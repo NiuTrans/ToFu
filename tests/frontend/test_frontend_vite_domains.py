@@ -65,9 +65,14 @@ def test_vendor_and_locale_owners_are_esm_chunks():
     pdf_reader = next(
         row for key, row in manifest.items()
         if key.startswith('_pdf-reader-') and key.endswith('.js'))
-    dynamic = set(pdf_reader.get('dynamicImports') or ())
-    assert 'node_modules/pdfjs-dist/legacy/build/pdf.mjs' in dynamic
-    assert 'node_modules/pdfjs-dist/legacy/build/pdf.worker.min.mjs?url' in dynamic
+    # Vite resolves linked dependencies to their real path in isolated worktrees.
+    # Assert the exact installed owner and worker, independent of checkout prefix.
+    dynamic = {
+        ((ROOT / key.partition('?')[0]).resolve(), key.partition('?')[2])
+        for key in pdf_reader.get('dynamicImports') or ()
+    }
+    assert ((ROOT / 'node_modules/pdfjs-dist/legacy/build/pdf.mjs').resolve(), '') in dynamic
+    assert ((ROOT / 'node_modules/pdfjs-dist/legacy/build/pdf.worker.min.mjs').resolve(), 'url') in dynamic
     runtime = _read('frontend/src/runtime/app-runtime.js')
     assert 'loadPdfJs' not in runtime
     assert 'let pdfjsLib' not in runtime
@@ -253,6 +258,8 @@ def test_window_public_surface_is_limited_to_api_and_tofu_modules():
     assert 'Object.defineProperties(window' not in runtime
 
     for path in (ROOT / 'frontend/src/features').rglob('*.ts'):
+        if path.name.endswith('.test.ts') or 'testing' in path.relative_to(ROOT / 'frontend/src').parts:
+            continue
         source = path.read_text(encoding='utf-8')
         assert 'Object.assign(window' not in source, path
         assert 'return window as' not in source, path
@@ -263,13 +270,13 @@ def test_window_public_surface_is_limited_to_api_and_tofu_modules():
         'getComputedStyle', 'getSelection', 'history', 'Image', 'innerHeight', 'innerWidth',
         'IntersectionObserver', 'location', 'matchMedia', 'MutationObserver',
         'navigator', 'onerror', 'open', 'opener', 'PointerEvent', 'print',
-        'prompt', 'removeEventListener', 'requestAnimationFrame',
+        'performance', 'prompt', 'removeEventListener', 'requestAnimationFrame',
         'ResizeObserver', 'scrollY', 'sessionStorage', 'setInterval',
         'setTimeout', 'visualViewport',
     }
     allowed = browser_native | {'Api', 'TofuModules'}
     for path in (ROOT / 'frontend/src').rglob('*'):
-        if path.suffix not in {'.js', '.ts'}:
+        if path.suffix not in {'.js', '.ts'} or path.name.endswith('.test.ts') or 'testing' in path.relative_to(ROOT / 'frontend/src').parts:
             continue
         source = path.read_text(encoding='utf-8')
         source = re.sub(r'/\*.*?\*/', '', source, flags=re.S)

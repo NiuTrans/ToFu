@@ -4,7 +4,7 @@
 
 This package owns the backend-neutral application client and repository
 boundary. The configured backend selects native `storage.v2` in
-`packages/tofu-db/` or SQL `storage.v1` in `lib/storage_sidecar/`; that dedicated
+`packages/tofu-db/` or SQL `storage.v1` in `lib/storage_authority_sql/`; that dedicated
 process owns durable state and transactions. Read `docs/STORAGE.md` and
 `docs/modules/data_tier.md`. Backend selection never implies migration.
 
@@ -26,9 +26,16 @@ process owns durable state and transactions. Read `docs/STORAGE.md` and
 - Manifest/catalog changes are declarative and validated against the selected
   backend semantic registrations; do not hardcode operation-specific transaction behavior here.
 
+`checkpoint_control.py` owns shared one-attempt instance binding for native
+`storage.v2` and SQL `storage.v1` checkpoint ports. Retain the negotiated UUID;
+never replay unknown commands or refresh stale capabilities. The SQL payload
+adds explicit owner scope and bypasses generic command receipts/retries.
+Embedded control retains its existing runtime lifetime. None selects a backend
+or sends semantic writes into reserved checkpoint namespaces.
+
 ## Verification
 
-Run `tests/storage_sidecar/test_storage_process_boundary.py` and focused client/supervision tests,
+Run `tests/storage_authority_sql/test_storage_process_boundary.py` and focused client/supervision tests,
 then `tests/storage/test_storage_application_contract.py` against both native and SQLite
 processes for changed semantic operations. Native wire changes also exercise
 `tests/tofudb/test_tofudb_differential.py` with the explicitly selected test binary.

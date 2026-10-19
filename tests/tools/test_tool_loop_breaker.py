@@ -430,7 +430,7 @@ class TestRepeatReminder:
         assert '_programmaticAdoptionNudges' not in task
 
     def test_adoption_nudge_metadata_is_bounded_and_damage_tolerant(self):
-        from lib.storage_projection import (
+        from lib.storage.storage_projection import (
             project_task_result_metadata_for_storage,
         )
         from lib.tasks_pkg.manager._persist import build_result_meta
@@ -824,7 +824,7 @@ class TestSemanticProgressGuard:
 
         description = PROJECT_TOOL_RUN_COMMAND['function']['description']
         assert 'Never use a shell no-op as a placeholder' in description
-        assert '`true`, `:`, or `exit 0`' in description
+        assert all(noop in description for noop in ('`true`', '`:`', '`exit 0`'))
         assert 'tool loop' in description
 
     def test_true_read_true_bypass_is_corrected_then_stopped(self):
@@ -1807,3 +1807,21 @@ def test_retained_noop_prompt_and_stop_are_recorded(monkeypatch):
     assert [r['reason'] for r in records] == ['explicit_noop', 'semantic_noop_tool_loop']
     assert records[0]['text'] == messages[0]['content']
     assert len(messages) == 1  # The stop is display-only, never model input.
+
+
+@pytest.mark.parametrize('changing_output', [False, True])
+def test_declared_remote_shell_uses_same_stall_and_progress_receipts(changing_output):
+    from lib.tasks_pkg.orchestrator._tool_loop_breaker import (
+        _guard_state, _update_stagnation_detectors)
+    task = _task()
+    task['_toolContractDocumentsByName'] = {
+        'custom__remote': {'shellCommandArgument': 'script'}}
+    state = _guard_state(task)
+    thresholds = {'fail_nudge': 3, 'fail_grace': 3, 'poll_nudge': 3, 'poll_grace': 3}
+    actions = []
+    for index in range(4):
+        row = {'toolName': 'custom__remote', 'toolArgs': '{"script":"compile"}',
+               'status': 'done', 'toolContent': 'exit_code=1\n' +
+               (f'completed stage {index}' if changing_output else 'same failure')}
+        actions.append(_update_stagnation_detectors(task, state, [row], thresholds=thresholds))
+    assert (('fail_fp', 'nudge') in actions) is (not changing_output)

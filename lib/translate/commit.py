@@ -17,6 +17,8 @@ import time
 from typing import Any, Mapping
 
 from lib.log import get_logger
+
+from lib.llm.diagnostic_timing import timed_call, timed_stage
 from lib.storage.errors import StorageError
 from lib.turn_lifecycle import (
     LifecycleConflict,
@@ -52,7 +54,7 @@ def _with_storage_retry(operation, *, description: str):
     delay = _STORAGE_RETRY_INITIAL_DELAY_S
     for attempt in range(_MAX_STORAGE_ATTEMPTS):
         try:
-            return operation()
+            return timed_call('storage_attempt', operation)
         except StorageError as exc:
             if (not _is_retryable_storage_error(exc)
                     or attempt + 1 >= _MAX_STORAGE_ATTEMPTS):
@@ -63,7 +65,7 @@ def _with_storage_retry(operation, *, description: str):
                 description, attempt + 1, _MAX_STORAGE_ATTEMPTS,
                 exc.code, exc, delay,
             )
-            time.sleep(delay)
+            timed_call('storage_backoff', time.sleep, delay)
             delay = min(delay * 2, _STORAGE_RETRY_MAX_DELAY_S)
     raise AssertionError("storage retry loop must return or raise")
 
@@ -166,6 +168,7 @@ def _merge_translation(
     return updated, updated != before
 
 
+@timed_stage('storage_commit')
 def commit_translation_to_turn(
     conversation_id: str,
     turn_id: str,
@@ -224,7 +227,7 @@ def commit_translation_to_turn(
                     raise
                 latest_conflict = exc
                 if attempt + 1 < _MAX_PROJECTION_ATTEMPTS:
-                    time.sleep(0.02 * (attempt + 1))
+                    timed_call('storage_backoff', time.sleep, 0.02 * (attempt + 1))
                 continue
 
             revision = result.get("conversationRevision")
@@ -306,7 +309,7 @@ def mark_turn_translation_failed(
                     raise
                 latest_conflict = exc
                 if attempt + 1 < _MAX_PROJECTION_ATTEMPTS:
-                    time.sleep(0.02 * (attempt + 1))
+                    timed_call('storage_backoff', time.sleep, 0.02 * (attempt + 1))
                 continue
             try:
                 from lib.conversations import notify_conv_changed
@@ -365,7 +368,7 @@ def mark_turn_translation_complete(
                     raise
                 latest_conflict = exc
                 if attempt + 1 < _MAX_PROJECTION_ATTEMPTS:
-                    time.sleep(0.02 * (attempt + 1))
+                    timed_call('storage_backoff', time.sleep, 0.02 * (attempt + 1))
                 continue
             try:
                 from lib.conversations import notify_conv_changed

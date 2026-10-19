@@ -13,7 +13,7 @@ contract owner directly:
 * model dispatch entry point: ``lib.llm_dispatch.api``.
 
 The executable core/plugin boundary is declared in
-:mod:`lib.agent_core_manifest`.
+:mod:`lib.agent_loop.agent_core_manifest`.
 """
 
 __all__ = ()

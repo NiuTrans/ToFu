@@ -100,6 +100,8 @@ def _seed_two_projects():
     # Register A as primary, B as an extra root (both known to the registry).
     _register_primary('proj-a', dir_a)
     _register_extra('proj-b', dir_b)
+    pm_config.set_conv_roots(conv_a, dir_a)
+    pm_config.set_conv_roots(conv_b, dir_b)
 
     r1 = tool_write_file(dir_a, 'a.txt', 'A-new\n',
                          conv_id=conv_a, task_id=task_a)

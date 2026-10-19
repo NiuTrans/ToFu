@@ -10,7 +10,7 @@ from __future__ import annotations
 from typing import Any
 
 from lib.log import get_logger
-from lib.task_replay import TASK_REPLAY_TERMINAL_STATUSES
+from lib.task_replay.task_replay import TASK_REPLAY_TERMINAL_STATUSES
 from lib.tasks_pkg.manager.runtime import chat_task_runtime
 from lib.tasks_pkg.tool_runtime import cancel_task_contexts
 
@@ -65,6 +65,7 @@ def cancel_task(task_id: str, *, user_id: int,
     except Exception as exc:
         # Local cancellation and resource fan-out still finish. A transport
         # error must not claim that this cancellation survives process loss.
+        logger.debug('cancel_task failure handled: %s', type(exc).__name__)
         persistence_error = exc
 
     # A conversation-scoped swarm may originate in an earlier, normally

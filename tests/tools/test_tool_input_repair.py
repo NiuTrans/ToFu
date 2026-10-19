@@ -1683,3 +1683,22 @@ if __name__ == '__main__':
                 traceback.print_exc()
     print(f'\n{passed} passed, {failed} failed')
     sys.exit(0 if failed == 0 else 1)
+
+
+def test_gateway_stringified_calls_preserve_nested_arguments():
+    import json
+    calls = [{'name': 'environment_providers', 'arguments': {}}]
+    args, log = validate_then_repair('execute_tools', {'calls': json.dumps(calls)})
+    assert args['calls'] == calls
+    assert ('calls', 'stringified_json') in log
+    valid, valid_log = validate_then_repair('execute_tools', {'calls': calls})
+    assert valid['calls'] == calls
+    assert not valid_log
+
+
+def test_gateway_repair_does_not_interpret_nested_user_strings():
+    import json
+    calls = [{'name': 'write_file', 'arguments': {'content': '[1,2]'}}]
+    args, log = validate_then_repair('execute_tools', {'calls': json.dumps(calls)})
+    assert args['calls'][0]['arguments']['content'] == '[1,2]'
+    assert log == [('calls', 'stringified_json')]

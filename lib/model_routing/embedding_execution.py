@@ -11,7 +11,7 @@ from lib.agent_core.execution_session import (
     acquire_and_bind_admission,
     bind_model_route,
 )
-from lib.http_client import http_post
+from lib.http_transport.client import http_post
 from lib.ids import short_id
 from lib.log import get_logger
 from lib.model_routing import (

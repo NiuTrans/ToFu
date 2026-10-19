@@ -1,13 +1,13 @@
-"""tests/rate_limit_api/test_rate_limit_api.py — lib.rate_limit_api unit tests."""
+"""tests/rate_limit_api/test_rate_limit_api.py — lib.rate_limit.rate_limit_api unit tests."""
 
 import time
 import unittest
 
 import pytest
 
-import lib.rate_limit_api as rate_limit_api
+import lib.rate_limit.rate_limit_api as rate_limit_api
 from lib.api_keys import AuthContext
-from lib.rate_limit_api import (
+from lib.rate_limit.rate_limit_api import (
     RateDecision, apply_headers, check_request, record_tokens,
 )
 
@@ -19,7 +19,7 @@ def _buckets() -> dict:
     """The CURRENT module-level bucket dict.
 
     Must be dereferenced through the module object: ``test_epic_a_backpressure``
-    deliberately ``importlib.reload()``s ``lib.rate_limit_api`` (to re-read its
+    deliberately ``importlib.reload()``s ``lib.rate_limit.rate_limit_api`` (to re-read its
     env knobs), and a reload RE-BINDS the module-global ``_state`` to a fresh
     dict. A ``from ... import _state`` here would keep pointing at the OLD
     dict — ``setUp`` would clear a dict nobody reads, and per-test isolation
@@ -48,32 +48,28 @@ class RateLimitTest(unittest.TestCase):
         for _ in range(1000):
             self.assertTrue(check_request(ctx).allowed)
 
-    def test_rpm_exhaustion(self):
-        ctx = self._ctx(rpm=3, tpd=0)
-        self.assertTrue(check_request(ctx).allowed)
-        self.assertTrue(check_request(ctx).allowed)
-        self.assertTrue(check_request(ctx).allowed)
-        d = check_request(ctx)
-        self.assertFalse(d.allowed)
-        self.assertEqual(d.reason, 'rpm')
-        self.assertGreater(d.retry_after_s, 0)
-        # Header values are sane.
-        self.assertEqual(d.rpm_limit, 3)
-        self.assertEqual(d.rpm_remaining, 0)
+    def test_historical_rpm_does_not_refuse_work(self):
+        from unittest.mock import patch
+        ctx = self._ctx(rpm=1)
+        with patch.object(rate_limit_api, '_shared_bucket_store',
+                          side_effect=AssertionError('request-rate backend entered')):
+            for _ in range(4097):
+                decision = check_request(ctx, request_cost=1000)
+                self.assertTrue(decision.allowed)
+                self.assertEqual(decision.rpm_limit, 0)
+        self.assertEqual(_buckets(), {})
 
-    def test_rpm_refill(self):
-        ctx = self._ctx(rpm=60)  # 1 token/sec
-        # Drain the bucket.
-        bucket = _buckets().get(ctx.key_id) or {}
-        for _ in range(60):
+    def test_spending_peek_refills_before_deciding(self):
+        from unittest.mock import patch
+        ctx = self._ctx(rpm=1, tpd=86400)
+        with patch.object(rate_limit_api.time, 'time', return_value=1000):
             self.assertTrue(check_request(ctx).allowed)
-        self.assertFalse(check_request(ctx).allowed)
-        # Manually advance the bucket time.
-        _buckets()[ctx.key_id]['rpm'].last_refill -= 5
-        # 5 seconds at 1 token/sec → 5 fresh tokens available.
-        for _ in range(5):
-            self.assertTrue(check_request(ctx).allowed)
-        self.assertFalse(check_request(ctx).allowed)
+            record_tokens(ctx.key_id, 86410, tpd_limit=86400)
+            self.assertFalse(check_request(ctx).allowed)
+        with patch.object(rate_limit_api.time, 'time', return_value=1011):
+            decision = check_request(ctx)
+            self.assertTrue(decision.allowed)
+            self.assertEqual(decision.tpd_remaining, 1)
 
     def test_tpd_decrement_via_record_tokens(self):
         ctx = self._ctx(rpm=60, tpd=1000)
@@ -84,35 +80,35 @@ class RateLimitTest(unittest.TestCase):
         self.assertLessEqual(d.tpd_remaining, 800)
 
     def test_tpd_zero_blocks(self):
+        from unittest.mock import patch
         ctx = self._ctx(rpm=60, tpd=100)
-        # Prime the bucket via a normal request first so rpm is full.
-        check_request(ctx)
-        record_tokens(ctx.key_id, 100, rpm_limit=60, tpd_limit=100)
-        d = check_request(ctx)
-        self.assertFalse(d.allowed)
-        self.assertEqual(d.reason, 'tpd')
+        with patch.object(rate_limit_api.time, 'time', return_value=1000):
+            check_request(ctx)
+            record_tokens(ctx.key_id, 100, rpm_limit=60, tpd_limit=100)
+            decision = check_request(ctx)
+        self.assertFalse(decision.allowed)
+        self.assertEqual(decision.reason, 'tpd')
 
-    def test_api_key_state_is_lru_bounded(self):
-        old_capacity = rate_limit_api._state_capacity
-        old_evictions = rate_limit_api._state_capacity_evictions
-        try:
-            rate_limit_api._state_capacity = 2
-            rate_limit_api._state_capacity_evictions = 0
-            check_request(self._ctx(key_id='k1', rpm=10))
-            check_request(self._ctx(key_id='k2', rpm=10))
-            check_request(self._ctx(key_id='k1', rpm=10))  # k1 is hottest
-            check_request(self._ctx(key_id='k3', rpm=10))
+    def test_spending_debt_survives_unrelated_credential_churn(self):
+        from unittest.mock import patch
+        first = self._ctx(key_id='original-debt', tpd=100)
+        with patch.object(rate_limit_api.time, 'time', return_value=1000):
+            self.assertTrue(check_request(first).allowed)
+            record_tokens(first.key_id, 150, tpd_limit=100)
+            for index in range(4097):
+                self.assertTrue(check_request(self._ctx(key_id=f'other-{index}', tpd=100)).allowed)
+            decision = check_request(first)
+            self.assertFalse(decision.allowed)
+            self.assertEqual(decision.reason, 'tpd')
+            self.assertEqual(_buckets()[first.key_id]['tpd'].tokens, -50)
+            self.assertEqual(rate_limit_api.api_rate_limit_stats(), {'entries': 4098})
 
-            self.assertEqual(list(_buckets()), ['k1', 'k3'])
-            self.assertEqual(rate_limit_api.api_rate_limit_stats(), {
-                'entries': 2,
-                'capacity': 2,
-                'capacity_evictions': 1,
-            })
-        finally:
-            _buckets().clear()
-            rate_limit_api._state_capacity = old_capacity
-            rate_limit_api._state_capacity_evictions = old_evictions
+    def test_posthoc_spending_creates_debt_without_preflight_state(self):
+        from unittest.mock import patch
+        with patch.object(rate_limit_api.time, 'time', return_value=1000):
+            record_tokens('posthoc', 150, tpd_limit=100)
+            self.assertEqual(_buckets()['posthoc']['tpd'].tokens, -50)
+            self.assertFalse(check_request(self._ctx(key_id='posthoc', tpd=100)).allowed)
 
     def test_apply_headers(self):
         class Resp:
@@ -124,8 +120,8 @@ class RateLimitTest(unittest.TestCase):
                          tpd_limit=10000, tpd_remaining=9500)
         r = Resp()
         apply_headers(r, d)
-        self.assertEqual(r.headers['X-RateLimit-Limit-Requests'], '60')
-        self.assertEqual(r.headers['X-RateLimit-Remaining-Requests'], '42')
+        self.assertNotIn('X-RateLimit-Limit-Requests', r.headers)
+        self.assertNotIn('X-RateLimit-Remaining-Requests', r.headers)
         self.assertEqual(r.headers['X-RateLimit-Limit-Tokens'], '10000')
         self.assertEqual(r.headers['X-RateLimit-Remaining-Tokens'], '9500')
 
@@ -134,8 +130,8 @@ class RateLimitTest(unittest.TestCase):
             headers: dict = {}
             def __init__(self):
                 self.headers = {}
-        d = RateDecision(allowed=False, reason='rpm', retry_after_s=2.5,
-                         rpm_limit=60, rpm_remaining=0)
+        d = RateDecision(allowed=False, reason='tpd', retry_after_s=2.5,
+                         tpd_limit=100, tpd_remaining=0)
         r = Resp()
         apply_headers(r, d)
         self.assertEqual(r.headers['Retry-After'], '3')

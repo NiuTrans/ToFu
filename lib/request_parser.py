@@ -24,7 +24,7 @@ All ``require_*`` raise ``BadRequest('field required')`` on missing.
 on type-mismatch (``"field must be a string"``, etc.).
 
 The route layer's ``@safe_route`` decorator (``lib.api_response``) and
-the global exception boundary in ``lib.http_error_handlers`` convert
+the global exception boundary in ``lib.http_transport.error_handlers`` convert
 ``BadRequest`` into a 400 response automatically.
 
 Design philosophy

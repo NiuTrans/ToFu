@@ -10,8 +10,8 @@ requests, so the debug preview and the real request see the same structure.
 from __future__ import annotations
 
 from lib.log import get_logger
-from lib.tool_round_identity import tool_round_batches
-from lib.tool_round_replay import (
+from lib.tool_results.tool_round_identity import tool_round_batches
+from lib.tool_results.tool_round_replay import (
     model_tool_content,
     scan_replayable_tool_round_prefix,
 )

@@ -1105,6 +1105,20 @@ def fetch_file_via_browser(
             client_id=device,
             owner_user_id=owner,
         )
+        # Current extensions enforce the issued byte ceiling locally before
+        # /start and between reads, returning this exact legacy error string.
+        # Normalize only that bounded refusal, never arbitrary error text or
+        # client-claimed success. Completion still requires the server receipt.
+        limit_message = f"Browser response exceeds the {transfer['maxBytes']}-byte limit"
+        if error in (
+            limit_message,
+            f'browser_file_transfer_too_large: {limit_message}',
+        ):
+            raise BrowserFileTransferError(
+                'browser_file_transfer_too_large',
+                f"Browser response exceeds the {transfer['maxBytes']}-byte limit",
+                status=413,
+            )
         if error:
             raise BrowserFileTransferError(
                 'browser_file_transfer_command_failed',

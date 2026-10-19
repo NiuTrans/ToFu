@@ -287,7 +287,7 @@ async function hydrateConversationRuntime(convId) {
   if (!turnStore?.hydrateConversation) {
     throw new Error('Conversation turn runtime is unavailable.');
   }
-  await turnStore.hydrateConversation(conv);
+  await withProjectHydration(conv, () => turnStore.hydrateConversation(conv));
   conv._turnSnapshotRequired = false;
   conv._serverTurnCount = runtimeScope.ConversationTurnRead?.ordered?.(conv)?.length || 0;
   if (typeof runtimeScope.loadCompactionHistory === 'function') {

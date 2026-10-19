@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import os
+from functools import wraps
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 from contextlib import suppress
 from typing import Any
@@ -19,6 +20,52 @@ from lib.log import get_logger
 
 
 logger = get_logger(__name__)
+
+
+def owned_sync_command(function):
+    """Run a finite synchronous HTTP command without abandoning accepted work.
+
+    Quart's ordinary executor future can be cancelled while its thread still
+    uses request streams or publishes durable state. Keep that one operation
+    shielded through settlement, then propagate cancellation. Streaming views
+    retain their separate iterator ownership and must not use this decorator.
+    """
+    @wraps(function)
+    async def wrapped(*args, **kwargs):
+        from quart.utils import run_sync
+
+        async def invoke():
+            try:
+                return True, await run_sync(function)(*args, **kwargs)
+            except BaseException as error:
+                # Deliver control exceptions to the request owner instead of
+                # allowing a Task callback to stop the serving loop first.
+                return False, error
+
+        operation = invoke()
+        try:
+            task = asyncio.create_task(operation)
+        except BaseException:
+            operation.close()
+            raise
+        interrupted = None
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError as error:
+                if interrupted is None:
+                    interrupted = error
+        success, result = task.result()
+        if not success:
+            if interrupted is not None:
+                raise BaseExceptionGroup('HTTP command interrupted and failed',
+                                         [interrupted, result]) from None
+            raise result
+        if interrupted is not None:
+            raise interrupted
+        return result
+
+    return wrapped
 
 
 def sync_boundary_timeout() -> float | None:
@@ -116,7 +163,7 @@ def send_from_directory(*args: Any, **kwargs: Any) -> Any:
 
 
 __all__ = [
-    'await_on_loop', 'make_response', 'request_data', 'request_files',
+    'await_on_loop', 'make_response', 'owned_sync_command', 'request_data', 'request_files',
     'request_form', 'request_json', 'resolve', 'send_file',
     'send_from_directory', 'sync_boundary_timeout',
 ]

@@ -1,4 +1,4 @@
-"""Requests upload policy, installed only on model transport pools.
+"""Requests connection-phase and upload policy for model transport pools.
 
 Entry point model_http_adapter creates private HTTP/HTTPS pool classes. TCP/TLS
 setup keeps urllib3's connect budget; headers/body use a separate write budget.
@@ -9,13 +9,25 @@ connection-class mutation or change to non-model HTTP clients.
 import requests
 from urllib.parse import urlsplit
 from urllib3.connection import HTTPSConnection
+from urllib3.exceptions import ConnectTimeoutError, ReadTimeoutError
 
-from lib.llm_errors import RequestUploadTimeoutError
+from lib.llm.llm_errors import RequestUploadTimeoutError
 
 
 def model_http_adapter(*, write_timeout, **adapter_options):
     """Create pools with independent upload timeouts, including proxy pools."""
     class UploadBudget:
+        def connect(self):
+            try:
+                return super().connect()
+            except (TimeoutError, ReadTimeoutError) as exc:
+                # Proxy TCP can be connected while CONNECT/TLS is unfinished.
+                # urllib3 otherwise calls this a response-read timeout, losing
+                # proof that no model request was sent. Keep that proof at the
+                # actual setup boundary; never infer it from error text.
+                raise ConnectTimeoutError(
+                    'Model connection setup timed out') from exc
+
         def request(self, method, url, body=None, headers=None, **kwargs):
             if self.sock is None:
                 self.connect()

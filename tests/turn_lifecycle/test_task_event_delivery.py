@@ -208,13 +208,17 @@ def test_failed_terminal_barrier_is_repaired_without_losing_its_carrier(
 
 def test_lost_ack_retries_exact_prefix_delta_payload_without_natural_key_conflict(
         turn_service, storage, owner, monkeypatch):
+    from copy import deepcopy
     from lib.storage.errors import StorageError
     from lib.tasks_pkg.request_inspector import _read_events_uncached
     _, task = _task(turn_service, storage, 'delivery-ack')
     original = turn_service.record_task_event
     lost_ack = False
+    attempted_carriers = []
     def record(task, wire, *args, **kwargs):
         nonlocal lost_ack
+        if wire['seq'] == 1:
+            attempted_carriers.append(deepcopy(kwargs['task_event']))
         result = original(task, wire, *args, **kwargs)
         if wire['seq'] == 1 and not lost_ack:
             lost_ack = True
@@ -229,8 +233,11 @@ def test_lost_ack_retries_exact_prefix_delta_payload_without_natural_key_conflic
     event_delivery.flush_task_events(task)
     expanded = [*messages, {'role': 'assistant', 'content': 'answer'}]
     emit(expanded, 2)
-    with pytest.raises(event_delivery.EventDeliveryError):
-        owner.flush(task['_eventDeliveryLane'], recover=False)
+    # The common persistence wait repairs this transient lost ACK in place.
+    # The frozen payload, not a surfaced transient error, is the invariant.
+    owner.flush(task['_eventDeliveryLane'], recover=False)
+    assert lost_ack and len(attempted_carriers) == 2
+    assert attempted_carriers[0] == attempted_carriers[1]
     before = _stored_event(storage, task['id'], 1)['event']
     assert before['prefixLen'] == len(messages)
     event_delivery.flush_task_events(task)

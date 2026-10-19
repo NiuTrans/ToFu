@@ -55,10 +55,8 @@ def background_command_injection_record(
     import hashlib
     import json
 
-    from lib.turn_source_queue_contract import QUEUE_INJECTION_ACK_MAX_IDS
-
     previews = event.get('previews')
-    if not isinstance(previews, list) or not 0 < len(previews) <= QUEUE_INJECTION_ACK_MAX_IDS:
+    if not isinstance(previews, list) or not previews:
         raise ValueError('Invalid background-command receipt batch')
     if any(not isinstance(preview, dict) for preview in previews):
         raise ValueError('Invalid background-command receipt preview')

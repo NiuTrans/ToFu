@@ -65,7 +65,6 @@ def test_studio_goal_model_human_delivery_and_chat_draft(page, live_server, widt
     page.route('**/api/v4/evolution/**',route)
     page.locator('#userInput').fill('Preserve my chat draft')
     page.locator('#evolutionBtn').click()
-    page.locator('.exp-secondary-nav a[href="#/evolution/runs"]').click()
     page.locator('wa-button[data-studio-action=menu]').click()
     page.locator('.evo-goal-switcher a').click()
     expect(page.locator('#evo-objective')).to_be_visible(timeout=20000)
@@ -73,6 +72,7 @@ def test_studio_goal_model_human_delivery_and_chat_draft(page, live_server, widt
     _dismiss_onboarding_modals(page)
     assert page.evaluate('document.documentElement.scrollWidth<=innerWidth')
     page.locator('#evo-objective').fill('Create a verified report')
+    page.locator('.evo-briefing-settings summary').click()
     page.locator('#evo-model').select_option('1')
     page.locator('[data-studio-action=refresh]').evaluate('(el)=>el.click()')
     expect(page.locator('#evo-objective')).to_have_value('Create a verified report')
@@ -102,7 +102,6 @@ def test_studio_goal_model_human_delivery_and_chat_draft(page, live_server, widt
     # Use same-document navigation to preserve the in-memory draft in the next check.
     page.locator('#userInput').fill('Preserve my chat draft')
     page.locator('#evolutionBtn').click()
-    page.locator('.exp-secondary-nav a[href="#/evolution/runs"]').click()
     expect(page.locator('#evo-goal')).to_be_attached()
     page.evaluate("location.hash='/chat'")
     expect(page.locator('#userInput')).to_have_value('Preserve my chat draft')
@@ -135,7 +134,7 @@ def test_goal_rooms_keep_materials_separate_and_objects_navigate(page,live_serve
         r.fulfill(status=200,content_type='application/json',body=json.dumps(body))
     page.route('**/api/v4/evolution/**',route)
     page.locator('#evolutionBtn').click()
-    page.locator('.exp-secondary-nav a[href="#/evolution/runs"]').click();expect(page.locator('#evo-goal')).to_have_value('research')
+    expect(page.locator('#evo-goal')).to_have_value('research')
     expect(page.locator('.evo-objective-form')).not_to_be_visible()
     page.locator('.evo-place-shortcut[data-place=plan]').click();expect(page.locator('.evo-room-content')).to_contain_text('Verify the goal-specific evidence')
     page.keyboard.press('Escape')
@@ -195,7 +194,6 @@ def test_swarm_agents_get_own_rooms_and_switcher(page,live_server,width,assert_n
         r.fulfill(status=200,content_type='application/json',body=json.dumps(body))
     page.route('**/api/v4/swarm/status/**',swarm)
     page.locator('#evolutionBtn').click()
-    page.locator('.exp-secondary-nav a[href="#/evolution/runs"]').click()
     tabs=page.locator('.evo-room-tab')
     expect(tabs).to_have_count(6,timeout=20000)
     # Workstation chairs stay tucked at their desks, never loose on the floor.
@@ -261,7 +259,7 @@ def test_spokesperson_message_receipts_goal_switch_and_followup(page,live_server
         r.fulfill(status=200,content_type='application/json',body=json.dumps(body))
     page.route('**/api/v4/evolution/**',route)
     page.locator('#evolutionBtn').click()
-    page.locator('.exp-secondary-nav a[href="#/evolution/runs"]').click();expect(page.locator('#evo-goal')).to_have_value('a')
+    expect(page.locator('#evo-goal')).to_have_value('a')
     if width<=850:page.locator('.evo-rooms-open').click()
     page.locator('[data-studio-action=conversation]').click();expect(page.locator('#evo-message')).to_be_visible()
     assert page.locator('.evo-conversation').evaluate("el=>getComputedStyle(el).getPropertyValue('--space-8').trim()")=='32px'
@@ -320,7 +318,7 @@ def test_actor_model_choice_uses_chat_catalog_and_survives_reload(page,live_serv
     page.goto(live_server+'/#/evolution/runs/role-goal')
     actor=page.locator('.evo-person[data-actor="0"]')
     expect(actor).to_be_visible(timeout=20000)
-    actor.click(force=True)
+    actor.press('Enter')
     drawer=page.locator('#evo-role-drawer')
     expect(drawer.locator('select')).to_be_visible()
     expect(drawer.locator('select option')).to_have_count(3)
@@ -330,7 +328,8 @@ def test_actor_model_choice_uses_chat_catalog_and_survives_reload(page,live_serv
     expect(drawer.locator('[role=status]')).not_to_be_empty()
     assert saved==[{'role':'executor','model':b}]
     assert run['task_id']=='active-task'
-    page.reload();expect(actor).to_be_visible(timeout=20000);actor.click(force=True)
+    page.reload();expect(actor).to_be_visible(timeout=20000);actor.press('Enter')
+    expect(drawer.locator('select')).to_be_visible()
     expect(drawer.locator('select')).to_have_value('1')
     output=Path('output/evolution-design/role-models');output.mkdir(parents=True,exist_ok=True)
     page.wait_for_function("document.querySelector('#evo-role-drawer').shadowRoot.querySelector('[part~=dialog]').getBoundingClientRect().right <= innerWidth")
@@ -391,7 +390,11 @@ def test_mission_panel_exposes_failed_run_without_opening_drawer(page, live_serv
     expect(panel).to_be_visible()
 
     assert not errors, errors
-    expect(panel).to_contain_text('Optimize the harness')
+    expect(page.locator('h1.evo-ledger-heading strong')).to_have_text(run['objective'])
+    expect(panel.locator('#evo-mission-title')).not_to_have_text(run['objective'])
+    expect(panel.locator('.evo-mission-hud')).to_be_visible()
+    expect(page.locator('.evo-studio-grid .evo-mission-hud')).to_have_count(0)
+    expect(page.locator('.evo-office-backdrop')).to_be_hidden()
     expect(panel).to_contain_text('Measure the baseline')
     expect(panel).to_contain_text('211,730')
     expect(panel).to_contain_text('Baseline captured')
@@ -410,7 +413,7 @@ def test_mission_panel_exposes_failed_run_without_opening_drawer(page, live_serv
       const room = box('.evo-studio-grid'), hint = box('.evo-pan-hint');
       return {hintInRoom: hint.top >= room.top && hint.bottom <= room.bottom,
         titleFits: title.bottom <= head.bottom + 1,
-        bodyFits: body.bottom <= mission.bottom + 1, roomFollows: room.top >= mission.bottom - 1,
+        bodyFits: body.bottom <= mission.bottom + 1, missionFirst: room.top >= mission.bottom - 1,
         geometry: ['.evo-main', '.evo-live-ledger', '.evo-mission-panel', '.evo-mission-body', '.evo-studio-grid'].map(s => {
           const el = document.querySelector(s), r = el.getBoundingClientRect(), c = getComputedStyle(el);
           return {s, top:r.top, bottom:r.bottom, height:r.height, rows:c.gridTemplateRows,
@@ -419,19 +422,91 @@ def test_mission_panel_exposes_failed_run_without_opening_drawer(page, live_serv
     }""")
     assert layout['titleFits'], layout
     if width < 850:
-        assert layout['bodyFits'] and layout['roomFollows'], json.dumps(layout)
+        assert layout['bodyFits'] and layout['missionFirst'], json.dumps(layout)
 
         assert layout['hintInRoom'], json.dumps(layout)
     page.screenshot(path=str(Path(screenshot_dir) / f'evolution-mission-failed-{width}.png'), full_page=True)
     # A retry prepares a visible confirmation; it must not replay effects itself.
     panel.locator('[data-mission-action=retry]').click()
-    expect(page.locator('#evo-create-drawer')).to_have_attribute('open', '')
+    expect(page.locator('#evo-objective')).to_be_visible()
+    assert page.locator('wa-drawer[open]').count() == 0
     expect(page.locator('#evo-objective')).to_have_value(run['objective'])
     assert not posted
-    page.keyboard.press('Escape')
+    page.goto(live_server + '/#/evolution/runs/mission-failed')
     # A later real snapshot updates this same surface, including explicit stop.
     run.update(status='executing', error='', receipts=[])
     workspace['status'] = 'executing'
     page.locator('[data-studio-action=refresh]').evaluate('(el)=>el.click()')
     expect(panel.locator('[data-mission-action=stop]')).to_be_visible(timeout=10000)
     expect(panel.locator('[data-mission-action=retry]')).to_be_hidden()
+
+
+@pytest.mark.parametrize('theme', ['tofu', 'light', 'dark'])
+@pytest.mark.parametrize('width', [320, 390, 768, 1024, 1536])
+def test_studio_briefing_themes_draft_and_focus(page, live_server, screenshot_dir, theme, width):
+    """The redesigned intake stays legible, keyboard usable and read-only until dispatch."""
+    from playwright.sync_api import expect
+    errors, writes = [], []
+    page.on('pageerror', lambda error: errors.append(str(error)))
+    page.set_viewport_size({'width': width, 'height': 1024})
+    page.emulate_media(reduced_motion='reduce')
+    language = 'en' if theme == 'dark' else 'zh'
+    page.add_init_script(f"localStorage.setItem('claude_ui_theme', {json.dumps(theme)});localStorage.setItem('tofu_ui_lang', {json.dumps(language)})")
+
+    def reads(route):
+        if route.request.method != 'GET':
+            writes.append(route.request.url)
+        route.fulfill(status=200, content_type='application/json', body=json.dumps({
+            'runs': [], 'models': [], 'programs': [], 'plugins': [], 'items': [],
+        }))
+
+    page.route('**/api/v4/evolution/**', reads)
+    # A query forces a new document so language/theme init scripts run; hash-only navigation does not.
+    page.goto(live_server + '/?studio-design=' + theme + '#/evolution/start', wait_until='domcontentloaded')
+    field = page.locator('#evo-objective')
+    expect(field).to_be_visible(timeout=20000)
+    expect(page.locator('html')).to_have_attribute('data-theme', theme)
+    expect(page.locator('.evo-briefing-examples svg')).to_have_count(3)
+    expect(page.locator('.evo-mission-header')).to_be_hidden()
+    expect(page.locator('.evo-mission-body')).to_be_hidden()
+    page.locator('[data-example=research]').click()
+    expect(field).not_to_have_value('')
+    expect(field).to_be_focused()
+    draft = field.input_value()
+    expect(page.locator('[data-example=build]')).to_be_disabled()
+    scene_focus = page.locator('[data-scene-focus-toggle]')
+    scene_focus.click()
+    expect(page.locator('.evo-studio')).to_have_attribute('data-scene-focus', 'true')
+    expect(page.locator('.evo-mission-panel')).to_be_hidden()
+    scene_focus.click()
+    expect(page.locator('.evo-studio')).to_have_attribute('data-scene-focus', 'false')
+    expect(field).to_have_value(draft)
+    page.locator('[data-studio-action=refresh]').evaluate('(el) => el.click()')
+    expect(field).to_have_value(draft)
+    assert not writes
+    assert not errors
+    assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+    geometry = page.evaluate('''() => {
+      const box = selector => document.querySelector(selector).getBoundingClientRect();
+      const panel = box('.evo-mission-panel'), office = box('.evo-studio-grid');
+      const submit = box('.evo-briefing button[type=submit]');
+      return {missionFirst: panel.bottom <= office.top, submitFits: submit.left >= panel.left && submit.right <= panel.right};
+    }''')
+    assert geometry['submitFits']
+    if width >= 850:
+        assert page.locator('.evo-destinations button').evaluate_all('(buttons) => buttons.every(button => button.scrollWidth <= button.clientWidth + 1)')
+    if width < 850:
+        assert geometry['missionFirst']
+    contrast = page.evaluate('''() => {
+      const rgb = value => value.match(/[\\d.]+/g).slice(0,3).map(Number).map(v => {v/=255;return v<=.04045?v/12.92:((v+.055)/1.055)**2.4});
+      const lum = value => {const [r,g,b]=rgb(value);return .2126*r+.7152*g+.0722*b};
+      const bg = lum(getComputedStyle(document.querySelector('.evo-mission-panel')).backgroundColor);
+      return ['.evo-briefing-intro','.evo-briefing-heading .evo-mission-eyebrow','.evo-briefing h3'].map(selector => {
+        const fg = lum(getComputedStyle(document.querySelector(selector)).color);
+        return {selector, ratio:(Math.max(fg,bg)+.05)/(Math.min(fg,bg)+.05)};
+      });
+    }''')
+    assert all(item['ratio'] >= 4.5 for item in contrast), contrast
+    field.fill('')
+    page.locator('.evo-main').evaluate('(el) => el.scrollTop = 0')
+    page.screenshot(path=str(Path(screenshot_dir) / f'evolution-briefing-{theme}-{width}.png'), full_page=True)

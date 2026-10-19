@@ -1,0 +1,6 @@
+{
+  "file": {"path": "replay-marker.txt", "content": "replay marker body\n"},
+  "content_contains": ["marker file is on disk"],
+  "tool_names": ["write_file"],
+  "aborted": false
+}

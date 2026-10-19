@@ -142,7 +142,7 @@ def _extract_xls_legacy(file_bytes: bytes, limit: int) -> dict:
         ws = wb.sheet_by_index(si)
         sheet_parts = [f'## Sheet: {ws.name}']
         rows_data = []
-        for ri in range(min(ws.nrows, 1001)):
+        for ri in range(ws.nrows):
             cells = []
             for ci in range(ws.ncols):
                 cell = ws.cell(ri, ci)
@@ -165,11 +165,6 @@ def _extract_xls_legacy(file_bytes: bytes, limit: int) -> dict:
                 else:
                     cells.append(str(cell.value) if cell.value else '')
             rows_data.append(cells)
-
-        if ws.nrows > 1001:
-            warnings.append(truncation_warning(
-                kept=len(rows_data), total=ws.nrows, unit='rows',
-                scope=f'Sheet "{ws.name}"', detail='row cap 1,000'))
 
         if rows_data:
             table_md = render_markdown_table(rows_data)

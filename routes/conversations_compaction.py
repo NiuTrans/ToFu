@@ -9,6 +9,7 @@ from quart import Response, request
 
 from lib.agent_core.store import get_conversation_store
 from lib.api_response import (
+    api_bad_request,
     api_conflict,
     api_error,
     api_internal_error,
@@ -69,13 +70,13 @@ async def get_compaction(conv_id, archive_id):
     user_id = _request_user_id()
     include_arg = str(request.args.get("includeMessages", "true")).lower()
     if include_arg not in {"true", "false", "1", "0"}:
-        return api_error(
-            "invalid_include_messages", status=400,
+        return api_bad_request(
+            "invalid_include_messages",
             error_code="invalid_include_messages")
     include_messages = include_arg in {"true", "1"}
     view = str(request.args.get("view", "pre")).lower()
     if view not in {"pre", "post"}:
-        return api_error("invalid_view", status=400, error_code="invalid_view")
+        return api_bad_request("invalid_view", error_code="invalid_view")
     include_post_messages = view == "post"
     if include_post_messages:
         # This is the saved compactor result, before runtime recomposition

@@ -189,13 +189,13 @@ fn saved_document_identity_schema_and_owner_are_stable_without_source_access() {
             SemanticExecutionError::InvalidPayload
         );
     }
-    assert!(retained_call(
+    let repeated_sources = retained_call(
         &mut db,
         "paper.document.resolve",
         json!({"user_id":11,"sources":vec![saved_source("x");65]}),
         1001
-    )
-    .is_err());
+    ).unwrap();
+    assert_eq!(repeated_sources.as_array().unwrap().len(), 65);
 }
 
 #[test]
@@ -687,4 +687,27 @@ fn saved_document_real_filesystem_growth_without_registry_quota() {
     let mut recovered = AuthorityDatabase::open(directory.path()).unwrap();
     for id in ids { assert_eq!(saved_get(&mut recovered, &json!(id), 2000)["document_id"], id); }
     eprintln!("PAPER_GROWTH_MEASURE documents=256 creation_ms={creation_ms:.2} directory_growth_bytes={growth}");
+}
+
+#[test]
+fn paper_document_resolve_preserves_complete_order_beyond_old_64_limit() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut db = AuthorityDatabase::initialize(directory.path()).unwrap();
+    let mut sources = Vec::new();
+    let mut identities = Vec::new();
+    for index in 0..71 {
+        let source = saved_source(&format!("main{index}.tex"));
+        let identity = retained_call(&mut db, "paper.document.register",
+            json!({"user_id":11,"source":source.clone()}), 1000).unwrap();
+        sources.push(source);
+        identities.push(identity["document_id"].clone());
+    }
+    drop(db);
+    let mut db = AuthorityDatabase::open(directory.path()).unwrap();
+    let result = retained_call(&mut db, "paper.document.resolve",
+        json!({"user_id":11,"sources":sources.clone()}), 1001).unwrap();
+    assert_eq!(result, json!(identities));
+    let foreign = retained_call(&mut db, "paper.document.resolve",
+        json!({"user_id":12,"sources":sources}), 1001).unwrap();
+    assert_eq!(foreign, json!(vec![Value::Null; 71]));
 }

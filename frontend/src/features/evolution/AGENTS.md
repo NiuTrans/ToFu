@@ -1,6 +1,15 @@
 # Evolution workbench
 
-`workspace.ts` lazily composes `programs/page.ts` as the primary `#/evolution` surface.
+`workspace.ts` lazily composes `studio.ts` as the primary `#/evolution` surface;
+the durable program notebook remains explicitly available at `#/evolution/programs`.
+`programs/experiment-charts.ts` projects bounded saved measurements through the shared rich-response chart presenter. `evidence-charts.ts` admits complete delivery charts beside exact originals, without transport or timers. Studio styles live in `frontend/src/styles/application/26-studio-*.css`; notebook observations use `26-evolution-observations.css`.
+`studio/command-center.ts` owns the persistent conversational briefing and
+receipt-backed stage HUD, without transport or timers.
+`26-studio-command-center.css` owns the responsive mission/scene composition.
+Compact inspection disclosures preserve focus and expansion for the selected
+goal; the full inspector retains source-reading authority. Real-browser theme,
+contrast and draft checks live in `test_evolution_studio_browser.py`. Intake lives beside the
+scene, never in an entry modal; explicit dispatch retains idempotent retry keys.
 `route-host.ts` owns pending-route epochs, one mounted page and teardown; each
 route imports its own graph through the shared document-lifetime module cache.
 `studio-entry.ts` alone installs studio controls/theme. Child import failures

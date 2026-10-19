@@ -17,7 +17,6 @@ def test_wide_tree_batches_directory_work_and_preserves_every_file(monkeypatch, 
     lock = threading.Lock()
     monkeypatch.setattr(tree_index, '_compile_gitignore', lambda root: ([], []))
     monkeypatch.setattr(tree_index, '_walk_jobs', lambda: capacity)
-    monkeypatch.setattr(tree_index, '_max_entries', lambda: 10_000)
 
     def scan(abs_dir, rel_dir, depth, out, contexts):
         nonlocal active, peak_active, peak_threads
@@ -50,19 +49,25 @@ def test_wide_tree_batches_directory_work_and_preserves_every_file(monkeypatch, 
         pool.shutdown(wait=True, cancel_futures=True)
 
 
-def test_expired_build_never_submits_the_remaining_frontier(monkeypatch):
-    from unittest.mock import Mock
+def test_legacy_expired_deadline_does_not_cut_complete_walk(monkeypatch):
     monkeypatch.setattr(tree_index, '_compile_gitignore', lambda root: ([], []))
-    pool = Mock()
-    rows, complete = tree_index._walk_tree('/root', time.time() - 1, scan_executor=pool)
-    assert not complete and rows == []
-    pool.submit.assert_not_called()
+    def scan(abs_dir, rel_dir, depth, out, contexts):
+        out.append(('complete.txt', 1, 0))
+        return []
+    monkeypatch.setattr(tree_index, '_scan_one_dir', scan)
+    rows, complete = tree_index._walk_tree('/root', time.time() - 1)
+    assert complete and rows == [('complete.txt', 1, 0)]
 
 
-def test_frontier_overflow_refuses_a_partial_index(monkeypatch):
+def test_frontier_above_retention_target_is_fully_consumed(monkeypatch):
     monkeypatch.setattr(tree_index, '_compile_gitignore', lambda root: ([], []))
     monkeypatch.setattr(tree_index, '_max_entries', lambda: 10)
-    monkeypatch.setattr(tree_index, '_scan_one_dir', lambda *args: [
-        (f'/root/{n}', str(n), 1, ()) for n in range(11)])
-    rows, complete = tree_index._walk_tree('/root', time.time() + 5)
-    assert not complete and rows == []
+    def scan(abs_dir, rel_dir, depth, out, contexts):
+        if not rel_dir:
+            return [(f'/root/{n}', str(n), 1, ()) for n in range(11)]
+        out.append((rel_dir + '/complete.txt', 1, 0))
+        return []
+    monkeypatch.setattr(tree_index, '_scan_one_dir', scan)
+    rows, complete = tree_index._walk_tree('/root')
+    assert complete
+    assert {row[0] for row in rows} == {f'{n}/complete.txt' for n in range(11)}

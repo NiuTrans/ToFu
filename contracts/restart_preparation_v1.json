@@ -18,12 +18,17 @@
         "downloading",
         "cached",
         "compiling",
+        "retrying",
         "validating",
         "publishing",
         "frontend",
         "prepared",
         "failed"
       ]
+    },
+    "recovering": {
+      "type": "boolean",
+      "description": "Source-change recovery remains active across preparation phases, even when a poll misses retrying."
     },
     "elapsedSeconds": {
       "type": "integer",

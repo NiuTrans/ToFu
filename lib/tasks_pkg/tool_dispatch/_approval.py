@@ -22,7 +22,7 @@ from lib.tasks_pkg.approval import request_write_approval
 from lib.tasks_pkg.executor import _finalize_tool_round
 from lib.tasks_pkg.manager import append_event
 from lib.tools.registry import build_tool_result_meta
-from lib.tool_rejection import stamp_tool_rejection
+from lib.tool_results.tool_rejection import stamp_tool_rejection
 
 logger = get_logger(__name__)
 _TOOL_APPROVAL_RECEIPT_MAX = 64
@@ -742,6 +742,17 @@ def _approval_meta_desktop_open_app(approval_meta, fn_args):
 #  sharpest — it deletes N notes and writes 1.
 # ══════════════════════════════════════════════════════════
 
+def _approval_meta_record_working_fact(approval_meta, fn_args):
+    """Show the exact claim, revision and evidence before a fact mutation."""
+    _risk(approval_meta,
+          ('Fact', fn_args.get('id') or 'New fact'),
+          ('Revision', str(fn_args.get('revision', ''))),
+          ('Kind', fn_args.get('kind')),
+          ('Claim', fn_args.get('text')),
+          ('Sources', json.dumps(fn_args.get('sources', []), ensure_ascii=False)),
+          note='Persist a sourced working claim; this does not verify an inference.')
+
+
 def _approval_meta_create_memory(approval_meta, fn_args):
     """``create_memory`` — new note; body + scope are what persist."""
     name = fn_args.get('name', '') or ''
@@ -1059,10 +1070,28 @@ def _approval_meta_manage_agents(approval_meta, fn_args):
     )
 
 
+def _approval_meta_coordinator_work(approval_meta, fn_args):
+    """Show the delegated scope or exact reviewed checkpoint before approval."""
+    from lib.project_dispatch.repository import CONTRACT
+    defaults = CONTRACT['delegationDefaults']
+    _risk(approval_meta,
+        ('Worker', fn_args.get('title')), ('Objective', fn_args.get('brief')),
+        ('Token allowance', fn_args.get('max_tokens', defaults['workerTokens']) if 'brief' in fn_args else None),
+        ('Model requests', fn_args.get('max_model_requests', defaults['workerModelRequests']) if 'brief' in fn_args else None),
+        ('Assignment', fn_args.get('assignment_id')), ('Result revision', fn_args.get('result_revision')),
+        ('Decision', fn_args.get('decision') or fn_args.get('outcome')), ('Report', fn_args.get('report_turn_id')), ('Evidence', fn_args.get('note')),
+        ('Checkpoint to integrate', fn_args.get('checkpoint_sha')),
+        note='Independent project work under the current request; publication uses existing verification gates.')
+
+
 # Module-level dispatch table — maps tool name → approval meta enricher.
 # Only tools that need special approval metadata are listed; tools not in
 # this dict get the base metadata only (path + description).
 _APPROVAL_META_ENRICHERS = {
+    'cancel_project_work': _approval_meta_coordinator_work,
+    'finish_project_request': _approval_meta_coordinator_work,
+    'delegate_project_work': _approval_meta_coordinator_work,
+    'review_project_work': _approval_meta_coordinator_work,
     'manage_agents': _approval_meta_manage_agents,
     'evolution_artifact': _approval_meta_evolution_artifact,
     'evolution_coordinate': _approval_meta_evolution,
@@ -1107,6 +1136,7 @@ _APPROVAL_META_ENRICHERS = {
     'desktop_open_file':        _approval_meta_desktop_open_file,
     'desktop_open_app':         _approval_meta_desktop_open_app,
     # ── memory CRUD: irreversible edits to stored notes ──
+    'record_working_fact':      _approval_meta_record_working_fact,
     'create_memory':            _approval_meta_create_memory,
     'update_memory':            _approval_meta_update_memory,
     'delete_memory':            _approval_meta_delete_memory,
@@ -1141,6 +1171,7 @@ def _handle_approval(
     model: str,
     cfg: dict[str, Any] | None = None,
     mint_receipt: bool = False,
+    file_recovery=None,
 ) -> tuple[bool, str | None]:
     """Gate a write operation on manual user approval (no execution).
 
@@ -1178,7 +1209,8 @@ def _handle_approval(
 
     # This seam is reached only after the pipeline's current admission and
     # child/unattended/Git policy. Keep the exact receipt for handler consume.
-    if approval_receipt_authority(task, fn_name, round_entry.get('toolCallId'), fn_args):
+    if file_recovery is None and approval_receipt_authority(
+            task, fn_name, round_entry.get('toolCallId'), fn_args):
         return True, None
     tid = task['id'][:8]
     approval_id = f'{task["id"]}_{uuid.uuid4().hex[:8]}'
@@ -1190,6 +1222,21 @@ def _handle_approval(
     }
 
     enrich_approval_metadata(approval_meta, fn_name, fn_args)
+    if file_recovery is not None:
+        explanations = {
+            'missing_evidence': 'The saved publication receipt is missing.',
+            'evidence_conflict': 'Saved evidence does not match the current file or project.',
+            'unsupported': 'This operation has no supported publication proof.',
+        }
+        unresolved = '\n\n'.join(
+            f"Earlier write {index}: {explanations.get(reason, 'Publication could not be established.')}\n"
+            f"Operation: {operation}\nProducing {'invocation' if kind == 'invocation' else 'Turn'}: {producer}"
+            for index, (_, kind, producer, operation, _, reason) in enumerate(file_recovery.unknown, 1))
+        _risk(approval_meta,
+            ('Unresolved earlier writes', unresolved),
+            ('Requested new write', json.dumps(fn_args, ensure_ascii=False, indent=2)),
+            note='Earlier writes may already have taken effect. Approving permits only this new write, '
+                 'which may duplicate or replace earlier work; it does not resolve or replay the earlier operation.')
 
     round_entry['status'] = 'pending_approval'
     round_entry['approvalId'] = approval_id
@@ -1265,4 +1312,6 @@ def _handle_approval(
             logger.error('[Task %s] approved %s has no tool call id',
                          tid, fn_name)
             return False, 'Approval could not be bound to this tool call.'
+        if file_recovery is not None:
+            task['_tool_approval_receipts'][tc_id]['fileRecoveryEvidence'] = file_recovery.fingerprint
     return True, None

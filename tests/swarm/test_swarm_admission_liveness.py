@@ -47,7 +47,7 @@ def test_another_owner_enters_while_existing_owner_is_still_running():
 # ── 2. AbortedError from admission settles CANCELLED, no retry ──
 
 def test_aborted_error_maps_to_cancelled_without_retry():
-    from lib.llm_errors import AbortedError
+    from lib.llm.llm_errors import AbortedError
     from lib.swarm.protocol import SubAgentStatus
     from lib.swarm.scheduler import StreamingScheduler
 

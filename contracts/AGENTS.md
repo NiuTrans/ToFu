@@ -39,5 +39,9 @@ Authority by API surface:
 
 Run the focused generator in check mode and its cataloged guard test. Common
 checks are `npm run check:conversation-sync`, `npm run check:api-v4`,
-`pytest -q tests/identity/test_identity_contract.py`, and `make docs-check`. Finish with
+and `pytest -q tests/identity/test_identity_contract.py`. Finish with
 the neighboring API/frontend contract gate for changed public wire behavior.
+
+`native_aggregate_cost_v1` describes original Goal credits without settlement
+authority. Generate standalone schemas via gen_native_checkpoint_control; verify
+aggregate fee tests plus native Goal claim/consumption and passive replay.

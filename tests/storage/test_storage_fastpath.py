@@ -34,8 +34,8 @@ from types import SimpleNamespace
 import pytest
 
 from lib.storage.errors import StorageError
-from lib.storage_sidecar import fastpath, shipper as shipper_module
-from lib.storage_sidecar.shipper import (
+from lib.storage_authority_sql import fastpath, shipper as shipper_module
+from lib.storage_authority_sql.shipper import (
     WalShipper,
     adaptive_wal_rebase_budget,
     filesystem_wal_rebase_maximum,
@@ -513,7 +513,7 @@ def test_wal_copy_refuses_a_short_source_instead_of_zero_extending(tmp_path):
 @pytest.fixture()
 def front(tmp_path):
     """A real front authority on a real writer, shipper-owned checkpoints."""
-    from lib.storage_sidecar.adapters.sqlite import _FairWriter
+    from lib.storage_authority_sql.adapters.sqlite import _FairWriter
 
     local_dir = tmp_path / 'front'
     shadow_dir = tmp_path / 'data' / fastpath.SHADOW_DIRNAME
@@ -875,7 +875,7 @@ def test_backup_pin_cross_device_fallback_is_sequential_and_equivalent(
               label='initial snapshot manifest')
     front.put('cross-device-backup', 23)
     monkeypatch.setattr(
-        'lib.storage_sidecar.shipper.os.link',
+        'lib.storage_authority_sql.shipper.os.link',
         lambda _source, _destination: (_ for _ in ()).throw(
             OSError(errno.EXDEV, 'different filesystem')),
     )
@@ -908,7 +908,7 @@ def test_backup_pin_same_dir_link_reject_falls_back_to_rename(
         return real_link(source, destination)
 
     monkeypatch.setattr(
-        'lib.storage_sidecar.shipper.os.link', beegfs_style_link)
+        'lib.storage_authority_sql.shipper.os.link', beegfs_style_link)
     destination = tmp_path / 'renamed-backup.sqlite3'
 
     result = front.shipper.pin_checkpointed_snapshot_for_backup(
@@ -929,7 +929,7 @@ def test_budget_rotation_still_refuses_when_filesystem_has_no_links(
     _wait_for(lambda: _shadow_manifest(front.shadow_dir) is not None,
               label='initial snapshot manifest')
     monkeypatch.setattr(
-        'lib.storage_sidecar.shipper.os.link',
+        'lib.storage_authority_sql.shipper.os.link',
         lambda _source, _destination: (_ for _ in ()).throw(
             OSError(errno.EPERM, 'no hard links at all')),
     )
@@ -950,7 +950,7 @@ def test_budget_rotation_refuses_cross_device_full_copy_fallback(
     _wait_for(lambda: _shadow_manifest(front.shadow_dir) is not None,
               label='initial snapshot manifest')
     monkeypatch.setattr(
-        'lib.storage_sidecar.shipper.os.link',
+        'lib.storage_authority_sql.shipper.os.link',
         lambda _source, _destination: (_ for _ in ()).throw(
             OSError(errno.EXDEV, 'different filesystem')),
     )
@@ -1407,7 +1407,7 @@ def test_checkpointed_copy_skips_sendfile_for_network_destination(
     destination = tmp_path / 'destination'
     source.write_bytes(b'network-copy')
     monkeypatch.setattr(
-        'lib.storage_sidecar.storage_capabilities.describe_mount',
+        'lib.storage_authority_sql.storage_capabilities.describe_mount',
         lambda _path: SimpleNamespace(storage_class='network-filesystem'),
     )
     monkeypatch.setattr(

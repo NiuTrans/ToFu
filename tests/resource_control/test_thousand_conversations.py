@@ -4,7 +4,7 @@ import logging
 import pytest
 
 from lib.resource_control.runtime import launch_policy
-from lib.server_loop_runtime import _worker_count
+from lib.server.server_loop_runtime import _worker_count
 from runtime_guards import task_concurrency_hard_ceiling
 
 pytestmark = pytest.mark.unit
@@ -17,7 +17,7 @@ def test_all_execution_owners_admit_a_thousand_when_the_memory_budget_fits():
     assert _worker_count('TOFU_AGENT_WORKERS', environment, logging.getLogger(__name__)) == 1200
     policy = launch_policy(environment)
     assert policy['root_maximum'] == 1200
-    assert policy['route_capacity'] >= 2 * 1200 * 64
+    assert 'route_capacity' not in policy
 
 
 def test_large_explicit_worker_count_cannot_escape_the_memory_budget():

@@ -32,7 +32,7 @@ class TerminalDelivery:
     _delivering: bool = field(default=False, init=False)
 
     def prepare_persistence(self, task: dict, content: str, content_epoch: int) -> dict | None:
-        """Freeze an opaque bounded application payload before the owned result CAS."""
+        """Freeze a complete portable application payload before the owned result CAS."""
         if task.get('id') != self.task_id or task.get('_userId') != self.owner_user_id:
             raise ValueError('terminal delivery identity changed')
         if task.get('status') not in TERMINAL_STATUSES or self.persistence_preparer is None:
@@ -51,8 +51,6 @@ class TerminalDelivery:
                 if not isinstance(value, dict):
                     raise ValueError('terminal persistence payload must be an object')
                 encoded = json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(',', ':'))
-                if len(encoded.encode('utf-8')) > 1024 * 1024:
-                    raise ValueError('terminal persistence payload exceeds bound')
                 self._prepared = json.loads(encoded)
                 self._preparation_identity = identity
                 return deepcopy(self._prepared)

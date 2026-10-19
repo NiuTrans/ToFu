@@ -1,3 +1,4 @@
+import { entityRecordValues } from '../domain/turn-store';
 /**
  * Pure ordered reads over normalized TurnState for retained feature adapters.
  *
@@ -45,7 +46,7 @@ export function activeConversationAttemptIds(
   state: TurnState | null | undefined,
 ): ReadonlyArray<string> {
   if (!state) return [];
-  return [...new Set(Object.values(state.turnsById).flatMap((turn) => (
+  return [...new Set(entityRecordValues(state.turnsById).flatMap((turn) => (
     turn && (turn.status === 'pending' || turn.status === 'running')
       && turn.currentAttemptId ? [turn.currentAttemptId] : []
   )))];

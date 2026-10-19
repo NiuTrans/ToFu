@@ -58,8 +58,8 @@ def _fake_log(tmp_path):
 
 def _fake_agent_dist(workdir):
     dist = os.path.join(workdir, 'staging')
-    os.makedirs(os.path.join(dist, 'TofuAgent'), exist_ok=True)
-    with open(os.path.join(dist, 'TofuAgent', 'TofuAgent.exe'), 'w') as f:
+    os.makedirs(os.path.join(dist, 'TofuRemote'), exist_ok=True)
+    with open(os.path.join(dist, 'TofuRemote', 'TofuRemote.exe'), 'w') as f:
         f.write('fake-binary')
     return dist
 
@@ -123,7 +123,7 @@ def test_agent_cache_hit_skips_the_pipeline(isolated, monkeypatch):
 
 
 def test_NEUTER_agent_run_records_its_own_payload(isolated, monkeypatch):
-    """A real agent run (pipeline faked) must tar the TofuAgent dir into
+    """A real agent run (pipeline faked) must tar the TofuRemote dir into
     the AGENT cache name — dropping the target threading anywhere
     (stamp, path, tar dir) is caught by the name or the contents."""
     monkeypatch.setattr(wb, '_git', lambda *a: 'a' * 40 + '\n')
@@ -137,9 +137,9 @@ def test_NEUTER_agent_run_records_its_own_payload(isolated, monkeypatch):
     assert dest == wb.payload_path('a' * 40, target='agent')
     assert os.path.basename(dest).startswith('payload-agent-')
     with tarfile.open(dest) as tf:
-        assert any(n.endswith('TofuAgent/TofuAgent.exe')
+        assert any(n.endswith('TofuRemote/TofuRemote.exe')
                    for n in tf.getnames()), (
-            'the tarball must carry the TofuAgent app dir — tarring '
+            'the tarball must carry the TofuRemote app dir — tarring '
             "'Tofu' here would ship an empty or wrong payload")
 
 
@@ -196,7 +196,7 @@ def test_agent_pipeline_uses_the_agent_spec_and_smoke_gate():
     assert 'tgt["smoke_env"]' in src and 'tgt["smoke_sentinel"]' in src
     t = wb._TARGETS['agent']
     assert t['spec'] == 'tofu-agent.spec'
-    assert t['app_dir'] == 'TofuAgent' and t['exe'] == 'TofuAgent.exe'
+    assert t['app_dir'] == 'TofuRemote' and t['exe'] == 'TofuRemote.exe'
     assert t['smoke_env'] == 'TOFU_AGENT_SMOKE'
     assert t['smoke_sentinel'] == 'TOFU_AGENT_SMOKE_OK'
     # …and the full row is the historical shape.
@@ -213,15 +213,15 @@ def test_agent_pipeline_uses_the_agent_spec_and_smoke_gate():
 def test_agent_wrap_records_a_kind_agent_artifact(isolated, monkeypatch,
                                                   tmp_path):
     payload_dir = tmp_path / 'payload-src'
-    (payload_dir / 'TofuAgent').mkdir(parents=True)
-    (payload_dir / 'TofuAgent' / 'TofuAgent.exe').write_text('exe')
+    (payload_dir / 'TofuRemote').mkdir(parents=True)
+    (payload_dir / 'TofuRemote' / 'TofuRemote.exe').write_text('exe')
     payload_tar = tmp_path / 'payload.tar.gz'
     with tarfile.open(payload_tar, 'w:gz') as tf:
-        tf.add(payload_dir / 'TofuAgent', arcname='TofuAgent')
+        tf.add(payload_dir / 'TofuRemote', arcname='TofuRemote')
 
     def _sh(cmd, log_fh, *, shell=False, timeout=9999):
         if 'makensis' in cmd:
-            out = isolated / 'wrap' / 'TofuAgent-Setup-0.16.0-win64.exe'
+            out = isolated / 'wrap' / 'TofuRemote-Setup-0.16.0-win64.exe'
             out.parent.mkdir(parents=True, exist_ok=True)
             out.write_bytes(b'NSIS-AGENT-INSTALLER')
             return None
@@ -236,14 +236,14 @@ def test_agent_wrap_records_a_kind_agent_artifact(isolated, monkeypatch,
                                server_url='https://tofu.example.com/',
                                workdir=str(isolated / 'wrap'),
                                target='agent')
-    assert os.path.basename(dest) == 'TofuAgent-Setup-0.16.0-win64.exe'
-    e = wb.store.artifacts()['TofuAgent-Setup-0.16.0-win64.exe']
+    assert os.path.basename(dest) == 'TofuRemote-Setup-0.16.0-win64.exe'
+    e = wb.store.artifacts()['TofuRemote-Setup-0.16.0-win64.exe']
     assert e['kind'] == 'agent', (
         'the store must tell the two components apart — a kindless agent '
         'entry reads as full (absent ⇒ full) and the selector would offer '
         'it to full-app seekers')
     assert e['source'] == 'built' and e['os'] == 'windows'
-    assert e['label'] == 'Windows agent installer'
+    assert e['label'] == 'Windows remote installer'
     # The record keeps the url as passed; the FILE gets the rstripped
     # form (the launcher's import contract).
     assert e['preseed']['url'] == 'https://tofu.example.com/'
@@ -257,11 +257,11 @@ def _wrap_agent_with_fake_makensis(isolated, monkeypatch, tmp_path,
                                    server_url, out_name):
     """Drive the REAL wrap half (untar + record) with makensis faked."""
     payload_dir = tmp_path / 'payload-src'
-    (payload_dir / 'TofuAgent').mkdir(parents=True)
-    (payload_dir / 'TofuAgent' / 'TofuAgent.exe').write_text('exe')
+    (payload_dir / 'TofuRemote').mkdir(parents=True)
+    (payload_dir / 'TofuRemote' / 'TofuRemote.exe').write_text('exe')
     payload_tar = tmp_path / 'payload.tar.gz'
     with tarfile.open(payload_tar, 'w:gz') as tf:
-        tf.add(payload_dir / 'TofuAgent', arcname='TofuAgent')
+        tf.add(payload_dir / 'TofuRemote', arcname='TofuRemote')
 
     def _sh(cmd, log_fh, *, shell=False, timeout=9999):
         if 'makensis' in cmd:
@@ -289,8 +289,8 @@ def test_agent_wrap_drops_a_loopback_preseed(isolated, monkeypatch,
     The agent target drops it; the personalized installer record owns attach."""
     _wrap_agent_with_fake_makensis(isolated, monkeypatch, tmp_path,
                                    'http://127.0.0.1:15000',
-                                   'TofuAgent-Setup-0.16.0-win64.exe')
-    e = wb.store.artifacts()['TofuAgent-Setup-0.16.0-win64.exe']
+                                   'TofuRemote-Setup-0.16.0-win64.exe')
+    e = wb.store.artifacts()['TofuRemote-Setup-0.16.0-win64.exe']
     assert 'preseed' not in e, (
         'a loopback preseed must be dropped, not recorded')
     assert not os.path.exists(
@@ -304,8 +304,8 @@ def test_agent_wrap_keeps_a_reachable_preseed(isolated, monkeypatch,
                                               tmp_path):
     _wrap_agent_with_fake_makensis(isolated, monkeypatch, tmp_path,
                                    'https://tofu.example.com',
-                                   'TofuAgent-Setup-0.16.0-win64.exe')
-    e = wb.store.artifacts()['TofuAgent-Setup-0.16.0-win64.exe']
+                                   'TofuRemote-Setup-0.16.0-win64.exe')
+    e = wb.store.artifacts()['TofuRemote-Setup-0.16.0-win64.exe']
     assert e['preseed']['url'] == 'https://tofu.example.com'
 
 
@@ -373,7 +373,7 @@ def test_NEUTER_agent_wrap_of_a_full_payload_is_refused(isolated,
                                                         monkeypatch,
                                                         tmp_path):
     """Target/payload mismatch must fail LOUD: wrapping the full payload
-    as 'agent' would produce an installer with no TofuAgent.exe."""
+    as 'agent' would produce an installer with no TofuRemote.exe."""
     payload_dir = tmp_path / 'payload-src'
     (payload_dir / 'Tofu').mkdir(parents=True)
     (payload_dir / 'Tofu' / 'Tofu.exe').write_text('exe')
@@ -382,7 +382,7 @@ def test_NEUTER_agent_wrap_of_a_full_payload_is_refused(isolated,
         tf.add(payload_dir / 'Tofu', arcname='Tofu')
     monkeypatch.setattr(wb, '_ensure_makensis', lambda log: '/fake/makensis')
     with _fake_log(isolated) as log:
-        with pytest.raises(RuntimeError, match='no TofuAgent.exe'):
+        with pytest.raises(RuntimeError, match='no TofuRemote.exe'):
             wb.wrap_payload(str(payload_tar), '0.16.0', 'd' * 40, log,
                             workdir=str(isolated / 'wrap'), target='agent')
 

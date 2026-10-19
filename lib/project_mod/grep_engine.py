@@ -34,6 +34,8 @@ from dataclasses import dataclass, field
 from typing import Callable, Optional, Sequence
 
 if _SCRIPT_MODE:  # keep helper startup independent from the application boot
+    from process_group import descendant_pids as _descendant_pids
+
     class _QuietLogger:
         def debug(self, *_args, **_kwargs):
             pass
@@ -43,6 +45,7 @@ if _SCRIPT_MODE:  # keep helper startup independent from the application boot
 else:
     from lib.log import get_logger
     from lib.project_mod.config import IGNORE_DIRS
+    from lib.project_mod.process_group import descendant_pids as _descendant_pids
     logger = get_logger(__name__)
 
 
@@ -80,6 +83,7 @@ class SearchRequest:
     gnu_argv: tuple[str, ...] = ()
     preferred_backend: str = 'auto'  # auto | rg | gnu
     raw_gnu: bool = False
+    cancel_event: object = field(default=None, compare=False, repr=False)
     match_line: Optional[Callable[[bytes], bool]] = field(
         default=None, compare=False, repr=False)
 
@@ -94,6 +98,7 @@ class SearchResult:
     limit_reached: bool = False
     consumer_closed: bool = False
     unavailable: bool = False
+    cancelled: bool = False
     # Withheld-evidence map, counted after ``limit_reached`` stopped
     # forwarding: matches beyond the cap are drained (not forwarded) and
     # counted per file so the caller can show exactly what it withheld.
@@ -185,36 +190,6 @@ def select_backend(request: SearchRequest) -> tuple[str, Optional[list[str]]]:
     return '', None
 
 
-def _descendant_pids(root_pid: int) -> list[int]:
-    """Best-effort process-tree discovery without a dependency on psutil."""
-    children: dict[int, list[int]] = {}
-    try:
-        entries = os.listdir('/proc')
-    except OSError as exc:
-        logger.debug('cannot enumerate /proc for grep descendants: %s', exc)
-        return []
-    for entry in entries:
-        if not entry.isdigit():
-            continue
-        try:
-            # /proc/PID/stat: pid (comm) state ppid ...; split after the final
-            # ')' because command names may themselves contain spaces.
-            raw = open(f'/proc/{entry}/stat', encoding='utf-8').read()
-            tail = raw[raw.rfind(')') + 2:].split()
-            ppid = int(tail[1])
-            children.setdefault(ppid, []).append(int(entry))
-        except (OSError, ValueError, IndexError) as exc:
-            logger.debug('cannot inspect grep descendant pid %s: %s', entry, exc)
-            continue
-    found = []
-    stack = list(children.get(root_pid, ()))
-    while stack:
-        pid = stack.pop()
-        found.append(pid)
-        stack.extend(children.get(pid, ()))
-    return found
-
-
 def _terminate_tree(proc: subprocess.Popen) -> None:
     if proc.poll() is not None:
         return
@@ -232,7 +207,6 @@ def _terminate_tree(proc: subprocess.Popen) -> None:
         pass
     try:
         proc.wait(timeout=0.35)
-        return
     except subprocess.TimeoutExpired:
         pass
     for pid in reversed(descendants):
@@ -289,213 +263,234 @@ def run_search(
         logger.debug('[grep_engine] backend start failed: %s', exc)
         return SearchResult(backend=backend, unavailable=True, returncode=127)
 
-    sel = selectors.DefaultSelector()
-    streams = {
-        proc.stdout.fileno(): ('stdout', proc.stdout, out_sink),
-        proc.stderr.fileno(): ('stderr', proc.stderr, err_sink),
-    }
-    buffers = {'stdout': bytearray(), 'stderr': bytearray()}
-    for _name, pipe, _sink in streams.values():
-        os.set_blocking(pipe.fileno(), False)
-        sel.register(pipe, selectors.EVENT_READ)
+    sel = None
+    try:
+        sel = selectors.DefaultSelector()
+        streams = {
+            proc.stdout.fileno(): ('stdout', proc.stdout, out_sink),
+            proc.stderr.fileno(): ('stderr', proc.stderr, err_sink),
+        }
+        buffers = {'stdout': bytearray(), 'stderr': bytearray()}
+        for _name, pipe, _sink in streams.values():
+            os.set_blocking(pipe.fileno(), False)
+            sel.register(pipe, selectors.EVENT_READ)
 
-    started = time.monotonic()
-    match_count = 0
-    timed_out = False
-    limit_reached = False
-    consumer_closed = False
-    # Post-cap drain-and-count state: once ``limit_reached`` stops forwarding,
-    # match lines are only counted (per file, with line ranges) until the
-    # ceilings or the drain deadline terminate the backend.
-    counting = False
-    count_stop = False
-    count_deadline = 0.0
-    count_finished = False
-    remainder_total = 0
-    remainder_capped = False
-    remainder_files: dict[str, list[int]] = {}
-    from_line = (request.from_line
-                 if request.from_line is not None and request.from_line > 1
-                 else None)
+        started = time.monotonic()
+        match_count = 0
+        timed_out = False
+        limit_reached = False
+        consumer_closed = False
+        cancelled = False
+        # Post-cap drain-and-count state: once ``limit_reached`` stops forwarding,
+        # match lines are only counted (per file, with line ranges) until the
+        # ceilings or the drain deadline terminate the backend.
+        counting = False
+        count_stop = False
+        count_deadline = 0.0
+        count_finished = False
+        remainder_total = 0
+        remainder_capped = False
+        remainder_files: dict[str, list[int]] = {}
+        from_line = (request.from_line
+                     if request.from_line is not None and request.from_line > 1
+                     else None)
 
-    def forward_lines(name: str, sink: Callable[[bytes], object], *, eof=False) -> bool:
-        nonlocal match_count, limit_reached, counting, count_stop
-        nonlocal count_deadline, remainder_total, remainder_capped
-        buf = buffers[name]
-
-        def process(line: bytes) -> bool:
+        def forward_lines(name: str, sink: Callable[[bytes], object], *, eof=False) -> bool:
             nonlocal match_count, limit_reached, counting, count_stop
             nonlocal count_deadline, remainder_total, remainder_capped
-            if name != 'stdout':
-                return _write_all(sink, line)
-            is_match = (request.match_line(line)
-                        if request.match_line else True)
-            if is_match and (counting or from_line is not None):
-                path, lineno = _parse_match_line(line)
-                if from_line is not None and lineno is not None \
-                        and lineno < from_line:
-                    return True  # excluded by the caller's line floor
-                if counting:
-                    remainder_total += 1
-                    if path is not None:
-                        stats = remainder_files.get(path)
-                        if stats is None:
-                            if len(remainder_files) >= _REMAINDER_FILE_CEILING:
-                                remainder_capped = True
-                                count_stop = True
-                                return True
-                            remainder_files[path] = [
-                                1, lineno or 0, lineno or 0]
-                        else:
-                            stats[0] += 1
-                            if lineno:
-                                stats[1] = min(stats[1], lineno) \
-                                    if stats[1] else lineno
-                                stats[2] = max(stats[2], lineno)
-                    if remainder_total >= _REMAINDER_MATCH_CEILING:
-                        remainder_capped = True
-                        count_stop = True
-                    return True
-            elif not is_match and (counting or from_line is not None):
-                # Context/separator lines: never counted.  When paging,
-                # drop the ones below the floor and the group separators
-                # (they carry no information for a paged reader).
-                if line.rstrip(b'\r\n') == b'--':
-                    return True
-                ctx = _RE_CONTEXT_LINE.match(line)
-                if from_line is not None and ctx \
-                        and int(ctx.group('line')) < from_line:
-                    return True
-                if counting:
-                    return True
-            if not _write_all(sink, line):
-                return False
-            if is_match and request.max_results is not None:
-                match_count += 1
-                if match_count >= request.max_results:
-                    limit_reached = True
-                    counting = True
-                    count_deadline = time.monotonic() + _REMAINDER_DRAIN_S
+            buf = buffers[name]
+
+            def process(line: bytes) -> bool:
+                nonlocal match_count, limit_reached, counting, count_stop
+                nonlocal count_deadline, remainder_total, remainder_capped
+                if name != 'stdout':
+                    return _write_all(sink, line)
+                is_match = (request.match_line(line)
+                            if request.match_line else True)
+                if is_match and (counting or from_line is not None):
+                    path, lineno = _parse_match_line(line)
+                    if from_line is not None and lineno is not None \
+                            and lineno < from_line:
+                        return True  # excluded by the caller's line floor
+                    if counting:
+                        remainder_total += 1
+                        if path is not None:
+                            stats = remainder_files.get(path)
+                            if stats is None:
+                                if len(remainder_files) >= _REMAINDER_FILE_CEILING:
+                                    remainder_capped = True
+                                    count_stop = True
+                                    return True
+                                remainder_files[path] = [
+                                    1, lineno or 0, lineno or 0]
+                            else:
+                                stats[0] += 1
+                                if lineno:
+                                    stats[1] = min(stats[1], lineno) \
+                                        if stats[1] else lineno
+                                    stats[2] = max(stats[2], lineno)
+                        if remainder_total >= _REMAINDER_MATCH_CEILING:
+                            remainder_capped = True
+                            count_stop = True
+                        return True
+                elif not is_match and (counting or from_line is not None):
+                    # Context/separator lines: never counted.  When paging,
+                    # drop the ones below the floor and the group separators
+                    # (they carry no information for a paged reader).
+                    if line.rstrip(b'\r\n') == b'--':
+                        return True
+                    ctx = _RE_CONTEXT_LINE.match(line)
+                    if from_line is not None and ctx \
+                            and int(ctx.group('line')) < from_line:
+                        return True
+                    if counting:
+                        return True
+                if not _write_all(sink, line):
+                    return False
+                if is_match and request.max_results is not None:
+                    match_count += 1
+                    if match_count >= request.max_results:
+                        limit_reached = True
+                        counting = True
+                        count_deadline = time.monotonic() + _REMAINDER_DRAIN_S
+                return True
+
+            while True:
+                pos = buf.find(b'\n')
+                if pos < 0:
+                    break
+                line = bytes(buf[:pos + 1])
+                del buf[:pos + 1]
+                if not process(line):
+                    return False
+            if eof and buf:
+                # A naturally-completed command may legitimately omit its final
+                # newline. Timeout/forced-limit callers pass eof=False and thereby
+                # discard only the possibly torn trailing record.
+                data = bytes(buf)
+                buf.clear()
+                if not process(data):
+                    return False
             return True
 
-        while True:
-            pos = buf.find(b'\n')
-            if pos < 0:
-                break
-            line = bytes(buf[:pos + 1])
-            del buf[:pos + 1]
-            if not process(line):
-                return False
-        if eof and buf:
-            # A naturally-completed command may legitimately omit its final
-            # newline. Timeout/forced-limit callers pass eof=False and thereby
-            # discard only the possibly torn trailing record.
-            data = bytes(buf)
-            buf.clear()
-            if not process(data):
-                return False
-        return True
-
-    while sel.get_map():
-        if request.timeout is not None and not timed_out \
-                and time.monotonic() - started >= request.timeout:
-            timed_out = True
-            _terminate_tree(proc)
-        if counting and not count_stop and count_deadline \
-                and time.monotonic() >= count_deadline:
-            count_stop = True
-            _terminate_tree(proc)
-        events = sel.select(0.1)
-        if not events and proc.poll() is not None:
-            # Pipes can become readable only to report EOF; loop once more.
-            events = sel.select(0)
-        for key, _mask in events:
-            name, pipe, sink = streams[key.fd]
-            try:
-                chunk = os.read(key.fd, 65536)
-            except BlockingIOError:
-                continue
-            if chunk:
-                buffers[name].extend(chunk)
-                if not forward_lines(name, sink):
-                    consumer_closed = True
-                    _terminate_tree(proc)
-                    break
-                if count_stop:
-                    _terminate_tree(proc)
-                    break
-            else:
-                sel.unregister(pipe)
-                natural_eof = not (timed_out or consumer_closed or count_stop)
-                if natural_eof and name == 'stdout' and counting:
-                    count_finished = True
-                if not forward_lines(name, sink, eof=natural_eof):
-                    consumer_closed = True
-                    _terminate_tree(proc)
-                    break
-                pipe.close()
-        if count_stop or timed_out or consumer_closed:
-            # Drain ready complete records after termination, but never wait
-            # for a misbehaving descendant that retained a pipe descriptor.
-            # After the cap, the drain keeps feeding the remainder counter.
-            drain_until = time.monotonic() + 0.5
-            while sel.get_map() and time.monotonic() < drain_until:
-                if count_stop:
-                    break
-                ready = sel.select(0.02)
-                if not ready:
-                    if proc.poll() is not None:
-                        break
+        while sel.get_map():
+            if request.cancel_event is not None and request.cancel_event.is_set() and not cancelled:
+                cancelled = True
+                _terminate_tree(proc)
+            if request.timeout is not None and not timed_out \
+                    and time.monotonic() - started >= request.timeout:
+                timed_out = True
+                _terminate_tree(proc)
+            if counting and not count_stop and count_deadline \
+                    and time.monotonic() >= count_deadline:
+                count_stop = True
+                _terminate_tree(proc)
+            events = sel.select(0.1)
+            if not events and proc.poll() is not None:
+                # Pipes can become readable only to report EOF; loop once more.
+                events = sel.select(0)
+            for key, _mask in events:
+                name, pipe, sink = streams[key.fd]
+                try:
+                    chunk = os.read(key.fd, 65536)
+                except BlockingIOError:
                     continue
-                for key, _mask in ready:
-                    name, pipe, sink = streams[key.fd]
-                    try:
-                        chunk = os.read(key.fd, 65536)
-                    except BlockingIOError:
-                        continue
-                    if not chunk:
-                        sel.unregister(pipe)
-                        pipe.close()
-                        continue
+                if chunk:
                     buffers[name].extend(chunk)
                     if not forward_lines(name, sink):
                         consumer_closed = True
-            break
+                        _terminate_tree(proc)
+                        break
+                    if count_stop:
+                        _terminate_tree(proc)
+                        break
+                else:
+                    sel.unregister(pipe)
+                    natural_eof = not (timed_out or consumer_closed or count_stop or cancelled)
+                    if natural_eof and name == 'stdout' and counting:
+                        count_finished = True
+                    if not forward_lines(name, sink, eof=natural_eof):
+                        consumer_closed = True
+                        _terminate_tree(proc)
+                        break
+                    pipe.close()
+            if count_stop or timed_out or consumer_closed or cancelled:
+                # Drain ready complete records after termination, but never wait
+                # for a misbehaving descendant that retained a pipe descriptor.
+                # After the cap, the drain keeps feeding the remainder counter.
+                drain_until = time.monotonic() + 0.5
+                while sel.get_map() and time.monotonic() < drain_until:
+                    if count_stop:
+                        break
+                    ready = sel.select(0.02)
+                    if not ready:
+                        if proc.poll() is not None:
+                            break
+                        continue
+                    for key, _mask in ready:
+                        name, pipe, sink = streams[key.fd]
+                        try:
+                            chunk = os.read(key.fd, 65536)
+                        except BlockingIOError:
+                            continue
+                        if not chunk:
+                            sel.unregister(pipe)
+                            pipe.close()
+                            continue
+                        buffers[name].extend(chunk)
+                        if not forward_lines(name, sink):
+                            consumer_closed = True
+                break
 
-    # Flush complete lines still buffered when the counting drain stopped on
-    # its deadline/ceilings; in counting mode they only feed the remainder.
-    if counting and buffers['stdout']:
-        forward_lines('stdout', out_sink)
+        # Flush complete lines still buffered when the counting drain stopped on
+        # its deadline/ceilings; in counting mode they only feed the remainder.
+        if counting and buffers['stdout']:
+            forward_lines('stdout', out_sink)
 
-    sel.close()
-    if proc.poll() is None:
-        _terminate_tree(proc)
-    try:
-        returncode = proc.wait(timeout=1)
-    except subprocess.TimeoutExpired:
-        returncode = -signal.SIGKILL
-    if timed_out:
-        returncode = 124
-    elif limit_reached:
-        returncode = 0
-    elif consumer_closed:
-        returncode = 128 + signal.SIGPIPE
-    return SearchResult(
-        stdout=b''.join(captured_out),
-        stderr=b''.join(captured_err),
-        returncode=returncode,
-        backend=backend,
-        timed_out=timed_out,
-        limit_reached=limit_reached,
-        consumer_closed=consumer_closed,
-        remainder_total=remainder_total,
-        remainder_files=tuple(sorted(
-            ((path, stats[0], stats[1], stats[2])
-             for path, stats in remainder_files.items()),
-            key=lambda row: (-row[1], row[0]))),
-        remainder_capped=remainder_capped,
-        remainder_complete=bool(limit_reached and count_finished),
-    )
+        sel.close()
+        if proc.poll() is None:
+            _terminate_tree(proc)
+        try:
+            returncode = proc.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            returncode = -signal.SIGKILL
+        if timed_out:
+            returncode = 124
+        elif cancelled:
+            returncode = 130
+        elif limit_reached:
+            returncode = 0
+        elif consumer_closed:
+            returncode = 128 + signal.SIGPIPE
+        return SearchResult(
+            stdout=b''.join(captured_out),
+            stderr=b''.join(captured_err),
+            returncode=returncode,
+            backend=backend,
+            timed_out=timed_out,
+            limit_reached=limit_reached,
+            consumer_closed=consumer_closed,
+            cancelled=cancelled,
+            remainder_total=remainder_total,
+            remainder_files=tuple(sorted(
+                ((path, stats[0], stats[1], stats[2])
+                 for path, stats in remainder_files.items()),
+                key=lambda row: (-row[1], row[0]))),
+            remainder_capped=remainder_capped,
+            remainder_complete=bool(limit_reached and count_finished),
+        )
+    finally:
+        if sel is not None:
+            sel.close()
+        try:
+            if proc.poll() is None:
+                _terminate_tree(proc)
+        finally:
+            for pipe in (proc.stdout, proc.stderr):
+                pipe.close()
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=1)
 
 
 def _fd_sink(fd: int) -> Callable[[bytes], bool]:

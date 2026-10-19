@@ -5,7 +5,7 @@ Tests pure logic modules:
   - lib.protocols (Protocol interfaces)
   - lib.pricing (cost calculation)
   - lib.utils (safe_json, etc.)
-  - lib.storage_sidecar (schema and semantic storage contracts)
+  - lib.storage_authority_sql (schema and semantic storage contracts)
   - lib.tests.validate_imports (all modules import cleanly)
 
 Run:  pytest tests/llm/test_backend_unit.py -m unit

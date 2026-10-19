@@ -28,7 +28,7 @@ def main():
     ttl = float(sys.argv[4])
     n = int(sys.argv[5])
     tag = sys.argv[6] if len(sys.argv) > 6 else str(os.getpid())
-    from lib.runtime_state_store import get_store, reset_for_test
+    from lib.runtime.runtime_state_store import get_store, reset_for_test
     reset_for_test()
     store = get_store()
     prefix = principle + '::'

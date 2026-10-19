@@ -6,7 +6,9 @@ import io
 import math
 import os
 import re
+import sys
 import zipfile
+from collections.abc import Callable
 
 from lib.log import get_logger
 
@@ -22,10 +24,9 @@ from .assets import (
 from .resource_policy import resolve_knowledge_visual_budget
 
 logger = get_logger(__name__)
+HtmlProjector = Callable[[str], str]
 
 _OLE_MAGIC = b'\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1'
-_MAX_UNCOMPRESSED = 256 * 1024 * 1024
-_MAX_ZIP_MEMBERS = 20_000
 
 PLAIN_EXTENSIONS = (
     '.txt', '.md', '.markdown', '.csv', '.tsv', '.json', '.jsonl',
@@ -52,29 +53,11 @@ class KnowledgeIngestError(ValueError):
     """A user-facing, per-document ingestion failure."""
 
 
-def _limit_chars() -> int:
-    raw = os.environ.get('TOFU_KNOWLEDGE_MAX_TEXT_CHARS', '12000000')
-    try:
-        return max(100_000, min(int(raw), 50_000_000))
-    except (TypeError, ValueError) as exc:
-        logger.debug('[Knowledge] invalid max-text limit %r: %s', raw, exc)
-        return 12_000_000
-
-
 def _safe_package_kind(raw: bytes) -> str:
     """Identify safe OOXML/ODF/EPUB packages from their members."""
     try:
         with zipfile.ZipFile(io.BytesIO(raw)) as archive:
             infos = archive.infolist()
-            if len(infos) > _MAX_ZIP_MEMBERS:
-                raise KnowledgeIngestError('Office package contains too many entries')
-            total = sum(max(0, i.file_size) for i in infos)
-            if total > _MAX_UNCOMPRESSED:
-                raise KnowledgeIngestError(
-                    f'Office package expands beyond {_MAX_UNCOMPRESSED // 1048576} MB')
-            compressed = max(1, sum(max(0, i.compress_size) for i in infos))
-            if total > 32 * 1024 * 1024 and total / compressed > 200:
-                raise KnowledgeIngestError('Office package has an unsafe compression ratio')
             names = {i.filename.lower() for i in infos}
             try:
                 with archive.open('mimetype') as mimetype_file:
@@ -84,8 +67,6 @@ def _safe_package_kind(raw: bytes) -> str:
                 logger.debug('[Knowledge] package mimetype entry unavailable: %s',
                              exc)
                 mimetype = ''
-    except KnowledgeIngestError:
-        raise
     except (zipfile.BadZipFile, OSError) as exc:
         raise KnowledgeIngestError(f'Invalid ZIP/Office container: {exc}') from exc
     if 'word/document.xml' in names:
@@ -468,7 +449,7 @@ def _strip_repeated_pdf_margins(text: str) -> str:
     return '\n\n---\n\n'.join(page for page in cleaned_pages if page)
 
 
-def _epub_text(raw: bytes, limit: int) -> dict:
+def _epub_text(raw: bytes, limit: int, *, html_projector: HtmlProjector | None = None) -> dict:
     """Read EPUB chapters in spine order, falling back to archive order."""
     import posixpath
     import xml.etree.ElementTree as ET
@@ -512,7 +493,7 @@ def _epub_text(raw: bytes, limit: int) -> dict:
                 chapter, chapter_warnings = _decode_text(
                     chapter_raw, name, max(1, limit - used_chars))
                 warnings.extend(chapter_warnings)
-                cleaned = _html_to_text(chapter)
+                cleaned = _project_html(chapter, html_projector)
                 if cleaned:
                     rendered = f'## Chapter {index}\n\n{cleaned}'
                     parts.append(rendered)
@@ -527,7 +508,8 @@ def _epub_text(raw: bytes, limit: int) -> dict:
             'pages': len(parts)}
 
 
-def _email_text(raw: bytes, limit: int, *, depth: int) -> dict:
+def _email_text(raw: bytes, limit: int, *, depth: int,
+                html_projector: HtmlProjector | None = None) -> dict:
     """Extract an RFC email body and searchable text attachments locally."""
     from email import policy
     from email.parser import BytesParser
@@ -542,7 +524,6 @@ def _email_text(raw: bytes, limit: int, *, depth: int) -> dict:
         f'Date: {message.get("date", "")}',
     ]
     warnings: list[str] = []
-    assets = OwnedAssetSequence()
     body = message.get_body(preferencelist=('plain', 'html'))
     if body is not None:
         try:
@@ -552,9 +533,10 @@ def _email_text(raw: bytes, limit: int, *, depth: int) -> dict:
             content, decode_warnings = _decode_text(payload, 'message.txt', limit)
             warnings.extend(decode_warnings)
         if body.get_content_type() == 'text/html':
-            content = _html_to_text(str(content))
+            content = _project_html(str(content), html_projector)
         parts.extend(('', str(content).strip()))
     used_chars = sum(len(item) + 1 for item in parts)
+    assets = OwnedAssetSequence()
     for attachment_index, attachment in enumerate(message.iter_attachments(), 1):
         name = attachment.get_filename() or ''
         payload = attachment.get_payload(decode=True) or b''
@@ -572,7 +554,8 @@ def _email_text(raw: bytes, limit: int, *, depth: int) -> dict:
             break
         parsed = None
         try:
-            parsed = extract(payload, name, _depth=depth + 1)
+            options = {'html_projector': html_projector} if html_projector is not None else {}
+            parsed = extract(payload, name, _depth=depth + 1, **options)
             heading = f'## Attachment: {name}'
             remaining = max(0, limit - used_chars - len(heading) - 2)
             parsed_text = str(parsed['text'])
@@ -733,16 +716,31 @@ def _extract_admitted_pdf(raw: bytes, kind: str, limit: int) -> dict:
         raise
 
 
+def _project_html(value: str, projector: HtmlProjector | None) -> str:
+    """Explicit projector errors propagate; the default owns its legacy fallback."""
+    if projector is None:
+        return _html_to_text(value)
+    result = projector(value)
+    if type(result) is not str:
+        raise TypeError('HTML projector must return a string')
+    return result
+
+
 def extract(
     raw: bytes,
     filename: str,
     *,
     _depth: int = 0,
     _pdf_already_admitted: bool = False,
+    html_projector: HtmlProjector | None = None,
 ) -> dict:
-    """Extract a supported file to normalized text plus provenance metadata."""
+    """Extract text/provenance, borrowing an optional caller-owned HTML projector."""
+    if html_projector is not None and not callable(html_projector):
+        raise TypeError('html_projector must be callable or None')
     kind = detect_kind(raw, filename)
-    limit = _limit_chars()
+    # Parser APIs take an integer output allowance. Addressability is the
+    # actual representation boundary; knowledge adds no private text quota.
+    limit = sys.maxsize
     canonical_name = (os.path.splitext(filename or 'document')[0] or 'document') + kind
 
     if kind in IMAGE_EXTENSIONS:
@@ -779,7 +777,7 @@ def extract(
         return result
 
     if kind == '.eml':
-        result = _email_text(raw, limit, depth=_depth)
+        result = _email_text(raw, limit, depth=_depth, html_projector=html_projector)
         if not result['text'].strip():
             raise KnowledgeIngestError('No searchable text could be extracted from this email')
         return result
@@ -795,7 +793,7 @@ def extract(
         return result
 
     if kind == '.epub':
-        result = _epub_text(raw, limit)
+        result = _epub_text(raw, limit, html_projector=html_projector)
         if not result['text'].strip():
             raise KnowledgeIngestError('No searchable text could be extracted from this EPUB')
         assets, visual_warnings = extract_package_assets(raw)
@@ -805,7 +803,7 @@ def extract(
 
     if kind in _HTML_EXTENSIONS:
         text, warnings = _decode_text(raw, canonical_name, limit)
-        text = _html_to_text(text)[:limit]
+        text = _project_html(text, html_projector)[:limit]
         if not text.strip():
             raise KnowledgeIngestError('No searchable text could be extracted from this HTML')
         return {'text': text, 'kind': kind, 'method': 'html-local',

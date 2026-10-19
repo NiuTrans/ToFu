@@ -5,7 +5,7 @@ import tracemalloc
 
 import pytest
 
-from lib.storage_sidecar import tofudb_migration_import as importer
+from lib.storage_authority_sql.migration import tofudb_migration_import as importer
 
 pytestmark = pytest.mark.unit
 

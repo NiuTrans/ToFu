@@ -255,141 +255,24 @@ runtimeScope.getConvById = getConvById;
 function getActiveConv() {
   return getConvById(activeConvId);
 }
-/* Perf: cache chatContainer ref — avoids getElementById on every scroll check */
-let _chatContainerEl = null;
+/* Compatibility entry points forward semantic intent to the mounted Surface.
+ * Scroll position, follow suspension and history windows have one typed owner. */
 function _getChatContainer() {
-  if (!_chatContainerEl || !_chatContainerEl.isConnected) {
-    _chatContainerEl = document.getElementById("chatContainer");
-  }
-  return _chatContainerEl;
+  return document.getElementById("chatContainer");
 }
 function isNearBottom(threshold) {
-  const c = _getChatContainer();
-  if (!c) return true;
-  return c.scrollHeight - c.scrollTop - c.clientHeight < (threshold || 150);
+  return runtimeScope.ConversationSurfacePresentation?.isNearLatest?.(threshold) ?? true;
 }
-/* ── Instant-scroll seam ───────────────────────────────────────────────
- * Run `fn` with `scroll-behavior` forced to `auto` on `el`, then restore the
- * previous value. If any stylesheet sets `scroll-behavior:smooth` on a scroll
- * container, a `scrollTop` write becomes an ANIMATION: during streaming it
- * perpetually chases a growing scrollHeight (reader drifts off the bottom then
- * snaps back), and at turn-finalize it visibly slides instead of re-pinning.
- *
- * Every programmatic scroll write that must land IMMEDIATELY goes through
- * here, so the restore is never forgotten and callers cannot half-implement
- * it. Restores in a `finally` so a throwing `fn` cannot leave the container
- * stuck on `auto`. */
-function _withInstantScroll(el, fn) {
-  if (!el) { fn(); return; }
-  const _prev = el.style.scrollBehavior;
-  el.style.scrollBehavior = 'auto';
-  try { fn(); }
-  finally { el.style.scrollBehavior = _prev; }
-}
-if (typeof window !== 'undefined') runtimeScope._withInstantScroll = _withInstantScroll;
-
-/* ── Bottom-follow suspension latch ────────────────────────────────────
- * The streaming auto-follow gates are POSITIONAL only (isNearBottom(80/200)).
- * While a rapidly-updating tail grows at up to 30fps, a reader who starts
- * scrolling up is yanked back to the bottom on every update until their
- * gesture crosses the threshold — and each yank resets their progress, so
- * the gesture and the programmatic pin fight every frame: the reported
- * "scrolling up during streaming makes the page shake/tremble".
- * The reader's UPWARD INTENT (wheel up, touch drag down, scrollbar drag /
- * PageUp moving away from the bottom) suspends the follow outright; landing
- * back at the bottom — or an explicit pin (scrollChatToBottom button,
- * `_forceScrollToBottom` turn transitions) — resumes it. */
-let _followSuspended = false;
-let _followListenersArmed = false;
-function _armFollowSuspensionListeners() {
-  if (_followListenersArmed) return;
-  const c = _getChatContainer();
-  if (!c) return;  // container not in DOM yet — retried by the next boot hook
-  _followListenersArmed = true;
-  c.addEventListener("wheel", (e) => {
-    if (e.deltaY < 0) _followSuspended = true;  // wheel up = leave the bottom
-  }, { passive: true });
-  let _touchY = null;
-  c.addEventListener("touchstart", (e) => {
-    _touchY = e.touches.length ? e.touches[0].clientY : null;
-  }, { passive: true });
-  c.addEventListener("touchmove", (e) => {
-    if (_touchY != null && e.touches.length
-        && e.touches[0].clientY > _touchY + 4) {
-      _followSuspended = true;  // drag down = scroll content up = leave the bottom
-    }
-  }, { passive: true });
-  let _lastTop = null;
-  c.addEventListener("scroll", () => {
-    /* Scrollbar drags and PageUp/Home produce no wheel/touch event: any
-     * user-driven move AWAY from the bottom suspends follow; landing back
-     * at the bottom resumes it. Programmatic pins land here too — an
-     * explicit pin IS a follow by definition. */
-    const st = c.scrollTop;
-    if (_lastTop != null && st < _lastTop - 4 && !isNearBottom(40)) {
-      _followSuspended = true;
-    } else if (isNearBottom(40)) {
-      _followSuspended = false;
-    }
-    _lastTop = st;
-  }, { passive: true });
-}
-if (typeof window !== 'undefined') runtimeScope._armFollowSuspensionListeners = _armFollowSuspensionListeners;
-
-let _scrollRafId = null;
 function scrollToBottom(force) {
-  const c = _getChatContainer();
-  if (!c) return;
-  if (!force && (_followSuspended || !isNearBottom(200))) {
-    /* Reader is scrolled up while content grows (e.g. live streaming) — no
-     * scroll event fires, so refresh the scroll-to-bottom affordance here. */
-    _updateScrollToBottomBtn();
-    return;
-  }
-  /* PERF: Coalesce scroll updates and use single rAF (not double).
-   * During streaming, the authoritative projection has already updated the
-   * DOM. A single rAF is sufficient to scroll after layout; double-rAF added
-   * 33ms of lag per frame. */
-  if (_scrollRafId) return; // already scheduled
-  _scrollRafId = requestAnimationFrame(() => {
-    _scrollRafId = null;
-    /* Re-check the suspension latch at WRITE time: the reader may have
-     * scrolled up between the schedule call and this frame — writing anyway
-     * is exactly the yank-down fight the latch exists to stop. */
-    if (_followSuspended) return;
-    /* SCROLL-JITTER FIX: during streaming this fires once per rAF while
-     * scrollHeight is still growing. If any stylesheet sets
-     * `scroll-behavior:smooth` on the chat container (some themes did),
-     * the write becomes an animation that perpetually chases a moving
-     * target — the reader visibly drifts off the bottom then snaps back.
-     * Force instant scroll for the duration of the write. The tofu theme
-     * no longer sets smooth; this is belt-and-suspenders for future
-     * themes / user stylesheets. */
-    _withInstantScroll(c, () => { c.scrollTop = c.scrollHeight; });
-  });
+  runtimeScope.ConversationSurfacePresentation?.followLatest?.({ force: Boolean(force) });
+  _updateScrollToBottomBtn();
 }
-/* ── Scroll-to-bottom button ──────────────────────────────────────────
- * A simple, always-available fallback affordance: when the reader scrolls
- * up away from the latest message, a floating pill appears; clicking it jumps
- * to the bottom via the real-height force-scroll path. */
 function scrollChatToBottom() {
-  /* ConversationSurface captures near-bottom state before every commit, so a
-   * direct jump is sufficient to keep following later Turn revisions. */
-  _followSuspended = false;
-  const c = _getChatContainer();
-  if (c) _withInstantScroll(c, () => { c.scrollTop = c.scrollHeight; });
+  runtimeScope.ConversationSurfacePresentation?.followLatest?.();
   _updateScrollToBottomBtn();
 }
 function _updateScrollToBottomBtn() {
-  const btn = document.getElementById("scrollToBottomBtn");
-  if (!btn) return;
-  const c = _getChatContainer();
-  /* Show only when there's real overflow AND the reader is scrolled up. The
-   * 120px threshold keeps the button hidden while effectively at the bottom
-   * (matches the near-bottom slack the streaming auto-scroll uses). */
-  const hasOverflow = !!c && c.scrollHeight - c.clientHeight > 40;
-  const show = hasOverflow && !isNearBottom(120);
-  btn.classList.toggle("visible", show);
+  document.getElementById("scrollToBottomBtn")?.classList.toggle("visible", !isNearBottom(120));
 }
 if (typeof window !== "undefined") {
   runtimeScope.scrollChatToBottom = scrollChatToBottom;

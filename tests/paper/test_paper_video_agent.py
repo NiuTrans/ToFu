@@ -9,7 +9,7 @@ pytestmark = pytest.mark.unit
 
 def test_source_agent_abort_after_stream_never_adopts_json(monkeypatch):
     from lib.motion_video import _recipe
-    from lib.llm_errors import AbortedError
+    from lib.llm.llm_errors import AbortedError
     aborted = threading.Event()
     def stream(_messages, **kwargs):
         kwargs['on_content']('{"beats": []}')
@@ -57,7 +57,7 @@ def test_source_agent_restart_discards_partial_content(monkeypatch):
 
 def test_paper_source_adapter_does_not_treat_abort_as_extractable_fallback(monkeypatch):
     from lib.paper.video_abstract import _llm_beats
-    from lib.llm_errors import AbortedError
+    from lib.llm.llm_errors import AbortedError
     def abort(*_args, **_kwargs):
         raise AbortedError('explicit stop')
     monkeypatch.setattr('lib.motion_video._recipe.script_stage_for_source', abort)

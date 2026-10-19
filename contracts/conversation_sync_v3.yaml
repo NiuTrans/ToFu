@@ -33,6 +33,9 @@ x-tofu-command-retry:
 x-tofu-invariants:
   - A conversation mutation and its change-log row commit atomically.
   - A snapshot cursor is captured in the same read transaction as its rows.
+  - A client acknowledges a snapshot cursor only after successful projection ingestion; reset recovery remains required across read failures and transport suspension.
+  - Conversation synchronization owns and cancels its reads, streams, listeners and timers; late completions cannot publish after disposal.
+  - A stream subscription is released on every setup exit until ownership transfers to its response body and unconsumed-body deadline.
   - Only the conversation event stream writes live turn projections.
   - Push and BroadcastChannel frames are invalidation hints, never projection data.
   - Projection patches apply only when baseRevision equals the local revision.
@@ -89,6 +92,23 @@ paths:
             type: string
             enum: [full, tail-96]
             default: full
+        - name: windowLimit
+          in: query
+          required: false
+          description: >-
+            Viewport-selected initial Turn count, valid only with tail-96.
+            Omission retains the 96-Turn profile. The newest contiguous suffix
+            and its continuation cursor are read in one owner-scoped transaction.
+          schema: {type: integer, minimum: 1, maximum: 96}
+        - name: windowBytes
+          in: query
+          required: false
+          description: >-
+            Soft UTF-8 projection-byte budget for a bounded tail. At least one
+            newest Turn is returned even when it alone exceeds the budget.
+            Full and branched snapshots retain complete topology. Omission
+            preserves the original count-only window.
+          schema: {type: integer, minimum: 65536, maximum: 16777216}
         - name: artifactHint
           in: query
           required: false
@@ -163,6 +183,40 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/TurnCommandResponse'
+  /api/v4/conversations/{conversationId}/turns/{turnId}/usage-recovery:
+    get:
+      operationId: conversationUsageRecovery
+      x-tofu-client: usageRecovery
+      x-tofu-contract: tofu.conversation-sync.usage-recovery/v1
+      parameters:
+        - $ref: '#/components/parameters/ConversationId'
+        - $ref: '#/components/parameters/TurnId'
+      responses:
+        '200':
+          description: Read-only safety check; never calls a model or changes accounting.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ConversationUsageRecovery'}
+    post:
+      operationId: conversationRecoverUsage
+      x-tofu-client: recoverUsage
+      x-tofu-idempotent-retry: true
+      x-tofu-client-timeout-ms: 0
+      x-tofu-contract: tofu.conversation-sync.command.usage-recovery/v1
+      parameters:
+        - $ref: '#/components/parameters/ConversationId'
+        - $ref: '#/components/parameters/TurnId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/RecoverUsageRequest'}
+      responses:
+        '200':
+          description: Explicit human authorization for one new bounded Turn, not settlement or replay of the source request.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/TurnCommandResponse'}
   /api/v4/conversations/{conversationId}/queue/{queueId}:
     delete:
       operationId: conversationQueueCancel
@@ -204,6 +258,14 @@ paths:
           in: query
           required: false
           schema: {type: integer, minimum: 1, maximum: 256, default: 64}
+
+        - name: windowBytes
+          in: query
+          required: false
+          description: >-
+            Soft UTF-8 projection-byte budget; retains at least one Turn and
+            an exact continuation cursor at the requested replay head.
+          schema: {type: integer, minimum: 65536, maximum: 16777216}
         - name: toolPayload
           in: query
           required: false
@@ -227,6 +289,58 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ConversationTurnPage'
+  /api/v4/conversations/{conversationId}/turns/rounds:
+    get:
+      operationId: conversationRoundDirectory
+      x-tofu-client: roundDirectory
+      x-tofu-contract: tofu.conversation-sync.round-directory/v1
+      parameters:
+        - $ref: '#/components/parameters/ConversationId'
+        - name: laneId
+          in: query
+          required: true
+          schema: {type: string, minLength: 1, maxLength: 128}
+        - name: syncSeq
+          in: query
+          required: true
+          schema: {type: integer, minimum: 0, maximum: 9223372036854775807}
+        - name: offset
+          in: query
+          schema: {type: integer, minimum: 0, default: 0}
+        - name: limit
+          in: query
+          schema: {type: integer, minimum: 1, maximum: 100, default: 50}
+        - name: anchorTurnId
+          in: query
+          schema: {type: string, minLength: 1, maxLength: 128}
+      responses:
+        '200':
+          description: Exact input-round ranks at one owner/lane sync head, without projections.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ConversationRoundDirectory'}
+  /api/v4/conversations/{conversationId}/turns/{turnId}/tool-effects/{operationId}:
+    get:
+      operationId: conversationToolEffectInspection
+      x-tofu-client: inspectToolEffect
+      x-tofu-contract: tofu.conversation-sync.tool-effect-inspection/v1
+      parameters:
+        - $ref: '#/components/parameters/ConversationId'
+        - $ref: '#/components/parameters/TurnId'
+        - name: operationId
+          in: path
+          required: true
+          schema: {type: string, pattern: '^[a-f0-9]{32}$'}
+        - name: ownerScope
+          in: query
+          required: true
+          schema: {type: string, pattern: '^[0-9a-f]{24}$'}
+      responses:
+        '200':
+          description: Fresh file-publication evidence only; never retries a write or accepts a task.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ConversationToolEffectInspection'}
   /api/v4/conversations/{conversationId}/turns/{turnId}/tool-results/{roundIndex}:
     get:
       operationId: conversationTurnToolResult
@@ -732,6 +846,89 @@ components:
           minLength: 1
           maxLength: 256
           description: Opaque invocation-scoped token; pass unchanged to the owner-authorized request payload API.
+    ProjectFileWriteReconciliation:
+      type: object
+      additionalProperties: false
+      required: [kind, changeId, basePath, path, taskId, rootIdentity, postDigest, postBytes]
+      properties:
+        kind: {type: string, const: project_file_write}
+        changeId: {type: string, pattern: '^[a-f0-9]{32}$'}
+        basePath: {type: string, minLength: 1}
+        path: {type: string, minLength: 1}
+        taskId: {type: string, minLength: 1}
+        rootIdentity:
+          type: array
+          minItems: 2
+          maxItems: 2
+          items: {type: integer, minimum: 0}
+        postDigest: {type: string, pattern: '^[a-f0-9]{64}$'}
+        postBytes: {type: integer, minimum: 0}
+    ToolEffectInspectionOutcome:
+      type: string
+      enum: [file_published, file_not_published, unknown]
+    ToolEffectInspectionReason:
+      type: string
+      enum: [undo_committed, prepared_file_applied, prepared_file_unpublished, checkpoint_batch_unentered, unsupported, missing_evidence, evidence_conflict, evidence_unavailable, writer_active]
+    ConversationToolEffectInspection:
+      type: object
+      additionalProperties: false
+      required: [ok, contract, conversationId, turnId, operationId, outcome, reason]
+      properties:
+        ok: {type: boolean, const: true}
+        contract: {type: string, const: tofu.conversation-sync.tool-effect-inspection/v1}
+        conversationId: {type: string}
+        turnId: {type: string}
+        operationId: {type: string, pattern: '^[a-f0-9]{32}$'}
+        outcome: {$ref: '#/components/schemas/ToolEffectInspectionOutcome'}
+        reason: {$ref: '#/components/schemas/ToolEffectInspectionReason'}
+    InvocationToolEffectInspection:
+      type: object
+      additionalProperties: false
+      required: [ok, contract, conversationId, invocationId, operationId, outcome, reason]
+      properties:
+        ok: {type: boolean, const: true}
+        contract: {type: string, const: tofu.invocation.tool-effect-inspection/v1}
+        conversationId: {type: string}
+        invocationId: {type: string}
+        operationId: {type: string, pattern: '^[a-f0-9]{32}$'}
+        outcome: {$ref: '#/components/schemas/ToolEffectInspectionOutcome'}
+        reason: {$ref: '#/components/schemas/ToolEffectInspectionReason'}
+    InvocationToolEffectInspectionReference:
+      type: object
+      additionalProperties: false
+      required: [conversationId, invocationId, operationId, ownerScope]
+      properties:
+        conversationId: {type: string, minLength: 1, maxLength: 256}
+        invocationId: {type: string, minLength: 1, maxLength: 512}
+        operationId: {type: string, pattern: '^[a-f0-9]{32}$'}
+        ownerScope: {type: string, pattern: '^[a-f0-9]{24}$'}
+    ToolEffectInspectionReference:
+      type: object
+      additionalProperties: false
+      required: [conversationId, turnId, operationId, ownerScope]
+      properties:
+        conversationId: {type: string, minLength: 1, maxLength: 256}
+        turnId: {type: string, minLength: 1, maxLength: 128}
+        operationId: {type: string, pattern: '^[a-f0-9]{32}$'}
+        ownerScope: {type: string, pattern: '^[a-f0-9]{24}$'}
+    ToolExecutionEffect:
+      type: object
+      additionalProperties: false
+      required: [operationId, state, recovery, scope]
+      properties:
+        reconciliation: {$ref: '#/components/schemas/ProjectFileWriteReconciliation'}
+        inspection: {$ref: '#/components/schemas/ToolEffectInspectionReference'}
+        invocationInspection: {$ref: '#/components/schemas/InvocationToolEffectInspectionReference'}
+        operationId: {type: string, pattern: '^[a-f0-9]{32}$'}
+        state:
+          type: string
+          enum: [entered, returned, unknown, not_started]
+          description: Entered is a write-ahead possibility, not proof of success; returned means a handler response was captured, not that a background operation finished.
+        recovery: {type: string, enum: [read_only, idempotent, reconcile]}
+        scope:
+          type: string
+          enum: [attempt, invocation, process]
+          description: Attempt records belong to the durable Turn; invocation records to a registered child task. Non-read-only intents commit before handler entry. Process-only execution has no restart durability promise.
     TurnToolRound:
       type: object
       additionalProperties: true
@@ -772,6 +969,7 @@ components:
           maxItems: 41
           items: {type: object, additionalProperties: true}
           description: Exact bounded model blocks; image bodies use immutable owner-scoped media references.
+        executionEffect: {$ref: '#/components/schemas/ToolExecutionEffect'}
         toolResultEvidence: {$ref: '#/components/schemas/ToolResultEvidence'}
         query: {type: string}
         status: {type: string}
@@ -848,6 +1046,12 @@ components:
         ownerScope: {type: string, pattern: '^[0-9a-f]{24}$'}
         preview: {type: string, maxLength: 240}
         chars: {type: integer, minimum: 4097}
+
+        fields:
+          type: array
+          minItems: 1
+          uniqueItems: true
+          items: {type: string, enum: [toolContent, results]}
       description: >-
         Snapshot-only read presentation. Missing inline toolContent means
         explicitly deferred output, never empty output. Detail is display-only
@@ -873,7 +1077,18 @@ components:
         roundIndex: {type: integer, minimum: 0}
         projectionRevision: {type: integer, minimum: 1}
         toolContent: {type: string}
+        results:
+          type: array
+          items:
+            anyOf:
+              - {$ref: '#/components/schemas/TurnToolDisplayMetadata'}
+              - {type: string}
+              - {type: number}
+              - {type: boolean}
+              - {type: array}
+              - {type: 'null'}
     SnapshotDocumentReferences:
+
       type: object
       additionalProperties: false
       minProperties: 1
@@ -1160,6 +1375,13 @@ components:
         action: {type: string}
         root: {type: string}
         rootPath: {type: string, maxLength: 4096}
+
+        undoAvailable:
+          type: boolean
+          description: >-
+            An explicit false is a capability denial, not a failure to edit.
+            Auxiliary manually integrated worktree facts do not authorize
+            the local single-root undo gateway to mutate the canonical checkout.
         count: {type: integer, minimum: 0}
         ok: {type: boolean}
         pending: {type: boolean}
@@ -1209,7 +1431,9 @@ components:
       type: object
       additionalProperties: false
       properties:
-
+        goalRunId:
+          type: string
+          description: Explicit durable Goal identity; distinct from the Turn execution attempt runId.
         usageAccounting: {$ref: '#/components/schemas/FlowUsageAccounting'}
         iteration:
           oneOf: [{type: integer, minimum: 0}, {type: string}]
@@ -1508,6 +1732,11 @@ components:
         # Exact durable segment identity (never a transient terminal alias).
         # Resolve within producer scope before any legacy round fallback.
         anchorBlockId: {type: string, maxLength: 320}
+
+        # Captured at compaction start, never re-bound to future same-round output.
+        # before/after reference anchorBlockId in producer scope; producer-start
+        # means before the first content of taskId/attemptId.
+        anchorPosition: {type: string, enum: [before, after, producer-start]}
         # Backend-owned TurnToolRound.roundNum occurrence in producer scope,
         # NOT a model round or an ordinal counted from the bounded timeline.
         # A missing/ambiguous explicit target must not rebind by toolCallId.
@@ -1534,6 +1763,19 @@ components:
         archiveId: {type: string, maxLength: 160}
         trigger: {type: string, maxLength: 80}
         tokenCountKind: {type: string, maxLength: 24}
+
+        # Legacy compaction.model names the task, NOT the summary. Missing
+        # summary identity stays unknown; selected is distinct from dispatch.
+        taskModel: {type: string, maxLength: 160}
+        summaryModel: {type: string, maxLength: 160}
+        summarySelectedModel: {type: string, maxLength: 160}
+        summaryProviderId: {type: string, maxLength: 160}
+        # Existing bounded receipt cost/dispatch provenance, never raw usage,
+        # credentials, transcript, current catalog prices or archive requests.
+        summaryCalls:
+          type: array
+          maxItems: 16
+          items: {$ref: '#/components/schemas/JsonObject'}
         tokensBefore: {type: integer, minimum: 0, maximum: 9007199254740991}
         tokensAfter: {type: integer, minimum: 0, maximum: 9007199254740991}
         messagesBefore: {type: integer, minimum: 0, maximum: 9007199254740991}
@@ -1798,6 +2040,9 @@ components:
           items: {$ref: '#/components/schemas/TurnContentSegment'}
         # Unknown/unreported usage is omitted, not null or fabricated zeros.
         usage: {$ref: '#/components/schemas/JsonObject'}
+        # False retains a reported lower bound after an unreceipted model call.
+        # Absence is legacy/unspecified; it never grants a claim of completeness.
+        usageComplete: {type: boolean}
         # Authoritative settled-cost snapshot, folded by the projection
         # authority from the turn's accumulated usage with the single
         # lib.cost formula. The finish footer / cost popover read this
@@ -1834,6 +2079,16 @@ components:
         imageGeneration: {$ref: '#/components/schemas/TurnImageGeneration'}
         proposedPlan: {$ref: '#/components/schemas/TurnProposedPlan'}
         planExecution: {$ref: '#/components/schemas/TurnPlanExecution'}
+
+        usageRecovery:
+          type: object
+          additionalProperties: false
+          required: [sourceTurnId, sourceProjectionRevision, budget]
+          description: Human-confirmed new-budget receipt; never evidence that earlier unknown usage was settled.
+          properties:
+            sourceTurnId: {type: string}
+            sourceProjectionRevision: {type: integer, minimum: 0}
+            budget: {$ref: '#/components/schemas/UsageRecoveryBudget'}
         # Deprecated request aliases accepted during producer migration. The
         # projection normalizer maps them into TurnTranslation and never emits
         # them publicly.
@@ -1852,12 +2107,9 @@ components:
           oneOf: [{type: number}, {type: string}]
         images:
           type: array
-
-          maxItems: 20
           items: {$ref: '#/components/schemas/TurnImageAttachment'}
         attachments:
           type: array
-          maxItems: 20
           items: {$ref: '#/components/schemas/TurnMediaAttachment'}
         videos:
           type: array
@@ -2505,6 +2757,33 @@ components:
             - {type: 'null'}
         hasMore: {type: boolean}
         totalTurns: {type: integer, minimum: 0}
+    ConversationRoundEntry:
+      type: object
+      additionalProperties: false
+      required: [turnId, ordinal, actor, roundNumber]
+      properties:
+        turnId: {type: string}
+        ordinal: {type: integer, minimum: 0}
+        actor: {type: string, enum: [human, critic, virtual_user]}
+        roundNumber: {type: integer, minimum: 1}
+    ConversationRoundDirectory:
+      type: object
+      additionalProperties: false
+      required: [ownerId, conversationId, laneId, syncSeq, stale, totalRounds, offset, entries]
+      properties:
+        ownerId: {type: integer, minimum: 1}
+        conversationId: {type: string}
+        laneId: {type: string}
+        syncSeq: {type: integer, minimum: 0}
+        stale: {type: boolean}
+        totalRounds: {type: integer, minimum: 0}
+        offset: {type: integer, minimum: 0}
+        nextOffset: {type: integer, minimum: 0}
+        activeRound: {type: integer, minimum: 1}
+        entries:
+          type: array
+          maxItems: 100
+          items: {$ref: '#/components/schemas/ConversationRoundEntry'}
     ConversationTurnPage:
       type: object
       additionalProperties: false
@@ -2670,6 +2949,37 @@ components:
           type: string
           enum: [current, fresh]
         config: {$ref: '#/components/schemas/JsonObject'}
+    UsageRecoveryBudget:
+      type: object
+      additionalProperties: false
+      required: [maxTokens, maxToolCalls, durationSeconds]
+      properties:
+        maxTokens: {type: integer, minimum: 1, maximum: 9007199254740991, default: 100000}
+        maxToolCalls: {type: integer, minimum: 0, maximum: 9007199254740991, default: 100}
+        durationSeconds: {type: integer, minimum: 1, maximum: 86400, default: 900}
+    ConversationUsageRecovery:
+      type: object
+      additionalProperties: false
+      required: [ok, conversationId, sourceTurnId, sourceProjectionRevision, state, reason, budget]
+      properties:
+        ok: {const: true}
+        conversationId: {type: string}
+        sourceTurnId: {type: string}
+        sourceProjectionRevision: {type: integer, minimum: 0}
+        state: {type: string, enum: [ready, blocked]}
+        reason:
+          type: string
+          enum: [ready, not_applicable, operation_unconfirmed, configuration_unavailable]
+        budget: {$ref: '#/components/schemas/UsageRecoveryBudget'}
+    RecoverUsageRequest:
+      type: object
+      additionalProperties: false
+      required: [commandId, expectedProjectionRevision, confirmed, budget]
+      properties:
+        commandId: {type: string, minLength: 1, maxLength: 256}
+        expectedProjectionRevision: {type: integer, minimum: 0}
+        confirmed: {const: true}
+        budget: {$ref: '#/components/schemas/UsageRecoveryBudget'}
     CreateAttemptRequest:
       type: object
       additionalProperties: false
@@ -2686,6 +2996,9 @@ components:
         expectedInputProjectionRevision: {type: integer, minimum: 0}
         # Required when operation is ``answer_guidance``; rejected otherwise.
         humanResponse: {type: string, minLength: 1, maxLength: 32768}
+
+        # Scoped live answer uses this endpoint without creating a new attempt.
+        guidanceId: {type: string, minLength: 1, maxLength: 256}
     CreateLaneRequest:
       type: object
       additionalProperties: false

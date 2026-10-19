@@ -145,6 +145,19 @@ Sharing a filename or similar code shape is not enough to move behavior into the
 
 ## User experience and failure semantics
 
+- An explicit `workUnitRef` renders a visible deliverable card outside settled
+  chat Process and model-round disclosures. Its production steps and original
+  request remain inspectable inside the card. Slides and video share the same
+  TypeScript owner, `frontend/src/conversation/ui/work-unit/`; the retained
+  `ui/workunit_tracker.js` supplies application ports only.
+- A pending outline/storyboard review is the first actionable content. Polling
+  preserves that guidance identity's draft, cursor and focus; duplicate cards
+  share a single submission. An accepted response/stop request never settles
+  the task locally. Read errors retain the last confirmed state with retry.
+- Preview selection addresses the exact page/scene; AI change requests append
+  to the existing composer draft without sending. Published video playback and
+  scene reads start on explicit intent. Re-render acceptance exposes its child
+  task, with parent refresh only after authoritative child settlement.
 - Repeating an identical request joins visible in-flight work instead of silently spending twice.
 - Progress is expressed as stable task events and semantic stages, not a fabricated timer.
 - Abort prevents later callbacks from publishing or changing terminal state.
@@ -155,6 +168,23 @@ Sharing a filename or similar code shape is not enough to move behavior into the
 - Deterministic revision owns field-level changes: `patch_slides` / `restyle_slides` / `set_narration` run zero-LLM ops with validation + rollback, the LLM rewrite stays the fallback for structural changes, every edit step snapshots for `revert_*`, and chat-initiated decks pause once at an interactive outline gate (`pendingGate` in the workUnit projection) answered through the shared human-response endpoint. The in-chat editor overlay (`openSlidesEditor`) and the chat tool call the SAME patch engine — three owner-scoped endpoints (`pages/<n>.html` / `pages/<n>/elements` / `pages/<n>/patch`) are its HTTP shape.
 - Motion revision adds three deterministic ops beyond scene rewrite: `set_narration` (TTS must fit the frozen frame), `set_subtitle_style` (job-level, persisted to `subtitle_style.json` so every later re-burn honors it), and `swap_asset` (stock / generated / text-to-video clip — a stock miss for a video-kind query tries ONE bounded t2v clip before becoming a finding, configured via `TOFU_T2V_*`). Chat-initiated films pause once at a storyboard gate whose decision persists (`storyboard_gate.json`), so a crash-respawned job never re-asks.
 - Missing artifact bytes, malformed manifests, and corrupt checkpoints are explicit failures, not empty success responses.
+
+Problem: a background producer was presented as a finished, collapsed tool
+receipt, obscuring both human decisions and the evolving artifact. Decision:
+keep one durable acceptance card and project the existing WorkUnit into it;
+place partial/failed quality evidence next to previews and retain the common
+task/human-response/edit endpoints. Alternatives rejected: exposing the raw
+workflow as the primary UI; adding a separate execution or frontend lifecycle;
+opening a separate app for every producer.
+
+Mounted resource ownership: duplicate cards coalesce reads by task and owner;
+only live mounted work polls (adaptive 2–5 seconds), and a hidden tab pauses
+polling. Terminal work has no poll timer. One demand-scoped observer ignores
+ordinary token/progress mutations and retires with the final mounted card;
+videos release their source when removed. Focused tests measure three mounted
+copies as one read, no additional reads over ten simulated terminal seconds,
+and zero retained task/view/request/timer/observer owners after removal.
+This measures UI residency and request counts, not provider throughput or RSS.
 
 ## Invariants
 
@@ -178,6 +208,7 @@ Sharing a filename or similar code shape is not enough to move behavior into the
 | Shared content contracts | `contracts.py`, `research.py` | every consuming recipe and finite validation |
 | One media recipe | its capability package | quality gate, artifact publication, task settlement |
 | Generic task projection | `routes/api_v1/tasks.py` | discovery, events, stream, abort |
+| Deliverable card and revision intents | `frontend/src/conversation/ui/work-unit/` | draft retention, authoritative settlement, owner fencing, mounted teardown, browser layouts |
 
 ## Test map
 
@@ -185,9 +216,11 @@ Sharing a filename or similar code shape is not enough to move behavior into the
 pytest -q tests/production/test_production_substrate.py tests/production/test_production_runtime.py tests/server/test_task_registry_discovery.py
 pytest -q tests/app_factory/test_production_lifecycle.py tests/startup/test_production_startup_boundary.py
 pytest -q tests/motion_video/test_motion_video_p4.py tests/motion_video/test_motion_video_p5.py tests/paper/test_paper_podcast_api.py tests/longform/test_longform_p7.py
-pytest -q tests/motion_video/test_motion_video_edit.py tests/production/test_work_unit_projection.py tests/frontend/test_frontend_workunit_gallery.py
+pytest -q tests/motion_video/test_motion_video_edit.py tests/production/test_work_unit_projection.py
+node --test tests/work-unit.test.cjs tests/motion-card.test.cjs tests/slides-editor.test.cjs
+pytest -q tests/visual/test_visual_work_unit_cards.py tests/visual/test_visual_multimedia_receipts.py
 pytest -q tests/slides/test_slides.py tests/slides/test_slides_creative_foundation.py tests/slides/test_slides_research_foundation.py tests/visual/test_visual_qa.py tests/slides/test_slides_semantic_components.py
-pytest -q tests/slides/test_slides_patch.py tests/slides/test_slides_theme_ops.py tests/slides/test_slides_batch_edit.py tests/slides/test_slides_versions.py tests/slides/test_slides_templates.py tests/slides/test_slides_outline_gate.py tests/slides/test_slides_editor_api.py tests/test_frontend_slides_editor.py
+pytest -q tests/slides/test_slides_patch.py tests/slides/test_slides_theme_ops.py tests/slides/test_slides_batch_edit.py tests/slides/test_slides_versions.py tests/slides/test_slides_templates.py tests/slides/test_slides_outline_gate.py tests/slides/test_slides_editor_api.py
 pytest -q tests/production/test_production_creative_director.py
 pytest -q tests/slides/test_slides_visual_repair.py tests/slides/test_visual_repair_recovery.py tests/slides/test_pptx_package_qa.py tests/motion_video/test_temporal_qa_bounds.py
 pytest -q tests/visual/test_motion_temporal_capture.py

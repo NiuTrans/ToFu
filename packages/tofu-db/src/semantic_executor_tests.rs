@@ -1,3 +1,6 @@
+    #[path = "transcript_archive_mutation_tests.rs"]
+    mod transcript_archive_mutation_tests;
+
     #[test]
     fn large_agent_checkpoint_uses_blob_budget_and_compact_outbox() {
         let directory = tempfile::tempdir().unwrap();
@@ -70,7 +73,7 @@
                 negotiated,
                 scope,
                 now_unix_ms,
-                crate::generated_storage_v2::MAX_STREAMED_REQUEST_PAYLOAD_BYTES,
+                usize::MAX,
             )
         } else {
             admit_request(request, negotiated, scope, now_unix_ms)
@@ -3452,6 +3455,51 @@
     }
 
     #[test]
+    fn daily_cost_demand_preserves_large_documents_complete_months_and_date_probes() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut database = AuthorityDatabase::initialize(directory.path()).unwrap();
+        let large = "x".repeat(9 * 1024 * 1024);
+        for first in "0123456789٠".chars() {
+            for second in "0123456789".chars() {
+                let date = format!("2026-10-{first}{second}");
+                execute(&mut database, &request("daily_cost.upsert",11,
+                    json!({"user_id":11,"date":date,"cost":1.0,"conversations":{},"computed_at":1000}),
+                    Some(&format!("daily-demand-{date}"))),1000).unwrap();
+            }
+        }
+        let snapshot = json!({"date":"2026-10-12","cost":2.0,"conversations":{"large":large},"computed_at":1001});
+        execute(&mut database,&request("daily_cost.upsert",11,
+            json!({"user_id":11,"date":"2026-10-12","cost":2.0,"conversations":{"large":large},"computed_at":1001}),
+            Some("daily-demand-large")),1001).unwrap();
+        drop(database);
+        let mut database = AuthorityDatabase::open(directory.path()).unwrap();
+        let month = execute(&mut database,&request("daily_cost.month",11,
+            json!({"user_id":11,"year":2026,"month":10}),None),1002).unwrap();
+        assert_eq!(month.as_array().unwrap().len(),110);
+        let row = month.as_array().unwrap().iter().find(|row|row["date"]=="2026-10-12").unwrap();
+        assert_eq!(row["conversations"]["large"].as_str().unwrap(),large);
+        for year in [2600,2970] {
+            execute(&mut database,&request("daily_cost.upsert",11,
+                json!({"user_id":11,"date":format!("{year}-10-12"),"cost":1.0,"conversations":{},"computed_at":1002}),
+                Some(&format!("daily-probe-{year}"))),1002).unwrap();
+        }
+        let mut dates = (1970..2971).map(|year|format!("{year:04}-10-12")).collect::<Vec<_>>();
+        dates.extend(["2026-10-12".to_owned(),"2026-10-13".to_owned()]);
+        let found = execute(&mut database,&request("daily_cost.persisted_dates",11,
+            json!({"user_id":11,"dates":dates}),None),1003).unwrap();
+        assert_eq!(found,json!({"dates":["2026-10-12","2600-10-12","2970-10-12","2026-10-13"]}));
+        assert_eq!(execute(&mut database,&request("daily_cost.month",12,
+            json!({"user_id":12,"year":2026,"month":10}),None),1004).unwrap(),json!([]));
+        assert_eq!(crate::daily_cost_migration::execute(&mut database,7,11,"migration.daily.cost.restore",snapshot).unwrap()["inserted"],false);
+        let restored = json!({"date":"2026-11-12","cost":2.0,"conversations":{"large":large},"computed_at":1001});
+        assert_eq!(crate::daily_cost_migration::execute(&mut database,7,11,"migration.daily.cost.restore",restored.clone()).unwrap()["inserted"],true);
+        assert_eq!(crate::daily_cost_migration::execute(&mut database,7,11,"migration.daily.cost.restore",restored).unwrap()["inserted"],false);
+        drop(database);
+        let mut database = AuthorityDatabase::open(directory.path()).unwrap();
+        assert_eq!(execute(&mut database,&request("daily_cost.month",11,json!({"user_id":11,"year":2026,"month":11}),None),1005).unwrap()[0]["conversations"]["large"].as_str().unwrap(),large);
+    }
+
+    #[test]
     fn daily_cost_cache_is_ordered_owner_scoped_durable_and_receipted() {
         let directory = tempfile::tempdir().unwrap();
         let mut database = AuthorityDatabase::initialize(directory.path()).unwrap();
@@ -3619,6 +3667,56 @@
             }),
             Some(command_id),
         )
+    }
+
+    #[test]
+    fn optimizer_large_fields_are_complete_after_reopen_and_offline_restore() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut database = AuthorityDatabase::initialize(directory.path()).unwrap();
+        let large = "x".repeat(9 * 1024 * 1024);
+        let mut create = optimizer_proposal_create("optimizer-large-create");
+        let mut payload: Value = serde_json::from_slice(&create.payload).unwrap();
+        for field in ["title", "rationale", "action_args", "evidence", "status_reason"] {
+            payload[field] = json!(large);
+        }
+        create.payload = serde_json::to_vec(&payload).unwrap();
+        drop(payload);
+        execute(&mut database, &create, 1000).unwrap();
+        let mut record = optimizer_action_record("optimizer-large-record");
+        let mut payload: Value = serde_json::from_slice(&record.payload).unwrap();
+        payload["pre_metric"] = json!(large);
+        record.payload = serde_json::to_vec(&payload).unwrap();
+        drop(payload);
+        execute(&mut database, &record, 1001).unwrap();
+        execute(&mut database, &request("optimizer.action.outcome", 11,
+            json!({"user_id":11,"log_id":"action-a","outcome_metric":large,"recorded_at":"2026-10-12T10:00:00Z"}),
+            Some("optimizer-large-outcome")), 1002).unwrap();
+        execute(&mut database, &request("optimizer.action.revert", 11,
+            json!({"user_id":11,"log_id":"action-a","reason":large,"reverted_at":"2026-10-12T10:01:00Z"}),
+            Some("optimizer-large-revert")), 1003).unwrap();
+        drop(database);
+        let mut database = AuthorityDatabase::open(directory.path()).unwrap();
+        let rows = execute(&mut database, &request("optimizer.action.list", 11,
+            json!({"user_id":11,"include_reverted":true,"limit":1001}),None),1004).unwrap();
+        assert_eq!(rows.as_array().unwrap().len(),1);
+        for field in ["pre_metric","outcome_metric","revert_reason","p_title","p_action_args"] {
+            assert_eq!(rows[0][field].as_str().unwrap(),large);
+        }
+        let mut proposal = execute(&mut database,&request("optimizer.proposal.get",11,
+            json!({"user_id":11,"proposal_id":"proposal-a"}),None),1005).unwrap();
+        for field in ["title","rationale","action_args","evidence","status_reason"] {
+            assert_eq!(proposal[field].as_str().unwrap(),large);
+        }
+        proposal.as_object_mut().unwrap().remove("user_id");
+        proposal["id"] = json!("proposal-restored-large");
+        let restore = json!({"table":"proposals","document":proposal,"updated_at_ms":1006});
+        assert_eq!(crate::optimizer_migration::execute(&mut database,7,11,"migration.optimizer.restore",restore.clone()).unwrap()["inserted"],true);
+        assert_eq!(crate::optimizer_migration::execute(&mut database,7,11,"migration.optimizer.restore",restore).unwrap()["inserted"],false);
+        let restored = execute(&mut database,&request("optimizer.proposal.get",11,
+            json!({"user_id":11,"proposal_id":"proposal-restored-large"}),None),1007).unwrap();
+        assert_eq!(restored["evidence"].as_str().unwrap(),large);
+        assert_eq!(execute(&mut database,&request("optimizer.proposal.get",12,
+            json!({"user_id":12,"proposal_id":"proposal-restored-large"}),None),1008).unwrap(),Value::Null);
     }
 
     #[test]
@@ -4731,6 +4829,47 @@
     }
 
     #[test]
+    fn project_brain_large_projection_and_event_are_complete_after_reopen_rebuild_and_restore() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut database = AuthorityDatabase::initialize(directory.path()).unwrap();
+        database.configure_logical_outbox(&[95;32],1024*1024,128*1024).unwrap();
+        let paths = (0..2501).map(|n|format!("src/{n:04}/{}","x".repeat(4080))).collect::<Vec<_>>();
+        let mut command = project_brain_fault_command();
+        let mut payload:Value = serde_json::from_slice(&command.payload).unwrap();
+        payload["work_item"]["changedPaths"] = json!(paths);
+        command.payload = serde_json::to_vec(&payload).unwrap();
+        drop(payload);
+        let written = execute(&mut database,&command,1000).unwrap();
+        assert_eq!(written["projection"]["workItems"][0]["changedPaths"],json!(paths));
+        assert_eq!(execute(&mut database,&command,1001).unwrap(),written);
+        drop(written);
+        drop(database);
+        let mut database = AuthorityDatabase::open(directory.path()).unwrap();
+        let rebuilt = execute(&mut database,&request("project_brain.rebuild",11,
+            json!({"owner_user_id":11,"project_key":"/fault-project"}),Some("project-large-rebuild")),1002).unwrap();
+        assert_eq!(rebuilt["replayedEvents"],1);
+        assert_eq!(rebuilt["projection"]["workItems"][0]["changedPaths"],json!(paths));
+        let read = execute(&mut database,&request("project_brain.get",11,
+            json!({"owner_user_id":11,"project_key":"/fault-project"}),None),1003).unwrap();
+        assert_eq!(read["workItems"][0]["changedPaths"],json!(paths));
+        let mut restored_projection = rebuilt["projection"].clone();
+        restored_projection["projectKey"] = json!("/restored-large");
+        let snapshot = json!({"project_key":"/restored-large","head_sequence":1,"checkpoint_sequence":0,
+            "projection_json":serde_json::to_string(&restored_projection).unwrap(),"updated_at_ms":1004});
+        assert_eq!(crate::project_brain_migration::execute(&mut database,7,11,"migration.project.brain.project.restore",snapshot.clone()).unwrap()["inserted"],true);
+        assert_eq!(crate::project_brain_migration::execute(&mut database,7,11,"migration.project.brain.project.restore",snapshot).unwrap()["inserted"],false);
+        drop(database);
+        let mut database = AuthorityDatabase::open(directory.path()).unwrap();
+        let restored = execute(&mut database,&request("project_brain.get",11,
+            json!({"owner_user_id":11,"project_key":"/restored-large"}),None),1005).unwrap();
+        assert_eq!(restored["workItems"][0]["changedPaths"],json!(paths));
+        let foreign = execute(&mut database,&request("project_brain.get",12,
+            json!({"owner_user_id":12,"project_key":"/restored-large"}),None),1006).unwrap();
+        assert!(foreign["workItems"].as_array().unwrap().is_empty());
+        eprintln!("project_payload_demand: {} path bytes, complete replay/reopen/restore",paths.iter().map(String::len).sum::<usize>());
+    }
+
+    #[test]
     fn project_brain_work_lifecycle_is_owner_scoped_durable_and_receipted() {
         let directory = tempfile::tempdir().unwrap();
         let mut database = AuthorityDatabase::initialize(directory.path()).unwrap();
@@ -5147,6 +5286,32 @@
                 .last_sequence,
             1
         );
+    }
+
+
+    #[test]
+    fn recent_project_demand_exceeds_former_owner_and_batch_quotas_and_reopens() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut database = AuthorityDatabase::initialize(directory.path()).unwrap();
+        let paths = (0..1101).map(|i| format!("/demand/{i:04}")).collect::<Vec<_>>();
+        let mut supplied = paths.clone(); supplied.extend(paths[..100].iter().cloned());
+        let command = request("project.recent.touch_many",11,json!({"user_id":11,"project_paths":supplied,"last_used":400}),Some("recent-demand"));
+        assert_eq!(execute(&mut database,&command,2000).unwrap(),json!({"touched":1101}));
+        assert_eq!(execute(&mut database,&command,2001).unwrap(),json!({"touched":1101}));
+        drop(database);
+        let mut reopened = AuthorityDatabase::open(directory.path()).unwrap();
+        let listed = execute(&mut reopened,&request("project.recent.list",11,json!({"user_id":11}),None),2002).unwrap();
+        let rows = listed.as_array().unwrap();
+        assert_eq!(rows.len(),1101);
+        for (path,row) in paths.iter().zip(rows) { assert_eq!(row["path"],*path); assert_eq!(row["count"],1); }
+        assert_eq!(execute(&mut reopened,&request("project.recent.list",12,json!({"user_id":12}),None),2003).unwrap(),json!([]));
+        assert_eq!(execute(&mut reopened,&request("project.recent.clear",11,json!({"user_id":11}),Some("clear-demand")),2004).unwrap(),json!({"deleted":1101}));
+        let mut tx = reopened.begin_with_identity_claim_scopes(7,11).unwrap();
+        let count_key = crate::entity::EntityKey::new(7,11,crate::generated_tofudb_ir::RECENT_PROJECT_COUNT_NAMESPACE,b"count").unwrap();
+        reopened.entity_put(&mut tx,count_key,(u64::MAX-1).to_le_bytes().to_vec()).unwrap();
+        reopened.commit(tx).unwrap();
+        assert!(execute(&mut reopened,&request("project.recent.list",11,json!({"user_id":11}),None),2005).is_err());
+
     }
 
     #[test]
@@ -9430,7 +9595,7 @@
     }
 
     #[test]
-    fn record_pages_are_byte_bounded_and_corrupt_envelopes_fail_closed() {
+    fn record_pages_are_complete_beyond_former_quota_and_corrupt_envelopes_fail_closed() {
         let directory = tempfile::tempdir().unwrap();
         let mut database = AuthorityDatabase::initialize(directory.path()).unwrap();
         for index in 0..10 {
@@ -9452,10 +9617,15 @@
             json!({"namespace": "bounded", "limit": 10}),
             None,
         );
-        assert_eq!(
-            execute(&mut database, &list, 2_000).unwrap_err(),
-            SemanticExecutionError::ResourceExhausted
-        );
+        let rows = execute(&mut database, &list, 2_000).unwrap();
+        assert_eq!(rows.as_array().unwrap().len(), 10);
+        for (index, row) in rows.as_array().unwrap().iter().enumerate() {
+            assert_eq!(row["key"], format!("row-{index:02}"));
+            assert_eq!(row["version"], 1);
+            let text = row["value"].as_str().unwrap();
+            assert_eq!(text.len(), 900_000);
+            assert!(text.bytes().all(|byte| byte == b'x'));
+        }
 
         let corrupt_key = record_key(7, 11, "corrupt", "row").unwrap();
         let mut transaction = database.begin(7, 11).unwrap();
@@ -9824,10 +9994,10 @@
             json!({"events": excessive_items}),
             Some("event-batch-excessive-items"),
         );
-        assert_eq!(
-            execute(&mut database, &excessive, 2_250).unwrap_err(),
-            SemanticExecutionError::InvalidPayload
-        );
+        let beyond_former_quota = execute(&mut database, &excessive, 2_250).unwrap();
+        assert_eq!(beyond_former_quota["inserted"], 1);
+        assert_eq!(beyond_former_quota["deduplicated"], 500);
+        assert_eq!(beyond_former_quota["results"].as_array().unwrap().len(), 501);
 
         for batch in 0..=2 {
             let start = batch * 500;
@@ -9893,10 +10063,9 @@
             }),
             None,
         );
-        assert_eq!(
-            execute(&mut database, &excessive_catalog, 2_290).unwrap_err(),
-            SemanticExecutionError::ResourceExhausted
-        );
+        let selected = execute(&mut database, &excessive_catalog, 2_290).unwrap();
+        assert_eq!(selected.as_array().unwrap().len(), 1);
+        assert_eq!(selected[0]["event"]["type"], "catalog.0000");
 
         let conflicting = request(
             "event.append_batch",
@@ -9923,7 +10092,7 @@
         );
         assert_eq!(
             database.logical_outbox_status(7, 11).unwrap().last_sequence,
-            8
+            9
         );
     }
 
@@ -9994,10 +10163,7 @@
             json!({"task_ids": (0..101).map(|index| format!("task-{index}")).collect::<Vec<_>>() }),
             None,
         );
-        assert_eq!(
-            execute(&mut database, &excessive, 5_300).unwrap_err(),
-            SemanticExecutionError::InvalidPayload
-        );
+        assert_eq!(execute(&mut database, &excessive, 5_300).unwrap(), json!({"records": []}));
     }
 
     #[test]
@@ -11378,6 +11544,27 @@
             drop(database);
             assert_provider_create_replay_converges(vfs, &command);
         }
+    }
+
+    #[test]
+    fn large_model_routing_commit_retains_configured_outbox_and_replays_once() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut database = AuthorityDatabase::initialize(directory.path()).unwrap();
+        database.configure_logical_outbox(&[18; 32], 1, 1).unwrap();
+        let document = json!({"contract_version": "tofu.model-routing/v2", "revision": 1,
+            "padding": "r".repeat(9 * 1024 * 1024)});
+        let command = request("model_routing.commit", 51,
+            json!({"owner_user_id": 51, "tenant_id": "large-demand", "expected_revision": 0,
+                   "document": document, "updated_at": 2.0}), Some("large-outbox-routing"));
+        let acknowledged = execute(&mut database, &command, 2_000).unwrap();
+        assert_eq!(acknowledged["revision"], 1);
+        assert_eq!(execute(&mut database, &command, 3_000).unwrap(), acknowledged);
+        let pending = database.logical_outbox_pending_bounded(7, 51, 10, 1).unwrap();
+        assert_eq!(pending.len(), 1);
+        let clear = database.logical_outbox_decrypt(&pending[0].record).unwrap();
+        assert!(clear.len() > 9 * 1024 * 1024);
+        let captured: Value = serde_json::from_slice(&clear).unwrap();
+        assert_eq!(captured["payload"]["document"], document);
     }
 
     fn model_routing_fault_commit(revision: u64, command_id: &str) -> Request {
@@ -19311,7 +19498,7 @@
     }
 
     #[test]
-    fn receipt_preview_and_pending_page_stay_bounded_beyond_full_response_cap() {
+    fn receipt_preview_and_pending_reads_preserve_demand_beyond_former_response_cap() {
         let directory = tempfile::tempdir().unwrap();
         let mut database = AuthorityDatabase::initialize(directory.path()).unwrap();
         execute(&mut database, &request("conversation.create", 11,
@@ -19329,13 +19516,19 @@
         }
         let list = |mode: &str| request("queue.list", 11,
             json!({"conv_id":"large-receipt-conv","user_id":11,"mode":mode}), None);
-        assert!(execute(&mut database, &list("full"), 1_002).is_err());
+        let full = execute(&mut database, &list("full"), 1_002).unwrap();
+        assert_eq!(full.as_array().unwrap().len(), 90);
         let preview = execute(&mut database, &list("preview"), 1_003).unwrap();
         assert_eq!(preview.as_array().unwrap().len(), 90);
         assert!(preview[0].get("payload").is_none());
         let pending = execute(&mut database, &list("background_pending"), 1_004).unwrap();
-        assert_eq!(pending.as_array().unwrap().len(), 32);
-        assert_eq!(pending[0]["payload"]["text"], output);
+        assert_eq!(pending.as_array().unwrap().len(), 90);
+        for index in 0..90 {
+            assert_eq!(pending[index]["payload"]["text"], output);
+            assert_eq!(full[index]["payload"]["text"], output);
+            assert_eq!(pending[index]["queueId"], format!("large-receipt-{index}"));
+            assert_eq!(pending[index]["queueId"], full[index]["queueId"]);
+        }
     }
 
     #[test]
@@ -19511,14 +19704,12 @@
         .unwrap();
         assert_eq!(missing, json!({"removed":0,"removedQueueIds":[]}));
         // Payload validation precedes authority work.
-        let mut oversized: Vec<String> = (0..=256).map(|index| format!("id-{index}")).collect();
-        oversized.dedup();
         for payload in [
             json!({"conv_id":"ack-conv","user_id":11}),
             json!({"conv_id":"ack-conv","user_id":11,"queue_ids":"ack-peer"}),
             json!({"conv_id":"ack-conv","user_id":11,"queue_ids":[""]}),
             json!({"conv_id":"ack-conv","user_id":11,"queue_ids":[Value::Null]}),
-            json!({"conv_id":"ack-conv","user_id":11,"queue_ids":oversized}),
+            json!({"conv_id":"ack-conv","user_id":11,"queue_ids":["x".repeat(257)]}),
         ] {
             assert_eq!(
                 execute(
@@ -22896,12 +23087,14 @@
         }
         assert!(pages > 1);
         assert_eq!(seen.len(), 32);
-        assert!(execute(&mut database, &request("queue.list", 11,
-            json!({"conv_id":"receipt-pages","user_id":11,"mode":"background_page", "max_bytes":1024}), None), 1003).is_err());
+        let first = execute(&mut database, &request("queue.list", 11,
+            json!({"conv_id":"receipt-pages","user_id":11,"mode":"background_page", "max_bytes":1}), None), 1003).unwrap();
+        assert_eq!(first["items"].as_array().unwrap().len(), 1);
+        assert!(!first["nextCursor"].is_null());
     }
 
     #[test]
-    fn event_list_materialized_page_overflow_is_payload_size_not_availability() {
+    fn event_list_materialized_page_is_complete_beyond_former_byte_quota() {
         let directory = tempfile::tempdir().unwrap();
         let mut database = AuthorityDatabase::initialize(directory.path()).unwrap();
         let text = "x".repeat(5 * 1024 * 1024);
@@ -22916,9 +23109,14 @@
             "task_id": "large-inspector-page", "after_sequence": after,
             "limit": limit, "types": ["messages_snapshot"]
         }), None);
-        let error = execute(&mut database, &read(-1, 1000), 1000).unwrap_err();
-        assert_eq!(error.code(), "storage_payload_too_large");
-        assert!(!error.retryable());
+        let complete = execute(&mut database, &read(-1, 1000), 1000).unwrap();
+        assert_eq!(complete.as_array().unwrap().len(),2);
+        for (index,row) in complete.as_array().unwrap().iter().enumerate() {
+            assert_eq!(row["sequence"],index);
+            let received = row["event"]["text"].as_str().unwrap();
+            assert_eq!(received.len(),text.len());
+            assert!(received.bytes().all(|byte| byte==b'x'));
+        }
         for after in [-1, 0] {
             let rows = execute(&mut database, &read(after, 1), 1000).unwrap();
             assert_eq!(rows.as_array().unwrap().len(), 1);
@@ -22947,3 +23145,226 @@ fn timer_counts_and_recovery_feed_have_no_live_or_saved_row_admission_quota() {
     eprintln!("timer demand: 650 durable active rows plus complete recovery feed, {:?}", started.elapsed());
     assert_eq!(database.snapshot_pin_metrics().unwrap().retained_transaction_bytes, 0);
 }
+
+#[test]
+fn generic_record_get_and_list_preserve_large_blob_documents_after_reopen() {
+    let directory = tempfile::tempdir().unwrap();
+    let value = json!({"text":"x".repeat(9 * 1024 * 1024),"keep":7});
+    {
+        let mut database = AuthorityDatabase::initialize(directory.path()).unwrap();
+        let mut tx = database.begin(7, 11).unwrap();
+        for logical_key in ["large-a", "large-b"] {
+            crate::versioned_document::put(&database, &mut tx,
+                crate::versioned_document::PutRequest {
+                    key:crate::versioned_document::record_key(7,11,"large-record",logical_key).unwrap(),
+                    namespace:"large-record".to_owned(), logical_key:logical_key.to_owned(),
+                    value_json:serde_json::to_vec(&value).unwrap(), expected_version:Some(0), updated_at_ms:1000,
+                }).unwrap();
+        }
+        database.commit(tx).unwrap();
+    }
+    let mut database = AuthorityDatabase::open(directory.path()).unwrap();
+    let item = execute(&mut database, &request("record.get",11,
+        json!({"namespace":"large-record","key":"large-a"}),None),1001).unwrap();
+    assert_eq!(item["version"],1);
+    assert_eq!(item["value"]["text"].as_str().unwrap().len(),9 * 1024 * 1024);
+    assert_eq!(item["value"]["keep"],7);
+    let rows = execute(&mut database, &request("record.list",11,
+        json!({"namespace":"large-record","limit":10}),None),1001).unwrap();
+    assert_eq!(rows.as_array().unwrap().len(),2);
+    for (index,row) in rows.as_array().unwrap().iter().enumerate() {
+        assert_eq!(row["key"],if index==0 {"large-a"} else {"large-b"});
+        assert_eq!(row["value"],value);
+    }
+    assert!(execute(&mut database,&request("record.get",12,
+        json!({"namespace":"large-record","key":"large-a"}),None),1001).unwrap().is_null());
+}
+
+#[test]
+fn event_payload_demand_exceeds_former_quota_with_complete_replay_reopen_and_owner_scope() {
+    let directory = tempfile::tempdir().unwrap();
+    let event = json!({"type":"messages_snapshot","text":"x".repeat(9 * 1024 * 1024),"keep":7});
+    {
+        let mut database = AuthorityDatabase::initialize(directory.path()).unwrap();
+        for sequence in [1,2] {
+            let append = request("event.append",11,json!({"task_id":"large-event-demand",
+                "sequence":sequence,"event":event}),Some(&format!("large-event-{sequence}")));
+            assert_eq!(execute(&mut database,&append,1000).unwrap()["inserted"],true);
+            assert_eq!(execute(&mut database,&append,1000).unwrap()["inserted"],false);
+        }
+    }
+    let mut database = AuthorityDatabase::open(directory.path()).unwrap();
+    let list = request("event.list",11,json!({"task_id":"large-event-demand","limit":10}),None);
+    let rows = execute(&mut database,&list,1001).unwrap();
+    assert_eq!(rows.as_array().unwrap().len(),2);
+    for (index,row) in rows.as_array().unwrap().iter().enumerate() {
+        assert_eq!(row["sequence"],index+1);
+        let text = row["event"]["text"].as_str().unwrap();
+        assert_eq!(text.len(),9 * 1024 * 1024);
+        assert!(text.bytes().all(|byte| byte==b'x'));
+        assert_eq!(row["event"]["keep"],7);
+    }
+    let foreign = execute(&mut database,&request("event.list",12,
+        json!({"task_id":"large-event-demand","limit":10}),None),1001).unwrap();
+    assert!(foreign.as_array().unwrap().is_empty());
+}
+
+#[test]
+fn scheduler_execution_settlement_uses_semantic_receipts_and_exact_current_identity() {
+    let directory=tempfile::tempdir().unwrap();let mut database=AuthorityDatabase::initialize(directory.path()).unwrap();
+    let create=request("scheduler.task.create",11,json!({"user_id":11,"task_id":"scheduled","name":"scheduled","schedule":"* * * * *","command":"run","task_type":"agent","created_at":"now","updated_at":"now","last_execution_task_id":"old","last_execution_status":"running"}),Some("create-execution"));
+    execute(&mut database,&create,1000).unwrap();
+    let settled=request("scheduler.task.settle_execution",11,json!({"user_id":11,"execution_task_id":"old","status":"ok","now":"terminal"}),Some("settled-execution"));
+    assert_eq!(execute(&mut database,&settled,1001).unwrap(),json!({"changed":1}));
+    let update=request("scheduler.task.update",11,json!({"user_id":11,"task_id":"scheduled","last_execution_task_id":"new","last_execution_status":"running"}),Some("new-execution"));
+    execute(&mut database,&update,1002).unwrap();
+    assert_eq!(execute(&mut database,&settled,1003).unwrap(),json!({"changed":1}));
+    let late=request("scheduler.task.settle_execution",11,json!({"user_id":11,"execution_task_id":"old","status":"ok","now":"late"}),Some("late-execution"));
+    assert_eq!(execute(&mut database,&late,1004).unwrap(),json!({"changed":0}));
+    let foreign=request("scheduler.task.settle_execution",12,json!({"user_id":12,"execution_task_id":"new","status":"error","now":"late"}),Some("foreign-execution"));
+    assert_eq!(execute(&mut database,&foreign,1005).unwrap(),json!({"changed":0}));
+    let row=execute(&mut database,&request("scheduler.task.get",11,json!({"user_id":11,"task_id":"scheduled"}),None),1006).unwrap();
+    assert_eq!(row["last_execution_status"],"running");
+}
+
+#[test]
+fn scheduler_readonly_lookup_exposes_legacy_uncertainty_and_exact_owner_match() {
+    let directory=tempfile::tempdir().unwrap();let mut database=AuthorityDatabase::initialize(directory.path()).unwrap();
+    let lookup=|owner|request("scheduler.task.execution_lookup",owner,json!({"user_id":owner,"execution_task_id":"old"}),None);
+    assert_eq!(execute(&mut database,&lookup(11),1000).unwrap(),json!({"indexed":true,"matched":false}));
+    let create=request("scheduler.task.create",11,json!({"user_id":11,"task_id":"lookup","name":"lookup","schedule":"* * * * *","command":"run","task_type":"agent","created_at":"now","updated_at":"now","last_execution_task_id":"old"}),Some("readonly-create"));
+    execute(&mut database,&create,1001).unwrap();
+    assert_eq!(execute(&mut database,&lookup(11),1002).unwrap(),json!({"indexed":false,"matched":false}));
+    execute(&mut database,&request("scheduler.task.settle_execution",11,json!({"user_id":11,"execution_task_id":"old","status":"ok","now":"terminal"}),Some("readonly-settle")),1003).unwrap();
+    assert_eq!(execute(&mut database,&lookup(11),1004).unwrap(),json!({"indexed":true,"matched":true}));
+    assert_eq!(execute(&mut database,&lookup(12),1005).unwrap(),json!({"indexed":true,"matched":false}));
+}
+
+#[test]
+fn live_guidance_answer_is_owned_first_wins_reopens_and_survives_worker_recovery() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut database = AuthorityDatabase::initialize(directory.path()).unwrap();
+    let created = execute(&mut database, &request("turn.create_pair", 11, json!({
+        "conversation_id": "live-guidance", "user_id": 11, "command_id": "birth-live-guidance",
+        "input_projection": {"content": "Ask"}, "config": {},
+        "conversation_defaults": {"allowCreate": true, "title": "Live", "settings": {}}
+    }), Some("birth-live-guidance")), 1000).unwrap();
+    let turn_id = created["turn"]["turnId"].as_str().unwrap();
+    let attempt_id = created["attempt"]["attemptId"].as_str().unwrap();
+    execute(&mut database, &request("turn.attempt.bind", 11, json!({
+        "attempt_id": attempt_id, "task_id": "live-task", "user_id": 11
+    }), Some("bind-live-guidance")), 1001).unwrap();
+    let projection = json!({"content": "", "thinking": "", "toolRounds": [{
+        "roundNum": 1, "llmRound": 0, "toolCallId": "call-live", "toolName": "ask_human",
+        "toolArgs": {"question": "Choose"}, "status": "awaiting_human",
+        "guidanceId": "hg_live", "guidanceType": "choice", "guidanceQuestion": "Choose",
+        "guidanceOptions": ["Client", "Server"]
+    }]});
+    let event = |projection: Value| request("turn.event.record", 11, json!({
+        "attempt_id": attempt_id, "task_id": "live-task", "user_id": 11,
+        "projection": projection, "status": "running", "event_type": "tool_result"
+    }), Some("record-live-guidance"));
+    execute(&mut database, &event(projection.clone()), 1002).unwrap();
+    let answer = |owner, response: &str, command: &str, guidance: &str| request("turn.projection.update", owner, json!({
+        "conversation_id": "live-guidance", "turn_id": turn_id, "user_id": owner,
+        "expected_projection_revision": 1,
+        "human_guidance_answer": {"guidanceId": guidance, "response": response, "commandId": command}
+    }), Some(command));
+    assert!(execute(&mut database, &answer(12, "Server", "foreign", "hg_live"), 1003).is_err());
+    assert!(execute(&mut database, &answer(11, "Server", "missing", "hg_absent"), 1003).is_err());
+    assert!(execute(&mut database, &answer(11, "Invented", "invalid", "hg_live"), 1003).is_err());
+    let accepted = execute(&mut database, &answer(11, "Server", "answer-live", "hg_live"), 1004).unwrap();
+    assert_eq!(accepted["turn"]["status"], "running");
+    assert_eq!(accepted["turn"]["projection"]["toolRounds"][0]["toolContent"], "Human response: Server");
+    assert!(execute(&mut database, &answer(11, "Client", "conflict", "hg_live"), 1005).is_err());
+    assert_eq!(execute(&mut database, &answer(11, "Server", "answer-live", "hg_live"), 1005).unwrap()["idempotentReplay"], true);
+    // A stale worker emits an unanswered round: accepted data must win.
+    execute(&mut database, &event(projection), 1006).unwrap();
+    drop(database);
+    let mut database = AuthorityDatabase::open(directory.path()).unwrap();
+    let read = request("turn.get", 11, json!({"conversation_id": "live-guidance", "turn_id": turn_id, "user_id": 11}), None);
+    let restored = execute(&mut database, &read, 1007).unwrap();
+    assert_eq!(restored["projection"]["toolRounds"][0]["guidanceResponse"], "Server");
+    execute(&mut database, &request("turn.recover", 11, json!({"user_id": 11}), Some("recover-live")), 1008).unwrap();
+    let recovered = execute(&mut database, &read, 1009).unwrap();
+    assert_eq!(recovered["status"], "interrupted");
+    assert_eq!(recovered["projection"]["toolRounds"][0]["guidanceResponse"], "Server");
+    assert_eq!(recovered["projection"]["toolRounds"][0]["status"], "completed");
+    assert_eq!(execute(&mut database, &answer(11, "Server", "answer-live", "hg_live"), 1010).unwrap()["idempotentReplay"], true);
+}
+
+#[test]
+fn record_list_headers_skip_blob_values_and_keep_scope_versions_and_cursors() {
+    let directory = tempfile::tempdir().unwrap();
+    {
+        let mut database = AuthorityDatabase::initialize(directory.path()).unwrap();
+        for index in 0..3 {
+            execute(&mut database, &request("record.put", 11,
+                json!({"namespace":"header-contract","key":format!("owned:{index}"),
+                       "value":{"dialogue":"large original ".repeat(8000)}}),
+                Some(&format!("header-{index}"))), 1000 + index).unwrap();
+        }
+    }
+    let mut database = AuthorityDatabase::open(directory.path()).unwrap();
+    let rows = execute(&mut database, &request("record.list",11,
+        json!({"namespace":"header-contract","prefix":"owned:","limit":2,"include_value":false}),
+        None),2000).unwrap();
+    assert_eq!(rows,json!([
+        {"key":"owned:0","version":1,"updated_at_ms":1000},
+        {"key":"owned:1","version":1,"updated_at_ms":1001}
+    ]));
+    for (cursor,expected) in [
+        (json!({"after_key":"owned:1"}),json!([{"key":"owned:2","version":1,"updated_at_ms":1002}])),
+        (json!({"before_key":"owned:2"}),json!([
+            {"key":"owned:1","version":1,"updated_at_ms":1001},
+            {"key":"owned:0","version":1,"updated_at_ms":1000}]))
+    ] {
+        let mut payload = json!({"namespace":"header-contract","prefix":"owned:","limit":2,"include_value":false});
+        payload.as_object_mut().unwrap().extend(cursor.as_object().unwrap().clone());
+        assert_eq!(execute(&mut database,&request("record.list",11,payload,None),2001).unwrap(),expected);
+    }
+    assert_eq!(execute(&mut database,&request("record.list",12,
+        json!({"namespace":"header-contract","include_value":false}),None),2002).unwrap(),json!([]));
+    for invalid in [Value::Null,json!(0),json!(1),json!("false"),json!([]),json!({})] {
+        assert_eq!(execute(&mut database,&request("record.list",11,
+            json!({"namespace":"header-contract","include_value":invalid}),None),2003).unwrap_err(),
+            SemanticExecutionError::InvalidPayload);
+    }
+    let ordinary = execute(&mut database,&request("record.list",11,
+        json!({"namespace":"header-contract","prefix":"owned:","limit":1}),None),2004).unwrap();
+    assert_eq!(ordinary[0]["value"]["dialogue"].as_str().unwrap().len(),15 * 8000);
+}
+
+    #[test]
+    fn usage_recovery_parent_revision_is_atomic_and_replay_safe() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut database = AuthorityDatabase::initialize(directory.path()).unwrap();
+        let source = execute(&mut database, &request("turn.append_settled", 11, json!({
+            "conversation_id":"usage-recovery", "user_id":11,
+            "command_id":"usage-source", "actor":"assistant", "status":"failed",
+            "turn_id":"usage-source", "projection":{"content":"saved", "usageComplete":false},
+            "settlement":{"outcome":"failed", "cause":"model_error", "resumeOptions":[]},
+            "conversation_defaults":{"allowCreate":true}, "now":1000
+        }), Some("usage-source")), 1000).unwrap();
+        let revision = source["turn"]["projectionRevision"].as_u64().unwrap();
+        let proposal = |command: &str, expected: u64| request("turn.create_pair", 11, json!({
+            "conversation_id":"usage-recovery", "user_id":11, "command_id":command,
+            "parent_turn_id":"usage-source", "require_parent_is_lane_tail":true,
+            "expected_parent_projection_revision":expected, "require_lane_idle":true,
+            "input_projection":{"content":"Continue with a newly confirmed bounded budget"},
+            "config":{"executionLimits":{"max_tokens":1000,"max_tool_calls":2,"deadline":100}}
+        }), Some(command));
+        assert_eq!(execute(&mut database, &proposal("stale-source", revision + 1), 2000).unwrap_err(),
+            SemanticExecutionError::TurnLaneAdvanced);
+        let accepted = execute(&mut database, &proposal("recover-source", revision), 2100).unwrap();
+        let repeated = execute(&mut database, &proposal("recover-source", revision), 2200).unwrap();
+        assert_eq!(accepted["attempt"]["attemptId"], repeated["attempt"]["attemptId"]);
+        assert_eq!(repeated["idempotentReplay"], true);
+        assert!(execute(&mut database, &proposal("recover-source-again", revision), 2300).is_err());
+        let retained = execute(&mut database, &request("turn.get", 11, json!({
+            "conversation_id":"usage-recovery", "turn_id":"usage-source", "user_id":11
+        }), None), 2400).unwrap();
+        assert_eq!(retained["projection"]["usageComplete"], false);
+        assert_eq!(retained["projection"]["content"], "saved");
+        assert_eq!(retained["projectionRevision"], revision);
+    }

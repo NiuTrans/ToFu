@@ -64,7 +64,7 @@ def test_installed_kernel_probe_runs_outside_checkout(tmp_path):
     result = subprocess.run([python, '-m', 'tofu_repo_kernel'], cwd=tmp_path,
                             capture_output=True, text=True, timeout=10)
     assert result.returncode == 0, result.stderr
-    assert result.stdout.strip() == 'native repository kernel ready'
+    assert result.stdout.strip() == 'native repository ranking, discovery and stream artifacts ready'
 
 
 def test_installed_probe_rejects_incorrect_computation(monkeypatch):

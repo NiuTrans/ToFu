@@ -8,6 +8,13 @@
       "owner": "lib/tasks_pkg/compaction/_summary_budget.py",
       "description": "Legacy values are ignored, including zero and positive values. Summary completion has no wall-clock deadline; cancellation and provider transport failures still apply. Elapsed duration is telemetry, never permission to adopt incomplete output or discard its source."
     },
+    "compaction.summaryMaxCostUsd": {
+      "scope": "task.config",
+      "type": "number",
+      "default": 0.05,
+      "owner": "lib/tasks_pkg/compaction/_auxiliary_route.py",
+      "description": "Finite nonnegative estimated paid-API quote ceiling per physical auxiliary attempt, including its admitted output allowance. This is not a cumulative retry-spend limit or subscription marginal cost. Unknown prices fail closed; explicit main/disableModelFallback prohibit substitution. Invalid values prohibit paid auxiliaries."
+    },
     "compaction.summaryPolicy": {
       "scope": "task.config",
       "type": "enum",
@@ -23,22 +30,22 @@
       "owner": "lib/tasks_pkg/compaction/_summary_routing.py",
       "rationale": {
         "problem": "Auxiliary summaries may be cheaper without changing the main task model or granting new route permissions.",
-        "decision": "Compression first uses the lowest projected-cost eligible route, with the highest exact fresh AA Intelligence Index breaking minimum-cost ties. AA is an accepted quality proxy, not measured summary fidelity or speed. Explicit main and disableModelFallback retain the main route.",
+        "decision": "Compression considers every compiler-authorized enabled same-owner/tenant text route, independently of the main provider/family or optional AA/profile coverage. Already-authorized subscription/local resources rank before paid APIs; maintained resource-reference cost or paid cost ranks within each class, then exact AA, declared lightness and stable identity. Paid-to-paid substitution requires strict savings. All evidence is proxy evidence, never measured fidelity, speed or subscription cash cost. Explicit main and disableModelFallback retain main.",
         "alternativesRejected": [
           "A hidden near-cheapest price band",
           "AA-first ranking that pays more",
           "Requiring the main model's ordinal quality tier despite exact AA evidence",
-          "Silent subscription-to-paid-API fallback"
+          "Unqualified or unpriced subscription-to-paid-API fallback"
         ]
       },
       "qualification": {
-        "executionScope": "Same owner, tenant, execution pin, actual provider, provider access and billing class; only already initialized authorized slots.",
-        "qualityProxy": "Every reachable candidate has confirmed identity and a fresh exact-model Artificial Analysis Intelligence Index, finite and nonnegative. Use the lowest score across reachable offerings; do not infer summary fidelity, latency, an AA-to-tier threshold or a main-quality-tier requirement. Routing scores use the existing AA cache freshness authority, with no inline fetch.",
+        "executionScope": "All native main routes consider enabled authorized same-owner/tenant text Offerings and every usable deployment/credential witness through the shared candidate compiler. Main provider/family, execution-slot membership and optional benchmark/profile coverage never restrict native eligibility. Mint only the selected witness in a private request-owned group; no main-model mutation. Legacy callers without native authority retain same-pin API compatibility.",
+        "qualityProxy": "Confirmed identity and compiler-authorized text capability establish eligibility. Fresh exact-model AA and maintained declarations are optional ranking evidence, not allowlists. Missing evidence stays unknown (routing_admission, null score), never invented AA or variant inheritance. Cached routing scores own freshness with no inline fetch. Text capability is not a measured summary-fidelity guarantee; complete-output adoption checks remain mandatory.",
         "capacity": "Every picker-reachable slot must have declared context/output capacity including full input plus requested output, intersected with learned context limits.",
-        "pricing": "Strictly lower token-weighted declared offering cost. USD/CNY per-million-token input, output and cache rates, selected prompt tier, zero speculative cache reads and conservative cold-cache write reserve. Unknown, invalid or time-dependent pricing never means free.",
-        "ranking": "Minimize worst-reachable token-weighted projected USD cost; among exact minimum-cost ties maximize the weakest-reachable AA Intelligence Index, then deterministic execution-pin/model ordering. No price-band tolerance. Require strict savings against the best reachable main offering; equal main costs retain main.",
-        "safety": "Missing/invalid AA or unknown price never qualifies an alternate. The main model needs confirmed identity and known price, not an AA score. disableModelFallback overrides selection. Subscription routes remain selected and marginal cost stays unknown. Existing qualified-cheapest requests use the AA-cheapest alias; invalid policies retain main.",
-        "caller": "Use returned providerId as an execution pin with strict_model=True; verify complete output before adopting a summary. Main task model/config is never mutated."
+        "pricing": "Paid candidates use token-weighted declared Offering USD/CNY per-million input/output/cache rates at the selected prompt tier, zero speculative cache reads and conservative cold-cache write reserve. API-main alternates require strictly lower projected cost. Subscription-main paid alternates require an affordable maximum quote; subscription resource/reference proxies never establish marginal cash cost. Unknown, invalid or time-dependent prices never mean free.",
+        "ranking": "Parent-independent resource classes: authorized subscription/local resources first, affordable paid API second. Within a class prefer known resource-reference proxy or projected paid cost, then known exact AA descending, declared lightness and stable provider/offering/deployment/credential identity. Missing proxies and scores do not disqualify resource candidates. Paid-to-paid requires strict savings against the best reachable main price. Resource preference is policy, not free subscription cash. Legacy groups retain worst reachable cost and weakest AA. No price-band tolerance.",
+        "safety": "Explicit main and disableModelFallback prohibit auxiliary discovery. Credential kinds oauth, subscription and local_identity express resource access; subscription may carry an API-key envelope. Plain api_key is not proof of either subscription entitlement or free usage, and provider names never establish billing. Paid quotes need admitted Offering prices and compaction.summaryMaxCostUsd (default 0.05 USD) at the admitted transport allowance; unknown paid prices fail closed. Resource marginal cash cost remains unknown. Mint only at dispatch; bind stable owner/tenant/revision and provider/access/offering/deployment/connection/credential identity, revalidate quote, restore parent pin and dispose credentials on every exit.",
+        "caller": "Existing API receipts return an execution providerId; requestOwned receipts instead carry stable routeIdentity and a billing providerId, minted into a private execution pin at dispatch. Use strict_model=True and at most two 429 attempts; verify complete output and existing adoption checks. Bounded selectionBasis records optional exact AA, maintained declared evidence, or routing admission with a null score; never invented measured capability or cash savings. Main task model/config is never mutated."
       }
     }
   },
@@ -46,7 +53,7 @@
     "TOFU_TOOL_CALL_FLOOD_HARD_CAP": {
       "status": "documented",
       "owner": "lib/llm/tool_call_flood.py",
-      "description": "Existing safety limit for identical normalized tool occurrences in one provider response; default 32, clamped to 2..4096. Independent of distinct-tool parallel fan-out and checkout admission. Registry catch-up only, no behavioral change."
+      "description": "Occurrences of one exact signature (name + canonical args + caller authority) tolerated in one provider response before the flood salvage collapses the rest; default 2, clamped to 2..4096. With the default, any repeated identical call is collapsed to its first occurrence. Independent of distinct-tool parallel fan-out and checkout admission."
     },
     "CDPATH": {
       "status": "documented",
@@ -56,7 +63,7 @@
     "TOFU_WORKSPACE_TOOL_WAIT_SECONDS": {
       "status": "documented",
       "owner": "lib/project_mod/tool_admission.py",
-      "description": "Cancellable checkout-writer admission wait for task file/shell mutations and input snapshot creation; default 5 seconds, finite inclusive 0..600. Does not cap command runtime, lower parallelism or alter low-level fail-fast lease defaults. Read fingerprints are rechecked after acquisition."
+      "description": "Optional explicit cancellable workspace-lock wait for task file/shell mutations and MCP file preparation. Unset or empty waits until acquisition; nonnegative finite values are exact, zero is fail-fast, with no 600-second clamp. Low-level omitted lease timeouts remain fail-fast. Path bindings and read fingerprints are rechecked after acquisition."
     },
     "TOFU_AGENT_WORKERS": {
       "status": "documented",
@@ -92,11 +99,6 @@
       "status": "documented",
       "owner": "runtime_guards.py",
       "description": "Cataloged process resource budget (seconds); personal and distributed launch defaults are owned by contracts/resource_policy_v1.json. Explicit overrides, probe fallback and finite consumer bounds resolve through runtime_guards.resolve_resource_budget. Changes require process restart."
-    },
-    "TOFU_EVOLUTION_TERMINAL_QUEUE_CAPACITY": {
-      "status": "documented",
-      "owner": "runtime_guards.py",
-      "description": "Cataloged process resource budget (count); personal and distributed launch defaults are owned by contracts/resource_policy_v1.json. Explicit overrides, probe fallback and finite consumer bounds resolve through runtime_guards.resolve_resource_budget. Changes require process restart."
     },
     "TOFU_INCREMENTAL_TRANSLATE_PREVIEW_DEADLINE_SECONDS": {
       "status": "documented",
@@ -143,35 +145,10 @@
       "owner": "runtime_guards.py",
       "description": "Cataloged process resource budget (count); personal and distributed launch defaults are owned by contracts/resource_policy_v1.json. Explicit overrides, probe fallback and finite consumer bounds resolve through runtime_guards.resolve_resource_budget. Changes require process restart."
     },
-    "TOFU_PAPER_BUILD_COMPILE_MAX_MIB": {
-      "status": "documented",
-      "owner": "runtime_guards.py",
-      "description": "Cataloged process resource budget (MiB); personal and distributed launch defaults are owned by contracts/resource_policy_v1.json. Explicit overrides, probe fallback and finite consumer bounds resolve through runtime_guards.resolve_resource_budget. Changes require process restart."
-    },
-    "TOFU_PAPER_BUILD_VALIDATION_MAX_MIB": {
-      "status": "documented",
-      "owner": "runtime_guards.py",
-      "description": "Cataloged process resource budget (MiB); personal and distributed launch defaults are owned by contracts/resource_policy_v1.json. Explicit overrides, probe fallback and finite consumer bounds resolve through runtime_guards.resolve_resource_budget. Changes require process restart."
-    },
     "TOFU_PAPER_QA_SOURCE_CACHE_CAPACITY": {
       "status": "documented",
       "owner": "runtime_guards.py",
       "description": "Cataloged process resource budget (count); personal and distributed launch defaults are owned by contracts/resource_policy_v1.json. Explicit overrides, probe fallback and finite consumer bounds resolve through runtime_guards.resolve_resource_budget. Changes require process restart."
-    },
-    "TOFU_PDF_MAX_PAGES": {
-      "status": "documented",
-      "owner": "runtime_guards.py",
-      "description": "Cataloged process resource budget (count); personal and distributed launch defaults are owned by contracts/resource_policy_v1.json. Explicit overrides, probe fallback and finite consumer bounds resolve through runtime_guards.resolve_resource_budget. Changes require process restart."
-    },
-    "TOFU_PDF_MAX_TEXT_MIB": {
-      "status": "documented",
-      "owner": "runtime_guards.py",
-      "description": "Cataloged process resource budget (MiB); personal and distributed launch defaults are owned by contracts/resource_policy_v1.json. Explicit overrides, probe fallback and finite consumer bounds resolve through runtime_guards.resolve_resource_budget. Changes require process restart."
-    },
-    "TOFU_PDF_PARSE_TIMEOUT": {
-      "status": "documented",
-      "owner": "runtime_guards.py",
-      "description": "Cataloged process resource budget (seconds); personal and distributed launch defaults are owned by contracts/resource_policy_v1.json. Explicit overrides, probe fallback and finite consumer bounds resolve through runtime_guards.resolve_resource_budget. Changes require process restart."
     },
     "TOFU_PDF_PROCESSES": {
       "status": "documented",
@@ -223,11 +200,6 @@
       "owner": "runtime_guards.py",
       "description": "Cataloged process resource budget (count); personal and distributed launch defaults are owned by contracts/resource_policy_v1.json. Explicit overrides, probe fallback and finite consumer bounds resolve through runtime_guards.resolve_resource_budget. Changes require process restart."
     },
-    "TOFU_PROJECT_WRITE_RECOVERY_MAX_MIB": {
-      "status": "documented",
-      "owner": "runtime_guards.py",
-      "description": "Process per-file exact write recovery budget in MiB; launch-probed from memory capacity, headroom and free volume via contracts/resource_policy_v1.json. Shared by direct edits, intent recovery and undo, independently of display limits. Overrides require restart."
-    },
     "TOFU_PROJECT_UNDO_CACHE_CAPACITY": {
       "status": "documented",
       "owner": "runtime_guards.py",
@@ -263,27 +235,12 @@
       "owner": "runtime_guards.py",
       "description": "Cataloged process resource budget (count); personal and distributed launch defaults are owned by contracts/resource_policy_v1.json. Explicit overrides, probe fallback and finite consumer bounds resolve through runtime_guards.resolve_resource_budget. Changes require process restart."
     },
-    "TOFU_SWARM_MAX_AGENTS_PER_SESSION": {
-      "status": "documented",
-      "owner": "runtime_guards.py",
-      "description": "Cataloged process resource budget (count); personal and distributed launch defaults are owned by contracts/resource_policy_v1.json. Explicit overrides, probe fallback and finite consumer bounds resolve through runtime_guards.resolve_resource_budget. Changes require process restart."
-    },
-    "TOFU_SWARM_MAX_AGENTS_PER_WAVE": {
-      "status": "documented",
-      "owner": "runtime_guards.py",
-      "description": "Cataloged process resource budget (count); personal and distributed launch defaults are owned by contracts/resource_policy_v1.json. Explicit overrides, probe fallback and finite consumer bounds resolve through runtime_guards.resolve_resource_budget. Changes require process restart."
-    },
     "TOFU_SWARM_MAX_PARALLEL": {
       "status": "documented",
       "owner": "runtime_guards.py",
       "description": "Cataloged process resource budget (count); personal and distributed launch defaults are owned by contracts/resource_policy_v1.json. Explicit overrides, probe fallback and finite consumer bounds resolve through runtime_guards.resolve_resource_budget. Changes require process restart."
     },
     "TOFU_SWARM_SESSION_CAPACITY": {
-      "status": "documented",
-      "owner": "runtime_guards.py",
-      "description": "Cataloged process resource budget (count); personal and distributed launch defaults are owned by contracts/resource_policy_v1.json. Explicit overrides, probe fallback and finite consumer bounds resolve through runtime_guards.resolve_resource_budget. Changes require process restart."
-    },
-    "TOFU_TIMER_LIVE_CAP": {
       "status": "documented",
       "owner": "runtime_guards.py",
       "description": "Cataloged process resource budget (count); personal and distributed launch defaults are owned by contracts/resource_policy_v1.json. Explicit overrides, probe fallback and finite consumer bounds resolve through runtime_guards.resolve_resource_budget. Changes require process restart."
@@ -321,7 +278,7 @@
     "TOFU_TREE_INDEX_MAX_ENTRIES": {
       "status": "documented",
       "owner": "runtime_guards.py",
-      "description": "Cataloged process resource budget (count); personal and distributed launch defaults are owned by contracts/resource_policy_v1.json. Explicit overrides, probe fallback and finite consumer bounds resolve through runtime_guards.resolve_resource_budget. Changes require process restart."
+      "description": "Launch-derived idle index retention target. Never truncates a build, rejects a complete disk index, or blocks a write-fresh checkpoint. The newest usable index may exceed this target; older reconstructible indexes are checkpointed and evicted."
     },
     "TOFU_TREE_INDEX_MEM_ROOTS": {
       "status": "documented",
@@ -934,21 +891,6 @@
       "description": ""
     },
     "TOFU_429_SATURATION_SECS": {
-      "status": "legacy",
-      "owner": "",
-      "description": ""
-    },
-    "TOFU_ADMISSION_CGROUP_PCT": {
-      "status": "legacy",
-      "owner": "",
-      "description": ""
-    },
-    "TOFU_ADMISSION_PROCESS_RSS": {
-      "status": "legacy",
-      "owner": "",
-      "description": ""
-    },
-    "TOFU_ADMIT_SLOT_TTL": {
       "status": "legacy",
       "owner": "",
       "description": ""
@@ -1676,7 +1618,7 @@
     "TOFU_HTTP_WRITE_STALL_SECS": {
       "status": "documented",
       "owner": "lib/hypercorn_runtime.py",
-      "description": "Seconds without observed buffer drain or TCP acknowledgement progress before resetting a peer; default 300, range 1\u201386400; renews during HTTP/WebSocket writes and normal close, independently of explicit shutdown grace and durable storage budgets."
+      "description": "Seconds without observed buffer drain or TCP acknowledgement progress before resetting a peer; default 300, range 1–86400; renews during HTTP/WebSocket writes and normal close, independently of explicit shutdown grace and durable storage budgets."
     },
     "TOFU_HTTP_REQUEST_LOG": {
       "status": "legacy",
@@ -1689,16 +1631,6 @@
       "description": ""
     },
     "TOFU_ICON_SHOOT_LIB": {
-      "status": "legacy",
-      "owner": "",
-      "description": ""
-    },
-    "TOFU_IMAGE_FETCH_MAX_BYTES": {
-      "status": "legacy",
-      "owner": "",
-      "description": ""
-    },
-    "TOFU_IMAGE_UPLOAD_MAX_BYTES": {
       "status": "legacy",
       "owner": "",
       "description": ""
@@ -1719,16 +1651,6 @@
       "description": ""
     },
     "TOFU_INTEGRATION_AUTORUN": {
-      "status": "legacy",
-      "owner": "",
-      "description": ""
-    },
-    "TOFU_INTEGRATION_STABLE_TEST_CMD": {
-      "status": "legacy",
-      "owner": "",
-      "description": ""
-    },
-    "TOFU_INTEGRATION_TEST_CMD": {
       "status": "legacy",
       "owner": "",
       "description": ""
@@ -1759,11 +1681,6 @@
       "description": ""
     },
     "TOFU_KNOWLEDGE_ENRICH_WORKER_IDLE_SECONDS": {
-      "status": "legacy",
-      "owner": "",
-      "description": ""
-    },
-    "TOFU_KNOWLEDGE_MAX_TEXT_CHARS": {
       "status": "legacy",
       "owner": "",
       "description": ""
@@ -1849,11 +1766,6 @@
       "description": ""
     },
     "TOFU_LOCAL_SERVE": {
-      "status": "legacy",
-      "owner": "",
-      "description": ""
-    },
-    "TOFU_LOCAL_SERVE_BUDGET_GB": {
       "status": "legacy",
       "owner": "",
       "description": ""
@@ -1964,11 +1876,6 @@
       "description": ""
     },
     "TOFU_MAX_INFLIGHT_TASKS": {
-      "status": "legacy",
-      "owner": "",
-      "description": ""
-    },
-    "TOFU_MAX_SSE_PER_PRINCIPAL": {
       "status": "legacy",
       "owner": "",
       "description": ""
@@ -2143,16 +2050,6 @@
       "owner": "",
       "description": ""
     },
-    "TOFU_OPEN_MODE_EXEMPT_PATHS": {
-      "status": "legacy",
-      "owner": "",
-      "description": ""
-    },
-    "TOFU_OPEN_MODE_RPM": {
-      "status": "legacy",
-      "owner": "",
-      "description": ""
-    },
     "TOFU_ORPHAN_RESULT_MAX_AGE_SECS": {
       "status": "legacy",
       "owner": "",
@@ -2319,11 +2216,6 @@
       "description": ""
     },
     "TOFU_QUEUE_REAPER_MAX_DISPATCH_PER_TICK": {
-      "status": "legacy",
-      "owner": "",
-      "description": ""
-    },
-    "TOFU_RATE_LIMIT": {
       "status": "legacy",
       "owner": "",
       "description": ""
@@ -2553,11 +2445,6 @@
       "owner": "",
       "description": ""
     },
-    "TOFU_SSE_SLOT_TTL": {
-      "status": "legacy",
-      "owner": "",
-      "description": ""
-    },
     "TOFU_STARTUP_PROGRESS": {
       "status": "legacy",
       "owner": "",
@@ -2694,11 +2581,6 @@
       "description": ""
     },
     "TOFU_SWARM_GLOBAL_WORKERS": {
-      "status": "legacy",
-      "owner": "",
-      "description": ""
-    },
-    "TOFU_SWARM_MAX_429_ATTEMPTS": {
       "status": "legacy",
       "owner": "",
       "description": ""
@@ -2863,22 +2745,7 @@
       "owner": "",
       "description": ""
     },
-    "TOFU_UPLOADS_QUOTA_MB": {
-      "status": "documented",
-      "owner": "lib/uploads_budget.py",
-      "description": "Directory-wide quota (MiB) for uploads/images; uploads past the ceiling are rejected with 413. Clamped to [64, 65536] MiB."
-    },
     "TOFU_VIDEO_ANALYSIS": {
-      "status": "legacy",
-      "owner": "",
-      "description": ""
-    },
-    "TOFU_VIDEO_MAX_BYTES": {
-      "status": "legacy",
-      "owner": "",
-      "description": ""
-    },
-    "TOFU_VIDEO_MAX_DURATION_S": {
       "status": "legacy",
       "owner": "",
       "description": ""
@@ -3121,7 +2988,7 @@
     "TOFUDB_TRANSPORT": {
       "status": "documented",
       "owner": "lib/storage/supervisor.py",
-      "description": "Native TofuDB authority transport: auto (default; resolves at launch from the authority volume class \u2014 embedded everywhere except observed network mounts, where the engine's Normal durability tier requires the daemon; classifier in lib/storage/volume_class.py mirrors packages/tofu-db/src/resource_probe.rs), daemon (supervised tofu-db serve child over loopback storage.v2), or embedded (same engine in-process via libtofu_db.so). A transport choice, never a second authority; invalid values fail closed."
+      "description": "Native TofuDB authority transport: auto (default; resolves at launch from the authority volume class — embedded everywhere except observed network mounts, where the engine's Normal durability tier requires the daemon; classifier in lib/storage/volume_class.py mirrors packages/tofu-db/src/resource_probe.rs), daemon (supervised tofu-db serve child over loopback storage.v2), or embedded (same engine in-process via libtofu_db.so). A transport choice, never a second authority; invalid values fail closed."
     },
     "TOFU_DB_DURABILITY": {
       "status": "legacy",
@@ -3347,7 +3214,492 @@
       "status": "documented",
       "owner": "desktop/autostart.py",
       "description": "Linux per-user configuration root for the Agent login-startup entry; absolute paths only, default ~/.config. No credentials are stored in the startup entry."
+    },
+    "OLLAMA_NUM_PARALLEL": {
+      "status": "documented",
+      "owner": "lib/local_serve/_probe.py",
+      "description": "Operator override for Ollama parallel allocation, captured in the local hardware snapshot. When unset, known dense GGUF layouts derive parallelism from observed resources; other layouts start lean. Literal values pass to Ollama for validation."
+    },
+    "TOFU_STORAGE_LOGICAL_PUBLISH_BATCH": {
+      "status": "documented",
+      "owner": "lib/storage_authority_sql/config.py",
+      "description": "Positive cursor page size for durable logical publication, without a fixed count-admission ceiling."
+    },
+    "TOFU_STORAGE_LOGICAL_SEGMENT_MIB": {
+      "status": "documented",
+      "owner": "lib/storage_authority_sql/config.py",
+      "description": "Positive logical-shadow segment rotation target in MiB; large records own a segment, and this setting never rejects a record."
+    },
+    "TOFU_JSON_BENCH_CPU": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_CONTEXT_NATIVE_ENGINE": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_PERSONAL_STORAGE_BACKEND": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_EVENT_NATIVE_ENGINE": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_RUNTIME_DIR": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "PYTHONPATH": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_LOG_DIR": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_PYTHON_BUNDLE_BASE_URL": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_GH_RELEASE_BASE": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_PYTHON_BUNDLE": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_PYTHON_BUNDLE_NO_DOWNLOAD": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_INTEGRATION_TEST_ROOT": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_DB_FASTPATH_SYNC_INTERVAL_MS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_DB_FASTPATH_DIR": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_STORAGE_SQLITE_READ_POOL": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "CARGO": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "RUSTC": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_NATIVE_MODEL_CONTROL_TEST_ARCHIVE": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_NATIVE_ACTOR_PAYER_TEST_LEGACY_ARCHIVE": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_NATIVE_ARCHIVE_LOADER_TEST_ARCHIVE": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_NATIVE_DISPATCH_CREDENTIAL_TEST_ARCHIVE": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_NATIVE_PRICED_SETTLEMENT_TEST_ARCHIVE": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_NATIVE_OAUTH_PRODUCTION_TEST_ARCHIVE": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_NATIVE_OAUTH_ROUTE_TEST_ARCHIVE": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_NATIVE_OPTIONAL_DEADLINE_TEST_ARCHIVE": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_NATIVE_OPTIONAL_ROUNDS_TEST_ARCHIVE": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_NATIVE_TOTAL_TOOLS_TEST_ARCHIVE": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_NATIVE_RESPONSES_DIALECT_TEST_ARCHIVE": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_NATIVE_RETAINED_HISTORY_OLD_ARCHIVE": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_NATIVE_TERMINAL_TEST_ARCHIVE": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_NATIVE_FLOW_TEST_ARCHIVE": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_NATIVE_TASK_STOP_TEST_ARCHIVE": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_NATIVE_USAGE_TEST_BINARY": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_NATIVE_WORKER_TEST_ARCHIVE": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_STORAGE_BROWSER_ANCHORS_OUTPUT": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "PLAYWRIGHT_NODEJS_PATH": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_NATIVE_HTML_TEST_LIBRARY": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_FLOW_COMPLETION_RECEIPTS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_NATIVE_FLOW_TEST_LIBRARY": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_NATIVE_HTML_TEST_ARCHIVE": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_NATIVE_EXTRACTION_LIBRARY": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_NATIVE_EXTRACTION_GRAMMARS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_NATIVE_EXTRACTION_BINARY": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_NATIVE_STREAM_BINARY": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_NATIVE_INSTALLED_DEPENDENCY_PATH": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_NATIVE_INSTALLED_AGENT": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_CHECKPOINT_CABI_TEST_SOURCE_SHA256": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_CHECKPOINT_CABI_TEST_BINARY": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_CHECKPOINT_CABI_TEST_LIBRARY": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_NATIVE_GOAL_HANDOFF_FIXTURE": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_NATIVE_SHARED_CHECKPOINT_TEST_ARCHIVE": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_NATIVE_TERMINAL_TEST_APPLICATION_ROOT": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_NATIVE_APPLICATION_RECEIPTS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_NATIVE_ROOT_RECOVERY_RECEIPTS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_NATIVE_FLOW_CANDIDATE_LIBRARY": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_NATIVE_FLOW_BASELINE_LIBRARY": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_NATIVE_BRANCH_RECEIPTS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_NATIVE_FLOW_COMPARISON_RECEIPTS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_NATIVE_FLOW_TRANSITION_RECEIPTS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_NATIVE_FLOW_LOOP_RECEIPTS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_NATIVE_ROOT_COMPARISON_RECEIPTS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_NATIVE_CRASH_TEST_PYTHON_COMMAND": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_NATIVE_TEST_PYTHON_COMMAND": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_AUTOMATION_SCREENSHOT_DIR": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_E2E_BASE_URL": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_INPLACE_SANITIZER_CHECK_OUTPUT": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_INPLACE_SANITIZER_PERF_OUTPUT": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_MARKDOWN_DOMAIN_OUTPUT": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_MARKDOWN_SMOKE_OUTPUT": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_READER_INPUT_OUTPUT": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_READER_PERF_OUTPUT": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_READER_MEMORY_PROFILE_OUTPUT": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_STREAMING_SECURITY_OUTPUT": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_STREAMING_READER_INTERACTION_OUTPUT": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_TURN_PIPELINE_BUNDLE": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_TURN_PIPELINE_OUTPUT": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_NATIVE_HTML_TEST_INSTALLATION": {
+      "status": "documented",
+      "owner": "tests/knowledge/test_native_html_http_storage.py",
+      "description": "Opt-in path to the installed native HTML test archive; absent installation skips native-library integration checks."
+    },
+    "TOFU_FACT_CONSUMER_MEASURE_OUTPUT": {
+      "status": "documented",
+      "owner": "tests/memory/test_working_fact_consumers.py",
+      "description": "Optional output directory for working-fact consumer measurements; defaults to the test-owned temporary directory."
+    },
+    "TOFU_LIVE_PIPELINE_OUTPUT": {
+      "status": "documented",
+      "owner": "tests/visual/test_visual_live_pipeline.py",
+      "description": "Optional output directory for live-pipeline browser measurements; defaults to the test-owned temporary directory."
+    },
+    "TOFU_LIVE_PIPELINE_CONVERSATIONS": {
+      "status": "documented",
+      "owner": "tests/visual/test_visual_live_pipeline.py",
+      "description": "Explicit number of concurrent conversations in the opt-in live-pipeline browser measurement; defaults to one."
+    },
+    "TOFU_NATIVE_HTTP_WRITE_PROBE": {
+      "status": "documented",
+      "owner": "tests/llm/test_native_http_write_budget.py",
+      "description": "Explicit prebuilt native http_write_budget_probe executable for owned TLS, proxy and HTTP/2 write budget API tests; never selects production transport."
+    },
+    "TOFU_LIVE_PIPELINE_PRODUCER": {
+      "status": "documented",
+      "owner": "tests/visual/test_visual_live_pipeline.py",
+      "description": "Selects python (default) or native for the live-pipeline browser fixture; native requires an explicitly verified TOFU_NATIVE_TERMINAL_TEST_ARCHIVE."
+    },
+    "TOFU_LIVE_PIPELINE_HISTORY": {
+      "status": "documented",
+      "owner": "tests/visual/test_visual_live_pipeline.py",
+      "description": "Comma-separated stored historical Turn counts for the opt-in full-application browser diagnostic; defaults to 0,256. Each count is bounded to 0–65536; this does not change product pagination or memory limits."
+    },
+    "TOFUDB_TEST_SOURCE": {
+      "status": "documented",
+      "owner": "tests/storage/test_direct_request_settlement_sigkill.py",
+      "description": "Test-only expected SHA-256 engine source identity; SIGKILL/reopen fixtures refuse mismatched artifacts."
+    },
+    "TOFUDB_TEST_LIBRARY": {
+      "status": "documented",
+      "owner": "tests/storage/test_direct_request_settlement_sigkill.py",
+      "description": "Test-only path to the matching private libtofu_db.so for abrupt process-loss and reopen verification."
+    },
+    "TOFUDB_TEST_BINARY": {
+      "status": "documented",
+      "owner": "tests/storage/test_direct_request_settlement_sigkill.py",
+      "description": "Test-only path to the private source-matched tofu-db executable; never selects the application service."
+    },
+    "TOFU_MAX_SSE_PER_PRINCIPAL": {
+      "status": "documented",
+      "owner": "lib/agent_core/sse_limit.py",
+      "description": "Optional per-principal resident SSE connection cap, resolved from the launch-time resource probe when omitted; environment overrides are bounded to 1..128. Connection ownership and release remain with the authenticated stream lifecycle."
+    },
+    "TOFU_WORKSPACE_MODE": {
+      "status": "documented",
+      "owner": "lib/project_mod/workspace_policy.py",
+      "description": "Explicit direct or isolated workspace execution policy; overrides repository-local tofu.workspaceMode. Absence defaults to direct execution. Invalid values fail closed; this setting never enables automatic commits or changes publication refs."
+    },
+    "TOFU_REPO_GRAMMAR_BUNDLE": {
+      "status": "documented",
+      "owner": "packages/tofu-repo-kernel/setup.py",
+      "description": "Build-only path to an explicit optional native grammar bundle with grammars.json and NOTICES.txt. Must be supplied together with TOFU_REPO_GRAMMAR_MANIFEST_SHA256; packaging verifies declared library sizes and hashes rather than discovering a user cache."
+    },
+    "TOFU_REPO_GRAMMAR_MANIFEST_SHA256": {
+      "status": "documented",
+      "owner": "packages/tofu-repo-kernel/setup.py",
+      "description": "Build-only SHA-256 pin for the manifest in TOFU_REPO_GRAMMAR_BUNDLE. Both settings are required together before the optional installed grammar libraries can enter a wheel."
+    },
+    "TOFU_REQUIRE_INSTALLED_GRAMMARS": {
+      "status": "documented",
+      "owner": "tests/repo_map/test_native_installed_grammar_package.py",
+      "description": "Test-only qualification flag. Value 1 requires the explicitly installed native repository package to contain its pinned grammar bundle and fails instead of skipping when it is absent; it never selects a production parser."
+    },
+    "TOFU_CHECKPOINT_SQL_TEST_LIBRARY": {
+      "status": "documented",
+      "owner": "tests/support/native_sql_goal.py",
+      "description": "Test-only native SQL checkpoint library path propagated into owned recovery subprocesses; paired with TOFU_CHECKPOINT_SQL_TEST_SHA256 for exact image verification, without selecting the application storage backend."
+    },
+    "TOFU_CHECKPOINT_SQL_TEST_SHA256": {
+      "status": "documented",
+      "owner": "tests/support/native_sql_goal.py",
+      "description": "Test-only SHA-256 pin for TOFU_CHECKPOINT_SQL_TEST_LIBRARY, checked before native SQL checkpoint recovery subprocesses acquire their private test authority."
+    },
+    "TOFU_HARNESS_GRAPH_BINARY": {
+      "status": "documented",
+      "owner": "tests/tofudb/test_harness_graph_controls.py",
+      "description": "Opt-in test-only path to the native graph prototype executable for cross-backend and process-crash contract verification; absence skips the external prototype check and does not change application authority."
     }
   },
-  "legacy_count": 665
+  "legacy_count": 626
 }

@@ -2,7 +2,7 @@
 import pytest
 from lib.production.stages import Stage, run_stages, run_independent_stages, load_state, StageFailed
 from lib.agent_core.execution_budget import model_budget_admission, ModelBudgetAdmissionDenied
-from lib.llm_errors import AbortedError
+from lib.llm.llm_errors import AbortedError
 pytestmark = pytest.mark.unit
 
 

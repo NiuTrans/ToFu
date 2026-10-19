@@ -18,17 +18,16 @@ jsdom (indirect eval → globals, mirroring the concatenated feature bundle):
      this is a source-contract assert that the guard predicate + early return
      exist and reference the overlay selectors.
 
-  3. DELETE-CONFIRM DIALOG: `_confirmDeleteFolder` (a destructive modal) now
-     dismisses on Escape — matching its create/rename siblings — and focuses
-     Cancel by default. Driven for real under jsdom (Escape closes, other keys
-     don't, listener is cleaned up, Cancel is focused).
+  3. DELETE-CONFIRM DIALOG: `_confirmDeleteFolder` delegates to the typed native
+     dialog owner and focuses Cancel by default. jsdom drives native close
+     teardown; top-layer Escape behavior belongs to the browser journey.
 
   4. FLOW-PICKER ARIA: the mobile flow picker (`openMobileFlowPicker` in
      mobile_panels.js) emits role=listbox / role=option / aria-selected so a
      screen reader can navigate it. Source-contract (IIFE + async-Api-bound).
 
-Triple-neuter proves the long-press wiring AND the delete-dialog Escape are
-each load-bearing. Skips cleanly without node/jsdom.
+Negative controls prove the long-press wiring is load-bearing. The removed
+custom Escape listener has no compatibility test. Skips without node/jsdom.
 """
 
 from __future__ import annotations
@@ -39,7 +38,7 @@ import subprocess
 
 import pytest
 
-from tests._runtime_sections import runtime_sections_dir
+from tests._runtime_sections import native_module_path, runtime_sections_dir
 
 pytestmark = pytest.mark.unit
 
@@ -48,11 +47,17 @@ ROOT = os.path.normpath(os.path.join(HERE, '..', '..'))
 JS_DIR = runtime_sections_dir()
 _SRC = os.path.join(JS_DIR, 'main', 'main_folders_mobile.js')
 
+_CONTROLS = native_module_path(
+    '.native/folder-config-control.js',
+    os.path.join(ROOT, 'frontend/src/conversation/ui/folder-config-control.ts'))
+
 
 def _node_deps_available() -> bool:
     if not shutil.which('node'):
         return False
-    return os.path.isdir(os.path.join(ROOT, 'node_modules', 'jsdom'))
+    result = subprocess.run(["node", "-p", 'require.resolve("jsdom")'],
+                            cwd=ROOT, capture_output=True, timeout=10)
+    return result.returncode == 0
 
 
 _HARNESS = r"""
@@ -60,7 +65,7 @@ const fs = require('fs');
 const path = require('path');
 const SRC = process.argv[2];
 const ROOT = process.argv[3];
-const { JSDOM } = require(path.join(ROOT, 'node_modules', 'jsdom'));
+const { JSDOM } = require('jsdom');
 const dom = new JSDOM(`<!DOCTYPE html><body>
   <div id="folderTabs"><div class="folder-tabs-scroll">
     <div class="folder-tab" data-folder-id="f1">Work</div>
@@ -70,6 +75,17 @@ const dom = new JSDOM(`<!DOCTYPE html><body>
 const { window } = dom;
 global.window = window; global.document = window.document;
 global.navigator = window.navigator;
+
+global.HTMLElement = window.HTMLElement;
+
+global.Element = window.Element;
+global.retainedCompositionLifecycle = { add: () => {}, listen: (target, type, fn, options) => target.addEventListener(type, fn, options) };
+(0, eval)(fs.readFileSync(process.argv[4], 'utf8'));
+window.HTMLDialogElement.prototype.showModal = function() { this.open = true; };
+window.HTMLDialogElement.prototype.close = function() {
+  if (!this.open) return;
+  this.open = false; this.dispatchEvent(new window.Event('close'));
+};
 // jsdom lacks ontouchstart — force the touch branch on.
 if (!('ontouchstart' in window)) window.ontouchstart = null;
 
@@ -173,33 +189,18 @@ check('swipe_guard_selectors',
   src.includes('mobile-bottom-sheet.open') &&
   src.includes('mobile-panel-portaled.visible'));
 
-// (E) Delete-confirm dialog: Escape dismisses it (matching create/rename),
-//     and Cancel is focused by default (destructive-modal safety). The real
-//     _confirmDeleteFolder is defined globally by the eval above.
-function _keydown(key) {
-  const ev = new window.KeyboardEvent('keydown', { key, bubbles: true, cancelable: true });
-  document.dispatchEvent(ev);
-}
+// (E) Native destructive confirmation: Cancel has initial focus and a native
+// close (the browser's Escape default action) tears down the owned DOM. jsdom
+// cannot implement top-layer Escape; the browser journey covers that default.
 _confirmDeleteFolder('f1');
-const dlg = document.getElementById('_folderCreateDialog');
+const dlg = document.querySelector('dialog[open]');
 check('delete_dialog_opens', dlg !== null);
-// Cancel focused by default (after the 50ms focus timeout fires).
-_flushTimers();
-check('delete_cancel_focused',
-  document.activeElement === document.getElementById('_folderDialogCancel'));
-// A non-Escape key must NOT close it.
-_keydown('a');
-check('delete_dialog_survives_other_key',
-  document.getElementById('_folderCreateDialog') !== null);
-// Escape closes it.
-_keydown('Escape');
-check('delete_dialog_escape_closes',
-  document.getElementById('_folderCreateDialog') === null);
-// Listener cleanup: a second Escape after close must not throw (handler gone).
-_keydown('Escape');
-check('delete_escape_listener_cleaned',
-  document.getElementById('_folderCreateDialog') === null);
-
+const cancel = [...dlg.querySelectorAll('button')].find(button => button.textContent === 'folder.cancel');
+check('delete_cancel_focused', document.activeElement === cancel);
+document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'a', bubbles: true }));
+check('delete_dialog_survives_other_key', dlg.isConnected && dlg.open);
+dlg.close();
+check('delete_native_close_teardown', !dlg.isConnected && document.querySelector('dialog') === null);
 console.log(out.join('\n'));
 """
 
@@ -210,7 +211,7 @@ def _run(src_path):
         f.write(_HARNESS)
     try:
         proc = subprocess.run(
-            ['node', harness, src_path, ROOT],
+            ['node', harness, src_path, ROOT, _CONTROLS],
             capture_output=True, text=True, timeout=60)
     finally:
         try:
@@ -227,8 +228,7 @@ _EXPECTED = (
     'longpress_click_swallowed', 'quick_tap_no_menu', 'move_cancels_longpress',
     'swipe_guard_predicate', 'swipe_guard_early_return', 'swipe_guard_selectors',
     'delete_dialog_opens', 'delete_cancel_focused',
-    'delete_dialog_survives_other_key', 'delete_dialog_escape_closes',
-    'delete_escape_listener_cleaned',
+    'delete_dialog_survives_other_key', 'delete_native_close_teardown',
 )
 
 
@@ -296,20 +296,6 @@ def test_NC_click_swallow_is_load_bearing():
         replacement="      if (false) { _lpFired = false; e.stopPropagation(); e.preventDefault(); }",
         must_fail=['longpress_click_swallowed'],
         must_still_pass=['longpress_opens_menu'],
-    )
-
-
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
-def test_NC_delete_dialog_escape_is_load_bearing():
-    """Neuter the delete-dialog Escape branch → delete_dialog_escape_closes
-    FAILs (the destructive modal stays up on Escape) while the dialog-opens
-    and Cancel-focus controls still PASS."""
-    _nc(
-        anchor="  function _onKey(e) { if (e.key === 'Escape') { e.preventDefault(); _closeDialog(); } }",
-        replacement="  function _onKey(e) { void e; }",
-        must_fail=['delete_dialog_escape_closes'],
-        must_still_pass=['delete_dialog_opens', 'delete_cancel_focused'],
     )
 
 

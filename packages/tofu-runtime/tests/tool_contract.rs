@@ -158,3 +158,89 @@ fn authorization_panics_fail_closed_before_any_handler() {
         Err(AdmissionError::Denied)
     ));
 }
+
+#[test]
+fn required_nullable_field_accepts_explicit_null_but_not_absence() {
+    let catalog=Catalog::compile(7,"epoch",&json!({"limits":{"name":"limits","contractVersion":"tofu.tool-contract/v2","permission":"read",
+        "arguments_schema":{"type":"object","required":["rounds"],"properties":{"rounds":{"type":["integer","null"],"minimum":1}}}}})).unwrap();
+    assert!(catalog.validate_protocol(7,"limits",json!({"rounds":null})).is_ok());
+    assert!(catalog.validate(7,"limits",json!({"rounds":null})).is_err());
+    assert!(catalog.validate(7,"limits",json!({"rounds":3})).is_ok());
+    assert!(catalog.validate(7,"limits",json!({})).is_err());
+    assert!(catalog.validate(7,"limits",json!({"rounds":0})).is_err());
+}
+
+#[test]
+fn native_configure_deadline_requires_explicit_valid_policy() {
+    let document:Value=serde_json::from_str(include_str!("../../../contracts/native_agent_stdio_v1.schema.json")).unwrap();
+    let schema=&document["$defs"]["configure"];
+    assert!(schema["required"].as_array().unwrap().contains(&json!("deadline_ms")));
+    let catalog=Catalog::compile(7,"epoch",&json!({"limits":{"name":"limits","contractVersion":"tofu.tool-contract/v2","permission":"read",
+        "arguments_schema":{"type":"object","required":["deadline_ms"],"properties":{"deadline_ms":schema["properties"]["deadline_ms"]}}}})).unwrap();
+    for value in [Value::Null,json!(50)] {
+        assert!(catalog.validate_protocol(7,"limits",json!({"deadline_ms":value})).is_ok());
+    }
+    for value in [json!(0),json!(-1),json!(false),json!(1.5)] {
+        assert!(catalog.validate_protocol(7,"limits",json!({"deadline_ms":value})).is_err());
+    }
+    assert!(catalog.validate_protocol(7,"limits",json!({})).is_err());
+}
+
+#[test]
+fn total_tool_limit_protocol_admits_null_zero_and_positive_only() {
+    let document:Value=serde_json::from_str(include_str!("../../../contracts/native_agent_stdio_v1.schema.json")).unwrap();
+    let catalog=Catalog::compile(7,"epoch",&json!({"limits":{"name":"limits","contractVersion":"tofu.tool-contract/v2","permission":"read",
+        "arguments_schema":{"type":"object","properties":{"total_tool_calls":document["$defs"]["configure"]["properties"]["total_tool_calls"]}}}})).unwrap();
+    for value in [Value::Null,json!(0),json!(3)] {
+        assert!(catalog.validate_protocol(7,"limits",json!({"total_tool_calls":value})).is_ok());
+    }
+    for value in [json!(-1),json!(false),json!(1.5)] {
+        assert!(catalog.validate_protocol(7,"limits",json!({"total_tool_calls":value})).is_err());
+    }
+    assert!(catalog.validate_protocol(7,"limits",json!({})).is_ok());
+}
+
+
+#[test]
+fn terminal_protocol_validation_preserves_exact_frozen_wire_for_all_outcomes() {
+    let contract: Value = serde_json::from_str(include_str!(
+        "../../../contracts/native_agent_stdio_v1.schema.json"
+    ))
+    .unwrap();
+    let schema = &contract["$defs"]["terminal_request"];
+    let catalog = Catalog::compile(7,"terminal",&json!({"terminal_request":{
+        "name":"terminal_request","contractVersion":"tofu.tool-contract/v2","arguments_schema":schema}})).unwrap();
+    for status in ["done", "error", "aborted"] {
+        for optional in [false, true] {
+            let mut event = json!({"status":status,"type":status});
+            if status == "done" {
+                event["result"] = json!({"messages":[{"role":"assistant","content":"unicode 中\nquoted \""}],"usage":[{"input_tokens":u64::MAX,"fraction":2.5}]});
+            } else {
+                event["execution"] = json!({"messages":[{"role":"user","content":"question"}],"usage":[{"input_tokens":1}]});
+                if status == "error" {
+                    event["error"] = json!({"kind":"fixture","message":"failed"});
+                }
+            }
+            let mut request = json!({"version":"tofu.native-agent-stdio/v1","type":"terminal_request",
+                "request_id":"commit","owner_user_id":7,"task_id":"task","attempt":1,
+                "event":event,"receipt":{"execution_id":"task","invariants_satisfied":true}});
+            if optional {
+                request["checkpoint_suspended"] = json!(status == "aborted");
+                if status == "done" {
+                    request["usage_summary"] = json!({"profile":"tofu.additive-usage/u64-f64-v1","counts":{"input_tokens":u64::MAX}});
+                }
+            }
+            let original = serde_json::to_vec(&request).unwrap();
+            let normalized = catalog.validate(7, "terminal_request", request).unwrap();
+            assert_eq!(
+                serde_json::to_vec(&normalized).unwrap(),
+                original,
+                "{status} {optional}"
+            );
+            let mut invalid = normalized.clone();
+            invalid["owner_user_id"] = json!(0);
+            assert!(catalog.validate(7, "terminal_request", invalid).is_err());
+            assert!(catalog.validate(8, "terminal_request", normalized).is_err());
+        }
+    }
+}

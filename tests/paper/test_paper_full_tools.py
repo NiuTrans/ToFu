@@ -123,11 +123,16 @@ def test_full_epoch_default_is_uncapped_and_model_neutral():
     assert repeated.wire_schemas == epoch.wire_schemas
     assert {'web_search', 'fetch_url', 'read_files', 'inspect_image',
             'read_tool_artifact', 'search_tool_artifact', 'run_command',
-            'create_memory', 'schedule_create', 'produce_slides',
+            'create_memory', 'schedule_create',
             'spawn_agents', 'get_agent_result', 'search_skills', 'load_skill',
-            'read_skill_resource', 'local_serve_prepare',
-            'local_serve_status', 'local_serve_list',
-            'local_serve_stop'} <= wire_names
+            'read_skill_resource'} <= wire_names
+    assert not {'produce_slides', 'local_serve_prepare', 'local_serve_status',
+                'local_serve_list', 'local_serve_stop'} & wire_names
+    enabled = build_paper_full_tool_epoch(
+        owner_user_id=TEST_OWNER_USER_ID, model='kimi-k3',
+        cfg={'plugins': ['production', 'local_models']})
+    assert {'produce_slides', 'local_serve_prepare', 'local_serve_status',
+            'local_serve_list', 'local_serve_stop'} <= set(_names(enabled.wire_schemas))
     assert 'search_tools' not in wire_names and 'execute_tools' not in wire_names
     from lib.tools.registry import all_specs
     attended_confirmation_names = set().union(*(
@@ -155,7 +160,7 @@ def test_explicit_budget_bounds_wire_but_preserves_searchable_authority():
             'read_tool_artifact', 'search_tool_artifact',
             'search_tools', 'execute_tools'} <= wire_names
     assert {'run_command', 'create_memory', 'schedule_create',
-            'produce_slides', 'spawn_agents'} <= authority_names - wire_names
+            'spawn_agents'} <= authority_names - wire_names
     assert all(epoch.discovery_policy_by_name[name] == 'searchable'
                for name in authority_names - wire_names)
 
@@ -232,10 +237,7 @@ def test_explicit_zero_budget_restores_the_pre_tool_search_control_surface():
     assert epoch.schema_budget_tokens == 0
     assert epoch.schema_tokens > 4_000
     assert epoch.gateway_schema_tokens == 0
-    # wire surface is 21: await_agents retired from the emitted surface
-    # (unified poll absorbs settlement waits); the name-set assertions below
-    # are the real drift guard, the count only pins the surface size.
-    assert len(epoch.wire_schemas) == len(epoch.executable_schemas) == 21
+    assert names == set(_names(epoch.executable_schemas))
     assert 'search_tools' not in names and 'execute_tools' not in names
     assert {'run_command', 'create_memory', 'spawn_agents'} <= names
     assert {'search_skills', 'load_skill', 'read_skill_resource'} <= names
@@ -291,9 +293,11 @@ def test_registered_tool_arms_are_single_factor_in_paper_epoch():
     assert not {'read_tool_artifact', 'search_tool_artifact'} & control_names
     assert result.result_envelope == 'v2'
     assert {'read_tool_artifact', 'search_tool_artifact'} <= result_names
-    assert control.telemetry()['wireToolCount'] == 19
-    assert surface.telemetry()['wireToolCount'] == 6
-    assert result.telemetry()['wireToolCount'] == 21
+    assert control_names == result_names - {'read_tool_artifact', 'search_tool_artifact'}
+    assert control.telemetry()['wireToolCount'] == len(control_names)
+    assert surface.telemetry()['wireToolCount'] == len(surface_names)
+    assert surface_names < result_names | {'search_tools', 'execute_tools'}
+    assert result.telemetry()['wireToolCount'] == len(control_names) + 2
 
 
 def test_full_paper_prompts_teach_the_bounded_gateway_contract():
@@ -572,7 +576,7 @@ def test_ambiguous_paper_epoch_fails_before_dispatch():
 
 def test_research_round_rejects_tool_removed_from_dynamic_epoch():
     """Usage-policy filtering is also an execution deny-list for that round."""
-    from lib.agent_loop import AbortSignal
+    from lib.agent_loop.agent_loop import AbortSignal
     from lib.paper.tools import (
         PaperToolResultBudgetV2,
         build_research_tool_schemas,
@@ -824,7 +828,7 @@ def test_explicit_legacy_result_arm_does_not_silently_use_v2():
 
 def test_research_executor_reads_owner_artifact_through_shared_dispatch(
         monkeypatch):
-    from lib.agent_loop import AbortSignal
+    from lib.agent_loop.agent_loop import AbortSignal
     from lib.paper.tools import (
         PaperToolResultBudgetV2,
         build_research_tool_schemas,
@@ -915,7 +919,7 @@ def test_report_engine_explicit_control_keeps_legacy_full_wire():
     names = set(_names(seen['tools']))
     assert task['status'] == 'done', task.get('error')
     assert task['toolEpochV2']['configuredSchemaBudgetTokens'] == 0
-    assert task['toolEpochV2']['wireToolCount'] == 21
+    assert task['toolEpochV2']['wireToolCount'] == len(seen['tools'])
     assert 'search_tools' not in names and 'execute_tools' not in names
     assert seen['messages'][0]['content'] == 'control system'
 

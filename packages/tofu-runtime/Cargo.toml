@@ -8,24 +8,36 @@ description = "Native runtime foundation for the Rust-primary Tofu migration"
 
 [lib]
 path = "src/lib.rs"
+crate-type = ["rlib", "cdylib"]
 
 [[bin]]
 name = "tofu-native"
 path = "src/main.rs"
 
 [features]
+token-count-abi = []
+flow-abi = []
+checkpoint-storage-abi = []
+html-projection-abi = []
 # Protocol consumers keep historical insertion order; checkpoint-only users opt out.
 default = ["provider-json-order"]
 provider-json-order = ["serde_json/preserve_order"]
 
 [dependencies]
-serde_json = { version = "=1.0.151", features = ["float_roundtrip"] }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "http2", "gzip", "brotli", "deflate", "stream"] }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = { version = "=1.0.151", features = ["float_roundtrip", "raw_value"] }
+reqwest = { version = "=0.12.28", path = "../vendor/reqwest", default-features = false, features = ["rustls-tls", "http2", "gzip", "brotli", "deflate", "stream"] }
 tokio = { version = "=1.51.1", features = ["rt", "time", "sync", "macros", "net", "io-util"] }
 bytes = "1"
+memchr = "=2.8.3"
 sha2 = "0.10"
 serde_core = "=1.0.229"
 libc = "0.2"
 tofu-rayon-core = { path = "vendor/rayon-core", version = "=1.13.0" }
 tiktoken-rs = { version = "=0.11.0", default-features = false }
 base64 = "=0.22.1"
+fancy-regex = "=0.17.0"
+rustc-hash = "=1.1.0"
+
+[dev-dependencies]
+tempfile = "=3.27.0"

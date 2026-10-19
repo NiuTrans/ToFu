@@ -12,16 +12,34 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 import hashlib
 import time
+from typing import TYPE_CHECKING
 
 from lib.goal_runs.contract import goal_run_id_for_task, goal_orchestration_id, GOAL_RUN_CREATED_BY
 from lib.goal_runs.repository import GoalRunRepositoryPort
 from lib.conversation_sync.repository import ConversationSyncRepository
 from lib.conversation_sync.command_service import ConversationTurnCommandService
-from lib.goal_runs.execution_journal import read_goal_execution
+from lib.goal_runs.execution_journal import inspect_goal_execution
 from lib.orchestration.execution_journal import JOURNAL_EVENTS, RecoveryRefused, RecoveryDeferred
 from lib.goal_runs.journal_codec import CHUNK_EVENT
 
+if TYPE_CHECKING:
+    from lib.goal_runs.pending_recovery import PendingGoalActors
+
+
 GOAL_RECOVERY_SOURCE_CONFIG_KEY = '_goalRecoverySourceRunId'
+
+
+def _execution_limits(config):
+    from lib.agent_core.execution_limits import validate_execution_limits
+    if config is not None and not isinstance(config, Mapping):
+        raise RecoveryRefused('Goal accepted execution config is invalid')
+    limits = (config or {}).get('executionLimits')
+    try:
+        validate_execution_limits(limits)
+    except ValueError as exc:
+        raise RecoveryRefused('Goal accepted execution limits are invalid') from exc
+    return deepcopy(limits) if limits is not None else {
+        'max_tokens': None, 'max_tool_calls': None, 'deadline': None}
 
 
 @dataclass(frozen=True)
@@ -30,6 +48,31 @@ class GoalRecoverySeed:
     definition: dict
     metadata: dict
     records: dict
+    account_snapshot: dict | None = None
+    pending_actors: PendingGoalActors | None = None
+
+    def require_settled(self):
+        if self.pending_actors is not None:
+            raise RecoveryRefused('Pending Goal actors require accepted atomic takeover before execution')
+
+    def inspect_pending_inputs(self, *, maximum_bytes, abort_check=None, native_flow_library=None,
+                               task=None):
+        """Rebuild the exact pending graph frontier, without creating recipients."""
+        from lib.orchestration.recovery_frontier import inspect_pending_inputs
+        if self.pending_actors is None:
+            raise RecoveryRefused('Goal input inspection requires its pending actor evidence')
+        if task is not None and (task.get('_goalRecoverySeed') is not self
+                or type(task.get('_userId')) is not int or task.get('_userId') != self.metadata['owner_user_id']
+                or task.get('convId') != self.metadata['conversation_id']
+                or str(task.get('_tenant_id') or '') != self.metadata['tenant_id']):
+            raise RecoveryRefused('Goal input inspection task differs from its source binding')
+        launch = self.launch()
+        return inspect_pending_inputs(self.definition, initial_context=launch.initial_context,
+            records=self.records, pending_agents={key: row['admission']
+                for key, row in self.pending_actors.actors.items()},
+            maximum_bytes=maximum_bytes, max_iterations=launch.max_iterations,
+            worker_context_policy='conversation', loop_budget_policy='checkpoint_extend',
+            abort_check=abort_check, native_flow_library=native_flow_library, parent_task=task)
 
     def launch(self):
         from lib.orchestration.chat_launch import OrchestrationChatFlowLaunchSpec
@@ -38,14 +81,13 @@ class GoalRecoverySeed:
         return OrchestrationChatFlowLaunchSpec(**fields)
 
 
-def _events(runs, run_id):
+def _event_pages(runs, run_id):
     cursor = 0
     while True:
         page = runs.replay(run_id, cursor)
         if page is None or page.cursor_reset:
             raise RecoveryRefused('Goal recovery history disappeared')
-        yield from (event for event in page.events
-                    if event.get('type') in JOURNAL_EVENTS or event.get('type') == CHUNK_EVENT)
+        yield page
         if page.caught_up:
             return
         if page.next_cursor <= cursor:
@@ -53,17 +95,46 @@ def _events(runs, run_id):
         cursor = page.next_cursor
 
 
-def load_goal_recovery_seed(runs, run_id, *, owner_user_id, tenant_id=''):
+def _events(runs, run_id):
+    for page in _event_pages(runs, run_id):
+        yield from (event for event in page.events
+                    if event.get('type') in JOURNAL_EVENTS or event.get('type') in {CHUNK_EVENT, 'execution_recovery_consumed'})
+
+
+def load_goal_recovery_seed(runs, run_id, *, owner_user_id, tenant_id='',
+                            pending_actor_bounds=None, storage=None):
+    """Load restart evidence; explicit native inspection preserves pending actors.
+
+    The default only returns settled replay. An inspected pending seed is fenced
+    from normal Goal execution until accepted atomic actor takeover is available.
+    """
     run = runs.get_execution_snapshot(run_id)
     error = (run or {}).get('error')
     if (run is None or run.get('status') != 'error'
             or not isinstance(error, dict) or error.get('kind') != 'worker_lost'
             or error.get('source') != 'orchestration.startup_recovery'):
         raise RecoveryRefused('Only a restart-interrupted Goal can be rebound')
-    metadata, records = read_goal_execution(
-        _events(runs, run_id), run=run, owner_user_id=owner_user_id,
-        tenant_id=tenant_id)
-    return GoalRecoverySeed(run_id, deepcopy(run['definition']), metadata, records)
+    source_cursor = None
+    events = _events(runs, run_id)
+    if pending_actor_bounds is not None:
+        events = []
+        for page in _event_pages(runs, run_id):
+            events.extend(event for event in page.events
+                          if event.get('type') in JOURNAL_EVENTS or event.get('type') in {CHUNK_EVENT, 'execution_recovery_consumed'})
+            source_cursor = page.next_cursor
+    evidence = inspect_goal_execution(events, run=run, owner_user_id=owner_user_id,
+        tenant_id=tenant_id, storage=storage, source_cursor=source_cursor)
+    if pending_actor_bounds is not None and evidence.journal.pending_agents:
+        from lib.goal_runs.pending_recovery import preflight_pending_actors
+        if storage is None:
+            from lib.storage import get_storage_client
+            storage = get_storage_client()
+        pending = preflight_pending_actors(evidence, storage=storage,
+            frontier_bounds=pending_actor_bounds)
+        return GoalRecoverySeed(run_id, deepcopy(run['definition']), evidence.metadata,
+            deepcopy(evidence.journal.records), pending_actors=pending)
+    metadata, records, account = evidence.settled()
+    return GoalRecoverySeed(run_id, deepcopy(run['definition']), metadata, records, account)
 
 
 @dataclass(frozen=True)
@@ -177,13 +248,19 @@ def _unfinished_handoff(runs, ports, seed, tail, latest, owner):
     return '', str(tail.get('currentAttemptId') or tail.get('runId'))
 
 
-def resume_chat_goal(runs, source_run_id, *, owner_user_id, tenant_id='', ports=None):
+def resume_chat_goal(runs, source_run_id, *, owner_user_id, tenant_id='', ports=None,
+                     pending_actor_bounds=None, storage=None, before_submit=None):
     # Start the cancellation watermark before reads, so Stop during preparation
     # is observed by the same normal command/dispatch boundary as a human send.
     started_at = time.time()
     ports = ports or GoalRecoveryPorts.defaults(owner_user_id, tenant_id)
+    if pending_actor_bounds is None and storage is None:
+        from lib.goal_runs.native_recovery import recovery_options
+        options = recovery_options()
+        pending_actor_bounds, storage = options.get('pending_actor_bounds'), options.get('storage')
     seed = load_goal_recovery_seed(runs, source_run_id,
-                                  owner_user_id=owner_user_id, tenant_id=tenant_id)
+        owner_user_id=owner_user_id, tenant_id=tenant_id,
+        pending_actor_bounds=pending_actor_bounds, storage=storage)
     metadata = seed.metadata
     conversation_id = metadata['conversation_id']
     from lib.orchestration.run_recovery import recovery_claim_successor
@@ -195,7 +272,7 @@ def resume_chat_goal(runs, source_run_id, *, owner_user_id, tenant_id='', ports=
             raise RecoveryRefused('Claimed Goal successor is missing or changed')
         return existing
     latest = ports.goal_repository.latest_for_conversation(conversation_id)
-    attempt = ports.get_attempt(metadata['attempt_id'], user_id=owner_user_id)
+    attempt = ports.get_attempt(metadata['attempt_id'], user_id=owner_user_id, include_execution_config=True)
     if (attempt.get('turnId') != metadata['turn_id']
             or attempt.get('taskId') != metadata['task_id']
             or attempt.get('status') != 'interrupted'):
@@ -225,6 +302,9 @@ def resume_chat_goal(runs, source_run_id, *, owner_user_id, tenant_id='', ports=
     command_id = _recovery_command_id(source_run_id, metadata['attempt_id'], predecessor)
     from lib.goal_runs.continuation import goal_continuation_config
     config = goal_continuation_config(deepcopy(metadata['invocation_policy']['config']))
+    # Root limits are accepted command authority, not a child's local policy.
+    # Keep absolute expiry and zero limits; recovery never grants a fresh budget.
+    config['executionLimits'] = _execution_limits(attempt.get('config'))
     if config.get('modelRef'):
         config.pop('_pinned_provider_id', None)
     for key in ('flowDefinition', 'flowBuiltin', 'flowId'):
@@ -232,6 +312,8 @@ def resume_chat_goal(runs, source_run_id, *, owner_user_id, tenant_id='', ports=
     config.update(autopilot=True, autopilotEnabled=True, planMode=False,
                   autopilotMaxIterations=metadata['launch']['max_iterations'])
     from lib.identity import PrincipalContext
+    if before_submit is not None:
+        before_submit()
     outcome = ports.commands.create_turn(
         conversation_id, owner_user_id,
         {'commandId': command_id, 'config': config,
@@ -246,6 +328,7 @@ def resume_chat_goal(runs, source_run_id, *, owner_user_id, tenant_id='', ports=
                                         owner_user_id=owner_user_id, tenant_id=tenant_id or None),
         trusted_goal_objective=metadata['objective'],
         trusted_goal_recovery_source=source_run_id,
+        trusted_review_source=(metadata['turn_id'], metadata['attempt_id'], metadata['task_id']),
         trusted_goal_recovery_abort_after=float(attempt['createdAt']) / 1000.0,
     )
     value = outcome.value
@@ -257,18 +340,24 @@ def resume_chat_goal(runs, source_run_id, *, owner_user_id, tenant_id='', ports=
     return successor
 
 
-def bind_goal_recovery_task(task, *, runs=None, conversation_repository=None, get_attempt=None):
+def bind_goal_recovery_task(task, *, runs=None, conversation_repository=None, get_attempt=None,
+                            pending_actor_bounds=None, storage=None):
     """Restore evidence only on the new command's already-bound executor."""
     source = (task.get('config') or {}).get(GOAL_RECOVERY_SOURCE_CONFIG_KEY)
     if not source:
         return None
+    if pending_actor_bounds is None and storage is None:
+        from lib.goal_runs.native_recovery import recovery_options
+        options = recovery_options(task)
+        pending_actor_bounds, storage = options.get('pending_actor_bounds'), options.get('storage')
     from lib.tasks_pkg.manager._registry import task_user_id
     owner, tenant = task_user_id(task), str(task.get('_tenant_id') or '')
     if runs is None:
         from lib.orchestration.run_service import OrchestrationRunService
         from lib.orchestration.sidecar_run_store import SidecarOrchestrationRunStore
         runs = OrchestrationRunService(SidecarOrchestrationRunStore(owner, tenant_id=tenant))
-    seed = load_goal_recovery_seed(runs, source, owner_user_id=owner, tenant_id=tenant)
+    seed = load_goal_recovery_seed(runs, source, owner_user_id=owner, tenant_id=tenant,
+                                  pending_actor_bounds=pending_actor_bounds, storage=storage)
     metadata = seed.metadata
     if (task.get('convId') != metadata['conversation_id']
             or (task.get('config') or {}).get('_goalObjective') != metadata['objective']):
@@ -288,6 +377,12 @@ def bind_goal_recovery_task(task, *, runs=None, conversation_repository=None, ge
             or attempt.get('status') not in {'pending', 'running'}
             or attempt.get('operation') != 'generate'):
         raise RecoveryRefused('Goal recovery executor is not the accepted attempt')
+    source_attempt = get_attempt(metadata['attempt_id'], user_id=owner, include_execution_config=True)
+    if (source_attempt.get('taskId') != metadata['task_id']
+            or source_attempt.get('turnId') != metadata['turn_id']
+            or _execution_limits(source_attempt.get('config')) != _execution_limits(accepted)
+            or _execution_limits(task.get('config')) != _execution_limits(accepted)):
+        raise RecoveryRefused('Goal recovery execution limits differ from accepted source authority')
     turn = conversation_repository.turn(task['convId'], task['_turnId'], owner)
     if not turn or turn.get('currentAttemptId') != task['_attemptId']:
         raise RecoveryRefused('Goal recovery Turn no longer owns the executor')

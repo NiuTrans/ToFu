@@ -118,10 +118,10 @@ def _script_import_dependencies(root: Path, path: Path) -> set[str]:
 def check_declared_scripts(root: Path, tracked: set[str]) -> list[str]:
     """A clean checkout must contain release entrypoints and local script imports.
 
-    Read declared build/workflow/catalog sources and retained test imports.
+    Read declared build/workflow sources and retained test imports.
     Never execute scripts or follow documentation/generated command examples.
     """
-    declarations = [root / 'Makefile', root / 'package.json', root / 'docs/catalog.json']
+    declarations = [root / 'Makefile', root / 'package.json']
     declarations.extend(sorted((root / '.github/workflows').glob('*.yml')))
     declarations.extend(sorted((root / '.github/workflows').glob('*.yaml')))
     pending = {name for name in tracked

@@ -27,6 +27,13 @@ export interface TransientTurnPresentation {
   model?: string;
   modelRoute?: TurnModelRoute;
   thinkingLength?: number;
+
+  /** Read-only context for a durable Goal phase; never an execution verdict. */
+  goalProgress?: {
+    iteration: string; role: string; rootSummary: boolean;
+    currentPhase?: Omit<TransientTurnPresentation, 'goalProgress'>;
+    workers: ReadonlyArray<{ text: string; phase: string; waitReason: string; latestTool?: string; toolError?: string }>;
+  };
 }
 
 export type TransientTurnRecord = TurnRecord & {

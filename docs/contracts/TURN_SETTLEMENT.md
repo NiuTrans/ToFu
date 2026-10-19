@@ -12,7 +12,7 @@ statuses are:
 | Status | Meaning |
 |---|---|
 | `completed` | provider/agent finished normally |
-| `interrupted` | cooperative user or supersession stop |
+| `interrupted` | cooperative user/supersession stop or service recovery |
 | `truncated` | provider limit or content filter cut output short |
 | `failed` | generation, provider stream, or executor startup failed |
 
@@ -33,6 +33,19 @@ response `error_message` while `error_code` stays `database_integrity`, so
 the `[TurnLifecycle] conversation authority integrity failure` and
 `[ProviderIngress] async delivery failed` log lines name the specific fence
 that fired.
+
+Service shutdown stamps `server_shutdown` through the shared task quiesce owner
+before closing native clients; their terminal callbacks can settle immediately.
+The existing verdict then records `interrupted/server_restart` with
+`evidence: system_recovery`. A prior user Stop retains its original cause.
+Problem: joining native clients first lost the shutdown source and fabricated
+`user_abort`. Decision: declare the cause before physical cancellation, while
+still joining native work before its dependencies close. Alternative rejected:
+rewriting the verdict after restart would replace an already committed fact.
+The full production shutdown test keeps a real native provider request and SSE
+consumer active, verifies joined exit and the reopened verdict, and rejects a
+new dispatch while the original usage is unknown, even if request config claims
+it is complete (`tests/server/test_native_production_shutdown.py`).
 
 Invocation guards stamp `_invocationStopReason` (`stalled` / `deadline`) and an
 internal error envelope before signaling physical abort. They settle as
@@ -86,6 +99,30 @@ continuations are exhausted, the turn settles as
 the partial projection remains durable (and prefill-capable models expose it to
 `continue`) and is never cleared by the whole-turn regeneration retry path.
 
+For a tool-bearing stream, parseable argument JSON proves only a complete
+prefix. Problem: the legacy recovery classifier admitted that prefix while
+the shared execution loop rejected its unverified stream, bypassing recovery.
+Decision: the typed stream verdict controls bounded tool-round retry, including
+when a legacy salvage hint is present. A verified provider finish without a
+`[DONE]` marker remains valid. The accumulator retires unverified announcements
+and speculative results before adoption; each discarded announcement receives
+an aborted completion receipt with no model-facing tool output. A retry closes
+its physical round before the next round opens; exhausted recovery also closes
+the rejected round. Alternatives rejected: treating
+parseable arguments as completion permits a partial tool batch; relaxing the
+common execution gate or dropping event invariants hides the defect. The real
+`incomplete_tool_stream` replay proves no unverified write, one verified write,
+paid-attempt accounting and paired durable round/tool events.
+
+Cooperative Stop before runner entry, including workspace admission, uses the
+existing aborted-task finalizer. Both the task flag and cancellation event are
+checked. Problem: workspace admission reported Stop as an executor error and
+could ignore an already-signalled event. Decision: preserve typed cancellation
+through the shared worker wrapper, keeping prepared workspace preservation and
+terminal persistence. Internal authority fences and binding failures retain
+their failure lane; converting every admission exception to cancellation would
+hide those failures.
+
 For single-agent Responses, an assistant output explicitly marked `commentary`
 is intermediate work even when the response closes with `stop`. With no tool
 calls, a valid unchanged phase replay triggers at most two continuations per
@@ -138,6 +175,22 @@ valid short text answers, while disabling recovery would reopen the upstream
 greeting incident. Shortness remains diagnostic evidence, not overwrite
 permission. The public task result and durable turn share this delivered body.
 
+## Event-delivery cancellation
+
+**Problem:** shutdown cancels event admission while a producer is still draining;
+wrapping that cancellation as a generic delivery failure misreports capacity
+pressure. **Decision:** the event admission fence preserves cancellation and
+revocation types across later emissions. Closing delivery is cancellation, not
+capacity rejection. The fatal sink uses the shared verdict matrix for typed
+cancellation: interrupted work publishes an aborted terminal with no failure
+envelope, preserving `server_shutdown` as `server_restart`. Invocation guards
+and internal authority fences retain their failed verdicts and diagnostics.
+Accepted event debt still drains before terminal persistence; cancellation does
+not replay model work or discard accepted evidence. **Alternatives rejected:**
+relabeling `server_busy` in the browser hides genuine durability failures;
+treating every physically aborted task as cancellation hides guard/fence faults.
+Specs: `tests/tasks_pkg/test_internal_delivery_error_attribution.py`.
+
 ## Delivery dependencies
 
 A completed provider Turn is not a user-objective completion receipt. Existing
@@ -187,7 +240,7 @@ a terminal phase fails. A conflicting batch rolls back its earlier mutations.
 Alternatives rejected: completing all phases, fixing projections only at restart,
 or adding a separate caller-supplied verdict beside message evidence.
 Specs: `packages/tofu-db/src/turn_visible_settlement_tests.rs` and
-`tests/storage_sidecar/test_turns_delta_sync.py`.
+`tests/storage_authority_sql/test_turns_delta_sync.py`.
 
 Visible tool segments use the public constructor's metadata rules on both
 authorities: retain exact nonnegative JavaScript-safe `roundNum`, preserve
@@ -205,6 +258,20 @@ A Stop acknowledgement means the owned attempt accepted a cancellation signal,
 not that its workers have exited or its Turn has settled. All chat Stop entry
 points delegate to the same owner-checked cancellation authority; a terminal or
 terminalizing attempt cannot be rewritten by a racing Stop.
+
+
+Post-Stop event admission raises typed `EventDeliveryCancelled`, never a new
+persistence failure. Unaccepted late frames stay invisible without poisoning
+admission or planting a delivery-wedge warning; accepted FIFO evidence still
+drains before terminal settlement. Typed cooperative cancellation at a model or
+persistence boundary uses the existing terminal owner with `aborted` and no
+fatal error payload. Internal fences, invocation guards and genuine delivery
+failures retain their failed verdicts. **Problem:** a cancelled child-panel write
+poisoned parent admission, replacing cancellation with generic `server_busy`.
+**Decision:** preserve cancellation identity at admission and settlement.
+**Alternative rejected:** suppressing all failures on an aborted task hides
+real storage faults. Specs: task-event-delivery and internal-delivery-attribution
+regressions.
 
 Explicit cancellation reaches the active child-agent session and tool resources
 without waiting for the parent model/tool loop to finalize. Ordinary parent
@@ -237,7 +304,11 @@ the swarm notification lane, preserving unrelated peer/background-command
 receipts and child results for inspection. Startup recovery checks owner-scoped
 Turn authority and fails closed on a committed Stop or unavailable cancellation
 authority. A terminated driver may replay terminal results, but never respawns
-missing/nonterminal checkpoints from a user cancellation.
+missing/nonterminal checkpoints from a user cancellation on its own. An exact
+accepted Continue may reopen safe ordinary children carrying parent-Stop
+provenance after the old workers drain; completed results, individual kills,
+retained assignment CAS and unresolved tool effects are not replayed. See
+[run continuity](../RUN_CONTINUITY.md).
 
 Server shutdown is distinct: `abort_reason=server_shutdown` derives
 `status=interrupted`, `outcome=interrupted`, `reason=server_restart`, with
@@ -428,6 +499,14 @@ bounded `detail` and `failureAttribution`). The producer in
 attempt-event decoders accept the same durable receipts. Strict settlement
 and receipt field validation remains enabled.
 
+
+Failure attribution projects the loop's zero-based internal dispatch index into
+one-based `roundNum`, including the first dispatch as round 1. The internal task
+index stays zero-based for context composition. Invalid/negative indices do not
+invent a round, and task-start failures never blame replayed rounds or tools.
+Normalizing the internal carrier was rejected because it shifts context-policy
+consumers; only the public diagnostic boundary performs the conversion.
+
 Alternatives rejected: dropping retry evidence hides why another attempt ran;
 allowing undeclared settlement fields removes the protocol safety boundary.
 `tests/turn_lifecycle/test_failure_attribution.py` covers produced receipts in
@@ -508,4 +587,6 @@ execution batch may supersede the old blocker. Alternatives rejected: treating
 `retryable` as permission to replay immediately, asking the model to invent a
 magic stopping token, or converting a tool refusal into successful settlement.
 
-Build-specific verification: [native parity evidence](../evidence/tofudb_native_parity_20261001.json).
+Build-specific verification: `tofudb_native_parity_20261001.json`.
+
+<!-- Evidence note: former docs/evidence/ artifact snapshots cited here were retired from the tree; cited JSON artifacts remain recoverable from git history. -->

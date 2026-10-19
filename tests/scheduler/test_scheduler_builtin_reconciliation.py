@@ -11,9 +11,9 @@ pytestmark = pytest.mark.unit
 
 
 def test_ensure_adopts_legacy_builtin_and_retires_new_duplicate():
-    from lib.storage_sidecar import schema
-    from lib.storage_sidecar.adapters.sqlite import SQLiteSession
-    from lib.storage_sidecar.operations_pkg._timers import _scheduler_ensure
+    from lib.storage_authority_sql import schema
+    from lib.storage_authority_sql.adapters.sqlite import SQLiteSession
+    from lib.storage_authority_sql.operations_pkg._timers import _scheduler_ensure
 
     connection = sqlite3.connect(':memory:')
     connection.row_factory = sqlite3.Row
@@ -83,9 +83,9 @@ def test_ensure_adopts_legacy_builtin_and_retires_new_duplicate():
 
 
 def test_ensure_does_not_adopt_same_name_with_different_task_type():
-    from lib.storage_sidecar import schema
-    from lib.storage_sidecar.adapters.sqlite import SQLiteSession
-    from lib.storage_sidecar.operations_pkg._timers import _scheduler_ensure
+    from lib.storage_authority_sql import schema
+    from lib.storage_authority_sql.adapters.sqlite import SQLiteSession
+    from lib.storage_authority_sql.operations_pkg._timers import _scheduler_ensure
 
     connection = sqlite3.connect(':memory:')
     connection.row_factory = sqlite3.Row

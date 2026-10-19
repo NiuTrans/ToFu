@@ -62,7 +62,7 @@ def _run(coro):
 class TestAsyncDispatchStreamIsNative:
     def test_upload_timeout_releases_slot_without_health_penalty_or_fallback(self, monkeypatch):
         from lib.llm_dispatch import api
-        from lib.llm_errors import RequestUploadTimeoutError
+        from lib.llm.llm_errors import RequestUploadTimeoutError
 
         slot = _make_slot(model='kimi-k3')
         dispatcher = _FakeDispatcher([slot, _make_slot(model='kimi-k3', key='k1')])
@@ -168,7 +168,7 @@ class TestAsyncDispatchStreamRetry:
             return None
         monkeypatch.setattr('lib.llm._transport.async_abortable_sleep', _no_sleep)
 
-        from lib.llm_errors import RateLimitError
+        from lib.llm.llm_errors import RateLimitError
         calls = {'n': 0}
 
         async def _fake_astream(body, **kwargs):
@@ -193,7 +193,7 @@ class TestAsyncDispatchStreamRetry:
 
     def test_429_after_partial_output_fires_attempt_restart(self, monkeypatch):
         from lib.llm_dispatch import api
-        from lib.llm_errors import RateLimitError
+        from lib.llm.llm_errors import RateLimitError
 
         slots = [_make_slot(key='partial'), _make_slot(key='success')]
         monkeypatch.setattr(api, 'get_dispatcher', lambda: _FakeDispatcher(slots))
@@ -232,7 +232,7 @@ class TestAsyncDispatchStreamRetry:
 
     def test_429_attempt_budget_matches_sync_dispatch(self, monkeypatch):
         from lib.llm_dispatch import api
-        from lib.llm_errors import RateLimitError
+        from lib.llm.llm_errors import RateLimitError
 
         slots = [_make_slot(key=f'k{i}') for i in range(3)]
         disp = _FakeDispatcher(slots)
@@ -262,7 +262,7 @@ class TestAsyncDispatchStreamRetry:
     def test_credential_delivery_anomaly_has_same_four_response_cap(
             self, monkeypatch):
         from lib.llm_dispatch import api
-        from lib.llm_errors import RateLimitError
+        from lib.llm.llm_errors import RateLimitError
 
         slot = _make_slot(model='kimi-k3', key='kA')
         dispatcher = _FakeDispatcher([slot, slot, slot, slot])
@@ -311,7 +311,7 @@ class TestAsyncDispatchStreamUnreachableFailover:
         disp = _FakeDispatcher([dead, live])
         monkeypatch.setattr(api, 'get_dispatcher', lambda: disp)
 
-        from lib.llm_errors import EndpointUnreachableError
+        from lib.llm.llm_errors import EndpointUnreachableError
         calls = {'n': 0}
 
         async def _fake_astream(body, **kwargs):
@@ -341,7 +341,7 @@ class TestAsyncDispatchStreamUnreachableFailover:
 class TestAsyncDispatchStreamAllUnreachable:
     def test_all_unreachable_raises_friendly_error(self, monkeypatch):
         from lib.llm_dispatch import api
-        from lib.llm_errors import EndpointUnreachableError
+        from lib.llm.llm_errors import EndpointUnreachableError
 
         # Single dead slot; after it's excluded the dispatcher returns None.
         dead = _make_slot(model='glm5.1-FP8', key='dead')
@@ -373,7 +373,7 @@ class TestAsyncDispatchStreamAllUnreachable:
 class TestAsyncDispatchStreamAbort:
     def test_abort_propagates_and_releases_slot(self, monkeypatch):
         from lib.llm_dispatch import api
-        from lib.llm_errors import AbortedError
+        from lib.llm.llm_errors import AbortedError
 
         slot = _make_slot()
         disp = _FakeDispatcher([slot])
@@ -390,3 +390,49 @@ class TestAsyncDispatchStreamAbort:
                 [{'role': 'user', 'content': 'hi'}], log_prefix='[t]'))
         # Abort must release the inflight reservation, not leak it.
         assert slot.inflight == 0
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize('mode', ['sync', 'async'])
+@pytest.mark.parametrize('prebuilt', [False, True])
+def test_client_tool_choice_and_generation_options_reach_selected_slot(
+        monkeypatch, mode, prebuilt):
+    from copy import deepcopy
+    from lib.llm_dispatch import api
+    import lib.llm as llm
+    import lib.llm.astream as astream
+
+    slot = _make_slot()
+    monkeypatch.setattr(api, 'get_dispatcher', lambda: _FakeDispatcher([slot]))
+    tools = [{'type': 'function', 'function': {'name': 'external_probe'}}]
+    choice = {'type': 'function', 'function': {'name': 'external_probe'}}
+    options = {'response_format': {'type': 'json_object'}, 'seed': 79,
+               'parallel_tool_calls': False, 'stop': ['END']}
+    messages = [{'role': 'user', 'content': 'client request'}]
+    request = ({'model': slot.model, 'messages': messages, 'max_tokens': 128,
+                'stream': True, 'tools': tools} if prebuilt else messages)
+    original = deepcopy((request, choice, options))
+    seen = []
+
+    def transport(body, **kwargs):
+        seen.append(deepcopy(body))
+        # A transport cannot contaminate a later retry's caller controls.
+        body['tool_choice']['function']['name'] = 'transport-mutated'
+        body['response_format']['type'] = 'transport-mutated'
+        return {'role': 'assistant', 'content': 'ok'}, 'stop', {'completion_tokens': 1}
+    async def async_transport(body, **kwargs):
+        return transport(body, **kwargs)
+    monkeypatch.setattr(llm, 'stream_chat', transport)
+    monkeypatch.setattr(astream, 'async_stream_chat', async_transport)
+    kwargs = dict(tools=tools, tool_choice=choice, generation_options=options,
+                  max_tokens=128, prefer_model=slot.model)
+    if mode == 'async':
+        asyncio.run(api.async_dispatch_stream(request, **kwargs))
+    else:
+        api.dispatch_stream(request, **kwargs)
+    assert len(seen) == 1
+    assert seen[0]['tools'] == tools
+    assert seen[0]['tool_choice'] == choice
+    assert all(seen[0][key] == value for key, value in options.items())
+    assert (request, choice, options) == original
+    assert slot.inflight == 0

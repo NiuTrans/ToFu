@@ -1,10 +1,14 @@
 /** Rich slot routing and sibling labels; tool bodies and Swarm lifecycle are injected collaborators. */
 import { escapeHtml } from '../../../html-safety';
+
+import { programOwnsGateway } from '../../presentation/program-activity';
 import { isProgramToolRound, isSwarmToolRound } from '../../presentation/tool-round-presentation';
 import { programChildParentCallId } from '../../presentation/tool-execution-groups';
 import type { ToolGroupPorts, ToolGroupRound } from './contracts';
 export function renderToolSlot(round: ToolGroupRound, context: readonly ToolGroupRound[], suffix: string,
   ports: ToolGroupPorts, inspector: (round: ToolGroupRound) => string): string {
+
+  if (programOwnsGateway(round, context)) return '';
   if (isProgramToolRound(round)) {
     return `<div data-prn="${round.roundNum}" data-prn-kind="program">${ports.renderProgram(round)}</div>`;
   }

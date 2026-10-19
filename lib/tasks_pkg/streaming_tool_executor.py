@@ -42,19 +42,29 @@ from lib.observability import InstrumentedThreadPoolExecutor
 from concurrent.futures import TimeoutError as _FuturesTimeoutError
 
 from lib.log import get_logger
-from lib.tool_call_identity import ensure_unique_tool_call_ids
-from lib.tool_caller_identity import (
+from lib.tool_results.tool_call_identity import ensure_unique_tool_call_ids
+from lib.tool_results.tool_caller_identity import (
     MAX_TOOL_CALLER_ID_CHARS,
     normalize_tool_caller,
     tool_caller_authority,
 )
-from lib.tool_round_replay import SUPERSEDED_PROVIDER_ATTEMPT_FIELD
+from lib.tool_results.tool_round_replay import SUPERSEDED_PROVIDER_ATTEMPT_FIELD
 from lib.tools.contracts import (
     ToolContractError,
     validate_tool_arguments_from_documents,
 )
 
 logger = get_logger(__name__)
+
+
+def _carry_trusted_result(instance, content):
+    """Carry the result-value owner's host-only capture through string wrappers."""
+    from lib.tools.result_value import CapturedToolResult
+    canonical = getattr(content, 'canonical', None)
+    if isinstance(canonical, CapturedToolResult):
+        instance.canonical = canonical
+        instance.envelope = getattr(content, 'envelope', False)
+    return instance
 
 
 class _ContentWithDisplayResults(str):
@@ -90,7 +100,7 @@ class _ContentWithDisplayResults(str):
         # idempotency. Transient failures must fall through to the ordinary
         # handler instead of becoming an authoritative prefetch hit.
         instance.cacheable = bool(cacheable)
-        return instance
+        return _carry_trusted_result(instance, content)
 
 
 class _ContentWithResultProjection(str):
@@ -109,7 +119,7 @@ class _ContentWithResultProjection(str):
         instance.result_projection_items = (
             projection_items if projection_items is not None else [])
         instance.result_producer_metadata = producer_metadata
-        return instance
+        return _carry_trusted_result(instance, content)
 
 
 # ── Read-only tools safe to pre-execute during streaming ──
@@ -505,6 +515,18 @@ class StreamingToolAccumulator:
                         SUPERSEDED_PROVIDER_ATTEMPT_FIELD: True,
                     },
                 )
+                # Orphan announcements never enter the tool pipeline, which
+                # normally publishes the occurrence's completion receipt.
+                # Close that occurrence here without inventing model output
+                # or a successful tool execution.
+                from lib.agent_core.events import EventType, build_event
+                from lib.tasks_pkg.manager import append_event
+                append_event(self._task, build_event(
+                    EventType.TOOL_COMPLETE,
+                    roundNum=rn, toolCallId=tc_id, toolName=tool_name,
+                    toolContent='', status='aborted',
+                    tStart=entry['tStart'], tEnd=entry['tEnd'],
+                ))
                 finalized += 1
                 logger.info(
                     '[%s] StreamingToolExec: settled orphan early-announced '
@@ -677,6 +699,13 @@ class StreamingToolAccumulator:
                          'for %s: %s', self._tid, fn_name, e)
 
         # ── Pre-execute read-only tools ──
+        # Source-bound reads need the canonical handler's request-owned capture
+        # and successful settlement before publishing their FileWitness. The
+        # speculative helper returns only content; caching it would bypass that
+        # boundary and lose the requested source descriptor. Keep the early
+        # presentation row, then let normal dispatch execute this opt-in read.
+        if fn_name == 'read_files' and fn_args.get('bind_sources') is True:
+            return
         # The speculative filesystem helper reads this server's filesystem.
         # Remote roots must execute through the addressed project handler so
         # device containment and read-before-write tokens remain authoritative.
@@ -777,11 +806,19 @@ class StreamingToolAccumulator:
                     '%s (tc_id=%s, rn=%d) — UI shows activity immediately',
                     self._tid, fn_name, tc_id[:8], rn)
 
-    def _execute_one_for_call(self, fn_name: str, fn_args: dict, tc_id: str) -> str:
+    def _execute_one_for_call(self, fn_name: str, fn_args: dict, tc_id: str) -> str | tuple:
         from lib.tools.execution_timing import tool_execution_timing
         with tool_execution_timing(fn_name, task_id=self._task.get('id'),
                 conversation_id=self._task.get('convId'), tool_call_id=tc_id):
-            return self._execute_one(fn_name, fn_args)
+            from lib.tasks_pkg.tool_dispatch._flags import (
+                _PROJECT_CACHEABLE_TOOLS, _ToolResultCacheReceipt,
+            )
+            from lib.write_freshness import project_read_cache_generation
+            generation = project_read_cache_generation()
+            content = self._execute_one(fn_name, fn_args)
+            if fn_name in _PROJECT_CACHEABLE_TOOLS:
+                return _ToolResultCacheReceipt((content,), generation)
+            return content
 
     def _execute_one(self, fn_name: str, fn_args: dict) -> str:
         """Execute a single read-only tool call in a background thread.
@@ -792,6 +829,11 @@ class StreamingToolAccumulator:
         Returns:
             Tool result content as string.
         """
+        from lib.tasks_pkg.coordinator_policy import coordinator_call_rejection
+        denial = coordinator_call_rejection(self._task, fn_name, fn_args, self._project_path)
+        if denial:
+            return _ContentWithDisplayResults(denial, cacheable=False)
+
         # Abort check: skip execution if user already clicked Stop
         if self._task.get('aborted'):
             logger.info('[%s] StreamingToolExec: skipping %s — task aborted',
@@ -813,9 +855,13 @@ class StreamingToolAccumulator:
                 fn_args = route_project_tool_args(self._task, fn_name, fn_args)
                 _base = self._project_path or '.'
                 _projection_items = [] if fn_name == 'read_files' else None
+
+                _read_observations = []
                 _execute_kwargs = {'task': self._task}
                 if _projection_items is not None:
                     _execute_kwargs['result_projection_items'] = _projection_items
+
+                    _execute_kwargs['read_observations'] = _read_observations
                 _content = execute_tool(
                     fn_name, fn_args, _base, conv_id=_conv_id,
                     **_execute_kwargs)
@@ -834,7 +880,8 @@ class StreamingToolAccumulator:
                             record_read_paths,
                         )
                         record_read_paths(self._task, fn_args,
-                                          self._project_path, _content)
+                                          self._project_path, _content,
+                                          observations=_read_observations)
                     except Exception as _fe:
                         logger.debug('[%s] StreamingToolExec: freshness '
                                      'read-token record failed (non-fatal): %s',
@@ -866,15 +913,18 @@ class StreamingToolAccumulator:
                 # hazard as the fetch_url fix: this result is cached and the
                 # serial pipeline SKIPS re-execution, so any drift here was
                 # silently served. (Lazy import avoids a cycle.)
-                from lib.tasks_pkg.handlers.search._core import _web_search_one
+                from lib.tasks_pkg.handlers.search._handlers import _load_search_backend
+                search_core, format_search_for_tool_response = _load_search_backend()
+                from lib.tasks_pkg.handlers.search._presentation import (
+                    failed_search_observation, format_search_observations,
+                    search_observation,
+                )
                 from lib.tasks_pkg.handlers.search._display import (
                     _format_search_display_for_results,
-                    _vertical_header_for_llm,
                     _vertical_to_sse_payload,
                 )
-                from tofu_search.search import format_search_for_tool_response
                 user_question = self._task.get('lastUserQuery', '')
-                from lib.search_bridge import bind_search_browser
+                from lib.search.search_bridge import bind_search_browser
                 owner_user_id = self._task.get('_userId', '') or ''
                 configured_client_id = (
                     (self._task.get('config') or {}).get('browserClientId') or '')
@@ -899,10 +949,12 @@ class StreamingToolAccumulator:
                     batch_freshness = fn_args.get('freshness', '')
                     specs = []
                     for s in queries[:5]:
-                        if isinstance(s, dict) and s.get('query'):
-                            specs.append((s['query'],
-                                          s.get('freshness', '') or batch_freshness,
-                                          s.get('vertical') or batch_vertical))
+                        if isinstance(s, dict):
+                            q = s.get('query', '')
+                            if isinstance(q, str) and q.strip():
+                                specs.append((q.strip(),
+                                              s.get('freshness', '') or batch_freshness,
+                                              s.get('vertical') or batch_vertical))
                         elif isinstance(s, str) and s.strip():
                             specs.append((s.strip(), batch_freshness, batch_vertical))
 
@@ -911,24 +963,27 @@ class StreamingToolAccumulator:
                         with bind_search_browser(
                                 user_id=owner_user_id,
                                 client_id=selected_client_id):
-                            results, search_diag, _bkdn, vertical_result = _web_search_one(
+                            results, search_diag, breakdown, vertical_result = search_core._web_search_one(
                                 q, user_question, f, vertical=v)
-                        fmt = format_search_for_tool_response(results, search_diag=search_diag, query=q)
-                        if vertical_result:
-                            fmt = _vertical_header_for_llm(vertical_result) + fmt
-                        return (results, fmt, vertical_result)
+                        return (results, search_diag, breakdown, vertical_result)
 
-                    ordered = run_batch_concurrent(specs, _worker, max_workers=5, tag='Search')
-                    n = len(specs)
+                    ordered = run_batch_concurrent(
+                        specs, _worker, max_workers=5, tag='Search',
+                        abort=lambda: bool(self._task.get('aborted')))
                     all_display_results = []
                     verticals = []
-                    parts = []
+                    observations = []
+                    diagnostics = []
                     for idx, item in enumerate(ordered):
                         q = specs[idx][0]
                         if item is None:
-                            parts.append(f'Search failed for "{q}": internal error (see logs)')
+                            observations.append(failed_search_observation(q))
                             continue
-                        results, fmt, vertical_result = item
+                        results, diag, breakdown, vertical_result = item
+                        observations.append(search_observation(
+                            q, results, diag, breakdown, vertical_result))
+                        if diag:
+                            diagnostics.append({'query': q, **diag})
                         disp = _format_search_display_for_results(results)
                         for dr in disp:
                             dr['_q'] = q
@@ -939,11 +994,13 @@ class StreamingToolAccumulator:
                                 payload = dict(payload)
                                 payload['query'] = q
                                 verticals.append(payload)
-                        parts.append(f'=== Search: {q} ===\n{fmt}' if n > 1 else fmt)
                     formatted = _ContentWithDisplayResults(
-                        '\n\n'.join(p for p in parts if p),
+                        format_search_observations(
+                            observations, format_search_for_tool_response),
                         all_display_results,
                     )
+                    if diagnostics:
+                        formatted.search_diag = {'batch': diagnostics}
                     if verticals:
                         formatted.vertical = {'batch': verticals}
                     return formatted
@@ -955,14 +1012,15 @@ class StreamingToolAccumulator:
                 with bind_search_browser(
                         user_id=owner_user_id,
                         client_id=selected_client_id):
-                    results, search_diag, engine_breakdown, vertical_result = _web_search_one(
+                    results, search_diag, engine_breakdown, vertical_result = search_core._web_search_one(
                         query, user_question, freshness, vertical=vertical_param)
-                formatted_text = format_search_for_tool_response(results, search_diag=search_diag, query=query)
-                if vertical_result:
-                    formatted_text = _vertical_header_for_llm(vertical_result) + formatted_text
+                formatted_text = format_search_observations([
+                    search_observation(query, results, search_diag,
+                                       engine_breakdown, vertical_result)],
+                    format_search_for_tool_response)
                 display_results = _format_search_display_for_results(results)
                 formatted = _ContentWithDisplayResults(formatted_text, display_results)
-                if not display_results and search_diag:
+                if search_diag:
                     formatted.search_diag = search_diag
                 if engine_breakdown:
                     formatted.engine_breakdown = engine_breakdown
@@ -987,7 +1045,7 @@ class StreamingToolAccumulator:
                 from lib.tasks_pkg.handlers.search._display import _format_fetch_display
                 from lib.tasks_pkg.tool_display import _short_url
                 user_question = self._task.get('lastUserQuery', '')
-                from lib.search_bridge import bind_search_browser
+                from lib.search.search_bridge import bind_search_browser
                 owner_user_id = self._task.get('_userId', '') or ''
                 configured_client_id = (
                     (self._task.get('config') or {}).get('browserClientId') or '')
@@ -1184,10 +1242,14 @@ class StreamingToolAccumulator:
             # Log compressed size instead of len(dict) which would be key count
             sz = content.get('compressedSize', 0)
             return content, sz
-        # Normalize ``str`` subclasses too: their metadata has already been
-        # copied into explicit bounded cache slots above, so retaining the
-        # subclass would duplicate the sidecar in ``raw_state``.
+        # Drop display sidecars already copied into explicit cache slots, but
+        # keep host canonical evidence: flattening that into a plain string
+        # would make authoritative prefetch silently destroy omitted source.
         content_str = content if type(content) is str else str(content)
+        if getattr(content, 'canonical', None) is not None:
+            from lib.tools.result_value import TrustedResultText
+            content_str = _carry_trusted_result(
+                TrustedResultText(content_str), content)
         return content_str, len(content_str)
 
     def inject_into_cache(self, task: dict) -> int:
@@ -1205,6 +1267,8 @@ class StreamingToolAccumulator:
             _ensure_tool_result_cache,
             _make_cache_key,
             _store_tool_result_cache_entry,
+            _ToolResultCacheReceipt,
+            _project_cache_entry_is_current,
         )
         _ensure_tool_result_cache(task)
 
@@ -1215,6 +1279,12 @@ class StreamingToolAccumulator:
             if future.done() and not future.cancelled():
                 try:
                     content = future.result(timeout=0)
+
+                    generation = getattr(content, 'generation', None)
+                    if isinstance(content, _ToolResultCacheReceipt):
+                        if not _project_cache_entry_is_current(fn_name, content):
+                            continue
+                        content = content[0]
                     if not getattr(content, 'cacheable', True):
                         logger.info(
                             '[%s] StreamingToolExec: %s pre-exec outcome is '
@@ -1245,7 +1315,10 @@ class StreamingToolAccumulator:
                     if _producer_metadata is not None:
                         cache_entry += (_producer_metadata,)
                     _store_tool_result_cache_entry(
-                        task, cache_key, cache_entry)
+                        task, cache_key, cache_entry, generation=generation)
+                    if not _project_cache_entry_is_current(
+                            fn_name, task['_tool_result_cache'].get(cache_key)):
+                        continue
                     injected += 1
                     logger.info('[%s] StreamingToolExec: injected %s into '
                                 'dedup cache (%.1fs, %d chars%s)',
@@ -1312,6 +1385,12 @@ class StreamingToolAccumulator:
                                          'timeout probe unavailable: %s',
                                          self._tid, _e)
                     content = future.result(timeout=_wait_timeout)
+
+                    generation = getattr(content, 'generation', None)
+                    if isinstance(content, _ToolResultCacheReceipt):
+                        if not _project_cache_entry_is_current(fn_name, content):
+                            continue
+                        content = content[0]
                     if not getattr(content, 'cacheable', True):
                         logger.info(
                             '[%s] StreamingToolExec: waited %s outcome is not '
@@ -1338,7 +1417,10 @@ class StreamingToolAccumulator:
                     if _producer_metadata is not None:
                         cache_entry += (_producer_metadata,)
                     _store_tool_result_cache_entry(
-                        task, cache_key, cache_entry)
+                        task, cache_key, cache_entry, generation=generation)
+                    if not _project_cache_entry_is_current(
+                            fn_name, task['_tool_result_cache'].get(cache_key)):
+                        continue
                     injected += 1
                     logger.info('[%s] StreamingToolExec: waited and injected '
                                 '%s into dedup cache (%.1fs, %d chars%s)',

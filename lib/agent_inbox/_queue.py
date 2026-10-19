@@ -2,7 +2,7 @@
 
 All functions here mutate the single-home objects imported from
 :mod:`lib.agent_inbox._state` (``_inboxes`` / ``_lock`` / ``_tombstones`` /
-``_PRIORITY`` / ``MAX_PER_TASK`` / ``_TOMBSTONE_MAX``).  They are imported by
+``_PRIORITY``).  They are imported by
 reference so every caller touches the SAME objects — this is what preserves the
 exactly-once delivery semantics.
 
@@ -21,10 +21,7 @@ from typing import Any, Callable
 from lib.log import get_logger
 
 from ._state import (
-    MAX_PER_TASK,
     _PRIORITY,
-    _TOMBSTONE_MAX,
-    _CONSUMED_QUEUE_MAX,
     _consumed_queue_ids,
     _inboxes,
     _lock,
@@ -35,17 +32,8 @@ logger = get_logger(__name__)
 
 
 def _append_item_locked(task_id: str, item: dict[str, Any]) -> None:
-    """Append to the one bounded bucket while the caller owns ``_lock``."""
+    """Append to the task bucket while the caller owns ``_lock``."""
     bucket = _inboxes.setdefault(task_id, [])
-    if len(bucket) >= MAX_PER_TASK:
-        logger.warning(
-            '[Inbox:%s] cap %d reached — dropping oldest item (mode=%s agent=%s)',
-            task_id, MAX_PER_TASK, item['mode'], item.get('agent_id', '?'))
-        drop_idx = next((
-            index for index, existing in enumerate(bucket)
-            if existing.get('priority') == 'later'
-        ), 0)
-        bucket.pop(drop_idx)
     bucket.append(item)
 
 
@@ -104,7 +92,7 @@ def enqueue(task_id: str, value: str, *,
                 '[Inbox:%s] enqueue (mode=%s agent=%s) dropped — task ended',
                 task_id, mode, agent_id or '?')
             return False
-        if (task_id, str(item.get('queueId') or '')) in _consumed_queue_ids:
+        if str(item.get('queueId') or '') in _consumed_queue_ids.get(task_id, ()):
             return False
         queue_id = item.get('queueId')
         if queue_id and any(existing.get('queueId') == queue_id
@@ -150,7 +138,7 @@ def enqueue_after_durable_commit(
     with _lock:
         if task_id in _tombstones:
             return False, None
-        if (task_id, str(item.get('queueId') or '')) in _consumed_queue_ids:
+        if str(item.get('queueId') or '') in _consumed_queue_ids.get(task_id, ()):
             return False, None
         committed = commit()
         _append_item_locked(task_id, item)
@@ -279,8 +267,8 @@ def consume_peer(task_id: str, queue_ids) -> int:
         now-redundant inbox twin so it isn't re-injected on that fresh turn.
 
     IDs are fenced even when their inbox twin has not been published yet.
-    The last 16,384 slot/ID pairs survive clear and revival; older pairs are
-    FIFO-evicted. Unique durable IDs and the existing conversation-key owner
+    Every consumed identity survives clear and revival until process exit.
+    Unique durable IDs and the existing conversation-key owner
     boundary apply. This process-local fence is not durable delivery history.
     Items whose ``queueId`` is not in *queue_ids* (and any swarm items, which
     carry no ``queueId``) are left untouched. Returns the number removed.
@@ -293,10 +281,12 @@ def consume_peer(task_id: str, queue_ids) -> int:
     with _lock:
         # Dispatch can win before the producer publishes its twin. Record even
         # an absent item; clear/untombstone must not reopen that publication.
-        for queue_id in ids:
-            _consumed_queue_ids.setdefault((task_id, queue_id), None)
-            if len(_consumed_queue_ids) > _CONSUMED_QUEUE_MAX:
-                _consumed_queue_ids.popitem(last=False)
+        consumed = _consumed_queue_ids.get(task_id)
+        if consumed is None:
+            # ids is a fresh owned set; transfer it instead of copying it.
+            _consumed_queue_ids[task_id] = ids
+        else:
+            consumed.update(ids)
         bucket = _inboxes.get(task_id)
         if not bucket:
             return 0
@@ -417,14 +407,9 @@ def clear(task_id: str, *, modes: list[str] | None = None) -> int:
                     _inboxes[task_id] = kept
                 else:
                     _inboxes.pop(task_id, None)
-        # Tombstone — bounded LRU-ish: when the cap is hit, drop the
-        # oldest tombstone to avoid unbounded growth.
+        # Ended slots remain closed until explicit revival; other traffic
+        # cannot revoke their late-producer protection.
         _tombstones.add(task_id)
-        if len(_tombstones) > _TOMBSTONE_MAX:
-            try:
-                _tombstones.pop()  # set.pop = arbitrary element — fine here
-            except KeyError as e:
-                logger.debug('[Inbox] tombstone evict on empty set: %s', e)
     if n:
         logger.info('[Inbox:%s] cleared %d unread item(s) (modes=%s)',
                     task_id, n, modes if modes is not None else 'ALL')
@@ -455,9 +440,7 @@ def reset_for_test(task_id: str = '') -> None:
         if task_id:
             _inboxes.pop(task_id, None)
             _tombstones.discard(task_id)
-            for key in list(_consumed_queue_ids):
-                if key[0] == task_id:
-                    del _consumed_queue_ids[key]
+            _consumed_queue_ids.pop(task_id, None)
         else:
             _inboxes.clear()
             _tombstones.clear()

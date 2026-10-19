@@ -3,7 +3,7 @@ from copy import deepcopy
 
 import pytest
 
-from lib.agent_loop import AbortSignal, run_agent_loop, validate_agent_loop_checkpoint
+from lib.agent_loop.agent_loop import AbortSignal, run_agent_loop, validate_agent_loop_checkpoint
 
 pytestmark = pytest.mark.unit
 

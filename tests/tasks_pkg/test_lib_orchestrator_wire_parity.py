@@ -589,7 +589,7 @@ def test_run_py_imports_and_calls_post_loop_helpers():
         '_run.py must import from lib.tasks_pkg.orchestrator._post_loop')
     assert 'finalize_after_loop(' in src, (
         '_run.py must CALL finalize_after_loop at the success-tail site')
-    assert 'handle_task_fatal(task, e)' in src, (
+    assert 'handle_task_fatal(task,e)' in ''.join(src.split()), (
         '_run.py must CALL handle_task_fatal at the except Exception site')
     # The specific inline patterns that lived in the extracted blocks are
     # GONE from _run.py — guards against silent revert.

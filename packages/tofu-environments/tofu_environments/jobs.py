@@ -45,6 +45,29 @@ class JobService:
     def __init__(self, repository, resolve_provider):
         self.repository, self.resolve_provider = repository, resolve_provider
 
+    def catalog(self, actor: Actor, provider_id: str) -> dict:
+        """Read bounded capabilities without a durable claim or allocation."""
+        from pathlib import Path
+        from jsonschema import Draft202012Validator
+        if not isinstance(provider_id, str) or not 0 < len(provider_id) <= 64:
+            raise EnvironmentError('invalid_provider', 'Bounded provider identifier required')
+        provider = self.resolve_provider(actor, provider_id)
+        reader = getattr(provider, 'compute_catalog', None)
+        if not callable(reader):
+            raise EnvironmentError('catalog_unsupported', 'Provider has no compute catalog capability')
+        result = reader(actor)
+        try:
+            raw = json.dumps(result, allow_nan=False, ensure_ascii=False)
+            if len(raw.encode()) > 65536:
+                raise ValueError('catalog size')
+            schema = json.loads(Path(__file__).with_name('compute_catalog.schema.json').read_text())
+            Draft202012Validator(schema).validate(result)
+            if result['provider'] != provider_id:
+                raise ValueError('provider identity')
+        except Exception as exc:
+            raise EnvironmentError('catalog_invalid', 'Provider catalog failed bounded contract validation') from exc
+        return json.loads(raw)
+
     def plan(self, actor, provider_id, spec, request_id):
         if not isinstance(request_id, str) or not 0 < len(request_id) <= 128:
             raise EnvironmentError('invalid_request', 'Bounded request identifier required')

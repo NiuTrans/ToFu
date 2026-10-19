@@ -7,7 +7,7 @@ from __future__ import annotations
 
 
 class WindowsJob:
-    def __init__(self, process, memory_bytes: int, process_count: int):
+    def __init__(self, process, memory_bytes: int = 0):
         import ctypes
         from ctypes import wintypes
 
@@ -34,14 +34,15 @@ class WindowsJob:
         self.kernel = kernel
         self.handle = kernel.CreateJobObjectW(None, None)
         limits = Extended()
-        limits.basic.flags = 0x8 | 0x200 | 0x2000  # ACTIVE_PROCESS | JOB_MEMORY | KILL_ON_JOB_CLOSE
-        limits.basic.process_count = process_count
-        limits.job_memory = memory_bytes
+        limits.basic.flags = 0x2000  # KILL_ON_JOB_CLOSE owns descendants.
+        if memory_bytes:
+            limits.basic.flags |= 0x200  # Explicit operator JOB_MEMORY override.
+            limits.job_memory = memory_bytes
         if (not self.handle or not kernel.SetInformationJobObject(
                 self.handle, 9, ctypes.byref(limits), ctypes.sizeof(limits))
                 or not kernel.AssignProcessToJobObject(self.handle, wintypes.HANDLE(process._handle))):
             self.close()
-            raise OSError('Cannot establish the paper command process budget')
+            raise OSError('Cannot establish the paper command process ownership')
 
     def close(self):
         if self.handle:

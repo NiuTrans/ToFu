@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from lib.provider_template_recipes import offering_recipes
+from lib.provider.provider_template_recipes import offering_recipes
 
 pytestmark = pytest.mark.unit
 

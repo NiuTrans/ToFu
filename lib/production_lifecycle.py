@@ -17,7 +17,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from lib.app_lifecycle import add_shutdown_handler, add_startup_handler
+from lib.app.app_lifecycle import add_shutdown_handler, add_startup_handler
 from lib import boot_profile as _boot_profile
 from lib import startup_phases as _startup_phases
 
@@ -29,7 +29,7 @@ Callback = Callable[..., Any]
 #
 # Owns the startup-phase state machine once the HTTP listener is allowed to
 # open.  The production lifespan runs only the listener-critical inline
-# phases (frontend assets, exclusive storage boundary) and then hands the
+# phase (frontend assets) and then hands the
 # remaining required phases — storage sidecar, recovery, model routing,
 # imports, workers, optional services, readiness announcement — to the
 # runner, which executes them in one serving-loop task while Hypercorn
@@ -687,9 +687,11 @@ def register_production_lifecycle(
 
     inline_phases = (
         _phase_spec(1, steps.build_assets),
-        _phase_spec(2, steps.validate_storage_boundary),
     )
     background_phases: list[BootPhase] = [
+        # The HTTP shell needs no database. Prove exclusive ownership before
+        # storage acquisition, while the default-deny API gate stays closed.
+        _phase_spec(2, steps.validate_storage_boundary),
         # Every repository depends on the authenticated Sidecar. Its
         # handshake is a required startup gate, never a best-effort task
         # or a selectable mode — backgrounded, never made optional.
@@ -790,13 +792,9 @@ def register_production_lifecycle(
     async def _startup() -> None:
         state['status'] = 'starting'
         try:
-            # Only the listener-critical phases hold the lifespan: the
-            # published frontend artifact must exist before the index can
-            # be served, and the exclusive storage boundary must be proven
-            # before the sidecar may take authority.  Everything else runs
-            # in the background boot task while Hypercorn already accepts
-            # connections, so the browser can paint the shell and a
-            # truthful boot-progress splash within ~1s of process start.
+            # Only frontend validation holds the listener. Storage ownership
+            # is still proven before acquisition, in the background runner;
+            # HTTP shell/progress remain available even when that proof fails.
             await runner.run_inline()
         except BaseException:
             state['status'] = 'startup_failed'
@@ -818,12 +816,12 @@ def register_production_lifecycle(
             log.warning('[Server] boot runner stop failed: %s', exc)
         runtime = shutdown_runtime
         if runtime is None:
-            from lib.server_shutdown import shutdown_production_runtime
+            from lib.server.server_shutdown import shutdown_production_runtime
 
             runtime = shutdown_production_runtime
         started = time.monotonic()
         try:
-            from lib.server_shutdown import _shutdown_timing_to_stderr
+            from lib.server.server_shutdown import _shutdown_timing_to_stderr
             _shutdown_timing_to_stderr('production shutdown stack begin')
         except Exception as _e:
             logging.getLogger('server').debug('shutdown step failed: %s', _e)
@@ -834,7 +832,7 @@ def register_production_lifecycle(
             elapsed = time.monotonic() - started
             log.info('[Server] production shutdown stack took %.1fs', elapsed)
             try:
-                from lib.server_shutdown import _shutdown_timing_to_stderr
+                from lib.server.server_shutdown import _shutdown_timing_to_stderr
                 _shutdown_timing_to_stderr(
                     f'production shutdown stack took {elapsed:.1f}s')
             except Exception as _e:

@@ -1,10 +1,8 @@
 # Run continuity: interruption recovery and long-running execution
 
-Design authority for making orchestration-backed execution survive process
-restarts without human action and remain stable across long horizons, in
+Design authority for making orchestration-backed execution survive process restarts without human action and remain stable across long horizons, in
 support of goal-driven self-evolution ([EVOLUTION_DESIGN.md](EVOLUTION_DESIGN.md)).
-Domain behavior owners stay as mapped:
-[modules/orchestration_dag.md](modules/orchestration_dag.md),
+Domain behavior owners stay as mapped: [modules/orchestration_dag.md](modules/orchestration_dag.md),
 [modules/task_engine.md](modules/task_engine.md),
 [modules/evolution.md](modules/evolution.md).
 
@@ -25,8 +23,8 @@ execution and conversation authority, but restart continuity still has gaps:
    or a new effect without a complete successor seed remain refusal boundaries.
 2. **The likeliest interruption point refuses recovery.** A run interrupted
    while a role invocation was in flight leaves an unmatched agent admission
-   in the execution journal; `read_journal` raises `RecoveryRefused` because
-   the external effects are unknown. Long runs spend most of their wall time
+   in the execution journal. A matching registered child completion can close
+   the handoff; without it `read_journal` refuses unknown external effects. Long runs spend most of their wall time
    inside model/tool invocations, so most real crashes land exactly here.
 3. **Goal continuity needs complete evidence.** Clean v2 launches and settled
    receipts can rebind to a normal successor Goal. Older launches, an incomplete
@@ -37,11 +35,76 @@ execution and conversation authority, but restart continuity still has gaps:
    these records preserve diagnostic evidence but cannot prove the outcome of
    an external action that was in flight at interruption.
 
-A secondary continuity gap: the invocation-tree budget account is live-only.
-Crash-persistent reservation stays rejected, but a recovered run currently
-re-derives consumption from domain counters ad hoc rather than from one rule.
+A secondary continuity gap remains for in-flight invocation-tree reservations.
+Completed registered Goal leaves now carry canonical cumulative consumption;
+unresolved reservations still cannot become a complete recovered balance.
+
+### Registered native actor checkpoint capture
+
+Problem: Flow children use transient runtime carriers, so native checkpoint
+composition discarded their paid model/tool frontiers even when conversation
+birth records were durable. Decision: explicit `checkpoint_actor_account`
+composition admits `NativeCheckpointPolicy(registered_child=True)` only for the
+unchanged owned child birth and its existing shared `ExecutionBudget`. Each
+callback checks that registration remains live and has no completion receipt.
+Headless children remain storage-free. The shared snapshot's `actor_task_id`
+identifies local consumption; `root_task_id` remains the real shared account.
+Actor model/tool ordinals retain their last assigned values when siblings advance.
+Local original-price fee rows carry no root wallet or descendant invoice capsule.
+Whole `write_file` batches persist invocation-scoped operation references before
+handler entry; pending-to-complete validation freezes the paid prefix.
+
+Alternative rejected: giving each child a fresh root account duplicates spending
+authority; using global counters as local usage duplicates parallel charges.
+Actor restore and file reconciliation require the explicitly composed aggregate
+Goal claim/whole-set handoff described in EXECUTION_ACCOUNT_CONTINUITY. Personal
+launches retain cost evidence without wallet authority; defaults remain opt-in. Verify
+`test_native_flow_actor_checkpoint.py`, `test_native_actor_checkpoint_policy.py`
+and native journal/handoff tests. Two ordinal maps follow active participants
+and delete child entries at close. At 1/32/256 actors their table storage was
+368/1,664/13,152 bytes, excluding referenced objects; one local snapshot was 370
+JSON bytes. Over 3,000 admissions, median reserve/dispatch/settle was 17.023 µs
+before and 17.078 µs after. The first capture measurement spent about 5.5 ms
+recompiling the same schema. One lazy cached generated-schema validator now
+serves root and actor capture/restore; validation remains strict. Warm capture
+medians became 103.5/102.8/106.4 µs over 100 samples at each size. Admission
+remeasurement was 17.899/17.151 µs before/after (3,000 calls); this noise does not
+establish a throughput gain. These local microbenchmarks are not task-speed
+claims. Each selected-store policy call adds birth and conversation reads, with
+the existing checkpoint journal retaining storage ownership and lifecycle. Native Goal recovery defaults its finite I/O deadline from the selected storage client’s read-only `request_timeout_seconds`; byte bounds still come from the issued transport, and explicit recovery I/O overrides remain. Problem: reusing terminal ACK grace made a valid nullable production ACK erase the recovery deadline. Decision: resolve the same selected storage once for both preflight/execution and derive milliseconds with positive finite/u64 admission. Alternatives: another timeout constant drifts from storage policy; deriving it from terminal or shutdown grace conflates independent lifecycles. No additional RPC, retry, store selection or worker is introduced. Verification covers nullable production profiles, selected storage policy, actor recovery and original-fee settlement.
+
+Problem: boot continuity appended its deferred/resumed audit after an asynchronous Goal successor had already read the source cursor, creating a false native claim conflict. Decision: the common continuity owner exposes an explicit source-cursor policy; Chat Goal calls its synchronous `before_submit` hook only after preflight and before the normal conversation command. The audit is acknowledged before submission, and claim/consumption own subsequent source writes. An unknown submission result keeps election pending and logs its reason without altering the issued source; a refusal before submission retains the existing durable refusal event. An already-claimed successor also receives no post-return audit. Alternatives rejected: relaxing native cursor checks admits unverified effects; replaying a conflicted claim repeats authority; sleeping after submission leaves a scheduling race. No worker, cache or new durable store is added. Verify `test_continuity_source_cursor` across all selected authorities and full public SQLite/PostgreSQL/native Goal restart tests; `system_native_sql_checkpoint_application_20261016.json` retains the real cursor-11 versus cursor-12 reproduction and fixed lifecycle.
 
 ## Decision
+
+### Read-only native actor frontier preflight
+
+Problem: aggregate Goal recovery needs every actor's original paid state before
+it can admit a successor account; acquiring actors one at a time changes leases
+before the complete set is known. Decision: the native checkpoint control
+`frontier` operation reads one owned completed or paid-pending snapshot after
+trusted process-death proof. Its closed request declares header/snapshot/identity
+byte bounds; response capacity is admitted before the read. The shared journal
+compares header versions before and after the exact-version snapshot read.
+Missing state, live/unknown writers, inflight requests, changed versions and
+oversized content cannot produce a usable observation.
+
+`invocation_frontier.py` binds this observation to the unchanged registered
+direct child birth and original account root, and rechecks registration after
+reading. Completed children use their immutable completion receipts. No lease,
+capability, account restoration, wallet settlement or replay permission is
+created. A later aggregate admission must revalidate versions and accepted Goal
+lineage; this port alone does not resume an interrupted child. Alternative
+rejected: acquiring individual leases during discovery partially mutates a set
+that may ultimately be refused. Verification covers actual SIGKILL, original
+prices, live-writer fencing, foreign ownership, read races and capability counts
+in `test_native_checkpoint_frontier.py`, `test_invocation_frontier.py` and native
+checkpoint journal/control tests. Storage remains with the selected journal;
+each successful observation performs three bounded header reads and one bounded
+snapshot read, without writes, additional workers or retained per-actor state.
+On a private debug engine after SIGKILL, 100 warm C ABI reads of 2,021/34,789/
+264,165-byte snapshots had median 0.82/2.65/15.48 ms and p95 0.85/2.73/15.99 ms.
+These include response decoding, not a production task or aggregate recovery.
 
 ### D1 — Continuity policy is launch-stamped run metadata *(running contract, phase 1)*
 
@@ -99,46 +162,36 @@ with `recovery_records`), binding the successor to the owner recorded on the
 run row. Journal validation is unchanged: a clean seed resumes, a refused
 seed leaves the source settled. Every outcome lands as a typed durable audit
 event on the source run's stream: `continuity_resumed` (with the successor
-id), `continuity_refused` (with reason), `continuity_deferred` (per-boot
-capacity), `continuity_exhausted` (crash-loop guard). These are durable
+id), `continuity_refused` (with reason), `continuity_deferred` (retryable
+recovery failure or awaiting successor journal). Historical `continuity_exhausted`
+records remain readable and preserve their recorded closure. These are durable
 replay-visible facts, not log lines; a generic Studio timeline projection is
 deliberately not added by phase 1.
 
-Bounds and guards: candidates are processed sequentially (spawning is cheap;
-execution concurrency stays governed by the task runtime) with a per-boot
-resume cap of `TOFU_CONTINUITY_AUTO_RESUME_MAX` (positive override, bounded by
-the shared task structural ceiling); otherwise the cap follows
-`TOFU_AGENT_WORKERS`, the positive inflight limit and the process memory ceiling
-from the cached launch resource policy. Missing, malformed
-or non-positive boot overrides use that same automatic default. This bounds
-recovery admissions and does not change normal worker dispatch. A fixed 16/64 recovery ceiling was
-rejected because it strands recoverable tasks on larger machines after restart;
-overflow lands `continuity_deferred` and remains pending for next startup. A
-candidate already carrying a recovery claim is skipped, so repeated passes
-never spawn twice. The crash-loop guard walks the lineage's journal parent
-links (bounded at 16) and refuses the resume when 3 or more links retired
-within 600 seconds — healthy restarts days apart never trip it, and
-exhaustion leaves the run settled with `continuity_exhausted`. Operator kill
-switch: `TOFU_CONTINUITY_AUTO_RESUME=off`. The pass is fail-soft per
+Demand and guards: candidates are processed sequentially and every eligible
+candidate is handed to the shared task runtime. No per-boot resource capacity
+limits recovery; legacy `TOFU_CONTINUITY_AUTO_RESUME_MAX` values are ignored.
+Worker/inflight/RSS settings grant no boot-recovery refusal. A candidate already carrying a recovery claim is skipped, so repeated passes
+never spawn twice. Restart count, lineage length and elapsed restart timing
+grant no new continuation refusal. Recovery still validates the complete source
+journal, owner, definition/input identity, budget state and unknown effects.
+Operator kill switch: `TOFU_CONTINUITY_AUTO_RESUME=off`. The pass is fail-soft per
 candidate and overall: it runs after readiness and must never wedge the
 process. No new resident daemon, timer, or queue is added.
 
-Capacity verification: synthetic shared probes for 2 CPUs/8 GiB and
-128 CPUs/256 GiB (half the memory available) resolve to 2 and 48 boot
-admissions respectively under the personal policy. An 18-run storage-backed
-recovery test verifies all successors and idempotent replay with a configured
-32-slot envelope. A 10,000-call resolution microbenchmark with explicit
-128-slot settings averaged 42.22 µs/call; this is policy resolution, not model
-execution throughput. The change adds no resident worker or persistent data.
+Completeness verification: forty storage-backed candidates are handed off in
+one pass despite one-worker/one-inflight and one-resume legacy settings.
+Each source records its durable successor receipt, no `boot_capacity` deferral
+is produced, and a repeated pass skips all forty without another spawn.
 
 ### D3 — Chat Goals rebind through normal conversation commands *(running contract)*
 
-Problem: Studio recovery cannot bind a chat Goal's conversation, attempt and
-GoalRun lifecycle. Decision: `lib/goal_runs/recovery.py::resume_chat_goal` is
-registered explicitly for `chat_goal_mode` on the post-ready continuity pass.
-The production pass now resolves its default owner-bound run-service factory;
-missing an injected factory no longer skips every candidate. Other domains
-retain their explicit generic recovery protocol.
+Problem: Studio recovery cannot bind a chat Goal's conversation, attempt and lifecycle. Decision: boot and authenticated task-resume dispatch `chat_goal_mode` to `resume_chat_goal` after owned-source lookup; other domains retain generic recovery.
+Refused/deferred admission returns 409. The server rechecks Stop, lane and effect guards; action visibility grants no authority.
+Every live/settled phase carries `orchestration.goalRunId`, distinct from the Turn attempt `runId`. Restart evidence stays on its interrupted phase; only a current tail offers “Check and resume”.
+One in-flight UI request preserves focus and delivery uncertainty. Acceptance is not completion; detached observers ignore replies without cancelling commands. No timer or pool is added.
+Alternative rejected: inferring IDs from attempts or verifier markers misses first-worker interruptions and can select the wrong run.
+The production boot pass resolves its owner-bound run-service factory. Native first-phase admission updates the existing recovery byte witness in the same transaction; crash sweeps keep their strict projection-size check.
 
 A source must have the exact restart interruption, a valid v2 launch archive,
 and fully settled agent receipts. The source attempt/Turn/task binding remains
@@ -200,9 +253,9 @@ observed outcome; a standalone Studio worker loses conversation authority;
 starting from the visible transcript loses compacted tool context; replaying
 an unresolved agent can repeat external effects. Fresh normal commands preserve
 one lifecycle and its existing CAS, cancellation, deletion and rollback seams.
-No daemon, polling timer or extra execution pool is added. Per-boot capacity
-and the crash-loop guard remain D2's authority; chunked launch parent links are
-now decoded across page boundaries before lineage counting.
+No daemon, polling timer or extra execution pool is added. Recovery eligibility
+and ordinary journal/budget checks remain D2's authority; chunked launch parent
+links are decoded across page boundaries during full lineage validation.
 
 Capacity measurement: five synthetic isolated SQLite recoveries with a 1 MiB
 launch message and one 1 MiB completed working-set receipt measured median
@@ -288,20 +341,20 @@ existing delete operation. `lib/goal_runs/journal_codec.py` splits large logical
 events into digest-bound 512 KiB fragments, encoded below the native 1 MiB
 document limit. Only the final reference commits the logical event; partial
 completion writes leave the preceding effect unresolved. The Goal publisher
-uses the shared bounded storage retry for timeout, busy and unavailable errors:
-it resends the identical owner/run/sequence/payload packet and advances the
-cursor only on acknowledgement. A lost response after commit reconciles through
-the existing idempotent projection; it never re-runs the model/tool effect.
-Ready-source acknowledgement likewise reconciles its immutable successor claim.
-The default three delays are 1/2/4 seconds, interrupted by owner Stop; conflicts,
-false admission and exhausted retries still revoke the journal and preserve
-ambiguity. No new receipt store, queue or timer is introduced. Immediate failure
-on a temporary authority outage and blind effect re-execution were rejected.
-Native and SQL event
-pages stop before their 8 MiB byte boundary and continue from the last physical
+uses shared task persistence waits for timeout, busy and unavailable errors, resending identical
+owner/run/sequence/payload packets and advancing only after ACK. Lost responses reconcile through
+idempotent projection without re-running effects; source ACKs reuse their immutable successor claim.
+Problem: short retries abandoned accepted effects during storage pressure. Decision: retain frozen writes
+until ACK, Stop before admission, permanent refusal or shutdown. Stop permits completed-effect/account
+evidence to settle; shutdown leaves unresolved recovery debt. Shared backoff/liveness adds no worker,
+queue, store or timer. Alternatives: longer retry ceilings still fail outages; effect replay duplicates work.
+Cancellation, receipt preparation and replay/context restoration failures revoke sibling admission while
+preserving original errors and already-admitted completions. Durable human suspension remains valid.
+`test_goal_journal_backpressure.py` injects 600 lost ACKs across 100 effects; with `test_journal_failure_fence.py`
+it covers exact retries, Stop/shutdown and concurrently settling siblings. Native and SQL event pages
+stop before their 8 MiB byte boundary and continue from the last physical
 sequence, retaining every packet without clipping context. PostgreSQL/SQLite
-UTF-8 sizing stays behind the SQL adapter boundary. No additional resident
-worker, queue or timer starts.
+UTF-8 sizing stays behind the SQL adapter boundary.
 Complete context is retained per agent receipt, so durable growth follows
 the sum of recorded working-set sizes, not just output text. A synthetic
 1 MiB-message launch and completed-context receipt against isolated SQLite are
@@ -962,6 +1015,7 @@ rule.
 
 ### D6 — One budget-continuity rule *(running contract, phase 1)*
 
+Whole-account Goal observations follow [Execution account continuity](contracts/EXECUTION_ACCOUNT_CONTINUITY.md).
 The shared invocation account now reserves the final locally admitted input
 estimate and output ceiling before each provider attempt. The transport's required
 settlement port records reported usage once, including retries and bridge handoffs.
@@ -980,8 +1034,21 @@ Problem: round-end checks admitted an already-unaffordable next prompt. Decision
 reserve at sealed request ingress. Alternatives: a root-only check misses children
 and retries; treating missing usage as zero refunds unknown provider work.
 
-A recovered run never re-spends completed work: the replayed receipt is the
-durable consumption record. The run-tree agent-start budget counts only
+A recovered Goal must retain spent authorization. Problem: replaying a completed
+child projected its cost but left a fresh account at zero, and child-policy
+projection omitted root limits. Decision: registered Flow receipts freeze the
+existing `ExecutionBudget` through `budget_snapshot.py`; `recovery_account.py`
+selects one complete settled frontier dominating all model/tool counters. Goal
+recovery restores it once after accepted source/target lineage and ready-journal
+acknowledgement, before dispatch. The accepted source Attempt supplies identical
+token/tool caps and absolute expiry, including zero. Unknown consumption, later
+unsettled spending, missing bounded evidence or changed policy refuse. Identical
+restore retries never rewind new spending; inherited generations retain totals.
+Alternatives rejected: adding cumulative samples double-charges parallel leaves;
+fresh caps refund spent authorization. No wallet settlement or invoice is minted
+by this port. Verify `test_budget_snapshot.py` and `test_goal_recovery_account.py`
+across semantic authorities; snapshot growth/capture measurements live in
+`docs/contracts/TOOL_EFFECT_RECOVERY.md`. The run-tree agent-start budget counts only
 genuine dispatches — a replayed receipt reaches the claim site before the
 journal returns its record, so the engine wires
 `OrchestrationAgentBudget.release` as the journal's replay hook and the
@@ -1041,7 +1108,7 @@ on; they are restated here so the continuity target names one place:
 
 | Phase | Scope | Focused verification |
 |---|---|---|
-| 1 *(landed)* | D1 launch-stamped policy, D2 boot pass, D6 replay refund, continuity events | `tests/orchestration/test_orchestration_continuity.py` (election, owner-bound successor, refusal audit, idempotency, crash-loop guard, capacity, kill switch, replay refund); `test_continuity_durable_election`, `test_orchestration_startup_recovery`, `test_server_startup_recovery`, `test_orchestration_continuation`, `test_orchestration_run_service`, `test_storage_application_contract` |
+| 1 *(landed)* | D1 launch-stamped policy, D2 boot pass, D6 replay refund, continuity events | `tests/orchestration/test_orchestration_continuity.py` (election, owner-bound successor, refusal audit, idempotency, safe deep lineage, complete handoff, kill switch, replay refund); `test_continuity_durable_election`, `test_orchestration_startup_recovery`, `test_server_startup_recovery`, `test_orchestration_continuation`, `test_orchestration_run_service`, `test_storage_application_contract` |
 | 2 | D3 GoalRun continuation | Goal run survives restart with working set restored from the lane checkpoint; terminal truth preserved on spawn failure/refusal; `test_goal_worker_context`, goal invocation integration |
 | 3 | D4 evolution stage re-admission | Sweep re-admits a lost stage as a new attempt with prior receipts intact; retry budget exhaustion → `needs_attention`; no verdict fabrication; `test_evolution_automation`, `test_evolution_runs`, end-to-end |
 | 4 | D5 attempt resolution | Committed-attempt conversion, void-receipt retry, ambiguous operator flow, journal additive compatibility; journal/recovery suites |
@@ -1118,3 +1185,76 @@ reuse old attempt keys. The caller must prove old-writer quiescence, validate
 receipts and bind the journal observer before restoration. The port grants no
 ownership, settlement or replay and is not yet activated by discovery recovery.
 Verify `tests/agent_core/test_model_account_restore.py` and model budget suites.
+
+### Tool timeout checkpoint round
+
+Problem: closing a timed-out tool round published `tools_in_flight` at the next
+round. The next model checkpoint then appeared to regress and killed a live
+Evolution task after successful external submission. Decision: unresolved tools
+retain their original round; only settled ready or terminal delivery advances
+the checkpoint round. Original tool messages and unknown-effect recovery fences
+remain. Rejected: weakening monotonicity or marking every timeout settled,
+which would conceal unresolved effects. Verify the real checkpoint-sink timeout
+and settled-tool cases in `test_evolution_working_checkpoint.py`.
+
+
+Per-boot recovery demand — Problem: a completed boot pass stopped at a private
+resource-derived resume count and stranded remaining durable candidates until
+another startup. Decision: remove the boot capacity calculation and deferral
+producer; keep owner/tenant election, recovery eligibility, duplicate-claim
+fences, accounting checks, failure classification and operator disable intent.
+Alternative rejected: larger defaults still strand enough interrupted work;
+resuming without the claim protocol risks duplicate side effects. Historical
+`boot_capacity` events remain readable and pending candidates remain eligible.
+The independent rapid-lineage guard is unchanged and remains a separate audit
+item. No new recovery daemon, worker pool or durable authority is added.
+
+
+Restart lineage is evidence, not a continuation quota — Problem: three recent
+retired links permanently stopped recovery even when journals were safe and
+legitimate work spanned repeated host restarts. Decision: remove the private
+600-second/three-restart guard and its 16-link counting walk. The existing
+recovery loader owns full lineage validation, cycle/refusal classification,
+unknown-side-effect fences and durable successor identity. Alternative rejected:
+higher counts still strand enough safe restarts; skipping snapshot and accounting
+checks risks replayed side effects. Storage-backed three- and twenty-link tests
+resume the eligible leaf exactly once; ambiguous in-flight effects still refuse.
+Historical exhausted decisions are neither deleted nor automatically reopened.
+The legacy summary field remains zero for this retired policy.
+## Swarm Continue after manual parent Stop
+
+**Problem:** Stop is signal-only; child cancellation checkpoints and a terminated
+swarm row retained useful progress, but Continue only admitted restart provenance
+and skipped the old live registry entry.
+
+**Decision:** `lib/swarm/restart_recovery.py` admits the exact authority-written
+accepted Continue predecessor with cause `user_abort` (interrupted/cancelled),
+including a terminated swarm row. Owner, conversation, Turn, source task/attempt,
+current attempt and successor checks remain mandatory. Cold startup never gains
+manual-Stop execution permission. Failed activation retry receipts still cannot
+be used to cross an intervening Stop.
+
+Before replacing an aborted live session, Continue serializes on the existing
+recovery lock, waits cancellably for its driver (at most 30 seconds), refuses
+remaining live workers, reloads/revalidates final durable evidence, and removes
+only the old registry handle. Durable checkpoints are not deleted. A drain
+failure is explicit; it never launches overlapping workers.
+
+The swarm owner stamps unsettled children cancelled by parent Stop with
+`recovery_reason=parent_stop`. Accepted Continue reopens only these ordinary
+child checkpoints and never individually cancelled, completed or failed work.
+Messages, tool receipts, rounds, usage, timeout accounting, launch workspace and
+completed delivery acknowledgements follow the existing restore path. Pending
+specs without a checkpoint remain fresh. Unknown tool outcomes still require
+reconciliation and block dependent work; no external effect is blindly replayed.
+Retained assignments already settled as cancelled remain terminal under their
+own assignment CAS; this path does not reset that authority. Legacy cancelled
+checkpoints without parent-Stop provenance also remain terminal.
+
+**Alternative rejected:** reset cancelled states or rerun all specs. This loses
+progress, repeats completed effects and resurrects individually cancelled or
+already-settled retained assignments. No frontend or parent verdict change is
+part of this owner change.
+
+Executable specifications: `tests/swarm/test_swarm_restart_continue.py` and
+`tests/swarm/test_swarm_invocation.py::test_parent_stop_checkpoint_continue_does_not_repeat_committed_tool`. <!-- Evidence note: former docs/evidence/ artifact snapshots cited here were retired from the tree; cited JSON artifacts remain recoverable from git history. -->

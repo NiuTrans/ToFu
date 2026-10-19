@@ -496,7 +496,7 @@ def test_recipe_is_the_only_place_that_knows_about_reports():
 
 def test_produce_report_tool_is_registered_and_ungated_by_project():
     from lib.tools.registry import ToolContext, assemble_tool_list
-    ctx = ToolContext(cfg={}, task_id='t', project_path='',
+    ctx = ToolContext(cfg={'plugins': ['production']}, enabled_plugins={'production'}, task_id='t', project_path='',
                       project_enabled=False, search_mode='multi',
                       search_enabled=True, fetch_enabled=False,
                       code_exec_enabled=False, browser_enabled=False,

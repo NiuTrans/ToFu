@@ -2,9 +2,9 @@
 
 Responsibility
 --------------
-Resolve process-pool idle reuse, text output, and
-wall-clock ceilings from the one launch-time system-resource probe.  Callers
-may lower limits; operator overrides remain inside explicit hard ceilings.
+Resolve process-pool idle reuse from the launch probe; only explicit positive
+operator/caller values constrain waiting.
+Text has no system quota; callers may request an explicit positive output cut.
 
 Entry points
 ------------
@@ -16,24 +16,19 @@ Entry points
 from __future__ import annotations
 
 import os
+import sys
 from collections.abc import Mapping
 from dataclasses import dataclass
 from functools import lru_cache
 
 from runtime_guards import resolve_resource_budget
 
-_MIB = 1024 * 1024
-PDF_TEXT_HARD_MAX_MIB = 64
-PDF_TIMEOUT_HARD_MAX_SECONDS = 3_600
 PDF_WORKER_IDLE_HARD_MAX_SECONDS = 86_400
-PDF_IMAGE_HARD_MAX = 64
 PDF_IMAGE_WIDTH_DEFAULT = 1_024
-PDF_IMAGE_WIDTH_HARD_MAX = 2_048
 _CLASSIC_PDF_ENVIRONMENT_NAMES = (
     'TOFU_DEPLOYMENT_MODE',
     'TOFU_PDF_PROCESSES',
     'TOFU_PDF_MAX_PAGES',
-    'TOFU_PDF_MAX_TEXT_MIB',
     'TOFU_PDF_PARSE_TIMEOUT',
     'TOFU_PDF_WORKER_IDLE_SECONDS',
 )
@@ -41,7 +36,7 @@ _CLASSIC_PDF_ENVIRONMENT_NAMES = (
 
 @dataclass(frozen=True, slots=True)
 class ClassicPdfBudget:
-    """Idle process reuse and derived-output envelope."""
+    """Idle process reuse, complete-text default and execution timing."""
 
     processes: int
     max_pages: int
@@ -78,17 +73,17 @@ def _resolve_cached_classic_pdf_budget(
 def _resolve_classic_pdf_budget_from_environment(
     environment: Mapping[str, str],
 ) -> ClassicPdfBudget:
-    """Apply domain hard ceilings to one explicit environment mapping."""
+    """Resolve idle reuse and explicit waiting from one environment mapping."""
     processes = resolve_resource_budget(
         'TOFU_PDF_PROCESSES', environment,
         minimum=1, maximum=2**31 - 1)
     max_pages = 0  # retired system page quota; caller ranges remain explicit
-    max_text_mib = resolve_resource_budget(
-        'TOFU_PDF_MAX_TEXT_MIB', environment,
-        minimum=1, maximum=PDF_TEXT_HARD_MAX_MIB)
-    timeout_seconds = resolve_resource_budget(
-        'TOFU_PDF_PARSE_TIMEOUT', environment,
-        minimum=1, maximum=PDF_TIMEOUT_HARD_MAX_SECONDS)
+    try:
+        timeout_seconds = int(environment.get('TOFU_PDF_PARSE_TIMEOUT', '') or 0)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError('TOFU_PDF_PARSE_TIMEOUT must be a nonnegative integer') from exc
+    if timeout_seconds < 0:
+        raise ValueError('TOFU_PDF_PARSE_TIMEOUT must be a nonnegative integer')
     if str(environment.get(
             'TOFU_PDF_WORKER_IDLE_SECONDS', '')).strip() == '0':
         worker_idle_seconds = 0
@@ -101,7 +96,7 @@ def _resolve_classic_pdf_budget_from_environment(
     return ClassicPdfBudget(
         processes=processes,
         max_pages=max_pages,
-        max_text_chars=max_text_mib * _MIB,
+        max_text_chars=sys.maxsize,
         timeout_seconds=timeout_seconds,
         worker_idle_seconds=worker_idle_seconds,
     )
@@ -124,43 +119,41 @@ def bounded_pdf_pages(requested: object, budget: ClassicPdfBudget) -> int:
 
 
 def bounded_pdf_text_chars(requested: object, budget: ClassicPdfBudget) -> int:
-    """Use the policy default for zero/malformed input; otherwise clamp."""
+    """Zero/malformed means complete text; positive caller limits remain exact."""
     try:
         value = int(requested or 0)
     except (TypeError, ValueError, OverflowError):
         value = 0
     if value <= 0:
         return budget.max_text_chars
-    return min(value, budget.max_text_chars)
+    return value
 
 
-def bounded_pdf_image_count(requested: object) -> int:
-    """Preserve zero as image-disable while bounding retained image objects."""
+def bounded_pdf_image_count(requested: object) -> int | None:
+    """None selects every detected figure; zero disables optional images."""
+    if requested is None:
+        return None
     try:
         value = int(requested or 0)
     except (TypeError, ValueError, OverflowError):
         value = 0
-    return max(0, min(PDF_IMAGE_HARD_MAX, value))
+    return max(0, value)
 
 
 def bounded_pdf_image_width(requested: object) -> int:
-    """Resolve malformed widths to the default and clamp pixel expansion."""
+    """Resolve malformed widths to the default; preserve explicit pixel width."""
     try:
         value = int(requested or 0)
     except (TypeError, ValueError, OverflowError):
         value = 0
     if value <= 0:
         value = PDF_IMAGE_WIDTH_DEFAULT
-    return min(PDF_IMAGE_WIDTH_HARD_MAX, value)
+    return value
 
 
 __all__ = [
     'ClassicPdfBudget',
-    'PDF_IMAGE_HARD_MAX',
     'PDF_IMAGE_WIDTH_DEFAULT',
-    'PDF_IMAGE_WIDTH_HARD_MAX',
-    'PDF_TEXT_HARD_MAX_MIB',
-    'PDF_TIMEOUT_HARD_MAX_SECONDS',
     'PDF_WORKER_IDLE_HARD_MAX_SECONDS',
     'bounded_pdf_image_count',
     'bounded_pdf_image_width',

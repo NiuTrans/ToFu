@@ -36,11 +36,13 @@ fails if a category is left unclassified.
 
 from __future__ import annotations
 
+from contextlib import ExitStack
 import json
 import os
 import re
 import signal
 import subprocess
+import tempfile
 import time
 
 from lib.log import get_logger
@@ -57,8 +59,8 @@ __all__ = ['lint_project', 'validate_project', 'inspect_project',
 #: available" and fall back to whatever it can compute itself — never as a
 #: reason to discard the author's work.
 #:
-#: ``'io'`` belongs here because the only way a gate call yields it is a failed
-#: ``Popen`` (the CLI could not be spawned at all).
+#: ``'io'`` covers CLI spawn and output publication I/O failures, not a verdict
+#: about the composition.
 INFRA_CATEGORIES = frozenset({
     'env_missing',   # hyperframes CLI / ffmpeg absent
     'aborted',       # cooperative user stop
@@ -75,7 +77,7 @@ INFRA_CATEGORIES = frozenset({
 #: an unexplained failure as "safe to ignore" would silently forgive real
 #: defects, so it stays a composition verdict until something identifies it.
 #: If it ever becomes common, classify it — do not move it wholesale.
-COMPOSITION_CATEGORIES = frozenset({'lint', 'unknown'})
+COMPOSITION_CATEGORIES = frozenset({'lint', 'unknown', 'continuity_failure'})
 
 #: Every category this module can emit. The two sets above MUST partition it —
 #: a category in neither is a category some consumer will silently mishandle.
@@ -324,6 +326,26 @@ def inspect_project(project_dir: str, *, timeout: int = 300, abort_event=None) -
     return _gate('inspect', project_dir, timeout=timeout, abort_event=abort_event)
 
 
+def _with_continuity(result: dict, project_dir: str, abort_event, deadline: float | None) -> dict:
+    """Opted-in films add evidence; legacy scenes keep their exact result shape."""
+    if not result.get('ok'):
+        return result
+    from lib.motion_video._continuity import check_continuity_project
+    start = time.monotonic()
+    continuity = check_continuity_project(
+        project_dir, abort_event=abort_event,
+        timeout=300 if deadline is None else max(0.0, deadline - time.monotonic()))
+    if continuity['status'] == 'not_requested':
+        return result
+    result['gates']['continuity'] = continuity
+    result['elapsed'] = round(result.get('elapsed', 0) + time.monotonic() - start, 2)
+    if not continuity['ok']:
+        result['ok'] = False
+        result['category'] = continuity.get('category', 'continuity_failure')
+        result['errors'].extend(continuity['errors'])
+    return result
+
+
 def check_project(project_dir: str, *, timeout: int = 300, abort_event=None) -> dict:
     """Run all three static gates and merge the results.
 
@@ -333,6 +355,7 @@ def check_project(project_dir: str, *, timeout: int = 300, abort_event=None) -> 
     the wall time). Falls back to the legacy per-gate calls when ``check`` is
     unavailable, so an older pinned CLI keeps working.
     """
+    deadline = time.monotonic() + timeout if timeout > 0 else None
     merged = {'ok': True, 'category': '', 'errors': [], 'warnings': [],
               'fix_hints': [], 'gates': {}, 'elapsed': 0.0}
 
@@ -355,7 +378,7 @@ def check_project(project_dir: str, *, timeout: int = 300, abort_event=None) -> 
             'detail': combined.get('detail') or '',
             'elapsed': round(combined.get('elapsed', 0.0), 2),
         })
-        return merged
+        return _with_continuity(merged, project_dir, abort_event, deadline)
 
     for name, fn in (('lint', lint_project),
                      ('validate', validate_project),
@@ -374,7 +397,7 @@ def check_project(project_dir: str, *, timeout: int = 300, abort_event=None) -> 
             if r.get('category') in ('env_missing', 'aborted', 'timeout'):
                 break
     merged['elapsed'] = round(merged['elapsed'], 2)
-    return merged
+    return _with_continuity(merged, project_dir, abort_event, deadline)
 
 
 # ── Render ────────────────────────────────────────────────
@@ -399,36 +422,91 @@ def render_project(project_dir: str, output: str, *, quality: str = 'standard',
 
     Post-checks: the output file exists and is non-empty (the CLI's own
     contract — see the HyperFrames CLI skill's post-render verification).
+    Opted-in films additionally fence the receipt's source digest around the
+    CLI and publish from a private, same-filesystem stage only on success.
     """
+    deadline = time.monotonic() + timeout if timeout > 0 else None
     cli = _cli_or_env_error()
     if not cli:
         return _env_missing_result('render')
     if quality not in ('draft', 'standard', 'high'):
         return {'ok': False, 'category': 'io',
                 'detail': f'invalid quality {quality!r} (draft|standard|high)'}
-    args = [cli, 'render', project_dir, '--quality', quality, '-o', output]
-    if fps:
-        args += ['--fps', str(fps)]
-    logger.info('[MotionVideo] render start: %s (quality=%s fps=%s)',
-                project_dir, quality, fps or 'default')
-    res = _run_cli(args, cwd=project_dir, timeout=timeout, abort_event=abort_event)
-    ok = res['rc'] == 0 and not res['category'] \
-        and os.path.isfile(output) and os.path.getsize(output) > 0
-    rendered_s = None
-    m = _RENDERED_RE.search(res['out'])
-    if m:
-        rendered_s = float(m.group(1))
-    result = {
-        'ok': ok,
-        'category': '' if ok else _classify_failure(res),
-        'output': output if ok else '',
-        'elapsed': round(res['elapsed'], 2),
-        'render_time_s': rendered_s,
-        'detail': '' if ok else (res['err'] or res['out'])[-_TAIL:],
-    }
-    if ok:
-        logger.info('[MotionVideo] render done: %s (%.1fs wall)', output, res['elapsed'])
-    else:
-        logger.warning('[MotionVideo] render failed (%s): %.500s',
-                       result['category'], result['detail'])
-    return result
+    from lib.motion_video._continuity import check_continuity_project, recheck_continuity_source
+    continuity = check_continuity_project(
+        project_dir, abort_event=abort_event,
+        timeout=300 if deadline is None else max(0.0, deadline - time.monotonic()))
+    if not continuity['ok']:
+        return {'ok': False, 'category': continuity.get('category', 'continuity_failure'),
+                'detail': '; '.join(continuity['errors']), 'output': '',
+                'continuity': continuity}
+    opted_in = continuity['status'] != 'not_requested'
+    if opted_in:
+        project_dir = os.path.abspath(project_dir)
+    try:
+        with ExitStack() as cleanup:
+            render_output = output
+            if opted_in:
+                # Resolve relative destinations against the same project root
+                # used by the CLI, not against this process's working directory.
+                destination = os.path.abspath(os.path.join(project_dir, output))
+                parent = os.path.dirname(destination)
+                os.makedirs(parent, exist_ok=True)
+                staging = cleanup.enter_context(tempfile.TemporaryDirectory(
+                    prefix='.tofu-continuity-render-', dir=parent))
+                render_output = os.path.join(staging, 'render.mp4')
+            args = [cli, 'render', project_dir, '--quality', quality, '-o', render_output]
+            if fps:
+                args += ['--fps', str(fps)]
+            logger.info('[MotionVideo] render start: %s (quality=%s fps=%s)',
+                        project_dir, quality, fps or 'default')
+            if opted_in:
+                continuity = recheck_continuity_source(project_dir, continuity)
+                if not continuity['ok']:
+                    return {'ok': False, 'category': continuity['category'], 'output': '',
+                            'detail': '; '.join(continuity['errors']), 'continuity': continuity}
+                if abort_event is not None and abort_event.is_set():
+                    return {'ok': False, 'category': 'aborted', 'detail': 'render aborted',
+                            'output': '', 'continuity': continuity}
+            remaining = 0 if deadline is None else deadline - time.monotonic()
+            if deadline is not None and remaining <= 0:
+                return {'ok': False, 'category': 'timeout', 'detail': 'render deadline exhausted', 'output': ''}
+            res = _run_cli(args, cwd=project_dir, timeout=remaining, abort_event=abort_event)
+            ok = res['rc'] == 0 and not res['category'] \
+                and os.path.isfile(render_output) and os.path.getsize(render_output) > 0
+            rendered_s = None
+            m = _RENDERED_RE.search(res['out'])
+            if m:
+                rendered_s = float(m.group(1))
+            result = {
+                'ok': ok,
+                'category': '' if ok else _classify_failure(res),
+                'output': output if ok else '',
+                'elapsed': round(res['elapsed'], 2),
+                'render_time_s': rendered_s,
+                'detail': '' if ok else (res['err'] or res['out'])[-_TAIL:],
+            }
+            if opted_in:
+                continuity = recheck_continuity_source(project_dir, continuity)
+                result['continuity'] = continuity
+                if not continuity['ok']:
+                    result.update(ok=False, output='')
+                    if result['category'] not in ('aborted', 'timeout'):
+                        result.update(category=continuity['category'], detail='; '.join(continuity['errors']))
+                if abort_event is not None and abort_event.is_set():
+                    result.update(ok=False, category='aborted', detail='render aborted', output='')
+                elif deadline is not None and time.monotonic() >= deadline:
+                    result.update(ok=False, category='timeout', detail='render deadline exhausted', output='')
+                if result['ok']:
+                    os.replace(render_output, destination)
+            if result['ok']:
+                logger.info('[MotionVideo] render done: %s (%.1fs wall)', output, res['elapsed'])
+            else:
+                logger.warning('[MotionVideo] render failed (%s): %.500s',
+                               result['category'], result['detail'])
+            return result
+    except OSError as exc:
+        if not opted_in:
+            raise
+        return {'ok': False, 'category': 'io', 'detail': f'render output unavailable: {exc}',
+                'output': '', 'continuity': continuity}

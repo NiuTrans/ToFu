@@ -16,7 +16,7 @@ def desktop_home(tmp_path, monkeypatch):
     monkeypatch.setenv('HOME', str(tmp_path))
     monkeypatch.setenv('XDG_CONFIG_HOME', str(tmp_path / 'config'))
     monkeypatch.setattr(autostart, 'sys', SimpleNamespace(
-        platform='linux', executable='/opt/Tofu space/TofuAgent', frozen=True))
+        platform='linux', executable='/opt/Tofu space/TofuRemote', frozen=True))
     return tmp_path
 
 
@@ -25,7 +25,7 @@ def test_linux_publish_reinstall_and_disable(desktop_home):
     autostart.apply(True)
     path = desktop_home / 'config/autostart/tofu-agent.desktop'
     content = path.read_text()
-    assert 'Exec="/opt/Tofu space/TofuAgent"' in content
+    assert 'Exec="/opt/Tofu space/TofuRemote"' in content
     assert 'Terminal=false' in content
     assert path.stat().st_mode & 0o777 == 0o600
     autostart.apply(True)
@@ -46,7 +46,7 @@ def test_macos_launchagent_has_exact_argv(desktop_home, monkeypatch):
     monkeypatch.setattr(autostart.sys, 'platform', 'darwin')
     autostart.apply(True)
     data = plistlib.loads(autostart._entry_path().read_bytes())
-    assert data['ProgramArguments'] == ['/opt/Tofu space/TofuAgent']
+    assert data['ProgramArguments'] == ['/opt/Tofu space/TofuRemote']
     assert data['Label'] == autostart.LABEL and data['RunAtLoad'] is True
     autostart.apply(False)
     assert not autostart.enabled()
@@ -82,7 +82,7 @@ def test_symlink_and_relative_config_refused(desktop_home, monkeypatch):
 
 
 def test_desktop_exec_escapes_both_layers(desktop_home, monkeypatch):
-    monkeypatch.setattr(autostart.sys, 'executable', '/opt/a$`"%\\b/TofuAgent')
+    monkeypatch.setattr(autostart.sys, 'executable', '/opt/a$`"%\\b/TofuRemote')
     autostart.apply(True)
     content = autostart._entry_path().read_text()
     assert '\\\\$' in content and '\\\\`' in content and '\\\\"' in content
@@ -116,10 +116,10 @@ def test_windows_registry_startup_preserves_quoted_executable(desktop_home, monk
         DeleteValue=delete)
     monkeypatch.setitem(sys.modules, 'winreg', registry)
     monkeypatch.setattr(autostart.sys, 'platform', 'win32')
-    monkeypatch.setattr(autostart.sys, 'executable', r'C:\Program Files\Tofu\TofuAgent.exe')
+    monkeypatch.setattr(autostart.sys, 'executable', r'C:\Program Files\Tofu\TofuRemote.exe')
     assert not autostart.enabled()
     autostart.apply(True)
-    assert values['TofuAgent'] == r'"C:\Program Files\Tofu\TofuAgent.exe"'
+    assert values['TofuAgent'] == r'"C:\Program Files\Tofu\TofuRemote.exe"'
     assert autostart.enabled()
     values['other-application'] = 'keep'
     autostart.apply(False)

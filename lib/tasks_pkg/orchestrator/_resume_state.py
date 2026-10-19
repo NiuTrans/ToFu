@@ -15,12 +15,12 @@ from dataclasses import dataclass
 from typing import Any
 
 from lib.error_envelope import make_envelope
-from lib.llm_errors import RequestScopedError
+from lib.llm.llm_errors import RequestScopedError
 from lib.log import get_logger
 from lib.tasks_pkg.conv_message_builder._toolcalls import (
     _reconstruct_tool_call_messages,
 )
-from lib.tool_round_replay import scan_replayable_tool_round_prefix
+from lib.tool_results.tool_round_replay import scan_replayable_tool_round_prefix
 from lib.tools.todo import (
     TODO_MAX_CONTENT_CHARS,
     TODO_MAX_EXPLANATION_CHARS,
@@ -68,6 +68,7 @@ class _PreparedResumeState:
     checkpoint_messages: tuple[dict[str, Any], ...]
     checkpoint_todo_state: dict[str, Any] | None
     checkpoint_usage: dict[str, Any] | None
+    checkpoint_usage_complete: bool | None
     checkpoint_api_rounds: tuple[dict[str, Any], ...]
     checkpoint_modified_files: int | None
     checkpoint_modified_file_list: tuple[dict[str, Any] | str, ...]
@@ -330,6 +331,9 @@ def prepare_resume_state(cfg: Any) -> _PreparedResumeState:
         None if raw_usage is None
         else dict(_json_safe_copy(dict(raw_usage), 'checkpointUsage'))
     )
+    checkpoint_usage_complete = cfg.get('checkpointUsageComplete')
+    if checkpoint_usage_complete is not None and type(checkpoint_usage_complete) is not bool:
+        raise _protocol_error('checkpointUsageComplete', 'must be a boolean')
 
     raw_api_rounds = (
         cfg.get('checkpointApiRounds')
@@ -404,6 +408,7 @@ def prepare_resume_state(cfg: Any) -> _PreparedResumeState:
         checkpoint_messages=checkpoint_messages,
         checkpoint_todo_state=todo_state,
         checkpoint_usage=checkpoint_usage,
+        checkpoint_usage_complete=checkpoint_usage_complete,
         checkpoint_api_rounds=checkpoint_api_rounds,
         checkpoint_modified_files=raw_modified_files,
         checkpoint_modified_file_list=checkpoint_modified_file_list,
@@ -552,6 +557,11 @@ def apply_resume_state(
     if prepared.checkpoint_usage:
         task['_checkpointUsage'] = prepared.checkpoint_usage
         task['usage'] = copy.deepcopy(prepared.checkpoint_usage)
+    if prepared.checkpoint_usage_complete is False:
+        # Restoring display counters does not reconcile an unreceipted request.
+        # Preserve unknown consumption through the existing model-admission port.
+        task['_executionActualsComplete'] = False
+        task['_checkpointUsageComplete'] = False
     if prepared.checkpoint_api_rounds:
         task['_checkpointApiRounds'] = list(prepared.checkpoint_api_rounds)
         task['apiRounds'] = copy.deepcopy(list(prepared.checkpoint_api_rounds))

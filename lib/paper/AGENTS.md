@@ -29,8 +29,12 @@ project write tools; nothing here calls a model directly.
   model, parser, renderer, and artifact work.
 - Use shared LLM dispatch, tools, translation, production, and artifact ports;
   do not create private provider transports or task settlement.
-- Bound pages, chunks, context, concurrent models, media duration, retries,
-  artifacts, and retained intermediate data.
+- Preserve explicit caller selections and execution budgets; do not impose
+  private source/page/artifact admission quotas. Transport/context projections
+  and reconstructible idle retention retain their declared lifecycle.
+- `images/figures.py` retains all detected figures by default; versioned cache
+  reuse requires matching count/width and successful extraction. Verify
+  `tests/pdf_parser/test_pdf_classic_bounds.py`.
 
 `agent_usage.py` owns shared budget/accounting snapshots and strict meter
 restoration; its restoration guards live in

@@ -52,7 +52,7 @@ hidden_imports = []
 # in the desktop launcher's frozen self-relaunch path, so static analysis
 # misses it. Must be listed explicitly or the frozen build can't start.
 hidden_imports += ['server']
-hidden_imports += ['pypdf', 'lib.paper.builds.pdf_validation_worker', 'lib.paper.builds.process_worker']
+hidden_imports += ['pypdf', 'lib.artifacts.image_validation_worker', 'lib.paper.builds.pdf_validation_worker', 'lib.paper.builds.process_worker']
 
 # All lib subpackages (Quart blueprints, LLM dispatch, tools, etc.)
 hidden_imports += collect_submodules('lib')
@@ -141,7 +141,7 @@ _candidate_datas = [
 
     # Provider template catalog (lib/model_info/data/*.json) — the
     # file-backed hot-reloaded authority merged by both template loaders
-    # (bootstrap_pkg.providers + lib.provider_template_recipes), and the
+    # (bootstrap_pkg.providers + lib.provider.provider_template_recipes), and the
     # GPT-5.6 contract that lib.model_info._openai_gpt56 hard-requires at
     # import time via __file__-relative lookup.  Without this entry the
     # frozen app loses the entire provider picker AND crashes on any

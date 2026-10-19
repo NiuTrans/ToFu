@@ -48,7 +48,7 @@ def _restore_dispatch_module_after_stub():
 
 def _derive_expected_from_catalog() -> frozenset[str]:
     """Ground-truth cheap+thinking model ids from the live template catalog."""
-    recipes = importlib.import_module('lib.provider_template_recipes')
+    recipes = importlib.import_module('lib.provider.provider_template_recipes')
     result: set[str] = set()
     for template in recipes.load_provider_templates():
         for row in template.get('offering_recipes') or []:
@@ -88,7 +88,7 @@ def test_static_floor_stays_within_catalog_derivation():
 def test_catalog_unreadable_falls_back_to_static_floor(monkeypatch):
     """A broken template catalog must not crash title generation — the
     exclusion set degrades to the static floor instead."""
-    recipes = importlib.import_module('lib.provider_template_recipes')
+    recipes = importlib.import_module('lib.provider.provider_template_recipes')
 
     def _boom():
         raise RuntimeError('catalog mid-write')

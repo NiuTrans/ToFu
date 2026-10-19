@@ -2,76 +2,28 @@
 This guide owns the detailed compaction policy referenced by the
 [context-engineering domain map](modules/context_engineering.md).
 Automatic compaction bounds the request view without rewriting durable Turns. Working-state summaries retain known repository/root attribution for paths as rootname-relative or original absolute paths. A new task worktree is not evidence that every historical path moved. Unknown attribution stays unresolved; fresh environment mappings govern execution.
-Manual compaction writes a persistent summary boundary through the conversation
-command service, guarded against intervening Turns. Both share summarization
-and token-budget primitives, never persistence semantics.
-L1 receives an API-form working projection and replaces only cold tool/image
-bulk; it performs no conversation read, projection update or change notification.
-Completed ordinary chat turns publish this bounded view through the owner-scoped
-durable continuation repository. The next turn validates it and transforms only
-uncovered Turns; restarts/cache eviction do not resurrect summarized history.
-Missing/invalid checkpoints rebuild unchanged Turns and pass fresh admission.
+Manual compaction writes a persistent summary boundary through the conversation command service, guarded against intervening Turns. Both share summarization and token-budget primitives, never persistence semantics.
+L1 receives an API-form working projection and replaces only cold tool/image bulk; it performs no conversation read, projection update or change notification.
+Completed ordinary chat turns publish this bounded view through the owner-scoped durable continuation repository. The next turn validates it and transforms only uncovered Turns; restarts/cache eviction do not resurrect summarized history. Missing/invalid checkpoints rebuild unchanged Turns and pass fresh admission.
 **Continuation boundary:** display updates previously invalidated summaries, while shared eligibility wrongly blocked completed Continue publication. Decision: semantic proof v2 preserves typed content/tool/Attempt/policy/media fences; Continue proves its input baseline, retains fresh suffixes, and publishes only verified complete model content. Rejected: weaker witnesses, history deletion or higher thresholds. Old proofs rebuild once with explicit reasons. Details: `contracts/model_context_v1.schema.json` and [storage operations](STORAGE_OPERATIONS.md#model-context-semantic-version).
-Ordinary `excludeLast` excludes the empty output target, not continuation itself:
-validate that boundary. Actual resume payloads, fresh execution boundaries and
-changed historical witnesses invalidate continuation.
-L1 indexes diagnostic/pairing/newest-unconsumed positions once per pass; input-bounded
-references expire on return. Reverse selection, occurrence IDs and consumption stay intact.
-Previews inspect at most 121 characters for two-line/120-character output.
-`tool_compacted` stays durable-before-visible without tool-row mutations; DEBUG success
-logs and content-free aggregates report emitted/failed counts and monotonic durations.
-Pipeline timings distinguish L1, L2 (checks/provider/persistence), recomposition
-(including analytics) and advanced work. `done` means normal return, not adoption.
-L1 total includes indexing/counting beyond event time; timing creates no authority.
-Summary formatting counts once; centre-first `O(n log n)` elision uses constant-time
-length deltas, preserves human text and reports irreducible overflow honestly.
+Ordinary `excludeLast` excludes the empty output target, not continuation itself: validate that boundary. Actual resume payloads and nonempty resume targets cannot blindly restore a completed prefix; fresh execution boundaries and changed historical witnesses also refuse restoration.
+
+**Ingress-policy continuity — Problem:** Continue/resume could exit prefix admission before pinning its policy, then publish a checkpoint hashed from runtime-normalized configuration. An unchanged next request rejected that checkpoint and rebuilt already-folded history. **Decision:** pin strict, portable and supported effort witnesses with the input history baseline before resume exclusions; successful, verified completion publishes those original witnesses. Real policy/project/permission changes still reject reuse. A validated-prefix refusal that requires a full-history reread preserves and logs its original reason (for example `policy_changed`), not the internal `replay_disabled` fallback status. **Rejected:** increasing compaction thresholds, equating absent policy with false, or bypassing owner/history/media fences. Specs: `tests/model_routing/test_model_continuation_policy.py`, `test_model_context_read.py`.
+L1 indexes diagnostic/pairing/newest-unconsumed positions once per pass; input-bounded references expire on return. Reverse selection, occurrence IDs and consumption stay intact. Previews inspect at most 121 characters for two-line/120-character output.
+`tool_compacted` stays durable-before-visible without tool-row mutations; DEBUG success logs and content-free aggregates report emitted/failed counts and monotonic durations.
+Pipeline timings distinguish L1, L2 (checks/provider/persistence), recomposition (including analytics) and advanced work. `done` means normal return, not adoption. L1 total includes indexing/counting beyond event time; timing creates no authority.
+Summary formatting counts once; centre-first `O(n log n)` elision uses constant-time length deltas, preserves human text and reports irreducible overflow honestly.
 ### Shared child invocation ownership
-`compaction/_ownership.py::compaction_owner_key` is the working-state identity
-boundary. Root/direct callers retain their existing conversation keys. A child
-identified by `is_child_invocation(task)` uses
-`invocation:{user_id}:{task_id}`; its parent `convId` remains an authorization
-link, never its compaction cache or accounting bucket. Explicit legacy `conv_id`
-arguments cannot override child identity. Missing child task identity fails closed.
-L1/advanced prefix reads, L2 admission/cooldowns, reactive invalidation, summary
-affinity and usage, archive creation/retention and prior-receipt lookup share this
-key. Real compaction and canonical call-level usage/receipts remain enabled.
-Children do not re-pin the parent's durable objective from generated summaries.
-No new ledger, store or worker is introduced. Child success and fatal/cancel
-handlers drain summary costs through `_settlement.py` before terminal delivery;
-the drain is idempotent and retains call-level costs. Provider token/cache writes
-and final cache cleanup use the same owner key; teardown releases only the owning
-child's cache and cooldown entries (see the lifecycle contract below).
-Storage remains the existing `ConversationStore` authority. A task-scoped key is
-**not** a durable conversation ID: child invocation integration must supply an
-owner-authorized task archive scope through that repository boundary, not create
-a synthetic conversation or fall back to the parent's archives. The default
-conversation-only adapter alone is insufficient for child receipt durability.
-`tests/tasks_pkg/test_child_compaction_ownership.py` specifies sibling/root isolation,
-canonical costs, cooldowns and create/read/prune scope parity with isolated fakes.
-Final recovery reuses that scope; metadata failure never falls back to parent archives.
-These specs cover usage settlement, not real Sidecar scope or provider cache cleanup.
+`compaction/_ownership.py::compaction_owner_key` is the working-state identity boundary. Root/direct callers retain their existing conversation keys. A child identified by `is_child_invocation(task)` uses `invocation:{user_id}:{task_id}`; its parent `convId` remains an authorization link, never its compaction cache or accounting bucket. Explicit legacy `conv_id` arguments cannot override child identity. Missing child task identity fails closed.
+L1/advanced prefix reads, L2 admission/cooldowns, reactive invalidation, summary affinity and usage, archive creation/retention and prior-receipt lookup share this key. Real compaction and canonical call-level usage/receipts remain enabled. Children do not re-pin the parent's durable objective from generated summaries.
+No new ledger, store or worker is introduced. Child success and fatal/cancel handlers drain summary costs through `_settlement.py` before terminal delivery; the drain is idempotent and retains call-level costs. Provider token/cache writes and final cache cleanup use the same owner key; teardown releases only the owning child's cache and cooldown entries (see the lifecycle contract below).
+Storage remains the existing `ConversationStore` authority. A task-scoped key is **not** a durable conversation ID: child invocation integration must supply an owner-authorized task archive scope through that repository boundary, not create a synthetic conversation or fall back to the parent's archives. The default conversation-only adapter alone is insufficient for child receipt durability.
+`tests/tasks_pkg/test_child_compaction_ownership.py` specifies sibling/root isolation, canonical costs, cooldowns and create/read/prune scope parity with isolated fakes. Final recovery reuses that scope; metadata failure never falls back to parent archives. These specs cover usage settlement, not real Sidecar scope or provider cache cleanup.
 ### Assistant phase and task continuity
-The default operating prompt interprets action requests as scoped execution,
-preserves authorization from the conversation, and carries the original task
-through status questions and compaction. It asks for essential missing input
-or new authorization after completing independent authorized preparation.
-Explanation-only requests, tool permissions and destructive-action boundaries
-remain explicit. The prompt is still composer-owned and cache-stable.
-Single-agent Responses assistant messages retain each original `commentary` /
-`final_answer` phase and message boundary in the existing `_responses_items`
-sidecar, shared by live, tool-round and durable history reconstruction. Adjacent
-assistant rows carrying native state are not merged. Every Responses route can
-replay these messages; model-specific opaque-item feature gates are unchanged.
-Replay requires matching current canonical prose, so redaction, hooks and
-compaction cannot resurrect stale captured text. User messages never gain a
-phase. Native multi-agent messages retain their separate attribution policy.
-This reconstructible sidecar adds no store or worker. Capture is bounded to
-64 messages, 64 content parts per message and 256 KiB of UTF-8 text per response;
-overflow or unsupported message shapes omit phase replay while retaining the
-ordinary transcript text. Existing continuation/Turn storage bounds and
-lifecycles still apply. Regression and budget evidence lives in
-`tests/llm/test_responses_message_phase.py`; terminal handling is specified in
-[TURN_SETTLEMENT.md](contracts/TURN_SETTLEMENT.md).
+The default operating prompt interprets action requests as scoped execution, preserves authorization from the conversation, and carries the original task through status questions and compaction. It asks for essential missing input or new authorization after completing independent authorized preparation. Explanation-only requests, tool permissions and destructive-action boundaries remain explicit. The prompt is still composer-owned and cache-stable.
+Single-agent Responses assistant messages retain each original `commentary` / `final_answer` phase and message boundary in the existing `_responses_items` sidecar, shared by live, tool-round and durable history reconstruction. Adjacent assistant rows carrying native state are not merged. Every Responses route can replay these messages; model-specific opaque-item feature gates are unchanged.
+Replay requires matching current canonical prose, so redaction, hooks and compaction cannot resurrect stale captured text. User messages never gain a phase. Native multi-agent messages retain their separate attribution policy.
+This reconstructible sidecar adds no store or worker. Capture is bounded to 64 messages, 64 content parts per message and 256 KiB of UTF-8 text per response; overflow or unsupported message shapes omit phase replay while retaining the ordinary transcript text. Existing continuation/Turn storage bounds and lifecycles still apply. Regression and budget evidence lives in `tests/llm/test_responses_message_phase.py`; terminal handling is specified in [TURN_SETTLEMENT.md](contracts/TURN_SETTLEMENT.md).
 ### Authoritative checklist restoration
 `context_composer/checklist.py` owns the model projection of the task's accepted
 checklist state. It is required execution data, not optional todo guidance: it
@@ -127,7 +79,18 @@ mid-flight, an already-aborted task skips the paid call entirely, and an
 abort never falls through to the text-tier retry. Synthetic task dicts
 (manual /compact, standalone callers) keep the non-streaming dispatch path
 unwired.
-Default task-owned summaries use cost-first, highest-AA routing; scope, evidence, opt-out and ranking semantics live in [AA-cheapest compression-first routing](CONTEXT_BUDGET_POLICY.md#aa-cheapest-compression-first-routing).
+Default task-owned summaries use a separate request-owned owner/tenant route.
+API summaries retain cost-first/highest-AA qualification; subscription summaries
+may use declared sufficient Luna-tier models or authorized known-cost paid APIs
+under an explicit resource-tier policy. `summaryMaxCostUsd` caps worst-case paid
+spend; subscription marginal cost remains unknown. Preflight does not resolve
+secrets. Dispatch binds the planned catalog revision/identities, mints only one
+candidate with no widened fallback, nests/restores the parent provider scope and
+cleans credential references after complete-output accounting. The parent Codex
+pin does not override a selected paid provider. Complete output and durable
+adoption checks remain unchanged; no route failure licenses source deletion.
+Scope, evidence, opt-out and ranking semantics live in
+[AA-cheapest compression-first routing](CONTEXT_BUDGET_POLICY.md#aa-cheapest-compression-first-routing).
 ### Complete summaries without a wall-clock deadline
 **Problem.** Short timers can discard useful slow work or trigger lossy recovery;
 clipped or provider-truncated summaries cannot safely replace source context.
@@ -156,6 +119,46 @@ Logs expose identity, reasoning length and first-text latency, never reasoning c
 live recovery improves apparent latency at the expense of state. Executable specs:
 `tests/tasks_pkg/test_live_summary_budget.py`, `tests/tasks_pkg/test_transient_summary_budget.py`,
 `tests/compaction/test_summary_completion_policy.py`.
+### Credential-outage robustness and authentic failed-attempt settlement
+**Problem.** When the owning subscription's shared credential cannot be read
+(`LocalRequestPreparationError` wrapping `SubscriptionCredentialUnavailableError`,
+e.g. `codex_command_unavailable`), the L2 summary previously abandoned its first attempt, so a
+long conversation over the working-set threshold deadlocks: every round-start
+`working_set` compaction archives + emits `COMPACTION`, fails the summary, and
+returns False, then the dispatch-guard admission pass repeats the summary and
+raises a fatal `ContextCompactionError`. The failed attempts also left no
+terminal fact, so the UI showed two stuck `running` "compressing" ghosts with
+meaningless durations (the muu1klptjtwd3t incident).
+**Decision.** Three scoped changes, none of which weaken the lossy-recovery
+invariants for live/transient tasks:
+1. Summaries reuse the main request's bounded credential-recovery owner for
+   proven transient failures before provider ingress: at most three attempts
+   within 30 seconds, preserving the exact payload, model, provider pin and
+   approved quote. Cancellation interrupts backoff; permanent credential faults,
+   local payload defects and observed provider work never retry. An alternate
+   model name is insufficient authority to move a pinned or quoted summary.
+2. The dispatch-guard admission pass may fall through to the bounded deterministic
+   `_head_truncate` when its summary cannot run and the conversation is over the
+   admission ceiling, for non-bounded tasks — the final boundary must bound the
+   context rather than surface a fatal error. Live/transient bounded tasks keep
+   their no-lossy-recovery discipline; the proactive `working_set` pass keeps its
+   summary-only economic path.
+3. A failed `working_set`/`window`/`dispatch_guard` attempt settles as one
+   terminal `compaction_done` whose receipt carries `status='failed'` and the real
+   `outcomeReason`, bridging the live phase row through the existing reactive
+   archive seam so the frontend renders an honest failed compaction row instead
+   of a ghost. Reactive/backfill/heal and deterministic-recovery paths keep their
+   own terminal accounting and are untouched.
+`llm_fallback/_call.py` applies the same discrimination: a subscription-credential
+outage rotates like any primary-model failure (and permits pool rescue), while a
+payload defect still refuses rotation.
+**Rejected.** A deterministic *summary* last resort for live tasks (violates the
+"source must survive a failed summary" invariant that `bounded_summary_task`
+encodes); blanket rotation of every `LocalRequestPreparationError` (replays local
+payload bugs across the pool); settling every failed attempt (double-counts the
+reactive path's own receipts). Executable specs:
+`tests/compaction/test_compaction_failed_settlement.py`,
+`tests/compaction/test_summary_credential_rotation.py`.
 Opaque reasoning is never locally tokenized as if ciphertext length were model
 tokens. The counter starts from the previous provider-measured input, estimates
 the visible appended suffix, and adds the provider-reported hidden-thinking
@@ -184,6 +187,16 @@ Present vs absent `content` is canonical-invisible but byte-divergent, so it
 rewrites the GLM/Anthropic prefix cache every round. Specs:
 `tests/llm_sanitize/test_empty_text_block_wire.py`,
 `tests/cache/test_cache_content_wrap_invariance.py`.
+
+Structured plain text separators are not phantom empty content: the shared
+`llm_sanitize.text_blocks` authority folds exact spaces/newlines/tabs into a
+compatible neighbor before strict-provider emission, without moving bytes
+across cache/signature/opaque/multimodal boundaries. All-blank content still
+heals/omits as above; ordinary single-string reports remain unchanged. Specs:
+`tests/llm_sanitize/test_structured_text_whitespace.py`. Alternatives rejected:
+keeping standalone blanks restores HTTP 400s; guessing spaces in saved messages
+rewrites evidence and identifiers. `swarm_messages_v1.json` requires readable
+authored prose, while message storage/injection preserve exact submitted text.
 Image-bearing placeholders name the durable recovery reference when one
 exists: retained owner-scoped media (`tofu-media:<id>`) is rewritten to the
 `att_media_<id>` form that `inspect_image` resolves through the attachment
@@ -194,79 +207,7 @@ durable reference exists. Text lanes never serialize a screenshot envelope:
 `__screenshot__` dict to its text fallback plus the same durable reference,
 so raw base64 can no longer spill into paged artifacts.
 ### Historical evidence, live requests and execution continuity
-`compaction/_history.py` owns human-source classification and historical user
-carriers. A provider's `role=user` alone does not prove a human request: runtime
-meta blocks, virtual-user directives and ordinary inbox notifications are not
-human steering; explicit operator/human steering remains eligible. The opening
-request survives as **historical evidence**, not as the default current ask.
-Earlier selected requests from the folded region use one bounded policy across
-repeated compactions: newest-first under 4,096 estimated tokens and eight
-messages, then chronological rendering, with the opener separately protected.
-Historical users in protected execution shells have a separate preservation
-allowance; the receipt's retained-user count includes both regions. Full
-request accounting includes every carrier and its wrapper. Selected strings
-retain full text and boundary whitespace, including distinct equal-text
-occurrences; multimodal content blocks remain intact.
-Unselected originals remain in the transcript/pre-compaction archive.
-Request-local carriers use producer-owned `_retainedUserHistory` metadata for
-reselection and visible `<retained_user_messages>` attribution for providers
-that strip private fields. The version remains private metadata, not prompt
-prose. Legacy trusted carriers remain readable; pasted user XML never proves
-producer identity. Adjacent trusted carriers coalesce into one historical
-region without crossing human/execution boundaries or deduplicating equal text.
-One full explanation appears in the first carrier of the rebuilt projection;
-other carriers retain balanced tags and per-entry historical labels, not another
-copy of the long guidance. Surviving assistant/tool rows remain in causal order.
-Emergency image stripping also updates request-local typed history; rebuilding cannot restore stripped payloads (`tests/compaction/test_compaction_history_image_recovery.py`).
-The explanation marks history as non-live, later human steering as controlling, and existing scoped authorization as preserved without new approvals.
-Automatic L2 and manual `/compact` select one chronological complete tool-round
-suffix **across user turns**, not a fresh allowance per assistant. The count is
-a maximum under the preservation-token budget; enclosing user/assistant shells
-are charged too. The newest complete real execution batch survives even when
-it exceeds that budget. Synthetic receipts cannot displace real execution;
-incomplete rounds are not relabelled complete. Emergency whole-message removal
-protects the latest human and real batch; oversized irreducible carriers cause
-admission refusal. Single-result byte recovery may shorten reconstructible
-execution text with an explicit elision marker, never the required handoff.
-The receipt is fallible working state: objective, constraints, verified work,
-current state, blockers and next steps. Its **Objective** is model-authored from
-verbatim human evidence; summary-input elision removes non-human prose, not
-human text. A missing/blank Objective stays unresolved, never falls back to the
-opening request. Continue/no-ask instructions retain their scope, later stops
-or replacements win, and assistant proposals cannot become approval gates.
-The advisory autopilot pin is updated only from an accepted receipt. Manual
-compaction freezes its read set before summary generation, reconciles unchanged
-folded prefixes with concurrent tails, and suppresses repinning if the accepted
-human read set changed. This is not a new authorization store.
-**Ruled Out / Dead Ends** retains verified negative conclusions with proof and
-retry boundaries; pending steps cannot re-propose them without superseding
-evidence. If all routes are ruled out, report the blocker. The newest typed
-handoff, complete adjacent legacy `context_compact` pair, or manual summary is
-carried forward under a bounded budget; chronology, not format, chooses it.
-Automatic L2 also supplies the latest completed assistant wrap-up from the full source.
-`_layer2/_summary_evidence.py` supplies adjacent occurrence-local tool observations:
-newest 256 messages, at most 64 calls/message, 16 rows, 4 KiB/row and 24 KiB total.
-Parsing caps at 32,768 characters; non-text/encoded bodies are omitted, previews
-use bounded head/tail samples, and oversized identities are omitted whole.
-All wrappers/observations enter the existing summary-input budget; human text
-is never silently elided. Calls express intent, missing/partial results cannot
-prove completion, and omitted observations are not verified negative evidence.
-The prior receipt occupies one slot; default summaries never extract a duplicate ledger.
-Opt-in `evidenceLedger`/adaptive validation retain the separate runtime-ledger contract,
-not this default extraction bound. All are fallible evidence; newer execution wins.
-Specs: `tests/compaction/test_compaction_summary_evidence.py`. No new store, worker or I/O.
-Without a recognized live receipt, load only the newest owner-scoped archive
-summary metadata, never the archived transcript. Text-only route switches
-retain compacted state and its private provenance if non-route policy matches;
-v2 `modelRef`, preferred provider and routing are route identity.
-Manual compaction keeps selected human Turns/identities, never fabricated users.
-Reload groups consecutive users before the summary into one historical carrier;
-recent exchanges remain ordinary dialogue. CAS/archives use raw Turn space,
-never indices from expanded model messages.
-The receipt targets 800–1,600 tokens with an advisory 2,200-token size budget;
-reconstructible `data/tool-results` paths never become durable working files.
-Tofu adopts summary-last placement, not Codex `compact.rs`'s full rewrite:
-execution tail, typed provenance, immutable Turns and append-only context survive.
+`compaction/_history.py` owns human-source classification and historical user carriers. A provider's `role=user` alone does not prove a human request: runtime meta blocks, virtual-user directives and ordinary inbox notifications are not human steering; explicit operator/human steering remains eligible. The opening request survives as **historical evidence**, not as the default current ask. Earlier selected requests from the folded region use one bounded policy across repeated compactions: newest-first under 4,096 estimated tokens and eight messages, then chronological rendering, with the opener separately protected. Historical users in protected execution shells have a separate preservation allowance; the receipt's retained-user count includes both regions. Full request accounting includes every carrier and its wrapper. Selected strings retain full text and boundary whitespace, including distinct equal-text occurrences; multimodal content blocks remain intact. Unselected originals remain in the transcript/pre-compaction archive. Request-local carriers use producer-owned `_retainedUserHistory` metadata for reselection and visible `<retained_user_messages>` attribution for providers that strip private fields. The version remains private metadata, not prompt prose. Legacy trusted carriers remain readable; pasted user XML never proves producer identity. Adjacent trusted carriers coalesce into one historical region without crossing human/execution boundaries or deduplicating equal text. One full explanation appears in the first carrier of the rebuilt projection; other carriers retain balanced tags and per-entry historical labels, not another copy of the long guidance. Surviving assistant/tool rows remain in causal order. Emergency image stripping also updates request-local typed history; rebuilding cannot restore stripped payloads (`tests/compaction/test_compaction_history_image_recovery.py`). The explanation marks history as non-live, later human steering as controlling, and existing scoped authorization as preserved without new approvals. Automatic L2 and manual `/compact` select one chronological complete tool-round suffix **across user turns**, not a fresh allowance per assistant. The count is a maximum under the preservation-token budget; enclosing user/assistant shells are charged too. The newest complete real execution batch survives even when it exceeds that budget. Synthetic receipts cannot displace real execution; incomplete rounds are not relabelled complete. Emergency whole-message removal protects the latest human and real batch; oversized irreducible carriers cause admission refusal. Single-result byte recovery may shorten reconstructible execution text with an explicit elision marker, never the required handoff. The receipt is fallible working state: objective, constraints, verified work, current state, blockers and next steps. Its **Objective** is model-authored from verbatim human evidence; summary-input elision removes non-human prose, not human text. A missing/blank Objective stays unresolved, never falls back to the opening request. Continue/no-ask instructions retain their scope, later stops or replacements win, and assistant proposals cannot become approval gates. The advisory autopilot pin is updated only from an accepted receipt. Manual compaction freezes its read set before summary generation, reconciles unchanged folded prefixes with concurrent tails, and suppresses repinning if the accepted human read set changed. This is not a new authorization store. **Ruled Out / Dead Ends** retains verified negative conclusions with proof and retry boundaries; pending steps cannot re-propose them without superseding evidence. If all routes are ruled out, report the blocker. The newest typed handoff, complete adjacent legacy `context_compact` pair, or manual summary is carried forward under a bounded budget; chronology, not format, chooses it. Automatic L2 also supplies the latest completed assistant wrap-up from the full source. `_layer2/_summary_evidence.py` supplies adjacent occurrence-local tool observations: newest 256 messages, at most 64 calls/message, 16 rows, 4 KiB/row and 24 KiB total. Parsing caps at 32,768 characters; non-text/encoded bodies are omitted, previews use bounded head/tail samples, and oversized identities are omitted whole. All wrappers/observations enter the existing summary-input budget; human text is never silently elided. Calls express intent, missing/partial results cannot prove completion, and omitted observations are not verified negative evidence. The prior receipt occupies one slot; default summaries never extract a duplicate ledger. Opt-in `evidenceLedger`/adaptive validation retain the separate runtime-ledger contract, not this default extraction bound. All are fallible evidence; newer execution wins. Specs: `tests/compaction/test_compaction_summary_evidence.py`. No new store, worker or I/O. Without a recognized live receipt, load only the newest owner-scoped archive summary metadata, never the archived transcript. Text-only route switches retain compacted state and its private provenance if non-route policy matches; v2 `modelRef`, preferred provider and routing are route identity. Manual compaction keeps selected human Turns/identities, never fabricated users. Reload groups consecutive users before the summary into one historical carrier; recent exchanges remain ordinary dialogue. CAS/archives use raw Turn space, never indices from expanded model messages. The receipt targets 800–1,600 tokens with an advisory 2,200-token size budget; reconstructible `data/tool-results` paths never become durable working files. Tofu adopts summary-last placement, not Codex `compact.rs`'s full rewrite: execution tail, typed provenance, immutable Turns and append-only context survive.
 ### Replaying the model request
 
 Checked Continue reuse and final-admission recovery follow [the coordinated budget contract](CONTEXT_BUDGET_POLICY.md#dispatch-recovery).
@@ -386,72 +327,31 @@ Proactive safety recovery and final guard share a route-derived window-safety ce
 Route propagation and coordinated L1/L2 adoption: [CONTEXT_BUDGET_POLICY.md](CONTEXT_BUDGET_POLICY.md).
 Receipts distinguish a local economic decline from an attempted summary failure;
 locally measured token counts are never labelled upstream-reported usage.
-The local token authority reuses exact-ish counts above 4 KiB, or above 512
-characters when a caller proves reuse. Full repeated requests batch all short
-text plus unique cold misses once, while stable large-prefix digest hits skip
-BPE work. Encoding/length/SHA-256 keys retain no prompt text; capacity is
-launch-probed with a 4,096-entry ceiling. General short text bypasses hashing;
-changed content or encoding is recounted. Provider-reported per-conversation
-anchors use a separate launch-probed LRU (128 fallback, 4,096 distributed,
-8,192 hard ceiling): TTL/capacity/pressure eviction falls through to the next
-counter, retained fields are bounded, and expiration plus replacement are
-atomic.
-Child invocations use `compaction_owner_key(task)` for provider-usage cache
-writes and native-compaction invalidation; parent `convId` is authorization
-lineage, never the child's cache key. The common settlement helper folds paid
-summary calls into `usage` and `apiRounds` before child/root terminal branching
-(and is shared by failure/cancellation). Drained costs are retained on the task
-until projection succeeds, so a cleanup fault cannot silently discard them.
-Child teardown independently releases token-cache and summary-cooldown entries,
-including after `KeyboardInterrupt`, without clearing parent or sibling state.
-Completed children retain no global usage/cache/cooldown scope; durable archive
-retention remains the storage owner's separate lifecycle. Specs:
-`tests/tasks_pkg/test_child_compaction_lifecycle.py`.
-L2's request gate counts tools; its message-only estimate retains retry/archive/analytics contracts. Final post-injection admission treats that canonical complete-request
-count as its total exactly once and passes it call-locally to the body clamp; v2
-schema/message fields only decompose it. Missing or invalid evidence rescans.
-Mutation invalidates reuse; current-task cache evidence wins after two misses.
-Within the request gate, the broad heuristic prefilter is lazy. A usage-cache
-hit or successful local tokenizer returns without paying for a discarded
-request-wide heuristic scan. Network counters still use that prefilter at the
-same threshold, and a later heuristic fallback reuses the already-computed
-value. A usage-cache hit verifies the complete measured-prefix digest, exact model,
-and system/tool envelope without copying the historical message list or
-re-tokenizing the prefix. A sampled tail is not sufficient evidence: earlier
-edits and cold history reconstruction invalidate reuse. On a miss, historical
-provider usage must never cap a fresh count. Native post-compaction effective
-usage cannot authorize the original pre-compaction message list.
-The selected-slot body adapter adds a local-only hard-window check after route
-adaptation. It recounts messages, system and tool schemas locally using bounded
-content-digest tokenizer caches; unbound integers and same-model hints cannot
-skip this safety check.
-Over-window input raises the existing typed context-limit failure before
-transport so the task can compact and retry; the adapter never silently
-truncates user history. Opaque reasoning ciphertext length is not text-token
-usage. Provider-native counts remain authoritative for billing.
-Adaptive L2 compaction is opt-in. It compares route-priced, cache-adjusted
-input savings with compaction-call and evidence-loss cost; context-window safety
-remains an unconditional hard gate. Generated state is checked against pending
-work and the evidence ledger; failed validation preserves the original context
-for live/transient tasks. Only explicit utility callers may retain a deterministic
-bounded view. `remainingRoundsMedian` is also the horizon for exact pre/post-summary
-checks. Fixed compaction starts at one round, then uses the shortest of the four
-most recent successful compaction gaps and the current window's observed age,
-capped at six and by the remaining API-round budget. Long task age cannot hide
-a three-round prefix lifetime.
-An automatic economic decline records the optimistic token-growth lower bound
-at which the candidate could first repay its cache rewrite or meet the minimum
-reduction. Until that bound, later rounds reuse the preflight veto instead of
-rebuilding the same fold candidate. A lower warm-cache witness or a longer
-observed compaction window invalidates the veto immediately;
-explicit/reactive compaction and the hard window gate always bypass it.
-Pre-compaction archives remain exact audit snapshots. Metadata/summary loads
-without the potentially multi-megabyte message payload; clients load messages
-only for explicit inspection, copy, or download. The bounded
-`tofu.compaction-receipt/v1` records strategy/fallback, preserved
-anchors/turns/tool rounds/files, durable-objective application, summary time,
-normalized usage, cache payback, evidence, and recovery truncation. Stored with
-the archive, it never enters model context or enlarges the next request.
+
+The activity header distinguishes `window` ("Context budget threshold reached" /
+"达到上下文预算阈值"), `dispatch_guard` ("Request too large before sending" /
+"发送前请求过大"), and `context_overflow` ("Provider context overflow" /
+"提供商报告上下文超限"). The first two describe local preventive admission,
+not a provider-reported overflow. Raw trigger/details and summary-model attribution
+remain unchanged. Summarization uses a separately prepared, bounded request: the
+main context's threshold does not imply that the summarizer received that entire
+context or reached its own route limit. UI specs: `activity-block.test.ts` and
+`tests/visual/test_visual_compaction_trigger_wording.py`.
+The local token authority reuses exact-ish counts above 4 KiB, or above 512 characters when a caller proves reuse. Full repeated requests batch all short text plus unique cold misses once, while stable large-prefix digest hits skip BPE work. Encoding/length/SHA-256 keys retain no prompt text; capacity is launch-probed with a 4,096-entry ceiling. General short text bypasses hashing; changed content or encoding is recounted. Provider-reported per-conversation anchors use a separate launch-probed LRU (128 fallback, 4,096 distributed, 8,192 hard ceiling): TTL/capacity/pressure eviction falls through to the next counter, retained fields are bounded, and expiration plus replacement are atomic.
+
+Child invocations use `compaction_owner_key(task)` for provider-usage cache writes and native-compaction invalidation; parent `convId` is authorization lineage, never the child's cache key. The common settlement helper folds paid summary calls into `usage` and `apiRounds` before child/root terminal branching (and is shared by failure/cancellation). Drained costs are retained on the task until projection succeeds, so a cleanup fault cannot silently discard them. Child teardown independently releases token-cache and summary-cooldown entries, including after `KeyboardInterrupt`, without clearing parent or sibling state. Completed children retain no global usage/cache/cooldown scope; durable archive retention remains the storage owner's separate lifecycle. Specs: `tests/tasks_pkg/test_child_compaction_lifecycle.py`.
+
+L2's request gate counts tools; its message-only estimate retains retry/archive/analytics contracts. Final post-injection admission treats that canonical complete-request count as its total exactly once and passes it call-locally to the body clamp; v2 schema/message fields only decompose it. Missing or invalid evidence rescans. Mutation invalidates reuse; current-task cache evidence wins after two misses.
+
+Within the request gate, the broad heuristic prefilter is lazy. A usage-cache hit or successful local tokenizer returns without paying for a discarded request-wide heuristic scan. Network counters still use that prefilter at the same threshold, and a later heuristic fallback reuses the already-computed value. A usage-cache hit verifies the complete measured-prefix digest, exact model, and system/tool envelope without copying the historical message list or re-tokenizing the prefix. A sampled tail is not sufficient evidence: earlier edits and cold history reconstruction invalidate reuse. On a miss, historical provider usage must never cap a fresh count. Native post-compaction effective usage cannot authorize the original pre-compaction message list.
+
+The selected-slot body adapter adds a local-only hard-window check after route adaptation. It recounts messages, system and tool schemas locally using bounded content-digest tokenizer caches; unbound integers and same-model hints cannot skip this safety check. Over-window input raises the existing typed context-limit failure before transport so the task can compact and retry; the adapter never silently truncates user history. Opaque reasoning ciphertext length is not text-token usage. Provider-native counts remain authoritative for billing.
+
+Adaptive L2 compaction is opt-in. It compares route-priced, cache-adjusted input savings with compaction-call and evidence-loss cost; context-window safety remains an unconditional hard gate. Generated state is checked against pending work and the evidence ledger; failed validation preserves the original context for live/transient tasks. Only explicit utility callers may retain a deterministic bounded view. `remainingRoundsMedian` is also the horizon for exact pre/post-summary checks. Fixed compaction starts at one round, then uses the shortest of the four most recent successful compaction gaps and the current window's observed age, capped at six and by the remaining API-round budget. Long task age cannot hide a three-round prefix lifetime.
+
+An automatic economic decline records the optimistic token-growth lower bound at which the candidate could first repay its cache rewrite or meet the minimum reduction. Until that bound, later rounds reuse the preflight veto instead of rebuilding the same fold candidate. A lower warm-cache witness or a longer observed compaction window invalidates the veto immediately; explicit/reactive compaction and the hard window gate always bypass it.
+
+Pre-compaction archives remain exact audit snapshots. Metadata/summary loads without the potentially multi-megabyte message payload; clients load messages only for explicit inspection, copy, or download. The bounded `tofu.compaction-receipt/v1` records strategy/fallback, preserved anchors/turns/tool rounds/files, durable-objective application, summary time, normalized usage, cache payback, evidence, and recovery truncation. Stored with the archive, it never enters model context or enlarges the next request.
 
 
 Model-projection display rules are owned by
@@ -472,3 +372,9 @@ peak temporary bytes on Python 3.12.13. This measures comparison overhead only.
 The viewer copies and downloads the same selected post-snapshot projection,
 loading it once on demand and fencing late results after a selection change;
 transport envelopes never become exported snapshot files.
+
+
+Summary credential rotation reads its selected model from declared dispatch
+options. Standalone/manual summaries can have no pinned model; an unassigned
+live-task local must never prevent their first request. Streaming, nonstreaming,
+completion verification and credential-rotation tests cover both entry shapes.

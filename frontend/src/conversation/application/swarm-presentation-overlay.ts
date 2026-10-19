@@ -1,3 +1,5 @@
+import { applyMessageReceipt, applyMessageReceipts, coalesceMessageReceipts, projectMessageReceipts, messageReceiptIdentity, sameMessageReceipt } from '../presentation/agent-message-receipts';
+import { entityRecordValues } from '../domain/turn-store';
 /**
  * Compose conversation-scoped swarm telemetry over authoritative Turn state.
  *
@@ -40,6 +42,8 @@ const SWARM_ROUND_PRESENTATION_FIELDS = Object.freeze([
   '_swarmKey',
   '_swarmRunId',
   '_swarmAgents',
+
+  '_swarmMessageReceipts',
   '_swActiveConfirmedAt',
 ] as const);
 
@@ -60,6 +64,7 @@ function mutableProjection(projection: TurnProjection): MutableProjection {
   copied.toolRounds = Array.isArray(copied.toolRounds)
     ? copied.toolRounds
     : [];
+  projectMessageReceipts(copied);
   return copied;
 }
 
@@ -79,7 +84,7 @@ function copyTurn(
 
 function hasSwarm(turn: TurnRecord | null | undefined): boolean {
   return (turn?.projection?.toolRounds ?? []).some((round) =>
-    Boolean(round && (round._swarm || round.toolName === 'spawn_agents')));
+    Boolean(round && (round._swarm || round.toolName === 'spawn_agents' || round._agentMessageReceipt)));
 }
 
 function swarmSettled(round: TurnToolRound): boolean {
@@ -256,6 +261,10 @@ function rebase(
 
     consumed.add(merged);
   }
+  for (const round of previousProjection.toolRounds ?? []) {
+    if (round._agentMessageReceipt) applyMessageReceipt(projection, round._agentMessageReceipt as Record<string, unknown>);
+  }
+  projectMessageReceipts(projection);
   rebindSegments(projection);
   return rebased;
 }
@@ -276,10 +285,12 @@ function selectCandidates(
   state: TurnState,
   readOverlay: SwarmOverlayReader,
 ): TurnRecord[] {
-  return newestAssistantTurns(state).map((durable) => rebase(
+  const turns = newestAssistantTurns(state).map((durable) => rebase(
     durable,
     readOverlay(conversationId, durable.turnId),
   ) ?? durable);
+  projectMessageReceipts({ toolRounds: turns.flatMap(turn => turn.projection.toolRounds ?? []) });
+  return turns;
 }
 
 function compose(
@@ -293,10 +304,44 @@ function compose(
   let changed = false;
   for (const durable of newestAssistantTurns(durableState).slice(0, candidateLimit)) {
     const overlay = readOverlay(conversationId, durable.turnId);
-    if (!overlay || !hasSwarm(overlay)) continue;
+    if (!overlay && !hasSwarm(durable)) continue;
     if (!changed) turnsById = { ...turnsById };
     turnsById[durable.turnId] = rebase(durable, overlay) ?? durable;
     changed = true;
+  }
+  if (changed) {
+    const rounds = Object.values(turnsById).flatMap(turn => turn?.projection.toolRounds ?? []);
+    const receipts = rounds.flatMap(round => {
+      const snapshot = round._swarmSnapshot as { agents?: Record<string, any>[]; messageReceipts?: Record<string, any>[] } | undefined;
+      return [...(Array.isArray(round._swarmMessageReceipts) ? round._swarmMessageReceipts : []),
+        ...(snapshot?.messageReceipts ?? []),
+        ...[...(Array.isArray(round._swarmAgents) ? round._swarmAgents : []), ...(snapshot?.agents ?? [])]
+          .flatMap((agent: any) => agent.messageReceipts ?? [])];
+    });
+    const senders = new Map<string, TurnToolRound>();
+    const receiptKey = (receipt: Record<string, any>) => JSON.stringify([
+      receipt.swarmRunId, receipt.agentId, receipt.messageId,
+    ]);
+    for (const round of rounds) {
+      if (round.toolName !== 'send_agent_message') continue;
+      const identity = messageReceiptIdentity(round);
+      const key = receiptKey(identity);
+      if (sameMessageReceipt(identity, identity) && !senders.has(key)) senders.set(key, round);
+    }
+    const enrichedReceipts = coalesceMessageReceipts(receipts).map(receipt => {
+      const sender = senders.get(receiptKey(receipt));
+      let content: unknown;
+      try { content = typeof sender?.toolArgs === 'string' ? JSON.parse(sender.toolArgs).content
+        : (sender?.toolArgs as Record<string, unknown> | undefined)?.content; } catch { /* Body unavailable. */ }
+      return { ...receipt, ...(typeof receipt.content !== 'string' && typeof content === 'string' ? { content } : {}) };
+    });
+    if (enrichedReceipts.length) for (const turn of Object.values(turnsById)) {
+      if (!turn) continue;
+      // One private copy per Turn, regardless of receipt count. The batch
+      // mutates only this copy and never the authoritative/transient inputs.
+      const copy = copyTurn(turn, false);
+      if (applyMessageReceipts(copy.projection, enrichedReceipts)) turnsById[turn.turnId] = copy;
+    }
   }
   return changed ? { ...transientState, turnsById } : transientState;
 }
@@ -329,6 +374,7 @@ export interface SwarmPushFrame extends Partial<PushTransportEnvelope> {
 
 export interface SwarmPresentationContext {
   convId: string;
+  /** Explicit producing execution task only; empty when the frame does not carry one. */
   taskId: string;
   assistantProjection: TurnProjection;
 }
@@ -478,7 +524,7 @@ export function createSwarmPushPresentationController(
       if (frame.turnId && frame.turnId !== turn.turnId) return false;
       if (!taskId && !frame.attemptId) return true;
       if (turn.projection.toolRounds?.some(round => swarmFrameMatchesExecution(frame, round))) return true;
-      return Object.values(state?.attemptsById ?? {}).some(attempt =>
+      return entityRecordValues(state?.attemptsById ?? {}).some(attempt =>
         attempt !== undefined && attempt.turnId === turn.turnId && (!taskId || attempt.taskId === taskId)
         && (!frame.attemptId || attempt.attemptId === frame.attemptId));
     });
@@ -517,7 +563,7 @@ export function createSwarmPushPresentationController(
       // admission. Historical attempts belong to recovery of actual receipts,
       // not permission to fabricate a new panel after regeneration.
       const eligible = turns.filter(turn => turn.status === 'running' && taskId
-        && Object.values(state?.attemptsById ?? {}).some(attempt => attempt
+        && entityRecordValues(state?.attemptsById ?? {}).some(attempt => attempt
           && attempt.turnId === turn.turnId && attempt.attemptId === turn.currentAttemptId
           && attempt.status === 'running' && attempt.taskId === taskId
           && (!frame.attemptId || attempt.attemptId === frame.attemptId)));
@@ -548,6 +594,19 @@ export function createSwarmPushPresentationController(
         }
         const conversation = ports.findConversation(conversationId);
         if (!conversation) return;
+
+        if (frame.type === 'swarm_message_receipt') {
+          const turns = candidates(conversation);
+          const sender = turns.flatMap(turn => turn.projection.toolRounds ?? [])
+            .find(round => round.toolName === 'send_agent_message' && sameMessageReceipt(messageReceiptIdentity(round), frame));
+          let content: unknown;
+          try { content = typeof sender?.toolArgs === 'string' ? JSON.parse(sender.toolArgs).content : (sender?.toolArgs as Record<string, unknown> | undefined)?.content; } catch { /* Missing request body is explicit. */ }
+          const receipt = { ...frame, ...(typeof frame.content !== 'string' && typeof content === 'string' ? { content } : {}) };
+          for (const turn of turns) {
+            update(conversation, turn.turnId, projection => applyMessageReceipt(projection, receipt));
+          }
+          return;
+        }
         const sourceTurn = findOwningTurn(conversation, frame);
         if (!sourceTurn) return;
         const owningRound = (sourceTurn.projection.toolRounds ?? []).find(round =>
@@ -565,7 +624,7 @@ export function createSwarmPushPresentationController(
           (assistantProjection) => {
             const context: SwarmPresentationContext = {
               convId: conversationId,
-              taskId: swarmFrameExecutionTaskId(frame) || String(frame.swarmId ?? frame.swarm_id ?? ''),
+              taskId: swarmFrameExecutionTaskId(frame),
               assistantProjection,
             };
             if (frame.type === 'swarm_phase') {

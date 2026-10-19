@@ -29,6 +29,7 @@ NEUTER: rewriting a guarded value back to bare `100dvh` re-trips the assertion.
 from __future__ import annotations
 
 import os
+from pathlib import Path
 import re
 
 import pytest
@@ -45,8 +46,10 @@ _CSS_PATH2 = os.path.join(ROOT, 'static', 'settings.css')
 
 
 def _read_all_css() -> str:
-    return (open(_CSS_PATH, encoding='utf-8').read()
-            + '\n' + open(_CSS_PATH2, encoding='utf-8').read())
+    root = Path(ROOT) / 'frontend/src/styles'
+    paths = sorted(root.glob('application/*.css')) + sorted(root.glob('settings/*.css'))
+    assert paths, 'retained style owners must exist'
+    return '\n'.join(path.read_text(encoding='utf-8') for path in paths)
 
 # Full-screen overlay selectors that go edge-to-edge on phones and therefore
 # pin height to the full viewport. These are the ones the WebView collapses.

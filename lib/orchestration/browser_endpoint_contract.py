@@ -48,7 +48,7 @@ def orchestration_browser_request_contract_dicts(
 ) -> dict[str, dict[str, object]]:
     """Join backend HTTP identity with its browser request policy."""
     contracts: dict[str, dict[str, object]] = {}
-    from lib.api_v4_constants_generated import API_MAJOR
+    from lib.generated_api_v4_constants import API_MAJOR
 
     for name, endpoint in orchestration_http_endpoints().items():
         contract = endpoint.as_dict()

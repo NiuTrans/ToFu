@@ -1,3 +1,5 @@
 include rust/kernel.rs
 include setup.py
 include README.md
+recursive-include rust/discovery *.rs Cargo.toml Cargo.lock
+recursive-include rust/extraction *.rs *.json *.txt *.py Cargo.toml Cargo.lock

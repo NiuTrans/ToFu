@@ -299,12 +299,16 @@ def _tool_display_browser(fn_name, fn_args, tc_id, tc_args_str):
 
 
 def _tool_display_memory(fn_name, fn_args, tc_id, tc_args_str):
-    """Build display info for memory management tool calls.
+    """Build display info for memory and conversation working-fact calls.
 
     No emoji prefix — the frontend renders a per-tool SVG icon (see
     ``_webToolSvg`` in ``static/js/ui/tool_rounds.js``).
     """
-    if fn_name == 'create_memory':
+    if fn_name == 'read_working_facts':
+        display = 'Reading working facts and source versions'
+    elif fn_name == 'record_working_fact':
+        display = 'Recording working fact: ' + str(fn_args.get('text', ''))[:120]
+    elif fn_name == 'create_memory':
         display = f"Saving memory: {fn_args.get('name', '?')}"
     elif fn_name == 'update_memory':
         display = f"Updating memory: {fn_args.get('memory_id', '?')}"
@@ -979,7 +983,7 @@ def _tool_display_mcp(fn_name, fn_args, tc_id, tc_args_str, *, user_id=None):
         # _display_query so it survives verbatim into the SSE tool_start event.
         extra['_display_query'] = display
         return display, extra
-    links = _mcp_links(nested_args, user_id=user_id)
+    links = _mcp_links(nested_args, fn_name=display_name, user_id=user_id)
     if links:
         extra['_mcpLinks'] = links
     return display, extra
@@ -993,3 +997,31 @@ def _tool_display_generic(fn_name, fn_args, tc_id, tc_args_str, *, user_id=None)
         return _tool_display_mcp(fn_name, fn_args, tc_id, tc_args_str, user_id=user_id)
     logger.warning('[Orchestrator] Unregistered tool %s — using generic round_entry. This tool may need a dedicated display handler.', fn_name)
     return fn_name, {'toolName': fn_name}
+
+
+_WORKFLOW_TOOL_LABELS = {
+    'get_project_workers': 'Read project Workers',
+    'cancel_project_work': 'Cancel project work',
+    'finish_project_request': 'Finish project request',
+    'delegate_project_work': 'Delegate project work',
+    'await_project_workers': 'Wait for Worker results',
+    'review_project_work': 'Review Worker evidence',
+    'evolution_explore': 'Explore research evidence',
+    'evolution_artifact': 'Manage research artifacts',
+    'evolution_review': 'Review research evidence',
+    'evolution_source': 'Inspect research sources',
+    'send_project_message': 'Send a project message',
+    'get_project_messages': 'Read project messages',
+    'consider_project_message': 'Consider a project message',
+    'list_agents': 'List retained agents',
+    'manage_agents': 'Manage retained agents',
+    'publish_response_asset': 'Publish a response asset',
+    'publish_response_file': 'Publish a response file',
+    'publish_rich_response': 'Publish a rich response',
+    'inspect_tool_effect': 'Inspect a tool effect',
+}
+
+
+def _tool_display_workflow(fn_name, fn_args, tc_id, tc_args_str):
+    """Name owned workflow actions without exposing their private payloads."""
+    return _WORKFLOW_TOOL_LABELS[fn_name], {'toolName': fn_name}

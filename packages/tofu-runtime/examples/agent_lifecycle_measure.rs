@@ -28,6 +28,7 @@ impl Provider for Model {
             state: ProviderStreamState::ProviderFinished,
             message,
             usage: json!({}),
+        cost: None,
             finish_reason: Some("stop".into()),
             done_seen: true,
             malformed_frames: 0,
@@ -102,8 +103,8 @@ fn main() {
         approvals: None,
         round_admission: None,
         budget: Budget {
-            rounds: 2,
-            tool_calls: 1,
+            rounds: Some(2),
+            tool_calls: Some(1),
             retained_bytes: 4096,
             feedback_bytes: 1024,
         },

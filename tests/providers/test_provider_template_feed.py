@@ -13,7 +13,7 @@ import time
 
 import pytest
 
-import lib.provider_template_feed as feed
+import lib.provider.provider_template_feed as feed
 
 pytestmark = pytest.mark.unit
 
@@ -97,7 +97,7 @@ def test_billing_redirect_and_non_chat_rows_are_excluded():
 
 
 def test_billing_channels_cannot_break_full_template_compilation(monkeypatch):
-    import lib.provider_template_recipes as recipes
+    import lib.provider.provider_template_recipes as recipes
     standard = 'meta/muse-spark-test-1.3'
     projected = feed.recipes_from_catalog([
         row(standard + '-contributor', created=3),
@@ -305,7 +305,7 @@ def test_provider_dialects_use_declared_metadata_and_exclude_non_chat(monkeypatc
 
 
 def test_loader_uses_local_feed_without_fetch_in_request(monkeypatch):
-    from lib.provider_template_recipes import load_provider_templates
+    from lib.provider.provider_template_recipes import load_provider_templates
     store(cache())
     scheduled = []
     monkeypatch.setattr(feed, 'maybe_refresh_async', lambda value: scheduled.append(value))

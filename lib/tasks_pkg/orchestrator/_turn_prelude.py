@@ -125,7 +125,7 @@ def run_turn_prelude(task, cfg, tid):
     # ── 4. Conversation-sticky cost experiment. Fail open: observability
     #    must never become a reason an otherwise valid chat request fails.
     try:
-        from lib.cost_experiments import apply_cost_experiment
+        from lib.cost_experiments.cost_experiments import apply_cost_experiment
         cfg = apply_cost_experiment(task, cfg)
     except Exception as _e:
         logger.error('[Task %s] cost experiment assignment failed; using '

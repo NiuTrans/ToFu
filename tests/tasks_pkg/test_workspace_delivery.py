@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import subprocess
 import threading
+from unittest.mock import Mock
 
 import pytest
 
@@ -18,8 +20,25 @@ def _git(root, *args):
                           capture_output=True, text=True).stdout.strip()
 
 
+@pytest.fixture(autouse=True)
+def workspace_environment(tmp_path, monkeypatch):
+    for name in tuple(os.environ):
+        if name.upper().startswith('GIT_'):
+            monkeypatch.delenv(name)
+    home = tmp_path / 'home'
+    home.mkdir()
+    monkeypatch.setenv('HOME', str(home))
+    monkeypatch.setenv('XDG_CONFIG_HOME', str(home / '.config'))
+    monkeypatch.setenv('GIT_CONFIG_NOSYSTEM', '1')
+    monkeypatch.setenv('GIT_CONFIG_GLOBAL', os.devnull)
+    monkeypatch.delenv('TOFU_LINEAR_GIT_CHECKPOINT', raising=False)
+    monkeypatch.delenv('TOFU_WORKSPACE_MODE', raising=False)
+
+
 @pytest.fixture
 def workspace(tmp_path, monkeypatch):
+    monkeypatch.setattr('lib.tasks_pkg.coordinator_policy.coordinator_scope', lambda *a, **kw: None)
+    monkeypatch.setattr('lib.agent_core.events.emit_phase', lambda *a, **kw: None)
     root = tmp_path / 'canonical'
     root.mkdir()
     _git(root, 'init', '-b', 'main')
@@ -71,7 +90,14 @@ def workspace(tmp_path, monkeypatch):
 
     monkeypatch.setattr(state, 'find_workspace', find_workspace)
     monkeypatch.setattr(state, 'set_workspace_meta', lambda **kw: env['origins'].append(kw))
-    return env
+    yield env
+    project_mod.config.clear_conv_state('owned-task')
+
+
+@pytest.fixture
+def isolated_mode(workspace):
+    """Clone-dependent contracts request isolation instead of relying on defaults."""
+    _git(workspace['root'], 'config', '--local', 'tofu.workspaceMode', 'isolated')
 
 
 def _task(path, **values):
@@ -80,26 +106,134 @@ def _task(path, **values):
             'config': {'projectPath': path}, **values}
 
 
-def test_canonical_dirty_context_is_automatically_isolated(workspace):
+@pytest.mark.parametrize('candidate', [False, True])
+@pytest.mark.parametrize('linear_requested', [False, True])
+def test_default_direct_preserves_dirty_context_without_snapshot_or_publication_probe(
+        workspace, monkeypatch, candidate, linear_requested):
+    from lib import integration_control as control
+    from lib import linear_git_checkpoint as checkpoint
+
     root = workspace['root']
+    if candidate:
+        _git(root, 'update-ref', 'refs/tofu/candidate', 'HEAD')
+    if linear_requested:
+        _git(root, 'config', '--local', 'tofu.linearCheckpoint', 'true')
+    Path(root, 'base.txt').write_text('staged WIP\n')
+    _git(root, 'add', 'base.txt')
+    Path(root, 'base.txt').write_text('unstaged WIP\n')
     Path(root, 'uncommitted.txt').write_text('keep user context')
+    before = (_git(root, 'for-each-ref'), Path(root, '.git/config').read_bytes(),
+              Path(root, '.git/index').read_bytes(), _git(root, 'status', '--porcelain'))
+    create = Mock(side_effect=AssertionError('direct startup must not snapshot or clone'))
+    publication = Mock(side_effect=AssertionError('publication is not workspace admission'))
+    monkeypatch.setattr(control, 'create_task_workspace', create)
+    monkeypatch.setattr(checkpoint, 'resolve_publication_mode', publication)
     task = _task(root)
-    receipt = delivery.bind_worker_workspace(task)
-    assert receipt['repositories'][0]['workspacePath'] == workspace['selected']
-    assert task['config']['projectPath'] == workspace['selected']
-    assert task['config']['canonicalProjectPath'] == root
+    original_config = dict(task['config'])
+
+    assert delivery.bind_worker_workspace(task) is None
+
+    assert task['config'] == original_config
+    assert not delivery.execution_repositories(task)
+    assert not workspace['registered'] and not workspace['binds'] and not workspace['origins']
+    create.assert_not_called()
+    publication.assert_not_called()
+    assert (_git(root, 'for-each-ref'), Path(root, '.git/config').read_bytes(),
+            Path(root, '.git/index').read_bytes(), _git(root, 'status', '--porcelain')) == before
+    assert Path(root, 'base.txt').read_text() == 'unstaged WIP\n'
     assert Path(root, 'uncommitted.txt').read_text() == 'keep user context'
 
 
-def test_explicit_linear_mode_preserves_shared_execution(workspace, monkeypatch):
-    from lib import linear_git_checkpoint
-    monkeypatch.setattr(linear_git_checkpoint, 'is_enabled', lambda root: True)
-    task = _task(workspace['root'])
+@pytest.mark.parametrize('owned_baseline', [False, True])
+def test_explicit_linear_mode_preserves_shared_execution(workspace, owned_baseline):
+    from lib import linear_git_checkpoint as checkpoint
+    root = workspace['root']
+    _git(root, 'config', '--local', 'tofu.linearCheckpoint', 'true')
+    if owned_baseline:
+        for ref in (checkpoint.STABLE_REF, checkpoint.CHECKPOINT_BASELINE_REF):
+            _git(root, 'update-ref', ref, 'HEAD')
+    before = _git(root, 'for-each-ref')
+    task = _task(root)
+    assert checkpoint.is_enabled(root) is True
     assert delivery.bind_worker_workspace(task) is None
-    assert task['config']['projectPath'] == workspace['root']
-    assert not workspace['registered']
+    assert task['config']['projectPath'] == root
+    assert not workspace['registered'] and not workspace['created']
+    assert _git(root, 'for-each-ref') == before
 
 
+@pytest.mark.usefixtures('isolated_mode')
+@pytest.mark.parametrize('conflict', ['candidate', 'stable-mismatch'])
+def test_explicit_isolation_preserves_incompatible_linear_history(workspace, conflict):
+    from lib import linear_git_checkpoint as checkpoint
+    root = workspace['root']
+    _git(root, 'config', '--local', 'tofu.linearCheckpoint', 'true')
+    head = _git(root, 'rev-parse', 'HEAD')
+    for ref in (checkpoint.STABLE_REF, checkpoint.CHECKPOINT_BASELINE_REF):
+        _git(root, 'update-ref', ref, head)
+    if conflict == 'candidate':
+        _git(root, 'update-ref', 'refs/tofu/candidate', head)
+    else:
+        Path(root, 'base.txt').write_text('new committed head\n')
+        _git(root, 'add', 'base.txt')
+        _git(root, 'commit', '-m', 'external head advance')
+    Path(root, 'base.txt').write_text('staged WIP\n')
+    _git(root, 'add', 'base.txt')
+    Path(root, 'base.txt').write_text('unstaged WIP\n')
+    Path(root, 'untracked.txt').write_text('keep user bytes\n')
+    before = (_git(root, 'for-each-ref'), Path(root, '.git/config').read_bytes(),
+              Path(root, '.git/index').read_bytes(), _git(root, 'status', '--porcelain'))
+    task = _task(root)
+    assert checkpoint.is_enabled(root) is True  # Requested opt-in is unchanged.
+
+    receipt = delivery.bind_worker_workspace(task)
+
+    row = receipt['repositories'][0]
+    assert row['workspacePath'] == workspace['selected']
+    assert task['config']['projectPath'] == workspace['selected']
+    assert len(workspace['created']) == 1
+    assert workspace['origins'][0]['patch']['_workspaceDelivery']['workspacePath'] == workspace['selected']
+    terminal = delivery.settle_task_workspaces(task)
+    assert terminal['repositories'][0]['workspacePath'] == workspace['selected']
+    assert (_git(root, 'for-each-ref'), Path(root, '.git/config').read_bytes(),
+            Path(root, '.git/index').read_bytes(), _git(root, 'status', '--porcelain')) == before
+    assert Path(root, 'base.txt').read_text() == 'unstaged WIP\n'
+    assert Path(root, 'untracked.txt').read_text() == 'keep user bytes\n'
+
+
+@pytest.mark.parametrize('probe_result', [
+    (128, '', 'publication refs unavailable'),
+    (0, 'incomplete publication refs', ''),
+])
+@pytest.mark.parametrize('workspace_mode', ['direct', 'isolated'])
+def test_linear_mode_read_failure_does_not_control_workspace_admission(
+        workspace, monkeypatch, probe_result, workspace_mode):
+    from lib import linear_git_checkpoint as checkpoint
+    root = workspace['root']
+    _git(root, 'config', '--local', 'tofu.linearCheckpoint', 'true')
+    assert checkpoint.is_enabled(root) is True
+    original_git = checkpoint._git
+    def failing_probe(cwd, args, **kwargs):
+        if args[0] == 'for-each-ref':
+            return subprocess.CompletedProcess(args, *probe_result)
+        return original_git(cwd, args, **kwargs)
+    monkeypatch.setattr(checkpoint, '_git', failing_probe)
+    monkeypatch.setenv('TOFU_WORKSPACE_MODE', workspace_mode)
+    task = _task(root)
+
+    receipt = delivery.bind_worker_workspace(task)
+
+    if workspace_mode == 'direct':
+        assert receipt is None
+        assert task['config'] == {'projectPath': root}
+        assert not workspace['created'] and not workspace['registered']
+        assert not workspace['binds'] and not workspace['origins']
+    else:
+        assert receipt['repositories'][0]['workspacePath'] == workspace['selected']
+        assert task['config']['projectPath'] == workspace['selected']
+        assert len(workspace['created']) == 1
+
+
+@pytest.mark.usefixtures('isolated_mode')
 def test_routes_absolute_paths_and_namespaces_cwd_by_task(workspace):
     task = _task(workspace['root'])
     delivery.bind_worker_workspace(task)
@@ -114,7 +248,15 @@ def test_routes_absolute_paths_and_namespaces_cwd_by_task(workspace):
     assert args['edits'][0]['path'] == root + '/base.txt'
 
 
-def test_registered_binding_maps_all_config_roots_and_readonly_without_prefix_collision(workspace):
+def test_registered_binding_maps_all_config_roots_and_readonly_without_prefix_collision(
+        workspace, monkeypatch):
+    from lib import integration_control as control
+    from lib import linear_git_checkpoint as checkpoint
+
+    create = Mock(side_effect=AssertionError('existing registration must not be recreated'))
+    publication = Mock(side_effect=AssertionError('registered admission is independent of publication'))
+    monkeypatch.setattr(control, 'create_task_workspace', create)
+    monkeypatch.setattr(checkpoint, 'resolve_publication_mode', publication)
     root, selected = workspace['root'], workspace['selected']
     workspace['registered'][root] = selected
     Path(root, 'src').mkdir()
@@ -133,6 +275,8 @@ def test_registered_binding_maps_all_config_roots_and_readonly_without_prefix_co
     assert receipt['repositories'][0]['status'] == 'bound'
     assert workspace['origins'][0]['patch']['_workspaceDelivery']['workId'] == task['id']
     assert all(call[2]['user_id'] == 7 for call in workspace['binds'])
+    create.assert_not_called()
+    publication.assert_not_called()
 
 
 def test_explicitly_registered_linked_checkout_is_bound_only_for_current_task(workspace):
@@ -367,7 +511,11 @@ def test_peer_visit_or_write_does_not_authorize_dirty_worktree_adoption(workspac
 
 @pytest.mark.parametrize('registered', [False, True])
 @pytest.mark.parametrize('path_kind', ['canonical', 'linked', 'subdirectory'])
-def test_readonly_configured_root_cannot_bind_or_settle(workspace, registered, path_kind):
+@pytest.mark.parametrize('workspace_mode', [None, 'isolated'])
+def test_readonly_configured_root_cannot_bind_or_settle(
+        workspace, monkeypatch, registered, path_kind, workspace_mode):
+    if workspace_mode is not None:
+        monkeypatch.setenv('TOFU_WORKSPACE_MODE', workspace_mode)
     root, selected = workspace['root'], workspace['selected']
     if registered:
         workspace['registered'][root] = selected
@@ -378,6 +526,8 @@ def test_readonly_configured_root_cannot_bind_or_settle(workspace, registered, p
     task = _task(path, config={'projectPath': path, 'projectPaths': [path],
                               'readOnlyPaths': [root if path_kind == 'canonical' else selected]})
     assert delivery.bind_worker_workspace(task) is None
+    assert not workspace['created']
+    assert task['config']['projectPath'] == path
     # Even stale cached evidence must obey the current read-only root boundary.
     receipt = delivery.settle_task_workspaces(task, evidence={
         'roots': [path], 'files': [], 'workingDirs': [path]})
@@ -517,6 +667,7 @@ def test_task_created_managed_workspace_has_durable_publication_authority(
     'printf changed > {root}/base.txt',
     'cd {sibling} && git add base.txt',
 ])
+@pytest.mark.usefixtures('isolated_mode')
 def test_literal_cross_checkout_shell_write_is_refused(workspace, command):
     task = _task(workspace['root'])
     delivery.bind_worker_workspace(task)
@@ -527,12 +678,14 @@ def test_literal_cross_checkout_shell_write_is_refused(workspace, command):
 
 
 @pytest.mark.parametrize('command', ['git status', 'git add base.txt', 'printf changed > base.txt'])
+@pytest.mark.usefixtures('isolated_mode')
 def test_owned_checkout_commands_still_admitted(workspace, command):
     task = _task(workspace['root'])
     delivery.bind_worker_workspace(task)
     assert not delivery.command_workspace_refusal(task, command, workspace['selected'])
 
 
+@pytest.mark.usefixtures('isolated_mode')
 def test_cancelled_during_binding_does_not_activate_config(workspace, monkeypatch):
     from lib import integration_control as control
     task = _task(workspace['root'])
@@ -541,13 +694,15 @@ def test_cancelled_during_binding_does_not_activate_config(workspace, monkeypatc
         workspace['registered'][path] = workspace['selected']
         task['aborted'] = True
     monkeypatch.setattr(control, 'create_task_workspace', create)
-    with pytest.raises(delivery.WorkspaceBindingError, match='cancelled'):
+    from lib.llm.llm_errors import AbortedError
+    with pytest.raises(AbortedError, match='cancelled'):
         delivery.bind_worker_workspace(task)
     assert task['config'] == config
     assert workspace['registered']
 
 
 @pytest.mark.parametrize('path', ['canonical:base.txt', 'file://{root}/base.txt'])
+@pytest.mark.usefixtures('isolated_mode')
 def test_replayed_root_labels_and_file_uris_route_to_task(workspace, path):
     task = _task(workspace['root'])
     delivery.bind_worker_workspace(task)
@@ -556,6 +711,7 @@ def test_replayed_root_labels_and_file_uris_route_to_task(workspace, path):
     assert result['path'] == workspace['selected'] + '/base.txt'
 
 
+@pytest.mark.usefixtures('isolated_mode')
 def test_write_symlink_cannot_escape_isolated_checkout(workspace):
     from lib.project_mod.tools import execute_tool
     task = _task(workspace['root'])
@@ -569,6 +725,7 @@ def test_write_symlink_cannot_escape_isolated_checkout(workspace):
     assert Path(workspace['selected'], 'base.txt').read_text() == 'base\n'
 
 
+@pytest.mark.usefixtures('isolated_mode')
 def test_streaming_reads_replayed_canonical_target_in_isolated_root(workspace):
     from lib import write_freshness
     from lib.tasks_pkg.streaming_tool_executor import StreamingToolAccumulator
@@ -594,6 +751,7 @@ def test_streaming_reads_replayed_canonical_target_in_isolated_root(workspace):
 
 
 @pytest.mark.parametrize('cross_checkout', [False, True])
+@pytest.mark.usefixtures('isolated_mode')
 def test_background_command_captures_execution_view_without_parent_task(
         workspace, monkeypatch, cross_checkout):
     from lib.tasks_pkg import background_commands
@@ -626,14 +784,18 @@ def test_background_command_captures_execution_view_without_parent_task(
     assert Path(workspace['root'], 'base.txt').read_text() == 'base\n'
 
 
-def test_execution_roots_rehydrate_after_lru_without_losing_readonly_policy(workspace):
+@pytest.mark.parametrize('workspace_mode', ['direct', 'isolated'])
+def test_execution_roots_rehydrate_after_lru_without_losing_readonly_policy(
+        workspace, monkeypatch, workspace_mode):
     from lib.project_mod import config
     from lib.project_mod.tools import execute_tool
+    monkeypatch.setenv('TOFU_WORKSPACE_MODE', workspace_mode)
+    execution_root = workspace['root'] if workspace_mode == 'direct' else workspace['selected']
     task = _task(workspace['root'])
     readonly = Path(workspace['root'], 'reference')
     readonly.mkdir()
     Path(workspace['selected'], 'reference').mkdir()
-    target = Path(workspace['selected'], 'reference/notes.txt')
+    target = Path(execution_root, 'reference/notes.txt')
     target.write_text('readonly\n')
     task['config']['projectPaths'] = [workspace['root'], str(readonly)]
     task['config']['readOnlyPaths'] = [str(readonly)]
@@ -641,13 +803,14 @@ def test_execution_roots_rehydrate_after_lru_without_losing_readonly_policy(work
     key = delivery.execution_root_key(task)
     config.clear_conv_state(key)  # same state as LRU eviction
     result = execute_tool('write_file', {'path': 'reference/notes.txt', 'content': 'clobber'},
-                          workspace['selected'], conv_id=key, task_id=task['id'], task=task)
+                          execution_root, conv_id=key, task_id=task['id'], task=task)
     assert 'READ-ONLY' in result
     assert target.read_text() == 'readonly\n'
     assert config.get_conv_roots(key)
     assert config.is_readonly_path(str(target), conv_id=key)
 
 
+@pytest.mark.usefixtures('isolated_mode')
 def test_journal_identity_stays_conversation_scoped_with_task_root(workspace, monkeypatch):
     from lib.project_mod.tools import execute_tool
     from lib.project_mod.modifications import get_modifications
@@ -665,7 +828,8 @@ def test_journal_identity_stays_conversation_scoped_with_task_root(workspace, mo
     assert {'path': 'task.txt', 'rootPath': workspace['selected']} in evidence['files']
 
 
-def test_canonical_dirty_context_is_automatically_bound_without_changing_user_files(workspace):
+@pytest.mark.usefixtures('isolated_mode')
+def test_explicit_isolation_binds_dirty_context_without_changing_user_files(workspace):
     root = workspace['root']
     Path(root, 'uncommitted.txt').write_text('keep user context')
     task = _task(root)
@@ -677,6 +841,7 @@ def test_canonical_dirty_context_is_automatically_bound_without_changing_user_fi
 
 
 
+@pytest.mark.usefixtures('isolated_mode')
 def test_canonical_tool_paths_are_rebound_without_changing_edit_content(workspace):
     root, selected = workspace['root'], workspace['selected']
     task = _task(root)
@@ -734,6 +899,7 @@ def test_child_inherits_path_identity_and_readonly_scope_without_claiming_parent
     ('pytest tests/', {'exitCode': 0, 'timedOut': True}),
     ('pytest tests/', {'exitCode': 0, 'backgrounded': True}),
 ])
+@pytest.mark.usefixtures('isolated_mode')
 def test_invalid_verifier_evidence_cannot_authorize_semantic_publication(workspace, command, metadata):
     root = workspace['root']
     task = _task(root)
@@ -745,6 +911,7 @@ def test_invalid_verifier_evidence_cannot_authorize_semantic_publication(workspa
 
 
 
+@pytest.mark.usefixtures('isolated_mode')
 def test_failed_verifier_metadata_write_is_retried_with_terminal_intent(workspace, monkeypatch):
     from lib import integration_state_repository as state
     root = workspace['root']
@@ -763,6 +930,7 @@ def test_failed_verifier_metadata_write_is_retried_with_terminal_intent(workspac
 
 
 
+@pytest.mark.usefixtures('isolated_mode')
 def test_runtime_roots_and_attachment_paths_keep_the_original_declared_store(workspace):
     root = workspace['root']
     uploads = Path(root, 'uploads')
@@ -792,6 +960,7 @@ def test_explicit_runtime_directory_is_not_mistaken_for_a_source_worktree(worksp
     assert task['config']['projectPath'] == str(path)
 
 
+@pytest.mark.usefixtures('isolated_mode')
 def test_background_completion_gets_registration_from_canonical_source(workspace, monkeypatch):
     from lib.background_command_delivery import completion_delivery_config
     parent = _task(workspace['root'])
@@ -818,3 +987,347 @@ def test_background_completion_gets_registration_from_canonical_source(workspace
     assert receipt['repositories'][0]['workId'] == 'fresh-task'
     assert task['config']['projectPath'] == fresh_path
     assert config['projectPath'] == workspace['selected']
+
+
+def test_terminal_receipt_reports_confirmed_workspace_delivery(workspace, monkeypatch):
+    from lib import integration_control as control
+    workspace['registered'][workspace['root']] = workspace['selected']
+    task = _task(workspace['root'])
+    monkeypatch.setattr(control, 'settle_task_workspace', lambda *a, **k: {
+        'state': 'delivered', 'phase': 'workspace_adoption',
+        'publicationMode': 'working_tree', 'targetSha': 'a' * 40, 'checkpointSha': 'b' * 40})
+    result = delivery.settle_task_workspaces(task)
+    row = result['repositories'][0]
+    assert row['deliveryStatus'] == 'delivered'
+    assert row['targetSha'] == 'a' * 40
+    assert row['deliveryPublicationMode'] == 'working_tree'
+    assert 'merged into the current workspace' in delivery.work_result_summary(task)
+
+
+@pytest.mark.parametrize('destination', ['root', 'sibling', 'selected'])
+@pytest.mark.parametrize('template', [
+    'cargo test > {target}',
+    'cargo test 2>>{target}',
+    'cargo test > {target} 2>&1',
+    'env MODE=test cargo test > {target}',
+    'cargo test "$FILTER" > {target}',
+    'cargo test > {target} "$OTHER"',
+    'cargo test > {target}/"$OUTPUT"',
+    'cp --unknown-option source {target}',
+])
+@pytest.mark.usefixtures('isolated_mode')
+def test_incomplete_command_keeps_known_workspace_targets(workspace, destination, template):
+    import shlex
+
+    task = _task(workspace['root'])
+    delivery.bind_worker_workspace(task)
+    # Expansion metacharacters in quoted filenames are literal, not a reason
+    # to drop an otherwise known destination from isolation admission.
+    target = Path(workspace[destination], 'cargo $literal `name` output')
+    command = template.format(target=shlex.quote(str(target)))
+    refusal = delivery.command_workspace_refusal(task, command, workspace['selected'])
+    if destination == 'selected':
+        assert refusal == ''
+    else:
+        assert 'workspace-isolation' in refusal
+        assert 'not started' in refusal
+    assert not target.exists()
+
+
+@pytest.mark.parametrize('command', ['cargo test', 'cargo test > /dev/null 2>&1',
+                                     'cargo test > local-output'])
+@pytest.mark.usefixtures('isolated_mode')
+def test_opaque_build_without_foreign_target_remains_admitted(workspace, command):
+    task = _task(workspace['root'])
+    delivery.bind_worker_workspace(task)
+    assert delivery.command_workspace_refusal(task, command, workspace['selected']) == ''
+
+
+@pytest.mark.parametrize('fence', ['symlink', 'readonly'])
+@pytest.mark.usefixtures('isolated_mode')
+def test_opaque_redirect_preserves_existing_write_fences(workspace, fence):
+    import shlex
+
+    task = _task(workspace['root'])
+    target = Path(workspace['selected'], 'fenced')
+    if fence == 'symlink':
+        target.symlink_to(workspace['sibling'], target_is_directory=True)
+    else:
+        canonical = Path(workspace['root'], 'fenced')
+        canonical.mkdir()
+        target.mkdir()
+        task['config']['projectPaths'] = [str(canonical)]
+        task['config']['readOnlyPaths'] = [str(canonical)]
+    delivery.bind_worker_workspace(task)
+    command = 'cargo test > ' + shlex.quote(str(target / 'output'))
+    assert 'workspace-isolation' in delivery.command_workspace_refusal(
+        task, command, workspace['selected'])
+    assert not (target / 'output').exists()
+
+
+@pytest.mark.parametrize('source', ['environment', 'local-config'])
+@pytest.mark.parametrize('owned_baseline', [False, True])
+def test_explicit_isolation_overrides_eligible_linear_publication(
+        workspace, monkeypatch, source, owned_baseline):
+    from lib import linear_git_checkpoint as checkpoint
+
+    root = workspace['root']
+    _git(root, 'config', '--local', 'tofu.linearCheckpoint', 'true')
+    if owned_baseline:
+        for ref in (checkpoint.STABLE_REF, checkpoint.CHECKPOINT_BASELINE_REF):
+            _git(root, 'update-ref', ref, 'HEAD')
+    assert checkpoint.resolve_publication_mode(root)['eligible'] is True
+    if source == 'environment':
+        monkeypatch.setenv('TOFU_WORKSPACE_MODE', 'isolated')
+    else:
+        _git(root, 'config', '--local', 'tofu.workspaceMode', 'isolated')
+    before = _git(root, 'for-each-ref')
+    publication = Mock(side_effect=AssertionError('isolation must not consult publication eligibility'))
+    monkeypatch.setattr(checkpoint, 'resolve_publication_mode', publication)
+    task = _task(root)
+
+    receipt = delivery.bind_worker_workspace(task)
+
+    assert receipt['repositories'][0]['workspacePath'] == workspace['selected']
+    assert task['config']['projectPath'] == workspace['selected']
+    assert task['config']['canonicalProjectPath'] == root
+    assert len(workspace['created']) == 1
+    assert workspace['created'][0][2]['user_id'] == 7
+    publication.assert_not_called()
+    assert _git(root, 'for-each-ref') == before
+
+
+@pytest.mark.parametrize('source', ['environment', 'local-config'])
+@pytest.mark.parametrize('invalid', ['', 'automatic'])
+def test_malformed_workspace_policy_refuses_before_runner(
+        workspace, monkeypatch, source, invalid):
+    from lib.tasks_pkg import spawn
+
+    root = workspace['root']
+    if source == 'environment':
+        monkeypatch.setenv('TOFU_WORKSPACE_MODE', invalid)
+    else:
+        _git(root, 'config', '--local', 'tofu.workspaceMode', invalid)
+    task = _task(root, status='pending')
+    config = dict(task['config'])
+    runner = Mock()
+    worker_started = threading.Event()
+    call = spawn._owned_task_callable(runner, task, worker_started, threading.Lock())
+
+    with pytest.raises(delivery.WorkspaceBindingError, match='Workspace mode admission failed'):
+        call()
+
+    runner.assert_not_called()
+    assert not worker_started.is_set()
+    assert task['config'] == config
+    assert not workspace['created'] and not workspace['registered']
+    assert not workspace['binds'] and not workspace['origins']
+
+
+def test_direct_worker_starts_on_canonical_root_without_isolation_phase(workspace, monkeypatch):
+    from lib import integration_control as control
+    from lib import linear_git_checkpoint as checkpoint
+    from lib.tasks_pkg import spawn
+
+    root = workspace['root']
+    task = _task(root, status='pending')
+    phases = []
+    monkeypatch.setattr('lib.agent_core.events.emit_phase',
+                        lambda task, phase, **fields: phases.append(fields))
+    create = Mock(side_effect=AssertionError('direct worker must not clone'))
+    publication = Mock(side_effect=AssertionError('direct worker must not probe publication'))
+    monkeypatch.setattr(control, 'create_task_workspace', create)
+    monkeypatch.setattr(checkpoint, 'resolve_publication_mode', publication)
+    runner = Mock(return_value='canonical execution')
+    worker_started = threading.Event()
+    call = spawn._owned_task_callable(runner, task, worker_started, threading.Lock())
+
+    assert call() == 'canonical execution'
+
+    runner.assert_called_once_with(task)
+    assert worker_started.is_set()
+    assert task['config'] == {'projectPath': root}
+    assert any(phase.get('detailKey') == 'stream.phase.workerStarting' for phase in phases)
+    assert all(phase.get('detailKey') != 'stream.phase.workspacePreparing' for phase in phases)
+    create.assert_not_called()
+    publication.assert_not_called()
+    assert not workspace['settles'] and not workspace['origins']
+
+
+def test_direct_startup_registry_failure_does_not_enter_runner(workspace, monkeypatch):
+    from lib import integration_state_repository as state
+    from lib.tasks_pkg import spawn
+
+    lookup = Mock(side_effect=RuntimeError('workspace registry unavailable'))
+    monkeypatch.setattr(state, 'find_workspace', lookup)
+    task = _task(workspace['root'], status='pending')
+    config = dict(task['config'])
+    runner = Mock()
+    worker_started = threading.Event()
+    call = spawn._owned_task_callable(runner, task, worker_started, threading.Lock())
+
+    with pytest.raises(RuntimeError, match='workspace registry unavailable'):
+        call()
+
+    runner.assert_not_called()
+    assert not worker_started.is_set()
+    assert task['config'] == config
+    assert not workspace['created'] and not workspace['binds'] and not workspace['origins']
+
+
+@pytest.mark.parametrize('cancel_at', ['before-admission', 'during-policy', 'abort-event'])
+def test_cancelled_direct_admission_does_not_enter_runner_or_activate_roots(
+        workspace, monkeypatch, cancel_at):
+    from lib.project_mod import workspace_policy
+    from lib.tasks_pkg import spawn
+
+    task = _task(workspace['root'], status='pending')
+    config = dict(task['config'])
+    if cancel_at == 'before-admission':
+        task['aborted'] = True
+    elif cancel_at == 'abort-event':
+        task['abort_event'] = threading.Event()
+        task['abort_event'].set()
+    else:
+        resolve = workspace_policy.resolve_workspace_mode
+
+        def cancel_during_policy(path):
+            mode = resolve(path)
+            task['aborted'] = True
+            return mode
+
+        monkeypatch.setattr(workspace_policy, 'resolve_workspace_mode', cancel_during_policy)
+    runner = Mock()
+    from functools import partial
+    from lib.tasks_pkg.manager._terminal import finalize_chat_task_aborted
+    events, persisted = [], []
+    monkeypatch.setattr('lib.tasks_pkg.manager.finalize_chat_task_aborted', partial(
+        finalize_chat_task_aborted,
+        append_event_fn=lambda task, event: events.append(event),
+        persist_task_result_fn=lambda task: persisted.append(dict(task)),
+        notify_terminal_fn=lambda task: None))
+    failed = Mock()
+    monkeypatch.setattr('lib.tasks_pkg.manager.finalize_chat_task_error', failed)
+    worker_started = threading.Event()
+    call = spawn._owned_task_callable(runner, task, worker_started, threading.Lock())
+
+    call()
+
+    runner.assert_not_called()
+    failed.assert_not_called()
+    assert task['finishReason'] == 'aborted'
+    assert len(persisted) == 1
+    assert [event['finishReason'] for event in events] == ['aborted']
+    assert not worker_started.is_set()
+    assert task['config'] == config
+    assert '_workspaceRootPolicy' not in task
+    assert not workspace['created'] and not workspace['registered']
+    assert not workspace['binds'] and not workspace['origins']
+
+
+def test_direct_runner_failure_uses_error_lane_without_workspace_publication(workspace, monkeypatch):
+    from lib.tasks_pkg import manager, spawn
+
+    task = _task(workspace['root'], status='pending')
+    finalized = []
+
+    def finalize(failed_task, error):
+        finalized.append((failed_task, error))
+        failed_task['status'] = 'failed'
+
+    monkeypatch.setattr(manager, 'finalize_chat_task_error', finalize)
+    runner = Mock(side_effect=RuntimeError('runner failed'))
+    worker_started = threading.Event()
+    call = spawn._owned_task_callable(runner, task, worker_started, threading.Lock())
+
+    with pytest.raises(RuntimeError, match='runner failed'):
+        call()
+
+    assert worker_started.is_set()
+    assert finalized == [(task, 'runner failed')]
+    assert task['config'] == {'projectPath': workspace['root']}
+    assert not workspace['created'] and not workspace['registered'] and not workspace['settles']
+
+
+def test_default_direct_tool_write_keeps_conversation_scoped_undo_journal(workspace):
+    from lib.project_mod.modifications import get_modifications
+    from lib.project_mod.tools import execute_tool
+    from lib import write_freshness
+
+    root = workspace['root']
+    task = _task(root)
+    assert delivery.bind_worker_workspace(task) is None
+    key = delivery.execution_root_key(task)
+    write_freshness._reset_for_tests()
+    try:
+        before = execute_tool('read_files', {'path': 'base.txt'}, root,
+                              conv_id=key, task_id=task['id'], task=task)
+        assert 'base' in before
+        result = execute_tool('write_file', {'path': 'base.txt', 'content': 'direct task edit\n'},
+                              root, conv_id=key, task_id=task['id'], task=task)
+        assert 'Error' not in result and 'failed' not in result
+        after = execute_tool('read_files', {'path': 'base.txt'}, root,
+                             conv_id=key, task_id=task['id'], task=task)
+        assert 'direct task edit' in after
+        assert Path(root, 'base.txt').read_text() == 'direct task edit\n'
+        modifications = get_modifications(root, conv_id=task['convId'])
+        assert any(row['path'] == 'base.txt' and row['taskId'] == task['id']
+                   for row in modifications)
+        assert not get_modifications(root, conv_id=key)
+        assert Path(workspace['selected'], 'base.txt').read_text() == 'base\n'
+        assert not workspace['created'] and not workspace['registered']
+        assert task['config'] == {'projectPath': root}
+    finally:
+        write_freshness._reset_for_tests()
+
+
+@pytest.mark.usefixtures('isolated_mode')
+def test_mixed_roots_keep_direct_primary_and_isolate_only_opted_in_project(workspace, tmp_path):
+    direct = tmp_path / 'direct-project'
+    direct.mkdir()
+    _git(direct, 'init', '-b', 'main')
+    _git(direct, 'config', 'user.name', 'Workspace test')
+    _git(direct, 'config', 'user.email', 'workspace@example.invalid')
+    Path(direct, 'base.txt').write_text('direct baseline\n')
+    _git(direct, 'add', 'base.txt')
+    _git(direct, 'commit', '-m', 'base')
+    Path(direct, 'base.txt').write_text('direct dirty context\n')
+    readonly = direct / 'reference'
+    readonly.mkdir()
+    root, selected = workspace['root'], workspace['selected']
+    task = _task(str(direct), config={
+        'projectPath': str(direct), 'projectPaths': [str(direct), root],
+        'readOnlyPaths': [str(readonly)]})
+
+    receipt = delivery.bind_worker_workspace(task)
+
+    assert len(receipt['repositories']) == 1
+    assert receipt['repositories'][0]['canonicalRoot'] == root
+    assert receipt['repositories'][0]['workspacePath'] == selected
+    assert task['config']['projectPath'] == str(direct)
+    assert task['config']['projectPaths'] == [str(direct), selected]
+    assert task['config']['readOnlyPaths'] == [str(readonly)]
+    assert [call[0] for call in workspace['created']] == [root]
+    assert workspace['registered'] == {root: selected}
+    routed = delivery.rebind_project_tool_arguments(task, {
+        'reads': [{'path': str(direct / 'base.txt')}, {'path': root + '/base.txt'}]})
+    assert routed['reads'] == [
+        {'path': str(direct / 'base.txt')}, {'path': selected + '/base.txt'}]
+    assert Path(direct, 'base.txt').read_text() == 'direct dirty context\n'
+
+
+def test_direct_admission_does_not_import_optional_integration_control(workspace, monkeypatch):
+    import builtins
+
+    root = workspace['root']
+    task = _task(root)
+    original_import = builtins.__import__
+
+    def guarded_import(name, *args, **kwargs):
+        if name == 'lib.integration_control':
+            raise AssertionError('direct admission loaded optional integration machinery')
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, '__import__', guarded_import)
+    assert delivery.bind_worker_workspace(task) is None
+    assert task['config']['projectPath'] == str(root)

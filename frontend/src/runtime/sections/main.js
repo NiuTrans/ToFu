@@ -774,28 +774,8 @@ function restoreConversationSettingsToComposer(conv, modelEligible) {
   /* Per-conv write-mode override; absent means the global default (Auto). */
   autoApplyWrites = conv.autoApply !== undefined ? !!conv.autoApply : true;
   _updateAutoApplyUI();
-  /* Three-tier dial: use the stored tier, or derive it from the atomic
-   * flags for a pre-feature conversation. Paint-only (no persist / no modal)
-   * so restoring never clobbers the just-restored flags — _applyChatModeUI is
-   * idempotent with the setters above. */
-  if (typeof _applyChatModeUI === 'function') {
-    const _storedMode = conv.chatMode
-      || (typeof _deriveChatModeFromFlags === 'function' ? _deriveChatModeFromFlags(conv) : 'chat');
-    /* Studio ⟺ a project is attached — the clamp is BIDIRECTIONAL.
-     * (a) A stored 'studio' tier with NO projectPath is poisoned (e.g.
-     * persisted before the project was cleared — the clear path once
-     * repainted without saving) — never restore it.
-     * (b) The mirror poison: a stored NON-studio tier WITH a projectPath
-     * (stamped by the one-way projectState→conv sync while another conv's
-     * project was globally active; the dial can never produce this on
-     * purpose — picking Chat detaches the project). A project attached IS
-     * Studio, so restore heals it upward. Both heals are paint-only, like
-     * the original one-way clamp. */
-    const _mode = (_storedMode === 'studio' && !conv.projectPath) ? 'chat'
-      : (_storedMode !== 'studio' && conv.projectPath) ? 'studio'
-      : _storedMode;
-    _applyChatModeUI(_mode);
-  }
+  // Project attachment is independent from everyday capabilities and Flow.
+  if (typeof _applyChatModeUI === 'function') _applyChatModeUI('chat');
   /* Restore the image gen model + batch count + aspect + resolution from conv settings */
   if (conv.imageGenModel) _igSelectedModel = conv.imageGenModel;
   _igSelectedProviderId = conv.imageGenProviderId || '';
@@ -907,7 +887,10 @@ function _resetToolsToDefaults() {
 
 /** WebView layout ownership is native; retained boot keeps only its ordered seam. */
 function _installViewportHeightGuard() {
-  retainedCompositionLifecycle.add(installViewportHeightGuard(window, document));
+  retainedCompositionLifecycle.add(installViewportHeightGuard(window, document, {
+    isMobileViewport,
+    maintainConversationFollow: () => scrollToBottom(),
+  }));
 }
 
 /* Build watch — the long-lived-tab handshake. A tab keeps running the
@@ -1009,6 +992,12 @@ function _startBuildWatch() {
   };
   retainedCompositionLifecycle.add(installApplicationInteractions({
     window, document,
+    diffReview: {
+      contextIdentity: () => activeConvId,
+      text: (key, fallback) => t(key) || fallback,
+      addQuote: quote => { if (!(getPendingReplyQuotes() || []).includes(quote)) _addReplyQuote(quote); },
+      reportFailure: reportInteractionFailure,
+    },
     initializeFolders: () => { _initFolderDragDrop(); _initFolderTabs(); },
     sidebar: {
       activate: loadConversation, copy: _safeClipboardWrite,
@@ -1026,7 +1015,7 @@ function _startBuildWatch() {
     files: {
       enabled: !('ontouchstart' in window),
       modalOwnsFiles: () => !!(runtimeScope._tofuProjectModalOpen || runtimeScope._tofuKnowledgeModalOpen),
-      paperMode: () => !!paperMode,
+      paperMode: () => !!runtimeScope.paperMode,
       isArchive: file => typeof _isArchiveFile === 'function' && _isArchiveFile(file),
       isDocument: file => _DOC_EXTS.has(_getFileExt(file.name)),
       handlePaper: file => runtimeScope._handlePaperFileDrop?.(file),
@@ -1055,9 +1044,8 @@ function _startBuildWatch() {
    *   server responds.  This eliminates all localStorage desync bugs.
    *   On failure we fall back to the IndexedDB cache + a backoff retry
    *   (see _bootReconnectWithBackoff below). */
-  /* Restore last active conversation from sessionStorage (if any).
-   *   If the conv exists on the server, we'll navigate to it after loading.
-   *   Otherwise, fall back to the most recent conversation. */
+  /* Restore the exact saved identity through ordinary conversation navigation.
+   *   Without a saved identity, fall back to the most recent conversation. */
   /* sessionStorage is PER-TAB and dies on a browser close/reopen — it only
    *   survives an in-tab reload. Fall back to the localStorage mirror (written
    *   on every leave via _persistLastActiveConv below) so a genuine COLD open
@@ -1183,11 +1171,6 @@ function _startBuildWatch() {
     if (typeof _startBuildWatch === 'function') _startBuildWatch();
   });
 
-  /* Bottom-follow suspension latch (core.js): arm the reader's
-   * scroll-up-intent listeners as soon as the chat container exists, so a
-   * wheel-up / touch-drag / scrollbar move away from the bottom detaches the
-   * streaming auto-follow from the first gesture — no fighting, no tremble. */
-  if (typeof _armFollowSuspensionListeners === 'function') _armFollowSuspensionListeners();
 
   initActiveTasks().then(() => {
     /* Decide reconnect by OBSERVABLE OUTCOME, not by a thrown error.
@@ -1285,8 +1268,8 @@ function _startBuildWatch() {
    *   they're still on the welcome screen (activeConvId still null). */
   function _bootRestoreActiveConv(restoredId) {
     if (activeConvId) return;  // user already navigated during the load — leave them be
-    const restoredConv = restoredId && conversations.find(c => c.id === restoredId);
-    if (restoredConv) {
+    // Catalog omission is not deletion; navigation resolves and fences the exact ID.
+    if (restoredId) {
       loadConversation(restoredId);
       return;
     }

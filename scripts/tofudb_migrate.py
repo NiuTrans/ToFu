@@ -5,7 +5,7 @@ release gate before Tofu-DB may be selected as a storage backend.  This tool
 is that gate for the first stable domain set:
 
 * reads the legacy SQLite authority through a bounded, driver-level
-  read-only connection (``lib.storage_sidecar.offline`` — the same WAL
+  read-only connection (``lib.storage_authority_sql.offline`` — the same WAL
   query-only mode ``debug/inspect_conversation.py`` uses) and never writes
   to it;
 * replays domain state into a running ``tofu-db serve`` daemon through the
@@ -44,7 +44,7 @@ from typing import Any, Callable, Iterable, Iterator, Mapping, Sequence
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from lib.storage_sidecar.offline import (  # noqa: E402
+from lib.storage_authority_sql.offline import (  # noqa: E402
     open_readonly_sqlite_authority,
     resolve_readonly_sqlite_authority,
 )
@@ -457,7 +457,7 @@ _RECORD_COLUMNS = ("namespace", "record_key", "value_json", "version")
 
 
 def _record_scan(connection: Any) -> Iterator[dict[str, Any]]:
-    from lib.storage_sidecar.operations_pkg._records import _load_record_value
+    from lib.storage_authority_sql.operations_pkg._records import _load_record_value
 
     rows = _paged_rows(
         connection, "storage_records", _RECORD_COLUMNS,

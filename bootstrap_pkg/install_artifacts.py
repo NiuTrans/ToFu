@@ -17,6 +17,7 @@ import subprocess
 import sys
 import shutil
 import tempfile
+from urllib.parse import unquote, urlsplit
 import zipfile
 
 
@@ -134,7 +135,35 @@ def main() -> None:
     print(prepare_search_wheel(args.root, args.python))
 
 
-def prepare_python_wheels(python: str, requirements: Path, wheelhouse: Path) -> Path:
+def _compiled_versions(lock: Path) -> dict[str, str]:
+    """Require every resolved package, including local first-party wheels."""
+    expected = {}
+    for raw in lock.read_text().splitlines():
+        line = raw.strip().rstrip('\\').strip()
+        if not line or line.startswith(('#', '--')):
+            continue
+        match = re.match(r'([A-Za-z0-9._-]+)==([^\s;]+)', line)
+        if match:
+            name, version = match.groups()
+        else:
+            url = line.split(' @ ', 1)[-1]
+            path = Path(unquote(urlsplit(url).path)) if url.startswith('file:') else Path(url)
+            if not path.is_file() or path.suffix != '.whl':
+                raise ValueError('Resolved Python artifact is not exact-pinned or a local wheel')
+            with zipfile.ZipFile(path) as archive:
+                names = [entry for entry in archive.namelist() if entry.endswith('.dist-info/METADATA')]
+                if len(names) != 1:
+                    raise ValueError('Invalid resolved wheel metadata')
+                metadata = BytesParser().parsebytes(archive.read(names[0]))
+                name, version = metadata['Name'], metadata['Version']
+        package = name.lower().replace('_', '-')
+        if package in expected and expected[package] != version:
+            raise ValueError('Conflicting resolved Python artifacts')
+        expected[package] = version
+    return expected
+
+
+def _acquire_python_wheels(python: str, requirements: Path, wheelhouse: Path) -> Path:
     """Resolve against staging, build/download everything, then lock wheel hashes.
 
     No package installs happen here. The real installation consumes only the
@@ -142,46 +171,82 @@ def prepare_python_wheels(python: str, requirements: Path, wheelhouse: Path) -> 
     """
     wheelhouse.mkdir(parents=True, exist_ok=True)
     report = wheelhouse / 'resolution.json'
-    environment = dict(os.environ, PIP_CONFIG_FILE=os.devnull)
+    environment = dict(os.environ, PIP_CONFIG_FILE=os.devnull, PIP_DISABLE_PIP_VERSION_CHECK='1')
     environment.pop('PIP_USER', None)
     environment.pop('PYTHONUSERBASE', None)
-    subprocess.run([python, '-m', 'pip', 'install', '--dry-run', '--upgrade', '--no-user',
-                    '--report', str(report), '-r', str(requirements)],
-                   check=True, timeout=900, env=environment, stdout=sys.stderr)
-    records = json.loads(report.read_text())['install']
-    if not records:
-        lock = wheelhouse / 'install.lock'
-        lock.write_text('')
-        return lock
     acquisition = wheelhouse / 'acquisition.lock'
-    lines = []
-    for record in records:
-        info = record['download_info']
-        digest = info['archive_info']['hashes']['sha256']
-        # Local first-party wheels need no index entry. Preserve their URI.
-        spec = (info['url'] if info['url'].startswith('file:') else
-                record['metadata']['name'] + '==' + record['metadata']['version'])
-        lines.append(spec + ' --hash=sha256:' + digest)
-    acquisition.write_text('\n'.join(lines) + '\n')
+    uv = shutil.which('uv')
+    expected = None
+    if uv:
+        # Resolve once using uv; no pip dry-run download before wheel acquisition.
+        constraints = requirements.parent / 'install-constraints.txt'
+        constraint_args = ['--constraint', str(constraints)] if constraints.is_file() else []
+        subprocess.run([uv, 'pip', 'compile', '--no-config', '--python', python,
+                        '--generate-hashes', '--output-file', str(acquisition),
+                        *constraint_args, str(requirements)], check=True, timeout=900,
+                       env=environment, stdout=sys.stderr)
+        expected = _compiled_versions(acquisition)
+    else:
+        subprocess.run([python, '-m', 'pip', 'install', '--dry-run', '--ignore-installed', '--upgrade', '--no-user',
+                        '--report', str(report), '-r', str(requirements)],
+                       check=True, timeout=900, env=environment, stdout=sys.stderr)
+        records = json.loads(report.read_text())['install']
+        if not records:
+            lock = wheelhouse / 'install.lock'
+            lock.write_text('')
+            return lock
+        acquisition = wheelhouse / 'acquisition.lock'
+        lines = []
+        for record in records:
+            info = record['download_info']
+            digest = info['archive_info']['hashes']['sha256']
+            # Local first-party wheels need no index entry. Preserve their URI.
+            spec = (info['url'] if info['url'].startswith('file:') else
+                    record['metadata']['name'] + '==' + record['metadata']['version'])
+            lines.append(spec + ' --hash=sha256:' + digest)
+        acquisition.write_text('\n'.join(lines) + '\n')
+        expected = {record['metadata']['name'].lower().replace('_', '-'):
+                    record['metadata']['version'] for record in records}
     subprocess.run([python, '-m', 'pip', 'wheel', '--no-deps', '--require-hashes',
                     '--wheel-dir', str(wheelhouse), '-r', str(acquisition)],
                    check=True, timeout=900, env=environment, stdout=sys.stderr)
-    expected = {record['metadata']['name'].lower().replace('_', '-'): record['metadata']['version']
-                for record in records}
     admitted = {}
     for wheel in wheelhouse.glob('*.whl'):
         with zipfile.ZipFile(wheel) as archive:
             name = next(name for name in archive.namelist() if name.endswith('.dist-info/METADATA'))
             metadata = BytesParser().parsebytes(archive.read(name))
         package = metadata['Name'].lower().replace('_', '-')
-        if expected.get(package) == metadata['Version']:
+        if package in admitted:
+            raise ValueError('Duplicate package in Python wheelhouse')
+        if expected is None or expected.get(package) == metadata['Version']:
             admitted[package] = (f"{package}=={metadata['Version']} --hash=sha256:"
                                  + hashlib.sha256(wheel.read_bytes()).hexdigest())
-    if set(admitted) != set(expected):
+    if expected is not None and set(admitted) != set(expected):
         raise ValueError('Required Python artifacts are incomplete; no environment commit permitted')
     lock = wheelhouse / 'install.lock'
     lock.write_text('\n'.join(admitted[key] for key in sorted(admitted)) + '\n')
     return lock
+
+
+def prepare_python_wheels(python: str, requirements: Path, wheelhouse: Path) -> Path:
+    """Reuse verified artifacts or stage a complete wheelhouse before publication."""
+    from . import python_wheels
+    if wheelhouse.is_symlink():
+        raise ValueError('Refusing a symlinked Python artifact cache')
+    wheelhouse.parent.mkdir(parents=True, exist_ok=True)
+    runtime = python_wheels.identity(python)
+    lock = python_wheels.reuse(wheelhouse, requirements, runtime)
+    if lock is not None:
+        print('Reusing verified Python wheels; no dependency resolution or download.', file=sys.stderr)
+        return lock
+    lock = python_wheels.release_bundle(wheelhouse, requirements, runtime)
+    if lock is not None:
+        print('Using verified release Python wheels.', file=sys.stderr)
+        return lock
+    with tempfile.TemporaryDirectory(prefix='.prepare-wheels-', dir=wheelhouse.parent) as temporary:
+        stage = Path(temporary) / 'wheelhouse'
+        _acquire_python_wheels(python, requirements, stage)
+        return python_wheels.publish(stage, wheelhouse, requirements, runtime)
 
 
 if __name__ == '__main__':

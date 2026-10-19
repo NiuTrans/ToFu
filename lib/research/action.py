@@ -21,11 +21,11 @@ from collections.abc import Mapping
 from typing import Any
 
 import lib as _lib
-from lib.agent_loop import AbortSignal
+from lib.agent_loop.agent_loop import AbortSignal
 from lib.agent_core.events import Phase, build_phase
 from lib.identity import require_user_id
-from lib.llm_json import extract_json
-from lib.llm_errors import AbortedError
+from lib.llm.llm_json import extract_json
+from lib.llm.llm_errors import AbortedError
 from lib.log import audit_log, get_logger
 from lib.mcp.types import parse_namespaced_name
 from lib.paper.agent_loop_policy import run_guarded_paper_agent_loop

@@ -70,7 +70,8 @@ class _FakeStorageClient:
             )
             return documents[:int(payload.get('limit', 1000))]
         if operation == 'conversation.search':
-            return self._search_hits
+            return {'items': self._search_hits, 'next_cursor': None,
+                    'incomplete': False, 'coverage': 'ready', 'coverage_reasons': []}
         raise AssertionError(f'unexpected sidecar operation: {operation}')
 
 

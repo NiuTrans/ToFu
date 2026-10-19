@@ -140,7 +140,7 @@ correct default for a public API.
 The tool declares `{url, auth, headers, timeout_s}`. On a call, the server
 POSTs `{tool, arguments}` to the URL and returns the response body as the tool
 result. Risk shifts from code-exec to **SSRF**, closed by
-`lib.byo_egress.validate_egress_url` at **both** mint time and call time
+`lib.byo.byo_egress.validate_egress_url` at **both** mint time and call time
 (defeats DNS rebinding) — the same guard ProviderAccess routes use
 (`169.254.169.254` / link-local always blocked; private ranges gated by
 `TOFU_BYO_BLOCK_PRIVATE`).
@@ -276,3 +276,8 @@ POST /api/v4/tasks/{task_id}/tool_result
   `request_client_tool_result`;
 * AST guard: no `/api/v1` request module imports/calls `register_tool_spec`
   or `tool_registry.register`.
+
+Optional `execution.shell_command_argument` declares which string parameter holds
+a shell program. `ToolContractV2` validates it and keeps it out of provider schemas;
+it enables the ordinary progress guard without changing permissions or dispatch.
+See [execution policy](contracts/TOOL_EXECUTION_POLICY.md#declared-shell-semantics).

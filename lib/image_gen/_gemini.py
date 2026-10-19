@@ -7,7 +7,7 @@ Extracted verbatim from the former flat ``lib/image_gen.py``:
 
 import time
 
-from lib.http_client import http_get, http_post
+from lib.http_transport.client import http_get, http_post
 from lib.log import get_logger
 
 from ._chat import _build_multiturn_contents

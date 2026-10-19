@@ -4,8 +4,8 @@
     "tofu_search": {
       "version": "0.12.0",
       "filename": "tofu_search-0.12.0-py3-none-any.whl",
-      "sha256": "a33f79a6b7ccaa9e054e342d22bb5bb5cea59487685d95252128da10babe083a"
+      "sha256": "6b28a96abf63294291c324aca014786915c62e6eb87d995db01e4966bbf266e2"
     }
   },
-  "tofu_version": "0.18.0"
+  "tofu_version": "0.18.2"
 }

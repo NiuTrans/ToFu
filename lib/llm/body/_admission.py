@@ -6,7 +6,7 @@ never truncates history or calls a provider. Opaque reasoning/signature payloads
 are not text tokens: use the canonical counter, not serialized body byte size.
 """
 
-from lib.llm_errors import PromptTooLongError
+from lib.llm.llm_errors import PromptTooLongError
 from lib.token_counter.evidence import ADMITTED_INPUT_TOKENS_KEY
 
 

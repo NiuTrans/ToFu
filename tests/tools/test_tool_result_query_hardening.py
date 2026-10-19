@@ -8,15 +8,15 @@ pytestmark = pytest.mark.unit
 
 
 def manifest(repo, owner, parts=(), children=(), now=100, ttl=100000):
-    from lib.tool_result_query_contract import MEDIA_TYPE
+    from lib.tool_results.tool_result_query_contract import MEDIA_TYPE
     return repo.put(user_id=owner, now_ms=now, ttl_ms=ttl, media_type=MEDIA_TYPE,
         content=json.dumps(dict(resultId=str(uuid4()), executionStatus='ok', sourceCoverage='complete', retentionCoverage='complete', parts=list(parts), children=list(children))))['artifactRef']
 
 
 def test_rejected_manifest_rollback_and_reserved_key():
-    from lib.tool_result_artifacts import ToolResultArtifactRepository
+    from lib.tool_results.tool_result_artifacts import ToolResultArtifactRepository
     from lib.storage import get_storage_client
-    from lib.tool_result_query_contract import MEDIA_TYPE
+    from lib.tool_results.tool_result_query_contract import MEDIA_TYPE
     repo = ToolResultArtifactRepository()
     # Failed admission must not prune already-expired evidence in its transaction.
     kept = repo.put(user_id=501, content='expired rollback sentinel', now_ms=100, ttl_ms=100)['artifactRef']
@@ -31,7 +31,7 @@ def test_rejected_manifest_rollback_and_reserved_key():
 
 
 def test_stable_restart_owner_expiry_and_late_child(artifact_storage):
-    from lib.tool_result_artifacts import ToolResultArtifactRepository
+    from lib.tool_results.tool_result_artifacts import ToolResultArtifactRepository
     repo = ToolResultArtifactRepository()
     ref = repo.put(user_id=502, content='abcdefghij', now_ms=100, ttl_ms=1000)['artifactRef']
     first = repo.read_range(user_id=502, artifact_ref=ref, now_ms=101, limit=3)
@@ -50,7 +50,7 @@ def test_stable_restart_owner_expiry_and_late_child(artifact_storage):
 
 
 def test_large_graph_over_16mib_search_continuation_without_loops():
-    from lib.tool_result_artifacts import ToolResultArtifactRepository
+    from lib.tool_results.tool_result_artifacts import ToolResultArtifactRepository
     repo = ToolResultArtifactRepository(deadline_seconds=15)
     children = []
     for i in range(18):
@@ -73,7 +73,7 @@ def test_large_graph_over_16mib_search_continuation_without_loops():
 
 
 def test_read_media_descriptor_and_plain_json_never_promoted():
-    from lib.tool_result_artifacts import ToolResultArtifactRepository
+    from lib.tool_results.tool_result_artifacts import ToolResultArtifactRepository
     repo = ToolResultArtifactRepository()
     root = manifest(repo, 505, [{'kind':'media','reference':'tofu-media:original','mimeType':'image/png'}])
     page = repo.read_range(user_id=505, artifact_ref=root, now_ms=101)

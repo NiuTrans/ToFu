@@ -207,8 +207,8 @@ def test_application_boundary_uses_only_the_injected_storage_port(monkeypatch):
 
 def test_schema_33_repairs_version_32_ownerless_paper_tables(tmp_path):
     """A v32 version stamp must not hide ownerless legacy paper tables."""
-    from lib.storage_sidecar.adapters.sqlite import SQLiteSession
-    from lib.storage_sidecar.schema import SCHEMA_VERSION, initialize_schema
+    from lib.storage_authority_sql.adapters.sqlite import SQLiteSession
+    from lib.storage_authority_sql.schema import SCHEMA_VERSION, initialize_schema
 
     connection = sqlite3.connect(tmp_path / 'ownerless-v32.db')
     connection.row_factory = sqlite3.Row

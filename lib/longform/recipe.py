@@ -117,7 +117,7 @@ def _assemble_checkpoint_version(ctx: dict) -> str:
 # ── Seams (monkeypatchable, same pattern as the video recipe) ──
 
 def _web_search(query: str, *, user_question: str = ''):
-    from lib.search_runtime import ensure_search_runtime
+    from lib.search.search_runtime import ensure_search_runtime
     search_runtime = ensure_search_runtime()
     return search_runtime.perform_web_search(
         query, user_question=user_question)

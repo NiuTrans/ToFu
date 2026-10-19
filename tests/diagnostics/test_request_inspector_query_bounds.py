@@ -29,7 +29,7 @@ def test_event_inspector_summary_uses_per_task_indexed_queries():
     seconds for milliseconds of key-range work. The operation must issue
     ONE equality probe plus ONE prefix-range probe per task, never an
     OR'd mega-predicate."""
-    import lib.storage_sidecar.operations_pkg._records as rec
+    import lib.storage_authority_sql.operations_pkg._records as rec
 
     calls = []
 
@@ -61,7 +61,7 @@ def test_summary_list_pushes_conv_id_prefilter_into_sql():
     task_results value to filter in Python (~6 s warm): a byte-level
     instr() pre-filter rides the page SQL. Unscoped scans keep the
     backend-neutral decode path untouched."""
-    import lib.storage_sidecar.operations_pkg._records as rec
+    import lib.storage_authority_sql.operations_pkg._records as rec
 
     seen = []
 

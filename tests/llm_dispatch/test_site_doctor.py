@@ -6,7 +6,7 @@ Covers the three layers of lib/site_doctor.py + lib/site_knowledge.py:
     refusal;
   * trigger guards: env kill switch, unknown site, per-site cooldown,
     fleet-wide single-flight — the doctor is cheap and rare by construction;
-  * the doctor loop itself: rides lib.agent_loop.run_agent_loop (charter
+  * the doctor loop itself: rides lib.agent_loop.agent_loop.run_agent_loop (charter
     iron rule) with a SCRIPTED dispatch — inspect → try(fail) → try(pass)
     → pin lands a verified entry; pin without a matching verification is
     rejected; give_up writes nothing; the loop NEVER raises.

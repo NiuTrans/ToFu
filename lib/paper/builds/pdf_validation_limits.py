@@ -1,7 +1,7 @@
 """Native limits for the short-lived PDF validator; never imported by the UI.
 
-POSIX uses address-space, CPU and wall limits. Windows uses a process-memory
-Job Object plus a daemon wall deadline. The supervising build worker also
+POSIX installs only explicit address-space, CPU and wall limits. Windows uses
+an ownership Job Object with optional memory and wall limits. The supervising build worker also
 checks resident memory/cancellation and always reaps the child.
 """
 from __future__ import annotations
@@ -14,11 +14,14 @@ def apply_limits(memory_bytes: int, seconds: float):
     if os.name != 'nt':
         import resource
         import signal
-        resource.setrlimit(resource.RLIMIT_AS, (memory_bytes, memory_bytes))
-        cpu = max(1, math.ceil(seconds))
-        resource.setrlimit(resource.RLIMIT_CPU, (cpu, cpu))
-        signal.signal(signal.SIGALRM, signal.SIG_DFL)
-        signal.setitimer(signal.ITIMER_REAL, seconds)
+        resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+        if memory_bytes:
+            resource.setrlimit(resource.RLIMIT_AS, (memory_bytes, memory_bytes))
+        if seconds:
+            cpu = max(1, math.ceil(seconds))
+            resource.setrlimit(resource.RLIMIT_CPU, (cpu, cpu))
+            signal.signal(signal.SIGALRM, signal.SIG_DFL)
+            signal.setitimer(signal.ITIMER_REAL, seconds)
         return None
     import ctypes
     from ctypes import wintypes
@@ -43,13 +46,15 @@ def apply_limits(memory_bytes: int, seconds: float):
     kernel.GetCurrentProcess.restype = wintypes.HANDLE
     job = kernel.CreateJobObjectW(None, None)
     limits = ExtendedLimits()
-    limits.basic.flags = 0x100 | 0x2000  # PROCESS_MEMORY | KILL_ON_JOB_CLOSE
+    limits.basic.flags = 0x2000 | (0x100 if memory_bytes else 0)  # optional PROCESS_MEMORY | KILL_ON_JOB_CLOSE
     limits.process_memory = memory_bytes
     if not job or not kernel.SetInformationJobObject(job, 9, ctypes.byref(limits), ctypes.sizeof(limits)) or not kernel.AssignProcessToJobObject(job, kernel.GetCurrentProcess()):
         raise OSError(ctypes.get_last_error(), 'Cannot bound the PDF validation process')
-    deadline = threading.Timer(seconds, lambda: os._exit(3))
-    deadline.daemon = True
-    deadline.start()
+    deadline = None
+    if seconds:
+        deadline = threading.Timer(seconds, lambda: os._exit(3))
+        deadline.daemon = True
+        deadline.start()
     # Keep the job handle alive until process exit. There is no resident pool.
     return job, deadline
 
@@ -74,3 +79,34 @@ def observed_memory_bytes() -> int:
         except (OSError, ValueError, IndexError):
             pass
     return psutil.Process().memory_info().rss
+
+
+def bind_parent_lifetime(parent_pid: int):
+    """An unlimited validator still belongs to its exact launching process."""
+    import sys
+    if parent_pid <= 0:
+        raise ValueError('invalid validator parent')
+    if sys.platform == 'linux':
+        import ctypes
+        import signal
+        if os.getppid() != parent_pid:
+            raise OSError('validator parent already retired')
+        library = ctypes.CDLL(None, use_errno=True)
+        if library.prctl(1, signal.SIGKILL, 0, 0, 0) != 0:
+            raise OSError(ctypes.get_errno(), 'Cannot bind validator parent lifetime')
+        if os.getppid() != parent_pid:
+            os._exit(4)
+        return
+    import psutil
+    import threading
+    parent = psutil.Process(parent_pid)
+    created = parent.create_time()
+    def watch():
+        while True:
+            try:
+                if not parent.is_running() or parent.status() == psutil.STATUS_ZOMBIE or parent.create_time() != created:
+                    os._exit(4)
+            except psutil.Error:
+                os._exit(4)
+            threading.Event().wait(0.1)
+    threading.Thread(target=watch, name='pdf-validation-owner', daemon=True).start()

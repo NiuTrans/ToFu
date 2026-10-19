@@ -13,7 +13,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 import lib.mcp  # noqa: E402
-from lib.search_bridge import _ChatuiKmDocReader  # noqa: E402
+from lib.search.search_bridge import _ChatuiKmDocReader  # noqa: E402
 
 
 class _FakeBridge:

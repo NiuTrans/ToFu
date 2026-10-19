@@ -257,10 +257,12 @@ def test_audio_failure_stops_parallel_admission_after_active_wave(monkeypatch):
 
     calls = []
     lock = threading.Lock()
+    active_wave = threading.Barrier(2)
 
     def fail_active_wave(_chunk, **kwargs):
         with lock:
             calls.append('called')
+        active_wave.wait(timeout=5)
         raise RuntimeError('parallel provider failed')
 
     monkeypatch.setattr(

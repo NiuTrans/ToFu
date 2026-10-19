@@ -7,7 +7,7 @@ The export tar-copied the WORKTREE while excluding untracked files. In a
 multi-sibling shared-worktree workflow that publishes half-written code:
 
 1. Round-19 export shipped a sibling's dirty server.py importing
-   lib/log_aggregates.py — still untracked, so skipped — and public CI
+   lib/logging_pkg/log_aggregates.py — still untracked, so skipped — and public CI
    red-filed with 800+ ModuleNotFoundError cascades.
 2. The recovery re-export then shipped a dirty mid-edit
    lib/motion_video/_scene_author.py (F821 Undefined name `theme`),

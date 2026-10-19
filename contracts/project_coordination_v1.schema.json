@@ -1,34 +1,372 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Project coordination binding v1",
-  "description": "An explicit owner/project binding to an existing conversation. This grants no execution or messaging permission.",
+  "description": "An owner/project coordinator created as a new empty conversation. Existing valid bindings are retained on reads/retries; explicit creation at the current revision replaces them without deleting the old chat. Historical conversations cannot be selected. This grants no execution or messaging permission.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["projectPath", "conversationId", "revision", "availability", "capabilities"],
+  "required": [
+    "projectPath",
+    "conversationId",
+    "revision",
+    "availability",
+    "capabilities"
+  ],
   "properties": {
-    "projectPath": {"type": "string", "minLength": 1, "maxLength": 4096},
-    "conversationId": {"type": "string", "maxLength": 256},
-    "revision": {"type": "integer", "minimum": 0},
-    "availability": {"enum": ["unbound", "available", "unavailable"]},
+    "projectPath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096
+    },
+    "conversationId": {
+      "type": "string",
+      "maxLength": 256
+    },
+    "revision": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "availability": {
+      "enum": [
+        "unbound",
+        "available",
+        "unavailable"
+      ]
+    },
     "capabilities": {
-      "type": "object", "additionalProperties": false,
-      "required": ["assign", "sendMessage", "steerSubagent"],
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "assign",
+        "sendMessage",
+        "steerSubagent"
+      ],
       "properties": {
-        "assign": {"const": false},
-        "sendMessage": {"const": false},
-        "steerSubagent": {"type": "boolean"}
+        "assign": {
+          "const": false
+        },
+        "sendMessage": {
+          "const": false
+        },
+        "steerSubagent": {
+          "type": "boolean"
+        }
       }
     }
   },
   "$defs": {
-    "bindRequest": {
-      "type": "object", "additionalProperties": false,
-      "required": ["path", "conversationId", "expectedRevision"],
+    "createRequest": {
+      "description": "At the current revision, create a fresh empty ordinary conversation and CAS-bind it, replacing any prior binding without deleting its chat. A stale retry returns the current available binding without creating another conversation.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "folderId",
+        "expectedRevision"
+      ],
       "properties": {
-        "path": {"type": "string", "minLength": 1, "maxLength": 4096},
-        "conversationId": {"type": "string", "maxLength": 256},
-        "expectedRevision": {"type": "integer", "minimum": 0}
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "folderId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "expectedRevision": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "bindRequest": {
+      "description": "Clear a binding with an empty conversationId, or reaffirm the current available binding. Selecting another existing conversation is rejected; use createRequest.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "conversationId",
+        "expectedRevision"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "conversationId": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "expectedRevision": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "reportScope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "owner",
+        "projectPath",
+        "coordinatorId",
+        "bindingRevision"
+      ],
+      "properties": {
+        "owner": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "projectPath": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "coordinatorId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "bindingRevision": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "reportRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "title",
+        "message",
+        "kind",
+        "idempotency_key"
+      ],
+      "properties": {
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120,
+          "pattern": "^[^\\r\\n]*\\S[^\\r\\n]*$"
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4000,
+          "pattern": "\\S"
+        },
+        "kind": {
+          "enum": [
+            "progress",
+            "decision",
+            "blocked",
+            "delivery"
+          ]
+        },
+        "idempotency_key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "pattern": "\\S"
+        }
+      }
+    },
+    "reportPointer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "turnId",
+        "ordinal",
+        "title",
+        "kind",
+        "createdAt"
+      ],
+      "properties": {
+        "turnId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "ordinal": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120,
+          "pattern": "^[^\\r\\n]+$"
+        },
+        "kind": {
+          "enum": [
+            "progress",
+            "decision",
+            "blocked",
+            "delivery"
+          ]
+        },
+        "createdAt": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "reportIntent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "scope",
+        "request"
+      ],
+      "properties": {
+        "scope": {
+          "$ref": "#/$defs/reportScope"
+        },
+        "request": {
+          "$ref": "#/$defs/reportRequest"
+        }
+      }
+    },
+    "reportHead": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "scope",
+        "latest",
+        "readOrdinal"
+      ],
+      "properties": {
+        "scope": {
+          "$ref": "#/$defs/reportScope"
+        },
+        "latest": {
+          "$ref": "#/$defs/reportPointer"
+        },
+        "readOrdinal": {
+          "type": "integer",
+          "minimum": -1
+        }
+      }
+    },
+    "reportState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "projectPath",
+        "conversationId",
+        "bindingRevision",
+        "latest",
+        "unread"
+      ],
+      "properties": {
+        "projectPath": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "conversationId": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "bindingRevision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "latest": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "turnId",
+                "ordinal",
+                "title",
+                "kind",
+                "createdAt",
+                "content"
+              ],
+              "properties": {
+                "turnId": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 256
+                },
+                "ordinal": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "title": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 120,
+                  "pattern": "^[^\\r\\n]+$"
+                },
+                "kind": {
+                  "enum": [
+                    "progress",
+                    "decision",
+                    "blocked",
+                    "delivery"
+                  ]
+                },
+                "createdAt": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "content": {
+                  "type": "string",
+                  "maxLength": 4250
+                }
+              }
+            }
+          ]
+        },
+        "unread": {
+          "type": "boolean"
+        }
+      }
+    },
+    "reportReadRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "conversationId",
+        "bindingRevision",
+        "turnId"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "conversationId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "bindingRevision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "turnId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        }
       }
     }
+  },
+  "reporting": {
+    "headNamespace": "project.coordinator.reports.v1",
+    "pendingNamespace": "project.coordinator.reports.pending.v1",
+    "casAttempts": 8,
+    "recoveryPageSize": 32
   }
 }

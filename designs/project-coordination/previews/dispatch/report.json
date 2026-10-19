@@ -1,0 +1,2201 @@
+{
+  "scope": "True Chromium; static UI mock ports ONLY; NOT backend/native acceptance; no paid models",
+  "cases": [
+    {
+      "width": 1440,
+      "theme": "tofu",
+      "noAutoGrant": true,
+      "freshConsent": true,
+      "scopeFence": true,
+      "exactUncertainRetryAfterReopen": true,
+      "explicitDependencyPins": [
+        {
+          "assignmentId": "mock-upstream-consult",
+          "grantRevision": 2,
+          "resultRevision": 11
+        },
+        {
+          "assignmentId": "mock-upstream-files",
+          "grantRevision": 2,
+          "resultRevision": 11,
+          "checkpointSha": "0123456789abcdef0123456789abcdef01234567"
+        }
+      ],
+      "dependencySelectionNoPost": true,
+      "dependencyConsentReset": true,
+      "backendMockWaitingToStale": true,
+      "stalePinsPreserved": true,
+      "dependencyRetryFrozen": true,
+      "reviewNotPublish": true,
+      "reworkDraftNoPost": true,
+      "freshReworkLineage": true,
+      "canonicalDelivery": false,
+      "mockCalls": [
+        {
+          "name": "grant",
+          "body": {
+            "projectPath": "/mock/project",
+            "coordinatorId": "mock-coord",
+            "recipientId": "mock-worker",
+            "authorizationSource": {
+              "conversationId": "mock-coord",
+              "turnId": "mock-human-turn",
+              "projectionRevision": 7
+            },
+            "brief": "核验范围内任务；不自动发布",
+            "model": "mock.not-callable",
+            "budget": {
+              "maxTokens": 100,
+              "maxModelRequests": 1,
+              "deadline": 1791646186.473
+            },
+            "dependencies": [
+              {
+                "assignmentId": "mock-upstream-consult",
+                "grantRevision": 2,
+                "resultRevision": 11
+              },
+              {
+                "assignmentId": "mock-upstream-files",
+                "grantRevision": 2,
+                "resultRevision": 11,
+                "checkpointSha": "0123456789abcdef0123456789abcdef01234567"
+              }
+            ]
+          },
+          "key": "mock-command-1"
+        },
+        {
+          "name": "grant",
+          "body": {
+            "projectPath": "/mock/project",
+            "coordinatorId": "mock-coord",
+            "recipientId": "mock-worker",
+            "authorizationSource": {
+              "conversationId": "mock-coord",
+              "turnId": "mock-human-turn",
+              "projectionRevision": 7
+            },
+            "brief": "核验范围内任务；不自动发布",
+            "model": "mock.not-callable",
+            "budget": {
+              "maxTokens": 100,
+              "maxModelRequests": 1,
+              "deadline": 1791646187.022
+            },
+            "profile": {
+              "mode": "files",
+              "readPaths": [
+                "src"
+              ],
+              "writePaths": [
+                "src"
+              ],
+              "maxToolCalls": 8,
+              "tools": [
+                "read_files",
+                "edit_file"
+              ]
+            },
+            "dependencies": [
+              {
+                "assignmentId": "mock-upstream-consult",
+                "grantRevision": 2,
+                "resultRevision": 11
+              },
+              {
+                "assignmentId": "mock-upstream-files",
+                "grantRevision": 2,
+                "resultRevision": 11,
+                "checkpointSha": "0123456789abcdef0123456789abcdef01234567"
+              }
+            ]
+          },
+          "key": "mock-command-2"
+        },
+        {
+          "name": "grant",
+          "body": {
+            "projectPath": "/mock/project",
+            "coordinatorId": "mock-coord",
+            "recipientId": "mock-worker",
+            "authorizationSource": {
+              "conversationId": "mock-coord",
+              "turnId": "mock-human-turn",
+              "projectionRevision": 7
+            },
+            "brief": "核验范围内任务；不自动发布",
+            "model": "mock.not-callable",
+            "budget": {
+              "maxTokens": 100,
+              "maxModelRequests": 1,
+              "deadline": 1791646187.022
+            },
+            "profile": {
+              "mode": "files",
+              "readPaths": [
+                "src"
+              ],
+              "writePaths": [
+                "src"
+              ],
+              "maxToolCalls": 8,
+              "tools": [
+                "read_files",
+                "edit_file"
+              ]
+            },
+            "dependencies": [
+              {
+                "assignmentId": "mock-upstream-consult",
+                "grantRevision": 2,
+                "resultRevision": 11
+              },
+              {
+                "assignmentId": "mock-upstream-files",
+                "grantRevision": 2,
+                "resultRevision": 11,
+                "checkpointSha": "0123456789abcdef0123456789abcdef01234567"
+              }
+            ]
+          },
+          "key": "mock-command-2"
+        },
+        {
+          "name": "review",
+          "body": {
+            "projectPath": "/mock/project",
+            "assignmentId": "mock-completed",
+            "expectedRevision": 2,
+            "resultRevision": 11,
+            "decision": "accept",
+            "note": ""
+          }
+        },
+        {
+          "name": "publish",
+          "body": {
+            "projectPath": "/mock/project",
+            "assignmentId": "mock-completed",
+            "expectedRevision": 2,
+            "resultRevision": 11,
+            "expectedCheckpointSha": "mock-checkpoint"
+          }
+        },
+        {
+          "name": "review",
+          "body": {
+            "projectPath": "/mock/project",
+            "assignmentId": "mock-rework",
+            "expectedRevision": 2,
+            "resultRevision": 11,
+            "decision": "rework",
+            "note": ""
+          }
+        },
+        {
+          "name": "grant",
+          "body": {
+            "projectPath": "/mock/project",
+            "coordinatorId": "mock-coord",
+            "recipientId": "mock-worker",
+            "authorizationSource": {
+              "conversationId": "mock-coord",
+              "turnId": "mock-human-turn",
+              "projectionRevision": 7
+            },
+            "brief": "核验范围内任务；不自动发布",
+            "model": "mock.not-callable",
+            "budget": {
+              "maxTokens": 100,
+              "maxModelRequests": 1,
+              "deadline": 1791646187.989
+            },
+            "profile": {
+              "mode": "files",
+              "readPaths": [
+                "src"
+              ],
+              "writePaths": [
+                "src"
+              ],
+              "maxToolCalls": 8,
+              "tools": [
+                "read_files",
+                "edit_file"
+              ]
+            },
+            "reworkOf": {
+              "assignmentId": "mock-rework",
+              "grantRevision": 2,
+              "resultRevision": 11
+            }
+          },
+          "key": "mock-command-3"
+        }
+      ],
+      "geometry": {
+        "client": 419,
+        "scroll": 419
+      },
+      "finalGeometry": {
+        "client": 419,
+        "scroll": 419
+      },
+      "focusRestored": true,
+      "pageErrors": []
+    },
+    {
+      "width": 1440,
+      "theme": "dark",
+      "noAutoGrant": true,
+      "freshConsent": true,
+      "scopeFence": true,
+      "exactUncertainRetryAfterReopen": true,
+      "explicitDependencyPins": [
+        {
+          "assignmentId": "mock-upstream-consult",
+          "grantRevision": 2,
+          "resultRevision": 11
+        },
+        {
+          "assignmentId": "mock-upstream-files",
+          "grantRevision": 2,
+          "resultRevision": 11,
+          "checkpointSha": "0123456789abcdef0123456789abcdef01234567"
+        }
+      ],
+      "dependencySelectionNoPost": true,
+      "dependencyConsentReset": true,
+      "backendMockWaitingToStale": true,
+      "stalePinsPreserved": true,
+      "dependencyRetryFrozen": true,
+      "reviewNotPublish": true,
+      "reworkDraftNoPost": true,
+      "freshReworkLineage": true,
+      "canonicalDelivery": false,
+      "mockCalls": [
+        {
+          "name": "grant",
+          "body": {
+            "projectPath": "/mock/project",
+            "coordinatorId": "mock-coord",
+            "recipientId": "mock-worker",
+            "authorizationSource": {
+              "conversationId": "mock-coord",
+              "turnId": "mock-human-turn",
+              "projectionRevision": 7
+            },
+            "brief": "核验范围内任务；不自动发布",
+            "model": "mock.not-callable",
+            "budget": {
+              "maxTokens": 100,
+              "maxModelRequests": 1,
+              "deadline": 1791646189.422
+            },
+            "dependencies": [
+              {
+                "assignmentId": "mock-upstream-consult",
+                "grantRevision": 2,
+                "resultRevision": 11
+              },
+              {
+                "assignmentId": "mock-upstream-files",
+                "grantRevision": 2,
+                "resultRevision": 11,
+                "checkpointSha": "0123456789abcdef0123456789abcdef01234567"
+              }
+            ]
+          },
+          "key": "mock-command-1"
+        },
+        {
+          "name": "grant",
+          "body": {
+            "projectPath": "/mock/project",
+            "coordinatorId": "mock-coord",
+            "recipientId": "mock-worker",
+            "authorizationSource": {
+              "conversationId": "mock-coord",
+              "turnId": "mock-human-turn",
+              "projectionRevision": 7
+            },
+            "brief": "核验范围内任务；不自动发布",
+            "model": "mock.not-callable",
+            "budget": {
+              "maxTokens": 100,
+              "maxModelRequests": 1,
+              "deadline": 1791646189.972
+            },
+            "profile": {
+              "mode": "files",
+              "readPaths": [
+                "src"
+              ],
+              "writePaths": [
+                "src"
+              ],
+              "maxToolCalls": 8,
+              "tools": [
+                "read_files",
+                "edit_file"
+              ]
+            },
+            "dependencies": [
+              {
+                "assignmentId": "mock-upstream-consult",
+                "grantRevision": 2,
+                "resultRevision": 11
+              },
+              {
+                "assignmentId": "mock-upstream-files",
+                "grantRevision": 2,
+                "resultRevision": 11,
+                "checkpointSha": "0123456789abcdef0123456789abcdef01234567"
+              }
+            ]
+          },
+          "key": "mock-command-2"
+        },
+        {
+          "name": "grant",
+          "body": {
+            "projectPath": "/mock/project",
+            "coordinatorId": "mock-coord",
+            "recipientId": "mock-worker",
+            "authorizationSource": {
+              "conversationId": "mock-coord",
+              "turnId": "mock-human-turn",
+              "projectionRevision": 7
+            },
+            "brief": "核验范围内任务；不自动发布",
+            "model": "mock.not-callable",
+            "budget": {
+              "maxTokens": 100,
+              "maxModelRequests": 1,
+              "deadline": 1791646189.972
+            },
+            "profile": {
+              "mode": "files",
+              "readPaths": [
+                "src"
+              ],
+              "writePaths": [
+                "src"
+              ],
+              "maxToolCalls": 8,
+              "tools": [
+                "read_files",
+                "edit_file"
+              ]
+            },
+            "dependencies": [
+              {
+                "assignmentId": "mock-upstream-consult",
+                "grantRevision": 2,
+                "resultRevision": 11
+              },
+              {
+                "assignmentId": "mock-upstream-files",
+                "grantRevision": 2,
+                "resultRevision": 11,
+                "checkpointSha": "0123456789abcdef0123456789abcdef01234567"
+              }
+            ]
+          },
+          "key": "mock-command-2"
+        },
+        {
+          "name": "review",
+          "body": {
+            "projectPath": "/mock/project",
+            "assignmentId": "mock-completed",
+            "expectedRevision": 2,
+            "resultRevision": 11,
+            "decision": "accept",
+            "note": ""
+          }
+        },
+        {
+          "name": "publish",
+          "body": {
+            "projectPath": "/mock/project",
+            "assignmentId": "mock-completed",
+            "expectedRevision": 2,
+            "resultRevision": 11,
+            "expectedCheckpointSha": "mock-checkpoint"
+          }
+        },
+        {
+          "name": "review",
+          "body": {
+            "projectPath": "/mock/project",
+            "assignmentId": "mock-rework",
+            "expectedRevision": 2,
+            "resultRevision": 11,
+            "decision": "rework",
+            "note": ""
+          }
+        },
+        {
+          "name": "grant",
+          "body": {
+            "projectPath": "/mock/project",
+            "coordinatorId": "mock-coord",
+            "recipientId": "mock-worker",
+            "authorizationSource": {
+              "conversationId": "mock-coord",
+              "turnId": "mock-human-turn",
+              "projectionRevision": 7
+            },
+            "brief": "核验范围内任务；不自动发布",
+            "model": "mock.not-callable",
+            "budget": {
+              "maxTokens": 100,
+              "maxModelRequests": 1,
+              "deadline": 1791646190.889
+            },
+            "profile": {
+              "mode": "files",
+              "readPaths": [
+                "src"
+              ],
+              "writePaths": [
+                "src"
+              ],
+              "maxToolCalls": 8,
+              "tools": [
+                "read_files",
+                "edit_file"
+              ]
+            },
+            "reworkOf": {
+              "assignmentId": "mock-rework",
+              "grantRevision": 2,
+              "resultRevision": 11
+            }
+          },
+          "key": "mock-command-3"
+        }
+      ],
+      "geometry": {
+        "client": 419,
+        "scroll": 419
+      },
+      "finalGeometry": {
+        "client": 419,
+        "scroll": 419
+      },
+      "focusRestored": true,
+      "pageErrors": []
+    },
+    {
+      "width": 1440,
+      "theme": "light",
+      "noAutoGrant": true,
+      "freshConsent": true,
+      "scopeFence": true,
+      "exactUncertainRetryAfterReopen": true,
+      "explicitDependencyPins": [
+        {
+          "assignmentId": "mock-upstream-consult",
+          "grantRevision": 2,
+          "resultRevision": 11
+        },
+        {
+          "assignmentId": "mock-upstream-files",
+          "grantRevision": 2,
+          "resultRevision": 11,
+          "checkpointSha": "0123456789abcdef0123456789abcdef01234567"
+        }
+      ],
+      "dependencySelectionNoPost": true,
+      "dependencyConsentReset": true,
+      "backendMockWaitingToStale": true,
+      "stalePinsPreserved": true,
+      "dependencyRetryFrozen": true,
+      "reviewNotPublish": true,
+      "reworkDraftNoPost": true,
+      "freshReworkLineage": true,
+      "canonicalDelivery": false,
+      "mockCalls": [
+        {
+          "name": "grant",
+          "body": {
+            "projectPath": "/mock/project",
+            "coordinatorId": "mock-coord",
+            "recipientId": "mock-worker",
+            "authorizationSource": {
+              "conversationId": "mock-coord",
+              "turnId": "mock-human-turn",
+              "projectionRevision": 7
+            },
+            "brief": "核验范围内任务；不自动发布",
+            "model": "mock.not-callable",
+            "budget": {
+              "maxTokens": 100,
+              "maxModelRequests": 1,
+              "deadline": 1791646192.239
+            },
+            "dependencies": [
+              {
+                "assignmentId": "mock-upstream-consult",
+                "grantRevision": 2,
+                "resultRevision": 11
+              },
+              {
+                "assignmentId": "mock-upstream-files",
+                "grantRevision": 2,
+                "resultRevision": 11,
+                "checkpointSha": "0123456789abcdef0123456789abcdef01234567"
+              }
+            ]
+          },
+          "key": "mock-command-1"
+        },
+        {
+          "name": "grant",
+          "body": {
+            "projectPath": "/mock/project",
+            "coordinatorId": "mock-coord",
+            "recipientId": "mock-worker",
+            "authorizationSource": {
+              "conversationId": "mock-coord",
+              "turnId": "mock-human-turn",
+              "projectionRevision": 7
+            },
+            "brief": "核验范围内任务；不自动发布",
+            "model": "mock.not-callable",
+            "budget": {
+              "maxTokens": 100,
+              "maxModelRequests": 1,
+              "deadline": 1791646192.788
+            },
+            "profile": {
+              "mode": "files",
+              "readPaths": [
+                "src"
+              ],
+              "writePaths": [
+                "src"
+              ],
+              "maxToolCalls": 8,
+              "tools": [
+                "read_files",
+                "edit_file"
+              ]
+            },
+            "dependencies": [
+              {
+                "assignmentId": "mock-upstream-consult",
+                "grantRevision": 2,
+                "resultRevision": 11
+              },
+              {
+                "assignmentId": "mock-upstream-files",
+                "grantRevision": 2,
+                "resultRevision": 11,
+                "checkpointSha": "0123456789abcdef0123456789abcdef01234567"
+              }
+            ]
+          },
+          "key": "mock-command-2"
+        },
+        {
+          "name": "grant",
+          "body": {
+            "projectPath": "/mock/project",
+            "coordinatorId": "mock-coord",
+            "recipientId": "mock-worker",
+            "authorizationSource": {
+              "conversationId": "mock-coord",
+              "turnId": "mock-human-turn",
+              "projectionRevision": 7
+            },
+            "brief": "核验范围内任务；不自动发布",
+            "model": "mock.not-callable",
+            "budget": {
+              "maxTokens": 100,
+              "maxModelRequests": 1,
+              "deadline": 1791646192.788
+            },
+            "profile": {
+              "mode": "files",
+              "readPaths": [
+                "src"
+              ],
+              "writePaths": [
+                "src"
+              ],
+              "maxToolCalls": 8,
+              "tools": [
+                "read_files",
+                "edit_file"
+              ]
+            },
+            "dependencies": [
+              {
+                "assignmentId": "mock-upstream-consult",
+                "grantRevision": 2,
+                "resultRevision": 11
+              },
+              {
+                "assignmentId": "mock-upstream-files",
+                "grantRevision": 2,
+                "resultRevision": 11,
+                "checkpointSha": "0123456789abcdef0123456789abcdef01234567"
+              }
+            ]
+          },
+          "key": "mock-command-2"
+        },
+        {
+          "name": "review",
+          "body": {
+            "projectPath": "/mock/project",
+            "assignmentId": "mock-completed",
+            "expectedRevision": 2,
+            "resultRevision": 11,
+            "decision": "accept",
+            "note": ""
+          }
+        },
+        {
+          "name": "publish",
+          "body": {
+            "projectPath": "/mock/project",
+            "assignmentId": "mock-completed",
+            "expectedRevision": 2,
+            "resultRevision": 11,
+            "expectedCheckpointSha": "mock-checkpoint"
+          }
+        },
+        {
+          "name": "review",
+          "body": {
+            "projectPath": "/mock/project",
+            "assignmentId": "mock-rework",
+            "expectedRevision": 2,
+            "resultRevision": 11,
+            "decision": "rework",
+            "note": ""
+          }
+        },
+        {
+          "name": "grant",
+          "body": {
+            "projectPath": "/mock/project",
+            "coordinatorId": "mock-coord",
+            "recipientId": "mock-worker",
+            "authorizationSource": {
+              "conversationId": "mock-coord",
+              "turnId": "mock-human-turn",
+              "projectionRevision": 7
+            },
+            "brief": "核验范围内任务；不自动发布",
+            "model": "mock.not-callable",
+            "budget": {
+              "maxTokens": 100,
+              "maxModelRequests": 1,
+              "deadline": 1791646193.688
+            },
+            "profile": {
+              "mode": "files",
+              "readPaths": [
+                "src"
+              ],
+              "writePaths": [
+                "src"
+              ],
+              "maxToolCalls": 8,
+              "tools": [
+                "read_files",
+                "edit_file"
+              ]
+            },
+            "reworkOf": {
+              "assignmentId": "mock-rework",
+              "grantRevision": 2,
+              "resultRevision": 11
+            }
+          },
+          "key": "mock-command-3"
+        }
+      ],
+      "geometry": {
+        "client": 419,
+        "scroll": 419
+      },
+      "finalGeometry": {
+        "client": 419,
+        "scroll": 419
+      },
+      "focusRestored": true,
+      "pageErrors": []
+    },
+    {
+      "width": 390,
+      "theme": "tofu",
+      "noAutoGrant": true,
+      "freshConsent": true,
+      "scopeFence": true,
+      "exactUncertainRetryAfterReopen": true,
+      "explicitDependencyPins": [
+        {
+          "assignmentId": "mock-upstream-consult",
+          "grantRevision": 2,
+          "resultRevision": 11
+        },
+        {
+          "assignmentId": "mock-upstream-files",
+          "grantRevision": 2,
+          "resultRevision": 11,
+          "checkpointSha": "0123456789abcdef0123456789abcdef01234567"
+        }
+      ],
+      "dependencySelectionNoPost": true,
+      "dependencyConsentReset": true,
+      "backendMockWaitingToStale": true,
+      "stalePinsPreserved": true,
+      "dependencyRetryFrozen": true,
+      "reviewNotPublish": true,
+      "reworkDraftNoPost": true,
+      "freshReworkLineage": true,
+      "canonicalDelivery": false,
+      "mockCalls": [
+        {
+          "name": "grant",
+          "body": {
+            "projectPath": "/mock/project",
+            "coordinatorId": "mock-coord",
+            "recipientId": "mock-worker",
+            "authorizationSource": {
+              "conversationId": "mock-coord",
+              "turnId": "mock-human-turn",
+              "projectionRevision": 7
+            },
+            "brief": "核验范围内任务；不自动发布",
+            "model": "mock.not-callable",
+            "budget": {
+              "maxTokens": 100,
+              "maxModelRequests": 1,
+              "deadline": 1791646195.005
+            },
+            "dependencies": [
+              {
+                "assignmentId": "mock-upstream-consult",
+                "grantRevision": 2,
+                "resultRevision": 11
+              },
+              {
+                "assignmentId": "mock-upstream-files",
+                "grantRevision": 2,
+                "resultRevision": 11,
+                "checkpointSha": "0123456789abcdef0123456789abcdef01234567"
+              }
+            ]
+          },
+          "key": "mock-command-1"
+        },
+        {
+          "name": "grant",
+          "body": {
+            "projectPath": "/mock/project",
+            "coordinatorId": "mock-coord",
+            "recipientId": "mock-worker",
+            "authorizationSource": {
+              "conversationId": "mock-coord",
+              "turnId": "mock-human-turn",
+              "projectionRevision": 7
+            },
+            "brief": "核验范围内任务；不自动发布",
+            "model": "mock.not-callable",
+            "budget": {
+              "maxTokens": 100,
+              "maxModelRequests": 1,
+              "deadline": 1791646195.488
+            },
+            "profile": {
+              "mode": "files",
+              "readPaths": [
+                "src"
+              ],
+              "writePaths": [
+                "src"
+              ],
+              "maxToolCalls": 8,
+              "tools": [
+                "read_files",
+                "edit_file"
+              ]
+            },
+            "dependencies": [
+              {
+                "assignmentId": "mock-upstream-consult",
+                "grantRevision": 2,
+                "resultRevision": 11
+              },
+              {
+                "assignmentId": "mock-upstream-files",
+                "grantRevision": 2,
+                "resultRevision": 11,
+                "checkpointSha": "0123456789abcdef0123456789abcdef01234567"
+              }
+            ]
+          },
+          "key": "mock-command-2"
+        },
+        {
+          "name": "grant",
+          "body": {
+            "projectPath": "/mock/project",
+            "coordinatorId": "mock-coord",
+            "recipientId": "mock-worker",
+            "authorizationSource": {
+              "conversationId": "mock-coord",
+              "turnId": "mock-human-turn",
+              "projectionRevision": 7
+            },
+            "brief": "核验范围内任务；不自动发布",
+            "model": "mock.not-callable",
+            "budget": {
+              "maxTokens": 100,
+              "maxModelRequests": 1,
+              "deadline": 1791646195.488
+            },
+            "profile": {
+              "mode": "files",
+              "readPaths": [
+                "src"
+              ],
+              "writePaths": [
+                "src"
+              ],
+              "maxToolCalls": 8,
+              "tools": [
+                "read_files",
+                "edit_file"
+              ]
+            },
+            "dependencies": [
+              {
+                "assignmentId": "mock-upstream-consult",
+                "grantRevision": 2,
+                "resultRevision": 11
+              },
+              {
+                "assignmentId": "mock-upstream-files",
+                "grantRevision": 2,
+                "resultRevision": 11,
+                "checkpointSha": "0123456789abcdef0123456789abcdef01234567"
+              }
+            ]
+          },
+          "key": "mock-command-2"
+        },
+        {
+          "name": "review",
+          "body": {
+            "projectPath": "/mock/project",
+            "assignmentId": "mock-completed",
+            "expectedRevision": 2,
+            "resultRevision": 11,
+            "decision": "accept",
+            "note": ""
+          }
+        },
+        {
+          "name": "publish",
+          "body": {
+            "projectPath": "/mock/project",
+            "assignmentId": "mock-completed",
+            "expectedRevision": 2,
+            "resultRevision": 11,
+            "expectedCheckpointSha": "mock-checkpoint"
+          }
+        },
+        {
+          "name": "review",
+          "body": {
+            "projectPath": "/mock/project",
+            "assignmentId": "mock-rework",
+            "expectedRevision": 2,
+            "resultRevision": 11,
+            "decision": "rework",
+            "note": ""
+          }
+        },
+        {
+          "name": "grant",
+          "body": {
+            "projectPath": "/mock/project",
+            "coordinatorId": "mock-coord",
+            "recipientId": "mock-worker",
+            "authorizationSource": {
+              "conversationId": "mock-coord",
+              "turnId": "mock-human-turn",
+              "projectionRevision": 7
+            },
+            "brief": "核验范围内任务；不自动发布",
+            "model": "mock.not-callable",
+            "budget": {
+              "maxTokens": 100,
+              "maxModelRequests": 1,
+              "deadline": 1791646196.355
+            },
+            "profile": {
+              "mode": "files",
+              "readPaths": [
+                "src"
+              ],
+              "writePaths": [
+                "src"
+              ],
+              "maxToolCalls": 8,
+              "tools": [
+                "read_files",
+                "edit_file"
+              ]
+            },
+            "reworkOf": {
+              "assignmentId": "mock-rework",
+              "grantRevision": 2,
+              "resultRevision": 11
+            }
+          },
+          "key": "mock-command-3"
+        }
+      ],
+      "geometry": {
+        "client": 351,
+        "scroll": 351
+      },
+      "finalGeometry": {
+        "client": 351,
+        "scroll": 351
+      },
+      "focusRestored": true,
+      "pageErrors": []
+    },
+    {
+      "width": 390,
+      "theme": "dark",
+      "noAutoGrant": true,
+      "freshConsent": true,
+      "scopeFence": true,
+      "exactUncertainRetryAfterReopen": true,
+      "explicitDependencyPins": [
+        {
+          "assignmentId": "mock-upstream-consult",
+          "grantRevision": 2,
+          "resultRevision": 11
+        },
+        {
+          "assignmentId": "mock-upstream-files",
+          "grantRevision": 2,
+          "resultRevision": 11,
+          "checkpointSha": "0123456789abcdef0123456789abcdef01234567"
+        }
+      ],
+      "dependencySelectionNoPost": true,
+      "dependencyConsentReset": true,
+      "backendMockWaitingToStale": true,
+      "stalePinsPreserved": true,
+      "dependencyRetryFrozen": true,
+      "reviewNotPublish": true,
+      "reworkDraftNoPost": true,
+      "freshReworkLineage": true,
+      "canonicalDelivery": false,
+      "mockCalls": [
+        {
+          "name": "grant",
+          "body": {
+            "projectPath": "/mock/project",
+            "coordinatorId": "mock-coord",
+            "recipientId": "mock-worker",
+            "authorizationSource": {
+              "conversationId": "mock-coord",
+              "turnId": "mock-human-turn",
+              "projectionRevision": 7
+            },
+            "brief": "核验范围内任务；不自动发布",
+            "model": "mock.not-callable",
+            "budget": {
+              "maxTokens": 100,
+              "maxModelRequests": 1,
+              "deadline": 1791646197.638
+            },
+            "dependencies": [
+              {
+                "assignmentId": "mock-upstream-consult",
+                "grantRevision": 2,
+                "resultRevision": 11
+              },
+              {
+                "assignmentId": "mock-upstream-files",
+                "grantRevision": 2,
+                "resultRevision": 11,
+                "checkpointSha": "0123456789abcdef0123456789abcdef01234567"
+              }
+            ]
+          },
+          "key": "mock-command-1"
+        },
+        {
+          "name": "grant",
+          "body": {
+            "projectPath": "/mock/project",
+            "coordinatorId": "mock-coord",
+            "recipientId": "mock-worker",
+            "authorizationSource": {
+              "conversationId": "mock-coord",
+              "turnId": "mock-human-turn",
+              "projectionRevision": 7
+            },
+            "brief": "核验范围内任务；不自动发布",
+            "model": "mock.not-callable",
+            "budget": {
+              "maxTokens": 100,
+              "maxModelRequests": 1,
+              "deadline": 1791646198.122
+            },
+            "profile": {
+              "mode": "files",
+              "readPaths": [
+                "src"
+              ],
+              "writePaths": [
+                "src"
+              ],
+              "maxToolCalls": 8,
+              "tools": [
+                "read_files",
+                "edit_file"
+              ]
+            },
+            "dependencies": [
+              {
+                "assignmentId": "mock-upstream-consult",
+                "grantRevision": 2,
+                "resultRevision": 11
+              },
+              {
+                "assignmentId": "mock-upstream-files",
+                "grantRevision": 2,
+                "resultRevision": 11,
+                "checkpointSha": "0123456789abcdef0123456789abcdef01234567"
+              }
+            ]
+          },
+          "key": "mock-command-2"
+        },
+        {
+          "name": "grant",
+          "body": {
+            "projectPath": "/mock/project",
+            "coordinatorId": "mock-coord",
+            "recipientId": "mock-worker",
+            "authorizationSource": {
+              "conversationId": "mock-coord",
+              "turnId": "mock-human-turn",
+              "projectionRevision": 7
+            },
+            "brief": "核验范围内任务；不自动发布",
+            "model": "mock.not-callable",
+            "budget": {
+              "maxTokens": 100,
+              "maxModelRequests": 1,
+              "deadline": 1791646198.122
+            },
+            "profile": {
+              "mode": "files",
+              "readPaths": [
+                "src"
+              ],
+              "writePaths": [
+                "src"
+              ],
+              "maxToolCalls": 8,
+              "tools": [
+                "read_files",
+                "edit_file"
+              ]
+            },
+            "dependencies": [
+              {
+                "assignmentId": "mock-upstream-consult",
+                "grantRevision": 2,
+                "resultRevision": 11
+              },
+              {
+                "assignmentId": "mock-upstream-files",
+                "grantRevision": 2,
+                "resultRevision": 11,
+                "checkpointSha": "0123456789abcdef0123456789abcdef01234567"
+              }
+            ]
+          },
+          "key": "mock-command-2"
+        },
+        {
+          "name": "review",
+          "body": {
+            "projectPath": "/mock/project",
+            "assignmentId": "mock-completed",
+            "expectedRevision": 2,
+            "resultRevision": 11,
+            "decision": "accept",
+            "note": ""
+          }
+        },
+        {
+          "name": "publish",
+          "body": {
+            "projectPath": "/mock/project",
+            "assignmentId": "mock-completed",
+            "expectedRevision": 2,
+            "resultRevision": 11,
+            "expectedCheckpointSha": "mock-checkpoint"
+          }
+        },
+        {
+          "name": "review",
+          "body": {
+            "projectPath": "/mock/project",
+            "assignmentId": "mock-rework",
+            "expectedRevision": 2,
+            "resultRevision": 11,
+            "decision": "rework",
+            "note": ""
+          }
+        },
+        {
+          "name": "grant",
+          "body": {
+            "projectPath": "/mock/project",
+            "coordinatorId": "mock-coord",
+            "recipientId": "mock-worker",
+            "authorizationSource": {
+              "conversationId": "mock-coord",
+              "turnId": "mock-human-turn",
+              "projectionRevision": 7
+            },
+            "brief": "核验范围内任务；不自动发布",
+            "model": "mock.not-callable",
+            "budget": {
+              "maxTokens": 100,
+              "maxModelRequests": 1,
+              "deadline": 1791646198.989
+            },
+            "profile": {
+              "mode": "files",
+              "readPaths": [
+                "src"
+              ],
+              "writePaths": [
+                "src"
+              ],
+              "maxToolCalls": 8,
+              "tools": [
+                "read_files",
+                "edit_file"
+              ]
+            },
+            "reworkOf": {
+              "assignmentId": "mock-rework",
+              "grantRevision": 2,
+              "resultRevision": 11
+            }
+          },
+          "key": "mock-command-3"
+        }
+      ],
+      "geometry": {
+        "client": 351,
+        "scroll": 351
+      },
+      "finalGeometry": {
+        "client": 351,
+        "scroll": 351
+      },
+      "focusRestored": true,
+      "pageErrors": []
+    },
+    {
+      "width": 390,
+      "theme": "light",
+      "noAutoGrant": true,
+      "freshConsent": true,
+      "scopeFence": true,
+      "exactUncertainRetryAfterReopen": true,
+      "explicitDependencyPins": [
+        {
+          "assignmentId": "mock-upstream-consult",
+          "grantRevision": 2,
+          "resultRevision": 11
+        },
+        {
+          "assignmentId": "mock-upstream-files",
+          "grantRevision": 2,
+          "resultRevision": 11,
+          "checkpointSha": "0123456789abcdef0123456789abcdef01234567"
+        }
+      ],
+      "dependencySelectionNoPost": true,
+      "dependencyConsentReset": true,
+      "backendMockWaitingToStale": true,
+      "stalePinsPreserved": true,
+      "dependencyRetryFrozen": true,
+      "reviewNotPublish": true,
+      "reworkDraftNoPost": true,
+      "freshReworkLineage": true,
+      "canonicalDelivery": false,
+      "mockCalls": [
+        {
+          "name": "grant",
+          "body": {
+            "projectPath": "/mock/project",
+            "coordinatorId": "mock-coord",
+            "recipientId": "mock-worker",
+            "authorizationSource": {
+              "conversationId": "mock-coord",
+              "turnId": "mock-human-turn",
+              "projectionRevision": 7
+            },
+            "brief": "核验范围内任务；不自动发布",
+            "model": "mock.not-callable",
+            "budget": {
+              "maxTokens": 100,
+              "maxModelRequests": 1,
+              "deadline": 1791646200.239
+            },
+            "dependencies": [
+              {
+                "assignmentId": "mock-upstream-consult",
+                "grantRevision": 2,
+                "resultRevision": 11
+              },
+              {
+                "assignmentId": "mock-upstream-files",
+                "grantRevision": 2,
+                "resultRevision": 11,
+                "checkpointSha": "0123456789abcdef0123456789abcdef01234567"
+              }
+            ]
+          },
+          "key": "mock-command-1"
+        },
+        {
+          "name": "grant",
+          "body": {
+            "projectPath": "/mock/project",
+            "coordinatorId": "mock-coord",
+            "recipientId": "mock-worker",
+            "authorizationSource": {
+              "conversationId": "mock-coord",
+              "turnId": "mock-human-turn",
+              "projectionRevision": 7
+            },
+            "brief": "核验范围内任务；不自动发布",
+            "model": "mock.not-callable",
+            "budget": {
+              "maxTokens": 100,
+              "maxModelRequests": 1,
+              "deadline": 1791646200.738
+            },
+            "profile": {
+              "mode": "files",
+              "readPaths": [
+                "src"
+              ],
+              "writePaths": [
+                "src"
+              ],
+              "maxToolCalls": 8,
+              "tools": [
+                "read_files",
+                "edit_file"
+              ]
+            },
+            "dependencies": [
+              {
+                "assignmentId": "mock-upstream-consult",
+                "grantRevision": 2,
+                "resultRevision": 11
+              },
+              {
+                "assignmentId": "mock-upstream-files",
+                "grantRevision": 2,
+                "resultRevision": 11,
+                "checkpointSha": "0123456789abcdef0123456789abcdef01234567"
+              }
+            ]
+          },
+          "key": "mock-command-2"
+        },
+        {
+          "name": "grant",
+          "body": {
+            "projectPath": "/mock/project",
+            "coordinatorId": "mock-coord",
+            "recipientId": "mock-worker",
+            "authorizationSource": {
+              "conversationId": "mock-coord",
+              "turnId": "mock-human-turn",
+              "projectionRevision": 7
+            },
+            "brief": "核验范围内任务；不自动发布",
+            "model": "mock.not-callable",
+            "budget": {
+              "maxTokens": 100,
+              "maxModelRequests": 1,
+              "deadline": 1791646200.738
+            },
+            "profile": {
+              "mode": "files",
+              "readPaths": [
+                "src"
+              ],
+              "writePaths": [
+                "src"
+              ],
+              "maxToolCalls": 8,
+              "tools": [
+                "read_files",
+                "edit_file"
+              ]
+            },
+            "dependencies": [
+              {
+                "assignmentId": "mock-upstream-consult",
+                "grantRevision": 2,
+                "resultRevision": 11
+              },
+              {
+                "assignmentId": "mock-upstream-files",
+                "grantRevision": 2,
+                "resultRevision": 11,
+                "checkpointSha": "0123456789abcdef0123456789abcdef01234567"
+              }
+            ]
+          },
+          "key": "mock-command-2"
+        },
+        {
+          "name": "review",
+          "body": {
+            "projectPath": "/mock/project",
+            "assignmentId": "mock-completed",
+            "expectedRevision": 2,
+            "resultRevision": 11,
+            "decision": "accept",
+            "note": ""
+          }
+        },
+        {
+          "name": "publish",
+          "body": {
+            "projectPath": "/mock/project",
+            "assignmentId": "mock-completed",
+            "expectedRevision": 2,
+            "resultRevision": 11,
+            "expectedCheckpointSha": "mock-checkpoint"
+          }
+        },
+        {
+          "name": "review",
+          "body": {
+            "projectPath": "/mock/project",
+            "assignmentId": "mock-rework",
+            "expectedRevision": 2,
+            "resultRevision": 11,
+            "decision": "rework",
+            "note": ""
+          }
+        },
+        {
+          "name": "grant",
+          "body": {
+            "projectPath": "/mock/project",
+            "coordinatorId": "mock-coord",
+            "recipientId": "mock-worker",
+            "authorizationSource": {
+              "conversationId": "mock-coord",
+              "turnId": "mock-human-turn",
+              "projectionRevision": 7
+            },
+            "brief": "核验范围内任务；不自动发布",
+            "model": "mock.not-callable",
+            "budget": {
+              "maxTokens": 100,
+              "maxModelRequests": 1,
+              "deadline": 1791646201.606
+            },
+            "profile": {
+              "mode": "files",
+              "readPaths": [
+                "src"
+              ],
+              "writePaths": [
+                "src"
+              ],
+              "maxToolCalls": 8,
+              "tools": [
+                "read_files",
+                "edit_file"
+              ]
+            },
+            "reworkOf": {
+              "assignmentId": "mock-rework",
+              "grantRevision": 2,
+              "resultRevision": 11
+            }
+          },
+          "key": "mock-command-3"
+        }
+      ],
+      "geometry": {
+        "client": 351,
+        "scroll": 351
+      },
+      "finalGeometry": {
+        "client": 351,
+        "scroll": 351
+      },
+      "focusRestored": true,
+      "pageErrors": []
+    },
+    {
+      "width": 320,
+      "theme": "tofu",
+      "noAutoGrant": true,
+      "freshConsent": true,
+      "scopeFence": true,
+      "exactUncertainRetryAfterReopen": true,
+      "explicitDependencyPins": [
+        {
+          "assignmentId": "mock-upstream-consult",
+          "grantRevision": 2,
+          "resultRevision": 11
+        },
+        {
+          "assignmentId": "mock-upstream-files",
+          "grantRevision": 2,
+          "resultRevision": 11,
+          "checkpointSha": "0123456789abcdef0123456789abcdef01234567"
+        }
+      ],
+      "dependencySelectionNoPost": true,
+      "dependencyConsentReset": true,
+      "backendMockWaitingToStale": true,
+      "stalePinsPreserved": true,
+      "dependencyRetryFrozen": true,
+      "reviewNotPublish": true,
+      "reworkDraftNoPost": true,
+      "freshReworkLineage": true,
+      "canonicalDelivery": false,
+      "mockCalls": [
+        {
+          "name": "grant",
+          "body": {
+            "projectPath": "/mock/project",
+            "coordinatorId": "mock-coord",
+            "recipientId": "mock-worker",
+            "authorizationSource": {
+              "conversationId": "mock-coord",
+              "turnId": "mock-human-turn",
+              "projectionRevision": 7
+            },
+            "brief": "核验范围内任务；不自动发布",
+            "model": "mock.not-callable",
+            "budget": {
+              "maxTokens": 100,
+              "maxModelRequests": 1,
+              "deadline": 1791646202.905
+            },
+            "dependencies": [
+              {
+                "assignmentId": "mock-upstream-consult",
+                "grantRevision": 2,
+                "resultRevision": 11
+              },
+              {
+                "assignmentId": "mock-upstream-files",
+                "grantRevision": 2,
+                "resultRevision": 11,
+                "checkpointSha": "0123456789abcdef0123456789abcdef01234567"
+              }
+            ]
+          },
+          "key": "mock-command-1"
+        },
+        {
+          "name": "grant",
+          "body": {
+            "projectPath": "/mock/project",
+            "coordinatorId": "mock-coord",
+            "recipientId": "mock-worker",
+            "authorizationSource": {
+              "conversationId": "mock-coord",
+              "turnId": "mock-human-turn",
+              "projectionRevision": 7
+            },
+            "brief": "核验范围内任务；不自动发布",
+            "model": "mock.not-callable",
+            "budget": {
+              "maxTokens": 100,
+              "maxModelRequests": 1,
+              "deadline": 1791646203.405
+            },
+            "profile": {
+              "mode": "files",
+              "readPaths": [
+                "src"
+              ],
+              "writePaths": [
+                "src"
+              ],
+              "maxToolCalls": 8,
+              "tools": [
+                "read_files",
+                "edit_file"
+              ]
+            },
+            "dependencies": [
+              {
+                "assignmentId": "mock-upstream-consult",
+                "grantRevision": 2,
+                "resultRevision": 11
+              },
+              {
+                "assignmentId": "mock-upstream-files",
+                "grantRevision": 2,
+                "resultRevision": 11,
+                "checkpointSha": "0123456789abcdef0123456789abcdef01234567"
+              }
+            ]
+          },
+          "key": "mock-command-2"
+        },
+        {
+          "name": "grant",
+          "body": {
+            "projectPath": "/mock/project",
+            "coordinatorId": "mock-coord",
+            "recipientId": "mock-worker",
+            "authorizationSource": {
+              "conversationId": "mock-coord",
+              "turnId": "mock-human-turn",
+              "projectionRevision": 7
+            },
+            "brief": "核验范围内任务；不自动发布",
+            "model": "mock.not-callable",
+            "budget": {
+              "maxTokens": 100,
+              "maxModelRequests": 1,
+              "deadline": 1791646203.405
+            },
+            "profile": {
+              "mode": "files",
+              "readPaths": [
+                "src"
+              ],
+              "writePaths": [
+                "src"
+              ],
+              "maxToolCalls": 8,
+              "tools": [
+                "read_files",
+                "edit_file"
+              ]
+            },
+            "dependencies": [
+              {
+                "assignmentId": "mock-upstream-consult",
+                "grantRevision": 2,
+                "resultRevision": 11
+              },
+              {
+                "assignmentId": "mock-upstream-files",
+                "grantRevision": 2,
+                "resultRevision": 11,
+                "checkpointSha": "0123456789abcdef0123456789abcdef01234567"
+              }
+            ]
+          },
+          "key": "mock-command-2"
+        },
+        {
+          "name": "review",
+          "body": {
+            "projectPath": "/mock/project",
+            "assignmentId": "mock-completed",
+            "expectedRevision": 2,
+            "resultRevision": 11,
+            "decision": "accept",
+            "note": ""
+          }
+        },
+        {
+          "name": "publish",
+          "body": {
+            "projectPath": "/mock/project",
+            "assignmentId": "mock-completed",
+            "expectedRevision": 2,
+            "resultRevision": 11,
+            "expectedCheckpointSha": "mock-checkpoint"
+          }
+        },
+        {
+          "name": "review",
+          "body": {
+            "projectPath": "/mock/project",
+            "assignmentId": "mock-rework",
+            "expectedRevision": 2,
+            "resultRevision": 11,
+            "decision": "rework",
+            "note": ""
+          }
+        },
+        {
+          "name": "grant",
+          "body": {
+            "projectPath": "/mock/project",
+            "coordinatorId": "mock-coord",
+            "recipientId": "mock-worker",
+            "authorizationSource": {
+              "conversationId": "mock-coord",
+              "turnId": "mock-human-turn",
+              "projectionRevision": 7
+            },
+            "brief": "核验范围内任务；不自动发布",
+            "model": "mock.not-callable",
+            "budget": {
+              "maxTokens": 100,
+              "maxModelRequests": 1,
+              "deadline": 1791646204.271
+            },
+            "profile": {
+              "mode": "files",
+              "readPaths": [
+                "src"
+              ],
+              "writePaths": [
+                "src"
+              ],
+              "maxToolCalls": 8,
+              "tools": [
+                "read_files",
+                "edit_file"
+              ]
+            },
+            "reworkOf": {
+              "assignmentId": "mock-rework",
+              "grantRevision": 2,
+              "resultRevision": 11
+            }
+          },
+          "key": "mock-command-3"
+        }
+      ],
+      "geometry": {
+        "client": 281,
+        "scroll": 281
+      },
+      "finalGeometry": {
+        "client": 281,
+        "scroll": 281
+      },
+      "focusRestored": true,
+      "pageErrors": []
+    },
+    {
+      "width": 320,
+      "theme": "dark",
+      "noAutoGrant": true,
+      "freshConsent": true,
+      "scopeFence": true,
+      "exactUncertainRetryAfterReopen": true,
+      "explicitDependencyPins": [
+        {
+          "assignmentId": "mock-upstream-consult",
+          "grantRevision": 2,
+          "resultRevision": 11
+        },
+        {
+          "assignmentId": "mock-upstream-files",
+          "grantRevision": 2,
+          "resultRevision": 11,
+          "checkpointSha": "0123456789abcdef0123456789abcdef01234567"
+        }
+      ],
+      "dependencySelectionNoPost": true,
+      "dependencyConsentReset": true,
+      "backendMockWaitingToStale": true,
+      "stalePinsPreserved": true,
+      "dependencyRetryFrozen": true,
+      "reviewNotPublish": true,
+      "reworkDraftNoPost": true,
+      "freshReworkLineage": true,
+      "canonicalDelivery": false,
+      "mockCalls": [
+        {
+          "name": "grant",
+          "body": {
+            "projectPath": "/mock/project",
+            "coordinatorId": "mock-coord",
+            "recipientId": "mock-worker",
+            "authorizationSource": {
+              "conversationId": "mock-coord",
+              "turnId": "mock-human-turn",
+              "projectionRevision": 7
+            },
+            "brief": "核验范围内任务；不自动发布",
+            "model": "mock.not-callable",
+            "budget": {
+              "maxTokens": 100,
+              "maxModelRequests": 1,
+              "deadline": 1791646205.505
+            },
+            "dependencies": [
+              {
+                "assignmentId": "mock-upstream-consult",
+                "grantRevision": 2,
+                "resultRevision": 11
+              },
+              {
+                "assignmentId": "mock-upstream-files",
+                "grantRevision": 2,
+                "resultRevision": 11,
+                "checkpointSha": "0123456789abcdef0123456789abcdef01234567"
+              }
+            ]
+          },
+          "key": "mock-command-1"
+        },
+        {
+          "name": "grant",
+          "body": {
+            "projectPath": "/mock/project",
+            "coordinatorId": "mock-coord",
+            "recipientId": "mock-worker",
+            "authorizationSource": {
+              "conversationId": "mock-coord",
+              "turnId": "mock-human-turn",
+              "projectionRevision": 7
+            },
+            "brief": "核验范围内任务；不自动发布",
+            "model": "mock.not-callable",
+            "budget": {
+              "maxTokens": 100,
+              "maxModelRequests": 1,
+              "deadline": 1791646206.005
+            },
+            "profile": {
+              "mode": "files",
+              "readPaths": [
+                "src"
+              ],
+              "writePaths": [
+                "src"
+              ],
+              "maxToolCalls": 8,
+              "tools": [
+                "read_files",
+                "edit_file"
+              ]
+            },
+            "dependencies": [
+              {
+                "assignmentId": "mock-upstream-consult",
+                "grantRevision": 2,
+                "resultRevision": 11
+              },
+              {
+                "assignmentId": "mock-upstream-files",
+                "grantRevision": 2,
+                "resultRevision": 11,
+                "checkpointSha": "0123456789abcdef0123456789abcdef01234567"
+              }
+            ]
+          },
+          "key": "mock-command-2"
+        },
+        {
+          "name": "grant",
+          "body": {
+            "projectPath": "/mock/project",
+            "coordinatorId": "mock-coord",
+            "recipientId": "mock-worker",
+            "authorizationSource": {
+              "conversationId": "mock-coord",
+              "turnId": "mock-human-turn",
+              "projectionRevision": 7
+            },
+            "brief": "核验范围内任务；不自动发布",
+            "model": "mock.not-callable",
+            "budget": {
+              "maxTokens": 100,
+              "maxModelRequests": 1,
+              "deadline": 1791646206.005
+            },
+            "profile": {
+              "mode": "files",
+              "readPaths": [
+                "src"
+              ],
+              "writePaths": [
+                "src"
+              ],
+              "maxToolCalls": 8,
+              "tools": [
+                "read_files",
+                "edit_file"
+              ]
+            },
+            "dependencies": [
+              {
+                "assignmentId": "mock-upstream-consult",
+                "grantRevision": 2,
+                "resultRevision": 11
+              },
+              {
+                "assignmentId": "mock-upstream-files",
+                "grantRevision": 2,
+                "resultRevision": 11,
+                "checkpointSha": "0123456789abcdef0123456789abcdef01234567"
+              }
+            ]
+          },
+          "key": "mock-command-2"
+        },
+        {
+          "name": "review",
+          "body": {
+            "projectPath": "/mock/project",
+            "assignmentId": "mock-completed",
+            "expectedRevision": 2,
+            "resultRevision": 11,
+            "decision": "accept",
+            "note": ""
+          }
+        },
+        {
+          "name": "publish",
+          "body": {
+            "projectPath": "/mock/project",
+            "assignmentId": "mock-completed",
+            "expectedRevision": 2,
+            "resultRevision": 11,
+            "expectedCheckpointSha": "mock-checkpoint"
+          }
+        },
+        {
+          "name": "review",
+          "body": {
+            "projectPath": "/mock/project",
+            "assignmentId": "mock-rework",
+            "expectedRevision": 2,
+            "resultRevision": 11,
+            "decision": "rework",
+            "note": ""
+          }
+        },
+        {
+          "name": "grant",
+          "body": {
+            "projectPath": "/mock/project",
+            "coordinatorId": "mock-coord",
+            "recipientId": "mock-worker",
+            "authorizationSource": {
+              "conversationId": "mock-coord",
+              "turnId": "mock-human-turn",
+              "projectionRevision": 7
+            },
+            "brief": "核验范围内任务；不自动发布",
+            "model": "mock.not-callable",
+            "budget": {
+              "maxTokens": 100,
+              "maxModelRequests": 1,
+              "deadline": 1791646206.888
+            },
+            "profile": {
+              "mode": "files",
+              "readPaths": [
+                "src"
+              ],
+              "writePaths": [
+                "src"
+              ],
+              "maxToolCalls": 8,
+              "tools": [
+                "read_files",
+                "edit_file"
+              ]
+            },
+            "reworkOf": {
+              "assignmentId": "mock-rework",
+              "grantRevision": 2,
+              "resultRevision": 11
+            }
+          },
+          "key": "mock-command-3"
+        }
+      ],
+      "geometry": {
+        "client": 281,
+        "scroll": 281
+      },
+      "finalGeometry": {
+        "client": 281,
+        "scroll": 281
+      },
+      "focusRestored": true,
+      "pageErrors": []
+    },
+    {
+      "width": 320,
+      "theme": "light",
+      "noAutoGrant": true,
+      "freshConsent": true,
+      "scopeFence": true,
+      "exactUncertainRetryAfterReopen": true,
+      "explicitDependencyPins": [
+        {
+          "assignmentId": "mock-upstream-consult",
+          "grantRevision": 2,
+          "resultRevision": 11
+        },
+        {
+          "assignmentId": "mock-upstream-files",
+          "grantRevision": 2,
+          "resultRevision": 11,
+          "checkpointSha": "0123456789abcdef0123456789abcdef01234567"
+        }
+      ],
+      "dependencySelectionNoPost": true,
+      "dependencyConsentReset": true,
+      "backendMockWaitingToStale": true,
+      "stalePinsPreserved": true,
+      "dependencyRetryFrozen": true,
+      "reviewNotPublish": true,
+      "reworkDraftNoPost": true,
+      "freshReworkLineage": true,
+      "canonicalDelivery": false,
+      "mockCalls": [
+        {
+          "name": "grant",
+          "body": {
+            "projectPath": "/mock/project",
+            "coordinatorId": "mock-coord",
+            "recipientId": "mock-worker",
+            "authorizationSource": {
+              "conversationId": "mock-coord",
+              "turnId": "mock-human-turn",
+              "projectionRevision": 7
+            },
+            "brief": "核验范围内任务；不自动发布",
+            "model": "mock.not-callable",
+            "budget": {
+              "maxTokens": 100,
+              "maxModelRequests": 1,
+              "deadline": 1791646208.121
+            },
+            "dependencies": [
+              {
+                "assignmentId": "mock-upstream-consult",
+                "grantRevision": 2,
+                "resultRevision": 11
+              },
+              {
+                "assignmentId": "mock-upstream-files",
+                "grantRevision": 2,
+                "resultRevision": 11,
+                "checkpointSha": "0123456789abcdef0123456789abcdef01234567"
+              }
+            ]
+          },
+          "key": "mock-command-1"
+        },
+        {
+          "name": "grant",
+          "body": {
+            "projectPath": "/mock/project",
+            "coordinatorId": "mock-coord",
+            "recipientId": "mock-worker",
+            "authorizationSource": {
+              "conversationId": "mock-coord",
+              "turnId": "mock-human-turn",
+              "projectionRevision": 7
+            },
+            "brief": "核验范围内任务；不自动发布",
+            "model": "mock.not-callable",
+            "budget": {
+              "maxTokens": 100,
+              "maxModelRequests": 1,
+              "deadline": 1791646208.604
+            },
+            "profile": {
+              "mode": "files",
+              "readPaths": [
+                "src"
+              ],
+              "writePaths": [
+                "src"
+              ],
+              "maxToolCalls": 8,
+              "tools": [
+                "read_files",
+                "edit_file"
+              ]
+            },
+            "dependencies": [
+              {
+                "assignmentId": "mock-upstream-consult",
+                "grantRevision": 2,
+                "resultRevision": 11
+              },
+              {
+                "assignmentId": "mock-upstream-files",
+                "grantRevision": 2,
+                "resultRevision": 11,
+                "checkpointSha": "0123456789abcdef0123456789abcdef01234567"
+              }
+            ]
+          },
+          "key": "mock-command-2"
+        },
+        {
+          "name": "grant",
+          "body": {
+            "projectPath": "/mock/project",
+            "coordinatorId": "mock-coord",
+            "recipientId": "mock-worker",
+            "authorizationSource": {
+              "conversationId": "mock-coord",
+              "turnId": "mock-human-turn",
+              "projectionRevision": 7
+            },
+            "brief": "核验范围内任务；不自动发布",
+            "model": "mock.not-callable",
+            "budget": {
+              "maxTokens": 100,
+              "maxModelRequests": 1,
+              "deadline": 1791646208.604
+            },
+            "profile": {
+              "mode": "files",
+              "readPaths": [
+                "src"
+              ],
+              "writePaths": [
+                "src"
+              ],
+              "maxToolCalls": 8,
+              "tools": [
+                "read_files",
+                "edit_file"
+              ]
+            },
+            "dependencies": [
+              {
+                "assignmentId": "mock-upstream-consult",
+                "grantRevision": 2,
+                "resultRevision": 11
+              },
+              {
+                "assignmentId": "mock-upstream-files",
+                "grantRevision": 2,
+                "resultRevision": 11,
+                "checkpointSha": "0123456789abcdef0123456789abcdef01234567"
+              }
+            ]
+          },
+          "key": "mock-command-2"
+        },
+        {
+          "name": "review",
+          "body": {
+            "projectPath": "/mock/project",
+            "assignmentId": "mock-completed",
+            "expectedRevision": 2,
+            "resultRevision": 11,
+            "decision": "accept",
+            "note": ""
+          }
+        },
+        {
+          "name": "publish",
+          "body": {
+            "projectPath": "/mock/project",
+            "assignmentId": "mock-completed",
+            "expectedRevision": 2,
+            "resultRevision": 11,
+            "expectedCheckpointSha": "mock-checkpoint"
+          }
+        },
+        {
+          "name": "review",
+          "body": {
+            "projectPath": "/mock/project",
+            "assignmentId": "mock-rework",
+            "expectedRevision": 2,
+            "resultRevision": 11,
+            "decision": "rework",
+            "note": ""
+          }
+        },
+        {
+          "name": "grant",
+          "body": {
+            "projectPath": "/mock/project",
+            "coordinatorId": "mock-coord",
+            "recipientId": "mock-worker",
+            "authorizationSource": {
+              "conversationId": "mock-coord",
+              "turnId": "mock-human-turn",
+              "projectionRevision": 7
+            },
+            "brief": "核验范围内任务；不自动发布",
+            "model": "mock.not-callable",
+            "budget": {
+              "maxTokens": 100,
+              "maxModelRequests": 1,
+              "deadline": 1791646209.471
+            },
+            "profile": {
+              "mode": "files",
+              "readPaths": [
+                "src"
+              ],
+              "writePaths": [
+                "src"
+              ],
+              "maxToolCalls": 8,
+              "tools": [
+                "read_files",
+                "edit_file"
+              ]
+            },
+            "reworkOf": {
+              "assignmentId": "mock-rework",
+              "grantRevision": 2,
+              "resultRevision": 11
+            }
+          },
+          "key": "mock-command-3"
+        }
+      ],
+      "geometry": {
+        "client": 281,
+        "scroll": 281
+      },
+      "finalGeometry": {
+        "client": 281,
+        "scroll": 281
+      },
+      "focusRestored": true,
+      "pageErrors": []
+    }
+  ]
+}

@@ -429,12 +429,14 @@ def split_input_tokens(usage: Optional[dict]) -> tuple[int, int]:
     return uncached, total
 
 
-def observed_usage_totals(usage: Optional[dict]) -> tuple[int, bool]:
+def observed_usage_totals(usage: Optional[dict], *, require_valid_cache=False) -> tuple[int, bool]:
     """Reported total tokens and whether both provider counters are known.
 
     Missing/malformed counters remain unknown. Cache-only reports supply a
     lower bound; cache conventions come from split_input_tokens. No estimated
     or reserved token amount enters observed consumption.
+    Token totals can be complete despite invalid optional OpenAI cache fields;
+    financial callers set require_valid_cache to require those fields as well.
     """
     if not isinstance(usage, dict):
         return 0, False
@@ -477,8 +479,56 @@ def observed_usage_totals(usage: Optional[dict]) -> tuple[int, bool]:
     cache_fallback = normalized['input'] == 0 and bool(normalized['cache_read'] or normalized['cache_write'])
     caches_needed = usage_cache_convention(clean) == 'anthropic'
     complete = (known['input'] and known['output'] and not cache_fallback
-                and (cache_valid or not caches_needed))
+                and (cache_valid or (not caches_needed and not require_valid_cache)))
     return max(0, total_input) + max(0, output), complete
+
+
+def validate_reported_usage_counters(usage: dict) -> None:
+    """Require explicit input/output counters for exact evidence accounting.
+
+    Display normalization remains permissive. Benchmark/settlement evidence
+    must distinguish absent counters from a provider-reported zero and must
+    not truncate fractional values or coerce strings and booleans. Aliases
+    and cache conventions remain owned by this module.
+    """
+    if not isinstance(usage, dict):
+        raise ValueError('provider usage must be an object')
+    for canonical, aliases in _USAGE_KEY_ALIASES.items():
+        fields = [(usage, key, key) for key in aliases if key in usage]
+        for parent, key in _USAGE_NESTED_ALIASES.get(canonical, ()):
+            details = usage.get(parent)
+            if details is None:
+                continue
+            if not isinstance(details, dict):
+                raise ValueError(f'provider usage.{parent} must be an object')
+            if key in details:
+                fields.append((details, key, f'{parent}.{key}'))
+        if canonical in ('input', 'output') and not fields:
+            raise ValueError(f'provider usage is missing {canonical} tokens')
+        for container, key, label in fields:
+            value = container[key]
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(
+                    f'provider usage.{label} must be a non-negative integer')
+    if 'total_tokens' in usage:
+        total = usage['total_tokens']
+        if isinstance(total, bool) or not isinstance(total, int) or total < 0:
+            raise ValueError('provider usage.total_tokens must be a non-negative integer')
+
+
+def billable_usage_evidence(usage: dict) -> dict:
+    """Retain only canonical cost inputs, preserving absent/malformed counters.
+
+    Request invoices must not archive arbitrary provider metadata or normalize
+    missing counters into zero. Alias/convention authority remains in this module.
+    """
+    result = {key: usage[key] for aliases in _USAGE_KEY_ALIASES.values()
+              for key in aliases if key in usage}
+    for aliases in _USAGE_NESTED_ALIASES.values():
+        for parent, key in aliases:
+            if isinstance(usage.get(parent), dict) and key in usage[parent]:
+                result.setdefault(parent, {})[key] = usage[parent][key]
+    return result
 
 
 def synthesize_usage(*, input_tokens: int = 0, output_tokens: int = 0,
@@ -570,6 +620,8 @@ def compute_cost(
     provider_id: Optional[str] = None,
     *,
     at: Optional[float] = None,
+
+    pricing_override: Optional[dict] = None,
 ) -> Optional[dict]:
     """Compute USD + CNY cost from a usage dict.
 
@@ -603,12 +655,12 @@ def compute_cost(
 
     # One resolver call selects ONE context tier from the COMPLETE prompt.
     # Input/output/cache read/cache write all consume the resulting rates.
-    mp = lookup_pricing(
+    mp = pricing_override if pricing_override is not None else (lookup_pricing(
         model_id,
         provider_id,
         at=at,
         prompt_tokens=total_input,
-    ) if model_id else None
+    ) if model_id else None)
     peak_mul = None
     if mp:
         base_in = float(mp.get('input') or 0)
@@ -707,6 +759,7 @@ def compute_api_rounds_cost(
     *,
     fallback_model_id: str = '',
     fallback_provider_id: Optional[str] = None,
+    use_frozen_costs: bool = False,
 ) -> Optional[dict]:
     """Sum an API-round ledger without flattening model/pricing identity.
 
@@ -731,8 +784,15 @@ def compute_api_rounds_cost(
         provider = (round_entry.get('provider_id')
                     or round_entry.get('providerId')
                     or fallback_provider_id)
-        cost = compute_cost(
-            usage, model_id=model, provider_id=provider)
+        if use_frozen_costs:
+            if 'cost' not in round_entry:
+                raise ValueError('frozen cost aggregation requires every round snapshot')
+            cost = round_entry.get('cost')
+            if cost is not None and not isinstance(cost, dict):
+                raise ValueError('frozen round cost must be a canonical mapping')
+        else:
+            cost = compute_cost(
+                usage, model_id=model, provider_id=provider)
         if not cost:
             continue
         costs.append(cost)

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Unit tests for lib.agent_loop — the shared AbortSignal + run_agent_loop seam.
+"""Unit tests for lib.agent_loop.agent_loop — the shared AbortSignal + run_agent_loop seam.
 
 Covers the abstraction directly (no paper engine): the three ``AbortSignal``
 wrappers over the project's three abort mechanisms, and the loop's three abort
@@ -26,7 +26,7 @@ def _ok(msg): print(' ', _color('✓', '32'), msg)
 # ── AbortSignal wrappers ────────────────────────────────────────────
 
 def test_abortsignal_from_event():
-    from lib.agent_loop import AbortSignal
+    from lib.agent_loop.agent_loop import AbortSignal
     ev = threading.Event()
     sig = AbortSignal.from_event(ev)
     assert sig.aborted is False
@@ -37,7 +37,7 @@ def test_abortsignal_from_event():
 
 
 def test_abortsignal_from_task_flag():
-    from lib.agent_loop import AbortSignal
+    from lib.agent_loop.agent_loop import AbortSignal
     task = {}
     sig = AbortSignal.from_task_flag(task)
     assert sig.aborted is False
@@ -50,7 +50,7 @@ def test_abortsignal_from_task_flag():
 
 
 def test_abortsignal_from_callback_and_never():
-    from lib.agent_loop import AbortSignal
+    from lib.agent_loop.agent_loop import AbortSignal
     flag = {'v': False}
     sig = AbortSignal.from_callback(lambda: flag['v'])
     assert sig.aborted is False
@@ -63,7 +63,7 @@ def test_abortsignal_from_callback_and_never():
 
 
 def test_abortsignal_broken_predicate_is_safe():
-    from lib.agent_loop import AbortSignal
+    from lib.agent_loop.agent_loop import AbortSignal
     def _boom():
         raise RuntimeError('bad predicate')
     assert AbortSignal(_boom).aborted is False  # logged, not raised
@@ -77,7 +77,7 @@ def _mk_msg(tool_calls=None):
 
 
 def test_loop_completes_when_no_tool_calls():
-    from lib.agent_loop import AbortSignal, run_agent_loop
+    from lib.agent_loop.agent_loop import AbortSignal, run_agent_loop
     calls = {'dispatch': 0, 'tools': 0}
 
     def dispatch(rnd, tools):
@@ -95,7 +95,7 @@ def test_loop_completes_when_no_tool_calls():
 def test_removed_tool_round_limit_arguments_are_rejected():
     """The retired numeric/terminal-round knobs cannot silently return."""
     import inspect
-    from lib.agent_loop import AbortSignal, run_agent_loop
+    from lib.agent_loop.agent_loop import AbortSignal, run_agent_loop
 
     params = inspect.signature(run_agent_loop).parameters
     assert 'max_tool_rounds' not in params
@@ -114,7 +114,7 @@ def test_removed_tool_round_limit_arguments_are_rejected():
 
 
 def test_loop_runs_tools_then_completes():
-    from lib.agent_loop import AbortSignal, run_agent_loop
+    from lib.agent_loop.agent_loop import AbortSignal, run_agent_loop
     seq = [
         _mk_msg([{'id': 't1', 'function': {'name': 'web_search', 'arguments': '{}'}}]),
         _mk_msg(None),
@@ -138,7 +138,7 @@ def test_loop_runs_tools_then_completes():
 
 def test_sequential_loop_preserves_equal_calls_as_distinct_occurrences():
     """Different response positions are actions, even with equal payloads."""
-    from lib.agent_loop import AbortSignal, run_agent_loop
+    from lib.agent_loop.agent_loop import AbortSignal, run_agent_loop
 
     twins = [
         {'id': 'first', 'function': {
@@ -170,7 +170,7 @@ def test_sequential_loop_preserves_equal_calls_as_distinct_occurrences():
 
 
 def test_sequential_loop_keeps_distinct_arguments_and_callers_independent():
-    from lib.agent_loop import AbortSignal, run_agent_loop
+    from lib.agent_loop.agent_loop import AbortSignal, run_agent_loop
 
     calls = [
         {'id': 'a', 'caller': {'type': 'multi_agent', 'agent_name': '/root'},
@@ -194,7 +194,7 @@ def test_sequential_loop_keeps_distinct_arguments_and_callers_independent():
 
 
 def test_sequential_loop_keeps_malformed_argument_diagnostics_independent():
-    from lib.agent_loop import AbortSignal, run_agent_loop
+    from lib.agent_loop.agent_loop import AbortSignal, run_agent_loop
 
     calls = [
         {'id': 'bad-a', 'function': {
@@ -216,7 +216,7 @@ def test_sequential_loop_keeps_malformed_argument_diagnostics_independent():
 
 
 def test_sequential_loop_repairs_recycled_ids_across_rounds_before_callbacks():
-    from lib.agent_loop import AbortSignal, run_agent_loop
+    from lib.agent_loop.agent_loop import AbortSignal, run_agent_loop
 
     first = {'id': 'positional_0', 'function': {
         'name': 'read_files', 'arguments': '{"path":"a"}'}}
@@ -238,7 +238,7 @@ def test_sequential_loop_repairs_recycled_ids_across_rounds_before_callbacks():
 
 
 def test_sequential_loop_halts_on_an_all_non_object_tool_batch():
-    from lib.agent_loop import AbortSignal, run_agent_loop
+    from lib.agent_loop.agent_loop import AbortSignal, run_agent_loop
 
     executed = []
     outcome = run_agent_loop(
@@ -255,7 +255,7 @@ def test_sequential_loop_halts_on_an_all_non_object_tool_batch():
 
 def test_tools_stay_available_until_natural_completion():
     """Tool schemas stay available across arbitrarily many productive rounds."""
-    from lib.agent_loop import AbortSignal, run_agent_loop
+    from lib.agent_loop.agent_loop import AbortSignal, run_agent_loop
     offered = []
 
     def dispatch(rnd, tools):
@@ -273,7 +273,7 @@ def test_tools_stay_available_until_natural_completion():
 
 
 def test_before_round_check_blocks_dispatch():
-    from lib.agent_loop import AbortSignal, run_agent_loop
+    from lib.agent_loop.agent_loop import AbortSignal, run_agent_loop
     calls = {'dispatch': 0}
 
     def dispatch(rnd, tools):
@@ -289,7 +289,7 @@ def test_before_round_check_blocks_dispatch():
 
 def test_post_stream_check_stops_before_tools():
     """Abort flips true DURING the dispatch → post-stream check stops before tools."""
-    from lib.agent_loop import AbortSignal, run_agent_loop
+    from lib.agent_loop.agent_loop import AbortSignal, run_agent_loop
     flag = {'v': False}
     calls = {'tools': 0}
 
@@ -310,7 +310,7 @@ def test_between_tools_check_skips_remaining_tools():
     This is the seam-level assertion of the "Stop has limited effect" fix
     (also proven end-to-end in test_paper_report_abort.py).
     """
-    from lib.agent_loop import AbortSignal, run_agent_loop
+    from lib.agent_loop.agent_loop import AbortSignal, run_agent_loop
     flag = {'v': False}
     ran = []
     two_tools = [
@@ -335,7 +335,7 @@ def test_between_tools_check_skips_remaining_tools():
 
 def test_exit_reason_completed():
     """LoopOutcome reports natural completion without a cap-exhausted state."""
-    from lib.agent_loop import AbortSignal, run_agent_loop
+    from lib.agent_loop.agent_loop import AbortSignal, run_agent_loop
     # natural completion
     out = run_agent_loop(abort=AbortSignal.never(), round_tools=['T'],
                          dispatch=lambda rnd, tools: _mk_msg(None),
@@ -346,7 +346,7 @@ def test_exit_reason_completed():
 
 def test_exit_reason_abort_phases():
     """exit_reason distinguishes the three abort placements."""
-    from lib.agent_loop import AbortSignal, run_agent_loop
+    from lib.agent_loop.agent_loop import AbortSignal, run_agent_loop
     # before-round
     o1 = run_agent_loop(abort=AbortSignal(lambda: True), round_tools=['T'],
                         dispatch=lambda rnd, tools: _mk_msg(None), execute_tool=lambda rnd, tc: None)
@@ -364,7 +364,7 @@ def test_exit_reason_abort_phases():
 
 def test_retry_bonus_grants_extra_round_dynamically():
     """A premature-close retry hook retries before accepting natural stop."""
-    from lib.agent_loop import AbortSignal, run_agent_loop
+    from lib.agent_loop.agent_loop import AbortSignal, run_agent_loop
     disp = {'n': 0}
     def dispatch(rnd, tools):
         disp['n'] += 1
@@ -386,7 +386,7 @@ def test_retry_bonus_grants_extra_round_dynamically():
 
 def test_retry_bonus_is_capped():
     """retry_bonus honours max_retry_bonus so a stuck premature-close can't loop forever."""
-    from lib.agent_loop import AbortSignal, run_agent_loop
+    from lib.agent_loop.agent_loop import AbortSignal, run_agent_loop
     disp = {'n': 0}
     def dispatch(rnd, tools):
         disp['n'] += 1
@@ -403,7 +403,7 @@ def test_retry_bonus_is_capped():
 
 def test_retry_bonus_default_off_completes_once():
     """With no retry hook, a no-tool response completes in one dispatch."""
-    from lib.agent_loop import AbortSignal, run_agent_loop
+    from lib.agent_loop.agent_loop import AbortSignal, run_agent_loop
     disp = {'n': 0}
     out = run_agent_loop(abort=AbortSignal.never(), round_tools=None,
                          dispatch=lambda rnd, tools: (disp.__setitem__('n', disp['n'] + 1) or _mk_msg(None)),
@@ -414,7 +414,7 @@ def test_retry_bonus_default_off_completes_once():
 
 def test_loop_does_not_swallow_dispatch_exception():
     """A dispatcher exception (e.g. AbortedError) must propagate to the caller."""
-    from lib.agent_loop import AbortSignal, run_agent_loop
+    from lib.agent_loop.agent_loop import AbortSignal, run_agent_loop
 
     class Boom(Exception):
         pass
@@ -432,7 +432,7 @@ def test_loop_does_not_swallow_dispatch_exception():
 def test_before_round_hook_halts_with_reason():
     """The before_round halt hook stops the loop with outcome.halted and a
     custom exit_reason (swarm's timeout is the first adopter)."""
-    from lib.agent_loop import AbortSignal, run_agent_loop
+    from lib.agent_loop.agent_loop import AbortSignal, run_agent_loop
     disp = {'n': 0}
 
     def dispatch(rnd, tools):
@@ -453,7 +453,7 @@ def test_before_round_hook_halts_with_reason():
 def test_execute_tools_batch_hook_replaces_per_tool_loop():
     """The batch execute_tools hook receives the round's whole tool list ONCE
     (parallel-pool engines); per-tool execute_tool must NOT fire."""
-    from lib.agent_loop import AbortSignal, run_agent_loop
+    from lib.agent_loop.agent_loop import AbortSignal, run_agent_loop
     two = [
         {'id': 't1', 'function': {'name': 'web_search', 'arguments': '{}'}},
         {'id': 't2', 'function': {'name': 'fetch_url', 'arguments': '{}'}},
@@ -476,7 +476,7 @@ def test_tool_timeout_breaker_halts_at_threshold():
     """max_consecutive_tool_timeouts: consecutive timed_out batch notes halt
     the loop with exit_reason 'tool_timeout'; a halted round fires NO
     on_round_end (mirrors orchestrator: breaker break precedes checkpoint)."""
-    from lib.agent_loop import AbortSignal, run_agent_loop
+    from lib.agent_loop.agent_loop import AbortSignal, run_agent_loop
     disp = {'n': 0}
     round_ends = []
 
@@ -499,7 +499,7 @@ def test_tool_timeout_breaker_halts_at_threshold():
 def test_tool_timeout_breaker_resets_on_clean_round():
     """A round whose batch note is falsy resets the consecutive count —
     isolated timeouts never trip the breaker."""
-    from lib.agent_loop import AbortSignal, run_agent_loop
+    from lib.agent_loop.agent_loop import AbortSignal, run_agent_loop
     notes = iter([{'timed_out': True}, None, {'timed_out': True}, None])
     seq = iter([
         _mk_msg([{'id': 'a', 'function': {'name': 'web_search', 'arguments': '{}'}}]),
@@ -520,7 +520,7 @@ def test_tool_timeout_breaker_resets_on_clean_round():
 def test_on_round_end_fires_only_after_executed_tool_rounds():
     """on_round_end fires once per tools-executed round — NOT on the final
     answer round and NOT on an aborted round."""
-    from lib.agent_loop import AbortSignal, run_agent_loop
+    from lib.agent_loop.agent_loop import AbortSignal, run_agent_loop
     ends = []
     seq = iter([
         _mk_msg([{'id': 'a', 'function': {'name': 'web_search', 'arguments': '{}'}}]),
@@ -538,7 +538,7 @@ def test_on_round_end_fires_only_after_executed_tool_rounds():
 
 def test_typed_decision_continues_provider_protocol_without_tools():
     """A protocol continuation is not mistaken for natural completion."""
-    from lib.agent_loop import AbortSignal, LoopDirective, run_agent_loop
+    from lib.agent_loop.agent_loop import AbortSignal, LoopDirective, run_agent_loop
 
     dispatched = []
 
@@ -562,7 +562,7 @@ def test_typed_decision_continues_provider_protocol_without_tools():
 
 
 def test_unverified_typed_stream_cannot_complete_or_execute_tools():
-    from lib.agent_loop import AbortSignal, run_agent_loop
+    from lib.agent_loop.agent_loop import AbortSignal, run_agent_loop
     from lib.llm.stream_result import (
         ProviderStreamResult,
         ProviderStreamState,
@@ -590,7 +590,7 @@ def test_unverified_typed_stream_cannot_complete_or_execute_tools():
 
 
 def test_typed_decision_can_recover_before_stream_evidence_gate():
-    from lib.agent_loop import AbortSignal, LoopDirective, run_agent_loop
+    from lib.agent_loop.agent_loop import AbortSignal, LoopDirective, run_agent_loop
     from lib.llm.stream_result import ProviderStreamResult, ProviderStreamState
 
     partial = ProviderStreamResult(
@@ -623,7 +623,7 @@ def test_typed_decision_can_recover_before_stream_evidence_gate():
 
 def test_before_and_after_tool_directives_own_control_sites():
     """Typed gates stop at their declared placement and skip later hooks."""
-    from lib.agent_loop import AbortSignal, LoopDirective, run_agent_loop
+    from lib.agent_loop.agent_loop import AbortSignal, LoopDirective, run_agent_loop
 
     tc = [{'id': 't', 'function': {'name': 'web_search', 'arguments': '{}'}}]
     executed = []
@@ -666,7 +666,7 @@ def test_before_and_after_tool_directives_own_control_sites():
 
 def test_timeout_state_observer_mirrors_chassis_counter():
     """Caller presentation sees, but does not own, the timeout counter."""
-    from lib.agent_loop import AbortSignal, run_agent_loop
+    from lib.agent_loop.agent_loop import AbortSignal, run_agent_loop
 
     notes = iter([
         {'timed_out': True}, None,
@@ -695,7 +695,7 @@ def test_timeout_state_observer_mirrors_chassis_counter():
 
 
 def test_abort_observer_can_preserve_caller_wire_reason():
-    from lib.agent_loop import AbortSignal, run_agent_loop
+    from lib.agent_loop.agent_loop import AbortSignal, run_agent_loop
 
     stopped = {'value': False}
     phases = []
@@ -724,7 +724,7 @@ def test_abort_observer_can_preserve_caller_wire_reason():
 
 
 def test_policy_hooks_reject_untyped_magic_actions():
-    from lib.agent_loop import AbortSignal, LoopDirective, run_agent_loop
+    from lib.agent_loop.agent_loop import AbortSignal, LoopDirective, run_agent_loop
 
     with pytest.raises(TypeError, match='LoopDirective'):
         run_agent_loop(

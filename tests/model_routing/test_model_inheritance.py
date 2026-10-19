@@ -11,7 +11,7 @@ from lib.model_routing import empty_document, normalize_document, plan_legacy_mi
 from lib.model_routing.catalog_identity import reconcile_catalog_identities
 from lib.model_routing.inference import candidate_inference_metadata, resolve_inference_profile
 from lib.model_routing.model_defaults import apply_model_defaults
-from lib.provider_template_recipes import compile_provider_template_bundle
+from lib.provider.provider_template_recipes import compile_provider_template_bundle
 
 pytestmark = pytest.mark.unit
 
@@ -63,7 +63,7 @@ def test_public_preset_reaches_sealed_protocol_payload(monkeypatch, protocol, mo
 
 
 def test_provider_override_is_scoped_and_request_name_does_not_change_model(monkeypatch):
-    import lib.provider_template_recipes as recipes
+    import lib.provider.provider_template_recipes as recipes
     model = {'creator_id': 'xai', 'model_id': 'grok-4.6', 'display_name': 'Owner Grok',
              'capabilities': ['text', 'vision', 'thinking'], 'context_window': 500000, 'quality_rank': 90}
     apply_model_defaults(model)

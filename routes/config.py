@@ -155,7 +155,7 @@ def get_server_config():
 
     logger.debug('[ServerConfig] GET /api/server-config requested')
     saved = _read_server_config()
-    from lib.cost_experiments import normalize_cost_experiment_config
+    from lib.cost_experiments.cost_experiments import normalize_cost_experiment_config
     cost_experiment = normalize_cost_experiment_config(
         saved.get('cost_experiment'))
 
@@ -196,14 +196,14 @@ def get_server_config():
         # Apply saved llm_content_filter on config load (page refresh / startup)
         if 'llm_content_filter' in saved['search']:
             _lib.LLM_CONTENT_FILTER_ENABLED = bool(saved['search']['llm_content_filter'])
-            from lib.search_runtime import sync_search_config_if_loaded
+            from lib.search.search_runtime import sync_search_config_if_loaded
             sync_search_config_if_loaded()
 
     # Live backend search status (tofu-search version / engines / extension
     # reachability / filter model+mode) — the piece that lets the Settings UI
     # show what the backend will ACTUALLY do, not just the saved knobs.
     try:
-        from lib.search_settings import status_payload as _ss_status
+        from lib.search.search_settings import status_payload as _ss_status
         from routes.api_v1.auth import current_auth
         search_status = _ss_status(
             owner_user_id=current_auth().owner_user_id)
@@ -428,12 +428,12 @@ async def cost_experiment_report():
     import asyncio
     import time
 
-    from lib.cost_experiments import (
+    from lib.cost_experiments.cost_experiments import (
         aggregate_cost_experiment_rows,
         normalize_cost_experiment_config,
         task_outcome_report_rows,
     )
-    from lib.cost_experiment_repository import scan_cost_experiment_outcomes
+    from lib.cost_experiments.cost_experiment_repository import scan_cost_experiment_outcomes
     from routes.api_v1.auth import request_user_id
 
     try:
@@ -618,10 +618,10 @@ def save_server_config():
     dispatch_reset_needed = False
 
     cost_experiment_prep = None
-    from lib.cost_experiments import CostExperimentTransitionError
+    from lib.cost_experiments.cost_experiments import CostExperimentTransitionError
     if 'cost_experiment' in data:
         try:
-            from lib.cost_experiments import normalize_cost_experiment_config
+            from lib.cost_experiments.cost_experiments import normalize_cost_experiment_config
             cost_experiment_prep = normalize_cost_experiment_config(
                 data['cost_experiment'], strict=True)
         except ValueError as e:
@@ -691,7 +691,7 @@ def save_server_config():
         # an admin slider change could move an existing conversation to the
         # other arm and contaminate both samples.
         if cost_experiment_prep is not None:
-            from lib.cost_experiments import validate_cost_experiment_transition
+            from lib.cost_experiments.cost_experiments import validate_cost_experiment_transition
             final_cost_experiment = validate_cost_experiment_transition(
                 existing.get('cost_experiment'), cost_experiment_prep)
 
@@ -709,7 +709,7 @@ def save_server_config():
             # LLM content filter is a separate module-level flag
             if 'llm_content_filter' in data['search']:
                 _lib.LLM_CONTENT_FILTER_ENABLED = bool(data['search']['llm_content_filter'])
-                from lib.search_runtime import sync_search_config_if_loaded
+                from lib.search.search_runtime import sync_search_config_if_loaded
                 sync_search_config_if_loaded()
                 logger.info('[Config] LLM content filter → %s', _lib.LLM_CONTENT_FILTER_ENABLED)
             changes.append('search.*')
@@ -790,7 +790,7 @@ def save_server_config():
                         existing['mt_provider']['enabled'])
 
         if final_cost_experiment is not None:
-            from lib.cost_experiments import normalize_cost_experiment_config
+            from lib.cost_experiments.cost_experiments import normalize_cost_experiment_config
             prior_cost_experiment = normalize_cost_experiment_config(
                 existing.get('cost_experiment'))
             if final_cost_experiment != prior_cost_experiment:

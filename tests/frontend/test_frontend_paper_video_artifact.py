@@ -77,6 +77,12 @@ owner.destroyVideoArtifact();assert(!host.children.length&&!film.getAttribute('s
 w._paperHash='hash-a';delete state.scenes[1].timeline_contract_version;owner.renderVideoArtifact(host,state);
 assert(!host.querySelector('.paper-studio-chapter-play'),'legacy planned time never authorizes navigation');
 assert(!owner.videoChapterTimings([{timeline_contract_version:'motion-timeline-v1',timeline_start_s:0,timeline_end_s:1}],30),'inconsistent film duration withholds timing');
+assert(!host.querySelector('.paper-studio-reader > .ui-alert--warning'),'clean film has no degradation warning');
+state.quality_axis={degraded:true,reason:'Template fallback in all scenes'};
+owner.renderVideoArtifact(host,state);
+assert(host.querySelector('.paper-studio-reader > .ui-alert--warning').textContent.includes('Template fallback in all scenes'),'degraded completed film explains quality loss');
+state.quality_axis={degraded:false};owner.renderVideoArtifact(host,state);
+assert(!host.querySelector('.paper-studio-reader > .ui-alert--warning'),'recovered film removes stale warning');
 owner.destroyVideoArtifact();console.log('ok');
 })().catch(error=>{console.error(error);process.exitCode=1});
 """

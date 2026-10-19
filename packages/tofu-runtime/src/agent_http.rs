@@ -29,6 +29,8 @@ pub struct HttpProvider<'a> {
     text_observer: Option<Arc<dyn crate::http::TextObserver>>,
     anthropic: Option<crate::anthropic::Budget>,
     responses: Option<(crate::responses::Budget, bool, crate::responses_request::Profile)>,
+    preserve_chat_text_parts: bool,
+    prepared_tools: Option<Arc<crate::prepared_tool_wire::PreparedToolWire>>,
 }
 impl<'a> HttpProvider<'a> {
     pub fn new(
@@ -69,6 +71,8 @@ impl<'a> HttpProvider<'a> {
             text_observer: None,
             anthropic: None,
             responses: None,
+            preserve_chat_text_parts: true,
+            prepared_tools: None,
         })
     }
     pub fn with_anthropic(mut self, budget: crate::anthropic::Budget) -> Result<Self, Value> {
@@ -146,11 +150,16 @@ impl<'a> HttpProvider<'a> {
         self.text_observer = Some(observer);
         self
     }
+    pub fn with_chat_text_parts(mut self, preserve: bool) -> Self {
+        self.preserve_chat_text_parts = preserve;
+        self
+    }
 }
 struct Body<'a> {
     template: &'a Map<String, Value>,
     messages: &'a [Value],
     output: Option<(&'a str, u64)>,
+    preserve_text_parts: bool,
 }
 impl serde_core::Serialize for Body<'_> {
     fn serialize<S: serde_core::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
@@ -166,7 +175,7 @@ impl serde_core::Serialize for Body<'_> {
         if let Some((field, limit)) = self.output {
             map.serialize_entry(field, &limit)?;
         }
-        map.serialize_entry("messages", self.messages)?;
+        map.serialize_entry("messages", &crate::chat_wire::Messages(self.messages, self.preserve_text_parts))?;
         map.serialize_entry("stream", &true)?;
         map.end()
     }
@@ -188,8 +197,14 @@ impl Write for Bytes {
     }
 }
 impl HttpProvider<'_> {
+    pub fn with_prepared_tools(mut self, state: Arc<crate::prepared_tool_wire::PreparedToolWire>, names: std::collections::BTreeSet<String>) -> Self {
+        self.prepared_tools=Some(state);
+        self.tool_names=Arc::new(names);
+        self
+    }
     fn round_inner(
         &self,
+        template: &Map<String, Value>,
         messages: &[Value],
         session: &Arc<ExecutionSession>,
         output: Option<(&str, u64)>,
@@ -204,7 +219,7 @@ impl HttpProvider<'_> {
             limit: c.request_bytes,
         };
         let reverse = if self.responses.is_some() {
-            crate::responses_request::aliases(&c.template, messages)
+            crate::responses_request::aliases(template, messages)
                 .map_err(|_| failure("agent_responses_alias_refused"))?
         } else {
             Default::default()
@@ -214,7 +229,7 @@ impl HttpProvider<'_> {
                 &mut body,
                 &crate::responses_request::Body {
                     profile,
-                    template: &c.template,
+                    template,
                     messages,
                     output: output.map(|(_, n)| n),
                     replay,
@@ -229,7 +244,7 @@ impl HttpProvider<'_> {
             serde_json::to_writer(
                 &mut body,
                 &crate::anthropic_request::Body {
-                    template: &c.template,
+                    template,
                     messages,
                     output: output.map(|(_, n)| n),
                 },
@@ -239,12 +254,14 @@ impl HttpProvider<'_> {
             serde_json::to_writer(
                 &mut body,
                 &Body {
-                    template: &c.template,
+                    template,
                     messages,
                     output,
+                    preserve_text_parts: self.preserve_chat_text_parts,
                 },
             )
-            .map_err(|_| failure("agent_request_budget"))?;
+            .map_err(|error| failure(if error.is_io() { "agent_request_budget" }
+                else { "agent_chat_request_refused" }))?;
         }
         let prepared_headers = if let Some(lease) = lease {
             lease.mark_dispatched(session).map_err(|error| {
@@ -253,6 +270,7 @@ impl HttpProvider<'_> {
             })?
         } else { None };
         let headers = prepared_headers.unwrap_or_else(|| c.headers.clone());
+        let request_bytes = body.value.len();
         let request = Request {
             headers,
             body: body.value,
@@ -303,8 +321,20 @@ impl HttpProvider<'_> {
             }
         });
         match result {
+            // A final text consumer can publish Stop during the transfer's
+            // winning poll, after select checked the stop branches. The
+            // transfer has joined its consumer and released HTTP before this
+            // publication check; retain transport/provider failures below.
+            Ok(_) if stop_now(session) || self.cancellation.is_cancelled() =>
+                Err(ProviderError::Stopped),
             Ok(response) => Ok(response),
             Err(Error::Cancelled) => Err(ProviderError::Stopped),
+            Err(Error::WriteTimeout) => Err(ProviderError::Failed(json!({
+                "kind":"provider_transport", "message":"Request upload timed out",
+                "failureStage":"upload", "transportReason":"timeout", "transportCause":"WriteTimeout",
+                "requestBytes":request_bytes,
+                "timeoutSeconds":self.transport.write_timeout().map(|value| value.as_secs_f64())
+            }))),
             Err(Error::Provider(error)) => Err(ProviderError::Failed(error.task_error())),
             Err(Error::UnsupportedProviderProfile) => Err(ProviderError::Failed(json!({"kind":"agent_responses_profile_refused"}))),
             Err(Error::ProviderRejected(error)) => Err(ProviderError::Failed(
@@ -323,7 +353,10 @@ impl Provider for HttpProvider<'_> {
         messages: &[Value],
         session: &Arc<ExecutionSession>,
     ) -> Result<StreamResult, ProviderError> {
-        self.round_inner(messages, session, None, None)
+        let prepared=self.prepared_tools.as_ref().map(|state|state.template()).transpose()
+            .map_err(|error|ProviderError::Failed(json!({"kind":"model_projection","message":error})))?;
+        let template=prepared.as_deref().unwrap_or(&self.configuration.template);
+        self.round_inner(template, messages, session, None, None)
     }
 }
 /// Trusted model ingress counter; count the frozen messages/tools, never hints.
@@ -414,12 +447,15 @@ impl SelectedLease {
             }
         }
     }
-    fn settle(&mut self, usage: Option<&Value>, unsent: bool) -> Result<(), Value> {
+    fn settle(&mut self,usage:Option<&Value>,unsent:bool) -> Result<(),Value> {
+        self.settle_with_cost(usage,unsent).map(|_|())
+    }
+    fn settle_with_cost(&mut self, usage: Option<&Value>, unsent: bool) -> Result<Option<Box<Value>>, Value> {
         match self {
-            Self::Native(lease) => lease.settle(usage, unsent).map_err(|_| json!({"kind":"model_account_settlement"})),
+            Self::Native(lease) => lease.settle(usage, unsent).map(|_|None).map_err(|_| json!({"kind":"model_account_settlement"})),
             Self::External { lease, dispatch_attempted } => {
-                let Some(mut lease) = lease.take() else { return Ok(()); };
-                external_callback(|| lease.settle(usage, unsent && !*dispatch_attempted))
+                let Some(mut lease) = lease.take() else { return Ok(None); };
+                external_callback(|| lease.settle_with_cost(usage, unsent && !*dispatch_attempted))
             }
         }
     }
@@ -539,13 +575,16 @@ impl Provider for BudgetedHttpProvider<'_> {
         if stop_now(session) {
             return Err(ProviderError::Stopped);
         }
+        let prepared=self.inner.prepared_tools.as_ref().map(|state|state.template()).transpose()
+            .map_err(|error|ProviderError::Failed(json!({"kind":"model_projection","message":error})))?;
+        let template=prepared.as_deref().unwrap_or(&self.inner.configuration.template);
         let input = self
             .counter
             .tokens(
                 self.owner,
                 &self.task,
                 messages,
-                &self.inner.configuration.template,
+                template,
             )
             .map_err(ProviderError::Failed)?;
         let output = self.inner.configuration.template[self.output.key()]
@@ -566,21 +605,19 @@ impl Provider for BudgetedHttpProvider<'_> {
             let settled = lease.settle(None, true);
             return Err(ProviderError::Failed(json!({"kind":if settled.is_ok() {"model_account_output_cap"} else {"model_account_settlement"}})));
         }
-        let result = self.inner.round_inner(
+        let mut result = self.inner.round_inner(
+            template,
             messages,
             session,
             Some((self.output.key(), admitted_output)),
             Some(&mut lease),
         );
-        if lease
-            .settle(result.as_ref().ok().map(|r| &r.usage), true)
-            .is_err()
-        {
-            // Keep paid evidence even when the accounting acknowledgement fails.
-            let usage = result.as_ref().ok().map(|r| &r.usage);
-            return Err(ProviderError::Failed(
-                json!({"kind":"model_account_settlement","usage":usage}),
-            ));
+        match lease.settle_with_cost(result.as_ref().ok().map(|r|&r.usage),true) {
+            Ok(cost) => { if let Ok(result)=&mut result {result.cost=cost;} }
+            Err(error) => {
+                let usage=result.as_ref().ok().map(|r|&r.usage);
+                return Err(ProviderError::Failed(json!({"kind":if error["kind"]=="model_pricing" {"model_pricing"} else {"model_account_settlement"},"usage":usage})));
+            }
         }
         result
     }

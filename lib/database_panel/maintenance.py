@@ -5,7 +5,7 @@ enabled, mirror one verified snapshot to the configured stable directory
 once every 24 h.
 
 HTTP activity is fed by a single ``before_request`` hook registered in
-``lib/app_assembly.py``; the hook and the loop are both fully guarded so a
+``lib/app/app_assembly.py``; the hook and the loop are both fully guarded so a
 panel failure can never break request serving.
 """
 

@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from lib.server_runtime_lifecycle import (
+from lib.server.server_runtime_lifecycle import (
     register_runtime_lifecycle,
     resolve_runtime_endpoint,
 )

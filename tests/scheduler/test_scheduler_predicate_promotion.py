@@ -604,12 +604,13 @@ def test_poll_decision_survives_none_content(monkeypatch):
     import lib.scheduler.proactive as proactive
 
     def _fake_smart_chat(messages, **kwargs):
+        assert kwargs['owner_user_id'] == 41
         return None, {'total_tokens': 0}
     import lib.llm_dispatch as _ld
     monkeypatch.setattr(_ld, 'smart_chat', _fake_smart_chat, raising=True)
     monkeypatch.setattr(proactive, 'gather_system_status', lambda task: 'STATUS')
 
-    task = {'id': 'task_none01', 'command': 'do it'}
+    task = {'id': 'task_none01', 'command': 'do it', 'user_id': 41}
     should_act, reason, tokens = proactive.poll_decision(task)
     assert should_act is False
     assert reason.startswith('Parse error:')

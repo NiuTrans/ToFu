@@ -2,10 +2,11 @@
 from __future__ import annotations
 
 from uuid import uuid4
+from threading import Lock
 
 import pytest
 
-from tests.storage.test_storage_sidecar_contract import storage
+from tests.storage.test_storage_authority_sql_contract import storage
 from tests.tofudb.test_tofudb_differential import tofudb_binary, tofudb_daemon
 
 pytestmark = [pytest.mark.unit, pytest.mark.serial]
@@ -17,10 +18,14 @@ def authority_client(request, monkeypatch, storage):  # noqa: F811 - pytest requ
         client = storage.client
     else:
         driver = request.getfixturevalue('tofudb_daemon')
+        # Settlement can start a background queue drain. This disposable
+        # driver's single request/reply connection must serialize all callers.
+        connection_lock = Lock()
         class Client:
             def invoke(self, operation, payload, command_id=None):
                 from lib.storage import StorageError
-                outcome = driver.execute(operation, payload, command_id)
+                with connection_lock:
+                    outcome = driver.execute(operation, payload, command_id)
                 if not outcome.ok:
                     raise StorageError(outcome.error_code, outcome.error_message)
                 return outcome.value
@@ -105,4 +110,8 @@ def test_real_attempt_acceptance_overwrites_spoofed_source_and_fences_intervenin
         'attemptId': resume_id, 'taskId': 'resume-task', 'status': 'interrupted', 'cause': 'user_abort'}
     assert not continue_recovery_allowed(row, task, user_id=11)
     row['config']['parent_cfg'].update(_swarmParentAttemptId=resume_id, _swarmParentTaskId='resume-task')
-    assert not continue_recovery_allowed(row, task, user_id=11)
+    # An exact server-bound successor may now authorize manual-Stop recovery;
+    # older-source crossing above and cold startup remain forbidden. Child
+    # reopening still separately requires parent-Stop provenance and receipts.
+    assert continue_recovery_allowed(row, task, user_id=11)
+    assert restart_source_attempt(row, user_id=11) is None

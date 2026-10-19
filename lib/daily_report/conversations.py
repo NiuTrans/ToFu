@@ -503,7 +503,7 @@ def _analyse_conversations(
                 target_date, len(convs), len(carryover), len(user_prompt))
 
     raw_streams, raw_tomorrow, raw_yesterday_done, error_msg = _run_llm_analysis(
-        user_prompt, len(convs))
+        user_prompt, len(convs), owner_user_id=owner_user_id)
 
     # ── Write back yesterday's completion status ──
     # Collect stream titles+summaries for additional fuzzy matching

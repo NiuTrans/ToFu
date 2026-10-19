@@ -50,7 +50,7 @@ class DiscoverPathsTest(unittest.TestCase):
                                         for p in paths]), \
                 patch.object(probe, 'data_root',
                              return_value=__import__('pathlib').Path('/fake/root')), \
-                patch('lib.storage_sidecar.storage_capabilities.probe_storage_path',
+                patch('lib.storage_authority_sql.storage_capabilities.probe_storage_path',
                       side_effect=fake_probe):
             return probe.discover_paths(refresh=True)
 
@@ -87,7 +87,7 @@ class DiscoverPathsTest(unittest.TestCase):
     def test_cache_serves_second_call(self):
         first = self._run_discovery({'root': _FakeReport(),
                                      'fast': _FakeReport(latency=0.5)})
-        with patch('lib.storage_sidecar.storage_capabilities.probe_storage_path',
+        with patch('lib.storage_authority_sql.storage_capabilities.probe_storage_path',
                    side_effect=AssertionError('must not re-probe')):
             second = probe.discover_paths()
         self.assertEqual(first, second)

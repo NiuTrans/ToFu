@@ -39,6 +39,7 @@ pub struct TerminalCandidate {
     pub status: TaskStatus,
     pub result: Option<Value>,
     pub error: Option<Value>,
+    pub execution: Option<Value>,
     pub receipt: Arc<TerminalReceipt>,
 }
 impl TerminalCandidate {
@@ -48,6 +49,9 @@ impl TerminalCandidate {
         event[TASK_REPLAY_EVENT_TYPE_FIELD] = Value::String(self.status.as_str().into());
         if let Some(error) = &self.error {
             event["error"] = error.clone();
+        }
+        if let Some(execution) = &self.execution {
+            event["execution"] = execution.clone();
         }
         if self.status == TaskStatus::Done {
             if let Some(result) = &self.result {
@@ -91,6 +95,10 @@ struct State {
     candidate: Option<Arc<TerminalCandidate>>,
     persisted: bool,
     delivered: bool,
+}
+struct TerminalCapture {
+    execution: Option<Value>,
+    retain_non_success_result: bool,
 }
 pub struct Task {
     identity: TaskIdentity,
@@ -163,6 +171,19 @@ impl Task {
     where
         F: FnOnce(&ExecutionSession) -> Result<Value, Value>,
     {
+        self.run_owned(owner, false, |session| (execute(session), None))
+    }
+    /// Explicit observed execution evidence shares the frozen terminal candidate.
+    pub fn run_captured<F>(&self, owner: u64, execute: F) -> Result<Arc<TerminalCandidate>, TaskError>
+    where
+        F: FnOnce(&ExecutionSession) -> (Result<Value, Value>, Option<Value>),
+    {
+        self.run_owned(owner, true, execute)
+    }
+    fn run_owned<F>(&self, owner: u64, retain_aborted_result: bool, execute: F) -> Result<Arc<TerminalCandidate>, TaskError>
+    where
+        F: FnOnce(&ExecutionSession) -> (Result<Value, Value>, Option<Value>),
+    {
         self.authorize(owner)?;
         {
             let mut state = self.state.lock().map_err(|_| TaskError::StatePoisoned)?;
@@ -175,6 +196,7 @@ impl Task {
             state.status = TaskStatus::Running;
             state.executing = true;
         }
+        let mut execution = None;
         let output = catch_unwind(AssertUnwindSafe(|| -> Result<Option<Value>, Value> {
             let snapshot = self
                 .session
@@ -191,7 +213,11 @@ impl Task {
                 return Ok(None);
             }
             match self.session.advance(Phase::Dispatching) {
-                Ok(_) => execute(&self.session).map(Some),
+                Ok(_) => {
+                    let (result, observed) = execute(&self.session);
+                    execution = observed;
+                    result.map(Some)
+                },
                 Err(_) => Err(json!({"kind":"generic","message":"execution dispatch failed"})),
             }
         }));
@@ -200,8 +226,8 @@ impl Task {
             .map_err(|_| TaskError::StatePoisoned)?
             .executing = false;
         match output {
-            Ok(Ok(value)) => self.finish(owner, value, None),
-            Ok(Err(error)) => self.finish(owner, None, Some(error)),
+            Ok(Ok(value)) => self.finish_captured(owner, value, None, execution, retain_aborted_result),
+            Ok(Err(error)) => self.finish_captured(owner, None, Some(error), execution, retain_aborted_result),
             Err(_) => self.finish(
                 owner,
                 None,
@@ -215,6 +241,12 @@ impl Task {
         result: Option<Value>,
         error: Option<Value>,
     ) -> Result<Arc<TerminalCandidate>, TaskError> {
+        self.finish_captured(owner, result, error, None, false)
+    }
+    fn finish_captured(
+        &self, owner: u64, result: Option<Value>, error: Option<Value>,
+        execution: Option<Value>, retain_aborted_result: bool,
+    ) -> Result<Arc<TerminalCandidate>, TaskError> {
         self.authorize(owner)?;
         let (candidate, aborted, persisted) = {
             let mut state = self.state.lock().map_err(|_| TaskError::StatePoisoned)?;
@@ -227,7 +259,8 @@ impl Task {
             state.terminalizing = true;
             (state.candidate.clone(), state.aborted, state.persisted)
         };
-        let attempt = self.finish_owned(candidate, aborted, persisted, result, error);
+        let attempt = self.finish_owned(candidate, aborted, persisted, result, error,
+            TerminalCapture {execution, retain_non_success_result:retain_aborted_result});
         self.state
             .lock()
             .map_err(|_| TaskError::StatePoisoned)?
@@ -241,6 +274,7 @@ impl Task {
         mut persisted: bool,
         result: Option<Value>,
         mut error: Option<Value>,
+        mut capture: TerminalCapture,
     ) -> Result<Arc<TerminalCandidate>, TaskError> {
         let candidate = match candidate {
             Some(candidate) => candidate,
@@ -277,6 +311,10 @@ impl Task {
                 } else {
                     TaskStatus::Done
                 };
+                let mut result = result;
+                if status != TaskStatus::Done && capture.execution.is_none() && capture.retain_non_success_result {
+                    capture.execution = result.take().filter(|value| value.is_object());
+                }
                 let candidate = Arc::new(TerminalCandidate {
                     identity: self.identity.clone(),
                     status,
@@ -286,6 +324,7 @@ impl Task {
                         None
                     },
                     error,
+                    execution: if status == TaskStatus::Done {None} else {capture.execution},
                     receipt,
                 });
                 self.state

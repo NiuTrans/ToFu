@@ -21,8 +21,8 @@ OUTPUT = ROOT / 'contracts/api_endpoint_index_v1.json'
 
 def route_app():
     from lib.api_v4 import configure_api_version_policy
-    from lib.api_v4_constants_generated import API_MAJOR
-    from lib.app_factory import create_base_app
+    from lib.generated_api_v4_constants import API_MAJOR
+    from lib.app.app_factory import create_base_app
     from routes import register_all
 
     app = create_base_app('api-endpoint-index', {
@@ -35,7 +35,7 @@ def route_app():
 
 def generate(app=None) -> dict:
     from lib.api_v4 import NativeContractBlueprint
-    from lib.api_v4_constants_generated import API_MAJOR
+    from lib.generated_api_v4_constants import API_MAJOR
 
     app = route_app() if app is None else app
     endpoints = []

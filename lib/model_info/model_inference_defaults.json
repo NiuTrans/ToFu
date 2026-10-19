@@ -698,6 +698,40 @@
     {
       "creator_id": "google",
       "model_ids": [
+        "gemini-4-argon"
+      ],
+      "inference_profile": {
+        "source": "official",
+        "reasoning": {
+          "support": "supported",
+          "wire_format": "reasoning_effort",
+          "can_disable": false,
+          "supported_efforts": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "default_effort": "medium",
+          "effort_map": {
+            "xhigh": "high",
+            "max": "high",
+            "ultra": "high"
+          }
+        },
+        "sampling": {
+          "omit": [
+            "temperature",
+            "top_p",
+            "top_k"
+          ]
+        }
+      },
+      "evidence_url": "https://ai.google.dev/gemini-api/docs/thinking",
+      "checked_at": "2026-10-17"
+    },
+    {
+      "creator_id": "google",
+      "model_ids": [
         "gemini-3.8-flash",
         "gemini-3.7-flash"
       ],

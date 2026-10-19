@@ -21,7 +21,7 @@ def cache(monkeypatch):
         def read_range(self, *, user_id, artifact_ref, limit):
             return {'content':self.rows[user_id,artifact_ref][:limit]} if (user_id,artifact_ref) in self.rows else None
     cache = Cache()
-    monkeypatch.setattr('lib.tool_result_artifacts.ToolResultArtifactRepository', lambda: cache)
+    monkeypatch.setattr('lib.tool_results.tool_result_artifacts.ToolResultArtifactRepository', lambda: cache)
     monkeypatch.setattr('lib.research.context.action_window', lambda _: 8192)
     monkeypatch.setattr('lib.token_counter.count_text', lambda text, **kwargs: len(text) // 4)
     return cache

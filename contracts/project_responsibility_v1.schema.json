@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "tofu.project-responsibility/v1",
+  "description": "Finite explicit human standing responsibility. Original authenticated principal is private durable boundary evidence, not public input. Existing automation owns trigger publication. Each occurrence permanently debits its full per-run token ceiling before child authorization; no refund or reset.",
+  "namespace": "project.responsibilities.v1",
+  "limits": {"responsibilitiesPerProject": 32, "occurrencesPerResponsibility": 128, "casAttempts": 8, "maxRecordBytes": 4194304},
+  "$defs": {
+
+    "privateEnvelope": {"type": "object", "additionalProperties": false, "required": ["view", "principal", "commandId", "createdAt", "bindingRevision"], "properties": {"view": {"$ref": "#/$defs/view"}, "principal": {"type": "object", "description": "Original PrincipalContext.to_payload from authenticated create boundary; strict identity decoder and live owner/source validation are mandatory. Never public input."}, "commandId": {"$ref": "#/$defs/id"}, "createdAt": {"type": "number", "exclusiveMinimum": 0}, "bindingRevision": {"type": "integer", "minimum": 1}}},
+    "id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "path": {"type": "string", "minLength": 1, "maxLength": 4096},
+    "allowance": {"type": "object", "additionalProperties": false, "required": ["maxRuns", "maxTotalTokens", "deadline"], "properties": {"maxRuns": {"type": "integer", "minimum": 1, "maximum": 128}, "maxTotalTokens": {"type": "integer", "minimum": 1, "maximum": 2147483647}, "deadline": {"type": "number", "exclusiveMinimum": 0}}},
+    "create": {"type": "object", "additionalProperties": false, "required": ["projectPath", "name", "assignment", "trigger", "allowance", "perRunSeconds"], "properties": {"projectPath": {"$ref": "#/$defs/path"}, "name": {"type": "string", "minLength": 1, "maxLength": 160}, "assignment": {"allOf": [{"$ref": "project_dispatch_v1.schema.json#/$defs/request"}, {"required": ["profile"], "not": {"required": ["reworkOf"]}, "properties": {"budget": {"properties": {"maxTokens": {"maximum": 10000000}}}}}]}, "trigger": {"$ref": "automation_v1.schema.json#/properties/trigger"}, "allowance": {"$ref": "#/$defs/allowance"}, "perRunSeconds": {"type": "integer", "minimum": 1, "maximum": 86400}}},
+    "listQuery": {"type": "object", "additionalProperties": false, "required": ["path"], "properties": {"path": {"$ref": "#/$defs/path"}}},
+    "readQuery": {"type": "object", "additionalProperties": false, "required": ["path", "responsibilityId"], "properties": {"path": {"$ref": "#/$defs/path"}, "responsibilityId": {"$ref": "#/$defs/id"}}},
+    "command": {"type": "object", "additionalProperties": false, "required": ["projectPath", "responsibilityId", "expectedRevision"], "properties": {"projectPath": {"$ref": "#/$defs/path"}, "responsibilityId": {"$ref": "#/$defs/id"}, "expectedRevision": {"type": "integer", "minimum": 1}}},
+    "pause": {"$ref": "#/$defs/command"},
+    "cancel": {"$ref": "#/$defs/command"},
+    "reconcile": {"$ref": "#/$defs/command"},
+    "occurrence": {"type": "object", "additionalProperties": false, "required": ["occurrenceId", "commandId", "reservedTokens", "deadline", "status", "assignmentId"], "properties": {"occurrenceId": {"$ref": "#/$defs/id"}, "commandId": {"$ref": "#/$defs/id"}, "reservedTokens": {"type": "integer", "minimum": 1}, "deadline": {"type": "number", "exclusiveMinimum": 0}, "status": {"enum": ["reserved", "authorizing", "active", "completed", "failed", "cancelled", "unknown"]}, "assignmentId": {"type": ["string", "null"], "maxLength": 256}}},
+    "view": {"type": "object", "additionalProperties": false, "required": ["responsibilityId", "revision", "owner", "tenant", "projectPath", "request", "state", "automationId", "runsReserved", "tokensReserved", "occurrences"], "properties": {"responsibilityId": {"$ref": "#/$defs/id"}, "revision": {"type": "integer", "minimum": 1}, "owner": {"type": "integer", "minimum": 1}, "tenant": {"type": ["string", "null"], "maxLength": 256}, "projectPath": {"$ref": "#/$defs/path"}, "request": {"$ref": "#/$defs/create"}, "state": {"enum": ["publishing", "active", "paused", "cancelled", "expired", "exhausted"]}, "automationId": {"$ref": "#/$defs/id"}, "runsReserved": {"type": "integer", "minimum": 0}, "tokensReserved": {"type": "integer", "minimum": 0}, "occurrences": {"type": "array", "maxItems": 128, "items": {"$ref": "#/$defs/occurrence"}}}}
+  },
+  "$ref": "#/$defs/create"
+}

@@ -1,5 +1,7 @@
 {
   "format": "tofu.conversation-concurrency-policy/v2",
+  "provenance_format": "tofu.benchmark-provenance/v1",
+  "qualification_source_policy": "complete-current-checkout-and-stable-declared-artifact",
   "minimum_conversations": 1000,
   "minimum_rounds": 4,
   "minimum_chunk_bytes": 8192,

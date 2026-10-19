@@ -309,11 +309,17 @@ def execute_browser_tool(
     client_id=None,
     work_key: str = '',
     display_metadata: dict | None = None,
+    connection_wait: float = 0,
+    cancellation=None,
 ):
     """Execute one catalogued browser tool under explicit owner authority."""
     caller_owner = str(owner_user_id or '').strip()
     if not caller_owner.isdigit() or int(caller_owner) < 1:
-        return 'Error: Browser tool requires an authenticated owner'
+        return typed_tool_error(
+            'browser_owner_required', retryable=False,
+            message='Browser tool requires an authenticated owner.',
+            next_action='Restore the authenticated task owner before using browser tools.',
+        ).to_envelope_text()
     handler = BROWSER_HANDLERS.get(str(fn_name or ''))
     if handler is None:
         logger.warning('Unknown browser tool requested: %s', fn_name)
@@ -332,13 +338,39 @@ def execute_browser_tool(
     from lib.browser.queue import get_connected_clients
 
     owned = get_connected_clients(owner_user_id=caller_owner)
+    if (connection_wait > 0 and
+            (not owned or (client_id and not any(
+                row['client_id'] == str(client_id) for row in owned)))):
+        from lib.browser.queue import wait_for_connected_clients
+        owned = wait_for_connected_clients(
+            owner_user_id=caller_owner, client_id=client_id,
+            timeout=connection_wait, cancellation=cancellation)
+    if cancellation is not None and cancellation.is_set():
+        from lib.llm.llm_errors import AbortedError
+        raise AbortedError('Browser connection wait cancelled')
     owned_ids = {str(row.get('client_id') or '') for row in owned}
     if client_id and str(client_id) not in owned_ids:
-        return 'Error: Browser client is not connected for this user'
+        return typed_tool_error(
+            'browser_client_disconnected', retryable=True,
+            message='The selected browser client is not connected for this user at execution time.',
+            next_action=(
+                'Report this connection blocker. Reconnect the selected device to '
+                'this Tofu server with the same owner, then retry. An earlier '
+                'connected snapshot is not current connection evidence; do not '
+                'repeat calls until the connection changes or switch devices implicitly.'),
+        ).to_envelope_text()
     if not client_id and owned:
         client_id = _pick_connected_client(caller_owner, owned)
     if not client_id:
-        return 'Error: No browser extension is connected for this user'
+        return typed_tool_error(
+            'browser_extension_disconnected', retryable=True,
+            message='No browser extension is connected for this user at execution time.',
+            next_action=(
+                'Report this connection blocker. Check the extension server URL '
+                'and authentication, reconnect, then retry. An earlier connected '
+                'snapshot is not current connection evidence; do not repeat calls '
+                'until the connection changes.'),
+        ).to_envelope_text()
 
     runtime_args = {'owner_user_id': caller_owner, 'client_id': str(client_id)}
     if display_metadata is not None:

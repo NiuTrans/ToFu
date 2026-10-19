@@ -24,6 +24,8 @@ import {
 } from './vite_asset_retention.mjs';
 
 const root = resolve(import.meta.dirname, '..');
+
+await import('../frontend/scripts/generate-rich-response.mjs');
 const liveDir = join(root, 'static', 'vite');
 const assetsDir = join(liveDir, 'assets');
 const requiredEntries = ['frontend/src/main.ts', 'frontend/src/admin.ts'];
@@ -154,6 +156,36 @@ async function readViteAuthoringDigest() {
     digest.update(Buffer.from([0]));
   }
   return digest.digest('hex');
+}
+
+/* Baseline bundle-size guard, post-manifest-validation: assert the primary
+ * entry's gzip size stays under a ratcheted ceiling so an unbounded bundle
+ * regression fails the build rather than slipping through unchecked. This is
+ * deliberately lean — a single first-paint guard, not the full budget
+ * framework (scripts/frontend_budget.py); that broader suite stays opt-in via
+ * its own CI target. The ceiling is overridable via TOFU_BUILD_MAIN_MAX_KIB. */
+const BUILD_MAIN_MAX_KIB = Math.max(1,
+  Number.parseInt(process.env.TOFU_BUILD_MAIN_MAX_KIB || '', 10) || 620);
+
+async function runBundleBudget(manifest, artifactDir) {
+  const { gzipSync } = await import('node:zlib');
+  const failures = [];
+  for (const entry of requiredEntries) {
+    const file = manifest[entry] && manifest[entry].file;
+    const asset = file && safeAsset(file);
+    if (!asset) continue;
+    const bytes = await readFile(join(artifactDir, asset));
+    const kib = gzipSync(bytes, { level: 9 }).length / 1024;
+    process.stdout.write(`bundle budget: ${entry} = ${kib.toFixed(1)} KiB gzip `
+      + `(ceiling ${BUILD_MAIN_MAX_KIB} KiB)\n`);
+    if (kib > BUILD_MAIN_MAX_KIB) {
+      failures.push(`${entry} is ${(kib - BUILD_MAIN_MAX_KIB).toFixed(1)} KiB over the build ceiling`);
+    }
+  }
+  if (failures.length) {
+    throw new Error('frontend bundle budget rejected the published graph: '
+      + failures.join('; '));
+  }
 }
 
 async function runBundleCanary(artifactDir) {
@@ -288,6 +320,7 @@ async function main() {
       await rm(join(assetsDir, ...name.split('/')), { force: true });
     }
     await validateManifest(await readJson(join(liveDir, 'manifest.json')), liveDir);
+    await runBundleBudget(nextManifest, temporaryDir);
     process.stdout.write(
       `Published ${nextAssets.size} Vite assets; retained ${previousAssets.size} from the previous graph; `
       + `kept ${retentionCandidates.length - deletions.length} older-generation files, pruned ${deletions.length}.\n`,

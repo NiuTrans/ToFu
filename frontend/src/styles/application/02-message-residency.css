@@ -17,14 +17,10 @@
  * grows; exclude it from anchoring so its growth doesn't fight stick-to-bottom. */
 #streaming-msg{overflow-anchor:none}
 
-/* Reserved box for bare markdown-rendered chat images (the .message-body img
- * fallback — NOT the fixed-size upload thumbnails or the image-gen cards, which
- * already reserve space). Without a reserved aspect box a late image decode
- * grows the bubble and shoves content under the reader mid-read. aspect-ratio +
- * object-fit:contain reserves the height up-front without distorting the image
- * (letterboxed within the box); it never enlarges an intrinsically small image
- * because width is still bounded by the image's natural size + the max-width. */
-.message-body img:not(.msg-img-thumb img, .ig-result-card img, .imagegen-card img, .ig-batch-slot img, .rf-img-tile img){aspect-ratio:3 / 2;height:auto;object-fit:contain}
+/* Markdown images use their intrinsic ratio (or explicit width/height), never
+ * a guessed reservation that remains as letterboxing after decode. Existing
+ * scroll anchoring above handles late layout; fixed attachment tiles retain
+ * their own geometry. Responsive prose sizing belongs to 23-reading-prose.css. */
 
 /* Known-stale cache paint: while a background server GET verifies a cached copy
  * we ALREADY know is outdated (the sidebar's server-issued updatedAt is newer

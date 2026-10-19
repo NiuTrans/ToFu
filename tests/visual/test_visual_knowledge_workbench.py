@@ -475,3 +475,18 @@ def test_knowledge_long_results_never_overlap_the_panel_footer(page, tmp_path):
     page.screenshot(path=str(shot), full_page=False)
     print(f'knowledge long-results screenshot: {shot}')
     assert not hard_errors, hard_errors
+
+
+def test_knowledge_picker_passes_complete_batch_without_client_quota(page):
+    _, _, mock = _knowledge_harness()
+    page.wait_for_function("window.TofuModules?.version === 3 && window.Api?.knowledge")
+    page.evaluate(mock)
+    page.evaluate("async () => { await window.TofuModules.invokeFeature('openKnowledgeBase', [], () => {}); }")
+    page.locator('#knowledgeModal.open').wait_for(state='visible')
+    page.locator('#knowledgeFileInput').set_input_files([
+        {'name': f'evidence-{i}.md', 'mimeType': 'text/markdown',
+         'buffer': f'Owned evidence {i}'.encode()} for i in range(33)])
+    page.wait_for_function("window._mockKnowledge.documents.length === 33")
+    assert page.evaluate("window._mockKnowledge.documents.map(d => d.name).sort()") == sorted(f'evidence-{i}.md' for i in range(33))
+    assert '50 MB' not in page.locator('#knowledgeFormatHint').text_content()
+    assert not getattr(page, '_tofu_js_errors', [])

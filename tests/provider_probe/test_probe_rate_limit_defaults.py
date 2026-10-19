@@ -3,7 +3,7 @@ from copy import deepcopy
 
 import pytest
 
-from lib import provider_probe as probe
+from lib.provider import provider_probe as probe
 
 pytestmark = pytest.mark.unit
 

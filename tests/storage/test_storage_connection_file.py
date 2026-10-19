@@ -88,7 +88,7 @@ def test_supervisor_attaches_without_owning_external_sidecar_process(tmp_path):
     environment.pop('TOFU_STORAGE_TOKEN', None)
     environment.pop('TOFU_STORAGE_PARENT_PID', None)
     process = subprocess.Popen(
-        [sys.executable, '-m', 'lib.storage_sidecar'],
+        [sys.executable, '-m', 'lib.storage_authority_sql'],
         cwd=ROOT,
         env=environment,
         stdout=subprocess.PIPE,

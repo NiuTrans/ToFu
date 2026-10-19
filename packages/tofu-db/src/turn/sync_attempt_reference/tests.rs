@@ -60,7 +60,7 @@ fn large_event_is_stored_once_and_replay_export_preserve_the_former_envelope() {
         &database, 7, 11, &stored, SYNC_DOCUMENT_IDENTITY).is_err(),
         "older readers must reject the reference representation");
     let (_, public) = materialize(&database, &mut tx, &key, &stored,
-        MAX_TRANSACTION_IR_LITERAL_BYTES, true).unwrap();
+        MAX_LEGACY_DOCUMENT_BYTES, true).unwrap();
     assert_eq!(public, expected(&canonical, cursor));
     let response: Value = serde_json::from_slice(&sync_changes(&database, &mut tx,
         "ref-conversation", cursor - 1, 100, &mut || false).unwrap().unwrap()).unwrap();
@@ -81,7 +81,7 @@ fn large_event_is_stored_once_and_replay_export_preserve_the_former_envelope() {
     let mut tx = database.begin(7, 11).unwrap();
     let stored = database.entity_get(&mut tx, &key).unwrap().unwrap();
     assert_eq!(materialize(&database, &mut tx, &key, &stored,
-        MAX_TRANSACTION_IR_LITERAL_BYTES, true).unwrap().1, expected(&canonical, cursor));
+        MAX_LEGACY_DOCUMENT_BYTES, true).unwrap().1, expected(&canonical, cursor));
 }
 
 #[test]
@@ -97,18 +97,18 @@ fn missing_source_protection_and_cross_owner_aliases_fail_closed() {
     let protection = attempt_sync_reference_key(&tx, "ref-attempt", "ref-conversation", cursor).unwrap();
     database.entity_delete(&mut tx, protection.clone()).unwrap();
     assert!(materialize(&database, &mut tx, &key, &stored,
-        MAX_TRANSACTION_IR_LITERAL_BYTES, true).is_err());
+        MAX_LEGACY_DOCUMENT_BYTES, true).is_err());
     drop(tx);
     let mut other = database.begin(7, 12).unwrap();
     let other_key = conversation_sync_event_key(&other, "ref-conversation", cursor).unwrap();
     assert!(materialize(&database, &mut other, &other_key, &stored,
-        MAX_TRANSACTION_IR_LITERAL_BYTES, true).is_err());
+        MAX_LEGACY_DOCUMENT_BYTES, true).is_err());
     drop(other);
     let mut tx = database.begin(7, 11).unwrap();
     let source = attempt_event_key(&tx, "ref-attempt", source_sequence).unwrap();
     database.entity_delete(&mut tx, source).unwrap();
     assert!(materialize(&database, &mut tx, &key, &stored,
-        MAX_TRANSACTION_IR_LITERAL_BYTES, true).is_err());
+        MAX_LEGACY_DOCUMENT_BYTES, true).is_err());
 }
 
 #[test]
@@ -136,7 +136,7 @@ fn retention_protects_the_source_then_old_snapshot_survives_both_prunes() {
     let mut tx = database.begin(7, 11).unwrap();
     assert!(database.entity_get(&mut tx, &source).unwrap().is_none());
     assert_eq!(materialize(&database, &mut old, &key, &stored,
-        MAX_TRANSACTION_IR_LITERAL_BYTES, true).unwrap().1, expected(&canonical, cursor));
+        MAX_LEGACY_DOCUMENT_BYTES, true).unwrap().1, expected(&canonical, cursor));
 }
 
 #[test]
@@ -145,8 +145,8 @@ fn smaller_locator_preserves_the_full_envelope_admission_limit() {
         2_000, json!({"event":{"seq":1}}), Some("ref-turn"), Some("ref-attempt"));
     let overhead = serde_json::to_vec(&envelope).unwrap().len()
         - serde_json::to_vec(&envelope["payload"]["event"]).unwrap().len();
-    assert!(encode(&envelope, MAX_TRANSACTION_IR_LITERAL_BYTES - overhead).is_ok());
-    let error = encode(&envelope, MAX_TRANSACTION_IR_LITERAL_BYTES - overhead + 1).unwrap_err();
+    assert!(encode(&envelope, MAX_LEGACY_DOCUMENT_BYTES - overhead).is_ok());
+    let error = encode(&envelope, MAX_LEGACY_DOCUMENT_BYTES - overhead + 1).unwrap_err();
     assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
 }
 
@@ -171,7 +171,7 @@ fn legacy_bytes_and_reference_bound_remain_exact() {
         }).unwrap();
     let stored = database.entity_get(&mut tx, &key).unwrap().unwrap();
     assert_eq!(materialize(&database, &mut tx, &key, &stored,
-        MAX_TRANSACTION_IR_LITERAL_BYTES, true).unwrap().1, legacy);
+        MAX_LEGACY_DOCUMENT_BYTES, true).unwrap().1, legacy);
 }
 
 #[test]
@@ -192,13 +192,13 @@ fn changed_source_version_and_protection_sequence_fail_closed() {
         updated_at_ms: 3_000,
     }).unwrap();
     assert!(materialize(&database, &mut tx, &key, &stored,
-        MAX_TRANSACTION_IR_LITERAL_BYTES, true).is_err());
+        MAX_LEGACY_DOCUMENT_BYTES, true).is_err());
     drop(tx);
     let mut tx = database.begin(7, 11).unwrap();
     let protection = attempt_sync_reference_key(&tx, "ref-attempt", "ref-conversation", cursor).unwrap();
     database.entity_put(&mut tx, protection, (sequence + 1).to_le_bytes().to_vec()).unwrap();
     assert!(materialize(&database, &mut tx, &key, &stored,
-        MAX_TRANSACTION_IR_LITERAL_BYTES, true).is_err());
+        MAX_LEGACY_DOCUMENT_BYTES, true).is_err());
 }
 
 fn fault_fixture() -> (Arc<DeterministicVfs>, AuthorityDatabase) {

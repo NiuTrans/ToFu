@@ -22,10 +22,15 @@ from evaluations.swebench.tofu_kimi_runtime import (
 from lib.benchmark_contract import (
     BenchmarkContractError,
     build_task_record_v2,
+    canonical_benchmark_usage,
     public_price_cost_from_usage,
     validate_record,
 )
-from lib.cost import normalize_usage, split_input_tokens
+
+
+from evaluations.long_agent_release.usage_evidence import (
+    partition_billed_rounds, reconcile_compaction_usage, validate_usage_accounting,
+)
 
 
 class TofuProjectionError(ValueError):
@@ -145,55 +150,14 @@ def _non_negative_number(value: Any, label: str) -> float:
     return result
 
 
-def _validate_raw_usage_numbers(value: dict[str, Any], label: str) -> None:
-    numeric_keys = {
-        "prompt_tokens", "input_tokens", "completion_tokens", "output_tokens",
-        "cache_read_tokens", "cache_write_tokens", "cached_tokens",
-        "cache_creation_input_tokens", "cache_read_input_tokens",
-        "reasoning_tokens", "thinking_tokens", "total_tokens",
-        "stream_elapsed_ms",
-    }
-    for key in numeric_keys:
-        if key in value:
-            _non_negative_integer(value[key], f"{label}.{key}")
-    for parent, child in (
-        ("prompt_tokens_details", "cached_tokens"),
-        ("completion_tokens_details", "reasoning_tokens"),
-    ):
-        details = value.get(parent)
-        if details is None:
-            continue
-        if not isinstance(details, dict):
-            raise TofuProjectionError(f"{label}.{parent} must be an object")
-        if child in details:
-            _non_negative_integer(
-                details[child], f"{label}.{parent}.{child}")
-
-
 def _canonical_usage(value: Any, label: str) -> dict[str, int]:
-    if not isinstance(value, dict):
-        raise TofuProjectionError(f"{label} must be an object")
-    _validate_raw_usage_numbers(value, label)
-    normalized = normalize_usage(value)
-    if any(amount < 0 for amount in normalized.values()):
-        raise TofuProjectionError(f"{label} contains negative token usage")
-    uncached, total_input = split_input_tokens(value)
-    if uncached < 0 or total_input < 0:
-        raise TofuProjectionError(f"{label} has an invalid cache convention")
-    cache_read = int(normalized["cache_read"])
-    cache_write = int(normalized["cache_write"])
-    output = int(normalized["output"])
-    reasoning = int(normalized["thinking"])
-    if reasoning > output and output > 0:
-        raise TofuProjectionError(f"{label} reasoning exceeds output tokens")
-    return {
-        "prompt_tokens": int(total_input),
-        "completion_tokens": output,
-        "cache_read_tokens": cache_read,
-        "cache_write_tokens": cache_write,
-        "reasoning_tokens": reasoning,
-        "total_tokens": int(total_input) + output,
-    }
+    try:
+        result = canonical_benchmark_usage(value)
+    except BenchmarkContractError as exc:
+        raise TofuProjectionError(f"{label}: {exc}") from exc
+    if "stream_elapsed_ms" in value:
+        _non_negative_integer(value["stream_elapsed_ms"], f"{label}.stream_elapsed_ms")
+    return result
 
 
 def _aggregate_usage(rows: list[dict[str, int]]) -> dict[str, int]:
@@ -392,7 +356,13 @@ def project_tofu_trial(
         raise TofuProjectionError("Tofu tool audit contract drifted")
     expected_tools_mode = (
         'augment' if str(tool_surface) == 'production' else 'exclusive')
-    if evidence.get("model") != expected_model \
+    # Current runtimes report the canonical Model; archived adapters used
+    # the provider alias as their logical identity. Bind every logical field
+    # to this trial's one identity, while dispatch remains pinned to the
+    # exact physical wire ID below (no family/prefix acceptance).
+    logical_model = evidence.get("model")
+    admitted_ids = {expected_model, TOFU_BENCHMARK_MODELS[expected_model]['model_id']}
+    if logical_model not in admitted_ids \
             or evidence.get("status") != "done" \
             or evidence.get("customToolsMode") != expected_tools_mode:
         raise TofuProjectionError(
@@ -478,7 +448,7 @@ def project_tofu_trial(
             if round_number < 1 or round_number in requests:
                 raise TofuProjectionError(
                     "request snapshots must be unique positive rounds")
-            if event.get("model") != expected_model \
+            if event.get("model") != logical_model \
                     or not isinstance(event.get("messages"), list):
                 raise TofuProjectionError("request snapshot model/messages drifted")
             round_schemas = event.get("tools")
@@ -513,25 +483,10 @@ def project_tofu_trial(
         raise TofuProjectionError("runtime evidence contains no API rounds")
     if not isinstance(context_rows, list) or not context_rows:
         raise TofuProjectionError("runtime evidence contains no context rounds")
-    # Context compaction calls are billed as API rounds with string round
-    # ids (``compaction-<k>``, tag ``COMPACTION-*``) but emit no
-    # ``round_usage`` event — their usage is accounted separately through
-    # ``compactionUsage``. Partition them out before the per-round pairing
-    # (tb21 v11: 25 trials failed the count check purely on compaction
-    # rounds).
-    api_rounds: list[dict[str, Any]] = []
-    compaction_billed_rounds: list[dict[str, Any]] = []
-    for row in api_rounds_raw:
-        if not isinstance(row, dict):
-            raise TofuProjectionError("billed API round is not an object")
-        if isinstance(row.get("round"), int):
-            api_rounds.append(row)
-        else:
-            compaction_billed_rounds.append(row)
-    for index, row in enumerate(compaction_billed_rounds, 1):
-        if str(row.get("round") or "") != f"compaction-{index}":
-            raise TofuProjectionError(
-                "billed compaction rounds are not sequential compaction-<k>")
+    try:
+        api_rounds, compaction_billed_rounds = partition_billed_rounds(api_rounds_raw)
+    except BenchmarkContractError as exc:
+        raise TofuProjectionError(str(exc)) from exc
     contexts: dict[int, dict[str, Any]] = {}
     for row in context_rows:
         if not isinstance(row, dict):
@@ -579,8 +534,8 @@ def project_tofu_trial(
                 usage_event.get("roundNum"), "round_usage.roundNum") \
                 != logical_round:
             raise TofuProjectionError("round_usage logical round drifted")
-        if usage_event.get("model") not in (None, "", expected_model) \
-                or api_row.get("model") not in (None, "", expected_model):
+        if usage_event.get("model") not in (None, "", logical_model) \
+                or api_row.get("model") not in (None, "", logical_model):
             raise TofuProjectionError("billed API round used another model")
         raw_usage = api_row.get("usage")
         usage = _canonical_usage(
@@ -605,7 +560,7 @@ def project_tofu_trial(
             context.get("promptProfile"),
             requested_profile=requested_profile,
             round_number=logical_round,
-            expected_model=expected_model,
+            expected_model=logical_model,
         )
         request_payload = _request_payload(request_row[2])
         request_bytes = len(_canonical_bytes(request_payload))
@@ -667,19 +622,14 @@ def project_tofu_trial(
         raise TofuProjectionError(
             "request/context logical rounds differ from billed API rounds")
     main_usage = _aggregate_usage(usages)
-    compaction_raw = evidence.get("compactionUsage") or {}
-    if not isinstance(compaction_raw, dict):
-        raise TofuProjectionError("compactionUsage must be an object")
-    compaction_calls = _non_negative_integer(
-        compaction_raw.get("n_calls", 0), "compactionUsage.n_calls")
-    if compaction_calls != len(compaction_billed_rounds):
-        raise TofuProjectionError(
-            "billed compaction rounds differ from compactionUsage.n_calls")
-    compaction_usage = _canonical_usage(
-        compaction_raw, "compactionUsage")
-    if compaction_calls == 0 and any(compaction_usage.values()):
-        raise TofuProjectionError(
-            "compaction usage has tokens but no model calls")
+    compaction_raw = evidence.get("compactionUsage")
+    try:
+        compaction_usage, compaction_calls = reconcile_compaction_usage(
+            compaction_raw, compaction_billed_rounds,
+            logical_model=logical_model, physical_model=expected_model)
+    except BenchmarkContractError as exc:
+        raise TofuProjectionError(str(exc)) from exc
+    compaction_raw = compaction_raw or {}
     compaction_timing = compaction_raw.get("timing") or {}
     if not isinstance(compaction_timing, dict):
         raise TofuProjectionError("compactionUsage.timing must be an object")
@@ -747,6 +697,11 @@ def project_tofu_trial(
                 "runtime aggregate usage differs from main plus compaction calls")
         usage_detail_loss = "legacy_top_level_fold"
         aggregate_usage = summed_usage
+
+    try:
+        validate_usage_accounting(evidence, aggregate_usage["total_tokens"])
+    except BenchmarkContractError as exc:
+        raise TofuProjectionError(str(exc)) from exc
 
     audit_rows = audit.get("calls")
     # tb21 v12: a timeout abort can leave exactly one custom_tool_call

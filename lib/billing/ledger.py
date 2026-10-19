@@ -8,12 +8,7 @@ from typing import List, Optional
 
 from lib.ids import short_id
 from lib.storage import get_storage_client
-
-
-LEDGER_KINDS = frozenset({
-    'topup', 'redeem', 'bonus', 'refund', 'adjust_credit', 'reserve',
-    'reserve_release', 'debit', 'adjust_debit',
-})
+from lib.storage_authority_sql.generated_billing_contract import LEDGER_KINDS
 
 
 @dataclass(frozen=True)

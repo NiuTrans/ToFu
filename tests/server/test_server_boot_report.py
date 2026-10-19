@@ -5,7 +5,7 @@ import time
 
 import pytest
 
-from lib.server_boot_report import _display_url_host, announce_server_ready
+from lib.server.server_boot_report import _display_url_host, announce_server_ready
 
 
 pytestmark = pytest.mark.unit
@@ -52,4 +52,4 @@ def test_ready_and_first_run_urls_share_display_host_while_warning_uses_bind_hos
     assert 'Bound to 0.0.0.0' in banner
     assert 'API is reachable on the LAN WITHOUT auth' in banner
     assert boot_messages[-1] == 'Ready — handing off to Hypercorn.'
-    assert 'first-run-secret' not in capsys.readouterr().err
+    assert 'http://localhost:15000/?token=first-run-secret' in capsys.readouterr().err

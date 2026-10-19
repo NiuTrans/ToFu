@@ -7,7 +7,7 @@ import sys
 
 import pytest
 
-import lib.server_reexec as server_reexec
+import lib.server.server_reexec as server_reexec
 
 
 pytestmark = pytest.mark.unit

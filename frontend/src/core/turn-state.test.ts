@@ -46,3 +46,77 @@ describe('seamless continuation acknowledgement', () => {
     expect(next.laneOrder.main).toEqual(['target']);
   });
 });
+
+
+describe('continuous history cursor isolation', () => {
+  const tail = () => reduceTurnState(createTurnState('conversation'), {type: 'snapshot', snapshot: {
+    turns: [turn('tail', 99)], turnWindow: {laneId: 'main', hasMore: true, nextBeforeOrdinal: 99, totalTurns: 100},
+  }});
+  it('hydrates detached ranks without crossing the gap or stealing the tail cursor', () => {
+    const next = reduceTurnState(tail(), {type: 'snapshot', snapshot: {
+      turns: [turn('old', 4)], laneId: 'main', beforeOrdinal: 5,
+      nextBeforeOrdinal: 4, hasMore: false, totalTurns: 100, historyMode: 'detached',
+    }});
+    expect(next.turnsById.old).toBeTruthy();
+    expect(next.historyByLane.main).toEqual({nextBeforeOrdinal: 99, hasMore: true, totalTurns: 100});
+  });
+  it('accepts only the continuous frontier and does not reset on a mismatched older page', () => {
+    let next = reduceTurnState(tail(), {type: 'snapshot', snapshot: {
+      turns: [turn('old', 4)], laneId: 'main', beforeOrdinal: 5,
+      nextBeforeOrdinal: 4, hasMore: false, totalTurns: 100,
+    }});
+    expect(next.historyByLane.main?.nextBeforeOrdinal).toBe(99);
+    next = reduceTurnState(next, {type: 'snapshot', snapshot: {
+      turns: [turn('near', 98)], laneId: 'main', beforeOrdinal: 99,
+      nextBeforeOrdinal: 98, hasMore: true, totalTurns: 100,
+    }});
+    expect(next.historyByLane.main?.nextBeforeOrdinal).toBe(98);
+  });
+});
+
+
+describe('phase evidence after command acknowledgement', () => {
+  const startup = {phase: 'working', detailKey: 'stream.phase.workerStarting'};
+  const running = (revision: number) => turn('target', 1, {
+    status: 'running', currentAttemptId: 'attempt', projectionRevision: revision,
+    projection: {content: revision > 1 ? 'Started replying' : ''},
+  });
+  const acknowledged = () => {
+    const state = reduceTurnState(createTurnState('conversation'), {type: 'snapshot', snapshot: {
+      authoritativeFull: true, conversationRevision: 1, turns: [running(1)],
+      attempts: [{attemptId: 'attempt', turnId: 'target', status: 'running', lastSeq: 1}],
+      activeAttemptPhase: {turnId: 'target', attemptId: 'attempt', projectionRevision: 1, phase: startup},
+    }});
+    return reduceTurnState(state, {type: 'command_response', response: {
+      conversationRevision: 2, turn: running(2),
+    }});
+  };
+  const frame = (revision = 2, seq = 2, phase: unknown = null) => ({
+    type: 'projection_updated' as const, conversationId: 'conversation', turnId: 'target', attemptId: 'attempt', seq,
+    projectionRevision: revision,
+    payload: {projection: {content: 'Started replying'}, phase},
+  });
+
+  it('consumes explicit phase null even when the ACK already installed its revision', () => {
+    const state = acknowledged();
+    expect(state.livePhase).toEqual(startup);
+    const next = reduceTurnState(state, {type: 'event', event: frame()});
+    expect(next.livePhase).toBeNull();
+    expect(next.attemptsById.attempt?.lastSeq).toBe(2);
+    expect(next.turnsById.target).toBe(state.turnsById.target);
+  });
+  it('accepts a same-revision stage change but never replays its consumed sequence', () => {
+    const waiting = {phase: 'waiting_model', detail: 'Waiting for model'};
+    const next = reduceTurnState(acknowledged(), {type: 'event', event: frame(2, 2, waiting)});
+    expect(next.livePhase).toEqual(waiting);
+    const duplicate = reduceTurnState(next, {type: 'event', event: frame(2, 2, startup)});
+    expect(duplicate.livePhase).toEqual(waiting);
+  });
+  it('does not replace newer presentation with an older revision or foreign attempt', () => {
+    const state = acknowledged();
+    const old = reduceTurnState(state, {type: 'event', event: frame(1, 2)});
+    expect(old.livePhase).toEqual(startup);
+    const foreign = reduceTurnState(state, {type: 'event', event: {...frame(), attemptId: 'foreign'}});
+    expect(foreign.livePhase).toEqual(startup);
+  });
+});

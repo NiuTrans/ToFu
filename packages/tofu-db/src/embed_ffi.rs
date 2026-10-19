@@ -56,10 +56,12 @@ use zeroize::Zeroize;
 
 #[cfg(feature = "native-runtime-checkpoints")]
 #[path = "embedded_checkpoint_control.rs"]
-mod checkpoint;
+pub(crate) mod checkpoint;
 
 #[path = "embed_reply.rs"]
 mod reply;
+#[path = "embed_continuation.rs"]
+mod continuation;
 #[path = "embed_envelope.rs"]
 mod envelope;
 use crate::embed::EmbeddedRuntime;
@@ -81,7 +83,6 @@ const WATCHDOG_MAX_BUDGET: Duration = Duration::from_secs(3600);
 /// carries the operation/command id/deadline fields and JSON punctuation
 /// around the payload text. Raw payload admission and the encoded dispatch
 /// both enforce the wire byte cap; the Value API uses capped serialization.
-const MAX_EMBEDDED_ENVELOPE_BYTES: usize = 64 * 1024;
 
 fn watchdog_budget(deadline_unix_ms: u64) -> Duration {
     #[cfg(test)]
@@ -107,7 +108,7 @@ thread_local! {
     static WATCHDOG_TEST_OVERRIDE_MS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
-struct Job {
+struct RawJob {
     #[cfg(feature = "native-runtime-checkpoints")]
     checkpoint: Option<Arc<checkpoint::Registry>>,
     enqueued_at: Option<std::time::Instant>,
@@ -118,6 +119,11 @@ struct Job {
     respond: std::sync::mpsc::Sender<JobOutcome>,
     _memory: OwnedInputLease,
 }
+
+enum Job { Raw(RawJob), Resume(Arc<continuation::Continuation<phase_executor::PhaseJob>>) }
+
+#[path = "embed_phase_executor.rs"]
+mod phase_executor;
 
 enum JobOutcome {
     Responded(io::Result<Vec<u8>>),
@@ -171,6 +177,7 @@ pub struct EmbedHandle {
     runtime: Arc<EmbeddedRuntime>,
     poisoned: Arc<AtomicBool>,
     input_memory: Arc<InputMemoryAccounting>,
+    phase_registry: Arc<phase_executor::Registry>,
     jobs: Mutex<Option<JobSender<Job>>>,
     worker_receiver: JobReceiver<Job>,
 }
@@ -215,16 +222,18 @@ fn spawn_demand_worker(handle: &EmbedHandle, job: Job) -> io::Result<std::thread
     let runtime = Arc::clone(&handle.runtime);
     let jobs = handle.worker_receiver.clone();
     let poisoned = Arc::clone(&handle.poisoned);
+    let registry=Arc::clone(&handle.phase_registry);
     std::thread::Builder::new()
         .name("tofu-db-embed-demand".to_owned())
         .stack_size(handle.runtime.resource_budget.connection_stack_bytes)
-        .spawn(move || run_worker(runtime, jobs, poisoned, Some(job)))
+        .spawn(move || run_worker(runtime, jobs, poisoned, registry, Some(job)))
 }
 
 fn run_worker(
     runtime: Arc<EmbeddedRuntime>,
     jobs: JobReceiver<Job>,
     poisoned: Arc<AtomicBool>,
+    registry: Arc<phase_executor::Registry>,
     mut first_job: Option<Job>,
 ) {
     loop {
@@ -238,7 +247,16 @@ fn run_worker(
         let Ok(job) = job else {
             break;
         };
-        let Job {
+        let job=match job {
+            Job::Raw(job)=>job,
+            Job::Resume(task)=>{phase_executor::run(&runtime,&poisoned,&jobs,task);continue;}
+        };
+        if phase_executor::eligible(&job) {
+            registry.start(&runtime,&poisoned,&jobs,job);
+            let _=jobs.prepare_for_next_job();
+            continue;
+        }
+        let RawJob {
             #[cfg(feature = "native-runtime-checkpoints")]
             checkpoint,
             enqueued_at,
@@ -343,6 +361,7 @@ fn read_c_path(pointer: *const c_char) -> std::io::Result<String> {
 fn poison(handle: &EmbedHandle) {
     handle.poisoned.store(true, Ordering::Release);
     handle.runtime.disarm_drop();
+    handle.phase_registry.cancel_all();
 }
 
 /// Frees one handle exactly once. A healthy handle runs its graceful or
@@ -360,6 +379,7 @@ fn teardown(handle: *mut EmbedHandle, graceful: bool) {
     // never, when wedged — it is detached by contract and only ever holds
     // an Arc, so teardown itself can never block on it).
     if let Ok(mut jobs) = handle.jobs.lock() {
+        handle.phase_registry.cancel_all();
         jobs.take();
     }
     if handle.poisoned.load(Ordering::Relaxed) {
@@ -378,6 +398,8 @@ fn teardown(handle: *mut EmbedHandle, graceful: bool) {
             handle.runtime.close_ungraceful()
         }
     }));
+    #[cfg(feature = "embedded-mimalloc")]
+    let reclaim_pages = graceful && matches!(&outcome, Ok(Ok(())));
     if let Err(payload) = outcome {
         crate::engine_log::error(
             "panic_containment",
@@ -389,6 +411,23 @@ fn teardown(handle: *mut EmbedHandle, graceful: bool) {
         // The stop may not have completed; do not run it again on Drop.
         handle.runtime.disarm_drop();
     }
+    // Release this owner's engine/cache allocations before reclaiming free
+    // allocator pages. Other authorities and outstanding worker references keep
+    // their live allocations. Poison, failed stop and abandon skip collection.
+    drop(handle);
+    #[cfg(feature = "embedded-mimalloc")]
+    if reclaim_pages {
+        collect_embed_allocator(true);
+    }
+}
+
+#[cfg(feature = "embedded-mimalloc")]
+fn collect_embed_allocator(force: bool) {
+    extern "C" { fn mi_collect(force: bool); }
+    // SAFETY: exact public signature of this library's linked mimalloc. Only
+    // free pages are reclaimed; live objects and other allocator instances stay
+    // owned. This changes no allocator option and performs no engine operation.
+    unsafe { mi_collect(force); }
 }
 
 /// # Safety
@@ -429,6 +468,7 @@ pub unsafe extern "C" fn tofudb_embed_open(
                 checkpoints: std::sync::OnceLock::new(),
                 runtime, poisoned, jobs: Mutex::new(Some(sender)), worker_receiver: receiver,
                 input_memory: Arc::default(),
+                phase_registry: Arc::default(),
             }))
         }
 
@@ -465,16 +505,14 @@ pub extern "C" fn tofudb_embed_allocator_kind() -> u32 {
 /// changing allocator options, or collecting Python/host allocator instances.
 /// `force`: 0 = ordinary collection, 1 = aggressive collection; other values
 /// return -1 without collecting. Returns 1 after invocation, 0 on caught panic.
-/// Collection may be expensive and is never invoked automatically.
+/// Explicit attribution may collect while authorities are live. Ordinary
+/// mimalloc builds reclaim free pages only after a successful graceful close.
 #[cfg(feature = "allocator-diagnostics")]
 #[no_mangle]
 pub extern "C" fn tofudb_embed_collect_allocator(force: u32) -> i32 {
     if force > 1 { return -1; }
     catch_unwind(AssertUnwindSafe(|| {
-        extern "C" { fn mi_collect(force: bool); }
-        // SAFETY: exact mimalloc public C signature; the feature selects that
-        // same linked allocator. It reclaims free pages, never live objects.
-        unsafe { mi_collect(force == 1); }
+        collect_embed_allocator(force == 1);
         1
     })).unwrap_or(0)
 }
@@ -658,12 +696,11 @@ unsafe fn execute_mode(
     if handle.is_null() || request.is_null() || request_len == 0 {
         return fail(out, out_cap, "invalid embedded execute arguments");
     }
-    if request_len > crate::generated_storage_v2::MAX_STREAMED_REQUEST_PAYLOAD_BYTES
-        + MAX_EMBEDDED_ENVELOPE_BYTES {
+    if request_len > isize::MAX as usize {
         return fail(
             out,
             out_cap,
-            "embedded request exceeds the storage.v2 payload envelope bound",
+            "embedded request exceeds addressable byte slice length",
         );
     }
     // SAFETY: the caller guarantees a live handle and `request_len` bytes.
@@ -729,9 +766,18 @@ unsafe fn execute_mode(
         }
         Some(registry)
     } else { None };
+    if !checkpoint_mode && command_id.is_none() {
+        if let Some(result) = handle.runtime.try_cached_json(&operation, &payload, command_id.as_deref(), deadline_unix_ms,
+            || handle.jobs.try_lock().ok().is_some_and(|jobs| jobs.as_ref().is_some_and(JobSender::try_healthy))) {
+            return match result {
+                Ok(response) => write_c_buffer(out, out_cap, &response),
+                Err(error) => fail(out, out_cap, &error.to_string()),
+            };
+        }
+    }
     let budget = watchdog_budget(deadline_unix_ms);
     let (respond, outcome_rx) = reply::fresh::<JobOutcome>();
-    let job = Job {
+    let job = Job::Raw(RawJob {
         #[cfg(feature = "native-runtime-checkpoints")]
         checkpoint,
         enqueued_at: crate::request_profile::enabled().then(std::time::Instant::now),
@@ -741,7 +787,7 @@ unsafe fn execute_mode(
         deadline_unix_ms,
         respond,
         _memory: memory,
-    };
+    });
     let _submit = crate::fsync_stats::StageTimer::diagnostic(crate::fsync_stats::STAGE_EMBEDDED_JOB_SUBMIT);
     let handle_lock = crate::fsync_stats::StageTimer::diagnostic(crate::fsync_stats::STAGE_EMBEDDED_HANDLE_LOCK);
     let submitted = match handle.jobs.lock() {

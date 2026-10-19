@@ -11,8 +11,7 @@ use serde_json::{json, Map, Value};
 use crate::authority::{AuthorityDatabase, AuthorityTransaction};
 use crate::entity::EntityKey;
 use crate::generated_tofudb_ir::{
-    DAILY_COST_COUNT_NAMESPACE, DAILY_COST_DOCUMENT_NAMESPACE, MAX_DAILY_COST_DOCUMENT_BYTES,
-    MAX_DAILY_COST_MONTH_ROWS, MAX_DAILY_COST_PERSISTED_DATES, MAX_TRANSACTION_IR_LITERAL_BYTES,
+    DAILY_COST_COUNT_NAMESPACE, DAILY_COST_DOCUMENT_NAMESPACE, MAX_ENTITY_RANGE_ROWS,
 };
 use crate::versioned_document::{self, PutRequest};
 
@@ -128,7 +127,7 @@ fn get_value(
         LOGICAL_NAMESPACE,
         date,
         transaction.owner_user_id(),
-        MAX_DAILY_COST_DOCUMENT_BYTES,
+        usize::MAX,
     )?
     .map(|raw| decode_document(&raw, date))
     .transpose()
@@ -163,9 +162,6 @@ pub(crate) fn upsert(
         "computed_at": request.computed_at,
     }))
     .map_err(|_| invalid_input("daily-cost document cannot be encoded"))?;
-    if value_json.len() > MAX_DAILY_COST_DOCUMENT_BYTES {
-        return Err(resource_exhausted("daily-cost document exceeds its bound"));
-    }
     if is_new {
         let next = read_count(database, transaction)?
             .checked_add(1)
@@ -184,7 +180,7 @@ pub(crate) fn upsert(
             updated_at_ms: request.updated_at_ms,
         },
         transaction.owner_user_id(),
-        MAX_DAILY_COST_DOCUMENT_BYTES,
+        usize::MAX,
     )?;
     Ok(br#"{"saved":true}"#.to_vec())
 }
@@ -199,33 +195,25 @@ pub(crate) fn month(
         return Err(invalid_input("invalid daily-cost month"));
     }
     let prefix = format!("{year:04}-{month:02}-");
-    let (start, end) = document_range(transaction, prefix.as_bytes())?;
-    let rows = database.entity_scan(transaction, &start, &end, MAX_DAILY_COST_MONTH_ROWS + 1)?;
-    if rows.len() > MAX_DAILY_COST_MONTH_ROWS {
-        return Err(invalid_data(
-            "daily-cost month exceeds its syntactic date bound",
-        ));
-    }
-    let mut values = Vec::with_capacity(rows.len());
-    let mut response_bytes = 2_usize;
-    for (key, _) in rows {
-        let date = std::str::from_utf8(key.key_bytes())
-            .map_err(|_| invalid_data("daily-cost date key is malformed"))?;
-        if !valid_date(date) || !date.starts_with(&prefix) {
-            return Err(invalid_data("daily-cost date key is inconsistent"));
+    let (mut cursor, end) = document_range(transaction, prefix.as_bytes())?;
+    let mut values = Vec::new();
+    loop {
+        let rows = database.entity_scan(transaction, &cursor, &end, MAX_ENTITY_RANGE_ROWS)?;
+        if rows.is_empty() { break; }
+        let mut successor = rows.last().expect("nonempty page").0.key_bytes().to_vec();
+        successor.push(0);
+        cursor = EntityKey::new(transaction.tenant_id(), transaction.owner_user_id(),
+            DAILY_COST_DOCUMENT_NAMESPACE, &successor)?;
+        for (key, _) in rows {
+            let date = std::str::from_utf8(key.key_bytes())
+                .map_err(|_| invalid_data("daily-cost date key is malformed"))?;
+            if !valid_date(date) || !date.starts_with(&prefix) {
+                return Err(invalid_data("daily-cost date key is inconsistent"));
+            }
+            let value = get_value(database, transaction, date)?
+                .ok_or_else(|| invalid_data("daily-cost document disappeared"))?;
+            values.push(value);
         }
-        let value = get_value(database, transaction, date)?
-            .ok_or_else(|| invalid_data("daily-cost document disappeared"))?;
-        response_bytes = response_bytes
-            .checked_add(
-                serde_json::to_vec(&value)
-                    .map_err(|_| invalid_data("daily-cost response cannot be encoded"))?
-                    .len()
-                    + 1,
-            )
-            .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
-            .ok_or_else(|| resource_exhausted("daily-cost month response exceeds 8 MiB"))?;
-        values.push(value);
     }
     serde_json::to_vec(&values).map_err(|_| invalid_data("daily-cost month cannot be encoded"))
 }
@@ -256,7 +244,7 @@ pub(crate) fn persisted_dates(
     transaction: &mut AuthorityTransaction,
     dates: &[String],
 ) -> io::Result<Vec<u8>> {
-    if dates.len() > MAX_DAILY_COST_PERSISTED_DATES || dates.iter().any(|date| !valid_date(date)) {
+    if dates.iter().any(|date| !valid_date(date)) {
         return Err(invalid_input("invalid daily-cost date probe"));
     }
     let mut existing = Vec::new();

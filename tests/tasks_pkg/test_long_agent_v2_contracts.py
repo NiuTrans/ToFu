@@ -1098,14 +1098,14 @@ def test_tool_result_v2_round_aggregate_keeps_honest_preview_on_store_failure(
 
 
 def test_tool_artifact_cas_is_owner_scoped_expiring_and_utf8_safe():
-    from lib.storage_sidecar.adapters.sqlite import SQLiteSession
-    from lib.storage_sidecar.operations_pkg._artifacts import (
+    from lib.storage_authority_sql.adapters.sqlite import SQLiteSession
+    from lib.storage_authority_sql.operations_pkg._artifacts import (
         _tool_result_artifact_prune,
         _tool_result_artifact_put,
         _tool_result_artifact_read,
         _tool_result_artifact_search,
     )
-    from lib.storage_sidecar.schema import initialize_schema
+    from lib.storage_authority_sql.schema import initialize_schema
 
     connection = sqlite3.connect(":memory:")
     connection.row_factory = sqlite3.Row
@@ -1275,7 +1275,7 @@ def test_adaptive_summary_rejects_missing_goal_constraints_and_pending_work():
         "Next, run the storage migration test.", snapshot) == []
 
 
-def test_adaptive_l2_replaces_lossy_narrative_with_derived_state(monkeypatch):
+def test_adaptive_l2_preserves_original_context_when_summary_loses_state(monkeypatch):
     import lib.tasks_pkg.compaction._layer2._compact as layer2
     from lib.tasks_pkg.compaction.api import execute_compact_tool
 
@@ -1298,16 +1298,18 @@ def test_adaptive_l2_replaces_lossy_narrative_with_derived_state(monkeypatch):
                    "compaction": {"strategy": "adaptive"}},
         "_todos": ["run the storage migration test"],
     }
+    from copy import deepcopy
+    original_messages = deepcopy(messages)
     compact_result = execute_compact_tool(
         messages, task=task, preserve_budget_tokens=500,
         _compaction_skip_archive=True, _result_meta=meta)
 
-    assert meta["compacted"] is True
+    assert meta["compacted"] is False
     assert meta["summaryRejected"] is True
     assert "goal" in meta["missingTaskStateFields"]
-    assert "TaskStateSnapshotV1" in compact_result
-    assert "artifact cursor recovery" in compact_result
-    assert "TaskStateSnapshotV1" in meta["summary_text"]
+    assert meta["summaryFailureReason"] == "critical_state_missing"
+    assert "original context preserved" in compact_result
+    assert messages == original_messages
 
 
 def test_orchestration_v2_selects_one_explainable_shape(monkeypatch):
@@ -1918,7 +1920,7 @@ def test_artifact_continuation_label_names_source_round():
     """The row is BORN with the readable label: source round + source tool
     display replace the bare content-hash digest at round-build time."""
     from lib.tasks_pkg.tool_display._dispatch import _build_tool_round_entry
-    from lib.tool_result_artifacts import register_artifact_provenance
+    from lib.tool_results.tool_result_artifacts import register_artifact_provenance
 
     ref = "tool-result:" + "d" * 64
     task: dict = {}
@@ -1973,7 +1975,7 @@ def test_artifact_continuation_batch_search_names_patterns():
     patterns being searched — otherwise a 4-pattern batch renders as the
     opaque 'Search 4 saved tool results'."""
     from lib.tasks_pkg.tool_display._dispatch import _build_tool_round_entry
-    from lib.tool_result_artifacts import register_artifact_provenance
+    from lib.tool_results.tool_result_artifacts import register_artifact_provenance
 
     ref = "tool-result:" + "e" * 64
     task: dict = {}

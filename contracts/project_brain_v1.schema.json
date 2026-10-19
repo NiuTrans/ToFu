@@ -27,7 +27,7 @@
         "ownerUserId": {"type": "integer", "minimum": 1},
         "projectKey": {"type": "string", "minLength": 1, "maxLength": 4096},
         "workItems": {
-          "type": "array", "maxItems": 100,
+          "type": "array",
           "items": {"$ref": "#/$defs/projectWorkItem"}
         }
       },
@@ -74,11 +74,11 @@
         "trigger": {"enum": ["todo_write", "file_write", "isolated_workspace"]},
         "status": {"enum": ["active", "completed", "failed", "cancelled"]},
         "changedPaths": {
-          "type": "array", "maxItems": 200, "uniqueItems": true,
+          "type": "array", "uniqueItems": true,
           "items": {"type": "string", "minLength": 1, "maxLength": 4096}
         },
         "artifacts": {
-          "type": "array", "maxItems": 100,
+          "type": "array",
           "items": {"$ref": "#/$defs/artifact"}
         },
         "resultSummary": {"type": "string", "maxLength": 4000},
@@ -183,11 +183,11 @@
         "project": {"type": "string"},
         "headSequence": {"type": "integer", "minimum": 0},
         "active": {
-          "type": "array", "maxItems": 100,
+          "type": "array",
           "items": {"$ref": "#/$defs/projectWorkItem"}
         },
         "recentOutcomes": {
-          "type": "array", "maxItems": 100,
+          "type": "array",
           "items": {"$ref": "#/$defs/projectWorkItem"}
         }
       },
@@ -198,7 +198,7 @@
       "required": ["events", "headSequence"],
       "properties": {
         "events": {
-          "type": "array", "maxItems": 200,
+          "type": "array",
           "items": {"$ref": "#/$defs/narrativeEvent"}
         },
         "headSequence": {"type": "integer", "minimum": 0}

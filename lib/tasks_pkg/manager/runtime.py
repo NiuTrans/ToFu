@@ -120,7 +120,7 @@ def _record_latest_task(conv_id: str, task_id: str) -> None:
     with _conv_latest_task_lock:
         _conv_latest_task[conv_id] = task_id
     try:
-        from lib.runtime_state_store import get_store
+        from lib.runtime.runtime_state_store import get_store
         get_store().set_value(_LATEST_KIND, conv_id, task_id, _LATEST_TTL)
     except Exception as e:
         logger.debug('[Task] supersede index mirror failed conv=%s: %s',
@@ -150,7 +150,7 @@ def _clear_latest_task(conv_id: str, *, expect_task_id: str | None = None) -> bo
             del _conv_latest_task[conv_id]
             removed = True
     try:
-        from lib.runtime_state_store import get_store
+        from lib.runtime.runtime_state_store import get_store
         get_store().delete_value(_LATEST_KIND, conv_id)
     except Exception as e:
         logger.debug('[Task] supersede index mirror clear failed conv=%s: %s',
@@ -163,7 +163,7 @@ def _latest_task_for_conv(conv_id: str):
     (cross-replica) and falls back to the local dict; the two agree under the
     inproc backend."""
     try:
-        from lib.runtime_state_store import get_store
+        from lib.runtime.runtime_state_store import get_store
         v = get_store().get_value(_LATEST_KIND, conv_id)
         if v:
             return v

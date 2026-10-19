@@ -69,7 +69,7 @@ def ensure_gsap(scene_dir: str, *, download: bool = True,
         if not download:
             return ''
         try:
-            from lib.http_client import http_get
+            from lib.http_transport.client import http_get
             response = http_get(GSAP_URL, timeout=timeout)
             data = getattr(response, 'content', b'') or b''
             code = int(getattr(response, 'status_code', 0) or 0)

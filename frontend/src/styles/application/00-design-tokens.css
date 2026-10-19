@@ -56,10 +56,23 @@
   --conversation-font-size-meta:var(--font-size-sm);
   --conversation-font-size-caption:var(--font-size-xs);
   --conversation-font-size-table:var(--font-size-lg);
-  --conversation-font-size-heading-1:var(--font-size-3xl);
-  --conversation-font-size-heading-2:var(--font-size-2xl);
-  --conversation-font-size-heading-3:var(--font-size-xl);
+  --conversation-font-size-heading-1:var(--font-size-4xl);
+  --conversation-font-size-heading-2:var(--font-size-3xl);
+  --conversation-font-size-heading-3:var(--font-size-2xl);
   --conversation-reading-measure:720px;
+  /* Mixed chronology: shared process row, label column and evidence inset.
+     Content order stays in the Surface; these tokens only set reading geometry. */
+  --conversation-process-font-size:var(--font-size-lg);
+  --conversation-process-row-height:var(--control-h-md);
+  --conversation-process-inset:var(--space-2);
+  --conversation-process-marker:var(--space-4);
+  --conversation-process-gap:var(--space-2);
+  --conversation-process-indent:calc(var(--conversation-process-inset) + var(--conversation-process-marker) + var(--conversation-process-gap));
+  --conversation-flow-gap:var(--space-1);
+  --conversation-prose-gap:var(--space-4);
+  --conversation-process-radius:12px;
+  --conversation-process-shell-inset:var(--space-2);
+  --conversation-answer-gap:var(--space-8);
   --inspector-reading-measure:860px;
   --weight-regular:400;
   --weight-medium:500;
@@ -72,10 +85,25 @@
   --control-edge-inset:1px;
   --tool-receipt-label-width:96px;
   --tool-source-chip-measure:360px;
+
   --radius-pill:999px;
   --control-h-sm:28px;
   --control-h-md:34px;
   --control-h-lg:42px;
+
+  /* Project workbench chrome: geometry is identical across themes. */
+  --project-dialog-measure:920px;
+  --project-frame-width:3px;
+  --project-panel-width:2px;
+  --project-surface:var(--bg-secondary);
+  --project-panel:var(--bg-primary);
+  --project-band:var(--bg-tertiary);
+  --project-ink:var(--text-primary);
+  --project-muted:var(--text-secondary);
+  --project-line:var(--border);
+  --project-accent:var(--accent);
+  --project-accent-hover:var(--accent-hover);
+  --project-on-accent:var(--text-on-accent);
 
   /* ── Motion ────────────────────────────────────────────────────────────
      --ease-standard matches the legacy --transition timing. */
@@ -88,6 +116,7 @@
   /* ── Z-index scale (NEW code only) ─────────────────────────────────────
      Legacy uses up to 10000; new code stays inside this ramp. Native
      <dialog> renders in the top layer and needs no z-index at all. */
+  --z-turn-context:1;
   --z-dropdown:1000;
   --z-sticky:1100;
   --z-overlay:9000;
@@ -102,6 +131,9 @@
   /* ── Text painted directly on --accent fills ──
      Matches every existing ghost fallback (#fff) → zero visual change. */
   --text-on-accent:#fff;
+
+  /* Scannable QR quiet zones stay white in every theme. */
+  --qr-plate-background:#fff;
 
   /* ── Feedback colors (dark) ────────────────────────────────────────────
      Text values target ≥4.5:1 on --bg-primary; verified in the ui-gallery
@@ -139,6 +171,17 @@
 
 [data-theme="tofu"]{
   --font-ui:var(--sans-body);
+
+  /* Match the existing CO-PILOT paper/ink/gold chrome, not chat's cold canvas. */
+  --project-surface:#faf8f3;
+  --project-panel:#fff;
+  --project-band:#f2ecda;
+  --project-ink:#1a1814;
+  --project-muted:#716a55;
+  --project-line:#d8d1c0;
+  --project-accent:#c9993f;
+  --project-accent-hover:#b58936;
+  --project-on-accent:#1a1814;
   /* Darkened derivatives of the tofu palette (fetch-teal / thinking amber /
      search-blue) so text clears 4.5:1 on the cold-white canvas. */
   --success-text:#3D7263;

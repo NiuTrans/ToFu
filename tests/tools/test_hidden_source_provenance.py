@@ -50,7 +50,7 @@ def test_complete_ack_has_no_missing_source_notice(xuecheng_ack, form):
     # Representation/duplicate storage remains recoverable after compaction,
     # but must not prompt an immediate redundant artifact round trip.
     if form in ('wrapped_mcp', 'normalized'):
-        from lib.tool_result_artifacts import ToolResultArtifactRepository
+        from lib.tool_results.tool_result_artifacts import ToolResultArtifactRepository
         ref = delivery.evidence['artifactRef']
         assert ref not in delivery.model_text
         recovered = ToolResultArtifactRepository().read_range(user_id=17, artifact_ref=ref, limit=8192)
@@ -59,7 +59,7 @@ def test_complete_ack_has_no_missing_source_notice(xuecheng_ack, form):
 
 @pytest.mark.parametrize('size', [20, 200000])
 def test_real_omission_has_visible_concrete_ref_and_recoverable_source(size):
-    from lib.tool_result_artifacts import ToolResultArtifactRepository
+    from lib.tool_results.tool_result_artifacts import ToolResultArtifactRepository
     original = 'GENUINE_OMITTED_NEEDLE ' + 'x' * size
     source = TrustedResultText('Usable answer', source_omitted=True,
                                canonical=capture_result(original))
@@ -164,19 +164,20 @@ def test_plain_receipt_flags_do_not_grant_provenance():
     assert not capture_result(outer).source_omitted
 
 
-def test_browser_render_marks_actual_clip_not_formatting(monkeypatch):
+def test_browser_render_keeps_complete_source_until_shared_l0(monkeypatch):
     from lib.browser.content import EvidenceReceipt
     from lib.browser.handlers._page import _render_with_evidence
     receipt = EvidenceReceipt(status='ok', content='All page content', records=[], evidence=[],
                               coverage={'truncated': False})
     receipt.evidence_json = json.dumps(receipt)
-    complete = _render_with_evidence(receipt, 8192)
+    complete = _render_with_evidence(receipt)
     assert not capture_result(complete).source_omitted
-    receipt['content'] = 'x' * 10000
+    receipt['content'] = 'x ' * 100000 + 'SOURCE_TAIL'
     receipt.evidence_json = json.dumps(receipt)
-    clipped = _render_with_evidence(receipt, 2048)
-    assert capture_result(clipped).source_omitted
-    delivery = deliver(clipped)
+    complete = _render_with_evidence(receipt)
+    assert 'SOURCE_TAIL' in complete
+    assert not capture_result(complete).source_omitted
+    delivery = deliver(complete)
     assert delivery.evidence['artifactRef'] in delivery.model_text
 
 
@@ -213,8 +214,8 @@ def test_settle_pipeline_forwards_provenance_and_model_reference(monkeypatch, xu
 
 @pytest.mark.parametrize('degraded', [False, True])
 def test_cli_preview_provenance_is_recoverable_only_when_writer_retained(degraded):
-    from lib.tool_result_artifact_writer import ToolResultArtifact
-    from lib.tool_result_artifacts import ToolResultArtifactRepository
+    from lib.tool_results.tool_result_artifact_writer import ToolResultArtifact
+    from lib.tool_results.tool_result_artifacts import ToolResultArtifactRepository
     from lib.tasks_pkg.handlers.code_exec import _project_output_artifact
     ref = ''
     if not degraded:
@@ -251,7 +252,7 @@ def test_fetch_readgate_opt_in_only_for_original_source(monkeypatch, gate):
         SimpleNamespace(_fetch_url_one=lambda *a, **k: item), None))
     monkeypatch.setattr(handler, '_format_fetch_display', lambda *a: {})
     monkeypatch.setattr(handler, '_finalize_tool_round', lambda *a, **k: None)
-    monkeypatch.setattr('lib.search_bridge.bind_search_browser', lambda **k: nullcontext())
+    monkeypatch.setattr('lib.search.search_bridge.bind_search_browser', lambda **k: nullcontext())
     _, source, _ = handler._handle_fetch_url(
         {'_userId': 17}, {}, 'fetch_url', 'fetch',
         {'url': 'https://example.org/received'}, 0, {}, {}, None, False)
@@ -278,7 +279,7 @@ def test_normalization_state_is_not_rehydrated_from_application_json():
 @pytest.mark.parametrize('omitted', [False, True])
 def test_spilled_batch_child_keeps_host_provenance_without_redundant_ack_notice(omitted):
     from lib.tools.result_value import CanonicalBatchSink
-    from lib.tool_result_artifacts import ToolResultArtifactRepository
+    from lib.tool_results.tool_result_artifacts import ToolResultArtifactRepository
     sink = CanonicalBatchSink(17)
     sink.remaining = 0
     child = replace(capture_result('SPILLED_CHILD_ORIGINAL'), source_omitted=omitted)

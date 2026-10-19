@@ -672,7 +672,7 @@ def _opencode_trial_evidence_checks(
             valid += 1
         except (OSError, ValueError, OpenCodeProjectionError) as exc:
             if len(errors) < 5:
-                from lib.log_record_values import text_value
+                from lib.logging_pkg.log_record_values import text_value
                 reason = text_value(str(exc), max_chars=240)
                 errors.append(f"{trial_dir.name}:{type(exc).__name__}:{reason}")
     return [AuditCheck(

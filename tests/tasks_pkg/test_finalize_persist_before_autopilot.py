@@ -68,3 +68,46 @@ def test_default_call_still_releases(persist_side_effects_off):
     task = _mk_task('terminal-default-release')
     assert persist_task_result(task) is True
     assert task['messages'] is None
+
+
+def test_transient_release_preserves_only_transcript_authority():
+    from lib.tasks_pkg.manager._persist import _release_heavy_task_state
+
+    task = _mk_task('transient-terminal')
+    task['_transientRuntime'] = True
+    task['_messages_include_current_run'] = True
+    task['messages'].append({'role': 'assistant', 'content': 'answer'})
+    task['_tool_result_cache'] = {'derived': 'discard'}
+    assert _release_heavy_task_state(task) == 1
+    assert task['messages'] == [
+        {'role': 'user', 'content': 'q'},
+        {'role': 'assistant', 'content': 'answer'},
+    ]
+    assert task['_tool_result_cache'] is None
+
+
+@pytest.mark.parametrize('ack', [False, True])
+def test_completion_spans_preserve_delivery_listener_order(monkeypatch, ack, persist_side_effects_off):
+    import json
+    from lib import observability
+    from lib.tasks_pkg import workspace_delivery
+    from lib.tasks_pkg.manager import persist_task_result
+    records, calls = [], []
+    monkeypatch.setattr(observability.logger, 'info',
+                        lambda message, payload: records.append(json.loads(payload)))
+    def deliver(task):
+        calls.append('delivery')
+        return ack
+    monkeypatch.setattr(workspace_delivery, 'persist_terminal_workspace_intent', deliver)
+    monkeypatch.setattr('lib.tasks_pkg.manager._terminal.notify_terminal_listeners',
+                        lambda task: calls.append('listener'))
+    task = _mk_task('terminal-listener-order')
+    assert persist_task_result(task, _defer_heavy_release=True) is ack
+    assert calls == (['delivery', 'listener'] if ack else ['delivery'])
+    completed = {record['stage']: record for record in records
+                 if record['boundary'] == 'complete'}
+    expected = 'success' if ack else 'deferred'
+    assert completed['workspace_delivery']['outcome'] == expected
+    assert completed['persistence']['outcome'] == expected
+    assert ('terminal_listeners' in completed) is ack
+    assert all(record['task_id'] == task['id'] for record in records)

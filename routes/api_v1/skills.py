@@ -50,7 +50,7 @@ _INSTALL_MAX_BYTES = 25 * 1024 * 1024
 
 def http_get(*args, **kwargs):
     """Load shared HTTP transport only for an explicit catalog install."""
-    from lib.http_client import http_get as implementation
+    from lib.http_transport.client import http_get as implementation
     return implementation(*args, **kwargs)
 
 

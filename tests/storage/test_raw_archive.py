@@ -353,7 +353,7 @@ def _unit_payload() -> dict:
 
 def test_raw_archive_put_skips_blob_readback_and_global_scan():
     """Writer-thread put stays byte-light (2026-09-05 starvation incident)."""
-    from lib.storage_sidecar.operations_pkg import _raw_archives
+    from lib.storage_authority_sql.operations_pkg import _raw_archives
 
     session = _RecordingSession(
         [
@@ -375,7 +375,7 @@ def test_raw_archive_put_skips_blob_readback_and_global_scan():
 
 def test_raw_archive_usage_counter_bootstraps_from_table_once():
     """Authorities predating the counter seed it from one SUM, then reuse."""
-    from lib.storage_sidecar.operations_pkg import _raw_archives
+    from lib.storage_authority_sql.operations_pkg import _raw_archives
 
     session = _RecordingSession(
         [
@@ -399,7 +399,7 @@ def test_raw_archive_usage_counter_bootstraps_from_table_once():
 
 
 def test_raw_archive_delete_debits_usage_counter():
-    from lib.storage_sidecar.operations_pkg import _raw_archives
+    from lib.storage_authority_sql.operations_pkg import _raw_archives
 
     session = _RecordingSession(
         [("SUM(stored_bytes)", {"total": 40})],

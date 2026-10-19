@@ -1,3 +1,4 @@
+import { entityRecordValues } from '../domain/turn-store';
 /**
  * Lifecycle-local turn overlays for work that is visible before it is durable.
  *
@@ -55,7 +56,7 @@ export function createTransientTurnOverlay(): TransientTurnOverlay {
       const laneOrder = Object.fromEntries(Object.entries(state.laneOrder)
         .map(([laneId, turnIds]) => [laneId, [...(turnIds ?? [])]]));
       const authoritativeTurnByPresentationId = new Map(
-        Object.values(state.turnsById).flatMap((turn) => (
+        entityRecordValues(state.turnsById).flatMap((turn) => (
           turn ? [[turn.presentationId || turn.turnId, turn.turnId] as const] : []
         )),
       );

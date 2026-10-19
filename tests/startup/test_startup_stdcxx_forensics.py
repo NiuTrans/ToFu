@@ -380,7 +380,7 @@ def test_first_use_linkage_degradation_is_announced_not_silent():
     proc = subprocess.run(
         [sys.executable, '-c',
          'import server; '
-         'from lib.search_runtime import ensure_search_runtime; '
+         'from lib.search.search_runtime import ensure_search_runtime; '
          '\ntry:\n ensure_search_runtime()\n'
          'except Exception:\n print("SEARCH-DEGRADED")'],
         cwd=_REPO, env=env, timeout=240,
@@ -400,9 +400,9 @@ def test_healthy_first_use_installs_search_fully():
         [sys.executable, '-c',
          'import sys; import server;'
          'print("BEFORE", "tofu_search" in sys.modules);'
-         'from lib.search_runtime import ensure_search_runtime;'
+         'from lib.search.search_runtime import ensure_search_runtime;'
          'ensure_search_runtime();'
-         'from lib.search_bridge import _installed;'
+         'from lib.search.search_bridge import _installed;'
          'import lib.tasks_pkg.handlers.search._core as search_core;'
          'print("BRIDGE", _installed, "HANDLER", callable(search_core._web_search_one))'],
         cwd=_REPO, env={k: v for k, v in os.environ.items() if k != 'LD_PRELOAD'},

@@ -15,12 +15,12 @@ from collections.abc import Mapping
 from typing import Any
 
 from lib.log import get_logger
-from lib.tool_round_identity import (
+from lib.tool_results.tool_round_identity import (
     execution_batch_keys,
     execution_identity,
     execution_llm_round,
 )
-from lib.tool_round_replay import SUPERSEDED_PROVIDER_ATTEMPT_FIELD
+from lib.tool_results.tool_round_replay import SUPERSEDED_PROVIDER_ATTEMPT_FIELD
 
 from lib.tasks_pkg.segments._types import SEG_THINKING, SEG_TEXT, SEG_TOOL_USE
 

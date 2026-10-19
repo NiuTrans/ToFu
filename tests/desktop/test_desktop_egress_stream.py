@@ -454,7 +454,7 @@ class TestTransportIntegration(unittest.TestCase):
 
     def test_midstream_egress_failure_maps_to_unreachable(self):
         from lib.llm.stream import _stream_chat_once
-        from lib.llm_errors import EndpointUnreachableError
+        from lib.llm.llm_errors import EndpointUnreachableError
 
         class _DyingReader:
             status_code = 200

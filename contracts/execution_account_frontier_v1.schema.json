@@ -1,0 +1,217 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "tofu.execution-account-frontier/v1",
+  "type": "object",
+  "properties": {
+    "format": {
+      "const": "tofu.execution-account-frontier/v1"
+    },
+    "version": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 18446744073709551615
+    },
+    "reason": {
+      "enum": [
+        "bound",
+        "attached",
+        "detached",
+        "tool_reserved",
+        "model_dispatched",
+        "model_settled",
+        "actor_rebound",
+        "tools_reconciled"
+      ]
+    },
+    "snapshot": {
+      "type": "object"
+    },
+    "actors": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 512
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/actor"
+      }
+    },
+    "child_ordinal": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 18446744073709551615
+    },
+    "closed_tokens": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 18446744073709551615
+    },
+    "closed_tool_calls": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 18446744073709551615
+    },
+    "model_requests": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "attempt_ordinal": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 18446744073709551615
+          },
+          "task_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "dispatched": {
+            "type": "boolean"
+          },
+          "reserved_tokens": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 18446744073709551615
+          }
+        },
+        "required": [
+          "attempt_ordinal",
+          "task_id",
+          "dispatched",
+          "reserved_tokens"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "recovery": {
+      "type": "object",
+      "properties": {
+        "source_root_task_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "source_frontier_version": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        },
+        "pending_actors": {
+          "type": "object",
+          "minProperties": 0,
+          "propertyNames": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/actor"
+          }
+        }
+      },
+      "required": [
+        "source_root_task_id",
+        "source_frontier_version",
+        "pending_actors"
+      ],
+      "additionalProperties": false
+    },
+    "actor_rebinding": {
+      "type": "object",
+      "properties": {
+        "source_task_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "target_task_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        }
+      },
+      "required": [
+        "source_task_id",
+        "target_task_id"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "format",
+    "version",
+    "reason",
+    "snapshot",
+    "actors",
+    "child_ordinal",
+    "closed_tokens",
+    "closed_tool_calls",
+    "model_requests"
+  ],
+  "additionalProperties": false,
+  "$defs": {
+    "actor": {
+      "type": "object",
+      "properties": {
+        "parent_task_id": {
+          "type": "string",
+          "maxLength": 512
+        },
+        "tokens": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        },
+        "tool_calls": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        },
+        "model_ordinal": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        },
+        "tool_ordinal": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        }
+      },
+      "required": [
+        "parent_task_id",
+        "tokens",
+        "tool_calls",
+        "model_ordinal",
+        "tool_ordinal"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "reason": {
+            "const": "actor_rebound"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "actor_rebinding"
+        ]
+      },
+      "else": {
+        "not": {
+          "required": [
+            "actor_rebinding"
+          ]
+        }
+      }
+    }
+  ]
+}

@@ -16,6 +16,7 @@ import os
 import socket
 import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
@@ -67,9 +68,22 @@ class _CountingHandler(BaseHTTPRequestHandler):
             self.rfile.read(length)
         self.send_response(200)
         self.send_header('Content-Type', 'text/event-stream')
-        self.send_header('Content-Length', str(len(_SSE_BODY)))
+        chunked = getattr(self.server, 'chunked', False)
+        self.send_header('Transfer-Encoding' if chunked else 'Content-Length',
+                         'chunked' if chunked else str(len(_SSE_BODY)))
         self.end_headers()
-        self.wfile.write(_SSE_BODY)
+        if chunked:
+            self.wfile.write(b'%X\r\n' % len(_SSE_BODY) + _SSE_BODY + b'\r\n')
+            self.wfile.flush()
+            release = getattr(self.server, 'release_eof', None)
+            if release is not None:
+                release.wait(3)
+            try:
+                self.wfile.write(b'0\r\n\r\n')
+            except (BrokenPipeError, ConnectionResetError):
+                self.close_connection = True
+        else:
+            self.wfile.write(_SSE_BODY)
 
     @classmethod
     def reset(cls):
@@ -78,12 +92,14 @@ class _CountingHandler(BaseHTTPRequestHandler):
             cls.requests = 0
 
 
-def _start_server():
+def _start_server(*, chunked=False, release_eof=None):
     sock = socket.socket()
     sock.bind(('127.0.0.1', 0))
     port = sock.getsockname()[1]
     sock.close()
     server = ThreadingHTTPServer(('127.0.0.1', port), _CountingHandler)
+    server.chunked = chunked
+    server.release_eof = release_eof
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return server, f'http://127.0.0.1:{port}'
 
@@ -130,10 +146,11 @@ def test_idle_pool_is_bounded_for_personal_server():
         _clean()
 
 
-def test_sync_reuses_one_connection_across_turns():
+@pytest.mark.parametrize('chunked', [False, True], ids=['length', 'chunked'])
+def test_sync_reuses_one_connection_across_turns(chunked):
     """3 sequential sync streams ⇒ the server sees 1 connection, 3 requests."""
     _clean()
-    server, base = _start_server()
+    server, base = _start_server(chunked=chunked)
     try:
         for _ in range(3):
             msg, finish, _usage = stream_chat(
@@ -149,6 +166,37 @@ def test_sync_reuses_one_connection_across_turns():
     finally:
         server.shutdown()
         _clean()
+
+
+@pytest.mark.parametrize('legacy', [False, True])
+def test_sync_terminal_cleanup_bounds_silent_http_eof(monkeypatch, legacy):
+    """A completed chunked answer settles even when HTTP never sends EOF."""
+    from lib.llm import _transport
+    from lib.llm.stream_result import ProviderStreamState
+    from urllib3.response import HTTPResponse
+
+    if legacy:
+        monkeypatch.setattr(HTTPResponse, 'shutdown', None)
+    monkeypatch.setattr(_transport, 'IDLE_STREAM_TIMEOUT_S', 0)
+    monkeypatch.setattr(_transport, 'POST_TERMINAL_DRAIN_TIMEOUT_S', .05)
+    _clean()
+    release = threading.Event()
+    server, base = _start_server(chunked=True, release_eof=release)
+    try:
+        started = time.monotonic()
+        result = stream_chat(
+            {'model': 'm', 'messages': [{'role': 'user', 'content': 'x'}]},
+            api_key='test', base_url=base)
+        assert time.monotonic() - started < .5
+        assert result.state is ProviderStreamState.PROVIDER_FINISHED
+        assert result.message['content'] == 'hi'
+        assert '_failure_stage' not in result.usage
+        assert _CountingHandler.requests == 1
+    finally:
+        release.set()
+        _clean()
+        server.shutdown()
+        server.server_close()
 
 
 # ─────────────────────────── async ───────────────────────────
@@ -222,11 +270,10 @@ def test_transport_owner_scope_is_idempotent_on_no_owner_sentinel():
 
 
 if __name__ == '__main__':
-    test_sync_session_is_a_singleton()
-    test_sync_reuses_one_connection_across_turns()
-    test_async_client_pooled_per_loop_and_proxy()
-    test_async_reuses_one_connection_across_turns()
-    print('All connection-reuse tests passed.')
+    # Use the shared pytest storage and lifecycle isolation for direct runs.
+    import sys as _runner_sys
+    import pytest
+    raise SystemExit(pytest.main([__file__, *_runner_sys.argv[1:]]))
 
 
 def test_async_http_burst_enters_server_without_active_connection_count_queue():

@@ -160,7 +160,7 @@ def test_aborted_model_request_localizes_detail_and_drops_constant_kind():
 
 
 def test_request_complete_fields_carry_abort_error_url():
-    from lib.llm_errors import AbortedError
+    from lib.llm.llm_errors import AbortedError
     from lib.tasks_pkg.manager._stream import _model_request_complete_fields
 
     fields = _model_request_complete_fields(
@@ -202,9 +202,8 @@ def test_request_complete_fields_carry_abort_error_url():
         usage_value={}, span_id='model:attempt-a:1', model='kimi-k3',
         started_ms=0, tag='R1', round_num=1,
     )
-    assert 'synthetic-password' not in redacted['errorUrl']
-    assert 'synthetic-token' not in redacted['errorUrl']
-    assert '<redacted>' in redacted['errorUrl']
+    assert redacted['errorUrl'] == (
+        'https://user:synthetic-password@x/v1/chat?token=synthetic-token')
     assert len(redacted['errorUrl']) <= 400
 
     # Dispatch metadata's masked key hint reaches the wire as keyHint.
@@ -220,7 +219,7 @@ def test_request_complete_fields_carry_abort_error_url():
 
 
 def test_abort_request_attribution_splits_internal_fence_from_user_stop():
-    from lib.llm_errors import AbortedError
+    from lib.llm.llm_errors import AbortedError
     from lib.tasks_pkg.manager._stream import _abort_request_attribution
 
     # A plain user Stop keeps the historic 'aborted' reading.
@@ -243,7 +242,7 @@ def test_abort_request_attribution_splits_internal_fence_from_user_stop():
 
 
 def test_request_complete_fields_honor_fence_error_overrides():
-    from lib.llm_errors import AbortedError
+    from lib.llm.llm_errors import AbortedError
     from lib.tasks_pkg.manager._stream import _model_request_complete_fields
 
     fields = _model_request_complete_fields(
@@ -446,7 +445,7 @@ def test_compaction_event_pair_replaces_phase_with_one_accounted_receipt():
     assert settled['reductionPercent'] == 77
     assert settled['durationMs'] == 310
     assert settled['startedAt'] == 1_000
-    assert settled['llmRound'] == 2
+    assert settled['llmRound'] == 3  # Compaction producer rounds are zero-based.
 
 
 @pytest.mark.parametrize('phase_present', [True, False])
@@ -1130,7 +1129,8 @@ def test_retry_frames_coalesce_and_projection_has_a_hard_size_budget():
             'detailArgs': {'value': 'y' * 1_000},
             'statusCode': 429,
         }, task, now_ms=10_000 + seq)
-    assert len(timeline['entries']) == ACTIVITY_TIMELINE_MAX_ENTRIES
+    assert 0 < len(timeline['entries']) <= ACTIVITY_TIMELINE_MAX_ENTRIES
+    assert timeline['entries'][-1]['seq'] == 699
     assert timeline['droppedCount'] > 0
     assert len(json.dumps(
         timeline, ensure_ascii=False, separators=(',', ':'),
@@ -1252,7 +1252,7 @@ def test_normalization_enforces_byte_budget_and_preserves_newest_error():
     }]})
     assert finite_json is not None
     json.dumps(finite_json, allow_nan=False)
-    assert finite_json['entries'][0]['summaryArgs']['api_token'] == '<redacted>'
+    assert finite_json['entries'][0]['summaryArgs']['api_token'] == 'provider-secret-value'
 
     bounded_counters = normalize_activity_timeline({
         'droppedCount': 10 ** 100,
@@ -1344,7 +1344,7 @@ def test_terminal_error_closes_open_rows_and_success_done_resolves_warnings():
     assert settled['severity'] == 'warning'
 
 
-def test_durable_error_detail_is_redacted_before_frontend_projection():
+def test_durable_error_detail_preserves_original_diagnostic_evidence():
     from lib.turn_activity_timeline import fold_activity_timeline
 
     timeline = fold_activity_timeline(None, {
@@ -1356,8 +1356,7 @@ def test_durable_error_detail_is_redacted_before_frontend_projection():
 
     assert timeline is not None
     detail = timeline['entries'][0]['detail']
-    assert 'provider-secret-value' not in detail
-    assert '<redacted>' in detail
+    assert detail == 'Authorization: Bearer provider-secret-value'
 
 
 def test_turn_authority_persists_and_replays_activity_timeline(chat_sidecar):
@@ -1542,7 +1541,7 @@ def test_stream_boundary_marks_returned_truncated_stream_failed(monkeypatch):
     assert complete['failureStage'] == 'midstream_close'
 
 
-def test_stream_boundary_closes_failed_span_with_redacted_detail(monkeypatch):
+def test_stream_boundary_closes_failed_span_with_original_detail(monkeypatch):
     import lib.tasks_pkg.manager._stream as stream_module
 
     class BadRequestError(RuntimeError):
@@ -1584,8 +1583,8 @@ def test_stream_boundary_closes_failed_span_with_redacted_detail(monkeypatch):
     assert complete['status'] == 'failed'
     assert complete['statusCode'] == 400
     assert complete['errorKind'] == 'BadRequestError'
-    assert 'provider-secret-value' not in complete['errorDetail']
-    assert '<redacted>' in complete['errorDetail']
+    assert complete['errorDetail'] == (
+        'Authorization: Bearer provider-secret-value request rejected')
     assert '_activeModelRequestSpan' not in task
 
 

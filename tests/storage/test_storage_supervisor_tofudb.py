@@ -175,7 +175,7 @@ def test_native_launch_health_query_and_fence(
 
         # Both backends must share the project lease, including after the
         # Python path resolver replaces itself with the native executable.
-        from lib.storage_sidecar.offline import (
+        from lib.storage_authority_sql.offline import (
             SQLiteAuthorityDiscoveryError, resolve_readonly_sqlite_authority,
         )
         with pytest.raises(SQLiteAuthorityDiscoveryError, match='tofudb'):

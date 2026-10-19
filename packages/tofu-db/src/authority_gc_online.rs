@@ -158,6 +158,24 @@ struct PreviousEpoch {
 /// phase, and there can be no meaningful garbage in the first minute.
 pub const ONLINE_GC_BOOT_GRACE: Duration = Duration::from_secs(30);
 
+/// A database protected by the owner's existing mutex. Projection and source
+/// share the collector algorithm, while every mark and delete stays local.
+pub trait OnlineGcDatabase: Send + 'static {
+    fn gc_database(&self) -> io::Result<&AuthorityDatabase>;
+    fn gc_database_mut(&mut self) -> io::Result<&mut AuthorityDatabase>;
+    fn gc_budget(&self, budget: AuthorityGarbageCollectionBudget) -> io::Result<AuthorityGarbageCollectionBudget> {
+        Ok(budget)
+    }
+    fn install_gc_handle(&mut self, handle: OnlineGarbageCollectionHandle) -> io::Result<()>;
+}
+impl OnlineGcDatabase for AuthorityDatabase {
+    fn gc_database(&self) -> io::Result<&AuthorityDatabase> { Ok(self) }
+    fn gc_database_mut(&mut self) -> io::Result<&mut AuthorityDatabase> { Ok(self) }
+    fn install_gc_handle(&mut self, handle: OnlineGarbageCollectionHandle) -> io::Result<()> {
+        self.set_online_garbage_collection(handle); Ok(())
+    }
+}
+
 pub struct OnlineGarbageCollector {
     budget: AuthorityGarbageCollectionBudget,
     catalog_pressure_floor: usize,
@@ -322,15 +340,17 @@ impl OnlineGarbageCollector {
     /// Runs one full epoch. Short authority holds are taken through
     /// `database`; everything expensive runs off-mutex on the caller's
     /// thread. `stop` requests prompt, safe abandonment between phases.
-    pub fn run_epoch(
+    pub fn run_epoch<D: OnlineGcDatabase>(
         &mut self,
-        database: &Arc<Mutex<AuthorityDatabase>>,
+        database: &Arc<Mutex<D>>,
         stop: &AtomicBool,
     ) -> io::Result<OnlineGarbageCollectionOutcome> {
         let started = Instant::now();
         self.last_epoch_started = Some(started);
         self.set_in_progress(true);
+        let launch_budget = self.budget;
         let outcome = self.run_epoch_inner(database, stop);
+        self.budget = launch_budget;
         let ended = Instant::now();
         self.last_epoch_ended = Some(ended);
         self.last_epoch_duration = ended.saturating_duration_since(started);
@@ -359,9 +379,9 @@ impl OnlineGarbageCollector {
         outcome.map(|(outcome, _)| outcome)
     }
 
-    fn run_epoch_inner(
+    fn run_epoch_inner<D: OnlineGcDatabase>(
         &mut self,
-        database: &Arc<Mutex<AuthorityDatabase>>,
+        database: &Arc<Mutex<D>>,
         stop: &AtomicBool,
     ) -> io::Result<(OnlineGarbageCollectionOutcome, bool)> {
         if stop.load(Ordering::Acquire) {
@@ -377,7 +397,11 @@ impl OnlineGarbageCollector {
                     return Ok((OnlineGarbageCollectionOutcome::Deferred, false));
                 }
             };
-            match database_guard.online_gc_capture(self.budget.maximum_temporary_bytes) {
+            let capture = database_guard.gc_budget(self.budget).and_then(|budget| {
+                self.budget = budget;
+                database_guard.gc_database()?.online_gc_capture(self.budget.maximum_temporary_bytes)
+            });
+            match capture {
                 Ok(capture) => capture,
                 Err(error) => {
                     self.note_deferred();
@@ -893,9 +917,9 @@ impl OnlineGarbageCollector {
         Ok(())
     }
 
-    fn delete_confirmed(
+    fn delete_confirmed<D: OnlineGcDatabase>(
         &self,
-        database: &Arc<Mutex<AuthorityDatabase>>,
+        database: &Arc<Mutex<D>>,
         epoch: &mut Epoch,
         stop: &AtomicBool,
     ) -> io::Result<()> {
@@ -924,7 +948,7 @@ impl OnlineGarbageCollector {
                 let mut database_guard = database
                     .try_lock()
                     .map_err(|_| would_block("online GC deletion hold contended"))?;
-                database_guard.online_gc_delete_loose(&victims)?
+                database_guard.gc_database_mut()?.online_gc_delete_loose(&victims)?
             };
             epoch.reclaimed_blocks += removal.blocks_removed;
             epoch.reclaimed_bytes += removal.bytes_removed;
@@ -939,13 +963,13 @@ impl OnlineGarbageCollector {
             let database_guard = database
                 .try_lock()
                 .map_err(|_| would_block("online GC orphan hold contended"))?;
-            let orphan_plan = database_guard.online_gc_plan_orphan()?;
+            let orphan_plan = database_guard.gc_database()?.online_gc_plan_orphan()?;
             if let Some(candidate) = orphan_plan.candidate {
                 let confirmed = self.previous.orphan_candidate.as_ref()
                     == Some(&candidate.file_name);
                 epoch.orphan_candidate_next = Some(candidate.file_name.clone());
                 if confirmed {
-                    let removed = database_guard.online_gc_remove_orphan(&candidate)?;
+                    let removed = database_guard.gc_database()?.online_gc_remove_orphan(&candidate)?;
                     epoch.orphan_segments_removed += 1;
                     epoch.reclaimed_bytes += removed;
                 }
@@ -964,7 +988,7 @@ impl OnlineGarbageCollector {
                 let mut database_guard = database
                     .try_lock()
                     .map_err(|_| would_block("online GC consolidation hold contended"))?;
-                database_guard.online_gc_finish_consolidation(
+                database_guard.gc_database_mut()?.online_gc_finish_consolidation(
                     &plan.victims,
                     &plan.retained_per_victim,
                     built_reference,
@@ -999,7 +1023,7 @@ impl OnlineGarbageCollector {
                 let mut database_guard = database
                     .try_lock()
                     .map_err(|_| would_block("online GC rewrite hold contended"))?;
-                database_guard.online_gc_finish_segment_reclaim(
+                database_guard.gc_database_mut()?.online_gc_finish_segment_reclaim(
                     reference.segment_id,
                     &reference,
                     &retained_ids,
@@ -1046,7 +1070,7 @@ impl OnlineGarbageCollector {
                 let mut database_guard = database
                     .try_lock()
                     .map_err(|_| would_block("online GC compaction hold contended"))?;
-                database_guard.online_gc_finish_compaction(&compaction_ids, built.1)
+                database_guard.gc_database_mut()?.online_gc_finish_compaction(&compaction_ids, built.1)
             };
             match publish {
                 Ok(metrics) => {
@@ -1223,20 +1247,20 @@ impl OnlineGarbageCollectionObserver {
 /// Dedicated `tofu-db-online-gc` thread. Mirrors the maintenance lane's
 /// politeness: every authority hold is a `try_lock`, contention always
 /// defers the collector, never the foreground.
-pub struct OnlineGarbageCollectionDriver {
+pub struct OnlineGarbageCollectionDriver<D: OnlineGcDatabase = AuthorityDatabase> {
     stop: Arc<AtomicBool>,
     thread: Mutex<Option<std::thread::JoinHandle<()>>>,
     observer: OnlineGarbageCollectionObserver,
-    database: Arc<Mutex<AuthorityDatabase>>,
+    database: Arc<Mutex<D>>,
 }
 
 const DRIVER_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const DRIVER_STACK_BYTES: usize = 1024 * 1024;
 pub(crate) const DRIVER_STOP_JOIN_BUDGET: Duration = Duration::from_secs(5);
 
-impl OnlineGarbageCollectionDriver {
+impl<D: OnlineGcDatabase> OnlineGarbageCollectionDriver<D> {
     pub fn start(
-        database: &Arc<Mutex<AuthorityDatabase>>,
+        database: &Arc<Mutex<D>>,
         budget: AuthorityGarbageCollectionBudget,
         volume_pressure: bool,
     ) -> io::Result<Self> {
@@ -1246,16 +1270,16 @@ impl OnlineGarbageCollectionDriver {
     }
 
     pub fn start_with_collector(
-        database: &Arc<Mutex<AuthorityDatabase>>,
+        database: &Arc<Mutex<D>>,
         mut collector: OnlineGarbageCollector,
         volume_pressure: bool,
     ) -> io::Result<Self> {
         let handle = collector.handle();
         {
-            let guard = database
+            let mut guard = database
                 .lock()
                 .map_err(|_| io::Error::other("authority mutex poisoned"))?;
-            guard.set_online_garbage_collection(handle.clone());
+            guard.install_gc_handle(handle.clone())?;
         }
         let stop = Arc::new(AtomicBool::new(false));
         let stopped = Arc::new(AtomicBool::new(false));
@@ -1325,7 +1349,9 @@ impl OnlineGarbageCollectionDriver {
         // Spill runs are reconstructible scratch, never authority: wipe the
         // work directories so a graceful stop leaves no GC residue behind.
         if let Ok(database) = self.database.lock() {
-            let _ = database.wipe_online_gc_work_directories();
+            if let Ok(database) = database.gc_database() {
+                let _ = database.wipe_online_gc_work_directories();
+            }
         }
         Ok(())
     }

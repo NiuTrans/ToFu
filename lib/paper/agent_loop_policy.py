@@ -10,8 +10,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from lib.agent_loop import LoopOutcome, run_agent_loop, agent_loop_checkpoint_limits
-from lib.llm_errors import AbortedError
+from lib.agent_loop.agent_loop import LoopOutcome, run_agent_loop, agent_loop_checkpoint_limits
+from lib.llm.llm_errors import AbortedError
 from lib.paper.contracts import (
     PAPER_AGENT_MAX_CONSECUTIVE_NO_PROGRESS_ROUNDS,
 )

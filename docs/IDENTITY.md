@@ -97,6 +97,13 @@ expiry and account changes fail closed. An absent Codex command (including the
 current Windows file-only adapter) retains the old strict file seam. The fixed
 upstream validates the bearer; JWT metadata is not local authorization.
 
+Native launch checks independently known free bytes and inodes for the OS and
+selected Codex home. `codex_home_storage_full` is transient, keeps the bounded
+verified-metadata fallback and does not revoke login. An ENOSPC spawn/early-exit
+failure receives the same issue. Task and settings feedback instructs releasing
+space or inodes and retrying, without starting a new sign-in. Unknown inode
+accounting alone never skips the known byte dimension.
+
 Expired file-backed login may request native `account/read(refreshToken=true)`
 during reconciliation or explicit recovery. Only Codex refreshes or writes its
 credentials; Tofu never copies refresh tokens, initiates sign-in or signs out
@@ -166,7 +173,7 @@ but retains the hash tombstone needed by recovery-only identify.
 |---|---|---|
 | Account fields or allocation | `lib/billing/users.py`, `operations_pkg/_tenant.py` | `tests/billing/test_identity_http_contract.py` |
 | Request principal | `lib/api_keys/_context.py`, `lib/identity.py`, `routes/api_v1/auth.py` | `tests/identity/test_principal_context.py` |
-| Credential lifecycle | `lib/api_keys/`, `operations_pkg/_credentials.py` | `tests/api/test_api_keys.py`, `tests/storage/test_storage_sidecar_contract.py` |
+| Credential lifecycle | `lib/api_keys/`, `operations_pkg/_credentials.py` | `tests/api/test_api_keys.py`, `tests/storage/test_storage_authority_sql_contract.py` |
 | Device authentication | `lib/bridge_auth.py`, `routes/_bridge_caller.py` | `tests/browser/test_bridge_auth.py` |
 
 Any new identity field starts in the machine contract, is carried explicitly
@@ -237,3 +244,16 @@ failures use a warning envelope with explicit `authIssue`, `credentialSource`
 and `providerReached=false`. Only transient read failures allow manual retry.
 Alternative rejected: unconditional turn replay risks repeating tools; borrowing
 another source or retaining bearer credentials would weaken authority.
+
+### Native Codex request binding
+
+The native application factory uses NativeCodexCredentialResolver with the supplied
+principal/repository, never an inferred current user. Existing owner/tenant/account
+metadata or the declared personal/shared-login boundary proves source ownership.
+Grant semantics and source identity are checked around refresh; account changes
+within or between rounds fail closed without moving existing history. The existing
+outbound owner emits identity/affinity headers and refuses a changed expected
+account. Missing source reads retain credential-unavailable attribution. No new
+vault or refresh-token copy is created. Verify native-credentials ownership,
+revocation, source changes, ordinary revision advancement and real native ingress
+refusal tests; production default remains unpromoted.

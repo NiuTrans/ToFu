@@ -6,6 +6,8 @@ const path = require('node:path');
 const os = require('node:os');
 const { execFileSync } = require('node:child_process');
 const { JSDOM } = require('jsdom');
+
+const createDOMPurify = require('dompurify');
 const marked = require('marked');
 const root = path.resolve(__dirname, '..');
 const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'tofu-markdown-tests-'));
@@ -21,7 +23,7 @@ function fixture(t, extra = {}) {
   const dom = new JSDOM('<main id="output"></main>');
   let parses = 0;
   const environment = { document: dom.window.document, parser: { parse: source => { parses++; return marked.parse(source); } },
-    sanitizer: null, highlighter: null, mathRenderer: null, basePath: '', projectActive: false };
+    sanitizer: createDOMPurify(dom.window), highlighter: null, mathRenderer: null, basePath: '', projectActive: false };
   const renderer = createMarkdownRenderer({ getEnvironment: () => ({ ...environment }), maximumCacheEntries: 3,
     ensureMath: () => {}, ...extra });
   t.after(() => { renderer.dispose(); dom.window.close(); });
@@ -167,4 +169,20 @@ test('unknown grammar outside the admitted catalog remains cacheable without a l
   const source = '```unknown-grammar\nplain evidence\n```';
   f.renderer.render(source); const parses = f.parses(); f.renderer.render(source);
   assert.equal(f.parses(), parses); assert.equal(loads, 0);
+});
+
+test('missing sanitizer shows escaped original source without caching and recovers', t => {
+  const f = fixture(t);
+  const sanitizer = f.environment.sanitizer;
+  f.environment.sanitizer = null;
+  const source = '<img src=x onerror=alert(1)>\n\n**readable fallback**';
+  const root = f.environment.document.querySelector('main');
+  root.innerHTML = f.renderer.render(source);
+  assert.equal(root.querySelector('img'), null);
+  assert.equal(root.textContent, source);
+  assert.equal(f.renderer.cacheStats().entries, 0);
+  f.environment.sanitizer = sanitizer;
+  root.innerHTML = f.renderer.render(source);
+  assert.equal(root.querySelector('strong').textContent, 'readable fallback');
+  assert.equal(root.querySelector('[onerror]'), null);
 });

@@ -13,8 +13,7 @@ export function mountGoalCommandPanel(host: HTMLElement, ports: {
   host.className = 'evo-mission-panel';
   host.setAttribute('aria-labelledby', 'evo-mission-title');
   const header = document.createElement('header');header.className = 'evo-mission-header';
-  const eyebrow = document.createElement('p');eyebrow.className = 'evo-mission-eyebrow';eyebrow.textContent = ports.copy('missionWorkspace');
-  const title = document.createElement('h2');title.id = 'evo-mission-title';
+  const title = document.createElement('h2');title.id = 'evo-mission-title';title.textContent = ports.copy('missionWorkspace');
   const status = document.createElement('p');status.className = 'evo-mission-status';status.setAttribute('role', 'status');
   const actions = document.createElement('div');actions.className = 'evo-mission-actions';
   const inspect = createButton({label: ports.copy('missionOpenExecution'), variant: 'primary', size: 'sm', onClick: () => {
@@ -36,15 +35,15 @@ export function mountGoalCommandPanel(host: HTMLElement, ports: {
   actions.append(inspect, stop, retry, human, details, conversation, create);
   const notice = document.createElement('p');notice.className = 'evo-mission-notice';notice.textContent = ports.copy('missionMotionNote');
   const body = document.createElement('div');body.className = 'evo-mission-body';
-  header.append(eyebrow, title, status, actions, notice);host.append(header, body);
+  header.append(title, status, actions, notice);host.append(header, body);
   const inspector = mountGoalRunInspector(body, ports);
   return {update(observation: GoalObservation, busy = false) {
     current = observation;
     const {run, questions} = observation;
-    title.textContent = run?.objective || ports.copy(observation.loading ? 'missionLoading' : 'nextTask');
+    title.textContent = ports.copy(observation.loading ? 'missionLoading' : 'missionWorkspace');
     const nextStatus = run ? `${run.background_wait ? ports.copy('waitingBackground') : runStatusLabel(run.status, ports.copy)}${questions ? ' · ' + ports.copy('askHuman') : ''}` : ports.copy('roomNoGoal');
     if (status.textContent !== nextStatus) status.textContent = nextStatus;
-    status.dataset.state = run?.status || 'idle';
+    status.dataset.state = questions ? 'waiting' : run?.status || 'idle';
     inspect.hidden = !run || !(run.task_id || run.receipts?.length);
     stop.hidden = !run || isTerminalRun(run);stop.disabled = busy;
     retry.hidden = !run || !['failed', 'needs_attention', 'cancelled'].includes(run.status);retry.disabled = busy;
@@ -52,5 +51,5 @@ export function mountGoalCommandPanel(host: HTMLElement, ports: {
     details.hidden = conversation.hidden = !run;
     create.hidden = !!run || !!observation.loading;
     inspector.update(observation);
-  }};
+  },visibilityChanged:inspector.visibilityChanged,dispose:inspector.dispose};
 }

@@ -17,7 +17,6 @@ import time
 from typing import Any
 
 from lib.cost import accumulate_usage_into, normalize_usage
-from lib.tasks_pkg.invocation import is_child_invocation
 from lib.tasks_pkg.failure_attribution import append_turn_retry_receipt
 from lib.tasks_pkg.stream_handler._canned_greeting import is_canned_greeting_reply
 from lib.turn_verdict import INTERNAL_FENCE_ABORT_REASONS
@@ -434,6 +433,14 @@ def _maybe_auto_retry_turn(task: dict[str, Any], cfg: dict[str, Any]) -> bool:
         should_auto_retry_turn,
     )
 
+    # A whole-invocation reset is safe only before tool admission. Persistence
+    # pressure retries its exact write elsewhere; it must never buy another
+    # model request or replay an already-started external effect.
+    if task.get('toolCallCount') or any(
+            row.get('status') not in {'pending', 'searching'}
+            for row in task.get('toolRounds') or [] if isinstance(row, dict)):
+        return False
+
     tid = task['id'][:8]
     err = task.get('error')
     attempt = int(task.get('_auto_turn_retry_count') or 0)
@@ -803,7 +810,7 @@ def _run_post_loop_fallback(
             tid, error, exc_info=True,
         )
         try:
-            from lib.llm_error_format import format_llm_error_for_user
+            from lib.llm.llm_error_format import format_llm_error_for_user
             task['error'] = format_llm_error_for_user(
                 error,
                 model=model,
@@ -1156,10 +1163,9 @@ def _finalize_and_emit_done(task: dict[str, Any], *, model: str, preset: str, th
     # tell the client to clear the partial bubble (retry_reset), back off, and
     # re-run run_task.  This spares the user from manually clicking Retry on
     # each of many parallel conversations that hit a passing gateway blip.
-    # Flow-managed turns are excluded (the graph owns
-    # its own retry/replan semantics); the raise/FATAL path is also excluded
-    # because it never reaches finalize.
-    if not is_child_invocation(task) and not task.get('_flow_managed') and not task.get('aborted'):
+    # Every invocation uses this decision before tool admission. Graph retry/
+    # replan remains a separate domain transition, never a creator-based bypass.
+    if not task.get('aborted'):
         if _maybe_auto_retry_turn(task, cfg):
             return
 
@@ -1280,7 +1286,7 @@ def _finalize_and_emit_done(task: dict[str, Any], *, model: str, preset: str, th
                     'aborted', 'interrupted', 'user_abort',
                 }
             if not _task_was_aborted:
-                from lib.tool_rejection import (
+                from lib.tool_results.tool_rejection import (
                     is_unavailable_tool_rejection,
                     rejection_reason,
                     rejection_tool_name,
@@ -1294,7 +1300,7 @@ def _finalize_and_emit_done(task: dict[str, Any], *, model: str, preset: str, th
                 from lib.tasks_pkg.stream_handler._intent_stall import (
                     known_external_blocker,
                 )
-                from lib.tool_rejection import tool_rejection_descriptor
+                from lib.tool_results.tool_rejection import tool_rejection_descriptor
                 _blocked = known_external_blocker(task)
                 if _rj is None and _blocked is not None:
                     _rj = _blocked
@@ -1356,41 +1362,16 @@ def _finalize_and_emit_done(task: dict[str, Any], *, model: str, preset: str, th
     except Exception as exc:
         logger.warning('[Usage] compaction costs retained for settlement: %s', exc)
 
-    if is_child_invocation(task):
-        # Shared typed terminal construction and execution-session settlement;
-        # conversation commit/queue/swarm/translation belong to the scheduler.
-        from lib.tasks_pkg.segments import assemble_segments
-        from lib.tasks_pkg.llm_fallback._state import cleanup_reactive_compact_state
-        task['segments'] = assemble_segments(task)
-        task['apiRounds'] = api_rounds
-        _stamp_child_round_costs(task, api_rounds, model=model)
-        accumulated_usage = _child_cost_usage(accumulated_usage, api_rounds)
-        done_evt = _build_done_event_base(
-            task, last_finish_reason=last_finish_reason,
-            last_stream_result=last_stream_result,
-            accumulated_usage=accumulated_usage, last_usage=last_usage,
-            model=model, thinking_depth=thinking_depth)
-
-        if task.get('_checkpointUsage'):
-            merged = {}
-            accumulate_usage_into(merged, task['_checkpointUsage'])
-            accumulate_usage_into(merged, done_evt.get('usage') or {})
-            done_evt['usage'] = merged
-            task['usage'] = merged
-            task['ownUsage'] = dict(merged)
-
-            task['_invocationCheckpointUsageMerged'] = True
-        if api_rounds:
-            done_evt['apiRounds'] = api_rounds
-        stamp_chat_task_terminal(task, status='done',
-                                 finish_reason=str(last_finish_reason or 'unknown'))
-        cleanup_reactive_compact_state(task['id'])
-        release_ttl_latch(task['id'])
-        append_event(task, done_evt)
-        return
+    # Accounting and terminal construction are shared. A presentation port
+    # chooses where evidence goes, never a weaker retry/settlement lifecycle.
+    detached_presentation = callable(task.get('_invocationEventSink'))
+    from lib.tasks_pkg.segments import assemble_segments
+    task['segments'] = assemble_segments(task)
+    _stamp_child_round_costs(task, api_rounds, model=model)
+    accumulated_usage = _child_cost_usage(accumulated_usage, api_rounds)
 
     # ── Generate tool summary for cross-turn context (non-blocking) ──
-    if tool_call_happened and not task['aborted']:
+    if not detached_presentation and tool_call_happened and not task['aborted']:
         try:
             summary = _generate_tool_summary(messages, model, task)
             if summary:
@@ -1398,7 +1379,7 @@ def _finalize_and_emit_done(task: dict[str, Any], *, model: str, preset: str, th
         except Exception as e:
             logger.warning('[Task %s] Tool summary generation failed model=%s (non-fatal): %s', task['id'][:8], model, e, exc_info=True)
 
-    if not task.get('_flow_managed'):
+    if not detached_presentation and not task.get('_flow_managed'):
         # Finalize-window latch: stamp BEFORE the terminal flip. From here
         # until append_event(done) and diagnostic handoff complete,
         # a LATE-done tick must hold — the successor stamp is not
@@ -1431,9 +1412,10 @@ def _finalize_and_emit_done(task: dict[str, Any], *, model: str, preset: str, th
     try:
         from lib.swarm.turn_handoff import prepare_swarm_turn_end
         from lib.tasks_pkg.manager import task_user_id
-        prepare_swarm_turn_end(
-            task, user_id=int(task_user_id(task)),
-            finish_reason=str(last_finish_reason or 'unknown'))
+        if not detached_presentation:
+            prepare_swarm_turn_end(
+                task, user_id=int(task_user_id(task)),
+                finish_reason=str(last_finish_reason or 'unknown'))
     except Exception as _e:
         logger.warning('[Orchestrator] swarm parent handoff failed: %s', _e, exc_info=True)
 
@@ -1539,6 +1521,10 @@ def _finalize_and_emit_done(task: dict[str, Any], *, model: str, preset: str, th
         done_evt['usage'] = _cp_usage
         task['usage'] = _cp_usage
 
+    if _cp_usage:
+        task['_invocationCheckpointUsageMerged'] = True
+        task['ownUsage'] = dict(task['usage'])
+
     _cp_api_rounds = task.get('_checkpointApiRounds')
     if _cp_api_rounds:
         merged_api = list(_cp_api_rounds) + (done_evt.get('apiRounds') or [])
@@ -1573,6 +1559,12 @@ def _finalize_and_emit_done(task: dict[str, Any], *, model: str, preset: str, th
             'thinking_len': _thinking_len,
             'suspicions': _suspicion_reasons,
         }
+
+    if detached_presentation:
+        stamp_chat_task_terminal(task, status='done',
+                                 finish_reason=str(last_finish_reason or 'unknown'))
+        append_event(task, done_evt)
+        return
 
     # ── Emit done event (unless Flow-managed) ──
     #
@@ -1619,7 +1611,7 @@ def _finalize_and_emit_done(task: dict[str, Any], *, model: str, preset: str, th
             compute_cost as _compute_cost,
         )
         for _rd in done_evt.get('apiRounds') or []:
-            if not isinstance(_rd, dict) or _rd.get('cost'):
+            if not isinstance(_rd, dict) or _rd.get('cost') or task.get('_nativeFrozenCostProjection') is True:
                 continue
             _ru = _rd.get('usage') or {}
             if not _ru:
@@ -1638,8 +1630,9 @@ def _finalize_and_emit_done(task: dict[str, Any], *, model: str, preset: str, th
             fallback_model_id=(
                 done_evt.get('model') or task.get('model') or ''),
             fallback_provider_id=task.get('provider_id') or None,
+            use_frozen_costs=task.get('_nativeFrozenCostProjection') is True,
         )
-        if _msg_cost is None and done_evt.get('usage'):
+        if _msg_cost is None and done_evt.get('usage') and task.get('_nativeFrozenCostProjection') is not True:
             _msg_cost = _compute_cost(
                 done_evt['usage'],
                 model_id=done_evt.get('model') or task.get('model') or '',
@@ -1655,7 +1648,7 @@ def _finalize_and_emit_done(task: dict[str, Any], *, model: str, preset: str, th
     # closes the live/reload parity gap without making experiment telemetry
     # critical-path.
     try:
-        from lib.cost_experiments import build_cost_experiment_outcome
+        from lib.cost_experiments.cost_experiments import build_cost_experiment_outcome
         _outcome = build_cost_experiment_outcome(
             task.get('_costExperiment'),
             usage=done_evt.get('usage'),
@@ -1767,61 +1760,8 @@ def _finalize_and_emit_done(task: dict[str, Any], *, model: str, preset: str, th
     if not _terminal_persisted:
         logger.error('[Task:%s] retained terminal retry state after persistence debt', tid)
         return
-    from lib.tasks_pkg.event_invariants import maybe_check_task_log
-    maybe_check_task_log(task)
-    # Terminal busy-state broadcast (): the CLEAR half of the busy
-    # channel must be event-driven like the SET half is, not ride the next
-    # incidental write. The status is terminal and the finalize latch is gone.
-    from lib.tasks_pkg.manager import notify_terminal_conversation_change
-    notify_terminal_conversation_change(task)
-
-    # The driver's only settle callback may have arrived while this Turn
-    # still owned the lane. Its results remain unread; now a successor may
-    # safely claim the committed lane through the same bounded policy.
-    try:
-        from lib.swarm.turn_handoff import resume_swarm_after_turn
-        from lib.swarm.delivery import restore_unconsumed_results
-        restore_unconsumed_results(task)
-        from lib.tasks_pkg.manager import task_user_id
-        resume_swarm_after_turn(task, user_id=int(task_user_id(task)))
-    except Exception as _swarm_resume_error:
-        logger.warning('[Task:%s] swarm completion handoff failed: %s',
-                       tid, _swarm_resume_error, exc_info=True)
-    if project_enabled and project_path and task.get('convId'):
-        try:
-            from lib.agent_core.settlement import (
-                notify_project_task_settled,
-            )
-            from lib.tasks_pkg.manager import task_user_id
-
-            notify_project_task_settled(
-                task,
-                project_path,
-                user_id=int(task_user_id(task)),
-            )
-        except Exception as _project_settlement_error:
-            logger.debug(
-                '[Task:%s] project settlement hooks failed: %s',
-                tid,
-                _project_settlement_error,
-            )
-    # Capture the commit observer's one tool-round fact before release.
-    _spawn_async_commit_round(task, project_enabled, project_path,
-                              project_paths=cfg.get('projectPaths'))
-
-    # The deferred release follows terminal publication and commit admission; the
-    # authority predicate excludes synchronous inline/headless carriers.
-    from lib.tasks_pkg.manager._persist import _release_heavy_task_state
-    _release_heavy_task_state(task)
-
-    # Layer-3 preference consolidation — OFF the hot path.
-    #   Mirrors _spawn_async_commit_round: runs AFTER the done event +
-    #   persist, in a daemon thread, so the user sees the turn finish
-    #   WITHOUT waiting on a cheap-LLM round-trip (most turns yield no
-    #   preference change, and under rate-limiting the cheap call can stall
-    #   for seconds). Any learned/staged preference is delivered as a
-    #   post-done `preference_learned` event (best-effort live via the same
-    #   SSE/push fan-out) + persisted to the conversation DB for reload.
-    #   Gated on the independent My Context capability inside the spawner, so
-    #   headless surfaces that did not opt in still learn nothing.
-    _spawn_async_profile_consolidation(task, messages, cfg)
+    from lib.tasks_pkg.orchestrator._post_commit import finish_committed_task
+    finish_committed_task(task, messages=messages, cfg=cfg,
+        project_enabled=project_enabled, project_path=project_path,
+        commit_round=_spawn_async_commit_round,
+        consolidate_profile=_spawn_async_profile_consolidation)

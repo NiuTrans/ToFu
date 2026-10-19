@@ -607,6 +607,8 @@
     if (typeof document === 'undefined'
         || typeof document.querySelectorAll !== 'function') return;
     const containers = document.querySelectorAll('.chat-container');
+
+    runtimeScope.mountBackgroundAgents?.();
     for (const cont of containers) {
       const rails = cont.querySelectorAll('.turn-ctx');
       if (!rails.length) continue;
@@ -717,7 +719,7 @@
       else _railFollowMO = new MutationObserver(_scheduleRailFollow);
       nodes.filter((n) => n.classList.contains('chat-container')).forEach((n) => {
         _railFollowMO.observe(n, { childList: true, subtree: true,
-          attributes: true, attributeFilter: ['hidden'] });
+          attributes: true, attributeFilter: ['hidden', 'open'] });
       });
     }
   }
@@ -967,6 +969,7 @@
       const rails = document.querySelectorAll('.chat-container .user-msg[data-turn-id] > .turn-ctx');
       const rail = rails.length ? rails[rails.length - 1] : null;
       if (rail) {
+        const facts = rail.querySelector('[data-conversation-part="turn-context-content"]') || rail;
         /* Branch row: rebuild (or remove) in place. Prefer the live branch
          * (it moves on a mid-turn `git checkout`); fall back to the branch
          * derivable from projectState so a gap in the live state never
@@ -976,14 +979,14 @@
         const gitHtml = _renderGitRowHtml(gitForRow);
         if (gitHtml) {
           if (gitRow) gitRow.outerHTML = gitHtml;
-          else rail.insertAdjacentHTML('beforeend', gitHtml);
+          else facts.insertAdjacentHTML('beforeend', gitHtml);
         } else if (gitRow) gitRow.remove();
         /* Checklist row: rebuild (or remove) in place. */
         const todoRow = rail.querySelector('[data-tctx-todo]');
         const todoHtml = _renderTodoRowHtml(live.todos);
         if (todoHtml) {
           if (todoRow) todoRow.outerHTML = todoHtml;
-          else rail.insertAdjacentHTML('beforeend', todoHtml);
+          else facts.insertAdjacentHTML('beforeend', todoHtml);
         } else if (todoRow) todoRow.remove();
       }
       /* Reconcile the in-flight turn's persisted snapshot so the authoritative

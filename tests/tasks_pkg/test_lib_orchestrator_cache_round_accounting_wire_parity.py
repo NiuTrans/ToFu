@@ -348,7 +348,7 @@ def test_helper_stamps_matching_content_free_prompt_admission(monkeypatch):
 
 def test_helper_stages_bounded_cache_facts_for_the_next_checkpoint(
         monkeypatch):
-    from lib.task_result_checkpoint_contract import (
+    from lib.task_replay.task_result_checkpoint_contract import (
         TASK_CACHE_PREFIX_HWM_CANDIDATE_FIELD,
         TASK_LAST_TURN_CACHE_READ_CANDIDATE_FIELD,
     )

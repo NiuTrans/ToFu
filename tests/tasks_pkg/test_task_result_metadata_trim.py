@@ -43,7 +43,7 @@ def _fat_meta():
 
 
 def test_trim_metadata_reuses_live_sanitizer_and_preserves_visible_fields():
-    from lib.storage_projection import (
+    from lib.storage.storage_projection import (
         project_task_result_metadata_for_storage,
     )
 
@@ -62,7 +62,7 @@ def test_trim_metadata_reuses_live_sanitizer_and_preserves_visible_fields():
 
 
 def test_sidecar_projection_sanitizes_text_metadata_and_indexes_experiment():
-    from lib.storage_sidecar.operations_pkg._records import (
+    from lib.storage_authority_sql.operations_pkg._records import (
         _project_task_result_experiment,
     )
 
@@ -82,7 +82,7 @@ def test_sidecar_projection_sanitizes_text_metadata_and_indexes_experiment():
 
 
 def test_sidecar_projection_also_guards_running_checkpoints():
-    from lib.storage_sidecar.operations_pkg._records import (
+    from lib.storage_authority_sql.operations_pkg._records import (
         _project_task_result_experiment,
     )
 

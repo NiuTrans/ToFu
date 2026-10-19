@@ -6,6 +6,7 @@ same-role messages — both defensive against Anthropic HTTP 400s.
 
 from lib.log import get_logger
 from lib.llm_sanitize._fields import _SAME_ROLE_SEAM_HINT_FIELD
+from lib.llm_sanitize.text_blocks import is_blank_text_block, normalize_text_blocks
 
 logger = get_logger(__name__)
 
@@ -106,7 +107,12 @@ def _blank_tool_call_content(content) -> bool:
 
 
 def _strip_empty_text_blocks(messages: list) -> list:
-    """Remove empty/whitespace-only text blocks from list-form message content.
+    """Normalize invalid blank blocks while preserving compatible separators.
+
+    ``text_blocks.normalize_text_blocks`` owns the pure block policy shared
+    with the Anthropic direct-bypass converter. Whitespace folds into adjacent
+    plain text without changing metadata or crossing multimodal boundaries;
+    only blank runs with no compatible text are discarded.
 
     A ``{'type': 'text', 'text': ''}`` block carries zero information, but
     strict providers HARD-400 the whole request on it — Kimi/Moonshot:
@@ -158,10 +164,9 @@ def _strip_empty_text_blocks(messages: list) -> list:
             continue
         if not isinstance(content, list) or not content:
             continue
-        kept = []
+        kept = normalize_text_blocks(content)
         for j, block in enumerate(content):
-            if (isinstance(block, dict) and block.get('type') == 'text'
-                    and not (block.get('text') or '').strip()):
+            if is_blank_text_block(block):
                 stripped += 1
                 # §2 logging discipline: name WHERE each phantom block lived
                 # (message index + role + block index) so the next producer is
@@ -169,8 +174,6 @@ def _strip_empty_text_blocks(messages: list) -> list:
                 # producer was never directly proven — no wire snapshot).
                 if len(locations) < 8:
                     locations.append(f'#{i}/{role}/block{j}')
-                continue
-            kept.append(block)
         if len(kept) == len(content):
             continue
         if kept:
@@ -183,7 +186,7 @@ def _strip_empty_text_blocks(messages: list) -> list:
             msg['content'] = ''
 
     if stripped:
-        logger.warning('[build_body] Stripped %d empty text block(s) from '
+        logger.warning('[build_body] Normalized %d empty text block(s) from '
                        'message content at %s%s — strict providers HTTP 400 '
                        'on them (Kimi: "text content is empty")',
                        stripped, ', '.join(locations),

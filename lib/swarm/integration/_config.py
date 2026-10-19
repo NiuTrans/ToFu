@@ -111,6 +111,10 @@ def _persist_config(cfg: dict, model: str, thinking_enabled: bool | None,
             out[k] = deepcopy(cfg[k])
     if parent_task is not None:
         from lib.swarm.master import _copy_execution_context
+        from lib.tasks_pkg.requirement_source import snapshot_requirement_source
+        out['requirement_source'] = snapshot_requirement_source(parent_task)
+        out['native_execution_required'] = bool(parent_task.get('_nativeInvocationParent')
+            or parent_task.get('_nativePreparedInvocation'))
         context = _copy_execution_context(parent_task)
         principal = parent_task.get('_principalContext')
         if principal is not None:

@@ -3,7 +3,7 @@ import asyncio
 import logging
 from types import SimpleNamespace
 import pytest
-from lib.app_lifecycle import owned_asgi_http_connection_class
+from lib.app.app_lifecycle import owned_asgi_http_connection_class
 pytestmark=pytest.mark.unit
 
 

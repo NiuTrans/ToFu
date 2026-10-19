@@ -1,5 +1,84 @@
 # Knowledge HTML projection experiment
 
+`native_ingest_measure.py --engine /absolute/path/to/tofu-db --pdf /tmp/fixture.pdf
+--installation /tmp/html-installation.json --python-command /tmp/python-command.json
+--output-dir /tmp/new-native-ingest-run` compares the current Python owner with
+the Rust projector through actual HTML, PDF, mixed, interruption and large-input
+uploads. The installation receipt comes from `build_native_runtime.py --check
+ARCHIVE --archive-sha256 PIN --application-version VERSION --install-html-library
+/absolute/new/library.so`; use `--archive` instead of `--installation` to include
+archive admission. The JSON Python command is an explicit argv prefix. Use a
+single exec image for child-memory observation, not a chain of shell launchers.
+
+Problem: kernel speed omits first-use loading, durable commits and short-lived
+children. Decision: first uploads include lazy imports, sealing and loading;
+common authority setup precedes clocks. Upload/source fsync, chunks/index commit
+and full public readback are timed. Raw CPU includes current-process and reaped
+descendant work. Warmup owners retire before reopening for the measured cohort;
+the first cohort call includes reactivation. Separate memory workers execute
+the full workload and journal records until after counters. The external exit
+observer records short child peaks while preserving original parent waits.
+For interruption it explicitly observes threaded children: every exiting TID
+contributes a snapshot, shared threads form one process peak, and original
+producer wait receipts account for every descendant. Sibling processes must
+be observed sequential; the memory sum adds ancestors along the largest path.
+Missing identities, snapshots, waits or overlap evidence refuse qualification.
+`system_native_ingest_thread_memory_20261015.json`
+records paired real producer recovery, exact waits and observer-failure cleanup;
+this small memory cohort establishes the mechanism, not full admission.
+Alternatives rejected: preloading hides first-use cost; sampled RSS misses short
+children; timing under ptrace contaminates latency evidence. Post-exec RSS
+estimates and sealed bytes form a conservative sum, not a historical PSS peak.
+
+The default contract requires three 100-sample pairs and 100 fresh cold pairs.
+Reduced cohorts are pilots. Every run first verifies exact fixtures, original
+bytes, replay/owner/rollback/reopen and joined cleanup using the same artifact.
+Sources, artifact pins, process identities and original failure receipts remain
+in the output directory. Unsupported child topology leaves memory missing and
+the verdict incomplete; it never substitutes sampled or zero memory. The
+interruption case is post-commit producer loss and recovery, not HTTP cancel.
+Neither this domain collector nor a passing subset selects application defaults.
+
+`system_native_ingest_owned_full_20261016.json`
+retains all five cases, three full warm/memory pairs and 100 fresh cold pairs.
+HTML and large-input measurements have no rejected metric; PDF warm p99,
+batch cold p99 and interruption warm/cold tails retain regressions. No default
+is admitted. Interruption clocks also include producer/recovery corpus setup
+and repeated benchmark source fingerprint work; they do not isolate product
+HTTP cancellation latency. Source-scope improvements require a new declared
+cohort and must retain these original clocks and the earlier partial cohort.
+
+Problem: the original interruption clock repeatedly scanned checkout provenance
+in both the producer and recovery process, unlike the other upload cases.
+Decision: clock scopes v2 and v3 verify the full database
+source digest and engine/library bytes before and after each worker cohort.
+The collector also checks the frozen database sources and artifact bytes around
+every worker. A private immutable receipt carries those expected pins into the
+owned producer; every opened runtime still compares its actual exported build
+identity. Ordinary corpus callers keep their per-open checks.
+Source-validation children remain inside memory observation and original-wait
+capture even though their work is outside operation clocks. Producer startup,
+authority initialization, lazy HTML admission, upload, kill/join, recovery and
+duplicate retry remain timed. Alternatives rejected: dropping provenance checks
+could certify changed code; caching mutable files without a final check could
+hide artifact replacement; preloading the HTML projector would hide cold cost.
+This corrects benchmark overhead, not product performance. Results under the
+two clock scopes cannot establish a Rust speedup across versions. Earlier full
+regressions remain evidence; fresh equivalent-work cohorts are required.
+Scope `tofu.native-ingest-clock/v3` keeps the v2 operation boundary and streams
+provenance hashing with bounded buffers. Problem: repeated whole-file source and
+artifact reads can dominate process peak/retained RSS even outside latency clocks.
+Decision: keep all source, byte-pin, exported-identity and original-wait checks,
+while bounding their read buffers. Alternative rejected: removing those checks
+would weaken evidence; attributing their allocator retention to Rust parsing
+would misidentify the cost. Original v2 cohorts and every rejection remain
+retained; this harness correction cannot be counted as product acceleration or
+waive the need for a fresh, identically scoped full comparison.
+
+Boundary verification
+retains the original diagnostics, refused memory pilot and corrected all-case
+pilot. The pilot checks the mechanism and does not admit performance.
+
 The benchmark view delegates to `lib.knowledge.html_text`. It uses a
 per-call lightweight tree, omits attributes, and preserves the canonical hidden
 content, whitespace, headings, table-cell and entity rules. The knowledge HTML adapter uses this parser lazily; PDF extraction, repository
@@ -119,3 +198,7 @@ resource tracker. Separate memory workers sample aggregate descendant RSS at
 5ms, include parent high-water RSS and report post-disposal positive RSS growth
 from a warmed/disposed baseline. Short child peaks may be missed; one lifetime
 is not long-run leak proof. Missing domains keep the whole-system goal open.
+
+The complete v2 ingestion cohort retains all five cases with three 100-operation warm/memory pairs and 100 fresh cold samples per arm. The collector completed with exact outputs and joined cleanup, while four performance guards rejected the candidate. Bounded-provenance v3 requires its own full cohort; neither version erases the earlier negative evidence.
+
+> Evidence note: the the former evidence/ artifact snapshots cited here were retired from the tree. The cited JSON artifacts remain recoverable from git history.

@@ -3,8 +3,8 @@
 The extension owns the temporary tab, logged-in browser context, scrolling,
 pagination and raw transport capture.  This module is the sole model-context
 boundary: it re-authorizes the final page and every response URL, classifies
-the observed data source, redacts structured state, and applies one output
-budget.  Nothing captured here is durable.
+the observed data source and redacts structured state. Accepted evidence enters
+the common L0 presentation boundary intact. Nothing captured here is durable.
 
 Entry point: ``research_page``.
 """
@@ -196,11 +196,9 @@ def render_research_payload(
     content_receipt: dict | None = None,
 ) -> str:
     """Render one already-authorized deep-capture result for model context."""
-    budget = _bounded_int(
-        max_chars, default=60_000, minimum=1_000, maximum=_MAX_CONTEXT_CHARS)
     from .content import collect_content, render_content
     content_receipt = content_receipt or collect_content(
-        payload, owner_user_id=owner_user_id, target=target, max_chars=budget)
+        payload, owner_user_id=owner_user_id, target=target)
     analysis = analysis or analyze_research_payload(
         payload, owner_user_id=owner_user_id, target=target,
         content_receipt=content_receipt)
@@ -217,16 +215,12 @@ def render_research_payload(
         if promotion_text:
             analysis_text += '\n\n' + promotion_text
     if mode == 'analysis':
-        return analysis_text[:budget]
+        return analysis_text
     if mode == 'content':
-        return render_content(content_receipt, max_chars=budget)
-    # Evidence first. Diagnostics cannot evict the content they describe.
-    if budget < 1400:
-        return render_content(content_receipt, max_chars=budget)
-    analysis_budget = min(2000, budget // 4)
-    content = render_content(content_receipt, max_chars=budget - analysis_budget)
-    separator = '\n\n--- Collection diagnostics ---\n'
-    return (content + separator + analysis_text[:analysis_budget - len(separator)])[:budget]
+        return render_content(content_receipt)
+    # Accepted evidence and diagnostics enter the common L0 boundary intact.
+    content = render_content(content_receipt)
+    return content + '\n\n--- Collection diagnostics ---\n' + analysis_text
 
 
 def _content_observation_outcome(content: dict, analysis: dict, prior: dict | None) -> str:
@@ -273,9 +267,6 @@ def research_page(fn_args: dict, runtime) -> str:
         return 'Error: browser research URL was denied by domain policy.'
     from .site_observations import load_site_observation
     prior_observation = load_site_observation(runtime.owner_user_id, url, operation=operation)
-    max_chars = _bounded_int(
-        fn_args.get('maxChars'), default=60_000,
-        minimum=1_000, maximum=_MAX_CONTEXT_CHARS)
     max_scrolls = _bounded_int(
         fn_args.get('maxScrolls'), default=4, minimum=0, maximum=8)
     max_pages = _bounded_int(
@@ -296,7 +287,7 @@ def research_page(fn_args: dict, runtime) -> str:
             f'research; missing capabilities: {", ".join(exc.missing)}')
     command_params = {
         'url': url,
-        'maxChars': max_chars,
+        'maxChars': _MAX_CONTEXT_CHARS,
         'maxScrolls': max_scrolls,
         'maxPages': max_pages,
         'pagination': pagination,
@@ -354,7 +345,7 @@ def research_page(fn_args: dict, runtime) -> str:
         logger.debug('[BrowserResearch] login-wall classification degraded: %s', exc)
     from .content import collect_content
     content_receipt = collect_content(
-        result, owner_user_id=runtime.owner_user_id, target=target, max_chars=max_chars)
+        result, owner_user_id=runtime.owner_user_id, target=target)
     analysis = analyze_research_payload(
         result, owner_user_id=runtime.owner_user_id, target=target,
         content_receipt=content_receipt)
@@ -386,7 +377,7 @@ def research_page(fn_args: dict, runtime) -> str:
         current_observation = None
     return render_research_payload(
         result, owner_user_id=runtime.owner_user_id,
-        mode=mode, max_chars=max_chars, analysis=analysis,
+        mode=mode, analysis=analysis,
         prior_observation=prior_observation,
         current_observation=current_observation, target=target,
         content_receipt=content_receipt)

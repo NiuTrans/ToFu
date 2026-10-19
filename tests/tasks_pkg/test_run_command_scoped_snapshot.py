@@ -153,26 +153,29 @@ class TestRunCommandScopedTracking:
         # Out-of-target churn is not reported.
         assert not any(rel == 'docs/c.md' for rel, *_ in records)
 
-    def test_glob_target_still_uses_full_snapshot(self, tmp_path, monkeypatch):
+    def test_glob_delete_preserves_recoverable_content_without_full_snapshot(self, tmp_path, monkeypatch):
         _tree(tmp_path)
-        spy = {'full': 0, 'scoped': 0}
-        real_full = project_tools._snapshot_project_files
-        real_scoped = project_tools._snapshot_targets
-        monkeypatch.setattr(
-            'lib.project_mod.tools._snapshot_project_files',
-            lambda cwd: (spy.__setitem__('full', spy['full'] + 1), real_full(cwd))[1])
-        monkeypatch.setattr(
-            'lib.project_mod.tools._snapshot_targets',
-            lambda cwd, targets: (
-                spy.__setitem__('scoped', spy['scoped'] + 1),
-                real_scoped(cwd, targets))[1])
-        monkeypatch.setattr(
-            'lib.project_mod.run_command._record_modification',
-            lambda *a, **k: None)
+        from lib.project_mod import run_command
+        monkeypatch.setattr(run_command, '_RM_TRASH_ENABLED', True)
+        monkeypatch.setattr(run_command, '_TRASH_DIRNAME', 'test-trash')
+        records = []
+        def unexpected_full_snapshot(*args):
+            raise AssertionError('A resolvable glob must not scan unrelated trees')
+        monkeypatch.setattr(project_tools, '_snapshot_project_files', unexpected_full_snapshot)
+        monkeypatch.setattr('lib.project_mod.run_command._record_modification',
+                            lambda base, source, rel, original_content=None, **kwargs:
+                            records.append((rel, kwargs.get('action'), original_content)))
         result = project_tools.execute_tool(
             'run_command', {'command': 'rm -f src/*.py'}, str(tmp_path))
         assert '[exit code: 0]' in result
-        assert spy['full'] == 2 and spy['scoped'] == 0
+        assert not (tmp_path / 'src/b.py').exists()
+        assert (tmp_path / 'src/pkg/a.py').read_text() == 'alpha\n'
+        assert (tmp_path / 'docs/c.md').read_text() == 'gamma\n'
+        # Shell expansion has no proven literal write set; the recoverable
+        # delete owner retains the exact preimage instead of claiming a diff.
+        assert records == []
+        retained = list((tmp_path / 'test-trash').glob('*/src/b.py'))
+        assert len(retained) == 1 and retained[0].read_text() == 'beta\n'
 
 
 @pytest.mark.unit

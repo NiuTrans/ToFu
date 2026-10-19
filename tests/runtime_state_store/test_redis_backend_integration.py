@@ -37,7 +37,7 @@ def _fake_client():
 #  RuntimeStateStore redis backend against a real client
 # ══════════════════════════════════════════════════════════════════════
 def _store_on(client):
-    from lib.runtime_state_store import RedisRuntimeStateStore
+    from lib.runtime.runtime_state_store import RedisRuntimeStateStore
     st = RedisRuntimeStateStore()
     st._client = client        # inject the real redis-py client (fakeredis)
     st._available = True

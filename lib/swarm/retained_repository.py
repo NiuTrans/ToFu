@@ -8,13 +8,14 @@ invocations; no model loop or thread is held on its behalf.
 from __future__ import annotations
 
 import hashlib
-import json
 import uuid
 from collections.abc import Mapping
 
 from lib.conversations.project_identity import normalize_project_path
 from lib.identity import require_user_id
+from lib.log import get_logger
 
+logger = get_logger(__name__)
 
 NAMESPACE = 'swarm.retained_agent.v1'
 INDEX_NAMESPACE = 'swarm.retained_agent_roster.v1'
@@ -22,14 +23,16 @@ INDEX_NAMESPACE = 'swarm.retained_agent_roster.v1'
 # column. This repository enforces owner/tenant/scope through opaque keys and
 # read validation; a future shared-administration API needs a dedicated
 # semantic storage operation with predicates in every backend.
-MAX_MEMORY_BYTES = 8 * 1024 * 1024
-MAX_ROSTER = 256
-MAX_ROSTER_SCAN = 1000
+_ROSTER_PAGE_ROWS = 1000  # physical metadata window, never a roster quota
 
 
 class RetainedAgentError(RuntimeError):
     """A reusable worker cannot be safely read or changed."""
 
+
+
+class _RosterProjectionConflict(RetainedAgentError):
+    """Only the reconstructible roster exhausted its bounded CAS attempts."""
 
 def scope_for(*, project_path: str = '', conversation_id: str = '',
               requested: str = '') -> str:
@@ -53,13 +56,33 @@ def scope_for(*, project_path: str = '', conversation_id: str = '',
 class RetainedAgentRepository:
     """CAS repository; every method requires the explicit owner at creation."""
 
-    def __init__(self, user_id: int, *, tenant_id: str = '', client=None):
+    def __init__(self, user_id: int, *, tenant_id: str = '', client=None,
+                 task: dict | None = None, cancellable: bool = True):
         self.user_id = require_user_id(user_id, context='retained agent owner')
         self.tenant_id = str(tenant_id or '')
         if client is None:
             from lib.storage import get_storage_client
             client = get_storage_client
         self._client = client
+
+        self._task = task
+        self._cancellable = cancellable
+
+    def _query(self, operation, payload):
+        if self._task is None:
+            return self._client().query(operation, payload)
+        from lib.tasks_pkg.persistence_wait import wait_for_persistence
+        return wait_for_persistence(self._task,
+            lambda: self._client().query(operation, payload), label=operation,
+            cancellable=self._cancellable)
+
+    def _command(self, operation, payload, command_id):
+        if self._task is None:
+            return self._client(write=True).command(operation, payload, command_id)
+        from lib.tasks_pkg.persistence_wait import wait_for_persistence
+        return wait_for_persistence(self._task,
+            lambda: self._client(write=True).command(operation, payload, command_id),
+            label=operation, cancellable=self._cancellable)
 
     def _prefix(self, scope: str) -> str:
         if not isinstance(scope, str) or not scope.startswith(('p:', 'c:')):
@@ -75,7 +98,7 @@ class RetainedAgentRepository:
         return self._prefix(scope) + canonical
 
     def get(self, scope: str, agent_id: str) -> tuple[dict, int] | None:
-        row = self._client().query('record.get', {
+        row = self._query('record.get', {
             'namespace': NAMESPACE, 'key': self._key(scope, agent_id),
         })
         if not isinstance(row, dict):
@@ -89,24 +112,82 @@ class RetainedAgentRepository:
             raise RetainedAgentError('Retained agent ownership record is invalid')
         return value, int(row['version'])
 
+    def _rows(self, scope: str, namespace: str, *, include_value=True):
+        """Stream ordered metadata pages; never enumerate authority dialogue."""
+        after = ''
+        prefix = self._prefix(scope)
+        while True:
+            payload = {'namespace': namespace, 'prefix': prefix,
+                       'limit': _ROSTER_PAGE_ROWS, 'include_value': include_value}
+            if after:
+                payload['after_key'] = after
+            rows = self._query('record.list', payload)
+            if not isinstance(rows, list) or len(rows) > _ROSTER_PAGE_ROWS:
+                raise RetainedAgentError('Retained agent roster is unavailable')
+            if not rows:
+                return
+            for row in rows:
+                key = row.get('key') if isinstance(row, dict) else None
+                if (not isinstance(key, str) or not key.startswith(prefix) or key <= after
+                        or type(row.get('version')) is not int or row['version'] < 1):
+                    raise RetainedAgentError('Retained agent roster cursor/version is invalid')
+                after = key
+                yield row
+
+    def _validate_index(self, scope: str, row: dict) -> dict:
+        value = row.get('value')
+        if (not isinstance(value, dict) or value.get('user_id') != self.user_id
+                or value.get('tenant_id') != self.tenant_id or value.get('scope') != scope
+                or row['key'] != self._key(scope, value.get('id'))
+                or type(value.get('source_version')) is not int or value['source_version'] < 1):
+            raise RetainedAgentError('Retained agent roster contains invalid ownership/version')
+        return value
+
+    @staticmethod
+    def _roster_value(value: dict, source_version: int) -> dict:
+        indexed = {field: value.get(field) for field in (
+            'id', 'user_id', 'tenant_id', 'scope', 'role', 'name', 'state',
+            'generation', 'last_result', 'last_status', 'created_at', 'updated_at')}
+        indexed['message_count'] = len(value.get('messages') or [])
+        indexed['source_version'] = source_version
+        return indexed
+
     def list(self, scope: str) -> list[dict]:
-        rows = self._client().query('record.list', {
-            # The roster holds metadata only. Listing full 8 MiB working
-            # transcripts would breach the storage frame at ordinary scale.
-            'namespace': INDEX_NAMESPACE, 'prefix': self._prefix(scope),
-            'limit': MAX_ROSTER_SCAN,
-        })
-        if not isinstance(rows, list):
-            raise RetainedAgentError('Retained agent roster is unavailable')
+        """Join authority headers to the cache; repair only mismatched identities.
+
+        This is a paged read, not a transaction-wide snapshot. Concurrent updates
+        may appear at their observed version, but a stale index never substitutes
+        for an authoritative version or invents an identity after deletion.
+        """
+        from lib.storage.errors import StorageError
         result = []
-        for row in rows:
-            value = row.get('value') if isinstance(row, dict) else None
-            if (not isinstance(value, dict)
-                    or value.get('user_id') != self.user_id
-                    or value.get('tenant_id') != self.tenant_id
-                    or value.get('scope') != scope):
-                raise RetainedAgentError('Retained agent roster contains invalid ownership')
-            result.append(value)
+        cached_rows = iter(self._rows(scope, INDEX_NAMESPACE))
+        cached = next(cached_rows, None)
+        for header in self._rows(scope, NAMESPACE, include_value=False):
+            while cached is not None and cached['key'] < header['key']:
+                self._validate_index(scope, cached)
+                cached = next(cached_rows, None)
+            indexed = None
+            if cached is not None and cached['key'] == header['key']:
+                indexed = self._validate_index(scope, cached)
+                cached = next(cached_rows, None)
+            if indexed is not None and indexed['source_version'] == header['version']:
+                result.append(indexed)
+                continue
+            agent_id = header['key'][len(self._prefix(scope)):]
+            found = self.get(scope, agent_id)
+            if found is None:
+                continue  # Concurrent deletion is authoritative, not a phantom row.
+            value, version = found
+            if version < header['version']:
+                raise RetainedAgentError('Retained agent authority version regressed')
+            result.append(self._roster_value(value, version))
+            try:
+                self._sync_index(scope, agent_id, value, version)
+            except (StorageError, _RosterProjectionConflict):
+                # Projection repair is optional: exact authority supplied this
+                # response, and the next listing retries the same version.
+                logger.warning('Retained roster projection repair unavailable')
         return result
 
     def _sync_index(self, scope: str, agent_id: str, value: dict,
@@ -114,13 +195,9 @@ class RetainedAgentRepository:
         """Publish a small monotonic roster projection after authority."""
         from lib.storage.errors import StorageError
         key = self._key(scope, agent_id)
-        indexed = {field: value.get(field) for field in (
-            'id', 'user_id', 'tenant_id', 'scope', 'role', 'name', 'state',
-            'generation', 'last_result', 'last_status', 'created_at', 'updated_at')}
-        indexed['message_count'] = len(value.get('messages') or [])
-        indexed['source_version'] = source_version
+        indexed = self._roster_value(value, source_version)
         for _ in range(4):
-            row = self._client().query('record.get', {
+            row = self._query('record.get', {
                 'namespace': INDEX_NAMESPACE, 'key': key,
             })
             current = row.get('value') if isinstance(row, dict) else None
@@ -129,7 +206,7 @@ class RetainedAgentRepository:
                 return
             expected = int(row['version']) if isinstance(row, dict) else 0
             try:
-                self._client(write=True).command('record.put', {
+                self._command('record.put', {
                     'namespace': INDEX_NAMESPACE, 'key': key,
                     'value': indexed, 'expected_version': expected,
                 }, f'retained-agent-roster:{uuid.uuid4().hex}')
@@ -141,13 +218,11 @@ class RetainedAgentRepository:
                 if (error.code != 'database_conflict'
                         and (error.request_not_dispatched or not error.retryable)):
                     raise
-        raise RetainedAgentError('Agent roster changed concurrently')
+        raise _RosterProjectionConflict('Agent roster changed concurrently')
 
     def create(self, scope: str, *, role: str, name: str,
                messages: list | None = None, last_result: str = '',
                last_status: str = '') -> dict:
-        if len(self.list(scope)) >= MAX_ROSTER:
-            raise RetainedAgentError('Retained agent roster is full; archive or delete an agent')
         if not isinstance(name, str) or not 1 <= len(name.strip()) <= 80:
             raise RetainedAgentError('Agent name must contain 1–80 characters')
         if not isinstance(role, str) or not role or len(role) > 64:
@@ -170,22 +245,19 @@ class RetainedAgentRepository:
 
     def _put(self, scope: str, agent_id: str, value: dict, *, expected: int) -> dict:
         from lib.storage.errors import StorageError
-        encoded = json.dumps(value, ensure_ascii=False, default=str).encode('utf-8')
-        if len(encoded) > MAX_MEMORY_BYTES:
-            raise RetainedAgentError('Agent memory exceeds its durable size limit')
         payload = {
             'namespace': NAMESPACE, 'key': self._key(scope, agent_id),
             'value': value, 'expected_version': expected,
         }
         try:
-            return self._client(write=True).command(
+            return self._command(
                 'record.put', payload, f'retained-agent:{uuid.uuid4().hex}')
         except StorageError as error:
             if error.code == 'database_conflict' or error.request_not_dispatched:
                 raise
             # An ambiguous ACK may follow a successful commit. Never issue a
             # second write with a fresh receipt before checking authority.
-            row = self._client().query('record.get', {
+            row = self._query('record.get', {
                 'namespace': NAMESPACE, 'key': payload['key'],
             })
             if (isinstance(row, dict) and row.get('value') == value
@@ -232,7 +304,7 @@ class RetainedAgentRepository:
         except StorageError as error:
             if error.request_not_dispatched or self.get(scope, agent_id) is not None:
                 raise
-        index_row = self._client().query('record.get', {
+        index_row = self._query('record.get', {
             'namespace': INDEX_NAMESPACE, 'key': key,
         })
         if not isinstance(index_row, dict):
@@ -254,5 +326,4 @@ class RetainedAgentRepository:
 
 __all__ = [
     'RetainedAgentError', 'RetainedAgentRepository', 'scope_for',
-    'MAX_MEMORY_BYTES', 'MAX_ROSTER', 'MAX_ROSTER_SCAN',
 ]

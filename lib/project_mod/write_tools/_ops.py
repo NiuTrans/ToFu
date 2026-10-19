@@ -7,6 +7,7 @@ their single-edit cores (``_apply_one_diff`` / ``_insert_one``). Every operation
 resolves + attributes through the ``_paths`` core and matches through the
 ``_text`` helpers.
 """
+from lib.project_mod.write_intents import recovery_file_bytes as recovery_file_bytes
 
 import os
 import tempfile
@@ -16,7 +17,6 @@ from difflib import SequenceMatcher
 
 from lib.log import get_logger
 from lib.tools.execution_timing import timing_phase
-from lib.project_mod.write_intents import recovery_file_bytes
 from lib.project_mod.modifications import _record_modification
 from lib.project_mod.session_lock import SessionLockBusy
 from lib.project_mod.path_resolution import _resolve_base
@@ -30,11 +30,11 @@ from ._paths import (
     _should_record_modification,
 )
 from ._text import (
-    _common_indent,
     _decode_unicode_escapes,
     _describe_duplicate_matches,
     _find_closest_match,
     _reindent_block,
+    _uniform_indent_offset,
     _touch_for_vscode,
 )
 
@@ -48,7 +48,7 @@ def _with_workspace_writer(function):
     from contextlib import ExitStack
     from lib.project_mod.post_commit import defer_publication
     from lib.project_mod.workspace_lease import (
-        WorkspaceBusyError, workspace_file_write_lease, is_source_workspace_path,
+        WorkspaceBusyError, workspace_claims_lease,
     )
 
     signature = inspect.signature(function)
@@ -62,6 +62,15 @@ def _with_workspace_writer(function):
                  if isinstance(edits, list) else [bound.get('rel_path')])
         targets = set()
         lexical_targets = {}
+
+
+        def changed_precondition(kind, message):
+            if edits is not None:
+                return f'Error [{kind}]: {message}. No edits applied.'
+            return {'ok': False, 'error': message, 'error_kind': kind,
+                    'retryable': True, 'path': bound.get('rel_path', ''),
+                    'mutationApplied': False}
+
         for path in paths:
             if not isinstance(path, str) or not path:
                 continue
@@ -84,25 +93,31 @@ def _with_workspace_writer(function):
             try:
                 from lib.project_mod.tool_admission import admission_timeout, cancellation
                 cancel = cancellation()
-                deadline = time.monotonic() + admission_timeout()
+                wait_timeout = admission_timeout()
                 with timing_phase('workspace_admission'):
-                    for target in sorted(targets):
-                        if not is_source_workspace_path(target):
-                            continue
-                        stack.enter_context(workspace_file_write_lease(target,
-                            timeout=max(0.0, deadline - time.monotonic()), cancel_event=cancel))
+                    claims = [('file', target) for target in targets]
+                    stack.enter_context(workspace_claims_lease(claims,
+                        timeout=wait_timeout, cancel_event=cancel))
                 # Admission may have waited behind a real writer. Revalidate
                 # the exact previously-read content before reading a preimage.
                 for lexical, target in lexical_targets.items():
                     if os.path.realpath(lexical) != target:
-                        raise WorkspaceBusyError('File target changed while waiting for write admission; '
-                                                 're-resolve and retry: ' + lexical)
+                        return changed_precondition('workspace-target-changed',
+                            'File target changed during write admission; '
+                            're-resolve and re-read the target before retrying: ' + lexical)
                 from lib import write_freshness
+                # Only append consumes the current preimage rather than the
+                # caller's observed replacement version. Keep admission and
+                # target revalidation; skip just the stale-token precondition.
+                pure_append = (function.__name__ == 'tool_write_file'
+                               and bound.get('append') is True)
                 for target in targets:
-                    if (bound.get('conv_id') and os.path.isfile(target)
+                    if (not pure_append and bound.get('conv_id') and os.path.isfile(target)
                             and write_freshness.is_stale(bound['conv_id'], target)):
-                        raise WorkspaceBusyError('File changed while waiting for write admission; '
-                                                 're-read and reconcile: ' + target)
+                        return changed_precondition('write-freshness-stale',
+                            'File changed on disk; the observed content version differs; '
+                            're-read and reconcile before retrying (waiting alone will not '
+                            'refresh the read): ' + target)
             except WorkspaceBusyError as error:
                 if edits is not None:
                     return f'Error [workspace-busy]: {error}. No edits applied; retry after the writer finishes.'
@@ -287,12 +302,37 @@ def _atomic_write_text(target, text, *, before_replace=None, after_replace=None)
                             before_replace=before_replace, after_replace=after_replace)
 
 
+def _write_destination(target, base, rel_path, *, conv_id=None, attribution=None):
+    """Resolve the existing undo authority before admission or publication."""
+    from lib.project_mod import modifications as mods
+    from lib.project_mod.write_intents import IntentError, validate_relative_path
+
+    mod_base, mod_rel = attribution or _mod_attribution(target, base, rel_path, conv_id=conv_id)
+    mod_base = os.path.abspath(mod_base)
+    physical_root = os.path.realpath(mod_base)
+    physical = os.path.realpath(target)
+    if os.path.commonpath([physical_root, physical]) != physical_root:
+        # Retain the existing same-repository checkout admission; attribution
+        # remains owned by _paths rather than this batch planner.
+        from lib.project_mod.write_tools._paths import (
+            _git_common_dir, _is_same_repo_worktree, _nearest_existing_dir)
+        anchor = _nearest_existing_dir(physical)
+        worktree_ok = (anchor is not None
+                       and _is_same_repo_worktree(physical, anchor, [physical_root])
+                       and _git_common_dir(anchor) is not None
+                       and _git_common_dir(physical_root) == _git_common_dir(anchor))
+        if not worktree_ok:
+            raise IntentError('Prepared write target escapes its attributed root')
+    mod_rel = validate_relative_path(os.path.relpath(physical, physical_root))
+    return mod_base, mod_rel, mods._get_session_dir(mod_base)
+
+
 def _write_with_undo(target, content, base, rel_path, original_content, *,
                      mod_type='write_file', reverse_patch=None, conv_id=None,
                      task_id=None, tracked=None, attribution=None):
     """One admitted prepare -> replace -> durable journal -> acknowledgement."""
     from lib.project_mod import modifications as mods
-    from lib.project_mod.write_intents import IntentError, locked_intents, _limit
+    from lib.project_mod.write_intents import IntentError, locked_intents
     from lib.project_mod.session_lock import locked_session
     from lib.project_mod.write_recovery import recover_locked, post_image
     writer = _atomic_write_text if isinstance(content, str) else _atomic_write_bytes
@@ -301,38 +341,11 @@ def _write_with_undo(target, content, base, rel_path, original_content, *,
     if not tracked:
         writer(target, content)
         return
-    if len(content) > _limit('postImageBytes') or (original_content is not None
-            and len(original_content) > _limit('originalBytes')):
-        raise IntentError(f'undo-budget-exceeded: exact recovery evidence exceeds write recovery budget ({recovery_file_bytes()} bytes); no write was performed; configure TOFU_PROJECT_WRITE_RECOVERY_MAX_MIB and restart')
     data = content.encode('utf-8') if isinstance(content, str) else bytes(content)
     original = (original_content.encode('utf-8') if isinstance(original_content, str)
                 else original_content)
-    if len(data) > _limit('postImageBytes') or (original is not None
-            and len(original) > _limit('originalBytes')):
-        raise IntentError(f'undo-budget-exceeded: exact recovery evidence exceeds write recovery budget ({recovery_file_bytes()} bytes); no write was performed; configure TOFU_PROJECT_WRITE_RECOVERY_MAX_MIB and restart')
-    mod_base, mod_rel = attribution or _mod_attribution(target, base, rel_path, conv_id=conv_id)
-    mod_base = os.path.abspath(mod_base)
-    physical_root = os.path.realpath(mod_base)
-    physical = os.path.realpath(target)
-    if os.path.commonpath([physical_root, physical]) != physical_root:
-        # A same-repo worktree target (2026-10-04 exemption) legitimately
-        # lives outside its attributed root — the worktree checkout sits in a
-        # sibling directory, but the undo journal belongs to the registered
-        # repo root that owns it. _mod_attribution only returns such a base
-        # after _is_same_repo_worktree matched, so reaching here means the
-        # escape is the sanctioned worktree case, not a path-confusion bug.
-        from lib.project_mod.write_tools._paths import (
-            _git_common_dir, _is_same_repo_worktree, _nearest_existing_dir)
-        _anchor = _nearest_existing_dir(physical)
-        _worktree_ok = (_anchor is not None
-                        and _is_same_repo_worktree(physical, _anchor,
-                                                   [physical_root])
-                        and _git_common_dir(_anchor) is not None
-                        and _git_common_dir(physical_root) == _git_common_dir(_anchor))
-        if not _worktree_ok:
-            raise IntentError('Prepared write target escapes its attributed root')
-    mod_rel = os.path.relpath(physical, physical_root)
-    session_dir = mods._get_session_dir(mod_base)
+    mod_base, mod_rel, session_dir = _write_destination(
+        target, base, rel_path, conv_id=conv_id, attribution=attribution)
     with locked_session(session_dir) as state, locked_intents(session_dir) as store:
         if state.get('writing') or state.get('recovering'):
             raise IntentError('Nested project write during journal publication is not allowed')
@@ -358,9 +371,11 @@ def _write_with_undo(target, content, base, rel_path, original_content, *,
             record = intent
         def prepare(stage):
             from lib.project_mod.tool_admission import journal_conv_id
-            store.prepare(base_path=mod_base, path=mod_rel, original=original,
+            prepared = store.prepare(base_path=mod_base, path=mod_rel, original=original,
                           post_content=data, stage_name=os.path.basename(stage),
                           conv_id=journal_conv_id(conv_id), task_id=task_id, on_intent=remember)
+            from lib.project_mod.effect_reconciliation import bind_prepared_write
+            bind_prepared_write(prepared)
         def applied():
             nonlocal published
             published = True
@@ -392,11 +407,9 @@ def _write_with_undo(target, content, base, rel_path, original_content, *,
 
 
 def _read_original_text(target):
-    """Bound the byte read before strict UTF-8 decoding; preserve newline bytes."""
+    """Read the complete source before strict UTF-8 decoding; preserve newline bytes."""
     with open(target, 'rb') as handle:
-        data = handle.read(recovery_file_bytes() + 1)
-    if len(data) > recovery_file_bytes():
-        raise ValueError(f'Original file exceeds write recovery budget ({recovery_file_bytes()} bytes); configure TOFU_PROJECT_WRITE_RECOVERY_MAX_MIB and restart')
+        data = handle.read()
     return data.decode('utf-8')
 
 
@@ -609,9 +622,7 @@ def tool_write_file(base, rel_path, content, description='', conv_id=None, task_
     if existed:
         try:
             with open(target, 'rb') as f:
-                original_bytes = f.read(recovery_file_bytes() + 1)
-                if len(original_bytes) > recovery_file_bytes():
-                    raise ValueError(f'Original file exceeds write recovery budget ({recovery_file_bytes()} bytes); configure TOFU_PROJECT_WRITE_RECOVERY_MAX_MIB and restart')
+                original_bytes = f.read()
             old_lines = original_bytes.count(b'\n') + 1
             try:
                 old_content = original_bytes.decode('utf-8')
@@ -808,9 +819,7 @@ def _publish_uploaded_target(base, rel_path, data, *, original_path,
     if existed:  # overwrite path — capture pre-image so undo restores bytes
         try:
             with open(target, 'rb') as f:
-                original_content = f.read(recovery_file_bytes() + 1)
-                if len(original_content) > recovery_file_bytes():
-                    raise ValueError(f'Original file exceeds write recovery budget ({recovery_file_bytes()} bytes); configure TOFU_PROJECT_WRITE_RECOVERY_MAX_MIB and restart')
+                original_content = f.read()
         except Exception as e:
             logger.debug('[Tools] upload pre-image read failed for %s: %s', target, e)
             return {'ok': False, 'action': 'upload_file', 'path': rel_path,
@@ -852,10 +861,10 @@ def _indent_tolerant_splice(norm_content, norm_search, replace, replace_all,
 
     The most common model drift after representation issues is a block emitted
     out-dented or over-indented relative to the file (aider's relative-indent
-    finding: tolerating it is where most edit reliability lives). Lines are
-    compared fully whitespace-stripped (optionally unicode-escape decoded);
-    on a unique line-aligned match the replacement is re-framed into the file
-    block's own indentation via ``_reindent_block`` before splicing.
+    finding: tolerating it is where most edit reliability lives). A match must
+    preserve every nonblank line's relative indentation: exactly one literal
+    leading prefix is added or removed across the entire block. The replacement
+    receives that same offset, never an independent per-line deindent.
 
     Returns ``{'ok': True, ...}`` with the spliced content, ``{'ok': False,
     'errorKind': EK_AMBIGUOUS_MATCH, ...}`` on multiple matches, or
@@ -877,8 +886,15 @@ def _indent_tolerant_splice(norm_content, norm_search, replace, replace_all,
         return {'ok': False}
     cmp_content = [_form(l) for l in content_lines]
     cmp_search = [_form(l) for l in search_lines]
-    starts = [i for i in range(len(cmp_content) - n + 1)
-              if cmp_content[i:i + n] == cmp_search]
+    offsets = {}
+    for i in range(len(cmp_content) - n + 1):
+        if cmp_content[i:i + n] != cmp_search:
+            continue
+        offset = _uniform_indent_offset(
+            search_lines, content_lines[i:i + n], decode=decode)
+        if offset is not None:
+            offsets[i] = offset
+    starts = list(offsets)
     if not starts:
         return {'ok': False}
     note = ('unicode-escape + indentation' if decode else 'indentation')
@@ -894,15 +910,19 @@ def _indent_tolerant_splice(norm_content, norm_search, replace, replace_all,
                 'error': error_msg, 'errorKind': EK_AMBIGUOUS_MATCH}
     replace_lines = replace.replace('\r\n', '\n').split('\n')
     work = list(content_lines)
+
+    if any(removed and any(line.strip() and not line.startswith(removed)
+                           for line in replace_lines)
+           for removed, _added in offsets.values()):
+        return {'ok': False}
     first_matched = None
     for start in reversed(starts):
         block = content_lines[start:start + n]
         if first_matched is None:
             first_matched = '\n'.join(block)
+        removed, added = offsets[start]
         work[start:start + n] = _reindent_block(
-            replace_lines,
-            from_prefix=_common_indent(search_lines),
-            to_prefix=_common_indent(block))
+            replace_lines, from_prefix=removed, to_prefix=added)
         if not replace_all:
             break
     return {'ok': True,
@@ -1019,8 +1039,8 @@ def _compute_diff(content, rel_path, search, replace, replace_all=False):
                 # ── Tier 5: uniform-indent (relative-indent) drift ──
                 # The model often emits the block out-dented/over-indented
                 # relative to the file (e.g. a method body at column 0). Match
-                # whitespace-stripped lines, then re-frame the replacement
-                # into the file's own indentation before splicing.
+                # one uniform leading-prefix offset without changing relative
+                # indentation, then apply that same offset to the replacement.
                 outcome = _indent_tolerant_splice(norm_content, norm_search,
                                                   replace, replace_all,
                                                   decode=False, rel_path=rel_path)
@@ -1088,11 +1108,6 @@ def _compute_diff(content, rel_path, search, replace, replace_all=False):
     if new_content.replace(reverse_patch['search'], reverse_patch['replace'], 1) != pre_edit_text:
         # Matching normalization or an ambiguous inverse can change more than
         # the nominal anchor. Preserve a proven exact inverse for fallback undo.
-        if any(len(text) > recovery_file_bytes() or len(text.encode('utf-8')) > recovery_file_bytes()
-               for text in (new_content, pre_edit_text)):
-            return {'ok': False, 'action': 'apply_diff', 'path': rel_path,
-                    'errorKind': 'undo-budget-exceeded',
-                    'error': 'Exact undo evidence exceeds the project file byte budget; no write was performed.'}
         reverse_patch = {'search': new_content, 'replace': pre_edit_text}
     if replace_all and count > 1:
         reverse_patch['replace_all'] = True
@@ -1263,7 +1278,7 @@ def _log_legacy_edit_efficiency(search, replace, *, ok):
     )
 
 
-def _commit_edit_group(target, base, recs, conv_id, task_id):
+def _commit_edit_group(target, base, recs, conv_id, task_id, *, write_options=None):
     """One physical replacement and one verifiable journal transition per file.
 
     Per-edit results remain ordered at the caller. Intermediate computations
@@ -1272,17 +1287,15 @@ def _commit_edit_group(target, base, recs, conv_id, task_id):
     first = recs[0]
     final = recs[-1]['new_content']
     try:
-        tracked = _should_record_modification(target, conv_id=conv_id)
+        tracked = (_should_record_modification(target, conv_id=conv_id)
+                   if write_options is None else write_options['tracked'])
         if tracked:
-            _mod_base, _mod_rel = _mod_attribution(
-                target, first['attribution_base'], first['attribution_rel'], conv_id=conv_id)
+            _mod_base, _mod_rel = (write_options['attribution'] if write_options is not None
+                                  else _mod_attribution(target, first['attribution_base'],
+                                                        first['attribution_rel'], conv_id=conv_id))
             reverse_patch = first['reverse_patch']
             if len(recs) > 1:
                 original = first['original_content']
-                if any(len(text) > recovery_file_bytes() or len(text.encode('utf-8')) > recovery_file_bytes()
-                       for text in (original, final)):
-                    return ('[undo-budget-exceeded] Exact batch undo evidence exceeds '
-                            'the project file byte budget; no write was performed.')
                 reverse_patch = {'search': final, 'replace': original}
     except Exception as exc:
         logger.warning('[Tools] batch undo evidence preparation failed for %s: %s',
@@ -1324,10 +1337,6 @@ def tool_apply_diffs(base_path, edits, conv_id=None, task_id=None,
     """
     if not edits:
         return 'No edits provided.'
-
-    MAX_EDITS = 30
-    if len(edits) > MAX_EDITS:
-        edits = edits[:MAX_EDITS]
 
     from collections import OrderedDict
 
@@ -1531,6 +1540,10 @@ def _splice_insertion(file_content, anchor_idx, anchor, content, position):
         it = '\n' + it
     elif after_idx < len(file_content):
         after_idx += 1
+    elif after_idx and file_content[after_idx - 1] != '\n':
+        # An unterminated final line still needs a separator before the new
+        # line. An anchor that already includes its final newline does not.
+        it = '\n' + it
     if not it.endswith('\n'):
         it += '\n'
     return file_content[:after_idx] + it + file_content[after_idx:], it
@@ -1953,11 +1966,6 @@ def _compute_insert(file_content, rel_path, anchor, content, position='after',
         reverse_patch = {'search': inserted_block, 'replace': file_content[anchor_idx:anchor_idx + len(anchor) + (1 if file_content[anchor_idx + len(anchor):anchor_idx + len(anchor) + 1] == '\n' else 0)]}
 
     if new_content.replace(reverse_patch['search'], reverse_patch['replace'], 1) != original_file_content:
-        if any(len(text) > recovery_file_bytes() or len(text.encode('utf-8')) > recovery_file_bytes()
-               for text in (new_content, original_file_content)):
-            return {'ok': False, 'action': 'insert_content', 'path': rel_path,
-                    'errorKind': 'undo-budget-exceeded',
-                    'error': 'Exact undo evidence exceeds the project file byte budget; no write was performed.'}
         reverse_patch = {'search': new_content, 'replace': original_file_content}
 
     return {
@@ -2078,10 +2086,6 @@ def tool_insert_contents(base_path, edits, conv_id=None, task_id=None,
     if not edits:
         return 'No edits provided.'
 
-    MAX_EDITS = 30
-    if len(edits) > MAX_EDITS:
-        edits = edits[:MAX_EDITS]
-
     results = []
     ok_count = 0
     partial_count = 0
@@ -2163,30 +2167,90 @@ def _log_edit_efficiency(operation, anchor, content, *, ok):
     )
 
 
+def _admit_edit_groups(groups, conv_id, stack):
+    """Hold every tracked destination's existing journal admission before writes.
+
+    The enclosing workspace owner already leased the complete physical write
+    set. Sort journal sessions as a set, not per-file nested acquisitions, and
+    use the same recovery/cache authority as the individual writer. No new
+    intents or user-file writes are prepared during this preflight.
+    """
+    from lib.project_mod import modifications as mods
+    from lib.project_mod.session_lock import locked_session
+    from lib.project_mod.write_intents import IntentError, locked_intents
+    from lib.project_mod.write_recovery import recover_locked
+
+    options, errors, sessions = {}, {}, {}
+    for target, ops in groups.items():
+        try:
+            # Canonical paths identify shared buffers, not workspace authority.
+            # A project symlink's referent must not become untracked scratch.
+            destinations = []
+            seen = set()
+            for op in ops:
+                lexical = op['target']
+                if lexical in seen:
+                    continue
+                seen.add(lexical)
+                if _should_record_modification(lexical, conv_id=conv_id):
+                    destinations.append(_write_destination(
+                        lexical, op['bp'], op['resolved_rp'], conv_id=conv_id))
+            options[target] = {'tracked': bool(destinations)}
+            if not destinations:
+                continue
+            options[target]['attribution'] = destinations[0][:2]
+            for mod_base, _mod_rel, session_dir in destinations:
+                session = sessions.setdefault(session_dir, {'base': mod_base, 'targets': []})
+                if target not in session['targets']:
+                    session['targets'].append(target)
+        except Exception as error:
+            errors[target] = error
+    for directory, session in sorted(sessions.items()):
+        try:
+            state = stack.enter_context(locked_session(directory))
+            store = stack.enter_context(locked_intents(directory))
+            if state.get('writing') or state.get('recovering'):
+                raise IntentError('Nested project write during journal publication is not allowed')
+            state['recovering'] = True
+            try:
+                recover_locked(session['base'], store)
+            finally:
+                state.pop('recovering', None)
+            # A later root's corrupt journal must not follow an earlier write.
+            mods._cache_get(directory)
+        except Exception as error:
+            for target in session['targets']:
+                errors[target] = error
+    return options, errors
+
+
+def _edit_group_failure(operation, path, error):
+    action = 'apply_diff' if operation == 'replace' else 'insert_content'
+    if isinstance(error, SessionLockBusy):
+        return _journal_busy_failure(action, path, error)
+    if isinstance(error, _AppliedWriteFailure):
+        return _applied_write_failure(action, path, error)
+    return {'ok': False, 'error': str(error), 'action': action, 'path': path,
+            'errorKind': EK_WRITE_FAILED}
+
+
 @_with_workspace_writer
 def tool_edit_file(base_path, edits, conv_id=None, task_id=None,
-                   allow_outside=False):
-    """Apply a sequential mixed batch of replacements and insertions.
+                   allow_outside=False, atomic=True):
+    """Preflight a sequential mixed batch, then publish one transition per file.
 
-    Edits are grouped by resolved target: each file is read once, its edits
-    are applied in memory sequentially (edit N still sees the result of
-    1..N-1), and the final bytes are written once — one atomic write, one
-    freshness record and one advisory note per file instead of N.
+    Atomic preflight is the default: an invalid operation, destination or match
+    prevents every write. Only explicit ``atomic=False`` permits legacy partial
+    application. This does not promise cross-file rollback after I/O failure.
+    Later edits see earlier in-memory changes; receipts keep original indexes.
     """
     if not edits:
         return 'No edits provided.'
     if not isinstance(edits, list):
         return 'Error: edit_file edits must be an array of objects.'
 
-    MAX_EDITS = 30
-    dropped = max(0, len(edits) - MAX_EDITS)
-    edits = edits[:MAX_EDITS]
-
     from collections import OrderedDict
 
-    ok_count = 0
-    partial_count = 0
-    fail_count = 0
     strings = {}
     prepared = []
 
@@ -2194,7 +2258,6 @@ def tool_edit_file(base_path, edits, conv_id=None, task_id=None,
         if not isinstance(edit, dict):
             strings[i] = _invalid_edit_entry_msg(
                 i, edit, '{path, operation, anchor, content}')
-            fail_count += 1
             continue
 
         rp = edit.get('path', '')
@@ -2209,13 +2272,11 @@ def tool_edit_file(base_path, edits, conv_id=None, task_id=None,
             strings[i] = (
                 f'[{i}] FAIL [{EK_INVALID_EDIT}] '
                 'Missing required field (path, anchor, or content)')
-            fail_count += 1
             continue
         if not isinstance(operation, str) or operation not in _EDIT_OPERATIONS:
             strings[i] = (f'[{i}] FAIL [{EK_INVALID_EDIT}] Invalid operation: '
                           f'{operation!r} '
                           '(must be insert_after, insert_before, or replace)')
-            fail_count += 1
             continue
         # ``replace_all`` has no meaning for an insertion.  Normalize it away
         # instead of rejecting a unique insertion and spending another model
@@ -2228,7 +2289,6 @@ def tool_edit_file(base_path, edits, conv_id=None, task_id=None,
         except ValueError as exc:
             logger.debug('[write_tools] tool_edit_file path rejected: %s', exc)
             strings[i] = f'[{i}] FAIL {rp} [{EK_PATH_INVALID}]: {exc}'
-            fail_count += 1
             continue
 
         prepared.append({
@@ -2248,9 +2308,38 @@ def tool_edit_file(base_path, edits, conv_id=None, task_id=None,
             p['resolve_err'] = str(e)
             continue
         p['target'] = target
-        groups.setdefault(target, []).append(p)
+        groups.setdefault(os.path.realpath(target), []).append(p)
 
-    # One read + one write per file.
+    # Path failures join the same whole-batch preflight, before any publication.
+    for p in prepared:
+        if 'resolve_err' in p:
+            _log_edit_efficiency(p['operation'], p['anchor'], p['content'], ok=False)
+            strings[p['i']] = (
+                f'[{p["i"]}] FAIL {p["rp"]} [{p["operation"]}] '
+                f'[{EK_PATH_INVALID}]: {p["resolve_err"]}')
+
+    return _execute_edit_file_plan(
+        groups, strings, len(edits), conv_id, task_id, atomic=atomic is not False)
+
+
+def _execute_edit_file_plan(groups, strings, total, conv_id, task_id, *, atomic):
+    """Compute all file buffers under existing admissions, then publish/report."""
+    from contextlib import ExitStack
+
+    with ExitStack() as stack:
+        options, admission_errors = _admit_edit_groups(groups, conv_id, stack)
+        return _preflight_and_commit_edits(
+            groups, strings, total, conv_id, task_id, atomic=atomic,
+            options=options, admission_errors=admission_errors)
+
+
+def _preflight_and_commit_edits(groups, strings, total, conv_id, task_id, *,
+                              atomic, options, admission_errors):
+    plans = []
+    fail_count = len(strings)
+    ok_count = partial_count = skipped_count = 0
+
+    # No file publication, history, freshness or syntax-success receipt here.
     for target, ops in groups.items():
         if not os.path.isfile(target):
             for p in ops:
@@ -2298,30 +2387,52 @@ def tool_edit_file(base_path, edits, conv_id=None, task_id=None,
             else:
                 comps.append((p, None, comp))
 
-        write_err = None
         if recs:
+            try:
+                # UTF-8 encoding is deterministic validation, not later I/O.
+                # Validate final buffers before any preceding file is published.
+                current.encode('utf-8')
+            except UnicodeEncodeError as error:
+                comps = [(p, None, err or {
+                    'ok': False, 'errorKind': EK_INVALID_EDIT,
+                    'error': f'Cannot encode planned UTF-8 content: {error}',
+                }) for p, _comp, err in comps]
+                recs = []
+        if target in admission_errors:
+            comps = [(p, None, err or _edit_group_failure(
+                p['operation'], p['resolved_rp'], admission_errors[target]))
+                for p, _comp, err in comps]
+            recs = []
+        plans.append((target, ops, before_batch, current, comps, recs))
+
+    rejected = atomic and (fail_count or any(
+        comp is None for _target, _ops, _before, _after, comps, _recs in plans
+        for _p, comp, _err in comps))
+
+    for target, ops, before_batch, current, comps, recs in plans:
+        write_err = None
+        if recs and not rejected:
             write_err = _commit_edit_group(
-                target, recs[0]['attribution_base'], recs, conv_id, task_id)
+                target, recs[0]['attribution_base'], recs, conv_id, task_id,
+                write_options=options.get(target))
 
         for p, comp, err_dict in comps:
             if comp is not None:
+                if rejected:
+                    strings[p['i']] = (
+                        f'[{p["i"]}] SKIP {p["rp"]} [{p["operation"]}]: '
+                        'Not applied because atomic preflight failed.')
+                    skipped_count += 1
+                    _log_edit_efficiency(p['operation'], p['anchor'], p['content'], ok=False)
+                    continue
                 if write_err is None:
                     if p['operation'] == 'replace':
                         result = _diff_result_from_comp(
                             p['resolved_rp'], comp, p['desc'], syntax_guard=False)
                     else:
                         result = _insert_result_from_comp(p['resolved_rp'], comp, p['desc'])
-                elif isinstance(write_err, SessionLockBusy):
-                    action = 'apply_diff' if p['operation'] == 'replace' else 'insert_content'
-                    result = _journal_busy_failure(action, p['resolved_rp'], write_err)
-                elif isinstance(write_err, _AppliedWriteFailure):
-                    action = 'apply_diff' if p['operation'] == 'replace' else 'insert_content'
-                    result = _applied_write_failure(action, p['resolved_rp'], write_err)
                 else:
-                    action = 'apply_diff' if p['operation'] == 'replace' else 'insert_content'
-                    result = {'ok': False, 'error': write_err,
-                              'action': action, 'path': p['resolved_rp'],
-                              'errorKind': EK_WRITE_FAILED}
+                    result = _edit_group_failure(p['operation'], p['resolved_rp'], write_err)
             else:
                 result = err_dict
             _log_edit_efficiency(p['operation'], p['anchor'], p['content'], ok=result['ok'])
@@ -2352,7 +2463,7 @@ def tool_edit_file(base_path, edits, conv_id=None, task_id=None,
         # Only committed final bytes can justify follow-up work. Checking
         # intermediate replacements would warn about syntax already repaired
         # by a later edit and spend another model round on a non-problem.
-        if recs and write_err is None:
+        if recs and write_err is None and not rejected:
             warning = _post_edit_guard(ops[0]['resolved_rp'], before_batch,
                                        current, abs_path=target)
             if warning:
@@ -2361,24 +2472,13 @@ def tool_edit_file(base_path, edits, conv_id=None, task_id=None,
                 strings[last_ok] += ' ' + warning
                 logger.warning('[SyntaxGuard] %s', warning)
 
-    # Edits whose path resolution failed at the write-core stage (readonly,
-    # forbidden root, …) — same error the single-edit core would surface.
-    for p in prepared:
-        if 'resolve_err' in p:
-            _log_edit_efficiency(p['operation'], p['anchor'], p['content'], ok=False)
-            strings[p['i']] = (
-                f'[{p["i"]}] FAIL {p["rp"]} [{p["operation"]}] '
-                f'[{EK_PATH_INVALID}]: '
-                f'{p["resolve_err"]}')
-            fail_count += 1
-
-    results = [strings[i] for i in range(1, len(edits) + 1)]
-    header = f'Applied {ok_count}/{ok_count + fail_count} edits'
+    results = [strings[i] for i in range(1, total + 1)]
+    header = f'Applied {ok_count}/{total} edits'
     if fail_count:
         header += f' ({fail_count} failed)'
+    if rejected:
+        header += f'; atomic preflight failed; no files written; {skipped_count} skipped'
     if partial_count:
         header = header.replace('Applied ', 'Completed ', 1).replace('Inserted ', 'Completed ', 1)
         header += f'; {partial_count} edits were applied without confirmed undo'
-    if dropped:
-        header += f' ({dropped} over the 30-edit limit dropped)'
     return header + '\n' + '\n'.join(results)

@@ -33,7 +33,7 @@ from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from lib.storage.errors import StorageError
+from lib.agent_core.storage_errors import StorageError
 
 
 StorageClientFactory = Callable[..., Any]
@@ -431,7 +431,7 @@ class ConversationRepository:
         user_id: int,
         settings_keys: list[str] | tuple[str, ...] | None,
     ) -> Iterator[ConversationSnapshot]:
-        """Hydrate one bounded ID batch, splitting only frame-size failures."""
+        """Split rejected batches; a single unavailable transcript still fails."""
         if not conversation_ids:
             return
         try:
@@ -444,8 +444,10 @@ class ConversationRepository:
             )
         except StorageError as exc:
             is_frame_limit = (
-                exc.code == "database_protocol_error"
-                and _FRAME_TOO_LARGE_MESSAGE in exc.message
+                (exc.code == "database_protocol_error"
+                 and _FRAME_TOO_LARGE_MESSAGE in exc.message)
+                or (exc.code == "database_unavailable"
+                    and exc.message == "database_resource_exhausted")
             )
             if not is_frame_limit or len(conversation_ids) == 1:
                 raise
@@ -590,6 +592,25 @@ def count_conversation_activity_intervals(
     )
 
 
+def search_conversation_page(query: str, *, user_id: int, limit: int = 200,
+                             cursor: str | None = None) -> dict:
+    """Owner-scoped v2 search page, including continuation and coverage."""
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 200:
+        raise ValueError('search page limit must be between 1 and 200')
+    page = ConversationRepository()._client().query('conversation.search', {
+        'query': query.strip(), 'user_id': _owner_id(user_id),
+        'limit': limit, 'page': True, 'cursor': cursor,
+    })
+    if (not isinstance(page, dict) or not isinstance(page.get('items'), list)
+            or 'next_cursor' not in page or not isinstance(page.get('incomplete'), bool)
+            or (page['next_cursor'] is not None and not isinstance(page['next_cursor'], str))):
+        raise RuntimeError('conversation search page is malformed')
+    for hit in page['items']:
+        if not isinstance(hit, Mapping) or not isinstance(hit.get('id'), str) or not hit['id']:
+            raise RuntimeError('conversation search hit is malformed')
+    return page
+
+
 def search_conversation_ids(
     query: str,
     *,
@@ -612,4 +633,6 @@ __all__ = [
     "scan_conversations_bounded",
     "count_conversation_activity_intervals",
     "search_conversation_ids",
+
+    "search_conversation_page",
 ]

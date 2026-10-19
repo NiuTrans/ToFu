@@ -67,7 +67,7 @@ def test_local_command_reaches_durable_research_settlement(storage, monkeypatch,
     if not bind_selection:
         monkeypatch.setattr(action, '_research_context', lambda *args: {})
     if bind_selection in ('paged', 'restored', 'history', 'history_expired'):
-        monkeypatch.setattr('lib.tool_result_artifacts.get_storage_client', lambda **kwargs: supervisor.client)
+        monkeypatch.setattr('lib.tool_results.tool_result_artifacts.get_storage_client', lambda **kwargs: supervisor.client)
     if bind_selection == 'restored':
         monkeypatch.setattr('lib.research.context.restore_source_reference', lambda *a, **k: True)
     direction = 'Local scientific pipeline ' + uuid.uuid4().hex
@@ -100,7 +100,7 @@ def test_local_command_reaches_durable_research_settlement(storage, monkeypatch,
         monkeypatch.setattr('lib.token_counter.count_text', lambda text, **kwargs: len(text) // 4)
     if bind_selection == 'history_expired':
         import time
-        from lib.tool_result_artifacts import ToolResultArtifactRepository, DEFAULT_TTL_MS
+        from lib.tool_results.tool_result_artifacts import ToolResultArtifactRepository, DEFAULT_TTL_MS
         class ExpiredFirstHistory(ToolResultArtifactRepository):
             first_expired = False
             def put(self, **kwargs):
@@ -108,7 +108,7 @@ def test_local_command_reaches_durable_research_settlement(storage, monkeypatch,
                     type(self).first_expired = True
                     kwargs['now_ms'] = int(time.time() * 1000) - 2 * DEFAULT_TTL_MS
                 return super().put(**kwargs)
-        monkeypatch.setattr('lib.tool_result_artifacts.ToolResultArtifactRepository', ExpiredFirstHistory)
+        monkeypatch.setattr('lib.tool_results.tool_result_artifacts.ToolResultArtifactRepository', ExpiredFirstHistory)
     warmup_rounds = 15 if bind_selection in ('long', 'history', 'history_expired', 'live_retry', 'storage_restart') else 0
     def provider(messages, **kwargs):
         retained = [size for reference,size in admission_references if reference() is not None]

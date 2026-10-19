@@ -211,16 +211,17 @@ def pdf_pool_metrics() -> dict[str, int | bool]:
     return result
 
 
-def parse_pdf_pooled(pdf_bytes: bytes, *, timeout: float = None, **kwargs) -> dict:
+def parse_pdf_pooled(pdf_bytes: bytes, *, timeout: float | None = None, **kwargs) -> dict:
     kwargs.pop('progress_callback', None)
     budget = resolve_classic_pdf_budget()
-    try:
-        requested_timeout = float(timeout or 0)
-    except (TypeError, ValueError, OverflowError):
-        requested_timeout = 0.0
-    if not math.isfinite(requested_timeout) or requested_timeout <= 0:
-        requested_timeout = float(budget.timeout_seconds)
-    wait_seconds = min(float(budget.timeout_seconds), requested_timeout)
+    if timeout is not None and (type(timeout) not in (int, float)
+            or not math.isfinite(timeout) or timeout < 0):
+        raise ValueError('PDF parse timeout must be a nonnegative finite number or None')
+    explicit = [
+        float(value) for value in (timeout, budget.timeout_seconds)
+        if value is not None and value > 0
+    ]
+    wait_seconds = min(explicit) if explicit else None
     lease = _ADMISSION.reserve()
     try:
         worker = _get_pool()

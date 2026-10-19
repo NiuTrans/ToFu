@@ -11,7 +11,9 @@ pytestmark = pytest.mark.unit
 
 
 @pytest.fixture
-def coordinator():
+def coordinator(monkeypatch):
+    monkeypatch.setattr('lib.tasks_pkg.persistence_wait._BASE_DELAY_SECONDS', 0.001)
+    monkeypatch.setattr('lib.tasks_pkg.persistence_wait._MAX_DELAY_SECONDS', 0.01)
     owner = EventDeliveryCoordinator(workers=2, capacity=32, byte_capacity=4096,
                                      retry_attempts=2, retry_delay=0, idle_timeout=.02)
     yield owner
@@ -41,6 +43,87 @@ def test_blocked_write_does_not_block_next_event_or_other_owner(coordinator):
     assert observed == ['commit-1', 'push-1', 'commit-2', 'push-2']
 
 
+def test_foreign_commits_do_not_resume_an_unrelated_durability_barrier(coordinator, monkeypatch):
+    blocked = DeliveryLane({'id': 'blocked-barrier'})
+    sibling = DeliveryLane({'id': 'committing-sibling'})
+    entered, release, waiting, resumed, finished = (threading.Event() for _ in range(5))
+    failures = []
+    original_wait = threading.Condition.wait
+
+    def observe_wait(condition, timeout=None):
+        is_barrier = threading.current_thread().name == 'isolated-barrier'
+        if is_barrier:
+            waiting.set()
+        result = original_wait(condition, timeout)
+        if is_barrier:
+            resumed.set()
+        return result
+
+    def persist():
+        entered.set()
+        assert release.wait(3)
+
+    def flush():
+        try:
+            coordinator.flush(blocked, timeout=None)
+        except BaseException as error:
+            failures.append(error)
+        finally:
+            finished.set()
+
+    coordinator.submit(blocked, 1, 128, persist, lambda: None)
+    assert entered.wait(2)
+    monkeypatch.setattr(threading.Condition, 'wait', observe_wait)
+    thread = threading.Thread(target=flush, name='isolated-barrier')
+    thread.start()
+    try:
+        assert waiting.wait(2)
+        for sequence in range(1, 17):
+            coordinator.submit(sibling, sequence, 128, lambda: None, lambda: None)
+            coordinator.flush(sibling)
+        assert not resumed.wait(.02)
+        assert not finished.is_set()
+    finally:
+        release.set()
+        thread.join(3)
+    assert finished.is_set() and resumed.is_set() and not failures
+
+
+def test_barrier_failure_wakes_without_a_polling_deadline(coordinator):
+    lane = DeliveryLane({'id': 'failed-barrier'})
+    entered, release, finished = (threading.Event() for _ in range(3))
+    failures = []
+
+    def persist():
+        entered.set()
+        assert release.wait(3)
+        raise StorageError('database_integrity', 'injected permanent failure')
+
+    def flush():
+        try:
+            coordinator.flush(lane, timeout=None)
+        except EventDeliveryError as error:
+            failures.append(error)
+        finally:
+            finished.set()
+
+    coordinator.submit(lane, 1, 128, persist, lambda: None)
+    assert entered.wait(2)
+    thread = threading.Thread(target=flush)
+    thread.start()
+    try:
+        release.set()
+        assert finished.wait(2)
+        assert len(failures) == 1 and lane.completed == 0
+        # Preserve the failed owned head, then explicitly repair for teardown.
+        with coordinator.condition:
+            lane.pending[0].persist = lambda: None
+        coordinator.flush(lane)
+    finally:
+        release.set()
+        thread.join(3)
+
+
 def test_failed_head_is_retained_and_recovered_before_followers(coordinator):
     lane = DeliveryLane({'id': 'retry'})
     failed, release = threading.Event(), threading.Event()
@@ -57,7 +140,7 @@ def test_failed_head_is_retained_and_recovered_before_followers(coordinator):
     release.set()
     assert failed.wait(2)
     with pytest.raises(EventDeliveryError):
-        coordinator.flush(lane, recover=False)
+        coordinator.flush(lane, recover=False, timeout=.01)
     assert coordinator.snapshot()['pending_events'] == 2
     assert '_pushWithheldAt' in lane.task
     assert observed == []
@@ -82,19 +165,19 @@ def test_transient_failed_head_keeps_accepting_memory_events_until_durable_repai
 
     coordinator.submit(lane, 1, 128, persist_first, lambda: observed.append(('push', 1)))
     with coordinator.condition:
-        assert coordinator.condition.wait_for(lambda: lane.error is failure, timeout=2)
+        assert coordinator.condition.wait_for(lambda: bool(lane.task.get('_storageWaits')), timeout=2)
     try:
         for sequence in range(2, 65):
             coordinator.submit(lane, sequence, 128,
                 lambda sequence=sequence: observed.append(('commit', sequence)),
                 lambda sequence=sequence: observed.append(('push', sequence)))
         assert lane.accepted == 64 and lane.completed == 0
-        assert lane.error is failure
+        assert lane.error is None and lane.task['_storageWaits']
         assert coordinator.snapshot()['pending_events'] == 64
         assert observed == []
         with pytest.raises(EventDeliveryError) as caught:
-            coordinator.flush(lane, recover=False)
-        assert caught.value.__cause__ is failure
+            coordinator.flush(lane, recover=False, timeout=.01)
+        assert 'barrier timed out' in str(caught.value)
     finally:
         recovered = True
         coordinator.flush(lane)
@@ -157,7 +240,7 @@ def test_progress_after_lost_ack_preserves_the_original_receipt_shape(coordinato
 
     submit(1)
     with coordinator.condition:
-        assert coordinator.condition.wait_for(lambda: lane.error is failure, timeout=2)
+        assert coordinator.condition.wait_for(lambda: bool(lane.task.get('_storageWaits')), timeout=2)
     try:
         submit(2)
         submit(3)
@@ -165,7 +248,9 @@ def test_progress_after_lost_ack_preserves_the_original_receipt_shape(coordinato
     finally:
         unavailable = False
         coordinator.flush(lane)
-    assert attempts == [(1,), (1,), (1,), (2, 3)]
+    assert len(attempts) >= 2
+    assert all(shape == (1,) for shape in attempts[:-1])
+    assert attempts[-1] == (2, 3)
     assert committed == published == [1, 2, 3]
 
 
@@ -462,7 +547,7 @@ def test_production_progress_events_share_one_charged_detached_history(monkeypat
         chat_task_runtime.discard(task['id'])
 
 
-def test_production_progress_continues_after_storage_retry_exhaustion(monkeypatch, record_property):
+def test_production_progress_retains_pressure_wait_and_exact_evidence(monkeypatch, record_property):
     import uuid
     from lib import turn_lifecycle
     from lib.agent_core.execution_session import ExecutionPhase
@@ -496,7 +581,7 @@ def test_production_progress_continues_after_storage_retry_exhaustion(monkeypatc
         _events.append_event(task, {'type': 'delta', 'content': '0'})
         lane = event_delivery.delivery_lane_for(task)
         with owner.condition:
-            assert owner.condition.wait_for(lambda: lane.error is failure, timeout=2)
+            assert owner.condition.wait_for(lambda: bool(task.get('_storageWaits')), timeout=2)
         started = time.perf_counter()
         for index in range(1, 64):
             task['content'] = str(index)
@@ -506,7 +591,7 @@ def test_production_progress_continues_after_storage_retry_exhaustion(monkeypatc
         assert not task.get('aborted') and not task['abort_event'].is_set()
         assert lane.accepted == 64 and lane.completed == 0 and frames == []
         with pytest.raises(EventDeliveryError):
-            owner.flush(lane, recover=False)
+            owner.flush(lane, recover=False, timeout=.01)
         task['toolRounds'][0]['result'] = 'live mutation'
         recovered = True
         owner.flush(lane)
@@ -773,3 +858,39 @@ def test_child_revoked_before_root_admission_is_not_accepted(coordinator):
     assert lane.accepted == 0
     assert not lane.pending
     assert coordinator.snapshot()['pending_events'] == 0
+
+
+def test_owner_stop_rejects_late_frames_without_poisoning_terminal_delivery(coordinator, monkeypatch):
+    import uuid
+    import lib.turn_lifecycle as turns
+    from lib.agent_core.execution_session import ExecutionPhase
+    from lib.tasks_pkg import event_delivery
+    from lib.tasks_pkg.manager import _events
+    from lib.tasks_pkg.manager.runtime import chat_task_runtime
+    from lib.tasks_pkg.event_delivery import EventDeliveryCancelled
+
+    monkeypatch.setattr(event_delivery, '_COORDINATOR', coordinator)
+    monkeypatch.setattr('lib.translate.terminal.schedule_terminal_turn_translations', lambda task: None)
+    observed = []
+    monkeypatch.setattr(turns, 'record_task_event',
+                        lambda task, wire, **kwargs: observed.append(wire['type']) or 'carried')
+    task = chat_task_runtime.create(user_id=1, task_id='stop-' + uuid.uuid4().hex)
+    task.update(_attemptId='stop-attempt', _turnId='stop-turn', convId='stop-conv',
+                _workerStartedAt=time.time(), status='running', config={},
+                content='partial', thinking='', toolRounds=[], content_lock=threading.Lock())
+    try:
+        _events.append_event(task, {'type': 'delta', 'content': 'partial'})
+        assert chat_task_runtime.abort_owned(task['id'], user_id=1, source='test-stop')
+        for wire in ({'type': 'delta', 'content': 'late'},
+                     {'type': 'round_end', 'roundNum': 1, 'reason': 'tools'}):
+            with pytest.raises(EventDeliveryCancelled):
+                _events.append_event(task, wire)
+            assert task['_eventDeliveryAdmissionError'] == 'EventDeliveryCancelled'
+            assert '_pushWithheldAt' not in task
+        _events.append_event(task, {'type': 'done', 'finishReason': 'aborted'})
+        assert observed == ['delta', 'done']
+        assert coordinator.snapshot()['pending_events'] == 0
+    finally:
+        coordinator.flush(event_delivery.delivery_lane_for(task))
+        task['_executionSession'].settle(ExecutionPhase.CANCELLED)
+        chat_task_runtime.discard(task['id'])

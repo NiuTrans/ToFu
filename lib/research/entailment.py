@@ -53,7 +53,7 @@ def assess_gaps(gaps, cards, sources, call, *, batch_size=24):
                 if not allowed <= {r['card_id'] for r in retained}:
                     failed += 1
             except Exception as error:
-                from lib.llm_errors import AbortedError
+                from lib.llm.llm_errors import AbortedError
                 if isinstance(error, AbortedError):
                     raise
                 failed += 1

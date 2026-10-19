@@ -80,7 +80,7 @@ function _renderToolRepairedBadge(round) {
     (rep.detail ? ":\n" + rep.detail : ".")
   );
   const cls = stillFailed ? "ptool-badge-warn" : "ptool-badge-repaired";
-  return `<span class="ptool-badge ${cls}" title="${tip}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;vertical-align:-2px"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.106-3.105c.32-.322.863-.22.983.218a6 6 0 0 1-8.259 7.057l-7.91 7.91a1 1 0 0 1-2.999-3l7.91-7.91a6 6 0 0 1 7.057-8.259c.438.12.54.662.219.984z"/></svg> ${label}</span>`;
+  return `<span class="ptool-badge ${cls}" title="${tip}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;vertical-align:-2px"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.106-3.105c.32-.322.863-.22.983.218a6 6 0 0 1-8.259 7.057l-7.91 7.91a1 1 0 0 1-2.999-3l7.91-7.91a6 6 0 0 1 7.057-8.259c.438.12.54.662.219.984z"/></svg> ${label}</span>${toolResultPresentation.renderRepairKindsHtml(round)}`;
 }
 
 function _toolRejectionDescriptor(round) {
@@ -203,21 +203,7 @@ function _projectTodoRoundsForDisplay(rounds) {
  * the first occurrence and skip if the label is empty or already inside
  * an anchor (defensive). */
 function _linkifyMcpLabels(text, round) {
-  const links = round && round._mcpLinks;
-  if (!links || typeof links !== "object" || !text) return text;
-  let out = text;
-  for (const label of Object.keys(links)) {
-    const href = links[label];
-    if (!label || !href) continue;
-    // Only allow http(s) hrefs — never inject javascript:/data: URLs.
-    if (!/^https?:\/\//i.test(href)) continue;
-    const escLabel = escapeHtml(label);
-    const idx = out.indexOf(escLabel);
-    if (idx === -1) continue;
-    const anchor = `<a class="ptool-mcp-link" href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer" title="${escapeHtml(href)}">${escLabel}</a>`;
-    out = out.slice(0, idx) + anchor + out.slice(idx + escLabel.length);
-  }
-  return out;
+  return renderMcpResourceLinks(text, round);
 }
 
 /* Recovery-rebuilt rounds can carry NO `query` at all: boot crash recovery
@@ -626,8 +612,6 @@ function _renderErrorRow(round, ctx) {
     outputExpanded: Boolean(round.toolCallId && _cmdOutputExpanded.has(_cmdInteractionKey(round))),
   });
   if (browserHtml) return browserHtml;
-  const _t = (typeof t === "function") ? t : (k, d) => d;
-
   // Artifact errors keep the same sole disclosure and visible failure verdict.
   if (renderToolArtifactHeaderHtml(round)) {
     const artifactHtml = renderGenericToolResultHtml(round, meta, {
@@ -652,18 +636,24 @@ function _renderErrorRow(round, ctx) {
     });
     if (writeCardHtml) return writeCardHtml;
   }
-  /* The clipped tail is exactly the part that explains the failure — render
-   * the content whole, line breaks included, mirroring the rejected lane. */
-  const reason = (typeof round.toolContent === "string" ? round.toolContent : "").trim();
-  const full = escapeHtml(reason).replace(/\n/g, "<br>");
-  const tip = escapeHtml(reason.split("\n")[0] || _t("tool.failedTip", "The tool failed — it did not complete successfully."));
-  return `<div class="ptool-line ptool-error" data-rn="${round.roundNum}" title="${tip}">
-         <span class="ptool-icon">${svg}</span>
-         ${rootPill}
-         <span class="ptool-text">${cmdText}</span>
-         ${renderToolHeaderBadgeHtml(round, meta)}
-         ${full ? `<span class="ptool-error-reason">${full}</span>` : ""}
-       </div>`;
+  // Compatibility bridge only: typed result presentation owns send-message
+  // content/errors. Delete with this legacy error-row dispatcher migration.
+  if (round.toolName === "send_agent_message") {
+    const sentMessageHtml = renderGenericToolResultHtml(round, meta, {
+      iconHtml: svg, queryHtml: q, rootPillHtml: rootPill, badgeHtml: "",
+      repairedBadgeHtml: ctx.repairedBadge,
+      rightControlsHtml: _rowRightControls(round),
+    });
+    if (sentMessageHtml) return sentMessageHtml;
+  }
+  // One authoritative/deferred disclosure, with bounded safe header copy.
+  // Delete this bridge with the classic dispatcher; never replay the tool.
+  return renderGenericToolResultHtml(round, meta, {
+    iconHtml: svg, queryHtml: cmdText, rootPillHtml: rootPill,
+    badgeHtml: renderToolHeaderBadgeHtml(round, meta),
+    repairedBadgeHtml: ctx.repairedBadge, rightControlsHtml: _rowRightControls(round),
+    toolDisplayLabel: td && td.label,
+  });
 }
 
 /* Command timing is the latest backend progress sample. Reconnect restores

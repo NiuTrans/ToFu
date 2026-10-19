@@ -11,9 +11,9 @@ import pprint
 from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / 'lib/agent_core/execution_session.py'
-REPLAY = ROOT / 'lib/task_replay.py'
+REPLAY = ROOT / 'lib/task_replay/task_replay.py'
 TOOL_FLOOD = ROOT / 'lib/llm/tool_call_flood.py'
-TOOL_CALLER = ROOT / 'lib/tool_caller_identity.py'
+TOOL_CALLER = ROOT / 'lib/tool_results/tool_caller_identity.py'
 SSE_CORE = ROOT / 'lib/llm/_sse_core.py'
 STREAM_RESULT = ROOT / 'lib/llm/stream_result.py'
 SSE = ROOT / 'lib/llm/_sse_framer.py'
@@ -117,7 +117,7 @@ def generate():
     def kinds(name):
         n = next(n for n in constants_tree.body if isinstance(n,ast.Assign) and n.targets[0].id==name)
         return ast.literal_eval(n.value.args[0] if isinstance(n.value,ast.Call) else n.value)
-    errors_tree = ast.parse((ROOT/'lib/llm_errors.py').read_text())
+    errors_tree = ast.parse((ROOT/'lib/llm/llm_errors.py').read_text())
     error_class = next(n for n in errors_tree.body if isinstance(n,ast.ClassDef) and n.name=='ProviderToolCallFloodError')
     stage = ast.literal_eval(next(n.value for n in error_class.body if isinstance(n,ast.Assign) and n.targets[0].id=='failure_stage'))
     envelope = dict(kind=kind,severity='warning' if kind in kinds('_WARNING_KINDS') else 'error',retryable=kind in kinds('_RETRYABLE_KINDS'),message=ast.literal_eval(assigned['message']),hint=ast.literal_eval(assigned['hint']),detail='',model='',context='',source='llm',raw='',failureStage=stage)
@@ -181,6 +181,26 @@ def generate():
         number = (ast.literal_eval(value.left)*ast.literal_eval(value.right) if isinstance(value,ast.BinOp) and isinstance(value.op,ast.Mult) else ast.literal_eval(value))
         output += ['pub const '+target_name+': usize = '+str(number)+';', '']
     frame_defs = json.loads((ROOT / 'contracts/native_agent_stdio_v1.schema.json').read_text())['$defs']
+    output += ['pub const ADDITIVE_USAGE_PROFILE: &str = '+json.dumps(frame_defs['additive_usage_summary']['properties']['profile']['const'])+';', '']
+    fields_tree = ast.parse((ROOT / 'lib/llm_sanitize/_fields.py').read_text())
+    message_fields = next(n.value for n in fields_tree.body if isinstance(n, ast.Assign)
+                         and n.targets[0].id == '_API_MESSAGE_FIELDS')
+    output += ['pub const CHAT_MESSAGE_FIELDS: &[&str] = &[' + ', '.join(
+        json.dumps(k) for k in sorted(ast.literal_eval(message_fields.args[0]))) + '];', '']
+    ordering_tree = ast.parse((ROOT / 'lib/llm/body/_canonical_wire.py').read_text())
+    for source_name, target_name in [('_MESSAGE_KEY_ORDER','CHAT_MESSAGE_ORDER'),
+            ('_TOOLCALL_KEY_ORDER','CHAT_TOOL_CALL_ORDER'),('_FUNCTION_KEY_ORDER','CHAT_FUNCTION_ORDER'),
+            ('_REASONING_DETAIL_KEY_ORDER','CHAT_REASONING_ORDER')]:
+        keys = next(n.value for n in ordering_tree.body if isinstance(n,ast.Assign) and n.targets[0].id==source_name)
+        output += ['pub const '+target_name+': &[&str] = &['+', '.join(json.dumps(k) for k in ast.literal_eval(keys))+'];','']
+    message_tree = ast.parse((ROOT / 'lib/llm_sanitize/_messages.py').read_text())
+    ghost = next(n for n in ast.walk(message_tree) if isinstance(n,ast.FunctionDef) and n.name=='_is_ghost')
+    keep = next(n.test for n in ghost.body if isinstance(n,ast.If) and isinstance(n.test,ast.BoolOp)
+                and all(isinstance(v,ast.Call) for v in n.test.values))
+    keys = [ast.literal_eval(n.args[0]) for n in keep.values]
+    output += ['pub const CHAT_GHOST_FIELDS: &[&str] = &['+', '.join(json.dumps(k) for k in keys)+'];','']
+    output += ['pub const CHAT_TEXT_WHITESPACE: &[u32] = &['+', '.join(
+        str(i) for i in range(0x110000) if chr(i).isspace())+'];','']
     for name, keys in [('NATIVE_TEXT_BLOCK_KEYS',frame_defs['tool_model_text']['properties']),('NATIVE_IMAGE_BLOCK_KEYS',frame_defs['tool_model_image']['properties']),('NATIVE_IMAGE_SOURCE_KEYS',frame_defs['tool_model_image']['properties']['image_url']['properties'])]:
         output += ['pub const '+name+': &[&str] = &['+', '.join(json.dumps(k) for k in keys)+'];', '']
     minimum = frame_defs['tool_model_image']['properties']['image_url']['properties']['url']['minLength']
@@ -237,6 +257,8 @@ def generate():
     output += ['#[rustfmt::skip]', 'pub const NATIVE_MODEL_TOOL_PROJECTION_JSON: &str = r#"'+projection+'"#;', '']
     output += ['pub fn native_model_tools(tools: &serde_json::Map<String,serde_json::Value>) -> Vec<serde_json::Value> {',
         '    tools.iter().map(|(name,tool)|serde_json::json!({"type":'+json.dumps(tool_projection['type'])+',"function":{"name":name,"description":tool['+json.dumps(tool_projection['description_field'])+'].as_str().unwrap_or('+json.dumps(tool_projection['missing_description'])+'),"parameters":tool['+json.dumps(tool_projection['parameters_field'])+']}})).collect()', '}', '']
+    cache_policy = json.loads((ROOT / 'contracts/native_agent_stdio_v1.schema.json').read_text())['model_cache_affinity_policy']
+    output += ['pub const MODEL_CACHE_AFFINITY_KEY_BYTES: usize = '+str(cache_policy['maximum_key_bytes'])+';', '']
     header_policy = json.loads((ROOT / 'contracts/native_agent_stdio_v1.schema.json').read_text())['model_dispatch_header_policy']
     output += ['pub const MODEL_DISPATCH_FORBIDDEN_HEADERS: &[&str] = &['+', '.join(json.dumps(name) for name in header_policy['forbidden'])+'];', '']
     return '\n'.join(output)
@@ -248,12 +270,30 @@ def main():
     defs = json.loads((ROOT / 'contracts/native_agent_stdio_v1.schema.json').read_text())['$defs']
     schemas = {kind:defs[name] for kind,name in [('text','tool_model_text'),('image_url','tool_model_image')]}
     py_target = ROOT / 'lib/agent_core/native_content_contract.py'
-    py_expected = '"""Generated native content/account schemas; sources: native_agent_stdio_v1.schema.json, native_agent_checkpoint_v1.schema.json."""\n\nMODEL_CONTENT_SCHEMAS = ' + pprint.pformat(schemas,width=100,sort_dicts=False) + '\n'
+    py_expected = '"""Generated native content/account schemas; sources: native_agent_stdio_v1.schema.json, native_agent_checkpoint_v1.schema.json, native_runtime_artifact_v1.json."""\n\nMODEL_CONTENT_SCHEMAS = ' + pprint.pformat(schemas,width=100,sort_dicts=False) + '\n'
+    artifact = json.loads((ROOT / 'contracts/native_runtime_artifact_v1.json').read_text())
+    py_expected += '\nNATIVE_ARTIFACT_SPEC = ' + pprint.pformat(artifact,width=100,sort_dicts=False) + '\n'
+    py_expected += '\nMODEL_PRICE_SCHEMA = ' + pprint.pformat(defs['model_price'],width=100,sort_dicts=False) + '\n'
+    py_expected += '\nMODEL_COUNTER_SCHEMA = ' + pprint.pformat(defs['model_counter'],width=100,sort_dicts=False) + '\n'
+    py_expected += '\nTERMINAL_PERSISTENCE_SCHEMA = ' + pprint.pformat(defs['terminal_persistence'],width=100,sort_dicts=False) + '\n'
+    py_expected += '\nADDITIVE_USAGE_SUMMARY_SCHEMA = ' + pprint.pformat(defs['additive_usage_summary'],width=100,sort_dicts=False) + '\n'
+    py_expected += '\nTERMINAL_RETRY_SCHEMA = ' + pprint.pformat(defs['terminal_retry'],width=100,sort_dicts=False) + '\n'
+    py_expected += '\nTERMINAL_COMMITTED_SCHEMA = ' + pprint.pformat(defs['terminal_committed'],width=100,sort_dicts=False) + '\n'
+    py_expected += '\nEXECUTION_HISTORY_SCHEMA = ' + pprint.pformat(defs['execution_history'],width=100,sort_dicts=False) + '\n'
+    py_expected += '\nNATIVE_STDIO_CONTRACT = ' + repr(json.loads((ROOT / 'contracts/native_agent_stdio_v1.schema.json').read_text())['$id']) + '\n'
+    py_expected += '\nNATIVE_WORKER_CONTRACT = ' + repr(defs['worker_run']['properties']['version']['enum'][0]) + '\n'
     projection = json.loads((ROOT / 'contracts/native_agent_stdio_v1.schema.json').read_text())['model_tool_projection']
     header_policy = json.loads((ROOT / 'contracts/native_agent_stdio_v1.schema.json').read_text())['model_dispatch_header_policy']
     py_expected += '\nMODEL_DISPATCH_FORBIDDEN_HEADERS = ' + repr(tuple(header_policy['forbidden'])) + '\n'
     checkpoint = json.loads((ROOT / 'contracts/native_agent_checkpoint_v1.schema.json').read_text())
+    py_expected += '\nFILE_TOOL_RECOVERY_SCHEMA = ' + pprint.pformat(checkpoint['$defs']['file_tool_recovery'],width=100,sort_dicts=False) + '\n'
     py_expected += '\nSHARED_ACCOUNT_SCHEMA = ' + pprint.pformat(checkpoint['properties']['shared_model_account'],width=100,sort_dicts=False) + '\n'
+    py_expected += '\nFEE_CHECKPOINT_SCHEMA = ' + pprint.pformat(checkpoint['properties']['host_fee_projection'],width=100,sort_dicts=False) + '\n'
+    actor_fees = json.loads(json.dumps(checkpoint['$defs']['registered_actor_fees']))
+    quote = actor_fees['properties']['rounds']['items']['properties']
+    assert quote['quote'] == {'$ref': '#/properties/host_fee_projection/properties/rounds/items/properties/cost'}
+    quote['quote'] = checkpoint['properties']['host_fee_projection']['properties']['rounds']['items']['properties']['cost']
+    py_expected += '\nREGISTERED_ACTOR_FEES_SCHEMA = ' + pprint.pformat(actor_fees,width=100,sort_dicts=False) + '\n'
     py_expected += '\nMODEL_TOOL_PROJECTION = ' + pprint.pformat(projection,width=100,sort_dicts=False) + '\n'
     py_expected += '\n' + 'def native_model_tools(tools):\n    """Project the canonical native catalog exactly like the generated Rust owner."""\n    rule = MODEL_TOOL_PROJECTION\n    return [{\'type\': rule[\'type\'], \'function\': {\n        \'name\': name,\n        \'description\': tool.get(rule[\'description_field\']) if isinstance(tool.get(rule[\'description_field\']), str) else rule[\'missing_description\'],\n        \'parameters\': tool.get(rule[\'parameters_field\']),\n    }} for name, tool in tools.items()]\n'
     if args.check:

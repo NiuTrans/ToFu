@@ -197,3 +197,49 @@ def test_progress_parser_accepts_split_frames_and_ignores_unstructured_output():
         reader('GRESS {"phase": "validating"}\n')
         reader('TOFU_ENGINE_PROGRESS malformed\n')
     assert frames == [{'phase': 'validating'}]
+
+
+@pytest.mark.parametrize('reported, reason', [
+    ('b' * 64 + ':1', 'source identity differs'),
+    ('a' * 64 + ':0', 'allocator is incompatible'),
+    ('invalid', 'invalid build metadata'),
+])
+def test_candidate_attestation_explains_metadata_refusal(tmp_path, monkeypatch, reported, reason):
+    candidate = tmp_path / 'tofu-db'
+    candidate.with_name('libtofu_db.so').write_bytes(b'candidate')
+    monkeypatch.setattr(engines.sys, 'platform', 'linux')
+    monkeypatch.setattr(engines, 'build_identity', lambda _: {'source_sha256': 'a' * 64})
+    monkeypatch.setattr(engines, '_run', lambda *_a, **_kw: reported)
+    with pytest.raises(engines.EnginePreparationError, match=reason):
+        engines._validate_candidate(candidate, tmp_path, {})
+
+
+def test_candidate_attestation_preserves_loader_failure(tmp_path, monkeypatch):
+    candidate = tmp_path / 'tofu-db'
+    candidate.with_name('libtofu_db.so').write_bytes(b'candidate')
+    monkeypatch.setattr(engines, 'build_identity', lambda _: {'source_sha256': 'a' * 64})
+
+    def load(*_args, **_kwargs):
+        raise engines.EnginePreparationError('loader failed: cannot allocate memory in static TLS block')
+
+    monkeypatch.setattr(engines, '_run', load)
+    with pytest.raises(engines.EnginePreparationError, match='cannot allocate memory in static TLS block'):
+        engines._validate_candidate(candidate, tmp_path, {})
+    assert not engines._cached_library_matches_source(candidate, 'a' * 64)
+
+
+def test_candidate_attestation_runs_semantic_probe_only_after_matching_pair(tmp_path, monkeypatch):
+    candidate = tmp_path / 'tofu-db'
+    candidate.with_name('libtofu_db.so').write_bytes(b'candidate')
+    monkeypatch.setattr(engines.sys, 'platform', 'linux')
+    monkeypatch.setattr(engines, 'build_identity', lambda _: {'source_sha256': 'a' * 64})
+    calls = []
+
+    def run(command, **_kwargs):
+        calls.append(command)
+        return 'a' * 64 + ':1' if len(calls) == 1 else ''
+
+    monkeypatch.setattr(engines, '_run', run)
+    engines._validate_candidate(candidate, tmp_path, {})
+    assert len(calls) == 2
+    assert calls[1][1:] == [str(tmp_path / 'scripts/check_tofudb_engine_drift.py'), '--binary', str(candidate), '--json']

@@ -2,7 +2,7 @@
 //!
 //! Project paths may exceed the Entity key bound, so documents use a
 //! domain-separated digest key and retain the exact path in a blob-capable
-//! versioned document. An exact count bounds full-list reads and lets clear
+//! versioned document. An exact count witnesses full-list reads and lets clear
 //! retire the complete physical namespace without walking every row.
 
 use std::cmp::Reverse;
@@ -14,7 +14,7 @@ use sha2::{Digest, Sha256};
 use crate::authority::{AuthorityDatabase, AuthorityTransaction};
 use crate::entity::EntityKey;
 use crate::generated_tofudb_ir::{
-    MAX_RECENT_PROJECTS_PER_OWNER, RECENT_PROJECT_COUNT_NAMESPACE,
+    RECENT_PROJECT_COUNT_NAMESPACE,
     RECENT_PROJECT_DOCUMENT_NAMESPACE,
 };
 use crate::versioned_document::{self, PutRequest};
@@ -91,9 +91,6 @@ fn read_count(
         .map_err(|_| invalid_data("recent-project count is malformed"))?;
     let count = usize::try_from(u64::from_le_bytes(bytes))
         .map_err(|_| invalid_data("recent-project count overflows this platform"))?;
-    if count > MAX_RECENT_PROJECTS_PER_OWNER {
-        return Err(invalid_data("recent-project count exceeds its bound"));
-    }
     Ok(count)
 }
 
@@ -102,9 +99,6 @@ fn write_count(
     transaction: &mut AuthorityTransaction,
     count: usize,
 ) -> io::Result<()> {
-    if count > MAX_RECENT_PROJECTS_PER_OWNER {
-        return Err(resource_exhausted("recent-project capacity is exhausted"));
-    }
     let key = count_key(transaction)?;
     database.entity_put(
         transaction,
@@ -227,13 +221,16 @@ pub(crate) fn list(
 ) -> io::Result<Vec<u8>> {
     let expected_count = read_count(database, transaction)?;
     let (start, end) = document_range(transaction)?;
-    let raw = versioned_document::list(
+    let raw = versioned_document::list_with_blob_owner_bounded(
         database,
         transaction,
         &start,
         &end,
         LOGICAL_NAMESPACE,
-        MAX_RECENT_PROJECTS_PER_OWNER,
+        expected_count.checked_add(1).ok_or_else(|| invalid_data("recent-project count lookahead overflow"))?,
+        versioned_document::ListProjectionBounds {
+            blob_owner_user_id: transaction.owner_user_id(), maximum_bytes: usize::MAX,
+        },
     )?;
     let documents: Vec<Value> = serde_json::from_slice(&raw)
         .map_err(|_| invalid_data("recent-project list projection is malformed"))?;

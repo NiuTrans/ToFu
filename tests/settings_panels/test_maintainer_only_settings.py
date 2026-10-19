@@ -15,7 +15,7 @@ cost A/B experiment) are:
     lib/mcp/registry.py's ``internal_only`` catalog filter, see
     tests/mcp_protocol/test_mcp_catalog_internal_only.py).
 
-The backend experiment engine (lib/cost_experiments.py, dispatch metadata,
+The backend experiment engine (lib/cost_experiments/cost_experiments.py, dispatch metadata,
 the report endpoint) deliberately ships in EVERY build: it is disabled by
 default (enabled=false), is wired through dispatch/persistence, and the
 frontend populate/collect/report functions are already null-safe when the

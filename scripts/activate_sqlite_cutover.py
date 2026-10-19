@@ -22,8 +22,8 @@ _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from lib.storage_sidecar import offline_maintenance as _PG_TOOLING  # noqa: E402
-from lib.storage_sidecar.cutover import (  # noqa: E402
+from lib.storage_authority_sql import offline_maintenance as _PG_TOOLING  # noqa: E402
+from lib.storage_authority_sql.cutover import (  # noqa: E402
     SQLiteCutoverError,
     activate_candidate,
     validate_candidate,

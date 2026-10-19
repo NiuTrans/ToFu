@@ -60,7 +60,7 @@ class TestNoProgressBreaker(unittest.TestCase):
 
     def test_identical_rounds_halt(self):
         """The incident shape: same tool call every round → halt, not 2**30."""
-        from lib.agent_loop import AbortSignal, run_agent_loop
+        from lib.agent_loop.agent_loop import AbortSignal, run_agent_loop
 
         calls = {'n': 0}
 
@@ -89,7 +89,7 @@ class TestNoProgressBreaker(unittest.TestCase):
     def test_empty_content_alone_is_not_no_progress(self):
         """MEASURED 50.3% of real rounds have content_len==0 — a pure
         tool-calling turn with VARYING calls must never trip the breaker."""
-        from lib.agent_loop import AbortSignal, run_agent_loop
+        from lib.agent_loop.agent_loop import AbortSignal, run_agent_loop
 
         seq = [
             _tool_turn([_tc('web_search', '{"q":"a"}')]),
@@ -122,7 +122,7 @@ class TestNoProgressBreaker(unittest.TestCase):
     def test_repeat_streak_resets_on_progress(self):
         """A repeat that is broken by a different call must reset the counter,
         so a legitimately retrying agent is not killed by an old streak."""
-        from lib.agent_loop import AbortSignal, run_agent_loop
+        from lib.agent_loop.agent_loop import AbortSignal, run_agent_loop
 
         seq = [
             _tool_turn([_tc('web_search', '{"q":"a"}')]),
@@ -155,7 +155,7 @@ class TestNoProgressBreaker(unittest.TestCase):
 
     def test_identical_poll_with_changing_visible_result_is_productive(self):
         """Same call is not a loop when the model receives advancing state."""
-        from lib.agent_loop import AbortSignal, run_agent_loop
+        from lib.agent_loop.agent_loop import AbortSignal, run_agent_loop
 
         calls = {'n': 0}
 
@@ -182,7 +182,7 @@ class TestNoProgressBreaker(unittest.TestCase):
 
     def test_missing_result_evidence_fails_open(self):
         """Call equality alone cannot prove that repeated execution stalled."""
-        from lib.agent_loop import AbortSignal, run_agent_loop
+        from lib.agent_loop.agent_loop import AbortSignal, run_agent_loop
 
         calls = {'n': 0}
 
@@ -206,7 +206,7 @@ class TestNoProgressBreaker(unittest.TestCase):
     def test_breaker_off_by_default(self):
         """Backwards compatibility: 0 (default) disables the breaker, so every
         existing adopter keeps byte-identical behaviour."""
-        from lib.agent_loop import AbortSignal, run_agent_loop
+        from lib.agent_loop.agent_loop import AbortSignal, run_agent_loop
 
         calls = {'n': 0}
 

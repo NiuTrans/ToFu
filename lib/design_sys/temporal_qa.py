@@ -15,6 +15,7 @@ import math
 import os
 import re
 import tempfile
+import time
 
 from lib.log import get_logger
 
@@ -100,15 +101,22 @@ _READINESS_JS = """async () => {
 
 
 def screenshot_timeline_contact_sheet(
-        scene_dir: str, out_path: str, *, width: int = 0, height: int = 0,
+        scene_dir: str, out_path: str | None, *, width: int = 0, height: int = 0,
         progresses=DEFAULT_PROGRESS_POINTS, settle_ms: int = 120,
         timeout_ms: int = 20000, duration_s: float | None = None,
-        abort_check=None) -> str:
+        abort_check=None, sample_observer=None, deadline: float | None = None) -> str | bytes:
     """Capture fractions of the declared render duration, with finite bounds.
 
     Entry point for motion production QA; dependencies are lazy Playwright/PIL.
     Missing timelines, asset errors and failed seeks invalidate the evidence.
     Cancellation preserves any previous contact sheet.
+
+    ``sample_observer(page, seconds, png_bytes)`` optionally records domain
+    evidence after each capture. It must not mutate the page; exceptions abort
+    capture and use the same cleanup path. Browser ownership stays here.
+
+    ``out_path=None`` returns bounded PNG bytes without publishing a file, for
+    callers with their own authorization-aware output owner.
     """
     from PIL import Image, ImageDraw
     from playwright.sync_api import sync_playwright
@@ -165,20 +173,28 @@ def screenshot_timeline_contact_sheet(
         if abort_check is not None and abort_check():
             raise InterruptedError('timeline QA aborted')
 
+        if deadline is not None and time.monotonic() >= deadline:
+            raise TimeoutError('timeline QA deadline exhausted')
+
+    def remaining_ms():
+        check_abort()
+        if deadline is None:
+            return timeout_ms
+        return max(1, min(timeout_ms, int((deadline - time.monotonic()) * 1000)))
     check_abort()
     frames = []
     with sync_playwright() as p:
-        browser = p.chromium.launch()
+        browser = p.chromium.launch(timeout=remaining_ms())
         try:
             page = browser.new_page(viewport={'width': width, 'height': height})
             errors = []
             page.on('pageerror', lambda error: errors.append(str(error)[:500]))
-            page.goto('file://' + index, wait_until='load', timeout=timeout_ms)
+            page.goto('file://' + index, wait_until='load', timeout=remaining_ms())
             readiness = page.evaluate(
                 'limit => Promise.race([(' + _READINESS_JS + ')(), '
                 'new Promise((_, reject) => setTimeout(() => '
                 'reject(new Error("timeline assets readiness timed out")), limit))])',
-                timeout_ms)
+                remaining_ms())
             font_failures = list((readiness or {}).get('fontFailures') or [])
             image_failures = list((readiness or {}).get('imageFailures') or [])
             if font_failures or image_failures:
@@ -194,13 +210,17 @@ def screenshot_timeline_contact_sheet(
             for point in points:
                 check_abort()
                 page.evaluate(_SEEK_JS, {'seconds': point * duration_s,
-                                         'duration': duration_s, 'timeout': timeout_ms})
+                                         'duration': duration_s, 'timeout': remaining_ms()})
                 page.wait_for_timeout(settle_ms)
                 if errors:
                     raise RuntimeError('timeline runtime failed: ' + '; '.join(errors[:3]))
-                raw = page.screenshot()
+                raw = page.screenshot(timeout=remaining_ms())
                 if len(raw) > _MAX_FRAME_BYTES:
                     raise ValueError('timeline QA screenshot exceeds byte limit')
+                check_abort()
+                if sample_observer is not None:
+                    sample_observer(page, point * duration_s, raw)
+                    check_abort()
                 with Image.open(io.BytesIO(raw)) as frame:
                     frames.append(frame.convert('RGB').resize(
                         (tile_w, tile_h), Image.Resampling.LANCZOS))
@@ -219,6 +239,12 @@ def screenshot_timeline_contact_sheet(
         x = i * (tile_w + gutter)
         sheet.paste(frame, (x, label_h))
         draw.text((x + 12, 13), f'{point * duration_s:.2f}s / {duration_s:g}s', fill='white')
+    if out_path is None:
+        check_abort()
+        buffer = io.BytesIO()
+        sheet.save(buffer, format='PNG', optimize=True)
+        check_abort()
+        return buffer.getvalue()
     os.makedirs(os.path.dirname(out_path) or '.', exist_ok=True)
     check_abort()
     with tempfile.NamedTemporaryFile(dir=os.path.dirname(out_path) or '.',

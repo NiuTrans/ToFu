@@ -576,7 +576,7 @@
         check("completed", oversized, "invalid_or_over_budget");
     }
 
-    fn live_projection_request(attempt_id: &str, content: &str, now_ms: u64) -> EventRecordRequest {
+    pub(super) fn live_projection_request(attempt_id: &str, content: &str, now_ms: u64) -> EventRecordRequest {
         EventRecordRequest {
             model_continuation: Value::Null,
             attempt_id: attempt_id.to_owned(),
@@ -921,6 +921,97 @@
     }
 
     #[test]
+    fn conversation_delete_skips_empty_attempt_ranges_and_preserves_trash() {
+        assert_conversation_delete_preserves_trash(97, 1);
+    }
+
+    #[test]
+    fn conversation_delete_handles_large_history_without_identity_scan_limit() {
+        assert_conversation_delete_preserves_trash(4096, 1);
+    }
+
+    #[test]
+    fn conversation_delete_handles_dense_attempt_events_without_range_limit() {
+        assert_conversation_delete_preserves_trash(97, 97);
+    }
+
+    fn assert_conversation_delete_preserves_trash(history_turns: u64, event_attempts: u64) {
+        let directory = tempfile::tempdir().unwrap();
+        let mut database = AuthorityDatabase::initialize(directory.path()).unwrap();
+        for index in 0..history_turns {
+            let mut seed = database.begin_with_identity_claim_scopes(7, 11).unwrap();
+            append_settled(&database, &mut seed, &AppendSettledRequest {
+                conversation_id: "sparse-events".into(), actor: "assistant".into(),
+                status: if index < event_attempts { "pending" } else { "completed" }.into(),
+                projection_json: serde_json::to_vec(&json!({"content": format!("history {index}")})).unwrap(),
+                projection_timestamp: None, settlement_json: b"{}".to_vec(),
+                lane_id: "main".into(), command_id: format!("seed-{index}"), kind: "reply".into(),
+                run_id: String::new(), turn_id: format!("turn-{index}"),
+                attempt_id: Some(format!("attempt-{index}")), created_at_ms: 1_000 + index,
+                committed_at_ms: 1_000 + index,
+                defaults: TurnDefaults { allow_create: true, title: "Sparse events".into(),
+                    settings_json: b"{}".to_vec(), created_at_ms: 1_000 },
+            }).unwrap();
+            database.commit(seed).unwrap();
+        }
+        for index in 0..event_attempts {
+            let attempt_id = format!("attempt-{index}");
+            let mut bind = database.begin_with_identity_claim_scopes(7, 11).unwrap();
+            attempt_bind(&database, &mut bind, &attempt_id, &format!("task-{index}"), "", 10_000).unwrap();
+            database.commit(bind).unwrap();
+            let mut live = database.begin_with_identity_claim_scopes(7, 11).unwrap();
+            let mut request = live_projection_request(&attempt_id, "live evidence", 10_001);
+            request.task_id = format!("task-{index}");
+            let recorded: Value = serde_json::from_slice(&event_record(&database, &mut live, &request).unwrap()).unwrap();
+            assert_eq!(recorded["applied"], true);
+            database.commit(live).unwrap();
+        }
+        let mut deletion = database.begin_with_identity_claim_scopes(7, 11).unwrap();
+        crate::conversation_header::delete(&mut database, &mut deletion,
+            &crate::conversation_header::DeleteRequest { conversation_id: "sparse-events".into(), deleted_at_ms: 20_000 }).unwrap();
+        database.commit(deletion).unwrap();
+        let mut read = database.begin_with_identity_claim_scopes(7, 11).unwrap();
+        assert!(get(&database, &mut read, "sparse-events", "turn-0").unwrap().is_none());
+        assert!(events_list(&database, &mut read, "attempt-0", 0, 20, false, &mut || false).unwrap().is_none());
+        assert!(event_retirement::pending(&database, &mut read, "sparse-events").unwrap());
+        drop(read);
+        drop(database);
+        let mut database = AuthorityDatabase::open(directory.path()).unwrap();
+        let mut restore = database.begin_with_identity_claim_scopes(7, 11).unwrap();
+        crate::conversation_header::restore(&mut database, &mut restore,
+            &crate::conversation_header::RestoreRequest { conversation_id: "sparse-events".into(), committed_at_ms: 30_000 }).unwrap();
+        database.commit(restore).unwrap();
+        let mut read = database.begin(7, 11).unwrap();
+        for index in 0..history_turns {
+            let restored: Value = serde_json::from_slice(&get(&database, &mut read, "sparse-events", &format!("turn-{index}")).unwrap().unwrap()).unwrap();
+            assert_eq!(restored["projection"]["content"], if index < event_attempts { "live evidence".into() } else { format!("history {index}") });
+            assert_eq!(restored["status"], if index < event_attempts { "interrupted" } else { "completed" });
+        }
+        drop(read);
+        let mut complete = false;
+        for _ in 0..history_turns / 16 + event_attempts * 8 + 10 {
+            let mut cleanup = database.begin_with_identity_claim_scopes(7, 11).unwrap();
+            let result: Value = serde_json::from_slice(&events_prune(&database, &mut cleanup,
+                &EventPruneRequest { settled_before_ms: 1, max_attempts: 16, max_rows: 2 }).unwrap()).unwrap();
+            assert!(result["deleted_rows"].as_u64().unwrap() <= 2);
+            if cleanup.has_business_mutation() { database.commit(cleanup).unwrap(); }
+            if result["remaining"] == 0 { complete = true; break; }
+        }
+        assert!(complete, "bounded cleanup cursor did not finish");
+        let mut read = database.begin_with_identity_claim_scopes(7, 11).unwrap();
+        assert!(!event_retirement::pending(&database, &mut read, "sparse-events").unwrap());
+        for index in 0..event_attempts {
+            let attempt_id = format!("attempt-{index}");
+            let prefix = attempt_event_prefix(&attempt_id).unwrap();
+            let (start, end) = EntityKey::prefix_range(7, 11, ATTEMPT_EVENT_NAMESPACE, &prefix).unwrap();
+            assert!(database.entity_scan(&mut read, &start, &end, 1).unwrap().is_empty());
+            let head = attempt_event_head_key(&read, &attempt_id).unwrap();
+            assert!(database.entity_get(&mut read, &head).unwrap().is_none());
+            assert!(events_list(&database, &mut read, &attempt_id, 0, 20, false, &mut || false).unwrap().is_none());
+        }
+    }
+
+    #[test]
     fn conversation_lifecycle_restores_and_purges_projection_heads() {
         let directory = tempfile::tempdir().unwrap();
         let mut database = AuthorityDatabase::initialize(directory.path()).unwrap();
@@ -1133,7 +1224,7 @@
         assert!(compacted["droppedSpans"].as_u64().unwrap_or(0) > 0);
     }
 
-    fn append_live_attempt(
+    pub(super) fn append_live_attempt(
         database: &AuthorityDatabase,
         transaction: &mut AuthorityTransaction,
         conversation_id: &str,
@@ -1672,7 +1763,7 @@
             .unwrap()
             .unwrap();
             assert!(
-                page_bytes.len() <= MAX_TRANSACTION_IR_LITERAL_BYTES + 256,
+                page_bytes.len() <= MAX_LEGACY_DOCUMENT_BYTES + 256,
                 "truncated page still exceeds the wire budget"
             );
             let page: Value = serde_json::from_slice(&page_bytes).unwrap();
@@ -1836,6 +1927,7 @@
                 u64::MAX,
                 3,
                 head,
+                0,
                 &mut || {
                     checks += 1;
                     checks == 3
@@ -1862,6 +1954,7 @@
                 1,
                 3,
                 head,
+                0,
                 &mut || false,
             )
             .unwrap()
@@ -1897,6 +1990,7 @@
                 &mut read,
                 "snapshot-conversation",
                 3,
+                0,
                 false,
                 &mut || {
                     checks += 1;
@@ -1917,6 +2011,7 @@
             &database,
             &mut read,
             "snapshot-conversation",
+            0,
             0,
             false,
             &mut || true,
@@ -1947,6 +2042,7 @@
             &mut read,
             "attempts-conversation",
             2,
+            0,
             false,
             &mut || {
                 checks += 1;
@@ -2531,6 +2627,19 @@
             attempt_get(&database, &mut read, "legacy-attempt").unwrap(),
             None
         );
+        drop(read);
+        let mut restore = database.begin_with_identity_claim_scopes(7, 11).unwrap();
+        crate::conversation_header::restore(&mut database, &mut restore,
+            &crate::conversation_header::RestoreRequest {
+                conversation_id: "legacy-conversation".into(), committed_at_ms: 3,
+            }).unwrap();
+        database.commit(restore).unwrap();
+        let mut read = database.begin_with_identity_claim_scopes(7, 11).unwrap();
+        assert!(attempt_get(&database, &mut read, "legacy-attempt").unwrap().is_none(),
+            "restore must not revive a random-key legacy execution record");
+        assert!(load_attempt_for_update(&database, &mut read, "legacy-attempt").unwrap().is_none());
+        assert!(events_list(&database, &mut read, "legacy-attempt", 0, 10, false, &mut || false).unwrap().is_none());
+        assert_eq!(attempt_claim(&database, &mut read, "legacy-attempt", "", 4).unwrap(), b"false");
     }
 
     #[test]
@@ -3379,7 +3488,7 @@ mod snapshot_response_construction_tests {
     use super::*;
 
     #[test]
-    fn borrowed_snapshot_matches_previous_tree_bytes_and_normalizes_attempts() {
+    fn owned_snapshot_matches_previous_tree_bytes_and_normalizes_attempts() {
         let settings = Map::from_iter([("hostile".to_owned(), json!("汉字\"\\\n")),
             ("nested".to_owned(), json!({"z": [true, null, 3], "a": {}}))]);
         // Original attempt conversion canonicalizes these valid source bytes.
@@ -3395,11 +3504,13 @@ mod snapshot_response_construction_tests {
                         "attempts": attempts, "queueItems": []});
                     if let Some(value) = &window { previous["turnWindow"] = value.clone(); }
                     if hint { previous["hasArtifacts"] = Value::Bool(false); }
-                    let response = SyncSnapshotResponse {attempts: json!(attempts),
-                        conversation_id: "id汉字\"\\\n", conversation_revision: 12,
-                        has_artifacts: hint.then_some(false), queue_items: &[], settings: &settings,
-                        sync_sequence: 42, turn_window: window.as_ref(), turns: &turns};
-                    let actual = encode_response(&response).unwrap();
+                    let response = SyncSnapshotResponse {active_attempt_phase: None, attempts: json!(attempts),
+                        conversation_id: "id汉字\"\\\n".to_owned(), conversation_revision: 12,
+                        has_artifacts: hint.then_some(false), queue_items: Vec::new(), settings: settings.clone(),
+                        sync_sequence: 42, turn_window: window.clone(), turns: turns.clone()};
+                    let encoded = response.into_encoded().unwrap();
+                    assert!(encoded.json_proven());
+                    let actual = encoded.into_bytes();
                     assert_eq!(actual, encode_response(&previous).unwrap());
                     let decoded: Value = serde_json::from_slice(&actual).unwrap();
                     assert_eq!(decoded, previous);
@@ -3411,13 +3522,13 @@ mod snapshot_response_construction_tests {
     }
 
     #[test]
-    fn borrowed_snapshot_retains_the_complete_response_byte_limit() {
+    fn owned_snapshot_retains_the_complete_response_byte_limit() {
         let settings = Map::new();
         let turns = vec![json!({"content": "x".repeat(crate::generated_tofudb_ir::MAX_TURN_RESPONSE_BYTES + 1)})];
-        let response = SyncSnapshotResponse {attempts: json!([]), conversation_id: "bounded",
-            conversation_revision: 1, has_artifacts: None, queue_items: &[], settings: &settings,
-            sync_sequence: 1, turn_window: None, turns: &turns};
-        let error = encode_response(&response).unwrap_err();
+        let response = SyncSnapshotResponse {active_attempt_phase: None, attempts: json!([]), conversation_id: "bounded".to_owned(),
+            conversation_revision: 1, has_artifacts: None, queue_items: Vec::new(), settings,
+            sync_sequence: 1, turn_window: None, turns};
+        let error = response.into_encoded().err().unwrap();
         assert_eq!(error.kind(), io::ErrorKind::OutOfMemory);
         assert_eq!(error.to_string(), "turn response exceeds its bounded streamed payload");
     }
@@ -3669,6 +3780,11 @@ mod event_evidence_witness_tests {
                 assert_eq!(projection["thinking"], "");
                 assert_eq!(projection["toolRounds"].as_array().unwrap().len(), 1);
                 assert_eq!(projection["toolRounds"][0]["toolCallId"], "kept");
+                let pending = crate::turn_projection_segments::stabilize_for_patch(
+                    projection.as_object().unwrap(), "assistant", "pending",
+                ).unwrap();
+                assert!(pending["segments"].as_array().unwrap().iter().any(|segment|
+                    segment["type"] == "tool_use" && segment["id"] == "kept"));
                 assert_eq!(projection["rolledBack"][0]["content"], "partial answer");
             } else {
                 assert_eq!(projection["content"], "");
@@ -3944,3 +4060,163 @@ mod event_evidence_witness_tests {
             }
         }
     }
+
+#[cfg(test)]
+mod public_turn_normalization_reuse_tests {
+    use super::*;
+fn previous_normalize_settlement(settlement: &mut Map<String, Value>, status: &str) {
+    let mut outcome = settlement
+        .get("outcome")
+        .and_then(Value::as_str)
+        .unwrap_or(if status == "superseded" {
+            "interrupted"
+        } else {
+            status
+        })
+        .to_owned();
+    if !matches!(
+        outcome.as_str(),
+        "completed" | "interrupted" | "truncated" | "failed"
+    ) {
+        outcome = "failed".to_owned();
+    }
+    let cause = settlement
+        .get("cause")
+        .and_then(Value::as_str)
+        .unwrap_or("ingested")
+        .to_owned();
+    if let Some(slot) = settlement.get_mut("outcome") {
+        *slot = Value::String(outcome.clone());
+    } else {
+        settlement.insert("outcome".to_owned(), Value::String(outcome.clone()));
+    }
+    if let Some(slot) = settlement.get_mut("cause") {
+        *slot = Value::String(cause.clone());
+    } else {
+        settlement.insert("cause".to_owned(), Value::String(cause.clone()));
+    }
+    if !settlement.contains_key("providerFinishReason") {
+        settlement.insert("providerFinishReason".to_owned(), Value::Null);
+    }
+    if !settlement.contains_key("error") {
+        settlement.insert("error".to_owned(), Value::Null);
+    }
+    if !settlement.contains_key("resumeOptions") {
+        settlement.insert("resumeOptions".to_owned(), json!([]));
+    }
+    if !settlement.contains_key("streamState") {
+        settlement.insert("streamState".to_owned(), Value::Null);
+    }
+    if !settlement.contains_key("evidence") {
+        let evidence = match (outcome.as_str(), cause.as_str()) {
+            (_, "server_restart" | "conversation_deleted") => "system_recovery",
+            ("truncated", _) => "provider_limit",
+            ("failed", _) => "generation_error",
+            ("completed", "provider_finished") => "legacy_finish",
+            _ => "external_authority",
+        };
+        settlement.insert("evidence".to_owned(), Value::String(evidence.to_owned()));
+    }
+}
+
+fn previous_public_turn(
+    mut document: Map<String, Value>,
+    current_execution_epoch: u64,
+) -> io::Result<Value> {
+    let _profile = crate::request_profile::Probe::new(crate::request_profile::TURN_PUBLIC);
+
+    let context_revision = model_context_revision(&document)?;
+    document.remove("_modelContextDisplayOffset");
+    document.insert("modelContextRevision".to_owned(), json!(context_revision));
+    let document_epoch = match document.remove("_executionEpoch") {
+        None => 0,
+        Some(Value::Number(value)) => value
+            .as_u64()
+            .ok_or_else(|| invalid_data("turn execution epoch is malformed"))?,
+        Some(_) => return Err(invalid_data("turn execution epoch is malformed")),
+    };
+    if document_epoch != current_execution_epoch {
+        document.insert("currentAttemptId".to_owned(), Value::Null);
+        document.insert("runId".to_owned(), Value::String(String::new()));
+        if matches!(
+            document.get("status").and_then(Value::as_str),
+            Some("pending" | "running")
+        ) {
+            document.insert("status".to_owned(), Value::String("interrupted".to_owned()));
+            document.insert(
+                "settlement".to_owned(),
+                json!({
+                    "outcome": "interrupted",
+                    "cause": "conversation_deleted",
+                    "resumeOptions": []
+                }),
+            );
+        }
+        if let Some(projection) = document.get_mut("projection") {
+            terminalize_restored_projection(projection);
+        }
+    }
+    let status = document
+        .get("status")
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid_data("turn status is malformed"))?
+        .to_owned();
+    {
+        let settlement = match document.get_mut("settlement") {
+            Some(Value::Object(settlement)) => settlement,
+            _ => return Err(invalid_data("turn settlement is malformed")),
+        };
+        if !matches!(status.as_str(), "pending" | "running") {
+            previous_normalize_settlement(settlement, &status);
+        }
+        let outcome = settlement
+            .get("outcome")
+            .and_then(Value::as_str)
+            .unwrap_or(&status)
+            .to_owned();
+        if matches!(
+            status.as_str(),
+            "completed" | "interrupted" | "truncated" | "failed" | "superseded"
+        ) && matches!(
+            outcome.as_str(),
+            "completed" | "interrupted" | "truncated" | "failed"
+        ) {
+            if let Some(slot) = document.get_mut("status") {
+                *slot = Value::String(outcome);
+            }
+        }
+    }
+    Ok(Value::Object(document))
+}
+
+    #[test]
+    fn public_turn_normalization_matches_previous_values_errors_and_epoch_projection() {
+        let statuses = [json!("completed"),json!("interrupted"),json!("truncated"),json!("failed"),json!("superseded"),json!("pending"),json!("running"),json!("unknown"),Value::Null,json!(42)];
+        let outcomes = [None,Some(json!("completed")),Some(json!("interrupted")),Some(json!("failed")),Some(json!("truncated")),Some(json!("unknown")),Some(Value::Null),Some(json!(1))];
+        let causes = [None,Some(json!("provider_finished")),Some(json!("server_restart")),Some(json!("conversation_deleted")),Some(json!("custom")),Some(Value::Null),Some(json!(false))];
+        let mut successful_cases = 0;
+        for status in statuses { for outcome in &outcomes { for cause in &causes { for epoch in [0,1] { for populated in [false,true] {
+            let mut settlement = Map::new();
+            if let Some(value)=outcome { settlement.insert("outcome".into(),value.clone()); }
+            if let Some(value)=cause { settlement.insert("cause".into(),value.clone()); }
+            if populated { for key in ["providerFinishReason","error","resumeOptions","streamState","evidence"] { settlement.insert(key.into(),json!({"preserve":[null,17,"nested"]})); } }
+            let mut document=json!({"status":status,"settlement":settlement,"_executionEpoch":epoch,"currentAttemptId":"attempt","runId":"run","modelContextRevision":3,"projectionRevision":3,"_modelContextDisplayOffset":2,"projection":{"content":"owned","_streaming":true}}).as_object().unwrap().clone();
+            if !populated { document.remove("modelContextRevision"); }
+            let expected=previous_public_turn(document.clone(),0).map_err(|e|(e.kind(),e.to_string()));
+            let actual=public_turn(document,0).map_err(|e|(e.kind(),e.to_string()));
+            if expected.is_ok() { successful_cases += 1; }
+            assert_eq!(actual,expected);
+        } } } } }
+        assert_eq!(successful_cases, 1792);
+        for settlement in [Value::Null,json!(4),json!([])] {
+            let document=json!({"status":"completed","settlement":settlement,"projectionRevision":1}).as_object().unwrap().clone();
+            assert_eq!(public_turn(document.clone(),0).unwrap_err().to_string(),previous_public_turn(document,0).unwrap_err().to_string());
+        }
+    }
+    #[test]
+    fn normalized_public_turn_retains_owned_status_outcome_and_cause_strings() {
+        let document=json!({"status":"completed","settlement":{"outcome":"completed","cause":"provider_finished","evidence":"legacy_finish","providerFinishReason":null,"error":null,"resumeOptions":[],"streamState":null},"modelContextRevision":1,"projectionRevision":1}).as_object().unwrap().clone();
+        let status=document["status"].as_str().unwrap().as_ptr();let outcome=document["settlement"]["outcome"].as_str().unwrap().as_ptr();let cause=document["settlement"]["cause"].as_str().unwrap().as_ptr();
+        let result=public_turn(document,0).unwrap();assert_eq!(result["status"].as_str().unwrap().as_ptr(),status);assert_eq!(result["settlement"]["outcome"].as_str().unwrap().as_ptr(),outcome);assert_eq!(result["settlement"]["cause"].as_str().unwrap().as_ptr(),cause);
+    }
+}

@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "title": "Database performance review",
+  "summary": "Historical measured builds • semantic SQLite baseline → embedded TofuDB. Faster does not mean release-ready.",
+  "blocks": [
+    {"type": "comparison", "id": "kpis", "title": "Measured latency improvements", "baselineLabel": "Semantic SQLite", "candidateLabel": "TofuDB", "metrics": [
+      {"label": "Submit → running P99", "baseline": 2386.7705576121807, "candidate": 696.217879652977, "unit": "ms", "direction": "lower", "status": "unknown", "budget": 5000, "note": "Median of two window P99s. Graceful reopen only; crash coverage is not established by this cohort."},
+      {"label": "Scheduled stream P99", "baseline": 2707.6090946793556, "candidate": 1267.1320959925652, "unit": "ms", "direction": "lower", "status": "failed", "budget": 1000, "note": "Both backends miss the 1-second stream target. Another 21.1% reduction is needed from this candidate."},
+      {"label": "Settlement P99", "baseline": 4148.950792849064, "candidate": 3007.0935040712357, "unit": "ms", "direction": "lower", "status": "unknown", "budget": 5000, "note": "Only two windows per backend. Candidate window range / median = 19.12%; not a confidence interval."},
+      {"label": "Warm full-response hydration", "baseline": 47.669580578804016, "candidate": 15.263647089401882, "unit": "ms", "direction": "lower", "status": "unknown", "note": "Median of four window means; exact response equality. Cold and concurrent workloads are not covered."}
+    ]},
+    {"type": "chart", "id": "stream-chart", "title": "Streaming latency against the absolute target", "baselineLabel": "Semantic SQLite", "candidateLabel": "TofuDB", "metrics": [
+      {"label": "Scheduled stream P99", "baseline": 2707.6090946793556, "candidate": 1267.1320959925652, "unit": "ms", "direction": "lower", "status": "failed", "budget": 1000, "note": "Two windows per backend; median of window P99 values, not pooled request P99."}
+    ]},
+    {"type": "table", "id": "raw-windows", "title": "Raw scheduled-stream windows", "columns": ["Backend", "Window 1 (ms)", "Window 2 (ms)"], "rows": [["SQLite", "2666.0487800836563", "2749.169409275055"], ["TofuDB", "1258.1945732235909", "1276.0696187615395"]]},
+    {"type": "image_gallery", "id": "image-gallery", "title": "Published chart asset", "images": [{"id": "demo-chart", "alt": "Four-panel historical SQLite and TofuDB comparison", "caption": "This gallery uses the same authenticated binary route as production; a repository path is not an image URL."}]},
+    {"type": "evidence", "id": "evidence", "title": "Workload and provenance", "items": [
+      {"label": "Conversation workload", "value": "1000 conversations × four unique 8192-byte chunks; scheduled 1-second arrivals; strict durability; SQLite–Native–Native–SQLite windows."},
+      {"label": "Hydration workload", "value": "50 conversations / 2000 settled turns; 30 warm sequential reads per window; four windows per backend; exact full-response equality."},
+      {"label": "Source", "value": "tofudb_direct_sqlite_pair_20261008.json; tofudb_hydration_exact_semantic_pair_20261009.json (retired docs/evidence/ artifacts; recoverable from git history)"},
+      {"label": "Iteration priority", "value": "Profile scheduled-stream tail latency first. Retain hydration parity and gains. Investigate raw point-read and projection/history footprint separately."},
+      {"label": "Acceptance", "value": "Correctness and relative speed are distinct from budget and coverage acceptance. No overall speedup or current-checkout certification is claimed."}
+    ]},
+    {"type": "artifact_reference", "id": "full-report", "title": "Open the full evidence report", "artifactId": "demo-report"},
+    {"type": "action_panel", "id": "actions", "title": "Read-only report actions", "actions": [{"kind": "download_asset", "label": "Download chart", "targetId": "demo-chart"}, {"kind": "open_artifact", "label": "Open full report", "targetId": "demo-report"}]}
+  ]
+}

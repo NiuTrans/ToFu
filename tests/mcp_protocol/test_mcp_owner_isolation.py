@@ -210,7 +210,7 @@ def test_http_crud_uses_authenticated_owner_and_redacts_credentials(tmp_path, mo
     import asyncio
     from quart import g, request
     from lib.api_keys import AuthContext
-    from lib.app_factory import create_base_app
+    from lib.app.app_factory import create_base_app
     from lib.mcp import config
     import lib.mcp.client as client
     from routes.api_v1.mcp import api_v1_mcp_bp

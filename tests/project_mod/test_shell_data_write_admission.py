@@ -175,14 +175,14 @@ def test_unsupported_or_executable_data_shapes_keep_protection(repo, source):
 def test_literal_directory_targets_do_not_lease_reading_checkout(repo, tmp_path):
     outside = tmp_path / 'external' / 'new' / 'src'
     source = f'mkdir -p {shlex.quote(str(outside))}'
-    assert commands.command_write_lease_claims(str(repo), source) == (('root', str(outside)),)
+    assert commands.command_write_lease_claims(str(repo), source) == ()
     other = tmp_path / 'other-checkout'
     other.mkdir()
     subprocess.run(['git', 'init', '-q', str(other)], check=True)
     source = f'mkdir -p {shlex.quote(str(other / "new"))}'
     with held(other):
-        assert '[workspace-busy]' in commands.tool_run_command(str(repo), source)
-    assert not (other / 'new').exists()
+        assert '[exit code: 0]' in commands.tool_run_command(str(repo), source)
+    assert (other / 'new').is_dir()
 
 
 def test_external_symlink_into_source_is_not_an_exemption(repo, tmp_path):
@@ -206,11 +206,12 @@ def test_admission_view_preserves_header_writes_and_real_tail(repo):
     assert ('file', str(repo / 'other')) in claims
 
 
-def test_external_git_metadata_directory_keeps_source_checkout_barrier(tmp_path):
+def test_external_git_metadata_directory_keeps_source_checkout_barrier(tmp_path, monkeypatch):
+    monkeypatch.setenv('TOFU_WORKSPACE_TOOL_WAIT_SECONDS', '0.04')
     root, metadata = tmp_path / 'separate-repo', tmp_path / 'metadata'
     subprocess.run(['git', 'init', '-q', '--separate-git-dir', str(metadata), str(root)], check=True)
     source = f'mkdir -p {shlex.quote(str(metadata / "objects/new"))}'
-    assert ('root', str(root)) in commands.command_write_lease_claims(str(root), source)
+    assert ('tree', str(root)) in commands.command_write_lease_claims(str(root), source)
     with held(root):
         assert '[workspace-busy]' in commands.tool_run_command(str(root), source)
     assert not (metadata / 'objects/new').exists()
@@ -221,7 +222,7 @@ def test_external_git_metadata_directory_keeps_source_checkout_barrier(tmp_path)
     'mkdir -p source/new > other', 'mkdir --unknown-option source/new',
 ])
 def test_ambiguous_directory_creation_retains_cwd_protection(repo, source):
-    assert ('root', str(repo)) in commands.command_write_lease_claims(str(repo), source)
+    assert ('tree', str(repo)) in commands.command_write_lease_claims(str(repo), source)
 
 
 @pytest.mark.parametrize('source', [
@@ -277,7 +278,7 @@ def test_legacy_backticks_cannot_hide_other_checkout_writer(repo, tmp_path, rout
 @pytest.mark.parametrize('operand', ['transient/../../outside', '.git/transient/../../outside'])
 def test_mkdir_parent_traversal_keeps_intermediate_checkout_writes_protected(repo, tmp_path, route, operand):
     source = 'mkdir -p ' + operand
-    assert ('root', str(repo)) in commands.command_write_lease_claims(str(repo), source)
+    assert ('tree', str(repo)) in commands.command_write_lease_claims(str(repo), source)
     with held(repo):
         result = run(repo, route, source)
     assert '[workspace-busy]' in result, result
@@ -295,7 +296,7 @@ def test_mkdir_traversal_protects_intermediate_peer_checkout(repo, tmp_path, rou
     operand = str(peer) + '/transient/../../outside' if absolute else '../peer/transient/../../outside'
     source = 'mkdir -p ' + shlex.quote(operand)
     claims = commands.command_write_lease_claims(str(repo), source)
-    assert ('root', str(peer / 'transient')) in claims, claims
+    assert ('tree', str(peer / 'transient')) in claims, claims
     with held(peer):
         result = run(repo, route, source)
     assert '[workspace-busy]' in result, result

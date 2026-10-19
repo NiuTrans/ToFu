@@ -22,6 +22,7 @@ approximation (drivers joined, WAL-window retirement skipped).
 from __future__ import annotations
 
 import json
+import sys
 import threading
 from pathlib import Path
 from typing import Any
@@ -48,7 +49,6 @@ except ImportError:  # pragma: no cover - optional accelerator
     _fast_json = None
 
 _RESPONSE_INITIAL_BYTES = 1 * 1024 * 1024
-_RESPONSE_MAX_BYTES = 16 * 1024 * 1024
 _ERROR_BUFFER_BYTES = 4096
 
 # Response buffers are thread-local and grow-on-demand: a fresh
@@ -56,27 +56,24 @@ _ERROR_BUFFER_BYTES = 4096
 # allocation (~23 µs on a 2026-09-23 profile), which dominated the
 # fixed per-op cost of the embedded transport. Reuse keeps concurrent
 # threads safe (each owns its buffer) and bounds retention at the
-# largest response that thread has ever served (≤ _RESPONSE_MAX_BYTES).
+# largest response that thread has actually served. Allocation failures
+# are reported; no private response-size admission quota is imposed.
 _thread_state = threading.local()
 
 
 def _response_buffer() -> tuple[Any, int]:
-    buffer = getattr(_thread_state, "buffer", None)
-    capacity = getattr(_thread_state, "capacity", 0)
-    if buffer is None:
-        buffer = _ffi.new("uint8_t[]", _RESPONSE_INITIAL_BYTES)
-        _thread_state.buffer = buffer
-        capacity = _RESPONSE_INITIAL_BYTES
-        _thread_state.capacity = capacity
-    return buffer, capacity
+    response = getattr(_thread_state, "response", None)
+    if response is None:
+        return _grow_response_buffer(_RESPONSE_INITIAL_BYTES)
+    return response
 
 
 def _grow_response_buffer(needed: int) -> tuple[Any, int]:
-    capacity = needed
-    buffer = _ffi.new("uint8_t[]", capacity)
-    _thread_state.buffer = buffer
-    _thread_state.capacity = capacity
-    return buffer, capacity
+    buffer = _ffi.new("uint8_t[]", needed)
+    # Publish the owned buffer and its capacity together only after allocation.
+    response = (buffer, needed)
+    _thread_state.response = response
+    return response
 
 
 def _dumps(payload: Any) -> bytes:
@@ -183,7 +180,9 @@ class EmbeddedRuntime:
         finally:
             with self._lifecycle:
                 self._active_calls -= 1
-                self._lifecycle.notify_all()
+                # Teardown can proceed only when the last admitted call leaves.
+                if self._closing and self._active_calls == 0:
+                    self._lifecycle.notify_all()
 
     def _execute_json(
         self,
@@ -205,22 +204,28 @@ class EmbeddedRuntime:
             }
         )
         out, capacity = _response_buffer()
-        for _attempt in range(8):
+        while True:
             written = self._lib.tofudb_embed_execute(
                 self._handle, request, len(request), out, capacity
             )
+            if written > capacity:
+                raise EmbeddedTransportError("embedded response exceeded supplied capacity")
             if written >= 0:
                 # Decode synchronously while this caller owns its thread-local
                 # output. The returned JSON tree owns its strings and containers;
                 # no view escapes into a later execute or native worker.
                 return _loads(memoryview(_ffi.buffer(out, written)))
             needed = -written
-            if needed <= 0 or needed > _RESPONSE_MAX_BYTES:
+            if needed <= capacity or needed > sys.maxsize:
                 raise EmbeddedTransportError(
                     f"embedded response framing failure ({written})"
                 )
-            out, capacity = _grow_response_buffer(needed)
-        raise EmbeddedTransportError("embedded response exceeds 16 MiB")
+            try:
+                out, capacity = _grow_response_buffer(needed)
+            except (MemoryError, OverflowError) as error:
+                raise EmbeddedTransportError(
+                    f"embedded response allocation failed for {needed} bytes"
+                ) from error
 
     @property
     def checkpoint_supported(self) -> bool:
@@ -240,9 +245,10 @@ class EmbeddedRuntime:
         method never grows-and-replays a one-shot load or ambiguous mutation.
         Capability lifecycle and journal release remain explicit caller actions.
         """
+        from sys import maxsize
         from .generated_checkpoint_control import FORMAT, OPERATIONS
         if (operation not in OPERATIONS or not isinstance(payload, dict)
-                or type(response_bytes) is not int or not 0 < response_bytes <= _RESPONSE_MAX_BYTES
+                or type(response_bytes) is not int or not 0 < response_bytes <= maxsize
                 or type(deadline_unix_ms) is not int or deadline_unix_ms <= 0):
             raise EmbeddedTransportError("invalid checkpoint control admission")
         with self._lifecycle:
@@ -256,7 +262,10 @@ class EmbeddedRuntime:
                               "deadline_unix_ms": deadline_unix_ms})
             out, capacity = _response_buffer()
             if capacity < response_bytes:
-                out, capacity = _grow_response_buffer(response_bytes)
+                try:
+                    out, capacity = _grow_response_buffer(response_bytes)
+                except (MemoryError, OverflowError) as error:
+                    raise EmbeddedTransportError('checkpoint response allocation failed before dispatch') from error
             written = self._lib.tofudb_embed_checkpoint_execute(
                 self._handle, request, len(request), out, response_bytes)
             if written < 0 or written > response_bytes:
@@ -269,7 +278,9 @@ class EmbeddedRuntime:
         finally:
             with self._lifecycle:
                 self._active_calls -= 1
-                self._lifecycle.notify_all()
+                # Teardown can proceed only when the last admitted call leaves.
+                if self._closing and self._active_calls == 0:
+                    self._lifecycle.notify_all()
 
     def _stop(self, *, graceful: bool) -> None:
         with self._lifecycle:

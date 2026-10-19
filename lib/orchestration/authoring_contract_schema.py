@@ -48,7 +48,7 @@ from lib.orchestration.run_status import run_status_contract_schema
 from lib.orchestration.runtime_wire_contracts import runtime_start_contract_schema
 from lib.orchestration.wire_formats import AUTHORING_CONTRACT_FORMAT
 from lib.orchestration.trace import trace_contract_schema
-from lib.task_replay import task_replay_contract_schema
+from lib.task_replay.task_replay import task_replay_contract_schema
 
 
 def _persona_registry_schema() -> dict:

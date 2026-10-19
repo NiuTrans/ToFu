@@ -1919,9 +1919,8 @@ class MCPBridge:
         if timeout_override is not None:
             if (not isinstance(timeout_override, int)
                     or isinstance(timeout_override, bool)
-                    or timeout_override <= 0
-                    or timeout_override > 300):
-                raise ValueError('MCP timeout_override must be 1..300 seconds')
+                    or timeout_override <= 0):
+                raise ValueError('MCP timeout_override must be a positive integer')
             timeout = timeout_override
         else:
             timeout = handle.config.get('timeout', MCP_CALL_TIMEOUT)
@@ -2033,15 +2032,15 @@ class MCPBridge:
         return result
 
     def call_tool_document(self, namespaced_name: str, arguments: dict[str, Any], *,
-                           timeout: int, cancel=None) -> Any:
+                           timeout: int | None = None, cancel=None) -> Any:
         """Return one complete JSON document through the existing MCP transport.
 
-        Application callers supply a finite deadline and own authorization.
+        Application callers own authorization and may supply an explicit deadline.
         An ambiguous disconnect is not replayed: a build/write may already
         have committed. Display truncation never turns into partial JSON.
         """
-        if type(timeout) is not int or not 1 <= timeout <= 300:
-            raise ValueError('MCP document timeout must be 1..300 seconds')
+        if timeout is not None and (type(timeout) is not int or timeout <= 0):
+            raise ValueError('MCP document timeout must be a positive integer or None')
         return decode_document(self.call_tool(namespaced_name, arguments,
             timeout_override=timeout, cancel=cancel, retry_on_disconnect=False))
 

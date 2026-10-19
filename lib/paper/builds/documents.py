@@ -9,7 +9,7 @@ import os
 import re
 from pathlib import Path
 
-from .contract import limit, validate
+from .contract import validate
 from .errors import BuildError
 from .service import owned_settings
 from .sources import read_source
@@ -62,41 +62,36 @@ def _scan(settings, payload):
     if requested and requested not in references:
         raise BuildError('project_root', 'Paper project is outside this conversation')
     references = [requested] if requested else references
-    if len(references) > limit('discovery_roots'):
-        raise BuildError('discovery_limit', 'Too many project roots for document discovery')
     documents, diagnostics = [], []
-    entries = size = 0
 
     def diagnostic(code, message):
         diagnostics.append({'severity': 'warning', 'code': code, 'message': message,
                             'file': '', 'line': None})
 
-    def visit(root, reference, path, depth=0):
-        nonlocal entries, size
-        if depth > limit('discovery_depth'):
-            raise BuildError('discovery_limit', 'Document discovery depth limit reached')
-        path = _safe(root, path.relative_to(root))
-        if path.is_dir():
-            # scandir is consumed incrementally: a huge directory cannot allocate an unbounded list.
-            with os.scandir(path) as children:
-                for child in children:
-                    entries += 1
-                    if entries > limit('discovery_entries'):
-                        raise BuildError('discovery_limit', 'Document discovery entry limit reached')
-                    if child.name.startswith('.') or child.name in _SKIP:
-                        continue
-                    if child.is_symlink():
-                        raise BuildError('source_path', 'Document scan encountered a symlink; scan is incomplete')
-                    visit(root, reference, Path(child.path), depth + 1)
-        elif path.suffix.lower() in {'.tex', '.ltx'}:
-            data = read_source(root, path, limit=min(limit('discovery_file_bytes'),
-                                                   limit('discovery_bytes') - size))
-            size += len(data)
-            text = re.sub(r'(?<!\\)%[^\n]*', '', data.decode('utf-8', errors='replace'))
-            if _DOCUMENT.search(text):
-                if len(documents) >= limit('discovery_candidates'):
-                    raise BuildError('discovery_limit', 'Document candidate limit reached')
-                documents.append(_document(root, reference, path))
+    def candidate(root, reference, path):
+        data = read_source(root, path)
+        text = re.sub(r'(?<!\\)%[^\n]*', '', data.decode('utf-8', errors='replace'))
+        if _DOCUMENT.search(text):
+            documents.append(_document(root, reference, path))
+
+    def visit(root, reference, path):
+        pending = [path]
+        while pending:
+            current = _safe(root, pending.pop().relative_to(root))
+            if current.is_dir():
+                with os.scandir(current) as children:
+                    for child in children:
+                        if child.name.startswith('.') or child.name in _SKIP:
+                            continue
+                        if child.is_symlink():
+                            raise BuildError('source_path', 'Document scan encountered a symlink; scan is incomplete')
+                        child_path = Path(child.path)
+                        if child.is_dir(follow_symlinks=False):
+                            pending.append(child_path)
+                        elif child_path.suffix.lower() in {'.tex', '.ltx'}:
+                            candidate(root, reference, child_path)
+            elif current.suffix.lower() in {'.tex', '.ltx'}:
+                candidate(root, reference, current)
 
     for reference in references:
         try:
@@ -104,8 +99,6 @@ def _scan(settings, payload):
             visit(root, reference, _safe(root, payload.get('path', '.')))
         except BuildError as exc:
             diagnostic(exc.code, str(exc))
-            if exc.code in {'discovery_limit', 'source_limit'}:
-                break
         except (OSError, RuntimeError, ValueError):
             diagnostic('discovery_scan', 'Paper source scan failed; results are incomplete')
     if not references:
@@ -165,12 +158,6 @@ def discover_documents(payload: dict, *, owner_user_id: int) -> dict:
                                 'file': '', 'line': None})
     elif len(documents) == 1 and not diagnostics:
         selected = documents[0]
-    maximum = limit('discovery_candidates')
-    if len(documents) > maximum:
-        documents = ([selected] if selected else []) + [value for value in documents if value != selected]
-        documents = documents[:maximum]
-        diagnostics.append({'severity': 'warning', 'code': 'discovery_limit',
-                            'message': 'Document list is incomplete', 'file': '', 'line': None})
     identities = PaperDocumentRepository(owner_user_id).resolve(documents)
     documents = [{**value, **({'document_id': identity} if identity else {})}
                  for value, identity in zip(documents, identities, strict=True)]

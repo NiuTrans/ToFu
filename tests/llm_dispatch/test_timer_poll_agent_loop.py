@@ -1,7 +1,7 @@
 """tests/llm_dispatch/test_timer_poll_agent_loop.py — Timer poll mini-agent loop parity.
 
 ``poll_timer`` used to hand-roll its ``for agent_round in range(N)`` tool-calling
-loop. It was migrated onto the shared ``lib.agent_loop.run_agent_loop`` primitive
+loop. It was migrated onto the shared ``lib.agent_loop.agent_loop.run_agent_loop`` primitive
 (the ``dispatch`` / ``execute_tool`` / ``on_tool_round`` hooks + ``AbortSignal``
 seam) so the round loop lives in ONE place. These tests pin the behaviour that
 must survive that refactor:

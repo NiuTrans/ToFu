@@ -346,7 +346,7 @@ def test_shared_request_recovers_once_and_retains_incident(login, monkeypatch, c
 ])
 def test_shared_source_failure_keeps_reason_and_neutral_preparation(login, monkeypatch, caplog, issue, reauth, retryable):
     from lib.error_envelope import from_exception
-    from lib.llm_errors import LocalRequestPreparationError
+    from lib.llm.llm_errors import LocalRequestPreparationError
     from lib.oauth.outbound import resolve_oauth_request
     shared.reconcile_shared_login(owner_user_id=1)
     monkeypatch.setattr(local, 'read_local_login', lambda **kwargs: {'shared_login_issue': issue})
@@ -369,7 +369,7 @@ def test_shared_source_failure_keeps_reason_and_neutral_preparation(login, monke
 
 
 def test_recovery_cannot_revive_logged_out_binding(login, monkeypatch):
-    from lib.llm_errors import SubscriptionCredentialUnavailableError
+    from lib.llm.llm_errors import SubscriptionCredentialUnavailableError
     from lib.oauth.codex import codex_get_valid_token
     shared.reconcile_shared_login(owner_user_id=1)
     def read(**kwargs):
@@ -385,7 +385,7 @@ def test_recovery_cannot_revive_logged_out_binding(login, monkeypatch):
 def test_shared_failure_is_durable_and_correlated(login, monkeypatch, tmp_path):
     from lib.incident_journal import IncidentJournalHandler
     from lib.log import LogContextFilter, bind_log_context
-    from lib.llm_errors import SubscriptionCredentialUnavailableError
+    from lib.llm.llm_errors import SubscriptionCredentialUnavailableError
     from lib.oauth.codex import codex_get_valid_token
     shared.reconcile_shared_login(owner_user_id=1)
     monkeypatch.setattr(local, 'read_local_login', lambda **kwargs: {'shared_login_issue': 'codex_command_timeout'})

@@ -16,7 +16,7 @@ from typing import Any
 
 from lib.error_envelope import from_json as error_from_json
 from lib.log import get_logger
-from lib.task_replay import (
+from lib.task_replay.task_replay import (
     TASK_REPLAY_TERMINAL_EVENT_TYPES,
     TASK_REPLAY_TERMINAL_STATUSES,
     TaskReplayPage,
@@ -35,6 +35,7 @@ DURABLE_CHAT_REPLAY_FETCH_LIMIT = 129
 # owning surfaces instead of leaking through the generic task endpoint.
 _PUBLIC_RESULT_METADATA_FIELDS = (
     'finishReason',
+    'streamState',
     'usage',
     'preset',
     'toolSummary',

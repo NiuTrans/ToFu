@@ -94,7 +94,7 @@ def _thinking_models_to_exclude() -> frozenset[str]:
     template-file problem.
     """
     try:
-        from lib.provider_template_recipes import load_provider_templates
+        from lib.provider.provider_template_recipes import load_provider_templates
         templates = load_provider_templates()
     except Exception as exc:
         logger.warning('[TitleGen] template catalog unreadable — using '

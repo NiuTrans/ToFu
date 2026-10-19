@@ -23,42 +23,18 @@ from collections.abc import Callable
 from typing import TypeVar
 
 from lib.log import get_logger
-from lib.storage.errors import StorageError
+from lib.agent_core.storage_errors import (
+    TRANSIENT_STORAGE_CODES, is_transient_storage_error,
+)
 
 logger = get_logger(__name__)
 
 T = TypeVar('T')
 
-#: Storage classifications that are always safe to retry with the identical
-#: operation (see the module docstring for the replay-safety argument).
-TRANSIENT_STORAGE_CODES = frozenset({
-    'database_timeout',
-    'database_busy',
-    'database_unavailable',
-})
-
 #: Default bounded backoff schedule (seconds): ~7s of waiting on top of the
 #: per-attempt RPC budgets, so a brief authority brownout (WAL rotation,
 #: checkpoint, pressure spike) degrades to a wait instead of a fatal error.
 DEFAULT_TRANSIENT_DELAYS_S = (1.0, 2.0, 4.0)
-
-
-def is_transient_storage_error(exc: BaseException | None) -> bool:
-    """Classify by code through the cause chain.
-
-    Wrappers such as ``EventDurabilityError`` lose the original
-    ``StorageError`` flag surface but keep it as ``__cause__``; walk the
-    chain (bounded) so classification happens at the site that catches.
-    """
-    seen = 0
-    current: BaseException | None = exc
-    while current is not None and seen < 8:
-        if (isinstance(current, StorageError)
-                and current.code in TRANSIENT_STORAGE_CODES):
-            return True
-        current = current.__cause__ or current.__context__
-        seen += 1
-    return False
 
 
 def call_with_transient_retry(

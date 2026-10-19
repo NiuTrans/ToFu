@@ -915,7 +915,7 @@ function _populateResponsesExperimentControls() {
   var responsesCfg = (config && config.responses) || {};
   var orchestrationCfg = (config && config.orchestration) || {};
   _setSelectValue('settingToolSearch', toolsCfg.toolSearch, 'auto');
-  _setSelectValue('settingProgrammaticCalling', toolsCfg.programmaticCalling, 'on');
+  _setSelectValue('settingProgrammaticCalling', toolsCfg.programmaticCalling, 'auto');
   _setSelectValue('settingResponsesPromptProfile', responsesCfg.promptProfile, 'auto');
   _setSelectValue('settingResponsesTransport', responsesCfg.transport, 'sse');
   _setSelectValue('settingResponsesReasoning', responsesCfg.reasoningMode, 'standard');
@@ -954,7 +954,7 @@ function _collectResponsesExperimentControls() {
     // turns those switches into an execution allow-list. ``selected_only``
     // remains a headless/API compatibility input only.
     executionScope: 'available',
-    programmaticCalling: value('settingProgrammaticCalling', 'on'),
+    programmaticCalling: value('settingProgrammaticCalling', 'auto'),
   });
   config.responses = Object.assign({}, config.responses || {}, {
     transport: value('settingResponsesTransport', 'sse'),

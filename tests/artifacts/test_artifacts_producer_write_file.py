@@ -174,26 +174,22 @@ def test_skips_when_file_missing(flask_app, tmp_project_root, fake_task):
     assert _last_artifact_event(fake_task) is None
 
 
-def test_size_cap_enforced(flask_app, tmp_project_root, fake_task):
-    from lib.tasks_pkg.handlers.project import (
-        _WRITE_ARTIFACT_MAX_BYTES,
-        _maybe_promote_write_to_artifact,
-    )
-
-    rel = 'huge.html'
-    big = '<!doctype html>' + ('a' * (_WRITE_ARTIFACT_MAX_BYTES + 1))
-    with open(os.path.join(tmp_project_root, rel), 'w') as f:
-        f.write(big)
-
+def test_large_completed_html_is_promoted_without_feature_or_storage_byte_quota(flask_app, tmp_project_root, fake_task):
+    import hashlib
+    from lib.tasks_pkg.handlers.project import _maybe_promote_write_to_artifact
+    from lib.artifacts import get_artifact
+    rel = 'large-complete.html'
+    body = '<!doctype html><html><!--' + 'a' * (9 * 1024 * 1024) + '--><p>late evidence</p></html>'
+    with open(os.path.join(tmp_project_root, rel), 'w') as output:
+        output.write(body)
     meta = {'toolName': 'write_file'}
     with flask_app.app_context():
-        _maybe_promote_write_to_artifact(
-            fake_task, 'write_file', {'path': rel}, tmp_project_root, meta,
-        )
-
-    # Above the per-feature cap → no artifact, no event.
-    assert 'artifactId' not in meta
-    assert _last_artifact_event(fake_task) is None
+        _maybe_promote_write_to_artifact(fake_task, 'write_file', {'path': rel}, tmp_project_root, meta)
+        saved = get_artifact(meta['artifactId'])
+    assert saved['content'] == body
+    assert saved['size_bytes'] == len(body.encode())
+    assert saved['content_sha256'] == hashlib.sha256(body.encode()).hexdigest()
+    assert _last_artifact_event(fake_task) is not None
 
 
 def test_apply_diff_promotes(flask_app, tmp_project_root, fake_task):

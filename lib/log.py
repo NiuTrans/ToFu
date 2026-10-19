@@ -43,7 +43,7 @@ Log file layout:
     logs/incident.jsonl — Compact WARNING+ fingerprint/correlation index.
     logs/audit.log   — Bounded structured JSON audit trail.
 
-Exact stream ceilings and retention are defined once in ``lib/log_policy.py``.
+Exact stream ceilings and retention are defined once in ``lib/logging_pkg/log_policy.py``.
 """
 
 import asyncio as _asyncio
@@ -62,7 +62,7 @@ from datetime import datetime, timezone
 from threading import Lock as _Lock
 from threading import Thread as _Thread
 
-from lib.log_record_values import sanitize_value
+from lib.logging_pkg.log_record_values import sanitize_value
 
 # Data and logs share one canonical startup decision, without an import cycle.
 from runtime_path_policy import get_runtime_base, resolve_runtime_base
@@ -313,7 +313,7 @@ def get_logger(name: str) -> logging.Logger:
 
 
 def log_event(logger: logging.Logger, level: int, event: str,
-              message: str = '', *args, **fields) -> None:
+              message: str = '', *args, no_coalesce: bool = False, **fields) -> None:
     """Emit a human message plus stable machine-readable event metadata."""
     event_name = str(event or '').strip()[:128]
     if not event_name:
@@ -327,6 +327,7 @@ def log_event(logger: logging.Logger, level: int, event: str,
         message or '[event:%s]',
         *(args if message else (event_name,)),
         extra={'tofu_event_name': event_name,
+               'tofu_no_coalesce': no_coalesce is True,
                'tofu_event_fields': dict(fields)},
         **logging_kwargs,
     )
@@ -398,7 +399,7 @@ def _audit_queue_capacity() -> int:
 
 def _audit_rotation_limits():
     """Return bounded, dependency-free audit-log rotation settings."""
-    from lib.log_policy import stream_backup_count, stream_max_bytes
+    from lib.logging_pkg.log_policy import stream_backup_count, stream_max_bytes
     return stream_max_bytes('audit'), stream_backup_count('audit')
 
 
@@ -406,7 +407,7 @@ def _rotate_audit_log_if_needed(incoming_bytes: int) -> None:
     """Size-rotate ``audit.log`` before one append; caller serializes writes."""
     max_bytes, backups = _audit_rotation_limits()
     try:
-        from lib.log_retention import copytruncate_if_oversize
+        from lib.logging_pkg.log_retention import copytruncate_if_oversize
         copytruncate_if_oversize(
             AUDIT_LOG_FILE,
             max_bytes=max_bytes,
@@ -427,7 +428,7 @@ def _audit_sync_writes() -> bool:
 def _audit_write_line(line: str) -> None:
     """Append one JSON line to the audit file (the actual disk I/O). Reads
     the module-level paths at call time so tests can monkeypatch them."""
-    from lib.log_retention import (
+    from lib.logging_pkg.log_retention import (
         append_bytes_locked, ensure_private_log_directory,
     )
     ensure_private_log_directory(LOG_DIR)
@@ -553,7 +554,7 @@ def audit_log(event: str, **details) -> None:
         **details: Arbitrary key-value pairs to include in the audit entry.
     """
     rid = req_id()
-    from lib.log_record_values import text_value, sanitize_value
+    from lib.logging_pkg.log_record_values import text_value, sanitize_value
 
     safe_details = sanitize_value(
         details, max_items=50,
@@ -702,7 +703,7 @@ def log_route(logger: logging.Logger, log_request_body: bool = False,
                 from quart import request as flask_req
                 body = flask_req.get_json(silent=True)
                 if body and isinstance(body, dict):
-                    from lib.log_record_values import sanitize_value
+                    from lib.logging_pkg.log_record_values import sanitize_value
                     safe_body = sanitize_value(body)
                     logger.debug('%s  Request body: %s', rid_tag, json.dumps(safe_body, ensure_ascii=False, default=str)[:2000])
             except Exception:

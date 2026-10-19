@@ -1,6 +1,6 @@
 //! Immutable child birth evidence in the task-result authority.
 //!
-//! Ports `lib/storage_sidecar/operations_pkg/_invocations.py` one for one:
+//! Ports `lib/storage_authority_sql/operations_pkg/_invocations.py` one for one:
 //! `register_child` proves an owned active conversation plus parent task
 //! birth (task-result record, or an exact bound generation attempt as the
 //! fallback), then stores the immutable user/conversation/parent/child

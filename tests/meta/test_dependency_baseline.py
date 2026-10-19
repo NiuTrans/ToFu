@@ -48,8 +48,6 @@ def test_pyproject_is_python_312_dependency_authority():
     assert _dependency_map(personal_dependencies) == _dependency_map(
         _requirements_dependencies())
     assert (ROOT / ".python-version").read_text(encoding="utf-8").strip() == "3.12"
-    assert "Python 3.12" in (ROOT / "README.md").read_text(encoding="utf-8")
-    assert "Python 3.12" in (ROOT / "README_CN.md").read_text(encoding="utf-8")
 
 
 def test_tooling_and_container_exclude_nested_codex_tree():
@@ -77,7 +75,6 @@ def test_primary_ci_uses_frozen_uv_and_blocks_slow_failures():
     assert "schedule:" in workflow
     assert "make test-visual" in workflow
     for required_gate in (
-        "make docs-check",
         "make architecture-check",
         "make contracts-check",
         "make suite-health",

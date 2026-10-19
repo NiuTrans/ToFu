@@ -802,6 +802,17 @@
      "bindings": [
       "watchRestartPreparation"
      ]
+    },
+    {
+     "source": "frontend/src/features/settings/restart-progress-dock.ts",
+     "bindings": ["dockRestartProgress", "recordRestartDiagnostic", "offerRestartReload"]
+    },
+    {
+     "source": "frontend/src/features/settings/restart-observation.ts",
+     "bindings": [
+      "projectRestartHealth",
+      "restartPhaseProgress"
+     ]
     }
    ],
    "registryImports": [],

@@ -45,8 +45,9 @@ ATTRIBUTION_KEY = 'failureAttribution'
 
 
 def record_active_round(task: dict[str, Any], round_num: Any) -> None:
-    """Stamp the loop's current dispatch round on the task (1-based)."""
-    if isinstance(round_num, int) and not isinstance(round_num, bool):
+    """Stamp the loop's zero-based dispatch index for internal context consumers."""
+    if (isinstance(round_num, int) and not isinstance(round_num, bool)
+            and round_num >= 0):
         task['_activeRoundNum'] = round_num
 
 
@@ -84,8 +85,10 @@ def build_failure_attribution(
     attribution: dict[str, Any] = {}
     round_num = (task or {}).get('_activeRoundNum')
     if isinstance(round_num, int) and not isinstance(round_num, bool) \
-            and round_num > 0:
-        attribution['roundNum'] = round_num
+            and round_num >= 0:
+        # Keep the task index zero-based for context composition; public
+        # failure receipts use the same one-based ordinal as admission.
+        attribution['roundNum'] = round_num + 1
     if phase:
         attribution['phase'] = str(phase)[:64]
     if tool_name:

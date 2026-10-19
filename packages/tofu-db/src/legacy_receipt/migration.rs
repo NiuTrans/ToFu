@@ -2,7 +2,6 @@
 //! The operator authorizes the tenant; its owner is never a historical owner.
 use super::*;
 use crate::generated_tofudb_ir::MIGRATION_SESSION_MAX_PAGE_ROWS;
-use crate::receipt::MAX_STORED_RECEIPT_BYTES;
 use crate::receipt_migration::{digest, hex, unhex};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -94,7 +93,7 @@ pub(crate) fn execute(
             ReceiptSnapshot {
                 operation: stored_operation,
                 request_digest: digest(&request_digest)?,
-                encoded_response: unhex(&response_hex, MAX_STORED_RECEIPT_BYTES)?,
+                encoded_response: unhex(&response_hex, usize::MAX)?,
                 committed_at_ms,
             },
         )?;

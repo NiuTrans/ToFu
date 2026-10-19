@@ -1,4 +1,4 @@
-"""tests/tools/test_tool_changes.py — port-parity tests for lib.tool_changes.
+"""tests/tools/test_tool_changes.py — port-parity tests for lib.tool_results.tool_changes.
 
 Each test exercises a JS branch with a fixture matching the JS impl's
 output. If a test fails, either the Python port diverged from JS or
@@ -12,7 +12,7 @@ _AUDIT_SYNTHETIC_REPO_PATHS = {'scripts/build.sh', 'tests/test_x.py'}
 import json
 import unittest
 
-from lib.tool_changes import (
+from lib.tool_results.tool_changes import (
     FileChange, _split_root, extract_file_changes,
     extract_file_changes_dicts,
 )

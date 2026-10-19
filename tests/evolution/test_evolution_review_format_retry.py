@@ -90,12 +90,12 @@ def test_valid_json_negative_or_invalid_contract_is_not_format_retried(runtime, 
     assert 'review_format_retry' not in final['receipts'][-1]
 
 
-def test_terminal_failure_and_output_bound_are_not_format_retry_authority(runtime):
+def test_large_syntax_failure_uses_existing_format_retry_authority(runtime):
     _, _, tasks = runtime
     ready(runtime)
     final = finish(runtime, tasks[-1], 'x' * 8001)
-    assert final['status'] == 'failed' and len(tasks) == 2
-    assert 'review_format_retry' not in final['receipts'][-1]
+    assert final['status'] == 'reviewing' and len(tasks) == 3
+    assert final['receipts'][-1]['review_format_retry']
 
 
 def pause_admission(runtime, monkeypatch):

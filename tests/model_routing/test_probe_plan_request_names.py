@@ -9,7 +9,7 @@ from copy import deepcopy
 
 import pytest
 
-from lib import provider_probe as probe
+from lib.provider import provider_probe as probe
 from lib.model_routing import probe_automation
 from lib.model_routing.domain import ModelRoutingError
 from lib.model_routing.probe_plan import matrix_probe_plan

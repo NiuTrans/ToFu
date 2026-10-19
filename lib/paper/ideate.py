@@ -274,7 +274,7 @@ def assemble_arxiv_query(identity, domain, *, tier: int = 1) -> tuple:
 
     ``mode``: ``'fielded_t1'`` | ``'fielded_t2'`` | ``'domain'`` | ``'all'``.
     """
-    from lib.search_runtime import ensure_search_runtime
+    from lib.search.search_runtime import ensure_search_runtime
     ensure_search_runtime()
     from tofu_search.search.vertical import arxiv as _ts
 
@@ -354,7 +354,7 @@ def ts_search_by_query(identity_terms, domain_terms=None, *, field='ti',
     (asked properly, nothing there → widen the rung) from ``request_failed`` /
     ``unusable_query`` (not evidence about the literature at all).
     """
-    from lib.search_runtime import ensure_search_runtime
+    from lib.search.search_runtime import ensure_search_runtime
     ensure_search_runtime()
     from tofu_search.search.vertical.arxiv import search_by_query as _sbq
     return _sbq(identity_terms, domain_terms, field=field,
@@ -656,8 +656,8 @@ def _score_idea(idea: dict, prior_set: dict, gap: dict, lang: str, *,
     novelty axis to min(score, 2) (the cap is applied HERE, deterministically,
     not left to the model).
     """
-    from lib.agent_loop import AbortSignal
-    from lib.llm_errors import AbortedError
+    from lib.agent_loop.agent_loop import AbortSignal
+    from lib.llm.llm_errors import AbortedError
     from lib.paper.agent_loop_policy import PAPER_AGENT_ROUTE_MAX_RETRIES
 
     abort_signal = AbortSignal.from_callback(abort)
@@ -810,7 +810,7 @@ def _score_prepared_ideas(rows: list[_PreparedIdeaJudge], *, lang: str,
                 **({'model_budget_admit': model_budget_admit} if model_budget_admit is not None else {}))
 
     from lib.production.concurrency import owned_results
-    from lib.llm_errors import AbortedError
+    from lib.llm.llm_errors import AbortedError
     results = [None] * len(rows)
     failures = {}
     def stopped():
@@ -841,7 +841,7 @@ def _generate_raw_ideas(direction, open_gaps, reader_context, lang, *,
     Single seam tests monkeypatch (``ideate._generate_raw_ideas``) to drive the
     gate pipeline offline. Mirrors insight/survey synthesis with the narrow
     research tool profile."""
-    from lib.agent_loop import AbortSignal
+    from lib.agent_loop.agent_loop import AbortSignal
     from lib.paper.agent_loop_policy import (
         PAPER_AGENT_ROUTE_MAX_RETRIES,
         run_guarded_paper_agent_loop,
@@ -1223,7 +1223,7 @@ def generate_ideas(direction: str, open_gaps: dict, *, lang: str = 'en',
         from lib.agent_core.execution_budget import ModelBudgetAdmissionDenied
         if isinstance(e, ModelBudgetAdmissionDenied):
             raise
-        from lib.llm_errors import AbortedError
+        from lib.llm.llm_errors import AbortedError
         if isinstance(e, AbortedError):
             return {'ok': False, 'error': 'aborted', 'direction': direction, 'lang': lang,
                     'accepted': [], 'rejected': [], 'threshold': thr,

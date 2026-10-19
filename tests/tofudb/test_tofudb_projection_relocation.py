@@ -16,7 +16,7 @@ import time
 
 import pytest
 
-from lib.storage_sidecar.projection_paths import (
+from lib.storage_authority_sql.projection_paths import (
     prepare_search_projection_directory, resolve_search_projection_paths,
 )
 from tests.support.tofudb_binary import ensure_engine_binary

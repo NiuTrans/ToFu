@@ -48,6 +48,25 @@ struct Flow {
     attempt: String,
 }
 
+#[test]
+fn completion_only_tool_phase_preserves_context_notes_on_exact_replay() {
+    let message = json!({"role":"assistant","content":"Done", "finishReason":"stop",
+        "segments":[{"type":"system_note","blockId":"context:actor","text":"Accepted project rules",
+            "noteKind":"context-injection","action":"prompt","llmRound":0}],
+        "toolRounds":[{"toolCallId":"write-1","toolName":"write_file","roundNum":1,"llmRound":0,
+            "taskId":"actor","toolContent":"Published once","status":"done"}],
+        "modifiedFileList":[{"path":"answer.txt"}],"modifiedFiles":1});
+    let message = message.as_object().unwrap();
+    let (actor, _, first) = visible_shape(message, "flow_node", &Map::new(), false);
+    let first = crate::turn_projection_segments::stabilize_for_patch(&first, &actor, "completed").unwrap();
+    assert_eq!(first["segments"].as_array().unwrap().iter()
+        .filter(|block| block["type"] == "system_note").count(), 1);
+    let (_, _, replay) = visible_shape(message, "flow_node", &first, true);
+    let replay = crate::turn_projection_segments::stabilize_for_patch(&replay, &actor, "completed").unwrap();
+    assert_eq!(replay, first);
+    assert_eq!(first["fileChanges"]["files"], message["modifiedFileList"]);
+}
+
 impl Flow {
     fn seed(database: &mut AuthorityDatabase) -> Self {
         database
@@ -1024,4 +1043,181 @@ fn visible_tool_metadata_is_typed_and_retained_after_public_sync_and_replay() {
     let before = flow.snapshot(&mut database);
     execute(&mut database, &request).unwrap();
     assert_eq!(flow.snapshot(&mut database), before);
+}
+
+#[test]
+fn visible_goal_vu_machine_tokens_are_normalized_before_sealing() {
+    // Equal display text is not a deduplication rule: only registered machine
+    // tokens are normalized, and genuinely changed answers remain evidence.
+    for final_content in ["Verified answer", "A genuinely changed answer"] {
+        let directory = tempfile::tempdir().unwrap();
+        let mut database = AuthorityDatabase::initialize(directory.path()).unwrap();
+        let flow = Flow::seed(&mut database);
+        let raw_content = "Verified answer\n\n[PROGRESS: resolved=2 remaining=2]";
+        let history = json!({
+            "type":"text", "blockId":"text:history", "text":"Verified answer",
+            "deliverable":false
+        });
+        let reasoning = json!({
+            "type":"thinking", "blockId":"thinking:recorded",
+            "text":"Reasoning [PROGRESS: resolved=2 remaining=2]", "deliverable":false
+        });
+        let tool = json!({
+            "type":"tool_use", "blockId":"tool:recorded", "id":"recorded",
+            "toolName":"read_files", "roundNum":0,
+            "result":{"content":"Evidence [PROGRESS: resolved=2 remaining=2]"}
+        });
+        let round = json!({
+            "toolCallId":"recorded", "toolName":"read_files", "roundNum":0,
+            "status":"done", "results":{"content":"durable result"}
+        });
+        execute(
+            &mut database,
+            &flow.sync(true, 1, json!([{
+                "role":"user", "_isVirtualUser":true, "content":raw_content,
+                "thinking":reasoning["text"], "toolRounds":[round],
+                "segments":[history, reasoning, tool, {
+                    "type":"text", "blockId":"text:terminal", "text":raw_content,
+                    "deliverable":true, "terminal":true
+                }]
+            }]), "vu-machine-live"),
+        ).unwrap();
+        execute(
+            &mut database,
+            &command("turn.event.record", 11, json!({
+                "attempt_id":flow.child_attempt(1), "flow_root_attempt_id":flow.attempt,
+                "task_id":"phase-task", "user_id":11, "terminal":false, "now":2_000,
+                "projection":{
+                    "content":raw_content, "thinking":reasoning["text"],
+                    "toolRounds":[round], "segments":[history, reasoning, tool, {
+                        "type":"text", "blockId":"text:terminal", "text":raw_content,
+                        "deliverable":true, "terminal":true
+                    }]
+                }
+            }), Some("vu-machine-checkpoint")),
+        ).unwrap();
+        let message = json!({
+            "role":"user", "_isVirtualUser":true,
+            "content":final_content, "finishReason":"stop"
+        });
+        execute(
+            &mut database,
+            &flow.sync(false, 1, json!([message]), "vu-machine-settle"),
+        ).unwrap();
+        let child = flow.turn(&mut database, 1);
+        assert_eq!(child["actor"], "virtual_user");
+        assert_eq!(child["projection"]["content"], final_content);
+        assert_eq!(child["projection"]["thinking"], reasoning["text"]);
+        assert_eq!(child["projection"]["toolRounds"], json!([round]));
+        let segments = child["projection"]["segments"].as_array().unwrap();
+        for recorded in [&history, &reasoning, &tool] {
+            assert_eq!(segments.iter().find(|block| block["blockId"] == recorded["blockId"]), Some(recorded));
+        }
+        let terminals: Vec<_> = segments.iter().filter(|block| {
+            block["type"] == "text" && block["terminal"] == true
+        }).collect();
+        assert_eq!(terminals.len(), 1);
+        assert_eq!(terminals[0]["text"], final_content);
+        assert!(segments.iter().filter(|block| block["type"] == "text").all(|block| {
+            !block["text"].as_str().unwrap().contains("[PROGRESS:")
+        }));
+        if final_content == "Verified answer" {
+            assert_eq!(segments.iter().filter(|block| block["type"] == "text").count(), 2,
+                "no completion mirror, equal history retained: {segments:?}");
+            assert_eq!(terminals[0]["blockId"], "text:terminal");
+        } else {
+            assert_eq!(segments.iter().filter(|block| block["type"] == "text").count(), 3,
+                "changed answer must append without discarding history: {segments:?}");
+            let original = segments.iter().find(|block| block["blockId"] == "text:terminal").unwrap();
+            assert_eq!(original["text"], "Verified answer");
+            assert_eq!(original["deliverable"], false);
+            assert!(original.get("terminal").is_none());
+        }
+        let before = flow.snapshot(&mut database);
+        execute(
+            &mut database,
+            &flow.sync(false, 1, json!([message]), "vu-machine-replay"),
+        ).unwrap();
+        assert_eq!(flow.snapshot(&mut database), before);
+    }
+}
+
+
+#[test]
+fn native_machine_token_sanitizer_preserves_python_semantics() {
+    for (source, expected) in [
+        ("  unchanged outer spaces \n\n\n ", "  unchanged outer spaces \n\n\n "),
+        ("A [progress: resolved=2 remaining=3] B", "A  B"),
+        ("[PROGRESS: resolved=٢ remaining=٣]", ""),
+        ("[PROGRESS:\u{0085}resolved=1\u{001c}remaining=2]", ""),
+        ("[verdıct: contİnue]", ""),
+        ("\u{001c} before [VU: TASK_DONE] after \u{001f}", "before  after"),
+        ("\u{feff} [VU: TASK_DONE] \u{feff}", "\u{feff}  \u{feff}"),
+        ("  [vu: task_done]  ", "  [vu: task_done]  "),
+        ("[PROGRESS: resolved=1remaining=2]", "[PROGRESS: resolved=1remaining=2]"),
+    ] {
+        assert_eq!(super::strip_agent_machine_tokens(source), expected, "{source:?}");
+        assert_eq!(super::strip_agent_machine_tokens(expected), expected);
+    }
+}
+
+#[test]
+fn first_visible_phase_recovery_index_survives_crash_and_torn_admission() {
+    fn seed(vfs: Arc<DeterministicVfs>) -> (AuthorityDatabase, Flow, Request) {
+        let mut database = AuthorityDatabase::initialize_with_vfs(std::path::Path::new("/data"), vfs.clone()).unwrap();
+        let flow = Flow::seed(&mut database);
+        let request = flow.sync(true, 0, json!([{"role":"assistant", "content":"",
+            "_flowLivePhase":true, "_flowIteration":1,
+            "orchestration":{"goalRunId":"goal-first-worker"}}]), "first-phase");
+        vfs.arm_fault(None).unwrap();
+        (database, flow, request)
+    }
+    let baseline_vfs = fault_vfs();
+    let (mut baseline, flow, request) = seed(baseline_vfs.clone());
+    let _ = flow.turn(&mut baseline, 0);
+    baseline_vfs.arm_fault(None).unwrap();
+    execute(&mut baseline, &request).unwrap();
+    let trace = baseline_vfs.trace().unwrap();
+    let expected = flow.turn(&mut baseline, 0)["projection"].clone();
+    assert_eq!(expected["orchestration"]["goalRunId"], "goal-first-worker");
+    let mut faults = vec![None]; // Also reopen the fully acknowledged write.
+    for (index, operation) in trace.iter().enumerate() {
+        let occurrence = trace[..=index].iter().filter(|item| *item == operation).count();
+        faults.push(Some((operation.clone(), occurrence,
+            FaultAction::ErrorBefore(io::ErrorKind::Interrupted))));
+        if operation == &Operation::Write {
+            faults.push(Some((operation.clone(), occurrence, FaultAction::ShortWrite(7))));
+        }
+    }
+    assert!(faults.len() > 1);
+    eprintln!("first visible phase recovery fault cases: {}", faults.len());
+    for fault in faults {
+        let armed = fault.is_some();
+        let vfs = fault_vfs();
+        let (mut database, flow, request) = seed(vfs.clone());
+        let before = flow.turn(&mut database, 0)["projection"].clone();
+        if let Some((operation, occurrence, action)) = fault {
+            vfs.arm_operation_fault(operation, occurrence, action).unwrap();
+        } else {
+            vfs.arm_fault(None).unwrap();
+        }
+        let _ = execute(&mut database, &request);
+        if armed { assert!(vfs.operation_fault_fired().unwrap(), "armed admission fault did not fire"); }
+        drop(database);
+        vfs.crash().unwrap();
+        vfs.arm_fault(None).unwrap();
+        let mut reopened = AuthorityDatabase::open_with_vfs(std::path::Path::new("/data"), vfs).unwrap();
+        reopened.configure_logical_outbox(&[72; 32], 4 * 1024 * 1024, 128 * 1024).unwrap();
+        let current = flow.turn(&mut reopened, 0)["projection"].clone();
+        assert!(current == before || current == expected, "partially committed phase");
+        let recovery = command("turn.recover", 11, json!({"user_id":11}), Some("recover-first-phase"));
+        assert_eq!(execute(&mut reopened, &recovery).unwrap()["recovered"], 1);
+        let turn = flow.turn(&mut reopened, 0);
+        assert_eq!(turn["status"], "interrupted");
+        assert_eq!(turn["settlement"]["cause"], "server_restart");
+        assert_eq!(turn["projection"]["orchestration"], current["orchestration"]);
+        assert_eq!(execute(&mut reopened, &recovery).unwrap()["recovered"], 0);
+        let again = command("turn.recover", 11, json!({"user_id":11}), Some("recover-empty"));
+        assert_eq!(execute(&mut reopened, &again).unwrap()["recovered"], 0);
+    }
 }

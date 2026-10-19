@@ -4,8 +4,8 @@ import sqlite3
 
 import pytest
 
-from lib.storage_sidecar.tofudb_migration_coverage import source_table_coverage
-from lib.storage_sidecar.tofudb_migration_source import SQLiteMigrationSource
+from lib.storage_authority_sql.migration.tofudb_migration_coverage import source_table_coverage
+from lib.storage_authority_sql.migration.tofudb_migration_source import SQLiteMigrationSource
 
 pytestmark = pytest.mark.unit
 
@@ -81,7 +81,7 @@ def test_mirror_does_not_count_when_current_authority_is_not_mapped(tmp_path):
 
 
 def test_bounded_proof_failure_cannot_admit_partial_results(tmp_path, monkeypatch):
-    from lib.storage_sidecar import tofudb_migration_mirrors
+    from lib.storage_authority_sql.migration import tofudb_migration_mirrors
     path = _fixture(tmp_path)
     monkeypatch.setattr(tofudb_migration_mirrors, '_MAX_ROWS', 0)
     report = _report(path)

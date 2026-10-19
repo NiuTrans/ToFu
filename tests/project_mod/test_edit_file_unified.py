@@ -4,7 +4,7 @@ import pytest
 
 from lib.project_mod.write_tools import tool_edit_file
 from lib.project_mod.write_tools._ops import _pure_addition_stats
-from lib.tool_changes import extract_file_changes
+from lib.tool_results.tool_changes import extract_file_changes
 from lib.tools.meta import build_project_tool_meta
 from lib.tools.project import (
     PROJECT_TOOLS,
@@ -33,6 +33,9 @@ def test_unified_schema_is_the_default_model_surface(monkeypatch):
     assert list(properties)[:2] == ['description', 'edits']
     assert properties['description']['maxLength'] == 120
     assert parameters['required'] == ['description', 'edits']
+
+    assert properties['atomic']['type'] == 'boolean'
+    assert properties['atomic']['default'] is True
     assert 'description' not in properties['edits']['items']['properties']
 
 
@@ -73,7 +76,7 @@ def test_failed_edit_does_not_stop_remaining_edits(tmp_path):
          'anchor': 'missing', 'content': 'x'},
         {'path': 'sample.txt', 'operation': 'insert_after',
          'anchor': 'A', 'content': 'B'},
-    ])
+    ], atomic=False)
 
     assert result.startswith('Applied 1/2 edits (1 failed)')
     assert target.read_text(encoding='utf-8') == 'A\nB\nC\n'
@@ -89,7 +92,7 @@ def test_malformed_operation_is_reported_without_aborting_batch(tmp_path):
          'anchor': 'A', 'content': 'bad'},
         {'path': 'sample.txt', 'operation': 'insert_after',
          'anchor': 'A', 'content': 'B'},
-    ])
+    ], atomic=False)
 
     assert result.startswith('Applied 1/2 edits (1 failed)')
     assert 'Invalid operation' in result
@@ -228,7 +231,7 @@ def test_retained_anchor_replace_keeps_match_safety(tmp_path, anchor, error):
          'anchor': anchor, 'content': anchor + '\nnew'},
         {'path': 'sample.txt', 'operation': 'replace',
          'anchor': 'old', 'content': 'updated'},
-    ])
+    ], atomic=False)
 
     assert result.startswith('Applied 1/2 edits (1 failed)'), result
     assert error in result
@@ -441,7 +444,7 @@ def test_anchor_echo_only_edit_fails_without_touching_file(tmp_path):
          'anchor': 'A', 'content': 'A'},
         {'path': 'sample.txt', 'operation': 'insert_after',
          'anchor': 'B', 'content': 'C'},
-    ])
+    ], atomic=False)
 
     assert result.startswith('Applied 1/2 edits (1 failed)')
     assert 'just the anchor text repeated' in result
@@ -579,7 +582,7 @@ def test_batch_syntax_feedback_warns_once_for_final_committed_state(tmp_path):
          'anchor': 'f(', 'content': 'g('},
         {'path': 'sample.py', 'operation': 'replace',
          'anchor': 'missing', 'content': 'missing + 1'},
-    ])
+    ], atomic=False)
 
     assert result.startswith('Applied 2/3 edits (1 failed)'), result
     assert result.count('SYNTAX GUARD') == 1
@@ -674,7 +677,7 @@ def test_batch_write_failure_isolated_without_false_freshness_or_history(
          'anchor': 'x = 1', 'content': 'x = 1\ndef f(:'},
         {'path': 'good.txt', 'operation': 'replace',
          'anchor': 'A', 'content': 'A\nB'},
-    ])
+    ], atomic=False)
 
     assert result.startswith('Applied 1/2 edits (1 failed)'), result
     assert 'SYNTAX GUARD' not in result

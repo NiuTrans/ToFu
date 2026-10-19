@@ -46,12 +46,25 @@ def test_success_settles_once_and_private_port_never_on_wire(transport,monkeypat
 def test_failed_attempt_unknown_prevents_retry_with_finite_budget(transport,monkeypatch):
     owner=task();seen=[]
     def send(*a,**k):
-        from lib.llm_errors import RetryableAPIError
+        from lib.llm.llm_errors import RetryableAPIError
         seen.append(True);raise RetryableAPIError('synthetic')
     monkeypatch.setattr(transport,'http_post',send)
     with pytest.raises(ModelBudgetAdmissionDenied):invoke(transport,model_budget_admission(owner),max_retries=1)
     assert len(seen)==1
     assert owner['_executionBudget'].consumption_snapshot()==(0,0,False)
+
+def test_unbounded_failed_attempt_retries_without_hiding_unknown_usage(transport,monkeypatch):
+    from lib.llm.llm_errors import RetryableAPIError
+    owner=task(None);owner['config']={};seen=[]
+    def send(*a,**k):
+        seen.append(k)
+        if len(seen)==1:raise RetryableAPIError('synthetic')
+        return response({'prompt_tokens':5,'completion_tokens':2})
+    monkeypatch.setattr(transport,'http_post',send)
+    content,usage=invoke(transport,model_budget_admission(owner),max_retries=1)
+    assert content=='ok' and len(seen)==2
+    assert owner['_executionBudget'].consumption_snapshot()==(7,0,False)
+    assert owner['_executionBudget'].continuity_snapshot()['pending_model_requests']==0
 
 def test_missing_success_usage_is_unknown(transport,monkeypatch):
     owner=task();monkeypatch.setattr(transport,'http_post',lambda *a,**k:response({}))
@@ -90,7 +103,7 @@ def test_learned_limit_recursion_keeps_account_and_unknown_failure(transport,mon
 
 def test_later_success_does_not_complete_unknown_earlier_attempt(transport,monkeypatch):
     from lib.agent_core.execution_budget import ExecutionBudget
-    from lib.llm_errors import RetryableAPIError
+    from lib.llm.llm_errors import RetryableAPIError
     owner=task(None);owner['_executionBudget']=ExecutionBudget(owner);seen=[]
     def send(*a,**k):
         seen.append(True)

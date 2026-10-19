@@ -3,8 +3,8 @@
 
 Three subsystems each hand-rolled their own "parse JSON out of an LLM reply"
 logic (fence strip + balanced-brace scan + truncation repair) — a duplicate of
-what ``lib/llm_json.py`` already provides. This suite pins the observable
-behavior of each call site so the consolidation onto ``lib.llm_json`` is proven
+what ``lib/llm/llm_json.py`` already provides. This suite pins the observable
+behavior of each call site so the consolidation onto ``lib.llm.llm_json`` is proven
 byte-for-byte equivalent, and guards that the deleted clone stays deleted.
 
 Covered call sites:
@@ -73,7 +73,7 @@ def test_daily_report_clone_deleted():
     """The local _repair_truncated_json clone must be gone (redundancy removed)."""
     import lib.daily_report.llm as m
     assert not hasattr(m, '_repair_truncated_json'), \
-        '_repair_truncated_json clone should be deleted — use lib.llm_json'
+        '_repair_truncated_json clone should be deleted — use lib.llm.llm_json'
     _ok('daily_report: local _repair_truncated_json clone deleted')
 
 

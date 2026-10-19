@@ -83,10 +83,6 @@ BROWSER_TOOL_READ_PAGE = {
                 "selector": {
                     "type": "string",
                     "description": "Optional CSS scope for text mode."
-                },
-                "max_chars": {
-                    "type": "integer",
-                    "description": "Output limit."
                 }
             },
         }
@@ -130,10 +126,6 @@ BROWSER_TOOL_RESEARCH_PAGE = {
                     "type": "string",
                     "enum": ["auto", "links", "none"],
                     "description": "auto (default), next links only, or none."
-                },
-                "max_chars": {
-                    "type": "integer",
-                    "description": "Output chars (default 60000, max 80000)."
                 }
             },
             "required": ["url"]

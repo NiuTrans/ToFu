@@ -329,13 +329,11 @@ pub(crate) fn validate(receipt: &Value) -> io::Result<usize> {
         }
         let size =
             unsigned(&artifact["size_bytes"]).ok_or_else(|| invalid("invalid artifact size"))?;
-        if size > limits::ARTIFACT_BYTES as u64 {
-            return Err(invalid("artifact exceeds its byte bound"));
-        }
-        payload_bytes += size as usize;
+        let size = usize::try_from(size).map_err(|_| invalid("artifact size exceeds platform extent"))?;
+        payload_bytes = payload_bytes.checked_add(size)
+            .ok_or_else(|| invalid("artifact total exceeds platform extent"))?;
     }
-    if payload_bytes > limits::BUILD_OUTPUT_BYTES
-        || receipt["status"] != "success"
+    if receipt["status"] != "success"
         || !names.contains("document.pdf")
         || receipt["diagnostics"]
             .as_array()
@@ -344,8 +342,9 @@ pub(crate) fn validate(receipt: &Value) -> io::Result<usize> {
             .any(|d| d["severity"] == "error")
     {
         return Err(invalid(
-            "retained receipt must describe a bounded successful build",
+            "retained receipt must describe a successful build",
         ));
     }
-    Ok(receipt_bytes + payload_bytes)
+    receipt_bytes.checked_add(payload_bytes)
+        .ok_or_else(|| invalid("retained bytes exceed platform extent"))
 }

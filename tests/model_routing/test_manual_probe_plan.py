@@ -9,7 +9,7 @@ from lib.model_routing.probe_plan import (
     matrix_probe_plan,
     provider_bundle,
 )
-from lib.provider_probe import build_probe_work
+from lib.provider.provider_probe import build_probe_work
 from tests.model_routing.test_model_routing_contract import _full_document
 
 pytestmark = pytest.mark.unit

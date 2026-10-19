@@ -33,7 +33,7 @@ logger = get_logger(__name__)
 
 def _world_catalog_rows() -> tuple[list[dict], list[dict]]:
     """Union of (creators, models) rows compiled from all known templates."""
-    from lib.provider_template_recipes import (
+    from lib.provider.provider_template_recipes import (
         ProviderTemplateRecipeError, compile_provider_template_bundle,
         load_provider_templates)
 
@@ -62,7 +62,7 @@ def _world_catalog_rows() -> tuple[list[dict], list[dict]]:
 def _retired_model_keys() -> set:
     """Canonical keys of every template-authored ``retired_model_ids`` row."""
     from lib.model_catalog._creator_identity import canonical_key
-    from lib.provider_template_recipes import load_provider_templates
+    from lib.provider.provider_template_recipes import load_provider_templates
 
     retired = set()
     for template in load_provider_templates():
@@ -117,7 +117,7 @@ def sync_world_model_catalog(*, boundary=None, repository=None) -> dict:
     from .model_defaults import apply_model_defaults
     from .catalog_identity import reconcile_catalog_identities
     from .metadata_migration import reconcile_offering_metadata
-    from lib.provider_template_recipes import load_provider_templates
+    from lib.provider.provider_template_recipes import load_provider_templates
     metadata_templates = load_provider_templates()
     legacy_receipt = (repository.migration_receipt(boundary) if any(
         'inherited_model_fields' not in row for row in current.document['offerings']) else None)

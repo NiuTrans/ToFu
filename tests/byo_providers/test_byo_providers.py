@@ -23,7 +23,7 @@ def isolated_provider_domain(monkeypatch):
         "TOFU_SECRET_ENCRYPTION_KEY", Fernet.generate_key().decode("ascii"))
     reset_secret_envelope_for_test()
     yield
-    from lib.byo_providers import delete_provider, list_providers
+    from lib.byo.byo_providers import delete_provider, list_providers
 
     for owner_user_id in TEST_OWNERS:
         for provider in list_providers(owner_user_id):
@@ -39,7 +39,7 @@ def _create(
     models: list[dict] | None = None,
     **fields,
 ) -> dict:
-    from lib.byo_providers import create_provider
+    from lib.byo.byo_providers import create_provider
 
     return create_provider(
         owner_user_id=owner_user_id,
@@ -56,7 +56,7 @@ def _create(
 
 
 def test_create_list_and_get_keep_plaintext_out_of_storage_projection():
-    from lib.byo_providers import get_provider, list_providers, redact
+    from lib.byo.byo_providers import get_provider, list_providers, redact
     from lib.storage.service import get_storage_client
 
     created = _create()
@@ -83,7 +83,7 @@ def test_create_list_and_get_keep_plaintext_out_of_storage_projection():
 
 
 def test_repository_owner_not_bearer_key_controls_visibility():
-    from lib.byo_providers import get_provider, list_providers
+    from lib.byo.byo_providers import get_provider, list_providers
 
     alice = _create(ALICE, name="A", api_key="", models=[])
     _create(BOB, name="B", api_key="", models=[])
@@ -93,7 +93,7 @@ def test_repository_owner_not_bearer_key_controls_visibility():
 
 
 def test_tenant_boundary_is_part_of_every_lookup():
-    from lib.byo_providers import get_provider, list_providers
+    from lib.byo.byo_providers import get_provider, list_providers
 
     created = _create(ALICE, tenant_id="tenant-a")
     assert list_providers(ALICE) == []
@@ -103,7 +103,7 @@ def test_tenant_boundary_is_part_of_every_lookup():
 
 
 def test_update_delete_and_wrong_owner_are_atomic():
-    from lib.byo_providers import delete_provider, get_provider, update_provider
+    from lib.byo.byo_providers import delete_provider, get_provider, update_provider
 
     created = _create(api_key="", models=[])
     assert update_provider(
@@ -119,7 +119,7 @@ def test_update_delete_and_wrong_owner_are_atomic():
 
 
 def test_update_reencrypts_secret_and_refreshes_hint():
-    from lib.byo_providers import get_provider, get_public, update_provider
+    from lib.byo.byo_providers import get_provider, get_public, update_provider
     from lib.storage.service import get_storage_client
 
     created = _create()
@@ -173,14 +173,14 @@ def test_create_rejects_invalid_input(fields, message):
         "models": [],
     }
     defaults.update(fields)
-    from lib.byo_providers import create_provider
+    from lib.byo.byo_providers import create_provider
 
     with pytest.raises(ValueError, match=message):
         create_provider(**defaults)
 
 
 def test_domain_validation_cannot_be_bypassed_by_direct_call():
-    from lib.byo_providers import create_provider, update_provider
+    from lib.byo.byo_providers import create_provider, update_provider
 
     with pytest.raises(ValueError, match="reserved"):
         create_provider(
@@ -201,7 +201,7 @@ def test_domain_validation_cannot_be_bypassed_by_direct_call():
 
 
 def test_owner_catalog_retains_all_providers_beyond_retired_quota():
-    from lib.byo_providers import list_providers
+    from lib.byo.byo_providers import list_providers
     created = [
         _create(DEMAND_OWNER, name=f"provider-{index}", api_key="", models=[])
         for index in range(65)
@@ -214,7 +214,7 @@ def test_owner_catalog_retains_all_providers_beyond_retired_quota():
 
 
 def test_model_string_resolution_and_disabled_behavior():
-    from lib.byo_providers import resolve_model_string, update_provider
+    from lib.byo.byo_providers import resolve_model_string, update_provider
 
     plain = resolve_model_string("deepseek-v4-pro", ALICE)
     assert plain.model_id == "deepseek-v4-pro"
@@ -236,7 +236,7 @@ def test_model_string_resolution_and_disabled_behavior():
 
 
 def test_thinking_format_round_trips_and_rejects_unknown_dialects():
-    from lib.byo_providers import get_provider, update_provider
+    from lib.byo.byo_providers import get_provider, update_provider
 
     created = _create(
         api_key="", models=[], thinking_format="chat_template_kwargs")

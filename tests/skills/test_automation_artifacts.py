@@ -1,4 +1,7 @@
 """Complete private frozen artifacts survive staging cleanup and corruptions fail closed."""
+
+# Synthetic repository/package fixtures, never shipped-source anchors.
+_AUDIT_SYNTHETIC_REPO_PATHS = ('scripts/setup.py',)
 import io
 from pathlib import Path
 from types import SimpleNamespace

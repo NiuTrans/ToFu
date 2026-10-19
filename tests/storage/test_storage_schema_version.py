@@ -8,9 +8,9 @@ import sqlite3
 import pytest
 
 from lib.storage.errors import StorageError
-from lib.storage_sidecar.config import SidecarConfig
-from lib.storage_sidecar.adapters.sqlite import SQLiteSession
-from lib.storage_sidecar.schema import (
+from lib.storage_authority_sql.config import SidecarConfig
+from lib.storage_authority_sql.adapters.sqlite import SQLiteSession
+from lib.storage_authority_sql.schema import (
     SCHEMA_VERSION,
     initialize_schema,
     validate_schema_version,
@@ -85,7 +85,7 @@ def test_retired_table_probe_anchors_matching_to_identifiers():
     (``storage_x_trash``) or an index merely NAMED after the retired table
     must still execute, or their DDL is silently lost.
     """
-    from lib.storage_sidecar.schema import _migration_statement_already_applied
+    from lib.storage_authority_sql.schema import _migration_statement_already_applied
 
     missing_all = _MigrationProbeSession()
 
@@ -592,7 +592,7 @@ def test_schema_50_repairs_the_checkpoint_unchanged_revision_cohort(
 
 
 def test_jsondoc_migration_spelling_is_backend_neutral():
-    from lib.storage_sidecar import schema
+    from lib.storage_authority_sql import schema
 
     sqlite_probe = type('SQLiteProbe', (), {'backend': 'sqlite'})()
     postgres_probe = type('PostgresProbe', (), {'backend': 'postgres'})()

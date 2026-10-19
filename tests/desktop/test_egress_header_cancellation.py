@@ -4,7 +4,7 @@ from unittest.mock import patch
 import pytest
 
 from lib.desktop import egress
-from lib.llm_errors import AbortedError
+from lib.llm.llm_errors import AbortedError
 
 pytestmark = pytest.mark.unit
 

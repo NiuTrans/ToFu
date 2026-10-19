@@ -7,7 +7,7 @@ import pytest
 
 from lib.paper.builds import document_repository, saved_documents, service
 from lib.paper.builds.document_repository import PaperDocumentRepository
-from tests.storage import test_storage_sidecar_contract as storage_support
+from tests.storage import test_storage_authority_sql_contract as storage_support
 from tests.api import test_api_v1_paper_builds as api_support
 from tests.paper.test_paper_build_retention import _repository
 from tests.paper.test_paper_build_cache import _build

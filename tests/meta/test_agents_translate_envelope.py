@@ -10,9 +10,9 @@ pytestmark = pytest.mark.unit
 def _exercise(monkeypatch, payload, *, major=4):
     from quart import g
     from lib.api_keys import local_admin_context
-    from lib.app_factory import create_base_app
+    from lib.app.app_factory import create_base_app
     from lib.api_v4 import attach_v4_envelope, copy_blueprint_to_v4
-    from lib.http_error_handlers import register_http_error_handlers
+    from lib.http_transport.error_handlers import register_http_error_handlers
     from routes.api_v1.agents import api_v1_agents_bp
     from routes.api_v1 import translate
 

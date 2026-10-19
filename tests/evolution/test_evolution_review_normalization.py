@@ -189,3 +189,32 @@ def test_concurrent_terminal_receivers_project_once_without_new_tasks(runtime, m
     final = runs.get_run(run['run_id'], user_id=OWNER)
     assert final['actuals']['tokens'] == 30 and len(tasks) == 2 and len(final['receipts']) == 2
     assert final['receipts'][-1]['review_format_normalization']
+
+
+def test_complete_multi_megabyte_review_projects_archived_text_without_rejudge(runtime):
+    from lib.evolution import stage_outcomes
+    runs, _, tasks = runtime
+    run = ready(runtime, acceptance_requirements=['Preserve the complete original review.'])
+    value = json.loads(review())
+    original_evidence = '完整原始评审证据 🧪' * 120000
+    value['criterion_results'][0]['evidence_ref'] = original_evidence
+    value['requirement_results'] = [{'requirement_id': 'requirement-1', 'outcome': 'pass',
+                                     'evidence_ref': original_evidence}]
+    raw = json.dumps(value, ensure_ascii=False)
+    assert len(raw.encode()) > 1 << 20
+    task = tasks[-1]
+    import time
+    import tracemalloc
+    tracemalloc.start(); started = time.perf_counter()
+    completed = finish(runtime, task, raw)
+    elapsed = time.perf_counter() - started
+    _, peak = tracemalloc.get_traced_memory(); tracemalloc.stop()
+    print(f'complete_review_utf8_bytes={len(raw.encode())} projection_seconds={elapsed:.4f} traced_peak_bytes={peak}')
+    assert completed['status'] == 'completed' and len(tasks) == 2
+    marker = completed['receipts'][-1]['review_format_normalization']
+    assert marker['source']['total_chars'] == len(raw)
+    original = stage_outcomes.page(run['run_id'], task['id'], user_id=OWNER,
+                                  offset=0, limit=6000)['content']
+    assert original == raw[:6000]
+    assert marker['source']['source_sha256'] in completed['review']['criterion_results'][0]['evidence_ref']
+    assert 'review_format_retry' not in completed['receipts'][-1]

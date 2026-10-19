@@ -120,7 +120,7 @@ class ToolExecutionContext:
             sink.publish(stream, text, **fields)
 
     def open_output_writer(self, **kwargs: Any):
-        from lib.tool_result_artifact_writer import (
+        from lib.tool_results.tool_result_artifact_writer import (
             TaskArtifactBudget,
             ToolResultArtifactWriter,
             resolve_task_quota_bytes,

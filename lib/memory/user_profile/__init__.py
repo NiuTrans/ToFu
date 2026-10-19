@@ -25,7 +25,7 @@ Design choices (locked by the user):
     resolved from the request's ``AuthContext`` via ``resolve_profile_scope``
     and captured onto the task at creation (the consolidation daemon has no
     request context). The ``.tofu`` prefix (per the artifact registry — see
-    ``lib/agent_artifacts.py``) is preserved on the filename either way.
+    ``lib/agent_loop/agent_artifacts.py``) is preserved on the filename either way.
   * Bullet-list markdown under headers (Hermes/OpenClaw ``USER.md`` shape).
   * The hard cap is the forcing function for refinement: the consolidation
     pass (layer 3) must ``replace`` in place rather than append.

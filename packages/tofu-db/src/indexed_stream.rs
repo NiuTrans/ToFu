@@ -6,7 +6,8 @@
 //! families are changed by the same Authority transaction.
 
 use std::borrow::Cow;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
+use std::cmp::Reverse;
 use std::io;
 use std::time::{Duration, Instant};
 
@@ -21,7 +22,7 @@ mod read_guard_tests;
 
 use crate::authority::{AuthorityDatabase, AuthorityTransaction};
 use crate::entity::EntityKey;
-use crate::generated_tofudb_ir::{MAX_STREAM_EVENT_BYTES, MAX_TRANSACTION_IR_LITERAL_BYTES};
+use crate::generated_tofudb_ir::MAX_STREAM_EVENT_BYTES;
 use crate::stream::{StreamEvent, StreamKey};
 use crate::versioned_document::{
     materialize_stored_document_bounded, put_with_blob_owner_bounded, PutRequest,
@@ -130,8 +131,7 @@ const PRUNE_CALL_TIME_BUDGET: Duration = Duration::from_millis(5_000);
 // a contract break: 256 silently truncated a valid 1,000-row batch to 128
 // rows (`event_prune_admits_one_thousand_distinct_tasks_within_hard_write_budget`).
 const RETENTION_SWEEP_MAX_SHRINK_ATTEMPTS: usize = 12;
-const MAX_FILTER_EVENT_TYPES: usize = 1_000;
-const MAX_INSPECTOR_TASKS: usize = 1_000;
+const METADATA_SCAN_PAGE_ROWS: usize = 512;
 const STRUCTURAL_EVENT_TYPES: [&str; 6] = [
     "flow_iteration",
     "messages_snapshot",
@@ -776,7 +776,7 @@ fn materialize_event_payload<'a>(
             transaction.owner_user_id(),
             &stored,
             INDEX_NAMESPACE,
-            MAX_TRANSACTION_IR_LITERAL_BYTES,
+            usize::MAX,
         )?;
         if logical_key != payload_logical_key(task_id, entry.application_sequence) {
             return Err(invalid_data(
@@ -793,29 +793,6 @@ fn materialize_event_payload<'a>(
         return Err(invalid_data("indexed event witness mismatch"));
     }
     Ok(payload)
-}
-
-// An accepted large event must fit a one-row replay page, including its envelope.
-// Count normalized JSON without allocating another full serialized copy.
-fn validate_large_replay_page(request: &AppendRequest) -> io::Result<()> {
-    struct ByteBudget(usize);
-    impl io::Write for ByteBudget {
-        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-            self.0 = self
-                .0
-                .checked_sub(bytes.len())
-                .ok_or_else(|| invalid_input("indexed event replay page exceeds 8 MiB"))?;
-            Ok(bytes.len())
-        }
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-    let value: Value = serde_json::from_slice(&request.payload_json)
-        .map_err(|_| invalid_input("indexed event JSON is invalid"))?;
-    serde_json::to_writer(&mut ByteBudget(MAX_TRANSACTION_IR_LITERAL_BYTES - 2),
-        &json!({"sequence": request.application_sequence, "event": value, "created_at_ms": request.created_at_ms}))
-        .map_err(|_| invalid_input("indexed event replay page exceeds 8 MiB"))
 }
 
 fn project_event(entry: IndexEntry, payload: &[u8]) -> io::Result<Vec<u8>> {
@@ -876,9 +853,6 @@ pub(crate) fn append(
         &request.task_id,
         request.application_sequence,
     )?;
-    if request.payload_json.len() > MAX_TRANSACTION_IR_LITERAL_BYTES {
-        return Err(invalid_input("indexed event payload exceeds 8 MiB"));
-    }
     let digest = *blake3::hash(&request.payload_json).as_bytes();
     let logical_type = logical_event_type_from_json(&request.payload_json)?;
     if let Some(existing) = database.entity_get(transaction, &index_key)? {
@@ -916,7 +890,6 @@ pub(crate) fn append(
         }
     };
     let physical_payload = if request.payload_json.len() > MAX_STREAM_EVENT_BYTES {
-        validate_large_replay_page(request)?;
         put_with_blob_owner_bounded(
             database,
             transaction,
@@ -935,7 +908,7 @@ pub(crate) fn append(
                     .map_err(|_| invalid_input("event retention timestamp is invalid"))?,
             },
             owner,
-            MAX_TRANSACTION_IR_LITERAL_BYTES,
+            usize::MAX,
         )?;
         let mut reference = PAYLOAD_REFERENCE_MAGIC.to_vec();
         reference.extend_from_slice(&request.application_sequence.to_be_bytes());
@@ -1470,7 +1443,7 @@ pub(crate) fn append_batch(
     transaction: &mut AuthorityTransaction,
     requests: &[AppendRequest],
 ) -> io::Result<Vec<u8>> {
-    if requests.is_empty() || requests.len() > 500 {
+    if requests.is_empty() {
         return Err(invalid_input("indexed event batch is invalid"));
     }
     let mut results = Vec::with_capacity(requests.len());
@@ -1516,6 +1489,33 @@ fn next_type_entry(
         .transpose()
 }
 
+fn visit_metadata_range<F>(
+    database: &AuthorityDatabase,
+    transaction: &mut AuthorityTransaction,
+    start: EntityKey,
+    end: &EntityKey,
+    mut visit: F,
+) -> io::Result<()>
+where
+    F: FnMut(EntityKey, Vec<u8>) -> io::Result<()>,
+{
+    let tenant = transaction.tenant_id();
+    let owner = transaction.owner_user_id();
+    let mut cursor = start;
+    loop {
+        let rows = database.entity_scan(transaction, &cursor, end, METADATA_SCAN_PAGE_ROWS)?;
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let mut next_bytes = rows.last().unwrap().0.key_bytes().to_vec();
+        next_bytes.push(0);
+        for (key, value) in rows {
+            visit(key, value)?;
+        }
+        cursor = EntityKey::new(tenant, owner, INDEX_NAMESPACE, &next_bytes)?;
+    }
+}
+
 fn filtered_entries(
     database: &AuthorityDatabase,
     transaction: &mut AuthorityTransaction,
@@ -1527,17 +1527,7 @@ fn filtered_entries(
     for prefix in &request.type_prefixes {
         let (start, end, type_offset) =
             type_catalog_range(tenant, owner, &request.task_id, prefix)?;
-        let rows = database.entity_scan(transaction, &start, &end, MAX_FILTER_EVENT_TYPES)?;
-        // Without an unbounded look-ahead, reaching the catalog budget cannot
-        // prove that every matching type was enumerated. Fail closed instead
-        // of returning a silently incomplete page.
-        if rows.len() == MAX_FILTER_EVENT_TYPES {
-            return Err(io::Error::new(
-                io::ErrorKind::OutOfMemory,
-                "event type catalog exceeds 1,000 matching types",
-            ));
-        }
-        for (key, value) in rows {
+        visit_metadata_range(database, transaction, start, &end, |key, value| {
             TypeMetadata::decode(&value)?;
             let raw_type = key
                 .key_bytes()
@@ -1549,7 +1539,8 @@ fn filtered_entries(
                 return Err(invalid_data("event type catalog key escaped its prefix"));
             }
             event_types.insert(event_type.to_owned());
-        }
+            Ok(())
+        })?;
     }
 
     let mut cursors = event_types
@@ -1565,14 +1556,12 @@ fn filtered_entries(
             Ok((event_type, entry))
         })
         .collect::<io::Result<Vec<_>>>()?;
+    let mut ready: BinaryHeap<Reverse<(u64, usize)>> = cursors.iter().enumerate()
+        .filter_map(|(index, (_, entry))| entry.map(|entry| Reverse((entry.application_sequence, index))))
+        .collect();
     let mut selected = Vec::with_capacity(request.limit);
     while selected.len() < request.limit {
-        let Some((cursor_index, _)) = cursors
-            .iter()
-            .enumerate()
-            .filter_map(|(index, (_, entry))| entry.map(|entry| (index, entry)))
-            .min_by_key(|(_, entry)| entry.application_sequence)
-        else {
+        let Some(Reverse((_, cursor_index))) = ready.pop() else {
             break;
         };
         let (event_type, current) = &mut cursors[cursor_index];
@@ -1587,6 +1576,9 @@ fn filtered_entries(
             event_type,
             Some(entry.application_sequence),
         )?;
+        if let Some(next) = current {
+            ready.push(Reverse((next.application_sequence, cursor_index)));
+        }
     }
     Ok(selected)
 }
@@ -1645,14 +1637,13 @@ pub(crate) fn list(
             }
             project_event_metadata(entry, event)?
         };
-        if output.len() + projected.len() + usize::from(offset > 0) + 1
-            > MAX_TRANSACTION_IR_LITERAL_BYTES
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::OutOfMemory,
-                "storage_payload_too_large: event page exceeds 8 MiB",
-            ));
-        }
+        let additional = projected.len().checked_add(usize::from(offset > 0))
+            .and_then(|length| length.checked_add(1))
+            .ok_or_else(|| invalid_input("event page length overflow"))?;
+        output.len().checked_add(additional)
+            .ok_or_else(|| invalid_input("event page length overflow"))?;
+        output.try_reserve(additional)
+            .map_err(|_| io::Error::new(io::ErrorKind::OutOfMemory,"cannot allocate complete event page"))?;
         if offset > 0 {
             output.push(b',');
         }
@@ -1704,17 +1695,9 @@ fn task_type_summary(
         }
     }
     let (start, end, _) = type_catalog_range(tenant, owner, task_id, LEGACY_FLOW_EVENT_PREFIX)?;
-    let legacy_flow_types =
-        database.entity_scan(transaction, &start, &end, MAX_FILTER_EVENT_TYPES)?;
-    if legacy_flow_types.len() == MAX_FILTER_EVENT_TYPES {
-        return Err(io::Error::new(
-            io::ErrorKind::OutOfMemory,
-            "inspector legacy flow type catalog exceeds 1,000 entries",
-        ));
-    }
-    for (_, raw) in legacy_flow_types {
-        merge_type_metadata(&mut total, TypeMetadata::decode(&raw)?)?;
-    }
+    visit_metadata_range(database, transaction, start, &end, |_, raw| {
+        merge_type_metadata(&mut total, TypeMetadata::decode(&raw)?)
+    })?;
     Ok(total)
 }
 
@@ -1723,7 +1706,7 @@ pub(crate) fn inspector_summary(
     transaction: &mut AuthorityTransaction,
     root_task_ids: &[String],
 ) -> io::Result<Vec<u8>> {
-    if root_task_ids.is_empty() || root_task_ids.len() > 100 {
+    if root_task_ids.is_empty() {
         return Err(invalid_input("inspector task roots are invalid"));
     }
     let tenant = transaction.tenant_id();
@@ -1738,14 +1721,7 @@ pub(crate) fn inspector_summary(
         }
         let child_prefix = format!("{root_task_id}#agent:");
         let (start, end) = metadata_range(tenant, owner, &child_prefix)?;
-        let children = database.entity_scan(transaction, &start, &end, MAX_INSPECTOR_TASKS)?;
-        if children.len() == MAX_INSPECTOR_TASKS {
-            return Err(io::Error::new(
-                io::ErrorKind::OutOfMemory,
-                "inspector child task catalog reaches 1,000 entries",
-            ));
-        }
-        for (key, raw) in children {
+        visit_metadata_range(database, transaction, start, &end, |key, raw| {
             Metadata::decode(&raw)?;
             let key_bytes = key.key_bytes();
             if key_bytes.first() != Some(&1) {
@@ -1757,13 +1733,8 @@ pub(crate) fn inspector_summary(
                 return Err(invalid_data("inspector child task escaped its prefix"));
             }
             task_ids.insert(task_id.to_owned());
-            if task_ids.len() > MAX_INSPECTOR_TASKS {
-                return Err(io::Error::new(
-                    io::ErrorKind::OutOfMemory,
-                    "inspector task expansion exceeds 1,000 entries",
-                ));
-            }
-        }
+            Ok(())
+        })?;
     }
 
     let mut records = Vec::new();

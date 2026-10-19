@@ -7,8 +7,14 @@ engine. It is not a second model loop, event taxonomy, persistence authority, or
 project board.
 
 `agent.py` adapts scheduling to `lib/tasks_pkg/child_invocation.py`, the shared
-Goal/Swarm factory. `invocation.py` owns execution; see
+Goal/Swarm factory. `master.bind_assignment_contexts` owns wave preparation and current-caller grants
+for retained runs and follow-up waves; persisted field names remain compatible.
+`lib/tasks_pkg/child_invocation.py` owns execution; see
 `docs/TASK_EXECUTION_MODES.md` for input, cancellation and evidence contracts.
+Ordinary and retained parent proxies preserve the read-only requirement source
+and borrow live native identity through `tasks_pkg/native_parent.py`. Durable
+session metadata retains source IDs and native recovery admission, never ports.
+Verify `test_native_delegation_recovery.py` and the production delegation test.
 
 ## Editing rules
 
@@ -22,6 +28,15 @@ Goal/Swarm factory. `invocation.py` owns execution; see
 - Dependencies, identity, cancellation and inherited consumption authority own
   execution; local pool/slot/count limits must not reject authorized work.
   Bound reconstructible messages/snapshots and retries; reject cycles and orphan work.
+- The shared execution-budget account's root must outlive every agent it
+  admits. A spawned swarm is fire-and-forget, so `MasterOrchestrator`
+  re-roots the account onto its session-lifetime `_parent_task_proxy`
+  (`_promote_proxy_to_budget_root`), which stays `status='running'` until
+  `abort()`/`suspend_for_restart()` mark it terminal. Never let the account
+  root be the short-lived spawning chat task: a dependency-blocked agent
+  admitted after that task settled must not hit `execution_owner_cancelled`
+  at admission. Covered by
+  `test_swarm_session_root_outlives_spawning_turn_for_blocked_dependents`.
 - Cancellation and shutdown propagate down the tree; cleanup cannot erase
   committed child evidence needed for parent recovery.
 - Integration adapters project canonical events and cannot own hidden global

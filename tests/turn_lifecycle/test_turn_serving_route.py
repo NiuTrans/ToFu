@@ -145,7 +145,7 @@ def test_finish_bar_renders_response_route_not_trailing_compaction(tmp_path):
     ) + len(function_end_marker)
     finish_source = tmp_path / 'finish-route.js'
     finish_source.write_text(
-        finish_owner[function_start:function_end], encoding='utf-8',
+        Path(native_module_path('finish-token-usage.js', ROOT / 'frontend/src/token-usage.ts')).read_text(encoding='utf-8') + finish_owner[function_start:function_end], encoding='utf-8',
     )
 
     harness = tmp_path / 'finish-route-harness.js'
@@ -236,11 +236,7 @@ console.log(JSON.stringify({kimi, sol, fallback, routed}));
 @pytest.mark.skipif(not shutil.which('node'), reason='node not installed')
 def test_model_first_picker_collapses_provider_supply_and_quarantines_pending(
         tmp_path):
-    source = runtime_section('main/main_toolbar_ui.js')
-    start = source.index('function _modelRoutingDropdownModels(documentValue) {')
-    end = source.index('\n}\n\n/* Populate model dropdown', start) + 2
-    owner = tmp_path / 'model-routing-picker.js'
-    owner.write_text(source[start:end], encoding='utf-8')
+    owner = native_module_path('model-routing-picker.js', ROOT / 'frontend/src/application-shell/model-picker/catalog.ts')
     harness = tmp_path / 'model-routing-picker-harness.js'
     harness.write_text(r"""
 const fs = require('fs');
@@ -273,7 +269,7 @@ const documentValue = {
     {offering_id: 'beta-pending', enabled: true},
   ],
 };
-console.log(JSON.stringify(_modelRoutingDropdownModels(documentValue)));
+console.log(JSON.stringify(projectModelPickerCatalog(documentValue)));
 """, encoding='utf-8')
     result = subprocess.run(
         [shutil.which('node'), str(harness), str(owner)],

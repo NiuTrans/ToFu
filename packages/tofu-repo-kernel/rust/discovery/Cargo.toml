@@ -1,0 +1,26 @@
+[package]
+name = "tofu-repository-discovery"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+license = "MIT"
+
+[workspace]
+
+[lib]
+name = "tofu_repository_discovery"
+path = "lib.rs"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+gix = { version = "=0.89.0", default-features = false, features = ["dirwalk", "sha1", "sha256"] }
+
+[[bin]]
+name = "tofu-repository-discovery"
+path = "main.rs"
+
+[profile.release]
+opt-level = "s"
+strip = "symbols"
+lto = "fat"
+codegen-units = 1

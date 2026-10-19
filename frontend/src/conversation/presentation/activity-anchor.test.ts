@@ -115,3 +115,59 @@ describe('producer occurrence anchors', () => {
     expect(activityEntryAttemptId(entry({ id: 'activity:attempt:with:colons:42:gateway-0' }))).toBe('attempt:with:colons');
   });
 });
+
+
+describe('compaction causal boundaries', () => {
+  const compaction = (extra: Partial<TurnActivityEntry> = {}) => entry({
+    kind: 'status', reasonCode: 'context_compaction', phase: 'compacting',
+    taskId: 'task-a', attemptId: 'attempt-a', llmRound: 0, ...extra,
+  });
+
+  it('keeps preflight before the first token for live, replay and snapshots', () => {
+    const activity = compaction({ anchorPosition: 'producer-start', trigger: 'pre_turn' });
+    for (const blocks of [[], [prose('first')], [prose('first'), prose('later')]]) {
+      expect(activityAnchorIndex(blocks, activity)).toBe(0);
+      expect(activityAnchorIndex(blocks, JSON.parse(JSON.stringify(activity)))).toBe(0);
+    }
+  });
+
+  it('retains exact midloop boundary despite future output in the same round', () => {
+    const activity = compaction({ anchorBlockId: 'before-summary', anchorPosition: 'after' });
+    expect(activityAnchorIndex([prose('before-summary')], activity)).toBe(1);
+    expect(activityAnchorIndex([prose('before-summary'), prose('future')], activity)).toBe(1);
+    expect(activityAnchorIndex([prose('before-summary'), prose('future'), prose('retry')], activity)).toBe(1);
+  });
+
+  it('honors explicit before boundaries and preserves repeated diagnostics order', () => {
+    const activity = compaction({ anchorBlockId: 'next-output', anchorPosition: 'before' });
+    const blocks = [prose('prior'), prose('next-output')];
+    expect(activityAnchorIndex(blocks, activity)).toBe(1);
+    blocks.splice(1, 0, {kind: 'activity-event', blockId: activity.id,
+      identitySource: 'contract', value: activity, source: activity} as ConversationBlockViewModel);
+    expect(activityAnchorIndex(blocks, {...activity, id: 'retry-summary'})).toBe(2);
+  });
+
+  it('scopes reset round0 starts to the resumed producer', () => {
+    const blocks = [prose('old'), prose('resumed', 'task-a', 'attempt-b'),
+      prose('future', 'task-a', 'attempt-b')];
+    expect(activityAnchorIndex(blocks, compaction({attemptId: 'attempt-b',
+      anchorPosition: 'producer-start'}))).toBe(1);
+    expect(activityAnchorIndex(blocks, compaction({attemptId: 'attempt-b',
+      anchorPosition: 'after', anchorBlockId: 'resumed'}))).toBe(2);
+  });
+
+  it('leaves failed/sparse legacy compaction before compatible output without archive fetch', () => {
+    const blocks = [prose('answer'), prose('later')];
+    for (const extra of [{trigger: 'pre_turn'}, {status: 'failed' as const},
+      {anchorBlockId: 'trimmed', anchorPosition: 'after' as const}]) {
+      expect(activityAnchorIndex(blocks, compaction(extra))).toBe(0);
+    }
+  });
+});
+
+
+it('prefers witnessed resumed producer content to unknown legacy block stamps', () => {
+  const blocks = [prose('legacy', '', ''), prose('resumed', 'task-a', 'attempt-b')];
+  expect(activityAnchorIndex(blocks, entry({reasonCode: 'context_compaction',
+    taskId: 'task-a', attemptId: 'attempt-b', anchorPosition: 'producer-start'}))).toBe(1);
+});

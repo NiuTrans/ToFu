@@ -27,11 +27,12 @@ class BenchmarkDefinition:
     task_count: int
     dataset_source_revision: str
     default_attempts: int
-    official_min_attempts: int
+    official_min_attempts: int | None
     source_url: str
     source_commit: str
     task_digest_lock: Path | None = None
     environment_defaults: dict[str, dict[str, str]] = field(default_factory=dict)
+    required_capabilities: tuple[str, ...] = ()
 
     @property
     def dataset_name(self) -> str:
@@ -46,6 +47,16 @@ class BenchmarkDefinition:
 
     def environment_kwargs(self, backend: str) -> dict[str, str]:
         return dict(self.environment_defaults.get(backend, {}))
+
+    def validate_backend(self, backend: str) -> None:
+        # The local image store models one environment per task. A separate
+        # verifier needs independently pinned images, resources and teardown.
+        if self.required_capabilities and backend in {"rootless-qemu", "singularity"}:
+            raise ValueError(
+                f"{self.key}: {backend} has no certified support for "
+                + ", ".join(self.required_capabilities)
+                + "; use a verified Harbor Docker/cloud backend"
+            )
 
     def to_dict(self) -> dict:
         value = asdict(self)
@@ -106,10 +117,12 @@ def load_catalog(path: Path = CATALOG_PATH) -> Mapping[str, BenchmarkDefinition]
                 or not dataset.rsplit("@", 1)[0]:
             raise ValueError(f"{key} requires an immutable dataset digest")
         if any(type(row[field]) is not int or not 1 <= row[field] <= maximum
-               for field, maximum in (("task_count", 100_000), ("default_attempts", 100),
-                                      ("official_min_attempts", 100))):
+               for field, maximum in (("task_count", 100_000), ("default_attempts", 100))):
             raise ValueError(f"{key} has invalid task/attempt budgets")
-        if row["default_attempts"] < row["official_min_attempts"]:
+        minimum = row["official_min_attempts"]
+        if minimum is not None and (type(minimum) is not int or not 1 <= minimum <= 100):
+            raise ValueError(f"{key} has invalid publication minimum")
+        if minimum is not None and row["default_attempts"] < minimum:
             raise ValueError(f"{key} default attempts violate the publication minimum")
         commit = row["source_commit"]
         url = row["source_url"]
@@ -136,7 +149,14 @@ def load_catalog(path: Path = CATALOG_PATH) -> Mapping[str, BenchmarkDefinition]
             for backend, values in defaults.items()
         ):
             raise ValueError(f"{key} has invalid backend defaults")
-        definition = BenchmarkDefinition(**{**row, "task_digest_lock": lock})
+        capabilities = row["required_capabilities"]
+        if not isinstance(capabilities, list) \
+                or any(not isinstance(value, str) or value not in
+                       {"separate-verifier", "verifier-collect"} for value in capabilities) \
+                or len(capabilities) != len(set(capabilities)):
+            raise ValueError(f"{key} has unsupported execution capabilities")
+        definition = BenchmarkDefinition(**{**row, "task_digest_lock": lock,
+                                            "required_capabilities": tuple(capabilities)})
         definition.task_digests()
         definitions[key] = definition
     return MappingProxyType(definitions)

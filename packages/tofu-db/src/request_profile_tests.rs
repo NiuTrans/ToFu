@@ -56,6 +56,15 @@ fn bounded_slowest_samples_keep_full_operation_histograms_and_errors() {
     assert_eq!(aggregate.histogram.iter().sum::<u64>(), 200);
     assert_eq!(aggregate.queue_samples, 200);
     assert_eq!(aggregate.total.queue_nanos, Some(20100));
+    let output = aggregate_json(aggregate);
+    assert_eq!(output["kind"], "aggregate");
+    assert_eq!(output["requests"], 200);
+    assert_eq!(output["errors"], 66);
+    assert!(output.get("outcome").is_none());
+    assert!(output.get("sample").is_none());
+    // Real slow samples still carry their actual outcomes and identities.
+    assert_eq!(sample_json(&collector.slow[0])["sample"], collector.slow[0].sequence);
+    assert_eq!(sample_json(&collector.slow[0])["outcome"], collector.slow[0].outcome);
 }
 
 #[test]
@@ -116,4 +125,110 @@ fn real_vfs_errors_remain_visible_without_retaining_paths() {
         assert!(!sample_json(&state.sample).to_string().contains("tofu-profiler-missing"));
     });
     drop(guard);
+}
+
+#[test]
+fn authority_commit_diagnostics_are_opt_in_and_partition_ir_commit() {
+    let guard = RequestGuard::begin(901, "record.put").unwrap();
+    let timer = crate::fsync_stats::StageTimer::diagnostic(
+        crate::fsync_stats::STAGE_AUTHORITY_COMMIT_VALIDATE_REBASE);
+    assert_eq!(timer.is_some(), enabled());
+    drop(timer);
+    ACTIVE.with(|active| assert_eq!(active.borrow().as_ref().unwrap().sample.stages[
+        crate::fsync_stats::STAGE_AUTHORITY_COMMIT_VALIDATE_REBASE].calls,
+        u64::from(enabled())));
+    drop(guard);
+    let mut state = state();
+    let parent = state.enter(crate::fsync_stats::STAGE_IR_COMMIT).unwrap();
+    for stage in [
+        crate::fsync_stats::STAGE_AUTHORITY_COMMIT_VALIDATE_REBASE,
+        crate::fsync_stats::STAGE_AUTHORITY_COMMIT_PRIVATE_BLOB_PUBLISH,
+        crate::fsync_stats::STAGE_AUTHORITY_COMMIT_INDEXES,
+        crate::fsync_stats::STAGE_AUTHORITY_COMMIT_OUTBOX_CAPTURE,
+        crate::fsync_stats::STAGE_AUTHORITY_COMMIT_STREAM_PREPARE,
+    ] {
+        let child = state.enter(stage).unwrap();
+        state.exit(child, 10);
+    }
+    state.exit(parent, 100);
+    let sample = state.finish(120, "ok");
+    assert_eq!(sample.invalid_spans, 0);
+    assert_eq!(sample.stages[crate::fsync_stats::STAGE_IR_COMMIT].exclusive, 50);
+    assert_eq!(sample.unattributed, 20);
+    assert_eq!(sample.stages.iter().map(|stage| stage.exclusive).sum::<u64>(), 100);
+    let encoded = sample_json(&sample).to_string();
+    assert!(encoded.contains("authority_commit_private_blob_publish"));
+    assert!(!encoded.contains("text-conversation"));
+}
+
+#[test]
+fn overlay_validation_probes_keep_fixed_labels_and_charge_the_existing_stage_arrays() {
+    let indexes = [crate::fsync_stats::STAGE_OVERLAY_VALIDATE_HEAD_VERSIONS,
+        crate::fsync_stats::STAGE_OVERLAY_VALIDATE_ORIGINAL_BLIND_VERSIONS,
+        crate::fsync_stats::STAGE_OVERLAY_VALIDATE_RANGE_WITNESSES];
+    let names = ["overlay_validate_head_versions", "overlay_validate_original_blind_versions",
+        "overlay_validate_range_witnesses"];
+    let mut request = state();
+    for index in indexes {
+        let span = request.enter(index).unwrap();
+        request.exit(span, 7);
+    }
+    let sample = request.finish(21, "ok");
+    assert_eq!(sample.invalid_spans, 0);
+    let encoded = sample_json(&sample);
+    let stages = encoded["stages"].as_array().unwrap();
+    assert_eq!(stages.len(), 3);
+    for (row, expected) in stages.iter().zip(names) {
+        assert_eq!(row["stage"], expected);
+        assert_eq!(row["calls"], 1);
+        assert_eq!(row["exclusiveNanos"], 7);
+    }
+    assert_eq!(sample.stages.len(), crate::fsync_stats::STAGE_NAMES.len() + EXTRA_NAMES.len());
+    assert_eq!(std::mem::size_of_val(&sample.stages), STAGES * std::mem::size_of::<Stage>());
+    assert_eq!(std::mem::size_of::<Stage>(), 24);
+    // Active and retained byte reports use size_of<RequestState/Sample/Aggregate>,
+    // which already include every fixed stage slot, including these three.
+    assert!(std::mem::size_of::<RequestState>() >= std::mem::size_of_val(&sample.stages));
+    assert!(std::mem::size_of::<Aggregate>() >= std::mem::size_of_val(&sample.stages));
+}
+
+#[test]
+fn completed_search_backfill_reuses_checkpoint_without_another_read() {
+    // Keep this fixture beside the thread-local work accounting so it does
+    // not add production counters or depend on process-wide profiler config.
+    use crate::authority::AuthorityDatabase;
+    use crate::maintenance::MaintenanceScope;
+    use crate::turn_search_projection::TurnSearchProjection;
+    use crate::turn_search_worker::process_turn_search_batch;
+    use std::sync::{Arc, Mutex};
+
+    let source_directory = tempfile::tempdir().unwrap();
+    let target_directory = tempfile::tempdir().unwrap();
+    let authority = Arc::new(Mutex::new(
+        AuthorityDatabase::initialize(source_directory.path()).unwrap(),
+    ));
+    let projection = Arc::new(Mutex::new(
+        TurnSearchProjection::initialize(target_directory.path(), 8 * 1024 * 1024).unwrap(),
+    ));
+    let scope = MaintenanceScope::new(7, 11).unwrap();
+    process_turn_search_batch(&authority, &projection, scope).unwrap();
+    assert!(!projection.lock().unwrap().owner_indexing(7, 11).unwrap());
+    let before = authority.lock().unwrap().query_snapshot();
+
+    let guard = RequestGuard::begin(902, "uncataloged").unwrap();
+    let metrics = process_turn_search_batch(&authority, &projection, scope).unwrap();
+    let entity_gets = ACTIVE.with(|state| {
+        state.borrow().as_ref().unwrap().sample.work[Work::EntityGet as usize]
+    });
+    drop(guard);
+    assert_eq!(metrics.dirty_conversations, 0);
+    assert_eq!(metrics.source_pages, 0);
+    assert_eq!(authority.lock().unwrap().query_snapshot(), before);
+    assert_eq!(authority.lock().unwrap().snapshot_pin_metrics().unwrap().active_handles, 0);
+    // Whole-batch accounting includes two source activation reads and four
+    // target format/gram/indexing reads. Only the checkpoint read is reusable.
+    let required_non_checkpoint_reads = 2 + 4;
+    eprintln!("completed_search_backfill_batch_entity_gets={entity_gets}");
+    assert_eq!(entity_gets, required_non_checkpoint_reads + 1,
+        "reuse consume_page's checkpoint, preserving activation and target checks");
 }

@@ -27,7 +27,7 @@ from lib.tasks_pkg.compaction._history import history_entries, is_human_message
 from lib.tasks_pkg.compaction._layer2._anchor import (
     _apiform_tool_rounds, _objective_anchor_index,
 )
-from lib.tool_history_pairing import adjacent_tool_call_result_pairs
+from lib.tool_results.tool_history_pairing import adjacent_tool_call_result_pairs
 from lib.tasks_pkg.compaction._reactive._measure import _estimate_wire_bytes
 from lib.tasks_pkg.compaction._tokens import (
     _estimate_msg_tokens,

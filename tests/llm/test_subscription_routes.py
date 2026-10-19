@@ -225,6 +225,154 @@ def test_network_circuit_half_opens_and_recovers():
         manager.close()
 
 
+def test_probe_recovery_admits_single_route_without_forgiving_request_backoff():
+    now = [100.0]
+    probe = mock.Mock(return_value=ProbeResult('ok', 10.0, 401))
+    manager = RouteManager(
+        probe=probe, clock=lambda: now[0], jitter=lambda value: value)
+    route = _route('proxy')
+    url = 'https://chatgpt.com/backend-api/codex/responses'
+    try:
+        assert manager.candidates(url, [route], wait_timeout=1) == [route]
+        for expected_delay in (5.0, 15.0, 30.0, 60.0, 120.0, 120.0):
+            manager.report(url, route, False)
+            assert manager.recovery_delay(url, [route]) == expected_delay
+            calls_before = probe.call_count
+            for _ in range(5):
+                assert manager.candidates(url, [route], wait_timeout=0) == []
+            assert probe.call_count == calls_before
+
+            now[0] += expected_delay
+            assert manager.candidates(url, [route], wait_timeout=1) == [route]
+            # Reachability is enough to admit the only route, even though
+            # another failed real setup must pay the next backoff interval.
+            assert manager.cached_candidates(url, [route]) == [route]
+            assert manager.verdict(url, [route]) == 'ok'
+            assert manager.recovery_delay(url, [route]) == 0.0
+        assert probe.call_count == 7
+
+        manager.report(url, route, True, 20.0)
+        assert manager.cached_candidates(url, [route]) == [route]
+        manager.report(url, route, False)
+        assert manager.recovery_delay(url, [route]) == 5.0
+    finally:
+        manager.close()
+
+
+def test_real_request_success_recovers_early_and_clears_backoff_debt():
+    now = [100.0]
+    probe = mock.Mock(return_value=ProbeResult('network_fail'))
+    manager = RouteManager(
+        probe=probe, clock=lambda: now[0], jitter=lambda value: value)
+    route = _route('proxy')
+    url = 'https://chatgpt.com/backend-api/codex/responses'
+    try:
+        for expected_delay in (5.0, 15.0, 30.0):
+            manager.report(url, route, False)
+            assert manager.recovery_delay(url, [route]) == expected_delay
+        # An already-running sibling can prove recovery before the circuit
+        # expires. All other callers must immediately share that evidence.
+        manager.report(url, route, True, 20.0)
+        assert manager.candidates(url, [route], wait_timeout=0) == [route]
+        assert manager.recovery_delay(url, [route]) == 0.0
+        assert manager.status()['routes']['chatgpt.com']['proxy']['failures'] == 0
+        assert probe.call_count == 0
+        manager.report(url, route, False)
+        assert manager.recovery_delay(url, [route]) == 5.0
+    finally:
+        manager.close()
+
+
+@pytest.mark.parametrize('probe_verdict', ['ok', 'network_fail'])
+@pytest.mark.parametrize('request_verdict', [
+    'ok', 'network_fail', 'policy_blocked', 'proxy_auth', 'midstream_io',
+])
+def test_singleflight_probe_cannot_overwrite_newer_request_outcome(
+        probe_verdict, request_verdict):
+    now = [100.0]
+    entered = threading.Event()
+    release = threading.Event()
+    probe = mock.Mock()
+
+    def run_probe(_url, _route):
+        entered.set()
+        assert release.wait(2)
+        return ProbeResult(probe_verdict, 1.0, 401 if probe_verdict == 'ok' else 0)
+
+    probe.side_effect = run_probe
+    manager = RouteManager(
+        probe=probe, clock=lambda: now[0], jitter=lambda value: value)
+    route = _route('proxy')
+    url = 'https://chatgpt.com/backend-api/codex/responses'
+    results = []
+
+    def choose():
+        results.append(manager.candidates(
+            url, [route], wait_timeout=0, force_probe=True))
+
+    callers = [threading.Thread(target=choose) for _ in range(8)]
+    try:
+        manager.report(url, route, True, 20.0)
+        for caller in callers:
+            caller.start()
+        assert entered.wait(1)
+        for caller in callers:
+            caller.join(1)
+            assert not caller.is_alive()
+        assert results == [[route]] * len(callers)
+        assert probe.call_count == 1
+        # Synchronize publication, not just the probe function's return. The
+        # fake clock deliberately stays unchanged across both observations.
+        with manager._lock:
+            pending_probe = manager._inflight[('chatgpt.com', 'proxy')]
+        manager.report(url, route, request_verdict == 'ok', 40.0,
+                       failure_kind=request_verdict)
+        expected_status = manager.status()
+        expected_plan = manager.cached_candidates(url, [route])
+        expected_delay = manager.recovery_delay(url, [route])
+        release.set()
+        pending_probe.result(timeout=1)
+        assert manager.status() == expected_status
+        assert manager.cached_candidates(url, [route]) == expected_plan
+        assert manager.recovery_delay(url, [route]) == expected_delay
+        assert probe.call_count == 1
+    finally:
+        release.set()
+        for caller in callers:
+            if caller.ident is not None:
+                caller.join(2)
+        manager.close()
+
+
+def test_request_probe_fencing_is_isolated_by_host_and_route():
+    entered = threading.Event()
+    release = threading.Event()
+
+    def probe(_url, _route):
+        entered.set()
+        assert release.wait(2)
+        return ProbeResult('ok', 10.0, 401)
+
+    manager = RouteManager(probe=probe, jitter=lambda value: value)
+    route, other_route = _route('proxy'), _route('other-proxy')
+    url = 'https://chatgpt.com/backend-api/codex/responses'
+    other_url = 'https://api.anthropic.com/v1/messages'
+    try:
+        assert manager.candidates(url, [route], wait_timeout=0) == []
+        assert entered.wait(1)
+        with manager._lock:
+            pending_probe = manager._inflight[('chatgpt.com', 'proxy')]
+        manager.report(other_url, route, False)
+        manager.report(url, other_route, False)
+        release.set()
+        pending_probe.result(timeout=1)
+        assert manager.cached_candidates(url, [route, other_route]) == [route]
+        assert manager.cached_candidates(other_url, [route]) == []
+    finally:
+        release.set()
+        manager.close()
+
+
 def test_health_isolated_by_target_host():
     manager = RouteManager(
         probe=lambda _url, _route: ProbeResult('ok', 10.0, 401),
@@ -282,6 +430,54 @@ def test_reset_discards_late_probe_result():
         assert manager.status()['routes'] == {}
     finally:
         release.set()
+        manager.close()
+
+
+@pytest.mark.parametrize('lifecycle_action', ['reset', 'close'])
+def test_probe_publication_is_fenced_atomically_with_reset_and_close(
+        monkeypatch, lifecycle_action):
+    publishing = threading.Event()
+    release = threading.Event()
+    manager = RouteManager(probe=lambda *_: ProbeResult('ok', 1.0, 401))
+    record = manager._record
+
+    def paused_record(*args, **kwargs):
+        if kwargs.get('source') == 'probe':
+            publishing.set()
+            assert release.wait(2)
+        return record(*args, **kwargs)
+
+    monkeypatch.setattr(manager, '_record', paused_record)
+    route = _route('proxy')
+    url = 'https://chatgpt.com/backend-api/codex/responses'
+    closer = None
+    try:
+        manager.report(url, route, True, 20.0)
+        manager.candidates(url, [route], wait_timeout=0, force_probe=True)
+        assert publishing.wait(1)
+        with manager._lock:
+            pending_probe = manager._inflight[('chatgpt.com', 'proxy')]
+        if lifecycle_action == 'reset':
+            manager.reset()
+        else:
+            closer = threading.Thread(target=manager.close)
+            closer.start()
+            deadline = time.monotonic() + 1
+            while manager.status()['routes']:
+                assert time.monotonic() < deadline
+                time.sleep(0.005)
+            # Already-running requests may also finish during shutdown.
+            manager.report(url, route, True, 30.0)
+        release.set()
+        pending_probe.result(timeout=1)
+        if closer is not None:
+            closer.join(1)
+            assert not closer.is_alive()
+        assert manager.status()['routes'] == {}
+    finally:
+        release.set()
+        if closer is not None:
+            closer.join(2)
         manager.close()
 
 
@@ -366,7 +562,7 @@ def test_only_unambiguous_connect_failures_are_replay_safe():
 
 
 def test_http_client_fails_over_only_on_safe_connect_error(monkeypatch):
-    from lib import http_client
+    from lib.http_transport import client as http_client
 
     first, second = _route('p1'), _route('p2')
     response = mock.Mock(status_code=200)
@@ -391,7 +587,7 @@ def test_http_client_fails_over_only_on_safe_connect_error(monkeypatch):
 
 
 def test_http_client_never_replays_ambiguous_connection_reset(monkeypatch):
-    from lib import http_client
+    from lib.http_transport import client as http_client
 
     first, second = _route('p1'), _route('p2')
     monkeypatch.setattr(
@@ -408,7 +604,7 @@ def test_http_client_never_replays_ambiguous_connection_reset(monkeypatch):
 
 
 def test_exhausted_route_error_does_not_expose_proxy_credentials(monkeypatch):
-    from lib import http_client
+    from lib.http_transport import client as http_client
 
     route = Route('pool:secret', 'proxy secret', 'proxy',
                   proxy_url='http://user:password@gw.invalid:8080')
@@ -538,3 +734,53 @@ def test_unstarted_route_failure_does_not_suppress_siblings(monkeypatch):
     finally:
         manager.close()
     assert not manager._inflight
+
+
+@pytest.mark.parametrize('failure_kind', ['midstream_io', 'midstream_close'])
+def test_interrupted_response_revalidates_without_cooling_other_requests(failure_kind):
+    now = [100.0]
+    manager = RouteManager(probe=lambda *_: ProbeResult('ok', 10, 401),
+                           clock=lambda: now[0], jitter=lambda value: value)
+    route = _route('proxy')
+    url = 'https://chatgpt.com/backend-api/codex/responses'
+    try:
+        manager.report(url, route, True)
+        manager.report(url, route, False, failure_kind=failure_kind)
+        assert manager.status()['routes']['chatgpt.com']['proxy']['retry_in_s'] == 0
+        assert manager.candidates(url, [route], wait_timeout=1) == [route]
+        assert manager.recovery_delay(url, [route]) == 0
+    finally:
+        manager.close()
+
+
+def test_revalidation_failure_opens_one_shared_circuit():
+    now = [100.0]
+    calls = mock.Mock(return_value=ProbeResult('network_fail'))
+    manager = RouteManager(probe=calls, clock=lambda: now[0], jitter=lambda value: value)
+    route = _route('proxy')
+    url = 'https://chatgpt.com/backend-api/codex/responses'
+    try:
+        manager.report(url, route, True)
+        manager.report(url, route, False, failure_kind='midstream_io')
+        assert manager.candidates(url, [route], wait_timeout=1) == []
+        assert manager.recovery_delay(url, [route]) == 5
+        for _ in range(50):
+            assert manager.candidates(url, [route], wait_timeout=0) == []
+            assert manager.recovery_delay(url, [route]) == 5
+        assert calls.call_count == 1
+        manager.report(url, route, True)
+        assert manager.candidates(url, [route], wait_timeout=0) == [route]
+    finally:
+        manager.close()
+
+
+@pytest.mark.parametrize('failure_kind', ['policy_blocked', 'proxy_auth'])
+def test_policy_failures_are_not_transient_recovery(failure_kind):
+    manager = RouteManager(probe=lambda *_: ProbeResult(failure_kind))
+    route = _route('proxy')
+    url = 'https://chatgpt.com/backend-api/codex/responses'
+    try:
+        assert manager.candidates(url, [route], wait_timeout=1) == []
+        assert manager.recovery_delay(url, [route]) is None
+    finally:
+        manager.close()

@@ -8,7 +8,7 @@ docs/modules/remote_execution.md:
     不留孤儿;
   * **``rm -rf ~`` 类拦下**:删除命令的绝对/~/env 目标必须 realpath
     落在 share root 内(agent 侧锁根,不靠服务器 is_restricted);
-  * **长超时不误杀**:timeout 参数透传,默认 300s。
+  * **长超时不误杀**:默认没有执行时限;显式 timeout 原值透传。
 
 Run:  pytest tests/desktop/test_desktop_exec_streaming.py -m unit -v
 """
@@ -214,7 +214,7 @@ class TestAgentLoopStreaming:
                         'params': {'root': 'app',
                                    'command': "printf 'a\\n'; sleep 0.6; printf 'b\\n'"},
                     }]}
-                if polls['n'] >= 25:
+                if polls['n'] >= 200:
                     stop.set()
                 return {'commands': []}
 
@@ -222,6 +222,8 @@ class TestAgentLoopStreaming:
                       allow_redirects=None, auth=None):
             assert allow_redirects is False and callable(auth)
             bodies.append(json)
+            if json.get('results'):
+                stop.set()
             return _Resp()
 
         monkeypatch.setattr(ar.requests.Session, 'post', lambda self, *a, **kw: fake_post(*a, **kw))
@@ -306,11 +308,14 @@ class TestBridgeStreams:
             self._frames()[2:], agent_id='agent-A', user_id='owner')
         assert db.get_command_stream('c1')['done'] is True
 
-    def test_ttl_sweep_drops_stale(self, clean_streams, monkeypatch):
+    def test_ttl_sweep_retains_unsettled_then_drops_completed(self, clean_streams, monkeypatch):
         db.resolve_streams(
             self._frames(), agent_id='agent-A', user_id='owner')
         with db.command_queue_lock:
             db._streams['c1']['updated_at'] = time.time() - 7200
+        assert db.get_command_stream('c1') is not None
+        with db.command_queue_lock:
+            db.command_queue['c1']['event'].set()
         assert db.get_command_stream('c1') is None
 
     def test_unknown_command_stream_is_none(self, clean_streams):
@@ -356,14 +361,15 @@ class TestPollRouteStreams:
         assert r.status_code == 200
 
 
-def test_streamed_process_cancellation_joins_readers_before_terminal(tmp_path):
+@pytest.mark.parametrize('timeout', [None, 300])
+def test_streamed_process_cancellation_joins_readers_before_terminal(tmp_path, timeout):
     cancel, entered, done = threading.Event(), threading.Event(), threading.Event()
     result, chunks = [], []
     command = 'python3 -u -c "import time; print(\'ready\'); time.sleep(300)"'
     def on_chunk(stream, data):
         chunks.append((stream, data))
         entered.set()
-    ex.start_streamed_command(command, str(tmp_path), 300, on_chunk,
+    ex.start_streamed_command(command, str(tmp_path), timeout, on_chunk,
                               lambda outcome: (result.append(outcome), done.set()), cancel=cancel)
     assert entered.wait(3)
     cancel.set()
@@ -391,3 +397,239 @@ def test_stream_worker_start_failure_reaps_spawned_process(tmp_path, monkeypatch
     assert len(processes) == len(results) == 1
     assert processes[0].poll() is not None
     assert 'worker creation failure' in results[0]['error']
+
+
+@pytest.mark.parametrize('timeout', [None, 5000])
+def test_project_execution_keeps_real_process_after_old_deadline(proj, monkeypatch, timeout):
+    import shlex
+    import sys
+    from types import SimpleNamespace
+    clock = [100.0]
+    monkeypatch.setattr(ex, 'time', SimpleNamespace(monotonic=lambda: clock[0]))
+    release = proj['root'] / 'release-command'
+    code = ("import pathlib,time; print('ready',flush=True); p=pathlib.Path('release-command'); "
+            "exec('while not p.exists(): time.sleep(.01)'); print('complete',flush=True)")
+    command = shlex.join([sys.executable, '-u', '-c', code])
+    entered, done, cancelled = threading.Event(), threading.Event(), threading.Event()
+    outcomes = []
+    params = {'root': 'app', 'command': command}
+    if timeout is not None:
+        params['timeout'] = timeout
+    try:
+        assert pj.start_project_run('long', params,
+            lambda stream, data: entered.set() if 'ready' in data else None,
+            lambda outcome: (outcomes.append(outcome), done.set()), cancel=cancelled) is None
+        assert entered.wait(3)
+        clock[0] += 4000
+        assert not done.wait(.35), outcomes
+        release.touch()
+        assert done.wait(5)
+        assert len(outcomes) == 1
+        assert outcomes[0]['exit_code'] == 0
+        assert outcomes[0]['timed_out'] is False and outcomes[0]['cancelled'] is False
+        assert 'complete' in outcomes[0]['stdout']
+    finally:
+        cancelled.set()
+        release.touch()
+        assert done.wait(5)
+
+
+@pytest.mark.parametrize('timeout', [-1, float('inf'), float('nan'), True, 'bad'])
+def test_invalid_execution_timeout_reports_once_before_spawn(monkeypatch, timeout):
+    outcomes = []
+    def forbidden(*args, **kwargs):
+        pytest.fail('invalid wait policy spawned a command')
+    monkeypatch.setattr(ex.subprocess, 'Popen', forbidden)
+    ex.start_streamed_command('echo work', None, timeout, lambda *_: None, outcomes.append)
+    assert len(outcomes) == 1 and 'timeout' in outcomes[0]['error']
+    assert 'timeout' in ex.cmd_run_local({'command': 'echo work', 'timeout': timeout})['error']
+
+
+@pytest.mark.parametrize('timeout', [None, 0, .01, 5000])
+def test_sync_execution_passes_exact_optional_timeout(monkeypatch, timeout):
+    from types import SimpleNamespace
+    captured = {}
+    def run(command, cwd, timeout, on_chunk, on_exit, **kwargs):
+        captured['timeout'] = timeout
+        on_exit({'stdout': 'done', 'stderr': '', 'exit_code': 0})
+    monkeypatch.setattr(ex, 'start_streamed_command', run)
+    params = {'command': 'echo done'}
+    if timeout is not None:
+        params['timeout'] = timeout
+    assert ex.cmd_run_local(params)['exit_code'] == 0
+    assert captured['timeout'] == timeout
+
+
+@pytest.mark.parametrize('allow_exec', [False, True])
+def test_generic_device_execution_observes_permission_and_owner_stop(tmp_path, allow_exec):
+    import shlex
+    import sys
+    from lib.desktop_agent import _run
+    stop, done = threading.Event(), threading.Event()
+    class Results(list):
+        def append(self, item):
+            super().append(item)
+            done.set()
+    results = Results()
+    results.stop = stop
+    chunks, lock = [], threading.RLock()
+    command = shlex.join([sys.executable, '-u', '-c',
+        "import time;print('ready',flush=True);time.sleep(300)"])
+    _run._start_project_run_streamed('generic', {'command': command, 'cwd': str(tmp_path)},
+        {'allow_exec': allow_exec}, results, chunks, lock, cmd_type='desktop_run_command')
+    if not allow_exec:
+        assert done.wait(1) and 'allow-exec' in results[0]['error']
+        assert chunks == []
+        return
+    deadline = time.monotonic() + 3
+    try:
+        while not any('ready' in item['data'] for item in chunks) and time.monotonic() < deadline:
+            done.wait(.01)
+        assert any('ready' in item['data'] for item in chunks)
+        assert not done.is_set()
+    finally:
+        stop.set()
+        assert done.wait(5)
+    assert len(results) == 1
+    outcome = results[0]['result']
+    assert outcome['cancelled'] is True and outcome['timed_out'] is False
+    assert outcome['exit_code'] != 0
+
+
+@pytest.mark.skipif(__import__('sys').platform != 'linux', reason='Linux subreaper/parent-death ownership')
+def test_abrupt_owner_death_reaps_escaped_command_tree_and_private_outputs(tmp_path):
+    from pathlib import Path
+    import json
+    import shlex
+    import subprocess
+    import sys
+    import psutil
+    child_info = tmp_path / 'child.json'
+    command_info = tmp_path / 'command.json'
+    owner_info = tmp_path / 'owner.json'
+    child_code = ("import json,os,subprocess,sys,time;from pathlib import Path;"
+        "p=subprocess.Popen([sys.executable,'-c','import time;time.sleep(300)']);"
+        f"Path({str(child_info)!r}).write_text(json.dumps([os.getpid(),p.pid]));time.sleep(300)")
+    command_code = ("import json,os,subprocess,sys,time;from pathlib import Path;"
+        f"p=subprocess.Popen([sys.executable,'-c',{child_code!r}],start_new_session=True);"
+        f"q=Path({str(child_info)!r});exec('while not q.exists(): time.sleep(.01)');"
+        f"Path({str(command_info)!r}).write_text(json.dumps([os.getpid(),*json.loads(q.read_text())]));"
+        "time.sleep(300)")
+    owner_code = """
+import json,sys,time
+from pathlib import Path
+from lib.desktop_agent._exec import _StreamedProcess
+p=_StreamedProcess(sys.argv[1],sys.argv[2],None,lambda *_:None,lambda *_:None)
+p.start()
+Path(sys.argv[3]).write_text(json.dumps({'supervisor':p._proc.pid,'directory':p._temporary.name}))
+while True:time.sleep(.1)
+"""
+    owner = subprocess.Popen([sys.executable, '-c', owner_code,
+        shlex.join([sys.executable, '-u', '-c', command_code]), str(tmp_path), str(owner_info)],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    ids = []
+    try:
+        deadline = time.monotonic() + 10
+        while not (owner_info.exists() and command_info.exists()) and time.monotonic() < deadline:
+            assert owner.poll() is None
+            time.sleep(.02)
+        command_ids = json.loads(command_info.read_text())
+        info = json.loads(owner_info.read_text())
+        ids = [info['supervisor'], *command_ids]
+        assert os.getsid(command_ids[1]) != os.getsid(info['supervisor'])
+        owned = [psutil.Process(pid) for pid in ids]
+        owner.kill();owner.wait(timeout=5)
+        gone, alive = psutil.wait_procs(owned, timeout=5)
+        # The supervisor may await the host init; every command descendant is reaped.
+        assert all(child.pid == info['supervisor'] and child.status() == psutil.STATUS_ZOMBIE
+                   for child in alive)
+        deadline = time.monotonic() + 3
+        while Path(info['directory']).exists() and time.monotonic() < deadline:
+            time.sleep(.01)
+        assert not Path(info['directory']).exists()
+    finally:
+        if owner.poll() is None:owner.kill()
+        owner.wait(timeout=5)
+        for pid in ids:
+            try:psutil.Process(pid).kill()
+            except psutil.NoSuchProcess:pass
+
+
+def test_worker_refuses_retired_owner_before_command_side_effect(tmp_path):
+    import subprocess
+    import sys
+    from lib.paper.builds.process_worker import main
+    directory = tmp_path / 'tofu-desktop-command-owner-guard'
+    directory.mkdir()
+    ready = directory / 'ready'
+    ready.write_bytes(b'1')
+    output, errors, status = [directory / name for name in ('stdout', 'stderr', 'status.json')]
+    output.touch();errors.touch()
+    effect = tmp_path / 'must-not-exist'
+    args = ['--desktop-streams', str(errors), str(status), '1', '0', '0', '0',
+        str(os.getppid()+1000000), str(ready), str(output), str(tmp_path), sys.executable,
+        '-c', f'from pathlib import Path;Path({str(effect)!r}).touch()']
+    assert main(args) == 125
+    assert not effect.exists() and not directory.exists()
+
+
+def test_supervised_stdout_stderr_and_negative_exit_remain_separate(tmp_path):
+    import shlex
+    import sys
+    command = shlex.join([sys.executable, '-u', '-c',
+        "import os,signal,sys;print('out',flush=True);print('err',file=sys.stderr,flush=True);os.kill(os.getpid(),signal.SIGTERM)"])
+    chunks, outcome = _run_streamed(command, str(tmp_path), None)
+    assert outcome['stdout'] == 'out\n' and outcome['stderr'] == 'err\n'
+    assert outcome['exit_code'] == -15
+    assert outcome['timed_out'] is False and outcome['cancelled'] is False
+
+
+@pytest.mark.parametrize('birth,status,expected', [(1,'running',True),(2,'running',False),(1,'zombie',False)])
+def test_windows_pre_admission_owner_identity_checks_birth_and_liveness(monkeypatch, birth, status, expected):
+    import psutil
+    from types import SimpleNamespace
+    from lib.paper.builds import process_worker
+    owner = SimpleNamespace(is_running=lambda: True, status=lambda: status, create_time=lambda: birth)
+    monkeypatch.setattr(process_worker, 'os', SimpleNamespace(name='nt'))
+    monkeypatch.setattr(psutil, 'Process', lambda pid: owner)
+    assert process_worker._owner_alive(123, 1) is expected
+
+
+def test_cleanup_fault_still_delivers_one_terminal_outcome(tmp_path, monkeypatch):
+    import tempfile
+    original = tempfile.TemporaryDirectory.cleanup
+    def cleanup(directory):
+        original(directory)
+        raise OSError('injected cleanup failure')
+    monkeypatch.setattr(tempfile.TemporaryDirectory, 'cleanup', cleanup)
+    chunks, outcome = _run_streamed('echo ready', str(tmp_path), None)
+    assert outcome['exit_code'] == 0
+    assert 'injected cleanup failure' in outcome['error']
+
+
+@pytest.mark.parametrize('record', ['[]', '{"returncode":true,"error":null,"stopped":false}',
+    '{"returncode":0,"error":[],"stopped":false}', '{"returncode":0,"stopped":false}'])
+def test_private_completion_record_refuses_malformed_status(tmp_path, record):
+    from lib.paper.builds.process_worker import load_desktop_status
+    status = tmp_path / 'status.json'
+    status.write_text(record)
+    with pytest.raises(ValueError):load_desktop_status(status)
+
+
+def test_stop_before_worker_admission_has_no_command_side_effect(tmp_path):
+    import shlex
+    import sys
+    effect = tmp_path / 'must-not-execute'
+    command = shlex.join([sys.executable, '-c',
+        f'from pathlib import Path;Path({str(effect)!r}).touch()'])
+    chunks, outcome = _run_streamed(command, str(tmp_path), 0)
+    assert outcome['timed_out'] is True
+    assert not effect.exists()
+
+
+def test_completion_record_failure_still_retires_and_delivers_error(tmp_path, monkeypatch):
+    from lib.paper.builds import process_worker
+    def fail(path):raise ValueError('injected invalid record')
+    monkeypatch.setattr(process_worker, 'load_desktop_status', fail)
+    chunks, outcome = _run_streamed('echo ready', str(tmp_path), None)
+    assert outcome['exit_code'] == 0 and 'supervisor' in outcome['error']

@@ -57,7 +57,7 @@ def test_proposer_uses_extract_json():
     import inspect
     import lib.optimizer.proposer as prop
     src = inspect.getsource(prop.propose)
-    assert 'extract_json' in src, 'propose() should use lib.llm_json.extract_json'
+    assert 'extract_json' in src, 'propose() should use lib.llm.llm_json.extract_json'
     _ok('proposer: delegates to shared extract_json')
 
 

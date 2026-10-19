@@ -74,7 +74,7 @@ def test_http_owned_source_secrets_scopes_and_exact_replay(app, tmp_path, monkey
 @pytest.fixture
 def app(semantic_authority, monkeypatch):
     from routes.api_v1 import automations
-    from lib.http_error_handlers import register_http_error_handlers
+    from lib.http_transport.error_handlers import register_http_error_handlers
     factory, owner, _ = semantic_authority
     application = Quart(__name__, static_folder=None)
     application.config['TESTING'] = True

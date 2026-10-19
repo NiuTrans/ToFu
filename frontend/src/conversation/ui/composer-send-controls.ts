@@ -21,6 +21,8 @@ export interface ComposerSendControlsInput {
   readonly stopping: boolean;
   readonly hasAttachmentDraft: boolean;
   readonly queueCount: number;
+  readonly sendBlocked?: boolean;
+  readonly blockedLabel?: string;
   readonly labels: ComposerSendControlLabels;
   readonly onSend: () => void;
   readonly onStop: () => void;
@@ -155,5 +157,10 @@ export function updateComposerSendControls(
   hideSeparateStop(input.document, sendButton);
   if (busy) showStop(sendButton, input);
   else showSend(sendButton, input);
+  // Keep Stop available for an existing turn; only new submissions are fenced.
+  sendButton.disabled = !busy && Boolean(input.sendBlocked);
+  if (sendButton.disabled && input.blockedLabel) {
+    setAccessibleLabel(sendButton, input.blockedLabel, input.blockedLabel);
+  }
   return { busy, hasDraft, splitControls: false };
 }

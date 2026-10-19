@@ -528,7 +528,7 @@ class TestDispatchIntegration:
             self, monkeypatch):
         """One contention 429 keeps the existing 0.3s retry contract."""
         from lib.llm_dispatch import api
-        from lib.llm_errors import RateLimitError
+        from lib.llm.llm_errors import RateLimitError
         from tests.providers.test_vendor_transient_dispatch import _FakeDispatcher
 
         s1, other = _slot('kimi-k3', 'k0'), _slot('kimi-k3', 'k1')
@@ -609,7 +609,7 @@ class TestDispatchIntegration:
 
     def test_dispatch_chat_consumes_coordinator_delay(self, monkeypatch):
         from lib.llm_dispatch import api
-        from lib.llm_errors import RateLimitError
+        from lib.llm.llm_errors import RateLimitError
         from tests.providers.test_vendor_transient_dispatch import _FakeDispatcher
 
         first, second = _slot('kimi-k3', 'k0'), _slot('kimi-k3', 'k1')
@@ -750,7 +750,7 @@ class TestDispatchIntegration:
 
     def test_async_stream_consumes_coordinator_delay(self, monkeypatch):
         from lib.llm_dispatch import api
-        from lib.llm_errors import RateLimitError
+        from lib.llm.llm_errors import RateLimitError
         from tests.llm_dispatch.test_async_dispatch_stream import _FakeDispatcher
 
         first, second = _slot('kimi-k3', 'k0'), _slot('kimi-k3', 'k1')
@@ -794,7 +794,7 @@ class TestDispatchIntegration:
         """Log-bloat guard for a sustained retry era: cycles 1-3 log at
         INFO, cycles 4+ at DEBUG (every 100th still surfaces at INFO)."""
         from lib.llm_dispatch import api
-        from lib.llm_errors import RateLimitError
+        from lib.llm.llm_errors import RateLimitError
         from tests.llm_dispatch.test_429_saturation_escalation import (
             _FakeClock, _FakeDispatcher, _FakeSlot)
 

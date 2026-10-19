@@ -50,7 +50,7 @@ def _build_work(models, faces, base_url=OPENAI_URL, protocol='openai',
     regression it existed to catch. ``build_probe_work`` is the shared seam,
     so route and test cannot drift apart.
     """
-    from lib.provider_probe import build_probe_work
+    from lib.provider.provider_probe import build_probe_work
     prov = {'id': 'p', 'base_url': base_url, 'protocol': protocol,
             'faces': faces or {}}
     return build_probe_work(prov, models, list(api_keys))
@@ -145,7 +145,7 @@ def test_a_provider_without_faces_is_unchanged():
 
 def test_worker_honours_the_per_cell_face():
     """The engine must USE the tuple's face, not the task-level one."""
-    import lib.provider_probe as pp
+    import lib.provider.provider_probe as pp
 
     seen = []
 
@@ -194,7 +194,7 @@ def test_worker_honours_the_per_cell_face():
 def test_worker_falls_back_for_legacy_five_tuples():
     """Older work tuples (no face columns) must still probe on the task-level
     values — a snapshot resumed across the upgrade must not crash."""
-    import lib.provider_probe as pp
+    import lib.provider.provider_probe as pp
 
     seen = []
 

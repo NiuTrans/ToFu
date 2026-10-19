@@ -263,7 +263,7 @@ class TestProviderProbeRouting(unittest.TestCase):
     """provider_probe 的 oauth 分支按路由走 direct / egress。"""
 
     def _probe(self, oauth='claude'):
-        from lib.provider_probe import probe_one_cell
+        from lib.provider.provider_probe import probe_one_cell
         return probe_one_cell
 
     def test_claude_probe_direct_path(self):
@@ -271,7 +271,7 @@ class TestProviderProbeRouting(unittest.TestCase):
             status_code=200,
             text='{"content":[{"type":"text","text":"OK"}]}')
         with mock.patch('lib.desktop.egress.route_request', return_value='direct'), \
-             mock.patch('lib.http_client.http_post', return_value=resp) as hp, \
+             mock.patch('lib.http_transport.client.http_post', return_value=resp) as hp, \
              mock.patch('lib.oauth.outbound.resolve_oauth_request',
                         return_value=('tok', {}, {'messages': []})):
             status, _detail = self._probe()(

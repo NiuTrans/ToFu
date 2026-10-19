@@ -6,9 +6,9 @@ persistence live in sibling modules.
 
 import hashlib
 
-from lib.agent_loop import AbortSignal
+from lib.agent_loop.agent_loop import AbortSignal
 from lib.llm_dispatch.api import dispatch_stream
-from lib.llm_errors import AbortedError
+from lib.llm.llm_errors import AbortedError
 from lib.log import get_logger
 from lib.llm.json_extract import extract_first_json_object
 from lib.paper.agent_loop_policy import run_guarded_paper_agent_loop

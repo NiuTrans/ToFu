@@ -18,6 +18,8 @@ from lib.agent_core.fair_work_lane import (
 )
 from lib.agent_core.task_runtime import TaskRuntime
 from lib.log import get_logger
+
+from .observability import observed_submission
 from runtime_guards import resolve_resource_budget
 
 
@@ -72,11 +74,10 @@ def submit_reconstructible_translation(
     The work has no independent durable task lifecycle: process restart may drop it. Callers may use this only for state
     that can be reconstructed from an already-durable source artifact.
     """
-    return _translation_lane.submit_task(
-        _reconstructible_lane_job_id(job_id),
-        owner_user_id,
-        function,
-    )
+    lane_job_id = _reconstructible_lane_job_id(job_id)
+    return observed_submission(lambda worker: _translation_lane.submit_task(
+        lane_job_id, owner_user_id, worker), lane_job_id, function,
+        kind='reconstructible_worker')
 
 
 def submit_attended_translation(
@@ -91,12 +92,10 @@ def submit_attended_translation(
     cross-owner selection retains exact identity while independent work starts
     on demand.
     """
-    return _translation_lane.submit_task(
-        _attended_lane_job_id(job_id),
-        owner_user_id,
-        function,
-        front_of_owner_queue=True,
-    )
+    lane_job_id = _attended_lane_job_id(job_id)
+    return observed_submission(lambda worker: _translation_lane.submit_task(
+        lane_job_id, owner_user_id, worker, front_of_owner_queue=True),
+        lane_job_id, function, kind='attended_worker')
 
 
 def cancel_attended_translation(job_id: str) -> bool:
@@ -132,12 +131,9 @@ def submit_translation_task(
         owner_user_id: int,
         worker: Callable[[], None],
     ):
-        return _translation_lane.submit_task(
-            lane_job_id,
-            owner_user_id,
-            worker,
-            front_of_owner_queue=prioritize,
-        )
+        return observed_submission(lambda observed: _translation_lane.submit_task(
+            lane_job_id, owner_user_id, observed, front_of_owner_queue=prioritize),
+            lane_job_id, worker, kind='background_worker', identity={'task_id': _task_id})
 
     try:
         runtime.submit_worker(task_id, _submit, _run_if_live)

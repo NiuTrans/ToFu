@@ -45,6 +45,7 @@ export const ERROR_KIND_LABELS: Readonly<Record<string, string>> = Object.freeze
   upstream_error: 'Upstream error',
   worker_lost: 'Worker lost',
   budget_exceeded: 'Budget exceeded',
+  execution_token_usage_unknown: 'Usage unconfirmed',
   tool_not_available: 'Tool not available',
   tool_call_rejected: 'Tool call blocked',
   user_switch: 'Switched by you',
@@ -60,6 +61,7 @@ type DynamicTranslator = (
 
 export interface ErrorEnvelopePresentationPorts {
   translate: Translator;
+  ownerDocument?: Document;
   iconHtml?: (name: string, size?: number) => string;
 }
 
@@ -269,7 +271,7 @@ export function createErrorEnvelopePresentation(
     let signInButton = '';
     if (error.kind === 'oauth_reauth') {
       const button = createButton({ label: ports.translate('err.subscription.signIn'),
-        variant: 'secondary', size: 'sm' });
+        variant: 'secondary', size: 'sm' }, ports.ownerDocument);
       button.classList.add('error-block-signin-btn');
       button.setAttribute('data-tofu-action', "jumpToSetting('oauth')");
       signInButton = `<div class="error-block-actions">${button.outerHTML}</div>`;

@@ -129,7 +129,7 @@ def resolve_t2v_clip(query: str, *, kind: str = 'video',
     except RuntimeError as exc:
         return {'ok': False, 'reason': str(exc)}
     try:
-        from lib.http_client import http_get, http_post
+        from lib.http_transport.client import http_get, http_post
         headers = {'Authorization': f'Bearer {cfg["key"]}',
                    'Content-Type': 'application/json'}
         submit = http_post(

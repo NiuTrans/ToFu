@@ -9,16 +9,18 @@ import json
 from lib.conversation_sync.attempt_identity import is_conversation_attempt
 from lib.error_envelope import to_json as _err_to_json
 from lib.log import get_logger
-from lib.task_replay import TASK_REPLAY_TERMINAL_STATUSES
+
+from lib.observability import measure_task_completion, observe_task_completion
+from lib.task_replay.task_replay import TASK_REPLAY_TERMINAL_STATUSES
 from lib.tasks_pkg.manager._events import snapshot_task_text
-from lib.tool_round_identity import tool_rounds_with_execution_identity
-from lib.storage_projection import (
+from lib.tool_results.tool_round_identity import tool_rounds_with_execution_identity
+from lib.storage.storage_projection import (
     _USAGE_TRANSIENT_KEYS,  # noqa: F401 — manager facade re-export
     sanitize_api_rounds_for_persist,
     sanitize_usage_for_persist,
     trim_tool_round_for_persist,
 )
-from lib.task_result_checkpoint_contract import (
+from lib.task_replay.task_result_checkpoint_contract import (
     TASK_CACHE_PREFIX_HWM_CANDIDATE_FIELD,
     TASK_LAST_TURN_CACHE_READ_CANDIDATE_FIELD,
     TASK_RESULT_CACHE_FACT_MAXIMUM,
@@ -155,7 +157,7 @@ def build_result_meta(task):
     """
     if task.get('_costExperiment') and not task.get('costExperiment'):
         try:
-            from lib.cost_experiments import build_task_cost_experiment_outcome
+            from lib.cost_experiments.cost_experiments import build_task_cost_experiment_outcome
             _outcome = build_task_cost_experiment_outcome(task)
             if _outcome:
                 task['costExperiment'] = _outcome
@@ -171,6 +173,7 @@ def build_result_meta(task):
         meta['turnId'] = task.get('_turnId') or ''
         meta['attemptId'] = task.get('_attemptId') or ''
     if task.get('finishReason'): meta['finishReason'] = task['finishReason']
+    if task.get('streamState'): meta['streamState'] = task['streamState']
     if task.get('usage'): meta['usage'] = sanitize_usage_for_persist(task['usage'])
     if task.get('preset'): meta['preset'] = task['preset']
     if task.get('toolSummary'): meta['toolSummary'] = task['toolSummary']
@@ -233,6 +236,13 @@ def build_result_meta(task):
     if task.get('_waiting_on'):
         meta['waitingOn'] = task['_waiting_on']
     if task.get('apiRounds'): meta['apiRounds'] = sanitize_api_rounds_for_persist(task['apiRounds'])
+    if type(task.get('_executionActualsComplete')) is bool:
+        meta['usageComplete'] = task['_executionActualsComplete']
+    if task.get('_nativePricingRequired') is True:
+        meta['nativePricingRequired'] = True
+        if task.get('_billingUserId') and task.get('status') in TASK_REPLAY_TERMINAL_STATUSES:
+            from lib.billing.native_settlement import terminal_metadata
+            meta.update(terminal_metadata(task))
 
     if task.get('compactionUsage'):
         meta['compactionUsage'] = task['compactionUsage']
@@ -364,11 +374,15 @@ def _upsert_task_row(task, conv_id, *, content, thinking, status,
     nonterminal_checkpoint = status in {'pending', 'running'}
     best_effort_checkpoint=nonterminal_checkpoint and not admission_checkpoint
     checkpoint_deadline = (
-        time.monotonic() + (admission_budget_seconds if admission_checkpoint else _NONTERMINAL_CHECKPOINT_DEADLINE_SECONDS)
-        if nonterminal_checkpoint else None
+        time.monotonic() + _NONTERMINAL_CHECKPOINT_DEADLINE_SECONDS
+        if best_effort_checkpoint else None
     )
 
     def deadline_options():
+
+        if admission_checkpoint:
+            # The bound is per RPC, not a deadline for accepting user work.
+            return {'deadline': admission_budget_seconds}
         if checkpoint_deadline is None:
             return {}
         remaining = checkpoint_deadline - time.monotonic()
@@ -378,15 +392,14 @@ def _upsert_task_row(task, conv_id, *, content, thinking, status,
             )
         return {'deadline': remaining}
 
-    def checkpoint_query(operation,payload):
-        for attempt in range(_TERMINAL_CHECKPOINT_ATTEMPTS if admission_checkpoint else 1):
-            try:return client.query(operation,payload,**deadline_options())
-            except StorageError as exc:
-                if (not admission_checkpoint or exc.code not in {'database_busy','database_timeout','database_unavailable'}
-                        or attempt+1==_TERMINAL_CHECKPOINT_ATTEMPTS):raise
-                remaining=checkpoint_deadline-time.monotonic()
-                if remaining<=0:raise
-                time.sleep(min(0.05*(attempt+1),remaining))
+    from lib.tasks_pkg.persistence_wait import wait_for_persistence
+
+    def checkpoint_query(operation, payload):
+        read = lambda: client.query(operation, payload, **deadline_options())
+        if best_effort_checkpoint:
+            return read()
+        return wait_for_persistence(task, read, label=operation,
+                                    cancellable=nonterminal_checkpoint)
 
     owner_user_id = require_user_id(
         task.get('_userId'), context='task result checkpoint')
@@ -566,12 +579,16 @@ def _upsert_task_row(task, conv_id, *, content, thinking, status,
             if cache_settings_requested:
                 checkpoint_payload['cache_settings_contract'] = (
                     TASK_RESULT_CACHE_SETTINGS_CONTRACT)
-            result = client.command(
-                'task_results.checkpoint', checkpoint_payload,
-                None,
-                **command_options,
-                **deadline_options(),
-            )
+            from uuid import uuid4
+            command_id = f'task-checkpoint:{uuid4().hex}'
+            def write_checkpoint():
+                return client.command(
+                    'task_results.checkpoint', checkpoint_payload, command_id,
+                    **command_options, **deadline_options())
+            result = (write_checkpoint() if best_effort_checkpoint else
+                      wait_for_persistence(task, write_checkpoint,
+                          label='task_results.checkpoint',
+                          cancellable=nonterminal_checkpoint))
             cache_settings_committed = False
             if isinstance(result, dict):
                 result_version = result.get('version')
@@ -715,7 +732,9 @@ def _upsert_task_row(task, conv_id, *, content, thinking, status,
 _HEAVY_TERMINAL_FIELDS = (
     'messages', '_flow_turns', '_flowLiveTurn', '_tool_result_cache',
     '_unchanged_tool_result_receipts', '_settled_tool_results',
-    '_tool_call_id_receipts',
+    '_tool_call_id_receipts', '_working_file_sources',
+    '_working_tool_source_starts', '_working_tool_sources',
+    '_nativePreparedInvocation', '_model_routing_selection',
     '_modelImageReuse', '_acceptedCompactionReceipt',
 )
 
@@ -740,6 +759,11 @@ def _release_heavy_task_state(task) -> int:
                 or task.get('_terminalPersistencePending')):
             return 0
         release_fields = _HEAVY_TERMINAL_FIELDS
+        if task.get('_transientRuntime'):
+            # Storage-free callers own the sole working transcript. Keep it
+            # with their bounded TaskRuntime, just like toolRounds, until the
+            # invocation owner releases the task after result projection.
+            release_fields = tuple(field for field in release_fields if field != 'messages')
         if is_conversation_attempt(task):
             # The terminal Turn is the structural authority for conversation
             # attempts, while result metadata owns programRuns. Inline/headless
@@ -786,6 +810,50 @@ def _release_heavy_task_state(task) -> int:
         logger.debug('[Task %s] heavy-state release skipped: %s',
                      (task.get('id') or '')[:8], e)
         return 0
+
+
+_TERMINAL_TOOL_GRAPH_FIELDS = (
+    ('_tool_schema', None, list),
+    ('_executable_tool_catalog', '_executableToolCatalog', list),
+    ('_toolContractDocumentsByName', '_toolContractDocumentsByName', dict),
+    ('_executableToolSearchTextByName', '_executableToolSearchTextByName', dict),
+)
+
+
+def _release_terminal_tool_state(task) -> int:
+    """Retire joined conversation tool graphs after post-commit owner capture.
+
+    Empty catalogs preserve explicit denial; missing/None catalogs can select
+    a fallback inventory. Replace containers/config rather than clearing them:
+    admitted children and post-commit observers own their captured references.
+    Early persistence must use only _release_heavy_task_state.
+    """
+    if (task.get('status') not in TASK_REPLAY_TERMINAL_STATUSES
+            or task.get('_terminalPersistencePending')
+            or task.get('_transientRuntime') or not is_conversation_attempt(task)):
+        return 0
+    configuration = task.get('config')
+    replacement = None
+    released = 0
+    for task_key, config_key, empty in _TERMINAL_TOOL_GRAPH_FIELDS:
+        if task.get(task_key):
+            task[task_key] = empty()
+            released += 1
+        if config_key is not None and isinstance(configuration, dict) and configuration.get(config_key):
+            if replacement is None:
+                replacement = dict(configuration)
+            replacement[config_key] = empty()
+            released += 1
+    if replacement is not None:
+        task['config'] = replacement
+    if released:
+        try:
+            from lib.tasks_pkg.manager._maintenance import request_released_task_heap_trim
+            request_released_task_heap_trim()
+        except Exception as error:
+            logger.debug('[Task %s] terminal tool heap-trim request skipped: %s',
+                         (task.get('id') or '')[:8], error)
+    return released
 
 
 def _stamp_conv_provider_id(task):
@@ -837,6 +905,7 @@ def _stamp_conv_provider_id(task):
                        (task.get('id') or '')[:8], conv_id[:8], e)
 
 
+@observe_task_completion('persistence')
 def persist_task_result(task, *, _defer_heavy_release: bool = False):
     """Terminal result persist. Keyword-only ``_defer_heavy_release``:
 
@@ -890,7 +959,7 @@ def persist_task_result(task, *, _defer_heavy_release: bool = False):
         from lib.tasks_pkg.compaction._resume_projection import preserve_suspended_compaction
         preserve_suspended_compaction(task)
     except Exception as exc:
-        from lib.storage.errors import describe_storage_failure
+        from lib.agent_core.storage_errors import describe_storage_failure
         logger.warning('[Task %s] suspended working context not saved: %s',
                        str(task.get('id') or '')[:8], describe_storage_failure(exc))
 
@@ -1047,13 +1116,16 @@ def persist_task_result(task, *, _defer_heavy_release: bool = False):
     # This required receiver is independent of file-history and daemon
     # admission. A failed intent write keeps the carrier/evidence retryable.
     from lib.tasks_pkg.workspace_delivery import persist_terminal_workspace_intent
-    if not persist_terminal_workspace_intent(task):
-        return False
+    with measure_task_completion('workspace_delivery') as timing:
+        if not persist_terminal_workspace_intent(task):
+            timing['outcome'] = 'deferred'
+            return False
 
     # A successful owned commit is the only terminal observer boundary.
     from lib.tasks_pkg.manager._terminal import notify_terminal_listeners
     try:
-        notify_terminal_listeners(task)
+        with measure_task_completion('terminal_listeners'):
+            notify_terminal_listeners(task)
     except Exception as exc:
         task['_terminalPersistencePending'] = True
         task['_terminalPersistenceRetryReady'] = True

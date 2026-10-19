@@ -1,6 +1,6 @@
-//! Trusted completed-round recovery over explicit owner/task/binding authority.
+//! Trusted completed/pending-tool recovery over explicit owner/task/binding authority.
 //! The host atomically fences each attempt before effects and commits completed
-//! state after joined tools/accounting. Inflight frontiers are never loadable.
+//! state after joined tools/accounting. Uncaptured inflight frontiers remain fenced.
 //! Account/deadline recovery belongs to the host; this port grants no new credit.
 use crate::{
     agent::Budget,
@@ -39,13 +39,32 @@ pub enum Disposition {
     Continue,
     Suspend,
 }
+/// A trusted domain query supplies one observation for each exact saved call.
+/// A locator alone is insufficient; adapters must refuse unresolved authority.
+pub struct ReconciledTool {
+    pub call_id: String,
+    pub content: Value,
+}
 pub trait Port {
     fn binding(&self) -> &str;
     fn load(&self, identity: Identity<'_>) -> Result<Option<Value>, Value>;
     fn begin(&self, identity: Identity<'_>, round: usize) -> Result<(), Value>;
+    /// Optional write-ahead capture after provider settlement and full-batch
+    /// validation, before approvals or tools. Legacy ports remain inflight.
+    fn pending(&self, _state: View<'_>) -> Result<(), Value> { Ok(()) }
+    /// Only a trusted reconciler may replace saved calls with observations.
+    /// Never dispatch the old tools or reserve/pay the old provider round here.
+    fn reconcile(&self, _identity: Identity<'_>, _state: &Value) -> Result<Vec<ReconciledTool>, Value> {
+        Err(refused())
+    }
     fn complete(&self, state: View<'_>) -> Result<Disposition, Value>;
 }
 impl View<'_> {
+    pub fn capture_pending(&self) -> Value {
+        let mut state = self.capture();
+        state["tools_pending"] = json!(true);
+        state
+    }
     /// Explicit capture for a caller that needs owned storage state. The native
     /// driver itself borrows history and never clones it on the disabled path.
     pub fn capture(&self) -> Value {
@@ -64,11 +83,23 @@ impl View<'_> {
         state
     }
 }
+/// Borrow the same history with an explicit pre-tool frontier marker.
+pub struct PendingView<'a>(pub View<'a>);
+impl serde_core::Serialize for PendingView<'_> {
+    fn serialize<S: serde_core::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.0.serialize_frontier(serializer, true)
+    }
+}
 impl serde_core::Serialize for View<'_> {
     fn serialize<S: serde_core::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.serialize_frontier(serializer, false)
+    }
+}
+impl View<'_> {
+    fn serialize_frontier<S: serde_core::Serializer>(&self, serializer: S, pending: bool) -> Result<S::Ok, S::Error> {
         use serde_core::ser::SerializeMap;
         let mut map =
-            serializer.serialize_map(Some(14 + usize::from(self.model_account.is_some()) + usize::from(self.deadline_unix_ms.is_some())))?;
+            serializer.serialize_map(Some(14 + usize::from(pending) + usize::from(self.model_account.is_some()) + usize::from(self.deadline_unix_ms.is_some())))?;
         map.serialize_entry("format", "tofu.native-agent-checkpoint/v1")?;
         map.serialize_entry("owner_user_id", &self.identity.owner)?;
         map.serialize_entry("task_id", self.identity.task_id)?;
@@ -89,6 +120,7 @@ impl serde_core::Serialize for View<'_> {
         if let Some(deadline) = self.deadline_unix_ms {
             map.serialize_entry("deadline_unix_ms", &deadline)?;
         }
+        if pending { map.serialize_entry("tools_pending", &true)?; }
         map.end()
     }
 }
@@ -98,6 +130,24 @@ pub(crate) struct Restored {
     pub messages: Vec<Value>,
     pub usage: Vec<Value>,
     pub progress: Ledger,
+    pub tools_pending: bool,
+}
+
+/// Validate the complete saved provider batch independently of a live catalog.
+/// Its current execution permission is never inferred from this stored shape.
+pub(crate) fn pending_calls(messages: &[Value]) -> Option<&[Value]> {
+    let last = messages.last()?;
+    if last["role"] != "assistant" { return None; }
+    let calls = last["tool_calls"].as_array()?;
+    if calls.is_empty() { return None; }
+    let mut ids = std::collections::BTreeSet::new();
+    for call in calls {
+        let id = call["id"].as_str().filter(|id| !id.is_empty())?;
+        call["function"]["name"].as_str().filter(|name| !name.is_empty())?;
+        if call["type"] != "function" || !ids.insert(id) { return None; }
+        crate::tool_policy::lossless_arguments(call["function"]["arguments"].as_str()?).ok()?;
+    }
+    Some(calls)
 }
 // Checkpoint schema vocabulary only. Tool argument admission deliberately
 // treats required null as missing and cannot validate persisted digest nulls.
@@ -105,6 +155,9 @@ pub(crate) fn valid(schema: &Value, value: &Value) -> bool {
     let supported = [
         "$schema",
         "$id",
+        // Opaque application metadata definitions are exported to its owner.
+        // References remain unsupported; these definitions add no instance rule.
+        "$defs",
         "type",
         "required",
         "properties",
@@ -235,8 +288,8 @@ pub(crate) fn restore(
         || value["task_id"] != identity.task_id
         || value["epoch"] != identity.epoch
         || value["binding"] != identity.binding
-        || value["round_limit"].as_u64() != Some(budget.rounds as u64)
-        || value["tool_limit"].as_u64() != Some(budget.tool_calls as u64)
+        || value["round_limit"] != json!(budget.rounds)
+        || value["tool_limit"] != json!(budget.tool_calls)
         || value["no_progress_limit"].as_u64() != Some(limits.no_progress_rounds as u64)
         || value["failure_limit"].as_u64() != Some(limits.nonretryable_failure_rounds as u64)
     {
@@ -248,9 +301,9 @@ pub(crate) fn restore(
     let next_round = count("next_round")?;
     let tool_calls = count("tool_calls")?;
     if next_round == 0
-        || next_round >= budget.rounds
+        || budget.rounds.is_some_and(|limit| next_round >= limit)
         || tool_calls < next_round
-        || tool_calls > budget.tool_calls
+        || budget.tool_calls.is_some_and(|limit| tool_calls > limit)
     {
         return Err(refused());
     }
@@ -263,9 +316,14 @@ pub(crate) fn restore(
     };
     let messages = take(object.remove("messages").unwrap())?;
     let usage = take(object.remove("usage").unwrap())?;
+    let tools_pending = value["tools_pending"] == true;
     if messages.iter().any(|v| !v.is_object())
         || usage.len() != next_round
-        || messages.last().and_then(|v| v["role"].as_str()) != Some("tool")
+        || (if tools_pending {
+            pending_calls(&messages).is_none_or(|calls| calls.len() > tool_calls)
+        } else {
+            messages.last().and_then(|v| v["role"].as_str()) != Some("tool")
+        })
     {
         return Err(refused());
     }
@@ -275,6 +333,7 @@ pub(crate) fn restore(
         messages,
         usage,
         progress,
+        tools_pending,
     })
 }
 
@@ -301,5 +360,34 @@ mod deadline_schema_tests {
         assert!(!valid(&schema, &json!(true)));
         assert!(!valid(&schema, &json!(1.0)));
         assert!(!valid(&json!({"type":"integer","maximum":100}), &json!(101)));
+    }
+
+    #[test]
+    fn host_fee_checkpoint_shape_is_closed_and_preserves_integer_rounds() {
+        let schema: Value = serde_json::from_str(include_str!("../../../contracts/native_agent_checkpoint_v1.schema.json")).unwrap();
+        let mut fees = json!({"format":"tofu.native-fee-checkpoint/v1","owner_user_id":7,
+            "tenant_id":"","task_id":"task","logical_model":"alpha","provider_id":"provider-a",
+            "wallet_user_id":"","reserved_micro":0,"rounds":[{"round":1,
+            "cost":{"amounts":null,"price":{},"credits":{}}}]});
+        assert!(valid(&schema["properties"]["host_fee_projection"], &fees));
+        fees["rounds"][0]["task_id"] = json!("original-executor");
+        assert!(valid(&schema["properties"]["host_fee_projection"], &fees));
+        fees["rounds"][0]["billable_task_id"] = json!("original-root");
+        assert!(valid(&schema["properties"]["host_fee_projection"], &fees));
+        for invalid in [json!(""), json!(false), json!("x".repeat(513))] {
+            fees["rounds"][0]["billable_task_id"] = invalid;
+            assert!(!valid(&schema["properties"]["host_fee_projection"], &fees));
+        }
+        fees["rounds"][0]["billable_task_id"] = json!("original-root");
+        fees["rounds"][0]["task_id"] = json!("");
+        assert!(!valid(&schema["properties"]["host_fee_projection"], &fees));
+        fees["rounds"][0]["task_id"] = json!(false);
+        assert!(!valid(&schema["properties"]["host_fee_projection"], &fees));
+        fees["rounds"][0].as_object_mut().unwrap().remove("task_id");
+        fees["rounds"][0]["round"] = json!(true);
+        assert!(!valid(&schema["properties"]["host_fee_projection"], &fees));
+        fees["rounds"][0]["round"] = json!(1);
+        fees["unexpected"] = json!(true);
+        assert!(!valid(&schema["properties"]["host_fee_projection"], &fees));
     }
 }

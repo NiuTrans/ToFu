@@ -184,7 +184,7 @@ class _FakeValueStore:
 def distributed_store(monkeypatch):
     store = _FakeValueStore()
     monkeypatch.setattr(registry_module, '_distributed_mode', lambda: True)
-    import lib.runtime_state_store as store_module
+    import lib.runtime.runtime_state_store as store_module
     monkeypatch.setattr(store_module, 'get_store', lambda: store)
     return store
 

@@ -3,6 +3,32 @@
 use super::*;
 use sha2::{Digest, Sha256};
 
+fn read_turn(
+    database: &AuthorityDatabase, transaction: &mut AuthorityTransaction,
+    conversation_id: &str, turn_id: &str,
+) -> io::Result<Option<(Value, usize)>> {
+    get_public_value(database, transaction, conversation_id, turn_id)?
+        .map(|value| {
+            let (value, bytes) = crate::response_json::normalize_value_with_size(
+                value, crate::generated_tofudb_ir::MAX_TURN_RESPONSE_BYTES)
+                .map_err(|error| if error.io_error_kind() == Some(io::ErrorKind::OutOfMemory) {
+                    io::Error::new(io::ErrorKind::OutOfMemory,
+                        "turn response exceeds its bounded streamed payload")
+                } else { invalid_data("context Turn is malformed") })?;
+            Ok((value, bytes))
+        }).transpose()
+}
+
+fn response(value: Value) -> io::Result<crate::response_json::EncodedResponse> {
+    let encoded = crate::response_json::EncodedResponse::from_value(value)
+        .map_err(|_| invalid_data("turn response cannot be encoded"))?;
+    if encoded.len() > crate::generated_tofudb_ir::MAX_TURN_RESPONSE_BYTES {
+        return Err(io::Error::new(io::ErrorKind::OutOfMemory,
+            "turn response exceeds its bounded streamed payload"));
+    }
+    Ok(encoded)
+}
+
 pub(crate) fn read(
     database: &AuthorityDatabase,
     transaction: &mut AuthorityTransaction,
@@ -10,15 +36,14 @@ pub(crate) fn read(
     turn_id: &str,
     replay: bool,
     after_turn_id: Option<&str>,
-) -> io::Result<Option<Vec<u8>>> {
-    let Some(target_bytes) = get(database, transaction, conversation_id, turn_id)? else {
+) -> io::Result<Option<crate::response_json::EncodedResponse>> {
+    let Some((target, target_bytes)) = read_turn(database, transaction, conversation_id, turn_id)? else {
         return Ok(None);
     };
-    let target: Value = serde_json::from_slice(&target_bytes)
-        .map_err(|_| invalid_data("context target is malformed"))?;
     if target.get("laneId").and_then(Value::as_str) != Some("main") {
-        return encode_response(&json!({"supported": false})).map(Some);
+        return response(json!({"supported": false})).map(Some);
     }
+    let mut target = Some((target, target_bytes));
     let prefix = lane_prefix(conversation_id, "main")?;
     let (mut start, end) = EntityKey::prefix_range(
         transaction.tenant_id(), transaction.owner_user_id(),
@@ -37,7 +62,7 @@ pub(crate) fn read(
             found = header.get("turnId").and_then(Value::as_str) == Some(turn_id);
             headers.push(header);
             if headers.len() > MAX_LIST_ROWS {
-                return encode_response(&json!({"supported": false})).map(Some);
+                return response(json!({"supported": false})).map(Some);
             }
             if found { break; }
         }
@@ -100,10 +125,10 @@ pub(crate) fn read(
         if headers[count].get("turnId") == witness.get(0) {
             let final_id = witness.get(0).and_then(Value::as_str)
                 .ok_or_else(|| invalid_data("context witness is malformed"))?;
-            if let Some(bytes) = get(database, transaction, conversation_id, final_id)? {
-                let row: Map<String, Value> = serde_json::from_slice(&bytes)
-                    .map_err(|_| invalid_data("context terminal is malformed"))?;
-                if crate::model_continuation::settled_witness(&row) == *witness {
+            if let Some((value, _)) = read_turn(database, transaction, conversation_id, final_id)? {
+                let row = value.as_object()
+                    .ok_or_else(|| invalid_data("context terminal is malformed"))?;
+                if crate::model_continuation::settled_witness(row) == *witness {
                     covered = count + 1;
 
                     continuation_status = "available";
@@ -136,16 +161,19 @@ pub(crate) fn read(
     for header in &selected[start..] {
         let id = header.get("turnId").and_then(Value::as_str)
             .ok_or_else(|| invalid_data("context header lacks identity"))?;
-        let bytes = get(database, transaction, conversation_id, id)?
-            .ok_or_else(|| invalid_data("context Turn disappeared"))?;
-        if !turns.is_empty() && page_bytes.saturating_add(bytes.len()) > page_limit {
+        let (value, bytes) = if id == turn_id {
+            target.take().ok_or_else(|| invalid_data("context target repeats"))?
+        } else {
+            read_turn(database, transaction, conversation_id, id)?
+                .ok_or_else(|| invalid_data("context Turn disappeared"))?
+        };
+        if !turns.is_empty() && page_bytes.saturating_add(bytes) > page_limit {
             next_turn_id = turns.last().and_then(|row: &Value| row.get("turnId"))
                 .and_then(Value::as_str).map(str::to_owned);
             break;
         }
-        page_bytes = page_bytes.saturating_add(bytes.len());
-        turns.push(serde_json::from_slice::<Value>(&bytes)
-            .map_err(|_| invalid_data("context Turn is malformed"))?);
+        page_bytes = page_bytes.saturating_add(bytes);
+        turns.push(value);
     }
     let eligible = turns.iter().all(|row| match row.get("projection")
             .and_then(|value| value.get("attachments")) {
@@ -153,13 +181,17 @@ pub(crate) fn read(
         Some(Value::Array(refs)) => refs.is_empty(),
         _ => false,
     });
-    encode_response(&json!({
-        "supported": true, "covered": covered, "turns": turns,
+    let mut result = json!({
+        "supported": true, "covered": covered,
         "nextTurnId": next_turn_id,
-        "continuation": continuation,
         "continuationStatus": continuation_status,
         "historyProof": {"version": 2, "count": headers.len() - 1,
                           "digest": format!("{:x}", digest.finalize())},
         "proofEligible": eligible,
-    })).map(Some)
+    });
+    // Move the private payloads; json! would serialize borrowed expressions to
+    // another Value, cloning every tool-result string in the selected history.
+    result["turns"] = Value::Array(turns);
+    result["continuation"] = continuation.unwrap_or(Value::Null);
+    response(result).map(Some)
 }

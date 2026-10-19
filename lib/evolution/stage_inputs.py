@@ -14,7 +14,8 @@ from .contracts import EvolutionStateError
 from .runs import _validate
 
 NAMESPACE = 'evolution.stage_inputs.v1'
-MAX_INPUT_BYTES = records.MAX_RECORD_BYTES - 16384
+# Inline/multipart crossover sizes storage frames, never input admission.
+_INLINE_INPUT_BYTES = 1 << 20
 INPUT_PARTS_NAMESPACE = 'evolution.stage_input_parts.v1'
 MODEL_ATTEMPTS_NAMESPACE = 'evolution.model_attempts.v1'
 CHILD_LIFECYCLES_NAMESPACE = 'evolution.child_lifecycles.v1'
@@ -22,14 +23,12 @@ TOOL_ATTEMPTS_NAMESPACE = 'evolution.tool_attempts.v1'
 _INPUT_PART_BYTES = 256 * 1024
 
 
-def canonical(value, *, bounded=True):
+def canonical(value):
     try:
         encoded = json.dumps(value, ensure_ascii=False, sort_keys=True,
                              separators=(',', ':'), allow_nan=False).encode('utf-8')
     except (TypeError, ValueError) as exc:
         raise EvolutionStateError('prepared stage input is not portable JSON') from exc
-    if bounded and len(encoded) > MAX_INPUT_BYTES:
-        raise EvolutionStateError('prepared stage input exceeds its byte bound')
     return encoded
 
 
@@ -45,7 +44,7 @@ def _no_credentials(value):
 
 
 def canonical_configuration(value):
-    """Validate bounded portable settings without archiving inline secrets."""
+    """Validate complete portable settings without archiving inline secrets."""
     _no_credentials(value)
     return canonical(value)
 
@@ -76,18 +75,17 @@ def freeze_input(run, task, stage, *, user_id):
             and value['config'].get('model') != task.get('model')):
         raise EvolutionStateError('prepared model differs from the task route binding')
     canonical_configuration(value['config'])
-    encoded = canonical(value, bounded=False)
+    encoded = canonical(value)
     digest = hashlib.sha256(encoded).hexdigest()
     reference = {'task_id': task['id'], 'sha256': digest}
     key = records.entity_key(task['id'], user_id, kind='prepared stage')
     existing = records.get_record(NAMESPACE, key)
     if existing is not None:
-        if canonical(_decode_input(existing, user_id=user_id), bounded=False) != encoded:
+        if canonical(_decode_input(existing, user_id=user_id)) != encoded:
             raise EvolutionStateError('prepared stage archive differs from the pending carrier')
     else:
         archived = value
-        if (len(encoded) > MAX_INPUT_BYTES
-                or len(json.dumps(value, ensure_ascii=False).encode('utf-8')) > records.MAX_RECORD_BYTES):
+        if len(encoded) > _INLINE_INPUT_BYTES:
             count = (len(encoded) + _INPUT_PART_BYTES - 1) // _INPUT_PART_BYTES
             archived = {'schema_version': 2, 'task_id': task['id'], 'user_id': user_id,
                         'sha256': digest, 'byte_count': len(encoded), 'part_count': count}
@@ -134,7 +132,8 @@ def _decode_input(archived, *, user_id):
     count = (archived['byte_count'] + _INPUT_PART_BYTES - 1) // _INPUT_PART_BYTES
     if archived['part_count'] != count:
         raise EvolutionStateError('prepared stage framing changed')
-    chunks = []
+    encoded = bytearray()
+    body_digest = hashlib.sha256()
     for index in range(count):
         part = records.get_record(INPUT_PARTS_NAMESPACE,
             _input_part_key(archived['task_id'], archived['sha256'], index, user_id))
@@ -147,9 +146,9 @@ def _decode_input(archived, *, user_id):
         if (part['index'] != index or len(chunk) != expected
                 or hashlib.sha256(chunk).hexdigest() != part['sha256']):
             raise EvolutionStateError('prepared stage frame changed')
-        chunks.append(chunk)
-    encoded = b''.join(chunks)
-    if hashlib.sha256(encoded).hexdigest() != archived['sha256']:
+        body_digest.update(chunk)
+        encoded.extend(chunk)
+    if body_digest.hexdigest() != archived['sha256']:
         raise EvolutionStateError('prepared stage body digest changed')
     try:
         value = json.loads(encoded)
@@ -172,7 +171,7 @@ def read_input(run, *, user_id):
     value = _decode_input(archived, user_id=user_id)
     _validate(value, 'prepared_input')
     binding = value['config'].get('evolution') or {}
-    if (hashlib.sha256(canonical(value, bounded=False)).hexdigest() != reference['sha256']
+    if (hashlib.sha256(canonical(value)).hexdigest() != reference['sha256']
             or value['task_id'] != reference['task_id'] or value['user_id'] != user_id
             or value['run_id'] != run['run_id'] or value['stage'] != run['status']
             or value['intent_id'] != run['stage_dispatch']['intent_id']

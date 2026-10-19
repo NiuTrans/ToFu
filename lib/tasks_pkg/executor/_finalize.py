@@ -12,7 +12,7 @@ from typing import Any
 from lib.agent_core.execution_clock import task_execution_time_ms
 from lib.agent_core.events import EventType as EventType, build_event as build_event, now_ms as now_ms
 from lib.log import get_logger
-from lib.tool_rejection import (
+from lib.tool_results.tool_rejection import (
     stamp_tool_rejection,
     tool_rejection_descriptor,
 )

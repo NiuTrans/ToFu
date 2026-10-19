@@ -11,7 +11,7 @@ import time
 
 import requests
 
-from lib.http_client import http_get as _default_http_get
+from lib.http_transport.client import http_get as _default_http_get
 from lib.log import get_logger
 
 from ._capabilities import _infer_capabilities, _infer_rpm
@@ -203,7 +203,7 @@ def discover_models(base_url: str, api_key: str,
         models_url = base_url.rstrip('/') + '/models'
 
     # Use-time SSRF egress guard (DNS can change since registration).
-    from lib.byo_egress import EgressDenied, validate_egress_url
+    from lib.byo.byo_egress import EgressDenied, validate_egress_url
     try:
         validate_egress_url(models_url)
     except EgressDenied as e:

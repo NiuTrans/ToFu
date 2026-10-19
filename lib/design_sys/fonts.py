@@ -342,7 +342,7 @@ def ensure_font(font_id: str, weight: int, *, download: bool = True,
 
         if not download:
             return ''
-        from lib.http_client import http_get
+        from lib.http_transport.client import http_get
         try:
             resp = http_get(src.url, timeout=timeout)
             data = getattr(resp, 'content', b'') or b''

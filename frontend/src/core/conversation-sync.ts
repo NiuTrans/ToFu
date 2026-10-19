@@ -10,6 +10,7 @@ import {
   type ConversationSyncEvent,
   type ConversationSyncSnapshot,
   type ConversationTurnPage,
+  type ConversationRoundDirectory,
   type ConnectionHealth,
   type TurnProjectionChange,
 } from '../api/conversation-sync.generated';
@@ -18,16 +19,20 @@ import {
 } from '../conversation/domain/tool-segment-references';
 import { createLifecycleScope, type LifecycleScope } from '../lifecycle';
 import { conversationConnectionHealth } from './connection-health';
+import { notifyObserver } from './observer';
 
+import { conversationLoadBudget, type ConversationSnapshotViewport } from './conversation-load-budget';
 type JsonRecord = Record<string, unknown>;
 
 export interface ConversationSyncCoordinatorOptions {
   conversationId: string;
   streamClientId?: string;
+
+  snapshotViewport?(): ConversationSnapshotViewport;
   api: ConversationSyncApi;
   onSnapshot(snapshot: ConversationSyncSnapshot & { authoritativeFull: true }): void;
   /** Publishes one sequence-checked history page synchronously. */
-  onTurnPage?(page: ConversationTurnPage): void;
+  onTurnPage?(page: ConversationTurnPage, mode?: 'continuous' | 'detached'): void;
   onAttemptEvent(
     event: AttemptEvent,
     receivedAt: number,
@@ -86,11 +91,17 @@ function record(value: unknown): JsonRecord {
  * Push and BroadcastChannel callers may only call `invalidate`; projections
  * enter the store through this stream (or its authoritative reset snapshot).
  */
+let roundDirectoryScope = 0;
+
 export class ConversationSyncCoordinator implements ConversationSyncConnection {
   private readonly options: ConversationSyncCoordinatorOptions;
   private source: EventSource | null = null;
   private sourceScope: LifecycleScope | null = null;
   private snapshotPromise: Promise<ConversationSyncSnapshot> | null = null;
+  // A reset is an obligation to replace the projection, not a cursor ACK.
+  // Keep this barrier across read failures, transport wakes and suspension.
+  private snapshotRequired = true;
+  private readonly reads = new AbortController();
   private turnPageFlight: {
     key: string;
     promise: Promise<ConversationTurnPage>;
@@ -104,6 +115,11 @@ export class ConversationSyncCoordinator implements ConversationSyncConnection {
   private retryCount = 0;
   private sequence = 0;
   private cursorValue = '';
+  private roundRevision = 0;
+  private readonly roundScope = ++roundDirectoryScope;
+  private roundOwner = 0;
+
+  get roundDirectoryRevision(): string { return `${this.roundScope}:${this.roundOwner}:${this.roundRevision}`; }
   private hasPublishedHealth = false;
 
   constructor(options: ConversationSyncCoordinatorOptions) {
@@ -135,7 +151,8 @@ export class ConversationSyncCoordinator implements ConversationSyncConnection {
       this.clearReconnectTimer();
       if (wasConnected) this.publishHealth('idle', 'transport-suspended');
     } else if (this.shouldConnect) {
-      void this.resume().catch(error => this.protocolError(error));
+      // The shared read/open path already reports and schedules failures.
+      void this.resume().catch(() => undefined);
     }
   }
 
@@ -143,7 +160,7 @@ export class ConversationSyncCoordinator implements ConversationSyncConnection {
     if (this.closed) return;
     this.shouldConnect = true;
     if (this.suspended) return;
-    if (!this.cursorValue) {
+    if (this.snapshotRequired || !this.cursorValue) {
       await this.hydrate(true);
       return;
     }
@@ -160,10 +177,6 @@ export class ConversationSyncCoordinator implements ConversationSyncConnection {
     if (this.closed) return;
     this.shouldConnect = true;
     if (this.suspended) return;
-    if (!this.cursorValue) {
-      await this.hydrate(true);
-      return;
-    }
     const health = conversationConnectionHealth.get(this.options.conversationId);
     const frameAge = Date.now() - Number(health?.lastFrameAt || 0);
     // A source opened by an immediately preceding wake has not had a chance
@@ -174,7 +187,7 @@ export class ConversationSyncCoordinator implements ConversationSyncConnection {
         > Number(CONVERSATION_SYNC_STREAM_POLICY.reconnectGraceMs) / 2) {
       this.closeSource();
     }
-    this.open();
+    await this.resume();
   }
 
   async hydrate(connect = true): Promise<ConversationSyncSnapshot> {
@@ -186,17 +199,9 @@ export class ConversationSyncCoordinator implements ConversationSyncConnection {
 
   async recover(reason = 'snapshot-recovery'): Promise<ConversationSyncSnapshot> {
     this.shouldConnect = true;
-    this.closeSource();
-    this.publishHealth('recovering', reason);
-    try {
-      const snapshot = await this.fetchSnapshot(reason);
-      this.retryCount = 0;
-      this.open();
-      return snapshot;
-    } catch (error) {
-      this.scheduleReconnect(reason);
-      throw error;
-    }
+    const snapshot = await this.fetchSnapshot(reason);
+    this.open();
+    return snapshot;
   }
 
   /**
@@ -210,9 +215,10 @@ export class ConversationSyncCoordinator implements ConversationSyncConnection {
     laneId: string,
     beforeOrdinal?: number,
     limit = 64,
+    mode: 'continuous' | 'detached' = 'continuous',
   ): Promise<ConversationTurnPage> {
     if (this.closed) throw new Error('Conversation sync coordinator is closed');
-    if (!this.cursorValue) {
+    if (this.snapshotRequired || !this.cursorValue) {
       throw new Error('Conversation history requires an authoritative snapshot');
     }
     const normalizedLaneId = laneId.trim();
@@ -224,12 +230,13 @@ export class ConversationSyncCoordinator implements ConversationSyncConnection {
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 256) {
       throw new Error('Conversation history has an invalid page limit');
     }
-    const key = `${normalizedLaneId}:${beforeOrdinal ?? 'head'}:${limit}`;
+    const key = `${normalizedLaneId}:${beforeOrdinal ?? 'head'}:${limit}:${mode}`;
     if (this.turnPageFlight) {
       if (this.turnPageFlight.key === key) return this.turnPageFlight.promise;
       throw new Error('A different conversation history page is already loading');
     }
     const expectedSequence = this.sequence;
+    const expectedGeneration = this.generation;
     /* Same wedged-flight guard as fetchSnapshot: an unbounded stalled page
      * read kept `turnPageFlight` forever, rejecting every later page with
      * "already loading" until reload. */
@@ -239,7 +246,9 @@ export class ConversationSyncCoordinator implements ConversationSyncConnection {
       expectedSequence,
       beforeOrdinal,
       limit,
-      { timeout: SNAPSHOT_FETCH_TIMEOUT_MS },
+      { timeout: SNAPSHOT_FETCH_TIMEOUT_MS, signal: this.reads.signal, query: {
+        windowBytes: conversationLoadBudget(this.options.snapshotViewport?.()).windowBytes,
+      } },
     ).then((wirePage) => {
       if (this.closed) throw new Error('Conversation sync coordinator is closed');
       const page = materializeSnapshotReferences(wirePage);
@@ -247,10 +256,12 @@ export class ConversationSyncCoordinator implements ConversationSyncConnection {
           || page.laneId !== normalizedLaneId) {
         throw new Error('Conversation history page identity mismatch');
       }
-      if (page.syncSeq !== expectedSequence || this.sequence !== expectedSequence) {
+      if (page.syncSeq !== expectedSequence || this.sequence !== expectedSequence
+          || this.generation !== expectedGeneration
+          || (beforeOrdinal !== undefined && page.beforeOrdinal !== beforeOrdinal)) {
         throw new Error('Conversation history page is stale');
       }
-      this.options.onTurnPage?.(page);
+      this.options.onTurnPage?.(page, mode);
       return page;
     }).catch((cause: unknown) => {
       this.protocolError(cause);
@@ -259,6 +270,27 @@ export class ConversationSyncCoordinator implements ConversationSyncConnection {
     const flight = request.finally(() => { this.turnPageFlight = null; });
     this.turnPageFlight = { key, promise: flight };
     return flight;
+  }
+
+  async loadRoundDirectory(
+    laneId: string, offset = 0, limit = 50, anchorTurnId?: string,
+  ): Promise<ConversationRoundDirectory> {
+    if (this.closed || this.snapshotRequired || !this.cursorValue || !this.roundOwner) {
+      throw new Error('Round directory requires an active snapshot with owner scope');
+    }
+    const expected = this.sequence;
+    const expectedGeneration = this.generation;
+    const owner = this.roundOwner;
+    const page = await this.options.api.roundDirectory(
+      this.options.conversationId, laneId, expected, offset, limit, anchorTurnId,
+      { timeout: SNAPSHOT_FETCH_TIMEOUT_MS, signal: this.reads.signal },
+    );
+    if (this.closed || this.generation !== expectedGeneration
+        || this.roundOwner !== owner || page.ownerId !== owner
+        || this.sequence !== expected || page.stale || page.syncSeq !== expected
+        || page.conversationId !== this.options.conversationId || page.laneId !== laneId
+        || page.offset !== offset) throw new Error('Round directory is stale or mismatched');
+    return page;
   }
 
   invalidate(_cursorHint?: string): void {
@@ -275,6 +307,7 @@ export class ConversationSyncCoordinator implements ConversationSyncConnection {
   pause(): void {
     this.shouldConnect = false;
     this.closeSource();
+    this.clearReconnectTimer();
     if (!this.closed) this.publishHealth('idle');
   }
 
@@ -284,13 +317,16 @@ export class ConversationSyncCoordinator implements ConversationSyncConnection {
     this.shouldConnect = false;
     this.closeSource();
     this.clearReconnectTimer();
+    this.reads.abort();
     this.publishHealth('closed');
     conversationConnectionHealth.clear(this.options.conversationId);
   }
 
   private async fetchSnapshot(reason: string): Promise<ConversationSyncSnapshot> {
-    if (this.snapshotPromise) return this.snapshotPromise;
     if (this.closed) throw new Error('Conversation sync coordinator is closed');
+    if (this.snapshotPromise) return this.snapshotPromise;
+    this.snapshotRequired = true;
+    this.clearReconnectTimer();
     let startSnapshot!: () => void;
     // A snapshot captures an earlier replay head than events arriving while
     // its request is in flight. Fence that generation before the read, then
@@ -302,9 +338,12 @@ export class ConversationSyncCoordinator implements ConversationSyncConnection {
           this.publishHealth(
             reason === 'hydrate' ? 'connecting' : 'recovering', reason,
           );
+          if (this.closed) throw new Error('Conversation sync coordinator is closed');
           const request = this.options.api.snapshot(
             this.options.conversationId,
-            { timeout: SNAPSHOT_FETCH_TIMEOUT_MS },
+            { timeout: SNAPSHOT_FETCH_TIMEOUT_MS, signal: this.reads.signal,
+              query: conversationLoadBudget(this.options.snapshotViewport?.()),
+            },
           )
             .then((wireSnapshot) => {
               if (this.closed) throw new Error('Conversation sync coordinator is closed');
@@ -314,17 +353,25 @@ export class ConversationSyncCoordinator implements ConversationSyncConnection {
               if (snapshot.conversationId !== this.options.conversationId) {
                 throw new Error('Conversation snapshot identity mismatch');
               }
+              // Ingestion is required, unlike health/debug observers. Never
+              // acknowledge a read whose projection was rejected by its owner.
+              this.options.onSnapshot({ ...snapshot, authoritativeFull: true });
+              if (this.closed) throw new Error('Conversation sync coordinator is closed');
               this.sequence = snapshot.syncSeq;
               this.cursorValue = snapshot.cursor;
-              this.options.onPushWithheld?.(snapshot.pushWithheld === true);
-              this.options.onSnapshot({ ...snapshot, authoritativeFull: true });
-              if (this.shouldConnect) this.touchFrame();
+              this.snapshotRequired = false;
+              this.retryCount = 0;
+              // Generated clients validate scope. Keep legacy injected snapshot
+              // ports usable, but never admit their unscoped rank navigation.
+              this.roundOwner = Number(snapshot.scope?.ownerId || 0);
+              if (!Number.isSafeInteger(this.roundOwner) || this.roundOwner <= 0) this.roundOwner = 0;
+              this.roundRevision++;
+              notifyObserver('conversation-push-withheld', this.options.onPushWithheld,
+                snapshot.pushWithheld === true);
+              if (this.closed) return snapshot;
+              if (this.shouldConnect && !this.suspended) this.touchFrame();
               else this.publishHealth('idle');
               return snapshot;
-            })
-            .catch((cause: unknown) => {
-              this.protocolError(cause);
-              throw cause;
             });
           void request.then(resolve, reject);
         } catch (cause) {
@@ -332,7 +379,14 @@ export class ConversationSyncCoordinator implements ConversationSyncConnection {
         }
       };
     });
-    const flight = operation.finally(() => { this.snapshotPromise = null; });
+    const flight = operation.catch((cause: unknown) => {
+      if (!this.closed) {
+        this.retryCount += 1;
+        this.protocolError(cause);
+        this.scheduleReconnect(reason);
+      }
+      throw cause;
+    }).finally(() => { this.snapshotPromise = null; });
     // Claim the flight before publishing health. Health observers may render
     // synchronously and re-enter hydrate/resume; they must join this request.
     this.snapshotPromise = flight;
@@ -341,23 +395,36 @@ export class ConversationSyncCoordinator implements ConversationSyncConnection {
   }
 
   private open(): void {
-    if (this.closed || this.suspended || !this.shouldConnect || this.source || this.snapshotPromise) return;
+    if (this.closed || this.suspended || !this.shouldConnect || this.source
+        || this.snapshotPromise || this.snapshotRequired) return;
     this.clearReconnectTimer();
     this.generation += 1;
     const sourceGeneration = this.generation;
     const factory = this.options.eventSourceFactory
       ?? ((url: string) => new EventSource(url));
-    const source = factory(this.options.api.eventsUrl(
-      this.options.conversationId,
-      this.cursorValue,
-      this.options.streamClientId,
-      this.options.streamClientId ? sourceGeneration : 0,
-    ));
+    let source: EventSource;
+    try {
+      source = factory(this.options.api.eventsUrl(
+        this.options.conversationId,
+        this.cursorValue,
+        this.options.streamClientId,
+        this.options.streamClientId ? sourceGeneration : 0,
+      ));
+    } catch (error) {
+      this.retryCount += 1;
+      this.protocolError(error);
+      this.scheduleReconnect('event-source-setup-failed');
+      throw error;
+    }
     const scope = createLifecycleScope();
     this.source = source;
     this.sourceScope = scope;
-    scope.add(() => source.close());
-    this.publishHealth('connecting');
+    scope.add(() => {
+      source.onopen = null;
+      source.onmessage = null;
+      source.onerror = null;
+      source.close();
+    });
 
     const ingest = (message: MessageEvent<string>): void => {
       if (this.closed || sourceGeneration !== this.generation) return;
@@ -370,14 +437,20 @@ export class ConversationSyncCoordinator implements ConversationSyncConnection {
         void this.recover('invalid-stream-frame').catch(() => undefined);
         return;
       }
-      this.ingest(event, message.lastEventId || '', receivedAt);
+      try {
+        this.ingest(event, message.lastEventId || '', receivedAt);
+      } catch (error) {
+        this.protocolError(error);
+        void this.recover('projection-ingestion-failed').catch(() => undefined);
+      }
     };
 
     source.onopen = () => {
       if (sourceGeneration !== this.generation) return;
-      this.retryCount = 0;
       this.publishHealth('live');
-      this.touchFrame();
+      // Opening a socket is not receipt of a valid frame. Neither repeated
+      // opens nor errors may postpone the existing last-frame deadline.
+      this.armSilenceTimer(false);
     };
     source.onmessage = ingest as (event: MessageEvent) => void;
     for (const name of CHANGE_EVENT_NAMES) {
@@ -390,8 +463,10 @@ export class ConversationSyncCoordinator implements ConversationSyncConnection {
       // below promotes only a genuinely stalled pipe to degraded.
       this.retryCount += 1;
       this.publishHealth('recovering', 'event-source-error');
-      this.armSilenceTimer();
+      this.armSilenceTimer(false);
     };
+    this.publishHealth('connecting');
+    if (sourceGeneration === this.generation) this.armSilenceTimer(false);
   }
 
   private ingest(
@@ -404,7 +479,9 @@ export class ConversationSyncCoordinator implements ConversationSyncConnection {
       void this.recover('identity-mismatch').catch(() => undefined);
       return;
     }
+    const generation = this.generation;
     this.touchFrame();
+    if (this.closed || generation !== this.generation) return;
     if (event.type === 'sync.heartbeat') {
       this.cursorValue = event.cursor;
       /* pushWithheld marks a WRITE-side wedge (authoritative pushes withheld
@@ -415,11 +492,10 @@ export class ConversationSyncCoordinator implements ConversationSyncConnection {
       this.publishHealth(event.degraded || wedged ? 'degraded' : 'live',
         wedged ? 'storage-write-wedged'
           : event.degraded ? 'storage-read-degraded' : undefined);
-      this.options.onPushWithheld?.(wedged);
+      notifyObserver('conversation-push-withheld', this.options.onPushWithheld, wedged);
       return;
     }
     if (event.type === 'sync.reset_required') {
-      this.cursorValue = event.cursor;
       void this.recover(event.reason).catch(() => undefined);
       return;
     }
@@ -431,6 +507,7 @@ export class ConversationSyncCoordinator implements ConversationSyncConnection {
     lastEventId: string,
     receivedAt: number,
   ): void {
+    const generation = this.generation;
     if (!lastEventId) {
       this.protocolError(new Error('Conversation change has no replay cursor'));
       void this.recover('missing-event-cursor').catch(() => undefined);
@@ -457,9 +534,10 @@ export class ConversationSyncCoordinator implements ConversationSyncConnection {
           receivedAt,
           Number(event.occurredAt || 0),
         );
+        if (this.closed || generation !== this.generation) return;
         const debugFrame = record(record(attemptEvent.payload).event);
         if (typeof debugFrame.type === 'string' && debugFrame.type) {
-          this.options.onDebugFrame?.(
+          notifyObserver('conversation-debug-frame', this.options.onDebugFrame,
             this.options.conversationId, debugFrame,
           );
         }
@@ -484,6 +562,7 @@ export class ConversationSyncCoordinator implements ConversationSyncConnection {
         this.protocolError(error);
         applied = false;
       }
+      if (applied && event.type !== 'turn.patch') this.roundRevision++;
       if (applied) applied = this.options.onTurnDelta({
         conversationRevision: Number(payload.conversationRevision || 0),
         turns: Array.isArray(payload.turns) ? payload.turns : [],
@@ -497,6 +576,7 @@ export class ConversationSyncCoordinator implements ConversationSyncConnection {
           ? payload.deletedTurnIds : [],
       });
     }
+    if (this.closed || generation !== this.generation) return;
     if (!applied) {
       void this.recover('projection-revision-gap').catch(() => undefined);
       return;
@@ -507,17 +587,20 @@ export class ConversationSyncCoordinator implements ConversationSyncConnection {
   }
 
   private touchFrame(): void {
+    this.retryCount = 0;
     this.publishHealth('live');
     this.armSilenceTimer();
   }
 
-  private armSilenceTimer(): void {
+  private armSilenceTimer(reset = true): void {
+    if (!reset && this.silenceTimer) return;
     if (this.silenceTimer) clearTimeout(this.silenceTimer);
     if (!this.source || this.closed) return;
     this.silenceTimer = setTimeout(() => {
       this.silenceTimer = null;
       if (this.closed || !this.shouldConnect) return;
       this.publishHealth('degraded', 'heartbeat-timeout');
+      this.retryCount += 1;
       this.closeSource();
       this.scheduleReconnect('heartbeat-timeout');
     }, Number(CONVERSATION_SYNC_STREAM_POLICY.reconnectGraceMs));
@@ -526,11 +609,15 @@ export class ConversationSyncCoordinator implements ConversationSyncConnection {
   private scheduleReconnect(reason: string, delay?: number): void {
     if (this.closed || this.suspended || !this.shouldConnect || this.reconnectTimer) return;
     const backoff = delay ?? Math.min(500 * (2 ** Math.min(this.retryCount, 5)), 15_000);
-    this.publishHealth('recovering', reason);
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
-      this.open();
+      // Wakes and retries use the same snapshot barrier as explicit resume.
+      // Failures are reported and scheduled by fetchSnapshot/open themselves.
+      void this.resume().catch(() => undefined);
     }, backoff);
+    // Claim before observers run: a synchronous invalidation must join this
+    // timer, and pause/close must be able to cancel it immediately.
+    this.publishHealth('recovering', reason);
   }
 
   private clearReconnectTimer(): void {
@@ -541,9 +628,10 @@ export class ConversationSyncCoordinator implements ConversationSyncConnection {
 
   private closeSource(): void {
     this.generation += 1;
-    this.sourceScope?.destroy();
+    const scope = this.sourceScope;
     this.sourceScope = null;
     this.source = null;
+    scope?.destroy();
     if (this.silenceTimer) clearTimeout(this.silenceTimer);
     this.silenceTimer = null;
   }
@@ -551,6 +639,7 @@ export class ConversationSyncCoordinator implements ConversationSyncConnection {
   private publishHealth(
     state: ConnectionHealth['state'], reason?: string,
   ): void {
+    if (this.closed && state !== 'closed') return;
     this.hasPublishedHealth = true;
     const previous = conversationConnectionHealth.get(this.options.conversationId);
     const now = Date.now();
@@ -564,11 +653,14 @@ export class ConversationSyncCoordinator implements ConversationSyncConnection {
       reason,
     };
     conversationConnectionHealth.set(this.options.conversationId, health);
-    this.options.onHealth?.(this.options.conversationId, health);
+    if (!this.closed || state === 'closed') {
+      notifyObserver('conversation-health', this.options.onHealth, this.options.conversationId, health);
+    }
   }
 
   private protocolError(cause: unknown): void {
+    if (this.closed) return;
     const error = cause instanceof Error ? cause : new Error(String(cause));
-    this.options.onProtocolError?.(error);
+    notifyObserver('conversation-protocol-error', this.options.onProtocolError, error);
   }
 }

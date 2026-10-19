@@ -18,7 +18,7 @@ from urllib.parse import unquote, urlparse
 import lib as _lib
 from lib.browser.log_safety import text_for_log, url_for_log
 from lib.log import get_logger
-from lib.search_runtime import ensure_search_runtime
+from lib.search.search_runtime import ensure_search_runtime
 
 ensure_search_runtime()
 
@@ -251,7 +251,7 @@ def _stage_binary_asset(
     # response first: signed/one-time download URLs must never be fetched
     # twice merely to distinguish text from a file.
     try:
-        from lib.search_bridge import claim_bound_browser_file
+        from lib.search.search_bridge import claim_bound_browser_file
         browser_receipt = claim_bound_browser_file(
             browser_claim_url or target_url)
     except Exception as exc:
@@ -273,7 +273,7 @@ def _stage_binary_asset(
         # valid session.  Stream that browser response back to THIS server;
         # never invoke chrome.downloads (whose destination is the client).
         try:
-            from lib.search_bridge import fetch_bound_browser_file
+            from lib.search.search_bridge import fetch_bound_browser_file
             browser_receipt = fetch_bound_browser_file(
                 target_url,
                 max_bytes=_lib.FETCH_MAX_BYTES,
@@ -438,6 +438,8 @@ def _download_failure(
     next_action: str,
 ) -> dict:
     """Return the one typed internal failure shape used by both entry paths."""
+    from lib.tools.result_envelope import tool_error_next_action
+
     return {
         'location': None,
         'saved_path': None,
@@ -445,7 +447,7 @@ def _download_failure(
         'error_code': str(code or 'server_download_failed')[:96],
         'error_msg': str(message or 'The URL could not be downloaded.')[:500],
         'retryable': bool(retryable),
-        'next_action': str(next_action or 'Stop and report the failure.')[:300],
+        'next_action': tool_error_next_action(next_action),
     }
 
 
@@ -466,14 +468,15 @@ def _stage_direct_server_download(
     owner_user_id,
 ) -> dict:
     """Atomically persist one server-fetched response under bounded staging."""
-    if len(raw) > int(_lib.FETCH_MAX_BYTES):
+    from lib.browser.file_transfer import MAX_TRANSFER_BYTES
+
+    if len(raw) > MAX_TRANSFER_BYTES:
         return _download_failure(
             'server_download_too_large',
-            'The remote response exceeds the configured server download limit.',
+            'The remote response exceeds the 500 MiB file download limit.',
             retryable=False,
             next_action=(
-                'Ask the user to raise the Search max-download setting only if '
-                'they expect and trust this file size.'),
+                'Stop: this file exceeds the supported 500 MiB download ceiling.'),
         )
     try:
         from lib.browser.file_transfer import file_transfer_store
@@ -601,10 +604,14 @@ def download_url_to_server(target_url: str, *, owner_user_id) -> dict:
                     'trying bound browser for %s', url_for_log(target_url))
 
     try:
-        from lib.search_bridge import require_bound_browser_file
+        from lib.browser.file_transfer import MAX_TRANSFER_BYTES
+        from lib.search.search_bridge import require_bound_browser_file
+        # Explicit file intent uses the streaming file budget, not the search
+        # body's in-memory FETCH_MAX_BYTES. The direct fast path stays small;
+        # larger files use the existing bounded browser-to-server stream.
         receipt = require_bound_browser_file(
             target_url,
-            max_bytes=_lib.FETCH_MAX_BYTES,
+            max_bytes=MAX_TRANSFER_BYTES,
             timeout=_lib.FETCH_TIMEOUT,
         )
     except Exception as exc:
@@ -645,6 +652,8 @@ def download_url_to_server(target_url: str, *, owner_user_id) -> dict:
                     'browser_file_transfer_offline',
                     'browser_file_transfer_unbound',
                 }
+                else 'Stop: this file exceeds the supported 500 MiB download ceiling.'
+                if code == 'browser_file_transfer_too_large'
                 else 'Retry once; report the browser file-transfer failure if it repeats.'
             )
         elif ((BrowserProtocolRejected and isinstance(
@@ -715,7 +724,7 @@ def _fetch_url_one(target_url: str, user_question: str, fetch_reason: str = ''):
 
     _fetch_diag = {}
     browser_claim_url = ''
-    from lib.search_bridge import (
+    from lib.search.search_bridge import (
         BrowserFileHandoffReady,
         browser_file_handoff_boundary,
     )

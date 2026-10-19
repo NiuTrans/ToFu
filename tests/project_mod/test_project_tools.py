@@ -769,12 +769,9 @@ class TestUnicodeEscapeNormalization:
 
 
 # ═══════════════════════════════════════════════════════════
-#  Large-file size gate vs. bounded range reads
-#  Regression: a whole-file read of a >MAX_FILE_SIZE file is rejected
-#  ("File too large"), but a bounded start_line/end_line read must still
-#  succeed — its output is capped by the range, not the total size.
-#  Rejecting it created a deadlock with the read-before-edit gate (the
-#  only gate-satisfying tool, read_files, was itself blocked).
+#  Complete large-file sources and exact explicit range reads.
+#  Whole-file requests include their tail; explicit ranges stay bounded by
+#  the requested lines and never widen because of source size.
 # ═══════════════════════════════════════════════════════════
 
 @pytest.mark.unit
@@ -782,21 +779,26 @@ class TestLargeFileRangeRead:
     def _make_big_file(self):
         import os
         import tempfile
-        from lib.project_mod.config import MAX_FILE_SIZE
+        retired_read_limit = 512 * 1024
         d = tempfile.mkdtemp()
-        # One line per row, comfortably over the size cap.
-        nlines = (MAX_FILE_SIZE // 10) + 5000
+        # One line per row above the retired reader admission threshold.
+        nlines = (retired_read_limit // 10) + 5000
         lines = [f'line-{i:08d}\n' for i in range(nlines)]
         with open(os.path.join(d, 'big.txt'), 'w') as f:
             f.writelines(lines)
-        assert os.path.getsize(os.path.join(d, 'big.txt')) > MAX_FILE_SIZE
+        assert os.path.getsize(os.path.join(d, 'big.txt')) > retired_read_limit
         return d
 
-    def test_whole_file_read_still_blocked(self):
+    def test_whole_file_read_keeps_the_complete_source(self):
+        import os
         from lib.project_mod.read_tools import _read_project_file
         d = self._make_big_file()
         r = _read_project_file(d, 'big.txt')
-        assert 'File too large' in r
+        assert 'File too large' not in r
+        assert 'line-00000000' in r
+        with open(os.path.join(d, 'big.txt')) as source:
+            last = source.readlines()[-1].strip()
+        assert last in r
 
     def test_bounded_range_read_succeeds(self):
         from lib.project_mod.read_tools import _read_project_file

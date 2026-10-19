@@ -28,32 +28,17 @@ def _task_poll_fields(runtime, task_id: str, cursor: int) -> dict:
     return dict(runtime.poll(task_id, cursor))
 
 
-class _PaperDownloadTooLarge(ValueError):
-    pass
-
-
 class _PaperInvalidPDF(ValueError):
     pass
 
 
-def _paper_pdf_limit() -> int:
-    # Lazy import keeps the PDF engine out of the ordinary server import path.
-    from lib.pdf_parser._common import MAX_PDF_BYTES
-
-    return MAX_PDF_BYTES
-
-
 def _declared_pdf_length(resp) -> int:
-    """Parse and enforce Content-Length; streamed bytes are checked again."""
+    """Parse advisory progress length without reserving or refusing source bytes."""
     try:
         declared = int(resp.headers.get("Content-Length") or 0)
     except (AttributeError, TypeError, ValueError) as exc:
         logger.debug("[Paper] invalid PDF Content-Length ignored: %s", exc)
         declared = 0
-    if declared > _paper_pdf_limit():
-        raise _PaperDownloadTooLarge(
-            f"PDF exceeds the {_paper_pdf_limit() // 1048576} MB limit"
-        )
     return max(0, declared)
 
 
@@ -65,45 +50,30 @@ def _new_pdf_part(filepath: str):
     )
 
 
-def _read_pdf_bounded(filepath: str) -> bytes:
-    limit = _paper_pdf_limit()
-    with open(filepath, "rb") as fh:
-        data = fh.read(limit + 1)
-    if len(data) > limit:
-        raise _PaperDownloadTooLarge(f"PDF exceeds the {limit // 1048576} MB limit")
-    return data
+def _read_pdf_source(filepath: str) -> bytes:
+    with open(filepath, "rb") as stream:
+        return stream.read()
 
 
 def _store_uploaded_pdf_atomic(stream, filepath: str) -> bytes:
-    """Bound, validate and atomically publish one uploaded PDF.
+    """Stream complete source into owned staging, validate, then publish atomically.
 
-    The multipart parser may spool the incoming body, but the route must not
-    turn that into an unbounded second in-memory copy. Stream into a same-dir
-    staging file, enforce the parser's byte ceiling independently of request
-    headers, then materialize exactly one bounded byte string for validation
-    and parsing. A disconnect, invalid document, ENOSPC or parser rejection
-    never leaves a partially-written final cache entry.
+    The parser consumes a complete byte string; this is not constant parser RAM.
+    Failed receive/write/validation never publishes a staging part.
     """
-    limit = _paper_pdf_limit()
     fd, part_path = _new_pdf_part(filepath)
     published = False
     try:
-        total = 0
         with os.fdopen(fd, "wb") as out:
             while True:
                 chunk = stream.read(1024 * 1024)
                 if not chunk:
                     break
-                total += len(chunk)
-                if total > limit:
-                    raise _PaperDownloadTooLarge(
-                        f"PDF exceeds the {limit // 1048576} MB limit"
-                    )
                 out.write(chunk)
             out.flush()
             os.fsync(out.fileno())
 
-        pdf_bytes = _read_pdf_bounded(part_path)
+        pdf_bytes = _read_pdf_source(part_path)
         from lib.pdf_parser.text import validate_pdf_bytes
 
         valid, _pages, error = validate_pdf_bytes(pdf_bytes)
@@ -139,14 +109,14 @@ def _load_valid_cached_pdf(filepath: str):
     try:
         if not os.path.exists(filepath) or os.path.getsize(filepath) <= 1000:
             return None
-        pdf_bytes = _read_pdf_bounded(filepath)
+        pdf_bytes = _read_pdf_source(filepath)
         from lib.pdf_parser.text import validate_pdf_bytes
 
         valid, _pages, error = validate_pdf_bytes(pdf_bytes)
         if valid:
             return pdf_bytes
         logger.warning("[Paper:arXiv] Discarding invalid cache %s: %s", filepath, error)
-    except (OSError, _PaperDownloadTooLarge) as exc:
+    except OSError as exc:
         logger.warning("[Paper:arXiv] Discarding unusable cache %s: %s", filepath, exc)
     try:
         os.remove(filepath)

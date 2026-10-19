@@ -616,10 +616,11 @@ pub fn serve_supervised<R: Read + Send + 'static, W: Write>(
         // barrier itself moves to a coordinator thread: every connection's
         // commits post their witness and wait outside the authority mutex,
         // so concurrent commits share one fsync (group-barrier pipelining).
-        let (barrier, driver) = crate::wal::WalBarrierDriver::start(
-            std::sync::Arc::new(crate::vfs::RealVfs),
+        let (barrier, driver) = crate::wal::WalBarrierDriver::start_with_write_buffer(
+            authority.wal_vfs()?,
             authority.wal_path()?,
             std::time::Duration::from_millis(1),
+            crate::wal::WalBarrierDriver::capacity_for_headroom(config.resource_budget.snapshot.memory_headroom_bytes),
         )?;
         authority.attach_wal_barrier(&barrier)?;
         Some((barrier, driver))
@@ -637,27 +638,15 @@ pub fn serve_supervised<R: Read + Send + 'static, W: Write>(
     let foreground_admissions = authority.foreground_admissions();
     let canonical_json_cache = Some(authority.canonical_json_cache_observer());
         let decoded_chunk_cache = Some(authority.decoded_chunk_cache_observer());
+    authority.configure_blob_codecs(config.resource_budget.snapshot)?;
+    let blob_codec_pool = Some(authority.blob_codec_pool_observer()?);
     let published_queries = authority.enable_published_queries()?;
     let database = Arc::new(Mutex::new(authority));
     let search_projection = crate::engine_log::lifecycle_step("startup_timing", "search_projection_open", || {
         config.search_projection_dir.as_ref().map(|path| {
-        let result = if path.exists() {
-            TurnSearchProjection::open(
-                path,
-                config
-                    .resource_budget
-                    .search_projection_maximum_bytes_per_owner,
-            )
-        } else {
-            TurnSearchProjection::initialize(
-                path,
-                config
-                    .resource_budget
-                    .search_projection_maximum_bytes_per_owner,
-            )
-        };
-        let mut projection = result?;
-        projection.require_source_admission(authority_uuid);
+        let projection = TurnSearchProjection::open_or_defer(
+            path, config.resource_budget.search_projection_maximum_bytes_per_owner, authority_uuid,
+        )?;
         Ok::<_, io::Error>(Arc::new(Mutex::new(projection)))
     }).transpose()
     })?;
@@ -676,7 +665,7 @@ pub fn serve_supervised<R: Read + Send + 'static, W: Write>(
         address.port(),
         authority_uuid,
         &config,
-        search_projection.is_some(),
+        search_projection.as_ref().is_some_and(|index| index.lock().is_ok_and(|index| index.available())),
     )?;
     // Bounded page-cache warm-up off the readiness path: sequential payload
     // reads convert cold network-volume fault-in into mount readahead so the
@@ -753,6 +742,18 @@ pub fn serve_supervised<R: Read + Send + 'static, W: Write>(
         )?)
     };
     let online_gc_observer = online_gc_driver.as_ref().map(|driver| driver.observer());
+    let search_gc_driver = if std::env::var_os("TOFU_DB_DISABLE_ONLINE_BACKGROUND").is_some() {
+        None
+    } else {
+        search_projection.as_ref().map(|projection| {
+            crate::authority_gc_online::OnlineGarbageCollectionDriver::start(
+                projection,
+                AuthorityGarbageCollectionBudget::from_resource_budget(config.resource_budget),
+                config.resource_budget.has_volume_pressure(),
+            )
+        }).transpose()?
+    };
+
     // Seals pending transcript windows into immutable pages off the
     // foreground path; hydration reads pages instead of per-turn documents.
     let archive_seal_driver =
@@ -792,12 +793,15 @@ pub fn serve_supervised<R: Read + Send + 'static, W: Write>(
     let authority_watch_observer = Some(authority_watch.observer());
     let control_observers = crate::control_ops::ControlObservers {
         canonical_json_cache,
+        wal_write_buffer: wal_barrier_driver.as_ref().map(|(barrier, _)| barrier.clone()),
         decoded_chunk_cache,
+        blob_codec_pool,
         published_queries: Some(published_queries.observer()),
         listener: Some(listener.observer()),
         maintenance: maintenance_observer.clone(),
         packer: packer_observer.clone(),
         online_gc: online_gc_observer.clone(),
+        search_gc: search_gc_driver.as_ref().map(|driver| driver.observer()),
         online_backup: online_backup_observer.clone(),
         authority_watch: authority_watch_observer.clone(),
         wal_durability: Some(match config.wal_durability {
@@ -807,7 +811,7 @@ pub fn serve_supervised<R: Read + Send + 'static, W: Write>(
         wal_flush_interval_milliseconds: Some(config.wal_flush_interval.as_millis() as u64),
         resource_budget: Some(resource_budget_json(
             &config,
-            search_projection.is_some(),
+            search_projection.as_ref().is_some_and(|index| index.lock().is_ok_and(|index| index.available())),
         )),
     };
     // The run consumes both Arcs; the shutdown tail retires their WAL
@@ -844,6 +848,9 @@ pub fn serve_supervised<R: Read + Send + 'static, W: Write>(
     // try_lock holds never contend with the final checkpoint commit.
     let online_gc_result = online_gc_driver
         .map(|driver| crate::engine_log::lifecycle_step("shutdown_timing", "online_gc", || driver.stop_and_join()))
+        .transpose();
+    let search_gc_result = search_gc_driver
+        .map(|driver| crate::engine_log::lifecycle_step("shutdown_timing", "search_gc", || driver.stop_and_join()))
         .transpose();
     let archive_seal_result = archive_seal_driver
         .map(|driver| crate::engine_log::lifecycle_step("shutdown_timing", "archive_seal", || driver.stop_and_join()))
@@ -901,6 +908,7 @@ pub fn serve_supervised<R: Read + Send + 'static, W: Write>(
     let listener_metrics = result?;
     maintenance_result?;
     online_gc_result?;
+    search_gc_result?;
     archive_seal_result?;
     online_backup_result?;
     authority_watch_result?;
@@ -1014,16 +1022,29 @@ fn validate_projection_path(authority_dir: &Path, projection_dir: &Path) -> io::
         ));
     }
     let authority = std::fs::canonicalize(authority_dir)?;
-    let projection = if projection_dir.exists() {
-        std::fs::canonicalize(projection_dir)?
-    } else {
-        let parent = projection_dir.parent().ok_or_else(|| {
-            invalid_input("turn-search projection path must have a persistent parent")
-        })?;
-        let name = projection_dir
-            .file_name()
-            .ok_or_else(|| invalid_input("turn-search projection path must name a directory"))?;
-        std::fs::canonicalize(parent)?.join(name)
+    // Resolve missing parents without writes, preserving canonical overlap checks.
+    let mut ancestor = projection_dir;
+    let mut missing_components = Vec::new();
+    let projection = loop {
+        match std::fs::canonicalize(ancestor) {
+            Ok(mut resolved) => {
+                for name in missing_components.iter().rev() { resolved.push(name); }
+                break resolved;
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                match std::fs::symlink_metadata(ancestor) {
+                    Ok(metadata) if metadata.file_type().is_symlink() => {
+                        return Err(invalid_input("turn-search projection has an unresolved symlink"));
+                    }
+                    Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
+                    _ => {},
+                }
+                let name = ancestor.file_name().ok_or_else(|| invalid_input("turn-search projection path must name a directory"))?;
+                missing_components.push(name.to_os_string());
+                ancestor = ancestor.parent().ok_or_else(|| invalid_input("turn-search projection path must have a persistent parent"))?;
+            }
+            Err(error) => return Err(error),
+        }
     };
     if authority == projection
         || authority.starts_with(&projection)
@@ -1360,7 +1381,7 @@ mod tests {
     fn supervised_serve_opens_configured_disposable_search_projection() {
         let directory = tempfile::tempdir().unwrap();
         let authority = directory.path().join("authority");
-        let projection = directory.path().join("projection");
+        let projection = directory.path().join("absent-parent/nested/projection");
         AuthorityDatabase::initialize(&authority).unwrap();
         let mut secret = [b's'; 32];
         let config = DaemonConfig::new(&authority, 11, Some(7), &mut secret)
@@ -1382,4 +1403,20 @@ mod tests {
         );
         assert!(projection.join("CONTROL").exists());
     }
+    #[cfg(unix)]
+    #[test]
+    fn missing_projection_parents_preserve_overlap_and_symlink_fences() {
+        use std::os::unix::fs::symlink;
+        let directory = tempfile::tempdir().unwrap();
+        let authority = directory.path().join("authority");
+        std::fs::create_dir(&authority).unwrap();
+        let alias = directory.path().join("alias");
+        symlink(&authority, &alias).unwrap();
+        assert_eq!(validate_projection_path(&authority, &alias.join("missing/nested/index")).unwrap_err().kind(), io::ErrorKind::InvalidInput);
+        assert!(!authority.join("missing").exists());
+        let dangling = directory.path().join("dangling");
+        symlink(directory.path().join("absent-target"), &dangling).unwrap();
+        assert_eq!(validate_projection_path(&authority, &dangling.join("nested/index")).unwrap_err().kind(), io::ErrorKind::InvalidInput);
+    }
+
 }

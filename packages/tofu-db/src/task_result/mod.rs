@@ -927,6 +927,14 @@ fn checkpoint_inner(
 /// Full version witness for the application checkpoint CAS. Never use a
 /// generic owner-scoped record key: task identity is tenant-global and its
 /// authenticated owner lives in the validated header.
+/// A prepared cross-domain operation rechecks the compact semantic CAS authority
+/// without materializing the unchanged cumulative child transcript again.
+pub(crate) fn owned_record_version(database: &AuthorityDatabase,
+    transaction: &mut AuthorityTransaction, task_id: &str) -> io::Result<Option<u64>> {
+    Ok(read_header(database, transaction, task_id)?
+        .filter(|header| header.owner_user_id == transaction.owner_user_id()).map(|header| header.version))
+}
+
 pub(crate) fn record_get(
     database: &AuthorityDatabase,
     transaction: &mut AuthorityTransaction,

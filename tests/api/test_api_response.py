@@ -12,6 +12,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 import pytest as _pytest
 
+pytestmark = _pytest.mark.unit
+
 
 @_pytest.fixture(autouse=True)
 def _isolate_req_id():
@@ -46,6 +48,120 @@ async def _resolve(resp):
     else:
         body = response  # plain string body (api_no_content path)
     return status, (json.loads(body) if body else {})
+
+
+@_pytest.mark.parametrize('code,status,event', [
+    ('database_integrity', 500, 'conversation.storage_failure'),
+    ('database_unavailable', 503, 'conversation.storage_unavailable'),
+])
+def test_conversation_storage_error_retains_correlated_backend_evidence(
+        code, status, event, tmp_path, caplog):
+    import asyncio
+    import logging
+
+    from lib.api_v4 import attach_v4_envelope
+    from lib.incident_journal import IncidentJournalHandler
+    from lib.log import LogContextFilter, bind_log_context, set_req_id
+    from lib.storage.errors import StorageError
+    from routes.conversation_turn_errors import storage_failure_response
+
+    try:
+        raise StorageError(code, 'private-storage-diagnostic', operation_id='storage-op')
+    except StorageError as caught:
+        failure = caught
+    app = _make_app_ctx()
+    attach_v4_envelope(app)
+    app.add_url_rule('/api/v4/conversations/<conversation_id>/turns/rounds',
+                     view_func=lambda conversation_id: None)
+    path = tmp_path / 'incident.jsonl'
+    journal = IncidentJournalHandler(str(path))
+    journal.addFilter(LogContextFilter())
+    route_logger = logging.getLogger('routes.conversation_turn_errors')
+
+    async def run():
+        async with app.test_request_context('/api/v4/conversations/c/turns/rounds'):
+            set_req_id('storage-rid')
+            with bind_log_context(user_id='owner'):
+                result = storage_failure_response(failure, operation='conversation.sync.round_directory')
+                response, actual_status = result
+                response = await app.process_response(response)
+                return actual_status, await response.get_data(as_text=True)
+
+    route_logger.addHandler(journal)
+    try:
+        with caplog.at_level(logging.WARNING, logger='routes.conversation_turn_errors'):
+            actual_status, body = asyncio.run(run())
+    finally:
+        route_logger.removeHandler(journal)
+        journal.close()
+    assert actual_status == status
+    if status == 500:
+        assert 'private-storage-diagnostic' not in body
+    record = next(record for record in caplog.records
+                  if getattr(record, 'tofu_event_name', '') == event)
+    assert record.tofu_event_fields['storage_operation_id'] == 'storage-op'
+    assert record.tofu_event_fields['storage_code'] == code
+    if status == 500:
+        assert record.exc_info == (StorageError, failure, failure.__traceback__)
+        assert 'private-storage-diagnostic' in record.getMessage()
+    incident = json.loads(path.read_text())
+    assert incident['request_id'] == 'storage-rid'
+    assert incident['conversation_id'] == 'c'
+    assert incident['user_id'] == 'owner'
+    assert incident['fields']['storage_operation_id'] == 'storage-op'
+    if status == 500:
+        assert 'StorageError' in incident['exception']
+
+
+@_pytest.mark.parametrize('cause', ['storage', 'contract', 'exception', 'string', 'none'])
+def test_each_http_500_preserves_request_evidence_through_coalescing(
+        cause, tmp_path, monkeypatch):
+    import asyncio
+    import logging
+
+    from lib.api_response import api_internal_error
+    from lib.conversation_sync.validation import ContractViolation
+    from lib.incident_journal import IncidentJournalHandler
+    from lib.log import LogContextFilter, set_req_id
+    from lib.logging_pkg.log_rate_limit import DuplicateCoalescingFilter
+    from lib.storage.errors import StorageError
+    from routes.conversation_turn_errors import contract_violation_response, storage_failure_response
+
+    app = _make_app_ctx()
+    journal_path = tmp_path / 'incident.jsonl'
+    journal = IncidentJournalHandler(str(journal_path))
+    coalescer = DuplicateCoalescingFilter()
+    monkeypatch.setattr(coalescer, '_settings', lambda: (1, 60.0, 60.0))
+    journal.addFilter(LogContextFilter())
+    journal.addFilter(coalescer)
+    logger = logging.getLogger('routes.conversation_turn_errors'
+                               if cause in {'storage', 'contract'} else 'lib.api_response')
+
+    async def run():
+        for index in range(3):
+            async with app.test_request_context('/test'):
+                set_req_id('failure-rid-%d' % index)
+                if cause == 'storage':
+                    result = storage_failure_response(
+                        StorageError('database_integrity', 'same failure'), operation='snapshot')
+                elif cause == 'contract':
+                    result = contract_violation_response(
+                        ContractViolation('TurnSnapshot', ['turn.status: required']), operation='snapshot')
+                else:
+                    failure = (RuntimeError('same failure') if cause == 'exception'
+                               else 'same failure' if cause == 'string' else None)
+                    result = api_internal_error(failure)
+                assert result[1] == 500
+
+    logger.addHandler(journal)
+    try:
+        asyncio.run(run())
+    finally:
+        logger.removeHandler(journal)
+        journal.close()
+    records = [json.loads(line) for line in journal_path.read_text().splitlines()]
+    assert [row['request_id'] for row in records] == ['failure-rid-%d' % i for i in range(3)]
+    assert all(row['occurrence_delta'] == 1 for row in records)
 
 
 def _make_app_ctx():

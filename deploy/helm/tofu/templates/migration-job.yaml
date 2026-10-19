@@ -27,7 +27,7 @@ spec:
         - name: migrate
           image: {{ include "tofu.apiImage" . }}
           imagePullPolicy: {{ .Values.images.pullPolicy }}
-          command: ["python", "-m", "lib.storage_sidecar.migrate"]
+          command: ["python", "-m", "lib.storage_authority_sql.migrate"]
           env:
 {{ include "tofu.commonEnv" (dict "root" . "role" "scheduler") | indent 12 }}
           securityContext:

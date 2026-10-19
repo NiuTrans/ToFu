@@ -25,7 +25,7 @@ pytestmark = pytest.mark.unit
 
 def _sync_kwargs(env=None):
     """Run sync_search_config() and capture the kwargs handed to configure()."""
-    import lib.search_bridge as sb
+    import lib.search.search_bridge as sb
     with mock.patch.dict(os.environ, env or {}, clear=False), \
          mock.patch.object(sb.tofu_search, 'configure') as cfg:
         sb.sync_search_config()
@@ -59,7 +59,7 @@ def test_empty_proxy_url_is_not_passed_so_env_survives():
     configure() applies its env default only to fields ABSENT from kwargs, so
     passing '' means "no proxy" instead of "fall back to the environment".
     """
-    import lib.search_bridge as sb
+    import lib.search.search_bridge as sb
     with mock.patch.object(sb, '_resolve_proxy_url', return_value=''):
         kw = _sync_kwargs()
     assert 'proxy_url' not in kw

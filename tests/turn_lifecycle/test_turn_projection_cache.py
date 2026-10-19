@@ -9,7 +9,7 @@ pytestmark = pytest.mark.unit
 
 
 def _key(suffix: str):
-    from lib.storage_sidecar.turn_projection_cache import projection_cache_key
+    from lib.storage_authority_sql.turn_projection_cache import projection_cache_key
 
     return projection_cache_key("sqlite", 1, "conv", suffix, "attempt")
 
@@ -27,7 +27,7 @@ def _remember(cache, key, revision, charge):
 
 
 def test_projection_cache_enforces_lru_byte_entry_and_idle_bounds():
-    from lib.storage_sidecar.turn_projection_cache import TurnProjectionCache
+    from lib.storage_authority_sql.turn_projection_cache import TurnProjectionCache
 
     now = [10.0]
     cache = TurnProjectionCache(
@@ -58,7 +58,7 @@ def test_projection_cache_enforces_lru_byte_entry_and_idle_bounds():
 
 
 def test_projection_cache_revision_mismatch_evicts_instead_of_serving_stale():
-    from lib.storage_sidecar.turn_projection_cache import TurnProjectionCache
+    from lib.storage_authority_sql.turn_projection_cache import TurnProjectionCache
 
     cache = TurnProjectionCache(1024, max_entries=2)
     key = _key("revision")
@@ -72,7 +72,7 @@ def test_projection_cache_revision_mismatch_evicts_instead_of_serving_stale():
 
 
 def test_projection_cache_text_charge_adjustment_avoids_full_serialization():
-    from lib.storage_sidecar.turn_projection_cache import (
+    from lib.storage_authority_sql.turn_projection_cache import (
         CachedTurnProjection,
         text_update_charge_bytes,
     )

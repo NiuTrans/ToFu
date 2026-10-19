@@ -1,14 +1,12 @@
-"""Bounded streaming extraction of uploaded TeX project archives.
+"""Owned streaming extraction of uploaded TeX project archives.
 
-This module is a PURE bounded extractor: callers own root/attachment
+This module is a PURE streaming extractor: callers own root/attachment
 authority and read-only enforcement. Extraction always lands in a private
 staging sibling and is published with one same-filesystem rename, so a
 failed archive never leaves a half-written tree and never overwrites
 existing files (the final directory is auto-suffixed).
 
-Limits mirror the paper source snapshot budget (512 files / 64 MiB total /
-32 MiB per file) so an extracted tree is always compilable by the build
-service. Archive bytes themselves are capped at 128 MiB compressed.
+Source bytes and regular-file counts have no private admission quota.
 """
 from __future__ import annotations
 
@@ -24,10 +22,6 @@ from pathlib import Path
 
 from lib.paper.builds.errors import BuildError
 
-MAX_ARCHIVE_BYTES = 128 * 1024 * 1024
-MAX_FILES = 512
-MAX_TOTAL_BYTES = 64 * 1024 * 1024
-MAX_FILE_BYTES = 32 * 1024 * 1024
 MAX_PATH_CHARS = 512
 MAX_DEPTH = 32
 _CHUNK = 1024 * 1024
@@ -38,25 +32,21 @@ class ExtractionReceipt:
     directory: Path
     files: int = 0
     bytes_written: int = 0
-    skipped: list = field(default_factory=list)  # (name, reason), bounded
+    skipped: list = field(default_factory=list)  # (name, reason)
 
     def as_dict(self, root: Path) -> dict:
         return {'directory': self.directory.name,
                 'path': str(self.directory),
                 'files': self.files, 'bytes': self.bytes_written,
-                'skipped': self.skipped[:16]}
+                'skipped': self.skipped}
 
 
-def stream_to_temp(stream, *, max_bytes: int = MAX_ARCHIVE_BYTES) -> Path:
-    """Spool one bounded upload body to a private temp file."""
+def stream_to_temp(stream) -> Path:
+    """Spool one complete upload body to a private temp file."""
     fd, name = tempfile.mkstemp(prefix='tofu-archive-', suffix='.bin')
-    size = 0
     try:
         with os.fdopen(fd, 'wb') as target:
             while chunk := stream.read(_CHUNK):
-                size += len(chunk)
-                if size > max_bytes:
-                    raise BuildError('archive_limit', 'Archive exceeds the byte limit')
                 target.write(chunk)
     except BaseException:
         Path(name).unlink(missing_ok=True)
@@ -75,17 +65,6 @@ def _member_parts(raw: str) -> tuple[str, ...]:
     if not parts or len(parts) > MAX_DEPTH or len(raw) > MAX_PATH_CHARS:
         raise BuildError('archive_path', 'Archive member path is unsafe')
     return tuple(parts)
-
-
-def _check_entry(name: str, size: int, budget: dict) -> None:
-    budget['files'] += 1
-    if budget['files'] > MAX_FILES:
-        raise BuildError('archive_limit', 'Archive has too many files')
-    if size > MAX_FILE_BYTES:
-        raise BuildError('archive_limit', 'Archive member exceeds the byte limit')
-    budget['bytes'] += size
-    if budget['bytes'] > MAX_TOTAL_BYTES:
-        raise BuildError('archive_limit', 'Archive exceeds the total byte limit')
 
 
 def _safe_target(staging: Path, parts: tuple[str, ...]) -> Path:
@@ -109,13 +88,14 @@ def _copy_stream(source, target: Path, size: int) -> None:
                     break
                 out.write(chunk)
                 remaining -= len(chunk)
+            if remaining:
+                raise BuildError('archive_invalid', 'Archive member ended before its declared size')
     except BaseException:
         target.unlink(missing_ok=True)
         raise
 
 
-def _extract_zip(archive: Path, staging: Path, receipt: ExtractionReceipt,
-                 budget: dict) -> None:
+def _extract_zip(archive: Path, staging: Path, receipt: ExtractionReceipt) -> None:
     with zipfile.ZipFile(archive) as bundle:
         for info in bundle.infolist():
             mode = (info.external_attr >> 16) & 0o170000
@@ -128,15 +108,13 @@ def _extract_zip(archive: Path, staging: Path, receipt: ExtractionReceipt,
             if info.is_dir():
                 _safe_target(staging, parts).mkdir(parents=True, exist_ok=True)
                 continue
-            _check_entry(info.filename, info.file_size, budget)
             with bundle.open(info) as source:
                 _copy_stream(source, _safe_target(staging, parts), info.file_size)
             receipt.files += 1
             receipt.bytes_written += info.file_size
 
 
-def _extract_tar(archive: Path, staging: Path, receipt: ExtractionReceipt,
-                 budget: dict) -> None:
+def _extract_tar(archive: Path, staging: Path, receipt: ExtractionReceipt) -> None:
     with tarfile.open(archive) as bundle:
         for member in bundle:
             parts = _member_parts(member.name)
@@ -148,7 +126,6 @@ def _extract_tar(archive: Path, staging: Path, receipt: ExtractionReceipt,
             if not member.isreg():
                 receipt.skipped.append((member.name[:120], 'link or special file'))
                 continue
-            _check_entry(member.name, member.size, budget)
             source = bundle.extractfile(member)
             if source is None:
                 raise BuildError('archive_invalid', 'Archive member cannot be read')
@@ -178,12 +155,11 @@ def extract_archive(archive: Path, destination_parent: Path, *,
     staging = destination_parent / ('.tofu-extract-%s' % uuid.uuid4().hex[:12])
     staging.mkdir(mode=0o700)
     receipt = ExtractionReceipt(directory=staging)
-    budget = {'files': 0, 'bytes': 0}
     try:
         if zipfile.is_zipfile(archive):
-            _extract_zip(archive, staging, receipt, budget)
+            _extract_zip(archive, staging, receipt)
         elif tarfile.is_tarfile(archive):
-            _extract_tar(archive, staging, receipt, budget)
+            _extract_tar(archive, staging, receipt)
         else:
             raise BuildError('archive_invalid', 'Only .zip/.tar/.tar.gz archives are supported')
         if not receipt.files:
@@ -193,10 +169,10 @@ def extract_archive(archive: Path, destination_parent: Path, *,
         while final.exists():
             final = destination_parent / ('%s (%d)' % (stem, counter))
             counter += 1
-            if counter > 64:
-                raise BuildError('archive_path', 'Cannot name the extracted directory')
         os.rename(staging, final)  # same filesystem; final is deduped above
         receipt.directory = final
         return receipt
+    except (zipfile.BadZipFile, tarfile.ReadError, EOFError) as exc:
+        raise BuildError('archive_invalid', f'Archive content is unreadable: {exc}') from exc
     finally:
         shutil.rmtree(staging, ignore_errors=True)

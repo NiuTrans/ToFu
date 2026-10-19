@@ -36,6 +36,36 @@ def test_bounded_process_captures_a_successful_child():
     assert result.stdout.strip() == 'maintenance-ok'
 
 
+def test_already_cancelled_process_never_spawns(monkeypatch):
+    from lib.scheduler import process_runner
+
+    cancel = threading.Event()
+    cancel.set()
+    launches = []
+    original_popen = process_runner.subprocess.Popen
+
+    def record_launch(*args, **kwargs):
+        launches.append(args)
+        return original_popen(*args, **kwargs)
+
+    monkeypatch.setattr(process_runner.subprocess, 'Popen', record_launch)
+    result = run_bounded_process(
+        [sys.executable, '-c', 'print("must-not-run")'],
+        max_runtime=10, job_id='pre-cancelled', job_type='test',
+        principal=_user_principal(), cancel_event=cancel)
+
+    assert result.cancelled
+    assert not result.ok
+    assert launches == []
+
+
+def test_cancelled_result_is_not_successful():
+    from lib.scheduler.process_runner import BoundedProcessResult
+
+    result = BoundedProcessResult(returncode=0, stdout='', stderr='', cancelled=True)
+    assert not result.ok
+
+
 def test_bounded_process_requires_explicit_principal():
     with pytest.raises(TypeError, match='PrincipalContext'):
         run_bounded_process(

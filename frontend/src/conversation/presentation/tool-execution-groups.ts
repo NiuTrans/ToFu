@@ -147,6 +147,7 @@ export function toolRoundAttention(value: unknown): ToolAttentionLevel {
   if (attentionKind === 'interactive'
       || INTERACTIVE_TOOL_STATUSES.has(status)
       || toolName === 'ask_human') return 'interactive';
+  if (hasAcceptedWorkUnit(value)) return 'important';
   if (attentionKind === 'important'
       || Boolean(toolField(value, '_programSynthetic'))) return 'important';
   if (attentionKind === 'routine'
@@ -154,6 +155,15 @@ export function toolRoundAttention(value: unknown): ToolAttentionLevel {
       || Boolean(toolField(value, '_artifactOrigin'))
       || legacyRoutineToolName(value)) return 'routine';
   return 'important';
+}
+
+/** Only the server's acceptance metadata makes a producer receipt a durable deliverable. */
+export function hasAcceptedWorkUnit(value: unknown): boolean {
+  const results = toolField(value, 'results');
+  return Array.isArray(results) && results.some(result => {
+    const id = record(record(result)?.workUnitRef)?.taskId;
+    return typeof id === 'string' && id.length > 0;
+  });
 }
 
 /** Summarize one panel/batch and decide whether it is safe to fold by default. */

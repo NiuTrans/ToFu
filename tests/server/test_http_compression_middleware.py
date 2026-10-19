@@ -9,9 +9,9 @@ import threading
 import pytest
 from quart import Response
 
-import lib.http_compression as compression
-from lib.app_assembly import configure_application
-from lib.app_factory import create_base_app
+import lib.http_transport.compression as compression
+from lib.app.app_assembly import configure_application
+from lib.app.app_factory import create_base_app
 
 
 pytestmark = pytest.mark.unit

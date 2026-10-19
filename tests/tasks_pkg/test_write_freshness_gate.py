@@ -36,8 +36,10 @@ def workspace(tmp_path):
             'target_abs': str(target)}
 
 
-def _make_task(conv_id='convA', task_id='t1'):
-    return {'id': task_id, 'convId': conv_id, 'messages': [], 'toolRounds': []}
+def _make_task(conv_id='convA', task_id=None):
+    # Physical execution root keys own tokens. Synthetic IDs match the token
+    # label unless a test explicitly supplies a different task identity.
+    return {'id': task_id or conv_id, 'convId': conv_id, 'messages': [], 'toolRounds': []}
 
 
 def _external_change(abs_path, extra='# sibling was here\n'):
@@ -349,9 +351,12 @@ def test_record_read_paths_after_successful_read(workspace):
     flips staleness for THIS conv only."""
     from lib.tasks_pkg.handlers._write_freshness_gate import record_read_paths
     from lib import write_freshness
-    n = record_read_paths(
-        _make_task(), {'reads': [{'path': workspace['target_rel']}]},
-        workspace['project_path'], '=== a.py ===\n  1: def foo():\n')
+    from lib.project_mod.read_tools import tool_read_files
+    observations = []
+    args = {'reads': [{'path': workspace['target_rel']}]}
+    result = tool_read_files(workspace['project_path'], args['reads'], read_observations=observations)
+    n = record_read_paths(_make_task(), args, workspace['project_path'], result,
+                          observations=observations)
     assert n == 1
     assert write_freshness.is_stale('convA', workspace['target_abs']) is False
     _external_change(workspace['target_abs'])

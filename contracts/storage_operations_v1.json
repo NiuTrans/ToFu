@@ -2,10 +2,10 @@
   "format": "tofu.storage-operation-catalog.v1",
   "generatedBy": "scripts/gen_storage_operation_catalog.py",
   "sourceProtocol": "storage.v1",
-  "sourceSchemaVersion": 67,
-  "sourceRegistryVersion": 49,
-  "operationCount": 367,
-  "operationsSha256": "b31ba3b78237b5ebe87d6c979dba76dca185c2cb5d3993ffdd147951ee57b20e",
+  "sourceSchemaVersion": 68,
+  "sourceRegistryVersion": 50,
+  "operationCount": 374,
+  "operationsSha256": "1717e967996953a99fcfe637ccfaf98be88d88086bd4c7a62404f29b39e80c6d",
   "operations": [
     {
       "name": "artifact.create",
@@ -1664,6 +1664,38 @@
       "ownerScope": "handler-enforced"
     },
     {
+      "name": "project.dispatch.commit",
+      "domain": "project_dispatch",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "project.dispatch.get",
+      "domain": "project_dispatch",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "project.dispatch.list",
+      "domain": "project_dispatch",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "project.dispatch.projects",
+      "domain": "project_dispatch",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
       "name": "project.recent.clear",
       "domain": "core",
       "kind": "command",
@@ -2192,6 +2224,14 @@
       "ownerScope": "handler-enforced"
     },
     {
+      "name": "scheduler.task.execution_lookup",
+      "domain": "scheduler",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
       "name": "scheduler.task.get",
       "domain": "scheduler",
       "kind": "query",
@@ -2217,6 +2257,14 @@
     },
     {
       "name": "scheduler.task.record_result",
+      "domain": "scheduler",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "scheduler.task.settle_execution",
       "domain": "scheduler",
       "kind": "command",
       "receiptRequired": true,
@@ -2843,6 +2891,14 @@
       "name": "turn.sync.prune",
       "domain": "turns",
       "kind": "command",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "turn.sync.round_directory",
+      "domain": "turns",
+      "kind": "query",
       "receiptRequired": false,
       "transactionTimeoutSeconds": null,
       "ownerScope": "handler-enforced"

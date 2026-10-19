@@ -12,6 +12,7 @@ from types import MappingProxyType
 from typing import Literal
 
 from ._models import ContextBlock
+from lib.memory.working_facts.contract import limit as working_fact_limit
 
 # Closed presentation tones for a model-visible intervention's title chip.
 # The frontend chip styles derive from these exact values; keep in sync with
@@ -81,6 +82,10 @@ _SPECS = (
                   'Attached enabled project; rules only, history is on demand',
                   authority='project', stability='conversation', lifecycle='conversation',
                   priority=0, layer='objective_constraints', required=True),
+    InjectionSpec('project_scoped_rules', 'project.path_guidance', 'required_contract',
+                  'Applicable rule files acquired for an accessed path; writes wait for full delivery',
+                  authority='project', stability='round', lifecycle='task',
+                  priority=1, layer='objective_constraints', required=True),
     InjectionSpec('user_context', 'memory.user_context', 'user_preference',
                   'Preferences enabled and nonempty', authority='preference',
                   stability='conversation', lifecycle='conversation', priority=20,
@@ -120,6 +125,16 @@ _SPECS = (
                   authority='ambient', stability='round', lifecycle='round',
                   priority=45, max_tokens=256, layer='hot_tail',
                   global_budget_policy='omit'),
+    InjectionSpec('working_facts', 'memory.working_facts', 'task_state',
+                  'Owned durable conversation facts refreshed before common round admission',
+                  authority='evidence', stability='round', lifecycle='conversation',
+                  priority=35, max_tokens=working_fact_limit('contextTokens'), layer='task_state',
+                  global_budget_policy='omit'),
+    InjectionSpec('project_coordinator', 'project.coordination', 'capability_guidance',
+                  'Current owner/project-bound coordinator root task',
+                  authority='workflow', stability='turn', lifecycle='task',
+                  max_tokens=600, layer='objective_constraints', global_budget_policy='omit',
+                  silent_absence_reasons=('inactive', 'provider_unavailable', 'over_block_budget')),
     InjectionSpec('project_context', 'project.brain', 'coordination_evidence',
                   'Available owner/project-bound coordinator with unseen narrative; '
                   'ordinary workers use scoped inbox and overlap advisories',
@@ -127,6 +142,17 @@ _SPECS = (
                   global_budget_policy='omit',
                   silent_absence_reasons=('empty', 'project_disabled', 'disabled',
                                           'provider_unavailable', 'over_block_budget')),
+    InjectionSpec('project_presence', 'project.presence', 'task_state',
+                  'Live same-project worker status for the bound Coordinator',
+                  authority='project', max_tokens=1500, layer='evidence',
+                  stability='round', lifecycle='round',
+                  global_budget_policy='omit',
+                  silent_absence_reasons=('empty', 'project_disabled', 'disabled',
+                                          'provider_unavailable', 'over_block_budget')),
+    InjectionSpec('turn_requirements', 'acceptance.turns', 'required_contract',
+                  'Current owner requirements for the bound ordinary assistant Turn',
+                  authority='user', stability='round', lifecycle='task', priority=1,
+                  layer='objective_constraints', required=True),
     InjectionSpec('active_checklist', 'task.todo_state', 'required_continuity',
                   'Accepted current checklist missing from visible context',
                   priority=5, layer='task_state', required=True,
@@ -173,7 +199,10 @@ _SPECS = (
     InjectionSpec('execution_allowance', 'agent_core.execution_budget', 'required_contract',
                   'Finite invocation allowance at first safe dispatch, lower-water '
                   'milestones or observed unknown consumption',
-                  lane='event', required=True, stability='round', lifecycle='task',
+                  # Round-lifecycle block: each milestone supersedes the prior
+                  # notice via content-addressed reuse instead of appending a
+                  # permanent bare _isMeta message that stacks until compaction.
+                  required=True, stability='round', lifecycle='round',
                   priority=5, max_tokens=350, note_kind='context-injection',
                   presentation=NotePresentation('systemNote.reasonExecutionAllowance', 'info', 'Execution budget')),
     InjectionSpec('tool_stagnation', 'orchestrator.tool_loop_breaker', 'safety_recovery',

@@ -284,7 +284,7 @@ def test_manager_log_maintenance_failure_is_observable_but_nonfatal(
         tmp_path, monkeypatch, caplog):
     project = _project(tmp_path)
     manager = sm.LifecycleManager(str(project), monitor_interval=0.2)
-    import lib.log_retention as retention
+    import lib.logging_pkg.log_retention as retention
 
     def fail_file(_path, *, create):
         raise OSError(f'log-file-unavailable create={create}')
@@ -326,10 +326,11 @@ def test_frontend_preflight_runs_project_command_with_bounded_contract(
         == str(project.resolve())
 
 
-def test_native_restart_preparation_failure_keeps_live_worker(tmp_path, monkeypatch):
+@pytest.mark.parametrize('backend', ['sqlite', 'tofudb'])
+def test_restart_preparation_failure_keeps_live_worker(tmp_path, monkeypatch, backend):
     project = _project(tmp_path)
     manager = sm.LifecycleManager(str(project))
-    (project / '.env').write_text('TOFU_PERSONAL_STORAGE_BACKEND=tofudb\n')
+    (project / '.env').write_text(f'TOFU_PERSONAL_STORAGE_BACKEND={backend}\n')
     monkeypatch.setattr(sm, 'run_frontend_preflight', lambda *_: (False, 'engine unavailable'))
     monkeypatch.setattr(manager, 'stop', lambda **_: pytest.fail('old worker must remain live'))
     assert manager.restart()['message'] == 'engine unavailable'
@@ -350,6 +351,33 @@ def test_preflight_refreshes_managed_pin_in_child_and_manager(tmp_path, monkeypa
     assert REAL_RUN_FRONTEND_PREFLIGHT(str(tmp_path), sys.executable, environment, 'test') == (True, '')
     assert environment['TOFUDB_EXPECTED_SHA256'] == 'new-managed-pin'
     assert os.environ['TOFUDB_EXPECTED_SHA256'] == 'new-managed-pin'
+
+
+@pytest.mark.parametrize('inherited', [None, 'explicit-pin'])
+def test_preflight_freezes_project_pin_without_overwriting_override(tmp_path, monkeypatch, inherited):
+    (tmp_path / 'serverctl.py').write_text('# isolated preflight\n')
+    (tmp_path / '.env').write_text('TOFUDB_EXPECTED_SHA256=project-pin\nTOFUDB_BIN=/admitted/engine\n')
+    monkeypatch.delenv('TOFUDB_EXPECTED_SHA256', raising=False)
+    environment = {} if inherited is None else {'TOFUDB_EXPECTED_SHA256': inherited}
+    monkeypatch.setattr(sm.subprocess, 'run', lambda command, **_: subprocess.CompletedProcess(command, 0))
+    assert REAL_RUN_FRONTEND_PREFLIGHT(str(tmp_path), sys.executable, environment, 'test') == (True, '')
+    assert environment['TOFUDB_EXPECTED_SHA256'] == (inherited or 'project-pin')
+    assert environment['TOFUDB_BIN'] == '/admitted/engine'
+    assert 'TOFUDB_EXPECTED_SHA256' not in os.environ
+
+
+def test_restart_preparation_cannot_undo_concurrent_stop(tmp_path, monkeypatch):
+    manager = sm.LifecycleManager(str(_project(tmp_path)))
+    manager._state['desired'] = 'running'
+    def prepare(*_):
+        manager._state['desired'] = 'stopped'
+        return True, ''
+    monkeypatch.setattr(sm, 'run_frontend_preflight', prepare)
+    monkeypatch.setattr(manager, 'stop', lambda **_: pytest.fail('stale restart must not stop a worker'))
+    result = manager.restart()
+    assert result['ok'] is False
+    assert 'lifecycle changed' in result['message']
+    assert manager._state['desired'] == 'stopped'
 
 
 def test_worker_spawn_refuses_failed_frontend_preflight_before_popen(
@@ -427,18 +455,18 @@ def test_storage_lease_status_normalizes_tofudb_stamp_to_sidecar(tmp_path):
         held = sm.read_storage_lease_status(data_dir)
 
     assert held['held'] is True
-    assert held['kind'] == 'storage_sidecar'
+    assert held['kind'] == 'storage_authority_sql'
 
 
 def test_legacy_storage_lease_owner_recognizes_native_tofudb_serve():
     kind, label = sm._legacy_storage_lease_owner(
         '/repo/packages/tofu-db/target/certified/tofu-db serve '
         '--data-dir /repo/data/tofudb-authority --owner-id 1 --tenant-id 1')
-    assert (kind, label) == ('storage_sidecar', 'Storage sidecar')
+    assert (kind, label) == ('storage_authority_sql', 'Storage sidecar')
 
     kind, label = sm._legacy_storage_lease_owner(
-        'python -m lib.storage_sidecar')
-    assert (kind, label) == ('storage_sidecar', 'Storage sidecar')
+        'python -m lib.storage_authority_sql')
+    assert (kind, label) == ('storage_authority_sql', 'Storage sidecar')
 
     # A bare tofu-db process that is NOT the serving authority stays unknown.
     kind, _ = sm._legacy_storage_lease_owner(
@@ -583,13 +611,13 @@ def test_reconcile_logs_worker_ready_with_boot_elapsed(
 
 
 @pytest.mark.skipif(os.name == 'nt', reason='POSIX signal contract')
-def test_reap_orphaned_storage_sidecar_sigterms_verified_holder(
+def test_reap_orphaned_storage_authority_sql_sigterms_verified_holder(
         tmp_path, monkeypatch):
     child = subprocess.Popen(['sleep', '300'])
     try:
         lease = {
             'held': True,
-            'kind': 'storage_sidecar',
+            'kind': 'storage_authority_sql',
             'label': 'Storage sidecar',
             'pid': child.pid,
             'host': sm._hostname(),
@@ -606,7 +634,7 @@ def test_reap_orphaned_storage_sidecar_sigterms_verified_holder(
             lambda: (dict(lease) if sm.pid_is_alive(child.pid)
                      else {'held': False, 'kind': None, 'pid': None}))
 
-        released = manager._reap_orphaned_storage_sidecar(dict(lease))
+        released = manager._reap_orphaned_storage_authority_sql(dict(lease))
 
         assert released['held'] is False
         assert not sm.pid_is_alive(child.pid)
@@ -616,13 +644,13 @@ def test_reap_orphaned_storage_sidecar_sigterms_verified_holder(
 
 
 @pytest.mark.skipif(os.name == 'nt', reason='POSIX signal contract')
-def test_reap_orphaned_storage_sidecar_refuses_foreign_identity(
+def test_reap_orphaned_storage_authority_sql_refuses_foreign_identity(
         tmp_path, monkeypatch):
     child = subprocess.Popen(['sleep', '300'])
     try:
         lease = {
             'held': True,
-            'kind': 'storage_sidecar',
+            'kind': 'storage_authority_sql',
             'label': 'Storage sidecar',
             'pid': child.pid,
             'host': sm._hostname(),
@@ -635,7 +663,7 @@ def test_reap_orphaned_storage_sidecar_refuses_foreign_identity(
         monkeypatch.setattr(
             manager, '_active_storage_lease', lambda: dict(lease))
 
-        blocked = manager._reap_orphaned_storage_sidecar(dict(lease))
+        blocked = manager._reap_orphaned_storage_authority_sql(dict(lease))
 
         assert blocked['held'] is True
         assert sm.pid_is_alive(child.pid)
@@ -649,7 +677,7 @@ def test_wait_for_stopped_sidecar_release_reaps_after_drain_grace(
     manager = sm.LifecycleManager(str(_project(tmp_path)))
     held_lease = {
         'held': True,
-        'kind': 'storage_sidecar',
+        'kind': 'storage_authority_sql',
         'label': 'Storage sidecar',
         'pid': 4321,
         'host': sm._hostname(),
@@ -659,7 +687,7 @@ def test_wait_for_stopped_sidecar_release_reaps_after_drain_grace(
         manager, '_active_storage_lease', lambda: dict(held_lease))
     reaped = []
     monkeypatch.setattr(
-        manager, '_reap_orphaned_storage_sidecar',
+        manager, '_reap_orphaned_storage_authority_sql',
         lambda lease, **_kwargs: reaped.append(lease) or {
             'held': False, 'kind': None, 'pid': None})
 
@@ -679,7 +707,7 @@ def test_wait_for_stopped_sidecar_release_does_not_reap_foreign_holders(
                 'held': True, 'kind': kind, 'pid': 4321,
                 'host': sm._hostname(), 'holderVerified': True})
         monkeypatch.setattr(
-            manager, '_reap_orphaned_storage_sidecar',
+            manager, '_reap_orphaned_storage_authority_sql',
             lambda *_args, **_kwargs: pytest.fail(
                 'non-sidecar holders must stay fail-closed'))
 
@@ -740,7 +768,7 @@ def test_restart_waits_for_just_stopped_sidecar_lease(
     manager = sm.LifecycleManager(str(project))
     held = {
         'held': True,
-        'kind': 'storage_sidecar',
+        'kind': 'storage_authority_sql',
         'label': 'Storage sidecar',
         'pid': 4321,
     }
@@ -764,6 +792,8 @@ def test_restart_waits_for_just_stopped_sidecar_lease(
 
     assert result['ok'] is True
     assert len(sleeps) == 2
+    prepared = starts[0].pop('_prepared_environment')
+    assert prepared['TOFU_PROJECT_PATH'] == str(project)
     assert starts == [{
         'server_args': [],
         'server_env': {},
@@ -1688,8 +1718,8 @@ def test_clean_exit_is_counted_once_while_orphan_sidecar_lease_drains(
     monkeypatch.setattr(manager, '_launcher_is_alive', lambda: False)
     _install_clean_worker_marker(manager, project, reason='restart')
     lease_states = iter([
-        {'held': True, 'kind': 'storage_sidecar', 'pid': 222},
-        {'held': True, 'kind': 'storage_sidecar', 'pid': 222},
+        {'held': True, 'kind': 'storage_authority_sql', 'pid': 222},
+        {'held': True, 'kind': 'storage_authority_sql', 'pid': 222},
         {'held': False},
     ])
     monkeypatch.setattr(
@@ -1778,7 +1808,7 @@ def test_real_failure_is_counted_before_orphan_sidecar_lease_wait(
     monkeypatch.setattr(manager, '_storage_data_dir', lambda: project / 'data')
     monkeypatch.setattr(manager, '_active_storage_lease', lambda: {
         'held': True,
-        'kind': 'storage_sidecar',
+        'kind': 'storage_authority_sql',
         'label': 'Storage sidecar',
         'pid': 222,
     })
@@ -2006,8 +2036,28 @@ def test_real_worker_start_restart_stop_and_manual_stop_sticks(tmp_path, monkeyp
         assert current['observed'] == 'running'
         first_pid = current['pid']
 
+        preparations = []
+
+        def prepare_while_serving(_project, _python, environment, operation):
+            # A source edit during shutdown must not cause another build after
+            # the only serving worker has already exited.
+            preparations.append(operation)
+            if not sm.pid_is_alive(first_pid):
+                return False, 'Engine source changed during preparation'
+            assert sm.port_accepts(port)
+            environment['TOFU_TEST_PREPARED_GENERATION'] = 'admitted'
+            return True, ''
+
+        monkeypatch.setattr(sm, 'run_frontend_preflight', prepare_while_serving)
+        real_popen = sm.subprocess.Popen
+        def launch_admitted_generation(*args, **kwargs):
+            if len(args[0]) > 1 and args[0][1] == 'server.py':
+                assert kwargs['env']['TOFU_TEST_PREPARED_GENERATION'] == 'admitted'
+            return real_popen(*args, **kwargs)
+        monkeypatch.setattr(sm.subprocess, 'Popen', launch_admitted_generation)
         restarted = manager.restart(source='integration')
-        assert restarted['ok'] is True
+        assert restarted['ok'] is True, restarted
+        assert len(preparations) == 1
         deadline = time.time() + 10
         while time.time() < deadline:
             current = manager.status(probe_health=True)
@@ -2201,6 +2251,10 @@ def test_serverctl_process_roundtrip(tmp_path, entry):
         shutil.copy(root / 'bootstrap_pkg' / name, project / 'bootstrap_pkg' / name)
     shutil.copy(root / 'server.py', project / 'server-entry.py')
     (project / 'server.py').write_text(_WORKER)
+    # The worker fixture borrows this checkout's verified frontend graph via
+    # PYTHONPATH; retain the real CLI preflight entry point in its project.
+    (project / 'scripts').mkdir()
+    shutil.copy(root / 'scripts/verify_frontend_dist.py', project / 'scripts/verify_frontend_dist.py')
     (project / 'stop.sh').write_text('#!/bin/sh\nexit 0\n')
     os.chmod(project / 'supervisor.sh', 0o755)
     manager_port = _free_port()

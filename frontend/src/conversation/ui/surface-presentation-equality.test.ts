@@ -1,7 +1,8 @@
 /** Executable repaint contracts: semantic replay, visible changes and bounded work. */
 import { describe, expect, it } from 'vitest';
 import type { ConversationQueueItemViewModel } from '../presentation/conversation-view-model';
-import { samePresentationValue, sameQueueItem } from './surface-presentation-equality';
+import { sameBlock, samePresentationValue, sameQueueItem } from './surface-presentation-equality';
+import type { TextBlockViewModel } from '../presentation/view-model/types';
 
 describe('presentation repaint decisions', () => {
   it('preserves equal snapshot values across object identity and key order', () => {
@@ -57,4 +58,14 @@ describe('presentation repaint decisions', () => {
     cyclic.self = cyclic;
     expect(sameQueueItem(previous, item(cyclic))).toBe(false);
   });
+});
+
+it('repaints translation attribution changes but preserves unchanged text blocks', () => {
+  const block: TextBlockViewModel = { kind: 'text', blockId: 'answer', source: {}, identitySource: 'contract',
+    markdown: 'Body', displayMarkdown: 'Body', displayMode: 'original',
+    terminal: true, deliverable: true, resumable: false, translationModel: 'gpt-6-luna' };
+  expect(sameBlock(block, { ...block, source: {} })).toBe(true);
+  expect(sameBlock(block, { ...block, translationModel: 'recorded-retry-model' })).toBe(false);
+  expect(sameBlock(block, { ...block, translationModel: undefined })).toBe(false);
+  expect(sameBlock(block, { ...block, inputTranslationCompleted: true })).toBe(false);
 });

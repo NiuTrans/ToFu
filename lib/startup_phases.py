@@ -1,16 +1,10 @@
-"""Canonical startup-phase catalog shared by the server and the frontend.
+"""Canonical startup-phase catalog for boot status, logs and measured profiles.
 
-The production lifespan logs ``[startup phase N/9]`` markers with HUMAN
-labels (``lib.production_lifecycle``), while the in-app restart progress bar
-(``frontend/src/runtime/sections/update.js``) needs STABLE machine keys that
-never drift when a label is reworded or translated.  This module is the single
-source of truth that maps one phase ordinal to both: Python consumes
-``label``; the restart profile persists ``key`` so the frontend can translate
-its own ``update.phase.<key>`` label and budget per phase.
-
-Do not reorder/rename casually: the phase ordinals and keys are a persisted,
-cross-process contract (the previous boot's measured profile feeds the next
-restart's progress estimate).
+The production lifespan and BootRunner project stable ordinals/keys to health
+and boot status; the browser translates those keys instead of estimating the
+current phase from elapsed time. Measured durations remain operations evidence.
+Do not reorder/rename casually: profiles persist the phase ordinals and keys
+across process replacements.
 """
 
 from __future__ import annotations
@@ -27,11 +21,11 @@ class StartupPhase:
 
 # Ordered exactly like ``register_production_lifecycle._startup``.  The
 # backend persists measured durations keyed by ``key``; the frontend maps the
-# same ``key`` onto its i18n label (``update.phase.<key>``) and time budget.
+# same ``key`` onto its i18n label (``update.phase.<key>``).
 STARTUP_PHASES: tuple[StartupPhase, ...] = (
     StartupPhase(1, 'frontend_assets', 'Frontend assets'),
     StartupPhase(2, 'storage_boundary', 'Exclusive storage boundary'),
-    StartupPhase(3, 'storage_sidecar', 'Storage sidecar'),
+    StartupPhase(3, 'storage_authority_sql', 'Storage sidecar'),
     StartupPhase(4, 'storage_recovery', 'Storage recovery'),
     StartupPhase(5, 'model_routing', 'Model-routing v2 authority'),
     StartupPhase(6, 'critical_imports', 'Critical imports'),

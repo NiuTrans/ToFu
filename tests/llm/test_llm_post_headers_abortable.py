@@ -22,7 +22,7 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from lib.llm._transport import post_headers_abortable  # noqa: E402
-from lib.llm_errors import AbortedError  # noqa: E402
+from lib.llm.llm_errors import AbortedError  # noqa: E402
 
 pytestmark = pytest.mark.unit
 

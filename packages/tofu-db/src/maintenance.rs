@@ -603,11 +603,12 @@ fn run_worker(
                     metrics.search_retry_deferrals = metrics.search_retry_deferrals.saturating_add(1);
                 }, Backoff::Keep);
             } else {
-                match crate::turn_search_worker::process_turn_search_batch_with_pressure(
+                match crate::turn_search_worker::process_turn_search_batch_with_pressure_and_stop(
                     database,
                     search_projection,
                     scope,
                     &mut search_pressure,
+                    || shared.state.lock().map(|state| state.stopping).unwrap_or(true),
                 ) {
                     Ok(search) => {
                         search_retries[scope_index].recovered();
@@ -668,6 +669,7 @@ fn run_worker(
                 }
             }
         }
+        if shared.state.lock().map(|state| state.stopping).unwrap_or(true) { return; }
         match run_round(database, scope, shared.config.history_retained_segments) {
             RoundOutcome::ForegroundBusy => update_metrics(
                 shared,
@@ -1040,12 +1042,9 @@ fn run_round(
                 }
                 Err(error) => return Err(error),
             };
-            if serde_json::from_slice::<serde_json::Value>(&outcome)
-                .ok()
-                .and_then(|value| value.get("deleted_rows")?.as_u64())
-                .unwrap_or(0)
-                > 0
-            {
+            // Cursor-only progress and stale-index removal are durable work
+            // even when this bounded slice contains no event payload rows.
+            if txn.has_business_mutation() {
                 database.commit(txn)?;
             }
             {
@@ -1622,6 +1621,30 @@ mod tests {
         });
         assert_eq!(metrics.attempt_event_prune_attempts, 1);
         scheduler.stop_and_join().unwrap();
+    }
+
+    #[test]
+    fn idle_round_commits_event_retirement_without_payload_rows() {
+        let (directory, database) = authority_with_expired_attempt_events(0);
+        let namespace = crate::generated_tofudb_ir::CONVERSATION_EVENT_RETIREMENT_NAMESPACE;
+        let (first, end) = EntityKey::prefix_range(7, 11, namespace, b"j").unwrap();
+        {
+            let mut db = database.lock().unwrap();
+            let mut tx = db.begin_with_identity_claim_scopes(7, 11).unwrap();
+            crate::conversation_header::delete(&mut db, &mut tx,
+                &crate::conversation_header::DeleteRequest {
+                    conversation_id: "maintenance-conversation".into(), deleted_at_ms: 2_000_000_000_000,
+                }).unwrap();
+            db.commit(tx).unwrap();
+            let mut tx = db.begin(7, 11).unwrap();
+            assert_eq!(db.entity_scan(&mut tx, &first, &end, 1).unwrap().len(), 1);
+        }
+        run_round(&database, MaintenanceScope::new(7, 11).unwrap(), 64);
+        drop(database);
+        let db = AuthorityDatabase::open(directory.path()).unwrap();
+        let mut tx = db.begin(7, 11).unwrap();
+        assert!(db.entity_scan(&mut tx, &first, &end, 1).unwrap().is_empty(),
+            "maintenance discarded metadata-only retirement progress");
     }
 
     fn authority_with_mount() -> (tempfile::TempDir, Arc<Mutex<AuthorityDatabase>>) {

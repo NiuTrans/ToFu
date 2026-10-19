@@ -3,6 +3,7 @@
 mod cli_agent;
 #[cfg(target_os = "linux")]
 mod cli_agent_control;
+mod cli_agent_worker;
 #[cfg(target_os = "linux")]
 mod cli_model_control;
 #[cfg(target_os = "linux")]
@@ -299,6 +300,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some("run-http-chat") => cli_http::run(),
         #[cfg(target_os = "linux")]
         Some("run-http-agent") => cli_agent::run(),
+        #[cfg(target_os = "linux")]
+        Some("run-http-agent-worker") => cli_agent_worker::run(),
         _ => {
             eprintln!("usage: tofu-native probe-capacity [VOLUME] | check-runtime | check-session | run-chat-stream OWNER TASK_ID OUTPUT_BYTES TOOL_CALLS [IDENTICAL_LIMIT]");
             std::process::exit(2);

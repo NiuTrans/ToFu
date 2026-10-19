@@ -15,7 +15,7 @@ pytestmark = pytest.mark.unit
 def transport(monkeypatch):
     calls = []
     pages = []
-    monkeypatch.setattr('lib.byo_egress.validate_egress_url', lambda url: None)
+    monkeypatch.setattr('lib.byo.byo_egress.validate_egress_url', lambda url: None)
 
     def get(url, **kwargs):
         calls.append((url, kwargs))

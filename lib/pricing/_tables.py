@@ -230,6 +230,9 @@ MODEL_PRICING = {
     # Intro pricing $0.75/$3.75 through 2026-12-31, then $1.50/$7.50 standard.
     'gemini-3.7-flash':          {'input': 0.75, 'output': 3.75, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.25, 'name': 'Gemini 3.7 Flash'},
     'gemini-3.8-flash':          {'input': 1.50, 'output': 7.50, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.25, 'name': 'Gemini 3.8 Flash'},
+    # Gemini 4 Argon intro pricing $2/$10 (+$0.10 cache-read) through 2026-11-30,
+    # then $4/$20 +$0.20 (ai.google.dev/gemini-api/docs/pricing).
+    'gemini-4-argon':            {'input': 2.00, 'output': 10.0, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.05, 'name': 'Gemini 4 Argon'},
     'gemini-3.5-flash-lite':     {'input': 0.30, 'output': 2.49, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.25, 'name': 'Gemini 3.5 Flash-Lite'},  # ¥2.16/¥18 per 1M
     'gemini-3.1-flash-image-preview': {'input': 0.25, 'output': 1.50, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.25, 'name': 'Gemini 3.1 Flash Image'},
     'gemini-3-pro-image-preview':    {'input': 2.50, 'output': 12.0, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.25, 'name': 'Gemini 3 Pro Image'},

@@ -189,9 +189,11 @@ def test_program_error_after_child_does_not_publish_witness(invoke_gateway):
 
 def test_program_output_limit_does_not_publish_witness(invoke_gateway, monkeypatch):
     import lib.tools.javascript as javascript
-    monkeypatch.setattr(javascript, 'MAX_OUTPUT_BYTES', 32)
+    limits = javascript.JavaScriptLimits(heap_bytes=2 * 1024 * 1024)
+    monkeypatch.setattr(javascript, 'javascript_limits', lambda: limits)
     task, messages, payload, _, _ = invoke_gateway(
-        {'program': 'return tools.call("todo_write", {});'})
+        {'program': 'return tools.call("todo_write", {});'},
+        output=lambda text: text + 'x' * limits.heap_bytes)
     assert payload['program']['error']['code'] == 'output_limit'
     assert 'output' not in payload['program']['childResults'][0]
     _assert_visibility(task, messages, visible=False)

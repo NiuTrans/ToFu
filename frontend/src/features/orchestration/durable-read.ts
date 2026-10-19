@@ -34,7 +34,10 @@ export function normalizeOrchestrationTaskRead(
       'readFields',
       wire.contract,
       options.runContract,
-      Array.isArray(options.requestArgs) ? options.requestArgs[0] : '',
+      // Resume reads a successor. The source argument is not its identity;
+      // ordinary task reads must still match their requested run exactly.
+      options.endpointName !== 'task-resume' && Array.isArray(options.requestArgs)
+        ? options.requestArgs[0] : '',
     ) ? body.run as ContractRecord : null;
   const accepted = Boolean(rawRun);
   const run = accepted

@@ -160,42 +160,33 @@ class OpenModeGateTest(unittest.TestCase):
             self.assertEqual(r.status_code, 200)
         asyncio.run(go())
 
-    def test_open_mode_api_requests_are_rate_limited_by_peer(self):
+    def test_remote_open_peer_requires_explicit_admission(self):
         import asyncio
-        import json
-        from lib.rate_limit_store import reset_for_test
-
-        old_rpm = os.environ.get('TOFU_OPEN_MODE_RPM')
-        old_backend = os.environ.get('TOFU_RATE_LIMIT_BACKEND')
-        os.environ['TOFU_OPEN_MODE_RPM'] = '1'
-        os.environ['TOFU_RATE_LIMIT_BACKEND'] = 'memory'
-        reset_for_test()
-
         async def go():
-            c = self.app.test_client()
-            first = await c.get('/api/v4/keys')
-            second = await c.get('/api/v4/keys')
-            self.assertEqual(first.status_code, 200)
-            self.assertEqual(second.status_code, 429)
-            self.assertEqual(second.headers['X-RateLimit-Limit-Requests'], '1')
-            self.assertEqual(second.headers['X-RateLimit-Remaining-Requests'], '0')
-            self.assertIn('Retry-After', second.headers)
-            body = v1_shaped(json.loads(await second.get_data(as_text=True)))
-            self.assertFalse(body['ok'])
-            self.assertEqual(body['error']['kind'], 'ratelimit')
+            client = self.app.test_client()
+            peer = {'client': ('203.0.113.7', 50000)}
+            with patch('routes.api_v1.auth._OPEN_MODE_ALLOW_REMOTE', False), \
+                    patch.dict(os.environ, {'TOFU_OPEN_MODE_RPM': '1'}):
+                response = await client.get('/api/v4/keys', scope_base=peer)
+                self.assertEqual(response.status_code, 401)
+            with patch('routes.api_v1.auth._OPEN_MODE_ALLOW_REMOTE', True), \
+                    patch.dict(os.environ, {'TOFU_OPEN_MODE_RPM': '1'}):
+                for _ in range(3):
+                    response = await client.get('/api/v4/keys', scope_base=peer)
+                    self.assertEqual(response.status_code, 200)
+        asyncio.run(go())
 
-        try:
+    def test_open_mode_requests_ignore_retired_peer_quota(self):
+        import asyncio
+        with patch.dict(os.environ, {'TOFU_OPEN_MODE_RPM': '1'}):
+            async def go():
+                client = self.app.test_client()
+                for _ in range(128):
+                    response = await client.get('/api/v4/keys')
+                    self.assertEqual(response.status_code, 200)
+                    self.assertNotIn('Retry-After', response.headers)
+                    self.assertNotIn('X-RateLimit-Limit-Requests', response.headers)
             asyncio.run(go())
-        finally:
-            if old_rpm is None:
-                os.environ.pop('TOFU_OPEN_MODE_RPM', None)
-            else:
-                os.environ['TOFU_OPEN_MODE_RPM'] = old_rpm
-            if old_backend is None:
-                os.environ.pop('TOFU_RATE_LIMIT_BACKEND', None)
-            else:
-                os.environ['TOFU_RATE_LIMIT_BACKEND'] = old_backend
-            reset_for_test()
 
 
 if __name__ == '__main__':

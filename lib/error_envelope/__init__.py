@@ -41,7 +41,7 @@ The `kind` enum is closed — callers must pick one of these values:
   - ``endpoint_unreachable`` model endpoint host down / not accepting connections
   - ``content_filter``      provider safety filter (HTTP 450, etc.)
   - ``invalid_image``       image content rejected
-  - ``prompt_too_long``     context window overflow (after auto-compact)
+  - ``prompt_too_long``     provider context overflow or explicit local admission refusal
   - ``stream_only``         model rejects non-streaming
   - ``model_limit``         max_tokens exceeds learned model cap
   - ``tool_rounds_exhausted`` legacy persisted turns from the retired cap
@@ -59,6 +59,7 @@ The `kind` enum is closed — callers must pick one of these values:
   - ``not_found``           HTTP 404 — model/route missing on the upstream
   - ``tool_not_available``  requested tool is absent from this turn
   - ``tool_call_rejected``  tool was blocked before execution
+  - ``execution_token_usage_unknown`` earlier model usage prevents finite-budget admission
 
 Backwards-compat note (2026-05-22): there is none.  The string form of
 ``task['error']`` was retired in favour of this dict.  Persistence

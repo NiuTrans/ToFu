@@ -64,7 +64,10 @@ def _expand(script: str, target: str) -> str:
     indirection."""
     t = wb._NSI_TARGETS[target]
     return (script.replace('${APP_NAME}', t['app_name'])
-                  .replace('${APP_EXE}', t['app_exe']))
+                  .replace('${APP_EXE}', t['app_exe'])
+                  .replace('${APP_REGISTRY_NAME}', t['registry_name'])
+                  .replace('${APP_LEGACY_EXE}', t['legacy_exe'])
+                  .replace('${APP_IMAGE}', t['app_exe']))
 
 
 def _code(script: str) -> str:
@@ -81,7 +84,7 @@ def _code(script: str) -> str:
 def test_app_name_and_install_dir_agree():
     assert 'AppName=Tofu\n' in _WORKFLOW, (
         'the full Inno authoring must name the app exactly "Tofu" — '
-        '"AppName=Tofu Agent" satisfies a bare substring check, so this '
+        '"AppName=Tofu Remote" satisfies a bare substring check, so this '
         'assertion is newline-anchored')
     assert '!define APP_NAME      "Tofu"' in _FULL
     # Inno {localappdata}\Programs\Tofu ≡ NSIS $LOCALAPPDATA\Programs\Tofu
@@ -185,10 +188,10 @@ def test_add_remove_programs_registration():
 # ═══════════════════════════════════════════════════════════════════
 
 def test_agent_rendering_has_its_own_identity():
-    assert '!define APP_NAME      "Tofu Agent"' in _AGENT
-    assert '!define APP_EXE       "TofuAgent.exe"' in _AGENT
+    assert '!define APP_NAME      "Tofu Remote"' in _AGENT
+    assert '!define APP_EXE       "TofuRemote.exe"' in _AGENT
     assert r'$LOCALAPPDATA\Programs\TofuAgent' in _AGENT
-    assert wb._NSI_TARGETS['agent']['setup_prefix'] == 'TofuAgent-Setup'
+    assert wb._NSI_TARGETS['agent']['setup_prefix'] == 'TofuRemote-Setup'
     # Per-user, same as full — the autostart key is HKCU precisely because
     # the privilege model matches.
     assert 'RequestExecutionLevel user' in _AGENT
@@ -267,7 +270,7 @@ def test_running_app_is_closed_gracefully_in_both_authorings():
     # ── NSIS side, both components ──
     assert '!macro TOFU_CLOSE_RUNNING_APP' in _NSI
     for script, target, exe in ((_FULL, 'full', 'Tofu.exe'),
-                                (_AGENT, 'agent', 'TofuAgent.exe')):
+                                (_AGENT, 'agent', 'TofuRemote.exe')):
         expanded = _expand(script, target)
         # Three insertion points: .onInit (default dir), the directory-
         # page leave (user retargeted another existing install), and
@@ -379,3 +382,16 @@ def test_modern_font_stack_for_labels():
     assert '"Microsoft YaHei UI"' in _NSI
     assert '${LANG_SIMPCHINESE}' in _NSI, (
         'the font family must switch on the UI language')
+
+
+def test_remote_rename_preserves_upgrade_identity_and_guards_old_executable():
+    target = wb._NSI_TARGETS['agent']
+    assert target['registry_name'] == 'Tofu Agent'
+    assert target['install_dir'] == 'TofuAgent'
+    assert target['autostart_value'] == 'TofuAgent'
+    assert target['legacy_exe'] == 'TofuAgent.exe'
+    expanded = _expand(_AGENT, 'agent')
+    assert r'Uninstall\Tofu Agent' in expanded
+    assert '"DisplayName" "Tofu Remote"' in expanded
+    assert '!insertmacro TOFU_CLOSE_NAMED_APP "TofuAgent.exe" legacy' in expanded
+    assert 'AppName=Tofu Remote\n          AppId=Tofu Agent' in _WORKFLOW

@@ -27,6 +27,8 @@ from .oauth import oauth_bp
 from .translate import translate_bp
 from .upload import upload_bp
 from .artifacts import artifacts_bp
+
+from .response_assets import response_assets_bp
 from .paper import paper_bp
 from .push import push_bp
 
@@ -52,6 +54,8 @@ ALL_BLUEPRINTS = [
     oauth_bp,
     paper_bp,
     artifacts_bp,
+
+    response_assets_bp,
     push_bp,
     # Headless API:
     *ALL_V1_BLUEPRINTS,
@@ -395,7 +399,7 @@ def register_all(app, *, start_workers=True, discover_plugins=True):
     # TOFU_API_MAJOR=1 compatibility lane (shared v1 test app) keeps the
     # legacy mount until the test ladder finishes migrating.
     from lib.api_v4 import active_api_major
-    from lib.api_v4_constants_generated import API_MAJOR as _RELEASE_MAJOR
+    from lib.generated_api_v4_constants import API_MAJOR as _RELEASE_MAJOR
     legacy_mount_active = active_api_major(app) < _RELEASE_MAJOR
     legacy_v1 = set(ALL_V1_BLUEPRINTS) if not legacy_mount_active else ()
     for bp in ALL_BLUEPRINTS:

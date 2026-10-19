@@ -1,4 +1,4 @@
-"""Resolve paper entry points and freeze bounded source trees.
+"""Resolve paper entry points and freeze complete source trees.
 
 Entry points: resolve_main, snapshot_sources. The caller supplies the already
 authorized project root. No global project selection, database or HTTP access.
@@ -19,10 +19,6 @@ from pathlib import Path
 from .errors import BuildError, check_cancelled
 from .contract import limit, schema
 
-MAX_SOURCE_FILES = limit('source_files')
-MAX_SOURCE_BYTES = limit('source_bytes')
-MAX_FILE_BYTES = limit('source_file_bytes')
-MAX_SCAN_ENTRIES = limit('scan_entries')
 _SKIP_DIRS = frozenset({'.git', '.hg', '.svn', '.tofu', '.texlive',
                         'node_modules', '__pycache__', '.venv', 'venv'})
 _INPUT_SUFFIXES = frozenset(schema()['x-source-suffixes'])
@@ -44,7 +40,7 @@ def contained_path(root: Path, path: str | Path) -> Path:
     return resolved
 
 
-def read_source(root: Path, path: Path, *, limit: int = MAX_FILE_BYTES) -> bytes:
+def read_source(root: Path, path: Path, *, limit: int | None = None, consume_chunk=None) -> bytes:
     """Open a regular file beneath root, refusing raced symlink components.
 
     POSIX uses descriptor-relative traversal with O_NOFOLLOW on every component.
@@ -69,16 +65,20 @@ def read_source(root: Path, path: Path, *, limit: int = MAX_FILE_BYTES) -> bytes
         before = os.fstat(fd)
         if not stat.S_ISREG(before.st_mode):
             raise BuildError('source_path', 'Paper inputs must be regular files')
-        if before.st_size > limit:
+        if limit is not None and before.st_size > limit:
             raise BuildError('source_limit', 'Paper input exceeds the file byte limit')
         chunks = []
-        remaining = limit + 1
-        while remaining:
-            chunk = os.read(fd, min(remaining, 1024 * 1024))
+        remaining = None if limit is None else limit + 1
+        while remaining is None or remaining > 0:
+            chunk = os.read(fd, 1024 * 1024 if remaining is None else min(remaining, 1024 * 1024))
             if not chunk:
                 break
-            chunks.append(chunk)
-            remaining -= len(chunk)
+            if consume_chunk is None:
+                chunks.append(chunk)
+            else:
+                consume_chunk(chunk)
+            if remaining is not None:
+                remaining -= len(chunk)
         after = os.fstat(fd)
         current_stat = contained_path(root, path).stat()
         signature = lambda s: (s.st_dev, s.st_ino, s.st_size, s.st_mtime_ns, s.st_ctime_ns)
@@ -112,8 +112,6 @@ def _includes(root: Path, main: Path, edited: Path) -> bool:
         if path in seen:
             continue
         seen.add(path)
-        if len(seen) > MAX_SOURCE_FILES:
-            raise BuildError('source_limit', 'Paper include graph exceeds the file limit')
         for name in _INCLUDE.findall(_without_comments(_text(root, path))):
             if '\\' in name or '#' in name:
                 continue  # macro expansion belongs to TeX, not a guessed path
@@ -147,13 +145,9 @@ def resolve_main(root: Path, edited: str | Path, *, main_file: str = '') -> Path
         if _DOCUMENT.search(_without_comments(text)):
             return edited_path
     directory = edited_path if edited_path.is_dir() else edited_path.parent
-    scanned = 0
     while True:
         candidates = []
         for path in directory.iterdir():
-            scanned += 1
-            if scanned > MAX_SCAN_ENTRIES:
-                raise BuildError('source_limit', 'Main-file discovery exceeds its scan limit')
             if path.suffix.lower() not in {'.tex', '.ltx'} or not path.is_file():
                 continue
             path = contained_path(root, path)
@@ -185,17 +179,16 @@ def _signature(info: os.stat_result) -> tuple[int, ...]:
             info.st_mtime_ns, info.st_ctime_ns)
 
 
-def _inventory(root: Path, main: Path, *, cancel, max_files: int) -> dict[str, tuple[int, ...]]:
+def _inventory(root: Path, main: Path, *, cancel) -> dict[str, tuple[int, ...]]:
     """Incrementally enumerate inputs and reject a tree changing during the scan.
 
     Directory identities fence additions behind the scanner, including in an
     already visited directory. The manifest itself ignores generated outputs.
-    scandir is consumed within the entry budget, before allocating a file list.
+    scandir is consumed incrementally; every supported source joins the inventory.
     """
     pending = [root]
     directories = {}
     files = {}
-    scanned = 0
     try:
         while pending:
             check_cancelled(cancel)
@@ -207,9 +200,6 @@ def _inventory(root: Path, main: Path, *, cancel, max_files: int) -> dict[str, t
             with os.scandir(directory) as children:
                 for child in children:
                     check_cancelled(cancel)
-                    scanned += 1
-                    if scanned > MAX_SCAN_ENTRIES:
-                        raise BuildError('source_limit', 'Paper tree exceeds scan limit; select a paper directory')
                     if child.name.startswith('.') or child.name in _SKIP_DIRS:
                         continue
                     path = Path(child.path)
@@ -224,8 +214,6 @@ def _inventory(root: Path, main: Path, *, cancel, max_files: int) -> dict[str, t
                     elif path.suffix.lower() in _INPUT_SUFFIXES and path != main.with_suffix('.pdf'):
                         if not stat.S_ISREG(info.st_mode):
                             raise BuildError('source_path', 'Paper inputs must be regular files')
-                        if len(files) >= max_files:
-                            raise BuildError('source_limit', 'Paper tree exceeds the source file limit')
                         files[path.relative_to(root).as_posix()] = _signature(info)
         for directory, signature in directories.items():
             check_cancelled(cancel)
@@ -239,25 +227,21 @@ def _inventory(root: Path, main: Path, *, cancel, max_files: int) -> dict[str, t
 
 
 def snapshot_sources(root: Path, main: Path, destination: Path, *,
-                     cancel=None, max_bytes: int = MAX_SOURCE_BYTES,
-                     max_files: int = MAX_SOURCE_FILES) -> SourceSnapshot:
-    """Freeze a bounded project source manifest, including binary dependencies.
+                     cancel=None) -> SourceSnapshot:
+    """Freeze a complete project source manifest, including binary dependencies.
 
-    The explicit project root is the snapshot boundary; oversized generic
-    workspaces must select a paper directory rather than silently omit inputs.
+    The authorized project root is the snapshot boundary; source size and
+    count do not truncate it.
     Aux/log outputs and hidden tool trees never enter the source digest.
     """
     root = root.resolve(strict=True)
     main = contained_path(root, main)
     if destination.resolve().is_relative_to(root):
         raise BuildError('source_path', 'Snapshot output must be outside the project source tree')
-    if not 0 < max_bytes <= MAX_SOURCE_BYTES or not 0 < max_files <= MAX_SOURCE_FILES:
-        raise BuildError('source_limit', 'Snapshot limits must fit the source resource budget')
     destination.mkdir(parents=True, exist_ok=False)
     for attempt in range(limit('source_snapshot_attempts')):
         try:
-            return _copy_snapshot(root, main, destination, cancel=cancel,
-                                  max_bytes=max_bytes, max_files=max_files)
+            return _copy_snapshot(root, main, destination, cancel=cancel)
         except BuildError as exc:
             if exc.code != 'source_changed' or attempt + 1 == limit('source_snapshot_attempts'):
                 raise
@@ -286,30 +270,41 @@ def manifest_digest(rows: list[dict] | tuple[dict, ...]) -> str:
     return hashlib.sha256(json.dumps(ordered, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
 
 
-def _copy_snapshot(root: Path, main: Path, destination: Path, *, cancel,
-                   max_bytes: int, max_files: int) -> SourceSnapshot:
+def _copy_snapshot(root: Path, main: Path, destination: Path, *, cancel) -> SourceSnapshot:
     rows = []
     checks = []
     size = 0
-    inventory = _inventory(root, main, cancel=cancel, max_files=max_files)
+    inventory = _inventory(root, main, cancel=cancel)
     if main.relative_to(root).as_posix() not in inventory:
         raise BuildError('main_file', 'Main document must be a regular supported paper input')
     for relative in sorted(inventory):
         check_cancelled(cancel)
         path = root / relative
-        data = _snapshot_read(root, path, limit=min(MAX_FILE_BYTES, max_bytes - size))
-        size += len(data)
         copied = destination / relative
         copied.parent.mkdir(parents=True, exist_ok=True)
-        copied.write_bytes(data)
-        digest = hashlib.sha256(data)
-        rows.append({'path': relative, 'sha256': digest.hexdigest(), 'size_bytes': len(data)})
+        digest = hashlib.sha256()
+        file_size = 0
+        with copied.open('xb') as output:
+            def consume(chunk):
+                nonlocal file_size
+                check_cancelled(cancel)
+                output.write(chunk)
+                digest.update(chunk)
+                file_size += len(chunk)
+            _snapshot_read(root, path, consume_chunk=consume)
+        size += file_size
+        rows.append({'path': relative, 'sha256': digest.hexdigest(), 'size_bytes': file_size})
         checks.append((path, digest.digest()))
     for path, digest in checks:
         check_cancelled(cancel)
-        if hashlib.sha256(_snapshot_read(root, path)).digest() != digest:
+        current = hashlib.sha256()
+        def verify(chunk):
+            check_cancelled(cancel)
+            current.update(chunk)
+        _snapshot_read(root, path, consume_chunk=verify)
+        if current.digest() != digest:
             raise BuildError('source_changed', 'Paper source changed during snapshot; retry')
-    if _inventory(root, main, cancel=cancel, max_files=max_files) != inventory:
+    if _inventory(root, main, cancel=cancel) != inventory:
         raise BuildError('source_changed', 'Paper source changed during snapshot; retry')
     for row in rows:
         (destination / row['path']).chmod(0o444)

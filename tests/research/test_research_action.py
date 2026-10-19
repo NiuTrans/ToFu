@@ -67,7 +67,7 @@ def test_write_actions_require_explicit_confirmation():
 def test_research_context_preserves_abort_signal(monkeypatch):
     import lib.research.action as action
     import lib.research.persistence as persistence
-    from lib.llm_errors import AbortedError
+    from lib.llm.llm_errors import AbortedError
 
     def abort(*_args, **_kwargs):
         raise AbortedError('owner stopped the task')

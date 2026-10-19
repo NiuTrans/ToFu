@@ -29,7 +29,7 @@ def test_package_import_keeps_dispatch_implementation_dormant():
         '"lib.llm_dispatch.api" in sys.modules, '
         '"lib.llm_dispatch.discovery" in sys.modules, '
         '"lib.llm_dispatch.dispatcher" in sys.modules, '
-        '"lib.http_client" in sys.modules, "requests" in sys.modules)'
+        '"lib.http_transport.client" in sys.modules, "requests" in sys.modules)'
     )
     assert proc.returncode == 0, proc.stderr[-1200:]
     assert "DISPATCH-PACKAGE 35 True False False False False False" in proc.stdout
@@ -43,7 +43,7 @@ def test_package_exports_and_child_modules_remain_compatible():
         'print("DISPATCH-FACADE", callable(stream), config.__name__, '
         '"lib.llm_dispatch.api" in sys.modules, '
         '"lib.llm_dispatch.discovery" in sys.modules, '
-        '"lib.http_client" in sys.modules, "requests" in sys.modules)'
+        '"lib.http_transport.client" in sys.modules, "requests" in sys.modules)'
     )
     assert proc.returncode == 0, proc.stderr[-1200:]
     assert (
@@ -59,7 +59,7 @@ def test_server_boot_keeps_dispatch_and_http_transport_dormant():
         'print("SERVER-DISPATCH", "lib.llm_dispatch.api" in sys.modules, '
         '"lib.llm_dispatch.discovery" in sys.modules, '
         '"lib.llm_dispatch.dispatcher" in sys.modules, '
-        '"lib.http_client" in sys.modules, "requests" in sys.modules)'
+        '"lib.http_transport.client" in sys.modules, "requests" in sys.modules)'
     )
     assert proc.returncode == 0, proc.stderr[-1200:]
     assert "SERVER-DISPATCH False False False False False" in proc.stdout
@@ -68,9 +68,9 @@ def test_server_boot_keeps_dispatch_and_http_transport_dormant():
 @pytest.mark.unit
 def test_retryable_transport_tuple_preserves_concrete_exception_contract():
     proc = _run_isolated(
-        'import sys; import lib.llm_errors as errors; '
+        'import sys; import lib.llm.llm_errors as errors; '
         'before = "requests" in sys.modules; '
-        'from lib.llm_errors import _RETRYABLE; '
+        'from lib.llm.llm_errors import _RETRYABLE; '
         'from requests.exceptions import ChunkedEncodingError, ConnectionError; '
         'print("RETRYABLE", before, isinstance(ConnectionError(), _RETRYABLE), '
         'isinstance(ChunkedEncodingError(), _RETRYABLE), '

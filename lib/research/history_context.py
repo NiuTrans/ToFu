@@ -82,7 +82,7 @@ def prepare_history_messages(messages, *, model, tools, max_output, user_id,
                 admit_messages(prepared, model=model, tools=tools, max_output=max_output)
             except ContextCapacityExceeded:
                 continue
-            from lib.tool_result_artifacts import ToolResultArtifactRepository
+            from lib.tool_results.tool_result_artifacts import ToolResultArtifactRepository
             stored = ToolResultArtifactRepository().put(user_id=user_id, content=original,
                                                         media_type='application/json')
             reference = (stored or {}).get('artifactRef')
@@ -101,7 +101,7 @@ def restore_history_reference(messages, *, user_id, task_id, artifact_ref, load_
     pending = list(_descriptors(messages, task_id, user_id))
     if not pending or not artifact_ref:
         return False
-    from lib.tool_result_artifacts import ToolResultArtifactRepository
+    from lib.tool_results.tool_result_artifacts import ToolResultArtifactRepository
     repository = ToolResultArtifactRepository()
     if repository.read_range(user_id=user_id, artifact_ref=artifact_ref, limit=1) is not None:
         return False

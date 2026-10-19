@@ -20,6 +20,8 @@ interface DetailState {
   key: string;
   reference: SnapshotToolResultReference;
   content?: string;
+
+  results?: ConversationTurnToolResult['results'];
   controller?: AbortController;
   detach?: () => void;
   render: () => void;
@@ -52,6 +54,13 @@ export function loadedToolResult(node: HTMLElement, value: unknown): string | un
     return undefined;
   }
   return state.content;
+}
+
+export function loadedToolResultResults(node: HTMLElement, value: unknown): ConversationTurnToolResult['results'] {
+  const reference = referenceFrom(value);
+  const state = states.get(node);
+  if (!reference || !state || state.key !== referenceKey(reference)) return undefined;
+  return state.results;
 }
 
 export function bindLazyToolResult(
@@ -94,6 +103,12 @@ export function bindLazyToolResult(
           || result.toolCallId !== reference.toolCallId) {
         throw new Error('Tool output identity changed');
       }
+      const fields = reference.fields;
+      const results = result.results;
+      if (fields?.includes('results') && !Array.isArray(results)) {
+        throw new Error('Structured tool output is missing');
+      }
+      current.results = results;
       current.content = result.toolContent;
       current.render();
     } catch (error) {

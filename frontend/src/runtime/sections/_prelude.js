@@ -1,5 +1,12 @@
 // @ts-check
 
+// Temporary selection/composer port; remove with retained popup composition.
+import { createSelectionPopup, renderReplyQuotePreviews } from '../selection-popup';
+import { createSelectionBranch } from '../selection-branch';
+
+
+import { renderRichResponse, disposeRichResponse } from '../rich-response/renderer';
+
 // Temporary toolbar seam; delete with retained model action composition.
 import { createModelPicker, projectModelPickerCatalog } from '../application-shell/model-picker';
 
@@ -14,6 +21,9 @@ import { refreshTimerCountdowns, toggleTimerWatcher, toggleTimerInstruction, tog
 // Temporary multimedia receipt port; remove with retained tool dispatch.
 import { renderProjectReceipt } from '../conversation/ui/project-receipt';
 import { renderMotionCard } from '../conversation/ui/motion-card';
+import { createWorkUnitTracker } from '../conversation/ui/work-unit/tracker';
+import { prefillWorkUnitComposer } from '../conversation/ui/work-unit/composer';
+import { resolvePath as resolveWorkUnitResourceUrl } from '../api/transport';
 
 import { inspectorReference } from '../features/inspector-evidence';
 
@@ -32,6 +42,12 @@ import { createComposerOptionsSheet } from '../composer-options-sheet';
 
 // Temporary lexical bridge; remove when the sidebar presentation migrates to TypeScript.
 import { createBackgroundActivityController } from '../background-activity-controller';
+
+import { createAgentSidebarDock, backgroundAgentContextHost } from '../agent-sidebar-dock';
+
+import { agentDockProjection } from '../agent-sidebar-dock-projection';
+
+import { swarmMessagesProjection } from '../conversation/presentation/swarm-messages-projection';
 import { createBackgroundActivityEvidenceObserver } from '../conversation/presentation/background-command-completion';
 import { createSidebarSearchController } from '../sidebar-search-controller';
 import { createBackendAvailabilityMonitor } from '../backend-availability-monitor';
@@ -39,6 +55,8 @@ import { createAvailabilityHealthProbeCoordinator } from '../availability-health
 import { createFeatureFlagsLoader } from '../core/feature-flags-loader';
 import { createModelPickerStartup } from '../features/model-catalog/model-picker-startup';
 import { createImageViewerActionsController } from '../image-viewer-actions';
+
+import { showAttachmentPreview, closeAttachmentPreview } from '../attachment-preview-lifecycle';
 import { installMarkdownPolicy } from '../markdown-policy';
 import { createMarkdownRenderer } from '../markdown';
 import { createStorageAvailabilityMonitor } from '../storage-availability-monitor';
@@ -101,6 +119,7 @@ import {
 } from '../core/native-bridge';
 import { clientLogFlushBaseDelayMs, createClientLogFlushScheduler } from '../core/client-log-flush-scheduler';
 import { responsivenessContext, startBrowserResponsivenessMonitor } from '../core/browser-responsiveness-monitor';
+import { createBrowserInteractionContext } from '../core/browser-interaction-context';
 import { createDebugRuntimeOwner } from '../core/debug-runtime-owner';
 import { TRANSLATION_CLAIMS } from '../core/translation-claim-registry';
 import {
@@ -113,10 +132,14 @@ import { createTurnMountTracker } from '../conversation/application/turn-mount-t
 import { createConversationRefresh } from '../conversation/application/conversation-refresh';
 import { createConversationWakeRecovery } from '../conversation/application/conversation-wake-recovery';
 import { createSendPreparationOverlayController } from '../conversation/application/send-preparation-overlay';
-import { createPreferenceActionsController } from '../features/memory/preference-actions';
-import { createPresenceSummaryController } from '../features/presence-summary-controller';
 
-import { createButton as createProjectCoordinationButton } from '../ui';
+import { createComposerTranslationStatus } from '../conversation/application/composer-translation-status';
+import { createPreferenceActionsController } from '../features/memory/preference-actions';
+import { createProjectCoordinationSurface } from '../features/project-coordination-surface';
+
+import { createProjectConversationNavigation } from '../features/project-conversation-navigation';
+
+
 // Temporary presence adapter: remove with the retained presence projection.
 const openProjectCoordinationWorkspace = (ports) => import('../features/project-coordination')
   .then(module => module.openProjectCoordination(ports));
@@ -136,15 +159,25 @@ import {
   createConversationSettingsResolution,
 } from '../conversation/application/conversation-settings-resolution';
 import { createConversationCatalogRevisionGate } from '../conversation/application/conversation-catalog-revision-gate';
+
+import { createFolderPresetMutations, folderPresetWorkspace } from '../conversation/application/folder-presets';
+
+import { openFolderSettings, openFolderDeleteConfirmation } from '../conversation/ui/folder-settings';
 import { createAutomationManagementClient } from '../api/automations';
 import { renderComposerModelNotice } from '../conversation/ui/composer-model-notice';
+
+// Temporary shell badge port; remove with the retained new-chat presentation.
+import { paintNewChatFolderBadges } from '../conversation/ui/new-chat-folder-badges';
+import { paintOptionalProjectAttachment } from '../conversation/ui/optional-project-attachment';
+import { createTurnReviewPresentation } from '../features/turn-review/presentation';
 import { createConversationSurfaceController } from '../conversation/application/conversation-surface-controller';
+import { entityRecordValues, entityRecordKeys } from '../core/entity-record';
 import { createConversationStartup } from '../conversation/application/conversation-startup';
 import {
   createPendingResumePrompter,
   pickPendingResumeTurn,
 } from '../conversation/application/pending-resume';
-import { createConversationProjectController } from '../conversation/application/conversation-project';
+import { createConversationProjectController, captureConversationProject, captureProjectStatus, projectStatusMatchesWorkspace, noteConversationProjectChoice, protectHydratingProjectSettings, withProjectHydration } from '../conversation/application/conversation-project';
 import { createThinkingDepthSlider, projectReasoningControl, THINKING_DEPTH_LABELS } from '../features/thinking-depth-slider';
 
 import { createProjectContext } from '../features/conversation-bar/project-context';
@@ -168,6 +201,7 @@ import {
 import { createTransientTurnOverlay } from '../conversation/application/transient-turn-overlay';
 import { createSwarmPushRuntime } from '../conversation/application/swarm-presentation-overlay';
 
+import { projectAgentTimeline } from '../conversation/presentation/agent-message-receipts';
 import { swarmOutcomeStatus, swarmFailureReason, swarmAgentFailureCard } from '../conversation/presentation/swarm-failure-presentation';
 import {
   backgroundActivityByConversation, backgroundActivityLabel, backgroundActivitySummary,
@@ -193,18 +227,25 @@ import {
   withOptimisticAssistantPreparation,
 } from '../conversation/application/optimistic-user-turn';
 import { createHumanGuidancePresentationStore } from '../conversation/application/human-guidance-presentation';
+
+import { createAuthenticatedChoiceInteractionPorts } from '../conversation/application/choice-interaction';
+
+import { createTurnCommandId } from '../core/turn-command';
 import {
   createClassicConversationRenderers,
 } from '../conversation/ui/classic-conversation-renderers';
 import {
   createHumanGuidanceActions,
 } from '../conversation/ui/human-guidance-actions';
+import { isBootSendBlocked, setBootSendBlocked, subscribeBootReadiness } from '../boot-readiness';
 import { updateComposerSendControls } from '../conversation/ui/composer-send-controls';
 import {
   openTurnInlineEditor,
   reconcileTurnInlineEditors,
 } from '../conversation/ui/turn-inline-editor';
-import { presentConversationRateLimit } from '../conversation/presentation/live-phase';
+
+import { presentConversationActivity } from '../conversation/presentation/conversation-activity';
+import { createConversationReviewTracker } from '../conversation-review';
 import {
   computeExecutionBatches,
   computeToolBatches,
@@ -259,6 +300,8 @@ import {
   presentTurnReasoningMapping,
 } from '../conversation/presentation/turn-serving-route';
 import { presentTurnExecutionTiming } from '../conversation/presentation/turn-finish';
+
+import { renderMcpResourceLinks } from '../conversation/presentation/mcp-resource-links';
 import {
   createToolHeaderPresentation,
 } from '../conversation/presentation/tool-header-presentation';
@@ -298,6 +341,7 @@ import {
   conversationTimestampLabels,
   stripNoTranslateTags,
 } from '../conversation/presentation/shell-localization';
+import { mountFolderConfigControls, installFolderConfigInteractions, makeFolderContextMenuAccessible } from '../conversation/ui/folder-config-control';
 import { createPlanDecisionBar } from '../conversation/ui/plan-decision-bar';
 import { createSendStartupLease, createComposerSubmissionGate, awaitSendPreparation } from '../core/send-startup';
 import { sendFailureToastDetail } from '../conversation/presentation/send-failure-message';
@@ -504,6 +548,12 @@ function submitBatchAnswers(element) {
 
 const imageViewerActions = createImageViewerActionsController({ document });
 const retainedCompositionLifecycle = createLifecycleScope();
+
+const composerTranslationStatus = createComposerTranslationStatus({
+  document, activeConversationId: () => activeConvId,
+  now: () => performance.now(), label: key => t(key),
+});
+retainedCompositionLifecycle.add(() => composerTranslationStatus.destroy());
 const composerOptionsSheet = createComposerOptionsSheet({
   document, refresh: () => updateMobileSheet(), label: () => t('toolbar.moreOptionsTooltip'),
 });
@@ -665,11 +715,16 @@ const backendAvailabilityMonitor = createBackendAvailabilityMonitor({
 // narrow lifecycle bridge instead of letting that chunk reach across module
 // scope to the typed monitor or duplicate its liveness state.
 const backendAvailabilityRestartScope = Object.freeze({
-  begin: () => backendAvailabilityMonitor.beginPlannedInterruption(),
-  end: (backendReachable) => (
-    backendAvailabilityMonitor.endPlannedInterruption(backendReachable)
-  ),
+  begin: () => {
+    setBootSendBlocked('restart', true);
+    backendAvailabilityMonitor.beginPlannedInterruption();
+  },
+  end: (backendReachable) => {
+    setBootSendBlocked('restart', false);
+    backendAvailabilityMonitor.endPlannedInterruption(backendReachable);
+  },
 });
+retainedCompositionLifecycle.add(subscribeBootReadiness(() => updateSendButton()));
 const storageAvailabilityMonitor = createStorageAvailabilityMonitor({
   document,
   schedule: backendAvailabilitySchedule,
@@ -1096,12 +1151,33 @@ runtimeScope.pushRecentModel = recentModelsController.pushRecentModel;
 runtimeScope._currentUserId = null;
 const currentUserIdentity = createCurrentUserIdentityController({
   loadCurrentUser: () => Api.users.me(),
-  onOwnerChanged: (ownerId) => { runtimeScope._currentUserId = ownerId; },
+  onOwnerChanged: (ownerId) => {
+    runtimeScope._currentUserId = ownerId;
+    if (document.querySelector('.ptool-work-card')) _wuScanSoon();
+  },
   log: (message, level) => {
     if (typeof debugLog === 'function') debugLog(message, level);
   },
 });
 const initCurrentUserId = () => currentUserIdentity.resolve();
+// Review receipts are UI preferences, never execution or settlement authority.
+// Remove this bridge when the sidebar and Surface composition move to TypeScript.
+const conversationReview = createConversationReviewTracker({
+  ownerId: () => runtimeScope._currentUserId,
+  storage: () => resolveBrowserLocalStorage(),
+  canView: () => !_effectiveHidden() && document.hasFocus(),
+});
+retainedCompositionLifecycle.add(() => conversationReview.destroy());
+retainedCompositionLifecycle.listen(window, 'storage', (event) => {
+  if (conversationReview.storageChanged(event.key)) renderConversationList();
+});
+const refreshConversationReview = () => {
+  if (!_effectiveHidden() && document.hasFocus() && typeof activeConvId !== 'undefined' && activeConvId) {
+    runtimeScope.requestAuthoritativeConversationRender?.(activeConvId);
+  }
+};
+retainedCompositionLifecycle.listen(document, 'visibilitychange', refreshConversationReview);
+retainedCompositionLifecycle.listen(window, 'focus', refreshConversationReview);
 const resetCurrentUserIdForTests = () => currentUserIdentity.reset();
 runtimeScope.initCurrentUserId = initCurrentUserId;
 runtimeScope.resetCurrentUserIdForTests = resetCurrentUserIdForTests;

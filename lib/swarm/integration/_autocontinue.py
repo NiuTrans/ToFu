@@ -155,17 +155,20 @@ def _durable_chain_allows(turns: list[dict], command_id: str, *,
         if isinstance(error, dict) and error.get('code') == 'task_start_failed':
             continue  # No execution occurred to supersede the main failure.
         if (automatic_recovery_blocker(error) is not None
+                or parent.get('_externalBlocker') is not None
                 or known_external_blocker(projection) is not None):
             return False
         break
+    paired_outputs = {}
+    for row in chain:
+        if row.get('kind') == 'swarm_autocontinue_reply':
+            paired_outputs.setdefault(row.get('parentTurnId'), row)
     receipts = []
     for turn in chain:
         if turn.get('kind') != 'swarm_autocontinue_input':
             continue
         projection = turn.get('projection') or {}
-        output = next((row for row in chain
-                       if row.get('parentTurnId') == turn.get('turnId')
-                       and row.get('kind') == 'swarm_autocontinue_reply'), None)
+        output = paired_outputs.get(turn.get('turnId'))
         error = ((output or {}).get('projection') or {}).get('error') or {}
         if isinstance(error, dict) and error.get('code') == 'task_start_failed':
             continue
@@ -192,20 +195,12 @@ def _start_autocontinue_turn(
             stamp_initiator,
         )
         from lib.scheduler.conversation_dispatch import dispatch_scheduled_turn
-        from lib.turn_lifecycle import list_turns
+        from lib.swarm.restart_recovery import read_continuation_turns
 
         owner_id = int(user_id)
-        page = list_turns(
-            conversation_id,
-            user_id=owner_id,
-            lane_id="main",
-            limit=2000,
-            light=False,
-        )
+        page = read_continuation_turns(conversation_id, user_id=owner_id)
         turns = list(page.get("turns") or [])
-        # The bounded listing is oldest-first. A full page cannot prove the
-        # tail or the last human authorization: fail closed, never reset a cap.
-        if not turns or len(turns) >= 2000:
+        if not turns:
             return False
         import lib.swarm.integration as integration
         updates = agent_inbox.pending_items(conversation_id, modes=['swarm-update'])

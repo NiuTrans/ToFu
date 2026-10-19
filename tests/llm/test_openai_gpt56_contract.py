@@ -317,5 +317,5 @@ def test_frontend_defaults_expose_auto_gates_and_no_fake_pro_model():
     assert "orchestrationCfg.multiAgent : responsesCfg.multiAgent" in other_tabs
     assert 'config.orchestration = Object.assign' in other_tabs
     assert 'Native multi-agent worker:' in tool_rounds
-    assert "toolsCfg.programmaticCalling, 'on'" in other_tabs
+    assert "toolsCfg.programmaticCalling, 'auto'" in other_tabs
     assert "model_id: 'gpt-5.6-pro'" not in other_tabs + tool_rounds

@@ -393,6 +393,14 @@ class StorageV2Client:
         # slow application work cannot prevent observer-based supervision.
         self._health_lock = threading.Lock()
         self._health_session: StorageV2Session | None = None
+        from lib.storage.checkpoint_control import CheckpointClientPort
+        self._checkpoint_port = CheckpointClientPort(timeout=self._timeout, request_once=self._checkpoint_request,
+            check_scope=self._checkpoint_scope, is_closed=self._checkpoint_closed)
+
+    @property
+    def request_timeout_seconds(self) -> float:
+        """Configured per-request I/O policy shared by native transport ports."""
+        return self._timeout
 
     @property
     def endpoint(self) -> tuple[str, int]:
@@ -477,7 +485,8 @@ class StorageV2Client:
         recorded = dict(budget or {})
         try:
             composition = native_event_batch_composition_budget(recorded.get('eventBatchComposition'))
-        except Exception:
+        except Exception as diagnostic_error:
+            logger.debug('set_readiness_budget failure handled: %s', type(diagnostic_error).__name__)
             composition = None
         with self._readiness_lock:
             self._readiness_budget = recorded
@@ -632,6 +641,30 @@ class StorageV2Client:
         raise StorageError(  # unreachable: loop either returns or raises
             'database_internal', 'Storage retry loop exited unexpectedly')
 
+    def _checkpoint_scope(self, owner):
+        if owner != self._owner_id:
+            raise StorageError('database_forbidden', 'native checkpoint owner differs')
+
+    def _checkpoint_closed(self):
+        with self._pool._condition:
+            return self._pool._closed
+
+    def _checkpoint_request(self, operation, payload, owner, deadline_unix_ms):
+        remaining = min(self._timeout, deadline_unix_ms/1000 - time.time())
+        if remaining <= 0:
+            raise StorageError('database_timeout', 'checkpoint deadline elapsed before effects')
+        return self._request_once(operation, payload, timeout=remaining,
+                                  command_id=None, deadline_unix_ms=deadline_unix_ms)
+
+    def native_checkpoint_available(self, *, user_id: int) -> bool:
+        return self._checkpoint_port.available(user_id=user_id)
+
+    def native_checkpoint_control(self, operation: str, payload: dict[str, Any], *,
+                                  user_id: int, deadline_unix_ms: int,
+                                  response_bytes: int) -> dict[str, Any]:
+        return self._checkpoint_port.control(operation, payload, user_id=user_id,
+            deadline_unix_ms=deadline_unix_ms, response_bytes=response_bytes)
+
     def _attempt(
         self,
         operation: str,
@@ -642,6 +675,11 @@ class StorageV2Client:
         deadline_unix_ms: int,
     ) -> Any:
         body = request_payload(operation, payload, owner_id=self._owner_id)
+        return self._request_once(operation, body, timeout=timeout,
+                                  command_id=command_id, deadline_unix_ms=deadline_unix_ms)
+
+    def _request_once(self, operation, body, *, timeout, command_id, deadline_unix_ms):
+        """One pooled transport attempt; replay policy belongs to the caller."""
         stop_at = time.monotonic() + timeout
         session = None
         broken = False

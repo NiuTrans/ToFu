@@ -197,15 +197,25 @@ _term_callbacks: dict[str, list] = {}
 _term_callbacks_lock = threading.Lock()
 
 
-def on_terminal(task_id: str, fn) -> None:
+def on_terminal(task_id: str, fn):
     """Register ``fn(task_id)`` to run exactly once when the task ends.
 
     Multiple callbacks per task run in registration order. A callback
-    registered for an ALREADY-terminal task runs immediately (the caller
-    holds that race when it registers after spawn).
+    The caller rechecks durable state after subscribing to close the settlement
+    race. The returned disposal function removes an outstanding subscription;
+    disposal is safe after notification and can race notification.
     """
     with _term_callbacks_lock:
         _term_callbacks.setdefault(task_id, []).append(fn)
+
+    def unsubscribe():
+        with _term_callbacks_lock:
+            callbacks = _term_callbacks.get(task_id)
+            if callbacks and fn in callbacks:
+                callbacks.remove(fn)
+                if not callbacks:
+                    _term_callbacks.pop(task_id, None)
+    return unsubscribe
 
 
 def fire_terminal_callbacks(task_id: str) -> None:

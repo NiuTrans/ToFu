@@ -332,3 +332,22 @@ def test_snapshot_writes_are_throttled_but_settlement_is_forced(monkeypatch):
         ("cv-throttle", ("a",), 1),
         ("cv-throttle", ("a",), 1),
     ]
+
+
+@pytest.mark.parametrize('incoming_revision', [None, 1])
+def test_message_receipt_revision_survives_stale_or_failed_snapshot_read(incoming_revision):
+    import json
+    from lib.swarm.snapshot import stamp_round
+    receipt = {'swarmRunId': 'run', 'agentId': 'a', 'messageId': 'm', 'state': 'input_confirmed'}
+    original = {'swarm_id': 'run', 'version': 0, 'agents': [
+        {'id': 'a', 'messageReceiptsVersion': 2, 'messageReceipts': [receipt]}]}
+    round_entry = {'toolName': 'spawn_agents', 'toolContent': json.dumps({'swarm_id': 'run'})}
+    stamp_round(round_entry, original)
+    stale_agent = {'id': 'a', 'status': 'running'}
+    if incoming_revision is not None:
+        stale_agent.update(messageReceiptsVersion=incoming_revision,
+                           messageReceipts=[{**receipt, 'state': 'submitted'}])
+    stamp_round(round_entry, {'swarm_id': 'run', 'version': 0, 'agents': [stale_agent]})
+    restored = round_entry['_swarmSnapshot']['agents'][0]
+    assert restored['messageReceipts'] == [receipt]
+    assert restored['messageReceiptsVersion'] == 2

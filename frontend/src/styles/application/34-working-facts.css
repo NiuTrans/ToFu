@@ -1,0 +1,8 @@
+/* Source-bound facts use the shared dialog, controls and layout primitives. */
+.working-facts { overflow-wrap: anywhere; }
+.working-facts fieldset { min-width: 0; border: 0; padding: 0; margin: 0; }
+.working-facts details { border-bottom: 1px solid var(--border); padding-block: var(--space-2); }
+.working-facts summary { cursor: pointer; font-weight: var(--weight-semibold); }
+.working-facts details > .ui-stack { padding-block: var(--space-3); }
+.working-facts p, .working-facts blockquote { margin: 0; }
+.working-facts blockquote { border-inline-start: 1px solid var(--border); padding-inline-start: var(--space-3); }

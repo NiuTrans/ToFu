@@ -44,7 +44,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 pytestmark = pytest.mark.unit
 
-from lib.llm_errors import RateLimitError  # noqa: E402
+from lib.llm.llm_errors import RateLimitError  # noqa: E402
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent.parent
 

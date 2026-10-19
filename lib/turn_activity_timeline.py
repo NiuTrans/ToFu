@@ -22,17 +22,19 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+
+import re
 import time
 from collections.abc import Mapping
 from typing import Any
 
 from lib.agent_core.events import EventType, Phase
-from lib.log_record_values import text_value
-from lib.tool_rejection import (
+from lib.logging_pkg.log_record_values import text_value
+from lib.tool_results.tool_rejection import (
     is_unavailable_tool_rejection,
     tool_rejection_descriptor,
 )
-from lib.tool_round_replay import SUPERSEDED_PROVIDER_ATTEMPT_FIELD
+from lib.tool_results.tool_round_replay import SUPERSEDED_PROVIDER_ATTEMPT_FIELD
 from lib.tools.result_envelope import tool_result_error
 
 
@@ -89,6 +91,12 @@ _STRING_LIMITS: dict[str, int] = {
     'taskId': 256,
     'attemptId': 256,
     'anchorBlockId': 320,
+
+    'anchorPosition': 24,
+    'taskModel': 160,
+    'summaryModel': 160,
+    'summarySelectedModel': 160,
+    'summaryProviderId': 160,
     'requestLevel': 24,
     'attemptScope': 24,
 }
@@ -99,7 +107,7 @@ _INTEGER_FIELDS = frozenset({
     'messagesBefore', 'messagesAfter', 'reductionPercent', 'attempt',
 })
 _ARG_FIELDS = frozenset({'summaryArgs', 'detailArgs'})
-_ENTRY_FIELDS = frozenset({*_STRING_LIMITS, *_INTEGER_FIELDS, *_ARG_FIELDS})
+_ENTRY_FIELDS = frozenset({*_STRING_LIMITS, *_INTEGER_FIELDS, *_ARG_FIELDS, 'summaryCalls'})
 
 _TOOL_TERMINAL_ERROR_STATUSES = frozenset({
     'error', 'failed', 'timeout', 'timed_out', 'cancelled',
@@ -199,6 +207,107 @@ def _identity_int(value: Any) -> int | None:
     return parsed if 0 <= parsed <= _INTEGER_MAX else None
 
 
+def _compaction_fact_text(value: Any, limit: int = 160) -> str:
+    """New attribution never stringifies containers or discloses credential prose."""
+    if not isinstance(value, str):
+        return ''
+    if re.search(
+        r'''(?ix)(?:authorization(?:\\?["'])?\s*:|bearer\s+|
+        (?:api[_-]?(?:key|secret)|(?:access|refresh)[_-]?token|token|password|secret)
+        (?:\\?["'])?\s*[:=]|https?://[^/\s:@]+:[^/\s@]+@)''', value,
+    ):
+        return '<redacted>'
+    return _text(value, limit)
+
+
+def _summary_calls(value: Any) -> list[dict[str, Any]]:
+    """Allow only recorded receipt provenance, never arbitrary dispatch secrets."""
+    if not isinstance(value, list):
+        return []
+    allowed = {
+        'model', 'providerId', 'status', 'costUsd', 'known', 'reason',
+        'costBasis', 'pricingSource', 'pricingSnapshot', 'source', 'currency',
+        'provider', 'selectedPromptTokens', 'tierId', 'maxPromptTokens',
+        'usdToCny', 'rates', 'input', 'output', 'cacheReadMul', 'cacheWriteMul',
+    }
+
+    def clean(row: Mapping[str, Any], depth: int = 0) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, item in row.items():
+            if key not in allowed:
+                continue
+
+            if key in {'model', 'providerId', 'provider'} and not isinstance(item, str):
+                continue
+            if isinstance(item, Mapping) and key in {'pricingSnapshot', 'rates'} and depth < 2:
+                result[key] = clean(item, depth + 1)
+            elif isinstance(item, str):
+                result[key] = _compaction_fact_text(item)
+            elif item is None or isinstance(item, bool):
+                result[key] = item
+            elif (isinstance(item, (int, float)) and abs(item) <= _INTEGER_MAX
+                  and math.isfinite(item)):
+                result[key] = item
+        return result
+
+    return [clean(row) for row in value[:16] if isinstance(row, Mapping)]
+
+
+def compaction_attribution_from_receipt(receipt: Any, observed_calls: Any = None) -> dict[str, Any]:
+    """Pure bounded projection seam for events or explicit offline evidence.
+
+    Never read an archive, reprice costs or graft the task model onto a summary.
+    Legacy receipt call identities can be selected-route fallbacks; they do
+    not alone prove actual dispatch. Callers must already have matching receipt
+    and optional observed dispatch evidence, never fetch or guess it here.
+    """
+    if not isinstance(receipt, Mapping):
+        return {}
+    summary = receipt.get('summary')
+    if not isinstance(summary, Mapping):
+        return {}
+    route = summary.get('route')
+    route = route if isinstance(route, Mapping) else {}
+    result: dict[str, Any] = {}
+    selected = _compaction_fact_text(route.get('modelId'))
+    if selected:
+        result['summarySelectedModel'] = selected
+    cost = summary.get('cost')
+    cost = cost if isinstance(cost, Mapping) else {}
+    recorded_raw = cost.get('calls')
+    call_count = cost.get('callCount')
+    # Establish completeness BEFORE filtering/truncation. Otherwise a hidden
+    # seventeenth route or malformed row can turn partial evidence into a lie.
+    complete_ledger = (
+        type(call_count) is int and 0 < call_count <= 16
+        and isinstance(recorded_raw, list) and len(recorded_raw) == call_count
+        and isinstance(observed_calls, list) and len(observed_calls) == call_count
+        and all(isinstance(row, Mapping) for row in recorded_raw)
+        and all(isinstance(row, Mapping) for row in observed_calls)
+    )
+    recorded = _summary_calls(recorded_raw)
+    observed = _summary_calls(observed_calls) if complete_ledger else []
+    calls = []
+    for index in range(max(len(recorded), len(observed))):
+        row = dict(recorded[index]) if index < len(recorded) else {}
+        # Price provenance remains intact, but identity must be observed.
+        row.pop('model', None)
+        row.pop('providerId', None)
+        if index < len(observed):
+            row.update({key: observed[index][key] for key in ('model', 'providerId')
+                        if key in observed[index]})
+        calls.append(row)
+    if calls:
+        result['summaryCalls'] = calls
+        # Do not hide incomplete/mixed attempts behind one selected model.
+        for source, target in (('model', 'summaryModel'), ('providerId', 'summaryProviderId')):
+            identities = {row.get(source) for row in calls}
+            if (complete_ledger and len(identities) == 1
+                    and all(isinstance(v, str) and v for v in identities)):
+                result[target] = next(iter(identities))
+    return result
+
+
 def _normalize_entry(raw: Any) -> dict[str, Any] | None:
     if not isinstance(raw, Mapping):
         return None
@@ -214,11 +323,17 @@ def _normalize_entry(raw: Any) -> dict[str, Any] | None:
     if (raw.get('anchorToolRoundNum') is not None
             and _identity_int(raw['anchorToolRoundNum']) is None):
         return None
+    position = raw.get('anchorPosition')
+    if position is not None and (not isinstance(position, str)
+                                 or position not in {'before', 'after', 'producer-start'}):
+        return None
     for key, value in raw.items():
         if key not in _ENTRY_FIELDS or value is None:
             continue
         if key in _STRING_LIMITS:
             rendered = (value if key in {'taskId', 'attemptId', 'anchorBlockId'}
+                        else _compaction_fact_text(value, _STRING_LIMITS[key])
+                        if key in {'taskModel', 'summaryModel', 'summarySelectedModel', 'summaryProviderId'}
                         else _text(value, _STRING_LIMITS[key]))
             if rendered:
                 entry[key] = rendered
@@ -229,6 +344,10 @@ def _normalize_entry(raw: Any) -> dict[str, Any] | None:
                       ))
             if parsed is not None:
                 entry[key] = parsed
+        elif key == 'summaryCalls':
+            calls = _summary_calls(value)
+            if calls:
+                entry[key] = calls
         elif key in _ARG_FIELDS:
             args = _safe_args(value)
             if args:
@@ -339,7 +458,7 @@ def _producer_identity(
     raw_event: Mapping[str, Any], task: Mapping[str, Any],
 ) -> dict[str, str]:
     """Keep a relayed producer distinct from its current display carrier."""
-    from lib.tool_round_identity import execution_identity
+    from lib.tool_results.tool_round_identity import execution_identity
 
     attempt_id, task_id = execution_identity(raw_event)
     owner_attempt, _ = execution_identity(task)
@@ -446,12 +565,13 @@ def _llm_round_anchor(
         return explicit
     if raw_event.get('type') in {
         EventType.MODEL_REQUEST_START, EventType.MODEL_REQUEST_COMPLETE,
-        EventType.COMPACTION, EventType.COMPACTION_DONE,
         EventType.TOOL_SCHEMA_REJECTED,
     }:
         round_num = _round_number(raw_event)
         if round_num is not None:
             return max(0, round_num - 1)
+    if raw_event.get('type') in {EventType.COMPACTION, EventType.COMPACTION_DONE}:
+        return _round_number(raw_event)  # Already zero-based at every producer.
     if raw_event.get('type') in {
         EventType.TOOL_START, EventType.TOOL_PROGRESS,
         EventType.TOOL_RESULT, EventType.TOOL_COMPLETE,
@@ -462,6 +582,25 @@ def _llm_round_anchor(
     if _producer_identity(raw_event, task) == _producer_identity({}, task):
         return _nonnegative_int(task.get('_activityLastLlmRound'))
     return None
+
+
+def capture_compaction_boundary(raw_event: Mapping[str, Any], task: Mapping[str, Any]) -> dict[str, Any]:
+    """Capture the nearest existing occurrence once, including prior tool output."""
+    scope: dict[str, Any] = _producer_identity(raw_event, task)
+    if raw_event.get('anchorPosition'):
+        return {**scope, **{key: raw_event[key] for key in ('anchorPosition', 'anchorBlockId') if key in raw_event}}
+    segments = task.get('segments')
+    for segment in reversed(segments if isinstance(segments, list) else []):
+        if (not isinstance(segment, Mapping) or segment.get('terminal')
+                or segment.get('type') not in {'text', 'thinking', 'tool_use', 'program'}
+                or not _same_producer(segment, scope)
+                or not any(scope.get(key) and segment.get(key) == scope[key] for key in ('taskId', 'attemptId'))):
+            continue
+        block_id = segment.get('blockId')
+        if (isinstance(block_id, str) and block_id
+                and not block_id.endswith(':terminal') and not block_id.startswith('terminal:')):
+            return {**scope, 'anchorBlockId': block_id, 'anchorPosition': 'after'}
+    return {**scope, 'anchorPosition': 'producer-start'}
 
 
 def _parent_request(raw_event: Mapping[str, Any], task: Mapping[str, Any]) -> str:
@@ -1136,9 +1275,30 @@ def _fold_phase(
         raw_event.get('anchorBlockId'), raw_event.get('anchorToolRoundNum'),
     )
     warning = phase == Phase.RETRYING or has_http_error
+    anchors = (capture_compaction_boundary(raw_event, task)
+               if phase == Phase.COMPACTING else _activity_anchors(raw_event, task))
+    if phase == Phase.COMPACTING:
+        # A retry/resume can compact twice at the same model round.
+        span_id = _stable_span('compaction-start', anchors.get('taskId'), anchors.get('attemptId'), seq)
+
+        # Reactive recovery archives before L2 starts. Bind its still-pending,
+        # unwitnessed placeholder rather than leave a permanent phase ghost.
+        # Witnessed or settled archives cannot consume a later start.
+        pending = [entry for entry in entries
+                   if _same_producer(entry, anchors)
+                   and entry.get('reasonCode') == 'context_compaction'
+                   and entry.get('status') == 'running'
+                   and entry.get('anchorPosition') == 'producer-start'
+                   and not entry.get('anchorBlockId')
+                   and entry.get('durationMs') == 0
+                   and entry.get('startedAt') == entry.get('occurredAt')]
+        if len(pending) == 1:
+            pending[0].update({**anchors, 'startedAt': now, 'endedAt': now,
+                               'durationMs': 0})
+            return
     _append_or_update(entries, {
         'id': _entry_id(task, seq, raw_event=raw_event),
-        **_activity_anchors(raw_event, task),
+        **anchors,
         'spanId': span_id,
         'parentSpanId': parent_span,
         'seq': seq,
@@ -1191,31 +1351,51 @@ def _fold_compaction_event(
     if not archive_id and not (raw_event.get('type') == EventType.COMPACTION_DONE
                                and (raw_event.get('receipt') or {}).get('status') == 'failed'):
         return
-    # Archive creation happens AFTER model summarization. Preserve the real
-    # phase start before replacing that transient row with its archive receipt.
-    phase_starts = [
-        entry.get('startedAt') for entry in entries
-        if _same_producer(entry, _producer_identity(raw_event, task))
+    producer = _producer_identity(raw_event, task)
+    span_id = _stable_span(
+        'compaction', producer.get('taskId'), producer.get('attemptId'),
+        archive_id or f'failed:{seq}',
+    )
+    prior_index = _find_span(entries, span_id, producer)
+
+    if prior_index is None and archive_id:
+        # Older writers used the carrier attempt in the span hash. An already
+        # projected owner-scoped archive occurrence still has its stable id.
+        matches = [index for index, entry in enumerate(entries)
+                   if entry.get('archiveId') == archive_id and _same_producer(entry, producer)]
+        if len(matches) == 1:
+            prior_index = matches[0]
+            span_id = entries[prior_index]['spanId']
+    prior = entries[prior_index] if prior_index is not None else {}
+    # Archive creation can happen AFTER summarization. A late settlement for
+    # an existing archive must not consume a newer same-round start phase.
+    phase_rows = [
+        entry for entry in entries
+        if not prior and _same_producer(entry, producer)
         and entry.get('phase') == Phase.COMPACTING
         and entry.get('reasonCode') == Phase.COMPACTING
         and entry.get('status') in {'started', 'running', 'waiting'}
     ]
-    phase_start = phase_starts[0] if len(phase_starts) == 1 else None
-    entries[:] = [
-        entry for entry in entries
-        if not (
-            _same_producer(entry, _producer_identity(raw_event, task))
-            and entry.get('phase') == Phase.COMPACTING
-            and entry.get('reasonCode') == Phase.COMPACTING
-            and entry.get('status') in {'started', 'running', 'waiting'}
-        )
-    ]
-    span_id = _stable_span(
-        'compaction', task.get('_attemptId'), archive_id or f'failed:{seq}',
-    )
-    prior_index = _find_span(entries, span_id, _producer_identity(raw_event, task))
-    prior = entries[prior_index] if prior_index is not None else {}
+    phase_row = phase_rows[0] if len(phase_rows) == 1 else {}
+    phase_start = phase_row.get('startedAt')
+    if phase_row:
+        entries.remove(phase_row)
     receipt = raw_event.get('receipt')
+
+    # Existing start wins: settling cannot move after future same-round output.
+    boundary_source = prior if prior.get('anchorPosition') else phase_row
+    anchors = _producer_identity(raw_event, task)
+    if boundary_source.get('anchorPosition'):
+        anchors.update({key: boundary_source[key] for key in ('anchorBlockId', 'anchorPosition') if key in boundary_source})
+    elif raw_event.get('anchorPosition'):
+        # A preflight refusal has no running phase, but its producer can
+        # record the real boundary before checking the budget. Reuse that
+        # witness on reload; never derive it from later replay segments.
+        anchors.update({key: raw_event[key] for key in ('anchorBlockId', 'anchorPosition') if key in raw_event})
+    else:
+        # Sparse replay/legacy has no witnessed start. Never inspect future
+        # segments to fabricate it; producer-start placement is conservative.
+        anchors['anchorPosition'] = 'producer-start'
     receipt = receipt if isinstance(receipt, Mapping) else {}
     receipt_status = _text(receipt.get('status'), 32).lower()
     completed = str(raw_event.get('type') or '') == EventType.COMPACTION_DONE
@@ -1246,7 +1426,8 @@ def _fold_compaction_event(
         detail = ''
     _append_or_update(entries, {
         'id': _entry_id(task, seq, raw_event=raw_event),
-        **_activity_anchors(raw_event, task),
+        **anchors,
+        **compaction_attribution_from_receipt(receipt, raw_event.get('summaryDispatchCalls')),
         'spanId': span_id,
         'seq': seq,
         'occurredAt': now,
@@ -1289,7 +1470,8 @@ def _fold_compaction_event(
             reduction_percent if reduction_percent is not None
             else prior.get('reductionPercent')
         ),
-        'model': _text(raw_event.get('model') or prior.get('model'), 160),
+        'taskModel': _compaction_fact_text(raw_event.get('taskModel') or raw_event.get('model')
+                                          or prior.get('taskModel') or task.get('model')),
         'roundNum': _round_number(raw_event),
         'llmRound': _llm_round_anchor(raw_event, task),
     })
@@ -1515,6 +1697,7 @@ __all__ = [
     'ACTIVITY_TIMELINE_MAX_ENTRIES',
     'ACTIVITY_TIMELINE_MAX_JSON_BYTES',
     'ACTIVITY_TIMELINE_VERSION',
+    'capture_compaction_boundary',
     'fold_activity_timeline',
     'normalize_activity_timeline',
 ]

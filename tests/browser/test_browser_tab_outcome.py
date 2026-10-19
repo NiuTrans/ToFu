@@ -528,12 +528,13 @@ def test_click_schema_documents_new_tab_follow():
     from lib.tools.browser import BROWSER_TOOL_CLICK
     desc = BROWSER_TOOL_CLICK['function']['description']
     assert 'NEW TAB' in desc
-    # Schema diet guard: the surface stays consolidated (15 tools).
+    # Schema diet guard: 19 intent tools, including research and advanced form actions.
     from lib.browser.advanced import ADVANCED_BROWSER_TOOLS
     from lib.tools.browser import BROWSER_TOOLS
     size = len(json.dumps(BROWSER_TOOLS + ADVANCED_BROWSER_TOOLS,
                           ensure_ascii=False))
-    assert size < 15000, f'browser schema surface grew to {size} chars'
+    assert len(BROWSER_TOOLS + ADVANCED_BROWSER_TOOLS) == 19
+    assert size < 19000, f'browser schema surface grew beyond 1000 chars/tool: {size}'
 
 
 if __name__ == '__main__':

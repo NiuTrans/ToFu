@@ -360,7 +360,15 @@ def with_cache_tracking_scope(function):
 
 def _current_invocation(conv_id: str, user_id: int):
     scope = _cache_invocation.get()
-    return scope if scope and scope.key[:2] == (user_id, conv_id) else None
+    if scope is None or scope.key[0]!=user_id:
+        return None
+    # Compaction gives a child its explicit owner/task namespace while model
+    # observations retain the authorization conversation. Both name this one
+    # invocation; no sibling or conversation baseline may be borrowed.
+    isolated_key=f'invocation:{user_id}:{scope.task_id}'
+    if scope.key[1]==conv_id or (scope.lane!='conversation' and conv_id==isolated_key):
+        return scope
+    return None
 
 
 def _allows_conversation_baseline(conv_id: str, user_id: int) -> bool:

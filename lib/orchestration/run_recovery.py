@@ -26,8 +26,10 @@ def _interrupted(run):
                                          'orchestration.continuation'))
 
 
-def load_recovery_records(runs, run_id: str):
+def load_recovery_records(runs, run_id: str, *, owner_user_id=None):
     """Stream bounded pages and retain effect receipts only, not UI history."""
+    from lib.orchestration.invocation_recovery import completion_resolver
+    reconcile = completion_resolver(owner_user_id) if owner_user_id is not None else None
     visited = set()
     original = None
     while True:
@@ -66,7 +68,7 @@ def load_recovery_records(runs, run_id: str):
                 'Chat Goal recovery requires its conversation, model context and lifecycle binding')
         try:
             records, parent = read_journal(events, definition=run['definition'],
-                                           initial_context=run.get('input', ''))
+                initial_context=run.get('input', ''), reconcile_agent=reconcile)
         except RecoveryRefused as exc:
             raise RunRecoveryError(str(exc)) from exc
         if not parent:

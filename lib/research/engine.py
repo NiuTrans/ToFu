@@ -21,7 +21,7 @@ __all__ = ['run_research_task', 'research_root', 'resume_interrupted_research',
 
 def research_root() -> str:
     """Writable root for auto-research job state (workdirs)."""
-    from lib.runtime_paths import data_root
+    from lib.runtime.runtime_paths import data_root
     path = os.path.join(data_root(), 'research')
     os.makedirs(path, exist_ok=True)
     return path

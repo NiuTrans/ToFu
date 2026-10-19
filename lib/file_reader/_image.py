@@ -12,7 +12,7 @@ import os
 
 from lib.log import get_logger
 
-from ._router import IMAGE_EXTENSIONS, MAX_IMAGE_BYTES, _EXT_MIME
+from ._router import IMAGE_EXTENSIONS, _EXT_MIME
 
 logger = get_logger(__name__)
 
@@ -28,9 +28,6 @@ _IMAGE_MAGICS = {
 
 def _read_image(path: str, ext: str, file_size: int) -> dict | str:
     """Read an image file and return a VLM-compatible dict."""
-    if file_size > MAX_IMAGE_BYTES:
-        return (f'Error: Image too large: {file_size:,} bytes '
-                f'(max {MAX_IMAGE_BYTES // (1024*1024)} MB)')
 
     try:
         with open(path, 'rb') as f:
@@ -134,11 +131,6 @@ def inspect_image_file(path, *, crop=None, rotate=0, zoom=None, grid=False):
                 f'({", ".join(sorted(IMAGE_EXTENSIONS))}); got {ext or "no extension"}. '
                 f'Use read_files for other file types.')
 
-    file_size = os.path.getsize(path)
-    if file_size > MAX_IMAGE_BYTES:
-        return (f'Error: Image too large: {file_size:,} bytes '
-                f'(max {MAX_IMAGE_BYTES // (1024 * 1024)} MB)')
-
     try:
         with open(path, 'rb') as f:
             raw = f.read()
@@ -184,9 +176,6 @@ def inspect_image_bytes(raw, *, source_name='image', crop=None, rotate=0,
     import io
 
     file_size = len(raw)
-    if file_size > MAX_IMAGE_BYTES:
-        return (f'Error: Image too large: {file_size:,} bytes '
-                f'(max {MAX_IMAGE_BYTES // (1024 * 1024)} MB)')
 
     try:
         from PIL import Image, ImageDraw, ImageOps

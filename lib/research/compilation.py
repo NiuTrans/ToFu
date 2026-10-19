@@ -16,9 +16,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 
 from lib.identity import require_user_id
-from lib.llm_errors import AbortedError
+from lib.llm.llm_errors import AbortedError
 from lib.paper.builds.compiler import CompiledBuild, artifact_metadata
-from lib.paper.builds.contract import limit
 from lib.paper.builds.errors import BuildError
 from lib.paper.builds.records import SourceRecords
 from lib.paper.builds.runtime import get_scheduler
@@ -87,15 +86,12 @@ def compile_workspace(workspace: dict, *, direction: str, lang: str, owner_user_
         raise AbortedError('Research compilation cancelled')
     task = start_record_build(records, owner_user_id=owner, document_id=document_id,
                               subscriber_id=subscriber, request_key=digest, scheduler=scheduler)
-    deadline = time.monotonic() + limit('compile_timeout_seconds') * (scheduler.budget.queue_capacity + 1)
     renewal = time.monotonic() + 30
     try:
         while task['status'] in {'pending', 'running'}:
             if cancel.wait(0.1):
                 raise AbortedError('Research compilation cancelled')
             now = time.monotonic()
-            if now > deadline:
-                raise BuildError('compile_timeout', 'Research compilation queue deadline expired')
             if now >= renewal:
                 scheduler.renew(task['id'], owner_user_id=owner, subscriber_id=subscriber)
                 renewal = now + 30

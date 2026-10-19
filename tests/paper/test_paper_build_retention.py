@@ -16,7 +16,7 @@ from lib.paper.builds.artifact_repository import PaperBuildArtifactRepository
 from lib.paper.builds.compiler import artifact_metadata
 from lib.paper.builds.contract import limit
 from lib.storage.errors import StorageError
-from tests.storage import test_storage_sidecar_contract as storage_support
+from tests.storage import test_storage_authority_sql_contract as storage_support
 from tests.api import test_api_v1_paper_builds as api_support
 from tests.paper.test_paper_build_cache import _build, _cache
 

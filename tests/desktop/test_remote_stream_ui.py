@@ -115,8 +115,12 @@ def test_remote_run_streams_via_tool_progress(tmp_path, monkeypatch):
     monkeypatch.setattr(hp, '_finalize_tool_round', lambda *a: None)
     # progress cb 走 code_exec 模块的 append_event,patch 它的导入点
     import lib.tasks_pkg.handlers.code_exec as ce
-    monkeypatch.setattr(ce, 'append_event',
-                        lambda task, ev: events.append(ev) or None)
+    progress_received = threading.Event()
+    def receive(task, event):
+        events.append(event)
+        if event.get('type') == 'tool_progress' and 'AAA' in event.get('chunk', ''):
+            progress_received.set()
+    monkeypatch.setattr(ce, 'append_event', receive)
 
     task = {'id': 'task-e2e', 'convId': 'conv-e2e', '_userId': 'owner'}
     round_entry = {'toolCallId': 'tc-1', 'toolName': 'run_command'}
@@ -125,7 +129,7 @@ def test_remote_run_streams_via_tool_progress(tmp_path, monkeypatch):
     def run_handler():
         outcome['r'] = hp._execute_remote_project_tool(
             task, 'run_command', 'tc-1',
-            {'command': "printf 'AAA\\n'; sleep 1.0; printf 'BBB\\n'"},
+            {'command': "printf 'AAA\\n'; while [ ! -f release-stream-proof ]; do sleep .01; done; printf 'BBB\\n'"},
             1, round_entry, {'agent_id': 'agent-A', 'root': 'myapp'})
 
     def fake_agent():
@@ -165,14 +169,17 @@ def test_remote_run_streams_via_tool_progress(tmp_path, monkeypatch):
     ht = threading.Thread(target=run_handler)
     at = threading.Thread(target=fake_agent)
     ht.start()
-    time.sleep(0.15)   # handler 先入队
     at.start()
-    # 命令在飞期间(sleep 1.0):progress 事件应已含 AAA
-    time.sleep(0.7)
-    mid = ''.join(ev.get('chunk', '') for ev in events
-                  if ev.get('type') == 'tool_progress')
-    ht.join(timeout=10)
-    at.join(timeout=10)
+    try:
+        assert progress_received.wait(5), 'no progress before command completion'
+        assert ht.is_alive(), 'progress arrived only after terminal settlement'
+        mid = ''.join(ev.get('chunk', '') for ev in events
+                      if ev.get('type') == 'tool_progress')
+    finally:
+        (root / 'release-stream-proof').touch()
+        ht.join(timeout=10)
+        at.join(timeout=10)
+    assert not ht.is_alive() and not at.is_alive()
 
     tc_id, content, _ = outcome['r']
     assert 'AAA' in mid, f'在飞期间无流式增量: mid={mid!r}'
@@ -188,7 +195,8 @@ def test_remote_run_streams_via_tool_progress(tmp_path, monkeypatch):
 
 
 @pytest.mark.unit
-def test_remote_run_meta_terminal_shape(tmp_path, monkeypatch):
+@pytest.mark.parametrize('explicit_timeout', [None, 5000])
+def test_remote_run_meta_terminal_shape(tmp_path, monkeypatch, explicit_timeout):
     """终态 meta 按终端块契约:command/output/exitCode + remoteRoot."""
     import lib.tasks_pkg.handlers.project as hp
 
@@ -198,14 +206,18 @@ def test_remote_run_meta_terminal_shape(tmp_path, monkeypatch):
     import lib.desktop
 
     def fake_send(cmd_type, params=None, timeout=30, target_agent_id=None,
-                  user_id='', cmd_id=None):
+                  user_id='', cmd_id=None, cancellation=None):
+        assert timeout is None
+        assert params.get('timeout') == explicit_timeout
+        assert cancellation is not None and not cancellation.is_set()
         return {'stdout': 'hello\n', 'stderr': '', 'exit_code': 0,
                 'timed_out': False, 'killed_tree': False, 'truncated': False}, None
 
     monkeypatch.setattr(lib.desktop, 'send_desktop_command', fake_send)
     task = {'id': 't-meta', 'convId': 'c', '_userId': ''}
     hp._execute_remote_project_tool(
-        task, 'run_command', 'tc-9', {'command': 'echo hello'}, 2,
+        task, 'run_command', 'tc-9', dict({'command': 'echo hello'},
+            **({'timeout': explicit_timeout} if explicit_timeout is not None else {})), 2,
         {'toolCallId': 'tc-9', 'toolName': 'run_command'},
         {'agent_id': 'agent-A', 'root': 'myapp'})
     meta = metas[0]
@@ -276,3 +288,27 @@ def test_streams_endpoint_unknown_404(flask_client):
     r = flask_client.get('/api/v4/desktop/streams/nobody',
                          headers={'Authorization': f'Bearer {token}'})
     assert r.status_code == 404
+
+
+@pytest.mark.unit
+def test_remote_bridge_failure_joins_its_progress_observer(monkeypatch):
+    from types import SimpleNamespace
+    import lib.desktop
+    import lib.tasks_pkg.handlers.project as hp
+    observers = []
+    real_thread = threading.Thread
+    def thread(*args, **kwargs):
+        result = real_thread(*args, **kwargs)
+        observers.append(result)
+        return result
+    monkeypatch.setattr(hp, 'threading', SimpleNamespace(Thread=thread, Event=threading.Event))
+    monkeypatch.setattr(hp, '_make_run_command_progress_cb', lambda *args:
+        SimpleNamespace(flush=lambda: None))
+    def fail(*args, **kwargs):
+        assert kwargs['timeout'] is None
+        raise RuntimeError('injected bridge failure')
+    monkeypatch.setattr(lib.desktop, 'send_desktop_command', fail)
+    with pytest.raises(RuntimeError, match='injected bridge failure'):
+        hp._execute_remote_run_command({'id': 'owner'}, 'tool', {'command': 'echo ready'},
+            1, {}, {'agent_id': 'device', 'root': 'project'})
+    assert len(observers) == 1 and not observers[0].is_alive()

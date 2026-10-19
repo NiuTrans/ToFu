@@ -116,8 +116,11 @@ def test_reverse_patch_is_exact_without_file_history(project, monkeypatch, origi
 
 
 @pytest.mark.parametrize('action', ['diff', 'insert'])
-def test_expanded_inverse_is_bounded_before_mutation(project, monkeypatch, action):
-    monkeypatch.setattr(_ops, 'recovery_file_bytes', lambda: 32)
+def test_unavailable_inverse_evidence_refuses_mutation(project, monkeypatch, action):
+    from lib.project_mod.write_intents import IntentError, IntentStore
+    def refuse_evidence(*args, **kwargs):
+        raise IntentError('injected undo evidence persistence failure')
+    monkeypatch.setattr(IntentStore, 'prepare', refuse_evidence)
     original = b'newnewnew old\r\n' + b'x' * 15
     target = project / 'file.txt'
     target.write_bytes(original)
@@ -125,6 +128,7 @@ def test_expanded_inverse_is_bounded_before_mutation(project, monkeypatch, actio
         result = _ops.tool_apply_diff(str(project), 'file.txt', 'old', 'newnewnew')
     else:
         result = _ops.tool_insert_content(str(project), 'file.txt', 'old', 'added')
-    assert result['ok'] is False and result['errorKind'] == 'undo-budget-exceeded'
+    assert result['ok'] is False
+    assert 'injected undo evidence persistence failure' in result['error']
     assert target.read_bytes() == original
     assert mods.get_modifications(str(project)) == []

@@ -55,7 +55,7 @@ umask 077
 BASE_DIR="$(cd "$(dirname "$0")" && pwd -P)"
 cd "$BASE_DIR" || { echo "FATAL: cannot cd $BASE_DIR" >&2; exit 1; }
 
-# ── Fixed layout (matches lib/storage_sidecar/native_launch.py) ─────────
+# ── Fixed layout (matches lib/storage_authority_sql/native_launch.py) ─────────
 DATA_DIR="$BASE_DIR/data"
 SOURCE_DB="$DATA_DIR/tofu.db"
 SNAPSHOT_DB="$DATA_DIR/tofu.db.pre-tofudb"
@@ -245,7 +245,7 @@ if [ "${1:-}" = "--run" ]; then
     TOFU_DB_CHECKPOINT_MATERIALIZE_BATCH_BYTES=67108864 \
     TOFU_MIGRATION_SKIP_ROW_VERIFY=1 \
     TOFU_MIGRATION_CHILD_STDERR="$BASE_DIR/logs/migration-child-stderr.log" \
-    "$PY" -m lib.storage_sidecar.tofudb_migration_import \
+    "$PY" -m lib.storage_authority_sql.migration.tofudb_migration_import \
       --source "$SOURCE_DB" \
       --checkpoint "$CHECKPOINT" \
       --binary "$BINARY" \
@@ -271,7 +271,7 @@ if [ "${1:-}" = "--run" ]; then
 
   # ── [4] CERTIFY (read-only integrity / rollback-safety of the import) ──
   _status certify start "read-only certification of imported authority"
-  if "$PY" -m lib.storage_sidecar.tofudb_migration_import \
+  if "$PY" -m lib.storage_authority_sql.migration.tofudb_migration_import \
       --source "$SOURCE_DB" \
       --checkpoint "$CHECKPOINT" \
       --authority-uuid "$AUTHORITY_UUID" \

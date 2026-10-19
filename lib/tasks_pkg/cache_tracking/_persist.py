@@ -54,7 +54,7 @@ import time
 from typing import Any
 
 from lib.log import get_logger
-from lib.task_result_checkpoint_contract import (
+from lib.task_replay.task_result_checkpoint_contract import (
     CONVERSATION_CACHE_PREFIX_HWM_SETTING,
     CONVERSATION_LAST_TURN_CACHE_READ_SETTING,
     TASK_RESULT_CACHE_FACT_MAXIMUM,

@@ -15,6 +15,17 @@ legacy limits survive. A matching unmarked value may establish provenance.
 Model context remains the official creator specification, independently of
 subscription supply. Repairing ambiguous legacy values uses the registration
 CAS boundary with explicit evidence, never a catalog guess or runtime write.
+When a managed Codex catalog first declares a context window, it replaces the
+Offering's inherited Model fallback and establishes the admitted catalog
+baseline. Explicit owner limits remain overrides. Problem: preserving the old
+inheritance marker forever ignored newly available subscription limits, so a
+stale 128K Model could keep forcing premature compaction even after catalog
+refresh. Decision: transition only inherited fallback metadata to declared
+supply, bounded by the current Model; repair incorrect official Model facts
+separately through registration. Alternatives rejected: rewriting Model facts
+from subscription defaults conflates two authorities; retaining inheritance
+ignores supplier evidence and can also exceed a smaller subscription window.
+Specifications: `tests/oauth/test_oauth_outbound.py`.
 Compaction resolves it inside the task's owner/pin boundary; exact selected-slot
 admission and output clamping recheck it after fallback. Legacy model-name
 estimates are fallback knowledge only, never a replacement for configured route
@@ -309,6 +320,21 @@ long-context tiers. Specifications:
 `tests/model_routing/test_subscription_registration_research.py` and
 `tests/oauth/test_codex_catalog.py`.
 
+Gemini 4 Argon evidence boundary (checked 2026-10-17): the only Gemini 4
+model and the current GA flagship. The official
+[model page](https://ai.google.dev/gemini-api/docs/models/gemini-4-argon)
+establishes the stable `gemini-4-argon` id, 1,048,576 unified input/output
+context, 65,536 default max output (up to 1M with long decode), text/image/
+video/audio/PDF input with text output, and thinking levels low/medium/high;
+the [thinking doc](https://ai.google.dev/gemini-api/docs/thinking) pins the
+default as On(medium) with no disable rung, and the
+[pricing page](https://ai.google.dev/gemini-api/docs/pricing) gives intro
+$2/$10 input/output (+$0.10 cache-read) per million tokens through
+2026-11-30, then $4/$20 (+$0.20). The Meituan AIGC gateway serves it:
+live probe 2026-10-17 returned HTTP 429 with a per-model RPM message (the
+deployment exists; the project key holds no quota), not the 400
+`不支持的模型类型` that unserved ids (e.g. `mimo-v2.6-pro`) return.
+
 Claude Sonnet/Haiku 5.5 and Mistral Large 4 evidence boundary (checked
 2026-10-08): Sonnet 5.5 (GA 2026-09-28, $2/$10, 1M ctx, adaptive thinking
 default ON, API default effort high, lowest rung between_tools) and Haiku 5.5
@@ -558,11 +584,59 @@ Credential; 403 affects the Credential×Deployment authorization. Health rows,
 probe work, candidate slots, and snapshots are bounded and expire through
 their owning lifecycle.
 
-The concrete personal-computer budget is: one owner aggregate is at most
-8 MiB with per-entity ceilings (256 Providers/ProviderAccesses, 512
-Connections, 1,024 Credentials, 4,096 Models/Offerings, and 8,192
-Deployments); one request mints at most 64 ephemeral route slots and disposes
-them at request teardown. Runtime health retains at most 4,096 rows for one
+Owner aggregates retain every admitted entity without entity-count or document
+byte quotas. Credential grants and connection/exclusion reference lists also
+retain all valid identities. Schema, duplicate/foreign references, registration
+admission, encrypted credential ownership and atomic revision CAS remain
+mandatory. Native authority, backups and migration receipts use blob-capable
+storage rather than an 8 MiB refusal; ciphertext migration keeps its separate
+existing envelope bound.
+
+Problem: valid owner authority was refused by entity counts and duplicated
+8 MiB checks in the repository, SQL storage, native executor, IR validation and
+blob access. Decision: keep the complete authority and migration originals,
+validate shape and identity, and use the existing owner-bound blob codec.
+Model-routing document bodies do not consume the IR metadata-literal quota;
+tenant carriers, timestamp/slot validation and revision fences remain.
+Alternatives: raising each independent number still leaves other refusal paths;
+truncating entities or prior migration evidence changes durable owner state.
+A traced in-memory commit of 11,000 Creator rows / 8,943,204 input UTF-8 bytes
+took 7.18 seconds with 10,704,345 bytes peak on the test host; input construction
+was excluded. This measures normalization/CAS with tracing, not native I/O or
+model throughput. Aggregate updates still normalize the owner's complete document.
+Verification: eight entity collections exceed their former ceilings; large grants
+retain connection/exclusion identities. In-memory, SQLite and native authorities
+preserve an 8,943,204-byte input plus the complete >8 MiB migration receipt and
+prior document, reject stale CAS, isolate tenant labels and survive restart.
+The embedded SDK grows its response buffer to the C ABI's required capacity
+without a private byte quota. Non-growing or unrepresentable native capacity
+returns, out-of-buffer writes and real allocation failures fail explicitly. It decodes
+owned values before reuse and preserves joined close/abandon behavior.
+Registration/native-route neighbors passed 74 checks; native model-routing
+fault/replay neighbors passed 10 checks, with generated contracts checked for drift.
+
+A request retains all eligible primary and fallback candidates by default and
+disposes its handles at teardown. An explicit positive `max_candidates` selects
+a caller shortlist without an upper quota. A planned route witness searches the
+complete eligible primary set before resolving its credential and mints only
+that exact route; it never silently changes route or adds fallback identities.
+Capability-group queries share one owner revision without a group-count gate,
+and reasoning controls retain every authorized group without tail truncation.
+Problem: a 64-candidate default hid valid routes and could misclassify a late
+planned witness as changed; separate group/control limits hid configured models.
+Decision: retain complete eligible results by default with exact ownership,
+registration, capability, egress, ranking and credential checks. Alternatives:
+larger constants merely move the failure; changing the witness or discarding
+fallbacks violates the caller's route identity. No new pool or global plaintext
+cache is introduced.
+Verification: 131 primary candidates retain every handle and compiler rank;
+a planned witness after the former 64-route prefix matches exactly, while a
+changed revision fails before mint/secret resolution. An explicit 100-route
+shortlist remains valid, and 70 primary routes precede the eligible fallback.
+A 34-group query reads one owner revision. For 8,193 configured unroutable
+Offerings the controls retain all 8,193 offering rows plus two aggregate rows;
+a traced projection took 4.41 seconds / 14,276,466 peak bytes, excluding input
+construction. This measures projection, not inference or browser rendering. Runtime health retains at most 4,096 rows for one
 hour (the diagnostic projection returns at most 256). The shared optional
 probe lane starts tasks and cells on demand, with no matrix-size or active
 worker quota; call validation retains a 120-second timeout and five attempts. A persisted

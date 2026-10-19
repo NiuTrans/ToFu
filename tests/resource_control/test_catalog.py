@@ -47,5 +47,12 @@ def test_explicit_operator_capacity_is_preserved():
                             'TOFU_PROCESS_RSS_RECYCLE_MB': '4096',
                             'TOFU_EPHEMERAL_SLOT_CAPACITY': '128'})
     assert policy['root_maximum'] == 2
-    assert policy['route_capacity'] == 128
+    assert 'route_capacity' not in policy
     assert launch_policy({'TOFU_DEPLOYMENT_MODE': 'distributed'})['automatic'] is False
+
+
+def test_compile_memory_limit_requires_an_explicit_operator_choice():
+    settings = catalog_document()['launch_settings']
+    assert 'TOFU_PAPER_BUILD_COMPILE_MAX_MIB' not in settings
+    for defaults in RESOURCE_FALLBACKS.values():
+        assert 'TOFU_PAPER_BUILD_COMPILE_MAX_MIB' not in defaults

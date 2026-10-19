@@ -25,7 +25,7 @@ export interface FieldHandle {
 
 let fieldSeq = 0;
 
-export function createField(options: FieldOptions): FieldHandle {
+export function createField(options: FieldOptions, document: Document = globalThis.document): FieldHandle {
   const control = options.control ?? (() => {
     if (options.choices) {
       const select = document.createElement('select');

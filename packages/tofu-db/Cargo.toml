@@ -5,6 +5,29 @@ edition = "2021"
 license = "Apache-2.0"
 description = "Pre-authority storage engine for Tofu's personal workload"
 
+# Keep the engine standalone when staged below cached Cargo workspaces.
+[workspace]
+
+[package.metadata.tofu]
+# Project-root compile inputs; preparation and build identity share this list.
+external-inputs = [
+    "contracts/native_agent_checkpoint_v1.schema.json",
+    "contracts/native_agent_journal_v1.schema.json",
+    "contracts/native_checkpoint_control_v1.schema.json",
+    "contracts/native_checkpoint_outbox_v1.schema.json",
+    "contracts/native_goal_actor_claim_v1.schema.json",
+    "contracts/native_aggregate_cost_v1.schema.json",
+    "contracts/native_goal_claim_outbox_v1.schema.json",
+    "contracts/native_goal_actor_handoff_v1.schema.json",
+    "contracts/native_goal_actor_handoff_outbox_v1.schema.json",
+    "contracts/execution_account_frontier_v1.schema.json",
+    "contracts/storage_operations_v1.json",
+    "contracts/tool_result_query_v1.json",
+    "contracts/native_agent_stdio_v1.schema.json",
+    "contracts/native_runtime_artifact_v1.json",
+    "VERSION",
+]
+
 [lib]
 # cdylib: the embedded in-process transport (src/embed_ffi.rs) loads the
 # same crate as a shared library for cffi callers; rlib stays the default
@@ -12,12 +35,15 @@ description = "Pre-authority storage engine for Tofu's personal workload"
 crate-type = ["rlib", "cdylib"]
 
 [features]
+default = ["native-runtime-checkpoints"]
 native-runtime-checkpoints = ["dep:tofu-runtime"]
 # Explicit opt-in only: default rlib consumers retain their allocator choice.
 # A late-loaded cdylib needs dynamic TLS instead of executable-only TLS.
 embedded-mimalloc = ["mimalloc/local_dynamic_tls"]
 # Experimental local allocator attribution; absent from normal release builds.
 allocator-diagnostics = ["embedded-mimalloc"]
+# Explicit recovery diagnostics; default builds erase the observer entirely.
+recovery-profile = []
 
 [dependencies]
 tofu-runtime = { path = "../tofu-runtime", optional = true, default-features = false }
@@ -34,10 +60,13 @@ fs2 = "0.4"
 flate2 = "1"
 rand_core = { version = "0.6", features = ["getrandom"] }
 sha2 = "0.10"
+hmac = "0.12"
 subtle = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip", "raw_value"] }
 memchr = "2"
+
+regex = "1"
 uuid = { version = "1", features = ["v4", "v5"] }
 zeroize = "1"
 zstd = { version = "0.13", default-features = false }

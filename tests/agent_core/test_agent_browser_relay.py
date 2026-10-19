@@ -296,7 +296,7 @@ def test_run_agent_prefers_live_browser_transport(monkeypatch, tmp_path):
             return RelayResponse(200, '{"commands":[]}')
 
     monkeypatch.setattr(
-        _run.requests, 'post',
+        _run.requests.Session, 'post',
         lambda *a, **k: pytest.fail('direct request used despite live browser'))
     stop = threading.Event()
     seen = []
@@ -328,23 +328,25 @@ def test_gateway_401_does_not_drop_queued_command_results(
         RelayResponse(200, '{"commands":[]}'),
     ]
 
-    def post(_url, **kwargs):
+    def post(_session, _url, **kwargs):
         sent.append(kwargs['json'])
+        assert responses, transitions
         return responses.pop(0)
 
-    monkeypatch.setattr(_run.requests, 'post', post)
+    monkeypatch.setattr(_run.requests.Session, 'post', post)
     monkeypatch.setattr(_run.time, 'sleep', lambda _seconds: None)
     stop = threading.Event()
     transitions = []
 
     def status(item):
         transitions.append(item['state'])
-        if transitions == ['ok', 'proxy', 'ok']:
+        if len(transitions) >= 3:
             stop.set()
 
     _run.run_agent('https://abc.example/proxy/15000', {},
                    poll_interval=0.001, bridge_secret='secret',
                    stop_event=stop, on_status=status)
+    assert transitions == ['ok', 'proxy', 'ok']
     assert len(sent[1]['results']) == 1
     assert sent[2]['results'] == sent[1]['results']
 

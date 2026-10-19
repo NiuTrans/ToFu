@@ -15,7 +15,7 @@ is a pure function of the retained evidence, not the per-occurrence label. The
 stored manifest still carries the real ``resultId`` (provenance intact); only
 the digest input drops it. Implemented identically in:
 
-  * SQLite sidecar — ``lib/storage_sidecar/operations_pkg/_artifacts.py``
+  * SQLite sidecar — ``lib/storage_authority_sql/operations_pkg/_artifacts.py``
     (``_tool_result_content_digest``), and
   * TofuDB authority — ``packages/tofu-db/src/artifact.rs``
     (``canonical_tool_result_digest``).
@@ -72,7 +72,7 @@ def test_canonical_digest_excludes_result_id_and_preserves_stored_manifest():
     a valid resultId (provenance for ``read_tool_artifact``/search).
     """
     import uuid
-    from lib.tool_result_artifacts import ToolResultArtifactRepository
+    from lib.tool_results.tool_result_artifacts import ToolResultArtifactRepository
     from lib.tools.result_value import (CanonicalReceipt, capture_result,
                                         compose_result, persist_result)
 
@@ -116,7 +116,7 @@ def test_non_manifest_content_digests_raw_bytes_unchanged():
     other content still hash their raw bytes (no behavior change for legacy
     artifacts and non-manifest blobs)."""
     import hashlib
-    from lib.storage_sidecar.operations_pkg._artifacts import (
+    from lib.storage_authority_sql.operations_pkg._artifacts import (
         _tool_result_content_digest)
 
     raw = 'not a manifest at all'

@@ -59,11 +59,15 @@ class TestClassifyInfrastructureFailure:
             "OpenCode CLI exited nonzero; the trial cannot be "
             "projected as complete",
         )) == OPENCODE_CLI_NONZERO_EXIT
-        assert classify_infrastructure_failure(_exception(
+        terminal_failure = _exception(
             "RuntimeError",
             "production AgentRuntime did not reach a successful "
             "terminal state",
-        )) == TOFU_RUNTIME_NO_SUCCESSFUL_TERMINAL
+        )
+        assert classify_infrastructure_failure(terminal_failure) is None
+        terminal_failure["agent_result"] = {"metadata": {"tofuKimiEvidence": {
+            "runtimeFailure": {"kind": "network", "retryable": True}}}}
+        assert classify_infrastructure_failure(terminal_failure) == TOFU_RUNTIME_NO_SUCCESSFUL_TERMINAL
 
     def test_agent_outcomes_are_never_infrastructure(self):
         assert classify_infrastructure_failure(_exception(
@@ -240,3 +244,14 @@ class TestResumeArchiveAssertion:
         _run_dir, job_dir = _make_run(tmp_path, trials=[])
         with pytest.raises(ValueError, match="must not be empty"):
             _assert_infrastructure_retry_tasks_archived(job_dir, ())
+
+
+@pytest.mark.unit
+def test_retry_of_one_repeat_preserves_scored_siblings(tmp_path):
+    from evaluations.swebench.harbor_runner import _assert_infrastructure_retry_tasks_archived
+    _, job_dir = _make_run(tmp_path, trials=[
+        ('same-task__pass', {'reward': 1}),
+        ('same-task__fail', {'reward': 0}),
+    ])
+    _assert_infrastructure_retry_tasks_archived(job_dir, ('terminal-bench/same-task',))
+    assert len(list(job_dir.iterdir())) == 2

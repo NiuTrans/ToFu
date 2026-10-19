@@ -4,7 +4,7 @@
 //! canonical JSON (sorted keys), so the legacy byte-equality redefinition
 //! check is reproduced exactly. Validation, version ordering, and the
 //! append-only walk mirror `lib/storage/manifest.py` and
-//! `lib/storage_sidecar/operations_pkg/_plugins.py`; every semantic rejection
+//! `lib/storage_authority_sql/operations_pkg/_plugins.py`; every semantic rejection
 //! surfaces as the typed `plugin_storage_incompatible` error.
 
 use std::collections::{HashMap, HashSet};

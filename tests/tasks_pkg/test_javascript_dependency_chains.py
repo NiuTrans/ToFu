@@ -128,7 +128,8 @@ def local_gateway(monkeypatch):
         }
         call_id, content, aborted = handler.handle_execute_tools(
             task, tc, EXECUTE_TOOLS_NAME, tc['id'], {'program': source},
-            1, {'calls': [], 'llmRound': 1}, {'autoApply': True}, None, False)
+            1, {'calls': [], 'llmRound': 1},
+            {'autoApply': True, 'tools': {'programmaticCalling': 'on'}}, None, False)
         assert call_id == tc['id']
         assert aborted is False
         payload = json.loads(content)
@@ -495,7 +496,7 @@ def test_program_failure_projects_typed_recovery_instead_of_nested_business_json
     tc = {'id':'bad-input', 'type':'function', 'function':{'name':EXECUTE_PROGRAM_NAME}}
     _, content, aborted = handler.handle_execute_program(task, tc, EXECUTE_PROGRAM_NAME,
         tc['id'], {'code':'return tools.result({ref:"tool-result:' + 'a' * 64 + '"});'},
-        1, {'calls':[], 'llmRound':1}, {}, None, False)
+        1, {'calls':[], 'llmRound':1}, {'tools': {'programmaticCalling': 'on'}}, None, False)
     error = tool_result_error(content)
     assert error.code == 'type_error' and 'tools.inputs' in error.next_action
     value = json.loads(split_tool_result_delivery(content).model_text)

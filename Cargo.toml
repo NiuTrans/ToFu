@@ -2,7 +2,7 @@
 resolver = "2"
 members = ["packages/tofu-runtime", "packages/tofu-runtime/vendor/rayon-core"]
 # Existing engines/prototypes retain their independent lock/build authorities.
-exclude = ["packages/tofu-db", "benchmarks/native_event", "benchmarks/context_compiler/native_json"]
+exclude = ["packages/vendor/reqwest", "packages/tofu-db", "benchmarks/native_event", "benchmarks/context_compiler/native_json"]
 
 [workspace.package]
 edition = "2021"

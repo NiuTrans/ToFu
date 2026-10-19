@@ -113,7 +113,7 @@ fn large_projection_small_patch_and_terminal_settlement_remain_writable() {
         assert_eq!(live_turn["status"], "running");
         assert!(
             serde_json::to_vec(&live_turn["projection"]).unwrap().len()
-                > crate::generated_tofudb_ir::MAX_TRANSACTION_IR_LITERAL_BYTES
+                > crate::generated_tofudb_ir::MAX_LEGACY_DOCUMENT_BYTES
         );
         let terminal_request = request(
             "turn.event.record",

@@ -1,4 +1,4 @@
-// Rotation publication tests: real blocked fsync, exact successor reconciliation,
+// Physical publication tests: real blocked fsync, exact successor reconciliation,
 // deterministic crash faults and bounded same-process paired latency measurement.
 
     fn prepared_rotation_publication(engine: &mut Engine) -> Box<PreparedRotationPublication> {
@@ -266,4 +266,83 @@
         eprintln!("ROTATION_PUBLICATION_MEASUREMENT={}", serde_json::json!({
             "source_sha256": env!("TOFUDB_SOURCE_SHA256"), "delay_ms": delay_ms,
             "samples_per_arm": samples, "all_exact_reopens": true, "rows": rows}));
+    }
+
+    #[test]
+    fn rotation_publication_refuses_a_failed_unwritten_successor_prefix() {
+        let (vfs, mut engine) = initialized_simulated_engine();
+        engine.attach_rotation_driver();
+        engine.commit_transaction(b"confirmed predecessor", &[b"confirmed payload"]).unwrap();
+        let snapshot = generation_snapshot(&mut engine);
+        let encoded = encode_rotation_segments(&snapshot);
+        let barrier = crate::wal::WalBarrierShared::buffered_for_test(1024 * 1024);
+        engine.attach_wal_barrier(&barrier).unwrap();
+        engine.commit_transaction(b"unconfirmed successor", &[b"queued payload"]).unwrap();
+        let prepared = match engine.prepare_rotation_publication(snapshot, encoded).unwrap() {
+            RotationPublication::Prepared(prepared) => prepared,
+            _ => panic!("sealed predecessor must prepare publication"),
+        };
+        vfs.arm_operation_fault(Operation::Write, 1,
+            FaultAction::ErrorBefore(io::ErrorKind::PermissionDenied)).unwrap();
+        assert!(barrier.sync_for_test(vfs.as_ref()).is_err());
+        assert!(barrier.barrier_error().is_some());
+        let outcome = publish_rotation_publication(&prepared);
+        assert!(outcome.is_err(), "raw fsync of empty successor cannot publish its queued sequence");
+        assert!(engine.finish_rotation_publication(prepared, outcome).is_err());
+        assert!(engine.is_restart_required());
+        std::mem::forget(engine);
+        vfs.crash().unwrap();
+        let reopened = Engine::open_with_vfs(Path::new("/data"), vfs).unwrap();
+        assert_eq!(reopened.state.durable_sequence, 1);
+        assert_eq!(reopened.read_block(BlockId::for_payload(b"confirmed payload")).unwrap(), b"confirmed payload");
+    }
+
+    #[test]
+    fn pack_publication_refuses_a_failed_unwritten_strict_prefix() {
+        let (vfs, mut engine) = initialized_simulated_engine();
+        let barrier = crate::wal::WalBarrierShared::buffered_for_test(1024 * 1024);
+        engine.attach_wal_barrier(&barrier).unwrap();
+        engine.commit_transaction(b"queued command", &[b"queued packed payload"]).unwrap();
+        build_and_complete_background_pack(&engine, &[b"queued packed payload"]);
+        let mut prepared = match engine.try_prepare_pack_adoption().unwrap() {
+            PackAdoptionPreparation::Ready(prepared) => prepared,
+            _ => panic!("completed segment must prepare adoption"),
+        };
+        vfs.arm_operation_fault(Operation::Write, 1,
+            FaultAction::ErrorBefore(io::ErrorKind::PermissionDenied)).unwrap();
+        assert!(barrier.sync_for_test(vfs.as_ref()).is_err());
+        let outcome = publish_prepared_pack_adoption(&mut prepared);
+        assert!(outcome.is_err(), "Strict handoff is not physical WAL coverage");
+        assert!(engine.finish_pack_adoption(prepared, outcome).is_err());
+        assert!(engine.is_restart_required());
+        std::mem::forget(engine);
+        vfs.crash().unwrap();
+        assert_eq!(Engine::open_with_vfs(Path::new("/data"), vfs).unwrap().state.durable_sequence, 0);
+    }
+
+    #[test]
+    fn history_publication_refuses_a_failed_unwritten_active_prefix() {
+        let (vfs, mut engine) = initialized_simulated_engine();
+        let root = engine.write_block(b"confirmed authority root").unwrap();
+        engine.commit_references_with_authority_state(b"first", &[], Some(root)).unwrap();
+        engine.commit_transaction(b"old", &[b"confirmed pruned payload"]).unwrap();
+        indexed_rotate(&mut engine);
+        engine.commit_transaction(b"new", &[b"confirmed retained payload"]).unwrap();
+        indexed_rotate(&mut engine);
+        let barrier = crate::wal::WalBarrierShared::buffered_for_test(1024 * 1024);
+        engine.attach_wal_barrier(&barrier).unwrap();
+        engine.commit_transaction(b"queued active", &[b"unconfirmed active payload"]).unwrap();
+        let prepared = engine.try_prepare_history_compaction(1).unwrap().unwrap();
+        vfs.arm_operation_fault(Operation::Write, 1,
+            FaultAction::ErrorBefore(io::ErrorKind::PermissionDenied)).unwrap();
+        assert!(barrier.sync_for_test(vfs.as_ref()).is_err());
+        let outcome = encode_history_compaction(&prepared);
+        assert!(outcome.is_err(), "history publication cannot cover empty physical active WAL");
+        assert!(engine.finish_history_compaction(prepared, outcome).is_err());
+        assert!(engine.is_restart_required());
+        std::mem::forget(engine);
+        vfs.crash().unwrap();
+        let reopened = Engine::open_with_vfs(Path::new("/data"), vfs).unwrap();
+        assert_eq!(reopened.state.durable_sequence, 3);
+        assert_eq!(reopened.read_block(BlockId::for_payload(b"confirmed retained payload")).unwrap(), b"confirmed retained payload");
     }

@@ -678,12 +678,7 @@ function _knowledgeRender() {
     input.accept = data.supported_extensions.join(',');
   }
   var formatHint = document.getElementById('knowledgeFormatHint');
-  if (formatHint && data && data.limits) {
-    formatHint.textContent = t('knowledge.formatHintDynamic', {
-      n: (data.supported_extensions || []).length,
-      mb: Math.round(Number(data.limits.max_file_bytes || 0) / 1048576),
-    });
-  }
+  if (formatHint) formatHint.textContent = t('knowledge.formatHint');
   _knowledgeRenderStats(data || {});
   _knowledgeRenderCatalog(data || {});
   _knowledgeRenderDocuments(data);
@@ -738,7 +733,7 @@ function _knowledgeMergeStatus(result) {
     return;
   }
   ['enabled', 'visual_enrichment', 'available', 'totals', 'facets',
-    'limits', 'supported_extensions', 'privacy',
+    'supported_extensions', 'privacy',
     'visual_enrichment_sends_images_to_configured_provider'].forEach(function (key) {
     if (Object.prototype.hasOwnProperty.call(result, key)) {
       _knowledgeState.data[key] = result[key];
@@ -803,38 +798,9 @@ async function _knowledgeToggleVisual() {
   }
 }
 
-function _knowledgeValidateFiles(files) {
-  var data = _knowledgeState.data || {};
-  var limits = data.limits || {};
-  var maxFiles = Number(limits.max_batch_files || 20);
-  var maxFileBytes = Number(limits.max_file_bytes || 50 * 1048576);
-  var maxBatchBytes = Number(limits.max_batch_bytes || 200 * 1048576);
-  var errors = [];
-  if (files.length > maxFiles) {
-    errors.push({ name: t('knowledge.batch'), error: t('knowledge.tooMany', { n: maxFiles }) });
-  }
-  var total = 0;
-  files.forEach(function (file) {
-    total += Number(file.size || 0);
-    if (file.size > maxFileBytes) {
-      errors.push({ name: file.name, error: t('knowledge.tooLarge', { size: _knowledgeBytes(maxFileBytes) }) });
-    }
-  });
-  if (total > maxBatchBytes) {
-    errors.push({ name: t('knowledge.batch'), error: t('knowledge.batchTooLarge', { size: _knowledgeBytes(maxBatchBytes) }) });
-  }
-  return errors;
-}
-
 async function _knowledgeUpload(fileList) {
   var files = Array.prototype.slice.call(fileList || []);
   if (!files.length || _knowledgeState.mutating || !Api.knowledge) return;
-  var validationErrors = _knowledgeValidateFiles(files);
-  if (validationErrors.length) {
-    _knowledgeState.uploadReport = { indexed: [], errors: validationErrors };
-    _knowledgeRenderUploadReport();
-    return;
-  }
   _knowledgeState.mutating = true;
   _knowledgeState.uploadReport = { pending: true, files: files };
   _knowledgeRender();

@@ -11,7 +11,7 @@ from quart import Blueprint, Response
 
 from lib.api_response import api_bad_request, sse_response
 from lib.api_v4 import attach_v4_envelope, raw_success_response
-from lib.app_factory import create_base_app
+from lib.app.app_factory import create_base_app
 from lib.openapi import api_meta, build_spec, media_responses
 from lib.openapi._paths import _flask_to_openapi_path
 from scripts.gen_api_endpoint_index import route_app

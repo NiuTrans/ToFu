@@ -66,7 +66,7 @@ def test_composer_does_not_adopt_context_acquired_after_stop(monkeypatch, cancel
 
 
 def test_reactive_retry_stops_before_checklist_and_body_when_restoration_is_cancelled(monkeypatch):
-    from lib.llm_errors import PromptTooLongError
+    from lib.llm.llm_errors import PromptTooLongError
     from lib.tasks_pkg.compaction import api, _pipeline
     from lib.tasks_pkg.context_composer import checklist
     from lib.tasks_pkg.llm_fallback import _call

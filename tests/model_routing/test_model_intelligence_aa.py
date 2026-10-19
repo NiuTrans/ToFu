@@ -212,7 +212,7 @@ def test_fetch_follows_bounded_api_pagination():
 
 
 def test_route_encrypts_owner_key_and_never_returns_plaintext(monkeypatch):
-    import lib.http_client
+    import lib.http_transport.client
     from lib.model_catalog import aa_key
     from routes.api_v1 import model_intelligence as route
 
@@ -238,7 +238,7 @@ def test_route_encrypts_owner_key_and_never_returns_plaintext(monkeypatch):
     monkeypatch.setattr(route, "_repository", lambda: repository)
     monkeypatch.setattr(aa_key, "_legacy_config_key", lambda: "")
     monkeypatch.setattr(route, "_remove_legacy_config_key", lambda: None)
-    monkeypatch.setattr(lib.http_client, "http_get", _fetcher("owner-aa-secret"))
+    monkeypatch.setattr(lib.http_transport.client, "http_get", _fetcher("owner-aa-secret"))
 
     app = Quart(__name__, static_folder=None)
     app.config["TESTING"] = True

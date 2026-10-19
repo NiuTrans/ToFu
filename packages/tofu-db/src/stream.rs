@@ -7,7 +7,7 @@ use crate::block::BlockId;
 use crate::engine::Engine;
 use crate::entity::{EntityDatabase, EntityKey, EntityTransaction};
 use crate::generated_tofudb_ir::{
-    MAX_STREAM_APPEND_BYTES, MAX_STREAM_APPEND_EVENTS, MAX_STREAM_EVENT_BYTES,
+    MAX_STREAM_EVENT_BYTES,
     MAX_STREAM_READ_BYTES, MAX_STREAM_READ_EVENTS,
 };
 use crate::transaction::{decode_family_records, FamilyRecordKind};
@@ -321,7 +321,6 @@ fn decode_catalog_segment(encoded: &[u8]) -> io::Result<SegmentReference> {
         maximum_created_at_ms: i64::from_le_bytes(encoded[56..64].try_into().unwrap()),
     };
     if reference.event_count == 0
-        || reference.event_count as usize > MAX_STREAM_APPEND_EVENTS
         || reference.minimum_created_at_ms > reference.maximum_created_at_ms
     {
         return Err(invalid_data("persisted stream segment metadata is invalid"));
@@ -684,18 +683,15 @@ pub(crate) fn prepare_persisted_append(
     if expected_next_sequence != actual_next_sequence {
         return Err(conflict("stream expected-position witness changed"));
     }
-    if events.is_empty() || events.len() > MAX_STREAM_APPEND_EVENTS {
+    if events.is_empty() || u32::try_from(events.len()).is_err() {
         return Err(invalid_input("stream append event count is invalid"));
     }
-    let append_bytes = events.iter().try_fold(0_usize, |total, event| {
+    let _append_bytes = events.iter().try_fold(0_usize, |total, event| {
         event.validate()?;
         total
             .checked_add(event.encoded_len())
             .ok_or_else(|| invalid_input("stream append byte count overflow"))
     })?;
-    if append_bytes > MAX_STREAM_APPEND_BYTES {
-        return Err(invalid_input("stream append exceeds 8 MiB"));
-    }
     actual_next_sequence
         .checked_add(events.len() as u64)
         .ok_or_else(|| invalid_input("stream append would exhaust its cursor space"))?;
@@ -713,7 +709,20 @@ pub(crate) fn prepare_persisted_append(
             return Err(invalid_input("stream event cannot fit in one segment"));
         }
         let segment_events = &events[start..end];
-        let block_id = engine.write_block(&encode_segment(key, first_sequence, segment_events)?)?;
+        // Scope + monotonically fenced stream position identify a newly
+        // encoded segment. Use the same owned fresh staging as COW pages:
+        // never search old history or loose paths merely to dedup new bytes.
+        let encoded = {
+            let _encode = crate::request_profile::Probe::new(crate::request_profile::STREAM_SEGMENT_ENCODE);
+            encode_segment(key, first_sequence, segment_events)?
+        };
+        let bytes = encoded.len();
+        let block_id = {
+            let _publish = crate::request_profile::Probe::new(crate::request_profile::STREAM_SEGMENT_FRESH_PUBLISH);
+            engine.write_block_fresh_owned(encoded)?
+        };
+        crate::request_profile::work(crate::request_profile::Work::FreshStreamSegments, 1);
+        crate::request_profile::work(crate::request_profile::Work::FreshStreamBytes, bytes as u64);
         segments.push(SegmentReference {
             block_id,
             event_count: segment_events.len() as u32,
@@ -796,7 +805,7 @@ fn encode_segment(
     first_sequence: u64,
     events: &[StreamEvent],
 ) -> io::Result<Vec<u8>> {
-    if events.is_empty() || events.len() > MAX_STREAM_APPEND_EVENTS {
+    if events.is_empty() || u32::try_from(events.len()).is_err() {
         return Err(invalid_input("stream segment event count is invalid"));
     }
     for event in events {
@@ -858,7 +867,6 @@ fn decode_segment(
         || reserved != 0
         || first_sequence != expected_first_sequence
         || event_count == 0
-        || event_count > MAX_STREAM_APPEND_EVENTS
     {
         return Err(invalid_data("stream segment header mismatch"));
     }
@@ -867,6 +875,9 @@ fn decode_segment(
     let stream_id = take(encoded, &mut offset, stream_id_len)?;
     if domain != expected_key.domain.as_bytes() || stream_id != expected_key.stream_id {
         return Err(invalid_data("stream segment key mismatch"));
+    }
+    if event_count > (encoded.len() - offset) / (EVENT_FIXED_BYTES + 1) {
+        return Err(invalid_data("stream event count exceeds encoded records"));
     }
     let mut events = Vec::with_capacity(event_count);
     for _ in 0..event_count {
@@ -903,6 +914,8 @@ impl StreamCommit {
                 "stream commit is empty or has an invalid sequence",
             ));
         }
+        u16::try_from(self.segments.len())
+            .map_err(|_| invalid_input("stream segment count exceeds its u16 representation"))?;
         let capacity = COMMIT_FIXED_BYTES
             + self.key.domain.len()
             + self.key.stream_id.len()
@@ -963,9 +976,7 @@ impl StreamCommit {
             || reserved_tail != 0
             || first_sequence == 0
             || event_count == 0
-            || event_count as usize > MAX_STREAM_APPEND_EVENTS
             || segment_count == 0
-            || segment_count > MAX_STREAM_APPEND_EVENTS
             || expected_len != encoded.len()
         {
             return Err(invalid_data("invalid or unbounded stream commit"));
@@ -987,7 +998,6 @@ impl StreamCommit {
             let maximum_created_at_ms =
                 i64::from_le_bytes(take(encoded, &mut offset, 8)?.try_into().unwrap());
             if segment_events == 0
-                || segment_events as usize > MAX_STREAM_APPEND_EVENTS
                 || minimum_created_at_ms > maximum_created_at_ms
             {
                 return Err(invalid_data("stream commit segment metadata is invalid"));
@@ -1486,20 +1496,19 @@ mod tests {
         let mut catalog = StreamCatalog::rebuild(&engine).unwrap();
         let key = StreamKey::new(1, 2, "turn", b"conversation-1").unwrap();
         let oversized: Vec<_> = (0..40).map(|index| event(index, 250_000)).collect();
-        assert!(catalog
-            .append(&mut engine, 1, 2, &key, 1, &oversized)
-            .is_err());
-
-        let first: Vec<_> = (0..24).map(|index| event(index, 250_000)).collect();
-        catalog.append(&mut engine, 1, 2, &key, 1, &first).unwrap();
-        let second: Vec<_> = (24..48).map(|index| event(index, 250_000)).collect();
-        catalog
-            .append(&mut engine, 1, 2, &key, 25, &second)
-            .unwrap();
+        catalog.append(&mut engine, 1, 2, &key, 1, &oversized).unwrap();
         let page = catalog.read(&engine, 1, 2, &key, 1, 1_000).unwrap();
         assert_eq!(page.events.len(), 33);
         assert_eq!(page.next_sequence, 34);
         assert!(!page.end_of_stream);
+        let tail = catalog.read(&engine, 1, 2, &key, page.next_sequence, 1_000).unwrap();
+        assert_eq!(tail.events.len(), 7);
+        assert!(tail.end_of_stream);
+        for (ordinal, row) in page.events.iter().chain(tail.events.iter()).enumerate() {
+            assert_eq!(row.sequence, ordinal as u64 + 1);
+            assert_eq!(row.event, oversized[ordinal]);
+        }
+
     }
 
     #[test]

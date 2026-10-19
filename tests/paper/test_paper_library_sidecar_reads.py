@@ -97,7 +97,7 @@ def test_podcast_fallback_requests_only_its_prompt_source_ceiling(monkeypatch):
 
 
 def test_existence_projection_does_not_scan_or_select_paper_text():
-    from lib.storage_sidecar.operations_pkg._papers import (
+    from lib.storage_authority_sql.operations_pkg._papers import (
         _paper_library_identity,
     )
 

@@ -28,7 +28,7 @@ def test_smart_chat_does_not_resurrect_aborted_dispatch(monkeypatch):
 
 
 def test_smart_chat_does_not_bypass_rate_limit_attempt_budget(monkeypatch):
-    from lib.llm_errors import RateLimitError
+    from lib.llm.llm_errors import RateLimitError
     from lib.llm_dispatch import api
 
     budget_error = api.DispatchRateLimitBudgetExceeded(
@@ -184,7 +184,7 @@ def test_translation_call_can_tighten_upstream_429_attempt_budget(monkeypatch):
 
 
 def test_translation_attempt_budget_is_terminal_for_outer_retry(monkeypatch):
-    from lib.llm_errors import RateLimitError
+    from lib.llm.llm_errors import RateLimitError
     from lib.llm_dispatch import api
     from lib.translate.engine import _engine
 

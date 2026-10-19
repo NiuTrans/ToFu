@@ -50,6 +50,23 @@
     },
     {
       "method": "GET",
+      "path": "/api/artifacts/<artifact_id>/download",
+      "transport": "http",
+      "responseContract": null,
+      "rawSuccess": true,
+      "summary": "Download an owned immutable artifact",
+      "tags": [
+        "artifacts"
+      ],
+      "scope": "",
+      "public": false,
+      "requiredScopes": null,
+      "documented": true,
+      "owner": "routes/artifacts.py",
+      "handler": "api_download_artifact"
+    },
+    {
+      "method": "GET",
       "path": "/api/artifacts/<artifact_id>/export",
       "transport": "http",
       "responseContract": null,
@@ -580,6 +597,74 @@
       "handler": "redoc_ui"
     },
     {
+      "method": "GET",
+      "path": "/api/response-assets/<asset_id>",
+      "transport": "http",
+      "responseContract": null,
+      "rawSuccess": true,
+      "summary": "Get an owned response image",
+      "tags": [
+        "artifacts"
+      ],
+      "scope": "",
+      "public": false,
+      "requiredScopes": null,
+      "documented": true,
+      "owner": "routes/response_assets.py",
+      "handler": "response_asset"
+    },
+    {
+      "method": "GET",
+      "path": "/api/response-assets/artifacts/<artifact_id>",
+      "transport": "http",
+      "responseContract": null,
+      "rawSuccess": true,
+      "summary": "Resolve an owned same-conversation rich artifact action",
+      "tags": [
+        "artifacts"
+      ],
+      "scope": "",
+      "public": false,
+      "requiredScopes": null,
+      "documented": true,
+      "owner": "routes/response_assets.py",
+      "handler": "response_artifact"
+    },
+    {
+      "method": "GET",
+      "path": "/api/response-surfaces/providers",
+      "transport": "http",
+      "responseContract": null,
+      "rawSuccess": true,
+      "summary": "List configured resource providers in an owned response context",
+      "tags": [
+        "artifacts"
+      ],
+      "scope": "",
+      "public": false,
+      "requiredScopes": null,
+      "documented": true,
+      "owner": "routes/response_assets.py",
+      "handler": "response_providers"
+    },
+    {
+      "method": "GET",
+      "path": "/api/response-surfaces/resources",
+      "transport": "http",
+      "responseContract": null,
+      "rawSuccess": true,
+      "summary": "Read live compute resources in an owned response context",
+      "tags": [
+        "artifacts"
+      ],
+      "scope": "",
+      "public": false,
+      "requiredScopes": null,
+      "documented": true,
+      "owner": "routes/response_assets.py",
+      "handler": "response_resources"
+    },
+    {
       "method": "POST",
       "path": "/api/translate/pptx",
       "transport": "http",
@@ -1083,6 +1168,42 @@
       "documented": true,
       "owner": "routes/api_v1/artifacts.py",
       "handler": "toggle_pin_v1"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v4/artifacts/<artifact_id>/review",
+      "transport": "http",
+      "responseContract": "tofu.api/v4",
+      "summary": "Read version-bound artifact owner review",
+      "tags": [
+        "artifacts"
+      ],
+      "scope": "chat",
+      "public": false,
+      "requiredScopes": [
+        "chat"
+      ],
+      "documented": true,
+      "owner": "routes/api_v1/artifacts.py",
+      "handler": "read_artifact_review_v1"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v4/artifacts/<artifact_id>/review",
+      "transport": "http",
+      "responseContract": "tofu.api/v4",
+      "summary": "Save requirements or an owner review of one artifact version",
+      "tags": [
+        "artifacts"
+      ],
+      "scope": "chat",
+      "public": false,
+      "requiredScopes": [
+        "chat"
+      ],
+      "documented": true,
+      "owner": "routes/api_v1/artifacts.py",
+      "handler": "update_artifact_review_v1"
     },
     {
       "method": "GET",
@@ -2661,6 +2782,60 @@
     },
     {
       "method": "GET",
+      "path": "/api/v4/conversations/<conv_id>/working-facts",
+      "transport": "http",
+      "responseContract": "tofu.api/v4",
+      "summary": "Read conversation working facts",
+      "tags": [
+        "memory"
+      ],
+      "scope": "chat",
+      "public": false,
+      "requiredScopes": [
+        "chat"
+      ],
+      "documented": true,
+      "owner": "routes/api_v1/working_facts.py",
+      "handler": "read_working_facts_v1"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v4/conversations/<conv_id>/working-facts",
+      "transport": "http",
+      "responseContract": "tofu.api/v4",
+      "summary": "Propose, correct, confirm or retract a conversation fact",
+      "tags": [
+        "memory"
+      ],
+      "scope": "chat",
+      "public": false,
+      "requiredScopes": [
+        "chat"
+      ],
+      "documented": true,
+      "owner": "routes/api_v1/working_facts.py",
+      "handler": "update_working_facts_v1"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v4/conversations/<conv_id>/working-facts/consumers",
+      "transport": "http",
+      "responseContract": "tofu.api/v4",
+      "summary": "Read tasks dependent on conversation working facts",
+      "tags": [
+        "memory"
+      ],
+      "scope": "chat",
+      "public": false,
+      "requiredScopes": [
+        "chat"
+      ],
+      "documented": true,
+      "owner": "routes/api_v1/working_facts.py",
+      "handler": "read_working_fact_consumers_v1"
+    },
+    {
+      "method": "GET",
       "path": "/api/v4/conversations/<conversation_id>/events",
       "transport": "http",
       "responseContract": "tofu.conversation-sync/v3",
@@ -2885,6 +3060,58 @@
     },
     {
       "method": "GET",
+      "path": "/api/v4/conversations/<conversation_id>/turns/<turn_id>/review",
+      "transport": "http",
+      "responseContract": "tofu.api/v4",
+      "summary": "Read ordinary Turn owner acceptance",
+      "tags": [
+        "conversations"
+      ],
+      "scope": "chat",
+      "public": false,
+      "requiredScopes": [
+        "chat"
+      ],
+      "documented": true,
+      "owner": "routes/api_v1/turn_review.py",
+      "handler": "read_turn_review_v1"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v4/conversations/<conversation_id>/turns/<turn_id>/review",
+      "transport": "http",
+      "responseContract": "tofu.api/v4",
+      "summary": "Save Turn requirements or an owner judgment of declared output versions",
+      "tags": [
+        "conversations"
+      ],
+      "scope": "chat",
+      "public": false,
+      "requiredScopes": [
+        "chat"
+      ],
+      "documented": true,
+      "owner": "routes/api_v1/turn_review.py",
+      "handler": "update_turn_review_v1"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v4/conversations/<conversation_id>/turns/<turn_id>/tool-effects/<operation_id>",
+      "transport": "http",
+      "responseContract": "tofu.conversation-sync/v3",
+      "summary": "",
+      "tags": [],
+      "scope": null,
+      "public": null,
+      "requiredScopes": [
+        "chat"
+      ],
+      "documented": false,
+      "owner": "routes/conversation_sync_v3.py",
+      "handler": "conversation_tool_effect_inspection"
+    },
+    {
+      "method": "GET",
       "path": "/api/v4/conversations/<conversation_id>/turns/<turn_id>/tool-results/<int:round_index>",
       "transport": "http",
       "responseContract": "tofu.conversation-sync/v3",
@@ -2898,6 +3125,38 @@
       "documented": false,
       "owner": "routes/conversation_sync_v3.py",
       "handler": "conversation_turn_tool_result"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v4/conversations/<conversation_id>/turns/<turn_id>/usage-recovery",
+      "transport": "http",
+      "responseContract": "tofu.conversation-sync/v3",
+      "summary": "",
+      "tags": [],
+      "scope": null,
+      "public": null,
+      "requiredScopes": [
+        "chat"
+      ],
+      "documented": false,
+      "owner": "routes/conversation_sync_v3.py",
+      "handler": "conversation_usage_recovery_v3"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v4/conversations/<conversation_id>/turns/<turn_id>/usage-recovery",
+      "transport": "http",
+      "responseContract": "tofu.conversation-sync/v3",
+      "summary": "",
+      "tags": [],
+      "scope": null,
+      "public": null,
+      "requiredScopes": [
+        "chat"
+      ],
+      "documented": false,
+      "owner": "routes/conversation_sync_v3.py",
+      "handler": "conversation_recover_usage_v3"
     },
     {
       "method": "POST",
@@ -2930,6 +3189,22 @@
       "documented": false,
       "owner": "routes/conversation_sync_v3.py",
       "handler": "conversation_turn_history_page"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v4/conversations/<conversation_id>/turns/rounds",
+      "transport": "http",
+      "responseContract": "tofu.conversation-sync/v3",
+      "summary": "",
+      "tags": [],
+      "scope": null,
+      "public": null,
+      "requiredScopes": [
+        "chat"
+      ],
+      "documented": false,
+      "owner": "routes/conversation_sync_v3.py",
+      "handler": "conversation_round_directory"
     },
     {
       "method": "POST",
@@ -4775,7 +5050,7 @@
       "path": "/api/v4/folders/<folder_id>",
       "transport": "http",
       "responseContract": "tofu.api/v4",
-      "summary": "Update a folder",
+      "summary": "Update project folder settings",
       "tags": [
         "conversations"
       ],
@@ -6864,7 +7139,7 @@
       "path": "/api/v4/orchestrations/tasks/<run_id>/resume",
       "transport": "http",
       "responseContract": "tofu.api/v4",
-      "summary": "Resume a server-interrupted Flow from committed node results",
+      "summary": "Resume a server-interrupted Flow or conversation Goal",
       "tags": [
         "orchestrations"
       ],
@@ -8444,11 +8719,173 @@
       "handler": "project_coordination_read"
     },
     {
+      "method": "GET",
+      "path": "/api/v4/project/coordination/assignments",
+      "transport": "http",
+      "responseContract": "tofu.api/v4",
+      "summary": "Read bounded assignment facts or reconcile an exact command without execution",
+      "tags": [
+        "project"
+      ],
+      "scope": "chat",
+      "public": false,
+      "requiredScopes": [
+        "chat"
+      ],
+      "documented": true,
+      "owner": "routes/api_v1/project_brain.py",
+      "handler": "project_assignment_list"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v4/project/coordination/assignments",
+      "transport": "http",
+      "responseContract": "tofu.api/v4",
+      "summary": "Explicitly authorize and dispatch a bounded no-tool consultation",
+      "tags": [
+        "project"
+      ],
+      "scope": "chat",
+      "public": false,
+      "requiredScopes": [
+        "chat"
+      ],
+      "documented": true,
+      "owner": "routes/api_v1/project_brain.py",
+      "handler": "project_assignment_create"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v4/project/coordination/assignments/dispatch",
+      "transport": "http",
+      "responseContract": "tofu.api/v4",
+      "summary": "Retry the same authorized consultation command without new grant",
+      "tags": [
+        "project"
+      ],
+      "scope": "chat",
+      "public": false,
+      "requiredScopes": [
+        "chat"
+      ],
+      "documented": true,
+      "owner": "routes/api_v1/project_brain.py",
+      "handler": "project_assignment_dispatch"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v4/project/coordination/assignments/publish",
+      "transport": "http",
+      "responseContract": "tofu.api/v4",
+      "summary": "Explicitly authorize publication of an accepted exact file-task result",
+      "tags": [
+        "project"
+      ],
+      "scope": "chat",
+      "public": false,
+      "requiredScopes": [
+        "chat"
+      ],
+      "documented": true,
+      "owner": "routes/api_v1/project_brain.py",
+      "handler": "project_assignment_publish"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v4/project/coordination/assignments/review",
+      "transport": "http",
+      "responseContract": "tofu.api/v4",
+      "summary": "Record review of an exact completed consultation result; not delivery",
+      "tags": [
+        "project"
+      ],
+      "scope": "chat",
+      "public": false,
+      "requiredScopes": [
+        "chat"
+      ],
+      "documented": true,
+      "owner": "routes/api_v1/project_brain.py",
+      "handler": "project_assignment_review"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v4/project/coordination/assignments/revoke",
+      "transport": "http",
+      "responseContract": "tofu.api/v4",
+      "summary": "Revoke project grant then cancel its exact existing attempt",
+      "tags": [
+        "project"
+      ],
+      "scope": "chat",
+      "public": false,
+      "requiredScopes": [
+        "chat"
+      ],
+      "documented": true,
+      "owner": "routes/api_v1/project_brain.py",
+      "handler": "project_assignment_revoke"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v4/project/coordination/batches",
+      "transport": "http",
+      "responseContract": "tofu.api/v4",
+      "summary": "Read an exact batch command receipt without authorizing or dispatching",
+      "tags": [
+        "project"
+      ],
+      "scope": "chat",
+      "public": false,
+      "requiredScopes": [
+        "chat"
+      ],
+      "documented": true,
+      "owner": "routes/api_v1/project_dispatch_batches.py",
+      "handler": "project_batch_receipt"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v4/project/coordination/batches",
+      "transport": "http",
+      "responseContract": "tofu.api/v4",
+      "summary": "Authorize one bounded parallel conversation batch before independent dispatch",
+      "tags": [
+        "project"
+      ],
+      "scope": "chat",
+      "public": false,
+      "requiredScopes": [
+        "chat"
+      ],
+      "documented": true,
+      "owner": "routes/api_v1/project_dispatch_batches.py",
+      "handler": "project_batch_create"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v4/project/coordination/batches/dispatch",
+      "transport": "http",
+      "responseContract": "tofu.api/v4",
+      "summary": "Retry only the original approved batch through existing conversation commands",
+      "tags": [
+        "project"
+      ],
+      "scope": "chat",
+      "public": false,
+      "requiredScopes": [
+        "chat"
+      ],
+      "documented": true,
+      "owner": "routes/api_v1/project_dispatch_batches.py",
+      "handler": "project_batch_dispatch"
+    },
+    {
       "method": "POST",
       "path": "/api/v4/project/coordination/bind",
       "transport": "http",
       "responseContract": "tofu.api/v4",
-      "summary": "Bind an existing owned project conversation as coordinator",
+      "summary": "Clear or reaffirm the current project coordinator binding",
       "tags": [
         "project"
       ],
@@ -8460,6 +8897,60 @@
       "documented": true,
       "owner": "routes/api_v1/project_brain.py",
       "handler": "project_coordination_bind"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v4/project/coordination/budget",
+      "transport": "http",
+      "responseContract": "tofu.api/v4",
+      "summary": "Read Coordinator request consumption and future request allowances",
+      "tags": [
+        "project"
+      ],
+      "scope": "conversations",
+      "public": false,
+      "requiredScopes": [
+        "conversations"
+      ],
+      "documented": true,
+      "owner": "routes/api_v1/project_brain.py",
+      "handler": "project_coordinator_budget_read"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v4/project/coordination/budget",
+      "transport": "http",
+      "responseContract": "tofu.api/v4",
+      "summary": "Set finite allowances for future human Coordinator requests",
+      "tags": [
+        "project"
+      ],
+      "scope": "conversations",
+      "public": false,
+      "requiredScopes": [
+        "conversations"
+      ],
+      "documented": true,
+      "owner": "routes/api_v1/project_brain.py",
+      "handler": "project_coordinator_budget_update"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v4/project/coordination/create",
+      "transport": "http",
+      "responseContract": "tofu.api/v4",
+      "summary": "Create an independent project coordinator conversation without execution",
+      "tags": [
+        "project"
+      ],
+      "scope": "conversations",
+      "public": false,
+      "requiredScopes": [
+        "conversations"
+      ],
+      "documented": true,
+      "owner": "routes/api_v1/project_brain.py",
+      "handler": "project_coordination_create"
     },
     {
       "method": "GET",
@@ -8478,6 +8969,276 @@
       "documented": true,
       "owner": "routes/api_v1/project_brain.py",
       "handler": "project_message_receipts"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v4/project/coordination/reports",
+      "transport": "http",
+      "responseContract": "tofu.api/v4",
+      "summary": "Read the latest Coordinator report and durable unread state",
+      "tags": [
+        "project"
+      ],
+      "scope": "conversations",
+      "public": false,
+      "requiredScopes": [
+        "conversations"
+      ],
+      "documented": true,
+      "owner": "routes/api_v1/project_brain.py",
+      "handler": "project_coordinator_report_read"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v4/project/coordination/reports/read",
+      "transport": "http",
+      "responseContract": "tofu.api/v4",
+      "summary": "Acknowledge the exact displayed Coordinator report",
+      "tags": [
+        "project"
+      ],
+      "scope": "conversations",
+      "public": false,
+      "requiredScopes": [
+        "conversations"
+      ],
+      "documented": true,
+      "owner": "routes/api_v1/project_brain.py",
+      "handler": "project_coordinator_report_ack"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v4/project/coordination/responsibilities",
+      "transport": "http",
+      "responseContract": "tofu.api/v4",
+      "summary": "Read bounded responsibility facts without triggering an occurrence",
+      "tags": [
+        "project"
+      ],
+      "scope": "chat",
+      "public": false,
+      "requiredScopes": [
+        "chat"
+      ],
+      "documented": true,
+      "owner": "routes/api_v1/project_brain.py",
+      "handler": "project_responsibility_list"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v4/project/coordination/responsibilities",
+      "transport": "http",
+      "responseContract": "tofu.api/v4",
+      "summary": "Create a finite human-authorized responsibility through existing automation",
+      "tags": [
+        "project"
+      ],
+      "scope": "chat",
+      "public": false,
+      "requiredScopes": [
+        "chat"
+      ],
+      "documented": true,
+      "owner": "routes/api_v1/project_brain.py",
+      "handler": "project_responsibility_create"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v4/project/coordination/responsibilities/cancel",
+      "transport": "http",
+      "responseContract": "tofu.api/v4",
+      "summary": "Cancel a revision-pinned responsibility and revoke its exact active children",
+      "tags": [
+        "project"
+      ],
+      "scope": "chat",
+      "public": false,
+      "requiredScopes": [
+        "chat"
+      ],
+      "documented": true,
+      "owner": "routes/api_v1/project_brain.py",
+      "handler": "project_responsibility_cancel"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v4/project/coordination/responsibilities/pause",
+      "transport": "http",
+      "responseContract": "tofu.api/v4",
+      "summary": "Pause future responsibility occurrences at the current revision",
+      "tags": [
+        "project"
+      ],
+      "scope": "chat",
+      "public": false,
+      "requiredScopes": [
+        "chat"
+      ],
+      "documented": true,
+      "owner": "routes/api_v1/project_brain.py",
+      "handler": "project_responsibility_pause"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v4/project/coordination/responsibilities/read",
+      "transport": "http",
+      "responseContract": "tofu.api/v4",
+      "summary": "Read an exact responsibility without renewing authority",
+      "tags": [
+        "project"
+      ],
+      "scope": "chat",
+      "public": false,
+      "requiredScopes": [
+        "chat"
+      ],
+      "documented": true,
+      "owner": "routes/api_v1/project_brain.py",
+      "handler": "project_responsibility_read"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v4/project/coordination/responsibilities/reconcile",
+      "transport": "http",
+      "responseContract": "tofu.api/v4",
+      "summary": "Reconcile exact existing responsibility commands without renewed allowance",
+      "tags": [
+        "project"
+      ],
+      "scope": "chat",
+      "public": false,
+      "requiredScopes": [
+        "chat"
+      ],
+      "documented": true,
+      "owner": "routes/api_v1/project_brain.py",
+      "handler": "project_responsibility_reconcile"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v4/project/coordination/scope-changes",
+      "transport": "http",
+      "responseContract": "tofu.api/v4",
+      "summary": "Read scope withdrawal receipts or reconcile an exact command without effects",
+      "tags": [
+        "project"
+      ],
+      "scope": "chat",
+      "public": false,
+      "requiredScopes": [
+        "chat"
+      ],
+      "documented": true,
+      "owner": "routes/api_v1/project_brain.py",
+      "handler": "project_scope_change_list"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v4/project/coordination/scope-changes",
+      "transport": "http",
+      "responseContract": "tofu.api/v4",
+      "summary": "Apply explicit human scope withdrawal with exact grant revision pins",
+      "tags": [
+        "project"
+      ],
+      "scope": "chat",
+      "public": false,
+      "requiredScopes": [
+        "chat"
+      ],
+      "documented": true,
+      "owner": "routes/api_v1/project_brain.py",
+      "handler": "project_scope_change_create"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v4/project/coordination/scope-changes/retry",
+      "transport": "http",
+      "responseContract": "tofu.api/v4",
+      "summary": "Retry cancellation and passive notification of the same revoked scope change",
+      "tags": [
+        "project"
+      ],
+      "scope": "chat",
+      "public": false,
+      "requiredScopes": [
+        "chat"
+      ],
+      "documented": true,
+      "owner": "routes/api_v1/project_brain.py",
+      "handler": "project_scope_change_retry"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v4/project/coordination/shared-files",
+      "transport": "http",
+      "responseContract": "tofu.api/v4",
+      "summary": "Read a bounded page of explicitly declared shared file versions",
+      "tags": [
+        "project"
+      ],
+      "scope": "chat",
+      "public": false,
+      "requiredScopes": [
+        "chat"
+      ],
+      "documented": true,
+      "owner": "routes/api_v1/project_brain.py",
+      "handler": "project_shared_files_list"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v4/project/coordination/shared-files/read",
+      "transport": "http",
+      "responseContract": "tofu.api/v4",
+      "summary": "Read an exact pinned shared file version as untrusted DATA only",
+      "tags": [
+        "project"
+      ],
+      "scope": "chat",
+      "public": false,
+      "requiredScopes": [
+        "chat"
+      ],
+      "documented": true,
+      "owner": "routes/api_v1/project_brain.py",
+      "handler": "project_shared_file_read"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v4/project/coordination/shared-files/refresh",
+      "transport": "http",
+      "responseContract": "tofu.api/v4",
+      "summary": "Refresh exact-version observations or record a human-authorized replacement path",
+      "tags": [
+        "project"
+      ],
+      "scope": "chat",
+      "public": false,
+      "requiredScopes": [
+        "chat"
+      ],
+      "documented": true,
+      "owner": "routes/api_v1/project_brain.py",
+      "handler": "project_shared_file_refresh"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v4/project/coordination/shared-files/register",
+      "transport": "http",
+      "responseContract": "tofu.api/v4",
+      "summary": "Register an explicit shared file with its source and current index revision",
+      "tags": [
+        "project"
+      ],
+      "scope": "chat",
+      "public": false,
+      "requiredScopes": [
+        "chat"
+      ],
+      "documented": true,
+      "owner": "routes/api_v1/project_brain.py",
+      "handler": "project_shared_file_register"
     },
     {
       "method": "GET",

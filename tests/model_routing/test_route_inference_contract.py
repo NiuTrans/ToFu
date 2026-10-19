@@ -73,7 +73,7 @@ def test_narrowed_ladder_drops_unrepresentable_can_disable():
 
 def test_astra_ultra_is_exact_model_contract_without_widening_gpt56():
     from pathlib import Path
-    from lib.provider_template_recipes import normalize_provider_template
+    from lib.provider.provider_template_recipes import normalize_provider_template
     raw = json.loads((Path(__file__).parents[2] / 'lib/model_info/data/openai.json').read_text())
     recipes = {row['model_id']: row for row in normalize_provider_template(raw)['offering_recipes']}
     assert recipes['gpt-6-astra']['inference_profile']['reasoning']['supported_efforts'][-1] == 'ultra'
@@ -172,13 +172,13 @@ def test_canonical_sections_endpoint_override_and_bounded_extras():
 
 
 def test_all_template_protocol_metadata_reaches_compiled_connections(monkeypatch):
-    from lib.provider_template_recipes import compile_provider_template_bundle
+    from lib.provider.provider_template_recipes import compile_provider_template_bundle
     for protocol in ('openai', 'anthropic', 'openai_responses'):
         template = {'key': 'declared-profile', 'name': 'Declared', 'base_url': 'https://example.com/v1',
                     'protocol': protocol, 'responses_profile': 'compatible',
                     'inference_profile': {'sampling': {'temperature': 'omit'}},
                     'offering_recipes': [{'model_id': 'unknown-profile-model'}]}
-        monkeypatch.setattr('lib.provider_template_recipes.load_provider_templates', lambda: [template])
+        monkeypatch.setattr('lib.provider.provider_template_recipes.load_provider_templates', lambda: [template])
         bundle = compile_provider_template_bundle(template['key'])
         connection = bundle['connections'][0]
         assert connection['protocol'] == protocol
@@ -190,7 +190,7 @@ def test_all_template_protocol_metadata_reaches_compiled_connections(monkeypatch
 @pytest.mark.parametrize('location', ['faces', 'endpoints'])
 @pytest.mark.parametrize('override', [{'can_disable': False}, {'support': 'unknown'}, {'support': 'unsupported'}])
 def test_partial_face_profile_inherits_or_clears(protocol, location, override):
-    from lib.provider_template_recipes import provider_from_template
+    from lib.provider.provider_template_recipes import provider_from_template
     base = {'reasoning': {'support': 'supported', 'wire_format': 'reasoning_effort',
                           'supported_efforts': ['none', 'high'], 'default_effort': 'high',
                           'can_disable': True},
@@ -225,7 +225,7 @@ def test_partial_face_profile_inherits_or_clears(protocol, location, override):
 @pytest.mark.parametrize('protocol', ['openai', 'anthropic', 'openai_responses'])
 def test_shipped_exact_contract_normalizes_migrates_and_binds(monkeypatch, protocol):
     from pathlib import Path
-    from lib.provider_template_recipes import normalize_provider_template, provider_from_template
+    from lib.provider.provider_template_recipes import normalize_provider_template, provider_from_template
     from tests.llm_dispatch.test_dispatcher_model_routing_v2 import _build
     raw = json.loads((Path(__file__).parents[2] / 'lib/model_info/data/openai.json').read_text())
     contract = copy.deepcopy(raw['contract'])
@@ -271,7 +271,7 @@ def test_shipped_exact_contract_normalizes_migrates_and_binds(monkeypatch, proto
 
 @pytest.mark.parametrize('override', [{'can_disable': True}, {'support': 'unknown'}, {'support': 'unsupported'}])
 def test_contract_recipe_overrides_use_section_precedence(override):
-    from lib.provider_template_recipes import normalize_provider_template
+    from lib.provider.provider_template_recipes import normalize_provider_template
     raw = {'key': 'no-name-heuristics',
            'contract': {'models': {'arbitrary-id': {}}, 'reasoning_efforts': ['low', 'high'],
                         'default_reasoning_effort': 'low'},

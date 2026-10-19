@@ -34,6 +34,8 @@ Latin stop-word removal) is identical to what reranking uses — no second,
 divergent notion of "query terms".
 """
 
+import re
+
 from tofu_search.log import get_logger
 from tofu_search.search.rerank import _tokenize
 
@@ -42,9 +44,34 @@ logger = get_logger(__name__)
 __all__ = ['should_fetch_result', 'partition_fetchable']
 
 
+# Quoted literals are subjects even when they contain operator-like text.
+_QUERY_PART = re.compile(r'(?:[+-]?[A-Za-z]+:|[+-])?"[^"]*"|\S+')
+_STRUCTURED_OPERATOR = re.compile(
+    r'^[+-]?(?:site|filetype|ext|inurl|intitle|intext|allinurl|allintitle|'
+    r'allintext|before|after|daterange|related|cache|source|language|lang):', re.I)
+
+
+def query_subject(query: str) -> str:
+    """Remove constraints/Boolean syntax, not quoted subject literals.
+
+    Operator operands and negative terms constrain retrieval; they cannot prove
+    positive subject evidence. Unknown colon words remain ordinary subjects.
+    """
+    subjects = []
+    for match in _QUERY_PART.finditer(query or ''):
+        part = match.group()
+        if part.startswith('"'):
+            subjects.append(part[1:-1])
+        elif (part.strip('()') not in {'OR', 'AND', 'NOT'}
+              and not _STRUCTURED_OPERATOR.match(part.lstrip('('))
+              and not part.lstrip('(').startswith('-')):
+            subjects.append(part)
+    return ' '.join(subjects)
+
+
 def query_terms(query: str) -> set[str]:
-    """Return the set of meaningful (tokenized, stop-word-stripped) query terms."""
-    return set(_tokenize(query or ''))
+    """Meaningful subject terms in the shared BM25 token space (no operators)."""
+    return set(_tokenize(query_subject(query)))
 
 
 def result_terms(result: dict) -> set[str]:

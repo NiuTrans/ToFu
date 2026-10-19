@@ -81,6 +81,26 @@ def _cleanup() -> None:
 def runtime_section(name: str, *, scope_prelude: bool = True) -> str:
     body = _section_source(name)
 
+
+    if name in ('main/main_send_pipeline.js', 'ui/send_button.js'):
+        body = Path(native_module_path(
+            '.native/boot-readiness.js', ROOT / 'frontend/src/boot-readiness.ts',
+        )).read_text(encoding='utf-8') + body
+    if name == 'update.js':
+        body = Path(native_module_path(
+            '.native/restart-progress-dock.js',
+            ROOT / 'frontend/src/features/settings/restart-progress-dock.ts',
+        )).read_text(encoding='utf-8') + body
+    if name == 'core/folders.js':
+        body = Path(native_module_path(
+            '.native/folder-presets.js',
+            ROOT / 'frontend/src/conversation/application/folder-presets.ts',
+        )).read_text(encoding='utf-8') + body
+    if name == 'main/main_folders_mobile.js':
+        body = Path(native_module_path(
+            '.native/folder-settings.js',
+            ROOT / 'frontend/src/conversation/ui/folder-settings.ts',
+        )).read_text(encoding='utf-8') + body
     if name == 'ui/tool_rounds_rich.js':
         for logical, entry in [
             ('checklist-card', 'checklist-card/index.ts'),
@@ -102,12 +122,23 @@ def runtime_section(name: str, *, scope_prelude: bool = True) -> str:
             ROOT / 'frontend/src/conversation/ui/motion-card/index.ts',
         ))
         body = owner.read_text(encoding='utf-8') + '\n' + body
+    if name == 'upload_preview.js':
+        owner = Path(native_module_path(
+            '.native/attachment-preview-lifecycle.js',
+            ROOT / 'frontend/src/attachment-preview-lifecycle.ts',
+        )).read_text(encoding='utf-8')
+        body = owner + body
     if name == 'core/markdown.js':
         owner = Path(native_module_path(
             '.native/markdown-renderer.js', ROOT / 'frontend/src/markdown/index.ts',
         )).read_text(encoding='utf-8')
         body = owner + body
     if name == 'background-activity.js':
+
+        for owner in ('agent-sidebar-dock', 'agent-sidebar-dock-projection'):
+            body = Path(native_module_path(
+                f'.native/{owner}.js', ROOT / f'frontend/src/{owner}.ts',
+            )).read_text(encoding='utf-8') + body
         body = Path(native_module_path(
             '.native/background-activity-controller.js',
             ROOT / 'frontend/src/background-activity-controller.ts',
@@ -130,6 +161,15 @@ def runtime_section(name: str, *, scope_prelude: bool = True) -> str:
         )).read_text(encoding='utf-8')
         body = wire_owner + body
     if name == 'ui/conversation_list.js':
+
+        body = Path(native_module_path(
+            '.native/conversation-activity.js',
+            ROOT / 'frontend/src/conversation/presentation/conversation-activity.ts',
+        )).read_text(encoding='utf-8') + body
+        body = Path(native_module_path(
+            '.native/folder-config-control.js',
+            ROOT / 'frontend/src/conversation/ui/folder-config-control.ts',
+        )).read_text(encoding='utf-8') + body
         # The two-tier search controller moved to a typed owner; production
         # imports it into the app runtime before this section runs. Raw
         # fixtures compose that same owner instead of stubbing its behavior.
@@ -248,6 +288,12 @@ var LocalControlShellState = Object.freeze({
         )).read_text(encoding='utf-8')
         body = presentation_owner + body
     if name == 'ui/streaming_swarm_panel.js':
+
+        receipt_owner = Path(native_module_path(
+            '.native/agent-message-receipts.js',
+            ROOT / 'frontend/src/conversation/presentation/agent-message-receipts.ts',
+        )).read_text(encoding='utf-8')
+        body = receipt_owner + body
 
         failure_owner = Path(native_module_path(
             '.native/swarm-failure-presentation.js',
@@ -398,6 +444,10 @@ var ProjectPresentationShellState = Object.freeze({
                 ROOT / 'frontend/src/conversation/presentation/write-gate-refusal.ts',
             )),
             Path(native_module_path(
+                '.native/mcp-resource-links.js',
+                ROOT / 'frontend/src/conversation/presentation/mcp-resource-links.ts',
+            )),
+            Path(native_module_path(
                 '.native/tool-header-presentation.js',
                 ROOT / 'frontend/src/conversation/presentation/tool-header-presentation.ts',
             )),
@@ -458,6 +508,7 @@ var _testToolResultPresentation = createToolResultPresentation({
   translate: (...args) => typeof t === 'function' ? t(...args) : args[0],
   writeGateRefusal: _testWriteGateRefusalPresentation,
 });
+var toolResultPresentation = _testToolResultPresentation;
 var renderToolResultCompactionLabelHtml =
   _testToolResultPresentation.renderCompactionLabelHtml;
 var renderWriteToolResultHtml =

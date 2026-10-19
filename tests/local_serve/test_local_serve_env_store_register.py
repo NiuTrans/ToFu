@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Managed-local env budget, ledger, and model-routing v2 hand-off.
+"""Managed-local installation, ledger, and model-routing v2 hand-off.
 
-Pins: the 20 GiB serve budget + free-space precheck; the ledger's
-upsert/eviction semantics; and the owner-scoped register/unregister round-trip.
+Pins: installation without estimated-space admission; the ledger's
+complete retention and protected atomic mutations; and the owner-scoped register/unregister round-trip.
 """
 
 import os
@@ -53,15 +53,48 @@ class TestLedger:
         store.update_fields('ls_a', status='stopped')
         assert store.get_instance('ls_a')['created_at'] == first
 
-    def test_eviction_prefers_terminal_rows(self, ledger):
-        for i in range(40):
-            store.upsert_instance({'id': 'ls_%d' % i,
-                                   'status': 'failed' if i % 2 else 'running'})
-        rows = store.list_instances()
-        assert len(rows) <= 32
-        assert all(r['status'] == 'running' for r in rows[:0] or [])
-        running = [r for r in rows if r['status'] == 'running']
-        assert len(running) == 20       # running rows are never evicted
+    def test_running_and_terminal_records_survive_count_churn(self, ledger):
+        for i in range(129):
+            store.upsert_instance({'id':f'ls_{i}', 'owner_user_id':1 if i%2 else 2,
+                                   'status':('running','stopped','failed')[i%3], 'pid':10000+i})
+        rows=store.list_instances()
+        assert len(rows)==129
+        assert rows[0]['id']=='ls_0' and rows[0]['pid']==10000
+        store.update_fields('ls_0',status='stopped')
+        assert len(store.list_instances())==129
+        assert store.remove_instance('ls_1')
+        assert len(store.list_instances())==128
+        assert store.get_instance('ls_128')['pid']==10128
+
+    def test_field_patch_preserves_concurrent_status_update(self, ledger, monkeypatch):
+        store.upsert_instance({'id':'owned','status':'starting','pid':10})
+        original=store.update_json_atomic
+        def interleaved(path, mutator, **kwargs):
+            def other_write(state):
+                state['instances'][0]['status']='running'
+                return state
+            original(path,other_write,default={'instances':[]},strict=True)
+            return original(path,mutator,**kwargs)
+        monkeypatch.setattr(store,'update_json_atomic',interleaved)
+        patched=store.update_fields('owned',pid=20)
+        assert patched['status']=='running' and patched['pid']==20
+        assert store.get_instance('owned')['status']=='running'
+        assert store.update_fields('missing',pid=30) is None
+
+    @pytest.mark.parametrize('raw',['not-json','[]','{"instances":{}}','{"instances":[{}]}'])
+    def test_corrupt_ledger_cannot_be_overwritten(self, ledger, raw):
+        from pathlib import Path
+        from lib.json_store import JsonStoreReadError
+        path=Path(store.LEDGER_PATH);path.write_text(raw)
+        with pytest.raises(JsonStoreReadError):
+            store.upsert_instance({'id':'new','status':'planned'})
+        assert path.read_text()==raw
+        with pytest.raises(JsonStoreReadError):
+            store.update_fields('new',status='running')
+        assert path.read_text()==raw
+        with pytest.raises(JsonStoreReadError):
+            store.remove_instance('new')
+        assert path.read_text()==raw
 
 
 class TestOwnerBoundary:
@@ -129,25 +162,61 @@ def envroot(tmp_path, monkeypatch):
     return root
 
 
-class TestDiskBudget:
-    def test_ok(self, envroot):
-        r = env_mod.check_disk_budget('llamacpp',
-                                      disk_free=100 * (1 << 30))
-        assert r['ok'] and r['budget_bytes'] == 20 * (1 << 30)
+class TestDiskObservations:
+    @pytest.mark.parametrize('free_bytes', [0, 1 << 30, 100 << 30])
+    def test_space_estimates_do_not_refuse_installation(self, envroot, free_bytes):
+        result = env_mod.check_disk_budget('vllm', disk_free=free_bytes)
+        assert result['ok'] and result['free_bytes'] == free_bytes
 
-    def test_insufficient_free(self, envroot):
-        r = env_mod.check_disk_budget('vllm', disk_free=1 * (1 << 30))
-        assert not r['ok'] and '磁盘余量不足' in r['error']
+    def test_retired_budget_and_directory_size_do_not_gate(self, envroot, monkeypatch):
+        monkeypatch.setenv('TOFU_LOCAL_SERVE_BUDGET_GB', '1')
+        with open(envroot / 'existing', 'wb') as output:
+            output.truncate(21 << 30)
+        assert env_mod.check_disk_budget('sglang', disk_free=0)['ok']
 
-    def test_budget_overflow(self, envroot, monkeypatch):
-        monkeypatch.setattr(env_mod, '_tree_bytes',
-                            lambda p: 19 * (1 << 30))
-        r = env_mod.check_disk_budget('sglang', disk_free=500 * (1 << 30))
-        assert not r['ok'] and '预算' in r['error']
-        assert 'TOFU_LOCAL_SERVE_BUDGET_GB' in r['error']
+    def test_failed_probe_is_diagnostic(self, envroot, monkeypatch):
+        def unavailable(*args):
+            raise OSError('probe unavailable')
+        monkeypatch.setattr(env_mod.shutil, 'disk_usage', unavailable)
+        result = env_mod.check_disk_budget('vllm')
+        assert result['ok'] and result['free_bytes'] is None
+        assert result['disk_probe_error'] == 'probe unavailable'
 
     def test_unknown_engine(self, envroot):
         assert not env_mod.check_disk_budget('nope')['ok']
+
+
+class TestStreamingDownload:
+    @pytest.mark.parametrize('failure', [None, 'read', 'write'])
+    def test_large_transfer_and_real_io_failure(self, monkeypatch, failure):
+        from contextlib import nullcontext
+        chunk = b'x' * (1 << 20)
+        read_count = 0
+        written = 0
+        def read(size):
+            nonlocal read_count
+            assert size == len(chunk)
+            read_count += 1
+            if failure == 'read' and read_count == 3:
+                raise OSError('network read failed')
+            return chunk if read_count <= 4097 else b''
+        def write(data):
+            nonlocal written
+            if failure == 'write' and written == 2 * len(chunk):
+                raise OSError('No space left on device')
+            written += len(data)
+        monkeypatch.setattr(env_mod.urllib.request, 'urlopen',
+                            lambda *a, **k: nullcontext(SimpleNamespace(read=read)))
+        monkeypatch.setattr(env_mod, 'open',
+                            lambda *a, **k: nullcontext(SimpleNamespace(write=write)),
+                            raising=False)
+        if failure:
+            with pytest.raises(OSError):
+                env_mod._fetch('https://example.invalid/engine', '/unused')
+            assert written == 2 * len(chunk)
+        else:
+            env_mod._fetch('https://example.invalid/engine', '/unused')
+            assert written == 4097 * len(chunk)
 
 
 class TestEnsureEngine:
@@ -158,16 +227,18 @@ class TestEnsureEngine:
         r = env_mod.ensure_engine('vllm')
         assert r['ok'] and r['installed'] is False  # no work was needed
 
-    def test_budget_refusal_precedes_install(self, envroot, monkeypatch):
-        called = []
+    def test_unknown_engine_precedes_install(self, envroot, monkeypatch):
         monkeypatch.setattr(env_mod, 'engine_status',
-                            lambda e: {'installed': False})
-        monkeypatch.setattr(env_mod, 'check_disk_budget',
-                            lambda e: {'ok': False, 'error': '预算不足'})
-        monkeypatch.setattr(env_mod, '_install_uv_env',
-                            lambda *a, **k: called.append(1) or {'ok': True})
-        r = env_mod.ensure_engine('vllm')
-        assert not r['ok'] and not called
+                            lambda e: pytest.fail('invalid engine must not install'))
+        assert not env_mod.ensure_engine('unknown')['ok']
+
+    def test_actual_install_failure_is_reported(self, envroot, monkeypatch):
+        monkeypatch.setattr(env_mod, 'engine_status', lambda e: {'installed': False})
+        def full(*args):
+            raise OSError('No space left on device')
+        monkeypatch.setattr(env_mod, '_install_uv_env', full)
+        result = env_mod.ensure_engine('vllm')
+        assert not result['ok'] and 'No space left on device' in result['error']
 
     def test_uv_install_flow(self, envroot, monkeypatch):
         states = iter([{'installed': False},
@@ -175,7 +246,7 @@ class TestEnsureEngine:
                         'system': False}])
         monkeypatch.setattr(env_mod, 'engine_status', lambda e: next(states))
         monkeypatch.setattr(env_mod, 'check_disk_budget',
-                            lambda e: {'ok': True})
+                            lambda e: pytest.fail('observations must not gate installation'))
         seen = []
 
         class R:

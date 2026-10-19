@@ -331,7 +331,7 @@ const { setup } = require(process.env.JSDOM_HARNESS);
 const { window, document, check, report } = setup({
   root: process.argv[3],
   html: '<!doctype html><body><div id="oauthCodexQuota"></div><div id="oauthCodexResetOffer"></div></body>',
-  targets: [process.argv[2]],
+  targets: [...process.argv.slice(4), process.argv[2]],
   globals: {
     Api: { oauth: { status: async () => null } },
     BroadcastChannel: class BroadcastChannel {},
@@ -522,6 +522,10 @@ def test_settings_offer_renderer_is_explicit_about_reset_state():
     run_harness(
         target_js=runtime_section_path("settings/oauth.js"),
         body_js=_SETTINGS_HARNESS,
+        extra_targets=[native_module_path(
+            '.native/codex-shared-login.js',
+            ROOT / 'frontend/src/features/settings/codex-shared-login.ts',
+        )],
         expect_pass=19,
         label="codex-reset-settings",
     )

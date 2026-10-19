@@ -4,10 +4,10 @@
     "lib/identity.py",
     "lib/process_roles.py",
     "lib/storage/connection_probe.py",
-    "lib/storage_sidecar/config.py",
-    "lib/storage_sidecar/migrate.py",
+    "lib/storage_authority_sql/config.py",
+    "lib/storage_authority_sql/migrate.py",
     "routes",
-    "lib/storage_sidecar",
+    "lib/storage_authority_sql",
     "lib/agent_core"
   ],
   "exclude": [
@@ -37,11 +37,11 @@
       "typeCheckingMode": "strict"
     },
     {
-      "root": "lib/storage_sidecar/config.py",
+      "root": "lib/storage_authority_sql/config.py",
       "typeCheckingMode": "strict"
     },
     {
-      "root": "lib/storage_sidecar/migrate.py",
+      "root": "lib/storage_authority_sql/migrate.py",
       "typeCheckingMode": "strict"
     }
   ]

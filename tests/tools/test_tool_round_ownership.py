@@ -3,7 +3,7 @@ from copy import deepcopy
 
 import pytest
 
-from lib.tool_round_identity import tool_round_with_execution_identity
+from lib.tool_results.tool_round_identity import tool_round_with_execution_identity
 
 pytestmark = pytest.mark.unit
 
@@ -41,7 +41,7 @@ def test_root_and_child_tool_announcements_stamp_the_producer():
 
 
 def test_resume_backfill_keeps_child_segments_and_rounds_in_one_scope():
-    from lib.tool_round_identity import projection_history_with_execution_identity
+    from lib.tool_results.tool_round_identity import projection_history_with_execution_identity
     projection = {'toolRounds': [{'taskId': 'child', 'toolCallId': 'one'}],
                   'segments': [
                       {'type': 'text', 'taskId': 'child', 'llmRound': 0, 'text': 'child narration'},

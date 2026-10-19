@@ -36,7 +36,7 @@ def _download_image(url: str, default_mime: str = 'image/png') -> tuple:
     """Download an image URL and return (base64_str, mime_type)."""
     try:
         import base64 as _b64
-        from lib.http_client import http_stream
+        from lib.http_transport.client import http_stream
         logger.info('[ImageGen] Downloading image from URL: %.120s', url)
         raw = bytearray()
         with http_stream('GET', url, timeout=30) as img_resp:

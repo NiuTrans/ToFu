@@ -66,7 +66,7 @@ local catalog metadata change
 
 ordered segments + explicit model-round / attempt / task scope
   -> presentation/round-outline.ts (contiguous runs; never diagnostic chronology)
-  -> ui/round-outline.ts (keyed headings, reader-owned disclosure, navigation)
+  -> ui/round-outline.ts (keyed action state and reader-owned evidence disclosure)
   -> existing keyed ConversationSurface leaves (answers always outside folds)
 
 compatible rich-card markup through the existing rendering/safety boundary
@@ -159,13 +159,25 @@ have explicit, independently readable responsibilities:
 |---|---|
 | `surface-contracts.ts` | Renderer, intent, window and scroll ports; types only |
 | `surface-windowing.ts` | DOM budgets and option validation; store history stays intact |
-| `conversation-viewport.ts` | Follow suspension, scroll anchoring and listener disposal |
+| `conversation-viewport.ts` | Follow suspension, visible-content scroll anchoring and listener disposal |
 | `surface-presentation-equality.ts` | Bounded semantic repaint decisions; no DOM |
 | `surface-dom.ts` | Keyed children and singleton slots; preserve unmanaged editor hosts |
 | `surface-default-renderers.ts` | Text-safe fallback markup; production renderers are injected |
 
 The composition entry re-exports its existing public ports; collaborators
 import the type owner directly and never import the composition to discover policy.
+
+The viewport owns the only follow latch and all automatic scroll writes.
+`followLatest()` restores every mounted lane/block window to the logical tail;
+`followLatest({force:false})` preserves reader suspension and never rebuilds the
+transcript. `isNearLatest()` includes unmounted later content. Retained buttons,
+send/layout nudges and mobile keyboard geometry forward these same intents.
+Surface commits publish bounded `mountedTurnIds` to presentation consumers;
+task-time reads do not observe the DOM or rescan it. The controller coalesces
+graph and asynchronous presentation updates through one fenced commit path;
+explicit disclosure/display actions flush that path before another UI action.
+Cancellation, host replacement and inactive-conversation checks guard every
+delivery. Scroll anchors retain separate leaf and Turn fallback offsets.
 
 The equality owner charges each compared value against 4096 visits and stops at
 depth 32. Matching identity remains constant-time; oversized or cyclic values
@@ -201,6 +213,10 @@ Failure receipt copy uses its own document's clipboard capability, falls back
 to a temporary textarea, and releases that node in `finally` even if native or
 compatibility copy fails. The fallback restores the reader's focus; copy failure
 leaves the control actionable and the full diagnostic evidence selectable.
+Terminal activity errors reuse `error-presentation.ts` for localized, escaped
+reason and guidance; the complete envelope remains in a separate technical
+disclosure whose open state and summary focus survive repaint. Raw JSON as the
+primary explanation was rejected because it bypassed the shared display policy.
 
 The delivery budget classifies `main.ts` and `admin.ts` by their explicit
 primary-entry identities even when Rollup also marks an entry dynamically
@@ -228,11 +244,20 @@ remains DOM-free; neither a split nor an index may mutate durable records.
 
 **Problem:** program-parent insertion repeatedly scanned the remaining rounds
 and spliced the block array, making long program histories quadratic.
-**Decision:** one temporary linked sequence, first-child lookup, suffix minimum
-and last-round lookup preserve declared-child, later-tool and childless-failure
-placement in O(blocks + rounds + child IDs) work. Rebuild the caller-owned output
-once. All nodes and indices expire at return; no resident cache or concurrency
-limit is introduced. **Alternatives rejected:** array-splice insertion retains
+**Decision:** a uniquely owned gateway is replaced in its authored segment
+slot by the program parent, once per occurrence. A projection-local call/round/
+scope index admits a unique parent in constant lookup work; reciprocal placement
+prefers a scoped gateway over an unstamped shell and retains equally supported
+ambiguous gateways. Parent block identities are claimed in durable sidecar order,
+not gateway arrival order. Historical `execute_tools` without parents bypass the
+lookup entirely. Only remaining sidecars enter
+the temporary linked sequence: declared-child lookup, then the last authored
+attempt/task/model-round anchor (with unique compatible historical scope), then
+suffix minima for later-program bounds and legacy later-tool fallback. This keeps
+partially hydrated sibling programs in sidecar order. This placement pass takes
+O(blocks + rounds + child IDs) work and
+rebuilds the caller-owned output once. All nodes and indices expire at return;
+no resident cache or concurrency limit is introduced. **Alternatives rejected:** array-splice insertion retains
 quadratic shifts even with an index; a persistent placement cache duplicates
 immutable Turn memo ownership and needs another invalidation lifecycle.
 
@@ -361,6 +386,25 @@ real-browser round, activity, note-group and navigation suites.
 | Refusal interpretation and rendering | [`write-gate-refusal.ts`](presentation/write-gate-refusal.ts) |
 | Card/diff body | [`tool-result-presentation.ts`](presentation/tool-result-presentation.ts) |
 
+Generic terminal failures use the same authoritative/deferred result disclosure
+as settled outputs. `tool-failure-presentation.ts` owns safe diagnostics (512
+UTF-16 units, 32,768-unit JSON parse budget, depth 6 and 32 visits), including
+historical artifact summaries containing MCP-prefixed serialized errors. Object
+`toolContent` and results-only evidence follow the existing result-source owner.
+Private artifact references, digests and cursors, malformed/oversized JSON and
+unknown wrappers never become header or tooltip copy; raw evidence stays folded.
+Missing evidence still shows an honest failed verdict, without reexecution.
+
+The generic diagnostic marks its disclosure with `data-tool-failure-evidence="collapsed"`;
+`ui/round-outline.ts` keeps raw envelopes folded while the failure reason and
+attention verdict remain visible. Reader choices survive replay; structured
+interactive/error evidence retains its existing first-paint behavior.
+**Problem:** legacy errors dumped giant serialized output inline and in titles.
+**Decision:** share bounded diagnostics with artifact cards and reuse lazy evidence.
+**Alternative rejected:** clipping raw JSON still leaks storage metadata and hides
+useful nested failure messages. Specs: `tool-failure-presentation.test.ts`,
+`tool-result-presentation.test.ts`, `tests/frontend/test_generic_tool_failure.py`.
+
 Repo-map requested scope stays visible even while its result is folded. Object/JSON
 arguments parse within 32,768 units; strings are escaped and visibly clipped at
 512 units. Missing fields never imply defaults; malformed/missing historical
@@ -374,10 +418,13 @@ and `tests/visual/test_visual_repo_map_parameters.py`.
 Projected rounds flow through these presentation owners to retained
 `runtime/sections/ui/tool_rounds.js`, which delegates header policy;
 `runtime/sections/_prelude.js` composes the ports (paths relative to `frontend/src/`).
-Hide redundant edit counts in new and recognizable historical headers as a
-presentation-only change: never mutate stored records. Preserve ambiguous
-historical titles and all failure, refusal, and operation evidence. Single-write
-and non-edit badges are unaffected; body evidence remains with the result owner.
+Normalize redundant counts in recognizable historical titles without mutating
+stored records. Settled batch headers show one success/total badge, green only
+for complete success and red otherwise; custom error copy and refusal diagnoses
+stay in detailed entries/notices rather than competing with that count. Structured
+per-edit statuses outrank legacy counted badges. Unknown totals stay unknown.
+Preserve ambiguous titles and all body evidence. Single-write and non-edit badges
+are unaffected. The edit-list owner removes the nested generic result rail/inset.
 
 
 Saved tool-output continuations show a localized action title, a meaningful
@@ -412,14 +459,39 @@ wire-parity test.
 
 ### Intent-first action stream
 
-`presentation/round-outline.ts::toolBlockOwnsSummary` identifies terminal,
-browser-script and structured checklist blocks whose cards own their own
-summary/disclosure. `ui/round-outline.ts` leaves these cards visible at their
-authored positions; program execution/handoff cards also keep their summary
-visible, while their generic tool children retain lazy keyed disclosure,
-bulk controls, attention classification and legacy malformed-result fallback.
-The generic disclosure uses one label plus its chevron, not a repeated details
-CTA. Accepted results and audit chronology remain unchanged.
+`ui/history-process.ts` is the Surface-owned historical disclosure boundary.
+Settled assistant turns show the last explicitly authored final-answer scope and
+other deliverables, with compact important result/error receipts outside. All
+nonfinal process evidence remains in authored order inside one native `details`.
+This intentionally replaces the previous historical “tools/narration always
+visible” contract. Close/unmount cancels existing lazy result readers and drops
+all process leaves; expansion mounts a viewport-budget content page (at most
+200 entries). Explicit previous/next buttons browse all evidence; contained inner
+scroll never shifts outer turn/block history windows. UI-only choices are keyed
+by presentation/block identity, retained across repaint/eviction, and cleared on
+conversation reset/disposal; no projection/result mirror or second store exists.
+
+`ui/round-outline.ts` still lets each mounted action own its summary and keyed
+evidence disclosure. Live/failed/waiting/interactive/background-unresolved turns
+retain this original actionable stream, never a fabricated completed answer.
+Legacy/missing final boundaries keep narration with an explicit fallback notice.
+`presentation/round-outline.ts` supplies accepted scope and action state;
+`tool-execution-groups.ts` remains the risk/attention classification authority.
+Executable historical contracts: `tests/frontend/test_frontend_history_process.py`
+and `tests/visual/test_visual_historical_process.py`.
+
+
+`program-gateway-presentation.ts` normalizes old exact native `execute_program`
+rows with serialized arguments for the existing unified card, without a second
+owner or durable copy. Synthetic ownership suppression stays occurrence-scoped.
+Only complete authoritative results (including a full snapshot preview with
+matching declared character witness) support retained-input directory counts.
+Missing counters are unavailable; gateway settlement says Returned. Script
+return shapes never supply host outcomes or statistics. Raw evidence remains
+independently disclosed, including existing lazy result hydration.
+Executable specs: `ui/program-gateway-card.test.ts` and
+`tests/visual/test_visual_reported_tool_cards.py` (raw history plus synthetic pair,
+desktop/mobile with reload).
 
 `presentation/command-card-chrome.ts` shares escaped full intent and localized
 secondary execution context across terminal and browser presenters. Each
@@ -434,3 +506,21 @@ Executable specifications: `tests/frontend/test_frontend_round_outline.py`,
 `tests/tools/test_tool_{command,browser}_execution_presentation.py`, and
 `tests/visual/test_visual_intent_first_actions.py` (isolated live app, both
 locales, desktop/phone, light/dark/Tofu themes, keyboard and replay state).
+
+## History-search receipts
+
+Problem: a fixed past-search label discarded the keyword, repeated the source
+badge, and rendered English empty-result prose while losing pagination health.
+Decision: `ui/project-receipt/search.ts` renders same-query `conversationSearch`
+metadata from `lib/conv_ref/_query.py` through the normal tool handler. The sole
+summary carries keyword, actual scope and returned count; the body localizes
+zero-hit versus incomplete/unknown coverage and states indexed-field limits.
+Records without metadata retain raw output without invented coverage/counts.
+The backend consumes v2 pages (including empty continuation pages), bounds work
+to four pages, uses metadata-only owner/project hydration, and refuses explicit
+project scope without context. Tool parameters/results remain outside the index.
+Alternatives rejected: prose-parsed success, unconditional widening, foreground
+transcript loading, and treating the first empty page as complete absence.
+Specs: `ui/project-receipt/search.test.ts`,
+`tests/conversation/test_conv_ref_search_receipt.py`, and
+`tests/visual/test_visual_conversation_search_receipt.py`.

@@ -40,7 +40,7 @@ def chat_workspaces_root() -> str:
     tree so a chat drop never writes into a root the user attached for editing.
     """
     try:
-        from lib.runtime_paths import uploads_root
+        from lib.runtime.runtime_paths import uploads_root
         path = os.path.join(uploads_root(), 'workspaces')
     except Exception as exc:  # pragma: no cover — defensive fallback
         logger.debug('[ChatWorkspace] uploads_root unavailable, in-tree: %s', exc)

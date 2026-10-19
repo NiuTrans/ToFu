@@ -1,0 +1,152 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tofu.local/contracts/workspace_acceptance_v1.schema.json",
+  "title": "WorkspaceAcceptanceV1",
+  "description": "Read-only projection of actual immutable Git gate evidence. A checked candidate is distinct from task completion, workspace publication and user acceptance. Missing/invalid evidence is unverified; checkpoint change is stale. Commands and output bodies stay private.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "status",
+    "reason",
+    "record"
+  ],
+  "properties": {
+    "status": {
+      "enum": [
+        "verified",
+        "failed",
+        "stale",
+        "unverified"
+      ]
+    },
+    "reason": {
+      "enum": [
+        "no_versioned_evidence",
+        "checkpoint_changed",
+        "checks_failed",
+        "project_checks_missing",
+        "exact_candidate_checked",
+        "criteria_changed",
+        "current_policy_unavailable"
+      ]
+    },
+    "record": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/Record"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "$defs": {
+    "Record": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "baseRevision",
+        "targetRevision",
+        "targetTree",
+        "checkpointRevision",
+        "commandDigest",
+        "observedAt",
+        "scope",
+        "outcome",
+        "checks"
+      ],
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "baseRevision": {
+          "type": "string",
+          "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+        },
+        "targetRevision": {
+          "type": "string",
+          "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+        },
+        "targetTree": {
+          "type": "string",
+          "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+        },
+        "checkpointRevision": {
+          "type": "string",
+          "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+        },
+        "commandDigest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "observedAt": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "scope": {
+          "enum": [
+            "configured_checks",
+            "builtin_checks"
+          ]
+        },
+        "outcome": {
+          "enum": [
+            "passed",
+            "failed"
+          ]
+        },
+        "checks": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "prefixItems": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "id",
+                "outcome"
+              ],
+              "properties": {
+                "id": {
+                  "const": "builtin"
+                },
+                "outcome": {
+                  "enum": [
+                    "passed",
+                    "failed",
+                    "unknown",
+                    "not_run"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "id",
+                "outcome"
+              ],
+              "properties": {
+                "id": {
+                  "const": "project_command"
+                },
+                "outcome": {
+                  "enum": [
+                    "passed",
+                    "failed",
+                    "unknown",
+                    "not_run"
+                  ]
+                }
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}

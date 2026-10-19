@@ -20,7 +20,7 @@ __all__ = ['run_slides_task', 'slides_root', 'resume_interrupted_decks',
 
 def slides_root() -> str:
     """Writable root for slide-deck state (job workdirs)."""
-    from lib.runtime_paths import data_root
+    from lib.runtime.runtime_paths import data_root
     path = os.path.join(data_root(), 'slides')
     os.makedirs(path, exist_ok=True)
     return path

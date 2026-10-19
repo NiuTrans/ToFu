@@ -1,0 +1,34 @@
+{
+  "version": 1,
+  "origin": "https://model.internal.example.com",
+  "canvasPathPrefix": "/user/modelManage/experimentalTaskDetail/",
+  "canvasPathPattern": "^/user/modelManage/experimentalTaskDetail/([0-9]+)(?:/[0-9]+/[0-9]+)?/?$",
+  "provenance": {
+    "pathRoute": "llm-mcp/src/llm_mcp/experiment_results.py:canvas_metadata and src/llm_mcp/native/experiment_types.py",
+    "singleItemWrapper": "lib/tasks_pkg/compaction/_budget.py:_candidate_items and lib/tools/result_envelope.py:_model_projection"
+  },
+  "server": "llm",
+  "toolPrefix": "experiment_",
+  "forkTools": ["experiment_fork", "experiment_data_fork"],
+  "progressiveTools": ["call_mcp_read_tool", "call_mcp_write_tool"],
+  "inputKeys": ["experiment_id_or_name_or_url", "experiment_or_url", "experiment_id_or_name", "experiment_id", "base_id", "ids"],
+  "singleItemWrapper": {
+    "keys": ["items", "summary"],
+    "summary": "Tool returned a structured result.",
+    "itemCount": 1,
+    "retainedSourceSummary": "Tool returned a structured result.\n[Original source retained; use search_tool_artifact or read_tool_artifact with artifactRef to inspect it.]",
+    "retainedSourceEvidence": {
+      "contractVersion": "tofu.tool-result-evidence/v1",
+      "resultContractVersion": "tofu.tool-result/v2",
+      "status": "ok",
+      "executionStatus": "ok",
+      "projectionKind": "summary_items",
+      "retentionCoverage": "complete",
+      "viewCoverage": "complete",
+      "truncated": false
+    }
+  },
+  "resultIdKey": "experimentId",
+  "resultUrlKeys": ["canvasUrl", "page", "url"],
+  "limits": {"serializedChars": 65536, "referenceChars": 512, "labelChars": 40, "inputLinks": 2}
+}

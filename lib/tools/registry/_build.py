@@ -119,6 +119,15 @@ def _build_project_result_meta(
     return build_project_tool_meta(tool_name, tool_args, tool_content)
 
 
+def project_dispatch_tool_schemas(names) -> list[dict]:
+    """Copy canonical file declarations for an already admitted dispatch profile."""
+    from copy import deepcopy
+    from lib.tools.project import READ_FILES_TOOL, PROJECT_TOOL_WRITE_FILE, PROJECT_TOOL_EDIT_FILE
+    return [deepcopy(tool) for tool in (
+        READ_FILES_TOOL, PROJECT_TOOL_WRITE_FILE, PROJECT_TOOL_EDIT_FILE,
+    ) if tool['function']['name'] in names]
+
+
 def _build_project_or_code_exec(ctx: ToolContext) -> list[dict]:
     # ``project_ready`` is evaluated from the current request, so attaching or
     # detaching Project Brain changes the next assembled tool surface directly.
@@ -164,88 +173,18 @@ def _build_desktop(ctx: ToolContext) -> list[dict]:
     return []
 
 
-def _build_image_gen(ctx: ToolContext) -> list[dict]:
-    from lib.tools.image_gen import GENERATE_IMAGE_TOOL
-    logger.debug('[Task %s] 🎨 Image generation tool available', ctx.tid)
-    return [GENERATE_IMAGE_TOOL]
 
 
-def _build_motion_video(ctx: ToolContext) -> list[dict]:
-    # Motion-video (MG animation) pipeline — gated on a project being
-    # attached (the workdir convention lives under the project's .tofu/),
-    # same gate as the project tool family.
-    if not ctx.project_ready:
-        return []
-    from lib.tools.motion_video import MOTION_VIDEO_TOOLS
-    logger.debug('[Task %s] Motion-video tools enabled (%d)',
-                 ctx.tid, len(MOTION_VIDEO_TOOLS))
-    return list(MOTION_VIDEO_TOOLS)
 
 
-def _build_produce(ctx: ToolContext) -> list[dict]:
-    # High-level "topic → finished video" tool. Deliberately NOT project-gated
-    # (owner 拍板 #2: "say one sentence and get a film" cannot require an
-    # attached project) — topic jobs render under the server data dir. Its
-    # schema exposure rides the Web Search composer preference; execution does
-    # not, because web_search itself remains available to the grounded recipe.
-    from lib.tools.produce import (PRODUCE_REPORT_TOOL,
-                                   PRODUCE_RESEARCH_TOOL, PRODUCE_SLIDES_TOOL,
-                                   PRODUCE_VIDEO_TOOL)
-    logger.debug('[Task %s] produce_video/produce_report/produce_research/'
-                 'produce_slides tools enabled', ctx.tid)
-    # Appended LAST so the existing video/report prefix stays byte-stable for
-    # the prompt cache (the ordering contract in this module's docstring).
-    return [PRODUCE_VIDEO_TOOL, PRODUCE_REPORT_TOOL, PRODUCE_RESEARCH_TOOL,
-            PRODUCE_SLIDES_TOOL]
 
 
-def _build_produce_edits(ctx: ToolContext) -> list[dict]:
-    # Conversational revision of ALREADY-PRODUCED artifacts. Unlike the
-    # produce_* family these never touch research/web grounding, so they must
-    # NOT disappear with the Web Search switch (the exposure gate above is an
-    # explicit produce-only product decision) — a user who generated a deck
-    # yesterday and turns search off today still gets to edit it.
-    from lib.tools.produce import (EDIT_SLIDES_TOOL, EDIT_VIDEO_TOOL,
-                                   PATCH_SLIDES_TOOL, RESTYLE_SLIDES_TOOL,
-                                   REVERT_SLIDES_TOOL, REVERT_VIDEO_TOOL)
-    logger.debug('[Task %s] edit/revert tools for produced artifacts '
-                 'enabled', ctx.tid)
-    return [EDIT_SLIDES_TOOL, EDIT_VIDEO_TOOL, PATCH_SLIDES_TOOL,
-            RESTYLE_SLIDES_TOOL, REVERT_SLIDES_TOOL, REVERT_VIDEO_TOOL]
 
 
-def _build_paper_build(ctx: ToolContext) -> list[dict]:
-    # Paper builds need an owned project root (the build service binds sources
-    # strictly to conversation roots), so the schema rides the project gate.
-    if not ctx.project_ready:
-        return []
-    from lib.tools.paper_build import (PAPER_ARXIV_IMPORT_TOOL,
-                                       PAPER_BUILD_TOOL, PAPER_LAYOUT_TOOL)
-    from lib.tools.paper_edits import PAPER_PROPOSE_EDITS_TOOL
-    return [PAPER_BUILD_TOOL, PAPER_LAYOUT_TOOL, PAPER_ARXIV_IMPORT_TOOL,
-            PAPER_PROPOSE_EDITS_TOOL]
 
 
-def _build_paper_citations(ctx: ToolContext) -> list[dict]:
-    # Citation search/insert/verify binds to the conversation's owned paper
-    # document root, so it rides the same project gate as paper_build.
-    if not ctx.project_ready:
-        return []
-    from lib.tools.paper_citations import (PAPER_CITATION_AUDIT_TOOL,
-                                           PAPER_CITE_INSERT_TOOL,
-                                           PAPER_CITE_SEARCH_TOOL)
-    return [PAPER_CITE_SEARCH_TOOL, PAPER_CITE_INSERT_TOOL,
-            PAPER_CITATION_AUDIT_TOOL]
 
 
-def _build_paper_quality(ctx: ToolContext) -> list[dict]:
-    # The quality gate reads the same owned live tree and the same retained
-    # build artifacts as paper_build, so it rides the same project gate.
-    if not ctx.project_ready:
-        return []
-    from lib.tools.paper_quality import (PAPER_CHECK_TOOL, PAPER_REVIEW_TOOL,
-                                         PAPER_SCAFFOLD_TOOL)
-    return [PAPER_CHECK_TOOL, PAPER_REVIEW_TOOL, PAPER_SCAFFOLD_TOOL]
 
 
 def _build_page_preview(ctx: ToolContext) -> list[dict]:
@@ -311,6 +250,26 @@ def canonical_human_guidance_schema() -> dict:
     return ASK_HUMAN_TOOL
 
 
+def _build_coordinator(ctx: ToolContext) -> list[dict]:
+    from lib.project_dispatch.admission import KEY, repository_for
+    from lib.tasks_pkg.coordinator_policy import coordinator_scope
+    if KEY in ctx.cfg:
+        # Catalog assembly has a config, not the executing task/account. Resolve
+        # its immutable grant here; the assembler and every call check the real
+        # physical task separately. Never construct a synthetic human task.
+        binding = ctx.cfg[KEY]
+        row = repository_for(binding).validate(binding)
+        if (row['request'].get('profile', {}).get('mode') != 'coordinator'
+                or binding['owner'] != ctx.owner_user_id or binding['recipientId'] != ctx.conv_id):
+            return []
+    elif not ctx.owner_user_id or not coordinator_scope({
+            '_userId': ctx.owner_user_id, 'convId': ctx.conv_id,
+            'config': ctx.cfg}, ctx.project_path):
+        return []
+    from lib.tools.coordinator import COORDINATOR_TOOLS
+    return list(COORDINATOR_TOOLS)
+
+
 def _build_human_guidance(ctx: ToolContext) -> list[dict]:
     if ctx.current_count > 0:
         logger.debug('[Task %s] 🙋 Human guidance (ask_human) tool available',
@@ -368,23 +327,6 @@ def _build_todo(ctx: ToolContext) -> list[dict]:
     return [TODO_WRITE_TOOL]
 
 
-def _build_local_serve(ctx: ToolContext) -> list[dict]:
-    # Managed local deployment (install + run an inference engine for a
-    # user-supplied model path) is a DEFAULT capability like the scheduler:
-    # it attaches whenever any base tool exists. It is discoverable through
-    # Tool Search rather than eagerly wired, so idle turns pay nothing.
-    # TOFU_LOCAL_SERVE=0 is the retraction switch.
-    if (not ctx.durable_state_available
-            or ctx.lean or not ctx.has_base_tools):
-        return []
-    import os
-    if os.environ.get('TOFU_LOCAL_SERVE', '1').strip().lower() in (
-            '0', 'false', 'no', 'off'):
-        return []
-    from lib.local_serve.tool_defs import LOCAL_SERVE_TOOLS
-    logger.debug('[Task %s] 🖥️ Local-serve tools enabled (%d tools)',
-                 ctx.tid, len(LOCAL_SERVE_TOOLS))
-    return list(LOCAL_SERVE_TOOLS)
 
 
 def _build_scheduler(ctx: ToolContext) -> list[dict]:
@@ -412,6 +354,13 @@ def _build_timer_watcher(ctx: ToolContext) -> list[dict]:
     return [TIMER_TOOL_CREATE]
 
 
+def _build_tool_effect_inspection(ctx: ToolContext) -> list[dict]:
+    if not ctx.durable_state_available or not ctx.conv_id:
+        return []
+    from lib.tools.tool_effect_inspection import TOOL_EFFECT_INSPECTION
+    return [TOOL_EFFECT_INSPECTION.provider_schema()]
+
+
 def _build_tool_result_artifacts(ctx: ToolContext) -> list[dict]:
     if not ctx.durable_state_available:
         return []
@@ -421,6 +370,18 @@ def _build_tool_result_artifacts(ctx: ToolContext) -> list[dict]:
         return []
     from lib.tools.tool_result_artifacts import build_tool_result_artifact_tools
     return build_tool_result_artifact_tools()
+
+
+def _build_working_facts(ctx: ToolContext) -> list[dict]:
+    if not ctx.durable_state_available:
+        return []
+    from lib.tools.working_facts import WORKING_FACT_CONTRACTS
+    return [contract.provider_schema() for contract in WORKING_FACT_CONTRACTS]
+
+
+def _handle_working_facts(*args, **kwargs):
+    from lib.tasks_pkg.handlers.working_facts import handle_working_facts
+    return handle_working_facts(*args, **kwargs)
 
 
 def _build_swarm(ctx: ToolContext) -> list[dict]:
@@ -490,7 +451,7 @@ def _build_mcp(ctx: ToolContext) -> list[dict]:
     from lib.mcp.tool_search import frozen_wire_definitions, mcp_selection_scope_id
     scope = mcp_selection_scope_id(
         task_id=getattr(ctx, 'task_id', ''), conv_id=getattr(ctx, 'conv_id', ''),
-        owner_user_id=ctx.owner_user_id)
+        owner_user_id=ctx.owner_user_id, storage_free=ctx.cfg.get('_storageFreeRuntime') is True)
     ctx.cfg['_mcpSelectionScopeId'] = scope
     exposure = str(ctx.cfg.get('mcpToolExposure', 'auto') or 'auto').strip().lower()
     adaptive = exposure not in (
@@ -504,7 +465,7 @@ def _build_mcp(ctx: ToolContext) -> list[dict]:
 
 def _build_mcp_live(
         ctx: ToolContext, frozen: list[dict] | None, *, adaptive: bool) -> list[dict]:
-    from lib.storage.mcp_declarations import MCPDeclarationError
+    from lib.agent_core.tool_errors import MCPDeclarationError
     try:
         from lib.mcp import get_bridge
         bridge = get_bridge(ctx.owner_user_id)
@@ -567,7 +528,8 @@ def _build_mcp_live(
                     ctx.cfg['_mcpSelectionScopeId'] = mcp_selection_scope_id(
                         task_id=getattr(ctx, 'task_id', ''),
                         conv_id=getattr(ctx, 'conv_id', ''),
-                        owner_user_id=getattr(ctx, 'owner_user_id', 0))
+                        owner_user_id=getattr(ctx, 'owner_user_id', 0),
+                        storage_free=ctx.cfg.get('_storageFreeRuntime') is True)
                     ctx.cfg['_mcpActiveToolNames'] = []
                     logger.info('[Task %s] MCP delegate exposure: 0 of %d '
                                 'schemas on wire; authority catalog retained '
@@ -616,6 +578,7 @@ def _build_mcp_live(
                         task_id=getattr(ctx, 'task_id', ''),
                         conv_id=getattr(ctx, 'conv_id', ''),
                         owner_user_id=getattr(ctx, 'owner_user_id', 0),
+                        storage_free=ctx.cfg.get('_storageFreeRuntime') is True,
                     )
                     ctx.cfg['_mcpSelectionScopeId'] = selection_scope_id
                     configured_used = list(
@@ -682,16 +645,22 @@ def _observe_evolution_source_input(task, wire_body):
 
 
 def _build_evolution_artifact(ctx: ToolContext) -> list[dict]:
+    if not ctx.cfg.get('evolution'):
+        return []
     from lib.evolution.artifact_evidence import build
     return build(ctx)
 
 
 def _build_evolution_review(ctx: ToolContext) -> list[dict]:
+    if not ctx.cfg.get('evolution'):
+        return []
     from lib.evolution.review_delivery import build
     return build(ctx)
 
 
 def _build_evolution_source(ctx: ToolContext) -> list[dict]:
+    if not ctx.cfg.get('evolution'):
+        return []
     from lib.evolution.source_tools import build
     return build(ctx)
 
@@ -768,9 +737,13 @@ def _build_custom(ctx: ToolContext) -> list[dict]:
     return list(schemas)
 
 
-def _register_builtins() -> None:
+def build_builtin_specs() -> list[ToolSpec]:
     """Register the built-in tool specs in canonical (cache-stable) order."""
+
+    from lib.tools.rich_response import build_spec as build_rich_spec
+    from lib.tools.tool_effect_inspection import TOOL_EFFECT_INSPECTION
     from lib.tools.tool_result_artifacts import TOOL_RESULT_ARTIFACT_CONTRACTS
+    from lib.tools.working_facts import WORKING_FACT_CONTRACTS
     from lib.tools.gateway import GATEWAY_TOOL_NAMES
 
     builtins = [
@@ -807,6 +780,7 @@ def _register_builtins() -> None:
                  category='project', description='Zoom/rotate/crop image viewer',
                  gate='常开（无需项目）'),
         ToolSpec('project', _build_project_or_code_exec, phase='base',
+                 compatibility_tools=frozenset({'apply_diff', 'apply_diffs', 'insert_content', 'insert_contents', 'check_background_command', 'kill_background_command'}),
                  provides=frozenset({
                      'grep_search', 'find_files',
                      'write_file', 'edit_file', 'apply_diff', 'apply_diffs',
@@ -988,87 +962,6 @@ def _register_builtins() -> None:
                  gate='连接桌面 agent（设置 → 设备）',
                  exposure_gate=lambda ctx: ctx.desktop_enabled,
                  pin_on_exposure=True),
-        ToolSpec('image_gen', _build_image_gen, phase='base',
-                 provides=frozenset({'generate_image'}),
-                 discovery_policy='searchable',
-                 search_hints={
-                     'generate_image': (
-                         'create edit image picture cover poster illustration '
-                         '生成图片 编辑图片 封面图 海报 插画 配图'),
-                 },
-                 category='image', description='Image generation and editing',
-                 gate='设置 → 显示 → 图像生成开关',
-                 exposure_gate=lambda ctx: ctx.image_gen_enabled,
-                 pin_on_exposure=True),
-        ToolSpec('motion_video', _build_motion_video, phase='base',
-                 provides=frozenset({
-                     'motion_video_env_check', 'motion_video_storyboard_check',
-                     'motion_video_check', 'motion_video_render',
-                     'motion_video_probe', 'motion_video_concat',
-                     'motion_video_narrate', 'motion_video_mux',
-                 }),
-                 write_tools=frozenset({
-                     'motion_video_render', 'motion_video_concat',
-                     'motion_video_narrate', 'motion_video_mux',
-                 }),
-                 idempotent_tools=frozenset({
-                     'motion_video_env_check', 'motion_video_storyboard_check',
-                     'motion_video_check', 'motion_video_probe',
-                 }),
-                 # These inspect mutable project files or host capabilities.
-                 cacheable_tools=frozenset(),
-                 unchanged_receipt_tools=frozenset({
-                     'motion_video_env_check', 'motion_video_storyboard_check',
-                     'motion_video_check', 'motion_video_probe',
-                 }),
-                 discovery_policy='searchable',
-                 category='video',
-                 description='Motion video (MG animation) generation',
-                 gate='挂载项目后可用'),
-        ToolSpec('produce', _build_produce, phase='base',
-                 provides=frozenset({'produce_video', 'produce_report',
-                                     'produce_research', 'produce_slides'}),
-                 discovery_policy='searchable',
-                 search_hints={
-                     'produce_video': (
-                         'make finished video film clip short video '
-                         '制作视频 生成视频 做个视频 科普视频 短视频 宣传片'),
-                     'produce_report': 'write complete report 生成报告',
-                     'produce_research': 'deep research study 深度研究',
-                     'produce_slides': (
-                         'deck presentation powerpoint ppt pptx slides keynote '
-                         '演示文稿 幻灯片 课件 路演 做PPT'),
-                 },
-                 category='video',
-                 description=(
-                     'High-level topic → finished video / editable slides / '
-                     'report / research'),
-                 gate='搜索开启后可用',
-                 exposure_gate=lambda ctx: (
-                     ctx.search_mode in ('single', 'multi')
-                     or ctx.search_enabled)),
-        ToolSpec('produce_edits', _build_produce_edits, phase='base',
-                 provides=frozenset({'edit_slides', 'edit_video',
-                                     'patch_slides', 'restyle_slides',
-                                     'revert_slides', 'revert_video'}),
-                 discovery_policy='searchable',
-                 search_hints={
-                     'edit_slides': 'revise presentation deck 编辑幻灯片 改PPT',
-                     'edit_video': 'revise video scene 编辑视频 改镜头',
-                     'patch_slides': ('change slide text style color '
-                                      '改标题 改字号 换图片'),
-                     'restyle_slides': ('change deck theme palette fonts '
-                                        '换主题 换配色 换字体'),
-                     'revert_slides': ('undo deck edit restore version '
-                                       '撤销 回滚 恢复上一版'),
-                     'revert_video': ('undo video scene edit restore '
-                                      '回滚视频镜头 恢复上一版'),
-                 },
-                 category='video',
-                 description='Conversational revision of produced artifacts',
-                 # Edits deliberately never gate on Web Search (a deck made
-                 # yesterday stays editable with search off) — always on.
-                 gate='常开（默认工具，无开关）'),
         # End of base phase: appending HERE keeps every earlier prefix
         # byte-stable for the prompt cache (the produce note above).
         ToolSpec('page_preview', _build_page_preview, phase='base',
@@ -1123,6 +1016,16 @@ def _register_builtins() -> None:
                  category='conversation',
                  description='Isolated project integration execution controls',
                  gate='项目模式'),
+        ToolSpec('coordinator', _build_coordinator, phase='base',
+                 category='coordination',
+                 description='Independent worker conversations and authorized dispatch',
+                 gate='项目中绑定的 Coordinator 对话',
+                 provides=frozenset({'create_conversation', 'dispatch_project_assignment',
+                                    'get_project_assignment', 'report_to_user', 'delegate_project_work', 'await_project_workers', 'review_project_work', 'get_project_workers', 'cancel_project_work', 'finish_project_request'}),
+                 write_tools=frozenset({'create_conversation', 'dispatch_project_assignment', 'report_to_user', 'delegate_project_work', 'review_project_work', 'cancel_project_work', 'finish_project_request'}),
+                 idempotent_tools=frozenset({'get_project_assignment', 'report_to_user', 'delegate_project_work', 'await_project_workers', 'review_project_work', 'get_project_workers', 'cancel_project_work', 'finish_project_request'}),
+                 timeout_ms_by_name={'await_project_workers': 1_805_000},
+                 cacheable_tools=frozenset()),
         ToolSpec('human_guidance', _build_human_guidance, phase='base',
                  provides=frozenset({'ask_human'}),
                  category='human', description='Ask the human for guidance',
@@ -1139,8 +1042,7 @@ def _register_builtins() -> None:
                  discovery_policy='searchable',
                  category='search', description='Search/fetch pipeline settings',
                  gate='输入框 → 搜索模式（联网/multi）',
-                 exposure_gate=lambda ctx: ctx.search_mode in (
-                     'single', 'multi')),
+                 exposure_gate=lambda ctx: ctx.cfg.get('searchSettingsEnabled') is True),
         # Local knowledge is appended at the END of the base phase so existing
         # tool positions remain prompt-cache-stable when it is available.
         ToolSpec('knowledge', _build_knowledge, phase='base',
@@ -1185,105 +1087,19 @@ def _register_builtins() -> None:
         # rendering), and approval-gating it would break the
         # edit→compile→fix loop that is its entire purpose. Results change
         # with source files, so it opts out of same-task result reuse.
-        ToolSpec('paper_build', _build_paper_build, phase='base',
-                 provides=frozenset({'paper_build', 'paper_layout',
-                                     'paper_import_arxiv',
-                                     'paper_propose_edits'}),
-                 # The import downloads into the workspace (a fresh arxiv-<id>/
-                 # directory), so it rides the serial write partition + Manual
-                 # approval like other project mutations.
-                 write_tools=frozenset({'paper_import_arxiv'}),
-                 cacheable_tools=frozenset(),
-                 timeout_ms_by_name={'paper_build': 280_000, 'paper_layout': 30_000,
-                                     'paper_import_arxiv': 180_000,
-                                     'paper_propose_edits': 60_000},
-                 discovery_policy='searchable',
-                 search_hints={
-                     'paper_build': (
-                         'compile latex tex project build pdf paper preview '
-                         'xelatex pdflatex bib citation error diagnostics '
-                         '编译 论文 排版 参考文献 报错 诊断'),
-                     'paper_layout': (
-                         'page count limit budget sections layout fullness '
-                         'compress shorten pages 页数 页面 压缩 限制 版面 章节'),
-                     'paper_import_arxiv': (
-                         'arxiv eprint source import download tex project '
-                         '论文 源码 导入 下载 预印本'),
-                     # paper_propose_edits parks a review proposal only; the
-                     # journaled write happens via the user-driven accept
-                     # route, so it is neither a write tool nor cacheable.
-                     'paper_propose_edits': (
-                         'propose suggest edits review accept reject '
-                         '提案 建议 修改 审阅'),
-                 },
-                 category='project',
-                 description='Compile conversation LaTeX paper + verified diagnostics',
-                 gate='挂载项目（输入框 → 项目）',
-                 exposure_gate=lambda ctx: ctx.project_ready),
         # Track C: PID-anchored citations. Search/audit are read-only network
         # lookups; paper_cite_insert mutates .bib/.tex through the journaled
         # write tools, so it rides the serial write partition + Manual
         # approval like paper_import_arxiv. Results change with the
         # literature indexes and source files, so nothing is cacheable.
-        ToolSpec('paper_citations', _build_paper_citations, phase='base',
-                 provides=frozenset({'paper_cite_search', 'paper_cite_insert',
-                                     'paper_citation_audit'}),
-                 write_tools=frozenset({'paper_cite_insert'}),
-                 cacheable_tools=frozenset(),
-                 timeout_ms_by_name={'paper_cite_search': 30_000,
-                                     'paper_cite_insert': 60_000,
-                                     'paper_citation_audit': 90_000},
-                 discovery_policy='searchable',
-                 search_hints={
-                     'paper_cite_search': (
-                         'search literature references citations openalex doi '
-                         'real papers bibliography related work 文献 检索 '
-                         '参考文献 论文 引用'),
-                     'paper_cite_insert': (
-                         'insert cite bibtex bib reference doi crossref '
-                         'bibliography add citation 引用 插入 参考文献 '
-                         '添加 文献'),
-                     'paper_citation_audit': (
-                         'verify citations audit references hallucinated '
-                         'retracted mismatch bib check submission 引用 审计 '
-                         '核验 幻觉 撤稿 参考文献 检查'),
-                 },
-                 category='project',
-                 description='Search, insert and verify real literature citations',
-                 gate='挂载项目（输入框 → 项目）',
-                 exposure_gate=lambda ctx: ctx.project_ready),
         # paper_quality follows paper_build at the END of the base phase.
         # All three tools are read-only: the gate only reads the live source
         # tree and retained build artifacts, the dossier is deterministic
         # text, and the scaffold is a text proposal — no write partition,
         # no approval gate, no same-task result reuse.
-        ToolSpec('paper_quality', _build_paper_quality, phase='base',
-                 provides=frozenset({'paper_check', 'paper_review',
-                                     'paper_scaffold'}),
-                 write_tools=frozenset(),
-                 cacheable_tools=frozenset(),
-                 timeout_ms_by_name={'paper_check': 60_000,
-                                     'paper_review': 60_000,
-                                     'paper_scaffold': 15_000},
-                 discovery_policy='searchable',
-                 search_hints={
-                     'paper_check': (
-                         'submission readiness quality gate lint latex check '
-                         'fonts embedded image dpi references labels '
-                         '投稿 检查 就绪 质量 门禁 字体 引用'),
-                     'paper_review': (
-                         'review critique peer review rubric claims audit '
-                         'revision plan 审稿 评审 意见 修改 建议'),
-                     'paper_scaffold': (
-                         'new paper skeleton scaffold sections starter '
-                         'template 新论文 骨架 模板 章节 提纲'),
-                 },
-                 category='project',
-                 description='Paper submission-readiness gate + review dossier',
-                 gate='挂载项目（输入框 → 项目）',
-                 exposure_gate=lambda ctx: ctx.project_ready),
         # ── capability phase ──
         ToolSpec('memory', _build_memory, phase='capability',
+                 discovery_policy_by_name={name: 'searchable' for name in ('update_memory', 'delete_memory', 'merge_memories')},
                  provides=frozenset({
                      'search_memories', 'create_memory', 'update_memory',
                      'delete_memory', 'merge_memories',
@@ -1339,60 +1155,12 @@ def _register_builtins() -> None:
                  description='Verified skill catalog installation',
                  gate='有任意基础工具；Auto 自动安装已验证包，Manual 真人确认'),
         ToolSpec('todo', _build_todo, phase='capability',
+                 discovery_policy='searchable',
                  provides=frozenset({'todo_write'}),
                  category='task', description='Structured task checklist',
                  gate='常开（有任意基础工具即挂载）'),
-        ToolSpec('local_serve', _build_local_serve, phase='capability',
-                 provides=frozenset({
-                     'local_serve_recommend', 'local_serve_prepare',
-                     'local_serve_deploy', 'local_serve_status',
-                     'local_serve_list', 'local_serve_stop',
-                     'local_serve_remove',
-                 }),
-                 # deploy spawns a background install+server; remove destroys
-                 # the registration — both ALWAYS need a human click (receipt
-                 # enforced again in the handler). stop kills a running server
-                 # but is trivially reversible (deploy starts it again), so it
-                 # is an ordinary write gated only in Manual mode.
-                 write_tools=frozenset({
-                     'local_serve_deploy', 'local_serve_stop',
-                     'local_serve_remove',
-                 }),
-                 confirmation_tools=frozenset({
-                     'local_serve_deploy', 'local_serve_remove',
-                 }),
-                 idempotent_tools=frozenset({
-                     'local_serve_recommend', 'local_serve_prepare',
-                     'local_serve_list',
-                 }),
-                 # status reflects a live server; prepare re-probes hardware.
-                 cacheable_tools=frozenset(),
-                 unchanged_receipt_tools=frozenset({'local_serve_list'}),
-                 programmatic_tools=frozenset({'local_serve_list'}),
-                 discovery_policy='searchable',
-                 search_hints={
-                     'local_serve_recommend': (
-                         'recommend open source local model for hardware gpu '
-                         'vram choose 推荐 本地模型 开源 硬件 显卡 选择'),
-                     'local_serve_prepare': (
-                         'inspect local model path hardware plan deploy '
-                         '本地模型 路径 检查 部署方案'),
-                     'local_serve_deploy': (
-                         'install engine start local model server vllm sglang '
-                         'ollama llamacpp 部署 启动 本地模型 安装'),
-                     'local_serve_status': (
-                         'check deployment progress log 部署进度 状态 日志'),
-                     'local_serve_list': 'list local deployments 本地部署 列表',
-                     'local_serve_stop': (
-                         'stop local model server 停止 本地服务'),
-                     'local_serve_remove': (
-                         'remove unregister local deployment 移除 注销 本地部署'),
-                 },
-                 category='local_serve',
-                 description='Managed local model deployment '
-                             '(vLLM/SGLang/Ollama/llama.cpp)',
-                 gate='常开（有任意基础工具即挂载；TOFU_LOCAL_SERVE=0 摘除）'),
         ToolSpec('scheduler', _build_scheduler, phase='capability',
+                 compatibility_tools=frozenset({'await_task'}),
                  provides=frozenset({
                      'schedule_create', 'schedule_list', 'schedule_manage',
                      'timer_manage', 'await_task',
@@ -1433,9 +1201,20 @@ def _register_builtins() -> None:
                  provides=frozenset({'timer_create'}),
                  direct_wire_tools=frozenset({'timer_create'}),
                  write_tools=frozenset({'timer_create'}),
-                 cacheable_tools=frozenset(), discovery_policy='eager',
+                 cacheable_tools=frozenset(), discovery_policy='searchable',
                  category='scheduler', description='Durable readiness continuation',
                  gate='常开（有基础工具和持久存储即挂载）'),
+        ToolSpec('tool_effect_inspection', _build_tool_effect_inspection, phase='capability',
+                 provides=frozenset({'inspect_tool_effect'}),
+                 idempotent_tools=frozenset({'inspect_tool_effect'}),
+                 cacheable_tools=frozenset(),
+                 programmatic_tools=frozenset({'inspect_tool_effect'}),
+                 contracts=(TOOL_EFFECT_INSPECTION,),
+                 discovery_policy='eager', catalog_active_only=True, script_safe=True,
+                 timeout_ms_by_name={'inspect_tool_effect': 30_000},
+                 category='general', description='Inspect interrupted file publication',
+                 gate='会话持久存储可用',
+                 search_hints={'inspect_tool_effect': 'recover unknown write outcome 核实写入 恢复未知操作'}),
         ToolSpec(
             'tool_result_artifacts', _build_tool_result_artifacts,
             phase='capability',
@@ -1461,7 +1240,19 @@ def _register_builtins() -> None:
             gate='tools.resultEnvelope=v2',
             contracts=TOOL_RESULT_ARTIFACT_CONTRACTS,
         ),
+        ToolSpec('working_facts', _build_working_facts, phase='capability',
+                 provides=frozenset({'read_working_facts', 'record_working_fact'}),
+                 write_tools=frozenset({'record_working_fact'}),
+                 idempotent_tools=frozenset({'read_working_facts'}), cacheable_tools=frozenset(),
+                 programmatic_tools=frozenset({'read_working_facts'}),
+                 contracts=WORKING_FACT_CONTRACTS, discovery_policy='searchable', script_safe=True,
+                 catalog_active_only=True, handler=_handle_working_facts,
+                 category='memory', description='Conversation working facts with versioned sources',
+                 gate='持久会话存储可用'),
         ToolSpec('swarm', _build_swarm, phase='capability',
+                 compatibility_tools=frozenset({'await_agents'}),
+                 contextual_tools=frozenset({'store_artifact', 'read_artifact', 'list_artifacts'}),
+                 discovery_policy_by_name={name: 'searchable' for name in ('send_agent_message', 'get_agent_messages', 'set_approval_delegate')},
                  # provides lists every name this family has a handler for on
                  # the MAIN dispatch registry (@tool_registry.tool_set over
                  # SWARM_TOOL_NAMES), which is wider than what build() puts in
@@ -1508,6 +1299,7 @@ def _register_builtins() -> None:
                  category='swarm', description='Async multi-agent swarm',
                  gate='常开（默认工具，无开关）'),
         ToolSpec('mcp', _build_mcp, phase='capability',
+                 compatibility_tools=frozenset({'search_mcp_tools', 'call_mcp_read_tool', 'call_mcp_write_tool'}),
                  provides=frozenset({
                      'search_mcp_tools', 'call_mcp_read_tool',
                      'call_mcp_write_tool',
@@ -1607,11 +1399,17 @@ def _register_builtins() -> None:
                  exposure_gate=lambda ctx: bool((ctx.cfg.get('evolution') or {}).get('run_id'))
                      and (ctx.cfg.get('evolution') or {}).get('stage') in ('executing', 'reviewing'),
                  handler=_handle_evolution_teach),
+        build_rich_spec(),
         # ── per-request custom tools (always last; handlers are task-local) ──
         ToolSpec('custom', _build_custom, phase='capability',
                  category='custom',
                  description='Per-request custom tools (handlers via task[_tool_env])',
                  gate='API /api/v1/agent/run 请求自带 tools 时出现'),
     ]
-    for spec in builtins:
+    return builtins
+
+
+def _register_builtins() -> None:
+    """Install the canonical built-in declarations once."""
+    for spec in build_builtin_specs():
         register_tool_spec(spec)

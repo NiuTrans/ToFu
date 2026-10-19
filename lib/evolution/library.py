@@ -1,7 +1,7 @@
 """Owner- and run-scoped material shelf. No fetching, crawling or resident cache.
 
 Entry points: list_materials, save_material, remove_material and material tool.
-One CAS record per goal-run, <=64 links; payload schema lives in evolution_run_v1.
+One CAS record per goal-run, complete material references; payload schema lives in evolution_run_v1.
 Metadata is a collected reference, never a verification or quality receipt.
 """
 from __future__ import annotations
@@ -14,8 +14,6 @@ from .contracts import EvolutionContractError, EvolutionStateError, contract_val
 from lib.storage.errors import StorageError
 
 SCHEMA = 'evolution_run_v1.schema.json'
-MAX_MATERIALS = 64
-MAX_LIBRARY_BYTES = 192 * 1024
 
 
 def _validate(value, definition):
@@ -74,11 +72,6 @@ def _mutate(run_id, user_id, change, *, row_change=None):
         result = change(row['materials'])
         if row_change is not None:result=row_change(row)
         _validate(row, 'library')
-        if len(json.dumps(row['materials'], ensure_ascii=False).encode('utf-8')) > MAX_LIBRARY_BYTES:
-            raise EvolutionStateError('shelf storage budget reached; shorten notes or remove a material')
-        from .coordination import MAX_WORKSPACE_BYTES
-        if len(json.dumps(row,ensure_ascii=False).encode('utf-8'))>MAX_WORKSPACE_BYTES:
-            raise EvolutionStateError('goal workspace storage budget reached; history was not deleted')
         try:
             records.put_record(records.NAMESPACE_LIBRARIES,key,row,kind='library',expected_version=version)
             return result
@@ -103,8 +96,6 @@ def save_material(run_id, payload, *, user_id, task_id='', origin=None):
     material_id = 'mat-' + hashlib.sha256(identity.encode()).hexdigest()[:24]
     def change(items):
         old = next((item for item in items if item['material_id']==material_id),None)
-        if old is None and len(items)>=MAX_MATERIALS:
-            raise EvolutionStateError('shelf is full (64 materials); remove a material before adding another')
         now = int(time.time())
         material = dict(payload, title=title, url=url, note=payload.get('note','').strip(),
                         material_id=material_id,run_id=run_id,origin=origin or ('agent' if task_id else 'user'),

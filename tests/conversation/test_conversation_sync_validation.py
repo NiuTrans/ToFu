@@ -256,3 +256,76 @@ def test_tool_result_evidence_preserves_known_durable_versions(version):
             decode("ToolResultEvidence", {**evidence, "resultContractVersion": invalid})
     with pytest.raises(ContractViolation):
         decode("ToolResultEvidence", {**evidence, "unregisteredField": True})
+
+
+def _tagged_branch(tag, *, required=True):
+    return {
+        "type": "object", "additionalProperties": False,
+        "required": ["payload", *(["type"] if required else [])],
+        "properties": {"type": {"const": tag}, "payload": {"type": "string"}},
+    }
+
+
+def test_tagged_union_checks_complete_selected_branch_and_mapping_wrappers():
+    from collections import UserDict
+
+    schemas = {
+        "Text": _tagged_branch("text"),
+        "Tool": _tagged_branch("tool"),
+        "Union": {"oneOf": [
+            {"$ref": "#/components/schemas/Text"},
+            {"$ref": "#/components/schemas/Tool"},
+        ]},
+    }
+    check = compile_success_predicates(schemas)["Union"]
+    for tag in ("text", "tool"):
+        assert check({"type": tag, "payload": "valid"})
+        assert check(UserDict({"type": tag, "payload": "valid"}))
+        assert not check({"type": tag, "payload": 42})
+        assert not check({"type": tag, "payload": "valid", "extra": True})
+    for invalid in ({}, {"payload": "valid"}, {"type": "unknown", "payload": "x"},
+                    {"type": [], "payload": "x"}, None):
+        assert not check(invalid)
+
+
+@pytest.mark.parametrize("branches,value,expected", [
+    ([_tagged_branch("same"), _tagged_branch("same")],
+     {"type": "same", "payload": "x"}, False),
+    ([_tagged_branch("a", required=False), _tagged_branch("b", required=False)],
+     {"payload": "x"}, False),
+    ([_tagged_branch("a", required=False), _tagged_branch("b")],
+     {"payload": "x"}, True),
+    ([_tagged_branch(True), _tagged_branch(1)],
+     {"type": True, "payload": "x"}, True),
+    ([_tagged_branch(True), _tagged_branch(1)],
+     {"type": 1, "payload": "x"}, True),
+    ([_tagged_branch("a"), {"type": "object"}],
+     {"type": "a", "payload": "x"}, False),
+])
+def test_unproven_tags_preserve_exactly_one_semantics(branches, value, expected):
+    check = compile_success_predicates({"Union": {"oneOf": branches}})["Union"]
+    assert check(value) is expected
+
+
+def test_tag_proof_does_not_override_reference_or_union_precedence():
+    ignored_tag = _tagged_branch("ignored")
+    ignored_tag["properties"]["type"] = {
+        "const": "ignored", "oneOf": [{"type": "string"}],
+    }
+    check = compile_success_predicates({"Union": {
+        "oneOf": [ignored_tag, _tagged_branch("text")],
+    }})["Union"]
+    assert not check({"type": "text", "payload": "overlaps"})
+    assert check({"type": "other", "payload": "one match"})
+
+
+def test_tagged_segment_failure_retains_diagnostic_details():
+    invalid = {"type": "tool_use", "blockId": "tool:1", "id": "call-1",
+               "name": "read", "input": {}, "result": {"status": 7},
+               "extra": True}
+    expected = contract_validation._validate(
+        OPENAPI_SCHEMAS["TurnContentSegment"], invalid, "$"
+    )
+    with pytest.raises(ContractViolation) as raised:
+        decode("TurnContentSegment", invalid)
+    assert list(raised.value.violations) == expected

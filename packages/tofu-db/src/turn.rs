@@ -18,6 +18,13 @@ pub(crate) mod sync_head_migration;
 #[path = "conversation_diagnostic.rs"]
 pub(crate) mod diagnostic;
 pub(crate) mod model_context;
+pub(crate) mod event_retirement;
+
+#[path = "turn/snapshot_phase.rs"]
+mod snapshot_phase;
+
+#[path = "turn_effect_interruption.rs"]
+mod effect_interruption;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -49,7 +56,7 @@ use crate::generated_tofudb_ir::{
     MAX_RECOVERY_INDEX_ROWS_PER_OWNER, MAX_SYNC_PRUNE_MATERIALIZED_BYTES,
     MAX_SYNC_PRUNE_ROWS_PER_TRANSACTION, MAX_TIMING_TRACE_CLIENT_OBSERVATIONS,
     MAX_TIMING_TRACE_COUNTER, MAX_TIMING_TRACE_PERSISTED_BYTES, MAX_TIMING_TRACE_ROWS_PER_QUERY,
-    MAX_TIMING_TRACE_TASK_CANDIDATES, MAX_TRANSACTION_IR_LITERAL_BYTES,
+    MAX_TIMING_TRACE_TASK_CANDIDATES, MAX_LEGACY_DOCUMENT_BYTES,
     MAX_TURN_COMPACTION_MATERIALIZED_BYTES, MAX_TURN_COMPACTION_METADATA_ROWS,
     MAX_TURN_COMPACTION_PROJECTION_BYTES, MAX_TURN_COMPACTION_PROJECTION_UPDATES,
     MAX_TURN_COMPACTION_REPARENTED_TURNS, MAX_TURN_PROJECTION_HEAD_PATCHES,
@@ -67,7 +74,12 @@ const ATTEMPT_EVENT_DOCUMENT_IDENTITY: &str = "attempt_events";
 const PROJECTION_HEAD_DOCUMENT_IDENTITY: &str = "turn_projection_heads";
 
 mod text_tail;
+#[cfg(test)]
+pub(crate) mod execution_frame;
 mod sync_attempt_reference;
+
+#[path = "turn/agent_machine_tokens.generated.rs"]
+mod agent_machine_tokens;
 const INDEX_PAGE_ROWS: usize = 1_000;
 const MAX_LIST_ROWS: usize = 10_000;
 const MAX_SCAN_PAGES: usize = 11;
@@ -219,6 +231,7 @@ pub struct CreatePairRequest {
     pub parent_turn_id: Option<String>,
     pub require_lane_idle: bool,
     pub require_parent_is_lane_tail: bool,
+    pub expected_parent_projection_revision: Option<u64>,
     pub require_parent_not_stopped: bool,
     pub reject_if_human_queued: bool,
     pub input_turn_id: String,
@@ -657,30 +670,6 @@ pub(crate) fn conversation_identity_records(
         }
     }
     Ok(records.into_values().collect())
-}
-
-pub(crate) fn retire_conversation_attempt_events(
-    database: &AuthorityDatabase,
-    transaction: &mut AuthorityTransaction,
-    conversation_id: &str,
-) -> io::Result<()> {
-    for record in conversation_identity_records(database, transaction, conversation_id)? {
-        for attempt_id in record.attempt_ids {
-            database.entity_delete(
-                transaction,
-                attempt_event_head_key(transaction, &attempt_id)?,
-            )?;
-            let prefix = attempt_event_prefix(&attempt_id)?;
-            let (start, end) = EntityKey::prefix_range(
-                transaction.tenant_id(),
-                transaction.owner_user_id(),
-                ATTEMPT_EVENT_NAMESPACE,
-                &prefix,
-            )?;
-            database.entity_retire_range(transaction, &start, &end)?;
-        }
-    }
-    Ok(())
 }
 
 fn scan_conversation_identity_namespace(
@@ -1823,6 +1812,24 @@ fn lane_index_key(
     entity_key(transaction, TURN_LANE_INDEX_NAMESPACE, &encoded)
 }
 
+/// Replace a visible lane entry or insert into its existing order. Every
+/// derived transcript page belongs to the old lane contents until this same
+/// transaction invalidates it. Fresh tail appends use their separate owner.
+fn store_changed_lane_turn(
+    database: &AuthorityDatabase,
+    transaction: &mut AuthorityTransaction,
+    conversation_id: &str,
+    lane_id: &str,
+    ordinal: u64,
+    stored: Vec<u8>,
+) -> io::Result<()> {
+    if lane_id == "main" {
+        crate::transcript_archive::invalidate(database, transaction, conversation_id)?;
+    }
+    database.entity_put(transaction,
+        lane_index_key(transaction, conversation_id, lane_id, ordinal)?, stored)
+}
+
 fn lane_compaction_index_key(
     transaction: &AuthorityTransaction,
     conversation_id: &str,
@@ -1865,6 +1872,7 @@ fn lane_compaction_index_value(document: &Map<String, Value>) -> io::Result<Vec<
             .ok_or_else(|| invalid_data("Turn compaction index counter is malformed"))
     };
     let mut header = json!({
+        "actor": text("actor")?,
         "turnId": text("turnId")?,
         "parentTurnId": optional_text("parentTurnId")?,
         "status": text("status")?,
@@ -1872,8 +1880,8 @@ fn lane_compaction_index_value(document: &Map<String, Value>) -> io::Result<Vec<
         "projectionRevision": unsigned("projectionRevision")?,
         "updatedAt": unsigned("updatedAt")?,
     });
-    // Legacy indexes remain byte-identical without a display offset. New
-    // context readers safely use projectionRevision when this field is absent.
+    // Actor belongs to this existing compact head, not a separately maintained
+    // count. Context readers use projectionRevision without a display offset.
     if document.contains_key("_modelContextDisplayOffset") {
         header["modelContextRevision"] = json!(model_context_revision(document)?);
     }
@@ -2792,7 +2800,7 @@ fn materialize_projection_head(
             transaction.owner_user_id(),
             &patch_stored,
             PROJECTION_HEAD_DOCUMENT_IDENTITY,
-            crate::generated_tofudb_ir::MAX_TRANSACTION_IR_LITERAL_BYTES,
+            crate::generated_tofudb_ir::MAX_LEGACY_DOCUMENT_BYTES,
         )?;
         crate::fsync_stats::note_projection_patch_bytes(patch_source_bytes);
         let Value::Object(envelope) = patch_value else {
@@ -2874,50 +2882,30 @@ fn encode_response(value: &impl Serialize) -> io::Result<Vec<u8>> {
 /// keys are already present (the common settled-turn case). The resulting
 /// map is identical to the previous remove/rebuild pass.
 fn normalize_settlement_in_place(settlement: &mut Map<String, Value>, status: &str) {
-    let mut outcome = settlement
-        .get("outcome")
-        .and_then(Value::as_str)
-        .unwrap_or(if status == "superseded" {
-            "interrupted"
-        } else {
-            status
-        })
-        .to_owned();
-    if !matches!(
-        outcome.as_str(),
-        "completed" | "interrupted" | "truncated" | "failed"
-    ) {
-        outcome = "failed".to_owned();
+    // Canonical terminal outcomes have static spellings. Preserve the existing
+    // owned strings on the common normalized path instead of replacing them.
+    let outcome = match settlement.get("outcome").and_then(Value::as_str)
+        .unwrap_or(if status == "superseded" { "interrupted" } else { status }) {
+        "completed" => "completed",
+        "interrupted" => "interrupted",
+        "truncated" => "truncated",
+        _ => "failed",
+    };
+    if settlement.get("outcome").and_then(Value::as_str) != Some(outcome) {
+        settlement.insert("outcome".to_owned(), Value::String(outcome.to_owned()));
     }
-    let cause = settlement
-        .get("cause")
-        .and_then(Value::as_str)
-        .unwrap_or("ingested")
-        .to_owned();
-    if let Some(slot) = settlement.get_mut("outcome") {
-        *slot = Value::String(outcome.clone());
-    } else {
-        settlement.insert("outcome".to_owned(), Value::String(outcome.clone()));
+    if settlement.get("cause").and_then(Value::as_str).is_none() {
+        settlement.insert("cause".to_owned(), Value::String("ingested".to_owned()));
     }
-    if let Some(slot) = settlement.get_mut("cause") {
-        *slot = Value::String(cause.clone());
-    } else {
-        settlement.insert("cause".to_owned(), Value::String(cause.clone()));
-    }
-    if !settlement.contains_key("providerFinishReason") {
-        settlement.insert("providerFinishReason".to_owned(), Value::Null);
-    }
-    if !settlement.contains_key("error") {
-        settlement.insert("error".to_owned(), Value::Null);
+    for key in ["providerFinishReason", "error", "streamState"] {
+        if !settlement.contains_key(key) { settlement.insert(key.to_owned(), Value::Null); }
     }
     if !settlement.contains_key("resumeOptions") {
         settlement.insert("resumeOptions".to_owned(), json!([]));
     }
-    if !settlement.contains_key("streamState") {
-        settlement.insert("streamState".to_owned(), Value::Null);
-    }
     if !settlement.contains_key("evidence") {
-        let evidence = match (outcome.as_str(), cause.as_str()) {
+        let cause = settlement.get("cause").and_then(Value::as_str).unwrap_or("ingested");
+        let evidence = match (outcome, cause) {
             (_, "server_restart" | "conversation_deleted") => "system_recovery",
             ("truncated", _) => "provider_limit",
             ("failed", _) => "generation_error",
@@ -3020,10 +3008,15 @@ fn public_turn(
     mut document: Map<String, Value>,
     current_execution_epoch: u64,
 ) -> io::Result<Value> {
+    let _profile = crate::request_profile::Probe::new(crate::request_profile::TURN_PUBLIC);
 
     let context_revision = model_context_revision(&document)?;
     document.remove("_modelContextDisplayOffset");
-    document.insert("modelContextRevision".to_owned(), json!(context_revision));
+    if let Some(slot) = document.get_mut("modelContextRevision") {
+        *slot = Value::from(context_revision);
+    } else {
+        document.insert("modelContextRevision".to_owned(), Value::from(context_revision));
+    }
     let document_epoch = match document.remove("_executionEpoch") {
         None => 0,
         Some(Value::Number(value)) => value
@@ -3052,34 +3045,35 @@ fn public_turn(
             terminalize_restored_projection(projection);
         }
     }
-    let status = document
-        .get("status")
-        .and_then(Value::as_str)
-        .ok_or_else(|| invalid_data("turn status is malformed"))?
-        .to_owned();
-    {
-        let settlement = match document.get_mut("settlement") {
-            Some(Value::Object(settlement)) => settlement,
-            _ => return Err(invalid_data("turn settlement is malformed")),
-        };
-        if !matches!(status.as_str(), "pending" | "running") {
-            normalize_settlement_in_place(settlement, &status);
+    let status = document.get("status").and_then(Value::as_str)
+        .ok_or_else(|| invalid_data("turn status is malformed"))?;
+    let active = matches!(status, "pending" | "running");
+    let terminal = matches!(status, "completed" | "interrupted" | "truncated" | "failed" | "superseded");
+    // Unknown statuses retain their original public spelling, while their
+    // missing/invalid terminal settlement still normalizes to failed.
+    let default_outcome = match status {
+        "completed" => "completed",
+        "interrupted" | "superseded" => "interrupted",
+        "truncated" => "truncated",
+        _ => "failed",
+    };
+    let settlement = match document.get_mut("settlement") {
+        Some(Value::Object(settlement)) => settlement,
+        _ => return Err(invalid_data("turn settlement is malformed")),
+    };
+    if !active { normalize_settlement_in_place(settlement, default_outcome); }
+    let public_status = if terminal {
+        match settlement.get("outcome").and_then(Value::as_str) {
+            Some("completed") => Some("completed"),
+            Some("interrupted") => Some("interrupted"),
+            Some("truncated") => Some("truncated"),
+            Some("failed") => Some("failed"),
+            _ => None,
         }
-        let outcome = settlement
-            .get("outcome")
-            .and_then(Value::as_str)
-            .unwrap_or(&status)
-            .to_owned();
-        if matches!(
-            status.as_str(),
-            "completed" | "interrupted" | "truncated" | "failed" | "superseded"
-        ) && matches!(
-            outcome.as_str(),
-            "completed" | "interrupted" | "truncated" | "failed"
-        ) {
-            if let Some(slot) = document.get_mut("status") {
-                *slot = Value::String(outcome);
-            }
+    } else { None };
+    if let Some(status) = public_status {
+        if document.get("status").and_then(Value::as_str) != Some(status) {
+            document.insert("status".to_owned(), Value::String(status.to_owned()));
         }
     }
     Ok(Value::Object(document))
@@ -4074,7 +4068,7 @@ pub(crate) fn clone_conversation_turns(
                     .map_err(|_| invalid_data("source Turn cannot be encoded"))?
                     .len(),
             )
-            .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
+            .filter(|bytes| *bytes <= MAX_LEGACY_DOCUMENT_BYTES)
             .ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::OutOfMemory,
@@ -4192,7 +4186,7 @@ pub(crate) fn clone_conversation_turns(
                     .map_err(|_| invalid_data("cloned Turn projection cannot be encoded"))?
                     .len(),
             )
-            .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
+            .filter(|bytes| *bytes <= MAX_LEGACY_DOCUMENT_BYTES)
             .ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::OutOfMemory,
@@ -4933,6 +4927,17 @@ pub(crate) fn create_pair(
             return Err(typed_conflict(TurnConflictKind::ParentInvalid));
         }
     }
+    if let Some(expected) = request.expected_parent_projection_revision {
+        let parent_id = request.parent_turn_id.as_ref()
+            .ok_or_else(|| typed_conflict(TurnConflictKind::ParentInvalid))?;
+        let encoded = get(database, transaction, &request.conversation_id, parent_id)?
+            .ok_or_else(|| typed_conflict(TurnConflictKind::ParentInvalid))?;
+        let parent: Value = serde_json::from_slice(&encoded)
+            .map_err(|error| invalid_data(&format!("invalid recovery parent: {error}")))?;
+        if parent.get("projectionRevision").and_then(Value::as_u64) != Some(expected) {
+            return Err(typed_conflict(TurnConflictKind::LaneAdvanced));
+        }
+    }
     if ((request.input_actor == "human" && request.queue_binding.is_none())
         || request.require_lane_idle)
         && lane_has_live_attempt(
@@ -5651,12 +5656,16 @@ pub(crate) fn update_projection(
     transaction: &mut AuthorityTransaction,
     request: &ProjectionUpdateRequest,
 ) -> io::Result<Vec<u8>> {
-    let staged = stage_projection_update(
-        database,
-        transaction,
-        request,
-        ProjectionUpdateMode::TypedSettledEdit,
-    )?;
+    update_projection_mode(database, transaction, request, ProjectionUpdateMode::TypedSettledEdit)
+}
+
+fn update_projection_mode(
+    database: &AuthorityDatabase,
+    transaction: &mut AuthorityTransaction,
+    request: &ProjectionUpdateRequest,
+    mode: ProjectionUpdateMode,
+) -> io::Result<Vec<u8>> {
+    let staged = stage_projection_update(database, transaction, request, mode)?;
     let activity_at_ms = if request.preserve_activity {
         crate::conversation_header::activity_timestamp(
             database,
@@ -5687,6 +5696,145 @@ pub(crate) fn update_projection(
         "turn": staged.turn,
         "conversationRevision": conversation_revision
     }))
+}
+
+/// Scoped command acceptance uses the owned Turn transaction and its sync publication.
+/// A process-local waiter is only a notification consumer of this receipt.
+pub(crate) fn answer_guidance(
+    database: &AuthorityDatabase,
+    transaction: &mut AuthorityTransaction,
+    conversation_id: &str,
+    turn_id: &str,
+    answer_json: &[u8],
+    now_ms: u64,
+) -> io::Result<Vec<u8>> {
+    let answer: Value = serde_json::from_slice(answer_json)
+        .map_err(|_| invalid_input("Invalid human guidance answer"))?;
+    let text = |key: &str, limit: usize| -> io::Result<&str> {
+        answer.get(key).and_then(Value::as_str)
+            .filter(|s| !s.trim().is_empty() && s.chars().count() <= limit)
+            .ok_or_else(|| invalid_input("Invalid human guidance answer"))
+    };
+    let guidance_id = text("guidanceId", crate::generated_tofudb_ir::MAX_HUMAN_GUIDANCE_IDENTITY_CHARACTERS)?;
+    let response = text("response", crate::generated_tofudb_ir::MAX_HUMAN_GUIDANCE_RESPONSE_CHARACTERS)?;
+    let command_id = text("commandId", crate::generated_tofudb_ir::MAX_HUMAN_GUIDANCE_IDENTITY_CHARACTERS)?;
+    let encoded_turn = get(database, transaction, conversation_id, turn_id)?
+        .ok_or_else(|| not_found("Human guidance not ready"))?;
+    let turn: Value = serde_json::from_slice(&encoded_turn)
+        .map_err(|_| invalid_data("Malformed guidance Turn"))?;
+    let mut projection = turn.get("projection").and_then(Value::as_object).cloned()
+        .ok_or_else(|| invalid_data("Malformed guidance projection"))?;
+    let rounds = projection.get_mut("toolRounds").and_then(Value::as_array_mut)
+        .ok_or_else(|| not_found("Human guidance not ready"))?;
+    let matches: Vec<usize> = rounds.iter().enumerate()
+        .filter(|(_, r)| r.get("guidanceId").and_then(Value::as_str) == Some(guidance_id))
+        .map(|(index, _)| index).collect();
+    if matches.len() != 1 { return Err(not_found("Human guidance not ready")); }
+    if rounds.iter().any(|r| r.get("guidanceAnswerCommandId").and_then(Value::as_str) == Some(command_id)
+        && (r.get("guidanceId").and_then(Value::as_str) != Some(guidance_id)
+            || r.get("guidanceResponse").and_then(Value::as_str) != Some(response))) {
+        return Err(conflict("Human guidance command already accepted differently"));
+    }
+    let question = rounds[matches[0]].as_object_mut()
+        .ok_or_else(|| not_found("Human guidance not ready"))?;
+    if question.get("toolName").and_then(Value::as_str) != Some("ask_human") {
+        return Err(not_found("Human guidance not ready"));
+    }
+    if question.get("guidanceAnswerCommandId").is_some() {
+        if question.get("guidanceResponse").and_then(Value::as_str) != Some(response) {
+            return Err(conflict("Human guidance already answered differently"));
+        }
+        let revision = crate::conversation_header::revision(database, transaction, conversation_id)?;
+        return encode_response(&json!({"turn": turn, "conversationRevision": revision,
+                                      "idempotentReplay": true}));
+    }
+    if !matches!(turn.get("status").and_then(Value::as_str), Some("pending" | "running"))
+        || !matches!(question.get("status").and_then(Value::as_str), Some("pending" | "awaiting_human")) {
+        return Err(not_found("Human guidance not ready"));
+    }
+    if question.get("guidanceType").and_then(Value::as_str) == Some("choice") {
+        let options = question.get("guidanceOptions").and_then(Value::as_array)
+            .filter(|v| !v.is_empty()).ok_or_else(|| invalid_input("No valid declared choices"))?;
+        let mut valid_response = false;
+        for option in options {
+            let label = option.as_str().or_else(|| option.get("label").and_then(Value::as_str))
+                .filter(|v| !v.is_empty()).ok_or_else(|| invalid_input("No valid declared choices"))?;
+            valid_response |= response == label || response.starts_with(&format!("{label}\nuser_note: "));
+        }
+        if !valid_response { return Err(invalid_input("Response is not a declared choice")); }
+    }
+    complete_guidance_round(question, response, command_id);
+    let request = ProjectionUpdateRequest {
+        preserve_activity: false, conversation_id: conversation_id.to_owned(), turn_id: turn_id.to_owned(),
+        projection_json: serde_json::to_vec(&projection).map_err(|_| invalid_data("Guidance projection encoding failed"))?,
+        expected_projection_revision: turn["projectionRevision"].as_u64()
+            .ok_or_else(|| invalid_data("Malformed guidance revision"))?,
+        updated_at_ms: now_ms, committed_at_ms: now_ms,
+    };
+    let result = update_projection_mode(database, transaction, &request, ProjectionUpdateMode::FencedLiveSteer)?;
+    if let Some(attempt_id) = turn.get("currentAttemptId").and_then(Value::as_str) {
+        if let Some(loaded) = load_attempt_for_update(database, transaction, attempt_id)? {
+            if attempt_is_live(&loaded.document) {
+                let created_at = loaded.document.get("createdAt").and_then(Value::as_u64)
+                    .ok_or_else(|| invalid_data("Malformed guidance recovery timestamp"))?;
+                let reply: Value = serde_json::from_slice(&result)
+                    .map_err(|_| invalid_data("Malformed guidance reply"))?;
+                let projection_bytes = serde_json::to_vec(&reply["turn"]["projection"])
+                    .map_err(|_| invalid_data("Guidance projection encoding failed"))?.len();
+                database.entity_put(transaction, recovery_index_key(transaction, created_at, attempt_id)?,
+                    recovery_index_value(&loaded.document, projection_bytes)?)?;
+            }
+        }
+    }
+    Ok(result)
+}
+
+fn complete_guidance_round(question: &mut Map<String, Value>, response: &str, command_id: &str) {
+    let guidance_id = question.get("guidanceId").cloned();
+    question.insert("guidanceResponse".to_owned(), json!(response));
+    question.insert("guidanceAnswerCommandId".to_owned(), json!(command_id));
+    question.insert("status".to_owned(), json!("completed"));
+    question.insert("resultSummary".to_owned(), json!(response));
+    question.insert("resultText".to_owned(), json!(format!("Human response: {response}")));
+    question.insert("toolContent".to_owned(), json!(format!("Human response: {response}")));
+    for key in ["results", "toolMeta"] {
+        if let Some(entries) = question.get_mut(key).and_then(Value::as_array_mut) {
+            for entry in entries {
+                if let Some(entry) = entry.as_object_mut() {
+                    if entry.get("guidanceId") == guidance_id.as_ref() {
+                        entry.insert("userResponse".to_owned(), json!(response));
+                        entry.insert("waiting".to_owned(), json!(false));
+                        entry.insert("received".to_owned(), json!(true));
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn preserve_guidance_answers(previous: &Map<String, Value>, candidate: &mut Map<String, Value>) -> bool {
+    let accepted: Vec<&Value> = previous.get("toolRounds").and_then(Value::as_array)
+        .map(|rounds| rounds.iter().filter(|r| r.get("guidanceAnswerCommandId").is_some()).collect())
+        .unwrap_or_default();
+    if accepted.is_empty() { return false; }
+    let rounds = candidate.entry("toolRounds".to_owned()).or_insert_with(|| json!([]));
+    if !rounds.is_array() { *rounds = json!([]); }
+    let Some(rounds) = rounds.as_array_mut() else { return false; };
+    let mut changed = false;
+    for receipt in accepted {
+        if let Some(question) = rounds.iter_mut().find(|r| r.get("guidanceId") == receipt.get("guidanceId")) {
+            let before = question.clone();
+            if let (Some(question), Some(response), Some(command_id)) = (
+                question.as_object_mut(), receipt.get("guidanceResponse").and_then(Value::as_str),
+                receipt.get("guidanceAnswerCommandId").and_then(Value::as_str)) {
+                complete_guidance_round(question, response, command_id);
+            }
+            changed |= before != *question;
+        } else {
+            rounds.push(receipt.clone()); changed = true;
+        }
+    }
+    changed
 }
 
 pub(crate) fn steer_commit(
@@ -5944,6 +6092,7 @@ pub(crate) fn visible_tool_segment(round: &Map<String, Value>, position: usize) 
 }
 
 fn visible_stable_segments(projection: &mut Map<String, Value>, actor: &str) {
+    let preserved_notes = crate::turn_projection_segments::preserved_notes(projection.get("segments"));
     let rounds = projection
         .get("toolRounds")
         .and_then(Value::as_array)
@@ -6029,28 +6178,20 @@ fn visible_stable_segments(projection: &mut Map<String, Value>, actor: &str) {
             "deliverable": true, "terminal": true
         }));
     }
-    projection.insert("segments".to_owned(), Value::Array(segments));
-    if !projection.contains_key("fileChanges") {
-        if let Some(files) = projection
-            .get("modifiedFileList")
-            .and_then(Value::as_array)
-            .filter(|files| !files.is_empty())
-        {
-            let declared = projection
-                .get("modifiedFiles")
-                .and_then(Value::as_u64)
-                .unwrap_or(0);
-            projection.insert(
-                "fileChanges".to_owned(),
-                json!({
-                    "blockId": "file-changes",
-                    "count": declared.max(files.len() as u64),
-                    "state": "applied",
-                    "files": files
-                }),
-            );
-        }
+    // Completion-only imports may already carry accepted context notes.
+    // Preserve them with the same round/attempt ordering as the producer;
+    // dropping them here makes an identical terminal replay add new evidence.
+    for note in preserved_notes {
+        let round = note.get("llmRound").and_then(Value::as_i64);
+        let scope = note.get("attemptId").and_then(Value::as_str).unwrap_or("");
+        let position = segments.iter().position(|segment| segment["terminal"] == true || (
+            round.zip(segment["llmRound"].as_i64()).is_some_and(|(a, b)| b > a)
+                && (scope.is_empty() || segment["attemptId"].as_str() == Some(scope))))
+            .unwrap_or(segments.len());
+        segments.insert(position, Value::Object(note));
     }
+    projection.insert("segments".to_owned(), Value::Array(segments));
+    crate::turn_projection_segments::normalize_file_changes(projection);
 }
 
 /// Mirror of `lib.agent_core.output_settlement.seal_output_projection` for
@@ -6083,6 +6224,51 @@ fn visible_seal_rounds(rounds: &mut Vec<Value>, additions: &[Value]) {
                     for (key, value) in row {
                         existing.entry(key.clone()).or_insert_with(|| value.clone());
                     }
+                }
+            }
+        }
+    }
+}
+
+/// Native consumer of the Python-owned token registry, generated with the
+/// browser consumer. Normalize machine metadata before sealing; never dedupe
+/// prose or change tool/reasoning evidence. No new execution or storage owner.
+fn strip_agent_machine_tokens(text: &str) -> String {
+    static PATTERNS: std::sync::OnceLock<Vec<regex::Regex>> = std::sync::OnceLock::new();
+    static BLANK_LINES: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let patterns = PATTERNS.get_or_init(|| {
+        agent_machine_tokens::MACHINE_TOKEN_PATTERNS.iter().map(|(pattern, ignore_case)| {
+            regex::RegexBuilder::new(pattern).case_insensitive(*ignore_case)
+                .build().expect("generated machine-token pattern must compile")
+        }).collect()
+    });
+    let mut out = text.to_owned();
+    let mut changed = false;
+    for pattern in patterns {
+        if pattern.is_match(&out) {
+            out = pattern.replace_all(&out, "").into_owned();
+            changed = true;
+        }
+    }
+    if !changed { return out; }
+    let blank_lines = BLANK_LINES.get_or_init(|| regex::Regex::new(r"\n{3,}").unwrap());
+    blank_lines.replace_all(&out, "\n\n")
+        .trim_matches(|ch: char| ch.is_whitespace() || matches!(ch, '\u{001c}'..='\u{001f}'))
+        .to_owned()
+}
+
+fn normalize_virtual_user_live_output(projection: &mut Map<String, Value>) {
+    if let Some(content) = projection.get("content").and_then(Value::as_str) {
+        let normalized = strip_agent_machine_tokens(content);
+        projection.insert("content".to_owned(), json!(normalized));
+    }
+    if let Some(segments) = projection.get_mut("segments").and_then(Value::as_array_mut) {
+        for block in segments {
+            if block.get("type").and_then(Value::as_str) != Some("text") { continue; }
+            if let Some(object) = block.as_object_mut() {
+                if let Some(text) = object.get("text").and_then(Value::as_str) {
+                    let normalized = strip_agent_machine_tokens(text);
+                    object.insert("text".to_owned(), json!(normalized));
                 }
             }
         }
@@ -6548,6 +6734,7 @@ fn visible_shape(
         "toolRounds",
         "segments",
         "usage",
+        "usageComplete",
         "apiRounds",
         "cost",
         "lastRoundUsage",
@@ -6588,6 +6775,8 @@ fn visible_shape(
         "imageGeneration",
         "proposedPlan",
         "planExecution",
+
+        "usageRecovery",
         "activityTimeline",
         "timingTrace",
         "rolledBack",
@@ -6690,6 +6879,9 @@ fn visible_shape(
             .is_some_and(|segments| !segments.is_empty())
         {
             visible_stable_segments(&mut sealed_live, actor);
+        }
+        if actor == "virtual_user" {
+            normalize_virtual_user_live_output(&mut sealed_live);
         }
         projection = visible_seal_projection(&sealed_live, &projection);
         // Repair only tool blocks the seal left uncovered; never rebuild
@@ -6899,11 +7091,7 @@ fn replace_visible_root(
     let stored = database
         .entity_get(transaction, &loaded.key)?
         .ok_or_else(|| invalid_data("visible root Turn disappeared"))?;
-    database.entity_put(
-        transaction,
-        lane_index_key(transaction, &conversation_id, &lane_id, ordinal)?,
-        stored,
-    )?;
+    store_changed_lane_turn(database, transaction, &conversation_id, &lane_id, ordinal, stored)?;
     put_lane_compaction_index(database, transaction, &document)?;
     if lane_id == "main" {
         database.entity_put(
@@ -7207,6 +7395,19 @@ pub(crate) fn visible_sync(
                         committed_at_ms: request.committed_at_ms,
                     },
                 )?;
+                // Root conversion changes the projection before any token is
+                // delivered. Keep the bounded restart sweep's byte witness in
+                // this transaction, just like ordinary turn.event.record.
+                let created_at_ms = attempt.document.get("createdAt")
+                    .and_then(Value::as_u64)
+                    .ok_or_else(|| invalid_data("attempt recovery timestamp is malformed"))?;
+                let projection_bytes = serde_json::to_vec(&projection)
+                    .map_err(|_| invalid_data("visible projection cannot be encoded"))?.len();
+                database.entity_put(
+                    transaction,
+                    recovery_index_key(transaction, created_at_ms, &request.attempt_id)?,
+                    recovery_index_value(&attempt.document, projection_bytes)?,
+                )?;
                 root_after = projection;
                 changed = true;
             }
@@ -7482,7 +7683,7 @@ pub(crate) fn visible_sync(
         if serde_json::to_vec(&payload)
             .map_err(|_| invalid_data("visible sync event cannot be encoded"))?
             .len()
-            > MAX_TRANSACTION_IR_LITERAL_BYTES
+            > MAX_LEGACY_DOCUMENT_BYTES
         {
             return Err(io::Error::new(
                 io::ErrorKind::OutOfMemory,
@@ -7584,7 +7785,7 @@ pub(crate) fn related_announce(
                     .map_err(|_| invalid_data("related Turn cannot be encoded"))?
                     .len(),
             )
-            .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
+            .filter(|bytes| *bytes <= MAX_LEGACY_DOCUMENT_BYTES)
             .ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::OutOfMemory,
@@ -7660,9 +7861,6 @@ fn stage_projection_update(
     request: &ProjectionUpdateRequest,
     mode: ProjectionUpdateMode,
 ) -> io::Result<StagedProjectionUpdate> {
-    // A projection update rewrites visible message content: archive reads
-    // fall back to the exact lane read until appends rebuild it.
-    crate::transcript_archive::invalidate(database, transaction, &request.conversation_id)?;
     let document_key = turn_key(transaction, &request.conversation_id, &request.turn_id)?;
     let stored = database
         .entity_get(transaction, &document_key)?
@@ -7784,11 +7982,7 @@ fn stage_projection_update(
             &turn_key(transaction, &request.conversation_id, &request.turn_id)?,
         )?
         .ok_or_else(|| invalid_data("staged turn document disappeared"))?;
-    database.entity_put(
-        transaction,
-        lane_index_key(transaction, &request.conversation_id, &lane_id, ordinal)?,
-        staged,
-    )?;
+    store_changed_lane_turn(database, transaction, &request.conversation_id, &lane_id, ordinal, staged)?;
     put_lane_compaction_index(database, transaction, &document)?;
     if lane_id == "main" {
         database.entity_put(
@@ -8057,11 +8251,16 @@ fn prune_expired_tombstones(
         &cutoff_ms.to_be_bytes(),
     )?;
     let stale = database.entity_scan(transaction, &start, &end, MAX_TOMBSTONE_PRUNE_ROWS)?;
-    let pruned = stale.len();
+    let mut pruned = 0;
     for (age_key, attempt_id_bytes) in stale {
         let (deleted_at_ms, conversation_id, turn_id) = decode_age_index_identity(&age_key)?;
         if deleted_at_ms >= cutoff_ms {
             return Err(invalid_data("turn tombstone age scan escaped its bound"));
+        }
+        // A restored conversation may still own detached old event bytes.
+        // Keep their identities reserved until its pinned cleanup has finished.
+        if event_retirement::pending(database, transaction, &conversation_id)? {
+            continue;
         }
         let attempt_ids = decode_tombstone_attempt_ids(&attempt_id_bytes)?;
         database.entity_delete(transaction, age_key)?;
@@ -8078,6 +8277,7 @@ fn prune_expired_tombstones(
                 &attempt_id,
             )?;
         }
+        pruned += 1;
     }
     Ok(pruned)
 }
@@ -8377,11 +8577,8 @@ pub(crate) fn compact(
         let staged = database
             .entity_get(transaction, &key)?
             .ok_or_else(|| invalid_data("staged retained Turn disappeared"))?;
-        database.entity_put(
-            transaction,
-            lane_index_key(transaction, &request.conversation_id, "main", row.ordinal)?,
-            staged,
-        )?;
+        store_changed_lane_turn(database, transaction, &request.conversation_id,
+            "main", row.ordinal, staged)?;
         put_lane_compaction_index(database, transaction, &document)?;
         database.entity_delete(
             transaction,
@@ -8491,16 +8688,8 @@ pub(crate) fn compact(
     let staged = database
         .entity_get(transaction, &summary_key)?
         .ok_or_else(|| invalid_data("staged summary Turn disappeared"))?;
-    database.entity_put(
-        transaction,
-        lane_index_key(
-            transaction,
-            &request.conversation_id,
-            "main",
-            summary_ordinal,
-        )?,
-        staged,
-    )?;
+    store_changed_lane_turn(database, transaction, &request.conversation_id,
+        "main", summary_ordinal, staged)?;
     put_lane_compaction_index(
         database,
         transaction,
@@ -9051,17 +9240,28 @@ pub(crate) fn get(
     conversation_id: &str,
     turn_id: &str,
 ) -> io::Result<Option<Vec<u8>>> {
+    get_public_value(database, transaction, conversation_id, turn_id)?
+        .map(|value| encode_response(&value)).transpose()
+}
+
+/// The caller owns this freshly materialized public projection. Byte-oriented
+/// callers still use get; context composition can retain the parsed tree.
+fn get_public_value(
+    database: &AuthorityDatabase,
+    transaction: &mut AuthorityTransaction,
+    conversation_id: &str,
+    turn_id: &str,
+) -> io::Result<Option<Value>> {
     let key = turn_key(transaction, conversation_id, turn_id)?;
     let Some(stored) = database.entity_get(transaction, &key)? else {
         return Ok(None);
     };
     let execution_epoch =
         crate::conversation_header::execution_epoch(database, transaction, conversation_id)?;
-    encode_response(&public_turn(
+    public_turn(
         materialize_turn(database, transaction, &stored)?,
         execution_epoch,
-    )?)
-    .map(Some)
+    ).map(Some)
 }
 
 fn supported_legacy_image_media_type(value: &str) -> Option<String> {
@@ -9176,12 +9376,6 @@ pub(crate) fn image_get(
         "base64": encoded,
     }))
     .map_err(|_| invalid_data("legacy Turn image response cannot be encoded"))?;
-    if encoded.len() > crate::generated_storage_v2::MAX_STREAMED_RESPONSE_PAYLOAD_BYTES {
-        return Err(io::Error::new(
-            io::ErrorKind::OutOfMemory,
-            "legacy Turn image response exceeds the streaming bound",
-        ));
-    }
     Ok(Some(encoded))
 }
 
@@ -10120,6 +10314,18 @@ fn sync_head(
     )
 }
 
+/// Scoped Attempt rows are detached by range retirement. Legacy random-key
+/// rows predate epochs and must stay inaccessible after delete/restore.
+fn attempt_conversation_is_active(
+    database: &AuthorityDatabase,
+    transaction: &mut AuthorityTransaction,
+    conversation_id: &str,
+    legacy: bool,
+) -> io::Result<bool> {
+    Ok(crate::conversation_header::sync_header(database, transaction, conversation_id)?.is_some()
+        && (!legacy || crate::conversation_header::execution_epoch(database, transaction, conversation_id)? == 0))
+}
+
 fn load_attempt_for_update(
     database: &AuthorityDatabase,
     transaction: &mut AuthorityTransaction,
@@ -10181,7 +10387,8 @@ fn load_attempt_for_update(
             "attempt locator conversation identity differs",
         ));
     }
-    if crate::conversation_header::sync_header(database, transaction, &conversation_id)?.is_none() {
+    if !attempt_conversation_is_active(database, transaction, &conversation_id,
+        located_conversation_id.is_none())? {
         return Ok(None);
     }
     Ok(Some(LoadedAttemptForUpdate {
@@ -10443,11 +10650,7 @@ fn update_attempt_turn_lifecycle(
     let staged = database
         .entity_get(transaction, &loaded.key)?
         .ok_or_else(|| invalid_data("staged turn document disappeared"))?;
-    database.entity_put(
-        transaction,
-        lane_index_key(transaction, conversation_id, &lane_id, ordinal)?,
-        staged,
-    )?;
+    store_changed_lane_turn(database, transaction, conversation_id, &lane_id, ordinal, staged)?;
     put_lane_compaction_index(database, transaction, &document)?;
     database.entity_delete(
         transaction,
@@ -10703,7 +10906,7 @@ pub(crate) fn attempt_dispatchable_list(
         if response_bytes
             .checked_add(projected_bytes)
             .and_then(|bytes| bytes.checked_add(usize::from(!response.is_empty())))
-            .is_none_or(|bytes| bytes > MAX_TRANSACTION_IR_LITERAL_BYTES)
+            .is_none_or(|bytes| bytes > MAX_LEGACY_DOCUMENT_BYTES)
         {
             return Err(io::Error::new(
                 io::ErrorKind::OutOfMemory,
@@ -11038,11 +11241,7 @@ fn stage_attempt_turn_transition(
     let staged = database
         .entity_get(transaction, &key)?
         .ok_or_else(|| invalid_data("staged turn document disappeared"))?;
-    database.entity_put(
-        transaction,
-        lane_index_key(transaction, conversation_id, &lane_id, ordinal)?,
-        staged,
-    )?;
+    store_changed_lane_turn(database, transaction, conversation_id, &lane_id, ordinal, staged)?;
     put_lane_compaction_index(database, transaction, &document)?;
     if lane_id == "main" {
         database.entity_put(
@@ -11153,8 +11352,7 @@ pub(crate) fn attempt_get_with_config(
         ));
     }
     if located_conversation_id.is_none()
-        && crate::conversation_header::sync_header(database, transaction, conversation_id)?
-            .is_none()
+        && !attempt_conversation_is_active(database, transaction, conversation_id, true)?
     {
         return Ok(None);
     }
@@ -12539,6 +12737,15 @@ pub(crate) fn attempt_create(
     if next_actor.is_empty() || next_kind.is_empty() {
         return Err(invalid_data("turn actor or kind is malformed"));
     }
+    if request.operation == "checkpoint_resume" {
+        // The accepted anchor clears the unfinished prose tail, while its
+        // completed tool receipts remain visible. Materialize those blocks
+        // at this producer boundary before publishing a pending attempt;
+        // readers must keep rejecting malformed committed projections.
+        projection = crate::turn_projection_segments::stabilize_for_patch(
+            &projection, next_actor, "running",
+        )?;
+    }
     let mut accepted_config = request.config.as_object().cloned()
         .ok_or_else(|| invalid_input("attempt config must be an object"))?;
     accepted_config.insert("_resumeSource".to_owned(), json!({
@@ -12841,8 +13048,7 @@ pub(crate) fn attempt_claim(
         ));
     }
     if located_conversation_id.is_none()
-        && crate::conversation_header::sync_header(database, transaction, conversation_id)?
-            .is_none()
+        && !attempt_conversation_is_active(database, transaction, conversation_id, true)?
     {
         return encode_response(&Value::Bool(false));
     }
@@ -13287,7 +13493,7 @@ fn validate_settleable_turn_size(
     let limit = crate::generated_tofudb_ir::MAX_TURN_SNAPSHOT_BYTES;
     let mut reserve = 0;
     if !terminal {
-        reserve = MAX_TRANSACTION_IR_LITERAL_BYTES + MAX_TIMING_TRACE_PERSISTED_BYTES + 1024;
+        reserve = MAX_LEGACY_DOCUMENT_BYTES + MAX_TIMING_TRACE_PERSISTED_BYTES + 1024;
         // Avoid rescanning the tool history on normal small streaming revisions.
         // A restart anchor can duplicate part of that history but not more than
         // the projection plus its bounded envelope. Inspect it near the ceiling.
@@ -13324,19 +13530,17 @@ fn event_projection_evidence_bytes(
     Ok(counted_projection_bytes)
 }
 
-pub(crate) fn event_record(
+/// Resolve the owner/current-attempt fence through the same transaction reads.
+/// Execution frames reuse this boundary only while their attempt stays running.
+fn load_event_record_state(
     database: &AuthorityDatabase,
     transaction: &mut AuthorityTransaction,
     request: &EventRecordRequest,
-) -> io::Result<Vec<u8>> {
-    if request.slim && request.projection_patch.is_some() {
-        return Err(invalid_input("Slim Turn events cannot carry a projection patch"));
-    }
-    let text_append = text_tail::classify(request);
-    let _load_stage = crate::fsync_stats::StageTimer::new(crate::fsync_stats::STAGE_TURN_EVENT_LOAD);
+    materialize_projection: bool,
+) -> io::Result<Option<(LoadedAttemptForUpdate, LoadedTurnForAttempt)>> {
     let Some(loaded_attempt) = load_attempt_for_update(database, transaction, &request.attempt_id)?
     else {
-        return encode_response(&json!({"applied": false}));
+        return Ok(None);
     };
     let attempt_status = loaded_attempt
         .document
@@ -13344,7 +13548,7 @@ pub(crate) fn event_record(
         .and_then(Value::as_str)
         .ok_or_else(|| invalid_data("attempt status is malformed"))?;
     if !matches!(attempt_status, "pending" | "running") {
-        return encode_response(&json!({"applied": false}));
+        return Ok(None);
     }
     // Flow-root fence, mirroring the SQL sidecar's `flow_root_attempt_id`
     // check: the declared root is only a hint — the immutable attempt config
@@ -13359,7 +13563,7 @@ pub(crate) fn event_record(
         .and_then(Value::as_str)
         .unwrap_or("");
     if attempt_flow_root != request.flow_root_attempt_id {
-        return encode_response(&json!({"applied": false}));
+        return Ok(None);
     }
     if !attempt_flow_root.is_empty() {
         let parent_current_and_live =
@@ -13379,12 +13583,12 @@ pub(crate) fn event_record(
                 None => false,
             };
         if !parent_current_and_live {
-            return encode_response(&json!({"applied": false}));
+            return Ok(None);
         }
     }
-    let load_turn = if text_append.is_some() {
-        load_current_turn_header_for_attempt
-    } else { load_current_turn_for_attempt };
+    let load_turn = if materialize_projection {
+        load_current_turn_for_attempt
+    } else { load_current_turn_header_for_attempt };
     let Some(loaded_turn) = load_turn(
         database,
         transaction,
@@ -13393,7 +13597,7 @@ pub(crate) fn event_record(
         &loaded_attempt.conversation_id,
     )?
     else {
-        return encode_response(&json!({"applied": false}));
+        return Ok(None);
     };
     let stored_task_id = loaded_attempt
         .document
@@ -13402,8 +13606,32 @@ pub(crate) fn event_record(
         .ok_or_else(|| invalid_data("attempt task identity is malformed"))?;
     let starts_attempt = !request.terminal && attempt_status == "pending";
     if starts_attempt && (stored_task_id.is_empty() || stored_task_id != request.task_id) {
-        return encode_response(&json!({"applied": false}));
+        return Ok(None);
     }
+
+    Ok(Some((loaded_attempt, loaded_turn)))
+}
+
+pub(crate) fn event_record(
+    database: &AuthorityDatabase,
+    transaction: &mut AuthorityTransaction,
+    request: &EventRecordRequest,
+) -> io::Result<Vec<u8>> {
+    if request.slim && request.projection_patch.is_some() {
+        return Err(invalid_input("Slim Turn events cannot carry a projection patch"));
+    }
+    let text_append = text_tail::classify(request);
+    let _load_stage = crate::fsync_stats::StageTimer::new(crate::fsync_stats::STAGE_TURN_EVENT_LOAD);
+    let Some((loaded_attempt, loaded_turn)) = load_event_record_state(
+        database, transaction, request, text_append.is_none(),
+    )? else {
+        return encode_response(&json!({"applied": false}));
+    };
+    let attempt_status = loaded_attempt.document.get("status").and_then(Value::as_str)
+        .ok_or_else(|| invalid_data("attempt status is malformed"))?;
+    let stored_task_id = loaded_attempt.document.get("taskId").and_then(Value::as_str)
+        .ok_or_else(|| invalid_data("attempt task identity is malformed"))?;
+    let starts_attempt = !request.terminal && attempt_status == "pending";
 
     let mut turn = loaded_turn.document.clone();
     let turn_id = turn
@@ -13534,6 +13762,12 @@ pub(crate) fn event_record(
         })?;
         (next, patch)
     };
+
+    if preserve_guidance_answers(&previous_projection, &mut next_projection) {
+        replay_patch = crate::turn_projection_patch::build_projection_patch(
+            &previous_projection, &next_projection, previous_revision, next_revision,
+        ).map_err(|_| invalid_data("Guidance preservation patch exceeds its bound"))?;
+    }
 
     drop(_projection_stage);
     let _store_stage = crate::fsync_stats::StageTimer::new(crate::fsync_stats::STAGE_TURN_EVENT_STORE);
@@ -13782,16 +14016,7 @@ pub(crate) fn event_record(
     let staged = database
         .entity_get(transaction, &loaded_turn.key)?
         .ok_or_else(|| invalid_data("staged turn document disappeared"))?;
-    database.entity_put(
-        transaction,
-        lane_index_key(
-            transaction,
-            &loaded_attempt.conversation_id,
-            &lane_id,
-            ordinal,
-        )?,
-        staged,
-    )?;
+    store_changed_lane_turn(database, transaction, &loaded_attempt.conversation_id, &lane_id, ordinal, staged)?;
     put_lane_compaction_index(database, transaction, &turn)?;
     database.entity_delete(
         transaction,
@@ -13839,6 +14064,35 @@ pub(crate) fn event_record(
         text_update.as_ref().map(|update| update.projection_bytes),
         projection_bytes,
     )?;
+    publish_event_record(database, transaction, request, EventPublication {
+        conversation_id: &loaded_attempt.conversation_id, turn: &turn,
+        attempt: &attempt, projection: &next_projection, projection_bytes,
+        replay_patch, starts_attempt,
+    })
+}
+
+struct EventPublication<'a> {
+    conversation_id: &'a str,
+    turn: &'a Map<String, Value>,
+    attempt: &'a Map<String, Value>,
+    projection: &'a Map<String, Value>,
+    projection_bytes: usize,
+    replay_patch: Map<String, Value>,
+    starts_attempt: bool,
+}
+
+fn publish_event_record(
+    database: &AuthorityDatabase,
+    transaction: &mut AuthorityTransaction,
+    request: &EventRecordRequest,
+    publication: EventPublication<'_>,
+) -> io::Result<Vec<u8>> {
+    let turn_id = publication.turn.get("turnId").and_then(Value::as_str)
+        .ok_or_else(|| invalid_data("turn identity is malformed"))?;
+    let ordinal = publication.turn.get("ordinal").and_then(Value::as_u64)
+        .ok_or_else(|| invalid_data("turn ordinal is malformed"))?;
+    let next_revision = publication.turn.get("projectionRevision").and_then(Value::as_u64)
+        .ok_or_else(|| invalid_data("turn projection revision is malformed"))?;
     let mut event_payload = request.event_payload.clone();
     event_payload.remove("removedQueueIds");
     if let Some(acknowledgement) = &request.background_command_ack {
@@ -13850,9 +14104,9 @@ pub(crate) fn event_record(
         let removed_ids = crate::queue::acknowledge_background_receipts(
             database,
             transaction,
-            &loaded_attempt.conversation_id,
+            publication.conversation_id,
             acknowledgement,
-            &next_projection,
+            &publication.projection,
         )?;
         event_payload.insert("removedQueueIds".to_owned(), json!(removed_ids));
     }
@@ -13863,18 +14117,18 @@ pub(crate) fn event_record(
                 &request.status,
                 &request.model_continuation,
                 &turn_id,
-                &next_projection,
+                &publication.projection,
             ) {
                 Ok(candidate_projection) => {
-                    let mut settled_turn = turn.clone();
+                    let mut settled_turn = publication.turn.clone();
                     settled_turn.insert(
                         "projection".to_owned(),
-                        Value::Object(next_projection.clone()),
+                        Value::Object(publication.projection.clone()),
                     );
                     crate::model_continuation::settle(
                         database,
                         transaction,
-                        &loaded_attempt.conversation_id,
+                        publication.conversation_id,
                         ordinal,
                         &settled_turn,
                         candidate_projection,
@@ -13894,20 +14148,20 @@ pub(crate) fn event_record(
         );
     }
     event_payload.remove("projection");
-    event_payload.insert("projectionPatch".to_owned(), Value::Object(replay_patch));
+    event_payload.insert("projectionPatch".to_owned(), Value::Object(publication.replay_patch));
     event_payload.insert("status".to_owned(), Value::String(request.status.clone()));
-    event_payload.insert("projectionBytes".to_owned(), Value::from(projection_bytes));
-    if starts_attempt {
+    event_payload.insert("projectionBytes".to_owned(), Value::from(publication.projection_bytes));
+    if publication.starts_attempt {
         event_payload.insert(
             "attempts".to_owned(),
-            Value::Array(vec![public_attempt(&attempt)?]),
+            Value::Array(vec![public_attempt(publication.attempt)?]),
         );
     }
     append_attempt_event(
         database,
         transaction,
         AttemptEventAppend {
-            conversation_id: &loaded_attempt.conversation_id,
+            conversation_id: publication.conversation_id,
             turn_id: &turn_id,
             attempt_id: &request.attempt_id,
             projection_revision: next_revision,
@@ -14278,7 +14532,7 @@ pub(crate) fn recover(
             &loaded_attempt.conversation_id,
         )?
         .ok_or_else(|| invalid_data("attempt recovery Turn is missing"))?;
-        let projection = loaded_turn
+        let mut projection = loaded_turn
             .document
             .get("projection")
             .and_then(Value::as_object)
@@ -14293,6 +14547,9 @@ pub(crate) fn recover(
             ));
         }
 
+        effect_interruption::record_interrupted_file_effects(&mut projection,
+            text("conversationId")?, text("turnId")?, &attempt_id,
+            loaded_attempt.document.get("taskId").and_then(Value::as_str).unwrap_or(""));
         let settlement = restart_settlement(&loaded_attempt.document, &projection);
         let mut attempt = loaded_attempt.document.clone();
         attempt.insert("status".to_owned(), Value::String("interrupted".to_owned()));
@@ -14362,11 +14619,7 @@ pub(crate) fn recover(
         let staged = database
             .entity_get(transaction, &loaded_turn.key)?
             .ok_or_else(|| invalid_data("staged turn document disappeared"))?;
-        database.entity_put(
-            transaction,
-            lane_index_key(transaction, &conversation_id, &lane_id, ordinal)?,
-            staged,
-        )?;
+        store_changed_lane_turn(database, transaction, &conversation_id, &lane_id, ordinal, staged)?;
         put_lane_compaction_index(database, transaction, &turn)?;
         database.entity_delete(
             transaction,
@@ -14583,6 +14836,9 @@ pub(crate) fn events_prune(
         || !(1..=MAX_ATTEMPT_EVENT_PRUNE_ROWS_PER_TRANSACTION).contains(&request.max_rows)
     {
         return Err(invalid_input("invalid attempt event prune bounds"));
+    }
+    if let Some(outcome) = event_retirement::sweep(database, transaction, request)? {
+        return Ok(outcome);
     }
     let physical_attempt_limit = request
         .max_attempts
@@ -14880,7 +15136,7 @@ pub(crate) fn sync_prune(
         };
         let (_, event_json) = sync_attempt_reference::materialize(
             database, transaction, &event_key, &stored,
-            MAX_TRANSACTION_IR_LITERAL_BYTES, false)?;
+            MAX_LEGACY_DOCUMENT_BYTES, false)?;
         if materialized_bytes.saturating_add(event_json.len()) > MAX_SYNC_PRUNE_MATERIALIZED_BYTES {
             break;
         }
@@ -15199,6 +15455,7 @@ fn attempts_for_turns(
     turns: &[Value],
     deadline_elapsed: &mut dyn FnMut() -> bool,
 ) -> io::Result<Vec<Box<RawValue>>> {
+    let _profile = crate::request_profile::Probe::new(crate::request_profile::TURN_SNAPSHOT_ATTEMPTS);
     let mut attempts: Vec<(u64, String, Box<RawValue>)> = Vec::new();
     for turn in turns {
         // Attempts must stay complete for the turns a snapshot/page already
@@ -15265,6 +15522,40 @@ fn conversation_is_linear(
     Ok(lanes.len() == 1 && lanes[0].0.key_bytes() == lane_prefix(conversation_id, "main")?)
 }
 
+/// Conservative serialized UTF-8 estimate without hydrating omitted blob bodies.
+/// Inline documents already came from the index; external heads contribute only
+/// checkpoint lengths, patch byte witnesses and the exact text-tail size.
+fn tail_projection_estimate(
+    database: &AuthorityDatabase,
+    transaction: &mut AuthorityTransaction,
+    stored: &[u8],
+) -> io::Result<u64> {
+    let bytes = crate::versioned_document::stored_document_logical_bytes(stored, DOCUMENT_IDENTITY)?;
+    if crate::versioned_document::stored_blob_reference(stored)?.is_some() {
+        return Ok(bytes);
+    }
+    let (_, value, _) = crate::versioned_document::materialize_stored_document_value_bounded(
+        database, transaction.tenant_id(), transaction.owner_user_id(), stored,
+        DOCUMENT_IDENTITY, crate::generated_tofudb_ir::MAX_TURN_SNAPSHOT_BYTES,
+    )?;
+    let document = value.as_object().ok_or_else(|| invalid_data("turn document is malformed"))?;
+    let Some(head) = projection_head_from_document(document)? else { return Ok(bytes); };
+    if let Some(tail) = &head.text_tail {
+        return Ok(bytes.saturating_add(tail.projection_bytes as u64));
+    }
+    let conversation_id = document.get("conversationId").and_then(Value::as_str)
+        .ok_or_else(|| invalid_data("Turn head conversation is malformed"))?;
+    let turn_id = document.get("turnId").and_then(Value::as_str)
+        .ok_or_else(|| invalid_data("Turn head identity is malformed"))?;
+    let key = projection_checkpoint_key(transaction, conversation_id, turn_id, &head.head_id)?;
+    let checkpoint = database.entity_get(transaction, &key)?
+        .ok_or_else(|| invalid_data("Turn projection checkpoint is missing"))?;
+    let checkpoint_bytes = crate::versioned_document::stored_document_logical_bytes(
+        &checkpoint, PROJECTION_HEAD_DOCUMENT_IDENTITY,
+    )?;
+    Ok(bytes.saturating_add(checkpoint_bytes).saturating_add(head.patch_bytes as u64))
+}
+
 fn lane_tail_before(
     database: &AuthorityDatabase,
     transaction: &mut AuthorityTransaction,
@@ -15272,8 +15563,10 @@ fn lane_tail_before(
     lane_id: &str,
     before_ordinal: u64,
     limit: usize,
+    max_projection_bytes: usize,
     deadline_elapsed: &mut dyn FnMut() -> bool,
 ) -> io::Result<(Vec<Value>, bool)> {
+    let _profile = crate::request_profile::Probe::new(crate::request_profile::TURN_SNAPSHOT_WINDOW);
     let prefix = lane_prefix(conversation_id, lane_id)?;
     let (start, namespace_end) = EntityKey::prefix_range(
         transaction.tenant_id(),
@@ -15291,7 +15584,16 @@ fn lane_tail_before(
     let execution_epoch =
         crate::conversation_header::execution_epoch(database, transaction, conversation_id)?;
     let mut turns = Vec::new();
+    let mut projection_bytes = 0_u64;
     for (_, stored) in rows.into_iter().take(limit) {
+        if max_projection_bytes != 0 {
+            let estimate = tail_projection_estimate(database, transaction, &stored)?;
+            if !turns.is_empty() && projection_bytes.saturating_add(estimate) > max_projection_bytes as u64 {
+                has_more = true;
+                break;
+            }
+            projection_bytes = projection_bytes.saturating_add(estimate);
+        }
         // Every turn materialization is a payload read behind the single
         // authority mutex. On deadline exhaustion keep the newest turns
         // already read and mark the window resumable (`has_more` forces
@@ -15316,32 +15618,69 @@ fn lane_tail_before(
     Ok((turns, has_more))
 }
 
-/// Borrow already validated private snapshot trees while encoding the same
-/// canonical response. Field order matches Value's lexical object ordering.
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct SyncSnapshotResponse<'a> {
+/// Private snapshot trees move into the canonical response exactly once. The
+/// generic IR slot owns the resulting bytes and their validation evidence.
+struct SyncSnapshotResponse {
+    active_attempt_phase: Option<Value>,
     attempts: Value,
-    conversation_id: &'a str,
+    conversation_id: String,
     conversation_revision: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
     has_artifacts: Option<bool>,
-    queue_items: &'a [Value],
-    settings: &'a Map<String, Value>,
+    queue_items: Vec<Value>,
+    settings: Map<String, Value>,
     sync_sequence: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    turn_window: Option<&'a Value>,
-    turns: &'a [Value],
+    turn_window: Option<Value>,
+    turns: Vec<Value>,
 }
 
+impl SyncSnapshotResponse {
+    fn into_encoded(self) -> io::Result<crate::response_json::EncodedResponse> {
+        let _profile = crate::request_profile::Probe::new(crate::request_profile::TURN_SNAPSHOT_ENCODE);
+        let mut response = Map::new();
+        if let Some(phase) = self.active_attempt_phase { response.insert("activeAttemptPhase".into(), phase); }
+        response.insert("attempts".into(), self.attempts);
+        response.insert("conversationId".into(), Value::String(self.conversation_id));
+        response.insert("conversationRevision".into(), Value::from(self.conversation_revision));
+        if let Some(hint) = self.has_artifacts { response.insert("hasArtifacts".into(), Value::Bool(hint)); }
+        response.insert("queueItems".into(), Value::Array(self.queue_items));
+        response.insert("settings".into(), Value::Object(self.settings));
+        response.insert("syncSequence".into(), Value::from(self.sync_sequence));
+        if let Some(window) = self.turn_window { response.insert("turnWindow".into(), window); }
+        response.insert("turns".into(), Value::Array(self.turns));
+        let encoded = crate::response_json::EncodedResponse::from_value(Value::Object(response))
+            .map_err(|_| invalid_data("turn response cannot be encoded"))?;
+        if encoded.len() > crate::generated_tofudb_ir::MAX_TURN_RESPONSE_BYTES {
+            return Err(io::Error::new(io::ErrorKind::OutOfMemory,
+                "turn response exceeds its bounded streamed payload"));
+        }
+        Ok(encoded)
+    }
+}
+
+#[cfg(test)]
 pub(crate) fn sync_snapshot(
     database: &AuthorityDatabase,
     transaction: &mut AuthorityTransaction,
     conversation_id: &str,
     turn_limit: usize,
+    max_projection_bytes: usize,
     include_artifact_hint: bool,
     deadline_elapsed: &mut dyn FnMut() -> bool,
 ) -> io::Result<Option<Vec<u8>>> {
+    sync_snapshot_with_proof(database, transaction, conversation_id, turn_limit,
+        max_projection_bytes, include_artifact_hint, deadline_elapsed)
+        .map(|response| response.map(crate::response_json::EncodedResponse::into_bytes))
+}
+
+pub(crate) fn sync_snapshot_with_proof(
+    database: &AuthorityDatabase,
+    transaction: &mut AuthorityTransaction,
+    conversation_id: &str,
+    turn_limit: usize,
+    max_projection_bytes: usize,
+    include_artifact_hint: bool,
+    deadline_elapsed: &mut dyn FnMut() -> bool,
+) -> io::Result<Option<crate::response_json::EncodedResponse>> {
     let Some((revision, settings)) =
         crate::conversation_header::sync_header(database, transaction, conversation_id)?
     else {
@@ -15358,6 +15697,7 @@ pub(crate) fn sync_snapshot(
             "main",
             u64::MAX,
             turn_limit,
+            max_projection_bytes,
             deadline_elapsed,
         )?;
         turns = window;
@@ -15376,22 +15716,117 @@ pub(crate) fn sync_snapshot(
             deadline_elapsed,
         )?;
     }
-    let attempts = attempts_for_turns(database, transaction, &turns, deadline_elapsed)?;
+    let attempts = json!(attempts_for_turns(database, transaction, &turns, deadline_elapsed)?);
+    let active_attempt_phase = snapshot_phase::active_attempt_phase(
+        database, transaction, conversation_id, &turns, &attempts)?;
     let sync_sequence = sync_head(database, transaction, conversation_id)?;
+    let has_artifacts = if include_artifact_hint {
+        crate::artifact::conversation_empty_hint(database, transaction, conversation_id)?
+    } else { None };
     // Keep the previous RawValue-to-Value conversion for attempts: raw source
     // bytes may be noncanonical, and response serialization must normalize them.
-    let response = SyncSnapshotResponse {
-        attempts: json!(attempts),
-        conversation_id,
-        conversation_revision: revision,
-        has_artifacts: include_artifact_hint.then_some(false),
-        queue_items: &[],
-        settings: &settings,
-        sync_sequence,
-        turn_window: turn_window.as_ref(),
-        turns: &turns,
-    };
-    encode_response(&response).map(Some)
+    // Move the private trees into one canonical Value; json! on the complete
+    // response would clone them. No parsed cache or escaped mutable view exists.
+    SyncSnapshotResponse { active_attempt_phase, attempts,
+        conversation_id: conversation_id.to_owned(), conversation_revision: revision,
+        has_artifacts, queue_items: Vec::new(),
+        settings, sync_sequence, turn_window, turns }.into_encoded().map(Some)
+}
+
+/// Resolve the legacy compact head from its canonical owner-scoped document.
+/// External projection payloads are deliberately never hydrated by navigation.
+fn round_directory_actor<'a>(
+    database: &AuthorityDatabase, transaction: &mut AuthorityTransaction,
+    conversation_id: &str, lane_id: &str, ordinal: u64, metadata: &'a Value,
+) -> io::Result<std::borrow::Cow<'a, str>> {
+    if let Some(actor) = metadata.get("actor") {
+        return actor.as_str().map(std::borrow::Cow::Borrowed)
+            .ok_or_else(|| invalid_data("Turn directory actor malformed"));
+    }
+    let turn_id = metadata.get("turnId").and_then(Value::as_str)
+        .ok_or_else(|| invalid_data("Turn directory identity malformed"))?;
+    let stored = database.entity_get(transaction,
+        &turn_key(transaction, conversation_id, turn_id)?)?
+        .ok_or_else(|| invalid_data("Turn directory legacy target missing"))?;
+    let (_, value, _) = crate::versioned_document::materialize_stored_document_value_bounded(
+        database, transaction.tenant_id(), transaction.owner_user_id(), &stored,
+        DOCUMENT_IDENTITY, crate::generated_tofudb_ir::MAX_TURN_SNAPSHOT_BYTES)?;
+    let document = value.as_object()
+        .ok_or_else(|| invalid_data("Turn directory legacy target malformed"))?;
+    if document.get("conversationId").and_then(Value::as_str) != Some(conversation_id)
+        || document.get("turnId").and_then(Value::as_str) != Some(turn_id)
+        || document.get("laneId").and_then(Value::as_str) != Some(lane_id)
+        || document.get("ordinal").and_then(Value::as_u64) != Some(ordinal) {
+        return Err(invalid_data("Turn directory legacy target identity differs"));
+    }
+    let mut expected: Value = serde_json::from_slice(&lane_compaction_index_value(document)?)
+        .map_err(|_| invalid_data("Turn directory legacy head malformed"))?;
+    let actor = expected.as_object_mut().unwrap().remove("actor").unwrap();
+    if &expected != metadata {
+        return Err(invalid_data("Turn directory legacy head differs from target"));
+    }
+    Ok(std::borrow::Cow::Owned(actor.as_str()
+        .ok_or_else(|| invalid_data("Turn directory legacy actor malformed"))?.to_owned()))
+}
+
+/// Exact owner/lane input ranks, retaining bounded compact metadata only.
+pub(crate) fn sync_round_directory(
+    database: &AuthorityDatabase, transaction: &mut AuthorityTransaction,
+    conversation_id: &str, lane_id: &str, offset: u64, limit: usize,
+    expected: u64, anchor: &str, deadline: &mut dyn FnMut() -> bool,
+) -> io::Result<Option<Vec<u8>>> {
+    if crate::conversation_header::sync_header(database, transaction, conversation_id)?.is_none() { return Ok(None); }
+    let head = sync_head(database, transaction, conversation_id)?;
+    let mut result = json!({"ownerId": transaction.owner_user_id(), "conversationId": conversation_id, "laneId": lane_id,
+        "syncSeq": head, "stale": head != expected, "totalRounds": 0,
+        "offset": offset, "entries": []});
+    if head == expected {
+        let prefix = lane_prefix(conversation_id, lane_id)?;
+        let (mut start, end) = EntityKey::prefix_range(transaction.tenant_id(),
+            transaction.owner_user_id(), TURN_LANE_COMPACTION_INDEX_NAMESPACE, &prefix)?;
+        let mut count = 0_u64;
+        let mut seen = 0_u64;
+        let mut entries = Vec::new();
+        loop {
+            if deadline() { return Err(io::Error::new(io::ErrorKind::TimedOut, "Turn directory deadline elapsed")); }
+            let page = database.entity_scan(transaction, &start, &end, INDEX_PAGE_ROWS)?;
+            if page.is_empty() { break; }
+            start = after_key(&page.last().expect("nonempty directory page").0,
+                transaction, TURN_LANE_COMPACTION_INDEX_NAMESPACE)?;
+            for (key, encoded) in page {
+                seen += 1;
+                let metadata: Value = serde_json::from_slice(&encoded)
+                    .map_err(|_| invalid_data("Turn directory head malformed"))?;
+                let ordinal = u64::from_be_bytes(key.key_bytes().get(prefix.len()..prefix.len() + 8)
+                    .filter(|_| key.key_bytes().len() == prefix.len() + 8)
+                    .ok_or_else(|| invalid_data("Turn directory key malformed"))?
+                    .try_into().unwrap());
+                let actor = round_directory_actor(database, transaction,
+                    conversation_id, lane_id, ordinal, &metadata)?;
+                let turn_id = metadata.get("turnId").and_then(Value::as_str)
+                    .ok_or_else(|| invalid_data("Turn directory identity malformed"))?;
+                if matches!(actor.as_ref(), "human" | "critic" | "virtual_user") {
+                    count += 1;
+                    if count > offset && entries.len() < limit {
+                        entries.push(json!({"turnId": turn_id,
+                            "ordinal": ordinal,
+                            "actor": actor, "roundNumber": count}));
+                    }
+                }
+                if turn_id == anchor && count > 0 { result["activeRound"] = json!(count); }
+            }
+        }
+        let lane_state = read_lane_state(database, transaction, conversation_id, lane_id)?;
+        if seen != lane_count_of(database, transaction, conversation_id, lane_id, lane_state.as_ref())? {
+            return Err(invalid_data("Turn directory compact head count differs"));
+        }
+        result["totalRounds"] = json!(count);
+        if offset.saturating_add(entries.len() as u64) < count {
+            result["nextOffset"] = json!(offset + entries.len() as u64);
+        }
+        result["entries"] = json!(entries);
+    }
+    serde_json::to_vec(&result).map(Some).map_err(|_| invalid_data("Turn directory encoding failed"))
 }
 
 pub(crate) fn sync_page(
@@ -15402,6 +15837,7 @@ pub(crate) fn sync_page(
     before_ordinal: u64,
     limit: usize,
     expected_sync_sequence: u64,
+    max_projection_bytes: usize,
     deadline_elapsed: &mut dyn FnMut() -> bool,
 ) -> io::Result<Option<Vec<u8>>> {
     let Some((revision, _)) =
@@ -15421,6 +15857,7 @@ pub(crate) fn sync_page(
         lane_id,
         before_ordinal,
         limit,
+        max_projection_bytes,
         deadline_elapsed,
     )?;
     let next_before_ordinal = turns
@@ -15506,7 +15943,7 @@ pub(crate) fn sync_changes(
             }
             let (_, value) = sync_attempt_reference::materialize(
                 database, transaction, &key, &stored,
-                MAX_TRANSACTION_IR_LITERAL_BYTES, true)?;
+                MAX_LEGACY_DOCUMENT_BYTES, true)?;
             // Same resumable-prefix contract as the deadline path above: an
             // event that would push the page past its byte budget TRUNCATES
             // the page instead of failing it. A hard error here is not a
@@ -15520,7 +15957,7 @@ pub(crate) fn sync_changes(
             // make progress, and a silent empty page would read as caught-up.
             let Some(next_bytes) = response_bytes
                 .checked_add(value.len() + usize::from(!events.is_empty()))
-                .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
+                .filter(|bytes| *bytes <= MAX_LEGACY_DOCUMENT_BYTES)
             else {
                 if events.is_empty() {
                     return Err(io::Error::new(
@@ -15653,3 +16090,8 @@ mod lane_state_tests {
 #[cfg(test)]
 #[path = "turn_visible_settlement_tests.rs"]
 mod visible_settlement_tests;
+
+#[cfg(test)]
+mod byte_window_tests {
+    include!("turn_byte_window_tests.rs");
+}

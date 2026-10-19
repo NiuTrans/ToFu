@@ -7,6 +7,7 @@ Each handler receives an explicit :class:`BrowserToolRuntime` authority.
 import json
 
 from lib.log import get_logger
+from lib.tools.result_envelope import typed_tool_error
 
 logger = get_logger(__name__)
 
@@ -27,7 +28,14 @@ def _result_url_allowed(result, runtime) -> bool:
 def _handle_list_tabs(fn_args, runtime):
     result, error = runtime.send('list_tabs', timeout=15)
     if error:
-        return f'Error listing tabs: {error}'
+        return typed_tool_error(
+            'browser_list_tabs_failed', retryable=True,
+            message=f'Error listing tabs: {error}',
+            next_action=(
+                'Report the failed browser read. Check the selected extension '
+                'connection and bridge diagnostics, then retry after recovery. '
+                'Do not infer that there are no tabs from this failed read.'),
+        ).to_envelope_text()
     if isinstance(result, list):
         # A read denial applies even to tab enumeration: titles/URLs from a
         # denied domain are page data and must not leak through this side path.

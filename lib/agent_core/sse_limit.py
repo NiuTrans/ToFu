@@ -1,8 +1,10 @@
-"""Track owned SSE connection lifetimes without connection admission quotas.
+"""Track owned SSE connection lifetimes with a probe-derived admission cap.
 
 Routes supply an authenticated principal and release their opaque token on
-close. No shared capacity store or lease heartbeat participates in admission;
-reconnect ownership and generation fencing belong to ConversationWakeBroker.
+close. The default per-principal cap derives from the launch-time resource
+probe (``TOFU_MAX_SSE_PER_PRINCIPAL``); ``cap=0`` preserves the explicit
+unbounded escape hatch. Reconnect ownership and generation fencing belong to
+ConversationWakeBroker.
 """
 from __future__ import annotations
 import threading
@@ -10,9 +12,13 @@ import uuid
 
 
 class SSELimiter:
-    """Connection accounting; the historical cap input cannot refuse streams."""
+    """Per-principal connection accounting with a bounded admission cap."""
     def __init__(self, cap: int | None = None):
-        self.cap = 0
+        if cap is None:
+            from runtime_guards import resolve_resource_budget
+            cap = resolve_resource_budget(
+                'TOFU_MAX_SSE_PER_PRINCIPAL', minimum=1, maximum=128)
+        self.cap = max(0, int(cap))
         self._lock = threading.Lock()
         self._held: dict[str, str] = {}
         self._active_by_principal: dict[str, int] = {}
@@ -21,11 +27,13 @@ class SSELimiter:
     def refresh_interval_seconds(self) -> float:
         return 60.0  # compatibility with existing route keepalive scheduling
 
-    def try_acquire(self, principal: str) -> str:
+    def try_acquire(self, principal: str) -> str | None:
         if not isinstance(principal, str) or not principal:
             raise ValueError('SSE principal must be explicit')
         token = uuid.uuid4().hex
         with self._lock:
+            if self.cap > 0 and self._active_by_principal.get(principal, 0) >= self.cap:
+                return None
             self._held[token] = principal
             self._active_by_principal[principal] = self._active_by_principal.get(principal, 0) + 1
         return token
@@ -49,7 +57,7 @@ class SSELimiter:
             return self._active_by_principal.get(principal, 0)
 
     def stats(self) -> dict:
-        return {'cap': 0}
+        return {'cap': self.cap}
 
 
 limiter = SSELimiter()

@@ -5,6 +5,8 @@ import math
 import time
 
 from lib.log import get_logger
+
+from lib.llm.diagnostic_timing import timed_stage
 from lib.secret_envelope import secret_hint
 from lib.llm_dispatch._api_budget import (
     _remember_route_missing_error,
@@ -31,7 +33,8 @@ def _readjust_thinking_params(body: dict, new_model: str, thinking_format: str,
 def _adapt_stream_body_for_slot(slot, body_or_messages, is_body, *,
                                 tools, max_tokens, temperature,
                                 thinking_enabled, preset, effort,
-                                thinking_depth=None, model_budget_admit=None):
+                                thinking_depth=None, model_budget_admit=None,
+                                tool_choice=None, generation_options=None):
     """Build/adapt the request body for a specific dispatched slot.
 
     Pure CPU (no I/O) — shared by the sync ``dispatch_stream`` loop and the
@@ -55,6 +58,10 @@ def _adapt_stream_body_for_slot(slot, body_or_messages, is_body, *,
     context_window = slot_context_window(slot)
     if is_body:
         body = dict(body_or_messages)
+        if generation_options:
+            body.update(copy.deepcopy(generation_options))
+        if tool_choice is not None:
+            body['tool_choice'] = copy.deepcopy(tool_choice)
         body.pop('_route_context_window', None)
         body.pop('_route_context_model', None)
         # A prebuilt envelope may bypass build_body entirely. Capture explicit
@@ -162,6 +169,7 @@ def _adapt_stream_body_for_slot(slot, body_or_messages, is_body, *,
         )
         if model_budget_admit is not None:
             body['_model_budget_admit'] = model_budget_admit
+        body['_admission_logical_model'] = getattr(slot, 'logical_model', '') or slot.model
         return body
     body = build_body(
         slot.model, body_or_messages,
@@ -169,11 +177,14 @@ def _adapt_stream_body_for_slot(slot, body_or_messages, is_body, *,
         thinking_enabled=thinking_enabled, preset=preset, effort=effort,
         thinking_depth=thinking_depth,
         tools=tools, stream=True, context_window=context_window,
+        extra=generation_options,
         thinking_format=slot.thinking_format or '',
         inference_profile=getattr(slot, 'inference_profile', None),
         provider_id=(getattr(slot, 'routing_provider_id', '')
                      or slot.provider_id or ''),
     )
+    if tool_choice is not None:
+        body['tool_choice'] = copy.deepcopy(tool_choice)
     from lib.model_info import _clamp_route_max_tokens, _route_output_limit_key
     route_limit_key = _route_output_limit_key(
         provider_id=str(getattr(slot, 'routing_provider_id', '')
@@ -200,6 +211,7 @@ def _adapt_stream_body_for_slot(slot, body_or_messages, is_body, *,
     )
     if model_budget_admit is not None:
         body['_model_budget_admit'] = model_budget_admit
+    body['_admission_logical_model'] = getattr(slot, 'logical_model', '') or slot.model
     return body
 
 
@@ -439,13 +451,14 @@ class _StreamRetryState:
     def capacity_wait_cycles(self):
         return self._429_count + self._cooldown_cycles
 
-    def wait_status(self):
+    def wait_status(self, cooldown_cause: str = ''):
         elapsed = max(0.0, time.monotonic() - self._started_at)
         return DispatchWaitStatus(
             kind='waiting_slot',
             request_elapsed_s=elapsed,
             transport_idle_s=elapsed,
             semantic_idle_s=elapsed,
+            cooldown_cause=cooldown_cause,
         )
 
     def gateway_outage_exceeded(self, budget_s):
@@ -685,6 +698,7 @@ def _first_output_callbacks(
     return ttft_value, _thinking, _content, _tool_call
 
 
+@timed_stage('dispatcher_wait')
 def _sleep_and_record_queue_wait(state, seconds, *, abort_check=None):
     """Sleep abortably for sync backpressure and account for the whole wait."""
     if seconds <= 0:

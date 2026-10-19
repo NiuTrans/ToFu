@@ -7,8 +7,8 @@ import sqlite3
 import pytest
 
 from lib.storage import StorageEventBatcher
-from lib.storage_metric_policy import storage_metric_sample_capacity
-from lib.storage_sidecar.adapters.sqlite import _FairWriter
+from lib.storage.storage_metric_policy import storage_metric_sample_capacity
+from lib.storage_authority_sql.adapters.sqlite import _FairWriter
 
 
 pytestmark = pytest.mark.unit

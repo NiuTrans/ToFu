@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from lib.runtime_layout import INSTALL_STATE
+from lib.runtime.runtime_layout import INSTALL_STATE
 
 
 pytestmark = pytest.mark.unit

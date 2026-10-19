@@ -447,3 +447,16 @@ def test_interrupted_baseline_initialization_releases_waiter(monkeypatch):
             first.result(timeout=5)
         assert second.result(timeout=5) == 0
     assert not state._cache_invocations and not state._cache_states
+
+
+def test_child_compaction_namespace_uses_same_invocation_guard_without_durable_reads(monkeypatch):
+    from lib.tasks_pkg.cache_tracking._prefix import get_cache_prefix_count
+    child=task('alias-child',_invocationPolicy=InvocationPolicy.child('root'),_parentTaskId='root',_transientRuntime=True)
+    monkeypatch.setattr(persist,'read_persisted_boundary',lambda *_a,**_k:pytest.fail('child alias read durable cache'))
+    with state.cache_tracking_scope(child):
+        original=state._current_invocation(child['convId'],1)
+        assert original is not None
+        assert state._current_invocation('invocation:1:alias-child',1) is original
+        assert state._current_invocation('invocation:1:other-child',1) is None
+        assert state._current_invocation('invocation:2:alias-child',2) is None
+        assert get_cache_prefix_count('invocation:1:alias-child',user_id=1)==0

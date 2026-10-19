@@ -786,8 +786,8 @@ body.artifact-panel-open {
    Scoped to NON-light, NON-tofu so the hand-built light & tofu themes
    are untouched. Goal: replace flat solid fills + hairline borders with
    subtle layering (gradient panels, edge highlights, a real separating
-   shadow, an accent bar on the active conversation, and a premium
-   New-Chat button). Pure visual; no layout/JS impact.
+   shadow and an accent bar on the active conversation).
+   Primary chat controls use the shared shell owner.
    ═══════════════════════════════════════════════════════════════════ */
 :root{--sb-edge:rgba(255,255,255,0.04);--tb-glass:rgba(17,17,21,0.72)}
 
@@ -801,19 +801,6 @@ html:not([data-theme="light"]):not([data-theme="tofu"]) .sidebar-header{
   border-bottom:1px solid #1f1f27;
   box-shadow:0 1px 0 var(--sb-edge);
 }
-
-/* ── New Chat: accent gradient + soft glow + hover lift (most-clicked control) ── */
-html:not([data-theme="light"]):not([data-theme="tofu"]) .new-chat-btn{
-  background:linear-gradient(135deg,#7c66d4 0%,#6e56cf 100%);
-  box-shadow:0 1px 2px rgba(0,0,0,0.4),0 4px 14px rgba(110,86,207,0.28),inset 0 1px 0 rgba(255,255,255,0.14);
-  transition:transform .15s cubic-bezier(.34,1.56,.64,1),box-shadow .15s ease,background .15s ease;
-}
-html:not([data-theme="light"]):not([data-theme="tofu"]) .new-chat-btn:hover{
-  background:linear-gradient(135deg,#866fe0 0%,#7866d8 100%);
-  box-shadow:0 2px 4px rgba(0,0,0,0.45),0 6px 20px rgba(110,86,207,0.40),inset 0 1px 0 rgba(255,255,255,0.18);
-  transform:translateY(-1px);
-}
-html:not([data-theme="light"]):not([data-theme="tofu"]) .new-chat-btn:active{transform:translateY(0)}
 
 /* ── Header action buttons: a touch more contrast on hover with a hairline edge ── */
 html:not([data-theme="light"]):not([data-theme="tofu"]) .action-btn:hover{

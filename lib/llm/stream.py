@@ -42,7 +42,7 @@ from lib.llm.stream_result import (
     ProviderStreamState,
     ensure_provider_stream_result,
 )
-from lib.llm_errors import (
+from lib.llm.llm_errors import (
     AbortedError,
     ContentFilterError,
     EndpointUnreachableError,
@@ -54,9 +54,12 @@ from lib.llm_errors import (
     RateLimitError,
     RequestTransportError,
     RetryableAPIError,
+    SubscriptionConnectionError,
     _RETRYABLE,
 )
 from lib.log import get_logger
+
+from lib.llm.diagnostic_timing import timed_call, timed_call_with_fields, timing_stage
 from lib.proxy import (
     describe_route,
     proxies_for,
@@ -197,7 +200,7 @@ def stream_chat(body, *, on_thinking=None, on_content=None,
                 # from this attempt is being abandoned.
                 _fire_attempt_restart('transport retry: %s' % e.__class__.__name__)
             wait = prepare_retryable_wait(attempt, e, abort_check, log_prefix)
-            abortable_sleep(wait, abort_check)
+            timed_call('transport_backoff', abortable_sleep, wait, abort_check)
     raise last_err
 
 
@@ -205,9 +208,34 @@ def _stream_chat_once(body, **kwargs):
     """Settle every physical provider attempt through its required budget port."""
     from lib.llm.request import ModelRequestBudgetScope
     with ModelRequestBudgetScope(body) as scope:
-        result = ensure_provider_stream_result(_stream_chat_once_impl(scope.body, **kwargs))
-        scope.usage = result.usage
-        return result
+        with timing_stage('provider_stream', model=body.get('model'),
+                protocol=kwargs.get('api_protocol', 'openai'),
+                measurement='stream_attempt_start_to_content_and_completion') as phase:
+            if phase is None:
+                result = ensure_provider_stream_result(_stream_chat_once_impl(scope.body, **kwargs))
+            else:
+                first_content = None
+                original_content = kwargs.get('on_content')
+
+                def observed_content(delta):
+                    nonlocal first_content
+                    if first_content is None and isinstance(delta, str) and delta:
+                        first_content = phase.owner.clock()
+                        phase.observe(first_content_ms=round(max(0.0,
+                            (first_content-phase.started)*1000), 3))
+                    if original_content is not None:
+                        return original_content(delta)
+
+                try:
+                    result = ensure_provider_stream_result(_stream_chat_once_impl(
+                        scope.body, **{**kwargs, 'on_content': observed_content}))
+                finally:
+                    if first_content is not None:
+                        phase.annotate(after_first_content_ms=round(max(0.0,
+                            (phase.owner.clock()-first_content)*1000), 3))
+            scope.usage = result.usage
+            scope.verified_complete = result.is_verified_complete
+            return result
 
 
 def _stream_chat_once_impl(body, *, on_thinking=None, on_content=None,
@@ -221,7 +249,7 @@ def _stream_chat_once_impl(body, *, on_thinking=None, on_content=None,
     from lib.llm._transport import transport_owner_scope
     _owner_scope = transport_owner_scope(owner_user_id)
     try:
-        plan = prepare_request(
+        plan = timed_call('request_build', prepare_request,
             body, attempt=attempt, log_prefix=log_prefix,
             api_key=api_key, base_url=base_url, extra_headers=extra_headers,
             api_protocol=api_protocol, oauth=oauth,
@@ -313,6 +341,7 @@ def _stream_chat_once_impl(body, *, on_thinking=None, on_content=None,
     # closed and leaked the fd once per retry against a down endpoint.
     from lib.llm.request import dispatch_model_request
     resp = None
+    raw_chunks = None
     # ── Idle watchdog ──
     # Three jobs: beat while the upstream is silent (HUD + the reaper's
     # liveness clocks), poll ``abort_check`` so a Stop pressed during a
@@ -334,7 +363,6 @@ def _stream_chat_once_impl(body, *, on_thinking=None, on_content=None,
         on_abort=lambda: _tp.interrupt_response_read(_resp_holder.get('resp')),
         idle_timeout=_tp.stream_idle_timeout_seconds(),
         on_idle_timeout=lambda: _tp.interrupt_response_read(_resp_holder.get('resp')))
-    _watchdog.start()
     try:
         _conn_t0 = time.monotonic()
         try:
@@ -350,6 +378,7 @@ def _stream_chat_once_impl(body, *, on_thinking=None, on_content=None,
                 # resolves to direct.
                 _eg = None
             if adapter and _eg is not None:
+                _watchdog.start()
                 # ── Subscription-adapter branch (E4): the provider IS a
                 # CLIProxyAPI sidecar on the user's desktop agent; its
                 # base_url is loopback-ON-THE-AGENT, which the server can
@@ -366,7 +395,9 @@ def _stream_chat_once_impl(body, *, on_thinking=None, on_content=None,
                     'decisionReason': 'subscription_adapter',
                 })
                 try:
-                    resp = dispatch_model_request(plan, _ad.relay_stream,
+                    resp = timed_call_with_fields('stream_headers_wait',
+                        {'trace_id': plan.trace_id, 'transport': 'adapter'},
+                        dispatch_model_request, plan, _ad.relay_stream,
                         adapter.get('agent_id', ''),
                         int(adapter.get('port') or 0),
                         _relay_path, headers=plan.hdrs,
@@ -389,10 +420,16 @@ def _stream_chat_once_impl(body, *, on_thinking=None, on_content=None,
                     _egress_route = 'direct'
                 else:
                     try:
-                        _egress_route = _eg.route_request(
-                            plan.url, user_id=_owner_scope)
+                        from lib.llm.egress_recovery import resolve_egress_route
+                        _egress_route = timed_call('egress_route', resolve_egress_route,
+                            _eg, plan.url, user_id=_owner_scope,
+                            abort_check=abort_check, on_wait=on_stream_wait)
                     except _eg.EgressUnavailable as e:
                         raise EndpointUnreachableError(str(e), base_url=plan.url) from e
+                # Route admission precedes socket silence. Waiting locally
+                # must not exhaust the upstream idle clock or emit its HUD.
+                _progress.mark_transport_activity()
+                _watchdog.start()
                 if _egress_route != 'direct':
                     _set_network_route({
                         'routeId': 'desktop:egress',
@@ -400,7 +437,9 @@ def _stream_chat_once_impl(body, *, on_thinking=None, on_content=None,
                         'decisionReason': 'desktop_egress',
                     })
                     try:
-                        resp = dispatch_model_request(plan, _eg.open_stream,
+                        resp = timed_call_with_fields('stream_headers_wait',
+                            {'trace_id': plan.trace_id, 'transport': 'desktop_egress'},
+                            dispatch_model_request, plan, _eg.open_stream,
                             plan.url, method='POST', headers=plan.hdrs,
                             body=transport_payload(plan.body),
                             agent_id=_egress_route, user_id=_owner_scope,
@@ -412,7 +451,7 @@ def _stream_chat_once_impl(body, *, on_thinking=None, on_content=None,
                         report_subscription_route,
                         subscription_route_candidates,
                     )
-                    _server_routes = subscription_route_candidates(plan.url)
+                    _server_routes = timed_call('network_route', subscription_route_candidates, plan.url)
                     if _server_routes:
                         _attempted_routes = set()
                         for _server_route in _server_routes:
@@ -426,8 +465,9 @@ def _stream_chat_once_impl(body, *, on_thinking=None, on_content=None,
                                    if _server_route.pool_id else {}),
                             }, subscription_route=_server_route)
                             try:
-                                resp = _tp.post_headers_abortable(
-                                    lambda: dispatch_model_request(plan, get_sync_session().post,
+                                resp = timed_call_with_fields('stream_headers_wait',
+                                    {'trace_id': plan.trace_id, 'transport': 'requests'},
+                                    _tp.post_headers_abortable, lambda: dispatch_model_request(plan, get_sync_session().post,
                                         plan.url, headers=plan.hdrs,
                                         **transport_body_arguments(plan.body, transport='requests'), stream=True,
                                         timeout=(CONNECT_TIMEOUT, None),
@@ -440,20 +480,20 @@ def _stream_chat_once_impl(body, *, on_thinking=None, on_content=None,
                                 )
                                 if not is_safe_connect_failure(e):
                                     report_subscription_route(
-                                        plan.url, _server_route, False)
-                                    raise EndpointUnreachableError(
-                                        'subscription route disconnected '
-                                        'before response headers; request was '
-                                        'not replayed because delivery is '
-                                        'ambiguous (%s)'
-                                        % type(e).__name__,
-                                        base_url=plan.url) from e
+                                        plan.url, _server_route, False,
+                                        failure_kind='midstream_io')
+                                    _network_reported = True
+                                    raise RequestTransportError(
+                                        failure_stage='connection',
+                                        reason='delivery_ambiguous',
+                                        cause_type=type(e).__name__,
+                                        base_url=plan.url) from None
                                 report_subscription_route(
                                     plan.url, _server_route, False)
                                 logger.info(
-                                    '%s connection failed via %s — trying '
+                                    '%s connection failed via %s (%s) — trying '
                                     'next subscription route',
-                                    log_prefix, _server_route.label)
+                                    log_prefix, _server_route.label, type(e).__name__)
                                 _known_routes = {
                                     item.route_id for item in _server_routes}
                                 for _candidate in subscription_route_candidates(
@@ -469,17 +509,19 @@ def _stream_chat_once_impl(body, *, on_thinking=None, on_content=None,
                                 time.monotonic() - _route_t0) * 1000.0
                             break
                         else:
-                            raise EndpointUnreachableError(
-                                'all server subscription routes failed during '
-                                'connection setup',
-                                base_url=plan.url) from None
+                            # Each route was already reported once. Let the
+                            # existing bounded retry loop re-enter shared
+                            # recovery without a second model cooldown.
+                            _network_reported = True
+                            raise SubscriptionConnectionError(base_url=plan.url) from None
                     else:
-                        _generic_proxies = proxies_for(plan.url)
+                        _generic_proxies = timed_call('network_route', proxies_for, plan.url)
                         _set_network_route(
                             describe_route(
                                 plan.url, proxies=_generic_proxies))
-                        resp = _tp.post_headers_abortable(
-                            lambda: dispatch_model_request(plan, get_sync_session().post,
+                        resp = timed_call_with_fields('stream_headers_wait',
+                            {'trace_id': plan.trace_id, 'transport': 'requests'},
+                            _tp.post_headers_abortable, lambda: dispatch_model_request(plan, get_sync_session().post,
                                 plan.url, headers=plan.hdrs, **transport_body_arguments(plan.body, transport='requests'),
                                 stream=True, timeout=(CONNECT_TIMEOUT, None),
                                 proxies=_generic_proxies,
@@ -598,8 +640,9 @@ def _stream_chat_once_impl(body, *, on_thinking=None, on_content=None,
                 logger.debug('%s debug SSE capture open failed: %s',
                              log_prefix, _dbg_open_e)
                 _dbg_sse_fp = None
+        raw_chunks = _iter_response_bytes(resp)
         try:
-            for raw_chunk in _iter_response_bytes(resp):
+            for raw_chunk in raw_chunks:
                 if _dbg_sse_fp is not None:
                     try:
                         _dbg_sse_fp.write(raw_chunk)
@@ -677,6 +720,15 @@ def _stream_chat_once_impl(body, *, on_thinking=None, on_content=None,
             # finalize as a silent empty/partial "success".
             raise AbortedError(
                 'User aborted while waiting on %s' % plan.url, url=plan.url)
+        if byte_stream.stopped and acc.saw_done and not acc.aborted_by_client:
+            def _record_tail(raw_chunk):
+                _progress.mark_transport_bytes(len(raw_chunk))
+                if plan.raw_archive_capture is not None:
+                    plan.raw_archive_capture.append_response(raw_chunk)
+
+            _tp.drain_completed_sync_stream(
+                raw_chunks, response=resp, watchdog=_watchdog,
+                abort_check=abort_check, on_chunk=_record_tail)
         acc.fire_final_tool_callback()
         stream_result = ensure_provider_stream_result(
             acc.finalize(resp_trace=resp_trace))
@@ -729,6 +781,12 @@ def _stream_chat_once_impl(body, *, on_thinking=None, on_content=None,
         return stream_result.with_usage(usage)
     finally:
         _watchdog.cancel()
+        if raw_chunks is not None:
+            try:
+                raw_chunks.close()
+            except Exception as error:
+                logger.debug('%s stream iterator cleanup failed: %s',
+                             log_prefix, type(error).__name__)
         if plan.raw_archive_capture is not None:
             plan.raw_archive_capture.commit(
                 response_complete=False,

@@ -6,7 +6,7 @@ import unittest
 
 import pytest
 
-from lib.agent_options import TofuOptions
+from lib.agent_loop.agent_options import TofuOptions
 
 pytestmark = pytest.mark.unit
 

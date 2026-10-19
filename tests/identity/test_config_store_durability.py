@@ -277,7 +277,7 @@ def test_optimizer_feature_toggle_uses_the_authenticated_owner(
 def test_search_updates_merge_with_concurrent_server_config_writer(
         tmp_path, monkeypatch):
     import lib
-    from lib import search_settings
+    from lib.search import search_settings
     from lib.json_store import update_json_atomic
 
     path = tmp_path / 'server_config.json'

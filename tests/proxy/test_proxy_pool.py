@@ -506,7 +506,7 @@ class TestGlobalProxyUrl(unittest.TestCase):
         proxy.set_proxy_pool([_entry('g1', scope='global')])
         self.assertEqual(proxy.first_global_proxy_url(),
                          'http://gw.example.com:8080')
-        from lib.search_bridge import _resolve_proxy_url
+        from lib.search.search_bridge import _resolve_proxy_url
         self.assertEqual(_resolve_proxy_url(), 'http://gw.example.com:8080')
 
     def test_cooling_global_entry_skipped(self):
@@ -520,7 +520,7 @@ class TestGlobalProxyUrl(unittest.TestCase):
                          'http://gw2.example.com:8080')
 
     def test_no_global_entry_falls_back_to_legacy(self):
-        from lib.search_bridge import _resolve_proxy_url
+        from lib.search.search_bridge import _resolve_proxy_url
         legacy = {'https_proxy': 'http://legacy.example.com:3128',
                   'http_proxy': ''}
         with mock.patch('lib.proxy.get_proxy_config', return_value=legacy):

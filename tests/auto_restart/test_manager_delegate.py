@@ -30,7 +30,7 @@ def test_unmanaged_worker_delegates_to_manager(monkeypatch):
         },
     )
     monkeypatch.setattr(
-        'lib.server_reexec.begin_server_reexec',
+        'lib.server.server_reexec.begin_server_reexec',
         lambda reason: calls.append(('execv', reason)) or True)
 
     assert upd._perform_server_reexec('update') is True
@@ -74,10 +74,10 @@ def test_manager_refusal_falls_back_to_self_execv(monkeypatch):
     monkeypatch.setattr(
         'serverctl_pkg.application_restart.run_application_restart_control', refuse)
     monkeypatch.setattr(
-        'lib.server_reexec.begin_server_reexec',
+        'lib.server.server_reexec.begin_server_reexec',
         lambda reason: calls.append(('begin', reason)) or True)
     monkeypatch.setattr(
-        'lib.server_reexec.finish_server_reexec_preparation',
+        'lib.server.server_reexec.finish_server_reexec_preparation',
         lambda: calls.append(('finish',)) or True)
     monkeypatch.setattr(upd, 'audit_log', lambda *a, **k: None)
 

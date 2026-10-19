@@ -101,7 +101,7 @@ class SubTaskSpec:
     """
 
     # ── Extended fields ──
-    max_retries: int = 0                         # Auto-retry on failure (0 = no retry)
+    max_retries: int | None = None               # Common invocation allowance; None inherits.
     model_override: str = ''                     # Explicit model, '' = auto from role hint
     model_tier: str = 'standard'                 # 'light', 'standard', or 'heavy'
     # Per-child slice of the spawning task's remaining execution budget
@@ -122,11 +122,23 @@ class SubTaskSpec:
     retained_agent_id: str = ''
     retained_scope: str = ''
     retained_run_id: str = ''
+
+    # Shared assignment authority for ordinary and retained children. The
+    # persisted field name is stable across existing Swarm checkpoints.
+    retained_execution_context: dict | None = None
+    # Live assignment ports are never accepted from durable/public dictionaries.
+    retained_assignment_parent: Any = field(default=None, repr=False, compare=False,
+                                             metadata={'runtime_only': True})
+    retained_assignment_abort_check: Any = field(default=None, repr=False, compare=False,
+                                                  metadata={'runtime_only': True})
+    retained_assignment_usage: Any = field(default=None, repr=False, compare=False,
+                                            metadata={'runtime_only': True})
     required_for_completion: bool = True         # False = optional background exploration
 
     def to_dict(self) -> dict:
-        """Serialize to a plain dict (all fields)."""
-        return {k: getattr(self, k) for k in self.__dataclass_fields__}
+        """Serialize declared inputs, never live assignment authority ports."""
+        return {k: getattr(self, k) for k, f in self.__dataclass_fields__.items()
+                if not f.metadata.get('runtime_only')}
 
     @classmethod
     def from_dict(cls, d: dict) -> SubTaskSpec:
@@ -137,7 +149,8 @@ class SubTaskSpec:
                 'naturally completes')
         if type(d.get('required_for_completion', True)) is not bool:
             raise ValueError('required_for_completion must be boolean')
-        known = {f for f in cls.__dataclass_fields__}
+        known = {k for k, f in cls.__dataclass_fields__.items()
+                 if not f.metadata.get('runtime_only')}
         return cls(**{k: v for k, v in d.items() if k in known})
 
 

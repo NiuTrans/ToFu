@@ -524,6 +524,9 @@ class FlowEventAdapter:
         )
 
     def _push(self, msg: dict):
+        if self._projection == 'autopilot' and self._vu_run_id:
+            msg['orchestration'] = {**(msg.get('orchestration') or {}),
+                                    'goalRunId': self._vu_run_id}
         self.messages.append(msg)
 
         identity = (msg.get('usageAccounting') or {}).get('invocationId')

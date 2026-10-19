@@ -13,7 +13,7 @@ from lib.orchestration.durable_run_field_registry import (
 from lib.orchestration.http_endpoint_contract import (
     orchestration_http_endpoint,
 )
-from lib.task_replay import (
+from lib.task_replay.task_replay import (
     TASK_REPLAY_FORMAT,
     TaskReplayPage,
     task_replay_request_contract,

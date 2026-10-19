@@ -17,7 +17,8 @@ from tests.agent_core.test_native_task_terminal import principal
 pytestmark=pytest.mark.api
 
 @pytest.mark.parametrize('cap',[1000,0])
-def test_installed_model_control_respects_parent_budget_and_charges_once(tmp_path,cap):
+@pytest.mark.parametrize('ack_ms',[2000,None])
+def test_installed_model_control_respects_parent_budget_and_charges_once(tmp_path,cap,ack_ms):
     archive=os.environ.get('TOFU_NATIVE_MODEL_CONTROL_TEST_ARCHIVE')
     if not archive:pytest.skip('explicit verified model-control native archive required')
     from scripts.build_native_runtime import verify
@@ -43,19 +44,39 @@ def test_installed_model_control_respects_parent_budget_and_charges_once(tmp_pat
         messages=[{'role':'user','content':'hello'}],tools={},event_bytes=65536,output_bytes=65536,tool_calls=8,request_bytes=65536,rounds=3,retained_bytes=65536,feedback_bytes=4096,tool_frame_bytes=65536,deadline_ms=3000,
         policy=dict(connections=1,idle_connections=1,keepalive_ms=1000,connect_ms=1000,request_headers_ms=2000,pool_wait_ms=1000,stream_idle_ms=1000,drain_timeout_ms=100,drain_bytes=65536,drain_chunks=16),
         model_control={'ack_ms':2000},model_counter=dict(encoding='cl100k_base',output_field='max_tokens',input_bytes=65536,text_bytes=65536,tool_json_bytes=65536,depth=128,worker_stack_bytes=1048576))
+    config['model_control']['ack_ms']=ack_ms
+    if ack_ms is None:
+        config['deadline_ms']=None
+        config['terminal_persistence']=dict(operation_id='commit',ack_ms=None,attempts=2,frame_bytes=65536)
     async def run(executor):
         policy=NativeModelAccountPolicy(principal=principal(),task=task,executor=executor)
         original=policy.reserve
         async def reserve(request):
+            if ack_ms is None and cap:
+                # Exceed the old production fixture's five-second extra ACK
+                # timeout while keeping the real parent account authoritative.
+                await asyncio.sleep(5.1)
             value=await original(request);grants.append(value);return value
         policy.reserve=reserve
+        persisted=[]
+        class Persistence:
+            async def persist(self,request):
+                persisted.append(request)
+                if request.attempt==1:
+                    await asyncio.sleep(5.1 if cap else .01)
+                    return 'retry'
+                assert request.event_json==persisted[0].event_json
+                assert request.receipt_json==persisted[0].receipt_json
+                return 'accepted'
+        terminal_options={'terminal_policy':Persistence()} if ack_ms is None else {}
         client=NativeProcessClient(binary=binary,sha256=manifest['files']['bin/tofu-native']['sha256'],protocol_version=manifest['build']['stdio_contract'],principal=principal(),budget=Budget(1,16*1024*1024,65536,65536,5))
         try:
             if cap:
-                event=await client.run(config,callbacks={},working_directory=tmp_path,model_policy=policy)
+                event=await client.run(config,callbacks={},working_directory=tmp_path,model_policy=policy,**terminal_options)
                 assert event['status']=='done'
+                if ack_ms is None:assert len(persisted)==2
             else:
-                with pytest.raises(NativeProcessError) as caught:await client.run(config,callbacks={},working_directory=tmp_path,model_policy=policy)
+                with pytest.raises(NativeProcessError) as caught:await client.run(config,callbacks={},working_directory=tmp_path,model_policy=policy,**terminal_options)
                 assert isinstance(caught.value.__cause__,ModelBudgetExceeded)
             assert client.active_runs==0 and account.continuity_snapshot()['pending_model_requests']==0
         finally:await client.close()

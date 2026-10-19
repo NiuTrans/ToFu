@@ -70,6 +70,7 @@ pub enum ResourceName {
     Admission,
     Billing,
     ModelRoute,
+    RepositoryScanner,
     Route,
     ToolEnvironment,
     Upstream,
@@ -80,6 +81,7 @@ impl ResourceName {
             Self::Admission => "admission",
             Self::Billing => "billing",
             Self::ModelRoute => "model_route",
+            Self::RepositoryScanner => "repository_scanner",
             Self::Route => "route",
             Self::ToolEnvironment => "tool_environment",
             Self::Upstream => "upstream",
@@ -242,6 +244,22 @@ pub const RESPONSES_MAX_PHASE_MESSAGES: usize = 64;
 
 pub const RESPONSES_MAX_PHASE_TEXT_BYTES: usize = 262144;
 
+pub const ADDITIVE_USAGE_PROFILE: &str = "tofu.additive-usage/u64-f64-v1";
+
+pub const CHAT_MESSAGE_FIELDS: &[&str] = &["cache_control", "content", "name", "reasoning_content", "reasoning_details", "role", "thinking_signature", "tool_call_id", "tool_calls"];
+
+pub const CHAT_MESSAGE_ORDER: &[&str] = &["role", "content", "reasoning_content", "thinking_signature", "reasoning_details", "tool_calls", "tool_call_id", "name", "extra_content"];
+
+pub const CHAT_TOOL_CALL_ORDER: &[&str] = &["id", "type", "function", "extra_content"];
+
+pub const CHAT_FUNCTION_ORDER: &[&str] = &["name", "arguments"];
+
+pub const CHAT_REASONING_ORDER: &[&str] = &["type", "thinking", "signature"];
+
+pub const CHAT_GHOST_FIELDS: &[&str] = &["tool_calls", "function_call", "reasoning_content", "reasoning_details", "thinking_signature"];
+
+pub const CHAT_TEXT_WHITESPACE: &[u32] = &[9, 10, 11, 12, 13, 28, 29, 30, 31, 32, 133, 160, 5760, 8192, 8193, 8194, 8195, 8196, 8197, 8198, 8199, 8200, 8201, 8202, 8232, 8233, 8239, 8287, 12288];
+
 pub const NATIVE_TEXT_BLOCK_KEYS: &[&str] = &["type", "text"];
 
 pub const NATIVE_IMAGE_BLOCK_KEYS: &[&str] = &["type", "image_url"];
@@ -328,5 +346,7 @@ pub const NATIVE_MODEL_TOOL_PROJECTION_JSON: &str = r#"{"type":"function","catal
 pub fn native_model_tools(tools: &serde_json::Map<String,serde_json::Value>) -> Vec<serde_json::Value> {
     tools.iter().map(|(name,tool)|serde_json::json!({"type":"function","function":{"name":name,"description":tool["description"].as_str().unwrap_or(""),"parameters":tool["arguments_schema"]}})).collect()
 }
+
+pub const MODEL_CACHE_AFFINITY_KEY_BYTES: usize = 128;
 
 pub const MODEL_DISPATCH_FORBIDDEN_HEADERS: &[&str] = &["host", "content-length", "transfer-encoding", "connection", "proxy-authorization"];

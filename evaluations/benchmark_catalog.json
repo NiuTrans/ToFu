@@ -11,7 +11,8 @@
       "source_url": "https://github.com/harbor-framework/harbor/tree/main/adapters/swebench",
       "source_commit": "ea2fee78517f2e591bad69fcf1e6731f9c23ec99",
       "task_digest_lock": "swebench/swebench_verified_task_digests.json",
-      "environment_defaults": {}
+      "environment_defaults": {},
+      "required_capabilities": []
     },
     {
       "key": "terminal-bench-2.1",
@@ -24,8 +25,59 @@
       "source_commit": "7131e4375048a0e408a8fb404b5f499d726b695b",
       "task_digest_lock": "swebench/terminal_bench_21_task_digests.json",
       "environment_defaults": {
-        "daytona": {"snapshot_template_name": "{name}-tb-2-1"}
-      }
+        "daytona": {
+          "snapshot_template_name": "{name}-tb-2-1"
+        }
+      },
+      "required_capabilities": []
+    },
+    {
+      "key": "deepswe-v1.1",
+      "dataset": "datacurve/deep-swe@sha256:aaa82ceb8404dccc17689c9383f93dbcbc8f029a7601d2e3856a416f2cb89269",
+      "task_count": 113,
+      "dataset_source_revision": "sha256:aaa82ceb8404dccc17689c9383f93dbcbc8f029a7601d2e3856a416f2cb89269",
+      "default_attempts": 5,
+      "official_min_attempts": null,
+      "source_url": "https://github.com/datacurve-ai/deep-swe",
+      "source_commit": "0b9fabbb63b9104d678fe965e1632f2dd9eaa2ea",
+      "task_digest_lock": "swebench/deepswe_v1_1_task_digests.json",
+      "environment_defaults": {},
+      "required_capabilities": [
+        "separate-verifier",
+        "verifier-collect"
+      ]
+    },
+    {
+      "key": "terminal-bench-3.0",
+      "dataset": "terminal-bench/terminal-bench@sha256:a32a61879ea94eb9dc16fa1fbeb398759f0c07ca633d9d1f6aec760207036da3",
+      "task_count": 74,
+      "dataset_source_revision": "sha256:a32a61879ea94eb9dc16fa1fbeb398759f0c07ca633d9d1f6aec760207036da3",
+      "default_attempts": 5,
+      "official_min_attempts": null,
+      "source_url": "https://github.com/harbor-framework/terminal-bench",
+      "source_commit": "2b0442c3c583b710ca8da14c8e601b99f2f1f244",
+      "task_digest_lock": "swebench/terminal_bench_3_0_task_digests.json",
+      "environment_defaults": {},
+      "required_capabilities": [
+        "separate-verifier",
+        "verifier-collect"
+      ]
+    },
+    {
+      "key": "terminal-bench-4.0",
+      "dataset": "terminal-bench/terminal-bench@sha256:39d9f44b40420cde8fdcc087579c0d72a7e14fa3656d603c3f0d22fb35e27732",
+      "task_count": 66,
+      "dataset_source_revision": "sha256:39d9f44b40420cde8fdcc087579c0d72a7e14fa3656d603c3f0d22fb35e27732",
+      "default_attempts": 5,
+      "official_min_attempts": null,
+      "source_url": "https://github.com/harbor-framework/terminal-bench",
+      "source_commit": "452bf305c6daa62fc59061d22133a7cbc7c1572e",
+      "task_digest_lock": "swebench/terminal_bench_4_0_task_digests.json",
+      "environment_defaults": {},
+      "required_capabilities": [
+        "separate-verifier",
+        "verifier-collect"
+      ]
     }
   ]
 }

@@ -76,7 +76,7 @@ class ScientificCommands:
                                   self.binding['user_id'],kind='scientific command')
 
     def _reference_text(self,reference):
-        from lib.tool_result_artifacts import ToolResultArtifactRepository
+        from lib.tool_results.tool_result_artifacts import ToolResultArtifactRepository
         repo=ToolResultArtifactRepository();cursor='0';seen=set();pieces=[];status=None
         while True:
             if cursor in seen:raise EvolutionStateError('scientific command source cursor repeated')

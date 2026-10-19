@@ -147,7 +147,7 @@ def _log_external_kill(rc: int) -> None:
             % (datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'), rc))
     print(line, file=sys.stderr)
     try:
-        from lib.log_retention import (
+        from lib.logging_pkg.log_retention import (
             append_bytes_locked, ensure_private_log_directory,
         )
         log_dir = os.path.join(BASE_DIR, 'logs')

@@ -37,6 +37,7 @@ import subprocess
 import pytest
 
 from tests._runtime_sections import (
+    native_module_path,
     ROOT,
     runtime_section,
     shipped_source_text,
@@ -138,6 +139,8 @@ global._stgModelRouting = global.freshRouting();
 // save_export into the shared lexical scope.
 global._stgRoutingPersistChain = Promise.resolve();
 global._persistModelRoutingNow = () => Promise.resolve(null);
+eval(fs.readFileSync(process.argv[5], 'utf8'));
+global.getManualMatrixProbe = () => global.manualMatrixProbe;
 // provider_render and access_matrix share a lexical scope in the shipped
 // bundle; eval them CONCATENATED so cross-file function/const bindings
 // resolve exactly as they do in production (per-file eval hides them).
@@ -162,7 +165,9 @@ def _run_harness(tmp_path, scenario: str) -> dict:
     harness = tmp_path / "harness.js"
     harness.write_text(HARNESS_PRELUDE % scenario, encoding="utf-8")
     result = subprocess.run(
-        [NODE, str(harness), str(provider), str(matrix), str(ZH_LOCALE)],
+        [NODE, str(harness), str(provider), str(matrix), str(ZH_LOCALE),
+         native_module_path('.native/manual-matrix-probe.js',
+                            ROOT / 'frontend/src/features/settings/manual-matrix-probe.ts')],
         capture_output=True,
         text=True,
         timeout=30,
@@ -602,6 +607,7 @@ def test_probe_lifecycle_never_changes_routing_or_toasts(tmp_path, entry_point):
       recommend_disable: false } }, summary: { ok: 1, disable: 0 },
   };
   const before = JSON.stringify(global._stgModelRouting);
+  global._stgModelRoutingSavedJson = before;
   let pendingTimer;
   global.setTimeout = callback => { pendingTimer = callback; return 1; };
   global.clearTimeout = () => {};

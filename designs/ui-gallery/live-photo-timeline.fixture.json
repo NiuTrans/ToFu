@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "title": "S5M2 Live Photo capture timing",
+  "summary": "Target logical timing only — not a verified camera firmware capability.",
+  "blocks": [{
+    "type": "timeline", "id": "capture-timing", "title": "Before and after the shutter",
+    "axis": {"start": -1.5, "end": 1.5, "unit": "s"},
+    "lanes": [
+      {"id": "video", "label": "Video", "kind": "video", "intervals": [
+        {"start": -1.5, "end": 0, "label": "Ring buffer"},
+        {"start": 0, "end": 1.5, "label": "Continued capture"}
+      ]},
+      {"id": "audio", "label": "Audio", "kind": "audio", "intervals": [
+        {"start": -1.5, "end": 1.5, "label": "Continuous audio"}
+      ]},
+      {"id": "photo", "label": "Photo", "kind": "photo", "intervals": []}
+    ],
+    "markers": [{"time": 0, "label": "Shutter", "laneId": "photo"}]
+  }]
+}

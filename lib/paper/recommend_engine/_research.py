@@ -11,7 +11,7 @@ in-progress year as the future. The final turn returns strict JSON.
 
 import hashlib
 
-from lib.agent_loop import AbortSignal
+from lib.agent_loop.agent_loop import AbortSignal
 from lib.llm_dispatch.api import dispatch_stream
 from lib.log import get_logger
 from lib.llm.json_extract import extract_first_json_object

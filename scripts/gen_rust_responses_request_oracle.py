@@ -46,6 +46,13 @@ def generate():
             output, reverse = openai_body_to_responses(oracle, stream=True, profile='codex')
             output.pop('_conversion_report', None)
             result.append({'name': 'codex_'+name+('_replay' if replay else ''), 'profile': 'codex', 'body': body, 'replay': replay, 'output': output, 'reverse': reverse})
+    from lib.llm.responses_outbound import responses_cache_affinity_key
+    oracle = {'model':'fixture','max_tokens':128,'messages':[{'role':'user','content':'hello'}], '_conv_id':'owned-conversation',
+        '_route_inference_profile': {'responses':{'feature_profile':'codex'},'features':{'responses_prompt_cache':'supported','responses_reasoning_replay':'unsupported'}}}
+    output, reverse = openai_body_to_responses(oracle, stream=True, profile='codex')
+    output.pop('_conversion_report',None)
+    body = {'model':'fixture','max_tokens':128,'messages':oracle['messages'],'prompt_cache_key':responses_cache_affinity_key(oracle)}
+    result.append({'name':'codex_cache_affinity','profile':'codex','body':body,'replay':False,'output':output,'reverse':reverse})
     return json.dumps(result, ensure_ascii=False, indent=2) + '\n'
 
 

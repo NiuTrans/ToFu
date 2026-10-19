@@ -174,7 +174,7 @@ def test_auto_mode_unaffected_by_delegate_branch(monkeypatch):
 
 
 def test_agent_options_accepts_delegate_exposure():
-    from lib.agent_options import TofuOptions
+    from lib.agent_loop.agent_options import TofuOptions
     opts = TofuOptions.from_cfg({'mcpToolExposure': 'delegate'})
     assert opts.mcp_tool_exposure == 'delegate'
     assert TofuOptions.from_cfg({}).mcp_tool_exposure == 'auto'

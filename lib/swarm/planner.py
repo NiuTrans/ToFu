@@ -23,6 +23,10 @@ from lib.swarm.types import SubTaskSpec
 logger = get_logger(__name__)
 
 
+class AgentDependencyCycleError(ValueError):
+    """A dependency graph was rejected before any work was admitted."""
+
+
 def resolve_execution_order(specs: list[SubTaskSpec]) -> list[list[SubTaskSpec]]:
     """Sort specs into waves based on dependency DAG (topological sort).
 
@@ -53,7 +57,7 @@ def resolve_execution_order(specs: list[SubTaskSpec]) -> list[list[SubTaskSpec]]
         if not wave_ids:
             cycle_ids = sorted(remaining)
             logger.error('[Swarm-DAG] Cycle detected! Involved IDs: %s', cycle_ids)
-            raise ValueError(
+            raise AgentDependencyCycleError(
                 f'Cycle detected in dependency graph — cannot schedule. '
                 f'Involved IDs: {cycle_ids}'
             )

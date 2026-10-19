@@ -23,6 +23,12 @@
 .ui-stack--tight{--ui-gap:var(--space-1)}
 .ui-stack--loose{--ui-gap:var(--space-6)}
 
+/* Bounded reading for long exact IDs/digests and plain text. */
+.ui-stack--bounded{min-width:0;overflow-wrap:anywhere}
+.ui-stack--bounded > *{min-width:0;max-width:100%}
+.ui-text-block{max-width:100%;overflow-wrap:anywhere;margin:0}
+pre.ui-text-block{white-space:pre-wrap;word-break:break-word}
+
 .ui-row{
   display:flex;align-items:center;
   gap:var(--ui-gap,var(--space-3));
@@ -111,6 +117,9 @@
 .ui-icon-btn:disabled{opacity:0.5;cursor:default;pointer-events:none}
 .ui-icon-btn--sm{width:var(--control-h-sm);height:var(--control-h-sm);border-radius:var(--radius-xs)}
 .ui-icon-btn--lg{width:var(--control-h-lg);height:var(--control-h-lg)}
+
+/* Author display must not override the platform's hidden attribute. */
+.ui-btn[hidden],.ui-icon-btn[hidden]{display:none}
 
 /* ── Field: label + control + hint/error ───────────────────────────────── */
 .ui-field{display:flex;flex-direction:column;gap:var(--space-2)}
@@ -253,10 +262,58 @@ dialog.ui-dialog[open]{animation:ui-dialog-in var(--motion-base) var(--ease-stan
   padding:0 var(--space-5) var(--space-4);
 }
 
+/* Project workbench variant. Shared chrome stays in the kit rather than
+   feature overrides; native modal/focus/dismissal behavior is unchanged. */
+dialog.ui-dialog--project{
+  --bg-primary:var(--project-panel);
+  --bg-secondary:var(--project-surface);
+  --bg-tertiary:var(--project-band);
+  --text-primary:var(--project-ink);
+  --text-secondary:var(--project-muted);
+
+  --text-tertiary:var(--project-muted);
+  --border:var(--project-line);
+  --accent:var(--project-accent);
+  --accent-hover:var(--project-accent-hover);
+  --text-on-accent:var(--project-on-accent);
+  width:min(var(--project-dialog-measure),calc(100vw - 2 * var(--space-4)));
+  border:var(--project-frame-width) solid var(--text-primary);
+  overflow:hidden;
+}
+dialog.ui-dialog--project[open]{display:flex;flex-direction:column}
+.ui-dialog--project .ui-dialog__header{
+  flex-shrink:0;padding:var(--space-5) var(--space-6);
+  background:var(--bg-tertiary);
+  border-bottom:var(--project-panel-width) solid var(--text-primary);
+}
+.ui-dialog--project .ui-dialog__title{font-size:var(--font-size-2xl);font-weight:var(--weight-bold)}
+
+.ui-dialog--project .ui-dialog__header .ui-icon-btn{
+  flex-shrink:0;border:var(--project-panel-width) solid var(--text-primary);
+  border-radius:var(--radius-pill);background:var(--bg-primary);color:var(--text-primary);
+  font-size:var(--font-size-2xl);
+}
+.ui-dialog--project .ui-dialog__body{
+  display:flex;flex:1;flex-direction:column;min-height:0;overflow:hidden;
+  padding:var(--space-5) var(--space-6);
+}
+.ui-dialog--project .ui-input,.ui-dialog--project .ui-select>select{
+  height:var(--control-h-lg);border-color:var(--text-secondary);
+}
+.ui-dialog--project .ui-btn--primary,.ui-dialog--project .ui-btn--secondary{
+  border:var(--project-panel-width) solid var(--text-primary);
+}
+.ui-dialog--project .ui-btn--primary{background:var(--accent);color:var(--text-on-accent)}
+.ui-dialog--project .ui-btn--primary:hover{background:var(--accent-hover)}
+@media(max-width:600px){
+  .ui-dialog--project .ui-dialog__header{padding:var(--space-4)}
+  .ui-dialog--project .ui-dialog__body{padding:var(--space-4)}
+}
+
 /* ── Drawer: dialog variant docked to the right edge ───────────────────── */
 dialog.ui-drawer{
   margin:0 0 0 auto;
-  width:min(420px,100vw);
+  width:min(420px,100vw);max-width:none;
   height:100dvh;max-height:none;
   border:none;border-left:1px solid var(--border);border-radius:0;
 }
@@ -332,6 +389,7 @@ dialog.ui-drawer:not([open]){display:none}
   border-bottom:1px solid var(--border);
 }
 .ui-tabs__tab{
+  flex:0 0 auto;white-space:nowrap;
   padding:var(--space-2) var(--space-3);
   margin-bottom:calc(-1 * var(--control-edge-inset)); /* overlap the list's bottom border */
   border:none;border-bottom:2px solid transparent;
@@ -349,6 +407,7 @@ dialog.ui-drawer:not([open]){display:none}
   font-weight:var(--weight-semibold);
 }
 .ui-tabs__tab:disabled{color:var(--text-tertiary);cursor:not-allowed}
+.ui-tabs__panel[hidden]{display:none}
 .ui-tabs__panel{padding-top:var(--space-4)}
 .ui-tabs__panel:focus-visible{outline:none;box-shadow:var(--focus-ring)}
 
@@ -556,3 +615,6 @@ dialog.ui-drawer:not([open]){display:none}
   max-width:40ch;
 }
 .ui-empty__action{margin-top:var(--space-3)}
+
+/* Multiline is opt-in through the button factory; keep after base button rules. */
+.ui-btn--wrap{white-space:normal;overflow-wrap:anywhere;min-height:var(--control-h-md);height:auto;padding-block:var(--space-1);line-height:var(--leading-body)}

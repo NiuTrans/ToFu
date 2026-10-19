@@ -1,28 +1,17 @@
 """tests/rate_limit_api/test_rate_limit_shared_buckets.py — Cross-replica API quota buckets.
 
-Proves the R5 fix: per-principal API token buckets are authoritative across
-replicas in distributed mode (via lib.rate_limit_store.RedisTokenBucketStore)
-instead of silently becoming limit × N, while personal mode keeps the
-in-process path byte-equivalent.
-
-Covers:
-  1. Two bucket-store instances sharing one fakeredis server never exceed
-     the global limit under concurrency (both at the store level and
-     end-to-end through lib.rate_limit_api.check_request).
-  2. Refill / consume math is identical to the in-process _Bucket across a
-     scripted timeline (including the negative consume-force path).
-  3. Backend selection: personal default = in-process (None), explicit
-     redis opt-in fails open, distributed mode selects redis fail-closed.
+Shared-store token math and explicit spending decisions remain consistent
+across replicas. Request throughput never enters a shared RPM bucket.
 """
 
 import threading
 
 import pytest
 
-import lib.rate_limit_api as rate_limit_api
-import lib.rate_limit_store as rate_limit_store
+import lib.rate_limit.rate_limit_api as rate_limit_api
+import lib.rate_limit.rate_limit_store as rate_limit_store
 from lib.api_keys import AuthContext
-from lib.rate_limit_api import check_request, record_tokens
+from lib.rate_limit.rate_limit_api import check_request, record_tokens
 
 
 pytestmark = pytest.mark.unit
@@ -87,21 +76,13 @@ def test_two_instances_never_exceed_global_limit(fake_server):
     assert allowed_total == limit
 
 
-def test_check_request_shared_store_global_limit(fake_server, monkeypatch):
-    """End-to-end: two check_request 'replicas' sharing one store admit at
-    most rpm tokens total."""
-    store = _redis_store(fake_server)
-    monkeypatch.setattr(rate_limit_store, 'get_token_bucket_store',
-                        lambda: store)
-    rate_limit_api._state.clear()
-
-    def ctx():
-        return AuthContext(key_id='k_shared', name='t',
-                           scopes=frozenset({'chat'}),
-                           rate_limit_rpm=10, rate_limit_tpd=0)
-
-    allowed = sum(1 for _ in range(50) if check_request(ctx()).allowed)
-    assert allowed == 10
+def test_request_throughput_never_enters_shared_bucket(monkeypatch):
+    def no_store():
+        pytest.fail('request throughput reached the shared spending store')
+    monkeypatch.setattr(rate_limit_store, 'get_token_bucket_store', no_store)
+    context = AuthContext(key_id='k_shared', name='t', scopes=frozenset({'chat'}),
+                          rate_limit_rpm=1, rate_limit_tpd=0)
+    assert all(check_request(context, request_cost=1000).allowed for _ in range(4097))
 
 
 # ── 2. Refill math identical across backends ──
@@ -150,10 +131,10 @@ def test_retry_after_formula_matches():
     assert rate_limit_api._bucket_retry_after(6.0, 6.0, 0.5) == 0.0
 
 
-# ── TPD denial refunds the RPM token (shared path) ──
+# ── Spending denial never creates request-rate state ──
 
 
-def test_tpd_denial_refunds_rpm(fake_server, monkeypatch):
+def test_tpd_denial_does_not_create_request_bucket(fake_server, monkeypatch):
     store = _redis_store(fake_server)
     monkeypatch.setattr(rate_limit_store, 'get_token_bucket_store',
                         lambda: store)
@@ -165,10 +146,8 @@ def test_tpd_denial_refunds_rpm(fake_server, monkeypatch):
     record_tokens(ctx.key_id, 150, rpm_limit=2, tpd_limit=100)
     d = check_request(ctx)
     assert not d.allowed and d.reason == 'tpd'
-    # The refunded RPM token must be back: an rpm-only principal sees it.
-    peek = store.bucket_try_consume('k_refund:rpm', 2.0, 2.0 / 60.0, 0.0,
-                                    9999999999.0)
-    assert peek is not None and peek[1] >= 1.0
+    assert store._client.keys('*rpm*') == []
+
 
 
 # ── 3. Backend selection / failure policy ──

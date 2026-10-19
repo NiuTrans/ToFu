@@ -196,7 +196,7 @@ def _fat_messages():
 def test_window_projection_shrinks_and_preserves_visible_content():
     """The first-paint projection drops heavy state and wire diagnostics."""
     import json
-    from lib.storage_projection import project_message_for_window
+    from lib.storage.storage_projection import project_message_for_window
 
     msgs = _fat_messages()
     before = len(json.dumps(msgs))
@@ -219,7 +219,7 @@ def test_window_projection_shrinks_and_preserves_visible_content():
 
 
 def test_window_projection_is_idempotent_and_copy_on_change():
-    from lib.storage_projection import project_message_for_window
+    from lib.storage.storage_projection import project_message_for_window
 
     original = _fat_messages()[1]
     once = project_message_for_window(original)
@@ -230,7 +230,7 @@ def test_window_projection_is_idempotent_and_copy_on_change():
 
 def test_manager_uses_single_storage_projection_helpers():
     """Manager persistence must reuse the storage projection source of truth."""
-    import lib.storage_projection as projection
+    import lib.storage.storage_projection as projection
     import lib.tasks_pkg.manager._persist as M
 
     assert M.sanitize_usage_for_persist is projection.sanitize_usage_for_persist
@@ -242,8 +242,8 @@ def test_manager_uses_single_storage_projection_helpers():
 def test_storage_projection_import_is_bootstrap_free():
     """Projection reuse must not import the host persistence graph."""
     code = (
-        "import sys; import lib.storage_projection; "
-        "assert 'lib.storage_sidecar' not in sys.modules; "
+        "import sys; import lib.storage.storage_projection; "
+        "assert 'lib.storage_authority_sql' not in sys.modules; "
         "assert 'lib.tasks_pkg' not in sys.modules"
     )
     result = subprocess.run(

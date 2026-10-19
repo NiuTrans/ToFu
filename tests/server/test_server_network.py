@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from lib import server_network
+from lib.server import server_network
 
 
 pytestmark = pytest.mark.unit

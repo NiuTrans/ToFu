@@ -130,16 +130,11 @@ def _walk_jobs():
         'TOFU_TREE_INDEX_WALK_JOBS', minimum=2, maximum=16)
 
 
-def _build_budget_s():
-    return _env_float('TOFU_TREE_INDEX_BUILD_BUDGET_S', 600.0)
-
-
 def _mem_roots():
     return resolve_resource_budget(
         'TOFU_TREE_INDEX_MEM_ROOTS', minimum=1, maximum=8)
 
 
-_DEPTH_CAP = 30          # parity with read_tools._TOOL_MAX_DEPTH
 _DISK_MAGIC = b'TFIX001\n'
 
 
@@ -419,7 +414,7 @@ def background_builder_snapshot():
             'retainedRoots': len(_mem),
             'retainedEntries': sum(len(entry.paths) for entry in _mem.values()),
             'rootCapacity': _mem_roots(),
-            'entryCapacity': _max_entries(),
+            'entryRetentionTarget': _max_entries(),
             'stableRefreshMaxSeconds': _stable_refresh_max_s(),
             'maxScheduledRefreshSeconds': max(
                 (entry.refresh_after_s for entry in _mem.values()),
@@ -496,18 +491,16 @@ def _scan_one_dir(abs_dir, rel_dir, depth, out, contexts):
     return subdirs
 
 
-def _walk_tree(root, deadline, *, scan_executor=None):
+def _walk_tree(root, deadline=None, *, scan_executor=None):
     """Parallel BFS walk of *root*.  Returns ``(rows, complete)``.
 
-    rows: list of ``(rel, size, mtime)``.  ``complete`` is False when the walk
-    was cut short by the entry cap or the time budget (such an index is NOT
-    used for queries — a partial candidate list would silently drop grep
-    hits, which is worse than falling back to the live walk).
+    Complete means every admitted directory was read successfully. The legacy
+    deadline argument is ignored: elapsed time cannot make a valid tree partial.
+    Directory Futures remain windowed; the frontier retains descriptors.
     """
     root_rules = _compile_gitignore(root)
     contexts = (('', root_rules),) if any(root_rules) else ()
     out = []
-    max_entries = _max_entries()
     truncated = False
 
     owns_executor = scan_executor is None
@@ -521,9 +514,6 @@ def _walk_tree(root, deadline, *, scan_executor=None):
             # rest of this directory frontier as descriptors, not Futures or
             # OS threads; accepted project builds still progress independently.
             while frontier and len(pending) < scan_window:
-                if len(out) >= max_entries or time.time() > deadline:
-                    truncated = True
-                    break
                 abs_d, rel_d, depth, ctx = frontier.popleft()
                 pending.add(pool.submit(_scan_one_dir, abs_d, rel_d, depth, out, ctx))
             if truncated or not pending:
@@ -537,15 +527,7 @@ def _walk_tree(root, deadline, *, scan_executor=None):
                     truncated = True
                     continue
                 for abs_d, rel_d, depth, ctx in subdirs:
-                    if depth > _DEPTH_CAP:
-                        truncated = True
-                        continue
                     frontier.append((abs_d, rel_d, depth, ctx))
-            if (len(out) >= max_entries or len(frontier) > max_entries
-                    or time.time() > deadline):
-                truncated = True
-                for f in pending:
-                    f.cancel()
     finally:
         # Shared scan workers can outlive this build. Drain only this walk's
         # accepted futures before returning so none can mutate ``out`` after
@@ -564,17 +546,16 @@ def _build_sync(root, *, scan_executor=None):
 
     Runs on the builder pool.  Never raises.
     """
-    deadline = time.time() + _build_budget_s()
     t0 = time.perf_counter()
     try:
-        result = _walk_tree(root, deadline, scan_executor=scan_executor)
+        result = _walk_tree(root, scan_executor=scan_executor)
         if not result:
             return
         rows, complete = result
         if not complete:
-            logger.warning('[TreeIndex] walk of %s incomplete (entries=%d, budget=%ds) '
-                           '— index NOT installed; queries fall back to live walk',
-                           root, len(rows), int(_build_budget_s()))
+            logger.warning('[TreeIndex] walk of %s incomplete after a read failure '
+                           '(entries=%d) — index NOT installed; queries fall back to live walk',
+                           root, len(rows))
             return
         rows.sort(key=lambda r: r[0])
         paths = [r[0] for r in rows]
@@ -707,11 +688,13 @@ def _evict_mem_over_cap():
     root_capacity = _mem_roots()
     entry_capacity = _max_entries()
     retained_entries = sum(len(entry.paths) for entry in _mem.values())
-    while (_mem and (
+    # Retain the newest usable index even when it alone exceeds the target.
+    # Returned index objects remain owned by their callers after LRU removal.
+    while (len(_mem) > 1 and (
             len(_mem) > root_capacity or retained_entries > entry_capacity)):
         victim = next(iter(_mem))
         entry = _mem.get(victim)
-        _checkpoint_dirty_eviction(entry, entry_capacity)
+        _checkpoint_dirty_eviction(entry)
         entry = _mem.pop(victim, None)
         retained_entries -= len(entry.paths) if entry is not None else 0
         logger.debug(
@@ -722,7 +705,7 @@ def _evict_mem_over_cap():
         )
 
 
-def _checkpoint_dirty_eviction(entry, entry_capacity):
+def _checkpoint_dirty_eviction(entry):
     """Persist a write-fresh entry before LRU eviction when its blob is stale.
 
     ``note_write`` normally removes the superseded blob, which makes a later
@@ -733,8 +716,7 @@ def _checkpoint_dirty_eviction(entry, entry_capacity):
     Clean entries already have a blob and incur no write; a failed checkpoint
     preserves the established rebuild fallback.
     """
-    if (not isinstance(entry, TreeIndex) or not entry.complete
-            or len(entry.paths) > entry_capacity):
+    if not isinstance(entry, TreeIndex) or not entry.complete:
         return False
     if entry.persisted_revision == entry.mutation_revision:
         try:
@@ -895,12 +877,6 @@ def _load_disk(root):
                 '<8sdIH', header)
             if magic != _DISK_MAGIC:
                 return None
-            entry_capacity = _max_entries()
-            if count > entry_capacity:
-                logger.debug(
-                    '[TreeIndex] persisted index exceeds current entry budget '
-                    'for %s (%d/%d)', root, count, entry_capacity)
-                return None
             blob = header + f.read()
         off = struct.calcsize('<8sdIH')
         disk_root = blob[off:off + root_len].decode('utf-8', 'surrogateescape')
@@ -908,6 +884,8 @@ def _load_disk(root):
             return None
         off += root_len
         nbytes = count * 8
+        if len(blob) < off + 2 * nbytes + 4:
+            return None  # Malformed count, not a source-size admission decision.
         sizes = array.array('q')
         sizes.frombytes(blob[off:off + nbytes])
         off += nbytes
@@ -916,7 +894,12 @@ def _load_disk(root):
         off += nbytes
         (paths_len,) = struct.unpack_from('<I', blob, off)
         off += 4
-        paths = blob[off:off + paths_len].decode('utf-8', 'surrogateescape').split('\n')
+        if off + paths_len != len(blob):
+            return None
+        paths = (blob[off:off + paths_len].decode('utf-8', 'surrogateescape').split('\n')
+                 if count else [])
+        if len(paths) != count:
+            return None
         if count and (not paths or paths[0] == '' and count > 1):
             return None
         return TreeIndex(
@@ -1147,11 +1130,11 @@ def find_matching(entry, rel_prefix, pattern, cap, *, case_sensitive=False):
     return out
 
 
-def grep_candidates(entry, rel_prefix, include, max_bytes):
+def grep_candidates(entry, rel_prefix, include):
     """In-memory candidate list for grep: ``(abs_paths, total_bytes)``.
 
     Applies the include glob (rg -g semantics: basename match unless the glob
-    contains '/') and the recorded size cap (parity with rg --max-filesize).
+    contains '/'). File size is telemetry, never source admission.
     ``total_bytes`` is the summed candidate size from the snapshot — the
     chunk runner uses it to tell content-heavy searches (parallelize reads
     across processes) from metadata-bound ones.
@@ -1167,8 +1150,6 @@ def grep_candidates(entry, rel_prefix, include, max_bytes):
     total = 0
     for i in range(lo, hi):
         sz = sizes[i]
-        if sz > max_bytes:
-            continue
         p = paths[i]
         if inc_re is not None:
             target = p if inc_rel else p.rsplit('/', 1)[-1]

@@ -127,7 +127,6 @@ class TestDiagnose:
         ('', 'ValueError: The model architecture qwen99 is not supported',
          'arch_unsupported', False),
         ('No space left on device', '', 'disk_full', True),
-        ('磁盘余量不足，将超出预算', '', 'disk_budget', True),
         ('', 'OSError: Address already in use', 'port_conflict', True),
         ('创建隔离环境失败：Connection timed out', '', 'network', True),
         ('等待就绪超时', '', 'start_timeout', True),

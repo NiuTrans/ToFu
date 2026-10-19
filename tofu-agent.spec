@@ -1,12 +1,12 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""PyInstaller spec for TofuAgent — the controlled-machine component.
+"""PyInstaller spec for TofuRemote — the controlled-machine component.
 
 Build:
     pyinstaller tofu-agent.spec
 
 Output:
-    dist/TofuAgent/              — self-contained app directory
-    dist/TofuAgent/TofuAgent.exe — main executable
+    dist/TofuRemote/              — self-contained app directory
+    dist/TofuRemote/TofuRemote.exe — main executable
 
 The mirror image of tofu.spec, minus the ENTIRE server stack: this bundle
 carries the desktop-agent closure only (poll loop, dispatch table, connect
@@ -41,7 +41,7 @@ hidden_imports += collect_submodules('lib.desktop_agent')
 # The agent's lib dependencies (stdlib-only, but PyInstaller's static
 # analysis follows them anyway — listed for explicitness).
 hidden_imports += ['lib.log', 'lib.json_store', 'lib.version',
-                   'lib.runtime_paths']
+                   'lib.runtime.runtime_paths']
 
 # The desktop package seams the launcher uses.
 hidden_imports += ['desktop.connect_ui', 'desktop._tk_theme',
@@ -54,7 +54,7 @@ hidden_imports += [
     'pystray',
     'PIL', 'PIL.Image',
     'psutil',
-    'pypdf', 'lib.paper.builds.pdf_validation_worker', 'lib.paper.builds.process_worker',
+    'pypdf', 'lib.artifacts.image_validation_worker', 'lib.paper.builds.pdf_validation_worker', 'lib.paper.builds.process_worker',
     # pyautogui's platform backends are imported dynamically.
     'pyautogui', 'pyperclip', 'pygetwindow', 'pyscreeze', 'pytweening',
     'mouseinfo',
@@ -147,7 +147,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,  # --onedir mode
-    name='TofuAgent',
+    name='TofuRemote',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -169,17 +169,17 @@ coll = COLLECT(
     strip=False,
     upx=_UPX_AVAILABLE,
     upx_exclude=_UPX_EXCLUDE,
-    name='TofuAgent',
+    name='TofuRemote',
 )
 
 if sys.platform == 'darwin':
     app = BUNDLE(
         coll,
-        name='TofuAgent.app',
+        name='TofuRemote.app',
         icon=_icon_mac if os.path.isfile(_icon_mac) else None,
         bundle_identifier='com.tofu.desktop-agent',
         info_plist={
-            'CFBundleDisplayName': 'Tofu Agent',
+            'CFBundleDisplayName': 'Tofu Remote',
             'CFBundleShortVersionString': open(
                 os.path.join(ROOT, 'VERSION')).read().strip(),
             'NSHighResolutionCapable': True,

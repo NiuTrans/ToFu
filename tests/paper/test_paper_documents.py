@@ -1,5 +1,6 @@
 """Synthetic document discovery and owner-scoped settings persistence boundaries."""
 import copy
+from pathlib import Path
 
 import pytest
 
@@ -104,23 +105,38 @@ def test_symlinks_skips_and_remote_no_fallback(owned):
     assert result['diagnostics'][0]['code'] == 'desktop_unavailable'
 
 
-@pytest.mark.parametrize('budget,value', [('discovery_entries', 1), ('discovery_bytes', 1),
-                                         ('discovery_file_bytes', 1), ('discovery_candidates', 1),
-                                         ('discovery_depth', 0), ('discovery_roots', 0)])
-def test_scans_fail_explicitly_at_each_budget(owned, monkeypatch, budget, value):
-    root, _ = owned
-    tex(root, 'a/main.tex')
-    tex(root, 'b/main.tex')
-    original = documents.limit
-    monkeypatch.setattr(documents, 'limit', lambda name: value if name == budget else original(name))
-    if budget == 'discovery_roots':
-        with pytest.raises(BuildError) as exc:
-            discover()
-        assert exc.value.code == 'discovery_limit'
-    else:
-        result = discover()
-        assert result['diagnostics']
-        assert result['selected'] is None
+def test_complete_scan_beyond_old_candidate_entry_and_depth_limits(owned):
+    root, state = owned
+    for index in range(71):
+        tex(root, f'paper-{index}/main.tex')
+    for index in range(4101):
+        (root / f'ignored-{index}.txt').write_bytes(b'')
+    deep = 'd/' * 40 + 'main.tex'
+    tex(root, deep)
+    result = discover()
+    assert len(result['documents']) == 72
+    assert not result['diagnostics']
+    assert result['selected'] is None
+    assert deep in {document['path'] for document in result['documents']}
+    from lib.paper.builds.document_repository import PaperDocumentRepository
+    assert PaperDocumentRepository(7).resolve(result['documents']) == [None] * 72
+
+
+def test_complete_owned_roots_and_large_main_source(owned):
+    root, state = owned
+    roots = []
+    for index in range(33):
+        directory = root / f'root-{index}'
+        tex(directory, 'main.tex')
+        roots.append(str(directory))
+    state['projectPath'], state['projectPaths'] = roots[0], roots
+    result = discover()
+    assert len(result['documents']) == 33 and not result['diagnostics']
+    large = Path(roots[0]) / 'main.tex'
+    large.write_text(' ' * (17 * 1024 * 1024) + r'\documentclass{article}')
+    result = discover(project_root=roots[0])
+    assert len(result['documents']) == 1 and not result['diagnostics']
+    assert result['selected']['path'] == 'main.tex'
 
 
 def test_missing_directory_scan_is_not_empty_success(owned):

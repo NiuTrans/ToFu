@@ -73,7 +73,7 @@ def _no_real_sleep(monkeypatch):
 @pytest.mark.unit
 class TestOAuth401RefreshRetry:
     def test_http_classifier_preserves_credential_wide_401_status(self):
-        from lib.llm_errors import PermissionError_, _classify_http_error
+        from lib.llm.llm_errors import PermissionError_, _classify_http_error
 
         with pytest.raises(PermissionError_) as raised:
             _classify_http_error(
@@ -84,7 +84,7 @@ class TestOAuth401RefreshRetry:
 
     def test_401_on_oauth_slot_refreshes_and_retries_once(self, monkeypatch):
         from lib.llm_dispatch import api
-        from lib.llm_errors import PermissionError_
+        from lib.llm.llm_errors import PermissionError_
 
         slot = _make_slot()
         # Picker re-picks the SAME slot after release (it has no cooldown).
@@ -126,7 +126,7 @@ class TestOAuth401RefreshRetry:
 
     def test_refresh_failure_falls_through_to_normal_failover(self, monkeypatch):
         from lib.llm_dispatch import api
-        from lib.llm_errors import PermissionError_
+        from lib.llm.llm_errors import PermissionError_
 
         slot1 = _make_slot(key='k1')
         slot2 = _make_slot(key='k2')
@@ -162,7 +162,7 @@ class TestOAuth401RefreshRetry:
             self, monkeypatch):
         """One rejected bearer token is shared by all models on its row."""
         from lib.llm_dispatch import api
-        from lib.llm_errors import PermissionError_
+        from lib.llm.llm_errors import PermissionError_
 
         rejected = _make_slot(model='gpt-5.6-sol', key='oauth-codex',
                               oauth='codex')
@@ -198,7 +198,7 @@ class TestOAuth401RefreshRetry:
     def test_oauth_http_401_key_exclusion_matches_non_stream_dispatch(
             self, monkeypatch):
         from lib.llm_dispatch import api
-        from lib.llm_errors import PermissionError_
+        from lib.llm.llm_errors import PermissionError_
 
         rejected = _make_slot(model='gpt-5.6-sol', key='oauth-codex',
                               oauth='codex')
@@ -232,7 +232,7 @@ class TestOAuth401RefreshRetry:
     def test_oauth_http_401_key_exclusion_matches_async_dispatch(
             self, monkeypatch):
         from lib.llm_dispatch import api
-        from lib.llm_errors import PermissionError_
+        from lib.llm.llm_errors import PermissionError_
 
         rejected = _make_slot(model='gpt-5.6-sol', key='oauth-codex',
                               oauth='codex')
@@ -267,7 +267,7 @@ class TestOAuth401RefreshRetry:
         exclusion, no refresh call (the 2026-08-03 all-keys-403 pool
         fallback path must not regress)."""
         from lib.llm_dispatch import api
-        from lib.llm_errors import PermissionError_
+        from lib.llm.llm_errors import PermissionError_
 
         slot1 = _make_slot(key='k1', oauth='')   # plain API-key slot
         slot2 = _make_slot(key='k2', oauth='')
@@ -303,7 +303,7 @@ class TestOAuth401RefreshRetry:
         """The retried request 401s AGAIN → no second refresh, normal
         failover bookkeeping kicks in (no loops)."""
         from lib.llm_dispatch import api
-        from lib.llm_errors import PermissionError_
+        from lib.llm.llm_errors import PermissionError_
 
         slot = _make_slot()
         disp = _FakeDispatcher([slot, slot, slot])

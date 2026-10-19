@@ -15,7 +15,7 @@ from typing import Any, cast
 
 from quart import Blueprint, Response, current_app, has_request_context, request
 
-from lib.api_v4_constants_generated import (
+from lib.generated_api_v4_constants import (
     API_MAJOR,
     API_RELEASE_STAGE,
     LEGACY_API_PREFIXES,
@@ -147,7 +147,7 @@ def problem_response(
     # Strict DTO construction is paid only by an actual v4 response. Ordinary
     # v1 boot/request paths need the generated release constants, not Pydantic's
     # validator graph or the canonical OpenAPI document.
-    from lib.api_v4_generated import validate_problem
+    from lib.generated_api_v4 import validate_problem
 
     request_id = req_id() or 'unassigned'
     payload: dict[str, Any] = {

@@ -115,7 +115,7 @@ def board_projection(project_path: str, *, user_id: int) -> dict:
         'project': projection.get('projectKey') or '',
         'headSequence': int(projection.get('headSequence') or 0),
         'active': active,
-        'recentOutcomes': recent[:100],
+        'recentOutcomes': recent,
     }
 
 
@@ -131,7 +131,7 @@ def feed_projection(
               if int(item.get('sequence') or 0) > int(since_sequence or 0)]
     events.sort(key=lambda item: int(item.get('sequence') or 0), reverse=True)
     return {
-        'events': events[:max(1, min(int(limit or 100), 200))],
+        'events': events[:max(1, int(limit or 100))],
         'headSequence': int(projection.get('headSequence') or 0),
     }
 
@@ -351,7 +351,7 @@ def changed_paths_from_tool(
             if isinstance(item, dict) and item.get('path'):
                 paths.append(str(item.get('path') or ''))
     normalized = [_normalize_changed_path(project_path, path) for path in paths]
-    return list(dict.fromkeys(path for path in normalized if path))[:200]
+    return list(dict.fromkeys(path for path in normalized if path))
 
 
 def _tool_succeeded(tool_content: Any) -> bool:
@@ -470,7 +470,7 @@ def _send_overlap_advisories(
                                 'taskIds': [this_task_id, str(peer.get('id') or '')],
                             })
         task['_projectChangedPaths'] = list(dict.fromkeys(
-            [*(task.get('_projectChangedPaths') or ()), *changed_paths]))[-200:]
+            [*(task.get('_projectChangedPaths') or ()), *changed_paths]))
     except Exception as exc:
         logger.debug('[ProjectBrain] overlap detection failed soft: %s', exc)
 
@@ -1081,7 +1081,8 @@ def record_integration_failure(
         'project_brain.narrative.add', project_path,
         user_id=user_id,
         command_id=f'project-integration-narrative:{work_id}:{digest}',
-        kind='integration_failed', text=text, work_id=work_id,
+        kind='integration_failed', text=_bounded_utf8(text, _MAX_NARRATIVE_BYTES),
+        work_id=work_id,
     )
 
 

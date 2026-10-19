@@ -1,7 +1,8 @@
 # Environment providers
 
 `packages/tofu-environments/` is an optional, independently installed SDK and
-native tool plugin for building images and provisioning workspaces. Its public
+MCP service and native compatibility adapters for image/workspace provisioning
+and remote batch compute. Its public
 contract is `tofu_environments/spec.schema.json`; provider implementations conform
 to `tofu_environments.contracts.Provider`. Neither schema nor workflow assumes a
 company, cloud, registry or login system. The core agent wheel has no dependency
@@ -28,19 +29,40 @@ would contaminate public artifacts and add startup dependencies.
 
 ## Installation and opt-in
 
-From a source checkout:
+Platform integration uses the independently installed stdio MCP entry point:
 
 ```sh
-python -m pip install ./packages/tofu-environments
+python -m pip install './packages/tofu-environments[mcp]'
+tofu-environments-mcp --factory deployment.environments:binding
 ```
 
-The `tofu.tools` entry point is named `environments`. Enable it per authenticated
-request with `config.plugins: ["environments"]`, or explicitly include it in the
-existing deployment setting `TOFU_DEFAULT_TOOL_PLUGINS`. Preserve any other
-allow-listed plugins. Restart an already running host through its normal lifecycle
-so its import-time tool catalog sees the installed entry point. No separate UI
-or MCP server is required. Plugin execution remains trusted in-process code;
-visibility isolation is not a sandbox.
+The trusted deployment factory returns `mcp_adapter.MCPBinding(actor,
+environment_service=..., job_service=..., authorize=..., close=...)`. Actor,
+project, repository and provider resolvers come from the deployment's identity,
+storage and credential owners, never model arguments or an ambient login.
+The binding uses the existing `EnvironmentService` and `JobService`; it adds no
+journal, submission loop, provider or default resource allocation. A configured
+service contributes only its tool family. Shared schemas live in `schemas.py`.
+The `authorize(actor, tool_name, exact_arguments)` policy must consume a one-use
+approved grant for that exact preview; absent policy refuses every external
+write. MCP connection or a valid schema is never authorization. Server shutdown
+calls the optional owned cleanup port. Blocking SDK calls borrow MCP's worker
+boundary and cancellation joins them rather than replaying a lost write.
+
+`compute_wait` remains a host Evolution dependency adapter, not a platform MCP
+operation. `compute_collect` uses only the trusted bound project destination;
+model arguments cannot select another root. Ownership, CAS claims, unknown
+outcome reconciliation, exit-code evidence and output seals remain SDK-owned.
+
+The native `tofu.tools` compatibility entry points are separately named
+`environments` and `compute`. Enable only the needed adapter via `config.plugins`.
+Without configured services or trusted `environment_provider_ids` /
+`compute_provider_ids` in `configure_provider_context`, only the native provider
+discovery tool is offered. Installing a provider is not proof of usable actor
+credentials. `compute_wait` also requires an executing Evolution run; native
+collection requires an attached project. No deployment-wide opt-in is added.
+The SDK package and existing private Meituan providers remain optional and
+release-separated. A deployment still owns live platform acceptance.
 
 | Tool | Behavior |
 |---|---|
@@ -49,9 +71,11 @@ visibility isolation is not a sandbox.
 | `environment_plan` | Validate explicit resources and persist an immutable preview |
 | `environment_apply` | Advance one approved write stage |
 | `environment_status` | Read progress or reconcile an uncertain result |
+| `compute_catalog` | Read actor-bound compute queues, resource snapshots and option schemas; no allocation |
 | `compute_plan` | Seal an explicit bounded batch job |
 | `compute_submit` | Submit one exact approved job without replay |
 | `compute_status` | Read exit status or reconcile uncertain submission |
+| `compute_wait` | Park an owned Evolution compute dependency; existing reaper resumes its goal at terminal status without model polling |
 | `compute_cancel` | Request exact authorized owned-job cancellation |
 | `compute_collect` | Collect successful owned outputs into the active project |
 
@@ -134,7 +158,11 @@ and validated by that provider. Unsupported options fail rather than disappear.
 The installed-wheel smoke measurement on CPython 3.12 was approximately 58 ms
 for importing the SDK, with zero additional worker threads. This is an SDK import
 sample, not an application startup benchmark. No persistent worker, polling
-thread or daemon is added. The host reuses its
+thread or daemon is added. A fresh CPython 3.12 / MCP 2.0 process measured
+server construction at approximately 1.45 s with one thread before and after;
+this optional SDK import sample is not an application startup benchmark.
+Descriptor registration imports no MCP SDK; calls borrow its existing worker
+boundary rather than adding a Tofu pool. The host reuses its
 cached launch resource probe and derives output/context bounds from available
 memory and volume headroom, and rechecks the staging volume before copying.
 Explicit trusted runner/provider overrides remain. Standalone SDK defaults are
@@ -179,7 +207,7 @@ Record size retains the existing 256 KiB bound and storage lifecycle.
 container with completed experiment output; direct CLI submission would lose
 scoped recovery and uncertain-write protection.
 
-Native compute tools are part of the opt-in environments plugin.
+Native compute tools use their own opt-in `compute` plugin.
 `environment_providers` also lists installed `tofu.compute_providers` entries
 without loading them. Factories accept `(actor, context)` and return a
 `JobProvider`; trusted actor-aware credentials use the same host context as
@@ -290,6 +318,9 @@ submission prevents long jobs from completing on preemptible capacity.
 
 **Decision:** `job.schema.json` permits an explicit `recovery` declaration:
 `{"max_attempts": 3, "restart_safe": true, "allowed_reason": "scheduler_preemption"}`.
+Status proof and output receipt selection both use `select_worker_attempt`;
+collection selects the admitted final Worker after the same full history and
+resource checks, rather than imposing an extra one-Worker-only gate.
 Omitting it preserves one-attempt admission. `runtime_seconds` remains a per-attempt
 execution bound; `gpu_seconds` must cover GPU count times that bound times all
 allowed attempts. The opt-in is an assertion that restarting the command cannot
@@ -320,3 +351,88 @@ supervision contract, not a cluster reservation or a guarantee that startup and
 scheduler teardown cannot exceed a limit. Allocation durations are capacity-time
 evidence, not a billing receipt. Live preemption recovery must be demonstrated
 separately from fixture tests.
+
+## Benchmark batch launcher
+
+`evaluations/platform_jobs/` packages the committed Harbor runner through the
+public JobService contract. Its request schema pins dataset/task/engine/source
+identity and budgets; Git object proofs validate exported source without .git.
+The worker runs doctor before model dispatch and retains failed trial evidence.
+Wrapper success permits diagnostic publication; benchmark state, child exit and
+formal audit remain separate, with no inferred score. Scope, exact-plan approval,
+uncertain-write reconciliation and output ownership stay in JobService/provider
+ports. See [the launcher contract](../evaluations/platform_jobs/README.md).
+
+CLI transport and source snapshots use private named temporary files, removed
+on close. Unlinked temporary files failed writes/flushes on the observed FUSE
+volume; snapshots remain pinned through extraction and cannot be reread from
+mutable original archives. Subprocess deadlines and group teardown are unchanged.
+Hope packages sealed top-level entries within the platform's 200-entry limit;
+the recursive file manifest is hashed incrementally under admitted source bounds.
+Links and special files in cached staging fail before packaging. This supports
+large retained runners without weakening per-file source seals.
+
+### Compute discovery
+
+**Problem:** compute planning required queue and provider-option knowledge that
+was unavailable through the public tools. **Decision:** `compute_catalog` uses
+`compute_catalog.schema.json` and an optional provider `compute_catalog(actor)`
+capability. Unsupported providers return `catalog_unsupported`; catalogs reject
+wrong provider identity, nonfinite values and payloads above 64 KiB. Catalog
+reads neither mutate the operation repository nor allocate resources.
+Hope queries only the trusted actor/project-bound queue with `include_apps=false`,
+projects resource counts and safe option defaults, and excludes image, credential,
+application and environment data. Capacity is a transient snapshot, never a
+sealed plan admission promise. **Alternatives considered:** raw MCP responses
+would expose unnecessary fields; hardcoded queue defaults would bind the public
+SDK to one company/user and become stale. No resident worker or cache is added.
+
+## Durable compute dependency
+
+Problem: raw platform wait tools may be hidden or time out, and an executor can
+finish after an intermediate queue snapshot. Decision: `compute_wait` validates
+a durable submitted actor/project operation and enrolls one pointer in the
+Evolution run. The shared terminal marker parks the carrier; the existing reaper
+observes that same operation no more often than every five seconds, retaining
+transient observation errors across application restarts. No worker or timer is
+added. The pointer is bounded by one operation identity and retry timestamp per
+run, not by poll history. Provider job records remain the sole job authority.
+
+Terminal status authorizes one continuation carrier under CAS, keeping the same
+logical episode, attempt and cumulative budget; original task receipts retain
+lineage and charges. A successful status must include proven zero exit. It does
+not grant artifact acceptance or scientific success. Cancellation stops waiting,
+without cancelling or resubmitting the remote job. The original failed/cancelled
+status is delivered for analysis. No optional SDK import happens without an
+enrolled dependency. Alternatives rejected: model polling grows context/cost;
+platform-specific wait names do not provide a general interface; a new polling
+daemon would duplicate scheduling and lifecycle authority. Verify
+`test_evolution_compute_wait.py` and the optional SDK host tests.
+
+### Goal creation in the browser
+
+Problem: installed compute tools were reachable through API launches but absent
+from the studio briefing. Decision: briefing settings accept a project directory
+and one installed execution plugin from the authenticated capability catalog.
+Omitting the selector inherits deployment defaults; choosing no optional plugins
+sends an explicit empty list. Failed reads expose retry and preserve input.
+Cluster credentials, quotas and compute limits remain server-owned. Alternatives:
+a Hope-specific switch would couple the public UI to one private provider;
+automatic opt-in would change task authority without explicit user selection.
+
+## Native capacity views
+
+The optional SDK host exposes `configured_compute_providers()` and
+`read_compute_catalog(actor, provider, cancelled=...)` as read ports. They own
+trusted composition, request cancellation and transport cleanup. Application
+presenters never access host globals or construct provider credentials.
+`capacity.queue_resources` is the shared pure queue-summary projection; strict
+provider admission still rejects incomplete required quantities, while native
+resource views may display unknown values explicitly.
+
+An optional owner-bound MCP adapter admits only registered, enabled tools marked
+read-only, with exact `compute_catalog` or `get_queue_resource` names. It validates
+the registered input schema, excludes applications from queue reads, disables
+transport replay and rechecks capability before calling. Provider discovery uses
+explicit configured IDs/schema enums; raw queue selection requires its exact
+name. No arbitrary MCP operation or model-authored endpoint is accepted.

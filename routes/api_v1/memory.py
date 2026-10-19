@@ -137,7 +137,7 @@ def get_memory_v1(memory_id):
 )
 def create_memory_v1():
     from lib.memory.storage import create_memory
-    data = parse_body(force=True)
+    data = parse_body(force=True, exact=('name', 'description', 'body', 'tags', 'scope'))
     name = data.get('name', 'Untitled')
     logger.info('[Memory.v1] creating %r (scope=%s)', name,
                 data.get('scope', 'global'))
@@ -204,7 +204,7 @@ def delete_memory_v1(memory_id):
 )
 def merge_memories_v1():
     from lib.memory.storage import MemoryRevisionConflict, merge_memories
-    data = parse_body(force=True)
+    data = parse_body(force=True, exact=('memory_ids', 'name', 'description', 'body', 'tags', 'scope'))
     logger.info('[Memory.v1] merging %s → %s',
                 data.get('memory_ids', []), data.get('name', '?'))
     try:
@@ -308,7 +308,7 @@ def put_user_context_v1():
 @api_meta(summary='Create one durable user-context item', tags=['memory'])
 def create_user_context_v1():
     import lib.memory.user_profile as up
-    data = parse_body()
+    data = parse_body(exact=('id', 'type', 'source', 'created_at', 'updated_at', 'condition', 'action', 'text'))
     try:
         result = up.create_context_item(data, _context_scope(), source='manual')
     except up.ContextValidationError as exc:
@@ -322,7 +322,7 @@ def create_user_context_v1():
 def update_user_context_v1(item_id):
     import lib.memory.user_profile as up
     try:
-        result = up.update_context_item(item_id, parse_body(), _context_scope())
+        result = up.update_context_item(item_id, parse_body(exact=('id', 'type', 'source', 'created_at', 'updated_at', 'condition', 'action', 'text')), _context_scope())
     except up.ContextValidationError as exc:
         return api_bad_request(str(exc), cap=up.CONTEXT_CHAR_CAP)
     if result is None:

@@ -796,6 +796,115 @@ def _emit_pending_l2_roi(prev, conv_id, cache_write, cache_read, usage, *,
                  turn_boundary=(prev.call_count == 0),
                  model=model or '', now=now)
 
+def _cache_observation_elapsed(prev, now, scope, key, user_id, conv_id):
+    # FIX: compute elapsed BEFORE updating state so TTL detection works.
+    # Previously, elapsed was computed AFTER setting last_update_time = now,
+    # which meant it was always 0, making the >5min TTL check dead code.
+    if prev.last_update_time:
+        elapsed = now - prev.last_update_time
+    else:
+        # Fresh per-thread state (a new task's round-1 on a fresh run_task
+        # thread): the thread's own clock starts at 0, which made gap_s a
+        # broken 0.0 on EXACTLY the records where the TTL-window question
+        # matters (turn_boundary_rebill — measured 44/44 records 2026-08-01
+        # reporting gap_s=0.0). Fall back to the NEWEST sibling thread's
+        # timestamp for the same conv — the previous turn's true send time.
+        # Runs under _cache_lock, so the sibling scan is race-free.
+        _latest_sib = 0.0
+        for _sk, _sst in _cache_states.items():
+            if (scope is None and _sk[0] == user_id
+                    and _sk[1] == conv_id and _sk != key
+                    and _sst.last_update_time > _latest_sib):
+                _latest_sib = _sst.last_update_time
+        elapsed = now - _latest_sib if _latest_sib else 0
+
+    return elapsed
+
+
+def _cache_verdict_finisher(
+    conv_id, prev, _ns_switch, _ttl_flip,
+    _breakpoint_lost, _wire_proven_identical, _ns_verified_same, cache_read,
+    cache_write, elapsed, _wire_culprits, model,
+    _wire_available, _wire_prefix_changed, _read_collapsed, client_changes,
+    prefix_mutation_break, _prefix_culprits, _wire_tools_verified, _wire_system_verified,
+    turn_boundary_break, _cross_turn_prev_read, prev_cache_read,
+):
+    """Freeze this round's evidence for consistent telemetry and returned verdicts."""
+    def _finish(v, record_as=None):
+        """Emit the per-round record, then return the DETECTOR's verdict.
+
+        ``record_as`` decouples what is RECORDED from what is RETURNED. A
+        round can be honestly bucketed as ``indeterminate`` in telemetry
+        while the function still returns ``None`` to its callers — the
+        return value is the confirmed-break signal that drives behaviour,
+        and an unconcluded round must NOT start claiming a confirmed break.
+        """
+        _emit_round_record(
+            conv_id, prev.call_count,
+            record_as if record_as is not None else v,
+            ns_switch=_ns_switch, ttl_flip=_ttl_flip,
+            breakpoint_lost=_breakpoint_lost,
+            body_identical=_wire_proven_identical,
+            namespace_verified=_ns_verified_same,
+            cache_read=cache_read, cache_write=cache_write,
+            elapsed=elapsed, culprits=_wire_culprits, model=model,
+            wire_available=_wire_available,
+            wire_changed=_wire_prefix_changed,
+            read_collapsed=_read_collapsed)
+        if v:
+            # Keep legacy keys and the primary ledger bucket, but never
+            # discard independent evidence merely because another reason
+            # won the classifier's display precedence.
+            v = dict(v)
+            for code, detail in client_changes.items():
+                v.setdefault(code, detail)
+            if prefix_mutation_break:
+                culprits = _wire_culprits if _wire_available else _prefix_culprits
+                v.setdefault('prefix_mutation',
+                             'prefix changed: ' + ', '.join(culprits or []))
+            if _ns_switch:
+                v.setdefault('cache_namespace_switch',
+                             'Observed routing fields changed: ' + ', '.join(_ns_switch)
+                             + '; this does not establish server cache causality.')
+            if _ttl_flip:
+                v.setdefault('cache_ttl_flip', 'Provider-bound cache marker TTL changed.')
+            if _breakpoint_lost:
+                v.setdefault('cache_breakpoint_lost', 'Provider-bound cache marker regressed.')
+            reasons = []
+            for code, detail in v.items():
+                if code in ('prev_read', 'read', 'gap_s', 'cold_write_gap_s'):
+                    continue
+                evidence = 'inferred'
+                if code in ('tools', 'system_prompt', 'model', 'message_count'):
+                    evidence = 'source_only'
+                if ((code == 'tools' and _wire_tools_verified)
+                        or (code == 'system_prompt' and _wire_system_verified)
+                        or (code == 'prefix_mutation' and _wire_prefix_changed)
+                        or code in ('cache_namespace_switch', 'cache_ttl_flip',
+                                    'cache_breakpoint_lost')):
+                    evidence = 'wire_verified'
+                elif code == 'prefix_mutation':
+                    evidence = 'source_only'
+                elif code == 'turn_boundary_rebill':
+                    evidence = 'provider_usage'
+                reasons.append({'code': code, 'detail': detail,
+                                'evidence': evidence})
+            baseline = (_cross_turn_prev_read if turn_boundary_break
+                        else prev_cache_read)
+            if baseline > cache_read:
+                reasons.append({
+                    'code': 'cache_read_drop',
+                    'detail': 'Provider-reported cache read decreased; '
+                              'this alone does not establish the cause.',
+                    'evidence': 'provider_usage',
+                    'prevRead': int(baseline), 'read': int(cache_read),
+                    'readDrop': int(baseline - cache_read),
+                })
+            v['reasons'] = reasons
+        return v
+    return _finish
+
+
 def detect_cache_break(
     conv_id: str,
     messages: list,
@@ -888,26 +997,7 @@ def detect_cache_break(
 
         prev_cache_read = prev.last_cache_read_tokens
 
-        # FIX: compute elapsed BEFORE updating state so TTL detection works.
-        # Previously, elapsed was computed AFTER setting last_update_time = now,
-        # which meant it was always 0, making the >5min TTL check dead code.
-        if prev.last_update_time:
-            elapsed = now - prev.last_update_time
-        else:
-            # Fresh per-thread state (a new task's round-1 on a fresh run_task
-            # thread): the thread's own clock starts at 0, which made gap_s a
-            # broken 0.0 on EXACTLY the records where the TTL-window question
-            # matters (turn_boundary_rebill — measured 44/44 records 2026-08-01
-            # reporting gap_s=0.0). Fall back to the NEWEST sibling thread's
-            # timestamp for the same conv — the previous turn's true send time.
-            # Runs under _cache_lock, so the sibling scan is race-free.
-            _latest_sib = 0.0
-            for _sk, _sst in _cache_states.items():
-                if (_scope is None and _sk[0] == user_id
-                        and _sk[1] == conv_id and _sk != _key
-                        and _sst.last_update_time > _latest_sib):
-                    _latest_sib = _sst.last_update_time
-            elapsed = now - _latest_sib if _latest_sib else 0
+        elapsed = _cache_observation_elapsed(prev, now, _scope, _key, user_id, conv_id)
 
         # Handle compaction: if compaction happened, a drop in cache_read
         # is expected — don't flag it as a break. Capture the flag BEFORE
@@ -1465,78 +1555,14 @@ def detect_cache_break(
         _ttl_flip = '<ttl-flip>' in (_wire_culprits or [])
         _breakpoint_lost = '<breakpoint-lost>' in (_wire_culprits or [])
 
-        def _finish(v, record_as=None):
-            """Emit the per-round record, then return the DETECTOR's verdict.
-
-            ``record_as`` decouples what is RECORDED from what is RETURNED. A
-            round can be honestly bucketed as ``indeterminate`` in telemetry
-            while the function still returns ``None`` to its callers — the
-            return value is the confirmed-break signal that drives behaviour,
-            and an unconcluded round must NOT start claiming a confirmed break.
-            """
-            _emit_round_record(
-                conv_id, prev.call_count,
-                record_as if record_as is not None else v,
-                ns_switch=_ns_switch, ttl_flip=_ttl_flip,
-                breakpoint_lost=_breakpoint_lost,
-                body_identical=_wire_proven_identical,
-                namespace_verified=_ns_verified_same,
-                cache_read=cache_read, cache_write=cache_write,
-                elapsed=elapsed, culprits=_wire_culprits, model=model,
-                wire_available=_wire_available,
-                wire_changed=_wire_prefix_changed,
-                read_collapsed=_read_collapsed)
-            if v:
-                # Keep legacy keys and the primary ledger bucket, but never
-                # discard independent evidence merely because another reason
-                # won the classifier's display precedence.
-                v = dict(v)
-                for code, detail in client_changes.items():
-                    v.setdefault(code, detail)
-                if prefix_mutation_break:
-                    culprits = _wire_culprits if _wire_available else _prefix_culprits
-                    v.setdefault('prefix_mutation',
-                                 'prefix changed: ' + ', '.join(culprits or []))
-                if _ns_switch:
-                    v.setdefault('cache_namespace_switch',
-                                 'Observed routing fields changed: ' + ', '.join(_ns_switch)
-                                 + '; this does not establish server cache causality.')
-                if _ttl_flip:
-                    v.setdefault('cache_ttl_flip', 'Provider-bound cache marker TTL changed.')
-                if _breakpoint_lost:
-                    v.setdefault('cache_breakpoint_lost', 'Provider-bound cache marker regressed.')
-                reasons = []
-                for code, detail in v.items():
-                    if code in ('prev_read', 'read', 'gap_s', 'cold_write_gap_s'):
-                        continue
-                    evidence = 'inferred'
-                    if code in ('tools', 'system_prompt', 'model', 'message_count'):
-                        evidence = 'source_only'
-                    if ((code == 'tools' and _wire_tools_verified)
-                            or (code == 'system_prompt' and _wire_system_verified)
-                            or (code == 'prefix_mutation' and _wire_prefix_changed)
-                            or code in ('cache_namespace_switch', 'cache_ttl_flip',
-                                        'cache_breakpoint_lost')):
-                        evidence = 'wire_verified'
-                    elif code == 'prefix_mutation':
-                        evidence = 'source_only'
-                    elif code == 'turn_boundary_rebill':
-                        evidence = 'provider_usage'
-                    reasons.append({'code': code, 'detail': detail,
-                                    'evidence': evidence})
-                baseline = (_cross_turn_prev_read if turn_boundary_break
-                            else prev_cache_read)
-                if baseline > cache_read:
-                    reasons.append({
-                        'code': 'cache_read_drop',
-                        'detail': 'Provider-reported cache read decreased; '
-                                  'this alone does not establish the cause.',
-                        'evidence': 'provider_usage',
-                        'prevRead': int(baseline), 'read': int(cache_read),
-                        'readDrop': int(baseline - cache_read),
-                    })
-                v['reasons'] = reasons
-            return v
+        _finish = _cache_verdict_finisher(
+            conv_id, prev, _ns_switch, _ttl_flip,
+            _breakpoint_lost, _wire_proven_identical, _ns_verified_same, cache_read,
+            cache_write, elapsed, _wire_culprits, model,
+            _wire_available, _wire_prefix_changed, _read_collapsed, client_changes,
+            prefix_mutation_break, _prefix_culprits, _wire_tools_verified, _wire_system_verified,
+            turn_boundary_break, _cross_turn_prev_read, prev_cache_read,
+        )
 
         # ── Report ──
         # A cache break is "confirmed" when the API shows: a DROP from a prior

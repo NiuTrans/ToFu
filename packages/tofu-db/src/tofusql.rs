@@ -20,7 +20,7 @@
 //! progress-handler deadline. Document bodies hydrate through the bounded
 //! `versioned_document` path against `maximumBodyHydrationBytes`; the response
 //! serializes as UTF-8 JSON bounded by `maximumResponseBytes` and the shared
-//! `MAX_TRANSACTION_IR_LITERAL_BYTES` slab ceiling.
+//! `MAX_LEGACY_DOCUMENT_BYTES` slab ceiling.
 
 use std::io;
 use std::time::{Duration, Instant};
@@ -37,7 +37,7 @@ use serde_json::{Map as JsonMap, Value as JsonValue};
 
 use crate::authority::{AuthorityDatabase, AuthorityTransaction};
 use crate::entity::EntityKey;
-use crate::generated_tofudb_ir::{MAX_ENTITY_RANGE_ROWS, MAX_TRANSACTION_IR_LITERAL_BYTES};
+use crate::generated_tofudb_ir::{MAX_ENTITY_RANGE_ROWS, MAX_LEGACY_DOCUMENT_BYTES};
 use crate::generated_tofusql_catalog::{
     tofusql_join_edges_between, tofusql_table, TofuSqlKeyEncoding, TofuSqlTable,
     TOFUSQL_CATALOG_VERSION, TOFUSQL_MAXIMUM_BODY_HYDRATION_BYTES,
@@ -415,7 +415,7 @@ fn run_statement(
     });
     let body = serde_json::to_vec(&payload)
         .map_err(|_| integrity_failure("failed to serialize the TofuSQL catalog response"))?;
-    if body.len() > TOFUSQL_MAXIMUM_RESPONSE_BYTES.min(MAX_TRANSACTION_IR_LITERAL_BYTES) {
+    if body.len() > TOFUSQL_MAXIMUM_RESPONSE_BYTES.min(MAX_LEGACY_DOCUMENT_BYTES) {
         return Err(SemanticExecutionError::ResourceExhausted);
     }
     Ok(body)
@@ -1367,7 +1367,7 @@ fn hydrate_row(
                 scope.owner_id,
                 raw_value,
                 candidate,
-                MAX_TRANSACTION_IR_LITERAL_BYTES,
+                MAX_LEGACY_DOCUMENT_BYTES,
             ) {
                 Ok(bytes) => {
                     body_bytes = Some(bytes);

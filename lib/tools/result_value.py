@@ -11,7 +11,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any
 
 from lib.log import get_logger
-from lib.tool_result_query_contract import MEDIA_TYPE as MANIFEST_MEDIA_TYPE
+from lib.tool_results.tool_result_query_contract import MEDIA_TYPE as MANIFEST_MEDIA_TYPE
 INLINE_LIMIT = 1024 * 1024
 
 # Below the 16 MiB repository row limit, with headroom for manifest/quotas.
@@ -214,7 +214,7 @@ def _text_chunks(text: str):
 def persist_result(value, *, user_id, now_ms=None):
     if value.artifact_ref and value.artifact_owner == int(user_id or 0): return value.artifact_ref
     if int(user_id or 0)<=0: raise ValueError('retention_owner_required')
-    from lib.tool_result_artifacts import ToolResultArtifactRepository
+    from lib.tool_results.tool_result_artifacts import ToolResultArtifactRepository
     repo=ToolResultArtifactRepository()
     parts=[]
     for p in value.parts:

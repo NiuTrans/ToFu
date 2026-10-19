@@ -42,8 +42,8 @@ use crate::authority::AuthorityDatabase;
 enum HoldPhase { RotationPrepare, RotationInstall, PackPrepare, PackInstall,
     OverlayCapture, OverlayPublish, MaintenanceRound, HistoryInstall,
     SearchPrepare, SearchAcknowledge, SearchActivation, SearchBackfill, SearchDirtyList,
-    ArchiveCapture, ArchivePublish, RotationPartial, RotationHandover }
-const HOLD_PHASES: [(HoldPhase, &str); 17] = [
+    ArchiveCapture, ArchivePublish, RotationPartial, RotationHandover, SearchActivationCapture }
+const HOLD_PHASES: [(HoldPhase, &str); 18] = [
     (HoldPhase::RotationPrepare, "rotation.prepare"),
     (HoldPhase::RotationInstall, "rotation.install"),
     (HoldPhase::PackPrepare, "pack.prepare"),
@@ -61,6 +61,7 @@ const HOLD_PHASES: [(HoldPhase, &str); 17] = [
     (HoldPhase::ArchivePublish, "archive.publish"),
     (HoldPhase::RotationPartial, "rotation.partial"),
     (HoldPhase::RotationHandover, "rotation.handover"),
+    (HoldPhase::SearchActivationCapture, "search.activation-capture"),
 ];
 fn hold_phase(operation: &str) -> Option<HoldPhase> {
     HOLD_PHASES.iter().find_map(|(phase, name)| (*name == operation).then_some(*phase))
@@ -268,7 +269,7 @@ impl AuthorityContentionWatch {
                         let progress = foreground_admissions.load(Ordering::Relaxed);
                         shared.record_probe(shared.elapsed_millis(), probe, progress != previous_progress);
                         previous_progress = progress;
-                        std::thread::sleep(WATCH_POLL_INTERVAL);
+                        std::thread::park_timeout(WATCH_POLL_INTERVAL);
                     }
                     stopped.store(true, Ordering::Release);
                 }
@@ -292,6 +293,7 @@ impl AuthorityContentionWatch {
             .map_err(|_| io::Error::other("authority watch thread lock poisoned"))?
             .take();
         if let Some(thread) = thread {
+            thread.thread().unpark();
             let deadline = Instant::now() + WATCH_STOP_JOIN_BUDGET;
             loop {
                 if thread.is_finished() {

@@ -260,6 +260,7 @@ def test_orchestration_schema_decision_is_latched_and_additive(monkeypatch):
             'policyVersion': 'tool-orchestration/v2',
             'compositionMode': 'ptc_bounded_reduction',
             'programmaticCalling': 'on',
+            'programmaticRequestedMode': kwargs['requested_programmatic'],
             'programmaticReason': 'resident_eligible_read_tools',
             'programmaticTier': 'program',
             'programmaticExposurePolicy': 'serial_gateway',
@@ -289,7 +290,8 @@ def test_orchestration_schema_decision_is_latched_and_additive(monkeypatch):
     )
     task = {
         'id': 'stable-tools', 'convId': 'stable-tools-conv', '_userId': 1,
-        'config': {'tools': {'programmaticExposure': 'serial_gateway'}},
+        'config': {'tools': {'programmaticExposure': 'serial_gateway',
+                             'programmaticCalling': 'on'}},
         '_toolScriptBatchFallback': True,
     }
     state = SimpleNamespace(

@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from typing import Any
 import math
 import time
-from lib.log import get_logger
+from lib.log import clear_log_context, get_logger, set_req_id
 
 logger = get_logger(__name__)
 
@@ -21,9 +21,6 @@ class InvocationPolicy:
     """Explicit lifecycle authority; model/capabilities remain task-local."""
 
     parent_task_id: str | None = None
-    presentation: str = 'task'
-    settlement: str = 'task'
-    cancellation: str = 'task'
     kickoff: bool = True
     timeout_seconds: float = 0
     max_429_attempts: int | None = None
@@ -39,19 +36,16 @@ class InvocationPolicy:
         if self.max_429_attempts is not None and (
                 type(self.max_429_attempts) is not int or not 1 <= self.max_429_attempts <= 4096):
             raise ValueError('Invocation provider retry allowance must be 1..4096')
-        root = (not self.is_child and self.presentation == 'task'
-                and self.settlement == 'task' and self.cancellation == 'task')
-        child = (bool(self.parent_task_id) and self.presentation == 'child'
-                 and self.settlement == 'child' and self.cancellation == 'inherited'
-                 and not self.kickoff)
-        if not (root or child):
-            raise ValueError('Invalid invocation policy: child requires task-local evidence port and lifecycle isolation')
+        if self.parent_task_id is not None and (
+                not isinstance(self.parent_task_id, str) or not self.parent_task_id.strip()):
+            raise ValueError('Invocation creator identity must be a nonempty string')
+        if type(self.kickoff) is not bool:
+            raise ValueError('Invocation kickoff policy must be boolean')
 
     @classmethod
     def child(cls, parent_task_id: str, *, timeout_seconds: float = 0,
               max_429_attempts: int | None = None) -> 'InvocationPolicy':
-        return cls(parent_task_id=parent_task_id, presentation='child',
-                   settlement='child', cancellation='inherited', kickoff=False,
+        return cls(parent_task_id=parent_task_id, kickoff=False,
                    timeout_seconds=timeout_seconds, max_429_attempts=max_429_attempts)
 
 
@@ -87,7 +81,9 @@ def _stop_internal_invocation(task: dict, reason: str, *, beacon=None) -> bool:
 
 def invocation_abort_requested(task: dict) -> bool:
     """Observe inherited cancellation without granting upward cancellation rights."""
-    if task.get('aborted'):
+    if task.get('aborted') or (task.get('abort_event') is not None
+                              and task['abort_event'].is_set()):
+        task['aborted'] = True
         return True
     probe = task.get('_invocationAbortCheck')
     if callable(probe):
@@ -102,11 +98,15 @@ def invocation_abort_requested(task: dict) -> bool:
             task['abort_event'].set()
             return True
     limits = (task.get('config') or {}).get('executionLimits') or {}
-    if limits.get('deadline') is not None and time.time() >= limits['deadline']:
+    account = task.get('_executionBudget')
+    account_deadline = (getattr(account, 'limits', {}) or {}).get('deadline')
+    if any(deadline is not None and time.time() >= deadline
+           for deadline in (limits.get('deadline'), account_deadline)):
         task['_executionLimitReason'] = 'execution_deadline_exceeded'
         return _stop_internal_invocation(task, 'deadline')
     beacon = task.get('_invocationProgressBeacon')
-    if beacon is not None and not beacon.is_making_progress(task.get('_invocationProgressKey') or task['id']):
+    if (beacon is not None and not task.get('_storageWaits')
+            and not beacon.is_making_progress(task.get('_invocationProgressKey') or task['id'])):
         return _stop_internal_invocation(task, 'stalled', beacon=beacon)
     deadline = task.get('_invocationDeadline')
     if deadline is not None and time.monotonic() >= deadline:
@@ -127,16 +127,15 @@ def deliver_invocation_event(task: dict, event: dict) -> None:
         raise RuntimeError('Invocation evidence delivery previously failed') from previous
     try:
         if event.get('type') == 'messages_snapshot' and not task.get('_invocationStorageFree'):
-            from lib.storage.retry import call_with_transient_retry
+            from lib.tasks_pkg.persistence_wait import wait_for_persistence
             from lib.tasks_pkg.event_log import append_persistent_event
-            # The append is idempotent on its natural (task, sequence) key,
-            # so a transient authority stall earns a bounded second chance
-            # instead of poisoning every later delivery of this invocation.
-            call_with_transient_retry(
-                lambda: append_persistent_event(
+            # The append is idempotent on its natural (task, sequence) key.
+            # Already-observed evidence waits for ACK even after user Stop;
+            # transient storage pressure cannot poison invocation delivery.
+            wait_for_persistence(
+                task, lambda: append_persistent_event(
                     task['_inspectorTaskId'], event['seq'], event),
-                abort_event=task.get('abort_event'),
-                label=f"invocation evidence append task={str(task.get('id') or '')[:8]}")
+                label='invocation evidence append', cancellable=False)
         sink(event)
     except Exception as exc:
         task['_invocationDeliveryError'] = exc
@@ -165,10 +164,25 @@ def invocation_affinity_id(task: dict) -> str:
 
 def execute_invocation(task: dict[str, Any], *, policy: InvocationPolicy) -> None:
     """Validate once, then enter the mature body inside the owned lane scope."""
+    try:
+        return _execute_invocation(task, policy=policy)
+    finally:
+        # copy_context isolates task teardown from its caller. A root owns a
+        # pooled lane and must also retire that caller's stale correlation;
+        # nested children retain their parent's request/task context.
+        if not policy.is_child:
+            set_req_id('')
+            clear_log_context()
+
+
+def _execute_invocation(task: dict[str, Any], *, policy: InvocationPolicy) -> None:
     from lib.tasks_pkg.orchestrator._run import _execute_task_invocation
     policy.validate()
     from lib.agent_core.execution_limits import validate_execution_limits
     validate_execution_limits((task.get('config') or {}).get('executionLimits'))
+
+    from lib.project_dispatch.admission import validate_task
+    validate_task(task)
     if not task.get('id'):
         raise ValueError("run_task called with a task dict missing 'id' — use create_task()")
     if not policy.is_child and (is_child_invocation(task) or task.get('_parentTaskId')):
@@ -182,32 +196,35 @@ def execute_invocation(task: dict[str, Any], *, policy: InvocationPolicy) -> Non
                 or task.get('_turnId') or task.get('_attemptId')
                 or task.get('_flowLiveTurn') or task.get('_flowRootAttemptId')):
             raise ValueError('Child requires its own carrier and task-local evidence port')
-        task['_invocationPolicy'] = policy
-        if policy.timeout_seconds:
-            task['_invocationDeadline'] = time.monotonic() + policy.timeout_seconds
-        # ContextVars isolate logs, principal and provider pin. Affinity and its
-        # pick diagnostic are thread-local and need an explicit nested scope.
-        # A child invocation is user-requested work, not optional background
-        # work: it must NOT inherit a strict billing-stop-admission scope its
-        # parent entered for its own cheap side calls (title-gen, translate,
-        # optimizer, …). copy_context() would otherwise propagate that
-        # ContextVar and the child's model dispatch would reject every slot
-        # with a recorded billing stop → "No slot available" with no upstream
-        # request ever sent (the swarm sub-agent failure, conv mu8e3bdwdqovh6).
-        from lib.key_stats._admission import _STRICT_BILLING_STOP_ADMISSION
-        from lib.llm_dispatch.conv_affinity import isolated_conv_affinity
+    task['_invocationPolicy'] = policy
+    if policy.timeout_seconds:
+        task.setdefault('_invocationDeadline', time.monotonic() + policy.timeout_seconds)
+    # Every authorized agent owns an isolated execution context. Creator
+    # provenance is not an optional-side-call billing or resilience policy.
+    from lib.key_stats._admission import _STRICT_BILLING_STOP_ADMISSION
+    from lib.llm_dispatch.conv_affinity import isolated_conv_affinity
 
-        def _run_child(t, *, policy):
-            # Clear the flag inside the COPIED context only — the parent
-            # thread's own strict scope (if any) stays intact.
-            _STRICT_BILLING_STOP_ADMISSION.set(False)
-            return _execute_task_invocation(t, policy=policy)
+    def run_in_scope():
+        _STRICT_BILLING_STOP_ADMISSION.set(False)
+        from lib.token_counter.native import native_token_scope
+        native = task.get('_nativePreparedInvocation')
+        if native is None:
+            return _execute_task_invocation(task, policy=policy)
+        from lib.tasks_pkg.native_invocation import NativePreparedInvocation
+        if (not isinstance(native, NativePreparedInvocation)
+                or type(task.get('_userId')) is not int
+                or task['_userId'] != native.principal.require_owner(context='native token invocation')):
+            raise ValueError('native token scope requires the task-owned invocation')
+        host = native.host
+        # Background preparation has no Quart app context. Borrow the issued
+        # host before the first context count; reset it even on fatal teardown.
+        with native_token_scope(host):
+            return _execute_task_invocation(task, policy=policy)
 
+    try:
         with isolated_conv_affinity(invocation_affinity_id(task)):
             invocation_abort_requested(task)
-            return copy_context().run(_run_child, task, policy=policy)
-    try:
-        return _execute_task_invocation(task, policy=policy)
+            return copy_context().run(run_in_scope)
     finally:
         if task.get('_swarm_inject_pending'):
             from lib.swarm.delivery import restore_unconsumed_results

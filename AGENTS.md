@@ -28,6 +28,14 @@ context growth without weakening verification.
   `frontend/src/runtime/sections/`, never the generated `app-runtime.js`. Edit
   styles in `frontend/src/styles/{application,settings}/`, never generated
   files under `static/`.
+- Repo-root local trees that are untracked on purpose (gitignored): `promo/`
+  (marketing HTML/PNGs) and `codex/` (a local vendored Codex CLI checkout used
+  for comparison/evaluation). Neither is a runtime dependency of tracked code:
+  `lib/oauth/codex*` and `lib/skills/paths.py` spawn a `codex` binary and scan
+  `.codex/skills` by name only. Do not track or delete these trees.
+- Generated Python modules follow the package-local `generated_*.py` (or
+  `*_generated.py` where the name predates the convention) prefix, never loose
+  hand-mixed names in a package root. See CONTRIBUTING.md “Generated files”.
 - Batch independent read-only inspections with the live tools' documented
   batching or parallel-call interface. Tool schemas, not repository examples,
   define the available names, arguments, and execution semantics. Return only
@@ -84,7 +92,7 @@ in `docs/STORAGE.md`.
 
 # Design principles (standing constraints)
 
-Three long-term product constraints govern every change in this repo.
+Four long-term product constraints govern every change in this repo.
 
 1. **Single-user performance now, enterprise multi-user later.** Do not build
    multi-tenancy features yet, but never hardcode single-user assumptions into
@@ -136,6 +144,15 @@ Three long-term product constraints govern every change in this repo.
      probed capacity, not a hardcoded single-user assumption.
    - A change that affects resident concurrency or persistent growth includes
      a measurement and updates the owning operations contract.
+
+4. **Find commonality before adding machinery.** Chat, Goal, Evolution and
+   specialized deliverables reuse the existing invocation, coordination, Turn
+   projection and rendering owners. Modes vary prompts, capabilities, actor
+   policy and graph paths, not model/tool loops or presentation state machines.
+   Inspect the common owner first; extend it with explicit policy ports where
+   needed, and remove redundant paths with behavioral parity tests. Synthetic
+   users never inherit human authorization, and domain-specific verification,
+   learning and durable settlement remain explicit rather than flattened away.
 
 Keep this file short and stable; detailed rationale and audit results live in
 docs/ (see docs/ENTERPRISE_EVOLUTION.md).

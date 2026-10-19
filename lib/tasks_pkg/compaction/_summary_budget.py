@@ -10,8 +10,11 @@ import time
 
 def bounded_summary_task(task):
     """Tasks whose source must survive a failed summary, without lossy recovery."""
+    from lib.tasks_pkg.invocation import is_child_invocation
     return isinstance(task, dict) and bool(
         task.get('_transientRuntime')
+        or task.get('_invocationStorageFree')
+        or is_child_invocation(task)
         or (task.get('id') and task.get('convId'))
         or (task.get('config') or {}).get('disableModelFallback'))
 

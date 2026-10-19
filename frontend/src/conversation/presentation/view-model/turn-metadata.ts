@@ -104,9 +104,12 @@ export function actionsFor(
   if (laneId !== 'main') {
     return [{ action: 'copy', disabled: false }];
   }
-  if (status === 'pending' || status === 'running') return [];
+  const review: ConversationTurnActionViewModel[] = actor === 'assistant' && !backgroundCommandInjected
+    ? [{ action: 'review', disabled: false }] : [];
+  if (status === 'pending' || status === 'running') return review;
   const actions: ConversationTurnActionViewModel[] = [
     { action: 'copy', disabled: false },
+    ...review,
     ...(requestInspectorEnabled && taskId
       ? [{ action: 'inspect' as const, operation: taskId, disabled: false }]
       : []),

@@ -1,7 +1,7 @@
 """One bounded L1 candidate before L2, sharing its target and cache economics.
 
 Normal L1 never edits a warm prefix. Under pressure this owner evaluates a
-detached tool/image-only candidate. Adopt only if it resolves the target and
+detached superseded-snapshot/tool/image candidate. Adopt only if it resolves the target and
 repays a prefix rewrite, or safety requires the space. A rejected candidate
 changes no messages/events/cache state. No LLM, durable reads, or new cache.
 """
@@ -25,7 +25,7 @@ def retain_oversized_tool_batch(messages, task, *, target_tokens,
         return False
     from lib.tasks_pkg.manager import task_user_id
     from lib.tasks_pkg.compaction._layer2._anchor import _apiform_tool_rounds
-    from lib.tool_history_pairing import adjacent_tool_call_result_pairs
+    from lib.tool_results.tool_history_pairing import adjacent_tool_call_result_pairs
     from lib.tasks_pkg.compaction._budget import enforce_round_aggregate_budget_v2
     from lib.tools.result_value import TrustedResultText
     import json
@@ -102,7 +102,8 @@ def try_pressure_l1(messages, task, *, target_tokens, total_tokens,
                     remaining_api_rounds=None, measure=None) -> bool:
     if total_tokens <= target_tokens or (task or {}).get('aborted'):
         return False
-    if not any(message.get('role') == 'tool' for message in messages):
+    has_tools = any(message.get('role') == 'tool' for message in messages)
+    if not has_tools and not any(message.get('_contextComposer') for message in messages):
         return False
     from lib.context_experiment_flags import normalize_context_experiment_flags
     if normalize_context_experiment_flags(
@@ -123,10 +124,13 @@ def try_pressure_l1(messages, task, *, target_tokens, total_tokens,
     options = dict(steps=['compact_tool_results', 'strip_cold_images'],
                    ignore_cache_prefix=True,
                    constant_overrides={'MICRO_HOT_TAIL_TOKENS': hot_budget})
-    candidate = deepcopy(messages)
-    saved = micro_compact(candidate, task=dict(task) if task is not None else None,
-                          _dry_run=True, **options)
-    if not saved:
+    from lib.tasks_pkg.context_composer import compact_context_snapshots
+    snapshots = compact_context_snapshots(messages)
+    snapshots_changed = snapshots != messages
+    candidate = deepcopy(snapshots)
+    saved = (micro_compact(candidate, task=dict(task) if task is not None else None,
+                           _dry_run=True, **options) if has_tools else 0)
+    if not saved and not snapshots_changed:
         return False
     after = (measure(candidate) if measure else
              _count_tokens_authoritative(candidate, task)[0])
@@ -161,9 +165,12 @@ def try_pressure_l1(messages, task, *, target_tokens, total_tokens,
         return False
     # Repeat the deterministic transform only after adoption; rejected trials
     # never emit tool_compacted or mark an expected provider cache break.
-    first_change = next(i for i, (old, new) in enumerate(zip(messages, candidate))
-                        if old != new)
-    micro_compact(messages, task=task, **options)
+    first_change = next((i for i, (old, new) in enumerate(zip(messages, candidate))
+                         if old != new), min(len(messages), len(candidate)))
+    if snapshots_changed:
+        messages[:] = snapshots
+    if has_tools:
+        micro_compact(messages, task=task, **options)
     owner = compaction_owner_key(task)
     if owner and task is not None:
         try:

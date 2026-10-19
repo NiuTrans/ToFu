@@ -39,7 +39,7 @@ from typing import Any
 
 from lib.json_store import read_json, update_json_atomic, write_json_atomic
 from lib.log import audit_log, get_logger
-from lib.runtime_paths import data_root
+from lib.runtime.runtime_paths import data_root
 
 logger = get_logger(__name__)
 

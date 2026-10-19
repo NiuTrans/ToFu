@@ -8,9 +8,9 @@ import logging
 import pytest
 from quart.testing import WebsocketResponseError
 
-from lib.app_factory import create_base_app
+from lib.app.app_factory import create_base_app
 from lib.api_response import api_error
-from lib.http_request_lifecycle import register_request_lifecycle
+from lib.http_transport.request_lifecycle import register_request_lifecycle
 from lib.log import req_id
 
 
@@ -24,7 +24,7 @@ pytestmark = pytest.mark.unit
 ])
 def test_owned_http_contains_only_peer_send_failures(failure_origin, error_type, caplog):
     from types import SimpleNamespace
-    from lib.app_lifecycle import owned_asgi_http_connection_class
+    from lib.app.app_lifecycle import owned_asgi_http_connection_class
 
     async def scenario():
         receiver_started = asyncio.Event()
@@ -77,7 +77,7 @@ def test_owned_http_contains_only_peer_send_failures(failure_origin, error_type,
 
 def test_owned_http_parent_cancellation_joins_receiver_and_sender():
     from types import SimpleNamespace
-    from lib.app_lifecycle import owned_asgi_http_connection_class
+    from lib.app.app_lifecycle import owned_asgi_http_connection_class
 
     async def scenario():
         sending = asyncio.Event()
@@ -119,7 +119,7 @@ def test_owned_http_parent_cancellation_joins_receiver_and_sender():
 def test_execution_clock_includes_policy_delay_before_route_and_wall_jump(monkeypatch):
     from types import SimpleNamespace
     from quart import request
-    from lib import http_request_lifecycle as lifecycle
+    from lib.http_transport import request_lifecycle as lifecycle
     from lib.agent_core import execution_clock as clocks
 
     ticks = [10_000_000_000]
@@ -145,7 +145,7 @@ def test_execution_clock_includes_policy_delay_before_route_and_wall_jump(monkey
 
 
 def test_bare_route_assembly_starts_clock_without_mismatching_old_epoch():
-    from lib.http_request_lifecycle import request_execution_clock
+    from lib.http_transport.request_lifecycle import request_execution_clock
     from lib.agent_core.execution_clock import ExecutionClock
     app = create_base_app('bare-request-clock-test', {'TESTING': True})
 

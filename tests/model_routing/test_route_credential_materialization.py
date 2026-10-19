@@ -22,7 +22,7 @@ def _prepare(monkeypatch, secrets):
             raise value
         return value
     repository = SimpleNamespace(
-        get=lambda owner: SimpleNamespace(document=document), resolve_secret=resolve)
+        get=lambda owner: SimpleNamespace(document=document, revision=3), resolve_secret=resolve)
     def mint(**kwargs):
         handle = SimpleNamespace(slot=SimpleNamespace(), api_key=kwargs['api_key'])
         minted.append(handle)

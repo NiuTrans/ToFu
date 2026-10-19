@@ -17,9 +17,12 @@ import uuid
 
 from lib.chat.messages import resolve_conv_refs
 from lib.log import get_logger
-from lib.tool_history_projection import build_tool_history_round
-from lib.tool_round_identity import tool_round_batches
-from lib.tool_round_replay import scan_replayable_tool_round_prefix
+
+from lib.llm.diagnostic_timing import current_timing, timed_stage, timing_stage
+from lib.translate.observability import translation_operation
+from lib.tool_results.tool_history_projection import build_tool_history_round
+from lib.tool_results.tool_round_identity import tool_round_batches
+from lib.tool_results.tool_round_replay import scan_replayable_tool_round_prefix
 
 logger = get_logger(__name__)
 
@@ -28,6 +31,7 @@ _TRANSLATE_SEND_TIMEOUT = 45
 _TRANSLATE_SEND_INNER_MARGIN_SECONDS = 5.0
 
 
+@timed_stage('language_detection')
 def _should_translate_input(text, config):
     """Decide whether ``text`` needs translating to English — the input gate.
 
@@ -100,6 +104,20 @@ def auto_translate_user(text, config, *, user_id, conv_id=None):
     auto_translate = resolve_auto_translate(config)
     if not auto_translate or not text:
         return text, None, None, None
+
+
+    existing = current_timing()
+    with translation_operation('send', conversation_id=conv_id) as timing:
+        with timing_stage('input_translation') as phase:
+            result = _auto_translate_user_active(text, config, user_id=user_id, conv_id=conv_id)
+            phase.annotate(translation_outcome=result[3] or ('completed' if result[1] else 'skipped'))
+        if existing is None:
+            timing.complete(result[3] or ('completed' if result[1] else 'skipped'))
+        return result
+
+
+def _auto_translate_user_active(text, config, *, user_id, conv_id=None):
+    """Execute the unchanged send policy inside one correlated timing scope."""
 
     # Target is always English (the model's strongest language).
     # Source language: an explicit hint wins (harness/SDK callers that know it);

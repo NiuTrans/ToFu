@@ -5,8 +5,8 @@
  * Stays in core because these are called from boot / first-paint / SSE paths:
  * main.js:1354-1355 (loadProjectStatus + _updateAutoApplyUI at boot, BARE),
  * sse_handlers_tool.js:177 + sse_handlers_misc.js:389 (_applyProjectData on
- * project SSE events, BARE), main_conv_lifecycle.js (_restoreConvProject /
- * _clearProjectStateLocal on conv switch), main.js:588 + presence.js +
+ * project SSE events, BARE), main_conv_lifecycle.js (_restoreConvProject on
+ * conversation switch), main.js:588 + presence.js +
  * project-brain*.js (_saveConvProjectPath / _getConvProjectPath), and the
  * always-visible project-bar render+interact cluster (_updateProjectUI /
  * toggleProjectBarReadOnly / toggleAutoApply / clearProject).
@@ -54,6 +54,14 @@ function _updateAutoApplyUI() {
 function _saveConvProjectPath(path, extraPaths, readOnlyPaths) {
   _conversationProjectController.begin();
   const conv = getActiveConv();
+
+  if (!conv) {
+    _conversationProjectController.chooseDraft({
+      projectPath: path || '', projectPaths: path ? [path, ...(extraPaths || [])] : [],
+      readOnlyPaths: readOnlyPaths || [],
+    });
+    return;
+  }
   if (conv) {
     conv.projectPath = path || "";
     // Persist ALL project paths (primary + extras) so they survive conversation switches
@@ -71,9 +79,11 @@ function _saveConvProjectPath(path, extraPaths, readOnlyPaths) {
     } else {
       conv.readOnlyPaths = [];
     }
+    noteConversationProjectChoice(conv);
     reconcileConversationCatalogMetadata(conv.id);
     persistConversationSettings(conv);
   }
+  _restoreConvProject(conv);
 }
 
 function _getConvProjectPath(conv) {
@@ -96,47 +106,7 @@ async function rescanProject() {
   }
 }
 
-/* 伪路径会话的项目栏合成态:不调 setPaths(服务器无法扫描),
-   只渲染 active bar + 徽章,身份仍保留完整伪路径。 */
-function _applyRemoteProjectState(conv, pseudo) {
-  projectState = {
-    active: true,
-    path: pseudo,
-    fileCount: 0,
-    dirCount: 0,
-    totalSize: 0,
-    languages: {},
-    scanning: false,
-    scanProgress: "",
-    scanDetail: "",
-    scannedAt: Date.now(),
-    readOnly: (conv.readOnlyPaths || []).includes(pseudo),
-    extraRoots: (conv.projectPaths || []).filter(path => path !== pseudo).map(path => ({
-      path, readOnly: (conv.readOnlyPaths || []).includes(path),
-    })),
-  };
-  debugLog("Remote worktree active for conversation: " + pseudo, "info");
-  _updateProjectUI();
-}
 
-function _clearProjectStateLocal() {
-  // Reset local projectState without touching server when the next
-  // conversation has no project. Project exploration no longer owns a poll.
-  projectState = {
-    active: false,
-    path: "",
-    fileCount: 0,
-    dirCount: 0,
-    totalSize: 0,
-    languages: {},
-    scanning: false,
-    scanProgress: "",
-    scanDetail: "",
-    scannedAt: 0,
-    extraRoots: [],
-  };
-  _updateProjectUI();
-}
 
 // Temporary retained adapter; delete when project presentation moves to TypeScript.
 function _hasProjectComposerDraft() {
@@ -150,13 +120,7 @@ function _hasProjectComposerDraft() {
 const _conversationProjectController = createConversationProjectController({
   activeId: () => activeConvId,
   exists: id => conversations.some(conv => conv && conv.id === id),
-  hasDraft: _hasProjectComposerDraft,
-  selection: () => projectState,
-  clear: _clearProjectStateLocal,
-  remote: _applyRemoteProjectState,
-  apply: _applyProjectData,
-  setPaths: (paths, readOnly, recent) => Api.project.setPaths(paths, readOnly, recent),
-  warn: message => debugLog(message, 'warn'),
+  apply: data => { projectState = data; _updateProjectUI(); },
 });
 function _restoreConvProject(conv, eligible) {
   return _conversationProjectController.restore(conv, eligible);
@@ -168,9 +132,7 @@ let _projectBarFolders = [];
 let _projectContextView = null;
 
 async function clearProject() {
-  const current = _conversationProjectController.beginMutation();
-  await Api.project.clear().catch(e => debugLog(`[clearProject] ${e.message}`, 'warn'));
-  if (!current()) return;
+  // Detach this conversation locally; do not clear another worker's registry.
   _saveConvProjectPath("");
   projectState = {
     active: false, path: "", fileCount: 0, dirCount: 0, totalSize: 0,
@@ -183,13 +145,14 @@ async function clearProject() {
       && typeof projectModalPresentation.resetAfterProjectClear === 'function') {
     projectModalPresentation.resetAfterProjectClear();
   }
-  /* A project-less chat is never Studio — fall back to Pro (unless the user
-   * is deliberately in Air). Keeps the dial truthful. */
+  // Repaint the optional attachment action; all chat capabilities remain available.
   if (typeof onProjectCleared === 'function') onProjectCleared();
   debugLog("Project cleared", "success");
 }
 
 function _applyProjectData(data) {
+  // Unscoped server/SSE status is enrichment only, not workspace authority.
+  if (!projectStatusMatchesWorkspace(data, projectState)) return;
   projectState = {
     ...projectState,
     active: true,
@@ -205,12 +168,12 @@ function _applyProjectData(data) {
   };
   // Merge in extra roots — backend always sends extraRoots[] in get_state()
   if (Array.isArray(data.extraRoots)) {
-    projectState.extraRoots = data.extraRoots;
+    projectState.extraRoots = projectState.extraRoots.map((root, index) => ({
+      ...data.extraRoots[index], ...root,
+    }));
   }
   // Primary root read-only flag (backend sends `readOnly` in get_state()).
-  if (data.readOnly !== undefined) {
-    projectState.readOnly = !!data.readOnly;
-  }
+  // Read-only policy also belongs to conversation settings, not global status.
   // Cross-DC indicator from backend
   if (data.crossDC) {
     projectState.crossDC = data.crossDC;
@@ -332,15 +295,8 @@ async function toggleProjectBarReadOnly(index, event) {
 
   const _prevProjectState = { ...projectState, extraRoots: (projectState.extraRoots || []).slice() };
 
-  // Optimistic LOCAL repaint only (instant feedback). We do NOT sync the
-  // conversation here — the backend round-trip below owns persistence, so we
-  // never write a guessed state that could race the authoritative response.
-  _applyProjectData({
-    path: folders[0],
-    readOnly: readOnly.has(folders[0]),
-    extraRoots: folders.slice(1).map((p) => ({ path: p, readOnly: readOnly.has(p) })),
-    crossDC: projectState.crossDC || null,
-  });
+  // Explicit user policy is conversation-owned even while validation is pending.
+  _saveConvProjectPath(folders[0], folders.slice(1), roList);
   debugLog(`${entry.path} → ${readOnly.has(entry.path) ? 'read-only' : 'writable'}`, "success");
 
   const current = _conversationProjectController.beginMutation();
@@ -351,13 +307,13 @@ async function toggleProjectBarReadOnly(index, event) {
     if (!resp || !resp.ok) throw new Error(data.error || "Failed");
     if (!current()) return; // navigation, restore or a newer selection owns the bar
     // Single source of truth: render + persist EXACTLY what the backend returned.
-    _applyProjectData(data);
     const { allPaths, roList: srvRo } = _deriveConvPathsFromState(data);
     _saveConvProjectPath(allPaths[0] || '', allPaths.slice(1), srvRo);
+    _applyProjectData(data);
   } catch (e) {
     if (!current()) return; // never restore the previous conversation's roots
-    projectState = _prevProjectState;
-    _updateProjectUI();
+    const previous = _deriveConvPathsFromState(_prevProjectState);
+    _saveConvProjectPath(previous.allPaths[0] || '', previous.allPaths.slice(1), previous.roList);
     debugLog(`Read-only toggle failed: ${e.message}`, "error");
   }
 }
@@ -366,8 +322,8 @@ async function toggleProjectBarReadOnly(index, event) {
 async function loadProjectStatus() {
 
   _updateProjectUI();
-  // Cold shells restore only after authoritative settings hydration.
+  // A status repaint is not a newer project choice: preserve the generation
+  // that lets the pending authoritative hydration update this same view.
   const conv = getActiveConv();
-  if (conv?._turnSnapshotRequired) return;
-  return _restoreConvProject(conv);
+  return _restoreConvProject(conv, () => getActiveConv() === conv);
 }

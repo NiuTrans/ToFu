@@ -167,7 +167,7 @@ def test_bound_complete_evidence_admission_scales_with_selected_model(monkeypatc
 def test_oversized_bound_source_uses_owned_artifact_without_mutating_original(monkeypatch):
     import json
     from lib.research import context
-    from lib.tool_result_artifacts import ToolResultArtifactRepository
+    from lib.tool_results.tool_result_artifacts import ToolResultArtifactRepository
     source = {'source_task_id': 'original', 'survey_markdown': 'evidence ' * 10000}
     messages = [{'role': 'system', 'content': 'system'}, {'role': 'user', 'content':
         json.dumps({'workspace': {'hypothesis': 'fixed'}, 'research_artifacts': source})}]
@@ -193,7 +193,7 @@ def test_oversized_bound_source_uses_owned_artifact_without_mutating_original(mo
 def test_source_continuation_requires_read_tool_and_retention_ack(monkeypatch):
     import json
     from lib.research import context
-    from lib.tool_result_artifacts import ToolResultArtifactRepository
+    from lib.tool_results.tool_result_artifacts import ToolResultArtifactRepository
     monkeypatch.setattr(context, 'action_window', lambda model: 32000)
     monkeypatch.setattr('lib.token_counter.count_text', lambda text, **k: 50000 if 'evidence evidence' in text else 1000)
     messages = [{'role': 'system', 'content': 'system'}, {'role': 'user', 'content': json.dumps(
@@ -208,7 +208,7 @@ def test_source_continuation_requires_read_tool_and_retention_ack(monkeypatch):
 def test_oversized_workspace_is_not_hidden_by_source_continuation(monkeypatch):
     import json
     from lib.research import context
-    from lib.tool_result_artifacts import ToolResultArtifactRepository
+    from lib.tool_results.tool_result_artifacts import ToolResultArtifactRepository
     monkeypatch.setattr(context, 'action_window', lambda model: 32000)
     monkeypatch.setattr('lib.token_counter.count_text', lambda *a, **k: 50000)
     monkeypatch.setattr(ToolResultArtifactRepository, 'put', lambda *a, **k: pytest.fail('unusable source persisted'))

@@ -203,7 +203,7 @@ def test_no_resend_when_prefix_changed(monkeypatch):
 def test_resend_stops_on_throttle(monkeypatch):
     """A throttle/503 on the resend stops the loop (don't pile retries on an
     already-throttled gateway) — exactly one resend attempt, no third call."""
-    from lib.llm_errors import RateLimitError
+    from lib.llm.llm_errors import RateLimitError
     n, usage = _run_stream(
         monkeypatch, enabled=True,
         dispatch_seq=[_FLOOR_USAGE, RateLimitError('429 throttled'), _HIT_USAGE])

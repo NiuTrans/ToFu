@@ -163,7 +163,7 @@ def test_task_runtime_owns_one_session_and_settles_before_terminal_event():
 
 def test_explicit_admission_lease_cannot_release_another_execution(monkeypatch):
     import lib.agent_core.admission as admission
-    import lib.runtime_state_store as runtime_state_store
+    import lib.runtime.runtime_state_store as runtime_state_store
 
     runtime_state_store.reset_for_test()
     controller = admission.AdmissionController(max_inflight=2)

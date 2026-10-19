@@ -30,6 +30,10 @@ _MCP_RESOURCE_KEYS = (
     'doc',            # xuecheng_* — doc id or full collabpage URL
     'app_id',         # hope_fetch_source_code / hope_get_status (appid variant)
     'appid',          # hope_get_status / hope_change_priority
+    'experiment_id_or_name_or_url',  # llm experiment canvas references
+    'experiment_or_url',
+    'experiment_id',
+    'base_id',        # llm fork source (server-scoped projection below)
     'experiment_id_or_name',  # llm_experiment_get — canvas experiment
     'job_id',         # hope_mlp_job_* — psx… job id
     'job_ids',        # hope_mlp_job_info — comma-separated
@@ -319,7 +323,7 @@ def _mcp_arg_suffix(fn_args, *, user_id=None):
     return ''
 
 
-def _mcp_links(fn_args, *, user_id=None):
+def _mcp_links(fn_args, *, fn_name='', tool_content=None, user_id=None, tool_result_evidence=None):
     """Map the human-readable label of a linkable MCP arg → its clickable URL.
 
     Returns a dict keyed by the EXACT label string ``_mcp_arg_suffix`` renders
@@ -337,7 +341,10 @@ def _mcp_links(fn_args, *, user_id=None):
     """
     if not isinstance(fn_args, dict):
         return {}
-    links = {}
+    suffix, links = _llm_canvas_display(fn_name, fn_args, tool_content,
+                                        tool_result_evidence=tool_result_evidence)
+    if suffix is not None:
+        return links
     try:
         pid = fn_args.get('project_id')
         if pid:
@@ -404,7 +411,7 @@ def _doc_cid(val) -> str:
     return s if s.isdigit() else ''
 
 
-def compose_mcp_display(fn_name, fn_args, *, user_id=None):
+def compose_mcp_display(fn_name, fn_args, *, tool_content=None, user_id=None, tool_result_evidence=None):
     """Compose the MCP tool-call display label — the SINGLE source of truth.
 
     Both the live tool-round line (``_tool_display_mcp``, at ``tool_start``)
@@ -445,5 +452,179 @@ def compose_mcp_display(fn_name, fn_args, *, user_id=None):
         scope = f' @ {container}' if container else ''
         return f'{head} — {n} file{"s" if n != 1 else ""}{scope}:\n{lines}', True
 
-    suffix = _mcp_arg_suffix(fn_args, user_id=user_id)
+    suffix, _ = _llm_canvas_display(fn_name, fn_args, tool_content,
+                                    tool_result_evidence=tool_result_evidence)
+    if suffix is None:
+        suffix = _mcp_arg_suffix(fn_args, user_id=user_id)
     return (f'{head} — {suffix}' if suffix else head), False
+
+
+# Shared route/resource policy; TS imports this same JSON directly.
+import json as _policy_json
+from pathlib import Path as _PolicyPath
+
+_LLM_CANVAS_POLICY = _policy_json.loads(
+    (_PolicyPath(__file__).resolve().parents[3] / 'contracts' /
+     'llm_canvas_links_v1.json').read_text(encoding='utf-8'))
+_LLM_CANVAS_BASE = (_LLM_CANVAS_POLICY['origin'] +
+                    _LLM_CANVAS_POLICY['canvasPathPrefix'])
+_LLM_EXPERIMENT_KEYS = tuple(_LLM_CANVAS_POLICY['inputKeys'])
+
+
+def _llm_experiment_id(value):
+    """Validate a decimal experiment ID or canonical canvas/run URL."""
+    import re
+    from urllib.parse import urlsplit
+    if isinstance(value, bool) or not isinstance(value, (str, int)):
+        return ''
+    text = str(value).strip()
+    if len(text) > 512:
+        return ''
+    if re.fullmatch(r'[0-9]+', text):
+        return text if int(text) > 0 else ''
+    if any(c.isspace() or c in '\\<>"\'' for c in text):
+        return ''
+    try:
+        url = urlsplit(text)
+        if (url.scheme + '://' + url.netloc != _LLM_CANVAS_POLICY['origin']
+                or url.query or url.fragment):
+            return ''
+        match = re.fullmatch(
+            _LLM_CANVAS_POLICY['canvasPathPattern'],
+            url.path)
+        return _llm_experiment_id(match.group(1)) if match else ''
+    except ValueError:
+        return ''
+
+
+def _llm_complete_retained_evidence(evidence, *, retained_source=True):
+    import re
+    if not isinstance(evidence, dict):
+        return False
+    required = _LLM_CANVAS_POLICY['singleItemWrapper']['retainedSourceEvidence']
+    return (all((not retained_source and key == 'projectionKind')
+                or (type(evidence.get(key)) is type(expected) and evidence.get(key) == expected)
+                for key, expected in required.items())
+            and evidence.get('sourceCoverage') in ('unknown', 'complete')
+            and (not retained_source or (
+                isinstance(evidence.get('artifactRef'), str)
+                and re.fullmatch(r'tool-result:[a-f0-9]{64}', evidence['artifactRef']) is not None
+                and all(isinstance(evidence.get(key), str) and evidence[key]
+                        for key in ('evidenceId', 'resultId'))))
+            and not evidence.get('error') and evidence.get('isError') is not True
+            and evidence.get('ok') is not False and evidence.get('success') is not False
+            and evidence.get('dry_run') is not True)
+
+
+def _llm_successful_result(value, *, tool_result_evidence=None):
+    """Explicit success, optionally in the exact single-item sparse projection."""
+
+    if tool_result_evidence is not None and not _llm_complete_retained_evidence(
+            tool_result_evidence, retained_source=False):
+        return {}
+    if isinstance(value, str):
+        if len(value) > _LLM_CANVAS_POLICY['limits']['serializedChars']:
+            return {}
+        try:
+            value = _policy_json.loads(value)
+        except (ValueError, TypeError):
+            return {}
+    if not isinstance(value, dict):
+        return {}
+    if 'items' in value:
+        wrapper = _LLM_CANVAS_POLICY['singleItemWrapper']
+        items = value.get('items')
+        if (set(value) != set(wrapper['keys'])
+                or not (value.get('summary') == wrapper['summary']
+                        or (value.get('summary') == wrapper['retainedSourceSummary']
+                            and _llm_complete_retained_evidence(tool_result_evidence)))
+                or not isinstance(items, list)
+                or len(items) != wrapper['itemCount']):
+            return {}
+        value = items[0]  # No recursive or multi-item harvesting.
+
+    def rejected(envelope):
+        return (not isinstance(envelope, dict)
+                or envelope.get('ok') is False or envelope.get('error')
+                or envelope.get('isError') is True
+                or envelope.get('success') is False
+                or envelope.get('dry_run') is True
+                or envelope.get('truncated') is True
+                or envelope.get('status') in ('error', 'failed', 'cancelled', 'canceled', 'partial'))
+
+    if rejected(value):
+        return {}
+    data = (value.get('data') if value.get('ok') is True
+            else value if value.get('success') is True else None)
+    return {} if rejected(data) else data
+
+
+def _llm_canvas_display(fn_name, fn_args, tool_content=None, *, tool_result_evidence=None):
+    """Call-local links: no name cache, guessed IDs, or nested config harvesting.
+
+    A successful resolved result can link an input name. Fork results identify
+    the NEW canvas, never the source. Failed envelopes cannot resolve names.
+    """
+    from lib.mcp.types import parse_namespaced_name
+    parsed = parse_namespaced_name(fn_name)
+    if (not parsed or parsed[0] != _LLM_CANVAS_POLICY['server']
+            or not parsed[1].startswith(_LLM_CANVAS_POLICY['toolPrefix'])):
+        return None, {}
+    if not isinstance(fn_args, dict):
+        return None, {}
+    result = _llm_successful_result(tool_content, tool_result_evidence=tool_result_evidence)
+    result_id = _llm_experiment_id(result.get('experimentId'))
+    if fn_args.get('dry_run') is True:
+        result_id = ''
+    # Untrusted URL fields must agree with the resolved identity.
+    for key in _LLM_CANVAS_POLICY['resultUrlKeys']:
+        if key in result and _llm_experiment_id(result[key]) != result_id:
+            result_id = ''
+            break
+    key = next((k for k in _LLM_EXPERIMENT_KEYS if fn_args.get(k) is not None), None)
+    fork = parsed[1] in _LLM_CANVAS_POLICY['forkTools']
+    links = {}
+
+    def label_and_link(value, resolved=''):
+        input_id = _llm_experiment_id(value)
+        label = _render_mcp_arg('experiment_id', input_id or value)
+        eid = input_id or resolved
+        if eid and label:
+            links[label] = _LLM_CANVAS_BASE + eid
+        return label
+
+    resource = ''
+    if key:
+        values = str(fn_args[key]).split(',') if key == 'ids' else [fn_args[key]]
+        labels = [label_and_link(v, result_id if not fork and len(values) == 1 else '')
+                  for v in values[:2]]
+        resource = ', '.join(filter(None, labels))
+        if len(values) > 2:
+            resource += f' +{len(values) - 2} more'
+    if not key and result_id:
+        result_name = result.get('experimentName')
+        if not isinstance(result_name, (str, int)):
+            result_name = result_id
+        resource = label_and_link(result_name or result_id, result_id)
+    if fork:
+        # Explicit qualifiers prevent identical source/new names colliding.
+        source = resource
+        source_links = dict(links)
+        links.clear()
+        if source:
+            resource = 'source: ' + source
+            for label, href in source_links.items():
+                links['source: ' + label] = href
+        new_name = result.get('experimentName') if result_id else fn_args.get('name')
+        if not isinstance(new_name, (str, int)):
+            new_name = result_id
+        new_label = _render_mcp_arg('name', new_name or result_id)
+        if new_label:
+            new_label = 'new: ' + new_label
+            resource = f'{new_label} @ {resource}' if resource else new_label
+            if result_id:
+                links[new_label] = _LLM_CANVAS_BASE + result_id
+    chips = _mcp_modifier_chips(fn_args, resource)
+    if chips:
+        resource = ' · '.join(filter(None, [resource, *chips]))
+    return resource or None, links

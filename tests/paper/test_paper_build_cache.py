@@ -91,13 +91,15 @@ def test_cached_pdf_is_owner_scoped_and_integrity_checked(tmp_path):
             pytest.fail('tampered read')
 
 
-def test_leased_reader_survives_pressure_and_admission_refuses_over_budget(tmp_path):
+def test_leased_reader_survives_pressure_and_publication_exceeds_idle_target(tmp_path):
     cache = _cache(tmp_path, records=1)
     first = _build(tmp_path)
     cache.publish(first)
     with cache.lease(7, 'a' * 64, first.receipt['build_id']):
-        with pytest.raises(BuildError, match='cache is in use'):
-            cache.publish(_build(tmp_path, document='c' * 64))
+        accepted = _build(tmp_path, document='c' * 64)
+        cache.publish(accepted)
+        assert cache.latest(7, 'c' * 64) == accepted.receipt
+        assert cache.latest(7, 'a' * 64) == first.receipt
         assert cache.prune()['records'] == 1
     next_build = _build(tmp_path, document='c' * 64)
     cache.publish(next_build)
@@ -134,13 +136,13 @@ def test_reader_reservations_survive_cache_recreation_and_expire_without_a_worke
     request = {'viewer_id': identity, 'operation': 'retain'}
     assert cache.viewer(7, document, build, request)['retained']
     other_process = LocalBuildCache(cache.root, cache.budget)
-    with pytest.raises(BuildError, match='cache is in use'):
-        other_process.publish(_build(tmp_path, document='c' * 64))
+    other_process.publish(_build(tmp_path, document='c' * 64))
+    assert other_process.latest(7, document) == first.receipt
     clock[0] += 200
     assert other_process.viewer(7, document, build, {**request, 'operation': 'renew'})['retained']
     clock[0] += 100
-    with pytest.raises(BuildError, match='cache is in use'):
-        cache.publish(_build(tmp_path, document='c' * 64))
+    cache.publish(_build(tmp_path, document='c' * 64))
+    assert cache.latest(7, first.receipt['document_id']) == first.receipt
     clock[0] += limit('viewer_lease_seconds')
     assert not cache.viewer(7, document, build, {**request, 'operation': 'renew'})['retained']
     replacement = _build(tmp_path, document='c' * 64)
@@ -186,12 +188,9 @@ from lib.paper.builds.budget import BuildBudget
 from lib.paper.builds.compiler import CompiledBuild
 from lib.paper.builds.errors import BuildError
 cache = LocalBuildCache(Path(sys.argv[1]), BuildBudget(1, 4, 16384, 1))
-try:
-    cache.publish(CompiledBuild(json.loads(sys.argv[2]), Path(sys.argv[3])))
-except BuildError as exc:
-    assert exc.code == 'cache_limit'
-else:
-    raise AssertionError('the other process evicted an active reader')
+cache.publish(CompiledBuild(json.loads(sys.argv[2]), Path(sys.argv[3])))
+assert cache.latest(7, 'a' * 64) is not None
+assert cache.latest(7, 'c' * 64)['build_id'] == json.loads(sys.argv[2])['build_id']
 ''', str(cache.root), json.dumps(second.receipt), str(second.directory)],
         capture_output=True, text=True, timeout=15)
     assert child.returncode == 0, child.stderr
@@ -212,8 +211,8 @@ def test_corrupt_reader_metadata_protects_only_until_expiry_and_is_counted(tmp_p
     path = cache._build(7, first.receipt['document_id'], first.receipt['build_id']) / '.viewers.json'
     path.write_bytes(b'?' * 3072)
     assert cache.prune()['bytes'] == baseline + 3072
-    with pytest.raises(BuildError, match='cache is in use'):
-        cache.publish(_build(tmp_path, document='c' * 64))
+    cache.publish(_build(tmp_path, document='c' * 64))
+    assert cache.latest(7, first.receipt['document_id']) == first.receipt
     expired = time.time() - limit('viewer_lease_seconds') - 1
     os.utime(path, (expired, expired))
     cache.publish(_build(tmp_path, document='c' * 64))
@@ -237,8 +236,8 @@ def test_reader_update_failure_preserves_prior_reservation(tmp_path, monkeypatch
     with pytest.raises(BuildError, match='Cannot update') as failure:
         cache.viewer(7, document, build, {**request, 'operation': 'renew'})
     assert isinstance(failure.value.__cause__, OSError)
-    with pytest.raises(BuildError, match='cache is in use'):
-        cache.publish(_build(tmp_path, document='c' * 64))
+    cache.publish(_build(tmp_path, document='c' * 64))
+    assert cache.latest(7, first.receipt['document_id']) == first.receipt
     assert not list(cache.root.rglob('.viewers.pending'))
 
 
@@ -256,8 +255,10 @@ def test_failed_build_under_pressure_preserves_last_good_and_single_slot_can_upd
     cache = _cache(tmp_path, records=1)
     good = _build(tmp_path)
     cache.publish(good)
-    with pytest.raises(BuildError, match='cache is in use'):
-        cache.publish(_build(tmp_path, status='failed'))
+    failed = _build(tmp_path, status='failed')
+    cache.publish(failed)
+    with cache.lease(7, 'a' * 64, failed.receipt['build_id']) as stored:
+        assert stored.receipt == failed.receipt
     assert cache.latest(7, 'a' * 64) == good.receipt
     next_build = _build(tmp_path)
     cache.publish(next_build)
@@ -282,3 +283,36 @@ def test_pointer_publication_failure_rolls_back_without_deleting_prior_success(t
         cache.publish(_build(tmp_path))
     assert cache.latest(7, 'a' * 64) == good.receipt
     assert cache.prune()['records'] == 1
+
+
+def test_oversized_result_is_published_and_reclaimable_after_read(tmp_path):
+    cache = _cache(tmp_path, records=1, size=1)
+    build = _build(tmp_path)
+    cache.publish(build)
+    assert cache.latest(7, 'a' * 64) == build.receipt
+    with cache.open_artifact(7, 'a' * 64, build.receipt['build_id'], 'document.pdf') as (stream, meta):
+        assert stream.read() == (build.directory / 'document.pdf').read_bytes()
+        occupancy = cache.prune()
+        assert occupancy['bytes'] > occupancy['max_bytes']
+        assert occupancy['records'] == 1
+    assert cache.prune()['records'] == 0
+    assert cache.latest(7, 'a' * 64) is None
+
+
+def test_many_active_results_survive_reopen_and_reclaim_after_release(tmp_path):
+    import contextlib
+    cache = _cache(tmp_path, records=1, size=1)
+    builds = [_build(tmp_path, document=f'{i:064x}') for i in range(145)]
+    with contextlib.ExitStack() as readers:
+        for build in builds:
+            cache.publish(build)
+            readers.enter_context(cache.lease(7, build.receipt['document_id'], build.receipt['build_id']))
+        reopened = LocalBuildCache(cache.root, cache.budget)
+        measured = reopened.prune()
+        assert measured['records'] == 145
+        assert measured['bytes'] > measured['max_bytes']
+        for build in builds:
+            with reopened.open_artifact(7, build.receipt['document_id'], build.receipt['build_id'], 'document.pdf') as (stream, meta):
+                assert stream.read() == (build.directory / 'document.pdf').read_bytes()
+                assert meta == build.receipt['artifacts'][0]
+    assert reopened.prune()['records'] == 0

@@ -98,7 +98,7 @@ def test_rpc_deadline_rejects_malformed_and_clamps(monkeypatch):
 
 
 def test_native_launch_durability_defaults_to_strict(monkeypatch):
-    from lib.storage_sidecar.native_launch import _durability_args
+    from lib.storage_authority_sql.native_launch import _durability_args
 
     monkeypatch.delenv('TOFU_DB_DURABILITY', raising=False)
     monkeypatch.delenv('TOFU_DB_WAL_FLUSH_INTERVAL_MS', raising=False)
@@ -108,7 +108,7 @@ def test_native_launch_durability_defaults_to_strict(monkeypatch):
 
 
 def test_native_launch_durability_normal_is_explicit_and_bounded(monkeypatch):
-    from lib.storage_sidecar.native_launch import _durability_args
+    from lib.storage_authority_sql.native_launch import _durability_args
 
     monkeypatch.setenv('TOFU_DB_DURABILITY', 'normal')
     monkeypatch.delenv('TOFU_DB_WAL_FLUSH_INTERVAL_MS', raising=False)
@@ -119,7 +119,7 @@ def test_native_launch_durability_normal_is_explicit_and_bounded(monkeypatch):
 
 
 def test_native_launch_durability_rejects_drift_fail_closed(monkeypatch):
-    from lib.storage_sidecar.native_launch import _durability_args
+    from lib.storage_authority_sql.native_launch import _durability_args
 
     # An interval without normal durability is a silent-drift trap, not a
     # hint: the bounded-RPO consent must be explicit and coherent.

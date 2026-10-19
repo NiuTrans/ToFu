@@ -185,3 +185,16 @@ def test_every_shipped_tool_family_has_a_display_handler():
 
 if __name__ == '__main__':
     raise SystemExit(pytest.main([__file__, '-v']))
+
+
+@pytest.mark.parametrize('name', [
+    'evolution_explore', 'evolution_artifact', 'evolution_review', 'evolution_source',
+    'send_project_message', 'get_project_messages', 'consider_project_message',
+    'list_agents', 'manage_agents', 'publish_response_asset', 'publish_response_file',
+    'publish_rich_response', 'inspect_tool_effect',
+])
+def test_workflow_tools_have_readable_labels_without_private_payload(name):
+    from lib.tasks_pkg.tool_display import tool_round_label
+    label = tool_round_label(name, {'content': 'private-payload-canary'})
+    assert label != name and ' ' in label
+    assert 'private-payload-canary' not in label

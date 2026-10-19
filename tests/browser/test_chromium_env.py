@@ -372,7 +372,7 @@ def test_all_entry_points_use_the_shared_module():
         # (_tofu_maybe_reexec_into_env) since the boot-env extraction — the
         # shared-module import lives there, and server.py itself carries no
         # chromium code (asserted below so a copy cannot re-grow inline).
-        'lib/server_boot_env.py': 'boots the app (server.py delegates here)',
+        'lib/server/server_boot_env.py': 'boots the app (server.py delegates here)',
         'bootstrap_pkg/env_reexec.py': 'smart launcher environment owner',
         'tests/conftest.py': 'visual E2E browser fixture',
         'lib/motion_video/_env.py': 'video render chain',
@@ -625,3 +625,17 @@ def test_interactive_login_degrades_with_an_actionable_reason():
     ''')
     assert rc == 0, f'interactive-login degradation failed:\n{out[-2500:]}'
     assert 'LOGIN_DEGRADE_OK' in out, out[-2000:]
+
+
+@pytest.mark.parametrize('override', [None, '/operator/node'])
+def test_playwright_driver_uses_provisioned_node_without_overriding_operator(tmp_path, monkeypatch, override):
+    local = tmp_path / '.local/bin/node'
+    local.parent.mkdir(parents=True)
+    local.write_text('#!/bin/sh\necho v20.19.0\n')
+    local.chmod(0o755)
+    monkeypatch.setattr(chromium_env.sys, 'platform', 'linux')
+    env = {'HOME': str(tmp_path)}
+    if override:
+        env['PLAYWRIGHT_NODEJS_PATH'] = override
+    chromium_env.ensure_chromium_env(env=env)
+    assert env['PLAYWRIGHT_NODEJS_PATH'] == (override or str(local))

@@ -27,7 +27,7 @@ def test_file_history_unhandled_failure_is_an_envelope(tmp_path, monkeypatch):
 
 
 def test_provider_probe_worker_failure_is_an_envelope(monkeypatch):
-    import lib.provider_probe as probe
+    import lib.provider.provider_probe as probe
 
     monkeypatch.setattr(probe, 'persist_probe_task', lambda _task: None)
     task = {

@@ -114,7 +114,8 @@ def execute_tools_schema(*, include_program: bool = True) -> dict[str, Any]:
     """Return the ``execute_tools`` gateway schema.
 
     The async JavaScript authoring contract is stable across task rounds.
-    ``include_program=False`` is the explicit operator/benchmark batch override.
+    ``include_program=False`` is the default model-facing JSON batch surface.
+    The combined form is retained for explicitly enabled legacy program calls.
     Task routing guidance belongs in tail context, never in this schema.
     """
     description = (
@@ -137,12 +138,10 @@ def execute_tools_schema(*, include_program: bool = True) -> dict[str, Any]:
         'all effects use tools.*. Source 32 KiB, 16 child calls, result 1 MiB.')
     if not include_program:
         description = (
-            'Run task-available tools; search_tools is optional when the exact '
-            'name and schema are already known. Provide calls '
-            'for one or more independent tool invocations; prefer a single '
-            'batched call with execution=parallel over issuing tools one per '
-            'turn. Do not wrap a call you also invoke directly in the '
-            'same response; choose one lane per action.')
+            'Run independent calls with known JSON arguments using execution=parallel. '
+            'Use direct tools for single actions. Sequential preserves order: '
+            'inspect prior results before dependent calls. Find exact schemas '
+            'with search_tools. Never repeat direct calls here. Permissions/approvals apply.')
     calls_property: dict[str, Any] = {
         'type': 'array',
         'maxItems': 16,
@@ -199,28 +198,24 @@ def execute_program_schema() -> dict[str, Any]:
         'function': {
             'name': EXECUTE_PROGRAM_NAME,
             'description': (
-                'Fetch dependent evidence, verify/paginate and compute privately; return findings. '
-                'Use visible tools’ exact names and schemas: await tools.invoke(name,args) returns '
-                'decoded data. Promise.all for independent calls. '
-                'Copy the expression string from programInput.read into your code for the entire retained response, '
-                'even when its preview is truncated; programInput is not a JavaScript global. '
-                'jsonType describes its value, not upstream completeness or freshness. '
-                'tools.result({ref}) or tools.result(name,args) returns decoded data, not a receipt or manifest. '
-                'artifactRef/tool-result: belongs to storage; tools.result requires an input_ handle. '
-                'tools.inputs({name:toolName}) lists {inputs,total,nextOffset}; use inputs[i].ref without copying IDs. '
-                'tools.keep(value) saves computed JSON and returns a handle with ref, not source evidence. '
-                'tools.observe(reason,data) stops for model judgment; keep state before handing off. '
-                'Failed/incomplete inputs also stop. No imports, timers, host filesystem/process/network. '
-                'tools.parseJSON(text) preserves large integer tokens as BigInt; return String(value). Same permissions/approvals. '
-                'Limits: source 32 KiB; 16 each of calls, reads, input queries and keeps; '
-                'private inputs 1 MiB per program; returns/handoffs use heap resources and artifact delivery.'),
+                'Async JS body, no wrapper. '
+                'await tools.invoke(name,args) makes NEW calls and returns decoded data. Promise.all batches calls. '
+                'programInput.read is a snapshot expression. '
+                'jsonType=type, not completeness. '
+                'tools.result({ref}) or tools.result(name,args) reads retained results, never unread pages. '
+                'Use input_ handles, never artifactRef/tool-result: refs. '
+                'Prefer tools.result(name,args); absent inputs hand off. '
+                'tools.inputs({name:toolName}): {inputs,total,nextOffset}; check inputs.length before indexing. '
+                'An empty page is not empty source data. Read artifactRef via read_tool_artifact. '
+                'tools.keep(value) retains computed JSON, not source evidence. '
+                'tools.observe(reason,data) hands off judgment; keep state first. Stop on incomplete/failed evidence. '
+                'No imports/timers/files/processes/network. tools.parseJSON(text) preserves BigInt; String() serializes it. '
+                'Same permissions/approvals. Limits: 32 KiB code; 16 each calls/reads/queries/keeps; '
+                '1 MiB private inputs/program.'),
             'parameters': {
                 'type': 'object',
                 'properties': {'code': {
                     'type': 'string', 'minLength': 1,
-                    'description': (
-                        'Async JavaScript body with explicit return, no function wrapper. '
-                        'Process decoded data using schemas or jsonType; inspect keys/samples only when needed.'),
                 }},
                 'required': ['code'], 'additionalProperties': False,
             },
@@ -1019,6 +1014,7 @@ def _without_schema_annotations(value: Any) -> Any:
 
 def _required_property_error(
     schema: Mapping[str, Any], *, path: str = '$',
+    _inherited_properties: frozenset[str] = frozenset(),
 ) -> str:
     """Return the first Moonshot-strict required/properties violation.
 
@@ -1028,6 +1024,10 @@ def _required_property_error(
     same schema's ``properties`` map. Enforce that provider-compatible subset
     recursively before a request leaves the process.
     """
+    # A combinator branch may legitimately carry only ``required`` while the
+    # shared ``properties`` bag lives on the parent (standard JSON Schema
+    # intersects them). Pre-seed the known names with the parent's property
+    # declarations so branch checks stay sound without forcing duplication.
     required = schema.get('required')
     if required is not None:
         if not isinstance(required, (list, tuple)) \
@@ -1036,14 +1036,18 @@ def _required_property_error(
         properties = schema.get('properties')
         property_names = set(properties) if isinstance(properties, Mapping) \
             else set()
+        property_names |= set(_inherited_properties)
         missing = [name for name in required if name not in property_names]
         if missing:
             return (f'{path}.required references properties not declared at '
                     f'that level: {", ".join(missing)}')
 
+    own_properties = schema.get('properties')
+    branch_inherited = frozenset(own_properties) \
+        if isinstance(own_properties, Mapping) else frozenset()
     for key in _SCHEMA_MAP_OF_SCHEMAS_KEYS:
         children = schema.get(key)
-        if not isinstance(children, Mapping):
+        if children is None or not isinstance(children, Mapping):
             continue
         for name, child in children.items():
             if isinstance(child, Mapping):
@@ -1058,11 +1062,14 @@ def _required_property_error(
         for index, child in enumerate(children):
             if isinstance(child, Mapping):
                 error = _required_property_error(
-                    child, path=f'{path}.{key}[{index}]')
+                    child, path=f'{path}.{key}[{index}]',
+                    _inherited_properties=branch_inherited)
                 if error:
                     return error
     for key in _SCHEMA_SINGLE_SCHEMA_KEYS:
         child = schema.get(key)
+        if child is None:
+            continue
         if isinstance(child, Mapping):
             error = _required_property_error(child, path=f'{path}.{key}')
             if error:
@@ -1436,6 +1443,11 @@ def sanitize_wire_tools(
     """
     if not isinstance(tools, list):
         return []
+    from lib.model_info import is_kimi
+
+    # Source validation already establishes the ordinary wire invariant.
+    # Kimi has a distinct projected dialect and always needs its final check.
+    source_validates_wire = not is_kimi(model)
     offenders: list[str] = []
     repaired_types: list[str] = []
     repaired_schemas: list[str] = []
@@ -1477,8 +1489,9 @@ def sanitize_wire_tools(
                     keep, repair_paths, normalization_error = (
                         _normalize_provider_tool_schema(tool, model=model)
                     )
-                schema_error = normalization_error or _wire_tool_schema_error(
-                    keep, model=model)
+                schema_error = normalization_error
+                if not schema_error and (keep is not tool or not source_validates_wire):
+                    schema_error = _wire_tool_schema_error(keep, model=model)
                 if schema_error:
                     drop = True
                     offenders.append(
@@ -1500,12 +1513,12 @@ def sanitize_wire_tools(
             if not drop and 'decoded_result_schema' in keep:
                 # Private catalog metadata never becomes a provider extension.
                 # Invalid late metadata removes only the claim, not authority.
-                from lib.tools.contracts import clone_decoded_result_schema
+                from lib.tools.contracts import serialize_decoded_result_schema
                 projected = dict(keep)
                 declared = projected.pop('decoded_result_schema')
                 if declared is not None and isinstance(keep.get('function'), dict):
                     try:
-                        declared = clone_decoded_result_schema(declared)
+                        declared = serialize_decoded_result_schema(declared)
                     except ValueError:
                         declared = None
                     if declared is not None:
@@ -1513,9 +1526,7 @@ def sanitize_wire_tools(
                         function['description'] = (
                             (function.get('description') or '') +
                             '\nSuccessful decoded JSON value (producer declaration; '
-                            'coverage/freshness unknown): ' + json.dumps(
-                                declared, ensure_ascii=True, sort_keys=True,
-                                separators=(',', ':'), allow_nan=False))
+                            'coverage/freshness unknown): ' + declared)
                         projected['function'] = function
                 keep = projected
         if out is None and (drop or keep is not tool):
@@ -1782,8 +1793,13 @@ def ptc_local_wire_tools(
     gateway_only remains an explicitly requested, one-round exposure trial;
     background controls stay available and ordinary task policy owns restoration.
     """
-    include_program = str(tier or '').strip().lower() != 'batch'
+    include_program = str(tier or '').strip().lower() == 'program'
     execute = execute_program_schema() if include_program else _stable_local_execute_tools_schema()
+    if (not include_program and str(exposure or '').strip().lower() == 'code_api'
+            and isinstance(projection_evidence, dict)):
+        projection_evidence['programmaticCodeApi'] = {'reason': 'code_api_requires_program_tier'}
+        projection_evidence['programmaticExposureRequested'] = 'code_api'
+        projection_evidence['programmaticExposure'] = 'additive'
     if include_program and str(exposure or '').strip().lower() == 'code_api':
         from lib.tools.code_api import compile_code_api_action
         required = (set(required_direct_names) & {_schema_name(tool) for tool in catalog or []
@@ -2728,8 +2744,80 @@ def _type_ok(value: Any, expected: str) -> bool:
     return True
 
 
+def _missing_required_keys(value: Any, schema: dict) -> list[str]:
+    missing = [key for key in schema.get('required') or ()
+               if key not in value or value.get(key) is None]
+    return [str(key) for key in missing]
+
+
+def _promote_batch_item_fields(item: dict, item_schema: dict,
+                               batch_source: dict, item_path: str,
+                               repairs: list[dict[str, Any]]) -> dict:
+    """Copy top-level singular values into batch entries missing them.
+
+    Only fills a missing required item key when the same key is declared as
+    a string on both the batch item schema and the top-level arguments, so
+    the value is provably the one the model already provided for the batch.
+    """
+    out = dict(item)
+    props = item_schema.get('properties') or {}
+    for key in _missing_required_keys(item, item_schema):
+        if key not in batch_source:
+            continue
+        candidate = batch_source[key]
+        prop = props.get(key)
+        if not isinstance(prop, dict) or prop.get('type') != 'string':
+            continue
+        if not isinstance(candidate, str):
+            continue
+        out[key] = candidate
+        repairs.append({
+            'path': f'{item_path}.{key}',
+            'kind': 'batch_item_promote',
+            'before': None, 'after': candidate,
+            'source': f'$.arguments.{key}',
+        })
+    return out
+
+
+def _normalize_batch_array(items: Any, item_schema: dict, path: str,
+                           repairs: list[dict[str, Any]],
+                           source_arguments: dict) -> Any:
+    item_props = item_schema.get('properties') or {}
+    if not isinstance(item_props, dict) or not item_props:
+        return items
+    required = [str(key) for key in item_schema.get('required') or ()]
+    if not required:
+        return items
+    normalized = []
+    dropped = 0
+    for index, item in enumerate(items):
+        if isinstance(item, dict):
+            item = _promote_batch_item_fields(
+                item, item_schema, source_arguments,
+                f'{path}[{index}]', repairs)
+        if isinstance(item, dict) and _missing_required_keys(item, item_schema):
+            dropped += 1
+            repairs.append({
+                'path': f'{path}[{index}]',
+                'kind': 'drop_invalid_batch_item',
+                'before': item, 'after': None,
+            })
+            continue
+        normalized.append(item)
+    if not normalized and dropped:
+        raise ValueError(json.dumps({
+            'code': 'missing_required_arguments', 'path': path,
+            'missing': required,
+            'message': ('All batch entries are missing required arguments: '
+                        + ', '.join(required)),
+            'retry_hint': 'Provide each missing argument and retry.',
+        }, ensure_ascii=False))
+    return normalized
+
 def _normalize_schema_value(value: Any, schema: Any, path: str,
-                            repairs: list[dict[str, Any]]) -> Any:
+                            repairs: list[dict[str, Any]],
+                            source_arguments: dict | None = None) -> Any:
     if not isinstance(schema, dict):
         return value
     expected = schema.get('type')
@@ -2799,7 +2887,8 @@ def _normalize_schema_value(value: Any, schema: Any, path: str,
         for key, child_schema in props.items():
             if key in out:
                 out[key] = _normalize_schema_value(
-                    out[key], child_schema, f'{path}.{key}', repairs)
+                    out[key], child_schema, f'{path}.{key}', repairs,
+                    source_arguments=source_arguments)
         if schema.get('additionalProperties') is False:
             extras = sorted(set(out) - set(props))
             if extras:
@@ -2812,7 +2901,12 @@ def _normalize_schema_value(value: Any, schema: Any, path: str,
                 }, ensure_ascii=False))
         value = out
     elif isinstance(value, list) and isinstance(schema.get('items'), dict):
-        value = [_normalize_schema_value(item, schema['items'],
+        item_schema = schema['items']
+        if source_arguments is not None \
+                and path.rsplit('.', 1)[0] == '$.arguments':
+            value = _normalize_batch_array(
+                value, item_schema, path, repairs, source_arguments)
+        value = [_normalize_schema_value(item, item_schema,
                                          f'{path}[{i}]', repairs)
                  for i, item in enumerate(value)]
 
@@ -2914,7 +3008,8 @@ def normalize_gateway_call(
     try:
         args = _normalize_schema_value(
             raw_args, _tool_parameters(catalog_index(catalog)[name]),
-            '$.arguments', repairs)
+            '$.arguments', repairs,
+            source_arguments=raw_args if isinstance(raw_args, dict) else None)
     except ValueError as exc:
         try:
             detail = json.loads(str(exc))

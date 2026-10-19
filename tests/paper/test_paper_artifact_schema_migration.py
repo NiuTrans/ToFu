@@ -6,8 +6,8 @@ import sqlite3
 
 import pytest
 
-from lib.storage_sidecar.adapters.sqlite import SQLiteSession
-from lib.storage_sidecar.schema import SCHEMA_VERSION, initialize_schema
+from lib.storage_authority_sql.adapters.sqlite import SQLiteSession
+from lib.storage_authority_sql.schema import SCHEMA_VERSION, initialize_schema
 
 
 pytestmark = pytest.mark.unit

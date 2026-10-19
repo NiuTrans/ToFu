@@ -257,5 +257,5 @@ def test_unreachable_network_does_not_raise(monkeypatch, tmp_path):
     def _boom(*a, **k):
         raise OSError('network unreachable')
 
-    monkeypatch.setattr('lib.http_client.http_get', _boom)
+    monkeypatch.setattr('lib.http_transport.client.http_get', _boom)
     assert _craft.ensure_craft_corpus() is False

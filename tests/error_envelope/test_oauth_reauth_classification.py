@@ -66,7 +66,7 @@ class TestOauthReauthClassification:
 @pytest.mark.parametrize('provider', ['codex', 'claude'])
 def test_missing_subscription_survives_request_preparation(monkeypatch, provider):
     from lib.error_envelope import from_exception
-    from lib.llm_errors import LocalRequestPreparationError, SubscriptionLoginRequiredError
+    from lib.llm.llm_errors import LocalRequestPreparationError, SubscriptionLoginRequiredError
     from lib.oauth.outbound import resolve_oauth_request
     monkeypatch.setattr(f'lib.oauth.{provider}.{provider}_get_valid_token', lambda **kwargs: None)
     try:
@@ -86,7 +86,7 @@ def test_missing_subscription_survives_request_preparation(monkeypatch, provider
 
 def test_preparation_programming_error_keeps_internal_guidance():
     from lib.error_envelope import from_exception
-    from lib.llm_errors import LocalRequestPreparationError
+    from lib.llm.llm_errors import LocalRequestPreparationError
     error = LocalRequestPreparationError('synthetic body failure')
     error.__cause__ = ValueError('Codex subscription not logged in')
     assert from_exception(error)['kind'] == 'internal'

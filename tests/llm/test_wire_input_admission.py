@@ -5,7 +5,7 @@ import pytest
 
 from lib.llm.body._admission import enforce_body_input_limit
 from lib.llm_dispatch._api_stream_state import _adapt_stream_body_for_slot
-from lib.llm_errors import PromptTooLongError
+from lib.llm.llm_errors import PromptTooLongError
 from lib.token_counter.evidence import ADMITTED_INPUT_TOKENS_KEY as COUNT
 
 pytestmark = pytest.mark.unit

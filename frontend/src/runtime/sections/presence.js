@@ -1,18 +1,9 @@
 /* ===== migrated source: presence.js ===== */
-/* Project collaboration bar derived only from the Project Brain projection.
- * Presence/peer state is intentionally absent: work ownership never transfers,
- * overlap advice is execution-local, and the bar is a projection shortcut.
- */
+/* Narrow retained adapter for the typed conversation-first project surface.
+ * Delete with retained project/catalog navigation; no presentation state here. */
 (function wireProjectProjectionBar() {
-  'use strict';
-  if (typeof pushSubscribe !== 'function') return;
-  if (typeof createPresenceSummaryController !== 'function') return;
   if (runtimeScope.__presenceWired) return;
   runtimeScope.__presenceWired = true;
-
-  var lastFingerprint = '';
-  var refetchTimer = null;
-
   function norm(value) { return String(value || '').replace(/[/\\]+$/, ''); }
   function projectPath() {
     try {
@@ -27,108 +18,140 @@
       return norm(path);
     } catch (_error) { return ''; }
   }
-  function text(key, params, fallback) {
-    try {
-      var value = typeof t === 'function' ? t(key, params) : '';
-      return value && value !== key ? value : fallback;
-    } catch (_error) { return fallback; }
+
+  function sidebarPath() {
+    var folder = typeof getFolders === 'function' && typeof getActiveFolderId === 'function'
+      ? getFolders().find(function (item) { return item.id === getActiveFolderId(); }) : null;
+    return folder ? norm(folder.projectPaths?.[0] || folder.projectPath || '') : projectPath();
   }
+  function scope(sidebarOnly) {
+    var resolvePath = sidebarOnly ? sidebarPath : projectPath;
+    var root = resolvePath();
+    var conv = typeof getActiveConv === 'function' ? getActiveConv() : null;
+    if (root !== projectPath()) conv = null;
+    var api = typeof Api !== 'undefined' ? Api.project : null;
+    if (!root || !api) return null;
+    return {
+          path: root, currentConversationId: conv?.id || '', currentPath: resolvePath,
 
-  var controller = createPresenceSummaryController({
-    currentScope: function () {
-      var root = projectPath();
-      return root ? { root: root, selfConversationId: '' } : null;
-    },
-    fetchSummary: function (root) {
-      var api = typeof Api !== 'undefined' ? Api.project : null;
-      return api && typeof api.brainSummary === 'function'
-        ? api.brainSummary(root) : null;
-    },
-    onSummaryChanged: render,
-    onError: function () { /* bar degrades to hidden */ },
-  });
-
-  function segments(summary) {
-    var status = summary?.status || {};
-    var active = Number(status.activeCount || 0);
-    var recent = Number(status.recentOutcomeCount || 0);
-    var values = [];
-    if (active > 0) values.push({
-      className: 'collab-seg-progress',
-      label: text('projectBrain.activeWork', null, 'Active') + ': ' + active,
-    });
-    if (recent > 0) values.push({
-      className: 'collab-seg-outcomes',
-      label: text('projectBrain.recentOutcomes', null, 'Recent outcomes') + ': ' + recent,
-    });
-    return values;
-  }
-
-  function render() {
-    var host = document.getElementById('presenceStrip');
-    if (!host) return;
-    var root = projectPath();
-    if (!root) {
-      host.hidden = true;
-      host.innerHTML = '';
-      lastFingerprint = '';
-      return;
-    }
-    var summary = controller.summaryFor(root, '');
-    var rows = segments(summary);
-    var label = [text('projectCoordination.title', null, 'Project workspace')]
-      .concat(rows.map(function (row) { return row.label; })).join(' · ');
-    var fingerprint = root + '|' + label;
-    if (fingerprint === lastFingerprint) return;
-    lastFingerprint = fingerprint;
-    host.replaceChildren();
-    host.hidden = false;
-
-    var coordination = createProjectCoordinationButton({
-      label: label,
-      size: 'sm', variant: 'ghost',
-      onClick: function () {
-        var conv = typeof getActiveConv === 'function' ? getActiveConv() : null;
-        var api = typeof Api !== 'undefined' ? Api.project : null;
-        if (!api || !root) return;
-        openProjectCoordinationWorkspace({
-          path: root, currentConversationId: conv?.id || '', currentPath: projectPath,
-
-          currentConversation: function () { return getActiveConv()?.id || ''; },
+          currentConversation: function () { return root === projectPath() ? (getActiveConv()?.id || '') : ''; },
+          conversations: function () {
+            return conversations.filter(function (item) {
+              return !item._localOnly && !item.archived && !item.readOnly
+                && norm(typeof _getConvProjectPath === 'function' ? _getConvProjectPath(item) : item.projectPath) === root;
+            }).map(function (item) { return { id: item.id, title: item.title || item.id }; });
+          },
+          subscribe: function (refresh) {
+            pushSubscribe('project', '*', refresh);
+            return function () { pushUnsubscribe('project', '*', refresh); };
+          },
           binding: function (path) { return api.coordination(path); },
 
+          dispatch: {
+            recipients: function () {
+              return conversations.filter(function (item) {
+                return !item._localOnly && !item.archived && !item.readOnly && item.id !== conv?.id
+                  && norm(typeof _getConvProjectPath === 'function' ? _getConvProjectPath(item) : item.projectPath) === root;
+              }).map(function (item) { return { id: item.id, title: item.title || item.id }; });
+            },
+            humanTurns: function () {
+              var state = runtimeScope.ConversationTurnStore?.ensureRuntimeStore?.(conv?.id)?.getState?.();
+              return Object.values(state?.turnsById || {}).filter(function (turn) {
+                return turn?.actor === 'human' && turn.projectionRevision > 0;
+              }).map(function (turn) {
+                return { actor: 'human', turnId: turn.turnId, projectionRevision: turn.projectionRevision,
+                  promptPreview: typeof turn.projection?.content === 'string' ? turn.projection.content.slice(0, 120) : '' };
+              });
+            },
+            commandId: function () { return api.newAssignmentCommandId(); },
+            list: function (path, commandId, options) { return api.coordinationAssignments(path, commandId, options); },
+            grant: function (request, commandId) { return api.grantAssignment(request, commandId); },
+            dispatch: function (request) { return api.dispatchAssignment(request); },
+            revoke: function (request) { return api.revokeAssignment(request); },
+            review: function (request) { return api.reviewAssignment(request); },
+
+            publish: function (request) { return api.publishAssignment(request); },
+          },
+
+          scopeChanges: {
+            list: async function (path) { return (await api.coordinationScopeChanges(path)).scopeChanges; },
+            apply: function (body, key) { return api.applyScopeChange(body, key); },
+            retry: function (body, key) { return api.retryScopeChange(body, key); },
+          },
+          responsibilities: {
+            list: async function (path) { return (await api.coordinationResponsibilities(path)).responsibilities; },
+            create: function (body, key) { return api.createResponsibility(body, key); },
+            pause: function (body, key) { return api.pauseResponsibility(body, key); },
+            cancel: function (body, key) { return api.cancelResponsibility(body, key); },
+            reconcile: function (body, key) { return api.reconcileResponsibility(body, key); },
+          },
+          sharedFiles: {
+            list: function (path, cursor) { return api.coordinationSharedFiles(path, cursor); },
+            read: function (_path, body) { return api.readSharedFile(body, api.newAssignmentCommandId()); },
+
+            register: function (body, key) { return api.registerSharedFile(body, key); },
+            refresh: function (body, key) { return api.refreshSharedFile(body, key); },
+          },
+
+          reports: {
+            read: function (path) { return api.coordinatorReports(path); },
+            markRead: function (body) { return api.markCoordinatorReportRead(body); },
+          },
+          budget: {
+            read: function (path) { return api.coordinatorBudget(path); },
+            update: function (body) { return api.updateCoordinatorBudget(body); },
+          },
           messages: function (path, id, beforeId) { return api.coordinationMessages(path, id, beforeId); },
           board: function (path) { return api.board(path); },
           bind: function (path, id, revision) { return api.bindCoordinator(path, id, revision); },
+
+          create: function (path, revision) {
+            var folderId = typeof getActiveFolderId === 'function' ? getActiveFolderId() : '';
+            return api.createCoordinator(path, folderId, revision);
+          },
           navigate: function (id) { if (typeof loadConversation === 'function') loadConversation(id); },
           openEvidence: function () { runtimeScope.openProjectBrain?.({ tab: 'integration' }); },
-        }).catch(function (error) {
-          if (typeof showToast === 'function') showToast(error.message || String(error), 'error');
-        });
-      },
-    });
-    coordination.setAttribute('data-testid', 'collab-bar');
-    host.appendChild(coordination);
-  }
 
-  function scheduleRefresh() {
-    if (refetchTimer) clearTimeout(refetchTimer);
-    refetchTimer = setTimeout(function () {
-      refetchTimer = null;
-      controller.refresh();
-    }, 300);
+    };
   }
+  var host = document.getElementById('presenceStrip');
+  var list = document.getElementById('convList');
+  if (!host || !list) return;
+  var sidebar = document.createElement('div');
+  sidebar.id = 'projectCoordinatorEntry';
+  var column = document.createElement('div');
+  column.className = 'coordination-conversation-column';
+  list.before(column);
+  column.append(sidebar, list);
+  host.hidden = false;
+  function createSurface(sidebarOnly) {
+    return createProjectCoordinationSurface({
+    sidebar: sidebarOnly ? sidebar : document.createElement('div'),
+    canvas: sidebarOnly ? document.createElement('div') : host,
+    mode: sidebarOnly ? 'sidebar' : 'canvas',
+    scope: function () { return scope(sidebarOnly); }, sidebarPath: sidebarPath,
 
-  pushSubscribe('project', '*', scheduleRefresh);
-  runtimeScope.presenceRefresh = function () {
-    if (projectPath()) controller.refresh();
-    render();
-  };
-  runtimeScope.CollabBar = {
-    _render: render,
-    _setSummary: function (root, summary) {
-      controller.adoptSummary(root, '', summary);
+    changed: function () { if (typeof renderConversationList === 'function') renderConversationList(); },
+    canCreate: function () { return typeof getActiveFolderId === 'function' && !!getActiveFolderId(); },
+    create: async function (ports, binding) {
+      var folderId = typeof getActiveFolderId === 'function' ? getActiveFolderId() : '';
+
+      var navigationCurrent = _projectConversationNavigation.checkpoint();
+      var created = await Api.project.createCoordinator(ports.path, folderId || '', binding.revision);
+      if (!navigationCurrent() || folderId !== getActiveFolderId()
+          || norm(ports.currentPath()) !== norm(ports.path)) return;
+      if (created.availability === 'available') ports.navigate(created.conversationId);
     },
-  };
+    details: function (ports) {
+      openProjectCoordinationWorkspace(ports).then(function () { surface.refresh(true); sidebarSurface.refresh(true); }).catch(function (error) {
+        if (typeof showToast === 'function') showToast(error.message || String(error), 'error');
+      });
+    },
+  });
+  }
+  var surface = createSurface(false);
+  var sidebarSurface = createSurface(true);
+  runtimeScope.presenceRefresh = function () { surface.refresh(); sidebarSurface.refresh(); };
+  window.addEventListener('pagehide', function (event) { if (!event.persisted) { surface.destroy(); sidebarSurface.destroy(); } });
   runtimeScope.presenceRefresh();
 })();

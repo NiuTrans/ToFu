@@ -1,7 +1,7 @@
 """Domain-facade contracts for turn-native conversations.
 
 Transaction semantics are exercised against the real authority in
-``test_storage_sidecar_contract.py``. This suite pins the public facade and
+``test_storage_authority_sql_contract.py``. This suite pins the public facade and
 its pure projection/settlement behavior without constructing a second store.
 """
 
@@ -373,8 +373,7 @@ def test_queued_pair_with_inline_image_activates_and_cancels(chat_sidecar):
     import os
 
     from lib.message_queue import get_queue
-    from lib.storage.errors import StorageError
-    from lib.storage_sidecar.receipt_codec import encode_receipt_response
+    from lib.storage_authority_sql.receipt_codec import encode_receipt_response, decode_receipt_response
     from lib.turn_lifecycle import (
         activate_queued_turn_pair,
         bind_task,
@@ -423,8 +422,7 @@ def test_queued_pair_with_inline_image_activates_and_cancels(chat_sidecar):
     assert activated['turn']['turnId'] == queued['turn']['turnId']
     assert activated['_needsStart'] is True
     assert get_queue(conversation_id, user_id=7) == []
-    with pytest.raises(StorageError, match='receipt budget'):
-        encode_receipt_response(activated)
+    assert decode_receipt_response(encode_receipt_response(activated)) == activated
 
     conversation_id = _new_conversation_id('queue-image-cancel')
     _create(conversation_id, user_id=7)
@@ -432,8 +430,7 @@ def test_queued_pair_with_inline_image_activates_and_cancels(chat_sidecar):
     cancelled = cancel_queued_turn_pair(conversation_id, queue_id, user_id=7)
     assert cancelled['cancelled'] is True
     assert get_queue(conversation_id, user_id=7) == []
-    with pytest.raises(StorageError, match='receipt budget'):
-        encode_receipt_response(cancelled)
+    assert decode_receipt_response(encode_receipt_response(cancelled)) == cancelled
 
 
 def test_terminal_frame_overflow_falls_back_to_slim_settlement(
@@ -1056,7 +1053,7 @@ def test_checkpoint_resume_freezes_previous_round_execution_identity(chat_sideca
         record_task_event,
         update_turn_projection,
     )
-    from lib.tool_round_replay import SUPERSEDED_PROVIDER_ATTEMPT_FIELD
+    from lib.tool_results.tool_round_replay import SUPERSEDED_PROVIDER_ATTEMPT_FIELD
 
     conversation_id = _new_conversation_id('round-owner')
     created = _create(conversation_id)
@@ -1760,7 +1757,7 @@ def test_checkpoint_resume_bootstrap_event_is_exempt_from_streaming_cap(chat_sid
     """
     import json
 
-    from lib.storage_sidecar.operations_pkg._turns import (
+    from lib.storage_authority_sql.operations_pkg._turns import (
         _ATTEMPT_EVENT_MAX_NONTERMINAL_BYTES,
     )
     from lib.turn_lifecycle import (
@@ -1772,7 +1769,7 @@ def test_checkpoint_resume_bootstrap_event_is_exempt_from_streaming_cap(chat_sid
         record_task_event,
         update_turn_projection,
     )
-    from lib.tool_round_replay import SUPERSEDED_PROVIDER_ATTEMPT_FIELD
+    from lib.tool_results.tool_round_replay import SUPERSEDED_PROVIDER_ATTEMPT_FIELD
 
     conversation_id = _new_conversation_id('resume-oversize')
     created = _create(conversation_id)

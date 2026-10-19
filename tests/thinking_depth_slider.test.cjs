@@ -324,18 +324,57 @@ test('single-rung rebinding holds the verbatim stored intent and never commits f
   s.event(s.inputs[0], 'input', 2);
   // Rebinding to a ladder that cannot represent 'medium' must not rewrite
   // saved intent from the render path. sync() only paints; 'medium' stays the
-  // verbatim depth, surfaced as unavailable, and nothing commits.
+  // verbatim committed depth and nothing commits from the render path.
   s.controller.sync('medium', { levels: ['default', 'low'], restoration: {fallback: 'default', replacements: {medium: 'low'}} });
   assert.deepEqual(s.commits, []);
   s.event(s.inputs[0], 'pointerup');
   s.event(s.inputs[0], 'change');
   // The stale drag was cancelled by the re-sync; it releases without persisting.
   assert.deepEqual(s.commits, []);
-  // 'medium' remains the held depth, surfaced as an unavailable rung (the
-  // ladder is ['low','medium'] with the thumb parked on the flagged 'medium').
+  // The server restoration table maps 'medium' onto 'low': the ladder is NOT
+  // inflated with an unusable rung — the thumb parks on the replacement rung
+  // and the label keeps the saved intent, flagged unavailable.
+  assert.equal(s.inputs[0].max, '0');
+  assert.equal(s.inputs[0].value, '0');
   assert.match(s.inputs[0].getAttribute('aria-valuetext'), /Unavailable/);
-  assert.equal(s.inputs[0].max, '1');
-  assert.equal(s.inputs[0].value, '1');
+  assert.match(s.inputs[0].getAttribute('aria-valuetext'), /Med/);
+});
+
+test('restoration parks the thumb on the mapped rung and preserves verbatim intent', t => {
+  // The restart scenario: a depth saved for a wider ladder meets a narrower
+  // route. The slider paints the executable replacement, keeps the verbatim
+  // saved depth in storage, and binds back when the wide ladder returns.
+  const s = setup(t);
+  const narrow = { levels: ['default', 'low', 'high', 'max'], restoration: {fallback: 'default', replacements: {medium: 'low'}} };
+  const wide = { levels: ['default', 'off', 'low', 'medium', 'high', 'xhigh', 'max'] };
+  s.controller.sync('medium', narrow);
+  assert.deepEqual(s.commits, []);
+  assert.equal(s.inputs[0].max, '2');
+  // The thumb parks on the mapped replacement rung 'low' (native index 0),
+  // flagged with the saved intent.
+  assert.equal(s.inputs[0].value, '0');
+  assert.match(s.inputs[0].getAttribute('aria-valuetext'), /Unavailable/);
+  // No synthesized unusable rung: the slider never grew a 'medium' position.
+  const card = s.inputs[0].closest('[data-thinking-depth-slider]');
+  assert.equal(card.querySelector('.depth-slider-dots').children.length, 3);
+  // The parked thumb is on a selectable rung; an explicit gesture still
+  // commits the rung it lands on, persistence stays gesture-only.
+  s.event(s.inputs[0], 'input', 1);
+  s.event(s.inputs[0], 'change');
+  assert.deepEqual(s.commits, ['high']);
+  // Rebinding to a ladder that can express the saved depth restores it as-is.
+  s.controller.sync('medium', wide);
+  assert.equal(s.inputs[0].value, '2');
+  assert.equal(s.inputs[0].getAttribute('aria-valuetext'), en['mobile.medium']);
+  assert.deepEqual(s.commits, ['high']);
+  // A depth the restoration table cannot map (unknown future token, no
+  // 'default' rung in the native ladder) is still appended as an unavailable
+  // flagged rung: verbatim intent survives, never silently rebound.
+  s.controller.sync('unknown-future-token', { levels: ['default', 'low', 'high'], restoration: {fallback: 'default', replacements: {medium: 'low'}} });
+  assert.equal(s.inputs[0].max, '2');
+  assert.equal(s.inputs[0].value, '2');
+  assert.match(s.inputs[0].getAttribute('aria-valuetext'), /Unavailable/);
+  assert.deepEqual(s.commits, ['high']);
 });
 
 test('opaque native names preserve declared order without invented effort rankings', t => {
@@ -345,12 +384,18 @@ test('opaque native names preserve declared order without invented effort rankin
   // cannot take, but commits nothing: persistence is gesture-only.
   s.controller.sync('off', options);
   assert.deepEqual(s.commits, []);
+  // 'off' maps onto 'careful': the thumb parks on the replacement rung
+  // (native index 0) and the label keeps the saved intent, flagged.
+  assert.equal(s.inputs[0].value, '0');
+  assert.match(s.inputs[0].getAttribute('aria-valuetext'), /Unavailable/);
   s.controller.sync('obsolete-custom-token', options);
   assert.deepEqual(s.commits, []);
-  // The unrepresentable 'obsolete-custom-token' is appended as a third
-  // (unavailable) rung and the thumb parks on it: max 2, value 2.
+  // An unmapped depth ('obsolete-custom-token', fallback 'default' not in
+  // the native ladder) is still appended as an unavailable flagged rung;
+  // the label keeps the saved intent verbatim.
   assert.equal(s.inputs[0].max, '2');
   assert.equal(s.inputs[0].value, '2');
+  assert.match(s.inputs[0].getAttribute('aria-valuetext'), /Unavailable/);
 });
 
 

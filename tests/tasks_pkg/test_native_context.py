@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 import pytest
 
-from lib.agent_core.native_process import RoundRequest
+from lib.agent_core.native_process import RoundRequest, RoundPreparation
 from lib.identity import PrincipalContext
 from lib.llm_dispatch.context_policy import task_context_profile
 from lib.llm_dispatch.native_context_scope import native_context_scope
@@ -41,6 +41,33 @@ class Accounting:
 
     async def settle(self, result):
         self.events.append(('settle', result.request.round))
+
+
+@pytest.mark.parametrize('round_number',[0,7])
+def test_wire_projection_reads_injected_admitted_history_on_fresh_or_restored_round(round_number):
+    async def run():
+        owner=task();events=[];raw_tools=[{'type':'function','function':{'name':'read','parameters':{}}}]
+        def inject(task,messages,**kwargs):
+            events.append('inject');messages.append({'role':'user','content':'injected context'})
+            assert kwargs['round_tools']==raw_tools
+        def admit(task,messages,tools,**kwargs):
+            events.append('admit');assert messages[-1]['content']=='injected context';assert tools==raw_tools
+        def project(route,template,catalog,messages,number):
+            events.append('wire');assert number==round_number;assert messages[-1]['content']=='injected context'
+            assert template['max_tokens']==64 and route['owner_user_id']==7
+            return []
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            policy=NativeContextPolicy(principal=principal(),task=owner,executor=executor)
+            policy.bind_wire_projection(project,raw_tools)
+            policy.bind_route(metadata(),{'max_tokens':64},{'read':{'name':'read'}})
+            request=RoundRequest(principal(),owner['id'],'request',round_number,1,[{'role':'user','content':'before'}])
+            with patch('lib.tasks_pkg.orchestrator._root_agent_loop.prepare_round_context',side_effect=inject),patch('lib.tasks_pkg.orchestrator._root_agent_loop.admit_round_context',side_effect=admit):
+                result=await policy.prepare(request)
+            assert isinstance(result,RoundPreparation) and result.wire_tools==[]
+            assert result.messages[-1]['content']=='injected context' and events==['inject','admit','wire']
+            assert policy.completion_binding()==('fixture',[])
+            policy.close()
+    asyncio.run(run())
 
 
 def test_scoped_route_window_output_and_owner_reset_without_dispatcher():
@@ -113,7 +140,7 @@ def test_real_admission_preserves_tool_and_encrypted_reasoning_evidence():
 
 
 def test_native_pressure_without_owned_summary_route_never_buys_a_summary():
-    from lib.llm_errors import PromptTooLongError
+    from lib.llm.llm_errors import PromptTooLongError
     async def run(executor):
         owner_task=task(); account=Accounting()
         policy=NativeContextPolicy(principal=principal(),task=owner_task,executor=executor,round_policy=account)
@@ -211,17 +238,26 @@ def test_shared_preparation_order_and_child_delivery_scope(monkeypatch):
         assert events==(['hygiene','remember','swarm','evolution','programmatic'] if child else ['hygiene','inbox','remember','project','swarm','evolution','programmatic'])
 
 
-def test_execution_notice_is_admitted_after_its_actual_append(monkeypatch):
+def test_execution_notice_is_counted_in_the_single_admission(monkeypatch):
+    """The decided notice is committed BEFORE the one measured admission, so
+    the appended notice is counted inside that measurement — no second
+    full-prompt re-measure."""
     from lib.tasks_pkg.orchestrator._root_agent_loop import admit_round_context
     seen=[]
     def admit(messages,*args,**kwargs):
         seen.append([dict(row) for row in messages]);return {'totalTokens':len(messages),'toolSchemaTokens':0}
-    def notice(task,messages,*args,**kwargs):messages.append({'role':'user','content':'budget notice'})
     monkeypatch.setattr('lib.tasks_pkg.compaction._prompt_admission.enforce_dispatch_prompt_limit',admit)
-    monkeypatch.setattr('lib.tasks_pkg.context_composer.execution_allowance.inject_execution_allowance',notice)
+    decision={'snapshot': {'tokens_remaining': None, 'usage_known': True},
+              'level': 0, 'initial_seconds': None, 'text': 'budget notice'}
+    monkeypatch.setattr('lib.tasks_pkg.context_composer.execution_allowance.notice_decision',
+                        lambda *a, **k: dict(decision))
+    monkeypatch.setattr('lib.tasks_pkg.context_composer.execution_allowance.render_allowance',
+                        lambda *a, **k: 'budget notice')
     messages=[{'role':'user','content':'intent'}]
     result=admit_round_context(task(),messages,[],round_num=0,model='fixture')
-    assert [len(rows) for rows in seen]==[1,2] and result['totalTokens']==2
+    # The notice is decided + committed before the single measurement.
+    assert [len(rows) for rows in seen]==[2] and result['totalTokens']==2
+    assert any(m.get('_contextInjectionId')=='execution_allowance' for m in messages)
 
 
 def test_inbox_confirmation_requires_verified_return_and_live_settlement():
@@ -247,3 +283,100 @@ def test_inbox_confirmation_requires_verified_return_and_live_settlement():
                 assert ('_projectNarrativeDelivery' in owner_task)==(not expected)
             assert account.events==[('settle',0)]
     with ThreadPoolExecutor(max_workers=1) as executor:asyncio.run(run(executor))
+
+
+def test_native_context_preserves_explicit_price_consumer_and_exact_settlement():
+    from lib.agent_core.native_process import RoundSettlement
+    async def run(executor):
+        owner_task=task()
+        received=[]
+        class Consumer(Accounting):
+            accepts_native_cost=True
+            async def settle(self,result): received.append(result)
+        policy=NativeContextPolicy(principal=principal(),task=owner_task,executor=executor,round_policy=Consumer())
+        assert policy.accepts_native_cost
+        request=RoundRequest(principal(),owner_task['id'],'priced-round',0,1)
+        settlement=RoundSettlement(request,{'kind':'returned','provider_state':'incomplete_stream','cost':{'credits':{'total':7593}}})
+        await policy.settle(settlement)
+        assert received==[settlement] and received[0] is settlement
+        policy.close()
+        assert not policy.accepts_native_cost
+    with ThreadPoolExecutor(max_workers=1) as executor:asyncio.run(run(executor))
+
+
+def test_native_preparation_preserves_invocation_context_in_callback_worker():
+    from contextvars import ContextVar
+    invocation=ContextVar('native-prepare-invocation',default='unbound')
+    async def run():
+        owner=task()
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            policy=NativeContextPolicy(principal=principal(),task=owner,executor=executor)
+            policy.bind_route(metadata(),{'max_tokens':64},{})
+            request=RoundRequest(principal(),owner['id'],'request',0,1,[{'role':'user','content':'question'}])
+            def prepare(task,messages,**kwargs):assert invocation.get()=='owned-root'
+            with patch('lib.tasks_pkg.orchestrator._root_agent_loop.prepare_round_context',side_effect=prepare),patch(
+                    'lib.tasks_pkg.orchestrator._root_agent_loop.admit_round_context'):
+                token=invocation.set('owned-root')
+                try:assert await policy.prepare(request)==request.messages
+                finally:invocation.reset(token)
+            assert executor.submit(invocation.get).result()=='unbound'
+    asyncio.run(run())
+
+
+def test_native_context_confirmation_cancellation_joins_physical_callback():
+    from types import SimpleNamespace
+    async def run():
+        owner=task();entered,release=threading.Event(),threading.Event()
+        def confirm(*args,**kwargs):
+            entered.set();assert release.wait(2)
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            policy=NativeContextPolicy(principal=principal(),task=owner,executor=executor)
+            result=SimpleNamespace(request=SimpleNamespace(principal=principal(),task_id=owner['id'],round=0),
+                evidence={'kind':'returned','provider_state':'provider_finished'},cancelled=None)
+            with patch('lib.tasks_pkg.orchestrator._deferred_inbox_flush.confirm_consumed_project_context',side_effect=confirm),patch(
+                    'lib.tasks_pkg.orchestrator._deferred_inbox_flush.flush_deferred_peer_and_steer') as flush:
+                pending=asyncio.create_task(policy.settle(result))
+                assert await asyncio.to_thread(entered.wait,1)
+                pending.cancel();await asyncio.sleep(.01)
+                assert not pending.done()
+                release.set()
+                with pytest.raises(asyncio.CancelledError):await pending
+                flush.assert_called_once()
+    asyncio.run(run())
+
+
+def test_background_preparation_explicitly_borrows_token_host_without_app_context():
+    from lib.tasks_pkg.native_host import NativeHost
+    from tests.tasks_pkg.test_native_host import image
+    from tests.token_counter.test_native_application_adapter import Counter
+    from lib.token_counter.native import NativeTextEncoder
+    from lib.token_counter import tiktoken_counter
+    from quart import has_app_context
+    async def run():
+        host = NativeHost(image(), token_count=True)
+        backend = Counter()
+        host._token_counter = backend
+        owner = task()
+        evidence = []
+        def observe(*args, **kwargs):
+            assert not has_app_context()
+            encoder = tiktoken_counter._get_encoder('cl100k_base')
+            assert isinstance(encoder, NativeTextEncoder) and encoder.host is host
+            evidence.append(encoder.count_text('background token scope'))
+        def project(*args):
+            observe()
+            return []
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            policy = NativeContextPolicy(principal=principal(), task=owner, executor=executor, token_count_host=host)
+            policy.bind_wire_projection(project, [])
+            policy.bind_route(metadata(), {'max_tokens':64}, {})
+            request = RoundRequest(principal(), owner['id'], 'request', 0, 1, [{'role':'user', 'content':'before'}])
+            with patch('lib.tasks_pkg.orchestrator._root_agent_loop.prepare_round_context', side_effect=observe), \
+                 patch('lib.tasks_pkg.orchestrator._root_agent_loop.admit_round_context', side_effect=observe):
+                await policy.prepare(request)
+            policy.close()
+        assert len(evidence) == 3 and len(set(evidence)) == 1
+        assert not isinstance(tiktoken_counter._get_encoder('cl100k_base'), NativeTextEncoder)
+        await host.close()
+        assert backend.closed
+    asyncio.run(run())

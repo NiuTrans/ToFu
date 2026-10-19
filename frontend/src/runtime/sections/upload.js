@@ -602,7 +602,6 @@ async function _waitForImageProcessing() {
 // upload to establish that ref, never for frame/transcript analysis; turns stay
 // small and later model requests resolve the latest server-side evidence.
 var _VIDEO_EXTS = new Set(['.mp4', '.m4v', '.mov', '.webm', '.mkv', '.avi']);
-var _VIDEO_MAX_BYTES = 512 * 1024 * 1024;  // mirrors TOFU_VIDEO_MAX_BYTES default
 
 function _looksLikeVideo(f) {
   const mt = (f.type || '').toLowerCase();
@@ -719,10 +718,6 @@ function _applyVideoAttachment(vObj, attachment) {
 }
 
 async function _handleVideoDrop(f) {
-  if (f.size > _VIDEO_MAX_BYTES) {
-    debugLog(t('upload.videoTooLarge') + ' — ' + (f.name || ''), 'error');
-    return;
-  }
   const vObj = { name: f.name || 'video', sizeKB: Math.round((f.size || 0) / 1024), _status: 'uploading' };
   pendingVideos.push(vObj);
   renderImagePreviews();
@@ -747,11 +742,12 @@ async function _handleVideoDrop(f) {
 }
 
 async function _pollVideoReady(vObj) {
-  for (let i = 0; i < 180; i++) {  // 180 × 4s = 12min ceiling (15-min video + transcript)
+  while (true) {  // Retain the attachment owner until actual completion or removal.
     await new Promise(r => setTimeout(r, 4000));
     if (!pendingVideos.includes(vObj)) throw new Error('removed');
     let rec = null;
     try { rec = await Api.videos.status(vObj.video_id); } catch (_e) { rec = null; }
+    if (!pendingVideos.includes(vObj)) throw new Error('removed');
     if (!rec) continue;  // transient network — keep polling
     if (rec.status === 'ready') {
       _applyVideoAttachment(vObj, rec.attachment || rec);
@@ -767,7 +763,6 @@ async function _pollVideoReady(vObj) {
       renderImagePreviews();
     }
   }
-  throw new Error('timeout');
 }
 
 function removeVideo(i) {

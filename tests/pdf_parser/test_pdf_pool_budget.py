@@ -234,7 +234,8 @@ def test_idle_pool_generation_retires_without_racing_new_work(monkeypatch):
 def test_real_spawn_pool_round_trip_is_bounded(monkeypatch):
     from lib.pdf_parser import pool
 
-    pymupdf = pytest.importorskip('pymupdf')
+    from lib.pdf_parser.text import pymupdf
+    if pymupdf is None:pytest.skip('requires a working real PyMuPDF backend')
     document = pymupdf.open()
     page = document.new_page()
     page.insert_text((72, 72), 'bounded process pool')
@@ -249,7 +250,7 @@ def test_real_spawn_pool_round_trip_is_bounded(monkeypatch):
     try:
         result = pool.parse_pdf_pooled(
             payload,
-            timeout=float('inf'),
+            timeout=5000,
             max_images=0,
             text_mode='fast',
         )
@@ -282,7 +283,8 @@ def test_real_pdf_burst_starts_beyond_idle_reuse_and_reaps_processes(monkeypatch
     from concurrent.futures import ThreadPoolExecutor
     import time
     import psutil
-    import pymupdf
+    from lib.pdf_parser.text import pymupdf
+    if pymupdf is None:pytest.skip('requires a working real PyMuPDF backend')
     from lib.pdf_parser import pool
     document = pymupdf.open()
     page = document.new_page()
@@ -395,3 +397,24 @@ def test_cleanup_join_failure_retains_ownership_until_retry_succeeds(isolated_po
         assert time.monotonic()<deadline
         time.sleep(.005)
     assert executor.attempts>=2
+
+
+@pytest.mark.parametrize('caller,operator,expected',[(None,None,None),(0,'0',None),(5000,None,5000),(5000,'8000',5000),(5000,'42',42)])
+def test_wait_only_uses_explicit_caller_or_operator_limits(isolated_pool,monkeypatch,caller,operator,expected):
+    if operator is None:monkeypatch.delenv('TOFU_PDF_PARSE_TIMEOUT',raising=False)
+    else:monkeypatch.setenv('TOFU_PDF_PARSE_TIMEOUT',operator)
+    waits=[]
+    class ObservedFuture(Future):
+        def result(self,timeout=None):
+            waits.append(timeout);return super().result(timeout)
+    future=ObservedFuture();future.set_result({'text':'complete'})
+    worker=_FuturePool([future]);monkeypatch.setattr(isolated_pool,'ProcessPoolExecutor',lambda **kwargs:worker)
+    assert isolated_pool.parse_pdf_pooled(b'source',timeout=caller)=={'text':'complete'}
+    assert waits==[expected] and isolated_pool.pdf_pool_metrics()['unfinished']==0
+
+
+@pytest.mark.parametrize('value',[float('inf'),float('nan'),-1,True,'bad'])
+def test_invalid_explicit_wait_refuses_before_work_ownership(isolated_pool,value):
+    with pytest.raises(ValueError,match='nonnegative finite'):
+        isolated_pool.parse_pdf_pooled(b'source',timeout=value)
+    assert isolated_pool.pdf_pool_metrics()['unfinished']==0

@@ -10,10 +10,12 @@ struct CanonicalPayloadCertificate;
 pub(crate) struct DispatchedResponse {
     response: Response,
     canonical: Option<CanonicalPayloadCertificate>,
+    snapshot_stable: Option<crate::query_result_cache::Admission>,
 }
 impl DispatchedResponse {
     pub(crate) fn successful(request: &Request, payload: IrResponse) -> Self {
         let canonical = payload.json_proven().then_some(CanonicalPayloadCertificate);
+        let snapshot_stable = payload.cache_admission();
         Self {
             response: Response {
                 correlation_id: request.correlation_id,
@@ -25,7 +27,17 @@ impl DispatchedResponse {
                 retryable: false,
             },
             canonical,
+            snapshot_stable,
         }
+    }
+    pub(crate) fn cache_admission(&self) -> Option<crate::query_result_cache::Admission> {
+        if self.canonical.is_some() { self.snapshot_stable } else { None }
+    }
+    #[cfg(test)]
+    pub(crate) fn snapshot_cacheable(&self) -> bool { self.cache_admission().is_some() }
+    pub(crate) fn snapshot_cache_copy(&self) -> Option<IrResponse> {
+        self.cache_admission().map(|admission|
+            IrResponse::from_snapshot_cache(self.response.payload.clone(), admission))
     }
     pub(crate) fn canonical_payload(&self) -> Option<&[u8]> {
         self.canonical.as_ref().map(|_| self.response.payload.as_slice())
@@ -36,7 +48,7 @@ impl DispatchedResponse {
 }
 impl From<Response> for DispatchedResponse {
     fn from(response: Response) -> Self {
-        Self { response, canonical: None }
+        Self { response, canonical: None, snapshot_stable: None }
     }
 }
 impl std::ops::Deref for DispatchedResponse {

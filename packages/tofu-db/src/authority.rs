@@ -78,7 +78,6 @@ use crate::receipt::{
     command_receipt_entity_key, command_receipt_key, decode_receipt_response,
     encode_receipt_family_record, encode_receipt_response, validate_receipt_identity,
     CommandReceipt, ReceiptSnapshot, StoredReceiptResponse, MAX_INLINE_RECEIPT_BYTES,
-    MAX_STORED_RECEIPT_BYTES,
 };
 use crate::stream::{
     persisted_event_count, prepare_persisted_append, read_persisted, read_persisted_positions,
@@ -88,8 +87,6 @@ use crate::stream::{
 use crate::transaction::{FamilyRecordKind, FamilyTransactionBuilder};
 use crate::vfs::Vfs;
 
-pub use crate::generated_tofudb_ir::MAX_TRANSACTION_STREAM_APPENDS as MAX_STREAM_APPENDS_PER_TRANSACTION;
-pub const MAX_STREAM_BYTES_PER_TRANSACTION: usize = 8 * 1024 * 1024;
 pub const MAX_LOGICAL_OUTBOX_FETCH_RECORDS: usize = 64;
 pub const MAX_LOGICAL_OUTBOX_FETCH_BYTES: usize = 8 * 1024 * 1024;
 
@@ -219,8 +216,6 @@ pub struct PendingLogicalOutboxRecord {
 #[derive(Clone)]
 struct LogicalOutboxRuntime {
     cipher: LogicalOutboxCipher,
-    max_pending_bytes: u64,
-    max_record_bytes: usize,
 }
 
 /// Everything one online-GC epoch needs after its snapshot hold releases
@@ -246,6 +241,7 @@ pub use crate::blob::decode_cache::{DecodedChunkCacheObserver, DecodedChunkCache
 
 pub struct AuthorityDatabase {
     published_query_options: Option<Arc<std::sync::RwLock<query_view::ReadOptions>>>,
+    published_query_results: Option<Arc<crate::query_result_cache::QueryResultCache>>,
     decoded_chunk_cache: Arc<crate::blob::decode_cache::DecodedChunkCache>,
     canonical_json_cache: Arc<crate::canonical_json_bytes::cache::CanonicalProofCache>,
     event_read_epoch: Uuid,
@@ -314,6 +310,7 @@ impl AuthorityDatabase {
             canonical_json_cache: Default::default(),
             decoded_chunk_cache: Default::default(),
             published_query_options: None,
+            published_query_results: None,
             logical_outbox: None,
             preparation: None,
             timer_live_capacity: 0,
@@ -332,6 +329,7 @@ impl AuthorityDatabase {
             canonical_json_cache: Default::default(),
             decoded_chunk_cache: Default::default(),
             published_query_options: None,
+            published_query_results: None,
             logical_outbox: None,
             preparation: None,
             timer_live_capacity: 0,
@@ -358,6 +356,7 @@ impl AuthorityDatabase {
             canonical_json_cache: Default::default(),
             decoded_chunk_cache: Default::default(),
             published_query_options: None,
+            published_query_results: None,
             logical_outbox: None,
             preparation: None,
             timer_live_capacity: 0,
@@ -381,6 +380,7 @@ impl AuthorityDatabase {
             canonical_json_cache: Default::default(),
             decoded_chunk_cache: Default::default(),
             published_query_options: None,
+            published_query_results: None,
             logical_outbox: None,
             preparation: None,
             timer_live_capacity: 0,
@@ -399,6 +399,7 @@ impl AuthorityDatabase {
             canonical_json_cache: Default::default(),
             decoded_chunk_cache: Default::default(),
             published_query_options: None,
+            published_query_results: None,
             logical_outbox: None,
             preparation: None,
             timer_live_capacity: 0,
@@ -417,6 +418,7 @@ impl AuthorityDatabase {
             canonical_json_cache: Default::default(),
             decoded_chunk_cache: Default::default(),
             published_query_options: None,
+            published_query_results: None,
             logical_outbox: None,
             preparation: None,
             timer_live_capacity: 0,
@@ -472,6 +474,7 @@ impl AuthorityDatabase {
             canonical_json_cache: Arc::clone(&self.canonical_json_cache),
             decoded_chunk_cache: Arc::clone(&self.decoded_chunk_cache),
             published_query_options: None,
+            published_query_results: None,
             logical_outbox: self.logical_outbox.clone(),
             preparation: None,
             timer_live_capacity: self.timer_live_capacity,
@@ -484,20 +487,13 @@ impl AuthorityDatabase {
     pub fn configure_logical_outbox(
         &mut self,
         encryption_key: &[u8; 32],
-        max_pending_bytes: u64,
-        max_record_bytes: usize,
+        _legacy_pending_bytes: u64,
+        _legacy_record_bytes: usize,
     ) -> io::Result<()> {
-        if max_pending_bytes == 0
-            || max_record_bytes == 0
-            || max_record_bytes > MAX_ENCODED_LOGICAL_OUTBOX_BYTES
-            || max_record_bytes as u64 > max_pending_bytes
-        {
-            return Err(invalid_input("invalid logical outbox resource budget"));
-        }
+        // Legacy size arguments remain source-compatible but never deny a
+        // captured business mutation. Blob storage owns durable backlog.
         self.logical_outbox = Some(LogicalOutboxRuntime {
             cipher: LogicalOutboxCipher::new(encryption_key),
-            max_pending_bytes,
-            max_record_bytes,
         });
         self.refresh_published_query_options();
         Ok(())
@@ -526,7 +522,18 @@ impl AuthorityDatabase {
             .set_page_cache_capacity_bytes(entity_page_cache_bytes)?;
         self.canonical_json_cache.configure_capacity(block_cache_bytes / crate::canonical_json_bytes::cache::HOT_CACHE_BUDGET_DIVISOR);
         self.decoded_chunk_cache.configure_capacity(block_cache_bytes / crate::blob::decode_cache::HOT_CACHE_BUDGET_DIVISOR);
+        if let Some(cache) = &self.published_query_results {
+            cache.configure(block_cache_bytes / crate::canonical_json_bytes::cache::HOT_CACHE_BUDGET_DIVISOR);
+        }
         Ok(())
+    }
+
+    pub(crate) fn configure_blob_codecs(&self, snapshot: crate::resource_probe::LaunchResourceSnapshot) -> io::Result<()> {
+        self.entities.writer_engine()?.shared_blob_encoder().configure(snapshot)
+    }
+
+    pub(crate) fn blob_codec_pool_observer(&self) -> io::Result<crate::blob::BlobCodecPoolObserver> {
+        Ok(self.entities.writer_engine()?.shared_blob_encoder().observer())
     }
 
     /// Applies the probe-derived write-path budgets at open: the overlay
@@ -584,8 +591,15 @@ impl AuthorityDatabase {
         let first = self.entities.overlay_replay_first_sequence()?;
         let engine = self.entities.writer_engine_mut()?;
         let retained = engine.history_retention_for_replay(maximum, first);
-        if engine.history_segment_count() <= retained { return Ok(None); }
-        engine.try_prepare_history_compaction(retained)
+        let count = engine.history_segment_count();
+        if count <= retained { return Ok(None); }
+        // This automatic publisher shares the CONTROL lane with WAL rotation.
+        // Retire only a launch-sized source slice, then release the lane so
+        // rotation can progress between rounds. Explicit operator compaction
+        // retains its complete requested suffix behavior.
+        let slice = (engine.checkpoint_materialize_batch_bytes
+            / crate::history::HISTORY_SEGMENT_MAX_BYTES as u64).max(1) as usize;
+        engine.try_prepare_history_compaction(retained.max(count.saturating_sub(slice)))
     }
 
     pub(crate) fn finish_history_compaction(&mut self, prepared: crate::engine::PreparedHistoryCompaction,
@@ -743,6 +757,11 @@ impl AuthorityDatabase {
         outcome: io::Result<()>,
     ) -> io::Result<u64> {
         self.entities.writer_engine_mut()?.finish_rotation_publication(prepared, outcome)
+    }
+
+    /// The WAL worker must inherit the authority's actual VFS capabilities.
+    pub(crate) fn wal_vfs(&self) -> io::Result<Arc<dyn crate::vfs::Vfs>> {
+        Ok(self.entities.writer_engine()?.vfs())
     }
 
     pub(crate) fn wal_path(&self) -> io::Result<std::path::PathBuf> {
@@ -1429,6 +1448,10 @@ impl AuthorityDatabase {
         self.entities.overlay_memory_bytes()
     }
 
+    pub(crate) fn query_snapshot(&self) -> crate::entity::EntitySnapshot {
+        self.entities.current_snapshot()
+    }
+
     pub fn snapshot_pin_metrics(&self) -> io::Result<EntitySnapshotPinMetrics> {
         self.entities.snapshot_pin_metrics()
     }
@@ -1632,13 +1655,6 @@ impl AuthorityDatabase {
             .stream_appends
             .iter()
             .position(|append| append.key == key);
-        if existing_append.is_none()
-            && transaction.stream_appends.len() == MAX_STREAM_APPENDS_PER_TRANSACTION
-        {
-            return Err(invalid_input(
-                "authority transaction has too many stream appends",
-            ));
-        }
         let append_bytes = events.iter().try_fold(0_usize, |total, event| {
             total
                 .checked_add(event.encoded_len())
@@ -1648,11 +1664,6 @@ impl AuthorityDatabase {
             .stream_bytes
             .checked_add(append_bytes)
             .ok_or_else(|| invalid_input("authority stream byte count overflow"))?;
-        if next_stream_bytes > MAX_STREAM_BYTES_PER_TRANSACTION {
-            return Err(invalid_input(
-                "authority transaction stream payload exceeds 8 MiB",
-            ));
-        }
         if let Some(index) = existing_append {
             let pending = &mut transaction.stream_appends[index];
             let pending_next = pending
@@ -1662,13 +1673,9 @@ impl AuthorityDatabase {
             if expected_next_sequence != pending_next {
                 return Err(conflict("pending stream expected-position witness changed"));
             }
-            if pending.events.len() + events.len()
-                > crate::generated_tofudb_ir::MAX_STREAM_APPEND_EVENTS
-            {
-                return Err(invalid_input(
-                    "pending stream event count exceeds its bound",
-                ));
-            }
+            pending.events.len().checked_add(events.len())
+                .and_then(|count| u32::try_from(count).ok())
+                .ok_or_else(|| invalid_input("pending stream event count exceeds its u32 representation"))?;
             pending.events.extend(events);
             transaction.stream_bytes = next_stream_bytes;
             transaction.has_business_mutation = true;
@@ -1768,11 +1775,11 @@ impl AuthorityDatabase {
             .iter()
             .filter(|block_id| !transaction.staged_blob_block_ids.contains(block_id))
             .count();
-        if transaction.staged_blob_block_ids.len() + additional_block_ids
-            > crate::transaction::MAX_REFERENCED_BLOCKS
+        if transaction.staged_blob_block_ids.len().checked_add(additional_block_ids)
+            .and_then(|count| u32::try_from(count).ok()).is_none()
         {
             return Err(invalid_input(
-                "authority transaction stages too many blob blocks",
+                "authority staged blob count exceeds its u32 representation",
             ));
         }
         transaction
@@ -1982,21 +1989,10 @@ impl AuthorityDatabase {
             capture.into_identity(sequence, transaction.tenant_id, transaction.owner_user_id)?;
         let sealed = runtime.cipher.seal(identity, &clear_payload)?;
         let encoded_record = sealed.encode()?;
-        if encoded_record.len() > runtime.max_record_bytes {
-            return Err(invalid_input(
-                "logical outbox record exceeds its configured record budget",
-            ));
-        }
         let record_bytes = encoded_record.len() as u64;
         let next_pending_bytes = pending_bytes
             .checked_add(record_bytes)
-            .filter(|value| *value <= runtime.max_pending_bytes)
-            .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::WouldBlock,
-                    "logical outbox reached its configured pending byte budget",
-                )
-            })?;
+            .ok_or_else(|| invalid_data("logical outbox pending byte count overflow"))?;
         let stored = if encoded_record.len() <= MAX_INLINE_LOGICAL_OUTBOX_BYTES {
             StoredLogicalOutboxRecord::Inline(encoded_record)
         } else {
@@ -2135,10 +2131,10 @@ impl AuthorityDatabase {
         limit: usize,
         maximum_bytes: usize,
     ) -> io::Result<Vec<PendingLogicalOutboxRecord>> {
-        if limit == 0 || limit > MAX_LOGICAL_OUTBOX_FETCH_RECORDS {
+        if limit == 0 {
             return Err(invalid_input("invalid logical outbox fetch limit"));
         }
-        if maximum_bytes == 0 || maximum_bytes > MAX_LOGICAL_OUTBOX_FETCH_BYTES {
+        if maximum_bytes == 0 {
             return Err(invalid_input("invalid logical outbox fetch byte limit"));
         }
         let mut transaction = self.begin(tenant_id, owner_user_id)?;
@@ -2161,12 +2157,8 @@ impl AuthorityDatabase {
             let next_fetched_bytes = fetched_bytes
                 .checked_add(stored.logical_bytes())
                 .ok_or_else(|| invalid_data("logical outbox fetch byte count overflow"))?;
-            if next_fetched_bytes > maximum_bytes {
-                if pending.is_empty() {
-                    return Err(invalid_input(
-                        "first logical outbox record exceeds the fetch byte limit",
-                    ));
-                }
+            // Byte hints choose page boundaries, never strand its first record.
+            if next_fetched_bytes > maximum_bytes && !pending.is_empty() {
                 break;
             }
             let expected_sequence = first + pending.len() as u64;
@@ -2377,13 +2369,14 @@ impl AuthorityDatabase {
                     transaction.owner_user_id,
                     reference,
                 )?;
-                let mut response = Vec::with_capacity(reference.logical_bytes as usize);
+                let mut response = Vec::new();
                 while let Some(chunk) = reader.next_chunk()? {
+                    response.try_reserve(chunk.len()).map_err(|_| io::Error::new(io::ErrorKind::OutOfMemory,"receipt materialization allocation failed"))?;
                     response.extend_from_slice(&chunk);
-                    if response.len() > MAX_STORED_RECEIPT_BYTES {
+                    if response.len() as u64 > reference.logical_bytes {
                         return Err(io::Error::new(
                             io::ErrorKind::InvalidData,
-                            "receipt blob exceeds its stored byte budget",
+                            "receipt blob exceeds its declared byte length",
                         ));
                     }
                 }
@@ -2671,22 +2664,34 @@ impl AuthorityDatabase {
         }
         let mut private_blobs_published = false;
         if transaction.deferred_outbox_capture.is_some() || !transaction.deferred_indexes.is_empty() {
-            self.require_write_admission()?;
-            // Validate business predicates before commit-owned index/counter
-            // maintenance. Independent business writes must not conflict on
-            // the physical representation of a shared secondary index.
-            self.entities.rebase_validated_for_commit(&mut transaction.entity)?;
+            {
+                let _timer = crate::fsync_stats::StageTimer::diagnostic(
+                    crate::fsync_stats::STAGE_AUTHORITY_COMMIT_VALIDATE_REBASE);
+                self.require_write_admission()?;
+                // Validate business predicates before commit-owned index/counter
+                // maintenance. Independent business writes must not conflict on
+                // the physical representation of a shared secondary index.
+                self.entities.rebase_validated_for_commit(&mut transaction.entity)?;
+            }
             if !transaction.deferred_indexes.is_empty() {
                 // Backfill may read a business document staged as a private
                 // blob. Publication is safe now: validation succeeded and the
                 // exclusive sequencer excludes GC deletion through commit.
                 if let Some(blobs) = &transaction.prepared_blobs {
+                    let _timer = crate::fsync_stats::StageTimer::diagnostic(
+                        crate::fsync_stats::STAGE_AUTHORITY_COMMIT_PRIVATE_BLOB_PUBLISH);
                     blobs.publish(self.entities.writer_engine()?)?;
                     private_blobs_published = true;
                 }
-                self.flush_deferred_indexes(&mut transaction)?;
+                {
+                    let _timer = crate::fsync_stats::StageTimer::diagnostic(
+                        crate::fsync_stats::STAGE_AUTHORITY_COMMIT_INDEXES);
+                    self.flush_deferred_indexes(&mut transaction)?;
+                }
             }
             if let Some(capture) = transaction.deferred_outbox_capture.take() {
+                let _timer = crate::fsync_stats::StageTimer::diagnostic(
+                    crate::fsync_stats::STAGE_AUTHORITY_COMMIT_OUTBOX_CAPTURE);
                 self.logical_outbox_capture(&mut transaction, capture)?;
             }
         }
@@ -2740,6 +2745,10 @@ impl AuthorityDatabase {
                 "configured logical outbox requires atomic capture",
             ));
         }
+        let stream_timer = if stream_appends.is_empty() { None } else {
+            crate::fsync_stats::StageTimer::diagnostic(
+                crate::fsync_stats::STAGE_AUTHORITY_COMMIT_STREAM_PREPARE)
+        };
         let mut prepared_streams: Vec<PreparedStreamAppend> = Vec::new();
         for append in stream_appends {
             let committed_event_count =
@@ -2754,6 +2763,7 @@ impl AuthorityDatabase {
             prepared.stage_persisted_catalog(&self.entities, &mut entity)?;
             prepared_streams.push(prepared);
         }
+        drop(stream_timer);
         let prepared_entity = {
             let _timer = crate::fsync_stats::StageTimer::new(crate::fsync_stats::STAGE_PREPARE);
             self.entities.prepare_commit(entity)?
@@ -2761,6 +2771,8 @@ impl AuthorityDatabase {
 
         if !private_blobs_published {
             if let Some(blobs) = prepared_blobs {
+                let _timer = crate::fsync_stats::StageTimer::diagnostic(
+                    crate::fsync_stats::STAGE_AUTHORITY_COMMIT_PRIVATE_BLOB_PUBLISH);
                 blobs.publish(self.entities.writer_engine()?)?;
             }
         }
@@ -3067,6 +3079,76 @@ mod tests {
             assert_eq!(status.published_sequence, 1);
             assert_eq!(status.pending_bytes, 0);
             assert!(pending.is_empty());
+        }
+    }
+
+    #[test]
+    fn stream_demand_exceeds_former_count_and_byte_quotas_and_reopens_exactly() {
+        let directory = tempfile::tempdir().unwrap();
+        let large_key = stream_key(b"large-demand");
+        let small_key = stream_key(b"small-demand");
+        {
+            let mut database = AuthorityDatabase::initialize(directory.path()).unwrap();
+            let mut transaction = database.begin(7, 11).unwrap();
+            for (start, end) in [(0, 2500), (2500, 5001)] {
+                let events = (start..end).map(|ordinal| StreamEvent::new(
+                    ordinal, "updated", vec![(ordinal % 251) as u8; 2048]).unwrap()).collect();
+                database.stream_append(&mut transaction, large_key.clone(), start as u64 + 1, events).unwrap();
+            }
+            let small = (0..5001).map(|ordinal| StreamEvent::new(ordinal, "updated",
+                vec![(ordinal % 251) as u8]).unwrap()).collect();
+            database.stream_append(&mut transaction, small_key.clone(), 1, small).unwrap();
+            let committed = database.commit(transaction).unwrap();
+            assert_eq!(committed.stream_appends.len(), 2);
+            assert!(committed.stream_appends.iter().all(|append| append.transaction_sequence == 1));
+        }
+        let database = AuthorityDatabase::open(directory.path()).unwrap();
+        for (key, bytes) in [(large_key, 2048), (small_key, 1)] {
+            let mut next = 1;
+            let mut count = 0;
+            loop {
+                let page = database.stream_read(7, 11, &key, next, 997).unwrap();
+                for row in &page.events {
+                    assert_eq!(row.sequence, count + 1);
+                    assert_eq!(row.event.payload, vec![(count % 251) as u8; bytes]);
+                    count += 1;
+                }
+                if page.end_of_stream { break; }
+                assert!(page.next_sequence > next);
+                next = page.next_sequence;
+            }
+            assert_eq!(count, 5001);
+        }
+    }
+
+    #[test]
+    fn staged_blob_demand_exceeds_former_reference_quota_and_reopens_all_graphs() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut references = Vec::new();
+        {
+            let mut database = AuthorityDatabase::initialize(directory.path()).unwrap();
+            let mut transaction = database.begin(7, 11).unwrap();
+            for ordinal in 0..2101_u64 {
+                let payload = ordinal.to_be_bytes();
+                let reference = database.stage_blob(&mut transaction,
+                    &mut payload.as_slice(), payload.len() as u64).unwrap();
+                // Persist every graph root in the same owning entity transaction.
+                database.entity_put(&mut transaction, entity_key(&payload),
+                    reference.manifest_block_id.0.to_vec()).unwrap();
+                references.push(reference);
+            }
+            assert!(transaction.staged_blob_block_ids.len() > 2048);
+            database.commit(transaction).unwrap();
+        }
+        let database = AuthorityDatabase::open(directory.path()).unwrap();
+        let mut transaction = database.begin(7, 11).unwrap();
+        for (ordinal, reference) in references.into_iter().enumerate() {
+            let payload = (ordinal as u64).to_be_bytes();
+            assert_eq!(database.entity_get(&mut transaction, &entity_key(&payload)).unwrap(),
+                Some(reference.manifest_block_id.0.to_vec()));
+            let mut reader = database.blob_reader(7, 11, reference).unwrap();
+            assert_eq!(reader.next_chunk().unwrap().unwrap().as_slice(), payload);
+            assert!(reader.next_chunk().unwrap().is_none());
         }
     }
 
@@ -3492,6 +3574,38 @@ mod tests {
     }
 
     #[test]
+    fn automatic_history_compaction_yields_between_launch_sized_slices() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut database = AuthorityDatabase::initialize(directory.path()).unwrap();
+        database.set_write_overlay_for_test(false);
+        database.engine_mut_for_test().set_checkpoint_materialize_batch_bytes(
+            crate::history::HISTORY_SEGMENT_MAX_BYTES as u64).unwrap();
+        for index in 0..5_u8 {
+            let mut tx = database.begin(7, 11).unwrap();
+            database.entity_put(&mut tx, entity_key(&[index]), vec![index; 64]).unwrap();
+            database.commit(tx).unwrap();
+            database.engine_mut_for_test().checkpoint().unwrap();
+        }
+        assert_eq!(database.engine_mut_for_test().history_segment_count(), 5);
+        for remaining in (1..5).rev() {
+            let prepared = database.try_prepare_history_compaction(1).unwrap().unwrap();
+            let encoded = crate::engine::encode_history_compaction(&prepared);
+            let progress = database.finish_history_compaction(prepared, encoded).unwrap();
+            assert_eq!(progress.retired_segments, 1);
+            assert_eq!(progress.retained_segments, remaining);
+            // The physical lane is released between publications.
+            assert!(database.engine_mut_for_test().require_write_admission().is_ok());
+        }
+        assert!(database.try_prepare_history_compaction(1).unwrap().is_none());
+        drop(database);
+        let mut reopened = AuthorityDatabase::open(directory.path()).unwrap();
+        let mut tx = reopened.begin(7, 11).unwrap();
+        for index in 0..5_u8 {
+            assert_eq!(reopened.entity_get(&mut tx, &entity_key(&[index])).unwrap(), Some(vec![index;64]));
+        }
+    }
+
+    #[test]
     fn indexed_history_pruning_retains_pending_and_partial_overlay_transactions() {
         let vfs = Arc::new(DeterministicVfs::new(None));
         vfs.create_dir(Path::new("/data")).unwrap();
@@ -3776,7 +3890,7 @@ mod tests {
     }
 
     #[test]
-    fn large_outbox_uses_blob_and_pending_budget_backpressures_before_commit() {
+    fn large_outbox_uses_blob_and_retains_backlog_beyond_configured_hints() {
         let directory = tempfile::tempdir().unwrap();
         let key = [18; 32];
         let payload = (0..10_000).map(|value| value as u8).collect::<Vec<_>>();
@@ -3816,25 +3930,53 @@ mod tests {
         database
             .configure_logical_outbox(&key, pending_bytes, pending_bytes as usize)
             .unwrap();
-        let mut rejected = database.begin(7, 11).unwrap();
-        database
-            .entity_put(&mut rejected, entity_key(b"second"), b"created".to_vec())
-            .unwrap();
-        assert_eq!(
-            database
-                .logical_outbox_capture(&mut rejected, outbox_capture(payload, None))
-                .unwrap_err()
-                .kind(),
-            io::ErrorKind::WouldBlock
-        );
-        assert_eq!(database.entities.writer_engine().unwrap().state().durable_sequence, 1);
+        let mut second = database.begin(7, 11).unwrap();
+        database.entity_put(&mut second, entity_key(b"second"), b"created".to_vec()).unwrap();
+        database.logical_outbox_capture(&mut second, outbox_capture(payload, None)).unwrap();
+        database.commit(second).unwrap();
+        assert!(database.logical_outbox_status(7, 11).unwrap().pending_bytes > pending_bytes);
+        let pending = database.logical_outbox_pending_bounded(7, 11, 10, 1).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].record.identity.sequence, 1);
         let mut inspect = database.begin(7, 11).unwrap();
-        assert_eq!(
-            database
-                .entity_get(&mut inspect, &entity_key(b"second"))
-                .unwrap(),
-            None
-        );
+        assert_eq!(database.entity_get(&mut inspect, &entity_key(b"second")).unwrap(), Some(b"created".to_vec()));
+
+    }
+
+    #[test]
+    fn large_outbox_survives_reopen_publication_retry_and_exact_ack_beyond_hints() {
+        use crate::outbox_publisher::{publish_batch, LogicalOutboxPublishBudget};
+        use crate::outbox_sink::EngineLogicalOutboxSink;
+        let directory = tempfile::tempdir().unwrap();
+        let key = [18; 32];
+        let payload = vec![37; 9 * 1024 * 1024];
+        let mut database = AuthorityDatabase::initialize(directory.path()).unwrap();
+        database.configure_logical_outbox(&key, 1, 1).unwrap();
+        let mut write = database.begin(7, 11).unwrap();
+        database.entity_put(&mut write, entity_key(b"large-demand"), b"committed".to_vec()).unwrap();
+        database.logical_outbox_capture(&mut write, outbox_capture(payload.clone(), Some("large-demand"))).unwrap();
+        database.commit(write).unwrap();
+        drop(database);
+        let mut database = AuthorityDatabase::open(directory.path()).unwrap();
+        database.configure_logical_outbox(&key, 0, 0).unwrap();
+        let pending = database.logical_outbox_pending_bounded(7, 11, 1, 1).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(database.logical_outbox_decrypt(&pending[0].record).unwrap(), payload);
+        let sink_path = tempfile::tempdir().unwrap();
+        let mut sink = EngineLogicalOutboxSink::initialize(sink_path.path(), 7, 11, 1).unwrap();
+        let started = std::time::Instant::now();
+        let budget = LogicalOutboxPublishBudget::new(1, 1).unwrap();
+        let published = publish_batch(&mut sink, &pending, budget).unwrap();
+        let repeated = publish_batch(&mut sink, &pending, budget).unwrap();
+        assert_eq!(published.receipts, repeated.receipts);
+        let receipt = published.receipts[0];
+        let acknowledged = database.logical_outbox_acknowledge(7, 11, receipt.sequence, receipt.event_id).unwrap();
+        assert_eq!(acknowledged.pending_bytes, 0);
+        assert_eq!(database.logical_outbox_acknowledge(7, 11, receipt.sequence, receipt.event_id).unwrap(), acknowledged);
+        let mut read = database.begin(7, 11).unwrap();
+        assert_eq!(database.entity_get(&mut read, &entity_key(b"large-demand")).unwrap(), Some(b"committed".to_vec()));
+        eprintln!("outbox_large payload_bytes={} record_bytes={} publish_retry_us={} acknowledged_pending_bytes=0",
+            payload.len(), pending[0].record_bytes, started.elapsed().as_micros());
     }
 
     #[test]
@@ -4133,3 +4275,7 @@ mod shutdown_checkpoint_tests {
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
     }
 }
+
+#[cfg(test)]
+#[path = "authority_stream_staging_tests.rs"]
+mod stream_staging_tests;

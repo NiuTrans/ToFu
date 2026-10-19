@@ -103,6 +103,20 @@ check('tool_preview_head_rendered', toolHtml.includes(THEAD));
 check('tool_preview_tail_rendered', toolHtml.includes(TTAIL));
 check('tool_preview_full_body_rendered', toolHtml.includes(bigPreview));
 
+// Messages stay available in their own folded section, never replacing latest execution.
+const messagingRound = { ...toolRound, _swarmActive: true, _swarmAgents: [{
+  ...toolRound._swarmAgents[0], status: 'running',
+  messageReceipts: [{ swarmRunId: 'run', agentId: 'a2', messageId: 'message',
+    state: 'input_confirmed', inputConfirmedAt: 10, content: 'MESSAGEHEAD' + 'm'.repeat(3000) + 'MESSAGETAIL' }],
+}] };
+const messagingNode = new JSDOM(_buildSwarmPanelHTML(messagingRound, [messagingRound])).window.document;
+const communication = messagingNode.querySelector('.sw-a-messages');
+check('messages_disclosure_closed', communication && !communication.open);
+check('message_body_complete', communication?.textContent.includes('MESSAGEHEAD' + 'm'.repeat(3000) + 'MESSAGETAIL'));
+check('message_not_execution_success', !communication?.querySelector('.sw-tl-done'));
+check('latest_remains_actual_tool', messagingNode.querySelector('.sw-a-latest')?.textContent.includes('fetch_url'));
+check('receipt_does_not_settle_agent', messagingNode.querySelector('[data-agent-id="a2"]')?.dataset.swAgentStatus === 'running');
+
 // ── Criterion 2b: bounded durable detail is explicit, including after F5 ──
 const boundedAgent = {
   id: 'a2b', role: 'researcher', objective: 'long audit',

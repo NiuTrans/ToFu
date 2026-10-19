@@ -392,3 +392,63 @@ def test_pdf_reader_prepared_replacement_waits_for_pinch_and_cancel_retires_it(r
     finally:
         session.detach()
     assert not errors
+
+
+def test_real_reader_opens_complete_byte_source_above_retired_quota(reader_page,tmp_path):
+    from tests.support.paper_pdf import pdf_from_objects,paper_objects
+    raw=pdf_from_objects(paper_objects(),padding=65*1024*1024)
+    (tmp_path/'large.pdf').write_bytes(raw)
+    page,errors=reader_page
+    page.evaluate("""async () => {
+      window.completeByteCount=0;
+      await reader.load({id:'large-complete',url:'/unused.pdf',preferBytes:true,
+        loadBytes:async signal=>{const bytes=await fetch('/large.pdf',{signal}).then(r=>r.arrayBuffer());
+          window.completeByteCount=bytes.byteLength;return bytes;}});
+    }""")
+    assert page.evaluate('completeByteCount')==len(raw)
+    assert page.evaluate('reader.state.sourceId')=='large-complete'
+    page.wait_for_selector('canvas',timeout=30000)
+    assert not errors
+
+
+def test_complete_long_pdf_navigation_search_outline_and_links(reader_page,tmp_path):
+    import fitz
+    document=fitz.open();count=1005
+    for i in range(count):
+        page=document.new_page(width=300,height=1000)
+        text='SourceNeedle' if i<300 or i==count-1 else 'Other source'
+        page.insert_text((20,30),f'Page {i+1} {text}',fontsize=10)
+        if i==0:
+            for link in range(600):
+                page.insert_link({'kind':fitz.LINK_URI,'from':fitz.Rect(20,40,150,60),
+                    'uri':f'https://example.com/source/{link}'})
+    document.set_toc([[i+1 if i<13 else 1,f'Entry {i+1}',i+1] for i in range(600)])
+    document.save(tmp_path/'complete.pdf');document.close()
+    page,errors=reader_page
+    assert page.evaluate("reader.load({id:'complete',url:'/complete.pdf'})")
+    assert page.evaluate('reader.state.pages')==count
+    page.wait_for_function("document.querySelectorAll('#reader .paper-reader-links a').length===600")
+    outline=page.evaluate('reader.outline()')
+    assert len(outline)==600 and outline[12]['depth']==12 and outline[-1]['title']=='Entry 600'
+    found=page.evaluate("reader.search('SourceNeedle')")
+    assert len(found['matches'])==301 and found['matches'][-1]['page']==count
+    assert not found['truncated']
+    page.evaluate(f'reader.goToPage({count},0.2)')
+    page.wait_for_function(f"document.querySelector('#reader [data-page=\"{count}\"] canvas')")
+    assert page.evaluate('reader.anchor().page')==count
+    assert page.evaluate('reader.state.canvasBytes')<=64*1024*1024
+    assert page.locator('#reader canvas').count()<=8
+    page.evaluate('reader.destroy()')
+    assert page.evaluate('reader.state.canvasBytes')==0
+    assert not errors
+
+
+def test_complete_selectable_page_text_above_old_character_quota(reader_page,tmp_path):
+    from tests.support.paper_pdf import pdf_from_objects,paper_objects
+    objects=paper_objects();content=(b'BT /F1 1 Tf 32 220 Td ('+b'x'*220+b') Tj ET\n')*1000
+    objects[3]=b'<< /Length '+str(len(content)).encode()+b' >>\nstream\n'+content+b'\nendstream'
+    (tmp_path/'dense.pdf').write_bytes(pdf_from_objects(objects))
+    page,errors=reader_page
+    assert page.evaluate("reader.load({id:'dense',url:'/dense.pdf'})")
+    page.wait_for_function("document.querySelector('#reader .paper-reader-text')?.textContent.length>200000",timeout=30000)
+    assert not errors

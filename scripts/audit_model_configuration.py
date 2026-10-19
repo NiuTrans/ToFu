@@ -28,7 +28,7 @@ from lib.model_routing.metadata_migration import reconcile_offering_metadata
 
 def audit_configuration(document, *, plan_migration=False):
     document = normalize_document(deepcopy(document))
-    from lib.provider_template_recipes import load_provider_templates
+    from lib.provider.provider_template_recipes import load_provider_templates
     changes = (reconcile_offering_metadata(document, provider_templates=load_provider_templates())
                if plan_migration else [])
     models = {(m['creator_id'], m['model_id']): m for m in document['models']}

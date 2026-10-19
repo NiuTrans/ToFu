@@ -10,6 +10,7 @@ from lib.storage.mcp_declarations import (
     MAX_DECLARATION_BYTES, MCPDeclarationError, MCPDeclarationStore, SETTING_KEY,
 )
 from tests.storage.test_storage_application_contract import application_storage as application_storage
+from tests.storage.test_storage_application_contract import application_storage_owner_id as application_storage_owner_id
 
 pytestmark = pytest.mark.api
 

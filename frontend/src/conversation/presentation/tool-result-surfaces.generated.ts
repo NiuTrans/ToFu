@@ -29,6 +29,11 @@ export const TOOL_RESULT_SURFACES = {
     "reason": "Preserve producer semantics; JSON is not itself a defect."
   },
   "toolPolicies": {
+    "send_agent_message": {
+      "modelFormat": "send_message_receipt",
+      "frontendFormat": "sent_message",
+      "reason": "Show authored message content in the browser. Compact only legacy exact-run success receipts; stable receipts retain pinned assignment and ordinary launch handles in the model view. Errors remain actionable; only explicit submission_state proves rejection."
+    },
     "spawn_agents": {
       "modelFormat": "spawn_receipt",
       "frontendFormat": "verbatim",
@@ -58,6 +63,56 @@ export const TOOL_RESULT_SURFACES = {
       "modelFormat": "agent_report_sections",
       "frontendFormat": "report",
       "reason": "Unwrap only recognized agent report JSON in poll sections; preserve command/task receipts and all control fields."
+    }
+  },
+  "sendMessageReceipt": {
+    "fields": [
+      "agent_id",
+      "swarm_run_id",
+      "message_id",
+      "state",
+      "kind",
+      "contentChars",
+      "execution_started"
+    ],
+    "legacyStates": [
+      "submitted",
+      "input_confirmed",
+      "unconfirmed"
+    ],
+    "stableFields": [
+      "retained_agent_id",
+      "scope",
+      "message_id",
+      "state",
+      "kind",
+      "contentChars",
+      "execution_started",
+      "assignment"
+    ],
+    "stableScopes": [
+      "project",
+      "conversation"
+    ],
+    "assignmentFields": [
+      "agent_id",
+      "swarm_run_id",
+      "conversation_id"
+    ],
+    "assignmentOptionalFields": [
+      "launch",
+      "message_id"
+    ],
+    "stableModelFormat": "verbatim",
+    "submissionStates": [
+      "rejected",
+      "unknown"
+    ],
+    "outcomes": {
+      "turn_started": "New turn accepted by the ordinary launch authority. Input consumption, acceptance and completion are not confirmed.",
+      "submitted": "Message sent successfully. Input consumption is not yet confirmed.",
+      "input_confirmed": "Message sent successfully; input consumption confirmed. This does not prove acceptance or completion.",
+      "unconfirmed": "Message was saved, but the run ended without confirmed input consumption. Do not transfer it to a replacement run."
     }
   },
   "artifactProjectionDefaults": {

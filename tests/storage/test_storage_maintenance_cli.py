@@ -14,10 +14,10 @@ import time
 import pytest
 
 from lib.storage import StorageSupervisor
-from lib.storage_sidecar import cli as cli_module
-from lib.storage_sidecar import fastpath
-from lib.storage_sidecar.cli import main
-from lib.storage_sidecar.schema import SCHEMA_VERSION
+from lib.storage_authority_sql import cli as cli_module
+from lib.storage_authority_sql import fastpath
+from lib.storage_authority_sql.cli import main
+from lib.storage_authority_sql.schema import SCHEMA_VERSION
 
 
 pytestmark = pytest.mark.unit

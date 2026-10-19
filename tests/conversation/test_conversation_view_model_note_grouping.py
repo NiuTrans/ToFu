@@ -53,15 +53,15 @@ def _run_node(harness: str, env_extra: dict) -> str:
 
 
 def _view_model_module() -> str:
-    return open(native_module_path(
+    return native_module_path(
         '.native/conversation-view-model.js',
         os.path.join(ROOT, 'frontend', 'src', 'conversation', 'presentation',
                      'conversation-view-model.ts'),
-    ), encoding='utf-8').read()
+    )
 
 
 _HARNESS = r"""
-eval(process.env.VM_SRC);
+eval(require('node:fs').readFileSync(process.env.VM_PATH, 'utf8'));
 const out = [];
 function check(name, cond){ out.push((cond ? 'PASS ' : 'FAIL ') + name); }
 
@@ -148,7 +148,7 @@ console.log(out.join('\n'));
 
 @pytest.mark.skipif(not _HAS_NODE, reason='node not installed')
 def test_typed_view_model_merges_adjacent_context_notes():
-    out = _run_node(_HARNESS, {'VM_SRC': _view_model_module()})
+    out = _run_node(_HARNESS, {'VM_PATH': _view_model_module()})
     fails = [ln for ln in out.splitlines() if ln.startswith('FAIL')]
     assert not fails, 'typed view-model grouping failures:\n' + out
     assert out.count('PASS') >= 11, f'expected >=11 PASS, got:\n{out}'

@@ -35,7 +35,7 @@ from lib.log import get_logger
 
 logger = get_logger(__name__)
 
-from lib.runtime_paths import data_root
+from lib.runtime.runtime_paths import data_root
 _DEFAULT_DIR = os.path.join(data_root(), 'translate_refusal')
 _REFUSAL_DIR = _DEFAULT_DIR
 

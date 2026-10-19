@@ -9,9 +9,9 @@ import time
 import pytest
 
 from lib.storage.errors import StorageError
-from lib.storage_sidecar.adapters.sqlite import SQLiteSession
-from lib.storage_sidecar.operations_pkg._common import _dump, _load
-from lib.storage_sidecar.schema import initialize_schema
+from lib.storage_authority_sql.adapters.sqlite import SQLiteSession
+from lib.storage_authority_sql.operations_pkg._common import _dump, _load
+from lib.storage_authority_sql.schema import initialize_schema
 
 
 pytestmark = pytest.mark.unit
@@ -65,7 +65,7 @@ def _seed_attempt(
     current: bool = True,
     superseded_at: int | None = None,
 ) -> dict:
-    from lib.storage_sidecar.operations_pkg._turns_events import (
+    from lib.storage_authority_sql.operations_pkg._turns_events import (
         _insert_attempt_event,
     )
 
@@ -110,7 +110,7 @@ def _seed_attempt(
 
 
 def _capture_attempt_change(session, event: Mapping) -> dict:
-    from lib.storage_sidecar.operations_pkg._turns_core import (
+    from lib.storage_authority_sql.operations_pkg._turns_core import (
         _turn_change_capture,
     )
 
@@ -125,11 +125,11 @@ def _capture_attempt_change(session, event: Mapping) -> dict:
 def test_attempt_change_stores_reference_and_round_trips_exact_public_event(
     session, monkeypatch,
 ):
-    from lib.storage_sidecar.operations_pkg import _turns_core as core
-    from lib.storage_sidecar.operations_pkg._turns_core import (
+    from lib.storage_authority_sql.operations_pkg import _turns_core as core
+    from lib.storage_authority_sql.operations_pkg._turns_core import (
         _append_conversation_change,
     )
-    from lib.storage_sidecar.operations_pkg._turns_read import _turn_sync_changes
+    from lib.storage_authority_sql.operations_pkg._turns_read import _turn_sync_changes
 
     attempt_event = _seed_attempt(session)
     real_dump = core._dump
@@ -202,8 +202,8 @@ def test_attempt_change_stores_reference_and_round_trips_exact_public_event(
 
 
 def test_replay_reference_protects_ttl_and_superseded_attempt_cleanup(session):
-    from lib.storage_sidecar.operations_pkg._turns_lifecycle import _turn_cleanup
-    from lib.storage_sidecar.operations_pkg._turns_read import (
+    from lib.storage_authority_sql.operations_pkg._turns_lifecycle import _turn_cleanup
+    from lib.storage_authority_sql.operations_pkg._turns_read import (
         _turn_events_prune,
         _turn_sync_prune,
     )
@@ -243,7 +243,7 @@ def test_replay_reference_protects_ttl_and_superseded_attempt_cleanup(session):
 
 
 def test_offline_retention_uses_the_same_sync_reference_fence(session):
-    from lib.storage_sidecar.offline_maintenance import (
+    from lib.storage_authority_sql.offline_maintenance import (
         sqlite_transport_retention_candidate_queries,
     )
 
@@ -272,7 +272,7 @@ def test_offline_retention_uses_the_same_sync_reference_fence(session):
 def test_sync_prune_batches_composite_keys_below_sqlite_parameter_limit(
     session, monkeypatch,
 ):
-    from lib.storage_sidecar.operations_pkg._turns_read import _turn_sync_prune
+    from lib.storage_authority_sql.operations_pkg._turns_read import _turn_sync_prune
 
     session.connection.executemany(
         "INSERT INTO storage_conversation_changes("
@@ -304,12 +304,12 @@ def test_sync_prune_batches_composite_keys_below_sqlite_parameter_limit(
 
 
 def test_turn_delete_expires_reference_prefix_before_attempt_events(session):
-    from lib.storage_sidecar.operations_pkg._turns_core import (
+    from lib.storage_authority_sql.operations_pkg._turns_core import (
         _append_conversation_change,
         _turn_change_capture,
     )
-    from lib.storage_sidecar.operations_pkg._turns_lifecycle import _turn_delete
-    from lib.storage_sidecar.operations_pkg._turns_read import _turn_sync_changes
+    from lib.storage_authority_sql.operations_pkg._turns_lifecycle import _turn_delete
+    from lib.storage_authority_sql.operations_pkg._turns_read import _turn_sync_changes
 
     event = _seed_attempt(session)
     _append_conversation_change(

@@ -175,8 +175,23 @@ export function activityAnchorIndex(
   anchorWindow?: ActivityAnchorWindow,
 ): number {
   const occurrence = resolveActivityOccurrence(blocks, entry);
+
+  if (entry.anchorPosition === 'producer-start') {
+    const producer = entryProducer(entry);
+    const exact = blocks.findIndex(block => {
+      const candidate = blockProducer(block);
+      return isContent(block) && candidate != null
+        && (!producer.taskId || candidate.taskId === producer.taskId)
+        && (!producer.attemptId || candidate.attemptId === producer.attemptId);
+    });
+    // Prefer a positively stamped scope over legacy blocks with unknown owner.
+    // With no such evidence, neutral placement is conservative, not an alias.
+    const first = exact >= 0 ? exact : blocks.findIndex(block => isContent(block)
+      && compatibleProducer(producer, blockProducer(block) ?? {}));
+    return afterDiagnostics(blocks, first < 0 ? blocks.length : first);
+  }
   if (occurrence != null) {
-    let index = occurrence + 1;
+    let index = occurrence + (entry.anchorPosition === 'before' ? 0 : 1);
     while (index < blocks.length) {
       const next = blocks[index];
       if (next.kind !== 'activity-event' || resolveActivityOccurrence(blocks, next.value) !== occurrence) break;
@@ -212,6 +227,9 @@ export function activityAnchorIndex(
   // Supplied exact identities fail closed, including missing trimmed targets.
   // A repeated legacy call id also cannot silently become a model-round guess.
   if (explicitTarget(entry) || entry.toolCallId) return neutral;
+  // Missing historical start evidence is not a license to attach after future
+  // round output (especially pre_turn 0). Never fetch archives or rewrite Turns.
+  if (['context_compaction', 'compacting'].includes(entry.reasonCode ?? '')) return neutral;
   if (entry.llmRound == null || !candidates.length) return neutral;
 
   // Round fallback is safe only inside ONE monotonic producer run. Missing

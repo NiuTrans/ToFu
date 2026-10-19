@@ -16,4 +16,6 @@ def test_markdown_domain_smoke(browser,frontend_visual_origin,tmp_path):
 def test_markdown_domain_full(browser,frontend_visual_origin,tmp_path):
     output=os.environ.get('TOFU_MARKDOWN_DOMAIN_OUTPUT')
     if not output:pytest.skip('set TOFU_MARKDOWN_DOMAIN_OUTPUT for full independent cohorts')
-    measure(browser,frontend_visual_origin,tmp_path,output)
+    reports = measure(browser,frontend_visual_origin,tmp_path,output)
+    assert reports
+    assert all(len(report['workloads']) == 5 for report in reports.values())

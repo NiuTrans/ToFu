@@ -157,3 +157,45 @@ def test_timer_panel_distinguishes_ready_dispatch_and_code_evidence(page, seeded
         page.locator('#timerPanel').screenshot(path=os.path.join(_SCREENSHOT_DIR, 'timer_ready_dispatch_mobile.png'))
     finally:
         timer_mod.cancel_timer(code['id'], user_id=_USER)
+
+def test_cancel_reconciles_after_older_list_response(page, seeded_timers):
+    """Real POST cancellation must survive a delayed pre-cancel GET snapshot."""
+    from playwright.sync_api import expect
+
+    timer_id = seeded_timers['active']['id']
+    _wait_ready(page)
+    _drain(page)
+    _invoke_action(page, 'toggleTimerPanel')
+    card = page.locator('#timerPanelContent .timer-panel-item').filter(has_text=timer_id)
+    expect(card.locator('.tpi-btn-cancel')).to_be_visible()
+    held = []
+
+    def delay_first_full_list(route):
+        if not held and 'summary=1' not in route.request.url:
+            response = route.fetch()
+            held.append((route, response.json()))
+            page.evaluate('window.__timerSnapshotHeld = true')
+        else:
+            route.continue_()
+
+    page.route('**/api/v4/timer/list*', delay_first_full_list)
+    try:
+        # Reopening requests a full snapshot while retaining the visible row.
+        _invoke_action(page, 'toggleTimerPanel')
+        with page.expect_request('**/api/v4/timer/list*'):
+            _invoke_action(page, 'toggleTimerPanel')
+        expect(card.locator('.tpi-btn-cancel')).to_be_visible()
+        page.wait_for_function('window.__timerSnapshotHeld === true')
+        with page.expect_response(lambda response: response.url.endswith(f'/{timer_id}/cancel')) as mutation:
+            card.locator('.tpi-btn-cancel').click()
+        assert mutation.value.ok
+        expect(card.locator('.tpi-pending')).to_be_visible()
+        assert any(row['id'] == timer_id and row['status'] == 'active'
+                   for row in held[0][1]['data']['timers'])
+        held[0][0].fulfill(json=held[0][1])
+        expect(card).to_have_class('timer-panel-item timer-status-cancelled')
+        expect(card.locator('.tpi-pending')).to_have_count(0)
+        expect(card.locator('.tpi-btn-cancel')).to_have_count(0)
+        assert not _hard_errors(page)
+    finally:
+        page.unroute('**/api/v4/timer/list*', delay_first_full_list)

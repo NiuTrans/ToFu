@@ -194,7 +194,7 @@ seccompProfile:
 - name: storage-sidecar
   image: {{ include "tofu.apiImage" .root }}
   imagePullPolicy: {{ .root.Values.images.pullPolicy }}
-  command: ["python", "-m", "lib.storage_sidecar"]
+  command: ["python", "-m", "lib.storage_authority_sql"]
   env:
 {{ include "tofu.sidecarEnv" . | indent 4 }}
   resources:

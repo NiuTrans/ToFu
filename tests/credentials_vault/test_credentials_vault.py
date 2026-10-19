@@ -260,7 +260,7 @@ def test_vault_files_live_under_the_excluded_data_dir():
     relied on. (Reads the defaults from config_path, not the module attrs,
     so the tmp-redirecting isolation fixture cannot confuse it.)"""
     from lib.config_dir import config_path
-    from lib.runtime_paths import data_root
+    from lib.runtime.runtime_paths import data_root
     root = os.path.realpath(data_root())
     for p in (config_path('credentials_vault.json'),
               config_path('.credentials_vault.key')):
@@ -410,7 +410,9 @@ def _run_inject(messages, *, has_real_tools=True):
         memory_enabled=False,
         search_enabled=False,
         has_real_tools=has_real_tools,
-        conv_id='', task={'config': {}}, model='claude-opus-4',
+        conv_id='', task={'config': {}, '_executable_tool_catalog': [
+            {'function': {'name': 'run_command'}},
+        ]}, model='claude-opus-4',
     )
 
 

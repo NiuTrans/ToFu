@@ -30,6 +30,8 @@ Tofu 是一套完整的 Agent 运行时，包含模型路由、流式输出、�
 同一套 `lib.tasks_pkg` Agent 内核，并不是另写的精简 Agent。Sidecar 只额外携带一个
 很小的 `/setup` 静态控制面板，用来无代码配置默认模型。
 
+**连接受控电脑：** 从 [Releases](https://github.com/rangehow/ToFu/releases/latest) 安装 **Tofu Remote（Tofu 受控端）**。它负责连接和控制电脑；下方的 `tofu-agent` 是 AI 运行时 SDK。手机、平板等设备也可以通过浏览器访问自己的 Tofu 服务。
+
 ## 60 秒启动 Tofu Agent
 
 安装发布包并启动即可；首次启动不要求先准备任何 Provider 环境变量：
@@ -285,7 +287,6 @@ PostgreSQL 是同一存储契约后的显式分布式选项。首次登录后请
 
 ```bash
 uv sync --frozen --extra dev
-uv run make docs-check
 npm run check:frontend
 uv run make test-unit
 ```
@@ -327,8 +328,8 @@ uv run make test-unit
 │   │   ├── compaction/
 │   │   ├── handlers/
 │   │   └── orchestrator/
-│   ├── byo_egress.py
-│   └── provider_probe.py
+│   ├── byo/
+│   └── provider/
 ├── packages/
 │   └── tofu-search/       # 独立的搜索/抓取发行包
 ├── plugins/

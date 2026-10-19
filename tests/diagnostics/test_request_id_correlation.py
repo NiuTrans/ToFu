@@ -145,7 +145,7 @@ def test_backend_prefers_inbound_request_id():
 
 
 def test_backend_wires_the_resolver_into_the_request_lifecycle():
-    middleware = ROOT / 'lib/http_request_lifecycle.py'
+    middleware = ROOT / 'lib/http_transport/request_lifecycle.py'
     source = middleware.read_text(encoding='utf-8')
     tree = ast.parse(source)
     handler = next(
@@ -168,7 +168,7 @@ def test_backend_wires_the_resolver_into_the_request_lifecycle():
     assert re.search(r"response\.headers\[['\"]X-Request-ID['\"]\]\s*=\s*rid", source)
     assert 'configure_application(' in SERVER.read_text(encoding='utf-8')
     assembly_tree = ast.parse(
-        (ROOT / 'lib/app_assembly.py').read_text(encoding='utf-8'))
+        (ROOT / 'lib/app/app_assembly.py').read_text(encoding='utf-8'))
     registration = next(
         (node for node in ast.walk(assembly_tree)
          if isinstance(node, ast.Call)

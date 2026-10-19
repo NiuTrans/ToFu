@@ -138,13 +138,13 @@ class _TerminalSettleBase(unittest.TestCase):
             owner_user_id=self.ROUTING_OWNER_ID,
             model_id='gpt-4o-mini',
         )
-        import lib.runtime_state_store as rss
+        import lib.runtime.runtime_state_store as rss
         rss.reset_for_test()
         from lib.idempotency import _cache as _id_cache
         _id_cache.clear()
 
     def tearDown(self):
-        import lib.runtime_state_store as rss
+        import lib.runtime.runtime_state_store as rss
         rss.reset_for_test()
 
     # ── helpers ─────────────────────────────────────────────────────

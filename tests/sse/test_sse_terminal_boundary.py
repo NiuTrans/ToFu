@@ -12,7 +12,7 @@ from lib.llm._sse_stream import SSEByteStream
 from lib.llm.anthropic_outbound import AnthropicSSETranslator
 from lib.llm.responses_outbound import ResponsesSSETranslator
 from lib.llm.stream_result import ProviderStreamState
-from lib.llm_errors import RetryableAPIError
+from lib.llm.llm_errors import RetryableAPIError
 from tests.sse.test_sse_core_parity import _run_async, _run_sync
 
 pytestmark = pytest.mark.unit

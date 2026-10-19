@@ -21,42 +21,34 @@
     "revision": {"type": "integer", "minimum": 0},
     "creators": {
       "type": "array",
-      "maxItems": 1024,
       "items": {"$ref": "#/$defs/creator"}
     },
     "models": {
       "type": "array",
-      "maxItems": 4096,
       "items": {"$ref": "#/$defs/model"}
     },
     "providers": {
       "type": "array",
-      "maxItems": 256,
       "items": {"$ref": "#/$defs/provider"}
     },
     "provider_accesses": {
       "type": "array",
-      "maxItems": 256,
       "items": {"$ref": "#/$defs/providerAccess"}
     },
     "connections": {
       "type": "array",
-      "maxItems": 512,
       "items": {"$ref": "#/$defs/connection"}
     },
     "credentials": {
       "type": "array",
-      "maxItems": 1024,
       "items": {"$ref": "#/$defs/credentialMetadata"}
     },
     "offerings": {
       "type": "array",
-      "maxItems": 4096,
       "items": {"$ref": "#/$defs/offering"}
     },
     "deployments": {
       "type": "array",
-      "maxItems": 8192,
       "items": {"$ref": "#/$defs/deployment"}
     },
     "migration": {"$ref": "#/$defs/migrationMetadata"}
@@ -248,7 +240,6 @@
     },
     "identifierList": {
       "type": "array",
-      "maxItems": 512,
       "uniqueItems": true,
       "items": {"$ref": "#/$defs/identifier"}
     },
@@ -397,7 +388,6 @@
         "connection_ids": {"$ref": "#/$defs/identifierList"},
         "models": {
           "type": "array",
-          "maxItems": 4096,
           "uniqueItems": true,
           "items": {"$ref": "#/$defs/wireGrant"}
         }
@@ -439,7 +429,6 @@
         "model_id": {"$ref": "#/$defs/identifier"},
         "excluded_wire_model_ids": {
           "type": "array",
-          "maxItems": 4096,
           "uniqueItems": true,
           "items": {"$ref": "#/$defs/identifier"}
         }

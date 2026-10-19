@@ -7,7 +7,6 @@ Public API:
 
 import json
 import re
-import time
 import uuid
 
 import requests
@@ -16,13 +15,14 @@ import lib as _lib
 from lib.llm._transport import (
     CONNECT_TIMEOUT,
     MAX_STREAM_RETRIES,
+    abortable_sleep,
     chat_url,
     headers,
     retry_wait,
 )
 from lib.llm.body import build_body
 from lib.llm.cache import add_cache_breakpoints
-from lib.llm_errors import (
+from lib.llm.llm_errors import (
     _ERR_BODY_LIMIT,
     ContentFilterError,
     EndpointUnreachableError,
@@ -32,6 +32,7 @@ from lib.llm_errors import (
     RateLimitError,
     RequestTransportError,
     StreamOnlyError,
+    SubscriptionConnectionError,
     _RETRYABLE,
     _classify_http_error,
     _has_outbound_credential,
@@ -46,7 +47,9 @@ from lib.model_info import (
     is_claude,
 )
 from lib.subscription_quota import USAGE_QUOTA_KEY, record_codex_quota
-from lib.http_client import http_post
+from lib.http_transport.client import http_post
+
+from lib.llm.diagnostic_timing import current_timing, timed_call, timed_stage, timing_stage
 
 logger = get_logger(__name__)
 
@@ -55,6 +58,8 @@ from lib.llm.nonstream_budget import budgeted_nonstream_chat
 
 
 @budgeted_nonstream_chat
+
+@timed_stage('chat_total')
 def chat(messages, model=None, *, max_tokens=4096, temperature=0,
          thinking_enabled=None, preset='low', effort=None, extra=None,
          thinking_depth=None,
@@ -62,7 +67,8 @@ def chat(messages, model=None, *, max_tokens=4096, temperature=0,
          extra_headers=None, max_retries=None, _limit_retry=False,
          thinking_format='', provider_id='', api_protocol='openai', oauth='',
          adapter=None, responses_feature_profile='', owner_user_id=None,
-         inference_profile=None, context_window=0, model_budget_admit=None, _budget_scope=None):
+         inference_profile=None, context_window=0, model_budget_admit=None, _budget_scope=None,
+         abort_check=None):
     """Non-streaming chat completion.
 
     Args:
@@ -108,7 +114,7 @@ def chat(messages, model=None, *, max_tokens=4096, temperature=0,
             oauth, _oauth_body_seed, extra_headers, user_id=_owner_scope)
         messages = _oauth_body_seed['messages']
 
-    body = build_body(
+    body = timed_call('request_build', build_body,
         model, messages,
         max_tokens=max_tokens,
         temperature=temperature,
@@ -161,7 +167,7 @@ def chat(messages, model=None, *, max_tokens=4096, temperature=0,
     from lib.llm.request import (
         detach_input, semantic_request_id, seal_request, transport_body_arguments)
     detach_input(body)
-    _input_tokens = enforce_body_input_limit(
+    _input_tokens = timed_call('input_admission', enforce_body_input_limit,
         body, model=model, provider_id=provider_id, context_window=context_window)
     _semantic_id = semantic_request_id(body)
 
@@ -188,7 +194,7 @@ def chat(messages, model=None, *, max_tokens=4096, temperature=0,
         _input_tokens = recount_anthropic_input(
             body, model=model, provider_id=provider_id)
 
-    body = seal_request(
+    body = timed_call('request_seal', seal_request,
         body, model=model, provider_id=provider_id, protocol=api_protocol,
         endpoint=url, input_tokens=_input_tokens, semantic_id=_semantic_id)
 
@@ -202,23 +208,31 @@ def chat(messages, model=None, *, max_tokens=4096, temperature=0,
     # directly, so there is no route to probe.
     _adapter = adapter if isinstance(adapter, dict) and adapter else None
     _egress_route = None
-    if not _adapter:
-        from lib.desktop import egress as _eg
-        try:
-            _egress_route = _eg.route_request(url, user_id=_owner_scope)
-        except _eg.EgressUnavailable as e:
-            raise EndpointUnreachableError(str(e), base_url=url) from e
-
     retries = MAX_STREAM_RETRIES if max_retries is None else max_retries
     resp = None
     resp_trace = ''
     trace_id = ''
     def _budget_send(send, *args, **kwargs):
-        if _budget_scope is not None:
-            return _budget_scope.send(body, send, *args, **kwargs)
-        return send(*args, **kwargs)
+        with timing_stage('provider_send', model=model, provider_id=provider_id,
+                protocol=api_protocol, trace_id=trace_id,
+                transport='adapter' if _adapter else 'desktop_egress'
+                    if _egress_route and _egress_route != 'direct' else 'requests'):
+            if _budget_scope is not None:
+                return _budget_scope.send(body, send, *args, **kwargs)
+            return send(*args, **kwargs)
 
     for attempt in range(1 + retries):
+        # Every physical retry re-enters shared route admission. In particular,
+        # a failed proxy must recover before another request is sent.
+        if not _adapter:
+            from lib.desktop import egress as _eg
+            try:
+                from lib.llm.egress_recovery import resolve_egress_route
+                _egress_route = timed_call('egress_route', resolve_egress_route,
+                    _eg, url, user_id=_owner_scope, abort_check=abort_check,
+                    timeout_s=timeout)
+            except _eg.EgressUnavailable as e:
+                raise EndpointUnreachableError(str(e), base_url=url) from e
         if _budget_scope is not None:
             body = _budget_scope.prepare(body)
         try:
@@ -324,7 +338,8 @@ def chat(messages, model=None, *, max_tokens=4096, temperature=0,
                             oauth=oauth, adapter=adapter,
                             responses_feature_profile=(
                                 responses_feature_profile or 'compatible'),
-                            owner_user_id=owner_user_id, model_budget_admit=model_budget_admit)
+                            owner_user_id=owner_user_id, model_budget_admit=model_budget_admit,
+                            abort_check=abort_check)
                         usage_r['_model_limit_learned'] = {
                             'model': model,
                             'old_limit': max_tokens,
@@ -342,10 +357,11 @@ def chat(messages, model=None, *, max_tokens=4096, temperature=0,
             if _budget_scope is not None:
                 _budget_scope.settle(getattr(e, 'usage', None))
             if attempt < retries:
-                wait = retry_wait(attempt)
+                wait = (0.0 if isinstance(e, SubscriptionConnectionError)
+                        else retry_wait(attempt))
                 logger.warning('%s ⚠ Attempt %d/%d failed '
                       '(%s), retrying in %.1fs…', log_prefix, attempt + 1, 1 + retries, type(e).__name__, wait, exc_info=True)
-                time.sleep(wait)
+                timed_call('transport_backoff', abortable_sleep, wait, abort_check)
             else:
                 logger.error('%s ✖ All %d attempts failed (non-stream).', log_prefix, 1 + retries, exc_info=True)
                 raise
@@ -353,7 +369,7 @@ def chat(messages, model=None, *, max_tokens=4096, temperature=0,
     assert resp is not None, 'BUG: retry loop exited without assigning resp'
 
     try:
-        data = resp.json()
+        data = timed_call('response_parse', resp.json)
     except (ValueError, json.JSONDecodeError) as e:
         raise Exception(
             f'API returned invalid JSON (HTTP {resp.status_code}): '
@@ -364,11 +380,11 @@ def chat(messages, model=None, *, max_tokens=4096, temperature=0,
             'API returned invalid response shape: top-level JSON must be an object')
     if _responses:
         from lib.llm.responses_outbound import responses_response_to_openai
-        data = responses_response_to_openai(
+        data = timed_call('response_normalize', responses_response_to_openai,
             data, tool_name_reverse=_resp_reverse)
     elif _anthropic:
         from lib.llm.anthropic_outbound import anthropic_response_to_openai
-        data = anthropic_response_to_openai(data)
+        data = timed_call('response_normalize', anthropic_response_to_openai, data)
         if _cloak_reverse:
             from lib.oauth.outbound import restore_claude_tool_names
             for _ch in data.get('choices') or []:
@@ -428,6 +444,8 @@ def chat(messages, model=None, *, max_tokens=4096, temperature=0,
     # Stamp canonical cache keys from vendor spellings (see _sse_core note).
     canonicalize_usage_cache_keys(usage)
     usage['_request_identity'] = body.diagnostics()
+    from lib.llm.request_receipt import request_parameter_receipt
+    usage['_request_parameters'] = request_parameter_receipt(body)
 
     if _reasoning_resolution:
         usage['_reasoning_resolution'] = _reasoning_resolution
@@ -491,5 +509,15 @@ def chat(messages, model=None, *, max_tokens=4096, temperature=0,
     if log_prefix:
         tokens = usage.get('total_tokens', 0)
         logger.debug('%s Done: %d chars, ~%d tokens', log_prefix, len(content), tokens)
+
+    if current_timing() is not None:
+        # Counts reveal slow reasoning without logging any reasoning text.
+        with timing_stage('response_usage', trace_id=trace_id, model=model,
+                output_chars=len(content),
+                reasoning_chars=len(_reasoning_content) if isinstance(_reasoning_content, str) else 0,
+                output_tokens=usage.get('completion_tokens', usage.get('output_tokens')),
+                reasoning_tokens=(usage.get('completion_tokens_details') or {}).get('reasoning_tokens')
+                    if isinstance(usage.get('completion_tokens_details'), dict) else None):
+            pass
 
     return content, usage

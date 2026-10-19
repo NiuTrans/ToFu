@@ -3,7 +3,7 @@ import copy
 
 import pytest
 
-from tests.storage.test_storage_sidecar_contract import storage, _import_conversation  # noqa: F401
+from tests.storage.test_storage_authority_sql_contract import storage, _import_conversation  # noqa: F401
 
 pytestmark = pytest.mark.unit
 

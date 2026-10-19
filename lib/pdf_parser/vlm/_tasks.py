@@ -26,7 +26,7 @@ from lib.agent_core.fair_work_lane import (
 from lib.error_envelope import from_exception, make_envelope
 from lib.identity import require_user_id
 from lib.ids import short_id
-from lib.llm_errors import AbortedError
+from lib.llm.llm_errors import AbortedError
 from lib.log import get_logger
 from lib.pdf_parser.vlm._parse import vlm_parse_pdf
 from lib.pdf_parser.vlm._policy import (

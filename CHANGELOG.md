@@ -1,5 +1,59 @@
 # Changelog
 
+
+## [0.18.2] - 2026-10-19
+
+### Changed
+- Prepare the current committed source for internal and Open distributions,
+  with aligned application, SDK and lockfile release metadata.
+- Retain the latest native runtime, storage, task lifecycle and dependency
+  boundary improvements without including unfinished workspace changes.
+
+- Regenerate browser runtime, stylesheet and wire fixtures from their retained
+  authorities, and complete test dependencies and environment-knob registration.
+
+- Retain the public generator and verification-helper dependency closure so a
+  clean open-source checkout can run its shipped contract and test gates.
+
+### Fixed
+- Align Python and TypeScript runtime versions and default client user agents
+  with the actual SDK package release, and verify lockfile identity.
+- Exclude the private maintainer export toolchain from internal distributions
+  as well as public ones, including stale copies in export destinations.
+
+- Fail closed when mandatory cleanup cannot remove a stale export package or
+  facade, rather than proceeding to copy or publication.
+
+- Run export privacy drift checks in linked Git worktrees and reject failed
+  Git inventory reads instead of silently skipping release verification.
+- Keep valid remote-workspace chats out of optional local automation scope
+  resolution without weakening explicit owned automation project bindings.
+
+- Restore the exact selected conversation through authorized navigation even
+  when its newly persisted row is absent from the first metadata catalog.
+
+## [0.18.1] - 2026-10-15
+
+### Changed
+- Prepare the current source snapshot for the YourProvider internal distribution.
+- Improve native runtime and storage paths, search I/O isolation, and HTML
+  projection, with retained compatibility and performance evidence.
+- Improve Goal recovery, context compaction, account continuity, and tool-result
+  delivery across ordinary chat and coordinated tasks.
+- Update conversation rendering, folder controls, agent message receipts,
+  attachment previews, startup readiness, and restart progress surfaces.
+
+### Fixed
+- Preserve the storage-free CLI transcript through terminal cleanup so exported
+  trajectories retain each completed tool call and receipt exactly once.
+- Preserve tool repair indicators and conversation project restoration in the
+  retained frontend, and align generated event and localization contracts.
+- Reject unknown Overleaf MCP tools before upstream dispatch, align bundled
+  search dependencies, and verify all six first-party MCP servers after install.
+- Align release tests with current authority, rollback, cancellation and protocol
+  contracts; tighten the source-text test audit baseline from 598 to 589.
+
+
 ## [0.18.0] - 2026-10-10
 
 ### Changed
@@ -6095,7 +6149,7 @@ All notable changes to tofu-open are documented in this file.
 - **Account ↔ wire-face separation in provider config**, so one account can
   serve both OpenAI- and Anthropic-shaped endpoints without duplicate entries.
 - **Web search and fetch extracted** to the standalone `tofu_search` package;
-  the app seams via `lib/search_bridge.py`. `lib/fetch/` and `lib/search/` no
+  the app seams via `lib/search/search_bridge.py`. `lib/fetch/` and `lib/search/` no
   longer exist in-tree.
 - **Desktop release workflow is VERSION-driven, not tag-driven.** A tag is a
   product of releasing, not evidence of it; the gate now asks the Releases API

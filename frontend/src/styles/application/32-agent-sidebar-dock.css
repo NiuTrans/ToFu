@@ -1,0 +1,35 @@
+/* Conversation activity shares the existing turn information column/fold.
+ * No separate track, positioning owner, card shell, avatar or chat margin. */
+.turn-context-content{display:contents}
+
+/* The existing rail extends beyond its short input host into the reply gutter.
+ * Lift that host above later reply hit boxes, below all popup/overlay layers. */
+.conversation-turn.user-msg:has(> .turn-ctx .agent-dock:not([hidden])){z-index:var(--z-turn-context)}
+.agent-dock{min-width:0;margin-top:var(--space-2);padding-top:var(--space-2);border-top:var(--control-edge-inset) solid var(--border);color:var(--text-secondary);font:var(--font-size-xs)/var(--leading-body) var(--font-ui);font-weight:var(--weight-medium)}
+.agent-dock[hidden],.agent-dock-history[hidden]{display:none}
+.agent-dock header{margin-bottom:var(--space-2)}
+.agent-dock-heading{display:flex;flex-wrap:wrap;align-items:baseline;gap:var(--space-1) var(--space-2)}
+.agent-dock header strong{font-size:inherit;font-weight:var(--weight-medium);color:var(--text-tertiary)}
+.agent-dock-counts{color:var(--text-secondary);overflow-wrap:anywhere}
+.agent-dock-active,.agent-dock-history>div{display:flex;flex-direction:column;gap:var(--space-1)}
+.agent-dock-agent{min-width:0}
+.agent-dock-agent>summary{display:grid;grid-template-columns:var(--space-3) minmax(0,1fr);column-gap:var(--space-1);padding:var(--space-1) 0;cursor:pointer;list-style:none}
+.agent-dock-agent>summary::-webkit-details-marker{display:none}
+.agent-dock-agent>summary::before{content:'›';grid-row:1 / span 2;color:var(--text-tertiary)}
+.agent-dock-agent[open]>summary::before{content:'⌄'}
+.agent-dock-agent>summary:focus-visible,.agent-dock-history>summary:focus-visible{outline:none;box-shadow:var(--focus-ring);border-radius:var(--radius-sm)}
+.agent-dock-name{min-width:0;overflow-wrap:anywhere;color:var(--text-secondary)}
+.agent-dock-status{grid-column:2;overflow-wrap:anywhere;color:var(--text-tertiary)}
+.agent-dock-agent[data-status="failed"] .agent-dock-status,.agent-dock-agent[data-status="error"] .agent-dock-status,.agent-dock-agent[data-status="interrupted"] .agent-dock-status,.agent-dock-agent[data-status="stalled"] .agent-dock-status{color:var(--error-text)}
+.agent-dock-detail{padding:var(--space-2) 0 var(--space-2) var(--space-3);overflow-wrap:anywhere;min-width:0}
+.agent-dock-detail .sw-a-body{display:block;padding:0;border:0}
+.agent-dock-evidence-note{font-size:inherit;color:var(--text-tertiary);margin:0 0 var(--space-2)}
+.agent-dock-detail pre{max-width:100%;overflow:auto}
+.agent-dock-history{margin-top:var(--space-2)}
+.agent-dock-history>summary{cursor:pointer;color:var(--text-tertiary);padding:var(--space-1) 0}
+
+.agent-dock-messages,.agent-dock-agent-messages{margin-top:var(--space-2);min-width:0}
+.agent-dock-messages[hidden],.agent-dock-agent-messages[hidden]{display:none}
+.agent-dock-messages>summary,.agent-dock-agent-messages>summary{cursor:pointer;padding-block:var(--space-1);color:var(--text-secondary);overflow-wrap:anywhere}
+.agent-dock-messages>summary:focus-visible,.agent-dock-agent-messages>summary:focus-visible{outline:var(--control-edge-inset) solid var(--focus-ring);outline-offset:var(--space-1)}
+.agent-dock-agent-messages .sw-messages>h4{display:none}

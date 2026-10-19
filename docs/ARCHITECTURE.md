@@ -557,7 +557,7 @@ The native `task.rs` driver now owns execution callbacks and frozen terminal
 candidates over explicit persistence/publication ports. Resource settlement
 precedes persistence, which precedes terminal delivery. Failed acknowledgements
 retain retry debt without restarting execution or cleanup; adapters must preserve
-owner/task idempotency. Terminal replay vocabulary derives from `lib/task_replay.py`.
+owner/task idempotency. Terminal replay vocabulary derives from `lib/task_replay/task_replay.py`.
 **Alternatives:** publishing before commit exposes uncommitted outcomes; retrying
 the execution callback duplicates provider/tool effects. Production provider,
 storage and SSE adapters remain pending; native tests certify this boundary only.
@@ -1146,7 +1146,6 @@ Use the smallest relevant test, then neighboring contract tests, then broad
 gates. The common architecture checks are:
 
 ```bash
-make docs-check
 npm run check:frontend
 make suite-health
 make test-unit
@@ -1162,7 +1161,7 @@ an explicit availability query; web-only imports never probe it. Missing librari
 retain explicit unavailable/raw-fallback behavior. **Alternatives:** removing the
 rich parser loses extraction quality; disabling vendor internals changes their
 process-wide behavior; independent lazy flags can expose partial initialization.
-The [startup measurements](evidence/system_search_startup_20261007.json) cover
+The startup measurements cover
 three pairs of 100 fresh-process imports and separate memory processes; cold PDF
 activation, raw fallback and concurrent first-use tests preserve capability behavior.
 The import cost is deferred to PDF use, not eliminated; this is not a PDF throughput
@@ -1187,7 +1186,7 @@ without weights changes ranking; sampled file identities cannot prove freshness.
 The [paired pipeline](../benchmarks/repository_pipeline.py) checks exact output,
 independent-process timing and separate-process memory. It proves repository-tool
 performance only; no persistent index/cache or new background worker is added.
-The [retained measurement](evidence/system_repository_pipeline_20261007.json)
+The retained measurement
 records the exact fixture/source identities, three paired distributions and
 RSS observations; raw reconstructible artifacts remain outside the repository.
 
@@ -1197,7 +1196,7 @@ base, length and suffix selection; return only a new suffix container. Unlocked
 and arbitrary-iterable callers retain the original full-snapshot boundary.
 **Alternatives:** returning a live view allows later eviction to change a page;
 trusting producer hints instead of retained sequence changes cursor authority.
-The [poll measurements](evidence/system_event_poll_20261007.json) cover empty,
+The poll measurements cover empty,
 64-event and 4096-event windows, short tails and full readback with three process
 pairs and separate RSS measurements. This changes neither append, durability,
 publication nor the replay format; native execution remains a separate candidate.
@@ -1209,7 +1208,7 @@ delegate subclasses, tuples and custom copy hooks to deepcopy. Independent
 fields remain independent, and caller-owned values are never mutated.
 **Alternatives:** JSON round trips change tuples, numbers and opaque carriers;
 sharing mutable input allows later body normalization to rewrite stored history.
-The [request measurements](evidence/system_request_copy_20261007.json) retain
+The request measurements retain
 initial rejected tail measurements and final controlled first-use/steady-state
 comparisons, including runtime/dependency identities. This is request-copy
 optimization, not evidence for an incremental context compiler or native kernel.
@@ -1223,7 +1222,7 @@ marking, retry, cancellation and budget settlement keep their existing ports.
 the shared client bypasses TLS, pooling and fault-injection behavior. The paired
 offline HTTP benchmark [HTTP benchmark](../benchmarks/sealed_request_transport.py) verifies equivalent
 JSON and separates client CPU/RSS from its owned upstream process. Its scope is
-dispatch encoding, not model latency or incremental context compilation. The [retained evidence](evidence/system_sealed_transport_20261007.json)
+dispatch encoding, not model latency or incremental context compilation. The `system_sealed_transport_20261007.json`
 records the paired results and baseline verification gaps.
 
 Streaming DOM: **Problem:** each text/thinking delta recreated every Markdown
@@ -1234,7 +1233,7 @@ nodes retain native selection. Edits/reference resolution and noncanonical
 tails fall back to full replacement; terminal rendering keeps its existing path.
 **Alternatives:** assuming an append-only Markdown AST misses later reference
 definitions; caching another source/token history adds residency and authority.
-Only the existing node-owned HTML witness is retained. The [browser comparison](evidence/system_streaming_renderer_20261007.json)
+Only the existing node-owned HTML witness is retained. The browser comparison
 uses real text/thinking renderers plus forced layout, fresh process pairs and
 separate renderer RSS/heap measurements. It does not prove SSE/backend latency.
 
@@ -1245,14 +1244,16 @@ priority, first-duplicate behavior, UTC normalization, prefix bounds and
 non-string BeautifulSoup decoding remain intact. Unterminated script text is
 retained at EOF. **Alternatives:** swapping to a native parser would reopen
 the known concurrent-extraction crash boundary; regex-only extraction misses
-CDATA, entities and malformed-token behavior. The [paired extraction evidence](evidence/system_publication_metadata_20261007.json)
+CDATA, entities and malformed-token behavior. The `system_publication_metadata_20261007.json`
 checks identical metadata/body output with the existing trafilatura safety lock.
 Its upstream dedup cache is reset outside timing only in owned benchmark processes.
 
-HTTP runtime comparison: [Headless HTTP/1.1 and TLS HTTP/2 measurements](evidence/system_http_runtime_20261007.json)
+HTTP runtime comparison: Headless HTTP/1.1 and TLS HTTP/2 measurements
 retain the production auth/SSE adapters with synthetic compute and fresh server
 processes. uvloop is not promoted: CPU gains do not erase inconsistent latency,
 H2 tail regressions or added RSS. The default keepalive GOAWAY boundary invalidated
 the initial long run; controlled client cohorts are separate evidence, not a
 connection-recovery fix. Full-app/native-server/slow-consumer/cancellation evidence
 remains necessary before any transport default changes.
+
+<!-- Evidence note: former docs/evidence/ artifact snapshots cited here were retired from the tree; cited JSON artifacts remain recoverable from git history. -->

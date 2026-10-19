@@ -1,0 +1,17 @@
+/* Version-bound owner review shares kit controls and the existing panel. */
+.artifact-review {
+  flex: 0 1 auto;
+  min-height: 0;
+  max-height: 70%;
+  overflow: auto;
+  padding: var(--space-3);
+  border-bottom: thin solid var(--border);
+}
+.artifact-review[hidden], .artifact-review [hidden] { display: none; }
+.artifact-review h3, .artifact-review p { margin: 0; }
+.artifact-review h3 { font-size: var(--font-size-lg); }
+.artifact-review > .ui-btn { align-self: flex-start; }
+
+.artifact-review[data-turn-review] { max-height: none; overflow-wrap: anywhere; border-bottom: 0; }
+.artifact-review fieldset { min-width: 0; border: 0; padding: 0; margin: 0; }
+.artifact-review legend { font-weight: var(--weight-semibold); margin-block-end: var(--space-2); }

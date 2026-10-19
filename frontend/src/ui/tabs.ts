@@ -29,7 +29,7 @@ export interface TabsHandle {
 
 let tabsSeq = 0;
 
-export function createTabs(options: TabsOptions): TabsHandle {
+export function createTabs(options: TabsOptions, document: Document = globalThis.document): TabsHandle {
   tabsSeq += 1;
   const baseId = `ui-tabs-${tabsSeq}`;
   const enabled = options.tabs.filter((tab) => !tab.disabled);

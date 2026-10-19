@@ -89,7 +89,7 @@ def test_edit_contract_survives_resident_projection_search_and_budget():
     assert tool_schema_tokens(projected, model='kimi-k3') <= 385
 
 
-def test_edit_schema_rejects_empty_and_oversized_batches_before_execution():
+def test_edit_schema_rejects_empty_edits_and_preserves_requested_batch_size():
     params = PROJECT_TOOL_EDIT_FILE['function']['parameters']
     Draft7Validator.check_schema(params)
     validator = Draft7Validator(params)
@@ -100,8 +100,8 @@ def test_edit_schema_rejects_empty_and_oversized_batches_before_execution():
     assert validator.is_valid({'description': 'Wire main', 'edits': [edit]})
     assert not validator.is_valid({'description': '', 'edits': [edit]})
     assert not validator.is_valid({'description': 'No work', 'edits': []})
-    assert not validator.is_valid({
-        'description': 'Too much', 'edits': [edit] * 31})
+    assert validator.is_valid({
+        'description': 'Complete requested batch', 'edits': [edit] * 31})
     assert not validator.is_valid({
         'description': 'No anchor', 'edits': [{**edit, 'anchor': ''}]})
     assert sanitize_wire_tools([PROJECT_TOOL_EDIT_FILE]) == [

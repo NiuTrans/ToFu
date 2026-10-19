@@ -107,7 +107,7 @@ def test_refresh_uses_authenticated_codex_endpoint_and_writes_private_cache(tmp_
                         'chatgpt-account-id': 'account-1',
                     }, {})), \
          mock.patch('lib.desktop.egress.route_request', return_value='direct'), \
-         mock.patch('lib.http_client.http_get', return_value=response) as get, \
+         mock.patch('lib.http_transport.client.http_get', return_value=response) as get, \
          mock.patch.object(codex_catalog, '_provision_from_best_available',
                            return_value=True):
         result = codex_catalog.refresh_codex_model_catalog(force=True)
@@ -252,7 +252,7 @@ def test_fetch_revalidates_with_etag_and_accepts_304():
     with mock.patch('lib.oauth.outbound.resolve_oauth_request',
                     return_value=('live-token', {}, {})), \
          mock.patch('lib.desktop.egress.route_request', return_value='direct'), \
-         mock.patch('lib.http_client.http_get',
+         mock.patch('lib.http_transport.client.http_get',
                     return_value=_NotModifiedResponse()) as get:
         got, etag, not_modified = codex_catalog._fetch_catalog(cache)
 
@@ -544,7 +544,7 @@ def test_client_upgrade_does_not_reuse_old_version_etag(status):
     with mock.patch('lib.oauth.outbound.resolve_oauth_request',
                     return_value=('live-token', {}, {})), \
          mock.patch('lib.desktop.egress.route_request', return_value='direct'), \
-         mock.patch('lib.http_client.http_get', return_value=response) as get:
+         mock.patch('lib.http_transport.client.http_get', return_value=response) as get:
         if status == 304:
             with pytest.raises(RuntimeError, match='matching client-version cache'):
                 codex_catalog._fetch_catalog(cache)

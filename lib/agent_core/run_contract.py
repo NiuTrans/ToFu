@@ -227,6 +227,11 @@ def build_agent_config(
             setter(config, merged.pop(alias))
 
     config.update(merged)
+    # Workspace lists are a per-invocation binding, never a borrowed mutable
+    # host settings object. Scalar roots remain explicit host inputs.
+    for key in ('projectPaths', 'readOnlyPaths'):
+        if key in config:
+            config[key] = copy.deepcopy(config[key])
 
     from lib.agent_core.personal_scope import apply_headless_personal_defaults
     apply_headless_personal_defaults(config)
@@ -289,7 +294,7 @@ def project_agent_result(
         terminal = usage.get('_stream_terminal') if isinstance(usage, dict) else None
         if not isinstance(terminal, dict):
             continue
-        from lib.log_record_values import text_value
+        from lib.logging_pkg.log_record_values import text_value
         receipt = {key: terminal[key] for key in terminal_fields if key in terminal}
         receipt = {key: (text_value(value, max_chars=160)
                          if isinstance(value, str) else value)
@@ -348,6 +353,7 @@ def project_agent_evidence(
         schemas = []
     content = str(task.get('content') or '')
     from lib.orchestration.adoption import public_orchestration_decisions
+    from lib.agent_core.execution_budget import execution_usage_evidence
 
     return {
         'contractVersion': AGENT_EVIDENCE_VERSION,
@@ -360,6 +366,7 @@ def project_agent_evidence(
         'createdAtUnixMs': int(float(task.get('created_at') or 0) * 1000),
         'finishedAtUnixMs': int(float(task.get('finished_at') or 0) * 1000),
         'usage': _public_usage_evidence(task.get('usage') or {}),
+        'usageAccounting': execution_usage_evidence(task),
         'apiRounds': _public_api_round_evidence(task.get('apiRounds') or []),
         'contextTelemetryRounds': copy.deepcopy(
             task.get('_contextTelemetryRounds') or []),
@@ -367,6 +374,7 @@ def project_agent_evidence(
             task.get('_contextCompactionEvents') or []),
         'compactionUsage': _public_compaction_usage_evidence(
             task.get('compactionUsage') or {}),
+        'toolProgressAudit': copy.deepcopy((task.get('_toolLoopBreakerAudit') or [])[-64:]),
         'toolExposureTelemetry': copy.deepcopy(
             task.get('_toolExposureTelemetry') or {}),
         'toolSchemas': copy.deepcopy(schemas),

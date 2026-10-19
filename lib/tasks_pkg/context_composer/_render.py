@@ -152,22 +152,14 @@ def _hash_join(values: list[str]) -> str:
     return hashlib.sha256('\x00'.join(values).encode('utf-8')).hexdigest()[:24]
 
 
-def _cache_epoch(request: ComposeRequest) -> int:
+def _cache_epoch(request: ComposeRequest, tool_manifest_hash: str) -> int:
     task = request.task
     if task is None:
         return 0
-    tool_manifest = (task.get('_tool_schema')
-                     if isinstance(task.get('_tool_schema'), list) else None)
-    tool_manifest_value = (
-        json.dumps(tool_manifest, ensure_ascii=False, sort_keys=True,
-                   separators=(',', ':'), default=str)
-        if tool_manifest is not None else '\x00'.join(sorted(request.tool_names))
-    )
     state = {
         'permissions': sorted(request.granted_permissions),
         'tools': sorted(request.tool_names),
-        'toolManifestHash': hashlib.sha256(
-            tool_manifest_value.encode('utf-8')).hexdigest()[:24],
+        'toolManifestHash': tool_manifest_hash,
         'compactionBoundary': str(task.get('_compactionBoundary') or ''),
     }
     key = hashlib.sha256(json.dumps(
@@ -283,7 +275,7 @@ def _apply_global_budget(manifest: list[dict[str, Any]],
         overflow_tokens=max(0, base + selected_tokens - budget),
         entries=entries,
         segment_hashes=segment_hashes,
-        cache_epoch=_cache_epoch(request),
+        cache_epoch=_cache_epoch(request, segment_hashes['toolManifest']),
     )
 
 
@@ -325,6 +317,25 @@ def _managed_block_hashes(
                     _canonical_section(block_id, _strip_to_body(match.group(0)))
                     .encode('utf-8')).hexdigest()[:16]
     return latest
+
+
+def verified_block_hash(messages, block_id, *, wire=False, existing_hashes=None):
+    """Read actual envelope bytes; final wire bodies no longer carry private flags.
+
+    ``existing_hashes`` may carry the map the composition render pass already
+    computed for THIS SAME list (same identity, unchanged length): the caller
+    owns that proof, and the block lookup then skips a second full regex scan.
+    Any other input — a foreign list, an unknown map, or a grown/shrunk
+    history — falls back to measuring the actual envelopes here.
+    """
+    if not isinstance(messages, list):
+        return None
+    if existing_hashes is not None and not wire:
+        if isinstance(existing_hashes, dict):
+            return existing_hashes.get(block_id)
+    if wire:
+        messages = [{**message, '_contextComposer': True} for message in messages if isinstance(message, dict)]
+    return _managed_block_hashes(messages).get(block_id)
 
 
 def _envelope(block: ContextBlock, text: str) -> str:
@@ -805,7 +816,8 @@ def render_context(messages: list[dict[str, Any]], blocks: list[ContextBlock],
     names = ','.join(f"{row['id']}:{row['chars']}" for row in manifest
                      if row['injected'])
     _emit_context_summary(request, names, total)
-    return ComposeResult(messages=messages, manifest=manifest, plan=plan)
+    return ComposeResult(messages=messages, manifest=manifest, plan=plan,
+                         managed_block_hashes=dict(existing_hashes))
 
 
 __all__ = ['render_context']

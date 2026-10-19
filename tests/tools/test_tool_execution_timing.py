@@ -101,7 +101,7 @@ def test_streaming_prefetch_keeps_call_identity_and_same_budget(clock, monkeypat
         clock.value = 6
         return 'private-read-content'
     monkeypatch.setattr(accumulator, '_execute_one', read)
-    assert accumulator._execute_one_for_call('read_files', {}, 'call-prefetch') == 'private-read-content'
+    assert accumulator._execute_one_for_call('read_files', {}, 'call-prefetch') == ('private-read-content',)
     fields = caplog.records[-1].tofu_event_fields
     assert fields['tool_call_id'] == 'call-prefetch'
     assert fields['budget_ms'] == TOOL_EXECUTION_BUDGETS_MS['read_files']

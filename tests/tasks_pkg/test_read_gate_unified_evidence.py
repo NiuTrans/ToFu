@@ -61,6 +61,11 @@ def _make_task(messages=None, tool_rounds=None, conv_id='c1', task_id='t1'):
     }
 
 
+def _root_key(conv_id, task_id='t1'):
+    from lib.tasks_pkg.workspace_delivery import execution_root_key
+    return execution_root_key(_make_task(conv_id=conv_id, task_id=task_id))
+
+
 def _history_with_call(name, args_dict, result_text, tc_id='tc_1'):
     """A prior-turn assistant tool_call + its tool result, as persisted
     (arguments VERBATIM as the model emitted them — the whole point)."""
@@ -150,7 +155,7 @@ def test_fresh_token_satisfies_post_compaction(workspace):
     but the freshness store proves this conv read the file and it is
     byte-unchanged since. Gate must allow."""
     from lib import write_freshness
-    write_freshness.record('c1', workspace['target_abs'])
+    write_freshness.record(_root_key('c1'), workspace['target_abs'])
     task = _make_task()  # no messages, no rounds — post-compaction shape
     assert _check(task, workspace) is None
 
@@ -160,7 +165,7 @@ def test_stale_token_does_NOT_satisfy(workspace):
     """Fail-closed: the token exists but the file CHANGED since (a sibling
     wrote it) — the write must still be refused (re-read first)."""
     from lib import write_freshness
-    write_freshness.record('c1', workspace['target_abs'])
+    write_freshness.record(_root_key('c1'), workspace['target_abs'])
     with open(workspace['target_abs'], 'a', encoding='utf-8') as f:
         f.write('# sibling was here\n')
     err = _check(_make_task(), workspace)
@@ -172,7 +177,7 @@ def test_stale_token_does_NOT_satisfy(workspace):
 def test_other_conv_token_does_not_satisfy(workspace):
     """Tokens are per-conversation: convB's read says nothing about convA."""
     from lib import write_freshness
-    write_freshness.record('convB', workspace['target_abs'])
+    write_freshness.record(_root_key('convB', 'other-task'), workspace['target_abs'])
     err = _check(_make_task(conv_id='c1'), workspace)
     assert err is not None
 
@@ -190,7 +195,7 @@ def test_subtask_falls_back_to_task_id_namespace(workspace):
     """A sub-task with convId='' (autopilot VU) uses its task id as the
     token namespace — same discipline as the FreshGate's _conv_key."""
     from lib import write_freshness
-    write_freshness.record('t-vu-1', workspace['target_abs'])
+    write_freshness.record(_root_key('', 't-vu-1'), workspace['target_abs'])
     task = _make_task(conv_id='', task_id='t-vu-1')
     assert _check(task, workspace) is None
 
@@ -203,7 +208,7 @@ def test_batch_partition_skips_only_uncovered_edit(workspace):
     other = os.path.join(workspace['project_path'], 'b.py')
     with open(other, 'w') as f:
         f.write('def bar():\n    return 2\n')
-    write_freshness.record('c1', workspace['target_abs'])
+    write_freshness.record(_root_key('c1'), workspace['target_abs'])
     skip, unread = partition_batch_edits(
         _make_task(), 'apply_diffs',
         {'edits': [
@@ -251,7 +256,7 @@ def test_neuter_staleness_check_breaks_token_evidence(workspace, monkeypatch):
     """Force every token stale → the token-covered allow disappears
     (proving the allow requires a NON-STALE token, not mere existence)."""
     from lib import write_freshness
-    write_freshness.record('c1', workspace['target_abs'])
+    write_freshness.record(_root_key('c1'), workspace['target_abs'])
     assert _check(_make_task(), workspace) is None  # intact
     monkeypatch.setattr(write_freshness, 'is_stale', lambda k, p: True)
     assert _check(_make_task(), workspace) is not None

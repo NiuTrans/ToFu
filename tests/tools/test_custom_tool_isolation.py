@@ -232,6 +232,8 @@ class TestClientHandoff:
             assert (result == ('command completed', False)) is success
             if not success:
                 assert result[1] and 'timed out' in result[0]
+                assert 'may have taken effect' in result[0]
+                assert 'Do not automatically repeat' in result[0]
             assert not resolve_client_tool_result(
                 published['callId'], 'late', task_id=task['id'], user_id=1)
         finally:
@@ -321,8 +323,19 @@ class TestClientHandoff:
             assert resolve_client_tool_result(
                 call_id, '0123456789abcdef', task_id=task['id'], user_id=1)
             waiter.join(timeout=3)
-            assert result['val'] == (
-                '01234567\n… [custom tool result truncated]', False)
+            import json
+            content, is_error = result['val']
+            assert is_error is True
+            error = json.loads(content)
+            assert error['status'] == 'error'
+            assert error['error']['code'] == 'custom_tool_result_too_large'
+            assert 'not retained' in error['error']['message']
+            assert error['error']['retryable'] is False
+            assert 'only its result was rejected' in error['error']['next_action']
+            assert 'Do not repeat the operation' in error['error']['next_action']
+            assert '01234567' not in content
+            assert not resolve_client_tool_result(
+                call_id, 'retry', task_id=task['id'], user_id=1)
         finally:
             dispose_tool_env(env)
 
@@ -551,3 +564,70 @@ def test_default_definition_and_environment_counts_do_not_reject_live_requests()
         for env in environments:
             dispose_tool_env(env)
         dispose_tool_env(large)
+
+
+@pytest.mark.parametrize('mode', ['client', 'webhook', 'sandbox'])
+@pytest.mark.parametrize('size', [7, 8, 9])
+def test_dispatch_result_admission_is_not_successful_truncation(monkeypatch, mode, size):
+    import json
+    from lib.tools.result_envelope import tool_result_error
+    env = mint_tool_env(tools=[_fn('custom__admission')],
+                        limits=ToolLimits(max_result_chars=8))
+    tool = env.tools[0]
+    tool.mode = mode
+    body = 'x' * size
+    monkeypatch.setattr(type(env), '_run_' + mode, lambda *a: (body, False))
+    metas = []
+    monkeypatch.setattr('lib.tasks_pkg.executor._finalize_tool_round',
+                        lambda *a, **k: metas.extend(a[3]))
+    try:
+        _, content, _ = env._dispatch(tool, {'id': 'owned'}, 'tc', {}, 1,
+                                     {'query': 'test'})
+        if size <= 8:
+            assert content == body
+            assert tool_result_error(content) is None
+            assert metas[0]['fetched'] is True
+        else:
+            error = json.loads(content)
+            assert error['status'] == 'error'
+            assert error['error']['code'] == 'custom_tool_result_too_large'
+            assert tool_result_error(content) is not None
+            assert 'Do not repeat the operation' in error['error']['next_action']
+            assert body not in content
+            assert metas[0]['fetched'] is False
+    finally:
+        dispose_tool_env(env)
+
+
+@pytest.mark.parametrize('argument', ['missing', 1, None])
+def test_shell_semantics_reject_undeclared_or_non_string_arguments(argument):
+    tool = _fn('custom__terminal', execution={'shell_command_argument': argument})
+    with pytest.raises(CustomToolError, match='shell_command_argument'):
+        mint_tool_env(tools=[tool])
+
+
+def test_shell_contract_is_request_owned_and_never_inferred_from_name():
+    from lib.tasks_pkg.orchestrator._tool_loop_breaker import (
+        _classify_round_rows, _round_action_kind, _shell_exit_code)
+    tool = _fn('custom__remote', write=True,
+               execution={'shell_command_argument': 'script'})
+    tool['function']['parameters']['properties']['script'] = {'type': 'string'}
+    env = mint_tool_env(tools=[tool])
+    try:
+        row = {'toolName': 'custom__remote', 'toolArgs': '{"script":"true"}',
+               'toolContent': 'exit_code=0\nstdout:\n', 'status': 'done'}
+        task = {'_tool_env': env, '_toolContractDocumentsByName': env.contract_documents}
+        assert _classify_round_rows(task, [row]) == ['shell_obs']
+        assert _round_action_kind(task, [row]) == ''
+        assert _shell_exit_code(row) == 0
+        row['toolArgs'] = '{"script":"build-project"}'
+        assert _classify_round_rows(task, [row]) == ['shell_opaque']
+        assert _round_action_kind(task, [row]) == 'opaque_action'
+        assert 'shellCommandArgument' not in str(env.schemas)
+        assert _classify_round_rows({}, [row]) == ['neutral']
+        # Detached documents cannot change a later request's semantics.
+        docs = env.contract_documents
+        docs['custom__remote']['shellCommandArgument'] = 'different'
+        assert env.contract_documents['custom__remote']['shellCommandArgument'] == 'script'
+    finally:
+        dispose_tool_env(env)

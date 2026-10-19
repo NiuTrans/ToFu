@@ -38,7 +38,7 @@ def owner_http_app():
     # their retained blueprint before it is registered on this test app.
     import server  # noqa: F401
     import routes  # noqa: F401
-    from lib.http_error_handlers import register_http_error_handlers
+    from lib.http_transport.error_handlers import register_http_error_handlers
     from routes.api_v1.chat import api_v1_chat_bp
     from routes.api_v1.project import api_v1_project_bp
 

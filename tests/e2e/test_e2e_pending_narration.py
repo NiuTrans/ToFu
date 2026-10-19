@@ -22,7 +22,7 @@ _FINAL = 'The dropdown inspection is complete.'
 @pytest.fixture(autouse=True)
 def narrated_tools(monkeypatch, page):
     from lib.agent_core.events import EventType, build_event
-    from lib.rate_limit_store import reset_for_test
+    from lib.rate_limit.rate_limit_store import reset_for_test
     from lib.tasks_pkg.manager._events import append_event
     import lib.tasks_pkg.llm_fallback._call as llm_call
     import lib.tasks_pkg.handlers.search._core as search_core
@@ -271,6 +271,8 @@ def test_first_round_narration_is_single_while_tools_pending(
     assert len(narrated_tools['streams']) == 2
 
     assert page.evaluate('window.__pendingNarrationTest.maxCopies()') == 1
+    page.locator('.conversation-history-process > summary').click()
+    page.wait_for_function('window.__pendingNarrationTest.sample().copies === 1')
     assert page.evaluate('window.__pendingNarrationTest.sample().copies') == 1
     # The cold snapshot must agree with the live stream, not merely hide the
     # duplicate at settlement. Page fixture owns and cleans this conversation.
@@ -282,5 +284,7 @@ def test_first_round_narration_is_single_while_tools_pending(
         '(text) => document.querySelector("#chatInner").innerText.includes(text)',
         arg=_FINAL, timeout=30000)
     page.evaluate(_OBSERVE, _NARRATION)
+    page.locator('.conversation-history-process > summary').click()
+    page.wait_for_function('window.__pendingNarrationTest.sample().copies === 1')
     assert page.evaluate('window.__pendingNarrationTest.sample().copies') == 1
     page.evaluate('window.__pendingNarrationTest.stop()')

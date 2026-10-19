@@ -18,6 +18,11 @@ from lib.tools.result_envelope import ToolResultEnvelopeV2
 
 logger = get_logger(__name__)
 
+# One bounded reconnect window before enqueue, shared by roots and children.
+# It covers the bridge's ordinary long poll plus a transport retry; it never
+# retries an already-issued page action.
+BROWSER_CONNECTION_WAIT_SECONDS = 15.0
+
 
 # ── Browser tool badge registry ─────────────────────────────────────────
 
@@ -124,6 +129,8 @@ def _handle_browser_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
         fn_name, fn_args, client_id=browser_client_id,
         owner_user_id=str(task.get('_userId') or ''),
         work_key=str(cfg.get('browserWorkKey') or ''),
+        connection_wait=BROWSER_CONNECTION_WAIT_SECONDS,
+        cancellation=task.get('abort_event'),
         **({'display_metadata': display_metadata} if display_metadata is not None else {}))
     typed_error = tool_result_error(tool_content)
 
@@ -152,7 +159,7 @@ def _handle_browser_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
                 break
         user_question = task.get('lastUserQuery', '')
         try:
-            from lib.search_runtime import ensure_search_runtime
+            from lib.search.search_runtime import ensure_search_runtime
             ensure_search_runtime()
             from tofu_search.fetch.content_filter import IRRELEVANT_SENTINEL, filter_web_content
             raw_chars = len(display_text)

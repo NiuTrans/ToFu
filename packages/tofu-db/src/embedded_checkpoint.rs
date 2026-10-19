@@ -1,16 +1,12 @@
-//! Owned checkpoint callbacks on the exact running embedded authority.
-//! Runtime lifecycle guards join entered Store calls before driver retirement.
-//! No authority open, worker, alternate backend, token attachment or journal logic.
-use super::EmbeddedRuntime;
-use crate::native_checkpoint_store::NativeCheckpointStore;
-use std::sync::{atomic::Ordering, Arc, RwLockReadGuard};
-use tofu_runtime::checkpoint_journal::{Error, Header, OwnedLease, Scope, SnapshotWrite, Store};
+//! Embedded lifecycle binding for the shared checkpoint runtime owner.
+//! Public methods retain the existing API; journal and store transitions live
+//! in checkpoint_runtime.rs and callbacks join this runtime's close boundary.
+use super::*;
+use crate::checkpoint_runtime::CheckpointRuntime;
+use std::sync::{atomic::Ordering, RwLockReadGuard};
+use tofu_runtime::checkpoint_journal::{ActorHandoffSpec, Error, OwnedLease, ResumeLineage, Scope};
 
-struct RuntimeStore {
-    runtime: Arc<EmbeddedRuntime>,
-    store: NativeCheckpointStore,
-}
-impl EmbeddedRuntime {
+impl CheckpointRuntime for EmbeddedRuntime {
     fn checkpoint_guard(&self) -> Result<RwLockReadGuard<'_, ()>, Error> {
         let guard = self.checkpoint_calls.read().map_err(|_| Error::Storage)?;
         if *self.closed.lock().map_err(|_| Error::Storage)?
@@ -20,67 +16,31 @@ impl EmbeddedRuntime {
         }
         Ok(guard)
     }
-    /// Bind an owned journal lease to this runtime's authenticated owner/tenant.
-    /// Callers supply task/epoch/binding, token and explicit byte bounds. The
-    /// shared Store and original runtime remain alive until the lease drops.
-    /// Close/abandon joins entered calls; all later callbacks refuse before I/O.
-    pub fn checkpoint_lease(
-        self: &Arc<Self>,
-        scope: Scope,
-        header_bytes: usize,
-        snapshot_bytes: usize,
-        identity_bytes: usize,
-        token: &str,
-    ) -> Result<OwnedLease, Error> {
-        if scope.owner != self.scope.owner_id {
-            return Err(Error::Invalid);
-        }
-        let guard = self.checkpoint_guard()?;
-        let store = NativeCheckpointStore::new(
-            self.database.clone(),
-            self.scope.tenant_id.unwrap_or(0),
-            self.scope.owner_id,
-            header_bytes,
-            snapshot_bytes,
-        )?;
-        drop(guard);
-        OwnedLease::acquire(
-            scope,
-            Arc::new(RuntimeStore {
-                runtime: self.clone(),
-                store,
-            }),
-            snapshot_bytes,
-            identity_bytes,
-            token,
-        )
-    }
+    fn checkpoint_database(&self) -> &Arc<Mutex<AuthorityDatabase>> { &self.database }
+    fn checkpoint_scope(&self) -> crate::semantic::AuthenticatedScope { self.scope }
 }
-impl Store for RuntimeStore {
-    fn header(&self, owner: u64, task: &str) -> Result<Option<Header>, Error> {
-        let _guard = self.runtime.checkpoint_guard()?;
-        self.store.header(owner, task)
+
+impl EmbeddedRuntime {
+    pub fn checkpoint_goal_claim(&self, owner:u64, header_bytes:usize, snapshot_bytes:usize, request:&serde_json::Value, evidence_bytes:usize) -> Result<serde_json::Value, Error> {
+        CheckpointRuntime::checkpoint_goal_claim(self, owner, header_bytes, snapshot_bytes, request, evidence_bytes)
     }
-    fn compare_exchange(
-        &self,
-        owner: u64,
-        task: &str,
-        expected: u64,
-        header: &serde_json::Value,
-        snapshot: SnapshotWrite<'_>,
-    ) -> Result<u64, Error> {
-        let _guard = self.runtime.checkpoint_guard()?;
-        self.store
-            .compare_exchange(owner, task, expected, header, snapshot)
+    pub fn checkpoint_goal_handoff(self:&Arc<Self>, owner:u64, header_bytes:usize, snapshot_bytes:usize, identity_bytes:usize, specs:Vec<ActorHandoffSpec>, authorization:&serde_json::Value, evidence_bytes:usize) -> Result<Vec<OwnedLease>, Error> {
+        CheckpointRuntime::checkpoint_goal_handoff(self, owner, header_bytes, snapshot_bytes, identity_bytes, specs, authorization, evidence_bytes)
     }
-    fn snapshot(
-        &self,
-        owner: u64,
-        task: &str,
-        version: u64,
-    ) -> Result<Option<serde_json::Value>, Error> {
-        let _guard = self.runtime.checkpoint_guard()?;
-        self.store.snapshot(owner, task, version)
+    pub fn checkpoint_frontier(&self, owner:u64, task:&str, header_bytes:usize, snapshot_bytes:usize, identity_bytes:usize) -> Result<Option<serde_json::Value>, Error> {
+        CheckpointRuntime::checkpoint_frontier(self, owner, task, header_bytes, snapshot_bytes, identity_bytes)
+    }
+    pub fn checkpoint_invoice(&self, owner:u64, task:&str, header_bytes:usize) -> Result<Option<serde_json::Value>, Error> {
+        CheckpointRuntime::checkpoint_invoice(self, owner, task, header_bytes)
+    }
+    pub fn checkpoint_lease(self:&Arc<Self>, scope:Scope, header_bytes:usize, snapshot_bytes:usize, identity_bytes:usize, token:&str) -> Result<OwnedLease, Error> {
+        CheckpointRuntime::checkpoint_lease(self, scope, header_bytes, snapshot_bytes, identity_bytes, token)
+    }
+    pub fn checkpoint_recover(self:&Arc<Self>, scope:Scope, header_bytes:usize, snapshot_bytes:usize, identity_bytes:usize, token:&str) -> Result<OwnedLease, Error> {
+        CheckpointRuntime::checkpoint_recover(self, scope, header_bytes, snapshot_bytes, identity_bytes, token)
+    }
+    pub fn checkpoint_handoff(self:&Arc<Self>, scope:Scope, header_bytes:usize, snapshot_bytes:usize, identity_bytes:usize, token:&str, lineage:&ResumeLineage) -> Result<OwnedLease, Error> {
+        CheckpointRuntime::checkpoint_handoff(self, scope, header_bytes, snapshot_bytes, identity_bytes, token, lineage)
     }
 }
 
@@ -222,7 +182,9 @@ mod tests {
         // This fixture replaced the runtime-owned coordinator with a manual
         // one. Retire that synthetic wait before authority Drop; no worker
         // exists to satisfy new shutdown-only checkpoint witnesses.
-        barrier.inject_background_error_for_test(std::io::Error::other("manual checkpoint fixture retired"));
+        barrier.inject_background_error_for_test(std::io::Error::other(
+            "manual checkpoint fixture retired",
+        ));
     }
     #[test]
     fn disarmed_embedded_runtime_refuses_checkpoint_effects_without_opening_an_authority() {
@@ -271,7 +233,7 @@ mod measurements {
         println!(
             "{}",
             serde_json::json!({"format":"tofu.embedded-checkpoint-cost/v1","acquire_load_release_ns":nanos,
-            "lifecycle_inline_bytes":std::mem::size_of::<std::sync::RwLock<()>>(),"store_wrapper_inline_bytes":std::mem::size_of::<RuntimeStore>(),
+            "lifecycle_inline_bytes":std::mem::size_of::<std::sync::RwLock<()>>(),"store_wrapper_inline_bytes":std::mem::size_of::<crate::checkpoint_runtime::RuntimeStore<EmbeddedRuntime>>(),
             "threads_before":threads_before,"threads_after":threads_after,"scope":"disposable-local-authority","build":"debug"})
         );
     }

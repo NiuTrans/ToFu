@@ -31,6 +31,7 @@ served name appears in ``/v1/models``.
 from __future__ import annotations
 
 import os
+import errno
 import re
 import signal
 import subprocess
@@ -42,7 +43,7 @@ from lib.proxy import register_no_proxy_url
 
 from . import _env as env_mod
 from . import _store as store
-from ._plan import MANAGED_PORT_BASE, MANAGED_PORT_END
+from ._plan import MANAGED_PORT_BASE
 
 logger = get_logger(__name__)
 
@@ -120,23 +121,65 @@ def _pid_alive(pid: int | None) -> bool:
 
 
 def allocate_port(*, ledger_rows=None, bind_test=True) -> int | None:
-    """First free port in the managed band; None when the band is exhausted."""
+    """Prefer an OS-selected loopback port; search physical user ports if needed.
+
+    Active/planned rows reserve their recorded ports. Terminal history does
+    not reserve a socket; restarting it selects a fresh port. Permission, FD
+    and other real socket failures propagate instead of masquerading as quota.
+    A selected socket closes before an external engine binds it; concurrent
+    external bind races still surface through the existing startup diagnosis.
+    """
     import socket
-    used = {r.get('port') for r in (ledger_rows if ledger_rows is not None
-                                    else store.list_instances())
-            if isinstance(r.get('port'), int)}
-    for port in range(MANAGED_PORT_BASE, MANAGED_PORT_END + 1):
-        if port in used:
+    from itertools import chain
+    rows = ledger_rows if ledger_rows is not None else store.list_instances()
+    used = {row.get('port') for row in rows
+            if isinstance(row.get('port'), int)
+            and row.get('status') not in ('stopped', 'failed')}
+    # Avoid an operator's customary engine endpoints even when currently idle.
+    reserved = {8000, 30000, 11434}
+    if bind_test:
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as candidate:
+                candidate.bind(('127.0.0.1', 0))
+                port = candidate.getsockname()[1]
+                if port not in used and port not in reserved:
+                    return port
+        except OSError as exc:
+            if exc.errno != errno.EADDRINUSE:
+                raise
+    # The kernel's ephemeral range may overlap planned rows or be exhausted.
+    # There is no managed count/range ceiling: try all unprivileged TCP ports.
+    for port in chain(range(MANAGED_PORT_BASE, 65536), range(1024, MANAGED_PORT_BASE)):
+        if port in used or port in reserved:
             continue
         if bind_test:
             try:
-                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                    s.bind(('127.0.0.1', port))
-            except OSError:
-                continue
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as candidate:
+                    candidate.bind(('127.0.0.1', port))
+            except OSError as exc:
+                if exc.errno == errno.EADDRINUSE:
+                    continue
+                raise
         return port
     return None
+
+
+def _renew_terminal_port(record: dict) -> dict:
+    """Restart terminal history on a fresh endpoint, updating one ledger row."""
+    rows = [row for row in store.list_instances() if row.get('id') != record['id']]
+    port = allocate_port(ledger_rows=rows)
+    if port is None:
+        raise OSError(errno.EADDRINUSE, '本机没有可绑定的用户 TCP 端口')
+    argv = list(record['argv'])
+    env = dict(record.get('env') or {})
+    if record['engine'] == 'ollama':
+        env['OLLAMA_HOST'] = '127.0.0.1:%s' % port
+    else:
+        index = argv.index('--port')
+        argv[index + 1] = str(port)
+    return store.update_fields(record['id'], port=port, argv=argv, env=env,
+                               base_url='http://127.0.0.1:%s/v1' % port,
+                               status='installing', last_error=None)
 
 
 # ─────────────────────────── degrade ladder ───────────────────────────
@@ -226,6 +269,12 @@ def start_instance(instance_id: str, *, log=None, popen=None, http_get=None,
             log(msg)
         logger.info('[LocalServe] %s: %s', instance_id, msg)
 
+    if record.get('status') in ('stopped', 'failed'):
+        try:
+            record = _renew_terminal_port(record)
+        except (OSError, ValueError) as exc:
+            record = store.update_fields(instance_id, status='failed', last_error=str(exc))
+            return {'ok': False, **record}
     engine = record['engine']
     store.update_fields(instance_id, status='installing', last_error=None)
     _log('检查 %s 运行环境…' % engine)

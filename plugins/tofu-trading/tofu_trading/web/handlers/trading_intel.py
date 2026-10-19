@@ -16,7 +16,6 @@ from tofu_trading.storage import (
 from lib.log import get_logger
 from lib.api_response import api_not_found, api_ok
 from lib.request_parser import async_parse_body
-from lib.rate_limiter import rate_limit
 
 from tofu_trading.identity import DEFAULT_OWNER_ID, current_user_id
 
@@ -477,7 +476,6 @@ async def trading_intel_status():
 
 @trading_intel_bp.route('/api/v1/trading/intel/crawl', methods=['POST'])
 @trading_intel_bp.route('/api/v1/trading/intel/refresh', methods=['POST'])
-@rate_limit(limit=2, per=3600)  # 2 requests per hour
 async def trading_intel_trigger_crawl():
     def _run():
         _do_intel_crawl()
@@ -546,7 +544,6 @@ async def trading_intel_coverage():
 
 
 @trading_intel_bp.route('/api/v1/trading/intel/backfill', methods=['POST'])
-@rate_limit(limit=1, per=3600)  # 1 request per hour (very resource-intensive)
 async def trading_intel_backfill():
     def _run():
         _do_intel_backfill()
@@ -554,7 +551,6 @@ async def trading_intel_backfill():
         target=_run, daemon=True, name='trading-intel-backfill').start()
     return api_ok({'message': '已触发3个月数据回填'})
 @trading_intel_bp.route('/api/v1/trading/intel/<int:iid>/preview', methods=['GET'])
-@rate_limit(limit=30, per=60)  # 30 requests per minute
 async def trading_intel_preview(iid):
     """Fetch full content of an intel article for preview.
 
@@ -641,7 +637,6 @@ async def trading_intel_preview(iid):
 
 
 @trading_intel_bp.route('/api/v1/trading/intel/<int:iid>/analyze', methods=['POST'])
-@rate_limit(limit=10, per=60)  # 10 requests per minute
 async def trading_intel_analyze_item(iid):
     """Deep-analyze a single intel article."""
     item = await async_fetchone('SELECT * FROM trading_intel_cache WHERE id=?', (iid,), domain=DOMAIN_TRADING)

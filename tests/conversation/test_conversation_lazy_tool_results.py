@@ -135,3 +135,61 @@ def test_lazy_tool_result_http_reads_exact_bytes_and_rejects_wrong_owner_and_sta
         assert other is None
     finally:
         client.command('conversation.purge', {'conv_id': cid, 'user_id': 1}, cid + '-purge')
+
+
+def _command_snapshot(**metadata):
+    source = _snapshot(tool_name='run_command', content='successful stdout\n' * 500)
+    source['turns'][0]['projection']['toolRounds'][0]['results'] = [{
+        'exitCode': 0, 'command': 'printf test', 'description': 'test command',
+        'output': 'structured stdout <script>never execute</script>\n' * 500,
+        **metadata,
+    }]
+    return source
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize('tool', ['run_command', 'code_exec'])
+def test_successful_command_defers_both_output_mirrors_and_restores_exact_results(tool):
+    from lib.conversation_sync.tool_results import tool_result_from_turn
+    source = _command_snapshot()
+    turn = source['turns'][0]
+    round_record = turn['projection']['toolRounds'][0]
+    round_record['toolName'] = tool
+    turn['projection']['segments'][0]['name'] = tool
+    before = copy.deepcopy(source)
+    lazy = snapshot_with_reference_tool_segments(source, owner_cache_scope='a' * 24, lazy_tool_results=True)
+    value = lazy['turns'][0]['projection']['toolRounds'][0]
+    assert 'toolContent' not in value
+    assert 'output' not in value['results'][0]
+    assert value['results'][0]['exitCode'] == 0
+    assert value['results'][0]['description'] == 'test command'
+    assert value['_snapshotToolResult']['fields'] == ['toolContent', 'results']
+    assert len(json.dumps(lazy)) < len(json.dumps(source)) / 3
+    detail = tool_result_from_turn(turn, conversation_id='c', turn_id='t', round_index=0, projection_revision=3)
+    assert detail['toolContent'] == round_record['toolContent']
+    assert detail['results'] == round_record['results']
+    assert source == before
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize('metadata', [
+    {'exitCode': 1}, {'exitCode': '0'}, {'exitCode': True}, {'exitCode': None},
+    {'timedOut': True}, {'interrupted': True}, {'notRun': True},
+    {'backgroundCompleted': True}, {'status': 'error'}, {'rejected': True},
+    {'error': 'execution failed'}, {'_rejected': True}, {'rejection': 'approval denied'},
+])
+def test_command_failures_and_ambiguous_status_never_become_deferred_success(metadata):
+    source = _command_snapshot(**metadata)
+    lazy = snapshot_with_reference_tool_segments(source, owner_cache_scope='a' * 24, lazy_tool_results=True)
+    value = lazy['turns'][0]['projection']['toolRounds'][0]
+    assert '_snapshotToolResult' not in value
+    assert value['toolContent'] == source['turns'][0]['projection']['toolRounds'][0]['toolContent']
+    assert value['results'][0]['output'] == source['turns'][0]['projection']['toolRounds'][0]['results'][0]['output']
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize('tool', ['read_tool_artifact', 'search_tool_artifact', 'repo_map'])
+def test_generic_evidence_tools_use_existing_exact_text_reference(tool):
+    source = _snapshot(tool_name=tool)
+    lazy = snapshot_with_reference_tool_segments(source, owner_cache_scope='a' * 24, lazy_tool_results=True)
+    assert '_snapshotToolResult' in lazy['turns'][0]['projection']['toolRounds'][0]

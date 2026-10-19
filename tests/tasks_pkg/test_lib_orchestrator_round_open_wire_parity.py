@@ -98,8 +98,8 @@ def test_leaf_round_start_and_phase_branch():
     src = LEAF_PY.read_text()
     assert 'build_event(EventType.ROUND_START' in src
     assert '_emit_tool_round_phase(' in src
-    assert 'rs.assistant_msg if round_num > 0 else {}' in src, (
-        'the phase emit must keep the round-0 empty-dict branch')
+    assert 'rs.assistant_msg or {}' in src, (
+        'phase emission must keep an available assistant anchor at every round')
 
 
 def test_leaf_accumulator_reads_cfg_projectpath():
@@ -132,7 +132,7 @@ def test_behaviour_phase_branch_round0_vs_later(monkeypatch):
 
     assert events[0][2] == {'roundNum': 0} and events[1][2] == {'roundNum': 2}, (
         'ROUND_START must carry the exact roundNum per round')
-    assert phases[0] == ({}, 0), (
-        'round 0 must emit the phase with an EMPTY anchor dict')
+    assert phases[0] == (RS.assistant_msg, 0), (
+        'round 0 retains an existing assistant anchor during continuation')
     assert phases[1] == ({'role': 'assistant', 'content': 'prior'}, 2), (
         'round >0 must emit the phase with rs.assistant_msg')

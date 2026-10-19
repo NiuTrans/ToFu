@@ -93,8 +93,8 @@ def test_internal_diagnostic_timeout_overrides_server_wait(monkeypatch):
     assert bridge.call_tool(
         namespaced, {}, timeout_override=30) == 'OK'
     assert seen['timeout'] == 40
-    with pytest.raises(ValueError, match='1..300'):
-        bridge.call_tool(namespaced, {}, timeout_override=301)
+    with pytest.raises(ValueError, match='positive integer'):
+        bridge.call_tool(namespaced, {}, timeout_override=0)
 
 
 @pytest.mark.skipif(

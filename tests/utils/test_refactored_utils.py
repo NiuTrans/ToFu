@@ -497,7 +497,7 @@ class TestParseTokenLimit:
     def test_http_classifier_learns_exclusive_limit_for_route(self,
                                                                monkeypatch):
         import lib.model_info as model_info
-        from lib.llm_errors import ModelLimitError, _classify_http_error
+        from lib.llm.llm_errors import ModelLimitError, _classify_http_error
 
         learned = []
         monkeypatch.setattr(

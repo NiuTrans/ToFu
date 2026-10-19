@@ -45,7 +45,7 @@ LOAD_SKILL_TOOL = {
     'function': {
         'name': 'load_skill',
         'description': (
-            'Load the first bounded page of an installed skill guide and its '
+            'Load the whole installed skill guide and its '
             'resource manifest. An empty manifest means instruction-only: do '
             'not invent skill:// paths. Call it before using a matching '
             'workflow. A skill is guidance only and grants no permissions.'),
@@ -69,7 +69,7 @@ READ_SKILL_RESOURCE_TOOL = {
     'function': {
         'name': 'read_skill_resource',
         'description': (
-            'Read one bounded UTF-8 page from an installed skill resource '
+            'Read a complete UTF-8 resource (or suffix at cursor) '
             'using an opaque skill:// path listed by load_skill. Do not '
             'convert workspace file paths into skill:// URIs. Binary, '
             'oversized, symlinked, or escaping paths are rejected.'),
@@ -94,14 +94,6 @@ READ_SKILL_RESOURCE_TOOL = {
                     'minimum': 0,
                     'default': 0,
                 },
-                'max_chars': {
-                    'type': 'integer',
-                    'minimum': 1,
-                    'maximum': 12000,
-                    'default': 6000,
-                    'description': (
-                        'Max characters returned in this call (1–12000).'),
-                },
             },
             'required': ['skill_id', 'resource'],
         },
@@ -116,7 +108,7 @@ REQUEST_SKILL_INSTALL_TOOL = {
             'Request installation of one exact verified catalog match from '
             'search_skills. Manual mode requires user confirmation; Auto mode '
             'authorizes verified installation, up to three attempts per task. '
-            'Successful installation also loads its first instruction page. It never '
+            'Successful installation also loads its whole guide. It never '
             'runs bundled scripts. Do not call for unavailable entries.'),
         'parameters': {
             'type': 'object',

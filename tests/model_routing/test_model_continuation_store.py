@@ -109,7 +109,12 @@ def test_delete_restore_purge_and_explicit_delete(authority):
     assert not store.put(**key, projection=value)
     command(authority.client, 'conversation.restore', {'conv_id': 'continuation', 'user_id': 1})
     assert store.get(**key) is None
-    assert store.put(**key, projection=value)
+    # Restore changes the authority witnesses; old continuation cannot revive.
+    assert not store.put(**key, projection=value)
+    restored = [authority.client.query('turn.get', {
+        'conversation_id': 'continuation', 'user_id': 1, 'turn_id': row['turnId'],
+    }) for row in rows]
+    assert store.put(**key, projection=projection(restored))
     command(authority.client, 'conversation.purge', {'conv_id': 'continuation', 'user_id': 1})
     assert store.get(**key) is None
 
@@ -190,7 +195,7 @@ def test_automatic_handoff_survives_durable_restart_and_later_stop(
 
 
 def test_catalog_live_cas_has_no_receipt_payload_history():
-    from lib.storage_sidecar.operation_registry import build_registry
+    from lib.storage_authority_sql.operation_registry import build_registry
     registry = build_registry()
     for name in ('get', 'put', 'delete'):
         assert not registry[f'model_continuation.{name}'].receipt_required

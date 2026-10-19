@@ -24,7 +24,8 @@ def create_service(*, client_factory=_storage, registry=None, max_workers=None,
     from runtime_guards import MAX_TASK_CONCURRENCY, resolve_resource_budget
     from .clock import AutomationClockHandler
     from .event_delivery import AutomationEventHandler
-    from .execution import AutomationExecutionHandler, presentation_registry
+    from .execution import AutomationExecutionHandler
+    from lib.project_dispatch.responsibilities_adapter import responsibility_registry
     from .worker_service import AutomationWorkerService
 
     policy = runtime_policy()
@@ -34,7 +35,7 @@ def create_service(*, client_factory=_storage, registry=None, max_workers=None,
     if now_ms is None:
         now_ms = lambda: int(time.time() * 1000)
     if registry is None:
-        registry = presentation_registry()
+        registry = responsibility_registry(client_factory=client_factory, now_ms=now_ms)
     execution = AutomationExecutionHandler(client_factory=client_factory, registry=registry,
         now_ms=now_ms, poll_interval_ms=policy['actionWaitMilliseconds'])
     registrations = (

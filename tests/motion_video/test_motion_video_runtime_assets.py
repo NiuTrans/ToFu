@@ -22,7 +22,7 @@ def test_ensure_gsap_verifies_caches_and_stages(monkeypatch, tmp_path):
         calls.append((url, timeout))
         return SimpleNamespace(status_code=200, content=data)
 
-    monkeypatch.setattr('lib.http_client.http_get', fake_get)
+    monkeypatch.setattr('lib.http_transport.client.http_get', fake_get)
     first = tmp_path / 'scene-a'
     second = tmp_path / 'scene-b'
 

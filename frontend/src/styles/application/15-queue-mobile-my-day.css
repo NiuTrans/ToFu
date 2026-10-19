@@ -683,7 +683,7 @@
   .md-content th,.md-content td{padding:6px var(--space-2);font-size:var(--font-size-sm)}
   .md-content ul,.md-content ol{margin-left:var(--space-4)}
   .md-content blockquote{padding:6px var(--space-3);font-size:var(--font-size-lg)}
-  .message-body img:not(.ig-result-card img, .imagegen-card img, .ig-batch-slot img, .rf-img-tile img){max-width:200px;max-height:150px}
+  .message-body img:not(.md-image, .ig-result-card img, .imagegen-card img, .ig-batch-slot img, .rf-img-tile img){max-width:200px;max-height:150px}
   .msg-img-thumb{width:60px;height:60px}
   .msg-img-badge{font-size:6px;padding:0 3px}
   .msg-img-size{font-size:7px}

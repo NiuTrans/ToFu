@@ -15,7 +15,7 @@ import pytest
 
 from lib.project_mod import portable_sandbox
 from lib.project_mod import python_bytecode_cache as cache
-from lib.storage_sidecar.storage_capabilities import MountDescription
+from lib.storage_authority_sql.storage_capabilities import MountDescription
 
 
 pytestmark = pytest.mark.unit

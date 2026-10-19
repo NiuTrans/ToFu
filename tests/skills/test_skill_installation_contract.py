@@ -245,7 +245,7 @@ def test_owner_global_packages_are_isolated(isolated):
             / 'sample-skill' / 'SKILL.md').is_file()
 
 
-def test_resource_reads_are_opaque_paged_and_symlink_safe(isolated):
+def test_resource_reads_are_complete_opaque_and_symlink_safe(isolated):
     from lib.skills import load_skill, read_skill_resource
     project = _project(isolated)
     package = Path(project) / '.tofu' / 'skills' / 'manual'
@@ -258,10 +258,15 @@ def test_resource_reads_are_opaque_paged_and_symlink_safe(isolated):
     assert str(package) not in loaded
     assert 'skill://manual/refs/long.txt' in loaded
     page = read_skill_resource(
-        'manual', 'skill://manual/refs/long.txt', cursor=2, max_chars=4,
+        'manual', 'skill://manual/refs/long.txt', cursor=2,
         project_path=project)
-    assert '<skill_resource>\ncdef\n</skill_resource>' in page
-    assert 'next_cursor: 6' in page
+    assert '<skill_resource>\ncdefghij\n</skill_resource>' in page
+    assert 'next_cursor: (end)' in page
+
+    full_text = '完整资源\n' * 5000 + 'RESOURCE_TAIL'
+    (package / 'refs' / 'long.txt').write_text(full_text, encoding='utf-8')
+    full = read_skill_resource('manual', 'refs/long.txt', project_path=project)
+    assert f'<skill_resource>\n{full_text}\n</skill_resource>' in full
     missing = read_skill_resource(
         'manual', 'skill://manual/docs.md', project_path=project)
     assert missing.startswith(

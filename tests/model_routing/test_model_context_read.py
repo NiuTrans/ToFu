@@ -201,7 +201,7 @@ def test_legacy_checkpoint_is_available_for_full_content_validation(context_driv
     assert read['continuation'] == legacy
 
 
-def test_application_restores_prefix_and_reloads_full_history_on_policy_change(context_driver, monkeypatch):
+def test_application_restores_prefix_and_reloads_full_history_on_policy_change(context_driver, monkeypatch, caplog):
     from lib import turn_lifecycle
     from lib.tasks_pkg.model_replay import policy_witness
     base, cached = seed(context_driver)
@@ -225,11 +225,28 @@ def test_application_restores_prefix_and_reloads_full_history_on_policy_change(c
     assert restored[-1]['content'] == 'next live request'
     assert operations == [('turn.context.read', True)]
     operations.clear()
+    changed_config = config | {'systemPrompt': 'changed policy'}
     rebuilt = turn_lifecycle.build_api_messages(base['conversation_id'], pair['turn']['turnId'],
-                                               config | {'systemPrompt': 'changed policy'}, user_id=11)
+                                               changed_config, user_id=11)
+    assert changed_config['_modelReplayStatus'] == 'policy_changed'
+    assert 'restore=policy_changed fallback=full_history' in caplog.text
     assert any(message['content'] == 'original request' for message in rebuilt)
     assert not any(message['content'] == 'compacted retained history' for message in rebuilt)
     assert operations == [('turn.context.read', True), ('turn.context.read', False)]
+
+
+    class DisappearingTargetClient(Client):
+        def query(self, operation, payload, **kwargs):
+            # The target may disappear between warm admission and a cold reread.
+            if payload.get('replay') is False:
+                return None
+            return super().query(operation, payload, **kwargs)
+
+    monkeypatch.setattr(turn_lifecycle, '_turn_client', lambda **kwargs: DisappearingTargetClient())
+    disappeared_config = config | {'systemPrompt': 'changed policy'}
+    assert turn_lifecycle.build_api_messages(
+        base['conversation_id'], pair['turn']['turnId'], disappeared_config, user_id=11) is None
+    assert disappeared_config['_modelReplayStatus'] == 'policy_changed'
 
 
 @pytest.mark.parametrize('proof', [None, [], 'bad', {'version': True, 'count': 0, 'digest': '0' * 64},

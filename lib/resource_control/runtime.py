@@ -37,17 +37,10 @@ def launch_policy(environ) -> dict:
     children = budget('TOFU_SWARM_GLOBAL_WORKERS', 64, 0)
     if not children:
         children = budget('TOFU_SWARM_MAX_PARALLEL', 64) * budget('TOFU_SWARM_SESSION_CAPACITY', 128)
-    from lib.llm_dispatch.ephemeral_policy import resolve_ephemeral_slot_capacity
-    # Queue remains at its launch size. Reserving the maximum future execution
-    # envelope is cheap: this is an integer limit, not preallocated handles.
-    route_environment = dict(environ)
-    route_environment['TOFU_AGENT_WORKERS'] = str(maximum)
-    route_environment['TOFU_MAX_INFLIGHT_TASKS'] = str(maximum)
     task_bytes = budget('TOFU_TASK_RSS_RESERVE_MB', 16384, 64) * (1 << 20)
     available = manifest['probe']['effective_memory_available_mb']
     return {'automatic': bool(manifest['adaptive']), 'root_maximum': maximum,
             'child_maximum': children, 'task_bytes': task_bytes,
-            'route_capacity': resolve_ephemeral_slot_capacity(route_environment),
             'frame_maximum': max(128 << 20, int(available or 128) * (1 << 20) // 8)}
 
 

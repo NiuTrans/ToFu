@@ -19,6 +19,7 @@ def test_canonical_ids_resolve_to_vendor_dates() -> None:
     assert release_date('kimi-k3') == '2026-07'
     assert release_date('gemini-3.7-flash') == '2026-08'
     assert release_date('gemini-3.8-flash') == '2026-09'
+    assert release_date('gemini-4-argon') == '2026-10'  # model page, Oct 2026
 
     assert release_date('muse-spark-1.3') == '2026-09-02'  # listed 2026-09-02
 

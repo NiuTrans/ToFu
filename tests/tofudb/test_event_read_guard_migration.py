@@ -2,8 +2,8 @@
 
 import sqlite3
 import pytest
-from lib.storage_sidecar.tofudb_migration_coverage import source_table_coverage
-from lib.storage_sidecar.tofudb_migration_source import SQLiteMigrationSource
+from lib.storage_authority_sql.migration.tofudb_migration_coverage import source_table_coverage
+from lib.storage_authority_sql.migration.tofudb_migration_source import SQLiteMigrationSource
 
 pytestmark = pytest.mark.unit
 

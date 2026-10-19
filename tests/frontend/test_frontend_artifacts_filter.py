@@ -15,14 +15,26 @@ again when the query clears. Skips cleanly without node + jsdom.
 
 from __future__ import annotations
 
-import os
+from pathlib import Path
 
 import pytest
 
 from tests._jsdom import run_harness
-from tests._runtime_sections import runtime_section_path
+from tests._paper_vite import compiled_typescript
 
 pytestmark = pytest.mark.unit
+
+
+@pytest.fixture(scope='module')
+def artifact_bundle():
+    root = Path(__file__).resolve().parents[2]
+    source = root/'frontend/src/runtime/sections/artifacts.js'
+    # Shipping imports are relative to composed runtime/app-runtime.js. Compile
+    # the actual adapter/typed presenter graph rather than eval ESM as classic JS.
+    contents = 'const runtimeScope = window;\n' + source.read_text().replace(
+        "'../rich-response/artifact-delivery'", repr(str(root/'frontend/src/rich-response/artifact-delivery.ts')))
+    with compiled_typescript(source, contents=contents) as bundle:
+        yield bundle
 
 _BODY = r"""
 const { setup } = require(process.env.JSDOM_HARNESS);
@@ -129,18 +141,18 @@ const { window, check, report } = setup({
 """
 
 
-def test_artifacts_filter_shows_empty_state():
+def test_artifacts_filter_shows_empty_state(artifact_bundle):
     run_harness(
-        target_js=runtime_section_path('artifacts.js'),
+        target_js=artifact_bundle,
         body_js=_BODY,
         min_pass=7,
         label='artifacts filter',
     )
 
 
-def test_snapshot_negative_hint_skips_empty_artifact_list_request():
+def test_snapshot_negative_hint_skips_empty_artifact_list_request(artifact_bundle):
     run_harness(
-        target_js=runtime_section_path('artifacts.js'),
+        target_js=artifact_bundle,
         body_js=_SNAPSHOT_HINT_BODY,
         expect_pass=6,
         label='artifact snapshot hint',

@@ -81,23 +81,19 @@ def desktop_execution(document, payload, scheduler):
                          **{key: payload[key] for key in ('engine', 'line', 'needle') if key in payload}},
                         'PaperDesktopBuildV1')
         address = {'target_agent_id': document.agent_id, 'user_id': str(document.owner_user_id)}
-        timeout = limit('compile_timeout_seconds') + limit('transfer_timeout_seconds')
         with scheduler.cache.stage(document.owner_user_id, document.document_id, build_id) as stage:
             receiver = BundleReceiver(stage / 'build', owner_user_id=document.owner_user_id,
                                       document_id=document.document_id, build_id=build_id, target='desktop')
             command_id, error = enqueue_desktop_command('paper_build', body, **address,
-                cmd_id=build_id, ttl=timeout, stream_limits={
+                cmd_id=build_id, stream_limits={
                     'bytes': limit('transfer_window_bytes'), 'frames': limit('transfer_window_frames'),
                     'frame_bytes': limit('transfer_frame_bytes')})
             if error:
                 raise BuildError('desktop_unavailable', str(error)[:1000])
             completed = False
             try:
-                deadline = time.monotonic() + timeout
                 while True:
                     check_cancelled(cancel)
-                    if time.monotonic() >= deadline:
-                        raise BuildError('desktop_timeout', 'Desktop paper build or transfer timed out')
                     state = consume_desktop_command(command_id, **address)
                     if state is None:
                         raise BuildError('desktop_unavailable', 'Desktop paper command expired or was disconnected')

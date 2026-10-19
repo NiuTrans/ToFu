@@ -8,45 +8,50 @@ from __future__ import annotations
 
 import gzip
 import os
+import tempfile
+import zlib
 from pathlib import Path
 
-from .contract import limit
 from .errors import BuildError
 
 
 def _lines(stream):
-    remaining = limit('synctex_decoded_bytes')
-    while remaining >= 0:
-        line = stream.readline(remaining + 1)
-        if not line:
-            return
-        remaining -= len(line)
-        if remaining < 0:
-            raise BuildError('synctex_limit', 'SyncTeX exceeds the decoded byte limit')
+    while True:
+        line = stream.readline()
+        if not line:return
         yield line
 
 
 def normalize(source: Path, destination: Path, *, source_root: Path,
               source_files: tuple[dict, ...], working_directory: Path | None = None) -> None:
     known = {row['path'] for row in source_files}
+    temporary = None
     try:
-        with gzip.open(source, 'rb') as incoming, gzip.open(destination, 'wb') as outgoing:
-            for raw in _lines(incoming):
-                if raw.startswith(b'Input:'):
-                    _, tag, label = raw.decode('utf-8', errors='replace').rstrip('\r\n').split(':', 2)
-                    path = Path(label)
-                    if not path.is_absolute():
-                        path = (working_directory or source_root) / path
-                    try:
-                        relative = path.resolve().relative_to(source_root.resolve()).as_posix()
-                    except ValueError:
-                        relative = ''
-                    normalized = relative if relative in known else f'@toolchain/{tag}'
-                    raw = f'Input:{tag}:{normalized}\n'.encode()
-                outgoing.write(raw)
-    except (OSError, EOFError, ValueError) as exc:
-        destination.unlink(missing_ok=True)
+        descriptor, name = tempfile.mkstemp(prefix='.synctex-normalize-', dir=destination.parent)
+        temporary = Path(name)
+        with os.fdopen(descriptor, 'wb') as staged, gzip.open(source, 'rb') as incoming:
+            with gzip.GzipFile(fileobj=staged, mode='wb', filename='', mtime=0) as outgoing:
+                for raw in _lines(incoming):
+                    if raw.startswith(b'Input:'):
+                        _, tag, label = raw.decode('utf-8', errors='replace').rstrip('\r\n').split(':', 2)
+                        path = Path(label)
+                        if not path.is_absolute():
+                            path = (working_directory or source_root) / path
+                        try:
+                            relative = path.resolve().relative_to(source_root.resolve()).as_posix()
+                        except ValueError:
+                            relative = ''
+                        normalized = relative if relative in known else f'@toolchain/{tag}'
+                        raw = f'Input:{tag}:{normalized}\n'.encode()
+                    outgoing.write(raw)
+            staged.flush()
+            os.fsync(staged.fileno())
+        os.replace(temporary, destination)
+        temporary = None
+    except (OSError, EOFError, ValueError, zlib.error) as exc:
         raise BuildError('synctex_invalid', 'Cannot decode build SyncTeX') from exc
+    finally:
+        if temporary is not None:temporary.unlink(missing_ok=True)
 
 
 def locate(path: Path, *, build_id: str, file: str, line: int) -> dict:
@@ -61,11 +66,12 @@ def _location_result(build_id, file, line):
     return validate({'build_id': build_id, 'file': file, 'line': line, 'page': None, 'rects': []}, 'PaperBuildLocationV1')
 
 
-def _decode(source) -> str:
+def _decoded_lines(source):
+    """Read through gzip EOF/CRC without assembling another full text copy."""
     try:
         with gzip.GzipFile(fileobj=source, mode='rb') as stream:
-            return b''.join(_lines(stream)).decode('utf-8', errors='replace')
-    except (OSError, EOFError) as exc:
+            for raw in _lines(stream):yield raw.decode('utf-8', errors='replace')
+    except (OSError, EOFError, zlib.error) as exc:
         raise BuildError('synctex_invalid', 'Cannot decode build SyncTeX') from exc
 
 
@@ -73,8 +79,7 @@ def locate_stream(source, *, build_id: str, file: str, line: int) -> dict:
     from lib.paper.latex_layout import parse_synctex
     from .contract import validate
     result = _location_result(build_id, file, line)
-    raw = _decode(source)
-    parsed = parse_synctex(raw)
+    parsed = parse_synctex(_decoded_lines(source))
     labels = {tag for tag, label in parsed['inputs'].items()
               if os.path.normpath(label).replace('\\', '/') == file}
     candidates = []
@@ -101,8 +106,7 @@ def inverse_stream(source, *, build_id: str, page: int, h: float, v: float) -> d
     """
     from lib.paper.latex_layout import parse_synctex
     from .contract import validate
-    raw = _decode(source)
-    parsed = parse_synctex(raw)
+    parsed = parse_synctex(_decoded_lines(source))
     best = None
     for (tag, source_line), box in parsed['by_line'].items():
         if box['page'] != page:

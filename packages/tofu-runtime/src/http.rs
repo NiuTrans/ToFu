@@ -5,15 +5,21 @@ use reqwest::{
     header::{HeaderMap, CONTENT_TYPE},
     Client, Url,
 };
-use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
-use tokio::sync::{watch, Semaphore};
+use std::{future::Future, pin::Pin, sync::{Arc, atomic::{AtomicUsize, Ordering}}, time::Duration};
+use tokio::sync::watch;
 #[derive(Clone, Copy)]
 pub struct Policy {
+    /// Compatibility hint (also used by CLI blocking workers), not HTTP admission.
     pub connections: usize,
     pub idle_connections: usize,
     pub keepalive: Duration,
     pub connect: Duration,
-    pub request_headers: Duration,
+    /// Optional overall budget through upload and response headers. None keeps
+    /// waiting under caller cancellation/deadline; it is not an upload timeout.
+    pub request_headers: Option<Duration>,
+    /// Independent post-connect physical write/flush budget; no header/read timer.
+    pub write: Option<Duration>,
+    /// Retained positive compatibility field; HTTP attempts have no slot queue.
     pub pool_wait: Duration,
     pub stream_idle: Option<Duration>,
     pub drain_timeout: Duration,
@@ -26,6 +32,7 @@ pub enum Error {
     Cancelled,
     PoolTimeout,
     RequestTimeout,
+    WriteTimeout,
     ConnectTimeout,
     Connection,
     ReadTimeout,
@@ -87,16 +94,22 @@ pub struct Request {
 pub struct Transport {
     client: Client,
     endpoint: Url,
-    slots: Arc<Semaphore>,
+    active: Arc<AtomicUsize>,
     policy: Policy,
+}
+struct ActiveRequest(Arc<AtomicUsize>);
+impl Drop for ActiveRequest {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 impl Transport {
     pub fn new(endpoint: &str, proxy: Option<&str>, policy: Policy) -> Result<Self, Error> {
         if policy.connections == 0
-            || policy.idle_connections > policy.connections
             || policy.keepalive.is_zero()
             || policy.connect.is_zero()
-            || policy.request_headers.is_zero()
+            || policy.request_headers.is_some_and(|d| d.is_zero())
+            || policy.write.is_some_and(|d| d.is_zero())
             || policy.pool_wait.is_zero()
             || policy.stream_idle.is_some_and(|d| d.is_zero())
             || policy.drain_timeout.is_zero()
@@ -122,6 +135,7 @@ impl Transport {
             .pool_max_idle_per_host(policy.idle_connections)
             .pool_idle_timeout(policy.keepalive)
             .tcp_nodelay(true);
+        builder = builder.write_timeout(policy.write);
         if let Some(proxy) = proxy {
             builder = builder.proxy(reqwest::Proxy::all(proxy).map_err(|_| Error::Configuration)?);
         }
@@ -129,12 +143,15 @@ impl Transport {
         Ok(Self {
             client,
             endpoint,
-            slots: Arc::new(Semaphore::new(policy.connections)),
+            active: Arc::new(AtomicUsize::new(0)),
             policy,
         })
     }
-    pub fn available_slots(&self) -> usize {
-        self.slots.available_permits()
+    pub(crate) fn write_timeout(&self) -> Option<Duration> { self.policy.write }
+
+    /// Diagnostic count; this observation never grants or refuses an attempt.
+    pub fn active_requests(&self) -> usize {
+        self.active.load(Ordering::Acquire)
     }
     pub async fn execute(
         &self,
@@ -208,7 +225,12 @@ impl Transport {
         observer: Option<&dyn TextObserver>,
         mut stream: S,
     ) -> Result<StreamResult, Error> {
-        let _permit = tokio::select! {biased; _=cancel.cancelled()=>return Err(Error::Cancelled), permit=tokio::time::timeout(self.policy.pool_wait,self.slots.acquire())=>permit.map_err(|_|Error::PoolTimeout)?.map_err(|_|Error::Configuration)?};
+        if cancel.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        self.active.fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| value.checked_add(1))
+            .map_err(|_| Error::Configuration)?;
+        let _active = ActiveRequest(self.active.clone());
         let mut headers = request.headers;
         headers.insert(
             CONTENT_TYPE,
@@ -220,7 +242,30 @@ impl Transport {
             .headers(headers)
             .body(request.body)
             .send();
-        let mut response = tokio::select! {biased; _=cancel.cancelled()=>return Err(Error::Cancelled), result=tokio::time::timeout(self.policy.request_headers,send)=>result.map_err(|_|Error::RequestTimeout)?.map_err(|e|if e.is_timeout()&&e.is_connect(){Error::ConnectTimeout}else if e.is_timeout(){Error::RequestTimeout}else{Error::Connection})?};
+        let response = async {
+            let result = match self.policy.request_headers {
+                Some(limit) => tokio::time::timeout(limit, send)
+                    .await
+                    .map_err(|_| Error::RequestTimeout)?,
+                None => send.await,
+            };
+            result.map_err(|error| {
+                if error.is_write_timeout() {
+                    Error::WriteTimeout
+                } else if error.is_timeout() && error.is_connect() {
+                    Error::ConnectTimeout
+                } else if error.is_timeout() {
+                    Error::RequestTimeout
+                } else {
+                    Error::Connection
+                }
+            })
+        };
+        let mut response = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Err(Error::Cancelled),
+            result = response => result?,
+        };
         if response.status().as_u16() != 200 {
             return Err(Error::HttpStatus(response.status().as_u16()));
         }
@@ -310,9 +355,9 @@ async fn next_chunk(
         tokio::time::timeout(idle, response.chunk())
             .await
             .map_err(|_| Error::ReadTimeout)?
-            .map_err(|_| Error::ReadFailure)
+            .map_err(|error| if error.is_write_timeout() { Error::WriteTimeout } else { Error::ReadFailure })
     } else {
-        response.chunk().await.map_err(|_| Error::ReadFailure)
+        response.chunk().await.map_err(|error| if error.is_write_timeout() { Error::WriteTimeout } else { Error::ReadFailure })
     }
 }
 impl Transport {

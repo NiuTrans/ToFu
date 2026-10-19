@@ -1,6 +1,6 @@
 //! Owner-scoped Project Brain projection and immutable semantic event stream.
 //!
-//! A digest-keyed blob-capable projection carries bounded current state while
+//! A digest-keyed blob-capable projection carries complete current state while
 //! every accepted transition is chunked into the stream family in the same
 //! authority transaction. Exact project identity remains inside the projection
 //! so hash collisions fail closed. This module is the sole physical owner.
@@ -15,12 +15,7 @@ use sha2::{Digest, Sha256};
 use crate::authority::{AuthorityDatabase, AuthorityTransaction};
 use crate::entity::EntityKey;
 use crate::generated_tofudb_ir::{
-    MAX_PROJECT_BRAIN_ACTIVE_WORK, MAX_PROJECT_BRAIN_ARTIFACTS_PER_WORK,
-    MAX_PROJECT_BRAIN_CHANGED_PATHS, MAX_PROJECT_BRAIN_CHARTER_DECISIONS,
-    MAX_PROJECT_BRAIN_CHECKER_VERSIONS, MAX_PROJECT_BRAIN_CURSORS,
-    MAX_PROJECT_BRAIN_DOCUMENT_BYTES, MAX_PROJECT_BRAIN_EVENT_BYTES, MAX_PROJECT_BRAIN_NARRATIVES,
     MAX_PROJECT_BRAIN_NARRATIVE_TEXT_BYTES, MAX_PROJECT_BRAIN_PROJECT_KEY_CHARACTERS,
-    MAX_PROJECT_BRAIN_WATCH_ITEMS, MAX_PROJECT_BRAIN_WORK_HISTORY,
     PROJECT_BRAIN_CHECKPOINT_NAMESPACE, PROJECT_BRAIN_DOCUMENT_NAMESPACE,
     PROJECT_BRAIN_EVENT_CHECKPOINT_TAIL, PROJECT_BRAIN_EVENT_CHECKPOINT_THRESHOLD,
     PROJECT_BRAIN_EVENT_INDEX_NAMESPACE, PROJECT_BRAIN_UPDATED_INDEX_NAMESPACE,
@@ -194,7 +189,7 @@ fn load_projection(
         LOGICAL_NAMESPACE,
         project_key,
         transaction.owner_user_id(),
-        MAX_PROJECT_BRAIN_DOCUMENT_BYTES,
+        usize::MAX,
     )?
     else {
         return Ok(empty_projection(transaction.owner_user_id(), project_key));
@@ -232,9 +227,6 @@ fn save_projection(
     stored_projection.insert("_updatedAt".to_owned(), Value::from(timestamp));
     let value_json = serde_json::to_vec(&Value::Object(stored_projection))
         .map_err(|_| invalid_data("Project Brain projection cannot be encoded"))?;
-    if value_json.len() > MAX_PROJECT_BRAIN_DOCUMENT_BYTES {
-        return Err(payload_too_large("Project Brain projection exceeds 8 MiB"));
-    }
     versioned_document::put_with_blob_owner_bounded(
         database,
         transaction,
@@ -247,7 +239,7 @@ fn save_projection(
             updated_at_ms: timestamp.max(1),
         },
         transaction.owner_user_id(),
-        MAX_PROJECT_BRAIN_DOCUMENT_BYTES,
+        usize::MAX,
     )?;
     if let Some(previous_updated_at) = previous_updated_at {
         let previous_key = updated_index_key(transaction, project_key, previous_updated_at)?;
@@ -279,7 +271,7 @@ fn save_checkpoint(
             updated_at_ms: timestamp.max(1),
         },
         transaction.owner_user_id(),
-        MAX_PROJECT_BRAIN_DOCUMENT_BYTES,
+        usize::MAX,
     )?;
     Ok(())
 }
@@ -333,7 +325,6 @@ fn string_list(
 fn artifacts(value: Option<&Value>) -> io::Result<Vec<Value>> {
     let values = value
         .and_then(Value::as_array)
-        .filter(|values| values.len() <= MAX_PROJECT_BRAIN_ARTIFACTS_PER_WORK)
         .ok_or_else(|| invalid_input("Invalid Project Brain artifacts"))?;
     values
         .iter()
@@ -393,7 +384,7 @@ fn validated_work_item(value: &Map<String, Value>) -> io::Result<Value> {
         "title": required_text(value, "title", 500)?,
         "trigger": trigger,
         "status": "active",
-        "changedPaths": string_list(value.get("changedPaths"), MAX_PROJECT_BRAIN_CHANGED_PATHS, 4096)?,
+        "changedPaths": string_list(value.get("changedPaths"), usize::MAX, 4096)?,
         "artifacts": artifacts(value.get("artifacts"))?,
         "resultSummary": result_summary,
         "startedAt": required_u64(value, "startedAt", 0, u64::MAX)?,
@@ -482,7 +473,7 @@ fn work_index(projection: &Map<String, Value>, work_id: &str) -> Option<usize> {
         })
 }
 
-fn bounded_work_items(items: &[Value]) -> Vec<Value> {
+fn ordered_work_items(items: &[Value]) -> Vec<Value> {
     let mut active = items
         .iter()
         .filter(|item| item.get("status").and_then(Value::as_str) == Some("active"))
@@ -500,15 +491,7 @@ fn bounded_work_items(items: &[Value]) -> Vec<Value> {
         .collect::<Vec<_>>();
     active.sort_by_key(|item| item.get("startedAt").and_then(Value::as_u64).unwrap_or(0));
     terminal.sort_by_key(|item| item.get("finishedAt").and_then(Value::as_u64).unwrap_or(0));
-    let active_start = active.len().saturating_sub(MAX_PROJECT_BRAIN_ACTIVE_WORK);
-    let terminal_start = terminal
-        .len()
-        .saturating_sub(MAX_PROJECT_BRAIN_WORK_HISTORY);
-    active[active_start..]
-        .iter()
-        .chain(&terminal[terminal_start..])
-        .cloned()
-        .collect()
+    active.into_iter().chain(terminal).collect()
 }
 
 fn bounded_utf8(value: &str, maximum_bytes: usize) -> String {
@@ -554,9 +537,6 @@ fn append_narrative(
         .and_then(Value::as_array_mut)
         .ok_or_else(|| invalid_data("Project Brain narratives are malformed"))?;
     narratives.push(entry);
-    if narratives.len() > MAX_PROJECT_BRAIN_NARRATIVES {
-        narratives.drain(..narratives.len() - MAX_PROJECT_BRAIN_NARRATIVES);
-    }
     Ok(())
 }
 
@@ -621,9 +601,6 @@ fn append_event(
 ) -> io::Result<(u64, u64)> {
     let encoded = serde_json::to_vec(event)
         .map_err(|_| invalid_data("Project Brain event cannot be encoded"))?;
-    if encoded.len() > MAX_PROJECT_BRAIN_EVENT_BYTES {
-        return Err(payload_too_large("Project Brain event exceeds 8 MiB"));
-    }
     let chunk_count = encoded.len().div_ceil(EVENT_CHUNK_BYTES).max(1);
     let chunk_count_u32 = u32::try_from(chunk_count)
         .map_err(|_| payload_too_large("Project Brain event has too many chunks"))?;
@@ -691,46 +668,42 @@ fn decode_event_chunks(
     let chunk_count = u32::from_be_bytes(header[20..24].try_into().unwrap()) as usize;
     let total_bytes = u32::from_be_bytes(header[24..28].try_into().unwrap()) as usize;
     let digest: [u8; 32] = header[28..60].try_into().unwrap();
-    if first_chunk_index != 0
-        || chunk_count == 0
-        || chunk_count > MAX_PROJECT_BRAIN_EVENT_BYTES.div_ceil(EVENT_CHUNK_BYTES)
-        || total_bytes > MAX_PROJECT_BRAIN_EVENT_BYTES
+    if first_chunk_index != 0 || chunk_count == 0 || total_bytes == 0
+        || chunk_count != total_bytes.div_ceil(EVENT_CHUNK_BYTES)
     {
-        return Err(invalid_data(
-            "Project Brain event chunk bounds are malformed",
-        ));
+        return Err(invalid_data("Project Brain event chunk bounds are malformed"));
     }
-    let page = database.stream_read_in_transaction(
-        transaction,
-        key,
-        first_physical_sequence,
-        chunk_count,
-    )?;
-    if page.events.len() != chunk_count {
-        return Err(invalid_data("Project Brain event chunks are incomplete"));
-    }
-    let mut encoded = Vec::with_capacity(total_bytes);
-    for (index, chunk) in page.events.iter().enumerate() {
-        let payload = chunk.event.payload.as_slice();
-        if chunk.sequence != first_physical_sequence + index as u64
-            || chunk.event.event_type != "semantic_event_chunk"
-            || payload.len() < EVENT_CHUNK_HEADER_BYTES
-            || &payload[..8] != EVENT_CHUNK_MAGIC
-            || u64::from_be_bytes(payload[8..16].try_into().unwrap()) != logical_sequence
-            || u32::from_be_bytes(payload[16..20].try_into().unwrap()) as usize != index
-            || u32::from_be_bytes(payload[20..24].try_into().unwrap()) as usize != chunk_count
-            || u32::from_be_bytes(payload[24..28].try_into().unwrap()) as usize != total_bytes
-            || payload[28..60] != digest
-        {
-            return Err(invalid_data(
-                "Project Brain event chunk sequence is malformed",
-            ));
+    let next = first_physical_sequence.checked_add(chunk_count as u64)
+        .ok_or_else(|| invalid_data("Project Brain physical sequence overflow"))?;
+    // Physical pages may stop before the logical event's end. Grow only from
+    // verified chunks, never an untrusted header's declared allocation size.
+    let mut encoded = Vec::new();
+    let mut index = 0_usize;
+    while index < chunk_count {
+        let page = database.stream_read_in_transaction(transaction,key,first_physical_sequence+index as u64,
+            (chunk_count-index).min(crate::generated_tofudb_ir::MAX_STREAM_READ_EVENTS))?;
+        if page.events.is_empty() {
+            return Err(invalid_data("Project Brain event chunks are incomplete"));
         }
-        encoded.extend_from_slice(&payload[EVENT_CHUNK_HEADER_BYTES..]);
-        if encoded.len() > total_bytes {
-            return Err(invalid_data(
-                "Project Brain event chunks exceed declared length",
-            ));
+        for chunk in &page.events {
+            let payload = chunk.event.payload.as_slice();
+            let expected_bytes = (total_bytes-encoded.len()).min(EVENT_CHUNK_BYTES);
+            if index >= chunk_count || chunk.sequence != first_physical_sequence + index as u64
+                || chunk.event.event_type != "semantic_event_chunk"
+                || payload.len() != EVENT_CHUNK_HEADER_BYTES + expected_bytes
+                || &payload[..8] != EVENT_CHUNK_MAGIC
+                || u64::from_be_bytes(payload[8..16].try_into().unwrap()) != logical_sequence
+                || u32::from_be_bytes(payload[16..20].try_into().unwrap()) as usize != index
+                || u32::from_be_bytes(payload[20..24].try_into().unwrap()) as usize != chunk_count
+                || u32::from_be_bytes(payload[24..28].try_into().unwrap()) as usize != total_bytes
+                || payload[28..60] != digest
+            {
+                return Err(invalid_data("Project Brain event chunk sequence is malformed"));
+            }
+            encoded.try_reserve(expected_bytes)
+                .map_err(|_| io::Error::new(io::ErrorKind::OutOfMemory,"Project Brain event allocation failed"))?;
+            encoded.extend_from_slice(&payload[EVENT_CHUNK_HEADER_BYTES..]);
+            index += 1;
         }
     }
     if encoded.len() != total_bytes || blake3::hash(&encoded).as_bytes() != &digest {
@@ -738,9 +711,6 @@ fn decode_event_chunks(
     }
     let event: Value = serde_json::from_slice(&encoded)
         .map_err(|_| invalid_data("Project Brain event JSON is malformed"))?;
-    let next = first_physical_sequence
-        .checked_add(chunk_count as u64)
-        .ok_or_else(|| invalid_data("Project Brain physical sequence overflow"))?;
     Ok((event, next))
 }
 
@@ -886,23 +856,25 @@ pub(crate) fn list_active(
     database: &AuthorityDatabase,
     transaction: &mut AuthorityTransaction,
 ) -> io::Result<Vec<u8>> {
-    let (start, end) = updated_index_range(transaction)?;
-    let rows = database.entity_scan(transaction, &start, &end, 1000)?;
+    let (mut cursor, end) = updated_index_range(transaction)?;
     let mut projects = Vec::new();
-    // Legacy update-index entries can repeat one project hundreds of times.
-    // Deduplicate before loading its complete projection. Keep the raw row
-    // page/cursor unchanged so settlement and deletion cannot skip a project.
     let mut seen_projects = HashSet::new();
-    for (_, raw_project_key) in &rows {
-        let project_key = std::str::from_utf8(raw_project_key)
-            .map_err(|_| invalid_data("Project Brain updated index is malformed"))?;
-        if !seen_projects.insert(project_key) {
-            continue;
-        }
-        let projection = load_projection(database, transaction, project_key)?;
-        let work_items = public_work_items(&projection, true)?;
-        if !work_items.is_empty() {
-            projects.push(json!({"projectKey": project_key, "workItems": work_items}));
+    loop {
+        let rows = database.entity_scan(transaction, &cursor, &end, crate::generated_tofudb_ir::MAX_ENTITY_RANGE_ROWS)?;
+        if rows.is_empty() { break; }
+        let mut successor = rows.last().expect("nonempty page").0.key_bytes().to_vec();
+        successor.push(0);
+        cursor = EntityKey::new(transaction.tenant_id(),transaction.owner_user_id(),PROJECT_BRAIN_UPDATED_INDEX_NAMESPACE,&successor)?;
+        for (_, raw_project_key) in rows {
+            let project_key = std::str::from_utf8(&raw_project_key)
+                .map_err(|_| invalid_data("Project Brain updated index is malformed"))?;
+            // Legacy update indexes may repeat projects across page boundaries.
+            if !seen_projects.insert(project_key.to_owned()) { continue; }
+            let projection = load_projection(database,transaction,project_key)?;
+            let work_items = public_work_items(&projection,true)?;
+            if !work_items.is_empty() {
+                projects.push(json!({"projectKey":project_key,"workItems":work_items}));
+            }
         }
     }
     serde_json::to_vec(&json!({"projects": projects}))
@@ -1010,7 +982,7 @@ pub(crate) fn rebuild(
         "project_brain_checkpoints",
         project_key,
         transaction.owner_user_id(),
-        MAX_PROJECT_BRAIN_DOCUMENT_BYTES,
+        usize::MAX,
     )?;
     let (mut projection, mut physical_sequence, mut logical_sequence) =
         if let Some(raw_checkpoint) = checkpoint_document {
@@ -1115,7 +1087,6 @@ fn merge_relinked_immutable_rows<K: Clone + Eq + std::hash::Hash>(
     destination_rows: Option<&Value>,
     source_rows: Option<&Value>,
     identity: impl Fn(&Map<String, Value>) -> K,
-    maximum: usize,
     field: &str,
 ) -> io::Result<Vec<Value>> {
     let mut order: Vec<K> = Vec::new();
@@ -1142,11 +1113,6 @@ fn merge_relinked_immutable_rows<K: Clone + Eq + std::hash::Hash>(
                 }
             }
         }
-    }
-    if rows.len() > maximum {
-        return Err(payload_too_large(&format!(
-            "Project Brain {field} limit reached during relink"
-        )));
     }
     Ok(order
         .into_iter()
@@ -1212,12 +1178,9 @@ fn merge_relinked_projections(
                     }
                 }
             }
-            let changed_start = changed_paths
-                .len()
-                .saturating_sub(MAX_PROJECT_BRAIN_CHANGED_PATHS);
             combined.insert(
                 "changedPaths".to_owned(),
-                Value::Array(changed_paths[changed_start..].to_vec()),
+                Value::Array(changed_paths),
             );
             let mut artifact_order: Vec<String> = Vec::new();
             let mut artifacts_by_key: HashMap<String, Map<String, Value>> = HashMap::new();
@@ -1250,12 +1213,9 @@ fn merge_relinked_projections(
                 .iter()
                 .map(|key| Value::Object(artifacts_by_key[key].clone()))
                 .collect();
-            let artifact_start = artifact_values
-                .len()
-                .saturating_sub(MAX_PROJECT_BRAIN_ARTIFACTS_PER_WORK);
             combined.insert(
                 "artifacts".to_owned(),
-                Value::Array(artifact_values[artifact_start..].to_vec()),
+                Value::Array(artifact_values),
             );
             work_by_id.insert(work_id, combined);
         }
@@ -1266,7 +1226,7 @@ fn merge_relinked_projections(
         .collect();
     merged.insert(
         "workItems".to_owned(),
-        Value::Array(bounded_work_items(&work_values)),
+        Value::Array(ordered_work_items(&work_values)),
     );
 
     type NarrativeKey = (String, String, u64, String, String);
@@ -1315,10 +1275,6 @@ fn merge_relinked_projections(
             item.get("sequence").and_then(Value::as_u64).unwrap_or(0),
         )
     });
-    let narrative_start = narrative_rows
-        .len()
-        .saturating_sub(MAX_PROJECT_BRAIN_NARRATIVES);
-    let mut narrative_rows = narrative_rows[narrative_start..].to_vec();
     let combined_head = (destination
         .get("headSequence")
         .and_then(Value::as_u64)
@@ -1355,7 +1311,6 @@ fn merge_relinked_projections(
                     item.get("version").and_then(Value::as_u64).unwrap_or(0),
                 )
             },
-            MAX_PROJECT_BRAIN_CHECKER_VERSIONS,
             "checkers",
         )?),
     );
@@ -1378,7 +1333,6 @@ fn merge_relinked_projections(
                 .unwrap_or("")
                 .to_owned()
         },
-        MAX_PROJECT_BRAIN_CHARTER_DECISIONS,
         "charter decisions",
     )?;
     let mut charter = source_charter;
@@ -1420,11 +1374,6 @@ fn merge_relinked_projections(
                 watch_by_id.insert(item_id, item.clone());
             }
         }
-    }
-    if watch_by_id.len() > MAX_PROJECT_BRAIN_WATCH_ITEMS {
-        return Err(payload_too_large(
-            "Project Brain watch limit reached during relink",
-        ));
     }
     let mut watch_rows: Vec<Map<String, Value>> = watch_order
         .iter()
@@ -1512,7 +1461,7 @@ pub(crate) fn relink_scope(
         LOGICAL_NAMESPACE,
         old_project_key,
         owner_user_id,
-        MAX_PROJECT_BRAIN_DOCUMENT_BYTES,
+        usize::MAX,
     )?
     else {
         return Ok(false);
@@ -1531,7 +1480,7 @@ pub(crate) fn relink_scope(
         LOGICAL_NAMESPACE,
         new_project_key,
         owner_user_id,
-        MAX_PROJECT_BRAIN_DOCUMENT_BYTES,
+        usize::MAX,
     )?;
 
     if let Some(destination_raw) = destination_raw {
@@ -1672,7 +1621,7 @@ pub(crate) fn relink_scope(
         "project_brain_checkpoints",
         old_project_key,
         owner_user_id,
-        MAX_PROJECT_BRAIN_DOCUMENT_BYTES,
+        usize::MAX,
     )?;
     if let Some(raw_checkpoint) = old_checkpoint {
         let mut checkpoint = serde_json::from_slice::<Value>(&raw_checkpoint)
@@ -1868,15 +1817,6 @@ pub(crate) fn command(
                 }
                 return command_result(&projection, None);
             }
-            let active_count = projection["workItems"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .filter(|item| item.get("status").and_then(Value::as_str) == Some("active"))
-                .count();
-            if active_count >= MAX_PROJECT_BRAIN_ACTIVE_WORK {
-                return Err(payload_too_large("Project active-work limit reached"));
-            }
             ("work_started", json!({"workItem": validated}))
         }
         CommandAction::WorkRefine => {
@@ -1911,7 +1851,7 @@ pub(crate) fn command(
                 ));
             }
             let changed_paths = match request.payload.get("changed_paths") {
-                Some(value) => string_list(Some(value), MAX_PROJECT_BRAIN_CHANGED_PATHS, 4096)?,
+                Some(value) => string_list(Some(value), usize::MAX, 4096)?,
                 None => Vec::new(),
             };
             let changed_artifacts = match request.payload.get("artifacts") {
@@ -2009,11 +1949,6 @@ pub(crate) fn command(
                 }
                 return command_result(&projection, None);
             }
-            if projection["checkers"].as_array().unwrap().len()
-                >= MAX_PROJECT_BRAIN_CHECKER_VERSIONS
-            {
-                return Err(payload_too_large("Project checker-version limit reached"));
-            }
             ("checker_registered", json!({"definition": validated}))
         }
         CommandAction::DecisionPromote => {
@@ -2055,9 +1990,6 @@ pub(crate) fn command(
                     return Err(conflict("Charter decisions are immutable"));
                 }
                 return command_result(&projection, None);
-            }
-            if decisions.len() >= MAX_PROJECT_BRAIN_CHARTER_DECISIONS {
-                return Err(payload_too_large("Project Charter decision limit reached"));
             }
             (
                 "decision_promoted",
@@ -2152,9 +2084,6 @@ pub(crate) fn command(
                         return Err(conflict("Project Watch item already exists"));
                     }
                     return command_result(&projection, None);
-                }
-                if projection["watch"].as_array().unwrap().len() >= MAX_PROJECT_BRAIN_WATCH_ITEMS {
-                    return Err(payload_too_large("Project Watch item limit reached"));
                 }
                 ("watch_added", json!({"item": validated}))
             } else {
@@ -2283,7 +2212,7 @@ fn fold_event(projection: &mut Map<String, Value>, event: &Value) -> io::Result<
                     .and_then(Value::as_array_mut)
                     .ok_or_else(|| invalid_data("Project Brain work items are malformed"))?;
                 items.push(item);
-                *items = bounded_work_items(items);
+                *items = ordered_work_items(items);
             }
         }
         "work_title_refined" => {
@@ -2322,9 +2251,6 @@ fn fold_event(projection: &mut Map<String, Value>, event: &Value) -> io::Result<
                             paths.push(Value::String(normalized.to_owned()));
                         }
                     }
-                    if paths.len() > MAX_PROJECT_BRAIN_CHANGED_PATHS {
-                        paths.drain(..paths.len() - MAX_PROJECT_BRAIN_CHANGED_PATHS);
-                    }
                     item.insert("changedPaths".to_owned(), Value::Array(paths));
                     let mut merged = item["artifacts"].as_array().unwrap().clone();
                     for artifact in payload["artifacts"].as_array().unwrap() {
@@ -2346,9 +2272,6 @@ fn fold_event(projection: &mut Map<String, Value>, event: &Value) -> io::Result<
                             merged.remove(existing);
                         }
                         merged.push(artifact.clone());
-                    }
-                    if merged.len() > MAX_PROJECT_BRAIN_ARTIFACTS_PER_WORK {
-                        merged.drain(..merged.len() - MAX_PROJECT_BRAIN_ARTIFACTS_PER_WORK);
                     }
                     item.insert("artifacts".to_owned(), Value::Array(merged));
                 }
@@ -2390,8 +2313,8 @@ fn fold_event(projection: &mut Map<String, Value>, event: &Value) -> io::Result<
                         item["conversationId"].as_str().unwrap_or("").to_owned(),
                     )
                 };
-                let bounded = bounded_work_items(projection["workItems"].as_array().unwrap());
-                projection.insert("workItems".to_owned(), Value::Array(bounded));
+                let ordered = ordered_work_items(projection["workItems"].as_array().unwrap());
+                projection.insert("workItems".to_owned(), Value::Array(ordered));
                 if has_output || matches!(status.as_str(), "failed" | "cancelled") {
                     let narrative = if summary.is_empty() {
                         format!(
@@ -2614,21 +2537,6 @@ fn fold_event(projection: &mut Map<String, Value>, event: &Value) -> io::Result<
                     conversation_id.to_owned(),
                     json!({"deliveredSequence": current.max(requested), "updatedAt": timestamp}),
                 );
-                if cursors.len() > MAX_PROJECT_BRAIN_CURSORS {
-                    let mut ordered = cursors
-                        .iter()
-                        .map(|(key, value)| {
-                            (
-                                value.get("updatedAt").and_then(Value::as_u64).unwrap_or(0),
-                                key.clone(),
-                            )
-                        })
-                        .collect::<Vec<_>>();
-                    ordered.sort();
-                    for (_, key) in &ordered[..ordered.len() - MAX_PROJECT_BRAIN_CURSORS] {
-                        cursors.remove(key);
-                    }
-                }
             }
         }
         _ => return Err(invalid_data("Unsupported Project Brain event kind")),
@@ -2985,7 +2893,7 @@ mod tests {
             "project_brain_checkpoints",
             project_key,
             11,
-            MAX_PROJECT_BRAIN_DOCUMENT_BYTES,
+            usize::MAX,
         )
         .unwrap()
         .is_some());
@@ -3006,5 +2914,154 @@ mod tests {
         assert_eq!(rebuilt["replayedEvents"], 0);
         assert_eq!(rebuilt["projection"]["narratives"][0]["text"], "checkpoint");
         database.commit(rebuild_transaction).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod demand_retention_tests {
+    use super::*;
+    fn apply(database: &mut AuthorityDatabase, action: CommandAction, payload: Value) -> Value {
+        let mut transaction = database.begin(7,11).unwrap();
+        let bytes = command(database,&mut transaction,&CommandRequest {
+            project_key:"/demand-project".to_owned(),action,
+            payload:payload.as_object().unwrap().clone(),timestamp:1000,
+        }).unwrap();
+        database.commit(transaction).unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+    #[test]
+    fn active_project_list_includes_every_project_beyond_the_former_page_quota() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut database = AuthorityDatabase::initialize(directory.path()).unwrap();
+        let mut transaction = database.begin(7,11).unwrap();
+        for ordinal in 0..1001 {
+            let key = format!("/active-demand-{ordinal:04}");
+            let mut projection = empty_projection(11,&key);
+            projection.insert("workItems".to_owned(),json!([{"id":"work","taskId":"task","status":"active"}]));
+            save_projection(&database,&mut transaction,&key,&projection,ordinal+1).unwrap();
+        }
+        database.commit(transaction).unwrap();
+        drop(database);
+        let database = AuthorityDatabase::open(directory.path()).unwrap();
+        let mut transaction = database.begin(7,11).unwrap();
+        let value:Value = serde_json::from_slice(&list_active(&database,&mut transaction).unwrap()).unwrap();
+        assert_eq!(value["projects"].as_array().unwrap().len(),1001);
+        assert_eq!(value["projects"][1000]["projectKey"],"/active-demand-0000");
+        let mut foreign = database.begin(7,12).unwrap();
+        assert_eq!(serde_json::from_slice::<Value>(&list_active(&database,&mut foreign).unwrap()).unwrap(),json!({"projects":[]}));
+    }
+
+    #[test]
+    fn project_history_demand_preserves_all_collections_after_reopen_relink_and_new_commands() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut database = AuthorityDatabase::initialize(directory.path()).unwrap();
+        for ordinal in 0..121 {
+            let task_id = format!("task-{ordinal}");
+            let digest = format!("{:x}",Sha256::digest(task_id.as_bytes()));
+            apply(&mut database,CommandAction::WorkStart,json!({"work_item":{
+                "id":format!("pw_{}",&digest[..24]),"taskId":task_id,"conversationId":"conversation",
+                "title":"Demand work","trigger":"file_write","status":"active",
+                "changedPaths":[],"artifacts":[],"resultSummary":"","startedAt":ordinal,
+                "finishedAt":null,"_titlePriority":100,"_titleRefined":false}}));
+        }
+        let mut transaction = database.begin(7,11).unwrap();
+        let mut projection = load_projection(&database,&mut transaction,"/demand-project").unwrap();
+        assert_eq!(projection["workItems"].as_array().unwrap().len(),121);
+        let work_id = projection["workItems"][0]["id"].as_str().unwrap().to_owned();
+        for ordinal in 0..121 {
+            projection["workItems"].as_array_mut().unwrap().push(json!({"id":format!("terminal-{ordinal}"),"status":"completed","finishedAt":ordinal}));
+        }
+        for ordinal in 0..601 {
+            let sequence = projection["headSequence"].as_u64().unwrap()+1;
+            let event = json!({"projectSequence":sequence,"timestamp":2000+ordinal,"kind":"narrative_added",
+                "payload":{"narrativeKind":"note","text":format!("history-{ordinal}")}});
+            append_event(&database,&mut transaction,"/demand-project",&event,sequence,2000+ordinal).unwrap();
+            fold_event(&mut projection,&event).unwrap();
+        }
+        for ordinal in 0..1101 {
+            let sequence = projection["headSequence"].as_u64().unwrap()+1;
+            let event = json!({"projectSequence":sequence,"timestamp":3000+ordinal,
+                "kind":"cursor_confirmed","payload":{"conversationId":format!("cursor-{ordinal}"),"deliveredSequence":1}});
+            append_event(&database,&mut transaction,"/demand-project",&event,sequence,3000+ordinal).unwrap();
+            fold_event(&mut projection,&event).unwrap();
+        }
+        for ordinal in 0..151 {
+            projection["watch"].as_array_mut().unwrap().push(json!({"id":format!("watch-{ordinal}"),"text":"retained","updatedAt":ordinal}));
+            projection["checkers"].as_array_mut().unwrap().push(json!({"checkerId":format!("checker-{ordinal}"),"version":1}));
+        }
+        for ordinal in 0..301 {
+            projection["charter"]["decisions"].as_array_mut().unwrap().push(json!({"decisionId":format!("decision-{ordinal}")}));
+        }
+        save_projection(&database,&mut transaction,"/demand-project",&projection,1000).unwrap();
+        database.commit(transaction).unwrap();
+        let changed = apply(&mut database,CommandAction::WorkChange,json!({"work_id":work_id,
+            "changed_paths":(0..401).map(|n|format!("src/path-{n}")).collect::<Vec<_>>(),
+            "artifacts":(0..151).map(|n|json!({"id":format!("artifact-{n}")})).collect::<Vec<_>>()}));
+        let item = changed["projection"]["workItems"].as_array().unwrap().iter().find(|v|v["id"]==work_id).unwrap();
+        assert_eq!(item["changedPaths"].as_array().unwrap().len(),401);
+        assert_eq!(item["artifacts"].as_array().unwrap().len(),151);
+        apply(&mut database,CommandAction::WorkFinish,json!({"work_id":work_id,"status":"completed","result_summary":"complete"}));
+        apply(&mut database,CommandAction::CheckerRegister,json!({"definition":{"checkerId":"checker-new","version":1,
+            "label":"new","argv":["true"],"cwd":"/demand-project","pathGlobs":["**"],"timeoutMs":100,"enabled":true}}));
+        apply(&mut database,CommandAction::WatchAdd,json!({"item":{"id":"watch-new","kind":"concern","text":"new","status":"active",
+            "sourceConversationId":"conversation","createdAt":1000,"updatedAt":1000,"latestResult":null}}));
+        apply(&mut database,CommandAction::DecisionPromote,json!({"decision":{"decisionId":"decision-new","text":"new",
+            "checkerRef":{"id":"checker-new","version":1},"sourceConversationId":"conversation","sourceTurnId":"turn", "latestVerification":null}}));
+        drop(database);
+        let database = AuthorityDatabase::open(directory.path()).unwrap();
+        let mut transaction = database.begin(7,11).unwrap();
+        let retained = load_projection(&database,&mut transaction,"/demand-project").unwrap();
+        eprintln!("project_history_demand: retained projection {} JSON bytes; 242 work items, 1101 cursors, 152 checkers/watch, 302 decisions",serde_json::to_vec(&retained).unwrap().len());
+        assert_eq!(retained["workItems"].as_array().unwrap().len(),242);
+        assert_eq!(retained["cursors"].as_object().unwrap().len(),1101);
+        assert_eq!(retained["narratives"][0]["text"],"history-0");
+        assert!(retained["narratives"].as_array().unwrap().len()>601);
+        assert_eq!(retained["checkers"].as_array().unwrap().len(),152);
+        assert_eq!(retained["watch"].as_array().unwrap().len(),152);
+        assert_eq!(retained["charter"]["decisions"].as_array().unwrap().len(),302);
+        let merged = merge_relinked_projections(11,"/renamed",&empty_projection(11,"/renamed"),&retained).unwrap();
+        for field in ["workItems","checkers","watch"] {
+            assert_eq!(merged[field],retained[field],"{field}");
+        }
+        let mut merged_texts = merged["narratives"].as_array().unwrap().iter().map(|v|v["text"].as_str().unwrap()).collect::<Vec<_>>();
+        let mut retained_texts = retained["narratives"].as_array().unwrap().iter().map(|v|v["text"].as_str().unwrap()).collect::<Vec<_>>();
+        merged_texts.sort(); retained_texts.sort();
+        assert_eq!(merged_texts,retained_texts);
+        assert_eq!(merged["charter"]["decisions"],retained["charter"]["decisions"]);
+        let mut divergent = retained.clone();
+        divergent["checkers"][0]["label"] = json!("conflicting identity");
+        assert!(merge_relinked_projections(11,"/renamed",&retained,&divergent).is_err());
+        let mut foreign = database.begin(7,12).unwrap();
+        assert!(load_projection(&database,&mut foreign,"/demand-project").unwrap()["workItems"].as_array().unwrap().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod demand_chunk_tests {
+    use super::*;
+    #[test]
+    fn claimed_large_chunk_headers_do_not_allocate_the_declared_event_and_missing_data_fails_closed() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut database = AuthorityDatabase::initialize(directory.path()).unwrap();
+        for (label,count,total,body) in [
+            ("shape",2_u32,1_u32,vec![b'x']),
+            ("missing",(u32::MAX as usize).div_ceil(EVENT_CHUNK_BYTES) as u32,u32::MAX,vec![b'x';EVENT_CHUNK_BYTES]),
+            ("digest",1_u32,1_u32,vec![b'x']),
+        ] {
+            let mut transaction = database.begin(7,11).unwrap();
+            let key = stream_key(&transaction,label).unwrap();
+            let mut payload = Vec::new();
+            payload.extend_from_slice(EVENT_CHUNK_MAGIC);
+            payload.extend_from_slice(&1_u64.to_be_bytes());
+            payload.extend_from_slice(&0_u32.to_be_bytes());
+            payload.extend_from_slice(&count.to_be_bytes());
+            payload.extend_from_slice(&total.to_be_bytes());
+            payload.extend_from_slice(&[0;32]);
+            payload.extend_from_slice(&body);
+            database.stream_append(&mut transaction,key.clone(),1,vec![StreamEvent::new(1,"semantic_event_chunk",payload).unwrap()]).unwrap();
+            database.commit(transaction).unwrap();
+            let mut read = database.begin(7,11).unwrap();
+            assert_eq!(decode_event_chunks(&database,&mut read,&key,1).unwrap_err().kind(),io::ErrorKind::InvalidData);
+        }
     }
 }

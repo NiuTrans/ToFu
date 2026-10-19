@@ -83,7 +83,7 @@ def _resolve_base(tmprepo, env_extra=None, want_log=True):
     code = f"""
         import logging, sys, os
         logging.basicConfig(level=logging.INFO, stream=sys.stderr)
-        import lib.runtime_paths as rp
+        import lib.runtime.runtime_paths as rp
         rp._REPO_ROOT = {tmprepo!r}
         base = rp._resolve_base()
         print('RPBASE', base)
@@ -115,11 +115,11 @@ class SourceCheckoutLayoutTest(unittest.TestCase):
         data = os.path.join(base, 'data')
         r = _run_py("""
             import os
-            import lib.runtime_paths as rp
+            import lib.runtime.runtime_paths as rp
             print('DATA', rp.data_root())
             print('LOGS', rp.logs_root())
             os.environ['TOFU_STORAGE_TOKEN'] = 't' * 48
-            from lib.storage_sidecar.config import SidecarConfig
+            from lib.storage_authority_sql.config import SidecarConfig
             print('DB', SidecarConfig.from_environment().sqlite_path)
         """, env_extra={'TOFU_DATA_DIR': data})
         self.assertEqual(r.returncode, 0, r.stderr)
@@ -201,7 +201,7 @@ class UploadsCoLocationTest(unittest.TestCase):
         base = os.path.realpath(tempfile.mkdtemp())
         data = os.path.join(base, 'data')
         r = _run_py("""
-            import lib.runtime_paths as rp
+            import lib.runtime.runtime_paths as rp
             print('DATA', rp.data_root())
             print('UPLOADS', rp.uploads_root())
         """, env_extra={'TOFU_DATA_DIR': data})
@@ -214,7 +214,7 @@ class UploadsCoLocationTest(unittest.TestCase):
         xdg = os.path.realpath(tempfile.mkdtemp())
         repo = _mk_repo(populated_data=None)
         code = f"""
-            import lib.runtime_paths as rp
+            import lib.runtime.runtime_paths as rp
             rp._REPO_ROOT = {repo!r}
             rp._BASE = rp._resolve_base()
             print('UPLOADS', rp.uploads_root())
@@ -231,7 +231,7 @@ class UploadsCoLocationTest(unittest.TestCase):
         xdg = os.path.realpath(tempfile.mkdtemp())
         repo = _mk_repo(populated_data=True)
         code = f"""
-            import lib.runtime_paths as rp
+            import lib.runtime.runtime_paths as rp
             rp._REPO_ROOT = {repo!r}
             rp._BASE = rp._resolve_base()
             print('UPLOADS', rp.uploads_root())
@@ -250,7 +250,7 @@ class UploadsCoLocationTest(unittest.TestCase):
         data = os.path.join(base, 'data')
         code = """
             import os
-            import lib.runtime_paths as rp
+            import lib.runtime.runtime_paths as rp
             base_uploads = rp.uploads_root()
             print('AUTHORITY', base_uploads)
             # paper PDFs + figure manifests (DB-referenced)
@@ -305,7 +305,7 @@ class ProjectSessionsCoLocationTest(unittest.TestCase):
         base = os.path.realpath(tempfile.mkdtemp())
         data = os.path.join(base, 'data')
         r = _run_py("""
-            import lib.runtime_paths as rp
+            import lib.runtime.runtime_paths as rp
             print('SESS', rp.project_sessions_root())
             print('DATA', rp.data_root())
         """, env_extra={'TOFU_DATA_DIR': data})
@@ -321,7 +321,7 @@ class ProjectSessionsCoLocationTest(unittest.TestCase):
         xdg = os.path.realpath(tempfile.mkdtemp())
         repo = _mk_repo(populated_data=True)  # populated → auto stays in-tree
         code = f"""
-            import lib.runtime_paths as rp
+            import lib.runtime.runtime_paths as rp
             rp._REPO_ROOT = {repo!r}
             rp._BASE = rp._resolve_base()
             print('SESS', rp.project_sessions_root())
@@ -336,7 +336,7 @@ class ProjectSessionsCoLocationTest(unittest.TestCase):
         xdg = os.path.realpath(tempfile.mkdtemp())
         repo = _mk_repo(populated_data=None)
         code = f"""
-            import lib.runtime_paths as rp
+            import lib.runtime.runtime_paths as rp
             rp._REPO_ROOT = {repo!r}
             rp._BASE = rp._resolve_base()
             print('SESS', rp.project_sessions_root())
@@ -383,14 +383,14 @@ class ProjectSessionsCoLocationTest(unittest.TestCase):
 
 class ProjectSessionsRegistryTest(unittest.TestCase):
     """The in-tree undo store ``lib/.project_sessions`` must be recognised by
-    the SINGLE runtime-state authority (``lib.runtime_layout``), not only by a
+    the SINGLE runtime-state authority (``lib.runtime.runtime_layout``), not only by a
     hand-maintained ``.gitignore`` line. Before this was registered, the
     relocation shipped a false docstring claim AND the predicates returned
     False → an overlay update could clobber undo history and a
     registry-regenerated ``.gitignore`` would silently drop the ignore."""
 
     def test_overlay_skip_and_runtime_state_recognise_undo_store(self):
-        import lib.runtime_layout as rl
+        import lib.runtime.runtime_layout as rl
         p = 'lib/.project_sessions/abc/modifications.json'
         self.assertTrue(rl.is_overlay_skipped(p),
                         'undo store not overlay-skipped — an update could '
@@ -400,7 +400,7 @@ class ProjectSessionsRegistryTest(unittest.TestCase):
                         'tree would block updates on it')
 
     def test_gitignore_lines_emits_undo_store(self):
-        import lib.runtime_layout as rl
+        import lib.runtime.runtime_layout as rl
         joined = '\n'.join(rl.gitignore_lines())
         self.assertIn('lib/.project_sessions/', joined,
                       'gitignore_lines() omits the undo store — a regenerated '
@@ -421,7 +421,7 @@ class ProjectSessionsRegistryTest(unittest.TestCase):
         """NEUTER: remove the registry entry → both predicates must go False
         AND gitignore_lines() must drop it, proving the entry is load-bearing
         (not covered incidentally by another prefix)."""
-        import lib.runtime_layout as rl
+        import lib.runtime.runtime_layout as rl
         orig = rl.INSTALL_STATE
         orig_rt = rl.RUNTIME_STATE_PREFIXES
         orig_skip = rl.OVERLAY_SKIP_PREFIXES

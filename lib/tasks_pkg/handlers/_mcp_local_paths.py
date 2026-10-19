@@ -83,7 +83,8 @@ def call_with_local_paths(bridge, name, arguments, *, task, invoke):
         from lib.project_mod.path_resolution import _resolve_base
         from lib.project_mod.tool_admission import Cancellation, admission_timeout, tool_admission_scope
         from lib.project_mod.write_tools._paths import _resolve_write_path
-        from lib.project_mod.workspace_lease import workspace_write_lease, workspace_read_lease
+        from lib.project_mod.workspace_lease import (
+            workspace_write_lease, workspace_read_lease, lease_claim_order)
         routed = dict(arguments)
         plans = []
         limits = path_contract()['x-limits']
@@ -117,7 +118,7 @@ def call_with_local_paths(bridge, name, arguments, *, task, invoke):
             leases = {}
             for _, field_policy, root in plans:
                 leases[root] = leases.get(root, False) or field_policy['access'] == 'write'
-            for root, write in sorted(leases.items()):
+            for root, write in sorted(leases.items(), key=lambda item: lease_claim_order(('root', item[0]))):
                 factory = workspace_write_lease if write else workspace_read_lease
                 stack.enter_context(factory(root, timeout=admission_timeout(), cancel_event=cancellation))
             if cancellation.is_set():

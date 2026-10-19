@@ -7,6 +7,7 @@ this package must never import application configuration or storage.
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 import uuid
@@ -547,9 +548,14 @@ class DemandExecutor(Executor):
                     self._active_jobs += 1
                     self._last_excess_activity = time.monotonic()
                     self._publish_locked()
-                self._metrics.observe_executor_queue_wait(
-                    self.metric_pool, time.monotonic() - item.queued_at,
-                )
+                try:
+                    self._metrics.observe_executor_queue_wait(
+                        self.metric_pool, time.monotonic() - item.queued_at,
+                    )
+                except Exception:
+                    logging.getLogger(__name__).exception(
+                        'observe_executor_queue_wait failed for pool %s',
+                        self.metric_pool)
 
                 execution_outcome: Future[Any] = Future()
                 try:

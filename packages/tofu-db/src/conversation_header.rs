@@ -25,7 +25,7 @@ use crate::generated_tofudb_ir::{
     CONVERSATION_TRASH_SETTINGS_OVERLAY_NAMESPACE, CONVERSATION_UPDATED_INDEX_NAMESPACE,
     MAX_ACTIVITY_CANDIDATE_BACKFILL_ROWS_PER_TRANSACTION,
     MAX_ACTIVITY_CANDIDATE_BACKFILL_SOURCE_BYTES_PER_TRANSACTION,
-    MAX_PROJECT_RELINK_CONVERSATION_CANDIDATES, MAX_TASK_RESULT_CACHE_FACT,
+    MAX_TASK_RESULT_CACHE_FACT,
 };
 
 pub(crate) const TENANT_GLOBAL_OWNER_ID: u64 = u64::MAX;
@@ -1094,6 +1094,34 @@ pub(crate) fn advance_for_turns(
     committed_at_ms: u64,
     added_main_turns: u64,
 ) -> io::Result<u64> {
+    advance_for_turn_changes(database, transaction, conversation_id, now_ms,
+        committed_at_ms, added_main_turns, 1)
+}
+
+/// One explicitly atomic Turn frame preserves every logical revision while
+/// publishing only the final header and derived activity/recency indexes.
+#[cfg(test)]
+pub(crate) fn advance_for_turn_event_frame(
+    database: &AuthorityDatabase,
+    transaction: &mut AuthorityTransaction,
+    conversation_id: &str,
+    now_ms: u64,
+    revisions: u64,
+) -> io::Result<u64> {
+    if revisions == 0 { return Err(invalid_input("empty Turn execution frame")); }
+    advance_for_turn_changes(database, transaction, conversation_id, now_ms,
+        now_ms, 0, revisions)
+}
+
+fn advance_for_turn_changes(
+    database: &AuthorityDatabase,
+    transaction: &mut AuthorityTransaction,
+    conversation_id: &str,
+    now_ms: u64,
+    committed_at_ms: u64,
+    added_main_turns: u64,
+    revisions: u64,
+) -> io::Result<u64> {
     let (mut header, physical_version) = load_header(database, transaction, conversation_id)?
         .ok_or_else(|| invalid_data("turn conversation header disappeared"))?;
     let previous_updated_at_ms = header
@@ -1107,7 +1135,7 @@ pub(crate) fn advance_for_turns(
     let revision = header
         .get("rev")
         .and_then(Value::as_u64)
-        .and_then(|value| value.checked_add(1))
+        .and_then(|value| value.checked_add(revisions))
         .ok_or_else(|| invalid_data("conversation revision overflow"))?;
     let message_count = header
         .get("msg_count")
@@ -1695,10 +1723,12 @@ pub(crate) fn delete(
         recoverable_ranges(transaction, &request.conversation_id, updated_at_ms)?;
     let pin_id = trash_pin_id(transaction, &request.conversation_id);
     database.stage_persistent_range_snapshot_pin(transaction, &pin_id, &recoverable_ranges)?;
-    crate::turn::retire_conversation_attempt_events(
+    let retiring_epoch = execution_epoch(database, transaction, &request.conversation_id)?;
+    crate::turn::event_retirement::enqueue(
         database,
         transaction,
         &request.conversation_id,
+        retiring_epoch,
     )?;
 
     let mut retired_ranges = recoverable_ranges;
@@ -1866,6 +1896,7 @@ pub(crate) fn restore(
         execution_epoch_key(transaction, &request.conversation_id)?,
         next_epoch.to_le_bytes().to_vec(),
     )?;
+    crate::transcript_archive::invalidate(database, transaction, &request.conversation_id)?;
     let count_key = key(
         transaction.tenant_id(),
         transaction.owner_user_id(),
@@ -1962,6 +1993,9 @@ pub(crate) fn purge(
         (identities, deleted_at_ms)
     };
 
+    crate::turn::event_retirement::reclaim_for_purge(
+        database, transaction, &request.conversation_id, &identities,
+    )?;
     crate::turn::release_conversation_identity_claims(
         database,
         transaction,
@@ -2069,7 +2103,6 @@ pub(crate) fn relink_project_settings(
     let owner_user_id = transaction.owner_user_id();
     let mut active_candidates: Vec<String> = Vec::new();
     let mut trashed_candidates: Vec<String> = Vec::new();
-    let mut total = 0_usize;
 
     let (document_start, document_end) = EntityKey::prefix_range(
         tenant_id,
@@ -2088,7 +2121,6 @@ pub(crate) fn relink_project_settings(
         if rows.is_empty() {
             break;
         }
-        let full_page = rows.len() == INDEX_SCAN_PAGE_ROWS;
         let mut last_key: Option<EntityKey> = None;
         for (row_key, _) in rows {
             let conversation_id = std::str::from_utf8(row_key.key_bytes())
@@ -2100,20 +2132,10 @@ pub(crate) fn relink_project_settings(
                     .and_then(Value::as_object)
                     .ok_or_else(|| invalid_data("conversation settings are malformed"))?;
                 if replace_project_path_references(settings, old_path, new_path).is_some() {
-                    total += 1;
-                    if total > MAX_PROJECT_RELINK_CONVERSATION_CANDIDATES {
-                        return Err(io::Error::new(
-                            io::ErrorKind::WouldBlock,
-                            "Too many conversations reference the old project path",
-                        ));
-                    }
                     active_candidates.push(conversation_id);
                 }
             }
             last_key = Some(row_key);
-        }
-        if !full_page {
-            break;
         }
         let last_key = last_key.ok_or_else(|| invalid_data("conversation scan page is empty"))?;
         page_start = after_index_key(
@@ -2137,7 +2159,6 @@ pub(crate) fn relink_project_settings(
         if rows.is_empty() {
             break;
         }
-        let full_page = rows.len() == INDEX_SCAN_PAGE_ROWS;
         let mut last_key: Option<EntityKey> = None;
         for (row_key, _) in rows {
             let conversation_id = std::str::from_utf8(row_key.key_bytes())
@@ -2162,19 +2183,9 @@ pub(crate) fn relink_project_settings(
                     }
                 };
             if replace_project_path_references(&settings, old_path, new_path).is_some() {
-                total += 1;
-                if total > MAX_PROJECT_RELINK_CONVERSATION_CANDIDATES {
-                    return Err(io::Error::new(
-                        io::ErrorKind::WouldBlock,
-                        "Too many conversations reference the old project path",
-                    ));
-                }
                 trashed_candidates.push(conversation_id);
             }
             last_key = Some(row_key);
-        }
-        if !full_page {
-            break;
         }
         let last_key = last_key.ok_or_else(|| invalid_data("conversation scan page is empty"))?;
         page_start = after_index_key(
@@ -2839,7 +2850,7 @@ fn primary_catalog_page(
     let response = serde_json::to_vec(&json!({
         "items": items, "total_count": total_count, "has_more": has_more,
     })).map_err(|_| invalid_data("conversation catalog cannot be encoded"))?;
-    if response.len() > crate::generated_tofudb_ir::MAX_TRANSACTION_IR_LITERAL_BYTES {
+    if response.len() > crate::generated_tofudb_ir::MAX_LEGACY_DOCUMENT_BYTES {
         return Err(io::Error::new(io::ErrorKind::OutOfMemory,
             "conversation catalog response exceeds 8 MiB"));
     }
@@ -2962,7 +2973,7 @@ pub(crate) fn catalog_page(
         "has_more": has_more
     }))
     .map_err(|_| invalid_data("conversation catalog cannot be encoded"))?;
-    if response.len() > crate::generated_tofudb_ir::MAX_TRANSACTION_IR_LITERAL_BYTES {
+    if response.len() > crate::generated_tofudb_ir::MAX_LEGACY_DOCUMENT_BYTES {
         return Err(io::Error::new(
             io::ErrorKind::OutOfMemory,
             "conversation catalog response exceeds 8 MiB",
@@ -3002,7 +3013,7 @@ fn primary_ordered_list(
     headers.sort_unstable_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
     let maximum_bytes = if request.include_messages {
         crate::generated_tofudb_ir::MAX_FROZEN_TRANSCRIPT_PAGE_BYTES
-    } else { crate::generated_tofudb_ir::MAX_TRANSACTION_IR_LITERAL_BYTES };
+    } else { crate::generated_tofudb_ir::MAX_LEGACY_DOCUMENT_BYTES };
     let mut response = vec![b'['];
     for (_, id, header) in headers.into_iter().take(request.limit) {
         let mut document = project_header(header, request.settings_keys.as_deref())?;
@@ -3048,7 +3059,7 @@ pub(crate) fn list(
     let maximum_response_bytes = if request.include_messages {
         crate::generated_tofudb_ir::MAX_FROZEN_TRANSCRIPT_PAGE_BYTES
     } else {
-        crate::generated_tofudb_ir::MAX_TRANSACTION_IR_LITERAL_BYTES
+        crate::generated_tofudb_ir::MAX_LEGACY_DOCUMENT_BYTES
     };
 
     if request.limit == 0 {
@@ -4203,4 +4214,38 @@ pub(crate) fn set_imported_message_count(
         conversation_id,
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod relink_demand_tests {
+    use super::*;
+
+    #[test]
+    fn relink_updates_more_than_former_candidate_limit_and_reopens_without_partial_pins() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut database = AuthorityDatabase::initialize(directory.path()).unwrap();
+        for first in (0..10001).step_by(64) {
+            let mut tx = database.begin_with_identity_claim_scopes(7,11).unwrap();
+            for ordinal in first..(first+64).min(10001) {
+                create(&database,&mut tx,&CreateRequest {
+                    conversation_id:format!("relink-{ordinal:05}"), title:String::new(),
+                    settings_json:serde_json::to_vec(&json!({"projectPath":"/old/project","keep":ordinal})).unwrap(),
+                    created_at_ms:1000,updated_at_ms:1000,committed_at_ms:1000,
+                }).unwrap();
+            }
+            database.commit(tx).unwrap();
+        }
+        let mut tx = database.begin_with_identity_claim_scopes(7,11).unwrap();
+        assert_eq!(relink_project_settings(&database,&mut tx,"/old/project","/new/project",2000).unwrap(),(10001,0));
+        database.commit(tx).unwrap();
+        drop(database);
+        let reopened = AuthorityDatabase::open(directory.path()).unwrap();
+        let mut tx = reopened.begin_with_identity_claim_scopes(7,11).unwrap();
+        for ordinal in [0,9999,10000] {
+            let (header,_) = load_header(&reopened,&mut tx,&format!("relink-{ordinal:05}")).unwrap().unwrap();
+            assert_eq!(header["settings"]["projectPath"],"/new/project");
+            assert_eq!(header["settings"]["keep"],ordinal);
+        }
+        assert_eq!(relink_project_settings(&reopened,&mut tx,"/old/project","/new/project",2001).unwrap(),(0,0));
+    }
 }

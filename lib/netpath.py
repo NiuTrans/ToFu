@@ -9,7 +9,7 @@ Three signal sources feed a per-host scorer:
 1. **Passive outcomes** — every real request routed through
    :func:`lib.proxy.proxies_for` reports success/failure + latency via
    :func:`report_outcome` (hooked in the LLM transports and
-   ``lib.http_client``). Real traffic is ground truth.
+   ``lib.http_transport.client``). Real traffic is ground truth.
 2. **Active probing** — a daemon worker fetches ``scheme://host/`` over
    paths whose bounded adaptive deadline is due (headers only, ~3s timeout).
    Stable or repeatedly failed paths back off; a passive request failure wakes

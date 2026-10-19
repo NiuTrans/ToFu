@@ -20,7 +20,6 @@ from lib.log import get_logger
 
 logger = get_logger(__name__)
 
-_MAX_ATTACHMENTS_PER_TURN = 20
 # Fallback per-attachment text budget for models whose context window is
 # unknown; known windows scale up from this floor (document_text_budget).
 _DOCUMENT_TEXT_CAP = 48_000
@@ -144,12 +143,13 @@ def get_attachment(attachment_id: str, *, user_id: int) -> dict | None:
 def ingest_document(
     raw: bytes, filename: str, *, user_id: int,
     command_id: str | None = None,
+    html_projector=None,
 ) -> dict:
     from lib.knowledge import add_document
 
     document = add_document(
         raw, filename, user_id=user_id, scope='draft',
-        command_id=command_id)
+        command_id=command_id, html_projector=html_projector)
     return attachment_ref(document)
 
 
@@ -401,7 +401,7 @@ def resolve_client_refs(
         return []
     resolved: list[dict] = []
     seen: set[str] = set()
-    for candidate in items[:_MAX_ATTACHMENTS_PER_TURN]:
+    for candidate in items:
         if not isinstance(candidate, dict):
             continue
         attachment_id = str(candidate.get('attachmentId') or '').strip()

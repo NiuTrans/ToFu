@@ -72,7 +72,7 @@ _MIN_NODE_MAJOR = 22
 
 def motion_root() -> str:
     """Writable root for motion-video state (managed node install, workdirs)."""
-    from lib.runtime_paths import data_root
+    from lib.runtime.runtime_paths import data_root
     path = os.path.join(data_root(), 'motion_video')
     os.makedirs(path, exist_ok=True)
     return path

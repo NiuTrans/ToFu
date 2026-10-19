@@ -1,4 +1,4 @@
-"""lib/pdf_parser/images/_detect.py — PDF figure/table detection and clipping."""
+"""PDF figure/table detection and clipping; Pillow loads only for stitching."""
 
 import io
 import re
@@ -11,11 +11,6 @@ except ImportError:
     except ImportError:
         pymupdf = None  # type: ignore[assignment]
         # Warning already logged by _common.py — debug-only here to avoid noise
-try:
-    from PIL import Image as PILImage
-except ImportError:
-    PILImage = None  # type: ignore[assignment]
-    # Warning already logged by lib/fetch/utils.py — debug-only here
 
 from lib.log import get_logger
 from lib.pdf_parser.images._resize import resize_image_bytes
@@ -117,19 +112,24 @@ def detect_and_clip_figures(page, page_idx, total_pages,
     """
     pw, ph = page.rect.width, page.rect.height
     entries = _parse_page_blocks(page)
-    if not entries:
+    caption_kinds = {kind for _, _, kind in entries
+                     if kind in ('figure_cap', 'table_cap')}
+    if not caption_kinds:
         return []
 
     img_rects = [r for r, _, t in entries if t == 'image']
     merged_imgs = _merge_nearby_rects(img_rects, gap=25)
 
     table_bboxes = []
-    try:
-        tabs = page.find_tables()
-        for tab in tabs.tables:
-            table_bboxes.append(pymupdf.Rect(tab.bbox))
-    except Exception as e:
-        logger.warning('[PDF] table detection failed on page %d: %s', page_idx, e, exc_info=True)
+    # Only table captions consume structured bounds. Plain and figure-only
+    # pages cannot publish a table crop, so do not expand every glyph there.
+    if 'table_cap' in caption_kinds:
+        try:
+            tabs = page.find_tables()
+            for tab in tabs.tables:
+                table_bboxes.append(pymupdf.Rect(tab.bbox))
+        except Exception as e:
+            logger.warning('[PDF] table detection failed on page %d: %s', page_idx, e, exc_info=True)
 
     results = []
 
@@ -308,7 +308,7 @@ def detect_and_clip_figures(page, page_idx, total_pages,
             max(0, clip.x0 - pad), max(0, clip.y0 - pad),
             min(pw, clip.x1 + pad), min(ph, clip.y1 + pad))
 
-        zoom = max(1.0, min(max_image_width / clip.width, 5.0))
+        zoom = max(1.0, max_image_width / clip.width)
         try:
             pix = page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom),
                                   clip=clip, alpha=False)
@@ -452,7 +452,7 @@ def _try_stitch_next_page_table(next_page, base_clip, base_pix,
         return None
 
     base_w = base_pix.width
-    zoom = max(1.0, min(base_w / cont_clip.width, 5.0))
+    zoom = max(1.0, base_w / cont_clip.width)
     try:
         cont_pix = next_page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom),
                                         clip=cont_clip, alpha=False)
@@ -461,7 +461,9 @@ def _try_stitch_next_page_table(next_page, base_clip, base_pix,
         return None
 
     # Stitch via PIL: same width (resize continuation to match base width).
-    if PILImage is None:
+    try:
+        from PIL import Image as PILImage
+    except ImportError:
         return None
     try:
         base_img = PILImage.open(io.BytesIO(base_pix.tobytes('png')))

@@ -176,7 +176,7 @@ class TestStallPressureContext:
     def test_stall_line_carries_pressure_suffix(self):
         """Source pin: the extracted owner still appends pressure context."""
         import inspect
-        from lib.server_loop_watchdog import LoopWatchdog
+        from lib.server.server_loop_watchdog import LoopWatchdog
 
         source = inspect.getsource(LoopWatchdog._stall_watch)
         assert 'pressure = self.hooks._stall_pressure_context()' in source

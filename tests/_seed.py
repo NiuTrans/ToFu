@@ -182,3 +182,16 @@ def conv_settings(conv_id, *, user_id=1):
     if not doc:
         return None
     return (doc.get('metadata') or {}).get('settings') or {}
+
+
+def seed_coordinator_binding(project_path, conversation_id, *, user_id=1, client=None):
+    """Seed a pre-policy durable binding, not a historical-chat selection command."""
+    from lib.conversations.project_coordination import NAMESPACE, ProjectCoordinationRepository
+    repository = ProjectCoordinationRepository(user_id, client=client)
+    path, key = repository._identity(project_path)
+    (client(write=True) if client else _write_client()).command('record.put', {
+        'namespace': NAMESPACE, 'key': key,
+        'value': {'user_id': user_id, 'projectPath': path, 'conversationId': conversation_id},
+        'expected_version': 0,
+    }, 'seed-coordinator:' + uuid.uuid4().hex)
+    return repository.read(path)

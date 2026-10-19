@@ -76,17 +76,15 @@ def fetch_arxiv_title(*args, **kwargs):
 
 def http_get(*args, **kwargs):
     """Request-loaded HTTP seam retained for paper route tests."""
-    from lib.http_client import http_get as _http_get
+    from lib.http_transport.client import http_get as _http_get
 
     return _http_get(*args, **kwargs)
 
 from routes.paper_pkg._common import (
-    _PaperDownloadTooLarge,
     _declared_pdf_length,
     _load_valid_cached_pdf,
     _new_pdf_part,
-    _paper_pdf_limit,
-    _read_pdf_bounded,
+    _read_pdf_source,
     api_v1_paper_bp,
     paper_bp,
 )
@@ -170,15 +168,11 @@ async def fetch_arxiv():
                     if not chunk:
                         continue
                     downloaded += len(chunk)
-                    if downloaded > _paper_pdf_limit():
-                        raise _PaperDownloadTooLarge(
-                            f"PDF exceeds the {_paper_pdf_limit() // 1048576} MB limit"
-                        )
                     f.write(chunk)
                 f.flush()
                 os.fsync(f.fileno())
 
-            pdf_bytes = _read_pdf_bounded(part_path)
+            pdf_bytes = _read_pdf_source(part_path)
             from lib.pdf_parser.text import validate_pdf_bytes as _validate_pdf_bytes
 
             _ok, _np, _verr = _validate_pdf_bytes(pdf_bytes)
@@ -222,9 +216,6 @@ async def fetch_arxiv():
             }
         )
 
-    except _PaperDownloadTooLarge as e:
-        logger.warning("[Paper:arXiv] Oversized PDF for %s: %s", arxiv_id, e)
-        return api_error(str(e), status=413)
     except ValueError as e:
         logger.warning("[Paper:arXiv] Rejected invalid PDF for %s: %s", arxiv_id, e)
         return api_bad_request(str(e))
@@ -377,10 +368,6 @@ async def fetch_arxiv_stream():
                             if not chunk:
                                 continue
                             downloaded += len(chunk)
-                            if downloaded > _paper_pdf_limit():
-                                raise _PaperDownloadTooLarge(
-                                    f"PDF exceeds the {_paper_pdf_limit() // 1048576} MB limit"
-                                )
                             f.write(chunk)
                             # Emit at most ~10 progress events per second
                             now = time.time()
@@ -395,7 +382,7 @@ async def fetch_arxiv_stream():
                                 )
                         f.flush()
                         os.fsync(f.fileno())
-                    pdf_bytes = _read_pdf_bounded(part_path)
+                    pdf_bytes = _read_pdf_source(part_path)
                     from lib.pdf_parser.text import validate_pdf_bytes as _validate_pdf_bytes
 
                     _ok, _np, _verr = _validate_pdf_bytes(pdf_bytes)
@@ -439,10 +426,6 @@ async def fetch_arxiv_stream():
                         "cached": False,
                     }
                 )
-        except _PaperDownloadTooLarge as e:
-            logger.warning("[Paper:arXiv:Stream] Oversized PDF for %s: %s", arxiv_id, e)
-            yield _sse({"stage": "error", "error": str(e)})
-            return
         except ValueError as e:
             logger.warning("[Paper:arXiv:Stream] Rejected PDF for %s: %s", arxiv_id, e)
             yield _sse({"stage": "error", "error": str(e)})

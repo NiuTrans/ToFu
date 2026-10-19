@@ -122,9 +122,10 @@ INTEGRATION_SUBMIT_TOOL = {
     'function': {
         'name': 'integration_submit',
         'description': (
-            'Run enabled project checkers, checkpoint, and submit this '
-            "execution's isolated workspace for human review. Checker "
-            'failure rejects submission and records a Project Feed narrative.'
+            'Save a checkpoint of this execution. Automatic task changes are '
+            'merged into the current canonical workspace at successful '
+            'completion, independently of commits and release gates. '
+            'Explicit candidate submissions retain their review/checker policy.'
         ),
         'parameters': {
             'type': 'object',

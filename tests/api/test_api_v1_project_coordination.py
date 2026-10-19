@@ -6,6 +6,66 @@ pytest_plugins = ('tests._chat_sidecar',)
 pytestmark = [pytest.mark.api, pytest.mark.auth_mode('open')]
 
 
+def test_budget_defaults_cas_owner_and_binding_never_start_work(flask_client, chat_sidecar):
+    from lib.conversations.project_coordination import ProjectCoordinationRepository
+    from lib.project_dispatch.repository import ProjectDispatchRepository
+    path = '/test/budget-' + uuid.uuid4().hex
+    binding = ProjectCoordinationRepository(1).create(path, folder_id='test', expected_revision=0, command_id='create')
+    endpoint = '/api/v4/project/coordination/budget'
+    initial = flask_client.get(endpoint, query_string={'path': path})
+    assert initial.status_code == 200, initial.get_json()
+    state = initial.get_json()
+    assert state['revision'] == 0 and state['request'] is None
+    request = {'path': path, 'conversationId': binding['conversationId'], 'bindingRevision': binding['revision'],
+        'expectedRevision': 0, 'settings': {**state['settings'], 'maxTokens': 9000, 'maxModelRequests': 12}}
+    updated = flask_client.post(endpoint, json=request)
+    assert updated.status_code == 200, updated.get_json()
+    assert updated.get_json()['revision'] == 1 and updated.get_json()['settings']['maxTokens'] == 9000
+    assert flask_client.post(endpoint, json=request).get_json() == updated.get_json()
+    assert flask_client.post(endpoint, json={**request, 'settings': {**request['settings'], 'maxTokens': 8000}}).status_code == 400
+    assert flask_client.post(endpoint, json={**request, 'bindingRevision': 999}).status_code == 403
+    assert flask_client.post(endpoint, json={**request, 'path': '/foreign'}).status_code == 403
+    assert flask_client.post(endpoint, json={**request, 'owner': 2}).status_code == 400
+    assert flask_client.post(endpoint, json={**request, 'settings': {**request['settings'], 'maxTokens': -1}}).status_code == 400
+    assert ProjectCoordinationRepository(1).read(path) == binding
+    value, _ = ProjectDispatchRepository(1, path)._load()
+    assert not value['assignments'] and not value.get('requestBudgets')
+
+
+def test_coordinator_reports_use_real_turns_and_ack_only_displayed_message(flask_client, chat_sidecar):
+    from lib.conversations.project_coordination import ProjectCoordinationRepository
+    from lib.conversations.coordinator_reports import CoordinatorReports
+    from lib.turn_lifecycle import get_turn
+    path = '/test/reports-' + uuid.uuid4().hex
+    binding = ProjectCoordinationRepository(1).create(path, folder_id='test', expected_revision=0, command_id='create')
+    scope = {'owner': 1, 'projectPath': path, 'coordinatorId': binding['conversationId'], 'bindingRevision': binding['revision']}
+    reports = CoordinatorReports(1, path)
+    request = {'title': 'Migration decision', 'message': 'Choose the maintenance window.', 'kind': 'decision', 'idempotency_key': 'one'}
+    first = reports.publish(scope, request)
+    endpoint = '/api/v4/project/coordination/reports'
+    response = flask_client.get(endpoint, query_string={'path': path})
+    assert response.status_code == 200, response.get_json()
+    assert response.get_json()['unread'] is True
+    assert 'maintenance window' in response.get_json()['latest']['content']
+    turn = get_turn(binding['conversationId'], first['turnId'], user_id=1)
+    assert turn['actor'] == 'assistant' and turn['kind'] == 'coordinator_report.decision'
+    assert turn['projection']['origin']['initiator'] == 'brain'
+    ack = {'path': path, 'conversationId': binding['conversationId'], 'bindingRevision': binding['revision'], 'turnId': first['turnId']}
+    read = flask_client.post(endpoint + '/read', json=ack)
+    assert read.status_code == 200, read.get_json()
+    assert read.get_json()['unread'] is False
+    assert reports.publish(scope, request) == first
+    assert reports.read()['unread'] is False
+    second = reports.publish(scope, {**request, 'message': 'Tests passed.', 'kind': 'delivery', 'idempotency_key': 'two'})
+    stale = flask_client.post(endpoint + '/read', json=ack)
+    assert stale.get_json()['unread'] is True
+    assert stale.get_json()['latest']['turnId'] == second['turnId']
+    assert flask_client.post(endpoint + '/read', json={**ack, 'bindingRevision': 999}).status_code == 403
+    assert flask_client.post(endpoint + '/read', json={**ack, 'path': '/foreign'}).status_code == 403
+    assert flask_client.post(endpoint + '/read', json={**ack, 'owner': 2}).status_code == 400
+    assert flask_client.get(endpoint, query_string={'path': '/foreign'}).get_json()['latest'] is None
+
+
 @pytest.fixture
 def flask_app(chat_sidecar):
     # Opt into the repository's disposable authority BEFORE importing the
@@ -16,7 +76,7 @@ def flask_app(chat_sidecar):
 
 
 def test_bind_replay_conflict_owner_and_delete(flask_client, chat_sidecar):
-    from tests._seed import seed_conversation, delete_conversation
+    from tests._seed import seed_conversation, delete_conversation, seed_coordinator_binding
     path = '/test/project-' + uuid.uuid4().hex
     conv_id, foreign = 'coord-' + uuid.uuid4().hex, 'foreign-' + uuid.uuid4().hex
     seed_conversation(conv_id, settings={'projectPath': path})
@@ -27,6 +87,11 @@ def test_bind_replay_conflict_owner_and_delete(flask_client, chat_sidecar):
     assert initial.get_json()['availability'] == 'unbound'
     body = {'path': path, 'conversationId': conv_id, 'expectedRevision': 0}
     headers = {'Idempotency-Key': 'bind-one'}
+
+    rejected = flask_client.post(endpoint + '/bind', json=body, headers=headers)
+    assert rejected.status_code == 400, rejected.get_json()
+    assert flask_client.get(endpoint, query_string={'path': path}).get_json()['availability'] == 'unbound'
+    seed_coordinator_binding(path, conv_id)
     bound = flask_client.post(endpoint + '/bind', json=body, headers=headers)
     assert bound.status_code == 200, bound.get_json()
     assert bound.get_json()['revision'] == 1
@@ -86,3 +151,56 @@ def test_binding_schema_and_generated_dto_are_current():
         'availability': 'unbound', 'capabilities': {'assign': False, 'sendMessage': False, 'steerSubagent': False},
     })
     subprocess.run(['python3', str(root / 'scripts/gen_project_coordination_contract.py'), '--check'], check=True)
+
+
+def test_create_empty_coordinator_replay_and_scope(flask_client, chat_sidecar, monkeypatch, tmp_path):
+    import routes.api_v1.folders as folders
+    from lib.conversations.repository import ConversationRepository
+    monkeypatch.setattr(folders, '_FOLDERS_PATH', str(tmp_path / 'folders.json'))
+    root = str(tmp_path / 'project')
+
+    from tests._seed import seed_conversation
+    historical = 'historical-' + uuid.uuid4().hex
+    seed_conversation(historical, settings={'projectPath': root},
+                      messages=[{'role': 'user', 'content': 'Unrelated historical context'}])
+    folder = folders._repository().create(1, {'name': 'Project', 'projectPaths': [root]})
+    body = {'path': root, 'folderId': folder['id'], 'expectedRevision': 0}
+    endpoint = '/api/v4/project/coordination/create'
+    headers = {'Idempotency-Key': 'create-one'}
+    assert flask_client.post(endpoint, json=body).status_code == 400
+    invalid = flask_client.post(endpoint, json={**body, 'path': root + '-other'}, headers=headers)
+    assert invalid.status_code == 400, invalid.get_json()
+    invalid = flask_client.post(endpoint, json={**body, 'folderId': 'foreign'}, headers=headers)
+    assert invalid.status_code == 403, invalid.get_json()
+    created = flask_client.post(endpoint, json=body, headers=headers)
+    assert created.status_code == 200, created.get_json()
+    result = created.get_json()
+    assert result['availability'] == 'available'
+    cid = result['conversationId']
+
+    assert cid != historical
+    snapshot = ConversationRepository().get(cid, user_id=1)
+    assert snapshot is not None
+    assert snapshot.messages == []
+    assert snapshot.metadata['settings']['projectPath'] == root
+    assert snapshot.metadata['settings']['folderId'] == folder['id']
+    assert result['capabilities']['assign'] is False
+    repeated = flask_client.post(endpoint, json=body, headers={'Idempotency-Key': 'another-click'})
+    assert repeated.status_code == 200
+    assert repeated.get_json()['conversationId'] == cid
+    assert repeated.get_json()['revision'] == result['revision']
+    assert ConversationRepository().get(cid, user_id=2) is None
+
+    replacement = flask_client.post(endpoint, json={**body, 'expectedRevision': result['revision']},
+                                    headers={'Idempotency-Key': 'replace-clean'})
+    assert replacement.status_code == 200, replacement.get_json()
+    fresh = replacement.get_json()
+    assert fresh['conversationId'] not in (historical, cid)
+    assert fresh['revision'] == result['revision'] + 1
+    assert ConversationRepository().get(fresh['conversationId'], user_id=1).messages == []
+    assert ConversationRepository().get(cid, user_id=1) is not None
+    assert ConversationRepository().get(historical, user_id=1).messages[0]['content'] == 'Unrelated historical context'
+    replay = flask_client.post(endpoint, json={**body, 'expectedRevision': result['revision']},
+                              headers={'Idempotency-Key': 'replace-clean'})
+    assert replay.status_code == 200
+    assert replay.get_json()['conversationId'] == fresh['conversationId']

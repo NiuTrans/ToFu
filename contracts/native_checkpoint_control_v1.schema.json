@@ -261,18 +261,529 @@
         }
       },
       "additionalProperties": false
+    },
+    "recover": {
+      "type": "object",
+      "required": [
+        "format",
+        "parameters"
+      ],
+      "properties": {
+        "format": {
+          "const": "tofu.native-checkpoint-control/v1"
+        },
+        "parameters": {
+          "$ref": "#/$defs/binding"
+        }
+      },
+      "additionalProperties": false
+    },
+    "handoff": {
+      "type": "object",
+      "required": [
+        "format",
+        "parameters",
+        "resume"
+      ],
+      "properties": {
+        "format": {
+          "const": "tofu.native-checkpoint-control/v1"
+        },
+        "parameters": {
+          "$ref": "#/$defs/binding"
+        },
+        "resume": {
+          "type": "object",
+          "required": [
+            "conversation_id",
+            "turn_id",
+            "source_attempt_id",
+            "target_attempt_id",
+            "source_task_id",
+            "reserved_micro"
+          ],
+          "properties": {
+            "conversation_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "turn_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "source_attempt_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "target_attempt_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "source_task_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "reserved_micro": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9223372036854775807
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "pending": {
+      "type": "object",
+      "required": [
+        "format",
+        "capability_id",
+        "state"
+      ],
+      "properties": {
+        "format": {
+          "const": "tofu.native-checkpoint-control/v1"
+        },
+        "capability_id": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        },
+        "state": {
+          "$ref": "tofu.native-agent-checkpoint/v1"
+        }
+      },
+      "additionalProperties": false
+    },
+    "invoice": {
+      "type": "object",
+      "required": [
+        "format",
+        "invoice"
+      ],
+      "properties": {
+        "format": {
+          "const": "tofu.native-checkpoint-control/v1"
+        },
+        "invoice": {
+          "type": "object",
+          "required": [
+            "owner_user_id",
+            "task_id",
+            "header_bytes"
+          ],
+          "properties": {
+            "owner_user_id": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "task_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "header_bytes": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "frontier": {
+      "type": "object",
+      "required": [
+        "format",
+        "frontier"
+      ],
+      "properties": {
+        "format": {
+          "const": "tofu.native-checkpoint-control/v1"
+        },
+        "frontier": {
+          "type": "object",
+          "required": [
+            "owner_user_id",
+            "task_id",
+            "header_bytes",
+            "snapshot_bytes",
+            "identity_bytes"
+          ],
+          "properties": {
+            "owner_user_id": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 18446744073709551615
+            },
+            "task_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "header_bytes": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 18446744073709551615
+            },
+            "snapshot_bytes": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 18446744073709551615
+            },
+            "identity_bytes": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 18446744073709551615
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "frontier_observation": {
+      "type": "object",
+      "required": [
+        "format",
+        "owner_user_id",
+        "task_id",
+        "epoch",
+        "binding",
+        "version",
+        "lease_generation",
+        "phase",
+        "snapshot"
+      ],
+      "properties": {
+        "format": {
+          "const": "tofu.native-checkpoint-frontier/v1"
+        },
+        "owner_user_id": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        },
+        "task_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "epoch": {
+          "type": "string",
+          "minLength": 1
+        },
+        "binding": {
+          "type": "string",
+          "minLength": 1
+        },
+        "version": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        },
+        "lease_generation": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        },
+        "phase": {
+          "enum": [
+            "completed",
+            "tools_pending"
+          ]
+        },
+        "snapshot": {
+          "type": "object"
+        }
+      },
+      "additionalProperties": false
+    },
+    "goal_claim": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "format",
+        "goal_claim"
+      ],
+      "properties": {
+        "format": {
+          "const": "tofu.native-checkpoint-control/v1"
+        },
+        "goal_claim": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "owner_user_id",
+            "header_bytes",
+            "snapshot_bytes",
+            "evidence_bytes",
+            "request"
+          ],
+          "properties": {
+            "owner_user_id": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 18446744073709551615
+            },
+            "header_bytes": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 18446744073709551615
+            },
+            "snapshot_bytes": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 18446744073709551615
+            },
+            "evidence_bytes": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 18446744073709551615
+            },
+            "request": {
+              "$ref": "native_goal_actor_claim_v1.schema.json"
+            }
+          }
+        }
+      }
+    },
+    "goal_handoff": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "format",
+        "goal_handoff"
+      ],
+      "properties": {
+        "format": {
+          "const": "tofu.native-checkpoint-control/v1"
+        },
+        "goal_handoff": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "owner_user_id",
+            "header_bytes",
+            "snapshot_bytes",
+            "evidence_bytes",
+            "identity_bytes",
+            "source_root_task_id",
+            "target_root_task_id",
+            "actors",
+            "authorization"
+          ],
+          "properties": {
+            "owner_user_id": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 18446744073709551615
+            },
+            "header_bytes": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 18446744073709551615
+            },
+            "snapshot_bytes": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 18446744073709551615
+            },
+            "evidence_bytes": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 18446744073709551615
+            },
+            "identity_bytes": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 18446744073709551615
+            },
+            "source_root_task_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "target_root_task_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "actors": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "source_task_id",
+                  "task_id",
+                  "epoch",
+                  "binding",
+                  "token"
+                ],
+                "properties": {
+                  "source_task_id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "task_id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "epoch": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "binding": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "token": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
+              }
+            },
+            "authorization": {
+              "$ref": "native_goal_actor_handoff_v1.schema.json"
+            }
+          }
+        }
+      }
     }
   },
   "limits": {
-    "responseHeadroomBytes": 4096
+    "responseHeadroomBytes": 4096,
+    "invoiceHeaderBytes": 131072,
+    "goalHandoffRowHeadroomBytes": 64
   },
   "semantics": {
     "carrier": "Separate checkpoint C ABI, existing embedded envelope/work queue/watchdog; normal storage execute grants no checkpoint access.",
     "ownership": "Server allocated monotonic capability IDs are scoped to one live embedded handle; never reuse IDs or attach lease tokens.",
     "buffers": "Before effects, caller capacity must cover declared snapshot bytes plus headroom; output-size refusal never executes or repeats one-shot load.",
     "lifecycle": "Forget drops only the in-memory capability after joined callers; release is explicit durable journal action. Closing handle drops capabilities without releasing durable leases.",
-    "retry": "Create/load/begin/complete/seal/release do not automatically retry ambiguous results; caller must preserve recovery fences.",
-    "feature": "native-runtime-checkpoints opt-in; absent feature refuses before dispatch.",
-    "finish": "Frozen status/suspended terminal fence delegates the same journal helper as Task persistence. Identical retries reread durable own terminal fence; changed disposition refuses. Only committed completed plus suspended aborted preserves recovery."
+    "retry": "Create/recover/load/begin/complete/seal/release do not automatically retry ambiguous results; caller must preserve recovery fences.",
+    "feature": "native-runtime-checkpoints is a standard engine feature; --no-default-features omits it and refuses before dispatch.",
+    "finish": "Frozen status/suspended terminal fence delegates the same journal helper as Task persistence. Identical retries reread durable own terminal fence; changed disposition refuses. Only committed completed plus suspended aborted preserves recovery.",
+    "recover": "Explicit abandoned acquisition accepts only leased new/completed frontiers. The Store proves the captured Linux boot/PID-view/start writer has exited using pidfd or PID reuse; live/foreign/inaccessible/legacy identities and passive replay targets refuse. Keep preserves the snapshot and CAS advances the fencing generation. No inflight rewind, expiry stealing or automatic create fallback.",
+    "handoff": "Explicit atomic handoff of released completed or proven-dead paid pending frontiers. Accepted ancestry, source retirement, target creation and source wallet invoice freezing share one transaction and composite outbox. Original quote credits and reservation stay with the retired executor; a pending target starts a zero-debt candidate under its own reservation. Retired invoice evidence survives private snapshot reclamation. No automatic ambiguous retry.",
+    "invoice": "Read-only owned active-authority journal phase and retired wallet capsule, after durable-WAL acknowledgement. No lease acquisition, snapshot read, wallet mutation or passive promotion. An existing journal without a retired invoice is not evidence of refundable unused funds.",
+    "frontier": "Read-only abandoned frontier preflight requires matching owner, known dead writer and completed/tools_pending phase. Header and snapshot use one observed version and a final unchanged-header check. It creates no capability, lease, wallet entry or recovery grant; acquisition must revalidate version, complete accepted lineage and aggregate accounting. Live/unknown writers, inflight/terminal/new phases, missing snapshot and races refuse. Caller-supplied header/snapshot bounds cover the complete response.",
+    "goal_handoff": "Publishes all successor capabilities after one durable commit. Exact successful requests may retrieve identical handles only before any member command is dispatched. A storage error is not reconciled by creating more leases; process death and durable domain recovery remain required."
+  },
+  "results": {
+    "goal_claim": {
+      "$ref": "native_goal_claim_outbox_v1.schema.json#/properties/claim"
+    },
+    "goal_handoff": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "leases"
+      ],
+      "properties": {
+        "leases": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "task_id",
+              "capability_id"
+            ],
+            "properties": {
+              "task_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "capability_id": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 18446744073709551615
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "daemonTransport": {
+    "format": "tofu.native-checkpoint-transport/v1",
+    "capabilitiesOperation": "native_checkpoint.capabilities",
+    "controlOperation": "native_checkpoint.control",
+    "lifecycle": "One authenticated selected authority; volatile runtime_id fences capability IDs across process restart. No automatic retry. Joined listener workers own all callbacks.",
+    "responseLimitSource": "contracts/storage_v2.json streamedResponses u32 chunk index representation; caller response preflight precedes effects and existing frame owners admit each chunk",
+    "requestSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "format",
+        "runtime_id",
+        "operation",
+        "payload",
+        "response_bytes"
+      ],
+      "properties": {
+        "format": {
+          "const": "tofu.native-checkpoint-transport/v1"
+        },
+        "runtime_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "operation": {
+          "enum": [
+            "create",
+            "load",
+            "begin",
+            "complete",
+            "seal",
+            "release",
+            "forget",
+            "finish",
+            "recover",
+            "handoff",
+            "pending",
+            "invoice",
+            "frontier",
+            "goal_claim",
+            "goal_handoff"
+          ]
+        },
+        "payload": {
+          "type": "object"
+        },
+        "response_bytes": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "capabilitiesResponseSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "format",
+        "available",
+        "runtime_id",
+        "maximum_response_bytes"
+      ],
+      "properties": {
+        "format": {
+          "const": "tofu.native-checkpoint-transport/v1"
+        },
+        "available": {
+          "type": "boolean"
+        },
+        "runtime_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "maximum_response_bytes": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    }
   }
 }

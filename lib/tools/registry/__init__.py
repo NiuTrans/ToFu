@@ -114,7 +114,6 @@ from lib.tools.registry._build import (  # noqa: E402,F401
     _build_desktop,
     _build_fetch,
     _build_human_guidance,
-    _build_image_gen,
     _build_inspect_image,
     _build_knowledge,
     _build_mcp,
@@ -126,8 +125,12 @@ from lib.tools.registry._build import (  # noqa: E402,F401
     _build_swarm,
     _build_todo,
     canonical_human_guidance_schema,
+    project_dispatch_tool_schemas,
     _register_builtins,
 )
+
+
+from lib.tools.optional_plugins import _build_image_gen  # compatibility import
 
 
 # ── Third-party plugin discovery + allow-list resolution ──────────────
@@ -155,6 +158,7 @@ __all__ = [
     'assemble_tool_list', 'build_tool_result_meta',
     'declared_tool_timeout_ms',
     'canonical_human_guidance_schema',
+    'project_dispatch_tool_schemas',
     # plugin discovery + allow-list
     'discover_plugin_specs', 'available_plugins', 'resolve_enabled_plugins',
 ]

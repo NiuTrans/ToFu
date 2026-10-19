@@ -11,9 +11,9 @@ import orjson
 import pytest
 
 from lib.storage.errors import StorageError
-from lib.storage_sidecar import archived_message_codec as codec
-from lib.storage_sidecar.operations_pkg import _archives as archives
-from lib.storage_sidecar.operations_pkg import _conversations as conversations
+from lib.storage_authority_sql import archived_message_codec as codec
+from lib.storage_authority_sql.operations_pkg import _archives as archives
+from lib.storage_authority_sql.operations_pkg import _conversations as conversations
 
 
 pytestmark = pytest.mark.unit

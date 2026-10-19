@@ -324,12 +324,12 @@ impl OnlineBackupDriver {
                                 let sequence = database.try_lock().ok()
                                     .and_then(|guard| guard.writer_engine().ok().map(|engine| engine.state().durable_sequence));
                                 if sequence.is_none() {
-                                    std::thread::sleep(DRIVER_POLL_INTERVAL);
+                                    std::thread::park_timeout(DRIVER_POLL_INTERVAL);
                                     continue;
                                 }
                                 if sequence == replicated_sequence {
                                     last_attempt = Instant::now();
-                                    std::thread::sleep(DRIVER_POLL_INTERVAL);
+                                    std::thread::park_timeout(DRIVER_POLL_INTERVAL);
                                     continue;
                                 }
                             }
@@ -348,7 +348,7 @@ impl OnlineBackupDriver {
                                         // absorb it inside the epoch so the
                                         // scheduler never sees it.
                                         attempt += 1;
-                                        std::thread::sleep(TRANSIENT_RETRY_BACKOFF);
+                                        std::thread::park_timeout(TRANSIENT_RETRY_BACKOFF);
                                         continue;
                                     }
                                     outcome => break outcome,
@@ -378,7 +378,7 @@ impl OnlineBackupDriver {
                             served_count = served_count.max(requested);
                             continue;
                         }
-                        std::thread::sleep(DRIVER_POLL_INTERVAL);
+                        std::thread::park_timeout(DRIVER_POLL_INTERVAL);
                     }
                     stopped.store(true, Ordering::Release);
                 }
@@ -405,6 +405,7 @@ impl OnlineBackupDriver {
             .map_err(|_| io::Error::other("online driver thread lock poisoned"))?
             .take();
         if let Some(thread) = thread {
+            thread.thread().unpark();
             // Bounded join: every epoch phase is crash-safe at any
             // interruption point, so a slow phase never stalls shutdown.
             let deadline = std::time::Instant::now() + DRIVER_STOP_JOIN_BUDGET;
@@ -523,6 +524,17 @@ fn run_epoch_off_mutex(
 ) -> io::Result<OnlineBackupEpochReport> {
     let (destination, snapshots_path) =
         backup::initialize_or_open_backup(&context.backup_dir, Arc::clone(&context.destination_vfs))?;
+    // A prior epoch may have committed its prune plan before losing the
+    // process or I/O. Resume that exact plan through the existing lease owner
+    // before copying; otherwise every future epoch fences on the same marker.
+    let resumed_prune = match backup::ensure_no_prune(
+        &context.backup_dir, context.destination_vfs.as_ref()) {
+        Ok(()) => None,
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock => Some(
+            backup::prune_backup_with_vfs(&context.backup_dir, context.retention,
+                Arc::clone(&context.destination_vfs))?),
+        Err(error) => return Err(error),
+    };
     // The lease scopes only the copy+publish phase: prune acquires the same
     // path-locked BACKUP_LOCK internally and would conflict with our hold.
     let copy_result = {
@@ -556,8 +568,10 @@ fn run_epoch_off_mutex(
         manifest_bytes: metrics.manifest_bytes,
         estimated_bytes,
         retained_generations: prune.retained_generations,
-        pruned_generations: prune.removed_generations,
-        pruned_block_bytes: prune.removed_block_bytes,
+        pruned_generations: prune.removed_generations
+            + resumed_prune.as_ref().map_or(0, |old| old.removed_generations),
+        pruned_block_bytes: prune.removed_block_bytes
+            + resumed_prune.as_ref().map_or(0, |old| old.removed_block_bytes),
     })
 }
 

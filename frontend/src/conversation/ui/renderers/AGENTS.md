@@ -13,11 +13,14 @@ This directory owns content projection into the Surface-provided node:
 | `compaction-block.ts` | Compaction receipt and shared token-flow subprojection |
 | `text-blocks.ts` | Prose, reasoning disclosure, translation and live status |
 | `tool-blocks.ts` | Tool, program and injection projection |
+| `tool-effect-notice.ts` | Shared uncertainty notice from effect metadata and Turn lifecycle; no retry authority |
 | `activity-block.ts` | Chronology-local activity rows |
 | `failure-receipt.ts` | Selectable diagnostics and document-scoped copy lifecycle |
 | `system-note-blocks.ts` | Generated reason taxonomy and context-note groups |
 | `change-receipt-blocks.ts` | File changes, provenance and rollback receipts |
 | `media-blocks.ts` | Generated images, artifacts and attachments |
+| `goal-recovery-notice.ts` | Explicit restart recovery request, delivery uncertainty and observer disposal |
+| `usage-recovery-notice.ts` | Read-only usage recovery check, explicit new-budget confirmation and delivery uncertainty; generated API ports only |
 | `workflow-blocks.ts` | Branch, queue and concluded goal-run surfaces |
 | `turn-chrome.ts` | Avatar, header, action datasets and footer; accepted task time delegates to `../task-time-presentations.ts` |
 | `stable-dom.ts`, `icons.ts`, `localized-copy.ts` | Shared reconciliation and presentation primitives |

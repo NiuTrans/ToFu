@@ -18,6 +18,7 @@ from typing import Any, Iterable, Literal, Mapping
 ToolPermission = Literal["read", "write", "approval", "external"]
 ToolIdempotency = Literal["read_only", "idempotent", "non_idempotent"]
 ToolResultRecovery = Literal["artifact", "source", "none"]
+ToolEffectRecovery = Literal["read_only", "idempotent", "reconcile"]
 MAX_DECODED_RESULT_SCHEMA_BYTES = 32768
 
 
@@ -27,6 +28,14 @@ def clone_decoded_result_schema(value: Any) -> dict[str, Any]:
     This describes successful local tools.invoke values, not transport/MCP
     envelopes. It is documentation, not result validation or evidence coverage.
     """
+    try:
+        return json.loads(_encode_decoded_result_schema(value))
+    except (TypeError, RecursionError) as error:
+        raise ValueError("decoded_result_schema must be finite JSON") from error
+
+
+def _encode_decoded_result_schema(value: Any) -> str:
+    """Apply the shared finite-JSON and byte admission before materialization."""
     if not isinstance(value, Mapping):
         raise ValueError("decoded_result_schema must be an object")
     try:
@@ -34,7 +43,39 @@ def clone_decoded_result_schema(value: Any) -> dict[str, Any]:
                              separators=(',', ':'), allow_nan=False)
         if len(encoded.encode('utf-8')) > MAX_DECODED_RESULT_SCHEMA_BYTES:
             raise ValueError("decoded_result_schema exceeds 32 KiB")
-        return json.loads(encoded)
+        return encoded
+    except (TypeError, RecursionError) as error:
+        raise ValueError("decoded_result_schema must be finite JSON") from error
+
+
+def serialize_decoded_result_schema(value: Any) -> str:
+    """Render the canonical declaration without constructing discarded JSON data.
+
+    Ordinary string-keyed JSON already has canonical key order after encoding.
+    Non-string keys and extension containers retain normalization through the
+    decoder, including the historical order after JSON stringifies numeric keys.
+    """
+    encoded = _encode_decoded_result_schema(value)
+    pending = [value]
+    # Encoding owns the result. If a producer changes the borrowed input while
+    # we inspect its key types, traversal must still terminate on that snapshot's
+    # byte budget and normalize the already frozen bytes.
+    remaining = len(encoded)
+    while pending and remaining:
+        remaining -= 1
+        node = pending.pop()
+        if type(node) is dict and all(type(key) is str for key in node):
+            pending.extend(node.values())
+        elif type(node) in (list, tuple):
+            pending.extend(node)
+        elif type(node) not in (str, int, float, bool, type(None)):
+            break
+    else:
+        if not pending:
+            return encoded
+    try:
+        return json.dumps(json.loads(encoded), ensure_ascii=True,
+                          sort_keys=True, separators=(',', ':'), allow_nan=False)
     except (TypeError, RecursionError) as error:
         raise ValueError("decoded_result_schema must be finite JSON") from error
 
@@ -119,6 +160,8 @@ class ToolContractV2:
     namespace: str = "general"
     result_recovery: ToolResultRecovery = "artifact"
     decoded_result_schema: Mapping[str, Any] | None = None
+    shell_command_argument: str | None = None
+    effect_recovery: ToolEffectRecovery | None = None
     contract_version: str = field(default="tofu.tool-contract/v2", init=False)
 
     def __post_init__(self) -> None:
@@ -147,6 +190,26 @@ class ToolContractV2:
         if self.result_recovery not in {"artifact", "source", "none"}:
             raise ValueError(
                 "result_recovery must be artifact, source, or none")
+
+        policy = (self.effect_recovery if self.effect_recovery is not None else (
+            'read_only' if self.permission == 'read' and self.idempotency == 'read_only'
+            else 'idempotent' if self.idempotency == 'idempotent' else 'reconcile'))
+        if policy not in {'read_only', 'idempotent', 'reconcile'}:
+            raise ValueError('invalid effect recovery policy')
+        if policy == 'read_only' and (self.permission != 'read' or self.idempotency != 'read_only'):
+            raise ValueError('read-only effect recovery requires a read-only contract')
+        if policy == 'idempotent' and self.idempotency != 'idempotent':
+            raise ValueError('idempotent effect recovery requires declared idempotency')
+        object.__setattr__(self, 'effect_recovery', policy)
+
+        if self.shell_command_argument is not None:
+            properties = self.parameters.get("properties", {})
+            if (not isinstance(self.shell_command_argument, str)
+                    or not self.shell_command_argument
+                    or not isinstance(properties, Mapping)
+                    or not isinstance(properties.get(self.shell_command_argument), Mapping)
+                    or properties[self.shell_command_argument].get("type") != "string"):
+                raise ValueError("shell_command_argument must name a string parameter")
 
     def provider_schema(self) -> dict[str, Any]:
         """Compile the short, cache-stable provider function schema."""
@@ -179,6 +242,8 @@ class ToolContractV2:
             "idempotency": self.idempotency,
             "ptcEligible": self.ptc_eligible,
             "resultRecovery": self.result_recovery,
+            "effectRecovery": self.effect_recovery,
+            "shellCommandArgument": self.shell_command_argument,
             "errors": [
                 {"code": error.code, "retryable": error.retryable,
                  "nextAction": error.next_action}
@@ -235,6 +300,10 @@ def _validate(value: Any, schema: Mapping[str, Any], *, path: str) -> Any:
                 f"Invalid length at {path} "
                 f"(got {len(value)} chars; allowed {allowed}).",
                 path=path)
+        pattern = schema.get('pattern')
+        if isinstance(pattern, str) and re.search(pattern, value) is None:
+            raise ToolContractError(
+                'invalid_argument_value', f'Value does not match the declared pattern at {path}.', path=path)
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         if "minimum" in schema and value < schema["minimum"]:
             raise ToolContractError(
@@ -259,6 +328,39 @@ def _validate(value: Any, schema: Mapping[str, Any], *, path: str) -> Any:
         if isinstance(child, Mapping):
             return [_validate(item, child, path=f"{path}[{index}]")
                     for index, item in enumerate(value)]
+    one_of = schema.get("oneOf")
+    if isinstance(value, dict) and isinstance(one_of, list) and one_of:
+        matched: list[int] = []
+        failures: list[str] = []
+        for index, branch in enumerate(one_of):
+            if not isinstance(branch, Mapping):
+                continue
+            try:
+                _validate(value, branch, path=path)
+            except ToolContractError as error:
+                failures.append(str(error))
+            else:
+                matched.append(index)
+        if not matched:
+            raise ToolContractError(
+                "invalid_argument_value",
+                f"No allowed target form matches at {path}. "
+                + " ".join(failures),
+                path=path,
+                next_action=(
+                    "Choose exactly one target form and remove the other "
+                    "form's fields."),
+            )
+        if len(matched) > 1:
+            raise ToolContractError(
+                "invalid_argument_value",
+                f"Arguments match more than one target form at {path}; "
+                "choose exactly one.",
+                path=path,
+                next_action=(
+                    "Choose exactly one target form and remove the other "
+                    "form's fields."),
+            )
     if isinstance(value, dict):
         properties = schema.get("properties") or {}
         required = schema.get("required") or ()
@@ -293,6 +395,8 @@ def adapt_legacy_tool_contract(
     search_metadata: tuple[str, ...] = (), permission: ToolPermission = "read",
     idempotency: ToolIdempotency = "read_only", ptc_eligible: bool = False,
     result_recovery: ToolResultRecovery = "artifact",
+    shell_command_argument: str | None = None,
+    effect_recovery: ToolEffectRecovery | None = None,
 ) -> ToolContractV2:
     """Read-only compatibility adapter for existing provider schemas."""
     function = schema.get("function") if isinstance(schema, Mapping) else None
@@ -317,6 +421,8 @@ def adapt_legacy_tool_contract(
         namespace=namespace,
         result_recovery=result_recovery,
         decoded_result_schema=schema.get('decoded_result_schema'),
+        shell_command_argument=shell_command_argument,
+        effect_recovery=effect_recovery,
     )
 
 
@@ -353,7 +459,7 @@ def compile_execution_contract_documents(
                     f"tool contract name mismatch for executable tool {name}")
         else:
             document = adapt_legacy_tool_contract(
-                schema, namespace=namespace).search_document()
+                schema, namespace=namespace, effect_recovery='reconcile').search_document()
         documents[name] = document
     return documents
 
@@ -480,6 +586,13 @@ def clamp_arguments_to_schema(
     log: list[tuple[str, str]] = []
     try:
         if not isinstance(value, dict) or not isinstance(schema, Mapping):
+            return value, log
+        # A oneOf schema shares one properties bag across mutually exclusive
+        # branches; field-level clamps stay sound because they only touch
+        # declared numeric/string bounds, but skipping keeps reasoning simple
+        # when a branch identity would change which bound applies. Clamping is
+        # a sizing convenience, never part of target-form authority.
+        if isinstance(schema.get("oneOf"), list) and schema["oneOf"]:
             return value, log
         properties = schema.get("properties")
         if not isinstance(properties, Mapping):

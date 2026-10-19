@@ -15,7 +15,10 @@ pytestmark = pytest.mark.unit
 
 
 @pytest.fixture
-def target(tmp_path):
+def target(tmp_path, monkeypatch):
+    # The preparation stub mutates the parent process environment just like the
+    # real restart port; retain that assertion without leaking its synthetic pin.
+    monkeypatch.setenv('TOFUDB_EXPECTED_SHA256', os.environ.get('TOFUDB_EXPECTED_SHA256', '0' * 64))
     package = tmp_path / 'serverctl_pkg'
     package.mkdir()
     (package / '__init__.py').write_text('')

@@ -41,6 +41,9 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
+import threading
+
+from .slot import THINKING_FORMATS as _BUILTIN_FORMATS
 
 from lib.log import get_logger
 
@@ -83,13 +86,24 @@ class BodyDialect:
 _DIALECTS: dict[str, BodyDialect] = {}
 
 # Built-in formats owned by the core ladders — NOT stored in _DIALECTS.
-# Kept here so registration can reject collisions and is_valid_* can accept
-# them.  Mirror of lib.llm_dispatch.slot.THINKING_FORMATS (imported lazily to
-# avoid a circular import at module load).
-_BUILTIN_FORMATS = frozenset({
-    '', 'enable_thinking', 'thinking_type', 'reasoning_effort',
-    'chat_template_kwargs', 'reasoning_split', 'none',
-})
+# Built-in formats share the Slot authority. Optional discovery is process-owned
+# and demand-loaded; the RLock permits a plugin callback to query the registry.
+_discovery_lock = threading.RLock()
+_discovery_complete = False
+_discovery_in_progress = False
+
+
+def _ensure_provider_plugins() -> None:
+    global _discovery_complete, _discovery_in_progress
+    with _discovery_lock:
+        if _discovery_complete or _discovery_in_progress:
+            return
+        _discovery_in_progress = True
+        try:
+            discover_provider_plugins()
+            _discovery_complete = True
+        finally:
+            _discovery_in_progress = False
 
 
 def register_dialect(dialect: BodyDialect, *, replace: bool = False) -> None:
@@ -119,18 +133,21 @@ def register_dialect(dialect: BodyDialect, *, replace: bool = False) -> None:
 
 def get_dialect(key: str) -> BodyDialect | None:
     """Return the plugin dialect for *key*, or ``None`` (incl. for built-ins)."""
-    if not key:
+    if key in _BUILTIN_FORMATS:
         return None
+    _ensure_provider_plugins()
     return _DIALECTS.get(key)
 
 
 def all_dialects() -> list[BodyDialect]:
     """Return all registered plugin dialects."""
+    _ensure_provider_plugins()
     return list(_DIALECTS.values())
 
 
 def dialect_keys() -> frozenset[str]:
     """Return the set of registered plugin dialect keys."""
+    _ensure_provider_plugins()
     return frozenset(_DIALECTS)
 
 
@@ -139,7 +156,10 @@ def is_valid_thinking_format(value: str) -> bool:
 
     Single predicate for the Slot constructor + BYO-provider validator.
     """
-    return value in _BUILTIN_FORMATS or value in _DIALECTS
+    if value in _BUILTIN_FORMATS:
+        return True
+    _ensure_provider_plugins()
+    return value in _DIALECTS
 
 
 # ══════════════════════════════════════════════════════════
@@ -187,9 +207,8 @@ def discover_provider_plugins() -> int:
     return loaded
 
 
-# Discover plugins at import time.  Built-in dialects are intentionally NOT
-# registered — core ladders own them.
-discover_provider_plugins()
+# Built-in lookups remain dormant. Custom lookups and enumeration discover
+# installed plugins once; explicit discover_provider_plugins remains available.
 
 
 __all__ = [

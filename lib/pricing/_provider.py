@@ -19,6 +19,7 @@ state; they must live together in this one module so all mutators
 reference.
 """
 
+import math
 import threading
 
 from lib.log import get_logger
@@ -37,6 +38,34 @@ logger = get_logger(__name__)
 # Populated at server-config load time from each provider template's per-model `pricing` field.
 PROVIDER_PRICING = {}
 _provider_pricing_lock = threading.Lock()
+
+
+def declared_pricing(info):
+    """Convert an admitted flat per-million price without global-table lookup.
+
+    Routing declarations carry absolute cache rates; existing fee arithmetic
+    takes input-rate multipliers. Refuse unrepresentable rates instead of
+    silently treating a positive cache charge over zero base input as free.
+    """
+    if (not isinstance(info, dict) or info.get('unit') != 'per_million_tokens'
+            or info.get('currency') not in {'USD', 'CNY'}):
+        raise ValueError('Invalid declared price units')
+    fields = ('input', 'output') + tuple(key for key in ('cache_read', 'cache_write') if key in info)
+    for key in fields:
+        value = info.get(key)
+        if type(value) not in (int, float) or not math.isfinite(value) or value < 0:
+            raise ValueError('Invalid declared price rate')
+    row = {key: info[key] for key in ('input', 'output', 'currency')}
+    for source, target in (('cache_read', 'cacheReadMul'), ('cache_write', 'cacheWriteMul')):
+        if source in info:
+            if info['input'] == 0 and info[source] != 0:
+                raise ValueError('Positive cache price with zero input price is not representable')
+            multiplier = info[source] / info['input'] if info['input'] else 0.0
+            if not math.isfinite(multiplier):
+                raise ValueError('Declared cache price multiplier is not finite')
+            row[target] = multiplier
+    row['_pricingSource'] = 'route_offering'
+    return row
 
 
 def _legacy_context_tiers(model_id):

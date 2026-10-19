@@ -33,12 +33,14 @@ def test_unsafe_links_rejected_without_write(shelf,url):
     with pytest.raises(EvolutionContractError):library.save_material('a',material(url=url),user_id=123)
     assert shelf.writes==0
 
-def test_full_shelf_never_silently_evicts(shelf):
-    for i in range(64):library.save_material('a',material(url=f'https://example.org/{i}'),user_id=123)
-    with pytest.raises(EvolutionStateError):library.save_material('a',material(),user_id=123)
-    assert len(library.list_materials('a',user_id=123))==64
+def test_materials_cross_old_count_limit_without_eviction(shelf):
+    for i in range(129):library.save_material('a',material(url=f'https://example.org/{i}'),user_id=123)
+    assert len(library.list_materials('a',user_id=123))==129
     library.save_material('a',material(url='https://example.org/1',title='updated'),user_id=123)
-    assert len(library.list_materials('a',user_id=123))==64
+    rows=library.list_materials('a',user_id=123)
+    assert len(rows)==129 and rows[0]['url']=='https://example.org/0'
+    assert rows[1]['title']=='updated'
+
 
 def test_cas_retry_preserves_a_concurrent_writer(shelf,monkeypatch):
     original=shelf.command;once=True
@@ -70,22 +72,17 @@ def test_tool_only_exposed_in_run_execution_even_with_execution_limits():
         assert ('evolution_material' in _names(ctx.executable_tool_catalog)) is expected
 
 
-def test_shelf_byte_budget_is_explicit_and_never_discards(shelf):
-    from lib.evolution import records
-    accepted=0
-    for i in range(64):
-        try:
-            library.save_material('a',material(title='研'*240,url='https://example.org/'+str(i)+'研'*1900,note='研'*500),user_id=123)
-            accepted+=1
-        except EvolutionStateError as exc:
-            assert 'budget' in str(exc);break
-    assert 0<accepted<64
-    assert len(library.list_materials('a',user_id=123))==accepted
+def test_dense_materials_cross_old_aggregate_budgets_atomically(shelf):
     import json
-    record=records.get_record(records.NAMESPACE_LIBRARIES,'123:a')
-    assert len(json.dumps(record['materials'],ensure_ascii=False).encode())<=library.MAX_LIBRARY_BYTES
-    from lib.evolution.coordination import MAX_WORKSPACE_BYTES
-    assert len(json.dumps(record,ensure_ascii=False).encode())<=MAX_WORKSPACE_BYTES
+    from lib.evolution import records
+    for i in range(160):
+        library.save_material('a',material(title='研'*240,url='https://example.org/'+str(i)+'研'*1900,note='研'*500),user_id=123)
+    assert len(library.list_materials('a',user_id=123))==160
+    row=records.get_record(records.NAMESPACE_LIBRARIES,'123:a')
+    assert len(json.dumps(row,ensure_ascii=False).encode())>1024*1024
+    assert len(row['coordination']['updates'])==160
+    assert all(event['kind']=='material_saved' for event in row['coordination']['updates'])
+
 
 
 def test_agent_can_read_user_materials_with_bounded_pagination(shelf):

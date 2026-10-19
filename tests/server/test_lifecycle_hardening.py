@@ -316,10 +316,10 @@ _HOLDER_PY = (
 def _start_lock_holder(lock_path):
     """A live process flocking *lock_path*, stamped '<pid>@<host>' inside it,
     whose /proc cmdline contains 'server.py' (the guard's liveness checks)."""
+    script = lock_path.parent / 'fixture-server.py'
+    script.write_text(_HOLDER_PY)
     proc = subprocess.Popen(
-        ['bash', '-c',
-         f'exec -a "python server.py" {shlex.quote(sys.executable)} -c '
-         f'{shlex.quote(_HOLDER_PY)} {shlex.quote(str(lock_path))}'],
+        [sys.executable, str(script), str(lock_path)],
         stdout=subprocess.PIPE, text=True)
     assert proc.stdout is not None
     assert proc.stdout.readline().strip() == 'held', 'lock holder failed to start'

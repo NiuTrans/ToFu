@@ -335,7 +335,7 @@ def test_read_search_health_does_not_depend_on_future_write_capabilities():
 
 def test_chatui_site_provider_binds_the_request_users_browser(monkeypatch):
     import lib.browser.adapters as browser_adapters
-    from lib.search_bridge import _ChatuiSiteSearchProvider
+    from lib.search.search_bridge import _ChatuiSiteSearchProvider
     from routes.api_v1 import auth as auth_routes
 
     _register('alice-browser', ALICE, profile='Alice Work')
@@ -361,7 +361,7 @@ def test_chatui_site_provider_binds_the_request_users_browser(monkeypatch):
 
 def test_chatui_site_provider_never_uses_a_global_unbound_browser(monkeypatch):
     import lib.browser.adapters as browser_adapters
-    from lib.search_bridge import _ChatuiSiteSearchProvider
+    from lib.search.search_bridge import _ChatuiSiteSearchProvider
 
     _register('somebody-elses-browser', OTHER)
     monkeypatch.setattr(
@@ -376,7 +376,7 @@ def test_chatui_site_provider_never_uses_a_global_unbound_browser(monkeypatch):
 def test_chatui_browser_provider_never_uses_a_global_unbound_browser(
         monkeypatch):
     import lib.browser.fetch as browser_fetch
-    from lib.search_bridge import _ChatuiBrowserProvider
+    from lib.search.search_bridge import _ChatuiBrowserProvider
 
     _register('somebody-elses-browser', OTHER)
     monkeypatch.setattr(
@@ -452,13 +452,14 @@ def test_extension_v2_advertises_and_implements_native_page_contract():
 def test_generic_browser_dispatch_rejects_cross_tenant_client_before_enqueue():
     from lib.browser.dispatch import execute_browser_tool
     from lib.browser.queue import _state
+    from lib.tools.result_envelope import tool_result_error
 
     _register('alice-browser', ALICE)
     _register('bob-browser', BOB)
     result = execute_browser_tool(
         'browser_list_tabs', {}, client_id='bob-browser',
         owner_user_id=ALICE)
-    assert result == 'Error: Browser client is not connected for this user'
+    assert tool_result_error(result).code == 'browser_client_disconnected'
     with _state._commands_lock:
         assert _state._commands == {}
 

@@ -34,7 +34,7 @@ ENTITY_SCHEMA = os.path.join(ROOT, "contracts", "model_routing_v2.schema.json")
 RECIPE_SCHEMA = os.path.join(ROOT, "contracts", "provider_offering_recipe_v1.schema.json")
 _RECIPE_PROPERTY_PREFIX = "./provider_offering_recipe_v1.schema.json#/properties/"
 _RECIPE_METADATA_FIELDS = frozenset({"category", "catalog_mode", "catalog_source"})
-PYTHON_OUTPUT = os.path.join(ROOT, "lib", "api_v1_model_routing_generated.py")
+PYTHON_OUTPUT = os.path.join(ROOT, "lib", "generated_api_v1_model_routing.py")
 TYPESCRIPT_OUTPUT = os.path.join(
     ROOT, "frontend", "src", "api", "api-v1-model-routing.generated.ts"
 )

@@ -77,3 +77,100 @@ def test_adapter_rechecks_each_concrete_redirect_hop(monkeypatch):
         assert adapter.send(public) is sentinel
         with pytest.raises(SafeFetchError, match='blocked IP'):
             adapter.send(private)
+
+
+def _mock_response(monkeypatch, chunks, headers=None):
+    from unittest.mock import MagicMock
+    session = MagicMock()
+    session.max_redirects = 30
+    response = session.get.return_value
+    response.headers = headers or {'Content-Type': 'image/png'}
+    response.url = 'https://example.test/image'
+    response.iter_content = lambda chunk_size: iter(chunks)
+    monkeypatch.setenv('TOFU_TEST_FETCH_ALLOW', 'example.test')
+    monkeypatch.setattr('lib.safe_fetch._session_for', lambda policy: session)
+    return session, response
+
+
+@pytest.mark.parametrize('headers,chunks', [
+    ({'Content-Length': '101'}, [b'x']), ({}, [b'x' * 60, b'y' * 60]),
+])
+def test_explicit_byte_policy_still_rejects_and_closes_response(monkeypatch, headers, chunks):
+    from lib.safe_fetch import fetch_public_bytes
+    session, response = _mock_response(monkeypatch, chunks, headers)
+    with pytest.raises(SafeFetchError, match='too large'):
+        fetch_public_bytes(response.url, max_bytes=100, allow_hosts_env='TOFU_TEST_FETCH_ALLOW')
+    response.close.assert_called_once()
+    assert session.max_redirects == 30
+
+
+def test_network_failure_closes_partial_file_and_response(monkeypatch):
+    import tempfile
+    from lib.safe_fetch import fetch_public_file
+    def chunks():
+        yield b'partial'
+        raise requests.ConnectionError('injected disconnect')
+    session, response = _mock_response(monkeypatch, [])
+    response.iter_content = lambda chunk_size: chunks()
+    source = tempfile.TemporaryFile(mode='w+b')
+    monkeypatch.setattr('lib.safe_fetch.tempfile.TemporaryFile', lambda **kwargs: source)
+    with pytest.raises(SafeFetchError, match='disconnect'):
+        fetch_public_file(response.url, allow_hosts_env='TOFU_TEST_FETCH_ALLOW')
+    assert source.closed
+    response.close.assert_called_once()
+    assert session.max_redirects == 30
+
+
+def test_file_write_failure_closes_owner_and_response(monkeypatch):
+    from lib.safe_fetch import fetch_public_file
+    session, response = _mock_response(monkeypatch, [b'bytes'])
+    class FailedFile:
+        closed = False
+        def write(self, value):
+            raise OSError('injected disk failure')
+        def close(self):
+            self.closed = True
+    source = FailedFile()
+    monkeypatch.setattr('lib.safe_fetch.tempfile.TemporaryFile', lambda **kwargs: source)
+    with pytest.raises(OSError, match='disk failure'):
+        fetch_public_file(response.url, allow_hosts_env='TOFU_TEST_FETCH_ALLOW')
+    assert source.closed
+    response.close.assert_called_once()
+    assert session.max_redirects == 30
+
+
+def test_active_download_can_disable_only_total_deadline(monkeypatch):
+    from lib.safe_fetch import fetch_public_file
+    session, response = _mock_response(monkeypatch, [b'first', b'last'])
+    timestamps = iter([0.0, 1000.0, 1001.0])
+    monkeypatch.setattr('lib.safe_fetch.time.monotonic', lambda: next(timestamps))
+    source, _, _ = fetch_public_file(response.url, timeout=1,
+        allow_hosts_env='TOFU_TEST_FETCH_ALLOW', enforce_total_timeout=False)
+    with source:
+        assert source.read() == b'firstlast'
+    assert session.get.call_args.kwargs['timeout'] == (1.0, 1.0)
+    response.close.assert_called_once()
+
+
+def test_explicit_total_deadline_still_closes_partial_download(monkeypatch):
+    from lib.safe_fetch import fetch_public_file
+    session, response = _mock_response(monkeypatch, [b'first', b'last'])
+    timestamps = iter([0.0, 1000.0])
+    monkeypatch.setattr('lib.safe_fetch.time.monotonic', lambda: next(timestamps))
+    with pytest.raises(SafeFetchError, match='total time budget'):
+        fetch_public_file(response.url, timeout=1, allow_hosts_env='TOFU_TEST_FETCH_ALLOW')
+    response.close.assert_called_once()
+
+
+def test_response_close_failure_does_not_leak_completed_file(monkeypatch):
+    import tempfile
+    from lib.safe_fetch import fetch_public_file
+    session, response = _mock_response(monkeypatch, [b'complete'])
+    source = tempfile.TemporaryFile(mode='w+b')
+    monkeypatch.setattr('lib.safe_fetch.tempfile.TemporaryFile', lambda **kwargs: source)
+    response.close.side_effect = OSError('injected response close failure')
+    with pytest.raises(OSError, match='response close failure'):
+        fetch_public_file(response.url, allow_hosts_env='TOFU_TEST_FETCH_ALLOW')
+    assert source.closed
+    response.close.assert_called_once()
+    assert session.max_redirects == 30

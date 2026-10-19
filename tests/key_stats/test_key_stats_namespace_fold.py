@@ -144,6 +144,24 @@ def _load(ks):
 @pytest.mark.unit
 class TestStatsFold:
 
+    def test_credential_evidence_survives_account_fold_and_reload(self, fresh_stats):
+        ks, stats_path = fresh_stats
+        _seed(stats_path, stats={
+            f'{ACCT}::{ACCT}_key_0': _entry(
+                failure=2, credential_failures=2),
+            f'{FACE}::{FACE}_key_0': _entry(
+                failure=3, credential_failures=3,
+                last_credential_error='API key revoked'),
+        })
+        _load(ks)
+        _load(ks)
+        row = ks.get_today_stats(ACCT, f'{ACCT}_key_0')
+        assert row['credential_failures'] == 5
+        assert row['auto_disabled'] is True
+        assert row['enabled'] is False
+        assert row['last_error'] == 'API key revoked'
+        assert ks.is_key_enabled(ACCT, f'{ACCT}_key_0') is False
+
     def test_fold_merges_into_existing_account_entry(self, fresh_stats):
         ks, stats_path = fresh_stats
         _seed(stats_path, stats={

@@ -46,6 +46,12 @@ def main():
     content += 'export type CoordinationBinding = ' + ts(schema) + ';\n'
     content += 'export type CoordinationBindRequest = ' + ts(schema['$defs']['bindRequest']) + ';\n'
 
+    content += 'export type CoordinationCreateRequest = ' + ts(schema['$defs']['createRequest']) + ';\n'
+
+    for name, definition in [('CoordinatorReportState', 'reportState'),
+                             ('CoordinatorReportReadRequest', 'reportReadRequest')]:
+        content += f'export type {name} = ' + ts(schema['$defs'][definition], schema) + ';\n'
+
     message_schema = json.loads((ROOT / 'contracts/project_messages_v1.json').read_text())
     content += 'export type ProjectMessageView = ' + ts(message_schema['$defs']['messageView'], message_schema) + ';\n'
     content += 'export type ProjectMessagePage = ' + ts(message_schema['$defs']['pageView'], message_schema) + ';\n'

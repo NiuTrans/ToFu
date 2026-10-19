@@ -214,7 +214,8 @@ class TestAssemblyWireFilter(unittest.TestCase):
         names = self._names(dict(self.BASE_CFG))
         self.assertIn('todo_write', names)
         self.assertIn('create_memory', names)
-        self.assertIn('update_search_settings', names)
+        self.assertIn('run_command', names)
+        self.assertNotIn('update_search_settings', names)
 
     def test_exact_call_classifier_restricts_mixed_and_unknown_tools(self):
         self.assertTrue(plan_mode_call_allowed(

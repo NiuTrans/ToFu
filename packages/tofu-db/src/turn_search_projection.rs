@@ -21,6 +21,12 @@ use crate::vfs::Vfs;
 #[path = "turn_search_projection_recovery.rs"]
 mod recovery;
 
+#[path = "turn_search_posting_codec.rs"]
+mod posting_codec;
+
+#[path = "turn_search_generation_dictionary.rs"]
+mod generation_dictionary;
+
 #[path = "turn_search_query.rs"]
 mod query;
 pub use query::ConversationSearchPage;
@@ -32,8 +38,8 @@ const TURN_META_NAMESPACE: &str = "search_turn_meta_v1";
 const TURN_TEXT_NAMESPACE: &str = "search_turn_text_v1";
 const USAGE_NAMESPACE: &str = "search_usage_v1";
 const USAGE_KEY: &[u8] = b"logical_bytes";
-// Owner-level gram posting index: one row per (distinct gram, conversation
-// generation) mapping a width-1/2/3 gram digest to the conversation whose
+// Owner-level gram posting index: one packed row per width-1/2/3 gram digest
+// with stable IDs for the conversation generations whose
 // title, id, or some chunk emitted it. A query resolves its candidate
 // conversations through a handful of prefix scans here instead of opening
 // every conversation's meta namespace. The index is a candidate filter only:
@@ -58,9 +64,8 @@ const GRAM_EXCLUSION_NAMESPACE: &str = "search_gram_excluded_v1";
 // takes the unfiltered walk (the index is not earning its keep there).
 const GRAM_EXCLUSION_SCAN_CAP: usize =
     crate::generated_tofudb_ir::MAX_ENTITY_RANGE_ROWS;
-// Posting lists inline at most 255 conversation-generation digests (the
-// two-byte header plus entries must fit the 8 KiB entity inline-value
-// bound); a gram in more conversations promotes to a universal marker the
+// Posting lists preserve the existing 255-generation selectivity boundary,
+// encoding stable owner-scoped IDs as canonical delta varints; a gram in more conversations promotes to a universal marker the
 // reader treats as unfilterable for that gram.
 const GRAM_LIST_MAX_ENTRIES: usize = 255;
 // Emission/removal bounds keep every projection transaction far below the
@@ -106,8 +111,8 @@ pub struct ConversationSearchRequest {
     pub snippet_radius: usize,
 }
 
-pub struct TurnSearchProjection {
-    database: AuthorityDatabase,
+pub(crate) struct OpenTurnSearchProjection {
+    pub(crate) database: AuthorityDatabase,
     maximum_logical_bytes_per_owner: u64,
     // Runtime-only: persisted coverage is not proof that this launch has
     // validated the source UUID or checked the authority's pending work.
@@ -201,7 +206,7 @@ fn gram_digest(gram: &[u8]) -> [u8; 32] {
 
 enum GramList {
     Omni,
-    Entries(Vec<[u8; 32]>),
+    Entries(Vec<u64>),
 }
 
 fn decode_gram_list(input: &[u8]) -> io::Result<GramList> {
@@ -210,29 +215,25 @@ fn decode_gram_list(input: &[u8]) -> io::Result<GramList> {
     }
     match input.get(1) {
         Some(1) if input.len() == 2 => Ok(GramList::Omni),
-        Some(0) if input.len() >= 2 && (input.len() - 2) % 32 == 0 => {
-            let entries: Vec<[u8; 32]> = input[2..]
-                .chunks_exact(32)
-                .map(|chunk| chunk.try_into().unwrap())
-                .collect();
-            if entries.len() > GRAM_LIST_MAX_ENTRIES
-                || !entries.windows(2).all(|pair| pair[0] < pair[1])
-            {
-                return Err(invalid_data("search gram posting list is malformed"));
-            }
-            Ok(GramList::Entries(entries))
-        }
+        Some(0) => Ok(GramList::Entries(posting_codec::decode(
+            &input[2..],
+            crate::generated_tofudb_ir::MAX_ENTITY_INLINE_VALUE_BYTES as usize - 2,
+            GRAM_LIST_MAX_ENTRIES,
+        )?)),
         _ => Err(invalid_data("search gram posting list is malformed")),
     }
 }
 
-fn encode_gram_entries(entries: &[[u8; 32]]) -> Vec<u8> {
-    let mut output = Vec::with_capacity(2 + entries.len() * 32);
-    output.extend_from_slice(&[FORMAT_VERSION, 0]);
-    for entry in entries {
-        output.extend_from_slice(entry);
+fn encode_gram_entries(entries: &[u64]) -> io::Result<Vec<u8>> {
+    if entries.len() > GRAM_LIST_MAX_ENTRIES {
+        return Err(invalid_data("search gram posting list exceeds entry bound"));
     }
-    output
+    let encoded = posting_codec::encode(entries,
+        crate::generated_tofudb_ir::MAX_ENTITY_INLINE_VALUE_BYTES as usize - 2)?;
+    let mut output = Vec::with_capacity(2 + encoded.len());
+    output.extend_from_slice(&[FORMAT_VERSION, 0]);
+    output.extend_from_slice(&encoded);
+    Ok(output)
 }
 
 fn gram_state_key(transaction: &AuthorityTransaction) -> io::Result<EntityKey> {
@@ -251,10 +252,8 @@ fn read_gram_state(
     }
 }
 
-// Posting rows carry no value: the key (gram digest, generation digest) is
-// the whole posting, keeping the index small enough to sit inside the owner
-// budget beside the content it accelerates. The query path trusts the key
-// only as a candidate hint; exact verification re-reads title, id, and text.
+// Posting values are candidate hints, encoded by posting_codec using stable
+// generation_dictionary IDs. Exact verification re-reads title, id and text.
 
 fn key(transaction: &AuthorityTransaction, namespace: &str, raw: &[u8]) -> io::Result<EntityKey> {
     EntityKey::new(
@@ -591,7 +590,7 @@ fn add_gram_posting(
     database: &AuthorityDatabase,
     transaction: &mut AuthorityTransaction,
     gram: &[u8; 32],
-    generation_digest: &[u8; 32],
+    generation_id: u64,
     base_bytes: u64,
     maximum_logical_bytes_per_owner: u64,
     gram_delta: &mut i64,
@@ -607,15 +606,15 @@ fn add_gram_posting(
             GramList::Entries(entries) => (entries, raw.len()),
         },
     };
-    if entries.contains(generation_digest) {
+    if entries.contains(&generation_id) {
         return Ok(());
     }
     let (value, value_bytes) = if entries.len() >= GRAM_LIST_MAX_ENTRIES {
         (vec![FORMAT_VERSION, 1], 2usize)
     } else {
-        entries.push(*generation_digest);
+        entries.push(generation_id);
         entries.sort_unstable();
-        let value = encode_gram_entries(&entries);
+        let value = encode_gram_entries(&entries)?;
         let value_bytes = value.len();
         (value, value_bytes)
     };
@@ -649,7 +648,7 @@ fn remove_gram_posting(
     database: &AuthorityDatabase,
     transaction: &mut AuthorityTransaction,
     gram: &[u8; 32],
-    generation_digest: &[u8; 32],
+    generation_id: u64,
     gram_delta: &mut i64,
 ) -> io::Result<()> {
     let posting_key = key(transaction, GRAM_NAMESPACE, gram)?;
@@ -659,7 +658,7 @@ fn remove_gram_posting(
     let GramList::Entries(mut entries) = decode_gram_list(&raw)? else {
         return Ok(());
     };
-    let Ok(position) = entries.binary_search(generation_digest) else {
+    let Ok(position) = entries.binary_search(&generation_id) else {
         return Ok(());
     };
     entries.remove(position);
@@ -668,7 +667,7 @@ fn remove_gram_posting(
         database.entity_delete(transaction, posting_key)?;
         *gram_delta -= key_bytes + raw.len() as i64;
     } else {
-        let value = encode_gram_entries(&entries);
+        let value = encode_gram_entries(&entries)?;
         *gram_delta -= (raw.len() - value.len()) as i64;
         database.entity_put(transaction, posting_key, value)?;
     }
@@ -710,6 +709,8 @@ fn emit_text_grams(
     if emission.excluded || emission.tripped {
         return Ok(());
     }
+    let generation_id = generation_dictionary::lookup(database, transaction, generation_digest)?
+        .ok_or_else(|| invalid_data("search generation dictionary assignment is missing"))?;
     let mut grams = Vec::new();
     visit_posting_grams(lowered, |gram| grams.push(gram_digest(gram)));
     for gram in grams {
@@ -728,7 +729,7 @@ fn emit_text_grams(
             database,
             transaction,
             &gram,
-            generation_digest,
+            generation_id,
             base_bytes,
             maximum_logical_bytes_per_owner,
             gram_delta,
@@ -751,6 +752,8 @@ fn retract_text_grams(
     ops: &mut usize,
     seen: &mut std::collections::HashSet<[u8; 32]>,
 ) -> io::Result<()> {
+    let generation_id = generation_dictionary::lookup(database, transaction, generation_digest)?
+        .ok_or_else(|| invalid_data("search generation dictionary assignment is missing"))?;
     let mut grams = Vec::new();
     visit_posting_grams(lowered, |gram| grams.push(gram_digest(gram)));
     for gram in grams {
@@ -761,7 +764,7 @@ fn retract_text_grams(
             continue;
         }
         *ops += 1;
-        remove_gram_posting(database, transaction, &gram, generation_digest, gram_delta)?;
+        remove_gram_posting(database, transaction, &gram, generation_id, gram_delta)?;
     }
     Ok(())
 }
@@ -858,7 +861,7 @@ fn write_usage(
     )
 }
 
-impl TurnSearchProjection {
+impl OpenTurnSearchProjection {
     /// Fence all owners before publishing the projection to daemon/embedded
     /// request dispatch. Maintenance validates each source binding and refreshes
     /// coverage under the projection mutex before admitting that owner. No
@@ -1033,7 +1036,9 @@ impl TurnSearchProjection {
                 }
             }
             // Legacy UUID-only markers cannot prove queue-consumer continuity.
-            Some(bytes) if [18, 34].contains(&bytes.len()) && bytes[0] == FORMAT_VERSION => {}
+            Some(bytes) if [18, 34].contains(&bytes.len())
+                && matches!(bytes[0], 2 | 3 | FORMAT_VERSION)
+                && bytes[1] <= 1 => {}
             Some(_) => return Err(invalid_data("unsupported search projection format marker")),
             None => {}
         }
@@ -1048,6 +1053,7 @@ impl TurnSearchProjection {
             USAGE_NAMESPACE,
             GRAM_NAMESPACE,
             GRAM_EXCLUSION_NAMESPACE,
+            generation_dictionary::NAMESPACE,
         ] {
             let (start, end) = EntityKey::prefix_range(tenant, owner, namespace, b"")?;
             self.database
@@ -1308,6 +1314,12 @@ impl TurnSearchProjection {
             .checked_add(build.generation_bytes)
             .filter(|n| *n <= self.maximum_logical_bytes_per_owner)
             .ok_or_else(|| exhausted("search header exceeds its resource budget"))?;
+        let (_, dictionary_bytes) = generation_dictionary::allocate(
+            &self.database, &mut transaction, &generation_digest(conversation_id, generation),
+            self.maximum_logical_bytes_per_owner - usage,
+        )?;
+        usage = usage.checked_add(dictionary_bytes)
+            .ok_or_else(|| exhausted("search dictionary usage overflow"))?;
         self.database
             .entity_put(&mut transaction, build_key, encode_build(&build)?)?;
         write_usage(&self.database, &mut transaction, usage)?;
@@ -1724,6 +1736,9 @@ impl TurnSearchProjection {
                 )?;
             }
             if row_count < GRAM_RETIRE_SCAN_BATCH {
+                *gram_delta -= generation_dictionary::retire(
+                    &self.database, transaction, &generation_digest,
+                )? as i64;
                 return Ok(());
             }
             let mut next = rows.last().unwrap().0.key_bytes().to_vec();
@@ -1839,7 +1854,7 @@ mod tests {
     }
 
     fn replace(
-        projection: &mut TurnSearchProjection,
+        projection: &mut OpenTurnSearchProjection,
         owner: u64,
         conversation: &str,
         generation: &str,
@@ -1864,7 +1879,7 @@ mod tests {
         let directory = tempdir().unwrap();
         let source = uuid::Uuid::new_v4();
         let other_source = uuid::Uuid::new_v4();
-        let mut projection = TurnSearchProjection::initialize(directory.path(), BUDGET).unwrap();
+        let mut projection = OpenTurnSearchProjection::initialize(directory.path(), BUDGET).unwrap();
         let (activation, _) = projection.prepare_owner(7, 11, source, None).unwrap();
         projection
             .acknowledge_owner_backfill(7, 11, source, activation)
@@ -1917,7 +1932,7 @@ mod tests {
     fn startup_admission_rechecks_stale_ready_flags_per_owner() {
         let directory = tempdir().unwrap();
         let source = uuid::Uuid::new_v4();
-        let mut projection = TurnSearchProjection::initialize(directory.path(), BUDGET).unwrap();
+        let mut projection = OpenTurnSearchProjection::initialize(directory.path(), BUDGET).unwrap();
         let mut activations = Vec::new();
         for owner in [11, 22] {
             let (activation, _) = projection.prepare_owner(7, owner, source, None).unwrap();
@@ -1937,7 +1952,7 @@ mod tests {
         }
         projection.checkpoint_wal_window_for_shutdown().unwrap();
         drop(projection);
-        let mut projection = TurnSearchProjection::open(directory.path(), BUDGET).unwrap();
+        let mut projection = OpenTurnSearchProjection::open(directory.path(), BUDGET).unwrap();
         projection.require_source_admission(source);
         for owner in [11, 22] {
             assert!(projection.owner_indexing(7, owner).unwrap());
@@ -1968,7 +1983,7 @@ mod tests {
     #[test]
     fn phrase_multi_turn_and_owner_order_semantics_match_contract() {
         let directory = tempdir().unwrap();
-        let mut projection = TurnSearchProjection::initialize(directory.path(), BUDGET).unwrap();
+        let mut projection = OpenTurnSearchProjection::initialize(directory.path(), BUDGET).unwrap();
         replace(
             &mut projection,
             11,
@@ -2019,7 +2034,7 @@ mod tests {
     #[test]
     fn generation_is_invisible_until_atomic_publish_and_retracts_old_text() {
         let directory = tempdir().unwrap();
-        let mut projection = TurnSearchProjection::initialize(directory.path(), BUDGET).unwrap();
+        let mut projection = OpenTurnSearchProjection::initialize(directory.path(), BUDGET).unwrap();
         replace(
             &mut projection,
             11,
@@ -2060,7 +2075,7 @@ mod tests {
             1
         );
         drop(projection);
-        let reopened = TurnSearchProjection::open(directory.path(), BUDGET).unwrap();
+        let reopened = OpenTurnSearchProjection::open(directory.path(), BUDGET).unwrap();
         assert_eq!(
             reopened.search(&request(11, "new phrase")).unwrap().len(),
             1
@@ -2070,7 +2085,7 @@ mod tests {
     #[test]
     fn phrase_pass_precedes_word_pass_and_equal_timestamps_sort_id_descending() {
         let directory = tempdir().unwrap();
-        let mut projection = TurnSearchProjection::initialize(directory.path(), BUDGET).unwrap();
+        let mut projection = OpenTurnSearchProjection::initialize(directory.path(), BUDGET).unwrap();
         replace(
             &mut projection,
             11,
@@ -2115,7 +2130,7 @@ mod tests {
     #[test]
     fn query_deadline_stops_before_projection_scan() {
         let directory = tempfile::tempdir().unwrap();
-        let projection = TurnSearchProjection::initialize(directory.path(), BUDGET).unwrap();
+        let projection = OpenTurnSearchProjection::initialize(directory.path(), BUDGET).unwrap();
         let error = projection
             .search_until(&request(7, "deadline"), || true)
             .unwrap_err();
@@ -2125,7 +2140,7 @@ mod tests {
     #[test]
     fn logical_budget_rejects_page_without_exposing_it() {
         let directory = tempdir().unwrap();
-        let mut projection = TurnSearchProjection::initialize(directory.path(), 1024).unwrap();
+        let mut projection = OpenTurnSearchProjection::initialize(directory.path(), 1024).unwrap();
         projection
             .begin_conversation_rebuild(7, 11, "conversation", "g1", 100)
             .unwrap();
@@ -2143,7 +2158,7 @@ mod tests {
     fn owner_activation_fences_old_index_without_rebuilding_unchanged_launches() {
         let directory = tempdir().unwrap();
         let source = uuid::Uuid::new_v4();
-        let mut projection = TurnSearchProjection::initialize(directory.path(), BUDGET).unwrap();
+        let mut projection = OpenTurnSearchProjection::initialize(directory.path(), BUDGET).unwrap();
         let (a, _) = projection.prepare_owner(7, 11, source, None).unwrap();
         projection
             .acknowledge_owner_backfill(7, 11, source, a)
@@ -2169,7 +2184,7 @@ mod tests {
             &[document("t", 1, "otherneedle")],
         );
         drop(projection);
-        let mut projection = TurnSearchProjection::open(directory.path(), BUDGET).unwrap();
+        let mut projection = OpenTurnSearchProjection::open(directory.path(), BUDGET).unwrap();
         assert_eq!(
             projection.prepare_owner(7, 11, source, Some(a)).unwrap(),
             (a, false)
@@ -2212,7 +2227,7 @@ mod tests {
     fn legacy_uuid_only_marker_rebuilds_once() {
         let directory = tempdir().unwrap();
         let source = uuid::Uuid::new_v4();
-        let mut projection = TurnSearchProjection::initialize(directory.path(), BUDGET).unwrap();
+        let mut projection = OpenTurnSearchProjection::initialize(directory.path(), BUDGET).unwrap();
         let (activation, _) = projection.prepare_owner(7, 11, source, None).unwrap();
         projection
             .acknowledge_owner_backfill(7, 11, source, activation)
@@ -2243,7 +2258,7 @@ mod tests {
     #[test]
     fn disposable_upgrade_binds_source_and_preserves_other_owners() {
         let directory = tempdir().unwrap();
-        let mut projection = TurnSearchProjection::initialize(directory.path(), BUDGET).unwrap();
+        let mut projection = OpenTurnSearchProjection::initialize(directory.path(), BUDGET).unwrap();
         let first_source = uuid::Uuid::new_v4();
         let (activation, pending) = projection.prepare_owner(7, 11, first_source, None).unwrap();
         assert!(pending);
@@ -2287,7 +2302,7 @@ mod tests {
             .unwrap()
             .is_empty());
         assert_eq!(projection.search(&request(12, "needle")).unwrap().len(), 1);
-        let reopened = TurnSearchProjection::open(directory.path(), BUDGET);
+        let reopened = OpenTurnSearchProjection::open(directory.path(), BUDGET);
         assert!(
             reopened.is_err(),
             "live projection lease must remain exclusive"
@@ -2295,9 +2310,53 @@ mod tests {
     }
 
     #[test]
+    fn digest_posting_upgrade_retires_only_the_selected_owner_and_stays_pending() {
+        for old_version in [2_u8, 3] {
+            let directory = tempdir().unwrap();
+            let mut projection = OpenTurnSearchProjection::initialize(directory.path(), BUDGET).unwrap();
+            let source = uuid::Uuid::new_v4();
+            let (old_activation, _) = projection.prepare_owner(7, 11, source, None).unwrap();
+            projection.acknowledge_owner_backfill(7, 11, source, old_activation).unwrap();
+            replace(&mut projection, 11, "local", "g", 1, &[document("t", 1, "oldneedle")]);
+            replace(&mut projection, 12, "foreign", "g", 1, &[document("t", 1, "foreignneedle")]);
+            let mut tx = projection.database.begin(7, 11).unwrap();
+            let format_key = key(&tx, "search_format", b"version").unwrap();
+            projection.database.entity_put(&mut tx, format_key,
+                [&[old_version, 1], source.as_bytes().as_slice(), old_activation.as_bytes().as_slice()].concat()).unwrap();
+            // A real old packed-digest posting must be retired without decoding
+            // it as an ID list. The other owner's dictionary must survive.
+            let posting_key = key(&tx, GRAM_NAMESPACE, &gram_digest(b"old")).unwrap();
+            projection.database.entity_put(&mut tx, posting_key,
+                [&[old_version, 0], generation_digest("local", "g").as_slice()].concat()).unwrap();
+            projection.database.commit(tx).unwrap();
+            drop(projection);
+            let mut projection = OpenTurnSearchProjection::open(directory.path(), BUDGET).unwrap();
+            let (activation, pending) = projection.prepare_owner(7, 11, source, Some(old_activation)).unwrap();
+            assert!(pending);
+            assert_ne!(activation, old_activation);
+            assert!(projection.search(&request(11, "oldneedle")).unwrap().is_empty());
+            assert_eq!(projection.search(&request(12, "foreignneedle")).unwrap().len(), 1);
+            assert_eq!(gram_row_count(&projection, 11), 0);
+            let mut tx = projection.database.begin(7, 11).unwrap();
+            assert_eq!(generation_dictionary::lookup(&projection.database, &mut tx,
+                &generation_digest("local", "g")).unwrap(), None);
+            assert_eq!(read_usage(&projection.database, &mut tx).unwrap(), 0);
+            drop(tx);
+            drop(projection);
+            let mut projection = OpenTurnSearchProjection::open(directory.path(), BUDGET).unwrap();
+            assert_eq!(projection.prepare_owner(7, 11, source, Some(old_activation)).unwrap(), (activation, true));
+            assert!(projection.acknowledge_owner_backfill(7, 11, source, old_activation).is_err());
+            replace(&mut projection, 11, "local", "new", 2, &[document("t", 1, "newneedle")]);
+            projection.acknowledge_owner_backfill(7, 11, source, activation).unwrap();
+            assert_eq!(projection.prepare_owner(7, 11, source, Some(activation)).unwrap(), (activation, false));
+            assert_eq!(projection.search(&request(11, "newneedle")).unwrap().len(), 1);
+        }
+    }
+
+    #[test]
     fn empty_headers_and_titles_consume_the_owner_budget_and_are_reclaimed() {
         let directory = tempdir().unwrap();
-        let mut projection = TurnSearchProjection::initialize(directory.path(), 4096).unwrap();
+        let mut projection = OpenTurnSearchProjection::initialize(directory.path(), 4096).unwrap();
         let mut inserted = 0;
         for index in 0..100 {
             let id = format!("header-{index}");
@@ -2335,7 +2394,7 @@ mod tests {
                 .unwrap();
             eprintln!("{} exclusion rows", rows.len());
         }
-        assert_eq!(leftover, 0);
+        assert_eq!(leftover, generation_dictionary::retained_counter_bytes(&projection.database, &mut transaction).unwrap());
         drop(transaction);
         projection
             .begin_conversation_rebuild(7, 11, "title", "g", 1)
@@ -2350,7 +2409,7 @@ mod tests {
     }
 
     fn gram_list_for(
-        projection: &TurnSearchProjection,
+        projection: &OpenTurnSearchProjection,
         owner: u64,
         gram: &str,
     ) -> io::Result<Option<GramList>> {
@@ -2367,7 +2426,7 @@ mod tests {
     }
 
     fn gram_contains(
-        projection: &TurnSearchProjection,
+        projection: &OpenTurnSearchProjection,
         owner: u64,
         gram: &str,
         conversation_id: &str,
@@ -2375,13 +2434,17 @@ mod tests {
     ) -> bool {
         let digest = generation_digest(conversation_id, generation);
         match gram_list_for(projection, owner, gram).unwrap() {
-            Some(GramList::Entries(entries)) => entries.contains(&digest),
+            Some(GramList::Entries(entries)) => {
+                let mut transaction = projection.database.begin(7, owner).unwrap();
+                generation_dictionary::lookup(&projection.database, &mut transaction, &digest)
+                    .unwrap().is_some_and(|id| entries.contains(&id))
+            },
             Some(GramList::Omni) => panic!("gram {gram} unexpectedly universal"),
             None => false,
         }
     }
 
-    fn set_gram_state(projection: &mut TurnSearchProjection, owner: u64, state: u8) {
+    fn set_gram_state(projection: &mut OpenTurnSearchProjection, owner: u64, state: u8) {
         let mut transaction = projection.database.begin(7, owner).unwrap();
         let stored_key = gram_state_key(&transaction).unwrap();
         projection
@@ -2391,7 +2454,7 @@ mod tests {
         projection.database.commit(transaction).unwrap();
     }
 
-    fn gram_row_count(projection: &TurnSearchProjection, owner: u64) -> usize {
+    fn gram_row_count(projection: &OpenTurnSearchProjection, owner: u64) -> usize {
         let mut transaction = projection.database.begin(7, owner).unwrap();
         let (start, end) = EntityKey::prefix_range(7, owner, GRAM_NAMESPACE, b"").unwrap();
         let mut total = 0;
@@ -2414,7 +2477,7 @@ mod tests {
     #[test]
     fn gram_postings_follow_the_generation_lifecycle() {
         let directory = tempdir().unwrap();
-        let mut projection = TurnSearchProjection::initialize(directory.path(), BUDGET).unwrap();
+        let mut projection = OpenTurnSearchProjection::initialize(directory.path(), BUDGET).unwrap();
         projection
             .begin_conversation_rebuild(7, 11, "conversation", "g1", 100)
             .unwrap();
@@ -2478,14 +2541,14 @@ mod tests {
         let mut transaction = projection.database.begin(7, 11).unwrap();
         assert_eq!(
             read_usage(&projection.database, &mut transaction).unwrap(),
-            0
+            generation_dictionary::retained_counter_bytes(&projection.database, &mut transaction).unwrap()
         );
     }
 
     #[test]
     fn unfinished_build_postings_retract_on_rebuild() {
         let directory = tempdir().unwrap();
-        let mut projection = TurnSearchProjection::initialize(directory.path(), BUDGET).unwrap();
+        let mut projection = OpenTurnSearchProjection::initialize(directory.path(), BUDGET).unwrap();
         projection
             .begin_conversation_rebuild(7, 11, "conversation", "g1", 100)
             .unwrap();
@@ -2526,7 +2589,7 @@ mod tests {
         // Room for one conversation's content plus a bounded slice of its
         // postings; the emission must trip into DEGRADED, never overspend.
         let mut projection =
-            TurnSearchProjection::initialize(directory.path(), 12 * 1024).unwrap();
+            OpenTurnSearchProjection::initialize(directory.path(), 12 * 1024).unwrap();
         projection
             .begin_conversation_rebuild(7, 11, "conversation", "g", 100)
             .unwrap();
@@ -2569,7 +2632,7 @@ mod tests {
         let mut transaction = projection.database.begin(7, 11).unwrap();
         assert_eq!(
             read_usage(&projection.database, &mut transaction).unwrap(),
-            0,
+            generation_dictionary::retained_counter_bytes(&projection.database, &mut transaction).unwrap(),
             "retraction frees charged postings even after a degradation"
         );
     }
@@ -2577,7 +2640,7 @@ mod tests {
     #[test]
     fn common_gram_list_promotes_to_universal_and_search_stays_exact() {
         let directory = tempdir().unwrap();
-        let mut projection = TurnSearchProjection::initialize(directory.path(), BUDGET).unwrap();
+        let mut projection = OpenTurnSearchProjection::initialize(directory.path(), BUDGET).unwrap();
         for index in 0..(GRAM_LIST_MAX_ENTRIES + 5) {
             replace(
                 &mut projection,
@@ -2601,27 +2664,26 @@ mod tests {
     #[test]
     fn gram_list_codec_rejects_malformed_values() {
         let mut oversized = vec![FORMAT_VERSION, 0];
-        for _ in 0..=GRAM_LIST_MAX_ENTRIES {
-            oversized.extend_from_slice(&[7u8; 32]);
-        }
+        oversized.extend_from_slice(&posting_codec::encode(
+            &(1..=GRAM_LIST_MAX_ENTRIES as u64 + 1).collect::<Vec<_>>(), 8192,
+        ).unwrap());
         for raw in [
             vec![0],
             vec![FORMAT_VERSION],
             vec![FORMAT_VERSION, 2],
             vec![FORMAT_VERSION, 1, 0],
-            vec![FORMAT_VERSION, 0, 1],
+            vec![FORMAT_VERSION, 0, 1, 0],
             oversized,
         ] {
             assert!(decode_gram_list(&raw).is_err(), "accepted {raw:?}");
         }
-        let mut entries: Vec<[u8; 32]> =
-            (0..3u8).map(|i| [i; 32]).collect();
+        let mut entries = vec![1_u64, 2, 3];
         assert!(matches!(
-            decode_gram_list(&encode_gram_entries(&entries)).unwrap(),
+            decode_gram_list(&encode_gram_entries(&entries).unwrap()).unwrap(),
             GramList::Entries(_)
         ));
         entries.swap(0, 2);
-        assert!(decode_gram_list(&encode_gram_entries(&entries)).is_err());
+        assert!(encode_gram_entries(&entries).is_err());
     }
 
     fn diverse_document(turn_id: &str, ordinal: u64, seed: u64, chars: usize) -> TurnSearchDocument {
@@ -2644,7 +2706,7 @@ mod tests {
     #[test]
     fn overflowing_page_excludes_one_conversation_and_keeps_the_index() {
         let directory = tempdir().unwrap();
-        let mut projection = TurnSearchProjection::initialize(directory.path(), BUDGET).unwrap();
+        let mut projection = OpenTurnSearchProjection::initialize(directory.path(), BUDGET).unwrap();
         projection
             .begin_conversation_rebuild(7, 11, "huge", "g", 100)
             .unwrap();
@@ -2739,11 +2801,11 @@ mod tests {
         );
     }
 
-    fn prepared_simulated_projection(vfs: Arc<DeterministicVfs>) -> TurnSearchProjection {
+    fn prepared_simulated_projection(vfs: Arc<DeterministicVfs>) -> OpenTurnSearchProjection {
         vfs.create_dir(Path::new("/search")).unwrap();
         vfs.sync_directory(Path::new("/")).unwrap();
         let mut projection =
-            TurnSearchProjection::initialize_with_vfs(Path::new("/search"), vfs, BUDGET).unwrap();
+            OpenTurnSearchProjection::initialize_with_vfs(Path::new("/search"), vfs, BUDGET).unwrap();
         replace(
             &mut projection,
             11,
@@ -2774,7 +2836,7 @@ mod tests {
         vfs.arm_fault(None).unwrap();
         vfs.crash().unwrap();
         let projection =
-            TurnSearchProjection::open_with_vfs(Path::new("/search"), vfs, BUDGET).unwrap();
+            OpenTurnSearchProjection::open_with_vfs(Path::new("/search"), vfs, BUDGET).unwrap();
         let old = projection
             .search(&request(11, "old durable phrase"))
             .unwrap();
@@ -2832,6 +2894,62 @@ mod tests {
             assert_recovered_generation(vfs);
         }
     }
+    #[test]
+    fn gram_dense_rebuilds_stay_within_transaction_reference_boundary() {
+        let directory = tempdir().unwrap();
+        let mut projection = OpenTurnSearchProjection::initialize(directory.path(), 4 * 1024 * 1024 * 1024).unwrap();
+        let mut state = 0xd5a1_804b_56c2_9041_u64;
+        for index in 0..128_u64 {
+            let mut text = String::with_capacity(32 * 1024);
+            for _ in 0..32 * 1024 {
+                state ^= state << 13; state ^= state >> 7; state ^= state << 17;
+                text.push(b"0123456789abcdef"[(state & 15) as usize] as char);
+            }
+            if index >= 35 {
+                let root = projection.database.authority_state_root();
+                let mut leaves=0_u64;let mut leaf_bytes=0_u64;let mut posting_rows=0_u64;let mut posting_bytes=0_u64;let mut max_posting=0_usize;
+
+                let metrics=crate::entity::visit_entity_page_graph_with_values(
+                    root,
+                    |id| projection.database.read_block_for_test(id),
+                    |_, bytes| { if bytes.starts_with(b"TDBENT01") && bytes[12]==0 { leaves+=1;leaf_bytes+=bytes.len() as u64; } Ok(()) },
+                    |key, bytes| {
+                        if key.namespace()==GRAM_NAMESPACE {
+                            posting_rows+=1;posting_bytes+=bytes.len() as u64;max_posting=max_posting.max(bytes.len());
+                            decode_gram_list(bytes)?;
+                        }
+                        Ok(())
+                    },
+                ).unwrap();
+                eprintln!("dense_search_physical_tree before_conversation={index} pages={} leaves={leaves} leaf_bytes={leaf_bytes} posting_rows={posting_rows} posting_bytes={posting_bytes} max_posting_bytes={max_posting}",metrics.page_count);
+            }
+            let before = crate::fsync_stats::stage_calls(crate::fsync_stats::STAGE_STORE_PAGE);
+            let conversation = format!("dense-{index:04}");
+            projection.begin_conversation_rebuild(7, 11, &conversation, "g1", index + 1).unwrap();
+            let documents: Vec<_> = text.as_bytes().chunks(CHUNK_CHARACTERS).enumerate().map(|(chunk, bytes)| {
+                let mut value = document("t1", 1, std::str::from_utf8(bytes).unwrap());
+                value.chunk_index = chunk as u32;
+                value
+            }).collect();
+            let result = documents.chunks(8).try_for_each(|page| {
+                projection.append_conversation_page(7, 11, &conversation, "g1", page)
+            });
+            let pages = crate::fsync_stats::stage_calls(crate::fsync_stats::STAGE_STORE_PAGE) - before;
+            eprintln!("dense_search_reference_probe conversation={index} stored_pages={pages} append_error={:?}", result.as_ref().err());
+            result.unwrap_or_else(|error| panic!("dense conversation {index} failed after {pages} page stores: {error}"));
+            projection.finalize_conversation_rebuild(7, 11, &conversation, "g1").unwrap();
+        }
+        set_gram_state(&mut projection, 11, GRAM_STATE_READY);
+        assert_eq!(projection.search(&request(11, "dense-")).unwrap().len(), 50);
+        assert_eq!(projection.search(&request(11, "dense-0127")).unwrap().len(), 1);
+        projection.remove_conversation(7, 11, "dense-0127").unwrap();
+        assert!(projection.search(&request(11, "dense-0127")).unwrap().is_empty());
+        drop(projection);
+        let projection = OpenTurnSearchProjection::open(directory.path(), 4 * 1024 * 1024 * 1024).unwrap();
+        assert_eq!(projection.search(&request(11, "dense-0126")).unwrap().len(), 1);
+        assert!(projection.search(&request(11, "dense-0127")).unwrap().is_empty());
+    }
+
 }
 
 #[cfg(test)]
@@ -2842,7 +2960,7 @@ mod shutdown_checkpoint_tests {
     fn shutdown_checkpoint_retires_the_projection_wal_window() {
         let directory = tempfile::tempdir().unwrap();
         let mut projection =
-            super::TurnSearchProjection::initialize(directory.path(), 1 << 20).unwrap();
+            super::OpenTurnSearchProjection::initialize(directory.path(), 1 << 20).unwrap();
         let error = projection
             .checkpoint_wal_window_for_shutdown()
             .unwrap_err();
@@ -2859,4 +2977,8 @@ mod shutdown_checkpoint_tests {
         // Content survives its own checkpoint.
         assert!(projection.owner_indexing(7, 11).unwrap());
     }
+
 }
+
+// Public runtime owns capacity admission and retryable deferred opening.
+pub use crate::turn_search_runtime::TurnSearchProjection;

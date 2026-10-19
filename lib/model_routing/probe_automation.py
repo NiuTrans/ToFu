@@ -8,7 +8,7 @@ import copy
 import time
 
 from lib.identity import PrincipalContext
-from lib import provider_probe as probe
+from lib.provider import provider_probe as probe
 from .authorization_diff import (
     derive_cell_state,
     derive_proposed_authorizations,

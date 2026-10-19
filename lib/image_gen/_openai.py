@@ -7,7 +7,7 @@ Extracted verbatim from the former flat ``lib/image_gen.py``:
 
 import time
 
-from lib.http_client import http_post
+from lib.http_transport.client import http_post
 from lib.log import get_logger
 
 from ._errors import _IMAGE_GEN_BASE_DEFAULT, _HttpError, _RateLimitError, _download_image

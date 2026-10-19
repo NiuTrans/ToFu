@@ -655,3 +655,35 @@ fn retained_reclamation_advances_beyond_a_full_page_of_pinned_builds() {
     retry["receipt"]["document_id"] = json!("f".repeat(64));
     retained_call(&mut db,"paper.artifact.prepare",retry,301003).unwrap();
 }
+
+#[test]
+fn research_workspace_large_source_round_trip_reopen_and_revision_cas() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut db = AuthorityDatabase::initialize(directory.path()).unwrap();
+    let workspace = json!({"source_files":[{"path":"main.tex","content":"x".repeat(9 * 1024 * 1024)}]});
+    let payload = json!({"user_id":11,"paper_hash":"large-source-demand","lang":"en",
+        "updated_at":2,"expected_revision":0,"workspace":workspace});
+    let saved = retained_call(&mut db, "research.workspace.put", payload.clone(), 1000).unwrap();
+    assert_eq!(saved["revision"], 1);
+    assert_eq!(saved["workspace"], workspace);
+    assert!(retained_call(&mut db, "research.workspace.put", payload, 1001).is_err());
+    drop(db);
+    let mut db = AuthorityDatabase::open(directory.path()).unwrap();
+    let loaded = retained_call(&mut db, "research.workspace.get",
+        json!({"user_id":11,"paper_hash":"large-source-demand","lang":"en"}),1002).unwrap();
+    assert_eq!(loaded["workspace"], workspace);
+    assert_eq!(loaded["revision"], 1);
+    let foreign = retained_call(&mut db, "research.workspace.get",
+        json!({"user_id":12,"paper_hash":"large-source-demand","lang":"en"}),1003).unwrap();
+    assert!(foreign.is_null());
+}
+
+#[test]
+fn retained_receipt_accepts_large_artifact_demand_and_rejects_extent_overflow() {
+    let (_, mut receipt) = retained_fixture(11, '1', b"pdf");
+    receipt["artifacts"][0]["size_bytes"] = json!(129u64 * 1024 * 1024);
+    let retained = crate::paper_build_receipt::validate(&receipt).unwrap();
+    assert!(retained > 129 * 1024 * 1024);
+    receipt["artifacts"][0]["size_bytes"] = json!(u64::MAX);
+    assert!(crate::paper_build_receipt::validate(&receipt).is_err());
+}

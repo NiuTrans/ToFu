@@ -7,7 +7,7 @@ import subprocess
 
 import pytest
 
-from lib.agent_loop import AbortSignal, run_agent_loop
+from lib.agent_loop.agent_loop import AbortSignal, run_agent_loop
 from lib.paper.agent_usage import PaperAgentUsageMeter
 from lib.research.execution_owner import ActionExecutionOwners, NAMESPACE, HEAD_NAMESPACE, HISTORY_NAMESPACE
 from lib.research.loop_checkpoint import LoopCheckpoints

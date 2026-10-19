@@ -1737,7 +1737,7 @@ def test_classifier_excludes_legacy_prompt_context_overflow(host_tmp_path):
         encoding="utf-8",
     )
     (trial_dir / "exception.txt").write_text(
-        "lib.llm_errors.PromptTooLongError: maximum context length",
+        "lib.llm.llm_errors.PromptTooLongError: maximum context length",
         encoding="utf-8",
     )
     trial = {

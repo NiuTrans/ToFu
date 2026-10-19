@@ -1,4 +1,4 @@
-"""Regression: ``lib.search_bridge.sync_search_config`` must forward the
+"""Regression: ``lib.search.search_bridge.sync_search_config`` must forward the
 tofu-search 0.3.2 pre-fetch-gate knobs and the 0.4.1 adaptive-proxy knob to
 ``tofu_search.configure``.
 
@@ -38,7 +38,7 @@ _LIB_STUB = {
 
 def _capture_configure_kwargs(monkeypatch, env=None):
     """Run sync_search_config with a stubbed _lib + captured configure()."""
-    import lib.search_bridge as sb
+    import lib.search.search_bridge as sb
 
     for k, v in _LIB_STUB.items():
         monkeypatch.setattr(sb._lib, k, v, raising=False)
@@ -110,7 +110,7 @@ class TestSyncSearchConfigKnobs:
                            env=None):
         """sync_search_config with a stubbed pool + primary proxy."""
         import lib.proxy as lp
-        import lib.search_bridge as sb
+        import lib.search.search_bridge as sb
 
         for k, v in _LIB_STUB.items():
             monkeypatch.setattr(sb._lib, k, v, raising=False)
@@ -168,7 +168,7 @@ class TestSyncSearchConfigKnobs:
 
     def test_prefetch_gate_disabled_via_lib_flag(self, monkeypatch):
         # PREFETCH_GATE_ENABLED env absent → falls back to _lib attribute.
-        import lib.search_bridge as sb
+        import lib.search.search_bridge as sb
         monkeypatch.setattr(sb._lib, 'PREFETCH_GATE_ENABLED', False, raising=False)
         cap = _capture_configure_kwargs(monkeypatch)
         # (helper re-sets the stub True, so override AFTER)
@@ -181,7 +181,7 @@ class TestSyncSearchConfigKnobs:
 def test_gate_adapter_preserves_irrelevant_verdict_and_bounds_provider_work(
         monkeypatch):
     """The sentinel is semantic output, so it must not also be a wire stop."""
-    import lib.search_bridge as sb
+    import lib.search.search_bridge as sb
 
     captured = {}
 
@@ -210,7 +210,7 @@ def test_gate_adapter_preserves_irrelevant_verdict_and_bounds_provider_work(
 def test_rewrite_adapter_keeps_long_output_budget_and_unrelated_stops(
         monkeypatch):
     """Only the verdict sentinel and gate output budget are specialized."""
-    import lib.search_bridge as sb
+    import lib.search.search_bridge as sb
 
     captured = {}
 

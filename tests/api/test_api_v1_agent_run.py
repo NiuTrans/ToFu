@@ -95,7 +95,7 @@ class AgentRunRouteTest(unittest.TestCase):
         # leaked count (e.g. test_admission's unbounded 1000) regardless of
         # run order — otherwise the cap-64 controller reads a polluted
         # in_flight and 503s every request.
-        import lib.runtime_state_store as rss
+        import lib.runtime.runtime_state_store as rss
         rss.reset_for_test()
 
         # Stub spawn_task so the orchestrator doesn't try to call out.
@@ -120,7 +120,7 @@ class AgentRunRouteTest(unittest.TestCase):
         pkg.spawn_task = self._orig_spawn
         # Leave the shared runtime_state_store clean so this suite never
         # leaks an in-flight count forward to whatever runs next.
-        import lib.runtime_state_store as rss
+        import lib.runtime.runtime_state_store as rss
         rss.reset_for_test()
 
     # ── Providers CRUD ──────────────────────────────────────────────

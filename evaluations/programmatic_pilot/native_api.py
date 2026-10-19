@@ -10,16 +10,15 @@ from __future__ import annotations
 import argparse
 import asyncio
 import copy
-import ipaddress
 import json
 import os
 from pathlib import Path
 import re
 import time
 from types import SimpleNamespace
-from urllib import error, parse, request
 import uuid
 
+from evaluations.application_api import JsonAPI
 from lib.agent_core.run_contract import project_agent_event_evidence
 from .runner import (
     ARMS, ARTIFACT_LIMIT_BYTES, paired_report, preflight,
@@ -28,43 +27,6 @@ from .runner import (
 from .workloads import Workload as Workload, canonical as canonical, workload_pack as workload_pack, workloads as workloads
 
 TERMINAL = {'done', 'error', 'aborted', 'interrupted'}
-
-
-class _NoRedirect(request.HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        raise error.HTTPError(req.full_url, code, 'Redirect refused', headers, fp)
-
-
-class JsonAPI:
-    def __init__(self, origin, *, token=None):
-        parts = parse.urlsplit(origin)
-        try:
-            loopback = ipaddress.ip_address(parts.hostname or '').is_loopback
-            port = parts.port
-        except ValueError as exc:
-            raise ValueError('Use an explicit loopback IP origin') from exc
-        if (parts.scheme not in {'http', 'https'} or not loopback
-                or parts.username or parts.password or parts.query or parts.fragment
-                or parts.path not in {'', '/'} or port == 0):
-            raise ValueError('Use an HTTP(S) loopback IP origin without credentials/path')
-        self.origin = origin.rstrip('/')
-        self.headers = {'Content-Type': 'application/json', 'User-Agent': 'Tofu-PTC-Pilot/1'}
-        if token:
-            self.headers['Authorization'] = 'Bearer ' + token
-        self.opener = request.build_opener(_NoRedirect())
-
-    def call(self, path, body=None):
-        req = request.Request(self.origin + path,
-            data=canonical(body).encode() if body is not None else None,
-            headers=self.headers, method='POST' if body is not None else 'GET')
-        with self.opener.open(req, timeout=10) as response:
-            raw = response.read(ARTIFACT_LIMIT_BYTES + 1)
-        if len(raw) > ARTIFACT_LIMIT_BYTES:
-            raise ValueError('HTTP evidence exceeds artifact ceiling')
-        payload = json.loads(raw)
-        if not isinstance(payload, dict) or not isinstance(payload.get('data'), dict):
-            raise ValueError('Expected a native v4 response envelope')
-        return payload['data']
 
 
 class HTTPExecution:
@@ -389,7 +351,7 @@ def main(argv=None):
     token = os.environ.get(args.api_token_env, '') if args.api_token_env else None
     if args.api_token_env and not token:
         parser.error('Named API-token environment variable is empty')
-    api = JsonAPI(args.origin, token=token)
+    api = JsonAPI(args.origin, token=token, maximum_bytes=ARTIFACT_LIMIT_BYTES)
     price_card = json.loads(args.price_card.read_text()) if args.price_card else None
     usage_cost({}, price_card)
     asyncio.run(live_run(api, {'creator_id':args.creator,'model_id':args.model},

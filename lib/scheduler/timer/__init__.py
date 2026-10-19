@@ -36,10 +36,9 @@ from ._state import (  # noqa: E402,F401
     _timers_lock,
 )
 
-# ── CRUD + resume guardrails ────────────────────────────────────────────────
+# ── Owner-scoped CRUD ────────────────────────────────────────────────
 from ._crud import (  # noqa: E402,F401
     _get_timer_row,
-    _resume_max_age_seconds,
     cancel_timer,
     create_timer,
     force_trigger_timer,

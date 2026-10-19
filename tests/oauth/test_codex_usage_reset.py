@@ -95,7 +95,7 @@ def test_refresh_reads_authenticated_usage_and_details_into_private_cache(
              }, {}),
          ) as resolve, \
          mock.patch("lib.desktop.egress.route_request", return_value="direct"), \
-         mock.patch("lib.http_client.http_get",
+         mock.patch("lib.http_transport.client.http_get",
                     side_effect=[usage, details]) as get:
         status = codex_usage.refresh_codex_usage_reset(
             user_id="owner-7", force=True, now=1_800_000_000)
@@ -138,7 +138,7 @@ def test_zero_is_explicit_none_and_skips_detail_request():
          ), \
          mock.patch("lib.desktop.egress.route_request", return_value="direct"), \
          mock.patch(
-             "lib.http_client.http_get",
+             "lib.http_transport.client.http_get",
              return_value=_Response({
                  "rate_limit_reset_credits": {"available_count": 0},
              }),
@@ -160,7 +160,7 @@ def test_successful_usage_without_reset_field_stays_unknown_not_zero():
          ), \
          mock.patch("lib.desktop.egress.route_request", return_value="direct"), \
          mock.patch(
-             "lib.http_client.http_get",
+             "lib.http_transport.client.http_get",
              return_value=_Response({
                  "primary_window": {"resets_at": 1_900_000_000},
              }),
@@ -291,9 +291,9 @@ def test_credit_expiry_requires_an_explicit_timezone():
         "2030-02-01T08:00:00+08:00") == 1_896_134_400
 
 
-def test_cache_rows_and_entry_count_are_hard_bounded(_private_cache):
+def test_cache_retains_all_valid_identity_rows_without_count_truncation(_private_cache):
     entries = {}
-    for index in range(30):
+    for index in range(1200):
         identity = codex_usage._identity(
             _token(f"account-{index}"), f"owner-{index}")
         assert identity is not None
@@ -306,8 +306,8 @@ def test_cache_rows_and_entry_count_are_hard_bounded(_private_cache):
     codex_usage._write_entries(entries)
 
     persisted = json.loads(_private_cache.read_text(encoding="utf-8"))
-    assert len(persisted["entries"]) == 16
-    assert len(codex_usage._read_entries()) == 16
+    assert len(persisted["entries"]) == 1200
+    assert len(codex_usage._read_entries()) == 1200
 
 
 def test_different_owner_refreshes_do_not_share_a_network_lock_or_lose_rows():
@@ -333,18 +333,17 @@ def test_different_owner_refreshes_do_not_share_a_network_lock_or_lose_rows():
     assert len(codex_usage._read_entries()) == 2
 
 
-def test_refresh_lock_sidecars_are_bounded_across_account_churn():
-    paths = set()
+def test_refresh_identity_lock_artifacts_retire_after_account_churn(_private_cache):
+    from lib.oauth.identity_flight import identity_flight
     for index in range(100):
-        identity = codex_usage._identity(
-            _token(f"account-{index}"), f"owner-{index}")
-        assert identity is not None
-        paths.add(codex_usage._refresh_lock_path(identity["cache_key"]))
+        identity = codex_usage._identity(_token(f'account-{index}'), f'owner-{index}')
+        with identity_flight(str(_private_cache), identity['cache_key']):
+            pass
+    assert not list(_private_cache.parent.glob('*.flight.active.*'))
+    assert len(list(_private_cache.parent.glob('*.flight.guard'))) == 1
 
-    assert len(paths) <= 16
 
-
-def test_daemon_capacity_is_bounded_per_owner_account(monkeypatch):
+def test_refresh_deduplicates_same_identity_and_accepts_independent_owners(monkeypatch):
     started = threading.Event()
     release = threading.Event()
 
@@ -360,12 +359,12 @@ def test_daemon_capacity_is_bounded_per_owner_account(monkeypatch):
     assert started.wait(timeout=5)
     assert codex_usage.trigger_codex_usage_reset_refresh(user_id="owner") is False
     assert codex_usage.trigger_codex_usage_reset_refresh(user_id="owner-2") is True
-    assert codex_usage.trigger_codex_usage_reset_refresh(user_id="owner-3") is False
+    assert codex_usage.trigger_codex_usage_reset_refresh(user_id="owner-3") is True
     release.set()
     deadline = time.monotonic() + 5
     identities = [
         codex_usage._identity(_token(), owner)
-        for owner in ("owner", "owner-2")
+        for owner in ("owner", "owner-2", "owner-3")
     ]
     assert all(identity is not None for identity in identities)
     while any(codex_usage._is_refreshing(identity["cache_key"])
@@ -444,20 +443,28 @@ def test_completion_push_failure_cannot_strand_refresh_state(monkeypatch):
         time.sleep(0.01)
 
 
-def test_capacity_deferral_returns_a_bounded_retry_hint():
+def test_status_starts_refresh_even_with_two_independent_queries_active(monkeypatch):
+    entered, release = threading.Event(), threading.Event()
+    def refresh(**kwargs):
+        entered.set()
+        assert release.wait(5)
+        return {'state':'none'}
+    monkeypatch.setattr(codex_usage, 'refresh_codex_usage_reset', refresh)
+    monkeypatch.setattr('lib.oauth.token_store.load_token', lambda p:_token())
     with codex_usage._state_lock:
-        codex_usage._refreshing_keys.update({"occupied-a", "occupied-b"})
+        codex_usage._refreshing_keys.update({'occupied-a','occupied-b'})
     try:
-        with mock.patch("lib.oauth.token_store.load_token",
-                        return_value=_token()):
-            status = codex_usage.codex_usage_reset_status(
-                user_id="waiting-owner", now=1000)
+        status = codex_usage.codex_usage_reset_status(user_id='waiting-owner',now=1000)
+        assert entered.wait(2)
+        assert status['refreshing']
+        assert 'retry_after_seconds' not in status
     finally:
-        codex_usage._reset_codex_usage_state_for_tests()
-
-    assert status["state"] == "unknown"
-    assert status["refreshing"] is False
-    assert status["retry_after_seconds"] == 5
+        release.set()
+        identity = codex_usage._identity(_token(),'waiting-owner')
+        deadline = time.monotonic()+3
+        while codex_usage._is_refreshing(identity['cache_key']):
+            assert time.monotonic()<deadline
+            time.sleep(0.005)
 
 
 def test_status_read_discards_a_projection_when_account_changes_mid_read():
@@ -1102,3 +1109,140 @@ def test_forced_refresh_despite_fresh_entry_records_quota_snapshot(
     assert quota is not None
     assert quota["captured_at"] == 1060
     assert quota["primary"]["used_percent"] == 30.0
+
+
+def test_thirty_two_blocked_refreshes_do_not_refuse_healthy_thirty_third(monkeypatch):
+    entered, release, healthy = threading.Condition(), threading.Event(), threading.Event()
+    identities = set()
+    threads = []
+    start = threading.Thread.start
+    def capture(thread):
+        if thread.name.startswith('codex-usage-reset-'):
+            threads.append(thread)
+        return start(thread)
+    monkeypatch.setattr(threading.Thread, 'start', capture)
+    monkeypatch.setattr('lib.oauth.token_store.load_token', lambda p:_token())
+    monkeypatch.setattr(codex_usage, '_publish_codex_usage_reset_update', lambda **kwargs:None)
+    def refresh(*, user_id, **kwargs):
+        if user_id=='healthy':healthy.set();return {'state':'none'}
+        with entered:
+            identities.add(user_id)
+            entered.notify_all()
+        assert release.wait(10)
+        return {'state':'none'}
+    monkeypatch.setattr(codex_usage, 'refresh_codex_usage_reset', refresh)
+    try:
+        for n in range(32):
+            assert codex_usage.trigger_codex_usage_reset_refresh(user_id=f'owner-{n}')
+        with entered:assert entered.wait_for(lambda:len(identities)==32,3)
+        assert codex_usage.trigger_codex_usage_reset_refresh(user_id='healthy')
+        assert healthy.wait(2)
+        assert not release.is_set()
+        assert not codex_usage.trigger_codex_usage_reset_refresh(user_id='owner-0')
+    finally:
+        release.set()
+        for thread in threads:thread.join(3)
+    assert not any(thread.is_alive() for thread in threads)
+    assert not codex_usage._refreshing_keys
+
+
+@pytest.mark.parametrize('partial', [False, True])
+def test_failed_refresh_start_releases_identity_without_query_or_publication(monkeypatch, partial):
+    start = threading.Thread.start
+    threads, queries, pushes = [], [], []
+    monkeypatch.setattr('lib.oauth.token_store.load_token', lambda p:_token())
+    monkeypatch.setattr(codex_usage, 'refresh_codex_usage_reset', lambda **kw:queries.append(kw) or {'state':'none'})
+    monkeypatch.setattr(codex_usage, '_publish_codex_usage_reset_update', lambda **kw:pushes.append(kw))
+    def fail(thread):
+        if thread.name.startswith('codex-usage-reset-'):
+            threads.append(thread)
+            if partial:start(thread)
+            raise RuntimeError('injected refresh startup failure')
+        return start(thread)
+    monkeypatch.setattr(threading.Thread, 'start', fail)
+    with pytest.raises(RuntimeError, match='startup'):
+        codex_usage.trigger_codex_usage_reset_refresh(user_id='owner')
+    for thread in threads:
+        if thread.ident is not None:thread.join(2)
+    assert queries==pushes==[]
+    assert not codex_usage._refreshing_keys
+    monkeypatch.setattr(threading.Thread, 'start', start)
+    assert codex_usage.trigger_codex_usage_reset_refresh(user_id='owner')
+    deadline=time.monotonic()+2
+    while codex_usage._refreshing_keys:
+        assert time.monotonic()<deadline
+        time.sleep(0.005)
+    assert len(queries)==len(pushes)==1
+
+
+def test_ambiguous_redeem_key_survives_thousand_identity_churn():
+    request_ids=[]
+    def post(url,payload,**kwargs):
+        request_ids.append(payload['redeem_request_id'])
+        raise RuntimeError('injected ambiguous transport failure')
+    patches=_consume_mocks(_details_payload('credit-1'),post_side_effect=post)
+    with patches[0],patches[1],patches[2],patches[3],patches[4]:
+        first=codex_usage.consume_codex_usage_reset(user_id='owner',now=1000)
+        assert first['error']=='unresolved'
+        entries=codex_usage._read_entries()
+        for n in range(1200):
+            identity=codex_usage._identity(_token(f'other-{n}'),f'owner-{n}')
+            entries[identity['cache_key']]={**identity,'state':'none','available_count':0,'captured_at':1001+n}
+        codex_usage._write_entries(entries,now=3000)
+        assert len(codex_usage._read_entries())==1201
+        second=codex_usage.consume_codex_usage_reset(user_id='owner',now=3010)
+        assert second['error']=='unresolved'
+    assert len(request_ids)==2
+    assert request_ids[0]==request_ids[1]
+
+
+def test_expired_observations_reclaim_without_dropping_pending_evidence():
+    now=200_000
+    rows={}
+    for name,state in [('old-none','none'),('old-unknown','unknown'),('pending','unknown'),('available','available'),('expired-positive','available'),('fresh','none')]:
+        identity=codex_usage._identity(_token(name),'owner')
+        row={**identity,'state':state,'available_count':1 if state=='available' else (0 if state=='none' else None),'captured_at':1}
+        if name=='pending':row['pending_redeem']={'credit_id':'credit','redeem_request_id':'preserved-key','created_at':1}
+        if name=='expired-positive':row['expires_at']=now-1
+        if name=='fresh':row['captured_at']=now-1
+        rows[identity['cache_key']]=row
+    codex_usage._write_entries(rows,now=now)
+    restored=codex_usage._read_entries()
+    retained={name:codex_usage._identity(_token(name),'owner')['cache_key'] for name in ('pending','available','fresh')}
+    assert set(restored)==set(retained.values())
+    assert restored[retained['pending']]['pending_redeem']['redeem_request_id']=='preserved-key'
+    assert codex_usage.clear_codex_usage_reset_cache(owner_user_id='owner')==3
+    assert codex_usage._read_entries()=={}
+
+
+def test_real_forced_refresh_preserves_ambiguous_redemption_record(monkeypatch):
+    ids=[]
+    monkeypatch.setattr('lib.oauth.token_store.load_token',lambda provider:_token())
+    monkeypatch.setattr(codex_usage,'_authenticated_get',lambda url,**kwargs:
+        {'rate_limit_reset_credits':{'available_count':1}} if url==codex_usage._codex_usage_url() else _details_payload('credit-1'))
+    def post(url,payload,**kwargs):
+        ids.append(payload['redeem_request_id'])
+        raise RuntimeError('injected ambiguous response')
+    monkeypatch.setattr(codex_usage,'_authenticated_post',post)
+    monkeypatch.setattr(codex_usage,'_publish_codex_usage_reset_update',lambda **kwargs:None)
+    first=codex_usage.consume_codex_usage_reset(user_id='owner',now=1000)
+    assert first['error']=='unresolved'
+    identity=codex_usage._identity(_token(),'owner')
+    assert codex_usage._read_entries()[identity['cache_key']]['pending_redeem']['redeem_request_id']==ids[0]
+    second=codex_usage.consume_codex_usage_reset(user_id='owner',now=1010)
+    assert second['error']=='unresolved'
+    assert ids[0]==ids[1]
+    assert codex_usage._read_entries()[identity['cache_key']]['pending_redeem']['redeem_request_id']==ids[0]
+
+
+@pytest.mark.parametrize('corrupt', ['not JSON', '{"schema_version":99,"entries":[]}', '{"schema_version":1,"entries":{}}', '{"schema_version":1,"entries":["invalid-row"]}'])
+def test_unreadable_existing_evidence_prevents_post_and_is_not_overwritten(_private_cache,corrupt):
+    from lib.json_store import JsonStoreReadError
+    _private_cache.parent.mkdir(parents=True,exist_ok=True)
+    _private_cache.write_text(corrupt,encoding='utf-8')
+    patches=_consume_mocks(_details_payload('credit-1'),post_response=_Response({'code':'reset'}))
+    with patches[0],patches[1],patches[2] as post,patches[3],patches[4]:
+        with pytest.raises(JsonStoreReadError):
+            codex_usage.consume_codex_usage_reset(user_id='owner',now=1000)
+        post.assert_not_called()
+    assert _private_cache.read_text(encoding='utf-8')==corrupt

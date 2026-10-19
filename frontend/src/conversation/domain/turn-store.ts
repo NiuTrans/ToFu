@@ -21,6 +21,10 @@ export type {
   TurnSnapshotInput,
   TurnState,
   TurnStateUpdate,
+  TurnStateChanges,
   TurnStore,
   TurnStoreOptions,
 } from '../../core/turn-state';
+
+// Bulk reads preserve record order without reflection over sharded indexes.
+export { entityRecordValues, entityRecordEntries, entityRecordKeys } from '../../core/entity-record';

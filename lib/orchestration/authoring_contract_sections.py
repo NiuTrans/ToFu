@@ -38,7 +38,7 @@ from lib.orchestration.request_limit_contract import request_limits_contract
 from lib.orchestration.run_status import run_status_contract
 from lib.orchestration.runtime_wire_contracts import runtime_start_contract
 from lib.orchestration.trace import trace_contract
-from lib.task_replay import task_replay_contract
+from lib.task_replay.task_replay import task_replay_contract
 
 
 def execution_options_contract() -> dict:

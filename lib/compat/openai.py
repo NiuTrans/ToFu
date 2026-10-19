@@ -87,6 +87,8 @@ def translate_openai_request(body: dict) -> tuple[list[dict], dict, dict]:
         cfg['responseFormat'] = body['response_format']
     if 'user' in body:
         cfg['user'] = body['user']
+    if 'parallel_tool_calls' in body:
+        cfg['parallelToolCalls'] = body['parallel_tool_calls']
 
     apply_tools_and_personal_defaults(cfg, body)
 
@@ -106,6 +108,63 @@ def translate_openai_request(body: dict) -> tuple[list[dict], dict, dict]:
 
 
 # ── Response translation (sync) ────────────────────────────────────
+
+def validate_client_tools(body: dict) -> tuple[list, object]:
+    """Validate client declarations without resolving any server tool handler."""
+    tools = body.get('tools')
+    if not isinstance(tools, list):
+        raise ValueError('tools must be an array')
+    names = set()
+    for tool in tools:
+        function = tool.get('function') if isinstance(tool, dict) else None
+        if not isinstance(function, dict) or tool.get('type') != 'function':
+            raise ValueError('client tools must be function declarations')
+        name = function.get('name')
+        if not isinstance(name, str) or not name or name in names:
+            raise ValueError('client tool names must be nonempty and unique')
+        parameters = function.get('parameters')
+        if parameters is not None and not isinstance(parameters, dict):
+            raise ValueError('client tool parameters must be a schema object')
+        names.add(name)
+    choice = body.get('tool_choice')
+    if choice is not None and choice not in ('auto', 'none', 'required'):
+        function = choice.get('function') if isinstance(choice, dict) else None
+        if (not isinstance(function, dict) or choice.get('type') != 'function'
+                or not isinstance(function.get('name'), str)
+                or function.get('name') not in names):
+            raise ValueError('tool_choice must name a declared client tool')
+    if not tools and choice not in (None, 'auto', 'none'):
+        raise ValueError('tool_choice requires declared client tools')
+    if body.get('n', 1) != 1:
+        raise ValueError('only n=1 is supported')
+    return tools, choice
+
+
+def project_completion_usage(usage: dict) -> dict:
+    """Preserve provider counters without exporting private dispatch metadata."""
+    prompt = int(usage.get('prompt_tokens') or usage.get('input_tokens') or 0)
+    completion = int(usage.get('completion_tokens') or usage.get('output_tokens') or 0)
+    public_usage = {key: value for key, value in usage.items() if not key.startswith('_')}
+    public_usage.update(prompt_tokens=prompt, completion_tokens=completion,
+                        total_tokens=int(usage.get('total_tokens') or prompt + completion))
+    return public_usage
+
+
+def build_direct_openai_response(result, *, model, completion_id, created):
+    """Project a verified single provider response after shared settlement."""
+    from lib.llm.stream_result import require_verified_provider_stream_result
+    require_verified_provider_stream_result(result, context='client-tool completion')
+    message = {key: result.message[key] for key in
+               ('role', 'content', 'tool_calls', 'reasoning_content') if key in result.message}
+    message.setdefault('role', 'assistant')
+    message.setdefault('content', None)
+    return {
+        'id': completion_id, 'object': 'chat.completion', 'created': created,
+        'model': model, 'choices': [{'index': 0, 'message': message,
+                                   'finish_reason': _openai_finish_reason(result.provider_finish_reason)}],
+        'usage': project_completion_usage(result.usage or {}),
+    }
+
 
 def _assistant_message(task: dict) -> dict:
     # Deliverable = narration-free answer from the segment model (epic
@@ -168,7 +227,7 @@ async def stream_openai_chunks(task, model: str, requested_id: str = '',
     emitted_role = False
     cursor = 0
     task_id = task.get('id') or ''
-    from lib.task_replay import task_memory_replay_page
+    from lib.task_replay.task_replay import task_memory_replay_page
 
     try:
       while True:

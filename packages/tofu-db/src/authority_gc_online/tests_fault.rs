@@ -168,6 +168,10 @@ fn rewrite_seed(checkpoint: bool) -> RewriteSeed {
     let (live_payload, dead_payload) = two_payloads_in_one_shard();
     let (live_id, dead_id, victim_segment) = {
         let mut database_guard = database.lock().unwrap();
+        // This campaign isolates one explicit partially-live payload segment.
+        // Start from a materialized entity root so retired overlay-cursor pages
+        // cannot become another rewrite victim ahead of the injected segment.
+        database_guard.set_write_overlay_for_test(false);
         let mut transaction = database_guard.begin(7, 11).unwrap();
         database_guard
             .entity_put(&mut transaction, key.clone(), b"live-value".to_vec())
@@ -179,14 +183,14 @@ fn rewrite_seed(checkpoint: bool) -> RewriteSeed {
         let dead_id = database_guard
             .write_orphan_block_for_test(&dead_payload)
             .unwrap();
-        database_guard
-            .compact_payload_blocks_for_test(&[live_id, dead_id])
-            .unwrap();
+        let packed = database_guard.engine_mut_for_test()
+            .compact_payload_blocks(&[live_id, dead_id]).unwrap();
         if checkpoint {
             database_guard.checkpoint_for_test().unwrap();
         }
-        let victim_segment =
-            database_guard.engine_mut_for_test().payload_segment_references()[0].segment_id;
+        // The target is the segment actually packed above, independent of
+        // entity-page IDs and any checkpoint-created catalog ordering.
+        let victim_segment = packed.segment_id;
         (live_id, dead_id, victim_segment)
     };
     drop(database);
@@ -566,11 +570,9 @@ fn online_gc_rewrite_old_segment_removal_fault_preserves_live_blocks() {
     // the unlink belongs to the deferred-retirement sweep, not the epoch.
     {
         let mut database_guard = database.lock().unwrap();
-        assert_ne!(
-            database_guard.engine_mut_for_test().payload_segment_references()[0].segment_id,
-            seed.victim_segment,
-            "replacement is the catalog member"
-        );
+        assert!(!database_guard.engine_mut_for_test().payload_segment_references().iter()
+            .any(|reference| reference.segment_id == seed.victim_segment),
+            "the actual victim must be replaced in the catalog");
     }
     // Arm the sweep's unlink of the parked victim to fail.
     vfs.arm_operation_fault(

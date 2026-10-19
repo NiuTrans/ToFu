@@ -443,7 +443,7 @@ def is_oauth_provider(oauth: str) -> bool:
 
 
 def resolve_oauth_request(oauth: str, body: dict, extra_headers: dict | None,
-                          user_id: str = ''):
+                          user_id: str = '', *, expected_account_id: str | None = None, cache_affinity_key: str | None = None):
     """Resolve the live token + identity headers for a slot.
 
     Args:
@@ -465,7 +465,7 @@ def resolve_oauth_request(oauth: str, body: dict, extra_headers: dict | None,
             Request preparation preserves this typed sign-in cause without
             penalizing provider health or automatically retrying.
     """
-    from lib.llm_errors import SubscriptionLoginRequiredError
+    from lib.llm.llm_errors import SubscriptionLoginRequiredError
     hdrs = dict(extra_headers or {})
 
     if oauth == 'codex':
@@ -477,6 +477,9 @@ def resolve_oauth_request(oauth: str, body: dict, extra_headers: dict | None,
                                '(no valid OAuth token)')
         stored = load_token('codex') or {}
         account_id = stored.get('account_id', '')
+        if expected_account_id is not None and account_id != expected_account_id:
+            from lib.llm.llm_errors import SubscriptionCredentialUnavailableError
+            raise SubscriptionCredentialUnavailableError(reason='account_changed', credential_source='tofu_oauth', transient=False)
         hdrs['OpenAI-Beta'] = 'responses=experimental'
         hdrs['originator'] = _CODEX_ORIGINATOR
         from lib.oauth.codex_version import codex_user_agent
@@ -488,7 +491,7 @@ def resolve_oauth_request(oauth: str, body: dict, extra_headers: dict | None,
         # on every warm round with stable ids.  Hashing the internal conv/task
         # id keeps the upstream value non-identifying.
         from lib.llm.responses_outbound import responses_cache_affinity_key
-        cache_key = responses_cache_affinity_key(body)
+        cache_key = responses_cache_affinity_key(body) if cache_affinity_key is None else cache_affinity_key
         # Codex CLI 0.147 sends the SAME UUID value in all three headers and
         # in Responses ``prompt_cache_key``.  Do not create two merely-related
         # namespaces here: exact equality is the first-party contract.
@@ -836,7 +839,7 @@ def _upsert_oauth_provider(
                     # Resolve fresh exact identities from the maintained
                     # first-party recipe before staging an unknown supply.
                     from lib.model_routing.model_defaults import official_model_directory
-                    from lib.provider_template_recipes import load_provider_templates
+                    from lib.provider.provider_template_recipes import load_provider_templates
                     templates = [r for r in load_provider_templates() if r['key'] == 'openai' and r.get('category') == 'official']
                     directory = directory + [r for r in official_model_directory(templates)
                         if r['creator_id'] == 'openai' and r['model_id'] in missing_ids]
@@ -878,13 +881,24 @@ def _upsert_oauth_provider(
                         catalog_window = incoming.get('context_window')
                         inherited = old.get('inherited_model_fields', [])
                         baseline_window = old.get('catalog_context_window')
-                        if 'context_window' in inherited:
+                        catalog_inherits_context = (
+                            'context_window' in incoming.get('inherited_model_fields', []))
+                        if 'context_window' in inherited and catalog_inherits_context:
                             row.pop('catalog_context_window', None)
-                        elif ('context_window' not in incoming.get('inherited_model_fields', [])
+                        elif (not catalog_inherits_context
                               and catalog_window is not None
                               and (not old or old.get('context_window') == catalog_window
+                                   or 'context_window' in inherited
                                    or (baseline_window is not None
                                        and old.get('context_window') == baseline_window))):
+                            # Inheritance is a missing-catalog fallback, not an
+                            # explicit provider override. A newly declared
+                            # supply window replaces it within the admitted
+                            # Model limit; subsequent refreshes track that
+                            # baseline without rewriting official Model facts.
+                            row['inherited_model_fields'] = [
+                                field for field in row.get('inherited_model_fields', [])
+                                if field != 'context_window']
                             row['context_window'] = catalog_window
                             row['catalog_context_window'] = catalog_window
                         elif baseline_window is not None:

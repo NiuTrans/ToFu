@@ -139,7 +139,9 @@ def restore_compacted_resume(task, config, rounds, *, fresh_messages=()):
             from lib.tasks_pkg.compaction._handoff import is_compaction_handoff
             if not any(is_compaction_handoff(message) for message in post):
                 return None
-            projected = deepcopy(post)
+            from lib.tasks_pkg.message_input_receipts import historical_swarm_context
+            projected = historical_swarm_context(
+                post, binding=task.get('_swarmMessageBinding'))
             projected.extend(_reconstruct_tool_call_messages(list(rounds[count:])) or [])
 
             # Hydration proves this tail follows unchanged current input.

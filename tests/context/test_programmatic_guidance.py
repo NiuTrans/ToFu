@@ -38,7 +38,7 @@ def test_guidance_recognizes_the_actual_or_admitted_action(source):
     assert count_text(text, model='gpt-4') <= injection_spec('programmatic_execution').max_tokens
     # Operations belong to the action schema; the context guide carries policy.
     action = execute_program_schema()['function']
-    interface = text + action['description'] + action['parameters']['properties']['code']['description']
+    interface = text + action['description'] + action['parameters']['properties']['code'].get('description', '')
     for operation in ('tools.invoke', 'tools.result', 'tools.inputs', 'tools.keep', 'tools.observe'):
         assert operation in interface
     assert 'programInput.read' in interface and 'jsonType' in interface
@@ -104,10 +104,21 @@ def test_explicit_off_is_authoritative_even_when_no_catalog_is_available(monkeyp
 
 
 def test_real_gateway_assembly_supplies_the_deferred_context_capability():
-    from lib.tasks_pkg.orchestrator._tool_assembly_prep import _attach_gateway_contract_documents
+    from lib.tasks_pkg.orchestrator._tool_assembly_prep import attach_gateway_contract_documents
     value = request(wire=['custom__read_dataset'])
     value.task['_toolContractDocumentsByName'] = {}
-    assert _attach_gateway_contract_documents(value.task, 'off') is True
+    assert attach_gateway_contract_documents(value.task, 'off') is True
     assert 'execute_program' in value.task['_tool_gateway_names']
     assert 'execute_program' not in value.tool_names
     assert providers._programmatic_guidance(value)
+
+
+@pytest.mark.parametrize('wire', [[], ['execute_tools'], ['execute_program']])
+def test_auto_never_injects_javascript_guidance_from_stale_capabilities(wire, monkeypatch):
+    monkeypatch.delenv('TOFU_PTC_TIER', raising=False)
+    assert providers._programmatic_guidance(request(mode='auto', wire=wire, admitted=True)) == ''
+
+
+def test_explicit_batch_override_withdraws_program_guidance(monkeypatch):
+    monkeypatch.setenv('TOFU_PTC_TIER', 'batch')
+    assert providers._programmatic_guidance(request(admitted=True)) == ''

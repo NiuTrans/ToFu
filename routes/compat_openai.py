@@ -42,7 +42,7 @@ from lib.idempotency import idempotent_post
 from lib.ids import short_id
 from lib.log import audit_log, get_logger
 from lib.openapi import media_responses, api_meta
-from lib.rate_limit_api import record_tokens
+from lib.rate_limit.rate_limit_api import record_tokens
 from lib.usage_tracker import record as record_usage
 from lib.request_parser import async_parse_body, parse_body
 
@@ -84,11 +84,19 @@ async def _wait_terminal(task, timeout_s: float):
               'Drop-in /v1/chat/completions endpoint. Set `base_url` to '
               'this server in the OpenAI SDK and use a Tofu API key.\n\n'
               'Streaming, tool_calls, vision content, response_format, '
-              'and reasoning_effort are all supported. The underlying '
-              'task gets a `task_id` you can poll via /api/v1/tasks/.'),
+              'and reasoning_effort are supported. Explicit `tools` (including []) '
+              'selects a single provider completion: the client executes tool_calls, '
+              'and X-Tofu-Request-Id identifies the request without a pollable Task. '
+              'Omitting tools retains the task-backed agent path and its task_id. '
+              'Use native /api/v4/chat/completions for server tools and task replay.'),
           tags=['compat:openai'], scope='chat')
 async def chat_completions():
     body = await async_parse_body()
+    if 'tools' in body:
+        # An OpenAI client owns declared tools, including an explicit empty
+        # catalog. Schema submission never authorizes server-side execution.
+        from routes.api_v1.chat_direct import serve_direct_completion
+        return await serve_direct_completion(body, compatibility=True)
     try:
         messages, cfg, options = translate_openai_request(body)
     except ValueError as e:

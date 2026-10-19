@@ -46,7 +46,7 @@ def test_tool_path_filter_keeps_result_and_metadata_consistent(tmp_path, monkeyp
     (tmp_path / 'selected').mkdir()
     (tmp_path / 'selected/module.js').write_text('function selectedSymbol() {}')
     (tmp_path / 'ignored.js').write_text('function outsideFilter() {}')
-    result, (metadata, status) = drive(monkeypatch, tmp_path, {'path': 'selected', 'max_tokens': 512})
+    result, (metadata, status) = drive(monkeypatch, tmp_path, {'path': 'selected'})
     assert not result[2] and status == 'done'
     assert 'selectedSymbol' in result[1] and 'outsideFilter' not in result[1]
     assert metadata[0]['stats']['files_total'] == metadata[0]['stats']['files_shown'] == 1
@@ -85,3 +85,23 @@ def test_scanner_denial_uses_existing_single_error_settlement(tmp_path, monkeypa
     result, (_, status) = drive(monkeypatch, tmp_path, scanner=denied)
     assert result[2] and status == 'error' and calls == [str(tmp_path)]
     assert 'foreign repository scope' in result[1]
+
+
+def test_tool_returns_all_scoped_files_and_definitions_for_shared_l0(tmp_path, monkeypatch):
+    for index in range(30):
+        (tmp_path / f'module_{index:02d}.py').write_text(''.join(
+            f'def symbol_{index}_{number}():\n    return {number}\n'
+            for number in range(25)))
+    result, (metadata, status) = drive(monkeypatch, tmp_path)
+    assert not result[2] and status == 'done'
+    text = result[1]
+    for index in range(30):
+        for number in range(25):
+            assert f'def symbol_{index}_{number}():' in text
+    assert len(text) > 2048 * 3
+    assert metadata[0]['stats']['files_shown'] == 30
+    assert metadata[0]['stats']['tags_shown'] == 750
+    assert metadata[0]['stats']['omitted'] == 0
+    # Retired arguments cannot secretly resurrect producer truncation.
+    legacy, _ = drive(monkeypatch, tmp_path, {'max_tokens': 1})
+    assert legacy[1] == text

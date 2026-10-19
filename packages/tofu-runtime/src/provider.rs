@@ -61,6 +61,7 @@ pub struct StreamResult {
     pub state: ProviderStreamState,
     pub message: Value,
     pub usage: Value,
+    pub cost: Option<Box<Value>>,
     pub finish_reason: Option<String>,
     pub done_seen: bool,
     pub malformed_frames: u64,
@@ -478,7 +479,23 @@ impl ChatStream {
             }
             let caller = call.caller;
             let extra_content = call.extra_content;
-            tools.push(json!({"id":call.id,"type":"function","function":{"name":call.name,"arguments":if crate::tool_policy::python_trim(&call.arguments).is_empty(){"{}".into()}else{call.arguments}}}));
+            let arguments = if crate::tool_policy::python_trim(&call.arguments).is_empty() {
+                "{}".to_owned()
+            } else {
+                call.arguments
+            };
+            // json! serializes borrowed expressions, copying owned strings.
+            // Transfer completed fields, releasing stream growth slack so the
+            // result does not retain more string capacity than the old copies.
+            let function = Value::Object([
+                ("name".to_owned(), Value::String(call.name.into_boxed_str().into_string())),
+                ("arguments".to_owned(), Value::String(arguments.into_boxed_str().into_string())),
+            ].into_iter().collect());
+            tools.push(Value::Object([
+                ("id".to_owned(), Value::String(call.id.into_boxed_str().into_string())),
+                ("type".to_owned(), Value::String("function".to_owned())),
+                ("function".to_owned(), function),
+            ].into_iter().collect()));
             if let Some(extra) = extra_content {
                 tools.last_mut().unwrap()["extra_content"] = extra;
             }
@@ -488,15 +505,20 @@ impl ChatStream {
         }
         let missing =
             matches!(a.finish.as_deref(), Some("tool_calls" | "tool_use")) && tools.is_empty();
-        let empty = a.content.trim().is_empty() && tools.is_empty();
         let text = a.content.trim();
-        let lowered = text.to_lowercase();
+        let empty = text.is_empty() && tools.is_empty();
         let gateway = a.finish.as_deref() == Some("stop")
             && tools.is_empty()
+            // Valid UTF-8 uses at most four bytes per scalar. This O(1) guard
+            // bounds the exact character count and normalization to short text.
+            && text.len() <= GATEWAY_LIMIT_MAX_CHARS.saturating_mul(char::MAX.len_utf8())
             && text.chars().count() <= GATEWAY_LIMIT_MAX_CHARS
-            && GATEWAY_LIMIT_PHRASES
-                .iter()
-                .any(|p| lowered.contains(p) || text.contains(p));
+            && {
+                let lowered = text.to_lowercase();
+                GATEWAY_LIMIT_PHRASES
+                    .iter()
+                    .any(|p| lowered.contains(p) || text.contains(p))
+            };
         let state = classify_stream(&StreamFacts {
             aborted,
             saw_finish_reason: a.finish.is_some(),
@@ -507,7 +529,10 @@ impl ChatStream {
             ..Default::default()
         });
         let omit_content = a.content.is_empty() && !tools.is_empty();
-        let mut message = json!({"role":"assistant","content":a.content});
+        let mut message = Value::Object([
+            ("role".to_owned(), Value::String("assistant".to_owned())),
+            ("content".to_owned(), Value::String(a.content.into_boxed_str().into_string())),
+        ].into_iter().collect());
         if omit_content {
             message.as_object_mut().unwrap().remove("content");
         }
@@ -524,6 +549,7 @@ impl ChatStream {
             state,
             message,
             usage: a.usage,
+            cost: None,
             finish_reason: a.finish,
             done_seen: a.done,
             malformed_frames: a.malformed,

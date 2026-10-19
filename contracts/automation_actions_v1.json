@@ -2,6 +2,16 @@
   "schemaVersion": 1,
   "contract": "tofu.automation-actions/v1",
   "actions": [
+
+    {
+      "id": "project.responsibility.run",
+      "version": 1,
+      "input": {"type": "object", "additionalProperties": false, "required": ["projectPath", "responsibilityId"], "properties": {"projectPath": {"type": "string", "minLength": 1, "maxLength": 4096}, "responsibilityId": {"type": "string", "minLength": 1, "maxLength": 256}}},
+      "output": {"type": "object", "additionalProperties": false, "required": ["responsibilityId", "occurrenceId", "status"], "properties": {"responsibilityId": {"type": "string", "minLength": 1, "maxLength": 256}, "occurrenceId": {"type": "string", "minLength": 1, "maxLength": 256}, "status": {"enum": ["queued", "running", "succeeded", "failed", "cancelled"]}}},
+      "effect": "agent",
+      "recovery": "reconcile",
+      "requiredScopes": ["automations:execute", "chat"]
+    },
     {
       "id": "task.show_time",
       "version": 1,

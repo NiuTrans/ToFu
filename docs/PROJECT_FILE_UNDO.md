@@ -8,20 +8,44 @@ The persisted `postImage` field follows
 
 ## Change observations
 
+
+### Linked worktrees and file-change presentation
+
+Problem: temporary linked checkouts were mistaken for scratch files, so edits
+could be merged successfully without a File Change Panel. Decision: file writes
+recognize same-repository worktrees before the temporary-directory exemption,
+register the checkout root in the execution's scoped registry, and journal clean
+root-relative paths. Ordinary scratch and unrelated temporary repositories remain
+untracked; existing restricted-caller, read-only and task-checkout admission still
+run first. Checkout identity does not grant access to another task's workspace.
+
+Settlement discovers runtime roots and committed live journal addresses as well
+as configured roots, then rereads conversation/task-stamped journals. A live row
+is a discovery hint, never independent proof of a file change. Explicit foreign
+task IDs never enter legacy timestamp fallback, and dynamically discovered roots
+require exact task IDs. Journals survive Git checkout removal; recorded command
+actions cannot be changed into deletions merely because a worktree was removed.
+Orphaned-turn restart recovery uses a separate explicit conversation-journal mode
+with the logical turn's creation floor to carry prior physical attempts; that
+mode requires an empty task ID and never changes normal settlement isolation.
+
+Auxiliary manually added worktrees carry durable per-file `undoAvailable: false`.
+Their original root identity remains visible after integration; the single-root
+undo gateway must not imply it can reverse the canonical Git merge. Normal
+primary/managed task checkouts retain their undo behavior. Any denied row disables
+the block's undo/redo, at both projection and command boundaries. Alternatives
+rejected: scanning a shared Git diff misattributes concurrent work, remapping
+worktree receipts to the main checkout invents undo authority, and treating every
+temporary path as a project pollutes scratch history. No new store, worker, or
+persistent ledger is introduced. Verify with worktree path, round-derivation and
+conversation file-command tests.
 Command tracking does not infer writes for opaque commands. Up to 64 literal
 relative write targets use a deduplicated scoped snapshot; a literal file never
 walks unrelated directories. Globs and other ambiguous target sets retain the
 bounded whole-tree fallback. Both paths share one entry budget.
 
 
-Write exclusion is independent of this observation policy: explicit regular-file
-targets coordinate by canonical file, and a shared checkout barrier still fences
-whole-tree Git/publication work. Literal interpreter/cat heredoc input does not
-itself request writer admission; real header output targets and shell tails remain
-visible. Explicit directory creation coordinates its target checkout, not the
-unrelated reading cwd. Shell setup/data-target boundaries are owned by
-[`project integration`](modules/project_integration.md). A read/test verification is never silently promoted to
-an immutable snapshot or granted extra filesystem authority by this exemption.
+Write exclusion is independent of this observation policy: explicit regular-file targets coordinate by canonical file, including neutral keys for runtime/data and non-Git files. Native same-checkout transformations/publication fence source edits there; destructive tree effects also fence nested and runtime/data targets. Git metadata-only operations and unrelated parent/peer native checkout changes do not exclude source edits. Multi-target admission uses `workspace_claims_lease` to flatten tree, metadata, checkout and file barriers before any preimage reads; logical `lease_claim_order` grouping alone is not an acquisition transaction. The effect-scoped admission contract lives in [`Git workspace guard`](runbooks/GIT_WORKSPACE_GUARD.md#lease-api-and-identity). Literal interpreter/cat heredoc input does not itself request writer admission; real header output targets and shell tails remain visible. Explicit directory creation coordinates its target checkout, not the unrelated reading cwd. Shell setup/data-target boundaries are owned by [`project integration`](modules/project_integration.md). A read/test verification is never silently promoted to an immutable snapshot or granted extra filesystem authority by this exemption. Git output redirects union their output-target claims with Git's own effects; inline includes/helpers and ambiguous forms retain conservative admission. Compound claims span preimages, the full supervised command, postimages and journaling. Inherited descriptors exclude until final close/group quiescence, not merely leader exit; background execution does not shorten that lifetime.
 
 `TOFU_COMMAND_SNAPSHOT_MAX_ENTRIES` counts directories and ignored entries too:
 personal defaults are probe-derived 5,000–20,000, lean fallback is 5,000, and
@@ -81,6 +105,13 @@ handle. Editor timestamp notifications use that same anchored authority and
 never reopen a substituted path. The final content check is optimistic: external writers do not
 participate in a cross-process transaction.
 
+Snapshot rewind and task redo reuse this same mutation boundary, including
+no-follow timestamp notifications and metadata refresh. Stored snapshot keys
+must be relative without empty, dot or traversal components. A refused file
+retains tracked evidence; partial redo reports applied paths and failure reasons
+with `ok: false`, without appending a successful redo snapshot. There is no
+whole-round rollback promise. See [file history](modules/file_history.md).
+
 Platforms without the anchored-open primitives decline capture/mutation
 visibly rather than falling back to path-based writes. Records remain available
 for inspection. No automatic override authorizes stale or unavailable evidence.
@@ -119,11 +150,10 @@ through an entry-bounded pass under the same admission; referenced packs and
 young artifacts are excluded. Cache capacity and bytes retain their launch-resolved total;
 LRU sessions share that total rather than reserving a fixed fraction per root.
 
-Alternatives rejected: deleting history loses undo; raising the old content
-cache retains hundreds of MB unnecessarily; one payload file and fsync per
-old record makes migration itself slow; unconfirmed background writes weaken
-acknowledgement. Packing is bounded by the existing history cache byte budget
-or one required value, with no idle worker or retained payload cache.
+Completion diagnostics use `get_task_modification_paths`: exact task/optional conversation, distinct addresses, remaining count bound (200 across roots), recovery before selection under session admission. Detached addresses survive tool release without copying historical rows or hydrating content. Cold/invalidated caches still validate the entire JSON authority: projection allocations, not cold I/O, are bounded.
+Moving capture after release or reusing truncated diagnostics for asynchronous presentation was rejected: it loses capture timing or complete/legacy-attributed file changes. Tests: `test_task_modification_paths.py` and `test_project_write_recovery_crashes.py`.
+
+Alternatives rejected: deleting history loses undo; raising the old content cache retains hundreds of MB unnecessarily; one payload file/fsync per record slows migration; unconfirmed background writes weaken acknowledgement. Packing uses the existing history cache byte budget or one required value, with no idle worker or retained payload cache.
 Verification: `tests/project_mod/test_project_undo_payloads.py`, journal
 failure/recovery, identity, concurrent writers and undo evidence suites.
 
@@ -137,6 +167,38 @@ Executable contracts include `tests/tasks_pkg/test_run_command_scoped_snapshot.p
 and `tests/project_mod/test_project_undo_postimage.py`. Keep real filesystem substitutions,
 FIFO races, disk-failure injection, same-size/coarse-mtime external edits,
 concurrent append, reverse-order restoration and allocation measurements.
+
+## Edit-batch preflight
+
+`edit_file` defaults to `atomic: true`: all operations, canonical destinations,
+source reads, matches, final UTF-8 encoding, intent-relative destination validation
+and tracked journal admissions are planned before any requested file edit is
+published. Canonical paths identify shared buffers and leases; each original
+lexical destination retains its root containment and tracking policy. A symlink
+cannot turn an attributed project write into untracked temporary scratch. Operations on each physical file see earlier
+in-memory edits, even when different path aliases name that file. A failed
+preflight returns zero applied edits, a failure for the rejected operations and
+`SKIP` receipts for otherwise valid operations, in their original request order.
+No undo, freshness or syntax-success receipt is earned by a skipped operation.
+Only explicit `atomic: false` requests the legacy partial-application behavior.
+The file-only scoped handler uses the same compute functions and whole-batch
+preflight policy, while retaining descriptor-fenced I/O and its prohibition on
+replaying pending recovery outside the grant.
+
+This is **preflight atomicity, not a cross-file transaction**. A later actual I/O
+or journal-publication failure can follow an earlier committed file; retain the
+existing per-file intent/undo evidence and report applied-but-unconfirmed writes
+rather than claiming rollback or suggesting a blind retry. Reconciliation of
+pre-existing write intents remains the existing recovery owner's responsibility.
+
+Problem: eager per-file publication left a partly changed project after a later
+missing anchor, invalid path or unavailable journal. Decision: plan the complete
+batch under existing workspace/session admissions, then publish one transition
+per physical file. Alternatives rejected: looser semantic matching can target
+unrelated code; rollback after an external writer races us can destroy user work;
+a second patch writer would duplicate authority, freshness and undo owners.
+Verify `test_edit_file_atomic_preflight.py`, `test_project_dispatch_scope.py`,
+`test_project_edit_demand.py` and `tests/tools/test_edit_result_meta.py`.
 
 ## Direct-write journal failure
 
@@ -163,33 +225,32 @@ conversation/task attribution. A symlinked project keeps its existing journal
 identity, but a retargeted alias is a recovery conflict. The caller fsyncs the
 stage; preparation fsyncs its directory before durably publishing the intent.
 
-Direct edits use one launch-resolved per-file recovery budget, independently of
-`MAX_FILE_SIZE` (the model-facing read/display budget). The restart-only
-`TOFU_PROJECT_WRITE_RECOVERY_MAX_MIB` override is registered in the resource
-policy. Automatic personal admission uses the minimum of memory capacity / 1024,
-launch headroom / 256 and free volume / 1024, in MiB (1–1024 MiB); unknown memory
-falls back to 4 MiB. The distributed fallback is 16 MiB. Original reads, exact
-UTF-8 byte admission, staged post-images, recovery classification, reverse-patch
-reads and direct-write undo fingerprints share this budget. Command snapshots
-retain their separate budgets. Undo batch hashing allows at least one admitted
-direct-write post-image (or the existing 20-MiB batch allowance, whichever is
-larger), including the EOF probe byte. Intent JSON admission allows exact base64 expansion
-plus the contract's 64-KiB envelope. A smaller restart budget may block access to
-larger pending evidence visibly; it never deletes that evidence or user history.
+Direct edits retain complete original bytes, staged post-images and exact undo
+identity without a private byte quota. `TOFU_PROJECT_WRITE_RECOVERY_MAX_MIB` is
+retired and ignored; changing it cannot hide pending durable evidence after
+restart. Pending-intent and directory-entry counts no longer refuse preparation
+or limit recovery discovery. Every recognized record still validates schema,
+base64, root/parent/inode identity, content digest and stage ownership before it
+can classify or authorize cleanup. Corrupt, retargeted and conflicting evidence
+fails closed. Actual write/flush/validation failure still prevents publication.
 
-Problem: the display cap previously rejected even a short append to a growing
-journal above 512 KiB. Decision: separate display and recovery admission, scaling
-exact evidence with the shared launch probe. Alternatives rejected: increasing
-the display cap couples tool output to undo memory; bypassing capture or truncating
-history weakens crash recovery and undo. This remains an inline exact-preimage
-journal: each edit retains its complete preimage; optional cache eviction never
-prunes durable records. A cold append probe on a 699,612-byte journal
-with 39 appended UTF-8 bytes peaked at 14,071,847 traced allocation bytes
-(including first-use validator imports), and exact undo restored the original
-SHA-256. This measures allocation for one inline-preimage write. The per-file envelope bounds transient work, not lifetime
-history. Verify large-file append/edit/upload, exact undo, interruption recovery,
-UTF-8/base64 boundaries and budget refusal with
-`tests/project_mod/test_write_recovery_budget.py`.
+Problem: a launch-derived 1–1024 MiB ceiling and 64-record/130-entry quotas
+rejected valid writes and could make older evidence inaccessible after a lower
+restart setting. Decision: preserve exact evidence and consume the complete
+owned recovery set. Alternatives considered: larger constants repeat the same
+failure; omitting preimages or deleting pending rows weakens recovery and undo.
+This remains an inline exact-preimage journal and materializes complete bytes;
+removing admission quotas does not imply constant memory. Command snapshots and
+namespace transaction policies retain their separate owners/audit targets.
+
+Verification: `test_project_write_intents.py` reopens 137 real pending records
+alongside 180 auxiliary entries and classifies applied/unpublished/conflicting
+states without losing evidence. `test_write_recovery_budget.py` covers original
+and post-image bytes above the retired configured ceiling, exact multibyte undo,
+large base64 evidence and recovery after a lower legacy setting. Crash, symlink,
+inode-retarget, malformed-record and real evidence-I/O failure tests stay
+mandatory. No durable history is reclaimed to satisfy a resource target.
+
 
 Recovery never restores or overwrites user files. A matching staged inode and
 content at the target proves publication. A matching stage still at its private
@@ -323,11 +384,11 @@ single run, so this establishes contention/I/O improvement, not a serial
 latency speedup. Whole-journal persistence and ordered history staging still
 scale with durable history; neither is bypassed to mask slow storage.
 
-Admission allows at most 64 pending records per session, 512 KiB each for
-original and post-image content, 1 MiB per encoded record, and 130 directory
-entries per scan. Lock contention fails after five seconds. Excess capacity or
-malformed records fail closed without eviction; this is durable recovery data,
-not a cache. Descriptor lifetimes end with the context, including process exit.
+Recovery admission has no private original/post-image, encoded-record or
+pending/directory count quota. Lock contention follows the session admission
+contract. Malformed or conflicting evidence fails closed without eviction;
+this is durable recovery data, not a cache. Descriptor lifetimes end with the
+context, including process exit.
 
 Journal snapshot publication flushes the JSON file before rename and then
 flushes its parent directory. Removing an empty journal also flushes the
@@ -373,8 +434,8 @@ Edit computations retain the original input before matching normalization.
 The compact inverse is checked by applying it to the computed post-image;
 if it would not reproduce the original (for example, repeated replacement
 text, multi-match replacement, deletion, or newline normalization), the journal
-uses an exact pre/post-image inverse. Each side is capped at the existing
-`MAX_FILE_SIZE` (512 KiB); exceeding that budget rejects the edit before write.
+uses a complete exact pre/post-image inverse. Actual evidence capture or
+validation failure rejects the edit before write; no private byte cap clips it.
 This keeps fallback undo exact even when optional file-history blobs are off.
 
 ## Atomic edit groups
@@ -384,6 +445,37 @@ replacement. Its undo journal likewise records one transition from the file's
 original bytes to the final bytes, rather than recording nonexistent disk
 states for each intermediate computation. Per-edit OK/FAIL output remains
 ordered and unchanged. Attribution and the combined inverse are prepared
-before writing; both sides of a multi-edit inverse must fit `MAX_FILE_SIZE`
-(512 KiB each), otherwise that file's group is refused without mutation.
+before writing; both sides of a multi-edit inverse retain complete bytes.
+Failure to preserve that exact evidence refuses the group without mutation.
 This also avoids partially persisting a chain of intermediate undo receipts.
+Same-file exclusion covers preimage/freshness checks, computation, replacement,
+persistence and journal acknowledgement. Lease exclusion and atomic replacement do not by themselves make a multi-file
+batch all-or-nothing or commit file and journal atomically; the separate batch
+preflight/failure policy above still applies. Post-replacement durability/journal failures retain the
+explicit mutation-applied outcomes above; external writers remain outside the
+cooperative transaction.
+
+## Complete edit batch admission
+
+Problem: legacy replacement/insertion batches silently discarded entries after
+30, while unified `edit_file` both declared and enforced the same private count
+ceiling. A late failed preflight could therefore disappear and let an atomic
+call publish changes whose complete requested batch was invalid. Decision:
+process the entire ordered batch. Unified tool schemas no longer reject the
+31st operation; result lines preserve every operation's original position,
+including late invalid entries and subsequent valid work.
+
+Grouped replacements still compute in order and publish one physical replacement
+and one verified undo transition per file. Atomic preflight considers every
+requested operation before publication. Insertion keeps its existing per-edit
+undo transitions. Path/read-only authority, freshness, real write failures and
+recovery-evidence checks retain their owners; count admission grants no write
+authority. Alternatives considered: raising the threshold still drops work;
+separate small calls erase batch-wide preflight and grouping semantics.
+
+`test_project_edit_demand.py` verifies schema admission and actual 64-edit
+chains with exact undo, a failed 41st atomic preflight with zero publication,
+a late invalid operation followed by successful work, 32 ordered inserts
+with complete undo, and a physical failure on the 32nd of 40 files that leaves
+39 completed files independently undoable and no false success history. Atomicity, write-failure, ownership and recovery neighbors
+remain required; independent byte/recovery policies are separate audit targets.

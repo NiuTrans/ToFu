@@ -15,9 +15,9 @@ deployments auto-discover the running application's loopback API from the
 configured ``PORT`` (default 15000) and read through the v4 conversation
 endpoints instead of erroring out.
 
-Dependencies: ``lib.storage_sidecar.offline`` for fail-closed active-authority
+Dependencies: ``lib.storage_authority_sql.offline`` for fail-closed active-authority
 discovery plus the bounded query-only connection, and
-``lib.storage_sidecar.operations`` for the exact ``conversation.get`` and
+``lib.storage_authority_sql.operations`` for the exact ``conversation.get`` and
 compaction-archive read paths the running sidecar serves. WAL permits concurrent
 readers, so this is safe against the live SQLite database. For native storage,
 explicit application API reads retain the service authorization boundary. They
@@ -116,12 +116,12 @@ def _log_line_count(value: str) -> int:
 
 
 def resolve_readonly_sqlite_authority(*args, **kwargs):
-    from lib.storage_sidecar.offline import resolve_readonly_sqlite_authority as resolve
+    from lib.storage_authority_sql.offline import resolve_readonly_sqlite_authority as resolve
     return resolve(*args, **kwargs)
 
 
 def _open_ro(db_path: Path) -> sqlite3.Connection:
-    from lib.storage_sidecar.offline import open_readonly_sqlite_authority
+    from lib.storage_authority_sql.offline import open_readonly_sqlite_authority
     return open_readonly_sqlite_authority(db_path)
 
 
@@ -168,8 +168,8 @@ def _load_sidecar_document(connection: sqlite3.Connection, conv_id: str,
     if not _table_columns(connection, 'storage_conversations'):
         return None
 
-    from lib.storage_sidecar import operations as ops
-    from lib.storage_sidecar.adapters.sqlite import SQLiteSession
+    from lib.storage_authority_sql import operations as ops
+    from lib.storage_authority_sql.adapters.sqlite import SQLiteSession
 
     session = SQLiteSession(connection)
     if user_id is None:
@@ -195,8 +195,8 @@ def _load_compaction_archives(
     if not _table_columns(connection, 'storage_compaction_archives'):
         return []
 
-    from lib.storage_sidecar import operations as ops
-    from lib.storage_sidecar.adapters.sqlite import SQLiteSession
+    from lib.storage_authority_sql import operations as ops
+    from lib.storage_authority_sql.adapters.sqlite import SQLiteSession
 
     session = SQLiteSession(connection)
     listed = ops._archive_list(session, {
@@ -500,7 +500,7 @@ def _render_tool_rounds(message, *, full: bool) -> list[str]:
 def _render_result_surfaces(document, *, tool_call_id=None, full=False, max_results=20):
     """Read the shared result observer; redact every diagnostic preview."""
     from lib.tools.result_surfaces import inspect_result_document
-    from lib.log_record_values import sanitize_value
+    from lib.logging_pkg.log_record_values import sanitize_value
     report = inspect_result_document(document, tool_call_id=tool_call_id, max_results=max_results,
                                      preview_chars=16384 if full else 4096)
     safe = sanitize_value(report, max_depth=12, max_items=256, max_string_chars=16384)
@@ -605,7 +605,7 @@ def _render_request_evidence(api, document: dict) -> list[str]:
                 details = archive.get('details') or {}
                 fields['traceId'] = details.get('traceId')
                 fields['statusCode'] = details.get('statusCode')
-                from lib.log_record_values import sanitize_value
+                from lib.logging_pkg.log_record_values import sanitize_value
                 lines.append('  ' + json.dumps(sanitize_value(fields), ensure_ascii=False))
         except DiagnosticAPIError as error:
             lines.append(f'  task={task_id}: evidence unavailable ({error})')
@@ -678,7 +678,7 @@ def _render_compaction_archives(
     omitted = len(archives) - len(selected)
     if omitted:
         lines.append(f'… <{omitted} older archive(s) omitted; use --full>')
-    from lib.log_record_values import sanitize_value
+    from lib.logging_pkg.log_record_values import sanitize_value
     for archive in selected:
         lines.append(
             '--- archive '
@@ -705,7 +705,7 @@ def _render_compaction_archives(
 
 
 def _scan_logs(conv_id: str, cap: int, log_dir: Path | None = None) -> list[str]:
-    from lib.log_record_values import text_value
+    from lib.logging_pkg.log_record_values import text_value
 
     lines = []
     for name in ('app.log', 'access.log'):
@@ -802,6 +802,10 @@ def _exception_chain(exc: BaseException) -> list[BaseException]:
         current = following
 
 
+class DiagnosticSnapshotConflict(DiagnosticAPIError):
+    """A revision/source fence invalidated the entire diagnostic read."""
+
+
 class DiagnosticBudgetError(DiagnosticAPIError):
     """Clean resource refusal; never a corrupt-data or consistency failure."""
 
@@ -864,7 +868,8 @@ class _DiagnosticAPI:
     def remaining_bytes(self) -> int:
         return max(0, self.MAX_TOTAL_BYTES - self.bytes_read - self.reserved_bytes)
 
-    def get(self, path: str, *, missing_ok: bool = False) -> dict | None:
+    def get(self, path: str, *, missing_ok: bool = False,
+            snapshot_read: bool = False) -> dict | None:
         import http.client
         import socket
         import threading
@@ -903,15 +908,18 @@ class _DiagnosticAPI:
             connection.request('GET', path, headers=headers)
             response = connection.getresponse()
             missing_candidate = response.status == 404 and missing_ok
+
+            conflict_candidate = response.status == 409 and snapshot_read
             unavailable = ('Diagnostic endpoint unavailable or incompatible (HTTP 404); '
                            'update the running application and storage service before retrying. '
                            'This does not establish that the conversation is missing.')
-            if response.status != 200 and not missing_candidate:
+            if response.status != 200 and not (missing_candidate or conflict_candidate):
                 raise DiagnosticAPIError(f'API refused read (HTTP {response.status}); verify endpoint and conversation-scoped authorization')
             if response.getheader('Content-Encoding', 'identity').lower() != 'identity':
                 raise DiagnosticAPIError('API returned unsupported compressed content')
             media_type = response.getheader('Content-Type', '').split(';', 1)[0].strip().lower()
-            expected_type = 'application/problem+json' if missing_candidate else 'application/json'
+            expected_type = ('application/problem+json' if missing_candidate or conflict_candidate
+                             else 'application/json')
             if media_type != expected_type:
                 raise DiagnosticAPIError(unavailable if missing_candidate
                                          else 'API returned a non-JSON response')
@@ -940,6 +948,16 @@ class _DiagnosticAPI:
             if declared is not None and len(body) != int(declared):
                 raise DiagnosticAPIError('API response ended before its declared length')
             envelope = json.loads(body)
+
+            if conflict_candidate:
+                # v4 _db_safe exposes the storage code as RFC7807 detail.
+                # Arbitrary conflicts remain terminal; never display raw bodies.
+                if (isinstance(envelope, dict) and envelope.get('status') == 409
+                        and envelope.get('code') == 'conflict'
+                        and envelope.get('detail') == 'database_conflict'):
+                    raise DiagnosticSnapshotConflict(
+                        'Conversation changed during diagnostic reads (HTTP 409 database_conflict)')
+                raise DiagnosticAPIError('API refused read (HTTP 409); unrecognized diagnostic conflict')
             if missing_candidate:
                 if (isinstance(envelope, dict) and envelope.get('status') == 404
                         and envelope.get('code') == 'diagnostic_conversation_not_found'):
@@ -1002,14 +1020,14 @@ def _load_api_turn(api: _DiagnosticAPI, path: str, *, conv_id: str,
     """Reconstruct one bounded client-side turn, reusing the authority codecs."""
     import base64
     import binascii
-    from lib.storage_sidecar.projection_codec import decode_projection_from_storage
-    from lib.storage_sidecar.operations_pkg._conversations import _turn_to_legacy_message
+    from lib.storage_authority_sql.projection_codec import decode_projection_from_storage
+    from lib.storage_authority_sql.operations_pkg._conversations import _turn_to_legacy_message
     from lib.turn_projection_patch import apply_projection_patch
-    from lib.storage_sidecar.turn_projection_head import PROJECTION_HEAD_MAX_PATCHES
+    from lib.storage_authority_sql.turn_projection_head import PROJECTION_HEAD_MAX_PATCHES
 
     from lib.conversations.diagnostic import terminalize_restored_projection
     cursor = f'&revision={revision}&index={index}'
-    page = api.get(path + '?kind=turn' + cursor)
+    page = api.get(path + '?kind=turn' + cursor, snapshot_read=True)
     turn, source, patches = page.get('turn'), page.get('source'), page.get('patches')
     if (page.get('revision') != revision or page.get('index') != index
             or page.get('totalCount') != total or not isinstance(turn, dict)
@@ -1039,7 +1057,8 @@ def _load_api_turn(api: _DiagnosticAPI, path: str, *, conv_id: str,
     offset = 0
     while offset < size:
         limit = min(65536, size - offset)
-        chunk = api.get(path + '?kind=chunk' + cursor + f'&offset={offset}&limit={limit}')
+        chunk = api.get(path + '?kind=chunk' + cursor + f'&offset={offset}&limit={limit}',
+                        snapshot_read=True)
         try:
             data = base64.b64decode(chunk.get('data', ''), validate=True)
         except (ValueError, TypeError, binascii.Error) as exc:
@@ -1088,6 +1107,24 @@ def _load_api_turn(api: _DiagnosticAPI, path: str, *, conv_id: str,
 def _load_api_document(api: _DiagnosticAPI, conv_id: str, *, full: bool,
                        start_index: int | None = None, max_turns: int | None = None,
                        ) -> tuple[dict | None, list[dict]]:
+    # Discard every page after a stale fence. Reuse the transport so retries
+    # share the original deadline and cumulative byte/request allowances.
+    for attempt in range(3):
+        try:
+            return _load_api_document_once(api, conv_id, full=full,
+                                          start_index=start_index, max_turns=max_turns)
+        except DiagnosticSnapshotConflict:
+            if attempt == 2:
+                raise DiagnosticAPIError(
+                    'Conversation changed during diagnostic reads; no consistent snapshot '
+                    'after 3 attempts. Retry when writes settle or use --start-index / '
+                    '--max-turns for a smaller range.') from None
+    raise AssertionError('unreachable diagnostic attempt')
+
+
+def _load_api_document_once(api: _DiagnosticAPI, conv_id: str, *, full: bool,
+                            start_index: int | None = None, max_turns: int | None = None,
+                            ) -> tuple[dict | None, list[dict]]:
 
     from urllib.parse import quote
     path = '/api/v4/conversations/' + quote(conv_id, safe='')
@@ -1149,7 +1186,7 @@ def _load_api_document(api: _DiagnosticAPI, conv_id: str, *, full: bool,
     witness = api.get(diagnostic + '?kind=header')
     _, last_revision, last_total = _diagnostic_header(witness, conv_id)
     if last_revision != revision or last_total != total:
-        raise DiagnosticAPIError('Conversation changed during diagnostic reads; retry')
+        raise DiagnosticSnapshotConflict('Conversation changed during diagnostic reads')
     document['diagnostic_unread_count'] = total - len(document['messages'])
     return document, archives
 
@@ -1283,7 +1320,7 @@ def main(argv: list[str] | None = None) -> int:
                 print('  logs: omitted because this endpoint does not prove ownership of local log files')
             args.no_logs = True
     else:
-        from lib.storage_sidecar.offline import SQLiteAuthorityDiscoveryError
+        from lib.storage_authority_sql.offline import SQLiteAuthorityDiscoveryError
         try:
             location = resolve_readonly_sqlite_authority(
                 data_dir, explicit_path=args.db, environ=environment)
@@ -1355,7 +1392,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  rev:        {metadata.get('rev')}")
     settings = metadata.get('settings') or {}
     if settings:
-        from lib.log_record_values import sanitize_value
+        from lib.logging_pkg.log_record_values import sanitize_value
         safe_settings = sanitize_value(settings, max_items=100,
                                        max_string_chars=2_000)
         print(f'  settings:   {json.dumps(safe_settings, ensure_ascii=False)}')

@@ -16,7 +16,7 @@ import time
 import uuid
 from collections import deque
 
-from lib.json_store import write_bytes_atomic
+from lib.project_mod import undo_filesystem
 from lib.log import get_logger
 from lib.error_envelope import from_exception
 
@@ -384,10 +384,12 @@ def rewind_to(base_path: str, snapshot_id: str) -> dict:
             except Exception as e:
                 failed.append({'path': rel, 'reason': str(e)})
                 logger.warning('[FileHistory] rewind %s failed: %s', rel, e)
-        result['ok'] = True
+        result['ok'] = not failed
         result['files'] = applied
         result['failed'] = failed
         result['hadPriorSnapshot'] = prev_seen
+        if failed:
+            result['error'] = 'Some files could not be safely rewound'
         logger.info('[FileHistory] rewind to=%s applied=%d failed=%d',
                     snapshot_id[:8], len(applied), len(failed))
         return result
@@ -432,26 +434,38 @@ def restore_from(base_path: str, snapshot_id: str) -> dict:
                 failed.append({'path': rel, 'reason': str(e)})
                 logger.warning('[FileHistory] restore_from %s failed: %s', rel, e)
 
-        # Refresh tracked.json so the new disk state is the latest.
+        # Only successful mutations can advance tracked state. Metadata is
+        # anchored too: a substituted parent must not become restore evidence.
         tracked = load_tracked(base_path)
-        for rel, v in target_files.items():
+        confirmed: list[dict] = []
+        for item in applied:
+            rel = item['path']
+            v = target_files[rel]
             v_int = int(v or 0)
             entry = tracked.get(rel) or {}
             if v_int == 0:
                 tracked[rel] = {**entry, 'latest_version': v_int,
                                 'deleted': True, 'mtime': 0, 'size': 0}
             else:
-                abs_p = os.path.join(os.path.abspath(base_path), rel)
                 try:
-                    st = os.stat(abs_p)
+                    st = undo_filesystem.stat_file(base_path, _restore_target(base_path, rel))
+                    if st is None:
+                        raise ValueError('Restored file disappeared')
                     tracked[rel] = {**entry, 'latest_version': v_int,
                                     'deleted': False,
                                     'mtime': st.st_mtime, 'size': st.st_size}
-                except OSError as _e_audit:
-                    logger.debug('[api] restore_from caught %s: %s', type(_e_audit).__name__, _e_audit)
-                    tracked[rel] = {**entry, 'latest_version': v_int,
-                                    'deleted': False}
-        save_tracked(base_path, tracked)
+                except (OSError, ValueError, NotImplementedError) as error:
+                    failed.append({'path': rel, 'reason': str(error)})
+                    continue
+            confirmed.append(item)
+        applied = confirmed
+        if applied:
+            save_tracked(base_path, tracked)
+        result['files'] = applied
+        result['failed'] = failed
+        if failed:
+            result['error'] = 'Some files could not be safely restored'
+            return result
 
         new_id = make_snapshot(
             base_path,
@@ -482,37 +496,30 @@ def _restore_one(base_path: str, rel: str, version: int) -> tuple[bool, str]:
 
     Returns (ok, action_label_or_reason).
     """
-    abs_p = os.path.join(os.path.abspath(base_path), rel)
-    if version == 0:
-        try:
-            if os.path.exists(abs_p):
-                os.remove(abs_p)
-                _nudge_vscode(abs_p)
-                return True, 'deleted'
-            return True, 'already_absent'
-        except OSError as e:
-            logger.debug('[api] _restore_one caught %s: %s', type(e).__name__, e)
-            return False, f'unlink failed: {e}'
-    blob = read_blob(base_path, rel, version)
-    if blob is None:
-        # The blob was GC'd or never written (file too large at backup time).
-        return False, f'no backup for v{version}'
     try:
-        write_bytes_atomic(abs_p, blob)
-        _nudge_vscode(abs_p)
+        target = _restore_target(base_path, rel)
+        if version < 0:
+            raise ValueError('Invalid backup version')
+        if version == 0:
+            removed = undo_filesystem.remove_file(base_path, target)
+            return True, 'deleted' if removed else 'already_absent'
+        blob = read_blob(base_path, rel, version)
+        if blob is None:
+            return False, f'no backup for v{version}'
+        undo_filesystem.write_file(base_path, target, blob)
+        undo_filesystem.touch_file(base_path, target)
         return True, 'restored'
-    except OSError as e:
-        logger.debug('[api] _restore_one caught %s: %s', type(e).__name__, e)
-        return False, f'write failed: {e}'
+    except (OSError, ValueError, NotImplementedError) as error:
+        logger.debug('[FileHistory] unsafe restore refused for %s: %s', rel, error)
+        return False, f'restore refused: {error}'
 
 
-def _nudge_vscode(abs_path: str) -> None:
-    """Bump mtime so VS Code's file watcher picks up the change."""
-    try:
-        st = os.stat(abs_path)
-        os.utime(abs_path, (st.st_atime, st.st_mtime + 1e-6))
-    except OSError as e:
-        logger.debug('[FileHistory] vscode mtime bump failed for %s: %s', abs_path, e)
+def _restore_target(base_path: str, rel: str) -> str:
+    """Validate persisted keys, rather than normalizing away unsafe components."""
+    if (not isinstance(rel, str) or not rel or '\\' in rel or '\x00' in rel
+            or os.path.isabs(rel) or any(part in ('', '.', '..') for part in rel.split('/'))):
+        raise ValueError('Restore path must be a project-relative file key')
+    return os.path.join(os.path.realpath(os.path.abspath(base_path)), *rel.split('/'))
 
 
 # ═══════════════════════════════════════════════════════════════════

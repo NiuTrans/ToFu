@@ -50,7 +50,7 @@ def _drain_progress(task: dict, cursor: int, progress_fn) -> int:
     (logged at debug) — progress reporting must never break the task.
     """
     try:
-        from lib.task_replay import task_memory_replay_page
+        from lib.task_replay.task_replay import task_memory_replay_page
         page = task_memory_replay_page(task, cursor)
         new = page.events
     except Exception as e:

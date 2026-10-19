@@ -22,6 +22,7 @@ from runtime_guards import resolve_resource_budget
 logger = get_logger(__name__)
 _TRANSIENT_READ_ISSUES = frozenset({
     'codex_command_timeout', 'codex_command_unavailable',
+    'codex_home_storage_full',
     'desktop_login_stale', 'desktop_login_unavailable', 'desktop_disconnected',
 })
 
@@ -145,7 +146,7 @@ def recover_bound_access(reference: dict, *, initial_issue: str) -> str | None:
         return snapshot['access_token']
     if issue in {'codex_access_expired', 'codex_not_signed_in', 'not_chatgpt_login'}:
         return None
-    from lib.llm_errors import SubscriptionCredentialUnavailableError
+    from lib.llm.llm_errors import SubscriptionCredentialUnavailableError
     raise SubscriptionCredentialUnavailableError(
         reason=issue, credential_source=source, transient=issue in _TRANSIENT_READ_ISSUES)
 

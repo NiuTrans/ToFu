@@ -102,6 +102,34 @@ class StorageClient:
         self._transport_metrics_lock = threading.Lock()
         self._pre_dispatch_command_retries = 0
         self._pre_dispatch_command_retry_exhaustions = 0
+        from lib.storage.checkpoint_control import CheckpointClientPort
+        self._checkpoint_port = CheckpointClientPort(timeout=self._timeout,
+            request_once=self._checkpoint_request, check_scope=lambda owner: None, is_closed=lambda: False)
+
+    def _checkpoint_request(self, operation, payload, owner, deadline_unix_ms):
+        from tofu_db.generated_checkpoint_control import CAPABILITIES_OPERATION
+        remaining = min(self._timeout, deadline_unix_ms/1000 - time.time())
+        if remaining <= 0:
+            raise StorageError('database_timeout', 'checkpoint deadline elapsed before effects')
+        return self._attempt('query' if operation == CAPABILITIES_OPERATION else 'command',
+            operation, {'owner_user_id': owner, **payload}, timeout=remaining, command_id=None,
+            priority='user', deadline_unix_ms=deadline_unix_ms)
+
+    def native_checkpoint_available(self, *, user_id: int) -> bool:
+        return self._checkpoint_port.available(user_id=user_id)
+
+    def native_checkpoint_control(self, operation: str, payload: dict[str, Any], *,
+                                  user_id: int, deadline_unix_ms: int, response_bytes: int) -> dict[str, Any]:
+        return self._checkpoint_port.control(operation, payload, user_id=user_id,
+            deadline_unix_ms=deadline_unix_ms, response_bytes=response_bytes)
+
+    def close(self):
+        self._checkpoint_port.close()
+
+    @property
+    def request_timeout_seconds(self) -> float:
+        """Configured per-request I/O policy, without opening a connection."""
+        return self._timeout
 
     @property
     def endpoint(self) -> tuple[str, int]:
@@ -221,6 +249,7 @@ class StorageClient:
         timeout: float,
         command_id: str | None,
         priority: str,
+        deadline_unix_ms: int | None = None,
     ) -> Any:
         request_id = uuid.uuid4().hex
         response_reservation = None
@@ -238,7 +267,8 @@ class StorageClient:
             'kind': kind,
             'operation': operation,
             'payload': dict(payload or {}),
-            'deadline_unix_ms': int((time.time() + timeout) * 1000),
+            'deadline_unix_ms': (int((time.time() + timeout) * 1000)
+                                 if deadline_unix_ms is None else deadline_unix_ms),
         }
         if kind == 'command':
             request['command_id'] = command_id

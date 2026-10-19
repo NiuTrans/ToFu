@@ -92,27 +92,27 @@ class _FakeClock:
 @pytest.mark.unit
 class TestGatewayClassification:
     def test_502_sets_is_gateway(self):
-        from lib.llm_errors import RateLimitError, _classify_http_error
+        from lib.llm.llm_errors import RateLimitError, _classify_http_error
         with pytest.raises(RateLimitError) as ei:
             _classify_http_error(502, '502 Bad Gateway', 'm', '[t]')
         assert ei.value.is_gateway is True
         assert ei.value.is_quota is False
 
     def test_503_504_set_is_gateway(self):
-        from lib.llm_errors import RateLimitError, _classify_http_error
+        from lib.llm.llm_errors import RateLimitError, _classify_http_error
         for code in (503, 504):
             with pytest.raises(RateLimitError) as ei:
                 _classify_http_error(code, 'upstream down', 'm', '[t]')
             assert ei.value.is_gateway is True
 
     def test_real_429_is_not_gateway(self):
-        from lib.llm_errors import RateLimitError, _classify_http_error
+        from lib.llm.llm_errors import RateLimitError, _classify_http_error
         with pytest.raises(RateLimitError) as ei:
             _classify_http_error(429, 'rate limit exceeded', 'm', '[t]')
         assert ei.value.is_gateway is False
 
     def test_quota_429_is_not_gateway(self):
-        from lib.llm_errors import RateLimitError, _classify_http_error
+        from lib.llm.llm_errors import RateLimitError, _classify_http_error
         with pytest.raises(RateLimitError) as ei:
             _classify_http_error(429, 'insufficient_quota', 'm', '[t]')
         assert ei.value.is_gateway is False
@@ -170,7 +170,7 @@ class TestStreakBookkeeping:
 class TestGatewayOutageRaises:
     def test_total_gateway_outage_gives_up(self, monkeypatch):
         from lib.llm_dispatch import api
-        from lib.llm_errors import RateLimitError
+        from lib.llm.llm_errors import RateLimitError
 
         disp = _EndlessDispatcher()
         monkeypatch.setattr(api, 'get_dispatcher', lambda: disp)
@@ -208,7 +208,7 @@ class TestRealRateLimitNotCapped:
         long fake clock can isolate gateway classification.
         """
         from lib.llm_dispatch import api
-        from lib.llm_errors import RateLimitError
+        from lib.llm.llm_errors import RateLimitError
 
         disp = _EndlessDispatcher()
         monkeypatch.setattr(api, 'get_dispatcher', lambda: disp)
@@ -264,7 +264,7 @@ class TestBudgetDefaultsDisabled:
         the gateway recovers — only the user's abort_check may stop it.
         """
         from lib.llm_dispatch import api
-        from lib.llm_errors import RateLimitError
+        from lib.llm.llm_errors import RateLimitError
 
         disp = _EndlessDispatcher()
         monkeypatch.setattr(api, 'get_dispatcher', lambda: disp)

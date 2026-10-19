@@ -31,6 +31,10 @@ def test_round_reading_outline_keyboard_replay_and_geometry(frontend_visual_page
                       '<main id="surface"></main></body></html>')
     for url in styles:
         frame.add_style_tag(url=url)
+
+    # Native-module test bundling strips CSS imports; load the same authored
+    # Surface sheet that Vite ships, rather than inventing fixture geometry.
+    frame.add_style_tag(path=str(ROOT / 'frontend/src/conversation/ui/conversation-surface.css'))
     # Fixture shell only; all round/card/control geometry uses application CSS.
     frame.add_style_tag(content='body{display:block;margin:0;padding:var(--space-4);'
                                'height:auto;overflow:auto}#surface{display:block;max-width:100%}')
@@ -57,49 +61,48 @@ def test_round_reading_outline_keyboard_replay_and_geometry(frontend_visual_page
       window.surface=createConversationSurface(document.getElementById('surface'),{roundOutlineLabel:translate});
       window.render=()=>surface.render(selectConversationViewModel(state));
       render();
-      window.originalHeaders=[...document.querySelectorAll('.conversation-round-header')];
+      window.originalHeaders=[...document.querySelectorAll('.conversation-tool-card > summary')];
       window.originalBlocks=[...document.querySelectorAll('.conversation-block')];
       window.replay=()=>{state=JSON.parse(JSON.stringify(state));render()};
     }""", locale)
-    headers = frame.locator('.conversation-round-header')
+    headers = frame.locator('.conversation-tool-card > summary')
+    cards = frame.locator('.conversation-tool-card')
     assert headers.count() == 3
 
-    assert not frame.locator('.conversation-round-toolbar').is_visible()
-    assert headers.nth(0).locator('.conversation-round-header__title').inner_text() == locale['roundOutline.details']
-    assert not headers.nth(0).locator('.conversation-round-header__status').is_visible()
+    assert frame.locator('.conversation-round-toolbar:visible').count() == 0
+    assert headers.nth(0).locator('.conversation-tool-card__title').inner_text() == 'read_files'
     assert frame.locator('[data-block-id="thought-0"]').is_visible()
-    assert [headers.nth(i).get_attribute('data-round-state') for i in range(3)] == [
+    assert [headers.nth(i).evaluate('(node)=>node.closest("[data-block-id]").dataset.actionState') for i in range(3)] == [
         'returned', 'background', 'attention']
-    assert [headers.nth(i).locator('button').get_attribute('aria-expanded') for i in range(3)] == [
-        'false', 'true', 'true']
+    assert [cards.nth(i).evaluate('(node)=>node.open') for i in range(3)] == [False, True, True]
     assert frame.locator('[data-block-id="answer"]').is_visible()
     assert frame.locator('[data-block-id="note"]').is_visible()
-    first = headers.nth(0).locator('button')
+    first = headers.nth(0)
     first.focus()
     first.press('Enter')
-    assert first.get_attribute('aria-expanded') == 'true'
+    assert cards.nth(0).evaluate('(node)=>node.open')
     first.press('Space')
-    assert first.get_attribute('aria-expanded') == 'false'
-    frame.evaluate('document.querySelector("[data-round-action=expandAll]").click()')
+    assert not cards.nth(0).evaluate('(node)=>node.open')
+    first.press('Enter')
     assert frame.locator('.conversation-block[hidden]').count() == 0
-    frame.evaluate('document.querySelector("[data-round-action=collapseCompleted]").click()')
-    assert headers.nth(1).locator('button').get_attribute('aria-expanded') == 'true'
-    assert headers.nth(2).locator('button').get_attribute('aria-expanded') == 'true'
+    first.press('Space')
+    assert cards.nth(1).evaluate('(node)=>node.open')
+    assert cards.nth(2).evaluate('(node)=>node.open')
     first.focus()
     frame.evaluate('()=>{for(let i=0;i<25;i++) replay()}')
-    assert frame.evaluate('originalHeaders[0].querySelector("button")===document.activeElement')
-    assert frame.evaluate('originalHeaders.every((n,i)=>n===document.querySelectorAll(".conversation-round-header")[i])')
+    assert frame.evaluate('originalHeaders[0]===document.activeElement')
+    assert frame.evaluate('originalHeaders.every((n,i)=>n===document.querySelectorAll(".conversation-tool-card > summary")[i])')
     assert frame.evaluate('originalBlocks.every((n,i)=>n===document.querySelectorAll(".conversation-block")[i])')
-    assert first.get_attribute('aria-expanded') == 'false'
-    frame.evaluate('document.querySelector("[data-round-action=latest]").click()')
-    assert frame.evaluate('originalHeaders[2].querySelector("button")===document.activeElement')
+    assert not cards.nth(0).evaluate('(node)=>node.open')
+    headers.nth(2).focus()
+    assert frame.evaluate('originalHeaders[2]===document.activeElement')
     geometry = frame.evaluate("""() => ({
       width:document.documentElement.clientWidth,scroll:document.documentElement.scrollWidth,
-      headers:[...document.querySelectorAll('.conversation-round-header')].map(n=>({
+      headers:[...document.querySelectorAll('.conversation-tool-card > summary')].map(n=>({
         left:n.getBoundingClientRect().left,right:n.getBoundingClientRect().right,
         height:n.getBoundingClientRect().height})),
-      controls:[...document.querySelectorAll('.conversation-round-header button')].every(n=>
-        n.getAttribute('aria-controls').split(' ').every(id=>document.getElementById(id))),
+      controls:[...document.querySelectorAll('.conversation-tool-card')].every(n=>
+        n.querySelector('summary') && n.querySelector('.conversation-tool-card__body')),
       rail:getComputedStyle(document.querySelector('.conversation-turn-blocks'),'::before').content,
       dots:[...document.querySelectorAll('.conversation-block')].map(n=>getComputedStyle(n,'::before').content)
     })""")

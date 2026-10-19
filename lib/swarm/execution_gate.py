@@ -7,7 +7,7 @@ tracks active execution by explicit owner and checks cancellation at entry.
 from __future__ import annotations
 from collections.abc import Callable, Hashable
 import threading
-from lib.llm_errors import AbortedError
+from lib.llm.llm_errors import AbortedError
 
 
 class SwarmExecutionAccounting:

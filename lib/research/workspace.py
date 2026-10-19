@@ -24,22 +24,16 @@ from .history import ResearchHistoryRepository, compact_observations
 from .persistence import _direction_read_candidates, research_direction_hash
 from .program import (
     MAX_CLAIMS,
-    MAX_PROGRAM_BYTES,
     MAX_RUNS,
     MAX_TEXT,
-    MAX_SOURCE_FILES,
-    MAX_SOURCE_FILE_CHARS,
-    MAX_SOURCE_TOTAL_CHARS,
     PROGRAM_CONTRACT_VERSION,
     default_program_fields,
-    encoded_program_size,
     normalize_program_fields,
     normalize_run_evidence,
     normalize_source_path,
 )
 
 WORKSPACE_CONTRACT_VERSION = PROGRAM_CONTRACT_VERSION
-MAX_WORKSPACE_BYTES = MAX_PROGRAM_BYTES
 
 
 def _storage(*, write: bool = False):
@@ -87,9 +81,6 @@ def normalize_workspace(
     base['hypothesis'] = _text(raw.get('hypothesis'))
     base.update(normalize_program_fields(raw))
     base['updated_at'] = max(0, int(raw.get('updated_at') or 0))
-    size = encoded_program_size(base)
-    if size > MAX_WORKSPACE_BYTES:
-        raise ValueError(f'research workspace exceeds {MAX_WORKSPACE_BYTES} bytes')
     return base
 
 
@@ -263,13 +254,12 @@ def save_workspace(
     # Source edits are user data. Reject an incomplete normalization instead of
     # accepting a truncated tree and later compiling a different manuscript.
     sources = candidate.get('source_files', [])
-    if (not isinstance(sources, list) or len(sources) > MAX_SOURCE_FILES
+    if (not isinstance(sources, list)
             or any(not isinstance(row, dict) or not isinstance(row.get('content'), str)
                    or not isinstance(row.get('path'), str)
                    or normalize_source_path(row['path']) != row['path']
-                   or len(row['content']) > MAX_SOURCE_FILE_CHARS for row in sources)
-            or sum(len(row['content']) for row in sources) > MAX_SOURCE_TOTAL_CHARS):
-        raise ValueError('Research source edits exceed the file or text budget')
+                   for row in sources)):
+        raise ValueError('Invalid Research source edits')
     if sources:
         from lib.paper.builds.records import SourceRecords
         from lib.paper.builds.errors import BuildError
@@ -474,6 +464,6 @@ def load_history_page(direction: str, lang: str = 'en', *, user_id: int, cursor=
 
 
 __all__ = [
-    'MAX_CLAIMS', 'MAX_RUNS', 'MAX_WORKSPACE_BYTES', 'WORKSPACE_CONTRACT_VERSION',
+    'MAX_CLAIMS', 'MAX_RUNS', 'WORKSPACE_CONTRACT_VERSION',
     'empty_workspace', 'load_workspace', 'open_run_receipts', 'read_run_execution_state', 'read_run_scientific_state', 'load_history_page', 'load_workspace_response', 'normalize_workspace', 'save_workspace',
 ]

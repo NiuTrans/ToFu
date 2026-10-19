@@ -1,0 +1,8013 @@
+[
+  {
+    "name": "0",
+    "preserve": true,
+    "messages": [],
+    "output": [],
+    "wire": "[]"
+  },
+  {
+    "name": "0",
+    "preserve": false,
+    "messages": [],
+    "output": [],
+    "wire": "[]"
+  },
+  {
+    "name": "1",
+    "preserve": true,
+    "messages": [
+      {
+        "role": "user",
+        "content": "question",
+        "_isMeta": true,
+        "carrier": "private"
+      }
+    ],
+    "output": [
+      {
+        "role": "user",
+        "content": "question"
+      }
+    ],
+    "wire": "[{\"role\":\"user\",\"content\":\"question\"}]"
+  },
+  {
+    "name": "1",
+    "preserve": false,
+    "messages": [
+      {
+        "role": "user",
+        "content": "question",
+        "_isMeta": true,
+        "carrier": "private"
+      }
+    ],
+    "output": [
+      {
+        "role": "user",
+        "content": "question"
+      }
+    ],
+    "wire": "[{\"role\":\"user\",\"content\":\"question\"}]"
+  },
+  {
+    "name": "2",
+    "preserve": true,
+    "messages": [
+      {
+        "role": "user",
+        "content": "a"
+      },
+      {
+        "role": "assistant",
+        "content": ""
+      },
+      {
+        "role": "user",
+        "content": "b"
+      }
+    ],
+    "output": [
+      {
+        "role": "user",
+        "content": "a\n\nb"
+      }
+    ],
+    "wire": "[{\"role\":\"user\",\"content\":\"a\\n\\nb\"}]"
+  },
+  {
+    "name": "2",
+    "preserve": false,
+    "messages": [
+      {
+        "role": "user",
+        "content": "a"
+      },
+      {
+        "role": "assistant",
+        "content": ""
+      },
+      {
+        "role": "user",
+        "content": "b"
+      }
+    ],
+    "output": [
+      {
+        "role": "user",
+        "content": "a\n\nb"
+      }
+    ],
+    "wire": "[{\"role\":\"user\",\"content\":\"a\\n\\nb\"}]"
+  },
+  {
+    "name": "3",
+    "preserve": true,
+    "messages": [
+      {
+        "role": "user",
+        "content": ""
+      },
+      {
+        "role": "user",
+        "content": "tail"
+      }
+    ],
+    "output": [
+      {
+        "role": "user",
+        "content": "tail"
+      }
+    ],
+    "wire": "[{\"role\":\"user\",\"content\":\"tail\"}]"
+  },
+  {
+    "name": "3",
+    "preserve": false,
+    "messages": [
+      {
+        "role": "user",
+        "content": ""
+      },
+      {
+        "role": "user",
+        "content": "tail"
+      }
+    ],
+    "output": [
+      {
+        "role": "user",
+        "content": "tail"
+      }
+    ],
+    "wire": "[{\"role\":\"user\",\"content\":\"tail\"}]"
+  },
+  {
+    "name": "4",
+    "preserve": true,
+    "messages": [
+      {
+        "role": "assistant",
+        "content": null,
+        "reasoning_content": "proof"
+      },
+      {
+        "role": "assistant",
+        "content": "answer"
+      }
+    ],
+    "output": [
+      {
+        "role": "assistant",
+        "content": "answer",
+        "reasoning_content": "proof"
+      }
+    ],
+    "wire": "[{\"role\":\"assistant\",\"content\":\"answer\",\"reasoning_content\":\"proof\"}]"
+  },
+  {
+    "name": "4",
+    "preserve": false,
+    "messages": [
+      {
+        "role": "assistant",
+        "content": null,
+        "reasoning_content": "proof"
+      },
+      {
+        "role": "assistant",
+        "content": "answer"
+      }
+    ],
+    "output": [
+      {
+        "role": "assistant",
+        "content": "answer",
+        "reasoning_content": "proof"
+      }
+    ],
+    "wire": "[{\"role\":\"assistant\",\"content\":\"answer\",\"reasoning_content\":\"proof\"}]"
+  },
+  {
+    "name": "5",
+    "preserve": true,
+    "messages": [
+      {
+        "role": "system",
+        "content": [
+          {
+            "type": "text",
+            "text": "instructions"
+          }
+        ]
+      },
+      {
+        "role": "user",
+        "content": "q"
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "ambient"
+          }
+        ],
+        "_contextComposer": true
+      }
+    ],
+    "output": [
+      {
+        "role": "system",
+        "content": [
+          {
+            "type": "text",
+            "text": "instructions"
+          }
+        ]
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "q"
+          },
+          {
+            "type": "text",
+            "text": "ambient"
+          }
+        ]
+      }
+    ],
+    "wire": "[{\"role\":\"system\",\"content\":[{\"type\":\"text\",\"text\":\"instructions\"}]},{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"q\"},{\"type\":\"text\",\"text\":\"ambient\"}]}]"
+  },
+  {
+    "name": "5",
+    "preserve": false,
+    "messages": [
+      {
+        "role": "system",
+        "content": [
+          {
+            "type": "text",
+            "text": "instructions"
+          }
+        ]
+      },
+      {
+        "role": "user",
+        "content": "q"
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "ambient"
+          }
+        ],
+        "_contextComposer": true
+      }
+    ],
+    "output": [
+      {
+        "role": "system",
+        "content": "instructions"
+      },
+      {
+        "role": "user",
+        "content": "qambient"
+      }
+    ],
+    "wire": "[{\"role\":\"system\",\"content\":\"instructions\"},{\"role\":\"user\",\"content\":\"qambient\"}]"
+  },
+  {
+    "name": "6",
+    "preserve": true,
+    "messages": [
+      {
+        "role": "assistant",
+        "content": "opaque",
+        "_responses_items": [
+          {
+            "type": "reasoning"
+          }
+        ]
+      },
+      {
+        "role": "assistant",
+        "content": "answer"
+      }
+    ],
+    "output": [
+      {
+        "role": "assistant",
+        "content": "opaque"
+      },
+      {
+        "role": "assistant",
+        "content": "answer"
+      }
+    ],
+    "wire": "[{\"role\":\"assistant\",\"content\":\"opaque\"},{\"role\":\"assistant\",\"content\":\"answer\"}]"
+  },
+  {
+    "name": "6",
+    "preserve": false,
+    "messages": [
+      {
+        "role": "assistant",
+        "content": "opaque",
+        "_responses_items": [
+          {
+            "type": "reasoning"
+          }
+        ]
+      },
+      {
+        "role": "assistant",
+        "content": "answer"
+      }
+    ],
+    "output": [
+      {
+        "role": "assistant",
+        "content": "opaque"
+      },
+      {
+        "role": "assistant",
+        "content": "answer"
+      }
+    ],
+    "wire": "[{\"role\":\"assistant\",\"content\":\"opaque\"},{\"role\":\"assistant\",\"content\":\"answer\"}]"
+  },
+  {
+    "name": "7",
+    "preserve": true,
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": " "
+          },
+          {
+            "type": "text",
+            "text": "head"
+          },
+          {
+            "type": "text",
+            "text": "\t"
+          },
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,cHJvYmU="
+            }
+          },
+          {
+            "type": "text",
+            "text": "  "
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      }
+    ],
+    "output": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": " head\t"
+          },
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,cHJvYmU="
+            }
+          },
+          {
+            "type": "text",
+            "text": "  tail"
+          }
+        ]
+      }
+    ],
+    "wire": "[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\" head\\t\"},{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/png;base64,cHJvYmU=\"}},{\"type\":\"text\",\"text\":\"  tail\"}]}]"
+  },
+  {
+    "name": "7",
+    "preserve": false,
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": " "
+          },
+          {
+            "type": "text",
+            "text": "head"
+          },
+          {
+            "type": "text",
+            "text": "\t"
+          },
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,cHJvYmU="
+            }
+          },
+          {
+            "type": "text",
+            "text": "  "
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      }
+    ],
+    "output": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": " head\t"
+          },
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,cHJvYmU="
+            }
+          },
+          {
+            "type": "text",
+            "text": "  tail"
+          }
+        ]
+      }
+    ],
+    "wire": "[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\" head\\t\"},{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/png;base64,cHJvYmU=\"}},{\"type\":\"text\",\"text\":\"  tail\"}]}]"
+  },
+  {
+    "name": "8",
+    "preserve": true,
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "head"
+          },
+          {
+            "type": "text",
+            "text": " ",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      }
+    ],
+    "output": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "head"
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      }
+    ],
+    "wire": "[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"head\"},{\"type\":\"text\",\"text\":\"tail\"}]}]"
+  },
+  {
+    "name": "8",
+    "preserve": false,
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "head"
+          },
+          {
+            "type": "text",
+            "text": " ",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      }
+    ],
+    "output": [
+      {
+        "role": "user",
+        "content": "headtail"
+      }
+    ],
+    "wire": "[{\"role\":\"user\",\"content\":\"headtail\"}]"
+  },
+  {
+    "name": "9",
+    "preserve": true,
+    "messages": [
+      {
+        "role": "assistant",
+        "content": [],
+        "tool_calls": [
+          {
+            "function": {
+              "arguments": "{}",
+              "name": "echo"
+            },
+            "type": "function",
+            "id": "call"
+          }
+        ]
+      },
+      {
+        "role": "tool",
+        "tool_call_id": "call",
+        "content": null
+      }
+    ],
+    "output": [
+      {
+        "role": "assistant",
+        "tool_calls": [
+          {
+            "id": "call",
+            "type": "function",
+            "function": {
+              "name": "echo",
+              "arguments": "{}"
+            }
+          }
+        ]
+      },
+      {
+        "role": "tool",
+        "content": "[empty tool result]",
+        "tool_call_id": "call"
+      }
+    ],
+    "wire": "[{\"role\":\"assistant\",\"tool_calls\":[{\"id\":\"call\",\"type\":\"function\",\"function\":{\"name\":\"echo\",\"arguments\":\"{}\"}}]},{\"role\":\"tool\",\"content\":\"[empty tool result]\",\"tool_call_id\":\"call\"}]"
+  },
+  {
+    "name": "9",
+    "preserve": false,
+    "messages": [
+      {
+        "role": "assistant",
+        "content": [],
+        "tool_calls": [
+          {
+            "function": {
+              "arguments": "{}",
+              "name": "echo"
+            },
+            "type": "function",
+            "id": "call"
+          }
+        ]
+      },
+      {
+        "role": "tool",
+        "tool_call_id": "call",
+        "content": null
+      }
+    ],
+    "output": [
+      {
+        "role": "assistant",
+        "tool_calls": [
+          {
+            "id": "call",
+            "type": "function",
+            "function": {
+              "name": "echo",
+              "arguments": "{}"
+            }
+          }
+        ]
+      },
+      {
+        "role": "tool",
+        "content": "[empty tool result]",
+        "tool_call_id": "call"
+      }
+    ],
+    "wire": "[{\"role\":\"assistant\",\"tool_calls\":[{\"id\":\"call\",\"type\":\"function\",\"function\":{\"name\":\"echo\",\"arguments\":\"{}\"}}]},{\"role\":\"tool\",\"content\":\"[empty tool result]\",\"tool_call_id\":\"call\"}]"
+  },
+  {
+    "name": "10",
+    "preserve": true,
+    "messages": [
+      {
+        "role": "assistant",
+        "reasoning_details": [
+          {
+            "signature": "sig",
+            "thinking": "proof",
+            "type": "thinking"
+          }
+        ],
+        "tool_calls": [
+          {
+            "z": 7,
+            "function": {
+              "z": 3,
+              "arguments": "{}",
+              "name": "echo"
+            },
+            "type": "function",
+            "id": "call"
+          }
+        ]
+      }
+    ],
+    "output": [
+      {
+        "role": "assistant",
+        "reasoning_details": [
+          {
+            "type": "thinking",
+            "thinking": "proof",
+            "signature": "sig"
+          }
+        ],
+        "tool_calls": [
+          {
+            "id": "call",
+            "type": "function",
+            "function": {
+              "name": "echo",
+              "arguments": "{}",
+              "z": 3
+            },
+            "z": 7
+          }
+        ]
+      }
+    ],
+    "wire": "[{\"role\":\"assistant\",\"reasoning_details\":[{\"type\":\"thinking\",\"thinking\":\"proof\",\"signature\":\"sig\"}],\"tool_calls\":[{\"id\":\"call\",\"type\":\"function\",\"function\":{\"name\":\"echo\",\"arguments\":\"{}\",\"z\":3},\"z\":7}]}]"
+  },
+  {
+    "name": "10",
+    "preserve": false,
+    "messages": [
+      {
+        "role": "assistant",
+        "reasoning_details": [
+          {
+            "signature": "sig",
+            "thinking": "proof",
+            "type": "thinking"
+          }
+        ],
+        "tool_calls": [
+          {
+            "z": 7,
+            "function": {
+              "z": 3,
+              "arguments": "{}",
+              "name": "echo"
+            },
+            "type": "function",
+            "id": "call"
+          }
+        ]
+      }
+    ],
+    "output": [
+      {
+        "role": "assistant",
+        "reasoning_details": [
+          {
+            "type": "thinking",
+            "thinking": "proof",
+            "signature": "sig"
+          }
+        ],
+        "tool_calls": [
+          {
+            "id": "call",
+            "type": "function",
+            "function": {
+              "name": "echo",
+              "arguments": "{}",
+              "z": 3
+            },
+            "z": 7
+          }
+        ]
+      }
+    ],
+    "wire": "[{\"role\":\"assistant\",\"reasoning_details\":[{\"type\":\"thinking\",\"thinking\":\"proof\",\"signature\":\"sig\"}],\"tool_calls\":[{\"id\":\"call\",\"type\":\"function\",\"function\":{\"name\":\"echo\",\"arguments\":\"{}\",\"z\":3},\"z\":7}]}]"
+  },
+  {
+    "name": "11",
+    "preserve": true,
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "\t"
+          }
+        ]
+      }
+    ],
+    "output": [
+      {
+        "role": "user",
+        "content": "[empty message]"
+      }
+    ],
+    "wire": "[{\"role\":\"user\",\"content\":\"[empty message]\"}]"
+  },
+  {
+    "name": "11",
+    "preserve": false,
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "\t"
+          }
+        ]
+      }
+    ],
+    "output": [
+      {
+        "role": "user",
+        "content": "[empty message]"
+      }
+    ],
+    "wire": "[{\"role\":\"user\",\"content\":\"[empty message]\"}]"
+  },
+  {
+    "name": "12",
+    "preserve": true,
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "\n"
+          }
+        ]
+      }
+    ],
+    "output": [
+      {
+        "role": "user",
+        "content": "[empty message]"
+      }
+    ],
+    "wire": "[{\"role\":\"user\",\"content\":\"[empty message]\"}]"
+  },
+  {
+    "name": "12",
+    "preserve": false,
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "\n"
+          }
+        ]
+      }
+    ],
+    "output": [
+      {
+        "role": "user",
+        "content": "[empty message]"
+      }
+    ],
+    "wire": "[{\"role\":\"user\",\"content\":\"[empty message]\"}]"
+  },
+  {
+    "name": "13",
+    "preserve": true,
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "\u000b"
+          }
+        ]
+      }
+    ],
+    "output": [
+      {
+        "role": "user",
+        "content": "[empty message]"
+      }
+    ],
+    "wire": "[{\"role\":\"user\",\"content\":\"[empty message]\"}]"
+  },
+  {
+    "name": "13",
+    "preserve": false,
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "\u000b"
+          }
+        ]
+      }
+    ],
+    "output": [
+      {
+        "role": "user",
+        "content": "[empty message]"
+      }
+    ],
+    "wire": "[{\"role\":\"user\",\"content\":\"[empty message]\"}]"
+  },
+  {
+    "name": "14",
+    "preserve": true,
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "\f"
+          }
+        ]
+      }
+    ],
+    "output": [
+      {
+        "role": "user",
+        "content": "[empty message]"
+      }
+    ],
+    "wire": "[{\"role\":\"user\",\"content\":\"[empty message]\"}]"
+  },
+  {
+    "name": "14",
+    "preserve": false,
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "\f"
+          }
+        ]
+      }
+    ],
+    "output": [
+      {
+        "role": "user",
+        "content": "[empty message]"
+      }
+    ],
+    "wire": "[{\"role\":\"user\",\"content\":\"[empty message]\"}]"
+  },
+  {
+    "name": "15",
+    "preserve": true,
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "\r"
+          }
+        ]
+      }
+    ],
+    "output": [
+      {
+        "role": "user",
+        "content": "[empty message]"
+      }
+    ],
+    "wire": "[{\"role\":\"user\",\"content\":\"[empty message]\"}]"
+  },
+  {
+    "name": "15",
+    "preserve": false,
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "\r"
+          }
+        ]
+      }
+    ],
+    "output": [
+      {
+        "role": "user",
+        "content": "[empty message]"
+      }
+    ],
+    "wire": "[{\"role\":\"user\",\"content\":\"[empty message]\"}]"
+  },
+  {
+    "name": "16",
+    "preserve": true,
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "\u001c"
+          }
+        ]
+      }
+    ],
+    "output": [
+      {
+        "role": "user",
+        "content": "[empty message]"
+      }
+    ],
+    "wire": "[{\"role\":\"user\",\"content\":\"[empty message]\"}]"
+  },
+  {
+    "name": "16",
+    "preserve": false,
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "\u001c"
+          }
+        ]
+      }
+    ],
+    "output": [
+      {
+        "role": "user",
+        "content": "[empty message]"
+      }
+    ],
+    "wire": "[{\"role\":\"user\",\"content\":\"[empty message]\"}]"
+  },
+  {
+    "name": "17",
+    "preserve": true,
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "\u001d"
+          }
+        ]
+      }
+    ],
+    "output": [
+      {
+        "role": "user",
+        "content": "[empty message]"
+      }
+    ],
+    "wire": "[{\"role\":\"user\",\"content\":\"[empty message]\"}]"
+  },
+  {
+    "name": "17",
+    "preserve": false,
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "\u001d"
+          }
+        ]
+      }
+    ],
+    "output": [
+      {
+        "role": "user",
+        "content": "[empty message]"
+      }
+    ],
+    "wire": "[{\"role\":\"user\",\"content\":\"[empty message]\"}]"
+  },
+  {
+    "name": "18",
+    "preserve": true,
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "\u001e"
+          }
+        ]
+      }
+    ],
+    "output": [
+      {
+        "role": "user",
+        "content": "[empty message]"
+      }
+    ],
+    "wire": "[{\"role\":\"user\",\"content\":\"[empty message]\"}]"
+  },
+  {
+    "name": "18",
+    "preserve": false,
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "\u001e"
+          }
+        ]
+      }
+    ],
+    "output": [
+      {
+        "role": "user",
+        "content": "[empty message]"
+      }
+    ],
+    "wire": "[{\"role\":\"user\",\"content\":\"[empty message]\"}]"
+  },
+  {
+    "name": "19",
+    "preserve": true,
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "\u001f"
+          }
+        ]
+      }
+    ],
+    "output": [
+      {
+        "role": "user",
+        "content": "[empty message]"
+      }
+    ],
+    "wire": "[{\"role\":\"user\",\"content\":\"[empty message]\"}]"
+  },
+  {
+    "name": "19",
+    "preserve": false,
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "\u001f"
+          }
+        ]
+      }
+    ],
+    "output": [
+      {
+        "role": "user",
+        "content": "[empty message]"
+      }
+    ],
+    "wire": "[{\"role\":\"user\",\"content\":\"[empty message]\"}]"
+  },
+  {
+    "name": "20",
+    "preserve": true,
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": " "
+          }
+        ]
+      }
+    ],
+    "output": [
+      {
+        "role": "user",
+        "content": "[empty message]"
+      }
+    ],
+    "wire": "[{\"role\":\"user\",\"content\":\"[empty message]\"}]"
+  },
+  {
+    "name": "20",
+    "preserve": false,
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": " "
+          }
+        ]
+      }
+    ],
+    "output": [
+      {
+        "role": "user",
+        "content": "[empty message]"
+      }
+    ],
+    "wire": "[{\"role\":\"user\",\"content\":\"[empty message]\"}]"
+  },
+  {
+    "name": "21",
+    "preserve": true,
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": ""
+          }
+        ]
+      }
+    ],
+    "output": [
+      {
+        "role": "user",
+        "content": "[empty message]"
+      }
+    ],
+    "wire": "[{\"role\":\"user\",\"content\":\"[empty message]\"}]"
+  },
+  {
+    "name": "21",
+    "preserve": false,
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": ""
+          }
+        ]
+      }
+    ],
+    "output": [
+      {
+        "role": "user",
+        "content": "[empty message]"
+      }
+    ],
+    "wire": "[{\"role\":\"user\",\"content\":\"[empty message]\"}]"
+  },
+  {
+    "name": "22",
+    "preserve": true,
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": " "
+          }
+        ]
+      }
+    ],
+    "output": [
+      {
+        "role": "user",
+        "content": "[empty message]"
+      }
+    ],
+    "wire": "[{\"role\":\"user\",\"content\":\"[empty message]\"}]"
+  },
+  {
+    "name": "22",
+    "preserve": false,
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": " "
+          }
+        ]
+      }
+    ],
+    "output": [
+      {
+        "role": "user",
+        "content": "[empty message]"
+      }
+    ],
+    "wire": "[{\"role\":\"user\",\"content\":\"[empty message]\"}]"
+  },
+  {
+    "name": "23",
+    "preserve": true,
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": " "
+          }
+        ]
+      }
+    ],
+    "output": [
+      {
+        "role": "user",
+        "content": "[empty message]"
+      }
+    ],
+    "wire": "[{\"role\":\"user\",\"content\":\"[empty message]\"}]"
+  },
+  {
+    "name": "23",
+    "preserve": false,
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": " "
+          }
+        ]
+      }
+    ],
+    "output": [
+      {
+        "role": "user",
+        "content": "[empty message]"
+      }
+    ],
+    "wire": "[{\"role\":\"user\",\"content\":\"[empty message]\"}]"
+  },
+  {
+    "name": "24",
+    "preserve": true,
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": " "
+          }
+        ]
+      }
+    ],
+    "output": [
+      {
+        "role": "user",
+        "content": "[empty message]"
+      }
+    ],
+    "wire": "[{\"role\":\"user\",\"content\":\"[empty message]\"}]"
+  },
+  {
+    "name": "24",
+    "preserve": false,
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": " "
+          }
+        ]
+      }
+    ],
+    "output": [
+      {
+        "role": "user",
+        "content": "[empty message]"
+      }
+    ],
+    "wire": "[{\"role\":\"user\",\"content\":\"[empty message]\"}]"
+  },
+  {
+    "name": "25",
+    "preserve": true,
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": " "
+          }
+        ]
+      }
+    ],
+    "output": [
+      {
+        "role": "user",
+        "content": "[empty message]"
+      }
+    ],
+    "wire": "[{\"role\":\"user\",\"content\":\"[empty message]\"}]"
+  },
+  {
+    "name": "25",
+    "preserve": false,
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": " "
+          }
+        ]
+      }
+    ],
+    "output": [
+      {
+        "role": "user",
+        "content": "[empty message]"
+      }
+    ],
+    "wire": "[{\"role\":\"user\",\"content\":\"[empty message]\"}]"
+  },
+  {
+    "name": "26",
+    "preserve": true,
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": " "
+          }
+        ]
+      }
+    ],
+    "output": [
+      {
+        "role": "user",
+        "content": "[empty message]"
+      }
+    ],
+    "wire": "[{\"role\":\"user\",\"content\":\"[empty message]\"}]"
+  },
+  {
+    "name": "26",
+    "preserve": false,
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": " "
+          }
+        ]
+      }
+    ],
+    "output": [
+      {
+        "role": "user",
+        "content": "[empty message]"
+      }
+    ],
+    "wire": "[{\"role\":\"user\",\"content\":\"[empty message]\"}]"
+  },
+  {
+    "name": "27",
+    "preserve": true,
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": " "
+          }
+        ]
+      }
+    ],
+    "output": [
+      {
+        "role": "user",
+        "content": "[empty message]"
+      }
+    ],
+    "wire": "[{\"role\":\"user\",\"content\":\"[empty message]\"}]"
+  },
+  {
+    "name": "27",
+    "preserve": false,
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": " "
+          }
+        ]
+      }
+    ],
+    "output": [
+      {
+        "role": "user",
+        "content": "[empty message]"
+      }
+    ],
+    "wire": "[{\"role\":\"user\",\"content\":\"[empty message]\"}]"
+  },
+  {
+    "name": "28",
+    "preserve": true,
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": " "
+          }
+        ]
+      }
+    ],
+    "output": [
+      {
+        "role": "user",
+        "content": "[empty message]"
+      }
+    ],
+    "wire": "[{\"role\":\"user\",\"content\":\"[empty message]\"}]"
+  },
+  {
+    "name": "28",
+    "preserve": false,
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": " "
+          }
+        ]
+      }
+    ],
+    "output": [
+      {
+        "role": "user",
+        "content": "[empty message]"
+      }
+    ],
+    "wire": "[{\"role\":\"user\",\"content\":\"[empty message]\"}]"
+  },
+  {
+    "name": "29",
+    "preserve": true,
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": " "
+          }
+        ]
+      }
+    ],
+    "output": [
+      {
+        "role": "user",
+        "content": "[empty message]"
+      }
+    ],
+    "wire": "[{\"role\":\"user\",\"content\":\"[empty message]\"}]"
+  },
+  {
+    "name": "29",
+    "preserve": false,
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": " "
+          }
+        ]
+      }
+    ],
+    "output": [
+      {
+        "role": "user",
+        "content": "[empty message]"
+      }
+    ],
+    "wire": "[{\"role\":\"user\",\"content\":\"[empty message]\"}]"
+  },
+  {
+    "name": "30",
+    "preserve": true,
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": " "
+          }
+        ]
+      }
+    ],
+    "output": [
+      {
+        "role": "user",
+        "content": "[empty message]"
+      }
+    ],
+    "wire": "[{\"role\":\"user\",\"content\":\"[empty message]\"}]"
+  },
+  {
+    "name": "30",
+    "preserve": false,
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": " "
+          }
+        ]
+      }
+    ],
+    "output": [
+      {
+        "role": "user",
+        "content": "[empty message]"
+      }
+    ],
+    "wire": "[{\"role\":\"user\",\"content\":\"[empty message]\"}]"
+  },
+  {
+    "name": "31",
+    "preserve": true,
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": " "
+          }
+        ]
+      }
+    ],
+    "output": [
+      {
+        "role": "user",
+        "content": "[empty message]"
+      }
+    ],
+    "wire": "[{\"role\":\"user\",\"content\":\"[empty message]\"}]"
+  },
+  {
+    "name": "31",
+    "preserve": false,
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": " "
+          }
+        ]
+      }
+    ],
+    "output": [
+      {
+        "role": "user",
+        "content": "[empty message]"
+      }
+    ],
+    "wire": "[{\"role\":\"user\",\"content\":\"[empty message]\"}]"
+  },
+  {
+    "name": "32",
+    "preserve": true,
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": " "
+          }
+        ]
+      }
+    ],
+    "output": [
+      {
+        "role": "user",
+        "content": "[empty message]"
+      }
+    ],
+    "wire": "[{\"role\":\"user\",\"content\":\"[empty message]\"}]"
+  },
+  {
+    "name": "32",
+    "preserve": false,
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": " "
+          }
+        ]
+      }
+    ],
+    "output": [
+      {
+        "role": "user",
+        "content": "[empty message]"
+      }
+    ],
+    "wire": "[{\"role\":\"user\",\"content\":\"[empty message]\"}]"
+  },
+  {
+    "name": "33",
+    "preserve": true,
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": " "
+          }
+        ]
+      }
+    ],
+    "output": [
+      {
+        "role": "user",
+        "content": "[empty message]"
+      }
+    ],
+    "wire": "[{\"role\":\"user\",\"content\":\"[empty message]\"}]"
+  },
+  {
+    "name": "33",
+    "preserve": false,
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": " "
+          }
+        ]
+      }
+    ],
+    "output": [
+      {
+        "role": "user",
+        "content": "[empty message]"
+      }
+    ],
+    "wire": "[{\"role\":\"user\",\"content\":\"[empty message]\"}]"
+  },
+  {
+    "name": "34",
+    "preserve": true,
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": " "
+          }
+        ]
+      }
+    ],
+    "output": [
+      {
+        "role": "user",
+        "content": "[empty message]"
+      }
+    ],
+    "wire": "[{\"role\":\"user\",\"content\":\"[empty message]\"}]"
+  },
+  {
+    "name": "34",
+    "preserve": false,
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": " "
+          }
+        ]
+      }
+    ],
+    "output": [
+      {
+        "role": "user",
+        "content": "[empty message]"
+      }
+    ],
+    "wire": "[{\"role\":\"user\",\"content\":\"[empty message]\"}]"
+  },
+  {
+    "name": "35",
+    "preserve": true,
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": " "
+          }
+        ]
+      }
+    ],
+    "output": [
+      {
+        "role": "user",
+        "content": "[empty message]"
+      }
+    ],
+    "wire": "[{\"role\":\"user\",\"content\":\"[empty message]\"}]"
+  },
+  {
+    "name": "35",
+    "preserve": false,
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": " "
+          }
+        ]
+      }
+    ],
+    "output": [
+      {
+        "role": "user",
+        "content": "[empty message]"
+      }
+    ],
+    "wire": "[{\"role\":\"user\",\"content\":\"[empty message]\"}]"
+  },
+  {
+    "name": "36",
+    "preserve": true,
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": " "
+          }
+        ]
+      }
+    ],
+    "output": [
+      {
+        "role": "user",
+        "content": "[empty message]"
+      }
+    ],
+    "wire": "[{\"role\":\"user\",\"content\":\"[empty message]\"}]"
+  },
+  {
+    "name": "36",
+    "preserve": false,
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": " "
+          }
+        ]
+      }
+    ],
+    "output": [
+      {
+        "role": "user",
+        "content": "[empty message]"
+      }
+    ],
+    "wire": "[{\"role\":\"user\",\"content\":\"[empty message]\"}]"
+  },
+  {
+    "name": "37",
+    "preserve": true,
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": " "
+          }
+        ]
+      }
+    ],
+    "output": [
+      {
+        "role": "user",
+        "content": "[empty message]"
+      }
+    ],
+    "wire": "[{\"role\":\"user\",\"content\":\"[empty message]\"}]"
+  },
+  {
+    "name": "37",
+    "preserve": false,
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": " "
+          }
+        ]
+      }
+    ],
+    "output": [
+      {
+        "role": "user",
+        "content": "[empty message]"
+      }
+    ],
+    "wire": "[{\"role\":\"user\",\"content\":\"[empty message]\"}]"
+  },
+  {
+    "name": "38",
+    "preserve": true,
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": " "
+          }
+        ]
+      }
+    ],
+    "output": [
+      {
+        "role": "user",
+        "content": "[empty message]"
+      }
+    ],
+    "wire": "[{\"role\":\"user\",\"content\":\"[empty message]\"}]"
+  },
+  {
+    "name": "38",
+    "preserve": false,
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": " "
+          }
+        ]
+      }
+    ],
+    "output": [
+      {
+        "role": "user",
+        "content": "[empty message]"
+      }
+    ],
+    "wire": "[{\"role\":\"user\",\"content\":\"[empty message]\"}]"
+  },
+  {
+    "name": "39",
+    "preserve": true,
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "　"
+          }
+        ]
+      }
+    ],
+    "output": [
+      {
+        "role": "user",
+        "content": "[empty message]"
+      }
+    ],
+    "wire": "[{\"role\":\"user\",\"content\":\"[empty message]\"}]"
+  },
+  {
+    "name": "39",
+    "preserve": false,
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "　"
+          }
+        ]
+      }
+    ],
+    "output": [
+      {
+        "role": "user",
+        "content": "[empty message]"
+      }
+    ],
+    "wire": "[{\"role\":\"user\",\"content\":\"[empty message]\"}]"
+  },
+  {
+    "name": "40",
+    "preserve": true,
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "head"
+          },
+          {
+            "type": "text",
+            "text": " "
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      },
+      {
+        "role": "tool",
+        "content": [
+          {
+            "type": "text",
+            "text": "head"
+          },
+          {
+            "type": "text",
+            "text": " "
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ],
+        "tool_call_id": "call",
+        "_contextComposer": true
+      },
+      {
+        "role": "system",
+        "content": ""
+      },
+      {
+        "role": "tool",
+        "content": [
+          {
+            "type": "text",
+            "text": "head"
+          },
+          {
+            "type": "text",
+            "text": " "
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ],
+        "tool_call_id": "call"
+      },
+      {
+        "role": "tool",
+        "content": [
+          {
+            "type": "text",
+            "text": "cached"
+          },
+          {
+            "type": "text",
+            "text": "keep",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          }
+        ],
+        "tool_call_id": "call"
+      },
+      {
+        "role": "tool",
+        "content": [
+          {
+            "type": "text",
+            "text": "head"
+          },
+          {
+            "type": "text",
+            "text": " "
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ],
+        "tool_call_id": "call"
+      }
+    ],
+    "output": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "head "
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      },
+      {
+        "role": "tool",
+        "content": [
+          {
+            "type": "text",
+            "text": "head "
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ],
+        "tool_call_id": "call"
+      },
+      {
+        "role": "system",
+        "content": ""
+      },
+      {
+        "role": "tool",
+        "content": [
+          {
+            "type": "text",
+            "text": "head "
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ],
+        "tool_call_id": "call"
+      },
+      {
+        "role": "tool",
+        "content": [
+          {
+            "type": "text",
+            "text": "cached"
+          },
+          {
+            "type": "text",
+            "text": "keep",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          }
+        ],
+        "tool_call_id": "call"
+      },
+      {
+        "role": "tool",
+        "content": [
+          {
+            "type": "text",
+            "text": "head "
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ],
+        "tool_call_id": "call"
+      }
+    ],
+    "wire": "[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"head \"},{\"type\":\"text\",\"text\":\"tail\"}]},{\"role\":\"tool\",\"content\":[{\"type\":\"text\",\"text\":\"head \"},{\"type\":\"text\",\"text\":\"tail\"}],\"tool_call_id\":\"call\"},{\"role\":\"system\",\"content\":\"\"},{\"role\":\"tool\",\"content\":[{\"type\":\"text\",\"text\":\"head \"},{\"type\":\"text\",\"text\":\"tail\"}],\"tool_call_id\":\"call\"},{\"role\":\"tool\",\"content\":[{\"type\":\"text\",\"text\":\"cached\"},{\"type\":\"text\",\"text\":\"keep\",\"cache_control\":{\"type\":\"ephemeral\"}}],\"tool_call_id\":\"call\"},{\"role\":\"tool\",\"content\":[{\"type\":\"text\",\"text\":\"head \"},{\"type\":\"text\",\"text\":\"tail\"}],\"tool_call_id\":\"call\"}]"
+  },
+  {
+    "name": "40",
+    "preserve": false,
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "head"
+          },
+          {
+            "type": "text",
+            "text": " "
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      },
+      {
+        "role": "tool",
+        "content": [
+          {
+            "type": "text",
+            "text": "head"
+          },
+          {
+            "type": "text",
+            "text": " "
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ],
+        "tool_call_id": "call",
+        "_contextComposer": true
+      },
+      {
+        "role": "system",
+        "content": ""
+      },
+      {
+        "role": "tool",
+        "content": [
+          {
+            "type": "text",
+            "text": "head"
+          },
+          {
+            "type": "text",
+            "text": " "
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ],
+        "tool_call_id": "call"
+      },
+      {
+        "role": "tool",
+        "content": [
+          {
+            "type": "text",
+            "text": "cached"
+          },
+          {
+            "type": "text",
+            "text": "keep",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          }
+        ],
+        "tool_call_id": "call"
+      },
+      {
+        "role": "tool",
+        "content": [
+          {
+            "type": "text",
+            "text": "head"
+          },
+          {
+            "type": "text",
+            "text": " "
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ],
+        "tool_call_id": "call"
+      }
+    ],
+    "output": [
+      {
+        "role": "user",
+        "content": "head tail"
+      },
+      {
+        "role": "tool",
+        "content": "head tail",
+        "tool_call_id": "call"
+      },
+      {
+        "role": "system",
+        "content": ""
+      },
+      {
+        "role": "tool",
+        "content": "head tail",
+        "tool_call_id": "call"
+      },
+      {
+        "role": "tool",
+        "content": [
+          {
+            "type": "text",
+            "text": "cached"
+          },
+          {
+            "type": "text",
+            "text": "keep",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          }
+        ],
+        "tool_call_id": "call"
+      },
+      {
+        "role": "tool",
+        "content": "head tail",
+        "tool_call_id": "call"
+      }
+    ],
+    "wire": "[{\"role\":\"user\",\"content\":\"head tail\"},{\"role\":\"tool\",\"content\":\"head tail\",\"tool_call_id\":\"call\"},{\"role\":\"system\",\"content\":\"\"},{\"role\":\"tool\",\"content\":\"head tail\",\"tool_call_id\":\"call\"},{\"role\":\"tool\",\"content\":[{\"type\":\"text\",\"text\":\"cached\"},{\"type\":\"text\",\"text\":\"keep\",\"cache_control\":{\"type\":\"ephemeral\"}}],\"tool_call_id\":\"call\"},{\"role\":\"tool\",\"content\":\"head tail\",\"tool_call_id\":\"call\"}]"
+  },
+  {
+    "name": "41",
+    "preserve": true,
+    "messages": [
+      {
+        "role": "tool",
+        "content": [
+          {
+            "type": "text",
+            "text": "cached"
+          },
+          {
+            "type": "text",
+            "text": "keep",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          }
+        ],
+        "tool_call_id": "call"
+      },
+      {
+        "role": "tool",
+        "content": "汉字 🦀",
+        "tool_call_id": "call"
+      },
+      {
+        "role": "system",
+        "content": [
+          {
+            "type": "text",
+            "text": "\u001c"
+          },
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,cHJvYmU="
+            }
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      },
+      {
+        "role": "user",
+        "content": "汉字 🦀"
+      },
+      {
+        "role": "system",
+        "content": ""
+      },
+      {
+        "role": "system",
+        "content": [
+          {
+            "type": "text",
+            "text": "\u001c"
+          },
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,cHJvYmU="
+            }
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      }
+    ],
+    "output": [
+      {
+        "role": "tool",
+        "content": [
+          {
+            "type": "text",
+            "text": "cached"
+          },
+          {
+            "type": "text",
+            "text": "keep",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          }
+        ],
+        "tool_call_id": "call"
+      },
+      {
+        "role": "tool",
+        "content": "汉字 🦀",
+        "tool_call_id": "call"
+      },
+      {
+        "role": "system",
+        "content": [
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,cHJvYmU="
+            }
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      },
+      {
+        "role": "user",
+        "content": "汉字 🦀"
+      },
+      {
+        "role": "system",
+        "content": ""
+      },
+      {
+        "role": "system",
+        "content": [
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,cHJvYmU="
+            }
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      }
+    ],
+    "wire": "[{\"role\":\"tool\",\"content\":[{\"type\":\"text\",\"text\":\"cached\"},{\"type\":\"text\",\"text\":\"keep\",\"cache_control\":{\"type\":\"ephemeral\"}}],\"tool_call_id\":\"call\"},{\"role\":\"tool\",\"content\":\"汉字 🦀\",\"tool_call_id\":\"call\"},{\"role\":\"system\",\"content\":[{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/png;base64,cHJvYmU=\"}},{\"type\":\"text\",\"text\":\"tail\"}]},{\"role\":\"user\",\"content\":\"汉字 🦀\"},{\"role\":\"system\",\"content\":\"\"},{\"role\":\"system\",\"content\":[{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/png;base64,cHJvYmU=\"}},{\"type\":\"text\",\"text\":\"tail\"}]}]"
+  },
+  {
+    "name": "41",
+    "preserve": false,
+    "messages": [
+      {
+        "role": "tool",
+        "content": [
+          {
+            "type": "text",
+            "text": "cached"
+          },
+          {
+            "type": "text",
+            "text": "keep",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          }
+        ],
+        "tool_call_id": "call"
+      },
+      {
+        "role": "tool",
+        "content": "汉字 🦀",
+        "tool_call_id": "call"
+      },
+      {
+        "role": "system",
+        "content": [
+          {
+            "type": "text",
+            "text": "\u001c"
+          },
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,cHJvYmU="
+            }
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      },
+      {
+        "role": "user",
+        "content": "汉字 🦀"
+      },
+      {
+        "role": "system",
+        "content": ""
+      },
+      {
+        "role": "system",
+        "content": [
+          {
+            "type": "text",
+            "text": "\u001c"
+          },
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,cHJvYmU="
+            }
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      }
+    ],
+    "output": [
+      {
+        "role": "tool",
+        "content": [
+          {
+            "type": "text",
+            "text": "cached"
+          },
+          {
+            "type": "text",
+            "text": "keep",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          }
+        ],
+        "tool_call_id": "call"
+      },
+      {
+        "role": "tool",
+        "content": "汉字 🦀",
+        "tool_call_id": "call"
+      },
+      {
+        "role": "system",
+        "content": [
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,cHJvYmU="
+            }
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      },
+      {
+        "role": "user",
+        "content": "汉字 🦀"
+      },
+      {
+        "role": "system",
+        "content": ""
+      },
+      {
+        "role": "system",
+        "content": [
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,cHJvYmU="
+            }
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      }
+    ],
+    "wire": "[{\"role\":\"tool\",\"content\":[{\"type\":\"text\",\"text\":\"cached\"},{\"type\":\"text\",\"text\":\"keep\",\"cache_control\":{\"type\":\"ephemeral\"}}],\"tool_call_id\":\"call\"},{\"role\":\"tool\",\"content\":\"汉字 🦀\",\"tool_call_id\":\"call\"},{\"role\":\"system\",\"content\":[{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/png;base64,cHJvYmU=\"}},{\"type\":\"text\",\"text\":\"tail\"}]},{\"role\":\"user\",\"content\":\"汉字 🦀\"},{\"role\":\"system\",\"content\":\"\"},{\"role\":\"system\",\"content\":[{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/png;base64,cHJvYmU=\"}},{\"type\":\"text\",\"text\":\"tail\"}]}]"
+  },
+  {
+    "name": "42",
+    "preserve": true,
+    "messages": [
+      {
+        "role": "tool",
+        "content": [
+          {
+            "type": "text",
+            "text": "cached"
+          },
+          {
+            "type": "text",
+            "text": "keep",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          }
+        ],
+        "tool_call_id": "call",
+        "_contextComposer": true
+      }
+    ],
+    "output": [
+      {
+        "role": "tool",
+        "content": [
+          {
+            "type": "text",
+            "text": "cached"
+          },
+          {
+            "type": "text",
+            "text": "keep",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          }
+        ],
+        "tool_call_id": "call"
+      }
+    ],
+    "wire": "[{\"role\":\"tool\",\"content\":[{\"type\":\"text\",\"text\":\"cached\"},{\"type\":\"text\",\"text\":\"keep\",\"cache_control\":{\"type\":\"ephemeral\"}}],\"tool_call_id\":\"call\"}]"
+  },
+  {
+    "name": "42",
+    "preserve": false,
+    "messages": [
+      {
+        "role": "tool",
+        "content": [
+          {
+            "type": "text",
+            "text": "cached"
+          },
+          {
+            "type": "text",
+            "text": "keep",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          }
+        ],
+        "tool_call_id": "call",
+        "_contextComposer": true
+      }
+    ],
+    "output": [
+      {
+        "role": "tool",
+        "content": [
+          {
+            "type": "text",
+            "text": "cached"
+          },
+          {
+            "type": "text",
+            "text": "keep",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          }
+        ],
+        "tool_call_id": "call"
+      }
+    ],
+    "wire": "[{\"role\":\"tool\",\"content\":[{\"type\":\"text\",\"text\":\"cached\"},{\"type\":\"text\",\"text\":\"keep\",\"cache_control\":{\"type\":\"ephemeral\"}}],\"tool_call_id\":\"call\"}]"
+  },
+  {
+    "name": "43",
+    "preserve": true,
+    "messages": [
+      {
+        "role": "tool",
+        "content": [
+          {
+            "type": "text",
+            "text": "cached"
+          },
+          {
+            "type": "text",
+            "text": "keep",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          }
+        ],
+        "tool_call_id": "call",
+        "_contextComposer": true
+      },
+      {
+        "role": "system",
+        "content": [
+          {
+            "type": "text",
+            "text": "cached"
+          },
+          {
+            "type": "text",
+            "text": "keep",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          }
+        ]
+      },
+      {
+        "role": "assistant",
+        "content": ""
+      },
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "head"
+          },
+          {
+            "type": "text",
+            "text": " "
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      },
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "\u001c"
+          },
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,cHJvYmU="
+            }
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      },
+      {
+        "role": "system",
+        "content": [
+          {
+            "type": "text",
+            "text": "head"
+          },
+          {
+            "type": "text",
+            "text": " "
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ],
+        "_contextComposer": true
+      }
+    ],
+    "output": [
+      {
+        "role": "tool",
+        "content": [
+          {
+            "type": "text",
+            "text": "cached"
+          },
+          {
+            "type": "text",
+            "text": "keep",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          }
+        ],
+        "tool_call_id": "call"
+      },
+      {
+        "role": "system",
+        "content": [
+          {
+            "type": "text",
+            "text": "cached"
+          },
+          {
+            "type": "text",
+            "text": "keep",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          }
+        ]
+      },
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "head "
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          },
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,cHJvYmU="
+            }
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      },
+      {
+        "role": "system",
+        "content": [
+          {
+            "type": "text",
+            "text": "head "
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      }
+    ],
+    "wire": "[{\"role\":\"tool\",\"content\":[{\"type\":\"text\",\"text\":\"cached\"},{\"type\":\"text\",\"text\":\"keep\",\"cache_control\":{\"type\":\"ephemeral\"}}],\"tool_call_id\":\"call\"},{\"role\":\"system\",\"content\":[{\"type\":\"text\",\"text\":\"cached\"},{\"type\":\"text\",\"text\":\"keep\",\"cache_control\":{\"type\":\"ephemeral\"}}]},{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"head \"},{\"type\":\"text\",\"text\":\"tail\"},{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/png;base64,cHJvYmU=\"}},{\"type\":\"text\",\"text\":\"tail\"}]},{\"role\":\"system\",\"content\":[{\"type\":\"text\",\"text\":\"head \"},{\"type\":\"text\",\"text\":\"tail\"}]}]"
+  },
+  {
+    "name": "43",
+    "preserve": false,
+    "messages": [
+      {
+        "role": "tool",
+        "content": [
+          {
+            "type": "text",
+            "text": "cached"
+          },
+          {
+            "type": "text",
+            "text": "keep",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          }
+        ],
+        "tool_call_id": "call",
+        "_contextComposer": true
+      },
+      {
+        "role": "system",
+        "content": [
+          {
+            "type": "text",
+            "text": "cached"
+          },
+          {
+            "type": "text",
+            "text": "keep",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          }
+        ]
+      },
+      {
+        "role": "assistant",
+        "content": ""
+      },
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "head"
+          },
+          {
+            "type": "text",
+            "text": " "
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      },
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "\u001c"
+          },
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,cHJvYmU="
+            }
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      },
+      {
+        "role": "system",
+        "content": [
+          {
+            "type": "text",
+            "text": "head"
+          },
+          {
+            "type": "text",
+            "text": " "
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ],
+        "_contextComposer": true
+      }
+    ],
+    "output": [
+      {
+        "role": "tool",
+        "content": [
+          {
+            "type": "text",
+            "text": "cached"
+          },
+          {
+            "type": "text",
+            "text": "keep",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          }
+        ],
+        "tool_call_id": "call"
+      },
+      {
+        "role": "system",
+        "content": [
+          {
+            "type": "text",
+            "text": "cached"
+          },
+          {
+            "type": "text",
+            "text": "keep",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          }
+        ]
+      },
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "head "
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          },
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,cHJvYmU="
+            }
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      },
+      {
+        "role": "system",
+        "content": "head tail"
+      }
+    ],
+    "wire": "[{\"role\":\"tool\",\"content\":[{\"type\":\"text\",\"text\":\"cached\"},{\"type\":\"text\",\"text\":\"keep\",\"cache_control\":{\"type\":\"ephemeral\"}}],\"tool_call_id\":\"call\"},{\"role\":\"system\",\"content\":[{\"type\":\"text\",\"text\":\"cached\"},{\"type\":\"text\",\"text\":\"keep\",\"cache_control\":{\"type\":\"ephemeral\"}}]},{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"head \"},{\"type\":\"text\",\"text\":\"tail\"},{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/png;base64,cHJvYmU=\"}},{\"type\":\"text\",\"text\":\"tail\"}]},{\"role\":\"system\",\"content\":\"head tail\"}]"
+  },
+  {
+    "name": "44",
+    "preserve": true,
+    "messages": [
+      {
+        "role": "user",
+        "content": "汉字 🦀"
+      },
+      {
+        "role": "assistant",
+        "content": ""
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "cached"
+          },
+          {
+            "type": "text",
+            "text": "keep",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          }
+        ]
+      }
+    ],
+    "output": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "汉字 🦀"
+          },
+          {
+            "type": "text",
+            "text": "cached"
+          },
+          {
+            "type": "text",
+            "text": "keep",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          }
+        ]
+      }
+    ],
+    "wire": "[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"汉字 🦀\"},{\"type\":\"text\",\"text\":\"cached\"},{\"type\":\"text\",\"text\":\"keep\",\"cache_control\":{\"type\":\"ephemeral\"}}]}]"
+  },
+  {
+    "name": "44",
+    "preserve": false,
+    "messages": [
+      {
+        "role": "user",
+        "content": "汉字 🦀"
+      },
+      {
+        "role": "assistant",
+        "content": ""
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "cached"
+          },
+          {
+            "type": "text",
+            "text": "keep",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          }
+        ]
+      }
+    ],
+    "output": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "汉字 🦀"
+          },
+          {
+            "type": "text",
+            "text": "cached"
+          },
+          {
+            "type": "text",
+            "text": "keep",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          }
+        ]
+      }
+    ],
+    "wire": "[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"汉字 🦀\"},{\"type\":\"text\",\"text\":\"cached\"},{\"type\":\"text\",\"text\":\"keep\",\"cache_control\":{\"type\":\"ephemeral\"}}]}]"
+  },
+  {
+    "name": "45",
+    "preserve": true,
+    "messages": [
+      {
+        "role": "user",
+        "content": "汉字 🦀"
+      }
+    ],
+    "output": [
+      {
+        "role": "user",
+        "content": "汉字 🦀"
+      }
+    ],
+    "wire": "[{\"role\":\"user\",\"content\":\"汉字 🦀\"}]"
+  },
+  {
+    "name": "45",
+    "preserve": false,
+    "messages": [
+      {
+        "role": "user",
+        "content": "汉字 🦀"
+      }
+    ],
+    "output": [
+      {
+        "role": "user",
+        "content": "汉字 🦀"
+      }
+    ],
+    "wire": "[{\"role\":\"user\",\"content\":\"汉字 🦀\"}]"
+  },
+  {
+    "name": "46",
+    "preserve": true,
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "\u001c"
+          },
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,cHJvYmU="
+            }
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      }
+    ],
+    "output": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,cHJvYmU="
+            }
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      }
+    ],
+    "wire": "[{\"role\":\"user\",\"content\":[{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/png;base64,cHJvYmU=\"}},{\"type\":\"text\",\"text\":\"tail\"}]}]"
+  },
+  {
+    "name": "46",
+    "preserve": false,
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "\u001c"
+          },
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,cHJvYmU="
+            }
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      }
+    ],
+    "output": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,cHJvYmU="
+            }
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      }
+    ],
+    "wire": "[{\"role\":\"user\",\"content\":[{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/png;base64,cHJvYmU=\"}},{\"type\":\"text\",\"text\":\"tail\"}]}]"
+  },
+  {
+    "name": "47",
+    "preserve": true,
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "cached"
+          },
+          {
+            "type": "text",
+            "text": "keep",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          }
+        ]
+      },
+      {
+        "role": "user",
+        "content": "汉字 🦀"
+      },
+      {
+        "role": "tool",
+        "content": [
+          {
+            "type": "text",
+            "text": "head"
+          },
+          {
+            "type": "text",
+            "text": " "
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ],
+        "tool_call_id": "call"
+      },
+      {
+        "role": "user",
+        "content": ""
+      },
+      {
+        "role": "tool",
+        "content": [
+          {
+            "type": "text",
+            "text": "cached"
+          },
+          {
+            "type": "text",
+            "text": "keep",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          }
+        ],
+        "tool_call_id": "call"
+      },
+      {
+        "role": "system",
+        "content": null
+      },
+      {
+        "role": "system",
+        "content": ""
+      },
+      {
+        "role": "tool",
+        "content": "汉字 🦀",
+        "tool_call_id": "call",
+        "_contextComposer": true
+      }
+    ],
+    "output": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "cached"
+          },
+          {
+            "type": "text",
+            "text": "keep",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          },
+          {
+            "type": "text",
+            "text": "汉字 🦀"
+          }
+        ]
+      },
+      {
+        "role": "tool",
+        "content": [
+          {
+            "type": "text",
+            "text": "head "
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ],
+        "tool_call_id": "call"
+      },
+      {
+        "role": "user",
+        "content": "[empty message]"
+      },
+      {
+        "role": "tool",
+        "content": [
+          {
+            "type": "text",
+            "text": "cached"
+          },
+          {
+            "type": "text",
+            "text": "keep",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          }
+        ],
+        "tool_call_id": "call"
+      },
+      {
+        "role": "system",
+        "content": null
+      },
+      {
+        "role": "system",
+        "content": ""
+      },
+      {
+        "role": "tool",
+        "content": "汉字 🦀",
+        "tool_call_id": "call"
+      }
+    ],
+    "wire": "[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"cached\"},{\"type\":\"text\",\"text\":\"keep\",\"cache_control\":{\"type\":\"ephemeral\"}},{\"type\":\"text\",\"text\":\"汉字 🦀\"}]},{\"role\":\"tool\",\"content\":[{\"type\":\"text\",\"text\":\"head \"},{\"type\":\"text\",\"text\":\"tail\"}],\"tool_call_id\":\"call\"},{\"role\":\"user\",\"content\":\"[empty message]\"},{\"role\":\"tool\",\"content\":[{\"type\":\"text\",\"text\":\"cached\"},{\"type\":\"text\",\"text\":\"keep\",\"cache_control\":{\"type\":\"ephemeral\"}}],\"tool_call_id\":\"call\"},{\"role\":\"system\",\"content\":null},{\"role\":\"system\",\"content\":\"\"},{\"role\":\"tool\",\"content\":\"汉字 🦀\",\"tool_call_id\":\"call\"}]"
+  },
+  {
+    "name": "47",
+    "preserve": false,
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "cached"
+          },
+          {
+            "type": "text",
+            "text": "keep",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          }
+        ]
+      },
+      {
+        "role": "user",
+        "content": "汉字 🦀"
+      },
+      {
+        "role": "tool",
+        "content": [
+          {
+            "type": "text",
+            "text": "head"
+          },
+          {
+            "type": "text",
+            "text": " "
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ],
+        "tool_call_id": "call"
+      },
+      {
+        "role": "user",
+        "content": ""
+      },
+      {
+        "role": "tool",
+        "content": [
+          {
+            "type": "text",
+            "text": "cached"
+          },
+          {
+            "type": "text",
+            "text": "keep",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          }
+        ],
+        "tool_call_id": "call"
+      },
+      {
+        "role": "system",
+        "content": null
+      },
+      {
+        "role": "system",
+        "content": ""
+      },
+      {
+        "role": "tool",
+        "content": "汉字 🦀",
+        "tool_call_id": "call",
+        "_contextComposer": true
+      }
+    ],
+    "output": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "cached"
+          },
+          {
+            "type": "text",
+            "text": "keep",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          },
+          {
+            "type": "text",
+            "text": "汉字 🦀"
+          }
+        ]
+      },
+      {
+        "role": "tool",
+        "content": "head tail",
+        "tool_call_id": "call"
+      },
+      {
+        "role": "user",
+        "content": "[empty message]"
+      },
+      {
+        "role": "tool",
+        "content": [
+          {
+            "type": "text",
+            "text": "cached"
+          },
+          {
+            "type": "text",
+            "text": "keep",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          }
+        ],
+        "tool_call_id": "call"
+      },
+      {
+        "role": "system",
+        "content": null
+      },
+      {
+        "role": "system",
+        "content": ""
+      },
+      {
+        "role": "tool",
+        "content": "汉字 🦀",
+        "tool_call_id": "call"
+      }
+    ],
+    "wire": "[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"cached\"},{\"type\":\"text\",\"text\":\"keep\",\"cache_control\":{\"type\":\"ephemeral\"}},{\"type\":\"text\",\"text\":\"汉字 🦀\"}]},{\"role\":\"tool\",\"content\":\"head tail\",\"tool_call_id\":\"call\"},{\"role\":\"user\",\"content\":\"[empty message]\"},{\"role\":\"tool\",\"content\":[{\"type\":\"text\",\"text\":\"cached\"},{\"type\":\"text\",\"text\":\"keep\",\"cache_control\":{\"type\":\"ephemeral\"}}],\"tool_call_id\":\"call\"},{\"role\":\"system\",\"content\":null},{\"role\":\"system\",\"content\":\"\"},{\"role\":\"tool\",\"content\":\"汉字 🦀\",\"tool_call_id\":\"call\"}]"
+  },
+  {
+    "name": "48",
+    "preserve": true,
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "head"
+          },
+          {
+            "type": "text",
+            "text": " "
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      },
+      {
+        "role": "tool",
+        "content": "汉字 🦀",
+        "tool_call_id": "call"
+      },
+      {
+        "role": "system",
+        "content": [
+          {
+            "type": "text",
+            "text": "cached"
+          },
+          {
+            "type": "text",
+            "text": "keep",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          }
+        ],
+        "_contextComposer": true
+      },
+      {
+        "role": "system",
+        "content": [
+          {
+            "type": "text",
+            "text": "cached"
+          },
+          {
+            "type": "text",
+            "text": "keep",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          }
+        ]
+      },
+      {
+        "role": "tool",
+        "content": "question",
+        "tool_call_id": "call"
+      },
+      {
+        "role": "system",
+        "content": "question",
+        "_contextComposer": true
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "\u001c"
+          },
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,cHJvYmU="
+            }
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "cached"
+          },
+          {
+            "type": "text",
+            "text": "keep",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          }
+        ]
+      }
+    ],
+    "output": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "head "
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      },
+      {
+        "role": "tool",
+        "content": "汉字 🦀",
+        "tool_call_id": "call"
+      },
+      {
+        "role": "system",
+        "content": [
+          {
+            "type": "text",
+            "text": "cached"
+          },
+          {
+            "type": "text",
+            "text": "keep",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          }
+        ]
+      },
+      {
+        "role": "system",
+        "content": [
+          {
+            "type": "text",
+            "text": "cached"
+          },
+          {
+            "type": "text",
+            "text": "keep",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          }
+        ]
+      },
+      {
+        "role": "tool",
+        "content": "question",
+        "tool_call_id": "call"
+      },
+      {
+        "role": "system",
+        "content": "question"
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,cHJvYmU="
+            }
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          },
+          {
+            "type": "text",
+            "text": "cached"
+          },
+          {
+            "type": "text",
+            "text": "keep",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          }
+        ]
+      }
+    ],
+    "wire": "[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"head \"},{\"type\":\"text\",\"text\":\"tail\"}]},{\"role\":\"tool\",\"content\":\"汉字 🦀\",\"tool_call_id\":\"call\"},{\"role\":\"system\",\"content\":[{\"type\":\"text\",\"text\":\"cached\"},{\"type\":\"text\",\"text\":\"keep\",\"cache_control\":{\"type\":\"ephemeral\"}}]},{\"role\":\"system\",\"content\":[{\"type\":\"text\",\"text\":\"cached\"},{\"type\":\"text\",\"text\":\"keep\",\"cache_control\":{\"type\":\"ephemeral\"}}]},{\"role\":\"tool\",\"content\":\"question\",\"tool_call_id\":\"call\"},{\"role\":\"system\",\"content\":\"question\"},{\"role\":\"user\",\"content\":[{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/png;base64,cHJvYmU=\"}},{\"type\":\"text\",\"text\":\"tail\"},{\"type\":\"text\",\"text\":\"cached\"},{\"type\":\"text\",\"text\":\"keep\",\"cache_control\":{\"type\":\"ephemeral\"}}]}]"
+  },
+  {
+    "name": "48",
+    "preserve": false,
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "head"
+          },
+          {
+            "type": "text",
+            "text": " "
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      },
+      {
+        "role": "tool",
+        "content": "汉字 🦀",
+        "tool_call_id": "call"
+      },
+      {
+        "role": "system",
+        "content": [
+          {
+            "type": "text",
+            "text": "cached"
+          },
+          {
+            "type": "text",
+            "text": "keep",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          }
+        ],
+        "_contextComposer": true
+      },
+      {
+        "role": "system",
+        "content": [
+          {
+            "type": "text",
+            "text": "cached"
+          },
+          {
+            "type": "text",
+            "text": "keep",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          }
+        ]
+      },
+      {
+        "role": "tool",
+        "content": "question",
+        "tool_call_id": "call"
+      },
+      {
+        "role": "system",
+        "content": "question",
+        "_contextComposer": true
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "\u001c"
+          },
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,cHJvYmU="
+            }
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "cached"
+          },
+          {
+            "type": "text",
+            "text": "keep",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          }
+        ]
+      }
+    ],
+    "output": [
+      {
+        "role": "user",
+        "content": "head tail"
+      },
+      {
+        "role": "tool",
+        "content": "汉字 🦀",
+        "tool_call_id": "call"
+      },
+      {
+        "role": "system",
+        "content": [
+          {
+            "type": "text",
+            "text": "cached"
+          },
+          {
+            "type": "text",
+            "text": "keep",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          }
+        ]
+      },
+      {
+        "role": "system",
+        "content": [
+          {
+            "type": "text",
+            "text": "cached"
+          },
+          {
+            "type": "text",
+            "text": "keep",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          }
+        ]
+      },
+      {
+        "role": "tool",
+        "content": "question",
+        "tool_call_id": "call"
+      },
+      {
+        "role": "system",
+        "content": "question"
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,cHJvYmU="
+            }
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          },
+          {
+            "type": "text",
+            "text": "cached"
+          },
+          {
+            "type": "text",
+            "text": "keep",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          }
+        ]
+      }
+    ],
+    "wire": "[{\"role\":\"user\",\"content\":\"head tail\"},{\"role\":\"tool\",\"content\":\"汉字 🦀\",\"tool_call_id\":\"call\"},{\"role\":\"system\",\"content\":[{\"type\":\"text\",\"text\":\"cached\"},{\"type\":\"text\",\"text\":\"keep\",\"cache_control\":{\"type\":\"ephemeral\"}}]},{\"role\":\"system\",\"content\":[{\"type\":\"text\",\"text\":\"cached\"},{\"type\":\"text\",\"text\":\"keep\",\"cache_control\":{\"type\":\"ephemeral\"}}]},{\"role\":\"tool\",\"content\":\"question\",\"tool_call_id\":\"call\"},{\"role\":\"system\",\"content\":\"question\"},{\"role\":\"user\",\"content\":[{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/png;base64,cHJvYmU=\"}},{\"type\":\"text\",\"text\":\"tail\"},{\"type\":\"text\",\"text\":\"cached\"},{\"type\":\"text\",\"text\":\"keep\",\"cache_control\":{\"type\":\"ephemeral\"}}]}]"
+  },
+  {
+    "name": "49",
+    "preserve": true,
+    "messages": [
+      {
+        "role": "system",
+        "content": null
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "cached"
+          },
+          {
+            "type": "text",
+            "text": "keep",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          }
+        ]
+      },
+      {
+        "role": "assistant",
+        "content": "question"
+      },
+      {
+        "role": "assistant",
+        "content": "question"
+      },
+      {
+        "role": "tool",
+        "content": [
+          {
+            "type": "text",
+            "text": "\u001c"
+          },
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,cHJvYmU="
+            }
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ],
+        "tool_call_id": "call"
+      },
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "head"
+          },
+          {
+            "type": "text",
+            "text": " "
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ],
+        "reasoning_content": "proof"
+      }
+    ],
+    "output": [
+      {
+        "role": "system",
+        "content": null
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "cached"
+          },
+          {
+            "type": "text",
+            "text": "keep",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          }
+        ]
+      },
+      {
+        "role": "assistant",
+        "content": "question\n\nquestion"
+      },
+      {
+        "role": "tool",
+        "content": [
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,cHJvYmU="
+            }
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ],
+        "tool_call_id": "call"
+      },
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "head "
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ],
+        "reasoning_content": "proof"
+      }
+    ],
+    "wire": "[{\"role\":\"system\",\"content\":null},{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"cached\"},{\"type\":\"text\",\"text\":\"keep\",\"cache_control\":{\"type\":\"ephemeral\"}}]},{\"role\":\"assistant\",\"content\":\"question\\n\\nquestion\"},{\"role\":\"tool\",\"content\":[{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/png;base64,cHJvYmU=\"}},{\"type\":\"text\",\"text\":\"tail\"}],\"tool_call_id\":\"call\"},{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"head \"},{\"type\":\"text\",\"text\":\"tail\"}],\"reasoning_content\":\"proof\"}]"
+  },
+  {
+    "name": "49",
+    "preserve": false,
+    "messages": [
+      {
+        "role": "system",
+        "content": null
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "cached"
+          },
+          {
+            "type": "text",
+            "text": "keep",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          }
+        ]
+      },
+      {
+        "role": "assistant",
+        "content": "question"
+      },
+      {
+        "role": "assistant",
+        "content": "question"
+      },
+      {
+        "role": "tool",
+        "content": [
+          {
+            "type": "text",
+            "text": "\u001c"
+          },
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,cHJvYmU="
+            }
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ],
+        "tool_call_id": "call"
+      },
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "head"
+          },
+          {
+            "type": "text",
+            "text": " "
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ],
+        "reasoning_content": "proof"
+      }
+    ],
+    "output": [
+      {
+        "role": "system",
+        "content": null
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "cached"
+          },
+          {
+            "type": "text",
+            "text": "keep",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          }
+        ]
+      },
+      {
+        "role": "assistant",
+        "content": "question\n\nquestion"
+      },
+      {
+        "role": "tool",
+        "content": [
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,cHJvYmU="
+            }
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ],
+        "tool_call_id": "call"
+      },
+      {
+        "role": "assistant",
+        "content": "head tail",
+        "reasoning_content": "proof"
+      }
+    ],
+    "wire": "[{\"role\":\"system\",\"content\":null},{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"cached\"},{\"type\":\"text\",\"text\":\"keep\",\"cache_control\":{\"type\":\"ephemeral\"}}]},{\"role\":\"assistant\",\"content\":\"question\\n\\nquestion\"},{\"role\":\"tool\",\"content\":[{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/png;base64,cHJvYmU=\"}},{\"type\":\"text\",\"text\":\"tail\"}],\"tool_call_id\":\"call\"},{\"role\":\"assistant\",\"content\":\"head tail\",\"reasoning_content\":\"proof\"}]"
+  },
+  {
+    "name": "50",
+    "preserve": true,
+    "messages": [
+      {
+        "role": "system",
+        "content": [
+          {
+            "type": "text",
+            "text": "head"
+          },
+          {
+            "type": "text",
+            "text": " "
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      },
+      {
+        "role": "system",
+        "content": "",
+        "_contextComposer": true
+      },
+      {
+        "role": "assistant",
+        "content": null
+      },
+      {
+        "role": "tool",
+        "content": [
+          {
+            "type": "text",
+            "text": "head"
+          },
+          {
+            "type": "text",
+            "text": " "
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ],
+        "tool_call_id": "call"
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "\u001c"
+          },
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,cHJvYmU="
+            }
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      }
+    ],
+    "output": [
+      {
+        "role": "system",
+        "content": [
+          {
+            "type": "text",
+            "text": "head "
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      },
+      {
+        "role": "system",
+        "content": ""
+      },
+      {
+        "role": "tool",
+        "content": [
+          {
+            "type": "text",
+            "text": "head "
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ],
+        "tool_call_id": "call"
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,cHJvYmU="
+            }
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      }
+    ],
+    "wire": "[{\"role\":\"system\",\"content\":[{\"type\":\"text\",\"text\":\"head \"},{\"type\":\"text\",\"text\":\"tail\"}]},{\"role\":\"system\",\"content\":\"\"},{\"role\":\"tool\",\"content\":[{\"type\":\"text\",\"text\":\"head \"},{\"type\":\"text\",\"text\":\"tail\"}],\"tool_call_id\":\"call\"},{\"role\":\"user\",\"content\":[{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/png;base64,cHJvYmU=\"}},{\"type\":\"text\",\"text\":\"tail\"}]}]"
+  },
+  {
+    "name": "50",
+    "preserve": false,
+    "messages": [
+      {
+        "role": "system",
+        "content": [
+          {
+            "type": "text",
+            "text": "head"
+          },
+          {
+            "type": "text",
+            "text": " "
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      },
+      {
+        "role": "system",
+        "content": "",
+        "_contextComposer": true
+      },
+      {
+        "role": "assistant",
+        "content": null
+      },
+      {
+        "role": "tool",
+        "content": [
+          {
+            "type": "text",
+            "text": "head"
+          },
+          {
+            "type": "text",
+            "text": " "
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ],
+        "tool_call_id": "call"
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "\u001c"
+          },
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,cHJvYmU="
+            }
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      }
+    ],
+    "output": [
+      {
+        "role": "system",
+        "content": "head tail"
+      },
+      {
+        "role": "system",
+        "content": ""
+      },
+      {
+        "role": "tool",
+        "content": "head tail",
+        "tool_call_id": "call"
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,cHJvYmU="
+            }
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      }
+    ],
+    "wire": "[{\"role\":\"system\",\"content\":\"head tail\"},{\"role\":\"system\",\"content\":\"\"},{\"role\":\"tool\",\"content\":\"head tail\",\"tool_call_id\":\"call\"},{\"role\":\"user\",\"content\":[{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/png;base64,cHJvYmU=\"}},{\"type\":\"text\",\"text\":\"tail\"}]}]"
+  },
+  {
+    "name": "51",
+    "preserve": true,
+    "messages": [
+      {
+        "role": "system",
+        "content": "汉字 🦀"
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "\u001c"
+          },
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,cHJvYmU="
+            }
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "head"
+          },
+          {
+            "type": "text",
+            "text": " "
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      },
+      {
+        "role": "tool",
+        "content": [
+          {
+            "type": "text",
+            "text": "cached"
+          },
+          {
+            "type": "text",
+            "text": "keep",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          }
+        ],
+        "tool_call_id": "call"
+      }
+    ],
+    "output": [
+      {
+        "role": "system",
+        "content": "汉字 🦀"
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,cHJvYmU="
+            }
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          },
+          {
+            "type": "text",
+            "text": "head "
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      },
+      {
+        "role": "tool",
+        "content": [
+          {
+            "type": "text",
+            "text": "cached"
+          },
+          {
+            "type": "text",
+            "text": "keep",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          }
+        ],
+        "tool_call_id": "call"
+      }
+    ],
+    "wire": "[{\"role\":\"system\",\"content\":\"汉字 🦀\"},{\"role\":\"user\",\"content\":[{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/png;base64,cHJvYmU=\"}},{\"type\":\"text\",\"text\":\"tail\"},{\"type\":\"text\",\"text\":\"head \"},{\"type\":\"text\",\"text\":\"tail\"}]},{\"role\":\"tool\",\"content\":[{\"type\":\"text\",\"text\":\"cached\"},{\"type\":\"text\",\"text\":\"keep\",\"cache_control\":{\"type\":\"ephemeral\"}}],\"tool_call_id\":\"call\"}]"
+  },
+  {
+    "name": "51",
+    "preserve": false,
+    "messages": [
+      {
+        "role": "system",
+        "content": "汉字 🦀"
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "\u001c"
+          },
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,cHJvYmU="
+            }
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "head"
+          },
+          {
+            "type": "text",
+            "text": " "
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      },
+      {
+        "role": "tool",
+        "content": [
+          {
+            "type": "text",
+            "text": "cached"
+          },
+          {
+            "type": "text",
+            "text": "keep",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          }
+        ],
+        "tool_call_id": "call"
+      }
+    ],
+    "output": [
+      {
+        "role": "system",
+        "content": "汉字 🦀"
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,cHJvYmU="
+            }
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          },
+          {
+            "type": "text",
+            "text": "head "
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      },
+      {
+        "role": "tool",
+        "content": [
+          {
+            "type": "text",
+            "text": "cached"
+          },
+          {
+            "type": "text",
+            "text": "keep",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          }
+        ],
+        "tool_call_id": "call"
+      }
+    ],
+    "wire": "[{\"role\":\"system\",\"content\":\"汉字 🦀\"},{\"role\":\"user\",\"content\":[{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/png;base64,cHJvYmU=\"}},{\"type\":\"text\",\"text\":\"tail\"},{\"type\":\"text\",\"text\":\"head \"},{\"type\":\"text\",\"text\":\"tail\"}]},{\"role\":\"tool\",\"content\":[{\"type\":\"text\",\"text\":\"cached\"},{\"type\":\"text\",\"text\":\"keep\",\"cache_control\":{\"type\":\"ephemeral\"}}],\"tool_call_id\":\"call\"}]"
+  },
+  {
+    "name": "52",
+    "preserve": true,
+    "messages": [
+      {
+        "role": "tool",
+        "content": [
+          {
+            "type": "text",
+            "text": "cached"
+          },
+          {
+            "type": "text",
+            "text": "keep",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          }
+        ],
+        "tool_call_id": "call"
+      },
+      {
+        "role": "user",
+        "content": "question"
+      },
+      {
+        "role": "user",
+        "content": "",
+        "_contextComposer": true
+      },
+      {
+        "role": "user",
+        "content": null
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "cached"
+          },
+          {
+            "type": "text",
+            "text": "keep",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          }
+        ]
+      },
+      {
+        "role": "user",
+        "content": "question"
+      },
+      {
+        "role": "user",
+        "content": [],
+        "_contextComposer": true
+      },
+      {
+        "role": "assistant",
+        "content": []
+      }
+    ],
+    "output": [
+      {
+        "role": "tool",
+        "content": [
+          {
+            "type": "text",
+            "text": "cached"
+          },
+          {
+            "type": "text",
+            "text": "keep",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          }
+        ],
+        "tool_call_id": "call"
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "question"
+          },
+          {
+            "type": "text",
+            "text": "cached"
+          },
+          {
+            "type": "text",
+            "text": "keep",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          },
+          {
+            "type": "text",
+            "text": "question"
+          }
+        ]
+      }
+    ],
+    "wire": "[{\"role\":\"tool\",\"content\":[{\"type\":\"text\",\"text\":\"cached\"},{\"type\":\"text\",\"text\":\"keep\",\"cache_control\":{\"type\":\"ephemeral\"}}],\"tool_call_id\":\"call\"},{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"question\"},{\"type\":\"text\",\"text\":\"cached\"},{\"type\":\"text\",\"text\":\"keep\",\"cache_control\":{\"type\":\"ephemeral\"}},{\"type\":\"text\",\"text\":\"question\"}]}]"
+  },
+  {
+    "name": "52",
+    "preserve": false,
+    "messages": [
+      {
+        "role": "tool",
+        "content": [
+          {
+            "type": "text",
+            "text": "cached"
+          },
+          {
+            "type": "text",
+            "text": "keep",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          }
+        ],
+        "tool_call_id": "call"
+      },
+      {
+        "role": "user",
+        "content": "question"
+      },
+      {
+        "role": "user",
+        "content": "",
+        "_contextComposer": true
+      },
+      {
+        "role": "user",
+        "content": null
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "cached"
+          },
+          {
+            "type": "text",
+            "text": "keep",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          }
+        ]
+      },
+      {
+        "role": "user",
+        "content": "question"
+      },
+      {
+        "role": "user",
+        "content": [],
+        "_contextComposer": true
+      },
+      {
+        "role": "assistant",
+        "content": []
+      }
+    ],
+    "output": [
+      {
+        "role": "tool",
+        "content": [
+          {
+            "type": "text",
+            "text": "cached"
+          },
+          {
+            "type": "text",
+            "text": "keep",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          }
+        ],
+        "tool_call_id": "call"
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "question"
+          },
+          {
+            "type": "text",
+            "text": "cached"
+          },
+          {
+            "type": "text",
+            "text": "keep",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          },
+          {
+            "type": "text",
+            "text": "question"
+          }
+        ]
+      }
+    ],
+    "wire": "[{\"role\":\"tool\",\"content\":[{\"type\":\"text\",\"text\":\"cached\"},{\"type\":\"text\",\"text\":\"keep\",\"cache_control\":{\"type\":\"ephemeral\"}}],\"tool_call_id\":\"call\"},{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"question\"},{\"type\":\"text\",\"text\":\"cached\"},{\"type\":\"text\",\"text\":\"keep\",\"cache_control\":{\"type\":\"ephemeral\"}},{\"type\":\"text\",\"text\":\"question\"}]}]"
+  },
+  {
+    "name": "53",
+    "preserve": true,
+    "messages": [
+      {
+        "role": "user",
+        "content": ""
+      }
+    ],
+    "output": [
+      {
+        "role": "user",
+        "content": "[empty message]"
+      }
+    ],
+    "wire": "[{\"role\":\"user\",\"content\":\"[empty message]\"}]"
+  },
+  {
+    "name": "53",
+    "preserve": false,
+    "messages": [
+      {
+        "role": "user",
+        "content": ""
+      }
+    ],
+    "output": [
+      {
+        "role": "user",
+        "content": "[empty message]"
+      }
+    ],
+    "wire": "[{\"role\":\"user\",\"content\":\"[empty message]\"}]"
+  },
+  {
+    "name": "54",
+    "preserve": true,
+    "messages": [
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "head"
+          },
+          {
+            "type": "text",
+            "text": " "
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      },
+      {
+        "role": "user",
+        "content": ""
+      },
+      {
+        "role": "tool",
+        "content": "汉字 🦀",
+        "tool_call_id": "call"
+      },
+      {
+        "role": "tool",
+        "content": "汉字 🦀",
+        "tool_call_id": "call",
+        "_contextComposer": true
+      },
+      {
+        "role": "tool",
+        "content": [
+          {
+            "type": "text",
+            "text": "cached"
+          },
+          {
+            "type": "text",
+            "text": "keep",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          }
+        ],
+        "tool_call_id": "call"
+      }
+    ],
+    "output": [
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "head "
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      },
+      {
+        "role": "user",
+        "content": "[empty message]"
+      },
+      {
+        "role": "tool",
+        "content": "汉字 🦀",
+        "tool_call_id": "call"
+      },
+      {
+        "role": "tool",
+        "content": "汉字 🦀",
+        "tool_call_id": "call"
+      },
+      {
+        "role": "tool",
+        "content": [
+          {
+            "type": "text",
+            "text": "cached"
+          },
+          {
+            "type": "text",
+            "text": "keep",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          }
+        ],
+        "tool_call_id": "call"
+      }
+    ],
+    "wire": "[{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"head \"},{\"type\":\"text\",\"text\":\"tail\"}]},{\"role\":\"user\",\"content\":\"[empty message]\"},{\"role\":\"tool\",\"content\":\"汉字 🦀\",\"tool_call_id\":\"call\"},{\"role\":\"tool\",\"content\":\"汉字 🦀\",\"tool_call_id\":\"call\"},{\"role\":\"tool\",\"content\":[{\"type\":\"text\",\"text\":\"cached\"},{\"type\":\"text\",\"text\":\"keep\",\"cache_control\":{\"type\":\"ephemeral\"}}],\"tool_call_id\":\"call\"}]"
+  },
+  {
+    "name": "54",
+    "preserve": false,
+    "messages": [
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "head"
+          },
+          {
+            "type": "text",
+            "text": " "
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      },
+      {
+        "role": "user",
+        "content": ""
+      },
+      {
+        "role": "tool",
+        "content": "汉字 🦀",
+        "tool_call_id": "call"
+      },
+      {
+        "role": "tool",
+        "content": "汉字 🦀",
+        "tool_call_id": "call",
+        "_contextComposer": true
+      },
+      {
+        "role": "tool",
+        "content": [
+          {
+            "type": "text",
+            "text": "cached"
+          },
+          {
+            "type": "text",
+            "text": "keep",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          }
+        ],
+        "tool_call_id": "call"
+      }
+    ],
+    "output": [
+      {
+        "role": "assistant",
+        "content": "head tail"
+      },
+      {
+        "role": "user",
+        "content": "[empty message]"
+      },
+      {
+        "role": "tool",
+        "content": "汉字 🦀",
+        "tool_call_id": "call"
+      },
+      {
+        "role": "tool",
+        "content": "汉字 🦀",
+        "tool_call_id": "call"
+      },
+      {
+        "role": "tool",
+        "content": [
+          {
+            "type": "text",
+            "text": "cached"
+          },
+          {
+            "type": "text",
+            "text": "keep",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          }
+        ],
+        "tool_call_id": "call"
+      }
+    ],
+    "wire": "[{\"role\":\"assistant\",\"content\":\"head tail\"},{\"role\":\"user\",\"content\":\"[empty message]\"},{\"role\":\"tool\",\"content\":\"汉字 🦀\",\"tool_call_id\":\"call\"},{\"role\":\"tool\",\"content\":\"汉字 🦀\",\"tool_call_id\":\"call\"},{\"role\":\"tool\",\"content\":[{\"type\":\"text\",\"text\":\"cached\"},{\"type\":\"text\",\"text\":\"keep\",\"cache_control\":{\"type\":\"ephemeral\"}}],\"tool_call_id\":\"call\"}]"
+  },
+  {
+    "name": "55",
+    "preserve": true,
+    "messages": [
+      {
+        "role": "system",
+        "content": ""
+      },
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "head"
+          },
+          {
+            "type": "text",
+            "text": " "
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ],
+        "_contextComposer": true,
+        "reasoning_content": "proof"
+      },
+      {
+        "role": "assistant",
+        "content": [],
+        "_contextComposer": true
+      },
+      {
+        "role": "tool",
+        "content": [
+          {
+            "type": "text",
+            "text": "\u001c"
+          },
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,cHJvYmU="
+            }
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ],
+        "tool_call_id": "call"
+      }
+    ],
+    "output": [
+      {
+        "role": "system",
+        "content": ""
+      },
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "head "
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ],
+        "reasoning_content": "proof"
+      },
+      {
+        "role": "tool",
+        "content": [
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,cHJvYmU="
+            }
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ],
+        "tool_call_id": "call"
+      }
+    ],
+    "wire": "[{\"role\":\"system\",\"content\":\"\"},{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"head \"},{\"type\":\"text\",\"text\":\"tail\"}],\"reasoning_content\":\"proof\"},{\"role\":\"tool\",\"content\":[{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/png;base64,cHJvYmU=\"}},{\"type\":\"text\",\"text\":\"tail\"}],\"tool_call_id\":\"call\"}]"
+  },
+  {
+    "name": "55",
+    "preserve": false,
+    "messages": [
+      {
+        "role": "system",
+        "content": ""
+      },
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "head"
+          },
+          {
+            "type": "text",
+            "text": " "
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ],
+        "_contextComposer": true,
+        "reasoning_content": "proof"
+      },
+      {
+        "role": "assistant",
+        "content": [],
+        "_contextComposer": true
+      },
+      {
+        "role": "tool",
+        "content": [
+          {
+            "type": "text",
+            "text": "\u001c"
+          },
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,cHJvYmU="
+            }
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ],
+        "tool_call_id": "call"
+      }
+    ],
+    "output": [
+      {
+        "role": "system",
+        "content": ""
+      },
+      {
+        "role": "assistant",
+        "content": "head tail",
+        "reasoning_content": "proof"
+      },
+      {
+        "role": "tool",
+        "content": [
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,cHJvYmU="
+            }
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ],
+        "tool_call_id": "call"
+      }
+    ],
+    "wire": "[{\"role\":\"system\",\"content\":\"\"},{\"role\":\"assistant\",\"content\":\"head tail\",\"reasoning_content\":\"proof\"},{\"role\":\"tool\",\"content\":[{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/png;base64,cHJvYmU=\"}},{\"type\":\"text\",\"text\":\"tail\"}],\"tool_call_id\":\"call\"}]"
+  },
+  {
+    "name": "56",
+    "preserve": true,
+    "messages": [
+      {
+        "role": "system",
+        "content": [
+          {
+            "type": "text",
+            "text": "head"
+          },
+          {
+            "type": "text",
+            "text": " "
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      },
+      {
+        "role": "assistant",
+        "content": []
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "\u001c"
+          },
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,cHJvYmU="
+            }
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      },
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "\u001c"
+          },
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,cHJvYmU="
+            }
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      },
+      {
+        "role": "tool",
+        "content": "汉字 🦀",
+        "tool_call_id": "call",
+        "_contextComposer": true
+      },
+      {
+        "role": "assistant",
+        "content": "question"
+      }
+    ],
+    "output": [
+      {
+        "role": "system",
+        "content": [
+          {
+            "type": "text",
+            "text": "head "
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,cHJvYmU="
+            }
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      },
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,cHJvYmU="
+            }
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      },
+      {
+        "role": "tool",
+        "content": "汉字 🦀",
+        "tool_call_id": "call"
+      },
+      {
+        "role": "assistant",
+        "content": "question"
+      }
+    ],
+    "wire": "[{\"role\":\"system\",\"content\":[{\"type\":\"text\",\"text\":\"head \"},{\"type\":\"text\",\"text\":\"tail\"}]},{\"role\":\"user\",\"content\":[{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/png;base64,cHJvYmU=\"}},{\"type\":\"text\",\"text\":\"tail\"}]},{\"role\":\"assistant\",\"content\":[{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/png;base64,cHJvYmU=\"}},{\"type\":\"text\",\"text\":\"tail\"}]},{\"role\":\"tool\",\"content\":\"汉字 🦀\",\"tool_call_id\":\"call\"},{\"role\":\"assistant\",\"content\":\"question\"}]"
+  },
+  {
+    "name": "56",
+    "preserve": false,
+    "messages": [
+      {
+        "role": "system",
+        "content": [
+          {
+            "type": "text",
+            "text": "head"
+          },
+          {
+            "type": "text",
+            "text": " "
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      },
+      {
+        "role": "assistant",
+        "content": []
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "\u001c"
+          },
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,cHJvYmU="
+            }
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      },
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "\u001c"
+          },
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,cHJvYmU="
+            }
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      },
+      {
+        "role": "tool",
+        "content": "汉字 🦀",
+        "tool_call_id": "call",
+        "_contextComposer": true
+      },
+      {
+        "role": "assistant",
+        "content": "question"
+      }
+    ],
+    "output": [
+      {
+        "role": "system",
+        "content": "head tail"
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,cHJvYmU="
+            }
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      },
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,cHJvYmU="
+            }
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      },
+      {
+        "role": "tool",
+        "content": "汉字 🦀",
+        "tool_call_id": "call"
+      },
+      {
+        "role": "assistant",
+        "content": "question"
+      }
+    ],
+    "wire": "[{\"role\":\"system\",\"content\":\"head tail\"},{\"role\":\"user\",\"content\":[{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/png;base64,cHJvYmU=\"}},{\"type\":\"text\",\"text\":\"tail\"}]},{\"role\":\"assistant\",\"content\":[{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/png;base64,cHJvYmU=\"}},{\"type\":\"text\",\"text\":\"tail\"}]},{\"role\":\"tool\",\"content\":\"汉字 🦀\",\"tool_call_id\":\"call\"},{\"role\":\"assistant\",\"content\":\"question\"}]"
+  },
+  {
+    "name": "57",
+    "preserve": true,
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "\u001c"
+          },
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,cHJvYmU="
+            }
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      },
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "\u001c"
+          },
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,cHJvYmU="
+            }
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ],
+        "reasoning_content": "proof"
+      },
+      {
+        "role": "system",
+        "content": [
+          {
+            "type": "text",
+            "text": "cached"
+          },
+          {
+            "type": "text",
+            "text": "keep",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          }
+        ]
+      },
+      {
+        "role": "tool",
+        "content": "",
+        "tool_call_id": "call",
+        "_contextComposer": true
+      },
+      {
+        "role": "system",
+        "content": null
+      },
+      {
+        "role": "tool",
+        "content": "汉字 🦀",
+        "tool_call_id": "call"
+      },
+      {
+        "role": "tool",
+        "content": [
+          {
+            "type": "text",
+            "text": "head"
+          },
+          {
+            "type": "text",
+            "text": " "
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ],
+        "tool_call_id": "call"
+      },
+      {
+        "role": "tool",
+        "content": [
+          {
+            "type": "text",
+            "text": "head"
+          },
+          {
+            "type": "text",
+            "text": " "
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ],
+        "tool_call_id": "call"
+      }
+    ],
+    "output": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,cHJvYmU="
+            }
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      },
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,cHJvYmU="
+            }
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ],
+        "reasoning_content": "proof"
+      },
+      {
+        "role": "system",
+        "content": [
+          {
+            "type": "text",
+            "text": "cached"
+          },
+          {
+            "type": "text",
+            "text": "keep",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          }
+        ]
+      },
+      {
+        "role": "tool",
+        "content": "[empty tool result]",
+        "tool_call_id": "call"
+      },
+      {
+        "role": "system",
+        "content": null
+      },
+      {
+        "role": "tool",
+        "content": "汉字 🦀",
+        "tool_call_id": "call"
+      },
+      {
+        "role": "tool",
+        "content": [
+          {
+            "type": "text",
+            "text": "head "
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ],
+        "tool_call_id": "call"
+      },
+      {
+        "role": "tool",
+        "content": [
+          {
+            "type": "text",
+            "text": "head "
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ],
+        "tool_call_id": "call"
+      }
+    ],
+    "wire": "[{\"role\":\"user\",\"content\":[{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/png;base64,cHJvYmU=\"}},{\"type\":\"text\",\"text\":\"tail\"}]},{\"role\":\"assistant\",\"content\":[{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/png;base64,cHJvYmU=\"}},{\"type\":\"text\",\"text\":\"tail\"}],\"reasoning_content\":\"proof\"},{\"role\":\"system\",\"content\":[{\"type\":\"text\",\"text\":\"cached\"},{\"type\":\"text\",\"text\":\"keep\",\"cache_control\":{\"type\":\"ephemeral\"}}]},{\"role\":\"tool\",\"content\":\"[empty tool result]\",\"tool_call_id\":\"call\"},{\"role\":\"system\",\"content\":null},{\"role\":\"tool\",\"content\":\"汉字 🦀\",\"tool_call_id\":\"call\"},{\"role\":\"tool\",\"content\":[{\"type\":\"text\",\"text\":\"head \"},{\"type\":\"text\",\"text\":\"tail\"}],\"tool_call_id\":\"call\"},{\"role\":\"tool\",\"content\":[{\"type\":\"text\",\"text\":\"head \"},{\"type\":\"text\",\"text\":\"tail\"}],\"tool_call_id\":\"call\"}]"
+  },
+  {
+    "name": "57",
+    "preserve": false,
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "\u001c"
+          },
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,cHJvYmU="
+            }
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      },
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "\u001c"
+          },
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,cHJvYmU="
+            }
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ],
+        "reasoning_content": "proof"
+      },
+      {
+        "role": "system",
+        "content": [
+          {
+            "type": "text",
+            "text": "cached"
+          },
+          {
+            "type": "text",
+            "text": "keep",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          }
+        ]
+      },
+      {
+        "role": "tool",
+        "content": "",
+        "tool_call_id": "call",
+        "_contextComposer": true
+      },
+      {
+        "role": "system",
+        "content": null
+      },
+      {
+        "role": "tool",
+        "content": "汉字 🦀",
+        "tool_call_id": "call"
+      },
+      {
+        "role": "tool",
+        "content": [
+          {
+            "type": "text",
+            "text": "head"
+          },
+          {
+            "type": "text",
+            "text": " "
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ],
+        "tool_call_id": "call"
+      },
+      {
+        "role": "tool",
+        "content": [
+          {
+            "type": "text",
+            "text": "head"
+          },
+          {
+            "type": "text",
+            "text": " "
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ],
+        "tool_call_id": "call"
+      }
+    ],
+    "output": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,cHJvYmU="
+            }
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      },
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,cHJvYmU="
+            }
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ],
+        "reasoning_content": "proof"
+      },
+      {
+        "role": "system",
+        "content": [
+          {
+            "type": "text",
+            "text": "cached"
+          },
+          {
+            "type": "text",
+            "text": "keep",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          }
+        ]
+      },
+      {
+        "role": "tool",
+        "content": "[empty tool result]",
+        "tool_call_id": "call"
+      },
+      {
+        "role": "system",
+        "content": null
+      },
+      {
+        "role": "tool",
+        "content": "汉字 🦀",
+        "tool_call_id": "call"
+      },
+      {
+        "role": "tool",
+        "content": "head tail",
+        "tool_call_id": "call"
+      },
+      {
+        "role": "tool",
+        "content": "head tail",
+        "tool_call_id": "call"
+      }
+    ],
+    "wire": "[{\"role\":\"user\",\"content\":[{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/png;base64,cHJvYmU=\"}},{\"type\":\"text\",\"text\":\"tail\"}]},{\"role\":\"assistant\",\"content\":[{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/png;base64,cHJvYmU=\"}},{\"type\":\"text\",\"text\":\"tail\"}],\"reasoning_content\":\"proof\"},{\"role\":\"system\",\"content\":[{\"type\":\"text\",\"text\":\"cached\"},{\"type\":\"text\",\"text\":\"keep\",\"cache_control\":{\"type\":\"ephemeral\"}}]},{\"role\":\"tool\",\"content\":\"[empty tool result]\",\"tool_call_id\":\"call\"},{\"role\":\"system\",\"content\":null},{\"role\":\"tool\",\"content\":\"汉字 🦀\",\"tool_call_id\":\"call\"},{\"role\":\"tool\",\"content\":\"head tail\",\"tool_call_id\":\"call\"},{\"role\":\"tool\",\"content\":\"head tail\",\"tool_call_id\":\"call\"}]"
+  },
+  {
+    "name": "58",
+    "preserve": true,
+    "messages": [
+      {
+        "role": "system",
+        "content": [
+          {
+            "type": "text",
+            "text": "head"
+          },
+          {
+            "type": "text",
+            "text": " "
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ],
+        "_contextComposer": true
+      },
+      {
+        "role": "system",
+        "content": [
+          {
+            "type": "text",
+            "text": "\u001c"
+          },
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,cHJvYmU="
+            }
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      },
+      {
+        "role": "assistant",
+        "content": "question",
+        "reasoning_content": "proof"
+      },
+      {
+        "role": "tool",
+        "content": [
+          {
+            "type": "text",
+            "text": "\u001c"
+          },
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,cHJvYmU="
+            }
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ],
+        "tool_call_id": "call"
+      },
+      {
+        "role": "system",
+        "content": "汉字 🦀"
+      }
+    ],
+    "output": [
+      {
+        "role": "system",
+        "content": [
+          {
+            "type": "text",
+            "text": "head "
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      },
+      {
+        "role": "system",
+        "content": [
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,cHJvYmU="
+            }
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      },
+      {
+        "role": "assistant",
+        "content": "question",
+        "reasoning_content": "proof"
+      },
+      {
+        "role": "tool",
+        "content": [
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,cHJvYmU="
+            }
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ],
+        "tool_call_id": "call"
+      },
+      {
+        "role": "system",
+        "content": "汉字 🦀"
+      }
+    ],
+    "wire": "[{\"role\":\"system\",\"content\":[{\"type\":\"text\",\"text\":\"head \"},{\"type\":\"text\",\"text\":\"tail\"}]},{\"role\":\"system\",\"content\":[{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/png;base64,cHJvYmU=\"}},{\"type\":\"text\",\"text\":\"tail\"}]},{\"role\":\"assistant\",\"content\":\"question\",\"reasoning_content\":\"proof\"},{\"role\":\"tool\",\"content\":[{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/png;base64,cHJvYmU=\"}},{\"type\":\"text\",\"text\":\"tail\"}],\"tool_call_id\":\"call\"},{\"role\":\"system\",\"content\":\"汉字 🦀\"}]"
+  },
+  {
+    "name": "58",
+    "preserve": false,
+    "messages": [
+      {
+        "role": "system",
+        "content": [
+          {
+            "type": "text",
+            "text": "head"
+          },
+          {
+            "type": "text",
+            "text": " "
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ],
+        "_contextComposer": true
+      },
+      {
+        "role": "system",
+        "content": [
+          {
+            "type": "text",
+            "text": "\u001c"
+          },
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,cHJvYmU="
+            }
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      },
+      {
+        "role": "assistant",
+        "content": "question",
+        "reasoning_content": "proof"
+      },
+      {
+        "role": "tool",
+        "content": [
+          {
+            "type": "text",
+            "text": "\u001c"
+          },
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,cHJvYmU="
+            }
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ],
+        "tool_call_id": "call"
+      },
+      {
+        "role": "system",
+        "content": "汉字 🦀"
+      }
+    ],
+    "output": [
+      {
+        "role": "system",
+        "content": "head tail"
+      },
+      {
+        "role": "system",
+        "content": [
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,cHJvYmU="
+            }
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      },
+      {
+        "role": "assistant",
+        "content": "question",
+        "reasoning_content": "proof"
+      },
+      {
+        "role": "tool",
+        "content": [
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,cHJvYmU="
+            }
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ],
+        "tool_call_id": "call"
+      },
+      {
+        "role": "system",
+        "content": "汉字 🦀"
+      }
+    ],
+    "wire": "[{\"role\":\"system\",\"content\":\"head tail\"},{\"role\":\"system\",\"content\":[{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/png;base64,cHJvYmU=\"}},{\"type\":\"text\",\"text\":\"tail\"}]},{\"role\":\"assistant\",\"content\":\"question\",\"reasoning_content\":\"proof\"},{\"role\":\"tool\",\"content\":[{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/png;base64,cHJvYmU=\"}},{\"type\":\"text\",\"text\":\"tail\"}],\"tool_call_id\":\"call\"},{\"role\":\"system\",\"content\":\"汉字 🦀\"}]"
+  },
+  {
+    "name": "59",
+    "preserve": true,
+    "messages": [
+      {
+        "role": "assistant",
+        "content": ""
+      },
+      {
+        "role": "tool",
+        "content": "question",
+        "tool_call_id": "call",
+        "_contextComposer": true
+      },
+      {
+        "role": "tool",
+        "content": [
+          {
+            "type": "text",
+            "text": "cached"
+          },
+          {
+            "type": "text",
+            "text": "keep",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          }
+        ],
+        "tool_call_id": "call"
+      }
+    ],
+    "output": [
+      {
+        "role": "tool",
+        "content": "question",
+        "tool_call_id": "call"
+      },
+      {
+        "role": "tool",
+        "content": [
+          {
+            "type": "text",
+            "text": "cached"
+          },
+          {
+            "type": "text",
+            "text": "keep",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          }
+        ],
+        "tool_call_id": "call"
+      }
+    ],
+    "wire": "[{\"role\":\"tool\",\"content\":\"question\",\"tool_call_id\":\"call\"},{\"role\":\"tool\",\"content\":[{\"type\":\"text\",\"text\":\"cached\"},{\"type\":\"text\",\"text\":\"keep\",\"cache_control\":{\"type\":\"ephemeral\"}}],\"tool_call_id\":\"call\"}]"
+  },
+  {
+    "name": "59",
+    "preserve": false,
+    "messages": [
+      {
+        "role": "assistant",
+        "content": ""
+      },
+      {
+        "role": "tool",
+        "content": "question",
+        "tool_call_id": "call",
+        "_contextComposer": true
+      },
+      {
+        "role": "tool",
+        "content": [
+          {
+            "type": "text",
+            "text": "cached"
+          },
+          {
+            "type": "text",
+            "text": "keep",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          }
+        ],
+        "tool_call_id": "call"
+      }
+    ],
+    "output": [
+      {
+        "role": "tool",
+        "content": "question",
+        "tool_call_id": "call"
+      },
+      {
+        "role": "tool",
+        "content": [
+          {
+            "type": "text",
+            "text": "cached"
+          },
+          {
+            "type": "text",
+            "text": "keep",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          }
+        ],
+        "tool_call_id": "call"
+      }
+    ],
+    "wire": "[{\"role\":\"tool\",\"content\":\"question\",\"tool_call_id\":\"call\"},{\"role\":\"tool\",\"content\":[{\"type\":\"text\",\"text\":\"cached\"},{\"type\":\"text\",\"text\":\"keep\",\"cache_control\":{\"type\":\"ephemeral\"}}],\"tool_call_id\":\"call\"}]"
+  },
+  {
+    "name": "60",
+    "preserve": true,
+    "messages": [
+      {
+        "role": "system",
+        "content": [
+          {
+            "type": "text",
+            "text": "head"
+          },
+          {
+            "type": "text",
+            "text": " "
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      },
+      {
+        "role": "tool",
+        "content": "question",
+        "tool_call_id": "call"
+      },
+      {
+        "role": "system",
+        "content": null
+      },
+      {
+        "role": "assistant",
+        "content": "",
+        "reasoning_content": "proof"
+      },
+      {
+        "role": "assistant",
+        "content": null
+      },
+      {
+        "role": "system",
+        "content": [],
+        "_contextComposer": true
+      },
+      {
+        "role": "assistant",
+        "content": "汉字 🦀",
+        "_contextComposer": true
+      },
+      {
+        "role": "system",
+        "content": [
+          {
+            "type": "text",
+            "text": "\u001c"
+          },
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,cHJvYmU="
+            }
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      }
+    ],
+    "output": [
+      {
+        "role": "system",
+        "content": [
+          {
+            "type": "text",
+            "text": "head "
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      },
+      {
+        "role": "tool",
+        "content": "question",
+        "tool_call_id": "call"
+      },
+      {
+        "role": "system",
+        "content": null
+      },
+      {
+        "role": "assistant",
+        "content": "",
+        "reasoning_content": "proof"
+      },
+      {
+        "role": "system",
+        "content": []
+      },
+      {
+        "role": "assistant",
+        "content": "汉字 🦀"
+      },
+      {
+        "role": "system",
+        "content": [
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,cHJvYmU="
+            }
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      }
+    ],
+    "wire": "[{\"role\":\"system\",\"content\":[{\"type\":\"text\",\"text\":\"head \"},{\"type\":\"text\",\"text\":\"tail\"}]},{\"role\":\"tool\",\"content\":\"question\",\"tool_call_id\":\"call\"},{\"role\":\"system\",\"content\":null},{\"role\":\"assistant\",\"content\":\"\",\"reasoning_content\":\"proof\"},{\"role\":\"system\",\"content\":[]},{\"role\":\"assistant\",\"content\":\"汉字 🦀\"},{\"role\":\"system\",\"content\":[{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/png;base64,cHJvYmU=\"}},{\"type\":\"text\",\"text\":\"tail\"}]}]"
+  },
+  {
+    "name": "60",
+    "preserve": false,
+    "messages": [
+      {
+        "role": "system",
+        "content": [
+          {
+            "type": "text",
+            "text": "head"
+          },
+          {
+            "type": "text",
+            "text": " "
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      },
+      {
+        "role": "tool",
+        "content": "question",
+        "tool_call_id": "call"
+      },
+      {
+        "role": "system",
+        "content": null
+      },
+      {
+        "role": "assistant",
+        "content": "",
+        "reasoning_content": "proof"
+      },
+      {
+        "role": "assistant",
+        "content": null
+      },
+      {
+        "role": "system",
+        "content": [],
+        "_contextComposer": true
+      },
+      {
+        "role": "assistant",
+        "content": "汉字 🦀",
+        "_contextComposer": true
+      },
+      {
+        "role": "system",
+        "content": [
+          {
+            "type": "text",
+            "text": "\u001c"
+          },
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,cHJvYmU="
+            }
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      }
+    ],
+    "output": [
+      {
+        "role": "system",
+        "content": "head tail"
+      },
+      {
+        "role": "tool",
+        "content": "question",
+        "tool_call_id": "call"
+      },
+      {
+        "role": "system",
+        "content": null
+      },
+      {
+        "role": "assistant",
+        "content": "",
+        "reasoning_content": "proof"
+      },
+      {
+        "role": "system",
+        "content": []
+      },
+      {
+        "role": "assistant",
+        "content": "汉字 🦀"
+      },
+      {
+        "role": "system",
+        "content": [
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,cHJvYmU="
+            }
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      }
+    ],
+    "wire": "[{\"role\":\"system\",\"content\":\"head tail\"},{\"role\":\"tool\",\"content\":\"question\",\"tool_call_id\":\"call\"},{\"role\":\"system\",\"content\":null},{\"role\":\"assistant\",\"content\":\"\",\"reasoning_content\":\"proof\"},{\"role\":\"system\",\"content\":[]},{\"role\":\"assistant\",\"content\":\"汉字 🦀\"},{\"role\":\"system\",\"content\":[{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/png;base64,cHJvYmU=\"}},{\"type\":\"text\",\"text\":\"tail\"}]}]"
+  },
+  {
+    "name": "61",
+    "preserve": true,
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "\u001c"
+          },
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,cHJvYmU="
+            }
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      },
+      {
+        "role": "assistant",
+        "content": ""
+      },
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "\u001c"
+          },
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,cHJvYmU="
+            }
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      },
+      {
+        "role": "system",
+        "content": ""
+      },
+      {
+        "role": "system",
+        "content": "汉字 🦀"
+      },
+      {
+        "role": "user",
+        "content": [],
+        "_contextComposer": true
+      }
+    ],
+    "output": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,cHJvYmU="
+            }
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      },
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,cHJvYmU="
+            }
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      },
+      {
+        "role": "system",
+        "content": ""
+      },
+      {
+        "role": "system",
+        "content": "汉字 🦀"
+      },
+      {
+        "role": "user",
+        "content": "[empty message]"
+      }
+    ],
+    "wire": "[{\"role\":\"user\",\"content\":[{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/png;base64,cHJvYmU=\"}},{\"type\":\"text\",\"text\":\"tail\"}]},{\"role\":\"assistant\",\"content\":[{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/png;base64,cHJvYmU=\"}},{\"type\":\"text\",\"text\":\"tail\"}]},{\"role\":\"system\",\"content\":\"\"},{\"role\":\"system\",\"content\":\"汉字 🦀\"},{\"role\":\"user\",\"content\":\"[empty message]\"}]"
+  },
+  {
+    "name": "61",
+    "preserve": false,
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "\u001c"
+          },
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,cHJvYmU="
+            }
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      },
+      {
+        "role": "assistant",
+        "content": ""
+      },
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "\u001c"
+          },
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,cHJvYmU="
+            }
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      },
+      {
+        "role": "system",
+        "content": ""
+      },
+      {
+        "role": "system",
+        "content": "汉字 🦀"
+      },
+      {
+        "role": "user",
+        "content": [],
+        "_contextComposer": true
+      }
+    ],
+    "output": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,cHJvYmU="
+            }
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      },
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,cHJvYmU="
+            }
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      },
+      {
+        "role": "system",
+        "content": ""
+      },
+      {
+        "role": "system",
+        "content": "汉字 🦀"
+      },
+      {
+        "role": "user",
+        "content": "[empty message]"
+      }
+    ],
+    "wire": "[{\"role\":\"user\",\"content\":[{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/png;base64,cHJvYmU=\"}},{\"type\":\"text\",\"text\":\"tail\"}]},{\"role\":\"assistant\",\"content\":[{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/png;base64,cHJvYmU=\"}},{\"type\":\"text\",\"text\":\"tail\"}]},{\"role\":\"system\",\"content\":\"\"},{\"role\":\"system\",\"content\":\"汉字 🦀\"},{\"role\":\"user\",\"content\":\"[empty message]\"}]"
+  },
+  {
+    "name": "62",
+    "preserve": true,
+    "messages": [
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "head"
+          },
+          {
+            "type": "text",
+            "text": " "
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      },
+      {
+        "role": "user",
+        "content": ""
+      },
+      {
+        "role": "system",
+        "content": [
+          {
+            "type": "text",
+            "text": "\u001c"
+          },
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,cHJvYmU="
+            }
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "\u001c"
+          },
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,cHJvYmU="
+            }
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      }
+    ],
+    "output": [
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "head "
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      },
+      {
+        "role": "user",
+        "content": "[empty message]"
+      },
+      {
+        "role": "system",
+        "content": [
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,cHJvYmU="
+            }
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,cHJvYmU="
+            }
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      }
+    ],
+    "wire": "[{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"head \"},{\"type\":\"text\",\"text\":\"tail\"}]},{\"role\":\"user\",\"content\":\"[empty message]\"},{\"role\":\"system\",\"content\":[{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/png;base64,cHJvYmU=\"}},{\"type\":\"text\",\"text\":\"tail\"}]},{\"role\":\"user\",\"content\":[{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/png;base64,cHJvYmU=\"}},{\"type\":\"text\",\"text\":\"tail\"}]}]"
+  },
+  {
+    "name": "62",
+    "preserve": false,
+    "messages": [
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "head"
+          },
+          {
+            "type": "text",
+            "text": " "
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      },
+      {
+        "role": "user",
+        "content": ""
+      },
+      {
+        "role": "system",
+        "content": [
+          {
+            "type": "text",
+            "text": "\u001c"
+          },
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,cHJvYmU="
+            }
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "\u001c"
+          },
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,cHJvYmU="
+            }
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      }
+    ],
+    "output": [
+      {
+        "role": "assistant",
+        "content": "head tail"
+      },
+      {
+        "role": "user",
+        "content": "[empty message]"
+      },
+      {
+        "role": "system",
+        "content": [
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,cHJvYmU="
+            }
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,cHJvYmU="
+            }
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      }
+    ],
+    "wire": "[{\"role\":\"assistant\",\"content\":\"head tail\"},{\"role\":\"user\",\"content\":\"[empty message]\"},{\"role\":\"system\",\"content\":[{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/png;base64,cHJvYmU=\"}},{\"type\":\"text\",\"text\":\"tail\"}]},{\"role\":\"user\",\"content\":[{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/png;base64,cHJvYmU=\"}},{\"type\":\"text\",\"text\":\"tail\"}]}]"
+  },
+  {
+    "name": "63",
+    "preserve": true,
+    "messages": [
+      {
+        "role": "system",
+        "content": null
+      },
+      {
+        "role": "tool",
+        "content": "汉字 🦀",
+        "tool_call_id": "call"
+      },
+      {
+        "role": "system",
+        "content": [
+          {
+            "type": "text",
+            "text": "head"
+          },
+          {
+            "type": "text",
+            "text": " "
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      },
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "cached"
+          },
+          {
+            "type": "text",
+            "text": "keep",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          }
+        ],
+        "_contextComposer": true
+      },
+      {
+        "role": "assistant",
+        "content": [],
+        "_contextComposer": true,
+        "reasoning_content": "proof"
+      },
+      {
+        "role": "user",
+        "content": "",
+        "_contextComposer": true
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "\u001c"
+          },
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,cHJvYmU="
+            }
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      }
+    ],
+    "output": [
+      {
+        "role": "system",
+        "content": null
+      },
+      {
+        "role": "tool",
+        "content": "汉字 🦀",
+        "tool_call_id": "call"
+      },
+      {
+        "role": "system",
+        "content": [
+          {
+            "type": "text",
+            "text": "head "
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      },
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "cached"
+          },
+          {
+            "type": "text",
+            "text": "keep",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          }
+        ]
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,cHJvYmU="
+            }
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      }
+    ],
+    "wire": "[{\"role\":\"system\",\"content\":null},{\"role\":\"tool\",\"content\":\"汉字 🦀\",\"tool_call_id\":\"call\"},{\"role\":\"system\",\"content\":[{\"type\":\"text\",\"text\":\"head \"},{\"type\":\"text\",\"text\":\"tail\"}]},{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"cached\"},{\"type\":\"text\",\"text\":\"keep\",\"cache_control\":{\"type\":\"ephemeral\"}}]},{\"role\":\"user\",\"content\":[{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/png;base64,cHJvYmU=\"}},{\"type\":\"text\",\"text\":\"tail\"}]}]"
+  },
+  {
+    "name": "63",
+    "preserve": false,
+    "messages": [
+      {
+        "role": "system",
+        "content": null
+      },
+      {
+        "role": "tool",
+        "content": "汉字 🦀",
+        "tool_call_id": "call"
+      },
+      {
+        "role": "system",
+        "content": [
+          {
+            "type": "text",
+            "text": "head"
+          },
+          {
+            "type": "text",
+            "text": " "
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      },
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "cached"
+          },
+          {
+            "type": "text",
+            "text": "keep",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          }
+        ],
+        "_contextComposer": true
+      },
+      {
+        "role": "assistant",
+        "content": [],
+        "_contextComposer": true,
+        "reasoning_content": "proof"
+      },
+      {
+        "role": "user",
+        "content": "",
+        "_contextComposer": true
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "\u001c"
+          },
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,cHJvYmU="
+            }
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      }
+    ],
+    "output": [
+      {
+        "role": "system",
+        "content": null
+      },
+      {
+        "role": "tool",
+        "content": "汉字 🦀",
+        "tool_call_id": "call"
+      },
+      {
+        "role": "system",
+        "content": "head tail"
+      },
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "cached"
+          },
+          {
+            "type": "text",
+            "text": "keep",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          }
+        ]
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,cHJvYmU="
+            }
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      }
+    ],
+    "wire": "[{\"role\":\"system\",\"content\":null},{\"role\":\"tool\",\"content\":\"汉字 🦀\",\"tool_call_id\":\"call\"},{\"role\":\"system\",\"content\":\"head tail\"},{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"cached\"},{\"type\":\"text\",\"text\":\"keep\",\"cache_control\":{\"type\":\"ephemeral\"}}]},{\"role\":\"user\",\"content\":[{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/png;base64,cHJvYmU=\"}},{\"type\":\"text\",\"text\":\"tail\"}]}]"
+  },
+  {
+    "name": "64",
+    "preserve": true,
+    "messages": [
+      {
+        "role": "assistant",
+        "content": null
+      },
+      {
+        "role": "system",
+        "content": [
+          {
+            "type": "text",
+            "text": "cached"
+          },
+          {
+            "type": "text",
+            "text": "keep",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          }
+        ],
+        "_contextComposer": true
+      },
+      {
+        "role": "tool",
+        "content": [
+          {
+            "type": "text",
+            "text": "cached"
+          },
+          {
+            "type": "text",
+            "text": "keep",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          }
+        ],
+        "tool_call_id": "call"
+      },
+      {
+        "role": "tool",
+        "content": [],
+        "tool_call_id": "call",
+        "_contextComposer": true
+      },
+      {
+        "role": "assistant",
+        "content": []
+      },
+      {
+        "role": "user",
+        "content": "汉字 🦀",
+        "_contextComposer": true
+      },
+      {
+        "role": "system",
+        "content": []
+      },
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "head"
+          },
+          {
+            "type": "text",
+            "text": " "
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ],
+        "_contextComposer": true
+      }
+    ],
+    "output": [
+      {
+        "role": "system",
+        "content": [
+          {
+            "type": "text",
+            "text": "cached"
+          },
+          {
+            "type": "text",
+            "text": "keep",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          }
+        ]
+      },
+      {
+        "role": "tool",
+        "content": [
+          {
+            "type": "text",
+            "text": "cached"
+          },
+          {
+            "type": "text",
+            "text": "keep",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          }
+        ],
+        "tool_call_id": "call"
+      },
+      {
+        "role": "tool",
+        "content": "[empty tool result]",
+        "tool_call_id": "call"
+      },
+      {
+        "role": "user",
+        "content": "汉字 🦀"
+      },
+      {
+        "role": "system",
+        "content": []
+      },
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "head "
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      }
+    ],
+    "wire": "[{\"role\":\"system\",\"content\":[{\"type\":\"text\",\"text\":\"cached\"},{\"type\":\"text\",\"text\":\"keep\",\"cache_control\":{\"type\":\"ephemeral\"}}]},{\"role\":\"tool\",\"content\":[{\"type\":\"text\",\"text\":\"cached\"},{\"type\":\"text\",\"text\":\"keep\",\"cache_control\":{\"type\":\"ephemeral\"}}],\"tool_call_id\":\"call\"},{\"role\":\"tool\",\"content\":\"[empty tool result]\",\"tool_call_id\":\"call\"},{\"role\":\"user\",\"content\":\"汉字 🦀\"},{\"role\":\"system\",\"content\":[]},{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"head \"},{\"type\":\"text\",\"text\":\"tail\"}]}]"
+  },
+  {
+    "name": "64",
+    "preserve": false,
+    "messages": [
+      {
+        "role": "assistant",
+        "content": null
+      },
+      {
+        "role": "system",
+        "content": [
+          {
+            "type": "text",
+            "text": "cached"
+          },
+          {
+            "type": "text",
+            "text": "keep",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          }
+        ],
+        "_contextComposer": true
+      },
+      {
+        "role": "tool",
+        "content": [
+          {
+            "type": "text",
+            "text": "cached"
+          },
+          {
+            "type": "text",
+            "text": "keep",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          }
+        ],
+        "tool_call_id": "call"
+      },
+      {
+        "role": "tool",
+        "content": [],
+        "tool_call_id": "call",
+        "_contextComposer": true
+      },
+      {
+        "role": "assistant",
+        "content": []
+      },
+      {
+        "role": "user",
+        "content": "汉字 🦀",
+        "_contextComposer": true
+      },
+      {
+        "role": "system",
+        "content": []
+      },
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "head"
+          },
+          {
+            "type": "text",
+            "text": " "
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ],
+        "_contextComposer": true
+      }
+    ],
+    "output": [
+      {
+        "role": "system",
+        "content": [
+          {
+            "type": "text",
+            "text": "cached"
+          },
+          {
+            "type": "text",
+            "text": "keep",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          }
+        ]
+      },
+      {
+        "role": "tool",
+        "content": [
+          {
+            "type": "text",
+            "text": "cached"
+          },
+          {
+            "type": "text",
+            "text": "keep",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          }
+        ],
+        "tool_call_id": "call"
+      },
+      {
+        "role": "tool",
+        "content": "[empty tool result]",
+        "tool_call_id": "call"
+      },
+      {
+        "role": "user",
+        "content": "汉字 🦀"
+      },
+      {
+        "role": "system",
+        "content": []
+      },
+      {
+        "role": "assistant",
+        "content": "head tail"
+      }
+    ],
+    "wire": "[{\"role\":\"system\",\"content\":[{\"type\":\"text\",\"text\":\"cached\"},{\"type\":\"text\",\"text\":\"keep\",\"cache_control\":{\"type\":\"ephemeral\"}}]},{\"role\":\"tool\",\"content\":[{\"type\":\"text\",\"text\":\"cached\"},{\"type\":\"text\",\"text\":\"keep\",\"cache_control\":{\"type\":\"ephemeral\"}}],\"tool_call_id\":\"call\"},{\"role\":\"tool\",\"content\":\"[empty tool result]\",\"tool_call_id\":\"call\"},{\"role\":\"user\",\"content\":\"汉字 🦀\"},{\"role\":\"system\",\"content\":[]},{\"role\":\"assistant\",\"content\":\"head tail\"}]"
+  },
+  {
+    "name": "65",
+    "preserve": true,
+    "messages": [
+      {
+        "role": "tool",
+        "content": "question",
+        "tool_call_id": "call"
+      },
+      {
+        "role": "user",
+        "content": [],
+        "_contextComposer": true
+      },
+      {
+        "role": "user",
+        "content": [],
+        "_contextComposer": true
+      },
+      {
+        "role": "user",
+        "content": "汉字 🦀",
+        "_contextComposer": true
+      },
+      {
+        "role": "assistant",
+        "content": ""
+      },
+      {
+        "role": "system",
+        "content": [
+          {
+            "type": "text",
+            "text": "head"
+          },
+          {
+            "type": "text",
+            "text": " "
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ],
+        "_contextComposer": true
+      }
+    ],
+    "output": [
+      {
+        "role": "tool",
+        "content": "question",
+        "tool_call_id": "call"
+      },
+      {
+        "role": "user",
+        "content": "汉字 🦀"
+      },
+      {
+        "role": "system",
+        "content": [
+          {
+            "type": "text",
+            "text": "head "
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      }
+    ],
+    "wire": "[{\"role\":\"tool\",\"content\":\"question\",\"tool_call_id\":\"call\"},{\"role\":\"user\",\"content\":\"汉字 🦀\"},{\"role\":\"system\",\"content\":[{\"type\":\"text\",\"text\":\"head \"},{\"type\":\"text\",\"text\":\"tail\"}]}]"
+  },
+  {
+    "name": "65",
+    "preserve": false,
+    "messages": [
+      {
+        "role": "tool",
+        "content": "question",
+        "tool_call_id": "call"
+      },
+      {
+        "role": "user",
+        "content": [],
+        "_contextComposer": true
+      },
+      {
+        "role": "user",
+        "content": [],
+        "_contextComposer": true
+      },
+      {
+        "role": "user",
+        "content": "汉字 🦀",
+        "_contextComposer": true
+      },
+      {
+        "role": "assistant",
+        "content": ""
+      },
+      {
+        "role": "system",
+        "content": [
+          {
+            "type": "text",
+            "text": "head"
+          },
+          {
+            "type": "text",
+            "text": " "
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ],
+        "_contextComposer": true
+      }
+    ],
+    "output": [
+      {
+        "role": "tool",
+        "content": "question",
+        "tool_call_id": "call"
+      },
+      {
+        "role": "user",
+        "content": "汉字 🦀"
+      },
+      {
+        "role": "system",
+        "content": "head tail"
+      }
+    ],
+    "wire": "[{\"role\":\"tool\",\"content\":\"question\",\"tool_call_id\":\"call\"},{\"role\":\"user\",\"content\":\"汉字 🦀\"},{\"role\":\"system\",\"content\":\"head tail\"}]"
+  },
+  {
+    "name": "66",
+    "preserve": true,
+    "messages": [
+      {
+        "role": "assistant",
+        "content": []
+      },
+      {
+        "role": "system",
+        "content": "",
+        "_contextComposer": true
+      },
+      {
+        "role": "tool",
+        "content": null,
+        "tool_call_id": "call",
+        "_contextComposer": true
+      }
+    ],
+    "output": [
+      {
+        "role": "system",
+        "content": ""
+      },
+      {
+        "role": "tool",
+        "content": "[empty tool result]",
+        "tool_call_id": "call"
+      }
+    ],
+    "wire": "[{\"role\":\"system\",\"content\":\"\"},{\"role\":\"tool\",\"content\":\"[empty tool result]\",\"tool_call_id\":\"call\"}]"
+  },
+  {
+    "name": "66",
+    "preserve": false,
+    "messages": [
+      {
+        "role": "assistant",
+        "content": []
+      },
+      {
+        "role": "system",
+        "content": "",
+        "_contextComposer": true
+      },
+      {
+        "role": "tool",
+        "content": null,
+        "tool_call_id": "call",
+        "_contextComposer": true
+      }
+    ],
+    "output": [
+      {
+        "role": "system",
+        "content": ""
+      },
+      {
+        "role": "tool",
+        "content": "[empty tool result]",
+        "tool_call_id": "call"
+      }
+    ],
+    "wire": "[{\"role\":\"system\",\"content\":\"\"},{\"role\":\"tool\",\"content\":\"[empty tool result]\",\"tool_call_id\":\"call\"}]"
+  },
+  {
+    "name": "67",
+    "preserve": true,
+    "messages": [
+      {
+        "role": "system",
+        "content": []
+      },
+      {
+        "role": "user",
+        "content": null
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "\u001c"
+          },
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,cHJvYmU="
+            }
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      },
+      {
+        "role": "system",
+        "content": "question"
+      }
+    ],
+    "output": [
+      {
+        "role": "system",
+        "content": []
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,cHJvYmU="
+            }
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      },
+      {
+        "role": "system",
+        "content": "question"
+      }
+    ],
+    "wire": "[{\"role\":\"system\",\"content\":[]},{\"role\":\"user\",\"content\":[{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/png;base64,cHJvYmU=\"}},{\"type\":\"text\",\"text\":\"tail\"}]},{\"role\":\"system\",\"content\":\"question\"}]"
+  },
+  {
+    "name": "67",
+    "preserve": false,
+    "messages": [
+      {
+        "role": "system",
+        "content": []
+      },
+      {
+        "role": "user",
+        "content": null
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "\u001c"
+          },
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,cHJvYmU="
+            }
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      },
+      {
+        "role": "system",
+        "content": "question"
+      }
+    ],
+    "output": [
+      {
+        "role": "system",
+        "content": []
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,cHJvYmU="
+            }
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      },
+      {
+        "role": "system",
+        "content": "question"
+      }
+    ],
+    "wire": "[{\"role\":\"system\",\"content\":[]},{\"role\":\"user\",\"content\":[{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/png;base64,cHJvYmU=\"}},{\"type\":\"text\",\"text\":\"tail\"}]},{\"role\":\"system\",\"content\":\"question\"}]"
+  },
+  {
+    "name": "68",
+    "preserve": true,
+    "messages": [
+      {
+        "role": "system",
+        "content": "question",
+        "_contextComposer": true
+      }
+    ],
+    "output": [
+      {
+        "role": "system",
+        "content": "question"
+      }
+    ],
+    "wire": "[{\"role\":\"system\",\"content\":\"question\"}]"
+  },
+  {
+    "name": "68",
+    "preserve": false,
+    "messages": [
+      {
+        "role": "system",
+        "content": "question",
+        "_contextComposer": true
+      }
+    ],
+    "output": [
+      {
+        "role": "system",
+        "content": "question"
+      }
+    ],
+    "wire": "[{\"role\":\"system\",\"content\":\"question\"}]"
+  },
+  {
+    "name": "69",
+    "preserve": true,
+    "messages": [
+      {
+        "role": "tool",
+        "content": [
+          {
+            "type": "text",
+            "text": "cached"
+          },
+          {
+            "type": "text",
+            "text": "keep",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          }
+        ],
+        "tool_call_id": "call"
+      }
+    ],
+    "output": [
+      {
+        "role": "tool",
+        "content": [
+          {
+            "type": "text",
+            "text": "cached"
+          },
+          {
+            "type": "text",
+            "text": "keep",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          }
+        ],
+        "tool_call_id": "call"
+      }
+    ],
+    "wire": "[{\"role\":\"tool\",\"content\":[{\"type\":\"text\",\"text\":\"cached\"},{\"type\":\"text\",\"text\":\"keep\",\"cache_control\":{\"type\":\"ephemeral\"}}],\"tool_call_id\":\"call\"}]"
+  },
+  {
+    "name": "69",
+    "preserve": false,
+    "messages": [
+      {
+        "role": "tool",
+        "content": [
+          {
+            "type": "text",
+            "text": "cached"
+          },
+          {
+            "type": "text",
+            "text": "keep",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          }
+        ],
+        "tool_call_id": "call"
+      }
+    ],
+    "output": [
+      {
+        "role": "tool",
+        "content": [
+          {
+            "type": "text",
+            "text": "cached"
+          },
+          {
+            "type": "text",
+            "text": "keep",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          }
+        ],
+        "tool_call_id": "call"
+      }
+    ],
+    "wire": "[{\"role\":\"tool\",\"content\":[{\"type\":\"text\",\"text\":\"cached\"},{\"type\":\"text\",\"text\":\"keep\",\"cache_control\":{\"type\":\"ephemeral\"}}],\"tool_call_id\":\"call\"}]"
+  },
+  {
+    "name": "70",
+    "preserve": true,
+    "messages": [
+      {
+        "role": "user",
+        "content": []
+      },
+      {
+        "role": "system",
+        "content": [
+          {
+            "type": "text",
+            "text": "head"
+          },
+          {
+            "type": "text",
+            "text": " "
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ],
+        "_contextComposer": true
+      }
+    ],
+    "output": [
+      {
+        "role": "user",
+        "content": "[empty message]"
+      },
+      {
+        "role": "system",
+        "content": [
+          {
+            "type": "text",
+            "text": "head "
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ]
+      }
+    ],
+    "wire": "[{\"role\":\"user\",\"content\":\"[empty message]\"},{\"role\":\"system\",\"content\":[{\"type\":\"text\",\"text\":\"head \"},{\"type\":\"text\",\"text\":\"tail\"}]}]"
+  },
+  {
+    "name": "70",
+    "preserve": false,
+    "messages": [
+      {
+        "role": "user",
+        "content": []
+      },
+      {
+        "role": "system",
+        "content": [
+          {
+            "type": "text",
+            "text": "head"
+          },
+          {
+            "type": "text",
+            "text": " "
+          },
+          {
+            "type": "text",
+            "text": "tail"
+          }
+        ],
+        "_contextComposer": true
+      }
+    ],
+    "output": [
+      {
+        "role": "user",
+        "content": "[empty message]"
+      },
+      {
+        "role": "system",
+        "content": "head tail"
+      }
+    ],
+    "wire": "[{\"role\":\"user\",\"content\":\"[empty message]\"},{\"role\":\"system\",\"content\":\"head tail\"}]"
+  },
+  {
+    "name": "71",
+    "preserve": true,
+    "messages": [
+      {
+        "role": "assistant",
+        "content": "question"
+      }
+    ],
+    "output": [
+      {
+        "role": "assistant",
+        "content": "question"
+      }
+    ],
+    "wire": "[{\"role\":\"assistant\",\"content\":\"question\"}]"
+  },
+  {
+    "name": "71",
+    "preserve": false,
+    "messages": [
+      {
+        "role": "assistant",
+        "content": "question"
+      }
+    ],
+    "output": [
+      {
+        "role": "assistant",
+        "content": "question"
+      }
+    ],
+    "wire": "[{\"role\":\"assistant\",\"content\":\"question\"}]"
+  }
+]

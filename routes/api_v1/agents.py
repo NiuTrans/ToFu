@@ -330,7 +330,7 @@ def _run_search(query: str, *, max_results: int, freshness: str,
     Pure function; no Flask dependencies, so the same body powers both
     the sync route and the async worker.
     """
-    from lib.search_runtime import ensure_search_runtime
+    from lib.search.search_runtime import ensure_search_runtime
     perform_web_search = ensure_search_runtime().perform_web_search
 
     t0 = time.time()
@@ -486,7 +486,7 @@ def browser_fetch():
     except BadRequest as e:
         return api_bad_request(str(e), field=e.field or 'url')
     try:
-        from lib.search_runtime import ensure_search_runtime
+        from lib.search.search_runtime import ensure_search_runtime
         fetch_page_content = ensure_search_runtime().fetch_page_content
     except Exception as e:
         return api_internal_error(e, context='Fetch pipeline unavailable',

@@ -14,7 +14,7 @@ import uuid
 from contextlib import ExitStack, contextmanager
 
 from lib.identity import require_user_id
-from lib.storage.errors import StorageError
+from lib.agent_core.storage_errors import StorageError
 from .artifact_reader import FileBuildArtifacts, RetainedBuildArtifacts
 from .compiler import CompiledBuild
 from .contract import limit, validate
@@ -47,10 +47,11 @@ class PaperBuildArtifactRepository:
         admitted = False
         try:
             check_cancelled(cancel)
-            # One admission reclaims at most one build's maximum chunk count;
-            # every individual GC transaction deletes at most 32 chunks.
-            steps = (limit('build_output_bytes') // limit('retained_chunk_bytes')
-                     + limit('retained_gc_chunks') - 1) // limit('retained_gc_chunks')
+            # Reclamation work scales with this accepted build, not a source quota.
+            # Each GC transaction remains bounded and cancellation-aware.
+            chunks = sum((row['size_bytes'] + limit('retained_chunk_bytes') - 1)
+                         // limit('retained_chunk_bytes') for row in receipt['artifacts'])
+            steps = (chunks + limit('retained_gc_chunks') - 1) // limit('retained_gc_chunks')
             for _ in range(steps):
                 check_cancelled(cancel)
                 if not self._command('prune', {})['progress']:

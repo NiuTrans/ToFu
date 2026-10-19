@@ -1,0 +1,177 @@
+/* Project workspace layout; controls and modal behavior belong to the UI kit. */
+.coordination-workspace {
+  width: min(72rem, calc(100vw - var(--space-6)));
+  max-width: calc(100vw - var(--space-6));
+}
+.coordination-workspace p,
+.coordination-workspace h3 { margin: var(--space-0); }
+.coordination-workspace h3 { font-size: var(--font-size-lg); }
+.coordination-workspace small { color: var(--text-secondary); }
+.coordination-workspace article,
+.coordination-entry { overflow-wrap: anywhere; min-width: 0; }
+.coordination-entry { border-inline-start: var(--space-1) solid var(--accent); }
+.coordination-work-grid { grid-template-columns: repeat(auto-fit, minmax(min(100%, 19rem), 1fr)); }
+@media (max-width: 480px) {
+  .coordination-workspace { width: calc(100vw - var(--space-2)); max-width: calc(100vw - var(--space-2)); }
+}
+
+/* Conversation-first project chrome; ordinary chat retains its canvas. */
+
+.coordination-conversation-column { display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; overflow: hidden; }
+#projectCoordinatorEntry { flex-shrink: 0; }
+/* The sidebar entry is a compact project hub card: identity mark, role name and
+ * a one-line work tally, so it reads as navigation instead of a stray label. */
+.coordination-leader {
+  display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2);
+  padding: var(--space-2); margin: var(--space-2) var(--space-2) var(--space-1);
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: var(--bg-primary); color: var(--text-primary);
+  transition: border-color var(--motion-fast) var(--ease-standard), background var(--motion-fast) var(--ease-standard);
+}
+.coordination-leader[data-coordinator-id]:not([data-coordinator-id=""]) { cursor: pointer; }
+.coordination-leader[data-coordinator-id]:not([data-coordinator-id=""]):hover,
+.coordination-leader[data-coordinator-id]:not([data-coordinator-id=""]):focus-visible {
+  border-color: var(--accent); background: var(--bg-hover); outline: none;
+}
+.coordination-leader[data-coordinator-id]:not([data-coordinator-id=""])[aria-current="page"] {
+  border-color: var(--accent); background: var(--accent-subtle);
+}
+.coordination-leader-mark {
+  display: inline-flex; align-items: center; justify-content: center;
+  inline-size: var(--space-6); block-size: var(--space-6); flex-shrink: 0;
+  border-radius: var(--radius-xs); background: var(--accent-subtle); color: var(--accent);
+}
+.coordination-leader-mark svg { inline-size: var(--space-4); block-size: var(--space-4); display: block; }
+.coordination-leader-body { display: flex; flex-direction: column; min-width: 0; flex: 1; }
+.coordination-leader-label {
+  font-weight: var(--weight-semibold); line-height: var(--leading-tight);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.coordination-leader-meta {
+  color: var(--text-tertiary); font-size: var(--font-size-xs); line-height: var(--leading-tight);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.coordination-leader-go { color: var(--text-tertiary); flex-shrink: 0; font-size: var(--font-size-lg); line-height: 1; }
+.coordination-leader-actions {
+  flex-basis: 100%; display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1);
+}
+.coordination-leader-actions small { color: var(--text-secondary); }
+
+.coordination-summary {
+  padding: var(--space-3); color: var(--text-secondary);
+  border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--bg-secondary); min-width: 0; max-width: 100%; box-sizing: border-box;
+}
+.coordination-summary summary {
+  cursor: pointer; color: var(--text-primary); font-weight: var(--weight-semibold);
+  display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-2); min-width: 0;
+}
+.coordination-summary-title { flex: 1 1 8rem; min-width: 0; }
+.coordination-summary-tally {
+  color: var(--text-tertiary); font-size: var(--font-size-xs); font-weight: var(--weight-regular);
+  font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+.coordination-summary-actions { display: inline-flex; flex-wrap: wrap; align-items: center; gap: var(--space-1); font-weight: var(--weight-normal); }
+.coordination-summary p { margin: var(--space-1) var(--space-0); white-space: pre-wrap; overflow-wrap: anywhere; }
+.coordination-summary-work { padding-block: var(--space-2); }
+
+#presenceStrip:has(.coordination-summary) { padding: var(--space-3) var(--space-4); }
+.coordination-summary summary:focus-visible { outline: var(--control-edge-inset) solid var(--accent); box-shadow: var(--focus-ring); }
+
+/* Graph workspace: geometry uses the same --space-4 cells as the projection.
+ * Container queries select wires and node positions together, including split panes. */
+.coordination-task-graph { display: flex; flex-direction: column; gap: var(--space-2); min-width: 0; max-width: 100%; color: var(--text-primary); }
+.coordination-task-graph h3, .coordination-task-graph p { margin: var(--space-0); }
+.coordination-task-graph h3 { font-size: var(--font-size-md); }
+.coordination-task-graph small { color: var(--text-secondary); font-size: var(--font-size-sm); }
+.coordination-canvas { container: coordination-canvas / inline-size; min-width: 0; }
+.coordination-canvas-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1); margin-block: var(--space-2); }
+.coordination-zoom-label { color: var(--text-secondary); font-size: var(--font-size-xs); font-variant-numeric: tabular-nums; }
+.coordination-graph-viewport {
+  min-width: 0; max-width: 100%; max-height: min(48vh, 36rem); overflow: auto; overscroll-behavior: contain;
+  border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-primary);
+  background-image: radial-gradient(var(--border) 1px, transparent 1px); background-size: var(--space-4) var(--space-4);
+}
+.coordination-graph-viewport:focus-visible { outline: var(--control-edge-inset) solid var(--accent); box-shadow: var(--focus-ring); }
+.coordination-graph-sheet {
+  --graph-width: var(--graph-width-3); --graph-height: var(--graph-height-3);
+  width: calc(var(--graph-width) * var(--space-4) * var(--coordination-zoom, 1));
+  height: calc(var(--graph-height) * var(--space-4) * var(--coordination-zoom, 1));
+}
+.coordination-graph-stage {
+  position: relative; width: calc(var(--graph-width) * var(--space-4)); height: calc(var(--graph-height) * var(--space-4));
+  transform: scale(var(--coordination-zoom, 1)); transform-origin: top left;
+}
+.coordination-graph-edges { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; }
+.coordination-graph-edges:not([data-columns="3"]) { display: none; }
+.coordination-graph-edges path { fill: none; stroke: var(--text-tertiary); stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+.coordination-graph-edges [data-edge-kind="dispatch"] { stroke-dasharray: 4 4; }
+.coordination-graph-edges [data-edge-kind="dependency"] { stroke: var(--accent); stroke-width: 2; }
+.coordination-graph-edges [data-edge-kind="rework"] { stroke: var(--warning-text); stroke-dasharray: 2 3; }
+.coordination-graph-node {
+  --graph-x: var(--graph-x-3); --graph-y: var(--graph-y-3);
+  position: absolute; left: calc(var(--graph-x) * var(--space-4)); top: calc(var(--graph-y) * var(--space-4));
+  width: calc(14 * var(--space-4)); height: calc(7 * var(--space-4)); box-sizing: border-box;
+  display: grid; grid-template-columns: var(--space-4) 1fr; align-content: start; align-items: start; gap: var(--space-2);
+  padding: var(--space-2); border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--bg-primary); box-shadow: var(--shadow-sm); color: var(--text-primary);
+}
+.coordination-graph-node[data-node-kind="coordinator"] { border-color: var(--accent); background: var(--accent-subtle); }
+.coordination-graph-node[data-node-kind="reference"] { border-style: dashed; }
+.coordination-graph-node[data-selected="true"] { outline: var(--control-edge-inset) solid var(--accent); }
+.coordination-graph-node button { min-width: 0; max-height: calc(4 * var(--space-4)); overflow: hidden; justify-content: flex-start; text-align: start; }
+.coordination-node-signal { display: inline-flex; align-items: center; justify-content: center; min-height: var(--space-6); font-size: var(--font-size-lg); color: var(--text-secondary); }
+.coordination-graph-node[data-status="running"] .coordination-node-signal { color: var(--accent); }
+.coordination-graph-node[data-status="completed"] .coordination-node-signal { color: var(--success-text); }
+.coordination-graph-node[data-status="failed"] .coordination-node-signal { color: var(--error-text); }
+.coordination-graph-node[data-status="blocked"] .coordination-node-signal { color: var(--warning-text); }
+.coordination-node-digest { grid-column: 1 / -1; color: var(--text-secondary); font-size: var(--font-size-xs); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.coordination-node-inspector { display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-2); padding: var(--space-3); margin-block-start: var(--space-2); background: var(--bg-primary); border-inline-start: var(--space-1) solid var(--accent); border-radius: var(--radius-sm); overflow-wrap: anywhere; }
+.coordination-node-inspector[hidden] { display: none; }
+.coordination-node-inspector p { font-size: var(--font-size-sm); }
+.coordination-edge-legend { display: flex; flex-wrap: wrap; gap: var(--space-3); padding-block: var(--space-2); color: var(--text-secondary); font-size: var(--font-size-xs); }
+.coordination-edge-legend span { display: inline-flex; align-items: center; gap: var(--space-1); }
+.coordination-edge-legend span::before { content: ''; width: var(--space-4); border-top: 1px dashed var(--text-tertiary); }
+.coordination-edge-legend [data-edge-legend="dependency"]::before { border-top: 2px solid var(--accent); }
+.coordination-edge-legend [data-edge-legend="rework"]::before { border-color: var(--warning-text); border-top-style: dotted; }
+.coordination-canvas-empty { padding: var(--space-3); color: var(--text-secondary); font-size: var(--font-size-sm); }
+.coordination-graph-coverage { color: var(--text-secondary); font-size: var(--font-size-xs); }
+.coordination-graph-coverage summary { cursor: pointer; font-weight: var(--weight-regular); }
+.coordination-graph-coverage small { display: block; padding-block-start: var(--space-1); }
+@container coordination-canvas (max-width: 800px) {
+  .coordination-graph-sheet { --graph-width: var(--graph-width-2); --graph-height: var(--graph-height-2); }
+  .coordination-graph-node { --graph-x: var(--graph-x-2); --graph-y: var(--graph-y-2); }
+  .coordination-graph-edges[data-columns="3"] { display: none; }
+  .coordination-graph-edges[data-columns="2"] { display: block; }
+}
+@container coordination-canvas (max-width: 530px) {
+  .coordination-graph-sheet { --graph-width: var(--graph-width-1); --graph-height: var(--graph-height-1); }
+  .coordination-graph-node { --graph-x: var(--graph-x-1); --graph-y: var(--graph-y-1); }
+  .coordination-graph-edges[data-columns="2"] { display: none; }
+  .coordination-graph-edges[data-columns="1"] { display: block; }
+}
+@media (max-width: 480px) { .coordination-summary { padding: var(--space-2); } }
+
+/* Coordinator attention is tied to a real assistant message, not task counts. */
+.coordination-leader-unread { margin-inline-start: var(--space-2); color: var(--accent); }
+.coordination-leader[data-unread="true"] .coordination-leader-meta { color: var(--text-primary); }
+.coordination-report { color: var(--text-primary); margin-block-end: var(--space-2); padding: var(--space-2) var(--space-3); border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-primary); }
+.coordination-report[data-unread="true"] { border-inline-start: var(--space-1) solid var(--accent); }
+.coordination-report summary { cursor: pointer; overflow-wrap: anywhere; font-size: var(--font-size-sm); }
+.coordination-report-kind { color: var(--text-secondary); font-size: var(--font-size-xs); margin-inline-end: var(--space-2); }
+.coordination-report-body { display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-2); padding-block-start: var(--space-3); max-height: min(30vh, 20rem); overflow: auto; }
+.coordination-report-body p { margin: var(--space-0); white-space: pre-wrap; overflow-wrap: anywhere; font-size: var(--font-size-sm); }
+.coordination-report-body small { color: var(--text-secondary); font-size: var(--font-size-xs); }
+.coordination-report summary:focus-visible, .coordination-report-body:focus-visible { outline: var(--control-edge-inset) solid var(--accent); box-shadow: var(--focus-ring); }
+.coordinator-budget-metrics,
+.coordinator-budget-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 12rem), 1fr));
+  gap: var(--space-4);
+}
+
+.coordinator-budget,
+.coordinator-budget-settings {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}

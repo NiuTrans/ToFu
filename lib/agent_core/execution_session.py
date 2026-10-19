@@ -63,6 +63,7 @@ _ALLOWED_RESOURCE_NAMES = frozenset({
     "model_route",
     "route",
     "tool_environment",
+    "repository_scanner",
     "upstream",
 })
 
@@ -98,7 +99,7 @@ class ExecutionTerminalReceipt:
 @dataclass
 class _OwnedResource:
     name: str
-    release: Callable[[ExecutionSettlementContext], Any]
+    release: Callable[[ExecutionSettlementContext], Any] | None
     release_order: int
     recoverable: bool
     disposition: ResourceDisposition | None = None
@@ -303,6 +304,8 @@ class ExecutionSession:
         with self._lock:
             if self._terminal_receipt is not None:
                 return self._terminal_receipt
+            if self._phase == ExecutionPhase.SETTLING:
+                raise RuntimeError("execution settlement is already in progress")
             previous_phase = self._phase
             self._phase = ExecutionPhase.SETTLING
             self._phase_changed_monotonic = time.monotonic()
@@ -319,14 +322,14 @@ class ExecutionSession:
                 key=lambda item: (-item.release_order, item.name),
             )
 
-            if previous_phase != ExecutionPhase.SETTLING:
-                _record_metric(
-                    "record_execution_phase_transition",
-                    self.kind,
-                    previous_phase.value,
-                    ExecutionPhase.SETTLING.value,
-                )
+            _record_metric(
+                "record_execution_phase_transition",
+                self.kind,
+                previous_phase.value,
+                ExecutionPhase.SETTLING.value,
+            )
 
+            interruption = None
             for resource in resources:
                 if resource.disposition is not None:
                     continue
@@ -336,7 +339,11 @@ class ExecutionSession:
                         resource.disposition = ResourceDisposition.DEFERRED
                     else:
                         resource.disposition = ResourceDisposition.RELEASED
-                except Exception as exc:
+                except BaseException as exc:
+                    # Cancellation cannot skip later releases or cause this
+                    # potentially non-idempotent release to run a second time.
+                    if not isinstance(exc, Exception) and interruption is None:
+                        interruption = exc
                     resource.disposition = (
                         ResourceDisposition.DEFERRED
                         if resource.recoverable else ResourceDisposition.FAILED
@@ -347,6 +354,10 @@ class ExecutionSession:
                         self.execution_id[:20], self.kind, resource.name,
                         resource.recoverable, type(exc).__name__,
                     )
+                finally:
+                    # A propagated exception retains this frame and resource
+                    # list; detach every consumed callback even in that case.
+                    resource.release = None
                 _record_metric(
                     "record_execution_resource_release",
                     self.kind,
@@ -358,7 +369,7 @@ class ExecutionSession:
                 (resource.name, resource.disposition or ResourceDisposition.FAILED)
                 for resource in resources
             )
-            invariants_satisfied = all(
+            invariants_satisfied = interruption is None and all(
                 disposition != ResourceDisposition.FAILED
                 for _, disposition in dispositions
             )
@@ -381,6 +392,9 @@ class ExecutionSession:
                 resource_dispositions=dispositions,
                 duration_seconds=max(0.0, now - self.created_monotonic),
             )
+            # The immutable receipt retains dispositions. Release closures can
+            # capture whole task/provider environments and serve no retry role.
+            self._resources.clear()
 
         with _active_sessions_lock:
             if _active_sessions.get(self.execution_id) is self:
@@ -392,6 +406,8 @@ class ExecutionSession:
             invariants_satisfied,
             self._terminal_receipt.duration_seconds,
         )
+        if interruption is not None:
+            raise interruption
         return self._terminal_receipt
 
     def snapshot(self) -> dict[str, Any]:
@@ -506,6 +522,14 @@ def bind_tool_environment(
     )
 
 
+def bind_repository_scanner(session: ExecutionSession, release: Callable[[], Any]) -> None:
+    """Own a repository task scope separately from custom tool environments."""
+    def _release(_context: ExecutionSettlementContext) -> None:
+        release()
+    _bind_acquired_resource(session, name="repository_scanner", release=_release,
+                            rollback=release, release_order=250)
+
+
 def _bind_acquired_resource(
     session: ExecutionSession,
     *,
@@ -542,8 +566,11 @@ def _bind_acquired_resource(
                     session.execution_id[:20], session.kind, name,
                     type(exc).__name__,
                 )
-            session.settle(
-                ExecutionPhase.FAILED, cause=f"{name}_bind_failed")
+            finally:
+                # An unbound rollback can itself be cancelled. Previously
+                # acquired resources still belong to this failed acquisition.
+                session.settle(
+                    ExecutionPhase.FAILED, cause=f"{name}_bind_failed")
         raise
 
 
@@ -641,6 +668,7 @@ __all__ = [
     "bind_billing_reservation",
     "bind_model_route",
     "bind_tool_environment",
+    "bind_repository_scanner",
     "execution_outcome_for_task",
     "execution_session_for_task",
     "reconcile_overdue_execution_sessions",

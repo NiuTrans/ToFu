@@ -3,6 +3,7 @@
 import copy
 from pathlib import Path
 import unittest
+import unittest.mock
 from types import SimpleNamespace
 from lib.identity import PrincipalContext
 from lib.model_routing.domain import ModelRef, NativeModelSelection
@@ -44,6 +45,32 @@ def selection():
 
 
 class RouteTests(unittest.IsolatedAsyncioTestCase):
+    async def test_counter_preparation_is_detached_and_refuses_before_process(self):
+        from unittest.mock import AsyncMock
+        repo=Repository()
+        route=compile_native_route(repo,repo.boundary,selection())
+        client=SimpleNamespace(principal=principal(),run=AsyncMock(return_value={'status':'done'}))
+        profile={'input_bytes':4096}
+        seen=[]
+        def prepare(metadata,template,counter):
+            seen.append((metadata,template))
+            counter['input_bytes']=8192
+            return counter
+        await run_native_route(client,route,{'owner_user_id':7,'model_counter':profile},
+            prepare_template=lambda metadata:{'model':metadata['wire_model'],'max_tokens':64},
+            callbacks={},working_directory=Path('/tmp'),prepare_model_counter=prepare)
+        self.assertEqual(profile,{'input_bytes':4096})
+        self.assertEqual(client.run.call_args.args[0]['model_counter'],{'input_bytes':8192})
+        self.assertEqual(seen[0][1]['max_tokens'],64)
+        client.run.reset_mock()
+        route=compile_native_route(repo,repo.boundary,selection())
+        def refuse(*args):raise ValueError('counter refused')
+        with self.assertRaisesRegex(ValueError,'counter refused'):
+            await run_native_route(client,route,{'owner_user_id':7,'model_counter':profile},
+                prepare_template=lambda metadata:{'model':metadata['wire_model'],'max_tokens':64},
+                callbacks={},working_directory=Path('/tmp'),prepare_model_counter=refuse)
+        client.run.assert_not_awaited()
+
     async def test_anthropic_endpoint_headers_and_native_protocol_are_owned(self):
         for base,endpoint in [("https://a.example/v1","https://a.example/v1/messages"),
                               ("https://a.example/anthropic","https://a.example/anthropic/v1/messages"),
@@ -89,6 +116,55 @@ class RouteTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(error.exception.kind, 'native_route_override')
             route.consume(principal())
 
+    async def test_codex_oauth_route_keeps_resolver_private_and_requires_exact_dialect(self):
+        resolver=lambda request: {}
+        repo=Repository()
+        repo.document['connections'][0].update(protocol='openai_responses',responses_profile='codex')
+        repo.document['credentials'][0]['kind']='oauth'
+        def secret(boundary,reference):
+            repo.secret_calls.append((boundary,reference))
+            return 'oauth:codex'
+        repo.resolve_secret=secret
+        route=compile_native_route(repo,repo.boundary,selection(),credential_resolver=resolver)
+        public,private=route.consume(principal())
+        self.assertEqual(public['credential_kind'],'oauth')
+        self.assertIs(private['_credential_resolver'],resolver)
+        self.assertEqual(private['oauth'],'codex')
+        self.assertNotIn('secret_reference',public)
+        self.assertIsNone(route._credential_resolver)
+        self.assertEqual(len(repo.secret_calls),1)
+        for protocol,profile in [('openai_responses','compatible'),('anthropic','codex')]:
+            repo.document['connections'][0].update(protocol=protocol,responses_profile=profile)
+            repo.secret_calls.clear()
+            with self.assertRaises(NativeRouteError):
+                compile_native_route(repo,repo.boundary,selection(),credential_resolver=resolver)
+            self.assertEqual(repo.secret_calls,[])
+
+    async def test_oauth_missing_account_binding_never_invokes_resolver_or_native(self):
+        resolver=unittest.mock.Mock(return_value={})
+        repo=Repository()
+        repo.document['connections'][0].update(protocol='openai_responses',responses_profile='codex')
+        repo.document['credentials'][0]['kind']='oauth'
+        repo.resolve_secret=lambda *_:'oauth:codex'
+        route=compile_native_route(repo,repo.boundary,selection(),credential_resolver=resolver)
+        client=SimpleNamespace(principal=principal(),run=unittest.mock.AsyncMock())
+        with self.assertRaises(NativeRouteError) as error:
+            await run_native_route(client,route,{'owner_user_id':7,'task_id':'task'},
+                prepare_template=lambda metadata:dict(model=metadata['wire_model'],max_tokens=100),
+                callbacks={},working_directory=Path('/tmp'))
+        self.assertEqual(error.exception.kind,'native_route_credential_binding')
+        resolver.assert_not_called()
+        client.run.assert_not_awaited()
+
+    async def test_route_tenant_mismatch_refuses_without_consuming_credentials(self):
+        repo=Repository();repo.boundary=OwnerBoundary.create(7,'tenant-a')
+        route=compile_native_route(repo,repo.boundary,selection())
+        foreign=PrincipalContext.user(subject_id='foreign-tenant',owner_user_id=7,tenant_id='tenant-b')
+        with self.assertRaises(NativeRouteError):route.consume(foreign)
+        owned=PrincipalContext.user(subject_id='owned-tenant',owner_user_id=7,tenant_id='tenant-a')
+        public,_=route.consume(owned)
+        self.assertEqual(public['tenant_id'],'tenant-a')
+
     async def test_responses_oauth_refuses_before_secret_resolution(self):
         repo = Repository()
         repo.document['connections'][0]['protocol'] = 'openai_responses'
@@ -105,6 +181,27 @@ class RouteTests(unittest.IsolatedAsyncioTestCase):
             await run_native_route(SimpleNamespace(principal=principal()), route,
                                    {'owner_user_id': 7, 'responses_reasoning_replay': True},
                                    prepare_template=lambda _: {}, callbacks={}, working_directory=Path('/tmp'))
+        self.assertEqual(error.exception.kind, 'native_route_override')
+        route.consume(principal())
+
+    async def test_chat_text_parts_policy_is_frozen_from_selected_destination(self):
+        from unittest.mock import patch
+        repo = Repository()
+        repo.document['deployments'][0]['wire_model_id'] = 'cache-aware-destination'
+        with patch('lib.llm.cache._gateway_honors_cache_markers', return_value=True) as policy:
+            route = compile_native_route(repo, repo.boundary, selection())
+        with patch('lib.llm.cache._gateway_honors_cache_markers', return_value=False):
+            public, private = route.consume(principal())
+        self.assertEqual(public['wire_model'], 'cache-aware-destination')
+        self.assertIs(private['chat_preserve_text_parts'], True)
+        policy.assert_called_once_with('cache-aware-destination')
+
+    async def test_chat_text_parts_override_cannot_consume_issued_route(self):
+        route = compile_native_route(Repository(), OwnerBoundary.create(7), selection())
+        with self.assertRaises(NativeRouteError) as error:
+            await run_native_route(SimpleNamespace(principal=principal()), route,
+                {'owner_user_id':7,'chat_preserve_text_parts':False},
+                prepare_template=lambda _: {}, callbacks={}, working_directory=Path('/tmp'))
         self.assertEqual(error.exception.kind, 'native_route_override')
         route.consume(principal())
 

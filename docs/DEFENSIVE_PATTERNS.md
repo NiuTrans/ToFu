@@ -13,8 +13,9 @@ demand executor, whose worker hint controls idle reuse rather than concurrency.
 Decision: each index walk retains a directory frontier and submits at most the
 launch-probed `TOFU_TREE_INDEX_WALK_JOBS` at once. Root builds remain admitted
 independently; overlapping roots share their executor generation, and their
-scan windows add. Frontier growth uses the existing entry budget; incomplete
-walks never install an index. Cancellation drains accepted workers before rows
+scan windows add. The frontier keeps the complete directory descriptors; only
+actual read failures make a walk incomplete, and incomplete walks never install
+an index. Cancellation drains accepted workers before rows
 are consumed or discarded. Alternatives rejected: changing shared executor
 admission blocks user tasks; eagerly submitting every directory creates a
 thread storm. Measurement: synthetic 4,096-directory walks preserve every file
@@ -32,7 +33,7 @@ activity cannot refresh a stalled loop's liveness. Stop still joins that exact
 thread; no worker or timer is added. Alternatives rejected: awaiting write I/O
 in the heartbeat task delays liveness observation; writing the watchdog's
 current timestamp masks an actual loop stall. Owner:
-`lib/server_loop_watchdog.py::_persist_loop_heartbeat`; specs:
+`lib/server/server_loop_watchdog.py::_persist_loop_heartbeat`; specs:
 `tests/server/test_heartbeat_persistence_isolation.py` inject blocked storage,
 prove loop progress, preserve stale timestamps, and verify joined teardown.
 
@@ -54,6 +55,32 @@ owned by Tofu-DB.
 
 ## Dispose must reach quiescence
 
+### Conversation sync ownership
+
+Problem: snapshot failure, callback reentry and response setup cancellation
+could skip authority or leak resources. Decision: `core/conversation-sync.ts`
+acknowledges cursors only after required ingestion, checks generation across
+callbacks and owns one abort signal for snapshot/history/rank reads. Disposal
+cancels reads and silences late state/diagnostic publication. Its existing
+watchdog starts at source construction; valid frames refresh it, repeated
+open/error notifications do not. Reconnect timers are claimed before notifying
+observers so reentrant pause/close can cancel them. `core/observer.ts` isolates
+optional health, withheld-write and debug notifications; projection/commit
+ports must still propagate failure. Health fanout survives a failed subscriber.
+The HTTP adapter uses one `ExitStack` until response construction succeeds;
+its generator finalizer includes initialization, and the existing 10-second
+unconsumed-body deadline covers responses that never start. Broker release
+callbacks share one isolated invocation path before/after close. Rejected:
+catch-by-catch cleanup leaves the next setup step unprotected; per-page retries
+create another recovery owner. No additional poller, queue or durable state.
+Specs: `core/conversation-sync.test.ts`, `core/connection-health.test.ts`,
+`tests/conversation/test_conversation_stream_{setup,ownership}.py` and the
+real-EventSource/Surface browser test `test_visual_conversation_sync_recovery.py`.
+The resource regression runs 100 recovery/disposal cycles, requiring zero live
+streams/timers and aborted read signals after every disposal.
+
+### Joined producers
+
 Teardown is not complete when the kill signal is sent; it is complete when the
 killed thing has exited and its late completions can no longer observe or
 mutate the world. Kill, then await exit. Close listeners, subscriptions, and
@@ -63,6 +90,46 @@ cooperatively is waited out, never abandoned while still holding task state.
 Anchors: `lib/agent_core/execution_session.py` (private resource stack
 settlement), `lib/tasks_pkg/tool_dispatch/_pipeline.py`
 (`_drain_cancelled_tool_workers`).
+
+### Interrupted resource settlement
+
+Problem: a service can close its native child clients while an ordinary Flow
+worker still owns a graph. Failing library close and then retiring the serving
+loop strands that worker's async cleanup. Decision: application-owned Flow close
+retires new graph admission and waits off-loop for accepted calls and graph
+borrowers. Existing graph operations remain usable through their final release.
+Standalone close retains its explicit borrowed-graph refusal. The existing
+condition signals quiescence; no new thread pool, polling loop or registry is
+added. Alternatives rejected: unloading early risks native use-after-free;
+blocking the serving loop prevents the borrower from finishing.
+
+The same active-Goal shutdown probe exposed a partially imported optional
+translation module. Shutdown now performs normal import on its existing worker
+before calling cleanup, joining Python's import lock while keeping unused
+modules unloaded. Direct `sys.modules` attribute access bypassed that lock;
+skipping an unfinished module would lose its cleanup obligation. Verify Flow
+lifetime, host close, server shutdown import-race and full production Goal tests.
+The resumed-provider fixture shut down both embedded and daemon applications
+in approximately 1.27 seconds with exit code zero, no forced group kill, zero
+remaining native clients and no live child processes. This is one controlled
+local observation per transport, not a general shutdown latency guarantee.
+
+Problem: cancellation inside a release callback skipped later resources and
+allowed a subsequent settlement to repeat non-idempotent cleanup; recursive
+settlement also reentered callbacks. Decision: `ExecutionSession.settle` refuses
+reentry, attempts every remaining release, freezes a failed terminal receipt,
+then propagates the first control exception unchanged. Recoverable resources
+retain explicit deferred dispositions; another finisher reads the same receipt.
+Acquire-to-registration rollback also settles the prior resource stack in a
+finalizer, including when the unbound resource's rollback is interrupted.
+Released callback closures are dropped because only dispositions have continuing
+value, including when propagated exceptions retain cleanup stack frames.
+No thread, queue, retry owner or durable record is added. Alternatives:
+immediate propagation leaks later resources; swallowing cancellation hides its
+cause; keeping closures until task expiry retains captured environments.
+`test_execution_session_cleanup.py` retains 100 terminal sessions whose callbacks
+captured 64 KiB each: 6,553,600 captured payload bytes become zero reachable payload
+bytes after settlement while all receipts remain. This measures ownership, not RSS.
 
 ## Report orthogonal outcomes independently
 
@@ -168,9 +235,16 @@ execution-session settlement and before task status/event publication, outside
 the registry lock. A refused write retains its original candidate and blocks
 terminal TTL reclamation. Finish/poll retry metadata only; completed resources
 are not executed again. Runtimes without this port retain transient behavior.
-Persisting after push or replacing the candidate with a storage-error outcome
-was rejected. Anchor: `lib/agent_core/task_runtime.py::finish`; regression:
-`tests/research/test_research_action_terminal.py`.
+The private pending record freezes both terminal state and event fields before
+I/O; each port call receives a detached state copy. Caller/port mutation cannot
+change retries, and polling preserves original event fields. Explicit false ACKs
+remain pending. One outer finalizer releases the terminalization guard across
+snapshot, settlement, persistence and publication failures. At most one frozen
+candidate and one current port copy are retained per finishing task; retry count
+does not add retained payloads. Persisting after push, retaining caller aliases
+or replacing the candidate with a storage-error outcome were rejected. Anchor:
+`lib/agent_core/task_runtime.py::finish`; specs: `test_terminal_candidate_retry.py`
+and `tests/research/test_research_action_terminal.py`.
 
 ## Worker startup transactions
 
@@ -216,3 +290,23 @@ Tests live in `tests/agent_core/test_worker_startup_transaction.py` alongside
 Packaged search/trading worker copies are regenerated only from the stdlib owner
 by `scripts/gen_packaged_demand_workers.py`; fresh isolated-process imports verify
 both copies run the same 32-way rendezvous without booting the application.
+
+
+## Native reader release must preserve join debt
+
+**Problem:** taking an actor JoinHandle out of a mutex before waiting lets a
+concurrent release report success while the actor still owns task state. A
+failed consumed handle then makes retry appear successfully released.
+**Decision:** the reader lease keeps Running/Joined/Failed under one mutex
+through the exact actor join and tail publication. Concurrent finish observers
+wait for that same join; failure remains Failed on retry and tail acquisition.
+Only Joined acknowledges release. **Alternatives rejected:** locking only the
+handle extraction proves transfer, not quiescence; treating an absent failed
+handle as success erases cleanup debt. This serializes one reader's teardown,
+never task admission or unrelated readers. Owner:
+`packages/tofu-runtime/src/cli_agent_control.rs::ReaderLease::finish`.
+Specs cover blocked concurrent release, actor panic/retry, exact tail ownership
+and real stdio cancel/checkpoint/model-control boundaries. Persistent worker
+reuse must use this barrier before advertising readiness; no reuse is currently
+selected by this change. Evidence and the 8-byte per-reader size change live in
+[resource control](RESOURCE_CONTROL.md#native-reader-join-fence).

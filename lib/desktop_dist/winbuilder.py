@@ -112,8 +112,8 @@ _TARGETS = {
     },
     'agent': {
         'spec': 'tofu-agent.spec',
-        'app_dir': 'TofuAgent',
-        'exe': 'TofuAgent.exe',
+        'app_dir': 'TofuRemote',
+        'exe': 'TofuRemote.exe',
         'smoke_env': 'TOFU_AGENT_SMOKE',
         'smoke_sentinel': 'TOFU_AGENT_SMOKE_OK',
         'payload_prefix': 'payload-agent',
@@ -691,6 +691,8 @@ _NSI_TEMPLATE = os.path.join(_REPO_ROOT, 'desktop', 'installer.nsi.tmpl')
 _NSI_TARGETS = {
     'full': {
         'app_name': 'Tofu',
+        'registry_name': 'Tofu',
+        'legacy_exe': '',
         'app_exe': 'Tofu.exe',
         'install_dir': 'Tofu',
         'setup_prefix': 'Tofu-Setup',
@@ -699,11 +701,13 @@ _NSI_TARGETS = {
         'autostart_value': '',
     },
     'agent': {
-        'app_name': 'Tofu Agent',
-        'app_exe': 'TofuAgent.exe',
-        'install_dir': 'TofuAgent',
-        'setup_prefix': 'TofuAgent-Setup',
-        'label': 'Windows agent installer',
+        'app_name': 'Tofu Remote',
+        'registry_name': 'Tofu Agent',  # Stable uninstall/upgrade identity.
+        'legacy_exe': 'TofuAgent.exe',
+        'app_exe': 'TofuRemote.exe',
+        'install_dir': 'TofuAgent',  # Stable per-user upgrade directory.
+        'setup_prefix': 'TofuRemote-Setup',
+        'label': 'Windows remote installer',
         'kind': 'agent',
         'autostart_value': 'TofuAgent',
     },
@@ -711,7 +715,7 @@ _NSI_TARGETS = {
 
 _NSI_PLACEHOLDERS = ('@APP_VERSION@', '@PAYLOAD_DIR@', '@OUT_FILE@',
                      '@ASSET_DIR@', '@ART_DIR@', '@APP_NAME@', '@APP_EXE@',
-                     '@INSTALL_DIR_NAME@', '@AUTOSTART_DECL@',
+                     '@INSTALL_DIR_NAME@', '@APP_REGISTRY_NAME@', '@APP_LEGACY_EXE@', '@AUTOSTART_DECL@',
                      '@AUTOSTART_PAGE@', '@AUTOSTART_INSTALL@',
                      '@AUTOSTART_UNINSTALL@')
 
@@ -789,6 +793,8 @@ def _render_nsi(version: str, payload_dir: str, out_file: str,
                 .replace('@ASSET_DIR@', asset_dir)
                 .replace('@ART_DIR@', art_dir)
                 .replace('@APP_NAME@', t['app_name'])
+                .replace('@APP_REGISTRY_NAME@', t['registry_name'])
+                .replace('@APP_LEGACY_EXE@', t['legacy_exe'])
                 .replace('@APP_EXE@', t['app_exe'])
                 .replace('@INSTALL_DIR_NAME@', t['install_dir'])
                 .replace('@AUTOSTART_DECL@', autostart_decl)

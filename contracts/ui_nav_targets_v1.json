@@ -251,8 +251,8 @@
         "en": "Daily Optimizer"
       },
       "description": {
-        "zh": "每晚 03:30 分析当日日志并自动提出改进建议（如屏蔽垃圾搜索域名）。关闭后不再运行分析，顶栏 OPTIMIZER 徽章隐藏。已应用的改动会保留直到手动撤销。",
-        "en": "Every night at 03:30 local, analyses the day's logs and auto-proposes improvements (e.g. blocking spammy search domains). When off, analysis stops and the top-bar OPTIMIZER badge is hidden. Already-applied changes persist until manually reverted."
+        "zh": "每天 03:30 分析日志并提出改进建议。关闭后停止分析，已应用的改动须手动撤销。",
+        "en": "Analyze logs and suggest improvements daily at 03:30. Disabling stops analysis; revert applied changes manually."
       }
     },
     {
@@ -264,8 +264,8 @@
         "en": "Trading / Fund Module"
       },
       "description": {
-        "zh": "交易顾问、基金筛选、自动驾驶、资讯爬虫。关闭后立即生效：顶栏入口隐藏、接口停止服务，后台资讯爬虫与自动驾驶也会停止（不再产生模型调用费用）。",
-        "en": "Trading advisor, fund screening, autopilot and news crawler. Takes effect immediately: the topbar entry is hidden, the API stops serving, and the background crawler and autopilot stop too — so they no longer run up model-call costs."
+        "zh": "关闭后停止交易服务、资讯抓取与自动驾驶，不再产生相关模型费用。",
+        "en": "Disabling stops trading services, news crawling and autopilot, including their model costs."
       }
     },
     {

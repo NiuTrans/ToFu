@@ -11,22 +11,24 @@ ports; backend libraries never import routes or browser owners.
 
 | Concern | Primary owners | First map |
 |---|---|---|
-| Boot and process lifecycle | `app_*`, `server_*`, `production_lifecycle.py`, `process_roles.py`, `compat/`, `self_update/`, `log_clean/` | `docs/modules/infra_runtime.md` |
-| Identity, providers, OAuth, billing | `identity.py`, `api_keys/`, `oauth/`, `billing/`, `llm_dispatch/` | `docs/modules/auth_providers_billing.md` |
+| HTTP transport and request lifecycle | `http_transport/` | `docs/modules/infra_runtime.md` |
+| Boot and process lifecycle | `app/` (was `app_*`), `server/` (was `server_*`), `server_boot/`, `runtime/` (was `runtime_*`), `production_lifecycle.py`, `process_roles.py`, `compat/`, `self_update/`, `log_clean/`, `native_binary/` | `docs/modules/infra_runtime.md` |
+| Identity, providers, OAuth, billing | `identity.py`, `api_keys/`, `oauth/`, `billing/`, `llm_dispatch/`, `provider/` (was `provider_*`), `byo/` (was `byo_*`), `rate_limit/` (was `rate_limit_*`) | `docs/modules/auth_providers_billing.md` |
 | API spec and error taxonomy | `openapi/`, `error_envelope/`, `api_response.py` | `docs/contracts/API_CONTRACT.md`, `docs/modules/integrations_api.md` |
-| Tasks and agent execution | `tasks_pkg/`, `agent_core/`, `swarm/`, `agent_verdict/`, `goal_runs/`, `key_stats/` | `docs/modules/task_engine.md` |
+| Log retention, diagnostics, aggregates | `log.py` (core), `logging_pkg/` (was `log_*`), `log_clean/` | `docs/modules/infra_runtime.md`, `docs/LOGGING.md` |
+| Tasks and agent execution | `tasks_pkg/`, `agent_core/`, `agent_loop/` (was `agent_*`), `task_replay/` (was `task_*`), `swarm/`, `agent_verdict/`, `goal_runs/`, `key_stats/` | `docs/modules/task_engine.md` |
 | Orchestration graphs | `orchestration/`, `orchestration_*.py` | `docs/modules/orchestration_dag.md` |
 | Model I/O | `llm/`, `llm_dispatch/`, `local_serve/`, `model_*`, `pricing/`, `llm_sanitize/`, `mt_provider/` | `docs/modules/llm_io.md` |
-| Tools, MCP, browser, site packs | `tools/`, `mcp/`, `browser/`, `site_packs/`, `project_mod/`, `repo_map/`, `tool_input_repair/` | `docs/modules/tools_execution.md`, `docs/SITE_PACKS.md` |
+| Tools, MCP, browser, site packs, search | `tools/`, `tool_results/` (was `tool_*`), `search/` (was `search_*`), `mcp/`, `browser/`, `site_packs/`, `project_mod/`, `repo_map/`, `tool_input_repair/` | `docs/modules/tools_execution.md`, `docs/SITE_PACKS.md` |
 | Context and memory | `tasks_pkg/context_composer/`, `tasks_pkg/compaction/`, `memory/`, `token_counter/` | `docs/modules/context_engineering.md` |
 | Conversations and project state | `conversation_sync/`, `conversations/`, `project_mod/`, `presence/`, `chat/`, `conv_config/` | `docs/modules/conversations_project_brain.md` |
-| Durable data | `storage/`, `storage_sidecar/` | `docs/modules/data_tier.md` |
+| Durable data | `storage/` (client facade), `storage_authority_sql/` (SQL authority) | `docs/modules/data_tier.md` |
 | Papers and media | `paper/`, `pdf_parser/`, `translate/`, `motion_video/`, `knowledge/`, `doc_parser/`, `video_analysis/`, `transcription/`, `text_lang/` | `docs/modules/ingest_media.md` |
-| Deliverable production | `production/`, `longform/`, `slides/`, `design_sys/`, `artifacts/`, `image_gen/` | `docs/modules/production.md` |
+| Deliverable production and owner acceptance | `acceptance/`, `production/`, `longform/`, `slides/`, `design_sys/`, `artifacts/`, `image_gen/` | `docs/modules/production.md` |
 | Scheduling and operations | `scheduler/`, `daily_report/`, `optimizer/` | `docs/modules/scheduling_ops.md` |
 | External channel integrations | `feishu/` | `docs/modules/integrations_api.md` |
 | Remote execution | `desktop/`, `desktop_agent/`, `desktop_dist/`, `desktop_wire/` | `docs/modules/remote_execution.md` |
-| Skills and experiments | `skills/`, `experiments/` | `docs/modules/skills.md`, `docs/modules/experiments.md` |
+| Skills and experiments | `skills/`, `experiments/`, `cost_experiments/` (was `cost_experiment*`) | `docs/modules/skills.md`, `docs/modules/experiments.md` |
 | Proof bundles | `proof/` | `docs/modules/proof.md` |
 
 ## Editing rules

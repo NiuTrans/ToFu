@@ -351,7 +351,7 @@ def test_live_retry_preserves_task_id(monkeypatch):
     cause and guards against a future refactor that mutates the caller in place.
     """
     from lib.llm_dispatch import api as _api
-    from lib.llm_errors import RateLimitError
+    from lib.llm.llm_errors import RateLimitError
 
     # Fake slot the dispatcher hands back.
     class _Slot:

@@ -191,7 +191,30 @@
           "type": "object"
         },
         "policy": {
-          "type": "object"
+          "type": "object",
+          "required": [
+            "request_headers_ms"
+          ],
+          "properties": {
+            "request_headers_ms": {
+              "description": "Overall wait through request upload and response headers; explicit null leaves this phase under caller Stop/deadline. This field is not an independent upload timeout.",
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 1,
+              "maximum": 18446744073709551615
+            },
+            "write_ms": {
+              "description": "Optional maximum pending duration of each post-connect physical write or flush. Null or omission preserves legacy behavior. Reads and HTTP/2 flow-control waits retain their independent owners.",
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 1,
+              "maximum": 18446744073709551615
+            }
+          }
         },
         "identical_tool_limit": {
           "type": [
@@ -212,12 +235,22 @@
           "type": "integer",
           "minimum": 1
         },
+        "total_tool_calls": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
         "request_bytes": {
           "type": "integer",
           "minimum": 1
         },
         "rounds": {
-          "type": "integer",
+          "type": [
+            "integer",
+            "null"
+          ],
           "minimum": 1
         },
         "retained_bytes": {
@@ -233,7 +266,10 @@
           "minimum": 1
         },
         "deadline_ms": {
-          "type": "integer",
+          "type": [
+            "integer",
+            "null"
+          ],
           "minimum": 1
         },
         "round_control": {
@@ -342,6 +378,45 @@
             "openai",
             "codex"
           ]
+        },
+        "cancel_requested": {
+          "type": "boolean"
+        },
+        "checkpoint_fee_projection": {
+          "type": "boolean"
+        },
+        "checkpoint_fee_executor_origins": {
+          "type": "boolean"
+        },
+        "retain_execution_history": {
+          "type": "boolean"
+        },
+        "chat_preserve_text_parts": {
+          "type": "boolean"
+        },
+        "tool_sibling_control": {
+          "type": "boolean"
+        },
+        "wire_tools": {
+          "$ref": "#/$defs/wire_function_tools"
+        },
+        "wire_tool_preparation": {
+          "type": "boolean"
+        },
+        "checkpoint_tree_usage": {
+          "type": "boolean"
+        },
+        "checkpoint_child_routes": {
+          "type": "boolean"
+        },
+        "checkpoint_pending_tools": {
+          "type": "boolean"
+        },
+        "checkpoint_actor_account": {
+          "type": "boolean"
+        },
+        "checkpoint_fee_payer_origins": {
+          "type": "boolean"
         }
       },
       "additionalProperties": false
@@ -439,6 +514,9 @@
         },
         "preparation_failed": {
           "type": "boolean"
+        },
+        "wire_tools": {
+          "$ref": "#/$defs/wire_function_tools"
         }
       },
       "additionalProperties": false
@@ -623,16 +701,34 @@
           "minLength": 1
         },
         "ack_ms": {
-          "type": "integer",
-          "minimum": 1
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1,
+          "description": "Additional frozen terminal publication/ACK budget. Explicit null waits for the joined persistence owner or EOF; it never turns cancellation or process exit into durable success.",
+          "maximum": 18446744073709551615
         },
         "attempts": {
           "type": "integer",
-          "minimum": 1
+          "minimum": 1,
+          "default": 2
         },
         "frame_bytes": {
           "type": "integer",
           "minimum": 1
+        },
+        "usage_summary": {
+          "type": "boolean",
+          "description": "Explicit native additive projection for successful terminal delivery; not financial evidence."
+        },
+        "completion_reference": {
+          "type": "boolean",
+          "description": "Explicit final metadata reference to the same accepted frozen terminal candidate; full retry requests remain unchanged."
+        },
+        "retry_reference": {
+          "type": "boolean",
+          "description": "Explicit metadata-only retry of the same first frozen candidate after host retry ACK; never permits a new candidate."
         }
       },
       "additionalProperties": false
@@ -677,13 +773,23 @@
           "minimum": 1
         },
         "event": {
-          "type": "object"
+          "type": "object",
+          "properties": {
+            "execution": {
+              "type": "object",
+              "$ref": "#/$defs/execution_history"
+            }
+          }
         },
         "checkpoint_suspended": {
           "type": "boolean"
         },
         "receipt": {
           "type": "object"
+        },
+        "usage_summary": {
+          "type": "object",
+          "$ref": "#/$defs/additive_usage_summary"
         }
       },
       "additionalProperties": false
@@ -881,7 +987,10 @@
           "type": "object"
         },
         "remaining_ms": {
-          "type": "integer",
+          "type": [
+            "integer",
+            "null"
+          ],
           "minimum": 1
         }
       },
@@ -1139,7 +1248,9 @@
           "enum": [
             "load",
             "begin",
-            "complete"
+            "complete",
+            "pending",
+            "reconcile"
           ]
         },
         "binding": {
@@ -1191,6 +1302,25 @@
         },
         "state": {
           "type": "object"
+        },
+        "tool_observations": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": [
+              "call_id",
+              "content"
+            ],
+            "properties": {
+              "call_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "content": {}
+            },
+            "additionalProperties": false
+          }
         }
       },
       "additionalProperties": false
@@ -1202,9 +1332,16 @@
       ],
       "properties": {
         "ack_ms": {
-          "type": "integer",
+          "type": [
+            "integer",
+            "null"
+          ],
           "minimum": 1,
-          "maximum": 18446744073709551615
+          "maximum": 18446744073709551615,
+          "description": "Additional host model callback/ACK budget. Explicit null waits under caller Stop/deadline and the callback owner; settlement still joins its authority. Missing is invalid."
+        },
+        "pricing": {
+          "type": "boolean"
         }
       },
       "additionalProperties": false
@@ -1248,11 +1385,13 @@
         "depth": {
           "type": "integer",
           "minimum": 1,
-          "maximum": 128
+          "maximum": 128,
+          "default": 128
         },
         "worker_stack_bytes": {
           "type": "integer",
-          "minimum": 262144
+          "minimum": 262144,
+          "default": 2097152
         }
       },
       "additionalProperties": false
@@ -1324,9 +1463,13 @@
           "maximum": 18446744073709551615
         },
         "expires_monotonic_ns": {
-          "type": "integer",
+          "type": [
+            "integer",
+            "null"
+          ],
           "minimum": 1,
-          "maximum": 18446744073709551615
+          "maximum": 18446744073709551615,
+          "description": "Exact monotonic callback deadline, or explicit null only when the configured model ACK budget and task phase have no deadline."
         },
         "usage": {},
         "unsent": {
@@ -1381,6 +1524,534 @@
         },
         "headers": {
           "type": "object"
+        },
+        "price": {
+          "$ref": "#/$defs/model_price"
+        }
+      },
+      "additionalProperties": false
+    },
+    "model_price": {
+      "type": "object",
+      "required": [
+        "input",
+        "output",
+        "cache_write_multiplier",
+        "cache_read_multiplier",
+        "margin",
+        "usd_to_cny",
+        "prompt_tokens",
+        "currency"
+      ],
+      "properties": {
+        "input": {
+          "type": "number",
+          "minimum": 0
+        },
+        "output": {
+          "type": "number",
+          "minimum": 0
+        },
+        "cache_write_multiplier": {
+          "type": "number",
+          "minimum": 0
+        },
+        "cache_read_multiplier": {
+          "type": "number",
+          "minimum": 0
+        },
+        "margin": {
+          "type": "number",
+          "minimum": 0
+        },
+        "usd_to_cny": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "prompt_tokens": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        },
+        "currency": {
+          "enum": [
+            "USD",
+            "CNY"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "execution_history": {
+      "type": "object",
+      "required": [
+        "messages",
+        "usage"
+      ],
+      "properties": {
+        "messages": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "usage": {
+          "type": "array"
+        },
+        "llm_rounds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "tool_calls": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "wire_function_tools": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "type",
+          "function"
+        ],
+        "properties": {
+          "type": {
+            "enum": [
+              "function"
+            ]
+          },
+          "function": {
+            "type": "object",
+            "required": [
+              "name",
+              "parameters"
+            ],
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1
+              },
+              "description": {
+                "type": "string"
+              },
+              "parameters": {
+                "type": "object"
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "worker_run": {
+      "type": "object",
+      "required": [
+        "version",
+        "type",
+        "owner_user_id",
+        "sequence",
+        "configuration"
+      ],
+      "properties": {
+        "version": {
+          "enum": [
+            "tofu.native-agent-worker/v1"
+          ]
+        },
+        "type": {
+          "enum": [
+            "worker_run"
+          ]
+        },
+        "owner_user_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "sequence": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "configuration": {
+          "type": "object"
+        }
+      },
+      "additionalProperties": false
+    },
+    "worker_control": {
+      "type": "object",
+      "required": [
+        "version",
+        "type",
+        "owner_user_id",
+        "sequence",
+        "frame"
+      ],
+      "properties": {
+        "version": {
+          "enum": [
+            "tofu.native-agent-worker/v1"
+          ]
+        },
+        "type": {
+          "enum": [
+            "worker_control"
+          ]
+        },
+        "owner_user_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "sequence": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "frame": {
+          "type": "object"
+        }
+      },
+      "additionalProperties": false
+    },
+    "worker_event": {
+      "type": "object",
+      "required": [
+        "version",
+        "type",
+        "owner_user_id",
+        "sequence",
+        "frame"
+      ],
+      "properties": {
+        "version": {
+          "enum": [
+            "tofu.native-agent-worker/v1"
+          ]
+        },
+        "type": {
+          "enum": [
+            "worker_event"
+          ]
+        },
+        "owner_user_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "sequence": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "frame": {
+          "type": "object"
+        }
+      },
+      "additionalProperties": false
+    },
+    "worker_ready": {
+      "type": "object",
+      "required": [
+        "version",
+        "type",
+        "owner_user_id",
+        "sequence",
+        "cached_encodings"
+      ],
+      "properties": {
+        "version": {
+          "enum": [
+            "tofu.native-agent-worker/v1"
+          ]
+        },
+        "type": {
+          "enum": [
+            "worker_ready"
+          ]
+        },
+        "owner_user_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "sequence": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "cached_encodings": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2
+        }
+      },
+      "additionalProperties": false
+    },
+    "worker_shutdown": {
+      "type": "object",
+      "required": [
+        "version",
+        "type",
+        "owner_user_id",
+        "sequence"
+      ],
+      "properties": {
+        "version": {
+          "enum": [
+            "tofu.native-agent-worker/v1"
+          ]
+        },
+        "type": {
+          "enum": [
+            "worker_shutdown"
+          ]
+        },
+        "owner_user_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "sequence": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "worker_closed": {
+      "type": "object",
+      "required": [
+        "version",
+        "type",
+        "owner_user_id",
+        "sequence"
+      ],
+      "properties": {
+        "version": {
+          "enum": [
+            "tofu.native-agent-worker/v1"
+          ]
+        },
+        "type": {
+          "enum": [
+            "worker_closed"
+          ]
+        },
+        "owner_user_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "sequence": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "additive_usage_summary": {
+      "type": "object",
+      "required": [
+        "profile",
+        "counts"
+      ],
+      "properties": {
+        "profile": {
+          "const": "tofu.additive-usage/u64-f64-v1"
+        },
+        "counts": {
+          "type": "object",
+          "properties": {
+            "prompt_tokens_details": {
+              "anyOf": [
+                {
+                  "type": "number",
+                  "minimum": 0
+                },
+                {
+                  "type": "object",
+                  "patternProperties": {
+                    "^_": false
+                  },
+                  "additionalProperties": {
+                    "type": "number",
+                    "minimum": 0
+                  }
+                }
+              ]
+            },
+            "completion_tokens_details": {
+              "anyOf": [
+                {
+                  "type": "number",
+                  "minimum": 0
+                },
+                {
+                  "type": "object",
+                  "patternProperties": {
+                    "^_": false
+                  },
+                  "additionalProperties": {
+                    "type": "number",
+                    "minimum": 0
+                  }
+                }
+              ]
+            },
+            "input_tokens_details": {
+              "anyOf": [
+                {
+                  "type": "number",
+                  "minimum": 0
+                },
+                {
+                  "type": "object",
+                  "patternProperties": {
+                    "^_": false
+                  },
+                  "additionalProperties": {
+                    "type": "number",
+                    "minimum": 0
+                  }
+                }
+              ]
+            },
+            "output_tokens_details": {
+              "anyOf": [
+                {
+                  "type": "number",
+                  "minimum": 0
+                },
+                {
+                  "type": "object",
+                  "patternProperties": {
+                    "^_": false
+                  },
+                  "additionalProperties": {
+                    "type": "number",
+                    "minimum": 0
+                  }
+                }
+              ]
+            },
+            "cache_creation": {
+              "anyOf": [
+                {
+                  "type": "number",
+                  "minimum": 0
+                },
+                {
+                  "type": "object",
+                  "patternProperties": {
+                    "^_": false
+                  },
+                  "additionalProperties": {
+                    "type": "number",
+                    "minimum": 0
+                  }
+                }
+              ]
+            }
+          },
+          "patternProperties": {
+            "^_": false
+          },
+          "additionalProperties": {
+            "type": "number",
+            "minimum": 0
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "terminal_committed": {
+      "type": "object",
+      "required": [
+        "version",
+        "type",
+        "request_id",
+        "owner_user_id",
+        "task_id",
+        "attempt",
+        "status"
+      ],
+      "properties": {
+        "version": {
+          "enum": [
+            "tofu.native-agent-stdio/v1"
+          ]
+        },
+        "type": {
+          "enum": [
+            "terminal_committed"
+          ]
+        },
+        "request_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "owner_user_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "task_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "attempt": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "status": {
+          "enum": [
+            "done",
+            "error",
+            "aborted"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "terminal_retry": {
+      "type": "object",
+      "required": [
+        "version",
+        "type",
+        "request_id",
+        "owner_user_id",
+        "task_id",
+        "attempt",
+        "status"
+      ],
+      "properties": {
+        "version": {
+          "enum": [
+            "tofu.native-agent-stdio/v1"
+          ]
+        },
+        "type": {
+          "enum": [
+            "terminal_retry"
+          ]
+        },
+        "request_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "owner_user_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "task_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "attempt": {
+          "type": "integer",
+          "minimum": 2
+        },
+        "status": {
+          "enum": [
+            "done",
+            "error",
+            "aborted"
+          ]
         }
       },
       "additionalProperties": false
@@ -1410,10 +2081,14 @@
     "preparation_deadline": "Optional deadline_monotonic_ns is the inherited local Linux CLOCK_MONOTONIC deadline, captured before serialization/publication. It never resets per round. Preparation timeout signals and joins the existing worker before terminal acknowledgment; expired decisions are not sent into the terminal input carrier.",
     "progress_control": "Optional progress_control=true binds trusted post-tool observations after round settlement over the existing control slot; no history mirror, implicit evidence or detached callbacks.",
     "checkpoint_control": "Optional trusted load/begin/complete checkpoint policy reuses one control slot. Completed state serializes borrowed history with settled native token account totals/ordinal/completeness/policy. Restore matches account policy and ordinal before one-time Account.restore; missing, removed or changed profiles fail before HTTP.",
-    "deadline_unix_ms": "Optional trusted application absolute UTC deadline. Native session clamps relative deadline_ms by remaining wall time observed once, subtracts observation-to-session delay, then uses its existing monotonic clock. Expired budget aborts without provider/tool effects. Checkpoint capture binds this original value; changed, added or removed recovery deadline refuses before another HTTP request.",
+    "deadline_unix_ms": "Optional trusted application absolute UTC deadline. Required deadline_ms accepts explicit null for no relative task expiry; positive integers retain finite expiry. Native session clamps any relative deadline_ms by remaining wall time observed once, subtracts observation-to-session delay, then uses its existing monotonic clock. Expired budget aborts without provider/tool effects. Checkpoint capture binds this original value; changed, added or removed recovery deadline refuses before another HTTP request.",
+    "application_model_counter_policy": "Application preparation may omit model_counter.encoding and output_field while retaining explicit byte/depth/stack bounds. Before native launch, the selected logical model uses the canonical local tiktoken-tier encoding_for_model policy without loading a Python encoder, and the output field derives from the final generation template. Explicit encodings remain supported; mismatched fields and invalid bounds refuse. All seven fields remain required on the native wire. This local tier is not an exact tokenizer claim for every provider.",
     "model_control": "Explicit model_control/model_counter selects one host shared-account authority instead of a native mirror. Rust counts admitted history once; reserve freezes output cap, dispatch ACK precedes HTTP and joined settlement preserves actual/unknown usage. Callback replies after their monotonic ACK expiry are not sent. Process loss joins before host pending-lease cleanup. Mixed local token_admission or checkpoint recovery is refused before effects until external recovery accounting is composed.",
     "shared_account_recovery": "Explicit checkpoint_shared_account with model_control captures one quiescent host invocation-root budget in the existing journal snapshot. SDK captures/restores before checkpoint completion/load acknowledgement; native checks owner/root and exact counter policy. Active children/pending attempts, changed policy and non-pristine restore refuse; unknown usage remains unknown. No native account mirror or automatic crash takeover.",
-    "model_dispatch_headers": "Accepted dispatch only may return full per-attempt HTTP headers from the trusted host. Replace configured headers after joined credential resolution and dispatch intent; never retain them in checkpoint state or account receipts. Existing control frame bytes/deadline apply; wrong-action, malformed or forbidden transport headers refuse before HTTP. No credential vault or automatic refresh authority is created."
+    "model_dispatch_headers": "Accepted dispatch only may return full per-attempt HTTP headers from the trusted host. Replace configured headers after joined credential resolution and dispatch intent; never retain them in checkpoint state or account receipts. Existing control frame bytes/deadline apply; wrong-action, malformed or forbidden transport headers refuse before HTTP. No credential vault or automatic refresh authority is created.",
+    "oauth_route": "An issued owner-authorized Codex OAuth route requires an explicit owner/destination-aware credential resolver bound to the existing model policy. Resolve after counted reservation and before dispatch intent on the supplied executor. No provider-global token store is selected. Route metadata includes credential kind, never tokens; declared Codex cache capability binds a stable canonical key into body and resolver request.",
+    "task_stop": "Optional trusted initial cancel_requested preserves original deadline/account/checkpoint policy while requesting session cancellation before any agent work. The owned host notification signal marks pre-configure Stop here; active Stop cancels the existing joined host invocation. No polling, blocking waiter or deadline rewrite.",
+    "model_pricing": "Explicit model_control.pricing admits a resolved price only on settle ACK. Rust binds prompt_tokens to actual raw usage and computes canonical fee components/credits. The existing round_settled carries optional cost; budget settlement precedes quoting and no price can refund unknown usage."
   },
   "model_tool_projection": {
     "type": "function",
@@ -1431,5 +2106,12 @@
       "connection",
       "proxy-authorization"
     ]
-  }
+  },
+  "model_cache_affinity_policy": {
+    "maximum_key_bytes": 128,
+    "protocol": "responses",
+    "profile": "codex",
+    "source": "lib.llm.responses_outbound.responses_cache_affinity_key"
+  },
+  "actor_account_checkpoint": "Explicit checkpoint_actor_account requires shared model-control checkpoints. actor_task_id equals the executor and differs from root_task_id; tokens/tool counters are this participant observation from the one shared account. Root checkpoint and handoff reject actor scope. Application restore requires separate accepted aggregate recovery authority."
 }

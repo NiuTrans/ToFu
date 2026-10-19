@@ -41,7 +41,7 @@ _PROJECTION_IDENTITY_KEYS = frozenset({
 # writer and public reader one executable definition of the backend/frontend
 # ownership boundary.
 PUBLIC_PROJECTION_FIELDS = frozenset({
-    'content', 'thinking', 'toolRounds', 'segments', 'usage', 'apiRounds',
+    'content', 'thinking', 'toolRounds', 'segments', 'usage', 'usageComplete', 'apiRounds',
     'cost',
     'lastRoundUsage', 'model', 'preset', 'providerId', 'routeSnapshot',
     'thinkingDepth',
@@ -54,7 +54,7 @@ PUBLIC_PROJECTION_FIELDS = frozenset({
     'orchestration', 'provenance', '_inboxInjects', '_peerInjects',
     '_userSteerInjects', '_bgCommandInjects', 'backgroundCommand',
     '_stallNudges', 'origin', 'contextSnapshot',
-    'compaction', 'imageGeneration', 'proposedPlan', 'planExecution',
+    'compaction', 'imageGeneration', 'proposedPlan', 'planExecution', 'usageRecovery',
     'activityTimeline', 'timingTrace', 'rolledBack',
 })
 

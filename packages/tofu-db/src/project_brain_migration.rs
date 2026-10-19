@@ -22,7 +22,7 @@ use std::io;
 use crate::authority::{AuthorityDatabase, AuthorityTransaction};
 use crate::entity::EntityKey;
 use crate::generated_tofudb_ir::{
-    MAX_PROJECT_BRAIN_DOCUMENT_BYTES, MAX_PROJECT_BRAIN_PROJECT_KEY_CHARACTERS,
+    MAX_PROJECT_BRAIN_PROJECT_KEY_CHARACTERS,
     MIGRATION_SESSION_MAX_PAGE_ROWS, PROJECT_BRAIN_DOCUMENT_NAMESPACE,
     PROJECT_BRAIN_UPDATED_INDEX_NAMESPACE,
 };
@@ -108,7 +108,6 @@ fn snapshot_value(request: &RestoreRequest) -> Value {
 fn validate_request(request: &RestoreRequest) -> io::Result<()> {
     if request.project_key.is_empty()
         || request.project_key.chars().count() > MAX_PROJECT_BRAIN_PROJECT_KEY_CHARACTERS
-        || request.projection_json.len() > MAX_PROJECT_BRAIN_DOCUMENT_BYTES
         || request.updated_at_ms == 0
     {
         return Err(invalid_input("invalid project brain snapshot metadata"));
@@ -145,7 +144,7 @@ fn read_snapshot(
         LOGICAL_NAMESPACE,
         project_key,
         transaction.owner_user_id(),
-        MAX_PROJECT_BRAIN_DOCUMENT_BYTES,
+        usize::MAX,
     )?
     else {
         return Ok(None);
@@ -218,7 +217,7 @@ fn restore(
             updated_at_ms: request.updated_at_ms.max(1),
         },
         transaction.owner_user_id(),
-        MAX_PROJECT_BRAIN_DOCUMENT_BYTES,
+        usize::MAX,
     )?;
     database.entity_put(
         transaction,

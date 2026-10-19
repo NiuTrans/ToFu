@@ -137,7 +137,7 @@ def test_round_card_stability_browser_surface_reorder(browser, round_card_stabil
         page.goto(round_card_stability_url)
         page.set_content('<!doctype html><main id="root"></main>')
         page.add_script_tag(url=round_card_stability_url + "round_card_stability.js")
-        page.evaluate(r"""legacyMove => {
+        verified = page.evaluate(r"""legacyMove => {
           const check=(ok,label)=>{if(!ok) throw new Error(label);};
           if(legacyMove) Object.defineProperty(Element.prototype,'moveBefore',{value:undefined,configurable:true});
           else check(typeof Element.prototype.moveBefore==='function','native move path available');
@@ -166,6 +166,8 @@ def test_round_card_stability_browser_surface_reorder(browser, round_card_stabil
           state.turnsById.turn=JSON.parse(JSON.stringify(state.turnsById.turn));paint();
           check(card.querySelector('button')===button,'equivalent replay retains action');
           button.click();check(intents===1,'exactly one latest intent');surface.dispose();
+          return true;
         }""", legacy_move)
+        assert verified is True
     finally:
         page.close()

@@ -1,90 +1,166 @@
 /**
- * Responsibility: conversation-scoped project restore and draft/selection fencing.
- * Entry: createConversationProjectController; retained shell supplies UI/transport ports.
- * No persistence: navigation and failed restoration never edit durable bindings.
+ * Conversation workspace authority: saved settings -> disposable local bar and
+ * immutable send binding. Navigation never writes the process-global registry.
+ * Retained adapters supply presentation ports only. A new draft owns a one-time
+ * folder/default snapshot until its first send creates saved settings.
  */
-interface ProjectConversation {
-  id: string;
+export interface ProjectConversation {
+  id?: string;
   projectPath?: string;
   projectPaths?: string[];
   readOnlyPaths?: string[];
 }
+export interface ConversationProjectBinding {
+  projectPath: string;
+  projectPaths: string[];
+  readOnlyPaths: string[];
+}
+
+export interface ConversationDraftProjectBinding extends ConversationProjectBinding {
+  folderId: string | null;
+}
+export interface ConversationDraftProjectOptions {
+  folderId?: string | null;
+  defaults?: ProjectConversation | null;
+  /** Keep an explicit attachment/private choice when carrying unsent work. */
+  preserveExplicit?: boolean;
+}
+/** An explicitly empty primary path detaches even if legacy extras remain. */
+export function captureConversationProject(
+  conv: ProjectConversation | null,
+): ConversationProjectBinding {
+  const primary = conv?.projectPath;
+  const path = typeof primary === 'string' ? primary : '';
+  const paths = path ? [...new Set([path, ...(conv?.projectPaths || [])]
+    .filter((root): root is string => typeof root === 'string' && !!root))] : [];
+  return {
+    projectPath: path,
+    projectPaths: paths,
+    readOnlyPaths: [...new Set((conv?.readOnlyPaths || [])
+      .filter(root => paths.includes(root)))],
+  };
+}
+
+export function projectConversationWorkspace(conv: ProjectConversation | null) {
+  const binding = captureConversationProject(conv);
+  return {
+    active: !!binding.projectPath,
+    path: binding.projectPath,
+    readOnly: binding.readOnlyPaths.includes(binding.projectPath),
+    extraRoots: binding.projectPaths.slice(1).map(path => ({
+      path, readOnly: binding.readOnlyPaths.includes(path),
+    })),
+    fileCount: 0, dirCount: 0, totalSize: 0, languages: {}, scanning: false,
+    scanProgress: '', scanDetail: '', scannedAt: 0,
+  };
+}
+
+/** Normalize one explicit picker response or rollback snapshot. */
+export function captureProjectStatus(data: any): ConversationProjectBinding {
+  const extras = Array.isArray(data?.extraRoots) ? data.extraRoots : [];
+  return captureConversationProject({
+    projectPath: data?.path || '',
+    projectPaths: extras.map((root: any) => typeof root === 'string' ? root : root?.path),
+    readOnlyPaths: [data?.readOnly ? data.path : '', ...extras
+      .filter((root: any) => root?.readOnly).map((root: any) => root.path)].filter(Boolean),
+  });
+}
+
+/** Global status may enrich matching roots, never select or append roots. */
+export function projectStatusMatchesWorkspace(data: any, selection: any): boolean {
+  if (!selection?.active || data?.path !== selection.path) return false;
+  const roots = (items: any[]) => items.map(root =>
+    typeof root === 'string' ? root : root?.path);
+  const expected = roots(selection.extraRoots || []);
+  const incoming = roots(data.extraRoots || []);
+  return expected.length === incoming.length
+    && expected.every((path, index) => path === incoming[index]);
+}
+
 interface ProjectPorts {
   activeId(): string | null;
   exists(id: string): boolean;
-  hasDraft(): boolean;
-  selection(): any;
-  clear(): void;
-  remote(conv: ProjectConversation, path: string): void;
-  apply(data: any): void;
-  setPaths(paths: string[], readOnly: string[], recent: string[]): Promise<any>;
-  warn(message: string): void;
+  apply(data: ReturnType<typeof projectConversationWorkspace>): void;
 }
 export function createConversationProjectController(ports: ProjectPorts) {
   let generation = 0;
-  let preservedDraft = false;
+
+  let draftWorkspace = captureConversationProject(null);
+  let draftFolderId: string | null = null;
+  // Transient provenance only: an empty explicit choice is not an unset default.
+  let draftExplicit = false;
   function begin() {
     const token = ++generation;
-    const selection = ports.selection();
-    const blocked = ports.hasDraft();
-    preservedDraft = blocked;
-    return () => token === generation && !blocked && !ports.hasDraft()
-      && selection === ports.selection();
+    return () => token === generation;
   }
-  async function restore(conv: ProjectConversation | null, eligible = begin()) {
-    if (!eligible()) return;
+  function restore(conv: ProjectConversation | null, eligible = begin()) {
     const id = conv?.id ?? null;
-    const current = () => ports.activeId() === id && (!id || ports.exists(id));
-    if (!current()) return;
-    const path = conv?.projectPath || '';
-    if (!path) { ports.clear(); return; }
-    if (path.startsWith('remote:') && path.slice(7).includes(':')) {
-      ports.remote(conv!, path);
-      return;
+    if (!eligible() || ports.activeId() !== id || (id && !ports.exists(id))) return;
+    if (conv) {
+      draftWorkspace = captureConversationProject(null);
+      draftFolderId = null;
+      draftExplicit = false;
     }
-    const paths = [...new Set([path, ...(conv?.projectPaths || [])].filter(Boolean))];
-    const readOnly = (conv?.readOnlyPaths || []).filter(p => paths.includes(p));
-    const selected = ports.selection();
-    const extras = selected?.extraRoots || [];
-    const selectedPaths = [selected?.path, ...extras.map((root: any) =>
-      typeof root === 'string' ? root : root.path)].filter(Boolean);
-    const selectedReadOnly = [selected?.readOnly ? selected.path : '',
-      ...extras.filter((root: any) => root?.readOnly).map((root: any) => root.path),
-    ].filter(Boolean);
-    if (selected?.active && selected.path === path
-        && selectedPaths.length === paths.length && paths.every(p => selectedPaths.includes(p))
-        && selectedReadOnly.length === readOnly.length
-        && readOnly.every(p => selectedReadOnly.includes(p))) return;
-    // Clear only the disposable bar, never the conversation settings.
-    ports.clear();
-    const stillEligible = begin();
-    try {
-      const response = await ports.setPaths(paths, readOnly, [path]);
-      const data = response ? await response.json().catch(() => ({})) : {};
-      if (!current() || !stillEligible()) return;
-      if (response?.ok && data.path === path) ports.apply({
-        ...data,
-        path,
-        readOnly: readOnly.includes(path),
-        extraRoots: paths.slice(1).map(root => ({
-          ...(data.extraRoots || []).find((item: any) => item?.path === root),
-          path: root,
-          readOnly: readOnly.includes(root),
-        })),
-      });
-      else ports.warn(`Saved project could not be restored: ${path}`);
-    } catch (error) {
-      if (current() && stillEligible()) ports.warn(`Project restore failed: ${String(error)}`);
-    }
+    // Boot/status refreshes of the null view cannot erase a live draft snapshot.
+    ports.apply(projectConversationWorkspace(conv || draftWorkspace));
   }
-  // User mutations may coexist with a draft, unlike automatic restore. Share
-  // the same generation so navigation or a newer choice invalidates completion.
+  // Explicit choices and navigation share a fence, independent of input draft.
   function beginMutation() {
     const token = ++generation;
     const id = ports.activeId();
-    const selected = ports.selection();
     return () => token === generation && ports.activeId() === id
-      && (!id || ports.exists(id)) && ports.selection() === selected;
+      && (!id || ports.exists(id));
   }
-  return { begin, beginMutation, restore, preservesDraft: () => preservedDraft };
+  function startDraft(options: ConversationDraftProjectOptions = {}) {
+    if (ports.activeId() !== null) return;
+    ++generation;
+    if (!options.preserveExplicit || !draftExplicit) {
+      draftFolderId = options.folderId || null;
+      draftWorkspace = captureConversationProject(options.defaults || null);
+      draftExplicit = false;
+    }
+    ports.apply(projectConversationWorkspace(draftWorkspace));
+  }
+  function captureDraftIdentity(): ConversationDraftProjectBinding {
+    return { folderId: draftFolderId, ...captureConversationProject(draftWorkspace) };
+  }
+  function chooseDraft(choice: ProjectConversation) {
+    if (ports.activeId() !== null) return;
+    ++generation;
+    draftWorkspace = captureConversationProject(choice);
+    draftExplicit = true;
+    ports.apply(projectConversationWorkspace(draftWorkspace));
+  }
+  return {
+    begin, beginMutation, restore, startDraft, chooseDraft, captureDraftIdentity,
+    captureDraft: () => captureConversationProject(draftWorkspace),
+  };
+}
+
+// Temporary hydration fences, not saved workspace authority. Entries are weak
+// and removed when the last overlapping hydrate settles (including failures).
+const hydrating = new WeakMap<ProjectConversation, {
+  count: number; choice?: ConversationProjectBinding;
+}>();
+
+export function noteConversationProjectChoice(conv: ProjectConversation): void {
+  const pending = hydrating.get(conv);
+  if (pending) pending.choice = captureConversationProject(conv);
+}
+export function protectHydratingProjectSettings<T extends Record<string, unknown>>(
+  conv: ProjectConversation, settings: T,
+): T {
+  const choice = hydrating.get(conv)?.choice;
+  return choice ? { ...settings, ...choice } : settings;
+}
+export async function withProjectHydration<T>(
+  conv: ProjectConversation, hydrate: () => Promise<T>,
+): Promise<T> {
+  const pending = hydrating.get(conv) || { count: 0 };
+  pending.count += 1;
+  hydrating.set(conv, pending);
+  try { return await hydrate(); }
+  finally {
+    if (--pending.count === 0) hydrating.delete(conv);
+  }
 }

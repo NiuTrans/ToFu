@@ -25,7 +25,7 @@ def build_stdio_environment(config: dict, *, prepare_directories=True) -> dict[s
     # https://nodejs.org/download/release/v22.21.0/docs/api/cli.html
     environment.setdefault('NODE_USE_ENV_PROXY', '1')
     _ensure_writable_caches(environment, prepare_directories=prepare_directories)
-    apply_tool_paths(environment, interpreter_first='PATH' not in overlay)
+    apply_tool_paths(environment)
     # An explicit PATH is an operator-selected search boundary.
     if 'PATH' in overlay:
         environment['PATH'] = overlay['PATH']

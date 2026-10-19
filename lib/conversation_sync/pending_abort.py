@@ -11,7 +11,7 @@ import json
 import time
 from typing import Any
 
-from lib.runtime_state_store import get_store
+from lib.runtime.runtime_state_store import get_store
 
 
 _STORE_KIND = "conversation_pending_abort"

@@ -908,9 +908,28 @@ def _render_typescript_client(document: dict[str, Any]) -> str:
             query_name for query_name in query_names
             if query_name not in fixed_query
         ]
+        if name == 'roundDirectory':
+            if (query_names != ['laneId', 'syncSeq', 'offset', 'limit', 'anchorTurnId']
+                    or fixed_query or request_schema is not None):
+                raise ValueError('roundDirectory requires an owner/lane/head rank fence')
+            interface_lines.append(
+                f'  {name}(conversationId: string, laneId: string, syncSeq: number, '
+                f'offset?: number, limit?: number, anchorTurnId?: string, options?: RequestOptions): Promise<{response_schema}>;'
+            )
+            implementation_lines.extend((
+                f'  async {name}(conversationId, laneId, syncSeq, offset = 0, limit = 50, anchorTurnId = undefined, options = {{}}) {{',
+                f'    const base = {_typescript_request_route(operation)};',
+                '    const value = await request<unknown>(base, {',
+                "      ...options, method: 'GET',",
+                '      query: { laneId, syncSeq, offset, limit, ...(anchorTurnId ? { anchorTurnId } : {}) },',
+                '    });',
+                f"    return assertConversationSyncSchema<{response_schema}>('{response_schema}', value);",
+                '  },',
+            ))
+            continue
         if name == 'turnPage':
             expected_query_names = [
-                'laneId', 'syncSeq', 'beforeOrdinal', 'limit', 'toolPayload', 'segmentPayload',
+                'laneId', 'syncSeq', 'beforeOrdinal', 'limit', 'windowBytes', 'toolPayload', 'segmentPayload',
             ]
             if (query_names != expected_query_names
                     or fixed_query != {'segmentPayload': 'refs', 'toolPayload': 'lazy'}
@@ -932,6 +951,8 @@ def _render_typescript_client(document: dict[str, Any]) -> str:
             implementation_lines.extend((
                 f'  async {name}({", ".join((*path_names, "laneId", "syncSeq", "beforeOrdinal = undefined", "limit = 64", "options = {}"))}) {{',
                 f'    const base = resolvePath({_typescript_request_route(operation)});',
+
+                '    const { query: selectors, ...requestOptions } = options;',
                 '    const query = [',
                 "      `laneId=${encodeURIComponent(laneId)}` ,",
                 "      `syncSeq=${encodeURIComponent(String(syncSeq))}` ,",
@@ -939,13 +960,34 @@ def _render_typescript_client(document: dict[str, Any]) -> str:
                 "        ? `beforeOrdinal=${encodeURIComponent(String(beforeOrdinal))}` : '',",
                 '      Number.isInteger(limit)',
                 "        ? `limit=${encodeURIComponent(String(limit))}` : '',",
+
+                '      selectors?.windowBytes === undefined ? ""',
+                '        : `windowBytes=${encodeURIComponent(String(selectors.windowBytes))}`,',
                 "    ].filter(Boolean).join('&');",
                 '    const value = await request<unknown>(',
                 '      `${base}&${query}`,',
-                "      { ...options, method: 'GET' },",
+                "      { ...requestOptions, method: 'GET' },",
                 '    );',
                 '    return '
                 f"assertConversationSyncSchema<{response_schema}>('{response_schema}', value);",
+                '  },',
+            ))
+            continue
+        if name == 'inspectToolEffect':
+            if (path_names != ['conversationId', 'turnId', 'operationId']
+                    or query_names != ['ownerScope'] or fixed_query or request_schema is not None):
+                raise ValueError('inspectToolEffect requires an exact occurrence and owner fence')
+            interface_lines.append(
+                f'  {name}(conversationId: string, turnId: string, operationId: string, '
+                f'ownerScope: string, options?: RequestOptions): Promise<{response_schema}>;'
+            )
+            implementation_lines.extend((
+                f'  async {name}(conversationId, turnId, operationId, ownerScope, options = {{}}) {{',
+                f'    const base = {_typescript_request_route(operation)};',
+                '    const value = await request<unknown>(base, {',
+                "      ...options, method: 'GET', query: { ownerScope },",
+                '    });',
+                f"    return assertConversationSyncSchema<{response_schema}>('{response_schema}', value);",
                 '  },',
             ))
             continue
@@ -969,7 +1011,30 @@ def _render_typescript_client(document: dict[str, Any]) -> str:
                 '  },',
             ))
             continue
-        if dynamic_query_names:
+        if name == 'snapshot':
+            if dynamic_query_names != ['windowLimit', 'windowBytes']:
+                raise ValueError('snapshot requires the declared optional viewport window selectors')
+
+            interface_lines.append(
+                f'  {name}(conversationId: string, options?: RequestOptions): Promise<{response_schema}>;'
+            )
+            implementation_lines.extend((
+                '  async snapshot(conversationId, options = {}) {',
+                '    const { query: selectors, ...requestOptions } = options;',
+                f'    const base = {_typescript_request_route(operation)};',
+                '    const query = ["windowLimit", "windowBytes"].flatMap((name) =>',
+                '      selectors?.[name] === undefined ? []',
+                '        : [`${name}=${encodeURIComponent(String(selectors[name]))}`],',
+                "    ).join('&');",
+                '    const value = await request<unknown>(',
+                '      query ? `${base}&${query}` : base,',
+                "      { ...requestOptions, method: 'GET' },",
+                '    );',
+                f"    return assertConversationSyncSchema<{response_schema}>('{response_schema}', value);",
+                '  },',
+            ))
+            continue
+        elif dynamic_query_names:
             raise ValueError(
                 f'non-stream client query parameters need an explicit generator policy: {name}'
             )

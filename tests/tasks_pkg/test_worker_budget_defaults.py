@@ -34,7 +34,7 @@ def test_parallel_timeout_knob_is_bounded_and_malformed_safe(monkeypatch):
 
 
 def test_server_zero_config_executor_defaults_fit_personal_hosts(monkeypatch):
-    from lib import server_loop_runtime
+    from lib.server import server_loop_runtime
 
     monkeypatch.setattr(server_loop_runtime.os, 'cpu_count', lambda: 64)
     expected = {

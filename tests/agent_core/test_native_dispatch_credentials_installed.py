@@ -11,7 +11,7 @@ import threading
 import pytest
 from lib.agent_core.execution_budget import ExecutionBudget
 from lib.agent_core.native_process import Budget, NativeProcessClient, NativeProcessError
-from lib.llm_errors import SubscriptionLoginRequiredError
+from lib.llm.llm_errors import SubscriptionLoginRequiredError
 from lib.tasks_pkg.native_model_account import NativeModelAccountPolicy
 from tests.agent_core.test_native_task_terminal import principal
 from tests.support.native_process_probe import config

@@ -364,7 +364,7 @@ def _spawn(policy: dict) -> None:
     cfg = os.path.join(_adapter_root(), 'config.yaml')
     log_path = os.path.join(_adapter_root(), 'adapter.log')
     try:
-        from lib.log_retention import register_external_log
+        from lib.logging_pkg.log_retention import register_external_log
         register_external_log(log_path, 'desktop_adapter_console')
     except Exception as exc:
         logger.debug('[Adapter] log retention registration failed: %s', exc)

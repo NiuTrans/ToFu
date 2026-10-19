@@ -24,7 +24,7 @@ from __future__ import annotations
 from quart import Blueprint, request
 
 from lib.api_response import (
-    api_bad_request, api_not_found, api_ok,
+    api_bad_request, api_conflict, api_forbidden, api_not_found, api_ok, api_payload_too_large,
 )
 from lib.artifacts import (
     ArtifactNotFoundError, delete_artifact, get_artifact_meta,
@@ -32,15 +32,63 @@ from lib.artifacts import (
     scan_message, set_pinned,
 )
 from lib.log import audit_log, get_logger
-from lib.openapi import api_meta
+from lib.openapi import api_meta, schema_definition
+from lib.artifacts.review_contract import contract as review_contract
 from lib.request_parser import async_parse_body
 from lib.storage import StorageError
 
-from .auth import request_user_id, require_auth
+from .auth import request_user_id, request_principal, require_auth, require_scope
 
 logger = get_logger(__name__)
 
 api_v1_artifacts_bp = Blueprint('api_v1_artifacts', __name__)
+
+
+def _review_responses():
+    return {'200': {'description': 'Version-bound owner review', 'content': {
+        'application/json': {'schema': schema_definition(review_contract(), 'ArtifactReviewView')},
+    }}}
+
+
+@api_v1_artifacts_bp.route('/api/v1/artifacts/<artifact_id>/review', methods=['GET'])
+@require_scope('chat')
+@api_meta(summary='Read version-bound artifact owner review', tags=['artifacts'],
+          scope='chat', responses=_review_responses())
+async def read_artifact_review_v1(artifact_id):
+    from quart.utils import run_sync
+    from lib.artifacts.review import read_review
+    try:
+        return api_ok(await run_sync(read_review)(artifact_id, principal=request_principal()))
+    except ArtifactNotFoundError:
+        return api_not_found('not_found')
+
+
+@api_v1_artifacts_bp.route('/api/v1/artifacts/<artifact_id>/review', methods=['POST'])
+@require_scope('chat')
+@api_meta(summary='Save requirements or an owner review of one artifact version',
+          tags=['artifacts'], scope='chat', responses=_review_responses(),
+          request_body={'required': True, 'content': {'application/json': {
+              'schema': schema_definition(review_contract(), 'ArtifactReviewCommand'),
+          }}})
+async def update_artifact_review_v1(artifact_id):
+    from quart.utils import run_sync
+    from lib.artifacts.review import ReviewConflict, update_review
+    max_bytes = review_contract()['x-limits']['maxRequestBytes']
+    if len(await request.get_data()) > max_bytes:
+        return api_payload_too_large(max_bytes)
+    body = await async_parse_body(strict=True, exact=tuple({field for branch in review_contract()['$defs']['ArtifactReviewCommand']['anyOf']
+        for field in review_contract()['$defs'][branch['$ref'].rsplit('/', 1)[1]]['properties']}))
+    try:
+        result = await run_sync(update_review)(artifact_id, body, principal=request_principal())
+        return api_ok(result)
+    except ArtifactNotFoundError:
+        return api_not_found('not_found')
+    except ReviewConflict as exc:
+        return api_conflict(str(exc))
+    except PermissionError as exc:
+        return api_forbidden(str(exc))
+    except ValueError as exc:
+        return api_bad_request(str(exc))
 
 
 def _strip_meta(meta: dict) -> dict:
@@ -66,6 +114,11 @@ def _strip_meta(meta: dict) -> dict:
 async def list_artifacts_v1():
     conv = (request.args.get('conv') or '').strip()
     if conv:
+        from lib.response_assets import owned_conversation
+        try:
+            owned_conversation(conv, request_user_id())
+        except PermissionError:
+            return api_not_found('conv_not_found')
         items = list_artifacts(conv)
         return api_ok({
             'conv_id': conv,

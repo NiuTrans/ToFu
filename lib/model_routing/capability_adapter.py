@@ -12,7 +12,6 @@ from dataclasses import dataclass
 from typing import Mapping
 
 from .dispatch_adapter import (
-    MAX_REQUEST_ROUTE_SLOTS,
     RoutedSlotGroup,
     mint_routed_slot_group,
 )
@@ -46,7 +45,6 @@ OPENAI_CHAT_COMPATIBLE_PROTOCOLS = frozenset({
     *OPENAI_COMPATIBLE_PROTOCOLS,
     "openai_responses",
 })
-MAX_CAPABILITY_ROUTE_GROUPS = 16
 
 
 @dataclass(frozen=True, slots=True)
@@ -187,11 +185,6 @@ def list_capability_route_groups(
     :func:`list_capability_routes`, used when one UI surface needs adjacent
     endpoint families such as transcription and audio-chat.
     """
-    if len(requirements) > MAX_CAPABILITY_ROUTE_GROUPS:
-        raise ModelRoutingError(
-            f"capability route query exceeds {MAX_CAPABILITY_ROUTE_GROUPS} groups",
-            kind="model_routing_resource_budget_exceeded",
-        )
     authority = repository.get(boundary)
     compiler = RouteCandidateCompiler(authority.document)
     return {
@@ -214,7 +207,7 @@ def mint_capability_slot_group(
     preferred_provider_id: str = "",
     required_protocols: frozenset[str] = frozenset(),
     owner_tag: str = "",
-    max_candidates: int = MAX_REQUEST_ROUTE_SLOTS,
+    max_candidates: int | None = None,
 ) -> tuple[str, RoutedSlotGroup]:
     """Resolve one capability model and mint its isolated dispatcher group."""
 
@@ -265,7 +258,6 @@ __all__ = [
     "CapabilityRoute",
     "OPENAI_CHAT_COMPATIBLE_PROTOCOLS",
     "OPENAI_COMPATIBLE_PROTOCOLS",
-    "MAX_CAPABILITY_ROUTE_GROUPS",
     "list_capability_route_groups",
     "list_capability_routes",
     "mint_capability_slot_group",

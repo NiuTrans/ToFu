@@ -48,13 +48,11 @@ from lib.tasks_pkg.manager import (
     append_event,
     persist_task_result,
 )
-from lib.tasks_pkg.manager._events import _strip_base64_for_snapshot
 from lib.tasks_pkg.orchestrator._finalize import (
     _finalize_and_emit_done,
     _finalize_dangling_tool_rounds,
     _maybe_auto_retry_turn,
 )
-from lib.tasks_pkg.wire_messages import apply_wire_sanitize
 from lib.tasks_pkg.invocation import is_child_invocation
 
 logger = get_logger(__name__)
@@ -124,44 +122,11 @@ def finalize_after_loop(
             #   the whole reply when no tools were called). round_num
             #   here is the final round index — unique vs the in-loop
             #   submissions.
-            try:
-                from lib.translate import submit_round_segment
-                if not is_child_invocation(task):
-                    submit_round_segment(task, round_num, _final_content)
-            except Exception as _ite:
-                logger.debug('[%s] incremental translate submit (final) failed: %s',
-                             tid, _ite)
-            # Emit a final snapshot so the debug panel shows the
-            # complete message list. The only in-loop snapshots are
-            # "请求前" (before the assistant reply exists) and the
-            # post-tool one (skipped on a no-tool-call completion), so
-            # without this the panel is stuck on [system?, user].
-            try:
-                from lib.tasks_pkg.manager import task_user_id
-                _wire = apply_wire_sanitize(
-                    messages, conv_id=task.get('convId', ''),
-                    provider_id=task.get('provider_id') or '',
-                    user_id=task_user_id(task))
-                snap = _strip_base64_for_snapshot(_wire)
-                snap_evt = build_event(
-                    EventType.MESSAGES_SNAPSHOT,
-                    # Request Inspector contract: post-reply mirror, NOT a request.
-                    kind='state',
-                    model=model,
-                    roundNum='final',
-                    label=f'最终回复后 · {len(snap)}条',
-                    messages=snap,
-                    contextManifest=list(task.get('_contextManifest') or []))
-                # Carry the tool schema so the panel's tools section
-                # survives — showMessagesInDebug rebuilds _debugCache
-                # and drops the cached tools unless this snapshot
-                # re-supplies them.
-                if tool_list:
-                    snap_evt['tools'] = tool_list
-                append_event(task, snap_evt)
-            except Exception:
-                logger.warning('[Task %s] final messages_snapshot failed model=%s',
-                               tid, model, exc_info=True)
+            from lib.tasks_pkg.orchestrator._completion_translation import submit_final_translation
+            submit_final_translation(task,round_num,_final_content)
+            from lib.tasks_pkg.orchestrator._completion_projection import publish_final_messages_snapshot
+            publish_final_messages_snapshot(task, messages, model=model, tid=tid,
+                tools=tool_list, publish=append_event)
 
     # ── Write back updated messages to task so callers (e.g.
     #    _run_single_turn → Flow runner) can access the complete
@@ -207,7 +172,7 @@ def retain_failure_messages(task: dict[str, Any], messages: list | None) -> None
         task['_messages_include_current_run'] = True
 
 
-def handle_task_fatal(task: dict[str, Any], e: Exception) -> bool:
+def handle_task_fatal(task: dict[str, Any], e: Exception, *, allow_retry: bool = True) -> bool:
     """FATAL-PATH exception handler.
 
     Extracts the user-friendly error, then tries THREE recovery paths
@@ -239,7 +204,24 @@ def handle_task_fatal(task: dict[str, Any], e: Exception) -> bool:
     :func:`handle_task_base_exception` below (slice 34).
     """
     _tid8 = (task.get('id', '?') or '?')[:8]
-    logger.error('[Orchestrator] run_task FATAL error task=%s', _tid8, exc_info=True)
+    from lib.llm.llm_errors import AbortedError
+    from lib.tasks_pkg.event_delivery import EventDeliveryCancelled
+    from lib.turn_verdict import TurnStatus, derive_task_verdict
+    _cancelled_delivery = isinstance(e, (AbortedError, EventDeliveryCancelled))
+
+    if _cancelled_delivery and task.get('_chat_terminal_stamped'):
+        # Late cancelled observers cannot replace an acknowledged candidate;
+        # existing terminal debt/retry retains ownership of its publication.
+        return True
+    _interrupted = _cancelled_delivery and derive_task_verdict(
+        task, {'type': 'aborted', 'finishReason': 'aborted'}
+    ).status is TurnStatus.INTERRUPTED
+    _terminal_status = 'aborted' if _interrupted else 'error'
+    _terminal_finish = 'aborted' if _interrupted else 'error'
+    if _interrupted:
+        logger.info('[Orchestrator] event delivery cancelled task=%s', _tid8)
+    else:
+        logger.error('[Orchestrator] run_task FATAL error task=%s', _tid8, exc_info=True)
 
     # Prefer the user-friendly message attached by _llm_call_with_fallback;
     # otherwise format the raw exception here so the frontend error-block
@@ -261,7 +243,7 @@ def handle_task_fatal(task: dict[str, Any], e: Exception) -> bool:
             context='task-fatal', source='orchestrator', raw=str(e))
     if not _user_err:
         try:
-            from lib.llm_error_format import format_llm_error_for_user
+            from lib.llm.llm_error_format import format_llm_error_for_user
             _user_err = format_llm_error_for_user(
                 e, model=task.get('config', {}).get('model', ''),
                 context='task-fatal', source='orchestrator')
@@ -276,30 +258,23 @@ def handle_task_fatal(task: dict[str, Any], e: Exception) -> bool:
                 source='orchestrator',
                 raw=str(e),
             )
-    task['error'] = attach_failure_attribution(
-        _user_err, task, phase='task-fatal')
-    task['status'] = 'error'
-    task['finishReason'] = 'error'
+    # Physical cancellation may be a guard/fence failure; only the shared
+    # verdict authorizes clearing a failure diagnostic for interruption.
+    if _interrupted:
+        _user_err = None
+        task['aborted'] = True
+    elif _cancelled_delivery and task.get('error'):
+        _user_err = task['error']
+    task['error'] = (None if _interrupted else attach_failure_attribution(
+        _user_err, task, phase='task-fatal'))
+    task['status'] = _terminal_status
+    task['finishReason'] = _terminal_finish
 
     try:
         from lib.tasks_pkg.compaction._settlement import settle_compaction_usage
         settle_compaction_usage(task)
     except Exception as exc:
         logger.warning('[Usage] fatal compaction settlement failed: %s', exc)
-
-    if is_child_invocation(task):
-        _settle_fatal_tool_rounds(task)
-        from lib.tasks_pkg.manager import stamp_chat_task_terminal
-        stamp_chat_task_terminal(task, status='error', finish_reason='error')
-        if task.get('_invocationDeliveryError') is None:
-            append_event(task, build_event(EventType.DONE, error=_user_err, finishReason='error'))
-        else:
-            from lib.agent_core.execution_session import settle_task_execution
-            settle_task_execution(task, event={'type': 'done', 'error': _user_err, 'finishReason': 'error'})
-        return True
-
-    if task.get('_flow_managed'):
-        return True   # the Flow runner owns terminal projection
 
     # ── Turn-level auto-retry (raise path) ──
     # A transient first-round error (e.g. a 429 with no fallback, or a
@@ -309,7 +284,7 @@ def handle_task_fatal(task: dict[str, Any], e: Exception) -> bool:
     # Apply the same self-heal here: if the classified error is
     # transient and the budget remains, re-run the whole turn
     # transparently instead of surfacing it for a manual click.
-    if not task.get('aborted') and not _delivery_failure:
+    if allow_retry and not task.get('aborted') and not _delivery_failure:
         try:
             _rt_cfg = task.get('config') or {}
             if _maybe_auto_retry_turn(task, _rt_cfg):
@@ -319,20 +294,47 @@ def handle_task_fatal(task: dict[str, Any], e: Exception) -> bool:
                            'failed (surfacing original error): %s', _ar_err,
                            exc_info=True)
 
+    if task.get('_flow_managed') and not callable(task.get('_invocationEventSink')):
+        return True  # Legacy graph carrier owns terminal projection, not retries.
+
+    # A required presentation port can be unusable without revoking execution
+    # resource settlement. This is a port failure, not a creator-based policy.
+    if task.get('_invocationDeliveryError') is not None:
+        _settle_fatal_tool_rounds(task)
+        from lib.tasks_pkg.manager import stamp_chat_task_terminal
+        from lib.agent_core.execution_session import settle_task_execution
+        stamp_chat_task_terminal(task, status=_terminal_status, finish_reason=_terminal_finish)
+        settle_task_execution(task, event={'type': 'done', 'error': task['error'], 'finishReason': _terminal_finish})
+        return True
+
     # Fall-through: terminal-DONE + persist path.
     _settle_fatal_tool_rounds(task)
     from lib.tasks_pkg.manager import stamp_chat_task_terminal
     try:
-        stamp_chat_task_terminal(task, status='error', finish_reason='error')
+        stamp_chat_task_terminal(task, status=_terminal_status, finish_reason=_terminal_finish)
         append_event(task, build_event(
-            EventType.DONE, error=task['error'], finishReason='error'))
+            EventType.DONE, finishReason=_terminal_finish,
+            **({'error': task['error']} if task['error'] else {})))
     except Exception as terminal_error:
         # The terminal lane may be the very lane that failed. Its later
         # publication error is secondary, never the task's original cause.
         logger.error('[Orchestrator] fatal terminal delivery failed task=%s: %s',
                      _tid8, type(terminal_error).__name__, exc_info=True)
     try:
-        persist_task_result(task)
+        if is_child_invocation(task):
+            from lib.agent_core.terminal_delivery import deliver_terminal
+            try:
+                deliver_terminal(task)
+            except Exception as error:
+                task['_terminalPersistencePending']=True
+                task['_terminalPersistenceRetryReady']=True
+                task['_invocationDeliveryError']=error
+                raise
+            return True
+        elif callable(task.get('_invocationEventSink')):
+            persist_task_result(task, _defer_heavy_release=True)
+        else:
+            persist_task_result(task)
     except Exception as persistence_error:
         logger.error('[Orchestrator] fatal result persistence failed task=%s: %s',
                      _tid8, type(persistence_error).__name__, exc_info=True)

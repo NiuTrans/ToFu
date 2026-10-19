@@ -422,3 +422,109 @@ fn offline_checkout_backfill_every_commit_fault_recovers_atomic_cursor_claim_and
         }
     }
 }
+
+#[test]
+fn workspace_demand_beyond_former_owner_and_active_quotas_finds_late_ready_work() {
+    let (vfs, mut database) = prepared();
+    let started = std::time::Instant::now();
+    seed_history(&mut database, 10_001, true);
+    let mut free = registration(11, "late-free", "/checkout/free");
+    free["project_root"] = json!("/free-project");
+    call(&mut database, "register", free).unwrap();
+    for start in (1..=1131).step_by(64) {
+        let mut tx = database.begin_with_identity_claim_scopes(7, 11).unwrap();
+        for ordinal in start..=(start + 63).min(1131) {
+            let old = read_workspace(&database, &mut tx, 11, "/repo", &format!("task-{ordinal}"))
+                .unwrap()
+                .unwrap();
+            let mut active = old.clone();
+            active.state = if ordinal == 1 { "integrating" } else { "ready" }.into();
+            active.checkpoint_sha = "checkpoint".into();
+            write_workspace(&database, &mut tx, Some(&old), &active).unwrap();
+        }
+        database.commit(tx).unwrap();
+    }
+    let mut tx = database.begin_with_identity_claim_scopes(7, 11).unwrap();
+    let old = read_workspace(&database, &mut tx, 11, "/free-project", "late-free")
+        .unwrap()
+        .unwrap();
+    let mut ready = old.clone();
+    ready.state = "ready".into();
+    ready.checkpoint_sha = "checkpoint".into();
+    write_workspace(&database, &mut tx, Some(&old), &ready).unwrap();
+    let count_key = active_count_key(&tx).unwrap();
+    assert_eq!(
+        read_u64(&database, &mut tx, &count_key, "active").unwrap(),
+        1132
+    );
+    database.commit(tx).unwrap();
+    let claimed = call(&mut database, "claim_next", json!({"now":1.5})).unwrap();
+    assert_eq!(claimed["task_id"], "late-free");
+    assert_eq!(claimed["project_root"], "/free-project");
+    assert_eq!(
+        call(&mut database, "peek_ready", json!({"now":1.5})).unwrap(),
+        Value::Null
+    );
+    drop(database);
+    let reopened = AuthorityDatabase::open_with_vfs(Path::new("/integration-claims"), vfs).unwrap();
+    let mut tx = reopened.begin_with_identity_claim_scopes(7, 11).unwrap();
+    assert_eq!(
+        read_workspace(&reopened, &mut tx, 11, "/free-project", "late-free")
+            .unwrap()
+            .unwrap()
+            .state,
+        "integrating"
+    );
+    let owner_key = owner_count_key(&tx, 11).unwrap();
+    assert_eq!(
+        read_u64(&reopened, &mut tx, &owner_key, "owner").unwrap(),
+        10_002
+    );
+    let active_key = active_count_key(&tx).unwrap();
+    assert_eq!(
+        read_u64(&reopened, &mut tx, &active_key, "active").unwrap(),
+        1132
+    );
+    eprintln!("integration_demand owner_rows=10002 active_rows=1132 late_claim=true reopen=true elapsed_ms={}", started.elapsed().as_millis());
+}
+
+#[test]
+fn stale_recovery_visits_every_active_index_page_and_commits_the_repaired_queue() {
+    let (vfs, mut database) = prepared();
+    for start in (1..=1101).step_by(64) {
+        let mut tx = database.begin_with_identity_claim_scopes(7, 11).unwrap();
+        for id in start..=(start + 63).min(1101) {
+            let workspace = Workspace {
+                id, owner_user_id: 11, project_root: format!("/project-{id}"),
+                task_id: format!("stale-{id}"), title: String::new(),
+                workspace_path: format!("/checkout-{id}"), managed: true,
+                state: "integrating".into(), base_sha: "base".into(),
+                checkpoint_sha: "checkpoint".into(), candidate_sha: String::new(),
+                error: String::new(), origin_raw: "{}".into(), created_at: 1.0, updated_at: 1.0,
+            };
+            write_workspace(&database, &mut tx, None, &workspace).unwrap();
+            let row_key = row_locator_key(&tx, id).unwrap();
+            database.entity_put(&mut tx, row_key, encode(&locator(&workspace), "locator").unwrap()).unwrap();
+            let natural = natural_claim_key(&tx, 11, &workspace.project_root, &workspace.task_id).unwrap();
+            write_u64(&database, &mut tx, natural, id).unwrap();
+        }
+        let last = (start + 63).min(1101);
+        let count_key = owner_count_key(&tx, 11).unwrap();
+        write_u64(&database, &mut tx, count_key, last).unwrap();
+        let sequence = sequence_key(&tx, INTEGRATION_ROW_SEQUENCE_NAMESPACE).unwrap();
+        write_u64(&database, &mut tx, sequence, last).unwrap();
+        database.commit(tx).unwrap();
+    }
+    let claimed = call(&mut database, "claim_next", json!({"now":1000.0})).unwrap();
+    assert_eq!(claimed["task_id"], "stale-1");
+    drop(database);
+    let reopened = AuthorityDatabase::open_with_vfs(Path::new("/integration-claims"), vfs).unwrap();
+    let mut tx = reopened.begin_with_identity_claim_scopes(7, 11).unwrap();
+    for id in 1..=1101 {
+        let workspace = read_workspace(&reopened, &mut tx, 11, &format!("/project-{id}"), &format!("stale-{id}")).unwrap().unwrap();
+        assert_eq!(workspace.state, if id == 1 { "integrating" } else { "ready" });
+        assert_eq!(workspace.updated_at, 1000.0);
+    }
+    let key = active_count_key(&tx).unwrap();
+    assert_eq!(read_u64(&reopened, &mut tx, &key, "active").unwrap(), 1101);
+}

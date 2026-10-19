@@ -1,17 +1,12 @@
-/**
- * Responsibility: cold-start boot splash — while the server's background
- * boot runner is still working through its required phases, show a truthful
- * full-screen progress card (current phase, per-phase checklist, elapsed
- * time) instead of a dead app shell, and surface a latched boot failure
- * with an operator retry. Dismisses itself the instant boot reports ready
- * and never re-appears: post-ready storage blips stay owned by the storage
- * availability banner.
- * Entry point: startBootSplash (production wiring), createBootSplashController
- * (ports-injected core). Dependencies: injected DOM/transport/copy/scheduler
- * ports only — no runtime-module reach-through.
+/** Nonblocking boot status: render real server phases while the shell stays usable.
+ * Entry points: startBootSplash / createBootSplashController. Owns one probe
+ * flight and one poll timer, stopped at readiness or teardown. Diagnostics
+ * project the existing phase snapshot; no raw application logs are exposed.
  */
 
 import type { I18nKey, t } from './i18n';
+import { createButton } from './ui';
+import { setBootSendBlocked } from './boot-readiness';
 
 export interface BootPhaseSnapshot {
   readonly index: number;
@@ -108,6 +103,7 @@ export interface BootSplashCopy {
   retry(): string;
   retrying(): string;
   phaseLabel(key: string, serverLabel: string): string;
+  details?(): string;
 }
 
 export interface BootSplashSchedule {
@@ -122,6 +118,7 @@ export interface BootSplashPorts {
   readonly log: { warn(...args: readonly unknown[]): void };
   probeBoot(timeoutMs: number): Promise<BootVerdict>;
   requestRetry(): Promise<boolean>;
+  onBlockedChange?(blocked: boolean): void;
 }
 
 export interface BootSplashController {
@@ -132,7 +129,6 @@ export interface BootSplashController {
 export const BOOT_SPLASH_POLICY = Object.freeze({
   probeTimeoutMs: 3_000,
   pollMs: 800,
-  retryResetMs: 2_500,
 });
 
 type BootPhaseLabelKey =
@@ -187,6 +183,9 @@ export function createBootSplashController(
   let errorBoxEl: HTMLElement | null = null;
   let retryButton: HTMLButtonElement | null = null;
   let spinnerEl: HTMLElement | null = null;
+  let detailsEl: HTMLElement | null = null;
+  let diagnosticsEl: HTMLElement | null = null;
+  let detailsToggle: HTMLButtonElement | null = null;
   let visible = false;
   let destroyed = false;
   let finished = false;
@@ -204,17 +203,16 @@ export function createBootSplashController(
     overlay = doc.createElement('div');
     overlay.className = 'boot-splash';
     overlay.id = 'boot-splash';
-    const card = doc.createElement('div');
+    const card = doc.createElement('section');
     card.className = 'boot-splash__card';
-    card.setAttribute('role', 'status');
-    card.setAttribute('aria-live', 'polite');
+    card.setAttribute('aria-label', ports.copy.splashTitle());
 
     spinnerEl = doc.createElement('span');
     spinnerEl.className = 'ui-spinner ui-spinner--lg boot-splash__spinner';
     spinnerEl.setAttribute('role', 'status');
     card.appendChild(spinnerEl);
 
-    titleEl = doc.createElement('h1');
+    titleEl = doc.createElement('h2');
     titleEl.className = 'boot-splash__title';
     card.appendChild(titleEl);
 
@@ -227,6 +225,7 @@ export function createBootSplashController(
     progressEl.setAttribute('role', 'progressbar');
     progressEl.setAttribute('aria-valuemin', '0');
     progressEl.setAttribute('aria-valuemax', '100');
+    progressEl.setAttribute('aria-label', ports.copy.splashTitle());
     progressFillEl = doc.createElement('div');
     progressFillEl.className = 'boot-splash__progress-fill';
     progressEl.appendChild(progressFillEl);
@@ -234,20 +233,45 @@ export function createBootSplashController(
 
     statusLineEl = doc.createElement('p');
     statusLineEl.className = 'boot-splash__status-line';
+    statusLineEl.setAttribute('role', 'status');
+    statusLineEl.setAttribute('aria-live', 'polite');
     card.appendChild(statusLineEl);
 
+    detailsEl = doc.createElement('div');
+    detailsEl.className = 'boot-splash__details';
+    detailsEl.id = 'boot-splash-details';
+    detailsEl.hidden = true;
+    const toggle = createButton({
+      label: ports.copy.details?.() || '启动详情 · Debug logs',
+      variant: 'ghost', size: 'sm',
+      onClick: () => {
+        if (!detailsEl) return;
+        detailsEl.hidden = !detailsEl.hidden;
+        toggle.setAttribute('aria-expanded', String(!detailsEl.hidden));
+      },
+    }, doc);
+    detailsToggle = toggle;
+    toggle.classList.add('boot-splash__toggle');
+    toggle.setAttribute('aria-expanded', 'false');
+    toggle.setAttribute('aria-controls', detailsEl.id);
+    card.appendChild(toggle);
+    card.appendChild(detailsEl);
     phaseListEl = doc.createElement('ul');
     phaseListEl.className = 'boot-splash__phases';
-    card.appendChild(phaseListEl);
+    detailsEl.appendChild(phaseListEl);
+    diagnosticsEl = doc.createElement('pre');
+    diagnosticsEl.className = 'boot-splash__logs';
+    diagnosticsEl.tabIndex = 0;
+    diagnosticsEl.setAttribute('aria-label', 'Debug logs');
+    detailsEl.appendChild(diagnosticsEl);
 
     errorBoxEl = doc.createElement('div');
     errorBoxEl.className = 'boot-splash__error';
     errorBoxEl.hidden = true;
     card.appendChild(errorBoxEl);
 
-    retryButton = doc.createElement('button');
-    retryButton.type = 'button';
-    retryButton.className = 'ui-btn ui-btn--primary boot-splash__retry';
+    retryButton = createButton({label: ports.copy.retry(), variant: 'secondary', size: 'sm'}, doc);
+    retryButton.classList.add('boot-splash__retry');
     retryButton.hidden = true;
     retryButton.addEventListener('click', () => {
       void onRetryClicked();
@@ -260,6 +284,13 @@ export function createBootSplashController(
 
   const renderPhases = (snapshot: BootSnapshot): void => {
     if (!phaseListEl) return;
+    if (detailsToggle) setText(detailsToggle, ports.copy.details?.() || '启动详情 · Debug logs');
+    if (diagnosticsEl) setText(diagnosticsEl, snapshot.phases.map(phase => {
+      const duration = phase.duration_s == null ? '' : ` · ${phase.duration_s.toFixed(2)}s`;
+      const retry = phase.retry ? ` · retry=${phase.retry}` : '';
+      return `[${phase.index}/${snapshot.phaseTotal}] ${phase.key} · ${phase.status}${duration}${retry}`
+        + (phase.error ? `\n${phase.error}` : '');
+    }).join('\n'));
     const phases = snapshot.phases.map(phase => ({
       status: phase.status,
       label: ports.copy.phaseLabel(phase.key, phase.label),
@@ -359,18 +390,13 @@ export function createBootSplashController(
 
   const dismiss = (): void => {
     finished = true;
+    ports.onBlockedChange?.(false);
     if (pollTimer !== null) {
       ports.schedule.clearTimeout(pollTimer);
       pollTimer = null;
     }
-    if (overlay) {
-      overlay.classList.add('boot-splash--leaving');
-      const node = overlay;
-      overlay = null;
-      // Keep the fade-out honest but bounded; then remove the node so no
-      // fullscreen layer can intercept clicks after boot.
-      ports.schedule.setTimeout(() => node.remove(), 400);
-    }
+    overlay?.remove();
+    overlay = null;
     visible = false;
     try {
       window.dispatchEvent(new CustomEvent('tofu:boot-ready'));
@@ -394,10 +420,8 @@ export function createBootSplashController(
       return;
     }
     if (verdict.kind === 'starting') {
-      retryInFlight = false;
       renderStarting(verdict.snapshot);
     } else if (verdict.kind === 'failed') {
-      retryInFlight = false;
       renderFailed(verdict.snapshot);
     }
     // 'unavailable' keeps the previous truthful state; the connectivity
@@ -419,20 +443,22 @@ export function createBootSplashController(
     } catch (error) {
       ports.log.warn('[boot-splash] retry request failed', error);
     } finally {
-      // The next poll renders the truthful state; the reset bound keeps the
-      // button from sticking if the server never flips status.
-      ports.schedule.setTimeout(() => {
-        retryInFlight = false;
-      }, BOOT_SPLASH_POLICY.retryResetMs);
+      retryInFlight = false;
+      if (!destroyed && retryButton) {
+        retryButton.disabled = false;
+        retryButton.textContent = ports.copy.retry();
+      }
     }
   };
 
+  ports.onBlockedChange?.(true);
   void poll();
 
   return {
     isActive: () => visible && !finished,
     destroy: () => {
       destroyed = true;
+      ports.onBlockedChange?.(false);
       if (pollTimer !== null) {
         ports.schedule.clearTimeout(pollTimer);
         pollTimer = null;
@@ -470,6 +496,7 @@ export function startBootSplash(
   const controller = createBootSplashController({
     document,
     log: console,
+    onBlockedChange: blocked => setBootSendBlocked('boot', blocked),
     schedule: {
       setTimeout: (callback, delayMs) => window.setTimeout(callback, delayMs),
       clearTimeout: handle => window.clearTimeout(handle),
@@ -477,10 +504,12 @@ export function startBootSplash(
     copy: {
       splashTitle: () => withFallback(
         () => translate('boot.splashTitle'), 'boot.splashTitle',
-        '正在启动服务'),
+        '服务正在后台启动'),
       splashSubtitle: () => withFallback(
         () => translate('boot.splashSubtitle'), 'boot.splashSubtitle',
-        '服务器已响应，正在完成启动；就绪后页面会自动继续。'),
+        '页面已可浏览，也可以编辑草稿；服务就绪后恢复发送。'),
+      details: () => withFallback(
+        () => translate('boot.details'), 'boot.details', '启动详情 · Debug logs'),
       connecting: () => withFallback(
         () => translate('boot.connecting'), 'boot.connecting',
         '正在确认服务器状态…'),

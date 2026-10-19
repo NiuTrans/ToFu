@@ -4,10 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tofu-repo-kernel"
-version = "0.1.0"
-description = "Standalone native weighted CSR PageRank for Tofu repository maps"
+version = "0.7.0"
+description = "Standalone native repository ranking, discovery and extraction"
 requires-python = ">=3.10"
-license = "MIT"
+license = "MIT AND Apache-2.0"
 readme = "README.md"
 dependencies = []
 
@@ -16,4 +16,4 @@ packages = ["tofu_repo_kernel"]
 include-package-data = true
 
 [tool.setuptools.package-data]
-tofu_repo_kernel = ["*.so", "*.dylib", "*.dll", "build.json"]
+tofu_repo_kernel = ["*.so", "*.dylib", "*.dll", "build.json", "grammar_bundle.schema.json", "LICENSE.grep-ast.txt", "tofu-repository-discovery", "tofu-repository-discovery.exe", "tofu-repository-stream", "tofu-repository-stream.exe", "grammars/*.so", "grammars/grammars.json", "grammars/NOTICES.txt"]

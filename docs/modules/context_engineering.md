@@ -19,12 +19,13 @@ Problem: importing storage for limits crossed core boundaries. Decision: share c
 | Token counting | `lib/token_counter/` |
 | Automatic compaction | `lib/tasks_pkg/compaction/` |
 | Automatic handoff identity, pre/mid-turn placement and restoration ordering | `lib/tasks_pkg/compaction/_handoff.py` |
+| Required ordinary Turn acceptance scope | `lib/tasks_pkg/context_composer/turn_requirements.py`; [contract](../contracts/ARTIFACT_REVIEW.md#shared-execution-context) |
 | Task-state projection / required checklist restoration | `lib/tasks_pkg/context_composer/task_state.py`, `checklist.py` |
 | Persistent manual compaction | `lib/tasks_pkg/compaction/_manual.py`, `_persist/` |
-| Long-term memory retrieval/injection; My Context proposal/undo UI | `lib/memory/`; `frontend/src/features/memory/preference-actions.ts` |
+| Long-term memory, My Context, and [working facts](../contracts/WORKING_FACTS.md) | `lib/memory/`; `frontend/src/features/memory/preference-actions.ts` |
 | Conversation message construction | `lib/tasks_pkg/conv_message_builder/` |
 | Completed-task model view recovery | `lib/tasks_pkg/model_replay.py`, `lib/storage/model_continuation.py` |
-| Cost experiments and trace | `lib/cost_experiments.py`, context trace modules |
+| Cost experiments and trace | `lib/cost_experiments/cost_experiments.py`, context trace modules |
 | Price tiers and per-round cost aggregation | `lib/pricing/`, `lib/cost.py` |
 
 ## Assembly flow
@@ -51,6 +52,8 @@ Other composer blocks are content-addressed appended user-role TAIL carriers: id
 - `mcpToolExposure='delegate'` (typed option, per-conversation resolvable) keeps EVERY MCP schema off the orchestrator's wire: `_build_mcp` returns an empty wire while `_mcpAllowedToolCatalog` stays the full execution authority, so `search_tools`/`execute_tools` still reach every tool and `spawn_agents` sub-agents inherit the complete catalog through the parent executable catalog (never the wire subset). The mode writes no selection freeze — it is a per-assembly decision, so an explicit mid-conversation exposure switch never fights stale freeze state. The `mcp_tools_delta` block is then the per-turn advertisement: it renders the whole connected catalog as names+hints and points at sub-agent `tools`-allowlist delegation. Specs: `tests/mcp_protocol/test_mcp_delegate_exposure.py`.
 - Programmatic and multi-agent wire projection is latched from the task's first orchestration decision. Observed fan-out, later round numbers, retries, serial-gateway experiments, and program fallback state may update telemetry or execution behavior, but cannot add/remove tools or switch an existing tool schema mid-task. Local programmatic projection remains additive.
 
+Preparation reuse — Problem: My Context acquisition reread one owner’s profile for prompt and event projections, and plan rendering serialized the same tool schema twice. Decision: derive prompt, character count, and structured event items from one acquired profile snapshot; reuse the render-local canonical tool-manifest digest for cache epochs. A populated profile now needs one read instead of three (empty: one instead of two); schema serialization needs one pass instead of two per planned render. No bytes, hash formats, epoch inputs, or token budgets change. Alternatives: cross-request caches risk stale owner state; parsing event items from Markdown loses multiline work-rule actions. Block tokenization remains unchanged rather than adding another cache. Count/parity specifications: `tests/context/test_context_preparation_work.py`.
+
 ### Snapshot freshness and provenance
 
 Problem: metadata-only supersession left contradictory instructions visible; retrieval misses were mistaken for knowledge invalidation and redundant ambient facts polluted the model input.
@@ -76,17 +79,7 @@ MCP tool results carry ImageContent out-of-band on a `str` subclass (`MCPToolRes
 Reconstruction returns detached blocks; request-local image normalization pins the first observed
 bytes, so later tool rounds do not reread mutable local paths. The image L1 step protects the entire latest unconsumed batch until a model response proves consumption.
 
-Context providers detach metadata without traversing executor-owned `messages`, `_turn_input_messages`, `events`, `result` or `toolRounds`; the synchronous renderer and state projection keep the original message/task authority. This removes history-sized copy allocation at every provider acquisition. A controlled offline sample (2026-10-08, 5,000 synthetic messages, 20,000 events, seven runs) measured median 71.136 ms / 15,404,024 peak allocated bytes for the prior full copy versus 0.003 ms / 2,792 bytes for metadata only; this excludes upstream TTFT and storage/queue delays. Measure with `python3 benchmarks/send_startup.py`; verify with `tests/context/test_context_provider_snapshot.py`. Read-only compaction hooks
-and context providers receive detached nested JSON containers; mutation or late completion cannot edit live history/config. The bounded continuation lifecycle is in [`STORAGE.md`](../STORAGE.md). Publication/restore report missing base, unsupported/resume mode, absent checkpoint, failed settlement, changed content and unavailable storage. Preparation logs `checkpoint_prepared`; only the terminal storage receipt logs `checkpoint_settled`, with conversation/Turn/attempt identity, so a candidate is never reported as a committed continuation. Tests: `tests/model_routing/test_model_replay_stability.py`, `tests/model_routing/test_model_continuation_policy.py`, `tests/model_routing/test_model_continuation_store.py`.
-The orchestrator deep-copies its nested projection before context composition,
-cache ordering, compaction, sanitization or provider conversion. Durable Turns
-stay immutable; automatic Layer 1 never reads or writes conversation authority. Dynamic
-guidance—MCP deltas, skills/memory, environment, lifecycle recovery,
-URL prefetch, branch context, Paper gateway routing, local PTC, and native
-multi-agent hints—is an appended tail `user` carrier. Provider
-converters must not add ephemeral per-round copies: stable PTC and multi-agent
-policy is composer-owned, while dynamic stage/capacity stays in execution
-telemetry rather than prompt bytes.
+Context providers detach metadata without traversing executor-owned `messages`, `_turn_input_messages`, `events`, `result` or `toolRounds`; the synchronous renderer and state projection keep the original message/task authority. This removes history-sized copy allocation at every provider acquisition. A controlled offline sample (2026-10-08, 5,000 synthetic messages, 20,000 events, seven runs) measured median 71.136 ms / 15,404,024 peak allocated bytes for the prior full copy versus 0.003 ms / 2,792 bytes for metadata only; this excludes upstream TTFT and storage/queue delays. Measure with `python3 benchmarks/send_startup.py`; verify with `tests/context/test_context_provider_snapshot.py`. Read-only compaction hooks and context providers receive detached nested JSON containers; mutation or late completion cannot edit live history/config. The bounded continuation lifecycle is in [`STORAGE.md`](../STORAGE.md). Publication/restore report missing base, unsupported/resume mode, absent checkpoint, failed settlement, changed content and unavailable storage. Preparation logs `checkpoint_prepared`; only the terminal storage receipt logs `checkpoint_settled`, with conversation/Turn/attempt identity, so a candidate is never reported as a committed continuation. Tests: `tests/model_routing/test_model_replay_stability.py`, `tests/model_routing/test_model_continuation_policy.py`, `tests/model_routing/test_model_continuation_store.py`. The orchestrator deep-copies its nested projection before context composition, cache ordering, compaction, sanitization or provider conversion. Durable Turns stay immutable; automatic Layer 1 never reads or writes conversation authority. Dynamic guidance—MCP deltas, skills/memory, environment, lifecycle recovery, URL prefetch, branch context, Paper gateway routing, local PTC, and native multi-agent hints—is an appended tail `user` carrier. Provider converters must not add ephemeral per-round copies: stable PTC and multi-agent policy is composer-owned, while dynamic stage/capacity stays in execution telemetry rather than prompt bytes.
 
 Tool inclusion may still change at an explicit capability/permission boundary,
 but an included first-party tool keeps its canonical name, description, and
@@ -201,7 +194,7 @@ A bounded launch-probed LRU may retain recursively frozen parsed frontmatter onl
 
 **Measured-prefix encoding — Problem:** identical encoder configuration was rebuilt per message. **Decision:** reuse one request-local encoder; full canonical digests, encoding failures and mutation denial remain exact.
 **Alternatives:** identity checks miss edits, prompt caches retain history, and changing encoders can alter numeric/error semantics. Public usage-cache fixtures measured completion CPU 12–19% lower for short/history/mixed content.
-Three 1,000-operation wide pairs passed unchanged tail/RSS guards: CPU 1–3% lower, P99 1–3% higher. [Evidence](../evidence/system_usage_signature_encoder_admission_20261009.json) retains earlier failures; inference and whole-context latency are excluded.
+Three 1,000-operation wide pairs passed unchanged tail/RSS guards: CPU 1–3% lower, P99 1–3% higher. `system_usage_signature_encoder_admission_20261009.json` retains earlier failures; inference and whole-context latency are excluded.
 
 ## Change routing
 
@@ -224,3 +217,4 @@ pytest -q tests/tasks_pkg/test_long_agent_v2_contracts.py -k 'context_plan or ta
 ```
 
 Profile review demand — Problem: one process-wide semaphore dropped eligible reviews across unrelated owners, and file-backed context mutations lacked a complete read/mirror/history transaction. Decision: eligible reviews start independently; ordinary provider/billing policy remains while immediate-only contention admission is retired. The captured task owner reaches model dispatch. context_transaction(scope) uses the shared weak JSON-path/process locking seam, reentrant only inside one storage transaction; model calls stay outside it. Assistant updates recheck their original item snapshot under the write transaction, and new-item/tombstone checks share that transaction. Alternatives: larger semaphore counts still drop work; a global learner mutex serializes independent owners and paid calls; unlocked parallel writes lose items/undo evidence. Concurrent writes, duplicate learning, stale manual edits and per-task event tests verify the boundary.
+<!-- Evidence note: former docs/evidence/ artifact snapshots cited here were retired from the tree; cited JSON artifacts remain recoverable from git history. -->

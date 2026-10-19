@@ -16,7 +16,8 @@ from lib.tasks_pkg.tool_dispatch._flags import (
     _call_id_signature,
     _execute_gateway_delegation_scope,
 )
-from lib.tool_history_pairing import adjacent_tool_call_result_pairs
+from lib.tasks_pkg.tool_search_outcome import audit_search_outcome
+from lib.tool_results.tool_history_pairing import adjacent_tool_call_result_pairs
 from lib.weak_lock_pool import WeakLockPool
 from lib.tools.gateway import (
     EXECUTE_TOOLS_NAME,
@@ -288,10 +289,11 @@ def handle_search_tools(
 ):
     catalog = _executable_catalog(task, all_tools)
     from lib.tools.disclosure_state import disclosed_names_for_catalog
-    visible_names = (
-        _model_visible_tool_names(task)
-        | disclosed_names_for_catalog(task, catalog)
-    )
+    search_visible = _model_visible_tool_names(task)
+    search_disclosed = disclosed_names_for_catalog(task, catalog)
+    visible_names = search_visible | search_disclosed
+    search_started = time.monotonic()
+    search_exception = None
     try:
         result = search_executable_catalog(
             catalog, fn_args.get('query'),
@@ -304,9 +306,10 @@ def handle_search_tools(
                 task.get('_executableToolSearchTextByName') or {}),
             contract_documents_by_name=(
                 task.get('_toolContractDocumentsByName') or {}),
-            visible_names=_model_visible_tool_names(task),
-            disclosed_names=disclosed_names_for_catalog(task, catalog))
+            visible_names=search_visible,
+            disclosed_names=search_disclosed)
     except Exception as exc:
+        search_exception = exc
         # Local retrieval must fail open. Keep native schemas server-owned,
         # mark subsequent rounds to send the complete catalog, and give this
         # round a compact hidden-tool directory so it can recover immediately.
@@ -393,6 +396,14 @@ def handle_search_tools(
             logger.info(
                 '[ToolSearch] exact-name miss task=%s query=%.80r total=%s',
                 task.get('id'), fn_args.get('query'), result.get('total'))
+    audit_search_outcome(
+        task, fn_args, result, source='search_tools', call_id=tc_id,
+        llm_round=round_entry.get('llmRound', rn),
+        catalog_names=(_schema_name(tool) for tool in catalog),
+        visible_names=search_visible,
+        disclosed_names=search_disclosed,
+        exception=search_exception,
+        duration_ms=(time.monotonic() - search_started) * 1000)
     content = _json(result)
     search_meta = {
         'toolSearchTotal': int(result.get('total') or 0),
@@ -883,16 +894,33 @@ def _execute_program(
 
     def search(query, namespace='', limit=8, cursor=''):
         from lib.tools.disclosure_state import disclosed_names_for_catalog
-        result = search_executable_catalog(
-            catalog, query, namespace=namespace, limit=limit, cursor=cursor,
-            execution_gateway=_search_execution_gateway(task),
-            namespace_by_name=namespaces, search_text_by_name=search_text,
-            contract_documents_by_name=(
-                task.get('_toolContractDocumentsByName') or {}),
-            visible_names=_model_visible_tool_names(task),
-            disclosed_names=disclosed_names_for_catalog(task, catalog))
-        return _with_browser_availability(
-            result, task, catalog, {'query': query, 'namespace': namespace})
+        arguments = {'query': query, 'namespace': namespace, 'cursor': cursor}
+        visible = _model_visible_tool_names(task)
+        disclosed = disclosed_names_for_catalog(task, catalog)
+        search_started = time.monotonic()
+        result = None
+        search_exception = None
+        try:
+            result = search_executable_catalog(
+                catalog, query, namespace=namespace, limit=limit, cursor=cursor,
+                execution_gateway=_search_execution_gateway(task),
+                namespace_by_name=namespaces, search_text_by_name=search_text,
+                contract_documents_by_name=(
+                    task.get('_toolContractDocumentsByName') or {}),
+                visible_names=visible, disclosed_names=disclosed)
+            result = _with_browser_availability(result, task, catalog, arguments)
+            return result
+        except Exception as exc:
+            search_exception = exc
+            raise
+        finally:
+            audit_search_outcome(
+                task, arguments, result, source='catalog.search',
+                call_id=execution_call_id, llm_round=llm_round,
+                catalog_names=(_schema_name(tool) for tool in catalog),
+                visible_names=visible, disclosed_names=disclosed,
+                exception=search_exception,
+                duration_ms=(time.monotonic() - search_started) * 1000)
 
     def call(name, arguments=None, call_id=None):
         nonlocal child_counter
@@ -1035,12 +1063,34 @@ def _execute_program(
         logger.debug('[ToolGateway] JavaScript program rejected: %s', exc)
         run['status'] = 'error'
         run['error'] = exc.as_dict()
+        error_code = str(run['error'].get('code') or '')
+        if error_code in _PROGRAM_AUTHORING_ERRORS:
+            fallback = 'Correct the reported code error or use other available tools.'
+        elif error_code in {'output_limit', 'memory_limit', 'execution_limit'}:
+            fallback = 'Process or page smaller inputs and return only the needed findings.'
+        elif error_code in {'runtime_unavailable', 'runtime_integrity'}:
+            fallback = ('Use available tools directly or execute_tools calls[]. '
+                        'Repair the reported runtime problem before using JavaScript again.')
+        elif error_code == 'cancelled':
+            fallback = 'Respect cancellation; do not resume the cancelled operation.'
+        else:
+            fallback = ('Inspect the reported cause before retrying; use other '
+                        'available tools for independent work.')
+        # A later authoring error does not undo earlier children. Put this
+        # before the specific hint so the model's 300-character view keeps it.
+        recovery = (
+            'Do not repeat completed child operations; inspect uncertain outcomes. '
+            'Reuse retained data via tools.inputs and tools.result. '
+            if canonical_receipts or run['childCalls'] or retained_inputs else '')
+        if error_code == 'cancelled':
+            recovery = ''
+        run['error']['retry_hint'] = (recovery + str(
+            run['error'].get('retry_hint') or fallback))[:300]
         native_stats = getattr(exc, 'execution_stats', None)
         if isinstance(native_stats, dict):
             run['stats'] = {**native_stats,
                 'result_delivery': program_result_budget.stats(),
                 'result_bytes': len(_json(run['error']).encode('utf-8'))}
-        error_code = str(run['error'].get('code') or '')
         if not run['childCalls'] and error_code in _PROGRAM_AUTHORING_ERRORS:
             failure_count = min(
                 _PROGRAM_BATCH_FALLBACK_AFTER,
@@ -1064,7 +1114,7 @@ def _execute_program(
             str(run['error'].get('code') or run['error'].get('kind') or ''),
             len(run['childCalls']),
             int((time.monotonic() - program_started) * 1000))
-        return {'status': 'error', 'error': exc.as_dict(),
+        return {'status': 'error', 'error': run['error'],
                 **({'stats': run['stats']} if 'stats' in run else {}),
                 'inputShapes': _program_input_shapes(canonical_receipts + retained_inputs),
                 'childResults': canonical_receipts}
@@ -1141,10 +1191,13 @@ def handle_execute_tools(
             # Retain existing task-latch keys so in-flight authoring recovery
             # survives this runtime cutover; these names do not select a VM.
             authoring_fallback = bool(task.get('_toolScriptBatchFallback'))
-            mode_off = (isinstance(cfg.get("tools"), dict)
-                        and cfg["tools"].get("programmaticCalling") == "off")
+            from lib.context_experiment_flags import normalize_context_experiment_flags
+            from lib.tools.programmatic import programmatic_tier
+            mode = normalize_context_experiment_flags(cfg)['tools']['programmaticCalling']
+            mode_off = mode == 'off'
             program_disabled = (
                 mode_off or authoring_fallback
+                or programmatic_tier(requested=mode) == 'batch'
                 or (isinstance(local_latch, dict)
                     and local_latch.get('tier') == 'batch'))
             if program_disabled:

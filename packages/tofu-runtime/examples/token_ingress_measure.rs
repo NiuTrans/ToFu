@@ -38,12 +38,19 @@ fn cpu() -> u128 {
     t.tv_sec as u128 * 1_000_000_000 + t.tv_nsec as u128
 }
 fn main() {
+    let arguments: Vec<_> = std::env::args().collect();
+    let cold_only = arguments.iter().any(|value| value == "--cold-only");
+    let selected = arguments.iter().position(|value| value == "--encoding")
+        .map(|position| arguments.get(position + 1).expect("encoding missing").as_str());
+    assert!(!cold_only || selected.is_some(), "cold worker requires one encoding");
+    assert!(selected.is_none_or(|value| matches!(value, "cl100k_base" | "o200k_base")));
     let rows: Value =
         serde_json::from_str(include_str!("../tests/fixtures/python_token_ingress.json")).unwrap();
     for (label, encoding) in [
         ("cl100k_base", Encoding::Cl100k),
         ("o200k_base", Encoding::O200k),
     ] {
+        if selected.is_some_and(|value| value != label) { continue; }
         let cases: Vec<_> = rows
             .as_array()
             .unwrap()
@@ -83,12 +90,10 @@ fn main() {
         black_box(count(cases[0]));
         let cold_wall = t.elapsed().as_nanos();
         let cold_cpu = cpu() - c;
-        for r in &cases {
-            black_box(count(r));
-        }
+        if !cold_only { for r in &cases { black_box(count(r)); } }
         let c = cpu();
         let t = Instant::now();
-        for _ in 0..20 {
+        for _ in 0..if cold_only { 0 } else { 20 } {
             for r in &cases {
                 black_box(count(r));
             }
@@ -101,7 +106,8 @@ fn main() {
         let remaining = LIVE.load(Ordering::Relaxed) - before;
         println!(
             "{}",
-            serde_json::json!({"encoding":label,"cold_wall_ns":cold_wall,"cold_cpu_ns":cold_cpu,"calls":cases.len()*20,"wall_ns":wall,"cpu_ns":cpu,"retained_requested_bytes":retained,"peak_requested_bytes":peak,"remaining_after_drop":remaining})
+            serde_json::json!({"encoding":label,"cold_wall_ns":cold_wall,"cold_cpu_ns":cold_cpu,
+                "pid":std::process::id(),"cold_only":cold_only,"calls":if cold_only { 0 } else { cases.len()*20 },"wall_ns":wall,"cpu_ns":cpu,"retained_requested_bytes":retained,"peak_requested_bytes":peak,"remaining_after_drop":remaining})
         );
     }
 }

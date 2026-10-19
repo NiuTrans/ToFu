@@ -79,7 +79,7 @@ test('pre-reserve eleven-field draft retains objective roles policy and ambiguou
 
 test('saved review reserve presentation states scope and does not promise acceptance',()=>{
  const owner=load('features/evolution/programs/execution-options.ts');const text=owner.executionPolicyText(program('a',{execution_options:{budget:{max_tokens:240000},review_reserve:{tokens:80000,tool_calls:0,wall_clock_seconds:0}}}),[],key=>locale['evolution.program.'+key]||key);
- assert.ok(text.includes('Review token reserve per experiment: 80,000'));assert.ok(text.includes('Review may still be unaffordable'));assert.ok(text.includes('reserve never proves acceptance'));
+ assert.ok(text.includes('Review token reserve per experiment: 80,000'));assert.ok(text.includes(locale['evolution.program.reviewReserveHint']));
 });
 
 test('explicit cumulative allowances, whole seconds and independent roles reach the original creation body',async t=>{

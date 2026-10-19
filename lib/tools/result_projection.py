@@ -23,7 +23,6 @@ TOOL_RESULT_PRODUCER_METADATA_KEY = "_toolResultProducerMetadata"
 
 _FILE_READ_SOURCE_PREVIEW_CHARS = 8_192
 _FILE_READ_PATH_CHARS = 384
-_FILE_READ_MAX_ITEMS = 20
 _FILE_READ_STATUSES = frozenset({
     "ok", "partial", "error", "skipped", "unknown",
 })
@@ -39,7 +38,8 @@ def _clip_middle(value: Any, limit: int) -> str:
 
 def _read_status(text: str) -> str:
     stripped = text.lstrip()
-    if stripped.startswith(("Error:", "File not found:", "Error reading ")):
+    if stripped.startswith(("Error:", "File not found:", "Error reading ",
+                            "Path traversal blocked:", "No project base path")):
         return "error"
     diagnostic = stripped[:512] + stripped[-512:]
     if any(marker in diagnostic for marker in (
@@ -108,7 +108,7 @@ def _requested_file_specs(tool_arguments: Mapping[str, Any] | None) -> list[dict
         return []
 
     requested: list[dict] = []
-    for raw in reads[:_FILE_READ_MAX_ITEMS]:
+    for raw in reads:
         if isinstance(raw, Mapping) and raw.get("path") is not None:
             requested.append({
                 "path": str(raw.get("path") or ""),
@@ -134,7 +134,7 @@ def normalize_file_read_projection_items(
     normalized: list[dict[str, Any]] = []
     if isinstance(raw_items, Sequence) and not isinstance(
             raw_items, (str, bytes)):
-        for position, raw in enumerate(raw_items[:_FILE_READ_MAX_ITEMS], 1):
+        for position, raw in enumerate(raw_items, 1):
             if not isinstance(raw, Mapping):
                 continue
             if raw.get("type") != FILE_READ_RESULT_ITEM_TYPE:
@@ -177,9 +177,9 @@ def normalize_file_read_projection_items(
         represented_paths.add(path)
 
     normalized.sort(key=lambda item: int(item.get("index") or 0))
-    for index, item in enumerate(normalized[:_FILE_READ_MAX_ITEMS], 1):
+    for index, item in enumerate(normalized, 1):
         item["index"] = index
-    return normalized[:_FILE_READ_MAX_ITEMS]
+    return normalized
 
 
 def is_file_read_projection(items: Sequence[Any] | None) -> bool:

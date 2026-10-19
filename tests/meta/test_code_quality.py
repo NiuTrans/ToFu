@@ -300,13 +300,17 @@ def _finding_sig(rel: str, f: dict) -> tuple[str, str, str]:
 # bounded sentinel, retains the already-safe value, or drops only diagnostic
 # delivery; application state is never changed here.
 _FAULT_CONTAINMENT_SIGS = frozenset({
+    # Timing observers must not recursively log their own sink failure.
+    ('lib/llm/diagnostic_timing.py', '_emit', 'Exception'),
+    ('lib/observability.py', 'measure_task_startup.anchor', 'Exception'),
+    ('lib/tools/execution_timing.py', 'tool_execution_timing', 'Exception'),
     ('lib/incident_journal.py', '_record_text', 'Exception'),
     ('lib/incident_journal.py', '_exception_signature', 'Exception'),
     ('lib/incident_journal.py', 'handleError', 'Exception'),
     ('lib/log.py', '_bounded_context_scalar', 'Exception'),
-    ('lib/log_rate_limit.py', '_full_text', 'Exception'),
-    ('lib/log_rate_limit.py', '_deliver_pending', 'Exception'),
-    ('lib/log_record_values.py', 'sanitize_value', 'Exception'),
+    ('lib/logging_pkg/log_rate_limit.py', '_full_text', 'Exception'),
+    ('lib/logging_pkg/log_rate_limit.py', '_deliver_pending', 'Exception'),
+    ('lib/logging_pkg/log_record_values.py', 'sanitize_value', 'Exception'),
     ('lib/tasks_pkg/context_composer/_render.py',
      '_emit_context_summary', 'Exception'),
     ('lib/tasks_pkg/manager/_persist.py',
@@ -318,8 +322,8 @@ _FAULT_CONTAINMENT_SIGS = frozenset({
 
 _ASSIGNMENT_FAULT_CONTAINMENT_SIGS = _FAULT_CONTAINMENT_SIGS | frozenset({
     ('lib/log.py', 'filter', 'Exception'),
-    ('lib/log_rate_limit.py', '_snapshot', 'Exception'),
-    ('lib/log_record_values.py', '_safe_string', 'Exception'),
+    ('lib/logging_pkg/log_rate_limit.py', '_snapshot', 'Exception'),
+    ('lib/logging_pkg/log_record_values.py', '_safe_string', 'Exception'),
 })
 
 

@@ -48,6 +48,7 @@ HOW TO RESPOND TO A FAILURE HERE
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import importlib.util
@@ -480,3 +481,29 @@ def test_event_contract_scan_targets_resolve():
 
 if __name__ == '__main__':
     sys.exit(pytest.main([__file__, '-v']))
+
+
+@pytest.mark.parametrize('checked', [False, True])
+def test_checked_subprocess_is_an_executable_assertion(checked):
+    audit = _load_audit_module()
+    source = f'def test_child():\n    subprocess.run(["child"], check={checked!r})\n'
+    assert audit._body_asserts(ast.parse(source).body[0]) is checked
+
+
+@pytest.mark.parametrize('observed', [False, True])
+def test_worker_exception_collection_requires_observation(observed):
+    audit = _load_audit_module()
+    source = ('def test_worker():\n    errors = []\n    try:\n        assert subject()\n'
+              '    except Exception as error:\n        errors.append(error)\n')
+    if observed:
+        source += '    assert not errors\n'
+    assert bool(audit._swallows(ast.parse(source).body[0])) is not observed
+
+
+def test_parsed_json_is_data_but_raw_json_remains_source():
+    audit = _load_audit_module()
+    expression = 'Path("frontend/src/i18n/locales/en.json").read_text()'
+    parsed = ast.parse('data = json.loads(' + expression + ')')
+    raw = ast.parse('source = ' + expression)
+    assert audit._shipped_source_reads(parsed) == {}
+    assert len(audit._shipped_source_reads(raw)) == 1

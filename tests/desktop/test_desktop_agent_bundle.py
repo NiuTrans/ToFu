@@ -93,7 +93,7 @@ def _clear_keys():
 def fake_artifact(tmp_path, monkeypatch):
     """Point the route's store seam at a one-file fake exe; returns a
     dict of knobs (entry, path, kicked)."""
-    exe = tmp_path / 'TofuAgent-Setup-9.9.9-win64.exe'
+    exe = tmp_path / 'TofuRemote-Setup-9.9.9-win64.exe'
     from lib.desktop_dist.agent_installer import EMPTY_TRAILER, FORMAT
     exe.write_bytes((b'fake-nsis-exe' * 64) + EMPTY_TRAILER)
     entry = {'filename': exe.name, 'version': '9.9.9', 'git_sha': 'shaHEAD',
@@ -156,7 +156,7 @@ class TestAgentInstallerRoute:
                              headers=_bearer('carol'))
         assert r.status_code == 200, r.get_data(as_text=True)
         cd = r.headers.get('Content-Disposition', '')
-        assert 'TofuAgent-Setup-9.9.9-win64.exe' in cd, cd
+        assert 'TofuRemote-Setup-9.9.9-win64.exe' in cd, cd
         assert '.zip' not in cd.lower()
         assert r.headers['Content-Type'].startswith(
             'application/vnd.microsoft.portable-executable')
@@ -546,7 +546,7 @@ class TestClientDiagInbox:
     def test_16_post_stores_a_jsonl_line_bound_to_the_caller(
             self, flask_client, diag_log):
         r = flask_client.post('/api/v4/desktop/client-diag',
-                              json={'text': 'Tofu Agent diagnostics\nlink: proxy'},
+                              json={'text': 'Tofu Remote diagnostics\nlink: proxy'},
                               headers=_bearer('diag'))
         assert r.status_code == 200, r.get_data(as_text=True)
         lines = diag_log.read_text(encoding='utf-8').strip().splitlines()

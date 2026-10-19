@@ -10,7 +10,9 @@
 //! with `database_protocol_error`).
 //!
 //! Entry point: [`stabilize_for_patch`]. Dependencies: serde_json only; the
-//! patch machinery itself lives in `turn_projection_patch.rs`.
+//! patch machinery itself lives in `turn_projection_patch.rs`. File-change
+//! sidecars share normalization with settled-turn assembly: nested patches
+//! must address the same derived object on both sides of the revision lock.
 //!
 //! Deliberate scope boundary: this ports only the segment-level invariants
 //! (validation, note dedup, terminal-block sync, narrated-mirror drop, stable
@@ -98,7 +100,7 @@ fn valid_segments(value: Option<&Value>) -> Option<Vec<Map<String, Value>>> {
 }
 
 /// Port of `_preserved_notes`: salvage display-only notes with their defaults.
-fn preserved_notes(value: Option<&Value>) -> Vec<Map<String, Value>> {
+pub(crate) fn preserved_notes(value: Option<&Value>) -> Vec<Map<String, Value>> {
     let mut notes = Vec::new();
     let mut seen = std::collections::HashSet::new();
     let Some(Value::Array(items)) = value else {
@@ -383,6 +385,23 @@ fn stable_block_ids(segments: &[Map<String, Value>]) -> Vec<Value> {
     normalized
 }
 
+/// Mirror the producer's file sidecar before patching or settled assembly.
+/// Preserve explicit fields; derive legacy files only when no object exists.
+pub(crate) fn normalize_file_changes(projection: &mut Map<String, Value>) {
+    if !projection.get("fileChanges").is_some_and(Value::is_object) {
+        let Some(files) = projection.get("modifiedFileList").and_then(Value::as_array)
+            .filter(|files| !files.is_empty()) else { return; };
+        let count = projection.get("modifiedFiles").and_then(Value::as_u64).unwrap_or(0);
+        let sidecar = serde_json::json!({"count": count.max(files.len() as u64), "files": files});
+        projection.insert("fileChanges".into(), sidecar);
+    }
+    let sidecar = projection.get_mut("fileChanges").and_then(Value::as_object_mut).unwrap();
+    if sidecar.get("blockId").and_then(Value::as_str).is_none_or(str::is_empty) {
+        sidecar.insert("blockId".into(), Value::String("file-changes".into()));
+    }
+    sidecar.entry("state").or_insert_with(|| Value::String("applied".into()));
+}
+
 /// Normalize one locked storage projection to the producer patch baseline.
 ///
 /// Returns the normalized document; the caller compares it with the stored
@@ -395,6 +414,7 @@ pub(crate) fn stabilize_for_patch(
     status: &str,
 ) -> io::Result<Map<String, Value>> {
     let mut projection = previous.clone();
+    normalize_file_changes(&mut projection);
     let raw_segments = projection.get("segments").cloned();
     let Some(mut segments) = valid_segments(raw_segments.as_ref()) else {
         return Err(integrity(
@@ -502,6 +522,33 @@ mod tests {
             .as_object()
             .unwrap()
             .clone()
+    }
+
+    #[test]
+    fn legacy_file_sidecar_is_a_valid_nested_patch_base_and_replay_is_complete() {
+        let mut raw = empty_live_projection();
+        raw.insert("modifiedFileList".into(), json!([{"path":"answer.txt","added":1}]));
+        raw.insert("modifiedFiles".into(), json!(3));
+        let stable = stabilize_for_patch(&raw, "assistant", "running").unwrap();
+        assert_eq!(stable["fileChanges"], json!({"blockId":"file-changes","state":"applied",
+            "count":3,"files":[{"path":"answer.txt","added":1}]}));
+        assert!(!raw.contains_key("fileChanges"));
+        let patch = json!({"version":1,"baseRevision":18,"targetRevision":19,"operations":[
+            {"op":"set","path":["fileChanges","taskId"],"value":"flow-root"}]}).as_object().unwrap().clone();
+        assert!(crate::turn_projection_patch::apply_projection_patch(Some(&raw), &patch).is_err());
+        let next = crate::turn_projection_patch::apply_projection_patch(Some(&stable), &patch).unwrap();
+        let replay = crate::turn_projection_patch::build_projection_patch(&raw, &next, 18, 19).unwrap();
+        assert_eq!(crate::turn_projection_patch::apply_projection_patch(Some(&raw), &replay).unwrap(), next);
+        assert_eq!(next["fileChanges"]["taskId"], "flow-root");
+    }
+
+    #[test]
+    fn declared_file_sidecar_keeps_its_state_identity_and_files() {
+        let mut value = empty_live_projection();
+        let sidecar = json!({"blockId":"files:owned","state":"reverted","count":0,"files":[]});
+        value.insert("fileChanges".into(), sidecar.clone());
+        value.insert("modifiedFileList".into(), json!([{"path":"stale.txt"}]));
+        assert_eq!(stabilize_for_patch(&value, "assistant", "running").unwrap()["fileChanges"], sidecar);
     }
 
     #[test]

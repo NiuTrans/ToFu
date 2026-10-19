@@ -507,6 +507,46 @@ def is_literal_sed_filter(arguments):
     return all(not operand.startswith('-') for operand in arguments[index + 1:])
 
 
+def command_segment_formatter_writes(source):
+    """Return (writes, literal targets, complete, owned) for Ruff, or None.
+
+    This proves maintained argv shapes, not permission. Unknown options,
+    wrappers and expansions retain writer admission without owned evidence.
+    """
+    try:
+        words = list(command_segment_words(source))
+    except ValueError:
+        return None
+    while words and _ENV_ASSIGNMENT_GUARD_RE.match(words[0]):
+        words.pop(0)
+    unwrapped = _unwrap_command_parts(words)
+    if not unwrapped or os.path.basename(unwrapped[0]) != 'ruff':
+        return None
+    if len(unwrapped) < 2 or unwrapped[1] not in {'format', 'check'}:
+        return True, (), False, False
+    verb, args = unwrapped[1], unwrapped[2:]
+    flags = {'--no-cache', '--isolated', '--force-exclude', '-q', '--quiet',
+             '-v', '--verbose', '--respect-gitignore', '--no-respect-gitignore'}
+    flags |= ({'--check', '--diff'} if verb == 'format' else
+              {'--fix', '--no-fix', '--fix-only', '--unsafe-fixes', '--no-unsafe-fixes', '--diff'})
+    targets = _static_writer_operands(args, flags)
+    complete = (words == unwrapped and targets is not None
+                and not shell_source_has_expansion(source)
+                and not _has_unquoted_shell_metachars(source))
+    if not complete:
+        return True, (), False, False
+    options = args[:args.index('--')] if '--' in args else args
+    if verb == 'format':
+        writes = not any(arg in {'--check', '--diff'} for arg in options)
+        owned = writes
+    else:
+        # fix=true in discovered Ruff configuration can make a plain check
+        # write. Only explicit no-fix/report mode proves source-read-only.
+        writes = '--no-fix' not in options and '--diff' not in options
+        owned = writes and any(arg in {'--fix', '--fix-only'} for arg in options)
+    return writes, tuple(targets), bool(targets), owned
+
+
 def _command_checkout_mutation(command, cwd=''):
     """Best-effort checkout mutation signal for undo/snapshot analysis.
 
@@ -540,10 +580,15 @@ def _command_checkout_mutation(command, cwd=''):
             if _classify_git_invocation(words[1:]) in ('safe_write', 'tree_destroying'):
                 return True
             continue  # readonly or unknown-but-non-mutating Git
-        if base == 'sort' and any(
-                w == '-o' or w.startswith('--output') or (w.startswith('-o') and len(w) > 2)
-                for w in words[1:]):
-            return True
+        formatter = command_segment_formatter_writes(segment)
+        if formatter is not None:
+            if formatter[0]:
+                return True
+            continue
+        if base == 'sort':
+            parsed = command_segment_targets(segment)
+            if parsed.targets or not parsed.complete:
+                return True
         if base in _READONLY_COMMANDS:
             continue
         # Opaque non-Git command (interpreter, build/test runner, …): not a
@@ -567,11 +612,11 @@ def _lease_free_git_segment(command):
     Like the lease itself, this assumes cooperating executables, not a sandbox
     against a substituted git binary or hostile inherited environment.
     """
-    if (not command or re.search(r'[$`]', command)
-            or re.search(r'[\r\n#;&|<>(){}*?\[\]~\\]', _mask_quoted_literals(command))):
+    if (not command or shell_source_has_expansion(command)
+            or re.search(r'[\r\n#;&|<>(){}*?\[\]\\]', _mask_quoted_literals(command))):
         return None
     try:
-        words = shlex.split(command, comments=False, posix=True)
+        words = list(command_segment_words(command))
     except ValueError:
         return None
     if not words or words[0] not in {'git', '/usr/bin/git', '/bin/git'}:
@@ -600,6 +645,15 @@ def _lease_free_git_segment(command):
     original_args = list(args)
     if _classify_git_invocation(words[1:], require_known_options=True) != 'readonly':
         return None
+
+    if verb == 'clean':
+        # Reuse the SAME value/bundle parser: proven noninteractive preview.
+        # Native clean dry-run has no write hook; disable pager/fsmonitor.
+        if _classify_git_clean(args) != 'readonly':
+            return None
+        return shlex.join([words[0], '--no-pager', '--no-optional-locks',
+                           '-c', 'core.fsmonitor=false', '-c', 'log.showSignature=false',
+                           '-c', 'format.pretty=medium', *directory_args, verb, *args])
     flags = {
         'status': {'-s', '--short', '-b', '--branch', '-z', '--null', '--porcelain',
                    '--porcelain=1', '--porcelain=2', '--porcelain=v1', '--porcelain=v2',
@@ -609,6 +663,9 @@ def _lease_free_git_segment(command):
         'branch': {'--show-current', '--list', '-a', '--all', '-r', '--remotes', '-v', '-vv'},
         'tag': {'--list', '-l', '-n'},
         'worktree': {'list', '--porcelain', '-z'},
+
+        'check-ignore': {'-q', '--quiet', '-v', '--verbose', '-n', '--non-matching',
+                         '-z', '--stdin', '--no-index'},
         'remote': {'-v', '--verbose'},
         'rev-parse': {'--show-toplevel', '--git-dir', '--git-common-dir', '--show-prefix',
                       '--is-inside-work-tree', '--is-bare-repository', '--verify', '--short',
@@ -721,7 +778,7 @@ def _lease_free_git_command(command):
     Writes, wrappers, redirections and unknown Git shapes never borrow the
     exemption from a neighbouring inspection.
     """
-    if not command or re.search(r'[$`]', command):
+    if not command or shell_source_has_expansion(command):
         return None
     masked = _mask_quoted_literals(command)
     if re.search(r'[\r\n#<>(){}*?\[\]~\\]', masked):
@@ -736,7 +793,7 @@ def _lease_free_git_command(command):
             return None
         segment = command[start:end].strip()
         try:
-            words = shlex.split(segment, comments=False, posix=True)
+            words = list(command_segment_words(segment))
         except ValueError:
             return None
         if not words:
@@ -819,6 +876,7 @@ _GIT_READONLY_SUBCOMMANDS = frozenset({
     'status', 'log', 'diff', 'show', 'branch', 'tag',
     'remote', 'describe', 'rev-parse', 'rev-list',
     'ls-files', 'ls-tree', 'ls-remote', 'merge-base', 'cat-file', 'for-each-ref', 'name-rev',
+    'check-ignore',
     'blame', 'shortlog', 'reflog',
     'config', 'stash',  # Parameter-sensitive forms are checked before this set.
 })
@@ -853,7 +911,7 @@ _ShellWord = namedtuple(
     '_ShellWord', ['text', 'start', 'end', 'squote', 'dquote'])
 
 
-def _shell_words(s):
+def _shell_words(s, *, strict=False, redirects=False):
     """Split one shell segment into unquoted words with source offsets.
 
     Guards and rewriters share this parser so quoted patterns such as
@@ -864,47 +922,45 @@ def _shell_words(s):
     out = []
     i, n = 0, len(s)
     while i < n:
-        while i < n and s[i] in ' \t':
+        while i < n and s[i].isspace():
             i += 1
         if i >= n:
             break
         start = i
-        buf = []
+        if redirects and s[i] in '<>':
+            while i < n and s[i] in '<>':
+                i += 1
+            out.append(_ShellWord(s[start:i], start, i, False, False))
+            continue
+        quote = None
         squote = dquote = False
-        while i < n and s[i] not in ' \t':
+        while i < n:
             char = s[i]
-            if char == '\\' and not squote:
-                if i + 1 < n:
-                    buf.append(s[i + 1])
+            if quote is None and (char.isspace() or (redirects and char in '<>')):
+                break
+            if char == '\\' and quote != "'":
+                if quote != '"' or (i + 1 < n and s[i + 1] in '$`"\\\n'):
                     i += 2
-                else:
-                    i += 1
-                continue
-            if char == "'" and not dquote:
-                squote = True
-                i += 1
-                while i < n and s[i] != "'":
-                    buf.append(s[i])
-                    i += 1
-                i += 1
-                continue
-            if char == '"' and not squote:
-                dquote = True
-                i += 1
-                while i < n and s[i] != '"':
-                    if (s[i] == '\\' and i + 1 < n
-                            and s[i + 1] in '$`"\\\n'):
-                        buf.append(s[i + 1])
-                        i += 2
-                        continue
-                    buf.append(s[i])
-                    i += 1
-                i += 1
-                continue
-            buf.append(char)
+                    continue
+            if char in "'\"":
+                if quote is None:
+                    quote = char
+                    squote = squote or char == "'"
+                    dquote = dquote or char == '"'
+                elif quote == char:
+                    quote = None
             i += 1
-        out.append(_ShellWord(
-            ''.join(buf), start, i, squote, dquote))
+        raw = s[start:i]
+        try:
+            decoded = shlex.split(raw, comments=False, posix=True)
+            if len(decoded) != 1:
+                raise ValueError('Invalid shell word')
+            text = decoded[0]
+        except ValueError:
+            if strict:
+                raise
+            text = raw  # Best-effort legacy analysis; admission uses strict mode.
+        out.append(_ShellWord(text, start, min(i, n), squote, dquote))
     return out
 
 
@@ -1072,6 +1128,480 @@ def _awk_inplace_operands(args):
     return [w for w in operands if not _re.match(r'^\w+=', w)]
 
 
+def _shell_expansion_prefix(source, *, pathname=True):
+    """Decode the literal prefix before a real shell expansion, if any."""
+    quote = None
+    prefix = []
+    index = 0
+    while index < len(source):
+        char = source[index]
+        if char == '\\' and quote != "'" and index + 1 < len(source):
+            following = source[index + 1]
+            if quote != '"' or following in '$`"\\\n':
+                prefix.append(following)
+                index += 2
+                continue
+        if char in "'\"":
+            if quote is None:
+                quote = char
+                index += 1
+                continue
+            if quote == char:
+                quote = None
+                index += 1
+                continue
+        # Tilde in HEAD~1 is literal, unlike a token/assignment prefix ~.
+        # Keep assignment/colon cases conservative across supported shells.
+        tilde_prefix = char == '~' and (index == 0 or source[index - 1] in ' \t\r\n=:')
+        if (quote != "'" and char in '$`'
+                or pathname and quote is None and (char in '*?[]{}' or tilde_prefix)):
+            return ''.join(prefix), True
+        prefix.append(char)
+        index += 1
+    return ''.join(prefix), quote is not None
+
+
+def shell_source_has_expansion(source, *, pathname=True):
+    """Detect expansion, not literal dollars/globs inside single quotes."""
+    return _shell_expansion_prefix(source, pathname=pathname)[1]
+
+
+def command_segment_words(source):
+    """One shell-token authority for utility targets and admission.
+
+    Redirection operators are separate tokens even without whitespace. Quoted
+    operands remain one token; no command text or embedded program is executed.
+    """
+    return tuple(word.text for word in _shell_words(source, strict=True, redirects=True))
+
+
+_CommandTargets = namedtuple('_CommandTargets', 'words targets complete')
+
+
+def _static_writer_operands(args, flags):
+    """Known non-value flags only; never guess unknown option arity."""
+    operands = []
+    options = True
+    for word in args:
+        if options and word == '--':
+            if operands:
+                return None
+            options = False
+        elif options and word.startswith('-'):
+            if operands or word not in flags:
+                return None
+        else:
+            operands.append(word)
+    return operands
+
+
+def _single_writer_option(args, short, long, flags):
+    """Parse one value option plus literal operands; duplicates stay opaque."""
+    value = None
+    operands = []
+    index = 0
+    while index < len(args):
+        word = args[index]
+        if operands and word.startswith('-'):
+            return None  # option permutation can depend on POSIXLY_CORRECT
+        if word == '--':
+            operands.extend(args[index + 1:])
+            break
+        if word == short or word == long:
+            index += 1
+            if value is not None or index >= len(args):
+                return None
+            value = args[index]
+        elif word.startswith(long + '=') or (word.startswith(short) and len(word) > len(short)):
+            if value is not None:
+                return None
+            value = word.split('=', 1)[1] if word.startswith(long + '=') else word[len(short):]
+        elif word.startswith('-'):
+            if word not in flags:
+                return None
+        else:
+            operands.append(word)
+        index += 1
+    return (value, operands) if value is not None else None
+
+
+def _find_parts(args):
+    """One bounded parser for search roots, link policy and the expression."""
+    index, follows_links = 0, False
+    while index < len(args):
+        arg = args[index]
+        if arg in {'-H', '-L', '-P'}:
+            follows_links = arg == '-L'
+            index += 1
+        elif re.fullmatch(r'-O[0-3]', arg):
+            index += 1
+        elif arg == '-D' and index + 1 < len(args):
+            index += 2
+        elif arg == '--':
+            index += 1
+            break
+        else:
+            break
+    roots = []
+    while index < len(args) and not args[index].startswith('-') and args[index] not in {'!', '('}:
+        roots.append(args[index])
+        index += 1
+    if not roots and index < len(args) and args[index].startswith('-O'):
+        return None
+    return roots or ['.'], args[index:], follows_links
+
+
+def _find_write_rows(expression):
+    """Identify action boundaries without interpreting predicate data as flags."""
+    values = {'-name', '-iname', '-path', '-ipath', '-wholename', '-iwholename',
+              '-lname', '-ilname', '-regex', '-iregex', '-type', '-xtype', '-user',
+              '-uid', '-group', '-gid', '-perm', '-size', '-links', '-inum',
+              '-samefile', '-newer', '-anewer', '-cnewer', '-atime', '-mtime',
+              '-ctime', '-amin', '-mmin', '-cmin', '-maxdepth', '-mindepth',
+              '-regextype', '-fstype', '-printf', '-used', '-context'}
+    rows, index, follows_links = [], 0, False
+    while index < len(expression):
+        arg = expression[index]
+        if arg == '-follow':
+            follows_links = True
+            index += 1
+        elif arg in {'-exec', '-execdir', '-ok', '-okdir'}:
+            end = index + 1
+            while end < len(expression) and expression[end] not in {';', '+'}:
+                end += 1
+            rows.append((index, end))
+            index = end + 1
+        elif arg in {'-fprint', '-fprint0', '-fls', '-fprintf'}:
+            rows.append((index, min(len(expression), index + (3 if arg == '-fprintf' else 2))))
+            index += 3 if arg == '-fprintf' else 2
+        elif arg == '-delete':
+            rows.append((index, index + 1))
+            index += 1
+        else:
+            index += 2 if arg in values or re.fullmatch(r'-newer[a-zA-Z]{2}', arg) else 1
+    return rows, follows_links
+
+
+def command_segment_write_scope_refusal(source):
+    """Refuse identified writes whose runtime traversal escapes literal scope.
+
+    This is not a ban on opaque runtimes: it fences explicit find mutations
+    without scanning a live tree or guessing each execdir working directory.
+    """
+    words = list(command_segment_words(source))
+    while words and _ENV_ASSIGNMENT_GUARD_RE.match(words[0]):
+        words.pop(0)
+    words = _unwrap_command_parts(words)
+    if not words or os.path.basename(words[0]) != 'find':
+        return None
+    parsed = _find_parts(words[1:])
+    if parsed is None:
+        return None  # Existing uncertain-option admission remains conservative.
+    _roots, expression, follows_links = parsed
+    rows, expression_follows_links = _find_write_rows(expression)
+    if not rows:
+        return None
+    if follows_links or expression_follows_links:
+        return 'workspace-write-scope-unsupported: find -L/-follow mutations may cross checkout symlinks; use concrete targets or non-following traversal'
+    for index, end in rows:
+        if expression[index] not in {'-execdir', '-okdir'}:
+            continue
+        nested = command_segment_targets(shlex.join(expression[index + 1:end]))
+        if any(not os.path.isabs(target) and '..' in target.split('/') for target in nested.targets):
+            return 'workspace-write-scope-unsupported: relative parent traversal in find -execdir/-okdir changes the write checkout; use an absolute destination'
+    return None
+
+
+def command_segment_output_targets(source):
+    """Shell output effects independent of the invoked utility's own write set."""
+    try:
+        tokens = _shell_words(source, strict=True, redirects=True)
+    except ValueError:
+        return _CommandTargets((), (), False)
+    words, redirects = [], []
+    complete, index = True, 0
+    while index < len(tokens):
+        word = tokens[index]
+        token = word.text
+        raw = source[word.start:word.end]
+        if raw == token and token in {'>', '>>', '<', '<<', '<<<', '<>'}:
+            if (index and words and words[-1].isdigit()
+                    and tokens[index - 1].end == word.start
+                    and source[tokens[index - 1].start:word.start].isdigit()):
+                words.pop()  # Only an adjacent, unquoted number is an IO descriptor.
+            if index + 1 >= len(tokens):
+                return _CommandTargets(tuple(words), tuple(redirects), False)
+            value_word = tokens[index + 1]
+            value = value_word.text
+            value_source = source[value_word.start:value_word.end]
+            if token in {'>', '>>', '<>'}:
+                if value_source.startswith('&'):
+                    # Known stdout/stderr duplication creates no named file.
+                    # Other inherited descriptors or legacy >&file are opaque.
+                    if token != '>' or value_source not in {'&1', '&2', '&-'}:
+                        complete = False
+                elif value != '/dev/null':
+                    redirects.append(value)
+                    if shell_source_has_expansion(value_source):
+                        complete = False
+            index += 2
+        elif raw == token and token.startswith(('>', '<')):
+            return _CommandTargets(tuple(words), tuple(redirects), False)
+        else:
+            words.append(token)
+            index += 1
+    return _CommandTargets(tuple(words), tuple(redirects), complete)
+
+
+def command_segment_targets(source):
+    """Bounded literal utility writes; incomplete parses retain candidate roots.
+
+    `complete` is snapshot precision, not authorization or lease exemption.
+    Unknown mutating options retain every literal candidate rather than guessing
+    an option's arity. Opaque runtimes remain the caller's scheduling policy.
+    """
+    outputs = command_segment_output_targets(source)
+    words, redirects = list(outputs.words), list(outputs.targets)
+    while words and _ENV_ASSIGNMENT_GUARD_RE.match(words[0]):
+        words.pop(0)
+    words = _unwrap_command_parts(words)
+    if not words:
+        return _CommandTargets((), tuple(redirects), True)
+    base, args = os.path.basename(words[0]), words[1:]
+    targets = list(redirects)
+    complete = outputs.complete and not shell_source_has_expansion(source)
+
+    def uncertain():
+        # Long option values may themselves select an external destination.
+        candidates = [arg.split('=', 1)[1] if arg.startswith('--') and '=' in arg
+                      else arg for arg in args if not arg.startswith('-')
+                      or (arg.startswith('--') and '=' in arg)]
+        return _CommandTargets(tuple(words), tuple(dict.fromkeys(targets + candidates)), False)
+
+    if base in {'touch', 'tee', 'mkdir'}:
+        flags = ({'-a', '-c', '-m', '--no-create'} if base == 'touch' else
+                 {'-a', '-i', '--append', '--ignore-interrupts'} if base == 'tee' else
+                 {'-p', '--parents', '-v', '--verbose'})
+        operands = _static_writer_operands(args, flags)
+        if operands is None:
+            return uncertain()
+        targets.extend(operands)
+        return _CommandTargets(tuple(words), tuple(targets), complete)
+    if base == 'truncate':
+        option = _single_writer_option(args, '-s', '--size', {'-c', '--no-create'})
+        if option is None:
+            return uncertain()
+        targets.extend(option[1])
+        return _CommandTargets(tuple(words), tuple(targets), complete)
+    if base == 'sort':
+        short_values = set('okStT')
+        short_flags = set('bdfgiMhnRrsuVzcmC')
+        long_values = {'--output', '--key', '--field-separator', '--buffer-size',
+                       '--temporary-directory', '--batch-size', '--parallel',
+                       '--compress-program', '--random-source', '--files0-from', '--sort'}
+        long_flags = {'--reverse', '--numeric-sort', '--general-numeric-sort',
+                      '--human-numeric-sort', '--month-sort', '--version-sort',
+                      '--random-sort', '--ignore-leading-blanks', '--dictionary-order',
+                      '--ignore-case', '--ignore-nonprinting', '--stable', '--unique',
+                      '--zero-terminated', '--merge', '--check', '--help', '--version', '--debug'}
+        index = 0
+        while index < len(args):
+            arg = args[index]
+            index += 1
+            if arg == '--':
+                break
+            if arg.startswith('--'):
+                option, separator, value = arg.partition('=')
+                if option in long_values:
+                    if not separator:
+                        if index >= len(args):
+                            return uncertain()
+                        value = args[index]
+                        index += 1
+                    if option in {'--output', '--temporary-directory'}:
+                        targets.append(value)
+                    # Helper programs cannot borrow a harmless read exemption.
+                    if option in {'--compress-program', '--random-source', '--files0-from'}:
+                        return uncertain()
+                elif option not in long_flags or separator:
+                    return uncertain()
+            elif arg.startswith('-') and arg != '-':
+                position = 1
+                while position < len(arg):
+                    flag = arg[position]
+                    position += 1
+                    if flag in short_values:
+                        value = arg[position:]
+                        if not value:
+                            if index >= len(args):
+                                return uncertain()
+                            value = args[index]
+                            index += 1
+                        if flag in {'o', 'T'}:
+                            targets.append(value)
+                        break
+                    if flag not in short_flags:
+                        return uncertain()
+        return _CommandTargets(tuple(words), tuple(targets), complete)
+    if base in {'cp', 'mv'}:
+        operands, destination = [], None
+        index, options = 0, True
+        flags = (set('abdfHilLnprRsTuvxP') if base == 'cp' else set('bfinTuv'))
+        long_flags = {'--force', '--interactive', '--no-clobber', '--verbose',
+                      '--no-target-directory', '--backup', '--update', '--help', '--version'}
+        if base == 'cp':
+            long_flags |= {'--archive', '--recursive', '--dereference', '--no-dereference',
+                           '--preserve', '--parents', '--link', '--symbolic-link',
+                           '--one-file-system', '--remove-destination', '--copy-contents'}
+        while index < len(args):
+            arg = args[index]
+            index += 1
+            if options and arg == '--':
+                options = False
+            elif options and arg.startswith('--'):
+                option, separator, value = arg.partition('=')
+                if option in {'--target-directory', '--suffix'}:
+                    if not separator:
+                        if index >= len(args):
+                            return uncertain()
+                        value = args[index]
+                        index += 1
+                    if option == '--target-directory':
+                        destination = value
+                elif option not in long_flags and option not in {'--reflink', '--sparse', '--no-preserve'}:
+                    return uncertain()
+            elif options and arg.startswith('-') and arg != '-':
+                position = 1
+                while position < len(arg):
+                    flag = arg[position]
+                    position += 1
+                    if flag in {'t', 'S'}:
+                        value = arg[position:]
+                        if not value:
+                            if index >= len(args):
+                                return uncertain()
+                            value = args[index]
+                            index += 1
+                        if flag == 't':
+                            destination = value
+                        break
+                    if flag not in flags:
+                        return uncertain()
+            else:
+                operands.append(arg)
+        if destination is None:
+            if len(operands) < 2:
+                return uncertain()
+            destination = operands.pop()
+        targets.append(destination)
+        if base == 'mv':
+            targets.extend(operands)
+        return _CommandTargets(tuple(words), tuple(targets), complete)
+    if base == 'sed':
+        inplace, program_option, operands = False, False, []
+        index, options = 0, True
+        while index < len(args):
+            arg = args[index]
+            index += 1
+            if options and arg == '--':
+                options = False
+            elif options and arg in {'-e', '-f', '--expression', '--file'}:
+                if index >= len(args):
+                    return uncertain()
+                index += 1
+                program_option = True
+            elif options and (arg.startswith(('--expression=', '--file='))
+                              or (arg.startswith(('-e', '-f')) and len(arg) > 2)):
+                program_option = True
+            elif options and (arg.startswith('--in-place')
+                              or (arg.startswith('-') and not arg.startswith('--') and 'i' in arg[1:])):
+                inplace = True
+            elif options and arg.startswith('-'):
+                if arg not in {'-n', '-r', '-E', '-s', '-u', '-z', '--quiet', '--silent',
+                               '--regexp-extended', '--separate', '--unbuffered', '--null-data'}:
+                    return uncertain()
+            else:
+                operands.append(arg)
+        if inplace:
+            targets.extend(operands if program_option else operands[1:])
+        elif not is_literal_sed_filter(args):
+            return _CommandTargets(tuple(words), tuple(targets), False)
+        return _CommandTargets(tuple(words), tuple(targets), complete)
+    if base.endswith('awk'):
+        files = _awk_inplace_operands(args)
+        if files is not None:
+            targets.extend(files)
+            return _CommandTargets(tuple(words), tuple(targets), complete)
+        return _CommandTargets(tuple(words), tuple(targets), complete)
+    if base == 'env' and args:
+        return _CommandTargets(tuple(words), tuple(targets), False)
+    if base == 'find':
+        parsed = _find_parts(args)
+        if parsed is None:
+            return uncertain()  # Unknown optimizer grammar cannot erase peer operands.
+        roots, expression, _follows_links = parsed
+        rows, _expression_follows_links = _find_write_rows(expression)
+        if rows:
+            targets.extend(roots)
+            for index, end in rows:
+                arg = expression[index]
+                if arg in {'-fprint', '-fprint0', '-fprintf', '-fls'} and index + 1 < len(expression):
+                    targets.append(expression[index + 1])
+                if arg in {'-exec', '-execdir', '-ok', '-okdir'}:
+                    nested = command_segment_targets(shlex.join(expression[index + 1:end]))
+                    targets.extend(path for path in nested.targets if '{}' not in path)
+                    if not nested.complete:
+                        targets.extend(path for path in expression[index + 2:end]
+                                       if not path.startswith('-') and '{}' not in path)
+            return _CommandTargets(tuple(words), tuple(dict.fromkeys(targets)), complete)
+        return _CommandTargets(tuple(words), tuple(targets), complete)
+    mode = _WRITE_TARGET_COMMANDS.get(base)
+    if mode == 'all_args':
+        targets.extend(arg for arg in args if not arg.startswith('-'))
+    elif mode == 'last_arg':
+        operands = [arg for arg in args if not arg.startswith('-')]
+        targets.extend(operands[-1:])
+    elif mode == 'opaque' or base not in _READONLY_COMMANDS:
+        return _CommandTargets(tuple(words), tuple(targets), False)
+    return _CommandTargets(tuple(words), tuple(targets), complete)
+
+
+def command_segment_literal_targets(source):
+    """Derive literal targets or bounded expansion parents from source words.
+
+    A dynamic source operand must not erase a literal destination in another
+    checkout. Single-quoted/escaped dollar signs are filenames, not expansion.
+    Fully dynamic names remain covered by the caller's conservative cwd claim;
+    this cooperative parser is not a sandbox for arbitrary runtime expansion.
+    """
+    parsed = command_segment_targets(source)
+    try:
+        words = _shell_words(source, strict=True, redirects=True)
+    except ValueError:
+        return ()
+    result = set()
+    for target in parsed.targets:
+        origins = [word for word in words if word.text == target
+                   or (word.text.startswith('-') and word.text.endswith(target))]
+        if not origins:
+            if target == '.':
+                result.add(target)  # find's implicit search root
+            continue
+        if any(not shell_source_has_expansion(source[word.start:word.end]) for word in origins):
+            result.add(target)
+            continue
+        # Use source provenance, not the decoded target's first dollar: a
+        # quoted checkout name may itself contain literal expansion markers.
+        for word in origins:
+            prefix, expanded = _shell_expansion_prefix(source[word.start:word.end])
+            if expanded:
+                target_prefix = prefix[len(word.text) - len(target):]
+                parent = os.path.dirname(target_prefix)
+                if parent:
+                    result.add(parent)
+    return tuple(sorted(result))
+
+
 def _extract_write_targets(command, cwd=''):
     """Parse a shell command and return the set of file paths it WRITES to.
 
@@ -1084,139 +1614,23 @@ def _extract_write_targets(command, cwd=''):
           in the project could be modified.
 
     This is used to filter snapshot diffs: only files in the returned set
-    (or all files if None) are reported as changed.
+    (or all files if None) are reported as changed. None does not mean that
+    known writes are absent: admission must use command_segment_literal_targets
+    to retain explicit destinations even when other effects are opaque.
     """
     if not command or not command.strip():
         return set()
 
-    cmd = command.strip()
     targets = set()
-    has_opaque = False
-
-    # ── Redirect targets ──
-    # Extract the file path from redirections like: > file.txt, >> log.txt, 2> err.log
-    # First remove /dev/null redirects, then find remaining redirect targets.
-    cmd_no_devnull = _REDIRECT_TO_DEV_NULL.sub('', cmd)
-    for m in _re.finditer(r'[12]?>>?\s*(\S+)', cmd_no_devnull):
-        target = m.group(1)
-        if target and not target.startswith('&'):
-            targets.add(target)
-
-    # ── sed -i targets ──
-    if _SED_INPLACE.search(cmd):
-        # sed -i[suffix] 's/.../.../g' file1 file2 ...
-        # File arguments come after the sed expression (last args that aren't flags)
-        for seg in _split_pipeline(cmd):
-            seg = seg.strip()
-            if not seg:
-                continue
-            parts = seg.split()
-            base_cmd = parts[0].split('/')[-1] if parts else ''
-            if base_cmd != 'sed':
-                continue
-            # Skip flags and the expression; remaining non-flag args are files
-            skip_next = False
-            past_expr = False
-            for arg in parts[1:]:
-                if skip_next:
-                    skip_next = False
-                    continue
-                if arg.startswith('-') and not past_expr:
-                    # -i, -e, -f may take a following argument
-                    if arg in ('-e', '-f'):
-                        skip_next = True
-                    continue
-                if not past_expr:
-                    past_expr = True  # first non-flag is the expression
-                    continue
-                # Everything after the expression is a file target
-                targets.add(arg)
-
-    # ── awk -i inplace targets ──
-    # gawk/goawk in-place editing:  awk -i inplace 'prog' file1 file2 ...
-    # Mirrors the sed -i block above, with operand parsing factored into
-    # _awk_inplace_operands.
-    if _AWK_INPLACE.search(cmd):
-        for seg in _split_pipeline(cmd):
-            seg = seg.strip()
-            if not seg:
-                continue
-            parts = seg.split()
-            base_cmd = parts[0].split('/')[-1] if parts else ''
-            if not base_cmd.endswith('awk'):
-                continue
-            files = _awk_inplace_operands(parts[1:])
-            if files:
-                targets.update(files)
-
-    # ── Per-segment analysis ──
-    segments = _split_pipeline(cmd)
-    for seg in segments:
-        seg = seg.strip()
-        if not seg:
-            continue
-        # Strip env var assignments
-        while _re.match(r'^\w+=\S*\s', seg):
-            seg = _re.sub(r'^\w+=\S*\s+', '', seg, count=1)
-        # Strip any redirect suffixes from this segment for command parsing
-        seg_clean = _re.sub(r'[12]?>>?\s*\S+', '', seg).strip()
-        parts = seg_clean.split()
-        if not parts:
-            continue
-        base_cmd = parts[0].split('/')[-1]
-
-        if base_cmd == 'env' and len(parts) > 1:
-            has_opaque = True
-            continue
-
-        # Read-only commands → no targets from this segment
-        if base_cmd in _READONLY_COMMANDS:
-            continue
-        if base_cmd == 'git':
-            words = [word.text for word in _shell_words(seg)]
-            if (_classify_git_invocation(words[1:]) == 'readonly'
-                    and not _re.search(r'[$`]', seg)):
-                continue
-            # git checkout/reset/etc affect the whole worktree → opaque
-            has_opaque = True
-            continue
-
-        # Known write commands → extract specific targets
-        write_mode = _WRITE_TARGET_COMMANDS.get(base_cmd)
-        if write_mode == 'all_args':
-            for arg in parts[1:]:
-                if not arg.startswith('-'):
-                    targets.add(arg)
-            continue
-        elif write_mode == 'last_arg':
-            # Last non-flag argument is the destination
-            non_flag = [a for a in parts[1:] if not a.startswith('-')]
-            if non_flag:
-                targets.add(non_flag[-1])
-                # For mv, source files are also "written" (deleted)
-                if base_cmd == 'mv':
-                    for a in non_flag[:-1]:
-                        targets.add(a)
-            continue
-        elif write_mode == 'sed_special':
-            # sed without -i is a pure filter (read-only);
-            # sed -i targets are already extracted above.
-            if _SED_INPLACE.search(seg):
-                continue  # targets already collected
-            else:
-                continue  # plain sed is read-only
-        elif write_mode == 'opaque':
-            has_opaque = True
-            continue
-
-        # Unknown/opaque command (interpreters, build tools, etc.)
-        if base_cmd not in _READONLY_COMMANDS:
-            has_opaque = True
-
-    # If any segment is opaque, we can't guarantee specific targets
-    if has_opaque:
-        return None
-
+    for segment in _split_pipeline(command):
+        parsed = command_segment_targets(segment)
+        if parsed.words and os.path.basename(parsed.words[0]) == 'git':
+            if (_classify_git_invocation(list(parsed.words[1:])) != 'readonly'
+                    or shell_source_has_expansion(segment)):
+                return None
+        elif not parsed.complete:
+            return None
+        targets.update(parsed.targets)
     return targets
 
 
@@ -1298,7 +1712,7 @@ def _is_destructive_command(command):
     # Shell expansion can execute writes before any nominally readonly verb.
     # Conservatively reject even quoted expansion markers; token-only parsing
     # is not evidence that a command substitution or variable is harmless.
-    if _re.search(r'[$`]', cmd):
+    if shell_source_has_expansion(cmd, pathname=False):
         return True
 
     # Output redirection → always destructive (writes to file).
@@ -1326,7 +1740,10 @@ def _is_destructive_command(command):
         while _re.match(r'^\w+=\S*\s', seg):
             seg = _re.sub(r'^\w+=\S*\s+', '', seg, count=1)
         # Get base command name
-        parts = seg.split()
+        try:
+            parts = command_segment_words(seg)
+        except ValueError:
+            return True
         if not parts:
             continue
         base = parts[0].split('/')[-1]  # handle /usr/bin/rm → rm
@@ -1912,17 +2329,105 @@ _GIT_GUARD_TREE_DESTROYING = frozenset({
 # git global options (BEFORE the sub-command) that consume the NEXT token
 # as their value: git -C <path> -c k=v --git-dir <p> ...
 _GIT_GUARD_GLOBAL_VALUE_OPTS = frozenset({
-    '-C', '-c', '--git-dir', '--work-tree', '--namespace', '--exec-path',
+    '-C', '-c', '--git-dir', '--work-tree', '--namespace', '--config-env',
 })
 
 # Bare global flags that are safe to skip while hunting the sub-command.
 _GIT_GUARD_GLOBAL_BARE_FLAGS = frozenset({
-    '-P', '--paginate', '--no-pager', '--bare', '--no-replace-objects',
+    '-p', '-P', '--paginate', '--no-pager', '--bare', '--no-replace-objects',
     '--literal-pathspecs', '--glob-pathspecs', '--noglob-pathspecs',
     '--icase-pathspecs', '--no-optional-locks', '--version', '--help',
 })
 
 _ENV_ASSIGNMENT_GUARD_RE = _re.compile(r'^[A-Za-z_][A-Za-z0-9_]*=')
+
+
+def git_command_words(words):
+    """Bounded Git wrapper projection; no env option/command interpretation."""
+    words = list(words)
+    while words and _ENV_ASSIGNMENT_GUARD_RE.match(words[0]):
+        words.pop(0)
+    words = _unwrap_command_parts(words)
+    if words and os.path.basename(words[0]) == 'env':
+        words = words[1:]
+        if words[:1] == ['--']:
+            words = words[1:]
+        while words and _ENV_ASSIGNMENT_GUARD_RE.match(words[0]):
+            words.pop(0)
+        if not words or words[0].startswith('-'):
+            return []  # -S/-u/-i and unknown forms never gain Git receipts.
+    return words
+
+
+def git_invocation_parts(args):
+    """Stable public syntax-only pair; authority belongs to details parsing."""
+    details = _git_invocation_details(args)
+    return None if details is None else (details[0], details[1])
+
+
+def _git_invocation_details(args):
+    """Parse argv into (subcommand, rest, unproved_config, autostash) or None.
+
+    One pure owner for validated global-option consumption. Unknown options,
+    missing values and invalid config assignments return None; attached -C/-c
+    and known long equals forms are supported. Values are argv data, including
+    option-looking paths. The returned rest is a fresh list; input is unchanged.
+    An empty subcommand denotes bare Git/global help or an exec-path query.
+    This is syntax evidence, not shell-expansion or configured-helper authority.
+    """
+    unproved = False
+    autostash = False
+    index = 0
+    while index < len(args):
+        token = args[index]
+        index += 1
+        if not isinstance(token, str) or '\x00' in token:
+            return None
+        if token in _GIT_GUARD_GLOBAL_BARE_FLAGS:
+            unproved |= token in {'--paginate', '-p'}
+            continue
+        if token == '--exec-path':
+            return '', [], unproved, autostash  # Query exits without invoking a verb.
+        option, value = token, None
+        if token in _GIT_GUARD_GLOBAL_VALUE_OPTS:
+            if index >= len(args):
+                return None
+            value = args[index]
+            index += 1
+        elif token.startswith(('-C', '-c')) and len(token) > 2:
+            option, value = token[:2], token[2:]
+        elif token.startswith('--') and '=' in token:
+            option, value = token.split('=', 1)
+            if option not in _GIT_GUARD_GLOBAL_VALUE_OPTS | {'--exec-path'}:
+                return None
+        elif token.startswith('-') or not token:
+            return None
+        else:
+            return token, list(args[index:]), unproved, autostash
+        if not isinstance(value, str) or '\x00' in value:
+            return None
+        if option in ('-c', '--config-env'):
+            key, separator, setting = value.partition('=')
+            if not re.fullmatch(
+                    r'[A-Za-z][A-Za-z0-9-]*(?:\.[^=\s]+)*\.[A-Za-z][A-Za-z0-9-]*', key):
+                return None
+            if option == '--config-env' and (not separator or not setting):
+                return None
+
+            # Only bounded presentation settings prove absence of helpers.
+            harmless = (option == '-c' and separator and (
+                (key.lower() in {'color.ui', 'color.diff', 'color.status', 'color.branch'}
+                 and setting.lower() in {'false', 'true', 'never', 'auto', 'always'})
+                or value in {'core.fsmonitor=false', 'log.showSignature=false',
+                             'format.pretty=medium'}))
+            unproved |= not harmless
+            autostash |= (option == '-c' and key.lower() == 'merge.autostash'
+                          and setting.lower() in {'true', 'yes', 'on', '1', ''})
+        elif option != '-C' and not value:
+            return None
+        if option == '--exec-path':
+            unproved = True
+    return '', [], unproved, autostash
 
 
 def _classify_checkout_like(sub, args):
@@ -2051,33 +2556,170 @@ def _git_worktree_add_destination(args):
     return rest[0]
 
 
+GitIntegrationEvidence = namedtuple(
+    'GitIntegrationEvidence', 'risky_options unknown_options external_options')
+
+
+def git_integration_option_evidence(subcommand, args):
+    """Pure per-verb option evidence from the SAME parser used for risk.
+
+    Tuple fields contain option spellings, never consumed message/key values.
+    Recovery/autostash/strategy is risky; unknown or invalid options require
+    attended fallback; signing invokes external machinery and is not discard.
+    ``--`` ends options. A value looking like --abort is still only data.
+    """
+    if subcommand not in {'merge', 'cherry-pick', 'revert'}:
+        return GitIntegrationEvidence((), ('unsupported integration verb',), ())
+    flags = {'--no-commit', '--commit', '-n', '--no-edit', '--edit', '-e',
+             '--signoff', '--no-signoff', '--continue', '--no-gpg-sign',
+             '--rerere-autoupdate', '--no-rerere-autoupdate'}
+    values = {'--cleanup': 'cleanup', '--strategy': 'strategy',
+              '--strategy-option': 'strategy', '-X': 'strategy'}
+    risky_flags = {'--abort', '--quit', '--skip', '--autostash'}
+    if subcommand == 'merge':
+        flags |= {'--ff', '--no-ff', '--ff-only', '--squash', '--no-squash',
+                  '--quiet', '-q', '--verbose', '-v', '--stat', '--no-stat',
+                  '--summary', '--no-summary', '--compact-summary',
+                  '--no-compact-summary', '--no-autostash', '--log', '--no-log',
+                  '--progress', '--no-progress', '--allow-unrelated-histories',
+                  '--overwrite-ignore', '--no-overwrite-ignore',
+                  '--verify', '--no-verify'}
+        values.update({'-m': 'message', '--message': 'message',
+                       '-F': 'file', '--file': 'file', '--into-name': 'name',
+                       '-s': 'strategy'})
+    else:
+        flags |= {'-s'}
+        values.update({'-m': 'mainline', '--mainline': 'mainline'})
+        if subcommand == 'cherry-pick':
+            flags |= {'-x', '--ff', '--no-ff', '--allow-empty', '--no-allow-empty',
+                      '--allow-empty-message', '--no-allow-empty-message',
+                      '--keep-redundant-commits', '--no-keep-redundant-commits'}
+            values['--empty'] = 'empty'
+        else:
+            flags |= {'--reference', '--no-reference'}
+    risky, unknown, external = [], [], []
+    if not args:
+        unknown.append('missing integration arguments')
+    index = 0
+    while index < len(args):
+        token = args[index]
+        index += 1
+        if token == '--':
+            break
+        if token in flags or not token.startswith('-'):
+            continue
+        if token in risky_flags:
+            risky.append(token)
+            continue
+        if (token in {'-S', '--gpg-sign', '--verify-signatures', '--no-verify-signatures'}
+                or token.startswith(('-S', '--gpg-sign='))):
+            external.append(token.split('=', 1)[0] if token.startswith('--') else '-S')
+            continue
+        option, value = token, None
+        if token in values:
+            if index < len(args):
+                value = args[index]
+                index += 1
+        elif token.startswith('--') and '=' in token:
+            option, value = token.split('=', 1)
+            if option == '--log' and subcommand == 'merge':
+                if not value.isdigit():
+                    unknown.append(option)
+                continue
+        elif token[:2] in values and len(token) > 2:
+            option, value = token[:2], token[2:]
+        kind = values.get(option)
+        valid = kind is not None and value is not None
+        if kind == 'mainline':
+            valid = valid and re.fullmatch(r'[1-9][0-9]*', value) is not None
+        elif kind == 'cleanup':
+            valid = valid and value in {'strip', 'whitespace', 'verbatim', 'scissors', 'default'}
+        elif kind == 'empty':
+            valid = valid and value in {'drop', 'keep', 'stop'}
+        elif kind in {'strategy', 'file', 'name'}:
+            valid = valid and bool(value) and not value.startswith('-')
+        if not valid:
+            unknown.append(option)
+        elif kind == 'strategy':
+            risky.append(option)
+    return GitIntegrationEvidence(tuple(risky), tuple(unknown), tuple(external))
+
+
+def _classify_git_integration(subcommand, args, *, require_known_options=False):
+    evidence = git_integration_option_evidence(subcommand, args)
+    unproved = evidence.unknown_options or evidence.external_options
+    if require_known_options and unproved:
+        return None
+    if evidence.risky_options:
+        return 'tree_destroying'
+    return None if unproved else 'safe_write'
+
+
+def _classify_git_clean(args):
+    """Only proven non-interactive dry-run syntax earns read authority."""
+    preview = False
+    unknown = False
+    index = 0
+    while index < len(args):
+        token = args[index]
+        index += 1
+        if token == '--':
+            break  # All remaining tokens are pathspec data.
+        if token in {'--dry-run', '--no-dry-run'}:
+            preview = token == '--dry-run'
+        elif token in {'--force', '--no-force', '--quiet', '--no-quiet'}:
+            continue
+        elif token in {'--interactive', '--no-interactive'}:
+            unknown = True
+        elif token in {'-e', '--exclude'}:
+            if index >= len(args):
+                unknown = True
+            else:
+                index += 1  # Even --dry-run is a pattern, not a preview flag.
+        elif token.startswith('--exclude='):
+            continue
+        elif token.startswith('--'):
+            unknown = True
+        elif token.startswith('-') and token != '-':
+            for offset, flag in enumerate(token[1:], 1):
+                if flag == 'e':
+                    if offset == len(token) - 1:
+                        if index >= len(args):
+                            unknown = True
+                        else:
+                            index += 1
+                    break  # Rest of bundle is the exclude value.
+                if flag == 'n':
+                    preview = True
+                elif flag not in 'dfqxX':
+                    unknown = True
+    if unknown:
+        return None
+    return 'readonly' if preview else 'tree_destroying'
+
+
 def _classify_git_invocation(args, *, require_known_options=False):
+    details = _git_invocation_details(args)
+    if details is None:
+        return None
+    sub, rest, unproved, autostash = details
+    native = _classify_git_native_invocation(
+        sub, rest, require_known_options=require_known_options)
+    if autostash and sub == 'merge' and not require_known_options:
+        return 'tree_destroying'
+    if unproved:
+        return 'tree_destroying' if native == 'tree_destroying' and not require_known_options else None
+    return native
+
+
+def _classify_git_native_invocation(sub, rest, *, require_known_options=False):
     """Classify one ``git ...`` argv (words AFTER the ``git`` word).
 
     Returns 'readonly' | 'safe_write' | 'tree_destroying' | None (unknown
     sub-command or global-flag shape → caller falls back to the human gate).
     """
-    i = 0
-    n = len(args)
-    # Skip global options to reach the sub-command word.
-    while i < n:
-        tok = args[i]
-        if tok in _GIT_GUARD_GLOBAL_VALUE_OPTS:
-            i += 2
-            continue
-        if tok in _GIT_GUARD_GLOBAL_BARE_FLAGS:
-            i += 1
-            continue
-        if tok.startswith('--') and '=' in tok:
-            i += 1
-            continue
-        if tok.startswith('-'):
-            return None  # unknown global flag → conservative
-        break
-    if i >= n:
-        return 'readonly'  # bare `git` prints help
-    sub = args[i]
-    rest = args[i + 1:]
+    if not sub:
+        return 'readonly'  # Bare Git/global help prints without mutation.
 
     if sub == 'worktree':
         if rest in (['list'], ['list', '--porcelain'], ['list', '--porcelain', '-z']):
@@ -2086,25 +2728,88 @@ def _classify_git_invocation(args, *, require_known_options=False):
             return 'safe_write'
         return None
     if sub in {'merge', 'cherry-pick', 'revert'}:
-        write_flags = {'--no-commit', '-n', '--no-edit', '--edit', '-e',
-                       '--ff', '--no-ff', '--ff-only', '--squash',
-                       '--signoff', '-s', '-x', '--allow-empty', '--allow-empty-message',
-                       '--continue', '--no-gpg-sign', '--quiet', '-q', '--verbose', '-v'}
-        if rest and all(not arg.startswith('-') or arg in write_flags for arg in rest):
-            return 'safe_write'
-        return 'tree_destroying'  # abort/quit/autostash/strategy/unknown options
+        return _classify_git_integration(
+            sub, rest, require_known_options=require_known_options)
+    if sub == 'clean':
+        return _classify_git_clean(rest)
     if sub == 'apply':
         return _classify_git_apply(rest, require_known_options=require_known_options)
-    if any(tok.startswith(('--output', '--ext-diff', '--textconv')) for tok in rest):
-        return None
     if sub == 'stash':
+        if any(tok.startswith(('--output', '--ext-diff', '--textconv')) for tok in rest):
+            return None
         # list/show are read-only; every other form (incl. bare `git stash`
         # == push) mutates the working tree or the shared stash stack.
-        for tok in rest:
-            if tok.startswith('-'):
+        if rest[:1] not in (['list'], ['show']):
+            return 'tree_destroying'
+        flags = {'-p', '--patch', '--stat', '--numstat', '--name-only',
+                 '--name-status', '--oneline', '--no-patch', '-s', '--raw',
+                 '--no-ext-diff', '--no-textconv', '--no-color', '--all',
+                 '--include-untracked', '--only-untracked', '-u'}
+        values = {'--format', '--pretty', '--date', '--max-count', '-n',
+                  '--grep', '--author', '--since', '--until'}
+        index = 1
+        while index < len(rest):
+            token = rest[index]
+            index += 1
+            if token == '--':
+                break
+            if token in values:
+                if index == len(rest):
+                    return None
+                value = rest[index]
+                index += 1
+            elif token.split('=', 1)[0] in values and '=' in token:
+                value = token.split('=', 1)[1]
+            elif (not token.startswith('-') or token in flags
+                  or re.fullmatch(r'-[0-9]+|-n[0-9]+|-U[0-9]+', token)):
                 continue
-            return 'readonly' if tok in ('list', 'show') else 'tree_destroying'
-        return 'tree_destroying'
+            else:
+                return None
+            if token.split('=', 1)[0] in {'--format', '--pretty'} and '%G' in value:
+                return None
+        return 'readonly'
+    if sub in {'branch', 'tag', 'push'}:
+        # Consume maintained value options before risk scans. Values are data.
+        values = ({'--push-option', '-o'} if sub == 'push' else
+                  {'--format', '--sort', '--contains', '--no-contains',
+                   '--merged', '--no-merged', '--points-at'})
+        filtered = []
+        index = 0
+        while index < len(rest):
+            token = rest[index]
+            index += 1
+            if token == '--':
+                filtered.extend(rest[index:])
+                break
+            if token in values:
+                if index == len(rest):
+                    return None
+                index += 1
+                if sub != 'push':
+                    filtered.append(token + '=value')
+            elif any(token.startswith(option + '=') for option in values if option.startswith('--')):
+                if sub != 'push':
+                    filtered.append(token.split('=', 1)[0] + '=value')
+            else:
+                filtered.append(token)
+        rest = filtered
+
+        known_flags = ({'--verbose', '--quiet', '--dry-run', '--set-upstream',
+                        '--all', '--tags', '--atomic', '--follow-tags', '--porcelain',
+                        '--no-verify', '--verify', '--ipv4', '--ipv6', '--force',
+                        '--force-with-lease', '--delete', '--mirror'} if sub == 'push' else
+                       {'-d', '-D', '--delete', '-m', '-M', '--move', '-c', '-C',
+                        '--copy', '-f', '--force', '--edit-description',
+                        '--set-upstream-to', '--unset-upstream', '--list', '-l',
+                        '-a', '--all', '-r', '--remotes', '-v', '-vv', '--verbose',
+                        '--show-current'})
+        if require_known_options and any(
+                token.startswith('-') and token not in known_flags
+                and token.split('=', 1)[0] not in values
+                and not (sub == 'push' and re.fullmatch(r'-[vqnu46fd]+|-o.+', token))
+                and not (sub != 'push' and re.fullmatch(r'-[avrdDfFmMcC]+', token))
+                for token in rest):
+            return None
     if sub == 'branch':
         # Plain -d/--delete is self-guarding: Git refuses to delete a branch
         # that is unmerged (against HEAD or its upstream) or checked out in
@@ -2148,7 +2853,7 @@ def _classify_git_invocation(args, *, require_known_options=False):
                           if not flag.endswith('=') else tok.startswith(flag)
                           for flag in allowed) for tok in rest):
                 return 'readonly'
-        return 'safe_write' if all(not tok.startswith('-') for tok in rest) else 'tree_destroying'
+        return 'safe_write' if all(not tok.startswith('-') for tok in rest) else None
     if sub == 'config':
         reads = {'--get', '--get-all', '--get-regexp', '--get-urlmatch',
                  '--list', '-l', '--show-origin', '--show-scope',
@@ -2180,6 +2885,14 @@ def _classify_git_invocation(args, *, require_known_options=False):
             tok.startswith(('--force', '--delete', '--mirror', '+', ':'))
             or _re.match(r'^-[vqnu46]*[fd]', tok) for tok in rest):
         return 'tree_destroying'
+
+    if sub == 'push':
+        flags = {'--verbose', '--quiet', '--dry-run', '--set-upstream',
+                 '--all', '--tags', '--atomic', '--follow-tags', '--porcelain',
+                 '--no-verify', '--verify', '--ipv4', '--ipv6'}
+        if any(token.startswith('-') and token not in flags
+               and not re.fullmatch(r'-[vqnu46]+|-o.+', token) for token in rest):
+            return None
     if sub in _GIT_READONLY_SUBCOMMANDS:
         if any(tok.startswith(('--output', '--ext-diff', '--textconv')) for tok in rest):
             return None
@@ -2228,11 +2941,15 @@ def _git_guard_classify(command, *, require_known_segments=False):
         i = 0
         while i < len(words) and _ENV_ASSIGNMENT_GUARD_RE.match(words[i]):
             i += 1
-        words = _unwrap_command_parts(words[i:])
+        words = git_command_words(words[i:])
+
+        if re.search(r'\bGIT_CONFIG_(?:COUNT|KEY_[0-9]+|VALUE_[0-9]+|PARAMETERS)=', seg):
+            saw_unknown = True
         if not words:
+            saw_unknown = True
             continue
         # Applies to filter/helper segments too, not only the Git argv.
-        if _re.search(r'[$`]', seg):
+        if shell_source_has_expansion(seg, pathname=False):
             saw_unknown = True
         base = words[0].split('/')[-1]
         if base != 'git':

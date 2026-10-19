@@ -6,7 +6,7 @@ import orjson
 import pytest
 
 from lib.storage.errors import StorageError
-from lib.storage_sidecar.task_event_codec import (
+from lib.storage_authority_sql.task_event_codec import (
     COMPRESSED_TASK_EVENT_MAGIC,
     TASK_EVENT_COMPRESSION_MIN_BYTES,
     decode_task_event_payload,
@@ -43,7 +43,7 @@ def test_large_task_event_compresses_and_round_trips_losslessly():
 
 
 def test_compressed_size_preflight_never_decompresses(monkeypatch):
-    import lib.storage_sidecar.task_event_codec as codec
+    import lib.storage_authority_sql.task_event_codec as codec
 
     raw = orjson.dumps({"content": "compressible " * 10_000})
     encoded = encode_task_event_payload(raw)
@@ -58,7 +58,7 @@ def test_compressed_size_preflight_never_decompresses(monkeypatch):
 
 
 def test_unhelpful_compression_keeps_legacy_bytes(monkeypatch):
-    import lib.storage_sidecar.task_event_codec as codec
+    import lib.storage_authority_sql.task_event_codec as codec
 
     raw = b'x' * TASK_EVENT_COMPRESSION_MIN_BYTES
     monkeypatch.setattr(
@@ -68,7 +68,7 @@ def test_unhelpful_compression_keeps_legacy_bytes(monkeypatch):
 
 
 def test_decoded_event_budget_rejects_oversize_input(monkeypatch):
-    import lib.storage_sidecar.task_event_codec as codec
+    import lib.storage_authority_sql.task_event_codec as codec
 
     monkeypatch.setattr(codec, 'MAX_DECODED_TASK_EVENT_BYTES', 10)
 

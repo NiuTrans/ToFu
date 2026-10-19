@@ -4,12 +4,12 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 import pytest
 from tofu_search.config import get_config,bind_call_config
-from lib.search_budget import content_filter_budget_scope
+from lib.search.search_budget import content_filter_budget_scope
 from lib.agent_core.execution_budget import model_budget_admission,ModelBudgetAdmissionDenied
 pytestmark=pytest.mark.unit
 
 def test_swallowed_denial_reappears_and_restores_config(monkeypatch):
-    from lib import search_bridge
+    from lib.search import search_bridge
     owner={'id':'search','config':{'executionLimits':{'max_tokens':0,'max_tool_calls':0,'deadline':None}}}
     port=model_budget_admission(owner)
     def adapter(messages,*,owner_user_id,model_budget_admit,**kwargs):
@@ -20,12 +20,12 @@ def test_swallowed_denial_reappears_and_restores_config(monkeypatch):
     with bind_call_config(config):
         with pytest.raises(ModelBudgetAdmissionDenied):
             with content_filter_budget_scope(owner_user_id=2,model_budget_admit=port):
-                try:get_config().llm_function([])
-                except Exception:pass  # Matches package fail-open behavior.
+                with pytest.raises(ModelBudgetAdmissionDenied):
+                    get_config().llm_function([])
         assert get_config() is config
 
 def test_concurrent_contexts_and_worker_inheritance(monkeypatch):
-    from lib import search_bridge
+    from lib.search import search_bridge
     def adapter(messages,*,owner_user_id,model_budget_admit,**kwargs):
         return (owner_user_id,model_budget_admit)
     monkeypatch.setattr(search_bridge,'_chatui_llm',adapter)
@@ -40,7 +40,7 @@ def test_concurrent_contexts_and_worker_inheritance(monkeypatch):
     assert results==[(2,ports[0]),(3,ports[1])]
 
 def test_normal_filter_failure_does_not_become_budget_refusal(monkeypatch):
-    from lib import search_bridge
+    from lib.search import search_bridge
     def adapter(*a,**k):raise RuntimeError('synthetic failure')
     monkeypatch.setattr(search_bridge,'_chatui_llm',adapter)
     config=replace(get_config(),llm_function=adapter)
@@ -51,7 +51,7 @@ def test_normal_filter_failure_does_not_become_budget_refusal(monkeypatch):
         assert get_config() is config
 
 def test_real_filter_and_host_adapter_cannot_hide_refusal(monkeypatch):
-    from lib import search_bridge
+    from lib.search import search_bridge
     from lib.llm_dispatch import api
     from tofu_search.fetch import content_filter
     owner={'id':'real-filter','config':{'executionLimits':{
@@ -75,8 +75,8 @@ def test_real_filter_and_host_adapter_cannot_hide_refusal(monkeypatch):
     assert seen==[(2,port)]
 
 def test_late_callback_after_scope_cannot_dispatch(monkeypatch):
-    from lib import search_bridge
-    from lib.llm_errors import AbortedError
+    from lib.search import search_bridge
+    from lib.llm.llm_errors import AbortedError
     def adapter(*a,**k):pytest.fail('closed scope cannot call model')
     monkeypatch.setattr(search_bridge,'_chatui_llm',adapter)
     config=replace(get_config(),llm_function=adapter)

@@ -46,6 +46,8 @@
   </header>
 
   <!-- ── 令牌 ── -->
+
+  <p class="gal-note"><a href="rich-response.html">Native rich response review: measured comparisons, charts, images and evidence →</a></p>
   <section class="ui-card ui-stack" aria-label="设计令牌">
     <h2 class="gal-h2">设计令牌 Tokens</h2>
     <div class="ui-grid ui-stack--loose" style="--ui-grid-min:200px">
@@ -109,6 +111,8 @@
   <!-- ── 按钮 ── -->
   <section class="ui-card ui-stack" aria-label="按钮">
     <h2 class="gal-h2">按钮 Buttons</h2>
+
+    <div id="gal-multiline-action" class="ui-stack ui-stack--bounded"></div>
     <div class="ui-stack">
       <div class="ui-row ui-row--wrap">
         <button class="ui-btn ui-btn--primary">保存更改</button>
@@ -209,6 +213,8 @@
     <p class="gal-note">基于原生 <code>&lt;dialog&gt;</code>:焦点圈定、Esc 关闭、top-layer 渲染均由平台提供,无需一行业务代码。</p>
     <div class="ui-row">
       <button class="ui-btn ui-btn--primary" id="gal-open-dialog">打开示例对话框</button>
+
+      <button class="ui-btn ui-btn--secondary" id="gal-open-project-dialog">项目工作台弹窗</button>
       <span class="gal-note" id="gal-dialog-result" aria-live="polite"></span>
     </div>
   </section>
@@ -290,6 +296,7 @@
   </section>
 
   <footer class="gal-note">Tofu UI Kit · 契约见 docs/DESIGN_SYSTEM.md · 新增控件必须在此页登记</footer>
+<a class="ui-link" href="./dynamic-response.html">动态任务工作台 · Dynamic response surfaces</a>
 </main>
 
 <dialog class="ui-dialog" id="gal-dialog" aria-labelledby="gal-dialog-title">
@@ -308,6 +315,8 @@
 <script type="module">
 import * as ui from './ui-kit.bundle.js';
 window.__ui = ui;
+
+document.getElementById('gal-multiline-action').append(ui.createButton({label:'长操作可换行 · A long localized action wraps on narrow screens',wrap:true,variant:'danger'}));
 
 const root = document.documentElement;
 const params = new URLSearchParams(location.search);
@@ -343,6 +352,16 @@ dialog.addEventListener('close', () => {
 if (params.get('dialog') === 'open') dialog.showModal();
 
 /* ── 工厂驱动演示 ── */
+
+const projectBody = document.createElement('div');
+projectBody.className = 'ui-stack';
+projectBody.append(ui.createField({ label: '项目名称', value: 'Tofu', required: true }).el,
+  ui.createField({ label: '目录路径', hint: '工作区可留空，仅名称即可创建。' }).el);
+const projectDialog = ui.createDialog({ title: '新建文件夹', appearance: 'project', body: projectBody,
+  actions: [{ id: 'cancel', label: '取消' }, { id: 'save', label: '创建', variant: 'primary' }] });
+document.body.append(projectDialog.el);
+document.getElementById('gal-open-project-dialog').addEventListener('click', () => projectDialog.open());
+if (params.get('project-dialog') === 'open') projectDialog.open();
 const mount = (id, node) => document.getElementById(id)?.appendChild(node);
 
 mount('gal-checkboxes', ui.createChoice({ label: '记住我的选择', checked: true }).el);

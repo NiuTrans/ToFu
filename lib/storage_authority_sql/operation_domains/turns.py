@@ -1,0 +1,127 @@
+"""Conversation turn, attempt, sync, and migration operations."""
+
+from lib.storage_authority_sql import operations as ops
+
+from lib.storage_authority_sql.operations_pkg._model_context import read_model_context
+
+OPERATIONS = {
+    'turn.context.read': ops.OperationSpec('query', False, read_model_context),
+    # The lifecycle command is idempotent by (conversation_id, command_id)
+    # and intentionally replays even if a lost-ACK retry carries a mutated
+    # body; this mirrors the legacy lifecycle contract.
+    'turn.create_pair': ops.OperationSpec(
+        'command', False, ops._turn_create_pair, ops._turn_change_capture),
+    # Queue lifecycle commands return full Turn publics; an input Turn with
+    # inline images exceeds the 64 KiB stored-receipt cap, which used to roll
+    # the activation back on every drain tick and strand the queue forever.
+    # Both are idempotent by re-execution against the durable queue row
+    # (activate: a committed activation removes the row; cancel answers
+    # cancelled=False), matching the receipt-free attempt lifecycle commands.
+    'turn.queue.activate': ops.OperationSpec(
+        'command', False, ops._turn_queue_activate, ops._turn_change_capture),
+    'turn.queue.cancel': ops.OperationSpec(
+        'command', False, ops._turn_queue_cancel, ops._turn_change_capture),
+    'turn.steer.commit': ops.OperationSpec(
+        'command', True, ops._turn_steer_commit, ops._turn_change_capture),
+    'turn.append_settled': ops.OperationSpec(
+        'command', True, ops._turn_append_settled, ops._turn_change_capture),
+    'turn.attempt.claim': ops.OperationSpec('command', False, ops._turn_attempt_claim),
+    'turn.attempt.create': ops.OperationSpec(
+        'command', False, ops._turn_attempt_create, ops._turn_change_capture),
+    # Semantic idempotency is owned by the deterministic attempt/job binding;
+    # a lost-ACK retry must inspect current authority instead of replaying a
+    # cached response that may predate worker settlement.
+    'turn.attempt.dispatch_worker': ops.OperationSpec(
+        'command', False, ops._turn_attempt_dispatch_worker,
+        ops._turn_change_capture),
+    'turn.projection.update': ops.OperationSpec(
+        'command', False, ops._turn_projection_update, ops._turn_change_capture),
+    'turn.perception.record': ops.OperationSpec(
+        'command', False, ops._turn_perception_record),
+    'raw_archive.put': ops.OperationSpec(
+        'command', False, ops._raw_archive_put),
+    'raw_archive.list': ops.OperationSpec(
+        'query', False, ops._raw_archive_list),
+    'raw_archive.read': ops.OperationSpec(
+        'query', False, ops._raw_archive_read),
+    'turn.related.announce': ops.OperationSpec(
+        'command', False, ops._turn_related_announce, ops._turn_change_capture),
+    'turn.branch.create': ops.OperationSpec(
+        'command', False, ops._turn_branch_create, ops._turn_change_capture),
+    'turn.branch.delete': ops.OperationSpec(
+        'command', False, ops._turn_branch_delete, ops._turn_change_capture),
+    'turn.compact': ops.OperationSpec(
+        'command', True, ops._turn_compact, ops._turn_change_capture),
+    'turn.delete': ops.OperationSpec(
+        'command', False, ops._turn_delete, ops._turn_change_capture),
+    'turn.recover': ops.OperationSpec(
+        'command', False, ops._turn_recover, ops._turn_change_capture),
+    # Bounded superseded-attempt cleanup is receipted so a lost-ACK retry
+    # replays the stored bounded-deletion receipt instead of re-executing.
+    'turn.cleanup': ops.OperationSpec('command', True, ops._turn_cleanup),
+    'turn.search.backfill': ops.OperationSpec(
+        'command', False, ops._turn_search_backfill),
+    'turn.visible.sync': ops.OperationSpec(
+        'command', False, ops._turn_visible_sync, ops._turn_change_capture),
+    'turn.attempt.bind': ops.OperationSpec(
+        'command', False, ops._turn_attempt_bind, ops._turn_change_capture),
+    'turn.attempt.start': ops.OperationSpec(
+        'command', False, ops._turn_attempt_start, ops._turn_change_capture),
+    'turn.event.record': ops.OperationSpec(
+        'command', False, ops._turn_event_record, ops._turn_change_capture),
+    'turn.get': ops.OperationSpec('query', False, ops._turn_get),
+    'turn.image.get': ops.OperationSpec('query', False, ops._turn_image_get),
+    'turn.exists': ops.OperationSpec('query', False, ops._turn_exists),
+    'turn.list': ops.OperationSpec('query', False, ops._turn_list),
+    'turn.list_delta': ops.OperationSpec('query', False, ops._turn_list_delta),
+    'turn.sync.snapshot': ops.OperationSpec('query', False, ops._turn_sync_snapshot),
+    'turn.timing_trace.get': ops.OperationSpec(
+        'query', False, ops._turn_timing_trace_get),
+    'turn.timing_trace.list': ops.OperationSpec(
+        'query', False, ops._turn_timing_trace_list),
+    'turn.sync.round_directory': ops.OperationSpec('query', False, ops._turn_sync_round_directory),
+    'turn.sync.page': ops.OperationSpec('query', False, ops._turn_sync_page),
+    'turn.sync.changes': ops.OperationSpec('query', False, ops._turn_sync_changes),
+    'turn.sync.prune': ops.OperationSpec('command', False, ops._turn_sync_prune),
+    'turn.attempt.get': ops.OperationSpec('query', False, ops._attempt_get),
+    'turn.attempt.dispatchable.list': ops.OperationSpec(
+        'query', False, ops._attempt_dispatchable_list),
+    'turn.revision': ops.OperationSpec('query', False, ops._turn_revision),
+    'turn.events.list': ops.OperationSpec('query', False, ops._turn_events),
+    # Idempotent by construction (age-bounded DELETE), so no receipt lane.
+    'turn.events.prune': ops.OperationSpec('command', False, ops._turn_events_prune),
+}
+
+# Architectural ratchet: every new turn command is replay-visible by default.
+# These maintenance/plumbing operations intentionally do not mutate a
+# browser-observable projection.  Adding another exception requires an
+# explicit review here instead of silently omitting transactional capture.
+_NON_SYNC_COMMANDS = {
+    'turn.attempt.claim',
+    'turn.cleanup',
+    'turn.events.prune',
+    # Durable, attempt-scoped diagnostics are read by the inspector endpoint;
+    # they intentionally do not mutate or replay the conversation projection.
+    'turn.perception.record',
+    'raw_archive.put',
+    'turn.search.backfill',
+    'turn.sync.prune',
+}
+for _name, _spec in OPERATIONS.items():
+    if (_spec.kind == 'command' and _name not in _NON_SYNC_COMMANDS
+            and _spec.after is None):
+        raise RuntimeError(
+            f'{_name} must declare transactional conversation-sync capture')
+
+_registered_capture_operations = {
+    name for name, spec in OPERATIONS.items()
+    if spec.after is ops._turn_change_capture
+}
+if _registered_capture_operations != set(ops._TURN_CHANGE_CAPTURE_OPERATIONS):
+    raise RuntimeError(
+        'Turn conversation-sync capture mapping/catalog drift: '
+        f'registered={sorted(_registered_capture_operations)!r}, '
+        f'mapped={sorted(ops._TURN_CHANGE_CAPTURE_OPERATIONS)!r}'
+    )
+
+__all__ = ['OPERATIONS']

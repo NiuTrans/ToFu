@@ -12,6 +12,7 @@ import contextlib
 import json
 import threading
 import time
+from concurrent.futures import Future
 
 from lib.agent_core.execution_session import ExecutionPhase, ExecutionSession
 from lib.error_envelope import make_envelope
@@ -57,10 +58,22 @@ class _DirectRelayFailure(RuntimeError):
         super().__init__(cause)
 
 # Strong references for direct dispatches whose HTTP consumer disconnected.
-# Production creation is bounded by the shared admission controller; completed
+# Each started request retains its original execution owner; completed
 # tasks remove themselves immediately.  No response chunks are retained after
 # detach, so a slow/absent frontend cannot grow this set's per-task memory.
 _DETACHED_DIRECT_DISPATCHES: set[asyncio.Task] = set()
+
+
+async def _join_owned_io(awaitable):
+    """Finish one accepted I/O operation before propagating cancellation."""
+    pending = asyncio.ensure_future(awaitable)
+    cancelled = False
+    while not pending.done():
+        try:
+            await asyncio.shield(pending)
+        except asyncio.CancelledError:
+            cancelled = True
+    return pending.result(), cancelled
 
 
 def _retain_detached_dispatch(task: asyncio.Task, *, completion_id: str) -> None:
@@ -118,6 +131,7 @@ def _chunk_frame(completion_id: str, model: str, *, role=False, content=None,
 async def run_direct_stream(messages, *, model, cfg, completion_id,
                             dispatch_fn=None, queue_maxsize=1000,
                             on_dispatch_started=None,
+                            before_dispatch=None, model_budget_admit=None,
                             on_dispatch_settled=None,
                             owner_user_id: int | None = None,
                             pinned_provider_id: str = '',
@@ -125,7 +139,9 @@ async def run_direct_stream(messages, *, model, cfg, completion_id,
                             max_429_attempts: int | None = None,
                             execution_session: ExecutionSession | None = None,
                             dispatch_terminal: dict | None = None,
-                            terminal_metadata: dict | None = None):
+                            terminal_metadata: dict | None = None,
+                            client_tools: list | None = None,
+                            client_tool_choice=None):
     """Async generator: drive an on-loop streaming dispatch → SSE frames.
 
     This is the TESTABLE CORE — ``dispatch_fn`` is injectable so tests can
@@ -145,9 +161,9 @@ async def run_direct_stream(messages, *, model, cfg, completion_id,
     Yields OpenAI ``chat.completion.chunk`` SSE frames, then a terminal frame
     (with ``finish_reason`` + ``usage``), then ``data: [DONE]``.
 
-    The queue is bounded and fail-closed. Overflow terminates the relay instead
-    of silently dropping text and later publishing a false-success terminal
-    frame. Provider callbacks may arrive from an adapter worker thread, so they
+    The queue owns ordered references. Output bursts spill to anonymous JSON
+    files instead of terminating accepted dispatch or dropping text. Actual
+    spool failures remain typed terminal errors. Provider callbacks may arrive from an adapter worker thread, so they
     cross one loop-owned scheduling seam before touching the queue.
 
     Transparent provider retry remains possible before the observer sees a
@@ -163,8 +179,24 @@ async def run_direct_stream(messages, *, model, cfg, completion_id,
     from lib.production.llm_policy import production_llm_dispatch_kwargs
     dispatch_policy = production_llm_dispatch_kwargs(
         max_429_attempts=max_429_attempts)
+    if model_budget_admit is not None:
+        dispatch_policy['model_budget_admit'] = model_budget_admit
+    # Declarations describe a caller-owned execution surface. This service
+    # has no tool executor, prefetcher, approvals or continuation loop.
+    if client_tools is not None:
+        dispatch_policy['tools'] = client_tools
+        dispatch_policy['generation_options'] = {
+            wire: cfg[key] for key, wire in (
+                ('topP', 'top_p'), ('seed', 'seed'), ('stop', 'stop'),
+                ('responseFormat', 'response_format'), ('user', 'user'),
+                ('parallelToolCalls', 'parallel_tool_calls'),
+            ) if key in cfg
+        }
+    if client_tool_choice is not None:
+        dispatch_policy['tool_choice'] = client_tool_choice
 
-    q: asyncio.Queue = asyncio.Queue(maxsize=queue_maxsize)
+    q: asyncio.Queue = asyncio.Queue()
+    frame_store = None
     loop = asyncio.get_running_loop()
     loop_thread_id = threading.get_ident()
     consumer_attached = True
@@ -190,11 +222,7 @@ async def run_direct_stream(messages, *, model, cfg, completion_id,
         abort_requested = True
         relay_failure = _DirectRelayFailure(
             cause=cause, envelope_kind=envelope_kind)
-        try:
-            q.put_nowait((_RELAY_FAILURE, None))
-        except asyncio.QueueFull:
-            # The consumer is necessarily runnable because a frame is queued.
-            pass
+        q.put_nowait((_RELAY_FAILURE, None))
 
     def _clear_unobserved_attempt() -> None:
         while True:
@@ -204,17 +232,24 @@ async def run_direct_stream(messages, *, model, cfg, completion_id,
                 return
 
     def _push(kind: str, text: str) -> None:
-        # Runs on the loop thread (callback fires inside the async parse loop).
-        if not consumer_attached:
-            # The dispatcher/parser still accumulates and validates the full
-            # provider response.  Only the now-unobservable relay chunks are
-            # discarded, keeping detached memory constant.
+        nonlocal frame_store
+        if not consumer_attached or relay_failure is not None:
             return
         try:
-            q.put_nowait((kind, text))
-        except asyncio.QueueFull:
-            _fail_relay(
-                cause='relay_queue_overflow', envelope_kind='server_busy')
+            if q.qsize() < queue_maxsize:
+                q.put_nowait((kind, text))
+            else:
+                if frame_store is None:
+                    from tofu_workers.json_frames import JsonFrameStore
+                    from lib.agent_core.push_policy import resolve_push_budget
+                    budget = resolve_push_budget()
+                    frame_store = JsonFrameStore(
+                        segment_bytes=budget.spool_segment_bytes,
+                        reuse_workers=budget.worker_reuse_target,
+                        thread_name_prefix='tofu-direct-relay')
+                q.put_nowait((kind, frame_store.prepare({'text': text})))
+        except Exception:
+            _fail_relay(cause='relay_spool_io_failed', envelope_kind='internal')
 
     def _schedule_on_loop(callback, *args) -> None:
         if threading.get_ident() == loop_thread_id:
@@ -248,14 +283,18 @@ async def run_direct_stream(messages, *, model, cfg, completion_id,
 
     async def _drive():
         result = None
-        if callable(on_dispatch_started):
-            try:
-                on_dispatch_started()
-            except Exception as e:
-                logger.debug('[chat_direct] dispatch-start observer failed: %s', e)
-        if execution_session is not None:
-            execution_session.mark_dispatch_started()
         try:
+            if before_dispatch is not None:
+                _, cancelled = await _join_owned_io(before_dispatch())
+                if cancelled:
+                    raise asyncio.CancelledError
+            if callable(on_dispatch_started):
+                try:
+                    on_dispatch_started()
+                except Exception as e:
+                    logger.debug('[chat_direct] dispatch-start observer failed: %s', e)
+            if execution_session is not None:
+                execution_session.mark_dispatch_started()
             from lib.llm_dispatch.provider_pin import provider_pin
             with provider_pin(pinned_provider_id):
                 result = await asyncio.wait_for(
@@ -331,6 +370,14 @@ async def run_direct_stream(messages, *, model, cfg, completion_id,
         failure_detail = ''
         while True:
             kind, text = await q.get()
+            if isinstance(text, Future):
+                try:
+                    stored = await asyncio.wrap_future(text)
+                    payload = await asyncio.wrap_future(frame_store.read(stored))
+                    text = payload['text']
+                    stored = payload = None
+                except Exception:
+                    _fail_relay(cause='relay_spool_io_failed', envelope_kind='internal')
             if relay_failure is not None or kind is _RELAY_FAILURE:
                 err = relay_failure or _DirectRelayFailure(
                     cause='relay_failure', envelope_kind='upstream_error')
@@ -373,7 +420,7 @@ async def run_direct_stream(messages, *, model, cfg, completion_id,
                         cause=failure_cause, envelope_kind=envelope_kind)
             except Exception as e:  # dispatch raised (exhausted slots, etc.)
                 err = e
-                from lib.llm_errors import LocalRequestPreparationError
+                from lib.llm.llm_errors import LocalRequestPreparationError
                 if isinstance(e, TerminalTaskFailure):
                     failure_cause = e.verdict.cause
                     envelope_kind = 'upstream_error'
@@ -416,6 +463,19 @@ async def run_direct_stream(messages, *, model, cfg, completion_id,
         provider_finish = stream_result.provider_finish_reason
         assert provider_finish is not None
 
+        calls = stream_result.message.get('tool_calls')
+        if calls:
+            # Emit only the fully validated provider batch. Partial/failed
+            # attempts never hand a client a callable tool result.
+            tool_frame = {
+                'id': completion_id, 'object': 'chat.completion.chunk',
+                'created': int(time.time()), 'model': model,
+                'choices': [{'index': 0, 'delta': {'tool_calls': [
+                    dict(call, index=index) for index, call in enumerate(calls)
+                ]}, 'finish_reason': None}],
+            }
+            yield f'data: {json.dumps(tool_frame, ensure_ascii=False)}\n\n'
+
         final = {
             'id': completion_id, 'object': 'chat.completion.chunk',
             'created': int(time.time()), 'model': model,
@@ -425,8 +485,13 @@ async def run_direct_stream(messages, *, model, cfg, completion_id,
         }
         if stream_result.usage:
             final['usage'] = stream_result.usage
+            if client_tools is not None:
+                from lib.compat.openai import project_completion_usage
+                final['usage'] = project_completion_usage(stream_result.usage)
         if terminal_metadata.get('billing'):
             final['billing'] = terminal_metadata['billing']
+        if terminal_metadata.get('billing_status'):
+            final['billing_status'] = terminal_metadata['billing_status']
         yield f'data: {json.dumps(final, ensure_ascii=False)}\n\n'
         yield 'data: [DONE]\n\n'
     except (GeneratorExit, asyncio.CancelledError):
@@ -452,6 +517,15 @@ async def run_direct_stream(messages, *, model, cfg, completion_id,
             consumer_attached = False
             _retain_detached_dispatch(
                 drive_task, completion_id=completion_id)
+        if frame_store is not None:
+            # Closing joins encoders/readers before anonymous transport ranges
+            # retire. Repeated cancellation cannot orphan a running file worker.
+            _, cancelled = await _join_owned_io(asyncio.to_thread(frame_store.close))
+            while not q.empty():
+                q.get_nowait()
+            frame_store = None
+            if cancelled:
+                raise asyncio.CancelledError
 
 
 __all__ = [

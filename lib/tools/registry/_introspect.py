@@ -246,6 +246,9 @@ def build_tool_inventory(*, owner_user_id: int = 0) -> dict:
 
     for spec in all_specs():
         gid = spec.category or 'other'
+        # Older registered instances predate this optional presentation field.
+        # Preserve their declared surface; execution authority stays elsewhere.
+        compatibility_tools = getattr(spec, 'compatibility_tools', frozenset())
         family = {
             'key': spec.key,
             'phase': spec.phase,
@@ -253,7 +256,9 @@ def build_tool_inventory(*, owner_user_id: int = 0) -> dict:
             'plugin_name': spec.plugin_name,
             'description': spec.description,
             'gate': getattr(spec, 'gate', ''),
-            'declared': sorted(spec.provides),
+            'declared': sorted(spec.provides - compatibility_tools),
+            'compatibility_tools': sorted(compatibility_tools),
+            'contextual_tools': sorted(getattr(spec, 'contextual_tools', frozenset())),
         }
         tools: list[dict] = []
         schemas = contributions.get(spec.key, [])

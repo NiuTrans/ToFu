@@ -81,7 +81,7 @@ scoped by plane: thought is free, evidence is bounded, behavior is gated
 | `evolution_guidance` context block rendering | `lib/evolution/guidance.py` |
 | Criteria checkers (bounded `test_command`) | `lib/evolution/checkers.py` |
 | HTTP surface | `routes/api_v1/evolution.py` |
-| Primary program notebook, execution studio, goal evidence, capabilities and teaching | `frontend/src/features/evolution.ts`, `frontend/src/features/evolution/` |
+| Primary studio, durable program notebook, goal evidence, capabilities and teaching | `frontend/src/features/evolution.ts`, `frontend/src/features/evolution/` |
 | Auto-research workbench page (`#/evolution/research`): direction composer, pipeline console, record archive, production workspace | `frontend/src/features/evolution/research/` |
 
 ## Verification
@@ -97,7 +97,10 @@ pytest -q tests/evolution/test_evolution_runs.py tests/evolution/test_evolution_
   tests/evolution/test_evolution_skill_forge.py tests/evolution/test_evolution_self_model.py \
   tests/evolution/test_evolution_curriculum.py tests/evolution/test_evolution_system.py \
   tests/evolution/test_evolution_end_to_end.py tests/api/test_api_v1_evolution.py \
-  tests/evolution/test_evolution_headless_runtime.py tests/evolution/test_evolution_soak.py \
+  tests/evolution/test_evolution_headless_runtime.py tests/evolution/test_evolution_coding_cycle.py \
+  tests/evolution/test_evolution_followup_policy.py tests/evolution/test_evolution_soak.py \
+  tests/evolution/test_evolution_coding_probe.py \
+  tests/evolution/test_evolution_context_policy.py tests/evolution/test_evolution_schema_cost.py \
   tests/evolution/test_evolution_observations.py tests/evolution/test_evolution_friction.py \
   tests/evolution/test_evolution_refetch.py tests/evolution/test_evolution_exploration.py
 ```
@@ -108,36 +111,7 @@ Neighbors: `tests/research/test_research_records.py` (records pattern),
 
 ## Browser workbench
 
-The primary `#/evolution` notebook creates and starts a durable program with
-original acceptance checks, optional project binding, queued experiments and
-paged immutable receipts. `programs/controller.ts` owns visible-page reads;
-`programs/page.ts` owns stable input forms and explicit commands. See the durable
-program section of `docs/EVOLUTION_DESIGN.md` for recovery and memory limits.
-The `#/evolution/runs` pixel studio accepts an objective and optional model, then
-uses the Headless run lifecycle directly. `workspace.ts` routes between it and
-existing detailed evidence pages. `workspace.py` projects bounded run summaries,
-owner-selectable model choices, live Ask Human questions, and the unified live
-floor: one bounded strip merging non-terminal evolution runs with durable
-orchestration runs (goal-mode rows detected through the canonical `chat-goal:`
-orchestration id), fail-soft when the orchestration store is unreadable. The
-same one-flight read carries the pending gate list (`proposed`/`confirmed`
-mutations reduced to presentation fields), and the studio's delivery-table
-drawer works those decisions with the shared enable/waiver/reject journey —
-receipts render in place, unmeasurable activation needs a second explicit
-click. A persistent responsive mission panel shows the goal, actual stage,
-failure/recovery guidance, proposed steps, latest recorded work, deliverables,
-review evidence and measured usage without requiring a drawer. Missing/null/zero
-goal limits mean **No limit**, never a percentage-complete gauge. New general
-runs have no default cumulative token, tool, duration or repair ceiling;
-explicit limits and legacy authorizations remain enforced. Task links show
-terminal receipt status rather than stale execution-stage labels. Preparing a
-retry only prefills a new goal form; it never replays side effects or starts
-spending. Room-animation pause and execution stop are separate controls.
-Review success never claims proven learning. Backend `get_run`/`list_runs` stay
-durable-only for authority and eligibility. HTTP detail and `workspace.py` use
-explicit `get_run_snapshot`/`list_run_snapshots` presentation reads; terminal
-status with `snapshot_pending_reconciliation` never authorizes result journaling
-or follow-up spend before the callback settles the run.
+The primary `#/evolution` notebook creates and starts a durable program with original acceptance checks, optional project binding, queued experiments and paged immutable receipts. `programs/controller.ts` owns visible-page reads; `programs/page.ts` owns stable input forms and explicit commands. See the durable program section of `docs/EVOLUTION_DESIGN.md` for recovery and memory limits. The `#/evolution/runs` pixel studio accepts an objective and optional model, then uses the Headless run lifecycle directly. `workspace.ts` routes between it and existing detailed evidence pages. `workspace.py` projects bounded run summaries, owner-selectable model choices, live Ask Human questions, and the unified live floor: one bounded strip merging non-terminal evolution runs with durable orchestration runs (goal-mode rows detected through the canonical `chat-goal:` orchestration id), fail-soft when the orchestration store is unreadable. The same one-flight read carries the pending gate list (`proposed`/`confirmed` mutations reduced to presentation fields), and the studio's delivery-table drawer works those decisions with the shared enable/waiver/reject journey — receipts render in place, unmeasurable activation needs a second explicit click. A persistent responsive mission panel shows the goal, actual stage, failure/recovery guidance, proposed steps, latest recorded work, deliverables, review evidence and measured usage without requiring a drawer. Missing/null/zero goal limits mean **No limit**, never a percentage-complete gauge. New general runs have no default cumulative token, tool, duration or repair ceiling; explicit limits and legacy authorizations remain enforced. Task links show terminal receipt status rather than stale execution-stage labels. Preparing a retry only prefills a new goal form; it never replays side effects or starts spending. Room-animation pause and execution stop are separate controls. Review success never claims proven learning. Backend `get_run`/`list_runs` stay durable-only for authority and eligibility. HTTP detail and `workspace.py` use explicit `get_run_snapshot`/`list_run_snapshots` presentation reads; terminal status with `snapshot_pending_reconciliation` never authorizes result journaling or follow-up spend before the callback settles the run.
 
 Projection authority: `goal-workbench.ts`; controls and expanded inspector:
 `studio/goal-command-panel.ts`, `studio/goal-run-inspector.ts`. The room uses
@@ -171,14 +145,20 @@ deterministic provider transport. The opt-in live long-run command and its
 measurement limits live in `EVOLUTION_DESIGN.md`.
 
 Terminal automation enqueues only owner/task/binding identities and derived
-consumption counters after a successful task-result commit. One lazy worker and
-`TOFU_EVOLUTION_TERMINAL_QUEUE_CAPACITY` pending receipts (launch-probed personal
-4..16, distributed 16, hard maximum 16) bound residency; idle workers retire after
-30 seconds. Saturation or shutdown leaves the durable episode awaiting explicit
-settlement, never reports a fabricated verdict. Shutdown cancels the active
-checker before storage teardown. Criteria execution uses the shared bounded
-process runner with an explicit owner, a cumulative 300-second goal deadline,
-and capped output. A receipt must match its episode's durable task identity.
+consumption counters after a successful task-result commit. One lazy coordinator
+submits every independent receipt through the shared production demand executor;
+launch resources size idle reuse, never admission. No queue count drops terminal
+notifications. The coordinator retires after 30 idle seconds only when checks
+are quiescent, and stays published until all physical workers join. Stop cancels
+checks before storage teardown; a timed-out join retains the owner and cannot
+start a new generation. Explicit shutdown leaves reconstructible checks for
+later settlement, without inventing a verdict. Criteria execution uses the
+shared process runner with an explicit owner, a cumulative 300-second goal
+deadline, and capped output. A receipt must match its episode's durable task identity.
+Legacy tasks without an explicit episode ID find their exact running binding
+through complete owner-scoped record pages, validating stored episode/key
+identity; a 200-row physical window is never a total catalog cutoff.
+
 
 
 ### Required execution completion
@@ -210,25 +190,7 @@ could close a replacement source. Decision: share URL policy and make source
 ownership explicit. Alternatives: feature-specific prefix parsing duplicates
 the deployment policy; polling alone discards the existing live activity feed.
 
-Programme creation accepts optional `research_source={task_id,idea_id}` from an
-owned completed discovery. The programme retains a small source identity and
-canonical payload digest; its original objective, acceptance and default
-scientific frontier remain unchanged. Current executors use
-`evolution_explore action=read_research_source` to page the exact selected idea,
-survey and gap map. Owner/current-run checks repeat after reads; changed or
-unavailable originals refuse without latest-direction fallback. Prior ideas
-remain unverified proposals. This seeds the existing long-horizon planner; it
-is not automatic continuation of the discovery account or an experiment verdict.
-The caller still supplies and starts its authorized programme/budget.
-Problem: completed discovery could not seed Programme with source-bound material.
-Decision: one original-record reference and digest, using existing read tools.
-Alternatives rejected: copying a clipped survey into the objective or inventing
-a separate autonomous research loop. No resident cache, worker or new store is
-added; the existing programme header gains one bounded reference (representative
-fixture <300 encoded bytes). Each page rereads/hashes the complete source payload:
-CPU and temporary memory scale with source size; a page grants no replay rights.
-Verify `test_evolution_research_source.py` and programme/exploration-tool suites;
-source tests use both SQLite and native TofuDB authorities.
+Programme creation accepts optional `research_source={task_id,idea_id}` from an owned completed discovery. The programme retains a small source identity and canonical payload digest; its original objective, acceptance and default scientific frontier remain unchanged. Current executors use `evolution_explore action=read_research_source` to page the exact selected idea, survey and gap map. Owner/current-run checks repeat after reads; changed or unavailable originals refuse without latest-direction fallback. Prior ideas remain unverified proposals. This seeds the existing long-horizon planner; it is not automatic continuation of the discovery account or an experiment verdict. The caller still supplies and starts its authorized programme/budget. Problem: completed discovery could not seed Programme with source-bound material. Decision: one original-record reference and digest, using existing read tools. Alternatives rejected: copying a clipped survey into the objective or inventing a separate autonomous research loop. No resident cache, worker or new store is added; the existing programme header gains one bounded reference (representative fixture <300 encoded bytes). Each page rereads/hashes the complete source payload: CPU and temporary memory scale with source size; a page grants no replay rights. Verify `test_evolution_research_source.py` and programme/exploration-tool suites; source tests use both SQLite and native TofuDB authorities.
 
 The research workbench opens a source-specific Programme intake draft through
 the existing creator. Its material reference and editable objective survive
@@ -253,4 +215,4 @@ record.get count fell from 2 to 1; SQLite median 3.30→2.60 ms and native TofuD
 2.98→2.10 ms. This measures source preparation, not end-to-end research speed.
 There is no new resident cache, worker or persistent data. Serialization/hash
 still scale with the whole source per page. Exact contents/digest remain equal
-and source-change refusal remains; verify source/draft/selection suites.
+and source-change refusal remains; verify source/draft/selection suites. **Problem:** serial page reads repeat growing model context. **Decision:** batch disjoint immutable-source reads in one model turn when the current input budget permits; preserve exact identity, each page limit and successful final-input consumption. Use returned offsets to recover compressed-page gaps, and submit final review separately. Raising page limits or trusting summaries was rejected because it would change evidence guarantees.

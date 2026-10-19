@@ -227,6 +227,38 @@ def test_runtime_default_capacity_uses_shared_hardware_budget(monkeypatch):
 
 
 @pytest.mark.unit
+def test_retained_runs_bound_scales_with_launch_probe_and_keeps_override(monkeypatch):
+    from lib.identity import PrincipalContext
+    from tofu_agent import AgentRuntime
+
+    def make(**kwargs):
+        return AgentRuntime(
+            principal=PrincipalContext.user(
+                subject_id='test:retained', owner_user_id=73),
+            model_routing=_access(), **kwargs)
+
+    monkeypatch.setenv('TOFU_AGENT_WORKERS', '2')
+    runtime = make()
+    try:
+        assert runtime._max_retained_runs == 128
+    finally:
+        runtime.close(abort=False)
+
+    monkeypatch.setenv('TOFU_AGENT_WORKERS', '128')
+    runtime = make()
+    try:
+        assert runtime._max_retained_runs == 4096
+    finally:
+        runtime.close(abort=False)
+
+    runtime = make(max_retained_runs=33)
+    try:
+        assert runtime._max_retained_runs == 33
+    finally:
+        runtime.close(abort=False)
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize('asynchronous', [False, True])
 def test_observer_drains_committed_events_when_worker_finishes_during_yield(asynchronous):
     import asyncio
@@ -435,6 +467,67 @@ def test_runtime_disposes_request_route_exactly_once(monkeypatch):
 
     assert result.ok
     assert disposed == [handle]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize('held_phase', ['worker', 'resource_release'])
+def test_terminal_status_does_not_release_sdk_owners_before_physical_cleanup(monkeypatch, held_phase):
+    from concurrent.futures import Future
+    from lib.agent_core.admission import fire_terminal_callbacks
+    import lib.tasks_pkg.manager as task_manager
+    import lib.tasks_pkg.spawn as task_spawn
+    from tofu_agent import AgentRuntime, AgentTimeoutError
+
+    disposed = []
+    handle = _patch_route_slot(monkeypatch, disposed=disposed)
+    entered, release, allow_terminal = threading.Event(), threading.Event(), threading.Event()
+    workers = []
+    def create(_conversation_id, _messages, _config, **kwargs):
+        return dict(id='held-sdk-'+held_phase, _userId=kwargs['principal'].owner_user_id,
+                    status='queued', events=[], toolRounds=[])
+    def hold():
+        entered.set()
+        assert release.wait(5)
+    def spawn(task, *, executor=None):
+        result = Future()
+        def run():
+            assert allow_terminal.wait(5)
+            task.update(status='done', content='settled', finishReason='stop')
+            fire_terminal_callbacks(task['id'])
+            if held_phase == 'worker': hold()
+            result.set_result(None)
+        worker = threading.Thread(target=run)
+        workers.append(worker)
+        worker.start()
+        return result
+    monkeypatch.setattr(task_manager, 'create_task', create)
+    monkeypatch.setattr(task_spawn, 'spawn_task', spawn)
+    runtime = AgentRuntime.local(model_routing=_access())
+    original_dispose = runtime._dispose_resources
+    def dispose(*args):
+        if held_phase == 'resource_release': hold()
+        original_dispose(*args)
+    monkeypatch.setattr(runtime, '_dispose_resources', dispose)
+    try:
+        execution = runtime.start([{'role': 'user', 'content': 'finish safely'}])
+        allow_terminal.set()
+        assert entered.wait(3)
+        assert not execution._terminal.is_set() and runtime.in_flight == 1
+        assert disposed == []
+        with pytest.raises(AgentTimeoutError, match='teardown has not joined'):
+            runtime.close(abort=False, timeout_s=.01)
+        assert runtime.in_flight == 1 and not execution._terminal.is_set()
+        release.set()
+        assert execution._terminal.wait(3)
+        runtime.close(abort=False)
+        assert runtime.in_flight == 0 and disposed == [handle]
+    finally:
+        allow_terminal.set()
+        release.set()
+        for worker in workers:
+            worker.join(3)
+            assert not worker.is_alive()
+        runtime.close(abort=False)
 
 
 @pytest.mark.unit

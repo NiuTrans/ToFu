@@ -65,6 +65,14 @@
         "routeWindowTokens": {"$ref": "#/$defs/count", "description": "Effective physical route capacity."},
         "hardCeilingTokens": {"$ref": "#/$defs/count", "description": "Physical prompt safety ceiling after output/safety reserve."},
         "reserveTokens": {"$ref": "#/$defs/count", "description": "max(0, routeWindowTokens - hardCeilingTokens), only when both were recorded."},
+        "windowSafetyTokens": {"$ref": "#/$defs/count", "description": "Window-policy safety ceiling before the resolved output reservation is intersected."},
+        "requestedOutputTokens": {"anyOf": [{"$ref": "#/$defs/count"}, {"type": "null"}], "description": "Explicit configured output cap, or null when the model default was requested."},
+        "outputCapTokens": {"$ref": "#/$defs/count"},
+        "resolvedOutputTokens": {"$ref": "#/$defs/count", "description": "Resolved output allowance; reserveTokens also includes safety headroom and is not this allowance."},
+        "outputResolutionInputTokens": {"$ref": "#/$defs/count"},
+        "outputReservationPolicy": {"type": "string", "maxLength": 80, "description": "input_aware_output_cap or native_bound_reservation; recorded evidence only."},
+        "outputResolutionSource": {"type": "string", "maxLength": 80},
+        "outputResolutionInputSource": {"type": "string", "maxLength": 80},
         "economicTargetTokens": {"$ref": "#/$defs/count", "description": "Optional economic target, never an alternate physical context limit."},
         "renderedPromptTokens": {"$ref": "#/$defs/count", "description": "Recorded complete rendered prompt including non-message overhead, not archive tokensAfter."},
         "messageTokens": {"$ref": "#/$defs/count"},
@@ -142,7 +150,7 @@
       "type": "object",
       "properties": {
         "modelId": {"type": "string", "maxLength": 200},
-        "providerId": {"type": "string", "maxLength": 200, "description": "Selected execution pin, not necessarily the actual billing provider. Per-call dispatch identities are recorded in summary.cost.calls."},
+        "providerId": {"type": "string", "maxLength": 200, "description": "Native auxiliary plans record the actual selected Provider; legacy plans may record an execution-group pin. Per-call actual dispatch identities are recorded in summary.cost.calls."},
         "policy": {"type": "string", "maxLength": 200},
         "reason": {"type": "string", "maxLength": 200},
         "costBasis": {"type": "string", "maxLength": 200, "description": "Bounded diagnostic serialization of selection-time pricing evidence. Unlike summary.cost.costBasis, this is not a billing-basis enum or proof of known spend; clients must not parse it as price evidence."},
@@ -152,14 +160,23 @@
     },
     "summarySelection": {
       "type": "object",
-      "description": "Optional selection-time AA proxy evidence, not measured summarization fidelity, latency, billed savings or authority to use a model. Absent on legacy/main-route receipts means no recorded AA selection.",
+      "description": "Optional selection-time evidence: exact AA, maintained declarations, or confirmed text-route admission with null quality score. Eligibility is compiler-owned, independent of provider/family and optional benchmark coverage. Never measured summary fidelity, latency or subscription cash savings.",
       "required": ["source", "metric", "score", "match", "ranking", "eligibleRoutes"],
+
+      "oneOf": [
+        {"properties": {"source": {"const": "Artificial Analysis"}, "metric": {"const": "intelligence"}, "match": {"const": "exact"}, "score": {"type": "number"}}},
+        {"properties": {"source": {"const": "maintained_declared_rule"}, "metric": {"const": "declared_capability"}, "match": {"const": "declared"}, "score": {"type": "number"}}},
+        {"properties": {"source": {"const": "routing_admission"}, "metric": {"const": "text_capability"}, "match": {"const": "confirmed"}, "score": {"type": "null"}, "ranking": {"const": "authorized_resource_cost_then_aa"}}}
+      ],
       "properties": {
-        "source": {"const": "Artificial Analysis"},
-        "metric": {"const": "intelligence"},
-        "score": {"type": "number", "minimum": 0},
-        "match": {"const": "exact"},
-        "ranking": {"const": "cost_asc_aa_desc"},
+        "source": {"enum": ["Artificial Analysis", "maintained_declared_rule", "routing_admission"]},
+        "metric": {"enum": ["intelligence", "declared_capability", "text_capability"]},
+        "score": {"type": ["number", "null"], "minimum": 0},
+        "match": {"enum": ["exact", "declared", "confirmed"]},
+        "ranking": {"enum": ["cost_asc_aa_desc", "subscription_resource_tier_then_cost_aa", "authorized_resource_cost_then_aa"]},
+        "qualityTier": {"type": "string", "maxLength": 30},
+        "resourceTier": {"type": "integer", "minimum": 0, "maximum": 5},
+        "paidCeilingUsd": {"type": ["number", "null"], "minimum": 0},
         "eligibleRoutes": {"type": "integer", "minimum": 1},
         "fetchedAt": {"type": ["number", "null"], "minimum": 0},
         "aaSlug": {"type": "string", "maxLength": 200}

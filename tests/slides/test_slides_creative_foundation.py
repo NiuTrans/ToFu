@@ -165,7 +165,7 @@ def test_slide_media_io_bounds_base64_local_files_and_http_streams(
     def stream(*_args, **_kwargs):
         yield Response()
 
-    monkeypatch.setattr('lib.http_client.http_stream', stream)
+    monkeypatch.setattr('lib.http_transport.client.http_stream', stream)
     remote = tmp_path / 'remote.png'
     with pytest.raises(ValueError, match='stream exceeds'):
         download_file_bounded(

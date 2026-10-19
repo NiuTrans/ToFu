@@ -3,7 +3,7 @@
 The modern installer wizard (desktop/installer.nsi.tmpl) renders a HEADER
 BAND bitmap (product name + version) plus real controls on the native
 dialog face. This module paints that band at wrap time (Pillow) so the
-art can carry the build's own facts — Tofu / Tofu Agent and the version
+art can carry the build's own facts — Tofu / Tofu Remote and the version
 — without committing per-target bitmap blobs to the repo.
 
 Why a band, not a full-page bitmap (measured 2026-08-05, 2026-08-06,
@@ -13,7 +13,7 @@ the band and any baked cards showed, every LangString/edit/checkbox
 stayed invisible. Live controls therefore sit BELOW the 38 du band on
 COLOR_3DFACE and must never overlap it.
 
-Only short brand text is baked into the band ("Tofu Agent", the version)
+Only short brand text is baked into the band ("Tofu Remote", the version)
 — distortion-tolerant under RESIZETOFIT. Every sentence is a LangString
 so English/Chinese stay a runtime NLF choice.
 """

@@ -1,4 +1,7 @@
-//! Bounded single-writer sequencer that forms sub-millisecond durability groups.
+//! Demand-accepted single-writer commits with sub-millisecond durability groups.
+//! Enqueue owns each prepared transaction without a slot or residency quota;
+//! completion waits for its durable result. WAL group bounds split accepted work.
+//! Real allocation failures and ambiguous writes keep their error boundaries.
 
 use std::collections::VecDeque;
 use std::io;
@@ -21,64 +24,22 @@ pub const MAX_BATCH_DELAY: Duration = Duration::from_millis(1);
 /// window for no grouping benefit. Shallow groups keep the sub-1 ms
 /// coalescing wait.
 const IMMEDIATE_FILL_DEPTH: usize = 2;
-pub const MAX_QUEUE_TRANSACTIONS: usize = 1_024;
-pub const MAX_QUEUE_BYTES: usize = 256 * 1024 * 1024;
-pub const MIN_QUEUE_BYTES: usize = 16 * 1024 * 1024;
-const TARGET_BYTES_PER_QUEUED_TRANSACTION: usize = 256 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SequencerConfig {
-    pub queue_transactions: usize,
-    pub queue_bytes: usize,
     pub batch_delay: Duration,
 }
 
 impl Default for SequencerConfig {
     fn default() -> Self {
-        Self::lean_fallback()
+        Self {
+            batch_delay: MAX_BATCH_DELAY,
+        }
     }
 }
 
 impl SequencerConfig {
-    /// Probe-failure profile. Normal startup should pass the one observed
-    /// launch-time memory-headroom value to `from_memory_headroom` instead.
-    pub const fn lean_fallback() -> Self {
-        Self {
-            queue_transactions: 64,
-            queue_bytes: MIN_QUEUE_BYTES,
-            batch_delay: MAX_BATCH_DELAY,
-        }
-    }
-
-    pub fn from_memory_headroom(memory_headroom_bytes: u64) -> Self {
-        if memory_headroom_bytes == 0 {
-            return Self::lean_fallback();
-        }
-        let queue_bytes = usize::try_from(memory_headroom_bytes / 128)
-            .unwrap_or(usize::MAX)
-            .clamp(MIN_QUEUE_BYTES, MAX_QUEUE_BYTES);
-        let queue_transactions =
-            (queue_bytes / TARGET_BYTES_PER_QUEUED_TRANSACTION).clamp(1, MAX_QUEUE_TRANSACTIONS);
-        Self {
-            queue_transactions,
-            queue_bytes,
-            batch_delay: MAX_BATCH_DELAY,
-        }
-    }
-
     fn validate(self) -> io::Result<Self> {
-        if self.queue_transactions == 0 || self.queue_transactions > MAX_QUEUE_TRANSACTIONS {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "sequencer queue transaction bound must be between 1 and 1024",
-            ));
-        }
-        if self.queue_bytes == 0 || self.queue_bytes > MAX_QUEUE_BYTES {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "sequencer queue byte bound must be between 1 and 256 MiB",
-            ));
-        }
         if self.batch_delay.is_zero() || self.batch_delay > MAX_BATCH_DELAY {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -142,7 +103,6 @@ struct Shared {
     config: SequencerConfig,
     state: Mutex<QueueState>,
     ready: Condvar,
-    space: Condvar,
     /// Submitters between `submit` entry and queue push. The worker consults
     /// this before waiting for batch-mates: with no submission in flight the
     /// batch delay would be pure latency for a sequential client, so the
@@ -201,7 +161,7 @@ fn close(shared: &Shared, terminal_error: Option<ErrorSnapshot>) {
             kind: io::ErrorKind::BrokenPipe,
             message: "sequencer is closed".to_owned(),
         });
-    let pending = state.requests.drain(..).collect::<Vec<_>>();
+    let pending = std::mem::take(&mut state.requests);
     state.queued_bytes = 0;
     state.metrics.queued_transactions = 0;
     state.metrics.queued_bytes = 0;
@@ -211,7 +171,6 @@ fn close(shared: &Shared, terminal_error: Option<ErrorSnapshot>) {
         .saturating_add(pending.len() as u64);
     drop(state);
     shared.ready.notify_all();
-    shared.space.notify_all();
     for request in pending {
         let _ = request.response.send(Err(response_error.clone()));
     }
@@ -235,7 +194,6 @@ fn first_request(shared: &Shared) -> io::Result<Option<Request>> {
     loop {
         if !guard.requests.is_empty() {
             let request = pop_front(&mut guard);
-            shared.space.notify_all();
             return Ok(Some(request));
         }
         if guard.closed {
@@ -264,7 +222,6 @@ fn fill_group(shared: &Shared, group: &mut Vec<Request>, deadline: Instant) -> i
                 logical_bytes = next_logical;
                 wal_bytes = next_wal;
                 let request = pop_front(&mut guard);
-                shared.space.notify_all();
                 group.push(request);
                 break;
             }
@@ -368,6 +325,21 @@ fn run_worker(mut engine: Engine, shared: &Shared) -> io::Result<()> {
     Ok(())
 }
 
+/// An accepted transaction's durable result. Dropping the ticket does not cancel it.
+pub struct CommitTicket {
+    shared: Arc<Shared>,
+    response: mpsc::Receiver<Response>,
+}
+
+impl CommitTicket {
+    pub fn wait(self) -> io::Result<CommitResult> {
+        self.response
+            .recv()
+            .map_err(|_| terminal_error_for(self.shared.as_ref()).into_error())?
+            .map_err(ErrorSnapshot::into_error)
+    }
+}
+
 pub struct CommitSequencer {
     shared: Arc<Shared>,
     worker: Mutex<Option<JoinHandle<()>>>,
@@ -400,7 +372,6 @@ impl CommitSequencer {
                 metrics: SequencerMetrics::default(),
             }),
             ready: Condvar::new(),
-            space: Condvar::new(),
             in_flight_submissions: AtomicUsize::new(0),
         });
         let worker_shared = Arc::clone(&shared);
@@ -431,42 +402,33 @@ impl CommitSequencer {
     }
 
     pub fn submit(&self, transaction: BatchTransaction) -> io::Result<CommitResult> {
+        self.enqueue(transaction)?.wait()
+    }
+
+    /// Prepare and accept owned work; only the returned ticket waits for durability.
+    pub fn enqueue(&self, transaction: BatchTransaction) -> io::Result<CommitTicket> {
         self.shared
             .in_flight_submissions
             .fetch_add(1, Ordering::AcqRel);
         let _in_flight = InFlightSubmission {
             shared: self.shared.as_ref(),
         };
-        // Hashing and envelope encoding occur on the caller, outside the
-        // single-writer worker and its short durability critical section.
         let transaction = transaction.prepare()?;
         let resident_bytes = transaction.resident_bytes();
-        if resident_bytes > self.shared.config.queue_bytes {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "transaction exceeds sequencer queue byte budget",
-            ));
-        }
         let (response_sender, response_receiver) = mpsc::sync_channel(1);
         let mut guard = state(self.shared.as_ref())?;
-        loop {
-            if guard.closed {
-                return Err(closed_error(&guard));
-            }
-            let byte_fits = guard
-                .queued_bytes
-                .checked_add(resident_bytes)
-                .is_some_and(|bytes| bytes <= self.shared.config.queue_bytes);
-            if guard.requests.len() < self.shared.config.queue_transactions && byte_fits {
-                break;
-            }
-            guard = self
-                .shared
-                .space
-                .wait(guard)
-                .map_err(|_| io::Error::other("sequencer queue lock is poisoned"))?;
+        if guard.closed {
+            return Err(closed_error(&guard));
         }
-        guard.queued_bytes += resident_bytes;
+        let queued_bytes = guard
+            .queued_bytes
+            .checked_add(resident_bytes)
+            .ok_or_else(|| io::Error::other("sequencer residency accounting overflow"))?;
+        guard
+            .requests
+            .try_reserve(1)
+            .map_err(|_| io::Error::other("sequencer request allocation failed"))?;
+        guard.queued_bytes = queued_bytes;
         guard.requests.push_back(Request {
             transaction,
             response: response_sender,
@@ -488,10 +450,10 @@ impl CommitSequencer {
         // request as a pending batch-mate and make every solo commit wait
         // the full batch delay.
         drop(_in_flight);
-        response_receiver
-            .recv()
-            .map_err(|_| terminal_error_for(self.shared.as_ref()).into_error())?
-            .map_err(ErrorSnapshot::into_error)
+        Ok(CommitTicket {
+            shared: Arc::clone(&self.shared),
+            response: response_receiver,
+        })
     }
 
     pub fn metrics(&self) -> io::Result<SequencerMetrics> {
@@ -507,7 +469,6 @@ impl Drop for CommitSequencer {
             .unwrap_or_else(|error| error.into_inner())
             .closed = true;
         self.shared.ready.notify_all();
-        self.shared.space.notify_all();
         let worker = self
             .worker
             .get_mut()
@@ -574,7 +535,6 @@ mod tests {
                 },
             }),
             ready: Condvar::new(),
-            space: Condvar::new(),
             in_flight_submissions: AtomicUsize::new(0),
         });
         (shared, receivers)
@@ -667,20 +627,8 @@ mod tests {
     }
 
     #[test]
-    fn queue_and_delay_configuration_hard_bounds_fail_closed() {
+    fn invalid_batch_delay_fails_before_creating_authority() {
         let invalid = [
-            SequencerConfig {
-                queue_transactions: 0,
-                ..SequencerConfig::default()
-            },
-            SequencerConfig {
-                queue_transactions: MAX_QUEUE_TRANSACTIONS + 1,
-                ..SequencerConfig::default()
-            },
-            SequencerConfig {
-                queue_bytes: MAX_QUEUE_BYTES + 1,
-                ..SequencerConfig::default()
-            },
             SequencerConfig {
                 batch_delay: Duration::ZERO,
                 ..SequencerConfig::default()
@@ -717,59 +665,72 @@ mod tests {
     }
 
     #[test]
-    fn queue_budget_derives_from_launch_headroom_and_clamps_extremes() {
-        assert_eq!(
-            SequencerConfig::from_memory_headroom(0),
-            SequencerConfig::lean_fallback()
+    fn demand_above_former_slot_and_residency_quotas_drains_and_reopens() {
+        let (vfs, engine) = engine();
+        let (shared, _) = preloaded(Vec::new());
+        shared.state.lock().unwrap().closed = false;
+        let sequencer = CommitSequencer {
+            shared: Arc::clone(&shared),
+            worker: Mutex::new(None),
+        };
+        let started = Instant::now();
+        let tickets = (0..1100)
+            .map(|ordinal| {
+                sequencer
+                    .enqueue(BatchTransaction {
+                        inline_payload: format!("demand-{ordinal}").into_bytes(),
+                        block_payloads: vec![vec![(ordinal % 251) as u8; 16 * 1024]],
+                    })
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let metrics = sequencer.metrics().unwrap();
+        assert_eq!(metrics.queued_transactions, 1100);
+        assert!(metrics.queued_bytes > 16 * 1024 * 1024);
+        eprintln!(
+            "sequencer_demand accepted=1100 queued_bytes={} enqueue_us={}",
+            metrics.queued_bytes,
+            started.elapsed().as_micros()
         );
-        assert_eq!(
-            SequencerConfig::from_memory_headroom(2 * 1024 * 1024 * 1024),
-            SequencerConfig {
-                queue_transactions: 64,
-                queue_bytes: 16 * 1024 * 1024,
-                batch_delay: MAX_BATCH_DELAY,
-            }
-        );
-        assert_eq!(
-            SequencerConfig::from_memory_headroom(4 * 1024 * 1024 * 1024),
-            SequencerConfig {
-                queue_transactions: 128,
-                queue_bytes: 32 * 1024 * 1024,
-                batch_delay: MAX_BATCH_DELAY,
-            }
-        );
-        assert_eq!(
-            SequencerConfig::from_memory_headroom(u64::MAX),
-            SequencerConfig {
-                queue_transactions: MAX_QUEUE_TRANSACTIONS,
-                queue_bytes: MAX_QUEUE_BYTES,
-                batch_delay: MAX_BATCH_DELAY,
-            }
-        );
+        shared.state.lock().unwrap().closed = true;
+        let worker_shared = Arc::clone(&shared);
+        *sequencer.worker.lock().unwrap() = Some(thread::spawn(move || {
+            run_worker(engine, &worker_shared).unwrap()
+        }));
+        let mut blocks = Vec::new();
+        for (ordinal, ticket) in tickets.into_iter().enumerate() {
+            let result = ticket.wait().unwrap();
+            assert_eq!(result.sequence, ordinal as u64 + 1);
+            assert_eq!(result.block_ids.len(), 1);
+            blocks.push((ordinal, result.block_ids[0]));
+        }
+        let metrics = sequencer.metrics().unwrap();
+        assert_eq!(metrics.committed_transactions, 1100);
+        assert_eq!(metrics.queued_bytes, 0);
+        assert_eq!(metrics.failed_transactions, 0);
+        assert!(metrics.durability_groups > 1);
+        assert!(metrics.largest_group_transactions <= MAX_GROUP_TRANSACTIONS);
+        drop(sequencer); // joins the owned writer before reopen
+        let reopened = Engine::open_with_vfs(Path::new("/data"), vfs).unwrap();
+        assert_eq!(reopened.next_sequence().unwrap(), 1101);
+        for (ordinal, block) in blocks {
+            assert_eq!(
+                reopened.read_block(block).unwrap(),
+                vec![(ordinal % 251) as u8; 16 * 1024]
+            );
+        }
     }
 
     #[test]
-    fn transaction_larger_than_queue_budget_never_reaches_worker() {
+    fn dropped_ticket_keeps_accepted_work_and_writer_close_joins_before_reopen() {
         let (vfs, engine) = engine();
-        let sequencer = CommitSequencer::start(
-            engine,
-            SequencerConfig {
-                queue_bytes: 256,
-                ..SequencerConfig::default()
-            },
-        )
-        .unwrap();
-        assert_eq!(
-            sequencer
-                .submit(BatchTransaction {
-                    inline_payload: vec![3; 512],
-                    block_payloads: Vec::new(),
-                })
-                .unwrap_err()
-                .kind(),
-            io::ErrorKind::InvalidInput
-        );
-        assert!(vfs.trace().unwrap().is_empty());
+        let sequencer = CommitSequencer::start(engine, SequencerConfig::default()).unwrap();
+        drop(sequencer.enqueue(transaction(1)).unwrap());
+        let second = sequencer.enqueue(transaction(2)).unwrap();
+        drop(sequencer);
+        assert_eq!(second.wait().unwrap().sequence, 2);
+        let reopened = Engine::open_with_vfs(Path::new("/data"), vfs).unwrap();
+        assert_eq!(reopened.next_sequence().unwrap(), 3);
     }
 
     #[test]

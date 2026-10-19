@@ -1,5 +1,6 @@
 """Real owned event projections reconcile transient/lost Goal acknowledgements."""
 from copy import deepcopy
+from threading import Event
 
 import pytest
 
@@ -14,13 +15,10 @@ pytest_plugins = ('tests.support.postgres_cluster',)
 pytestmark = pytest.mark.unit
 
 
-class AbortWait:
-    def __init__(self, aborted=False):
-        self.aborted = aborted
-        self.delays = []
-    def wait(self, timeout):
-        self.delays.append(timeout)
-        return self.aborted
+@pytest.fixture(autouse=True)
+def fast_backoff(monkeypatch):
+    from lib.tasks_pkg import persistence_wait
+    monkeypatch.setattr(persistence_wait, '_BASE_DELAY_SECONDS', 0.0)
 
 
 class FaultingRuns:
@@ -31,6 +29,7 @@ class FaultingRuns:
         self.target = None
         self.attempts = []
         self.header_committed = False
+        self.on_attempt = None
     def __getattr__(self, name):
         return getattr(self.runs, name)
     def project_event(self, run_id, cursor, packet):
@@ -47,6 +46,8 @@ class FaultingRuns:
         if self.target is not None and (run_id, cursor) == self.target[:2]:
             self.attempts.append(identity)
             assert identity == self.target
+            if self.on_attempt is not None:
+                self.on_attempt(len(self.attempts))
             if self.persistent or len(self.attempts) == 1:
                 if self.after_commit:
                     assert self.runs.project_event(run_id, cursor, packet)
@@ -85,6 +86,7 @@ def run_effect(recovery, runs):
 @pytest.mark.parametrize('phase,code', [
     ('header_chunk', 'database_timeout'),
     ('execution_journal_ready', 'database_busy'),
+    ('execution_account_frontier', 'database_timeout'),
     ('execution_effect_started', 'database_unavailable'),
     ('completion_chunk', 'database_busy'),
     ('execution_effect_completed', 'database_timeout'),
@@ -92,14 +94,14 @@ def run_effect(recovery, runs):
 @pytest.mark.parametrize('after_commit', [False, True])
 def test_identical_packet_retry_never_repeats_effect_or_chunks(recovery, phase, code, after_commit):
     recovery.task['messages'].insert(0, {'role': 'system', 'content': 'launch policy' * 100_000})
-    control = recovery.task['abort_event'] = AbortWait()
+    recovery.task['abort_event'] = Event()
     runs = FaultingRuns(recovery.runs, phase=phase, code=code, after_commit=after_commit)
     journal, runner, calls, snapshot = run_effect(recovery, runs)
     result = runner({'id': 'a'}, 'context', 0)
     assert result.output == 'settled'
     assert calls == ['model/tool']
     assert len(runs.attempts) == 2
-    assert control.delays == [1.0]
+    assert not recovery.task.get('_storageWaits')
     rows = packets(recovery)
     chunk_keys = [(row['sha256'], row['index']) for row in rows if row.get('type') == CHUNK_EVENT]
     assert len(chunk_keys) == len(set(chunk_keys))
@@ -111,23 +113,25 @@ def test_identical_packet_retry_never_repeats_effect_or_chunks(recovery, phase, 
     assert not journal.abort_requested()
 
 
-@pytest.mark.parametrize('failure,expected_attempts,expected_delays', [
-    ('exhausted', 4, [1.0, 2.0, 4.0]),
-    ('owner_stop', 1, [1.0]),
-    ('conflict', 1, []),
-    ('rejected', 1, []),
+@pytest.mark.parametrize('failure,expected_attempts', [
+    ('shutdown', 4),
+    ('conflict', 1),
+    ('rejected', 1),
 ])
-def test_unacknowledged_completion_retains_ambiguity_and_never_reexecutes(recovery, failure, expected_attempts, expected_delays):
-    control = recovery.task['abort_event'] = AbortWait(aborted=failure == 'owner_stop')
+def test_unacknowledged_completion_retains_ambiguity_and_never_reexecutes(recovery, failure, expected_attempts):
+    recovery.task['abort_event'] = Event()
     runs = FaultingRuns(recovery.runs, phase='execution_effect_completed',
                         code='database_conflict' if failure == 'conflict' else 'database_busy',
                         persistent=True, rejected=failure == 'rejected')
+    if failure == 'shutdown':
+        runs.on_attempt = lambda attempt: recovery.task.update(
+            _abort_reason='server_shutdown') if attempt == 4 else None
     journal, runner, calls, _ = run_effect(recovery, runs)
     with pytest.raises(RecoveryRefused):
         runner({'id': 'a'}, 'context', 0)
     assert calls == ['model/tool']
     assert len(runs.attempts) == expected_attempts
-    assert control.delays == expected_delays
+    assert not recovery.task.get('_storageWaits')
     assert journal.abort_requested()
     with pytest.raises(RecoveryRefused, match='external effects are unknown'):
         read_goal_execution(packets(recovery), run=recovery.runs.get_execution_snapshot('goal_source-task'),
@@ -148,7 +152,7 @@ def test_recovery_source_acknowledgement_reconciles_transient_delivery(recovery,
         task, runs=recovery.runs,
         conversation_repository=recovery.ports.conversation_repository, get_attempt=get_attempt)
     recovery.service.start(task, seed.definition)
-    control = task['abort_event'] = AbortWait()
+    task['abort_event'] = Event()
     class LostAcknowledgement:
         def __init__(self):
             self.attempts = 0
@@ -165,7 +169,7 @@ def test_recovery_source_acknowledgement_reconciles_transient_delivery(recovery,
             return recovery.runs.append_event(run_id, cursor, packet)
     runs = LostAcknowledgement()
     journal = create_goal_execution_journal(task, seed.definition, seed.launch(), runs=runs)
-    assert control.delays == [1.0]
+    assert not task.get('_storageWaits')
     assert runs.attempts == (1 if after_commit else 2)
     assert recovery_claim_successor(recovery.runs, seed.source_run_id) == successor
     assert not journal.abort_requested()

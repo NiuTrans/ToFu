@@ -7,8 +7,8 @@ import logging
 
 import pytest
 
-from lib.app_factory import create_base_app
-from lib.http_compat_middleware import register_static_cache_headers
+from lib.app.app_factory import create_base_app
+from lib.http_transport.compat_middleware import register_static_cache_headers
 from lib.static_serving import load_static_bytes, register_static_route
 
 

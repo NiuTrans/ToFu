@@ -17,7 +17,7 @@ for surviving recipes. Policy exclusions (EXCLUDED) win over the probe:
 the retired original GPT-5 family stays out even though the gateway serves
 it, per the dated note in lib/llm_dispatch/config/_slots.py.
 
-Probe routing reuses ``lib.provider_probe.build_probe_work`` so a Claude
+Probe routing reuses ``lib.provider.provider_probe.build_probe_work`` so a Claude
 candidate is probed on the Anthropic face exactly the way the dispatcher
 would route it — never a re-derived face guess.
 
@@ -264,7 +264,7 @@ def probe_wires(wires: list[str], base_url: str, api_key: str,
                 timeout: int = 20) -> dict[str, tuple[str, str]]:
     """wire -> (verdict, detail), routed through build_probe_work so each id
     is probed on the face the dispatcher would use (Claude -> anthropic)."""
-    from lib.provider_probe import build_probe_work, probe_one_cell
+    from lib.provider.provider_probe import build_probe_work, probe_one_cell
     provider = {'base_url': base_url, 'protocol': 'openai',
                 'faces': _load_template().get('faces') or {}}
     models = [{'model_id': w, 'capabilities': []} for w in wires]

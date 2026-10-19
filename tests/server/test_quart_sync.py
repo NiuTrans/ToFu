@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import threading
+from contextvars import ContextVar
 
 import pytest
 
@@ -16,6 +18,62 @@ pytestmark = pytest.mark.unit
 def test_resolve_plain_value_is_passthrough():
     marker = object()
     assert quart_sync.resolve(marker) is marker
+
+
+@pytest.mark.parametrize('failure', [None, OSError('command failed')])
+def test_owned_command_joins_repeated_cancellation_and_preserves_request_context(failure):
+    identity = ContextVar('fixture-owner')
+    entered, release = threading.Event(), threading.Event()
+    completed = []
+
+    @quart_sync.owned_sync_command
+    def command():
+        owner = identity.get()
+        entered.set()
+        if not release.wait(5):
+            raise TimeoutError('test did not release command')
+        completed.append(owner)
+        if failure is not None:
+            raise failure
+        return owner
+
+    async def exercise():
+        identity.set(41)
+        task = asyncio.create_task(command())
+        try:
+            assert await asyncio.to_thread(entered.wait, 3)
+            identity.set(42)
+            for _ in range(2):
+                task.cancel()
+                await asyncio.sleep(0)
+                assert not task.done() and not completed
+        finally:
+            release.set()
+        if failure is None:
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        else:
+            with pytest.raises(BaseExceptionGroup) as caught:
+                await task
+            assert isinstance(caught.value.exceptions[0], asyncio.CancelledError)
+            assert caught.value.exceptions[1] is failure
+        assert completed == [41]
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize('failure', [KeyboardInterrupt('interrupted'), SystemExit('exit')])
+def test_owned_command_delivers_control_failure_to_its_awaiting_owner(failure):
+    @quart_sync.owned_sync_command
+    def command():
+        raise failure
+
+    async def exercise():
+        with pytest.raises(type(failure)) as caught:
+            await command()
+        assert caught.value is failure
+
+    asyncio.run(exercise())
 
 
 def test_resolve_awaitable_without_running_loop():

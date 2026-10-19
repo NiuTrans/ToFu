@@ -16,25 +16,25 @@ from lib.storage import StorageSupervisor
 from lib.storage.client import StorageClient
 from lib.storage.errors import StorageError
 from lib.secret_envelope import reset_secret_envelope_for_test
-from lib.storage_sidecar.operation_domains import REGISTRY_VERSION
-from lib.storage_sidecar.schema import SCHEMA_VERSION, initialize_schema
-from lib.storage_sidecar.adapters.sqlite import SQLiteBackend, SQLiteSession
-from lib.storage_sidecar.config import SidecarConfig
-from lib.storage_sidecar.logical_outbox import (
+from lib.storage_authority_sql.operation_domains import REGISTRY_VERSION
+from lib.storage_authority_sql.schema import SCHEMA_VERSION, initialize_schema
+from lib.storage_authority_sql.adapters.sqlite import SQLiteBackend, SQLiteSession
+from lib.storage_authority_sql.config import SidecarConfig
+from lib.storage_authority_sql.logical_outbox import (
     LogicalOutboxPipeline,
     LogicalOutboxPolicy,
     _fetch_pending,
     decode_logical_payload,
     policy_from_config,
 )
-from lib.storage_sidecar.logical_replay import (
+from lib.storage_authority_sql.logical_replay import (
     BackendReplayTarget,
     ReplayCheckpoint,
     replay_records,
 )
-from lib.storage_sidecar.logical_shadow import LogicalCommitShadow
-from lib.storage_sidecar import logical_outbox
-from lib.storage_sidecar.server import create_server
+from lib.storage_authority_sql.logical_shadow import LogicalCommitShadow
+from lib.storage_authority_sql import logical_outbox
+from lib.storage_authority_sql.server import create_server
 
 
 pytestmark = pytest.mark.unit
@@ -132,7 +132,7 @@ def test_policy_is_topology_aware_and_distributed_publish_has_one_role(tmp_path)
     assert capture_only.publisher_enabled is False
 
 
-def test_logical_configuration_is_explicit_bounded_and_absolute(
+def test_logical_configuration_preserves_explicit_permissions_and_absolute_paths(
     tmp_path, monkeypatch,
 ):
     root = tmp_path / 'config-root'
@@ -153,15 +153,14 @@ def test_logical_configuration_is_explicit_bounded_and_absolute(
     assert config.logical_shadow_mode == 'required'
     assert config.logical_shadow_dir == sink.resolve()
     assert config.logical_shadow_access == 'group'
-    assert config.logical_outbox_max_bytes == 32 * 1024 * 1024
-    assert config.logical_shadow_max_bytes == 128 * 1024 * 1024
+    assert config.logical_outbox_max_bytes > 0
+    assert config.logical_shadow_max_bytes == config.logical_outbox_max_bytes * 4
     assert config.logical_shadow_segment_bytes == 32 * 1024 * 1024
-    assert config.logical_record_max_bytes == 8 * 1024 * 1024
+    assert config.logical_record_max_bytes == 4 * 1024 * 1024
     assert config.logical_publish_batch_size == 7
 
     monkeypatch.setenv('TOFU_STORAGE_LOGICAL_RECORD_MAX_MIB', '17')
-    with pytest.raises(RuntimeError, match='at most half'):
-        SidecarConfig.from_environment()
+    assert SidecarConfig.from_environment().logical_record_max_bytes == config.logical_record_max_bytes
     monkeypatch.setenv('TOFU_STORAGE_LOGICAL_RECORD_MAX_MIB', '8')
     monkeypatch.setenv('TOFU_STORAGE_LOGICAL_SHADOW_DIR', 'relative/sink')
     with pytest.raises(RuntimeError, match='must be absolute'):
@@ -367,7 +366,7 @@ def test_sidecar_process_parses_and_owns_required_pipeline(tmp_path, monkeypatch
     assert [record['operation'] for record in records] == ['record.put']
 
 
-def test_oversize_capture_rolls_back_the_domain_mutation(tmp_path, monkeypatch):
+def test_large_capture_retains_the_business_mutation_and_complete_encrypted_response(tmp_path, monkeypatch):
     monkeypatch.setenv('TOFU_STORAGE_FASTPATH', 'off')
     backend = SQLiteBackend(_config(tmp_path, role='api'))
     backend.start()
@@ -400,20 +399,21 @@ def test_oversize_capture_rolls_back_the_domain_mutation(tmp_path, monkeypatch):
                 request_digest='a' * 64,
                 command_id='oversize-command',
                 payload={'value': 'small'},
-                response={'value': 'x' * 2048},
+                response={'value': '原文' * 1500000},
             )
 
-        with pytest.raises(StorageError) as raised:
-            backend.command(
-                'test.oversize',
-                'b' * 64,
-                None,
-                'user',
-                command,
-                time.monotonic() + 5,
-                receipt_required=False,
-            )
-        assert raised.value.code == 'storage_payload_too_large'
+        backend.command('test.large', 'b' * 64, None, 'user', command,
+                        time.monotonic() + 15, receipt_required=False)
+        pending = backend.query('test.large.pending', lambda session: _fetch_pending(session, limit=1),
+                                time.monotonic() + 5)
+        assert len(pending) == 1
+        assert pending[0].record_bytes > policy.max_record_bytes
+        pipeline._sink = LogicalCommitShadow(tmp_path / 'large-sink', stream_id=pipeline._stream_id,
+            max_segment_bytes=8192, max_record_bytes=512, max_total_bytes=16384)
+        pipeline._publish(pending[0])
+        records = pipeline._sink.read_records()
+        assert decode_logical_payload(records[0])['response']['value'] == '原文' * 1500000
+        assert pipeline._state_snapshot()['pending_records'] == 0
         assert backend.query(
             'test.rollback.verify',
             lambda session: session.fetch_one(
@@ -422,7 +422,7 @@ def test_oversize_capture_rolls_back_the_domain_mutation(tmp_path, monkeypatch):
                 ('logical-test', 'rolled-back'),
             ),
             time.monotonic() + 5,
-        ) is None
+        ) is not None
     finally:
         pipeline.close()
         backend.close()
@@ -518,7 +518,7 @@ def test_encryption_key_change_fails_before_accepting_more_commands(
         backend.close()
 
 
-def test_pending_byte_ceiling_backpressures_and_rolls_back_only_new_work(
+def test_pending_and_record_byte_hints_preserve_all_business_work(
     tmp_path, monkeypatch,
 ):
     monkeypatch.setenv('TOFU_STORAGE_FASTPATH', 'off')
@@ -558,22 +558,10 @@ def test_pending_byte_ceiling_backpressures_and_rolls_back_only_new_work(
                     response={'ok': True},
                 )
 
-            try:
-                backend.command(
-                    'test.bounded-backlog',
-                    f'{index + 1:064x}',
-                    None,
-                    'user',
-                    command,
-                    time.monotonic() + 5,
-                    receipt_required=False,
-                )
-                committed += 1
-            except StorageError as exc:
-                assert exc.code == 'database_busy'
-                break
-        else:
-            raise AssertionError('bounded outbox never applied backpressure')
+            backend.command(
+                'test.durable-backlog', f'{index + 1:064x}', None, 'user', command,
+                time.monotonic() + 5, receipt_required=False)
+            committed += 1
 
         counts = backend.query(
             'test.bounded-backlog.verify',
@@ -590,9 +578,9 @@ def test_pending_byte_ceiling_backpressures_and_rolls_back_only_new_work(
             },
             time.monotonic() + 5,
         )
-        assert committed >= 1
+        assert committed == 10
         assert counts['domain'] == counts['outbox'] == committed
-        assert counts['pending_bytes'] <= policy.max_pending_bytes
+        assert counts['pending_bytes'] > policy.max_pending_bytes
     finally:
         pipeline.close()
         backend.close()
@@ -792,3 +780,60 @@ def test_publisher_generic_failure_logs_message_and_traceback(
     finally:
         publisher.close()
         backend.close()
+
+
+
+def test_complete_mutation_batch_exceeds_former_command_quota_and_replays(tmp_path, monkeypatch):
+    monkeypatch.setenv('TOFU_STORAGE_FASTPATH', 'off')
+    backend = SQLiteBackend(_config(tmp_path, role='api'))
+    backend.start()
+    policy = LogicalOutboxPolicy('required', True, False, None, 'complete mutations',
+                                1, 1, 8192, 1, 1)
+    pipeline = LogicalOutboxPipeline(backend, policy)
+    pipeline.start()
+    try:
+        def command(session):
+            response, _ = pipeline.execute_and_capture(session, lambda recorder: recorder.execute_many_exact(
+                'INSERT INTO storage_records(namespace, record_key, value_json, version, updated_at_ms) VALUES (?, ?, ?, ?, ?)',
+                [('complete-mutations', str(i), b'{}', 1, 1) for i in range(4097)]),
+                operation='record.put', request_id='complete', request_digest='c'*64,
+                command_id='complete', payload={'count': 4097})
+            return response
+        assert backend.command('test.complete-mutations', 'c'*64, None, 'user', command,
+                               time.monotonic()+15, receipt_required=False) == 4097
+        record = backend.query('test.pending', lambda session: _fetch_pending(session, 1), time.monotonic()+5)[0]
+        pipeline._sink = LogicalCommitShadow(tmp_path / 'complete-sink', stream_id=pipeline._stream_id,
+                                             max_segment_bytes=8192, max_record_bytes=1, max_total_bytes=1)
+        pipeline._publish(record)
+        original = pipeline._sink.read_records()[0]
+        assert len(decode_logical_payload(original)['mutations']) == 4097
+        target_backend = SQLiteBackend(_config(tmp_path / 'target', role='api'))
+        target_backend.start()
+        try:
+            target = BackendReplayTarget(target_backend, target_name='complete-target', stream_id=pipeline._stream_id)
+            replay_records([original], target)
+            count = target_backend.query('test.complete-count', lambda session: int(session.fetch_one(
+                'SELECT COUNT(*) AS count FROM storage_records WHERE namespace = ?', ('complete-mutations',))['count']),
+                time.monotonic()+5)
+            assert count == 4097
+        finally:
+            target_backend.close()
+    finally:
+        pipeline.close()
+        backend.close()
+
+
+
+def test_logical_capacity_knobs_are_retired_and_work_hints_have_no_upper_ceiling(tmp_path, monkeypatch):
+    monkeypatch.setenv('TOFU_STORAGE_FASTPATH', 'off')
+    monkeypatch.setenv('TOFU_STORAGE_PROJECT_ROOT', str(tmp_path))
+    monkeypatch.setenv('TOFU_STORAGE_ALLOW_PROJECT_OVERRIDE', '1')
+    monkeypatch.setenv('TOFU_STORAGE_TOKEN', _TOKEN)
+    for name in ('TOFU_STORAGE_LOGICAL_OUTBOX_MAX_MIB', 'TOFU_STORAGE_LOGICAL_SHADOW_MAX_MIB',
+                 'TOFU_STORAGE_LOGICAL_RECORD_MAX_MIB'):
+        monkeypatch.setenv(name, 'retired-invalid-value')
+    monkeypatch.setenv('TOFU_STORAGE_LOGICAL_SEGMENT_MIB', '4097')
+    monkeypatch.setenv('TOFU_STORAGE_LOGICAL_PUBLISH_BATCH', '1025')
+    config = SidecarConfig.from_environment()
+    assert config.logical_shadow_segment_bytes == 4097 * 1024 * 1024
+    assert config.logical_publish_batch_size == 1025

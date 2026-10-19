@@ -24,17 +24,17 @@ from lib.api_v4 import (
     configure_api_version_policy,
     legacy_api_upgrade_before_request,
 )
-from lib.api_v4_generated import (
+from lib.generated_api_v4 import (
     OPENAPI_DOCUMENT,
     validate_api_meta_response,
 )
 from lib.api_response import api_unauthorized
-from lib.app_assembly import create_application
-from lib.app_factory import create_base_app
-from lib.http_body_policy import HttpBodyPolicy
-from lib.http_error_handlers import register_http_error_handlers
-from lib.http_request_lifecycle import register_request_lifecycle
-from lib.storage_sidecar.schema import SCHEMA_VERSION
+from lib.app.app_assembly import create_application
+from lib.app.app_factory import create_base_app
+from lib.http_transport.body_policy import HttpBodyPolicy
+from lib.http_transport.error_handlers import register_http_error_handlers
+from lib.http_transport.request_lifecycle import register_request_lifecycle
+from lib.storage_authority_sql.schema import SCHEMA_VERSION
 from lib.version import __version__
 from routes import ALL_BLUEPRINTS
 from routes.api_v4.bootstrap import api_v4_bp

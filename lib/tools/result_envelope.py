@@ -441,12 +441,21 @@ class ToolResultEnvelopeV2:
         ).with_visible_bytes()
 
 
+def tool_error_next_action(value: Any) -> str:
+    """Bound recovery advice without inferring replay safety from retryability."""
+    return (str(value or '').strip() or (
+        'Inspect the error and current tool contract. Correct rejected arguments '
+        'or use another authorized approach. Before repeating an operation that '
+        'may have run, verify its outcome. Continue independent work; report any '
+        'remaining blocker.'))[:300]
+
+
 def typed_tool_error(code: str, *, retryable: bool, next_action: str,
                      message: str = "") -> ToolResultEnvelopeV2:
     error = ToolResultErrorV2(
         code=str(code or "tool_error")[:96],
         retryable=bool(retryable),
-        next_action=str(next_action or "Stop and report the failure.")[:300],
+        next_action=tool_error_next_action(next_action),
         message=str(message or "")[:500],
     )
     return ToolResultEnvelopeV2(
@@ -593,5 +602,5 @@ __all__ = [
     "ToolResultRecoveryV2", "model_text_from_tool_result",
     "nonretryable_tool_error_code", "sparse_result_items",
     "split_tool_result_delivery",
-    "tool_result_error", "tool_result_observation", "typed_tool_error",
+    "tool_error_next_action", "tool_result_error", "tool_result_observation", "typed_tool_error",
 ]

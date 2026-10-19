@@ -420,6 +420,9 @@ export function createToolCommandExecutionPresentation(
   ): string {
     if (!commandRound(round)) return '';
     const metadata = record(firstResult);
+
+    const lazyReference = field(round, '_snapshotToolResult');
+    const nativeOutput = Boolean(lazyReference || field(round, '_displayToolResultReference'));
     const argumentsProjection = projectArguments(field(round, 'toolArgs'));
     const command = boundedText(firstDefinedString(
       field(metadata, 'command'),
@@ -508,7 +511,7 @@ export function createToolCommandExecutionPresentation(
     const collapsible = commandIsCollapsible(command, description);
     const key = interactionKey(round);
     const bodyOpen = Boolean(collapsible && key && interaction.bodyExpanded);
-    const hasOutput = !notRun && Boolean(output);
+    const hasOutput = !notRun && (Boolean(output) || nativeOutput);
     const outputOpen = Boolean(hasOutput && key && interaction.outputExpanded);
     const outputLimitHtml = outputProjection.truncated
       ? limitNoteHtml('toolCommandExecution.outputLimit', RESULT_UNITS)
@@ -527,6 +530,14 @@ export function createToolCommandExecutionPresentation(
            <pre class="ptool-cmd-output"><code>${escapeHtmlText(output)}</code></pre>${outputLimitHtml}
          </div>`;
     }
+
+    if (nativeOutput && !notRun) {
+      const preview = stringField(lazyReference, 'preview');
+      outputHtml = `<details class="ptool-result-block" data-lazy-tool-result="" data-tool-result-authority="${lazyReference ? 'deferred' : 'toolContent'}">
+        <summary>${escapeHtmlText(translate('toolCmd.foldOutput'))}</summary>
+        <div class="ptool-result-body"><pre class="ptool-cmd-output"><code>${escapeHtmlText(lazyReference ? preview : output)}</code></pre>${outputLimitHtml}</div>
+      </details>`;
+    }
     const argumentsLimitHtml = argumentsProjection.serializedArgumentsExceeded
       ? limitNoteHtml(
         'toolCommandExecution.argumentsLimit',
@@ -543,12 +554,12 @@ export function createToolCommandExecutionPresentation(
       )
       : '';
 
-    return `<div class="ptool-cmd-block ${statusClassName}${bodyOpen ? ' cmd-open' : ''}${hasOutput ? ' ptool-cmd-hasoutput' : ''}${outputOpen ? ' output-open' : ''}" data-rn="${escapeHtmlText(field(round, 'roundNum'))}"${collapsible ? ` data-cmd-key="${escapeHtmlText(key)}"` : ''}${hasOutput ? ` data-output-key="${escapeHtmlText(key)}"` : ''}>
+    return `<div class="ptool-cmd-block ${statusClassName}${bodyOpen ? ' cmd-open' : ''}${hasOutput ? ' ptool-cmd-hasoutput' : ''}${outputOpen ? ' output-open' : ''}" data-rn="${escapeHtmlText(field(round, 'roundNum'))}"${collapsible ? ` data-cmd-key="${escapeHtmlText(key)}"` : ''}${hasOutput && !nativeOutput ? ` data-output-key="${escapeHtmlText(key)}"` : ''}>
          <div class="ptool-cmd-header">
            <span class="ptool-cmd-icon">${header.iconHtml}</span>
            ${descriptionHtml(description)}
            <div class="ptool-cmd-meta"><span class="ptool-cmd-identity">${commandCardContextHtml('terminal', translate)}${header.rootPillHtml}${grepInterceptBadgeHtml()}</span>
-           <span class="ptool-cmd-right">${collapsible ? foldChipHtml('cmd', bodyOpen) : ''}${hasOutput ? foldChipHtml('output', outputOpen) : ''}${header.rightControlsHtml}<span class="ptool-cmd-verdict"><span class="ptool-cmd-status">${escapeHtmlText(statusLabel)}</span></span></span></div>
+           <span class="ptool-cmd-right">${collapsible ? foldChipHtml('cmd', bodyOpen) : ''}${hasOutput && !nativeOutput ? foldChipHtml('output', outputOpen) : ''}${header.rightControlsHtml}<span class="ptool-cmd-verdict"><span class="ptool-cmd-status">${escapeHtmlText(statusLabel)}</span></span></span></div>
          </div>${argumentsLimitHtml}${descriptionLimitHtml}
          <pre class="ptool-cmd-code${collapsible ? ' ptool-cmd-collapsible' : ''}"><code>${workingDirectoryHtml(argumentsProjection)}$ ${escapeHtmlText(command.value)}</code></pre>${commandLimitHtml}
          ${qrStripHtml(metadata)}${outputHtml}

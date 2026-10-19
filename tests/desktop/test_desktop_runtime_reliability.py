@@ -135,7 +135,7 @@ def test_retry_wait_is_interruptible(monkeypatch, failure):
                        'auth' if failure in (401, 403) else 'http')]
 
 
-@pytest.mark.parametrize('kind', ['project_run_command', 'egress_http_stream'])
+@pytest.mark.parametrize('kind', ['project_run_command', 'desktop_run_command', 'egress_http_stream'])
 def test_streamed_work_retains_admission_until_terminal(monkeypatch, kind):
     stop, started, release, finished = (threading.Event() for _ in range(4))
     calls = []
@@ -143,19 +143,20 @@ def test_streamed_work_retains_admission_until_terminal(monkeypatch, kind):
     monkeypatch.setattr(_run, '_ensure_agent_id', lambda: 'test-agent')
     monkeypatch.setattr(_run, 'load_config', lambda: {})
 
-    def stream(cmd_id, params, permissions, results, streams, lock):
+    def stream(cmd_id, params, permissions, results, streams, lock, **options):
         calls.append(cmd_id)
         started.set()
         def finish():
             assert release.wait(2)
             results.append({'id': cmd_id, 'result': {}, 'error': None})
             finished.set()
-        if kind == 'project_run_command':
+        if kind in ('project_run_command', 'desktop_run_command'):
+            assert options.get('cmd_type', 'project_run_command') == kind
             threading.Thread(target=finish).start()
         else:
             finish()  # Egress implementation is synchronous.
 
-    monkeypatch.setattr(_run, '_start_project_run_streamed' if kind == 'project_run_command'
+    monkeypatch.setattr(_run, '_start_project_run_streamed' if kind in ('project_run_command', 'desktop_run_command')
                         else '_start_egress_stream_streamed', stream)
     count = 0
     class Response:
@@ -211,10 +212,13 @@ def test_poll_never_forwards_credential_on_redirect(monkeypatch):
     _run.run_agent('https://test', {}, .001, stop_event=stop, bridge_secret='test-only')
 
 
-def test_poll_dispatches_burst_without_worker_quota_and_replayed_execution(monkeypatch):
+@pytest.mark.parametrize("negotiated",[False,True])
+def test_poll_dispatches_burst_without_worker_quota_and_replayed_execution(monkeypatch,negotiated):
     import time
     stop, release, all_started = threading.Event(), threading.Event(), threading.Event()
     commands = [{'id': f'burst-{index}', 'type': 'fixture', 'params': {}} for index in range(32)]
+    if negotiated:
+        for row in commands:row.update(target_agent_id='fixture-agent',expires_at=900,deadline_enforced=False)
     entered, delivered = [], []
     lock = threading.Lock()
     def execute(kind, params, permissions):
@@ -228,7 +232,7 @@ def test_poll_dispatches_burst_without_worker_quota_and_replayed_execution(monke
     class Response:
         status_code = 200
         def json(self):
-            return {'commands': commands}
+            return {'commands': commands, **({'protocol_version':3,'server_time':1000} if negotiated else {})}
     def post(url, **kwargs):
         polls[0] += 1
         if polls[0] > 1:

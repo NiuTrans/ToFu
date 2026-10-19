@@ -126,7 +126,7 @@ def _ensure_cjk_sans(*, download: bool = True, timeout: int = 90) -> str:
     if not download:
         return ''
 
-    from lib.http_client import http_get
+    from lib.http_transport.client import http_get
     for url, suffix in _SOURCES:
         try:
             resp = http_get(url, timeout=timeout)

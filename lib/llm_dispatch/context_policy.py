@@ -29,6 +29,7 @@ def pinned_context_profile(model, *, provider_id='', owner_user_id=None, pin='')
         return None
     from lib.llm_dispatch.factory import get_dispatcher
     candidates = []
+    output_caps = []
     exact = True
     for slot in list(get_dispatcher().slots):
         if pin and slot.provider_id != pin:
@@ -52,9 +53,20 @@ def pinned_context_profile(model, *, provider_id='', owner_user_id=None, pin='')
         if not window:
             return None
         candidates.append(int(window))
+
+        from lib.model_info import _clamp_route_max_tokens, _route_output_limit_key
+        route_key = _route_output_limit_key(
+            provider_id=str(getattr(slot, 'routing_provider_id', '') or slot.provider_id or ''),
+            offering_id=str(getattr(slot, 'route_offering_id', '') or ''),
+            deployment_id=str(getattr(slot, 'route_deployment_id', '') or ''),
+            protocol=str(slot.protocol or 'openai'), model=str(slot.model or ''))
+        output_caps.append(_clamp_route_max_tokens(
+            slot.model, int(window), route_key=route_key,
+            declared_limit=int(getattr(slot, 'max_output_tokens', 0) or 0)))
     if not candidates:
         return None
-    return {'window': min(candidates), 'source': 'model_routing_v2', 'exact': exact}
+    return {'window': min(candidates), 'source': 'model_routing_v2', 'exact': exact,
+            'output_cap_tokens': min(output_caps)}
 
 
 def task_context_profile(task):

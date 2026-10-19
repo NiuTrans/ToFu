@@ -580,7 +580,7 @@ def test_json_type_changes_are_real_edits_on_both_authorities(scenario, location
 
 
 def test_offline_sql_turn_projection_preserves_only_valid_nonzero_display_offset():
-    from lib.storage_sidecar.tofudb_migration_import import _turn_document, MigrationImportError
+    from lib.storage_authority_sql.migration.tofudb_migration_import import _turn_document, MigrationImportError
     row = {'turn_id': 'a', 'conversation_id': 'conv', 'presentation_id': 'a',
            'user_id': 11, 'lane_id': 'main', 'parent_turn_id': None, 'ordinal': 1,
            'actor': 'assistant', 'kind': 'real', 'run_id': '', 'status': 'completed',

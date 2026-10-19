@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import pytest
 
-import lib.provider_probe as pp
+import lib.provider.provider_probe as pp
 
 pytestmark = pytest.mark.unit
 
@@ -43,7 +43,7 @@ class _FakeResp:
 
 
 def _patch_http(monkeypatch, captured, resp):
-    import lib.http_client as hc
+    import lib.http_transport.client as hc
     def _post(url, json=None, headers=None, timeout=None, **kw):
         captured['url'] = url
         captured['json'] = json

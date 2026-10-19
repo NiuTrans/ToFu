@@ -1,12 +1,8 @@
-"""storage.v2 process-level response byte admission.
+"""storage.v2 shared response buffer ownership and demand-driven streams.
 
-v1 has always admitted each declared response frame against ONE process-wide
-budget (TOFU_STORAGE_RPC_INFLIGHT_MAX_MIB). v2 only had per-response caps, so
-8 pooled sessions × 64 MiB of streamed chunks had no process bound. The same
-shared budget now admits every v2 response frame as it arrives; overflow is
-a classified retryable rejection, never a silent wait, and the desynced
-session is retired. v1 behavior is unchanged: both clients share the exact
-singleton it always used.
+One process planner accounts each frame and assembled payload. The memory hint
+selects RAM or anonymous-file overflow; it is not a byte/count admission quota.
+Malformed sequences and transport errors retire the session and release buffers.
 """
 
 from __future__ import annotations
@@ -298,3 +294,78 @@ def test_client_maps_rejection_to_retryable_unavailable_and_retires():
         client.close()
     finally:
         v2_mod.StorageV2Session = original
+
+
+def test_streamed_response_exceeds_former_byte_and_chunk_quotas_and_releases():
+    def respond(conn, correlation):
+        stream_id = b'\x02' * 16
+        chunk = b'x' * _CHUNK
+        for index in range(70):
+            conn.sendall(_chunk_frame(correlation, stream_id, index, chunk, False))
+        conn.sendall(_chunk_frame(correlation, stream_id, 70, b'end', True))
+        conn.sendall(_response_frame(correlation, b''))
+    daemon = _FakeDaemon(respond)
+    admission = FrameByteAdmission(capacity_bytes=4 * _CHUNK)
+    session = _session(daemon.port, admission, timeout=30.0)
+    try:
+        response = session.request('record.get', {}, command_id=None, deadline_unix_ms=0)
+        assert response.status == 0
+        assert len(response.payload) == 70 * _CHUNK + 3
+        assert response.payload.endswith(b'end')
+        assert response.payload[:-3].count(b'x') == 70 * _CHUNK
+        assert admission.metrics()['frame_bytes_inflight'] == 0
+        assert admission.metrics()['frame_admission_rejections'] == 0
+    finally:
+        session.close()
+        daemon.join(timeout=30)
+        assert not daemon._thread.is_alive()
+
+
+def test_streamed_request_exceeds_former_byte_and_chunk_quotas():
+    from tofu_db import wire as wire_module
+    class RequestPeer(_FakeDaemon):
+        chunks = 0
+        failure = None
+        def _serve(self):
+            try:
+                conn, _ = self._listener.accept()
+                conn.settimeout(30)
+                with conn:
+                    hello = recv_frame(conn)
+                    conn.sendall(_response_frame(hello[FIELD_CORRELATION_ID], b''))
+                    payload = bytearray()
+                    correlation = None
+                    while True:
+                        message = recv_frame(conn)
+                        if message[FIELD_KIND] == wire_module.KIND_REQUEST:
+                            assert not message.get(FIELD_PAYLOAD, b'')
+                            break
+                        assert message[FIELD_KIND] == wire_module.KIND_BLOB_CHUNK
+                        assert message[FIELD_CHUNK_INDEX] == self.chunks
+                        correlation = message[FIELD_CORRELATION_ID]
+                        payload.extend(message[FIELD_PAYLOAD])
+                        self.chunks += 1
+                        if message[FIELD_FINAL]:
+                            assert len(payload) == message[wire_module.FIELD_TOTAL_PAYLOAD_BYTES]
+                    assert message[FIELD_CORRELATION_ID] == correlation
+                    value = json.loads(payload)
+                    assert len(value['blob']) == 70 * _CHUNK
+                    assert value['blob'].count('x') == 70 * _CHUNK
+                    conn.sendall(_response_frame(correlation, b'{"ok":true}'))
+            except BaseException as error:
+                self.failure = error
+            finally:
+                self._listener.close()
+    daemon = RequestPeer(None)
+    admission = FrameByteAdmission(capacity_bytes=4 * _CHUNK)
+    session = _session(daemon.port, admission, timeout=30)
+    try:
+        response = session.request('record.put', {'blob':'x' * (70 * _CHUNK)},
+                                   command_id=None, deadline_unix_ms=0)
+        assert response.json() == {'ok':True}
+    finally:
+        session.close()
+        daemon.join(timeout=30)
+        assert not daemon._thread.is_alive()
+    assert daemon.failure is None, daemon.failure
+    assert daemon.chunks > 64

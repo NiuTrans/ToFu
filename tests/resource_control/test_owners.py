@@ -107,7 +107,7 @@ def test_failed_release_can_be_retried():
 
 
 def test_sampler_owned_by_serving_loop(monkeypatch):
-    from lib.server_loop_runtime import ServingLoopRuntime
+    from lib.server.server_loop_runtime import ServingLoopRuntime
     from lib.resource_control import current_controller
     import lib.resource_control.runtime as control_runtime
     called = asyncio.Event()

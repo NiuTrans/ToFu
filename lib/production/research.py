@@ -363,7 +363,7 @@ def research_topic(topic: str, *, max_cards: int = 12,
     specs = _query_specs(topic, current_freshness=current_freshness)
     try:
         if search_fn is None:
-            from lib.search_runtime import ensure_search_runtime
+            from lib.search.search_runtime import ensure_search_runtime
             search_fn = ensure_search_runtime().perform_web_search
         # One search can return a partial, engine-dependent set.  Independent
         # lanes run concurrently so freshness and authority do not add serial

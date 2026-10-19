@@ -57,6 +57,9 @@ _RULES: tuple[tuple[str, str], ...] = (
     ('gpt-image-1-5', '2025-12'),
     ('text-embedding-3', '2024-01'),  # vendor launch 2025-01-25 → 2024-01-25
     # ── Google ───────────────────────────────────────────────────
+    # Gemini 4 Argon GA flagship (ai.google.dev/gemini-api/docs/models /
+    # models/gemini-4-argon: stable id, latest update October 2026).
+    ('gemini-4-argon', '2026-10'),
     ('gemini-3-8-flash', '2026-09'),
     ('gemini-3-7-flash', '2026-08'),
     ('gemini-3-6-flash', '2026-06'),

@@ -102,11 +102,15 @@ def prepare(model_path: str, *, engine: str | None = None) -> dict:
         return {'ok': False, 'stage': 'inspect',
                 'error': inspection.get('error'), 'inspection': inspection}
     hardware = probe.probe_hardware()
-    port = proc.allocate_port()
+    try:
+        port = proc.allocate_port()
+    except OSError as exc:
+        return {'ok': False, 'stage': 'plan',
+                'error': '无法分配本地监听端口: %s' % exc,
+                'inspection': inspection, 'hardware': hardware}
     if port is None:
         return {'ok': False, 'stage': 'plan',
-                'error': '托管端口段 18100-18199 已占满；'
-                         '请先停止不用的本地部署实例',
+                'error': '本机没有可绑定的用户 TCP 端口',
                 'inspection': inspection, 'hardware': hardware}
     plan = plan_launch(inspection, hardware, engine=engine, port=port)
     if not plan.get('ok'):

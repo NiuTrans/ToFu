@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Contract tests for lib.http_client — sync + async paths.
+"""Contract tests for lib.http_transport.client — sync + async paths.
 
 Uses a tiny in-process HTTP server bound to 127.0.0.1 so the tests are
 hermetic (no external network required) and exercise the actual sockets +
@@ -133,7 +133,7 @@ def _run_async(coro):
         try:
             return await coro
         finally:
-            from lib.http_client import close_async_http_clients
+            from lib.http_transport.client import close_async_http_clients
             await close_async_http_clients()
     return asyncio.run(_wrapped())
 
@@ -141,7 +141,7 @@ def _run_async(coro):
 # ─── Sync tests ────────────────────────────────────────────────
 
 def test_http_get_basic():
-    from lib.http_client import http_get
+    from lib.http_transport.client import http_get
     _clear()
     resp = http_get(f'{_base}/hello')
     assert resp.status_code == 200
@@ -151,7 +151,7 @@ def test_http_get_basic():
 
 
 def test_http_get_default_user_agent():
-    from lib.http_client import http_get
+    from lib.http_transport.client import http_get
     _clear()
     http_get(f'{_base}/echo-headers')
     rec = _last_request()
@@ -161,7 +161,7 @@ def test_http_get_default_user_agent():
 
 
 def test_http_get_custom_headers_override_default_ua():
-    from lib.http_client import http_get
+    from lib.http_transport.client import http_get
     _clear()
     http_get(f'{_base}/echo-headers',
              headers={'User-Agent': 'CustomBot/2.0', 'X-Trace': 'abc'})
@@ -172,7 +172,7 @@ def test_http_get_custom_headers_override_default_ua():
 
 
 def test_http_get_query_params():
-    from lib.http_client import http_get
+    from lib.http_transport.client import http_get
     _clear()
     resp = http_get(f'{_base}/p', params={'q': 'hello world', 'n': 5})
     assert resp.status_code == 200
@@ -184,7 +184,7 @@ def test_http_get_query_params():
 
 
 def test_http_post_json():
-    from lib.http_client import http_post
+    from lib.http_transport.client import http_post
     _clear()
     resp = http_post(f'{_base}/post', json={'a': 1, 'b': 'hi'})
     assert resp.status_code == 200
@@ -196,7 +196,7 @@ def test_http_post_json():
 
 
 def test_http_post_form_data():
-    from lib.http_client import http_post
+    from lib.http_transport.client import http_post
     _clear()
     resp = http_post(f'{_base}/form',
                       data={'field1': 'value1', 'field2': 'value2'})
@@ -207,7 +207,7 @@ def test_http_post_form_data():
 
 
 def test_http_status_codes_passthrough():
-    from lib.http_client import http_get
+    from lib.http_transport.client import http_get
     for code in (404, 500, 503):
         resp = http_get(f'{_base}/status/{code}')
         assert resp.status_code == code
@@ -215,7 +215,7 @@ def test_http_status_codes_passthrough():
 
 
 def test_http_stream_context_manager():
-    from lib.http_client import http_stream
+    from lib.http_transport.client import http_stream
     received = []
     with http_stream('GET', f'{_base}/stream', timeout=5) as resp:
         assert resp.status_code == 200
@@ -228,7 +228,7 @@ def test_http_stream_context_manager():
 
 
 def test_http_request_method_dispatcher():
-    from lib.http_client import http_request
+    from lib.http_transport.client import http_request
     _clear()
     resp = http_request('GET', f'{_base}/test')
     assert resp.status_code == 200
@@ -239,7 +239,7 @@ def test_http_request_method_dispatcher():
 
 def test_http_proxy_arg_passes_through():
     """When a custom proxies dict is provided, http_request uses it as-is."""
-    from lib.http_client import http_get
+    from lib.http_transport.client import http_get
     # Provide explicit proxies={} → bypass proxy entirely
     resp = http_get(f'{_base}/hello', proxies={})
     assert resp.status_code == 200
@@ -247,7 +247,7 @@ def test_http_proxy_arg_passes_through():
 
 
 def test_sync_pool_reuses_session_without_persisting_cookies():
-    from lib import http_client
+    from lib.http_transport import client as http_client
     http_client.close_sync_http_clients()
     first = http_client._sync_session()
     http_client.http_get(f'{_base}/set-cookie', use_proxy=False)
@@ -264,7 +264,7 @@ def test_sync_pool_reuses_session_without_persisting_cookies():
 # ─── Async tests ───────────────────────────────────────────────
 
 def test_async_http_get():
-    from lib.http_client import async_http_get
+    from lib.http_transport.client import async_http_get
 
     async def _t():
         resp = await async_http_get(f'{_base}/hello', timeout=5)
@@ -277,7 +277,7 @@ def test_async_http_get():
 
 
 def test_async_http_post_json():
-    from lib.http_client import async_http_post
+    from lib.http_transport.client import async_http_post
 
     async def _t():
         resp = await async_http_post(f'{_base}/post',
@@ -291,7 +291,7 @@ def test_async_http_post_json():
 
 
 def test_async_http_default_user_agent():
-    from lib.http_client import async_http_get
+    from lib.http_transport.client import async_http_get
 
     async def _t():
         _clear()
@@ -304,7 +304,7 @@ def test_async_http_default_user_agent():
 
 
 def test_async_http_stream():
-    from lib.http_client import async_http_stream
+    from lib.http_transport.client import async_http_stream
 
     async def _t():
         received = []
@@ -322,7 +322,7 @@ def test_async_http_stream():
 
 
 def test_async_http_status_codes():
-    from lib.http_client import async_http_get
+    from lib.http_transport.client import async_http_get
 
     async def _t():
         for code in (404, 500, 503):
@@ -334,7 +334,7 @@ def test_async_http_status_codes():
 
 
 def test_async_pool_reuses_client_without_persisting_cookies():
-    from lib import http_client
+    from lib.http_transport import client as http_client
 
     async def _t():
         first = http_client._async_client(proxy=None, verify=True)
@@ -396,7 +396,7 @@ def finally_shutdown():
     global _server, _base
     if _server is None:
         return
-    from lib.http_client import close_sync_http_clients
+    from lib.http_transport.client import close_sync_http_clients
     server, _server, _base = _server, None, ''
     close_sync_http_clients()
     server.shutdown()

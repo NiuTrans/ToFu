@@ -43,7 +43,6 @@ def harness():
 
     def listing(conv, **kwargs):
         assert conv == key and kwargs['user_id'] == 17
-        assert kwargs['light'] is False
         return {'turns': list(turns)}
 
     def enqueue(*statuses):
@@ -53,7 +52,7 @@ def harness():
                                 mode='swarm-update', agent_id=str(index),
                                 extra={'status': status})
 
-    with patch('lib.turn_lifecycle.list_turns', side_effect=listing), \
+    with patch('lib.swarm.restart_recovery.read_continuation_turns', side_effect=listing), \
          patch('lib.scheduler.conversation_dispatch.dispatch_scheduled_turn', side_effect=dispatch), \
          patch('lib.agent_core.push.push_event'), \
          patch.object(integration, '_key_is_live', return_value=False), \
@@ -152,12 +151,12 @@ def test_success_duplicates_do_not_charge_budget(harness):
 
 def test_owner_query_failure_stands_down(harness):
     harness.enqueue('failed')
-    with patch('lib.turn_lifecycle.list_turns', side_effect=PermissionError):
+    with patch('lib.swarm.restart_recovery.read_continuation_turns', side_effect=PermissionError):
         assert not _start_autocontinue_turn(harness.key, 18, command_id='foreign')
     assert not harness.calls
 
 
-def test_no_human_or_truncated_authority_fails_closed(harness):
+def test_missing_human_authority_fails_closed(harness):
     harness.enqueue('failed')
     harness.turns[0]['actor'] = 'virtual_user'
     harness.run()
@@ -277,3 +276,12 @@ def test_guard_terminal_classification_preserves_bounded_wake_gate(harness, inte
     assert len(harness.calls) == (1 if internal else 0)
     if internal:
         assert harness.calls[0][0]['_swarmFailureRecovery'] is True
+
+
+def test_long_conversation_still_integrates_completed_child(harness):
+    harness.turns[1:1] = [dict(turnId=f'ordinary-{i}', actor='assistant',
+        status='completed', projection={}) for i in range(5001)]
+    harness.enqueue('completed')
+    harness.run()
+    assert len(harness.calls) == 1
+    assert harness.calls[0][1]['parent_turn_id'] == 'parent'

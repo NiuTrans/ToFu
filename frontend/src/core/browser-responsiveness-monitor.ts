@@ -2,7 +2,7 @@
  * Responsibility: passive, bounded evidence for recovered browser main-thread stalls.
  * Entry: startBrowserResponsivenessMonitor; dependencies are observer, visibility,
  * monotonic clock, canonical context reader and existing log relay ports.
- * No polling, network owner, transcript copies, or import-time side effects.
+ * One demand-only flush timer, no polling, transcript copies or network owner.
  */
 import type { TurnState } from './turn-state';
 
@@ -28,79 +28,168 @@ export interface ResponsivenessEntry {
   duration: number;
   blockingDuration?: number;
   scripts?: ReadonlyArray<{ sourceURL?: string; sourceFunctionName?: string;
+    sourceCharPosition?: number; invokerType?: string;
     duration?: number; forcedStyleAndLayoutDuration?: number }>;
 }
+export interface ResponsivenessObservation {
+  disconnect(): void;
+  takeRecords?(): ResponsivenessEntry[];
+}
 export interface ResponsivenessPorts {
-  observe(type: string, receive: (entries: ResponsivenessEntry[]) => void): (() => void) | null;
+  observe(type: string, receive: (entries: ResponsivenessEntry[]) => void): (() => void) | ResponsivenessObservation | null;
   visibility: Pick<Document, 'hidden' | 'addEventListener' | 'removeEventListener'>;
+  lifecycle?: Pick<Window, 'addEventListener' | 'removeEventListener'>;
+  schedule: { setTimeout(callback: () => void, delayMs: number): unknown; clearTimeout(handle: unknown): void };
   now(): number;
+  wallNow?(): number;
   readonly timeOriginMs?: number;
   context(): Record<string, unknown>;
+  interactionContext?(startMs: number, endMs: number): Record<string, unknown>;
   report(message: string): void;
 }
 
 export function startBrowserResponsivenessMonitor(ports: ResponsivenessPorts): { dispose(): void } {
   let disposed = false;
   let generation = 0;
-  let disconnectors: Array<() => void> = [];
-  const checkpoints = new Map<string, { at: number; suppressed: number; maximumMs: number }>();
-  const receive = (entries: ResponsivenessEntry[]): void => {
-    if (disposed || ports.visibility.hidden) return;
-    for (const entry of entries) {
-      if (!Number.isFinite(entry.duration) || entry.duration < 250) continue;
-      const previous = checkpoints.get(entry.entryType);
-      const now = ports.now();
-      if (previous && now - previous.at < 5000) {
-        previous.suppressed++;
-        previous.maximumMs = Math.max(previous.maximumMs, entry.duration);
-        continue;
+  let observations: Array<(() => void) | ResponsivenessObservation> = [];
+  let timer: unknown = null;
+  let timerAt: number | null = null;
+  type Evidence = Record<string, unknown> & { durationMs: number };
+  const checkpoints = new Map<string, { at: number; reportedMs: number;
+    suppressed: number; pending: Evidence | null }>();
+  const report = (evidence: Evidence, suppressed = 0): void => {
+    try {
+      const record = { ...evidence };
+      if (suppressed) record.suppressed = suppressed;
+      // Keep attribution ahead of optional turn/tool context. Every fallback
+      // reserializes an intact JSON object; never truncate the encoded line.
+      let encoded = JSON.stringify(record);
+      for (const key of ['toolStatus', 'transport', 'toolCallId', 'tool', 'attemptId', 'taskId', 'turnId',
+        'interactionConversationId', 'observedAtMs', 'startAtMs', 'script', 'conversationId']) {
+        if (encoded.length <= 760) break;
+        delete record[key];
+        encoded = JSON.stringify(record);
       }
-      checkpoints.set(entry.entryType, { at: now, suppressed: 0, maximumMs: 0 });
-      try {
-        const evidence: Record<string, unknown> = {
-          event: 'browser.main_thread_stall', kind: entry.entryType,
-          startMs: Math.round(entry.startTime), durationMs: Math.round(entry.duration),
-          startAtMs: typeof ports.timeOriginMs === 'number'
-            ? Math.round(ports.timeOriginMs + entry.startTime) : undefined,
-          observedDelayMs: Math.max(0, Math.round(now - entry.startTime - entry.duration)),
-          ...ports.context(),
-        };
-        if (previous?.suppressed) {
-          evidence.suppressed = previous.suppressed;
-          evidence.suppressedMaximumMs = Math.round(previous.maximumMs);
-        }
-        if (typeof entry.blockingDuration === 'number') {
-          evidence.blockingMs = Math.round(entry.blockingDuration);
-        }
-        // One slowest script; omit URL query/fragment and all code/arguments/results.
-        let slowest: NonNullable<ResponsivenessEntry['scripts']>[number] | undefined;
-        for (const script of entry.scripts ?? []) {
-          if (!slowest || (script.duration ?? 0) > (slowest.duration ?? 0)) slowest = script;
-        }
-        if (slowest) {
-          let path = '';
-          try { path = new URL(slowest.sourceURL ?? '').pathname.slice(-120); } catch { /* unavailable */ }
-          evidence.script = { path, function: String(slowest.sourceFunctionName ?? '').slice(0, 60),
-            durationMs: Math.round(slowest.duration ?? 0),
-            layoutMs: Math.round(slowest.forcedStyleAndLayoutDuration ?? 0) };
-        }
-        // Keep each structured record intact inside the relay's 800-character cap.
-        let encoded = JSON.stringify(evidence);
-        if (encoded.length > 760) { delete evidence.script; encoded = JSON.stringify(evidence); }
-        if (encoded.length > 760) {
-          delete evidence.toolStatus; delete evidence.transport;
-          encoded = JSON.stringify(evidence);
-        }
-        ports.report('[browser-responsiveness] ' + encoded);
-      } catch { /* diagnostics never interrupt rendering or observer delivery */ }
+      ports.report('[browser-responsiveness] ' + encoded);
+    } catch { /* Diagnostic serialization/relay failure cannot interrupt rendering. */ }
+  };
+  const cancelTimer = (): void => {
+    if (timer !== null) ports.schedule.clearTimeout(timer);
+    timer = null;
+    timerAt = null;
+  };
+  const flushPending = (all = false): void => {
+    const now = ports.now();
+    for (const checkpoint of checkpoints.values()) {
+      if (!checkpoint.pending || (!all && now - checkpoint.at < 5000)) continue;
+      report(checkpoint.pending, checkpoint.suppressed);
+      checkpoint.reportedMs = checkpoint.pending.durationMs;
+      checkpoint.pending = null;
+      checkpoint.suppressed = 0;
+      checkpoint.at = now;
     }
+  };
+  const schedulePending = (): void => {
+    if (disposed || ports.visibility.hidden) { cancelTimer(); return; }
+    const deadlines = [...checkpoints.values()].filter(item => item.pending).map(item => item.at + 5000);
+    if (!deadlines.length) { cancelTimer(); return; }
+    const deadline = Math.min(...deadlines);
+    if (timer !== null && timerAt === deadline) return;
+    cancelTimer();
+    timerAt = deadline;
+    timer = ports.schedule.setTimeout(() => {
+      timer = null;
+      timerAt = null;
+      if (disposed) return;
+      flushPending(ports.visibility.hidden);
+      schedulePending();
+    }, Math.max(0, deadline - ports.now()));
+  };
+  const evidenceFor = (entry: ResponsivenessEntry): Evidence | null => {
+    try {
+      const evidence: Evidence = {
+        event: 'browser.main_thread_stall', kind: entry.entryType,
+        startMs: Math.round(entry.startTime), durationMs: Math.round(entry.duration),
+        startAtMs: typeof ports.timeOriginMs === 'number'
+          ? Math.round(ports.timeOriginMs + entry.startTime) : undefined,
+        observedDelayMs: Math.max(0, Math.round(ports.now() - entry.startTime - entry.duration)),
+        observedAtMs: ports.wallNow?.(),
+        ...ports.context(),
+        ...ports.interactionContext?.(entry.startTime, entry.startTime + entry.duration),
+      };
+      if (typeof entry.blockingDuration === 'number') {
+        evidence.blockingMs = Math.round(entry.blockingDuration);
+      }
+      // One slowest script; omit URL query/fragment and all code/arguments/results.
+      let slowest: NonNullable<ResponsivenessEntry['scripts']>[number] | undefined;
+      for (const script of entry.scripts ?? []) {
+        if (!slowest || (script.duration ?? 0) > (slowest.duration ?? 0)) slowest = script;
+      }
+      if (slowest) {
+        let path = '';
+        try { path = new URL(slowest.sourceURL ?? '').pathname.slice(-120); } catch { /* unavailable */ }
+        evidence.script = { path, function: String(slowest.sourceFunctionName ?? '').slice(0, 60),
+          charPosition: Number.isFinite(slowest.sourceCharPosition) ? slowest.sourceCharPosition : undefined,
+          invokerType: String(slowest.invokerType ?? '').slice(0, 32),
+          durationMs: Math.round(slowest.duration ?? 0),
+          layoutMs: Math.round(slowest.forcedStyleAndLayoutDuration ?? 0) };
+      }
+      return evidence;
+    } catch { return null; /* Diagnostic context/entry access may be unavailable during teardown. */ }
+  };
+  const receive = (entries: ResponsivenessEntry[], draining = false): void => {
+    if (disposed || (!draining && ports.visibility.hidden)) return;
+    // A recovered batch may contain an early short stall followed by the hang.
+    // Pick its longest entry before rate limiting, with at most two groups.
+    const batches = new Map<string, { longest: ResponsivenessEntry; count: number }>();
+    for (const entry of entries) {
+      if (!['longtask', 'long-animation-frame'].includes(entry.entryType)
+          || !Number.isFinite(entry.duration) || !Number.isFinite(entry.startTime) || entry.duration < 250) continue;
+      const batch = batches.get(entry.entryType);
+      if (!batch) batches.set(entry.entryType, { longest: entry, count: 1 });
+      else { batch.count++; if (entry.duration > batch.longest.duration) batch.longest = entry; }
+    }
+    for (const [kind, batch] of batches) {
+      const evidence = evidenceFor(batch.longest);
+      if (!evidence) continue;
+      const now = ports.now();
+      const previous = checkpoints.get(kind);
+      if (previous && now - previous.at < 5000) {
+        previous.suppressed += batch.count;
+        if (!previous.pending || evidence.durationMs > previous.pending.durationMs) previous.pending = evidence;
+        // One severity promotion per window. Later maxima still have a finite
+        // drain deadline, even when no further stalls occur.
+        if (evidence.durationMs >= 1000 && previous.reportedMs < 1000) {
+          report(previous.pending, previous.suppressed);
+          previous.reportedMs = previous.pending.durationMs;
+          previous.pending = null;
+          previous.suppressed = 0;
+        }
+      } else {
+        const pending = previous?.pending;
+        const selected = pending && pending.durationMs > evidence.durationMs ? pending : evidence;
+        report(selected, (previous?.suppressed ?? 0) + batch.count - 1);
+        checkpoints.set(kind, { at: now, reportedMs: selected.durationMs, suppressed: 0, pending: null });
+      }
+    }
+    schedulePending();
   };
   const disconnect = (): void => {
     generation++;
-    for (const stop of disconnectors.splice(0)) { try { stop(); } catch { /* fail soft */ } }
+    for (const observation of observations.splice(0)) {
+      try {
+        if (typeof observation === 'function') observation();
+        else {
+          try { receive(observation.takeRecords?.() ?? [], true); }
+          finally { observation.disconnect(); }
+        }
+      } catch { /* Observer records/disconnection may be unavailable during renderer teardown. */ }
+    }
   };
   const onVisibility = (): void => {
     disconnect();
+    flushPending(true);
+    cancelTimer();
     checkpoints.clear();
     if (disposed || ports.visibility.hidden) return;
     for (const type of ['longtask', 'long-animation-frame']) {
@@ -109,17 +198,29 @@ export function startBrowserResponsivenessMonitor(ports: ResponsivenessPorts): {
         const stop = ports.observe(type, entries => {
           if (observedGeneration === generation) receive(entries);
         });
-        if (stop) disconnectors.push(stop);
+        if (stop) observations.push(stop);
       } catch { /* unsupported browser entry type */ }
     }
   };
+  const onPageHide = (): void => {
+    disconnect();
+    flushPending(true);
+    cancelTimer();
+    checkpoints.clear();
+  };
   ports.visibility.addEventListener('visibilitychange', onVisibility);
+  ports.lifecycle?.addEventListener('pagehide', onPageHide);
+  ports.lifecycle?.addEventListener('pageshow', onVisibility);
   onVisibility();
   return { dispose() {
     if (disposed) return;
-    disposed = true;
     disconnect();
+    flushPending(true);
+    disposed = true;
+    cancelTimer();
     checkpoints.clear();
     ports.visibility.removeEventListener('visibilitychange', onVisibility);
+    ports.lifecycle?.removeEventListener('pagehide', onPageHide);
+    ports.lifecycle?.removeEventListener('pageshow', onVisibility);
   } };
 }

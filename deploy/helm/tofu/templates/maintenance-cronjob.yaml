@@ -28,7 +28,7 @@ spec:
             - name: integrity-check
               image: {{ include "tofu.apiImage" . }}
               imagePullPolicy: {{ .Values.images.pullPolicy }}
-              command: ["python", "-m", "lib.storage_sidecar.cli", "integrity-check"]
+              command: ["python", "-m", "lib.storage_authority_sql.cli", "integrity-check"]
               env:
 {{ include "tofu.commonEnv" (dict "root" . "role" "scheduler") | indent 16 }}
               securityContext:

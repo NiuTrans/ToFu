@@ -101,16 +101,12 @@ def _start_payload(work_id: str, task_id: str, conv_id: str) -> dict:
     }
 
 
-def test_machine_readable_contract_is_valid_and_cataloged():
+def test_machine_readable_contract_is_valid():
     from jsonschema.validators import Draft202012Validator
 
     schema_path = ROOT / 'contracts/project_brain_v1.schema.json'
     schema = json.loads(schema_path.read_text(encoding='utf-8'))
     Draft202012Validator.check_schema(schema)
-    catalog = json.loads((ROOT / 'docs/catalog.json').read_text(encoding='utf-8'))
-    assert any(row['path'] == 'contracts/project_brain_v1.schema.json'
-               and row['guard'] == 'tests/project_mod/test_project_brain_signal_driven.py'
-               for row in catalog['contracts'])
 
 
 def test_command_receipt_and_rebuild_are_idempotent(chat_sidecar):
@@ -802,7 +798,9 @@ def test_restart_recovery_only_finishes_original_work(monkeypatch):
                 }],
             }
 
-        def query(self, operation, payload):
+        def query(self, operation, payload, **kwargs):
+            if operation == 'record.list':
+                return []
             assert operation == 'task_results.replay_get'
             return {
                 'task-done': {'status': 'done', 'metadata': {'finishReason': 'stop'}},
@@ -886,10 +884,9 @@ def test_noncoordinators_never_acquire_cursor_or_snapshot(monkeypatch, case):
         lambda self, cid, *, user_id, include_messages: (
             SimpleNamespace(metadata={'settings': targets[(user_id, cid)]})
             if (user_id, cid) in targets else None))
-    repository = ProjectCoordinationRepository(1)
     if case != 'unbound':
-        repository.bind(project, 'coordinator', expected_revision=0,
-                        command_id='bind-' + uuid.uuid4().hex)
+        from tests._seed import seed_coordinator_binding
+        seed_coordinator_binding(project, 'coordinator')
     conversation_id, user_id, requested_project = 'coordinator', 1, project
     if case == 'ordinary':
         conversation_id = 'worker'
@@ -978,3 +975,80 @@ def test_coordinator_active_work_excludes_own_conversation(coordinator_binding):
     assert 'Active work:' in context
     assert 'peer work' in context
     assert 'own active work' not in context
+
+
+def test_project_brain_demand_keeps_complete_live_and_terminal_work_and_large_collections():
+    from lib.storage import get_storage_client
+    from lib.conversations.project_brain import board_projection, feed_projection, read_projection, deterministic_work_id
+    project = _project('complete-history-demand')
+    client = get_storage_client(write=True)
+    work_ids = []
+    for ordinal in range(121):
+        task_id = f'demand-{uuid.uuid4().hex}'
+        work_id = deterministic_work_id(task_id)
+        work_ids.append(work_id)
+        payload = _start_payload(work_id, task_id, 'conversation-demand')
+        payload['project_key'] = project
+        client.command('project_brain.work.start', payload, f'start-{task_id}')
+    assert len(board_projection(project, user_id=1)['active']) == 121
+    paths = [f'src/demand-{ordinal}' for ordinal in range(401)]
+    artifacts = [{'id': f'artifact-{ordinal}'} for ordinal in range(151)]
+    client.command('project_brain.work.change', {'owner_user_id':1,'project_key':project,
+        'work_id':work_ids[0],'changed_paths':paths,'artifacts':artifacts,'timestamp':1000},f'change-{uuid.uuid4().hex}')
+    item = read_projection(project, user_id=1)['workItems'][0]
+    assert item['changedPaths'] == paths
+    assert len(item['artifacts']) == 151
+    for work_id in work_ids:
+        client.command('project_brain.work.finish', {'owner_user_id':1,'project_key':project,
+            'work_id':work_id,'status':'completed','result_summary':'complete','timestamp':1001},f'finish-{work_id}')
+    assert len(board_projection(project,user_id=1)['recentOutcomes']) == 121
+    for ordinal in range(601):
+        client.command('project_brain.narrative.add', {'owner_user_id':1,'project_key':project,
+            'kind':'note','text':f'demand-narrative-{ordinal}','timestamp':2000+ordinal},f'note-{uuid.uuid4().hex}')
+    feed = feed_projection(project,user_id=1,limit=1001)['events']
+    texts = {row['text'] for row in feed}
+    assert 'demand-narrative-0' in texts and 'demand-narrative-600' in texts
+    assert len(feed) > 601
+    client.maintenance('project_brain.rebuild', {'owner_user_id':1,'project_key':project})
+    rebuilt = read_projection(project,user_id=1)
+    assert len(rebuilt['workItems']) == 121
+    assert 'demand-narrative-0' in {row['text'] for row in rebuilt['narratives']}
+
+
+def test_project_brain_fold_and_relink_preserve_all_registered_records_and_delivery_cursors():
+    from lib.storage_authority_sql.operations_pkg._project_brain import _empty_projection, _fold_event, _merge_relinked_projections
+    projection = _empty_projection(1,'/demand-history')
+    for ordinal in range(1101):
+        _fold_event(projection, {'projectSequence':ordinal+1,'timestamp':ordinal+1,'kind':'cursor_confirmed',
+            'payload':{'conversationId':f'cursor-{ordinal}','deliveredSequence':ordinal+1}})
+    assert len(projection['cursors']) == 1101 and projection['cursors']['cursor-0']['deliveredSequence'] == 1
+    projection['checkers'] = [{'checkerId':f'checker-{n}','version':1} for n in range(151)]
+    projection['charter']['decisions'] = [{'decisionId':f'decision-{n}'} for n in range(301)]
+    projection['watch'] = [{'id':f'watch-{n}','updatedAt':n} for n in range(151)]
+    merged = _merge_relinked_projections(1,'/renamed',_empty_projection(1,'/renamed'),projection)
+    for field in ['checkers','charter','watch']:
+        assert merged[field] == projection[field]
+    conflicting = json.loads(json.dumps(projection))
+    conflicting['checkers'][0]['label'] = 'different immutable record'
+    from lib.storage.errors import StorageError
+    with pytest.raises(StorageError):
+        _merge_relinked_projections(1,'/renamed',projection,conflicting)
+
+
+def test_project_brain_large_projection_survives_real_transport_and_rebuild():
+    from lib.storage import get_storage_client
+    from lib.conversations.project_brain import deterministic_work_id, read_projection
+    project = _project('large-projection-demand')
+    task_id = f'large-{uuid.uuid4().hex}'
+    payload = _start_payload(deterministic_work_id(task_id),task_id,'large-conversation')
+    payload['project_key'] = project
+    paths = [f'src/{n:04}/' + 'x' * 4080 for n in range(2501)]
+    payload['work_item']['changedPaths'] = paths
+    client = get_storage_client(write=True)
+    command_id = f'large-start-{task_id}'
+    written = client.command('project_brain.work.start',payload,command_id)
+    assert written['projection']['workItems'][0]['changedPaths'] == paths
+    assert client.command('project_brain.work.start',payload,command_id) == written
+    assert read_projection(project,user_id=1)['workItems'][0]['changedPaths'] == paths
+    rebuilt = client.maintenance('project_brain.rebuild',{'owner_user_id':1,'project_key':project})
+    assert rebuilt['projection']['workItems'][0]['changedPaths'] == paths

@@ -79,8 +79,8 @@ use crate::generated_tofudb_ir::{
     MAX_KNOWLEDGE_SCOPE_CHARACTERS, MAX_KNOWLEDGE_SEARCH_POSTINGS_SCAN,
     MAX_KNOWLEDGE_SEARCH_TEXT_CHARACTERS, MAX_KNOWLEDGE_SEARCH_TOKENS,
     MAX_KNOWLEDGE_SECTION_CHARACTERS, MAX_KNOWLEDGE_STATUS_CHARACTERS,
-    MAX_KNOWLEDGE_STORED_NAME_CHARACTERS, MAX_KNOWLEDGE_TERMS_PER_CHUNK,
-    MAX_KNOWLEDGE_TERM_CHARACTERS, MAX_TRANSACTION_IR_LITERAL_BYTES,
+    MAX_KNOWLEDGE_STORED_NAME_CHARACTERS,
+    MAX_KNOWLEDGE_TERM_CHARACTERS, MAX_LEGACY_DOCUMENT_BYTES,
 };
 use crate::versioned_document::{self, PutRequest};
 
@@ -641,14 +641,9 @@ fn sha256_digest(text: String) -> io::Result<String> {
 fn search_terms(search_text: &str) -> io::Result<Vec<String>> {
     let mut terms = Vec::new();
     let mut seen = HashSet::new();
-    let mut raw_count = 0_usize;
     for raw_term in search_text.split(is_python_whitespace) {
         if raw_term.is_empty() {
             continue;
-        }
-        raw_count += 1;
-        if raw_count > MAX_KNOWLEDGE_TERMS_PER_CHUNK {
-            return Err(invalid_input("knowledge chunk has too many search terms"));
         }
         let term = python_casefold(raw_term);
         if term.is_empty() || term.chars().count() > MAX_KNOWLEDGE_TERM_CHARACTERS {
@@ -2160,7 +2155,7 @@ impl KnowledgeRequest {
                 bytes
             }
         };
-        if literal_bytes > MAX_TRANSACTION_IR_LITERAL_BYTES {
+        if literal_bytes > MAX_LEGACY_DOCUMENT_BYTES {
             return Err(resource_exhausted(
                 "knowledge request exceeds the IR literal budget",
             ));
@@ -4014,6 +4009,28 @@ mod tests {
         assert_eq!(serde_json::from_slice::<Vec<u64>>(&bytes).unwrap(), Vec::<u64>::new());
         assert!(KnowledgeRequest::EnrichmentOwners { limit: 513, after_user_id: 0 }.validate().is_err());
         assert!(KnowledgeRequest::EnrichmentOwners { limit: 1, after_user_id: u64::MAX }.validate().is_err());
+    }
+
+    #[test]
+    fn complete_chunk_terms_survive_restore_replay_and_reopen() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut database = AuthorityDatabase::initialize(directory.path()).unwrap();
+        let mut document = valid_document();
+        let search = (0..5501).map(|index| format!("wide{index}"))
+            .collect::<Vec<_>>().join(" ");
+        document["chunks"][0]["search_text"] = json!(search);
+        let payload = json!({"document": document, "settings": Value::Null});
+        let result = knowledge_migration_execute(&mut database, 7, 11,
+            "migration.knowledge.document.restore", payload.clone()).unwrap();
+        assert_eq!(result["inserted"], true);
+        drop(database);
+        let mut database = AuthorityDatabase::open(directory.path()).unwrap();
+        let restored = knowledge_migration_execute(&mut database, 7, 11,
+            "migration.knowledge.document.get", json!({"document_id": "doc-1"})).unwrap();
+        assert_eq!(restored["document"]["chunks"][0]["search_text"], json!(search));
+        let replay = knowledge_migration_execute(&mut database, 7, 11,
+            "migration.knowledge.document.restore", payload).unwrap();
+        assert_eq!(replay["inserted"], false);
     }
 
     #[test]

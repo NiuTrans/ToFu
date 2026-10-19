@@ -4,8 +4,8 @@ import json
 
 import pytest
 
-from lib.storage_sidecar import tofudb_migration_import as m
-from lib.storage_sidecar import tofudb_migration_turn_payload as payload
+from lib.storage_authority_sql.migration import tofudb_migration_import as m
+from lib.storage_authority_sql.migration import tofudb_migration_turn_payload as payload
 
 pytestmark = pytest.mark.unit
 

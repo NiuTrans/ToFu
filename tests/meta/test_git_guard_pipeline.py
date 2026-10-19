@@ -111,6 +111,30 @@ def test_safe_write_unattended_no_longer_rejected(harness):
     assert [r['authority'] for r in harness['receipts']] == ['git_safe_write']
 
 
+@pytest.mark.parametrize('command', [
+    'git merge --no-ff topic -m "merge: reviewed work"',
+    'git merge topic --message=--abort',
+])
+def test_merge_message_does_not_probe_presence(harness, monkeypatch, command):
+    def unexpected_presence_probe(*args, **kwargs):
+        pytest.fail('ordinary merge must not consult advisory presence')
+
+    monkeypatch.setattr(guard, 'active_peers', unexpected_presence_probe)
+    stopped, _ = _invoke(command=command)
+    assert stopped is False
+    assert [r['authority'] for r in harness['receipts']] == ['git_safe_write']
+    assert harness['rejections'] == [] and harness['approvals'] == []
+
+
+def test_merge_short_strategy_still_refuses_presence(harness, monkeypatch):
+    monkeypatch.setattr(guard, 'active_peers',
+                        lambda root, user_id, exclude_conv='': [_peer()])
+    stopped, _ = _invoke(command='git merge -s ours topic -m message')
+    assert stopped is True
+    assert harness['rejections'][0]['descriptor']['kind'] == 'git_guard'
+    assert harness['receipts'] == []
+
+
 # ── tree_destroying, solo ───────────────────────────────────────────
 
 def test_tree_destroying_solo_runs_with_solo_receipt(harness, monkeypatch):
@@ -141,11 +165,14 @@ def test_presence_refusal_names_peers_without_claiming_locks(harness, monkeypatc
     assert 'not evidence of an actual writer lock/lease or a file conflict' in content
     assert f'Checkout root: {ROOT}' in content
     assert 'convId=conv-victim agentId=(main)' in content
-    assert harness['rejections'][0]['descriptor'] == {
-        'kind': 'git_guard', 'tool': 'run_command',
-        'condition': 'active_project_presence_settled',
-        'retryPolicy': {'mode': 'after_condition_change', 'automatic': False},
-    }
+    descriptor = harness['rejections'][0]['descriptor']
+    assert descriptor['kind'] == 'git_guard'
+    assert descriptor['tool'] == 'run_command'
+    assert descriptor['condition'] == 'active_project_presence_settled'
+    assert descriptor['retryPolicy'] == {'mode': 'after_condition_change', 'automatic': False}
+    assert descriptor['gitDiagnostics']['execution'] == 'not_started'
+    assert descriptor['gitDiagnostics']['evidenceLevel'] == 'advisory_presence_only'
+    assert descriptor['gitDiagnostics']['segments'][0]['verb'] == 'reset'
     assert harness['rejections'][0]['retryable'] is True
     assert harness['settles'][0]['terminal_status'] == 'rejected'
     # No human approval was involved anywhere.
@@ -588,3 +615,59 @@ def test_ordinary_integration_does_not_treat_presence_as_writer(harness, monkeyp
     assert stopped is False
     assert [receipt['authority'] for receipt in harness['receipts']] == ['git_safe_write']
     assert harness['approvals'] == []
+
+
+@pytest.mark.parametrize('attended', [True, False])
+def test_empty_target_resolution_never_mints_solo_or_consumes_ack(harness, monkeypatch, attended):
+    monkeypatch.setattr(pipeline, '_git_guard_presence_roots', lambda *args: [])
+    def forbidden(*args, **kwargs):
+        pytest.fail('unresolved roots must not run presence, ACK or mergedness probes')
+    monkeypatch.setattr(guard, 'consume_ack', forbidden)
+    monkeypatch.setattr(guard, 'active_peers', forbidden)
+    monkeypatch.setattr(guard, 'force_delete_targets_merged', forbidden)
+    stopped, _ = _invoke(command='TOFU_GIT_ACK=abc123 git reset --hard', attended=attended)
+    assert stopped is True
+    assert harness['receipts'] == []
+    assert bool(harness['approvals']) is attended
+
+
+@pytest.mark.parametrize('command, trigger', [
+    ('git stash push -m backup && git merge --no-ff topic -m merge', 'stash'),
+    ('git merge --no-ff topic -m "--abort"; git cherry-pick --abort', 'cherry-pick'),
+])
+def test_refusal_diagnostics_pin_actual_risky_segment(harness, monkeypatch, command, trigger):
+    monkeypatch.setattr(guard, 'active_peers', lambda *args, **kwargs: [_peer()])
+    stopped, results = _invoke(command=command)
+    assert stopped is True
+    evidence = harness['rejections'][0]['descriptor']['gitDiagnostics']
+    assert [segment['verb'] for segment in evidence['segments']] == [trigger]
+    assert evidence['execution'] == 'not_started'
+    assert 'git commit --only' in results['call-1'][0]
+    assert harness['receipts'] == []
+
+
+@pytest.mark.parametrize('command', [
+    'git merge topic --cleanup=strip',
+    'git cherry-pick --ff --empty=drop topic',
+    'git -C/proj/guarded merge topic --cleanup=verbatim',
+    'git clean -ndx',
+])
+def test_maintained_options_do_not_probe_presence(harness, monkeypatch, command):
+    monkeypatch.setattr(guard, 'active_peers', lambda *args, **kwargs: pytest.fail('no presence for ordinary/preview'))
+    stopped, _ = _invoke(command=command)
+    assert stopped is False
+    assert harness['approvals'] == []
+
+
+@pytest.mark.parametrize('command', [
+    'git merge topic --future-option',
+    'git merge topic --gpg-sign',
+    'git cherry-pick --empty=invalid topic',
+])
+@pytest.mark.parametrize('attended', [True, False])
+def test_unknown_or_external_options_retain_approval_not_presence(harness, monkeypatch, command, attended):
+    monkeypatch.setattr(guard, 'active_peers', lambda *args, **kwargs: pytest.fail('unknown is not proven destruction'))
+    stopped, _ = _invoke(command=command, attended=attended)
+    assert stopped is True
+    assert harness['receipts'] == []
+    assert bool(harness['approvals']) is attended

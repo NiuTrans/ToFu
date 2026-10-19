@@ -15,7 +15,7 @@ PROJECT_TOOL_GREP = {
             "short literal keywords; regex uses Rust/ripgrep syntax (`A|B`, `\\.` for "
             "a literal dot, per-line `^`/`$`), not GNU BRE. `path` is one relative "
             "path or project root. For independent roots/patterns use one `searches` "
-            "batch (max 20 entries); it runs together and avoids sequential model "
+            "batch; every operation runs and avoids sequential model "
             "rounds."
         ),
         "parameters": {
@@ -30,7 +30,7 @@ PROJECT_TOOL_GREP = {
                 "count_only": {"type": "boolean", "description": "Return the full matching-line count only; `max_results` is ignored in count_only mode."},
                 "searches": {
                     "type": "array",
-                    "description": "Batch operations, max 20 entries; extras are dropped. Faster than separate calls.",
+                    "description": "Batch operations; all entries execute. Faster than separate calls.",
                     "items": {
                         "type": "object",
                         "properties": {
@@ -72,7 +72,7 @@ PROJECT_TOOL_FIND = {
                 "max_results": {"type": "integer", "description": "Maximum number of files to return. Default 100. Use a small value (5-20) when you only need a quick sample."},
                 "searches": {
                     "type": "array",
-                    "description": "Array of find operations (for batch mode, max 20 entries — extras are dropped). Each entry has the same fields as the top-level parameters. Much faster than multiple separate find_files calls.",
+                    "description": "Array of find operations. All entries execute with the same fields as the top-level parameters. Faster than separate find_files calls.",
                     "items": {
                         "type": "object",
                         "properties": {
@@ -102,9 +102,8 @@ PROJECT_TOOL_REPO_MAP = {
             "read_files to see the actual code. Read-only, makes no changes.\n\n"
             "Filters: `path` scopes the map to one subdirectory (e.g. "
             "\"lib/storage\"); `focus` keeps only files whose path contains "
-            "the given text; `max_tokens` caps output size (default 2048, the "
-            "most useful tradeoff). If the map reports '(N more files…)', "
-            "raise max_tokens or switch to a smaller `path`."
+            "the given text. Returns all definitions in the selected scope; "
+            "shared L0 handles long results without producer truncation."
         ),
         "parameters": {
             "type": "object",
@@ -122,15 +121,6 @@ PROJECT_TOOL_REPO_MAP = {
                         "Case-insensitive substring filter on file paths (e.g. "
                         "\"storage\" or \"_test.py\"). Optional."
                     )
-                },
-                "max_tokens": {
-                    "type": "integer",
-                    "description": (
-                        "Rough token budget for the output (default 2048). "
-                        "Lower it for a quick glance; raise it only when the "
-                        "default cut off files you need."
-                    ),
-                    "default": 2048
                 }
             }
         }
@@ -275,16 +265,16 @@ PROJECT_TOOL_APPLY_DIFFS = {
             "ambiguous) does NOT halt the batch and applied edits are NOT rolled "
             "back — the summary reads ``Applied X/(X+Y) edits`` with per-edit "
             "OK/FAIL lines; re-read affected files before retrying. Set "
-            "atomic=true for all-or-nothing: every edit is pre-flight checked "
-            "and when ANY edit fails, NOTHING is written — the report shows "
-            "what would have applied so you can fix the failures and re-send."
+            "atomic=true to preflight every edit before writing: a validation "
+            "failure writes nothing and the report shows what would have applied. "
+            "This does not roll back earlier files after a later I/O failure."
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "edits": {
                     "type": "array",
-                    "description": "Array of edit operations (max 30 per call — extras are dropped). Each entry has description, path, search, replace.",
+                    "description": "Array of edit operations; every entry is processed. Each entry has description, path, search, replace.",
                     "items": {
                         "type": "object",
                         "properties": {
@@ -300,7 +290,7 @@ PROJECT_TOOL_APPLY_DIFFS = {
                 "description": {"type": "string", "description": "Brief description of the overall change"},
                 "atomic": {
                     "type": "boolean",
-                    "description": "All-or-nothing mode (default false). When true, every edit is pre-flight validated and if ANY edit fails, NO file is written; the report marks each edit as would-apply or FAIL so the batch can be fixed and re-sent. Use for interdependent edits where a partial batch would leave the file inconsistent."
+                    "description": "Preflight atomicity (default false). When true, validate every edit before writing; a validation failure writes nothing and marks edits as would-apply or FAIL. Later I/O failures can still leave partial writes; this is not cross-file rollback."
                 },
                 "allow_outside_workspace": {
                     "type": "boolean",
@@ -376,7 +366,7 @@ PROJECT_TOOL_INSERT_CONTENTS = {
             "properties": {
                 "edits": {
                     "type": "array",
-                    "description": "Array of insertion operations (max 30 per call — extras are dropped). Each entry has description, path, anchor, content, and position.",
+                    "description": "Array of insertion operations; every entry is processed. Each entry has description, path, anchor, content, and position.",
                     "items": {
                         "type": "object",
                         "properties": {
@@ -422,7 +412,9 @@ PROJECT_TOOL_EDIT_FILE = {
             "A/C: anchor A, content B. Safe insertion echoes are stripped; pure echoes "
             "rejected. Anchors match exactly once; "
             "replace_all permits multiple matches only for replace. Later edits see "
-            "earlier changes; one failure neither rolls back nor stops the others."
+            "earlier changes. Atomic preflight defaults true: any validation failure "
+            "writes nothing. With atomic=false, one failure neither rolls back nor "
+            "stops the others. I/O failures may leave partial writes."
         ),
         "parameters": {
             "type": "object",
@@ -438,7 +430,6 @@ PROJECT_TOOL_EDIT_FILE = {
                 "edits": {
                     "type": "array",
                     "minItems": 1,
-                    "maxItems": 30,
                     "description": "Shortest-unique-anchor operations, in order.",
                     "items": {
                         "type": "object",
@@ -469,6 +460,11 @@ PROJECT_TOOL_EDIT_FILE = {
                         "required": ["path", "operation", "anchor", "content"],
                     },
                 },
+                "atomic": {
+                    "type": "boolean",
+                    "default": True,
+                    "description": "Preflight all edits before writing. False permits partial application.",
+                },
                 "allow_outside_workspace": {
                     "type": "boolean",
                     "description": (
@@ -490,24 +486,17 @@ PROJECT_TOOL_RUN_COMMAND = {
     "function": {
         "name": "run_command",
         "description": (
-            "Run a shell command for builds, tests, lint, installs, Git, or a "
-            "pipeline, returning stdout/stderr. There is NO timeout: a command "
-            "runs until it finishes, the user stops it, or you stop a "
-            "backgrounded one with `kill`. If the operator sends a message "
-            "during a long wait, the command may move to the background and its "
-            "result will arrive automatically. Avoid commands that wait for "
-            "stdin.\n\n"
-            "Each call is a fresh subprocess with no persistent shell: environment "
-            "changes do not carry over. Prefer absolute paths and avoid `cd`; use "
-            "`working_dir`.\n\n"
-            "Use `read_files`, `grep_search`, `find_files`, `edit_file`, and "
-            "`write_file` for repository data. Filesystem grep is redirected through "
-            "a bounded FUSE-safe engine or refused with a `grep_search` translation; "
-            "filtering another command's output is allowed. Use "
-            "`browser_download_url_to_server` for browser-authenticated downloads. "
-            "Text helpers include `sd`, `mlr`, and `goawk`.\n\n"
-            "Never use a shell no-op as a placeholder (`true`, `:`, or `exit 0`); "
-            "repeated placeholders are a tool loop."
+            "Run builds, tests, lint, installs, Git or pipelines; returns stdout/stderr. "
+            "NO timeout: runs until it finishes, the user stops it, or you stop a backgrounded one with `kill`. "
+            "Execution may move to the background on new messages; results arrive automatically. "
+            "Avoid waiting for stdin.\n\n"
+            "Fresh subprocess; no persistent shell or environment changes. "
+            "Prefer absolute paths and `working_dir` over `cd`.\n\n"
+            "Use `read_files`, `grep_search`, `find_files`, `edit_file`, `write_file` for repository data. "
+            "Filesystem grep uses a bounded FUSE-safe engine or returns a `grep_search` translation; "
+            "filtering command output is allowed. `browser_download_url_to_server` handles authenticated "
+            "browser downloads. Text helpers: `sd`, `mlr`, `goawk`.\n\n"
+            "Never use a shell no-op as a placeholder (`true`, `:`, `exit 0`); repetition is a tool loop."
         ),
         "parameters": {
             "type": "object",
@@ -533,7 +522,7 @@ PROJECT_TOOL_RUN_COMMAND = {
                     "type": "object",
                     "minProperties": 1,
                     "additionalProperties": {"type":"string","minLength":1,"maxLength":1024},
-                    "description": "Optional self-evolution executor observation: map frozen digest fields (dataset_digest, split_digest, candidate_digest, baseline_digest) to project-relative files. Server derives expected hashes from your owned protocol and refuses drift before launch. Uses noninteractive stdin. Read facts are retained with command originals; tracing changes timing and is not semantic input-use or scientific acceptance proof."
+                    "description": "Optional evolution observation: map dataset_digest, split_digest, candidate_digest, baseline_digest to project-relative files. Owned protocol hashes are verified before launch. Uses noninteractive stdin; read facts accompany command originals. Tracing affects timing and proves neither semantic input-use nor scientific acceptance."
                 },
                 "credentials": {
                     "type": "array",
@@ -623,10 +612,10 @@ READ_FILES_TOOL = {
             "within the round budget: for 1-2 relevant files request 200+ lines or a "
             "whole small file instead of repeated 50-line fragments; for 3+ files use "
             "focused ranges or `grep_search`. An explicit start/end range is "
-            "authoritative and never widened. Whole-file reads above 512 KB are "
-            "refused, but bounded ranges always work and satisfy read-before-edit. "
-            "Batch up to 20 independent ranges while keeping total expected content "
-            "near 24k tokens; use top-level `path` for one file. Prefer this over shell "
+            "authoritative and never widened. Whole-file text reads retain complete "
+            "sources; model previews are budgeted separately. Batch independent "
+            "ranges while keeping expected model content near 24k tokens; every "
+            "requested read executes. Use top-level `path` for one file. Prefer this over shell "
             "cat/head/tail/sed. Relative paths use the project; absolute, `~`, and "
             "`file://` paths are supported. Images are shown natively; PDFs extract "
             "layout text; Office files extract Markdown text/tables; text uses "
@@ -635,9 +624,10 @@ READ_FILES_TOOL = {
         "parameters": {
             "type": "object",
             "properties": {
+                "bind_sources": {"type": "boolean", "description": "Opt in to exact UTF-8 project file sources for working facts. Returns id/version/path; add a quote when recording a fact. Unsupported sources are explicit. Hashes the whole file even for ranged reads; default false."},
                 "reads": {
                     "type": "array",
-                    "description": "Batch file/range specs: `{path, start_line?, end_line?}` (max 20).",
+                    "description": "Batch file/range specs: `{path, start_line?, end_line?}`. Every requested read executes.",
                     "items": {
                         "type": "object",
                         "properties": {

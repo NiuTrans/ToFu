@@ -395,16 +395,33 @@ export function createToolSearchPresentation(
   </div>`;
   }
 
+  function zeroResultDiagnostic(round: UnknownRecord): UnknownRecord {
+    // Single-query searches stamp `searchDiag`; batch searches stamp the
+    // plural `searchDiags` (one per query). Read the singular first, then
+    // recover the primary failing batch diag so a batch failure is not
+    // mislabeled as a clean "no matches".
+    const singular = record(round.searchDiag);
+    if (singular !== EMPTY_RECORD) return singular;
+    const diags = Array.isArray(round.searchDiags) ? round.searchDiags : [];
+    const records = diags
+      .map((entry) => record(entry))
+      .filter((entry) => entry !== EMPTY_RECORD);
+    if (!records.length) return EMPTY_RECORD;
+    return records.find(
+      (entry) => stringField(entry, 'reason') !== 'no_matches',
+    ) || records[0];
+  }
+
   function renderZeroResultHtml(
     round: UnknownRecord,
     header: ToolSearchHeaderHtml,
   ): string {
-    const diagnostic = record(round.searchDiag);
+    const diagnostic = zeroResultDiagnostic(round);
     const reason = stringField(diagnostic, 'reason');
     let badgeText = 'no results';
     let badgeClassName = 'ptool-badge-warn';
     let detailHtml = '';
-    if (round.searchDiag) {
+    if (diagnostic !== EMPTY_RECORD) {
       if (reason === 'network_error') {
         badgeText = 'network error';
         badgeClassName = 'ptool-badge-err';
@@ -417,6 +434,14 @@ export function createToolSearchPresentation(
         detailHtml = `<div class="ptool-search-diag">Network errors from ${
           escapeHtmlText(failedEngines)
         }; other engines returned no matches.</div>`;
+      } else if (reason === 'deadline') {
+        badgeText = 'timed out';
+        badgeClassName = 'ptool-badge-err';
+        detailHtml = '<div class="ptool-search-diag">The search time budget expired before any usable page could be fetched — slow or unreachable sources, not a lack of matches. Try again.</div>';
+      } else if (reason === 'no_usable_evidence') {
+        badgeText = 'no usable evidence';
+        badgeClassName = 'ptool-badge-warn';
+        detailHtml = '<div class="ptool-search-diag">Candidate pages did not establish query-relevant evidence. This is not proof the subject does not exist — try more specific keywords or a direct source URL.</div>';
       } else if (reason === 'exception') {
         badgeText = 'error';
         badgeClassName = 'ptool-badge-err';
@@ -651,7 +676,7 @@ export function createToolSearchPresentation(
       }</div>`
       : '';
     return `<div class="eb-section">
-          <button type="button" class="eb-toggle" aria-expanded="false" data-tofu-action="event.stopPropagation();this.parentElement.classList.toggle('eb-expanded');this.setAttribute('aria-expanded',String(this.parentElement.classList.contains('eb-expanded')))"><span class="eb-icon">${
+          <button type="button" class="eb-toggle" aria-expanded="false" data-tofu-action="event.stopPropagation();this.parentElement.classList.toggle('eb-expanded');this.setAttribute('aria-expanded',this.parentElement.classList.contains('eb-expanded'))"><span class="eb-icon">${
             headerIconHtml
           }</span>Engine Sources <span class="eb-total">${totalRaw} raw → ${
             finalResultCount
@@ -741,7 +766,7 @@ export function createToolSearchPresentation(
     return `<div class="ptool-results-block" data-rn="${
       escapeHtmlText(round.roundNum)
     }">
-         <div class="ptool-line ptool-results-header" role="button" tabindex="0" aria-expanded="false" data-tofu-action="if(event.target.closest('.ri-tool-anchor'))return;event.stopPropagation();this.parentElement.classList.toggle('expanded');this.setAttribute('aria-expanded',String(this.parentElement.classList.contains('expanded')))">
+         <div class="ptool-line ptool-results-header" role="button" tabindex="0" aria-expanded="false" data-tofu-action="if(!event.target.closest('.ri-tool-anchor')){event.stopPropagation();this.parentElement.classList.toggle('expanded');this.setAttribute('aria-expanded',this.parentElement.classList.contains('expanded'))}">
            <span class="ptool-icon">${header.iconHtml}</span>
            <span class="ptool-text">${header.queryHtml}</span>
            ${verticalBadgeHtml}

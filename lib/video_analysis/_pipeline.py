@@ -17,19 +17,16 @@ never decoded on the FUSE mount — and is removed in ``finally``.
 from __future__ import annotations
 
 import os
+import math
 import shutil
 import threading
 from collections.abc import Callable
 
 from lib.log import get_logger
-from lib.runtime_paths import uploads_root
+from lib.runtime.runtime_paths import uploads_root
 
 from lib.video_analysis import _store
 from lib.video_analysis._audio import transcribe_track
-from lib.video_analysis._config import (
-    TRANSCRIPT_CHAR_CAP,
-    video_max_duration_s,
-)
 from lib.video_analysis._frames import extract_frames
 
 logger = get_logger(__name__)
@@ -144,14 +141,9 @@ def _process(video_id: str, scratch_path: str, original_name: str, *,
         fail('not a readable video file')
         return
     duration_s = float(probe.get('duration') or 0)
-    if duration_s <= 0:
+    if not math.isfinite(duration_s) or duration_s <= 0:
         fail('could not determine video duration')
         return
-    max_dur = video_max_duration_s()
-    if duration_s > max_dur:
-        fail(f'video too long ({duration_s:.0f}s, max {max_dur:.0f}s)')
-        return
-
     # ── frames ──
     phase('frames')
     scratch_dir = os.path.dirname(scratch_path)
@@ -173,9 +165,6 @@ def _process(video_id: str, scratch_path: str, original_name: str, *,
         owner_user_id=user_id,
     )
     storyboard = sb['text']
-    if len(storyboard) > TRANSCRIPT_CHAR_CAP:
-        storyboard = storyboard[:TRANSCRIPT_CHAR_CAP] + '\n[storyboard truncated]'
-
     # ── audio transcript (optional, degrades to a status) ──
     phase('audio')
     if probe.get('has_audio'):
@@ -188,10 +177,6 @@ def _process(video_id: str, scratch_path: str, original_name: str, *,
     else:
         tr = {'text': '', 'status': 'no_audio', 'model': ''}
     transcript = tr['text']
-    if len(transcript) > TRANSCRIPT_CHAR_CAP:
-        transcript = transcript[:TRANSCRIPT_CHAR_CAP] + '\n[transcript truncated]'
-        logger.info('[VideoPipeline] transcript truncated at %d chars', TRANSCRIPT_CHAR_CAP)
-
     probe = {**probe, 'filename': original_name}
     attachment = complete_video(
         video_id, frames=frames, transcript=transcript,

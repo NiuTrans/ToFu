@@ -25,7 +25,7 @@ import path byte-for-byte: every public symbol (and the private symbols
 imported by consumers/tests) is re-exported here.
 """
 
-from lib.http_client import http_get  # noqa: F401  (re-exported so tests can patch discovery.http_get)
+from lib.http_transport.client import http_get  # noqa: F401  (re-exported so tests can patch discovery.http_get)
 from lib.log import get_logger
 
 from ._balance import (

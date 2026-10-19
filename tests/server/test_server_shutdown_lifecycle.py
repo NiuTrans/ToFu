@@ -8,13 +8,46 @@ import threading
 
 import pytest
 
-from lib.server_shutdown import (
+from lib.server.server_shutdown import (
     _stop_storage_boundary_for_shutdown,
+    _shutdown_loaded_module,
     shutdown_production_runtime,
 )
 
 
 pytestmark = pytest.mark.unit
+
+
+def test_optional_shutdown_joins_partial_import_and_preserves_unused_laziness(tmp_path, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor, TimeoutError
+    import sys
+    from types import SimpleNamespace
+    entered, release = threading.Event(), threading.Event()
+    events = []
+    monkeypatch.setitem(sys.modules, 'shutdown_import_state',
+        SimpleNamespace(entered=entered, release=release, events=events))
+    module_name = 'shutdown_partial_import'
+    (tmp_path / (module_name + '.py')).write_text(
+        'from shutdown_import_state import entered, release, events\n'
+        'entered.set()\nassert release.wait(5)\n'
+        'def close(): events.append("closed")\n')
+    monkeypatch.syspath_prepend(str(tmp_path))
+    try:
+        with ThreadPoolExecutor(max_workers=2) as workers:
+            importing = workers.submit(importlib.import_module, module_name)
+            try:
+                assert entered.wait(5)
+                closing = workers.submit(_shutdown_loaded_module, module_name, 'close')
+                with pytest.raises(TimeoutError): closing.result(timeout=.03)
+                assert events == []
+            finally:
+                release.set()
+            importing.result(timeout=5); closing.result(timeout=5)
+        assert events == ['closed']
+    finally:
+        sys.modules.pop(module_name, None)
+    _shutdown_loaded_module('unused_shutdown_dependency', 'close')
+    assert 'unused_shutdown_dependency' not in sys.modules
 
 
 @pytest.fixture(autouse=True)
@@ -54,8 +87,8 @@ def test_shutdown_closes_all_runtime_owners_and_offloads_sync_joins(monkeypatch,
     import lib.agent_core.push as push
     import lib.cgroup_guard as cgroup_guard
     import lib.fs_keepalive as fs_keepalive
-    import lib.http_client as http_client
-    import lib.search_runtime as search_runtime
+    import lib.http_transport.client as http_client
+    import lib.search.search_runtime as search_runtime
     import lib.scheduler.timer as timer_runtime
     import lib.integration_control as integration_control
     import lib.llm_dispatch.health_local as health_local
@@ -64,8 +97,8 @@ def test_shutdown_closes_all_runtime_owners_and_offloads_sync_joins(monkeypatch,
     import lib.netpath as netpath
     import lib.presence as presence
     import lib.pricing as pricing
-    import lib.runtime_state_store as runtime_state_store
-    import lib.server_background_services as background_services
+    import lib.runtime.runtime_state_store as runtime_state_store
+    import lib.server.server_background_services as background_services
     import lib.storage as storage
     import lib.storage.warmup as warmup
     import lib.swarm.integration as swarm_integration
@@ -98,8 +131,13 @@ def test_shutdown_closes_all_runtime_owners_and_offloads_sync_joins(monkeypatch,
     class Bridge:
         disconnect_all = sync_call('mcp')
 
-    monkeypatch.setattr(
-        task_manager, 'quiesce_running_tasks', lambda **_kwargs: 0)
+    quiesce_reasons = []
+
+    def quiesce_tasks(*, reason):
+        quiesce_reasons.append(reason)
+        return 0
+
+    monkeypatch.setattr(task_manager, 'quiesce_running_tasks', quiesce_tasks)
     monkeypatch.setattr(
         swarm_integration, 'stop_swarm_cleanup_timer',
         sync_call('swarm-cleanup'))
@@ -143,11 +181,18 @@ def test_shutdown_closes_all_runtime_owners_and_offloads_sync_joins(monkeypatch,
 
     stopped = threading.Event()
     stopped.set()
-    app = object()
+    from types import SimpleNamespace
+    async def close_native():
+        # Native close can settle a task immediately. Its cause must already
+        # identify service recovery rather than fabricate a human stop.
+        assert quiesce_reasons == ['server_shutdown']
+        calls.append(('native-host',threading.get_ident(),{}))
+    app = SimpleNamespace(extensions={'tofu_native_host':SimpleNamespace(close=close_native)})
 
     async def exercise():
         serving_loop_threads.append(threading.get_ident())
         await shutdown_production_runtime(stopped, app=app)
+        assert calls[0][0]=='native-host'
 
     if automation_stop_fails:
         with pytest.raises(RuntimeError, match='Owned work has not quiesced'):
@@ -157,6 +202,8 @@ def test_shutdown_closes_all_runtime_owners_and_offloads_sync_joins(monkeypatch,
         return
     _run_async(exercise())
     loop_thread = serving_loop_threads[0]
+    assert calls[0]==('native-host',loop_thread,{})
+    calls=calls[1:]
 
     assert [name for name, _, _ in calls] == [
         'timers', 'incremental-translation', 'search-browser', 'swarm-cleanup', 'swarm-output-cleanup', 'netpath', 'lan-discovery',
@@ -191,7 +238,7 @@ def test_shutdown_closes_all_runtime_owners_and_offloads_sync_joins(monkeypatch,
 def test_storage_shutdown_certifies_reexec_only_after_release(
     monkeypatch, hard_deadline, storage_timeout,
 ):
-    import lib.server_reexec as server_reexec
+    import lib.server.server_reexec as server_reexec
     import lib.storage as storage
 
     calls = []
@@ -228,7 +275,7 @@ def test_storage_shutdown_certifies_reexec_only_after_release(
 
 
 def test_storage_shutdown_failure_cannot_certify_reexec(monkeypatch):
-    import lib.server_reexec as server_reexec
+    import lib.server.server_reexec as server_reexec
     import lib.storage as storage
 
     certified = []
@@ -394,7 +441,7 @@ def test_scheduler_manager_stop_interrupts_wait_and_releases_owner():
 
 def test_timer_join_failure_keeps_storage_and_clients_live(monkeypatch):
     import lib.scheduler.timer as timer_runtime
-    import lib.http_client as http_client
+    import lib.http_transport.client as http_client
     import lib.storage as storage
     closed = []
     def fail():
@@ -410,9 +457,9 @@ def test_timer_join_failure_keeps_storage_and_clients_live(monkeypatch):
 
 
 def test_browser_join_failure_keeps_dependencies_live(monkeypatch):
-    import lib.search_runtime as runtime
+    import lib.search.search_runtime as runtime
     import lib.scheduler.timer as timer
-    import lib.http_client as http
+    import lib.http_transport.client as http
     import lib.storage as storage
     import lib.tasks_pkg.manager as manager
     closed=[]
@@ -432,7 +479,7 @@ def test_incremental_shutdown_failure_preserves_dependencies(monkeypatch):
     from lib.translate import incremental
     import lib.scheduler.timer as timers
     import lib.tasks_pkg.manager as manager
-    import lib.search_runtime as browser
+    import lib.search.search_runtime as browser
     import lib.storage as storage
     closed = []
     monkeypatch.setattr(timers, 'shutdown_timer_watchers', lambda: None)
@@ -452,7 +499,7 @@ def test_unused_incremental_shutdown_does_not_import_module(monkeypatch):
     import builtins
     import lib.scheduler.timer as timers
     import lib.tasks_pkg.manager as manager
-    import lib.search_runtime as browser
+    import lib.search.search_runtime as browser
     monkeypatch.delitem(sys.modules, 'lib.translate.incremental', raising=False)
     monkeypatch.setattr(timers, 'shutdown_timer_watchers', lambda: None)
     monkeypatch.setattr(manager, 'quiesce_running_tasks', lambda **kwargs: 0)

@@ -39,8 +39,8 @@ except ModuleNotFoundError as exc:  # direct ``python scripts/...`` execution
         raise
     import migrate_pg_to_sqlite as _reverse_migrator
 
-from lib.storage_sidecar import offline_maintenance as _SQLITE_TOOLING
-from lib.storage_sidecar.schema import SCHEMA_VERSION
+from lib.storage_authority_sql import offline_maintenance as _SQLITE_TOOLING
+from lib.storage_authority_sql.schema import SCHEMA_VERSION
 
 
 _MIGRATION_LOCK_NAMESPACE = 'tofu.storage'
@@ -253,7 +253,7 @@ def open_sqlite_snapshot(path: Path) -> Iterator[SQLiteSnapshot]:
 
 @contextmanager
 def _project_lease(data_dir: Path):
-    from lib.storage_sidecar.preflight import ProjectLease
+    from lib.storage_authority_sql.preflight import ProjectLease
 
     lease = ProjectLease(
         data_dir,
@@ -328,7 +328,7 @@ class PsycopgMigrationTarget:
         from psycopg import sql
         from psycopg.rows import dict_row
         from psycopg.types.json import Json, Jsonb
-        from lib.storage_sidecar.adapters.postgres import PostgresSession
+        from lib.storage_authority_sql.adapters.postgres import PostgresSession
 
         self._psycopg = psycopg
         self._sql = sql
@@ -353,7 +353,7 @@ class PsycopgMigrationTarget:
         self.session.lock_key(_MIGRATION_LOCK_NAMESPACE, _MIGRATION_LOCK_KEY)
 
     def validate_schema_version(self) -> int:
-        from lib.storage_sidecar.schema import validate_schema_version
+        from lib.storage_authority_sql.schema import validate_schema_version
 
         return validate_schema_version(self.session)
 

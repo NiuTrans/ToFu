@@ -1,5 +1,4 @@
 """Large files remain editable, recoverable and undoable within one resource budget."""
-from dataclasses import replace
 from pathlib import Path
 import base64
 import os
@@ -9,7 +8,6 @@ import pytest
 
 from lib.project_mod import modifications as mods, write_intents as intents
 from lib.project_mod.write_tools import _ops
-from runtime_guards import SystemResourceSnapshot, deployment_resource_default, resolve_resource_budget
 
 pytestmark = pytest.mark.unit
 MIB = 1024 * 1024
@@ -104,20 +102,20 @@ def test_large_prepared_intent_reopens_and_recovers_exactly(project, phase):
 
 
 @pytest.mark.parametrize('which', ['original', 'post-image'])
-def test_real_recovery_budget_refuses_before_mutation(project, which):
-    original = b'x' * (4 * MIB + 1) if which == 'original' else b'old\n'
-    target = project / 'JOURNAL.md'
-    target.write_bytes(original)
-    addition = 'new' if which == 'original' else 'x' * (4 * MIB)
-    result = _ops.tool_write_file(str(project), 'JOURNAL.md', addition, append=True)
-    assert not result['ok'] and 'write recovery budget' in result['error'], result
-    assert target.read_bytes() == original
-    assert mods.get_modifications(str(project)) == []
-    assert not list(project.glob('.tofu_atomic_*'))
+def test_retired_recovery_budget_does_not_refuse_complete_mutation(project, which):
+    original=b'x'*(4*MIB+1) if which=='original' else b'old\n'
+    target=project/'JOURNAL.md';target.write_bytes(original)
+    addition='new' if which=='original' else 'x'*(4*MIB)
+    result=_ops.tool_write_file(str(project),'JOURNAL.md',addition,append=True,task_id='task')
+    assert result['ok'],result
+    assert target.read_bytes()==original+addition.encode()
+    undone=mods.undo_task_modifications(str(project),'task')
+    assert undone['failed']==0 and undone['undone']==1
+    assert target.read_bytes()==original
 
 
-def test_base64_envelope_budget_handles_maximum_preimage(project):
-    original = b'x' * intents.recovery_file_bytes()
+def test_complete_base64_preimage_beyond_retired_budget_is_undoable(project):
+    original = b'x' * (8 * MIB)
     target = project / 'JOURNAL.md'
     target.write_bytes(original)
     result = _ops.tool_write_file(str(project), 'JOURNAL.md', 'short', task_id='task')
@@ -126,21 +124,11 @@ def test_base64_envelope_budget_handles_maximum_preimage(project):
     assert target.read_bytes() == original
 
 
-def test_launch_budget_scales_and_respects_explicit_override():
-    low = SystemResourceSnapshot(4, 4, None, 4, 4096, 2048, None, None,
-                                4096, 2048, 100*1024, 50*1024)
-    high = replace(low, effective_memory_capacity_mb=64*1024,
-                   effective_memory_available_mb=32*1024, disk_free_mb=200*1024)
-    name = 'TOFU_PROJECT_WRITE_RECOVERY_MAX_MIB'
-    assert deployment_resource_default(name, {}, snapshot=low) == 4
-    assert deployment_resource_default(name, {}, snapshot=high) == 64
-    assert deployment_resource_default(name, {}, snapshot=replace(high, disk_free_mb=2*1024)) == 2
-    assert deployment_resource_default(name, {}, snapshot=replace(low,
-        effective_memory_capacity_mb=None, effective_memory_available_mb=None)) == 4
-    assert resolve_resource_budget(name, {name:'12'}, maximum=1024, snapshot=low) == 12
-    assert resolve_resource_budget(name, {name:'0'}, maximum=1024, snapshot=low) == 4
-    assert resolve_resource_budget(name, {name:'2048'}, maximum=1024, snapshot=high) == 1024
-    assert intents.contract()['x-resource-budget']['environment'] == name
+def test_retired_recovery_knob_is_not_a_launch_admission_budget():
+    from bootstrap_pkg.resource_policy_generated import RESOURCE_FALLBACKS
+    for defaults in RESOURCE_FALLBACKS.values():
+        assert 'TOFU_PROJECT_WRITE_RECOVERY_MAX_MIB' not in defaults
+    assert 'x-resource-budget' not in intents.contract()
 
 
 def test_large_append_undo_refuses_later_user_edit(project):
@@ -175,10 +163,11 @@ def test_smaller_restart_budget_preserves_pending_evidence(project, monkeypatch)
     os.replace(stage, target)
     monkeypatch.setenv('TOFU_PROJECT_WRITE_RECOVERY_MAX_MIB', '1')
     intents.recovery_file_bytes.cache_clear()
-    with pytest.raises(intents.IntentError):
-        mods.get_modifications(str(project))
-    assert evidence.read_bytes() == before
-    assert target.read_bytes() == updated
+    with intents.locked_intents(session) as store:
+        assert store.read()[0]['changeId']==record['changeId']
+        assert intents.classify(store.read()[0])=='applied'
+    assert evidence.read_bytes()==before
+    assert target.read_bytes()==updated
     monkeypatch.setenv('TOFU_PROJECT_WRITE_RECOVERY_MAX_MIB', '4')
     intents.recovery_file_bytes.cache_clear()
     assert len(mods.get_modifications(str(project))) == 1
@@ -195,10 +184,12 @@ def test_undo_batch_budget_can_verify_one_maximum_direct_write(project, monkeypa
     assert not (project / 'large.txt').exists()
 
 
-def test_utf8_postimage_is_admitted_in_bytes(project):
-    target = project / 'JOURNAL.md'
-    target.write_bytes(b'original')
-    result = _ops.tool_write_file(str(project), 'JOURNAL.md', '历' * (4 * MIB // 3 + 1))
-    assert not result['ok'] and 'write recovery budget' in result['error'], result
-    assert target.read_bytes() == b'original'
-    assert mods.get_modifications(str(project)) == []
+def test_utf8_postimage_preserves_complete_bytes_beyond_retired_budget(project):
+    target=project/'JOURNAL.md';target.write_bytes(b'original')
+    text='历'*(4*MIB//3+1)
+    result=_ops.tool_write_file(str(project),'JOURNAL.md',text,task_id='task')
+    assert result['ok'],result
+    assert target.read_bytes()==text.encode()
+    undone=mods.undo_task_modifications(str(project),'task')
+    assert undone['failed']==0 and undone['undone']==1
+    assert target.read_bytes()==b'original'

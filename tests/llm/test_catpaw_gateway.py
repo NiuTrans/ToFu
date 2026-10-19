@@ -110,7 +110,7 @@ class HeadersTest(unittest.TestCase):
 
 class TemplateTest(unittest.TestCase):
     def test_catpaw_template_loads_as_anthropic_protocol(self):
-        from lib.provider_template_recipes import load_provider_templates
+        from lib.provider.provider_template_recipes import load_provider_templates
 
         templates = {t['key']: t for t in load_provider_templates()}
         self.assertIn('catpaw', templates)

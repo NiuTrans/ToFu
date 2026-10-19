@@ -21,6 +21,11 @@
   color: var(--text-primary);
   white-space: normal;
 }
+
+.ptool-convmeta-header .ptool-text,
+.ptool-convmeta-structured {
+  overflow-wrap: anywhere;
+}
 .ptool-convmeta-block > summary::-webkit-details-marker { display: none; }
 .ptool-convmeta-block > summary::marker { display: none; content: ""; }
 .ptool-convmeta-block > summary:focus-visible {

@@ -6,6 +6,7 @@ use std::{borrow::Cow, ops::Deref, sync::Mutex};
 
 #[derive(Clone)]
 pub(crate) struct StorageV2Bindings {
+    pub(crate) checkpoint_control: Option<std::sync::Arc<crate::daemon_checkpoint::DaemonCheckpointControl>>,
     pub(crate) authority_admission: std::sync::Arc<crate::authority_admission::AuthorityAdmission>,
     pub(crate) published_queries: Option<crate::authority::PublishedQueryView>,
     pub(crate) authority_gc_budget: AuthorityGarbageCollectionBudget,
@@ -44,6 +45,7 @@ impl<'stores> StorageV2Stores<'stores> {
             authority,
             search_projection,
             bindings: Cow::Owned(StorageV2Bindings {
+                checkpoint_control: None,
                 authority_admission: std::sync::Arc::default(),
                 published_queries: None,
                 authority_gc_budget: AuthorityGarbageCollectionBudget::conservative(),
@@ -64,6 +66,11 @@ impl<'stores> StorageV2Stores<'stores> {
             search_projection,
             bindings: Cow::Borrowed(bindings),
         }
+    }
+
+    pub(crate) fn with_checkpoint_control(mut self, control: std::sync::Arc<crate::daemon_checkpoint::DaemonCheckpointControl>) -> Self {
+        self.bindings.to_mut().checkpoint_control = Some(control);
+        self
     }
 
     pub(crate) fn with_wal_barrier(mut self, barrier: crate::wal::WalBarrier) -> Self {
@@ -122,7 +129,7 @@ mod tests {
     };
     fn bindings() -> StorageV2Bindings {
         StorageV2Bindings {
-            authority_admission: Arc::default(),
+            checkpoint_control: None,            authority_admission: Arc::default(),
             published_queries: None,
             authority_gc_budget: AuthorityGarbageCollectionBudget::conservative(),
             wal_barrier: None,

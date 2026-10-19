@@ -17,7 +17,8 @@ class CommandRunner:
             raise EnvironmentError("transport_unsupported", "Default CLI transport requires POSIX; inject a platform-specific runner")
         if self.cancelled():
             raise EnvironmentError("cancelled", "Operation cancelled before dispatch")
-        with tempfile.TemporaryFile() as output, tempfile.TemporaryFile() as source:
+        # Named 0600 files remain valid on FUSE until their scoped close.
+        with tempfile.NamedTemporaryFile(prefix='tofu-provider-output-') as output, tempfile.NamedTemporaryFile(prefix='tofu-provider-input-') as source:
             source.write(input_bytes); source.seek(0)
             try:
                 child = subprocess.Popen([self.executable, *args], stdin=source, stdout=output,

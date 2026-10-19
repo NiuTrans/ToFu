@@ -121,7 +121,9 @@ PLATFORM_ASSETS: tuple[tuple[str, str, str, str, int], ...] = (
     ('macos',   'arm64',  'macOS arm64 DMG',   'Tofu-*-macos-arm64.dmg',  119_000_000),
     ('macos',   'x86_64', 'macOS x86_64 DMG',  'Tofu-*-macos-x86_64.dmg', 121_000_000),
     ('windows', 'x86_64', 'Windows installer', 'Tofu-Setup-*-win64.exe',   81_000_000),
-    ('linux',   'x86_64', 'Linux archive',     'Tofu-*-linux*.tar.gz',    135_000_000),
+    ('linux',   'x86_64', 'Linux archive',     'Tofu-*-linux-x86_64.tar.gz',    135_000_000),
+    ('linux', 'arm64', 'Linux ARM64 archive', 'Tofu-*-linux-aarch64.tar.gz', 135_000_000),
+    ('linux', 'arm64', 'Linux ARM64 .deb installer', 'Tofu-*-linux-aarch64.deb', 130_000_000),
     # The primary Linux installer (pt_a64216b959694605). Same content as the
     # tarball, so it shares the hollow-build floor rationale (~70% of the
     # measured healthy size).
@@ -129,7 +131,7 @@ PLATFORM_ASSETS: tuple[tuple[str, str, str, str, int], ...] = (
 )
 
 # The AGENT component's assets (docs/modules/remote_execution.md):
-# same tuple shape, disjoint globs (TofuAgent- prefix can never collide
+# same tuple shape, disjoint globs (TofuRemote- prefix can never collide
 # with the full line). The CI agent legs (build-desktop.yml, slice A2b)
 # produce them, and REQUIRED_PLATFORM_ASSETS below derives over BOTH
 # tables — the join and the legs landed in ONE change on purpose: legs
@@ -142,14 +144,16 @@ PLATFORM_ASSETS: tuple[tuple[str, str, str, str, int], ...] = (
 # 2026-08-02) → 70%; mac/linux are CI-leg estimates to be re-measured on
 # the first real legs.
 AGENT_PLATFORM_ASSETS: tuple[tuple[str, str, str, str, int], ...] = (
-    ('macos',   'arm64',  'macOS agent arm64 DMG',
-     'TofuAgent-*-macos-arm64.dmg',   15_000_000),
-    ('macos',   'x86_64', 'macOS agent x86_64 DMG',
-     'TofuAgent-*-macos-x86_64.dmg',  15_000_000),
-    ('windows', 'x86_64', 'Windows agent installer',
-     'TofuAgent-Setup-*-win64.exe',   37_000_000),
-    ('linux',   'x86_64', 'Linux agent archive',
-     'TofuAgent-*-linux-x86_64.tar.gz', 15_000_000),
+    ('macos',   'arm64',  'macOS remote arm64 DMG',
+     'TofuRemote-*-macos-arm64.dmg',   15_000_000),
+    ('macos',   'x86_64', 'macOS remote x86_64 DMG',
+     'TofuRemote-*-macos-x86_64.dmg',  15_000_000),
+    ('windows', 'x86_64', 'Windows remote installer',
+     'TofuRemote-Setup-*-win64.exe',   37_000_000),
+    ('linux', 'arm64', 'Linux ARM64 remote archive',
+     'TofuRemote-*-linux-aarch64.tar.gz', 15_000_000),
+    ('linux',   'x86_64', 'Linux remote archive',
+     'TofuRemote-*-linux-x86_64.tar.gz', 15_000_000),
 )
 
 # The (label, glob) view the two release gates consume. DERIVED, never
@@ -157,10 +161,25 @@ AGENT_PLATFORM_ASSETS: tuple[tuple[str, str, str, str, int], ...] = (
 # both would keep passing on the platforms they still knew about. Since A2b
 # (2026-08-02) this spans BOTH components: a release missing an agent asset
 # is exactly as INCOMPLETE as one missing a platform.
+# Python target descriptors derive from the desktop support matrix.
+PYTHON_BUNDLE_TARGETS = tuple(sorted({
+    ({'macos': 'darwin', 'windows': 'win32', 'linux': 'linux'}[os_key],
+     {'arm64': 'aarch64'}.get(arch, arch))
+    for os_key, arch, _label, _pattern, _floor in PLATFORM_ASSETS
+}))
+
 REQUIRED_PLATFORM_ASSETS: tuple[tuple[str, str], ...] = tuple(
     (label, pattern)
     for _os, _arch, label, pattern, _min in (
         PLATFORM_ASSETS + AGENT_PLATFORM_ASSETS)) + (
+    *tuple((f'Python wheels {platform}/{machine}{suffix}',
+            f'python-wheels-*-cpython-312-{platform}-{machine}.tar.gz{suffix}')
+           for platform, machine in PYTHON_BUNDLE_TARGETS
+           for suffix in ('', '.sha256')),
+    *tuple((f'Prebuilt TofuDB {target}{suffix}', f'tofu-db-*-{target}.tar.gz{suffix}')
+           for target in ('x86_64-unknown-linux-musl', 'aarch64-unknown-linux-musl',
+                          'x86_64-apple-darwin', 'aarch64-apple-darwin')
+           for suffix in ('', '.sha256')),
     ('prebuilt frontend graph', 'frontend-dist-*.tar.gz'),
     ('prebuilt frontend SHA-256', 'frontend-dist-*.tar.gz.sha256'),
 )

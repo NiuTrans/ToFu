@@ -17,7 +17,7 @@ from evaluations.codex_kimi_proxy.codex_contract import (
     validate_trial_token,
 )
 
-OPENCODE_VERSION = "1.18.29"
+OPENCODE_VERSION = "1.19.0"
 # Public correlation digest, not a credential. Keep it outside token redaction.
 OPENCODE_TRIAL_IDENTITY_FIELD = 'trial_id_sha256'
 OPENCODE_PROVIDER_NPM = "@ai-sdk/openai-compatible"

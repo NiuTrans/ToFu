@@ -97,6 +97,7 @@ class SaveBytesTest(_Workspace):
             shutil.rmtree(stray, ignore_errors=True)
 
     def test_write_is_recorded_for_undo(self):
+        cfg.set_conv_roots('conv-x', self.rw, [self.ro], [self.ro])
         save_uploaded_file(self.rw, os.path.join(self.rw, 'tracked.png'), PNG,
                            conv_id='conv-x', task_id='task-x')
         mods = get_modifications(self.rw, conv_id='conv-x')

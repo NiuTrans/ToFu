@@ -355,6 +355,28 @@ class ScheduledTaskManager:
         )
         return task
 
+    def settle_execution(self, execution_task_id, *, user_id, status, now):
+        """Atomically settle only records still naming this owner/executor."""
+        from lib.storage import StorageError
+        if (status not in ('ok', 'error') or not isinstance(now, str)
+                or not now or len(now) > 64):
+            raise StorageError('database_protocol_error', 'Invalid execution settlement')
+        lookup = _scheduler_client().query('scheduler.task.execution_lookup', {
+            'user_id': int(user_id), 'execution_task_id': execution_task_id,
+        })
+        if (not isinstance(lookup, dict) or set(lookup) != {'indexed', 'matched'}
+                or any(type(lookup[key]) is not bool for key in ('indexed', 'matched'))
+                or (not lookup['indexed'] and lookup['matched'])):
+            raise StorageError('database_protocol_error', 'Invalid execution lookup response')
+        if lookup['indexed'] and not lookup['matched']:
+            return {'changed': 0}
+        return _scheduler_client(write=True).command(
+            'scheduler.task.settle_execution',
+            {'user_id': int(user_id), 'execution_task_id': execution_task_id,
+             'status': status, 'now': now},
+            f'scheduler.settle:{user_id}:{execution_task_id}:{uuid.uuid4().hex}',
+        )
+
     def list_tasks(self, *, user_id: int, include_disabled=False):
         """List all tasks."""
         rows = _scheduler_client().query(
@@ -613,6 +635,7 @@ class ScheduledTaskManager:
                 content, usage = smart_chat(
                     messages=[{"role": "user", "content": command}],
                     max_tokens=4096,
+                    owner_user_id=_task_owner_user_id(task),
                     log_prefix="[Scheduler]",
                 )
                 return True, content

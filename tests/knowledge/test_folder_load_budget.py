@@ -5,6 +5,7 @@ from __future__ import annotations
 import shutil
 import subprocess
 from pathlib import Path
+from tests._runtime_sections import native_module_path
 
 import pytest
 
@@ -73,6 +74,8 @@ global.requiredApiTransport = {
   },
 };
 
+eval(fs.readFileSync(process.argv[3], 'utf8'));
+eval(fs.readFileSync(process.argv[4], 'utf8'));
 eval(fs.readFileSync(process.argv[1], 'utf8'));
 const api = runtimeScope.Api;
 let renders = 0;
@@ -194,7 +197,11 @@ const settle = async () => {
 @pytest.mark.skipif(not shutil.which('node'), reason='node is required')
 def test_folder_list_singleflight_failure_and_empty_budget():
     result = subprocess.run(
-        ['node', '-e', HARNESS, str(API_SOURCE), str(FOLDER_SOURCE)],
+        ['node', '-e', HARNESS, str(API_SOURCE), str(FOLDER_SOURCE),
+         native_module_path('.native/endpoint-registry.js',
+                            ROOT / 'frontend/src/api/endpoint-registry/index.ts'),
+         native_module_path('.native/folder-presets.js',
+                            ROOT / 'frontend/src/conversation/application/folder-presets.ts')],
         cwd=ROOT,
         capture_output=True,
         text=True,

@@ -205,7 +205,7 @@ def _live_prober(*, base_url: str, protocol: str, faces: dict,
                  api_key: str, extra_headers: dict,
                  recipes: list[dict]) -> dict[str, str]:
     """Probe each recipe's wire pool; return model_id → verdict."""
-    from lib.provider_probe import build_probe_work, probe_one_cell
+    from lib.provider.provider_probe import build_probe_work, probe_one_cell
 
     provider = {'base_url': base_url, 'protocol': protocol, 'faces': faces}
     models = [
@@ -239,7 +239,8 @@ def _live_prober(*, base_url: str, protocol: str, faces: dict,
         for root, future in futures:
             try:
                 _root, (verdict, _detail) = future.result()
-            except Exception:
+            except Exception as diagnostic_error:
+                logger.debug('_live_prober failure handled: %s', type(diagnostic_error).__name__)
                 verdict = 'unknown'
             previous = by_root.get(root)
             if previous in _SERVED_VERDICTS:
@@ -434,7 +435,7 @@ def sync_template_supply(*, boundary=None, repository=None,
                     'accesses': {}, 'skipped': 'no_owner'}
         boundary, repository = context
 
-    from lib.provider_template_recipes import (
+    from lib.provider.provider_template_recipes import (
         compile_provider_template_bundle, load_provider_templates)
 
     if templates is None:

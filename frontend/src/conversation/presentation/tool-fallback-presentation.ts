@@ -16,6 +16,9 @@
 
 import { detectCodeLanguage, highlightCodeToHtml } from './code-highlight';
 
+import { escapeHtmlText } from '../../html-safety';
+import { renderMcpResourceLinks } from './mcp-resource-links';
+
 export type ToolFallbackStatusTone = 'ok' | 'err' | 'active' | 'muted';
 
 const OK_STATUSES = new Set(['done', 'completed', 'ok', 'success']);
@@ -45,6 +48,9 @@ export interface ToolFallbackSectionSpec {
 
 export interface ToolFallbackCardSpec {
   title: string;
+
+  /** Authoritative projected round; only safe backend-provided URLs become anchors. */
+  resourceRound?: unknown;
   status?: string;
   badges?: ReadonlyArray<string>;
   /** Child tool names for program orchestration cards. */
@@ -88,7 +94,7 @@ export function buildToolFallbackCard(
   summary.className = 'conversation-tool-card__summary';
   const title = document.createElement('span');
   title.className = 'conversation-tool-card__title';
-  title.textContent = spec.title || 'Tool';
+  title.innerHTML = renderMcpResourceLinks(escapeHtmlText(spec.title || 'Tool'), spec.resourceRound);
   summary.appendChild(title);
   for (const badgeText of spec.badges ?? []) {
     if (!badgeText) continue;

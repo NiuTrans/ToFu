@@ -7,7 +7,7 @@ from lib.observability import (
     record_runtime_probe_failure,
     reset_for_tests,
 )
-from lib.server_runtime_probes import stall_pressure_context
+from lib.server.server_runtime_probes import stall_pressure_context
 
 
 pytestmark = pytest.mark.unit

@@ -29,10 +29,11 @@ import { contextNoteDisplayKind } from '../context-note-grouping';
 
 export function richToolRoundsBySegment(
   turn: TurnRecord,
+  segments: ReadonlyArray<TurnContentSegment> = turn.projection.segments ?? [],
 ): ReadonlyArray<TurnToolRound | undefined> {
   const rounds = turn.projection.toolRounds ?? [];
   const resolve = createToolOccurrenceMatcher(rounds.filter(round => round.toolCallId));
-  return (turn.projection.segments ?? []).map((segment) => {
+  return segments.map((segment) => {
     if (segment.type !== 'tool_use') return undefined;
     // Embedded bodies still consume their occurrence, keeping later pairings stable.
     const round = resolve(segment.id.trim(), segment);
@@ -91,6 +92,13 @@ export function blockFromSegment(
       identitySource,
       source: segment,
       markdown: original,
+      ...((segment.terminal || segment.deliverable)
+        && turn.projection.translation?.model?.trim()
+        ? { translationModel: turn.projection.translation.model } : {}),
+      ...((segment.terminal || segment.deliverable) && turn.actor === 'human'
+        && !humanOriginal && !visibleTranslation?.trim()
+        && turn.projection.translation?.status === 'completed'
+        ? { inputTranslationCompleted: true } : {}),
       ...(visibleTranslation ? { translatedMarkdown: visibleTranslation } : {}),
       displayMarkdown: displayMode === 'translated'
         ? displayedTranslation ?? original : original,

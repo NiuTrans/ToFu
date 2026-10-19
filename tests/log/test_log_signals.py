@@ -25,7 +25,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-import lib.log_signals as ls
+import lib.logging_pkg.log_signals as ls
 
 pytestmark = pytest.mark.unit
 
@@ -265,7 +265,7 @@ class TestDigestEndpoint:
     def _app(self):
         from quart import g
 
-        from lib.app_factory import create_base_app
+        from lib.app.app_factory import create_base_app
         from lib.api_keys import local_admin_context
         from routes.api_v1.logs import api_v1_logs_bp
 

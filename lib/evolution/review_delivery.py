@@ -127,8 +127,6 @@ def prepare(task, arguments, *, call_id, round_num):
     runs._validate_review_submission(authored, run)
     _require_review_inspection(task, run, authored)
     content = json.dumps(authored, ensure_ascii=False, separators=(',', ':'), allow_nan=False)
-    if len(content) > runs.review_output_bound(run, include_original_sources=runs.review_has_original_sources(authored), task=task):
-        raise EvolutionContractError('review exceeds output bound')
     binding = {key: deepcopy(run.get(key)) for key in _BINDING_FIELDS}
 
     def verify():

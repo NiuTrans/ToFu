@@ -53,11 +53,9 @@ def on_task_terminal(task: dict, *, actuals=None, cancel_event=None) -> None:
     else:
         # Launched tasks carry goal/plan in config; the durable link is the
         # episode's task_id. Match it instead of mutating a live task config.
-        from .episodes import list_episodes
+        from .episodes import find_running_episode_for_task
         task_id = str(task.get('id') or '')
-        match = next((e for e in list_episodes(user_id=user_id, limit=200)
-                      if e.get('task_id') == task_id
-                      and e.get('status') == 'running'), None)
+        match = find_running_episode_for_task(task_id=task_id, user_id=user_id)
         episode_id = match['episode_id'] if match else ''
     if not episode_id:
         return
@@ -92,8 +90,6 @@ def on_task_terminal(task: dict, *, actuals=None, cancel_event=None) -> None:
                        '%s', episode_id, exc)
 
 
-_MAX_PENDING_TERMINALS = 16
-_queue_capacity = None
 _IDLE_SECONDS = 30.0
 _pending = deque()
 _worker = None
@@ -101,26 +97,70 @@ _worker_condition = threading.Condition()
 _worker_stop = threading.Event()
 
 
+def _start_terminal_worker_locked():
+    global _worker
+    _worker = threading.Thread(target=_consume_terminals,
+                               name='evolution-terminal', daemon=True)
+    try:
+        _worker.start()
+    except BaseException:
+        _worker = None
+        raise
+
+
+def _check_terminal_receipt(task, actuals):
+    if _worker_stop.is_set():
+        return
+    try:
+        on_task_terminal(task, actuals=actuals, cancel_event=_worker_stop)
+    except Exception as exc:
+        logger.warning('[Evolution:Automation] terminal check failed: %s',
+                       type(exc).__name__)
+    finally:
+        with _worker_condition:
+            _worker_condition.notify_all()
+
+
 def _consume_terminals():
     global _worker
-    while True:
+    owner = threading.current_thread()
+    try:
+        from lib.production.concurrency import production_executor
+        with production_executor(name='evolution-terminal-check') as executor:
+            while True:
+                with _worker_condition:
+                    if not _pending and not _worker_stop.is_set():
+                        _worker_condition.wait(timeout=_IDLE_SECONDS)
+                    if _worker_stop.is_set():
+                        return
+                    if not _pending:
+                        snapshot = executor.resource_snapshot()
+                        if snapshot['used'] or snapshot['waiting']:
+                            continue
+                        return
+                    task, actuals = _pending.popleft()
+                try:
+                    executor.submit(_check_terminal_receipt, task, actuals)
+                except Exception as exc:
+                    logger.warning('[Evolution:Automation] terminal worker start failed: %s',
+                                   type(exc).__name__)
+    finally:
+        # Keep the physical owner published until its executor has joined.
+        # Enqueue during idle close stays owned and starts a fresh generation.
         with _worker_condition:
-            if not _pending and not _worker_stop.is_set():
-                _worker_condition.wait(timeout=_IDLE_SECONDS)
-            if _worker_stop.is_set() or not _pending:
+            if _worker is owner:
                 _worker = None
-                return
-            task, actuals = _pending.popleft()
-        try:
-            on_task_terminal(task, actuals=actuals, cancel_event=_worker_stop)
-        except Exception as exc:
-            logger.warning('[Evolution:Automation] terminal check failed: %s',
-                           type(exc).__name__)
+                if _pending and not _worker_stop.is_set():
+                    try:
+                        _start_terminal_worker_locked()
+                    except Exception as exc:
+                        logger.warning('[Evolution:Automation] terminal owner start failed: %s',
+                                       type(exc).__name__)
 
 
 def enqueue_task_terminal(task: dict) -> bool:
-    """Keep only bounded identity/consumption receipts, never task history."""
-    global _worker, _queue_capacity
+    """Own every accepted identity/consumption receipt, never task history."""
+    global _worker
     binding = episode_binding(task)
     if binding is None:
         return False
@@ -150,21 +190,14 @@ def enqueue_task_terminal(task: dict) -> bool:
     if not complete:
         receipt['_executionActualsComplete'] = False
     with _worker_condition:
-        if _queue_capacity is None:
-            from runtime_guards import resolve_resource_budget
-            _queue_capacity = resolve_resource_budget(
-                'TOFU_EVOLUTION_TERMINAL_QUEUE_CAPACITY', maximum=_MAX_PENDING_TERMINALS)
-        if _worker_stop.is_set() or len(_pending) >= _queue_capacity:
-            logger.warning('[Evolution:Automation] terminal queue unavailable; episode awaits explicit settlement')
+        if _worker_stop.is_set():
+            logger.warning('[Evolution:Automation] terminal checks are stopped')
             return False
         _pending.append((receipt, actuals))
         if _worker is None:
-            _worker = threading.Thread(target=_consume_terminals,
-                                       name='evolution-terminal', daemon=True)
             try:
-                _worker.start()
+                _start_terminal_worker_locked()
             except BaseException:
-                _worker = None
                 _pending.pop()
                 raise
         _worker_condition.notify()

@@ -7,6 +7,7 @@ are substituted; production globals and the configured application remain intact
 from __future__ import annotations
 
 import hashlib
+from functools import partial
 from pathlib import Path
 import subprocess
 import types
@@ -21,12 +22,15 @@ from tofu_db.embedded import EmbeddedRuntime
 
 
 class DurableHtmlCorpus:
-    def __init__(self, root: Path, engine: Path, *, variant: str, owner_user_id: int = 1, initialize: bool = True):
+    def __init__(self, root: Path, engine: Path, *, variant: str, owner_user_id: int = 1, initialize: bool = True, html_projector=None, database_provenance=None):
         if variant not in {'reference', 'candidate'}:
             raise ValueError('unknown HTML variant')
+        if html_projector is not None and (variant != 'candidate' or not callable(html_projector)):
+            raise ValueError('explicit HTML projector requires candidate and callable')
         self.root = root
         self.owner_user_id = require_user_id(owner_user_id, context='private native corpus owner')
         self.engine = engine
+        self.database_provenance = database_provenance
         self.runtime = None
         self.client = None
         self.data_dir = root / 'authority'
@@ -43,11 +47,15 @@ class DurableHtmlCorpus:
         try:
             reference, self.reference_source_sha256 = load_reference()
             ingest_namespace = dict(vars(ingest))
+            for name, value in vars(ingest).items():
+                if isinstance(value, types.FunctionType) and value.__globals__ is vars(ingest):
+                    clone = types.FunctionType(value.__code__, ingest_namespace, value.__name__,
+                                               value.__defaults__, value.__closure__)
+                    clone.__kwdefaults__ = value.__kwdefaults__
+                    ingest_namespace[name] = clone
             if variant == 'reference':
                 ingest_namespace['_html_to_text'] = reference
-            extract = types.FunctionType(ingest.extract.__code__, ingest_namespace,
-                                         ingest.extract.__name__, ingest.extract.__defaults__)
-            extract.__kwdefaults__ = ingest.extract.__kwdefaults__
+            extract = ingest_namespace['extract']
             namespace = dict(vars(store))
             for name, value in vars(store).items():
                 if isinstance(value, types.FunctionType) and value.__globals__ is vars(store):
@@ -59,6 +67,10 @@ class DurableHtmlCorpus:
                              _SOURCE_ROOT_OVERRIDE=str(root / 'sources'),
                              _ASSET_ROOT_OVERRIDE=str(root / 'assets'))
             self.add_document = namespace['add_document']
+            self.reindex_document = namespace['reindex_document']
+            if html_projector is not None:
+                self.add_document = partial(self.add_document, html_projector=html_projector)
+                self.reindex_document = partial(self.reindex_document, html_projector=html_projector)
             self.get_document_content = namespace['get_document_content']
         except BaseException:
             self.close()
@@ -74,12 +86,14 @@ class DurableHtmlCorpus:
         try:
             checkout = Path(__file__).resolve().parents[2]
             identity = runtime.build_identity()
-            expected = source_fingerprint(checkout)
-            if expected is None or identity != {'source_sha256': expected}:
+            provenance = self.database_provenance
+            expected = (provenance.expected_identity(self.engine) if provenance is not None
+                        else {'source_sha256': source_fingerprint(checkout)})
+            if expected['source_sha256'] is None or identity != expected:
                 raise RuntimeError('native library is not built from this checkout')
             self.build_identity = identity
-            self.library_sha256 = hashlib.sha256(
-                self.engine.with_name('libtofu_db.so').read_bytes()).hexdigest()
+            self.library_sha256 = (provenance.library_sha256 if provenance is not None else
+                hashlib.sha256(self.engine.with_name('libtofu_db.so').read_bytes()).hexdigest())
             self.client = EmbeddedStorageV2Client(runtime, secret, owner_id=self.owner_user_id,
                                                   tenant_id=1, timeout=30)
             self.runtime = runtime

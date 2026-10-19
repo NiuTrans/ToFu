@@ -33,3 +33,18 @@ def test_impossible_review_allocation_is_a_contract_error_before_creation(client
         json={'objective': 'Keep the original budget.', 'budget': {'max_tokens': 100},
               'review_reserve': {'tokens': 100}}))
     assert response.status_code == 400 and store.writes == before
+
+
+def test_program_schema_cost_policy_is_owned_frozen_and_readable(client):
+    http, token, _ = client
+    headers = {'Authorization': f'Bearer {token}', 'Idempotency-Key': 'http-schema-cost'}
+    body = {'objective': 'Repair and verify a project.', 'executor_schema_budget_tokens': 4000}
+    response = _run(http.post('/api/v4/evolution/programs', headers=headers, json=body))
+    assert response.status_code == 201
+    program = _run(response.get_json())['program']
+    assert program['execution_options']['executor_schema_budget_tokens'] == 4000
+    response = _run(http.get('/api/v4/evolution/programs/' + program['program_id'], headers=headers))
+    assert _run(response.get_json())['program']['execution_options']['executor_schema_budget_tokens'] == 4000
+    response = _run(http.post('/api/v4/evolution/programs', headers=headers,
+                             json={**body, 'executor_schema_budget_tokens': 0}))
+    assert response.status_code == 409

@@ -82,4 +82,20 @@ approximately 0.164 ms. This is a warm, unoptimized generic-engine workload,
 not application latency or a large production corpus. Initial copy/restore
 took 2.13 s; a changed snapshot copied 538,408 bytes in 0.592 s, with about
 65 MiB peak process RSS. Whole-graph traversal remains a material large-corpus
-cost. Exact source digest, sizes and raw distributions: [measurement](evidence/tofudb_native_fastpath_20261006.json).
+cost. Exact source digest, sizes and raw distributions: measurement.
+
+## Interrupted prune recovery
+
+Problem: an epoch could commit its prune plan and fail before clearing it;
+subsequent backups refused forever before reaching the existing prune resumer.
+Decision: resume the persisted plan through the same backup/prune lease owner
+before the next copy phase, outside the foreground mutex. Recheck the prune
+fence after acquiring the copy lease. The persisted retention set, pins,
+encryption, fault rollback and manifest-last publication remain authoritative;
+the completion receipt includes both resumed and current prune removals.
+Alternatives rejected: deleting the marker loses crash safety; changing a
+pending retention set can discard recovery generations; pruning under the copy
+lease deadlocks its ownership boundary. An injected interruption test restores
+the newest data after the next online epoch; no worker or retained queue is added.
+
+<!-- Evidence note: former docs/evidence/ artifact snapshots cited here were retired from the tree; cited JSON artifacts remain recoverable from git history. -->

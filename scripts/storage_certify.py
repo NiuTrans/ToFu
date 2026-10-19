@@ -23,7 +23,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from lib.storage import StorageError, StorageEventBatcher, StorageSupervisor
-from lib.storage_sidecar.durability import write_json_durable
+from lib.storage_authority_sql.durability import write_json_durable
 
 
 def _mount(path: Path) -> dict[str, str]:

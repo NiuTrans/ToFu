@@ -19,7 +19,7 @@ use crate::generated_tofudb_ir::{
     MAX_ENTITY_MOUNT_CONSOLIDATION_BYTES, MAX_ENTITY_MOUNT_CONSOLIDATION_ROWS,
     MAX_ENTITY_RANGE_ROWS,
     MAX_ENTITY_REACHABILITY_FRONTIER, MAX_ENTITY_REACHABILITY_PAGES, MAX_ENTITY_RETIRED_RANGES,
-    MAX_ENTITY_ROOT_RANGE_MOUNTS, MAX_ENTITY_TRANSACTION_WRITES,
+    MAX_ENTITY_ROOT_RANGE_MOUNTS,
     MAX_LEGACY_PERSISTENT_ENTITY_ROOT_PINS, MAX_PERSISTENT_ENTITY_CAPSULE_RANGES,
     MAX_PERSISTENT_ENTITY_ROOT_PINS, MAX_PERSISTENT_ENTITY_ROOT_PIN_ID_BYTES,
     PERSISTENT_ENTITY_ROOT_PIN_CATALOG_NAMESPACE,
@@ -28,9 +28,12 @@ use crate::generated_tofudb_ir::{
 use crate::vfs::Vfs;
 use uuid::Uuid;
 
+#[path = "entity_page_codec.rs"]
+mod page_codec;
+use page_codec::LeafFrame;
+
 const PAGE_MAGIC: &[u8; 8] = b"TDBENT01";
 const ROOT_MAGIC: &[u8; 8] = b"TDBROOT1";
-const PAGE_VERSION: u32 = 1;
 const ROOT_VERSION: u32 = 2;
 const ROOT_DIRECTORY_MAGIC: &[u8; 8] = b"TDBRDIR1";
 const ROOT_DIRECTORY_VERSION: u32 = 1;
@@ -43,7 +46,6 @@ const MIN_INTERNAL_SPLIT_CHILDREN: usize =
     crate::generated_tofudb_ir::MIN_ENTITY_INTERNAL_SPLIT_CHILDREN;
 const MAX_NAMESPACE_BYTES: usize = 63;
 const MAX_TREE_DEPTH: usize = 16;
-const MAX_INTERNAL_RANGE_ROWS: usize = MAX_ENTITY_RANGE_ROWS + MAX_ENTITY_TRANSACTION_WRITES;
 /// Overlay scan slack: the merge trigger (`merge_overlay_if_needed`) fires
 /// at this many pending delta entries, so any single scanned range holds at
 /// most this many overlay entries and exact scan coverage always fits.
@@ -376,7 +378,7 @@ impl OverlayMergePreparation {
                 written_ids.iter().filter_map(|id| state.pages.get(id)).try_fold(0_usize, |total, bytes|
                     total.checked_add(bytes.len()).ok_or_else(|| invalid_data("private merge byte count overflow")))?
             };
-            if written_ids.len() <= crate::transaction::MAX_REFERENCED_BLOCKS
+            if u32::try_from(written_ids.len()).is_ok()
                 && carried_bytes <= crate::transaction::MAX_CARRIED_PAYLOAD_BYTES {
                 let payloads = {
                     let mut state = pages.state.lock().map_err(|_| io::Error::other("private merge pages poisoned"))?;
@@ -540,6 +542,28 @@ enum RootNode {
     Directory(RootDirectory),
 }
 
+impl RootNode {
+    fn owned_allocation_bytes(&self) -> usize {
+        std::mem::size_of::<Self>().saturating_add(match self {
+            Self::Page(Page::Leaf(entries)) => entries.capacity()
+                .saturating_mul(std::mem::size_of::<(Vec<u8>, EntityValue)>())
+                .saturating_add(entries.iter().fold(0usize, |total, (key, value)|
+                    total.saturating_add(key.capacity())
+                        .saturating_add(value.value.as_ref().map_or(0, Vec::capacity)))),
+            Self::Page(Page::Internal { children, .. }) => children.capacity()
+                .saturating_mul(std::mem::size_of::<Child>())
+                .saturating_add(children.iter().fold(0usize, |total, child|
+                    total.saturating_add(child.lower_bound.capacity()))),
+            Self::Directory(directory) => directory.mounts.capacity()
+                .saturating_mul(std::mem::size_of::<RangeMount>())
+                .saturating_add(directory.mounts.iter().fold(0usize, |total, mount|
+                    total.saturating_add(mount.start.capacity()).saturating_add(mount.end.capacity())))
+                .saturating_add(directory.materialized.as_ref().and_then(|position| position.key.as_ref())
+                    .map_or(0, Vec::capacity)),
+        })
+    }
+}
+
 /// Default decoded entity-page cache budget.  Decoded pages expand to roughly
 /// four times their encoded size once per-entry Vec/String overhead lands, so
 /// 16 MiB resident covers the hot root-to-leaf paths of personal-mode
@@ -580,7 +604,8 @@ impl DecodedPageCache {
 
     fn insert(&mut self, id: BlockId, node: Arc<RootNode>, encoded_len: usize) {
         let charge = encoded_len.saturating_mul(PAGE_CACHE_DECODED_EXPANSION)
-            .saturating_add(PAGE_CACHE_ENTRY_OVERHEAD_BYTES);
+            .saturating_add(PAGE_CACHE_ENTRY_OVERHEAD_BYTES)
+            .max(node.owned_allocation_bytes().saturating_add(PAGE_CACHE_ENTRY_OVERHEAD_BYTES));
         if charge > self.capacity_bytes || self.entries.contains_key(&id) { return; }
         // Evict before admitting the verified miss, so a recently referenced
         // old page cannot immediately evict the page we have just decoded.
@@ -923,34 +948,6 @@ impl PreparedEntityCommit {
         self.overlay_delta
             .as_ref()
             .map(crate::entity_overlay::encode_overlay_delta)
-    }
-}
-
-/// One unpublished leaf tail while repacking adjacent modified children.
-/// Encoded content is bounded by the page ceiling; untouched children flush
-/// the tail and retain their original block references. The tail is held as
-/// pre-encoded page bytes so repacking copies each entry at most once.
-struct LeafFrame {
-    bytes: Vec<u8>,
-    entries: usize,
-    first_key: Vec<u8>,
-    encoded_bytes: usize,
-}
-
-impl LeafFrame {
-    fn new() -> Self {
-        let mut bytes = Vec::with_capacity(256);
-        bytes.extend_from_slice(PAGE_MAGIC);
-        bytes.extend_from_slice(&PAGE_VERSION.to_le_bytes());
-        bytes.push(0);
-        bytes.push(0);
-        bytes.extend_from_slice(&0u16.to_le_bytes());
-        Self {
-            bytes,
-            entries: 0,
-            first_key: Vec::new(),
-            encoded_bytes: 16,
-        }
     }
 }
 
@@ -1477,27 +1474,6 @@ impl RootDirectory {
 }
 
 impl Page {
-    fn encoded_bytes(&self) -> io::Result<usize> {
-        fn bounded_sum(mut entries: impl Iterator<Item = usize>) -> io::Result<usize> {
-            entries.try_fold(16_usize, |total, entry| {
-                total
-                    .checked_add(entry)
-                    .filter(|size| *size <= PAGE_MAX_BYTES)
-                    .ok_or_else(|| invalid_data("entity page exceeds maximum encoding size"))
-            })
-        }
-        match self {
-            Self::Leaf(entries) => {
-                bounded_sum(entries.iter().map(|(key, entity)| {
-                    13 + key.len() + entity.value.as_ref().map_or(0, Vec::len)
-                }))
-            }
-            Self::Internal { children, .. } => {
-                bounded_sum(children.iter().map(|child| 34 + child.lower_bound.len()))
-            }
-        }
-    }
-
     fn first_key_ref(&self) -> io::Result<&[u8]> {
         match self {
             Self::Leaf(entries) => entries
@@ -1533,108 +1509,6 @@ impl Page {
 
     fn first_key(&self) -> io::Result<Vec<u8>> {
         self.first_key_ref().map(<[u8]>::to_vec)
-    }
-
-    fn encode(&self) -> io::Result<Vec<u8>> {
-        let mut bytes = Vec::with_capacity(self.encoded_bytes()?);
-        bytes.extend_from_slice(PAGE_MAGIC);
-        bytes.extend_from_slice(&PAGE_VERSION.to_le_bytes());
-        match self {
-            Self::Leaf(entries) => {
-                bytes.push(0);
-                bytes.push(0);
-                push_u16(&mut bytes, entries.len())?;
-                for (key, entity) in entries {
-                    push_u16(&mut bytes, key.len())?;
-                    push_u16(
-                        &mut bytes,
-                        entity.value.as_ref().map_or(0, |value| value.len()),
-                    )?;
-                    bytes.extend_from_slice(&entity.version.to_le_bytes());
-                    bytes.push(u8::from(entity.value.is_none()));
-                    bytes.extend_from_slice(key);
-                    if let Some(value) = &entity.value {
-                        bytes.extend_from_slice(value);
-                    }
-                }
-            }
-            Self::Internal { level, children } => {
-                if *level == 0 {
-                    return Err(invalid_data("internal entity page has leaf level"));
-                }
-                bytes.push(1);
-                bytes.push(*level);
-                push_u16(&mut bytes, children.len())?;
-                for child in children {
-                    push_u16(&mut bytes, child.lower_bound.len())?;
-                    bytes.extend_from_slice(&child.lower_bound);
-                    bytes.extend_from_slice(&child.block_id.0);
-                }
-            }
-        }
-        Ok(bytes)
-    }
-
-    fn decode(bytes: &[u8]) -> io::Result<Self> {
-        if bytes.len() < 16 || bytes.len() > PAGE_MAX_BYTES || &bytes[..8] != PAGE_MAGIC {
-            return Err(invalid_data("entity page magic mismatch"));
-        }
-        if u32::from_le_bytes(bytes[8..12].try_into().unwrap()) != PAGE_VERSION {
-            return Err(invalid_data("unsupported entity page version"));
-        }
-        let kind = bytes[12];
-        let level = bytes[13];
-        let count = u16::from_le_bytes(bytes[14..16].try_into().unwrap()) as usize;
-        let mut offset = 16;
-        let page = match kind {
-            0 if level == 0 => {
-                let mut entries = Vec::with_capacity(count);
-                for _ in 0..count {
-                    let key_len = read_u16(bytes, &mut offset)?;
-                    let value_len = read_u16(bytes, &mut offset)?;
-                    let version =
-                        u64::from_le_bytes(take(bytes, &mut offset, 8)?.try_into().unwrap());
-                    let tombstone = take(bytes, &mut offset, 1)?[0];
-                    if key_len > MAX_ENTITY_KEY_BYTES + 82
-                        || value_len > MAX_ENTITY_INLINE_VALUE_BYTES
-                        || tombstone > 1
-                    {
-                        return Err(invalid_data("unbounded entity leaf entry"));
-                    }
-                    let key = take(bytes, &mut offset, key_len)?.to_vec();
-                    let value = if tombstone == 1 {
-                        if value_len != 0 {
-                            return Err(invalid_data("entity tombstone carries bytes"));
-                        }
-                        None
-                    } else {
-                        Some(take(bytes, &mut offset, value_len)?.to_vec())
-                    };
-                    entries.push((key, EntityValue { version, value }));
-                }
-                Self::Leaf(entries)
-            }
-            1 if level > 0 && level as usize <= MAX_TREE_DEPTH => {
-                let mut children = Vec::with_capacity(count);
-                for _ in 0..count {
-                    let key_len = read_u16(bytes, &mut offset)?;
-                    if key_len > MAX_ENTITY_KEY_BYTES + 82 {
-                        return Err(invalid_data("unbounded entity internal key"));
-                    }
-                    children.push(Child {
-                        lower_bound: take(bytes, &mut offset, key_len)?.to_vec(),
-                        block_id: BlockId(take(bytes, &mut offset, 32)?.try_into().unwrap()),
-                    });
-                }
-                Self::Internal { level, children }
-            }
-            _ => return Err(invalid_data("invalid entity page kind or level")),
-        };
-        if offset != bytes.len() {
-            return Err(invalid_data("entity page has trailing bytes"));
-        }
-        page.validate()?;
-        Ok(page)
     }
 
     fn validate(&self) -> io::Result<()> {
@@ -1872,9 +1746,19 @@ impl<'a> Tree<'a> {
     /// fully verifies the block through the engine, decodes it, and only then
     /// populates the cache; a failed verify/decode populates nothing.
     fn load_node(&self, id: BlockId) -> io::Result<Arc<RootNode>> {
-        let _timer = crate::fsync_stats::StageTimer::new(crate::fsync_stats::STAGE_LOAD_NODE);
+        self.load_version_node(id, &mut None)
+    }
+
+    fn load_version_node(&self, id: BlockId,
+        cached: &mut Option<std::sync::RwLockReadGuard<'_, DecodedPageCache>>,
+    ) -> io::Result<Arc<RootNode>> {
+        let _timer = crate::fsync_stats::StageTimer::diagnostic(crate::fsync_stats::STAGE_LOAD_NODE);
+        if let Some(node) = cached.as_ref().and_then(|cache| cache.get(id)) {
+            return Ok(node);
+        }
+        drop(cached.take());
         if let Some(cache) = self.page_cache {
-            let waiting = crate::fsync_stats::StageTimer::new(crate::fsync_stats::STAGE_ENTITY_PAGE_CACHE_READ_WAIT);
+            let waiting = crate::fsync_stats::StageTimer::diagnostic(crate::fsync_stats::STAGE_ENTITY_PAGE_CACHE_READ_WAIT);
             let guard = cache
                 .read()
                 .map_err(|_| io::Error::other("entity page cache lock was poisoned"))?;
@@ -1885,10 +1769,10 @@ impl<'a> Tree<'a> {
             }
         }
         let encoded = {
-            let _read = crate::fsync_stats::StageTimer::new(crate::fsync_stats::STAGE_ENTITY_PAGE_SOURCE_READ);
+            let _read = crate::fsync_stats::StageTimer::diagnostic(crate::fsync_stats::STAGE_ENTITY_PAGE_SOURCE_READ);
             self.backend.read_verified(id)?
         };
-        let decoding = crate::fsync_stats::StageTimer::new(crate::fsync_stats::STAGE_ENTITY_PAGE_DECODE);
+        let decoding = crate::fsync_stats::StageTimer::diagnostic(crate::fsync_stats::STAGE_ENTITY_PAGE_DECODE);
         let node = if encoded.starts_with(ROOT_DIRECTORY_MAGIC) {
             RootNode::Directory(RootDirectory::decode(&encoded)?)
         } else {
@@ -1897,7 +1781,7 @@ impl<'a> Tree<'a> {
         drop(decoding);
         let node = Arc::new(node);
         if let Some(cache) = self.page_cache {
-            let waiting = crate::fsync_stats::StageTimer::new(crate::fsync_stats::STAGE_ENTITY_PAGE_CACHE_WRITE_WAIT);
+            let waiting = crate::fsync_stats::StageTimer::diagnostic(crate::fsync_stats::STAGE_ENTITY_PAGE_CACHE_WRITE_WAIT);
             let mut guard = cache
                 .write()
                 .map_err(|_| io::Error::other("entity page cache lock was poisoned"))?;
@@ -2023,26 +1907,38 @@ impl<'a> Tree<'a> {
         debug_assert!(keys.windows(2).all(|pair| pair[0] < pair[1]));
         let mut versions = vec![None; keys.len()];
         let targets: Vec<_> = keys.iter().enumerate().map(|(index, key)| (*key, index)).collect();
-        if let Some(root) = root { self.versions_root(root, &targets, &mut versions, 0)?; }
+        if let Some(root) = root.filter(|_| !targets.is_empty()) {
+            // A warm batch borrows one cache read lock. The first miss releases
+            // it before source I/O/cache insertion and disables borrowing for
+            // this batch, so neither slow storage nor a pending writer is held
+            // behind repeated read-lock acquisition.
+            let mut cached = if let Some(cache) = self.page_cache {
+                let _waiting = crate::fsync_stats::StageTimer::diagnostic(
+                    crate::fsync_stats::STAGE_ENTITY_PAGE_CACHE_READ_WAIT);
+                Some(cache.read().map_err(|_| io::Error::other("entity page cache lock was poisoned"))?)
+            } else { None };
+            self.versions_root(root, &targets, &mut versions, 0, &mut cached)?;
+        }
         Ok(versions)
     }
 
     fn versions_root(&self, root: BlockId, targets: &[(&[u8], usize)],
-        versions: &mut [Option<u64>], directory_depth: usize) -> io::Result<()> {
+        versions: &mut [Option<u64>], directory_depth: usize,
+        cached: &mut Option<std::sync::RwLockReadGuard<'_, DecodedPageCache>>) -> io::Result<()> {
         if targets.iter().all(|(_, index)| versions[*index].is_some()) { return Ok(()); }
         if directory_depth > MAX_TREE_DEPTH {
             return Err(invalid_data("entity root directory exceeds maximum depth"));
         }
-        match &*self.load_node(root)? {
-            RootNode::Page(page) => self.versions_page(page, targets, versions, 0),
+        match &*self.load_version_node(root, cached)? {
+            RootNode::Page(page) => self.versions_page(page, targets, versions, 0, cached),
             RootNode::Directory(directory) => {
                 if let Some(base) = directory.base_root {
-                    self.versions_root(base, targets, versions, directory_depth + 1)?;
+                    self.versions_root(base, targets, versions, directory_depth + 1, cached)?;
                 }
                 for mount in &directory.mounts {
                     let first = targets.partition_point(|(key, _)| *key < mount.start.as_slice());
                     let last = targets.partition_point(|(key, _)| *key < mount.end.as_slice());
-                    self.versions_root(mount.root, &targets[first..last], versions, directory_depth + 1)?;
+                    self.versions_root(mount.root, &targets[first..last], versions, directory_depth + 1, cached)?;
                 }
                 Ok(())
             }
@@ -2050,7 +1946,8 @@ impl<'a> Tree<'a> {
     }
 
     fn versions_page(&self, page: &Page, targets: &[(&[u8], usize)],
-        versions: &mut [Option<u64>], depth: usize) -> io::Result<()> {
+        versions: &mut [Option<u64>], depth: usize,
+        cached: &mut Option<std::sync::RwLockReadGuard<'_, DecodedPageCache>>) -> io::Result<()> {
         if depth > MAX_TREE_DEPTH { return Err(invalid_data("entity tree exceeds maximum depth")); }
         match page {
             Page::Leaf(entries) => {
@@ -2072,8 +1969,8 @@ impl<'a> Tree<'a> {
                     } else { targets.len() };
                     let group = &targets[first..last];
                     if group.iter().any(|(_, index)| versions[*index].is_none()) {
-                        match &*self.load_node(children[child].block_id)? {
-                            RootNode::Page(page) => self.versions_page(page, group, versions, depth + 1)?,
+                        match &*self.load_version_node(children[child].block_id, cached)? {
+                            RootNode::Page(page) => self.versions_page(page, group, versions, depth + 1, cached)?,
                             RootNode::Directory(_) => return Err(invalid_data("entity page magic mismatch")),
                         }
                     }
@@ -2144,22 +2041,12 @@ impl<'a> Tree<'a> {
         pages: &mut Vec<Child>,
         written_block_ids: &mut Vec<BlockId>,
     ) -> io::Result<()> {
-        if buffer.entries == 0 {
-            return Ok(());
-        }
+        let Some((lower_bound, encoded)) = buffer.finish() else { return Ok(()); };
         let _timer = crate::fsync_stats::StageTimer::new(crate::fsync_stats::STAGE_STORE_PAGE);
-        debug_assert!(buffer.bytes.len() >= 16);
-        buffer.bytes[14..16].copy_from_slice(&(buffer.entries as u16).to_le_bytes());
-        if buffer.bytes.len() > PAGE_MAX_BYTES {
-            return Err(invalid_data("entity page exceeds maximum after split"));
-        }
-        let encoded = std::mem::take(&mut buffer.bytes);
-        let lower_bound = std::mem::take(&mut buffer.first_key);
         let block_id = self.backend.write_fresh_owned(encoded)?;
         if !written_block_ids.contains(&block_id) {
             written_block_ids.push(block_id);
         }
-        *buffer = LeafFrame::new();
         pages.push(Child {
             lower_bound,
             block_id,
@@ -2176,36 +2063,10 @@ impl<'a> Tree<'a> {
         pages: &mut Vec<Child>,
         written_block_ids: &mut Vec<BlockId>,
     ) -> io::Result<()> {
-        let value_len = value.map_or(0, <[u8]>::len);
-        let entry_bytes = 2 + 2 + 8 + 1 + key.len() + value_len;
-        if buffer.entries > 0 && buffer.encoded_bytes + entry_bytes > PAGE_PACK_TARGET_BYTES {
+        if buffer.would_overflow(key, value) {
             self.flush_leaf_frame(buffer, pages, written_block_ids)?;
         }
-        // A single maximum-size entry can exceed the target while still
-        // fitting the format ceiling checked by flush_leaf_frame().
-        if key.len() > MAX_ENTITY_KEY_BYTES + 82 || value_len > MAX_ENTITY_INLINE_VALUE_BYTES {
-            return Err(invalid_data("unbounded entity leaf entry"));
-        }
-        if buffer.entries == 0 {
-            buffer.first_key.clear();
-            buffer.first_key.extend_from_slice(key);
-        }
-        buffer.bytes.reserve(entry_bytes);
-        buffer
-            .bytes
-            .extend_from_slice(&(key.len() as u16).to_le_bytes());
-        buffer
-            .bytes
-            .extend_from_slice(&(value_len as u16).to_le_bytes());
-        buffer.bytes.extend_from_slice(&version.to_le_bytes());
-        buffer.bytes.push(u8::from(value.is_none()));
-        buffer.bytes.extend_from_slice(key);
-        if let Some(value) = value {
-            buffer.bytes.extend_from_slice(value);
-        }
-        buffer.entries += 1;
-        buffer.encoded_bytes += entry_bytes;
-        Ok(())
+        buffer.push(key, version, value)
     }
 
     fn pack_leaves(
@@ -2354,21 +2215,30 @@ impl<'a> Tree<'a> {
             return Err(invalid_data("cannot pack an undersized internal level"));
         }
         let mut groups: Vec<Vec<Child>> = Vec::new();
-        let mut current = Vec::new();
+        let mut current: Vec<Child> = Vec::new();
         let mut used = 16;
+        let mut expanded = 16;
         for child in children {
-            let child_bytes = 2 + child.lower_bound.len() + 32;
+            let mut child_bytes = page_codec::internal_entry_bytes(
+                current.last().map_or(&[][..], |previous| previous.lower_bound.as_slice()),
+                &child.lower_bound);
+            let expanded_child_bytes = 34 + child.lower_bound.len();
             if current.len() >= MIN_INTERNAL_SPLIT_CHILDREN
-                && used + child_bytes > PAGE_PACK_TARGET_BYTES
+                && (used + child_bytes > PAGE_PACK_TARGET_BYTES
+                    || expanded + expanded_child_bytes > crate::generated_tofudb_ir::MAX_ENTITY_PAGE_EXPANDED_BYTES)
             {
                 groups.push(current);
                 current = Vec::new();
                 used = 16;
+                expanded = 16;
+                child_bytes = page_codec::internal_entry_bytes(&[], &child.lower_bound);
             }
-            if used + child_bytes > PAGE_MAX_BYTES {
+            if used + child_bytes > PAGE_MAX_BYTES
+                || expanded + expanded_child_bytes > crate::generated_tofudb_ir::MAX_ENTITY_PAGE_EXPANDED_BYTES {
                 return Err(invalid_data("entity child cannot fit in one internal page"));
             }
             used += child_bytes;
+            expanded += expanded_child_bytes;
             current.push(child);
         }
         groups.push(current);
@@ -3095,7 +2965,7 @@ impl<'a> Tree<'a> {
         limit: usize,
         dead_leaves: &mut u32,
     ) -> io::Result<ScanResult> {
-        if start >= end || limit == 0 || limit > MAX_INTERNAL_RANGE_ROWS {
+        if start >= end || limit == 0 {
             return Err(invalid_input("invalid or unbounded entity range"));
         }
         let mut rows = Vec::new();
@@ -3308,7 +3178,7 @@ impl<'a> Tree<'a> {
         limit: usize,
         dead_leaves: &mut u32,
     ) -> io::Result<ScanResult> {
-        if start >= end || limit == 0 || limit > MAX_INTERNAL_RANGE_ROWS {
+        if start >= end || limit == 0 {
             return Err(invalid_input("invalid or unbounded reverse entity range"));
         }
         let mut rows = Vec::new();
@@ -3844,11 +3714,11 @@ impl EntityDatabase {
             .iter()
             .filter(|block_id| !transaction.staged_reference_blocks.contains(block_id))
             .count();
-        if transaction.staged_reference_blocks.len() + additional_blocks
-            > crate::transaction::MAX_REFERENCED_BLOCKS
+        if transaction.staged_reference_blocks.len().checked_add(additional_blocks)
+            .and_then(|count| u32::try_from(count).ok()).is_none()
         {
             return Err(invalid_input(
-                "persistent entity range snapshot stages too many blocks",
+                "persistent snapshot block count exceeds its u32 representation",
             ));
         }
         for block_id in staged_blocks {
@@ -3945,11 +3815,11 @@ impl EntityDatabase {
             .mounted_ranges
             .sort_by(|left, right| left.start.cmp(&right.start));
         if !transaction.staged_reference_blocks.contains(&capsule_root) {
-            if transaction.staged_reference_blocks.len()
-                == crate::transaction::MAX_REFERENCED_BLOCKS
+            if transaction.staged_reference_blocks.len().checked_add(1)
+                .and_then(|count| u32::try_from(count).ok()).is_none()
             {
                 return Err(invalid_input(
-                    "persistent entity restore stages too many blocks",
+                    "persistent restore block count exceeds its u32 representation",
                 ));
             }
             transaction.staged_reference_blocks.push(capsule_root);
@@ -4442,10 +4312,10 @@ impl EntityDatabase {
             ));
         }
         if !transaction.writes.contains_key(&key.0)
-            && transaction.writes.len() == MAX_ENTITY_TRANSACTION_WRITES
+            && u32::try_from(transaction.writes.len()).is_ok_and(|count| count == u32::MAX)
         {
             return Err(invalid_input(
-                "entity transaction exceeds 14336 distinct writes",
+                "entity overlay write count exceeds its u32 representation",
             ));
         }
         transaction.discard_point_read(key.encoded());
@@ -4485,10 +4355,10 @@ impl EntityDatabase {
             return Err(invalid_input("entity write overlaps a retired range"));
         }
         if !transaction.writes.contains_key(&key.0)
-            && transaction.writes.len() == MAX_ENTITY_TRANSACTION_WRITES
+            && u32::try_from(transaction.writes.len()).is_ok_and(|count| count == u32::MAX)
         {
             return Err(invalid_input(
-                "entity transaction exceeds 14336 distinct writes",
+                "entity overlay write count exceeds its u32 representation",
             ));
         }
         transaction.discard_point_read(key.encoded());
@@ -4774,7 +4644,11 @@ impl EntityDatabase {
             .map(Vec::as_slice).collect();
         keys.sort_unstable();
         keys.dedup();
-        let head_versions = versions_at(&overlay, head, &keys)?;
+        let head_versions = {
+            let _versions = crate::fsync_stats::StageTimer::diagnostic(
+                crate::fsync_stats::STAGE_OVERLAY_VALIDATE_HEAD_VERSIONS);
+            versions_at(&overlay, head, &keys)?
+        };
         let head_version = |key: &[u8]| head_versions[keys.binary_search(&key).expect("validation key collected")];
         for (key, witnessed) in &transaction.point_witnesses {
             if head_version(key) != witnessed.version {
@@ -4783,12 +4657,18 @@ impl EntityDatabase {
         }
         let blind_keys: Vec<_> = transaction.writes.keys()
             .filter(|key| !transaction.point_witnesses.contains_key(*key)).map(Vec::as_slice).collect();
-        let snapshot_versions = versions_at(&transaction.overlay_view, transaction.snapshot, &blind_keys)?;
+        let snapshot_versions = {
+            let _versions = crate::fsync_stats::StageTimer::diagnostic(
+                crate::fsync_stats::STAGE_OVERLAY_VALIDATE_ORIGINAL_BLIND_VERSIONS);
+            versions_at(&transaction.overlay_view, transaction.snapshot, &blind_keys)?
+        };
         for (key, version) in blind_keys.into_iter().zip(snapshot_versions) {
             if version != head_version(key) {
                 return Err(conflict("entity write witness changed"));
             }
         }
+        let range_validation = crate::fsync_stats::StageTimer::diagnostic(
+            crate::fsync_stats::STAGE_OVERLAY_VALIDATE_RANGE_WITNESSES);
         for witness in &transaction.range_witnesses {
             if overlay.changed_in_range_since(
                 &witness.start,
@@ -4826,6 +4706,7 @@ impl EntityDatabase {
             };
             if !unchanged { return Err(conflict("entity range witness changed")); }
         }
+        drop(range_validation);
         Ok(())
     }
 
@@ -4912,9 +4793,9 @@ impl EntityDatabase {
                 overlay_delta: None,
             });
         }
-        if transaction.writes.len() > MAX_ENTITY_TRANSACTION_WRITES {
+        if u32::try_from(transaction.writes.len()).is_err() {
             return Err(invalid_input(
-                "entity transaction exceeds 14336 distinct writes",
+                "entity overlay write count exceeds its u32 representation",
             ));
         }
         let sequence = self.writer_engine()?.next_sequence()?;
@@ -5441,7 +5322,7 @@ impl EntityDatabase {
                 }
             }
             drop(carry_timer);
-            let fits_references = written_block_ids.len() <= crate::transaction::MAX_REFERENCED_BLOCKS;
+            let fits_references = u32::try_from(written_block_ids.len()).is_ok();
             let fits_carried = carried_bytes <= crate::transaction::MAX_CARRIED_PAYLOAD_BYTES;
             if fits_references && (fits_carried || chunk_entries == 1) {
                 break (actual_entries, boundary, directory, written_block_ids, next_root, carried_bytes, consumed_positions, superseded_positions);

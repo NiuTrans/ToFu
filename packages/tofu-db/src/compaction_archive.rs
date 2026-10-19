@@ -19,7 +19,7 @@ use crate::generated_tofudb_ir::{
     COMPACTION_ARCHIVE_MESSAGES_NAMESPACE, COMPACTION_ARCHIVE_POST_MESSAGES_NAMESPACE,
     COMPACTION_ARCHIVE_RECEIPT_NAMESPACE, COMPACTION_ARCHIVE_SUMMARY_NAMESPACE,
     MAX_COMPACTION_ARCHIVES_PER_CONVERSATION, MAX_COMPACTION_ARCHIVE_DOCUMENT_BYTES,
-    MAX_TRANSACTION_IR_LITERAL_BYTES,
+    MAX_LEGACY_DOCUMENT_BYTES,
 };
 
 #[path = "compaction_search_source.rs"]
@@ -796,7 +796,7 @@ pub(crate) fn list(
     }
     let response = serde_json::to_vec(&json!({"archives": archives}))
         .map_err(|_| invalid_data("archive list response cannot be encoded"))?;
-    if response.len() > MAX_TRANSACTION_IR_LITERAL_BYTES {
+    if response.len() > MAX_LEGACY_DOCUMENT_BYTES {
         return Err(io::Error::new(
             io::ErrorKind::OutOfMemory,
             "archive list response exceeds 8 MiB",

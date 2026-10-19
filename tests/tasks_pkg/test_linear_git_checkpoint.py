@@ -51,6 +51,7 @@ def repository(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     _git(repo, 'add', '.')
     _git(repo, 'commit', '-qm', 'base')
     monkeypatch.setenv('TOFU_LINEAR_GIT_CHECKPOINT', '1')
+    monkeypatch.setenv('TOFU_INTEGRATION_TEST_ROOT', str(repo))
     monkeypatch.setenv(
         'TOFU_LINEAR_GIT_CHECKPOINT_LOCK_WAIT_SECONDS', '2')
     monkeypatch.delenv(
@@ -77,6 +78,88 @@ def _head(repo: Path) -> str:
 
 def _stable(repo: Path) -> str:
     return _git(repo, 'rev-parse', checkpoint.STABLE_REF).stdout.strip()
+
+
+@pytest.mark.parametrize('state,eligible,reason', [
+    ('fresh', True, 'initial linear baseline activation'),
+    ('owned', True, 'owns stable at HEAD'),
+    ('candidate', False, 'Integration candidate exists'),
+    ('unowned-stable', False, 'no linear baseline ownership'),
+    ('missing-stable', False, 'stable ref is missing'),
+    ('stable-mismatch', False, 'Stable and HEAD differ'),
+    ('foreign-baseline', False, 'outside the linear baseline history'),
+    ('detached', False, 'Detached HEAD'),
+    ('unborn', False, 'Unborn HEAD'),
+])
+def test_publication_mode_resolution_is_read_only(repository, state, eligible, reason):
+    head = _head(repository)
+    _git(repository, 'config', '--local', 'tofu.linearCheckpoint', 'true')
+    if state in {'owned', 'candidate', 'stable-mismatch', 'foreign-baseline'}:
+        for ref in (checkpoint.STABLE_REF, checkpoint.CHECKPOINT_BASELINE_REF):
+            _git(repository, 'update-ref', ref, head)
+    if state == 'candidate':
+        _git(repository, 'update-ref', 'refs/tofu/candidate', head)
+    elif state == 'unowned-stable':
+        _git(repository, 'update-ref', checkpoint.STABLE_REF, head)
+    elif state == 'missing-stable':
+        _git(repository, 'update-ref', checkpoint.CHECKPOINT_BASELINE_REF, head)
+    elif state == 'stable-mismatch':
+        (repository / 'README.md').write_text('external commit\n')
+        _git(repository, 'add', 'README.md')
+        _git(repository, 'commit', '-qm', 'external head advance')
+    elif state == 'foreign-baseline':
+        tree = _git(repository, 'rev-parse', 'HEAD^{tree}').stdout.strip()
+        foreign = _git(repository, 'commit-tree', tree, '-m', 'foreign baseline').stdout.strip()
+        _git(repository, 'update-ref', checkpoint.CHECKPOINT_BASELINE_REF, foreign)
+    elif state == 'detached':
+        _git(repository, 'update-ref', '--no-deref', 'HEAD', head)
+    elif state == 'unborn':
+        _git(repository, 'symbolic-ref', 'HEAD', 'refs/heads/unborn')
+    (repository / 'app.py').write_text('staged WIP\n')
+    _git(repository, 'add', 'app.py')
+    (repository / 'app.py').write_text('unstaged WIP\n')
+    (repository / 'untracked.txt').write_text('preserve user bytes\n')
+    before = (_git(repository, 'for-each-ref').stdout,
+              (repository / '.git/config').read_bytes(),
+              (repository / '.git/HEAD').read_bytes(),
+              (repository / '.git/index').read_bytes())
+    assert checkpoint.is_enabled(repository) is True
+
+    resolved = checkpoint.resolve_publication_mode(repository)
+
+    assert resolved['requested'] is True and resolved['eligible'] is eligible
+    assert resolved['mode'] == ('linear-checkpoint' if eligible else 'isolated-task')
+    assert reason in resolved['reason'] and len(resolved['reason']) <= 500
+    assert (_git(repository, 'for-each-ref').stdout,
+            (repository / '.git/config').read_bytes(),
+            (repository / '.git/HEAD').read_bytes(),
+            (repository / '.git/index').read_bytes()) == before
+    assert (repository / 'app.py').read_text() == 'unstaged WIP\n'
+    assert (repository / 'untracked.txt').read_text() == 'preserve user bytes\n'
+
+
+@pytest.mark.parametrize('failure', [
+    'read-error', 'incomplete-config', 'incomplete-refs', 'incomplete-head', 'unknown-mode',
+])
+def test_publication_mode_resolution_refuses_unknown_probes(repository, monkeypatch, failure):
+    monkeypatch.delenv('TOFU_LINEAR_GIT_CHECKPOINT')
+    _git(repository, 'config', '--local', 'tofu.linearCheckpoint', 'true')
+    original_git = checkpoint._git
+    def failing_probe(root, args, **kwargs):
+        if failure == 'read-error' and args[0] == 'for-each-ref':
+            return subprocess.CompletedProcess(args, 128, '', 'cannot read refs')
+        if failure == 'incomplete-config' and args[0] == 'config':
+            return subprocess.CompletedProcess(args, 0, '', '')
+        if failure == 'incomplete-refs' and args[0] == 'for-each-ref':
+            return subprocess.CompletedProcess(args, 0, 'incomplete refs', '')
+        if failure == 'incomplete-head' and args[:2] == ['rev-parse', '--verify']:
+            return subprocess.CompletedProcess(args, 0, '', '')
+        return original_git(root, args, **kwargs)
+    monkeypatch.setattr(checkpoint, '_git', failing_probe)
+    if failure == 'unknown-mode':
+        monkeypatch.setenv('TOFU_LINEAR_GIT_CHECKPOINT', 'unknown')
+    with pytest.raises(checkpoint.LinearCheckpointError, match='Cannot resolve publication mode'):
+        checkpoint.resolve_publication_mode(repository)
 
 
 def test_preexisting_dirty_workspace_is_checkpointed_without_admission(
@@ -591,3 +674,25 @@ def test_publication_cas_conflict_preserves_both_refs(repository):
             stable_sha=target, target_sha=target)
     assert _head(repository) == base
     assert _stable(repository) == base
+
+
+@pytest.mark.parametrize('key', ['tofu.integrationTestCommand', 'tofu.linearCheckpointTestCommand'])
+def test_local_command_promotes_foreign_linear_checkpoint(repository, monkeypatch, key):
+    import shlex
+    monkeypatch.delenv('TOFU_INTEGRATION_TEST_ROOT', raising=False)
+    monkeypatch.setenv('TOFU_INTEGRATION_TEST_CMD', 'missing-global-command')
+    _git(repository, 'config', '--local', key, f'{shlex.quote(sys.executable)} -c pass')
+    (repository / 'app.py').write_text('VALUE = 7\n')
+    row = _settle(repository, _task('local-gate'))['repositories'][0]
+    assert row['verification'] == 'passed' and row['stableUpdated']
+
+
+def test_linear_gate_policy_mutation_refuses_promotion(repository):
+    baseline = _head(repository)
+    command = 'git config --local tofu.linearCheckpointTestCommand changed-command'
+    _git(repository, 'config', '--local', 'tofu.linearCheckpointTestCommand', command)
+    (repository / 'app.py').write_text('VALUE = 8\n')
+    row = _settle(repository, _task('policy-mutator'))['repositories'][0]
+    assert row['verification'] == 'failed'
+    assert 'policy changed' in row['verificationDetail']
+    assert _stable(repository) == baseline

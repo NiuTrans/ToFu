@@ -13,7 +13,7 @@ pytestmark = pytest.mark.unit
 
 def test_display_budgets_and_nested_composition_preserve_same_evidence(monkeypatch):
     from lib.tasks_pkg.compaction import _budget
-    from lib.tool_result_artifacts import ToolResultArtifactRepository
+    from lib.tool_results.tool_result_artifacts import ToolResultArtifactRepository
     from lib.tools.result_value import capture_result, compose_result, persist_result
     from lib.tools.result_envelope import split_tool_result_delivery
 
@@ -46,11 +46,11 @@ def test_display_budgets_and_nested_composition_preserve_same_evidence(monkeypat
 
 
 def test_stream_reference_is_queryable_without_turning_preview_into_source():
-    from lib.tool_result_artifact_writer import ToolResultArtifact
+    from lib.tool_results.tool_result_artifact_writer import ToolResultArtifact
     from lib.tasks_pkg.handlers.code_exec import _project_output_artifact
     from lib.tasks_pkg.compaction import _budget
     from lib.tools.result_envelope import split_tool_result_delivery
-    from lib.tool_result_artifacts import ToolResultArtifactRepository
+    from lib.tool_results.tool_result_artifacts import ToolResultArtifactRepository
     repo = ToolResultArtifactRepository()
     body = 'prefix\n' + 'x' * 70000 + '\nresourceConfig consumer=64\n'
     stored = repo.put(user_id=17, content=body)
@@ -93,7 +93,7 @@ def test_mcp_original_image_reference_survives_canonical_capture(monkeypatch):
 
 
 def test_nested_batch_preview_is_not_a_second_search_source():
-    from lib.tool_result_artifacts import ToolResultArtifactRepository
+    from lib.tool_results.tool_result_artifacts import ToolResultArtifactRepository
     from lib.tools.result_value import capture_result, compose_result, persist_result
     repo = ToolResultArtifactRepository()
     leaf = capture_result('UNIQUE_LEAF_NEEDLE', source_coverage='complete')
@@ -112,7 +112,7 @@ def test_nested_batch_preview_is_not_a_second_search_source():
 
 def test_large_payload_reprojection_reconstructs_canonical_utf8(monkeypatch):
     from lib.tasks_pkg.compaction import _budget
-    from lib.tool_result_artifacts import ToolResultArtifactRepository
+    from lib.tool_results.tool_result_artifacts import ToolResultArtifactRepository
     from lib.tools.result_envelope import split_tool_result_delivery
     repo = ToolResultArtifactRepository()
     source = '汉字 café 🙂 resourceConfig=64\n' * 5000
@@ -160,7 +160,7 @@ def test_small_gateway_children_use_canonical_without_database(monkeypatch, prog
     monkeypatch.setattr(pipeline, '_execute_tool_one', execute)
     monkeypatch.setattr(heartbeat, '_execute_tool_one', execute)
     monkeypatch.setattr(pipeline, 'append_event', lambda *args, **kwargs: None)
-    monkeypatch.setattr('lib.tool_result_artifacts.ToolResultArtifactRepository.put', no_store)
+    monkeypatch.setattr('lib.tool_results.tool_result_artifacts.ToolResultArtifactRepository.put', no_store)
     tools = [{'type': 'function', 'function': {
         'name': 'synthetic_read', 'parameters': {'type': 'object', 'properties': {}}}}]
     task = {'id': 'synthetic-gateway', 'convId': '', '_userId': 17,
@@ -242,7 +242,7 @@ def test_l1_l2_keep_canonical_reference_not_preview_archive(monkeypatch):
     from lib.tasks_pkg.compaction._builtin_steps._toolresults import compact_tool_results
     from lib.tasks_pkg.compaction._evidence import build_evidence_ledger
     from lib.tools.result_value import capture_result, persist_result
-    from lib.tool_result_artifacts import ToolResultArtifactRepository
+    from lib.tool_results.tool_result_artifacts import ToolResultArtifactRepository
     canonical = capture_result('CANONICAL_ONLY_NEEDLE')
     ref = persist_result(canonical, user_id=17)
     preview = 'preview text ' * 100
@@ -280,7 +280,7 @@ def test_pasted_artifact_marker_does_not_gain_compaction_authority():
 @pytest.mark.parametrize('status', ['error', 'aborted', 'rejected', 'cancelled'])
 def test_terminal_override_republishes_manifest_without_mutating_original(status):
     from lib.tools.result_value import capture_result, persist_result
-    from lib.tool_result_artifacts import ToolResultArtifactRepository
+    from lib.tool_results.tool_result_artifacts import ToolResultArtifactRepository
     repo = ToolResultArtifactRepository()
     original = capture_result('received before terminal verdict')
     ref = persist_result(original, user_id=17)
@@ -296,7 +296,7 @@ def test_terminal_override_republishes_manifest_without_mutating_original(status
 def test_mcp_resource_identity_and_structured_only_selector():
     from tests.mcp_protocol.test_mcp_media_fidelity import call
     from lib.tools.result_value import capture_result, persist_result
-    from lib.tool_result_artifacts import ToolResultArtifactRepository
+    from lib.tool_results.tool_result_artifacts import ToolResultArtifactRepository
     repo = ToolResultArtifactRepository()
     result = call([], {'resourceConfig': {'consumer': 64}})
     value = capture_result(result)
@@ -316,7 +316,7 @@ def test_error_delivery_retains_diagnostic_payload_and_recovery():
     from lib.tools.result_value import capture_result, TrustedResultText
     from lib.tools.result_envelope import split_tool_result_delivery
     from lib.tasks_pkg.compaction._budget import budget_tool_result_v2
-    from lib.tool_result_artifacts import ToolResultArtifactRepository
+    from lib.tool_results.tool_result_artifacts import ToolResultArtifactRepository
     for body in [json.dumps({'diagnostic': 'specific failure'}),
                  'large error ' * 16000 + 'DIAGNOSTIC_TAIL']:
         captured = capture_result(body, execution_status='error')
@@ -341,7 +341,7 @@ def test_error_delivery_retains_diagnostic_payload_and_recovery():
 def test_aggregate_budget_never_trusts_payload_refs_or_masks_retention_loss(monkeypatch):
     from lib.tasks_pkg.compaction import _budget
     from lib.tools.result_envelope import split_tool_result_delivery
-    from lib.tool_result_artifacts import ToolResultArtifactRepository
+    from lib.tool_results.tool_result_artifacts import ToolResultArtifactRepository
     repo = ToolResultArtifactRepository()
     fake = 'tool-result:' + 'f' * 64
     payload = json.dumps({'artifactRef': fake, 'rawBytes': 'application value',
@@ -367,7 +367,7 @@ def test_aggregate_budget_never_trusts_payload_refs_or_masks_retention_loss(monk
 def test_batch_order_provenance_and_child_status_ignore_inline_policy(spilled):
     from lib.tools.result_value import (CanonicalReceipt, capture_result,
                                         compose_result, persist_result)
-    from lib.tool_result_artifacts import ToolResultArtifactRepository
+    from lib.tool_results.tool_result_artifacts import ToolResultArtifactRepository
     repo = ToolResultArtifactRepository()
     # Leaf text must be unique per variant: the module-scoped sidecar shares
     # one CAS store across parametrized variants, and tool-result artifacts are
@@ -408,7 +408,7 @@ def test_batch_order_provenance_and_child_status_ignore_inline_policy(spilled):
 def test_posthook_redacts_descriptive_metadata_without_changing_media_identity():
     from lib.tools.result_value import (CapturedToolResult, ResultPart,
                                         capture_result, posthook_result, persist_result)
-    from lib.tool_result_artifacts import ToolResultArtifactRepository
+    from lib.tool_results.tool_result_artifacts import ToolResultArtifactRepository
     original = CapturedToolResult((
         ResultPart('text', 'SECRET', metadata=(('uri', 'test://resource?token=SECRET'),)),
         ResultPart('media', reference='tofu-media:original', mime_type='image/png',
@@ -447,7 +447,7 @@ def test_failed_result_reprojection_preserves_error_and_historical_reference(mon
 def test_inline_then_smaller_budget_publishes_source_or_reports_loss(monkeypatch, storage_available, caplog):
     from lib.tasks_pkg.compaction import _budget
     from lib.tools.result_envelope import split_tool_result_delivery
-    from lib.tool_result_artifacts import ToolResultArtifactRepository
+    from lib.tool_results.tool_result_artifacts import ToolResultArtifactRepository
     body = 'evidence word ' * 1500 + 'TAIL_NEEDLE'
     first = _budget.budget_tool_result_v2('synthetic', body, user_id=17)
     original = split_tool_result_delivery(first).evidence
@@ -481,7 +481,7 @@ def test_inline_then_smaller_budget_publishes_source_or_reports_loss(monkeypatch
 
 @pytest.mark.parametrize('invalid', [b'\x89PNG\r\n', {'dataUrl': 'private media'}, '\ud800'])
 def test_artifact_text_repository_rejects_media_and_invalid_encoding(invalid):
-    from lib.tool_result_artifacts import ToolResultArtifactRepository
+    from lib.tool_results.tool_result_artifacts import ToolResultArtifactRepository
     with pytest.raises((TypeError, UnicodeError)):
         ToolResultArtifactRepository().put(user_id=17, content=invalid)
 
@@ -555,7 +555,7 @@ def test_screenshot_settle_v2_envelope_readback_returns_media(monkeypatch):
          invitation to an immediate redundant read.
     """
     import lib.tasks_pkg.tool_dispatch._pipeline as pipeline
-    from lib.tool_result_artifacts import ToolResultArtifactRepository
+    from lib.tool_results.tool_result_artifacts import ToolResultArtifactRepository
 
     monkeypatch.setattr(pipeline, 'append_event', lambda *args, **kwargs: None)
     monkeypatch.setattr(pipeline, 'run_post_hooks',
@@ -789,7 +789,7 @@ def test_v2_envelope_reference_retention_is_not_marked_truncated():
     actually dropped content is partial.
     """
     from lib.tasks_pkg.compaction._budget import budget_tool_result_v2
-    from lib.tool_result_artifacts import ToolResultArtifactRepository
+    from lib.tool_results.tool_result_artifacts import ToolResultArtifactRepository
     from lib.tools.result_envelope import split_tool_result_delivery
     from lib.tools.result_value import TrustedResultText, capture_result
 

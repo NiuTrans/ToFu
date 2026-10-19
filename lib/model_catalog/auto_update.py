@@ -117,7 +117,7 @@ def run_model_intelligence_update(
     from lib.model_routing.world_catalog import sync_world_model_catalog
 
     summary: dict = {"ok": True}
-    from lib.provider_template_feed import refresh_now
+    from lib.provider.provider_template_feed import refresh_now
     try:
         summary["templates"] = refresh_now(max_runtime=max(1, deadline - time.monotonic()))
     except Exception as exc:

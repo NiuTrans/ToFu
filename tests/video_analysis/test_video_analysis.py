@@ -33,6 +33,8 @@ pytestmark = [pytest.mark.auth_mode('open'), pytest.mark.unit]
 
 @pytest.fixture
 def client(flask_app):
+    from lib.storage import start_storage
+    start_storage()
     return flask_app.test_client()
 
 
@@ -99,22 +101,21 @@ def _make_video(path, *, seconds=2.0, with_audio=False, with_cut=False,
 #  Pure unit: config / budget / sniff / thin / ts
 # ─────────────────────────────────────────────────────────────────────
 
-def test_frame_tiers():
-    from lib.video_analysis import frame_target_for_duration, FRAME_CEILING
+def test_frame_sampling_scales_with_complete_duration():
+    from lib.video_analysis import frame_target_for_duration
     assert frame_target_for_duration(1) == 16
     assert frame_target_for_duration(60) == 16
-    assert frame_target_for_duration(61) == 32
-    assert frame_target_for_duration(600) == 32
-    assert frame_target_for_duration(601) == 64
-    assert frame_target_for_duration(900) == FRAME_CEILING == 64
+    assert frame_target_for_duration(600) == 60
+    assert frame_target_for_duration(900) == 90
+    assert frame_target_for_duration(7200) == 720
 
 
-def test_frame_ceiling_parity():
-    """model_info._video duplicates FRAME_CEILING BY VALUE (one-way import);
-    this pin fails if either side moves without the other."""
-    from lib.model_info._video import _EXTRACTION_CEILING
-    from lib.video_analysis import FRAME_CEILING
-    assert _EXTRACTION_CEILING == FRAME_CEILING
+def test_large_model_context_is_not_clamped_to_old_extraction_count(monkeypatch):
+    import lib.model_info._video as video
+    monkeypatch.setattr(video, 'model_supports_vision', lambda model: True)
+    monkeypatch.setattr(video, 'is_claude', lambda model: False)
+    monkeypatch.setattr('lib.context_limits.lookup_learned_context_limit', lambda *args: 1_000_000)
+    assert video.video_frame_budget('large-context-vision') == 200
 
 
 def test_processing_handoff_has_no_capacity_gate_and_cannot_be_reused():
@@ -277,11 +278,15 @@ def test_transform_video_budget_thins(monkeypatch):
     import lib.model_info as mi
     monkeypatch.setattr(mi, 'video_frame_budget', lambda m, **k: 4)
     from lib.tasks_pkg.conv_message_builder._transform import _build_user_message
-    out = _build_user_message(_video_msg(n_frames=10), model='gpt-4o')
+    message = _video_msg(n_frames=10)
+    message['videos'][0]['storyboard'] = 'Full visual evidence, including omitted frames'
+    out = _build_user_message(message, model='gpt-4o')
     blocks = out['content']
     imgs = [b for b in blocks if b.get('type') == 'image_url']
     assert len(imgs) == 4
     assert '4 frames sampled (of 10 extracted)' in blocks[0]['text']
+    assert any('Full visual evidence, including omitted frames' in block.get('text', '')
+               for block in blocks)
     # Uniform thinning keeps the FIRST and LAST frame.
     assert imgs[0]['image_url']['url'] == '/api/images/f0.jpg'
     assert imgs[-1]['image_url']['url'] == '/api/images/f9.jpg'
@@ -348,10 +353,8 @@ def test_extract_frames_real(tmp_path):
     from lib.video_analysis._frames import extract_frames
     video = _make_video(tmp_path / 'plain.mp4', seconds=3.0)
     frames = extract_frames(video, 3.0, str(tmp_path))
-    # 3s → tier 16 → uniform layer = 16 - 16//3 = 11; a flat color clip has
-    # no scene cuts AND any cut would dedupe against the dense uniform layer,
-    # so the total IS the uniform layer (see _merge_scene_extras docstring).
-    assert len(frames) == 11
+    # A short flat clip retains its 16 uniform samples.
+    assert len(frames) == 16
     ts = [f['t'] for f in frames]
     assert ts == sorted(ts) and 0 <= ts[0] < ts[-1] <= 3.0
     for fr in frames:
@@ -367,16 +370,15 @@ def test_scene_cut_detected(tmp_path):
     assert any(abs(t - 2.0) < 0.4 for t in cuts), cuts
 
 
-def test_merge_scene_extras_dedupe_and_budget():
+def test_merge_scene_extras_deduplicates_without_count_loss():
     """Cuts within ±1s of a uniform sample (or each other) are redundant;
-    the budget caps how many extras ride."""
+    every nonredundant cut remains."""
     from lib.video_analysis._frames import _merge_scene_extras
     uniform = [10.0, 20.0, 30.0, 40.0]
     cuts = [10.4, 25.0, 25.5, 33.0, 50.0]
-    picked = _merge_scene_extras(uniform, cuts, budget=5)
+    picked = _merge_scene_extras(uniform, cuts)
     assert picked == [25.0, 33.0, 50.0]
-    assert _merge_scene_extras(uniform, cuts, budget=1) == [25.0]
-    assert _merge_scene_extras(uniform, [], 5) == []
+    assert _merge_scene_extras(uniform, []) == []
 
 
 def test_extract_single_frame_real(tmp_path):
@@ -520,23 +522,40 @@ def test_pipeline_end_to_end(tmp_path, monkeypatch):
     assert committed['storyboard_model'] == 'vl-test'
 
 
-def test_pipeline_rejects_too_long(tmp_path, monkeypatch):
+def test_pipeline_accepts_long_video_and_preserves_complete_text(tmp_path, monkeypatch):
     import lib.video_analysis._pipeline as pipe
     import lib.video_analysis._store as store
-
-    monkeypatch.setattr(store, '_registry_path',
-                        lambda: str(tmp_path / 'registry.json'))
-    monkeypatch.setattr(pipe, 'video_max_duration_s', lambda: 1.0)
+    import lib.video_analysis._caption as cap
+    import lib.motion_video._gates as gates
     import lib.media_attachments as media
-    monkeypatch.setattr(media, 'set_phase', lambda *a, **k: None)
-    monkeypatch.setattr(media, 'mark_failed', lambda *a, **k: None)
-    video = _make_video(tmp_path / 'job' / 'upload.mp4', seconds=3.0)
-    store.create_record(
-        'v_long', name='long.mp4', size_bytes=1, user_id=1)
-    pipe._process('v_long', video, 'long.mp4', user_id=1)
-    rec = store.get_record('v_long', user_id=1)
-    assert rec['status'] == 'failed'
-    assert 'too long' in rec['error']
+    monkeypatch.setattr(store, '_registry_path', lambda: str(tmp_path / 'registry.json'))
+    monkeypatch.setattr(gates, 'probe_video', lambda path: {
+        'codec': 'h264', 'duration': 7200.0, 'has_audio': True})
+    frames = [{'url': '/api/images/frame.jpg', 'ts': 7100.0}]
+    transcript = 'spoken evidence ' * 5000 + 'TRANSCRIPT_END'
+    storyboard = 'visual evidence ' * 5000 + 'STORYBOARD_END'
+    monkeypatch.setattr(pipe, 'extract_frames', lambda *args: frames)
+    monkeypatch.setattr(cap, 'storyboard_for_frames', lambda *args, **kwargs: {
+        'text': storyboard, 'status': 'ok', 'model': 'vision'})
+    monkeypatch.setattr(pipe, 'transcribe_track', lambda *args, **kwargs: {
+        'text': transcript, 'status': 'ok', 'model': 'stt'})
+    committed = {}
+    def complete(video_id, **payload):
+        committed.update(payload)
+        return {'attachmentId': video_id, 'status': 'ready'}
+    monkeypatch.setattr(media, 'complete_video', complete)
+    monkeypatch.setattr(media, 'set_phase', lambda *args, **kwargs: None)
+    def unexpected_failure(*args, **kwargs):
+        pytest.fail('Valid complete video was rejected')
+    monkeypatch.setattr(media, 'mark_failed', unexpected_failure)
+    store.create_record('v_long', name='long.mp4', size_bytes=1, user_id=1)
+    pipe._process('v_long', str(tmp_path / 'source.mp4'), 'long.mp4', user_id=1)
+    assert store.get_record('v_long', user_id=1)['status'] == 'ready'
+    assert committed['transcript'] == transcript
+    assert committed['storyboard'] == storyboard
+    assert committed['probe']['duration'] == 7200.0
+    assert committed['frames'] == frames
+
 
 
 def test_stale_processing_record_swept(tmp_path, monkeypatch):
@@ -551,6 +570,12 @@ def test_stale_processing_record_swept(tmp_path, monkeypatch):
         reg['v_stale']['updated_at'] = 0
         return reg
     update_json_atomic(str(tmp_path / 'registry.json'), _age, default={})
+    got = store.get_record('v_stale', user_id=1)
+    assert got['status'] == 'processing'
+    def exited_owner(reg):
+        reg['v_stale']['process_owner']['started'] = '0'
+        return reg
+    update_json_atomic(str(tmp_path / 'registry.json'), exited_owner, default={})
     got = store.get_record('v_stale', user_id=1)
     assert got['status'] == 'failed'
     assert 'interrupted' in got['error']
@@ -619,6 +644,7 @@ def test_upload_route_happy_and_status(client, tmp_path, monkeypatch):
         rec = await v1_get_json(r2)
         assert rec['ok'] is True
         assert rec['status'] == 'processing'
+        assert 'process_owner' not in rec
         assert rec['name'] == 'clip.mp4'
         assert rec['size_bytes'] == len(_fake_mp4_bytes())
         return vid
@@ -751,16 +777,14 @@ def test_storyboard_no_vision_slot(monkeypatch):
 
 
 def test_storyboard_happy_message_shape(monkeypatch):
-    """One batched vision call: per-frame image+timestamp pairs, instruction
-    LAST (media-before-question convention), frame set thinned to budget."""
+    """Every frame reaches a bounded request batch in chronological order."""
     import lib.video_analysis._caption as cap
     monkeypatch.setattr(cap, '_vision_slot_models', lambda: ['vl-test'])
     monkeypatch.setattr(cap, 'video_frame_budget', lambda m, **k: 2)
-    captured = {}
+    captured = []
 
     def _fake_dispatch(messages, *, capability, temperature, max_tokens, log_prefix):
-        captured['messages'] = messages
-        captured['capability'] = capability
+        captured.append({'messages': messages, 'capability': capability})
         return ('- [00:00] a red screen\nOverall: a demo', {'_dispatch': {'model': 'vl-test'}})
     import lib.llm_dispatch as disp
     monkeypatch.setattr(disp, 'dispatch_chat', _fake_dispatch)
@@ -771,10 +795,14 @@ def test_storyboard_happy_message_shape(monkeypatch):
     assert res['status'] == 'ok'
     assert res['model'] == 'vl-test'
     assert 'Overall: a demo' in res['text']
-    assert captured['capability'] == 'vision'
-    blocks = captured['messages'][0]['content']
+    assert len(captured) == 3
+    assert all(call['capability'] == 'vision' for call in captured)
+    all_images = [block['image_url']['url'] for call in captured
+                  for block in call['messages'][0]['content'] if block['type'] == 'image_url']
+    assert all_images == [frame['url'] for frame in frames]
+    blocks = captured[0]['messages'][0]['content']
     imgs = [b for b in blocks if b.get('type') == 'image_url']
-    assert len(imgs) == 2  # thinned 6 → 2
+    assert len(imgs) == 2
     assert blocks[-1]['type'] == 'text' and 'visual storyboard' in blocks[-1]['text']
     assert any(b.get('text') == '[frame at 00:00]' for b in blocks)
 
@@ -900,19 +928,190 @@ def test_turn_builder_no_videos_key_when_empty():
     assert 'videos' not in msg
 
 
-def test_body_cap_guard_matrix():
-    """The central body-cap table: only the video upload path gets 512 MiB;
-    everything else stays at the legacy 50 MiB (owner ruling). Source-pinned
-    so a future refactor can't silently widen the default."""
-    import inspect
-    import lib.http_body_policy as _body_policy
-    src = inspect.getsource(_body_policy)
-    assert "'/api/v4/videos/upload', 512 * 1024 * 1024" in src
-    assert "'/api/v1/videos/upload', 512 * 1024 * 1024" in src
-    assert 'DEFAULT_BODY_CAP = 50 * 1024 * 1024' in src
-    assert 'cap = policy.default_cap' in src
-    assert 'app.before_request(_enforce_http_body_policy)' in src
+def test_video_transport_has_no_default_byte_quota_and_other_policy_is_explicit():
+    from lib.http_transport.body_policy import build_http_body_policy
+    from lib.app.app_assembly import DEFAULT_MAX_CONTENT_LENGTH
+    policy = build_http_body_policy()
+    caps = dict(policy.route_caps)
+    assert caps['/api/v4/videos/upload'] is None
+    assert caps['/api/v1/videos/upload'] is None
+    assert DEFAULT_MAX_CONTENT_LENGTH is None
+    assert policy.default_cap == 50*1024*1024
 
 
 if __name__ == '__main__':
     sys.exit(pytest.main([__file__, '-v']))
+
+
+@pytest.mark.slow
+def test_large_multipart_video_reaches_durable_source_and_processing_owner(client,tmp_path,monkeypatch):
+    import asyncio
+    import lib.video_analysis as va
+    import lib.video_analysis._store as store
+    from lib.media_attachments import get_attachment
+    scratch = tmp_path / 'large-scratch'
+    scratch.mkdir()
+    monkeypatch.setattr(va,'scratch_root',lambda:str(scratch))
+    monkeypatch.setattr(store,'_registry_path',lambda:str(tmp_path/'registry.json'))
+    started = []
+    def finish_handoff(video_id,path,name,*,user_id,reservation=None):
+        started.append((video_id,os.path.getsize(path),user_id))
+        import shutil
+        shutil.rmtree(os.path.dirname(path))
+    monkeypatch.setattr(va,'start_processing',finish_handoff)
+    boundary = 'tofu-large-video-demand'
+    header = (f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="large.mp4"\r\n'
+              'Content-Type: video/mp4\r\n\r\n').encode()
+    tail = f'\r\n--{boundary}--\r\n'.encode()
+    chunk = b'\x00\x00\x00\x18ftypisom' + b'x' * (1024*1024-12)
+    count = 513
+    async def exercise():
+        async with client.request('/api/v4/videos/upload',method='POST',headers={
+            'Content-Type':f'multipart/form-data; boundary={boundary}',
+            'Content-Length':str(len(header)+count*len(chunk)+len(tail)),
+        }) as connection:
+            await connection.send(header)
+            for _ in range(count): await connection.send(chunk)
+            await connection.send(tail)
+            await connection.send_complete()
+        response = await connection.as_response()
+        assert response.status_code == 200, await response.get_json()
+        result = await v1_get_json(response)
+        assert result['ok'] is True and result['status'] == 'processing'
+        assert started == [(result['video_id'],count*len(chunk),1)]
+        attachment = get_attachment(result['video_id'],user_id=1)
+        assert attachment['sizeBytes'] == count*len(chunk)
+        from lib.storage.errors import StorageError
+        try:
+            foreign = get_attachment(result['video_id'],user_id=2)
+        except StorageError as error:
+            assert error.code == 'database_forbidden'
+            assert error.message == 'authority_scope_mismatch'
+        else:
+            assert foreign is None
+        assert not list(scratch.iterdir())
+    _run_async(exercise())
+
+
+def test_scratch_reclaim_respects_live_and_unknown_process_owners(tmp_path, monkeypatch):
+    import json
+    from lib.video_analysis import _config
+    monkeypatch.setenv('TOFU_VIDEO_SCRATCH_TTL_S', '3600')
+    now = time.time()
+    live = tmp_path / 'job_live'
+    unknown = tmp_path / 'job_unknown'
+    dead = tmp_path / 'job_dead'
+    for path in (live, unknown, dead):
+        path.mkdir()
+        _config.mark_scratch_owner(str(path))
+        (path / 'source.mp4').write_bytes(b'owned bytes')
+    (unknown / '.process-owner.json').write_text('null')
+    owner = json.loads((dead / '.process-owner.json').read_text())
+    owner['started'] = '0'
+    (dead / '.process-owner.json').write_text(json.dumps(owner))
+    for path in (live, unknown, dead):
+        os.utime(path, (now - 7200, now - 7200))
+    assert _config.reclaim_stale_scratch(str(tmp_path), now_s=now) == 1
+    assert (live / 'source.mp4').read_bytes() == b'owned bytes'
+    assert (unknown / 'source.mp4').read_bytes() == b'owned bytes'
+    assert not dead.exists()
+
+
+def test_processing_records_do_not_expire_by_age_or_unknown_owner(tmp_path, monkeypatch):
+    import lib.video_analysis._store as store
+    from lib.json_store import update_json_atomic
+    path = tmp_path / 'registry.json'
+    monkeypatch.setattr(store, '_registry_path', lambda: str(path))
+    store.create_record('v_unknown', name='long.mp4', size_bytes=1, user_id=1)
+    def age(reg):
+        reg['v_unknown']['updated_at'] = 0
+        reg['v_unknown']['process_owner'] = None
+        return reg
+    update_json_atomic(str(path), age, default={})
+    store.create_record('v_new', name='new.mp4', size_bytes=1, user_id=1)
+    assert store.get_record('v_unknown', user_id=1)['status'] == 'processing'
+    assert store.get_record('v_unknown', user_id=2) is None
+
+
+@pytest.mark.parametrize('duration', [float('nan'), float('inf'), -1.0])
+def test_unusable_video_duration_still_settles_failure(tmp_path, monkeypatch, duration):
+    import lib.video_analysis._pipeline as pipe
+    import lib.video_analysis._store as store
+    import lib.motion_video._gates as gates
+    import lib.media_attachments as media
+    monkeypatch.setattr(store, '_registry_path', lambda: str(tmp_path / 'registry.json'))
+    monkeypatch.setattr(gates, 'probe_video', lambda path: {'codec': 'h264', 'duration': duration})
+    monkeypatch.setattr(media, 'set_phase', lambda *args, **kwargs: None)
+    failures = []
+    monkeypatch.setattr(media, 'mark_failed', lambda video_id, error, **kwargs: failures.append(error))
+    store.create_record('v_invalid', name='bad.mp4', size_bytes=1, user_id=1)
+    pipe._process('v_invalid', '/not-decoded.mp4', 'bad.mp4', user_id=1)
+    assert failures == ['could not determine video duration']
+    assert store.get_record('v_invalid', user_id=1)['status'] == 'failed'
+
+
+def test_real_long_clip_preserves_more_than_64_frames(tmp_path):
+    from lib.video_analysis._frames import extract_frames
+    video = _make_video(tmp_path / 'long.mp4', seconds=700.0, size='32x32')
+    frames = extract_frames(video, 700.0, str(tmp_path))
+    assert len(frames) == 70
+    assert frames[-1]['t'] > 690
+    assert all(os.path.getsize(frame['path']) > 0 for frame in frames)
+    print(f'video_frame_demand: {len(frames)} frames, '
+          f'{sum(os.path.getsize(frame["path"]) for frame in frames)} JPEG bytes, 700s source')
+
+
+def test_scene_evidence_beyond_old_count_ceiling_is_retained():
+    from lib.video_analysis._frames import _merge_scene_extras
+    cuts = [float(index * 3) for index in range(200)]
+    assert _merge_scene_extras([], cuts) == cuts
+
+
+def test_late_storyboard_batch_failure_cannot_publish_partial_success(monkeypatch):
+    import lib.video_analysis._caption as caption
+    import lib.llm_dispatch as dispatch
+    monkeypatch.setattr(caption, '_vision_slot_models', lambda: ['vision'])
+    monkeypatch.setattr(caption, 'video_frame_budget', lambda *args, **kwargs: 2)
+    calls = []
+    def narrate(messages, **kwargs):
+        calls.append(messages)
+        if len(calls) == 3:
+            raise RuntimeError('late provider failure')
+        return ('partial narration', {})
+    monkeypatch.setattr(dispatch, 'dispatch_chat', narrate)
+    frames = [{'url': f'/api/images/{index}.jpg', 't': index, 'bytes': 10} for index in range(6)]
+    result = caption.storyboard_for_frames(frames)
+    assert len(calls) == 3
+    assert result == {'text': '', 'status': 'failed', 'model': ''}
+
+
+def test_storyboard_visits_every_frame_beyond_old_ceiling(monkeypatch):
+    import lib.video_analysis._caption as caption
+    import lib.llm_dispatch as dispatch
+    monkeypatch.setattr(caption, '_vision_slot_models', lambda: ['vision'])
+    monkeypatch.setattr(caption, 'video_frame_budget', lambda *args, **kwargs: 200)
+    seen = []
+    batches = []
+    def narrate(messages, **kwargs):
+        images = [block['image_url']['url'] for block in messages[0]['content']
+                  if block['type'] == 'image_url']
+        batches.append(len(images))
+        seen.extend(images)
+        return ('narrated ' + images[-1], {'model': 'vision'})
+    monkeypatch.setattr(dispatch, 'dispatch_chat', narrate)
+    frames = [{'url': f'/api/images/{index}.jpg', 't': index, 'bytes': 10} for index in range(193)]
+    result = caption.storyboard_for_frames(frames)
+    assert result['status'] == 'ok'
+    assert seen == [frame['url'] for frame in frames]
+    assert len(batches) > 1
+    assert '/api/images/192.jpg' in result['text']
+
+
+def test_detected_scene_frame_failure_cannot_be_hidden_as_complete(monkeypatch):
+    import lib.video_analysis._frames as frames
+    monkeypatch.setattr(frames, '_ffmpeg', lambda: 'ffmpeg')
+    monkeypatch.setattr(frames, '_extract_uniform', lambda *args: [{'path': 'uniform.jpg', 't': 0.0}])
+    monkeypatch.setattr(frames, '_scene_cut_times', lambda *args: [5.0])
+    monkeypatch.setattr(frames, '_extract_single', lambda *args: None)
+    with pytest.raises(RuntimeError, match='Scene evidence extraction failed'):
+        frames.extract_frames('video.mp4', 60.0, '/scratch')

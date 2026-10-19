@@ -42,10 +42,8 @@ def test_completion_config_publication_and_recovery(semantic_authority, monkeypa
         'include_full': True})
     assert len(rows) == 1
     assert rows[0]['payload'] == original_message
-    if native_engine is not None:
-        assert rows[0]['config'] == {'model': 'original-model', 'thinkingEnabled': True}
-    else:
-        # SQL can accept the old request. Its committed envelope is replayed
-        # exactly; it must never be rewritten after a lost ACK.
-        assert rows[0]['config'] == original_config
+    # Both authorities accept this envelope under their resource-derived bounds.
+    # Lost-ACK replay preserves the committed bytes exactly. Refusal/reduction
+    # is covered separately by the fault-injected delivery tests.
+    assert rows[0]['config'] == original_config
     assert json.loads(path.read_text()) == frozen

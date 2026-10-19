@@ -79,7 +79,7 @@ def official_model_directory(templates: list[dict]) -> list[dict]:
     remain Offering/Connection/Deployment overrides in the importing bundle.
     """
     from lib.model_catalog._creator_identity import brand_family
-    from lib.provider_template_recipes import provider_from_template
+    from lib.provider.provider_template_recipes import provider_from_template
     from .migration import plan_legacy_migration
 
     rows = {}

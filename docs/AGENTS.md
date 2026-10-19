@@ -15,8 +15,8 @@ describes the system that runs now; Git history is the archive.
 
 ## Editing rules
 
-- Every Markdown file under this directory, including this file, must appear
-  exactly once in `catalog.json` and stay within its group's line budget.
+- Keep `README.md` and `catalog.json` useful as navigation. There is no
+  documentation catalog, length, link, prose, or generated-index gate.
 - Update an authority document in the same change as the behavior or contract
   it describes. Reference guides may explain an authority but may not redefine
   it.
@@ -30,6 +30,6 @@ describes the system that runs now; Git history is the archive.
 
 ## Verification
 
-Run `make docs-check`. When architecture ownership changes, also run
+When architecture ownership changes, run
 `python3 scripts/check_architecture.py` and the focused contract tests named by
 the affected domain map.

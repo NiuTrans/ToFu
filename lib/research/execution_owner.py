@@ -88,7 +88,7 @@ class ActionExecutionOwners(ActionObservations):
         from .model_response import ModelResponses
         from .model_accounting import ModelCalls
         from .action_terminal import NAMESPACE as TERMINAL_NAMESPACE
-        from lib.agent_loop import validate_agent_loop_checkpoint
+        from lib.agent_loop.agent_loop import validate_agent_loop_checkpoint
         if not isinstance(expected_limits, dict) or not expected_limits:
             raise ValueError('Research recovery requires explicit caller chassis limits')
         if type(ordinal) is not int or ordinal < 1:

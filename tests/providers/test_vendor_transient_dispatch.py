@@ -218,7 +218,7 @@ class TestDispatchStreamVendorStorm:
         """Deterministic 400: NO consecutive_errors feed (no 300s lockout),
         NO key_stats call — the sibling key still gets its one try."""
         from lib.llm_dispatch import api
-        from lib.llm_errors import BadRequestError
+        from lib.llm.llm_errors import BadRequestError
 
         sick = _make_slot(model='opus-x', key='kA')
         healthy = _make_slot(model='opus-x', key='kB')
@@ -257,7 +257,7 @@ class TestDispatchStreamVendorStorm:
         """is_gateway RateLimitError → HUD hears 'Upstream error' + the REAL
         status, and the 429 auto-exhaust streak is NOT fed."""
         from lib.llm_dispatch import api
-        from lib.llm_errors import RateLimitError
+        from lib.llm.llm_errors import RateLimitError
 
         slot1 = _make_slot(key='k1')
         slot2 = _make_slot(key='k2')
@@ -299,7 +299,7 @@ class TestDispatchStreamVendorStorm:
     def test_plain_429_still_reports_rate_limited(
             self, monkeypatch, key_stats_recorders):
         from lib.llm_dispatch import api
-        from lib.llm_errors import RateLimitError
+        from lib.llm.llm_errors import RateLimitError
 
         slot1 = _make_slot(key='k1')
         slot2 = _make_slot(key='k2')

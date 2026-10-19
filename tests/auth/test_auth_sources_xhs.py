@@ -27,7 +27,7 @@ class _AuthSourceProviderForTests:
     After the search/fetch extraction the XHS engine and the authenticated
     fetch path read connected sources through ``tofu_search.providers``
     (the host registers a provider), not by importing the host store
-    directly. Production wires this in ``lib/search_bridge.py``; tests do the
+    directly. Production wires this in ``lib/search/search_bridge.py``; tests do the
     same so the provider-gated paths are exercised against the real store.
     """
 

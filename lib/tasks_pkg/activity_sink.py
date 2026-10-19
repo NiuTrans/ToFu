@@ -2,7 +2,7 @@
 
 This is the **host side** of the agent base's activity-feed seam (see
 :mod:`lib.agent_core.activity`).  The reusable agent base (orchestrator,
-endpoint, compaction — the ``CORE_MODULES`` in ``lib/agent_core_manifest.py``)
+endpoint, compaction — the ``CORE_MODULES`` in ``lib/agent_loop/agent_core_manifest.py``)
 must NOT import ``lib.conversations`` directly; it emits a project-brain
 Activity Feed pulse through :func:`lib.agent_core.activity.emit_activity_event`,
 which — absent a host override — routes here.

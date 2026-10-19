@@ -9,7 +9,7 @@ import type {
   ConversationBlockViewModel,
   ConversationTurnViewModel,
 } from './view-model/types';
-import { toolExecutionLlmRound, toolRoundAttention } from './tool-execution-groups';
+import { hasAcceptedWorkUnit, toolExecutionLlmRound, toolRoundAttention } from './tool-execution-groups';
 
 import { swarmLaunchFailure } from './swarm-agent-presentation';
 
@@ -61,6 +61,7 @@ export function blockRoundIdentity(block: ConversationBlockViewModel): RoundIden
   // Deliverables are never hidden by an activity disclosure. Diagnostics cannot
   // lend their (possibly legacy/ambiguous) round metadata to content grouping.
   if (block.kind === 'text' && (block.deliverable || block.terminal)) return null;
+  if ((block.kind === 'tool' || block.kind === 'program') && hasAcceptedWorkUnit(block.round)) return null;
   if (block.kind !== 'tool' && block.kind !== 'program'
       && block.kind !== 'thinking' && block.kind !== 'text') return null;
   // The ordered segment owns scope; a rich body is only a legacy fallback.

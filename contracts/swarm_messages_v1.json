@@ -3,29 +3,86 @@
   "namespace": "swarm.run_messages.v1",
   "limits": {"messageChars": 4096, "messageBytes": 16384, "messagesPerRun": 64, "batchSize": 8, "casAttempts": 4},
   "states": ["submitted", "input_confirmed", "unconfirmed"],
+
+  "presentation": {
+    "event": "swarm_message_receipt",
+    "identity": ["swarmRunId", "agentId", "messageId"],
+
+    "timestamps": "submittedAt, inputInjectedAt and inputConfirmedAt are Unix epoch milliseconds in events, snapshots and tool receipts. Numeric strings use the same millisecond unit; readers must not multiply by 1000.",
+
+    "snapshot": {
+      "messageReceipts": "All exact-run recipient mailboxes, including coordinator agentId == swarm_id; same fields as receipt events. Wave filtering does not filter run messages.",
+      "messageReceiptsAvailable": "Boolean: true only when every recipient mailbox was read and projected successfully; false is incomplete evidence, never an empty-success claim.",
+      "messageReceiptsVersions": "Map of recipient assignment ID to mailbox revision, including empty revision-zero mailboxes. Independent of agent completion version; preserves newer evidence through stale or failed reads.",
+      "messageParticipants": "Array of {id, taskId?, label}. Coordinator id and taskId equal swarm_id. Child id is assignment ID, label is its role; taskId comes only from an exact owned live child binding or mailbox inputTaskId witness. Multiple taskId rows for one assignment preserve resumed-task witnesses referenced by receipts. SenderTaskId is a task identity, never an assignment-ID prefix. Unknown task IDs stay unresolved.",
+      "compatibility": "Per-agent messageReceipts and messageReceiptsVersion remain available. Coordinator has no synthetic child row and child completion never proves coordinator termination. Missing legacy run fields are unavailable evidence."
+    },
+    "evidence": "submittedAt proves durable submission. inputInjectedAt/inputTaskId/inputInjectedRound prove complete carrier insertion into logical model context, not provider consumption. Only input_confirmed plus inputConfirmedAt proves verified provider return. unconfirmed is terminal uncertainty, never proof of non-consumption.",
+    "recovery": "Owner-scoped durable mailbox reads and per-agent messageReceipts in the existing swarm snapshot recover missed push events. Events and snapshots include exact authored content and kind within the existing messageChars/messageBytes limits. messageSequence is the one-based append position in this exact mailbox (not a global clock or consumption proof), derived without changing stored authority. Missing content on legacy projections is unavailable evidence, never an empty message. Content is owner-scoped presentation data, never unrelated telemetry or logs."
+  },
+  "stableAgentMessaging": {
+    "authority": "The retained identity record owns atomic routing and durable message deduplication. Ordinary spawn_agents children remain temporary unless explicitly promoted.",
+    "target": "Exactly one of retained_agent_id plus optional scope, or agent_id plus swarm_run_id. Never infer a stable identity from an expired run handle.",
+    "routing": "Busy binds to the owned current assignment; idle starts one fresh ordinary child using saved dialogue and current caller execution authority. A routing race never transfers an accepted message to another assignment.",
+    "stop": "Cancelled identities require intent=resume for a fresh turn. Suspended/interrupted or ambiguous busy assignments cannot be replaced by messaging; use the existing Continue/reset controls. A currently stopped caller cannot send or start work.",
+    "deduplication": "idempotency_key is durable across turns and reset generations of one identity. The same key with changed content, kind or intent is rejected. Original assignment handles and outcomes remain inspectable; old operations never reactivate work.",
+    "activation": "Commit routing and claim activation before calling the ordinary spawn authority. Retrying uncertain activation consults exact durable execution evidence; absence of a witness is unknown, never permission to spawn again.",
+    "retention": "Dispatch evidence stays in the existing bounded retained identity record, is not evicted on reset or completion, and is removed only with explicit identity deletion. Before dispatch, reserve 32 KiB for each unresolved outcome plus 32 KiB for terminal headers; reject exhaustion before effects. Ordinary launch identity evidence is bounded without duplicated objectives. Full dialogue remains in the original Swarm checkpoint; retained working history is the newest whole-message suffix fitting the remaining capacity, with an explicit omitted count. No idle worker, timer or polling loop is added.",
+    "turn_started": "The ordinary launch authority accepted a fresh turn. This is not proof of provider input consumption, acceptance or completion.",
+    "receipts": "Stable sends return retained_agent_id, scope, message_id, state, kind, contentChars, execution_started and assignment. A fresh turn uses state=turn_started and retains its ordinary launch handle; busy sends use the exact mailbox state and assignment.message_id for the mailbox receipt (distinct from the stable message_id). Error submission_state distinguishes rejected from unknown."
+  },
+  "teamMessaging": {
+    "authority": "Workers use their server-stamped original run binding and live assignment. Cross-owner, tenant, run and retained activation remain forbidden. Root send behavior is unchanged.",
+    "coordinator": "agent_id equal to swarm_run_id targets the original running root; context is consumed at existing complete-round boundaries. No wake or new turn.",
+    "deduplication": "Worker idempotency keys are namespaced by their original assignment; one worker cannot collide with another worker or root.",
+    "receipts": "The existing bounded run mailbox, input budget and physical request receipts are reused for root and worker consumption.",
+    "toolViews": {
+      "send_agent_message": {
+        "fields": ["agent_id", "swarm_run_id", "content", "kind", "idempotency_key"],
+        "required": ["agent_id", "swarm_run_id", "content", "idempotency_key"],
+        "description": "Send useful findings or a question to your running coordinator or a teammate in your current team. Use the exact swarm_run_id from your assignment. To contact the coordinator, set agent_id equal to swarm_run_id; for a teammate use the assignment ID supplied by the coordinator. This only submits context; it never starts or restarts work. Use a unique idempotency_key and keep it unchanged when reconciling an uncertain submission. A rejected optional progress message does not prevent your assigned work: correct its arguments or continue the task and include the finding in your final result. Final results are delivered automatically."
+      },
+      "get_agent_messages": {
+        "fields": ["agent_id", "swarm_run_id", "message_id"],
+        "required": ["agent_id", "swarm_run_id"],
+        "description": "Read message receipts in your current team without starting work. Use your assignment ID as agent_id to inspect your inbox, or the original recipient ID and optional message_id to check a submitted message. Always use the swarm_run_id from your assignment. A message rejected before submission has no receipt to inspect; correct the arguments or continue your assigned work."
+      }
+    }
+  },
   "semantics": {
+
+    "emptyMailbox": "Exact-run reads validate the owned original run and recipient even before the lazy mailbox exists. A verified absent mailbox returns messages=[] without creating storage or starting work; a requested absent message_id returns message_not_found. Missing run/recipient authority remains message_run_not_found, never fabricated empty success. Storage failures remain errors.",
+    "historicalCarriers": "Validated completed-turn replay and root archive restoration retain nonhuman message text but remove prior-run swarm receipt metadata from detached input. Historical text cannot bind or acknowledge a mailbox. Same-run child recovery retains its exact binding and revalidates before dispatch; pending originals remain durable and never transfer to a successor.",
     "input_confirmed": "A verified provider response consumed the input. It does not prove acceptance, compliance, task completion or delivery.",
-    "submitted": "Durable before execution sees it. No new worker or model call is started by sending.",
+    "submitted": "Durable before execution sees it. Exact-run sending starts no worker or model call; stable-agent idle sending explicitly authorizes a new ordinary assignment.",
     "unconfirmed": "The run ended without a durable verified input receipt. Consumption may be unknown after an ACK failure. Content remains inspectable and is never transferred to a later run.",
     "provenance": "agent; not human guidance, not an authority grant",
-    "target": "Exact owned parent conversation + swarm_run_id + child agent_id. Retained run_id is revalidated before consumption."
+    "content": "Author readable prose with normal word spacing and meaningful newlines. Preserve identifiers and source text. Storage and delivery preserve submitted text; they do not infer missing spaces or rewrite canonical evidence.",
+    "target": "Exact owned parent conversation + swarm_run_id + child agent_id for run steering. Stable-agent routing uses the current owned project/conversation scope and pins the resulting assignment. Retained run_id is revalidated before consumption."
   },
   "tools": [
     {
       "type": "function",
       "function": {
         "name": "send_agent_message",
-        "description": "Send bounded extra context or a direction adjustment to your existing pending/running child. Use the exact agent_id and swarm_run_id from spawn_agents; for a retained identity use its current assignment handle, not its stable identity ID. Supply a unique idempotency_key and reuse it unchanged after uncertain submission. Commits durably, then the child reads at the next complete tool boundary. Sending starts no worker, grants no permission, and submitted is not input-confirmed or accepted. Settled runs cannot be restarted; use kill to stop, never a natural-language message. Children cannot message siblings. Do not poll repeatedly for consumption.",
+        "description": "Send one durable message to exactly one target. Two target forms exist; choose one and do not mix their fields. Form A, exact run: pass agent_id AND swarm_run_id from a launch handle. This steers or informs a running temporary spawn_agents child or the coordinator (set agent_id equal to swarm_run_id); it never starts or redirects work after that run ends. Example: {\"agent_id\":\"child\",\"swarm_run_id\":\"launch\",\"content\":\"Evidence\",\"idempotency_key\":\"evidence-1\"}. Form B, stable colleague: pass retained_agent_id (from manage_agents/list_agents); optional scope selects the project or conversation binding, and intent=resume explicitly authorizes a fresh turn after cancellation. A busy colleague receives the message in its current owned assignment; an idle one starts a fresh turn with remembered dialogue and current tools, policy and budget. Supply a unique idempotency_key and reuse unchanged content, kind and intent after uncertainty; use get_agent_messages to reconcile the same stable key or exact run. Submission or turn start is not input confirmation, acceptance or completion. Stop work via kill, not natural language.",
         "parameters": {
           "type": "object", "additionalProperties": false,
-          "required": ["agent_id", "swarm_run_id", "content", "idempotency_key"],
+          "required": ["content", "idempotency_key"],
           "properties": {
-            "agent_id": {"type": "string", "minLength": 1, "maxLength": 256},
+            "agent_id": {"type": "string", "minLength": 1, "maxLength": 256, "description": "Exact team assignment ID; workers may target their coordinator with agent_id equal to swarm_run_id. Requires swarm_run_id; omit retained_agent_id."},
             "swarm_run_id": {"type": "string", "minLength": 1, "maxLength": 256},
-            "content": {"type": "string", "minLength": 1, "maxLength": 4096},
+            "content": {"type": "string", "minLength": 1, "maxLength": 4096, "description": "Use readable prose and preserve exact identifiers and meaningful whitespace. The authored text is saved verbatim."},
             "kind": {"type": "string", "enum": ["reference", "steer"], "default": "reference"},
-            "idempotency_key": {"type": "string", "minLength": 1, "maxLength": 256}
-          }
+            "idempotency_key": {"type": "string", "minLength": 1, "maxLength": 256},
+            "retained_agent_id": {"type": "string", "minLength": 1, "maxLength": 256, "description": "Stable colleague identity; omit both run-target fields."},
+            "scope": {"type": "string", "enum": ["project", "conversation"], "description": "Stable target only. Defaults to current project, otherwise conversation."},
+            "intent": {"type": "string", "enum": ["message", "resume"], "description": "Stable target only; omit for exact-run targets. Stable messaging defaults to message. resume explicitly authorizes a fresh turn after cancellation; it does not replay interrupted work."}
+          },
+          "oneOf": [
+            {"required": ["agent_id", "swarm_run_id"]},
+            {"required": ["retained_agent_id"]}
+          ]
         }
       }
     },
@@ -33,15 +90,21 @@
       "type": "function",
       "function": {
         "name": "get_agent_messages",
-        "description": "Read the bounded durable messages and actual input receipts for your exact child run. Use the agent_id and swarm_run_id returned by spawn_agents. Read on demand to reconcile an uncertain send or inspect an ended run; do not busy-poll. input_confirmed proves input consumption only, not that the child accepted or completed the request. Old records remain bound to their original run and cannot be used to steer a replacement.",
+        "description": "Read durable message evidence for exactly one target without starting work. Two target forms exist; choose one and do not mix their fields. Form A, exact run: pass agent_id AND swarm_run_id, plus optional message_id, to inspect input receipts in a temporary spawn_agents run, including a worker's own inbox. Example: {\"agent_id\":\"child\",\"swarm_run_id\":\"launch\"}. Form B, stable colleague: pass retained_agent_id AND the original idempotency_key, plus optional scope, to inspect that message's pinned assignment and outcome; stable-agent reads remain root-only. Read on demand after uncertainty; input_confirmed does not prove acceptance or completion. Old messages never steer or activate replacement runs.",
         "parameters": {
           "type": "object", "additionalProperties": false,
-          "required": ["agent_id", "swarm_run_id"],
           "properties": {
             "agent_id": {"type": "string", "minLength": 1, "maxLength": 256},
             "swarm_run_id": {"type": "string", "minLength": 1, "maxLength": 256},
-            "message_id": {"type": "string", "minLength": 1, "maxLength": 128}
-          }
+            "message_id": {"type": "string", "minLength": 1, "maxLength": 128},
+            "retained_agent_id": {"type": "string", "minLength": 1, "maxLength": 256},
+            "scope": {"type": "string", "enum": ["project", "conversation"]},
+            "idempotency_key": {"type": "string", "minLength": 1, "maxLength": 256, "description": "Required for a stable-agent receipt lookup."}
+          },
+          "oneOf": [
+            {"required": ["agent_id", "swarm_run_id"]},
+            {"required": ["retained_agent_id", "idempotency_key"]}
+          ]
         }
       }
     }

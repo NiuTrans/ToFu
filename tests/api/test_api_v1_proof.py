@@ -42,7 +42,7 @@ def client(monkeypatch):
 
     # Production's exception boundary: require_*'s BadRequest becomes the
     # canonical 400 envelope (lib/http_error_handlers).
-    from lib.http_error_handlers import register_http_error_handlers
+    from lib.http_transport.error_handlers import register_http_error_handlers
     register_http_error_handlers(app)
 
     from routes.api_v1.proof import api_v1_proof_bp

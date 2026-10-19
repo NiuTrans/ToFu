@@ -53,7 +53,7 @@ from lib.tasks_pkg.cache_tracking._state import get_prev_turn_cache_read
 from lib.tasks_pkg.cache_tracking._roi import log_round_cache_stats
 from lib.tasks_pkg.manager import task_user_id
 from lib.tasks_pkg.write_breakdown import _compute_write_breakdown
-from lib.task_result_checkpoint_contract import (
+from lib.task_replay.task_result_checkpoint_contract import (
     TASK_CACHE_PREFIX_HWM_CANDIDATE_FIELD,
     TASK_LAST_TURN_CACHE_READ_CANDIDATE_FIELD,
     TASK_RESULT_CACHE_FACT_MAXIMUM,

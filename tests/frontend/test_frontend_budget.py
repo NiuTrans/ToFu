@@ -118,17 +118,19 @@ def test_vite_url_assets_require_an_explicit_whitelist_entry():
     }) == ['assets/orchestration-a1b2c3d4.js']
 
 
-def test_tool_presentation_policy_maps_only_explicit_modules_to_one_chunk():
+def test_tool_presentation_policy_maps_the_presentation_directory_to_one_chunk():
+    """The chunk is derived by path prefix, so a rename within the owning
+    presentation directory stays in the chunk instead of silently no-op'ing
+    back into the entry graph."""
     script = r"""
 import { manualChunkName } from './vite.config.mjs';
 const moduleIds = [
   '/repo/frontend/src/conversation/presentation/image-source-policy.ts',
   '/repo/frontend/src/conversation/presentation/tool-approval-presentation.ts',
   'C:\\repo\\frontend\\src\\conversation\\presentation\\tool-command-execution-presentation.ts',
-  '/repo/frontend/src/conversation/presentation/tool-injection-presentation.ts',
-  '/repo/frontend/src/conversation/presentation/write-gate-refusal.ts',
-  '/repo/frontend/src/conversation/ui/human-guidance-actions.ts',
   '/repo/frontend/src/conversation/presentation/conversation-view-model.ts',
+  '/repo/frontend/src/conversation/presentation/renamed-future-module.ts',
+  '/repo/frontend/src/conversation/ui/human-guidance-actions.ts',
   '/repo/frontend/src/features/paper.ts',
 ];
 process.stdout.write(JSON.stringify(moduleIds.map(manualChunkName)));
@@ -146,7 +148,6 @@ process.stdout.write(JSON.stringify(moduleIds.map(manualChunkName)));
         'tool-presentation',
         'tool-presentation',
         'tool-presentation',
-        None,
         None,
         None,
     ]

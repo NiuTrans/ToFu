@@ -15,6 +15,8 @@ import type { Translator } from './i18n';
 
 // Name → inner SVG markup (paths/circles/etc., no <svg> wrapper).
 const ICON_PATHS: Readonly<Record<string, string>> = {
+    quote: '<path d="M3 21c3 0 7-2 7-7V3H2v11h5c0 2-1 3-4 4z"/><path d="M15 21c3 0 7-2 7-7V3h-8v11h5c0 2-1 3-4 4z"/>',
+    gitBranch: '<path d="M6 3v12"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="6" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/>',
     rocket: '<path d="M12 15v5s3.03-.55 4-2c1.08-1.62 0-5 0-5"/><path d="M4.5 16.5c-1.5 1.26-2 5-2 5s3.74-.5 5-2c.71-.84.7-2.13-.09-2.91a2.18 2.18 0 0 0-2.91-.09"/><path d="M9 12a22 22 0 0 1 2-3.95A12.88 12.88 0 0 1 22 2c0 2.72-.78 7.5-6 11a22.4 22.4 0 0 1-4 2z"/><path d="M9 12H4s.55-3.03 2-4c1.62-1.08 5 .05 5 .05"/>',
     search: '<path d="m21 21-4.34-4.34"/><circle cx="11" cy="11" r="8"/>',
     save: '<path d="M15.2 3a2 2 0 0 1 1.4.6l3.8 3.8a2 2 0 0 1 .6 1.4V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M17 21v-7a1 1 0 0 0-1-1H8a1 1 0 0 0-1 1v7"/><path d="M7 3v4a1 1 0 0 0 1 1h7"/>',

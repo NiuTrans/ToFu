@@ -69,9 +69,8 @@ _MIN_FENCE_LINES = _env_int('TOFU_ARTIFACT_FENCE_MIN_LINES', 80)
 # a "render this" payload regardless of size.
 _MIN_DOC_BYTES = _env_int('TOFU_ARTIFACT_DOC_MIN_BYTES', 200)
 
-# Per-feature ceiling.  Anything larger is left as inline code rather
-# than persisted (the lib.artifacts hard cap is 8 MiB).
-_MAX_BYTES = _env_int('TOFU_ARTIFACT_SCAN_MAX_BYTES', 1 * 1024 * 1024)
+# Only an explicit positive operator bound narrows scanner promotion.
+_MAX_BYTES = max(0, _env_int('TOFU_ARTIFACT_SCAN_MAX_BYTES', 0))
 
 
 # ── Regexes ───────────────────────────────────────────────────────────
@@ -179,7 +178,7 @@ def _detect_fenced_blocks(text: str) -> list[dict[str, Any]]:
         # line-heavy without being byte-heavy and vice-versa for HTML.
         if size < _MIN_FENCE_BYTES and line_count < _MIN_FENCE_LINES:
             continue
-        if size > _MAX_BYTES:
+        if _MAX_BYTES and size > _MAX_BYTES:
             logger.info(
                 '[Artifacts:scan] skip oversize fenced block fmt=%s size=%d cap=%d',
                 fmt, size, _MAX_BYTES,
@@ -235,7 +234,7 @@ def _detect_bare_html_docs(text: str) -> list[dict[str, Any]]:
                 continue
             body = m.group(0)
             size = len(body.encode('utf-8', errors='replace'))
-            if size < _MIN_DOC_BYTES or size > _MAX_BYTES:
+            if size < _MIN_DOC_BYTES or (_MAX_BYTES and size > _MAX_BYTES):
                 continue
             out.append({
                 'format': 'html',

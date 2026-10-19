@@ -12,7 +12,7 @@ launch plan. The catalog only decides what is worth RECOMMENDING.
 
 ``evaluate_hardware`` maps one hardware snapshot (``_probe.probe_hardware``)
 onto the catalog: every model gets its best feasible variant
-(engine + tier), infeasible ones are dropped, and the survivors are ranked
+(engine + tier), options predicted to fit are ranked
 comfortable-first then bigger-params-first. ``cloud_alternative`` answers
 the follow-up question — when the machine can only run something tiny (or
 nothing), it recommends the cheapest capable API model instead of letting
@@ -162,7 +162,7 @@ LOCAL_MODEL_CATALOG = [
 
 def _fit_options(entry: dict, gpu: dict | None,
                  ram_available: int | None) -> list:
-    """Every (variant, engine, tier) the hardware can actually run."""
+    """Rank variants predicted to fit; this is recommendation filtering, not launch admission."""
     options = []
     for variant in entry['variants']:
         weight = variant['weight_bytes']
@@ -181,7 +181,8 @@ def _fit_options(entry: dict, gpu: dict | None,
                     'repo': variant['repo'],
                 })
         if variant['kind'] == 'gguf' and ram_available:
-            # Mirrors the llama.cpp CPU feasibility rule in _plan.
+            # Prefer CPU recommendations predicted to fit. Explicit deployment
+            # requests still reach the actual engine without this estimate gate.
             if weight * 1.1 <= ram_available * 0.8:
                 options.append({
                     'variant': variant['label'],

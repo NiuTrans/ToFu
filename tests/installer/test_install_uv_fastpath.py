@@ -184,7 +184,7 @@ def test_reexec_uses_prefix_not_just_executable():
     sys.prefix to env_prefix (a venv's bin/python is a symlink to a base
     interpreter, so a bare executable compare can false-positive)."""
     for src, name in (
-            (_server_py(), 'lib/server_boot_env.py'),
+            (_server_py(), 'lib/server/server_boot_env.py'),
             (_bootstrap_env_reexec_py(), 'bootstrap_pkg/env_reexec.py')):
         assert re.search(r'os\.path\.realpath\(sys\.prefix\) == os\.path\.realpath\(env_prefix\)',
                          src), f'{name} does not use a sys.prefix vs env_prefix re-exec check'
@@ -264,7 +264,7 @@ def test_playwright_env_exported_before_reexec_early_return():
     tests/browser/test_chromium_env.py.
     """
     for src, name, early_var in (
-            (_server_py(), 'lib/server_boot_env.py', 'already_in_env'),
+            (_server_py(), 'lib/server/server_boot_env.py', 'already_in_env'),
             (_bootstrap_env_reexec_py(), 'bootstrap_pkg/env_reexec.py', 'same')):
         assert '_tofu_export_env_native_paths' in src, \
             f'{name} has no native-path export helper'
@@ -307,7 +307,7 @@ def test_fontconfig_exported_when_no_system_config():
         ('chromium_env.py does not bail out when /etc/fonts exists — it would '
          'override a real system fontconfig config')
     # And both entry points must actually route through it.
-    for name in ('lib/server_boot_env.py', 'bootstrap_pkg/env_reexec.py'):
+    for name in ('lib/server/server_boot_env.py', 'bootstrap_pkg/env_reexec.py'):
         assert _really_imports_chromium_env(name), \
             f'{name} does not import chromium_env.py for the fontconfig fallback'
     _ok('fontconfig falls back to the env config only when /etc/fonts is absent')

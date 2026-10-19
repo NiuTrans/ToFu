@@ -142,6 +142,10 @@ def recover_active_work_items() -> int:
         if not snapshot.get('capped'):
             break
         cursor = next_cursor
+    from lib.project_dispatch.recovery import recover_persisted_dispatch
+    recover_persisted_dispatch(client=client)
+    from lib.conversations.coordinator_reports import recover_pending_reports
+    recover_pending_reports(client=client)
     if recovered:
         logger.warning(
             '[ProjectBrain] terminally reconciled %d orphaned work item(s)',

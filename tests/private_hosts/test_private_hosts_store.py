@@ -155,7 +155,7 @@ def test_unusable_stored_row_is_dropped_on_load(_isolated_store):
 # ── 2. Bridge wiring: store is the source of truth, env is only a fallback ──
 
 def _sync_kwargs(env=None):
-    import lib.search_bridge as sb
+    import lib.search.search_bridge as sb
     with mock.patch.dict(os.environ, env or {}, clear=False), \
          mock.patch.object(sb.tofu_search, 'configure') as cfg:
         sb.sync_search_config()
@@ -188,7 +188,7 @@ def test_empty_store_and_no_env_means_everything_blocked(_isolated_store):
 
 def test_unreadable_store_fails_closed(_isolated_store):
     """An unreadable allowlist must block, never silently widen the boundary."""
-    import lib.search_bridge as sb
+    import lib.search.search_bridge as sb
     with mock.patch('lib.private_hosts.enabled_hosts', side_effect=OSError('boom')):
         assert sb._store_private_hosts() == set()
 
@@ -273,7 +273,7 @@ def test_the_data_file_is_export_excluded_on_purpose():
 def test_feature_is_not_env_only():
     """The capability must not require an env var that export.py cannot carry."""
     root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    with open(os.path.join(root, 'lib/search_bridge.py'), encoding='utf-8') as f:
+    with open(os.path.join(root, 'lib/search/search_bridge.py'), encoding='utf-8') as f:
         src = f.read()
     idx = src.find('allow_private_hosts =')
     assert idx > 0, 'allow_private_hosts assignment not found'

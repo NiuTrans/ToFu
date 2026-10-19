@@ -238,6 +238,7 @@ class EventType:
     DELTA_RESET = 'delta_reset'
     # ── tool ──
     TOOL_START = 'tool_start'
+    TOOL_EFFECT = 'tool_effect'
     TOOL_PROGRESS = 'tool_progress'
     TOOL_RESULT = 'tool_result'
     TOOL_COMPLETE = 'tool_complete'
@@ -280,6 +281,8 @@ class EventType:
     SWARM_INBOX_INJECT = 'swarm_inbox_inject'
     SWARM_AGENT_PHASE = 'swarm_agent_phase'
     SWARM_AGENT_PROGRESS = 'swarm_agent_progress'
+
+    SWARM_MESSAGE_RECEIPT = 'swarm_message_receipt'
     SWARM_AGENT_COMPLETE = 'swarm_agent_complete'
     SWARM_AGENT_ERROR = 'swarm_agent_error'
     SWARM_AGENT_TOOL_CALL = 'swarm_agent_tool_call'
@@ -847,6 +850,16 @@ _SPECS: tuple[EventSpec, ...] = (
                   FieldSpec('contentEpoch', 'int', required=True),
               )),
     # ───────────────────────── tool ─────────────────────────
+    EventSpec(EventType.TOOL_EFFECT, _C.TOOL,
+              'Write-ahead tool effect identity; commit before handler entry.',
+              fields={'roundNum': 'Producing tool occurrence ordinal',
+                      'toolCallId': 'Correlation ID, never a retry authority',
+                      'toolName': 'Exact admitted tool name',
+                      'executionEffect': 'Canonical ToolExecutionEffect from Conversation Sync'},
+              schema=(FieldSpec('roundNum', 'int', required=True),
+                      FieldSpec('toolCallId', 'str', required=True),
+                      FieldSpec('toolName', 'str', required=True),
+                      FieldSpec('executionEffect', 'dict', required=True))),
     EventSpec(EventType.TOOL_START, _C.TOOL,
               'A tool call began executing.',
               fields={'roundNum': 'round index', 'toolName': 'tool name',
@@ -1101,7 +1114,13 @@ _SPECS: tuple[EventSpec, ...] = (
                       'vertical': '(optional) structured vertical of a '
                                   'cache-hit search (academic/finance/…)',
                       'searchDiag': '(optional) search-diagnostics dict '
-                                    'carried through a cache hit',
+                                    'carried through a cache hit; on a '
+                                    'zero-result batch web_search it carries '
+                                    'the PRIMARY failing per-query diag so '
+                                    'the zero-result renderer stays honest',
+                      'searchDiags': '(optional) per-query search-diagnostics '
+                                     'list on a batch web_search (one entry '
+                                     'per failed/empty query)',
                       'toolSearchTotal': '(optional) search_tools total '
                                          'catalogue hits',
                       'toolSearchNextCursor': '(optional) search_tools '
@@ -1135,6 +1154,7 @@ _SPECS: tuple[EventSpec, ...] = (
                   FieldSpec('verticals', 'list'),
                   FieldSpec('vertical', 'str'),
                   FieldSpec('searchDiag', 'dict'),
+                  FieldSpec('searchDiags', 'list'),
                   FieldSpec('toolSearchTotal', 'int'),
                   FieldSpec('toolSearchNextCursor', 'str | None'),
                   FieldSpec('toolSearchFailOpen', 'bool'),
@@ -1471,13 +1491,16 @@ _SPECS: tuple[EventSpec, ...] = (
                   'archiveId': 'owner-scoped archive id',
                   'convId': 'conversation id',
                   'trigger': 'working_set|window|force|reactive|manual',
-                  'roundNum': 'task round number',
+                  'roundNum': 'zero-based producer round number',
                   'tokensBefore': 'estimated pre-compaction input tokens',
                   'tokensAfter': 'estimated post tokens; zero until complete',
                   'tokenCountKind': 'estimated',
                   'msgsBefore': 'pre-compaction message count',
                   'msgsAfter': 'post-compaction count; zero until complete',
                   'model': 'task model id, not summary-model attribution',
+
+                  'taskModel': 'explicit parent task model id',
+                  'receipt': 'bounded recorded summary route/cost evidence',
                   'reason': 'bounded trigger explanation',
                   'snapshotKind': 'pre_compaction_transcript',
                   'ts': 'epoch seconds',
@@ -1495,6 +1518,9 @@ _SPECS: tuple[EventSpec, ...] = (
                   FieldSpec('model', 'str', required=True),
                   FieldSpec('reason', 'str', required=True),
                   FieldSpec('snapshotKind', 'str', required=True),
+
+                  FieldSpec('taskModel', 'str'),
+                  FieldSpec('receipt', 'dict'),
                   FieldSpec('ts', 'int', required=True),
               )),
     EventSpec(EventType.COMPACTION_DONE, _C.CONTEXT,
@@ -1509,8 +1535,13 @@ _SPECS: tuple[EventSpec, ...] = (
                   'msgsBefore': 'pre-compaction message count',
                   'msgsAfter': 'complete post-compaction message count',
                   'reductionPct': 'estimated percentage token reduction',
-                  'roundNum': 'task round number',
+                  'roundNum': 'zero-based producer round number',
                   'receipt': 'bounded tofu.compaction-receipt/v1 result',
+
+                  'summaryDispatchCalls': 'at most 16 observed _dispatch model/provider identities; absent means unknown',
+                  'taskModel': 'explicit parent task model id',
+                  'anchorBlockId': 'producer-scoped occurrence witnessed before compaction preflight',
+                  'anchorPosition': 'before|after|producer-start; explicit witness when no running phase was emitted',
               },
               schema=(
                   FieldSpec('archiveId', 'str', required=True),
@@ -1524,6 +1555,11 @@ _SPECS: tuple[EventSpec, ...] = (
                   FieldSpec('reductionPct', 'number', required=True),
                   FieldSpec('roundNum', 'int', required=True),
                   FieldSpec('receipt', 'dict', required=True),
+
+                  FieldSpec('summaryDispatchCalls', 'list'),
+                  FieldSpec('taskModel', 'str'),
+                  FieldSpec('anchorBlockId', 'str'),
+                  FieldSpec('anchorPosition', 'str'),
               )),
     EventSpec(EventType.MEMORY_PREFETCH, _C.CONTEXT,
               'Memory-prefetch pipeline stage update.',
@@ -1805,6 +1841,9 @@ _SPECS: tuple[EventSpec, ...] = (
               'A sub-agent changed phase (e.g. running).',
               fields={'agentId': 'sub-agent id', 'phase': 'phase',
                       'content': 'human-readable phase detail',
+                      'detailKey': '(optional) localized phase message key',
+                      'detailArgs': '(optional) phase interpolation arguments',
+                      'attempt': '(optional) actual retry ordinal; absent for recovery waits',
                       'role': '(optional) sub-agent role',
                       'objective': '(optional) sub-agent objective',
                       'model': '(optional) sub-agent model id',
@@ -1823,6 +1862,9 @@ _SPECS: tuple[EventSpec, ...] = (
                   FieldSpec('agentId', 'str'),
                   FieldSpec('phase', 'str'),
                   FieldSpec('content', 'str', required=True),
+                  FieldSpec('detailKey', 'str'),
+                  FieldSpec('detailArgs', 'dict'),
+                  FieldSpec('attempt', 'int'),
                   FieldSpec('role', 'str'),
                   FieldSpec('objective', 'str'),
                   FieldSpec('model', 'str'),
@@ -1833,6 +1875,42 @@ _SPECS: tuple[EventSpec, ...] = (
                   FieldSpec('roundNum', 'int'),
                   FieldSpec('total_agents', 'int'),
                   FieldSpec('completed_agents', 'int'),
+              )),
+    EventSpec(EventType.SWARM_MESSAGE_RECEIPT, _C.SWARM,
+              'Committed exact-run message evidence; insertion is not consumption.',
+              fields={
+                  'swarmRunId': 'exact swarm run id',
+                  'agentId': 'exact recipient id',
+                  'messageId': 'immutable message id',
+                  'content': 'original bounded message body',
+                  'kind': 'message kind',
+                  'messageSequence': 'one-based mailbox sequence',
+                  'state': 'durable receipt state',
+                  'senderTaskId': 'sender task id',
+                  'submittedAt': 'submission time in milliseconds',
+                  'inputInjectedAt': 'input insertion time',
+                  'inputInjectedRound': 'insertion round',
+                  'inputTaskId': 'consumer task id',
+                  'inputRound': 'confirmed input round',
+                  'inputConfirmedAt': 'confirmed input time',
+              },
+              schema=(
+                  FieldSpec('swarmRunId', 'str', required=True),
+                  FieldSpec('agentId', 'str', required=True),
+                  FieldSpec('messageId', 'str', required=True),
+
+                  FieldSpec('content', 'str'),
+                  FieldSpec('kind', 'str'),
+                  FieldSpec('messageSequence', 'int'),
+                  FieldSpec('state', 'str', required=True),
+                  FieldSpec('senderTaskId', 'str', required=True),
+                  FieldSpec('submittedAt', 'int', required=True),
+                  FieldSpec('inputInjectedAt', 'int'),
+
+                  FieldSpec('inputInjectedRound', 'int'),
+                  FieldSpec('inputTaskId', 'str'),
+                  FieldSpec('inputRound', 'int'),
+                  FieldSpec('inputConfirmedAt', 'int'),
               )),
     EventSpec(EventType.SWARM_AGENT_PROGRESS, _C.SWARM,
               'Sub-agent progress update.',

@@ -157,8 +157,9 @@ def test_c_check_warns_on_new_file_with_syntax_error(tmp_path):
     broken = 'int main(void) { return 0\n}\n'  # missing ';'
     out = checks.post_edit_check('bad.c', None, broken, abs_path=str(target))
     assert out.startswith('COMPILE CHECK:')
-    # GCC points at the '}' on line 2 where the missing ';' becomes visible.
-    assert 'bad.c' in out and 'created' in out and 'line 2' in out
+    # GCC versions locate the missing semicolon at the return or closing brace.
+    assert 'bad.c' in out and 'created' in out
+    assert any(f'line {line}' in out for line in (1, 2))
 
 
 @needs_cc

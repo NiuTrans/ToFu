@@ -18,6 +18,14 @@ import pytest
 
 pytest_plugins = ('tests._artifact_sidecar',)
 
+
+
+@pytest.fixture
+def flask_app(artifact_storage):
+    """Bind the HTTP app to this module's disposable artifact authority."""
+    import server
+    server.app.config.update(TESTING=True)
+    return server.app
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 
@@ -79,6 +87,13 @@ class TestPublicMetaUnit:
 class TestRouteSanitization:
     """The live API routes must apply public_meta — the internal meta dict
     must not appear in any artifact response."""
+
+    @pytest.fixture(autouse=True)
+    def owned_route_conversations(self, monkeypatch):
+        from lib import response_assets
+        conversations = {'conv-sanit-get', 'conv-sanit-list', 'conv-sanit-ver', 'conv-sanit-pin'}
+        monkeypatch.setattr(response_assets, 'get_conversation', lambda conv, user_id, **kw:
+                            {'id': conv} if conv in conversations and user_id == 1 else None)
 
     def _make(self, flask_app, conv_id, **kw):
         from lib.artifacts import create_artifact

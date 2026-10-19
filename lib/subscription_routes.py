@@ -155,9 +155,13 @@ class _Health:
     last_failure: float = 0.0
     last_probe: float = 0.0
     circuit_until: float = 0.0
+    # Probe reachability can reopen admission, but only a successful real
+    # request forgives the backoff debt from failed connections.
     backoff_step: int = 0
     failure_kind: str = ''
     quality: int = 0
+    # Order actual request outcomes even when monotonic timestamps are equal.
+    request_revision: int = 0
 
 
 def probe_route(url: str, route: Route) -> ProbeResult:
@@ -212,6 +216,9 @@ class RouteManager:
     path already exists, it is returned immediately while stale and recovered
     routes are refreshed in the background.  Per-route singleflight prevents
     a burst of requests from multiplying probes.  Probe workers exist only
+
+    Probe success reopens admission without clearing connection backoff debt;
+    only a successful real request proves recovery from those setup failures.
     while a batch is in flight; the executor is rebuilt lazily for the next
     network race so one cold request does not leave idle threads resident.
     """
@@ -296,19 +303,35 @@ class RouteManager:
             executor.shutdown(wait=True, cancel_futures=True)
 
     def _record(self, host: str, route: Route, result: ProbeResult, *,
-                source: str = 'request') -> None:
+                source: str = 'request',
+                probe_snapshot: 'tuple[int, int] | None' = None) -> None:
         now = self._clock()
         recovered = False
         opened_for = 0.0
         with self._lock:
-            state = self._health.setdefault((host, route.route_id), _Health())
+            if self._closed:
+                return
+            key = (host, route.route_id)
+            state = self._health.get(key)
+            if source == 'probe':
+                request_revision = state.request_revision if state else 0
+                if probe_snapshot != (self._generation, request_revision):
+                    # A topology change or a real request superseded this
+                    # probe. Check and publish under the same lock so neither
+                    # success nor failure can resurrect stale evidence.
+                    return
+            if state is None:
+                state = self._health[key] = _Health()
+            if source == 'request':
+                state.request_revision += 1
             state.last_probe = now
             if result.ok:
                 recovered = state.consecutive_failures > 0
                 state.has_success = True
                 state.consecutive_failures = 0
                 state.circuit_until = 0.0
-                state.backoff_step = 0
+                if source == 'request':
+                    state.backoff_step = 0
                 state.failure_kind = ''
                 state.last_success = now
                 observed_quality = max(0, int(result.quality or 0))
@@ -333,7 +356,13 @@ class RouteManager:
                 state.last_failure = now
                 state.failure_kind = result.verdict or 'network_fail'
                 state.has_success = False
-                if state.failure_kind in ('policy_blocked', 'proxy_auth'):
+                if source == 'request' and state.failure_kind in ('midstream_io', 'midstream_close'):
+                    # A disconnected response is evidence to revalidate the
+                    # route, not proof that all connections through it failed.
+                    # Next demand joins one immediate probe; only a failed
+                    # probe/connection opens the shared backoff circuit.
+                    opened_for = 0.0
+                elif state.failure_kind in ('policy_blocked', 'proxy_auth'):
                     opened_for = _POLICY_BACKOFF_S
                 else:
                     idx = min(state.backoff_step,
@@ -356,6 +385,10 @@ class RouteManager:
                 '[SubscriptionRoute] probe: %s via %s unavailable (%s) — '
                 'circuit open %.1fs',
                 host, route.label, result.verdict, opened_for)
+        elif not result.ok and opened_for == 0.0:
+            logger.info(
+                '[SubscriptionRoute] %s via %s response interrupted (%s) — '
+                'revalidating shared route', host, route.label, result.verdict)
         elif not result.ok:
             logger.warning(
                 '[SubscriptionRoute] %s via %s unavailable (%s) — '
@@ -374,7 +407,7 @@ class RouteManager:
             ProbeResult('ok' if ok else failure_kind, latency_ms))
 
     def _run_probe(self, url: str, host: str, route: Route,
-                   generation: int) -> ProbeResult:
+                   snapshot: tuple[int, int]) -> ProbeResult:
         try:
             result = self._probe(url, route)
             if not isinstance(result, ProbeResult):
@@ -383,10 +416,8 @@ class RouteManager:
             logger.debug('[SubscriptionRoute] probe worker via %s raised (%s)',
                          route.label, type(error).__name__)
             result = ProbeResult('network_fail')
-        with self._lock:
-            if generation != self._generation:
-                return result
-        self._record(host, route, result, source='probe')
+        self._record(host, route, result, source='probe',
+                     probe_snapshot=snapshot)
         return result
 
     def _probe_done(
@@ -426,11 +457,13 @@ class RouteManager:
                 existing = self._inflight.get(key)
                 if existing is not None:
                     return existing
-                generation = self._generation
+                state = self._health.get(key)
+                snapshot = (self._generation,
+                            state.request_revision if state else 0)
                 executor = self._executor_locked()
                 try:
                     future = executor.submit(
-                        self._run_probe, url, host, route, generation)
+                        self._run_probe, url, host, route, snapshot)
                 except BaseException:
                     submission_failed = True
                     if not self._inflight and self._executor is executor:
@@ -600,6 +633,28 @@ class RouteManager:
         if kinds and kinds <= {'policy_blocked', 'proxy_auth'}:
             return 'geo_blocked'
         return 'network_fail'
+
+    def recovery_delay(self, url: str, routes: list[Route]) -> float | None:
+        """Seconds until a transient route can be retried; no I/O or mutation.
+
+        A circuit is shared transport state, not a fresh provider failure.
+        Policy/auth failures are never made waitable by this method.
+        """
+        host = self._host(url)
+        routes = self._dedupe(routes)
+        now = self._clock()
+        if self._healthy(host, routes, now):
+            return 0.0
+        with self._lock:
+            delays = []
+            for route in routes:
+                state = self._health.get((host, route.route_id))
+                if state and state.failure_kind not in ('policy_blocked', 'proxy_auth'):
+                    if state.consecutive_failures:
+                        delays.append(max(0.05, state.circuit_until - now))
+                elif state is None and (host, route.route_id) in self._inflight:
+                    delays.append(0.1)
+            return min(delays) if delays else None
 
     def status(self) -> dict:
         """Credential-free diagnostics for tests and status surfaces."""

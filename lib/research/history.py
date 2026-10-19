@@ -229,7 +229,9 @@ def compact_observations(program):
     runs = normalize_run_evidence(program.get('runs'))
 
     def pressured(rows):
-        proposal = dict(program, runs=rows)
+        # User source bytes have their own durable workspace owner; their size
+        # cannot force unrelated observation history out of the working window.
+        proposal = dict(program, runs=rows, source_files=[])
         canonical = dict(proposal, **normalize_program_fields(proposal))
         # Reserve the bounded scope aggregate and newly derived claim reasons;
         # this is document headroom, not an execution/concurrency throttle.

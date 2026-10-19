@@ -1,10 +1,11 @@
 """Disposable PostgreSQL for real row-lock and semantic authority tests.
 
-Entry point: postgres_cluster. The fixture binds only a private Unix socket,
-owns its foreground process and reaps it before removing test files. It uses
-no existing service, database, authentication profile or application.
+Entry points: postgres_cluster, owned_postgres_cluster. Each owns a private
+Unix socket and foreground process, reaped before removing test files. They
+use no existing service, database, authentication profile or application.
 """
 
+from contextlib import contextmanager
 from pathlib import Path
 import os
 import shutil
@@ -24,8 +25,11 @@ class RestartablePostgresDsn(str):
         return result
 
 
-@pytest.fixture
-def postgres_cluster():
+@contextmanager
+def owned_postgres_cluster(*, max_connections: int = 16):
+    """Own one cluster with explicit test demand; the fixture retains 16 slots."""
+    if type(max_connections) is not int or max_connections < 4:
+        raise ValueError('A private PostgreSQL cluster needs at least four slots')
     if os.name != "posix" or os.getuid() == 0:
         pytest.skip("Local PostgreSQL tests need an ordinary POSIX user")
     psycopg = pytest.importorskip("psycopg")
@@ -62,7 +66,7 @@ def postgres_cluster():
                     "-h",
                     "",
                     "-c",
-                    "max_connections=16",
+                    f"max_connections={max_connections}",
                     "-c",
                     "shared_buffers=16MB",
                 ]
@@ -101,3 +105,9 @@ def postgres_cluster():
                     except subprocess.TimeoutExpired:
                         os.killpg(server.pid, signal.SIGKILL)
                         server.wait(timeout=10)
+
+
+@pytest.fixture
+def postgres_cluster():
+    with owned_postgres_cluster() as dsn:
+        yield dsn

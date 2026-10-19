@@ -19,6 +19,9 @@ import time
 import weakref
 from collections import defaultdict
 from contextlib import contextmanager
+from contextvars import ContextVar
+
+from functools import wraps
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, AsyncIterator, Iterable
 
@@ -52,8 +55,19 @@ _EXECUTION_OUTCOMES = frozenset({
 })
 _TASK_STARTUP_STAGES = frozenset({
     'context', 'registration', 'preparation', 'binding', 'submission',
-    'worker_entry',
+    'worker_entry', 'cleanup', 'workspace_binding',
+    'workspace_provision', 'workspace_roots', 'workspace_identity',
+    'workspace_root_binding', 'workspace_persist',
+    'workspace_snapshot', 'workspace_materialize', 'workspace_registration',
+    'workspace_destination_wait', 'workspace_repo_wait',
+    'workspace_index_seed', 'workspace_index_add', 'workspace_index_tree',
+    'workspace_snapshot_commit', 'workspace_index_validate',
+    'workspace_metadata', 'workspace_checkout',
 })
+_TASK_COMPLETION_STAGES = frozenset({
+    'persistence', 'workspace_delivery', 'workspace_evidence', 'terminal_listeners',
+})
+_TASK_PHASE_OUTCOMES = frozenset({'success', 'error', 'deferred'})
 _EXECUTION_RESOURCE_DISPOSITIONS = frozenset({
     'released', 'deferred', 'failed',
 })
@@ -108,23 +122,48 @@ class _Store:
         self.histograms: dict[
             tuple[str, tuple[tuple[str, str], ...]], dict[str, Any]
         ] = {}
+        # The normalized value for a (name, axis, raw-text) triple is stable:
+        # once a value has been admitted or folded to 'other', re-presenting
+        # the same triple always yields the same series.  Hot counters
+        # (task-event eviction, replay) re-resolve the same tiny closed set
+        # of kinds every call, so memoize the bounding + cap-fold instead of
+        # re-running strip/regex/slice and set membership on each increment.
+        # Bound the memo itself so a hostile caller cannot grow it without
+        # limit; a full memo simply falls back to the uncached path.
+        self._label_memo: dict[tuple[str, str, str], str] = {}
+
+    def _label_value(self, name: str, axis: str, value: Any) -> str:
+        text = _bounded(value)
+        seen = self.label_values[(name, axis)]
+        # The route inventory is larger than provider/task dimensions but
+        # still finite.  Once a bad caller exceeds the cap, fold novel
+        # values into one stable series instead of growing forever.
+        cap = 512 if axis == 'route' else 128
+        if text not in seen:
+            if len(seen) >= cap:
+                text = 'other'
+            seen.add(text)
+        return text
 
     def _labels(self, name: str, labels: dict[str, Any] | None) \
             -> tuple[tuple[str, str], ...]:
+        if not labels:
+            return ()
+        memo = self._label_memo
         normalized = []
-        for key, value in (labels or {}).items():
+        for key, value in labels.items():
             axis = str(key)
-            text = _bounded(value)
-            seen = self.label_values[(name, axis)]
-            # The route inventory is larger than provider/task dimensions but
-            # still finite.  Once a bad caller exceeds the cap, fold novel
-            # values into one stable series instead of growing forever.
-            cap = 512 if axis == 'route' else 128
-            if text not in seen:
-                if len(seen) >= cap:
-                    text = 'other'
-                seen.add(text)
-            normalized.append((axis, text))
+            raw = value if type(value) is str else None
+            cache_key = (name, axis, raw) if raw is not None else None
+            if cache_key is not None:
+                cached = memo.get(cache_key)
+                if cached is None:
+                    cached = self._label_value(name, axis, raw)
+                    if len(memo) < 8192:
+                        memo[cache_key] = cached
+                normalized.append((axis, cached))
+            else:
+                normalized.append((axis, self._label_value(name, axis, value)))
         return tuple(sorted(normalized))
 
     def inc(self, name: str, value: float = 1.0, **labels: Any) -> None:
@@ -270,26 +309,87 @@ def record_task_queue_wait(kind: Any, seconds: float) -> None:
                    kind=_bounded(kind, fallback='chat', limit=48))
 
 
+_STARTUP_IDENTITY: ContextVar[dict | None] = ContextVar('startup_identity', default=None)
+
+
 @contextmanager
-def measure_task_startup(stage: str):
-    """Measure actual dispatch stages; diagnostics never change execution."""
+def _measure_task_phase(stage: str, *, identity, metric_name: str, log_tag: str):
+    """Paired content-free spans; callers own closed stage/metric families."""
+    fields = dict(_STARTUP_IDENTITY.get() or {})
+    for key in ('conversation_id', 'turn_id', 'attempt_id', 'task_id', 'user_id'):
+        value = (identity or {}).get(key)
+        if isinstance(value, (str, int)) and not isinstance(value, bool):
+            fields[key] = _bounded(value, limit=128)
     started = time.monotonic()
-    outcome = 'success'
+
+    def anchor(boundary, **values):
+        if not fields:
+            return
+        try:
+            import json
+            logger.info(f'[{log_tag}] %s', json.dumps({
+                'stage': stage, 'boundary': boundary,
+                'observedAtMs': int(time.time() * 1000),
+                **fields, **values}, separators=(',', ':')))
+        except Exception:
+            pass  # Diagnostics must not replace the execution verdict.
+
+    anchor('start')
+    state = {'outcome': 'success'}
+    token = _STARTUP_IDENTITY.set(fields)
     try:
-        yield
+        yield state
     except BaseException:
-        outcome = 'error'
+        state['outcome'] = 'error'
         raise
     finally:
+        _STARTUP_IDENTITY.reset(token)
+        elapsed = max(0.0, time.monotonic() - started)
+        outcome = state.get('outcome')
+        outcome = outcome if outcome in _TASK_PHASE_OUTCOMES else 'error'
+        anchor('complete', outcome=outcome, durationMs=round(elapsed * 1000, 3))
         try:
-            _STORE.observe(
-                'tofu_task_startup_stage_seconds', time.monotonic() - started,
-                _HTTP_BUCKETS,
-                stage=stage if stage in _TASK_STARTUP_STAGES else 'other',
-                outcome=outcome,
-            )
-        except Exception as error:
-            logger.debug('task startup timing observation failed: %s', error)
+            _STORE.observe(metric_name, elapsed, _HTTP_BUCKETS,
+                           stage=stage, outcome=outcome)
+        except Exception:
+            pass  # An unavailable diagnostic sink cannot change settlement.
+
+
+@contextmanager
+def measure_task_startup(stage: str, *, identity=None):
+    """Measure dispatch with paired anchors; IDs are logs, never metric labels."""
+    stage = stage if stage in _TASK_STARTUP_STAGES else 'other'
+    with _measure_task_phase(stage, identity=identity,
+                             metric_name='tofu_task_startup_stage_seconds',
+                             log_tag='TaskStartupTiming'):
+        yield
+
+
+@contextmanager
+def measure_task_completion(stage: str, *, identity=None):
+    """Inclusive completion spans; deferred is not a successful delivery ACK."""
+    stage = stage if stage in _TASK_COMPLETION_STAGES else 'other'
+    with _measure_task_phase(stage, identity=identity,
+                             metric_name='tofu_task_completion_stage_seconds',
+                             log_tag='TaskCompletionTiming') as state:
+        yield state
+
+
+def observe_task_completion(stage: str):
+    """Time a synchronous task receiver, retaining its exact return/exception."""
+    def decorate(receiver):
+        @wraps(receiver)
+        def measured(task, *args, **kwargs):
+            identity = {'task_id': task.get('id'), 'conversation_id': task.get('convId'),
+                        'turn_id': task.get('_turnId'), 'attempt_id': task.get('_attemptId'),
+                        'user_id': task.get('_userId')}
+            with measure_task_completion(stage, identity=identity) as state:
+                result = receiver(task, *args, **kwargs)
+                if result is False:
+                    state['outcome'] = 'deferred'
+                return result
+        return measured
+    return decorate
 
 
 def record_storage_rpc(

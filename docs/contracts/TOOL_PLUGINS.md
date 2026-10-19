@@ -14,6 +14,27 @@ Use the table in §7 to pick which mechanism you want.
 
 ---
 
+## Bundled optional capabilities
+
+**Problem:** unrelated tasks inherited domain schemas and plugin selection was
+inconsistently pinned or omitted by routing. **Decision:** keep domain services
+behind optional descriptors using the existing execution/approval owners.
+**Alternatives rejected:** duplicating services in domain-specific loops loses
+behavioral parity; MCP adds unnecessary transport for host-owned deliverables,
+but is the appropriate boundary for separately configured company platforms.
+
+The host ships dormant `papers`, `production`, `image_generation` and
+`local_models` descriptors in `lib/tools/optional_plugins.py`. They register
+through the same ToolSpec/plugin gate as installed entry points; no domain
+service is imported by descriptor registration. Enable only the needed names
+with `config.plugins`. An explicit list, including `[]`, takes precedence over
+feature switches. Without a list, explicit `imageGenEnabled`, `paperEnabled`,
+`productionEnabled` or `localServeEnabled` selects its corresponding plugin.
+Bundled descriptors retain host-owned names and schema policy; external entry
+points cannot replace them or spoof that provenance. Allow-list membership is
+availability, not a request to pin every schema. Full and routed exposure both
+retain enabled plugins; provider/local Tool Search can defer their functions.
+
 ## 1. The problem
 
 A third-party package contributes native tools by declaring a `tofu.tools`

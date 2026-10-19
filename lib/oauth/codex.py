@@ -22,7 +22,7 @@ import requests
 from lib.log import get_logger
 from lib.oauth.pkce import generate_pkce_codes
 from lib.oauth.token_store import load_token, save_token, OAuthExchangeError
-from lib.http_client import http_post
+from lib.http_transport.client import http_post
 
 logger = get_logger(__name__)
 
@@ -266,6 +266,18 @@ def codex_device_poll_token(device_auth_id: str, user_code: str,
             'code_challenge': data.get('code_challenge', '')}
 
 
+def _save_login_token(token_data: dict) -> bool:
+    """Commit a new login after any older refresh, never underneath it.
+
+    Only login commits acquire this boundary. Refresh already owns the same
+    transaction lock, so adding it to generic save_token would deadlock.
+    """
+    from lib.json_store import locked_path
+    from lib.oauth.token_store import token_path
+    with locked_path(token_path('codex') + '.refresh'):
+        return save_token('codex', token_data)
+
+
 def codex_exchange_code(code: str, pkce_verifier: str,
                         user_id: str = '',
                         redirect_uri: str = '') -> dict | None:
@@ -329,7 +341,7 @@ def codex_exchange_code(code: str, pkce_verifier: str,
             'expires_in': expires_in,
         }
 
-        if not save_token('codex', token_data):
+        if not _save_login_token(token_data):
             raise OAuthExchangeError(
                 'OpenAI authorized successfully, but the credentials could '
                 'not be saved securely. Check data-directory permissions or '
@@ -385,7 +397,7 @@ def codex_store_token(data: dict) -> dict:
         'expire': time.time() + expires_in,
         'expires_in': expires_in,
     }
-    if not save_token('codex', token_data):
+    if not _save_login_token(token_data):
         raise OAuthExchangeError(
             'OpenAI credentials could not be saved securely. Check '
             'data-directory permissions or free disk space.',
@@ -604,10 +616,21 @@ def codex_get_valid_token(user_id: str = '') -> str | None:
                                             user_id=user_id)
             if refreshed:
                 return refreshed.get('access_token')
-        if now < expire:
+        # Refresh can block across expiry, logout, or a replacement login.
+        # Re-read both authority and wall time instead of returning a stale
+        # pre-refresh snapshot. A new shared reference needs its owner check
+        # on the next resolution; never use it as an owned-token fallback.
+        current = load_token('codex') or {}
+        if isinstance(current.get('codex_shared_reference'), dict):
+            return None
+        try:
+            current_expire = float(current.get('expire') or 0)
+        except (TypeError, ValueError, OverflowError):
+            current_expire = 0
+        if math.isfinite(current_expire) and time.time() < current_expire:
             logger.warning('[Codex OAuth] Refresh unavailable; using access '
                            'token only until its recorded expiry')
-            return access_token
+            return current.get('access_token') or None
         logger.warning('[Codex OAuth] Access token expired and refresh is '
                        'unavailable; sign-in required')
         return None

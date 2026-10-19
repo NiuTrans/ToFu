@@ -395,6 +395,19 @@ fn claim_owner(
     }
 }
 
+/// Resolve the existing tenant-global owner claim for financial reconciliation.
+/// Missing is distinct from an empty/free wallet; callers still prove the exact
+/// reservation or its absence for the source task in the same transaction.
+pub(crate) fn account_id_for_owner(database: &AuthorityDatabase,
+    transaction: &mut AuthorityTransaction, owner: u64) -> io::Result<Option<String>> {
+    if owner != transaction.owner_user_id() || owner == 0 {
+        return Err(invalid_input("tenant account owner scope differs"));
+    }
+    database.entity_get(transaction, &owner_claim_key(transaction, owner)?)?
+        .map(|bytes| String::from_utf8(bytes).map_err(|_| invalid_data("tenant owner claim encoding")))
+        .transpose()
+}
+
 fn advance_owner_sequence_past(
     database: &AuthorityDatabase,
     transaction: &mut AuthorityTransaction,

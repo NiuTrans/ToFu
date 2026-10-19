@@ -864,7 +864,7 @@ def author_scene(scene: dict, scene_dir: str, *, width: int, height: int,
     """
     import time as _time
 
-    from lib.agent_loop import AbortSignal
+    from lib.agent_loop.agent_loop import AbortSignal
     from lib.motion_video._template import render_scene_html
 
     token_budget = (_DEFAULT_TOKEN_BUDGET if not token_budget
@@ -1054,7 +1054,7 @@ def _author_once(scene: dict, scene_dir: str, *, width: int, height: int,
     """
     import json as _json
 
-    from lib.agent_loop import AbortSignal, run_agent_loop
+    from lib.agent_loop.agent_loop import AbortSignal, run_agent_loop
 
     state = {'html': seed_html, 'tokens': 0, 'gate_ok': False,
              'craft_reads': ([str(scene.get('blueprint'))]
@@ -1315,7 +1315,7 @@ def _author_once(scene: dict, scene_dir: str, *, width: int, height: int,
             on_tool_round=_on_tool_round)
         rounds = outcome.rounds
     except Exception as e:
-        from lib.llm_errors import AbortedError
+        from lib.llm.llm_errors import AbortedError
         if abort.aborted or isinstance(e, AbortedError):
             return {'outcome': 'aborted', 'html': state['html'],
                     'rounds': rounds, 'tokens': state['tokens'],

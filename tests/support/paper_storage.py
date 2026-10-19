@@ -6,9 +6,9 @@ import sqlite3
 import threading
 
 from lib.storage.errors import StorageError
-from lib.storage_sidecar.adapters.sqlite import SQLiteSession
-from lib.storage_sidecar.operation_registry import build_registry
-from lib.storage_sidecar.schema import initialize_schema
+from lib.storage_authority_sql.adapters.sqlite import SQLiteSession
+from lib.storage_authority_sql.operation_registry import build_registry
+from lib.storage_authority_sql.schema import initialize_schema
 
 
 class TransactionClient:

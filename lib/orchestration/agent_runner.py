@@ -8,7 +8,10 @@ stay lazy so the pure graph interpreter can use deterministic runner fixtures.
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from contextlib import contextmanager
+from copy import deepcopy
+from dataclasses import dataclass, field, replace
+import threading
 from typing import Any
 
 from lib.orchestration._execution_projection import render_role_brief
@@ -19,6 +22,10 @@ from lib.orchestration.runner_result import (
 )
 from lib.orchestration.tool_usage import classify_orchestration_tool_usage
 from lib.orchestration.usage_accounting import project_child_accounting
+
+from lib.log import get_logger
+
+logger = get_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -57,6 +64,14 @@ class OrchestrationAgentRunnerConfig:
             'model_routing_policy': self.model_routing_policy,
             'worker_context_policy': self.worker_context_policy,
         }
+
+
+@dataclass(frozen=True)
+class PreparedOrchestrationInvocation:
+    """Borrowed child carrier and one ordinary execution entry; caller owns scope."""
+    child: dict
+    run: Callable[..., OrchestrationAgentResult]
+    prepare_completion: Callable[..., dict | None]
 
 
 class OrchestrationInvocationRunner:
@@ -122,6 +137,15 @@ class OrchestrationInvocationRunner:
                     'owner_user_id': task_user_id(parent_task),
                     'tenant_id': parent_task.get('_tenant_id'),
                 })
+                from lib.model_routing.domain import NativeModelSelection
+                native_selection=parent_task.get('_model_routing_selection')
+                if isinstance(native_selection,NativeModelSelection):
+                    from lib.identity import PrincipalContext
+                    resolver_kwargs['provider_id']=native_selection.preferred_provider_id or (
+                        native_selection.provider_offering.provider_id if native_selection.provider_offering else '')
+                    resolver_kwargs['tenant_id']=PrincipalContext.from_payload(
+                        parent_task['_principalContext']).tenant_id
+
             resolved_model = str(resolver(
                 tier, selected_model, **resolver_kwargs) or selected_model)
         return OrchestrationModelRoute(
@@ -133,15 +157,25 @@ class OrchestrationInvocationRunner:
                   else 'role_tier'),
         )
 
-    def __call__(
-        self, node: dict, context: str, iteration: int, *, before_dispatch=None,
-    ) -> OrchestrationAgentResult:
-        """Schedule an owner-scoped invocation; project canonical events only."""
-        from lib.tasks_pkg.child_invocation import create_child_invocation, run_child_invocation
+    def __call__(self, node: dict, context: str, iteration: int, *, before_dispatch=None):
+        with self.prepare(node, context, iteration, durable_admission=before_dispatch is not None) as prepared:
+            return prepared.run(before_dispatch=before_dispatch)
+
+    @contextmanager
+    def prepare(self, node: dict, context: str, iteration: int, *, durable_admission=False,
+                transfer_context=False):
+        """Prepare through the ordinary child owner; scope exit rejects unused work."""
+        from lib.tasks_pkg.child_invocation import (
+            create_child_invocation, run_child_invocation, close_unstarted_child_invocation)
         from lib.swarm.registry import scope_tools_for_role, get_role_system_suffix
-        from lib.turn_verdict import derive_task_verdict
 
         parent = self._config.parent_task or {}
+        original_context = self.snapshot_worker_context() if transfer_context else None
+        transfer_config = (replace(self._config, all_tools=deepcopy(self._config.all_tools))
+                           if transfer_context else None)
+        execution_owner = self
+        runtime_abort = node.get('_runtimeAbortCheck')
+        child = None
         from lib.tasks_pkg.manager import task_user_id
         task_user_id(parent)
         if not parent.get('id'):
@@ -156,7 +190,7 @@ class OrchestrationInvocationRunner:
 
         def stream_sink(kind: str, chunk: str, *, phase: str = '', **meta):
             if kind == 'phase':
-                self._emit({
+                execution_owner._emit({
                     'type': 'step_phase',
                     'node_id': node_id,
                     'role': role,
@@ -167,7 +201,7 @@ class OrchestrationInvocationRunner:
                     **meta,
                 })
                 return
-            self._emit({
+            execution_owner._emit({
                 'type': 'step_delta',
                 'node_id': node_id,
                 'role': role,
@@ -177,7 +211,7 @@ class OrchestrationInvocationRunner:
             })
 
         def tool_event_sink(event: dict) -> None:
-            self._emit({
+            execution_owner._emit({
                 'type': 'step_tool_event',
                 'node_id': node_id,
                 'role': role,
@@ -191,17 +225,17 @@ class OrchestrationInvocationRunner:
             check_publication()
             kind = event.get('type')
 
-            if kind in {'delta_reset', 'retry_reset', 'round_end', 'done'}:
+            if child is not None and kind in {'delta_reset', 'retry_reset', 'round_end', 'done'}:
                 # These boundaries run after provider ingress has drained.
                 # The exact same assembly as a normal checkpoint owns order;
                 # the graph cannot recreate it later from display previews.
                 from lib.tasks_pkg.invocation import invocation_output_projection
-                self._emit({'type': 'step_event', 'node_id': node_id,
+                execution_owner._emit({'type': 'step_event', 'node_id': node_id,
                             'role': role, 'emits': emits,
                             'event': {'type': 'state',
                                       **invocation_output_projection(child)}})
             if kind in {'round_start', 'round_end', 'delta_reset', 'retry_reset'}:
-                self._emit({'type': 'step_event', 'node_id': node_id,
+                execution_owner._emit({'type': 'step_event', 'node_id': node_id,
                             'role': role, 'emits': emits, 'event': dict(event)})
                 return
             if kind == 'delta':
@@ -254,6 +288,13 @@ class OrchestrationInvocationRunner:
                 'model': model_route.resolved_model,
                 'modelRoute': model_route.to_projection(),
             })
+        if durable_admission:
+            from lib.tasks_pkg.invocation_registration import storage_free_parent
+            if not storage_free_parent(parent):
+                # Even an unbounded registered tree needs a complete observation
+                # account before its first child attaches and emits a receipt.
+                from lib.agent_core.execution_budget import _ensure_execution_budget
+                _ensure_execution_budget(parent)
         child = create_child_invocation(
             parent, model=model_route.resolved_model, tools=tools,
             objective=render_role_brief(node) or node.get('name') or 'Execute this step.',
@@ -263,30 +304,114 @@ class OrchestrationInvocationRunner:
             system_prompt=self._config.system_prompt_base,
             project_path=self._config.project_path,
             thinking_enabled=self._config.thinking_enabled,
-            event_sink=event_sink, abort_check=lambda: self._abort_check() or (
-                callable(node.get('_runtimeAbortCheck')) and node['_runtimeAbortCheck']()))
-        child['_flow_iteration'] = iteration
-        child['_flow_phase'] = role
-        if conversation_worker:
-            self._worker_context.hydrate(
-                child,
-                objective=render_role_brief(node),
-                # The run's authoritative objective, stamped from the accepted
-                # human turn at the command boundary and the GoalRun start.
-                # Re-stamped verbatim every iteration so compaction can never
-                # drift it (Hole A) and the prefix cache stays warm.
-                goal_objective=str(parent.get('_goalObjective') or ''),
-            )
-        if before_dispatch is None:
-            run_child_invocation(child)
-        else:
-            run_child_invocation(child, before_dispatch=before_dispatch)
+            event_sink=event_sink, abort_check=lambda: execution_owner._abort_check() or (
+                callable(runtime_abort) and runtime_abort()))
+        entered = closed = executing = False
+        execution_thread = None
+        preparation_lock = threading.Condition()
+        completion_writer = None
+
+        def prepare_completion(event):
+            nonlocal completion_writer
+            from lib.tasks_pkg.invocation_registration import registered_invocation_id
+            with preparation_lock:
+                if entered or closed or not durable_admission or completion_writer is not None:
+                    raise ValueError('Prepared child cannot reserve another completion binding')
+                if registered_invocation_id(child) is None:
+                    return None
+                from lib.orchestration.invocation_recovery import RegisteredInvocationCompletion
+                completion_writer = RegisteredInvocationCompletion(child)
+                return completion_writer.prepare(event)
+
+        def execute(*, before_dispatch=None, recipient_runner=None, runtime_abort_check=None):
+            nonlocal entered, executing, execution_thread, execution_owner, runtime_abort
+            with preparation_lock:
+                if entered or closed or (durable_admission and not callable(before_dispatch)):
+                    raise ValueError('Prepared graph child is closed, consumed or lacks durable admission')
+                if recipient_runner is not None and recipient_runner is not self:
+                    if (not transfer_context or not isinstance(recipient_runner, OrchestrationInvocationRunner)
+                            or recipient_runner._config.parent_task is not parent
+                            or recipient_runner._config != transfer_config
+                            or recipient_runner.snapshot_worker_context() != original_context):
+                        raise ValueError('Prepared graph child context or execution owner changed')
+                    execution_owner = recipient_runner
+                    runtime_abort = runtime_abort_check
+                entered = executing = True
+                execution_thread = threading.get_ident()
+            try:
+                if before_dispatch is None:
+                    run_child_invocation(child)
+                else:
+                    def admit_registered_child():
+                        from lib.tasks_pkg.invocation_registration import registered_invocation_id
+                        invocation_id = registered_invocation_id(child)
+                        if invocation_id is None:
+                            before_dispatch()
+                        else:
+                            from lib.orchestration.invocation_recovery import RegisteredInvocationCompletion
+                            before_dispatch(invocation_id=invocation_id,
+                                            completion=completion_writer or RegisteredInvocationCompletion(child))
+                    run_child_invocation(child, before_dispatch=admit_registered_child)
+                return execution_owner._complete_invocation(child, conversation_worker=conversation_worker,
+                    role=role, model_route=model_route)
+            finally:
+                with preparation_lock:
+                    executing = False
+                    preparation_lock.notify_all()
+
+        try:
+            child['_flow_iteration'] = iteration
+            child['_flow_phase'] = role
+            if conversation_worker:
+                self._worker_context.hydrate(
+                    child,
+                    objective=render_role_brief(node),
+                    # The run's authoritative objective, stamped from the accepted
+                    # human turn at the command boundary and the GoalRun start.
+                    # Re-stamped verbatim every iteration so compaction can never
+                    # drift it (Hole A) and the prefix cache stays warm.
+                    goal_objective=str(parent.get('_goalObjective') or ''),
+                )
+            yield PreparedOrchestrationInvocation(child, execute, prepare_completion)
+        finally:
+            import sys
+            primary = sys.exception()
+            interrupted = None
+            with preparation_lock:
+                closed = True
+                if executing and execution_thread == threading.get_ident():
+                    raise RuntimeError('Prepared child cannot close its own active scope')
+                if executing:
+                    child['abort_event'].set()
+                while executing:
+                    try:
+                        preparation_lock.wait()
+                    except BaseException as error:
+                        logger.debug('prepare failure handled: %s', type(error).__name__)
+                        interrupted = interrupted or error
+                unused = not entered
+            if interrupted is not None:
+                if primary is None:
+                    raise interrupted
+                primary.add_note('Prepared child close was interrupted; its invocation still joined')
+            if unused:
+                try:
+                    close_unstarted_child_invocation(child, reason='Prepared graph child was not dispatched')
+                except BaseException as error:
+                    if primary is None:
+                        raise
+                    primary.add_note('Unstarted graph child cleanup failed: '+type(error).__name__)
+
+
+    def _complete_invocation(self, child, *, conversation_worker, role, model_route):
+        """Project one ordinary child into this actual graph context owner."""
+        from lib.turn_verdict import derive_task_verdict
+        parent = self._config.parent_task or {}
         verdict = derive_task_verdict(child)
         if conversation_worker and (child.get('_messages_include_current_run')
                                     or verdict.status.value == 'completed'):
             self._worker_context.accept(child)
             if parent.get('convId') and parent.get('_attemptId'):
-                from copy import deepcopy
                 parent['_goalWorkerCheckpoint'] = {
                     'messages': self._worker_context.messages,
                     'task_state': deepcopy(self._worker_context.task_state),
@@ -317,4 +442,4 @@ class OrchestrationInvocationRunner:
 OrchestrationSubAgentRunner = OrchestrationInvocationRunner
 
 __all__ = ['OrchestrationAgentRunnerConfig', 'OrchestrationInvocationRunner',
-           'OrchestrationSubAgentRunner']
+           'OrchestrationSubAgentRunner', 'PreparedOrchestrationInvocation']

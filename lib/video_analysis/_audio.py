@@ -1,8 +1,7 @@
 """lib/video_analysis/_audio.py — audio track → transcript, on the EXISTING STT chain.
 
 Zero new dependencies (owner ruling 2026-08-04): the audio track is extracted
-with ffmpeg (mono 16kHz MP3 ≈ 0.36 MB/min, so even the 15-min P1 cap lands
-~5 MB — well under the 25 MiB transcription byte cap) and handed to
+with ffmpeg (mono 16kHz MP3 ≈ 0.36 MB/min) and handed to
 :func:`lib.transcription.transcribe`, which routes through the configured
 whisper-style / omni-audio slots with its own silence gate, hallucination flag
 and Chinese-variant normalization.

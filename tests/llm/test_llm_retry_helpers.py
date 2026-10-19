@@ -15,7 +15,7 @@ from lib.llm._transport import (
     attach_limit_learned,
     prepare_retryable_wait,
 )
-from lib.llm_errors import AbortedError, RetryableAPIError
+from lib.llm.llm_errors import AbortedError, RetryableAPIError
 
 pytestmark = pytest.mark.unit
 

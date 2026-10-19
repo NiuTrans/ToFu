@@ -23,17 +23,13 @@ from lib.log import get_logger
 logger = get_logger(__name__)
 
 from lib.video_analysis._config import (  # noqa: E402,F401
-    FRAME_CEILING,
     FRAME_JPEG_Q,
     FRAME_LONG_SIDE_PX,
-    TRANSCRIPT_CHAR_CAP,
     VIDEO_EXTS,
     frame_target_for_duration,
     scene_score_threshold,
     scratch_root,
     video_analysis_enabled,
-    video_max_bytes,
-    video_max_duration_s,
     video_scratch_ttl_s,
 )
 from lib.video_analysis._store import (  # noqa: E402,F401
@@ -62,10 +58,10 @@ from lib.video_analysis._pipeline import (  # noqa: E402,F401
 )
 
 __all__ = [
-    'FRAME_CEILING', 'FRAME_JPEG_Q', 'FRAME_LONG_SIDE_PX', 'TRANSCRIPT_CHAR_CAP',
+    'FRAME_JPEG_Q', 'FRAME_LONG_SIDE_PX',
     'VIDEO_EXTS',
     'frame_target_for_duration', 'scene_score_threshold', 'scratch_root',
-    'video_analysis_enabled', 'video_max_bytes', 'video_max_duration_s',
+    'video_analysis_enabled',
     'video_scratch_ttl_s',
     'create_record', 'get_record', 'register_video_asset',
     'resolve_owned_video_asset', 'update_record', 'set_phase',

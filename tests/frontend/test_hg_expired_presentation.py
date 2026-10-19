@@ -75,10 +75,12 @@ global.conversationHasActor = () => false;
 // The composed section graph assigns PaperPreviewPresentation from the TS
 // feature owner; the decorateRound contract under test never reaches it.
 global.createPaperPreviewChanges = () => ({});
+global.createAutomationManagementClient = () => ({});
 global.createConversationTurnRuntime = () => ({
   emptyState() { return {}; }, reducer(s) { return s; },
   readRuntimeState() { return null; },
 });
+global.renderContextProvenanceHtml = () => '';
 global.escapeHtml = (s) => String(s == null ? '' : s);
 global.t = (k) => k;
 

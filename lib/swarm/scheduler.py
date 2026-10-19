@@ -15,7 +15,7 @@ from lib.agent_core.worker_executor import RecoverableAgentExecutor
 
 from lib.log import get_logger
 from lib.swarm.agent import SubAgent
-from lib.llm_errors import AbortedError
+from lib.llm.llm_errors import AbortedError
 from lib.swarm.liveness import ProgressBeacon, thread_progress_sink
 from lib.swarm.protocol import (
     SubAgentResult,
@@ -162,7 +162,7 @@ class StreamingScheduler:
         dedup).  Callers should compare against the original ``specs``
         list to detect dropped duplicates and surface them to the LLM.
         """
-        from lib.swarm.planner import resolve_execution_order
+        from lib.swarm.planner import AgentDependencyCycleError, resolve_execution_order
 
         logger.info('[Scheduler] add_specs called with %d spec(s): %s',
                      len(specs), [(s.id, s.role) for s in specs])
@@ -174,9 +174,9 @@ class StreamingScheduler:
         # Cycle check first (outside lock — pure function on new specs only)
         try:
             resolve_execution_order(specs)
-        except ValueError as e:
+        except AgentDependencyCycleError as e:
             logger.error('[Scheduler] Cycle detected when adding specs: %s', e, exc_info=True)
-            raise ValueError(f'Cannot add specs: {e}') from e
+            raise AgentDependencyCycleError(f'Cannot add specs: {e}') from e
 
         with self._lock:
             # ── Snapshot existing objectives for dedup ──
@@ -195,7 +195,12 @@ class StreamingScheduler:
             deduped_specs = []
             for s in specs:
                 obj_norm = s.objective.strip().lower()
-                if obj_norm in seen_objectives and s.id not in existing_ids:
+                # A retained assignment is a new turn with prior dialogue,
+                # not redundant one-off work merely because its text repeats.
+                # Its server-minted run identity remains strictly unique.
+                if s.retained_agent_id and s.id in existing_ids:
+                    continue
+                if not s.retained_agent_id and obj_norm in seen_objectives and s.id not in existing_ids:
                     logger.debug(
                         '[Scheduler] Skipping duplicate spec %s (%s): '
                         'objective already covered',
@@ -607,6 +612,12 @@ class StreamingScheduler:
             try:
                 agent = self._factory(spec)
 
+                invocation_owned = getattr(agent, 'retry_owner', None) == 'invocation'
+                if invocation_owned:
+                    # Agent retries belong to the common pipeline; recreating
+                    # its carrier here would discard receipts and repeat effects.
+                    effective_retries = 0
+
                 with self._lock:
                     dependency_evidence = self._inject_deps_locked(spec)
                 if dependency_evidence:
@@ -619,13 +630,8 @@ class StreamingScheduler:
                                for m in messages if isinstance(m, dict)):
                         append_injection(messages, 'worker_dependencies', dependency_evidence,
                                          task=getattr(agent, 'context_task', None))
-                # Admission backpressure (rate-limiter semaphore, then the
-                # process-wide execution gate) can legitimately park an agent
-                # longer than the stall window while other waves hold every
-                # permit. Bind the progress sink so those wait loops heartbeat
-                # the beacon — a QUEUED agent is alive and must never read as
-                # silent (production: whole waves were stall-aborted at 900s
-                # with zero LLM rounds while merely waiting for admission).
+                # Bind execution progress to this child's beacon. Accounting
+                # enters immediately; cancellation still fences publication.
                 with thread_progress_sink(self._beacon, spec.id):
                     if self._rate_limiter:
                         result = self._rate_limiter.run_agent(
@@ -640,6 +646,9 @@ class StreamingScheduler:
                         if self._abort_check():
                             raise AbortedError('swarm execution cancelled during start publication')
                         result = agent.run()
+
+                if invocation_owned:
+                    break
 
                 if result.status == SubAgentStatus.COMPLETED.value:
                     result.retry_count = attempt
@@ -713,6 +722,9 @@ class StreamingScheduler:
                     )
                 else:
                     result.retry_count = attempt
+
+            if attempt >= effective_retries:
+                break
 
         # Publish the completion callback BEFORE removing this id from
         # ``_running`` or making the result visible to the driver's queue.

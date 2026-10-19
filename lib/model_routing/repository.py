@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass
-import json
 import secrets
 import threading
 import time
@@ -18,7 +17,6 @@ from .change_notifications import notify_model_routing_changed
 from .credential_envelope import credential_secret_display_hint
 
 from .domain import (
-    MAX_DOCUMENT_BYTES,
     ModelRoutingError,
     empty_document,
     normalize_document,
@@ -92,11 +90,6 @@ class RepositoryPort(Protocol):
         self, boundary: OwnerBoundary, receipt: Mapping[str, Any],
     ) -> dict[str, Any]: ...
 
-
-def _document_size(document: Mapping[str, Any]) -> int:
-    return len(json.dumps(
-        document, ensure_ascii=False, separators=(",", ":"), sort_keys=True,
-    ).encode("utf-8"))
 
 
 def _validated_secret(plaintext: str) -> str:
@@ -173,11 +166,6 @@ class ModelRoutingRepository:
         from .registration import prepare_registration_document
         admitted = prepare_registration_document(document, previous=current.document)
         normalized = normalize_document(admitted, revision=expected_revision + 1)
-        if _document_size(normalized) > MAX_DOCUMENT_BYTES:
-            raise ModelRoutingError(
-                f"model-routing aggregate exceeds {MAX_DOCUMENT_BYTES} bytes",
-                kind="model_routing_resource_budget_exceeded",
-            )
         command_id = (
             f"model_routing.commit:{boundary.tenant_id}:"
             f"{boundary.owner_user_id}:{expected_revision}:{secrets.token_hex(8)}"
@@ -394,11 +382,6 @@ class InMemoryModelRoutingRepository:
             from .registration import prepare_registration_document
             admitted = prepare_registration_document(document, previous=current.document if current else empty_document())
             normalized = normalize_document(admitted, revision=expected_revision + 1)
-            if _document_size(normalized) > MAX_DOCUMENT_BYTES:
-                raise ModelRoutingError(
-                    "model-routing aggregate exceeds its resource budget",
-                    kind="model_routing_resource_budget_exceeded",
-                )
             row = StoredAuthority(
                 boundary, expected_revision + 1, copy.deepcopy(normalized), time.time())
             self._authorities[boundary] = row

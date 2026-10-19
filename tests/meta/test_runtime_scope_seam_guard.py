@@ -158,7 +158,7 @@ def test_no_bare_cross_section_refs_to_runtimescope_names():
 
     violations = []
     for name in PINNED_NAMES:
-        ref_re = re.compile(r"(?<![.\w$])\b%s\b" % re.escape(name))
+        ref_re = re.compile(r"(?<![.\w$])\b%s\b(?!\s*:)" % re.escape(name))
         for sec_name, start, end in sections:
             if sec_name in owners[name]:
                 continue

@@ -1,0 +1,26 @@
+{
+ "$schema":"https://json-schema.org/draft/2020-12/schema",
+ "$id":"tofu.project-scope-change/v1",
+ "description":"Explicit human removal of pinned existing grants. Project Stop also withdraws earlier same-tenant/coordinator finite responsibilities through durable change evidence; later fresh human grants remain separate. Dispatch CAS owns revocation; existing attempt cancellation and passive mailbox owners alone prove Stop and consideration.",
+ "limits":{"changesPerProject":128,"targetsPerChange":128,"maxChangeBytes":262144},
+ "$defs":{
+  "id":{"type":"string","minLength":1,"maxLength":256},
+  "project":{"type":"string","minLength":1,"maxLength":4096},
+  "revision":{"type":"integer","minimum":1},
+  "source":{"type":"object","additionalProperties":false,"required":["conversationId","turnId","projectionRevision"],"properties":{"conversationId":{"$ref":"#/$defs/id"},"turnId":{"$ref":"#/$defs/id"},"projectionRevision":{"$ref":"#/$defs/revision"}}},
+  "target":{"type":"object","additionalProperties":false,"required":["assignmentId","grantRevision"],"properties":{"assignmentId":{"$ref":"#/$defs/id"},"grantRevision":{"$ref":"#/$defs/revision"}}},
+  "request":{"type":"object","additionalProperties":false,"required":["projectPath","coordinatorId","authorizationSource","kind","note","targets"],"properties":{"projectPath":{"$ref":"#/$defs/project"},"coordinatorId":{"$ref":"#/$defs/id"},"authorizationSource":{"$ref":"#/$defs/source"},"kind":{"enum":["shrink","stop_project"]},"note":{"type":"string","maxLength":2048},"targets":{"type":"array","minItems":0,"maxItems":128,"uniqueItems":true,"items":{"$ref":"#/$defs/target"}}}},
+  "execution":{"type":["object","null"],"additionalProperties":false,"required":["turnId","attemptId"],"properties":{"turnId":{"$ref":"#/$defs/id"},"attemptId":{"$ref":"#/$defs/id"}}},
+  "cancellation":{"type":"object","additionalProperties":false,"required":["state","status","error"],"properties":{"state":{"enum":["pending","unbound","signaled","terminal","failed"]},"status":{"type":"string","maxLength":64},"error":{"type":"string","maxLength":256}}},
+  "revocation":{"type":"object","additionalProperties":false,"required":["assignmentId","grantRevision","revokedRevision","recipientId","execution","cancellation"],"properties":{"assignmentId":{"$ref":"#/$defs/id"},"grantRevision":{"$ref":"#/$defs/revision"},"revokedRevision":{"$ref":"#/$defs/revision"},"recipientId":{"$ref":"#/$defs/id"},"execution":{"$ref":"#/$defs/execution"},"cancellation":{"$ref":"#/$defs/cancellation"}}},
+  "notification":{"type":"object","additionalProperties":false,"required":["recipientId","state","messageId","error"],"properties":{"recipientId":{"$ref":"#/$defs/id"},"state":{"enum":["pending","submitted","failed"]},"messageId":{"type":"string","maxLength":256},"error":{"type":"string","maxLength":256}}},
+  "change":{"type":"object","additionalProperties":false,"required":["changeId","request","owner","tenant","subject","createdAt","revocations","notifications"],"properties":{"changeId":{"$ref":"#/$defs/id"},"request":{"$ref":"#/$defs/request"},"owner":{"type":"integer","minimum":1},"tenant":{"type":["string","null"],"minLength":1,"maxLength":256},"subject":{"$ref":"#/$defs/id"},"createdAt":{"type":"number","minimum":0},"revocations":{"type":"array","minItems":0,"maxItems":128,"items":{"$ref":"#/$defs/revocation"}},"notifications":{"type":"array","maxItems":129,"items":{"$ref":"#/$defs/notification"}}}},
+  "extension":{"type":"object","additionalProperties":false,"required":["scopeChanges"],"properties":{"scopeChanges":{"type":"array","maxItems":128,"items":{"$ref":"#/$defs/change"}}}},
+  "messageEvidence":{"type":["object","null"],"additionalProperties":false,"required":["id","revision","state","decision"],"properties":{"id":{"$ref":"#/$defs/id"},"revision":{"$ref":"#/$defs/revision"},"state":{"enum":["submitted","input_confirmed"]},"decision":{"type":["string","null"],"maxLength":64}}},
+  "notificationView":{"type":"object","additionalProperties":false,"required":["recipientId","state","messageId","error","messageEvidence"],"properties":{"recipientId":{"$ref":"#/$defs/id"},"state":{"enum":["pending","submitted","failed"]},"messageId":{"type":"string","maxLength":256},"error":{"type":"string","maxLength":256},"messageEvidence":{"$ref":"#/$defs/messageEvidence"}}},
+  "view":{"type":"object","additionalProperties":false,"required":["changeId","request","createdAt","revocations","notifications","authorityRevoked","stopConfirmed"],"properties":{"changeId":{"$ref":"#/$defs/id"},"request":{"$ref":"#/$defs/request"},"createdAt":{"type":"number","minimum":0},"revocations":{"type":"array","minItems":0,"maxItems":128,"items":{"$ref":"#/$defs/revocation"}},"notifications":{"type":"array","maxItems":129,"items":{"$ref":"#/$defs/notificationView"}},"authorityRevoked":{"const":true},"stopConfirmed":{"type":"boolean"}}},
+  "listQuery":{"type":"object","additionalProperties":false,"required":["path"],"properties":{"path":{"$ref":"#/$defs/project"},"commandId":{"$ref":"#/$defs/id"}}},
+  "retry":{"type":"object","additionalProperties":false,"required":["projectPath","changeId"],"properties":{"projectPath":{"$ref":"#/$defs/project"},"changeId":{"$ref":"#/$defs/id"}}}
+ },
+ "$ref":"#/$defs/request"
+}

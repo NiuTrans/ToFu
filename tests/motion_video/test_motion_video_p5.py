@@ -333,7 +333,7 @@ def test_author_dispatch_uses_abort_and_production_retry_budgets(
 
 
 def test_abort_during_author_dispatch_is_not_retried(monkeypatch, tmp_path):
-    from lib.llm_errors import AbortedError
+    from lib.llm.llm_errors import AbortedError
 
     abort_event = threading.Event()
     calls = []

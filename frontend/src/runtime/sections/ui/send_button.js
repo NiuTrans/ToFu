@@ -90,6 +90,8 @@ function updateSendButton() {
   };
   const state = updateComposerSendControls({
     document,
+    sendBlocked: isBootSendBlocked(),
+    blockedLabel: t('boot.sendPaused'),
     translating,
     startupConnecting,
     turnBusy,

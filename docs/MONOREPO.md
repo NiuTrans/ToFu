@@ -5,6 +5,111 @@ first-party Python and Rust artifacts. Source location, installable package, and
 process are separate boundaries: sharing one Git repository does not make an
 optional capability part of the core wheel or force it into another process.
 
+## Rust migration quality
+
+**Problem:** translating Python line for line can preserve allocation, copying,
+boundary and process overhead while adding installation cost or losing failure
+semantics. Rust source coverage alone does not establish product improvement.
+**Decision:** Rust is the preferred implementation direction. Advance complete
+vertical paths through the existing domain owners, prioritizing measured hot
+paths, removal of runtime dependencies and lifecycle weaknesses. Use ownership,
+borrowing, compact typed state, bounded buffers and joined concurrency where
+they remove actual costs. Python supplies behavioral oracles during cutover;
+avoid adding a permanent second implementation or state authority.
+
+Every promoted path preserves authorization, cancellation, error reporting,
+durability and recovery, with differential and fault tests for its boundary.
+Compare identical work in the old and new paths, including small and large
+inputs, fragmented streams, concurrency and failure where relevant. Record
+latency distributions, CPU, allocation/residency and startup or installation
+costs affected by the change. Installation claims require a verified built
+artifact and its real runtime dependencies, not a successful source build alone.
+Component measurements justify component decisions; default application cutover
+requires its own end-to-end evidence. Retain adverse results and resolve them
+before promotion rather than hiding them in an aggregate throughput number.
+Unmeasured dimensions remain explicit gaps.
+
+**Alternatives rejected:** a wholesale rewrite delays useful verified delivery;
+permanent Python/Rust mirroring duplicates costs and authority; selecting Rust
+solely by language or using a faster microbenchmark to waive application,
+installation or robustness checks can ship a regression. Accelerate migration
+by landing independently verified slices and retiring redundant old paths.
+
+### SSE framing comparison
+
+**Problem:** fewer allocations and faster ordinary text can hide slower fragmented
+or Unicode delivery. **Decision:** the shared native SSE framer retains its
+existing implementation. `packages/tofu-runtime/tests/sse.rs` verifies exact
+payload ownership, empty multiline fields, byte budgets and resynchronization;
+512 malformed/oversized fixtures compare eight transport chunkings with bytewise
+delivery. The retained `benchmarks/sse_framing.rs` probe validates every event
+and measures seven workloads, including one-byte and Unicode fragments.
+
+Build locked dependencies with `cargo test --locked -p tofu-runtime --test sse`,
+then run `python3 benchmarks/sse_framing_measure.py --baseline REV
+--dependency-dir TARGET/debug/deps --output REPORT.json --rustc RUSTC`.
+Use the compiler that built the dependency directory. The collector freezes
+source hashes, pins one available CPU and alternates 12 fresh-process pairs per
+case. Each process emits seven batch clocks; allocation counts and requested
+peak live bytes come from separate instrumented binaries. These are component
+diagnostics, not whole-process RSS, installation or complete-task acceptance.
+Compiler source paths are remapped identically, binary hashes are retained, and
+identical-source comparisons refuse different binaries. This control exposed
+large timing differences in the initial unnormalized-path probe; those earlier
+clocks are retained as unqualified observations. The corrected same-source
+control has identical binaries and case median ratios between 0.994 and 1.011.
+`--candidate-framer PATH` compares an experiment without installing it.
+
+**Alternative rejected:** bulk valid-text scanning and buffer moves improve
+ordinary and full-chunk Unicode cases by about 3–5 times, but the corrected
+comparison still slows one-byte fragments by 11% and fragmented Unicode by 4%.
+The candidate is not promoted despite lower allocations and peak live bytes.
+The frozen sources, candidate patches and raw paired observations
+retain those adverse cases alongside improvements. Better future candidates
+must explain the tradeoffs across the full matrix before changing this owner.
+
+### Native provider completion
+
+**Problem:** the common native Chat/Anthropic/Responses completion path lowercased
+every response before checking whether it could be a short gateway notice, then
+`json!` serialized borrowed owned strings and copied the completed body and tool
+fields. **Decision:** check finish/tool eligibility and a conservative UTF-8 byte
+bound before the exact generated character limit and Unicode normalization.
+Transfer completed strings into JSON values, releasing stream growth slack at
+that boundary. Keep the original text, tool metadata, ordering, classification
+precedence and empty-argument defaults. The generated Python contract remains
+the classification authority. No pool, queue, dependency or durable format changes.
+
+`tests/provider.rs` verifies scalar boundaries, cancellation/finish/tool precedence,
+large arguments and compact retained capacity after multiple deltas; neighboring
+Anthropic/Responses/HTTP tests exercise the same completion owner. Verify default
+and `--no-default-features` provider tests because JSON map ordering differs.
+The retained `provider_finish_measure` Cargo example measures real `ChatStream::finish`
+over twelve exact-output fixtures, including fragmented growth and long tool arguments.
+Build with `cargo build --locked --release -p tofu-runtime --example
+provider_finish_measure`; run `TARGET/release/examples/provider_finish_measure
+CASE OPERATIONS`. Feed/setup and validation are outside its seven batch clocks.
+Build allocation evidence separately with `cargo rustc --locked --release -p
+tofu-runtime --example provider_finish_measure -- --cfg allocation_counts`;
+instrumented clocks are suppressed. Compare revisions from the same build path
+with the same locked dependencies and retain binary/source hashes and raw pairs.
+These are completion-component clocks and requested allocation bytes, not
+whole-application speed, RSS/PSS or installation qualification.
+
+The `rust_provider_completion_20261015.json` retains
+12 fresh-process pairs per fixture and the rejected placeholder-insertion variant.
+64 KiB ASCII completion measures 11.23 to 0.34 microseconds and 131,456 to 280
+requested allocation bytes; fragmented text measures 24.23 to 2.07 microseconds.
+Short/gateway/Unicode-boundary median ratios are 0.968/0.877/0.959. Fragmented tool
+arguments take 0.895 times the prior duration but request 50 more allocator bytes
+(0.038%) while calls fall from 25 to 22; retained string capacity is unchanged.
+This small allocation tradeoff is explicit; the evidence does not assert zero
+copies when releasing growth slack requires allocator relocation.
+
+**Alternatives rejected:** ASCII-only folding changes Unicode behavior; merely
+moving the lowercase operation still copies full results; transferring buffers
+without releasing growth slack retains more memory after fragmented responses.
+
 ## Native runtime artifact boundary
 
 Problem: the Rust runtime was executable only from build/checkouts. Decision:
@@ -50,6 +155,26 @@ legacy hints set to 1 rendezvoused in 1.66 ms, retained sorted results and all 3
 resource receipts, then left zero workers. This measures controlled scheduling,
 not external service throughput.
 
+Shared optional library admission — Problem: token counting and Flow control
+use the same release member but independently inspected the archive and copied
+its library. Decision: `NativeArchiveImage` lazily admits each selected library
+member once, retaining only its declared ABI names and sealed descriptor. Each
+capability owns its descriptor, ABI validation, call leases and unload; host
+shutdown joins acquisition and releases all owners. Missing ABI declarations
+still refuse, and independent installed-library pins keep their existing path.
+Alternatives rejected: an eager all-member cache taxes unused capabilities;
+a process-global cache loses application lifetime; sharing a bound ABI object
+would entangle independent call/graph teardown. The executable still has its
+own sealed image and complete self checks. Measurement: 400 fresh processes,
+100 alternating pairs per loading order, execute identical real token/Flow work.
+Component CPU means fall 27.0–27.6%, cold wall means 15.9–18.1%, and full-process
+CPU means 21.8–22.3%. Unique sealed library backing decreases from 12,279,936
+to 6,139,968 bytes; parent RSS high water decreases 1.7–1.8%. These byte sizes
+are not physical peak PSS, and the component result admits no system defaults.
+See raw identities, ratios and retained limitations.
+Transient SDK history completes on its joined worker before resource retirement;
+see [SDK project retirement](DEVELOPER_RUNTIME.md) for the lifetime boundary.
+
 ## Owned artifacts
 
 | Source owner | Distribution | Runtime role | Version authority |
@@ -80,6 +205,14 @@ The root Cargo workspace owns `packages/tofu-runtime/` and the native
 `tofu-native` entry point. `cargo test --workspace` verifies this new runtime
 boundary. Existing Tofu-DB and experimental native crates remain explicitly
 excluded so their manifests, lockfiles and certification sources stay separate.
+Problem: Cargo can skip an excluding workspace and discover an older cached
+ancestor during restart preparation. Decision: Tofu-DB declares its own empty
+`[workspace]`, retaining its lockfile and release profile in both the checkout
+and source snapshot. Its sibling dependencies retain their own workspace
+inheritance. Alternatives rejected: deleting ancestor manifests can affect
+unowned files; rewriting only the staged manifest breaks source attestation.
+Real Cargo workspace-discovery regressions cover clean and legacy cache layouts
+in `tests/server/test_native_engine_root_inputs.py`.
 The runtime foundation is a development artifact; its [guide](../packages/tofu-runtime/README.md)
 names the implemented physical executor and remaining domain integrations.
 
@@ -125,6 +258,54 @@ pre-authority.  Its focused gate is
 build artifacts and application compatibility gates in the same change.
 
 ## Releases
+
+
+Release identity — Problem: SDK runtime constants and lockfile root metadata can
+lag their package versions, producing misleading user agents and CLI diagnostics.
+Decision: release preparation aligns root `VERSION`, application metadata, both
+SDK package versions, runtime version constants and lockfiles before exporting an
+explicit immutable commit. SDK tests exercise runtime identity against package
+metadata. Alternatives rejected: changing only tags or package metadata leaves
+installed clients reporting another release; `export.py --bump` alone updates
+only `VERSION` and cannot prepare a complete release.
+
+Shared-export privacy — Problem: the maintainer export package contains private
+sanitization markers, including personal credential patterns. Decision: neither
+internal nor public distributions contain `export.py` or `export_pkg/`; cleanup
+also removes a stale package from a previous destination before copying and
+refuses the export if mandatory removal fails. Personal
+backups retain the source toolchain. Company bundles and explicitly shared
+internal configuration retain their separate internal-tier policy. Alternatives
+rejected: preserving the package for colleagues also distributes personal
+markers; public-only exclusion leaves the internal sharing boundary unsafe.
+
+
+Public build/test closure — the restored helper set is explicit and includes
+transitive generator and receipt-assessment imports required by shipped tests.
+Each added helper passes the public secret scan.
+ Internal-provider acceptance
+tests stay with their excluded adapters; portable measurement and qualification
+helpers remain available to the public tests that exercise them.
+ The privacy drift gate also
+runs in linked Git worktrees (`.git` is a pointer file); a failed Git inventory
+read is an error, not an empty clean snapshot. Broadly publishing `scripts/` or
+silently skipping worktree verification would defeat the private/public boundary.
+Desktop controlled-computer assets use **Tofu Remote** (`TofuRemote-*`);
+`tofu-agent` retains its AI runtime SDK identity. OS registration, configuration
+and pairing identifiers stay stable through upgrades. Native release jobs cover
+Windows x64, macOS x64/ARM64 and Linux x64/ARM64, with frozen startup checks.
+Python wheelhouses use committed `uv.lock` constraints and empty-environment
+import/PDF/WASM verification. TofuDB daemon archives are built from locked Cargo
+inputs and smoke-tested natively (musl-static on Linux). Archives and SHA-256
+sidecars join the required-asset gate and signed release checksum manifest;
+a source installer consumes verified caches/bundles before local preparation.
+
+Problem: controlled devices and AI runtimes shared a product name, while user
+installs repeated artifact preparation. Decision: separate names and prepare
+verified artifacts once per release/platform. Alternatives: changing only labels
+leaves ambiguous filenames; caching inside fresh environments loses reuse;
+skipping native smoke would certify the builder's environment rather than the
+shipped dependency closure. Platform certification remains a real CI result.
 
 Frozen desktop contracts — Problem: a partial schema list let installers build
 but fail at startup when a runtime loader opened an omitted authority. Decision:
@@ -247,3 +428,5 @@ endpoint. Controlled measurement: 32 read workers rendezvoused and joined in
 owned query completions and closes all 31 handles. This measures scheduling,
 not data-provider throughput. Verify plugin demand/identity/transaction tests,
 generator drift and installed-wheel execution.
+
+<!-- Evidence note: former docs/evidence/ artifact snapshots cited here were retired from the tree; cited JSON artifacts remain recoverable from git history. -->

@@ -44,7 +44,7 @@ _VENDOR_TRANSIENT_ZH = '{"error":{"message":"请求失败,请稍后再尝试"},'
 class TestTransient4xxReclassification:
 
     def test_transient_400_becomes_gateway_ratelimit(self):
-        from lib.llm_errors import RateLimitError, _classify_http_error
+        from lib.llm.llm_errors import RateLimitError, _classify_http_error
         with pytest.raises(RateLimitError) as ei:
             _classify_http_error(400, _VENDOR_TRANSIENT_ZH, 'm', '[t]')
         assert ei.value.is_gateway is True
@@ -53,7 +53,7 @@ class TestTransient4xxReclassification:
     def test_transient_403_is_not_auth(self):
         """The incident shape: vendor outage wrapped as 403 — must NOT be
         treated as PermissionError_ (pair exclusion as auth failure)."""
-        from lib.llm_errors import PermissionError_, RateLimitError, _classify_http_error
+        from lib.llm.llm_errors import PermissionError_, RateLimitError, _classify_http_error
         try:
             _classify_http_error(403, _VENDOR_TRANSIENT_ZH, 'm', '[t]')
         except PermissionError_:
@@ -65,7 +65,7 @@ class TestTransient4xxReclassification:
                                         'temporarily unavailable',
                                         'overloaded'])
     def test_transient_english_phrases(self, phrase):
-        from lib.llm_errors import RateLimitError, _classify_http_error
+        from lib.llm.llm_errors import RateLimitError, _classify_http_error
         with pytest.raises(RateLimitError) as ei:
             _classify_http_error(400, f'{{"error":{{"message":"{phrase}"}}}}', 'm', '[t]')
         assert ei.value.is_gateway is True
@@ -76,7 +76,7 @@ class TestDeterministic400Boundary:
 
     def test_signature_400_is_bad_request(self):
         """The epic's original poison: deterministic vendor rejection."""
-        from lib.llm_errors import BadRequestError, RateLimitError, _classify_http_error
+        from lib.llm.llm_errors import BadRequestError, RateLimitError, _classify_http_error
         try:
             _classify_http_error(
                 400, '{"error":{"type":"invalid_request_error",'
@@ -91,13 +91,13 @@ class TestDeterministic400Boundary:
     def test_bare_try_again_does_not_match_transient(self):
         """Pattern conservatism: 'try again' WITHOUT 'later' is not proof of
         a transient — deterministic invalid bodies stay BadRequestError."""
-        from lib.llm_errors import BadRequestError, _classify_http_error
+        from lib.llm.llm_errors import BadRequestError, _classify_http_error
         with pytest.raises(BadRequestError):
             _classify_http_error(400, 'invalid request shape, please try again',
                                  'm', '[t]')
 
     def test_specific_400_shapes_unchanged(self):
-        from lib.llm_errors import (InvalidImageError, PromptTooLongError,
+        from lib.llm.llm_errors import (InvalidImageError, PromptTooLongError,
                                     StreamOnlyError, _classify_http_error)
         with pytest.raises(PromptTooLongError):
             _classify_http_error(400, 'prompt is too long', 'm', '[t]')
@@ -107,7 +107,7 @@ class TestDeterministic400Boundary:
             _classify_http_error(400, 'this model only support stream mode', 'm', '[t]')
 
     def test_unknown_status_still_generic(self):
-        from lib.llm_errors import BadRequestError, _classify_http_error
+        from lib.llm.llm_errors import BadRequestError, _classify_http_error
         with pytest.raises(Exception) as ei:
             _classify_http_error(418, 'teapot', 'm', '[t]')
         assert not isinstance(ei.value, BadRequestError)
@@ -117,14 +117,14 @@ class TestDeterministic400Boundary:
 class TestStatusCodeStamps:
 
     def test_429_stamps_429(self):
-        from lib.llm_errors import RateLimitError, _classify_http_error
+        from lib.llm.llm_errors import RateLimitError, _classify_http_error
         with pytest.raises(RateLimitError) as ei:
             _classify_http_error(429, 'rate limit exceeded', 'm', '[t]')
         assert ei.value.status_code == 429
         assert ei.value.is_gateway is False
 
     def test_quota_429_still_quota(self):
-        from lib.llm_errors import RateLimitError, _classify_http_error
+        from lib.llm.llm_errors import RateLimitError, _classify_http_error
         with pytest.raises(RateLimitError) as ei:
             _classify_http_error(429, 'insufficient_quota', 'm', '[t]')
         assert ei.value.is_quota is True
@@ -132,7 +132,7 @@ class TestStatusCodeStamps:
 
     @pytest.mark.parametrize('code', [502, 503, 504])
     def test_gateway_throttle_stamps_real_code(self, code):
-        from lib.llm_errors import RateLimitError, _classify_http_error
+        from lib.llm.llm_errors import RateLimitError, _classify_http_error
         with pytest.raises(RateLimitError) as ei:
             _classify_http_error(code, 'upstream down', 'm', '[t]')
         assert ei.value.is_gateway is True

@@ -207,6 +207,24 @@ fn main() {
             );
         }
     }
+    let manifest: toml::Table = fs::read_to_string(root.join("Cargo.toml"))
+        .expect("read source manifest").parse().expect("parse source manifest");
+    if let Some(values) = manifest.get("package").and_then(|v| v.get("metadata"))
+        .and_then(|v| v.get("tofu")).and_then(|v| v.get("external-inputs")) {
+        let project = root.parent().unwrap().parent().unwrap().canonicalize().unwrap();
+        for value in values.as_array().expect("external input path list") {
+            let name = value.as_str().expect("external input relative path");
+            let path = Path::new(name);
+            assert!(path.components().all(|c| matches!(c, Component::Normal(_)))
+                && (name.starts_with("contracts/") || name == "VERSION"),
+                "external input escapes declared source namespace");
+            let file = project.join(path);
+            assert_eq!(file.canonicalize().expect("resolve external input"), file,
+                "external input uses a symlink");
+            assert!(entries.insert(format!("@external/{name}"), file).is_none(),
+                "external input paths collide");
+        }
+    }
     let mut digest = Sha256::new();
     digest.update(b"tofu-db-source-v2\0");
     for (key, path) in entries {

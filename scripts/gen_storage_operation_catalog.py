@@ -19,9 +19,9 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 if str(REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_ROOT))
 
-from lib.storage_sidecar.operation_domains import REGISTRY_VERSION  # noqa: E402
-from lib.storage_sidecar.operation_registry import _DOMAIN_MODULES  # noqa: E402
-from lib.storage_sidecar.schema import SCHEMA_VERSION  # noqa: E402
+from lib.storage_authority_sql.operation_domains import REGISTRY_VERSION  # noqa: E402
+from lib.storage_authority_sql.operation_registry import _DOMAIN_MODULES  # noqa: E402
+from lib.storage_authority_sql.schema import SCHEMA_VERSION  # noqa: E402
 
 
 JSON_OUTPUT = REPOSITORY_ROOT / "contracts" / "storage_operations_v1.json"
@@ -38,7 +38,7 @@ RUST_OUTPUT = (
 def _document() -> dict:
     from importlib import import_module
 
-    from lib.task_event_contract import (
+    from lib.task_replay.task_event_contract import (
         EVENT_READ_GUARD_CONTRACT, EVENT_READ_GUARD_SCOPED_CONTRACT,
         EVENT_READ_GUARD_MAX_TYPES,
     )
@@ -46,7 +46,7 @@ def _document() -> dict:
     operations: list[dict] = []
     for domain in _DOMAIN_MODULES:
         module = import_module(
-            f"lib.storage_sidecar.operation_domains.{domain}"
+            f"lib.storage_authority_sql.operation_domains.{domain}"
         )
         for name, spec in module.OPERATIONS.items():
             operations.append({

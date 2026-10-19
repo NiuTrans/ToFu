@@ -71,7 +71,7 @@ _DAEMON_ENV_PASSTHROUGH = frozenset({
     'TOFU_DB_OVERLAY_BUDGET_BYTES',
     'TOFU_DB_OVERLAY_WAL_WATERMARK_BYTES',
     # Explicit WAL durability selection, validated by native_launch and
-    # converted to serve arguments (lib/storage_sidecar/native_launch.py).
+    # converted to serve arguments (lib/storage_authority_sql/native_launch.py).
     # These were registered there with full validation but never added to
     # this passthrough, so the boot gate rejected them as "removed
     # deployment configuration" — the knobs only worked on paths that
@@ -658,10 +658,6 @@ def _personal_resource_defaults(
             'TOFU_PDF_PROCESSES']
         classic_pdf_max_pages = _RESOURCE_FALLBACKS['personal'][
             'TOFU_PDF_MAX_PAGES']
-        classic_pdf_max_text_mib = _RESOURCE_FALLBACKS['personal'][
-            'TOFU_PDF_MAX_TEXT_MIB']
-        classic_pdf_timeout = _RESOURCE_FALLBACKS['personal'][
-            'TOFU_PDF_PARSE_TIMEOUT']
     else:
         classic_pdf_processes = max(1, min(
             task_parallelism, int(available_mb or 256) // 128))
@@ -677,10 +673,6 @@ def _personal_resource_defaults(
                 classic_pdf_max_pages,
                 max(256, available_mb // 8),
             )
-        classic_pdf_max_text_mib = max(
-            2, min(8, (classic_pdf_max_pages + 127) // 128))
-        classic_pdf_timeout = max(
-            300, min(1800, classic_pdf_max_pages * 2))
     # Swarm agents outlive the root turn and historically created one private
     # thread/API pool per conversation. Owner directive 2026-09-04: spawned
     # agents must start immediately, never queue behind a half-envelope cap.
@@ -962,9 +954,6 @@ def _personal_resource_defaults(
             max(64, min(512, int(disk_free_mb * 0.005)))
             if disk_free_mb is not None else 256),
         'TOFU_PAPER_BUILD_CACHE_RECORDS': max(16, min(32, task_parallelism * 4)),
-        'TOFU_PAPER_BUILD_VALIDATION_MAX_MIB': max(128, min(256, int(available_mb or 2048) // 16)),
-        'TOFU_PAPER_BUILD_COMPILE_MAX_MIB': max(256, min(512,
-            int(capacity_mb or 4096) // 16, int(available_mb if available_mb is not None else 2048) // 8)),
         'TOFU_TRANSLATE_CACHE_MAX_MIB': translate_cache_max_mib,
         # Optional translation enrichment must not turn a provider-wide
         # capacity incident into hundreds of paid transport attempts. Scale
@@ -1001,8 +990,6 @@ def _personal_resource_defaults(
             1, min(2, task_parallelism)),
         'TOFU_PDF_PROCESSES': classic_pdf_processes,
         'TOFU_PDF_MAX_PAGES': classic_pdf_max_pages,
-        'TOFU_PDF_MAX_TEXT_MIB': classic_pdf_max_text_mib,
-        'TOFU_PDF_PARSE_TIMEOUT': classic_pdf_timeout,
         'TOFU_PDF_WORKER_IDLE_SECONDS': 60,
         # Whole-PDF carriers start on demand; this value controls idle reuse. Page-level calls
         # currently retain their separate parser policy.
@@ -1035,17 +1022,9 @@ def _personal_resource_defaults(
         'TOFU_SWARM_MAX_RETRIES': 1,
         'TOFU_SWARM_SESSION_CAPACITY': swarm_session_capacity,
         'TOFU_CONTROL_RPC_WORKERS': control_rpc_workers,
-        'TOFU_EVOLUTION_TERMINAL_QUEUE_CAPACITY': max(4, min(16, io_parallelism * 2)),
         'TOFU_PROJECT_REFRESH_QUEUE_CAPACITY': max(
             16, min(128, io_parallelism * 8)),
         'TOFU_PROJECT_REFRESH_IDLE_SECONDS': project_refresh_idle_seconds,
-        # Inline exact pre-images incur UTF-8, base64, JSON and journal copies.
-        # Reserve at most 1/1024 of capacity, 1/256 of launch headroom and
-        # 1/1024 of free volume for one file, capped by the intent contract.
-        'TOFU_PROJECT_WRITE_RECOVERY_MAX_MIB': (
-            max(1, min(1024, capacity_mb // 1024, available_mb // 256,
-                       disk_free_mb // 1024 if disk_free_mb is not None else 1024))
-            if capacity_known and available_mb is not None else 4),
         'TOFU_PROJECT_UNDO_CACHE_CAPACITY': max(
             32, min(256, io_parallelism * 16)),
         'TOFU_COMMAND_SNAPSHOT_MAX_ENTRIES': max(

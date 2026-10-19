@@ -33,6 +33,7 @@ from .constants import (
     FRAMEWORK_VERSION,
     HARBOR_COMMIT,
     ISOLATED_BACKENDS,
+    PROJECT_ROOT,
 )
 from .process import (
     capture_resource_environment, recorded_resource_environment,
@@ -91,6 +92,7 @@ class HarborRunSpec:
     tofu_kimi: TofuKimiCandidateSettings | None = None
     opencode: OpenCodeBaselineSettings | None = None
     release_run_root: Path | None = None
+    source_receipt: Path | None = None
 
     @property
     def definition(self) -> BenchmarkDefinition:
@@ -106,6 +108,7 @@ class HarborRunSpec:
     def validate(self) -> None:
 
         validate_output_path(self.output_root)
+        self.definition.validate_backend(self.backend)
         if not self.agent.strip():
             raise ValueError("agent must not be empty")
         if not self.models or any(not model.strip() for model in self.models):
@@ -223,10 +226,10 @@ class HarborRunSpec:
                 raise ValueError(
                     "Tofu Kimi agent version differs from frozen settings")
             if self.reasoning_effort not in {
-                "low", "medium", "high", "xhigh", "max", "ultra",
+                "default", "low", "medium", "high", "xhigh", "max", "ultra",
             }:
                 raise ValueError(
-                    "Tofu Kimi candidate requires an explicit thinking setting")
+                    "Tofu Kimi candidate requires default or an explicit thinking setting")
             if not 1 <= self.timeout_multiplier <= 64:
                 raise ValueError(
                     "Tofu Kimi timeout_multiplier must be between 1 and 64")
@@ -447,8 +450,10 @@ def build_job_config(
 
 def _child_environment_without(names: tuple[str, ...]) -> dict[str, str]:
     from evaluations.paths import runtime_environment
-    from .constants import PROJECT_ROOT
-    environment = {**os.environ, **runtime_environment(PROJECT_ROOT / ".eval-runs" / ".metadata")}
+    from rootless_vm.host_paths import private_temporary_root
+    # Metadata probes follow the configured private scratch owner too; a
+    # source-only worktree need not itself be on the writable evaluation volume.
+    environment = {**os.environ, **runtime_environment(private_temporary_root() / "evaluation-metadata")}
     for name in names:
         environment.pop(name, None)
     return environment
@@ -523,8 +528,23 @@ def _executable_identity(executable: str) -> tuple[str, str]:
     return str(path), digest.hexdigest()
 
 
+def _resume_source_matches(manifest: dict, *, exclusions: tuple[str, ...]) -> bool:
+    receipt = manifest.get("source_receipt")
+    if receipt is None:
+        return manifest.get("source_identity") is None \
+            and _git_dirty(unset_env=exclusions) is False \
+            and _git_revision(unset_env=exclusions) == manifest.get("project_revision")
+    from evaluations.source_identity import verify_source_receipt
+    identity = verify_source_receipt(PROJECT_ROOT, Path(receipt),
+                                     expected_revision=manifest.get("project_revision"))
+    return identity == manifest.get("source_identity")
+
+
 def start_harbor_run(spec: HarborRunSpec, *, dry_run: bool = False) -> tuple[int, Path]:
     spec.validate()
+    if not dry_run:
+        from .capabilities import require_harbor_capabilities
+        require_harbor_capabilities(spec.definition)
     credential_exclusions = (
         spec.codex_kimi.child_environment_exclusions
         if spec.codex_kimi is not None else (
@@ -545,14 +565,19 @@ def start_harbor_run(spec: HarborRunSpec, *, dry_run: bool = False) -> tuple[int
         spec.tofu_kimi.validate()
         if not dry_run:
             spec.tofu_kimi.credentials_from_environment()
-    project_revision = _git_revision(unset_env=credential_exclusions)
     if spec.opencode is not None:
         spec.opencode.validate(verify_binary=True)
         if not dry_run:
             # Same launcher-owned secret discipline as the Codex Kimi proxy arm.
             spec.opencode.credentials_from_environment()
-    project_revision = _git_revision(unset_env=credential_exclusions)
-    project_dirty = _git_dirty(unset_env=credential_exclusions)
+    source_identity = None
+    if spec.source_receipt is not None:
+        from evaluations.source_identity import verify_source_receipt
+        source_identity = verify_source_receipt(PROJECT_ROOT, spec.source_receipt)
+        project_revision, project_dirty = source_identity["revision"], False
+    else:
+        project_revision = _git_revision(unset_env=credential_exclusions)
+        project_dirty = _git_dirty(unset_env=credential_exclusions)
     if (spec.codex_kimi is not None or spec.tofu_kimi is not None
             or spec.opencode is not None) \
             and not dry_run and (
@@ -616,6 +641,7 @@ def start_harbor_run(spec: HarborRunSpec, *, dry_run: bool = False) -> tuple[int
         full_dataset = not spec.task_ids and spec.limit is None
         leaderboard_trial_shape = (
             full_dataset
+            and definition.official_min_attempts is not None
             and attempts >= definition.official_min_attempts
             and spec.timeout_multiplier == 1.0
             and bool(spec.reasoning_effort)
@@ -675,6 +701,8 @@ def start_harbor_run(spec: HarborRunSpec, *, dry_run: bool = False) -> tuple[int
             "harbor_source_commit": HARBOR_COMMIT,
             "project_revision": project_revision,
             "project_dirty": project_dirty,
+            "source_receipt": str(spec.source_receipt.resolve()) if spec.source_receipt is not None else None,
+            "source_identity": source_identity,
             "job_config": str(config_path),
         }
         manifest["harness_identity"] = {
@@ -1033,7 +1061,13 @@ def _assert_infrastructure_retry_tasks_archived(
             existing = json.loads(result_path.read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError):
             continue
-        if str(existing.get("task_name") or "") in allowed:
+        from .infrastructure_retry import _numeric_reward
+        # A repeated-task job keeps its scored sibling attempts. Harbor
+        # reconciles their config multiset and schedules only the missing
+        # occurrences, so archiving successful/failed graded siblings would
+        # erase evidence and bias the repeated-attempt estimator.
+        if (str(existing.get("task_name") or "") in allowed
+                and _numeric_reward(existing) is None):
             raise ValueError(
                 "infrastructure retry task was not archived before resume: "
                 f"{existing.get('task_name')!r}")
@@ -1142,9 +1176,7 @@ def resume_harbor_run(
             else tofu_runtime.credential_environment_names
         )
         if manifest.get("project_dirty") is not False \
-                or _git_dirty(unset_env=exclusions) is not False \
-                or _git_revision(unset_env=exclusions) \
-                != manifest.get("project_revision"):
+                or not _resume_source_matches(manifest, exclusions=exclusions):
             raise ValueError(
                 "formal Kimi resume requires the same clean runner revision"
             )
@@ -1165,9 +1197,7 @@ def resume_harbor_run(
             )
         )
         if manifest.get("project_dirty") is not False \
-                or _git_dirty(unset_env=exclusions) is not False \
-                or _git_revision(unset_env=exclusions) \
-                != manifest.get("project_revision"):
+                or not _resume_source_matches(manifest, exclusions=exclusions):
             raise ValueError(
                 "formal baseline resume requires the same clean runner revision"
             )

@@ -28,7 +28,7 @@ logger = get_logger(__name__)
 
 
 # The serving-loop runtime already sweeps finished tasks on its periodic
-# reaper (lib/server_loop_runtime.py). These per-request calls are only a
+# reaper (lib/server/server_loop_runtime.py). These per-request calls are only a
 # best-effort side-effect sweep, so throttle them so the hot start path is
 # usually free. ``cleanup_old_tasks`` is resolved through THIS module's global
 # (not a captured local) so tests that monkeypatch
@@ -188,10 +188,15 @@ def start_conversation_attempt_executor(
     from lib.tasks_pkg.plan_mode import normalize_interaction_mode_runtime_config
     config = normalize_interaction_mode_runtime_config(config)
 
-    _throttled_cleanup_old_tasks()
+    timing_identity = {
+        'conversation_id': conv_id, 'turn_id': config.get('_turnId'),
+        'attempt_id': config.get('_attemptId'), 'user_id': owner_user_id,
+    }
+    with measure_task_startup('cleanup', identity=timing_identity):
+        _throttled_cleanup_old_tasks()
 
     from lib.turn_lifecycle import build_api_messages
-    with measure_task_startup('context'):
+    with measure_task_startup('context', identity=timing_identity):
         api_messages = build_api_messages(
             conv_id,
             config.get('_turnId') or '',
@@ -203,7 +208,7 @@ def start_conversation_attempt_executor(
     if not api_messages:
         return None, 'empty_model_context'
 
-    with measure_task_startup('registration'):
+    with measure_task_startup('registration', identity=timing_identity):
         task = create_task(
             conv_id, api_messages, config,
             user_id=owner_user_id,principal=principal,
@@ -212,12 +217,18 @@ def start_conversation_attempt_executor(
     task_id = task['id']
     _cfg_model = config.get('model', '?')
 
+    timing_identity['task_id'] = task_id
+
     # Turn-native dispatch is a three-stage handshake: register the in-memory
     # task, durably bind that exact id to the accepted attempt, only then
     # launch billable work. Preparation and binding share one rollback fence:
     # no exception can strand an unbound ``pending`` registry carrier.
     try:
-        with measure_task_startup('preparation'):
+        with measure_task_startup('preparation', identity=timing_identity):
+
+            if '_projectDispatchAdmission' in config:
+                from lib.project_dispatch.admission import bind_account
+                bind_account(task)
             config, _flow_entry, _flow_selected = (
                 _prepare_unbound_task_dispatch(
                     task,
@@ -227,9 +238,15 @@ def start_conversation_attempt_executor(
                     abort_after_ts,
                 )
             )
+            from quart import current_app,has_app_context
+            if has_app_context() and current_app.extensions.get('tofu_native_application') is not None:
+                from lib.tasks_pkg.native_application import bind_application_native_task
+                bind_application_native_task(task,flow=_flow_entry is not None)
         if on_task_registered is not None:
-            with measure_task_startup('binding'):
+            with measure_task_startup('binding', identity=timing_identity):
                 on_task_registered(task_id)
+        from lib.project_dispatch.request_budget import bind_source_account
+        bind_source_account(task)
     except AttemptDispatchCancelled:
         _discard_unstarted_task(task_id, conv_id)
         raise
@@ -264,7 +281,7 @@ def start_conversation_attempt_executor(
                     task_id[:8], conv_id[:8], _cfg_model, _flow_entry.__name__)
         try:
             from lib.tasks_pkg.spawn import spawn_task
-            with measure_task_startup('submission'):
+            with measure_task_startup('submission', identity=timing_identity):
                 spawn_task(task, runner=_flow_entry)
         except Exception as _spawn_err:
             logger.exception('[Chat] Failed to start flow thread for task %s conv=%s',
@@ -276,7 +293,7 @@ def start_conversation_attempt_executor(
                     task_id[:8], conv_id[:8], _cfg_model)
         try:
             from lib.tasks_pkg.spawn import spawn_task
-            with measure_task_startup('submission'):
+            with measure_task_startup('submission', identity=timing_identity):
                 spawn_task(task)
         except Exception as _spawn_err:
             logger.exception('[Chat] Failed to start thread for task %s conv=%s',

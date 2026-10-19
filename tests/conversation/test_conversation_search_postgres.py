@@ -5,8 +5,8 @@ from pathlib import Path
 import pytest
 
 from lib.storage.errors import StorageError
-from lib.storage_sidecar.turn_search_chunks import CHUNK_SCHEMA
-from lib.storage_sidecar.turn_search_query import search_conversations
+from lib.storage_authority_sql.turn_search_chunks import CHUNK_SCHEMA
+from lib.storage_authority_sql.turn_search_query import search_conversations
 from tests.support.postgres_isolation import isolated_postgres_dsn
 
 
@@ -20,7 +20,7 @@ pytestmark = [pytest.mark.slow, pytest.mark.skipif(
 def test_postgres_source_preference_and_owner_survive_continuation(tmp_path, query):
     import psycopg
     from psycopg.rows import dict_row
-    from lib.storage_sidecar.adapters.postgres import PostgresSession
+    from lib.storage_authority_sql.adapters.postgres import PostgresSession
 
     source = Path(os.environ['TOFU_STORAGE_TEST_POSTGRES_DSN_FILE'])
     with isolated_postgres_dsn(source, tmp_path) as dsn_file:

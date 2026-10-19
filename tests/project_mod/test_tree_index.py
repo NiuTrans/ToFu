@@ -90,33 +90,12 @@ class TestBuildAndAcquire:
         assert loaded.refresh_after_s == tree_index._stale_after_s()
         assert loaded.unchanged_refreshes == 0
 
-    def test_oversized_disk_index_is_rejected_before_body_read(
-            self, monkeypatch):
+    def test_malformed_disk_count_cannot_install_missing_rows(self, proj):
         header = tree_index.struct.pack(
-            '<8sdIH', tree_index._DISK_MAGIC, time.time(), 600_001, 0)
-        read_sizes = []
-
-        class HeaderOnlyFile:
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *_args):
-                return False
-
-            def read(self, size=-1):
-                read_sizes.append(size)
-                if len(read_sizes) > 1:
-                    pytest.fail('oversized index body must not be read')
-                return header
-
-        monkeypatch.setenv('TOFU_DEPLOYMENT_MODE', 'distributed')
-        monkeypatch.setattr(tree_index, '_disk_path', lambda _root: '/ignored')
-        monkeypatch.setattr(
-            tree_index, 'open', lambda *_args, **_kwargs: HeaderOnlyFile(),
-            raising=False)
-
-        assert tree_index._load_disk('/project') is None
-        assert read_sizes == [len(header)]
+            '<8sdIH', tree_index._DISK_MAGIC, time.time(), 600_001, len(proj.encode()))
+        with open(tree_index._disk_path(proj), 'wb') as output:
+            output.write(header + proj.encode())
+        assert tree_index._load_disk(proj) is None
 
     def test_stale_entry_served_while_refresh_kicked(self, proj, monkeypatch):
         _build(proj)
@@ -496,7 +475,7 @@ def test_lru_eviction_preserves_rebuild_fallback_when_checkpoint_fails(
     assert proj in tree_index._building
 
 
-def test_lru_eviction_does_not_persist_entry_over_current_budget(monkeypatch):
+def test_oversized_newest_index_survives_and_eviction_checkpoints_it(monkeypatch):
     monkeypatch.setenv('TOFU_TREE_INDEX_MAX_ENTRIES', '10000')
     oversized = tree_index.TreeIndex(
         '/oversized', ['path'] * 10_001,
@@ -511,8 +490,12 @@ def test_lru_eviction_does_not_persist_entry_over_current_budget(monkeypatch):
 
     tree_index._evict_mem_over_cap()
 
-    assert tree_index._mem == {}
+    assert tree_index._mem == {'oversized': oversized}
     assert persisted_calls == []
+    tree_index._mem['newer'] = SimpleNamespace(paths=[])
+    tree_index._evict_mem_over_cap()
+    assert tuple(tree_index._mem) == ('newer',)
+    assert persisted_calls == [oversized]
 
 
 def test_background_warm_restores_fresh_disk_without_project_walk(
@@ -670,29 +653,33 @@ class TestFind:
         assert './.hidden.py' in out
         assert './src/pkg/alpha.py' in out
 
-    def test_python_fallback_has_explicit_scan_budget(self, proj, monkeypatch):
-        monkeypatch.setattr(read_tools, '_FD_BIN', None)
-        monkeypatch.setattr(read_tools, '_FIND_SCAN_LIMIT', 2)
-        out = read_tools.tool_find_files(
-            proj,
-            '*',
-            max_results=20,
-            shell_output=True,
-            respect_project_ignores=False,
-        )
-        assert 'find: [search stopped after scanning 2 entries' in out
+    def test_python_fallback_consumes_more_than_250000_entries(self, proj, monkeypatch):
+        from contextlib import nullcontext
+        from itertools import chain, repeat
+        marker = os.path.join(proj, 'last-source.txt')
+        with open(marker, 'w') as source:
+            source.write('real source reached after the old scan ceiling')
+        with os.scandir(proj) as entries:
+            actual = next(entry for entry in entries if entry.name == 'last-source.txt')
+        class NonFile:
+            name = 'non-file'
+            path = os.path.join(proj, 'non-file')
+            def is_dir(self, **kwargs):
+                return False
+            def is_file(self, **kwargs):
+                return False
+        monkeypatch.setattr(read_tools.os, 'scandir', lambda root:
+            nullcontext(chain(repeat(NonFile(), 250001), [actual])))
+        rows = read_tools._python_find(proj, proj, 'last-source.txt', 20,
+            respect_project_ignores=False)
+        assert rows == [('last-source.txt', os.path.getsize(marker))]
 
-    def test_python_fallback_reports_depth_budget(self, proj, monkeypatch):
+    def test_python_fallback_searches_nested_directories(self, proj, monkeypatch):
         monkeypatch.setattr(read_tools, '_FD_BIN', None)
-        monkeypatch.setattr(read_tools, '_TOOL_MAX_DEPTH', 0)
-        out = read_tools.tool_find_files(
-            proj,
-            '*',
-            max_results=20,
-            shell_output=True,
-            respect_project_ignores=False,
-        )
-        assert 'find: [search depth capped at 0' in out
+        out = read_tools.tool_find_files(proj, 'alpha.py', max_results=20,
+            shell_output=True, respect_project_ignores=False)
+        assert './src/pkg/alpha.py' in out
+        assert 'depth capped' not in out
 
     def test_fd_timeout_does_not_double_scan(self, proj, monkeypatch):
         monkeypatch.setattr(read_tools, '_FD_BIN', '/fake/fd')
@@ -993,11 +980,26 @@ def test_independent_roots_start_with_idle_reuse_hint_one(tmp_path, monkeypatch)
     print(f'32 root builds: {(time.monotonic() - started) * 1000:.2f} ms; 0 workers')
 
 
-def test_depth_truncation_never_installs_partial_index(proj, monkeypatch):
-    monkeypatch.setattr(tree_index, '_DEPTH_CAP', 0)
+def test_real_deep_tree_is_complete_and_queryable(proj, monkeypatch):
+    from pathlib import Path
+    deep = Path(proj)
+    for _ in range(42):
+        deep = deep / 'nested'
+        deep.mkdir()
+    marker = deep / 'last.txt'
+    marker.write_text('deep complete source')
     tree_index._build_sync(proj)
-    assert proj not in tree_index._mem
-    assert not os.path.exists(tree_index._disk_path(proj))
+    entry = tree_index.acquire(proj)
+    assert entry is not None and entry.complete
+    assert marker.relative_to(proj).as_posix() in entry.paths
+    relative=marker.relative_to(proj).as_posix()
+    assert relative in tree_index._load_disk(proj).paths
+    assert relative in read_tools.tool_find_files(proj, 'last.txt')
+    assert 'deep complete source' in read_tools.tool_grep(proj, 'deep complete source')
+    monkeypatch.setenv('TOFU_TREE_INDEX_DISABLE', '1')
+    assert 'deep complete source' in read_tools.tool_grep(proj, 'deep complete source')
+    monkeypatch.setattr(read_tools, '_FD_BIN', None)
+    assert relative in read_tools.tool_find_files(proj, 'last.txt')
 
 
 def test_directory_read_failure_never_installs_partial_index(proj, monkeypatch):
@@ -1031,3 +1033,54 @@ def test_unstarted_root_build_failure_releases_owner_and_keeps_live_reads(proj, 
     assert not snapshot['executorActive'] and not snapshot['scanExecutorActive']
     assert 'src/pkg/alpha.py' in read_tools.tool_find_files(proj, 'alpha.py')
     assert not any(t.name.startswith('tree-index') for t in threading.enumerate())
+
+
+def test_real_tree_above_retention_target_persists_reloads_and_keeps_writes(proj, monkeypatch):
+    from pathlib import Path
+    monkeypatch.setenv('TOFU_TREE_INDEX_MAX_ENTRIES', '10000')
+    expected=set()
+    root=Path(proj)
+    for shard in range(101):
+        directory=root / f'shard-{shard:03d}'
+        directory.mkdir()
+        for number in range(101):
+            path=directory / f'file-{number:03d}.txt'
+            path.write_text(f'{shard}:{number}')
+            expected.add(path.relative_to(root).as_posix())
+    tree_index._build_sync(proj)
+    entry=tree_index.acquire(proj)
+    assert entry is not None and len(entry.paths)>10000
+    assert expected <= set(entry.paths)
+    tree_index._mem.clear()
+    loaded=tree_index.acquire(proj)
+    assert loaded is not None and expected <= set(loaded.paths)
+    late=root / 'late.txt';late.write_text('retained after large-index write')
+    tree_index.note_write(str(late))
+    assert 'late.txt' in loaded.paths
+    assert 'late.txt' in read_tools.tool_find_files(proj, 'late.txt')
+    tree_index._mem['newer']=SimpleNamespace(paths=[])
+    tree_index._evict_mem_over_cap()
+    assert proj not in tree_index._mem
+    restored=tree_index._load_disk(proj)
+    assert restored is not None
+    assert expected | {'late.txt'} <= set(restored.paths)
+    assert 'late.txt' in read_tools.tool_find_files(proj, 'late.txt')
+
+
+def test_large_text_sources_are_searchable_live_indexed_and_explicit(proj, monkeypatch):
+    source=os.path.join(proj, 'large-source.txt')
+    with open(source, 'w') as output:
+        output.write('unrelated source line\n' * 150000)
+        output.write('full-large-source-needle\n')
+    assert os.path.getsize(source)>2*1024*1024
+    tree_index._build_sync(proj)
+    entry=tree_index.acquire(proj)
+    candidates,total_bytes=tree_index.grep_candidates(entry, '', '*.txt')
+    assert source in candidates and total_bytes>=os.path.getsize(source)
+    indexed=read_tools.tool_grep(proj, 'full-large-source-needle')
+    assert 'large-source.txt' in indexed and 'full-large-source-needle' in indexed
+    monkeypatch.setenv('TOFU_TREE_INDEX_DISABLE', '1')
+    live=read_tools.tool_grep(proj, 'full-large-source-needle')
+    assert 'large-source.txt' in live and 'full-large-source-needle' in live
+    explicit=read_tools.tool_grep(proj, 'full-large-source-needle', rel_path='large-source.txt')
+    assert 'full-large-source-needle' in explicit

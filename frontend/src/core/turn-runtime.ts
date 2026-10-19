@@ -1,3 +1,4 @@
+import { entityRecordKeys, entityRecordValues } from './entity-record';
 import type {
   AppendSettledTurnRequest,
   ConnectionHealth,
@@ -10,6 +11,8 @@ import type {
   ExecutePlanRequest,
   FileChangesCommandRequest,
   ConversationTurnPage,
+  ConversationRoundDirectory,
+  ConversationRoundEntry,
   UpdateTurnRequest,
   TurnRecord,
 } from '../api/conversation-sync.generated';
@@ -23,7 +26,7 @@ import {
   createTurnCommandId,
 } from './turn-command';
 import {
-  applyTurnStateProjection,
+  createTurnProjectionReconciler,
   type ProjectedConversation,
 } from './turn-projection';
 import { presentTurnFinish, resumeTurnOptions } from './turn-presentation';
@@ -59,9 +62,12 @@ export interface RuntimeConversation extends ProjectedConversation {
   _localOnly?: boolean;
 }
 
+
 export interface TurnRuntimeOptions {
   api: ConversationSyncApi;
   streamClientId?: string;
+
+  snapshotViewport?(): { width: number; height: number };
   findConversation?(conversationId: string): RuntimeConversation | null;
   persist?(conversation: RuntimeConversation): void;
   isActive?(conversation: RuntimeConversation): boolean;
@@ -77,7 +83,7 @@ export interface TurnRuntimeOptions {
   renderState?(
     conversation: RuntimeConversation,
     state: TurnState,
-    render?: { force?: boolean },
+    render?: { force?: boolean; update?: TurnStateUpdate },
   ): boolean | void;
   disposeRenderedState?(conversationId: string): void;
 
@@ -137,6 +143,11 @@ export interface TurnRuntime {
   resumeOptions: typeof resumeTurnOptions;
   hydrateConversation(conversation: RuntimeConversation): Promise<RuntimeStore>;
   wakeConversation(conversation: RuntimeConversation): Promise<RuntimeStore>;
+  roundDirectoryKey(conversationId: string): string;
+  loadConversationRoundDirectory(conversation: RuntimeConversation, laneId: string,
+    offset?: number, limit?: number, anchorTurnId?: string): Promise<ConversationRoundDirectory>;
+  hydrateConversationRound(conversation: RuntimeConversation, laneId: string,
+    entry: ConversationRoundEntry): Promise<void>;
   loadConversationTurnPage(
     conversation: RuntimeConversation,
     laneId: string,
@@ -288,6 +299,7 @@ export function createConversationTurnRuntime(
   options: TurnRuntimeOptions,
 ): TurnRuntime {
   const terminal = new Set(['completed', 'interrupted', 'truncated', 'failed']);
+  const shellProjection = createTurnProjectionReconciler();
   const runtimeStores = new Map<string, RuntimeStore>();
   const coordinators = new Map<string, ConversationSyncCoordinator>();
   let transportSuspended = false;
@@ -342,7 +354,7 @@ export function createConversationTurnRuntime(
   ): PerceptionAttemptIdentity | null => {
     const state = runtimeStores.get(conversationId)?.getState();
     if (!state) return null;
-    const attempts = Object.values(state.attemptsById)
+    const attempts = entityRecordValues(state.attemptsById)
       .filter((attempt) => attempt?.attemptId && attempt.turnId
         && (attempt.status === 'pending' || attempt.status === 'running'))
       .sort((left, right) => {
@@ -370,9 +382,12 @@ export function createConversationTurnRuntime(
   ): void => {
     const coordinator = coordinators.get(conversation.id);
     if (!coordinator) return;
-    const hasLiveTurn = Object.values(state.turnsById).some((turn) =>
-      turn && (turn.status === 'pending' || turn.status === 'running'));
-    if (active || hasLiveTurn) {
+    if (conversation._localOnly) {
+      coordinator.pause();
+      return;
+    }
+    if (active || entityRecordValues(state.turnsById).some((turn) =>
+      turn && (turn.status === 'pending' || turn.status === 'running'))) {
       void coordinator.resume().catch(options.onProtocolError);
     } else {
       coordinator.pause();
@@ -388,7 +403,7 @@ export function createConversationTurnRuntime(
     let terminalSettled = false;
     const finishingAttemptId = conversation._finishingAttemptId;
     if (conversation._finishingStream && finishingAttemptId) {
-      const turnStatus = Object.values(state.turnsById).find((turn) =>
+      const turnStatus = entityRecordValues(state.turnsById).find((turn) =>
         turn?.currentAttemptId === finishingAttemptId)?.status;
       terminalSettled = terminal.has(turnStatus || '');
     }
@@ -397,7 +412,7 @@ export function createConversationTurnRuntime(
     let stateRendered = false;
     const renderActiveState = (force = false): void => {
       if (!options.isActive?.(conversation)) return;
-      const handled = options.renderState?.(conversation, state, { force });
+      const handled = options.renderState?.(conversation, state, { force, update });
       if (handled !== false && options.renderState) {
         stateRendered = true;
       } else if (options.replaceAll) {
@@ -427,7 +442,7 @@ export function createConversationTurnRuntime(
       if (options.deferTerminalRelease) options.deferTerminalRelease(release);
       else release();
     };
-    const projectionChanged = applyTurnStateProjection({
+    const projectionChanged = shellProjection.apply({
       conversation,
       state,
       active,
@@ -443,7 +458,7 @@ export function createConversationTurnRuntime(
       buildNavigation: options.buildNavigation,
       renderConversationList: options.renderConversationList,
       updateSendButton: options.updateSendButton,
-    });
+    }, update);
     /* Transport-only frames may not change the shell fingerprint, but the
      * typed surface still consumes the authoritative state directly. */
     if (active && options.renderState && !stateRendered) {
@@ -458,7 +473,7 @@ export function createConversationTurnRuntime(
       renderActiveState(true);
       scheduleTerminalRelease();
     }
-    for (const turn of Object.values(state.turnsById)) {
+    for (const turn of entityRecordValues(state.turnsById)) {
       const attemptId = stringValue(turn?.currentAttemptId);
       if (!turn || !attemptId) continue;
       if (turn.status === 'pending' || turn.status === 'running') {
@@ -484,6 +499,8 @@ export function createConversationTurnRuntime(
     coordinator = new ConversationSyncCoordinator({
       conversationId,
       streamClientId: options.streamClientId,
+
+      snapshotViewport: options.snapshotViewport,
       api: options.api,
       onSnapshot(snapshot) {
         store._snapshotLoaded = true;
@@ -496,10 +513,10 @@ export function createConversationTurnRuntime(
         );
         store.dispatch({ type: 'snapshot', snapshot });
       },
-      onTurnPage(page) {
+      onTurnPage(page, mode) {
         // History pages add bounded older records. They are never deletion
         // authority and therefore intentionally omit authoritativeFull.
-        store.dispatch({ type: 'snapshot', snapshot: page });
+        store.dispatch({ type: 'snapshot', snapshot: { ...page, historyMode: mode } });
       },
       onAttemptEvent(event, receivedAt, serverPublishedAt) {
         const previousRevision = Number(
@@ -1172,6 +1189,31 @@ export function createConversationTurnRuntime(
     resumeOptions: resumeTurnOptions,
     hydrateConversation,
     wakeConversation,
+    roundDirectoryKey(conversationId: string) { return coordinators.get(conversationId)?.roundDirectoryRevision ?? ''; },
+    async loadConversationRoundDirectory(conversation: RuntimeConversation, laneId: string, offset = 0, limit = 50, anchorTurnId?: string) {
+      if (!conversation?.id) throw new Error('Conversation is required.');
+      if (conversation._localOnly) throw new Error('Local draft has no round directory.');
+      const store = ensureRuntimeStore(conversation.id);
+      if (!store._snapshotLoaded) await hydrateConversation(conversation);
+      const coordinator = coordinators.get(conversation.id);
+      if (!coordinator) throw new Error('Conversation coordinator is not initialized.');
+      return coordinator.loadRoundDirectory(laneId, offset, limit, anchorTurnId);
+    },
+    async hydrateConversationRound(conversation: RuntimeConversation, laneId: string, entry: ConversationRoundEntry) {
+      const coordinator = coordinators.get(conversation.id);
+      if (!coordinator) throw new Error('Conversation coordinator is not initialized.');
+      const store = ensureRuntimeStore(conversation.id);
+      if (!store.getState().turnsById[entry.turnId]) {
+        await coordinator.loadTurnPage(laneId, entry.ordinal + 9, 8, 'detached');
+        if (!store.getState().turnsById[entry.turnId]) {
+          await coordinator.loadTurnPage(laneId, entry.ordinal + 1, 1, 'detached');
+        }
+      }
+      const target = store.getState().turnsById[entry.turnId];
+      if (!target || target.laneId !== laneId || target.ordinal !== entry.ordinal) {
+        throw new Error('Round target no longer exists.');
+      }
+    },
     loadConversationTurnPage,
     submitConversation,
     appendSettledConversationTurn,
@@ -1274,7 +1316,7 @@ export function createConversationTurnRuntime(
       const state = readRuntimeState(conversationId);
       if (!state || !commandId) return false;
       return state.queueItems.some((item) => item.sourceMessageId === commandId)
-        || Object.values(state.attemptsById).some(
+        || entityRecordValues(state.attemptsById).some(
           (attempt) => attempt?.commandId === commandId,
         );
     },
@@ -1321,6 +1363,8 @@ export function createConversationTurnRuntime(
       coordinators.get(conversationId)?.invalidate(cursorHint);
     },
     disposeConversation(conversationId: string) {
+      const projected = boundConversationById.get(conversationId);
+      if (projected) shellProjection.forget(projected);
 
       if (renderedConversationId === conversationId) {
         renderedTurns.clear();
@@ -1338,7 +1382,7 @@ export function createConversationTurnRuntime(
         boundConversations.delete(conversation);
       }
       const state = runtimeStores.get(conversationId)?.getState();
-      for (const attemptId of Object.keys(state?.attemptsById ?? {})) {
+      for (const attemptId of entityRecordKeys(state?.attemptsById ?? {})) {
         attemptConnectionLeases.get(attemptId)?.close();
         attemptConnectionLeases.delete(attemptId);
         attemptHooks.delete(attemptId);

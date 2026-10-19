@@ -108,10 +108,11 @@ class TestApply(unittest.TestCase):
         )
         self.assertEqual(apply_chat_mode({'chatMode': 'pro'})['chatMode'], 'chat')
 
-    def test_studio_leaves_code_exec_alone(self):
-        # studio does NOT pin codeExec (run_command supersedes it downstream).
+    def test_studio_migrates_to_everyday_chat(self):
         out = apply_chat_mode({'chatMode': 'studio'})
-        self.assertNotIn('codeExecEnabled', chat_mode_defaults('studio'))
+        self.assertEqual(out['chatMode'], 'chat')
+        self.assertEqual(chat_mode_defaults('studio'), chat_mode_defaults('chat'))
+        self.assertTrue(out['codeExecEnabled'])
         self.assertTrue(out['memoryEnabled'])
 
     def test_input_not_mutated(self):

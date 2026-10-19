@@ -15,7 +15,7 @@ import os
 from lib.config_dir import config_path
 from lib.identity import PERSONAL_USER_ID
 from lib.log import get_logger
-from lib.provider_headers import split_header_secrecy
+from lib.provider.provider_headers import split_header_secrecy
 
 from .credential_envelope import (
     ENVELOPE_FORMAT,
@@ -147,7 +147,7 @@ def _import_pending_provider(
 
 def _legacy_sources(boundary: OwnerBoundary) -> tuple[dict, list[dict]]:
     from lib import _load_server_config
-    from lib.byo_providers import get_provider, list_providers
+    from lib.byo.byo_providers import get_provider, list_providers
 
     rows = list_providers(
         boundary.owner_user_id, tenant_id=boundary.tenant_id)

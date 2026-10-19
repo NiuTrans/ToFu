@@ -12,14 +12,14 @@ from dataclasses import dataclass
 from typing import Any
 
 from lib.log import get_logger
-from lib.tool_round_replay import normalize_replay_tool_arguments
+from lib.tool_results.tool_round_replay import normalize_replay_tool_arguments
 from lib.error_envelope import make_envelope
-from lib.llm_errors import RequestScopedError
+from lib.llm.llm_errors import RequestScopedError
 from lib.model_info import (
     model_requires_thinking_signature_replay,
     model_requires_thought_signature_on_tool_calls,
 )
-from lib.tool_caller_identity import (
+from lib.tool_results.tool_caller_identity import (
     MAX_TOOL_CALLER_ID_CHARS,
     normalize_tool_caller,
     tool_caller_authority,

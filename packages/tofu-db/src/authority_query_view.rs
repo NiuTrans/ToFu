@@ -39,6 +39,7 @@ impl ReadOptions {
             online_gc: std::sync::Mutex::new(None),
             backup_anchors: std::sync::Mutex::new(Vec::new()),
             published_query_options: None,
+            published_query_results: None,
         }
     }
 }
@@ -46,8 +47,35 @@ impl ReadOptions {
 pub(crate) struct PublishedQueryView {
     entities: Arc<crate::entity::PublishedEntityReads>,
     options: Arc<RwLock<ReadOptions>>,
+    results: Arc<crate::query_result_cache::QueryResultCache>,
+}
+pub(crate) struct CachedQueryResult {
+    response: Arc<crate::transaction_ir::IrResponse>,
+    foreground_admissions: Arc<std::sync::atomic::AtomicU64>,
+}
+impl CachedQueryResult {
+    pub(crate) fn into_response(self) -> crate::transaction_ir::IrResponse {
+        self.foreground_admissions.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        (*self.response).clone()
+    }
 }
 impl PublishedQueryView {
+    pub(crate) fn try_cached(&self, key: crate::query_result_cache::Lookup<'_>) -> Option<CachedQueryResult> {
+        // Empty, uncacheable and evicted keys avoid health/publication locks.
+        // The owned candidate is never an answer until live generation proof.
+        let (stored, response) = self.results.candidate(key)?;
+        let options = self.options.try_read().ok()?;
+        if !self.entities.with_healthy_current_snapshot(|snapshot| snapshot == stored)? { return None; }
+        Some(CachedQueryResult { response, foreground_admissions: Arc::clone(&options.foreground_admissions) })
+    }
+    pub(crate) fn remember(&self, request: &crate::protocol::Request,
+        snapshot: crate::entity::EntitySnapshot, response: &crate::server::response::DispatchedResponse) {
+        if request.command_id.is_some() { return; }
+        let Some(admission) = response.cache_admission() else { return; };
+        self.entities.with_healthy_current_snapshot(|current| {
+            if current == snapshot { self.results.insert(request.into(), snapshot, response.payload.len(), admission, || response.snapshot_cache_copy()); }
+        });
+    }
     pub(crate) fn try_build(&self) -> Option<io::Result<AuthorityDatabase>> {
         // Configuration is copied under its read guard. A failed/contended
         // optional mirror uses the original authority path, never stale data.
@@ -63,6 +91,7 @@ impl PublishedQueryView {
             entities: Arc::clone(&self.entities),
             options: Arc::clone(&self.options),
             metadata_bytes: self.metadata_bytes(),
+            results: Arc::clone(&self.results),
         }
     }
     pub(crate) fn metadata_bytes(&self) -> usize {
@@ -82,7 +111,9 @@ impl AuthorityDatabase {
                 options
             }
         };
-        Ok(PublishedQueryView { entities, options })
+        let results = self.published_query_results.get_or_insert_with(||
+            Arc::new(crate::query_result_cache::QueryResultCache::new(self.canonical_json_cache.observer().metrics().capacity_bytes))).clone();
+        Ok(PublishedQueryView { entities, options, results })
     }
     pub(super) fn refresh_published_query_options(&self) {
         if let Some(options) = &self.published_query_options {
@@ -96,6 +127,7 @@ impl AuthorityDatabase {
 pub struct PublishedQueryObserver {
     entities: Arc<crate::entity::PublishedEntityReads>,
     options: Arc<RwLock<ReadOptions>>,
+    results: Arc<crate::query_result_cache::QueryResultCache>,
     metadata_bytes: usize,
 }
 impl PublishedQueryObserver {
@@ -104,6 +136,7 @@ impl PublishedQueryObserver {
         value["available"] =
             (value["available"].as_bool().unwrap_or(false) && !self.options.is_poisoned()).into();
         value["metadataBytes"] = self.metadata_bytes.into();
+        value["queryResults"] = self.results.metrics();
         value
     }
 }
@@ -139,8 +172,8 @@ mod tests {
         let replica = view.try_build().unwrap().unwrap();
         assert_eq!(replica.timer_live_capacity, 0);
         assert_eq!(
-            replica.logical_outbox.as_ref().unwrap().max_pending_bytes,
-            65536
+            replica.logical_outbox.as_ref().unwrap().cipher.key_id(),
+            writer.logical_outbox.as_ref().unwrap().cipher.key_id()
         );
         drop(replica);
         let _ = std::panic::catch_unwind(|| {
@@ -170,3 +203,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "authority_query_cache_tests.rs"]
+mod authority_query_cache_tests;

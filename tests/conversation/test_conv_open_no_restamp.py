@@ -154,14 +154,12 @@ class TestOpenBumpRemovedAtSource:
             'frontend still PATCHes the removed touchUpdatedAt flag')
 
     def test_conv_click_path_calls_load_only(self):
-        src = self._frontend_src()
-        start = src.index('function _handleConvClick')
-        end = src.index('.addEventListener("click", _handleConvClick)')
-        body = src[start:end]
-        assert '_bumpConvOnOpen' not in body, (
-            'conv-click path reintroduced a recency rewrite')
-        assert 'loadConversation(item.dataset.convId)' in body, (
-            'conv-click path no longer opens the conversation — wiring broken')
+        with open(os.path.join(REPO, 'frontend', 'src', 'application-shell',
+                               'interactions', 'sidebar.ts'), encoding='utf-8') as f:
+            body = f.read()
+        assert '_bumpConvOnOpen' not in body
+        assert 'touchUpdatedAt' not in body
+        assert 'ports.activate(id)' in body
 
     def test_settings_patch_body_has_no_updated_at_write(self):
         src = self._routes_src()

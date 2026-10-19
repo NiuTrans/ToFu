@@ -7,7 +7,7 @@ from lib.orchestration.errors import RuntimeMutationError
 from lib.orchestration.service_call import orchestration_dependency_call
 from lib.orchestration.mutation_operations import runtime_abort_mutation
 from lib.orchestration.mutation_result import OrchestrationMutationResult
-from lib.task_runtime_ports import TaskAbortRuntimePort
+from lib.task_replay.task_runtime_ports import TaskAbortRuntimePort
 
 
 class OrchestrationRuntimeMutationService:

@@ -77,6 +77,7 @@ var runtimeScope = {
   },
 };
 var config = {};
+var composerTranslationStatus = { refresh() {} };
 var _conversationProjectController = { begin: () => () => true };
 var _conversationModelController = { begin: () => () => true };
 function _clearProjectStateLocal() {}
@@ -99,6 +100,7 @@ function renderConversationList() {}
 function renderPendingQueueUI() {}
 function _refreshServerQueue() {}
 function updateSendButton() {}
+function renderComposerModelNotice() {}
 function _restoreConvProject() { calls.projectRestore += 1; }
 function _resumePendingTranslations() {}
 function restoreConversationSettingsToComposer() {}
@@ -138,6 +140,6 @@ async function open(snapshotRequired) {
     )
     assert result.returncode == 0, result.stderr or result.stdout
     assert json.loads(result.stdout) == {
-        "warm": {"hydrate": 0, "wake": 1, "projectRestore": 1},
-        "cold": {"hydrate": 1, "wake": 0, "projectRestore": 1},
+        "warm": {"hydrate": 0, "wake": 1, "projectRestore": 2},
+        "cold": {"hydrate": 1, "wake": 0, "projectRestore": 2},
     }

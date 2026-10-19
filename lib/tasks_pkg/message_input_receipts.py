@@ -8,13 +8,39 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
-from lib.llm_errors import AbortedError, RequestScopedError
+from lib.llm.llm_errors import AbortedError, RequestScopedError
 
 
 class MessageInputScopeError(RequestScopedError, PermissionError):
     """Local mailbox scope denial: no route retry, fallback, or health penalty."""
 
     failure_stage = 'before_dispatch'
+
+
+def historical_swarm_context(messages: list[dict], *, binding=None) -> list[dict]:
+    """Detach trusted restored history without transferring run receipt rights.
+
+    Only server-owned history restoration calls this projection. It never
+    derives a binding from carrier metadata or touches durable mailbox rows.
+    Explicit same-run recovery preserves every witness, including malformed or
+    foreign ones: the normal dispatch gate must reject those, not hide them.
+    """
+    from copy import deepcopy
+    restored = deepcopy(messages)
+    if binding is None:
+        for message in restored:
+            message.pop('_swarmMessageIds', None)
+            message.pop('_swarmMessageMailbox', None)
+    return restored
+
+
+def _validate_input_scope(task: dict, matches: dict) -> None:
+    try:
+        validate_matches(task, matches)
+    except (AbortedError, MessageInputScopeError):
+        raise
+    except Exception as error:
+        raise MessageInputScopeError('Mailbox input scope is no longer available') from error
 
 
 class _ReceiptLease:
@@ -44,13 +70,14 @@ class _ReceiptLease:
         # Recompute from the sealed, translated input after every dispatcher
         # wait. Canonical-body membership cannot prove physical consumption.
         self.admission.matches = None
-        matches = matched_ids(self.admission.task, body)
+        from lib.tasks_pkg.context_dependencies import observe_wire
         try:
-            validate_matches(self.admission.task, matches)
-        except AbortedError:
-            raise
-        except Exception as error:
-            raise MessageInputScopeError('Mailbox input scope is no longer available') from error
+            observe_wire(self.admission.task, [{'role': 'user', 'content': text} for text in _strings(body)]
+                         if self.admission.task.get('_workingFactDependencyPending') else None)
+        except PermissionError as error:
+            raise MessageInputScopeError('Working fact input scope is no longer available') from error
+        matches = matched_ids(self.admission.task, body)
+        _validate_input_scope(self.admission.task, matches)
         if self.delegate is not None:
             prepare = getattr(self.delegate, 'prepare_input', None)
             if callable(prepare):
@@ -58,6 +85,9 @@ class _ReceiptLease:
         self.admission.matches = matches
 
     def confirm_input(self, *, successful):
+        if not successful:
+            from lib.tasks_pkg.context_dependencies import observe_wire
+            observe_wire(self.admission.task, None)
         if self.delegate is not None:
             confirm = getattr(self.delegate, 'confirm_input', None)
             if callable(confirm):
@@ -82,7 +112,7 @@ class ReceiptAdmission:
 
 
 def receipt_admission(task: dict, budget_admit):
-    if not task.get('_messageInputWitnesses'):
+    if not task.get('_messageInputWitnesses') and not task.get('_workingFactDependencyPending'):
         return None
     return ReceiptAdmission(task, budget_admit)
 
@@ -168,7 +198,7 @@ def stream_with_receipts(stream, task: dict, body: dict, **kwargs):
     task.pop('_verifiedMessageInputIds', None)
     task.pop('_messageInputPhysicalIds', None)
     matches = matched_ids(task, body)
-    validate_matches(task, matches)
+    _validate_input_scope(task, matches)
     try:
         result = stream(task, body, **kwargs)
         if ensure_provider_stream_result(result).is_verified_complete:

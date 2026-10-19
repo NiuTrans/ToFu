@@ -31,7 +31,7 @@ the public import path byte-identical — ``from lib.agent_inbox import X`` and
 
   * :mod:`lib.agent_inbox._state` — the SINGLE process-wide home of the shared
     exactly-once delivery registry (``_inboxes`` / ``_lock`` / ``_tombstones`` /
-    ``_PRIORITY`` / ``MAX_PER_TASK`` / ``_TOMBSTONE_MAX``).
+    ``_PRIORITY``).
   * :mod:`lib.agent_inbox._queue` — the thread-safe queue operations.
   * :mod:`lib.agent_inbox._format` — the pure ``<swarm-update>`` XML formatter.
 
@@ -73,9 +73,7 @@ from lib.log import get_logger
 
 # ── Shared state (single-home, re-exported BY REFERENCE) ─────
 from ._state import (
-    MAX_PER_TASK,
     _PRIORITY,
-    _TOMBSTONE_MAX,
     _inboxes,
     _lock,
     _tombstones,
@@ -125,10 +123,8 @@ __all__ = [
     'format_swarm_update',
     '_escape',
     # shared state / constants (tests + callers reach for these)
-    'MAX_PER_TASK',
     '_PRIORITY',
     '_inboxes',
     '_lock',
     '_tombstones',
-    '_TOMBSTONE_MAX',
 ]

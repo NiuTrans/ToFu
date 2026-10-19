@@ -332,7 +332,7 @@ def _llm_beats(source_text: str, *, lang: str, max_scenes: int,
     + art direction". Returns [] when the model is unreachable or its output
     fails the shape check, letting the caller fall back to slicing.
     """
-    from lib.llm_errors import AbortedError
+    from lib.llm.llm_errors import AbortedError
     try:
         from lib.motion_video._recipe import script_stage_for_source
         beats = script_stage_for_source(

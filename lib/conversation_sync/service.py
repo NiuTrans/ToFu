@@ -122,6 +122,7 @@ class ConversationSyncService:
         tool_payload: str = "full",
         turn_limit: int | None = None,
         include_artifact_hint: bool = False,
+        max_projection_bytes: int = 0,
     ) -> dict[str, Any]:
         if tool_payload not in {"full", "lazy"} or (tool_payload == "lazy" and segment_payload != "refs"):
             raise ValueError("Lazy tool payload requires reference segments")
@@ -151,6 +152,8 @@ class ConversationSyncService:
             ),
             turn_limit=turn_limit,
             include_artifact_hint=include_artifact_hint,
+
+            max_projection_bytes=max_projection_bytes,
         )
         # The shared authority has already passed generated-schema validation.
         # A refs flight only removes optional fields and introduces declared
@@ -164,12 +167,16 @@ class ConversationSyncService:
         turn_limit: int | None = None,
         *,
         include_artifact_hint: bool = False,
+        max_projection_bytes: int = 0,
     ) -> dict[str, Any]:
         snapshot_options: dict[str, Any] = {}
         if turn_limit is not None:
             snapshot_options["turn_limit"] = turn_limit
         if include_artifact_hint:
             snapshot_options["include_artifact_hint"] = True
+
+        if max_projection_bytes:
+            snapshot_options["max_projection_bytes"] = max_projection_bytes
         stored = self._repository.snapshot(
             conversation_id,
             user_id,
@@ -223,6 +230,20 @@ class ConversationSyncService:
             response["hasArtifacts"] = stored["hasArtifacts"]
         return decode("ConversationSyncSnapshot", response)
 
+    def round_directory(
+        self, conversation_id: str, user_id: int, *, lane_id: str,
+        expected_sync_sequence: int, offset: int = 0, limit: int = 50,
+        anchor_turn_id: str = "",
+    ) -> dict[str, Any]:
+        stored = self._repository.round_directory(
+            conversation_id, user_id, lane_id=lane_id,
+            expected_sync_sequence=expected_sync_sequence, offset=offset,
+            limit=limit, anchor_turn_id=anchor_turn_id,
+        )
+        if stored is None:
+            raise ConversationSyncNotFound("Conversation not found")
+        return decode("ConversationRoundDirectory", stored)
+
     def turn_page(
         self,
         conversation_id: str,
@@ -234,6 +255,7 @@ class ConversationSyncService:
         limit: int = 64,
         segment_payload: str = "full",
         tool_payload: str = "full",
+        max_projection_bytes: int = 0,
     ) -> dict[str, Any]:
         """Return one bounded historical lane page at an exact replay head."""
         if tool_payload not in {"full", "lazy"} or (tool_payload == "lazy" and segment_payload != "refs"):
@@ -247,6 +269,8 @@ class ConversationSyncService:
             expected_sync_sequence=expected_sync_sequence,
             before_ordinal=before_ordinal,
             limit=limit,
+
+            **({"max_projection_bytes": max_projection_bytes} if max_projection_bytes else {}),
         )
         if stored is None:
             raise ConversationSyncNotFound("Conversation not found")
@@ -297,6 +321,22 @@ class ConversationSyncService:
         turn = public_value_with_stable_segments([adapt_turn_read(stored)])[0]
         return decode("ConversationTurnRead", {
             "ok": True, "contract": "tofu.conversation-sync.turn-read/v1", "turn": turn,
+        })
+
+    def inspect_tool_effect(self, conversation_id: str, turn_id: str, user_id: int,
+                            *, operation_id: str, producer_task_id: str | None = None) -> dict[str, Any]:
+        """Inspect domain evidence only after an owner-scoped occurrence lookup."""
+        from .tool_effects import inspect_tool_effect
+        stored = self._repository.turn(conversation_id, turn_id, user_id)
+        if stored is None:
+            raise ConversationSyncNotFound("Tool occurrence not found")
+        outcome, reason = inspect_tool_effect(
+            stored, conversation_id=conversation_id, operation_id=operation_id,
+            producer_task_id=producer_task_id)
+        return decode("ConversationToolEffectInspection", {
+            "ok": True, "contract": "tofu.conversation-sync.tool-effect-inspection/v1",
+            "conversationId": conversation_id, "turnId": turn_id,
+            "operationId": operation_id, "outcome": outcome, "reason": reason,
         })
 
     def turn_tool_result(

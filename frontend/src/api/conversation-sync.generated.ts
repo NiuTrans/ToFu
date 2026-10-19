@@ -640,6 +640,93 @@ export const CONVERSATION_SYNC_SCHEMAS = {
     ],
     "type": "object"
   },
+  "ConversationRoundDirectory": {
+    "additionalProperties": false,
+    "properties": {
+      "activeRound": {
+        "minimum": 1,
+        "type": "integer"
+      },
+      "conversationId": {
+        "type": "string"
+      },
+      "entries": {
+        "items": {
+          "$ref": "#/components/schemas/ConversationRoundEntry"
+        },
+        "maxItems": 100,
+        "type": "array"
+      },
+      "laneId": {
+        "type": "string"
+      },
+      "nextOffset": {
+        "minimum": 0,
+        "type": "integer"
+      },
+      "offset": {
+        "minimum": 0,
+        "type": "integer"
+      },
+      "ownerId": {
+        "minimum": 1,
+        "type": "integer"
+      },
+      "stale": {
+        "type": "boolean"
+      },
+      "syncSeq": {
+        "minimum": 0,
+        "type": "integer"
+      },
+      "totalRounds": {
+        "minimum": 0,
+        "type": "integer"
+      }
+    },
+    "required": [
+      "ownerId",
+      "conversationId",
+      "laneId",
+      "syncSeq",
+      "stale",
+      "totalRounds",
+      "offset",
+      "entries"
+    ],
+    "type": "object"
+  },
+  "ConversationRoundEntry": {
+    "additionalProperties": false,
+    "properties": {
+      "actor": {
+        "enum": [
+          "human",
+          "critic",
+          "virtual_user"
+        ],
+        "type": "string"
+      },
+      "ordinal": {
+        "minimum": 0,
+        "type": "integer"
+      },
+      "roundNumber": {
+        "minimum": 1,
+        "type": "integer"
+      },
+      "turnId": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "turnId",
+      "ordinal",
+      "actor",
+      "roundNumber"
+    ],
+    "type": "object"
+  },
   "ConversationSyncEvent": {
     "oneOf": [
       {
@@ -743,6 +830,45 @@ export const CONVERSATION_SYNC_SCHEMAS = {
       "turns",
       "attempts",
       "queueItems"
+    ],
+    "type": "object"
+  },
+  "ConversationToolEffectInspection": {
+    "additionalProperties": false,
+    "properties": {
+      "contract": {
+        "const": "tofu.conversation-sync.tool-effect-inspection/v1",
+        "type": "string"
+      },
+      "conversationId": {
+        "type": "string"
+      },
+      "ok": {
+        "const": true,
+        "type": "boolean"
+      },
+      "operationId": {
+        "pattern": "^[a-f0-9]{32}$",
+        "type": "string"
+      },
+      "outcome": {
+        "$ref": "#/components/schemas/ToolEffectInspectionOutcome"
+      },
+      "reason": {
+        "$ref": "#/components/schemas/ToolEffectInspectionReason"
+      },
+      "turnId": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "ok",
+      "contract",
+      "conversationId",
+      "turnId",
+      "operationId",
+      "outcome",
+      "reason"
     ],
     "type": "object"
   },
@@ -876,6 +1002,31 @@ export const CONVERSATION_SYNC_SCHEMAS = {
         "minimum": 1,
         "type": "integer"
       },
+      "results": {
+        "items": {
+          "anyOf": [
+            {
+              "$ref": "#/components/schemas/TurnToolDisplayMetadata"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "type": "array"
+      },
       "roundIndex": {
         "minimum": 0,
         "type": "integer"
@@ -936,6 +1087,53 @@ export const CONVERSATION_SYNC_SCHEMAS = {
     ],
     "type": "object"
   },
+  "ConversationUsageRecovery": {
+    "additionalProperties": false,
+    "properties": {
+      "budget": {
+        "$ref": "#/components/schemas/UsageRecoveryBudget"
+      },
+      "conversationId": {
+        "type": "string"
+      },
+      "ok": {
+        "const": true
+      },
+      "reason": {
+        "enum": [
+          "ready",
+          "not_applicable",
+          "operation_unconfirmed",
+          "configuration_unavailable"
+        ],
+        "type": "string"
+      },
+      "sourceProjectionRevision": {
+        "minimum": 0,
+        "type": "integer"
+      },
+      "sourceTurnId": {
+        "type": "string"
+      },
+      "state": {
+        "enum": [
+          "ready",
+          "blocked"
+        ],
+        "type": "string"
+      }
+    },
+    "required": [
+      "ok",
+      "conversationId",
+      "sourceTurnId",
+      "sourceProjectionRevision",
+      "state",
+      "reason",
+      "budget"
+    ],
+    "type": "object"
+  },
   "CreateAttemptRequest": {
     "additionalProperties": false,
     "properties": {
@@ -954,6 +1152,11 @@ export const CONVERSATION_SYNC_SCHEMAS = {
       "expectedProjectionRevision": {
         "minimum": 0,
         "type": "integer"
+      },
+      "guidanceId": {
+        "maxLength": 256,
+        "minLength": 1,
+        "type": "string"
       },
       "humanResponse": {
         "maxLength": 32768,
@@ -1207,6 +1410,75 @@ export const CONVERSATION_SYNC_SCHEMAS = {
     ],
     "type": "object"
   },
+  "InvocationToolEffectInspection": {
+    "additionalProperties": false,
+    "properties": {
+      "contract": {
+        "const": "tofu.invocation.tool-effect-inspection/v1",
+        "type": "string"
+      },
+      "conversationId": {
+        "type": "string"
+      },
+      "invocationId": {
+        "type": "string"
+      },
+      "ok": {
+        "const": true,
+        "type": "boolean"
+      },
+      "operationId": {
+        "pattern": "^[a-f0-9]{32}$",
+        "type": "string"
+      },
+      "outcome": {
+        "$ref": "#/components/schemas/ToolEffectInspectionOutcome"
+      },
+      "reason": {
+        "$ref": "#/components/schemas/ToolEffectInspectionReason"
+      }
+    },
+    "required": [
+      "ok",
+      "contract",
+      "conversationId",
+      "invocationId",
+      "operationId",
+      "outcome",
+      "reason"
+    ],
+    "type": "object"
+  },
+  "InvocationToolEffectInspectionReference": {
+    "additionalProperties": false,
+    "properties": {
+      "conversationId": {
+        "maxLength": 256,
+        "minLength": 1,
+        "type": "string"
+      },
+      "invocationId": {
+        "maxLength": 512,
+        "minLength": 1,
+        "type": "string"
+      },
+      "operationId": {
+        "pattern": "^[a-f0-9]{32}$",
+        "type": "string"
+      },
+      "ownerScope": {
+        "pattern": "^[a-f0-9]{24}$",
+        "type": "string"
+      }
+    },
+    "required": [
+      "conversationId",
+      "invocationId",
+      "operationId",
+      "ownerScope"
+    ],
+    "type": "object"
+  },
   "JsonObject": {
     "additionalProperties": true,
     "type": "object"
@@ -1214,6 +1486,59 @@ export const CONVERSATION_SYNC_SCHEMAS = {
   "PlanId": {
     "pattern": "^plan_[0-9a-f]{24}$",
     "type": "string"
+  },
+  "ProjectFileWriteReconciliation": {
+    "additionalProperties": false,
+    "properties": {
+      "basePath": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "changeId": {
+        "pattern": "^[a-f0-9]{32}$",
+        "type": "string"
+      },
+      "kind": {
+        "const": "project_file_write",
+        "type": "string"
+      },
+      "path": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "postBytes": {
+        "minimum": 0,
+        "type": "integer"
+      },
+      "postDigest": {
+        "pattern": "^[a-f0-9]{64}$",
+        "type": "string"
+      },
+      "rootIdentity": {
+        "items": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "maxItems": 2,
+        "minItems": 2,
+        "type": "array"
+      },
+      "taskId": {
+        "minLength": 1,
+        "type": "string"
+      }
+    },
+    "required": [
+      "kind",
+      "changeId",
+      "basePath",
+      "path",
+      "taskId",
+      "rootIdentity",
+      "postDigest",
+      "postBytes"
+    ],
+    "type": "object"
   },
   "ProjectionPatch": {
     "additionalProperties": false,
@@ -1584,6 +1909,33 @@ export const CONVERSATION_SYNC_SCHEMAS = {
     ],
     "type": "object"
   },
+  "RecoverUsageRequest": {
+    "additionalProperties": false,
+    "properties": {
+      "budget": {
+        "$ref": "#/components/schemas/UsageRecoveryBudget"
+      },
+      "commandId": {
+        "maxLength": 256,
+        "minLength": 1,
+        "type": "string"
+      },
+      "confirmed": {
+        "const": true
+      },
+      "expectedProjectionRevision": {
+        "minimum": 0,
+        "type": "integer"
+      }
+    },
+    "required": [
+      "commandId",
+      "expectedProjectionRevision",
+      "confirmed",
+      "budget"
+    ],
+    "type": "object"
+  },
   "RouteModelRef": {
     "additionalProperties": false,
     "properties": {
@@ -1879,6 +2231,18 @@ export const CONVERSATION_SYNC_SCHEMAS = {
         "minLength": 1,
         "type": "string"
       },
+      "fields": {
+        "items": {
+          "enum": [
+            "toolContent",
+            "results"
+          ],
+          "type": "string"
+        },
+        "minItems": 1,
+        "type": "array",
+        "uniqueItems": true
+      },
       "ownerScope": {
         "pattern": "^[0-9a-f]{24}$",
         "type": "string"
@@ -2034,6 +2398,110 @@ export const CONVERSATION_SYNC_SCHEMAS = {
       "kind",
       "ownerId",
       "threadId"
+    ],
+    "type": "object"
+  },
+  "ToolEffectInspectionOutcome": {
+    "enum": [
+      "file_published",
+      "file_not_published",
+      "unknown"
+    ],
+    "type": "string"
+  },
+  "ToolEffectInspectionReason": {
+    "enum": [
+      "undo_committed",
+      "prepared_file_applied",
+      "prepared_file_unpublished",
+      "checkpoint_batch_unentered",
+      "unsupported",
+      "missing_evidence",
+      "evidence_conflict",
+      "evidence_unavailable",
+      "writer_active"
+    ],
+    "type": "string"
+  },
+  "ToolEffectInspectionReference": {
+    "additionalProperties": false,
+    "properties": {
+      "conversationId": {
+        "maxLength": 256,
+        "minLength": 1,
+        "type": "string"
+      },
+      "operationId": {
+        "pattern": "^[a-f0-9]{32}$",
+        "type": "string"
+      },
+      "ownerScope": {
+        "pattern": "^[a-f0-9]{24}$",
+        "type": "string"
+      },
+      "turnId": {
+        "maxLength": 128,
+        "minLength": 1,
+        "type": "string"
+      }
+    },
+    "required": [
+      "conversationId",
+      "turnId",
+      "operationId",
+      "ownerScope"
+    ],
+    "type": "object"
+  },
+  "ToolExecutionEffect": {
+    "additionalProperties": false,
+    "properties": {
+      "inspection": {
+        "$ref": "#/components/schemas/ToolEffectInspectionReference"
+      },
+      "invocationInspection": {
+        "$ref": "#/components/schemas/InvocationToolEffectInspectionReference"
+      },
+      "operationId": {
+        "pattern": "^[a-f0-9]{32}$",
+        "type": "string"
+      },
+      "reconciliation": {
+        "$ref": "#/components/schemas/ProjectFileWriteReconciliation"
+      },
+      "recovery": {
+        "enum": [
+          "read_only",
+          "idempotent",
+          "reconcile"
+        ],
+        "type": "string"
+      },
+      "scope": {
+        "description": "Attempt records belong to the durable Turn; invocation records to a registered child task. Non-read-only intents commit before handler entry. Process-only execution has no restart durability promise.",
+        "enum": [
+          "attempt",
+          "invocation",
+          "process"
+        ],
+        "type": "string"
+      },
+      "state": {
+        "description": "Entered is a write-ahead possibility, not proof of success; returned means a handler response was captured, not that a background operation finished.",
+        "enum": [
+          "entered",
+          "returned",
+          "unknown",
+          "not_started"
+        ],
+        "type": "string"
+      }
+    },
+    "required": [
+      "operationId",
+      "state",
+      "recovery",
+      "scope"
     ],
     "type": "object"
   },
@@ -2214,6 +2682,14 @@ export const CONVERSATION_SYNC_SCHEMAS = {
       },
       "anchorBlockId": {
         "maxLength": 320,
+        "type": "string"
+      },
+      "anchorPosition": {
+        "enum": [
+          "before",
+          "after",
+          "producer-start"
+        ],
         "type": "string"
       },
       "anchorToolRoundNum": {
@@ -2409,12 +2885,35 @@ export const CONVERSATION_SYNC_SCHEMAS = {
       "summaryArgs": {
         "$ref": "#/components/schemas/JsonObject"
       },
+      "summaryCalls": {
+        "items": {
+          "$ref": "#/components/schemas/JsonObject"
+        },
+        "maxItems": 16,
+        "type": "array"
+      },
       "summaryKey": {
+        "maxLength": 160,
+        "type": "string"
+      },
+      "summaryModel": {
+        "maxLength": 160,
+        "type": "string"
+      },
+      "summaryProviderId": {
+        "maxLength": 160,
+        "type": "string"
+      },
+      "summarySelectedModel": {
         "maxLength": 160,
         "type": "string"
       },
       "taskId": {
         "maxLength": 256,
+        "type": "string"
+      },
+      "taskModel": {
+        "maxLength": 160,
         "type": "string"
       },
       "timingMode": {
@@ -2925,6 +3424,10 @@ export const CONVERSATION_SYNC_SCHEMAS = {
       "sourceRevision": {
         "maxLength": 40,
         "type": "string"
+      },
+      "undoAvailable": {
+        "description": "An explicit false is a capability denial, not a failure to edit. Auxiliary manually integrated worktree facts do not authorize the local single-root undo gateway to mutate the canonical checkout.",
+        "type": "boolean"
       }
     },
     "required": [
@@ -3431,6 +3934,10 @@ export const CONVERSATION_SYNC_SCHEMAS = {
       "flowRunId": {
         "type": "string"
       },
+      "goalRunId": {
+        "description": "Explicit durable Goal identity; distinct from the Turn execution attempt runId.",
+        "type": "string"
+      },
       "iteration": {
         "oneOf": [
           {
@@ -3735,7 +4242,6 @@ export const CONVERSATION_SYNC_SCHEMAS = {
         "items": {
           "$ref": "#/components/schemas/TurnMediaAttachment"
         },
-        "maxItems": 20,
         "type": "array"
       },
       "backgroundCommand": {
@@ -3785,7 +4291,6 @@ export const CONVERSATION_SYNC_SCHEMAS = {
         "items": {
           "$ref": "#/components/schemas/TurnImageAttachment"
         },
-        "maxItems": 20,
         "type": "array"
       },
       "lastRoundUsage": {
@@ -3905,6 +4410,31 @@ export const CONVERSATION_SYNC_SCHEMAS = {
       },
       "usage": {
         "$ref": "#/components/schemas/JsonObject"
+      },
+      "usageComplete": {
+        "type": "boolean"
+      },
+      "usageRecovery": {
+        "additionalProperties": false,
+        "description": "Human-confirmed new-budget receipt; never evidence that earlier unknown usage was settled.",
+        "properties": {
+          "budget": {
+            "$ref": "#/components/schemas/UsageRecoveryBudget"
+          },
+          "sourceProjectionRevision": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "sourceTurnId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "sourceTurnId",
+          "sourceProjectionRevision",
+          "budget"
+        ],
+        "type": "object"
       },
       "videos": {
         "items": {
@@ -5209,6 +5739,9 @@ export const CONVERSATION_SYNC_SCHEMAS = {
         "minimum": 0,
         "type": "number"
       },
+      "executionEffect": {
+        "$ref": "#/components/schemas/ToolExecutionEffect"
+      },
       "inspectorRef": {
         "$ref": "#/components/schemas/InspectorRef"
       },
@@ -5503,6 +6036,35 @@ export const CONVERSATION_SYNC_SCHEMAS = {
       "projection"
     ],
     "type": "object"
+  },
+  "UsageRecoveryBudget": {
+    "additionalProperties": false,
+    "properties": {
+      "durationSeconds": {
+        "default": 900,
+        "maximum": 86400,
+        "minimum": 1,
+        "type": "integer"
+      },
+      "maxTokens": {
+        "default": 100000,
+        "maximum": 9007199254740991,
+        "minimum": 1,
+        "type": "integer"
+      },
+      "maxToolCalls": {
+        "default": 100,
+        "maximum": 9007199254740991,
+        "minimum": 0,
+        "type": "integer"
+      }
+    },
+    "required": [
+      "maxTokens",
+      "maxToolCalls",
+      "durationSeconds"
+    ],
+    "type": "object"
   }
 } as const;
 
@@ -5575,6 +6137,65 @@ export type InspectorRef = {
   "turn": string;
 };
 
+export type ProjectFileWriteReconciliation = {
+  "kind": "project_file_write";
+  "changeId": string;
+  "basePath": string;
+  "path": string;
+  "taskId": string;
+  "rootIdentity": ReadonlyArray<number>;
+  "postDigest": string;
+  "postBytes": number;
+};
+
+export type ToolEffectInspectionOutcome = "file_published" | "file_not_published" | "unknown";
+
+export type ToolEffectInspectionReason = "undo_committed" | "prepared_file_applied" | "prepared_file_unpublished" | "checkpoint_batch_unentered" | "unsupported" | "missing_evidence" | "evidence_conflict" | "evidence_unavailable" | "writer_active";
+
+export type ConversationToolEffectInspection = {
+  "ok": true;
+  "contract": "tofu.conversation-sync.tool-effect-inspection/v1";
+  "conversationId": string;
+  "turnId": string;
+  "operationId": string;
+  "outcome": ToolEffectInspectionOutcome;
+  "reason": ToolEffectInspectionReason;
+};
+
+export type InvocationToolEffectInspection = {
+  "ok": true;
+  "contract": "tofu.invocation.tool-effect-inspection/v1";
+  "conversationId": string;
+  "invocationId": string;
+  "operationId": string;
+  "outcome": ToolEffectInspectionOutcome;
+  "reason": ToolEffectInspectionReason;
+};
+
+export type InvocationToolEffectInspectionReference = {
+  "conversationId": string;
+  "invocationId": string;
+  "operationId": string;
+  "ownerScope": string;
+};
+
+export type ToolEffectInspectionReference = {
+  "conversationId": string;
+  "turnId": string;
+  "operationId": string;
+  "ownerScope": string;
+};
+
+export type ToolExecutionEffect = {
+  "reconciliation"?: ProjectFileWriteReconciliation;
+  "inspection"?: ToolEffectInspectionReference;
+  "invocationInspection"?: InvocationToolEffectInspectionReference;
+  "operationId": string;
+  "state": "entered" | "returned" | "unknown" | "not_started";
+  "recovery": "read_only" | "idempotent" | "reconcile";
+  "scope": "attempt" | "invocation" | "process";
+};
+
 export type TurnToolRound = {
   "inspectorRef"?: InspectorRef;
   "attemptId"?: string;
@@ -5589,6 +6210,7 @@ export type TurnToolRound = {
   "toolModelContent"?: ReadonlyArray<{
   [key: string]: unknown;
 }>;
+  "executionEffect"?: ToolExecutionEffect;
   "toolResultEvidence"?: ToolResultEvidence;
   "query"?: string;
   "status"?: string;
@@ -5638,6 +6260,7 @@ export type SnapshotToolResultReference = {
   "ownerScope": string;
   "preview": string;
   "chars": number;
+  "fields"?: ReadonlyArray<"toolContent" | "results">;
 };
 
 export type ConversationTurnRead = {
@@ -5655,6 +6278,7 @@ export type ConversationTurnToolResult = {
   "roundIndex": number;
   "projectionRevision": number;
   "toolContent": string;
+  "results"?: ReadonlyArray<(TurnToolDisplayMetadata) | (string) | (number) | (boolean) | (ReadonlyArray<unknown>) | (null)>;
 };
 
 export type SnapshotDocumentReferences = {
@@ -5870,6 +6494,7 @@ export type TurnFileChange = {
   "action"?: string;
   "root"?: string;
   "rootPath"?: string;
+  "undoAvailable"?: boolean;
   "count"?: number;
   "ok"?: boolean;
   "pending"?: boolean;
@@ -5909,6 +6534,7 @@ export type FlowUsageAccounting = {
 };
 
 export type TurnOrchestration = {
+  "goalRunId"?: string;
   "usageAccounting"?: FlowUsageAccounting;
   "iteration"?: (number) | (string);
   "approved"?: boolean;
@@ -6104,6 +6730,7 @@ export type TurnActivityEntry = {
   "taskId"?: string;
   "attemptId"?: string;
   "anchorBlockId"?: string;
+  "anchorPosition"?: "before" | "after" | "producer-start";
   "anchorToolRoundNum"?: number;
   "llmRound"?: number;
   "model"?: string;
@@ -6120,6 +6747,11 @@ export type TurnActivityEntry = {
   "archiveId"?: string;
   "trigger"?: string;
   "tokenCountKind"?: string;
+  "taskModel"?: string;
+  "summaryModel"?: string;
+  "summarySelectedModel"?: string;
+  "summaryProviderId"?: string;
+  "summaryCalls"?: ReadonlyArray<JsonObject>;
   "tokensBefore"?: number;
   "tokensAfter"?: number;
   "messagesBefore"?: number;
@@ -6296,6 +6928,7 @@ export type TurnProjection = {
   "timingTrace"?: TurnTimingTrace;
   "segments"?: ReadonlyArray<TurnContentSegment>;
   "usage"?: JsonObject;
+  "usageComplete"?: boolean;
   "cost"?: JsonObject;
   "apiRounds"?: ReadonlyArray<JsonObject>;
   "lastRoundUsage"?: TurnLastRoundUsage;
@@ -6321,6 +6954,11 @@ export type TurnProjection = {
   "imageGeneration"?: TurnImageGeneration;
   "proposedPlan"?: TurnProposedPlan;
   "planExecution"?: TurnPlanExecution;
+  "usageRecovery"?: {
+  "sourceTurnId": string;
+  "sourceProjectionRevision": number;
+  "budget": UsageRecoveryBudget;
+};
   "_translateDone"?: boolean;
   "_translateSkippedReason"?: string;
   "_translateModel"?: string;
@@ -6666,6 +7304,26 @@ export type ConversationTurnWindow = {
   "totalTurns": number;
 };
 
+export type ConversationRoundEntry = {
+  "turnId": string;
+  "ordinal": number;
+  "actor": "human" | "critic" | "virtual_user";
+  "roundNumber": number;
+};
+
+export type ConversationRoundDirectory = {
+  "ownerId": number;
+  "conversationId": string;
+  "laneId": string;
+  "syncSeq": number;
+  "stale": boolean;
+  "totalRounds": number;
+  "offset": number;
+  "nextOffset"?: number;
+  "activeRound"?: number;
+  "entries": ReadonlyArray<ConversationRoundEntry>;
+};
+
 export type ConversationTurnPage = {
   "ok": true;
   "contract": "tofu.conversation-sync.turn-page/v1";
@@ -6772,6 +7430,29 @@ export type ExecutePlanRequest = {
   "config": JsonObject;
 };
 
+export type UsageRecoveryBudget = {
+  "maxTokens": number;
+  "maxToolCalls": number;
+  "durationSeconds": number;
+};
+
+export type ConversationUsageRecovery = {
+  "ok": true;
+  "conversationId": string;
+  "sourceTurnId": string;
+  "sourceProjectionRevision": number;
+  "state": "ready" | "blocked";
+  "reason": "ready" | "not_applicable" | "operation_unconfirmed" | "configuration_unavailable";
+  "budget": UsageRecoveryBudget;
+};
+
+export type RecoverUsageRequest = {
+  "commandId": string;
+  "expectedProjectionRevision": number;
+  "confirmed": true;
+  "budget": UsageRecoveryBudget;
+};
+
 export type CreateAttemptRequest = {
   "commandId": string;
   "operation": TurnResumeOperation;
@@ -6781,6 +7462,7 @@ export type CreateAttemptRequest = {
   "inputUpdate"?: unknown;
   "expectedInputProjectionRevision"?: number;
   "humanResponse"?: string;
+  "guidanceId"?: string;
 };
 
 export type CreateLaneRequest = {
@@ -7209,8 +7891,12 @@ export interface ConversationSyncApi {
   snapshot(conversationId: string, options?: RequestOptions): Promise<ConversationSyncSnapshot>;
   eventsUrl(conversationId: string, after?: string, streamClientId?: string, streamGeneration?: number): string;
   createTurn(conversationId: string, body: CreateTurnRequest, options?: RequestOptions): Promise<TurnCommandResponse>;
+  usageRecovery(conversationId: string, turnId: string, options?: RequestOptions): Promise<ConversationUsageRecovery>;
+  recoverUsage(conversationId: string, turnId: string, body: RecoverUsageRequest, options?: RequestOptions): Promise<TurnCommandResponse>;
   cancelQueue(conversationId: string, queueId: string, options?: RequestOptions): Promise<QueueCancelResponse>;
   turnPage(conversationId: string, laneId: string, syncSeq: number, beforeOrdinal?: number, limit?: number, options?: RequestOptions): Promise<ConversationTurnPage>;
+  roundDirectory(conversationId: string, laneId: string, syncSeq: number, offset?: number, limit?: number, anchorTurnId?: string, options?: RequestOptions): Promise<ConversationRoundDirectory>;
+  inspectToolEffect(conversationId: string, turnId: string, operationId: string, ownerScope: string, options?: RequestOptions): Promise<ConversationToolEffectInspection>;
   turnToolResult(conversationId: string, turnId: string, roundIndex: number, projectionRevision: number, ownerScope: string, options?: RequestOptions): Promise<ConversationTurnToolResult>;
   turnImageUrl(conversationId: string, turnId: string, imageIndex: number, projectionRevision: number, ownerScope: string): string;
   appendSettledTurn(conversationId: string, body: AppendSettledTurnRequest, options?: RequestOptions): Promise<TurnMutationResponse>;
@@ -7231,9 +7917,15 @@ const segment = (value: string | number): string => encodeURIComponent(String(va
 
 export const conversationSyncApi = Object.freeze<ConversationSyncApi>({
   async snapshot(conversationId, options = {}) {
+    const { query: selectors, ...requestOptions } = options;
+    const base = `/api/v4/conversations/${segment(conversationId)}/sync?segmentPayload=refs&toolPayload=lazy&turnWindow=tail-96&artifactHint=has-any`;
+    const query = ["windowLimit", "windowBytes"].flatMap((name) =>
+      selectors?.[name] === undefined ? []
+        : [`${name}=${encodeURIComponent(String(selectors[name]))}`],
+    ).join('&');
     const value = await request<unknown>(
-      `/api/v4/conversations/${segment(conversationId)}/sync?segmentPayload=refs&toolPayload=lazy&turnWindow=tail-96&artifactHint=has-any`,
-      { ...options, method: 'GET' },
+      query ? `${base}&${query}` : base,
+      { ...requestOptions, method: 'GET' },
     );
     return assertConversationSyncSchema<ConversationSyncSnapshot>('ConversationSyncSnapshot', value);
   },
@@ -7256,6 +7948,21 @@ export const conversationSyncApi = Object.freeze<ConversationSyncApi>({
     ), command, options);
     return assertConversationSyncSchema<TurnCommandResponse>('TurnCommandResponse', value);
   },
+  async usageRecovery(conversationId, turnId, options = {}) {
+    const value = await request<unknown>(
+      `/api/v4/conversations/${segment(conversationId)}/turns/${segment(turnId)}/usage-recovery`,
+      { ...options, method: 'GET' },
+    );
+    return assertConversationSyncSchema<ConversationUsageRecovery>('ConversationUsageRecovery', value);
+  },
+  async recoverUsage(conversationId, turnId, body, options = {}) {
+    const command = snapshotConversationCommand<RecoverUsageRequest>('RecoverUsageRequest', body);
+    const value = await idempotentCommand(() => request<unknown>(
+      `/api/v4/conversations/${segment(conversationId)}/turns/${segment(turnId)}/usage-recovery`,
+      { ...options, method: 'POST', json: command, timeout: 0 },
+    ), command, options);
+    return assertConversationSyncSchema<TurnCommandResponse>('TurnCommandResponse', value);
+  },
   async cancelQueue(conversationId, queueId, options = {}) {
     const value = await request<unknown>(
       `/api/v4/conversations/${segment(conversationId)}/queue/${segment(queueId)}`,
@@ -7265,6 +7972,7 @@ export const conversationSyncApi = Object.freeze<ConversationSyncApi>({
   },
   async turnPage(conversationId, laneId, syncSeq, beforeOrdinal = undefined, limit = 64, options = {}) {
     const base = resolvePath(`/api/v4/conversations/${segment(conversationId)}/turns/history?segmentPayload=refs&toolPayload=lazy`);
+    const { query: selectors, ...requestOptions } = options;
     const query = [
       `laneId=${encodeURIComponent(laneId)}` ,
       `syncSeq=${encodeURIComponent(String(syncSeq))}` ,
@@ -7272,12 +7980,29 @@ export const conversationSyncApi = Object.freeze<ConversationSyncApi>({
         ? `beforeOrdinal=${encodeURIComponent(String(beforeOrdinal))}` : '',
       Number.isInteger(limit)
         ? `limit=${encodeURIComponent(String(limit))}` : '',
+      selectors?.windowBytes === undefined ? ""
+        : `windowBytes=${encodeURIComponent(String(selectors.windowBytes))}`,
     ].filter(Boolean).join('&');
     const value = await request<unknown>(
       `${base}&${query}`,
-      { ...options, method: 'GET' },
+      { ...requestOptions, method: 'GET' },
     );
     return assertConversationSyncSchema<ConversationTurnPage>('ConversationTurnPage', value);
+  },
+  async roundDirectory(conversationId, laneId, syncSeq, offset = 0, limit = 50, anchorTurnId = undefined, options = {}) {
+    const base = `/api/v4/conversations/${segment(conversationId)}/turns/rounds`;
+    const value = await request<unknown>(base, {
+      ...options, method: 'GET',
+      query: { laneId, syncSeq, offset, limit, ...(anchorTurnId ? { anchorTurnId } : {}) },
+    });
+    return assertConversationSyncSchema<ConversationRoundDirectory>('ConversationRoundDirectory', value);
+  },
+  async inspectToolEffect(conversationId, turnId, operationId, ownerScope, options = {}) {
+    const base = `/api/v4/conversations/${segment(conversationId)}/turns/${segment(turnId)}/tool-effects/${segment(operationId)}`;
+    const value = await request<unknown>(base, {
+      ...options, method: 'GET', query: { ownerScope },
+    });
+    return assertConversationSyncSchema<ConversationToolEffectInspection>('ConversationToolEffectInspection', value);
   },
   async turnToolResult(conversationId, turnId, roundIndex, projectionRevision, ownerScope, options = {}) {
     const base = `/api/v4/conversations/${segment(conversationId)}/turns/${segment(turnId)}/tool-results/${segment(roundIndex)}`;

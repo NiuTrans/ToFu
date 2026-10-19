@@ -65,6 +65,7 @@ files, but the import graph stays clean.
 
 import logging
 import os
+import shutil
 import sys
 
 __all__ = [
@@ -204,6 +205,15 @@ def ensure_chromium_env(env=None, env_prefix=None):
         'ld_library_path': str, 'platform_skipped': bool}``
     """
     target = os.environ if env is None else env
+    # A locally provisioned Node can run the Playwright driver on old Linux
+    # hosts where the package's newer bundled Node cannot load system glibc.
+    # Explicit Playwright selection always wins; no process runs at startup.
+    if sys.platform.startswith('linux') and not target.get('PLAYWRIGHT_NODEJS_PATH'):
+        home = target.get('HOME')
+        local_node = (shutil.which('node', path=os.path.join(home, '.local', 'bin'))
+                      if home else None)
+        if local_node:
+            target['PLAYWRIGHT_NODEJS_PATH'] = local_node
     # install.sh downloads outside the Python env, and its shell exports do
     # not survive a later independent server/bootstrap invocation. Restore
     # that same cache only when it exists; explicit Playwright overrides

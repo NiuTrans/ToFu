@@ -41,7 +41,7 @@ logger = get_logger('tofu.storage.supervisor')
 # engine error/integrity evidence lands in the standard app pipeline
 # (app.log + error.log + incident index) instead of only the inherited
 # console stream. Routing depends on this name staying inside the 'tofu.'
-# business prefix admitted by lib/server_logging._BIZ_PREFIXES.
+# business prefix admitted by lib/server/server_logging._BIZ_PREFIXES.
 engine_logger = get_logger('tofu.storage.engine')
 
 MAX_PINNED_TOFUDB_BINARY_BYTES = 512 * 1024 * 1024
@@ -401,7 +401,7 @@ def _host_overload_detail(
     observation failure falls back to ``None`` (host presumed healthy) so
     non-Linux hosts and restricted sandboxes keep the original fail-fast
     recycle behavior. Kernel-ABI paths mirror lib/cgroup_guard.py and
-    lib/server_mlock.py; kept independent so this monitor carries no import
+    lib/server/server_mlock.py; kept independent so this monitor carries no import
     dependency on later-loaded modules.
     """
     try:
@@ -983,13 +983,13 @@ class StorageSupervisor:
         if native_scope is not None and self._resolve_transport() == 'embedded':
             return self._start_embedded(native_scope)
         expected_protocol = PROTOCOL_VERSION
-        launch_command = [sys.executable, '-m', 'lib.storage_sidecar']
+        launch_command = [sys.executable, '-m', 'lib.storage_authority_sql']
         if native_scope is not None:
             from tofu_db.wire import PROTOCOL_VERSION as V2_PROTOCOL_VERSION
 
             expected_protocol = V2_PROTOCOL_VERSION
             launch_command = [
-                sys.executable, '-m', 'lib.storage_sidecar.native_launch',
+                sys.executable, '-m', 'lib.storage_authority_sql.native_launch',
                 _resolve_tofudb_binary(), str(native_scope[0]),
                 str(native_scope[1] or 0),
             ]
@@ -1030,12 +1030,12 @@ class StorageSupervisor:
             try:
                 projection_directory = ''
                 if native_scope is not None:
-                    from lib.storage_sidecar.projection_paths import resolve_search_projection_paths
+                    from lib.storage_authority_sql.projection_paths import resolve_search_projection_paths
 
                     if self._project_root is not None:
                         data_dir = self._project_root / 'data'
                     else:
-                        from lib.runtime_paths import data_root
+                        from lib.runtime.runtime_paths import data_root
 
                         data_dir = Path(data_root())
                     projection_directory = str(resolve_search_projection_paths(
@@ -1338,7 +1338,7 @@ class StorageSupervisor:
         if self._project_root is not None:
             data_dir = self._project_root / 'data'
         else:
-            from lib.runtime_paths import data_root
+            from lib.runtime.runtime_paths import data_root
 
             data_dir = Path(data_root()).resolve()
         from lib.storage.volume_class import NETWORK, volume_class
@@ -1370,11 +1370,11 @@ class StorageSupervisor:
         monitor fences the degraded case (driver failure, closed handle)
         through the same crash callbacks a daemon exit fires.
         """
-        from lib.storage_sidecar.native_launch import (
+        from lib.storage_authority_sql.native_launch import (
             _bootstrap_fresh_authority,
             _durability_args,
         )
-        from lib.storage_sidecar.preflight import ProjectLease
+        from lib.storage_authority_sql.preflight import ProjectLease
 
         if _durability_args():
             raise RuntimeError(
@@ -1384,14 +1384,14 @@ class StorageSupervisor:
         if self._project_root is not None:
             data_dir = self._project_root / 'data'
         else:
-            from lib.runtime_paths import data_root
+            from lib.runtime.runtime_paths import data_root
 
             data_dir = Path(data_root()).resolve()
         authority = data_dir / 'tofudb-authority'
         if not authority.is_dir():
             _bootstrap_fresh_authority(binary, authority)
-        from lib.storage_sidecar.projection_paths import (
-            prepare_search_projection_directory, resolve_search_projection_paths,
+        from lib.storage_authority_sql.projection_paths import (
+            resolve_search_projection_paths,
         )
 
         with self._lock:
@@ -1423,8 +1423,6 @@ class StorageSupervisor:
             from tofu_db.embedded import EmbeddedRuntime
 
             projection = resolve_search_projection_paths(data_dir)
-            prepare_search_projection_directory(
-                projection.directory, projection.authority_directory)
             runtime = EmbeddedRuntime(
                 Path(library),
                 authority,

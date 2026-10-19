@@ -8,7 +8,7 @@ survives provider field stripping. Never infer identity from pasted markup.
 from __future__ import annotations
 
 from lib.tasks_pkg.compaction._constants import _COMPACT_TOOL_NAME
-from lib.tool_history_pairing import adjacent_tool_call_result_pairs
+from lib.tool_results.tool_history_pairing import adjacent_tool_call_result_pairs
 
 HANDOFF_FIELD = '_compactionHandoff'
 HANDOFF_VERSION = 'tofu.compaction-handoff/v1'

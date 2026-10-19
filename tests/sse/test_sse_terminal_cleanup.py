@@ -5,14 +5,96 @@ import asyncio
 
 import httpx
 import pytest
+import requests
 
 from lib.llm import _transport as transport
 from lib.llm.stream_result import ProviderStreamState
-from lib.llm_errors import AbortedError
-from tests.sse.test_sse_core_parity import _FakeAsyncStreamCtx, _run_async
+from lib.llm.llm_errors import AbortedError
+from lib.desktop.egress import EgressUnavailable
+from tests.sse.test_sse_core_parity import _FakeAsyncStreamCtx, _run_async, _run_sync
 from tests.sse.test_sse_terminal_boundary import _response
 
 pytestmark = pytest.mark.unit
+
+
+def _drain_sync(chunks, **kwargs):
+    watcher = transport.StreamIdleWatchdog()
+    try:
+        return transport.drain_completed_sync_stream(
+            iter(chunks), response=None, watchdog=watcher, **kwargs)
+    finally:
+        watcher.cancel()
+        watcher._thread.join(1)
+        assert not watcher._thread.is_alive()
+
+
+@pytest.mark.parametrize('chunk', [b'x', b'x' * (32 << 10)])
+def test_sync_endless_tail_has_byte_and_iteration_bounds(chunk):
+    reads = []
+
+    def tail():
+        while True:
+            reads.append(len(chunk))
+            yield chunk
+
+    assert _drain_sync(tail()) is False
+    assert 0 < len(reads) <= transport.POST_TERMINAL_DRAIN_MAX_CHUNKS
+    assert sum(reads) <= transport.POST_TERMINAL_DRAIN_MAX_BYTES
+
+
+def test_sync_cleanup_preserves_abort_and_rejects_oversized_capture():
+    with pytest.raises(AbortedError):
+        _drain_sync([b'tail'], abort_check=lambda: True)
+    captured = []
+    assert _drain_sync([b'x' * (transport.POST_TERMINAL_DRAIN_MAX_BYTES + 1)],
+                       on_chunk=captured.append) is False
+    assert captured == []
+
+
+@pytest.mark.parametrize('error', [TimeoutError, ValueError])
+def test_sync_cleanup_does_not_hide_callback_errors(error):
+    def callback(chunk):
+        raise error('callback failed')
+
+    with pytest.raises(error, match='callback failed'):
+        _drain_sync([b'tail'], on_chunk=callback)
+
+
+@pytest.mark.parametrize('protocol', ['openai', 'anthropic', 'responses'])
+@pytest.mark.parametrize('error', [requests.exceptions.ChunkedEncodingError,
+                                 EgressUnavailable])
+def test_sync_late_transport_error_cannot_retry_completed_work(protocol, error):
+    prefix, terminal = _response(protocol)
+    reads = []
+
+    def tail():
+        yield prefix + terminal
+        reads.append('cleanup')
+        raise error('late disconnect')
+
+    result = _run_sync([], protocol=protocol, raw_chunks=tail())
+    assert reads == ['cleanup']
+    assert result.state is ProviderStreamState.PROVIDER_FINISHED
+    assert result.message['content'] == 'complete 世界'
+    assert '_failure_stage' not in result.usage
+
+
+def test_sync_bounded_tail_releases_reader_without_reparsing(monkeypatch):
+    monkeypatch.setattr(transport, 'POST_TERMINAL_DRAIN_MAX_CHUNKS', 2)
+    prefix, terminal = _response('responses')
+    closed = []
+
+    def tail():
+        try:
+            yield prefix + terminal
+            while True:
+                yield b'invalid trailing bytes'
+        finally:
+            closed.append(True)
+
+    result = _run_sync([], protocol='responses', raw_chunks=tail())
+    assert result.state is ProviderStreamState.PROVIDER_FINISHED
+    assert closed == [True]
 
 
 def test_small_tail_is_drained_to_eof_for_connection_reuse():
@@ -192,7 +274,7 @@ def test_preterminal_transport_error_remains_retryable(monkeypatch):
     monkeypatch.setattr(_FakeAsyncStreamCtx, 'aiter_bytes', bytes_then_error)
     # finish_reason alone cannot suppress transport errors: final usage might
     # still be missing. The existing retry exception contract remains intact.
-    from lib.llm_errors import RetryableAPIError
+    from lib.llm.llm_errors import RetryableAPIError
     with pytest.raises(RetryableAPIError):
         _run_async([])
 

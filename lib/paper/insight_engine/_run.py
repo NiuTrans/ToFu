@@ -7,7 +7,7 @@ model synthesis, grounding, rendering, anchors, and rubric scoring.
 import time
 import uuid
 
-from lib.llm_errors import AbortedError
+from lib.llm.llm_errors import AbortedError
 from lib.log import get_logger
 
 from ._config import INSIGHT_GATE_THRESHOLD, insight_gate_fires, insight_lang_key

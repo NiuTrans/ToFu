@@ -1,7 +1,7 @@
 """Demand-driven execution, spooled transport and negotiated replay deadlines.
 
 Legacy execution stays demand-driven. Negotiated server delivery uses advisory
-CPU/memory slots; finite replay records retire only after expiry and output ACK.
+poll windows; replay records retire only after their horizon and output ACK.
 Spool and execution owners join at shutdown before temporary output is reclaimed.
 """
 import json
@@ -188,6 +188,7 @@ class RuntimeState:
         self._deadlines, self._expiry_heap = {}, []
         self._clock = clock
         self._server_anchor = self._clock_anchor = None
+        self._active_cursor = 0
 
     def _server_now(self):
         if self._server_anchor is None:
@@ -227,15 +228,34 @@ class RuntimeState:
             self._reclaim()
             if self.stop.is_set():
                 return 0
-            return max(0, min(self.budget.workers - len(self.running),
-                              self.budget.replay_ids - len(self._deadlines)))
+            return limit('command_batch')
 
-    def admit(self, cmd_id, *, expires_at=None):
+    def active_command_ids(self):
+        """Rotate bounded metadata pages; active cardinality grants no refusal."""
+        with self.lock:
+            active = sorted(self.running)
+            if not active:
+                self._active_cursor = 0
+                return []
+            size = min(len(active), limit('legacy_execution_ids'))
+            start = self._active_cursor % len(active)
+            selected, encoded_bytes = [], 2
+            for index in range(size):
+                command_id = active[(start + index) % len(active)]
+                item_bytes = len(json.dumps(command_id, ensure_ascii=True).encode("ascii")) + 2
+                if selected and encoded_bytes + item_bytes > limit("stream_bytes_floor"):
+                    break
+                selected.append(command_id)
+                encoded_bytes += item_bytes
+            self._active_cursor = (start + len(selected)) % len(active)
+            return selected
+
+    def admit(self, cmd_id, *, expires_at=None, deadline_enforced=True):
         with self.lock:
             self._reclaim()
             if self.stop.is_set() or cmd_id in self.seen:
                 return False
-            if self.expired(expires_at):
+            if deadline_enforced and self.expired(expires_at):
                 self.results.append({'id': cmd_id, 'result': None,
                                      'error': 'Command expired before desktop execution'})
                 return False
@@ -291,6 +311,8 @@ def validate_poll_response(data, *, agent_id=None, require_v3=False):
                            or not isinstance(cmd.get('target_agent_id'), str)
                            or not cmd['target_agent_id']):
             raise ValueError('Invalid desktop command lifetime or device')
+        if 'deadline_enforced' in cmd and type(cmd['deadline_enforced']) is not bool:
+            raise ValueError('Invalid desktop deadline policy')
     return commands
 
 

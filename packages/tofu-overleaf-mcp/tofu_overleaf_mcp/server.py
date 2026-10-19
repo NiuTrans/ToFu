@@ -13,7 +13,7 @@ import os
 
 from mcp.server.lowlevel import Server
 from mcp.server.stdio import stdio_server
-from mcp.types import CallToolResult, ListToolsResult, TextContent, Tool, ToolAnnotations
+from mcp.types import CallToolResult, PaginatedRequestParams, ListToolsResult, TextContent, Tool, ToolAnnotations
 
 from . import __version__
 from .contract import ExportError, definition, schema
@@ -57,6 +57,10 @@ def create_server(store: ExportStore, upstream, *, writes=None, git_operations=N
         file_write = writes is not None and params.name in write_contract()['x-mcp-write-tools']
         git_operation = params.name in git_tools()
         if role is None and not git_operation:
+            legacy = await upstream.handle_list_tools(ctx, PaginatedRequestParams())
+            if not any(tool.name == params.name for tool in legacy.tools):
+                return CallToolResult(content=[TextContent(
+                    type='text', text='Unknown tool: ' + params.name)], is_error=True)
             return await upstream.handle_call_tool(ctx, params)
         try:
             args = params.arguments or {}

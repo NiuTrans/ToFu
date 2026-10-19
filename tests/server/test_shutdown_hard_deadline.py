@@ -11,7 +11,7 @@ pytestmark = pytest.mark.unit
 
 
 def test_server_reexports_shutdown_policy_from_lifecycle_module():
-    from lib import server_shutdown
+    from lib.server import server_shutdown
     import server
 
     assert server.graceful_shutdown_signals is server_shutdown.graceful_shutdown_signals
@@ -72,7 +72,7 @@ def test_shutdown_deadline_forces_only_while_shutdown_is_requested():
 
 
 def test_shutdown_trigger_closes_push_before_transport_drain():
-    from lib.server_shutdown import wait_for_shutdown_trigger
+    from lib.server.server_shutdown import wait_for_shutdown_trigger
 
     requested = threading.Event()
     closed = []

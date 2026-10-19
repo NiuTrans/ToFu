@@ -10,20 +10,25 @@ from __future__ import annotations
 from collections import deque
 from contextvars import copy_context
 from dataclasses import dataclass, field
+import os
 import sys
 import threading
 import time
-from typing import Callable
+import weakref
+from typing import Callable, TYPE_CHECKING
 
-from lib.storage.generated_task_event_delivery_contract import (
-    PROGRESS_BATCH_MAX_FRAMES, PROGRESS_BATCH_MAX_WIRE_BYTES,
+from lib.agent_core.generated_task_event_delivery_contract import (
+    PROGRESS_BATCH_MAX_FRAMES, PROGRESS_BATCH_MAX_WIRE_BYTES, DELIVERY_PROFILE_ENV,
 )
 from runtime_guards import resolve_resource_budget
 from lib.log import get_logger
-from lib.storage.retry import is_transient_storage_error
+from lib.agent_core.storage_errors import is_transient_storage_error
 
 from lib.agent_core.publication import accepted_publication_context
-from lib.storage_event_policy import resolve_storage_event_budget
+from lib.storage.storage_event_policy import resolve_storage_event_budget
+
+if TYPE_CHECKING:
+    from lib.tasks_pkg.event_delivery_profile import DeliverySample
 
 logger = get_logger(__name__)
 
@@ -98,6 +103,7 @@ class _Delivery:
     progress_wire_bytes: int = 0
     progress_payload_bytes: int = 0
     persistence_started: bool = False
+    profile: DeliverySample | None = None
 
     @property
     def event_count(self):
@@ -109,11 +115,22 @@ class EventDeliveryCoordinator:
 
     Queued and in-flight snapshots are measured, never a count/byte quota.
     A failed head stays retained; no later frame can overtake it. Transient
-    failure still admits memory events; explicit flush/maintenance retries
-    that head instead of silently skipping evidence.
+    pressure retains the exact head under the shared agent wait owner. Model/
+    tool/round barriers pause execution without silently skipping evidence.
     """
     def __init__(self, *, workers=None, capacity=None, byte_capacity=None,
-                 retry_attempts=8, retry_delay=0.1, idle_timeout=1.0):
+                 retry_attempts=8, retry_delay=0.1, idle_timeout=1.0, profile_every=None):
+        if profile_every is None:
+            try:
+                profile_every = max(0, int(os.environ.get(DELIVERY_PROFILE_ENV, '0')))
+            except ValueError:
+                profile_every = 0
+        if isinstance(profile_every, bool) or not isinstance(profile_every, int) or profile_every < 0:
+            raise ValueError('profile_every must be a nonnegative integer')
+        self.profiler = None
+        if profile_every:
+            from lib.tasks_pkg.event_delivery_profile import DeliveryProfiler
+            self.profiler = DeliveryProfiler(profile_every)
         budget = resolve_storage_event_budget()
         self.idle_reuse_workers = max(1, int(workers)) if workers is not None else resolve_resource_budget(
             'TOFU_AGENT_WORKERS', minimum=1, maximum=sys.maxsize)
@@ -123,7 +140,9 @@ class EventDeliveryCoordinator:
         self.retry_attempts = max(1, retry_attempts)
         self.retry_delay = max(0.0, retry_delay)
         self.idle_timeout = idle_timeout
-        self.condition = threading.Condition()
+        self._state_lock = threading.RLock()
+        self.condition = threading.Condition(self._state_lock)
+        self._flush_conditions = weakref.WeakKeyDictionary()
         self.ready = deque()
         self.lanes = set()
         self.workers = set()
@@ -131,6 +150,7 @@ class EventDeliveryCoordinator:
         self._executor = None
         self.count = self.bytes = self.active = self.pending_frames = 0
         self.closed = False
+        self._shutdown_deadline = None
         self.projections = {}
         self.metrics = dict(accepted=0, committed=0, completed=0, retries=0, failures=0,
                             peak_events=0, peak_bytes=0, peak_workers=0,
@@ -167,6 +187,7 @@ class EventDeliveryCoordinator:
                     lane.error = error
                     lane.task['_eventDeliveryError'] = type(error).__name__
                     self.metrics['failures'] += 1
+                    self._notify_lane(lane)
             self.condition.notify_all()
 
     def submit(self, lane, sequence, retained_bytes, persist, publish, *, timeout=None,
@@ -206,6 +227,8 @@ class EventDeliveryCoordinator:
                 merged_bytes = tail.progress_wire_bytes + retained_bytes
                 extra_bytes = merged_bytes - tail.retained_bytes
                 if tail.progress_payload_bytes + progress_payload_bytes <= self.progress_batch_byte_limit:
+                    if tail.profile is not None:
+                        self.profiler.observe('accept_frame', tail.profile, sequence)
                     tail.progress_frames.append(progress_frame)
                     tail.sequence = sequence
                     tail.persist = persist
@@ -230,6 +253,8 @@ class EventDeliveryCoordinator:
             if projection_identity is not None:
                 residency = self.projections.setdefault(projection_identity, [projection_bytes, 0])
                 residency[1] += 1
+            if self.profiler is not None:
+                item.profile = self.profiler.observe('accept', sequence)
             lane.pending.append(item)
             lane.accepted += 1
             self.lanes.add(lane)
@@ -251,6 +276,7 @@ class EventDeliveryCoordinator:
                 lane.error = exc
                 lane.task['_eventDeliveryError'] = type(exc).__name__
                 self.metrics['failures'] += 1
+                self._notify_lane(lane)
                 raise EventDeliveryError('Task event delivery worker could not start') from exc
 
     def _release_item(self, item):
@@ -269,13 +295,40 @@ class EventDeliveryCoordinator:
         if lane.revoked:
             raise EventDeliveryRevoked('Task event publication authority was revoked')
         if self.closed:
-            raise EventDeliveryError('Task event delivery is shutting down')
+            raise EventDeliveryCancelled('Task event delivery is shutting down')
         if lane.error is not None and not is_transient_storage_error(lane.error):
             raise EventDeliveryError('Earlier task event is not durable') from lane.error
 
-    def flush(self, lane, *, timeout=30.0, recover=True):
-        deadline = time.monotonic() + timeout
+    def _lane_condition(self, lane):
+        # State stays under the same coordinator lock; only waiter queues are
+        # separate. A sibling commit must not wake every task's barrier.
+        condition = self._flush_conditions.get(lane)
+        if condition is None:
+            condition = threading.Condition(self._state_lock)
+            self._flush_conditions[lane] = condition
+        return condition
+
+    def _notify_lane(self, lane):
+        condition = self._flush_conditions.get(lane)
+        if condition is not None:
+            condition.notify_all()
+
+    def flush(self, lane, *, timeout=30.0, recover=True, cancel_check=None):
+        if self.profiler is None:
+            return self._flush(lane, timeout=timeout, recover=recover, cancel_check=cancel_check)
+        start = self.profiler.observe('clock_ns')
+        failed = True
+        try:
+            result = self._flush(lane, timeout=timeout, recover=recover, cancel_check=cancel_check)
+            failed = False
+            return result
+        finally:
+            self.profiler.observe('barrier', start, failed)
+
+    def _flush(self, lane, *, timeout=30.0, recover=True, cancel_check=None):
+        deadline = None if timeout is None else time.monotonic() + timeout
         with self.condition:
+            lane_condition = self._lane_condition(lane)
             target = lane.accepted
             if recover and lane.error is not None:
                 lane.error = None
@@ -283,32 +336,59 @@ class EventDeliveryCoordinator:
             while lane.completed < target:
                 if lane.error is not None:
                     raise EventDeliveryError('Task event delivery failed; pending evidence retained') from lane.error
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
+                if cancel_check is not None and cancel_check():
+                    from lib.llm.llm_errors import AbortedError
+                    raise AbortedError('Agent stopped at event durability barrier')
+                remaining = None if deadline is None else deadline - time.monotonic()
+                if remaining is not None and remaining <= 0:
                     raise EventDeliveryError('Task event durability barrier timed out; pending evidence retained')
-                self.condition.wait(remaining)
+                wait_for = remaining
+                if cancel_check is not None:
+                    wait_for = 0.1 if remaining is None else min(0.1, remaining)
+                lane_condition.wait(wait_for)
 
     def _persist(self, item, lane):
-        for attempt in range(self.retry_attempts):
+        from lib.tasks_pkg.persistence_wait import wait_for_persistence
+
+        def persist():
+            start = self.profiler.observe('attempt_start', item.profile) if item.profile is not None else None
+            failed = True
+            outcome = 'interrupted'
             try:
                 if item.progress_frames is not None:
-                    item.context.run(item.persist_progress, item.progress_frames)
+                    result = item.context.run(item.persist_progress, item.progress_frames)
                 else:
-                    item.context.run(item.persist)
-                return
+                    result = item.context.run(item.persist)
+                failed = False
+                outcome = 'ok'
+                return result
             except EventDeliveryRevoked:
+                outcome = 'authority_revoked'
                 raise
-            except Exception as exc:
-                # Keep the existing owner-scoped frontend wedge signal at
-                # the first failed attempt, not after the entire retry window.
+            except Exception as error:
+                if item.profile is not None:
+                    outcome = self.profiler.observe('failure_outcome', error)
                 lane.task.setdefault('_pushWithheldAt', time.time())
                 lane.task['_pushWithheldCount'] = min((1 << 31) - 1,
                     int(lane.task.get('_pushWithheldCount') or 0) + 1)
-                if not is_transient_storage_error(exc) or attempt + 1 == self.retry_attempts:
-                    raise
-                with self.condition:
-                    self.metrics['retries'] += 1
-                time.sleep(min(1.0, self.retry_delay * (2 ** attempt)))
+                raise
+            finally:
+                if item.profile is not None:
+                    self.profiler.observe('attempt_end', item.profile, start, failed, outcome)
+
+        def retry():
+            with self.condition:
+                self.metrics['retries'] += 1
+
+                self.condition.notify_all()
+
+        # Accepted evidence must still commit after user Stop. Shutdown hands
+        # the exact head to existing debt/recovery rather than losing ownership.
+        wait_for_persistence(lane.task, persist, label='task event',
+                             cancellable=False, stopping=lambda: (
+                                 self._shutdown_deadline is not None
+                                 and time.monotonic() >= self._shutdown_deadline),
+                             on_retry=retry)
 
     def _run(self):
         current = threading.current_thread()
@@ -339,8 +419,12 @@ class EventDeliveryCoordinator:
                     # An unacknowledged attempt may already be committed.
                     # Keep its exact batch through failure and explicit repair.
                     item.persistence_started = True
+                if item.profile is not None:
+                    self.profiler.observe('dispatch', item.profile)
                 try:
                     self._persist(item, lane)
+                    if item.profile is not None:
+                        self.profiler.observe('acknowledge', item.profile)
                 except EventDeliveryRevoked:
                     with self.condition:
                         lane.running = False
@@ -349,6 +433,8 @@ class EventDeliveryCoordinator:
                         lane.task['_eventDeliveryRevoked'] = True
                         self.metrics['revoked_events'] += sum(entry.event_count for entry in lane.pending)
                         for entry in lane.pending:
+                            if entry.profile is not None:
+                                self.profiler.observe('finish', entry.profile, 'revoked')
                             self._release_item(entry)
                         lane.pending.clear()
                         lane.completed = lane.accepted
@@ -357,16 +443,20 @@ class EventDeliveryCoordinator:
                         lane.projection_identity = None
                         self.lanes.discard(lane)
                         lane.task.pop('_eventDeliveryPending', None)
+                        self._notify_lane(lane)
                         self.condition.notify_all()
                     del item, lane
                     continue
                 except BaseException as exc:
+                    if item.profile is not None:
+                        self.profiler.observe('failed_round')
                     with self.condition:
                         lane.running = False
                         self.active -= 1
                         lane.error = exc
                         self.metrics['failures'] += 1
                         lane.task['_eventDeliveryError'] = type(exc).__name__
+                        self._notify_lane(lane)
                         self.condition.notify_all()
                     logger.warning('[TaskEvents] retained failed delivery task=%s seq=%s error=%s',
                                    str(lane.task.get('id') or '?')[:8], item.sequence, type(exc).__name__)
@@ -379,20 +469,16 @@ class EventDeliveryCoordinator:
                 try:
                     if item.progress_frames is not None:
                         for frame in item.progress_frames:
-                            advance_event_visibility(lane.task, frame.sequence)
-                            try:
-                                frame.context.run(frame.publish)
-                            except Exception as exc:
-                                logger.debug('[TaskEvents] push observer failed: %s', type(exc).__name__)
+                            self._publish(item, lane, frame.sequence, frame.context, frame.publish)
                     else:
-                        if item.sequence >= 0:
-                            advance_event_visibility(lane.task, item.sequence)
-                        item.context.run(item.publish)
+                        self._publish(item, lane, item.sequence, item.context, item.publish)
                 except Exception as exc:
                     # Visibility hints cannot invalidate a committed event or
                     # cause repeated authority writes; reconnect repairs push.
                     logger.debug('[TaskEvents] push observer failed: %s', type(exc).__name__)
                 finally:
+                    if item.profile is not None:
+                        self.profiler.observe('finish', item.profile, 'committed')
                     with self.condition:
                         lane.pending.popleft()
                         lane.running = False
@@ -400,6 +486,7 @@ class EventDeliveryCoordinator:
                         lane.completed += item.event_count
                         self._release_item(item)
                         self.metrics['completed'] += item.event_count
+                        self._notify_lane(lane)
                         if item.sequence >= 0:
                             self.metrics['committed'] += item.event_count
                         self.metrics['max_lag_ms'] = max(self.metrics['max_lag_ms'],
@@ -420,9 +507,29 @@ class EventDeliveryCoordinator:
                 self.workers.discard(current)
                 self.condition.notify_all()
 
+    def _publish(self, item, lane, sequence, context, publish):
+        profile = item.profile
+        start = self.profiler.observe('clock_ns') if profile is not None else None
+        callback_start = None
+        failed = True
+        try:
+            if sequence >= 0:
+                advance_event_visibility(lane.task, sequence)
+            if profile is not None:
+                callback_start = self.profiler.observe('clock_ns')
+            try:
+                context.run(publish)
+                failed = False
+            except Exception as exc:
+                logger.debug('[TaskEvents] push observer failed: %s', type(exc).__name__)
+        finally:
+            if profile is not None:
+                end = self.profiler.observe('clock_ns')
+                self.profiler.observe('publication', profile, sequence, start, callback_start, end, failed)
+
     def snapshot(self):
         with self.condition:
-            return {**self.metrics, 'pending_events': self.pending_frames,
+            result = {**self.metrics, 'pending_events': self.pending_frames,
                     'pending_batches': self.count,
                     'pending_bytes': self.bytes, 'workers': len(self.workers),
                     'active_workers': self.active,
@@ -430,11 +537,15 @@ class EventDeliveryCoordinator:
                     'event_capacity': self.capacity,
                     'progress_batch_capacity': self.progress_batch_limit,
                     'byte_capacity': self.byte_capacity, 'failed_lanes': sum(l.error is not None for l in self.lanes)}
+        result['performance_profile'] = (self.profiler.observe('snapshot') or {'enabled': True, 'available': False}) if self.profiler is not None else {'enabled': False}
+        return result
 
     def close(self, timeout=10.0):
         deadline = time.monotonic() + timeout
         with self.condition:
             self.closed = True
+
+            self._shutdown_deadline = deadline
             self.condition.notify_all()
             for lane in tuple(self.lanes):
                 if lane.error is not None:
@@ -516,10 +627,10 @@ def advance_event_visibility(task, sequence):
             receipt['visibleCursor'] = task['_eventVisibilityCursor']
 
 
-def flush_task_events(task, *, timeout=30.0):
+def flush_task_events(task, *, timeout=None, cancel_check=None):
     lane = task.get('_eventDeliveryLane')
     if lane is not None:
-        coordinator().flush(lane, timeout=timeout)
+        coordinator().flush(lane, timeout=timeout, cancel_check=cancel_check)
         task['_eventDeliveryReceipt'] = {
             'contract': 'tofu.task-event-delivery/v1',
             'accepted': lane.accepted, 'completed': lane.completed,

@@ -10,11 +10,13 @@ code ownership only and must not redefine backend authority.
 |---|---|---|
 | `lib/storage/` | Web, worker, task, plugin parent | Selected `storage.v1` / native `storage.v2` transport, process-wide response-frame admission, semantic client, structured errors, supervision, readiness/write fence, declarative manifest validation |
 | `lib/storage_sidecar/` | Dedicated child process | Personal database paths, project lease, FUSE preflight, drivers, pools, transactions, receipts, semantic operation catalog, SQLite backup/restore/handoff |
+| `lib/storage_sidecar/native_checkpoint_{config,service}.py`, `lib/storage/checkpoint_control.py` | Selected SQL Sidecar / application client | Explicit pinned scope, lazy joined code lifetime and one-attempt instance-bound RPC; no backend switching or generic receipts |
+| `lib/storage_sidecar/native_checkpoint_outbox.py` | Selected SQL Sidecar | Shared Rust checkpoint transaction capture, ordered SQL prefix verification and passive replay; existing outbox owns encryption/publication |
 | `lib/storage_sidecar/adapters/sqlite.py` | Sidecar only | One ordered writer without job-count admission, fair priority lanes, demand-created query-only connections with idle reuse, WAL/full-sync, progress watchdog, result-code retry classification |
 | `lib/storage_sidecar/adapters/postgres.py` | Sidecar only | External TLS PostgreSQL connections, durability/schema validation, Psycopg 3 demand-created connections, isolated read/write lease owners, idle reuse and SQLSTATE retry classification |
 | `packages/tofu-db/` | Supervised Rust authority | CONTROL/WAL engine, owner-scoped semantic operations and resource-budgeted `storage.v2` serving; selection and certification are separate ([native contract](../STORAGE_TOFUDB.md)) |
-| `lib/storage_metric_policy.py` | Shared dependency-light policy | Launch-probed recent latency sample window for application and Sidecar metrics |
-| `lib/storage_event_policy.py` | Application process | Launch-derived event residency hints and independent Sidecar frame bounds; batcher uses RAM/file overflow, while task delivery owns its separate scheduling policy |
+| `lib/storage/storage_metric_policy.py` | Shared dependency-light policy | Launch-probed recent latency sample window for application and Sidecar metrics |
+| `lib/storage/storage_event_policy.py` | Application process | Launch-derived event residency hints and independent Sidecar frame bounds; batcher uses RAM/file overflow, while task delivery owns its separate scheduling policy |
 | `lib/conversations/repository.py` | Application process | Owner-scoped conversation projections; metadata-first lazy transcript scans with recursive frame splitting; validated interval-count projection |
 
 | `lib/conversations/diagnostic.py` | Application process | Strict owner/revision/rank/byte-cursor validation for bounded diagnostic reads; no projection hydration or physical storage knowledge |
@@ -25,10 +27,10 @@ code ownership only and must not redefine backend authority.
 | `lib/storage_sidecar/operations_pkg/_conversations.py` | Sidecar only | Owner-scoped metadata/full/window/activity projections; SQL paging/scalar timestamps for active Turns; bounded compatibility decoding for frozen archives |
 | `lib/storage_sidecar/archived_message_codec.py`, `offline_compaction_archive_maintenance.py` | Sidecar archive boundary / stopped-server window | Backend-neutral lossless per-message storage codec; bounded owner-resolved consolidation of retired compaction snapshots |
 | `lib/storage_sidecar/task_result_field_codec.py`, `operations_pkg/_records.py`, `offline_task_result_maintenance.py` | Sidecar task-result boundary / stopped-server window | Selective backend-neutral field codec; public hydration, compact projections, and bounded version-neutral historical backfill |
-| `lib/storage_sidecar/logical_outbox.py`, `logical_shadow.py` | Sidecar only, explicit opt-in | Same-transaction bounded logical outbox; asynchronous backend-neutral publisher; private checksummed filesystem sink; publisher health and backpressure |
+| `lib/storage_sidecar/logical_outbox.py`, `logical_shadow.py` | Sidecar only, explicit opt-in | Same-transaction durable logical outbox; asynchronous backend-neutral publisher; private checksummed filesystem sink; publisher health and backpressure |
 | `lib/storage_sidecar/logical_replay.py` | Offline verifier / future projection worker | Authenticated bounded mutation replay to SQLite/PostgreSQL with an atomic durable checkpoint, ordered projection digests, deterministic canary sampling, explicit fail-closed cutover/rollback evidence |
 | `scripts/storage_deep_clean.py` | Explicit stopped-server window | Lease-owned retention, verified compaction, deferred performance-index installation, integrity/parity gates, atomic publication and rollback retention |
-| `lib/storage_sidecar/tofudb_migration_{source,checkpoint,target,import}.py` | Explicit offline migration owner | Bounded pinned SQLite reads, verified identity-bound resume publication, and operator domain import; limits generated from `contracts/tofudb_ir_v1.json`; rollback, remaining domains, and cutover stay separate |
+| `lib/storage_sidecar/migration/tofudb_migration_{source,checkpoint,target,import}.py` | Explicit offline migration owner | Bounded pinned SQLite reads, verified identity-bound resume publication, and operator domain import; limits generated from `contracts/tofudb_ir_v1.json`; rollback, remaining domains, and cutover stay separate |
 | `lib/storage_sidecar/migrate.py` | One-shot distributed migration Job | Advisory-lock serialization and forward-only PostgreSQL schema migration; never imported as application startup authority |
 | `lib/database_panel/` | Application process | Settings → 数据库 panel: engine status/switch (`.env` + restart), optional native/SQLite Fast Path configuration and actual activation, independent native search-index placement, path discovery, dual-path backup mirror; contract in [STORAGE.md](../STORAGE.md#settings-database-panel) |
 
@@ -64,6 +66,9 @@ itself resolves identical replay and rejects stale divergent replay. Clean
 no-write results are not receipts. Both adapters execute the same catalog
 contract and return the same wire shapes and error codes.
 
+Generic record metadata reads share SQL/native implementations in `_records.py`
+and `versioned_document.rs`; the wire contract is in [STORAGE.md](../STORAGE.md#retention-and-size-bounds).
+
 `task_results.checkpoint` has an additive guarded-v1 mode for independently
 deployed task managers. The response echoes the exact contract only after the
 Sidecar has atomically taken the conversation lifecycle and task-key locks and
@@ -96,6 +101,8 @@ transfer and maintenance commands may open a driver only from their explicit
 CLI boundary; `tests/storage_sidecar/test_storage_process_boundary.py` keeps that exception
 small and prevents it from becoming a runtime access path.
 
+Problem: without ripgrep, indexed startup scans included offline scripts and refused a valid Web process. Decision: Git, lexical and filesystem scans use the same runtime roots; the separate strict inventory still audits offline tools. Alternative: requiring ripgrep hides the scope defect and makes storage startup depend on an optional accelerator. Verify all Git/ripgrep availability combinations and real production restart.
+
 Plugins contribute declarative manifests. They cannot execute schema callbacks
 or receive a connection object. Manifest row writes use version-witnessed
 `put`/`delete` or one bounded same-table `batch`; legacy import can only scan
@@ -126,3 +133,8 @@ provisioned disposable database, never a production authority.
   job and on each supported platform.
 - Release load, soak, fault, FUSE, restore, and handoff gates are defined only
   in the authoritative storage document.
+
+The backend-neutral error envelope lives in `lib.agent_core.storage_errors`;
+`lib.storage.errors` re-exports the same objects. This keeps transient execution
+independent of storage initialization while preserving adapter catches and wire
+classification. Verify storage error diagnostics and the core persistence boundary.

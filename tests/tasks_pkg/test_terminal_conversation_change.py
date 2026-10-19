@@ -13,7 +13,7 @@ pytestmark = pytest.mark.unit
 ROOT = Path(__file__).resolve().parents[2]
 FINALIZE_PATH = ROOT / "lib/tasks_pkg/orchestrator/_finalize.py"
 FLOW_COMPLETION_PATH = ROOT / "lib/orchestration/chat_completion.py"
-CALL = "notify_terminal_conversation_change(task)"
+CALL = "finish_committed_task(task,"
 
 
 def test_terminal_seams_notify_after_the_done_event():

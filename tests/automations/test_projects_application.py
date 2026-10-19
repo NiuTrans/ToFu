@@ -5,6 +5,7 @@ import uuid
 import pytest
 
 from tests.storage.test_storage_application_contract import application_storage as application_storage
+from tests.storage.test_storage_application_contract import application_storage_owner_id as application_storage_owner_id
 
 pytestmark=pytest.mark.api
 
@@ -12,7 +13,7 @@ pytestmark=pytest.mark.api
 @pytest.fixture(autouse=True)
 def isolated_cancellation_store(monkeypatch):
     from lib.conversation_sync import pending_abort
-    from lib.runtime_state_store import InProcRuntimeStateStore
+    from lib.runtime.runtime_state_store import InProcRuntimeStateStore
     store = InProcRuntimeStateStore()
     monkeypatch.setattr(pending_abort, 'get_store', lambda: store)
 

@@ -114,6 +114,7 @@ _ASSERT_CALL_NAMES = {
     'assert_called_once_with', 'assert_any_call', 'assert_has_calls',
     'assert_not_called', 'assert_awaited', 'assert_awaited_once',
     'raises', 'warns', 'approx', 'check_output', 'assert_frame_equal',
+    'validate', 'validate_pair', 'validate_observation',
 }
 # Helper-name heuristic: many files funnel assertions through a local helper
 # (``_expect(...)`` / ``_must(...)`` / ``check_x(...)``). A test calling one of
@@ -199,7 +200,12 @@ def _body_asserts(fn) -> bool:
             return True
         if isinstance(n, ast.Call):
             nm = _call_name(n)
-            if nm in _ASSERT_CALL_NAMES or _ASSERT_HELPER_RE.match(nm or ''):
+            if (nm in _ASSERT_CALL_NAMES or _ASSERT_HELPER_RE.match(nm or '')
+                    or (nm == 'run' and isinstance(n.func, ast.Attribute)
+                        and isinstance(n.func.value, ast.Name)
+                        and n.func.value.id == 'subprocess'
+                        and any(k.arg == 'check' and isinstance(k.value, ast.Constant)
+                                and k.value.value is True for k in n.keywords))):
                 return True
         # ``with pytest.raises(...)`` shows up as a Call, covered above.
     return False
@@ -312,7 +318,24 @@ def _swallows(fn) -> str:
         for h in n.handlers:
             names = {_call_name(c) for c in ast.walk(h) if isinstance(c, ast.Call)}
             has_reraise = any(isinstance(x, ast.Raise) for x in ast.walk(h))
-            fails = bool(names & (_ASSERT_CALL_NAMES | {'fail'}))
+            fails = bool(names & (_ASSERT_CALL_NAMES | {'fail'})) or any(
+                isinstance(x, ast.Assert) for x in ast.walk(h))
+            # Worker failures cross a thread/process boundary before the test
+            # asserts them. A collector counts only with an explicit assertion.
+            assertions = [ast.unparse(x.test) for x in ast.walk(fn)
+                          if isinstance(x, ast.Assert)]
+            for call in (x for x in ast.walk(h) if isinstance(x, ast.Call)):
+                if (_call_name(call) == 'append' and isinstance(call.func, ast.Attribute)
+                        and any(ast.unparse(call.func.value) in check for check in assertions)):
+                    fails = True
+                if (_call_name(call) == '_exit' and call.args
+                        and isinstance(call.args[0], ast.Constant) and call.args[0].value == 1):
+                    fails = True
+            for assign in (x for x in ast.walk(h) if isinstance(x, ast.Assign)):
+                if any(isinstance(target, ast.Attribute)
+                       and any('.' + target.attr in check for check in assertions)
+                       for target in assign.targets):
+                    fails = True
             if has_reraise or fails:
                 continue
             if names & _SKIP_NAMES:
@@ -575,6 +598,14 @@ def _shipped_source_reads(tree) -> dict:
                 continue
             tgt = n.targets[0]
             if not isinstance(tgt, ast.Name):
+                continue
+            # Parsed JSON is contract/fixture data, not source text. Treating
+            # a locale dictionary or build manifest as code invents a G
+            # finding and makes E compare dictionary keys against raw JSON.
+            if (isinstance(n.value, ast.Call) and isinstance(n.value.func, ast.Attribute)
+                    and isinstance(n.value.func.value, ast.Name)
+                    and n.value.func.value.id == 'json'
+                    and n.value.func.attr in {'load', 'loads'}):
                 continue
             rel = ''
             for c in ast.walk(n.value):
@@ -861,7 +892,7 @@ def analyze_file(rel: str) -> FileReport:
 # user context), money (billing), or correctness that only shows up in
 # production. Used to rank gaps by RISK rather than alphabetically.
 _HIGH_RISK_PREFIXES = (
-    'lib/storage/', 'lib/storage_sidecar/', 'lib/tasks_pkg/',
+    'lib/storage/', 'lib/storage_authority_sql/', 'lib/tasks_pkg/',
     'lib/agent_core/', 'lib/agent_loop',
     'lib/agent_verdict/', 'lib/llm/', 'lib/llm_dispatch/', 'lib/billing/',
     'lib/production/', 'lib/conversations/', 'routes/api_v1/',

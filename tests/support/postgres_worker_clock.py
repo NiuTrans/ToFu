@@ -21,7 +21,7 @@ def compile_clock_library(output: Path, *, source: Path | None = None) -> Path:
     headers = Path(subprocess.check_output([pg_config, '--includedir-server'], text=True).strip())
     if not (headers / 'storage/dsm_registry.h').is_file():
         pytest.skip('Server-clock module requires PostgreSQL 17+ headers')
-    source = source or Path(__file__).resolve().parents[2] / 'lib/storage_sidecar/native_worker_clock/worker_clock.c'
+    source = source or Path(__file__).resolve().parents[2] / 'lib/storage_authority_sql/native_worker_clock/worker_clock.c'
     arguments = [compiler, '-shared', '-fPIC', '-O2', '-Wall', '-Wextra', '-Werror',
                  '-Wno-unused-parameter', '-D_GNU_SOURCE', f'-I{headers}']
     sysroot = headers.parents[1] / 'x86_64-conda-linux-gnu/sysroot'

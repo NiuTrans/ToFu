@@ -55,7 +55,7 @@ import threading
 import time
 
 from lib.log import get_logger
-from lib.runtime_paths import data_root
+from lib.runtime.runtime_paths import data_root
 
 from . import store
 

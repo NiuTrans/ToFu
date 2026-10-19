@@ -124,7 +124,7 @@ def _validate_image_blocks(messages: list, *, user_id: int | None = None) -> lis
     # tree). Falls back to the legacy in-tree path if runtime_paths is
     # somehow unavailable (byte-identical in the default layout).
     try:
-        from lib.runtime_paths import uploads_root
+        from lib.runtime.runtime_paths import uploads_root
         _IMAGES_DIR = os.path.join(uploads_root(), 'images')
     except Exception as _rp_e:
         logger.debug('[ImageValidation] uploads_root() unavailable, using in-tree: %s', _rp_e)

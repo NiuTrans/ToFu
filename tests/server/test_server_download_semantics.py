@@ -441,7 +441,7 @@ def test_browser_element_read_denial_is_a_typed_download_failure(monkeypatch):
 def test_download_handler_routes_page_element_and_transfer_through_same_device(
         monkeypatch):
     import lib.browser.download_target as target
-    import lib.search_bridge as search_bridge
+    import lib.search.search_bridge as search_bridge
     import lib.tasks_pkg.handlers.search._core as core
     import lib.tasks_pkg.handlers.search._handlers as handlers
 
@@ -491,7 +491,7 @@ def test_download_handler_routes_page_element_and_transfer_through_same_device(
 
 def test_unselected_download_prefers_freshest_file_export_device(monkeypatch):
     import lib.browser.queue as queue
-    from lib.search_bridge import bind_search_browser
+    from lib.search.search_bridge import bind_search_browser
 
     monkeypatch.setattr(
         queue,
@@ -553,7 +553,7 @@ def test_explicit_server_download_uses_direct_transport_when_available(
     assert Path(result['saved_path']).read_bytes() == payload
 
 
-def test_server_direct_and_browser_files_share_one_bounded_staging_budget(
+def test_server_staging_preserves_existing_receipts_when_disk_headroom_is_low(
         monkeypatch, tmp_path):
     import lib.browser.file_transfer as transfer_mod
     from lib.browser.file_transfer import (
@@ -564,7 +564,6 @@ def test_server_direct_and_browser_files_share_one_bounded_staging_budget(
 
     _patch_fetched_root(monkeypatch, tmp_path)
     monkeypatch.setattr(transfer_mod, '_live_staging_headroom', lambda _n: True)
-    monkeypatch.setattr(transfer_mod, '_browser_staging_budget_bytes', lambda: 8)
     store = BrowserFileTransferStore(clock=lambda: 1000.0)
     first = store.stage_server_response(
         owner_user_id='41',
@@ -574,6 +573,7 @@ def test_server_direct_and_browser_files_share_one_bounded_staging_budget(
     )
 
     assert Path(first['path']).name.startswith(SERVER_DOWNLOAD_FILENAME_PREFIX)
+    monkeypatch.setattr(transfer_mod, '_live_staging_headroom', lambda _n: False)
     with pytest.raises(BrowserFileTransferError) as full:
         store.stage_server_response(
             owner_user_id='42',
@@ -581,7 +581,7 @@ def test_server_direct_and_browser_files_share_one_bounded_staging_budget(
             body=b'x',
             content_type='application/octet-stream',
         )
-    assert full.value.code == 'server_download_staging_capacity'
+    assert full.value.code == 'server_download_disk_headroom'
     assert Path(first['path']).exists(), (
         'fresh staging must reject new work instead of invalidating its receipt')
 
@@ -608,7 +608,7 @@ def test_server_direct_staging_requires_explicit_positive_owner(
 
 def test_direct_login_html_automatically_switches_to_browser_export(
         monkeypatch, tmp_path):
-    import lib.search_bridge as search_bridge
+    import lib.search.search_bridge as search_bridge
     import lib.tasks_pkg.handlers.search._core as core
 
     _patch_fetched_root(monkeypatch, tmp_path)
@@ -647,7 +647,7 @@ def test_direct_login_html_automatically_switches_to_browser_export(
 
 def test_browser_login_page_is_deleted_and_reported_as_retryable(
         monkeypatch, tmp_path):
-    import lib.search_bridge as search_bridge
+    import lib.search.search_bridge as search_bridge
     import lib.tasks_pkg.handlers.search._core as core
 
     _patch_fetched_root(monkeypatch, tmp_path)
@@ -680,7 +680,7 @@ def test_browser_login_page_is_deleted_and_reported_as_retryable(
 
 def test_offline_browser_error_survives_as_actionable_download_failure(
         monkeypatch):
-    import lib.search_bridge as search_bridge
+    import lib.search.search_bridge as search_bridge
     import lib.tasks_pkg.handlers.search._core as core
     from lib.browser.file_transfer import BrowserFileTransferError
 
@@ -704,7 +704,7 @@ def test_offline_browser_error_survives_as_actionable_download_failure(
 
 def test_direct_failure_is_safely_observable_before_browser_fallback(
         monkeypatch, caplog):
-    import lib.search_bridge as search_bridge
+    import lib.search.search_bridge as search_bridge
     import lib.tasks_pkg.handlers.search._core as core
 
     def fail_direct(_url):
@@ -731,7 +731,7 @@ def test_direct_failure_is_safely_observable_before_browser_fallback(
 
 
 def test_missing_file_export_is_an_explicit_upgrade_failure(monkeypatch):
-    import lib.search_bridge as search_bridge
+    import lib.search.search_bridge as search_bridge
     import lib.tasks_pkg.handlers.search._core as core
     from lib.browser.protocol import BrowserUpgradeRequired
 
@@ -947,3 +947,105 @@ def test_download_handler_returns_machine_readable_server_receipt(monkeypatch):
     assert receipt['path'] == '/safe/browser-transfer-citadel.zip'
     assert receipt['sha256'] == 'c' * 64
     assert finalized['results'][0]['badge'] == 'server staged'
+
+
+def test_explicit_large_file_stream_is_independent_of_search_body_limit(
+        monkeypatch, tmp_path):
+    import lib as settings
+    import lib.browser.access as access
+    import lib.browser.protocol as protocol
+    import lib.browser.queue as queue
+    import lib.browser.file_transfer as transfer_mod
+    import lib.search.search_bridge as search_bridge
+    import lib.tasks_pkg.handlers.search._core as core
+
+    _patch_fetched_root(monkeypatch, tmp_path)
+    store = transfer_mod.BrowserFileTransferStore()
+    monkeypatch.setattr(transfer_mod, 'file_transfer_store', store)
+    monkeypatch.setattr(transfer_mod, '_live_staging_headroom', lambda _n: True)
+    monkeypatch.setattr(settings, 'FETCH_MAX_BYTES', 20 * 1024 * 1024)
+    monkeypatch.setattr(core, 'fetch_url_bytes', lambda _url: None)
+    monkeypatch.setattr(queue, 'is_extension_connected', lambda *a, **kw: True)
+    monkeypatch.setattr(protocol, 'require_capabilities', lambda *a: {'profile': 'Work'})
+    monkeypatch.setattr(access, 'require_access', lambda *a, **kw: 'files.test')
+    monkeypatch.setattr(
+        search_bridge, 'require_bound_browser_file',
+        lambda url, **kw: transfer_mod.fetch_file_via_browser(
+            url, client_id='browser-a', owner_user_id='41', **kw))
+    chunk = b'x' * transfer_mod.MAX_CHUNK_BYTES
+    chunk_count = 108  # 27 MiB, beyond the old search ceiling.
+    digest = hashlib.sha256()
+
+    def send(command, params, **route):
+        assert command == 'fetch_file_to_server'
+        assert params['maxBytes'] == transfer_mod.MAX_TRANSFER_BYTES
+        assert route['timeout'] <= 120
+        auth = dict(owner_user_id='41', client_id='browser-a',
+                    token=params['transferToken'])
+        transfer_id = params['transferId']
+        store.start(transfer_id, final_url='https://files.test/camera.pkg',
+                    response_status=200, content_type='application/octet-stream',
+                    content_length=len(chunk) * chunk_count, **auth)
+        for sequence in range(chunk_count):
+            store.append_chunk(transfer_id, sequence, chunk, **auth)
+            digest.update(chunk)
+        return store.complete(transfer_id, total_bytes=len(chunk) * chunk_count,
+                              chunk_count=chunk_count, **auth), None
+
+    monkeypatch.setattr(queue, 'send_browser_command', send)
+    result = core.download_url_to_server(
+        'https://files.test/camera.pkg', owner_user_id='41')
+    assert result['location'] == 'server_staging'
+    assert result['transport'] == 'browser_authenticated'
+    assert result['size_bytes'] == len(chunk) * chunk_count
+    assert result['sha256'] == digest.hexdigest()
+    assert Path(result['saved_path']).stat().st_size == result['size_bytes']
+    assert not store._transfers
+    assert settings.FETCH_MAX_BYTES == 20 * 1024 * 1024
+
+
+@pytest.mark.parametrize('failure_kind', ['local', 'server', 'unrelated', 'wrong_limit'])
+def test_explicit_download_limit_refusal_is_not_a_retryable_command_failure(
+        monkeypatch, tmp_path, failure_kind):
+    import lib.browser.access as access
+    import lib.browser.protocol as protocol
+    import lib.browser.queue as queue
+    import lib.browser.file_transfer as transfer_mod
+    import lib.search.search_bridge as search_bridge
+    import lib.tasks_pkg.handlers.search._core as core
+
+    _patch_fetched_root(monkeypatch, tmp_path)
+    store = transfer_mod.BrowserFileTransferStore()
+    monkeypatch.setattr(transfer_mod, 'file_transfer_store', store)
+    monkeypatch.setattr(core, 'fetch_url_bytes', lambda _url: None)
+    monkeypatch.setattr(queue, 'is_extension_connected', lambda *a, **kw: True)
+    monkeypatch.setattr(protocol, 'require_capabilities', lambda *a: {'profile': 'Work'})
+    monkeypatch.setattr(access, 'require_access', lambda *a, **kw: 'files.test')
+    monkeypatch.setattr(
+        search_bridge, 'require_bound_browser_file',
+        lambda url, **kw: transfer_mod.fetch_file_via_browser(
+            url, client_id='browser-a', owner_user_id='41', **kw))
+
+    def send(command, params, **route):
+        message = f"Browser response exceeds the {params['maxBytes']}-byte limit"
+        if failure_kind == 'server':
+            message = 'browser_file_transfer_too_large: ' + message
+        elif failure_kind == 'unrelated':
+            message += ' unrelated failure'
+        elif failure_kind == 'wrong_limit':
+            message = 'Browser response exceeds the 1-byte limit'
+        return None, message
+
+    monkeypatch.setattr(queue, 'send_browser_command', send)
+    result = core.download_url_to_server(
+        'https://files.test/camera.pkg', owner_user_id='41')
+    oversize = failure_kind in {'local', 'server'}
+    assert result['error_code'] == (
+        'browser_file_transfer_too_large' if oversize
+        else 'browser_file_transfer_command_failed')
+    assert result['retryable'] is (not oversize)
+    if oversize:
+        assert '500 MiB' in result['next_action']
+        assert 'Retry' not in result['next_action']
+    assert not store._transfers
+    assert not list(tmp_path.iterdir())

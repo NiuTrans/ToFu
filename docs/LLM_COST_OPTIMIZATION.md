@@ -55,6 +55,14 @@ On 2026-08-27, nine distinct long tasks' earliest declines projected 1.18–3.89
 
 The collapsed finish footer shows total input, uncached input, cache reads and output together. Top-level turn cost is the sum of per-API-round prices under each round's own model/provider/tier; mixed main, fallback and compaction calls are never flattened and repriced under the final model.
 
+Summary retry ordering preserves cancellation, local request errors and
+incomplete-output handling before the generic transport fallback. An unqualified
+cheap request may retry once on the text tier; selected routes and bounded tasks
+retain their existing restrictions. Once transport returns, local accounting or
+validation failure cannot authorize another paid call. A blanket exception
+handler both hides the intended fallback and conflates local failures with
+provider outages; regressions exercise both chat and streaming dispatch.
+
 ### 3. GPT-5.6 Responses caching and compaction
 
 Only GPT-5.6-family Responses requests receive these OpenAI-specific fields; generic Responses-compatible providers are unchanged. The ChatGPT Codex subscription profile keeps the fields its internal backend supports and omits the public-only explicit breakpoint and `context_management` request fields:
@@ -197,7 +205,7 @@ Tool Search for the non-pinned residual catalog:
   "cache": {"gpt56BreakpointMode": "explicit"},
   "tools": {
     "nativeExposure": "routed",
-    "programmaticCalling": "on",
+    "programmaticCalling": "auto",
     "programmaticExposure": "additive",
     "toolSearch": "auto"
   },
@@ -250,35 +258,13 @@ Tool Search for the non-pinned residual catalog:
 - `compaction.evidenceLedger=true` additionally persists exact L1 cold tool
   results and adds their recovery handles to that ledger. It remains opt-in
   because durable raw-result storage has a different privacy/I/O trade-off.
-- `tools.programmaticCalling=on|auto|off` defaults to `on`. Verified provider features plus reviewed eligibility select native OpenAI PTC; other tool-capable routes use local async JavaScript with the complete task-executable catalog. `off` disables programs. [The gateway contract](contracts/TOOL_SEARCH_EXECUTION_GATEWAY.md) owns eligibility, approval, runtime bounds, replay and recovery; local execution never gains hosted-only authority.
-  Local projection is additive and cache-stable. `on` exposes an available resident tier; `auto` requires bounded many-result intent or observed read fan-out. `TOFU_PTC_TIER=batch` selects bounded `calls[]`. Productive single-read chains neither force adoption nor change the wire schema; historical `serial_gateway` settings remain readable only for explicit experiments. Actual completed `programRuns` and backend/evidence identity establish adoption; byte counts and `expectedSavings.basis=program_surface_unmeasured` do not establish model cost or latency gains.
+- `tools.programmaticCalling=on|auto|off` defaults to `auto`. Verified provider features plus reviewed eligibility select native OpenAI PTC; other tool-capable routes default to direct tools and JSON batches. Explicit `on` enables local async JavaScript with the complete task-executable catalog; `off` disables programs. [The gateway contract](contracts/TOOL_SEARCH_EXECUTION_GATEWAY.md) owns interface selection, eligibility, approval, runtime bounds, replay and recovery; local execution never gains hosted-only authority.
+  Local projection is additive and cache-stable. `on` exposes an available resident tier; `auto` selects batching for bounded many-result intent or observed read fan-out. `TOFU_PTC_TIER=program|batch` is an explicit evaluation/operator override, never a model-size heuristic. Native-to-local fallback keeps auto's JSON interface. Productive single-read chains neither force adoption nor change the wire schema; historical `serial_gateway` settings remain readable only for explicit experiments. Actual completed `programRuns` and backend/evidence identity establish adoption; byte counts and `expectedSavings.basis=program_surface_unmeasured` do not establish model cost or latency gains.
   Historical production calibration: 93 calls, 107 tools, 7.149M prompt tokens (6.945M cache reads), ¥23.05, 2,286.3 seconds; 45 gateway offers and zero program runs. Five serial-read chains covered 24 model rounds; 19-call and nine-call counterfactual opportunity ceilings are theoretical, not savings. The [paired public-SDK pilot](../evaluations/programmatic_pilot/README.md) measures optional adoption, complete-evidence answer quality, actual usage and latency before promotion.
 - `responses.promptProfile=auto` selects compact GPT-5.6 but keeps Kimi on full.
   Explicit Kimi lean/ablation arms emit applied profile, SHA-256 and token proof;
   the benchmark rejects missing/mismatched adoption before any promotion.
-- `orchestration.multiAgent=full` (shipped default) keeps `spawn_agents` and
-  the parallel-execution guidance on the wire every round, and workers inherit
-  the parent's full authority catalog minus the leaf-worker denylist (no
-  nested orchestration, no blocking on the human). `read_only` forces the
-  analysis-only lane, `auto` is the legacy first-round-only gate requiring
-  independent, complex workstreams, and `off` is the immediate rollback. The
-  provider-neutral policy in
-  `lib/tasks_pkg/tool_orchestration_policy.py` selects this control plane and
-  the programmatic data plane independently. Both may therefore be active:
-  agents partition independent workstreams, while the root and each eligible
-  local worker use PTC to reduce repeated reads inside its own workstream.
-  `lib/swarm/routing.py` selects native OpenAI acceleration only for a verified
-  public GPT-5.6 Responses face carrying a `read_only` decision — a `full`
-  lane never routes to the analysis-only native extension and otherwise
-  projects the existing local `spawn_agents` runtime for every model whose
-  task authority includes it. Read-only workers (native or local) share the
-  read-only dispatch filter: the shared execution boundary rejects file,
-  shell, artifact, scheduler, project-state, integration, and other non-root
-  mutations even if prompt guidance is ignored. Full-authority local workers
-  keep writes and run under the ordinary per-tool approval/authority gates.
-  Streaming and non-streaming surfaces expose only `/root`'s `final_answer`.
-  Benchmark arms remain single-factor experiments for causal attribution; that
-  experimental isolation is not a production mutual-exclusion rule.
+- `orchestration.multiAgent=full` (shipped default) keeps `spawn_agents` and the parallel-execution guidance on the wire every round, and workers inherit the parent's full authority catalog minus the leaf-worker denylist (no nested orchestration, no blocking on the human). `read_only` forces the analysis-only lane, `auto` is the legacy first-round-only gate requiring independent, complex workstreams, and `off` is the immediate rollback. The provider-neutral policy in `lib/tasks_pkg/tool_orchestration_policy.py` selects this control plane and the programmatic data plane independently. Both may therefore be active: agents partition independent workstreams, while the root and each eligible local worker use PTC to reduce repeated reads inside its own workstream. `lib/swarm/routing.py` selects native OpenAI acceleration only for a verified public GPT-5.6 Responses face carrying a `read_only` decision — a `full` lane never routes to the analysis-only native extension and otherwise projects the existing local `spawn_agents` runtime for every model whose task authority includes it. Read-only workers (native or local) share the read-only dispatch filter: the shared execution boundary rejects file, shell, artifact, scheduler, project-state, integration, and other non-root mutations even if prompt guidance is ignored. Full-authority local workers keep writes and run under the ordinary per-tool approval/authority gates. Streaming and non-streaming surfaces expose only `/root`'s `final_answer`. Benchmark arms remain single-factor experiments for causal attribution; that experimental isolation is not a production mutual-exclusion rule.
 - Each terminal task result keeps bounded reason, `expectedSavings`, and
   `projectionEvidence` per routing decision. Provider wire projection is never
   adoption: only a real program run, native multi-agent call, or launched local
@@ -448,3 +434,14 @@ Tool-authority preflight: `python -m evaluations.evolution.tool_authority --owne
 Problem: schema budgets can change executable authority, confounding surface-only comparisons. Decision: freeze schemas, authoritative contract hashes and arm policies; mismatches exit 2 without provider calls. Missing/degraded contracts refuse; prior outputs are preserved.
 Alternatives: equal counts miss substituted tools, and policy-field checks miss derived registry differences. Historical controls remain intact; matched execution catalogs are required for schema-only attribution.
 This offline artifact provides no quality or activation authority and is not wired into every live experiment caller.
+
+## Public runtime usage accounting
+
+`AgentExecution.evidence_snapshot()` exposes `usageAccounting` (`complete`, `observedTokens`, `scope`, `rootTaskId`) from the shared account. Model leases, tool attempts, children and recovered debt keep its atomic tree snapshot incomplete. Known unknown usage stays incomplete even without an account; an absent account is otherwise unobserved (`complete: null`). Reading evidence never creates or settles an account and does not certify task acceptance or coverage of uninstrumented calls.
+
+Ordinary tasks bind `model_budget_admission` on their first model invocation even without execution limits. The existing account observes streaming, non-streaming and retries; omitted provider output caps stay omitted. Live unbounded work may retry after unknown usage, but its evidence remains incomplete. Finite authorization and unreconciled restored checkpoints retain their refusal rules.
+Problem: counter-only projections lost uncertainty, and unbounded ordinary calls had no account. Decision: expose the shared account and remove the entry-point exemption. Alternatives rejected: infer completeness from counters, create accounts while reading evidence, or duplicate settlement with a second ledger/retry policy. Verify public usage-evidence and model-budget admission tests.
+
+The account lives with the task and retains totals and active leases, not completed request history. A local synthetic measurement found about 4.5 KB per active account, 40 microseconds per reserve/dispatch/settle, and 32 retained bytes of growth across 10,000 further settlements; this is not provider or end-to-end latency evidence. See the measurement and verification receipt.
+
+<!-- Evidence note: former docs/evidence/ artifact snapshots cited here were retired from the tree; cited JSON artifacts remain recoverable from git history. -->

@@ -191,6 +191,7 @@ def test_cross_process_history_staging_retains_journal_commit_order(project, mon
     entered, release = ctx.Event(), ctx.Event()
     track_edit = file_history.track_edit
     monkeypatch.setattr(locks, '_wait_seconds', lambda: 0.04)
+    monkeypatch.setenv('TOFU_WORKSPACE_TOOL_WAIT_SECONDS', '0.04')
 
     def slow_first_history(base, path, **kwargs):
         if kwargs['task_id'] == 'first':
@@ -240,8 +241,7 @@ def test_cross_process_history_staging_retains_journal_commit_order(project, mon
         competitor, competitor_pipe = start('C', 'second')
         busy = result(competitor, competitor_pipe)
         assert busy['ok'] is False
-        assert busy['errorKind'] == 'journal-busy'
-        assert busy['mutationApplied'] is False
+        assert 'Workspace lease contention is active' in busy['error']
         assert Path(project, 'first.txt').read_bytes() == b'B'
         release.set()
         assert result(first, first_pipe)['ok']

@@ -6,7 +6,7 @@ import asyncio
 
 import pytest
 
-from lib.app_factory import create_base_app
+from lib.app.app_factory import create_base_app
 
 
 pytestmark = pytest.mark.unit

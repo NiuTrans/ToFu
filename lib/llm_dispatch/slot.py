@@ -445,7 +445,7 @@ class Slot:
                                self.consecutive_errors,
                                int(_TRUNCATION_WINDOW_S // 60), _window_hits)
 
-    def record_error(self, is_rate_limit=False, error: str = '',
+    def record_error(self, is_rate_limit=False, error: str | Exception = '',
                      is_quota_exhausted: bool = False, is_gateway: bool = False,
                      is_shared_contention: bool = False,
                      is_account_quota: bool = False,
@@ -464,7 +464,9 @@ class Slot:
                 typically reflect contention, not key health, so they don't
                 count as failures in the daily success-rate tracker UNLESS
                 is_quota_exhausted is also True (persistent billing error).
-            error: short error description (optional, stored for UI display).
+            error: Error description or original typed exception. Credential
+                health requires a PermissionError_ proving key-wide rejection;
+                strings and generic exceptions are diagnostic telemetry only.
             is_quota_exhausted: True when the 429/402 indicates a PERSISTENT
                 billing/quota problem (insufficient balance, credits too low).
                 Such keys should be marked as exhausted for the rest of the day,
@@ -487,8 +489,8 @@ class Slot:
                 and must never trip the auto-disable gate (2026-08-03
                 incident); they are counted on the separate
                 ``gateway_errors`` channel. The dead-key safety net lives
-                on the unchanged genuine-failure classes (401/403 auth
-                death, endpoint-unreachable).
+                on explicit credential rejection, never endpoint failures or
+                model-specific permission errors.
             is_shared_contention: True when the 429 names a PROJECT-LEVEL
                 limit shared with other tenants of the gateway account
                 (RateLimitError.is_shared_contention). Counted into
@@ -498,6 +500,7 @@ class Slot:
                 provider/model admission gate owns pacing, so the warm key
                 stays eligible and its prompt-cache namespace is preserved.
         """
+        error_message = str(error) if error else ''
         shared_contention = bool(is_shared_contention and not is_gateway)
         with self._lock:
             self.inflight = max(0, self.inflight - 1)
@@ -521,8 +524,8 @@ class Slot:
             else:
                 self.total_errors += 1
             self.last_error_time = time.time()
-            if error:
-                self.last_error_msg = str(error)[:200]
+            if error_message:
+                self.last_error_msg = error_message[:200]
 
             if is_quota_exhausted:
                 # Persistent billing/balance problem — long cooldown so this
@@ -580,7 +583,7 @@ class Slot:
                 mark_key_exhausted(
                                    self.key_stats_provider_id(),
                                    self.key_stats_key_name(),
-                                   reason=error or 'quota exhausted (HTTP 402/429)',
+                                   reason=error_message or 'quota exhausted (HTTP 402/429)',
                                    model='' if is_account_quota else self.model)
             except Exception as e:
                 logger.debug('[Slot] key_stats mark_key_exhausted failed: %s', e)
@@ -604,7 +607,7 @@ class Slot:
                 record_gateway_error(
                                      self.key_stats_provider_id(),
                                      self.key_stats_key_name(),
-                                     reason=error or 'gateway 5xx')
+                                     reason=error_message or 'gateway 5xx')
             except Exception as e:
                 logger.debug('[Slot] key_stats record_gateway_error failed: %s', e)
         elif is_rate_limit and not is_gateway:
@@ -613,22 +616,21 @@ class Slot:
                 record_rate_limit(
                                   self.key_stats_provider_id(),
                                   self.key_stats_key_name(),
-                                  reason=error or 'HTTP 429')
+                                  reason=error_message or 'HTTP 429')
             except Exception as e:
                 logger.debug('[Slot] key_stats record_rate_limit failed: %s', e)
         else:
-            # Generic failure (auth death, endpoint-unreachable, hard 5xx
-            # that is not gateway-class). record_outcome feeds the daily
-            # success-rate column (no auto-exhaust threshold), so the
-            # dead-key safety net keeps working while the consecutive-429
-            # auto-exhaust streak is reserved for genuine per-key
-            # contention.
+            # Request telemetry and credential health have separate evidence.
+            # Never infer a bad key from harness/transport exception strings.
             try:
                 from lib.key_stats import record_outcome
+                from lib.llm.llm_errors import PermissionError_
                 record_outcome(
                                self.key_stats_provider_id(),
                                self.key_stats_key_name(),
-                               success=False, error=error)
+                               success=False, error=error_message,
+                               credential_failure=(isinstance(error, PermissionError_)
+                                                   and error.is_credential_error))
             except Exception as e:
                 logger.debug('[Slot] key_stats record_outcome(failure) failed: %s', e)
 

@@ -95,9 +95,9 @@ def test_invalid_or_oversized_dotenv_fails_loudly_without_parsing(tmp_path):
 def test_all_runtime_consumers_delegate_to_the_canonical_parser():
     root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     expected = {
-        # server.py's dotenv load rides the lib/server_boot_env.py facade;
+        # server.py's dotenv load rides the lib/server/server_boot_env.py facade;
         # the canonical-parser delegation is pinned at that owner.
-        'lib/server_boot_env.py': 'load_dotenv_file',
+        'lib/server/server_boot_env.py': 'load_dotenv_file',
         'bootstrap_pkg/runtime.py': 'load_dotenv_file',
         'healthcheck.py': 'read_dotenv_values',
         'serverctl.py': 'read_dotenv_values',

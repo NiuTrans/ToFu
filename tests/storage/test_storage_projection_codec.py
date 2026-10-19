@@ -6,8 +6,8 @@ import orjson
 import pytest
 
 from lib.storage.errors import StorageError
-from lib.storage_sidecar.operations_pkg._common import _dump, _load
-from lib.storage_sidecar.projection_codec import (
+from lib.storage_authority_sql.operations_pkg._common import _dump, _load
+from lib.storage_authority_sql.projection_codec import (
     ProjectionCodecError,
     STORAGE_PROJECTION_CODEC_KEY,
     STORAGE_PROJECTION_MAX_HYDRATION_RATIO,
@@ -161,7 +161,7 @@ def test_projection_sequence_compacts_archives_and_hydrates_shared_values():
 
 
 def test_archived_conversation_codec_corruption_is_storage_integrity():
-    from lib.storage_sidecar.operations_pkg._conversations import (
+    from lib.storage_authority_sql.operations_pkg._conversations import (
         _archived_conversation_messages,
     )
 

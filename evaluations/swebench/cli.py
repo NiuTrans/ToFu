@@ -166,6 +166,8 @@ def _tofu_kimi_settings(
         upstream_base_url_env=args.kimi_base_url_env,
         upstream_api_key_env=args.kimi_api_key_env,
         thinking_format=args.tofu_thinking_format,
+        tool_surface=args.tofu_tool_surface,
+        wire_proxy=args.tofu_wire_proxy,
     )
     settings.validate()
     return TOFU_KIMI_AGENT, agent_version, settings
@@ -228,6 +230,7 @@ def build_parser() -> argparse.ArgumentParser:
         "diagnose",
         help="Read-only coverage/evidence diagnosis of one run root (no harness load)")
     diagnose.add_argument("run_root")
+    diagnose.add_argument("--reference-profile", choices=("glm-5.3-tb21",))
 
     run = sub.add_parser("run", help="Run agent × model × task trials through Harbor")
     run.add_argument("--agent", required=True)
@@ -272,6 +275,8 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--secret-env", action="append", default=[])
     run.add_argument("--agent-host", action="append", default=[])
     run.add_argument("--reasoning-effort")
+    run.add_argument("--source-receipt", type=Path,
+                     help="Verified Git-object source proof for an exported worker payload")
     run.add_argument("--agent-version")
     run.add_argument(
         "--codex-binary",
@@ -316,6 +321,10 @@ def build_parser() -> argparse.ArgumentParser:
         default="",
         help="Optional public Kimi thinking-format adapter identifier",
     )
+    run.add_argument("--tofu-tool-surface", choices=("exclusive", "production"),
+                     default="exclusive", help="Freeze the candidate's actual tool surface")
+    run.add_argument("--tofu-wire-proxy", action="store_true",
+                     help="Retain secret-free actual provider request receipts")
     run.add_argument(
         "--kimi-base-url-env",
         default="KIMI_CHAT_BASE_URL",
@@ -459,11 +468,42 @@ def build_parser() -> argparse.ArgumentParser:
         compare.add_argument('--run-id', required=True)
         compare.add_argument('--target-pp', type=float, default=10)
         compare.add_argument('--seed', type=int, default=1729)
+        compare.add_argument('--reference-prices', type=Path,
+                             help='Four USD-per-million rates, frozen at registration; not an invoice')
+        if name == 'comparison-register':
+            compare.add_argument('--infrastructure-retries', type=int, default=0)
         if name == 'compare':
             compare.add_argument('--require-target', action='store_true',
                                  help='Exit nonzero unless the 95%% lower bound reaches the target')
     verify = sub.add_parser('comparison-verify', help='Rehash original evidence referenced by a paired report')
     verify.add_argument('report', type=Path)
+    msubmit = sub.add_parser(
+        'meituan-submit',
+        help='Plan a meituan-sandbox canvas submission (dry-run prints the plan)',
+    )
+    msubmit.add_argument('--base-canvas-id', required=True)
+    msubmit.add_argument('--model-id', required=True)
+    msubmit.add_argument('--tofu-commit', required=True)
+    msubmit.add_argument('--agentix-branch', required=True)
+    msubmit.add_argument('--tb-git-branch', required=True)
+    msubmit.add_argument('--evaluate-name', required=True)
+    msubmit.add_argument('--agent-workers', type=int, default=64)
+    msubmit.add_argument('--attempts', type=int, default=5)
+    msubmit.add_argument('--task-count', type=int, default=89)
+    msubmit.add_argument('--json', action='store_true')
+    msubmit.add_argument('--dry-run', action='store_true')
+
+    mscore = sub.add_parser(
+        'meituan-score',
+        help='Collect per-trial rewards from dolphinfs trajectories and audit',
+    )
+    mscore.add_argument('--evaluate-name', required=True)
+    mscore.add_argument('--agent-alias', required=True)
+    mscore.add_argument('--output-root', type=Path, default=None)
+    mscore.add_argument('--expected-attempts', type=int, default=1)
+    mscore.add_argument('--release', action='store_true',
+                        help='Audit for a formal release (expected-attempts per task)')
+    mscore.add_argument('--json', action='store_true')
     return parser
 
 
@@ -482,11 +522,114 @@ def main(argv: list[str] | None = None) -> int:
             report = verify_report(args.report)
             print(json.dumps(report, ensure_ascii=False, indent=2))
             return 0 if report['ok'] else 1
+        if args.command == 'meituan-submit':
+            from .meituan_sandbox.submit import MassConfig, build_submit_plan
+            mass = MassConfig(
+                task_count=args.task_count,
+                attempts=args.attempts,
+                agent_workers=args.agent_workers,
+            )
+            plan = build_submit_plan(
+                base_canvas_id=args.base_canvas_id,
+                model_id=args.model_id,
+                tofu_commit=args.tofu_commit,
+                agentix_branch=args.agentix_branch,
+                tb_git_branch=args.tb_git_branch,
+                evaluate_name=args.evaluate_name,
+                mass=mass,
+            )
+            payload = {
+                'base_canvas_id': plan.base_canvas_id,
+                'model_id': plan.model_id,
+                'agent_alias': plan.agent_alias,
+                'tb_git_branch': plan.tb_git_branch,
+                'evaluate_name': plan.evaluate_name,
+                'mass': {
+                    'task_count': plan.mass.task_count,
+                    'attempts': plan.mass.attempts,
+                    'total_trials': plan.mass.total_trials,
+                    'agent_workers': plan.mass.agent_workers,
+                    'gpu_cards': plan.mass.gpu_cards,
+                    'estimated_cpu_cores': plan.mass.estimated_cpu_cores,
+                    'estimated_memory_gib': plan.mass.estimated_memory_gib,
+                },
+                'canvas_params': plan.merged_canvas_params(),
+                'donor_cache_flags': plan.donor_cache_flags,
+                'resource_code': plan.resource_code,
+                'schedule_priority': plan.schedule_priority,
+                'cpu_queue': plan.cpu_queue,
+                'gpu_queue': plan.gpu_queue,
+                'dry_run': args.dry_run,
+            }
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+            if args.dry_run:
+                return 0
+            print(
+                'error: live submission requires the llm MCP canvas client; '
+                'run with --dry-run to inspect the plan',
+                file=sys.stderr,
+            )
+            return 2
+
+        if args.command == 'meituan-score':
+            from .meituan_sandbox.score import (
+                DEFAULT_OUTPUT_ROOT,
+                collect_scores,
+                resolve_trajectory_root,
+            )
+            output_root = args.output_root or DEFAULT_OUTPUT_ROOT
+            root = resolve_trajectory_root(
+                args.evaluate_name, args.agent_alias, output_root=output_root
+            )
+            tasks, audit = collect_scores(
+                root,
+                expected_attempts=args.expected_attempts,
+                require_unique_attempt=not args.release,
+            )
+            rewards = [
+                tr.reward
+                for t in tasks.values()
+                for tr in t.trials
+                if tr.reward is not None
+            ]
+            payload = {
+                'trajectory_root': str(root),
+                'audit': {
+                    'ok': audit.ok,
+                    'n_tasks': audit.n_tasks,
+                    'n_trials': audit.n_trials,
+                    'n_empty': audit.n_empty,
+                    'n_running': audit.n_running,
+                    'rejected_tasks': list(audit.rejected_tasks),
+                    'reason': audit.reason,
+                },
+                'n_scored': len(rewards),
+                'pass_rate': (sum(rewards) / len(rewards)) if rewards else None,
+            }
+            if args.json:
+                print(json.dumps(payload, ensure_ascii=False, indent=2))
+            else:
+                print(f"trajectory root: {root}")
+                print(f"audit: {'PASS' if audit.ok else 'FAIL'} ({audit.reason})")
+                print(
+                    f"tasks={audit.n_tasks} trials={audit.n_trials} "
+                    f"scored={len(rewards)} empty={audit.n_empty} "
+                    f"running={audit.n_running}"
+                )
+                if rewards:
+                    print(f"pass rate: {sum(rewards) / len(rewards):.3f}")
+                if audit.rejected_tasks:
+                    print(f"rejected: {', '.join(audit.rejected_tasks)}")
+            return 0 if audit.ok else 1
         if args.command in {'comparison-register', 'compare'}:
             from .comparison import compare_runs, register_comparison
             kwargs = dict(output_root=args.output_root, run_id=args.run_id,
                           target_pp=args.target_pp, seed=args.seed)
+            if args.reference_prices:
+                from .comparison import _read
+                kwargs['reference_prices'] = _read(args.reference_prices)
             if args.command == 'comparison-register':
+                kwargs['infrastructure_retry_limit'] = args.infrastructure_retries
                 path = register_comparison(args.baseline, args.candidate, **kwargs)
                 print(f'comparison protocol: {path}')
                 return 0
@@ -501,6 +644,7 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.command == "prepare-rootless":
             definition = BENCHMARKS[args.benchmark]
+            definition.validate_backend("rootless-qemu")
             output_root = prepare_output_root(args.output_root)
             definitions_root = args.definitions_root or (
                 output_root / ".definitions" / args.benchmark
@@ -564,7 +708,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "diagnose":
             from .diagnostics import diagnose_run
             print(json.dumps(
-                diagnose_run(Path(args.run_root)), ensure_ascii=False, indent=2))
+                diagnose_run(Path(args.run_root), reference_profile=args.reference_profile),
+                ensure_ascii=False, indent=2))
             return 0
 
         if args.command == "doctor":
@@ -643,6 +788,7 @@ def main(argv: list[str] | None = None) -> int:
                 reasoning_effort=args.reasoning_effort,
                 agent_version=agent_version,
                 harbor_bin=args.harbor_bin,
+                source_receipt=args.source_receipt,
                 rootless_qemu=rootless_qemu,
                 codex_kimi=codex_kimi,
                 tofu_kimi=tofu_kimi,

@@ -7,7 +7,7 @@ import copy
 
 import math
 
-from lib.llm_errors import LocalRequestPreparationError
+from lib.llm.llm_errors import LocalRequestPreparationError
 
 SAMPLING = ('temperature', 'top_p', 'top_k', 'presence_penalty',
             'frequency_penalty', 'stop')

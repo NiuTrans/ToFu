@@ -85,6 +85,12 @@ class OrchestrationChatFlowCompletion:
         terminal = self.terminal
         if terminal.runtime_error and terminal.chat_status == 'error':
             self._task['error'] = terminal.error_envelope
+        native=self._task.get('_nativePreparedInvocation')
+        if native is not None:
+            from lib.tasks_pkg.native_invocation import NativePreparedInvocation
+            if not isinstance(native,NativePreparedInvocation):
+                raise ValueError('Flow native execution owner is not issued')
+            native.finalize_flow_accounting(self._task)
         self._capture_trace()
         self._task['_flow_turns'] = self._messages
         settled = self._turn_persistence.finalize()
@@ -128,7 +134,7 @@ class OrchestrationChatFlowCompletion:
         ))
         done_event = build_event(
             EventType.DONE,
-            usage=self._task.get('usage', {}),
+            usage=self._task.get('usage') or {},
             finishReason=finish_reason,
             flowReason=stop_reason,
             flowMode=True,

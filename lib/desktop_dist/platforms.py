@@ -257,7 +257,7 @@ def fetch_latest_release(timeout: float = 8.0) -> dict | None:
     if not repo:
         return None
     try:
-        from lib.http_client import http_get
+        from lib.http_transport.client import http_get
         resp = http_get(
             f'https://api.github.com/repos/{repo}/releases/latest',
             timeout=timeout,

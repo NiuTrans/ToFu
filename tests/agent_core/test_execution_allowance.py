@@ -10,7 +10,7 @@ from lib.agent_core.execution_budget import (
     execution_allowance_snapshot, inherit_execution_budget, model_budget_admission,
 )
 from lib.agent_core.execution_limits import admit_tool_execution
-from lib.llm_errors import AbortedError
+from lib.llm.llm_errors import AbortedError
 
 pytestmark = pytest.mark.unit
 

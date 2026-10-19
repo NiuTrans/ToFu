@@ -1,3 +1,4 @@
+import { entityRecordValues } from '../domain/turn-store';
 /** Join immutable handoff receipts to conversation-scoped completion evidence.
  * Activity snapshots are NOT an input: disappearance is not completion.
  * Weak caches follow TurnStore lifetimes; unchanged turns keep identity.
@@ -66,7 +67,7 @@ export function createBackgroundCommandCompletionProjection() {
         const completion = row(item.backgroundCommand);
         if (completion.status === 'completed' && typeof completion.commandId === 'string') next.set(completion.commandId, completion);
       }
-      for (const turn of Object.values(state.turnsById)) {
+      for (const turn of entityRecordValues(state.turnsById)) {
         if (!turn || turn.conversationId !== conversationId || !turn.projection) continue;
         for (const [id, value] of evidence(turn.projection)) next.set(id, value);
       }
@@ -119,7 +120,7 @@ export function createBackgroundActivityEvidenceObserver() {
     for (const item of state.queueItems) {
       if (item.backgroundCommand?.commandId) tokens.push(`queue:${item.backgroundCommand.commandId}`);
     }
-    for (const turn of Object.values(state.turnsById)) {
+    for (const turn of entityRecordValues(state.turnsById)) {
       if (!turn || turn.conversationId !== state.conversationId) continue;
       const projection = row(turn.projection);
       const rounds = list(projection.toolRounds);

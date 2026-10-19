@@ -4,7 +4,8 @@ import threading
 
 import pytest
 
-from lib.agent_core.execution_budget import inherit_execution_budget, close_execution_budget
+from lib.agent_core.execution_budget import (
+    ModelBudgetExceeded, inherit_execution_budget, close_execution_budget)
 from lib.agent_core.execution_limits import admit_tool_execution, execution_limit_reason
 from lib.evolution.bridge import derive_actuals
 
@@ -125,6 +126,43 @@ def test_real_swarm_detached_carrier_shares_the_flow_budget():
     assert admit_tool_execution(parent) == 'execution_tool_budget_exhausted'
     close_execution_budget(delegated)
     assert len(parent['_executionBudget']._active) == 1
+
+
+def test_swarm_session_root_outlives_spawning_turn_for_blocked_dependents():
+    """A fire-and-forget swarm keeps admitting dependency-blocked agents long
+    after the spawning chat task settled 'done'.
+
+    Regression for the bug where a spec that only unblocked after its
+    dependency finished (e.g. ``tls`` waiting on ``nsb``) was killed with
+    'execution_owner_cancelled' at admission, because the shared budget
+    account's root was the short-lived spawning chat task (already terminal).
+    The session proxy is now the budget root and stays 'running' until the
+    swarm is explicitly aborted/suspended.
+    """
+    from lib.swarm.master import MasterOrchestrator
+    parent = root()
+    parent['_userId'] = 7
+    master = MasterOrchestrator('session', '', [], user_id=7, parent_task=parent)
+    proxy = master._parent_task_proxy
+    account = parent['_executionBudget']
+    # The budget root is now the long-lived session proxy, not the chat task.
+    assert account.root_id == proxy['id']
+    assert proxy['status'] == 'running'
+    # The spawning chat task settles 'done' while a dependent is still queued.
+    parent['status'] = 'done'
+    # A dependency-blocked child admitted later still attaches and admits.
+    blocked = child(proxy, 'blocked-dependent')
+    assert admit_tool_execution(blocked) is None
+    lease = account.reserve_model(blocked, input_tokens=10, max_output_tokens=5)
+    lease.mark_dispatched()
+    lease.settle({'input_tokens': 10, 'output_tokens': 2})
+    close_execution_budget(blocked)
+    assert account.consumption() == (112, 1)
+    # An explicit whole-swarm abort still fences every later admission.
+    master.abort()
+    with pytest.raises(ModelBudgetExceeded, match='owner_cancelled'):
+        child(proxy, 'after-abort')
+    assert admit_tool_execution(blocked) == 'execution_owner_cancelled'
 
 
 def test_nullable_limits_keep_usage_accounting_without_old_cumulative_caps():
@@ -266,7 +304,7 @@ def test_model_observer_cannot_replace_an_existing_admission_authority():
 
 @pytest.mark.parametrize('change',['cancel','deadline'])
 def test_model_observation_delay_cannot_send_after_owner_cancellation(monkeypatch,change):
-    from lib.llm_errors import AbortedError
+    from lib.llm.llm_errors import AbortedError
     parent=root();worker=child(parent,'worker');account=parent['_executionBudget']
     def observe(event):
         if event['phase']=='dispatch_intent':
@@ -438,7 +476,7 @@ def test_terminal_root_rejects_new_model_tool_and_child_work_without_cancellatio
 
 def test_terminal_transition_between_model_reservation_and_send_refuses_dispatch_but_settles_lease():
     from lib.agent_core.execution_budget import ExecutionBudget
-    from lib.llm_errors import AbortedError
+    from lib.llm.llm_errors import AbortedError
     parent=root();account=ExecutionBudget(parent)
     lease=account.reserve_model(parent,input_tokens=10,max_output_tokens=5)
     parent['status']='done'
@@ -527,7 +565,7 @@ def test_same_identity_model_carrier_cannot_expand_the_active_owner_token_slice(
 
 def test_owner_usage_and_tightened_deadline_are_checked_at_model_send():
     from lib.agent_core.execution_budget import ExecutionBudget,share_execution_budget
-    from lib.llm_errors import AbortedError
+    from lib.llm.llm_errors import AbortedError
     parent=root();parent['_executionBudget']=ExecutionBudget(parent)
     carrier={'id':parent['id'],'config':{}}
     share_execution_budget(parent,carrier)
@@ -567,7 +605,7 @@ def test_fresh_carrier_cannot_clear_unknown_usage_of_a_locally_bounded_owner():
 
 def test_owner_usage_becoming_unknown_between_reservation_and_send_refuses_carrier_dispatch():
     from lib.agent_core.execution_budget import ExecutionBudget,share_execution_budget
-    from lib.llm_errors import AbortedError
+    from lib.llm.llm_errors import AbortedError
     parent=root();parent['config']['executionLimits']['max_tokens']=None
     parent['_executionBudget']=ExecutionBudget(parent)
     parent['config']['executionLimits']['max_tokens']=200

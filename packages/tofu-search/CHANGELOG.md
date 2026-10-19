@@ -11,6 +11,18 @@
 
 ## Unreleased
 
+
+- Separate weak generic-word matches from substantive lexical evidence; search
+  operators and link inventories cannot prove subject relevance. Keep uncertain
+  candidates recoverable rather than claiming no subject exists.
+- Recover on no useful first-wave evidence, preserving the original query,
+  freshness and explicit engine selection. Reserve fetch capacity for stronger
+  candidates instead of letting weak SERPs monopolize it.
+- Enforce site scope across one-hop expansion and respect the remaining deadline.
+- Keep relevance verdicts observable instead of consuming them as stop strings;
+  cap gate generation and never cache malformed responses as successful verdicts.
+- Share explicit output budgets across snippets and page passages; retain useful
+  provenance and distinguish provider agreement from independence.
 - Attempt every eligible connected host-browser fallback; the retired 16-call
   semaphore no longer discards independent requests. Keep bound identity,
   access policy, timeout forwarding, content checks and provider ownership.

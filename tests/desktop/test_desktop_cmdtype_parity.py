@@ -54,3 +54,44 @@ def test_enqueued_wire_type_matches_agent_command_table(monkeypatch):
         assert enqueued in AGENT_COMMANDS, (
             f'wire 错配: {fn_name} 被入队为 {enqueued!r} —— '
             f'agent 只会回 Unknown command(完整名才命中 COMMANDS)')
+
+
+@pytest.mark.unit
+def test_desktop_tool_does_not_manufacture_a_wait_deadline(monkeypatch):
+    import lib.desktop
+    from lib.tasks_pkg.handlers.misc import _agents
+    from lib.project_mod.tool_admission import Cancellation
+    task = {'aborted': False}
+    cancellation = Cancellation(task)
+    captured = {}
+    def send(cmd_type, params, **options):
+        captured.update(options)
+        task['aborted'] = True
+        assert options['cancellation'].is_set()
+        return {'entries': []}, None
+    monkeypatch.setattr(lib.desktop, 'send_desktop_command', send)
+    _agents._run_desktop('desktop_list_files', {}, user_id='owner', cancellation=cancellation)
+    assert captured['timeout'] is None
+    assert captured['user_id'] == 'owner'
+
+
+@pytest.mark.unit
+def test_desktop_handler_binds_task_stop_to_its_wait(monkeypatch):
+    import lib.desktop
+    from lib.tasks_pkg.handlers.misc import _agents
+    task = {'aborted': False, '_userId': 'owner'}
+    captured = {}
+    def send(cmd_type, params, **options):
+        captured.update(options)
+        assert not options['cancellation'].is_set()
+        task['aborted'] = True
+        assert options['cancellation'].is_set()
+        return None, 'cancelled'
+    def execute(task, fn_name, fn_args, rn, round_entry, tc_id, *, executor, **options):
+        return executor(fn_name, fn_args)
+    monkeypatch.setattr(lib.desktop, 'send_desktop_command', send)
+    monkeypatch.setattr(_agents, 'simple_call', execute)
+    result = _agents._handle_desktop_tool(
+        task, {}, 'desktop_list_files', 'tool', {}, 1, {}, {}, None, False)
+    assert 'cancelled' in result
+    assert captured['timeout'] is None and captured['user_id'] == 'owner'

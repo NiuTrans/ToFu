@@ -182,7 +182,7 @@ def interactive_login(domain):
     timeout_s = max(30, min(timeout_s, 600))
 
     try:
-        from lib.search_runtime import prepare_search_dependency_import
+        from lib.search.search_runtime import prepare_search_dependency_import
         prepare_search_dependency_import()
         from tofu_search.fetch.interactive_login import capture_login_cookies
     except Exception as e:

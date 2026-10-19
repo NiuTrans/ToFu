@@ -10,7 +10,6 @@ import json
 from lib.turn_verdict import terminal_finish_reason
 from .contracts import EvolutionStateError
 from . import stage_outcomes as outcomes
-from .records import MAX_RECORD_BYTES
 
 
 def persistence_preparer(run, *, user_id, review_prompt_factory):
@@ -39,8 +38,6 @@ def persistence_preparer(run, *, user_id, review_prompt_factory):
                          'content_epoch': content_epoch, 'dispatch': context['stage_dispatch'],
                          'outcome': {**value, 'archive_state': 'sealed', 'revision': 2}}
             outcomes._validate(candidate, 'terminal_checkpoint')
-            if len(json.dumps(candidate, ensure_ascii=False).encode('utf-8')) > MAX_RECORD_BYTES:
-                raise EvolutionStateError('terminal checkpoint exceeds metadata bound')
             task['_terminalOutcomeCandidate'] = candidate
         if (candidate['content_epoch'] != content_epoch
                 or candidate['outcome']['status'] != task.get('status')):

@@ -19,4 +19,12 @@ def test_reader_input_contention_pairs(browser, frontend_visual_origin, tmp_path
     destination = os.environ.get('TOFU_READER_INPUT_OUTPUT')
     if not destination:
         pytest.skip('set TOFU_READER_INPUT_OUTPUT for paired browser cohorts')
-    measure(browser, frontend_visual_origin, tmp_path, destination)
+    report = measure(browser, frontend_visual_origin, tmp_path, destination)
+    assert report['cases']
+    for case in report['cases']:
+        assert len(case['pairs']) == 3
+        for pair in case['pairs']:
+            for value in pair.values():
+                assert len(value['raw']) == 100 and value['warmup_keys'] == 20
+                assert all(row['keydown_to_second_raf_ms'] > 0
+                           and row['render_and_layout_ms'] >= 0 for row in value['raw'])

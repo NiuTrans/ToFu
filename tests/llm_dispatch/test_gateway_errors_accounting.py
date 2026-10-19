@@ -72,7 +72,7 @@ def key_stats_recorders(monkeypatch):
         lambda p, k, reason='': rec['rate_limit'].append((p, k)) or False)
     monkeypatch.setattr(
         'lib.key_stats.record_outcome',
-        lambda p, k, success, error='': rec['outcome'].append((p, k, success)))
+        lambda p, k, success, error='', **kwargs: rec['outcome'].append((p, k, success)))
     monkeypatch.setattr(
         'lib.key_stats.mark_key_exhausted',
         lambda p, k, reason='', model='': rec['exhausted'].append((p, k)))
@@ -237,13 +237,11 @@ class TestDailyGatewayAccounting:
         assert snap['keys'][PK]['gateway_errors'] == 1
 
     def test_genuine_failures_still_feed_the_safety_net(self, fresh_stats):
-        """The dead-key safety net lives on the UNCHANGED classes: auth
-        death (401/403) and endpoint-unreachable both record genuine
-        failures. Gateway reclassification must not soften them."""
+        """Explicit credential rejection still feeds the dead-key safety net."""
         ks = fresh_stats
         for _ in range(6):
             ks.record_outcome(PROV, KEY, success=False,
-                              error='HTTP 401 key revoked')
+                              error='HTTP 401 key revoked', credential_failure=True)
         row = ks.get_today_stats(PROV, KEY)
         assert row['failure'] == 6
         assert row['auto_disabled'] is True, (
@@ -294,7 +292,7 @@ class TestDispatchLoopIntegration:
     def test_gateway_502_then_success_feeds_only_the_gateway_counter(
             self, monkeypatch, key_stats_recorders):
         from lib.llm_dispatch import api
-        from lib.llm_errors import RateLimitError
+        from lib.llm.llm_errors import RateLimitError
         from tests.providers.test_vendor_transient_dispatch import _FakeDispatcher
 
         slot1 = _make_slot(key='gwacct_key_1')

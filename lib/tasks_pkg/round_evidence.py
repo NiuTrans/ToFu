@@ -60,4 +60,33 @@ def build_round_evidence(task: dict, messages: list, *, ref: dict,
         event['tools'] = tools
     if kind == 'request' and not canonical:
         event.update(degraded=True, degradedReason='request-build-fallback')
+    # Watermark for the reduced-scope post-tool dedup (FINDING C): the
+    # request snapshot for this round just sanitized + copied the full wire.
+    # A post-tool snapshot over an unchanged tail would be byte-equal, so the
+    # pipeline skips re-copying it. Identity is length + id() of the tail
+    # object — enough to prove no append/edit without another O(history) scan.
+    task['_snapshotWatermark'] = {
+        'roundNum': ref['roundNum'], 'len': len(messages),
+        'tail_id': id(messages[-1]) if messages else 0,
+    }
     return event
+
+
+def snapshot_unchanged_since_request(task: dict, messages: list) -> bool:
+    """True when the message list is unchanged since this round's snapshot.
+
+    Conservative identity check used to skip a duplicate post-tool snapshot:
+    same recorded round, same list length, and the tail message object is the
+    identical object the request snapshot copied. Any append, edit, or
+    compaction changes one of those and forces a fresh snapshot.
+    """
+    wm = task.get('_snapshotWatermark')
+    if not isinstance(wm, dict):
+        return False
+    ref = task.get('_inspectorRef') or {}
+    if wm.get('roundNum') != ref.get('roundNum'):
+        return False
+    if wm.get('len') != len(messages):
+        return False
+    tail_id = id(messages[-1]) if messages else 0
+    return wm.get('tail_id') == tail_id

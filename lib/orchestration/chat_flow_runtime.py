@@ -187,14 +187,20 @@ def execute_orchestration_chat_flow_task(
 
     execution_kwargs = launch.execution_kwargs(
         task, subflow_resolver=definition_service.get_definition)
-    if virtual_user_flow and ports.create_execution_journal is not None:
-        journal = ports.create_execution_journal(task, definition, launch)
-        execution_kwargs['executor_options']['execution_journal'] = journal
-    outcome = execute_flow(
-        definition,
-        on_event=adapter.on_event,
-        **execution_kwargs,
-    )
+    if virtual_user_flow and recovery_seed is not None and recovery_seed.pending_actors is not None:
+        from lib.goal_runs.native_recovery import execute_pending_goal_flow
+        outcome = execute_pending_goal_flow(task, definition, launch,
+            journal_factory=ports.create_execution_journal, on_event=adapter.on_event,
+            execution_kwargs=execution_kwargs)
+    else:
+        if virtual_user_flow and ports.create_execution_journal is not None:
+            journal = ports.create_execution_journal(task, definition, launch)
+            execution_kwargs['executor_options']['execution_journal'] = journal
+        outcome = execute_flow(
+            definition,
+            on_event=adapter.on_event,
+            **execution_kwargs,
+        )
     completion = OrchestrationChatFlowCompletion(
         task,
         projection=projection,

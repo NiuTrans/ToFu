@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from lib.llm_errors import ContextCompactionError, PromptTooLongError
+from lib.llm.llm_errors import ContextCompactionError, PromptTooLongError
 from lib.tasks_pkg.compaction import _prompt_admission as admission
 from lib.token_counter.base import (
     REUSABLE_TEXT_TOKEN_COUNTS_BY_IDENTITY_KEY,
@@ -345,3 +345,32 @@ def test_later_round_does_not_force_the_economic_working_set(monkeypatch):
 
     assert result['totalTokens'] == 127_000
     assert task['_lastPromptAdmission']['targetTokens'] > 128_000
+
+
+@pytest.mark.parametrize('pressure', ['l1', 'retention'])
+def test_summary_route_refusal_uses_latest_pressure_measurement(monkeypatch, pressure):
+    from lib.error_envelope import from_exception
+    from lib.tasks_pkg.compaction import _pressure
+    from lib.llm_dispatch import native_context_scope as scope
+
+    task = _task()
+    measurements = iter([_measurement(900_000, 8_000),
+                         _measurement(800_000, 8_000)])
+    monkeypatch.setattr(admission, '_measure', lambda *a, **k: next(measurements))
+    monkeypatch.setattr(_pressure, 'try_pressure_l1', lambda *a, **k: pressure == 'l1')
+    monkeypatch.setattr(_pressure, 'retain_oversized_tool_batch',
+                        lambda *a, **k: pressure == 'retention')
+    monkeypatch.setattr(scope, 'native_compaction_route_ready', lambda task: False)
+    monkeypatch.setattr(admission, 'force_compact_if_needed',
+                        lambda *a, **k: pytest.fail('no owned summary route'))
+
+    with pytest.raises(PromptTooLongError) as caught:
+        admission.enforce_dispatch_prompt_limit(
+            [{'role': 'user', 'content': 'required objective'}], [], task,
+            round_num=0, model='kimi-k3')
+
+    envelope = from_exception(caught.value)
+    assert envelope['reason'] == 'summary_route_unavailable'
+    assert envelope['totalTokens'] == 808_000
+    assert task['_lastPromptAdmission']['totalTokens'] == 808_000
+    assert task['_contextBudgetDecision']['outputResolutionInputTokens'] == 808_000

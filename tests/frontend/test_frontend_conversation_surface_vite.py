@@ -48,6 +48,8 @@ def conversation_bundle(tmp_path_factory: pytest.TempPathFactory) -> Path:
 
 def _run(bundle: Path, source: str) -> dict:
     script = f"""
+const harnessDom = new (require('jsdom').JSDOM)('', {{url:'http://localhost/'}});
+global.window = harnessDom.window;
 const feature = require({json.dumps(str(bundle))});
 {source}
 """
@@ -789,6 +791,7 @@ const surface = feature.createConversationSurface(
   }),
 );
 surface.render(vm);
+for (const process of document.querySelectorAll('.conversation-history-process')) { process.open=true; process.dispatchEvent(new document.defaultView.Event('toggle')); }
 // Reveal historical content before exercising its controls.
 document.querySelector('[data-round-action="expandAll"]')?.click();
 console.log(JSON.stringify({
@@ -810,6 +813,119 @@ dom.window.close();
         "disclosureCount": 5,
         "gatewayCount": 0,
     }
+
+
+@pytest.mark.parametrize("scenario", [
+    "next-round", "same-round", "reused-call-across-attempts",
+])
+def test_childless_programs_keep_gateway_slots_through_surface_lifecycle(
+        conversation_bundle: Path, scenario: str):
+    """Hidden gateways still own the exact position of their visible parent."""
+    result = _run(conversation_bundle, "const scenario = " + json.dumps(scenario) + r""";
+const { JSDOM } = require('jsdom');
+const dom = new JSDOM('<main id="chat"></main>');
+global.Element = dom.window.Element;
+const document = dom.window.document;
+const segments = [], toolRounds = [];
+const reused = scenario === 'reused-call-across-attempts';
+const firstScope = reused ? {attemptId:'attempt-a'} : {};
+const lastScope = reused ? {attemptId:'attempt-b'} : {};
+const prose = (type, text, llmRound, scope = {}) => segments.push({
+  type, blockId:`${type}:${text}`, text, llmRound, ...scope,
+});
+const program = (callId, label, scope) => {
+  const code = `return "${label}";`;
+  const output = {label};
+  segments.push({type:'tool_use', blockId:`tool:${label}`, id:callId,
+    name:'execute_program', input:{code}, llmRound:11, ...scope,
+    result:{status:'done', content:JSON.stringify(output)}});
+  toolRounds.push({roundNum:toolRounds.length + 1, llmRound:11, ...scope,
+    toolCallId:callId, toolName:'execute_program', toolArgs:{code},
+    status:'done', toolContent:output}, {
+    roundNum:8800000 + toolRounds.length, llmRound:11, ...scope,
+    _programSynthetic:true, _programCallId:callId,
+    programBackend:'local_javascript', programSource:'execute_program',
+    programCode:code, programResult:output, programStatus:'completed',
+    status:'done', childCallIds:[], childToolNames:[],
+    programStats:{tool_calls:0, successful_tool_calls:0},
+  });
+};
+prose('thinking', 'thinking11', 11, firstScope);
+program('gateway11', 'program11', firstScope);
+if (scenario !== 'next-round') {
+  prose('text', 'between-programs', 11, lastScope);
+  program(reused ? 'gateway11' : 'gateway11b', 'program11b', lastScope);
+}
+prose('thinking', 'thinking12', 12, lastScope);
+prose('text', 'text12', 12, lastScope);
+segments.push({type:'tool_use', blockId:'tool:tool12', id:'tool12',
+  name:'read_files', input:{path:'sample.txt'}, llmRound:12, ...lastScope,
+  result:{status:'done', content:'sample'}});
+toolRounds.push({roundNum:12, llmRound:12, ...lastScope,
+  toolCallId:'tool12', toolName:'read_files', toolArgs:{path:'sample.txt'},
+  status:'done', toolContent:'sample'});
+const createSurface = () => feature.createConversationSurface(
+  document.getElementById('chat'), feature.createClassicConversationRenderers({
+    renderSafeMarkdownHtml:value => `<p>${value}</p>`,
+  }));
+let surface = createSurface();
+const snapshots = {};
+for (const [phase, transport, status] of [
+  ['live', 'live', 'running'], ['terminal', 'live', 'completed'],
+  ['replay', 'replay', 'completed'],
+]) {
+  if (phase === 'replay') { surface.dispose(); surface = createSurface(); }
+  const revision = Object.keys(snapshots).length + 1;
+  const turn = {
+    turnId:'turn-program', conversationId:'conv-a', laneId:'main', ordinal:1,
+    actor:'assistant', kind:'reply', runId:'', status,
+    currentAttemptId:status === 'running' ? 'attempt-b' : null,
+    projection:JSON.parse(JSON.stringify({segments, toolRounds})),
+    projectionRevision:revision, createdAt:1, updatedAt:revision,
+    settlement:status === 'completed' ? {outcome:'completed'} : {},
+  };
+  const state = {conversationId:'conv-a', conversationRevision:revision, transport,
+    turnsById:{'turn-program':turn}, laneOrder:{main:['turn-program']},
+    attemptsById:{}, queueItems:[], pendingEventsByTurn:{}, commandPending:{},
+    liveRoundUsageByTurn:{}};
+  const before = JSON.stringify(state);
+  const vm = feature.selectConversationViewModel(state);
+  surface.render(vm);
+  for (const process of surface.root.querySelectorAll('.conversation-history-process')) {
+    process.open = true;
+    process.dispatchEvent(new dom.window.Event('toggle'));
+  }
+  surface.root.querySelector('[data-round-action="expandAll"]')?.click();
+  const blocks = vm.mainLane.turns[0].blocks.filter(block => block.kind !== 'live-status');
+  const label = block => `${block.kind}:${block.kind === 'program'
+    ? block.round.programResult.label : block.kind === 'tool'
+      ? block.toolCallId : block.markdown}`;
+  const labelsById = new Map(blocks.map(block => [block.blockId, label(block)]));
+  snapshots[phase] = {
+    order:blocks.map(label),
+    domOrder:Array.from(surface.root.querySelectorAll('[data-block-kind]'))
+      .filter(node => node.dataset.blockKind !== 'live-status')
+      .map(node => labelsById.get(node.dataset.blockId)),
+    thinkingCount:surface.root.querySelectorAll('.thinking-block').length,
+    programCount:surface.root.querySelectorAll('.ptc-card').length,
+    uniqueIds:labelsById.size === blocks.length,
+    unchanged:before === JSON.stringify(state),
+  };
+}
+surface.dispose();
+dom.window.close();
+console.log(JSON.stringify(snapshots));
+""")
+    order = ["thinking:thinking11", "program:program11"]
+    if scenario != "next-round":
+        order += ["text:between-programs", "program:program11b"]
+    order += ["thinking:thinking12", "text:text12", "tool:tool12"]
+    expected = {
+        "order": order, "domOrder": order, "thinkingCount": 2,
+        "programCount": 1 if scenario == "next-round" else 2,
+        "uniqueIds": True, "unchanged": True,
+    }
+    assert result == {phase: expected for phase in ("live", "terminal", "replay")}
 
 
 def test_thinking_block_collapses_when_streaming_completes(
@@ -1102,11 +1218,13 @@ const controller = feature.createConversationSurfaceController({
 const conversation = {id:'conv-a'};
 controller.render(conversation, makeState(makeTurn(1, 'one')));
 scheduled.shift()();
+for (const process of document.querySelectorAll('.conversation-history-process')) { process.open=true; process.dispatchEvent(new document.defaultView.Event('toggle')); }
 // Reveal historical content before exercising its controls.
 document.querySelector('[data-round-action="expandAll"]')?.click();
 const first = document.querySelector('[data-block-id="tool:call-1"]');
 controller.render(conversation, makeState(makeTurn(2, 'two')));
 scheduled.shift()();
+for (const process of document.querySelectorAll('.conversation-history-process')) { process.open=true; process.dispatchEvent(new document.defaultView.Event('toggle')); }
 const second = document.querySelector('[data-block-id="tool:call-1"]');
 const payload = {
   native:Boolean(
@@ -1334,9 +1452,11 @@ const controller = feature.createConversationSurfaceController({
 const conversation = {id:'conv-a'};
 controller.render(conversation, makeState(makeTurn(1)));
 scheduled.shift()();
+for (const process of document.querySelectorAll('.conversation-history-process')) { process.open=true; process.dispatchEvent(new document.defaultView.Event('toggle')); }
 const first = document.querySelector('[data-block-id="program:gateway-1"]');
 controller.render(conversation, makeState(makeTurn(2)));
 scheduled.shift()();
+for (const process of document.querySelectorAll('.conversation-history-process')) { process.open=true; process.dispatchEvent(new document.defaultView.Event('toggle')); }
 const second = document.querySelector('[data-block-id="program:gateway-1"]');
 const blocks = feature.selectTurnBlocks(makeTurn(3));
 console.log(JSON.stringify({
@@ -1694,6 +1814,7 @@ const controller = feature.createConversationSurfaceController({
 });
 controller.render({id:'conv-a'}, state);
 scheduled.shift()();
+for (const process of document.querySelectorAll('.conversation-history-process')) { process.open=true; process.dispatchEvent(new document.defaultView.Event('toggle')); }
 const firstFailureRow = document.querySelector('[data-block-id="activity:model-1"]');
 const nextState = JSON.parse(JSON.stringify(state));
 nextState.conversationRevision = 2;
@@ -1710,6 +1831,7 @@ nextState.turnsById['turn-activity'].projection.activityTimeline.entries.push({
 });
 controller.render({id:'conv-a'}, nextState);
 scheduled.shift()();
+for (const process of document.querySelectorAll('.conversation-history-process')) { process.open=true; process.dispatchEvent(new document.defaultView.Event('toggle')); }
 const block = id => document.querySelector(`[data-block-id="${id}"]`);
 const payload = {
   blockIds:vmTurn.blocks.map(block => block.blockId),
@@ -1756,11 +1878,11 @@ console.log(JSON.stringify(payload));
             "activity:switch-1",
         ],
         "domOrder": [
+            "text:terminal",
             "tool:call-1",
             "activity:tool-fail",
             "activity:schema-1",
             "activity:gateway-shell",
-            "text:terminal",
             "activity:model-1",
             "activity:switch-1",
             "activity:retry-1",
@@ -1769,7 +1891,7 @@ console.log(JSON.stringify(payload));
         "toolBlocks": 1,
         "errorRowUnderCall": "activity:tool-fail",
         "schemaAfterErrorRow": "activity:schema-1",
-        "failureAfterRoundText": "text:terminal",
+        "failureAfterRoundText": "activity:gateway-shell",
         "switchAfterFailure": "activity:model-1",
         "retryAfterSwitch": "activity:switch-1",
         "timelineBlocks": 0,
@@ -1842,6 +1964,7 @@ const controller = feature.createConversationSurfaceController({
 });
 controller.render({id:'conv-a'}, state);
 scheduled.shift()();
+for (const process of document.querySelectorAll('.conversation-history-process')) { process.open=true; process.dispatchEvent(new document.defaultView.Event('toggle')); }
 const vmTurn = feature.selectConversationViewModel(state).mainLane.turns[0];
 const row = document.querySelector('[data-activity-id="compact-1"]');
 const before = row.querySelector('.compaction-token-stage.is-before');
@@ -1879,7 +2002,7 @@ controller.dispose();
 dom.window.close();
 """)
     assert result == {
-        "blockKinds": ["text", "activity-event"],
+        "blockKinds": ["activity-event", "text"],
         "infoToolHidden": True,
         "compactionClass": True,
         "durationMs": 239253,
@@ -1955,6 +2078,7 @@ const controller = feature.createConversationSurfaceController({
 });
 controller.render({id:'conv-a'}, state);
 scheduled.shift()();
+for (const process of document.querySelectorAll('.conversation-history-process')) { process.open=true; process.dispatchEvent(new document.defaultView.Event('toggle')); }
 const vmTurn = feature.selectConversationViewModel(state).mainLane.turns[0];
 console.log(JSON.stringify({
   blockIds:vmTurn.blocks.map(block => block.blockId),
@@ -2051,6 +2175,7 @@ const controller = feature.createConversationSurfaceController({
 });
 controller.render({id:'conv-a'}, state);
 scheduled.shift()();
+for (const process of document.querySelectorAll('.conversation-history-process')) { process.open=true; process.dispatchEvent(new document.defaultView.Event('toggle')); }
 const vmTurn = feature.selectConversationViewModel(state).mainLane.turns[0];
 console.log(JSON.stringify({
   blockIds:vmTurn.blocks.map(block => block.blockId),
@@ -2582,6 +2707,7 @@ const controller = feature.createConversationSurfaceController({
 });
 controller.render({id:'conv-a'}, state);
 scheduled.shift()();
+for (const process of document.querySelectorAll('.conversation-history-process')) { process.open=true; process.dispatchEvent(new document.defaultView.Event('toggle')); }
 const block = (id) => document.querySelector(`[data-block-id="${id}"]`);
 const payload = {
   narrationText:block('text:llm-0').querySelector('.md-content').textContent,
@@ -3246,6 +3372,7 @@ const controller = feature.createConversationSurfaceController({
 const conversation = {id:'conv-a'};
 controller.render(conversation, firstState);
 scheduled.shift()();
+for (const process of document.querySelectorAll('.conversation-history-process')) { process.open=true; process.dispatchEvent(new document.defaultView.Event('toggle')); }
 const firstVm = feature.selectConversationViewModel(firstState);
 const blockOrder = firstVm.mainLane.turns[0].blocks.map(block => block.blockId);
 const firstNode = document.querySelector(
@@ -3253,6 +3380,7 @@ const firstNode = document.querySelector(
 firstNode.querySelector('details').open = false;
 controller.render(conversation, secondState);
 scheduled.shift()();
+for (const process of document.querySelectorAll('.conversation-history-process')) { process.open=true; process.dispatchEvent(new document.defaultView.Event('toggle')); }
 const secondNode = document.querySelector(
   '[data-block-id="injection:user-steer:round-2"]');
 console.log(JSON.stringify({
@@ -3576,12 +3704,14 @@ const controller = feature.createConversationSurfaceController({
 const conversation = {id:'conv-a'};
 controller.render(conversation, state(makeTurn(1, 'first')));
 scheduled.shift()();
+for (const process of document.querySelectorAll('.conversation-history-process')) { process.open=true; process.dispatchEvent(new document.defaultView.Event('toggle')); }
 const vm = feature.selectConversationViewModel(state(makeTurn(1, 'first')));
 const firstBlock = document.querySelector('[data-block-kind="rolled-back"]');
 const firstThinking = firstBlock.querySelector('.thinking-block.thinking-prior');
 const firstContent = firstBlock.querySelector('.thinking-block.content-prior');
 controller.render(conversation, state(makeTurn(2, 'second')));
 scheduled.shift()();
+for (const process of document.querySelectorAll('.conversation-history-process')) { process.open=true; process.dispatchEvent(new document.defaultView.Event('toggle')); }
 const secondBlock = document.querySelector('[data-block-kind="rolled-back"]');
 const emptyVm = feature.selectConversationViewModel(state(makeTurn(3, 'third',
   [{blockId:'rolled-back', thinking:'  ', content:''}])));
@@ -3949,7 +4079,7 @@ console.log(JSON.stringify({
 }));
 """)
     assert result == {
-        "blocks": ["image-generation", "text:terminal"],
+        "blocks": ["text:terminal", "image-generation"],
         "image": "/generated/a.png",
         "error": "rate limited",
         "intents": [
@@ -4311,7 +4441,10 @@ console.log(JSON.stringify({
   collapsedBranchDecision:collapsedBranchVm.planDecision,
   decisionInsideSourceTurn:planDecisionNode?.closest('[data-turn-id]') === planTurnNode,
   decisionDirectlyAfterBlocks:planDecisionNode?.previousElementSibling
-    ?.dataset.conversationPart === 'turn-blocks',
+    ?.dataset.conversationPart === 'turn-blocks-later'
+    && planDecisionNode.previousElementSibling.hidden
+    && planDecisionNode.previousElementSibling.previousElementSibling
+      ?.dataset.conversationPart === 'turn-blocks',
   decisionBeforeTurnActions:planDecisionNode?.nextElementSibling
     ?.dataset.conversationPart === 'turn-actions',
 }));
@@ -4775,14 +4908,14 @@ global.Element = dom.window.Element;
 const document = dom.window.document;
 const makeTurn = (conversationId, turnId, blockCount) => ({
   turnId, conversationId, laneId:'main',
-  ordinal:0, actor:'assistant', kind:'reply', status:'completed',
+  ordinal:0, actor:'assistant', kind:'reply', status:'failed',
   currentAttemptId:null, projectionRevision:1,
   projection:{content:`block ${blockCount - 1}`,
     segments:Array.from({length:blockCount}, (_, i) => ({
       type:'text', blockId:`${turnId}:block-${i}`, text:`block ${i}`,
       deliverable:i === blockCount - 1, terminal:i === blockCount - 1,
     }))},
-  settlement:{outcome:'completed'}, createdAt:0, updatedAt:0,
+  settlement:{outcome:'failed'}, createdAt:0, updatedAt:0,
 });
 const makeVm = (conversationId, turns) => feature.selectConversationViewModel({
   conversationId, conversationRevision:1, transport:'live',
@@ -4807,7 +4940,12 @@ const earlierButton = () => surface.root.querySelector(
 const earlierNav = () => surface.root.querySelector(
   '[data-conversation-part="turn-blocks-earlier"]',
 );
-surface.render(makeVm('conv-blocks', [makeTurn('conv-blocks', 'turn-huge', 450)]));
+const hugeVm = makeVm('conv-blocks', [makeTurn('conv-blocks', 'turn-huge', 450)]);
+surface.render(hugeVm);
+const visited = new Set();
+const observe = () => surface.root.querySelectorAll('[data-block-id]')
+  .forEach(node => visited.add(node.dataset.blockId));
+observe();
 const contentParts = () => Array.from(
   surface.root.querySelector('.conversation-turn-content').children,
 ).map(node => node.dataset.conversationPart).filter(Boolean).slice(0, 3);
@@ -4826,10 +4964,27 @@ for (let i = 0; i < 4; i += 1) {
   button.click();
   output.clicks.push({blocks:blockCount(), first:firstBlockId(),
     hidden:earlierNav().hidden, label:earlierButton().textContent});
+
+  observe();
 }
 output.expandedBlocks = blockCount();
 surface.render(makeVm('conv-blocks', [makeTurn('conv-blocks', 'turn-huge', 450)]));
 output.expandedKeptAfterRerender = blockCount();
+
+output.vmHistory = hugeVm.mainLane.turns[0].blocks.length;
+output.earlierVisited = visited.size;
+const laterButton = () => surface.root.querySelector(
+  '[data-conversation-block-window-action="later"]');
+for (let i = 0; i < 4 && !laterButton().disabled; i++) {
+  laterButton().click(); observe();
+}
+output.laterFirst = firstBlockId();
+output.laterBlocks = blockCount();
+output.laterDisabled = laterButton().disabled;
+earlierButton().click();
+surface.followLatest();
+output.latestFirst = firstBlockId();
+output.latestBlocks = blockCount();
 surface.render(makeVm('conv-blocks-2', [
   makeTurn('conv-blocks-2', 'turn-huge-2', 450),
   makeTurn('conv-blocks-2', 'turn-small', 100),
@@ -4851,20 +5006,25 @@ console.log(JSON.stringify(output));
     assert result["initialFirst"] == "turn-huge:block-250"
     assert result["initialRenders"] == 200
     assert result["navVisible"] is True
-    assert result["buttonLabel"] == "earlier:100"
+    assert result["buttonLabel"] == "earlier:250"
     assert result["contentOrder"] == [
         "turn-header", "turn-blocks-earlier", "turn-blocks",
     ]
     assert result["clicks"] == [
-        {"blocks": 300, "first": "turn-huge:block-150",
-         "hidden": False, "label": "earlier:100"},
-        {"blocks": 400, "first": "turn-huge:block-50",
+        {"blocks": 200, "first": "turn-huge:block-150",
+         "hidden": False, "label": "earlier:150"},
+        {"blocks": 200, "first": "turn-huge:block-50",
          "hidden": False, "label": "earlier:50"},
-        {"blocks": 450, "first": "turn-huge:block-0",
+        {"blocks": 200, "first": "turn-huge:block-0",
          "hidden": True, "label": "earlier:0"},
     ]
-    assert result["expandedBlocks"] == 450
-    assert result["expandedKeptAfterRerender"] == 450
+    assert result["expandedBlocks"] == 200
+    assert result["expandedKeptAfterRerender"] == 200
+
+    assert result["vmHistory"] == result["earlierVisited"] == 450
+    assert result["laterFirst"] == result["latestFirst"] == "turn-huge:block-250"
+    assert result["laterBlocks"] == result["latestBlocks"] == 200
+    assert result["laterDisabled"] is True
     assert result["resetBlocksFirstTurn"] == 300
     assert result["smallTurnBlocks"] == 100
     assert result["smallTurnNavHidden"] is True
@@ -5795,6 +5955,7 @@ const controller = feature.createConversationSurfaceController({
 });
 controller.render({id:'conv-a'}, state);
 scheduled.shift()();
+for (const process of document.querySelectorAll('.conversation-history-process')) { process.open=true; process.dispatchEvent(new document.defaultView.Event('toggle')); }
 // Reveal historical content before exercising its controls.
 document.querySelector('[data-round-action="expandAll"]')?.click();
 const node = document.querySelector('[data-turn-id="copy-block-turn"]');
@@ -5806,7 +5967,7 @@ const copyButtons = () => textBlocks().map(block =>
 const thinkingCopies = node.querySelectorAll(
   '.conversation-block--thinking button[data-conversation-action="copy-block"]'
 ).length;
-const middleCopy = () => textBlocks()[0]
+const middleCopy = () => node.querySelector('[data-block-id="text:llm-1"]')
   .querySelector('button[data-conversation-action="copy-block"]');
 const aria = middleCopy().getAttribute('aria-label');
 middleCopy().click();
@@ -5816,6 +5977,7 @@ const afterTranslate = forwarded.map(intent =>
   [intent.type, intent.blockId, intent.operation]);
 controller.render({id:'conv-a'}, state, {force:true});
 scheduled.shift()();
+for (const process of document.querySelectorAll('.conversation-history-process')) { process.open=true; process.dispatchEvent(new document.defaultView.Event('toggle')); }
 const countsAfterRerender = copyButtons();
 const payload = {
   textBlockCount:textBlocks().length,
@@ -6097,14 +6259,23 @@ const count=()=>({turns:surface.root.querySelectorAll('[data-turn-id]').length,
 const small=count();const historyPreserved=Object.keys(store.getState().turnsById).length===100;
 surface.showEarlier();const earlier=!!surface.root.querySelector('[data-turn-id="t-89"]');
 surface.followLatest();height=1600;paint();const large=count();
+const firstIndex=()=>Number(surface.root.querySelector('[data-turn-id="t-99"] [data-block-id]').dataset.blockId.slice(6));
+const tailStart=firstIndex();
 surface.root.querySelector('[data-turn-id="t-99"] [data-conversation-block-window-action="earlier"]').click();
-const expanded=count().blocks>large.blocks;surface.dispose();dom.window.close();
-console.log(JSON.stringify({small,large,historyPreserved,earlier,expanded}));
+const shifted=count().blocks===large.blocks
+ && firstIndex()<tailStart
+ && !surface.root.querySelector('[data-turn-id="t-99"] [data-block-id="block-159"]');
+surface.followLatest();
+const latestReset=count().blocks===large.blocks
+ && !!surface.root.querySelector('[data-turn-id="t-99"] [data-block-id="block-159"]');
+surface.dispose();dom.window.close();
+console.log(JSON.stringify({small,large,historyPreserved,earlier,shifted,latestReset}));
 """)
     assert result['small']['turns'] == 8
     assert result['large']['turns'] == 20
     assert result['small']['blocks'] < result['large']['blocks'] < 160
-    assert result['historyPreserved'] and result['earlier'] and result['expanded']
+    assert result['historyPreserved'] and result['earlier']
+    assert result['shifted'] and result['latestReset']
 
 
 def test_deferred_terminal_projection_recovers_before_patch_and_accepts_full_authority(conversation_bundle):
@@ -6291,3 +6462,114 @@ controller.dispose();
 """)
     assert result == {'sameTurnNode': True, 'rendered': True, 'sourcePreserved': True,
                       'modelRevision': 1, 'projectionRevision': 2}
+
+
+@pytest.mark.parametrize("settlement", ["resolve", "reject"])
+def test_surface_history_loading_single_flight_retry_and_disposal(
+        conversation_bundle: Path, settlement: str):
+    result = _run(conversation_bundle, "const settlement=" + json.dumps(settlement) + ";" + r"""
+(async () => {
+const {JSDOM}=require('jsdom');
+const dom=new JSDOM('<main id="chat"></main>');
+global.Element=dom.window.Element;const document=dom.window.document;
+const state=feature.createTurnState('async-history');
+state.laneOrder.main=['t'];
+state.turnsById.t={turnId:'t',conversationId:'async-history',laneId:'main',ordinal:100,
+ actor:'human',kind:'input',status:'completed',projectionRevision:1,
+ projection:{content:'loaded'},createdAt:1,updatedAt:1};
+state.historyByLane={main:{hasMore:true,nextBeforeOrdinal:100,totalTurns:100}};
+const flights=[];const intents=[];
+const surface=feature.createConversationSurface(document.getElementById('chat'),{
+ onIntent(intent){intents.push(intent);return new Promise((resolve,reject)=>flights.push({resolve,reject}));}
+});
+surface.render(feature.selectConversationViewModel(state));
+const boundary=()=>surface.root.querySelector('[data-conversation-part="turn-window-earlier"]');
+const snapshot=()=>({state:boundary().dataset.historyState,
+ disabled:boundary().querySelector('button').disabled,
+ status:boundary().querySelector('[role="status"]').textContent});
+surface.showEarlier();const loading=snapshot();
+surface.showEarlier();boundary().querySelector('button').click();
+const singleFlight=intents.length===1;
+flights[0][settlement](settlement==='reject'?new Error('offline'):undefined);
+await Promise.resolve();await Promise.resolve();
+const settled=snapshot();
+surface.showEarlier();const retried=intents.length===2 && snapshot().state==='loading';
+surface.dispose();flights[1][settlement](settlement==='reject'?new Error('late'):undefined);
+await Promise.resolve();await Promise.resolve();
+const disposed=document.getElementById('chat').children.length===0;
+dom.window.close();console.log(JSON.stringify({loading,singleFlight,settled,retried,disposed,
+ cursors:intents.map(i=>i.beforeOrdinal)}));
+})().catch(error=>{console.error(error);process.exitCode=1;});
+""")
+    assert result["loading"]["state"] == "loading"
+    assert result["loading"]["disabled"] is True
+    assert "Loading" in result["loading"]["status"]
+    assert result["singleFlight"] is True
+    assert result["settled"]["state"] == ("failed" if settlement == "reject" else "idle")
+    assert result["settled"]["disabled"] is False
+    if settlement == "reject":
+        assert "retry" in result["settled"]["status"]
+    assert result["retried"] and result["disposed"]
+    assert result["cursors"] == [100, 100]
+
+
+def test_surface_same_round_history_is_bounded_and_stream_does_not_steal_reading(
+        conversation_bundle: Path):
+    result = _run(conversation_bundle, r"""
+const {JSDOM}=require('jsdom');const dom=new JSDOM('<main id="chat"></main>');
+global.Element=dom.window.Element;const document=dom.window.document;
+const store=feature.createTurnStore('same-round');
+const turn=count=>({turnId:'t',conversationId:'same-round',laneId:'main',ordinal:1,
+ actor:'assistant',kind:'reply',status:'running',currentAttemptId:'a',projectionRevision:count,
+ createdAt:1,updatedAt:count,projection:{segments:Array.from({length:count},(_,i)=>({
+ type:'text',blockId:'b-'+i,text:'block '+i,roundNum:1,llmRound:0}))}});
+const update=count=>store.dispatch({type:'snapshot',snapshot:{conversationRevision:count,
+ turns:[turn(count)],authoritativeFull:true}});
+const surface=feature.createConversationSurface(document.getElementById('chat'),{
+ windowing:{maxBlocksPerTurn:20,blockBatchSize:10},renderBlock(node,b){node.textContent=b.markdown;}});
+const paint=()=>surface.render(feature.selectConversationViewModel(store.getState()));
+const ids=()=>Array.from(surface.root.querySelectorAll('[data-block-id]')).map(n=>n.dataset.blockId);
+const earlier=()=>surface.root.querySelector('[data-conversation-block-window-action="earlier"]');
+const later=()=>surface.root.querySelector('[data-conversation-block-window-action="later"]');
+update(125);paint();const initial=ids();const seen=new Set(initial);let bounded=true;let monotonic=true;
+let last=105;let guard=0;
+while(!earlier().disabled && guard++<20){earlier().click();const current=ids();
+ const start=Number(current[0].slice(2));monotonic&&=start<last;last=start;
+ bounded&&=current.length<=20;current.forEach(id=>seen.add(id));}
+const reading=ids();update(130);paint();const streamPreserved=JSON.stringify(ids())===JSON.stringify(reading);
+guard=0;while(!later().disabled && guard++<20){later().click();bounded&&=ids().length<=20;}
+const reachedLatest=ids().includes('b-129');earlier().click();surface.followLatest();
+const reset=ids().includes('b-129') && ids().length===20;
+const durable=store.getState().turnsById.t.projection.segments.length;
+surface.dispose();dom.window.close();console.log(JSON.stringify({initial:initial[0],seen:seen.size,
+ bounded,monotonic,streamPreserved,reachedLatest,reset,durable}));
+""")
+    assert result == {"initial": "b-105", "seen": 125, "bounded": True,
+                      "monotonic": True, "streamPreserved": True,
+                      "reachedLatest": True, "reset": True, "durable": 130}
+
+
+def test_remote_prepend_retains_visible_anchor_with_small_turn_budget(conversation_bundle):
+    result = _run(conversation_bundle, r"""
+const {JSDOM}=require('jsdom');const dom=new JSDOM('<main id="chat"></main>');
+global.Element=dom.window.Element;const document=dom.window.document;
+const turn=i=>({turnId:'t-'+i,conversationId:'small-prepend',laneId:'main',ordinal:i,
+ actor:'assistant',kind:'reply',status:'completed',projectionRevision:1,
+ projection:{content:'Turn '+i},createdAt:i,updatedAt:i});
+const state=turns=>({...feature.createTurnState('small-prepend'),
+ turnsById:Object.fromEntries(turns.map(t=>[t.turnId,t])),laneOrder:{main:turns.map(t=>t.turnId)},
+ historyByLane:{main:{hasMore:true,nextBeforeOrdinal:turns[0].ordinal,totalTurns:200}}});
+const loaded=Array.from({length:8},(_,i)=>turn(i+100));
+const surface=feature.createConversationSurface(document.getElementById('chat'),{
+ windowing:{maxTurns:8,batchSize:20},onIntent(){}});
+surface.render(feature.selectConversationViewModel(state(loaded)));
+const anchor=surface.root.querySelector('[data-turn-id="t-100"]');
+surface.showEarlier();
+const older=Array.from({length:64},(_,i)=>turn(i+36));
+surface.render(feature.selectConversationViewModel(state([...older,...loaded])));
+const visible=[...surface.root.querySelectorAll('[data-turn-id]')];
+const output={same:surface.root.querySelector('[data-turn-id="t-100"]')===anchor,
+ count:visible.length,first:visible[0].dataset.turnId,last:visible.at(-1).dataset.turnId};
+surface.dispose();dom.window.close();console.log(JSON.stringify(output));
+""")
+    assert result == {"same": True, "count": 8, "first": "t-96", "last": "t-103"}

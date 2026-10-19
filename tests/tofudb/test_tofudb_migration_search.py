@@ -4,10 +4,10 @@ import sqlite3
 
 import pytest
 
-from lib.storage_sidecar.tofudb_migration_import import PLAN
-from lib.storage_sidecar.tofudb_migration_coverage import source_table_coverage
-from lib.storage_sidecar.tofudb_migration_search import verified_retired_search
-from lib.storage_sidecar.tofudb_migration_source import SQLiteMigrationSource, MigrationSourceError
+from lib.storage_authority_sql.migration.tofudb_migration_import import PLAN
+from lib.storage_authority_sql.migration.tofudb_migration_coverage import source_table_coverage
+from lib.storage_authority_sql.migration.tofudb_migration_search import verified_retired_search
+from lib.storage_authority_sql.migration.tofudb_migration_source import SQLiteMigrationSource, MigrationSourceError
 
 pytestmark = pytest.mark.unit
 

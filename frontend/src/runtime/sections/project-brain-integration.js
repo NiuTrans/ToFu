@@ -69,6 +69,16 @@
     'delivery.preserved': 'Current checkout preserved; not delivered',
     'delivery.failed': 'Current checkout: delivery failed',
     'delivery.unknown': 'Current checkout: delivery not verified',
+    "acceptance.verified": "Candidate checks passed",
+    "acceptance.failed": "Candidate checks failed",
+    "acceptance.stale": "Verification is out of date",
+    "acceptance.unverified": "Candidate not verified",
+    "acceptance.builtin": "Built-in checks",
+    "acceptance.project_command": "Project checks",
+    "acceptance.passed": "passed",
+    "acceptance.failedCheck": "failed",
+    "acceptance.unknown": "unknown",
+    "acceptance.not_run": "not run",
   };
 
   var _STATE_FALLBACK = {
@@ -231,6 +241,30 @@
     return _pbiText('delivery.' + state);
   }
 
+  function _acceptanceHtml(item) {
+    var acceptance = item.acceptance || {};
+    var status = ['verified', 'failed', 'stale', 'unverified'].indexOf(acceptance.status) >= 0
+      ? acceptance.status : 'unverified';
+    var record = acceptance.record;
+    if (!record || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(record.targetRevision || '')) {
+      record = null;
+      status = 'unverified';
+    }
+    var checks = record && Array.isArray(record.checks) ? record.checks.slice(0, 2) : [];
+    var checkText = checks.filter(function (check) {
+      return check && ['builtin', 'project_command'].indexOf(check.id) >= 0;
+    }).map(function (check) {
+      var outcome = ['passed', 'failed', 'unknown', 'not_run'].indexOf(check.outcome) >= 0
+        ? check.outcome : 'unknown';
+      return _pbiText('acceptance.' + check.id) + ': '
+        + _pbiText('acceptance.' + (outcome === 'failed' ? 'failedCheck' : outcome));
+    }).join(' · ');
+    return '<div class="pbi-writer-meta" data-acceptance-status="' + status + '"><span>'
+      + _esc(_pbiText('acceptance.' + status)) + '</span>'
+      + (record ? '<code title="' + _esc(record.targetRevision) + '">' + _esc(_sha(record.targetRevision)) + '</code>' : '')
+      + (checkText ? '<span>' + _esc(checkText) + '</span>' : '') + '</div>';
+  }
+
   function _workspaceRows(data) {
     var items = data.workspaces || [];
     if (!items.length) return '<div class="pbi-empty">' + _esc(_pbiText('noWorkspaces')) + '</div>';
@@ -257,6 +291,7 @@
           : ((dirty.total || 0) + ' ' + _esc(_pbiText('localChanges')))) +
         '</span><span title="' + _esc(deliveryDetail) + '">' +
         _esc(_fmtTime(delivery.updatedAt || item.updatedAt)) + '</span></div>' +
+        _acceptanceHtml(item) +
         (error ? '<pre class="pbi-writer-error">' + _esc(error) + '</pre>' : '') +
         '</div><div class="pbi-writer-actions">' + _taskActions(item) + '</div></article>';
     }).join('');

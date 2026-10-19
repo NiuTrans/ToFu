@@ -77,7 +77,15 @@ fn checkpoint_crash_child() {
     let lease = j.acquire("child").unwrap();
     lease.load().unwrap();
     lease.begin(0).unwrap();
-    if mode != "inflight" {
+    if mode == "tools_pending_kill" {
+        lease.pending(&pending_state()).unwrap();
+        let mut file = std::fs::OpenOptions::new().create(true).append(true)
+            .open(std::path::Path::new(&path).join("effect.txt")).unwrap();
+        std::io::Write::write_all(&mut file, b"once\n").unwrap();
+        file.sync_all().unwrap();
+        std::fs::write(std::path::Path::new(&path).join("tool-returned"), b"ready").unwrap();
+        loop { std::thread::park(); }
+    } else if mode != "inflight" {
         lease.complete(&state()).unwrap();
     }
     if mode == "released" {
@@ -85,6 +93,54 @@ fn checkpoint_crash_child() {
     }
     // Simulate process loss without any database/lease Drop or graceful shutdown.
     unsafe { libc::_exit(0) }
+}
+
+fn pending_state() -> Value {
+    let mut value = state();
+    value["tools_pending"] = json!(true);
+    value["usage"] = json!([{"total_tokens":23,"cost_usd":0.01}]);
+    value["messages"][1] = json!({"role":"assistant","tool_calls":[
+        {"id":"write-1","type":"function","function":{"name":"write_file","arguments":"{\"path\":\"effect.txt\",\"append\":true,\"content\":\"once\\n\"}"}}
+    ]});
+    value
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn paid_tool_frontier_survives_sigkill_and_never_replays_the_write() {
+    struct Child(std::process::Child);
+    impl Drop for Child {
+        fn drop(&mut self) { let _ = self.0.kill(); let _ = self.0.wait(); }
+    }
+    let directory = tempfile::tempdir().unwrap();
+    drop(AuthorityDatabase::initialize(directory.path()).unwrap());
+    let mut child = Child(std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact","native_checkpoint_store::adapter::tests::checkpoint_crash_child","--nocapture"])
+        .env("TOFU_CHECKPOINT_STORE_TEST_DIRECTORY", directory.path())
+        .env("TOFU_CHECKPOINT_STORE_TEST_STAGE", "tools_pending_kill")
+        .stdout(std::process::Stdio::null()).spawn().unwrap());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while !directory.path().join("tool-returned").exists() {
+        assert!(child.0.try_wait().unwrap().is_none(), "writer exited before its durable barrier");
+        assert!(std::time::Instant::now() < deadline, "writer did not reach the tool boundary");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    child.0.kill().unwrap();
+    assert!(!child.0.wait().unwrap().success());
+    let db = store(AuthorityDatabase::open(directory.path()).unwrap());
+    let j = journal(&db);
+    assert_eq!(j.acquire("ordinary-retry").err(),Some(Error::Ineligible));
+    let lease = j.recover("verified-dead-writer").unwrap();
+    let mut saved = lease.load().unwrap().unwrap();
+    assert_eq!(j.recover("competing-recovery").err(),Some(Error::Ineligible));
+    assert_eq!(saved,pending_state());
+    assert_eq!(std::fs::read(directory.path().join("effect.txt")).unwrap(),b"once\n");
+    saved.as_object_mut().unwrap().remove("tools_pending");
+    saved["messages"].as_array_mut().unwrap().push(json!({"role":"tool","tool_call_id":"write-1","content":"existing publication proved"}));
+    lease.complete(&saved).unwrap();
+    lease.begin(1).unwrap();
+    assert_eq!(std::fs::read(directory.path().join("effect.txt")).unwrap(),b"once\n");
+    assert_eq!(saved["usage"],json!([{"total_tokens":23,"cost_usd":0.01}]));
 }
 
 #[test]
@@ -117,6 +173,23 @@ fn abrupt_process_loss_recovers_only_released_completed_frontier() {
             assert!(j.acquire("later").is_err());
         } else {
             assert_eq!(j.acquire("parent").err(), Some(Error::Ineligible));
+            if mode == "completed" {
+                #[cfg(target_os = "linux")]
+                {
+                    let old = db.header(7, "task").unwrap().unwrap();
+                    let lease = j.recover("parent").unwrap();
+                    let new = db.header(7, "task").unwrap().unwrap();
+                    assert!(
+                        new.value["lease_generation"].as_u64().unwrap()
+                            > old.value["lease_generation"].as_u64().unwrap()
+                    );
+                    assert_eq!(lease.load().unwrap(), Some(state()));
+                    assert_eq!(j.recover("competing").err(), Some(Error::Ineligible));
+                    lease.begin(1).unwrap();
+                }
+            } else {
+                assert_eq!(j.recover("parent").err(), Some(Error::Ineligible));
+            }
         }
     }
 }
@@ -303,6 +376,7 @@ fn outbox_capture_replays_atomically_with_scope_and_latest_retry_fences() {
         );
         let header = target.header(7, "task").unwrap().unwrap();
         assert_eq!(header.version, i as u64 + 1);
+        assert_eq!(target.writer_quiescent(7, "task", &json!({})), Ok(false));
         let clear = cipher.open(&item.record).unwrap();
         let value: Value = serde_json::from_slice(&clear).unwrap();
         assert_eq!(value["snapshot"].is_null(), i != 2);
@@ -749,9 +823,7 @@ fn persisted_task_terminal_fence_survives_reopen_and_delegate_failure() {
         fail: true.into(),
         published: 0.into(),
     });
-    let persistence = policy
-        .terminal_persistence(ports.clone())
-        .unwrap();
+    let persistence = policy.terminal_persistence(ports.clone()).unwrap();
     let sessions = Registry::new();
     let session = sessions.start("task", "task", 7, "", None).unwrap();
     let task = Task::new(
@@ -792,26 +864,45 @@ fn persisted_task_terminal_fence_survives_reopen_and_delegate_failure() {
 }
 
 fn manual_barrier_store() -> (Arc<NativeCheckpointStore>, crate::wal::WalBarrier, Arc<DeterministicVfs>) {
+    manual_barrier_store_with_durability(crate::wal::WalDurability::Strict)
+}
+fn manual_barrier_store_with_durability(durability: crate::wal::WalDurability) -> (
+    Arc<NativeCheckpointStore>, crate::wal::WalBarrier, Arc<DeterministicVfs>,
+) {
     let vfs = Arc::new(DeterministicVfs::new(None));
     vfs.create_dir(std::path::Path::new("/data")).unwrap();
     vfs.sync_directory(std::path::Path::new("/")).unwrap();
-    let db = Arc::new(store(AuthorityDatabase::initialize_with_vfs(std::path::Path::new("/data"), vfs.clone()).unwrap()));
+    let mut database = AuthorityDatabase::initialize_with_vfs(std::path::Path::new("/data"), vfs.clone()).unwrap();
+    database.set_wal_durability(durability).unwrap();
     let barrier = crate::wal::WalBarrier::default();
-    db.authority.lock().unwrap().attach_wal_barrier(&barrier).unwrap();
+    database.attach_wal_barrier(&barrier).unwrap();
+    let db = Arc::new(store(database));
     barrier.sync_for_test(vfs.as_ref()).unwrap();
     (db, barrier, vfs)
 }
 #[test]
 fn shared_wal_checkpoint_cas_and_reads_wait_outside_writer_for_durable_prefix() {
-    use crate::native_checkpoint_store::test_support::{BarrierTask, wait_for_append};
+    checkpoint_cas_and_reads_wait_for_durable_prefix(crate::wal::WalDurability::Strict);
+}
+#[test]
+fn normal_wal_checkpoint_cas_and_reads_wait_outside_writer_for_durable_prefix() {
+    checkpoint_cas_and_reads_wait_for_durable_prefix(crate::wal::WalDurability::Normal);
+}
+fn checkpoint_cas_and_reads_wait_for_durable_prefix(durability: crate::wal::WalDurability) {
+    use crate::native_checkpoint_store::test_support::{wait_for_append, BarrierTask};
     use tofu_runtime::checkpoint_journal::OwnedLease;
-    let (db, barrier, vfs) = manual_barrier_store();
+    let (db, barrier, vfs) = manual_barrier_store_with_durability(durability);
     let before = db.authority.lock().unwrap().wal_len().unwrap();
     let target = db.clone();
-    let acquire = BarrierTask::spawn(&barrier, move || OwnedLease::acquire(scope(), target, 1048576, 1024, "a"));
+    let acquire = BarrierTask::spawn(&barrier, move || {
+        OwnedLease::acquire(scope(), target, 1048576, 1024, "a")
+    });
     wait_for_append(&db.authority, before);
     assert!(!acquire.is_finished(), "unflushed lease was acknowledged");
-    assert!(db.authority.try_lock().is_ok(), "WAL waiter retained the writer");
+    assert!(
+        db.authority.try_lock().is_ok(),
+        "WAL waiter retained the writer"
+    );
     let target = db.clone();
     let read = BarrierTask::spawn(&barrier, move || target.header(7, "task"));
     std::thread::sleep(std::time::Duration::from_millis(10));
@@ -823,87 +914,226 @@ fn shared_wal_checkpoint_cas_and_reads_wait_outside_writer_for_durable_prefix() 
     let before = db.authority.lock().unwrap().wal_len().unwrap();
     let active = lease.clone();
     let begin = BarrierTask::spawn(&barrier, move || active.begin(0));
-    wait_for_append(&db.authority, before);assert!(!begin.is_finished());
-    barrier.sync_for_test(vfs.as_ref()).unwrap();begin.finish().unwrap();
+    wait_for_append(&db.authority, before);
+    assert!(!begin.is_finished());
+    barrier.sync_for_test(vfs.as_ref()).unwrap();
+    begin.finish().unwrap();
     let before = db.authority.lock().unwrap().wal_len().unwrap();
     let active = lease.clone();
     let complete = BarrierTask::spawn(&barrier, move || active.complete(&state()));
-    wait_for_append(&db.authority, before);assert!(!complete.is_finished());
+    wait_for_append(&db.authority, before);
+    assert!(!complete.is_finished());
     let target = db.clone();
     let version = {
-        let database = db.authority.lock().unwrap();let mut tx=database.begin(3,7).unwrap();
-        let key=versioned_document::record_key(3,7,HEADERS,"task").unwrap();
-        versioned_document::get_value_with_version(&database,&mut tx,&key,HEADERS,"task").unwrap().unwrap().1
+        let database = db.authority.lock().unwrap();
+        let mut tx = database.begin(3, 7).unwrap();
+        let key = versioned_document::record_key(3, 7, HEADERS, "task").unwrap();
+        versioned_document::get_value_with_version(&database, &mut tx, &key, HEADERS, "task")
+            .unwrap()
+            .unwrap()
+            .1
     };
     let snapshot = BarrierTask::spawn(&barrier, move || target.snapshot(7, "task", version));
-    std::thread::sleep(std::time::Duration::from_millis(10));assert!(!snapshot.is_finished());
-    barrier.sync_for_test(vfs.as_ref()).unwrap();complete.finish().unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(10));
+    assert!(!snapshot.is_finished());
+    barrier.sync_for_test(vfs.as_ref()).unwrap();
+    complete.finish().unwrap();
     assert_eq!(snapshot.finish().unwrap(), Some(state()));
 }
 #[test]
 fn shared_wal_checkpoint_flush_failure_never_certifies_committed_metadata_or_retry() {
-    use crate::native_checkpoint_store::test_support::{BarrierTask, wait_for_append};
+    checkpoint_flush_failure_never_certifies_metadata(crate::wal::WalDurability::Strict);
+}
+#[test]
+fn normal_wal_checkpoint_flush_failure_never_certifies_committed_metadata_or_retry() {
+    checkpoint_flush_failure_never_certifies_metadata(crate::wal::WalDurability::Normal);
+}
+fn checkpoint_flush_failure_never_certifies_metadata(durability: crate::wal::WalDurability) {
+    use crate::native_checkpoint_store::test_support::{wait_for_append, BarrierTask};
     use tofu_runtime::checkpoint_journal::OwnedLease;
-    let (db, barrier, vfs) = manual_barrier_store();
-    let before = db.authority.lock().unwrap().wal_len().unwrap();let target=db.clone();
-    let acquire=BarrierTask::spawn(&barrier,move || OwnedLease::acquire(scope(),target,1048576,1024,"a"));
-    wait_for_append(&db.authority,before);barrier.sync_for_test(vfs.as_ref()).unwrap();
-    let lease=Arc::new(acquire.finish().unwrap());lease.load().unwrap();
-    let before=db.authority.lock().unwrap().wal_len().unwrap();let active=lease.clone();
-    let begin=BarrierTask::spawn(&barrier,move || active.begin(0));
-    wait_for_append(&db.authority,before);
+    let (db, barrier, vfs) = manual_barrier_store_with_durability(durability);
+    let before = db.authority.lock().unwrap().wal_len().unwrap();
+    let target = db.clone();
+    let acquire = BarrierTask::spawn(&barrier, move || {
+        OwnedLease::acquire(scope(), target, 1048576, 1024, "a")
+    });
+    wait_for_append(&db.authority, before);
+    barrier.sync_for_test(vfs.as_ref()).unwrap();
+    let lease = Arc::new(acquire.finish().unwrap());
+    lease.load().unwrap();
+    let before = db.authority.lock().unwrap().wal_len().unwrap();
+    let active = lease.clone();
+    let begin = BarrierTask::spawn(&barrier, move || active.begin(0));
+    wait_for_append(&db.authority, before);
     barrier.inject_background_error_for_test(std::io::Error::other("physical WAL sync failed"));
-    assert_eq!(begin.finish(),Err(Error::Storage));
-    assert_eq!(lease.begin(0),Err(Error::Poisoned));assert_eq!(lease.release(),Err(Error::Poisoned));
-    assert!(matches!(db.header(7,"task"),Err(Error::Storage)));assert!(db.is_restart_required());
-    assert!(NativeCheckpointStore::new(db.authority.clone(),3,7,4096,1048576).is_err());
+    assert_eq!(begin.finish(), Err(Error::Storage));
+    assert_eq!(lease.begin(0), Err(Error::Poisoned));
+    assert_eq!(lease.release(), Err(Error::Poisoned));
+    assert!(matches!(db.header(7, "task"), Err(Error::Storage)));
+    assert!(db.is_restart_required());
+    assert!(NativeCheckpointStore::new(db.authority.clone(), 3, 7, 4096, 1048576).is_err());
 }
 #[test]
 fn checkpoint_store_refuses_deferred_wal_without_a_barrier_before_any_lease_write() {
-    let directory=tempfile::tempdir().unwrap();
-    let mut database=AuthorityDatabase::initialize(directory.path()).unwrap();
-    database.set_wal_durability(crate::wal::WalDurability::Normal).unwrap();
-    let database=Arc::new(Mutex::new(database));
-    assert!(NativeCheckpointStore::new(database.clone(),3,7,4096,1048576).is_err());
-    let database=database.lock().unwrap();let mut transaction=database.begin(3,7).unwrap();
-    let key=versioned_document::record_key(3,7,HEADERS,"task").unwrap();
-    assert!(versioned_document::get_value_with_version(&database,&mut transaction,&key,HEADERS,"task").unwrap().is_none());
+    let directory = tempfile::tempdir().unwrap();
+    let mut database = AuthorityDatabase::initialize(directory.path()).unwrap();
+    database
+        .set_wal_durability(crate::wal::WalDurability::Normal)
+        .unwrap();
+    let database = Arc::new(Mutex::new(database));
+    assert!(NativeCheckpointStore::new(database.clone(), 3, 7, 4096, 1048576).is_err());
+    let database = database.lock().unwrap();
+    let mut transaction = database.begin(3, 7).unwrap();
+    let key = versioned_document::record_key(3, 7, HEADERS, "task").unwrap();
+    assert!(versioned_document::get_value_with_version(
+        &database,
+        &mut transaction,
+        &key,
+        HEADERS,
+        "task"
+    )
+    .unwrap()
+    .is_none());
 }
 
 #[test]
 fn checkpoint_passive_replay_and_current_retry_refuse_unconfirmed_shared_wal() {
-    use crate::native_checkpoint_store::test_support::{BarrierTask, wait_for_append};
-    let directory=tempfile::tempdir().unwrap();let source=store(AuthorityDatabase::initialize(directory.path()).unwrap());
-    source.authority.lock().unwrap().configure_logical_outbox(&[72;32],1048576,131072).unwrap();
-    let journal=journal(&source);let lease=journal.acquire("a").unwrap();lease.load().unwrap();
-    let record=source.authority.lock().unwrap().logical_outbox_pending(3,7,8).unwrap().remove(0).record;
-    let origin=source.source_uuid().unwrap();let (target,barrier,_vfs)=manual_barrier_store();
-    let before=target.authority.lock().unwrap().wal_len().unwrap();let active=target.clone();let uuid=origin.clone();let frame=record.clone();
-    let replay=BarrierTask::spawn(&barrier,move || active.replay(&LogicalOutboxCipher::new(&[72;32]),&uuid,&frame));
-    wait_for_append(&target.authority,before);assert!(!replay.is_finished());assert!(target.authority.try_lock().is_ok());
+    use crate::native_checkpoint_store::test_support::{wait_for_append, BarrierTask};
+    let directory = tempfile::tempdir().unwrap();
+    let source = store(AuthorityDatabase::initialize(directory.path()).unwrap());
+    source
+        .authority
+        .lock()
+        .unwrap()
+        .configure_logical_outbox(&[72; 32], 1048576, 131072)
+        .unwrap();
+    let journal = journal(&source);
+    let lease = journal.acquire("a").unwrap();
+    lease.load().unwrap();
+    let record = source
+        .authority
+        .lock()
+        .unwrap()
+        .logical_outbox_pending(3, 7, 8)
+        .unwrap()
+        .remove(0)
+        .record;
+    let origin = source.source_uuid().unwrap();
+    let (target, barrier, _vfs) = manual_barrier_store();
+    let before = target.authority.lock().unwrap().wal_len().unwrap();
+    let active = target.clone();
+    let uuid = origin.clone();
+    let frame = record.clone();
+    let replay = BarrierTask::spawn(&barrier, move || {
+        active.replay(&LogicalOutboxCipher::new(&[72; 32]), &uuid, &frame)
+    });
+    wait_for_append(&target.authority, before);
+    assert!(!replay.is_finished());
+    assert!(target.authority.try_lock().is_ok());
     barrier.inject_background_error_for_test(std::io::Error::other("passive WAL sync failed"));
-    assert_eq!(replay.finish(),Err(Error::Storage));
-    assert_eq!(target.replay(&LogicalOutboxCipher::new(&[72;32]),&origin,&record),Err(Error::Storage));
+    assert_eq!(replay.finish(), Err(Error::Storage));
+    assert_eq!(
+        target.replay(&LogicalOutboxCipher::new(&[72; 32]), &origin, &record),
+        Err(Error::Storage)
+    );
 }
 #[test]
 fn checkpoint_source_ack_waits_for_its_shared_wal_after_target_and_archive_delivery() {
-    use crate::native_checkpoint_store::{NativeCheckpointSink,test_support::{BarrierTask,wait_for_append}};
+    use crate::native_checkpoint_store::{
+        test_support::{wait_for_append, BarrierTask},
+        NativeCheckpointSink,
+    };
     use crate::outbox_publisher::LogicalOutboxPublishBudget;
     use crate::outbox_sink::EngineLogicalOutboxSink;
-    let directory=tempfile::tempdir().unwrap();let source=Arc::new(store(AuthorityDatabase::initialize(directory.path()).unwrap()));
-    source.authority.lock().unwrap().configure_logical_outbox(&[72;32],1048576,131072).unwrap();
-    let journal=journal(source.as_ref());let lease=journal.acquire("a").unwrap();lease.load().unwrap();
-    let target_dir=tempfile::tempdir().unwrap();let archive_dir=tempfile::tempdir().unwrap();
-    let target=store(AuthorityDatabase::initialize(target_dir.path()).unwrap());
-    let archive=EngineLogicalOutboxSink::initialize(archive_dir.path(),3,7,1048576).unwrap();
-    let mut sink=NativeCheckpointSink::new(target,archive,LogicalOutboxCipher::new(&[72;32]),source.source_uuid().unwrap()).unwrap();
-    let barrier=crate::wal::WalBarrier::default();source.authority.lock().unwrap().attach_wal_barrier(&barrier).unwrap();
-    barrier.sync_for_test(&crate::vfs::RealVfs).unwrap();let before=source.authority.lock().unwrap().wal_len().unwrap();let active=source.clone();
-    let publish=BarrierTask::spawn(&barrier,move || {
-        let result=active.publish_pending(&mut sink,LogicalOutboxPublishBudget::new(8,131072).unwrap());(result,sink)
+    let directory = tempfile::tempdir().unwrap();
+    let source = Arc::new(store(
+        AuthorityDatabase::initialize(directory.path()).unwrap(),
+    ));
+    source
+        .authority
+        .lock()
+        .unwrap()
+        .configure_logical_outbox(&[72; 32], 1048576, 131072)
+        .unwrap();
+    let journal = journal(source.as_ref());
+    let lease = journal.acquire("a").unwrap();
+    lease.load().unwrap();
+    let target_dir = tempfile::tempdir().unwrap();
+    let archive_dir = tempfile::tempdir().unwrap();
+    let target = store(AuthorityDatabase::initialize(target_dir.path()).unwrap());
+    let archive = EngineLogicalOutboxSink::initialize(archive_dir.path(), 3, 7, 1048576).unwrap();
+    let mut sink = NativeCheckpointSink::new(
+        target,
+        archive,
+        LogicalOutboxCipher::new(&[72; 32]),
+        source.source_uuid().unwrap(),
+    )
+    .unwrap();
+    let barrier = crate::wal::WalBarrier::default();
+    source
+        .authority
+        .lock()
+        .unwrap()
+        .attach_wal_barrier(&barrier)
+        .unwrap();
+    barrier.sync_for_test(&crate::vfs::RealVfs).unwrap();
+    let before = source.authority.lock().unwrap().wal_len().unwrap();
+    let active = source.clone();
+    let publish = BarrierTask::spawn(&barrier, move || {
+        let result = active.publish_pending(
+            &mut sink,
+            LogicalOutboxPublishBudget::new(8, 131072).unwrap(),
+        );
+        (result, sink)
     });
-    wait_for_append(&source.authority,before);assert!(!publish.is_finished());assert!(source.authority.try_lock().is_ok());
-    barrier.sync_for_test(&crate::vfs::RealVfs).unwrap();let (result,sink)=publish.finish();assert_eq!(result.unwrap().receipts.len(),1);
-    assert!(source.authority.lock().unwrap().logical_outbox_pending(3,7,8).unwrap().is_empty());
-    let (target,archive)=sink.into_parts();assert_eq!(target.header(7,"task").unwrap().unwrap().version,1);assert_eq!(archive.status().durable_sequence,1);
+    wait_for_append(&source.authority, before);
+    assert!(!publish.is_finished());
+    assert!(source.authority.try_lock().is_ok());
+    barrier.sync_for_test(&crate::vfs::RealVfs).unwrap();
+    let (result, sink) = publish.finish();
+    assert_eq!(result.unwrap().receipts.len(), 1);
+    assert!(source
+        .authority
+        .lock()
+        .unwrap()
+        .logical_outbox_pending(3, 7, 8)
+        .unwrap()
+        .is_empty());
+    let (target, archive) = sink.into_parts();
+    assert_eq!(target.header(7, "task").unwrap().unwrap().version, 1);
+    assert_eq!(archive.status().durable_sequence, 1);
+}
+
+#[test]
+#[ignore = "manual pending checkpoint component measurement"]
+fn measure_pending_checkpoint_cost() {
+    for bytes in [32768,262144] {
+        for pending in [false,true] {
+            let directory=tempfile::tempdir().unwrap();
+            let db=store(AuthorityDatabase::initialize(directory.path()).unwrap());
+            let j=journal(&db);let lease=j.acquire("measurement").unwrap();lease.load().unwrap();
+            let mut timings=Vec::new();let mut logical_bytes=0;
+            for index in 0..40 {
+                lease.begin(index).unwrap();
+                let mut saved=pending_state();
+                saved["messages"][0]["content"]=json!("x".repeat(bytes));
+                saved["next_round"]=json!(index+1);saved["tool_calls"]=json!(index+1);
+                saved["round_limit"]=Value::Null;saved["tool_limit"]=Value::Null;
+                saved["usage"]=json!(vec![json!({"total_tokens":23});index as usize+1]);
+                let mut complete=saved.clone();complete.as_object_mut().unwrap().remove("tools_pending");
+                complete["messages"].as_array_mut().unwrap().push(json!({"role":"tool","tool_call_id":"write-1","content":"observed"}));
+                let start=std::time::Instant::now();
+                if pending { lease.pending(&saved).unwrap(); }
+                lease.complete(&complete).unwrap();
+                let elapsed=start.elapsed().as_secs_f64()*1000.0;
+                if index>=8 {
+                    timings.push(elapsed);
+                    logical_bytes+=serde_json::to_vec(&complete).unwrap().len();
+                    if pending {logical_bytes+=serde_json::to_vec(&saved).unwrap().len();}
+                }
+            }
+            timings.sort_by(f64::total_cmp);
+            println!("PENDING_COST {}",json!({"source_bytes":bytes,"pending":pending,"samples":timings.len(),"p50_ms":timings[timings.len()/2],"p95_ms":timings[timings.len()*95/100],"logical_snapshot_bytes_per_round":logical_bytes/timings.len(),"snapshot_replacements_per_round":if pending {2} else {1},"settlement_snapshot_reads_per_round":usize::from(pending)}));
+        }
+    }
 }

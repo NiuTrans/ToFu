@@ -256,7 +256,7 @@ class PushHub:
 
     def _register_subscription(self, channel: str, task_id: str) -> None:
         try:
-            from lib.runtime_state_store import get_store
+            from lib.runtime.runtime_state_store import get_store
             get_store().acquire_lease(self._SUB_KIND,
                                       self._sub_key(channel, task_id),
                                       self._SUB_TTL)
@@ -270,7 +270,7 @@ class PushHub:
         second still-connected client on the same replica keeps the lease. TTL
         remains the crash-only backstop; this is the normal eager release."""
         try:
-            from lib.runtime_state_store import get_store
+            from lib.runtime.runtime_state_store import get_store
             get_store().release_lease(self._SUB_KIND,
                                       self._sub_key(channel, task_id))
         except Exception as e:
@@ -290,7 +290,7 @@ class PushHub:
         if not live:
             return
         try:
-            from lib.runtime_state_store import get_store
+            from lib.runtime.runtime_state_store import get_store
             store = get_store()
             for channel, task_id in live:
                 store.refresh_lease(self._SUB_KIND,
@@ -467,7 +467,12 @@ class PushClient:
     """
 
     def __init__(self, *, user_id: int | str, req_id: str = ''):
-        self._queue: asyncio.Queue = asyncio.Queue()
+        # Transport frames are reconstructible; a stalled socket that fills
+        # this probe-derived backlog is disconnected so it reconciles from
+        # durable state instead of accumulating unbounded memory.
+        from lib.agent_core.push_policy import resolve_push_event_queue_capacity
+        self._queue: asyncio.Queue = asyncio.Queue(
+            maxsize=resolve_push_event_queue_capacity())
         self._active_event = None
         self._frame_store = None
         # Liveness and correlated responses jump event data through the sole
@@ -488,8 +493,16 @@ class PushClient:
                    if isinstance(event, _QueuedPushEvent))
 
     def enqueue_prepared(self, event: _QueuedPushEvent) -> None:
-        if self._connected:
+        if not self._connected:
+            return
+        try:
             self._queue.put_nowait(event)
+        except asyncio.QueueFull:
+            logger.warning(
+                '[Push] Client event backlog full (%d); disconnecting stalled '
+                'socket for durable reconciliation (rid=%s)',
+                self._queue.maxsize, self.req_id or '?')
+            self.disconnect()
 
     def enqueue(self, frame: dict, *, retained_bytes: int | None = None):
         if not self._connected:
@@ -579,7 +592,8 @@ class PushClient:
                     operation.cancel()
                 try:
                     await operation
-                except (asyncio.CancelledError, Exception):
+                except (asyncio.CancelledError, Exception) as diagnostic_error:
+                    logger.debug('drain failure handled: %s', type(diagnostic_error).__name__)
                     pass
                 if not waiter.done():
                     waiter.cancel()

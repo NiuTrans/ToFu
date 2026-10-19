@@ -129,7 +129,7 @@ fn receipt_snapshot_catalog_pages_and_bounds_are_owner_scoped() {
         assert!(run(&mut db, "migration.command.receipt.restore", invalid).is_err());
     }
     let mut oversized = payload.clone();
-    oversized["response_hex"] = json!("00".repeat(MAX_STORED_RECEIPT_BYTES + 1));
+    oversized["response_hex"] = json!(hex(b"tofu.receipt.unknown.v9\0payload"));
     assert!(run(&mut db, "migration.command.receipt.restore", oversized).is_err());
     let mut corrupt = payload;
     corrupt["response_hex"] = json!(hex(b"not JSON"));
@@ -219,4 +219,21 @@ fn receipt_snapshot_faults_preserve_complete_blob_and_live_replay() {
             );
         }
     }
+}
+
+#[test]
+fn large_plain_receipt_restores_reopens_and_replays_complete_owner_scoped_bytes() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut db = AuthorityDatabase::initialize(directory.path()).unwrap();
+    let raw = serde_json::to_vec(&json!({"value":"x".repeat(9*1024*1024)})).unwrap();
+    let payload = request("large-plain-command",&raw,false);
+    assert_eq!(run(&mut db,"migration.command.receipt.restore",payload.clone()).unwrap()["inserted"],true);
+    drop(db);
+    let mut db = AuthorityDatabase::open(directory.path()).unwrap();
+    assert_eq!(run(&mut db,"migration.command.receipt.restore",payload).unwrap()["inserted"],false);
+    let mut tx = db.begin(7,11).unwrap();
+    assert_eq!(db.receipt_lookup(&mut tx,"large-plain-command","record.put",[3;32]).unwrap(),Some(raw));
+    assert_eq!(db.receipt_lookup(&mut tx,"large-plain-command","record.put",[4;32]).unwrap_err().kind(),io::ErrorKind::WouldBlock);
+    let mut foreign = db.begin(7,12).unwrap();
+    assert!(db.receipt_lookup(&mut foreign,"large-plain-command","record.put",[3;32]).unwrap().is_none());
 }

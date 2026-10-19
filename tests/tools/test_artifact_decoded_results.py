@@ -7,10 +7,10 @@ from uuid import uuid4
 import pytest
 from jsonschema import Draft202012Validator
 
-from lib.storage_sidecar.operations_pkg._artifacts import (
+from lib.storage_authority_sql.operations_pkg._artifacts import (
     _tool_result_artifact_put, _tool_result_artifact_read, _tool_result_artifact_search)
 from lib.tools.tool_result_artifacts import READ_TOOL_ARTIFACT, SEARCH_TOOL_ARTIFACT
-from lib.tool_result_query_contract import MEDIA_TYPE
+from lib.tool_results.tool_result_query_contract import MEDIA_TYPE
 
 pytestmark = pytest.mark.unit
 

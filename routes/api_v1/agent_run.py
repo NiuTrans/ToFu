@@ -198,7 +198,7 @@ async def _stream_generator(task, model: str, completion_id: str,
             _billed = True
 
     task_id = task.get('id') or ''
-    from lib.task_replay import task_memory_replay_page
+    from lib.task_replay.task_replay import task_memory_replay_page
     try:
         while True:
             page = task_memory_replay_page(task, cursor)
@@ -434,6 +434,7 @@ async def agent_run():
             dispose_routed_slot_group(route_group)
             return api_internal_error(e, context='api_v1.agent_run.tools')
         cfg['_customToolSchemas'] = tool_env.schemas
+        cfg['_customToolContracts'] = tool_env.contract_documents
 
     audit_log('agent_run_start', key_id=credential_key_id,
               owner_user_id=owner_user_id,

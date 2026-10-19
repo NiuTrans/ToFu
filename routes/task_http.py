@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from lib.api_response import api_payload
-from lib.task_replay import (
+from lib.task_replay.task_replay import (
     safe_replay_cursor,
     task_replay_http_status,
     task_replay_request_contract,

@@ -145,3 +145,171 @@ def test_directory_pages_do_not_hide_old_originals(setup):
     assert len(detail['messages'][0]['content']) > 1000
     with pytest.raises(pm.ProjectMessageError, match='Pagination'):
         pm.execute('get_project_messages', {'before_id': 'foreign'}, setup.recipient)
+
+
+@pytest.mark.parametrize('bound', ['tokens', 'bytes'])
+def test_later_small_originals_progress_past_full_unfit_prefix(setup, monkeypatch, bound):
+    from copy import deepcopy
+    from html import escape
+    from lib.tasks_pkg import message_input_receipts as receipts
+    from lib.llm.stream_result import ProviderStreamResult
+
+    monkeypatch.setattr('lib.tasks_pkg.compaction._tokens._get_context_limit', lambda task: 128000)
+    monkeypatch.setattr('lib.tasks_pkg.compaction._tokens._estimate_total_tokens', lambda messages: 0)
+    monkeypatch.setattr('lib.tasks_pkg.context_composer._render._count_tokens',
+                        lambda text, model: len(text) if bound == 'tokens' else 1)
+    mailbox = pm.ProjectMailbox(1, '/project', 'recipient')
+    batch_size = pm.LIMITS['batchSize']
+    small_count = 2 * batch_size + 1
+    prefix_count = pm.LIMITS['messagesPerMailbox'] - small_count
+    for index in range(pm.LIMITS['messagesPerMailbox']):
+        if index < prefix_count:
+            content = ('x' if bound == 'tokens' else '"') * pm.LIMITS['messageChars']
+        else:
+            content = f'  small {index}\n\t<&雪🙂>  '
+        mailbox.submit('sender', {'content': content, 'idempotency_key': str(index)}, 'task-s')
+    originals = deepcopy(mailbox.load()[0]['messages'])
+    pending = originals[prefix_count:]
+    messages = [{'role': 'user', 'content': 'Objective'}]
+    for round_num in range(3):
+        expected = [row['id'] for row in pending[round_num * batch_size:(round_num + 1) * batch_size]]
+        pm.inject(setup.recipient, messages, round_num)
+        carrier = messages[-1]
+        assert carrier.get('_projectMessageIds') == expected
+        assert carrier['_containsHumanSteer'] is False
+        for row in pending[round_num * batch_size:(round_num + 1) * batch_size]:
+            assert escape(row['content']) in carrier['content']
+        pm.confirm(setup.recipient, round_num)
+        assert all(row['state'] == 'submitted' for row in mailbox.load()[0]['messages'][prefix_count + round_num * batch_size:])
+        receipts.stream_with_receipts(
+            lambda *a, **kw: ProviderStreamResult.from_legacy({'role': 'assistant', 'content': 'Read'}, 'stop', {}),
+            setup.recipient, {'messages': messages})
+        pm.confirm(setup.recipient, round_num)
+        saved = mailbox.load()[0]['messages']
+        assert saved[:prefix_count] == originals[:prefix_count]
+        assert all(row['state'] == 'input_confirmed' for row in saved[prefix_count:prefix_count + (round_num + 1) * batch_size])
+        assert [row['content'] for row in saved] == [row['content'] for row in originals]
+    pm.inject(setup.recipient, messages, 3)
+    assert len(messages) == 4  # No unfit original was clipped or duplicated.
+
+
+@pytest.mark.parametrize('refusal', ['budget', 'carrier'])
+def test_present_original_still_acknowledges_when_fresh_input_is_refused(setup, monkeypatch, refusal):
+    from lib.tasks_pkg import message_input_receipts as receipts
+    from lib.llm.stream_result import ProviderStreamResult
+
+    first = send(setup)['message']
+    messages = [{'role': 'user', 'content': 'Objective'}]
+    pm.inject(setup.recipient, messages, 0)
+    original_carrier = messages[-1].copy()
+    second = send(setup, idempotency_key='two')['message']
+    if refusal == 'budget':
+        monkeypatch.setattr('lib.tasks_pkg.compaction._tokens._estimate_total_tokens', lambda messages: 10**9)
+    else:
+        monkeypatch.setattr('lib.tasks_pkg.context_composer.append_injection', lambda *a, **kw: None)
+    pm.inject(setup.recipient, messages, 1)
+    assert messages[-1] == original_carrier and len(messages) == 2
+    assert setup.recipient['_projectMessageAttempt']['ids'] == [first['id']]
+    # A surviving checkpoint carrier is not confirmation; dropped physical input
+    # still cannot ACK it, and the fresh refused original has no witness at all.
+    receipts.stream_with_receipts(
+        lambda *a, **kw: ProviderStreamResult.from_legacy({'role': 'assistant', 'content': 'Read'}, 'stop', {}),
+        setup.recipient, {'messages': messages[:1]})
+    pm.confirm(setup.recipient, 1)
+    assert all(row['state'] == 'submitted' for row in pm.ProjectMailbox(1, '/project', 'recipient').load()[0]['messages'])
+    receipts.stream_with_receipts(
+        lambda *a, **kw: ProviderStreamResult.from_legacy({'role': 'assistant', 'content': 'Read'}, 'stop', {}),
+        setup.recipient, {'messages': messages})
+    pm.confirm(setup.recipient, 1)
+    saved = pm.ProjectMailbox(1, '/project', 'recipient').load()[0]['messages']
+    assert [(row['id'], row['state']) for row in saved] == [
+        (first['id'], 'input_confirmed'), (second['id'], 'submitted')]
+
+
+def test_present_batch_does_not_spend_fresh_count_and_only_physical_carrier_acks(setup):
+    from lib.llm._sse_core import prepare_request
+    from lib.llm.request import ModelRequestBudgetScope, dispatch_model_request
+    from lib.llm.stream_result import ProviderStreamResult
+    from lib.tasks_pkg import message_input_receipts as receipts
+
+    batch_size = pm.LIMITS['batchSize']
+    originals = [send(setup, content=f'Original {i}', idempotency_key=str(i))['message']
+                 for i in range(2 * batch_size + 1)]
+    messages = [{'role': 'user', 'content': 'Objective'}]
+    pm.inject(setup.recipient, messages, 0)
+    pm.inject(setup.recipient, messages, 1)
+    expected = [row['id'] for row in originals]
+    assert [carrier['_projectMessageIds'] for carrier in messages[1:]] == [
+        expected[:batch_size], expected[batch_size:2 * batch_size]]
+    assert setup.recipient['_projectMessageAttempt']['ids'] == expected[:2 * batch_size]
+
+    def stream(task, source):
+        observer = receipts.receipt_admission(task, None)
+        # The logical input contains both carriers; final physical input drops
+        # the first. Use the real prepared-send observer, not canonical matches.
+        physical = {'model': 'glm-4-flash', 'messages': source['messages'][-1:],
+                    'max_tokens': 32, '_model_budget_admit': observer}
+        with ModelRequestBudgetScope(physical) as scope:
+            plan = prepare_request(scope.body, api_key='unused',
+                                   base_url='https://example.invalid/v1', api_protocol='openai')
+            result = dispatch_model_request(plan, lambda wire: ProviderStreamResult.from_legacy(
+                {'role': 'assistant', 'content': 'Read'}, 'stop', {}), plan.body)
+            scope.usage = result.usage
+        task['_messageInputPhysicalIds'] = observer.matches
+        return result
+
+    receipts.stream_with_receipts(stream, setup.recipient, {'messages': messages})
+    pm.confirm(setup.recipient, 1)
+    rows = pm.ProjectMailbox(1, '/project', 'recipient').load()[0]['messages']
+    assert [row['id'] for row in rows if row['state'] == 'input_confirmed'] == expected[batch_size:2 * batch_size]
+    pm.inject(setup.recipient, messages, 2)
+    assert messages[-1]['_projectMessageIds'] == expected[-1:]
+    assert setup.recipient['_projectMessageAttempt']['ids'] == expected[:batch_size] + expected[-1:]
+
+
+def test_full_scan_keeps_state_decision_and_sender_scope_filters(setup):
+    mailbox = pm.ProjectMailbox(1, '/project', 'recipient')
+    setup.conversations[(1, 'rebound')] = '/project'
+    for index in range(pm.LIMITS['batchSize']):
+        mailbox.submit('rebound', {'content': 'Unavailable sender', 'idempotency_key': str(index)}, 'old-task')
+    confirmed = mailbox.submit('sender', {'content': 'Already confirmed', 'idempotency_key': 'confirmed'}, 'task-s')
+    mailbox.confirm([confirmed['id']], 'task-r', 0)
+    decided = mailbox.submit('sender', {'content': 'Already considered', 'idempotency_key': 'decided'}, 'task-s')
+    mailbox.consider({'message_id': decided['id'], 'decision': 'deferred', 'note': 'Wait', 'expected_revision': 1}, 'task-r')
+    fresh = mailbox.submit('sender', {'content': 'Current original', 'idempotency_key': 'fresh'}, 'task-s')
+    setup.conversations[(1, 'rebound')] = '/other'
+    before = mailbox.load()
+    messages = [{'role': 'user', 'content': 'Objective'}]
+    pm.inject(setup.recipient, messages, 1)
+    assert messages[-1]['_projectMessageIds'] == [fresh['id']]
+    assert setup.recipient['_projectMessageAttempt']['ids'] == [fresh['id']]
+    assert mailbox.load() == before  # Optional acquisition creates no receipt or execution.
+
+
+def test_sender_validity_cache_is_per_injection_and_includes_invalid_senders(setup, monkeypatch):
+    from collections import Counter
+
+    mailbox = pm.ProjectMailbox(1, '/project', 'recipient')
+    setup.conversations.update({(1, 'invalid'): '/other', (1, 'second'): '/project'})
+    senders = ('sender', 'invalid', 'second')
+    for index in range(pm.LIMITS['messagesPerMailbox']):
+        sender = senders[index % len(senders)]
+        mailbox.submit(sender, {'content': sender, 'idempotency_key': str(index)}, 'task-s')
+    scope_calls = []
+    original_scope = pm.scope
+    def observed_scope(owner, conversation_id, expected_project=''):
+        scope_calls.append(conversation_id)
+        return original_scope(owner, conversation_id, expected_project)
+    monkeypatch.setattr(pm, 'scope', observed_scope)
+    messages = [{'role': 'user', 'content': 'Objective'}]
+    pm.inject(setup.recipient, messages, 0)
+    assert Counter(scope_calls) == {'recipient': 1, 'sender': 1, 'invalid': 1, 'second': 1}
+    rows = {row['id']: row for row in mailbox.load()[0]['messages']}
+    assert {rows[item]['sender'] for item in messages[-1]['_projectMessageIds']} == {'sender', 'second'}
+    # Cache entries, including negative results, cannot survive another inject.
+    setup.conversations.update({(1, 'sender'): '/other', (1, 'invalid'): '/project'})
+    pm.inject(setup.recipient, messages, 1)
+    assert Counter(scope_calls) == {'recipient': 2, 'sender': 2, 'invalid': 2, 'second': 2}
+    assert len(messages) == 3
+    assert {rows[item]['sender'] for item in messages[-1]['_projectMessageIds']} == {'invalid', 'second'}
+    assert all(rows[item]['sender'] != 'sender' for item in setup.recipient['_projectMessageAttempt']['ids'])

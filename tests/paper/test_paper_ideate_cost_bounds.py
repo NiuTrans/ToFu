@@ -209,7 +209,7 @@ def test_all_rubric_judges_enter_without_waiting_for_warmup(
 
 def test_rubric_scheduler_stops_admission_after_abort(monkeypatch):
     import lib.paper.ideate as ideate
-    from lib.llm_errors import AbortedError
+    from lib.llm.llm_errors import AbortedError
 
     monkeypatch.setenv('TOFU_PRODUCTION_LLM_FANOUT', '2')
     rows = [

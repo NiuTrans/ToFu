@@ -19,8 +19,8 @@ import time
 from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
 
-from lib.log_policy import LOG_FILE_MODE, stream_backup_count, stream_max_bytes
-from lib.log_record_values import text_value, sanitize_value
+from lib.logging_pkg.log_policy import LOG_FILE_MODE, stream_backup_count, stream_max_bytes
+from lib.logging_pkg.log_record_values import text_value, sanitize_value
 
 
 SCHEMA_VERSION = 1
@@ -122,7 +122,7 @@ class IncidentJournalHandler(logging.Handler):
         if fingerprint and template:
             return fingerprint, template
         try:
-            from lib.log_aggregates import fingerprint_text
+            from lib.logging_pkg.log_aggregates import fingerprint_text
             return fingerprint_text(record.levelname, record.name, text)
         except Exception:
             import hashlib
@@ -143,7 +143,7 @@ class IncidentJournalHandler(logging.Handler):
                     exc_type or '?', os.path.basename(code.co_filename), code.co_name)
             return exc_type
         try:
-            from lib.log_aggregates import _exc_signature
+            from lib.logging_pkg.log_aggregates import _exc_signature
             return _exc_signature(text)
         except Exception:
             return ''

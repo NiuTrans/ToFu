@@ -12,10 +12,10 @@ export function createFoldersEndpoints(ports: EndpointPorts) {
       });
       return requiredItemsList(data, path);
     },
-    create: (name: string, color: string)      => post('/api/v4/folders', { name, color: color || '' }, { onError: 'null' }),
-    update: (id: string, updates: JsonObject)      => put(`/api/v4/folders/${encodeURIComponent(id)}`, updates, { onError: 'null' }),
+    create: (name: string, color: string, projectPaths: string[] = [], readOnlyPaths: string[] = []) => post('/api/v4/folders', { name, color: color || '', projectPaths, readOnlyPaths }, { onError: 'throw' }),
+    update: (id: string, updates: JsonObject)      => put(`/api/v4/folders/${encodeURIComponent(id)}`, updates, { onError: 'throw' }),
     remove: async (id: string)         => {
-      const r = await del<Response | null>(`/api/v4/folders/${encodeURIComponent(id)}`, { parse: 'response', onError: 'null' });
+      const r = await del<Response | null>(`/api/v4/folders/${encodeURIComponent(id)}`, { parse: 'response', onError: 'throw' });
       return !!(r && r.ok);
     },
   };

@@ -53,7 +53,7 @@ def _turn_mods(task: dict, roots: list[str]) -> list[dict]:
         own = [m for m in root_mods if m.get('taskId') == task_id]
         if not own and task_start:
             own = [m for m in root_mods
-                   if m.get('timestamp', 0) >= task_start]
+                   if not m.get('taskId') and m.get('timestamp', 0) >= task_start]
         for m in own:
             key = (root, m.get('path', ''))
             if key in seen:

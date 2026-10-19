@@ -1,6 +1,7 @@
 """Owner-scoped record plumbing for the self-evolution module.
 
-Responsibility: key discipline, size bounds, and acknowledged writes with a
+Responsibility: key discipline, evidence-capsule bounds, complete workspaces,
+and acknowledged writes with a
 bounded retry on transient storage failure, over the existing Sidecar
 ``record.*`` operations. Entry points: ``put_record`` / ``get_record`` /
 ``list_records`` / ``entity_key``. Dependencies: ``lib.identity`` and
@@ -9,7 +10,6 @@ bounded retry on transient storage failure, over the existing Sidecar
 from __future__ import annotations
 
 from copy import deepcopy
-import json
 import re
 import time
 import uuid
@@ -39,8 +39,8 @@ NAMESPACE_RUNS = 'evolution.runs.v1'
 NAMESPACE_LIBRARIES = 'evolution.libraries.v1'
 NAMESPACE_OBSERVATIONS = 'evolution.observations.v1'
 
-#: Episodes are small structured records; bulky evidence stays in the existing
-#: owner-scoped artifact stores and is referenced, never copied.
+#: Legacy input/header sizing hint for existing consumers, not a put_record
+#: admission ceiling. Bulky evidence still belongs in owner-scoped archives.
 MAX_RECORD_BYTES = 1024 * 1024
 MAX_LIST_LIMIT = 200
 
@@ -69,8 +69,8 @@ def entity_key(entity_id: str, user_id, *, kind: str) -> str:
 
 def put_record(namespace: str, key: str, value: dict, *, kind: str,
                expected_version: int | None = None) -> int:
-    if len(json.dumps(value, ensure_ascii=False).encode('utf-8')) > MAX_RECORD_BYTES:
-        raise ValueError(f'evolution {kind} exceeds {MAX_RECORD_BYTES} bytes')
+    # Owning contracts validate durable records. Physical storage failures
+    # propagate; record size does not create a second application quota.
     payload = {'namespace': namespace, 'key': key, 'value': value}
     if expected_version is not None:
         payload['expected_version'] = expected_version

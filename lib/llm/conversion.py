@@ -6,7 +6,7 @@ import hashlib
 import json
 import math
 
-from lib.llm_errors import LocalRequestPreparationError
+from lib.llm.llm_errors import LocalRequestPreparationError
 
 from dataclasses import dataclass, field
 from copy import deepcopy
@@ -295,6 +295,17 @@ def conversion_report(body, protocol, *, replay_reasoning=False, replay_types=fr
                 continue
             if protocol == 'responses' and replay_reasoning and kind in replay_types:
                 continue
+
+            if protocol == 'anthropic' and kind == 'reasoning':
+                encrypted = item.get('encrypted_content')
+                if encrypted is not None and not isinstance(encrypted, str):
+                    raise ProtocolConversionError('native_content_invalid')
+                if encrypted:
+                    # Foreign ciphertext is not executable Messages history.
+                    # Project canonical text, function calls and results without
+                    # fabricating signed thinking; retain caller replay state.
+                    loss('cross_protocol_reasoning_omitted')
+                    continue
             if (kind == 'compaction' or kind in {'program', 'program_output'}
                     or kind.endswith('_call') or kind.endswith('_call_output')
                     or kind in {'tool_search_output', 'function_call_output'}

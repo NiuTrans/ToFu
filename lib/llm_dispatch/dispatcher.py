@@ -1276,6 +1276,24 @@ class LLMDispatcher:
                     causes.add(s.cooldown_reason or 'error')
         return causes
 
+    def dominant_cooldown_cause(self, capability: str = 'text',
+                                exclude_models=None, exclude_keys=None,
+                                exclude_pairs=None) -> str:
+        """Single most user-actionable cooldown cause among cooling slots.
+
+        Precedence mirrors ``cooldown_wait_label``: a subscription/billing
+        'quota' hold outranks everything (it won't recover for hours/days),
+        then external 'contention', then per-key 'rate_limit', then the
+        generic error/upstream backoff. Returns '' when nothing is cooling.
+        """
+        causes = self.cooling_cause_summary(
+            capability, exclude_models=exclude_models,
+            exclude_keys=exclude_keys, exclude_pairs=exclude_pairs)
+        for cause in ('quota', 'contention', 'rate_limit'):
+            if cause in causes:
+                return cause
+        return next(iter(causes), '') if causes else ''
+
     def sticky_cooldown_remaining_s(self, conv_id: str, prefer_model=None,
                                     *, exclude_keys=None, exclude_pairs=None):
         """Seconds until ``conv_id``'s warm sticky key becomes pickable again.

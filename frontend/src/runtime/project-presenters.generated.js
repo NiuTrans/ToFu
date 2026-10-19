@@ -407,32 +407,27 @@ async function mpApplyFolders() {
     ...currentProjectState,
     extraRoots: (currentProjectState.extraRoots || []).slice(),
   };
-  _applyProjectData({
-    path: primary,
-    readOnly: _mpReadOnly.has(primary),
-    extraRoots: extras.map(p => ({ path: p, readOnly: _mpReadOnly.has(p) })),
-    crossDC: null,
-  });
   _saveConvProjectPath(primary, extras, readOnly);
   closeProjectModal();
   const nExtras = extras.length;
   const nRO = readOnly.length;
   debugLog(`Project set: ${primary}` + (nExtras ? ` + ${nExtras} extra folder(s)` : '') + (nRO ? ` (${nRO} read-only)` : ''), "success");
-  /* Attaching a project IS the Studio tier. Promote the capability dial so
-   * the UI + derived flags stay truthful. NOTE (owner-directed 2026-07-19):
-   * the tier is DECOUPLED from execution strategy — attaching a project no
-   * longer auto-enables Swarm / Autopilot (those are orthogonal B-axis modes
-   * the user turns on explicitly). */
+  // Attachment only repaints the optional project affordance. Execution
+  // strategy, Flow and model remain independent of the chosen roots.
   if (typeof onProjectAttached === 'function') onProjectAttached();
   else if (typeof captureActiveConversationSettings === 'function') captureActiveConversationSettings();
 
   // ── Reconcile with the server in the background ──
+
+  const current = ProjectPresentationShellState.beginProjectMutation();
   try {
     const resp = await Api.project.setPaths(folders, readOnly, folders);
     const data = resp ? await resp.json().catch(() => ({})) : {};
     if (!resp || !resp.ok) throw new Error(data.error || (typeof t === 'function' ? t('pm.applyFailed') : "Failed"));
+    if (!current()) return;
+    const binding = ProjectPresentationShellState.captureProjectStatus(data);
+    _saveConvProjectPath(binding.projectPath, binding.projectPaths.slice(1), binding.readOnlyPaths);
     _applyProjectData(data);
-    _saveConvProjectPath(data.path, _mpFolders.slice(1), readOnly);
 
     if (typeof showToast === 'function') {
       showToast(
@@ -442,18 +437,12 @@ async function mpApplyFolders() {
       );
     }
   } catch (e) {
-    // Revert the optimistic state and reopen the modal so the user can fix it.
-    ProjectPresentationShellState.projectState = _prevProjectState;
-    _saveConvProjectPath(_prevProjectState.path || "",
-                         (_prevProjectState.extraRoots || []).map(r => typeof r === 'string' ? r : r.path));
+    if (!current()) return; // stale error must not roll back another selection
+    // Revert all previous roots AND their read-only policy.
+    const previous = ProjectPresentationShellState.captureProjectStatus(_prevProjectState);
+    _saveConvProjectPath(previous.projectPath, previous.projectPaths.slice(1), previous.readOnlyPaths);
     _updateProjectUI();
-    /* Studio ⟺ a project is attached. Rolling back to a state with NO
-     * project must demote the dial as well — the optimistic promotion was
-     * already persisted by onProjectAttached, so without this the conv is
-     * left in the poisoned "Studio + no project" shape (durably so, since
-     * the promotion now saves immediately). onProjectCleared repaints AND
-     * persists the fallback. When the previous state DID have a project the
-     * tier stays Studio — still truthful. */
+    // Rollback repaints only this still-current attachment, never a capability tier.
     if (!_prevProjectState.path && typeof onProjectCleared === 'function') onProjectCleared();
     document.getElementById("projectModal").classList.add("open");
     const statusEl = document.getElementById("projectModalStatus");

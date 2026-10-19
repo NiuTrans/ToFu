@@ -21,7 +21,7 @@ export function swarmFailureReason(value: unknown): string {
   if (typeof value === 'string') return value;
   if (value && typeof value === 'object') {
     const row = value as Row;
-    return swarmFailureReason(row.message || row.error || row.detail);
+    return swarmFailureReason(row.detail || row.raw || row.message || row.error);
   }
   return '';
 }
@@ -33,6 +33,15 @@ export function swarmAgentFailureCard(error: unknown, preview: unknown, modified
   const code = data.code || (data.reason && typeof data.reason === 'object' ? data.reason.code : '');
   const noSlot = code === 'route_unavailable'
     || (typeof code !== 'string' || !code) && /\bno slot available\b/i.test(reason);
+  const localContextFailure = !code || code === 'internal'
+    ? /^Automatic context compaction failed locally before provider dispatch\b/.test(reason)
+    : code === 'context_compaction_failed';
+  if (localContextFailure) return {
+    title: t('swarm.failure.contextPreparation'),
+    detail: reason,
+    recovery: t(modifiedFiles > 0
+      ? 'swarm.failure.contextPreparationWithEdits' : 'swarm.failure.contextPreparationRecovery'),
+  };
   return {
     title: t(noSlot ? 'swarm.failure.noSlot' : 'swarm.failure.generic'),
     detail: reason || t('swarm.phase.failed'),

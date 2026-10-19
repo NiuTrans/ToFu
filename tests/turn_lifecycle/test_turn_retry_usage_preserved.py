@@ -59,7 +59,7 @@ def _task(*, usage=None, api_rounds=None, err='abnormal_stop', **extra):
         'error': make_envelope(err, detail='x') if err else None,
         'status': 'error',
         'finishReason': 'error',
-        'toolRounds': [{'round': 0}],
+        'toolRounds': [{'round': 0, 'status': 'pending'}],
         'messages': [{'role': 'user', 'content': 'hi'}],
         '_turn_input_messages': [{'role': 'user', 'content': 'hi'}],
         'model': 'yuju-claude-opus-5-evaDaily',

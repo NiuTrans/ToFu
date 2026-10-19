@@ -5,6 +5,8 @@ first normal use, without loading providers or opening storage for sampling.
 """
 from __future__ import annotations
 
+import sys
+
 from . import current_controller
 from .contract import ResourcePort, ResourceSample
 
@@ -89,7 +91,7 @@ def bind_ephemeral() -> None:
     from lib.llm_dispatch.ephemeral import count_ephemeral_slots
     controller.bind_lazy('model.routes', controller, lambda: ResourcePort(
         lambda: ResourceSample(max(1, count_ephemeral_slots()), used=count_ephemeral_slots()),
-        lambda target: None, 1, max(1, controller.launch_policy['route_capacity']),
+        lambda target: None, 1, sys.maxsize,
         automatic=False))
 
 

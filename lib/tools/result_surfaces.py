@@ -81,6 +81,34 @@ def _spawn_receipt(source):
     return dump_projection_json(projected)
 
 
+def _send_message_receipt(source):
+    """Compact legacy exact-run receipts only; stable assignment handles stay actionable."""
+    from lib.tools.result_projection_json import JSONNumber, load_projection_json
+    try:
+        value = load_projection_json(source)
+    except (ValueError, TypeError, RecursionError, OverflowError):
+        return None
+    policy = CONTRACT['sendMessageReceipt']
+
+    # Stable sends can start ordinary children, and busy receipts pin the exact
+    # assignment to inspect. Keep the complete producer JSON (including launch
+    # handles) in the model view, not just in canonical/frontend retention.
+    if isinstance(value, dict) and 'retained_agent_id' in value:
+        return source
+    if not isinstance(value, dict) or set(value) != set(policy['fields']):
+        return None
+    if (not all(type(value[key]) is str and value[key]
+                for key in ('agent_id', 'swarm_run_id', 'message_id'))
+            or value['kind'] not in ('reference', 'steer')
+            or not isinstance(value['contentChars'], JSONNumber)
+            or not re.fullmatch(r'[1-9][0-9]*', value['contentChars'])
+            or value['execution_started'] is not False
+            or type(value['state']) is not str
+            or value['state'] not in policy['legacyStates']):
+        return None
+    return policy['outcomes'].get(value['state'])
+
+
 def project_model_source(tool_name, source):
     """Optional lossless text view; the caller retains the original canonical JSON.
 
@@ -93,6 +121,9 @@ def project_model_source(tool_name, source):
 
     if policy == 'spawn_receipt':
         return _spawn_receipt(source) or source
+
+    if policy == 'send_message_receipt':
+        return _send_message_receipt(source) or source
     if policy == 'artifact_query':
         from lib.tools.artifact_result_projection import project_artifact_result
         return project_artifact_result(tool_name, source) or source

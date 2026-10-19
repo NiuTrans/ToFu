@@ -3,6 +3,7 @@
  * Types only; generated DTOs remain wire authority.
  * Entry: presentation type exports.
  * Dependencies: conversation-sync.generated, errors, transient-turn, turn-finish. */
+import type { ToolEffectNotice } from '../tool-effect-presentation';
 import type { AutomationManagementPresentation } from '../../../api/automation.generated';
 import {
   type ConversationQueueItem,
@@ -83,6 +84,11 @@ export interface TextBlockViewModel extends ConversationBlockBase {
   kind: 'text';
   /** Original model/user-authored text. */
   markdown: string;
+  /** Recorded translation provider model from projection.translation.model only. */
+  translationModel?: string;
+
+  /** Canonical completed input transform retained without its original body. */
+  inputTranslationCompleted?: boolean;
   translatedMarkdown?: string;
   displayMarkdown: string;
   displayMode: TranslationDisplayMode;
@@ -105,6 +111,7 @@ export interface ThinkingBlockViewModel extends ConversationBlockBase {
 
 export interface ToolBlockViewModel extends ConversationBlockBase {
   kind: 'tool';
+  effectNotice?: ToolEffectNotice;
   toolCallId: string;
   name: string;
   input: unknown;
@@ -115,6 +122,7 @@ export interface ToolBlockViewModel extends ConversationBlockBase {
 /** Display-only parent for native PTC or local ToolScript child calls. */
 export interface ProgramBlockViewModel extends ConversationBlockBase {
   kind: 'program';
+  effectNotice?: ToolEffectNotice;
   programCallId: string;
   round: TurnToolRound;
 }
@@ -239,6 +247,7 @@ export interface ArtifactsBlockViewModel extends ConversationBlockBase {
 }
 
 export type AutopilotRunNoticeReason =
+  | 'worker_lost'
   | 'yielded_to_human'
   | 'aborted_mid_vu'
   | 'superseded'
@@ -256,6 +265,8 @@ export interface AutopilotRunNotice {
   /** The settings record carries a bounded excerpt; the full stop report is
    * fetchable from the durable GoalRun transition when this is set. */
   hasFullReport?: boolean;
+  /** Advisory only: the server revalidates Stop, lane tail and effect evidence. */
+  canRequestRecovery?: boolean;
 }
 
 export interface AutopilotRunNoticeBlockViewModel extends ConversationBlockBase {
@@ -425,6 +436,7 @@ export type ConversationTurnAction =
   | 'resume'
   | 'translate'
   | 'export'
+  | 'review'
   | 'promote-decision'
   | 'branch'
   | 'delete';

@@ -9,7 +9,7 @@ import time
 from lib.agent_core.events import EventType, build_event
 from lib.error_envelope import to_json as _err_to_json
 from lib.log import get_logger
-from lib.task_replay import TASK_REPLAY_TERMINAL_STATUSES
+from lib.task_replay.task_replay import TASK_REPLAY_TERMINAL_STATUSES
 
 from lib.tasks_pkg.manager.runtime import (
     chat_task_runtime,
@@ -385,6 +385,11 @@ def reap_stuck_running_tasks() -> int:
     stuck = []
 
     def _inspect_and_reap(task):
+
+        # Required storage backpressure is explained waiting, not silence.
+        # Explicit Stop/deadline remain controlled by the invocation owner.
+        if task.get('_storageWaits'):
+            return
         created = task.get('created_at', now)
         # Both clocks fall back to created_at so a task that never emitted
         # output is judged by the same dual-clock rule.

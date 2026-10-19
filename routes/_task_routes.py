@@ -31,7 +31,7 @@ from quart import request
 from lib.api_response import api_not_found, api_ok
 from lib.log import get_logger
 from lib.openapi import api_meta
-from lib.task_runtime_ports import TaskRouteRuntimePort
+from lib.task_replay.task_runtime_ports import TaskRouteRuntimePort
 from routes.task_http import (
     task_replay_cursor,
     task_replay_parameters,

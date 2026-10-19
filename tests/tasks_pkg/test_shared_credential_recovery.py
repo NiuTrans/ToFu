@@ -1,7 +1,7 @@
 """Pre-ingress credential failures retry the same round without replaying tools."""
 import pytest
 
-from lib.llm_errors import (AbortedError, LocalRequestPreparationError,
+from lib.llm.llm_errors import (AbortedError, LocalRequestPreparationError,
                             SubscriptionCredentialUnavailableError)
 from lib.tasks_pkg.llm_fallback import _call, _credential_recovery as recovery
 

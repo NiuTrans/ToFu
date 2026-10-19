@@ -192,12 +192,22 @@ export const SYSTEM_NOTE_DISPLAY_POLICY: Readonly<Record<string, SystemNoteDispl
     "noteKind": "context-injection",
     "provenanceField": ""
   },
+  "project_coordinator": {
+    "groupContext": true,
+    "noteKind": "context-injection",
+    "provenanceField": ""
+  },
   "project_path_change": {
     "groupContext": true,
     "noteKind": "context-injection",
     "provenanceField": "projectPathChange"
   },
   "project_rules": {
+    "groupContext": true,
+    "noteKind": "context-injection",
+    "provenanceField": ""
+  },
+  "project_scoped_rules": {
     "groupContext": true,
     "noteKind": "context-injection",
     "provenanceField": ""
@@ -288,6 +298,11 @@ export const SYSTEM_NOTE_DISPLAY_POLICY: Readonly<Record<string, SystemNoteDispl
     "provenanceField": ""
   },
   "worker_wrapup": {
+    "groupContext": true,
+    "noteKind": "context-injection",
+    "provenanceField": ""
+  },
+  "working_facts": {
     "groupContext": true,
     "noteKind": "context-injection",
     "provenanceField": ""

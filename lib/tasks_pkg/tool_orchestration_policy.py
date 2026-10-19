@@ -292,7 +292,7 @@ def resolve_tool_orchestration(
             'observed_read_fanout'):
         programmatic = requested_programmatic
         from lib.tools.programmatic import programmatic_tier
-        programmatic_tier = programmatic_tier(model)
+        programmatic_tier = programmatic_tier(model, requested=requested_programmatic)
 
     # The output inactive state is 'disabled'. Users cannot request it —
     # the settings surface dropped multi-agent opt-out, so the only writer
@@ -361,6 +361,7 @@ def resolve_tool_orchestration(
                           else TOOL_ORCHESTRATION_POLICY_VERSION),
         'compositionMode': composition,
         'programmaticCalling': programmatic,
+        'programmaticRequestedMode': requested_programmatic,
         'programmaticReason': programmatic_reason,
         'programmaticTier': programmatic_tier,
         'programmaticExposurePolicy': str(

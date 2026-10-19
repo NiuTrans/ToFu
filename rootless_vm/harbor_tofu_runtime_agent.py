@@ -98,38 +98,19 @@ def _harbor_model_routing(
     benchmark artifacts.
     """
     spec = _BENCHMARK_MODELS[str(model)]
-    model_ref = {'creator_id': spec['creator_id'], 'model_id': str(model)}
+    model_ref = {'creator_id': spec['creator_id'], 'model_id': spec['model_id']}
+    from lib.model_info._context import context_profile
+    official_context = context_profile(spec['model_id'])['window']
     provider_id = 'harbor-benchmark'
     access_id = f'{provider_id}-access'
     connection_id = f'{provider_id}-connection'
     credential_id = f'{provider_id}-credential'
     secret_reference = f'{provider_id}-secret'
     offering_id = f'{provider_id}-offering'
-    # Declared-compilation capability: an installed v2 route compiles
-    # reasoning strictly from declared metadata (unknown support now fails
-    # closed instead of falling back to wire-name heuristics). The benchmark
-    # destination is fixed and known, so the adapter declares it explicitly —
-    # GLM-5.3 is forced-thinking with a low/high/max ladder, GLM-5.2+ effort
-    # wire, thinking enabled at temperature 1.0, preserved-history opt-out.
-    inference_profile = {
-        'reasoning': {
-            'support': 'supported',
-            'wire_format': 'thinking_type',
-            'supported_efforts': ['low', 'high', 'max'],
-            'default_effort': 'high',
-            'effort_map': {
-                'off': 'low', 'minimal': 'low', 'none': 'low',
-                'low': 'low', 'medium': 'high', 'high': 'high',
-                'xhigh': 'max', 'max': 'max', 'ultra': 'max',
-            },
-            'can_disable': False,
-            'preserve_history': 'clear_thinking_false',
-        },
-        'sampling': {
-            'enabled_temperature': 1.0,
-            'disabled_temperature': 0.7,
-        },
-    }
+    # The official Model uses maintained exact catalog facts/defaults through
+    # normal admission. Provider limits belong to the Offering; its wire alias
+    # belongs to the Deployment. A private alias is not a new trained model,
+    # and one provider's reasoning profile must not be copied to other models.
     return ModelRoutingConfig(
         document={
             'contract_version': 'tofu.model-routing/v2',
@@ -142,9 +123,8 @@ def _harbor_model_routing(
                 **model_ref,
                 'display_name': spec['display_name'],
                 'capabilities': ['text', 'thinking', 'tools'],
-                'context_window': int(spec['context_window']),
+                'context_window': int(official_context),
                 'quality_rank': 10,
-                'inference_profile': inference_profile,
             }],
             'providers': [{
                 'provider_id': provider_id,
@@ -603,7 +583,7 @@ class TofuKimiRuntimeAgent(BaseAgent):
             raise ValueError("Tofu runtime config digest mismatch")
         self._reasoning_effort = str(reasoning_effort).strip().lower()
         if self._reasoning_effort not in {
-            "low", "medium", "high", "xhigh", "max", "ultra",
+            "default", "low", "medium", "high", "xhigh", "max", "ultra",
         }:
             raise ValueError("unsupported Tofu thinking setting")
         self._thinking_format = str(thinking_format or "")
@@ -796,10 +776,9 @@ class TofuKimiRuntimeAgent(BaseAgent):
             model=self._model,
         )
         runtime_config = json.loads(json.dumps(self._runtime_config))
-        runtime_config.update({
-            "thinking": self._reasoning_effort,
-            "disableModelFallback": True,
-        })
+        runtime_config["disableModelFallback"] = True
+        if self._reasoning_effort != "default":
+            runtime_config["thinking"] = self._reasoning_effort
         production = self._tool_surface == "production"
         # Production-surface trial state. All guest side effects cross the
         # RootlessQemuEnvironment exec boundary; the host-visible rootfs is
@@ -924,6 +903,9 @@ class TofuKimiRuntimeAgent(BaseAgent):
                 timeout_s=float(self._timeout_sec)
             ):
                 observed_at = await writer.append_async(event)
+                if event.get("type") == "done" and event.get("error"):
+                    from evaluations.native_failure import native_failure_receipt
+                    state["runtimeFailure"] = native_failure_receipt(event["error"])
                 if not first_event_at:
                     first_event_at = observed_at
                 if event.get("type") != "custom_tool_call":
@@ -1081,6 +1063,8 @@ class TofuKimiRuntimeAgent(BaseAgent):
                 "searchEnabled": bool(search_enabled),
             }
         context.metadata = {"tofuKimiEvidence": metadata}
+        if state.get("runtimeFailure"):
+            metadata["runtimeFailure"] = state["runtimeFailure"]
         if not result.ok:
             raise RuntimeError(
                 "production AgentRuntime did not reach a successful terminal state"

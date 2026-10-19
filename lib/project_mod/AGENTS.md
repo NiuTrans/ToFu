@@ -33,6 +33,16 @@ Read `docs/PROJECT_FILE_UNDO.md` for acknowledgement and conflict rules.
 `workspace_lease.py` owns cooperative checkout/file exclusion and descriptor
 lifetime, not authorization. `run_command.py` owns command write-scope admission;
 any heredoc admission view must preserve the original execution/approval source.
+
+`command_network_probe.py` owns the bounded complete HTTP-probe plan used by
+both writer admission and execution; first-option curl config suppression stays
+execution-only. See `docs/runbooks/GIT_WORKSPACE_GUARD.md` and verify
+`tests/project_mod/test_network_probe_lease.py`. It grants no authorization.
+
+`process_group.py` owns bounded POSIX descendant retirement for foreground and
+recovered commands. Leader exit is not group quiescence; cancellation must
+await inherited descriptor closure. Recovered records verify PID starttime
+and the observed group before signalling. No arbitrary recorded PID is authority.
 Use `post_commit.defer_publication` outside filesystem lease scopes so optional
 callbacks run after freshness and file release. Coordination decisions live in
 `docs/modules/project_integration.md`, not a duplicate policy in callers.
@@ -45,9 +55,13 @@ staging remains under session admission. Cache identity/byte bounds stay in
 `write_tools/` search/replace matching is a ladder: exact → CRLF →
 trailing-whitespace → unicode-escape → uniform-indent (relative-indent
 re-framing) → unicode+indent, each rung ambiguity-guarded with located
-errors; a miss returns the closest block to re-anchor from. `apply_diffs`
-defaults to per-edit failure isolation (one undo transition per file) and
-accepts `atomic=true` for all-or-nothing pre-flighted batches.
+errors; a miss returns the closest block to re-anchor from. Indent fallback
+requires one uniform literal prefix shift, never independently stripped nesting.
+`edit_file` defaults to whole-batch atomic preflight; only explicit `atomic=false`
+permits partial application. `apply_diffs` retains its default per-edit failure
+isolation and accepts `atomic=true`. Both group one undo transition per physical
+file; neither promises cross-file rollback after later I/O failures. Read
+`docs/PROJECT_FILE_UNDO.md` for the preflight and applied-failure contract.
 
 `git_command_scope.py` is the single Git target resolver for approval and writer
 admission, including shell cwd control, prospective worktrees and Git metadata
@@ -65,7 +79,7 @@ intercepted by the tool pipeline. Classification stays pure in
 presence and probe subprocesses are only read. Read
 `docs/modules/project_integration.md` for the coordination contract.
 
-`task_delta_delivery.py` owns automatic task-only patch validation/publication and no-change clone
+`task_delta_delivery.py` owns automatic task-only three-way workspace merging/publication and proven-recoverable clone
 reclamation; `workspace_runtime.py` owns lazy reconstructible dependency bridges. Durable intent,
 revocation and recovery stay in `delivery.py`; gates/snapshots stay in `integration_control.py`.
 `delivery_retry.py` owns condition fingerprints, bounded conflict evidence and immutable scoped
@@ -98,3 +112,45 @@ read probes under `tests/evolution/`.
 only after ordinary command/environment/network/sandbox preparation. It closes
 stdin and preserves originals; verify agent-read-selection and real-measurement
 tests. This does not grant semantic input-use or timing benchmark proof.
+
+`tree_index.py` walks complete authorized trees with windowed directory Futures.
+Entry retention targets cannot truncate builds, reject persisted indexes, or
+prevent write-fresh checkpoints. Deep trees and expired legacy walk deadlines
+remain complete; actual read failures never install a partial index. Verify
+`test_tree_index.py` and `test_tree_index_scan_pressure.py`.
+
+Project grep searches complete source files, including those above the retired
+2 MiB default. `grep_candidates` sizes are scheduling observations. Python find
+has no private entry-count cutoff; result/time policies remain with search.
+
+Batched read/grep/find operations execute every entry and retain every receipt.
+Presentation quotas belong to the shared result envelope, never batch slicing
+or early loop termination. Verify `test_project_batch_demand.py`, range,
+projection, source-recovery and settlement neighbors.
+
+Whole plain-text reads retain their complete source regardless of size or
+data-file heuristics. Explicit ranges remain exact; presentation belongs to
+the result envelope. `MAX_FILE_SIZE` still belongs to modification capture,
+not reader admission. Verify `test_project_file_demand.py` and range/facade
+contracts before changing that independent history owner.
+
+Edit batches process every requested operation. Count thresholds cannot cut off
+preflight, hide late failures, or remove result lines. Preserve grouped physical
+writes/undo and whole-batch atomic preflight; verify `test_project_edit_demand.py`
+with batch atomicity, write-failure and recovery neighbors.
+
+Write intents preserve complete byte evidence and discover all pending records;
+legacy recovery-budget values cannot hide durable state. Identity, digest,
+regular-file, corruption and real I/O guards remain mandatory. The physical
+extent compatibility helper is not an admission knob. Verify write-intent,
+crash-recovery, byte-roundtrip and grouped-undo tests.
+
+`delivery_acceptance.py` binds actual immutable-candidate checks to source and
+checker revisions. The existing workspace origin retains one bounded receipt;
+missing checks never inherit task completion. Read `docs/WORKSPACE_ACCEPTANCE.md`;
+verify the SQLite/native acceptance tests and built-app integration browser test.
+
+`effect_reconciliation.py` binds tracked local write publication to the common
+execution effect and reads existing undo/intent evidence without replay. Read
+`docs/contracts/TOOL_EFFECT_RECOVERY.md`; verify file-effect reconciliation,
+selected-store restart, and owner-scoped inspection tests.

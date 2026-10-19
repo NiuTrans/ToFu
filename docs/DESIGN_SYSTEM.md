@@ -46,6 +46,7 @@ margins/paddings (gate: phase 3).
 | Font size | `--font-size-xs`…`--font-size-4xl` | consolidated from the legacy 9–16px half-step sprawl |
 | Leading/weight | `--leading-*`, `--weight-*` | tight/title/body; regular→bold |
 | Conversation measure | `--conversation-reading-measure` = 720px | Default input to the existing `--msg-measure` authority; explicit overrides continue to size shell, prose, composer and context rails together. |
+| Conversation process | `--conversation-process-*`, `--conversation-flow-gap`, `--conversation-prose-gap` | Shared 14px labels, marker/label columns, evidence inset, process density and prose separation. Touch rows use the existing large control height. |
 | Control height | `--control-h-sm/md/lg` = 28/34/42 | one height ramp → rows align by construction |
 | Motion | `--motion-fast/base/slow`, `--ease-*` | collapses to 0.01s under reduced-motion |
 | Z-index | `--z-dropdown`…`--z-tooltip` | new code only; native `<dialog>` needs none |
@@ -104,6 +105,9 @@ not application code.)
 Mounted surfaces pass their container's `ownerDocument` so controls remain in
 that DOM realm (including embedded views and isolated test documents); styling
 and native keyboard behavior are identical.
+
+Shared buttons honor native `hidden`: author display rules must not restore
+invisible retry/reload actions to layout or the keyboard focus order.
 | Control | Markup / factory | Status |
 |---|---|---|
 | Layout: stack / row / grid / toolbar | `.ui-stack` `.ui-row` `.ui-grid` `.ui-toolbar` (+`--tight/--loose/--between/--wrap`) | ✅ |
@@ -126,6 +130,24 @@ and native keyboard behavior are identical.
 | Progress | `createProgress` — determinate + indeterminate | ✅ |
 | Divider | `hr.ui-divider` / `--vertical` — margin:0, parent stack owns spacing | ✅ |
 | Empty state | `createEmptyState` — icon/title/description/action | ✅ |
+
+Tabs preserve native `hidden` even when a panel uses a layout primitive such
+as `.ui-stack`; inactive panels leave layout and keyboard navigation. Tab labels
+retain one line in their existing horizontal scrolling container on narrow screens.
+
+### Project workbench dialog appearance
+
+`createDialog({ appearance: 'project', ... })` is the opt-in native project
+shell. `--project-*` tokens supply the ink frame, paper/header surfaces and gold
+accent in Tofu; dark/light retain their palettes. Geometry is theme-invariant.
+The kit owns descendant field/button treatment; feature CSS owns only layout.
+Default dialogs and Settings chrome are unaffected. Native focus trapping,
+Escape and backdrop dismissal remain the only modal behavior owner.
+
+Problem: a generic cold/hairline dialog did not match the established CO-PILOT
+workbench. Decision: extend the existing factory/kit with semantic tokens.
+Rejected: adding legacy `.modal` classes or feature-level `.ui-*` overrides
+would duplicate chrome authority and couple native dialogs to legacy skins.
 
 ### Adding a control
 
@@ -215,6 +237,73 @@ workflow, so an agent lands on the kit instead of a blank stylesheet:
 
 New-project checklist: scaffold cloned □ factories only □ no raw hex/px □
 gallery updated □ verify+capture green □ screenshots posted.
+
+## Conversation reading grammar
+
+**Problem:** a flat list of equally styled prose and disclosures makes a mixed
+chronology read like logs. Uniform spacing alone cannot distinguish the user's
+brief, the assistant's work, and its eventual answer. A separate card for every
+operation creates the opposite problem: too many competing boundaries.
+
+**Decision:** compose each Turn as an editorial reading sequence. Human input is
+a compact, right-aligned note; assistant identity is a small accent mark and
+byline. Authored narration stays open on the page. Consecutive operational leaves
+share one lightly tinted, rounded activity surface with a continuous icon rail.
+Narration, deliverables and the current page/window boundary interrupt that
+surface. The `RoundOutline` derives start/middle/end/single decoration from the
+mounted sequence without regrouping, reparenting or creating disclosures. Its
+small map is replaced on each bounded projection. Accepted WorkUnits keep their
+own delivery surface, as do artifacts and other durable content.
+
+`23-turn-reading-system.css` owns these boundaries. The shared process slot,
+label column, type scale and evidence inset live in `23-reading-process.css`
+and `23-reading-execution.css`. Tool identity is leading; disclosure is trailing.
+Reasoning, search/read results, context, checklists, programs and fallback tools
+use the same row rhythm. Code/output controls remain independent, with selectable
+intent. The program summary keeps recorded activity, counts and semantic receipts;
+arbitrary return-value previews live in expanded evidence. Failure/attention
+receipts remain visible. Routine success is quiet; pending actions retain their
+own controls and status.
+
+The surrounding chat chrome uses the same vocabulary: flat ink/paper New Chat,
+quiet topbar launchers, a single softly raised composer and shared send/stop
+intent states. Retired Tofu-theme textures, beveled launcher/toolbar rules and
+warm composer overrides are removed at their source instead of counter-styled.
+Message actions form an icon shelf with localized accessible names and native
+tooltips; Review keeps its visible label. Shared controls remain keyboard and
+touch accessible. The shell-action owner now passes the strict token gate.
+
+An explicit assistant deliverable starts with a localized **Answer** rubric,
+a small accent diamond and a hairline. Its first heading is the largest text in
+the response (28px desktop / 22px phone); subsequent headings and 16px prose
+create a readable type hierarchy. The rubric identifies authored answer content,
+never declares success. Short answers, images and rich Markdown use the same
+owner. Historical Process is a compact capsule before the answer; opening it
+reveals a bounded inset reading area. Paging only appears when useful. Closing
+still unmounts evidence. Mobile metadata wraps without stealing the title's
+width; copy controls reserve their own space.
+
+Visual references reviewed: [Linear Agent](https://linear.app/docs/linear-agent)
+for quiet activity and content hierarchy; [Cursor's agents workspace](https://cursor.com/blog/cursor-3)
+for outcome emphasis and inspectable detail; [Raycast's redesign](https://www.raycast.com/blog/the-new-raycast)
+for coherent control geometry and restrained surfaces. These inform Tofu's
+composition, not its brand, content order or interaction authority.
+
+**Alternatives considered:** regrouping all tools or reasoning loses causality;
+a flat disclosure list lacks hierarchy; independent cards fragment the stream;
+a permanent second column reduces prose width and fails on phones. Adjacency
+surfaces and an explicit answer destination preserve one responsive reading
+column, stable leaves, reader choices and existing lazy owners. No duplicated
+transcript, additional timers, transport or animation loop is introduced.
+
+`tests/visual/test_visual_timeline_reading.py` mounts the real selector, Surface,
+Markdown and tool presenters, then also places the same Surface in application
+shell markup. It checks chronological boundaries, label alignment, actual-surface
+contrast, 320/390px wrapping, native keyboard disclosure, replay focus and history
+settlement in three themes. Shell captures verify layout only; live-app boot is
+owned by the existing conversation-reading shell test. Reviewed images live in
+`designs/ui-gallery/previews/timeline-*.png`. Historical-process, intent-first
+and program-surface suites own neighboring interaction and lifecycle contracts.
 
 ## Verification
 

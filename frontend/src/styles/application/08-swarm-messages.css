@@ -1,0 +1,73 @@
+/* Run-level mailbox evidence; independent of agent execution timelines. */
+.sw-messages {
+  display: grid;
+  gap: var(--space-2);
+  min-width: 0;
+  margin-top: var(--space-3);
+  color: var(--text-primary);
+  font-size: var(--conversation-font-size-content);
+}
+.sw-messages h4 {
+  margin: 0;
+  font-size: var(--font-size-sm);
+  font-weight: var(--weight-semibold);
+}
+.sw-messages-list {
+  display: grid;
+  gap: var(--space-2);
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  min-width: 0;
+}
+.sw-messages-row {
+  padding: var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-secondary);
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+.sw-messages-direction { font-weight: var(--weight-semibold); }
+.sw-messages-status,
+.sw-messages-time,
+.sw-messages-notice {
+  color: var(--text-secondary);
+  font-size: var(--font-size-xs);
+}
+.sw-messages-time { margin-inline-start: var(--space-2); }
+.sw-messages-notice { margin: 0; }
+.sw-messages summary {
+  cursor: pointer;
+  padding-block: var(--space-1);
+  overflow-wrap: anywhere;
+}
+.sw-messages summary:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: var(--space-1);
+}
+/* Keep the native summary focusable while showing content in only one place. */
+.sw-messages-content > summary .sw-messages-collapse,
+.sw-messages-content[open] > summary .sw-messages-preview { display: none; }
+.sw-messages-content[open] > summary .sw-messages-collapse { display: inline; }
+.sw-messages-body {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  padding-top: var(--space-2);
+  line-height: var(--leading-body);
+}
+.sw-messages [hidden] { display: none; }
+.sw-messages-evidence {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 2fr);
+  gap: var(--space-1) var(--space-2);
+  margin-block: var(--space-2) 0;
+  color: var(--text-secondary);
+  font-size: var(--font-size-xs);
+}
+.sw-messages-evidence dd { margin: 0; }
+.sw-messages-status[data-state="input_confirmed"] { color: var(--success-text); }
+
+.sw-a-messages{margin-block:var(--space-2);min-width:0}
+.sw-a-messages>summary,.sw-messages-diagnostics>summary{cursor:pointer;padding-block:var(--space-1);color:var(--text-secondary);font-size:var(--font-size-xs);overflow-wrap:anywhere}
+.sw-a-messages>summary:focus-visible,.sw-messages-diagnostics>summary:focus-visible{outline:var(--control-edge-inset) solid var(--focus-ring);outline-offset:var(--space-1)}

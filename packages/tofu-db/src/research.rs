@@ -16,7 +16,7 @@ use crate::entity::EntityKey;
 use crate::generated_tofudb_ir::{
     MAX_RESEARCH_ARTIFACTS_PER_OWNER, MAX_RESEARCH_ARTIFACT_DOCUMENT_BYTES,
     MAX_RESEARCH_DIRECTION_ROWS, MAX_RESEARCH_DIRECTION_SCAN_ROWS, MAX_RESEARCH_RESPONSE_BYTES,
-    MAX_RESEARCH_WORKSPACE_BYTES, RESEARCH_ARTIFACT_COUNT_NAMESPACE,
+    RESEARCH_ARTIFACT_COUNT_NAMESPACE,
     RESEARCH_ARTIFACT_CREATED_INDEX_NAMESPACE, RESEARCH_ARTIFACT_DOCUMENT_NAMESPACE,
     RESEARCH_ARTIFACT_STATE_NAMESPACE, RESEARCH_WORKSPACE_DOCUMENT_NAMESPACE,
 };
@@ -290,7 +290,7 @@ impl ResearchRequest {
                     .map(|proof| {
                         crate::paper_build_receipt::encode_bounded(
                             proof,
-                            MAX_RESEARCH_WORKSPACE_BYTES,
+                            usize::MAX,
                         )
                         .map(|bytes| bytes.len())
                     })
@@ -299,12 +299,10 @@ impl ResearchRequest {
                 let bytes = serde_json::to_vec(workspace)
                     .map_err(|_| invalid_input("research workspace cannot be encoded"))?
                     .len();
-                if bytes.saturating_add(proof_bytes) > MAX_RESEARCH_WORKSPACE_BYTES {
-                    return Err(resource_exhausted(
-                        "research workspace exceeds its document byte bound",
-                    ));
-                }
-                paper_hash.len() + lang.len() + bytes + proof_bytes
+                paper_hash.len().checked_add(lang.len())
+                    .and_then(|size| size.checked_add(bytes))
+                    .and_then(|size| size.checked_add(proof_bytes))
+                    .ok_or_else(|| resource_exhausted("research workspace size is not addressable"))?
             }
         };
         Ok(literal_bytes)
@@ -697,7 +695,7 @@ pub(crate) fn workspace_get(
         WORKSPACE_LOGICAL_NAMESPACE,
         &logical_key(paper_hash, lang)?,
         transaction.owner_user_id(),
-        MAX_RESEARCH_WORKSPACE_BYTES,
+        usize::MAX,
     )
 }
 
@@ -783,11 +781,6 @@ fn workspace_put(
     });
     let value_json = serde_json::to_vec(&response)
         .map_err(|_| invalid_data("research workspace cannot be encoded"))?;
-    if value_json.len() > MAX_RESEARCH_WORKSPACE_BYTES {
-        return Err(resource_exhausted(
-            "research workspace exceeds its document byte bound",
-        ));
-    }
     versioned_document::put_with_blob_owner_bounded(
         database,
         transaction,
@@ -795,14 +788,14 @@ fn workspace_put(
             key,
             namespace: WORKSPACE_LOGICAL_NAMESPACE.to_owned(),
             logical_key: logical_key(paper_hash, lang)?,
-            value_json,
+            value_json: value_json.clone(),
             expected_version: Some(actual_revision),
             updated_at_ms: physical_updated_at_ms,
         },
         transaction.owner_user_id(),
-        MAX_RESEARCH_WORKSPACE_BYTES,
+        usize::MAX,
     )?;
-    encode_response(&response)
+    Ok(value_json)
 }
 
 pub fn execute(

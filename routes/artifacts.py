@@ -25,6 +25,7 @@ Security invariants (also covered in tests/artifacts/test_artifacts_api.py):
 """
 
 from __future__ import annotations
+from lib.artifacts import get_artifact as get_artifact
 
 import re
 from urllib.parse import quote as _urlquote
@@ -32,10 +33,11 @@ from urllib.parse import quote as _urlquote
 from quart import Blueprint, Response, request
 
 from lib.api_v4 import raw_success_response
+
+from routes.api_v1.auth import request_user_id, require_auth
 from lib.openapi import media_responses, api_meta
 from lib.artifacts import (
     ArtifactNotFoundError,
-    get_artifact,
     get_artifact_meta,
 )
 from lib.log import audit_log, get_logger
@@ -48,6 +50,8 @@ artifacts_bp = Blueprint('artifacts', __name__)
 
 # ── Format → response Content-Type mapping (used by /raw) ────────────
 _FORMAT_CONTENT_TYPE = {
+
+    'rich': 'application/json; charset=utf-8',
     'markdown': 'text/markdown; charset=utf-8',
     'html':     'text/html; charset=utf-8',
     'svg':      'image/svg+xml; charset=utf-8',
@@ -69,10 +73,15 @@ _CSP_HEADER = (
     "media-src data: https:"
 )
 
+_RESPONSE_FILE_CSP_HEADER = (
+    "default-src 'none'; style-src 'unsafe-inline'; img-src data:; "
+    "font-src data:; media-src data:; sandbox; frame-ancestors 'self';"
+)
+
 _COMMON_SECURITY_HEADERS = {
     'X-Content-Type-Options': 'nosniff',
     'Referrer-Policy':        'no-referrer',
-    'Cache-Control':          'private, max-age=300',
+    'Cache-Control':          'private, no-store',
 }
 
 # CSP for the /view endpoint.  Same-origin scripts ('self') ARE allowed
@@ -127,7 +136,7 @@ def _strip_model_scripts(html: str) -> str:
 
 
 def _build_artifact_view_html(artifact: dict) -> str:
-    """Translate an HTML/SVG artifact into a view-mode HTML document.
+    """Translate a Markdown/HTML/SVG artifact into a view-mode HTML document.
 
     For full ``<html>`` documents we inject KaTeX + auto-render into the
     existing head; for fragments we wrap them in a minimal template.
@@ -137,7 +146,11 @@ def _build_artifact_view_html(artifact: dict) -> str:
     body = artifact.get('content') or ''
     title = (artifact.get('title') or 'Artifact').replace('<', '').replace('>', '')[:200]
     fmt = artifact.get('format')
-    body = _strip_model_scripts(body)
+    if fmt == 'markdown':
+        from lib.artifacts.markdown_view import render_markdown_html
+        body = render_markdown_html(body)
+    else:
+        body = _strip_model_scripts(body)
 
     katex_css = '/static/vendor/katex/katex.min.css'
     katex_js = '/static/vendor/katex/katex.min.js'
@@ -234,12 +247,14 @@ def _content_disposition(disposition: str, filename: str) -> str:
 
 
 @artifacts_bp.route('/api/artifacts/<artifact_id>/view', methods=['GET'])
+
+@require_auth
 @api_meta(
     responses=media_responses('text/html'),
 )
 @raw_success_response
 def api_get_artifact_view(artifact_id):
-    """HTML/SVG artifact wrapped with our trusted KaTeX so math renders
+    """Markdown/HTML/SVG artifact wrapped with trusted KaTeX so math renders
     even when model scripts are blocked.
 
     Defaults the iframe sandbox to running OUR scripts only (KaTeX +
@@ -263,18 +278,20 @@ def api_get_artifact_view(artifact_id):
         the iframe weren't sandboxed the model JS would still be blocked.
       * KaTeX + auto-render are loaded from `/static/vendor/katex/`,
         which is `'self'` and therefore allowed.
-      * Markdown is not served via this endpoint — frontend already
-        renders markdown with our marked + DOMPurify pipeline.
+      * Markdown reuses the PDF export's inert body renderer, with raw
+        HTML escaped and a plaintext fallback if the renderer is unavailable.
     """
     try:
-        artifact = get_artifact(artifact_id)
+        from lib.artifacts.response_files import load_artifact_for_delivery
+        artifact, _data, _info = load_artifact_for_delivery(artifact_id, user_id=request_user_id())
     except ArtifactNotFoundError:
         logger.debug('[Artifacts] view lookup miss id=%s', artifact_id[:8])
         return api_not_found('not_found')
 
     fmt = artifact['format']
-    if fmt not in ('html', 'svg'):
-        # /view doesn't add value for markdown; redirect callers to /raw
+    if fmt == 'file':
+        return api_not_found('not_found')
+    if fmt not in ('markdown', 'html', 'svg'):
         return api_error('unsupported_format_for_view', status=400, format=fmt)
 
     body_html = _build_artifact_view_html(artifact)
@@ -289,6 +306,8 @@ def api_get_artifact_view(artifact_id):
 
 
 @artifacts_bp.route('/api/artifacts/<artifact_id>/raw', methods=['GET'])
+
+@require_auth
 @api_meta(
     responses=media_responses('text/markdown', 'text/html', 'image/svg+xml', 'text/plain'),
 )
@@ -296,17 +315,25 @@ def api_get_artifact_view(artifact_id):
 def api_get_artifact_raw(artifact_id):
     """Return the raw bytes with a strict CSP for safe iframe embedding."""
     try:
-        artifact = get_artifact(artifact_id)
+        from lib.artifacts.response_files import load_artifact_for_delivery
+        artifact, _data, _info = load_artifact_for_delivery(artifact_id, user_id=request_user_id())
     except ArtifactNotFoundError:
         logger.debug('[Artifacts] raw lookup miss id=%s', artifact_id[:8])
         return api_not_found('not_found')
 
     fmt = artifact['format']
+    if fmt == 'file':
+        return api_not_found('not_found')
     content_type = _FORMAT_CONTENT_TYPE.get(fmt, 'text/plain; charset=utf-8')
+
+    if artifact.get('source') == 'response_file':
+        info = artifact.get('meta', {}).get('responseFile', {})
+        content_type = info.get('mime', content_type) + '; charset=utf-8'
     body = artifact['content']
     resp = Response(body, mimetype=content_type, status=200)
     resp.headers['Content-Type']             = content_type
-    resp.headers['Content-Security-Policy']  = _CSP_HEADER
+    resp.headers['Content-Security-Policy']  = (_RESPONSE_FILE_CSP_HEADER
+                                             if artifact.get('source') == 'response_file' else _CSP_HEADER)
     for k, v in _COMMON_SECURITY_HEADERS.items():
         resp.headers[k] = v
     # Filename hint for "save as" — title may be empty, keep the id as
@@ -322,6 +349,8 @@ def api_get_artifact_raw(artifact_id):
 
 
 @artifacts_bp.route('/api/artifacts/<artifact_id>/export', methods=['GET'])
+
+@require_auth
 @api_meta(
     responses=media_responses('application/pdf'),
 )
@@ -331,6 +360,19 @@ def api_export_artifact(artifact_id):
     fmt = (request.args.get('format') or 'pdf').lower()
     if fmt != 'pdf':
         return api_bad_request(f'unsupported export format: {fmt}')
+
+    try:
+        from lib.artifacts.response_files import load_artifact_for_delivery
+        artifact, _data, _info = load_artifact_for_delivery(artifact_id, user_id=request_user_id())
+        if artifact['format'] == 'file':
+            return api_not_found('not_found')
+
+        if artifact.get('source') == 'response_file' and artifact['format'] in ('html', 'svg'):
+            # Legacy PDF preprocessing strips script tags but does not enforce a
+            # browser CSP for event handlers/SVG. Do not widen that trust surface.
+            return api_bad_request('response_file_markup_pdf_export_unavailable')
+    except ArtifactNotFoundError:
+        return api_not_found('not_found')
 
     try:
         from lib.artifacts.pdf_export import PdfRenderError, render_artifact_pdf
@@ -373,6 +415,8 @@ def api_export_artifact(artifact_id):
 
     resp = Response(pdf_bytes, mimetype='application/pdf', status=200)
     resp.headers['Content-Type'] = 'application/pdf'
+
+    resp.headers['Cache-Control'] = 'private, no-store'
     resp.headers['Content-Disposition'] = _content_disposition('attachment', title)
     resp.headers['X-Content-Type-Options'] = 'nosniff'
     resp.headers['Referrer-Policy'] = 'no-referrer'
@@ -380,3 +424,28 @@ def api_export_artifact(artifact_id):
 
 
 # scan moved to routes/api_v1/artifacts.py
+
+
+@artifacts_bp.route('/api/artifacts/<artifact_id>/download', methods=['GET'])
+@require_auth
+@api_meta(summary='Download an owned immutable artifact', tags=['artifacts'],
+          responses=media_responses('text/plain', 'text/markdown', 'text/html', 'image/svg+xml',
+                                    'application/pdf', 'application/zip', 'application/octet-stream'))
+@raw_success_response
+async def api_download_artifact(artifact_id):
+    import asyncio
+    from lib.artifacts.response_files import download_payload
+    try:
+        data, info = await asyncio.to_thread(download_payload, artifact_id,
+                                             user_id=request_user_id(),
+                                             interactive=request.args.get('interactive') == '1')
+    except ArtifactNotFoundError:
+        return api_not_found('not_found')
+    resp = Response(data, content_type=info['mime'])
+    resp.headers['Content-Disposition'] = _content_disposition('attachment', info['filename'])
+    resp.headers['Content-Security-Policy'] = "default-src 'none'; sandbox"
+    if info['warning']:
+        resp.headers['Warning'] = '299 tofu "' + info['warning'] + '"'
+    for key, value in _COMMON_SECURITY_HEADERS.items():
+        resp.headers[key] = value
+    return resp

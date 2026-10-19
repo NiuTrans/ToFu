@@ -302,34 +302,7 @@ the external sanitized proxy through a private Unix socket. Host corporate
 proxy credentials, if present, are sent to the sanitized proxy child over a
 pipe and never enter QEMU, the guest, command arguments, or persistent files.
 
-The host proxy resolves names itself, rejects loopback, RFC1918, link-local,
-multicast, metadata, and mixed public/private answers, and connects using the
-validated numeric address first. When a required corporate parent proxy refuses
-CONNECT to that numeric destination, the proxy retries CONNECT to the already
-DoH-validated hostname; TLS still pins the session with SNI and certificate
-verification, so DNS is never delegated for a name that failed public
-resolution. HTTPS remains end-to-end TLS through CONNECT. When this host itself
-requires a corporate proxy that rejects numeric port 80, plain HTTP is upgraded
-on the host side to certificate-verified HTTPS (numeric CONNECT, then hostname);
-the guest still receives the requested HTTP response. Without the hostname
-CONNECT retry, verifier `apt-get` of curl/uvx fails closed with HTTP 502
-`cannot securely upgrade public HTTP destination` and the trial becomes a false
-model zero (`curl: command not found` / `uvx: command not found`).
-Connections, headers, idle
-time, relay backpressure, and aggregate bytes are bounded. Established relay
-writes allow 120 seconds for a TCG guest to resume draining before the tunnel
-is closed. Plain proxy requests are restricted to
-TCP 80 and CONNECT tunnels to TCP 443; SSH, mail, arbitrary TCP, UDP, ICMP, and
-inbound networking remain unavailable.
-All sessions under one private state root also share a 16-connection upstream
-gate. The mode-0600 advisory locks contain no traffic or credentials; they
-prevent parallel package managers in many VMs from multiplying into a parent
-proxy reset storm while retaining per-session byte limits and authentication.
-Agent package installs retain a generous transient-download retry budget. The
-replaceable verifier phase limits uv to two concurrent downloads and uses a
-bounded 20-attempt, 60-second network policy. If it still cannot bootstrap, the
-result is infrastructure-invalid and the exact trial slot is regenerated
-instead of becoming a false model zero.
+The host proxy resolves names itself, rejects loopback, RFC1918, link-local, multicast, metadata, and mixed public/private answers, and connects using the validated numeric address first. When a required corporate parent proxy refuses CONNECT to that numeric destination, the proxy retries CONNECT to the already DoH-validated hostname; TLS still pins the session with SNI and certificate verification, so DNS is never delegated for a name that failed public resolution. HTTPS remains end-to-end TLS through CONNECT. When this host itself requires a corporate proxy that rejects numeric port 80, plain HTTP is upgraded on the host side to certificate-verified HTTPS (numeric CONNECT, then hostname); the guest still receives the requested HTTP response. Without the hostname CONNECT retry, verifier `apt-get` of curl/uvx fails closed with HTTP 502 `cannot securely upgrade public HTTP destination` and the trial becomes a false model zero (`curl: command not found` / `uvx: command not found`). Connections, headers, idle time, relay backpressure, and aggregate bytes are bounded. Established relay writes allow 120 seconds for a TCG guest to resume draining before the tunnel is closed. Plain proxy requests are restricted to TCP 80 and CONNECT tunnels to TCP 443; SSH, mail, arbitrary TCP, UDP, ICMP, and inbound networking remain unavailable. All sessions under one private state root also share a 16-connection upstream gate. The mode-0600 advisory locks contain no traffic or credentials; they prevent parallel package managers in many VMs from multiplying into a parent proxy reset storm while retaining per-session byte limits and authentication. Agent package installs retain a generous transient-download retry budget. The replaceable verifier phase limits uv to two concurrent downloads and uses a bounded 20-attempt, 60-second network policy. If it still cannot bootstrap, the result is infrastructure-invalid and the exact trial slot is regenerated instead of becoming a false model zero.
 
 Host/guest file transfers use 128 KiB QGA chunks, a byte ceiling, and one
 monotonic twenty-minute deadline for the whole transfer. This avoids both the
@@ -412,7 +385,7 @@ recovery/checkpoint loop; only `tofu-kimi` is the production-runtime candidate.
 The production adapter awaits durable event/audit writes off Harbor's shared
 asyncio loop, using its bounded executor with at most one outstanding operation
 per adapter. Every event still receives `fsync`; cancellation drains the owned
-write before closing or hashing artifacts. `tofu-kimi-evidence/io-metrics.json`
+write before closing or hashing artifacts. `io-metrics.json`
 records event-write count, total and maximum latency including executor wait.
 Observer delivery lag is measured separately from provider inference latency;
 a slow evidence filesystem must not silently consume other trials' deadlines.
@@ -698,3 +671,22 @@ separately: local QEMU/cache optimization cannot remove remote variance.
 
 The split keeps the core reusable by other local evaluation harnesses and
 makes the remaining packaging work independent of Harbor and Tofu.
+
+Private backing-chain normalization uses `SandboxSpec.disk_prepare_timeout_sec`
+(default 300 seconds, finite 1..86400); Harbor supplies its declared boot budget.
+Problem: `qemu-img rebase -u` flushes the preceding multi-GiB private clone, so a
+30-second metadata timeout can fail both healthy simultaneous starts. A local
+2.34 GiB probe spent 15.6 seconds in `fdatasync`; two concurrent starts exceeded
+30 seconds. Decision: retain private copies, flushes, and kill/wait-on-timeout,
+but use the explicit disk preparation budget. Disabling flushes or hard-linking
+shared input images was rejected because it would weaken isolation/integrity.
+
+Host QMP and QGA clients connect through a short `/proc/self/fd/<dirfd>/<name>`
+pathname while pinning the private parent directory for the connect call. This
+matches the existing egress listener/storage probe strategy and preserves normal
+filesystem access controls; it does not enable sockets on incompatible FUSE.
+Long HOME/checkout paths must not be mistaken for guest readiness failures.
+The parent descriptor closes on success and exception. Shared temp directories,
+abstract sockets and an unauthenticated TCP replacement remain rejected.
+
+<!-- Evidence note: former docs/evidence/ artifact snapshots cited here were retired from the tree; cited JSON artifacts remain recoverable from git history. -->

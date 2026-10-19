@@ -146,11 +146,8 @@ function domainLoader(name: string): () => Promise<DomainModule> {
   throw new Error(`No frontend owner is registered for ${name}`);
 }
 
-// Cold-start boot splash: with the early-serving lifespan the HTTP listener
-// answers long before the background boot runner finishes storage/recovery,
-// so the first health probes can observe a live-but-not-ready server. The
-// splash turns that window into a truthful per-phase launch screen and owns
-// the latched-failure retry; it self-dismisses on ready and never returns.
+// Observe boot without covering the shell. The shared send admission stays
+// closed until ready; reading and drafting remain available throughout.
 startBootSplash({
   request,
   errorStatus: error => (error instanceof ApiError ? error.status : undefined),

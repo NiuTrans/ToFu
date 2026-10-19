@@ -185,17 +185,25 @@ def test_drain_alone_never_deletes_the_durable_row(monkeypatch):
     assert task.get('_bgcmd_inject_pending')
 
 
-def test_pending_receipt_backpressure_leaves_later_twin_in_inbox():
-    from lib.turn_source_queue_contract import BACKGROUND_RECEIPT_BATCH_MAX
+def test_pending_occurrences_do_not_block_later_twin_by_count():
     task = _task()
     task['_bgcmd_inject_pending'] = [
         {'queueId': f'q-{i}', 'commandId': f'bg-{i}', 'value': 'result'}
-        for i in range(BACKGROUND_RECEIPT_BATCH_MAX)]
+        for i in range(1025)]
     _enqueue_twin(queue_id='q-later')
     messages = [{'role': 'user', 'content': 'go'}]
     drain_and_inject_inbox(task=task, messages=messages, round_num=1, tid='task-1')
-    assert len(task['_bgcmd_inject_pending']) == BACKGROUND_RECEIPT_BATCH_MAX
-    assert messages == [{'role': 'user', 'content': 'go'}]
+    assert len(task['_bgcmd_inject_pending']) == 1026
+    assert task['_bgcmd_inject_pending'][-1]['queueId'] == 'q-later'
+    assert not agent_inbox.drain(CONV, modes=['background-command'])
+
+
+def test_frozen_receipt_preserves_retry_before_consuming_a_new_occurrence():
+    task = _task()
+    task['_bgcmd_delivery_event'] = {'previews':[{'queueId':'old'}]}
+    _enqueue_twin(queue_id='q-later')
+    messages = [{'role':'user','content':'go'}]
+    drain_and_inject_inbox(task=task, messages=messages, round_num=1, tid='task-1')
     assert agent_inbox.drain(CONV, modes=['background-command'])[0]['queueId'] == 'q-later'
 
 
@@ -214,3 +222,23 @@ def test_dispatch_reverse_race_guard_covers_background_command():
     src = MESSAGE_QUEUE_PY.read_text()
     assert 'payload.get("_peerMessage") or payload.get("_backgroundCommand")' \
         in src
+
+
+def test_flush_receipt_retains_all_occurrences_beyond_former_batch_quota(monkeypatch):
+    import lib.tasks_pkg.orchestrator._deferred_inbox_flush as flush_mod
+    events = []
+    monkeypatch.setattr(flush_mod, 'append_event', lambda task, event: events.append(event))
+    task = _task()
+    task['_bgcmd_inject_pending'] = [
+        {'queueId': f'q-{i}', 'commandId': f'bg-{i}', 'value': f'complete-{i}'}
+        for i in range(1025)
+    ]
+    flush_deferred_peer_and_steer(task, round_num=2, tid='task-1')
+    assert '_bgcmd_inject_pending' not in task
+    assert len(events) == 1
+    assert events[0]['count'] == 1025
+    receipt = task['_bgCommandInjects'][0]
+    assert receipt['count'] == 1025
+    assert [preview['queueId'] for preview in receipt['previews']] == [f'q-{i}' for i in range(1025)]
+    flush_deferred_peer_and_steer(task, round_num=2, tid='task-1')
+    assert len(events) == 1

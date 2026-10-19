@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from lib.task_replay import (
+from lib.task_replay.task_replay import (
     live_task_replay_response_schema as orchestration_live_replay_response_schema,
     task_replay_contract,
     task_replay_event_schema as orchestration_replay_event_schema,

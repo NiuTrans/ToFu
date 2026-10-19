@@ -26,7 +26,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from quart import Quart, Response, jsonify, request
-from lib.app_lifecycle import owned_asgi_http_connection_class
+from lib.app.app_lifecycle import owned_asgi_http_connection_class
 
 from tofu_agent.capabilities import runtime_capabilities
 from tofu_agent.models import (

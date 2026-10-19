@@ -17,8 +17,7 @@ from lib.timeutil import now_ms
 
 logger = get_logger(__name__)
 
-_HARD_MAX_BYTES = 8 * 1024 * 1024
-ALLOWED_FORMATS = ('markdown', 'html', 'svg')
+ALLOWED_FORMATS = ('markdown', 'html', 'svg', 'rich', 'file')
 _EXT_TO_FORMAT = {
     '.md': 'markdown',
     '.markdown': 'markdown',
@@ -95,12 +94,51 @@ _PUBLIC_META_FIELDS = frozenset({
 })
 
 
+def _presentation_artifact(row):
+    """Expose rich presentation without changing the durable text/blob codec."""
+    if row.get('source') == 'rich_response' and isinstance((row.get('meta') or {}).get('richResponse'), dict):
+        return {**row, 'format': 'rich'}
+    if row.get('source') == 'response_file':
+        from lib.artifacts.response_files import public_file_info
+        try:
+            info = (row.get('meta') or {}).get('responseFile')
+            if not isinstance(info, dict):
+                raise ValueError('Missing file provenance')
+            public_file_info(info)
+
+            from lib.identity import require_user_id
+            require_user_id(info.get('ownerUserId'), context='file provenance')
+        except (ValueError, TypeError, AttributeError) as exc:
+            raise ArtifactNotFoundError('Response file unavailable') from exc
+        if info['kind'] == 'attachment':
+            return {**row, 'format': 'file'}
+    return row
+
+
 def public_meta(meta: dict) -> dict:
     """Whitelist artifact fields safe for public HTTP responses."""
     if not meta:
         return {}
-    return {key: value for key, value in meta.items()
-            if key in _PUBLIC_META_FIELDS}
+    result = {key: value for key, value in meta.items()
+              if key in _PUBLIC_META_FIELDS}
+    rich = (meta.get('meta') or {}).get('richResponse')
+    if meta.get('format') == 'rich' and isinstance(rich, dict) and rich.get('version') == 1:
+        result['meta'] = {'richResponse': rich}
+    info = (meta.get('meta') or {}).get('responseFile')
+    if meta.get('source') == 'response_file':
+        # Envelope content remains private even when durable metadata is corrupt.
+        result.pop('content', None)
+
+        result['source_ref'] = {}  # No workspace provenance path is public for files.
+        if isinstance(info, dict):
+            from lib.artifacts.response_files import public_file_info
+            try:
+                result['meta'] = {'responseFile': public_file_info(info)}
+            except (ValueError, TypeError) as exc:
+                raise ArtifactNotFoundError('Response file unavailable') from exc
+        else:
+            raise ArtifactNotFoundError('Response file unavailable')
+    return result
 
 
 def create_artifact(
@@ -125,9 +163,6 @@ def create_artifact(
     if not isinstance(content, str):
         raise TypeError(f'content must be str, got {type(content).__name__}')
     size = len(content.encode('utf-8', errors='replace'))
-    if size > _HARD_MAX_BYTES:
-        raise ArtifactSizeError(
-            f'Artifact too large: {size} bytes > hard cap {_HARD_MAX_BYTES}')
     if source_ref is not None and not isinstance(source_ref, dict):
         raise TypeError('source_ref must be a dict')
     if meta is not None and not isinstance(meta, dict):
@@ -140,7 +175,7 @@ def create_artifact(
             'artifact_id': artifact_id, 'conv_id': conv_id,
             'task_id': task_id or '', 'msg_id': msg_id or '',
             'source': source, 'source_ref': source_ref or {},
-            'format': format, 'title': (title or '').strip()[:300],
+            'format': 'markdown' if format in ('rich', 'file') else format, 'title': (title or '').strip()[:300],
             'content': content, 'parent_id': parent_id or '',
             'meta': meta or {}, 'created_at': _now_ms(),
         }, f'artifact.create:{artifact_id}')
@@ -150,8 +185,21 @@ def create_artifact(
             conv_id[:8], source, size, exc, exc_info=True)
         raise
 
-    artifact = result['artifact']
+    artifact = _presentation_artifact(result['artifact'])
     if not result['created']:
+
+        protected = ('response_file', 'response_asset', 'rich_response')
+        if source in protected or artifact.get('source') in protected:
+            expected = meta or {}
+            stored = artifact.get('meta') or {}
+            compatible = artifact.get('source') == source and artifact.get('format') == format
+            if source == 'response_file':
+                fields = ('version', 'kind', 'mime', 'sizeBytes', 'sha256', 'scriptRisk', 'ownerUserId')
+                compatible = compatible and all(stored.get('responseFile', {}).get(k) == expected.get('responseFile', {}).get(k) for k in fields)
+            elif source == 'response_asset':
+                compatible = compatible and stored.get('responseAsset', {}).get('ownerUserId') == expected.get('responseAsset', {}).get('ownerUserId')
+            if not compatible:
+                raise ValueError('Publication collided with incompatible artifact evidence')
         logger.info(
             '[Artifacts] dedupe hit conv=%s existing=%s producer=%s size=%d',
             conv_id[:8], artifact['id'][:8], source, size)
@@ -172,7 +220,28 @@ def create_artifact(
     return artifact
 
 
-def get_artifact(artifact_id: str) -> dict:
+def _check_response_owner(artifact, user_id=None):
+    """Every HTTP source requires a live owned conversation; internal jobs stay explicit."""
+    from quart import g, has_request_context
+    if user_id is None and has_request_context():
+        from lib.identity import principal_from_auth_context
+        from lib.auth_mode import is_multi_user
+        try:
+            principal = getattr(g, 'principal_context', None)
+            if principal is None:
+                principal = principal_from_auth_context(getattr(g, 'auth_ctx', None), allow_personal_owner=not is_multi_user())
+            user_id = principal.require_owner(context='artifact HTTP access')
+        except (PermissionError, ValueError) as exc:
+            raise ArtifactNotFoundError('Unavailable') from exc
+    if user_id is not None:
+        from lib.response_assets import owned_conversation
+        try:
+            owned_conversation(artifact['conv_id'], user_id)
+        except PermissionError as exc:
+            raise ArtifactNotFoundError('Unavailable') from exc
+
+
+def get_artifact(artifact_id: str, *, response_asset_access: bool = False, file_access: bool = False, user_id: int | None = None) -> dict:
     """Return a live artifact including its content."""
     if not artifact_id:
         raise ArtifactNotFoundError('empty id')
@@ -180,12 +249,16 @@ def get_artifact(artifact_id: str) -> dict:
     artifact = get_storage_client().query('artifact.get', {
         'artifact_id': artifact_id, 'include_content': True,
     })
-    if artifact is None:
+    if artifact is None or (artifact.get('source') == 'response_asset' and not response_asset_access):
         raise ArtifactNotFoundError(artifact_id)
+    _check_response_owner(artifact, user_id)
+    artifact = _presentation_artifact(artifact)
+    if artifact.get('format') == 'file' and not file_access:
+        artifact = {**artifact, 'content': ''}
     return artifact
 
 
-def get_artifact_meta(artifact_id: str) -> dict:
+def get_artifact_meta(artifact_id: str, *, user_id: int | None = None) -> dict:
     """Return a live artifact without transferring its content."""
     if not artifact_id:
         raise ArtifactNotFoundError('empty id')
@@ -195,7 +268,22 @@ def get_artifact_meta(artifact_id: str) -> dict:
     })
     if artifact is None:
         raise ArtifactNotFoundError(artifact_id)
-    return artifact
+    _check_response_owner(artifact, user_id)
+    return _presentation_artifact(artifact)
+
+
+def _visible_response_rows(rows):
+    """Filter all rows through conversation ownership at the HTTP boundary."""
+    visible = []
+    for row in rows:
+        if row.get('source') == 'response_asset':
+            continue
+        try:
+            _check_response_owner(row)
+            visible.append(_presentation_artifact(row))
+        except ArtifactNotFoundError:
+            continue
+    return visible
 
 
 def list_artifacts(conv_id: str, *, include_deleted: bool = False) -> list[dict]:
@@ -203,14 +291,19 @@ def list_artifacts(conv_id: str, *, include_deleted: bool = False) -> list[dict]
     if not conv_id:
         return []
     from lib.storage import get_storage_client
-    return get_storage_client().query('artifact.list', {
+    return _visible_response_rows(get_storage_client().query('artifact.list', {
         'conv_id': conv_id, 'include_deleted': bool(include_deleted),
-    })
+    }))
 
 
 def delete_artifact(artifact_id: str) -> bool:
     """Idempotently soft-delete an artifact."""
     if not artifact_id:
+        return False
+
+    try:
+        get_artifact_meta(artifact_id)
+    except ArtifactNotFoundError:
         return False
     from lib.storage import get_storage_client
     result = get_storage_client(write=True).command('artifact.delete', {
@@ -230,8 +323,8 @@ def list_versions(artifact_id: str) -> list[dict]:
     if not artifact_id:
         return []
     from lib.storage import get_storage_client
-    return get_storage_client().query(
-        'artifact.versions', {'artifact_id': artifact_id})
+    return _visible_response_rows(get_storage_client().query(
+        'artifact.versions', {'artifact_id': artifact_id}))
 
 
 def list_pinned_or_recent(*, limit: int = 50) -> list[dict]:
@@ -239,13 +332,18 @@ def list_pinned_or_recent(*, limit: int = 50) -> list[dict]:
     if limit <= 0:
         return []
     from lib.storage import get_storage_client
-    return get_storage_client().query(
-        'artifact.library', {'limit': min(int(limit), 200)})
+    return _visible_response_rows(get_storage_client().query(
+        'artifact.library', {'limit': min(int(limit), 200)}))
 
 
 def set_pinned(artifact_id: str, pinned: bool) -> bool:
     """Set the pin state of a live artifact."""
     if not artifact_id:
+        return False
+
+    try:
+        get_artifact_meta(artifact_id)
+    except ArtifactNotFoundError:
         return False
     from lib.storage import get_storage_client
     result = get_storage_client(write=True).command('artifact.pin', {

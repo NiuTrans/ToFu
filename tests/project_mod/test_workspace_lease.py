@@ -1,4 +1,5 @@
 """Executable specification for checkout admission and descriptor lifetime."""
+import hashlib
 import os
 import subprocess
 import sys
@@ -83,12 +84,14 @@ class TestWorkspaceWriterLease:
         with workspace_write_lease(repo):
             fds = workspace_lease_fds()
             with workspace_write_lease(alias / 'file.txt'):
-                assert workspace_lease_fds() == fds
+                assert set(fds).issubset(workspace_lease_fds())
 
             def other_thread():
-                with pytest.raises(WorkspaceBusyError, match='Workspace write is active'):
+                with pytest.raises(WorkspaceBusyError, match=r'(Workspace|Git common-directory metadata) write is active'):
                     with workspace_write_lease(repo):
                         pytest.fail('same checkout overlapped')
+                with lease_mod.workspace_file_write_lease(sibling / 'file.txt'):
+                    assert workspace_lease_fds()  # Independent source files remain usable.
                 with workspace_write_lease(sibling):
                     assert workspace_lease_fds()
 
@@ -96,7 +99,13 @@ class TestWorkspaceWriterLease:
             _join(worker, errors)
         _assert_closed(fds)
         _assert_clean()
-        assert len(list((repo / '.git' / 'tofu-workspace-leases').glob('*.lock'))) == 2
+        with workspace_write_lease(sibling):
+            assert workspace_lease_fds()
+        expected = {hashlib.sha256(os.fsencode(str(path))).hexdigest() + '.lock'
+                    for path in (repo, sibling, sibling / 'file.txt')}
+        actual = {path.name for path in (repo / '.git' / 'tofu-workspace-leases').glob('*.lock')}
+        assert actual == expected
+        _assert_clean()
 
     def test_exception_and_process_exit_release(self, tmp_path):
         repo = _repo(tmp_path / 'repo')
@@ -188,13 +197,14 @@ class TestWorkspaceWriterLease:
 
 class TestWorkspaceAdmissionWait:
     @pytest.mark.parametrize('mode', [workspace_read_lease, workspace_write_lease])
-    def test_waiter_acquires_after_writer_release(self, tmp_path, mode):
+    @pytest.mark.parametrize('timeout', [5, None, 5000])
+    def test_waiter_acquires_after_writer_release(self, tmp_path, mode, timeout):
         repo = _repo(tmp_path / 'repo')
         cancel = _ObservedCancellation()
         acquired = threading.Event()
 
         def wait_for_lease():
-            with mode(repo, timeout=5, cancel_event=cancel):
+            with mode(repo, timeout=timeout, cancel_event=cancel):
                 acquired.set()
 
         with workspace_write_lease(repo):
@@ -206,14 +216,15 @@ class TestWorkspaceAdmissionWait:
         _assert_clean()
 
     @pytest.mark.parametrize('mode', [workspace_read_lease, workspace_write_lease])
-    def test_waiter_cancels_without_entering_or_leaking(self, tmp_path, mode):
+    @pytest.mark.parametrize('timeout', [5, None, 5000])
+    def test_waiter_cancels_without_entering_or_leaking(self, tmp_path, mode, timeout):
         repo = _repo(tmp_path / 'repo')
         cancel = _ObservedCancellation()
         acquired = threading.Event()
 
         def wait_for_lease():
             with pytest.raises(WorkspaceLeaseCancelled, match='admission cancelled'):
-                with mode(repo, timeout=5, cancel_event=cancel):
+                with mode(repo, timeout=timeout, cancel_event=cancel):
                     acquired.set()
 
         with workspace_write_lease(repo):
@@ -251,7 +262,7 @@ class TestWorkspaceAdmissionWait:
 
         def waiter():
             with pytest.raises(WorkspaceLeaseCancelled):
-                with workspace_write_lease(repo, timeout=5, cancel_event=cancel):
+                with workspace_write_lease(repo, timeout=None, cancel_event=cancel):
                     pytest.fail('cancelled process waiter entered')
 
         try:
@@ -272,9 +283,9 @@ class TestWorkspaceAdmissionWait:
             assert workspace_lease_fds()
         _assert_clean()
 
-    @pytest.mark.parametrize('timeout', [-1, 601, float('inf'), float('nan')])
+    @pytest.mark.parametrize('timeout', [-1, float('inf'), float('nan')])
     def test_invalid_timeout_rejected_before_acquisition(self, tmp_path, timeout):
-        with pytest.raises(ValueError, match=r'\[0, 600\]'):
+        with pytest.raises(ValueError, match='nonnegative and finite'):
             with workspace_write_lease(tmp_path, timeout=timeout):
                 pytest.fail('invalid admission timeout accepted')
         _assert_clean()
@@ -302,7 +313,7 @@ class TestWorkspaceReadLease:
             worker, errors = _thread(reader)
             try:
                 assert ready.wait(5)
-                with pytest.raises(WorkspaceBusyError, match='Workspace read is active'):
+                with pytest.raises(WorkspaceBusyError, match=r'(Workspace|Git common-directory metadata) read is active'):
                     with workspace_write_lease(repo):
                         pytest.fail('writer ignored another explicit reader')
             finally:
@@ -316,7 +327,7 @@ class TestWorkspaceReadLease:
         repo = _repo(tmp_path / 'repo')
         with workspace_write_lease(repo):
             def reader():
-                with pytest.raises(WorkspaceBusyError, match='Workspace write is active'):
+                with pytest.raises(WorkspaceBusyError, match=r'(Workspace|Git common-directory metadata) write is active'):
                     with workspace_read_lease(repo):
                         pytest.fail('reader overlapped a writer')
             worker, errors = _thread(reader)
@@ -330,7 +341,7 @@ class TestWorkspaceReadLease:
                 with workspace_write_lease(repo):
                     assert workspace_lease_fds()
             def writer():
-                with pytest.raises(WorkspaceBusyError, match='Workspace write is active'):
+                with pytest.raises(WorkspaceBusyError, match=r'(Workspace|Git common-directory metadata) write is active'):
                     with workspace_write_lease(repo):
                         pytest.fail('nested read downgraded writer')
             worker, errors = _thread(writer)
@@ -346,7 +357,7 @@ class TestWorkspaceReadLease:
                 with workspace_read_lease(repo):
                     assert workspace_lease_fds() == fds
             def writer():
-                with pytest.raises(WorkspaceBusyError, match='Workspace read is active'):
+                with pytest.raises(WorkspaceBusyError, match=r'(Workspace|Git common-directory metadata) read is active'):
                     with workspace_write_lease(repo):
                         pytest.fail('upgrade lost outer reader')
             worker, errors = _thread(writer)

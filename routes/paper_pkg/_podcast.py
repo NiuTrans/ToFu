@@ -273,7 +273,7 @@ async def start_video_abstract_task():
     # probe → FUSE source-file reads → a blocking LLM beat-writing call,
     # tens of seconds). Run inline it froze the event loop for the whole
     # request (2026-08-01: 39.6s stall → LoopWatch trip at
-    # lib/http_client.py — every SSE/WS connection dropped).
+    # lib/http_transport/client.py — every SSE/WS connection dropped).
     res = await asyncio.to_thread(
         start_video_abstract,
         phash,
@@ -732,7 +732,7 @@ async def serve_podcast_audio(paper_hash, mode, lang, voice):
 # ``register_task_routes`` factory instead of three hand-rolled handlers.
 # The factory's ``runtime.abort(task_id)`` sets exactly the same
 # ``task['abort_event']`` the engine loops read (via
-# ``AbortSignal.from_event`` in lib/agent_loop.py), so abort semantics are
+# ``AbortSignal.from_event`` in lib/agent_loop/agent_loop.py), so abort semantics are
 # unchanged; the atomic status-check + set() (under the runtime lock) is
 # actually STRONGER than the old handler's bare ``.set()`` (it can't mark a
 # racing finish 'done').

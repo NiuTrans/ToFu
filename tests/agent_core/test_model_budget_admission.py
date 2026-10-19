@@ -17,7 +17,7 @@ from lib.agent_core.execution_budget import (
 )
 from lib.evolution.bridge import derive_actuals
 from lib.llm.request import ModelRequestBudgetScope
-from lib.llm_errors import AbortedError, LocalRequestPreparationError
+from lib.llm.llm_errors import AbortedError, LocalRequestPreparationError
 from tests.evolution.test_evolution_runs import runtime as runtime, finish, review, OWNER
 
 
@@ -31,6 +31,48 @@ def task(limit=100, *, name='root'):
 def reserve(account, owner, input_tokens=20, output_tokens=30):
     return account.reserve_model(owner, input_tokens=input_tokens,
                                  max_output_tokens=output_tokens)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize('limit', [None, 100])
+@pytest.mark.parametrize('restored_after_creation', [False, True])
+def test_restored_unknown_usage_refuses_models_without_erasing_paid_lower_bound(
+        limit, restored_after_creation):
+    owner = task(limit)
+    owner['usage'] = {'prompt_tokens': 3, 'completion_tokens': 2, 'total_tokens': 5}
+    owner['_checkpointUsageComplete'] = False
+    if not restored_after_creation:
+        owner['_executionActualsComplete'] = False
+    account = ExecutionBudget(owner)
+    owner['_executionActualsComplete'] = False
+    assert account.consumption_snapshot() == (5, 0, False)
+    with pytest.raises(ModelBudgetExceeded, match='execution_token_usage_unknown'):
+        reserve(account, owner)
+    assert account.consumption_snapshot() == (5, 0, False)
+
+
+@pytest.mark.unit
+def test_unknown_usage_blocks_a_previously_reserved_physical_dispatch():
+    owner = task(None)
+    account = ExecutionBudget(owner)
+    lease = reserve(account, owner)
+    owner['_executionActualsComplete'] = False
+    owner['_checkpointUsageComplete'] = False
+    with pytest.raises(AbortedError, match='execution_token_usage_unknown'):
+        lease.mark_dispatched()
+    lease.settle(unsent=True)
+    assert account.actuals_complete() is False
+
+
+@pytest.mark.unit
+def test_uncapped_python_resume_still_has_a_reconciliation_admission_port():
+    owner = task(None)
+    owner['_checkpointUsageComplete'] = False
+    owner['_executionActualsComplete'] = False
+    admit = model_budget_admission(owner)
+    assert callable(admit)
+    with pytest.raises(AbortedError, match='execution_token_usage_unknown'):
+        admit(input_tokens=20, max_output_tokens=30)
 
 
 @pytest.mark.unit
@@ -192,7 +234,7 @@ def test_required_scope_voids_local_failure_and_accounts_nested_scope_once():
 
 @pytest.mark.unit
 def test_proven_unsent_preflight_failure_refunds_without_unknown_cost():
-    from lib.llm_errors import EndpointUnreachableError
+    from lib.llm.llm_errors import EndpointUnreachableError
     owner = task(50)
     with pytest.raises(EndpointUnreachableError):
         with ModelRequestBudgetScope(request(owner)) as scope:
@@ -283,9 +325,25 @@ def test_delegated_attempt_settles_after_its_async_caller_exits():
     assert not owner['_executionBudget']._model_leases
 
 @pytest.mark.unit
-def test_unbounded_tasks_have_no_request_reservation_port():
-    assert model_budget_admission(task(None)) is None
-    assert model_budget_admission({'config': {}}) is None
+@pytest.mark.parametrize('limits_present', [False, True])
+def test_unbounded_tasks_observe_requests_without_imposing_output_caps(limits_present):
+    from lib.agent_core.execution_budget import execution_usage_evidence
+    owner = task(None)
+    if not limits_present:
+        owner['config'] = {}
+    admission = model_budget_admission(owner)
+    assert callable(admission)
+    first = admission(input_tokens=20, max_output_tokens=0)
+    assert first.max_output_tokens == 0
+    first.mark_dispatched()
+    first.settle({'prompt_tokens': 20})
+    second = admission(input_tokens=20, max_output_tokens=30)
+    assert second.max_output_tokens == 30
+    second.mark_dispatched()
+    second.settle({'prompt_tokens': 20, 'completion_tokens': 5})
+    assert execution_usage_evidence(owner) == {
+        'complete': False, 'observedTokens': 45,
+        'scope': 'execution_tree', 'rootTaskId': owner['id']}
 
 
 @pytest.mark.unit
@@ -382,6 +440,51 @@ def request(owner):
 
 
 @pytest.mark.parametrize('asynchronous', [False, True])
+@pytest.mark.parametrize('output_limit', [None, 100])
+@pytest.mark.parametrize('protocol', ['openai', 'responses'])
+@pytest.mark.api
+def test_unbounded_transport_keeps_wire_caps_and_observes_failed_retry(
+        provider, monkeypatch, asynchronous, output_limit, protocol):
+    from lib.agent_core.execution_budget import execution_usage_evidence
+    from lib.llm import stream, astream
+    url, bodies, options = provider
+    owner = task(None)
+    owner['config'] = {}
+    restarts = []
+    monkeypatch.setattr(stream, 'prepare_retryable_wait', lambda *a, **k: 0)
+    monkeypatch.setattr(astream, 'prepare_retryable_wait', lambda *a, **k: 0)
+
+    def restart(**event):
+        restarts.append(event)
+        options['failure'] = False
+
+    def call():
+        body = request(owner)
+        if output_limit is None:
+            body.pop('max_tokens')
+        if asynchronous:
+            return asyncio.run(astream.async_stream_chat(
+                body, base_url=url, owner_user_id=7, on_attempt_restart=restart,
+                api_protocol=protocol))
+        return stream.stream_chat(body, base_url=url, owner_user_id=7,
+                                  on_attempt_restart=restart, api_protocol=protocol)
+
+    assert call().is_verified_complete
+    assert execution_usage_evidence(owner)['observedTokens'] == 25
+    assert execution_usage_evidence(owner)['complete'] is True
+    options['failure'] = True
+    assert call().is_verified_complete
+    assert execution_usage_evidence(owner)['observedTokens'] == 50
+    assert execution_usage_evidence(owner)['complete'] is False
+    assert len(bodies) == 3
+    assert len(restarts) == 1
+    limit_key = 'max_output_tokens' if protocol == 'responses' else 'max_tokens'
+    assert all(body.get(limit_key) == output_limit for body in bodies)
+    assert all(not any(key.startswith('_') for key in body) for body in bodies)
+    assert owner['_executionBudget'].continuity_snapshot()['pending_model_requests'] == 0
+
+
+@pytest.mark.parametrize('asynchronous', [False, True])
 @pytest.mark.api
 def test_real_transport_caps_output_and_blocks_an_impossible_following_prompt(provider, asynchronous):
     from lib.llm.stream import stream_chat
@@ -405,7 +508,7 @@ def test_real_transport_caps_output_and_blocks_an_impossible_following_prompt(pr
 def test_real_transport_routing_failure_before_send_refunds_and_can_retry(provider, monkeypatch, asynchronous):
     from lib.desktop import egress
     from lib.llm import stream, astream
-    from lib.llm_errors import EndpointUnreachableError
+    from lib.llm.llm_errors import EndpointUnreachableError
     url, bodies, _ = provider;owner = task(50)
     original = egress.route_request
     def refuse(*args, **kwargs):raise egress.EgressUnavailable('Route not available')
@@ -451,7 +554,7 @@ def test_websocket_failed_send_is_ambiguous_and_not_replayed_on_sse(provider, mo
     body = request(owner)
     body.update({'model': 'gpt-5.6-sol', '_task_id': 'budget-websocket', '_responses_feature_profile': 'openai',
                  '_responses_transport': 'websocket'})
-    from lib.llm_errors import RetryableAPIError
+    from lib.llm.llm_errors import RetryableAPIError
     with pytest.raises(RetryableAPIError, match='WebSocket failed'):
         stream._stream_chat_once(body, base_url=url, api_protocol='responses', owner_user_id=7)
     assert len(sent) == 1 and bodies == []
@@ -582,7 +685,6 @@ def test_generic_episode_automation_keeps_incomplete_cost_in_its_compact_queue(r
     monkeypatch.setattr(automation, '_pending', deque())
     monkeypatch.setattr(automation, '_worker', SimpleNamespace(is_alive=lambda: True))
     monkeypatch.setattr(automation, '_worker_stop', threading.Event())
-    monkeypatch.setattr(automation, '_queue_capacity', 10)
     assert automation.enqueue_task_terminal(task)
     receipt, actuals = automation._pending.popleft()
     assert receipt['_executionActualsComplete'] is False

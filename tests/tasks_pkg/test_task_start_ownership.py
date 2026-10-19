@@ -64,6 +64,20 @@ def test_task_registration_receives_the_accepted_principal_tenant(monkeypatch,ta
     assert captured[0].scopes==frozenset()
 
 
+def test_request_budget_binding_precedes_spawn_and_uses_existing_rollback(monkeypatch, task_start_fixture):
+    runtime, config, task, discarded = task_start_fixture
+    bound = []
+    monkeypatch.setattr(runtime, '_prepare_unbound_task_dispatch', lambda *a: (config, None, False))
+    def reject_budget(actual):
+        assert actual is task and bound == [task['id']]
+        raise RuntimeError('request allowance registration failed')
+    monkeypatch.setattr('lib.project_dispatch.request_budget.bind_source_account', reject_budget)
+    monkeypatch.setattr('lib.tasks_pkg.spawn.spawn_task', lambda *a, **kw: pytest.fail('Unbudgeted task started'))
+    with pytest.raises(RuntimeError, match='request allowance'):
+        runtime.start_conversation_attempt_executor('conv-ownership', config, on_task_registered=bound.append)
+    assert discarded == [('task-ownership', 'conv-ownership')]
+
+
 def test_prebind_preparation_exception_discards_registry_carrier(
     monkeypatch,
     task_start_fixture,

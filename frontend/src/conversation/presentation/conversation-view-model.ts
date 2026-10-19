@@ -1,7 +1,8 @@
+import { entityRecordValues } from '../domain/turn-store';
 /**
  * Pure ConversationViewModel composition over immutable TurnStore. Owns lane/attempt
  * joins and Turn memoization; delegates content projection to view-model/.
- * Entry: selectConversationViewModel.
+ * Entry: selectConversationViewModel, createConversationViewModelSelector.
  * Dependencies: background-command-completion, conversation-sync.generated, turn-store, transient-turn, turn-finish, types, turn-blocks, turn-metadata, live-turns.
  */
 import type { AutomationManagementPresentation } from '../../api/automation.generated';
@@ -13,8 +14,9 @@ import {
   type TurnRecord,
 } from '../../api/conversation-sync.generated';
 import {
-  type TurnState,
+  type TurnState, type TurnStateUpdate,
 } from '../domain/turn-store';
+import { canReuseSelection, snapshotPresentation, samePresentation } from './view-model/selection-deltas';
 import {
   transientTurnPresentation,
 } from '../domain/transient-turn';
@@ -39,6 +41,7 @@ import {
 } from './view-model/turn-metadata';
 import {
   liveAttemptPresentation,
+  selectGoalProgress,
   waitingPlaceholderRedundant,
   selectAutopilotRunNotices,
 } from './view-model/live-turns';
@@ -118,15 +121,10 @@ interface TurnVmMemoEntry {
 
 const turnVmMemo = new WeakMap<TurnRecord, TurnVmMemoEntry>();
 
-const backgroundCommands = createBackgroundCommandCompletionProjection();
+type BackgroundProjection = ReturnType<typeof createBackgroundCommandCompletionProjection>;
 
-/** Select the complete lane tree without relying on message array positions. */
-export function selectConversationViewModel(
-  state: TurnState,
-  diagnostics: ConversationViewModelDiagnostics = {},
-  presentation: ConversationPresentationState = {},
-): ConversationViewModel {
-
+function selectJoins(state: TurnState, presentation: ConversationPresentationState,
+  backgroundCommands: BackgroundProjection) {
   backgroundCommands.update(state);
   const autopilotNoticesByTurn = selectAutopilotRunNotices(state, presentation);
   const nativeQueueByInputTurn = new Map(
@@ -141,7 +139,7 @@ export function selectConversationViewModel(
     taskId: string;
     createdAt: number;
   }>();
-  for (const attempt of Object.values(state.attemptsById)) {
+  for (const attempt of entityRecordValues(state.attemptsById)) {
     if (!attempt?.turnId || !attempt.taskId) continue;
     const current = latestAttemptByTurn.get(attempt.turnId);
     const createdAt = Number(attempt.createdAt || 0);
@@ -168,9 +166,10 @@ export function selectConversationViewModel(
         ? state.attemptsById[turn.currentAttemptId] : undefined;
       return !transientTurnPresentation(turn) && !attempt?.queueBinding;
     }) ?? null;
+  const goalProgressByTurn = selectGoalProgress(state, mainLiveTurnId);
   const laneOwners = new Map<string, LaneOwner>();
   let descriptorOrder = 0;
-  for (const turn of Object.values(state.turnsById)) {
+  for (const turn of entityRecordValues(state.turnsById)) {
     if (!turn) continue;
     for (const descriptor of turn.projection._branchLanes ?? []) {
       if (!descriptor.laneId || laneOwners.has(descriptor.laneId)) continue;
@@ -205,12 +204,110 @@ export function selectConversationViewModel(
     ));
   }
 
+  return { autopilotNoticesByTurn, nativeQueueByInputTurn, queuedOutputTurnIds,
+    latestAttemptByTurn, mainLiveTurnId, goalProgressByTurn, laneOwners, childrenByTurn };
+}
+
+interface CompiledSelection {
+  joins: ReturnType<typeof selectJoins>;
+  lanes: Map<string, ConversationLaneViewModel>;
+  locations: Map<string, { laneId: string; index: number }>;
+  viewModel: ConversationViewModel;
+  cyclic: boolean;
+}
+
+const snapshotBackgroundCommands = createBackgroundCommandCompletionProjection();
+
+/** Snapshot selection remains available to callers without canonical deltas. */
+export function selectConversationViewModel(
+  state: TurnState, diagnostics: ConversationViewModelDiagnostics = {},
+  presentation: ConversationPresentationState = {},
+): ConversationViewModel {
+  return composeSelection(state, diagnostics, presentation,
+    snapshotBackgroundCommands).viewModel;
+}
+
+/** One latest compiled view per mounted session; never retains an event log. */
+export function createConversationViewModelSelector() {
+  let backgroundCommands = createBackgroundCommandCompletionProjection();
+  let compiled: CompiledSelection | undefined;
+  let observed: TurnState | undefined;
+  let display = snapshotPresentation({});
+  let diagnosticsUsed: ConversationViewModelDiagnostics | undefined;
+  let reusable = false;
+  const dirty = new Set<string>();
+  return {
+    observe(state: TurnState, update?: TurnStateUpdate): void {
+      if (state === observed) return;
+      if (!compiled || !observed || !update || update.previousState !== observed
+          || !canReuseSelection(observed, state, update)) {
+        reusable = false;
+        dirty.clear();
+      } else if (reusable) {
+        for (const id of update.changes!.turnIds) dirty.add(id);
+        for (const id of update.changes!.attemptIds) {
+          const turnId = state.attemptsById[id]?.turnId;
+          if (turnId) dirty.add(turnId);
+        }
+      }
+      observed = state;
+    },
+    select(state: TurnState, diagnostics: ConversationViewModelDiagnostics = {},
+      presentation: ConversationPresentationState = {}): ConversationViewModel {
+      const usePrevious = reusable && state === observed && compiled && !compiled.cyclic
+        && diagnostics.onCompatibilityIdentity === diagnosticsUsed?.onCompatibilityIdentity
+        && diagnostics.onLaneCycle === diagnosticsUsed?.onLaneCycle
+        && samePresentation(display, presentation);
+      compiled = composeSelection(state, diagnostics, presentation, backgroundCommands,
+        usePrevious ? compiled : undefined, dirty);
+      observed = state;
+      display = snapshotPresentation(presentation);
+      diagnosticsUsed = diagnostics;
+      dirty.clear();
+      reusable = true;
+      return compiled.viewModel;
+    },
+    dispose(): void {
+      compiled = undefined; observed = undefined; diagnosticsUsed = undefined;
+      display = snapshotPresentation({}); dirty.clear(); reusable = false;
+      backgroundCommands = createBackgroundCommandCompletionProjection();
+    },
+  };
+}
+
+function composeSelection(
+  state: TurnState, diagnostics: ConversationViewModelDiagnostics,
+  presentation: ConversationPresentationState, backgroundCommands: BackgroundProjection,
+  previous?: CompiledSelection, dirty: ReadonlySet<string> = new Set(),
+): CompiledSelection {
+  const joins = previous?.joins ?? selectJoins(state, presentation, backgroundCommands);
+  const { autopilotNoticesByTurn, nativeQueueByInputTurn, queuedOutputTurnIds,
+    latestAttemptByTurn, mainLiveTurnId, goalProgressByTurn, laneOwners, childrenByTurn } = joins;
+  const lanes = new Map(previous?.lanes);
+  const locations = previous?.locations ?? new Map<string, { laneId: string; index: number }>();
+  const affected = new Map<string, Set<string>>();
+  // A changed descendant also replaces each containing Turn/lane, once.
+  for (const changedId of dirty) {
+    let id: string | undefined = changedId;
+    const visited = new Set<string>();
+    while (id && !visited.has(id)) {
+      visited.add(id);
+      const location = locations.get(id);
+      if (!location) break;
+      const ids = affected.get(location.laneId) ?? new Set<string>();
+      ids.add(id); affected.set(location.laneId, ids);
+      id = laneOwners.get(location.laneId)?.parentTurnId;
+    }
+  }
+  let cyclic = false;
+
   const selectedLanes = new Set<string>();
   const selectLane = (
     laneId: string,
     stack: ReadonlySet<string>,
   ): ConversationLaneViewModel => {
     if (stack.has(laneId)) {
+      cyclic = true;
       diagnostics.onLaneCycle?.(laneId);
       return {
         laneId,
@@ -223,13 +320,14 @@ export function selectConversationViewModel(
         turns: [],
       };
     }
+    const cachedLane = previous?.lanes.get(laneId);
+    if (cachedLane && !affected.has(laneId)) return cachedLane;
     selectedLanes.add(laneId);
     const nextStack = new Set(stack);
     nextStack.add(laneId);
     const owner = laneOwners.get(laneId);
     const descriptor = owner?.descriptor;
-    const turns = (state.laneOrder[laneId] ?? []).flatMap(
-      (turnId): ConversationTurnViewModel[] => {
+    const selectTurn = (turnId: string): ConversationTurnViewModel[] => {
         const sourceTurn = state.turnsById[turnId];
         if (!sourceTurn) return [];
         const turn = backgroundCommands.project(sourceTurn);
@@ -256,7 +354,7 @@ export function selectConversationViewModel(
           && (autopilotNoticesByTurn.get(turn.turnId)?.length ?? 0) === 0
           && !nativeQueueByInputTurn.has(turn.turnId)
           && !(presentation.artifactsByTurn?.get(turn.turnId)?.length)
-          && turn.turnId !== mainLiveTurnId;
+          && turn.turnId !== mainLiveTurnId && !goalProgressByTurn.has(turn.turnId);
         if (plain) {
           const cached = turnVmMemo.get(turn);
           if (cached
@@ -283,7 +381,7 @@ export function selectConversationViewModel(
          * array reference the keyed Surface can skip reconciling. */
         const hasAdditiveBlocks = autopilotNotices.length > 0
           || Boolean(queueItem) || Boolean(artifacts?.length)
-          || turn.turnId === mainLiveTurnId;
+          || turn.turnId === mainLiveTurnId || goalProgressByTurn.has(turn.turnId);
         const blocks: ConversationBlockViewModel[] = hasAdditiveBlocks
           ? [...leafBlocks]
           : leafBlocks as ConversationBlockViewModel[];
@@ -312,16 +410,18 @@ export function selectConversationViewModel(
             artifacts,
           });
         }
-        if (turn.turnId === mainLiveTurnId
+        if ((turn.turnId === mainLiveTurnId || goalProgressByTurn.has(turn.turnId))
             && !blocks.some((block) => block.kind === 'live-status')) {
           const currentAttempt = turn.currentAttemptId
             ? state.attemptsById[turn.currentAttemptId] : undefined;
-          const phaseSource = state.livePhase && typeof state.livePhase === 'object'
+          const phaseSource = turn.turnId === mainLiveTurnId
+              && state.livePhase && typeof state.livePhase === 'object'
             ? state.livePhase as object : currentAttempt ?? turn;
           const liveStatus = liveAttemptPresentation(
             phaseSource,
             turn.status,
           );
+          liveStatus.goalProgress = goalProgressByTurn.get(turn.turnId);
           /* A withheld-push wedge means no newer frame can arrive, so any
            * livePhase on record is stale. Present the honest storage-wedge
            * status instead of the misleading generic waiting placeholder
@@ -329,6 +429,7 @@ export function selectConversationViewModel(
            * agent worker…" while the task was actually retrying writes). */
           if (state.pushWithheld) {
             liveStatus.phase = 'storage_wedged';
+            delete liveStatus.goalProgress;
             liveStatus.label = '';
             liveStatus.detail = '';
             delete liveStatus.detailKey;
@@ -404,9 +505,18 @@ export function selectConversationViewModel(
           });
         }
         return [turnVm];
-      },
-    );
-    return {
+    };
+    const turns = cachedLane ? [...cachedLane.turns]
+      : (state.laneOrder[laneId] ?? []).flatMap(selectTurn);
+    if (cachedLane) {
+      for (const id of affected.get(laneId) ?? []) {
+        const location = locations.get(id)!;
+        turns[location.index] = selectTurn(id)[0]!;
+      }
+    } else {
+      turns.forEach((turn, index) => locations.set(turn.turnId, { laneId, index }));
+    }
+    const lane: ConversationLaneViewModel = {
       laneId,
       parentTurnId: owner?.parentTurnId ?? null,
       title: laneId === 'main' ? 'Conversation' : descriptor?.title ?? 'Branch',
@@ -418,20 +528,22 @@ export function selectConversationViewModel(
         ? { parentSelection: descriptor.parentSelection } : {}),
       expanded: laneId === 'main'
         || presentation.expandedBranchLaneId === laneId,
-      live: turns.some((turn) => turn.status === 'pending' || turn.status === 'running'),
-      humanTurnCount: turns.filter((turn) => turn.actor === 'human').length,
+      live: cachedLane?.live ?? turns.some((turn) => turn.status === 'pending' || turn.status === 'running'),
+      humanTurnCount: cachedLane?.humanTurnCount ?? turns.filter((turn) => turn.actor === 'human').length,
       ...(state.historyByLane?.[laneId]
         ? { history: { ...state.historyByLane[laneId] } } : {}),
       turns,
     };
+    lanes.set(laneId, lane);
+    return lane;
   };
 
   const mainLane = selectLane('main', new Set());
-  const orphanLanes = Object.keys(state.laneOrder)
-    .filter((laneId) => laneId !== 'main' && !selectedLanes.has(laneId))
-    .sort()
+  const orphanLanes = (previous ? previous.viewModel.orphanLanes.map((lane) => lane.laneId)
+    : Object.keys(state.laneOrder)
+      .filter((laneId) => laneId !== 'main' && !selectedLanes.has(laneId)).sort())
     .map((laneId) => selectLane(laneId, new Set()));
-  const queue = state.queueItems.filter(
+  const queue = previous?.viewModel.queue ?? state.queueItems.filter(
     (item) => item.kind !== 'autopilot' && !item.inputTurnId,
   )
     .sort((left, right) => Number(left.position || 0) - Number(right.position || 0))
@@ -443,17 +555,7 @@ export function selectConversationViewModel(
       source: item,
     }));
   const decisionLaneId = presentation.expandedBranchLaneId || 'main';
-  const lanesToVisit = [mainLane, ...orphanLanes];
-  let decisionLane: ConversationLaneViewModel | undefined;
-  while (lanesToVisit.length > 0 && !decisionLane) {
-    const candidate = lanesToVisit.shift();
-    if (!candidate) continue;
-    if (candidate.laneId === decisionLaneId) {
-      decisionLane = candidate;
-      break;
-    }
-    for (const turn of candidate.turns) lanesToVisit.push(...turn.branches);
-  }
+  const decisionLane = lanes.get(decisionLaneId);
   const tail = decisionLane?.turns.at(-1);
   const proposedPlan = tail?.source.projection.proposedPlan;
   const laneCanDecide = decisionLane?.laneId === 'main'
@@ -468,7 +570,7 @@ export function selectConversationViewModel(
       planId: proposedPlan.planId,
       pending: Boolean(tail.commandPending),
     } : null;
-  return {
+  const viewModel: ConversationViewModel = {
     conversationId: state.conversationId,
     conversationRevision: state.conversationRevision,
     transport: state.transport,
@@ -478,6 +580,7 @@ export function selectConversationViewModel(
     planDecision,
     transportNotice: selectTransportNotice(presentation.syncHealth),
   };
+  return { joins, lanes, locations, viewModel, cyclic };
 }
 
 /* Transport degradation is a conversation-level fact, not a turn failure:

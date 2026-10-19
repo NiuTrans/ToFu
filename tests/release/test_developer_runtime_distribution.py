@@ -17,6 +17,7 @@ from scripts.check_developer_runtime_artifacts import (
     FORBIDDEN_MEMBERS,
     FORBIDDEN_PREFIXES,
     REQUIRED_MEMBERS,
+    REQUIRED_SOURCE_MEMBERS,
     validate_sdist,
 )
 
@@ -27,7 +28,7 @@ _AUDIT_SYNTHETIC_REPO_PATHS = frozenset({
     '../outside.py',
     'audit_codex_session.py',
     'lib/database/secret.py',
-    'lib/storage_sidecar/secret.py',
+    'lib/storage_authority_sql/secret.py',
 })
 
 
@@ -79,20 +80,20 @@ def test_default_python_distribution_excludes_application_storage():
     assert project['tool']['setuptools']['include-package-data'] is False
     for excluded in (
         'routes*', 'lib.database*', 'lib.storage', 'lib.storage.*',
-        'lib.storage_sidecar*', 'lib.tests*',
+        'lib.storage_authority_sql*', 'lib.tests*',
     ):
         assert excluded in package_find['exclude']
 
     manifest = (ROOT / 'MANIFEST.in').read_text(encoding='utf-8')
     for pruned in (
         'routes', 'tests', 'frontend', 'static',
-        'lib/database', 'lib/storage', 'lib/storage_sidecar', 'lib/tests',
+        'lib/database', 'lib/storage', 'lib/storage_authority_sql', 'lib/tests',
     ):
         assert f'prune {pruned}' in manifest
     assert 'exclude audit_codex_session.py' in manifest
     assert 'audit_codex_session.py' in FORBIDDEN_MEMBERS
     assert 'lib/database/' in FORBIDDEN_PREFIXES
-    assert 'lib/storage_sidecar/' in FORBIDDEN_PREFIXES
+    assert 'lib/storage_authority_sql/' in FORBIDDEN_PREFIXES
 
 
 def test_model_metadata_is_package_owned_not_frontend_owned():
@@ -131,7 +132,7 @@ def test_release_build_backend_and_validation_tools_are_lock_owned():
 
 def test_release_artifact_checker_accepts_the_current_sdist_boundary(tmp_path):
     sdist = tmp_path / 'tofu_agent-0.17.0.tar.gz'
-    _write_test_sdist(sdist, set(REQUIRED_MEMBERS) | {'PKG-INFO'})
+    _write_test_sdist(sdist, set(REQUIRED_MEMBERS | REQUIRED_SOURCE_MEMBERS) | {'PKG-INFO'})
 
     report = validate_sdist(sdist)
 
@@ -144,7 +145,7 @@ def test_release_artifact_checker_accepts_the_current_sdist_boundary(tmp_path):
     [
         ('audit_codex_session.py', 'leaked excluded application members'),
         ('lib/database/secret.py', 'leaked excluded application members'),
-        ('lib/storage_sidecar/secret.py', 'leaked excluded application members'),
+        ('lib/storage_authority_sql/secret.py', 'leaked excluded application members'),
         ('../outside.py', 'contains a non-canonical path'),
     ],
 )
@@ -154,7 +155,7 @@ def test_release_artifact_checker_rejects_malicious_sdist_members(
         error_pattern,
 ):
     sdist = tmp_path / 'tofu_agent-0.17.0.tar.gz'
-    members = set(REQUIRED_MEMBERS) | {malicious_member}
+    members = set(REQUIRED_MEMBERS | REQUIRED_SOURCE_MEMBERS) | {malicious_member}
     _write_test_sdist(sdist, members)
 
     with pytest.raises(ValueError, match=error_pattern):
@@ -315,3 +316,11 @@ def test_tag_release_embedded_shell_is_valid_bash():
             checked_steps += 1
 
     assert checked_steps >= 10
+
+
+@pytest.mark.parametrize('missing', sorted(REQUIRED_SOURCE_MEMBERS))
+def test_sdist_requires_inputs_for_packaged_runtime_schema(tmp_path, missing):
+    sdist = tmp_path / 'tofu_agent-0.17.0.tar.gz'
+    _write_test_sdist(sdist, set(REQUIRED_MEMBERS | REQUIRED_SOURCE_MEMBERS) - {missing})
+    with pytest.raises(ValueError, match='missing required runtime members'):
+        validate_sdist(sdist)

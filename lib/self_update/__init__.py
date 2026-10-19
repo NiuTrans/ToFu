@@ -72,7 +72,7 @@ logger = get_logger(__name__)
 # ``lib.self_update.http_get`` / ``lib.self_update.http_stream`` attributes
 # (present when this was a single module) remain readable AND monkeypatchable
 # by consumers / tests after the package split.
-from lib.http_client import http_get, http_stream  # noqa: F401
+from lib.http_transport.client import http_get, http_stream  # noqa: F401
 
 # ── Shared constants ──
 from lib.self_update._config import (
@@ -127,13 +127,13 @@ from lib.self_update._apply import (
     apply_update,
 )
 
-# Re-exported from lib.runtime_layout (single source of truth) so existing
+# Re-exported from lib.runtime.runtime_layout (single source of truth) so existing
 # call sites / tests that reference the update skip-lists keep working
 # (byte-identical to the historical literals).
-from lib.runtime_layout import (  # noqa: F401
+from lib.runtime.runtime_layout import (  # noqa: F401
     OVERLAY_SKIP_PREFIXES as _OVERLAY_SKIP_PREFIXES,
 )
-from lib.runtime_layout import (  # noqa: F401
+from lib.runtime.runtime_layout import (  # noqa: F401
     RUNTIME_STATE_PREFIXES as _RUNTIME_STATE_PREFIXES,
 )
 
@@ -142,7 +142,7 @@ __all__ = [
     'git_available', 'current_version', 'fetch_latest_release',
     '_fetch_latest_release_detailed',
     'working_tree_status', 'check_for_update', 'apply_update',
-    # Re-exported from lib.runtime_layout (single source of truth) so existing
+    # Re-exported from lib.runtime.runtime_layout (single source of truth) so existing
     # call sites / tests that reference the update skip-lists keep working.
     '_RUNTIME_STATE_PREFIXES', '_OVERLAY_SKIP_PREFIXES',
     # Additional symbols kept importable for consumers / tests.

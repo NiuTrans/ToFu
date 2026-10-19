@@ -541,6 +541,7 @@ def test_native_turn_runtime_owns_hydrate_submit_stream_and_projection(
       const submitted = [];
       const persisted = [];
       const renderedStates = [];
+      const renderedDeltas = [];
       const settledTurns = [];
       let legacyRepaints = 0;
       const api = {
@@ -605,7 +606,8 @@ def test_native_turn_runtime_owns_hydrate_submit_stream_and_projection(
         },
         applySettings(conv, settings) { Object.assign(conv, settings); },
         isActive() { return true; },
-        renderState(_conv, state) {
+        renderState(_conv, state, context) {
+          if (context?.update) renderedDeltas.push(context.update.changes);
           renderedStates.push(Object.values(state.turnsById).map(turn => turn?.status));
           return true;
         },
@@ -679,6 +681,7 @@ def test_native_turn_runtime_owns_hydrate_submit_stream_and_projection(
           .map(turn => turn.currentAttemptId),
         persistedCount: persisted.length,
         renderStateSawTerminal,
+        canonicalDeltasForwarded: renderedDeltas.some(delta => delta?.turnIds.length > 0),
         settledTurns,
         legacyRepaints,
       };
@@ -712,6 +715,7 @@ def test_native_turn_runtime_owns_hydrate_submit_stream_and_projection(
         # and settlement. Turn content remains normalized in TurnStore.
         'persistedCount': 4,
         'renderStateSawTerminal': True,
+        'canonicalDeltasForwarded': True,
         'settledTurns': ['assistant-1:completed'],
         'legacyRepaints': 0,
     }
@@ -758,6 +762,7 @@ def test_native_turn_runtime_does_not_probe_an_unsaved_conversation(
           async deleteTurns() { throw Error('not used'); },
           async abortAttempt() { throw Error('not used'); },
         },
+        isActive: () => true,
       });
       const conversation = {
         id:'local-only-conversation', title:'New Chat', createdAt:10,
@@ -813,11 +818,17 @@ def test_native_turn_runtime_wake_skips_local_only_draft(
         _localOnly:true,
       };
       const first = await runtime.wakeConversation(conversation);
+      runtime.markCommandPending(conversation, 'draft-turn', 'submit');
+      runtime.reconcileConversationActivity(conversation.id);
       const second = await runtime.wakeConversation(conversation);
+      let refusedDirectory = false;
+      try { await runtime.loadConversationRoundDirectory(conversation, 'main'); }
+      catch (error) { refusedDirectory = error.message === 'Local draft has no round directory.'; }
       return {
         snapshotCalls,
         sameStore: first === second,
         localOnly: conversation._localOnly,
+        refusedDirectory,
       };
     }
     """)
@@ -826,6 +837,7 @@ def test_native_turn_runtime_wake_skips_local_only_draft(
         'snapshotCalls': 0,
         'sameStore': True,
         'localOnly': True,
+        'refusedDirectory': True,
     }
 
 

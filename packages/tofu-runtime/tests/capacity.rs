@@ -153,10 +153,7 @@ fn native_idle_budget_scales_with_probe_and_falls_back_lean_without_headroom() {
     assert_eq!(large.max_inflight_bytes, 131072);
     let pressured = snapshot(128, Some(8192)).executor_budget(demand()).unwrap();
     assert_eq!(pressured.workers, 2);
-    assert!(matches!(
-        snapshot(128, Some(0)).executor_budget(demand()),
-        Ok(_)
-    ));
+    assert!(snapshot(128, Some(0)).executor_budget(demand()).is_ok());
     let lean = snapshot(128, None).executor_budget(demand()).unwrap();
     assert_eq!((lean.workers, lean.max_inflight_jobs), (1, 1));
     let invalid = Demand {
@@ -208,5 +205,5 @@ fn zero_cgroup_memory_limit_is_known_exhaustion() {
     let s = f.probe();
     assert_eq!(s.memory_capacity_bytes, Some(0));
     assert_eq!(s.memory_available_bytes, Some(0));
-    assert!(matches!(s.executor_budget(demand()), Ok(_)));
+    assert!(s.executor_budget(demand()).is_ok());
 }

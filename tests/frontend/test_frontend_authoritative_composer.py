@@ -27,6 +27,7 @@ const sendSource = fs.readFileSync(process.argv[1], 'utf8');
 const startupSource = fs.readFileSync(process.argv[2], 'utf8');
 const failureSource = fs.readFileSync(process.argv[3], 'utf8');
 const exercise = process.argv[4];
+const projectSource = fs.readFileSync(process.argv[5], 'utf8');
 const context = vm.createContext({
   console,
   AbortController,
@@ -36,13 +37,14 @@ const context = vm.createContext({
   clearTimeout,
 });
 vm.runInContext(
-  'globalThis.window = globalThis; globalThis.runtimeScope = globalThis;',
+  'globalThis.window = globalThis; globalThis.runtimeScope = globalThis; globalThis.isBootSendBlocked = () => false;',
   context,
 );
 
 (async () => {
   vm.runInContext(startupSource, context, { filename: process.argv[2] });
   vm.runInContext(failureSource, context, { filename: process.argv[3] });
+  vm.runInContext(projectSource, context, { filename: process.argv[5] });
   vm.runInContext(sendSource, context, { filename: process.argv[1] });
   await vm.runInContext(`(async () => {\n${exercise}\n})()`, context, {
     filename: 'authoritative-composer.exercise.js',
@@ -126,6 +128,10 @@ _vlmSaveState = () => {};
 _vlmClearState = () => {};
 _renderTranslatingBubble = () => {};
 _removeTranslatingBubble = () => {};
+composerTranslationStatus = {
+  begin: (conversationId, kind) => ({ conversationId, kind }),
+  finish() {},
+};
 updateSendButton = () => {};
 renderConversationList = () => {};
 buildTurnNav = () => {};
@@ -236,6 +242,8 @@ def _run_pipeline(exercise: str) -> None:
             startup_bundle,
             failure_bundle,
             HARNESS_SETUP + "\n" + exercise,
+            native_module_path('.native/conversation-project.js',
+                               ROOT / 'frontend/src/conversation/application/conversation-project.ts'),
         ],
         cwd=ROOT,
         text=True,
@@ -1048,3 +1056,18 @@ const draft = { commandId: 'repeat', submittedModelId: 'model-c' };
 _consumeAcceptedComposerDraft(draft); _consumeAcceptedComposerDraft(draft);
 check(JSON.stringify(recent) === '["model-a","model-c"]', 'acceptance double-counted model use');
 """)
+
+
+def test_boot_send_fence_preserves_draft_before_any_send_mode():
+    _run_pipeline(r'''
+      globalThis.isBootSendBlocked = () => true;
+      composerInput.value = 'draft during restart';
+      pendingImages = [{id:'image-draft'}];
+      imageGenMode = true;
+      runtimeScope.generateImageDirect = () => { throw Error('must not generate'); };
+      showToast = () => {};
+      await sendMessage();
+      check(composerInput.value === 'draft during restart', 'restart consumed text');
+      check(pendingImages.length === 1, 'restart consumed attachments');
+      check(optimisticTurnUpserts.length === 0, 'restart created optimistic turns');
+    ''')

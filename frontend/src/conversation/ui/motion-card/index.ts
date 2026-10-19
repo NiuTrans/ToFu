@@ -8,6 +8,7 @@ import { readMotionPayload } from './payload';
 import { renderEnvCheck, renderStoryboard, renderCheck } from './validation';
 import { renderRender, renderProbe, renderConcat, renderNarrate, renderMux } from './media';
 import { renderProduce, renderPatchSlides, renderEditVideo, renderRestyleSlides, renderRevert } from './production';
+import { renderWorkUnitShell } from '../work-unit/shell';
 
 const BODY_RENDERERS: Readonly<Record<string, (payload: MotionPayload, text: MotionText) => string>> = {
   motion_video_env_check: renderEnvCheck,
@@ -49,7 +50,7 @@ export function renderMotionCard(round: MotionRound, svg: string, badgeHtml: str
   const snippet = (tn.startsWith("motion_video_") ? "" : typeof meta.snippet === "string" ? meta.snippet : "");
   const snippetHtml = (!bodyInner && snippet)
     ? `<div class="ptool-motion-li">${escapeValue(snippet)}</div>` : "";
-  if (!bodyInner && !snippetHtml && !callLine) return "";
+  if (!bodyInner && !snippetHtml && !callLine && !meta.workUnitRef?.taskId) return "";
   const emptyNote = (!bodyInner && !snippetHtml)
     ? `<div class="ptool-convmeta-empty">${escapeValue(text("tool.noContent", "No content returned."))}</div>` : "";
   const bodyHtml = `<div class="ptool-motion-body">${purposeHtml}${bodyInner}${snippetHtml}${emptyNote}${callLine}</div>`;
@@ -63,11 +64,13 @@ export function renderMotionCard(round: MotionRound, svg: string, badgeHtml: str
   const wuRef = (meta && meta.workUnitRef && typeof meta.workUnitRef === "object")
     ? meta.workUnitRef : null;
   const wuTaskId = wuRef && wuRef.taskId ? String(wuRef.taskId) : "";
-  const wuAttrs = wuTaskId
-    ? ` data-wu-task="${escapeValue(wuTaskId)}" data-wu-kind="${escapeValue(String(wuRef?.kind || ""))}"` : "";
-  const wuLive = wuTaskId ? `<div class="ptool-wu-live"></div>` : "";
-  if (wuTaskId) ports.scanWorkUnits?.();
-  return `<details class="ptool-convmeta-block ptool-motion-block" data-rn="${escapeValue(String(round.roundNum))}"${wuAttrs}>
+  if (wuTaskId) {
+    ports.scanWorkUnits?.();
+    const title = String(p.topic || p.direction || headLabel);
+    return renderWorkUnitShell(wuTaskId, String(wuRef?.kind || ''), title, srcLabel, text,
+      { icon: svg, details: bodyHtml, round: round.roundNum });
+  }
+  return `<details class="ptool-convmeta-block ptool-motion-block" data-rn="${escapeValue(String(round.roundNum))}">
        <summary class="ptool-line ptool-convmeta-header">
          <span class="ptool-icon">${svg}</span>
          <span class="ptool-text">${escapeValue(headLabel)}</span>
@@ -75,6 +78,5 @@ export function renderMotionCard(round: MotionRound, svg: string, badgeHtml: str
          ${badgeHtml}
        </summary>
        ${bodyHtml}
-       ${wuLive}
      </details>`;
 }

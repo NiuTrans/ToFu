@@ -154,19 +154,27 @@ def test_file_level_rule_failure_retains_complete_snapshot_then_recovers(
     assert 'CLAUDE RULE' in initial and 'COMPLETE AGENT RULE' in initial
     messages = _seed('project_rules', initial)
     before = copy.deepcopy(messages)
-    real_open, real_stat = builtins.open, os.stat
+    real_open, real_stat, real_descriptor_open = builtins.open, os.stat, os.open
 
     def fail_open(path, *args, **kwargs):
         if os.fspath(path) == str(agents):
             raise PermissionError('simulated AGENTS read failure')
         return real_open(path, *args, **kwargs)
 
+
+    def fail_descriptor_open(path, *args, **kwargs):
+        # Guidance uses no-follow descriptors on POSIX; inject at acquisition.
+        if os.fspath(path) == agents.name and kwargs.get('dir_fd') is not None:
+            raise PermissionError('simulated AGENTS descriptor read failure')
+        return real_descriptor_open(path, *args, **kwargs)
     def fail_stat(path, *args, **kwargs):
         if isinstance(path, (str, os.PathLike)) and os.fspath(path) == str(agents):
             raise PermissionError('simulated AGENTS stat failure')
         return real_stat(path, *args, **kwargs)
 
     with monkeypatch.context() as patch:
+        if fault == 'read' and os.name == 'posix':
+            patch.setattr(os, 'open', fail_descriptor_open)
         patch.setattr(builtins if fault == 'read' else os,
                       'open' if fault == 'read' else 'stat',
                       fail_open if fault == 'read' else fail_stat)

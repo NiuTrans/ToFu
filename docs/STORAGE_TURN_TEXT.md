@@ -69,7 +69,7 @@ improvement is certified. Cached metrics snapshots cannot establish isolated
 terminal-stage durations by subtraction. Next work examines duplicate event
 persistence and terminal payload costs; the replay payload contract is in
 [STORAGE_EVENT_REPLAY.md](STORAGE_EVENT_REPLAY.md). Artifact identities, all legs and
-limits are in [structured evidence](evidence/tofudb_turn_text_pages_20261001.json).
+limits are in `tofudb_turn_text_pages_20261001.json`.
 
 Producer measurement: a paired CPU-only probe removes 200 segment-normalization
 calls from 200 suffix acknowledgements; it uses a fake command response and is
@@ -82,4 +82,6 @@ query RPC P99 was 75–101 ms with profiling disabled; reconciled native dispatc
 means were 3.34–3.72 ms and roughly95% waiting. The admission/client path remains
 a separate measured bottleneck. Default browser behavior passes. Matched pins,
 all workloads and baseline test failures are in
-[producer evidence](evidence/tofudb_producer_baseline_20261001.json).
+`tofudb_producer_baseline_20261001.json`.
+
+<!-- Evidence note: former docs/evidence/ artifact snapshots cited here were retired from the tree; cited JSON artifacts remain recoverable from git history. -->

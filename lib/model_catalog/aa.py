@@ -22,7 +22,7 @@ from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 from lib.log import get_logger
-from lib.runtime_paths import data_root
+from lib.runtime.runtime_paths import data_root
 
 from ._score_matching import match_model, normalize_name
 
@@ -113,7 +113,7 @@ def _fetch_dataset(api_key: str, fetcher: Callable[..., Any] | None = None) -> l
     if not api_key:
         raise PermissionError("Artificial Analysis API key is not configured")
     if fetcher is None:
-        from lib.http_client import http_get
+        from lib.http_transport.client import http_get
 
         fetcher = http_get
     models: list[dict[str, Any]] = []

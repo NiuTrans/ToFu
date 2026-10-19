@@ -1,6 +1,8 @@
-"""Supervise one bounded TeX command, including its descendants and output.
+"""Supervise one TeX command, including its descendants and output.
 
-run_command owns admission, RSS/count observation, cancellation and retirement.
+run_command owns startup, RSS/count observation, cancellation and retirement.
+Memory limits apply only to an explicit operator override; process counts are
+observed without a private rejection threshold.
 The caller owns the log file and optional aggregate-output check. Native limits
 run in a fresh worker, never a preexec callback in the threaded application.
 """
@@ -8,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import os
+import math
 from pathlib import Path
 import signal
 import subprocess
@@ -16,7 +19,6 @@ import tempfile
 import time
 
 from .budget import compile_memory_bytes
-from .contract import limit
 from .errors import BuildError, check_cancelled
 from .process_worker import WORKER_FLAG
 
@@ -35,20 +37,23 @@ def _command(command, cwd, memory, seconds, file_bytes, ready, log):
 
 
 def run_command(command: list[str], *, cwd: Path, environment: dict[str, str],
-                log: Path, timeout: float, log_bytes: int, cancel=None,
+                log: Path, timeout: float | None, log_bytes: int | None, cancel=None,
                 inspect_output=None, usage: CommandUsage | None = None,
                 file_bytes: int | None = None) -> CommandUsage:
     """A finite command result; no output bytes are accumulated in Python RAM."""
     import psutil
     check_cancelled(cancel)
-    seconds = min(max(0, timeout), limit('compile_timeout_seconds'))
-    if seconds <= 0:
-        raise BuildError('compile_timeout', 'Paper compilation timed out')
+    if timeout is not None and (type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0):
+        raise BuildError('compile_timeout', 'Compiler timeout must be a positive finite number')
+    if log_bytes is not None and (type(log_bytes) is not int or log_bytes < 0):
+        raise BuildError("output_limit", "Compiler log limit must be a nonnegative integer or None")
+    seconds = 0 if timeout is None else timeout
     memory = compile_memory_bytes(environment)
-    maximum_processes = limit('compile_processes')
     result = usage if usage is not None else CommandUsage()
-    file_bytes = min(file_bytes or limit('build_output_bytes'), limit('build_output_bytes'))
-    deadline = time.monotonic() + seconds
+    file_bytes = 0 if file_bytes is None else file_bytes
+    if type(file_bytes) is not int or file_bytes < 0:
+        raise BuildError('compile_limit', 'Compiler file limit must be a nonnegative integer')
+    deadline = None if timeout is None else time.monotonic() + seconds
     process = None
     job = None
     observed = {}
@@ -62,13 +67,13 @@ def run_command(command: list[str], *, cwd: Path, environment: dict[str, str],
                 start_new_session=os.name != 'nt')
             if os.name == 'nt':
                 from .windows_job import WindowsJob
-                job = WindowsJob(process, memory, maximum_processes)
+                job = WindowsJob(process, memory)
             ready.write_bytes(b'1')
             parent = psutil.Process(process.pid)
             next_output_check = 0.0
             while True:
                 check_cancelled(cancel)
-                if time.monotonic() >= deadline:
+                if deadline is not None and time.monotonic() >= deadline:
                     raise BuildError('compile_timeout', 'Paper compilation timed out')
                 rss = count = 0
                 try:
@@ -86,9 +91,9 @@ def run_command(command: list[str], *, cwd: Path, environment: dict[str, str],
                     pass
                 result.peak_memory_bytes = max(result.peak_memory_bytes, rss)
                 result.peak_processes = max(result.peak_processes, count)
-                if rss > memory or count > maximum_processes:
-                    raise BuildError('compile_limit', 'Paper compilation exceeded its memory or process budget')
-                if log.stat().st_size > log_bytes:
+                if memory and rss > memory:
+                    raise BuildError('compile_limit', 'Paper compilation exceeded the explicitly configured memory budget')
+                if log_bytes is not None and log.stat().st_size > log_bytes:
                     raise BuildError('output_limit', 'Compiler log exceeds the byte limit')
                 result.returncode = process.poll()
                 if inspect_output is not None and (time.monotonic() >= next_output_check or result.returncode is not None):
@@ -105,7 +110,7 @@ def run_command(command: list[str], *, cwd: Path, environment: dict[str, str],
                 raise BuildError('compile_timeout', 'Paper compilation exceeded its native deadline')
             if result.returncode == 125:
                 raise BuildError('compile_unavailable', 'Cannot start the bounded paper compiler')
-            if result.returncode != 0 and log.stat().st_size >= log_bytes:
+            if log_bytes is not None and result.returncode != 0 and log.stat().st_size >= log_bytes:
                 raise BuildError('output_limit', 'Compiler log exhausted its byte limit')
             if result.returncode == 128 + getattr(signal, 'SIGXFSZ', 25):
                 raise BuildError('output_limit', 'Paper compilation exceeded its native file byte limit')
@@ -143,6 +148,6 @@ def run_command(command: list[str], *, cwd: Path, environment: dict[str, str],
             process.wait(timeout=5)
             psutil.wait_procs(list(observed.values()), timeout=1)
         temporary.cleanup()
-        if log.is_file() and log.stat().st_size > log_bytes:
+        if log_bytes is not None and log.is_file() and log.stat().st_size > log_bytes:
             with log.open('r+b') as output:
                 output.truncate(log_bytes)

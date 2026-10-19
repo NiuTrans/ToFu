@@ -1,8 +1,8 @@
 """Retained composer/project adapters exercise the real typed restore owner.
 
-Navigation restores saved bindings only for an empty composer. Drafts retain
-shown context, failed restores retain durable settings, and only explicit
-selection/clear/send commits context. Race policy itself lives in the sibling
+Navigation restores destination project bindings locally, including with a
+text draft. Only explicit selection/clear changes saved context; send captures
+the destination binding regardless of ambient bar state. Race policy itself lives in the sibling
 conversation-project owner tests; these tests pin the retained wiring.
 """
 from __future__ import annotations
@@ -47,7 +47,13 @@ new Function('module', 'exports', ts.transpileModule(fs.readFileSync(
   'frontend/src/conversation/application/conversation-project.ts', 'utf8'),
   {compilerOptions: {target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS}}
 ).outputText)(owner, owner.exports);
-const {createConversationProjectController} = owner.exports;
+const {createConversationProjectController, projectStatusMatchesWorkspace, noteConversationProjectChoice, captureConversationProject, captureProjectStatus, withProjectHydration} = owner.exports;
+const attachmentOwner = {exports: {}};
+new Function('exports', ts.transpileModule(fs.readFileSync(
+  'frontend/src/conversation/ui/optional-project-attachment.ts', 'utf8'),
+  {compilerOptions: {target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS}}
+).outputText)(attachmentOwner.exports);
+const {paintOptionalProjectAttachment} = attachmentOwner.exports;
 const modelOwner = {exports: {}};
 new Function('module', 'exports', ts.transpileModule(fs.readFileSync(
   'frontend/src/conversation/application/conversation-model.ts', 'utf8'),
@@ -58,6 +64,8 @@ const _conversationModelController = createConversationModelController({
   hasDraft: () => _hasProjectComposerDraft(), selection: () => captureComposerModel(config),
 });
 var runtimeScope = globalThis;
+var composerTranslationStatus = {refresh() {}};
+function renderComposerModelNotice() {}
 var conversations = [], activeConvId = null, chatMode = 'chat';
 var pendingImages = [], pendingPdfTexts = [], pendingVideos = [], _pendingLogClean = null;
 var searchMode = 'multi', fetchEnabled = true, codeExecEnabled = true;
@@ -137,9 +145,10 @@ function saved(id, path = '/saved') {
 function setup(target) {
   conversations = [saved('outgoing', '/outgoing'), target];
   activeConvId = 'outgoing';
-  _applyProjectData({path: '/shown', readOnly: true,
-    extraRoots: [{path: '/shown-extra', readOnly: true}]});
-  chatMode = 'studio';
+  projectState = {active: true, path: '/shown', readOnly: true,
+    extraRoots: [{path: '/shown-extra', readOnly: true}]};
+  _updateProjectUI();
+  _applyChatModeUI('studio');
 }
 const flush = () => new Promise(resolve => setTimeout(resolve, 0));
 function defer() {let resolve; const promise = new Promise(r => resolve = r); return {promise, resolve};}
@@ -189,10 +198,10 @@ loadConversation('target');
 await flush();
 assert.equal(projectState.path, HAS_PROJECT ? '/saved' : '');
 assert.equal(el('projectBar').dataset.active, String(HAS_PROJECT));
-assert.equal(chatMode, HAS_PROJECT ? 'studio' : 'chat');
-assert.equal(el('chatModeLabel').textContent, HAS_PROJECT ? 'Studio' : 'Chat');
+assert.equal(chatMode, 'chat');
+assert.equal(el('chatModeLabel').textContent, 'conversationBar.attachProject');
 assert.equal(JSON.stringify(binding(target)), before);
-assert.deepEqual(calls, HAS_PROJECT ? [[['/saved', '/extra'], ['/saved', '/extra'], ['/saved']]] : []);
+assert.deepEqual(calls, []);
 if (HAS_PROJECT) assert.deepEqual(_projectBarFolders, [
   {path: '/saved', readOnly: true}, {path: '/extra', readOnly: true}]);
 '''.replace('HAS_PROJECT', json.dumps(has_project)))
@@ -200,7 +209,7 @@ if (HAS_PROJECT) assert.deepEqual(_projectBarFolders, [
 
 @pytest.mark.parametrize('draft', ['text', 'image', 'pdf', 'video'])
 @pytest.mark.parametrize('has_project', [False, True])
-def test_draft_switch_keeps_shown_project_without_rebinding(draft, has_project):
+def test_draft_switch_restores_destination_without_rebinding(draft, has_project):
     drafts = {
         'text': "el('userInput').value = 'unsent draft';",
         'image': "pendingImages = [{id: 'image'}];",
@@ -214,8 +223,8 @@ DRAFT
 const shown = projectState, before = JSON.stringify(binding(target));
 loadConversation('target');
 await flush();
-assert.equal(projectState, shown);
-assert.equal(el('projectBar').dataset.active, 'true');
+assert.equal(projectState.path, HAS_PROJECT ? '/saved' : '');
+assert.equal(el('projectBar').dataset.active, String(HAS_PROJECT));
 assert.equal(calls.length, 0);
 captureActiveConversationSettings();
 assert.equal(JSON.stringify(binding(target)), before);
@@ -230,7 +239,7 @@ _pendingLogClean = {originalText:'old paste'};
 loadConversation('target'); await flush();
 assert.equal(projectState.path, '/saved');
 assert.equal(target.projectPath, '/saved');
-assert.equal(calls.length, 1);
+assert.equal(calls.length, 0);
 ''')
 
 
@@ -248,12 +257,11 @@ hydrateConversationRuntime = async id => {
 loadConversation('target');
 await loadProjectStatus();
 assert.equal(calls.length, 0);
-assert.equal(el('projectBar').dataset.active, String(DRAFT));
+assert.equal(el('projectBar').dataset.active, 'true');
+assert.equal(projectState.path, '/stale-shell');
 gate.resolve(); await flush();
-assert.equal(projectState.path, DRAFT ? '/shown' : '/hydrated');
-assert.equal(calls.length, DRAFT ? 0 : 1);
-if (DRAFT) assert.equal(projectState, shown);
-else assert.deepEqual(calls[0], [['/hydrated', '/extra'], ['/hydrated', '/extra'], ['/hydrated']]);
+assert.equal(projectState.path, '/hydrated');
+assert.equal(calls.length, 0);
 assert.equal(target.projectPath, '/hydrated');
 '''.replace('DRAFT', json.dumps(draft)))
 
@@ -262,7 +270,7 @@ assert.equal(target.projectPath, '/hydrated');
 def test_cold_hydration_cannot_overwrite_new_composer_intent(change):
     actions = {
         'draft': "el('userInput').value = 'new draft';",
-        'selection': "_applyProjectData({path: '/chosen', extraRoots: []});",
+        'selection': "_saveConvProjectPath('/chosen', [], []);",
         'switch': "loadConversation('outgoing'); await flush();",
     }
     _run(r'''
@@ -274,25 +282,25 @@ loadConversation('target');
 ACTION
 const shown = projectState, count = calls.length;
 gate.resolve(); await flush();
-assert.equal(projectState, shown);
+assert.deepEqual(projectState, shown);
 assert.equal(calls.length, count);
-assert.equal(target.projectPath, '/saved');
-'''.replace('ACTION', actions[change]))
+assert.equal(target.projectPath, 'CHANGE' === 'selection' ? '/chosen' : '/saved');
+'''.replace('ACTION', actions[change]).replace('CHANGE', change))
 
 
 @pytest.mark.parametrize('failure', ['invalid', 'offline'])
 @pytest.mark.parametrize('entry', ['restore', 'boot'])
-def test_failed_restore_preserves_durable_binding(failure, entry):
+def test_local_restore_is_independent_of_server_availability(failure, entry):
     _run(r'''
 const target = saved('target'); setup(target); activeConvId = target.id;
 const before = JSON.stringify(target);
 request = async () => { FAILURE };
 await ENTRY;
 assert.equal(JSON.stringify(target), before);
-assert.equal(projectState.active, false);
-assert.equal(el('projectBar').dataset.active, 'false');
-assert.equal(el('projectBarFolders').textContent.trim(), 'conversationBar.attachProject');
-assert.equal(warnings.length, 1);
+assert.equal(projectState.path, '/saved');
+assert.equal(el('projectBar').dataset.active, 'true');
+assert.equal(warnings.length, 0);
+assert.equal(calls.length, 0);
 assert.equal(saves.length, 0);
 '''.replace('FAILURE', "throw Error('offline');" if failure == 'offline'
             else 'return {ok: false, json: async () => ({})};')
@@ -308,8 +316,7 @@ assert.equal(projectState.active, false);
 assert.equal(el('projectBar').dataset.active, 'false');
 assert.equal(el('projectBarFolders').textContent.trim(), 'conversationBar.attachProject');
 assert.equal(chatMode, 'chat');
-assert.equal(target.chatMode, 'chat');
-assert.equal(clears, 1);
+assert.equal(clears, 0);
 assert.ok(saves.includes('target'));
 ''')
 
@@ -330,14 +337,12 @@ assert.deepEqual(saves, ['target']);
 
 
 @pytest.mark.parametrize('shown', [False, True])
-def test_send_commits_shown_primary_extras_and_read_only_at_startup(shown):
+def test_send_captures_destination_binding_despite_ambient_project_bar(shown):
     _run(r'''
 const target = saved('target'); setup(target); activeConvId = target.id;
-if (!SHOWN) _clearProjectStateLocal();
+if (!SHOWN) {projectState = {active:false,path:'',extraRoots:[]}; _updateProjectUI();}
 el('userInput').value = 'send this';
-const expected = SHOWN
-  ? {path: '/shown', paths: ['/shown', '/shown-extra'], ro: ['/shown', '/shown-extra']}
-  : binding(target);
+const expected = binding(target);
 // Stop at the send-startup port: the real submission adapter must commit
 // context before a lease/transport can observe the conversation. No model or
 // optimistic transcript dependencies are involved in this project test.
@@ -353,15 +358,17 @@ assert.deepEqual(binding(target), expected);
 '''.replace('SHOWN', json.dumps(shown)))
 
 
-def test_projectless_draft_does_not_inherit_destination_project_on_send():
+def test_text_draft_cannot_clear_destination_project_on_send():
     _run(r'''
 const target = saved('target'); setup(target);
-_clearProjectStateLocal(); el('userInput').value = 'projectless draft';
+projectState = {active:false,path:'',extraRoots:[]}; _updateProjectUI();
+el('userInput').value = 'projectless draft';
 loadConversation(target.id);
 const boundary = Error('observed send startup');
 globalThis._composerCommandId = () => 'test-command';
 globalThis.createSendStartupLease = conv => {
-  assert.deepEqual(binding(conv), {path: '', paths: [], ro: []});
+  assert.deepEqual(binding(conv), binding(target));
+  assert.equal(conv.projectPath, '/saved');
   throw boundary;
 };
 await assert.rejects(_submitComposerDraft(), error => error === boundary);
@@ -455,16 +462,16 @@ if ('ACTION' === 'toggle') request = () => gate.promise;
 else Api.project.clear = () => gate.promise;
 const pending = 'ACTION' === 'toggle' ? toggleProjectBarReadOnly(0) : clearProject();
 activeConvId = target.id;
-_applyProjectData({path:'/chosen', extraRoots:[], readOnly:false});
+_saveConvProjectPath('/chosen', [], []);
 _conversationProjectController.begin();
 if ('NAVIGATE' === 'roundtrip') activeConvId = origin.id;
 const chosen = projectState;
-const before = JSON.stringify(conversations);
+const before = JSON.stringify(conversations), savedCount = saves.length;
 gate.resolve({ok:true,json:async()=>({path:'/stale',extraRoots:[],readOnly:true})});
 await pending;
 assert.equal(projectState, chosen);
 assert.equal(JSON.stringify(conversations), before);
-assert.equal(saves.length,0);
+assert.equal(saves.length,savedCount);
 '''.replace('ACTION', action).replace('NAVIGATE', navigate))
 
 
@@ -476,8 +483,8 @@ request = async () => ({ok:true,json:async()=>({path:'/shown',readOnly:false,
 await toggleProjectBarReadOnly(0);
 assert.equal(projectState.readOnly,false);
 assert.deepEqual(getActiveConv().readOnlyPaths,['/shown-extra']);
-const before = JSON.stringify(projectState);
+const before = JSON.stringify(captureProjectStatus(projectState));
 request = async () => {throw Error('offline');};
 await toggleProjectBarReadOnly(0);
-assert.equal(JSON.stringify(projectState),before);
+assert.equal(JSON.stringify(captureProjectStatus(projectState)),before);
 ''')

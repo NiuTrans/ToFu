@@ -41,14 +41,14 @@ def queued_project(tmp_path, monkeypatch, *, wait_seconds):
 def test_late_lock_acquisition_leaves_full_work_budget_for_real_child(tmp_path, monkeypatch):
     with queued_project(tmp_path, monkeypatch, wait_seconds=495) as now:
         budgets = []
-        def verify(binary, project):
+        def verify(binary, project, expected):
             budgets.append(engines._deadline.get() - now[0])
             now[0] += 570
             # A real child must still be allowed after spending almost all of
             # the work budget. The former shared 600s clock expires here.
             assert engines._run([sys.executable, '-c', 'print("verified")'],
                 cwd=project, environment=dict(os.environ), timeout=10) == 'verified'
-        monkeypatch.setattr(engines, 'verify_current', verify)
+        monkeypatch.setattr(engines, '_verify_generation', verify)
         parent_deadline = engines._deadline.get()
         assert engines.prepare(tmp_path, {}) is False
         assert budgets == [engines.PREPARATION_TOTAL_TIMEOUT_SECONDS - 495]
@@ -61,7 +61,7 @@ def test_outer_total_and_work_budget_bound_actual_verification(tmp_path, monkeyp
         def verify(*_):
             now[0] += engines.PREPARATION_TOTAL_TIMEOUT_SECONDS - 495 + 1
             engines._run(['unused'], cwd=tmp_path, environment={}, timeout=10)
-        monkeypatch.setattr(engines, 'verify_current', verify)
+        monkeypatch.setattr(engines, '_verify_generation', verify)
         monkeypatch.setattr(engines.subprocess, 'Popen',
                             lambda *_a, **_k: pytest.fail('expired work must not spawn'))
         monkeypatch.setattr(engines, '_prebuilt', lambda *_: None)
@@ -76,7 +76,7 @@ def test_outer_total_and_work_budget_bound_actual_verification(tmp_path, monkeyp
 def test_contended_lock_times_out_without_starting_preparation(tmp_path, monkeypatch):
     with queued_project(tmp_path, monkeypatch, wait_seconds=1) as now:
         monkeypatch.setattr(engines.time, 'sleep', lambda _: now.__setitem__(0, now[0] + 601))
-        monkeypatch.setattr(engines, 'verify_current',
+        monkeypatch.setattr(engines, '_verify_generation',
                             lambda *_: pytest.fail('must not verify without the lock'))
         with pytest.raises(engines.EnginePreparationError, match='Another storage engine update'):
             engines.prepare(tmp_path, {})
@@ -130,7 +130,7 @@ def test_work_uses_unused_queue_budget_without_renewing_total(tmp_path, monkeypa
             now[0] += remaining - 1
             assert engines._run([sys.executable, '-c', 'print("verified")'],
                 cwd=tmp_path, environment=dict(os.environ), timeout=10) == 'verified'
-        monkeypatch.setattr(engines, 'verify_current', verify)
+        monkeypatch.setattr(engines, '_verify_generation', verify)
         assert engines.prepare(tmp_path, {}) is False
         assert now[0] == 100 + engines.PREPARATION_TOTAL_TIMEOUT_SECONDS - 1
 
@@ -141,7 +141,7 @@ def test_prepare_never_extends_shorter_caller_deadline(tmp_path, monkeypatch):
         try:
             def verify(*_):
                 assert engines._deadline.get() == 150
-            monkeypatch.setattr(engines, 'verify_current', verify)
+            monkeypatch.setattr(engines, '_verify_generation', verify)
             assert engines.prepare(tmp_path, {}) is False
             assert engines._deadline.get() == 150
         finally:

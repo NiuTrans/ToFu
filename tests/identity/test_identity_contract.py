@@ -16,7 +16,7 @@ CONTRACT = yaml.safe_load(
 
 
 def test_declared_identity_operations_are_the_registered_authority():
-    from lib.storage_sidecar.operation_domains.identity import OPERATIONS
+    from lib.storage_authority_sql.operation_domains.identity import OPERATIONS
 
     declared = {
         operation
@@ -67,7 +67,7 @@ def test_device_bridge_has_no_global_or_credential_free_authority(monkeypatch):
 def test_schema_contains_separate_account_owner_and_credential_authorities():
     # Assert against the live DDL initialize_schema actually executes, not
     # the bytes on disk (reading shipped source text is implementation-face).
-    from lib.storage_sidecar import schema as sidecar_schema
+    from lib.storage_authority_sql import schema as sidecar_schema
     ddl = '\n'.join(sidecar_schema._TABLES)
     assert 'tenant_users (' in ddl
     assert 'owner_user_id BIGINT NOT NULL UNIQUE' in ddl

@@ -8,13 +8,13 @@
       "backend": "sqlite",
       "marker": "unit",
       "tests": [
-        "tests/storage_sidecar/test_storage_certification_gate.py",
+        "tests/storage_authority_sql/test_storage_certification_gate.py",
         "tests/tofudb/test_tofudb_pre_authority.py",
         "tests/storage/test_storage_public_boundary.py",
         "tests/storage/test_storage_v2_client.py",
         "tests/tofudb/test_tofudb_v2_client.py",
         "tests/tofudb/test_tofudb_differential.py",
-        "tests/storage_sidecar/test_storage_log_audit.py",
+        "tests/storage_authority_sql/test_storage_log_audit.py",
         "tests/storage/test_storage_maintenance_circuit.py",
         "tests/tofudb/test_tofudb_perf_compare.py",
         "tests/storage/test_storage_receipt_codec.py",
@@ -22,8 +22,8 @@
         "tests/tofudb/test_tofudb_crc_accelerator.py::test_unsupported_platform_keeps_checksum_without_compiler"
       ],
       "required_cases": [
-        "tests/storage_sidecar/test_storage_certification_gate.py::test_complete_evidence_accepts_only_full_execution",
-        "tests/storage_sidecar/test_storage_certification_gate.py::test_differential_does_not_equate_boolean_with_number_or_arbitrary_uuid_text",
+        "tests/storage_authority_sql/test_storage_certification_gate.py::test_complete_evidence_accepts_only_full_execution",
+        "tests/storage_authority_sql/test_storage_certification_gate.py::test_differential_does_not_equate_boolean_with_number_or_arbitrary_uuid_text",
         "tests/storage/test_storage_receipt_codec.py::test_incompressible_or_decoded_oversize_responses_keep_hard_limits",
         "tests/tofudb/test_tofudb_differential.py::test_large_incompressible_receipt_replay_conflict_and_rollback[legacy_driver]",
         "tests/tofudb/test_tofudb_differential.py::test_large_incompressible_receipt_replay_conflict_and_rollback[tofudb_daemon]",

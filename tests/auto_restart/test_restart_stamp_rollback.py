@@ -30,7 +30,7 @@ def test_total_failure_rolls_back_restart_stamp(monkeypatch):
     monkeypatch.setattr(
         'serverctl_pkg.application_restart.run_application_restart_control', refuse)
     monkeypatch.setattr(
-        'lib.server_reexec.begin_server_reexec', lambda reason: False)
+        'lib.server.server_reexec.begin_server_reexec', lambda reason: False)
     monkeypatch.setattr(
         'lib.lifecycle_approval.rollback_restart_stamp',
         lambda *, pid: cleared.append(pid) or True)

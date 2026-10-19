@@ -7,30 +7,63 @@
     "programValue": "new parent source, separate from child receipts and previews"
   },
   "manifestRequired": [
-    "resultId", "executionStatus", "sourceCoverage", "retentionCoverage", "parts", "children"
+    "resultId",
+    "executionStatus",
+    "sourceCoverage",
+    "retentionCoverage",
+    "parts",
+    "children"
   ],
-  "executionStatuses": ["ok", "success", "error", "failed", "cancelled", "aborted", "rejected", "partial"],
+  "executionStatuses": [
+    "ok",
+    "success",
+    "error",
+    "failed",
+    "cancelled",
+    "aborted",
+    "rejected",
+    "partial"
+  ],
   "manifestOptionalPartFields": [
-    "sourceOrdinal", "view", "sha256", "byteSize", "caption", "status", "reason", "uri", "omittedCount"
+    "sourceOrdinal",
+    "view",
+    "sha256",
+    "byteSize",
+    "caption",
+    "status",
+    "reason",
+    "uri",
+    "omittedCount"
   ],
   "read": {
     "selector": "optional RFC6901 JSON pointer over each JSON part",
     "offsetUnit": "utf8_bytes",
     "legacyNumericOffsets": true,
     "scope": "text_and_media_descriptors",
-    "sizeBytes": "present only on terminal page"
+    "sizeBytes": "present only on terminal page",
+    "provenanceSegment": "immutable root-relative route indices identify an exact text segment, including repeated child call IDs; quotes never concatenate different segments"
   },
   "search": {
     "offsetUnit": "unicode_codepoints",
     "numericCursor": "zero only",
     "scope": "text_only",
-    "coverage": ["complete", "incomplete", "unavailable"]
+    "coverage": [
+      "complete",
+      "incomplete",
+      "unavailable"
+    ]
   },
   "cursor": {
     "format": "trq1.base64url-json.hmac-sha256",
-    "binds": ["owner", "artifactRef", "operation", "query", "selector"],
-    "position": "bounded immutable root-relative route, segment codepoint offset, logical output offset, earliest observed expiry",
-    "key": "persistent sidecar private record; all generic record operations deny tool_result_private",
+    "binds": [
+      "owner",
+      "artifactRef",
+      "operation",
+      "query",
+      "selector"
+    ],
+    "position": "bounded immutable root-relative route, segment codepoint offset, logical output offset, earliest observed expiry; native cursors also retain a checked segment byte offset for direct blob seek",
+    "key": "persistent authority-private key; all generic record operations deny tool_result_private; native physical namespace is inaccessible through record APIs",
     "maxLength": 2048,
     "availability": "expired observed evidence or unavailable resumed children reject; never shift concatenated offsets",
     "seek": "at most depth+1 ancestors, no completed sibling replay"
@@ -48,7 +81,7 @@
     "ownerRows": 1024,
     "globalRows": 4096
   },
-  "quotaAuthority": "lib.tool_result_query_contract reads these hard ceilings; launch TOFU_BROWSER_STAGING_MAX_MIB may tighten byte admission",
+  "quotaAuthority": "lib.tool_results.tool_result_query_contract reads these hard ceilings; launch TOFU_BROWSER_STAGING_MAX_MIB may tighten byte admission",
   "response": {
     "tokens": 7000,
     "overflow": "requery same cursor with smaller limit; metadata-only overflow explicitly refuses without self-loop continuation"

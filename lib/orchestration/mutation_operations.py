@@ -13,7 +13,7 @@ from lib.orchestration.mutation_result import (
     MUTATION_CONFLICT,
     OrchestrationMutationResult,
 )
-from lib.task_runtime_ports import TaskAbortRuntimePort
+from lib.task_replay.task_runtime_ports import TaskAbortRuntimePort
 
 
 def resolved_mutation(

@@ -33,3 +33,7 @@ its contract is in `docs/modules/tools_execution.md`. `HandlerResolver` owns dyn
 Run focused MCP protocol, lifecycle, liveness, cancellation, normalization,
 visibility, and tool-registry tests. Use live external servers only as explicit
 opt-in smoke tests.
+
+`declarations.py` owns bounded wire validation shared by transient SDK scopes and
+the durable conversation repository. Keep validation independent of storage;
+verify declaration lifecycle tests and the installed native model/tool cycle.

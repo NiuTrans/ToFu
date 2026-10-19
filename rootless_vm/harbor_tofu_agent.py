@@ -24,7 +24,7 @@ from typing import Any
 from harbor.agents.base import BaseAgent
 from harbor.environments.base import BaseEnvironment
 from harbor.models.agent.context import AgentContext
-from lib.llm_errors import PromptTooLongError
+from lib.llm.llm_errors import PromptTooLongError
 from rootless_vm.host_paths import private_temporary_root, validate_host_path
 from rootless_vm.trajectory import persist_host_atif
 

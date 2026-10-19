@@ -37,6 +37,9 @@ class _AppFixture:
         self.app.config.setdefault('PROVIDE_AUTOMATIC_OPTIONS', True)
         self.app.config['TESTING'] = True
 
+        from lib.http_transport.error_handlers import register_http_error_handlers
+        register_http_error_handlers(self.app)
+
         # Register the bearer auth hook + a couple of blueprints.
         from routes.api_v1.auth import (
             attach_rate_headers, bearer_auth_before_request,
@@ -288,13 +291,19 @@ class IntegrationTest(unittest.TestCase):
                 self.assertTrue(body['ok'])
                 self.assertEqual(body['items'], [])
 
-                # 1. Create.
+                # 1. Create (with a bound default project path).
                 r = await cli.post('/api/v1/folders', headers=hdrs,
-                                   json={'name': 'Work', 'color': '#f00'})
+                                   json={'name': 'Work', 'color': '#f00',
+                                         'projectPaths': ['~/Projects/tofu',
+                                                          '/mnt/data/ref',
+                                                          '~/Projects/tofu']})
                 self.assertEqual(r.status_code, 201)
                 folder = await r.get_json()
                 self.assertEqual(folder['name'], 'Work')
                 self.assertEqual(folder['color'], '#f00')
+                self.assertEqual(folder['projectPaths'],
+                                 ['~/Projects/tofu', '/mnt/data/ref'])
+                self.assertEqual(folder['projectPath'], '~/Projects/tofu')
                 fid = folder['id']
                 self.assertTrue(fid.startswith('f_'))
 
@@ -303,13 +312,24 @@ class IntegrationTest(unittest.TestCase):
                                    json={'name': '   '})
                 self.assertEqual(r.status_code, 400)
 
-                # 3. Update.
+                # 3. Update (rename + collapse; replace the bound roots).
                 r = await cli.put(f'/api/v1/folders/{fid}', headers=hdrs,
-                                  json={'name': 'Personal', 'collapsed': True})
+                                  json={'name': 'Personal', 'collapsed': True,
+                                        'projectPaths': ['/only/one']})
                 self.assertEqual(r.status_code, 200)
                 updated = await r.get_json()
                 self.assertEqual(updated['name'], 'Personal')
                 self.assertTrue(updated['collapsed'])
+                self.assertEqual(updated['projectPaths'], ['/only/one'])
+                self.assertEqual(updated['projectPath'], '/only/one')
+
+                # 3b. Legacy scalar update replaces the primary root.
+                r = await cli.put(f'/api/v1/folders/{fid}', headers=hdrs,
+                                  json={'projectPath': '/new/primary'})
+                self.assertEqual(r.status_code, 200)
+                updated = await r.get_json()
+                self.assertEqual(updated['projectPaths'][0], '/new/primary')
+                self.assertEqual(updated['projectPath'], '/new/primary')
 
                 # 4. Update unknown id → 404.
                 r = await cli.put('/api/v1/folders/f_nope', headers=hdrs,

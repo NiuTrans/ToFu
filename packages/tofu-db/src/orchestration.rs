@@ -6,6 +6,9 @@
 //! label before returning data.
 
 pub(crate) mod migration;
+#[cfg(feature = "native-runtime-checkpoints")]
+#[path = "orchestration_goal_claim.rs"]
+pub(crate) mod goal_claim;
 
 use std::io;
 

@@ -36,8 +36,16 @@ def _task() -> dict:
 
 
 def _patch_common(monkeypatch, admission, context_limit):
-    monkeypatch.setattr(admission, '_resolved_ceiling',
-                        lambda task, *, round_num: (60_000, 60_000))
+    def resolve(task, *, round_num, input_tokens=None):
+        # Simulate an advisory rewrite target below a physical safety ceiling.
+        # Deferral cannot borrow raw output or bypass that safety boundary.
+        task['_contextBudgetDecision'] = {
+            'contextWindowTokens': context_limit,
+            'windowSafetyTokens': 140_000,
+            'resolvedOutputTokens': 65_536,
+        }
+        return 140_000, 60_000
+    monkeypatch.setattr(admission, '_resolved_ceiling', resolve)
     monkeypatch.setattr(admission, 'force_compact_if_needed',
                         lambda *a, **k: False)
     monkeypatch.setattr(

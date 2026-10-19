@@ -17,7 +17,7 @@ def test_frozen_probe_preserves_existing_user_file(tmp_path):
 import sys
 sys.frozen = True
 sys.executable = sys.argv[1]
-import lib.runtime_paths
+import lib.runtime.runtime_paths
 import lib.log
 ''', str(tmp_path / 'Tofu')], env=env, capture_output=True, text=True, timeout=20)
     assert result.returncode == 0, result.stderr
@@ -61,7 +61,7 @@ with ThreadPoolExecutor(max_workers=8) as workers:
     values = list(workers.map(resolve, range(8)))
 assert count == 1, count
 assert len(set(values)) == 1
-import lib.runtime_paths as paths
+import lib.runtime.runtime_paths as paths
 import lib.log as logs
 assert paths._BASE == values[0]
 assert logs.LOG_DIR == values[0] + '/logs'

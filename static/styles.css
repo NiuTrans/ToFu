@@ -1,3 +1,386 @@
+/* Source-bound facts use the shared dialog, controls and layout primitives. */
+.working-facts { overflow-wrap: anywhere; }
+.working-facts fieldset { min-width: 0; border: 0; padding: 0; margin: 0; }
+.working-facts details { border-bottom: 1px solid var(--border); padding-block: var(--space-2); }
+.working-facts summary { cursor: pointer; font-weight: var(--weight-semibold); }
+.working-facts details > .ui-stack { padding-block: var(--space-3); }
+.working-facts p, .working-facts blockquote { margin: 0; }
+.working-facts blockquote { border-inline-start: 1px solid var(--border); padding-inline-start: var(--space-3); }
+/* Composable response surfaces. Controls stay owned by the shared UI kit. */
+.rich-layout,.rich-layout-content{display:flex;flex-direction:column;gap:var(--space-4);min-width:0}
+.rich-layout[data-mode="grid"]{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,24rem),1fr));align-items:start}
+.rich-layout-group{min-width:0}
+.rich-layout-group>h3{font-size:var(--font-size-sm);font-weight:var(--weight-semibold);color:var(--text-secondary);margin:0 0 var(--space-3)}
+.rich-layout[data-density="compact"] .rich-layout-content{gap:var(--space-2)}
+.rich-layout .rich-block{margin:0;min-width:0}
+.rich-indicator-grid,.rich-resource-overview{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,12rem),1fr));gap:var(--space-3)}
+.rich-indicator,.rich-resource-capacity{padding:var(--space-4);border:var(--control-edge-inset) solid var(--border);border-radius:var(--radius);background:var(--bg-secondary);min-width:0}
+.rich-indicator h3,.rich-resource-capacity h4{margin:0 0 var(--space-2);font-size:var(--font-size-sm);font-weight:var(--weight-medium);color:var(--text-secondary)}
+.rich-indicator-value,.rich-resource-capacity>strong{display:block;font-size:var(--font-size-2xl);font-weight:var(--weight-semibold);font-variant-numeric:tabular-nums;color:var(--text-primary)}
+.rich-indicator p,.rich-resource-capacity p{margin:var(--space-2) 0 0;color:var(--text-secondary);font-size:var(--font-size-xs);overflow-wrap:anywhere}
+.rich-indicator[data-tone="warning"],.rich-notice[data-tone="warning"]{border-color:var(--warning-border)}
+.rich-indicator[data-tone="error"],.rich-notice[data-tone="error"]{border-color:var(--error-border)}
+.rich-indicator[data-tone="success"],.rich-notice[data-tone="success"]{border-color:var(--success-border)}
+.rich-sparkline{display:block;width:100%;height:2.5rem;margin-top:var(--space-3);overflow:visible;color:var(--accent)}
+.rich-sparkline polyline{fill:none;stroke:currentColor;stroke-width:2;vector-effect:non-scaling-stroke}
+.rich-indicator details{font-size:var(--font-size-xs);margin-top:var(--space-2)}
+.rich-notice{border-inline-start:var(--space-1) solid var(--info-border);border-radius:var(--radius);padding:var(--space-3) var(--space-4);background:var(--bg-secondary)}
+.rich-notice p{margin:0;color:var(--text-secondary)}
+.rich-notice .rich-notice-message{color:var(--text-primary);font-weight:var(--weight-medium)}
+.rich-notice p+p{margin-top:var(--space-2)}
+.rich-workflow{list-style:none;padding:0;margin:0;display:flex;flex-direction:column;gap:var(--space-3)}
+.rich-workflow li{display:grid;grid-template-columns:auto 1fr;gap:var(--space-1) var(--space-3);align-items:baseline;padding:var(--space-3);border:var(--control-edge-inset) solid var(--border);border-radius:var(--radius);background:var(--bg-secondary)}
+.rich-workflow li>p{grid-column:2;margin:0;color:var(--text-secondary);font-size:var(--font-size-sm)}
+.rich-workflow li>strong{font-weight:var(--weight-medium);font-size:var(--font-size-sm)}
+.rich-step-status{font-size:var(--font-size-xs);font-weight:var(--weight-semibold);color:var(--text-secondary)}
+.rich-workflow [data-state="running"] .rich-step-status{color:var(--info-text)}
+.rich-workflow [data-state="completed"] .rich-step-status{color:var(--success-text)}
+.rich-workflow [data-state="failed"] .rich-step-status{color:var(--error-text)}
+.rich-workflow [data-state="blocked"] .rich-step-status{color:var(--warning-text)}
+.rich-next-step{padding:var(--space-3);margin:var(--space-3) 0 0;border-radius:var(--radius);background:var(--info-bg);color:var(--info-text);font-size:var(--font-size-sm)}
+.rich-resource-panel{display:flex;flex-direction:column;gap:var(--space-3);min-width:0}
+.rich-resource-panel p{margin:0}
+.rich-resource-status{font-size:var(--font-size-sm);color:var(--text-secondary)}
+.rich-resource-panel[data-state="error"] .rich-resource-status{color:var(--warning-text)}
+.rich-resource-panel[data-state="loading"] .rich-resource-status{color:var(--info-text)}
+.rich-resource-provenance,.rich-resource-note{font-size:var(--font-size-xs);color:var(--text-secondary);overflow-wrap:anywhere}
+.rich-resource-scroll-hint{font-size:var(--font-size-xs);color:var(--text-secondary)}
+.rich-resource-filters{display:grid;grid-template-columns:2fr 1fr 1fr;gap:var(--space-3);min-width:0}
+.rich-resource-panel table{width:100%;font-size:var(--font-size-sm);font-variant-numeric:tabular-nums}
+.rich-resource-panel th,.rich-resource-panel td{text-align:start;padding:var(--space-2) var(--space-3);vertical-align:top}
+.rich-resource-panel th[scope="row"]{font-weight:var(--weight-medium);overflow-wrap:anywhere;min-width:10rem;max-width:20rem}
+.rich-resource-panel td:nth-child(n+3){white-space:nowrap;text-align:end}
+.rich-resource-empty{padding:var(--space-5);text-align:center;color:var(--text-secondary);border:var(--control-edge-inset) dashed var(--border);border-radius:var(--radius)}
+.rich-resource-source{font-size:var(--font-size-xs);color:var(--text-secondary)}
+.rich-resource-source pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:20rem;overflow:auto}
+.rich-resource-panel [hidden]{display:none!important}
+@media(max-width:600px){.rich-resource-filters{grid-template-columns:1fr}.rich-resource-overview{grid-template-columns:1fr}.rich-indicator-value{font-size:var(--font-size-xl)}}
+
+.rich-guidance-form,.rich-guidance-form fieldset{display:flex;flex-direction:column;gap:var(--space-3);min-width:0}
+.rich-guidance-form fieldset{border:0;padding:0;margin:0}
+.rich-guidance-form>p{margin:0;color:var(--text-secondary);font-size:var(--font-size-sm)}
+.rich-resource-launcher{padding:var(--space-4);border:var(--control-edge-inset) solid var(--border);border-radius:var(--radius);background:var(--bg-primary)}
+.rich-resource-launcher>summary{font-weight:var(--weight-semibold);cursor:pointer}
+.rich-resource-launcher[open]>summary{margin-bottom:var(--space-4)}
+.rich-resource-launcher>.ui-toolbar{margin-bottom:var(--space-3)}
+/* Version-bound owner review shares kit controls and the existing panel. */
+.artifact-review {
+  flex: 0 1 auto;
+  min-height: 0;
+  max-height: 70%;
+  overflow: auto;
+  padding: var(--space-3);
+  border-bottom: thin solid var(--border);
+}
+.artifact-review[hidden], .artifact-review [hidden] { display: none; }
+.artifact-review h3, .artifact-review p { margin: 0; }
+.artifact-review h3 { font-size: var(--font-size-lg); }
+.artifact-review > .ui-btn { align-self: flex-start; }
+
+.artifact-review[data-turn-review] { max-height: none; overflow-wrap: anywhere; border-bottom: 0; }
+.artifact-review fieldset { min-width: 0; border: 0; padding: 0; margin: 0; }
+.artifact-review legend { font-weight: var(--weight-semibold); margin-block-end: var(--space-2); }
+/* Project workspace layout; controls and modal behavior belong to the UI kit. */
+.coordination-workspace {
+  width: min(72rem, calc(100vw - var(--space-6)));
+  max-width: calc(100vw - var(--space-6));
+}
+.coordination-workspace p,
+.coordination-workspace h3 { margin: var(--space-0); }
+.coordination-workspace h3 { font-size: var(--font-size-lg); }
+.coordination-workspace small { color: var(--text-secondary); }
+.coordination-workspace article,
+.coordination-entry { overflow-wrap: anywhere; min-width: 0; }
+.coordination-entry { border-inline-start: var(--space-1) solid var(--accent); }
+.coordination-work-grid { grid-template-columns: repeat(auto-fit, minmax(min(100%, 19rem), 1fr)); }
+@media (max-width: 480px) {
+  .coordination-workspace { width: calc(100vw - var(--space-2)); max-width: calc(100vw - var(--space-2)); }
+}
+
+/* Conversation-first project chrome; ordinary chat retains its canvas. */
+
+.coordination-conversation-column { display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; overflow: hidden; }
+#projectCoordinatorEntry { flex-shrink: 0; }
+/* The sidebar entry is a compact project hub card: identity mark, role name and
+ * a one-line work tally, so it reads as navigation instead of a stray label. */
+.coordination-leader {
+  display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2);
+  padding: var(--space-2); margin: var(--space-2) var(--space-2) var(--space-1);
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: var(--bg-primary); color: var(--text-primary);
+  transition: border-color var(--motion-fast) var(--ease-standard), background var(--motion-fast) var(--ease-standard);
+}
+.coordination-leader[data-coordinator-id]:not([data-coordinator-id=""]) { cursor: pointer; }
+.coordination-leader[data-coordinator-id]:not([data-coordinator-id=""]):hover,
+.coordination-leader[data-coordinator-id]:not([data-coordinator-id=""]):focus-visible {
+  border-color: var(--accent); background: var(--bg-hover); outline: none;
+}
+.coordination-leader[data-coordinator-id]:not([data-coordinator-id=""])[aria-current="page"] {
+  border-color: var(--accent); background: var(--accent-subtle);
+}
+.coordination-leader-mark {
+  display: inline-flex; align-items: center; justify-content: center;
+  inline-size: var(--space-6); block-size: var(--space-6); flex-shrink: 0;
+  border-radius: var(--radius-xs); background: var(--accent-subtle); color: var(--accent);
+}
+.coordination-leader-mark svg { inline-size: var(--space-4); block-size: var(--space-4); display: block; }
+.coordination-leader-body { display: flex; flex-direction: column; min-width: 0; flex: 1; }
+.coordination-leader-label {
+  font-weight: var(--weight-semibold); line-height: var(--leading-tight);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.coordination-leader-meta {
+  color: var(--text-tertiary); font-size: var(--font-size-xs); line-height: var(--leading-tight);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.coordination-leader-go { color: var(--text-tertiary); flex-shrink: 0; font-size: var(--font-size-lg); line-height: 1; }
+.coordination-leader-actions {
+  flex-basis: 100%; display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1);
+}
+.coordination-leader-actions small { color: var(--text-secondary); }
+
+.coordination-summary {
+  padding: var(--space-3); color: var(--text-secondary);
+  border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--bg-secondary); min-width: 0; max-width: 100%; box-sizing: border-box;
+}
+.coordination-summary summary {
+  cursor: pointer; color: var(--text-primary); font-weight: var(--weight-semibold);
+  display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-2); min-width: 0;
+}
+.coordination-summary-title { flex: 1 1 8rem; min-width: 0; }
+.coordination-summary-tally {
+  color: var(--text-tertiary); font-size: var(--font-size-xs); font-weight: var(--weight-regular);
+  font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+.coordination-summary-actions { display: inline-flex; flex-wrap: wrap; align-items: center; gap: var(--space-1); font-weight: var(--weight-normal); }
+.coordination-summary p { margin: var(--space-1) var(--space-0); white-space: pre-wrap; overflow-wrap: anywhere; }
+.coordination-summary-work { padding-block: var(--space-2); }
+
+#presenceStrip:has(.coordination-summary) { padding: var(--space-3) var(--space-4); }
+.coordination-summary summary:focus-visible { outline: var(--control-edge-inset) solid var(--accent); box-shadow: var(--focus-ring); }
+
+/* Graph workspace: geometry uses the same --space-4 cells as the projection.
+ * Container queries select wires and node positions together, including split panes. */
+.coordination-task-graph { display: flex; flex-direction: column; gap: var(--space-2); min-width: 0; max-width: 100%; color: var(--text-primary); }
+.coordination-task-graph h3, .coordination-task-graph p { margin: var(--space-0); }
+.coordination-task-graph h3 { font-size: var(--font-size-md); }
+.coordination-task-graph small { color: var(--text-secondary); font-size: var(--font-size-sm); }
+.coordination-canvas { container: coordination-canvas / inline-size; min-width: 0; }
+.coordination-canvas-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1); margin-block: var(--space-2); }
+.coordination-zoom-label { color: var(--text-secondary); font-size: var(--font-size-xs); font-variant-numeric: tabular-nums; }
+.coordination-graph-viewport {
+  min-width: 0; max-width: 100%; max-height: min(48vh, 36rem); overflow: auto; overscroll-behavior: contain;
+  border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-primary);
+  background-image: radial-gradient(var(--border) 1px, transparent 1px); background-size: var(--space-4) var(--space-4);
+}
+.coordination-graph-viewport:focus-visible { outline: var(--control-edge-inset) solid var(--accent); box-shadow: var(--focus-ring); }
+.coordination-graph-sheet {
+  --graph-width: var(--graph-width-3); --graph-height: var(--graph-height-3);
+  width: calc(var(--graph-width) * var(--space-4) * var(--coordination-zoom, 1));
+  height: calc(var(--graph-height) * var(--space-4) * var(--coordination-zoom, 1));
+}
+.coordination-graph-stage {
+  position: relative; width: calc(var(--graph-width) * var(--space-4)); height: calc(var(--graph-height) * var(--space-4));
+  transform: scale(var(--coordination-zoom, 1)); transform-origin: top left;
+}
+.coordination-graph-edges { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; }
+.coordination-graph-edges:not([data-columns="3"]) { display: none; }
+.coordination-graph-edges path { fill: none; stroke: var(--text-tertiary); stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+.coordination-graph-edges [data-edge-kind="dispatch"] { stroke-dasharray: 4 4; }
+.coordination-graph-edges [data-edge-kind="dependency"] { stroke: var(--accent); stroke-width: 2; }
+.coordination-graph-edges [data-edge-kind="rework"] { stroke: var(--warning-text); stroke-dasharray: 2 3; }
+.coordination-graph-node {
+  --graph-x: var(--graph-x-3); --graph-y: var(--graph-y-3);
+  position: absolute; left: calc(var(--graph-x) * var(--space-4)); top: calc(var(--graph-y) * var(--space-4));
+  width: calc(14 * var(--space-4)); height: calc(7 * var(--space-4)); box-sizing: border-box;
+  display: grid; grid-template-columns: var(--space-4) 1fr; align-content: start; align-items: start; gap: var(--space-2);
+  padding: var(--space-2); border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--bg-primary); box-shadow: var(--shadow-sm); color: var(--text-primary);
+}
+.coordination-graph-node[data-node-kind="coordinator"] { border-color: var(--accent); background: var(--accent-subtle); }
+.coordination-graph-node[data-node-kind="reference"] { border-style: dashed; }
+.coordination-graph-node[data-selected="true"] { outline: var(--control-edge-inset) solid var(--accent); }
+.coordination-graph-node button { min-width: 0; max-height: calc(4 * var(--space-4)); overflow: hidden; justify-content: flex-start; text-align: start; }
+.coordination-node-signal { display: inline-flex; align-items: center; justify-content: center; min-height: var(--space-6); font-size: var(--font-size-lg); color: var(--text-secondary); }
+.coordination-graph-node[data-status="running"] .coordination-node-signal { color: var(--accent); }
+.coordination-graph-node[data-status="completed"] .coordination-node-signal { color: var(--success-text); }
+.coordination-graph-node[data-status="failed"] .coordination-node-signal { color: var(--error-text); }
+.coordination-graph-node[data-status="blocked"] .coordination-node-signal { color: var(--warning-text); }
+.coordination-node-digest { grid-column: 1 / -1; color: var(--text-secondary); font-size: var(--font-size-xs); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.coordination-node-inspector { display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-2); padding: var(--space-3); margin-block-start: var(--space-2); background: var(--bg-primary); border-inline-start: var(--space-1) solid var(--accent); border-radius: var(--radius-sm); overflow-wrap: anywhere; }
+.coordination-node-inspector[hidden] { display: none; }
+.coordination-node-inspector p { font-size: var(--font-size-sm); }
+.coordination-edge-legend { display: flex; flex-wrap: wrap; gap: var(--space-3); padding-block: var(--space-2); color: var(--text-secondary); font-size: var(--font-size-xs); }
+.coordination-edge-legend span { display: inline-flex; align-items: center; gap: var(--space-1); }
+.coordination-edge-legend span::before { content: ''; width: var(--space-4); border-top: 1px dashed var(--text-tertiary); }
+.coordination-edge-legend [data-edge-legend="dependency"]::before { border-top: 2px solid var(--accent); }
+.coordination-edge-legend [data-edge-legend="rework"]::before { border-color: var(--warning-text); border-top-style: dotted; }
+.coordination-canvas-empty { padding: var(--space-3); color: var(--text-secondary); font-size: var(--font-size-sm); }
+.coordination-graph-coverage { color: var(--text-secondary); font-size: var(--font-size-xs); }
+.coordination-graph-coverage summary { cursor: pointer; font-weight: var(--weight-regular); }
+.coordination-graph-coverage small { display: block; padding-block-start: var(--space-1); }
+@container coordination-canvas (max-width: 800px) {
+  .coordination-graph-sheet { --graph-width: var(--graph-width-2); --graph-height: var(--graph-height-2); }
+  .coordination-graph-node { --graph-x: var(--graph-x-2); --graph-y: var(--graph-y-2); }
+  .coordination-graph-edges[data-columns="3"] { display: none; }
+  .coordination-graph-edges[data-columns="2"] { display: block; }
+}
+@container coordination-canvas (max-width: 530px) {
+  .coordination-graph-sheet { --graph-width: var(--graph-width-1); --graph-height: var(--graph-height-1); }
+  .coordination-graph-node { --graph-x: var(--graph-x-1); --graph-y: var(--graph-y-1); }
+  .coordination-graph-edges[data-columns="2"] { display: none; }
+  .coordination-graph-edges[data-columns="1"] { display: block; }
+}
+@media (max-width: 480px) { .coordination-summary { padding: var(--space-2); } }
+
+/* Coordinator attention is tied to a real assistant message, not task counts. */
+.coordination-leader-unread { margin-inline-start: var(--space-2); color: var(--accent); }
+.coordination-leader[data-unread="true"] .coordination-leader-meta { color: var(--text-primary); }
+.coordination-report { color: var(--text-primary); margin-block-end: var(--space-2); padding: var(--space-2) var(--space-3); border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-primary); }
+.coordination-report[data-unread="true"] { border-inline-start: var(--space-1) solid var(--accent); }
+.coordination-report summary { cursor: pointer; overflow-wrap: anywhere; font-size: var(--font-size-sm); }
+.coordination-report-kind { color: var(--text-secondary); font-size: var(--font-size-xs); margin-inline-end: var(--space-2); }
+.coordination-report-body { display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-2); padding-block-start: var(--space-3); max-height: min(30vh, 20rem); overflow: auto; }
+.coordination-report-body p { margin: var(--space-0); white-space: pre-wrap; overflow-wrap: anywhere; font-size: var(--font-size-sm); }
+.coordination-report-body small { color: var(--text-secondary); font-size: var(--font-size-xs); }
+.coordination-report summary:focus-visible, .coordination-report-body:focus-visible { outline: var(--control-edge-inset) solid var(--accent); box-shadow: var(--focus-ring); }
+.coordinator-budget-metrics,
+.coordinator-budget-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 12rem), 1fr));
+  gap: var(--space-4);
+}
+
+.coordinator-budget,
+.coordinator-budget-settings {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+/* Native rich response: reading visuals only; controls are UI factories. */
+
+.rich-response [hidden] { display: none !important; }
+.rich-response { display: flex; flex-direction: column; gap: var(--space-3); min-width: 0; color: var(--text-primary); }
+.rich-response h2 { font-size: var(--font-size-xl); margin: 0; }
+.rich-block { border: var(--control-edge-inset) solid var(--border); border-radius: var(--radius-md); background: var(--bg-secondary); padding: var(--space-3); min-width: 0; }
+.rich-block > summary { font-weight: var(--weight-semibold); cursor: pointer; overflow-wrap: anywhere; }
+.rich-block > :not(summary) { margin-top: var(--space-3); }
+.rich-table-scroll { overflow: auto; max-width: 100%; }
+.rich-response table { border-collapse: collapse; width: 100%; min-width: 36rem; font-size: var(--font-size-sm); }
+.rich-response th, .rich-response td { text-align: start; vertical-align: top; padding: var(--space-2); border-bottom: var(--control-edge-inset) solid var(--border); overflow-wrap: anywhere; }
+.rich-response th { font-weight: var(--weight-semibold); }
+.rich-response figure { margin: 0; display: flex; flex-wrap: wrap; gap: var(--space-2); }
+.rich-response img { max-width: 100%; height: auto; object-fit: contain; }
+.rich-response figcaption { flex-basis: 100%; color: var(--text-secondary); overflow-wrap: anywhere; }
+.rich-response dd { margin: 0 0 var(--space-3); white-space: pre-wrap; overflow-wrap: anywhere; }
+.rich-response dt { font-weight: var(--weight-semibold); }
+.rich-warning { color: var(--warning-text); border-inline-start: var(--space-1) solid var(--warning-text); padding: var(--space-2); }
+.rich-chart-row { display: flex; flex-direction: column; gap: var(--space-2); }
+.rich-pending { white-space: pre-wrap; overflow-wrap: anywhere; background: var(--bg-secondary); padding: var(--space-3); font-size: var(--font-size-sm); }
+.rich-response :focus-visible { outline: var(--space-1) solid var(--accent); outline-offset: var(--space-1); }
+
+.rich-metric-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 14rem), 1fr)); gap: var(--space-3); }
+.rich-metric { display: flex; flex-direction: column; gap: var(--space-2); border: var(--control-edge-inset) solid var(--border); border-radius: var(--radius-md); padding: var(--space-3); background: var(--bg-primary); min-width: 0; }
+.rich-metric h3 { margin: 0; font-size: var(--font-size-lg); font-weight: var(--weight-semibold); overflow-wrap: anywhere; }
+.rich-metric strong { font-size: var(--font-size-3xl); line-height: var(--leading-title); overflow-wrap: anywhere; }
+.rich-metric p { margin: 0; color: var(--text-secondary); font-size: var(--font-size-sm); }
+.rich-status { font-size: var(--font-size-sm); font-weight: var(--weight-semibold); color: var(--text-secondary); }
+.rich-metric[data-status="failed"] .rich-status { color: var(--error-text); }
+.rich-metric[data-status="passed"] .rich-status { color: var(--success-text); }
+.rich-metric[data-status="unknown"] .rich-status { color: var(--warning-text); }
+.rich-actions { display: flex; gap: var(--space-2); flex-wrap: wrap; align-items: center; }
+.rich-response > p { margin: 0; color: var(--text-secondary); font-size: var(--font-size-md); overflow-wrap: anywhere; }
+.rich-block { font-family: var(--font-ui); }
+.rich-chart-row h3 { margin: 0; font-size: var(--font-size-lg); }
+.md-inaccessible-attachment { display: block; padding: var(--space-3); color: var(--warning-text); background: var(--warning-bg); border-inline-start: var(--space-1) solid var(--warning-border); border-radius: var(--radius-sm); overflow-wrap: anywhere; }
+
+/* Numeric SVG geometry is presenter-owned; all paints/type consume theme tokens. */
+.rich-timeline { min-width: 0; }
+.rich-timeline-scroll { overflow: auto; max-width: 100%; }
+.rich-timeline-plot { display: block; width: 100%; min-width: 36rem; font-family: var(--font-ui); font-size: var(--font-size-sm); }
+.rich-timeline-track { fill: var(--bg-primary); }
+.rich-timeline-grid { stroke: var(--border); stroke-width: var(--control-edge-inset); vector-effect: non-scaling-stroke; }
+.rich-timeline-interval { stroke-width: var(--control-edge-inset); vector-effect: non-scaling-stroke; }
+.rich-timeline-video { fill: var(--info-bg); stroke: var(--info-border); }
+.rich-timeline-audio { fill: var(--success-bg); stroke: var(--success-border); }
+.rich-timeline-photo { fill: var(--warning-bg); stroke: var(--warning-border); }
+.rich-timeline-other { fill: var(--bg-secondary); stroke: var(--border); }
+.rich-timeline-lane-label, .rich-timeline-interval-label { fill: var(--text-primary); }
+.rich-timeline-tick { fill: var(--text-secondary); font-size: var(--font-size-xs); }
+.rich-timeline-marker { stroke: var(--accent); stroke-width: var(--space-0-5); vector-effect: non-scaling-stroke; }
+.rich-timeline-marker-label { fill: var(--text-primary); font-weight: var(--weight-semibold); }
+.rich-timeline-data { margin-top: var(--space-3); }
+.rich-timeline-data > summary { cursor: pointer; font-size: var(--font-size-sm); }
+.rich-timeline-data caption { text-align: start; padding: var(--space-2); color: var(--text-secondary); }
+/* Owner-bound human guidance layout; behavioral radio/button styles belong to the kit. */
+.rich-choices { display: grid; gap: var(--space-3); min-width: 0; }
+.rich-choices fieldset { display: grid; gap: var(--space-3); min-width: 0; border: 0; padding: 0; margin: 0; }
+.rich-choices legend { font-weight: var(--weight-semibold); margin-bottom: var(--space-2); }
+.rich-choices p { margin: 0; overflow-wrap: anywhere; }
+.rich-choices [role="status"] { color: var(--text-secondary); font-size: var(--font-size-sm); }
+.rich-choices .ui-choice { max-width: 100%; overflow-wrap: anywhere; }
+.rich-choice-description { color: var(--text-secondary); font-size: var(--font-size-sm); }
+/* Source citations: supplied metadata only, with no remote thumbnail residency. */
+.rich-citation-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  padding-block: var(--space-2);
+}
+.rich-citation-chip {
+  display: inline-flex;
+  max-width: 100%;
+  vertical-align: baseline;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-secondary);
+  overflow-wrap: anywhere;
+}
+.rich-citation-preview {
+  min-width: 0;
+  max-width: 100%;
+  font-size: var(--font-size-md);
+  line-height: var(--leading-body);
+  overflow-wrap: anywhere;
+}
+.rich-citation-preview p,
+.rich-citation-preview blockquote {
+  margin: 0 0 var(--space-3);
+  white-space: pre-wrap;
+}
+.rich-citation-preview a {
+  display: block;
+  color: var(--accent);
+  margin-bottom: var(--space-4);
+}
+.rich-citation-preview a:focus-visible { box-shadow: var(--focus-ring); }
+/* Data-chart owner: theme paints/type only; SVG geometry belongs to data-chart.ts. */
+.rich-data-chart { min-width: 0; font-family: var(--font-ui); }
+.rich-data-chart-scroll, .rich-data-chart-table { overflow: auto; max-width: 100%; }
+.rich-data-chart-plot { display: block; width: 100%; min-width: 36rem; font-size: var(--font-size-sm); }
+.rich-data-chart-grid { stroke: var(--border); stroke-width: var(--control-edge-inset); vector-effect: non-scaling-stroke; }
+.rich-data-chart-axis { stroke: var(--text-secondary); stroke-width: var(--control-edge-inset); vector-effect: non-scaling-stroke; }
+.rich-data-chart-tick { fill: var(--text-secondary); font-size: var(--font-size-xs); }
+.rich-data-chart-label { fill: var(--text-primary); font-size: var(--font-size-sm); }
+.rich-data-chart-slice-label { fill: var(--bg-primary); stroke: var(--text-primary); stroke-width: var(--control-edge-inset); paint-order: stroke; font-weight: var(--weight-semibold); }
+.rich-data-chart-mark { fill: currentColor; stroke: var(--bg-primary); stroke-width: var(--control-edge-inset); vector-effect: non-scaling-stroke; }
+.rich-data-chart-line { fill: none; stroke: currentColor; stroke-width: var(--space-0-5); vector-effect: non-scaling-stroke; }
+.rich-data-chart-paint-0 { color: var(--accent); }
+.rich-data-chart-paint-1 { color: var(--success-text); }
+.rich-data-chart-paint-2 { color: var(--warning-text); }
+.rich-data-chart-paint-3 { color: var(--info-text); }
+.rich-data-chart-paint-4 { color: var(--error-text); }
+.rich-data-chart-paint-5 { color: var(--text-secondary); }
+.rich-data-chart-paint-6 { color: var(--text-primary); }
+.rich-data-chart-paint-7 { color: var(--accent-hover); }
+.rich-data-chart-legend { display: flex; flex-wrap: wrap; column-gap: var(--space-8); row-gap: var(--space-2); margin: var(--space-3) 0; padding-inline-start: var(--space-6); color: var(--text-primary); font-size: var(--font-size-sm); }
+.rich-data-chart-legend li { overflow-wrap: anywhere; }
+.rich-data-chart-table table { border-collapse: collapse; width: 100%; min-width: 36rem; font-size: var(--font-size-sm); }
+.rich-data-chart-table th, .rich-data-chart-table td { text-align: start; padding: var(--space-2); border-bottom: var(--control-edge-inset) solid var(--border); overflow-wrap: anywhere; }
+.rich-data-chart-table th { font-weight: var(--weight-semibold); }
+.rich-data-chart-table caption { text-align: start; padding: var(--space-2); color: var(--text-secondary); }
+.rich-data-chart :focus-visible { outline: var(--space-1) solid var(--accent); outline-offset: var(--space-1); }
+.rich-data-chart-plot--pie { min-width: 0; max-height: 24rem; }
 /* ══════════════════════════════════════════════════════════════════════════
    TOFU DESIGN TOKENS — foundation layer (composed FIRST, see manifest.json)
 
@@ -56,10 +439,23 @@
   --conversation-font-size-meta:var(--font-size-sm);
   --conversation-font-size-caption:var(--font-size-xs);
   --conversation-font-size-table:var(--font-size-lg);
-  --conversation-font-size-heading-1:var(--font-size-3xl);
-  --conversation-font-size-heading-2:var(--font-size-2xl);
-  --conversation-font-size-heading-3:var(--font-size-xl);
+  --conversation-font-size-heading-1:var(--font-size-4xl);
+  --conversation-font-size-heading-2:var(--font-size-3xl);
+  --conversation-font-size-heading-3:var(--font-size-2xl);
   --conversation-reading-measure:720px;
+  /* Mixed chronology: shared process row, label column and evidence inset.
+     Content order stays in the Surface; these tokens only set reading geometry. */
+  --conversation-process-font-size:var(--font-size-lg);
+  --conversation-process-row-height:var(--control-h-md);
+  --conversation-process-inset:var(--space-2);
+  --conversation-process-marker:var(--space-4);
+  --conversation-process-gap:var(--space-2);
+  --conversation-process-indent:calc(var(--conversation-process-inset) + var(--conversation-process-marker) + var(--conversation-process-gap));
+  --conversation-flow-gap:var(--space-1);
+  --conversation-prose-gap:var(--space-4);
+  --conversation-process-radius:12px;
+  --conversation-process-shell-inset:var(--space-2);
+  --conversation-answer-gap:var(--space-8);
   --inspector-reading-measure:860px;
   --weight-regular:400;
   --weight-medium:500;
@@ -72,10 +468,25 @@
   --control-edge-inset:1px;
   --tool-receipt-label-width:96px;
   --tool-source-chip-measure:360px;
+
   --radius-pill:999px;
   --control-h-sm:28px;
   --control-h-md:34px;
   --control-h-lg:42px;
+
+  /* Project workbench chrome: geometry is identical across themes. */
+  --project-dialog-measure:920px;
+  --project-frame-width:3px;
+  --project-panel-width:2px;
+  --project-surface:var(--bg-secondary);
+  --project-panel:var(--bg-primary);
+  --project-band:var(--bg-tertiary);
+  --project-ink:var(--text-primary);
+  --project-muted:var(--text-secondary);
+  --project-line:var(--border);
+  --project-accent:var(--accent);
+  --project-accent-hover:var(--accent-hover);
+  --project-on-accent:var(--text-on-accent);
 
   /* ── Motion ────────────────────────────────────────────────────────────
      --ease-standard matches the legacy --transition timing. */
@@ -88,6 +499,7 @@
   /* ── Z-index scale (NEW code only) ─────────────────────────────────────
      Legacy uses up to 10000; new code stays inside this ramp. Native
      <dialog> renders in the top layer and needs no z-index at all. */
+  --z-turn-context:1;
   --z-dropdown:1000;
   --z-sticky:1100;
   --z-overlay:9000;
@@ -102,6 +514,9 @@
   /* ── Text painted directly on --accent fills ──
      Matches every existing ghost fallback (#fff) → zero visual change. */
   --text-on-accent:#fff;
+
+  /* Scannable QR quiet zones stay white in every theme. */
+  --qr-plate-background:#fff;
 
   /* ── Feedback colors (dark) ────────────────────────────────────────────
      Text values target ≥4.5:1 on --bg-primary; verified in the ui-gallery
@@ -139,6 +554,17 @@
 
 [data-theme="tofu"]{
   --font-ui:var(--sans-body);
+
+  /* Match the existing CO-PILOT paper/ink/gold chrome, not chat's cold canvas. */
+  --project-surface:#faf8f3;
+  --project-panel:#fff;
+  --project-band:#f2ecda;
+  --project-ink:#1a1814;
+  --project-muted:#716a55;
+  --project-line:#d8d1c0;
+  --project-accent:#c9993f;
+  --project-accent-hover:#b58936;
+  --project-on-accent:#1a1814;
   /* Darkened derivatives of the tofu palette (fetch-teal / thinking amber /
      search-blue) so text clears 4.5:1 on the cold-white canvas. */
   --success-text:#3D7263;
@@ -213,7 +639,11 @@ html[data-rail] .folder-quickadd{display:none}
 .sidebar-header-actions{display:flex;gap:2px;align-items:center}
 .sidebar-header-actions .action-btn{width:30px;height:30px}
 .sidebar-action-row{display:flex;gap:6px;padding:var(--space-3) var(--space-4);align-items:stretch}
-.new-chat-btn{flex:1;padding:10px var(--space-4);margin:0;background:var(--accent);color:white;border:none;border-radius:var(--radius-sm);font-family:inherit;font-size:var(--font-size-md);font-weight:600;cursor:pointer;transition:background var(--transition);display:flex;align-items:center;gap:var(--space-2);justify-content:center}.new-chat-btn:hover{background:var(--accent-hover)}
+/* One flat primary action; no texture, bevel or animated icon rotation. */
+.new-chat-btn{flex:1;min-height:var(--control-h-lg);padding:var(--space-2) var(--space-4);margin:0;background:var(--text-primary);color:var(--bg-primary);border:var(--control-edge-inset) solid transparent;border-radius:var(--conversation-process-radius);font-family:var(--font-ui);font-size:var(--font-size-lg);font-weight:var(--weight-medium);cursor:pointer;box-shadow:none;display:flex;align-items:center;gap:var(--space-2);justify-content:center;transition:background var(--motion-fast) var(--ease-standard)}
+.new-chat-btn:hover{background:color-mix(in srgb,var(--text-primary) 86%,var(--bg-primary))}
+.new-chat-btn:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.new-chat-btn:active{opacity:.9}
 /* new-folder-btn removed — folders use tab bar with "+" button */
 /* ── Folder create/rename dialog ── */
 .folder-dialog-overlay{position:fixed;inset:0;height:var(--vh100,100vh);background:rgba(0,0,0,0.5);z-index:9999;display:flex;align-items:center;justify-content:center;animation:fadeIn 0.15s ease}
@@ -221,6 +651,33 @@ html[data-rail] .folder-quickadd{display:none}
 .folder-dialog-title{font-size:15px;font-weight:600;color:var(--text-primary);margin-bottom:14px}
 .folder-dialog-input{width:100%;padding:9px var(--space-3);background:var(--bg-primary);border:1px solid var(--border);border-radius:var(--radius-xs);color:var(--text-primary);font-size:var(--font-size-lg);font-family:inherit;outline:none;transition:border-color var(--transition)}
 .folder-dialog-input:focus{border-color:var(--accent)}
+.folder-dialog-path{margin-top:var(--space-2)}
+.folder-dialog-label{font-size:var(--font-size-md);font-weight:600;color:var(--text-secondary);margin:12px 1px 6px}
+.folder-dialog-hint{font-size:var(--font-size-sm);color:var(--text-tertiary);margin:6px 1px 0}
+/* ── Multi-path default-root picker ── */
+.fpp{margin-top:2px}
+.fpp-chips{display:flex;flex-wrap:wrap;gap:var(--space-1);min-height:26px;padding:var(--space-1);background:var(--bg-primary);border:1px solid var(--border);border-radius:var(--radius-xs)}
+.fpp-chip{display:inline-flex;align-items:center;gap:6px;padding:3px 6px 3px 9px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:999px;font-size:var(--font-size-sm);color:var(--text-primary);max-width:100%}
+.fpp-chip-primary{border-color:var(--accent)}
+.fpp-chip-name{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:180px}
+.fpp-chip-badge{font-size:10px;line-height:14px;padding:0 5px;border-radius:6px;background:var(--accent-subtle);color:var(--accent);font-weight:600}
+.fpp-chip-x{display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;padding:0;border:none;background:transparent;color:var(--text-tertiary);cursor:pointer;border-radius:50%;font-size:14px;line-height:1}
+.fpp-chip-x:hover{color:var(--text-primary);background:var(--bg-hover)}
+.fpp-empty{font-size:var(--font-size-sm);color:var(--text-tertiary);padding:2px 4px}
+.fpp-toolbar{display:flex;gap:var(--space-2);margin-top:var(--space-2)}
+.fpp-path-input{flex:1;min-width:0;padding:6px var(--space-2);background:var(--bg-primary);border:1px solid var(--border);border-radius:var(--radius-xs);color:var(--text-primary);font-size:var(--font-size-md);font-family:inherit;outline:none}
+.fpp-path-input:focus{border-color:var(--accent)}
+.fpp-add-btn{flex:none;padding:6px var(--space-3);background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius-xs);color:var(--text-primary);font-size:var(--font-size-md);cursor:pointer}
+.fpp-add-btn:hover{background:var(--bg-hover)}
+.fpp-browse-btn{flex:none;padding:6px var(--space-3);background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius-xs);color:var(--text-primary);font-size:var(--font-size-md);cursor:pointer}
+.fpp-recent-label{font-size:var(--font-size-sm);font-weight:600;color:var(--text-tertiary);margin:10px 1px 4px}
+.fpp-recent{display:flex;flex-direction:column;gap:var(--space-1);max-height:150px;overflow-y:auto;scrollbar-width:thin}
+.fpp-recent-item{display:flex;align-items:center;gap:var(--space-2);padding:6px 8px;background:transparent;border:1px solid transparent;border-radius:var(--radius-xs);cursor:pointer;text-align:left;font-family:inherit;min-width:0}
+.fpp-recent-item:hover{background:var(--bg-hover);border-color:var(--border)}
+.fpp-recent-plus{flex:none;width:18px;height:18px;display:inline-flex;align-items:center;justify-content:center;border-radius:50%;background:var(--accent-subtle);color:var(--accent);font-size:14px;font-weight:600}
+.fpp-recent-text{flex:1;min-width:0;display:flex;flex-direction:column;gap:1px}
+.fpp-recent-name{font-size:var(--font-size-md);font-weight:600;color:var(--text-primary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.fpp-recent-full{font-size:10.5px;color:var(--text-tertiary);font-family:'JetBrains Mono',monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;direction:rtl;text-align:left}
 .folder-dialog-colors{display:flex;gap:var(--space-2);margin:14px 0 18px;flex-wrap:wrap}
 .folder-color-dot{width:22px;height:22px;border-radius:50%;cursor:pointer;border:2px solid transparent;transition:border-color 0.15s,transform 0.15s;flex-shrink:0}
 .folder-color-dot:hover{transform:scale(1.15)}
@@ -261,8 +718,10 @@ html[data-rail] .folder-quickadd{display:none}
 .sidebar.rail-collapsed .project-rail-head{justify-content:center;padding:10px 0 6px}
 .project-rail-list{display:flex;flex-direction:column;gap:2px;flex:1;overflow-y:auto;overflow-x:hidden;padding:2px var(--space-2) var(--space-1);min-height:0}
 
+.folder-tab-row{display:flex;align-items:center;min-width:0;position:relative}
+.folder-tab-row>.folder-tab{flex:1;min-width:0}
 /* Project ROW (reuses .folder-tab so all JS handlers still match) */
-.folder-tab{display:flex;align-items:center;gap:var(--space-2);width:100%;padding:7px 9px;border:1px solid transparent;border-radius:var(--radius-xs);background:transparent;color:var(--text-secondary);font-size:12.5px;font-weight:600;font-family:inherit;cursor:pointer;white-space:nowrap;transition:background 0.15s,color 0.15s;user-select:none;line-height:1.3;position:relative;text-align:left}
+.folder-tab{display:flex;align-items:center;gap:var(--space-2);width:100%;min-height:var(--control-h-lg);box-sizing:border-box;padding:var(--space-2);border:1px solid transparent;border-radius:var(--radius-xs);background:transparent;color:var(--text-secondary);font-size:12.5px;font-weight:600;font-family:inherit;cursor:pointer;white-space:nowrap;transition:background 0.15s,color 0.15s;user-select:none;line-height:1.3;position:relative;text-align:left}
 .folder-tab:hover{background:var(--bg-hover);color:var(--text-primary)}
 .folder-tab.active{background:var(--accent-subtle);color:var(--accent);font-weight:700}
 /* Left accent bar for the active project — reads as "you are here" */
@@ -275,15 +734,12 @@ html[data-rail] .folder-quickadd{display:none}
 .folder-tab-dot[data-mono-len="1"]{font-size:var(--font-size-sm);letter-spacing:0}
 .folder-tab-dot.streaming{animation:folderDotPulse 1.6s ease-in-out infinite}
 @keyframes folderDotPulse{0%,100%{opacity:1}50%{opacity:0.45}}
-/* Default (未分类) home tile: its glyph blinks periodically so it reads
- * "alive" and stops clashing with the flat colored project tiles. */
-@keyframes folderInboxBlink{0%,88%,100%{opacity:1}94%{opacity:0.3}}
 /* Inbox (未分类) + add tiles share the tile footprint but read as "system"
  * chips: a neutral surface square with a centered glyph, not a colored brand
  * tile — so they group with, yet stay distinct from, the projects. */
 .folder-tab-inbox-dot,.folder-tab-add-dot{width:20px;height:20px;border-radius:6px;display:inline-flex;align-items:center;justify-content:center;color:var(--text-tertiary);background:var(--bg-hover);box-shadow:inset 0 0 0 1px var(--border)}
 .folder-tab-inbox-dot svg,.folder-tab-add-dot svg{width:12px;height:12px}
-.folder-tab-inbox-dot svg{width:15px;height:15px;animation:folderInboxBlink 4.8s ease-in-out infinite}
+.folder-tab-inbox-dot svg{width:15px;height:15px}
 .folder-tab.active .folder-tab-inbox-dot{color:var(--accent);background:var(--accent-subtle);box-shadow:inset 0 0 0 1px var(--accent)}
 .folder-tab-add:hover .folder-tab-add-dot{color:var(--accent);background:var(--accent-subtle);box-shadow:inset 0 0 0 1px var(--accent)}
 .folder-tab-name{flex:1;overflow:hidden;text-overflow:ellipsis}
@@ -895,7 +1351,7 @@ html[data-rail] .folder-quickadd{display:none}
 /* Legacy bare img fallback (markdown-rendered images)
  * ★ Excludes image-gen cards: :not() specificity (0,2,2) was beating the (0,2,1) overrides
  *   in .ig-result-card / .imagegen-card, squishing generated images to 300×200px */
-.message-body img:not(.msg-img-thumb img, .ig-result-card img, .imagegen-card img, .ig-batch-slot img, .rf-img-tile img){max-width:300px;max-height:200px;border-radius:var(--radius-sm);margin-bottom:var(--space-2);border:1px solid var(--border);cursor:pointer;transition:opacity .2s}.message-body img:not(.msg-img-thumb img, .ig-result-card img, .imagegen-card img, .ig-batch-slot img, .rf-img-tile img):hover{opacity:0.85}
+.message-body img:not(.md-image, .msg-img-thumb img, .ig-result-card img, .imagegen-card img, .ig-batch-slot img, .rf-img-tile img){max-width:300px;max-height:200px;border-radius:var(--radius-sm);margin-bottom:var(--space-2);border:1px solid var(--border);cursor:pointer;transition:opacity .2s}.message-body img:not(.md-image, .msg-img-thumb img, .ig-result-card img, .imagegen-card img, .ig-batch-slot img, .rf-img-tile img):hover{opacity:0.85}
 .md-content{font-family:var(--md-sans);font-size:14.5px;line-height:1.75;letter-spacing:0.005em;color:var(--text-primary);contain:layout style;overflow-x:hidden;max-width:100%;overflow-wrap:break-word;word-wrap:break-word}.md-content p{margin-bottom:13px}.md-content p:last-child{margin-bottom:0}.md-content strong{font-weight:650}.md-content em{font-style:italic;color:var(--text-secondary)}.md-content a{color:var(--accent);text-decoration:none;word-break:break-word;text-underline-offset:2px}.md-content a:hover{text-decoration:underline}.md-content ul,.md-content ol{margin:10px 0 13px 22px}.md-content li{margin-bottom:5px}.md-content li::marker{color:var(--text-tertiary)}.md-content h1,.md-content h2,.md-content h3,.md-content h4{margin:22px 0 9px;font-weight:650;letter-spacing:-0.01em;line-height:1.35}.md-content h1{font-size:20px}.md-content h2{font-size:17px}.md-content h3{font-size:15px}.md-content blockquote{border-left:3px solid var(--accent);padding:var(--space-2) var(--space-4);margin:var(--space-3) 0;color:var(--text-secondary);background:var(--bg-tertiary);border-radius:0 var(--radius-xs) var(--radius-xs) 0}.md-content code{font-family:'JetBrains Mono',monospace;font-size:12.5px;background:var(--bg-tertiary);padding:2px 6px;border-radius:4px;border:1px solid var(--border)}.md-content pre{margin:var(--space-3) 0;border-radius:var(--radius-sm);overflow:hidden;border:1px solid var(--border)}.md-content pre code{display:block;padding:var(--space-4);overflow-x:auto;background:var(--bg-secondary);border:none;line-height:1.5}.code-header{display:flex;align-items:center;gap:var(--space-2);padding:6px var(--space-3);background:var(--bg-tertiary);border-bottom:1px solid var(--border);font-size:var(--font-size-xs);font-family:'JetBrains Mono',monospace;color:var(--text-tertiary)}.code-header span{flex:1}.copy-btn{background:none;border:none;color:var(--text-tertiary);cursor:pointer;font-size:var(--font-size-xs);font-family:inherit;padding:2px var(--space-2);border-radius:4px;transition:color var(--transition),background-color var(--transition);flex-shrink:0}.copy-btn:hover{color:var(--text-primary);background:var(--bg-hover)}.md-content.user-content{white-space:pre-wrap;word-break:break-word}pre.code-long{position:relative}pre.code-long[data-collapsed="true"]>code{max-height:200px;overflow:hidden}pre.code-long[data-collapsed="true"]::after{content:'';position:absolute;bottom:0;left:0;right:0;height:60px;background:linear-gradient(to bottom,transparent,var(--bg-secondary));pointer-events:none;border-radius:0 0 var(--radius-sm) var(--radius-sm)}.code-collapse-btn{background:none;border:none;color:var(--accent);cursor:pointer;font-size:var(--font-size-xs);font-family:'JetBrains Mono',monospace;padding:2px var(--space-2);border-radius:4px;transition:color var(--transition),background-color var(--transition);flex-shrink:0;white-space:nowrap}.code-collapse-btn:hover{background:var(--accent-subtle);color:var(--accent-hover)}.table-header{display:flex;align-items:center;gap:var(--space-2);padding:var(--space-1) var(--space-3);background:var(--bg-tertiary);border-bottom:1px solid var(--border);font-size:var(--font-size-xs);font-family:'JetBrains Mono',monospace;color:var(--text-tertiary)}.table-header span{flex:1}.md-table-wrapper{overflow-x:auto;margin:var(--space-3) 0;border:1px solid var(--border);border-radius:var(--radius-sm);scrollbar-width:thin;scrollbar-color:var(--text-tertiary) transparent}.md-table-wrapper::-webkit-scrollbar{height:6px}.md-table-wrapper::-webkit-scrollbar-track{background:transparent}.md-table-wrapper::-webkit-scrollbar-thumb{background:var(--text-tertiary);border-radius:3px}.md-content table{width:max-content;min-width:100%;border-collapse:collapse;font-size:var(--font-size-md);margin:0}.md-content th,.md-content td{padding:var(--space-2) var(--space-3);border:1px solid var(--border);text-align:left;white-space:normal;word-break:break-word}.md-content th{background:var(--bg-tertiary);font-weight:600;white-space:nowrap}
 /* Thinking content retains its own layout containment. */
 .thinking-block{margin-bottom:var(--space-2);border:1px solid var(--border);border-radius:var(--radius-sm);background:transparent;overflow:hidden;contain:content}
@@ -1065,6 +1521,129 @@ summary.thinking-header::-webkit-details-marker{display:none}
 /* ── Engine Breakdown section (inside search results panel) ── */
 .eb-section{border-top:1px solid rgba(59,130,246,0.15);margin-top:var(--space-1);padding:0}.eb-toggle{display:flex;align-items:center;gap:6px;padding:var(--space-2) 14px;font-size:var(--font-size-xs);color:var(--text-tertiary);cursor:pointer;user-select:none;transition:background var(--transition)}.eb-toggle:hover{background:rgba(59,130,246,0.04)}.eb-total{font-size:10px;color:var(--text-muted);font-family:'JetBrains Mono',monospace}.eb-arrow{font-size:10px;margin-left:auto;transition:transform .2s ease}.eb-section.eb-expanded .eb-arrow{transform:rotate(90deg)}.eb-content{max-height:0;overflow:hidden;transition:max-height .3s ease}.eb-section.eb-expanded .eb-content{max-height:2000px}.eb-engine{padding:var(--space-1) 14px 6px}.eb-engine-name{font-size:var(--font-size-xs);font-weight:600;color:#60a5fa;margin-bottom:2px}.eb-engine-count{font-weight:400;color:var(--text-tertiary);font-size:10px}.eb-engine-urls{padding-left:var(--space-2);border-left:2px solid rgba(59,130,246,0.15)}.eb-url-item{padding:2px 0 2px var(--space-2);font-size:var(--font-size-xs);line-height:1.4}.eb-url-item a{color:var(--text-secondary);text-decoration:none}.eb-url-item a:hover{text-decoration:underline;color:#93c5fd}.eb-url-text{font-size:9px;color:var(--text-muted);font-family:'JetBrains Mono',monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
 .error-block{padding:var(--space-3) var(--space-4);border:1px solid var(--error-border);border-radius:var(--radius-sm);background:var(--error-bg);font-size:var(--font-size-md);color:var(--error-text);overflow:hidden;word-break:break-word;white-space:pre-wrap;line-height:1.55}.stream-status{font-size:var(--font-size-xs);color:var(--text-tertiary);padding:var(--space-1) 0;display:flex;align-items:center;gap:6px;font-family:'JetBrains Mono',monospace}.stream-status .pulse{width:6px;height:6px;background:var(--thinking-text);border-radius:50%;animation:pulse 1.5s infinite}.stream-phase{display:flex;align-items:flex-start;gap:var(--space-2);padding:var(--space-2) 14px;margin-top:var(--space-2);border-radius:var(--radius-sm);background:linear-gradient(135deg,rgba(110,86,207,0.08),rgba(59,130,246,0.08));border:1px solid rgba(110,86,207,0.15);font-size:var(--font-size-sm);line-height:1.5;font-family:'JetBrains Mono',monospace;color:var(--accent);transition:opacity .3s ease}.stream-phase-icon{flex-shrink:0;display:inline-flex;align-items:center;height:1.5em}.stream-phase-text{flex:1;min-width:0;opacity:0.85;line-height:1.5;white-space:normal;overflow-wrap:anywhere;word-break:break-word}.stream-phase-ctx{display:inline;margin-left:6px;opacity:0.6;font-size:var(--font-size-xs)}.stream-phase-dots{display:inline-flex;gap:1px;margin-left:2px}.stream-phase-dots span{animation:phaseDot 1.4s infinite;opacity:0;font-weight:bold}.stream-phase-dots span:nth-child(2){animation-delay:0.2s}.stream-phase-dots span:nth-child(3){animation-delay:0.4s}@keyframes phaseDot{0%,80%,100%{opacity:0}40%{opacity:1}}@keyframes phaseIconPulse{0%,100%{opacity:0.6;transform:scale(1)}50%{opacity:1;transform:scale(1.1)}}.stream-phase-retrying{background:linear-gradient(135deg,rgba(245,158,11,0.10),rgba(234,179,8,0.06));border-color:rgba(245,158,11,0.20);color:#f59e0b}.stream-phase-retrying .stream-phase-icon{animation:phaseIconPulse 1.5s ease-in-out infinite}.stream-phase-thinking{background:linear-gradient(135deg,rgba(168,85,247,0.10),rgba(139,92,246,0.06));border-color:rgba(168,85,247,0.20)}.stream-phase-thinking .stream-phase-icon{animation:phaseIconPulse 2s ease-in-out infinite}.stream-phase-counter{display:inline-block;margin-left:var(--space-2);padding:1px 7px;border-radius:8px;background:rgba(168,85,247,0.15);font-size:10px;font-weight:600;color:rgba(196,167,255,0.85);letter-spacing:0.3px;min-width:48px;text-align:center;transition:background .2s ease}@keyframes pulse{0%,100%{opacity:.4}50%{opacity:1}}@keyframes searchOrbit{0%{transform:rotate(0deg) translateX(10px) rotate(0deg)}100%{transform:rotate(360deg) translateX(10px) rotate(-360deg)}}.search-orbit-container{width:22px;height:22px;position:relative;display:inline-block;flex-shrink:0}.search-orbit-center{position:absolute;inset:6px;border-radius:50%;background:var(--search-blue);opacity:.6;animation:pulse 1.2s infinite}.search-orbit-dot{position:absolute;width:4px;height:4px;border-radius:50%;top:50%;left:50%;margin:-2px;animation:searchOrbit 1.2s linear infinite}.search-orbit-dot:nth-child(2){background:#60a5fa}.search-orbit-dot:nth-child(3){background:#a78bfa;animation-delay:-.4s}.search-orbit-dot:nth-child(4){background:#34d399;animation-delay:-.8s}
+/* Completed reply awaiting a look: quiet accent, distinct from success/error. */
+.conv-review-dot {
+  width:var(--space-2);height:var(--space-2);border-radius:var(--radius-pill);
+  background:var(--accent);flex-shrink:0;
+}
+.conv-status-review {
+  color:var(--text-primary);background:var(--accent-subtle);animation:none;
+}
+/* Sidebar defaults editor. Project chrome/controls belong to the UI kit;
+   this owner only supplies workbench layout and evidence hierarchy. */
+.folder-settings{display:flex;flex:1;flex-direction:column;gap:var(--space-4);min-width:0;min-height:0}
+.folder-settings-content{display:flex;flex-direction:column;gap:var(--space-4);min-height:0;overflow:auto}
+.folder-settings-fields{display:flex;flex-direction:column;gap:var(--space-5);border:0;padding:0;margin:0;min-width:0}
+.folder-settings-identity{display:grid;grid-template-columns:minmax(0,2fr) minmax(0,1fr);gap:var(--space-4)}
+.folder-settings-workbench{display:grid;grid-template-columns:minmax(0,1.35fr) minmax(0,1fr);gap:var(--space-4);align-items:start;min-width:0}
+.folder-settings-workspace,.folder-settings-recents{padding:var(--space-4);border:var(--project-panel-width) solid var(--text-primary);border-radius:var(--radius);background:var(--bg-primary);min-width:0}
+.folder-settings-workspace{display:flex;flex-direction:column;gap:var(--space-3)}
+.folder-settings-section-heading{display:flex;align-items:center;justify-content:space-between;gap:var(--space-2)}
+.folder-settings-count{display:inline-flex;align-items:center;justify-content:center;min-width:var(--space-6);height:var(--space-6);border-radius:var(--radius-pill);background:var(--bg-tertiary);color:var(--text-primary);font-size:var(--font-size-sm);font-weight:var(--weight-semibold)}
+.folder-settings-heading{margin:0;font-size:var(--font-size-lg);font-weight:var(--weight-bold);color:var(--text-primary)}
+.folder-settings-hint{margin:0;font-size:var(--font-size-md);line-height:var(--leading-body);color:var(--text-secondary);overflow-wrap:anywhere}
+.folder-settings-roots{display:flex;flex-direction:column;gap:var(--space-2);list-style:none;padding:0;margin:0;min-width:0;max-height:calc(var(--control-h-lg) * 7);overflow:auto}
+.folder-settings-root{display:flex;flex-direction:column;gap:var(--space-2);padding:var(--space-3);background:var(--bg-secondary);border:var(--control-edge-inset) solid var(--border);border-radius:var(--radius-sm);min-width:0}
+.folder-settings-root[data-primary="true"]{border-color:var(--accent);background:var(--bg-tertiary)}
+.folder-settings-root-name{font-size:var(--font-size-lg);font-weight:var(--weight-semibold);color:var(--text-primary);overflow-wrap:anywhere}
+.folder-settings-full-path{font-family:var(--font-mono);font-size:var(--font-size-sm);line-height:var(--leading-body);overflow-wrap:anywhere;color:var(--text-secondary);user-select:text}
+.folder-settings-root-actions,.folder-settings-actions{display:flex;align-items:center;flex-wrap:wrap;gap:var(--space-2)}
+.folder-settings-footer{display:flex;align-items:center;justify-content:flex-end;flex-wrap:wrap;flex-shrink:0;gap:var(--space-2);padding-top:var(--space-4);border-top:var(--control-edge-inset) solid var(--border)}
+.folder-settings-empty{padding:var(--space-2) 0;font-size:var(--font-size-md);color:var(--text-secondary);line-height:var(--leading-body)}
+.folder-settings-status{margin:0;color:var(--text-secondary);font-size:var(--font-size-sm);overflow-wrap:anywhere}
+.folder-settings-status:empty,.folder-settings-hint:empty{display:none}
+
+/* Exact paths remain announced without duplicating each selected-root card. */
+.folder-settings-announcement{position:absolute;width:var(--control-edge-inset);height:var(--control-edge-inset);overflow:hidden;clip-path:inset(50%)}
+.folder-settings-error{padding:var(--space-3);margin:0;border:var(--control-edge-inset) solid var(--error-border);border-radius:var(--radius-sm);background:var(--error-bg);color:var(--error-text);font-size:var(--font-size-md);line-height:var(--leading-body);overflow-wrap:anywhere}
+.folder-settings-browser{display:flex;flex-direction:column;gap:var(--space-3);padding-top:var(--space-3);border-top:var(--control-edge-inset) solid var(--border);min-width:0}
+.folder-settings-browser[hidden],.folder-settings-error[hidden]{display:none}
+.folder-settings-directories,.folder-settings-recent-list{display:flex;flex-direction:column;align-items:stretch;gap:var(--space-2);max-height:calc(var(--control-h-lg) * 7);overflow:auto;min-width:0}
+.folder-settings-directory-name{width:100%;text-align:start;overflow-wrap:anywhere}
+
+.folder-settings-directories>button,.folder-settings-recent-list>button{flex-shrink:0}
+.folder-settings-recents>summary{cursor:pointer;color:var(--text-primary);font-size:var(--font-size-lg);font-weight:var(--weight-bold);min-height:var(--control-h-sm);line-height:var(--leading-body)}
+.folder-settings-recents[open]>summary{margin-bottom:var(--space-3)}
+.folder-settings-recents>summary:focus-visible{outline:none;box-shadow:var(--focus-ring);border-radius:var(--radius-sm)}
+.folder-settings-recent-copy{display:flex;flex-direction:column;gap:var(--space-1);width:100%;min-width:0;text-align:start;padding:var(--space-2);border:var(--control-edge-inset) solid var(--border);border-radius:var(--radius-sm);background:var(--bg-secondary)}
+.folder-settings-recent-name{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:var(--font-size-lg);font-weight:var(--weight-semibold);color:var(--text-primary)}
+.folder-settings-recent-path{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:var(--font-mono);font-size:var(--font-size-sm);font-weight:var(--weight-regular);color:var(--text-secondary);line-height:var(--leading-body)}
+.folder-settings-delete-name{margin:0;color:var(--text-primary);font-weight:var(--weight-semibold);overflow-wrap:anywhere}
+.folder-tab-copy{display:flex;flex:1;min-width:0;text-align:start}
+/* Root details remain in the tooltip/settings, not a second row per tile. */
+.folder-tab-summary{display:none}
+/* Navigation is not a card/button surface. Scope above generic theme button
+   chrome; keep the shared controls inside the settings dialog unchanged. */
+#folderTabs.project-rail{background:var(--bg-secondary);border-inline-end:var(--control-edge-inset) solid var(--border)}
+#folderTabs .project-rail-title,#folderTabs .project-rail-collapse{color:var(--text-secondary)}
+#folderTabs .folder-tab-inbox-dot,#folderTabs .folder-tab-add-dot{color:var(--text-secondary)}
+#folderTabs .folder-tab.active::before{background:var(--accent)}
+#folderTabs .folder-tab{border:0;box-shadow:none;background:transparent;color:var(--text-primary);font-family:var(--font-ui);min-height:var(--control-h-lg);font-weight:var(--weight-medium);padding-inline-end:calc(var(--control-h-sm) + var(--space-2));transform:none}
+#folderTabs .folder-tab:hover{background:var(--bg-hover);color:var(--text-primary)}
+#folderTabs .folder-tab.active{background:var(--accent-subtle);color:var(--text-primary);font-weight:var(--weight-semibold)}
+#folderTabs .folder-tab-uncat{margin-block-end:var(--space-2)}
+#folderTabs .folder-tab-count{position:absolute;inset-inline-end:var(--space-2);width:var(--control-h-sm);min-width:0;height:auto;line-height:inherit;padding:0;border-radius:0;background:transparent;color:var(--text-secondary);font-size:var(--font-size-xs);font-weight:var(--weight-regular);font-variant-numeric:tabular-nums;text-align:end}
+#folderTabs .folder-tab-settings{position:absolute;inset-inline-end:var(--space-2);opacity:0;pointer-events:none;background:transparent;color:var(--text-secondary);border:0;box-shadow:none;transform:none}
+#folderTabs .folder-tab-row:hover .folder-tab-settings,#folderTabs .folder-tab-row:focus-within .folder-tab-settings{opacity:1;pointer-events:auto}
+#folderTabs .folder-tab-row:hover .folder-tab-count,#folderTabs .folder-tab-row:focus-within .folder-tab-count{visibility:hidden}
+#folderTabs .folder-tab.folder-tab-drop{background:var(--accent-subtle);box-shadow:inset 0 0 0 var(--control-edge-inset) var(--accent)}
+#folderTabs .folder-tab:focus-visible,#folderTabs .folder-tab-settings:focus-visible{box-shadow:var(--focus-ring)}
+.sidebar.rail-collapsed .folder-tab-copy{display:none}
+.sidebar.rail-collapsed #folderTabs .folder-tab{padding-inline-end:0}
+.sidebar.rail-collapsed #folderTabs .folder-tab.active{background:transparent}
+.sidebar.rail-collapsed #folderTabs .folder-tab-uncat{margin-block-end:0}
+.sidebar.rail-collapsed #folderTabs .folder-tab-settings{display:none;inset-inline-end:0;inset-block-start:0}
+.folder-tab:focus-visible,.project-rail-collapse:focus-visible,.folder-tab-menu-item:focus-visible{outline:none;box-shadow:var(--focus-ring)}
+/* Touch keeps the menu visible beside the count; inbox reserves the same
+   two slots so its count still aligns with every project. */
+@media(pointer:coarse){
+  #folderTabs .folder-tab{padding-inline-end:calc(var(--control-h-sm) * 2 + var(--space-2))}
+  #folderTabs .folder-tab-count{inset-inline-end:calc(var(--control-h-sm) + var(--space-2))}
+  #folderTabs .folder-tab-settings{opacity:1;pointer-events:auto}
+  #folderTabs .folder-tab-row:hover .folder-tab-count,#folderTabs .folder-tab-row:focus-within .folder-tab-count{visibility:visible}
+}
+@media(max-width:700px){.folder-settings-workbench{grid-template-columns:minmax(0,1fr)}}
+@media(max-width:480px){
+  .folder-settings-workspace,.folder-settings-recents{padding:var(--space-3)}
+  .folder-settings-identity{grid-template-columns:minmax(0,1fr)}
+  .folder-settings-root-actions{gap:var(--space-3)}
+  .folder-settings-footer{gap:var(--space-3)}
+}
+/* Conversation activity shares the existing turn information column/fold.
+ * No separate track, positioning owner, card shell, avatar or chat margin. */
+.turn-context-content{display:contents}
+
+/* The existing rail extends beyond its short input host into the reply gutter.
+ * Lift that host above later reply hit boxes, below all popup/overlay layers. */
+.conversation-turn.user-msg:has(> .turn-ctx .agent-dock:not([hidden])){z-index:var(--z-turn-context)}
+.agent-dock{min-width:0;margin-top:var(--space-2);padding-top:var(--space-2);border-top:var(--control-edge-inset) solid var(--border);color:var(--text-secondary);font:var(--font-size-xs)/var(--leading-body) var(--font-ui);font-weight:var(--weight-medium)}
+.agent-dock[hidden],.agent-dock-history[hidden]{display:none}
+.agent-dock header{margin-bottom:var(--space-2)}
+.agent-dock-heading{display:flex;flex-wrap:wrap;align-items:baseline;gap:var(--space-1) var(--space-2)}
+.agent-dock header strong{font-size:inherit;font-weight:var(--weight-medium);color:var(--text-tertiary)}
+.agent-dock-counts{color:var(--text-secondary);overflow-wrap:anywhere}
+.agent-dock-active,.agent-dock-history>div{display:flex;flex-direction:column;gap:var(--space-1)}
+.agent-dock-agent{min-width:0}
+.agent-dock-agent>summary{display:grid;grid-template-columns:var(--space-3) minmax(0,1fr);column-gap:var(--space-1);padding:var(--space-1) 0;cursor:pointer;list-style:none}
+.agent-dock-agent>summary::-webkit-details-marker{display:none}
+.agent-dock-agent>summary::before{content:'›';grid-row:1 / span 2;color:var(--text-tertiary)}
+.agent-dock-agent[open]>summary::before{content:'⌄'}
+.agent-dock-agent>summary:focus-visible,.agent-dock-history>summary:focus-visible{outline:none;box-shadow:var(--focus-ring);border-radius:var(--radius-sm)}
+.agent-dock-name{min-width:0;overflow-wrap:anywhere;color:var(--text-secondary)}
+.agent-dock-status{grid-column:2;overflow-wrap:anywhere;color:var(--text-tertiary)}
+.agent-dock-agent[data-status="failed"] .agent-dock-status,.agent-dock-agent[data-status="error"] .agent-dock-status,.agent-dock-agent[data-status="interrupted"] .agent-dock-status,.agent-dock-agent[data-status="stalled"] .agent-dock-status{color:var(--error-text)}
+.agent-dock-detail{padding:var(--space-2) 0 var(--space-2) var(--space-3);overflow-wrap:anywhere;min-width:0}
+.agent-dock-detail .sw-a-body{display:block;padding:0;border:0}
+.agent-dock-evidence-note{font-size:inherit;color:var(--text-tertiary);margin:0 0 var(--space-2)}
+.agent-dock-detail pre{max-width:100%;overflow:auto}
+.agent-dock-history{margin-top:var(--space-2)}
+.agent-dock-history>summary{cursor:pointer;color:var(--text-tertiary);padding:var(--space-1) 0}
+
+.agent-dock-messages,.agent-dock-agent-messages{margin-top:var(--space-2);min-width:0}
+.agent-dock-messages[hidden],.agent-dock-agent-messages[hidden]{display:none}
+.agent-dock-messages>summary,.agent-dock-agent-messages>summary{cursor:pointer;padding-block:var(--space-1);color:var(--text-secondary);overflow-wrap:anywhere}
+.agent-dock-messages>summary:focus-visible,.agent-dock-agent-messages>summary:focus-visible{outline:var(--control-edge-inset) solid var(--focus-ring);outline-offset:var(--space-1)}
+.agent-dock-agent-messages .sw-messages>h4{display:none}
 
 
 /* ── Tool-row request anchor (P6) ──────────────────────────────────
@@ -1163,7 +1742,8 @@ summary.thinking-header::-webkit-details-marker{display:none}
   flex-direction: column;
   background: var(--bg-secondary);
   border: 1px solid var(--border);
-  border-radius: var(--radius);
+  border-radius: var(--conversation-process-radius);
+  box-shadow: 0 2px 12px color-mix(in srgb, var(--text-primary) 6%, transparent);
   margin-top: var(--space-3);
   transition: border-color var(--motion-base) ease, box-shadow var(--motion-base) ease;
   isolation: isolate;
@@ -1186,7 +1766,7 @@ summary.thinking-header::-webkit-details-marker{display:none}
   padding: var(--space-3) var(--space-4);
   resize: none;
   max-height: 200px;
-  min-height: var(--control-h-lg);
+  min-height: var(--space-16);
 }
 .input-area .input-box textarea::placeholder { color: var(--text-secondary); }
 .send-btn {
@@ -1209,9 +1789,26 @@ summary.thinking-header::-webkit-details-marker{display:none}
 .send-btn:active:not(:disabled) { opacity: .85; }
 .send-btn:disabled { opacity: .45; cursor: not-allowed; box-shadow: none; background: var(--border); }
 .send-btn.stop-btn { background: var(--error-text); box-shadow: none; }
+.send-btn.stop-btn:hover:not(:disabled) { background: color-mix(in srgb, var(--error-text) 85%, var(--text-primary)); }
 .send-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .composer-stop-btn[hidden] { display: none; }
 .input-actions-right.composer-dual-actions > .send-btn { margin-left: 0; }
+
+/* Translation receipts remain in flow, never in a conditional zero-width rail. */
+.composer-translation-status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-1) var(--space-2);
+  padding: var(--space-1) var(--space-4) var(--space-2);
+  color: var(--text-secondary);
+  font-size: var(--font-size-xs);
+  line-height: var(--leading-body);
+  overflow-wrap: anywhere;
+}
+.composer-translation-phase { color: var(--accent); }
+.composer-translation-status[data-state="failed"] .composer-translation-phase { color: var(--error-text); }
+.composer-translation-detail { min-width: 0; font-variant-numeric: tabular-nums; }
 
 /* Unified toolbar */
 .input-actions{position:relative;display:flex;align-items:center;padding:var(--space-2) var(--space-3) 10px 14px;gap:var(--space-2);flex-wrap:nowrap;overflow:visible}.input-actions-scroll{display:flex;align-items:center;gap:2px;flex:0 1 auto;min-width:0;overflow:visible;scrollbar-width:none;-ms-overflow-style:none}.input-actions-scroll::-webkit-scrollbar{display:none}.input-actions-right{display:flex;align-items:center;gap:var(--space-1);flex-shrink:0;margin-left:auto}
@@ -1227,69 +1824,63 @@ summary.thinking-header::-webkit-details-marker{display:none}
 /* ── Action Buttons ── */
 .action-btn{width:32px;height:32px;background:none;border:none;border-radius:8px;cursor:pointer;display:flex;align-items:center;justify-content:center;color:var(--text-tertiary);transition:color .15s ease,background-color .15s ease,box-shadow .15s ease;font-size:15px;position:relative;flex-shrink:0}
 .action-btn:hover{color:var(--text-primary);background:var(--bg-hover)}
-.action-btn.active{color:var(--accent);background:var(--accent-subtle);box-shadow:0 0 0 1px var(--accent-subtle)}
-
-/* ── Topbar action buttons — unified labeled icon+text style shared by the
- *    feature launchers (Paper / My Day / …) AND the update button, so the
- *    whole topbar-right cluster reads as one consistent control group. ── */
+.action-btn.active{color:var(--accent);background:var(--accent-subtle);box-shadow:0 0 0 1px var(--accent-subtle)}/* Shared shell launchers. Quiet surfaces, one control scale; feature state
+ * remains visible. Scope excludes dialogs and feature-owned workspaces. */
 .topbar-tools{display:flex;align-items:center;gap:var(--space-1);margin-left:auto}
-.topbar-tool-btn,.update-btn{display:inline-flex;align-items:center;gap:6px;height:30px;padding:0 10px;background:none;border:1px solid transparent;border-radius:8px;cursor:pointer;color:var(--text-secondary);font-family:'Jakarta Toolbar','Plus Jakarta Sans','Jakarta Fallback',sans-serif;font-size:12.5px;font-weight:600;line-height:1;white-space:nowrap;flex-shrink:0;transition:color .15s ease,background-color .15s ease,border-color .15s ease}
+.topbar-tool-btn,.update-btn{display:inline-flex;align-items:center;gap:var(--space-2);height:var(--control-h-md);padding:0 var(--space-2);background:transparent;border:var(--control-edge-inset) solid transparent;border-radius:var(--radius-sm);cursor:pointer;color:var(--text-secondary);font-family:var(--font-ui);font-size:var(--font-size-sm);font-weight:var(--weight-medium);line-height:1;white-space:nowrap;flex-shrink:0;transition:color var(--motion-fast) var(--ease-standard),background-color var(--motion-fast) var(--ease-standard)}
 .topbar-tool-btn:hover,.update-btn:hover{color:var(--text-primary);background:var(--bg-hover);border-color:var(--border-light)}
 .topbar-tool-btn.active{color:var(--accent);background:var(--accent-subtle);border-color:var(--accent-subtle)}
+.topbar-tool-btn:focus-visible,.update-btn:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 .topbar-tool-btn svg,.update-btn svg{flex-shrink:0}
 .topbar-tool-label,.update-btn-label{white-space:nowrap}
-/* Narrow DESKTOP windows only (pointer:fine): drop the labels, keep icon-only
- * buttons. The `and (pointer:fine)` guard is load-bearing — a width-only rule
- * here also fires on a PORTRAIT TABLET (769–1024px, coarse pointer) which has
- * ample room, silently truncating the tool labels to bare icons. Coarse phones
- * (≤768) get their own icon-only hide inside the phone @media block, so this
- * rule intentionally does NOT need to cover them. Guarded by
- * tests/frontend/test_tablet_label_truncation.py. */
-@media (max-width:1080px) and (pointer:fine){.topbar-tool-label,.update-btn-label{display:none}.topbar-tool-btn,.update-btn{padding:0 7px}}
-
-/* ── Update button — inherits the unified style above; only the
- *    "update available" accent state is bespoke. ── */
+/* A narrow mouse-driven desktop may use tooltips. Tablets retain labels;
+ * phones have their own shell rules. See test_tablet_label_truncation.py. */
+@media (max-width:1080px) and (pointer:fine){.topbar-tool-label,.update-btn-label{display:none}.topbar-tool-btn,.update-btn{padding:0 var(--space-2)}}
 .update-btn-pill{display:none}
-/* When an update is available: turn the whole pill accent + show "New" */
-.update-btn.has-update{color:#fff;background:var(--accent);border-color:var(--accent)}
-.update-btn.has-update:hover{background:var(--accent-hover);color:#fff}
-.update-btn.has-update .update-btn-pill{display:inline-flex;align-items:center;padding:2px 6px;border-radius:6px;background:rgba(255,255,255,0.22);font-size:10px;font-weight:800;letter-spacing:.03em;text-transform:uppercase;line-height:1}
+.update-btn.has-update{color:var(--text-on-accent);background:var(--accent);border-color:var(--accent)}
+.update-btn.has-update:hover{background:var(--accent-hover);color:var(--text-on-accent)}
+.update-btn.has-update .update-btn-pill{display:inline-flex;align-items:center;padding:var(--space-1);border-radius:var(--radius-sm);background:color-mix(in srgb,var(--text-on-accent) 22%,transparent);font-size:var(--font-size-xs);font-weight:var(--weight-semibold);letter-spacing:.03em;text-transform:uppercase;line-height:1}
 .update-btn.has-update svg{animation:updPulse 1.6s ease-in-out infinite}
 @keyframes updPulse{0%,100%{transform:rotate(0)}50%{transform:rotate(-22deg)}}
+@media (prefers-reduced-motion:reduce){.update-btn.has-update svg{animation:none}}
+
 /* ── Update modal ── */
-.update-modal{width:480px;max-width:92vw;padding:0;display:flex;flex-direction:column;overflow:hidden;border-radius:18px;box-shadow:0 24px 64px rgba(0,0,0,0.45),0 2px 8px rgba(0,0,0,0.3);animation:updModalIn .26s cubic-bezier(0.16,1,0.3,1)}
+.update-modal{width:480px;max-width:92vw;padding:0;display:flex;flex-direction:column;overflow:hidden;border-radius:18px;box-shadow:var(--shadow);animation:updModalIn .26s cubic-bezier(0.16,1,0.3,1)}
 @keyframes updModalIn{from{opacity:0;transform:translateY(10px) scale(.97)}to{opacity:1;transform:none}}
-.update-modal-header{display:flex;align-items:center;justify-content:space-between;gap:var(--space-3);padding:18px var(--space-5);border-bottom:1px solid var(--border)}
-.update-modal-head-l{display:flex;align-items:center;gap:13px;min-width:0}
+.update-modal-header{display:flex;align-items:center;justify-content:space-between;gap:var(--space-3);padding:calc(var(--space-1) * 4.5) var(--space-5);border-bottom:1px solid var(--border)}
+.update-modal-head-l{display:flex;align-items:center;gap:calc(var(--space-1) * 3.25);min-width:0}
 .upd-head-icon{width:38px;height:38px;border-radius:11px;flex-shrink:0;display:flex;align-items:center;justify-content:center;color:var(--accent);background:var(--accent-subtle)}
 .upd-head-icon svg{width:20px;height:20px}
 .upd-head-text{min-width:0}
 .update-modal-header h3{margin:0;font-size:var(--font-size-xl);font-weight:700;color:var(--text-primary);letter-spacing:-0.01em;line-height:1.2}
-.upd-head-sub{margin:2px 0 0;font-size:var(--font-size-sm);color:var(--text-tertiary);line-height:1.3;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.upd-head-sub{margin:calc(var(--space-1) / 2) 0 0;font-size:var(--font-size-sm);color:var(--text-tertiary);line-height:1.3;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .modal-close-btn{width:30px;height:30px;flex-shrink:0;display:flex;align-items:center;justify-content:center;background:none;border:none;border-radius:8px;cursor:pointer;color:var(--text-tertiary);font-size:20px;line-height:1;padding:0;transition:color .15s ease,background-color .15s ease}
 .modal-close-btn:hover{color:var(--text-primary);background:var(--bg-hover)}
 .modal-close-btn:active{transform:scale(.92)}
-.update-modal-body{padding:22px;min-height:148px;display:flex;flex-direction:column;justify-content:center}
+.update-modal-body{padding:calc(var(--space-1) * 5.5);min-height:148px;display:flex;flex-direction:column;justify-content:center}
+
+/* Independent status notices must not share a border (e.g. local edits + latest release). */
+.upd-action > .upd-badge + .upd-badge{margin-top:var(--space-4)}
 /* Checking state — centered spinner + label */
-.upd-checking-wrap{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;padding:14px 0;text-align:center}
+.upd-checking-wrap{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:calc(var(--space-1) * 3.5);padding:calc(var(--space-1) * 3.5) 0;text-align:center}
 .upd-checking-wrap .upd-big-spin{width:32px;height:32px;border:3px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin .8s linear infinite}
 .upd-checking-wrap span{font-size:var(--font-size-md);color:var(--text-tertiary)}
-.upd-retry-btn{margin-top:13px;padding:9px 18px;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border);border-radius:9px;font-size:var(--font-size-md);font-weight:600;cursor:pointer;transition:background-color .15s ease}
+.upd-retry-btn{margin-top:calc(var(--space-1) * 3.25);padding:calc(var(--space-1) * 2.25) calc(var(--space-1) * 4.5);background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border);border-radius:9px;font-size:var(--font-size-md);font-weight:600;cursor:pointer;transition:background-color .15s ease}
 .upd-retry-btn:hover{background:var(--bg-hover)}
 /* Version hero — current → latest */
-.upd-hero{display:flex;align-items:center;justify-content:center;gap:10px;padding:var(--space-5) 18px;background:linear-gradient(180deg,var(--bg-tertiary),var(--bg-secondary));border:1px solid var(--border);border-radius:14px;margin-bottom:18px}
+.upd-hero{display:flex;align-items:center;justify-content:center;gap:calc(var(--space-1) * 2.5);padding:var(--space-5) calc(var(--space-1) * 4.5);background:linear-gradient(180deg,var(--bg-tertiary),var(--bg-secondary));border:1px solid var(--border);border-radius:14px;margin-bottom:calc(var(--space-1) * 4.5)}
 .upd-ver{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:var(--space-2);padding:var(--space-1)}
 .upd-ver-label{font-size:10px;text-transform:uppercase;letter-spacing:.1em;color:var(--text-tertiary);font-weight:700}
 .upd-ver-num{font-size:var(--font-size-3xl);font-weight:800;font-variant-numeric:tabular-nums;color:var(--text-primary);line-height:1;letter-spacing:-0.01em}
 /* Up-to-date hero: collapse the duplicate "same version" pair into one clear
    statement — dim the arrow and de-emphasize the redundant latest column. */
-.upd-hero.up-to-date{gap:6px}
+.upd-hero.up-to-date{gap:calc(var(--space-1) * 1.5)}
 .upd-hero.up-to-date .upd-arrow{opacity:.4}
 .upd-ver.latest .upd-ver-num{color:var(--accent)}
 .upd-hero.up-to-date .upd-ver.latest .upd-ver-num{color:var(--text-primary)}
 .upd-arrow{display:flex;align-items:center;justify-content:center;width:30px;height:30px;border-radius:50%;flex-shrink:0;color:var(--text-tertiary);background:var(--bg-hover)}
 .upd-arrow svg{width:16px;height:16px}
-.upd-hero:not(.up-to-date) .upd-arrow{color:#fff;background:var(--accent)}
+.upd-hero:not(.up-to-date) .upd-arrow{color:var(--text-on-accent);background:var(--accent)}
 /* Animated stepper */
 .upd-stepper{list-style:none;margin:6px 0 var(--space-1);padding:0;display:flex;flex-direction:column;gap:15px;position:relative}
 .upd-step{display:flex;align-items:center;gap:var(--space-3);position:relative;flex-wrap:wrap}
@@ -1822,14 +2413,10 @@ summary.thinking-header::-webkit-details-marker{display:none}
  * grows; exclude it from anchoring so its growth doesn't fight stick-to-bottom. */
 #streaming-msg{overflow-anchor:none}
 
-/* Reserved box for bare markdown-rendered chat images (the .message-body img
- * fallback — NOT the fixed-size upload thumbnails or the image-gen cards, which
- * already reserve space). Without a reserved aspect box a late image decode
- * grows the bubble and shoves content under the reader mid-read. aspect-ratio +
- * object-fit:contain reserves the height up-front without distorting the image
- * (letterboxed within the box); it never enlarges an intrinsically small image
- * because width is still bounded by the image's natural size + the max-width. */
-.message-body img:not(.msg-img-thumb img, .ig-result-card img, .imagegen-card img, .ig-batch-slot img, .rf-img-tile img){aspect-ratio:3 / 2;height:auto;object-fit:contain}
+/* Markdown images use their intrinsic ratio (or explicit width/height), never
+ * a guessed reservation that remains as letterboxing after decode. Existing
+ * scroll anchoring above handles late layout; fixed attachment tiles retain
+ * their own geometry. Responsive prose sizing belongs to 23-reading-prose.css. */
 
 /* Known-stale cache paint: while a background server GET verifies a cached copy
  * we ALREADY know is outdated (the sidebar's server-issued updatedAt is newer
@@ -7062,6 +7649,79 @@ input.settings-mono {
 .sw-active .sw-progress-fill{animation:progressShimmer 2s ease-in-out infinite}
 @keyframes progressShimmer{0%{filter:brightness(1)}50%{filter:brightness(1.3)}100%{filter:brightness(1)}}
 .sw-progress-label{display:flex;justify-content:space-between;align-items:center;margin-top:var(--space-1);font-size:10px;font-family:'JetBrains Mono',monospace;color:var(--text-tertiary)}
+/* Run-level mailbox evidence; independent of agent execution timelines. */
+.sw-messages {
+  display: grid;
+  gap: var(--space-2);
+  min-width: 0;
+  margin-top: var(--space-3);
+  color: var(--text-primary);
+  font-size: var(--conversation-font-size-content);
+}
+.sw-messages h4 {
+  margin: 0;
+  font-size: var(--font-size-sm);
+  font-weight: var(--weight-semibold);
+}
+.sw-messages-list {
+  display: grid;
+  gap: var(--space-2);
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  min-width: 0;
+}
+.sw-messages-row {
+  padding: var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-secondary);
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+.sw-messages-direction { font-weight: var(--weight-semibold); }
+.sw-messages-status,
+.sw-messages-time,
+.sw-messages-notice {
+  color: var(--text-secondary);
+  font-size: var(--font-size-xs);
+}
+.sw-messages-time { margin-inline-start: var(--space-2); }
+.sw-messages-notice { margin: 0; }
+.sw-messages summary {
+  cursor: pointer;
+  padding-block: var(--space-1);
+  overflow-wrap: anywhere;
+}
+.sw-messages summary:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: var(--space-1);
+}
+/* Keep the native summary focusable while showing content in only one place. */
+.sw-messages-content > summary .sw-messages-collapse,
+.sw-messages-content[open] > summary .sw-messages-preview { display: none; }
+.sw-messages-content[open] > summary .sw-messages-collapse { display: inline; }
+.sw-messages-body {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  padding-top: var(--space-2);
+  line-height: var(--leading-body);
+}
+.sw-messages [hidden] { display: none; }
+.sw-messages-evidence {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 2fr);
+  gap: var(--space-1) var(--space-2);
+  margin-block: var(--space-2) 0;
+  color: var(--text-secondary);
+  font-size: var(--font-size-xs);
+}
+.sw-messages-evidence dd { margin: 0; }
+.sw-messages-status[data-state="input_confirmed"] { color: var(--success-text); }
+
+.sw-a-messages{margin-block:var(--space-2);min-width:0}
+.sw-a-messages>summary,.sw-messages-diagnostics>summary{cursor:pointer;padding-block:var(--space-1);color:var(--text-secondary);font-size:var(--font-size-xs);overflow-wrap:anywhere}
+.sw-a-messages>summary:focus-visible,.sw-messages-diagnostics>summary:focus-visible{outline:var(--control-edge-inset) solid var(--focus-ring);outline-offset:var(--space-1)}
 /* ── Agent grid ── */
 .sw-agent-grid{display:flex;flex-direction:column;gap:var(--space-1);padding:var(--space-1) 14px var(--space-3)}
 .sw-empty{padding:6px 2px;font-size:var(--font-size-sm);color:var(--text-tertiary)}
@@ -7648,9 +8308,9 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
 .ptc-title { font-weight: var(--weight-semibold); color: var(--text-primary); }
 .ptc-status { margin-left: auto; max-width: 100%; overflow-wrap: anywhere; font-size: var(--font-size-xs); color: var(--text-tertiary); }
 .ptc-running .ptc-status { color: var(--accent); }
-.ptc-status-error { color: var(--error-text); font-weight: var(--weight-semibold); }
-.ptc-meta { flex-basis: 100%; padding-inline-start: var(--space-3); color: var(--text-tertiary); font-size: var(--font-size-xs); overflow-wrap: anywhere; }
-@media (min-width: 640px) { .ptc-meta { flex-basis: auto; padding-inline-start: 0; } .ptc-status { order: 1; } }
+.ptc-status.ptc-status-error { color: var(--chip-err-color); background: var(--chip-err-bg); font-weight: var(--weight-semibold); }
+.ptc-meta { flex-basis: 100%; min-width: 0; padding-inline-start: var(--space-3); color: var(--text-secondary); font-size: var(--font-size-xs); overflow-wrap: anywhere; white-space: normal; }
+.ptc-status { padding: var(--space-1) var(--space-2); border-radius: var(--radius-sm); background: var(--chip-neutral-bg); color: var(--chip-neutral-color); }
 .ptc-tools { display: flex; flex-wrap: wrap; gap: var(--space-1); margin: 0 0 var(--space-2); }
 .ptc-tool-chip { padding: var(--space-1) var(--space-2); max-width: 100%; overflow-wrap: anywhere; border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text-secondary); font: var(--font-size-xs)/var(--leading-title) var(--font-mono); background: var(--bg-primary); }
 .ptc-detail { min-width: 0; margin: var(--space-2) 0 0; color: var(--text-secondary); font-size: var(--font-size-sm); }
@@ -8855,17 +9515,17 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
 }
 /* Under 10s left — the command is about to be killed, so stop being quiet. */
 .ptool-cmd-timer-soon {
-  color: #d97706;
+  color: var(--warning-text);
   opacity: 1;
 }
 /* Past the deadline: the backend is SIGKILLing the process tree. */
 .ptool-cmd-timer-over {
-  color: #dc2626;
+  color: var(--error-text);
   opacity: 1;
 }
 .ptool-cmd-code {
   margin: 0;
-  padding: 3px 0 5px;
+  padding: var(--space-1) 0 var(--space-1);
   background: none;
   border: none;
   white-space: pre-wrap;
@@ -8896,7 +9556,7 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
 .ptool-cmd-output {
   display: none;
   margin: 0;
-  padding: var(--space-1) 0 var(--space-1) 10px;
+  padding: var(--space-1) 0 var(--space-1) var(--space-3);
   background: none;
   white-space: pre-wrap;
   word-break: break-all;
@@ -8918,7 +9578,7 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
  * scanners require, and keeps the code readable under a dark theme where a
  * transparent PNG would invert to unscannable. */
 .ptool-qr-strip {
-  margin: 6px 0 2px;
+  margin: var(--space-2) 0 var(--space-1);
 }
 .ptool-qr-label {
   font-size: 10.5px;
@@ -8933,7 +9593,7 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
 .ptool-qr-tile {
   margin: 0;
   padding: var(--space-2);
-  background: #fff;
+  background: var(--qr-plate-background);
   border: 1px solid var(--border);
   border-radius: 6px;
   line-height: 0;
@@ -8955,7 +9615,7 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
   max-height: 220px;
   overflow-y: auto;
   margin: 0;
-  padding: var(--space-1) 0 var(--space-1) 10px;
+  padding: var(--space-1) 0 var(--space-1) var(--space-3);
   background: none;
   border-left: 2px solid var(--border);
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
@@ -8986,6 +9646,11 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
   display: block;
 }
 
+/* Lazy historical output uses native disclosure state, not legacy fold state. */
+.ptool-cmd-block details.ptool-result-block[open] .ptool-cmd-output {
+  display: block;
+}
+
 /* ── Fold chips: the explicit per-pane disclosures (owner call 2026-09-05)
  * ──
  * A matched pair of ghost buttons on the header row — 命令 for the command
@@ -9000,9 +9665,9 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
   flex-shrink: 0;
   display: inline-flex;
   align-items: center;
-  gap: 3px;
+  gap: var(--space-1);
   margin: 0;
-  padding: 1px 5px;
+  padding: var(--control-edge-inset) var(--space-1);
   border: none;
   border-radius: 4px;
   background: none;
@@ -9016,7 +9681,7 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
 }
 .ptool-cmd-fold:hover {
   color: var(--accent-hover);
-  background: rgba(148, 163, 184, 0.12);
+  background: var(--bg-hover);
 }
 .ptool-cmd-fold svg {
   width: 10px;
@@ -9153,105 +9818,79 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
   0%, 100% { opacity: 1; }
   50%      { opacity: 0.6; }
 }
-
-/* Diff preview */
+/* Edit previews and settled batch disclosures; shared design-token chrome. */
 .ptool-diff-preview {
-  padding: 6px 0;
+  padding: var(--space-2) 0;
   max-height: 340px;
   overflow-y: auto;
-  font-family: 'JetBrains Mono', 'Fira Code', monospace;
-  font-size: 11.5px;
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
   line-height: 1.55;
 }
 .ptool-diff-line {
   display: flex;
-  padding: 1px var(--space-3) 1px 10px;
+  padding: var(--control-edge-inset) var(--space-3);
   min-height: 20px;
 }
 .ptool-diff-sign {
   flex-shrink: 0;
   width: 18px;
   text-align: center;
-  font-weight: 700;
+  font-weight: var(--weight-bold);
   user-select: none;
 }
-.ptool-diff-code {
-  flex: 1;
-  white-space: pre-wrap;
-  word-break: break-all;
-}
-.ptool-diff-del {
-  background: rgba(239,68,68,0.1);
-  color: #fca5a5;
-}
-.ptool-diff-del .ptool-diff-sign {
-  color: #f87171;
-}
-.ptool-diff-add {
-  background: rgba(34,197,94,0.1);
-  color: #86efac;
-}
-.ptool-diff-add .ptool-diff-sign {
-  color: #4ade80;
-}
-.ptool-diff-ellipsis {
-  opacity: 0.55;
-  font-style: italic;
-}
+.ptool-diff-code { flex: 1; white-space: pre-wrap; word-break: break-all; }
+.ptool-diff-del { background: var(--error-bg); color: var(--error-text); }
+.ptool-diff-del .ptool-diff-sign { color: var(--error-text); }
+.ptool-diff-add { background: var(--success-bg); color: var(--success-text); }
+.ptool-diff-add .ptool-diff-sign { color: var(--success-text); }
+.ptool-diff-ellipsis { opacity: 0.55; font-style: italic; }
 .ptool-diff-separator {
   height: 1px;
   margin: var(--space-1) var(--space-3);
-  background: rgba(255,255,255,0.08);
+  background: var(--border);
 }
 
-/* Batch apply_diff */
-.ptool-batch-preview {
-  padding: var(--space-1) 0;
-}
+/* Batch apply_diff preview. */
+.ptool-batch-preview { padding: var(--space-1) 0; }
 .ptool-batch-header {
-  padding: 6px var(--space-3);
-  font-size: 11.5px;
-  font-weight: 600;
+  padding: var(--space-2) var(--space-3);
+  font-size: var(--font-size-xs);
+  font-weight: var(--weight-semibold);
   color: var(--text-secondary);
-  border-bottom: 1px solid rgba(255,255,255,0.06);
+  border-bottom: 1px solid var(--border);
 }
-.ptool-batch-edit {
-  border-bottom: 1px solid rgba(255,255,255,0.04);
-}
-.ptool-batch-edit[open] {
-  background: rgba(0,0,0,0.08);
-}
+.ptool-batch-edit { border-bottom: 1px solid var(--border); }
+.ptool-batch-edit[open] { background: var(--bg-secondary); }
 .ptool-batch-summary {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 5px var(--space-3);
-  font-size: 11.5px;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-3);
+  font-size: var(--font-size-xs);
   cursor: pointer;
   color: var(--text-secondary);
   user-select: none;
-  transition: background .15s;
+  transition: background var(--motion-fast);
 }
-.ptool-batch-summary:hover {
-  background: rgba(255,255,255,0.04);
-}
+.ptool-batch-summary:hover { background: var(--bg-secondary); }
 .ptool-batch-idx {
   color: var(--accent);
-  font-weight: 700;
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 10.5px;
+  font-weight: var(--weight-bold);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
   min-width: 22px;
 }
 .ptool-batch-path {
-  color: #93c5fd;
-  font-family: 'JetBrains Mono', monospace;
+  color: var(--info-text);
+  font-family: var(--font-mono);
   font-size: var(--font-size-xs);
 }
 .ptool-batch-desc {
   flex: 1;
   color: var(--text-tertiary);
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 11.5px;
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
   line-height: 1.4;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -9259,72 +9898,63 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
 }
 .ptool-batch-stats {
   color: var(--text-tertiary);
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 10px;
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
   opacity: 0.7;
 }
 .ptool-batch-edit .ptool-diff-preview {
   max-height: 200px;
-  border-top: 1px solid rgba(255,255,255,0.04);
+  border-top: 1px solid var(--border);
 }
 .ptool-batch-more {
-  padding: 5px var(--space-3);
-  font-size: 10.5px;
+  padding: var(--space-1) var(--space-3);
+  font-size: var(--font-size-xs);
   color: var(--text-tertiary);
   font-style: italic;
 }
 
-/* ── Batch tool done state — collapsible per-edit list ── */
-.ptool-batch-done-block {
-  border-radius: 8px;
-  overflow: hidden;
-}
-.ptool-batch-done-block > summary {
-  list-style: none;
-  cursor: pointer;
-}
+/* Settled edit rows already carry their own status/ordinal/operation chrome.
+ * Do not stack the generic result rail and a second nested-list inset. */
+.ptool-batch-done-block { border-radius: var(--radius-sm); overflow: hidden; }
+.ptool-batch-done-block > summary { list-style: none; cursor: pointer; }
 .ptool-batch-done-block > summary::-webkit-details-marker { display: none; }
 .ptool-batch-done-block > summary::marker { display: none; content: ""; }
 .ptool-batch-done-block > summary .ptool-text::after {
   content: " ▸";
-  font-size: 10px;
+  font-size: var(--font-size-xs);
   opacity: 0.5;
 }
-.ptool-batch-done-block[open] > summary .ptool-text::after {
-  content: " ▾";
+.ptool-batch-done-block[open] > summary .ptool-text::after { content: " ▾"; }
+.ptool-batch-done-block > .ptool-result-body {
+  margin: 0;
+  padding: 0;
+  border-left: 0;
 }
 .ptool-batch-done-list {
-  padding: 6px var(--space-2) var(--space-2) var(--space-6);
+  padding: var(--space-1) 0 var(--space-2);
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: var(--space-1);
 }
-/* Each edit is a nested <details> with summary + optional diff preview */
 .ptool-batch-done-edit {
-  border-radius: 6px;
-  border: 1px solid rgba(255,255,255,0.06);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
   overflow: hidden;
 }
-.ptool-batch-done-edit[open] {
-  border-color: rgba(255,255,255,0.1);
-}
+.ptool-batch-done-edit[open] { border-color: var(--border-light); }
 
-/* Failed edit body — the exact per-edit line the tool returned to the model
-   (or the metadata detail fallback when the raw text was compacted away). */
+/* Exact per-edit evidence, retained even when the model output was compacted. */
 .ptool-batch-fail-detail {
-  padding: 6px 11px var(--space-2) 34px;
-  font-family: 'JetBrains Mono', 'Fira Code', monospace;
-  font-size: 11.5px;
+  padding: var(--space-2) var(--space-3) var(--space-2) var(--space-8);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
   line-height: 1.5;
-  color: var(--accent-red, #f87171);
+  color: var(--error-text);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-  border-top: 1px solid rgba(255,255,255,0.04);
+  border-top: 1px solid var(--border);
 }
-/* Inline failure reason — shown on the failed edit's summary line and on
-   the collapsed batch header so a gate/executor refusal is visible without
-   expanding anything. Truncated with ellipsis; full text lives in the title
-   tooltip and the .ptool-batch-fail-detail block. */
+/* Reasons belong to individual edit rows, not the batch count header. */
 .ptool-batch-fail-reason {
   display: inline-block;
   flex-shrink: 1;
@@ -9334,16 +9964,13 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
   text-overflow: ellipsis;
   white-space: nowrap;
   vertical-align: baseline;
-  color: var(--accent-red, #f87171);
-  font-family: 'JetBrains Mono', monospace;
+  color: var(--error-text);
+  font-family: var(--font-mono);
   font-size: var(--font-size-xs);
   line-height: 1.4;
   opacity: 0.85;
 }
-.ptool-batch-done-single {
-  border-radius: 6px;
-  overflow: hidden;
-}
+.ptool-batch-done-single { border-radius: var(--radius-sm); overflow: hidden; }
 /* Memory body rendered as Markdown inside the expand block — give it
    breathing room and a subtle surface so it reads like a content card,
    not a raw diff row. */
@@ -9861,6 +10488,11 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
   color: var(--text-primary);
   white-space: normal;
 }
+
+.ptool-convmeta-header .ptool-text,
+.ptool-convmeta-structured {
+  overflow-wrap: anywhere;
+}
 .ptool-convmeta-block > summary::-webkit-details-marker { display: none; }
 .ptool-convmeta-block > summary::marker { display: none; content: ""; }
 .ptool-convmeta-block > summary:focus-visible {
@@ -10333,6 +10965,14 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
   border-color: rgba(239,68,68,0.45);
   color: #fca5a5;
   box-shadow: 0 0 10px -3px rgba(239,68,68,0.25);
+}
+/* Revision action inside an expanded edit; shared UI controls own appearance. */
+.tool-diff-review {
+  display: flex;
+  justify-content: flex-end;
+  padding: var(--space-1) var(--space-3);
+  background: var(--bg-secondary);
+  border-top: 1px solid var(--border);
 }
 
 /* ═══════════════════════════════════════════
@@ -10992,304 +11632,88 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
     margin-left: var(--space-2);
   }
 }
-
-/* ═══════════════════════════════════════════════════════════════════════════
-   WorkUnit live region (docs/contracts/API_CONTRACT.md §2.18)
-   Hydrated in place by ui/workunit_tracker.js inside a produce_* card:
-   a stage stepper (done/active/skipped/failed/pending) plus ONE terminal
-   outcome line — download links for done/degraded, the failure envelope for
-   failed. The header badge speaks the same lifecycle enum via
-   .ptool-wu-badge-*.
-   ═══════════════════════════════════════════════════════════════════════════ */
-.ptool-wu-live:empty { display: none; }
-.ptool-wu-stages {
-  margin: 2px var(--space-2) var(--space-2) var(--space-6);
-  padding: 6px 10px;
-  border: 1px solid var(--border-color, rgba(128,128,128,0.22));
-  border-radius: var(--radius-sm);
-  background: color-mix(in srgb, currentColor 2.5%, transparent);
-}
-.ptool-wu-stage {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 11.5px;
-  line-height: 1.7;
-  color: var(--text-secondary);
-}
-.ptool-wu-stage-icon { flex: none; display: inline-flex; width: 14px; justify-content: center; }
-.ptool-wu-stage-name { font-family: var(--font-mono, ui-monospace, monospace); font-size: var(--font-size-xs); }
-.ptool-wu-stage-done .ptool-wu-stage-icon { color: #22c55e; }
-.ptool-wu-stage-done .ptool-wu-stage-name { color: var(--text-primary); }
-.ptool-wu-stage-active .ptool-wu-stage-name { color: var(--accent, #3b82f6); font-weight: 600; }
-.ptool-wu-stage-failed .ptool-wu-stage-icon,
-.ptool-wu-stage-failed .ptool-wu-stage-name { color: #ef4444; }
-.ptool-wu-stage-skipped { opacity: 0.55; }
-.ptool-wu-stage-pending { opacity: 0.4; }
-.ptool-wu-attempt {
-  font-size: 10px;
-  font-weight: 600;
-  padding: 0 6px;
-  border-radius: 7px;
-  color: #f59e0b;
-  background: rgba(245,158,11,0.13);
-}
-.ptool-wu-elapsed { font-size: 10.5px; opacity: 0.7; font-variant-numeric: tabular-nums; }
-.ptool-wu-stage-err {
-  font-size: 10.5px;
-  color: #ef4444;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+/* Accepted production work is a durable visible card. Details disclose execution;
+ * all state and interaction ownership lives in conversation/ui/work-unit. */
+.ptool-work-card {
   min-width: 0;
-}
-.ptool-wu-line {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin: 0 var(--space-2) var(--space-2) var(--space-6);
-  font-size: var(--font-size-sm);
-  font-weight: 600;
-}
-.ptool-wu-line-ok { color: #22c55e; }
-.ptool-wu-line-warn { color: #f59e0b; }
-.ptool-wu-line-err { color: #ef4444; }
-.ptool-wu-line-muted { color: var(--text-secondary); font-weight: 500; }
-.ptool-wu-line-note { font-weight: 400; color: var(--text-secondary); }
-.ptool-wu-hint {
-  margin: -4px var(--space-2) var(--space-2) 44px;
-  font-size: 11.5px;
-  line-height: 1.5;
-  color: var(--text-secondary);
-}
-.ptool-wu-download {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-1);
-  padding: 2px 9px;
-  border-radius: 8px;
-  border: 1px solid rgba(34,197,94,0.4);
-  background: rgba(34,197,94,0.1);
-  color: #16a34a;
-  font-size: var(--font-size-xs);
-  font-weight: 600;
-  text-decoration: none;
-  cursor: pointer;
-}
-.ptool-wu-download:hover { background: rgba(34,197,94,0.18); }
-/* Header badge: the WorkUnit lifecycle enum (static — no blink; a terminal
- * state must not pulse, and a running one already has the stage spinner). */
-.ptool-wu-badge-queued,
-.ptool-wu-badge-running {
-  color: var(--accent, #3b82f6);
-  background: color-mix(in srgb, var(--accent, #3b82f6) 13%, transparent);
-}
-.ptool-wu-badge-retrying {
-  color: #f59e0b;
-  background: rgba(245,158,11,0.15);
-}
-.ptool-wu-badge-done {
-  color: #22c55e;
-  background: rgba(34,197,94,0.14);
-}
-.ptool-wu-badge-degraded {
-  color: #f59e0b;
-  background: rgba(245,158,11,0.15);
-}
-.ptool-wu-badge-failed {
-  color: #ef4444;
-  background: rgba(239,68,68,0.13);
-}
-.ptool-wu-badge-aborted {
-  color: var(--text-secondary);
-  background: color-mix(in srgb, currentColor 8%, transparent);
-}
-/* Streaming page gallery: thumbnails arrive as page_rendered events project
- * into the workUnit; pending slots (live units only) reserve the grid so the
- * card does not jump when a page lands. 16:9-ish cells at a fixed track keep
- * one DOM write per snapshot — the fingerprint gate already skips unchanged
- * polls. */
-.ptool-wu-gallery {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
-  gap: var(--space-2);
-  margin: 2px var(--space-2) var(--space-2) var(--space-6);
-}
-.ptool-wu-thumb {
-  position: relative;
-  display: block;
-  aspect-ratio: 16 / 9;
-  border: 1px solid var(--border-color, rgba(128,128,128,0.22));
-  border-radius: var(--radius-sm);
-  overflow: hidden;
-  background: color-mix(in srgb, currentColor 3%, transparent);
-}
-.ptool-wu-thumb img {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-  display: block;
-}
-.ptool-wu-thumb-n {
-  position: absolute;
-  right: 3px;
-  bottom: 3px;
-  min-width: 15px;
-  padding: 0 4px;
-  border-radius: 7px;
-  background: rgba(0,0,0,0.55);
-  color: #fff;
-  font-size: 9.5px;
-  font-weight: 600;
-  line-height: 15px;
-  text-align: center;
-  font-variant-numeric: tabular-nums;
-}
-.ptool-wu-thumb-pending {
-  border-style: dashed;
-  opacity: 0.45;
-}
-.ptool-wu-thumb-pending .ptool-wu-thumb-n {
-  background: color-mix(in srgb, currentColor 14%, transparent);
-  color: var(--text-secondary);
-}
-/* Quick-action chips (C2) + motion scene grid (B4): terminal-card revision
- * affordances. Chips send/prefill composer instructions; scene rows offer
- * per-scene regen + edit-prefill without leaving the conversation. */
-.ptool-wu-chips {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-2);
-  margin: 0 var(--space-2) var(--space-2) var(--space-6);
-}
-.ptool-wu-chip {
-  padding: 3px 10px;
-  border-radius: 999px;
-  border: 1px solid var(--border-color, rgba(128,128,128,0.3));
-  background: color-mix(in srgb, currentColor 4%, transparent);
-  color: var(--text-secondary);
-  font-size: var(--font-size-xs);
-  font-weight: 600;
-  cursor: pointer;
-}
-.ptool-wu-chip:hover {
-  color: var(--accent, #3b82f6);
-  border-color: color-mix(in srgb, var(--accent, #3b82f6) 45%, transparent);
-  background: color-mix(in srgb, var(--accent, #3b82f6) 8%, transparent);
-}
-.ptool-wu-scenes {
-  margin: 0 var(--space-2) var(--space-2) var(--space-6);
-  border: 1px solid var(--border-color, rgba(128,128,128,0.22));
-  border-radius: var(--radius-sm);
-  overflow: hidden;
-}
-.ptool-wu-scene {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  padding: 4px 10px;
-  font-size: var(--font-size-xs);
-  color: var(--text-secondary);
-}
-.ptool-wu-scene + .ptool-wu-scene {
-  border-top: 1px solid color-mix(in srgb, currentColor 7%, transparent);
-}
-.ptool-wu-scene-missing .ptool-wu-scene-id { color: #f59e0b; }
-.ptool-wu-scene-id {
-  font-family: var(--font-mono, ui-monospace, monospace);
-  font-variant-numeric: tabular-nums;
-}
-.ptool-wu-scene-dur { opacity: 0.7; margin-left: auto; }
-.ptool-wu-scene-btn {
-  padding: 1px 8px;
-  border-radius: 7px;
-  border: 1px solid var(--border-color, rgba(128,128,128,0.3));
-  background: transparent;
-  color: var(--text-secondary);
-  font-size: 10.5px;
-  font-weight: 600;
-  cursor: pointer;
-}
-.ptool-wu-scene-btn:hover:not(:disabled) {
-  color: var(--accent, #3b82f6);
-  border-color: color-mix(in srgb, var(--accent, #3b82f6) 45%, transparent);
-}
-.ptool-wu-scene-btn:disabled { opacity: 0.45; cursor: default; }
-/* Interactive outline gate (A6): the workUnit card doubles as the review
- * surface while the deck parks before authoring. Bounded page list; the
- * answer posts to the shared human-response endpoint. */
-.ptool-wu-gate {
-  margin: 2px var(--space-2) var(--space-2) var(--space-6);
-  padding: 8px 10px;
-  border: 1px solid color-mix(in srgb, var(--accent, #3b82f6) 35%, transparent);
-  border-radius: var(--radius-sm);
-  background: color-mix(in srgb, var(--accent, #3b82f6) 5%, transparent);
-}
-.ptool-wu-gate-title {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: var(--font-size-xs);
-  font-weight: 700;
-  color: var(--accent, #3b82f6);
-}
-.ptool-wu-gate-deck {
-  margin-top: 4px;
-  font-size: var(--font-size-sm);
-  font-weight: 600;
+  margin-block: var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-secondary);
   color: var(--text-primary);
+  font: var(--font-size-lg)/var(--leading-body) var(--font-ui);
+  overflow-wrap: anywhere;
 }
-.ptool-wu-gate-pages {
-  margin: 6px 0;
-  max-height: 180px;
-  overflow-y: auto;
+.ptool-work-card [hidden] { display: none !important; }
+.ptool-work-header { display: flex; align-items: flex-start; gap: var(--space-3); padding: var(--space-4); }
+.ptool-work-icon { flex: none; display: inline-flex; padding-top: var(--space-1); color: var(--text-secondary); }
+.ptool-work-icon svg { width: var(--space-5); height: var(--space-5); }
+.ptool-work-heading { flex: 1; min-width: 0; }
+.ptool-work-heading .ptool-text {
+  margin: 0; color: var(--text-primary); font: var(--weight-semibold) var(--font-size-xl)/var(--leading-title) var(--font-ui);
+  white-space: normal; overflow: visible; text-overflow: clip;
 }
-.ptool-wu-gate-page {
-  display: flex;
-  gap: 6px;
-  align-items: baseline;
-  font-size: 11.5px;
-  line-height: 1.6;
-  color: var(--text-secondary);
+.ptool-work-heading .ptool-convmeta-src { display: block; margin: 0; padding: 0; border: 0; border-radius: 0; background: transparent; color: var(--text-secondary); font-size: var(--font-size-sm); }
+.ptool-work-status { flex: none; max-width: 40%; color: var(--info-text); font-size: var(--font-size-sm); }
+.ptool-work-status[data-state="done"] { color: var(--success-text); }
+.ptool-work-status[data-state="waiting"], .ptool-work-status[data-state="degraded"], .ptool-work-status[data-state="retrying"] { color: var(--warning-text); }
+.ptool-work-status[data-state="failed"] { color: var(--error-text); }
+.ptool-work-status[data-state="aborted"] { color: var(--text-secondary); }
+.ptool-work-card .ptool-wu-live { padding: 0 var(--space-4) var(--space-4); }
+.ptool-work-card p { margin: 0 0 var(--space-3); }
+.ptool-wu-activity { color: var(--text-primary); font-size: var(--font-size-lg); }
+.ptool-work-card .ptool-wu-caption { font-size: var(--font-size-sm); color: var(--text-secondary); }
+.ptool-wu-outcome { padding: var(--space-3); border: 1px solid var(--warning-border); border-radius: var(--radius-sm); background: var(--warning-bg); color: var(--warning-text); white-space: pre-wrap; }
+.ptool-wu-outcome[data-state="failed"] { color: var(--error-text); border-color: var(--error-border); background: var(--bg-primary); }
+.ptool-work-card .ptool-wu-error { color: var(--error-text); }
+.ptool-work-card .ptool-wu-actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); margin-top: var(--space-3); }
+.ptool-work-card .ptool-wu-downloads { display: contents; }
+.ptool-work-card .ptool-wu-download { display: inline-flex; align-items: center; min-height: var(--control-h-sm); padding: var(--space-1) var(--space-3); border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text-primary); background: var(--bg-primary); font-size: var(--font-size-md); text-decoration: none; }
+.ptool-wu-download:hover { border-color: var(--accent); }
+.ptool-work-card summary { cursor: pointer; color: var(--text-secondary); font-size: var(--font-size-sm); }
+.ptool-work-card summary:focus-visible, .ptool-wu-download:focus-visible { outline: 2px solid var(--info-text); outline-offset: 2px; }
+.ptool-wu-process, .ptool-wu-revisions, .ptool-wu-scenes { border-top: 1px solid var(--border); margin-top: var(--space-4); padding-top: var(--space-3); }
+.ptool-work-receipt { padding: var(--space-3) var(--space-4); border-top: 1px solid var(--border); }
+.ptool-work-receipt .ptool-motion-body { margin: var(--space-2) 0 0; }
+.ptool-work-card .ptool-wu-stages { list-style: none; padding: 0; margin: var(--space-3) 0 0; }
+.ptool-work-card .ptool-wu-stage { display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: baseline; padding-block: var(--space-1); font-size: var(--font-size-md); }
+.ptool-wu-stage-mark { min-width: var(--space-4); color: var(--text-secondary); }
+.ptool-wu-stage[data-state="done"] .ptool-wu-stage-mark { color: var(--success-text); }
+.ptool-wu-stage[data-state="active"] .ptool-wu-stage-mark { color: var(--info-text); }
+.ptool-wu-stage[data-state="failed"] .ptool-wu-stage-mark { color: var(--error-text); }
+.ptool-work-card .ptool-wu-gallery { display: grid; grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr); gap: var(--space-2); margin-block: var(--space-3); }
+.ptool-work-card .ptool-wu-gallery:not(.ptool-wu-gallery-all) > :first-child { grid-row: span 2; aspect-ratio: auto; height: 100%; }
+.ptool-work-card .ptool-wu-gallery-all { grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); }
+.ptool-work-card .ptool-wu-thumb { position: relative; min-width: 0; width: 100%; height: auto; aspect-ratio: 16/9; padding: 0; display: block; overflow: hidden; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg-primary); }
+.ptool-work-card .ptool-wu-thumb img { display: block; width: 100%; height: 100%; object-fit: contain; }
+.ptool-work-card .ptool-wu-thumb-n { position: absolute; right: var(--space-1); bottom: var(--space-1); padding: 0 var(--space-1); border-radius: var(--radius-sm); background: var(--bg-primary); color: var(--text-primary); font: var(--font-size-sm)/var(--leading-body) var(--font-ui); }
+.ptool-work-card .ptool-wu-thumb-pending { border-style: dashed; }
+.ptool-work-card .ptool-wu-thumb-error { border-color: var(--warning-border); }
+.ptool-wu-film { margin-block: var(--space-3); }
+.ptool-wu-video-cover { display: flex; flex-direction: column; justify-content: center; align-items: center; gap: var(--space-4); padding: var(--space-6); min-height: 180px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg-primary); text-align: center; }
+.ptool-work-card .ptool-wu-video-title { font-size: var(--font-size-2xl); margin: 0; }
+.ptool-wu-film video { width: 100%; max-height: 480px; border-radius: var(--radius-sm); background: var(--bg-primary); }
+.ptool-wu-scene { display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: center; padding-block: var(--space-3); border-bottom: 1px solid var(--border); }
+.ptool-wu-scene-title { margin-right: auto; font-size: var(--font-size-md); }
+.ptool-work-card .ptool-wu-action-message { flex-basis: 100%; font-size: var(--font-size-sm); color: var(--text-secondary); white-space: pre-wrap; margin: var(--space-2) 0 0; }
+.ptool-wu-action-message:empty { display: none; }
+.ptool-wu-connection { margin-top: var(--space-3); }
+.ptool-wu-revision-tasks:not(:empty) { padding: 0 var(--space-3); }
+@media (max-width: 480px) {
+  .ptool-work-header { flex-wrap: wrap; }
+  .ptool-work-icon { display: none; }
+  .ptool-work-status { flex-basis: 100%; max-width: none; }
+  .ptool-work-card .ptool-wu-gallery-all { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
-.ptool-wu-gate-page-n {
-  flex: none;
-  min-width: 16px;
-  font-weight: 700;
-  font-variant-numeric: tabular-nums;
-}
-.ptool-wu-gate-page-type {
-  flex: none;
-  font-family: var(--font-mono, ui-monospace, monospace);
-  font-size: 10px;
-  opacity: 0.75;
-}
-.ptool-wu-gate-page-msg {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.ptool-wu-gate-input {
-  width: 100%;
-  box-sizing: border-box;
-  resize: vertical;
-  border: 1px solid var(--border-color, rgba(128,128,128,0.3));
-  border-radius: var(--radius-sm);
-  background: var(--bg-primary, transparent);
-  color: var(--text-primary);
-  font-size: var(--font-size-xs);
-  padding: 6px 8px;
-}
-.ptool-wu-gate-actions {
-  display: flex;
-  gap: var(--space-2);
-  margin-top: 6px;
-}
-.ptool-wu-gate-done {
-  opacity: 0.6;
-}
+/* A pending review is always visible, above preview/action/process content.
+ * Its keyed DOM preserves draft text and focus across authoritative snapshots. */
+.ptool-work-card .ptool-wu-gate { padding: var(--space-4); margin-block: var(--space-3); border: 1px solid var(--warning-border); border-radius: var(--radius-sm); background: var(--bg-primary); }
+.ptool-work-card .ptool-wu-gate-title { font: var(--weight-semibold) var(--font-size-xl)/var(--leading-title) var(--font-ui); color: var(--text-primary); margin: 0 0 var(--space-3); }
+.ptool-work-card .ptool-wu-gate-deck { color: var(--text-secondary); font-size: var(--font-size-md); }
+.ptool-work-card .ptool-wu-gate-pages { max-height: 280px; overflow-y: auto; list-style: none; padding: 0; margin: var(--space-3) 0; }
+.ptool-work-card .ptool-wu-gate-page { display: flex; gap: var(--space-3); padding-block: var(--space-2); font-size: var(--font-size-lg); line-height: var(--leading-body); }
+.ptool-wu-gate-page-n { flex: none; min-width: var(--space-4); font-variant-numeric: tabular-nums; color: var(--text-secondary); }
+.ptool-work-card .ptool-wu-gate textarea { width: 100%; resize: vertical; min-height: 90px; box-sizing: border-box; font-size: var(--font-size-lg); }
 
 /* Browser JS keeps the same command chrome; the observed page title is the
  * execution-location chip. Never uppercase the operation or expand raw JS
@@ -13147,102 +13571,7 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
 }
 /* Pinned zone removed — replaced by folders */
 
-/* ══════════════════════════════════════════════════════
-   🕹️ PIXEL ART SYSTEM — identity through BORDER + FONT
-   SNES-style 3D borders: light top-left, dark bottom-right.
-   JetBrains Mono for cute monospace text in buttons/toggles.
-   Pixel identity = square corners (4px radius) +
-   directional borders + bottom drop shadow + press-down :active.
-
-   Technique: 2px border with per-side colors (FFFCF6 top/left,
-   A89878 bottom/right) + 0 2px 0 drop-shadow.
-   Font: JetBrains Mono 600 for crisp, dark (#5C4A33) text.
-   ══════════════════════════════════════════════════════ */
-
-/* ── New Chat — buttered-toast primary button ──
-   A golden toast-crust gradient (linear) topped by a soft melting-butter
-   sheen (radial highlight) — the Jon Kantner stacked-gradient skeuomorphic
-   recipe. Puffy "bread" depth via an inset top butter-rim + a warm baked
-   bottom crust shadow. Drop shadow stays in tofu's neutral warm-charcoal
-   clay vocabulary (rgba(92,72,44,…) — NO accent glow; guarded by
-   tests/frontend/test_frontend_new_chat_btn_style.py, which also rewrites the
-   rgba(92,72,44,0.10) token, so keep it present). */
-[data-theme="tofu"] .new-chat-btn{
-  background:
-    radial-gradient(58% 48% at 22% 32%,rgba(165,100,38,0.16) 0%,transparent 62%),
-    radial-gradient(52% 46% at 78% 66%,rgba(165,100,38,0.13) 0%,transparent 60%),
-    radial-gradient(42% 60% at 90% 22%,rgba(175,105,42,0.11) 0%,transparent 56%),
-    radial-gradient(100% 130% at 50% -8%,rgba(255,246,222,0.28) 0%,rgba(255,246,222,0) 46%),
-    linear-gradient(180deg,#E6C486 0%,#D8B168 56%,#CA9F52 100%);
-  color:#5A3A16;
-  border:1px solid rgba(150,100,45,0.34);
-  border-radius:12px;
-  box-shadow:0 1px 2px rgba(92,72,44,0.08),0 4px 12px rgba(92,72,44,0.10),inset 0 1px 0 rgba(255,248,228,0.34),inset 0 -3px 4px rgba(150,95,40,0.20);
-  font-family:var(--sans-body);
-  font-size:var(--font-size-md);font-weight:600;letter-spacing:0.01em;line-height:1;
-  text-transform:none;
-  text-shadow:0 1px 0 rgba(255,250,232,0.45);
-  padding:10px var(--space-4);
-  margin:0;
-  width:auto;
-  position:relative;
-  clip-path:none;
-  image-rendering:auto;
-  transition:background 0.18s ease,box-shadow 0.18s ease,transform 0.15s cubic-bezier(.34,1.56,.64,1)
-}
-[data-theme="tofu"] .new-chat-btn:hover{
-  background:
-    radial-gradient(58% 48% at 22% 32%,rgba(165,100,38,0.14) 0%,transparent 62%),
-    radial-gradient(52% 46% at 78% 66%,rgba(165,100,38,0.11) 0%,transparent 60%),
-    radial-gradient(100% 130% at 50% -8%,rgba(255,248,226,0.34) 0%,rgba(255,248,226,0) 46%),
-    linear-gradient(180deg,#EFCA8C 0%,#E2BA6F 56%,#D3A85A 100%);
-  color:#4E3213;
-  box-shadow:0 2px 4px rgba(92,72,44,0.12),0 7px 18px rgba(92,72,44,0.16),inset 0 1px 0 rgba(255,250,232,0.42),inset 0 -3px 4px rgba(150,95,40,0.22);
-  transform:translateY(-1px)
-}
-[data-theme="tofu"] .new-chat-btn:active{
-  transform:translateY(0);
-  box-shadow:var(--clay-pressed),inset 0 2px 4px rgba(150,95,40,0.35);
-  background:linear-gradient(180deg,#D29A4A 0%,#BC833B 100%)
-}
-[data-theme="tofu"] .new-chat-btn svg{
-  transition:transform 0.2s ease;
-  width:13px;height:13px;
-  stroke-width:2.2;
-  filter:none
-}
-[data-theme="tofu"] .new-chat-btn:hover svg{
-  transform:rotate(90deg)
-}
-/* Toasted-bread grain: an organic fractal-noise texture (inline SVG
-   feTurbulence), multiply-blended low so it reads as a fine baked grain,
-   NOT a mechanical dot grid. Sits above the crust, below the label. */
-[data-theme="tofu"] .new-chat-btn::before{
-  content:"";
-  position:absolute;
-  inset:1px;
-  border-radius:inherit;
-  pointer-events:none;
-  z-index:0;
-  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='52'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.82' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
-  background-size:120px 52px;
-  mix-blend-mode:multiply;
-  opacity:0.30
-}
-/* Toasted corners: a soft warm vignette so the edges look more baked. */
-[data-theme="tofu"] .new-chat-btn::after{
-  content:"";
-  position:absolute;
-  inset:0;
-  border-radius:inherit;
-  pointer-events:none;
-  z-index:0;
-  background:radial-gradient(120% 135% at 50% 42%,transparent 62%,rgba(140,80,30,0.14) 100%);
-  mix-blend-mode:multiply
-}
-[data-theme="tofu"] .new-chat-btn > *{position:relative;z-index:1}
-[data-theme="tofu"] .new-chat-btn:hover::before{opacity:0.24}
-
+/* New Chat uses the shared flat primary action in shell navigation. */
 /* ── Tofu theme: sidebar action row ── */
 [data-theme="tofu"] .sidebar-action-row{padding:10px 10px 6px}
 [data-theme="tofu"] .folder-dialog{background:#FDF8F3;border-color:#E8D5C0}
@@ -13278,7 +13607,7 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
 [data-theme="tofu"] .folder-tab-menu-item:hover{background:rgba(196,149,106,0.1)}
 [data-theme="tofu"] .folder-tab-menu-delete:hover{color:#D4544A;background:rgba(212,84,74,0.08)}
 
-[data-theme="tofu"] .folder-tab-dot.streaming{animation:tofuBreathing 2.2s cubic-bezier(0.45,0.05,0.55,0.95) infinite}
+[data-theme="tofu"] .folder-tab-dot.streaming{animation:folderDotPulse 2.2s ease-in-out infinite}
 
 /* ── Message avatar — clean, no frame, 40×40 ── */
 [data-theme="tofu"] .message-avatar img,[data-theme="tofu"] .message-avatar svg{filter:none}
@@ -13320,138 +13649,9 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
   letter-spacing:0.02em
 }
 
-/* ══════════════════════════════════════════════════════
-   🕹️ Topbar feature launchers (Paper / My Day / Trading) +
-   update btn — previously UNSTYLED in tofu, so they rendered as
-   flat ghost buttons clashing with the beveled pixel buttons in
-   the sidebar. Bring them into the same SNES-bevel language:
-   warm parchment fill, light top-left / dark bottom-right border,
-   JetBrains Mono label, steps() press-down. Active = kinako fill.
-   ══════════════════════════════════════════════════════ */
-[data-theme="tofu"] .topbar-tool-btn,
-[data-theme="tofu"] .update-btn{
-  height:28px;
-  border-radius:4px;
-  border:1.5px solid rgba(194,188,164,0.5);
-  border-top-color:rgba(255,252,246,0.6);
-  border-left-color:rgba(255,252,246,0.6);
-  border-right-color:rgba(168,152,120,0.4);
-  border-bottom-color:rgba(168,152,120,0.4);
-  background:linear-gradient(180deg, rgba(245,242,234,0.6) 0%, rgba(235,232,222,0.6) 100%);
-  box-shadow:0 1px 0 rgba(154,144,122,0.25);
-  color:#7C6A4E;
-  font-family:var(--sans-body);
-  font-size:var(--font-size-xs);
-  font-weight:600;
-  letter-spacing:0.02em;
-  transition:transform 0.08s ease,box-shadow 0.08s ease,color 0.12s,background 0.12s
-}
-[data-theme="tofu"] .topbar-tool-btn:hover,
-[data-theme="tofu"] .update-btn:hover{
-  color:#5C4A33;
-  background:linear-gradient(180deg, rgba(250,247,240,0.85) 0%, rgba(240,237,228,0.85) 100%);
-  border-right-color:rgba(168,152,120,0.55);
-  border-bottom-color:rgba(168,152,120,0.55);
-  transform:translateY(-1px);
-  box-shadow:0 2px 0 rgba(154,144,122,0.25)
-}
-[data-theme="tofu"] .topbar-tool-btn:active,
-[data-theme="tofu"] .update-btn:active{
-  transform:translateY(1px);
-  box-shadow:none
-}
-/* Active launcher (e.g. Paper mode on) — bright kinako selected slot */
-[data-theme="tofu"] .topbar-tool-btn.active{
-  color:#FFF8F0;
-  background:linear-gradient(180deg, #C4956A 0%, #B8895E 100%);
-  border-color:#C4956A;
-  border-top-color:#DEB890;
-  border-left-color:#DEB890;
-  border-right-color:#8A6840;
-  border-bottom-color:#8A6840;
-  text-shadow:0 1px 1px rgba(74,50,20,0.3);
-  box-shadow:0 1px 0 #7A5830
-}
-[data-theme="tofu"] .topbar-tool-btn.active:hover{
-  background:linear-gradient(180deg, #D4A57A 0%, #C8996E 100%);
-  transform:translateY(-1px);
-  box-shadow:0 2px 0 #7A5830
-}
-[data-theme="tofu"] .topbar-tool-btn svg,
-[data-theme="tofu"] .update-btn svg{stroke-width:2.2}
-/* Latency badge — mirror the kinako tool-button shell in the tofu theme. */
-[data-theme="tofu"] .net-latency-badge{
-  height:28px;
-  border-radius:4px;
-  border:1.5px solid rgba(194,188,164,0.5);
-  border-top-color:rgba(255,252,246,0.6);
-  border-left-color:rgba(255,252,246,0.6);
-  border-right-color:rgba(168,152,120,0.4);
-  border-bottom-color:rgba(168,152,120,0.4);
-  background:linear-gradient(180deg, rgba(245,242,234,0.6) 0%, rgba(235,232,222,0.6) 100%);
-  box-shadow:0 1px 0 rgba(154,144,122,0.25);
-  color:#7C6A4E;
-  font-family:var(--sans-body);
-  font-size:var(--font-size-xs);
-  font-weight:600;
-  letter-spacing:0.02em
-}
-[data-theme="tofu"] .net-latency-badge:hover{
-  color:#5C4A33;
-  background:linear-gradient(180deg, rgba(250,247,240,0.85) 0%, rgba(240,237,228,0.85) 100%);
-  border-right-color:rgba(168,152,120,0.55);
-  border-bottom-color:rgba(168,152,120,0.55)
-}
-[data-theme="tofu"] .net-latency-badge .net-ms{color:#9A8A6E}
+/* Topbar and latency controls inherit shared shell geometry and colors. */
 
-/* ══════════════════════════════════════════════════════
-   🕹️ Send btn — pixel art primary action button
-   Warm kinako fill, NES 3D shadow, press-down on click
-   ══════════════════════════════════════════════════════ */
-/* ══════════════════════════════════════════════════════
-   🕹️ Send btn — SNES bordered square (NO clip-path!)
-   Clean 2px border with light top-left / dark bottom-right
-   ══════════════════════════════════════════════════════ */
-[data-theme="tofu"] .send-btn{
-  background:var(--accent);
-  color:#FFFCF6;
-  border:1px solid transparent;
-  border-radius:var(--radius-sm);
-  font-weight:600;
-  position:relative;overflow:visible;
-  box-shadow:var(--clay-sm);
-  clip-path:none;
-  image-rendering:auto;
-  transition:background 0.18s ease,box-shadow 0.18s ease
-}
-[data-theme="tofu"] .send-btn:hover{
-  background:var(--accent-hover);
-  box-shadow:var(--clay-md);
-  transform:none
-}
-[data-theme="tofu"] .send-btn:active{
-  transform:none;
-  box-shadow:var(--clay-pressed);
-  background:var(--accent-hover)
-}
-/* Icon — slight nudge on hover */
-[data-theme="tofu"] .send-btn svg{
-  transition:transform 0.12s ease
-}
-[data-theme="tofu"] .send-btn:hover svg{
-  transform:translate(1px,-1px)
-}
-/* Disabled state — muted */
-[data-theme="tofu"] .send-btn:disabled{
-  background:var(--bg-active);
-  color:var(--text-tertiary);
-  border:1px solid var(--border);
-  box-shadow:none;
-  opacity:0.5
-}
-[data-theme="tofu"] .send-btn:disabled::before,
-[data-theme="tofu"] .send-btn:disabled::after{display:none}
-
+/* Send/stop use the shared composer intent states. */
 /* Attach button — quiet ghost icon */
 [data-theme="tofu"] .attach-btn{
   color:var(--text-secondary);
@@ -13465,62 +13665,8 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
 [data-theme="tofu"] .attach-btn:active{
   transform:scale(.94)
 }
-/* Stop btn — calm solid, gentle pulse */
-[data-theme="tofu"] .send-btn.stop-btn{
-  background:var(--error-text);
-  border:1px solid transparent;
-  box-shadow:var(--clay-sm);
-  animation:tofuPixelPulse 1.8s ease-in-out infinite
-}
-[data-theme="tofu"] .send-btn.stop-btn:hover{
-  background:#9E4E3E;
-  box-shadow:var(--clay-md)
-}
-[data-theme="tofu"] .send-btn.stop-btn:active{
-  transform:none;
-  box-shadow:var(--clay-pressed);
-  animation:none
-}
-/* Gentle pulse for stop */
-@keyframes tofuPixelPulse{
-  0%,100%{opacity:1}
-  50%{opacity:0.82}
-}
 
-/* ══════════════════════════════════════════════════════
-   🕹️ Action buttons — rounded icon buttons
-   ══════════════════════════════════════════════════════ */
-/* ── Action buttons — pixel icon buttons with 3D frame ── */
-[data-theme="tofu"] .action-btn{
-  border-radius:4px;
-  border:1.5px solid rgba(194,188,164,0.4);
-  border-top-color:rgba(255,252,246,0.6);
-  border-left-color:rgba(255,252,246,0.6);
-  border-right-color:rgba(168,152,120,0.4);
-  border-bottom-color:rgba(168,152,120,0.4);
-  background:linear-gradient(180deg, rgba(245,242,234,0.5) 0%, rgba(235,232,222,0.5) 100%);
-  color:#6B5A40;
-  box-shadow:0 1px 0 rgba(154,144,122,0.3);
-  clip-path:none;
-  transition:color 0.15s,background 0.15s,transform 0.08s ease,box-shadow 0.08s ease
-}
-[data-theme="tofu"] .action-btn:hover{
-  background:linear-gradient(180deg, rgba(251,248,240,0.7) 0%, rgba(242,239,229,0.7) 100%);
-  color:#4A3820;
-  box-shadow:0 2px 0 rgba(154,144,122,0.3), 0 2px 6px rgba(74,63,47,0.06);
-  transform:translateY(-1px)
-}
-[data-theme="tofu"] .action-btn:active{
-  transform:translateY(1px);
-  box-shadow:0 0 0 rgba(154,144,122,0.3);
-  background:linear-gradient(180deg, rgba(232,229,219,0.7) 0%, rgba(226,223,212,0.7) 100%)
-}
-[data-theme="tofu"] .action-btn.active{
-  color:#8E6B48;
-  background:rgba(196,149,106,0.14);
-  border-color:rgba(196,149,106,0.35);
-  box-shadow:inset 0 1px 2px rgba(0,0,0,0.06)
-}
+/* Action controls use the shared composer control owner. */
 [data-theme="tofu"] .conv-streaming-dot{
   background:#BB9572;
   border-radius:50%;
@@ -14092,7 +14238,7 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
 [data-theme="tofu"] .recent-path-item:hover .recent-path-name{color:#A67B52}
 
 /* ── Capability mode picker — tofu (clay) theme ──
- * The trigger inherits the pixel-pill [data-theme="tofu"] .submenu-trigger
+ * The trigger inherits the shared composer .submenu-trigger
  * style and the popover inherits [data-theme="tofu"] .flow-menu, so only the
  * active-Studio accent is bespoke here. */
 [data-theme="tofu"] .chat-mode-trigger[data-mode="studio"]{color:#A67B52;background:rgba(196,149,106,0.12);border-color:rgba(196,149,106,0.35)}
@@ -14107,35 +14253,6 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
 .mobile-mode-item.active .mobile-sheet-item-check{opacity:1}
 
 /* ── Submenu triggers — pixel pill buttons with JetBrains Mono ── */
-[data-theme="tofu"] .submenu-trigger{
-  border-radius:4px;
-  border:1.5px solid rgba(194,188,164,0.4);
-  border-top-color:rgba(255,252,246,0.6);
-  border-left-color:rgba(255,252,246,0.6);
-  border-right-color:rgba(168,152,120,0.4);
-  border-bottom-color:rgba(168,152,120,0.4);
-  background:linear-gradient(180deg, rgba(245,242,234,0.6) 0%, rgba(235,232,222,0.6) 100%);
-  /* Item 2 — true frosted glass matching the project bar's pills */
-  -webkit-backdrop-filter:blur(6px) saturate(1.05);
-  backdrop-filter:blur(6px) saturate(1.05);
-  color:#3D3022;
-  box-shadow:0 1px 0 rgba(154,144,122,0.3);
-  clip-path:none;
-  padding:var(--space-1) 10px;
-  font-family:var(--sans-body);
-  font-size:var(--font-size-xs);
-  font-weight:700;
-  letter-spacing:0.02em;
-  -webkit-font-smoothing:antialiased;
-  -moz-osx-font-smoothing:grayscale;
-  transition:color 0.15s,background 0.15s,transform 0.08s ease,box-shadow 0.08s ease
-}
-[data-theme="tofu"] .submenu-trigger:hover{
-  background:linear-gradient(180deg, rgba(251,248,240,0.8) 0%, rgba(242,239,229,0.8) 100%);
-  color:#2A2018;
-  box-shadow:0 2px 0 rgba(154,144,122,0.3), 0 2px 6px rgba(74,63,47,0.06);
-  transform:translateY(-1px)
-}
 [data-theme="tofu"] .submenu-trigger:active{
   transform:translateY(1px);
   box-shadow:0 0 0 rgba(154,144,122,0.3)
@@ -14151,12 +14268,6 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
 [data-theme="tofu"] .submenu-trigger.open{
   background:rgba(196,149,106,0.12);
   color:#3D3022;
-  border-color:rgba(196,149,106,0.35);
-  font-weight:700
-}
-[data-theme="tofu"] .submenu-trigger.has-active{
-  color:#6A4E2E;
-  background:rgba(196,149,106,0.1);
   border-color:rgba(196,149,106,0.35);
   font-weight:700
 }
@@ -15012,7 +15123,7 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
 /* tofu conv-pin removed — replaced by folders */
 
 /* ══════════════════════════════════════════════════════════
-   INPUT — Warm Reading Room composer
+   INPUT — Shared conversation composer
    A calm paper box: soft border, diffuse shadow, quiet focus
    ring. No controller frame, pet mascot, sparkles, D-pad or
    speech-bubble tail — all decorative pseudo-elements retired.
@@ -15023,23 +15134,6 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
   box-shadow:none;
   position:relative;
   padding-top:var(--space-2)
-}
-[data-theme="tofu"] .input-box{
-  /* Item 1 — adopt the project bar's "gallery-hung frame" vocabulary: one slim
-     warm frame line + soft two-layer elevation (a tight contact shadow + a
-     feathered ambient halo), 14px radius. Kinship with .project-bar (styles.css
-     :11931), NOT a re-added game panel. STATIC — no animation on the box. */
-  border:1.5px solid rgba(140,116,80,0.34);
-  background:#FFFDF9;
-  border-radius:14px;
-  box-shadow:
-    0 1px 2px rgba(74,58,36,0.10),
-    0 8px 22px -8px rgba(96,76,48,0.22);
-  isolation:auto;
-  overflow:visible;
-  transition:border-color 0.2s ease,box-shadow 0.2s ease;
-  position:relative;
-  z-index:2
 }
 /* Decorative pseudo-elements retired (pet mascot / grip wings) */
 [data-theme="tofu"] .input-box::before,
@@ -15064,26 +15158,8 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
   content:none;
   display:none
 }
-/* ── Focus state: quiet accent ring, no lift ── */
-[data-theme="tofu"] .input-box:focus-within{
-  /* Item 3 — warm focus echoing the bar's hover-warmth: deepen the warm frame,
-     widen the ambient shadow a touch, and add a soft warm-amber ring (the bar's
-     #C4956A family). NO lift, NO animation; the glow lives on the box FRAME
-     (box-shadow OUTSIDE the border) — never a layer behind the live text. */
-  border-color:rgba(140,116,80,0.62);
-  box-shadow:
-    0 1px 2px rgba(74,58,36,0.10),
-    0 10px 26px -8px rgba(96,76,48,0.28),
-    0 0 0 3px rgba(196,149,106,0.22);
-  transform:none
-}
-/* ── Conversation strip: the composer card's own top band ──
-   No frame of its own — the .input-box card supplies the paper, border and
-   elevation; the band is set off by one warm hairline, softer than the
-   card's outer frame. */
-[data-theme="tofu"] .conv-status-strip{
-  box-shadow:inset 0 -1px 0 rgba(140,116,80,0.22);
-}
+/* Conversation strip uses the composer card's single hairline. */
+[data-theme="tofu"] .conv-status-strip{box-shadow:inset 0 -1px 0 var(--border-light)}
 /* Quiet, static scene echo in the toolbar tray, never behind typing. */
 @media(min-width:801px){
   [data-theme="tofu"] .input-box .input-actions{border-radius:0 0 12.5px 12.5px}
@@ -15091,22 +15167,6 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
   [data-theme="tofu"] .project-bar[data-decor="pool"]:not([style*="none"]) ~ .input-box .input-actions{background:#edf1ef}
   [data-theme="tofu"] .project-bar[data-decor="sky"]:not([style*="none"]) ~ .input-box .input-actions{background:#f5ede8}
 }
-/* ── Textarea ── */
-[data-theme="tofu"] .input-box textarea{
-  min-height:64px;
-  max-height:260px;
-  padding:var(--space-4) var(--space-5) 14px;
-  font-size:var(--font-size-xl);
-  line-height:var(--leading-body)
-}
-[data-theme="tofu"] .input-box textarea::placeholder{
-  font-family:var(--sans-body);
-  color:var(--text-tertiary);
-  font-size:var(--font-size-lg);
-  font-weight:400;
-  letter-spacing:0
-}
-
 /* ══════════════════════════════════════════════════════════════
    Tofu Code Block — clean editorial code surface
    (mono kept for actual code text; cartridge frame/scanline/bevel gone)
@@ -16477,6 +16537,32 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
    pixelated 会关掉抗锯齿、把曲线边缘硬化,22px 处最明显。欢迎屏同一份资产从未
    设过它,故删除即是三主题 × 两处的同源。渲染保真度属品牌形态,见基础层锁定块。 */
 
+/* Selection actions: fixed to the selected line and clamped by the typed owner. */
+.selection-popup {
+  position:fixed; z-index:var(--z-tooltip); display:flex; flex-direction:column;
+  max-width:calc(100vw - var(--space-4)); padding:var(--space-1);
+  color:var(--text-primary); background:var(--bg-secondary);
+  border:1px solid var(--border); border-radius:var(--radius); box-shadow:var(--shadow);
+}
+.selection-popup[hidden], .reply-quote-container[hidden] { display:none; }
+.selection-popup-actions { display:flex; gap:var(--space-1); }
+.selection-action-icon { display:inline-flex; flex-shrink:0; }
+.selection-popup-hint {
+  padding:var(--space-1) var(--space-2); max-width:30ch;
+  font-size:var(--font-size-xs); line-height:var(--leading-title); color:var(--text-secondary);
+}
+.reply-quote-container { max-height:40vh; overflow:auto; display:flex; flex-direction:column; gap:var(--space-2); padding:var(--space-2) var(--space-3); }
+.reply-quote-preview {
+  display:flex; align-items:flex-start; gap:var(--space-2); min-width:0;
+  padding:var(--space-2); border-inline-start:var(--space-1) solid var(--accent);
+  border-radius:var(--radius-sm); background:var(--bg-tertiary);
+}
+.reply-quote-preview details { flex:1; min-width:0; }
+.reply-quote-preview summary { cursor:pointer; font-size:var(--font-size-sm); line-height:var(--leading-body); }
+.reply-quote-preview summary:focus-visible { outline:2px solid var(--accent); outline-offset:var(--space-1); }
+.reply-quote-preview-label { color:var(--text-secondary); font-weight:var(--weight-medium); margin-inline-end:var(--space-2); }
+.reply-quote-preview-text { overflow-wrap:anywhere; color:var(--text-primary); display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
+.reply-quote-preview blockquote { margin:var(--space-2) 0 0; padding:0; white-space:pre-wrap; overflow-wrap:anywhere; max-height:30vh; overflow:auto; font-size:var(--font-size-md); line-height:var(--leading-body); color:var(--text-primary); }
 /* ═══════════════════════════════════════════
    ★ Browser Bridge Modal & UI
    ═══════════════════════════════════════════ */
@@ -17413,26 +17499,6 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
 [data-theme="light"] .branch-msg.user{background:rgba(0,0,0,0.03);border-left-color:var(--user-bubble)}
 [data-theme="light"] .branch-input{background:#fff}
 
-/* ── Text Selection Popup (Branch / Reply) ── */
-.selection-popup{
-  position:fixed;z-index:9999;
-  display:flex;gap:0;
-  background:var(--bg-secondary);border:1px solid var(--border);
-  border-radius:8px;box-shadow:0 4px 20px rgba(0,0,0,0.25);
-  overflow:hidden;animation:selPopIn .15s ease;
-  pointer-events:auto;
-}
-@keyframes selPopIn{from{opacity:0;transform:scale(.9) translateY(4px)}to{opacity:1;transform:scale(1) translateY(0)}}
-.selection-popup-btn{
-  display:flex;align-items:center;gap:5px;
-  padding:7px 14px;font-size:var(--font-size-sm);font-weight:500;
-  color:var(--text-primary);background:transparent;
-  border:none;cursor:pointer;transition:background-color .15s,color .15s;
-  white-space:nowrap;font-family:inherit;
-}
-.selection-popup-btn:hover{background:var(--accent-subtle);color:var(--accent)}
-.selection-popup-btn:first-child{border-right:1px solid var(--border)}
-
 /* ── Reply Quote — in user message ── */
 /* ── Reply Quote Badge — in-message (looks like file upload badge) ── */
 .reply-quote-badge{
@@ -17449,32 +17515,6 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
 .reply-quote-badge-info{display:flex;flex-direction:column;gap:1px;min-width:0;overflow:hidden}
 .reply-quote-badge-name{font-size:12.5px;font-weight:500;color:var(--text-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .reply-quote-badge-meta{font-size:var(--font-size-xs);color:var(--text-tertiary)}
-
-/* ── Reply Quote Container (multi-quote) ── */
-.reply-quote-container{
-  display:flex;flex-wrap:wrap;gap:6px;
-  padding:6px 14px 2px;
-}
-.reply-quote-container:empty{display:none}
-/* ── Reply Quote Chip — floating above input (same file-badge look) ── */
-.reply-quote-chip{
-  display:inline-flex;align-items:center;gap:6px;
-  padding:var(--space-1) 10px;
-  background:var(--thinking-bg);
-  border:1px solid var(--thinking-border);
-  border-radius:6px;
-  max-width:320px;
-  font-size:var(--font-size-sm);
-  animation:quoteChipIn .2s ease;
-}
-@keyframes quoteChipIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
-.reply-quote-chip-meta{font-size:10.5px;color:var(--text-tertiary)}
-.reply-quote-chip-close{
-  background:none;border:none;color:var(--text-tertiary);cursor:pointer;
-  padding:2px var(--space-1);font-size:var(--font-size-lg);line-height:1;transition:color .15s;flex-shrink:0;
-  border-radius:4px;
-}
-.reply-quote-chip-close:hover{color:var(--text-primary);background:var(--bg-tertiary)}
 
 /* ── @ button active state in input toolbar ── */
 #convRefBtn.has-refs{
@@ -17724,7 +17764,6 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
 
 /* ── Reply quote inside branch message ── */
 
-[data-theme="light"] .selection-popup{background:#fff;box-shadow:0 4px 20px rgba(0,0,0,0.12)}
 [data-theme="light"] .reply-quote-badge{background:rgba(0,0,0,0.03);border-color:rgba(0,0,0,0.08)}
 [data-theme="light"] .reply-quote-chip{background:#f8f8f8;border-color:rgba(0,0,0,0.08)}
 
@@ -18873,7 +18912,7 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
   .md-content th,.md-content td{padding:6px var(--space-2);font-size:var(--font-size-sm)}
   .md-content ul,.md-content ol{margin-left:var(--space-4)}
   .md-content blockquote{padding:6px var(--space-3);font-size:var(--font-size-lg)}
-  .message-body img:not(.ig-result-card img, .imagegen-card img, .ig-batch-slot img, .rf-img-tile img){max-width:200px;max-height:150px}
+  .message-body img:not(.md-image, .ig-result-card img, .imagegen-card img, .ig-batch-slot img, .rf-img-tile img){max-width:200px;max-height:150px}
   .msg-img-thumb{width:60px;height:60px}
   .msg-img-badge{font-size:6px;padding:0 3px}
   .msg-img-size{font-size:7px}
@@ -22882,8 +22921,8 @@ body.artifact-panel-open {
    Scoped to NON-light, NON-tofu so the hand-built light & tofu themes
    are untouched. Goal: replace flat solid fills + hairline borders with
    subtle layering (gradient panels, edge highlights, a real separating
-   shadow, an accent bar on the active conversation, and a premium
-   New-Chat button). Pure visual; no layout/JS impact.
+   shadow and an accent bar on the active conversation).
+   Primary chat controls use the shared shell owner.
    ═══════════════════════════════════════════════════════════════════ */
 :root{--sb-edge:rgba(255,255,255,0.04);--tb-glass:rgba(17,17,21,0.72)}
 
@@ -22897,19 +22936,6 @@ html:not([data-theme="light"]):not([data-theme="tofu"]) .sidebar-header{
   border-bottom:1px solid #1f1f27;
   box-shadow:0 1px 0 var(--sb-edge);
 }
-
-/* ── New Chat: accent gradient + soft glow + hover lift (most-clicked control) ── */
-html:not([data-theme="light"]):not([data-theme="tofu"]) .new-chat-btn{
-  background:linear-gradient(135deg,#7c66d4 0%,#6e56cf 100%);
-  box-shadow:0 1px 2px rgba(0,0,0,0.4),0 4px 14px rgba(110,86,207,0.28),inset 0 1px 0 rgba(255,255,255,0.14);
-  transition:transform .15s cubic-bezier(.34,1.56,.64,1),box-shadow .15s ease,background .15s ease;
-}
-html:not([data-theme="light"]):not([data-theme="tofu"]) .new-chat-btn:hover{
-  background:linear-gradient(135deg,#866fe0 0%,#7866d8 100%);
-  box-shadow:0 2px 4px rgba(0,0,0,0.45),0 6px 20px rgba(110,86,207,0.40),inset 0 1px 0 rgba(255,255,255,0.18);
-  transform:translateY(-1px);
-}
-html:not([data-theme="light"]):not([data-theme="tofu"]) .new-chat-btn:active{transform:translateY(0)}
 
 /* ── Header action buttons: a touch more contrast on hover with a hairline edge ── */
 html:not([data-theme="light"]):not([data-theme="tofu"]) .action-btn:hover{
@@ -23959,6 +23985,8 @@ body.kb-open { overflow: hidden; }
   --turn-spine: color-mix(in srgb, var(--text-tertiary) 24%, transparent);
   --turn-process-surface: color-mix(in srgb, var(--bg-secondary) 62%, transparent);
   --turn-process-hover: color-mix(in srgb, var(--bg-hover) 70%, transparent);
+  --turn-process-panel: color-mix(in srgb, var(--bg-secondary) 72%, var(--bg-primary));
+  --turn-process-line: color-mix(in srgb, var(--border) 74%, var(--bg-primary));
 }
 
 [data-theme="tofu"] .conversation-surface {
@@ -23982,12 +24010,15 @@ body.kb-open { overflow: hidden; }
   overflow: visible;
 }
 
-.conversation-surface .conversation-turn-avatar.message-avatar {
+.conversation-surface .conversation-turn.message > .conversation-turn-avatar.message-avatar {
   width: 34px;
   height: 34px;
   margin-top: 0;
-  opacity: .9;
-  color: var(--text-secondary);
+  opacity: 1;
+  color: var(--accent);
+  border: var(--control-edge-inset) solid color-mix(in srgb, var(--accent) 18%, var(--border-light));
+  border-radius: var(--conversation-process-radius);
+  background: color-mix(in srgb, var(--accent) 6%, var(--bg-primary));
 }
 
 .conversation-surface .conversation-turn-avatar.message-avatar :is(img, svg) {
@@ -24005,14 +24036,14 @@ body.kb-open { overflow: hidden; }
 .conversation-surface .conversation-turn-header.message-header {
   justify-content: flex-start;
   min-height: 20px;
-  margin: 0 0 var(--space-2);
+  margin: var(--space-1) 0 var(--space-4);
   gap: var(--space-2);
   line-height: 1.25;
 }
 
 .conversation-surface .message-role {
-  color: var(--text-secondary);
-  font-size: var(--conversation-font-size-content);
+  color: var(--text-primary);
+  font-size: var(--conversation-process-font-size);
   font-weight: var(--weight-bold);
   letter-spacing: .006em;
 }
@@ -24040,37 +24071,86 @@ body.kb-open { overflow: hidden; }
 
 .conversation-surface .conversation-turn-blocks {
   overflow: visible;
+  gap: 0;
 }
 
 .conversation-surface .conversation-turn-blocks > .conversation-block {
-  margin: 0 0 var(--space-2);
+  margin: 0;
+}
+
+/* One spacing owner, including the demand-mounted historical process body.
+ * Adjacent process rows form a compact run. Prose gets a paragraph's breath
+ * on either side without moving, grouping or recreating any keyed leaf. */
+.conversation-surface :is(.conversation-turn-blocks, [data-history-process-blocks]) > .conversation-block + .conversation-block {
+  margin-block-start: var(--conversation-flow-gap);
+}
+
+.conversation-surface :is(.conversation-turn-blocks, [data-history-process-blocks]) > .conversation-block--text + .conversation-block,
+.conversation-surface :is(.conversation-turn-blocks, [data-history-process-blocks]) > .conversation-block + .conversation-block--text {
+  margin-block-start: var(--conversation-prose-gap);
 }
 
 .conversation-surface .conversation-turn-blocks > .conversation-block:last-child {
   margin-bottom: 0;
 }
 
-/* Round sections are semantic boundaries, not a decorative per-block spine.
- * Leaves remain direct keyed children so streaming never reparents live cards. */
+/* Adjacent process leaves make one continuous work surface. The derived edges
+ * describe the mounted order only: narration, deliverables and page boundaries
+ * break the surface. No extra wrapper, duplicate content or disclosure state. */
+.conversation-surface :is(.conversation-turn-blocks, [data-history-process-blocks]) > .conversation-block[data-process-edge] {
+  position: relative;
+  isolation: isolate;
+  margin-block-start: 0;
+  padding-inline: var(--conversation-process-shell-inset);
+  border-inline: var(--control-edge-inset) solid var(--turn-process-line);
+  background: var(--turn-process-panel);
+}
+
+.conversation-surface :is(.conversation-turn-blocks, [data-history-process-blocks]) > .conversation-block[data-process-edge]:is([data-process-edge="start"], [data-process-edge="single"]) {
+  margin-block-start: var(--space-4);
+  padding-block-start: var(--space-2);
+  border-block-start: var(--control-edge-inset) solid var(--turn-process-line);
+  border-start-start-radius: var(--conversation-process-radius);
+  border-start-end-radius: var(--conversation-process-radius);
+}
+
+.conversation-surface :is(.conversation-turn-blocks, [data-history-process-blocks]) > .conversation-block[data-process-edge]:is([data-process-edge="end"], [data-process-edge="single"]) {
+  padding-block-end: var(--space-2);
+  border-block-end: var(--control-edge-inset) solid var(--turn-process-line);
+  border-end-start-radius: var(--conversation-process-radius);
+  border-end-end-radius: var(--conversation-process-radius);
+}
+
+.conversation-surface .conversation-block[data-process-edge]::before {
+  content: '';
+  position: absolute;
+  z-index: -1;
+  inset-block: 0;
+  inset-inline-start: calc(var(--conversation-process-shell-inset) + var(--conversation-process-inset) + var(--conversation-process-marker) / 2);
+  width: var(--control-edge-inset);
+  background: var(--turn-spine);
+  pointer-events: none;
+}
+.conversation-surface .conversation-block[data-process-edge="start"]::before {
+  inset-block-start: calc(var(--conversation-process-row-height) / 2 + var(--space-2));
+}
+.conversation-surface .conversation-block[data-process-edge="end"]::before {
+  height: calc(var(--conversation-process-row-height) / 2);
+  inset-block-end: auto;
+}
+.conversation-surface .conversation-block[data-process-edge="single"]::before { display: none; }
+.conversation-surface .conversation-block[data-process-edge][data-action-state="active"] {
+  background: color-mix(in srgb, var(--accent) 5%, var(--turn-process-panel));
+}
+.conversation-surface .conversation-block[data-process-edge][data-action-state="attention"] {
+  border-inline-start-color: var(--error-text);
+}
+
+/* Leaves remain direct keyed children so streaming never reparents live cards. */
 
 .conversation-surface .conversation-turn-blocks {
   min-width: 0;
   padding-inline-start: 0;
-}
-
-.conversation-surface .conversation-round-toolbar {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: var(--space-2);
-  margin-block: var(--space-2) var(--space-3);
-}
-
-.conversation-surface .conversation-round-toolbar__label {
-  margin-inline-end: auto;
-  color: var(--text-secondary);
-  font-size: var(--conversation-font-size-meta);
-  font-weight: var(--weight-semibold);
 }
 
 .conversation-surface .conversation-round-header {
@@ -24140,13 +24220,12 @@ body.kb-open { overflow: hidden; }
 
 /* Hidden disclosures must win over card display:flex/grid rules. */
 
-.conversation-surface .conversation-round-toolbar[hidden],
 .conversation-surface .conversation-block[hidden] {
   display: none;
 }
 
-.conversation-surface .conversation-block--text[data-deliverable="true"] {
-  margin-block-start: var(--space-6);
+.conversation-surface .conversation-block + .conversation-block--text[data-deliverable="true"] {
+  margin-block-start: var(--conversation-answer-gap);
 }
 
 .conversation-surface .conversation-block--text[data-deliverable="true"] > .md-content {
@@ -24210,6 +24289,47 @@ body.kb-open { overflow: hidden; }
   font-weight: var(--weight-regular);
   line-height: var(--leading-body);
   overflow-wrap: anywhere;
+}
+
+/* The authored answer is the visual destination of a mixed timeline. The
+ * small rubric is neutral: an answer is not a claim of successful execution. */
+.conversation-surface .conversation-answer-label {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin-block: 0 var(--space-4);
+  color: var(--text-secondary);
+  font-size: var(--conversation-font-size-meta);
+  font-weight: var(--weight-semibold);
+  line-height: var(--leading-title);
+  letter-spacing: .08em;
+}
+.conversation-surface .conversation-answer-label::before {
+  content: '';
+  width: var(--space-2);
+  height: var(--space-2);
+  border-radius: var(--control-edge-inset);
+  background: var(--accent);
+  transform: rotate(45deg);
+}
+.conversation-surface .conversation-answer-label::after {
+  content: '';
+  height: var(--control-edge-inset);
+  flex: 1;
+  background: var(--turn-rule);
+}
+.conversation-surface .conversation-block--text[data-deliverable="true"] > .md-content > :is(h1, h2, h3):first-child {
+  margin-block-start: 0;
+  font-size: var(--conversation-font-size-heading-1);
+  line-height: var(--leading-tight);
+  letter-spacing: -.025em;
+}
+.conversation-surface .conversation-block--text[data-deliverable="true"] > .md-content > p:first-child {
+  font-size: var(--font-size-2xl);
+}
+.conversation-surface .conversation-history-process .conversation-block--text > .md-content {
+  font-size: var(--conversation-process-font-size);
+  color: var(--text-secondary);
 }
 
 .conversation-surface .conversation-block--text > .md-content :is(p, ul, ol, pre, table, blockquote) {
@@ -24345,24 +24465,221 @@ body.kb-open { overflow: hidden; }
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
+
+/* Projected Markdown images are reading content, not attachment thumbnails. */
+.conversation-surface .md-content img.md-image {
+  display: inline-block;
+  max-width: 100%;
+  max-height: none;
+  height: auto;
+  object-fit: contain;
+  vertical-align: middle;
+  margin: 0;
+  cursor: default;
+}
+
+.conversation-surface .md-content img.md-image:hover {
+  opacity: 1;
+}
+
+.conversation-surface .md-content p.md-image-only {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-3);
+}
+
+.conversation-surface .md-content p.md-image-only img.md-image {
+  display: block;
+}
+
+.conversation-surface .md-content p.md-image-only > br {
+  display: none;
+}
+
+.conversation-surface .md-content img.md-preview-image {
+  cursor: zoom-in;
+}
+
+.conversation-surface .md-content a img.md-image {
+  cursor: pointer;
+}
+
+.conversation-surface .md-content img.md-preview-image:focus-visible {
+  outline: calc(2 * var(--control-edge-inset)) solid var(--accent);
+  outline-offset: calc(-2 * var(--control-edge-inset));
+}
+
+.conversation-surface .md-content p.md-image-only > a {
+  display: block;
+  max-width: 100%;
+}
 /* Thinking disclosures and generic tool evidence.
  * Owner: ConversationSurface; tokens: 00-design-tokens.css.
  * Delivery: ordered application manifest; neighboring content owners are independent.
  */
 
-/*
- * Reasoning is inspectable process evidence, not a competing answer card —
- * and per-round reasoning is rarely opened, so a stack of full bordered
- * cards reads as visual noise (the same "too huge" verdict the retained
- * timeline's .seg-thinking already settled). Render it as a slim muted
- * one-liner disclosure: no card chrome, secondary label, full opacity only
- * while the reasoning is actually streaming. (2026-08-27 owner readability
- * recalibration: the previous .58-opacity header + 11.5px tertiary label
- * crossed from "quiet" into "hard to read".)
- */
+/* A shared disclosure grammar for reasoning, tool results, context notes,
+ * checklists, programs and the fallback renderer. Existing native disclosures
+ * retain their lifecycle; only the label/marker/evidence columns are shared. */
+.conversation-surface :is(
+  .thinking-header, .ptool-line, .ptc-head, .conversation-tool-card__summary
+) {
+  box-sizing: border-box;
+  min-height: var(--conversation-process-row-height);
+  padding: var(--space-2) var(--conversation-process-inset);
+  gap: var(--conversation-process-gap);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-secondary);
+  font-family: var(--font-ui);
+  font-size: var(--conversation-process-font-size);
+  line-height: var(--leading-title);
+}
+
+.conversation-surface :is(
+  .thinking-header, .ptool-line, .ptc-head, .conversation-tool-card__summary
+):hover {
+  background: var(--turn-process-hover);
+}
+
+.conversation-surface :is(
+  .thinking-label, .ptool-text, .ptc-title, .conversation-tool-card__title
+) {
+  min-width: 0;
+  color: var(--text-secondary);
+  font-family: var(--font-ui);
+  font-size: var(--conversation-process-font-size);
+  font-weight: var(--weight-medium);
+  line-height: var(--leading-title);
+  white-space: normal;
+  overflow-wrap: anywhere;
+  letter-spacing: normal;
+}
+
+/* Tool identity stays in the leading slot; a single trailing caret is the
+ * consistent disclosure affordance. Native summaries still own interaction. */
+.conversation-surface :is(.ptool-result-header, .ptool-results-header, .sw-inbox-row-header, .ptool-todo-header, .conversation-tool-card__summary)::after {
+  content: '';
+  box-sizing: border-box;
+  flex: 0 0 var(--space-2);
+  width: var(--space-2);
+  height: var(--space-2);
+  margin-inline: var(--space-1);
+  border-inline-end: var(--control-edge-inset) solid currentColor;
+  border-block-end: var(--control-edge-inset) solid currentColor;
+  transform: rotate(-45deg);
+  color: var(--text-secondary);
+}
+.conversation-surface details[open] > :is(.ptool-result-header, .sw-inbox-row-header, .ptool-todo-header, .conversation-tool-card__summary)::after,
+.conversation-surface .ptool-results-header[aria-expanded="true"]::after {
+  transform: rotate(45deg);
+}
+.conversation-surface :is(.ptool-result-header, .ptool-results-header, .sw-inbox-row-header, .ptool-todo-header) > .ptool-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 var(--conversation-process-marker);
+  width: var(--conversation-process-marker);
+  height: var(--conversation-process-marker);
+  color: var(--text-secondary);
+}
+.conversation-surface .ptool-results-header > .ptool-results-toggle,
+.conversation-surface :is(.ptool-result-header, .sw-inbox-row-header, .ptool-todo-header) .ptool-text::after {
+  display: none;
+}
+.conversation-surface .ptc-head::before,
+.conversation-surface .conversation-tool-card__summary::before {
+  content: '{}';
+  order: -1;
+  width: var(--conversation-process-marker);
+  flex: 0 0 var(--conversation-process-marker);
+  text-align: center;
+  color: var(--text-secondary);
+  font: var(--weight-medium) var(--conversation-font-size-meta) var(--font-mono);
+}
+.conversation-surface .ptc-chevron { order: 2; }
+.conversation-surface .conversation-block[data-process-edge] :is(.ptool-icon, .ptool-cmd-icon, .thinking-state-dot),
+.conversation-surface .conversation-block[data-process-edge] .ptc-head::before {
+  position: relative;
+  z-index: 1;
+  background-color: var(--turn-process-panel);
+  box-shadow: 0 0 0 var(--space-1) var(--turn-process-panel);
+}
+
+.conversation-surface :is(.ptc-chevron, .conversation-disclosure-chevron) {
+  flex: 0 0 var(--conversation-process-marker);
+  width: var(--conversation-process-marker);
+  height: var(--conversation-process-marker);
+}
+
+.conversation-surface .ptc-meta {
+  order: 3;
+  padding-inline-start: calc(var(--conversation-process-marker) + var(--conversation-process-gap));
+  font-size: var(--conversation-font-size-meta);
+}
+
+.conversation-surface :is(.ptool-result-header, .ptool-results-header, .sw-inbox-row-header, .ptool-todo-header) > .ptool-text {
+  flex: 1 1 auto;
+}
+.conversation-surface :is(.ptool-result-header, .ptool-results-header, .sw-inbox-row-header, .ptool-todo-header)::after {
+  margin-inline-start: auto;
+}
+.conversation-surface .ptc-preview {
+  margin-block: var(--space-2);
+  color: var(--text-secondary);
+  font-size: var(--conversation-font-size-content);
+  line-height: var(--leading-body);
+  overflow-wrap: anywhere;
+}
+
+.conversation-surface :is(.ptool-result-body, .ptc-body, .ptool-todo-body, .sw-inbox-row-body, .conversation-tool-card__body),
+.conversation-surface .ptool-results-block.expanded > .ptool-results-content {
+  margin: var(--space-1) var(--conversation-process-inset) var(--space-3) var(--space-4);
+  padding: var(--space-1) 0 var(--space-1) calc(var(--space-4) - var(--control-edge-inset));
+  border: 0;
+  border-inline-start: var(--control-edge-inset) solid var(--turn-spine);
+  border-radius: 0;
+  background: transparent;
+}
+
+.conversation-surface .ptool-results-block,
+.conversation-surface .ptool-results-block.expanded {
+  margin: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  box-shadow: none;
+}
+
+.conversation-surface .ptool-results-content .search-result-item {
+  padding: var(--space-2) 0;
+  border-color: var(--turn-rule);
+}
+
+.conversation-surface :is(.ptool-result-pre, .conversation-tool-card__pre, .ptc-detail pre) {
+  border-color: var(--turn-rule);
+  border-radius: var(--radius-sm);
+  background: var(--turn-process-surface);
+  box-shadow: none;
+}
+
+.conversation-surface :is(.ptool-result-pre > code, .conversation-tool-card__pre > code) {
+  padding: var(--space-3);
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: var(--conversation-font-size-content);
+  line-height: var(--leading-body);
+}
+
+.conversation-surface :is(.thinking-header, .ptool-result-header, .ptool-todo-header, .sw-inbox-row-header, .ptc-head, .conversation-tool-card__summary):focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: var(--control-edge-inset);
+}
 
 .conversation-surface .thinking-block {
-  margin: var(--space-1) 0 var(--space-2);
+  margin: 0;
   border: 0;
   border-radius: 0;
   background: transparent;
@@ -24371,23 +24688,21 @@ body.kb-open { overflow: hidden; }
 }
 
 .conversation-surface .thinking-header {
-  min-height: var(--control-h-md);
-  padding: var(--space-1) 0;
-  gap: var(--space-1);
-  background: transparent;
-  box-sizing: border-box;
   opacity: 1;
-  font-size: var(--conversation-font-size-content);
-  transition: opacity var(--motion-fast) ease;
+  transition: background var(--motion-fast) var(--ease-standard);
 }
 
 .conversation-surface .thinking-header:hover {
-  background: transparent;
+  background: var(--turn-process-hover);
   opacity: 1;
 }
 
 .conversation-surface .thinking-block[data-state="active"] .thinking-header {
   opacity: 1;
+}
+
+.conversation-surface .thinking-block[data-state="active"] .thinking-label {
+  color: var(--text-primary);
 }
 
 .conversation-surface .thinking-header:focus-visible,
@@ -24398,17 +24713,17 @@ body.kb-open { overflow: hidden; }
 }
 
 .conversation-surface .thinking-state-dot {
-  width: 6px;
-  height: 6px;
-  flex: 0 0 auto;
-  border: 1px solid color-mix(in srgb, var(--text-tertiary) 70%, transparent);
+  box-sizing: border-box;
+  width: var(--conversation-process-marker);
+  height: var(--conversation-process-marker);
+  flex: 0 0 var(--conversation-process-marker);
+  border: var(--control-edge-inset) dashed var(--text-secondary);
   border-radius: 50%;
   background: transparent;
 }
 
 .conversation-surface .thinking-block[data-state="complete"] .thinking-state-dot {
-  border-color: color-mix(in srgb, var(--accent) 72%, var(--border));
-  background: color-mix(in srgb, var(--accent) 72%, var(--bg-primary));
+  display: block;
 }
 
 .conversation-surface .thinking-block[data-state="active"] .thinking-state-dot {
@@ -24423,11 +24738,19 @@ body.kb-open { overflow: hidden; }
 }
 
 .conversation-surface .thinking-label {
+  flex: 1;
+}
+
+.conversation-surface .thinking-state-dot { order: -1; }
+.conversation-surface .thinking-toggle.conversation-disclosure-chevron {
+  order: 2;
+  margin: 0;
+  opacity: 1;
   color: var(--text-secondary);
-  font-family: var(--font-ui);
-  font-size: var(--conversation-font-size-content);
-  font-weight: var(--weight-medium);
-  letter-spacing: .006em;
+  transform: rotate(-90deg);
+}
+.conversation-surface .thinking-block[open] > summary .thinking-toggle.conversation-disclosure-chevron {
+  transform: none;
 }
 
 .conversation-surface .conversation-disclosure-chevron {
@@ -24459,15 +24782,15 @@ body.kb-open { overflow: hidden; }
 }
 
 .conversation-surface .thinking-text {
-  padding: var(--space-1) 0 var(--space-2) var(--space-3);
-  margin-left: var(--space-1);
+  padding: var(--space-1) 0 var(--space-2) calc(var(--space-4) - var(--control-edge-inset));
+  margin: var(--space-1) var(--conversation-process-inset) var(--space-3) var(--space-4);
   border-top: 0;
   border-left: 1px solid var(--turn-spine);
-  color: color-mix(in srgb, var(--text-primary) 42%, var(--text-secondary));
+  color: var(--text-secondary);
   font-family: var(--font-ui);
-  font-size: var(--conversation-font-size-content);
+  font-size: var(--conversation-process-font-size);
   font-weight: var(--weight-regular);
-  line-height: 1.66;
+  line-height: var(--leading-body);
 }
 
 .conversation-surface .thinking-text > :first-child {
@@ -24541,16 +24864,16 @@ body.kb-open { overflow: hidden; }
 }
 
 .conversation-surface .conversation-block--tool .ptool-turn {
-  margin: var(--space-1) 0;
-  border: 1px solid var(--turn-rule);
-  border-radius: 8px;
-  background: var(--turn-process-surface);
+  margin: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
   box-shadow: none;
 }
 
 [data-theme="tofu"] .conversation-surface .conversation-block--tool .ptool-turn {
-  border-color: var(--turn-rule);
-  background: var(--turn-process-surface);
+  border: 0;
+  background: transparent;
   box-shadow: none;
 }
 
@@ -24559,11 +24882,11 @@ body.kb-open { overflow: hidden; }
 }
 
 .conversation-surface .conversation-block--tool .ptool-line {
-  min-height: 34px;
-  padding: var(--space-1) var(--space-2);
-  gap: var(--space-2);
-  border-bottom-color: var(--turn-rule);
-  font-size: var(--conversation-font-size-meta);
+  min-height: var(--conversation-process-row-height);
+  padding: var(--space-2) var(--conversation-process-inset);
+  gap: var(--conversation-process-gap);
+  border: 0;
+  font-size: var(--conversation-process-font-size);
 }
 
 .conversation-surface .conversation-block--tool .ptool-line:hover {
@@ -24584,15 +24907,31 @@ body.kb-open { overflow: hidden; }
 }
 
 .conversation-surface .conversation-block--tool :is(.ptool-text, .ptool-cmd-label) {
-  font-size: var(--conversation-font-size-meta);
-  line-height: 1.5;
+  font-size: var(--conversation-process-font-size);
+  line-height: var(--leading-title);
 }
 
 .conversation-surface .conversation-tool-card {
-  border-color: var(--turn-rule);
-  border-radius: 8px;
-  background: var(--turn-process-surface);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
 }
+
+/* Keep exceptional outcomes colored, make routine metadata readable and quiet. */
+.conversation-surface :is(.ptc-status, .conversation-tool-card__chip--ok, .ptool-line-status--ok, .ptool-badge-info, .ptool-badge-ok) {
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: var(--conversation-font-size-meta);
+  box-shadow: none;
+  animation: none;
+}
+.conversation-surface .ptc-status.ptc-status-error {
+  color: var(--error-text);
+  background: var(--error-bg);
+}
+.conversation-surface .ptc-running .ptc-status { color: var(--accent); }
 
 .conversation-surface button.ptool-results-header,
 .conversation-surface button.eb-toggle,
@@ -24642,6 +24981,91 @@ body.kb-open { overflow: hidden; }
 .conversation-surface .eb-section.eb-expanded .eb-arrow {
   transform: rotate(90deg);
 }
+
+/* Historical process is a quiet turn-leading disclosure. Closing unmounts
+ * evidence; inner paging and scroll remain owned by HistoricalProcess. */
+.conversation-history-process {
+  margin-block: 0 var(--space-6);
+  color: var(--text-secondary);
+  font-family: var(--font-ui);
+  font-size: var(--conversation-font-size-content);
+}
+
+.conversation-history-process > summary {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  box-sizing: border-box;
+  width: fit-content;
+  max-width: 100%;
+  min-height: var(--control-h-lg);
+  padding: var(--space-2) var(--space-3);
+  border: var(--control-edge-inset) solid var(--turn-process-line);
+  border-radius: var(--conversation-process-radius);
+  background: var(--turn-process-panel);
+  list-style: none;
+  cursor: pointer;
+  line-height: var(--leading-title);
+  overflow-wrap: anywhere;
+  transition: color var(--motion-fast) ease, background var(--motion-fast) ease;
+}
+
+.conversation-history-process > summary::-webkit-details-marker { display: none; }
+.conversation-history-process > summary::before {
+  content: '';
+  flex: 0 0 auto;
+  width: var(--space-1);
+  height: var(--space-1);
+  border-inline-end: 1px solid currentColor;
+  border-block-end: 1px solid currentColor;
+  transform: rotate(-45deg);
+  transition: transform var(--motion-fast) ease;
+}
+.conversation-history-process[open] > summary::before { transform: rotate(45deg); }
+.conversation-history-process > summary:hover {
+  color: var(--text-primary);
+  background: var(--bg-secondary);
+}
+.conversation-history-process > summary:focus-visible {
+  outline: 0;
+  box-shadow: var(--focus-ring);
+}
+
+.conversation-history-process__body {
+  max-height: min(65vh, var(--conversation-reading-measure));
+  margin-block-start: var(--space-3);
+  margin-inline-start: 0;
+  padding: var(--space-3);
+  border: var(--control-edge-inset) solid var(--turn-process-line);
+  border-radius: var(--conversation-process-radius);
+  background: var(--bg-primary);
+  scrollbar-width: thin;
+  overflow: auto;
+  overscroll-behavior: contain;
+  overflow-anchor: none;
+}
+.conversation-history-process__controls {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding-block: var(--space-1) var(--space-2);
+  background: var(--bg-primary);
+  font-size: var(--conversation-font-size-meta);
+}
+.conversation-history-process__controls > span {
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
+}
+.conversation-history-process__controls[hidden] { display: none; }
+.conversation-history-notice {
+  font-size: var(--conversation-font-size-content);
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+}
 /* Durable activity, failures and compaction receipts.
  * Owner: ConversationSurface; tokens: 00-design-tokens.css.
  * Delivery: ordered application manifest; neighboring content owners are independent.
@@ -24659,9 +25083,9 @@ body.kb-open { overflow: hidden; }
   display: flex;
   align-items: flex-start;
   gap: var(--space-2);
-  min-height: 29px;
-  padding: var(--space-1) var(--space-1) var(--space-1) var(--space-1);
-  border-bottom: 1px solid color-mix(in srgb, var(--turn-rule) 70%, transparent);
+  min-height: var(--conversation-process-row-height);
+  padding: var(--space-2) var(--conversation-process-inset);
+  border-bottom: 0;
   border-radius: 0;
   background: transparent;
   box-sizing: border-box;
@@ -24681,8 +25105,8 @@ body.kb-open { overflow: hidden; }
   align-items: center;
   justify-content: center;
   border-radius: 50%;
-  background: var(--bg-primary);
-  box-shadow: 0 0 0 1px var(--turn-spine);
+  background: transparent;
+  box-shadow: none;
   color: var(--text-tertiary);
 }
 
@@ -24769,9 +25193,71 @@ body.kb-open { overflow: hidden; }
   letter-spacing: .003em;
 }
 
+.conversation-surface .activity-event--compaction .activity-event__body {
+  flex: 1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-3);
+}
+
+.conversation-surface .activity-event--compaction .activity-event__line {
+  flex: 1 0 100%;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
 .conversation-surface .activity-event--compaction .compaction-token-flow {
   display: flex;
-  margin-top: var(--space-2);
+  flex-wrap: wrap;
+  margin: 0;
+}
+
+.conversation-surface .activity-event--compaction .compaction-token-stage {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--space-1);
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+}
+
+.conversation-surface .activity-event--compaction .compaction-token-label,
+.conversation-surface .activity-event--compaction .compaction-token-value {
+  font-size: var(--conversation-font-size-caption);
+  letter-spacing: normal;
+}
+
+.conversation-surface .activity-event--compaction .activity-event__facts {
+  margin: 0;
+  font-family: var(--font-ui);
+}
+
+.conversation-surface .activity-event--compaction .activity-event__detail {
+  flex-basis: 100%;
+}
+
+.conversation-surface .activity-event__compaction-details {
+  min-width: 0;
+  margin-left: auto;
+  color: var(--text-tertiary);
+  font-size: var(--conversation-font-size-caption);
+  overflow-wrap: anywhere;
+}
+
+.conversation-surface .activity-event__compaction-details[open] {
+  flex-basis: 100%;
+  margin-left: 0;
+}
+
+.conversation-surface .activity-event__compaction-details > summary {
+  cursor: pointer;
+}
+
+.conversation-surface .activity-event__compaction-details > summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: var(--space-1);
 }
 
 .conversation-surface .activity-event__compaction-open {
@@ -24808,8 +25294,7 @@ body.kb-open { overflow: hidden; }
     flex-wrap: wrap;
   }
   .conversation-surface .activity-event--compaction .activity-event__chips {
-    width: 100%;
-    margin-left: 0;
+    flex-wrap: wrap;
   }
   .conversation-surface .activity-event--compaction .compaction-token-flow {
     flex-wrap: wrap;
@@ -24905,9 +25390,9 @@ body.kb-open { overflow: hidden; }
  * scrollbar. */
 
 .conversation-surface .conversation-block--file-changes {
-  border: 1px solid var(--turn-rule);
-  border-radius: 8px;
-  background: var(--turn-process-surface);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
   box-shadow: none;
 }
 
@@ -24923,8 +25408,11 @@ body.kb-open { overflow: hidden; }
 
 .conversation-surface .conversation-file-changes .fc-summary {
   min-width: 0;
-  padding: var(--space-2) var(--space-2);
-  border-radius: 7px;
+  min-height: var(--conversation-process-row-height);
+  padding: var(--space-2) var(--conversation-process-inset);
+  gap: var(--conversation-process-gap);
+  border-radius: var(--radius-sm);
+  font-size: var(--conversation-process-font-size);
 }
 
 .conversation-surface .conversation-file-changes .fc-summary:hover {
@@ -25044,8 +25532,8 @@ body.kb-open { overflow: hidden; }
 }
 
 .conversation-surface .bilingual-header {
-  min-height: 34px;
-  padding: var(--space-1) var(--space-1);
+  min-height: var(--conversation-process-row-height);
+  padding: var(--space-2) var(--conversation-process-inset);
   background: transparent;
 }
 
@@ -25057,6 +25545,27 @@ body.kb-open { overflow: hidden; }
 .conversation-surface .bilingual-label {
   font-size: var(--conversation-font-size-caption);
   font-weight: var(--weight-medium);
+}
+
+/* Recorded translation attribution is text beside the fold/answer, not a panel.
+ * Provider-qualified IDs must wrap at narrow widths rather than hiding evidence. */
+.conversation-surface .bilingual-model {
+  min-width: 0;
+  max-width: 100%;
+  margin-inline-start: var(--space-2);
+  padding: 0;
+  color: var(--text-tertiary);
+  background: transparent;
+  font-family: inherit;
+  font-size: var(--conversation-font-size-caption);
+  font-weight: var(--weight-regular);
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.conversation-surface .bilingual-attribution {
+  display: block;
+  margin: var(--space-1) 0;
 }
 
 .conversation-surface .bilingual-body .md-content {
@@ -25144,6 +25653,21 @@ body.kb-open { overflow: hidden; }
 .sw-note-group .sw-note-group-item-head > :is(.ptool-icon, .sw-note-badge) {
   flex-shrink: 0;
 }
+
+/* Message intent outranks the passive outcome chip on narrow tool cards. */
+.ptool-agent-message > .ptool-result-header {
+  flex-wrap: wrap;
+}
+.ptool-agent-message > .ptool-result-header .ptool-text {
+  flex: 1 1 auto;
+  min-width: min(100%, calc(var(--tool-receipt-label-width) * 2));
+}
+.ptool-agent-message > .ptool-result-header .ptool-line-status {
+  flex: 0 1 auto;
+  margin-inline-start: var(--space-6);
+  max-width: 100%;
+  white-space: normal;
+}
 /* Turn actions, copy affordances and finish metadata.
  * Owner: ConversationSurface; tokens: 00-design-tokens.css.
  * Delivery: ordered application manifest; neighboring content owners are independent.
@@ -25155,10 +25679,15 @@ body.kb-open { overflow: hidden; }
   display: flex;
   align-items: center;
   gap: var(--space-1);
-  margin-top: var(--space-2);
-  padding-top: var(--space-1);
+  margin-top: var(--space-4);
+  padding-top: var(--space-2);
   opacity: 1;
   transition: opacity var(--motion-fast) ease;
+}
+
+.conversation-surface .conversation-block--text:has(> .conversation-answer-label) > .conversation-block-copy {
+  top: 0;
+  background: var(--bg-primary);
 }
 
 .conversation-surface .conversation-turn:hover .conversation-turn-actions,
@@ -25213,6 +25742,16 @@ body.kb-open { overflow: hidden; }
   height: 13.5px;
   flex: 0 0 auto;
   opacity: .82;
+}
+
+/* A compact icon shelf leaves the answer as the visual endpoint. The review
+ * action keeps its label; every icon retains its localized accessible name. */
+.conversation-surface .conversation-turn-actions .msg-action-btn:not(.conversation-action--review):has(.msg-action-icon) .msg-action-label {
+  display: none;
+}
+.conversation-surface .conversation-turn-actions .msg-action-btn {
+  min-width: var(--control-h-sm);
+  justify-content: center;
 }
 
 .conversation-surface .msg-action-btn:hover .msg-action-icon {
@@ -25369,6 +25908,48 @@ body.kb-open { overflow: hidden; }
   color: var(--accent) !important;
   font-weight: var(--weight-semibold) !important;
 }
+
+/* Scroll history boundaries are not toolbar chrome. */
+.conversation-surface .conversation-history-boundary {
+  position: relative;
+  grid-column: 2;
+  min-width: 0;
+  max-width: var(--msg-measure);
+  min-height: 1px;
+  color: var(--text-muted);
+  font-size: var(--conversation-font-size-caption);
+  text-align: center;
+  overflow-anchor: none;
+}
+.conversation-surface .conversation-history-boundary[hidden] { display: none; }
+.conversation-surface .conversation-history-boundary [role="status"]:not([hidden]) {
+  display: block;
+  padding-block: var(--space-2);
+}
+.conversation-surface .conversation-history-fallback:not(:focus-visible) {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+}
+.conversation-surface .conversation-history-fallback:focus-visible {
+  position: relative;
+  max-width: 100%;
+  white-space: normal;
+}
+
+.conversation-surface .conversation-history-boundary[data-history-state="failed"] .conversation-history-fallback {
+  position: relative;
+  width: auto;
+  height: auto;
+  max-width: 100%;
+  clip-path: none;
+  overflow: visible;
+  white-space: normal;
+}
 /* User notes, narrow screens and reduced motion.
  * Owner: ConversationSurface; tokens: 00-design-tokens.css.
  * Delivery: ordered application manifest; neighboring content owners are independent.
@@ -25377,15 +25958,23 @@ body.kb-open { overflow: hidden; }
 /* User turns are compact notes; they deliberately do not grow an execution spine. */
 
 .conversation-surface .message.user-msg .message-content {
-  padding: var(--space-3) var(--space-4);
-  border: 1px solid var(--turn-rule);
-  border-radius: var(--radius-sm);
-  background: color-mix(in srgb, var(--user-bubble) 50%, var(--bg-primary));
+  justify-self: end;
+  box-sizing: border-box;
+  width: fit-content;
+  max-width: 90%;
+  padding: var(--space-4) var(--space-5);
+  border: var(--control-edge-inset) solid var(--turn-rule);
+  border-radius: var(--conversation-process-radius);
+  background: color-mix(in srgb, var(--user-bubble) 70%, var(--bg-primary));
   box-shadow: none;
 }
 
+.conversation-surface .message.user-msg .message-avatar {
+  visibility: hidden;
+}
+
 .conversation-surface .message.user-msg .message-header {
-  margin-bottom: var(--space-1);
+  margin-block: 0 var(--space-2);
 }
 
 .conversation-surface .message.user-msg .conversation-turn-blocks > .conversation-block {
@@ -25403,6 +25992,9 @@ body.kb-open { overflow: hidden; }
 }
 
 @media (max-width: 720px) {
+  .conversation-surface {
+    --conversation-process-row-height: var(--control-h-lg);
+  }
   .conversation-surface .conversation-turn.message {
     grid-template-columns: minmax(0, 1fr);
     margin-bottom: var(--space-6);
@@ -25417,6 +26009,13 @@ body.kb-open { overflow: hidden; }
     margin-bottom: var(--space-2);
   }
 
+  .conversation-surface .conversation-block--text[data-deliverable="true"] > .md-content > :is(h1, h2, h3):first-child {
+    font-size: var(--conversation-font-size-heading-2);
+  }
+  .conversation-surface .conversation-history-process__body {
+    padding: var(--space-2);
+  }
+
   .conversation-surface .message-time {
     font-size: var(--conversation-font-size-caption);
   }
@@ -25425,17 +26024,8 @@ body.kb-open { overflow: hidden; }
     flex-wrap: wrap;
   }
 
-  .conversation-surface .thinking-header {
-    min-height: 36px;
-  }
-
   .conversation-surface .bilingual-header {
     min-height: 44px;
-  }
-
-  .conversation-surface .thinking-text {
-    padding: var(--space-1) 0 var(--space-2) var(--space-3);
-    font-size: var(--conversation-font-size-content);
   }
 
   .conversation-surface .conversation-turn-actions.message-actions {
@@ -25447,6 +26037,29 @@ body.kb-open { overflow: hidden; }
   }
   .conversation-surface .conversation-block-copy {
     opacity: .6;
+  }
+  /* Touch keeps copy discoverable without painting over the last words. */
+  .conversation-surface .conversation-block--text:has(> .conversation-block-copy) > .md-content {
+    box-sizing: border-box;
+    padding-inline-end: var(--space-6);
+  }
+
+  .conversation-surface .sw-inbox-row > .sw-inbox-row-header,
+  .conversation-surface .ptool-result-header:has(.ptool-artifact-header) {
+    flex-wrap: wrap;
+    row-gap: var(--space-1);
+  }
+  .conversation-surface .sw-inbox-row-header > .ptool-text,
+  .conversation-surface .ptool-result-header:has(.ptool-artifact-header) > .ptool-text {
+    flex-basis: calc(100% - var(--conversation-process-marker) - var(--conversation-process-gap) - var(--space-8));
+  }
+  .conversation-surface .sw-inbox-row-header > :not(.ptool-icon, .ptool-text),
+  .conversation-surface .ptool-result-header:has(.ptool-artifact-header) > :not(.ptool-icon, .ptool-text) {
+    order: 2;
+  }
+  .conversation-surface .sw-inbox-row-header > .ptool-text + :not(.ptool-row-ctl),
+  .conversation-surface .ptool-result-header:has(.ptool-artifact-header) > .ptool-text + :not(.ptool-row-ctl) {
+    margin-inline-start: calc(var(--conversation-process-marker) + var(--conversation-process-gap));
   }
 
   .conversation-surface .conversation-turn-actions::-webkit-scrollbar {
@@ -25466,9 +26079,15 @@ body.kb-open { overflow: hidden; }
   }
 
   .conversation-surface .message.user-msg .message-content {
-    padding: var(--space-2) var(--space-3) var(--space-2);
-    border-radius: var(--radius-sm);
+    max-width: 100%;
+    padding: var(--space-3) var(--space-4);
+    border-radius: var(--conversation-process-radius);
   }
+}
+
+@media (pointer: coarse) {
+  .conversation-surface { --conversation-process-row-height: var(--control-h-lg); }
+  .conversation-surface .ptool-cmd-fold { min-height: var(--control-h-lg); }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -25729,17 +26348,19 @@ body.kb-open { overflow: hidden; }
 
 /* Intent-first execution rows. Each action owns one summary line: intent
  * description on the left, meta strip (context + fold chips + quiet verdict)
- * on the right; evidence folds open underneath. Owner call 2026-10-04: the
- * tofu theme hides the icon slot entirely, so the icon grid column collapses
- * to zero and never indents the description. */
+ * on the right; evidence folds open underneath. The marker and label columns
+ * use the same tokens as reasoning, generic tools and checklist disclosures. */
 
 .ptool-cmd-block > .ptool-cmd-header {
   display: grid;
-  grid-template-columns: 0 minmax(0, 1fr) max-content;
+  grid-template-columns: var(--conversation-process-marker) minmax(0, 1fr) max-content;
   align-items: center;
-  column-gap: var(--space-2);
+  column-gap: var(--conversation-process-gap);
   row-gap: var(--space-1);
-  padding: var(--space-3);
+  padding: var(--space-2) var(--conversation-process-inset);
+  min-height: var(--conversation-process-row-height);
+  box-sizing: border-box;
+  border: 0;
   font-family: var(--font-ui);
   background: transparent;
 }
@@ -25748,7 +26369,16 @@ body.kb-open { overflow: hidden; }
   grid-column: 1;
   grid-row: 1;
   align-self: center;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--conversation-process-marker);
+  height: var(--conversation-process-marker);
+  color: var(--text-secondary);
 }
+
+.conversation-surface .ptool-cmd-header > .ptool-cmd-icon { display: flex; }
+.conversation-surface .ptool-cmd-icon::before { content: none; }
 
 .ptool-cmd-block .ptool-cmd-desc-inline {
   grid-column: 2;
@@ -25757,11 +26387,11 @@ body.kb-open { overflow: hidden; }
   flex: none;
   min-width: 0;
   max-width: none;
-  color: var(--text-primary);
+  color: var(--text-secondary);
   font-family: var(--font-ui);
-  font-size: var(--conversation-font-size-content);
+  font-size: var(--conversation-process-font-size);
   font-weight: var(--weight-medium);
-  line-height: var(--leading-body);
+  line-height: var(--leading-title);
   white-space: pre-wrap;
   overflow: visible;
   overflow-wrap: anywhere;
@@ -25812,8 +26442,8 @@ body.kb-open { overflow: hidden; }
 }
 
 .ptool-cmd-context {
-  color: var(--text-tertiary);
-  font-size: var(--conversation-font-size-caption);
+  color: var(--text-secondary);
+  font-size: var(--conversation-font-size-meta);
   font-weight: var(--weight-regular);
   line-height: var(--leading-tight);
   white-space: nowrap;
@@ -25887,16 +26517,11 @@ body.kb-open { overflow: hidden; }
 
 .ptool-todo-header .ptool-text {
   font-family: var(--font-ui);
-  font-size: var(--conversation-font-size-content);
+  font-size: var(--conversation-process-font-size);
   font-weight: var(--weight-medium);
 }
 
 /* Flatten only proven self-contained cards, not generic batch/program shells. */
-
-.conversation-surface .conversation-block[data-tool-summary="self-contained"] {
-  margin-block: var(--space-2);
-  border-bottom: 1px solid var(--turn-rule);
-}
 
 .conversation-surface .conversation-block[data-tool-summary="self-contained"] .ptool-turn {
   margin: 0;
@@ -25915,9 +26540,33 @@ body.kb-open { overflow: hidden; }
 }
 
 .conversation-surface .conversation-block[data-tool-summary="self-contained"] .ptool-todo-header {
-  padding: var(--space-3);
-  gap: var(--space-2);
+  padding: var(--space-2) var(--conversation-process-inset);
+  gap: var(--conversation-process-gap);
   border: 0;
+}
+
+.conversation-surface .ptool-cmd-ok .ptool-cmd-status {
+  background: transparent;
+  color: var(--text-secondary);
+  font-weight: var(--weight-regular);
+}
+
+.conversation-surface .ptool-cmd-block > :is(.ptool-cmd-code, .ptool-cmd-output-wrap, .ptool-cmd-js-code) {
+  margin-inline: var(--conversation-process-indent) var(--conversation-process-inset);
+}
+
+.conversation-surface .ptool-cmd-block :is(.ptool-cmd-code code, .ptool-cmd-output code) {
+  color: var(--text-secondary);
+  font-size: var(--conversation-font-size-content);
+  line-height: var(--leading-body);
+}
+
+.conversation-surface .ptool-cmd-block :is(.ptool-cmd-code, .ptool-cmd-output) {
+  padding: var(--space-3);
+  border: var(--control-edge-inset) solid var(--turn-rule);
+  border-radius: var(--radius-sm);
+  background: var(--turn-process-surface);
+  box-shadow: none;
 }
 
 .ptool-todo-body > .ptool-todo-revisions {
@@ -25929,7 +26578,7 @@ body.kb-open { overflow: hidden; }
 
 @media (max-width: 600px) {
   .ptool-cmd-block > .ptool-cmd-header {
-    grid-template-columns: 0 minmax(0, 1fr);
+    grid-template-columns: var(--conversation-process-marker) minmax(0, 1fr);
   }
   .ptool-cmd-block .ptool-cmd-desc-inline {
     grid-column: 2;
@@ -26116,73 +26765,58 @@ body.kb-open { overflow: hidden; }
   .ctx-meter-fill {background:Highlight}
   .conversation-bar-panel,.ctx-bar-popover,.turn-jump-panel {border-color:CanvasText}
 }
-/* Cold-start boot splash (frontend/src/boot-splash.ts).
-   Full-screen launch screen shown only while the server's background boot
-   runner reports a non-ready boot over /api/boot. Solid app background (not
-   a modal backdrop): this IS the app launch surface, not a dialog dim. */
 
+.turn-jump-direct {display:flex;align-items:center;gap:var(--space-1);padding:var(--space-1)}
+.turn-jump-direct input {width:8ch;min-width:0;background:var(--bg-primary);color:var(--text-primary);border:1px solid var(--border);border-radius:var(--radius-sm);padding:var(--space-1);font:inherit}
+.turn-jump-direct input:focus-visible {outline:2px solid var(--accent);outline-offset:1px}
+/* A compact status dock; only its card receives pointer events. The shell
+   remains readable and interactive while backend admission is closed. */
 .boot-splash{
   position:fixed;
-  inset:0;
+  inset-block-start:calc(var(--space-16) + env(safe-area-inset-top));
+  inset-inline-end:var(--space-4);
   z-index:var(--z-toast);
-  display:flex;
-  align-items:center;
-  justify-content:center;
-  background:var(--bg-primary);
+  width:min(24rem,calc(100vw - var(--space-4) * 2));
   color:var(--text-primary);
-  opacity:0;
-  transition:opacity var(--motion-base) var(--ease-standard);
   pointer-events:none;
 }
-.boot-splash--visible{
-  opacity:1;
-  pointer-events:auto;
-}
-.boot-splash--leaving{
-  opacity:0;
-  pointer-events:none;
-}
-
 .boot-splash__card{
   display:flex;
   flex-direction:column;
-  align-items:center;
-  gap:var(--space-3);
-  width:min(420px,calc(100vw - var(--space-8) * 2));
-  padding:var(--space-8);
+  align-items:stretch;
+  gap:var(--space-2);
+  padding:var(--space-4);
   background:var(--bg-secondary);
   border:1px solid var(--border);
   border-radius:var(--radius);
   box-shadow:var(--shadow);
-  text-align:center;
+  text-align:start;
+  pointer-events:auto;
   -webkit-user-select:text;
   user-select:text;
+  max-height:calc(100dvh - var(--space-16) * 2);
+  overflow:auto;
 }
-
-.boot-splash__spinner{
-  margin-bottom:var(--space-2);
-}
-
+.boot-splash__spinner{align-self:flex-start;}
 .boot-splash__title{
-  font-size:var(--font-size-2xl);
+  margin:0;
+  font-size:var(--font-size-lg);
   font-weight:var(--weight-semibold);
   line-height:var(--leading-title);
   color:var(--text-primary);
 }
-
 .boot-splash__subtitle{
+  margin:0;
   font-size:var(--font-size-md);
   line-height:var(--leading-body);
   color:var(--text-secondary);
 }
-
 .boot-splash__progress{
   width:100%;
-  height:6px;
+  height:var(--space-1);
   border-radius:var(--radius-xs);
   background:var(--bg-tertiary);
   overflow:hidden;
-  margin-top:var(--space-2);
 }
 .boot-splash__progress-fill{
   height:100%;
@@ -26190,21 +26824,24 @@ body.kb-open { overflow: hidden; }
   border-radius:inherit;
   transition:width var(--motion-slow) var(--ease-standard);
 }
-
 .boot-splash__status-line{
+  margin:0;
   font-size:var(--font-size-sm);
-  color:var(--text-tertiary);
+  color:var(--text-secondary);
 }
-
+.boot-splash__details{
+  max-height:45dvh;
+  overflow:auto;
+  border-top:1px solid var(--border);
+  padding-block-start:var(--space-3);
+}
 .boot-splash__phases{
   list-style:none;
-  margin:var(--space-2) 0 0;
+  margin:0;
   padding:0;
-  width:100%;
   display:flex;
   flex-direction:column;
-  gap:var(--space-1);
-  text-align:left;
+  gap:var(--space-2);
 }
 .boot-splash__phase{
   display:flex;
@@ -26212,20 +26849,11 @@ body.kb-open { overflow: hidden; }
   gap:var(--space-2);
   font-size:var(--font-size-sm);
   line-height:var(--leading-tight);
-  color:var(--text-tertiary);
-}
-.boot-splash__phase--running{
-  color:var(--text-primary);
-}
-.boot-splash__phase--done{
   color:var(--text-secondary);
 }
-.boot-splash__phase--done .boot-splash__phase-marker{
-  color:var(--success-text);
-}
-.boot-splash__phase--failed{
-  color:var(--error-text);
-}
+.boot-splash__phase--running{color:var(--text-primary);}
+.boot-splash__phase--done .boot-splash__phase-marker{color:var(--success-text);}
+.boot-splash__phase--failed{color:var(--error-text);}
 .boot-splash__phase-marker{
   width:var(--space-4);
   display:inline-flex;
@@ -26234,10 +26862,21 @@ body.kb-open { overflow: hidden; }
   flex:none;
   font-weight:var(--weight-bold);
 }
-
+.boot-splash__logs{
+  margin:var(--space-3) 0 0;
+  padding:var(--space-3);
+  background:var(--bg-primary);
+  border:1px solid var(--border);
+  border-radius:var(--radius-xs);
+  font-family:var(--font-mono);
+  font-size:var(--font-size-xs);
+  line-height:var(--leading-body);
+  white-space:pre-wrap;
+  overflow-wrap:anywhere;
+  color:var(--text-secondary);
+}
 .boot-splash__error{
-  width:100%;
-  max-height:120px;
+  max-height:8rem;
   overflow:auto;
   padding:var(--space-2) var(--space-3);
   background:var(--error-bg);
@@ -26246,17 +26885,11 @@ body.kb-open { overflow: hidden; }
   color:var(--error-text);
   font-size:var(--font-size-xs);
   line-height:var(--leading-body);
-  text-align:left;
-  word-break:break-word;
+  overflow-wrap:anywhere;
 }
-
-.boot-splash--failed .boot-splash__title{
-  color:var(--error-text);
-}
-
-.boot-splash__retry{
-  margin-top:var(--space-2);
-}
+.boot-splash--failed .boot-splash__title{color:var(--error-text);}
+.boot-splash__retry,.boot-splash__toggle{align-self:flex-start;}
+.boot-splash [hidden]{display:none;}
 /* ══════════════════════════════════════════════════════════════════════════
    TOFU UI KIT — shared component layer (composed LAST, see manifest.json)
 
@@ -26281,6 +26914,12 @@ body.kb-open { overflow: hidden; }
 }
 .ui-stack--tight{--ui-gap:var(--space-1)}
 .ui-stack--loose{--ui-gap:var(--space-6)}
+
+/* Bounded reading for long exact IDs/digests and plain text. */
+.ui-stack--bounded{min-width:0;overflow-wrap:anywhere}
+.ui-stack--bounded > *{min-width:0;max-width:100%}
+.ui-text-block{max-width:100%;overflow-wrap:anywhere;margin:0}
+pre.ui-text-block{white-space:pre-wrap;word-break:break-word}
 
 .ui-row{
   display:flex;align-items:center;
@@ -26370,6 +27009,9 @@ body.kb-open { overflow: hidden; }
 .ui-icon-btn:disabled{opacity:0.5;cursor:default;pointer-events:none}
 .ui-icon-btn--sm{width:var(--control-h-sm);height:var(--control-h-sm);border-radius:var(--radius-xs)}
 .ui-icon-btn--lg{width:var(--control-h-lg);height:var(--control-h-lg)}
+
+/* Author display must not override the platform's hidden attribute. */
+.ui-btn[hidden],.ui-icon-btn[hidden]{display:none}
 
 /* ── Field: label + control + hint/error ───────────────────────────────── */
 .ui-field{display:flex;flex-direction:column;gap:var(--space-2)}
@@ -26512,10 +27154,58 @@ dialog.ui-dialog[open]{animation:ui-dialog-in var(--motion-base) var(--ease-stan
   padding:0 var(--space-5) var(--space-4);
 }
 
+/* Project workbench variant. Shared chrome stays in the kit rather than
+   feature overrides; native modal/focus/dismissal behavior is unchanged. */
+dialog.ui-dialog--project{
+  --bg-primary:var(--project-panel);
+  --bg-secondary:var(--project-surface);
+  --bg-tertiary:var(--project-band);
+  --text-primary:var(--project-ink);
+  --text-secondary:var(--project-muted);
+
+  --text-tertiary:var(--project-muted);
+  --border:var(--project-line);
+  --accent:var(--project-accent);
+  --accent-hover:var(--project-accent-hover);
+  --text-on-accent:var(--project-on-accent);
+  width:min(var(--project-dialog-measure),calc(100vw - 2 * var(--space-4)));
+  border:var(--project-frame-width) solid var(--text-primary);
+  overflow:hidden;
+}
+dialog.ui-dialog--project[open]{display:flex;flex-direction:column}
+.ui-dialog--project .ui-dialog__header{
+  flex-shrink:0;padding:var(--space-5) var(--space-6);
+  background:var(--bg-tertiary);
+  border-bottom:var(--project-panel-width) solid var(--text-primary);
+}
+.ui-dialog--project .ui-dialog__title{font-size:var(--font-size-2xl);font-weight:var(--weight-bold)}
+
+.ui-dialog--project .ui-dialog__header .ui-icon-btn{
+  flex-shrink:0;border:var(--project-panel-width) solid var(--text-primary);
+  border-radius:var(--radius-pill);background:var(--bg-primary);color:var(--text-primary);
+  font-size:var(--font-size-2xl);
+}
+.ui-dialog--project .ui-dialog__body{
+  display:flex;flex:1;flex-direction:column;min-height:0;overflow:hidden;
+  padding:var(--space-5) var(--space-6);
+}
+.ui-dialog--project .ui-input,.ui-dialog--project .ui-select>select{
+  height:var(--control-h-lg);border-color:var(--text-secondary);
+}
+.ui-dialog--project .ui-btn--primary,.ui-dialog--project .ui-btn--secondary{
+  border:var(--project-panel-width) solid var(--text-primary);
+}
+.ui-dialog--project .ui-btn--primary{background:var(--accent);color:var(--text-on-accent)}
+.ui-dialog--project .ui-btn--primary:hover{background:var(--accent-hover)}
+@media(max-width:600px){
+  .ui-dialog--project .ui-dialog__header{padding:var(--space-4)}
+  .ui-dialog--project .ui-dialog__body{padding:var(--space-4)}
+}
+
 /* ── Drawer: dialog variant docked to the right edge ───────────────────── */
 dialog.ui-drawer{
   margin:0 0 0 auto;
-  width:min(420px,100vw);
+  width:min(420px,100vw);max-width:none;
   height:100dvh;max-height:none;
   border:none;border-left:1px solid var(--border);border-radius:0;
 }
@@ -26591,6 +27281,7 @@ dialog.ui-drawer:not([open]){display:none}
   border-bottom:1px solid var(--border);
 }
 .ui-tabs__tab{
+  flex:0 0 auto;white-space:nowrap;
   padding:var(--space-2) var(--space-3);
   margin-bottom:calc(-1 * var(--control-edge-inset)); /* overlap the list's bottom border */
   border:none;border-bottom:2px solid transparent;
@@ -26608,6 +27299,7 @@ dialog.ui-drawer:not([open]){display:none}
   font-weight:var(--weight-semibold);
 }
 .ui-tabs__tab:disabled{color:var(--text-tertiary);cursor:not-allowed}
+.ui-tabs__panel[hidden]{display:none}
 .ui-tabs__panel{padding-top:var(--space-4)}
 .ui-tabs__panel:focus-visible{outline:none;box-shadow:var(--focus-ring)}
 
@@ -26815,3 +27507,6 @@ dialog.ui-drawer:not([open]){display:none}
   max-width:40ch;
 }
 .ui-empty__action{margin-top:var(--space-3)}
+
+/* Multiline is opt-in through the button factory; keep after base button rules. */
+.ui-btn--wrap{white-space:normal;overflow-wrap:anywhere;min-height:var(--control-h-md);height:auto;padding-block:var(--space-1);line-height:var(--leading-body)}

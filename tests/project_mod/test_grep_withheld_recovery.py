@@ -308,28 +308,35 @@ def test_count_skipped_chunks_exact_and_bounded(tmp_path):
     assert files == {str(tmp_path / 'x.py'): 4, str(tmp_path / 'y.py'): 6}
 
 
-def test_index_chunks_start_without_count_window():
+@pytest.mark.parametrize('jobs', [2, 8, 16])
+def test_index_chunks_bound_prefetch_and_preserve_every_result(jobs):
     import threading
     import time
     from types import SimpleNamespace
 
-    barrier = threading.Barrier(32, timeout=10)
-    results = [None] * 32
+    active = peak = 0
+    lock = threading.Lock()
+    results = [None] * 128
 
     def search(index, chunk):
-        barrier.wait()
-        return index, chunk, False, False, 0, SimpleNamespace(limit_reached=False)
+        nonlocal active, peak
+        with lock:
+            active += 1
+            peak = max(peak, active)
+        try:
+            time.sleep(0.002)
+            return index, chunk, False, False, 0, SimpleNamespace(limit_reached=False)
+        finally:
+            with lock:
+                active -= 1
 
-    started = time.monotonic()
-    actual = read_tools._run_pool(search, [str(i).encode() for i in range(32)],
-        1, results, 0, True, 1000, re.compile(b'x'))
-    assert actual == (results, False, False, False, None, 31)
-    assert results == [str(i).encode() for i in range(32)]
-    deadline = time.monotonic() + 2
-    while any(t.name.startswith('project-read') for t in threading.enumerate()):
-        assert time.monotonic() < deadline
-        time.sleep(0.01)
-    print(f'32 search chunks: {(time.monotonic() - started) * 1000:.2f} ms; 0 workers')
+    actual = read_tools._run_pool(search, [str(i).encode() for i in range(128)],
+        jobs, results, 0, True, 1000, re.compile(b'x'))
+    assert actual == (results, False, False, False, None, 127)
+    assert results == [str(i).encode() for i in range(128)]
+    assert 1 < peak <= jobs
+    assert active == 0
+
 
 
 def test_unstarted_index_chunk_failure_preserves_incomplete_evidence(monkeypatch):
@@ -360,7 +367,7 @@ def test_unstarted_index_chunk_failure_preserves_incomplete_evidence(monkeypatch
     monkeypatch.setattr(threading.Thread, 'start', start)
     results = [None] * 4
     actual = read_tools._run_pool(search, [b'a', b'b', b'c', b'd'],
-        1, results, 0, True, 1000, re.compile(b'x'))
+        4, results, 0, True, 1000, re.compile(b'x'))
     assert results == [b'a', b'', b'c', b'd']
     assert actual[2] is True  # Never certify missing chunk as an empty match set.
     assert sorted(called) == [0, 2, 3]
@@ -381,27 +388,32 @@ def test_incomplete_index_results_use_live_fallback(tmp_path, monkeypatch):
         None, 0, 100, False, 5) is None
 
 
-def test_all_count_chunks_start_without_count_window(monkeypatch):
+def test_count_chunks_bound_prefetch_and_preserve_complete_counts(monkeypatch):
     import threading
     import time
     from types import SimpleNamespace
 
-    barrier = threading.Barrier(32, timeout=10)
+    active = peak = 0
+    lock = threading.Lock()
 
     def search(request):
+        nonlocal active, peak
         path = request.rg_argv[-1]
-        barrier.wait()
-        return SimpleNamespace(stdout=(path + ':1\n').encode(),
-                               unavailable=False, timed_out=False)
+        with lock:
+            active += 1
+            peak = max(peak, active)
+        try:
+            time.sleep(0.002)
+            return SimpleNamespace(stdout=(path + ':1\n').encode(),
+                                   unavailable=False, timed_out=False)
+        finally:
+            with lock:
+                active -= 1
 
     monkeypatch.setattr(read_tools, 'run_search', search)
-    started = time.monotonic()
     result = read_tools._count_skipped_chunks('.', 'x',
-        [[f'f{i}.py'] for i in range(32)], time.monotonic() + 15)
-    assert result['total'] == 32 and not result['capped']
-    assert len(result['files']) == 32
-    deadline = time.monotonic() + 2
-    while any(t.name.startswith('project-count') for t in threading.enumerate()):
-        assert time.monotonic() < deadline
-        time.sleep(0.01)
-    print(f'32 count chunks: {(time.monotonic() - started) * 1000:.2f} ms; 0 workers')
+        [[f'f{i}.py'] for i in range(128)], time.monotonic() + 15)
+    assert result['total'] == 128 and not result['capped']
+    assert len(result['files']) == 128
+    assert 1 < peak <= 2
+    assert active == 0

@@ -21,7 +21,7 @@ def test_cold_status_avoids_launch_and_write_probes(tmp_path):
          patch.object(probe, '_dir_bytes_bounded', return_value=None), \
          patch.object(probe, 'resolve_tofudb_binary', side_effect=forbidden), \
          patch.object(probe, 'tofudb_authority_has_data', side_effect=forbidden), \
-         patch('lib.storage_sidecar.storage_capabilities.probe_storage_path', side_effect=forbidden), \
+         patch('lib.storage_authority_sql.storage_capabilities.probe_storage_path', side_effect=forbidden), \
          patch('serverctl_pkg.native_engine.source_fingerprint', side_effect=forbidden), \
          patch('serverctl_pkg.native_engine.build_identity', side_effect=forbidden):
         state = probe.engine_status(runtime)
@@ -47,7 +47,7 @@ def test_stopped_engine_is_unknown_not_uninstalled(tmp_path):
 def test_discovery_concurrent_request_does_not_duplicate_probe():
     probe._discovery_lock.acquire()
     try:
-        with patch('lib.storage_sidecar.storage_capabilities.probe_storage_path', side_effect=AssertionError('duplicate scan')):
+        with patch('lib.storage_authority_sql.storage_capabilities.probe_storage_path', side_effect=AssertionError('duplicate scan')):
             state = probe.discover_paths(refresh=True)
         assert state['inProgress'] is True
     finally:

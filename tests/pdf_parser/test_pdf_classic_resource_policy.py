@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 import pytest
 
 from lib.pdf_parser.policy import (
@@ -37,7 +38,7 @@ def test_reference_budget_has_no_page_quota_and_retains_output_policy():
 
     assert budget.processes == 1
     assert budget.max_pages == 0
-    assert budget.max_text_chars == 4 * _MIB
+    assert budget.max_text_chars == sys.maxsize
     assert budget.timeout_seconds == 1024
     assert budget.worker_idle_seconds == 60
 
@@ -53,8 +54,8 @@ def test_operator_overrides_remain_inside_hard_ceilings():
 
     assert budget.processes == 999999
     assert budget.max_pages == 0
-    assert budget.max_text_chars == 64 * _MIB
-    assert budget.timeout_seconds == 3_600
+    assert budget.max_text_chars == sys.maxsize
+    assert budget.timeout_seconds == 999_999
     assert classic_pdf_worker_idle_seconds(_environment(
         TOFU_PDF_WORKER_IDLE_SECONDS='999999')) == 86_400
 
@@ -89,7 +90,7 @@ def test_nonpositive_or_malformed_request_uses_policy_default(requested):
     budget = resolve_classic_pdf_budget(_environment())
 
     assert bounded_pdf_pages(requested, budget) == 0
-    assert bounded_pdf_text_chars(requested, budget) == 4 * _MIB
+    assert bounded_pdf_text_chars(requested, budget) == sys.maxsize
 
 
 def test_caller_page_range_is_preserved_and_text_output_remains_bounded():
@@ -98,16 +99,16 @@ def test_caller_page_range_is_preserved_and_text_output_remains_bounded():
     assert bounded_pdf_pages(20, budget) == 20
     assert bounded_pdf_pages(10_000, budget) == 10_000
     assert bounded_pdf_text_chars(8_000, budget) == 8_000
-    assert bounded_pdf_text_chars(100 * _MIB, budget) == 4 * _MIB
+    assert bounded_pdf_text_chars(100 * _MIB, budget) == 100 * _MIB
 
 
-def test_image_projection_dimensions_are_hard_bounded():
+def test_image_projection_preserves_explicit_caller_selection():
     assert bounded_pdf_image_count(0) == 0
     assert bounded_pdf_image_count(20) == 20
-    assert bounded_pdf_image_count(999_999) == 64
+    assert bounded_pdf_image_count(999_999) == 999_999
     assert bounded_pdf_image_width('bad') == 1_024
     assert bounded_pdf_image_width(900) == 900
-    assert bounded_pdf_image_width(999_999) == 2_048
+    assert bounded_pdf_image_width(999_999) == 999_999
 
 
 def test_eight_gib_reference_probe_keeps_long_text_without_vlm_multiplier():
@@ -131,8 +132,6 @@ def test_eight_gib_reference_probe_keeps_long_text_without_vlm_multiplier():
         for name in (
             'TOFU_PDF_PROCESSES',
             'TOFU_PDF_MAX_PAGES',
-            'TOFU_PDF_MAX_TEXT_MIB',
-            'TOFU_PDF_PARSE_TIMEOUT',
             'TOFU_PDF_WORKER_IDLE_SECONDS',
         )
     }
@@ -140,7 +139,16 @@ def test_eight_gib_reference_probe_keeps_long_text_without_vlm_multiplier():
     assert resolved == {
         'TOFU_PDF_PROCESSES': 4,
         'TOFU_PDF_MAX_PAGES': 512,
-        'TOFU_PDF_MAX_TEXT_MIB': 4,
-        'TOFU_PDF_PARSE_TIMEOUT': 1_024,
         'TOFU_PDF_WORKER_IDLE_SECONDS': 60,
     }
+
+
+def test_default_pdf_wait_has_no_launch_or_hard_deadline():
+    assert resolve_classic_pdf_budget({}).timeout_seconds==0
+    assert resolve_classic_pdf_budget({'TOFU_PDF_PARSE_TIMEOUT':'0'}).timeout_seconds==0
+    assert resolve_classic_pdf_budget({'TOFU_PDF_PARSE_TIMEOUT':'5000'}).timeout_seconds==5000
+
+
+@pytest.mark.parametrize('value',['bad','-1'])
+def test_invalid_operator_pdf_wait_is_not_silently_ignored(value):
+    with pytest.raises(ValueError):resolve_classic_pdf_budget({'TOFU_PDF_PARSE_TIMEOUT':value})

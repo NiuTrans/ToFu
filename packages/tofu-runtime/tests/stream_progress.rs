@@ -120,7 +120,8 @@ fn policy() -> Policy {
         idle_connections: 1,
         keepalive: Duration::from_secs(1),
         connect: Duration::from_secs(1),
-        request_headers: Duration::from_secs(1),
+        request_headers: Some(Duration::from_secs(1)),
+        write: None,
         pool_wait: Duration::from_secs(1),
         stream_idle: Some(Duration::from_secs(1)),
         drain_timeout: Duration::from_millis(30),
@@ -206,10 +207,10 @@ async fn cancellation_retains_response_admission_until_started_consumer_finishes
     cancel.cancel();
     tokio::task::yield_now().await;
     assert!(!run.is_finished());
-    assert_eq!(transport.available_slots(), 0);
+    assert_eq!(transport.active_requests(), 1);
     observer.release.notify_one();
     assert!(matches!(run.await.unwrap(), Err(Error::Cancelled)));
-    assert_eq!(transport.available_slots(), 1);
+    assert_eq!(transport.active_requests(), 0);
     server.await.unwrap();
 }
 #[tokio::test]
@@ -229,7 +230,7 @@ async fn required_consumer_failure_cannot_become_provider_success() {
             .await,
         Err(Error::TextDelivery)
     ));
-    assert_eq!(transport.available_slots(), 1);
+    assert_eq!(transport.active_requests(), 0);
     server.await.unwrap();
 }
 #[tokio::test]
@@ -290,8 +291,12 @@ async fn provider_session_stop_and_deadline_join_the_started_text_consumer() {
                     &[serde_json::json!({"role":"user","content":"hello"})],
                     &session,
                 );
-                assert_eq!(transport.available_slots(), 1);
-                assert!(matches!(result, Err(ProviderError::Stopped)));
+                assert_eq!(transport.active_requests(), 0);
+                match result {
+                    Err(ProviderError::Stopped) => (),
+                    Err(ProviderError::Failed(error)) => panic!("provider failed: {error}"),
+                    Ok(_) => panic!("provider succeeded after published stop"),
+                }
             })
         };
         observer.entered.notified().await;
@@ -304,6 +309,76 @@ async fn provider_session_stop_and_deadline_join_the_started_text_consumer() {
         assert!(!worker.is_finished());
         observer.release.notify_one();
         worker.join().unwrap();
+        server.await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn stop_published_by_final_text_consumer_cannot_become_provider_success() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use tofu_runtime::{
+        agent::{Provider, ProviderError},
+        agent_http::{Configuration, HttpProvider},
+        session::{ExecutionSession, Registry},
+    };
+    #[derive(Clone, Copy)]
+    enum Action { Session, Client, Deadline, Failure }
+    struct StopOnText {
+        session: Arc<ExecutionSession>,
+        client: Cancellation,
+        clock: Arc<AtomicU64>,
+        action: Action,
+    }
+    impl TextObserver for StopOnText {
+        fn observe<'a>(&'a self, _channel: TextChannel, text: &'a str)
+            -> Pin<Box<dyn Future<Output = Result<(), TextDeliveryError>> + Send + 'a>> {
+            Box::pin(async move {
+                assert_eq!(text, "first");
+                match self.action {
+                    Action::Session => { self.session.request_cancel("consumer stop").unwrap(); }
+                    Action::Client => self.client.cancel(),
+                    Action::Deadline => self.clock.store(2_000_000_000, Ordering::SeqCst),
+                    Action::Failure => {
+                        self.session.request_cancel("consumer stop with failure").unwrap();
+                        return Err(TextDeliveryError);
+                    }
+                }
+                Ok(())
+            })
+        }
+    }
+    for action in [Action::Session, Action::Client, Action::Deadline, Action::Failure] {
+        let (url, server) = server().await;
+        let clock = Arc::new(AtomicU64::new(0));
+        let clock_reader = clock.clone();
+        let registry = Registry::with_clock(Arc::new(move ||
+            Duration::from_nanos(clock_reader.load(Ordering::SeqCst))));
+        let session = registry.start("consumer-stop", "task", 7, "",
+            if matches!(action, Action::Deadline) { Some(Duration::from_secs(1)) } else { None }).unwrap();
+        let result = tokio::task::spawn_blocking(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+            let transport = {
+                let _enter = runtime.enter();
+                Transport::new(&url, None, policy()).unwrap()
+            };
+            let cancel = Cancellation::new();
+            let observer = StopOnText { session: session.clone(), client: cancel.clone(), clock, action };
+            let provider = HttpProvider::new(&runtime, &transport, Configuration {
+                headers: Default::default(), template: Default::default(), budget: budget(),
+                request_bytes: 65536, identical_tool_limit: None,
+            }, &cancel).unwrap().with_text_observer(Arc::new(observer));
+            let result = provider.round(&[serde_json::json!({"role":"user","content":"hello"})], &session);
+            assert_eq!(transport.active_requests(), 0);
+            result
+        }).await.unwrap();
+        match (action, result) {
+            (Action::Failure, Err(ProviderError::Failed(error))) =>
+                assert_eq!(error["kind"], "provider_transport"),
+            (Action::Failure, _) => panic!("consumer failure was hidden by stop"),
+            (_, Err(ProviderError::Stopped)) => (),
+            (_, Err(ProviderError::Failed(error))) => panic!("provider failed: {error}"),
+            (_, Ok(_)) => panic!("provider succeeded after published stop"),
+        }
         server.await.unwrap();
     }
 }

@@ -148,16 +148,14 @@ def test_retained_scroll_adapter_has_no_parallel_surface_latches():
     assert "return document.getElementById('chatContainer');" in adapter
     assert 'captureScroll() {' not in adapter
     assert 'restoreScroll(' not in adapter
-    # Controller/viewport arbitration is exercised against the compiled owner
-    # in test_frontend_conversation_surface_vite; keep this retained-boundary
-    # ratchet focused on the adapter and legacy fallback it actually owns.
-
-    jump_start = scroll_owner.index('function scrollChatToBottom() {')
-    jump_end = scroll_owner.index('function _updateScrollToBottomBtn()', jump_start)
-    jump = scroll_owner[jump_start:jump_end]
-    assert '_followSuspended = false;' in jump
-    assert 'c.scrollTop = c.scrollHeight;' in jump
-    assert '_withInstantScroll' in jump
+    # User intent and history-window behavior are exercised by the typed owner
+    # and shipped-browser tests. Retained compatibility must not regain scroll
+    # authority, including the old mobile keyboard path.
+    mobile = runtime_section('main/main_folders_mobile.js')
+    for retired in ('_followSuspended', '_scrollRafId', '_armFollowSuspensionListeners',
+                    'cc.scrollTop =', 'c.scrollTop ='):
+        assert retired not in scroll_owner
+        assert retired not in mobile
     for retired in (
         '_explicitBottomLatch', '_openScrollConvId', '_initialSwitchLoad',
     ):
@@ -183,15 +181,31 @@ def test_main_bridge_does_not_export_turn_internals():
 
 
 def test_turn_continue_affordance_reads_only_server_resume_options():
-    source = (ROOT / 'frontend/src/conversation/presentation/conversation-view-model.ts').read_text()
-    start = source.index('function actionsFor(')
-    end = source.index('interface LaneOwner', start)
-    gate = source[start:end]
-
-    assert 'finish?.resumeOptions?.[0]' in gate
-    assert "actions.push({ action: 'resume'" in gate
-    for retired_inference in (
-        'computeTurnSettlement', 'continueButtonForSettlement',
-        'finishReason', '_trimmedToolRoundCount',
-    ):
-        assert retired_inference not in gate
+    node = shutil.which('node')
+    if not node:
+        pytest.skip('node not installed')
+    bundle = native_module_path(
+        '.native/turn-actions.js',
+        ROOT / 'frontend/src/conversation/presentation/view-model/turn-metadata.ts',
+    )
+    script = r"""
+(0, eval)(require('fs').readFileSync(process.argv[1], 'utf8'));
+const resume = (finish, status='failed', pending=null) => actionsFor(
+  'assistant', 'main', pending, finish, {}, status, undefined, false, false,
+).filter(action => action.action === 'resume');
+console.log(JSON.stringify({
+  missing: resume(null),
+  inferred: resume({finishReason:'length', canResume:true}),
+  granted: resume({resumeOptions:[{operation:'resume'}]}),
+  busy: resume({resumeOptions:[{operation:'resume'}]}, 'running'),
+  pending: resume({resumeOptions:[{operation:'resume'}]}, 'failed', 'retry'),
+}));
+"""
+    result = subprocess.run([node, '-e', script, bundle], cwd=ROOT,
+                            capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {
+        'missing': [], 'inferred': [], 'busy': [],
+        'granted': [{'action': 'resume', 'operation': 'resume', 'disabled': False}],
+        'pending': [{'action': 'resume', 'operation': 'resume', 'disabled': True}],
+    }

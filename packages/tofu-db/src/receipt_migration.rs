@@ -10,7 +10,7 @@ use std::io;
 use crate::authority::{AuthorityDatabase, AuthorityTransaction};
 use crate::entity::EntityKey;
 use crate::generated_tofudb_ir::MIGRATION_SESSION_MAX_PAGE_ROWS;
-use crate::receipt::{ReceiptSnapshot, MAX_STORED_RECEIPT_BYTES};
+use crate::receipt::{ReceiptSnapshot};
 
 fn invalid(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message)
@@ -21,7 +21,7 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
 }
 
 pub(crate) fn unhex(value: &str, maximum: usize) -> io::Result<Vec<u8>> {
-    if value.len() > maximum * 2
+    if value.len() / 2 > maximum
         || !value.len().is_multiple_of(2)
         || !value
             .bytes()
@@ -106,7 +106,7 @@ pub(crate) fn execute(
             let snapshot = ReceiptSnapshot {
                 operation: input.operation,
                 request_digest: digest(&input.request_digest)?,
-                encoded_response: unhex(&input.response_hex, MAX_STORED_RECEIPT_BYTES)?,
+                encoded_response: unhex(&input.response_hex, usize::MAX)?,
                 committed_at_ms: input.committed_at_ms,
             };
             let inserted = database.receipt_restore_snapshot(&mut tx, key, snapshot)?;

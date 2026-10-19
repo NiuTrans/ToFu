@@ -101,13 +101,8 @@ def fetch_pdf_link_title(url: str) -> str:
 
 
 def _title_probe_max_bytes() -> int:
-    try:
-        from lib.pdf_parser._common import MAX_PDF_BYTES
-
-        return int(MAX_PDF_BYTES)
-    except Exception as exc:  # pragma: no cover - defensive import fallback
-        logger.debug('[Paper:PdfUrl] MAX_PDF_BYTES import fallback: %s', exc)
-        return 64 * 1024 * 1024
+    # Optional metadata probing has its own transport budget, never source admission.
+    return 200 * 1024 * 1024
 
 
 __all__ = [

@@ -448,7 +448,7 @@ def test_mp3_duration_estimate():
 # ═══ Probe ═══
 
 def test_probe_tts_cell():
-    import lib.provider_probe as PP
+    import lib.provider.provider_probe as PP
 
     class _Resp:
         def __init__(self, code, body):
@@ -467,7 +467,7 @@ def test_probe_tts_cell():
         return _Resp(200, _tiny_wav())
 
     orig = PP.http_post if hasattr(PP, 'http_post') else None
-    import lib.http_client as HC
+    import lib.http_transport.client as HC
     orig_hc = HC.http_post
     # _post_and_classify imports http_post lazily inside the function
     HC.http_post = _post
@@ -484,8 +484,8 @@ def test_probe_tts_cell():
 
 
 def test_probe_tts_cell_bad_shape_and_404():
-    import lib.provider_probe as PP
-    import lib.http_client as HC
+    import lib.provider.provider_probe as PP
+    import lib.http_transport.client as HC
 
     class _Resp:
         def __init__(self, code, body=b'{}'):
@@ -511,7 +511,7 @@ def test_probe_tts_cell_bad_shape_and_404():
 
 
 def test_probe_fn_registration():
-    import lib.provider_probe as PP
+    import lib.provider.provider_probe as PP
     assert PP.nonchat_probe_fn(['tts']) is PP.probe_tts_cell
     # priority: transcription still outranks tts for multi-cap cells
     assert PP.nonchat_probe_fn(['tts', 'transcription']) is PP.probe_transcription_cell

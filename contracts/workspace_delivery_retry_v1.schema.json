@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "tofu.workspace-delivery-retry/v1",
   "title": "Durable automatic workspace delivery retry evidence",
-  "description": "Advisory retry evidence in integration origin.delivery. Never grants execution or publication authority. Immutable Git inputs survive restart; only completed owned tasks may publish after exact combined-tree verification.",
+  "description": "Advisory retry evidence in integration origin.delivery. Never grants execution or publication authority. Immutable Git inputs survive restart; only completed owned tasks may merge their registered delta into current workspace bytes, independently of commits and release validation. Source snapshots include uncommitted workspace bytes but grant no authority to commit other writers' work.",
   "type": "object",
   "additionalProperties": false,
   "required": [

@@ -1,7 +1,7 @@
 # 新 Agent 能力上手指南 — 挂在共享底盘上,不要重造轮子
 
 > **铁律(charter 2026-07-27,owner 拍板):** 新增任何 agent 驱动的功能 MUST 建在共享底盘上:
-> agent 循环用 `lib/agent_loop.py` 的 `run_agent_loop`(+ `AbortSignal`),
+> agent 循环用 `lib/agent_loop/agent_loop.py` 的 `run_agent_loop`(+ `AbortSignal`),
 > 「一句话 → 成品」类能力用 `lib/production/` 的 ProductionRuntime + 阶段图。
 > **禁止**新增私有的多轮工具调用循环、私有的中止逻辑、私有的崩溃恢复。
 > 棘轮 `tests/agent_core/test_agent_loop_adoption_guard.py` 会把新私有循环打成红。
@@ -25,7 +25,7 @@
 你的引擎只提供几个钩子,所有引擎特定的 I/O(事件、内容缓冲、usage 累加)都留在钩子里。
 
 ```python
-from lib.agent_loop import AbortSignal, LoopDirective, run_agent_loop
+from lib.agent_loop.agent_loop import AbortSignal, LoopDirective, run_agent_loop
 
 # ① 中止信号:三种存量机制统一成一个谓词,按你的场景选一个构造器
 abort = AbortSignal.from_event(task['abort_event'])   # threading.Event(paper 引擎)

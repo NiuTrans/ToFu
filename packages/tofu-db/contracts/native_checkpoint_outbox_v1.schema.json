@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "tofu.native-checkpoint-mutation/v1",
+  "type": "object",
+  "required": [
+    "format",
+    "source_uuid",
+    "owner_user_id",
+    "task_id",
+    "expected_version",
+    "header",
+    "snapshot",
+    "updated_at_ms"
+  ],
+  "properties": {
+    "format": {
+      "enum": [
+        "tofu.native-checkpoint-mutation/v1"
+      ]
+    },
+    "source_uuid": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "owner_user_id": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "task_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "expected_version": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "header": {
+      "$ref": "native_agent_journal_v1.schema.json"
+    },
+    "snapshot": {
+      "anyOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "native_agent_checkpoint_v1.schema.json"
+        }
+      ]
+    },
+    "updated_at_ms": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "handoff_source": {
+      "type": "object",
+      "required": [
+        "task_id",
+        "expected_version",
+        "header"
+      ],
+      "properties": {
+        "task_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "expected_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "header": {
+          "$ref": "native_agent_journal_v1.schema.json"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

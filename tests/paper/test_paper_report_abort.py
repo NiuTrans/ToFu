@@ -216,7 +216,7 @@ def test_batch_runner_no_abort_runs_all():
 def test_aborted_error_mid_retry():
     """A dispatcher AbortedError is treated as a clean stop, not an error."""
     import lib.paper.report_engine.worker as re_mod
-    from lib.llm_errors import AbortedError
+    from lib.llm.llm_errors import AbortedError
     orig = re_mod.dispatch_stream
 
     def _raise_abort(*a, **k):

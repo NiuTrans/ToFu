@@ -17,7 +17,7 @@ import uuid
 from datetime import datetime
 from typing import Any, Mapping
 
-from lib.agent_loop import AbortSignal, run_agent_loop
+from lib.agent_loop.agent_loop import AbortSignal, run_agent_loop
 from lib.log import audit_log, get_logger, log_context
 from lib.scheduler._shared import (
     build_poll_system_prompt,
@@ -577,6 +577,8 @@ def poll_timer(
                 thinking_enabled=False,
                 tools=poll_tools,
                 capability='cheap',
+                owner_user_id=int(user_id),
+                abort_check=_poll_cancelled,
                 log_prefix=f'[Timer:{timer_id}:R{rnd}]',
             )
         content = _content or ''

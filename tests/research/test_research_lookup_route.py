@@ -95,6 +95,7 @@ _IDEATE = {
 @pytest.fixture()
 def fresh_db(tmp_path, monkeypatch):
     import lib.research.persistence as persistence
+    import lib.evolution.records as evolution_records
     from lib.storage import StorageSupervisor
 
     supervisor = StorageSupervisor(
@@ -102,6 +103,7 @@ def fresh_db(tmp_path, monkeypatch):
     supervisor.start()
     monkeypatch.setattr(
         persistence, '_storage', lambda **_kwargs: supervisor.client)
+    monkeypatch.setattr(evolution_records, '_storage', lambda **_kwargs: supervisor.client)
     try:
         yield supervisor
     finally:

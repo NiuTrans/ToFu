@@ -22,7 +22,7 @@ export interface ConversationIntent {
   operation?: string;
   beforeOrdinal?: number;
   limit?: number;
-  /** Direct image source for injection-lane thumbnails (no positional index). */
+  /** Direct source for Markdown/injection images without a positional index. */
   previewSource?: string;
 }
 
@@ -92,9 +92,11 @@ export interface ConversationSurfaceRenderers {
 }
 
 export interface ScrollAnchorPort<Snapshot = unknown> {
+  readonly following?: boolean;
   capture(root: HTMLElement): Snapshot;
   restore(root: HTMLElement, snapshot: Snapshot): void;
-  followLatest?(root: HTMLElement): void;
+  followLatest?(root: HTMLElement, options?: { force?: boolean }): void;
+  isNearBottom?(threshold?: number): boolean;
 
   suspendFollow?(): void;
   dispose?(): void;
@@ -109,6 +111,10 @@ export interface ConversationWindowOptions {
   blockBatchSize?: number;
   label?(direction: 'earlier' | 'later', count: number): string;
   blockLabel?(count: number): string;
+
+  historyStatusLabel?(state: 'loading' | 'failed'): string;
+
+  historyRetryLabel?(): string;
 }
 
 export interface ConversationWindowState {
@@ -121,6 +127,9 @@ export interface ConversationWindowState {
 
 export interface ConversationViewportOptions {
   nearBottomThreshold?: number;
+
+  /** Physical window bottom is not necessarily the conversation tail. */
+  canFollowLatest?(): boolean;
   scheduleAfterLayout?(callback: () => void): () => void;
 }
 
@@ -128,12 +137,19 @@ export interface ConversationScrollSnapshot {
   following: boolean;
   scrollTop: number;
   anchorTurnId?: string;
+
+  anchorBlockId?: string;
+  anchorPresentationId?: string;
   anchorOffset?: number;
+  /** Separate fallback geometry when the visible leaf is retired. */
+  anchorTurnOffset?: number;
 }
 
 export interface ConversationSurfaceOptions extends ConversationSurfaceRenderers {
-  onIntent?(intent: ConversationIntent): void;
-  /** Lightbox opener for injection-lane (steer/peer) image thumbnails. */
+  /** Mounted Turn identities from the keyed commit, including window changes. */
+  onCommit?(turnIds: ReadonlyArray<string>): void;
+  onIntent?(intent: ConversationIntent): void | Promise<unknown>;
+  /** Shared lightbox opener for Markdown images and injection-lane thumbnails. */
   onPreviewImage?(source: string): void;
   scrollAnchor?: ScrollAnchorPort;
   scrollViewport?: HTMLElement;
@@ -150,11 +166,13 @@ export interface ConversationSurfaceOptions extends ConversationSurfaceRenderers
 export interface ConversationSurface {
   readonly root: HTMLElement;
   readonly windowState: ConversationWindowState;
+  readonly mountedTurnIds: ReadonlyArray<string>;
   render(viewModel: ConversationViewModel): void;
   showEarlier(): boolean;
   showLater(): boolean;
 
   revealTurn(turnId: string): boolean;
-  followLatest(): void;
+  isNearLatest(threshold?: number): boolean;
+  followLatest(options?: { force?: boolean }): void;
   dispose(): void;
 }

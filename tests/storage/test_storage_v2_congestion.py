@@ -39,15 +39,20 @@ def test_busy_command_spaces_local_pressure_and_replays_identity(
         client.close()
 
 
-def test_long_lane_rejection_proves_no_request_was_dispatched():
-    pool = storage._SessionPool(lambda timeout: object(), 4)
+def test_closed_long_lane_proves_no_request_was_dispatched():
+    creations = []
+    def create(timeout):
+        creations.append(timeout)
+        return object()
+    pool = storage._SessionPool(create, 4)
     held = pool.acquire(60)
     try:
+        pool.close()
         with pytest.raises(StorageError) as caught:
             pool.acquire(60)
-        assert caught.value.code == 'database_busy'
+        assert caught.value.code == 'database_unavailable'
         assert caught.value.request_not_dispatched is True
-        assert caught.value.retry_after_ms == 50
+        assert len(creations) == 1
         assert pool.resource_snapshot()['used'] == 1
     finally:
         pool.release(held, broken=False)

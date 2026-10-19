@@ -20,11 +20,6 @@ def test_receipt_fixture_has_one_registered_schema_authority():
     receipt = json.loads(FIXTURE.read_text())
     VALIDATOR.validate(receipt)
     assert len(json.dumps(receipt).encode()) < 32 * 1024
-    catalog = json.loads((ROOT / 'docs/catalog.json').read_text())
-    assert {'path': 'contracts/compaction_receipt_v1.schema.json',
-            'guard': 'tests/compaction/test_compaction_receipt_contract.py'} in catalog['contracts']
-    assert 'contracts/compaction_receipt_v1.schema.json' in (
-        ROOT / 'docs/contracts/API_CONTRACT.md').read_text()
 
     retired = json.loads((ROOT / 'contracts/config_knobs_v1.json').read_text())[
         'taskConfig']['compaction.summaryBudgetSeconds']
@@ -86,6 +81,26 @@ def test_actual_selector_route_serialization_obeys_receipt_contract():
     assert receipt['summary']['accepted'] is False
 
 
+@pytest.mark.parametrize('policy', ['input_aware_output_cap', 'native_bound_reservation'])
+def test_receipt_preserves_output_and_safety_budget_evidence(policy):
+    evidence = {
+        'contextWindowTokens': 128_000, 'hardCeilingTokens': 80_640,
+        'windowSafetyTokens': 80_640, 'resolvedOutputTokens': 38_050,
+        'outputCapTokens': 128_000, 'requestedOutputTokens': None,
+        'outputReservationPolicy': policy, 'outputResolutionSource': 'model_default',
+        'outputResolutionInputTokens': 81_307,
+        'outputResolutionInputSource': 'current_prompt',
+    }
+    receipt = build_compaction_receipt(
+        trigger='dispatch_guard', status='completed', strategy='selective_summary',
+        implementation='model_summary', context_budget=evidence)
+    VALIDATOR.validate(receipt)
+    budget = receipt['contextBudget']
+    assert budget['reserveTokens'] == 47_360
+    for key, value in evidence.items():
+        assert budget['routeWindowTokens' if key == 'contextWindowTokens' else key] == value
+
+
 def test_legacy_additive_fields_are_optional_but_not_inferred():
     receipt = json.loads(FIXTURE.read_text())
     for key in ('complete', 'route', 'cost'):
@@ -101,6 +116,10 @@ def test_legacy_additive_fields_are_optional_but_not_inferred():
     {'summary': {'cost': {'known': True, 'costUsd': None, 'costBasis': 'metered_api_equivalent'}}},
     {'summary': {'cost': {'known': True, 'costUsd': -1, 'costBasis': 'metered_api_equivalent'}}},
     {'contextBudget': {'reserveTokens': -1}},
+    {'contextBudget': {'windowSafetyTokens': -1}},
+    {'contextBudget': {'resolvedOutputTokens': -1}},
+    {'contextBudget': {'requestedOutputTokens': -1}},
+    {'contextBudget': {'outputResolutionInputTokens': -1}},
     {'economics': {'paybackRounds': -1}},
 ])
 def test_receipt_contract_rejects_false_certainty_and_invalid_values(invalid):

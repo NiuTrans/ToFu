@@ -66,7 +66,7 @@ preserving its summary/receipt and saving a detached final projection.
 from copy import deepcopy
 
 from lib.log import get_logger
-from lib.tasks_pkg.compaction._archive import _archive_transcript
+from lib.tasks_pkg.compaction._archive import _archive_transcript, summary_dispatch_calls
 from lib.tasks_pkg.compaction._constants import (
     _cooldown_lock,
     _SINGLE_RESULT_HARD_CEILING_CHARS,
@@ -423,6 +423,8 @@ def reactive_compact(messages: list, task: dict | None = None,
                     reductionPct=round(_red_pct, 1),
                     roundNum=round_num,
                     receipt=receipt,
+
+                    summaryDispatchCalls=summary_dispatch_calls(summary_meta.get('summary_usage')),
                 ))
             except Exception as _ev_e:
                 logger.debug('%s [ReactiveCompact] compaction_done emit '

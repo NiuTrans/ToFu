@@ -192,6 +192,53 @@ def test_terminal_episode_never_resettles(store):
             learning=_learning())
 
 
+@pytest.mark.parametrize('complete', [False, True])
+def test_reconciliation_confirms_exact_terminal_bytes_without_rewriting(store, complete):
+    from lib import evolution
+    episode = _opened(store)
+    arguments = dict(user_id=USER, status='aborted', actuals_complete=complete,
+                     actuals={'tokens': 2, 'wall_clock_seconds': 1, 'tool_calls': 0})
+    settled = evolution.settle_episode(episode['episode_id'], **arguments, now=1700000010)
+    writes = store.writes
+    assert evolution.settle_episode(episode['episode_id'], **arguments,
+                                    reconcile=True, now=1700000200) == settled
+    assert store.writes == writes
+    with pytest.raises(evolution.EvolutionStateError, match='already terminal'):
+        evolution.settle_episode(episode['episode_id'], **arguments)
+    with pytest.raises(evolution.EvolutionStateError, match='unknown episode'):
+        evolution.settle_episode(episode['episode_id'], **{**arguments, 'user_id': USER + 1},
+                                 reconcile=True)
+    with pytest.raises(evolution.EvolutionStateError, match='conflicts'):
+        evolution.settle_episode(episode['episode_id'],
+                                 **{**arguments, 'actuals_complete': not complete}, reconcile=True)
+    assert store.writes == writes
+
+
+@pytest.mark.parametrize('changed', ['actuals', 'verdict', 'stage_receipts', 'learning'])
+def test_reconciliation_rejects_changed_settlement_intent(store, changed):
+    from lib import evolution
+    episode = _opened(store)
+    arguments = dict(user_id=USER, status='success',
+                     actuals={'tokens': 2, 'wall_clock_seconds': 1, 'tool_calls': 0},
+                     verdict={'outcome': 'success', 'assessed_by': 'checker',
+                              'criterion_results': [{'criterion_id': 'c1', 'outcome': 'pass'}]})
+    settled = evolution.settle_episode(episode['episode_id'], **arguments)
+    proposed = deepcopy(arguments)
+    if changed == 'actuals':
+        proposed['actuals']['tokens'] += 1
+    elif changed == 'verdict':
+        proposed['verdict']['criterion_results'][0]['evidence_ref'] = 'Changed evidence'
+    elif changed == 'stage_receipts':
+        proposed['stage_receipts'] = [{'stage': 'execute', 'status': 'done'}]
+    else:
+        proposed['learning'] = _learning()
+    writes = store.writes
+    with pytest.raises(evolution.EvolutionStateError, match='conflicts'):
+        evolution.settle_episode(episode['episode_id'], **proposed, reconcile=True)
+    assert evolution.get_episode(episode['episode_id'], user_id=USER) == settled
+    assert store.writes == writes
+
+
 def test_transient_write_failure_retries_and_persistent_failure_leaves_running(store):
     from lib import evolution
     episode = _opened(store)

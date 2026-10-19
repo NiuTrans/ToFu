@@ -49,12 +49,19 @@ def render_profile_block(body: str | None = None, scope: str = '') -> str | None
 
 
 def context_items_for_event(body: str | None = None,
-                            scope: str = '') -> list[str]:
-    """Return every durable item represented by the injected context block."""
+                            scope: str = '', *,
+                            context_items: list[dict] | None = None) -> list[str]:
+    """Return durable event items; supplied context_items avoids a storage reread.
+
+    Structured snapshots preserve work-rule actions and original item order,
+    unlike parsing the grouped prompt Markdown. Explicit body behavior is unchanged.
+    """
     if body is None:
-        from lib.memory.user_profile._context import load_context
+        if context_items is None:
+            from lib.memory.user_profile._context import load_context
+            context_items = load_context(scope)['items']
         items = []
-        for item in load_context(scope)['items']:
+        for item in context_items:
             if item.get('type') == 'work_rule':
                 items.append(f'When {item.get("condition", "")} → '
                              f'{item.get("action", "")}')

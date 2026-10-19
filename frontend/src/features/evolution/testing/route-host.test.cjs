@@ -11,7 +11,7 @@ new Function('exports', ts.transpileModule(source, { compilerOptions: {
   module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022,
 } }).outputText)(api);
 const tick = () => new Promise(resolve => setImmediate(resolve));
-function setup(t, overrides = {}, path = 'evolution') {
+function setup(t, overrides = {}, path = 'evolution/programs') {
   const dom = new JSDOM('<main></main>'); t.after(() => dom.window.close());
   const root = dom.window.document.querySelector('main');
   const flights = [], mounts = [], disposals = [], updates = [], failures = [], reports = [];
@@ -29,7 +29,7 @@ function setup(t, overrides = {}, path = 'evolution') {
   return { root, host, flights, mount, mounts, disposals, updates, failures, reports };
 }
 test('route taxonomy preserves notebook, studio, research and evidence URLs', () => {
-  for (const [path, kind] of [['evolution','programs'],['evolution/programs/a','programs'],
+  for (const [path, kind] of [['evolution','studio'],['evolution/programs/a','programs'],
     ['evolution/runs/r','studio'],['evolution/start','studio'],['evolution/research/id','research'],
     ['evolution/goals/a','detail'],['evolution/floor','detail']]) assert.equal(api.evolutionPageKind(path), kind);
 });

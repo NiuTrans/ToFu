@@ -7,6 +7,8 @@ Cancellation, timeout and memory pressure kill and reap it before returning.
 from __future__ import annotations
 
 import json
+import math
+import os
 import stat
 import subprocess
 import sys
@@ -21,21 +23,21 @@ from .pdf_validation_worker import WORKER_FLAG
 
 _MESSAGES = {
     'pdf_invalid': 'Build produced a malformed or unreadable PDF',
-    'pdf_limit': 'PDF validation exceeded its time, memory or document budget',
-    'pdf_validation_unavailable': 'The bounded PDF validator is unavailable',
+    'pdf_limit': 'PDF validation could not complete within available resources or explicit execution limits',
+    'pdf_validation_unavailable': 'The PDF validation worker is unavailable',
 }
 
 
-def _command(path: Path, report: Path, memory: int) -> list[str]:
+def _command(path: Path, report: Path, memory: int, seconds: float = 0) -> list[str]:
     mode = [WORKER_FLAG] if getattr(sys, 'frozen', False) else ['-m', 'lib.paper.builds.pdf_validation_worker']
-    return [sys.executable, *mode, str(path), str(report), str(memory)]
+    return [sys.executable, *mode, str(path), str(report), str(memory), str(seconds), str(os.getpid())]
 
 
 def validate_pdf(path: Path, *, cancel=None, timeout: float | None = None) -> dict:
     check_cancelled(cancel)
     try:
         info = path.lstat()
-        if not stat.S_ISREG(info.st_mode) or not 0 < info.st_size <= limit('artifact_bytes'):
+        if not stat.S_ISREG(info.st_mode) or info.st_size <= 0:
             raise BuildError('pdf_invalid', _MESSAGES['pdf_invalid'])
         with path.open('rb') as source:
             header = source.read(8)
@@ -46,13 +48,14 @@ def validate_pdf(path: Path, *, cancel=None, timeout: float | None = None) -> di
         raise BuildError('pdf_invalid', _MESSAGES['pdf_invalid']) from exc
     import psutil
     memory = validation_memory_bytes()
-    seconds = min(timeout if timeout is not None else limit('pdf_validation_timeout_seconds'),
-                  limit('pdf_validation_timeout_seconds'))
-    deadline = time.monotonic() + max(0, seconds)
+    if timeout is not None and (type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0):
+        raise BuildError('pdf_limit', _MESSAGES['pdf_limit'])
+    seconds = 0 if timeout is None else timeout
+    deadline = None if timeout is None else time.monotonic() + seconds
     with tempfile.TemporaryDirectory(prefix='.pdf-validation-', dir=path.parent) as temporary:
         report_path = Path(temporary) / 'result.json'
         try:
-            process = subprocess.Popen(_command(path.resolve(), report_path.resolve(), memory),
+            process = subprocess.Popen(_command(path.resolve(), report_path.resolve(), memory, seconds),
                 cwd=Path(__file__).resolve().parents[3], stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except OSError as exc:
@@ -65,12 +68,12 @@ def validate_pdf(path: Path, *, cancel=None, timeout: float | None = None) -> di
                 child = None
             while process.poll() is None:
                 check_cancelled(cancel)
-                if time.monotonic() >= deadline:
+                if deadline is not None and time.monotonic() >= deadline:
                     raise BuildError('pdf_limit', _MESSAGES['pdf_limit'])
                 try:
                     if child is not None:
                         observed_memory = max(observed_memory, child.memory_info().rss)
-                    if observed_memory > memory:
+                    if memory and observed_memory > memory:
                         raise BuildError('pdf_limit', _MESSAGES['pdf_limit'])
                 except psutil.NoSuchProcess:
                     pass  # wait/poll, rather than observation, owns process completion
@@ -87,14 +90,15 @@ def validate_pdf(path: Path, *, cancel=None, timeout: float | None = None) -> di
                 raise BuildError('pdf_validation_unavailable', _MESSAGES['pdf_validation_unavailable'])
             try:
                 result = json.loads(report_path.read_bytes())
-                maxima = {'pages': limit('reader_pages'), 'objects': limit('pdf_validation_objects'),
-                          'decoded_bytes': limit('pdf_validation_decoded_bytes'), 'observed_memory_bytes': memory}
-                if not isinstance(result, dict) or set(result) != {'valid', 'error', *maxima}:
+                metrics = ('pages', 'objects', 'decoded_bytes', 'observed_memory_bytes')
+                if not isinstance(result, dict) or set(result) != {'valid', 'error', *metrics}:
                     raise ValueError('invalid report fields')
                 if type(result['valid']) is not bool or any(
-                    type(result[name]) is not int or not 0 <= result[name] <= maximum
-                    for name, maximum in maxima.items()):
+                    type(result[name]) is not int or result[name] < 0
+                    for name in metrics):
                     raise ValueError('invalid report bounds')
+                if memory and result['observed_memory_bytes'] > memory:
+                    raise ValueError('invalid memory observation')
                 if not result['valid']:
                     code = result['error'] if result['error'] in _MESSAGES else 'pdf_validation_unavailable'
                     raise BuildError(code, _MESSAGES[code])

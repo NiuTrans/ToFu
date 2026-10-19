@@ -3,7 +3,7 @@
 Covers docs/RUN_CONTINUITY.md phase 1: policy-filtered election from the
 startup retire fence, owner-bound successor spawn through the ordinary
 recovery protocol, typed continuity audit events, idempotency, per-boot
-capacity, the crash-loop guard, the operator kill switch, and the budget
+complete eligible handoff, restart lineage, the operator kill switch, and the budget
 refund for replayed receipts (D6).
 """
 
@@ -18,7 +18,9 @@ import pytest
 pytestmark = pytest.mark.unit
 
 
-GOAL_CREATED_BY = 'chat_goal_mode'
+# Generic orchestration fixtures exercise the caller's explicit auto policy.
+# Actual Chat Goals require their separate versioned launch and command owner.
+AUTO_CREATED_BY = 'continuity_test'
 RETIRE_ERROR = {
     'kind': 'worker_lost',
     'message': 'Run interrupted by a server restart before completion.',
@@ -68,9 +70,7 @@ def _journal_events(definition, input_text, *, parent_run_id='', extra=()):
 
 
 def _create_run(client, run_id, *, owner, tenant, created_by, input_text='goal'):
-    # Goal runs carry the canonical chat-goal orchestration id; the durable
-    # one-active-goal fence keys on (tenant, owner, orch_id).
-    orch_id = (f'chat-goal:{run_id}' if created_by == GOAL_CREATED_BY else '')
+    orch_id = (f'continuity-test:{run_id}' if created_by == AUTO_CREATED_BY else '')
     assert client.command(
         'orchestration.run.create',
         {'run_id': run_id, 'user_id': owner, 'tenant_id': tenant,
@@ -152,19 +152,19 @@ def _pass_kwargs(sidecar, runtime):
         'runtime': runtime,
         'run_service_for_owner': run_service_for_owner,
         'definition_service_for_owner': definition_service_for_owner,
-        'auto_created_by': frozenset({GOAL_CREATED_BY}),
+        'auto_created_by': frozenset({AUTO_CREATED_BY}),
     }
 
 
 def test_retire_reports_exactly_this_boot_generations_retired_runs(sidecar):
     client = sidecar.client
     _create_run(client, 'run-a', owner=7, tenant='tenant-a',
-                created_by=GOAL_CREATED_BY)
+                created_by=AUTO_CREATED_BY)
     _create_run(client, 'run-b', owner=8, tenant='tenant-b',
                 created_by='studio')
     # A durable human wait survives retirement and is never a candidate.
     _create_run(client, 'run-parked', owner=7, tenant='tenant-a',
-                created_by=GOAL_CREATED_BY)
+                created_by=AUTO_CREATED_BY)
     assert client.command(
         'orchestration.run.update_status',
         {'run_id': 'run-parked', 'user_id': 7, 'tenant_id': 'tenant-a',
@@ -181,7 +181,7 @@ def test_retire_reports_exactly_this_boot_generations_retired_runs(sidecar):
     assert set(candidates) == {'run-a', 'run-b'}
     assert candidates['run-a'] == {
         'run_id': 'run-a', 'user_id': 7, 'tenant_id': 'tenant-a',
-        'created_by': GOAL_CREATED_BY}
+        'created_by': AUTO_CREATED_BY}
     assert client.query(
         'orchestration.run.get',
         {'run_id': 'run-parked', 'user_id': 7, 'tenant_id': 'tenant-a'},
@@ -193,7 +193,7 @@ def test_auto_resume_spawns_owner_bound_successor_and_audits(sidecar):
     from lib.orchestration.run_recovery import recovery_run_id
     client = sidecar.client
     _create_run(client, 'run-goal', owner=7, tenant='tenant-a',
-                created_by=GOAL_CREATED_BY)
+                created_by=AUTO_CREATED_BY)
     _append_events(client, 'run-goal', owner=7, tenant='tenant-a',
                    events=_journal_events(_definition(), 'goal'))
     _create_run(client, 'run-manual', owner=7, tenant='tenant-a',
@@ -214,7 +214,7 @@ def test_auto_resume_spawns_owner_bound_successor_and_audits(sidecar):
     row = client.query(
         'orchestration.run.get',
         {'run_id': successor, 'user_id': 7, 'tenant_id': 'tenant-a'})
-    assert row is not None and row['created_by'] == GOAL_CREATED_BY
+    assert row is not None and row['created_by'] == AUTO_CREATED_BY
     source_events = _run_events(client, 'run-goal', owner=7, tenant='tenant-a')
     event_types = [event['type'] for event in source_events]
     assert 'execution_recovery_claim' in event_types
@@ -227,13 +227,24 @@ def test_auto_resume_spawns_owner_bound_successor_and_audits(sidecar):
                    for event in manual_events)
 
 
+def test_generic_journal_does_not_authorize_a_chat_goal(sidecar):
+    from lib.orchestration.continuity import run_boot_continuity_pass
+    _create_run(sidecar.client, 'invalid-chat-goal', owner=7, tenant='tenant-a', created_by='chat_goal_mode')
+    _append_events(sidecar.client, 'invalid-chat-goal', owner=7, tenant='tenant-a',
+                   events=_journal_events(_definition(), 'goal'))
+    runtime = _FakeRuntime()
+    ports = {**_pass_kwargs(sidecar, runtime), 'auto_created_by': {'chat_goal_mode'}}
+    result = run_boot_continuity_pass(candidates=_retire(sidecar).candidates, **ports)
+    assert result['refused'] == 1 and runtime.spawns == []
+
+
 def test_ambiguous_inflight_invocation_stays_settled_and_records_refusal(
         sidecar):
     from lib.orchestration.continuity import run_boot_continuity_pass
     from lib.orchestration.run_recovery import recovery_run_id
     client = sidecar.client
     _create_run(client, 'run-ambiguous', owner=7, tenant='tenant-a',
-                created_by=GOAL_CREATED_BY)
+                created_by=AUTO_CREATED_BY)
     _append_events(client, 'run-ambiguous', owner=7, tenant='tenant-a',
                    events=_journal_events(
                        _definition(), 'goal',
@@ -263,7 +274,7 @@ def test_repeated_pass_never_spawns_twice(sidecar):
     from lib.orchestration.continuity import run_boot_continuity_pass
     client = sidecar.client
     _create_run(client, 'run-once', owner=7, tenant='tenant-a',
-                created_by=GOAL_CREATED_BY)
+                created_by=AUTO_CREATED_BY)
     _append_events(client, 'run-once', owner=7, tenant='tenant-a',
                    events=_journal_events(_definition(), 'goal'))
     retirement = _retire(sidecar)
@@ -282,55 +293,51 @@ def test_repeated_pass_never_spawns_twice(sidecar):
                for event in events) == 1
 
 
-def test_crash_loop_guard_records_exhaustion_and_skips_spawn(sidecar):
+@pytest.mark.parametrize('count',[3,20])
+def test_safe_restart_lineage_is_not_refused_by_time_or_count(sidecar,count):
     from lib.orchestration.continuity import run_boot_continuity_pass
-    client = sidecar.client
-    # A lineage of rapid successive recoveries: c <- b <- a, all retired
-    # inside the guard window by this boot's fence.
-    for run_id, parent in (('run-a', ''), ('run-b', 'run-a'),
-                           ('run-c', 'run-b')):
-        _create_run(client, run_id, owner=7, tenant='tenant-a',
-                    created_by=GOAL_CREATED_BY)
-        _append_events(client, run_id, owner=7, tenant='tenant-a',
-                       events=_journal_events(
-                           _definition(), 'goal', parent_run_id=parent))
-    retirement = _retire(sidecar)
-    runtime = _FakeRuntime()
-    candidate = [row for row in retirement.candidates
-                 if row['run_id'] == 'run-c']
-
-    summary = run_boot_continuity_pass(
-        candidates=candidate, **_pass_kwargs(sidecar, runtime))
-
-    assert summary['exhausted'] == 1
-    assert runtime.spawns == []
-    events = _run_events(client, 'run-c', owner=7, tenant='tenant-a')
-    assert any(event['type'] == 'continuity_exhausted' for event in events)
+    client=sidecar.client;parent=''
+    for i in range(count):
+        run_id=f'lineage-{i}'
+        _create_run(client,run_id,owner=7,tenant='tenant-a',created_by=AUTO_CREATED_BY)
+        _append_events(client,run_id,owner=7,tenant='tenant-a',
+            events=_journal_events(_definition(),'goal',parent_run_id=parent))
+        parent=run_id
+    retirement=_retire(sidecar);runtime=_FakeRuntime()
+    candidates=[row for row in retirement.candidates if row['run_id']==parent]
+    summary=run_boot_continuity_pass(candidates=candidates,**_pass_kwargs(sidecar,runtime))
+    assert summary['resumed']==1 and summary['exhausted']==0 and len(runtime.spawns)==1
+    events=_run_events(client,parent,owner=7,tenant='tenant-a')
+    assert any(row['type']=='continuity_resumed' for row in events)
+    assert not any(row['type']=='continuity_exhausted' for row in events)
+    repeated=run_boot_continuity_pass(candidates=candidates,**_pass_kwargs(sidecar,runtime))
+    assert repeated['skipped']==1 and repeated['resumed']==0 and len(runtime.spawns)==1
 
 
-def test_per_boot_capacity_defers_overflow_candidates(sidecar):
+@pytest.mark.parametrize('legacy_override',['1','malformed','0','-1','128'])
+def test_boot_processes_all_eligible_candidates_without_resource_quota(sidecar,legacy_override):
     from lib.orchestration.continuity import run_boot_continuity_pass
-    client = sidecar.client
-    for run_id in ('run-cap-1', 'run-cap-2'):
-        _create_run(client, run_id, owner=7, tenant='tenant-a',
-                    created_by=GOAL_CREATED_BY)
-        _append_events(client, run_id, owner=7, tenant='tenant-a',
-                       events=_journal_events(_definition(), 'goal'))
-    retirement = _retire(sidecar)
-    runtime = _FakeRuntime()
-
-    summary = run_boot_continuity_pass(
-        candidates=retirement.candidates,
-        environ={'TOFU_CONTINUITY_AUTO_RESUME_MAX': '1'},
-        **_pass_kwargs(sidecar, runtime))
-
-    assert summary['resumed'] == 1
-    assert summary['deferred'] == 1
-    assert len(runtime.spawns) == 1
-    deferred_events = _run_events(
-        client, 'run-cap-2', owner=7, tenant='tenant-a')
-    assert any(event['type'] == 'continuity_deferred'
-               for event in deferred_events)
+    client=sidecar.client;count=40
+    for i in range(count):
+        run_id=f'run-demand-{i}'
+        _create_run(client,run_id,owner=7,tenant='tenant-a',created_by=AUTO_CREATED_BY)
+        _append_events(client,run_id,owner=7,tenant='tenant-a',events=_journal_events(_definition(),'goal'))
+    retirement=_retire(sidecar);runtime=_FakeRuntime()
+    environment={'TOFU_CONTINUITY_AUTO_RESUME_MAX':legacy_override,
+        'TOFU_AGENT_WORKERS':'1','TOFU_MAX_INFLIGHT_TASKS':'1',
+        'TOFU_PROCESS_RSS_RECYCLE_MB':'1','TOFU_TASK_RSS_RESERVE_MB':'1024'}
+    summary=run_boot_continuity_pass(candidates=retirement.candidates,environ=environment,
+        **_pass_kwargs(sidecar,runtime))
+    assert summary['resumed']==count and summary['deferred']==0
+    assert len(runtime.spawns)==count
+    for i in range(count):
+        events=_run_events(client,f'run-demand-{i}',owner=7,tenant='tenant-a')
+        assert any(row['type']=='continuity_resumed' for row in events)
+        assert not any(row.get('reason')=='boot_capacity' for row in events)
+    repeated=run_boot_continuity_pass(candidates=retirement.candidates,environ=environment,
+        **_pass_kwargs(sidecar,runtime))
+    assert repeated['resumed']==0 and repeated['skipped']==count
+    assert len(runtime.spawns)==count
 
 
 def test_launch_capacity_recovers_more_than_the_former_fixed_boot_limit(sidecar):
@@ -339,7 +346,7 @@ def test_launch_capacity_recovers_more_than_the_former_fixed_boot_limit(sidecar)
     for index in range(18):
         run_id = f'run-scaled-{index:02d}'
         _create_run(client, run_id, owner=7, tenant='tenant-a',
-                    created_by=GOAL_CREATED_BY)
+                    created_by=AUTO_CREATED_BY)
         _append_events(client, run_id, owner=7, tenant='tenant-a',
                        events=_journal_events(_definition(), 'goal'))
     retirement = _retire(sidecar)
@@ -366,65 +373,6 @@ def test_launch_capacity_recovers_more_than_the_former_fixed_boot_limit(sidecar)
     assert len(runtime.spawns) == 18
 
 
-@pytest.mark.parametrize('override', ['', 'malformed', '0', '-1'])
-def test_boot_capacity_uses_launch_policy_when_override_is_unusable(override):
-    from lib.orchestration.continuity import max_resumes_per_boot
-    assert max_resumes_per_boot({
-        'TOFU_AGENT_WORKERS': '128',
-        'TOFU_MAX_INFLIGHT_TASKS': '128',
-        'TOFU_PROCESS_RSS_RECYCLE_MB': '65536',
-        'TOFU_TASK_RSS_RESERVE_MB': '64',
-        'TOFU_CONTINUITY_AUTO_RESUME_MAX': override,
-    }) == 128
-
-
-def test_automatic_boot_capacity_respects_memory_and_admission_limits():
-    from lib.orchestration.continuity import max_resumes_per_boot
-    environment = {
-        'TOFU_AGENT_WORKERS': '1200', 'TOFU_MAX_INFLIGHT_TASKS': '1200',
-        'TOFU_PROCESS_RSS_RECYCLE_MB': '4096',
-        'TOFU_TASK_RSS_RESERVE_MB': '1024',
-    }
-    assert max_resumes_per_boot(environment) == 3
-    environment['TOFU_MAX_INFLIGHT_TASKS'] = '2'
-    assert max_resumes_per_boot(environment) == 2
-    environment['TOFU_MAX_INFLIGHT_TASKS'] = '0'
-    assert max_resumes_per_boot(environment) == 3
-
-
-def test_automatic_boot_capacity_scales_with_the_shared_resource_probe(monkeypatch):
-    import runtime_guards
-    from lib.orchestration.continuity import max_resumes_per_boot
-    capacities = []
-    for cpus, memory_mb in ((2, 8192), (128, 262144)):
-        snapshot = runtime_guards.SystemResourceSnapshot(
-            host_cpu_count=cpus, affinity_cpu_count=cpus,
-            cgroup_cpu_count=None, effective_cpu_count=cpus,
-            host_memory_total_mb=memory_mb,
-            host_memory_available_mb=memory_mb // 2,
-            cgroup_memory_limit_mb=None, cgroup_memory_current_mb=None,
-            effective_memory_capacity_mb=memory_mb,
-            effective_memory_available_mb=memory_mb // 2,
-            disk_total_mb=1048576, disk_free_mb=524288,
-        )
-        monkeypatch.setattr(runtime_guards, 'probe_system_resources',
-                            lambda env, snapshot=snapshot: snapshot)
-        capacities.append(max_resumes_per_boot({}))
-    assert 1 <= capacities[0] <= 2
-    assert capacities[1] > 16
-
-
-def test_positive_boot_override_is_independent_and_structurally_bounded():
-    from lib.orchestration.continuity import max_resumes_per_boot
-    from runtime_guards import MAX_TASK_CONCURRENCY
-    assert max_resumes_per_boot({
-        'TOFU_AGENT_WORKERS': '2', 'TOFU_CONTINUITY_AUTO_RESUME_MAX': '128',
-    }) == 128
-    assert max_resumes_per_boot({
-        'TOFU_CONTINUITY_AUTO_RESUME_MAX': str(MAX_TASK_CONCURRENCY * 10),
-    }) == MAX_TASK_CONCURRENCY
-
-
 def test_kill_switch_disables_the_pass_without_touching_storage():
     from lib.orchestration.continuity import run_boot_continuity_pass
 
@@ -433,8 +381,8 @@ def test_kill_switch_disables_the_pass_without_touching_storage():
 
     summary = run_boot_continuity_pass(
         candidates=[{'run_id': 'run-x', 'user_id': 7, 'tenant_id': '',
-                     'created_by': GOAL_CREATED_BY}],
-        auto_created_by=frozenset({GOAL_CREATED_BY}),
+                     'created_by': AUTO_CREATED_BY}],
+        auto_created_by=frozenset({AUTO_CREATED_BY}),
         runtime=_FakeRuntime(),
         run_service_for_owner=forbidden,
         definition_service_for_owner=forbidden,

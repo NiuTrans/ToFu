@@ -55,3 +55,14 @@ def test_page_miss_is_explicit_and_validates():
     result = inverse_stream(_synctex(), build_id='b' * 32, page=9, h=1, v=1)
     assert result['file'] == '' and result['line'] is None
     assert result['page'] == 9
+
+
+def test_corrupt_gzip_tail_cannot_return_partial_known_location():
+    from lib.paper.builds.synctex import locate_stream
+    from lib.paper.builds.errors import BuildError
+    encoded=_synctex().getvalue()[:-4]
+    for query in (
+        lambda stream:locate_stream(stream,build_id='b'*32,file='main.tex',line=5),
+        lambda stream:inverse_stream(stream,build_id='b'*32,page=1,h=100,v=200),
+    ):
+        with pytest.raises(BuildError,match='Cannot decode'):query(io.BytesIO(encoded))

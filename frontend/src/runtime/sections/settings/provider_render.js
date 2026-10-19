@@ -266,8 +266,7 @@ function _renderModelRoutingProvidersTab(list) {
       expandedIds.add(String(card.getAttribute('data-provider-id') || ''));
     });
   }
-  var html = '<div class="stg-v2-intro"><strong>服务商</strong>' +
-    '<span>这里管理供给、请求 alias 和接入状态；官方模型身份不会因此改变。</span></div>';
+  var html = '';
   providers.forEach(function(provider) {
     var context = _modelRoutingProviderContext(provider.provider_id);
     if (!context) return;

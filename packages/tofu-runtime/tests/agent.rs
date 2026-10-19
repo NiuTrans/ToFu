@@ -94,8 +94,8 @@ fn catalog() -> Catalog {
 }
 fn budget() -> Budget {
     Budget {
-        rounds: 3,
-        tool_calls: 8,
+        rounds: Some(3),
+        tool_calls: Some(8),
         retained_bytes: 65536,
         feedback_bytes: 4096,
     }
@@ -127,6 +127,7 @@ fn response(message: Value) -> StreamResult {
         state: ProviderStreamState::ProviderFinished,
         message,
         usage: json!({"total_tokens":1}),
+        cost: None,
         finish_reason: Some("stop".into()),
         done_seen: true,
         malformed_frames: 0,
@@ -198,6 +199,15 @@ fn run_with_handler_recovery(
     progress: Option<&dyn tofu_runtime::progress::Policy>,
     checkpoints: Option<&dyn tofu_runtime::agent_checkpoint::Port>,
 ) -> (Arc<TerminalCandidate>, usize) {
+    run_with_capture(provider, authorization, b, handler, calls, progress, checkpoints, false)
+}
+#[allow(clippy::too_many_arguments)]
+fn run_with_capture(
+    provider: &dyn Provider, authorization: &dyn Authorization, b: Budget,
+    handler: Arc<dyn Handler>, calls: Arc<AtomicUsize>,
+    progress: Option<&dyn tofu_runtime::progress::Policy>,
+    checkpoints: Option<&dyn tofu_runtime::agent_checkpoint::Port>, retain: bool,
+) -> (Arc<TerminalCandidate>, usize) {
     let sessions = Sessions::new();
     let (t, output) = task(&sessions, None);
     let handlers = Registry::new(7, "epoch", vec![("echo".into(), handler)]).unwrap();
@@ -217,17 +227,48 @@ fn run_with_handler_recovery(
         round_admission: None,
         budget: b,
     };
-    let result = agent
-        .run(
-            &t,
-            7,
-            "agent",
-            vec![json!({"role":"user","content":"hello"})],
-        )
-        .unwrap();
+    let messages=vec![json!({"role":"user","content":"hello"})];
+    let original=messages[0]["content"].as_str().unwrap().as_ptr();
+    let result=if retain {agent.run_retained(&t,7,"agent",messages)}
+        else {agent.run(&t,7,"agent",messages)}.unwrap();
+    let history=result.result.as_ref().or(result.execution.as_ref());
+    if let Some(history)=history.filter(|_|checkpoints.is_none()) {
+        assert_eq!(history["messages"][0]["content"].as_str().unwrap().as_ptr(),original);
+    }
     assert_eq!(sessions.active_count().unwrap(), 0);
     assert_eq!(output.0.lock().unwrap().len(), 1);
     (result, calls.load(Ordering::SeqCst))
+}
+
+#[test]
+fn retained_tool_history_survives_provider_error_cancel_and_panic_without_replay() {
+    struct Interrupted {calls:AtomicUsize,behavior:&'static str}
+    impl Provider for Interrupted {
+        fn round(&self,messages:&[Value],session:&Arc<ExecutionSession>)->Result<StreamResult,ProviderError>{
+            if self.calls.fetch_add(1,Ordering::SeqCst)==0 {return Ok(response(tools("{}")));}
+            assert_eq!(messages.len(),3);
+            match self.behavior {
+                "cancel"=>{session.request_cancel("fixture_cancel").unwrap();Err(ProviderError::Stopped)},
+                "panic"=>panic!("provider failed after tool"),
+                _=>Err(ProviderError::Failed(json!({"kind":"fixture_transport"}))),
+            }
+        }
+    }
+    for behavior in ["error","cancel","panic"] {
+        let provider=Interrupted {calls:AtomicUsize::new(0),behavior};
+        let calls=Arc::new(AtomicUsize::new(0));
+        let (result,effects)=run_with_capture(&provider,&Allow,budget(),Arc::new(Echo(calls.clone())),calls,None,None,true);
+        assert_eq!(effects,1);
+        assert_eq!(provider.calls.load(Ordering::SeqCst),2);
+        assert_eq!(result.status,if behavior=="cancel" {TaskStatus::Aborted}else{TaskStatus::Error});
+        assert!(result.result.is_none());
+        let execution=result.execution.as_ref().unwrap();
+        assert_eq!(execution["messages"].as_array().unwrap().len(),3);
+        assert_eq!(execution["messages"][2]["role"],"tool");
+        assert_eq!(execution["usage"].as_array().unwrap().len(),1);
+        assert_eq!(result.event()["execution"],*execution);
+        assert!(result.receipt.invariants_satisfied);
+    }
 }
 #[test]
 fn ordered_feedback_continues_and_terminalizes_once() {
@@ -289,7 +330,7 @@ fn duplicate_ids_and_missing_continuation_budget_prevent_effects() {
     assert_eq!(c, 0);
     let p = rounds(vec![tools("{}")]);
     let mut b = budget();
-    b.rounds = 1;
+    b.rounds=Some(1);
     let (r, c) = run(&p, &Allow, b);
     assert_eq!(r.error.as_ref().unwrap()["kind"], "agent_round_budget");
     assert_eq!(c, 0);
@@ -311,7 +352,8 @@ fn policy() -> tofu_runtime::http::Policy {
         idle_connections: 1,
         keepalive: Duration::from_secs(1),
         connect: Duration::from_secs(1),
-        request_headers: Duration::from_secs(1),
+        request_headers: Some(Duration::from_secs(1)),
+        write: None,
         pool_wait: Duration::from_secs(1),
         stream_idle: None,
         drain_timeout: Duration::from_millis(20),
@@ -395,7 +437,7 @@ fn real_http_model_tool_feedback_model_flow_reuses_pool() {
     let (r, c) = run(&provider, &Allow, budget());
     assert_eq!(r.status, TaskStatus::Done);
     assert_eq!(c, 1);
-    assert_eq!(transport.available_slots(), 1);
+    assert_eq!(transport.active_requests(), 0);
     let bodies = server.join().unwrap();
     assert_eq!(bodies.len(), 2);
     #[cfg(target_os = "linux")]
@@ -403,6 +445,96 @@ fn real_http_model_tool_feedback_model_flow_reuses_pool() {
     #[cfg(not(target_os = "linux"))]
     assert_eq!(bodies[1]["messages"][2]["content"], "42");
     assert_eq!(bodies[1]["stream"], true);
+}
+
+#[test]
+fn chat_wire_keeps_owned_context_metadata_outside_real_http() {
+    use std::io::Write;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = format!("http://{}/chat", listener.local_addr().unwrap());
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let body = read_request(&mut stream);
+        let wire = "data: {\"choices\":[{\"delta\":{\"content\":\"done\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
+        write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\n\r\n{wire}", wire.len()).unwrap();
+        body
+    });
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let transport = {
+        let _enter = runtime.enter();
+        tofu_runtime::http::Transport::new(&endpoint, None, policy()).unwrap()
+    };
+    let cancel = tofu_runtime::http::Cancellation::new();
+    let provider = tofu_runtime::agent_http::HttpProvider::new(
+        &runtime, &transport, provider_config(), &cancel).unwrap();
+    let sessions = Sessions::new();
+    let session = sessions.start("chat-private", "task", 7, "", None).unwrap();
+    let messages = vec![json!({"role":"user","content":[{"type":"text","text":"question _isMeta"}],
+        "_contextComposer":true,"_isMeta":true,"carrier":"context",
+        "_contextBlocks":[{"source":"private-host"}],"future_metadata":{"owner":7}})];
+    let before = messages.clone();
+    let result = provider.round(&messages, &session).unwrap_or_else(|_| panic!("Chat round failed"));
+    assert_eq!(result.message["content"], "done");
+    assert_eq!(transport.active_requests(), 0);
+    let body = server.join().unwrap();
+    assert_eq!(body["messages"][0], json!({"role":"user","content":messages[0]["content"]}));
+    assert_eq!(messages, before);
+    session.settle(tofu_runtime::execution_contract::ExecutionPhase::Completed, "").unwrap();
+}
+
+#[test]
+fn chat_wire_normalizes_context_seams_before_real_http_without_history_mutation() {
+    use std::io::Write;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = format!("http://{}/chat", listener.local_addr().unwrap());
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let body = read_request(&mut stream);
+        let wire = "data: {\"choices\":[{\"delta\":{\"content\":\"done\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
+        write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\n\r\n{wire}", wire.len()).unwrap();
+        body
+    });
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let transport = {
+        let _enter = runtime.enter();
+        tofu_runtime::http::Transport::new(&endpoint, None, policy()).unwrap()
+    };
+    let cancel = tofu_runtime::http::Cancellation::new();
+    let provider = tofu_runtime::agent_http::HttpProvider::new(
+        &runtime, &transport, provider_config(), &cancel).unwrap().with_chat_text_parts(false);
+    let sessions = Sessions::new();
+    let session = sessions.start("chat-seam", "task", 7, "", None).unwrap();
+    let messages = vec![json!({"role":"user","content":"question"}),
+        json!({"role":"assistant","content":null}),
+        json!({"role":"user","content":[{"type":"text","text":" ambient"}],"_contextComposer":true})];
+    let before = messages.clone();
+    assert!(provider.round(&messages, &session).is_ok());
+    assert_eq!(server.join().unwrap()["messages"], json!([{"role":"user","content":"question ambient"}]));
+    assert_eq!(transport.active_requests(), 0);
+    assert_eq!(messages, before);
+    session.settle(tofu_runtime::execution_contract::ExecutionPhase::Completed, "").unwrap();
+}
+
+#[test]
+fn chat_wire_invalid_adjacency_refuses_before_any_http_request() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let transport = {
+        let _enter = runtime.enter();
+        tofu_runtime::http::Transport::new(&format!("http://{}/chat", listener.local_addr().unwrap()), None, policy()).unwrap()
+    };
+    let cancel = tofu_runtime::http::Cancellation::new();
+    let provider = tofu_runtime::agent_http::HttpProvider::new(&runtime, &transport, provider_config(), &cancel).unwrap();
+    let sessions = Sessions::new();
+    let session = sessions.start("chat-invalid", "task", 7, "", None).unwrap();
+    let messages = vec![json!({"role":"user","content":2}), json!({"role":"user","content":"text"})];
+    assert!(matches!(provider.round(&messages,&session),Err(ProviderError::Failed(v)) if v["kind"]=="agent_chat_request_refused"));
+    assert!(matches!(listener.accept(),Err(e) if e.kind()==std::io::ErrorKind::WouldBlock));
+    assert_eq!(transport.active_requests(), 0);
+    session.settle(tofu_runtime::execution_contract::ExecutionPhase::Failed, "").unwrap();
 }
 
 #[test]
@@ -544,7 +676,7 @@ fn silent_http_observes_parent_deadline_and_releases_pool() {
     let result = agent.run(&t, 7, "agent", vec![]).unwrap();
     assert_eq!(result.status, TaskStatus::Aborted);
     assert!(result.result.is_none());
-    assert_eq!(transport.available_slots(), 1);
+    assert_eq!(transport.active_requests(), 0);
     assert_eq!(calls.load(Ordering::SeqCst), 0);
     assert_eq!(sessions.active_count().unwrap(), 0);
     assert_eq!(published.0.lock().unwrap().len(), 1);
@@ -669,7 +801,7 @@ fn request_body_limit_refuses_before_http_and_duplicate_run_never_reexecutes() {
     );
     assert!(agent.run(&t, 7, "agent", vec![]).is_err());
     assert_eq!(published.0.lock().unwrap().len(), 1);
-    assert_eq!(transport.available_slots(), 1);
+    assert_eq!(transport.active_requests(), 0);
 }
 
 #[test]
@@ -1450,7 +1582,7 @@ fn denied_native_round_never_opens_http_and_stopped_provider_settles_once() {
     assert_eq!(result.error.as_ref().unwrap()["kind"], "round_denied");
     assert_eq!(tools, 0);
     assert!(matches!(listener.accept(),Err(e) if e.kind()==std::io::ErrorKind::WouldBlock));
-    assert_eq!(transport.available_slots(), 1);
+    assert_eq!(transport.active_requests(), 0);
     struct Stopped;
     impl Provider for Stopped {
         fn round(
@@ -1573,7 +1705,7 @@ fn native_anthropic_model_tool_model_replays_signed_and_hosted_state() {
     let transport={let _entered=runtime.enter();Transport::new(&format!("http://{address}/v1/messages"),None,policy()).unwrap()};let cancel=Cancellation::new();
     let mut configuration=provider_config();configuration.headers.insert("content-type",reqwest::header::HeaderValue::from_static("application/json"));
     let provider=HttpProvider::new(&runtime,&transport,configuration,&cancel).unwrap().with_anthropic(anthropic::Budget{blocks:32,retained_bytes:65536}).unwrap();
-    let (result,calls)=run(&provider,&Allow,budget());assert_eq!(result.status,TaskStatus::Done);assert_eq!(calls,1);assert_eq!(transport.available_slots(),1);
+    let (result,calls)=run(&provider,&Allow,budget());assert_eq!(result.status,TaskStatus::Done);assert_eq!(calls,1);assert_eq!(transport.active_requests(),0);
     let bodies=server.join().unwrap();assert_eq!(bodies.len(),2);
 }
 
@@ -1596,7 +1728,7 @@ fn unsupported_anthropic_request_refuses_before_any_tcp_effect() {
         let session=sessions.start(&format!("unsupported-{ordinal}"),"task",7,"",None).unwrap();
         assert!(matches!(provider.round(&[json!({"role":"user","content":"question"})],&session),Err(ProviderError::Failed(value)) if value["kind"]=="agent_anthropic_request_refused"));
         assert!(matches!(listener.accept(),Err(error) if error.kind()==std::io::ErrorKind::WouldBlock));
-        assert_eq!(transport.available_slots(),1);
+        assert_eq!(transport.active_requests(),0);
         session.settle(tofu_runtime::execution_contract::ExecutionPhase::Failed,"").unwrap();
     }
 }
@@ -1643,7 +1775,7 @@ fn responses_model_tool_model_with_profile(profile: tofu_runtime::responses_requ
     let transport={let _entered=runtime.enter();Transport::new(&format!("http://{address}/v1/responses"),None,policy()).unwrap()};let cancel=Cancellation::new();
     let mut configuration=provider_config();configuration.headers.insert("content-type",reqwest::header::HeaderValue::from_static("application/json"));
     let provider=HttpProvider::new(&runtime,&transport,configuration,&cancel).unwrap().with_responses_profile(responses::Budget{items:32,retained_bytes:65536},true,profile).unwrap();
-    let (result,calls)=run(&provider,&Allow,budget());assert_eq!(result.status,TaskStatus::Done);assert_eq!(calls,1);assert_eq!(transport.available_slots(),1);
+    let (result,calls)=run(&provider,&Allow,budget());assert_eq!(result.status,TaskStatus::Done);assert_eq!(calls,1);assert_eq!(transport.active_requests(),0);
     let bodies=server.join().unwrap();assert_eq!(bodies.len(),2);
 }
 
@@ -1678,7 +1810,7 @@ fn unsupported_responses_profile_refuses_before_tool_effects() {
     let transport={let _entered=runtime.enter();Transport::new(&format!("http://{address}/v1/responses"),None,policy()).unwrap()};let cancel=Cancellation::new();
     let mut configuration=provider_config();configuration.headers.insert("content-type",reqwest::header::HeaderValue::from_static("application/json"));
     let provider=HttpProvider::new(&runtime,&transport,configuration,&cancel).unwrap().with_responses(responses::Budget{items:32,retained_bytes:65536},true).unwrap();
-    let (result,calls)=run(&provider,&Allow,budget());assert_eq!(result.status,TaskStatus::Error);assert_eq!(calls,0);assert_eq!(transport.available_slots(),1);
+    let (result,calls)=run(&provider,&Allow,budget());assert_eq!(result.status,TaskStatus::Error);assert_eq!(calls,0);assert_eq!(transport.active_requests(),0);
     let bodies=server.join().unwrap();assert_eq!(bodies.len(),1);
 }
 
@@ -1788,7 +1920,7 @@ fn trusted_progress_halts_only_after_joined_tools() {
     ] {
         let provider = rounds(vec![tools("{}"),tools("{}"),tools("{}"),tools("{}"),json!({"role":"assistant","content":"done"})]);
         let calls = Arc::new(AtomicUsize::new(0));
-        let mut b=budget(); b.rounds=6;
+        let mut b=budget(); b.rounds=Some(6);
         let (result, count)=run_with_handler_progress(&provider,&Allow,b,Arc::new(Echo(calls.clone())),calls,Some(&probe));
         assert_eq!(result.status, expected_status);
         assert_eq!(provider.seen.lock().unwrap().len(), expected_rounds);
@@ -1816,7 +1948,7 @@ fn native_progress_failure_policy_and_disabled_or_oversized_probes() {
     }
     for (disabled,oversized,expected_rounds,expected_kind) in [(false,false,2,Some("agent_nonretryable_tool_failure")),(true,false,4,None),(false,true,1,Some("agent_progress_budget"))] {
         let provider=rounds(vec![tools("{\"value\":1}"),tools("{\"value\":2}"),tools("{\"value\":3}"),json!({"role":"assistant","content":"done"})]);
-        let mut b=budget();b.rounds=5;
+        let mut b=budget();b.rounds=Some(5);
         let probe=Probe{disabled,oversized};
         let (result,_)=run_with_handler_progress(&provider,&Allow,b,Arc::new(Fail),Arc::new(AtomicUsize::new(0)),Some(&probe));
         assert_eq!(provider.seen.lock().unwrap().len(),expected_rounds);
@@ -1921,7 +2053,7 @@ fn recovery_preserves_progress_streaks_and_total_tool_budget() {
         fn observe(&self,_:Context<'_>)->Result<Observation,Value>{Ok(Observation{evidence_ids:vec!["visible".into()],evidence_complete:true,..Default::default()})}
     }
     let port=Recovery::default();port.0.lock().unwrap().suspend=true;
-    let mut b=budget();b.rounds=5;
+    let mut b=budget();b.rounds=Some(5);
     let (paused,calls)=recover(&rounds(vec![tools("{}")]),b,&port,Some(&Same));
     assert_eq!(paused.status,TaskStatus::Aborted);assert_eq!(calls,1);
     let saved=port.0.lock().unwrap().saved.clone().unwrap();
@@ -1938,7 +2070,7 @@ fn recovery_preserves_progress_streaks_and_total_tool_budget() {
     assert_eq!(halted.error.as_ref().unwrap()["noProgressStreak"],2);
     assert_eq!(port.0.lock().unwrap().starts,vec![0,1,2]);
     let limited=Recovery::default();limited.0.lock().unwrap().suspend=true;
-    let mut b=budget();b.tool_calls=1;
+    let mut b=budget();b.tool_calls=Some(1);
     recover(&rounds(vec![tools("{}")]),b,&limited,None);
     limited.0.lock().unwrap().suspend=false;
     let (halted,calls)=recover(&rounds(vec![tools("{}")]),b,&limited,None);
@@ -2022,4 +2154,198 @@ fn agent_terminal_persistence_automatically_seals_completion_and_preserves_suspe
         assert_eq!(candidate.status,if suspend {TaskStatus::Aborted}else{TaskStatus::Done});assert_eq!(calls.load(Ordering::SeqCst),1);assert_eq!(provider.seen.lock().unwrap().len(),if suspend {1}else{2});assert_eq!(output.0.lock().unwrap().len(),1);
         if suspend {policy.release().unwrap();assert!(journal.acquire("resume").is_ok());}else{assert!(journal.acquire("resume").is_err());}
     }
+}
+
+#[test]
+fn absent_round_limit_preserves_other_admission_boundaries() {
+    let messages = (0..7).map(|_| tools("{}")).chain(std::iter::once(json!({"role":"assistant","content":"done"}))).collect();
+    let p = rounds(messages);
+    let mut b = budget();
+    b.rounds = None;
+    let (done,calls) = run(&p,&Allow,b);
+    assert_eq!(done.status,TaskStatus::Done);
+    assert_eq!(calls,7);
+    assert_eq!(p.seen.lock().unwrap().len(),8);
+    let p = rounds(vec![tools("{}"),tools("{}")]);
+    b.tool_calls = Some(1);
+    let (failed,calls) = run(&p,&Allow,b);
+    assert_eq!(failed.status,TaskStatus::Error);
+    assert_eq!(calls,1);
+}
+
+#[test]
+fn unbounded_round_checkpoint_cannot_change_its_declared_limit() {
+    let port = Recovery::default();
+    port.0.lock().unwrap().suspend = true;
+    let mut b = budget(); b.rounds = None;
+    let (paused,calls) = recover(&rounds(vec![tools("{}")]),b,&port,None);
+    assert_eq!(paused.status,TaskStatus::Aborted);
+    assert_eq!(calls,1);
+    assert!(port.0.lock().unwrap().saved.as_ref().unwrap()["round_limit"].is_null());
+    port.0.lock().unwrap().suspend=false;
+    let p = rounds(vec![json!({"role":"assistant","content":"done"})]);
+    let mut changed=b;changed.rounds=Some(3);
+    let (refused,calls)=recover(&p,changed,&port,None);
+    assert_eq!(refused.status,TaskStatus::Error);
+    assert_eq!(calls,0);
+    assert!(p.seen.lock().unwrap().is_empty());
+    let p = rounds(vec![json!({"role":"assistant","content":"done"})]);
+    let (done,calls)=recover(&p,b,&port,None);
+    assert_eq!(done.status,TaskStatus::Done);
+    assert_eq!(calls,0);
+}
+
+#[test]
+fn absent_total_tool_limit_continues_and_zero_refuses_before_effects() {
+    let mut b=budget();b.rounds=None;b.tool_calls=None;
+    let messages=(0..12).map(|_|tools("{}")).chain(std::iter::once(json!({"role":"assistant","content":"done"}))).collect();
+    let provider=rounds(messages);
+    let (done,calls)=run(&provider,&Allow,b);
+    assert_eq!(done.status,TaskStatus::Done);assert_eq!(calls,12);
+    assert_eq!(provider.seen.lock().unwrap().len(),13);
+    b.tool_calls=Some(0);
+    let (failed,calls)=run(&rounds(vec![tools("{}")]),&Allow,b);
+    assert_eq!(failed.error.as_ref().unwrap()["kind"],"agent_tool_budget");assert_eq!(calls,0);
+    let (done,calls)=run(&rounds(vec![json!({"role":"assistant","content":"answer"})]),&Allow,b);
+    assert_eq!(done.status,TaskStatus::Done);assert_eq!(calls,0);
+}
+
+#[test]
+fn nullable_total_tool_checkpoint_keeps_exact_recovery_policy() {
+    let port=Recovery::default();port.0.lock().unwrap().suspend=true;
+    let mut b=budget();b.rounds=None;b.tool_calls=None;
+    let (paused,calls)=recover(&rounds(vec![tools("{}")]),b,&port,None);
+    assert_eq!(paused.status,TaskStatus::Aborted);assert_eq!(calls,1);
+    assert!(port.0.lock().unwrap().saved.as_ref().unwrap()["tool_limit"].is_null());
+    port.0.lock().unwrap().suspend=false;
+    let mut changed=b;changed.tool_calls=Some(8);
+    let provider=rounds(vec![json!({"role":"assistant","content":"done"})]);
+    let (failed,calls)=recover(&provider,changed,&port,None);
+    assert_eq!(failed.status,TaskStatus::Error);assert_eq!(calls,0);
+    assert!(provider.seen.lock().unwrap().is_empty());
+    let (done,calls)=recover(&provider,b,&port,None);
+    assert_eq!(done.status,TaskStatus::Done);assert_eq!(calls,0);
+    assert_eq!(provider.seen.lock().unwrap().len(),1);
+}
+
+struct PendingProgress { fail: bool, observed: AtomicUsize }
+impl tofu_runtime::progress::Policy for PendingProgress {
+    fn limits(&self) -> tofu_runtime::progress::Limits {
+        tofu_runtime::progress::Limits { no_progress_rounds: 2, nonretryable_failure_rounds: 0 }
+    }
+    fn observe(&self, context: tofu_runtime::progress::Context<'_>) -> Result<tofu_runtime::progress::Observation,Value> {
+        assert_eq!(context.round,0);
+        self.observed.fetch_add(1,Ordering::SeqCst);
+        if self.fail { return Err(json!({"kind":"worker_lost_after_tool"})); }
+        assert_eq!(context.messages.last().unwrap()["content"],"observed existing effect");
+        Ok(tofu_runtime::progress::Observation { world_version:"world-after-tool".into(), evidence_ids:vec!["effect-1".into()],evidence_complete:true,..Default::default() })
+    }
+}
+struct PendingRecovery { mode: &'static str, restored: AtomicUsize }
+impl tofu_runtime::checkpoint_journal::Recovery for PendingRecovery {
+    fn restore(&self, identity:tofu_runtime::agent_checkpoint::Identity<'_>, saved:&Value) -> Result<(),Value> {
+        assert_eq!((identity.owner,identity.task_id),(7,"agent"));
+        assert_eq!(saved["usage"],json!([{"total_tokens":1}]));
+        assert_eq!(saved["next_round"],1);
+        self.restored.fetch_add(1,Ordering::SeqCst); Ok(())
+    }
+    fn reconcile(&self, identity:tofu_runtime::agent_checkpoint::Identity<'_>, saved:&Value)
+        -> Result<Vec<tofu_runtime::agent_checkpoint::ReconciledTool>,Value> {
+        use tofu_runtime::agent_checkpoint::ReconciledTool;
+        assert_eq!(saved["messages"].as_array().unwrap().last().unwrap()["tool_calls"][0]["id"],"a1");
+        if self.mode=="unknown" { return Err(json!({"kind":"effect_outcome_unknown"})); }
+        if self.mode=="missing" { return Ok(vec![]); }
+        if self.mode=="cancel" { identity.session.request_cancel("owner_stop").unwrap(); }
+        let content=if self.mode=="oversized" {"x".repeat(4097)} else {"observed existing effect".into()};
+        let mut observations: Vec<_> = saved["messages"].as_array().unwrap().last().unwrap()["tool_calls"]
+            .as_array().unwrap().iter().map(|call| ReconciledTool {
+                call_id:if self.mode=="wrong_call" {"other".into()} else {call["id"].as_str().unwrap().into()},
+                content:json!(content),
+            }).collect();
+        if self.mode=="missing_one" { observations.pop(); }
+        if self.mode=="reordered" { observations.reverse(); }
+        Ok(observations)
+    }
+}
+
+#[test]
+fn paid_pending_batch_reconciles_without_replaying_tools_or_old_model_round() {
+    use tofu_runtime::checkpoint_journal::{Journal,Policy,Scope};
+    for (mode,count) in [("proved",1),("proved",2),("unknown",1),("missing",1),
+        ("wrong_call",1),("oversized",1),("cancel",1),("missing_one",2),("reordered",2)] {
+        let store=checkpoint_store::MemoryStore::default();
+        *store.writer.lock().unwrap()=Some(json!({"boot_id":"boot","pid_namespace":1,"pid":12,"start_ticks":10}));
+        let journal=Journal::new(Scope {owner:7,task_id:"agent".into(),epoch:"epoch".into(),binding:"fixture-model-and-tools".into()},&store,65536,1024).unwrap();
+        let restoration=PendingRecovery {mode,restored:AtomicUsize::new(0)};
+        let first=Policy::new(journal.acquire("first").unwrap(),&restoration,false);
+        let mut batch=tools("{}");
+        if count==2 { let mut second=batch["tool_calls"][0].clone();second["id"]=json!("a2");batch["tool_calls"].as_array_mut().unwrap().push(second); }
+        let provider=rounds(vec![batch]);
+        let probe=PendingProgress {fail:true,observed:AtomicUsize::new(0)};
+        let (failed,calls)=recover(&provider,budget(),&first,Some(&probe));
+        assert_eq!(failed.status,TaskStatus::Error); assert_eq!(calls,count);
+        assert_eq!(provider.seen.lock().unwrap().len(),1);
+        assert_eq!(store.record.lock().unwrap().as_ref().unwrap().1["phase"],"tools_pending");
+        assert!(journal.recover("second").is_err());
+        store.writer_dead.store(true,Ordering::SeqCst);
+        let second=Policy::new(journal.recover("second").unwrap(),&restoration,false);
+        let provider=rounds(if mode=="proved" {vec![json!({"role":"assistant","content":"done"})]} else {vec![]});
+        let probe=PendingProgress {fail:false,observed:AtomicUsize::new(0)};
+        let (result,calls)=recover(&provider,budget(),&second,Some(&probe));
+        assert_eq!(calls,0,"{mode}");
+        assert_eq!(restoration.restored.load(Ordering::SeqCst),1);
+        if mode=="proved" {
+            assert_eq!(result.status,TaskStatus::Done);
+            let result=result.result.as_ref().unwrap();
+            assert_eq!(result["usage"],json!([{"total_tokens":1},{"total_tokens":1}]));
+            assert_eq!(result["llm_rounds"],2); assert_eq!(result["tool_calls"],count);
+            assert_eq!(provider.seen.lock().unwrap().len(),1);
+            assert_eq!(probe.observed.load(Ordering::SeqCst),1);
+        } else {
+            assert_eq!(result.status,if mode=="cancel" {TaskStatus::Aborted} else {TaskStatus::Error});
+            assert!(provider.seen.lock().unwrap().is_empty(),"{mode}");
+            assert_eq!(probe.observed.load(Ordering::SeqCst),0);
+            assert_eq!(store.record.lock().unwrap().as_ref().unwrap().1["phase"],"tools_pending");
+        }
+    }
+}
+
+#[test]
+fn pending_recovery_keeps_prior_progress_streak_and_halts_before_new_reservation() {
+    use tofu_runtime::checkpoint_journal::{Journal,Policy,Scope,Recovery};
+    struct Progress { fail_second: bool }
+    impl tofu_runtime::progress::Policy for Progress {
+        fn limits(&self)->tofu_runtime::progress::Limits {
+            tofu_runtime::progress::Limits {no_progress_rounds:1,nonretryable_failure_rounds:0}
+        }
+        fn observe(&self, context:tofu_runtime::progress::Context<'_>)->Result<tofu_runtime::progress::Observation,Value> {
+            if self.fail_second && context.round==1 { return Err(json!({"kind":"worker_lost"})); }
+            Ok(tofu_runtime::progress::Observation {world_version:"same".into(),evidence_complete:true,..Default::default()})
+        }
+    }
+    struct Restore;
+    impl Recovery for Restore {
+        fn restore(&self,_:tofu_runtime::agent_checkpoint::Identity<'_>,state:&Value)->Result<(),Value> {
+            assert_eq!(state["next_round"],2);assert_eq!(state["usage"].as_array().unwrap().len(),2);Ok(())
+        }
+        fn reconcile(&self,_:tofu_runtime::agent_checkpoint::Identity<'_>,_:&Value)
+            ->Result<Vec<tofu_runtime::agent_checkpoint::ReconciledTool>,Value> {
+            Ok(vec![tofu_runtime::agent_checkpoint::ReconciledTool {call_id:"a1".into(),content:json!("existing effect")}])
+        }
+    }
+    let store=checkpoint_store::MemoryStore::default();
+    *store.writer.lock().unwrap()=Some(json!({"boot_id":"boot","pid_namespace":1,"pid":12,"start_ticks":10}));
+    let journal=Journal::new(Scope {owner:7,task_id:"agent".into(),epoch:"epoch".into(),binding:"fixture-model-and-tools".into()},&store,65536,1024).unwrap();
+    let first=Policy::new(journal.acquire("first").unwrap(),&Restore,false);
+    let mut limits=budget();limits.rounds=Some(4);
+    let provider=rounds(vec![tools("{}"),tools("{}")]);
+    let (failed,calls)=recover(&provider,limits,&first,Some(&Progress {fail_second:true}));
+    assert_eq!(failed.status,TaskStatus::Error);assert_eq!(calls,2);
+    store.writer_dead.store(true,Ordering::SeqCst);
+    let second=Policy::new(journal.recover("second").unwrap(),&Restore,false);
+    let provider=rounds(vec![]);
+    let (failed,calls)=recover(&provider,limits,&second,Some(&Progress {fail_second:false}));
+    assert_eq!(failed.error.as_ref().unwrap()["kind"],"agent_no_progress");
+    assert_eq!(failed.error.as_ref().unwrap()["noProgressStreak"],1);
+    assert_eq!(calls,0);assert!(provider.seen.lock().unwrap().is_empty());
 }

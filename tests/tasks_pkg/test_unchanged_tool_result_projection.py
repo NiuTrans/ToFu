@@ -362,14 +362,14 @@ def test_registry_separates_fresh_observers_from_execution_reuse():
         compact_unchanged_tool_names,
     )
 
-    _writes, execution_reuse = _task_partitions({})
+    writes, execution_reuse = _task_partitions({})
     retry_safe = _task_idempotent_tools({})
     compact_unchanged = compact_unchanged_tool_names()
 
     dynamic = {
         'list_conversations', 'get_conversation',
         'motion_video_env_check', 'motion_video_storyboard_check',
-        'motion_video_check', 'motion_video_probe',
+        'motion_video_probe',
         'search_memories', 'schedule_list', 'list_artifacts',
         'local_serve_list',
     }
@@ -377,6 +377,13 @@ def test_registry_separates_fresh_observers_from_execution_reuse():
     assert dynamic <= retry_safe
     assert dynamic <= compact_unchanged
     assert 'get_agent_result' in compact_unchanged
+
+    # Continuity checks publish contact sheets, so their write effect must not
+    # be hidden behind an unchanged-read receipt or task-lifetime cache reuse.
+    assert 'motion_video_check' in writes
+    assert 'motion_video_check' in retry_safe
+    assert 'motion_video_check' not in execution_reuse
+    assert 'motion_video_check' not in compact_unchanged
 
     stable_reuse = {
         'web_search', 'fetch_url', 'read_files', 'grep_search', 'find_files',

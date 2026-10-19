@@ -1,6 +1,6 @@
 # Paper build guidance
 
-This package owns source snapshots, bounded compilation, build receipts and
+This package owns source snapshots, supervised compilation, build receipts and
 reconstructible PDF/SyncTeX artifacts. Wire authority is
 `contracts/paper_build_v1.schema.json`; the parent Paper guide applies.
 
@@ -31,7 +31,9 @@ fullness maps from build artifacts without recompiling.
   authority. Failed, cancelled or unverified work cannot replace a verified
   successful build or settle a research passing receipt.
 - Build only frozen input snapshots. Outputs, logs and temporary tool state
-  belong to the build directory, with finite byte/count/time limits.
+  belong to the build directory with joined retirement. Compiler output bytes
+  have no default quota; explicit file limits remain. Publication, validation,
+  diagnostic projection and reconstructible cache retention are separate owners.
 - Keep the compiler independent of HTTP, application storage and device
   transport so the Desktop Agent can run the same implementation.
 
@@ -49,3 +51,12 @@ then the preview, layout, research and device boundary suites.
 completed bytes use one anonymous caller spool, never worker-written cache files.
 The receiver consumes in canonical order, and every reader joins before spool
 close/lease release. Verify Overleaf transfer, cancellation and identity tests.
+
+Compiler memory/count samples are observations, not default admission or kill
+thresholds. Only an explicit positive operator memory override constrains RSS.
+`test_paper_build_process.py` verifies real allocations/child fan-out, exact
+cancellation/deadline behavior, parent death and joined process retirement.
+
+`process_worker.py` also supervises desktop shell commands through its separated
+stream mode. `workers.py` remains the source/frozen dispatch boundary; desktop
+ownership and temporary output behavior live in `docs/modules/remote_execution.md`.

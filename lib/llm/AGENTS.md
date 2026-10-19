@@ -6,6 +6,10 @@ This package owns canonical model requests, provider wire translation, streaming
 parsers, and shared HTTP transport. Provider choice, slots, health, and retry
 policy live in `lib/llm_dispatch/`. Read `docs/modules/llm_io.md`.
 
+tool_wire owns final discovery/program/multi-agent schema visibility shared by
+Python transport and native preparation. It grants no execution authority;
+cache/protocol translation remain later stages. Preserve diagnostics and latches.
+
 ## Editing rules
 
 - Normalize once into the canonical request/body model, then translate in the
@@ -24,6 +28,9 @@ policy live in `lib/llm_dispatch/`. Read `docs/modules/llm_io.md`.
 - Optional provider dependencies load lazily; no import-time network calls.
 - Sealed request ingress honors an injected model-budget port. Sync/async
   attempt scopes must settle it once; abandoned unsent plans void their lease.
+  Input confirmation requires a verified provider outcome. Sealed requests
+  retain the dispatch-owned logical model separately from the wire alias;
+  private identity/ports never enter provider JSON.
 
 ## Verification
 

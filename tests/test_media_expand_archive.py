@@ -155,18 +155,16 @@ async def _test_nul(app, workspace, tmp_path):
     assert (tree / 'bad').is_file()
 
 
-def test_oversized_member_is_refused_without_partial_tree(app, workspace):
+def test_large_member_is_received_completely(app, workspace):
     asyncio.run(_test_oversized(app, workspace))
 
 
 async def _test_oversized(app, workspace):
-    from lib.paper.archive import MAX_FILE_BYTES
-    big = b'x' * (MAX_FILE_BYTES + 1)
+    big = b'x' * (33 * 1024 * 1024)
     archive = _zip_bytes([('big.bin', big), ('ok.tex', 'y')])
     response = await _post(app.test_client(), 'big.zip', archive)
-    assert response.status_code == 400
-    # Atomic extraction: a failed archive leaves no half-written tree.
-    assert list(workspace.iterdir()) == []
+    assert response.status_code == 200
+    assert next(workspace.glob('big*/big.bin')).read_bytes() == big
 
 
 def test_missing_file_field_is_a_bad_request(app):

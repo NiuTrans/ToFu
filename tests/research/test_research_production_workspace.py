@@ -105,7 +105,7 @@ def test_protocol_starts_from_a_grounded_draft_not_a_blank_form():
     src = WORKSPACE.read_text(encoding='utf-8')
     api = API.read_text(encoding='utf-8')
     assert '_draftResearchProtocol(this)' in src
-    assert "api.draftProtocol({ direction: state.direction, lang: state.lang, idea_id: ideaId })" in src
+    assert "api.draftProtocol({ direction: state.direction, lang: state.lang, idea_id: ideaId," in src
     assert "post('/api/v4/research/workspace/draft-protocol'" in api
     # Rarely-touched protocol fields live behind an opt-in disclosure.
     assert '<details class="rsw-advanced">' in src

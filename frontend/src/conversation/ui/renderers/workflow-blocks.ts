@@ -15,13 +15,18 @@ import type { ClassicConversationRendererPorts } from './ports';
 import { preserveDetailsOpen } from './stable-dom';
 import { textFor } from './localized-copy';
 import { renderBackgroundCompletion } from './text-blocks';
+import { renderGoalRecoveryNotice } from './goal-recovery-notice';
 
 export function renderAutopilotRunNoticeBlock(
   node: HTMLElement,
   block: Extract<ConversationBlockViewModel, { kind: 'autopilot-run-notice' }>,
   ports: ClassicConversationRendererPorts,
 ): void {
-  const labels: Record<typeof block.value.reason, readonly [string, string]> = {
+  if (block.value.reason === 'worker_lost') {
+    renderGoalRecoveryNotice(node, block.value, ports);
+    return;
+  }
+  const labels: Record<Exclude<typeof block.value.reason, 'worker_lost'>, readonly [string, string]> = {
     yielded_to_human: ['autopilot.endedYielded',
       'Autopilot stood down — you sent a message, so it stopped here'],
     aborted_mid_vu: ['autopilot.endedAborted',

@@ -4,6 +4,8 @@ import { featureRegistry as runtimeScope } from '../feature-registry';
 import { t } from '../i18n/index';
 import { escapeHtml } from '../html-safety';
 import { watchRestartPreparation } from '../features/settings/restart-preparation';
+import { dockRestartProgress, recordRestartDiagnostic, offerRestartReload } from '../features/settings/restart-progress-dock';
+import { projectRestartHealth, restartPhaseProgress } from '../features/settings/restart-observation';
 
 const Api = runtimeScope.Api;
 if (!Api || typeof Api !== 'object') throw new Error('utility-panels runtime dependency is unavailable: Api');
@@ -327,6 +329,9 @@ async function _optimizerRunNow() {
 function _startOptimizerPolling() {
   if (_optimizerPollTimer) return;
   _optimizerPollTimer = setInterval(() => {
+    // Skip while hidden: the 5-minute badge clock keeps aging, and the first
+    // tick after visibility returns fires the catch-up refresh then.
+    if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
     // Refresh badge in background even when panel is closed (every 5 min)
     if (_optimizerPanelOpen || (Date.now() - _optimizerLastRefresh) > 5 * 60 * 1000) {
       _refreshOptimizerPanel();
@@ -388,11 +393,9 @@ var _UPDATE_STAGES = ['fetch', 'pull', 'deps'];
 
 var _pendingRestartToastFor = null;  // version already toasted (once per page load)
 
-// Application deferred restart waits ≤15s for quiescence, then the new
-// worker still has to boot. 80s was shorter than a loaded boot and far
-// shorter than the old 3600s idle wait, so the UI declared timeout while
-// the same PID was still serving.
-var _RESTART_HEALTH_DEADLINE_S = 180;
+// A slow-start warning is observational, never a terminal restart outcome.
+// Keep one bounded health probe until ready, failure, or page teardown.
+var _RESTART_SLOW_AFTER_S = 180;
 // Preparation can build the engine and browser artifacts while the current
 // server keeps serving. This covers the control process's 2010s combined
 // engine/frontend preflight plus bounded descendant cleanup;
@@ -483,6 +486,7 @@ function _renderSettingsUpdatePill() {
 async function openUpdateDialog() {
   const modal = document.getElementById('updateModal');
   if (!modal) return;
+  if (_restartActive) return;
   modal.classList.add('open');
   if (_updateBusy) {
     _ensureUpdateScaffold();
@@ -1070,46 +1074,18 @@ function _renderDepsFailed(b) {
     '<p class="upd-hint">' + escapeHtml(t('update.restartHint')) + '</p>';
 }
 
-// ── Restart progress model ───────────────────────────────────────────
-// During an in-place re-exec there is NO server listening (the old process
-// os.execv's into the new one; Hypercorn only binds after the storage
-// boundary + sidecar + recovery + imports + workers are up). So we can't
-// stream live boot logs over the wire. Instead we drive a determinate bar
-// through the server's REAL boot phases — the same 9 phases the lifespan
-// logs as `[startup phase N/9]` (`lib/startup_phases.py`). The per-phase
-// budget comes from the host's OWN previous boot (`/api/health
-// → bootProfile`), so the bar tracks real time on this machine instead of a
-// universal hardcoded guess. /api/health remains the completion authority:
-// the instant it answers with a new bootId we snap to 100%. The bar eases
-// toward each phase's cap but never reaches 100% on its own — it can only
-// *under*-report progress, never claim "done" before the server actually is.
-var _RESTART_PHASES = [
-  { key: 'frontend_assets'   },
-  { key: 'storage_boundary'  },
-  { key: 'storage_sidecar'   },
-  { key: 'storage_recovery'  },
-  { key: 'model_routing'     },
-  { key: 'critical_imports'  },
-  { key: 'background_workers'},
-  { key: 'optional_services' },
-  { key: 'readiness'         },
-];
-// Fallback boot budget for the FIRST restart on a fresh host that has no
-// previous bootProfile yet. This is the boot shape measured on the author's
-// HDD+FUSE environment (~34 s), not a universal truth — the moment a real
-// profile exists, _restartBuildTimeline uses it instead of these weights.
-var _RESTART_FALLBACK_WEIGHTS = [
-  0.2, 2.4, 10.2, 9.8, 0.7, 3.2, 0.2, 0.2, 0.1
-];
+// ── Restart progress model ──────────────────────────────────────────────
+// Health exposes the new process before its required phases complete. The
+// typed restart observation owner projects those server phases; elapsed time
+// only animates preparation/drain and never predicts a completed boot phase.
 var _RESTART_PREPARE_FLOOR = 3;
 var _RESTART_PREPARE_CAP = 12;
 // Drain band [_RESTART_PREPARE_CAP, _RESTART_DRAIN_CAP]: after the backend
 // accepts, the OLD process is still draining (Hypercorn graceful window +
 // Quart shutdown stack + sidecar stop + lifecycle-owner respawn). The bar
 // eases through this bounded band and says so ('shutdown') instead of
-// claiming boot phases that have not started yet. The measured boot timeline
-// then spans [_RESTART_DRAIN_CAP, 96] from the moment the old process stops
-// answering (first failed health probe), so phase labels track reality.
+// claiming boot phases that have not started yet. Once health exposes a new
+// boot, its completed predecessor phases determine progress up to 96%.
 var _RESTART_DRAIN_CAP = 20;
 var _RESTART_DRAIN_SOFT_S = 6;
 // Verification cadence. The old 2.5s blind wait + 1.5s poll + 0.75s success
@@ -1118,7 +1094,6 @@ var _RESTART_DRAIN_SOFT_S = 6;
 // for a done restart), so probe almost immediately and poll briskly.
 var _RESTART_FIRST_PROBE_DELAY_MS = 900;
 var _RESTART_HEALTH_POLL_MS = 700;
-var _RESTART_SUCCESS_PAUSE_MS = 400;
 var _restartT0 = 0;
 var _restartAcceptedAt = 0;
 // Timestamp of the first health probe that found the OLD process gone (the
@@ -1132,6 +1107,8 @@ var _restartPollStartTimer = null;
 var _restartHealthProbeActive = false;
 var _restartAttemptGeneration = 0;
 var _restartDone = false;
+var _restartSlowWarning = false;
+var _restartObservedBoot = null;
 // The server's bootId captured BEFORE we trigger the restart. The re-exec
 // mints a fresh bootId (os.execv keeps the PID + start-time, so bootId is the
 // only reliable 'a NEW process answered' signal). _restartCheckHealth only
@@ -1145,82 +1122,12 @@ var _restartPreBootId = null;
 // loaded DIFFERENT source — i.e. whether their edits are actually live. null
 // when the server can't produce one (non-git deploy) → degrade to bootId only.
 var _restartPreFingerprint = null;
-// The previous boot's measured per-phase profile, captured from /api/health
-// BEFORE the restart (the new process is not yet listening). null when the
-// server has never recorded a profile; _restartBuildTimeline then falls back
-// to _RESTART_FALLBACK_WEIGHTS.
-var _restartBootProfile = null;
-// Resolved timeline: cumulative [{ key, cap, budget }] across the boot band
-// [_RESTART_PREPARE_CAP, 96], built once from _restartBootProfile (or the
-// fallback) when the restart begins. Kept on a var so a second restart
-// rebuilds it from a fresh profile without touching _restartProgress.
-var _restartTimeline = null;
-// True from the moment a restart is kicked off until it succeeds or times
-// out. Single source of truth that the dialog-render paths consult so they
+// True from the moment a restart is kicked off until readiness or a latched
+// failure. Single source of truth that the dialog-render paths consult so they
 // never clobber the live restart progress card (e.g. re-opening the dialog
 // or the always-live footer "Restart now" button mid-restart). Distinct from
 // _restartDone, which starts false and so can't tell "not started" from "done".
 var _restartActive = false;
-
-/** Build the boot-phase timeline from the previous boot's measured profile.
- * Each entry is { key, budget, cap }: `budget` is the measured seconds for
- * that phase; `cap` is the cumulative percent the bar may reach by the END of
- * that phase. The boot band spans [_RESTART_DRAIN_CAP, 96]; the last phase
- * (readiness) always caps at 96 because the Hypercorn bind that follows is
- * what /api/health actually measures — the bar can only *under*-report, never
- * claim done before the server truly answers. */
-function _restartBuildTimeline() {
-  var measured = (_restartBootProfile && _restartBootProfile.phases) || null;
-  var budgets = [];
-  var total = 0;
-  for (var i = 0; i < _RESTART_PHASES.length; i++) {
-    var b = 0;
-    if (measured) {
-      for (var j = 0; j < measured.length; j++) {
-        if (Number(measured[j].index) === i + 1) {
-          b = Number(measured[j].duration_s) || 0;
-          break;
-        }
-      }
-    }
-    if (!(b > 0)) b = _RESTART_FALLBACK_WEIGHTS[i] || 0.1;
-    // Keep a floor so a phase that previously took ~0s still occupies a
-    // visible slice; a 0s phase would make the bar look frozen.
-    b = Math.max(0.15, b);
-    budgets.push(b);
-    total += b;
-  }
-  var band = 96 - _RESTART_DRAIN_CAP;
-  var timeline = [];
-  var acc = 0;
-  for (var k = 0; k < _RESTART_PHASES.length; k++) {
-    acc += budgets[k];
-    var cap = (k === _RESTART_PHASES.length - 1)
-      ? 96
-      : _RESTART_DRAIN_CAP + band * (acc / total);
-    timeline.push({ key: _RESTART_PHASES[k].key, budget: budgets[k], cap: cap });
-  }
-  return timeline;
-}
-
-/** Map elapsed seconds → {pct, key} along the measured timeline (ease-out
- *  per phase). The final phase holds at its cap if the server overruns, so a
- *  slow boot looks "still working" rather than falsely complete. */
-function _restartProgress(elapsed) {
-  if (!_restartTimeline) _restartTimeline = _restartBuildTimeline();
-  var from = _RESTART_DRAIN_CAP, acc = 0;
-  for (var i = 0; i < _restartTimeline.length; i++) {
-    var ph = _restartTimeline[i];
-    var last = (i === _restartTimeline.length - 1);
-    if (elapsed < acc + ph.budget || last) {
-      var t = Math.min(1, Math.max(0, (elapsed - acc) / ph.budget));
-      var eased = 1 - Math.pow(1 - t, 2);
-      return { pct: Math.min(from + (ph.cap - from) * eased, ph.cap), key: ph.key };
-    }
-    acc += ph.budget; from = ph.cap;
-  }
-  return { pct: 96, key: 'readiness' };
-}
 
 function _restartSetControlsBusy(busy) {
   const restartNow = document.getElementById('updateRestartNowBtn');
@@ -1249,10 +1156,13 @@ function _restartObservePreparation(approvalId) {
     (snapshot) => {
       if (_restartDone || _restartAcceptedAt > 0) return;
       _restartPreparationSnapshot = snapshot;
+      recordRestartDiagnostic(document.getElementById('updRestartCard'),
+        'preparation=' + snapshot.phase + ' elapsed=' + snapshot.elapsedSeconds.toFixed(1) + 's');
       const title = document.getElementById('updRestartTitle');
       const sub = document.getElementById('updRestartSub');
       if (title) title.textContent = t('update.preparation.' + snapshot.phase);
-      if (sub) sub.textContent = t('update.preparation.' + snapshot.phase + 'Hint');
+      if (sub) sub.textContent = t('update.preparation.' +
+        (snapshot.recovering === true ? 'retrying' : snapshot.phase) + 'Hint');
     },
   );
 }
@@ -1363,8 +1273,10 @@ function _restartAnimate() {
   const totalElapsed = Math.max(0, (Date.now() - _restartT0) / 1000);
   var progress;
   if (_restartAcceptedAt > 0) {
-    progress = _restartBootingAt > 0
-      ? _restartProgress((Date.now() - _restartBootingAt) / 1000)
+    progress = _restartObservedBoot
+      ? (restartPhaseProgress(_restartObservedBoot) || { pct: _RESTART_DRAIN_CAP, key: 'bind' })
+      : _restartBootingAt > 0
+      ? { pct: _RESTART_DRAIN_CAP, key: 'bind' }
       : { pct: _restartDrainProgress((Date.now() - _restartAcceptedAt) / 1000), key: 'shutdown' };
   } else {
     progress = { pct: _RESTART_PREPARE_FLOOR, key: 'prepare' };
@@ -1379,6 +1291,8 @@ function _restartBeginExperience() {
   _restartHealthProbeActive = false;
   _restartActive = true;
   _restartDone = false;
+  _restartSlowWarning = false;
+  _restartObservedBoot = null;
   _restartT0 = Date.now();
   _restartPreparationSnapshot = null;
   _restartAcceptedAt = 0;
@@ -1390,6 +1304,8 @@ function _restartBeginExperience() {
   const modal = document.getElementById('updateModal');
   if (modal) modal.classList.add('open');
   _renderRestartProgress();
+  dockRestartProgress(document.getElementById('updRestartCard'), t('boot.details'));
+  recordRestartDiagnostic(document.getElementById('updRestartCard'), t('update.restartPreparingTitle'));
   _restartSetControlsBusy(true);
   _restartBeginAvailabilityScope();
   _restartRaf = requestAnimationFrame(_restartAnimate);
@@ -1400,6 +1316,7 @@ function _restartMarkAccepted(reason) {
   _restartPreparationStop = null;
   if (_restartDone) return;
   _restartAcceptedAt = Date.now();
+  recordRestartDiagnostic(document.getElementById('updRestartCard'), reason);
   const card = document.getElementById('updRestartCard');
   const title = document.getElementById('updRestartTitle');
   const sub = document.getElementById('updRestartSub');
@@ -1498,6 +1415,7 @@ function _restartCancelPreparation() {
   _restartStopTimers();
   _restartEndAvailabilityScope(true);
   _restartSetControlsBusy(false);
+  document.getElementById('restart-progress-dock')?.remove();
   if (_updateDoneResult) {
     _ensureUpdateScaffold();
     _renderDoneCard(_updateDoneResult);
@@ -1508,13 +1426,18 @@ function _restartCancelPreparation() {
   }
 }
 
-/** Snap to 100% "Back online · vX", then reload the page. */
+/** Snap to readiness and offer reload without discarding drafts. */
 function _restartSucceed(version, info) {
   if (_restartDone) return;
   _restartDone = true;
   _restartActive = false;
   _restartStopTimers();
   _restartEndAvailabilityScope(true);
+  _restartSetControlsBusy(false);
+  const title = document.getElementById('updRestartTitle');
+  const sub = document.getElementById('updRestartSub');
+  if (title) title.textContent = t('update.phase.online');
+  if (sub) sub.textContent = t('boot.readyHint');
   const fill = document.getElementById('updRestartFill');
   const pctEl = document.getElementById('updRestartPct');
   const phaseEl = document.getElementById('updRestartPhase');
@@ -1545,40 +1468,36 @@ function _restartSucceed(version, info) {
   } else if (verdict === 'changed') {
     if (typeof debugLog === 'function') debugLog('[Update] restart: new source loaded (edits are live)', 'success');
   }
-  // Brief pause so the user sees the completed state before the reload.
-  setTimeout(function () { window.location.reload(); }, _RESTART_SUCCESS_PAUSE_MS);
+  // A user may have drafted or attached content during recovery. Applying
+  // the new browser bundle is explicit so readiness never destroys that work.
+  recordRestartDiagnostic(document.getElementById('updRestartCard'), 'ready');
+  offerRestartReload(document.getElementById('updRestartCard'), t('boot.reload'), t('boot.dismiss'));
 }
 
-/** Restart failed to come back within the ceiling — stop and tell the user. */
+/** Warn once without giving up observation or permitting a duplicate restart. */
 function _restartTimeout() {
-  if (_restartDone) return;
-  _restartDone = true;
-  _restartActive = false;
-  _restartStopTimers();
-  _restartEndAvailabilityScope(false);
-  _restartSetControlsBusy(false);
-  const card = document.getElementById('updRestartCard');
-  const title = document.getElementById('updRestartTitle');
-  const phaseEl = document.getElementById('updRestartPhase');
-  const pctEl = document.getElementById('updRestartPct');
-  const bar = document.getElementById('updRestartBar');
-  const spin = document.getElementById('updRestartSpin');
-  if (card) card.classList.add('is-error');
-  if (spin) spin.classList.add('is-error');
-  if (title) title.textContent = t('update.restartTimeout');
-  if (phaseEl) phaseEl.textContent = t('update.restartTimeout');
-  if (pctEl) pctEl.textContent = '—';
-  if (bar) {
-    bar.removeAttribute('aria-valuenow');
-    bar.setAttribute('aria-valuetext', t('update.restartTimeout'));
-  }
-  if (card) card.insertAdjacentHTML('beforeend', _restartRetryHtml());
-  showToast('⚠️', t('update.restartTimeout'), '', 6000);
+  if (_restartDone || _restartSlowWarning) return;
+  _restartSlowWarning = true;
+  const sub = document.getElementById('updRestartSub');
+  if (sub) sub.textContent = t('update.restartTimeout');
+  showToast('⏳', t('update.restartTimeout'), '', 6000);
 }
 
-/** Explicit restart — prepares current disk code in a fresh controller,
- *  requests managed process replacement, then waits for a new ready boot.
- *  Invoked from the post-pull button and the settings footer. */
+/** A latched server failure has an actual cause and a phase-local retry. */
+function _restartFailBoot(boot) {
+  _restartFailBeforeStart({ message: boot.error || t('boot.failedTitle') }, true);
+  // A live failed process still rejects submissions until phase retry succeeds.
+  _restartBeginAvailabilityScope();
+  recordRestartDiagnostic(document.getElementById('updRestartCard'), boot);
+  const title = document.getElementById('updRestartTitle');
+  const phase = document.getElementById('updRestartPhase');
+  const sub = document.getElementById('updRestartSub');
+  if (title) title.textContent = t('boot.failedTitle');
+  if (phase) phase.textContent = boot.failedPhase
+    ? t('update.phase.' + boot.failedPhase.key) : t('boot.failedTitle');
+  if (sub) sub.textContent = t('boot.failedHint');
+}
+
 async function restartServer(opts) {
   // Already restarting — ignore a re-entry (footer button stays live, the
   // post-pull button could be double-clicked) so we never spawn a second
@@ -1622,23 +1541,30 @@ async function restartServer(opts) {
   // old 'any ok' rule) — see _restartCheckHealth.
   _restartPreBootId = null;
   _restartPreFingerprint = null;
-  _restartBootProfile = null;
-  _restartTimeline = null;
   try {
     const pre = await Api.health.info({ timeout: 4000 });
+    if (pre && pre.boot && pre.boot.status !== 'ready') {
+      _restartPreBootId = null;
+      if (pre.boot.status === 'failed') {
+        try {
+          await Api.health.retryBoot({ timeout: 4000 });
+        } catch (error) {
+          _restartFailBoot({ ...pre.boot, error: _restartErrorMessage(error).detail });
+          return;
+        }
+      }
+      _restartObservedBoot = pre.boot;
+      _restartMarkAccepted('observing-current-boot');
+      await _restartCheckHealth();
+      return;
+    }
     if (pre && pre.bootId) _restartPreBootId = pre.bootId;
     if (pre && pre.codeFingerprint && pre.codeFingerprint.digest) {
       _restartPreFingerprint = pre.codeFingerprint.digest;
     }
-    // The host's OWN previous-boot profile drives the phase budgets, so the
-    // bar tracks real time on THIS machine instead of a hardcoded fiction.
-    if (pre && pre.bootProfile && pre.bootProfile.phases) {
-      _restartBootProfile = pre.bootProfile;
-    }
   } catch (e) {
     _restartPreBootId = null;
     _restartPreFingerprint = null;
-    _restartBootProfile = null;
   }
 
   // Two-stage informed restart. Stage 1: request WITHOUT force. The backend
@@ -1684,6 +1610,17 @@ async function restartServer(opts) {
         return;
       }
       _restartMarkAccepted('forced-acknowledged');
+      return;
+    }
+    if (e && e.status === 503 && e.body
+        && (e.body.boot || e.body.code === 'server_booting' || e.body.error === 'server_booting')) {
+      _restartPreBootId = null;
+      if (e.body.boot && e.body.boot.status === 'failed') {
+        _restartFailBoot(e.body.boot);
+        return;
+      }
+      _restartMarkAccepted('observing-current-boot');
+      await _restartCheckHealth();
       return;
     }
     if (e && Number(e.status) > 0) {
@@ -1820,23 +1757,13 @@ async function _lcDecide(btn, approved) {
   }
 }
 
-/** One health probe; on success finish, on overall timeout bail.
- *  Success requires a genuinely NEW process answered — health.ok AND a bootId
- *  that DIFFERS from the one captured before the restart. os.execv keeps the
- *  PID + start-time, so bootId is the only reliable 'different process' signal;
- *  keying on it stops the old process (still draining) from being mistaken for
- *  a completed restart. If we could not capture a pre-restart bootId, or the
- *  server is an old build that doesn't report bootId, we degrade gracefully:
- *  accept the first ok health that carries ANY bootId, else (no bootId field at
- *  all) accept ok — never worse than the old rule, and still bounded by the
- *  overall timeout. */
+/** One bounded health probe. Replacement identity and boot readiness decide
+ * completion; elapsed time only warns. Older health endpoints retain their
+ * identity-only fallback. A boot adopted before POST intentionally has no
+ * previous identity, so it can complete on the already-starting process. */
 async function _restartCheckHealth() {
   if (_restartDone) return;
   const waitingSince = _restartAcceptedAt || _restartT0;
-  if ((Date.now() - waitingSince) / 1000 > _RESTART_HEALTH_DEADLINE_S) {
-    _restartTimeout();
-    return;
-  }
   if (_restartHealthProbeActive) return;
   const attemptGeneration = _restartAttemptGeneration;
   _restartHealthProbeActive = true;
@@ -1851,34 +1778,25 @@ async function _restartCheckHealth() {
     }
   }
   if (_restartDone || attemptGeneration !== _restartAttemptGeneration) return;
-  if (!info || !info.ok) {
-    // The first unreachable probe after acceptance proves the OLD process
-    // released the port: the drain is over and the boot phases begin here,
-    // so the timeline switches from the drain band to the measured boot
-    // shape anchored at this moment instead of at acceptance.
-    if (_restartAcceptedAt > 0 && _restartBootingAt === 0) {
-      _restartBootingAt = Date.now();
-    }
-    return;
-  }
-  // Early-serving: a new process answers /api/health seconds before its
-  // background boot runner finishes phases 3–9. Declaring success there
-  // would reload the user onto the cold-start splash mid-boot and call the
-  // restart complete while storage is still fenced. When the server reports
-  // a boot projection, "restarted" additionally means boot finished; older
-  // servers omit the field and keep the pre-existing bootId-only rule.
-  if (info.boot && typeof info.boot.status === 'string'
-      && info.boot.status !== 'ready') {
-    return;
-  }
-  // Preferred, robust path: we know the old bootId AND the server reports one.
-  if (_restartPreBootId && info.bootId) {
-    if (info.bootId === _restartPreBootId) return;  // still the OLD process — keep waiting
+  const verdict = projectRestartHealth(info, _restartPreBootId);
+  if (verdict.kind === 'ready') {
     _restartSucceed(info.version || '', info);
     return;
   }
-  // Degraded path (no pre-id captured, or old build without bootId): accept ok.
-  _restartSucceed(info.version || '', info);
+  if (verdict.kind === 'failed') {
+    _restartFailBoot(verdict.boot);
+    return;
+  }
+  if (verdict.kind === 'booting') {
+    _restartObservedBoot = verdict.boot;
+    recordRestartDiagnostic(document.getElementById('updRestartCard'), verdict.boot);
+    if (!_restartBootingAt) _restartBootingAt = Date.now();
+  } else if (verdict.kind === 'unavailable' && !_restartBootingAt) {
+    _restartBootingAt = Date.now();
+  }
+  if ((Date.now() - waitingSince) / 1000 > _RESTART_SLOW_AFTER_S) {
+    _restartTimeout();
+  }
 }
 
 /** Classify whether the restarted process loaded DIFFERENT source than the
@@ -2003,7 +1921,8 @@ function toggleTimerPanel(e) {
   // The panel is a DOM descendant of the badge, so clicks (and the click
   // that ends a text-selection drag) inside the panel bubble up to this
   // onclick handler. Without this guard they would flip the panel shut.
-  if (e && panel.contains(/** @type {Node} */ (e.target))) return;
+  if (e && (panel.contains(/** @type {Node} */ (e.target))
+      || e.composedPath?.().includes(panel))) return;
   if (e) e.stopPropagation();
   _timerPanelOpen = !_timerPanelOpen;
   panel.classList.toggle("visible", _timerPanelOpen);
@@ -2011,8 +1930,14 @@ function toggleTimerPanel(e) {
 }
 
 // ── Refresh panel data from API ──
-async function _refreshTimerPanel() {
+async function _refreshTimerPanel(afterMutation = false) {
   try {
+    // A read admitted before a successful mutation cannot acknowledge it.
+    // Drain that read (including failure), then join/start a fresh one through
+    // the same single-flight owner used by push and background refreshes.
+    if (afterMutation && _timerListInFlight) {
+      await _timerListInFlight.request.catch(() => null);
+    }
     const data = await _fetchTimerList(false);
     if (!data || !data.ok) return;
 
@@ -2192,9 +2117,9 @@ async function _triggerTimer(timerId) {
   try {
     const data = await Api.timer.trigger(timerId);
     if (data && data.ok) {
-      _timerClearPending(timerId, true);   // the refresh renders the fresh state
       debugLog(`⏱️ Timer ${timerId} triggered! Execution: ${data.execution_task_id}`, "success");
-      await _refreshTimerPanel();
+      await _refreshTimerPanel(true);
+      _timerClearPending(timerId);
     } else {
       _timerClearPending(timerId);       // restore the row
       debugLog(`⏱️ Trigger failed: ${data && data.error}`, "error");
@@ -2220,9 +2145,9 @@ async function _cancelTimer(timerId) {
       debugLog(`⏱️ Cancel failed: ${data && data.error}`, "error");
       return;
     }
-    _timerClearPending(timerId, true);   // the refresh renders the fresh state
     debugLog(`⏱️ Timer ${timerId} cancelled.`, "info");
-    await _refreshTimerPanel();
+    await _refreshTimerPanel(true);
+    _timerClearPending(timerId);
   } catch (e) {
     _timerClearPending(timerId);         // restore the row
     debugLog(`⏱️ Cancel error: ${e.message}`, "error");
@@ -2396,7 +2321,11 @@ document.addEventListener("click", (e) => {
   // backdrop (mobile_panels.js) owns closing, so skip the badge-based check.
   if (panel && panel.classList.contains("mobile-panel-portaled")) return;
   const badge = document.getElementById("timerBadge");
-  if (badge && !badge.contains(/** @type {Node} */ (e.target))) {
+  // A row action synchronously replaces its button with the pending label.
+  // The original event path still proves the click came from inside the badge
+  // even though its detached target no longer passes contains().
+  if (badge && !badge.contains(/** @type {Node} */ (e.target))
+      && !e.composedPath?.().includes(badge)) {
     _timerPanelOpen = false;
     if (panel) panel.classList.remove("visible");
   }

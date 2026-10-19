@@ -102,17 +102,23 @@ def test_failed_summary_defers_when_prompt_physically_fits(monkeypatch):
     assert messages == original
 
 
-def test_failed_summary_is_fatal_only_when_prompt_plus_output_exceeds_window(
+def test_failed_summary_preserves_source_when_prompt_exceeds_route_window(
         monkeypatch):
     from lib.tasks_pkg.compaction import _prompt_admission as admission
-    from lib.llm_errors import ContextCompactionError
+    from lib.llm.llm_errors import ContextCompactionError
     task = {'_transientRuntime': True, '_summaryBudgetFailure': 'summary_budget_exhausted',
-            'config': {'model': 'eval', 'maxTokens': 900_000,
+            'config': {'model': 'eval', 'maxTokens': 1024,
                        'compaction': {'workingSetTokens': 128000}}}
     messages = [{'role': 'user', 'content': 'original objective'}]
+    original = copy.deepcopy(messages)
+    # An ordinary maxTokens value is clamped against current input, not a
+    # strict allocation. Exercise real mandatory pressure on an explicit route.
+    monkeypatch.setattr('lib.llm_dispatch.context_policy.task_context_profile',
+                        lambda task: {'window': 200000, 'source': 'test_route'})
     monkeypatch.setattr(admission, '_measure', lambda *a, **k: {
         'totalTokens': 250000, 'messageTokens': 250000, 'toolSchemaTokens': 0,
         'method': 'test', 'messageCount': 1})
     monkeypatch.setattr(admission, 'force_compact_if_needed', lambda *a, **k: False)
     with pytest.raises(ContextCompactionError, match='summary_budget_exhausted'):
         admission.enforce_dispatch_prompt_limit(messages, [], task, round_num=0, model='eval')
+    assert messages == original

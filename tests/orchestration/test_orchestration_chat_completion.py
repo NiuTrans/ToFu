@@ -133,7 +133,7 @@ def test_prepare_selects_last_assistant_and_captures_partial_trace_once():
 def test_finish_projects_honest_terminal_event_and_is_idempotent(
     terminal, expected_extra,
 ):
-    task = {'id': 'task-two', 'model': 'model-x'}
+    task = {'id': 'task-two', 'model': 'model-x', 'usage': None}
     completion, task, content, turns, events, persisted, notified = _completion(
         terminal, task=task)
 
@@ -147,6 +147,7 @@ def test_finish_projects_honest_terminal_event_and_is_idempotent(
     assert [event['type'] for _owner, event in events] == [
         'flow_complete', 'done']
     done = events[-1][1]
+    assert done['usage'] == {}
     assert done['finishReason'] == terminal.finish_reason
     assert done['flowReason'] == terminal.stop_reason
     assert done['model'] == 'model-x'

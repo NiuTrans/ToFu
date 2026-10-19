@@ -23,6 +23,11 @@ class ConversationAuthority:
         self.backend = backend
         self.native_client = native_client
         self._embedded_client = None
+
+        self.binary = binary
+        self.declared_artifact = None
+        self.artifact_before = None
+        self.artifact_after = None
         self.engine = (TofuDbEngine(binary, authority_dir_parent=directory, client_mode=native_client)
                        if backend == 'tofudb' else LegacyEngine('sqlite', authority_dir_parent=directory))
 
@@ -42,8 +47,14 @@ class ConversationAuthority:
         return getattr(self.engine, 'log_path', None)
 
     def start(self):
+        if self.backend == 'tofudb':
+            from benchmarks.conversation_provenance import capture_declared_artifact
+            self.declared_artifact = capture_declared_artifact(
+                self.binary, embedded=self.native_client == 'embedded')
+            self.engine._expected_sha256 = self.declared_artifact['binary_sha256']
         with patch.dict(os.environ, {'TOFU_STORAGE_RPC_DEADLINE_S': str(POLICY['rpc_deadline_seconds'])}):
             self.engine.start()
+        self.artifact_before = self.artifact_snapshot()
         self._bind_embedded_client()
         self._check_deadline()
 
@@ -71,9 +82,19 @@ class ConversationAuthority:
             return self.engine._embedded is not None and not self.engine._embedded.closed
         return self._process is not None and self._process.poll() is None
 
+    def artifact_snapshot(self):
+        """Observe the pinned engine, never the original mutable build path."""
+        if self.backend != 'tofudb':
+            return None
+        from benchmarks.conversation_provenance import capture_artifact
+        return capture_artifact(
+            self.engine._binary,
+            embedded_build_identity=getattr(self.engine, '_embedded_build_identity', None))
+
     def describe(self):
         path = self.engine._data_dir if self.backend == 'tofudb' else self.engine._project_root
         result = {'backend': self.backend, 'authority_directory': str(path),
+                  'volume_device': os.stat(path).st_dev,
                   'filesystem': _mount_type(path), 'durability': 'strict',
                   'rpc_deadline_seconds': self._client._timeout, 'crash_scope': 'sigkill'}
         if self.backend == 'tofudb':
@@ -156,4 +177,9 @@ class ConversationAuthority:
         return [str(p) for p in keep]
 
     def stop(self):
+        try:
+            self.artifact_after = self.artifact_snapshot()
+        except Exception as exc:
+            # Preserve cleanup even when the artifact vanished or became unreadable.
+            self.artifact_after = {'capture_error': f'{type(exc).__name__}: {exc}'}
         self.engine.stop()

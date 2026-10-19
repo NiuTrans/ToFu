@@ -106,7 +106,8 @@ def test_live_and_durable_adapters_delegate_to_shared_task_http():
     assert generic.count('task_replay_response(resp)') == 1
     assert generic.count('parameters=task_replay_parameters()') == 1
     assert generic_api.count('task_replay_cursor(request.args)') == 2
-    assert generic_api.count('parameters=_TASK_REPLAY_PARAMETERS') == 2
+    assert 'parameters=_TASK_REPLAY_PARAMETERS' in generic_api
+    assert 'parameters=[*_TASK_REPLAY_PARAMETERS, _TASK_VIEW_PARAMETER]' in generic_api
     assert 'int(request.args.get(\'cursor\')' not in generic_api
     assert 'safe_replay_cursor' not in generic + generic_api + durable
     assert 'task_replay_http_status' not in generic + generic_api + durable
@@ -125,7 +126,7 @@ def test_task_route_consumers_depend_on_shared_capability_ports():
                        'orchestration_mutation_routes.py').read_text()
     mutation_operations = (ROOT / 'lib/orchestration/'
                            'mutation_operations.py').read_text()
-    ports = (ROOT / 'lib/task_runtime_ports.py').read_text()
+    ports = (ROOT / 'lib/task_replay/task_runtime_ports.py').read_text()
 
     assert 'runtime: TaskRouteRuntimePort' in generic
     assert 'runtime: TaskRouteRuntimePort' in runtime

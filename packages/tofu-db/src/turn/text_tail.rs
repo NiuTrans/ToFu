@@ -229,7 +229,7 @@ pub(super) fn append(database: &AuthorityDatabase, transaction: &mut AuthorityTr
     }
     // Stay within the existing terminal/recovery reserve without hydrating a
     // restart anchor near the limit. The ordinary path owns those large cases.
-    let reserve = MAX_TRANSACTION_IR_LITERAL_BYTES + MAX_TIMING_TRACE_PERSISTED_BYTES + 4096;
+    let reserve = MAX_LEGACY_DOCUMENT_BYTES + MAX_TIMING_TRACE_PERSISTED_BYTES + 4096;
     if tail.projection_bytes.saturating_mul(2).saturating_add(reserve) > MAX_TURN_SNAPSHOT_BYTES {
         return Ok(None);
     }

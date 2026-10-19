@@ -52,8 +52,8 @@ def _node_deps_available() -> bool:
     return os.path.isdir(os.path.join(ROOT, 'node_modules', 'jsdom'))
 
 
-# Runs under plain node (≥23 for type stripping): imports a .mts snapshot of
-# the real registry so no bundler is needed, drives REAL jsdom click events.
+# Imports the real registry compiled with the supported Node/esbuild toolchain
+# and drives real jsdom click events.
 _HARNESS = r"""
 import { pathToFileURL } from 'node:url';
 import { createRequire } from 'node:module';
@@ -182,8 +182,14 @@ process.exit(0);
                     reason='node + jsdom dev-deps not installed (run npm install)')
 def test_nested_call_grammar_contract():
     harness = os.path.join(HERE, '_action_registry_harness.mjs')
-    snapshot = os.path.join(HERE, '_action_registry_snapshot.mts')
-    shutil.copyfile(REGISTRY, snapshot)  # run the REAL registry source
+    snapshot = os.path.join(HERE, '_action_registry_snapshot.mjs')
+    subprocess.run([
+        'node', '--input-type=module', '-e',
+        "import { buildSync } from 'esbuild'; buildSync({"
+        "entryPoints:[process.argv[1]], outfile:process.argv[2],"
+        "bundle:true, format:'esm', platform:'browser'});",
+        REGISTRY, snapshot,
+    ], cwd=ROOT, check=True, capture_output=True, text=True, timeout=60)
     with open(harness, 'w', encoding='utf-8') as f:
         f.write(_HARNESS)
     try:

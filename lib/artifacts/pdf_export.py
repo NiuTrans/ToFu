@@ -32,6 +32,7 @@ import time
 from typing import Any
 
 from lib.log import get_logger
+from .markdown_view import render_markdown_html
 
 logger = get_logger(__name__)
 
@@ -109,25 +110,6 @@ def _wrap_html(body: str, title: str = '') -> str:
     )
 
 
-def _render_markdown_to_html(md: str) -> str:
-    """Best-effort Markdown → HTML.  Falls back to <pre>plaintext."""
-    try:
-        from markdown_it import MarkdownIt
-    except ImportError:
-        logger.info('[ArtifactsPDF] markdown_it not available, using plaintext fallback')
-        from html import escape as _escape
-        return '<pre>' + _escape(md) + '</pre>'
-    md_engine = MarkdownIt('commonmark', {
-        'breaks': True,
-        'html': False,  # do NOT pass through raw HTML in markdown source —
-                        # PDF renders go to our browser pool, and this is
-                        # one of the few defenses against XSS-via-PDF.
-        'linkify': True,
-        'typographer': False,
-    })
-    return md_engine.render(md or '')
-
-
 def _strip_scripts(html: str) -> str:
     """Remove <script> blocks from raw HTML before sending to Chromium.
 
@@ -149,7 +131,7 @@ def _build_print_html(artifact: dict[str, Any]) -> str:
     title = artifact.get('title') or ''
 
     if fmt == 'markdown':
-        body = _render_markdown_to_html(content)
+        body = render_markdown_html(content)
         return _wrap_html(body, title)
     if fmt == 'html':
         # Already a full document?  Strip scripts and trust the structure.
@@ -190,7 +172,7 @@ def render_artifact_pdf(artifact_id: str) -> bytes:
     )
 
     try:
-        from lib.search_runtime import prepare_search_dependency_import
+        from lib.search.search_runtime import prepare_search_dependency_import
         prepare_search_dependency_import()
         from tofu_search import get_playwright_pool
         _pw_pool = get_playwright_pool()

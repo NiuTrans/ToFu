@@ -1351,7 +1351,7 @@ elements: []
             yield Response()
 
         calls = []
-        monkeypatch.setattr('lib.http_client.http_stream', stream)
+        monkeypatch.setattr('lib.http_transport.client.http_stream', stream)
         ctx = {
             'deck_dir': deck.root,
             'size': deck.size,

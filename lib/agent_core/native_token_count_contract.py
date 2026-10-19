@@ -1,0 +1,23 @@
+"""Generated from native_token_count_abi_v1.json; do not edit."""
+TOKEN_COUNT_SPEC = {'format': 'tofu.native-token-count-abi/v1',
+ 'abi_version': 1,
+ 'encodings': {'CL100K': 0, 'O200K': 1},
+ 'status': {'OK': 0,
+            'INVALID_ENCODING': 1,
+            'INVALID_BUFFER': 2,
+            'INVALID_UTF8': 3,
+            'CLOSED': 4,
+            'ENCODER': 5,
+            'PANIC': 6,
+            'CAPACITY': 7},
+ 'symbols': ['tofu_token_count_abi_version',
+             'tofu_token_count_open',
+             'tofu_token_count_batch',
+             'tofu_token_count_close'],
+ 'lifetime': 'Monotonic non-reused handle; close withdraws lookup and joins accepted calls before '
+             'encoder release. Text/output spans are caller-owned until the synchronous call '
+             'returns.',
+ 'output': 'One u64 ordinary-token count per UTF-8 text in original order; failed calls leave '
+           'output unchanged; special token spellings are ordinary text.',
+ 'authority': 'Pure token measurement; no model selection, account, billing, user/tenant store, '
+              'fallback or execution rights.'}

@@ -84,8 +84,6 @@ def execute_workflow(adapter, workflow, runtime):
     _validate_workflow(adapter, workflow)
     started = time.monotonic()
     deadline = started + workflow.get('timeout_s', 120)
-    maximum = workflow.get('max_chars', 60000)
-    payload_budget = maximum - min(2048, maximum // 2)
     completed = []
     values = {}
     stopped = threading.Event()
@@ -127,11 +125,9 @@ def execute_workflow(adapter, workflow, runtime):
                                              owner_user_id=runtime.owner_user_id,
                                              client_id=runtime.client_id, _page=page,
                                              cancel_event=getattr(runtime, 'cancel_event', None))
-        # Keep only redacted, bounded results even between steps.
-        clean = redact_value(result['result'], max_string_chars=maximum)
-        if len(json.dumps(clean, ensure_ascii=False)) > payload_budget:
-            raise adapters.AdapterExecutionError('output_budget_exhausted', 'Request fewer records or fields')
-        return clean
+        # Credential redaction/admission stays at the browser evidence boundary;
+        # model presentation sizing belongs to shared L0, not workflow arguments.
+        return redact_value(result['result'], max_string_chars=80000)
 
     def independent(operation, params, collector):
         try:
@@ -185,9 +181,6 @@ def execute_workflow(adapter, workflow, runtime):
                                 try:
                                     item = future.result()
                                     results.append(item)
-                                    if len(json.dumps(completed, ensure_ascii=False)) > payload_budget:
-                                        results.pop()
-                                        raise adapters.AdapterExecutionError('output_budget_exhausted', 'Workflow output budget reached')
                                     entry['completed_items'].append(index)
                                 except Exception as exc:
                                     # Only the first failure is re-raised below;
@@ -202,15 +195,9 @@ def execute_workflow(adapter, workflow, runtime):
                     else:
                         for index, params in enumerate(calls):
                             results.append(invoke(step['operation'], params, page, timings))
-                            if len(json.dumps(completed, ensure_ascii=False)) > payload_budget:
-                                results.pop()
-                                raise adapters.AdapterExecutionError('output_budget_exhausted', 'Workflow output budget reached')
                             entry['completed_items'].append(index)
                     value = results if each else results[0]
                     entry.update(status='ok', result=value)
-                    if len(json.dumps(completed, ensure_ascii=False)) > payload_budget:
-                        entry.update(status='partial', result=[], completed_items=[], omitted=True)
-                        raise adapters.AdapterExecutionError('output_budget_exhausted', 'Workflow output budget reached')
                     values[step['id']] = value
         except Exception as exc:
             from .log_safety import text_for_log
@@ -229,8 +216,4 @@ def execute_workflow(adapter, workflow, runtime):
                              'requested_steps': len(workflow['steps'])},
                 'metrics': {**timings.summary(), 'elapsed_ms': round((time.monotonic() - started) * 1000),
                             'model_calls': 1}}
-        if len(json.dumps(receipt, ensure_ascii=False)) > maximum:
-            receipt['metrics'] = {key: receipt['metrics'][key] for key in
-                                  ('command_count', 'elapsed_ms', 'model_calls')}
-            receipt['metrics']['detail_omitted'] = True
         return receipt

@@ -70,7 +70,7 @@ def test_run_status_openapi_schema_is_derived_and_detached():
 def test_persistence_and_http_replay_use_canonical_terminal_predicate():
     run_persistence = ''.join(open(os.path.join(ROOT, path),
                                    encoding='utf-8').read() for path in (
-        'lib/storage_sidecar/operations_pkg/_runs.py',
+        'lib/storage_authority_sql/operations_pkg/_runs.py',
     ))
     route = open(os.path.join(
         ROOT, 'routes/api_v1/orchestrations.py'), encoding='utf-8').read()

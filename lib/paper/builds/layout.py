@@ -21,7 +21,7 @@ from lib.paper.latex_layout import (_body_bottom_on_page, _page_for_line,
 
 from .contract import validate
 from .errors import BuildError
-from .synctex import _decode
+from .synctex import _decoded_lines
 
 _SECTION = re.compile(
     r'\\(part|chapter|section|subsection|subsubsection|paragraph)\*?'
@@ -57,7 +57,7 @@ def layout_report(build, *, source_root: Path | None = None) -> dict:
     if receipt['status'] != 'success' or 'document.synctex.gz' not in declared:
         return validate(result, 'PaperBuildLayoutV1')
     with build.open_artifact('document.synctex.gz') as (stream, _):
-        parsed = parse_synctex(_decode(stream))
+        parsed = parse_synctex(_decoded_lines(stream))
     pages = int(parsed.get('max_page') or 0)
     result['pages'] = pages
 

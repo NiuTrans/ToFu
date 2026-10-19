@@ -4,7 +4,6 @@ import threading
 import pytest
 
 from lib.storage.errors import StorageError
-from lib.tasks_pkg.event_delivery import EventDeliveryError
 from lib.tasks_pkg.manager import _events as manager
 from lib.agent_core import push
 from tests.turn_lifecycle.test_task_event_delivery import _task, _discard
@@ -32,9 +31,13 @@ def test_progress_backlog_uses_one_atomic_batch_and_retries_exact_frames(
         outcome = original(task, wire, **kwargs)
         if lost_ack and wire['seq'] == 63 and not failed_once:
             failed_once = True
+            assert published == [0], 'unknown batch ACK became visible before reconciliation'
             raise StorageError('database_timeout', 'injected lost batch ACK')
         return outcome
     def publish(channel, task_id, wire, **kwargs):
+        if wire.get('type') != 'delta':
+            # The persistence owner may emit a retrying presentation hint.
+            return
         stored = _stored_event(storage, task_id, wire['seq'])
         assert stored['event']['content'] == wire['content']
         published.append(wire['seq'])
@@ -52,11 +55,12 @@ def test_progress_backlog_uses_one_atomic_batch_and_retries_exact_frames(
         release.set()
         lane = task['_eventDeliveryLane']
         if lost_ack:
-            with pytest.raises(EventDeliveryError):
-                owner.flush(lane, recover=False)
-            assert owner.snapshot()['pending_events'] == 63
-            assert published == [0]
-        owner.flush(lane)
+            # The shared persistence owner reconciles a transient lost ACK
+            # internally. The exact same frozen batch must be retried; it need
+            # not first escape as lane debt before the caller can join it.
+            owner.flush(lane, recover=False)
+        else:
+            owner.flush(lane)
         assert calls == ([0, 63, 63] if lost_ack else [0, 63])
         assert published == list(range(64))
         turn = turn_service.get_turn(task['convId'], created['turn']['turnId'], user_id=1)

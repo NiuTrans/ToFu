@@ -28,6 +28,17 @@ def track_reads(store):
     return reads
 
 
+
+def track_view_loads(monkeypatch):
+    reader = episodes.recent_settled_episodes
+    loads = []
+    def observed(**kwargs):
+        loads.append(kwargs)
+        return reader(**kwargs)
+    monkeypatch.setattr(episodes, 'recent_settled_episodes', observed)
+    return loads
+
+
 def test_view_is_lazy_isolated_and_fresh_for_the_next_cycle(store):
     _settle(store, 'g1', 'e1', 'success', tokens=123)
     reads = track_reads(store)
@@ -69,7 +80,8 @@ def test_exception_releases_retained_view(store):
 
 
 @pytest.mark.parametrize('malformed', [False, True])
-def test_failed_load_is_not_shared_as_empty_evidence(store, malformed):
+def test_failed_load_is_not_shared_as_empty_evidence(store, malformed, monkeypatch):
+    loads = track_view_loads(monkeypatch)
     _settle(store, 'g1', 'e1', 'success')
     query = store.query
     attempts = []
@@ -84,14 +96,14 @@ def test_failed_load_is_not_shared_as_empty_evidence(store, malformed):
     report = maintenance.run_maintenance_cycle(user_id=USER, include_refetch=False)
     assert not report['ok'] and not report['steps']['priors']['ok']
     assert report['steps']['hypotheses']['ok'] and report['steps']['monitoring']['ok']
-    assert len(attempts) == 2
+    assert len(loads) == 2
 
 
 def test_complete_cycle_preserves_results_with_one_episode_read(store, monkeypatch, record_property):
     for index, outcome in enumerate(('success','failure','success')):
         _settle(store, f'g{index}', f'e{index}', outcome)
     original_rows, original_versions = deepcopy(store.rows), deepcopy(store.versions)
-    reads = track_reads(store)
+    reads = track_view_loads(monkeypatch)
     actual = maintenance.run_maintenance_cycle(user_id=USER, include_refetch=False)
     assert actual['ok']
     cached_reads = len(reads)

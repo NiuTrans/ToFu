@@ -65,7 +65,9 @@ def async_app(quart_available, flask_app):
 
 @pytest.fixture
 def client(async_app):
-    """Quart test client."""
+    """Quart test client over an active, disposable storage lifecycle."""
+    from lib.storage import start_storage
+    start_storage()
     return async_app.test_client()
 
 

@@ -24,10 +24,10 @@ use crate::generated_tofudb_ir::{
     INTEGRATION_READY_INDEX_NAMESPACE, INTEGRATION_ROW_LOCATOR_NAMESPACE,
     INTEGRATION_ROW_SEQUENCE_NAMESPACE, INTEGRATION_STALE_SECONDS,
     INTEGRATION_WORKSPACE_COUNT_NAMESPACE, INTEGRATION_WORKSPACE_NAMESPACE, MAX_ENTITY_RANGE_ROWS,
-    MAX_INTEGRATION_ACTIVE_WORKSPACES, MAX_INTEGRATION_EVENTS_PER_PROJECT,
+    MAX_INTEGRATION_EVENTS_PER_PROJECT,
     MAX_INTEGRATION_PROJECT_ROOT_CHARACTERS, MAX_INTEGRATION_RESPONSE_BYTES,
     MAX_INTEGRATION_STATUS_EVENTS, MAX_INTEGRATION_STATUS_ROWS, MAX_INTEGRATION_TASK_ID_CHARACTERS,
-    MAX_INTEGRATION_WORKSPACES_PER_OWNER, MAX_INTEGRATION_WORKSPACE_DOCUMENT_BYTES,
+    MAX_INTEGRATION_WORKSPACE_DOCUMENT_BYTES,
 };
 
 const SEQUENCE_KEY: &[u8] = b"sequence";
@@ -686,10 +686,8 @@ fn write_workspace(
         let key = active_count_key(tx)?;
         let count = read_u64(database, tx, &key, "integration active count")?;
         let next = if new_active {
-            if count >= MAX_INTEGRATION_ACTIVE_WORKSPACES as u64 {
-                return Err(exhausted("integration active queue capacity reached"));
-            }
-            count + 1
+            count.checked_add(1)
+                .ok_or_else(|| invalid_data("integration active count overflow"))?
         } else {
             count
                 .checked_sub(1)
@@ -931,11 +929,10 @@ fn register(
     } else {
         let count_key = owner_count_key(tx, owner)?;
         let count = read_u64(database, tx, &count_key, "integration owner count")?;
-        if count >= MAX_INTEGRATION_WORKSPACES_PER_OWNER as u64 {
-            return Err(exhausted("integration workspace owner capacity reached"));
-        }
+        let next_count = count.checked_add(1)
+            .ok_or_else(|| invalid_data("integration owner count overflow"))?;
         let id = next_sequence(database, tx, INTEGRATION_ROW_SEQUENCE_NAMESPACE)?;
-        write_u64(database, tx, count_key, count + 1)?;
+        write_u64(database, tx, count_key, next_count)?;
         let workspace = Workspace {
             id,
             owner_user_id: owner,
@@ -1192,37 +1189,38 @@ fn set_meta(
     bounded_response(&json!({"ok":true,"origin":origin}))
 }
 
-fn queue_rows(
+// A format-sized page is a read window, never an admission or total-scan limit.
+// Only an empty page proves completion, including mount-split short pages.
+fn visit_queue<T>(
     database: &AuthorityDatabase,
     tx: &mut AuthorityTransaction,
     namespace: &str,
-) -> io::Result<Vec<(EntityKey, Locator)>> {
-    let (start, end) =
+    mut visit: impl FnMut(&AuthorityDatabase, &mut AuthorityTransaction, Locator) -> io::Result<Option<T>>,
+) -> io::Result<Option<T>> {
+    let (mut start, end) =
         EntityKey::prefix_range(tx.tenant_id(), TENANT_GLOBAL_OWNER_ID, namespace, b"")?;
-    let rows = scan_paged(
-        database,
-        tx,
-        start,
-        &end,
-        MAX_INTEGRATION_ACTIVE_WORKSPACES + 1,
-    )?;
-    if rows.len() > MAX_INTEGRATION_ACTIVE_WORKSPACES {
-        return Err(exhausted("integration active index exceeds its bound"));
+    loop {
+        let page = database.entity_scan(tx, &start, &end, MAX_ENTITY_RANGE_ROWS)?;
+        if page.is_empty() { return Ok(None); }
+        let next = page.last().unwrap().0.clone().exact_range()?.1;
+        for (_, raw) in page {
+            if let Some(value) = visit(database, tx, decode(&raw, "integration queue locator")?)? {
+                return Ok(Some(value));
+            }
+        }
+        start = next;
     }
-    rows.into_iter()
-        .map(|(key, raw)| Ok((key, decode(&raw, "integration queue locator")?)))
-        .collect()
 }
 fn claimable_ready(
     database: &AuthorityDatabase,
     tx: &mut AuthorityTransaction,
 ) -> io::Result<Option<Workspace>> {
-    for (_key, locator) in queue_rows(database, tx, INTEGRATION_READY_INDEX_NAMESPACE)? {
+    visit_queue(database, tx, INTEGRATION_READY_INDEX_NAMESPACE, |database, tx, locator| {
         if database
             .entity_get(tx, &project_claim_key(tx, &locator.project_root)?)?
             .is_some()
         {
-            continue;
+            return Ok(None);
         }
         let workspace = read_workspace_by_id(database, tx, locator.id)?
             .ok_or_else(|| invalid_data("integration ready locator is missing"))?;
@@ -1230,11 +1228,10 @@ fn claimable_ready(
             return Err(invalid_data("integration ready index state mismatch"));
         }
         if delivery_denied(&origin_document(&workspace.origin_raw)) {
-            continue;
+            return Ok(None);
         }
-        return Ok(Some(workspace));
-    }
-    Ok(None)
+        Ok(Some(workspace))
+    })
 }
 fn stale_integrating(
     database: &AuthorityDatabase,
@@ -1246,7 +1243,7 @@ fn stale_integrating(
         return Ok(Vec::new());
     }
     let mut stale = Vec::new();
-    for (_key, locator) in queue_rows(database, tx, INTEGRATION_INTEGRATING_INDEX_NAMESPACE)? {
+    visit_queue(database, tx, INTEGRATION_INTEGRATING_INDEX_NAMESPACE, |database, tx, locator| {
         let workspace = read_workspace_by_id(database, tx, locator.id)?
             .ok_or_else(|| invalid_data("integration active locator is missing"))?;
         if workspace.state != "integrating" {
@@ -1255,7 +1252,8 @@ fn stale_integrating(
         if workspace.updated_at < cutoff {
             stale.push(workspace);
         }
-    }
+        Ok(None::<()>)
+    })?;
     stale.sort_by(|left, right| {
         left.updated_at
             .total_cmp(&right.updated_at)

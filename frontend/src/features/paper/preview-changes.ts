@@ -1,10 +1,11 @@
+import { entityRecordKeys, entityRecordValues } from '../../core/entity-record';
 /** Observe committed files and bounded authoritative discovery hints. No DOM,
  * output/prose scanning, PDF dependency or durable conversation state.
  */
 import type { TurnState, TurnStateUpdate } from '../../core/turn-state';
 import type { ProjectionTurn } from '../../core/turn-projection';
 import type { TurnFileChange } from '../../api/conversation-sync.generated';
-import { PAPER_SOURCE_SUFFIXES, PAPER_BUILD_LIMITS as limits } from '../../api/paper-build.generated';
+import { PAPER_SOURCE_SUFFIXES } from '../../api/paper-build.generated';
 
 export interface PaperPreviewChange {
   conversationId: string; changeId: string; source: 'local' | 'overleaf';
@@ -32,7 +33,7 @@ function discoveryHints(turn: ProjectionTurn, cold = false): Map<string, Discove
   const projection = turn.projection;
   const block = projection?.fileChanges;
   if (!block?.state || block.state === 'applied') {
-    for (const file of (block?.files ?? projection?.modifiedFileList ?? []).slice(-limits.source_files)) {
+    for (const file of (block?.files ?? projection?.modifiedFileList ?? [])) {
       if ((!cold && file.changeId) || file.pending || file.ok === false || file.action === 'deleted'
         || file.source === 'overleaf' || !boundedPath(file.path) || !texPath(file.path)) continue;
       // Qualification is shared with real receipts, but no invented receipt escapes.
@@ -41,7 +42,7 @@ function discoveryHints(turn: ProjectionTurn, cold = false): Map<string, Discove
       hints.set(`file:${qualified.projectRoot ?? ''}:${qualified.path}`, qualified);
     }
   }
-  for (const round of (projection?.toolRounds ?? []).slice(-limits.source_files)) {
+  for (const round of (projection?.toolRounds ?? [])) {
     if (!round.toolCallId || round.rejection || round._rejected || round.result?.rejection
       || round.result?._rejected || round.result?.rejected
       || !['done', 'completed', 'success'].includes(round.status ?? '')
@@ -97,8 +98,8 @@ export function createPaperPreviewChanges(ports: ChangePorts): {
 
   let observedUpdates = new WeakSet<TurnStateUpdate>();
   const coldDiscovery = (id: string, state: TurnState): void => {
-    const turns = Object.values(state.turnsById).filter(turn => !!turn)
-      .sort((a, b) => Number(b.ordinal) - Number(a.ordinal)).slice(0, limits.source_files);
+    const turns = entityRecordValues(state.turnsById).filter(turn => !!turn)
+      .sort((a, b) => Number(b.ordinal) - Number(a.ordinal));
     for (const turn of turns) {
       const hints = [...discoveryHints(turn, true).values()];
       if (hints.length) { ports.discover?.(id, hints.at(-1)); return; }
@@ -107,7 +108,7 @@ export function createPaperPreviewChanges(ports: ChangePorts): {
   const files = (turn?: ProjectionTurn): TurnFileChange[] => {
     const block = turn?.projection?.fileChanges;
     if (block?.state && block.state !== 'applied' && block.state !== 'undone') return [];
-    return (block?.files ?? turn?.projection?.modifiedFileList ?? []).slice(0, limits.source_files)
+    return (block?.files ?? turn?.projection?.modifiedFileList ?? [])
       .filter(file => !!file.changeId && !file.pending && file.ok !== false);
   };
   const receiptKey = (turn: ProjectionTurn, file: TurnFileChange): string => {
@@ -127,7 +128,7 @@ export function createPaperPreviewChanges(ports: ChangePorts): {
       // Repainting has no new reducer transition. Cold hydration establishes a
       // baseline even if the empty store was bound before the snapshot arrived.
       if (!update) {
-        if (!initialized && (Object.keys(state.turnsById).length > 0 || state.conversationRevision > 0)) {
+        if (!initialized && (entityRecordKeys(state.turnsById).length > 0 || state.conversationRevision > 0)) {
           initialized = true;
           coldDiscovery(id, state);
         }
@@ -142,14 +143,14 @@ export function createPaperPreviewChanges(ports: ChangePorts): {
       }
       const previous = update.previousState;
       let previousNewest = -1;
-      for (const turn of Object.values(previous.turnsById)) {
+      for (const turn of entityRecordValues(previous.turnsById)) {
         if (turn) previousNewest = Math.max(previousNewest, Number(turn.ordinal));
       }
       const changes: PaperPreviewChange[] = [];
 
       let discover = false;
       let hint: DiscoveryHint | undefined;
-      const currentTurns = Object.values(state.turnsById).filter((turn) => !!turn)
+      const currentTurns = entityRecordValues(state.turnsById).filter((turn) => !!turn)
         .filter(turn => turn !== previous.turnsById[turn.turnId])
         .sort((a, b) => Number(a.ordinal) - Number(b.ordinal));
       for (const turn of currentTurns) {
@@ -171,7 +172,6 @@ export function createPaperPreviewChanges(ports: ChangePorts): {
             ...(block?.state === 'undone' ? { action: 'deleted' } : {}) });
           if (change) {
             changes.push(change);
-            if (changes.length > limits.source_files) changes.shift();
           }
         }
       }

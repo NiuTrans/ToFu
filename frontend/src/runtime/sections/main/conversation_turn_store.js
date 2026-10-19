@@ -91,7 +91,7 @@ function _nativeResumeCtxOptions(resolved, operation) {
 async function _operateNativeTurn(conv, turnId, operation, inputEdit) {
   const resolved = _nativeTurnState(conv, turnId);
   if (!resolved || typeof runtimeScope.ConversationTurnStore === 'undefined') return false;
-  if (Object.values(resolved.state.turnsById || {}).some(turn =>
+  if (entityRecordValues(resolved.state.turnsById || {}).some(turn =>
     turn && (turn.status === 'pending' || turn.status === 'running'))) {
     if (typeof showToast === 'function') {
       showToast('Stop the current attempt before starting another operation.', 'info');
@@ -151,7 +151,7 @@ async function _answerHumanGuidanceLate(conv, turnId, responseText) {
   if (!resolved || typeof runtimeScope.ConversationTurnStore === 'undefined') {
     throw new Error('Unknown turn; refresh the authoritative snapshot.');
   }
-  if (Object.values(resolved.state.turnsById || {}).some(turn =>
+  if (entityRecordValues(resolved.state.turnsById || {}).some(turn =>
     turn && (turn.status === 'pending' || turn.status === 'running'))) {
     throw new Error('Stop the current attempt before answering.');
   }
@@ -455,23 +455,27 @@ async function _createNativeBranchFromSelection(
   conv, parentTurnId, title, selectedText,
 ) {
   if (!conv || !parentTurnId || !title?.trim()
-      || typeof runtimeScope.ConversationTurnStore === 'undefined') return;
-  try {
-    await runtimeScope.ConversationTurnStore.createBranchLane(
-      conv,
-      parentTurnId,
-      {
-        title: title.trim(),
-        kind: 'branch',
+      || typeof runtimeScope.ConversationTurnStore === 'undefined') return false;
+  return createSelectionBranch({
+    create: () => runtimeScope.ConversationTurnStore.createBranchLane(
+      conv, parentTurnId, {
+        title: title.trim(), kind: 'branch',
         anchorText: String(selectedText || '').slice(0, 200),
         parentSelection: String(selectedText || ''),
       },
-    );
-  } catch (error) {
-    if (typeof showToast === 'function') {
-      showToast(error?.message || 'Branch creation failed', 'error');
-    }
-  }
+    ),
+    isCurrent: () => getActiveConv()?.id === conv.id,
+    open: laneId => {
+      runtimeScope.ConversationSurfacePresentation?.setExpandedBranchLane?.(conv.id, laneId);
+      _openNativeBranchComposer(conv, parentTurnId, laneId);
+      document.getElementById('userInput')?.focus();
+    },
+    error: error => {
+      if (typeof showToast === 'function') {
+        showToast(error?.message || t('selection.failed'), 'error');
+      }
+    },
+  });
 }
 
 const _nativeBranchComposer = createBranchComposerSession();
@@ -607,8 +611,8 @@ async function sendBranchMessage(text, images) {
 
 function promptNewBranch(parentTurnId, preTitle, selectedText) {
   const conv = typeof getActiveConv === 'function' ? getActiveConv() : null;
-  if (!conv || !parentTurnId) return;
-  void _createNativeBranchFromSelection(
+  if (!conv || !parentTurnId) return Promise.resolve(false);
+  return _createNativeBranchFromSelection(
     conv, parentTurnId, preTitle || String(selectedText || '').slice(0, 40), selectedText,
   );
 }
@@ -730,6 +734,34 @@ async function _mutateNativeTurnFiles(conv, turnId, operation) {
 }
 
 const _nativeTurnRenderers = createClassicConversationRenderers({
+
+  usageRecovery: {
+    inspect(conversationId, turnId, signal) {
+      return conversationSyncApi.usageRecovery(conversationId, turnId, { signal, timeout: 30_000 });
+    },
+    recover(conversationId, turnId, body) {
+      return conversationSyncApi.recoverUsage(conversationId, turnId, body);
+    },
+    createCommandId: createTurnCommandId,
+    onAccepted(conversationId) {
+      const conv = conversations.find(item => item?.id === conversationId) || { id: conversationId };
+      void runtimeScope.ConversationTurnStore.hydrateConversation(conv)
+        .catch(error => console.warn('[UsageRecovery] authoritative refresh failed', error));
+    },
+  },
+  choiceInteractions(conversationId, turnId) {
+    return createAuthenticatedChoiceInteractionPorts({
+      conversationId, turnId,
+      commandId: createTurnCommandId,
+      text: (key, fallback) => { const value = typeof t === 'function' ? t(key) : ''; return value && value !== key ? value : fallback; },
+    });
+  },
+  inspectToolEffect(reference, signal) {
+    return conversationSyncApi.inspectToolEffect(
+      reference.conversationId, reference.turnId, reference.operationId, reference.ownerScope,
+      { signal, timeout: 30_000 },
+    );
+  },
   loadToolResult(reference, signal) {
     return conversationSyncApi.turnToolResult(
       reference.conversationId, reference.turnId, reference.roundIndex,
@@ -936,6 +968,14 @@ const _nativeTurnRenderers = createClassicConversationRenderers({
         ? { report: result.report } : null))
       .catch(() => null);
   },
+  async resumeGoalRun(runId) {
+    const { createOrchestrationTaskRequestClient } = await import('../features/orchestration/task-request');
+    const result = await createOrchestrationTaskRequestClient({
+      api: resolveOrchestrationApiClient(Api),
+    }).resume(runId);
+    return { ok: result.ok === true, status: Number(result.status || 0),
+      runId: String(result.runId || ''), error: String(result.error || '') };
+  },
   roleLabel(turn) {
     const initiator = turn?.metadata?.origin?.initiator;
     const originLabels = {
@@ -962,14 +1002,14 @@ const _nativeTurnRenderers = createClassicConversationRenderers({
   },
   actionLabel(action, turn, actionView) {
     const keys = {
-      copy: 'msgAction.copy', inspect: 'msgAction.inspect',
+      copy: 'msgAction.copy', inspect: 'msgAction.inspect', review: 'turnReview.title',
       edit: 'msgAction.edit', regenerate: 'msgAction.regen',
       resume: 'msgAction.continue', translate: 'msgAction.translate',
       export: 'msgAction.export', 'promote-decision': 'msgAction.promoteDecision',
       branch: 'branch.add', delete: 'msgAction.delete',
     };
     const fallbacks = {
-      copy: 'Copy', inspect: 'Inspect', edit: 'Edit', regenerate: 'Regen',
+      copy: 'Copy', inspect: 'Inspect', review: 'Task acceptance', edit: 'Edit', regenerate: 'Regen',
       resume: 'Continue',
       translate: 'Translate', export: 'Export',
       'promote-decision': 'Promote as decision', branch: 'Branch', delete: 'Delete',
@@ -1082,6 +1122,26 @@ runtimeScope.PlanDecisionPresentation = Object.freeze({
 });
 
 const _automationTimeClient = createAutomationManagementClient();
+// Temporary retained bridge: remove with the shell migration; the typed owner
+// holds the only dialog lifetime and borrows existing conversation lifecycle.
+const _turnReviewPresentation = createTurnReviewPresentation({
+  activeConversationId: () => typeof getActiveConv === 'function' ? getActiveConv()?.id || null : null,
+  load: (convId, turnId, signal) => Api.conversations.turnReview(convId, turnId, signal),
+  save: (convId, turnId, command, signal) => Api.conversations.saveTurnReview(convId, turnId, command, signal),
+  facts: (convId, signal) => Api.conversations.workingFacts(convId, signal),
+  outputs: async (convId, signal) => {
+    const value = await Api.artifacts.forConv(convId, signal);
+    if (!Array.isArray(value?.artifacts)) throw new Error(t('turnReview.outputsError'));
+    return value.artifacts.map(item => ({ id: String(item.id), title: String(item.title || '') }));
+  },
+  openOutput: id => window.open(Api.artifacts.viewUrl(id), '_blank', 'noopener'),
+  text: (key, fallback) => { const value = t(key); return value && value !== key ? value : fallback; },
+  reportError: message => { if (typeof showToast === 'function') showToast(message, 'error'); },
+});
+if (typeof retainedCompositionLifecycle !== 'undefined') {
+  retainedCompositionLifecycle.add(() => _turnReviewPresentation.destroy());
+}
+
 const _conversationSurfaceController = createConversationSurfaceController({
   loadTaskTimePresentations(conversationId, attemptId, signal) {
     return _automationTimeClient.presentations(conversationId, attemptId, { signal });
@@ -1128,7 +1188,7 @@ const _conversationSurfaceController = createConversationSurfaceController({
     const signatures = new Map();
     if (typeof calcCostCny !== 'function') return signatures;
     const turnsById = state?.turnsById || {};
-    for (const turnId of Object.keys(turnsById)) {
+    for (const turnId of entityRecordKeys(turnsById)) {
       const turn = turnsById[turnId];
       if (!turn || turn.actor !== 'assistant') continue;
       if (!['completed', 'interrupted', 'truncated', 'failed']
@@ -1159,6 +1219,12 @@ const _conversationSurfaceController = createConversationSurfaceController({
     blockLabel(count) {
       return t('chat.loadEarlierBlocks', { n: count });
     },
+
+    historyStatusLabel(state) {
+      return t(state === 'loading' ? 'chat.historyLoading' : 'chat.historyFailed');
+    },
+
+    historyRetryLabel() { return t('chat.historyRetry'); },
   },
   roundOutlineLabel(key, n) {
     return t(key, { n });
@@ -1171,24 +1237,13 @@ const _conversationSurfaceController = createConversationSurfaceController({
     };
     return t(keys[state] || 'sync.transportRecovering');
   },
-  followLatest() {
-    if (typeof scrollToBottom === 'function') scrollToBottom(true);
-  },
   onIntent(intent) {
     const conv = typeof getActiveConv === 'function' ? getActiveConv() : null;
     if (!conv || conv.id !== intent.conversationId) return;
     if (intent.type === 'load-earlier-turns' && intent.laneId) {
-      void runtimeScope.ConversationTurnStore?.loadConversationTurnPage?.(
-        conv,
-        intent.laneId,
-        intent.beforeOrdinal,
-        intent.limit,
-      ).catch((error) => {
-        if (typeof showToast === 'function') {
-          showToast(error?.message || 'Unable to load earlier turns', 'error');
-        }
-      });
-      return;
+      return runtimeScope.ConversationTurnStore?.loadConversationTurnPage?.(
+        conv, intent.laneId, intent.beforeOrdinal, intent.limit,
+      );
     }
     if (intent.type === 'remove-queue' && intent.queueId) {
       void _removeNativeQueueItem(conv, intent.queueId);
@@ -1254,6 +1309,9 @@ const _conversationSurfaceController = createConversationSurfaceController({
       conv.id, intent.turnId,
     );
     if (!resolved && !transientTurn) return;
+    if (intent.type === 'review' && resolved?.turn?.actor === 'assistant' && resolved.turn.laneId === 'main') {
+      void _turnReviewPresentation.open(conv.id, intent.turnId); return;
+    }
     const projection = resolved?.turn?.projection || transientTurn?.projection || {};
     const attachmentIndex = Number.parseInt(intent.operation || '', 10);
     if (intent.type === 'toggle-branch' && intent.laneId) {
@@ -1382,7 +1440,15 @@ const _conversationSurfaceController = createConversationSurfaceController({
     else if (intent.type === 'branch') void _createNativeBranch(conv, intent.turnId);
     else if (intent.type === 'delete') void _deleteNativeTurn(conv, intent.turnId);
   },
-  afterConversationCommit(conv, state, _force, viewModel) {
+  onConversationMounted(conv) {
+    _turnReviewPresentation.activate(conv.id);
+    runtimeScope.Artifacts?.activateConversation?.(conv);
+  },
+  afterConversationCommit(conv, state, _force, viewModel, mountedTurnIds) {
+    if (conversationReview.viewed(conv.id,
+      runtimeScope.ConversationTurnRead.ordered(conv),
+      mountedTurnIds)) renderConversationList();
+    runtimeScope.renderBackgroundAgents?.();
     renderComposerModelNotice(document.getElementById('composerModelNotice'), viewModel, {
       localizedText: (key, fallback, values) => {
         const label = t(key, values);
@@ -1392,12 +1458,11 @@ const _conversationSurfaceController = createConversationSurfaceController({
 
     runtimeScope.ConversationTurnStore?.notifyRenderedState?.(
       conv.id, state,
-      Array.from(document.getElementById('chatInner')?.querySelectorAll(
-        '[data-turn-id]',
-      ) || [], node => node.dataset.turnId).filter(Boolean),
+      mountedTurnIds,
     );
     /* Running and terminal revisions reconcile into the same data-turn-id
      * node; this adapter never creates an alternate message identity. */
+    _updateScrollToBottomBtn();
     if (typeof buildTurnNav === 'function') buildTurnNav(conv);
     if (typeof _cvRefreshContextGauge === 'function') _cvRefreshContextGauge();
     if (typeof reconcileTurnInlineEditors === 'function') {
@@ -1409,12 +1474,20 @@ const _conversationSurfaceController = createConversationSurfaceController({
 const _conversationTransientTurnOverlay = createTransientTurnOverlay();
 
 runtimeScope.ConversationSurfacePresentation = Object.freeze({
-
+  activateConversation(conversationId) {
+    _turnReviewPresentation.activate(conversationId || null);
+  },
+  ownsConversation(conversationId) {
+    return _conversationSurfaceController.ownsConversation(conversationId);
+  },
   revealTurn(conversationId, turnId) {
     return _conversationSurfaceController.revealTurn(conversationId, turnId);
   },
-  followLatest() {
-    _conversationSurfaceController.followLatest();
+  isNearLatest(threshold) {
+    return _conversationSurfaceController.isNearLatest(threshold);
+  },
+  followLatest(intent) {
+    _conversationSurfaceController.followLatest(intent);
   },
   setTranslationActivity(conversationId, turnId, activity) {
     _conversationSurfaceController.setTranslationActivity(
@@ -1521,7 +1594,7 @@ runtimeScope.renderAuthoritativeConversationSurface = function (conversationId, 
   const store = service.ensureRuntimeStore(conversationId);
   const state = store?.getState?.();
   if (!state || (!store._snapshotLoaded
-      && Object.keys(state.turnsById || {}).length === 0)) return false;
+      && entityRecordKeys(state.turnsById || {}).length === 0)) return false;
   return _renderConversationSurfaceState(conv, state, repaint);
 };
 
@@ -1559,6 +1632,14 @@ runtimeScope.requestAuthoritativeConversationRender = function (
   runtimeScope.ConversationTurnStore = createConversationTurnRuntime({
     api: conversationSyncApi,
     streamClientId: requiredApiTransport.pageRequestId(),
+
+    snapshotViewport() {
+      const pane = document.getElementById('chatContainer');
+      return {
+        width: pane?.clientWidth || window.innerWidth,
+        height: pane?.clientHeight || window.innerHeight,
+      };
+    },
     findConversation(conversationId) {
       if (typeof conversations === 'undefined' || !Array.isArray(conversations)) return null;
       return conversations.find(item => item?.id === conversationId) || null;
@@ -1568,6 +1649,9 @@ runtimeScope.requestAuthoritativeConversationRender = function (
       _conversationSurfaceController.invalidateTaskTimePresentations(conversationId);
     },
     onStateApplied(conv, state, update) {
+      _turnReviewPresentation.observe(conv.id, state.turnsById);
+      conversationReview.observe(conv.id,
+        (state.laneOrder.main || []).map(id => state.turnsById[id]).filter(Boolean));
       if (activeConvId === conv.id) runtimeScope.PaperPreviewPresentation.activateConversation(conv.id);
       runtimeScope.PaperPreviewPresentation.observe(conv.id, state, update);
     },
@@ -1634,13 +1718,14 @@ runtimeScope.requestAuthoritativeConversationRender = function (
       );
     },
     disposeRenderedState(conversationId) {
+      _turnReviewPresentation.disposeConversation(conversationId);
       const modelNotice = document.getElementById('composerModelNotice');
       if (modelNotice?.dataset.conversationId === conversationId) {
         renderComposerModelNotice(modelNotice, null);
       }
       const state = runtimeScope.ConversationTurnRead?.state?.(conversationId);
       if (typeof clearFinishInfoPresentation === 'function') {
-        clearFinishInfoPresentation(Object.keys(state?.turnsById || {}));
+        clearFinishInfoPresentation(entityRecordKeys(state?.turnsById || {}));
       }
       humanGuidancePresentation.clearConversation(conversationId);
       _conversationSurfaceController.disposeConversation(conversationId);
@@ -1651,6 +1736,7 @@ runtimeScope.requestAuthoritativeConversationRender = function (
           global.requestAnimationFrame(() => release()))
       : undefined,
     buildNavigation(conv) {
+      _updateScrollToBottomBtn();
       if (typeof buildTurnNav === 'function') buildTurnNav(conv);
     },
     renderConversationList: typeof renderConversationList === 'function'

@@ -12,18 +12,18 @@ import orjson
 import pytest
 
 from lib.storage.errors import StorageError
-from lib.storage_sidecar.adapters.postgres import PostgresSession, _JsonBytesDumper, _load_json_document
-from lib.storage_sidecar.adapters.sqlite import SQLiteSession
-from lib.storage_sidecar.json_document import JsonBytes
-from lib.storage_sidecar.schema import initialize_schema
-from lib.storage_sidecar.operation_registry import build_registry
-from lib.storage_sidecar.operations_pkg._common import _dump
-from lib.storage_sidecar.operations_pkg._conversation_diagnostic import _conversation_diagnostic
-from lib.storage_sidecar.projection_codec import (
+from lib.storage_authority_sql.adapters.postgres import PostgresSession, _JsonBytesDumper, _load_json_document
+from lib.storage_authority_sql.adapters.sqlite import SQLiteSession
+from lib.storage_authority_sql.json_document import JsonBytes
+from lib.storage_authority_sql.schema import initialize_schema
+from lib.storage_authority_sql.operation_registry import build_registry
+from lib.storage_authority_sql.operations_pkg._common import _dump
+from lib.storage_authority_sql.operations_pkg._conversation_diagnostic import _conversation_diagnostic
+from lib.storage_authority_sql.projection_codec import (
     STORAGE_PROJECTION_CODEC_KEY,
     decode_projection_from_storage,
 )
-from lib.storage_sidecar.turn_projection_head import PROJECTION_HEAD_MAX_PATCH_BYTES
+from lib.storage_authority_sql.turn_projection_head import PROJECTION_HEAD_MAX_PATCH_BYTES
 from lib.turn_projection_patch import apply_projection_patch, build_projection_patch
 
 
@@ -179,7 +179,7 @@ def read_evidence(monkeypatch):
         pytest.fail("A diagnostic query called the full projection hydrator")
 
     monkeypatch.setattr(
-        "lib.storage_sidecar.operations_pkg._turns_core.projection_from_turn_row", forbidden_hydration)
+        "lib.storage_authority_sql.operations_pkg._turns_core.projection_from_turn_row", forbidden_hydration)
     for session in (SQLiteSession, PostgresSession):
         monkeypatch.setattr(session, "fetch_one", wrap(session.fetch_one))
         monkeypatch.setattr(session, "fetch_all", wrap(session.fetch_all))
@@ -875,7 +875,7 @@ def test_sqlite_hash_streams_bounded_blob_reads_without_decoding_or_full_fetch(s
             return result
 
     monkeypatch.setattr(store.session, "connection", ObservedConnection())
-    monkeypatch.setattr("lib.storage_sidecar.operations_pkg._conversation_diagnostic.hashlib.sha256", ObservedHash)
+    monkeypatch.setattr("lib.storage_authority_sql.operations_pkg._conversation_diagnostic.hashlib.sha256", ObservedHash)
     evidence = request.getfixturevalue("read_evidence")
     metadata = store.query("turn", revision=42, index=0)
     assert sum(reads) == metadata["source"]["totalBytes"]

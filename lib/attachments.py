@@ -126,7 +126,7 @@ def _images_dir() -> str:
     somehow unavailable (byte-identical in the default single-box layout).
     """
     try:
-        from lib.runtime_paths import uploads_root
+        from lib.runtime.runtime_paths import uploads_root
         return os.path.join(uploads_root(), 'images')
     except Exception as e:  # pragma: no cover — defensive
         logger.debug('[Attachments] uploads_root() unavailable, using in-tree: %s', e)

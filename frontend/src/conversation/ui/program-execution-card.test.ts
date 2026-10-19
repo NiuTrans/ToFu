@@ -141,13 +141,25 @@ describe('program call outcome counts', () => {
 
 
 describe.each(Object.entries(surfaces))('%s compact program disclosure', (_name, render) => {
+  it('keeps arbitrary result previews in evidence while preserving the recorded return value', () => {
+    const node = document.createElement('div');
+    const result = { rows: ['<script>unsafe()</script>'], opaque_metadata: 1234 };
+    render(node, { ...block(), round: { programStatus: 'completed', programResult: result,
+      programStats: { tool_calls: 2, successful_tool_calls: 2 } } });
+    expect(node.querySelector('.ptc-head')?.textContent).not.toContain('opaque_metadata');
+    expect(node.querySelector('.ptc-preview')?.textContent).toContain('opaque_metadata');
+    expect(JSON.parse(node.querySelector('.ptc-result pre')!.textContent!)).toEqual(result);
+    expect(node.querySelector('script')).toBeNull();
+    expect(node.querySelector<HTMLDetailsElement>('.ptc-card')?.open).toBe(false);
+  });
+
   it('keeps zero-new-call reuse quiet with all counters and results inspectable', () => {
     const node = document.createElement('div');
     render(node, { ...block(), round: { programStatus: 'completed', programResult: { answer: 42 },
       childToolNames: ['read'], programStats: { tool_calls: 0, successful_tool_calls: 0,
         result_reads: 2, result_bytes: 2048, result_delivery: { outputBytes: 1048576 }, extra_counter: 7 } } });
-    expect(node.querySelector('.ptc-head')?.textContent).toContain('No new tool calls · 2 retained results reused');
-    expect(node.querySelector('.ptc-head')?.textContent).not.toMatch(/successful|bytes|child tool/);
+    expect(node.querySelector('.ptc-head')?.textContent).toContain('Saved results read 2 times');
+    expect(node.querySelector('.ptc-head')?.textContent).not.toMatch(/successful|bytes|child tool|No source tools/);
     expect(node.querySelector<HTMLDetailsElement>('.ptc-card')?.open).toBe(false);
     expect(node.querySelector<HTMLDetailsElement>('.ptc-result')?.open).toBe(false);
     expect(node.querySelector<HTMLDetailsElement>('.ptc-technical')?.open).toBe(false);
@@ -159,7 +171,8 @@ describe.each(Object.entries(surfaces))('%s compact program disclosure', (_name,
   it('does not confuse unique tool names with calls in older records', () => {
     const node = document.createElement('div');
     render(node, { ...block(), round: { programStatus: 'completed', childToolNames: ['read', 'read'] } });
-    expect(node.querySelector('.ptc-head')?.textContent).not.toMatch(/call|attempt/);
+    expect(node.querySelector('.ptc-head')?.textContent).toContain('not recorded / unavailable');
+    expect(node.querySelector('.ptc-head')?.textContent).not.toMatch(/\d+.*(?:call|attempt)/);
   });
 
   it.each(['error', 'completed'])('reveals new %s attention but retains dismissed attention and focused source', status => {
@@ -202,5 +215,25 @@ describe.each(['default', 'classic-fallback', 'classic-rich'])('%s execution chi
         expect(node.hasAttribute('data-parent-tool-call-id')).toBe(false);
       }
     }
+  });
+});
+
+
+describe.each(Object.entries(surfaces))('%s saved-result receipt', (_name, render) => {
+  it('keeps internal references out of the header without losing original evidence', () => {
+    const node = document.createElement('div');
+    const result = { kind: 'program_value', ref: 'input_' + 'a'.repeat(32), bytes: 22144, sourceCoverage: 'unknown' };
+    const round = { programStatus: 'completed', programCode: 'return tools.keep(value);',
+      programStats: { tool_calls: 1, successful_tool_calls: 1 }, programResult: result };
+    const before = JSON.stringify(round);
+    render(node, { ...block(), round });
+    const header = node.querySelector('.ptc-head')!.textContent!;
+    expect(header).toContain('Saved program result (21.6 KiB)');
+    expect(header).not.toMatch(/input_|sourceCoverage|program_value|tools\.keep/);
+    expect(JSON.parse(node.querySelector('.ptc-result pre')!.textContent!)).toEqual(result);
+    expect(JSON.stringify(round)).toBe(before);
+    render(node, { ...block(), round: { ...round, programCode: 'return businessData;',
+      programResult: { ...result, businessField: 1 } } });
+    expect(node.querySelector('.ptc-head')!.textContent).not.toContain('Saved program result');
   });
 });

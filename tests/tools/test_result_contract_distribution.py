@@ -24,7 +24,7 @@ import sys
 from pathlib import Path
 class NoApplicationStorage(importlib.abc.MetaPathFinder):
     def find_spec(self, fullname, path=None, target=None):
-        if fullname == 'lib.storage' or fullname.startswith(('lib.storage.', 'lib.storage_sidecar')):
+        if fullname == 'lib.storage' or fullname.startswith(('lib.storage.', 'lib.storage_authority_sql')):
             raise ModuleNotFoundError('Application storage absent: ' + fullname, name=fullname)
 sys.meta_path.insert(0, NoApplicationStorage())
 original = Path.open
@@ -34,7 +34,7 @@ def no_repository_contract(self, *args, **kwargs):
     return original(self, *args, **kwargs)
 Path.open = no_repository_contract
 from lib.tools.result_value import capture_result, compose_result, CanonicalReceipt
-from lib.tool_result_query_contract import LIMITS
+from lib.tool_results.tool_result_query_contract import LIMITS
 from lib.tasks_pkg.compaction._budget import budget_tool_result_v2
 source = capture_result('original')
 receipt = CanonicalReceipt(name='read', call_id='call', canonical=source)

@@ -44,6 +44,27 @@ phase. A scheduler-level retry publishes `swarm_agent_phase` with
 permit. That clears the prior attempt's live clock without rewriting its
 result or declaring the child failed; the next admission publishes running.
 In-run provider retries retain their active phase and execution permit.
+`swarm_agent_phase` declares `detailKey`, `detailArgs`, and `attempt` for the
+same localized retry projection as the root conversation. Network recovery
+uses `stream.retryReason.networkRecovery` inside `retryCooldownWait`, without
+an attempt counter: no model request has failed while waiting for admission.
+The following recovery phase restores `stream.phase.waitingForModel`.
+
+## Swarm message receipt evidence
+
+`swarm_message_receipt` is an owner-scoped projection of a committed exact-run
+mailbox transition, not a consumption acknowledgement by itself. Its schema is
+registered in `lib/agent_core/events.py`; semantics and bounds are owned by
+`contracts/swarm_messages_v1.json` and [retained agents](../RETAINED_AGENTS.md).
+Exact run/agent/message identity reaches task replay and conversation Swarm push.
+Existing per-agent spawn snapshots carry receipt rows plus mailbox revision for
+reload and monotonic merge; missing push is not missing submission.
+
+Both paths carry exact bounded `content`, `kind`, and one-based mailbox append
+`messageSequence`, alongside submission and input-round evidence. Sequence orders
+messages within one mailbox only; it is not a consumption receipt or a global
+clock. Legacy missing content stays unavailable. Bodies never enter unrelated
+telemetry/logs and do not grant authority or create another poller.
 
 ## 1. The rule
 
@@ -382,6 +403,12 @@ The compaction pair becomes one inspectable Turn row keyed by `archiveId`; its
 settled form carries the estimated token/message counts before and after plus
 the reduction percentage. The transient `phase=compacting` beat remains
 progress text and is replaced by that receipt row rather than rendered twice.
+Problem: archive-less preflight refusals appeared at the conversation start.
+Decision: `compaction_done` may carry producer-scoped `anchorBlockId` and
+`anchorPosition` captured before planning. The fold reuses this witness when
+no start/phase exists; an existing start/phase wins. Legacy events without a
+witness keep conservative placement. Reject inferring boundaries from later
+replay segments or inventing a running phase when no summary call happened.
 
 Each entry carries a 0-based `llmRound` display anchor — its own 1-based
 `R{n}` request-tag round minus one when present, else the last model-request
@@ -506,6 +533,18 @@ Host-local root-task queueing uses `Phase.EXECUTOR_QUEUED`. Its payload carries
 still owns the task and is ordered before the worker-entry phase. Do not reuse
 it for provider throttling or API quota; those waits remain `retrying` with a
 typed reason.
+
+Retry/wait phases distinguish quota classes by their recovery profile. A
+transient per-key 429 is `retrying` + `detailKey=stream.phase.retryRateLimited`
+(queued retry, recovers in seconds). An OAuth **subscription-quota** window
+(Codex `usage_limit_reached`, resetting at a known time hours/days away) is NOT a
+transient 429: the dispatcher tags its retry with reason `Subscription quota
+reached`, which maps to `detailKey=stream.phase.subscriptionQuotaReached`
+(regardless of the 429 status), and an all-slots-cooling wait whose dominant
+slot `cooldown_reason` is `'quota'` surfaces as `Phase.WAITING_MODEL` +
+`detailKey=stream.phase.waitingQuotaReset`. Billing exhaustion (`Key balance
+exhausted`) stays a separate reason. The sidebar "rate-limited" chip excludes
+the quota keys so a multi-hour subscription hold is never rendered as 限流.
 
 Flow role phases may additionally carry `model` plus a structured `modelRoute`
 with `selectedModel`, `resolvedModel`, `role`, `tier`, and `kind`. A changed

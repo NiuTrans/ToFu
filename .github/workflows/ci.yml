@@ -30,8 +30,6 @@ jobs:
         run: uv run --frozen --extra dev python scripts/check_typing_baseline.py
       - name: Verify generated API contracts
         run: uv run --frozen --extra dev make contracts-check
-      - name: Verify current documentation catalog
-        run: uv run --frozen --extra dev make docs-check
       - name: Verify architecture boundaries and debt ratchets
         run: uv run --frozen --extra dev make architecture-check
       - name: Verify monorepo package and dependency boundaries
@@ -502,7 +500,7 @@ jobs:
       - name: Install ${{ matrix.browser }} + system deps
         run: uv run --frozen --extra test python -m playwright install --with-deps ${{ matrix.browser }}
       - name: Run E2E smoke + critical journeys (${{ matrix.browser }})
-        run: uv run --frozen --extra test pytest tests/e2e/test_e2e_smoke.py tests/e2e/test_e2e_journeys.py -m visual -ra
+        run: uv run --frozen --extra test make test-e2e
       - name: Detect browser-facing changes
         if: matrix.browser == 'chromium'
         id: visual-scope
@@ -569,3 +567,41 @@ jobs:
         run: uv lock --check && uv sync --frozen --extra test
       - name: Performance ratio gate
         run: uv run --frozen --extra test python scripts/check_perf_regression.py
+
+  # Require this stable check name in branch protection. It validates the same
+  # merge candidate as the child jobs; skipped/failed dependencies cannot hide.
+  required:
+    name: CI required
+    if: ${{ always() }}
+    needs:
+      - lint
+      - tofu-search
+      - tofu-trading
+      - test-unit
+      - test-api
+      - coverage
+      - test-slow
+      - frontend
+      - supply-chain
+      - container
+      - helm
+      - e2e
+      - visual-nightly
+      - perf-nightly
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Require successful dependencies
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          if [ "$EVENT_NAME" = schedule ]; then
+            python3 .github/scripts/check_ci_results.py <<< "$NEEDS"
+          else
+            python3 .github/scripts/check_ci_results.py --allow-skipped visual-nightly perf-nightly <<< "$NEEDS"
+          fi

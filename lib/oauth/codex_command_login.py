@@ -9,9 +9,10 @@ Dependencies: stdlib only; the same adapter ships in the paired desktop agent.
 from __future__ import annotations
 
 import atexit
+import errno
 import hashlib
 import json
-import logging
+from lib.log import get_logger
 import os
 from pathlib import Path
 import queue
@@ -27,10 +28,20 @@ _MAX_LINE_BYTES = 65536
 _CONTEXT_TTL_SECONDS = 30.0
 # Absolute age from a successful native policy read; failures never renew it.
 _CONTEXT_MAX_AGE_SECONDS = 120.0
+# A full Codex home is transient (freeing space recovers) but must never be
+# reported as a generic command failure: re-login cannot repair a full disk.
+_HOME_STORAGE_FULL_ISSUE = 'codex_home_storage_full'
 _TRANSIENT_ISSUES = frozenset({
     "codex_command_timeout", "codex_command_unavailable",
+    _HOME_STORAGE_FULL_ISSUE,
 })
-_logger = logging.getLogger(__name__)
+# Admission floor for the Codex home filesystem. The native probe spawns one
+# child and Codex itself maintains sqlite/thread state under the same home;
+# refusing distinctly just before the last inodes run out keeps the failure
+# actionable instead of a mysterious mid-protocol child exit.
+_MIN_HOME_FREE_INODES = 1024
+_MIN_HOME_FREE_BYTES = 64 * 1024 * 1024
+_logger = get_logger(__name__)
 _lock = threading.Lock()
 _cached: tuple[tuple, float, dict] | None = None
 _verified: tuple[tuple, float, dict, tuple] | None = None
@@ -64,6 +75,42 @@ def _environment_revision(environment: dict, home: Path) -> str:
 
 class _CommandFailure(Exception):
     """Non-secret protocol failure; subprocess/parser text never escapes."""
+
+
+def _home_storage_full(environment: dict, home: Path) -> bool:
+    """True when the Codex home filesystem cannot accept new files.
+
+    Side-effect free: one statvfs per candidate, no writes. Filesystems that
+    do not report inode capacity (``f_files == 0``, e.g. some FUSE mounts)
+    are treated as unknown, never as full. Absence of statvfs (Windows)
+    also reports unknown: the file adapter owns that platform.
+    """
+    statvfs = getattr(os, 'statvfs', None)
+    if statvfs is None:
+        return False
+    candidates = [home]
+    codex_home = environment.get('CODEX_HOME')
+    if codex_home:
+        candidates.append(Path(codex_home))
+    else:
+        candidates.append(home / '.codex')
+    for candidate in candidates:
+        try:
+            probe = candidate if candidate.is_dir() else candidate.parent
+            info = statvfs(probe)
+        except (OSError, ValueError):
+            continue
+        if getattr(info, 'f_files', 0) and info.f_favail < _MIN_HOME_FREE_INODES:
+            return True
+        if not getattr(info, 'f_blocks', 0):
+            continue
+        try:
+            free_bytes = info.f_bavail * info.f_frsize
+        except (AttributeError, OverflowError):
+            continue
+        if free_bytes < _MIN_HOME_FREE_BYTES:
+            return True
+    return False
 
 
 def _launch(environment: dict, home: Path) -> list[str] | None:
@@ -130,6 +177,12 @@ def _protocol(environment: dict, home: Path, *, renew_root: Path | None = None,
     command = _launch(environment, home)
     if command is None:
         raise _CommandFailure('codex_command_missing')
+    if _home_storage_full(environment, home):
+        # Fail before spawning: neither the probe child nor Codex's own
+        # sqlite/thread state under this home can create files. The caller
+        # reports this distinctly so the user frees space instead of
+        # re-logging in to no effect.
+        raise _CommandFailure(_HOME_STORAGE_FULL_ISSUE)
     inbox: queue.Queue = queue.Queue(maxsize=16)
     failed = threading.Event()
     # Do not select an unrelated API-key/access-token/WIF identity from Tofu's
@@ -193,8 +246,14 @@ def _protocol(environment: dict, home: Path, *, renew_root: Path | None = None,
                 message = inbox.get(timeout=min(0.1, max(0.001, deadline - time.monotonic())))
             except queue.Empty:
                 if process.poll() is not None:
-                    raise _CommandFailure('codex_command_missing' if process.returncode == 127
-                                          else 'codex_command_unavailable')
+                    if process.returncode == 127:
+                        raise _CommandFailure('codex_command_missing')
+                    # Codex itself keeps sqlite/thread state under its home;
+                    # a disk-full death there must not read as a broken
+                    # command (re-login cannot repair it).
+                    if _home_storage_full(environment, home):
+                        raise _CommandFailure(_HOME_STORAGE_FULL_ISSUE)
+                    raise _CommandFailure('codex_command_unavailable')
                 continue
             if message.get('id') != wire_ids[request_id]:
                 continue
@@ -427,7 +486,8 @@ def command_context(*, environment=None, home: Path | None = None,
         if not cached[2].get('shared_login_issue') and verified_context() is None:
             return False
         return not (bypass_failure and cached[2].get('shared_login_issue')
-                    in {'codex_command_timeout', 'codex_command_unavailable'})
+                    in {'codex_command_timeout', 'codex_command_unavailable',
+                        _HOME_STORAGE_FULL_ISSUE})
 
     def run_probe(probe_deadline):
         global _cached, _verified
@@ -436,7 +496,12 @@ def command_context(*, environment=None, home: Path | None = None,
             context = _exchange(environment, home, timeout_seconds=max(0, probe_deadline - now))
         except _CommandFailure as error:
             context = {'shared_login_issue': str(error)}
-        except (OSError, ValueError, TypeError, RuntimeError):
+        except OSError as error:
+            # A spawn/pipe failure with ENOSPC is the full home, not a
+            # broken command; anything else stays a generic failure.
+            context = {'shared_login_issue': _HOME_STORAGE_FULL_ISSUE
+                       if error.errno == errno.ENOSPC else 'codex_command_unavailable'}
+        except (ValueError, TypeError, RuntimeError):
             context = {'shared_login_issue': 'codex_command_unavailable'}
         if (not context.get('shared_login_issue') and _verified
                 and _verified[0] == signature
@@ -485,10 +550,13 @@ def command_context(*, environment=None, home: Path | None = None,
                 worker = threading.Thread(target=revalidate, name='codex-metadata-revalidation', daemon=True)
                 _metadata_probe = worker
                 worker.start()
-            except (OSError, RuntimeError):
+            except (OSError, RuntimeError) as error:
                 _metadata_probe = None
+                issue = (_HOME_STORAGE_FULL_ISSUE
+                         if getattr(error, 'errno', None) == errno.ENOSPC
+                         else 'codex_command_unavailable')
                 _cached = (signature, time.monotonic() + 5.0,
-                           {'shared_login_issue': 'codex_command_unavailable'})
+                           {'shared_login_issue': issue})
                 _lock.release()  # Optional worker admission must not kill a healthy read.
             except BaseException:
                 _metadata_probe = None
@@ -537,7 +605,10 @@ def renew_command_login(root: Path, *, expected_account_id: str, settings: dict,
             return _exchange(environment, home, renew_root=root, timeout_seconds=remaining)
         except _CommandFailure as error:
             return {'shared_login_issue': str(error)}
-        except (OSError, ValueError, TypeError, RuntimeError):
+        except OSError as error:
+            return {'shared_login_issue': _HOME_STORAGE_FULL_ISSUE
+                    if error.errno == errno.ENOSPC else 'codex_command_unavailable'}
+        except (ValueError, TypeError, RuntimeError):
             return {'shared_login_issue': 'codex_command_unavailable'}
     finally:
         _lock.release()

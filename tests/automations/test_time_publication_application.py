@@ -2,6 +2,7 @@
 import time
 import pytest
 from tests.storage.test_storage_application_contract import application_storage as application_storage
+from tests.storage.test_storage_application_contract import application_storage_owner_id as application_storage_owner_id
 from tests.automations.test_time_publication import prepared, query
 
 pytestmark=pytest.mark.api

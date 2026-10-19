@@ -1,0 +1,1156 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "tofu:rich-response:v1",
+  "title": "Native rich response v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "title",
+    "blocks"
+  ],
+  "properties": {
+    "version": {
+      "const": 1
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "summary": {
+      "type": "string",
+      "maxLength": 2000
+    },
+    "blocks": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "oneOf": [
+          {
+            "$ref": "#/$defs/comparison"
+          },
+          {
+            "$ref": "#/$defs/chart"
+          },
+          {
+            "$ref": "#/$defs/table"
+          },
+          {
+            "$ref": "#/$defs/gallery"
+          },
+          {
+            "$ref": "#/$defs/evidence"
+          },
+          {
+            "$ref": "#/$defs/artifact"
+          },
+          {
+            "$ref": "#/$defs/actions"
+          },
+          {
+            "$ref": "#/$defs/timeline"
+          },
+          {
+            "$ref": "#/$defs/data_chart"
+          },
+          {
+            "$ref": "#/$defs/citations"
+          },
+          {
+            "$ref": "#/$defs/choice_prompt"
+          },
+          {
+            "$ref": "#/$defs/metric_grid"
+          },
+          {
+            "$ref": "#/$defs/workflow"
+          },
+          {
+            "$ref": "#/$defs/notice"
+          },
+          {
+            "$ref": "#/$defs/resource_panel"
+          },
+          {
+            "$ref": "#/$defs/form_prompt"
+          }
+        ]
+      }
+    },
+    "layout": {
+      "$ref": "#/$defs/layout"
+    }
+  },
+  "$defs": {
+    "choice_prompt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "id",
+        "title",
+        "interactionId"
+      ],
+      "properties": {
+        "type": {
+          "const": "choice_prompt"
+        },
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "title": {
+          "$ref": "#/$defs/text"
+        },
+        "interactionId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[A-Za-z0-9_-]+$"
+        }
+      }
+    },
+    "citationSource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "title",
+        "url"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000
+        },
+        "url": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "publisher": {
+          "$ref": "#/$defs/text"
+        },
+        "excerpt": {
+          "type": "string",
+          "maxLength": 4000
+        }
+      }
+    },
+    "citations": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "id",
+        "title",
+        "sources"
+      ],
+      "properties": {
+        "type": {
+          "const": "citations"
+        },
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "title": {
+          "$ref": "#/$defs/text"
+        },
+        "sources": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/citationSource"
+          }
+        }
+      }
+    },
+    "chartNumber": {
+      "type": "number",
+      "minimum": -1000000000000.0,
+      "maximum": 1000000000000.0
+    },
+    "chartLabel": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160
+    },
+    "chartPoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "value"
+      ],
+      "properties": {
+        "value": {
+          "$ref": "#/$defs/chartNumber"
+        },
+        "x": {
+          "$ref": "#/$defs/chartNumber"
+        },
+        "label": {
+          "$ref": "#/$defs/chartLabel"
+        }
+      }
+    },
+    "chartSeries": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "label",
+        "points"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "label": {
+          "$ref": "#/$defs/chartLabel"
+        },
+        "points": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/chartPoint"
+          }
+        }
+      }
+    },
+    "data_chart": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "id",
+        "title",
+        "kind",
+        "series"
+      ],
+      "properties": {
+        "type": {
+          "const": "data_chart"
+        },
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "title": {
+          "$ref": "#/$defs/text"
+        },
+        "kind": {
+          "enum": [
+            "line",
+            "scatter",
+            "bar",
+            "pie"
+          ]
+        },
+        "series": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/chartSeries"
+          }
+        },
+        "xLabel": {
+          "$ref": "#/$defs/chartLabel"
+        },
+        "yLabel": {
+          "$ref": "#/$defs/chartLabel"
+        },
+        "xUnit": {
+          "type": "string",
+          "maxLength": 32
+        },
+        "yUnit": {
+          "type": "string",
+          "maxLength": 32
+        }
+      }
+    },
+    "time": {
+      "type": "number",
+      "minimum": -1000000000.0,
+      "maximum": 1000000000.0
+    },
+    "timelineAxis": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "start",
+        "end",
+        "unit"
+      ],
+      "properties": {
+        "start": {
+          "$ref": "#/$defs/time"
+        },
+        "end": {
+          "$ref": "#/$defs/time"
+        },
+        "unit": {
+          "enum": [
+            "s",
+            "ms"
+          ]
+        }
+      }
+    },
+    "timelineInterval": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "start",
+        "end",
+        "label"
+      ],
+      "properties": {
+        "start": {
+          "$ref": "#/$defs/time"
+        },
+        "end": {
+          "$ref": "#/$defs/time"
+        },
+        "label": {
+          "$ref": "#/$defs/text"
+        }
+      }
+    },
+    "timelineLane": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "label",
+        "kind",
+        "intervals"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "label": {
+          "$ref": "#/$defs/text"
+        },
+        "kind": {
+          "enum": [
+            "video",
+            "audio",
+            "photo",
+            "other"
+          ]
+        },
+        "intervals": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/timelineInterval"
+          }
+        }
+      }
+    },
+    "timelineMarker": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "time",
+        "label"
+      ],
+      "properties": {
+        "time": {
+          "$ref": "#/$defs/time"
+        },
+        "label": {
+          "$ref": "#/$defs/text"
+        },
+        "laneId": {
+          "$ref": "#/$defs/id"
+        }
+      }
+    },
+    "timeline": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "id",
+        "title",
+        "axis",
+        "lanes",
+        "markers"
+      ],
+      "properties": {
+        "type": {
+          "const": "timeline"
+        },
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "title": {
+          "$ref": "#/$defs/text"
+        },
+        "axis": {
+          "$ref": "#/$defs/timelineAxis"
+        },
+        "lanes": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/timelineLane"
+          }
+        },
+        "markers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/timelineMarker"
+          }
+        }
+      }
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{1,64}$"
+    },
+    "text": {
+      "type": "string",
+      "maxLength": 1000
+    },
+    "asset": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "alt"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "alt": {
+          "$ref": "#/$defs/text"
+        },
+        "caption": {
+          "$ref": "#/$defs/text"
+        }
+      }
+    },
+    "metric": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "label",
+        "baseline",
+        "candidate",
+        "unit",
+        "direction",
+        "status"
+      ],
+      "properties": {
+        "label": {
+          "$ref": "#/$defs/text"
+        },
+        "baseline": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1e+100
+        },
+        "candidate": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1e+100
+        },
+        "unit": {
+          "type": "string",
+          "maxLength": 32
+        },
+        "direction": {
+          "enum": [
+            "lower",
+            "higher"
+          ]
+        },
+        "status": {
+          "enum": [
+            "passed",
+            "failed",
+            "unknown"
+          ]
+        },
+        "budget": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1e+100
+        },
+        "note": {
+          "$ref": "#/$defs/text"
+        }
+      }
+    },
+    "comparison": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "id",
+        "title",
+        "baselineLabel",
+        "candidateLabel",
+        "metrics"
+      ],
+      "properties": {
+        "type": {
+          "const": "comparison"
+        },
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "title": {
+          "$ref": "#/$defs/text"
+        },
+        "baselineLabel": {
+          "$ref": "#/$defs/text"
+        },
+        "candidateLabel": {
+          "$ref": "#/$defs/text"
+        },
+        "metrics": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/metric"
+          }
+        }
+      }
+    },
+    "chart": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "id",
+        "title",
+        "metrics"
+      ],
+      "properties": {
+        "type": {
+          "const": "chart"
+        },
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "title": {
+          "$ref": "#/$defs/text"
+        },
+        "metrics": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/metric"
+          }
+        },
+        "baselineLabel": {
+          "$ref": "#/$defs/text"
+        },
+        "candidateLabel": {
+          "$ref": "#/$defs/text"
+        }
+      }
+    },
+    "table": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "id",
+        "title",
+        "columns",
+        "rows"
+      ],
+      "properties": {
+        "type": {
+          "const": "table"
+        },
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "title": {
+          "$ref": "#/$defs/text"
+        },
+        "columns": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/text"
+          }
+        },
+        "rows": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/text"
+            }
+          }
+        }
+      }
+    },
+    "gallery": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "id",
+        "title",
+        "images"
+      ],
+      "properties": {
+        "type": {
+          "const": "image_gallery"
+        },
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "title": {
+          "$ref": "#/$defs/text"
+        },
+        "images": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/asset"
+          }
+        }
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "id",
+        "title",
+        "items"
+      ],
+      "properties": {
+        "type": {
+          "const": "evidence"
+        },
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "title": {
+          "$ref": "#/$defs/text"
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "label",
+              "value"
+            ],
+            "properties": {
+              "label": {
+                "$ref": "#/$defs/text"
+              },
+              "value": {
+                "$ref": "#/$defs/text"
+              }
+            }
+          }
+        }
+      }
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "id",
+        "title",
+        "artifactId"
+      ],
+      "properties": {
+        "type": {
+          "const": "artifact_reference"
+        },
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "title": {
+          "$ref": "#/$defs/text"
+        },
+        "artifactId": {
+          "$ref": "#/$defs/id"
+        }
+      }
+    },
+    "action": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "label",
+        "targetId"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "open_asset",
+            "download_asset",
+            "open_artifact",
+            "download_artifact"
+          ]
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "targetId": {
+          "$ref": "#/$defs/id"
+        }
+      }
+    },
+    "actions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "id",
+        "title",
+        "actions"
+      ],
+      "properties": {
+        "type": {
+          "const": "action_panel"
+        },
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "title": {
+          "$ref": "#/$defs/text"
+        },
+        "actions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/action"
+          }
+        }
+      }
+    },
+    "tone": {
+      "enum": [
+        "neutral",
+        "info",
+        "success",
+        "warning",
+        "error"
+      ]
+    },
+    "layoutGroup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "title",
+        "blocks"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "title": {
+          "$ref": "#/$defs/text"
+        },
+        "blocks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/id"
+          }
+        }
+      }
+    },
+    "layout": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mode",
+        "groups"
+      ],
+      "properties": {
+        "mode": {
+          "enum": [
+            "stack",
+            "grid",
+            "tabs"
+          ]
+        },
+        "groups": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/layoutGroup"
+          }
+        },
+        "density": {
+          "enum": [
+            "comfortable",
+            "compact"
+          ]
+        }
+      }
+    },
+    "indicator": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "label",
+        "value",
+        "unit"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "label": {
+          "$ref": "#/$defs/text"
+        },
+        "value": {
+          "oneOf": [
+            {
+              "type": "number",
+              "minimum": -1000000000000.0,
+              "maximum": 1000000000000.0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "unit": {
+          "type": "string",
+          "maxLength": 32
+        },
+        "description": {
+          "$ref": "#/$defs/text"
+        },
+        "tone": {
+          "$ref": "#/$defs/tone"
+        },
+        "maximum": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 1000000000000.0
+        },
+        "history": {
+          "type": "array",
+          "items": {
+            "type": "number",
+            "minimum": -1000000000000.0,
+            "maximum": 1000000000000.0
+          }
+        }
+      }
+    },
+    "metric_grid": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "id",
+        "title",
+        "items"
+      ],
+      "properties": {
+        "type": {
+          "const": "metric_grid"
+        },
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "title": {
+          "$ref": "#/$defs/text"
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/indicator"
+          }
+        }
+      }
+    },
+    "workflowStep": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "label",
+        "state"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "label": {
+          "$ref": "#/$defs/text"
+        },
+        "state": {
+          "enum": [
+            "pending",
+            "running",
+            "completed",
+            "blocked",
+            "failed",
+            "skipped"
+          ]
+        },
+        "detail": {
+          "$ref": "#/$defs/text"
+        }
+      }
+    },
+    "workflow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "id",
+        "title",
+        "steps"
+      ],
+      "properties": {
+        "type": {
+          "const": "workflow"
+        },
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "title": {
+          "$ref": "#/$defs/text"
+        },
+        "steps": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/workflowStep"
+          }
+        },
+        "next": {
+          "$ref": "#/$defs/text"
+        }
+      }
+    },
+    "notice": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "id",
+        "title",
+        "tone",
+        "message"
+      ],
+      "properties": {
+        "type": {
+          "const": "notice"
+        },
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "title": {
+          "$ref": "#/$defs/text"
+        },
+        "tone": {
+          "$ref": "#/$defs/tone"
+        },
+        "message": {
+          "$ref": "#/$defs/text"
+        },
+        "detail": {
+          "$ref": "#/$defs/text"
+        }
+      }
+    },
+    "resourceRow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "queue",
+        "kind",
+        "name",
+        "unit",
+        "total",
+        "allocated",
+        "available"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "queue": {
+          "$ref": "#/$defs/text"
+        },
+        "kind": {
+          "enum": [
+            "gpu",
+            "cpu",
+            "memory",
+            "storage",
+            "other"
+          ]
+        },
+        "name": {
+          "$ref": "#/$defs/text"
+        },
+        "unit": {
+          "type": "string",
+          "maxLength": 32
+        },
+        "total": {
+          "oneOf": [
+            {
+              "type": "number",
+              "minimum": -1000000000000.0,
+              "maximum": 1000000000000.0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "allocated": {
+          "oneOf": [
+            {
+              "type": "number",
+              "minimum": -1000000000000.0,
+              "maximum": 1000000000000.0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "available": {
+          "oneOf": [
+            {
+              "type": "number",
+              "minimum": -1000000000000.0,
+              "maximum": 1000000000000.0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "pending": {
+          "oneOf": [
+            {
+              "type": "number",
+              "minimum": -1000000000000.0,
+              "maximum": 1000000000000.0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "resourceSnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "fetchedAt",
+        "rows"
+      ],
+      "properties": {
+        "fetchedAt": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "rows": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/resourceRow"
+          }
+        },
+        "note": {
+          "$ref": "#/$defs/text"
+        }
+      }
+    },
+    "resource_panel": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "id",
+        "title",
+        "provider"
+      ],
+      "properties": {
+        "type": {
+          "const": "resource_panel"
+        },
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "title": {
+          "$ref": "#/$defs/text"
+        },
+        "provider": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[A-Za-z0-9_-]+$"
+        },
+        "snapshot": {
+          "$ref": "#/$defs/resourceSnapshot"
+        },
+        "connection": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9_.-]+$"
+        },
+        "queue": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        }
+      }
+    },
+    "form_prompt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "id",
+        "title",
+        "interactionId"
+      ],
+      "properties": {
+        "type": {
+          "const": "form_prompt"
+        },
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "title": {
+          "$ref": "#/$defs/text"
+        },
+        "interactionId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[A-Za-z0-9_-]+$"
+        }
+      }
+    }
+  }
+}

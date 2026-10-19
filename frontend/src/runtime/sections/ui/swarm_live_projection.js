@@ -91,7 +91,10 @@ function _handleSwarmPhase(ev, c) {
             status: "searching",
             toolName: "spawn_agents",
 
-            taskId: swarmFrameExecutionTaskId(ev) || ev.swarmId || ev.swarm_id || undefined,
+            // A legacy mirror may carry only conversation routing and a run ID.
+            // Leave its producer unknown until the durable launch supplies it;
+            // inventing taskId=runId prevents scoped reconciliation to that row.
+            taskId: swarmFrameExecutionTaskId(ev) || undefined,
             attemptId: ev.attemptId || undefined,
             _swarmRunId: ev.swarmId || ev.swarm_id || undefined,
             _swarm: true,

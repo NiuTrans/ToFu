@@ -37,7 +37,7 @@ from lib.idempotency import idempotent_post
 from lib.ids import short_id
 from lib.log import audit_log, get_logger
 from lib.openapi import media_responses, api_meta
-from lib.rate_limit_api import record_tokens
+from lib.rate_limit.rate_limit_api import record_tokens
 from lib.usage_tracker import record as record_usage
 from lib.request_parser import async_parse_body, parse_body
 

@@ -105,24 +105,14 @@ def test_stateless_caller_keeps_request_local_result():
             'stateless assembly must not record sticky state')
 
 
-def test_sticky_state_capacity_is_bounded():
-    """The per-conversation store evicts its oldest entry at capacity — a
-    long-lived server cannot grow it without bound."""
-    monkey_capacity = 2
-    original = routing._sticky_state_capacity
-    routing._sticky_state_capacity = lambda: monkey_capacity
-    try:
-        routing.routed_native_spec_keys(_ctx('搜索', conv_id='cv-cap-1'))
-        routing.routed_native_spec_keys(_ctx('搜索', conv_id='cv-cap-2'))
-        routing.routed_native_spec_keys(_ctx('搜索', conv_id='cv-cap-3'))
-    finally:
-        routing._sticky_state_capacity = original
-    with routing._STICKY_LOCK:
-        assert len(routing._STICKY_STATE) <= monkey_capacity, (
-            f'sticky state exceeded its capacity bound: '
-            f'{len(routing._STICKY_STATE)}')
-        assert '1:cv-cap-1' not in routing._STICKY_STATE, (
-            'oldest entry should have been evicted first')
+def test_sticky_state_survives_unrelated_conversation_churn():
+    context = _ctx('搜索', conv_id='cv-retained', owner=1)
+    first = routing._union_conversation_sticky(context, {'original-tool'})
+    assert first == {'original-tool'}
+    for index in range(4097):
+        routing._union_conversation_sticky(_ctx('', conv_id=f'cv-{index}', owner=1), {'other-tool'})
+    assert routing._union_conversation_sticky(context, {'new-tool'}) == {'original-tool', 'new-tool'}
+    assert routing._union_conversation_sticky(_ctx('', conv_id='cv-retained', owner=2), {'foreign-tool'}) == {'foreign-tool'}
 
 
 def main():
@@ -132,7 +122,7 @@ def main():
         test_sticky_union_keeps_earlier_families,
         test_sticky_union_is_owner_and_conversation_scoped,
         test_stateless_caller_keeps_request_local_result,
-        test_sticky_state_capacity_is_bounded,
+        test_sticky_state_survives_unrelated_conversation_churn,
     ]
     for fn in tests:
         routing._reset_sticky_exposure_for_tests()

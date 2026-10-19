@@ -14,7 +14,6 @@ use crate::block::BlockId;
 use crate::entity::EntityKey;
 use crate::generated_tofudb_ir::{
     MAX_ENTITY_INLINE_VALUE_BYTES, MAX_ENTITY_RANGE_ROWS, MAX_MIGRATION_DOCUMENT_BYTES,
-    MAX_TRANSACTION_IR_LITERAL_BYTES,
 };
 
 pub(crate) fn record_composite_key(namespace: &str, key: &str) -> io::Result<Vec<u8>> {
@@ -56,17 +55,17 @@ const BLOB_REFERENCE_BYTES: usize = 32 + 32;
 const MAX_PHYSICAL_LOGICAL_BYTES: u64 = 1024 * 1024 * 1024;
 
 #[derive(Clone, Debug)]
-struct Document {
-    namespace: String,
-    key: String,
+struct Document<'a> {
+    namespace: std::borrow::Cow<'a, str>,
+    key: std::borrow::Cow<'a, str>,
     version: u64,
     updated_at_ms: u64,
-    value: DocumentValue,
+    value: DocumentValue<'a>,
 }
 
 #[derive(Clone, Debug)]
-enum DocumentValue {
-    Inline(Vec<u8>),
+enum DocumentValue<'a> {
+    Inline(std::borrow::Cow<'a, [u8]>),
     Blob(BlobReference),
 }
 
@@ -142,7 +141,7 @@ fn read_u16(input: &[u8], offset: &mut usize) -> io::Result<usize> {
     Ok(u16::from_le_bytes(take(input, offset, 2)?.try_into().unwrap()) as usize)
 }
 
-impl Document {
+impl<'a> Document<'a> {
     fn encode(&self) -> io::Result<Vec<u8>> {
         let logical_bytes = match &self.value {
             DocumentValue::Inline(value) => value.len() as u64,
@@ -184,7 +183,7 @@ impl Document {
         Ok(output)
     }
 
-    fn decode(input: &[u8]) -> io::Result<Self> {
+    fn decode(input: &'a [u8]) -> io::Result<Self> {
         if input.len() < FIXED_HEADER_BYTES || &input[..8] != MAGIC {
             return Err(invalid_data("versioned document magic mismatch"));
         }
@@ -202,15 +201,15 @@ impl Document {
         }
         let namespace = std::str::from_utf8(take(input, &mut offset, namespace_bytes)?)
             .map_err(|_| invalid_data("versioned document namespace is not UTF-8"))?
-            .to_owned();
+            .into();
         let key = std::str::from_utf8(take(input, &mut offset, key_bytes)?)
             .map_err(|_| invalid_data("versioned document key is not UTF-8"))?
-            .to_owned();
+            .into();
         let value = match storage {
             INLINE => {
                 let length = usize::try_from(logical_bytes)
                     .map_err(|_| invalid_data("versioned document length overflow"))?;
-                DocumentValue::Inline(take(input, &mut offset, length)?.to_vec())
+                DocumentValue::Inline(take(input, &mut offset, length)?.into())
             }
             BLOB if logical_bytes <= MAX_PHYSICAL_LOGICAL_BYTES => {
                 let blob_id = BlobId(take(input, &mut offset, 32)?.try_into().unwrap());
@@ -237,14 +236,17 @@ impl Document {
 }
 
 /// Mutable bytes consume and discard the completed blob witness.
-enum MaterializedDocumentValue {
-    Inline(Vec<u8>),
+enum MaterializedDocumentValue<'a> {
+    Inline(&'a [u8]),
     Blob(crate::blob::VerifiedBlobBytes),
 }
-impl MaterializedDocumentValue {
+impl MaterializedDocumentValue<'_> {
+    fn bytes(&self) -> &[u8] {
+        match self { Self::Inline(bytes) => bytes, Self::Blob(blob) => blob.bytes() }
+    }
     fn into_bytes(self) -> Vec<u8> {
         match self {
-            Self::Inline(bytes) => bytes,
+            Self::Inline(bytes) => bytes.to_vec(),
             Self::Blob(blob) => blob.into_bytes(),
         }
     }
@@ -261,13 +263,13 @@ fn materialize_value(
         .map(MaterializedDocumentValue::into_bytes)
 }
 
-fn materialize_value_with_witness(
+fn materialize_value_with_witness<'a>(
     database: &AuthorityDatabase,
     tenant_id: u64,
     owner_user_id: u64,
-    value: &DocumentValue,
+    value: &'a DocumentValue<'_>,
     maximum_bytes: usize,
-) -> io::Result<MaterializedDocumentValue> {
+) -> io::Result<MaterializedDocumentValue<'a>> {
     match value {
         DocumentValue::Inline(value) => {
             if value.len() > maximum_bytes {
@@ -275,7 +277,7 @@ fn materialize_value_with_witness(
                     "versioned document inline exceeds response bound",
                 ));
             }
-            Ok(MaterializedDocumentValue::Inline(value.clone()))
+            Ok(MaterializedDocumentValue::Inline(value.as_ref()))
         }
         DocumentValue::Blob(reference) => {
             let reader = database.reachable_blob_reader(tenant_id, owner_user_id, *reference)?;
@@ -301,7 +303,7 @@ pub(crate) fn materialize_stored_document(
         owner_user_id,
         stored,
         namespace,
-        MAX_TRANSACTION_IR_LITERAL_BYTES,
+        usize::MAX,
     )
 }
 
@@ -348,7 +350,7 @@ fn materialize_stored_bytes_bounded(
         &document.value,
         maximum_bytes,
     )?;
-    Ok((document.key, value))
+    Ok((document.key.into_owned(), value))
 }
 
 pub(crate) fn materialize_stored_document_bounded(
@@ -376,10 +378,17 @@ pub(crate) fn materialize_stored_document_value_bounded(
     namespace: &str,
     maximum_bytes: usize,
 ) -> io::Result<(String, Value, usize)> {
-    let (key, decoded, bytes) = materialize_stored_document_value_and_bytes_bounded(
-        database, tenant_id, owner_user_id, stored, namespace, maximum_bytes,
-    )?;
-    Ok((key, decoded, bytes.len()))
+    let _profile = crate::request_profile::Probe::new(crate::request_profile::DOCUMENT_MATERIALIZE);
+    let document = Document::decode(stored)?;
+    if document.namespace != namespace {
+        return Err(invalid_data("versioned document identity mismatch"));
+    }
+    let materialized = materialize_value_with_witness(
+        database, tenant_id, owner_user_id, &document.value, maximum_bytes)?;
+    let bytes = materialized.bytes();
+    let decoded = serde_json::from_slice::<Value>(bytes)
+        .map_err(|_| invalid_data("versioned document value is not JSON"))?;
+    Ok((document.key.into_owned(), decoded, bytes.len()))
 }
 
 /// One scoped read and one parse; retain the original bytes when a consumer
@@ -438,13 +447,13 @@ pub(crate) fn materialize_stored_document_for_catalog(
 /// recorded key without the per-namespace label check the hot identity path
 /// enforces.
 pub(crate) fn stored_document_logical_key_for_catalog(stored: &[u8]) -> io::Result<String> {
-    Ok(Document::decode(stored)?.key)
+    Ok(Document::decode(stored)?.key.into_owned())
 }
 
 /// Validated physical identity for owners admitting multiple explicit codecs.
 /// This does not fetch or decode the document's JSON/blob value.
 pub(crate) fn stored_document_namespace(stored: &[u8]) -> io::Result<String> {
-    Ok(Document::decode(stored)?.namespace)
+    Ok(Document::decode(stored)?.namespace.into_owned())
 }
 
 /// Header-only projection: the document's logical key without decoding or
@@ -455,7 +464,7 @@ pub(crate) fn stored_document_logical_key(stored: &[u8], namespace: &str) -> io:
     if document.namespace != namespace {
         return Err(invalid_data("versioned document identity mismatch"));
     }
-    Ok(document.key)
+    Ok(document.key.into_owned())
 }
 
 pub(crate) fn stored_document_version(
@@ -604,8 +613,8 @@ pub(crate) fn clone_stored_document(
         transaction,
         request.destination_key,
         Document {
-            namespace: request.namespace.to_owned(),
-            key: request.destination_logical_key.to_owned(),
+            namespace: request.namespace.to_owned().into(),
+            key: request.destination_logical_key.to_owned().into(),
             version: 1,
             updated_at_ms: request.updated_at_ms,
             value: source.value,
@@ -626,7 +635,7 @@ pub(crate) fn get_value_with_version(
     namespace: &str,
     logical_key: &str,
 ) -> io::Result<Option<(Vec<u8>, u64)>> {
-    get_value_with_version_bounded(database, transaction, key, namespace, logical_key, MAX_TRANSACTION_IR_LITERAL_BYTES)
+    get_value_with_version_bounded(database, transaction, key, namespace, logical_key, usize::MAX)
 }
 
 pub(crate) fn get_value_with_version_bounded(
@@ -649,7 +658,7 @@ pub(crate) fn get_value_with_version_bounded(
         transaction.tenant_id(),
         transaction.owner_user_id(),
         &document.value,
-        maximum_bytes.min(MAX_TRANSACTION_IR_LITERAL_BYTES),
+        maximum_bytes,
     )?;
     Ok(Some((value, document.version)))
 }
@@ -675,7 +684,7 @@ pub(crate) fn put_known_version_returning_envelope(
         expected_version,
         updated_at_ms,
     } = request;
-    if updated_at_ms == 0 || value_json.len() > MAX_TRANSACTION_IR_LITERAL_BYTES {
+    if updated_at_ms == 0 {
         return Err(invalid_input("invalid versioned document mutation"));
     }
     if expected_version.is_some_and(|expected| expected != known_current_version) {
@@ -693,8 +702,8 @@ pub(crate) fn put_known_version_returning_envelope(
         transaction.owner_user_id(),
     )?;
     let stored_envelope = Document {
-        namespace,
-        key: logical_key,
+        namespace: namespace.into(),
+        key: logical_key.into(),
         version,
         updated_at_ms,
         value,
@@ -728,7 +737,7 @@ pub(crate) fn get_with_response_proof(
     key: &EntityKey, namespace: &str, logical_key: &str,
 ) -> io::Result<Option<DocumentProjection>> {
     get_projection_with_blob_owner_bounded(database, transaction, key, namespace,
-        logical_key, transaction.owner_user_id(), MAX_TRANSACTION_IR_LITERAL_BYTES)
+        logical_key, transaction.owner_user_id(), usize::MAX)
 }
 
 #[cfg(test)]
@@ -810,7 +819,7 @@ mod tests {
             &mut transaction,
             put_request("cached", serde_json::to_vec(&value).unwrap(), Some(0)),
             OWNER,
-            MAX_TRANSACTION_IR_LITERAL_BYTES,
+            usize::MAX,
         )
         .unwrap()
         .1;
@@ -829,7 +838,7 @@ mod tests {
                 OWNER,
                 &document,
                 false,
-                MAX_TRANSACTION_IR_LITERAL_BYTES,
+                usize::MAX,
             )
             .unwrap();
             assert!(output.json_proven());
@@ -852,7 +861,7 @@ mod tests {
                     owner,
                     &document,
                     false,
-                    MAX_TRANSACTION_IR_LITERAL_BYTES
+                    usize::MAX
                 )
                 .err()
                 .unwrap()
@@ -877,7 +886,7 @@ mod tests {
             &mut transaction,
             put_request("cached", serde_json::to_vec(&changed).unwrap(), Some(1)),
             OWNER,
-            MAX_TRANSACTION_IR_LITERAL_BYTES,
+            usize::MAX,
         )
         .unwrap()
         .1;
@@ -889,7 +898,7 @@ mod tests {
             OWNER,
             &changed_document,
             false,
-            MAX_TRANSACTION_IR_LITERAL_BYTES,
+            usize::MAX,
         )
         .unwrap();
         assert_eq!(
@@ -1000,7 +1009,7 @@ mod tests {
         for bytes in cases {
             let expected = serde_json::from_slice::<Value>(&bytes);
             let stored = Document { namespace: "conversations".into(), key: "source".into(),
-                version: 1, updated_at_ms: 1, value: DocumentValue::Inline(bytes.clone()),
+                version: 1, updated_at_ms: 1, value: DocumentValue::Inline(bytes.clone().into()),
             }.encode().unwrap();
             let byte_read = materialize_stored_document_bounded(
                 &database, TENANT, OWNER, &stored, "conversations", bytes.len(),
@@ -1053,8 +1062,7 @@ mod tests {
                 version: 1,
                 updated_at_ms: 1,
                 value: DocumentValue::Inline(
-                    format!("{}null{}", "[".repeat(depth), "]".repeat(depth)).into_bytes(),
-                ),
+                    format!("{}null{}", "[".repeat(depth), "]".repeat(depth)).into_bytes().into()),
             };
             database
                 .entity_put(&mut transaction, key.clone(), document.encode().unwrap())
@@ -1100,7 +1108,7 @@ mod tests {
             key: "row".into(),
             version: 1,
             updated_at_ms: 1,
-            value: DocumentValue::Inline(b" null ".to_vec()),
+            value: DocumentValue::Inline(b" null ".to_vec().into()),
         };
         database
             .entity_put(&mut transaction, key.clone(), document.encode().unwrap())
@@ -1132,7 +1140,7 @@ mod tests {
                     key: "key\n😀".into(),
                     version: u64::MAX,
                     updated_at_ms: u64::MAX,
-                    value: DocumentValue::Inline(bytes),
+                    value: DocumentValue::Inline(bytes.into()),
                 };
                 for include_key in [false, true] {
                     match project_document_with_proof(
@@ -1177,7 +1185,7 @@ mod tests {
                 key: "key".into(),
                 version: 1,
                 updated_at_ms: 1,
-                value: DocumentValue::Inline(bytes.to_vec()),
+                value: DocumentValue::Inline(bytes.to_vec().into()),
             };
             let output =
                 project_document_with_proof(&database, TENANT, OWNER, &document, false, 8192).unwrap();
@@ -1200,8 +1208,8 @@ mod tests {
         ];
         for bytes in values {
             for include_key in [false, true] {
-                let document = Document { namespace: "projection".to_owned(), key: "key\n\\\"😀".to_owned(),
-                    version: u64::MAX, updated_at_ms: u64::MAX, value: DocumentValue::Inline(bytes.to_vec()) };
+                let document = Document { namespace: "projection".to_owned().into(), key: "key\n\\\"😀".to_owned().into(),
+                    version: u64::MAX, updated_at_ms: u64::MAX, value: DocumentValue::Inline(bytes.to_vec().into()) };
                 let value: Value = serde_json::from_slice(bytes).unwrap();
                 let previous = if include_key {
                     json!({"key":document.key,"value":value,"version":document.version,"updated_at_ms":document.updated_at_ms})
@@ -1222,8 +1230,8 @@ mod tests {
     fn canonical_projection_rejects_malformed_inline_and_preserves_blob_scope_fences() {
         let database = authority();
         for bytes in [b"{".as_slice(),b"1e309",br#""\uD800""#,b"\"\xff\"",b"[1,]"] {
-            let document=Document { namespace:"projection".to_owned(),key:"k".to_owned(),version:1,
-                updated_at_ms:1,value:DocumentValue::Inline(bytes.to_vec()) };
+            let document=Document { namespace:"projection".to_owned().into(),key:"k".to_owned().into(),version:1,
+                updated_at_ms:1,value:DocumentValue::Inline(bytes.to_vec().into()) };
             let error=project_document(&database,TENANT,OWNER,&document,true,1024).unwrap_err();
             assert_eq!(error.kind(),io::ErrorKind::InvalidData);
             assert_eq!(error.to_string(),"versioned document value is not JSON");
@@ -1232,16 +1240,16 @@ mod tests {
         let mut transaction=database.begin(TENANT,OWNER).unwrap();
         let envelope=put_with_blob_owner_bounded_returning_envelope(&database,&mut transaction,
             put_request("large",serde_json::to_vec(&value).unwrap(),Some(0)),OWNER,
-            MAX_TRANSACTION_IR_LITERAL_BYTES).unwrap().1;
+            usize::MAX).unwrap().1;
         let document=Document::decode(&envelope).unwrap();
         assert!(matches!(document.value,DocumentValue::Blob(_)));
         let mut oracle=document.clone();
-        let logical=materialize_value(&database,TENANT,OWNER,&document.value,MAX_TRANSACTION_IR_LITERAL_BYTES).unwrap();
-        oracle.value=DocumentValue::Inline(logical);
-        assert_eq!(project_document(&database,TENANT,OWNER,&document,true,MAX_TRANSACTION_IR_LITERAL_BYTES).unwrap(),
-            project_document(&database,TENANT,OWNER,&oracle,true,MAX_TRANSACTION_IR_LITERAL_BYTES).unwrap());
+        let logical=materialize_value(&database,TENANT,OWNER,&document.value,usize::MAX).unwrap();
+        oracle.value=DocumentValue::Inline(logical.into());
+        assert_eq!(project_document(&database,TENANT,OWNER,&document,true,usize::MAX).unwrap(),
+            project_document(&database,TENANT,OWNER,&oracle,true,usize::MAX).unwrap());
         for (tenant,owner) in [(TENANT+1,OWNER),(TENANT,OWNER+1)] {
-            assert_eq!(project_document(&database,tenant,owner,&document,true,MAX_TRANSACTION_IR_LITERAL_BYTES).unwrap_err().kind(),
+            assert_eq!(project_document(&database,tenant,owner,&document,true,usize::MAX).unwrap_err().kind(),
                 io::ErrorKind::PermissionDenied);
         }
     }
@@ -1254,10 +1262,10 @@ mod tests {
             let mut tx = database.begin(TENANT, OWNER).unwrap();
             let (_, envelope) = put_with_blob_owner_bounded_returning_envelope(&database, &mut tx,
                 put_request("conv", serde_json::to_vec(&value).unwrap(), Some(0)), OWNER,
-                MAX_TRANSACTION_IR_LITERAL_BYTES).unwrap();
+                usize::MAX).unwrap();
             database.commit(tx).unwrap();
             let (key, bytes) = materialize_stored_document_bounded(&database, TENANT, OWNER,
-                &envelope, "conversations", MAX_TRANSACTION_IR_LITERAL_BYTES).unwrap();
+                &envelope, "conversations", usize::MAX).unwrap();
             let (decoded_key, decoded, source_bytes) = materialize_stored_document_value_bounded(
                 &database, TENANT, OWNER, &envelope, "conversations", bytes.len()).unwrap();
             assert_eq!(decoded_key, key);
@@ -1278,8 +1286,8 @@ mod tests {
             }
         }
         let database = authority();
-        let malformed = Document { namespace: "conversations".to_owned(), key: "bad".to_owned(),
-            version: 1, updated_at_ms: 1, value: DocumentValue::Inline(b"{".to_vec()) }.encode().unwrap();
+        let malformed = Document { namespace: "conversations".to_owned().into(), key: "bad".to_owned().into(),
+            version: 1, updated_at_ms: 1, value: DocumentValue::Inline(b"{".to_vec().into()) }.encode().unwrap();
         assert_eq!(materialize_stored_document_value_bounded(&database, TENANT, OWNER,
             &malformed, "conversations", 100).unwrap_err().kind(), io::ErrorKind::InvalidData);
     }
@@ -1369,6 +1377,32 @@ mod tests {
     }
 
     #[test]
+    fn document_demand_exceeds_former_default_quota_for_known_and_fresh_paths() {
+        let directory = tempfile::tempdir().unwrap();
+        let bytes = serde_json::to_vec(&json!({"text":"x".repeat(9 * 1024 * 1024),"keep":7})).unwrap();
+        {
+            let mut database = AuthorityDatabase::initialize(directory.path()).unwrap();
+            let mut tx = database.begin(TENANT, OWNER).unwrap();
+            let known = put_known_version_returning_envelope(&database, &mut tx,
+                put_request("large-known", bytes.clone(), Some(0)), 0).unwrap();
+            assert!(matches!(Document::decode(&known).unwrap().value, DocumentValue::Blob(_)));
+            let mut fresh = put_request("large-fresh", bytes.clone(), None);
+            fresh.expected_version = None;
+            put_fresh_prevalidated(&database, &mut tx, fresh).unwrap();
+            database.commit(tx).unwrap();
+        }
+        let database = AuthorityDatabase::open(directory.path()).unwrap();
+        let mut tx = database.begin(TENANT, OWNER).unwrap();
+        for logical_key in ["large-known", "large-fresh"] {
+            let key = document_key(logical_key);
+            let value = get_value_with_version_bounded(&database, &mut tx, &key,
+                "conversations", logical_key, bytes.len() + 100).unwrap().unwrap();
+            assert_eq!(value.1, 1);
+            assert_eq!(blake3::hash(&value.0), blake3::hash(&bytes));
+        }
+    }
+
+    #[test]
     fn known_version_put_rejects_invalid_mutation_metadata() {
         let mut database = authority();
         let mut tx = database
@@ -1378,14 +1412,9 @@ mod tests {
         request.updated_at_ms = 0;
         let zero_clock = put_known_version_returning_envelope(&database, &mut tx, request, 0);
         assert_eq!(zero_clock.unwrap_err().kind(), io::ErrorKind::InvalidInput);
-        let mut request = put_request(
-            "conv",
-            vec![b'x'; MAX_TRANSACTION_IR_LITERAL_BYTES + 1],
-            Some(0),
-        );
-        request.updated_at_ms = 1;
-        let oversized = put_known_version_returning_envelope(&database, &mut tx, request, 0);
-        assert_eq!(oversized.unwrap_err().kind(), io::ErrorKind::InvalidInput);
+        let request = put_request("conv", b"{}".to_vec(), Some(1));
+        let stale = put_known_version_returning_envelope(&database, &mut tx, request, 0);
+        assert_eq!(stale.unwrap_err().kind(), io::ErrorKind::WouldBlock);
     }
 
     #[test]
@@ -1450,7 +1479,7 @@ pub(crate) fn get_value(
         transaction.tenant_id(),
         transaction.owner_user_id(),
         &document.value,
-        MAX_TRANSACTION_IR_LITERAL_BYTES,
+        usize::MAX,
     )?;
     serde_json::from_slice::<Value>(&value)
         .map_err(|_| invalid_data("versioned document value is not JSON"))?;
@@ -1472,7 +1501,7 @@ pub(crate) fn get_with_blob_owner(
         namespace,
         logical_key,
         blob_owner_user_id,
-        MAX_TRANSACTION_IR_LITERAL_BYTES,
+        usize::MAX,
     )
 }
 
@@ -1588,7 +1617,7 @@ pub(crate) fn put_fresh_prevalidated(
         expected_version,
         updated_at_ms,
     } = request;
-    if updated_at_ms == 0 || value_json.len() > MAX_TRANSACTION_IR_LITERAL_BYTES {
+    if updated_at_ms == 0 {
         return Err(invalid_input("invalid versioned document mutation"));
     }
     // Never silently drop a version expectation: freshness is established by
@@ -1608,8 +1637,8 @@ pub(crate) fn put_fresh_prevalidated(
         transaction.owner_user_id(),
     )?;
     let stored_envelope = Document {
-        namespace,
-        key: logical_key,
+        namespace: namespace.into(),
+        key: logical_key.into(),
         version: 1,
         updated_at_ms,
         value,
@@ -1631,7 +1660,7 @@ pub(crate) fn put_returning_envelope(
         transaction,
         request,
         transaction.owner_user_id(),
-        MAX_TRANSACTION_IR_LITERAL_BYTES,
+        usize::MAX,
     )
 }
 
@@ -1646,7 +1675,7 @@ pub(crate) fn put_with_blob_owner(
         transaction,
         request,
         blob_owner_user_id,
-        MAX_TRANSACTION_IR_LITERAL_BYTES,
+        usize::MAX,
     )
 }
 
@@ -1714,8 +1743,8 @@ pub(crate) fn put_with_blob_owner_bounded_returning_envelope(
         blob_owner_user_id,
     )?;
     let stored_envelope = Document {
-        namespace,
-        key: logical_key.clone(),
+        namespace: namespace.into(),
+        key: logical_key.clone().into(),
         version,
         updated_at_ms,
         value,
@@ -1736,11 +1765,11 @@ fn stage_document_value(
     logical_key: &str,
     value_json: Vec<u8>,
     blob_owner_user_id: u64,
-) -> io::Result<DocumentValue> {
+) -> io::Result<DocumentValue<'static>> {
     let inline_envelope_bytes =
         FIXED_HEADER_BYTES + namespace.len() + logical_key.len() + value_json.len();
     if inline_envelope_bytes <= MAX_ENTITY_INLINE_VALUE_BYTES {
-        Ok(DocumentValue::Inline(value_json))
+        Ok(DocumentValue::Inline(value_json.into()))
     } else {
         let logical_bytes = value_json.len() as u64;
         let reference = if blob_owner_user_id == transaction.owner_user_id() {
@@ -1819,8 +1848,8 @@ pub(crate) fn restore_snapshot(
         request.blob_owner_user_id,
     )?;
     let envelope = Document {
-        namespace: request.namespace,
-        key: request.logical_key,
+        namespace: request.namespace.into(),
+        key: request.logical_key.into(),
         version: request.version,
         updated_at_ms: request.updated_at_ms,
         value,
@@ -1865,8 +1894,8 @@ pub(crate) fn read_snapshot_bounded(
     }
     Ok(Some(SnapshotDocument {
         key: key.clone(),
-        namespace: document.namespace,
-        logical_key: document.key,
+        namespace: document.namespace.into_owned(),
+        logical_key: document.key.into_owned(),
         version: document.version,
         updated_at_ms: document.updated_at_ms,
         value_json: materialize_value(
@@ -1933,7 +1962,7 @@ pub(crate) fn list_direction(
         limit,
         ListProjectionBounds {
             blob_owner_user_id: transaction.owner_user_id(),
-            maximum_bytes: MAX_TRANSACTION_IR_LITERAL_BYTES,
+            maximum_bytes: usize::MAX,
         },
         reverse,
     )
@@ -1966,7 +1995,7 @@ fn list_direction_bounded(
     bounds: ListProjectionBounds,
     reverse: bool,
 ) -> io::Result<Vec<u8>> {
-    list_direction_bounded_with_proof(database, transaction, start, end, namespace, limit, bounds, reverse)
+    list_direction_bounded_with_proof(database, transaction, start, end, namespace, limit, bounds, reverse, true)
         .map(DocumentProjection::into_bytes)
 }
 
@@ -1976,7 +2005,17 @@ pub(crate) fn list_direction_with_response_proof(
 ) -> io::Result<DocumentProjection> {
     list_direction_bounded_with_proof(database, transaction, start, end, namespace, limit,
         ListProjectionBounds { blob_owner_user_id: transaction.owner_user_id(),
-            maximum_bytes: MAX_TRANSACTION_IR_LITERAL_BYTES }, reverse)
+            maximum_bytes: usize::MAX }, reverse, true)
+}
+
+/// Enumerate authority versions without fetching blob-backed values or decoding JSON.
+pub(crate) fn list_headers_direction_with_response_proof(
+    database: &AuthorityDatabase, transaction: &mut AuthorityTransaction,
+    start: &EntityKey, end: &EntityKey, namespace: &str, limit: usize, reverse: bool,
+) -> io::Result<DocumentProjection> {
+    list_direction_bounded_with_proof(database, transaction, start, end, namespace, limit,
+        ListProjectionBounds { blob_owner_user_id: transaction.owner_user_id(),
+            maximum_bytes: usize::MAX }, reverse, false)
 }
 
 fn list_direction_bounded_with_proof(
@@ -1988,8 +2027,9 @@ fn list_direction_bounded_with_proof(
     limit: usize,
     bounds: ListProjectionBounds,
     reverse: bool,
+    include_value: bool,
 ) -> io::Result<DocumentProjection> {
-    let mut rows = Vec::with_capacity(limit);
+    let mut rows = Vec::with_capacity(limit.min(MAX_ENTITY_RANGE_ROWS));
     let mut page_start = start.clone();
     let mut page_end = end.clone();
     while rows.len() < limit {
@@ -1999,13 +2039,13 @@ fn list_direction_bounded_with_proof(
         } else {
             database.entity_scan(transaction, &page_start, end, page_limit)?
         };
-        let full = page.len() == page_limit;
+        if page.is_empty() { break; }
         let next = page
             .last()
             .map(|(key, _)| key.clone().exact_range())
             .transpose()?;
         rows.extend(page);
-        if !full || rows.len() == limit {
+        if rows.len() == limit {
             break;
         }
         let boundary = next.ok_or_else(|| invalid_data("versioned document pagination lost continuation"))?;
@@ -2018,23 +2058,40 @@ fn list_direction_bounded_with_proof(
         if document.namespace != namespace {
             return Err(invalid_data("versioned document namespace mismatch"));
         }
-        let projected = project_document_with_proof(
-            database,
-            transaction.tenant_id(),
-            bounds.blob_owner_user_id,
-            &document,
-            true,
-            bounds.maximum_bytes,
-        )?;
+        let projected = if include_value {
+            project_document_with_proof(
+                database,
+                transaction.tenant_id(),
+                bounds.blob_owner_user_id,
+                &document,
+                true,
+                bounds.maximum_bytes,
+            )?
+        } else {
+            DocumentProjection {
+                bytes: serde_json::to_vec(&serde_json::json!({
+                    "key": document.key,
+                    "version": document.version,
+                    "updated_at_ms": document.updated_at_ms,
+                }))?,
+                maximum_container_depth: Some(1),
+            }
+        };
         maximum_container_depth = maximum_container_depth.zip(projected.maximum_container_depth)
             .map(|(current,row)| current.max(row + 1));
-        let additional = projected.bytes.len() + usize::from(index > 0) + 1;
-        if output.len() + additional > bounds.maximum_bytes {
+        let additional = projected.bytes.len().checked_add(usize::from(index > 0))
+            .and_then(|length| length.checked_add(1))
+            .ok_or_else(|| invalid_input("versioned document page length overflow"))?;
+        let next_length = output.len().checked_add(additional)
+            .ok_or_else(|| invalid_input("versioned document page length overflow"))?;
+        if next_length > bounds.maximum_bytes {
             return Err(io::Error::new(
                 io::ErrorKind::OutOfMemory,
-                "versioned document page exceeds 8 MiB",
+                "versioned document page exceeds requested projection bytes",
             ));
         }
+        output.try_reserve(additional)
+            .map_err(|_| io::Error::new(io::ErrorKind::OutOfMemory, "cannot allocate complete versioned document page"))?;
         if index > 0 {
             output.push(b',');
         }
@@ -2042,4 +2099,28 @@ fn list_direction_bounded_with_proof(
     }
     output.push(b']');
     Ok(DocumentProjection { bytes: output, maximum_container_depth })
+}
+
+
+#[cfg(test)]
+mod borrowed_document_decode_tests {
+    use super::*;
+    #[test]
+    fn borrowed_document_preserves_source_bytes_and_rejects_every_truncated_envelope() {
+        let encoded = Document { namespace: "borrowed".into(), key: "escaped\n🧈".into(),
+            version: 7, updated_at_ms: 17,
+            value: DocumentValue::Inline(b"{\"text\":\"immutable\",\"items\":[1,null,true]}".to_vec().into()) }.encode().unwrap();
+        let decoded = Document::decode(&encoded).unwrap();
+        assert_eq!(decoded.encode().unwrap(), encoded);
+        assert!(matches!(decoded.namespace, std::borrow::Cow::Borrowed(_)));
+        assert!(matches!(decoded.key, std::borrow::Cow::Borrowed(_)));
+        let DocumentValue::Inline(std::borrow::Cow::Borrowed(bytes)) = decoded.value else { panic!("inline decoding copied its source"); };
+        let offset = bytes.as_ptr() as usize - encoded.as_ptr() as usize;
+        assert_eq!(&encoded[offset..offset+bytes.len()], bytes);
+        for length in 0..encoded.len() { assert!(Document::decode(&encoded[..length]).is_err(), "accepted truncated envelope at {length}"); }
+        let mut trailing=encoded.clone();trailing.push(0);assert!(Document::decode(&trailing).is_err());
+        for (offset,value) in [(8,2),(12,0),(20,0),(32,9),(33,1)] {
+            let mut invalid=encoded.clone();invalid[offset]=value;assert!(Document::decode(&invalid).is_err(),"accepted malformed header at {offset}");
+        }
+    }
 }

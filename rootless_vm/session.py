@@ -18,6 +18,8 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
+from .unix_socket import connect_unix_socket
+
 from .host_paths import validate_host_path
 from .egress_proxy import EgressProxy
 from .guest_agent import GuestAgent, GuestAgentError
@@ -156,6 +158,7 @@ class SandboxSpec:
     egress_global_concurrency: int = 16
     require_qemu_sandbox: bool = True
     virtual_time_shift: int | None = None
+    disk_prepare_timeout_sec: float = 300.0
 
     def validate(self) -> None:
         if os.geteuid() == 0 or os.getuid() == 0:
@@ -216,6 +219,11 @@ class SandboxSpec:
             raise ValueError("cpus must be between 1 and 256")
         if self.virtual_time_shift is not None and not 0 <= self.virtual_time_shift <= 10:
             raise ValueError("virtual_time_shift must be between 0 and 10")
+        import math
+        if (type(self.disk_prepare_timeout_sec) not in (int, float)
+                or not math.isfinite(self.disk_prepare_timeout_sec)
+                or not 1 <= self.disk_prepare_timeout_sec <= 86400):
+            raise ValueError("disk_prepare_timeout_sec must be finite and in 1..86400")
         base_disk = _existing_file(self.base_disk, "base_disk")
         kernel = _existing_file(self.kernel, "kernel")
         initrd = _existing_file(self.initrd, "initrd")
@@ -455,7 +463,9 @@ class SandboxSession:
                 ],
                 capture_output=True,
                 text=True,
-                timeout=30,
+                # Rebase fsync also drains the preceding full private clone.
+                # A metadata-only 30s cap can kill healthy multi-GiB startup IO.
+                timeout=self.spec.disk_prepare_timeout_sec,
                 check=False,
                 env=_isolated_subprocess_env(),
             )
@@ -828,7 +838,7 @@ class SandboxSession:
     def _qmp(self, command: str, *, timeout: float) -> object:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
             client.settimeout(timeout)
-            client.connect(str(self.qmp_path))
+            connect_unix_socket(client, self.qmp_path)
             stream = client.makefile("rwb", buffering=0)
             stream.readline()
             _qmp_request(stream, "qmp_capabilities", "capabilities")
@@ -879,7 +889,7 @@ class SandboxSession:
             try:
                 with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
                     client.settimeout(timeout)
-                    client.connect(str(self.qmp_path))
+                    connect_unix_socket(client, self.qmp_path)
                     stream = client.makefile("rwb", buffering=0)
                     stream.readline()
                     _qmp_request(stream, "qmp_capabilities", "capabilities")

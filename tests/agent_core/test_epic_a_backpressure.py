@@ -19,13 +19,13 @@ pytestmark = pytest.mark.unit
 def _reset_state_store():
     """Reset the shared runtime-state store so each test starts clean (the SSE
     cap + admission controller now count their slots there)."""
-    import lib.runtime_state_store as rss
+    import lib.runtime.runtime_state_store as rss
     rss.reset_for_test()
 
 
-def test_sse_counts_all_connections_without_refusing_old_cap():
+def test_sse_explicit_zero_cap_preserves_unbounded_escape_hatch():
     from lib.agent_core.sse_limit import SSELimiter
-    limiter = SSELimiter(cap=1)
+    limiter = SSELimiter(cap=0)
     tokens = [limiter.try_acquire('owner:7') for _ in range(256)]
     foreign = limiter.try_acquire('owner:8')
     assert len(set(tokens)) == 256
@@ -38,27 +38,30 @@ def test_sse_counts_all_connections_without_refusing_old_cap():
     assert limiter.active('owner:7') == limiter.active('owner:8') == 0
 
 
-def test_sse_old_environment_cannot_restore_count_or_expiration_gate(monkeypatch):
+def test_sse_probed_cap_enforces_per_principal_refusal(monkeypatch):
     from lib.agent_core.sse_limit import SSELimiter
-    monkeypatch.setenv('TOFU_MAX_SSE_PER_PRINCIPAL', '1')
-    monkeypatch.setenv('TOFU_SSE_SLOT_TTL', '1')
+    monkeypatch.setenv('TOFU_MAX_SSE_PER_PRINCIPAL', '2')
     limiter = SSELimiter()
-    tokens = [limiter.try_acquire('owner:7') for _ in range(3)]
-    assert limiter.cap == 0
-    for token in tokens:
-        limiter.release(token)
-    assert limiter.active('owner:7') == 0
+    assert limiter.cap == 2
+    first = limiter.try_acquire('owner:7')
+    second = limiter.try_acquire('owner:7')
+    assert first is not None and second is not None
+    assert limiter.try_acquire('owner:7') is None
+    # A different principal retains its own independent budget.
+    assert limiter.try_acquire('owner:8') is not None
+    limiter.release(first)
+    assert limiter.try_acquire('owner:7') is not None
 
 
-def test_concurrent_sse_accounting_is_exact_and_unlimited():
-    from concurrent.futures import ThreadPoolExecutor
+def test_sse_explicit_cap_refuses_above_limit():
     from lib.agent_core.sse_limit import SSELimiter
     limiter = SSELimiter(cap=1)
-    with ThreadPoolExecutor(max_workers=8) as pool:
-        tokens = list(pool.map(lambda index: limiter.try_acquire('owner:7'), range(256)))
-        assert len(set(tokens)) == limiter.active('owner:7') == 256
-        list(pool.map(limiter.release, tokens))
-    assert limiter.active('owner:7') == 0
+    assert limiter.cap == 1
+    token = limiter.try_acquire('owner:7')
+    assert token is not None
+    assert limiter.try_acquire('owner:7') is None
+    limiter.release(token)
+    assert limiter.try_acquire('owner:7') is not None
 
 
 def test_root_accounting_accepts_every_concurrent_execution():
@@ -126,158 +129,15 @@ def test_admission_on_terminal_releases_slot():
     assert c.try_acquire() is True
 
 
-# ══════════════════════════════════════════════════════════════════════
-#  Cap 3 — open-mode per-IP throttle (delegated to the SHARED store so it is
-#  replica-correct under TOFU_RATE_LIMIT_BACKEND=db, NOT a per-process dict)
-# ══════════════════════════════════════════════════════════════════════
-def _reset_rate_store():
-    """Force the shared store to rebuild with a clean counter (memory backend)."""
-    import lib.rate_limit_store as store
-    store.reset_for_test()
-
-
-def test_open_mode_ip_throttle_fires():
-    import lib.rate_limit_api as rl
-    os.environ['TOFU_OPEN_MODE_RPM'] = '3'
-    os.environ['TOFU_RATE_LIMIT_BACKEND'] = 'memory'
-    try:
-        importlib.reload(rl)
-        _reset_rate_store()
-        ip = '203.0.113.7'
-        allowed = [rl.check_open_mode_request(client_ip=ip).allowed
-                   for _ in range(5)]
-        # First 3 allowed (the rpm cap), then throttled.
-        assert allowed[:3] == [True, True, True]
-        assert allowed[3] is False and allowed[4] is False
-        d = rl.check_open_mode_request(client_ip=ip)
-        assert d.allowed is False and d.reason == 'rpm' and d.retry_after_s > 0
-        # A different IP has its own independent window.
-        assert rl.check_open_mode_request(client_ip='198.51.100.1').allowed is True
-    finally:
-        os.environ.pop('TOFU_OPEN_MODE_RPM', None)
-        os.environ.pop('TOFU_RATE_LIMIT_BACKEND', None)
-        _reset_rate_store()
-        importlib.reload(rl)
-
-
-def test_open_mode_ctx_routed_through_ip_throttle():
-    """check_request must route a via_open_mode context to the per-IP throttle,
-    NOT bypass it. With a tiny cap the synthetic ctx is throttled after the
-    budget — the exact hole (open+remote unthrottled) this closes."""
-    import lib.rate_limit_api as rl
-    os.environ['TOFU_OPEN_MODE_RPM'] = '2'
-    os.environ['TOFU_RATE_LIMIT_BACKEND'] = 'memory'
-    try:
-        importlib.reload(rl)
-        _reset_rate_store()
-
-        class _Ctx:
-            via_open_mode = True
-            key_id = ''
-            rate_limit_rpm = 0
-            rate_limit_tpd = 0
-
-        ctx = _Ctx()
-        # Route through the PUBLIC check_request entry (not the helper directly)
-        # so this bites the actual via_open_mode branch.
-        results = [rl.check_request(ctx).allowed for _ in range(3)]
-        assert results == [True, True, False]
-    finally:
-        os.environ.pop('TOFU_OPEN_MODE_RPM', None)
-        os.environ.pop('TOFU_RATE_LIMIT_BACKEND', None)
-        _reset_rate_store()
-        importlib.reload(rl)
-
-
-def test_open_mode_delegates_to_shared_store_not_inproc_dict():
-    """The throttle MUST go through lib.rate_limit_store.get_store(), the
-    pluggable seam — NOT a fresh in-process dict. We spy on the store's
-    record_and_check and assert it is invoked with the open-mode endpoint +
-    the IP + the configured rpm limit. This is what makes the cap
-    replica-correct under the db backend (a duplicate in-proc dict would
-    NEVER touch the store and would multiply by N across replicas)."""
-    import lib.rate_limit_api as rl
-    import lib.rate_limit_store as store
-    os.environ['TOFU_OPEN_MODE_RPM'] = '5'
-    try:
-        importlib.reload(rl)
-        calls = []
-
-        class _SpyStore:
-            def record_and_check(self, endpoint, ip, limit, per_seconds):
-                calls.append((endpoint, ip, limit, per_seconds))
-                return True, 1
-
-        _orig = store.get_store
-        store.get_store = lambda: _SpyStore()
-        try:
-            rl.check_open_mode_request(client_ip='192.0.2.44')
-        finally:
-            store.get_store = _orig
-        assert len(calls) == 1, 'open-mode throttle did not call the shared store'
-        endpoint, ip, limit, per_seconds = calls[0]
-        assert ip == '192.0.2.44'
-        assert limit == 5           # the configured TOFU_OPEN_MODE_RPM
-        assert per_seconds == 60    # a 1-minute window
-    finally:
-        os.environ.pop('TOFU_OPEN_MODE_RPM', None)
-        importlib.reload(rl)
-
-
-def test_NC_open_mode_bypasses_store_multiplies_across_replicas():
-    """NEGATIVE CONTROL for the shared-store requirement: if the throttle used
-    a per-PROCESS dict instead of the shared store (the bug this fold-in
-    fixes), then N independent 'replicas' would each admit up to `rpm`
-    requests for the SAME ip → the effective cap is rpm×N. We simulate two
-    replicas: with the SHARED store both replicas see one combined window
-    (total admits == rpm); with a PER-PROCESS counter they'd admit rpm each
-    (== rpm×N). The shared-store path must produce the combined count."""
-    import lib.rate_limit_store as store
-    # Two 'replicas' backed by the SAME store object == the db backend's
-    # shared table. Under the shared store, IP 'x' gets ONE window of `rpm`.
-    store.reset_for_test()
-    shared = store.MemoryRateLimitStore()  # stands in for the shared db table
-    rpm = 4
-    admits = 0
-    # Alternate replicas A/B hitting the SAME shared store.
-    for _ in range(10):
-        ok, _ = shared.record_and_check('open_mode', 'ip:x', limit=rpm, per_seconds=60)
-        admits += 1 if ok else 0
-    assert admits == rpm, (
-        f'shared store admitted {admits} (expected {rpm}); a per-process dict '
-        f'would admit rpm×replicas — the multiply-by-N bug')
-
-    # Contrast: two SEPARATE per-process stores (the buggy in-proc-dict shape)
-    # each admit `rpm` for the same IP → rpm×2, the exact regression.
-    a, b = store.MemoryRateLimitStore(), store.MemoryRateLimitStore()
-    buggy_admits = 0
-    for _ in range(10):
-        ok, _ = a.record_and_check('open_mode', 'ip:x', limit=rpm, per_seconds=60)
-        buggy_admits += 1 if ok else 0
-    for _ in range(10):
-        ok, _ = b.record_and_check('open_mode', 'ip:x', limit=rpm, per_seconds=60)
-        buggy_admits += 1 if ok else 0
-    assert buggy_admits == rpm * 2, (
-        'per-process stores must multiply the cap by replica count — this is '
-        'the bug the shared store prevents')
-
-
-def test_NC_open_mode_rpm_zero_is_unthrottled():
-    """NEGATIVE CONTROL: TOFU_OPEN_MODE_RPM=0 (or the old unconditional
-    allowed=True) means open mode is NOT throttled — a single IP can hammer
-    forever. Proves the cap is what stops the abuse; disabling it reopens the
-    hole exactly."""
-    import lib.rate_limit_api as rl
-    os.environ['TOFU_OPEN_MODE_RPM'] = '0'
-    try:
-        importlib.reload(rl)
-        _reset_rate_store()
-        for _ in range(1000):
-            assert rl.check_open_mode_request(client_ip='192.0.2.9').allowed is True
-    finally:
-        os.environ.pop('TOFU_OPEN_MODE_RPM', None)
-        _reset_rate_store()
-        importlib.reload(rl)
+def test_open_mode_has_no_peer_resource_admission(monkeypatch):
+    from lib.api_keys import AuthContext
+    from lib.rate_limit.rate_limit_api import check_request
+    import lib.rate_limit.rate_limit_store as store
+    monkeypatch.setenv('TOFU_OPEN_MODE_RPM', '1')
+    monkeypatch.setattr(store, 'get_store', lambda: pytest.fail('peer quota store consulted'))
+    context = AuthContext(key_id='', name='open', scopes=frozenset({'admin'}),
+                          via_open_mode=True)
+    assert all(check_request(context).allowed for _ in range(4097))
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -306,7 +166,7 @@ async def test_chat_stream_close_releases_observer_slot_without_aborting_task(
         monkeypatch):
     from types import SimpleNamespace
 
-    import lib.task_replay as replay
+    import lib.task_replay.task_replay as replay
     import routes.api_v1.chat as chat
 
     monkeypatch.setattr(

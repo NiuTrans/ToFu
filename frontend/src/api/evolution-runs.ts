@@ -37,6 +37,7 @@ export interface EvolutionRun {
   acceptance_requirements?: string[];
   require_requirement_originals?: true;
   project_path?: string;
+  executor_plugins?: string[]; executor_schema_budget_tokens?: number;
   stage_launch?: {intent_id: string; stage: 'executing' | 'reviewing'};
   stage_dispatch?: {task_id: string; intent_id: string; birth_version: number;
     state: 'bound' | 'admitted' | 'refused';
@@ -62,7 +63,7 @@ export interface EvolutionStageOutcomePage {
   actuals: EvolutionRun['actuals']; actuals_complete: boolean;
 }
 export interface ResearchRunParams {lang?: 'zh'|'en'; n_ideas?: number; seed_arxiv_ids?: string[]; harvest_n?: number; model?: string}
-export interface CreateRunBody {objective: string; model?: EvolutionModel; role_models?: RoleModels; domain?: 'general'|'research'; research?: ResearchRunParams;
+export interface CreateRunBody {executor_plugins?: string[]; executor_schema_budget_tokens?: number; objective: string; model?: EvolutionModel; role_models?: RoleModels; domain?: 'general'|'research'; research?: ResearchRunParams;
   acceptance_requirements?: string[]; require_requirement_originals?: true; project_path?: string; budget?: RunBudget | null; review_reserve?: ReviewReserve; max_attempts?: number | null; max_review_recoveries?: number; max_review_format_retries?: number}
 export type EvolutionRunSummary = Pick<EvolutionRun, 'run_id' | 'objective' | 'status' | 'task_id' | 'attempt' | 'created_at' | 'updated_at'>;
 export interface EvolutionFloorItem {
@@ -106,6 +107,7 @@ export interface SwarmStatus {active:boolean|null;known?:boolean;agents?:SwarmAg
 const base = '/api/v4/evolution';
 const runPath = (id: string) => `${base}/runs/${encodeURIComponent(id)}`;
 export const evolutionRunsApi = {
+  listExecutorPlugins: (signal?: AbortSignal) => request<{extensibility?: {plugins?: {available?: Record<string, string[]>}}}>('/api/v4/capabilities', {signal}),
   listRuns: (signal?: AbortSignal) => request<{runs: EvolutionRunSummary[]; floor?: EvolutionFloor; proposals?: EvolutionGatePending}>(`${base}/runs`, {signal}),
   getRun: (id: string, signal?: AbortSignal) => request<{run: EvolutionRun; pending_questions: HumanQuestion[];workspace?:GoalWorkspace}>(runPath(id), {signal}),
   createRun: (body: CreateRunBody, key: string) => request<{run: EvolutionRun}>(`${base}/runs`, {method:'POST', json:body, headers:{'Idempotency-Key':key}}),

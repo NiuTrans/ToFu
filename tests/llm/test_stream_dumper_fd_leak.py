@@ -29,7 +29,7 @@ def test_connect_failure_closes_dumper_fd(monkeypatch):
 
     import lib.llm.diagnostics as diag
     import lib.llm.stream as stream
-    from lib.llm_errors import EndpointUnreachableError
+    from lib.llm.llm_errors import EndpointUnreachableError
 
     # Force the dumper to re-read the (now enabled) env filter.
     monkeypatch.setattr(diag, '_RAW_SSE_FILTER', '1', raising=False)

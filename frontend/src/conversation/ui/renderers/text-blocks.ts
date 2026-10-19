@@ -6,6 +6,8 @@
  * Dependencies: conversation-sync.generated, conversation-view-model, ports,
  * stable-dom, icons, localized-copy.
  */
+import { renderRichMarkdown, disposeRichMarkdown } from '../../../rich-response/markdown';
+export { disposeRichMarkdown };
 import type { BackgroundCommandCompletion } from '../../../api/conversation-sync.generated';
 import {
   type ConversationBlockViewModel,
@@ -25,6 +27,8 @@ import {
   actionIcon,
 } from './icons';
 import { textFor } from './localized-copy';
+
+import { liveStatusPhase, presentLivePhaseLabel } from '../../presentation/live-phase';
 
 export function renderBackgroundCompletion(
   node: HTMLElement,
@@ -82,12 +86,16 @@ export function renderTextBlock(
   if (!body) {
     body = node.ownerDocument.createElement('div');
     node.prepend(body);
-  } else if (node.firstElementChild !== body) {
+  } else if (node.firstElementChild !== body
+      && !body.previousElementSibling?.classList.contains('conversation-answer-label')) {
+    // The answer rubric is allowed before prose. Moving a retained Markdown
+    // body just to put it back would blur focused code/table controls on replay.
     node.prepend(body);
   }
   body.className = 'md-content';
   const setBodyHtml = block.terminal ? setCompletedMarkdownHtml : setStreamingMarkdownHtml;
-  setBodyHtml(body, ports.renderSafeMarkdownHtml(
+  if (turn?.actor === 'human') disposeRichMarkdown(body);
+  if (turn?.actor === 'human' || !renderRichMarkdown(body, block.markdown, block.terminal, ports, turn?.source.conversationId, turn?.turnId)) setBodyHtml(body, ports.renderSafeMarkdownHtml(
     block.displayMarkdown ?? block.markdown,
     {
       ...(turn?.actor === 'human' ? { escapeRawHtml: true } : {}),
@@ -97,6 +105,15 @@ export function renderTextBlock(
     },
   ));
   renderTranslationAlternative(node, block, ports);
+  let answerLabel = directClassChild<HTMLElement>(node, 'conversation-answer-label');
+  if (block.deliverable && turn?.role === 'assistant') {
+    if (!answerLabel) {
+      answerLabel = node.ownerDocument.createElement('div');
+      answerLabel.className = 'conversation-answer-label';
+    }
+    answerLabel.textContent = textFor(ports, 'conversation.answer', 'Answer');
+    node.insertBefore(answerLabel, body);
+  } else answerLabel?.remove();
   /* Assistant text blocks carry their own copy affordance: the turn-level
    * Copy only holds the final answer (projection.content), so mid-turn
    * prose between tool calls would otherwise have no copy path at all.
@@ -275,60 +292,35 @@ export function renderLiveStatusBlock(
   node.setAttribute('aria-atomic', 'true');
   const document = node.ownerDocument;
   const phase = value.phase || 'working';
-  const phaseFallback = phase === 'executor_preparing'
-    ? "Task accepted; binding it to this server's task scheduler…"
-    : phase === 'executor_queued'
-      ? "Waiting in this server's AI task queue; syncing queue position and "
-        + 'available slots (not model/API quota)…'
-      : phase === 'worker_starting'
-        ? 'Server execution slot acquired; starting the task…'
-        : '';
-  const localizedDetail = value.detailKey
-    ? textFor(ports, value.detailKey,
-      value.detail || value.label || phaseFallback,
-      value.detailArgs)
-    : '';
-  let label = localizedDetail || value.detail || value.label;
-  if (phase === 'warming') {
-    label = textFor(ports, 'autopilot.warming', 'Autopilot is starting…');
-  } else if (phase === 'thinking_active') {
-    label = textFor(ports, 'stream.thinking.active', 'Thinking…');
-  } else if (phase === 'llm_thinking' && !label) {
-    label = textFor(ports, 'stream.phase.generatingResponse', 'Generating response…');
-  } else if (phase === 'tool_exec' && value.tools?.length) {
-    label = value.detail || value.tools.join(', ');
-  } else if (phase === 'retrying' && !localizedDetail && !value.detail) {
-    label = textFor(ports, 'stream.phase.retrying', 'Retrying…');
-  } else if (phase === 'storage_wedged') {
-    label = textFor(
-      ports, 'stream.phase.storageWedged', 'Storage write stalled — retrying…',
-    );
-  } else if (phase === 'waiting' && !localizedDetail && !value.detail) {
-    label = textFor(
-      ports, 'stream.phase.waitingWorkerStatus',
-      'Waiting for an execution status update…',
-    );
-  } else if (phase === 'responding' && !value.detail) {
-    label = textFor(ports, 'autopilot.warming', 'Autopilot is responding…');
-  }
-  const modelRoute = value.modelRoute;
-  if (modelRoute?.selectedModel && modelRoute.resolvedModel
-      && modelRoute.selectedModel !== modelRoute.resolvedModel
-      && value.detailKey !== 'stream.phase.modelRouted') {
-    const routeLabel = textFor(
-      ports,
-      'stream.phase.modelRouted',
-      'Model routing: {from} → {to} ({role}, {tier})',
-      {
-        from: modelRoute.selectedModel,
-        to: modelRoute.resolvedModel,
-        role: modelRoute.role,
-        tier: modelRoute.tier,
-      },
-    );
-    label = label ? `${routeLabel} · ${label}` : routeLabel;
-  }
+  const goal = value.goalProgress;
+  let label = presentLivePhaseLabel(liveStatusPhase(value),
+    (key, fallback, args) => textFor(ports, key, fallback, args));
+  if (goal && phase !== 'storage_wedged') {
 
+    const roleKeys: Record<string, [string, string]> = {
+      worker: ['stream.goal.role.worker', 'Worker'],
+      planner: ['stream.goal.role.planner', 'Planner'],
+      critic: ['stream.goal.role.critic', 'Critic'],
+      virtual_user: ['stream.goal.role.virtualUser', 'Virtual user'],
+    };
+    const [key, fallback] = roleKeys[goal.role] ?? ['', goal.role];
+    const role = textFor(ports, key, fallback);
+    const context = textFor(ports,
+      goal.rootSummary ? 'stream.goal.activeRoot' : 'stream.goal.activePhase',
+      goal.rootSummary ? 'Run ongoing · Iteration {iteration} · {role}' : 'Iteration {iteration} · {role}',
+      { iteration: goal.iteration, role });
+    label = `${context}${label ? ' · ' + label : ''}`;
+    if (goal.workers.length) label += ' · ' + goal.workers.map(worker =>
+      worker.text + ' · ' + textFor(ports,
+        worker.waitReason === 'capacity' ? 'swarm.wait.capacity' : worker.waitReason === 'dependencies'
+          ? 'swarm.wait.dependencies' : worker.phase === 'pending'
+          ? 'swarm.wait.pending' : 'swarm.phase.' + worker.phase, worker.phase)
+      + (worker.latestTool ? ' · ' + textFor(ports, 'stream.goal.latestTool',
+        'Latest tool: {tool}', { tool: worker.latestTool }) : '')
+      + (worker.toolError ? ' · ' + textFor(ports,
+        'stream.goal.toolError', 'Latest tool error: {error}', { error: worker.toolError }) : '')
+    ).join('; ');
+  }
   if (phase === 'warming') {
     const status = document.createElement('div');
     status.className = 'stream-status';
@@ -368,17 +360,51 @@ export function renderLiveStatusBlock(
   node.replaceChildren(row);
 }
 
+/** Plain text only: recorded model IDs never cross the Markdown/HTML boundary. */
+function renderTranslationModel(
+  parent: HTMLElement,
+  model: string | undefined,
+  ports: ClassicConversationRendererPorts,
+  className: string,
+  visible: boolean,
+): void {
+  let badge = directClassChild<HTMLElement>(parent, className);
+  if (!visible) { badge?.remove(); return; }
+  if (!badge) {
+    badge = parent.ownerDocument.createElement('span');
+    badge.classList.add('bilingual-model', className);
+    parent.appendChild(badge);
+  }
+  const label = model?.trim()
+    ? textFor(ports, 'chat.translationModel', 'Translated by {model}', { model })
+    : textFor(ports, 'chat.translationModelUnknown', 'Translation model not reported');
+  badge.textContent = label;
+  badge.title = label;
+}
+
 function renderTranslationAlternative(
   node: HTMLElement,
   block: Extract<ConversationBlockViewModel, { kind: 'text' | 'thinking' }>,
   ports: ClassicConversationRendererPorts,
 ): void {
   let details = directClassChild<HTMLDetailsElement>(node, 'bilingual-block');
+
+  // A translated answer needs attribution outside its closed Original fold.
+  // With no alternate body (e.g. a reloaded translated input lacking its
+  // original), retain the canonical receipt without inventing a disclosure.
+  renderTranslationModel(node, block.kind === 'text' ? block.translationModel : undefined,
+    ports, 'bilingual-attribution', block.kind === 'text'
+      && ((block.displayMode === 'translated' && Boolean(block.translatedMarkdown?.trim()))
+        || Boolean(block.inputTranslationCompleted)));
+
+  const attribution = directClassChild<HTMLElement>(node, 'bilingual-attribution');
+  const answer = directClassChild<HTMLElement>(node, 'md-content');
+  if (attribution && answer && answer.nextSibling !== attribution) answer.after(attribution);
   /* Only the deliverable answer carries the per-block original/translation
    * alternative. Mid-turn narration and thinking follow the turn-level
    * display mode — a per-block toggle there is timing-dependent noise. */
   if (block.kind !== 'text' || !block.deliverable
-      || !block.translatedMarkdown) {
+      || !block.translatedMarkdown?.trim()) {
     details?.remove();
     return;
   }
@@ -407,6 +433,9 @@ function renderTranslationAlternative(
   label.textContent = alternativeMode === 'original'
     ? textFor(ports, 'chat.bilingualOriginal', 'Original')
     : textFor(ports, 'chat.bilingualTranslated', 'Translation');
+
+  renderTranslationModel(summary, block.translationModel, ports, 'bilingual-model',
+    alternativeMode === 'translated');
   let toggle = directClassChild<HTMLElement>(summary, 'bilingual-toggle');
   if (!toggle) {
     toggle = disclosureChevron(document, 'bilingual-toggle');
@@ -414,7 +443,9 @@ function renderTranslationAlternative(
   } else if (!toggle.classList.contains('conversation-disclosure-chevron')) {
     const replacement = disclosureChevron(document, 'bilingual-toggle');
     toggle.replaceWith(replacement);
+    toggle = replacement;
   }
+  if (summary.lastElementChild !== toggle) summary.appendChild(toggle);
   let wrapper = directClassChild<HTMLElement>(details, 'bilingual-body');
   if (!wrapper) {
     wrapper = document.createElement('div');

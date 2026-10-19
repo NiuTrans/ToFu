@@ -44,7 +44,7 @@ def test_manifest_composition_references_full_child_not_preview(monkeypatch):
         ref = 'tool-result:' + str(len(stored)).zfill(64)
         stored[ref] = kwargs
         return {'artifactRef': ref}
-    monkeypatch.setattr('lib.tool_result_artifacts.ToolResultArtifactRepository.put', put)
+    monkeypatch.setattr('lib.tool_results.tool_result_artifacts.ToolResultArtifactRepository.put', put)
     sink = CanonicalBatchSink(7)
     child = replace(capture_result(json.dumps({'preview': 'x' * 215659,
                                       'resourceConfig': {'consumer': 64}})),
@@ -69,7 +69,7 @@ def test_manifest_composition_references_full_child_not_preview(monkeypatch):
 def test_manifest_publication_failure_is_explicit(monkeypatch, caplog):
     def fail(*args, **kwargs):
         raise OSError('SECRET-storage-detail')
-    monkeypatch.setattr('lib.tool_result_artifacts.ToolResultArtifactRepository.put', fail)
+    monkeypatch.setattr('lib.tool_results.tool_result_artifacts.ToolResultArtifactRepository.put', fail)
     sink = CanonicalBatchSink(7)
     sink.capture('small', capture_result('evidence'))
     assert 'retentionError' not in sink.result('small')
@@ -110,7 +110,7 @@ def test_posthook_redacts_parts_not_media_or_premerged_structured_text():
 
 
 def test_tiny_transient_batch_no_persistence_or_canonical_wire_leak(monkeypatch):
-    monkeypatch.setattr('lib.tool_result_artifacts.ToolResultArtifactRepository.put',
+    monkeypatch.setattr('lib.tool_results.tool_result_artifacts.ToolResultArtifactRepository.put',
                         lambda *a,**k:pytest.fail('small transient must not persist'))
     sink=CanonicalBatchSink(0)
     sink.capture('x',capture_result('unique historical content'))
@@ -143,7 +143,7 @@ def test_programmatic_reference_or_loss_cannot_claim_complete_empty_body():
 
 
 def test_large_private_program_child_does_not_make_compact_answer_partial(monkeypatch):
-    monkeypatch.setattr('lib.tool_result_artifacts.ToolResultArtifactRepository.put',
+    monkeypatch.setattr('lib.tool_results.tool_result_artifacts.ToolResultArtifactRepository.put',
                         lambda *a,**k:pytest.fail('complete compact answer needs no spill'))
     sink = CanonicalBatchSink(7)
     child = capture_result(json.dumps({'privateRows':'x' * 215659}))
@@ -168,7 +168,7 @@ def test_private_child_policy_does_not_hide_oversized_returned_value(monkeypatch
         ref = 'tool-result:' + str(len(stored)).zfill(64)
         stored[ref] = kwargs
         return {'artifactRef':ref}
-    monkeypatch.setattr('lib.tool_result_artifacts.ToolResultArtifactRepository.put', put)
+    monkeypatch.setattr('lib.tool_results.tool_result_artifacts.ToolResultArtifactRepository.put', put)
     value = {'answer':'x' * 215659}
     result = compose_result(json.dumps(value), [], program_value=value, private_children=True)
     delivery = split_tool_result_delivery(

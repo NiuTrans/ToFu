@@ -23,6 +23,7 @@ class ConversationSyncRepository(Protocol):
         *,
         turn_limit: int | None = None,
         include_artifact_hint: bool = False,
+        max_projection_bytes: int = 0,
     ) -> Mapping[str, Any] | None:
         ...
 
@@ -36,6 +37,12 @@ class ConversationSyncRepository(Protocol):
     ) -> Mapping[str, Any] | None:
         ...
 
+    def round_directory(
+        self, conversation_id: str, user_id: int, *, lane_id: str,
+        expected_sync_sequence: int, offset: int = 0, limit: int = 50,
+        anchor_turn_id: str = "",
+    ) -> Mapping[str, Any] | None: ...
+
     def turn_page(
         self,
         conversation_id: str,
@@ -45,6 +52,7 @@ class ConversationSyncRepository(Protocol):
         expected_sync_sequence: int,
         before_ordinal: int | None,
         limit: int,
+        max_projection_bytes: int = 0,
     ) -> Mapping[str, Any] | None:
         ...
 
@@ -111,6 +119,7 @@ class SidecarConversationSyncRepository:
         *,
         turn_limit: int | None = None,
         include_artifact_hint: bool = False,
+        max_projection_bytes: int = 0,
     ) -> Mapping[str, Any] | None:
         payload: dict[str, Any] = {
             "conversation_id": conversation_id,
@@ -120,6 +129,8 @@ class SidecarConversationSyncRepository:
             payload["turn_limit"] = int(turn_limit)
         if include_artifact_hint:
             payload["include_artifact_hint"] = True
+        if max_projection_bytes:
+            payload["max_projection_bytes"] = int(max_projection_bytes)
         result = self._query_window(
             "turn.sync.snapshot", payload, "turn_limit",
         )
@@ -152,6 +163,17 @@ class SidecarConversationSyncRepository:
             )
         return result
 
+    def round_directory(
+        self, conversation_id: str, user_id: int, *, lane_id: str,
+        expected_sync_sequence: int, offset: int = 0, limit: int = 50,
+        anchor_turn_id: str = "",
+    ) -> Mapping[str, Any] | None:
+        return self._client().query("turn.sync.round_directory", {
+            "conversation_id": conversation_id, "user_id": user_id, "lane_id": lane_id,
+            "sync_sequence": expected_sync_sequence, "offset": offset, "limit": limit,
+            "anchor_turn_id": anchor_turn_id,
+        })
+
     def turn_page(
         self,
         conversation_id: str,
@@ -161,6 +183,7 @@ class SidecarConversationSyncRepository:
         expected_sync_sequence: int,
         before_ordinal: int | None,
         limit: int = 64,
+        max_projection_bytes: int = 0,
     ) -> Mapping[str, Any] | None:
         payload: dict[str, Any] = {
             "conversation_id": conversation_id,
@@ -171,6 +194,8 @@ class SidecarConversationSyncRepository:
         }
         if before_ordinal is not None:
             payload["before_ordinal"] = int(before_ordinal)
+        if max_projection_bytes:
+            payload["max_projection_bytes"] = int(max_projection_bytes)
         result = self._query_window("turn.sync.page", payload, "limit")
         if result is not None and not isinstance(result, Mapping):
             raise StorageError(

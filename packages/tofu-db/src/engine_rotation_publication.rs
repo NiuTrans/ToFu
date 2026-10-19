@@ -18,7 +18,7 @@ pub(crate) struct PreparedRotationPublication {
     outcome: RotationSegmentOutcome,
     blocks: Arc<BlockStore>,
     control: Arc<Mutex<ControlFile>>,
-    wal_cover: Option<(PathBuf, Arc<dyn Vfs>)>,
+    wal_cover: Option<crate::wal::PublicationWalCover>,
     restart_required: Arc<std::sync::atomic::AtomicBool>,
     completed: bool,
 }
@@ -82,8 +82,7 @@ impl Engine {
             };
             // Cover the captured logical state before publishing CONTROL.
             // This includes Strict's in-flight group-barrier acknowledgements.
-            let wal_cover = (self.wal.unsynced_bytes() > 0)
-                .then(|| (self.wal.path().to_path_buf(), Arc::clone(&self.vfs)));
+            let wal_cover = self.wal.publication_cover(Arc::clone(&self.vfs))?;
             let prepared = PreparedRotationPublication {
                 manifest, manifest_bytes, manifest_id, catchup, next, outcome,
                 blocks: Arc::clone(&self.blocks), control: Arc::clone(&self.control),
@@ -143,10 +142,7 @@ impl Engine {
 /// WAL cover, immutable manifest and checksummed CONTROL publication retain
 /// their ordering and lost-sync barriers; only their lock placement changes.
 pub(crate) fn publish_rotation_publication(prepared: &PreparedRotationPublication) -> io::Result<()> {
-    if let Some((path, vfs)) = &prepared.wal_cover {
-        let mut file = vfs.open(path, OpenRequest { write: true, ..Default::default() })?;
-        crate::vfs::sync_data_barrier(file.as_mut())?;
-    }
+    if let Some(cover) = &prepared.wal_cover { cover.sync()?; }
     let mut control = prepared.control.lock()
         .map_err(|_| io::Error::other("tofu-db CONTROL lock is poisoned"))?;
     if let Some(catchup) = &prepared.catchup { control.publish(catchup)?; }

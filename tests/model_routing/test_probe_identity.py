@@ -34,7 +34,7 @@ def test_pending_names_participate_in_probe_without_canonical_wire_guess():
 
 
 def test_pending_model_matrix_is_not_truncated_by_retired_probe_quota():
-    from lib.provider_probe import build_probe_work
+    from lib.provider.provider_probe import build_probe_work
     _, bundle = fixture()
     offering, deployment, credential = bundle['offerings'][0], bundle['deployments'][0], bundle['credentials'][0]
     bundle['offerings'] = [dict(offering, offering_id=f'o{i}', pending_model_id=f'm{i}') for i in range(1000)]
@@ -141,7 +141,7 @@ def test_scoped_probe_never_confirms_from_seeded_cells():
 
 @pytest.mark.parametrize('aborted,conflict', [(False, False), (True, False), (False, True)])
 def test_probe_worker_publishes_completion_only_after_identity_commit(monkeypatch, tmp_path, aborted, conflict):
-    from lib import provider_probe as probe
+    from lib.provider import provider_probe as probe
     calls = []
     monkeypatch.setattr(probe, 'probe_cache_path', lambda _: str(tmp_path / 'probe.json'))
     monkeypatch.setattr(probe, 'probe_cell_multi', lambda *a, **kw: ('ok', 'HTTP 200'))

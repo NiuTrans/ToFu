@@ -33,7 +33,7 @@ def srv():
     except ImportError as e:
         pytest.skip('quart/hypercorn not installed: %s' % e)
     import server
-    from lib import http_request_lifecycle as lifecycle
+    from lib.http_transport import request_lifecycle as lifecycle
     return SimpleNamespace(
         app=server.app,
         _fmt_size=lifecycle.format_size,

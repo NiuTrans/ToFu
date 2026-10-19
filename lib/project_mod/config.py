@@ -118,7 +118,6 @@ IGNORE_FILES = {
 MAX_FILE_SIZE    = 512 * 1024
 MAX_SCAN_FILES   = 5000
 MAX_TREE_ENTRIES = 500
-MAX_READ_CHARS   = 1_000_000     # whole-file read cap lifted; MAX_FILE_SIZE (512KB) is the real bound
 MAX_GREP_RESULTS = 50
 LINE_COUNT_LIMIT = 50_000        # skip line counting for files above this
 # Per-project undo/redo history store. Resolved through the single runtime-base
@@ -126,7 +125,7 @@ LINE_COUNT_LIMIT = 50_000        # skip line counting for files above this
 # instead of under a read-only <repo>/lib. Byte-identical to the legacy
 # <repo>/lib/.project_sessions for an in-tree install (see project_sessions_root).
 try:
-    from lib.runtime_paths import project_sessions_root as _sessions_root
+    from lib.runtime.runtime_paths import project_sessions_root as _sessions_root
     SESSIONS_DIR = _sessions_root()
 except Exception as _rp_e:  # pragma: no cover — defensive (keeps import robust)
     logger.debug('[Config] project_sessions_root() unavailable, using in-tree: %s', _rp_e)
@@ -185,7 +184,6 @@ DATA_EXTENSIONS = {
     '.arff', '.sav', '.rec', '.ftr', '.feather',
 }
 # Max chars returned to LLM for data files in tool_read_file
-MAX_DATA_FILE_PREVIEW = 2000
 
 
 # ═══════════════════════════════════════════════════════
@@ -313,8 +311,8 @@ def get_conv_roots(conv_id):
     if view is not None:
         return {name: dict(state) for name, state in view[2].items()}
     with _lock:
-        if conv_id and conv_id in _conv_roots:
-            return {n: dict(s) for n, s in _conv_roots[conv_id].items()}
+        if conv_id:
+            return {n: dict(s) for n, s in _conv_roots.get(conv_id, {}).items()}
         return {n: dict(s) for n, s in _roots.items()}
 
 
@@ -339,6 +337,8 @@ def get_root_path(name, conv_id=None):
                 for rn, rs in conv_map.items():
                     if rn.lower() == name.lower():
                         return rs['path']
+        if conv_id:
+            return None
         r = _roots.get(name)
         return r['path'] if r else None
 
@@ -691,9 +691,14 @@ def resolve_namespaced_path(rel_path, conv_id=None):
                     return state['path'], rest or '.'
             raise UnknownWorkspaceRootError(
                 f'Unknown workspace root: {name} (available: {", ".join(view[2])})')
+        if not view[1]:
+            raise ValueError('No project path set for this task')
         return view[1], rel_path
     with _lock:
         if ':' in rel_path and not os.path.isabs(rel_path.split(':')[0]):
+
+            if conv_id and conv_id not in _conv_roots:
+                raise UnknownWorkspaceRootError('No roots registered for this conversation')
             name, _, rest = rel_path.partition(':')
             # 1) Conv-specific registry — STRICT isolation when the conv has
             #    registered roots.  If a conv has its own registry, we do
@@ -731,7 +736,7 @@ def resolve_namespaced_path(rel_path, conv_id=None):
         primary = None
         if conv_id:
             primary = _conv_primary.get(conv_id)
-        if not primary:
+        else:
             primary = _state['path']
         if not primary:
             raise ValueError('No project path set')

@@ -124,8 +124,26 @@ __pycache__/
 !/benchmarks/conversation_concurrency_contract.json
 !/benchmarks/conversation_acceptance.py
 !/benchmarks/conversation_authority.py
+!/benchmarks/conversation_provenance.py
 !/benchmarks/embedded_process_recovery.py
 !/benchmarks/conversation_compare.py
+!/benchmarks/tofudb_context_read.py
+!/benchmarks/tofudb_cached_read.py
+!/benchmarks/tofudb_context_controls.py
+!/benchmarks/harness_sqlite_reference.rs
+!/benchmarks/harness_graph_controls.py
+!/benchmarks/harness_graph/
+/benchmarks/harness_graph/*
+!/benchmarks/harness_graph/AGENTS.md
+!/benchmarks/harness_graph/README.md
+!/benchmarks/harness_graph/measure.py
+!/benchmarks/harness_graph/Cargo.toml
+!/benchmarks/harness_graph/Cargo.lock
+!/benchmarks/harness_graph/src/
+!/benchmarks/harness_graph/tests/
+!/benchmarks/live_pipeline.py
+
+!/benchmarks/conversation_snapshot_cpu.py
 !/benchmarks/task_replay_bench.py
 !/benchmarks/system_performance.py
 !/benchmarks/send_startup.py
@@ -150,13 +168,21 @@ __pycache__/
 # belong beside their owning docs or in the canonical static asset tree.
 /propaganda/
 /scripts/*
+!/scripts/gen_working_facts_contract.py
+!/scripts/gen_execution_account_frontier.py
+!/scripts/gen_native_token_count_abi.py
+!/scripts/gen_native_usage_aggregate.py
+!/scripts/check_native_token_count_abi.py
+!/scripts/check_native_token_binding.py
 !/scripts/check_rust_token_ingress.py
 !/scripts/check_rust_model_account.py
 !/scripts/check_rust_usage_oracle.py
+!/scripts/gen_rust_pricing_oracle.py
 !/scripts/gen_task_event_delivery_contract.py
 !/scripts/trace_experiment_reads.py
 !/scripts/gen_automation_contract.py
 !/scripts/gen_model_context_projection.py
+!/scripts/gen_agent_machine_tokens.py
 !/scripts/AGENTS.md
 !/scripts/check_tool_environment.py
 !/scripts/check_monorepo.py
@@ -178,6 +204,7 @@ __pycache__/
 !/scripts/build_frontend.mjs
 !/scripts/check_conversation_renderer_boundaries.mjs
 !/scripts/check_i18n_usage.mjs
+!/scripts/check_i18n_dead_keys.mjs
 !/scripts/check_lazy_runtime_bindings.mjs
 !/scripts/check_runtime_reachability.mjs
 !/scripts/check_frontend_tdz.mjs
@@ -225,6 +252,7 @@ __pycache__/
 !/scripts/gen_tofudb_unicode_casefold.py
 !/scripts/gen_tofudb_unicode_simple_fold.py
 !/scripts/tofudb_perf_compare.py
+!/scripts/tofudb_charter_assess.py
 !/scripts/tofudb_profile_report.py
 !/scripts/tofudb_v2_client.py
 !/scripts/tofudb_migrate.py
@@ -286,6 +314,7 @@ __pycache__/
 # locally, which is the worst place to discover a missing file.
 !/scripts/release_assets.py
 !/scripts/build_native_runtime.py
+!/scripts/build_python_wheels.py
 # Shared "is this VERSION documented?" predicate. The version gate in
 # build-desktop.yml calls it BEFORE any build, so a clean clone without it
 # fails the release pipeline in CI — the same worst-place-to-discover argument
@@ -293,7 +322,6 @@ __pycache__/
 # through 0.15.2) shipped with no changelog entry: nothing in the repo
 # referenced CHANGELOG.md, so no check could observe the drift.
 !/scripts/changelog_gate.py
-!/scripts/check_documentation.py
 !/scripts/check_architecture.py
 # Cache-waste distribution report. The measurement discipline it encodes —
 # rates DERIVED from lib.cost rather than hand-written, non-waste classes
@@ -301,6 +329,7 @@ __pycache__/
 # percentiles that treat 0 as a number — is the deliverable. An untracked copy
 # means the next cost audit goes back to throwaway one-liners and re-makes the
 # errors tests/cache/test_cache_waste_report.py now pins.
+!/scripts/report_tool_search_outcomes.py
 !/scripts/cache_waste_report.py
 # Second-path cache A/B probe. It is the control the gateway report is missing,
 # and it is DRY-RUN by default — the value is the encoded experiment design
@@ -560,8 +589,18 @@ designs/ui-gallery/ui-kit.bundle.js
 !/scripts/gen_packaged_demand_workers.py
 
 # Public test collection dependencies.
-!/benchmarks/system_evidence_inventory.py
+!/benchmarks/native_completion.py
+!/benchmarks/native_terminal_delivery.py
 !/benchmarks/conversation_concurrency_contract.json
+
+!/scripts/gen_native_flow_abi.py
+
+!/scripts/gen_native_verdict_policy.py
+
+!/scripts/gen_native_loop_policy.py
+
+# Generated visual-test screenshots — never commit.
+/tests/visual/output/
 
 # BEGIN tofu public retained source
 !/benchmarks/
@@ -570,6 +609,7 @@ designs/ui-gallery/ui-kit.bundle.js
 !/benchmarks/context_efficiency/
 !/benchmarks/knowledge_html/
 !/benchmarks/markdown_worker/
+!/benchmarks/repository_index/
 !/benchmarks/AGENTS.md
 !/benchmarks/context_efficiency/README.md
 !/benchmarks/context_efficiency/__init__.py
@@ -584,9 +624,11 @@ designs/ui-gallery/ui-kit.bundle.js
 !/benchmarks/conversation_compare.py
 !/benchmarks/conversation_concurrency.py
 !/benchmarks/conversation_concurrency_contract.json
+!/benchmarks/conversation_provenance.py
 !/benchmarks/conversation_wake.py
 !/benchmarks/desktop_runtime.py
 !/benchmarks/evolution_long_horizon.py
+!/benchmarks/harness_graph_controls.py
 !/benchmarks/http_cpu_clock.py
 !/benchmarks/http_domain_measure.py
 !/benchmarks/http_frame_coalescing.py
@@ -610,12 +652,19 @@ designs/ui-gallery/ui-kit.bundle.js
 !/benchmarks/knowledge_html/fixture_pdf.py
 !/benchmarks/knowledge_html/interruption.py
 !/benchmarks/knowledge_html/measure.py
+!/benchmarks/knowledge_html/native_ingest_check.py
+!/benchmarks/knowledge_html/native_ingest_interrupt.py
+!/benchmarks/knowledge_html/native_ingest_measure.py
+!/benchmarks/knowledge_html/native_ingest_memory.py
+!/benchmarks/knowledge_html/native_ingest_provenance.py
+!/benchmarks/knowledge_html/native_ingest_worker.py
 !/benchmarks/knowledge_html/native_profile_measure.py
 !/benchmarks/knowledge_html/reference.py
 !/benchmarks/knowledge_html/token_measure.py
 !/benchmarks/knowledge_html/token_projection.py
 !/benchmarks/knowledge_html/upload_phases.py
 !/benchmarks/knowledge_html/upload_phases_measure.py
+!/benchmarks/live_pipeline.py
 !/benchmarks/markdown_worker/AGENTS.md
 !/benchmarks/markdown_worker/README.md
 !/benchmarks/markdown_worker/browser_measure.py
@@ -631,13 +680,28 @@ designs/ui-gallery/ui-kit.bundle.js
 !/benchmarks/markdown_worker/reader_measure.js
 !/benchmarks/markdown_worker/reader_measure.py
 !/benchmarks/markdown_worker/reader_memory_profile.py
+!/benchmarks/native_agent_root.py
+!/benchmarks/native_agent_root_measure.py
+!/benchmarks/native_application_authority.py
+!/benchmarks/native_application_stages.py
+!/benchmarks/native_root_memory.py
+!/benchmarks/native_shared_library.py
 !/benchmarks/perf_baseline.json
+!/benchmarks/process_memory_counters.py
+!/benchmarks/process_vm_memory.py
+!/benchmarks/repository_index/child_memory.py
+!/benchmarks/repository_index/exit_memory.py
+!/benchmarks/repository_index/native_domain_worker.py
+!/benchmarks/repository_index/record_journal.py
 !/benchmarks/research_observation_contract.py
 !/benchmarks/research_quality_compare.py
-!/benchmarks/system_evidence_inventory.py
 !/benchmarks/system_performance.py
 !/benchmarks/system_performance_contract.json
 !/benchmarks/task_replay_bench.py
+!/benchmarks/tofudb_cached_read.py
+!/benchmarks/tofudb_context_controls.py
+!/benchmarks/tofudb_context_read.py
+!/benchmarks/token_cold_start.py
 !/debug/AGENTS.md
 !/debug/inspect_conversation.py
 !/debug/tool_call_success_report.py
@@ -650,6 +714,7 @@ designs/ui-gallery/ui-kit.bundle.js
 !/scripts/bootstrap_rootless_qemu.sh
 !/scripts/build_frontend.mjs
 !/scripts/build_native_runtime.py
+!/scripts/build_python_wheels.py
 !/scripts/build_tofudb_prebuilt.py
 !/scripts/certify_storage_backends.py
 !/scripts/changelog_gate.py
@@ -658,13 +723,15 @@ designs/ui-gallery/ui-kit.bundle.js
 !/scripts/check_conversation_renderer_boundaries.mjs
 !/scripts/check_coverage.py
 !/scripts/check_developer_runtime_artifacts.py
-!/scripts/check_documentation.py
 !/scripts/check_frontend_tdz.mjs
 !/scripts/check_function_sizes.py
 !/scripts/check_helm_render.py
+!/scripts/check_i18n_dead_keys.mjs
 !/scripts/check_i18n_usage.mjs
 !/scripts/check_lazy_runtime_bindings.mjs
 !/scripts/check_monorepo.py
+!/scripts/check_native_token_binding.py
+!/scripts/check_native_token_count_abi.py
 !/scripts/check_note_presentation_parity.mjs
 !/scripts/check_perf_regression.py
 !/scripts/check_runtime_reachability.mjs
@@ -678,30 +745,48 @@ designs/ui-gallery/ui-kit.bundle.js
 !/scripts/compose_frontend_runtime.mjs
 !/scripts/compose_frontend_styles.mjs
 !/scripts/compose_settings_panels.mjs
+!/scripts/db_performance_catalog.py
 !/scripts/deploy_tofudb_engine.py
 !/scripts/frontend_api_inventory.mjs
 !/scripts/frontend_budget.py
 !/scripts/frontend_bundle_canary.py
+!/scripts/gen_agent_machine_tokens.py
 !/scripts/gen_api_endpoint_index.py
 !/scripts/gen_api_v1_model_routing_contract.py
 !/scripts/gen_api_v4_contract.py
+!/scripts/gen_artifact_review_contract.py
 !/scripts/gen_automation_contract.py
 !/scripts/gen_concept_index.py
 !/scripts/gen_conversation_sync_contract.py
 !/scripts/gen_desktop_icons.py
 !/scripts/gen_event_contract.py
+!/scripts/gen_execution_account_frontier.py
 !/scripts/gen_i18n_contract.mjs
 !/scripts/gen_model_context_projection.py
 !/scripts/gen_native_checkpoint_control.py
+!/scripts/gen_native_checkpoint_storage_abi.py
+!/scripts/gen_native_flow_abi.py
+!/scripts/gen_native_html_projection.py
+!/scripts/gen_native_html_projection_abi.py
+!/scripts/gen_native_loop_policy.py
+!/scripts/gen_native_token_count_abi.py
+!/scripts/gen_native_token_rank_tables.py
+!/scripts/gen_native_usage_aggregate.py
+!/scripts/gen_native_verdict_policy.py
 !/scripts/gen_orchestration_authoring_metadata.py
 !/scripts/gen_orchestration_compatibility_defaults.py
 !/scripts/gen_orchestration_http_contract.py
 !/scripts/gen_orchestration_wire_formats.py
 !/scripts/gen_packaged_demand_workers.py
+!/scripts/gen_project_continuity_contract.py
 !/scripts/gen_project_coordination_contract.py
+!/scripts/gen_project_dispatch_contract.py
+!/scripts/gen_project_dispatch_storage.py
 !/scripts/gen_resource_policy.py
 !/scripts/gen_rust_anthropic_oracle.py
+!/scripts/gen_rust_chat_wire_oracle.py
 !/scripts/gen_rust_execution_contract.py
+!/scripts/gen_rust_pricing_oracle.py
 !/scripts/gen_rust_progress_oracle.py
 !/scripts/gen_rust_responses_oracle.py
 !/scripts/gen_rust_responses_request_oracle.py
@@ -720,6 +805,7 @@ designs/ui-gallery/ui-kit.bundle.js
 !/scripts/gen_tool_result_surfaces.py
 !/scripts/gen_ui_nav_targets.mjs
 !/scripts/gen_wire_fixtures.py
+!/scripts/gen_working_facts_contract.py
 !/scripts/generate_evolution_game_frames.py
 !/scripts/generate_evolution_people.py
 !/scripts/generate_evolution_props.py
@@ -730,14 +816,17 @@ designs/ui-gallery/ui-kit.bundle.js
 !/scripts/install_frontend_dist.py
 !/scripts/install_on_server.sh
 !/scripts/install_tofudb_prebuilt.py
+!/scripts/json_schema_types.py
 !/scripts/migrate_checkout_path.py
 !/scripts/migrate_pg_to_sqlite.py
 !/scripts/migrate_sqlite_to_postgres.py
 !/scripts/package_extension.sh
 !/scripts/png_to_svg.py
 !/scripts/ptc_live_smoke.py
+!/scripts/python_with_glibc.py
 !/scripts/release_assets.py
 !/scripts/release_sign.py
+!/scripts/report_tool_search_outcomes.py
 !/scripts/rootless_egress_bridge.c
 !/scripts/rootless_qemu-conda-linux-64.lock
 !/scripts/rootless_terminal_bench_21.py
@@ -748,6 +837,7 @@ designs/ui-gallery/ui-kit.bundle.js
 !/scripts/style_token_policy.mjs
 !/scripts/test_select.py
 !/scripts/tofudb_bench.py
+!/scripts/tofudb_charter_assess.py
 !/scripts/tofudb_migrate.py
 !/scripts/tofudb_perf_compare.py
 !/scripts/tofudb_soak.py

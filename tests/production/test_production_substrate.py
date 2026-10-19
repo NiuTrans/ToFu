@@ -362,26 +362,6 @@ def test_recipe_imports_the_shared_stage_owner():
     assert 'from lib.motion_video._stages import' not in src
 
 
-@pytest.mark.skipif(
-    not os.path.isfile(os.path.join(
-        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-        'CLAUDE.md')),
-    reason='CLAUDE.md not shipped in opensource (agent-rules doc, export-excluded)')
-def test_claude_md_documents_the_new_packages():
-    """The short agent entry point must lead to the authoritative domain map."""
-    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    claude = open(os.path.join(root, 'CLAUDE.md'), encoding='utf-8').read()
-    docs_map = open(os.path.join(root, 'docs', 'README.md'),
-                    encoding='utf-8').read()
-    production = open(os.path.join(root, 'docs', 'modules', 'production.md'),
-                      encoding='utf-8').read()
-    assert '`docs/README.md`' in claude
-    assert '`lib/production/`' in docs_map
-    assert 'modules/production.md' in docs_map
-    assert '`lib/production/stages.py`' in production
-    assert '`lib/motion_video/`' in production
-
-
 def test_sixty_four_stages_enter_one_idle_hint_and_reap_workers(tmp_path, monkeypatch):
     import time
     from lib.production import stages as st

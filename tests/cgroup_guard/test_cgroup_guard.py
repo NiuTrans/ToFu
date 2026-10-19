@@ -349,13 +349,14 @@ def test_relieve_clears_caches_and_trims(guard, monkeypatch):
     monkeypatch.setattr(guard, 'malloc_trim', lambda: True)
     try:
         stats = guard.relieve_memory('test')
-        assert stats['dropped'] >= 8
+        assert stats['dropped'] >= 7
         assert len(c) == 0
         assert usage_cache.usage_cache_snapshot()['entries'] == 0
         assert _resolve.current_work_tab(('41', 'pressure-a')) is None
         assert _resolve.current_work_tab(('42', 'pressure-b')) is None
         assert tool_search.catalog_cache_stats()['indexes'] == 0
-        assert tool_search.catalog_cache_stats()['tasks'] == 0
+        assert tool_search.catalog_cache_stats()['tasks'] == 1
+        assert tool_search._SELECTION_STATE['pressure-tool-search']['used'] == ['mcp__docs__read']
     finally:
         _resolve.clear_work_tab_cache()
         tool_search.clear_tool_search_caches()

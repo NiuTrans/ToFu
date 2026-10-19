@@ -252,8 +252,8 @@ def _stream_call(messages: list[dict], *, model: str | None,
     # paper stream callers all accumulate from on_content instead. Doing the
     # same also guarantees the text we parse is byte-identical to the text we
     # counted progress from.
-    from lib.agent_loop import AbortSignal
-    from lib.llm_errors import AbortedError
+    from lib.agent_loop.agent_loop import AbortSignal
+    from lib.llm.llm_errors import AbortedError
     from lib.llm.stream_result import require_verified_provider_stream_result
     from lib.paper.agent_loop_policy import run_guarded_paper_agent_loop
     result = None

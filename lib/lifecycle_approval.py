@@ -86,7 +86,7 @@ from lib.json_store import (
     write_json_atomic as write_json_atomic,  # historical test/debug seam
 )
 from lib.log import audit_log, get_logger
-from lib.runtime_paths import data_root
+from lib.runtime.runtime_paths import data_root
 
 logger = get_logger(__name__)
 

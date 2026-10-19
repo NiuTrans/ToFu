@@ -6,6 +6,8 @@ pub(crate) const SNAPSHOTS: &str = "native_checkpoint_snapshots_v1";
 #[path = "native_checkpoint_store_adapter.rs"]
 mod adapter;
 #[cfg(feature = "native-runtime-checkpoints")]
+use tofu_runtime::checkpoint_writer as writer;
+#[cfg(feature = "native-runtime-checkpoints")]
 pub use adapter::NativeCheckpointStore;
 
 #[cfg(test)]

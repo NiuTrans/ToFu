@@ -32,7 +32,9 @@ def evidence_font():
     locale = json.loads((ROOT / 'frontend/src/i18n/locales/zh.json').read_text())
     subset = Subsetter()
     subset.populate(text=(Path(__file__).parent / 'preview.html').read_text() +
-                    ''.join(value for key, value in locale.items() if key.startswith('projectCoordination.')) + '关闭面板')
+                    (Path(__file__).parent / 'dispatch-preview.html').read_text() +
+                    ''.join(value for key, value in locale.items()
+                            if key.startswith(('projectCoordination.', 'projectDispatch.'))) + '关闭面板')
     subset.subset(font)
     font = instantiateVariableFont(font, {'wght': 400}, inplace=True)
     output = BytesIO()

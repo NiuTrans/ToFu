@@ -122,7 +122,7 @@ export function createPaperPreview(overrides: Partial<PreviewOptions> = {}): {
   const presentDocuments = (): void => {
     const choices = [...(documents?.documents ?? [])];
     if (selected && !choices.some(value => paperDocumentKey(value) === paperDocumentKey(selected))) choices.unshift(selected);
-    panel?.setDocuments(choices.slice(0, limits.discovery_candidates), selected, documents?.overleaf_servers ?? []);
+    panel?.setDocuments(choices, selected, documents?.overleaf_servers ?? []);
     panel?.setCompileAvailable(saved?.can_compile ?? true);
   };
 

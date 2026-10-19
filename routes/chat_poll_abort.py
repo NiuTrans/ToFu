@@ -48,9 +48,11 @@ def chat_abort_conv(conv_id):
     from routes.api_v1.auth import request_user_id
 
     owner_user_id = int(request_user_id())
-    mark_pending_abort(conv_id, owner_user_id)
+    timestamp = mark_pending_abort(conv_id, owner_user_id)
     aborted = abort_running_tasks_for_conv(
         conv_id, user_id=owner_user_id)
+    from lib.project_dispatch.recovery import revoke_conversation_dispatch
+    revoke_conversation_dispatch(conv_id, user_id=owner_user_id, occurred_at=timestamp)
     # ③-3 (): also tombstone running DB rows the registry has
     #   LOST — the in-registry sweep above structurally cannot reach them
     #   (measured 2026-08-01: abort-conv returned 0 while a live task spun).
@@ -92,6 +94,11 @@ def chat_abort(task_id):
         from lib.tasks_pkg.manager import plant_abort_tombstone as _plant
         if _plant(
                 task_id, source='api_chat_abort', user_id=owner_user_id):
+
+            from lib.project_dispatch.recovery import revoke_conversation_dispatch
+            value = _load_persisted_task_result(task_id, user_id=owner_user_id)
+            if value is not None and value.get('conv_id'):
+                revoke_conversation_dispatch(value['conv_id'], user_id=owner_user_id)
             return api_ok(taskId=task_id, status='abort_signaled',
                           note='task absent from registry; abort tombstone '
                                'planted — the live worker consumes it at its '
@@ -102,6 +109,11 @@ def chat_abort(task_id):
         task_id, user_id=owner_user_id, source='api_chat_abort')
     task = receipt['task']
     was_already_aborted = receipt['alreadyCancelled']
+
+    if task.get('convId'):
+        timestamp = mark_pending_abort(task['convId'], owner_user_id)
+        from lib.project_dispatch.recovery import revoke_conversation_dispatch
+        revoke_conversation_dispatch(task['convId'], user_id=owner_user_id, occurred_at=timestamp)
     audit_log('api_chat_abort',
               key_id=(current_auth().key_id if current_auth() else ''),
               task_id=task_id)

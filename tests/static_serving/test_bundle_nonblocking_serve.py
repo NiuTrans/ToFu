@@ -33,7 +33,7 @@ def test_server_does_not_build_missing_frontend_artifacts():
 @pytest.mark.parametrize('role', ('all', 'api'))
 def test_frontend_roles_fail_startup_with_actionable_artifact_error(
         role, monkeypatch):
-    import lib.server_assembly as assembly
+    import lib.server.server_assembly as assembly
     from lib import vite_assets
 
     monkeypatch.setattr(
@@ -55,7 +55,7 @@ def test_frontend_roles_fail_startup_with_actionable_artifact_error(
 
 @pytest.mark.parametrize('role', ('worker', 'scheduler'))
 def test_non_frontend_roles_skip_artifact_validation(role, monkeypatch):
-    import lib.server_assembly as assembly
+    import lib.server.server_assembly as assembly
     from lib import vite_assets
 
     boot = []
@@ -74,7 +74,7 @@ def test_non_frontend_roles_skip_artifact_validation(role, monkeypatch):
 
 def test_runtime_startup_does_not_recheck_authoring_source_freshness(
         monkeypatch):
-    import lib.server_assembly as assembly
+    import lib.server.server_assembly as assembly
     from lib import vite_assets
 
     calls = []

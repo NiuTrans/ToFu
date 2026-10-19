@@ -24,7 +24,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 
-from chromium_env import ensure_chromium_env  # noqa: E402
+from chromium_env import ensure_chromium_env, chromium_executable  # noqa: E402
 from playwright.sync_api import sync_playwright  # noqa: E402
 
 PORT = 18924
@@ -52,7 +52,7 @@ def ensure_bundle() -> None:
             and all(bundle.stat().st_mtime > s.stat().st_mtime for s in sources)):
         return
     subprocess.run(
-        [str(REPO_ROOT / "node_modules/.bin/esbuild"), str(src),
+        ["node", str(REPO_ROOT / "scripts/vite_test_bundle.mjs"), str(src),
          "--bundle", "--format=esm", f"--outfile={bundle}"],
         check=True, capture_output=True,
     )
@@ -86,7 +86,7 @@ def main() -> None:
     try:
         ensure_chromium_env()
         with sync_playwright() as pw:
-            browser = pw.chromium.launch(args=["--no-sandbox", "--disable-gpu"])
+            browser = pw.chromium.launch(executable_path=chromium_executable() or None, args=["--no-sandbox", "--disable-gpu"])
             page = browser.new_page(viewport={"width": 1440, "height": 900})
 
             # ── 1. Control height ramp ──────────────────────────────
@@ -100,6 +100,17 @@ def main() -> None:
                   f"heights: {sorted(md_heights)}")
             check("sm controls share the sm ramp height", sm_heights == {28.0},
                   f"heights: {sorted(sm_heights)}")
+
+            hidden_controls = page.evaluate("""() =>
+                ['.ui-btn', '.ui-icon-btn'].map(selector => {
+                  const control = document.querySelector(selector);
+                  control.hidden = true;
+                  const invisible = getComputedStyle(control).display === 'none'
+                    && control.getClientRects().length === 0;
+                  control.hidden = false;
+                  return invisible;
+                })""")
+            check("native hidden removes shared button layout and focus targets", all(hidden_controls))
             input_heights = {round(b["h"], 2) for b in boxes(page, "input.ui-input, .ui-select>select")}
             check("all md inputs/selects share the md control height", input_heights == {34.0},
                   f"heights: {sorted(input_heights)}")

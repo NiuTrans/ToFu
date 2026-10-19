@@ -32,7 +32,7 @@ def test_default_accumulator_diagnostics_measure_original_payload(tmp_path, monk
     assert not (tmp_path / 'raw_sse.log').exists()
 
 
-def test_decoded_opt_in_payload_keeps_structure_but_not_tool_fragments(tmp_path, monkeypatch):
+def test_decoded_opt_in_payload_keeps_original_evidence_with_byte_limits(tmp_path, monkeypatch):
     monkeypatch.setattr(diagnostics, 'LOG_DIR', str(tmp_path))
     monkeypatch.setattr(diagnostics, '_RAW_SSE_FILTER', '1')
     dumper = diagnostics.RawSSEDumper('model', 'trace', {})
@@ -54,8 +54,9 @@ def test_decoded_opt_in_payload_keeps_structure_but_not_tool_fragments(tmp_path,
     for path in tmp_path.glob('raw_sse*.log'):
         text = path.read_text()
         assert 'visible text' in text
-        assert 'omitted tool input size=' in text
+        assert 'TOOL-FRAGMENT' in text
+        assert 'CANARY-CREDENTIAL' in text
         assert f'omitted payload chars={len(huge)}' in text
         assert 'malformed payload chars=' in text
-        assert 'CANARY' not in text
-        assert 'TOOL-FRAGMENT' not in text
+        assert 'CANARY-HUGE' not in text
+        assert 'CANARY-MALFORMED' not in text

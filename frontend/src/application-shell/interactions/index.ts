@@ -5,12 +5,14 @@ import { installComposerInput, type ComposerInputPorts } from './composer-input'
 import { installFileDrop, type FileDropPorts } from './file-drop';
 import { installChromeGeometry, type ChromeGeometryPorts } from './chrome-geometry';
 import { installShellShortcuts, type ShellShortcutPorts } from './shortcuts';
+import { installDiffReview, type DiffReviewPorts } from './diff-review';
 export { installViewportHeightGuard } from './viewport';
 export interface ApplicationInteractionPorts {
   window: Window; document: Document;
   initializeFolders(): void;
   sidebar: SidebarInteractionPorts; composer: ComposerInputPorts; files: FileDropPorts;
   geometry: ChromeGeometryPorts; shortcuts: ShellShortcutPorts;
+  diffReview?: DiffReviewPorts;
 }
 export function installApplicationInteractions(ports: ApplicationInteractionPorts): () => void {
   const scope = createLifecycleScope(ports.window), document = ports.document;
@@ -20,6 +22,7 @@ export function installApplicationInteractions(ports: ApplicationInteractionPort
     ports.initializeFolders();
     const input = document.getElementById('userInput') as HTMLTextAreaElement | null;
     if (input) installComposerInput(scope, input, ports.composer);
+    if (input && ports.diffReview) installDiffReview(scope, document, input, ports.diffReview);
     installFileDrop(scope, document, ports.files);
     const settings = document.getElementById('settingsModal');
     if (settings) scope.listen(settings, 'click', event => { if (event.target === settings) ports.shortcuts.closeSettings(); });

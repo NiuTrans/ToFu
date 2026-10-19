@@ -99,6 +99,7 @@
       "currentAttemptId": "s",
       "kind": "s",
       "laneId": "s",
+      "modelContextRevision": 1,
       "ordinal": 1,
       "parentTurnId": "s",
       "presentationId": "s",
@@ -301,6 +302,7 @@
             {
               "action": "s",
               "anchorBlockId": "s",
+              "anchorPosition": "before",
               "anchorToolRoundNum": 1,
               "archiveId": "s",
               "attempt": 1,
@@ -341,8 +343,15 @@
               "statusCode": 1,
               "summary": "s",
               "summaryArgs": {},
+              "summaryCalls": [
+                {}
+              ],
               "summaryKey": "s",
+              "summaryModel": "s",
+              "summaryProviderId": "s",
+              "summarySelectedModel": "s",
               "taskId": "s",
+              "taskModel": "s",
               "timingMode": "s",
               "toModel": "s",
               "tokenCountKind": "s",
@@ -443,7 +452,8 @@
               "rootPath": "s",
               "source": "local",
               "sourceHash": "s",
-              "sourceRevision": "s"
+              "sourceRevision": "s",
+              "undoAvailable": true
             }
           ],
           "state": "applied",
@@ -495,6 +505,15 @@
           "keyTail": "s",
           "model": "s",
           "providerId": "s",
+          "reasoningResolution": {
+            "actualMode": "s",
+            "actualValue": "s",
+            "effective": "s",
+            "reason": "s",
+            "requested": "s",
+            "requestedValue": "s",
+            "source": "s"
+          },
           "resolvedModel": "s",
           "round": 1,
           "tag": "s",
@@ -517,7 +536,8 @@
             "rootPath": "s",
             "source": "local",
             "sourceHash": "s",
-            "sourceRevision": "s"
+            "sourceRevision": "s",
+            "undoAvailable": true
           }
         ],
         "modifiedFiles": 1,
@@ -526,6 +546,7 @@
           "approved": true,
           "flowNodeId": "s",
           "flowRunId": "s",
+          "goalRunId": "s",
           "iteration": 1,
           "modelRoute": {
             "kind": "selected",
@@ -823,6 +844,9 @@
             "_snapshotToolResult": {
               "chars": 4097,
               "conversationId": "s",
+              "fields": [
+                "toolContent"
+              ],
               "ownerScope": "aaaaaaaaaaaaaaaaaaaaaaaa",
               "preview": "s",
               "projectionRevision": 1,
@@ -845,6 +869,37 @@
             "execElapsedMs": 1.5,
             "execStartTs": 1.5,
             "execTimingAtMs": 1.5,
+            "executionEffect": {
+              "inspection": {
+                "conversationId": "s",
+                "operationId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "ownerScope": "aaaaaaaaaaaaaaaaaaaaaaaa",
+                "turnId": "s"
+              },
+              "invocationInspection": {
+                "conversationId": "s",
+                "invocationId": "s",
+                "operationId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "ownerScope": "aaaaaaaaaaaaaaaaaaaaaaaa"
+              },
+              "operationId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "reconciliation": {
+                "basePath": "s",
+                "changeId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "kind": "project_file_write",
+                "path": "s",
+                "postBytes": 1,
+                "postDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "rootIdentity": [
+                  1,
+                  1
+                ],
+                "taskId": "s"
+              },
+              "recovery": "read_only",
+              "scope": "attempt",
+              "state": "entered"
+            },
             "inspectorRef": {
               "roundNum": 1,
               "taskId": "s",
@@ -968,6 +1023,16 @@
           "taskId": "s"
         },
         "usage": {},
+        "usageComplete": true,
+        "usageRecovery": {
+          "budget": {
+            "durationSeconds": 1,
+            "maxTokens": 1,
+            "maxToolCalls": 1
+          },
+          "sourceProjectionRevision": 1,
+          "sourceTurnId": "s"
+        },
         "videos": [
           {
             "avg_frame_bytes": 1.5,

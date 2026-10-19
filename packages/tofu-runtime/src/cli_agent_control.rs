@@ -15,11 +15,16 @@ fn failure() -> Value {
     json!({"kind":"client_tool_protocol","message":"native client control exchange refused"})
 }
 pub(crate) struct Exchange {
+    pub(crate) scope: Option<Arc<crate::cli_agent_worker::Scope>>,
     pending: Mutex<Option<(String, bool, String)>>,
     fatal: Mutex<Option<Value>>,
     replies: tokio::sync::Mutex<tokio::sync::mpsc::Receiver<Result<Value, Value>>>,
 }
 impl Exchange {
+    pub(crate) fn quiescent(&self) -> bool {
+        self.failure().is_none() && self.pending.lock().is_ok_and(|pending|pending.is_none())
+            && self.replies.try_lock().is_ok_and(|replies|replies.is_empty())
+    }
     pub(crate) fn prepare(&self, id: String, response: &str) -> Result<(), Value> {
         if let Some(error) = self.failure() {
             return Err(error);
@@ -51,22 +56,36 @@ impl Exchange {
         value
     }
 }
+enum ReaderJoin {
+    Running(tokio::task::JoinHandle<Vec<u8>>),
+    Joined,
+    Failed,
+}
 pub(crate) struct ReaderLease {
     runtime: Arc<tokio::runtime::Runtime>,
     tail: Mutex<Option<Vec<u8>>>,
     shutdown: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
-    worker: Mutex<Option<tokio::task::JoinHandle<Vec<u8>>>>,
+    worker: Mutex<ReaderJoin>,
 }
 impl ReaderLease {
     pub(crate) fn finish(&self) -> Result<ReleaseAck, ()> {
         if let Some(signal) = self.shutdown.lock().map_err(|_| ())?.take() {
             let _ = signal.send(());
         }
-        let worker = self.worker.lock().map_err(|_| ())?.take();
-        if let Some(worker) = worker {
-            let tail = self.runtime.block_on(worker).map_err(|_| ())?;
-            *self.tail.lock().map_err(|_| ())? = Some(tail);
-        }
+        // Serialize observations of this exact join. Taking the handle and
+        // unlocking lets another caller acknowledge before the actor exits.
+        let mut state = self.worker.lock().map_err(|_| ())?;
+        let worker = match std::mem::replace(&mut *state, ReaderJoin::Failed) {
+            ReaderJoin::Running(worker) => worker,
+            ReaderJoin::Joined => {
+                *state = ReaderJoin::Joined;
+                return Ok(ReleaseAck::Released);
+            }
+            ReaderJoin::Failed => return Err(()),
+        };
+        let tail = self.runtime.block_on(worker).map_err(|_| ())?;
+        *self.tail.lock().map_err(|_| ())? = Some(tail);
+        *state = ReaderJoin::Joined;
         Ok(ReleaseAck::Released)
     }
 }
@@ -93,6 +112,7 @@ pub(crate) fn start(
     let (tx, rx) = tokio::sync::mpsc::channel(1);
     let (shutdown, mut stop) = tokio::sync::oneshot::channel();
     let exchange = Arc::new(Exchange {
+        scope: input.scope(),
         pending: Mutex::new(None),
         fatal: Mutex::new(None),
         replies: tokio::sync::Mutex::new(rx),
@@ -158,7 +178,7 @@ pub(crate) fn start(
             runtime,
             tail: Mutex::new(None),
             shutdown: Mutex::new(Some(shutdown)),
-            worker: Mutex::new(Some(worker)),
+            worker: Mutex::new(ReaderJoin::Running(worker)),
         }),
     )
 }
@@ -206,12 +226,51 @@ mod tests {
             runtime,
             tail: Mutex::new(None),
             shutdown: Mutex::new(Some(tx)),
-            worker: Mutex::new(Some(worker)),
+            worker: Mutex::new(ReaderJoin::Running(worker)),
         };
         lease.finish().unwrap();
         assert!(exited.load(Ordering::SeqCst));
         lease.finish().unwrap();
     }
+    #[test]
+    fn concurrent_release_waits_for_the_same_actor_join() {
+        let runtime = Arc::new(tokio::runtime::Builder::new_current_thread().build().unwrap());
+        let (shutdown, _stop) = tokio::sync::oneshot::channel();
+        let (release, blocked) = tokio::sync::oneshot::channel();
+        let (entered, entry) = std::sync::mpsc::channel();
+        let exited = Arc::new(AtomicBool::new(false));
+        let marker = exited.clone();
+        let worker = runtime.spawn(async move {
+            entered.send(()).unwrap();
+            blocked.await.unwrap();
+            marker.store(true, Ordering::SeqCst);
+            b"joined-tail".to_vec()
+        });
+        let lease = Arc::new(ReaderLease {
+            runtime, tail: Mutex::new(None), shutdown: Mutex::new(Some(shutdown)),
+            worker: Mutex::new(ReaderJoin::Running(worker)),
+        });
+        let first = lease.clone();
+        let first = std::thread::spawn(move || first.finish());
+        entry.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
+        let (started, start) = std::sync::mpsc::channel();
+        let (returned, returns) = std::sync::mpsc::channel();
+        let second = lease.clone();
+        let second = std::thread::spawn(move || {
+            started.send(()).unwrap();
+            returned.send(second.finish()).unwrap();
+        });
+        start.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
+        let premature = returns.recv_timeout(std::time::Duration::from_millis(25));
+        release.send(()).unwrap();
+        assert!(first.join().unwrap().is_ok());
+        second.join().unwrap();
+        assert!(matches!(premature, Err(std::sync::mpsc::RecvTimeoutError::Timeout)));
+        assert!(returns.recv().unwrap().is_ok());
+        assert!(exited.load(Ordering::SeqCst));
+        assert_eq!(lease.take_tail().unwrap(), b"joined-tail");
+    }
+
     #[test]
     fn actor_panic_is_cleanup_failure() {
         let runtime = Arc::new(
@@ -225,8 +284,10 @@ mod tests {
             runtime,
             tail: Mutex::new(None),
             shutdown: Mutex::new(Some(tx)),
-            worker: Mutex::new(Some(worker)),
+            worker: Mutex::new(ReaderJoin::Running(worker)),
         };
         assert!(lease.finish().is_err());
+        assert!(lease.finish().is_err());
+        assert!(lease.take_tail().is_err());
     }
 }

@@ -1,9 +1,9 @@
-/** Pixel studio over real Headless runs. One visible-page read flight; office-scene owns bounded presentation animation.
+/** Interactive studio over real Headless runs. One visible-page read flight; office-scene owns bounded presentation animation.
  * Stable input islands preserve drafts; idempotency keys survive ambiguous POST retries.
  * Task execution, human waiting, model routing and verdicts remain backend-owned.
  */
 import type { EvolutionApi } from './controller';
-import type { EvolutionRun, EvolutionRunSummary, EvolutionFloor, EvolutionGatePending, HumanQuestion, EvolutionModel, GoalWorkspace, GoalCoordination, RoleModels, EvolutionRole, SwarmAgentStatus } from '../../api/evolution-runs';
+import type { CreateRunBody, EvolutionRun, EvolutionRunSummary, EvolutionFloor, EvolutionGatePending, HumanQuestion, EvolutionModel, GoalWorkspace, GoalCoordination, RoleModels, EvolutionRole, SwarmAgentStatus } from '../../api/evolution-runs';
 import { proposalsPanelHtml, type GateReceipt } from './proposals';
 import { esc, patch } from './components/ui';
 import { t, type I18nKey, type I18nParamsFor } from '../../i18n';
@@ -20,6 +20,9 @@ import { createButton } from '../../ui/index';
 import { isTerminalRun, runStatusLabel } from './goal-workbench';
 import { mountGoalCommandPanel } from './studio/goal-command-panel';
 import { mountGoalRunInspector } from './studio/goal-run-inspector';
+import { iconHtml } from '../../icons';
+import { mountCommandCenter } from './studio/command-center';
+import { mountExecutionEnvironment } from './studio/execution-environment';
 type UnparameterizedStudioKey = {
   [K in Extract<I18nKey, `evolution.studio.${string}`>]: I18nParamsFor<K> extends never ? K : never
 }[Extract<I18nKey, `evolution.studio.${string}`>];
@@ -31,6 +34,7 @@ export function mountStudio(root: HTMLElement, ports: {
   api: EvolutionApi; path: string; navigate: (path: string) => void; openTask: (id: string) => void;
 }) {
   let disposed = false, busy = false, flight: Promise<void> | undefined;
+  let briefingOpen = ports.path.split('/')[1] === 'start';
   let runInspector: ReturnType<typeof mountGoalRunInspector> | undefined;
   let timer = 0, path = ports.path, runs: EvolutionRunSummary[] = [], active: EvolutionRun | undefined;
   let floor: EvolutionFloor = {items: [], degraded: false};
@@ -44,7 +48,7 @@ export function mountStudio(root: HTMLElement, ports: {
   let swarmKnown = false;
   let questions: HumanQuestion[] = [], models: Array<{model: EvolutionModel;label: string}> = [];
   let draftRoleModels:RoleModels = {};
-  let pendingSubmit: {body: {objective: string;model?: EvolutionModel;role_models?:RoleModels}; key: string} | undefined;
+  let pendingSubmit: {body: CreateRunBody; key: string} | undefined;
   let activityStream: TaskActivityStream|undefined, activityTaskId = '';
   const activeToolCalls = new Map<string,ToolActivity>();
   const abort = new AbortController();
@@ -59,7 +63,6 @@ export function mountStudio(root: HTMLElement, ports: {
   const roomDrawer=drawer('evo-room-drawer',copy('exploreGoal'),[q('.evo-goal-panel')]);
 
   roomDrawer.classList.add('evo-workbench-drawer');
-  const createDrawer=drawer('evo-create-drawer',copy('newGoal'),[q('.evo-objective-form')]);
   const detailDrawer=drawer('evo-detail-drawer',copy('currentTask'),[q('.evo-human'),q('.evo-run-detail')]);
 
   detailDrawer.classList.add('evo-workbench-drawer');
@@ -74,15 +77,24 @@ export function mountStudio(root: HTMLElement, ports: {
   const roleDrawer=drawer('evo-role-drawer',copy('roleModelTitle'),[roleHost]);
   const roomsDrawer=drawer('evo-rooms-drawer',copy('roomSwitch'),[]);
   roomsDrawer.setAttribute('placement','start');
-  const drawers=[roomsDrawer,roomDrawer,createDrawer,detailDrawer,menuDrawer,conversationDrawer,proposalsDrawer,floorDrawer,roleDrawer];
+  const drawers=[roomsDrawer,roomDrawer,detailDrawer,menuDrawer,conversationDrawer,proposalsDrawer,floorDrawer,roleDrawer];
   let drawerReturnFocus:HTMLElement|null=null;
+  let briefingFocusPending=false;
+  let focusReturnTimer=0;
   let revealSelectedRoom=false;
   function restoreDrawerFocus(event:Event){
+    if(disposed)return;
     if(!drawers.some(item=>item===event.target))return;
     if(event.target===detailDrawer)runInspector?.visibilityChanged(false);
     // wa-after-hide precedes Lit's reflected attribute update. The live property
     // is already false; [open] would skip returning focus after a drawer handoff.
-    if(!drawers.some(item=>item.open)&&drawerReturnFocus&&root.contains(drawerReturnFocus))drawerReturnFocus.focus({preventScroll:true});
+    if(!drawers.some(item=>item.open)){
+      if(briefingFocusPending){
+        briefingFocusPending=false;clearTimeout(focusReturnTimer);
+        focusReturnTimer=window.setTimeout(()=>{focusReturnTimer=0;if(disposed)return;objective.disabled=false;dispatch.disabled=busy;if(briefingOpen&&!drawers.some(item=>item.open))center.focus();},0);
+      }
+      else if(drawerReturnFocus&&root.contains(drawerReturnFocus))drawerReturnFocus.focus({preventScroll:true});
+    }
 
     if(event.target===roomsDrawer&&revealSelectedRoom){
       revealSelectedRoom=false;
@@ -91,6 +103,8 @@ export function mountStudio(root: HTMLElement, ports: {
   }
   root.addEventListener('wa-after-hide',restoreDrawerFocus);
   function openDrawer(element:HTMLElement,label?:string){
+    clearTimeout(focusReturnTimer);focusReturnTimer=0;
+    objective.disabled=false;dispatch.disabled=busy;
     const focused=document.activeElement as HTMLElement|null;
     if(focused&&root.contains(focused)&&!focused.closest('wa-drawer'))drawerReturnFocus=focused;
     drawers.forEach(item=>item.toggleAttribute('open',item===element));
@@ -115,7 +129,7 @@ export function mountStudio(root: HTMLElement, ports: {
   q('.evo-page-head').hidden=true;q('.evo-studio-aside').hidden=true;q('.evo-office-caption').hidden=true;
   function readDelivery(){openDrawer(detailDrawer,copy('deliverable'));}
   const roleModels=mountRoleModels(roleHost,{copy,api:ports.api,models:()=>models,
-    ready:()=>!selectedId()||!!active,current:()=>active,draft:()=>draftRoleModels,setDraft:value=>{draftRoleModels=value;},
+    ready:()=>briefingOpen||!selectedId()||!!active,current:()=>briefingOpen?undefined:active,draft:()=>draftRoleModels,setDraft:value=>{draftRoleModels=value;},
     refresh:refreshAfterWrite,openTask:ports.openTask,askHuman:()=>openDrawer(detailDrawer,copy('askHuman'))});
   function configureRole(role:EvolutionRole){roleModels.open(role);openDrawer(roleDrawer,copy('roleModelTitle'));}
   const scene = mountOfficeScene(q('.evo-office-live'),q('.evo-office-controls'),{copy,configureRole:index=>configureRole((['executor','reviewer','coordinator'] as EvolutionRole[])[index]),openTask:ports.openTask,askHuman:()=>openDrawer(detailDrawer,copy('askHuman'))});
@@ -131,17 +145,26 @@ export function mountStudio(root: HTMLElement, ports: {
   const ledger=mountOfficeLedger(ledgerHost,copy);
   const rail=document.createElement('aside');rail.className='evo-room-rail';
   const brand=document.createElement('a');brand.className='evo-studio-brand';brand.href='#/evolution';
-  brand.innerHTML=`<b>Tofu</b><span>${text('studio')}</span>`;
+  brand.innerHTML=`<span class="evo-brand-mark" aria-hidden="true">T<span>↗</span></span><span class="evo-brand-copy"><b>Tofu</b><span>${text('studio')}</span></span>`;
   const railFooter=document.createElement('footer');railFooter.className='evo-rail-footer';
-  const newGoal=document.createElement('a');newGoal.href='#/evolution/start';newGoal.className='evo-new-goal';
-  newGoal.textContent=`＋ ${copy('newGoal')}`;
+  const newGoal=createButton({label:`＋ ${copy('newGoal')}`,variant:'primary',
+    onClick:()=>{if(path.split('/')[1]==='start')showBriefing();else ports.navigate('evolution/start');}},root.ownerDocument);
   railFooter.append(concierge,newGoal);
-  rail.append(brand,rooms.bar,rooms.inspector,railFooter);q('.evo-main').prepend(rail);
+  const destinations=document.createElement('nav');destinations.className='evo-destinations ui-stack';
+  destinations.setAttribute('aria-label',copy('navigation'));
+  for(const [label,route,mark] of [['programNotebook','evolution/programs','clipboard'],['research','evolution/research','search'],['evidence','evolution/capabilities','chart']]){
+    const destination=createButton({label:copy(label!),variant:'ghost',wrap:true,onClick:()=>ports.navigate(route!)},root.ownerDocument);
+    const icon=document.createElement('span');icon.className='evo-destination-icon';icon.setAttribute('aria-hidden','true');icon.innerHTML=iconHtml(mark!);
+    destination.prepend(icon);destinations.append(destination);
+  }
+  rail.append(brand,destinations,rooms.bar,rooms.inspector,railFooter);q('.evo-main').prepend(rail);
   const actions=document.createElement('div');actions.className='evo-studio-actions';
   const roomsButton=document.createElement('button');roomsButton.type='button';roomsButton.className='evo-rooms-open';
   roomsButton.textContent=copy('rooms');roomsButton.setAttribute('aria-controls','evo-rooms-drawer');
   roomsButton.setAttribute('aria-haspopup','dialog');roomsButton.addEventListener('click',()=>openDrawer(roomsDrawer));
-  actions.append(roomsButton,menuButton);ledgerHost.append(actions,rooms.heading);
+  actions.append(roomsButton,menuButton);ledgerHost.append(actions);
+  const sceneToolbar=document.createElement('header');sceneToolbar.className='evo-scene-toolbar ui-row ui-row--between';
+  sceneToolbar.append(rooms.heading);q('.evo-studio-grid').prepend(sceneToolbar);
   // Secondary management actions remain available in the existing menu.
   const management=document.createElement('div');management.className='evo-menu-actions';
   management.append(status,gateButton,floorButton,coordinatorModel,back);menuDrawer.prepend(management);
@@ -163,17 +186,44 @@ export function mountStudio(root: HTMLElement, ports: {
     });
   }
 
-  const room = mountGoalRoom(q('.evo-goal-panel'),q('.evo-office-objects'),q('.evo-place-shortcuts'),{api:ports.api,copy,refresh:refreshAfterWrite,openTask:id=>{drawers.forEach(item=>item.removeAttribute('open'));ports.openTask(id);},readDelivery,openPanel:()=>openDrawer(roomDrawer,copy('exploreGoal'))});
+  const room = mountGoalRoom(q('.evo-goal-panel'),q('.evo-office-objects'),q('.evo-place-shortcuts'),{api:ports.api,copy,refresh:refreshAfterWrite,openTask:id=>{drawers.forEach(item=>item.removeAttribute('open'));ports.openTask(id);},readDelivery,create:showBriefing,openPanel:()=>openDrawer(roomDrawer,copy('exploreGoal'))});
   const goalSelect=q<HTMLSelectElement>('#evo-goal');
   const error = q('.evo-error');
   const objective = q<HTMLTextAreaElement>('#evo-objective');
   const model = q<HTMLSelectElement>('#evo-model');
-  const submit = q<HTMLButtonElement>('[type=submit]');
 
   const missionHost=document.createElement('aside');q('.evo-main').append(missionHost);
   const command=mountGoalCommandPanel(missionHost,{copy,openTask:ports.openTask,
     stop:()=>{void write('cancel');},retry:prepareRetry,details:()=>openDrawer(detailDrawer),
-    conversation:()=>openDrawer(conversationDrawer),create:()=>openDrawer(createDrawer)});
+    conversation:()=>openDrawer(conversationDrawer),create:showBriefing});
+  const center=mountCommandCenter(missionHost,q<HTMLFormElement>('.evo-objective-form'),{
+    copy,details:()=>openDrawer(conversationDrawer),configure:()=>configureRole('executor'),briefing:showBriefing,
+    inspect:place=>room.open(place),dismiss:()=>{briefingOpen=false;render();}});
+  const executionEnvironment=mountExecutionEnvironment(center.settings,{copy,signal:abort.signal,
+    load:signal=>ports.api.listExecutorPlugins(signal)});
+  const dispatch=center.submit;
+  // Progress belongs with the task evidence, not above the illustrated room.
+  missionHost.insertBefore(center.hud,q('.evo-mission-body'));
+  const focus=createButton({label:copy('sceneFocus'),variant:'ghost',size:'sm',onClick:()=>{
+    const focused=root.dataset.sceneFocus!=='true';root.dataset.sceneFocus=String(focused);
+    focus.setAttribute('aria-pressed',String(focused));focus.textContent=copy(focused?'sceneRestore':'sceneFocus');
+    command.visibilityChanged(!focused&&!document.hidden&&!briefingOpen);
+  }});
+  focus.dataset.sceneFocusToggle='';focus.setAttribute('aria-pressed','false');sceneToolbar.append(focus);
+  const headerNewGoal=createButton({label:copy('newGoal'),variant:'primary',size:'sm',onClick:showBriefing},root.ownerDocument);
+  const notebook=createButton({label:copy('programNotebook'),variant:'ghost',size:'sm',onClick:()=>ports.navigate('evolution/programs')},root.ownerDocument);
+  notebook.dataset.studioAction='notebook';
+  headerNewGoal.dataset.briefingAction='new';actions.append(notebook,headerNewGoal);
+  const sceneNote=document.createElement('p');sceneNote.className='evo-scene-guide';sceneNote.textContent=copy('sceneGuide');
+  q('.evo-studio-grid').append(sceneNote);
+  management.append(createButton({label:copy('programNotebook'),variant:'ghost',onClick:()=>ports.navigate('evolution/programs')}));
+  function showBriefing(){
+    briefingFocusPending=drawers.some(item=>item.open||item.hasAttribute('open'));
+    objective.disabled=briefingFocusPending;dispatch.disabled=busy||briefingFocusPending;
+    briefingOpen=true;drawers.forEach(item=>item.removeAttribute('open'));
+    root.dataset.sceneFocus='false';focus.setAttribute('aria-pressed','false');focus.textContent=copy('sceneFocus');
+    render();center.focus();
+  }
   const detailHost=q('.evo-run-detail'),detailToolbar=document.createElement('div'),detailBody=document.createElement('div');
   detailToolbar.className='evo-mission-actions';detailHost.append(detailToolbar,detailBody);
   const detailStop=createButton({label:copy('cancel'),variant:'danger',onClick:()=>{void write('cancel');}});
@@ -190,12 +240,11 @@ export function mountStudio(root: HTMLElement, ports: {
     objective.value=active.objective;draftRoleModels={...active.role_models};
     const index=models.findIndex(entry=>JSON.stringify(entry.model)===JSON.stringify(active?.model));
     model.value=index>=0?String(index+1):'';
-    q('.evo-objective-form').hidden=false;openDrawer(createDrawer,copy('missionRetry'));
-    objective.focus();
+    showBriefing();
   }
   function showError(value: unknown) { if(disposed)return; error.textContent=value instanceof Error?value.message:String(value||''); error.hidden=!value;if(value)(drawers.find(item=>item.hasAttribute('open'))||q('.evo-main')).prepend(error); }
   function selectedId() { try { return path.split('/')[1]==='runs'?decodeURIComponent(path.split('/')[2] || ''):''; } catch { return ''; } }
-  function setBusy(value: boolean) { busy=value; submit.disabled=value; objective.readOnly=value; model.disabled=value; submit.textContent=copy(value?'starting':'start'); command.update({run:active,workspace,coordination,questions:questions.length,loading:!!selectedId()&&!active},value);detailStop.disabled=value;detailRefresh.disabled=value||!active; }
+  function setBusy(value: boolean) { busy=value; executionEnvironment.setBusy(value); dispatch.disabled=value||briefingFocusPending||!!focusReturnTimer; objective.readOnly=value; model.disabled=value; dispatch.textContent=copy(value?'starting':'briefingDispatch'); command.update({run:active,workspace,coordination,questions:questions.length,loading:!!selectedId()&&!active},value);detailStop.disabled=value;detailRefresh.disabled=value||!active; }
   function render() {
     if(disposed)return;
     const run = active;
@@ -206,7 +255,6 @@ export function mountStudio(root: HTMLElement, ports: {
     goalSelect.value=run?.run_id||selectedId();
     goalSelect.title=run?.objective||'';
     const hasSelection=!!run||!!selectedId();
-    if(!hasSelection||!createDrawer.hasAttribute('open'))q('.evo-objective-form').hidden=hasSelection;
     q('.evo-delivery').hidden=hasSelection;
     roleModels.sync();
     room.update(run,workspace);
@@ -237,6 +285,9 @@ export function mountStudio(root: HTMLElement, ports: {
     syncActivityStream(run);
     const observation={run,workspace,coordination,questions:questions.length,loading:!!selectedId()&&!run};
     command.update(observation,busy);runInspector?.update(observation);
+    const briefing=briefingOpen||!hasSelection;
+    missionHost.dataset.briefing=String(briefing);center.update(observation,briefing);
+    command.visibilityChanged(!briefing&&!document.hidden&&root.dataset.sceneFocus!=='true');
     detailStop.hidden=!working;detailStop.disabled=busy;detailRefresh.disabled=busy||!run;detailDownload.hidden=!run?.result;
     patch(q('.evo-human'), questions.map(question=>{
       const fields=question.questions.length?question.questions:[question];
@@ -293,7 +344,7 @@ export function mountStudio(root: HTMLElement, ports: {
     clearTimeout(timer);timer=0;
     if(!disposed&&!document.hidden)timer=window.setTimeout(()=>{void refresh();},(active&&!terminal(active))||coordination?.coordinator.status==='running'?3000:15000);
   }
-  function visibility(){runInspector?.visibilityChanged(!document.hidden&&detailDrawer.hasAttribute('open'));if(document.hidden){clearTimeout(timer);timer=0;}else void refresh();}
+  function visibility(){runInspector?.visibilityChanged(!document.hidden&&detailDrawer.hasAttribute('open'));command.visibilityChanged(!document.hidden&&!briefingOpen&&root.dataset.sceneFocus!=='true');if(document.hidden){clearTimeout(timer);timer=0;}else void refresh();}
   // Live tool bubbles are pure decoration over the polling authority: one SSE
   // subscription per active stage task, swapped whenever the run/stage flips.
   function closeActivityStream(){
@@ -329,7 +380,9 @@ export function mountStudio(root: HTMLElement, ports: {
     if(!root.contains(form))return;event.preventDefault();
     if(busy)return;
     if(form.classList.contains('evo-objective-form')){
-      const body={objective:objective.value.trim(),...(Object.keys(draftRoleModels).length?{role_models:{...draftRoleModels}}:{}),...(model.value?{model:models[Number(model.value)-1].model}:{})};
+      let executionOptions: Pick<CreateRunBody, 'project_path' | 'executor_plugins'>;
+      try {executionOptions=executionEnvironment.read();}catch(reason){showError(reason instanceof Error?reason.message:String(reason));return;}
+      const body={...executionOptions,objective:objective.value.trim(),...(Object.keys(draftRoleModels).length?{role_models:{...draftRoleModels}}:{}),...(model.value?{model:models[Number(model.value)-1].model}:{})};
       if(!body.objective)return;
       if(!pendingSubmit||JSON.stringify(pendingSubmit.body)!==JSON.stringify(body))pendingSubmit={body,key:crypto.randomUUID()};
       const submittedPath=path;
@@ -339,7 +392,7 @@ export function mountStudio(root: HTMLElement, ports: {
         if(disposed)return;
         pendingSubmit=undefined;objective.value='';
         if(path!==submittedPath){await refresh();return;}
-        active=response.run;workspace=undefined;questions=[];render();
+        briefingOpen=false;active=response.run;workspace=undefined;questions=[];coordination=undefined;coordinationError='';swarmAgents=[];swarmKnown=false;render();
         ports.navigate(`evolution/runs/${encodeURIComponent(active.run_id)}`);
         await refresh();
       }catch(e){showError(e);}finally{if(!disposed)setBusy(false);}
@@ -372,11 +425,12 @@ export function mountStudio(root: HTMLElement, ports: {
   }
   async function onClick(event: Event){
     const link=(event.target as Element).closest<HTMLAnchorElement>('a[href^="#/"]');
-    if(link?.getAttribute('href')==='#/evolution/start'&&path.split('/')[1]==='start'){event.preventDefault();openDrawer(createDrawer);return;}
+    if(link?.getAttribute('href')==='#/evolution/start'&&path.split('/')[1]==='start'){event.preventDefault();showBriefing();return;}
     if(link)drawers.forEach(item=>item.removeAttribute('open'));
     const target=(event.target as Element).closest<HTMLElement>('[data-studio-action]');
     if(!target||!root.contains(target))return;
     const action=target.dataset.studioAction;
+    if(action==='notebook')return; // The shared control owns navigation.
     if(action==='task'){if(target.dataset.task)ports.openTask(target.dataset.task);return;}
     if(action==='open-conv'){const conv=target.dataset.conv||'';const opener=(window as unknown as {openConversation?:(id:string)=>unknown}).openConversation;if(conv&&typeof opener==='function')opener(conv);return;}
     if(action==='option'){
@@ -418,14 +472,14 @@ export function mountStudio(root: HTMLElement, ports: {
   goalSelect.addEventListener('change',changeGoal);
   root.addEventListener('submit',onSubmit);root.addEventListener('click',onClick);
   document.addEventListener('visibilitychange',visibility);
-  render();if(path.split('/')[1]==='start')openDrawer(createDrawer);void refresh();
+  render();if(briefingOpen)center.focus();void refresh();
   void ports.api.listRunModels(abort.signal).then(response=>{
     if(disposed)return;models=response.models.slice(0,128);roleModels.refreshOptions();
     models.forEach((entry,i)=>model.add(new Option(entry.label,String(i+1))));
     if(!models.length)q('.evo-model-message').textContent=copy('noModels');
   }).catch(()=>{if(!disposed)q('.evo-model-message').textContent=copy('modelsUnavailable');});
   return {
-    updateRoute(next: string){drawers.forEach(item=>item.removeAttribute('open'));path=next;if(path.split('/')[1]==='start')openDrawer(createDrawer);active=undefined;workspace=undefined;questions=[];coordination=undefined;coordinationError='';swarmKnown=false;render();void (flight||Promise.resolve()).then(()=>refresh());},
-    dispose(){disposed=true;runInspector?.dispose();narrow.removeEventListener('change',placeRoomRail);closeActivityStream();root.removeEventListener('wa-after-hide',restoreDrawerFocus);drawers.forEach(item=>item.removeAttribute('open'));conversation.dispose();room.dispose();scene.dispose();rooms.dispose();roleModels.dispose();goalSelect.removeEventListener('change',changeGoal);abort.abort();clearTimeout(timer);document.removeEventListener('visibilitychange',visibility);root.removeEventListener('submit',onSubmit);root.removeEventListener('click',onClick);root.classList.remove('evo-studio');},
+    updateRoute(next: string){briefingFocusPending=next.split('/')[1]==='start'&&drawers.some(item=>item.open||item.hasAttribute('open'));objective.disabled=briefingFocusPending;dispatch.disabled=busy||briefingFocusPending;drawers.forEach(item=>item.removeAttribute('open'));path=next;briefingOpen=path.split('/')[1]==='start';active=undefined;workspace=undefined;questions=[];coordination=undefined;coordinationError='';swarmKnown=false;render();if(briefingOpen)center.focus();void (flight||Promise.resolve()).then(()=>refresh());},
+    dispose(){disposed=true;clearTimeout(focusReturnTimer);command.dispose();runInspector?.dispose();narrow.removeEventListener('change',placeRoomRail);closeActivityStream();root.removeEventListener('wa-after-hide',restoreDrawerFocus);drawers.forEach(item=>item.removeAttribute('open'));conversation.dispose();room.dispose();scene.dispose();rooms.dispose();roleModels.dispose();goalSelect.removeEventListener('change',changeGoal);abort.abort();clearTimeout(timer);document.removeEventListener('visibilitychange',visibility);root.removeEventListener('submit',onSubmit);root.removeEventListener('click',onClick);delete root.dataset.sceneFocus;root.classList.remove('evo-studio');},
   };
 }

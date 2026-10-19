@@ -76,6 +76,9 @@ _EXACT_RULES: tuple[tuple[str, int, str], ...] = (
     # verified variants win while unknown future variants (e.g. a
     # hypothetical gemini-3.5-pro) still refuse to inherit the generic
     # 'gemini' family estimate.
+    # Gemini 4 Argon (GA flagship, updated 2026-10): 1,048,576 unified
+    # input+output context; 65,536 default max output (ai.google.dev model page).
+    ('gemini-4-argon', 1_048_576, 'vendor_official'),
     ('gemini-3.5-flash-lite', 1_000_000, 'vendor_official'),
     ('gemini-3.5-flash', 1_000_000, 'vendor_official'),
     ('gemini-3.6-flash', 1_000_000, 'vendor_official'),

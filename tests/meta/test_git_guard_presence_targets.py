@@ -89,7 +89,7 @@ def test_target_writer_blocks_even_when_dispatch_root_is_solo(
     elif shape == 'repeated':
         command = f'git -C .. -C {quote(target.name)} -C nested reset --hard'
     elif shape == 'wrapper':
-        command = f'MODE=test sudo -u writer /usr/bin/git -c key=-C -C {quote(str(target))} reset --hard'
+        command = f'MODE=test sudo -u writer /usr/bin/git -c probe.key=-C -C {quote(str(target))} reset --hard'
     elif shape == 'alias':
         alias = tmp_path / 'alias'
         alias.symlink_to(target, target_is_directory=True)
@@ -115,13 +115,19 @@ def test_target_writer_blocks_even_when_dispatch_root_is_solo(
     harness['peers_at'].add(str(target))
     stopped, results, entry = _invoke(dispatch, command, **extra)
     assert stopped is True
-    assert harness['roots'] == [str(target)]
+    expected = ([str(dispatch), str(target)]
+                if shape in {'work_tree', 'work_tree_equals'} else [str(target)])
+    # --work-tree redirects working bytes, not the dispatch index/refs.
+    assert harness['roots'] == expected
     assert 'Target writer' in results['call'][0]
 
     assert f'Checkout root: {target}' in results['call'][0]
     assert f'checkout root: {target}' in results['call'][0]
     assert 'convId=peer agentId=(main)' in results['call'][0]
-    assert f'Checkout root: {dispatch}' not in results['call'][0]
+    if shape in {'work_tree', 'work_tree_equals'}:
+        assert f'Checkout root: {dispatch}' in results['call'][0]
+    else:
+        assert f'Checkout root: {dispatch}' not in results['call'][0]
     assert harness['settles'] == ['rejected']
     assert harness['receipts'] == []
     # Conservative project presence is not a confirmed writer/lease fence.
@@ -283,3 +289,25 @@ def test_failed_creation_does_not_authorize_future_parent_git(checkouts, harness
         + ' git -C .worktrees/own-task reset --hard')
     assert stopped
     assert harness['roots'] == [str(dispatch)]
+
+
+@pytest.mark.parametrize('option', ['--work-tree ', '--work-tree='])
+def test_worktree_redirect_still_checks_dispatch_index_owner(checkouts, harness, option):
+    dispatch, target = checkouts
+    harness['peers_at'].add(str(dispatch))
+    stopped, _, _ = _invoke(dispatch, 'git ' + option + shlex.quote(str(target)) + ' reset --hard')
+    assert stopped is True
+    assert harness['roots'] == [str(dispatch), str(target)]
+    assert harness['receipts'] == []
+
+
+@pytest.mark.parametrize('setup', ['GIT_COMMON_DIR={common} git', 'env GIT_COMMON_DIR={common} git',
+                                   'export GIT_COMMON_DIR={common}; git'])
+def test_common_directory_owner_presence_is_not_erased(checkouts, harness, setup):
+    dispatch, target = checkouts
+    harness['peers_at'].add(str(target))
+    command = setup.format(common=shlex.quote(str(target / '.git'))) + ' branch -D unmerged'
+    stopped, _, _ = _invoke(dispatch, command)
+    assert stopped is True
+    assert str(target) in harness['roots']
+    assert harness['receipts'] == []

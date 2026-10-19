@@ -27,7 +27,7 @@ def call_round(monkeypatch, stream, body, *, append_event=None):
 
 def test_credential_retry_rechecks_receipt_authority(monkeypatch):
     recovery = pytest.importorskip('lib.tasks_pkg.llm_fallback._credential_recovery')
-    from lib.llm_errors import LocalRequestPreparationError, SubscriptionCredentialUnavailableError
+    from lib.llm.llm_errors import LocalRequestPreparationError, SubscriptionCredentialUnavailableError
     from lib.tasks_pkg import message_input_receipts as receipts
     revoked = False
     clock = [0.0]

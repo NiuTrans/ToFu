@@ -18,7 +18,7 @@ reached for a PDF → these tests fail.
 
 import pytest
 
-import lib.search_bridge as sb
+import lib.search.search_bridge as sb
 
 
 @pytest.mark.unit

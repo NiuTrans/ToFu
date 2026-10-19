@@ -22,7 +22,7 @@ from lib.llm_dispatch.retry_i18n import (
     retry_phase_fields,
 )
 from lib.log import get_logger
-from lib.log_record_values import text_value
+from lib.logging_pkg.log_record_values import text_value
 from lib.turn_verdict import INTERNAL_FENCE_ABORT_REASONS
 
 from lib.tasks_pkg.manager._delta_coalescer import TaskTextDeltaCoalescer
@@ -103,6 +103,8 @@ def _opaque_reasoning_replay_tokens(
 _STREAM_CHECKPOINT_INTERVAL = 5
 
 _RETRY_REASON_CLASSES = frozenset({
+    'Waiting for network recovery',
+    'Network recovered',
     _GATEWAY_RETRY_TOKEN,
     'Endpoint unreachable',
     'Request timed out',
@@ -132,8 +134,15 @@ def _append_dispatch_retry_phase(task, event_budget, *, model, attempt,
     task['_dispatch_heartbeat'] = time.time()
     reason_class = (reason if reason in _RETRY_REASON_CLASSES
                     else ('other' if reason else ''))
-    if not event_budget.should_emit(
-            ('dispatch_retry', reason_class, int(status_code or 0))):
+    signature = ('dispatch_retry', reason_class, int(status_code or 0))
+    if reason == 'Waiting for network recovery':
+        emit = event_budget.should_emit_wait(signature)
+    elif reason == 'Network recovered':
+        emit = event_budget.complete_wait(
+            ('dispatch_retry', 'Waiting for network recovery', 0))
+    else:
+        emit = event_budget.should_emit(signature)
+    if not emit:
         return
 
     if status_code == 429:
@@ -179,7 +188,7 @@ def _abort_request_attribution(task, error):
     timeline explains the stop instead of rendering a plain user abort.
     """
     if type(error).__name__ not in ('AbortedError', 'CancelledError',
-                                    'GeneratorExit'):
+                                    'EventDeliveryCancelled', 'GeneratorExit'):
         return 'failed', None, None
     reason = str(task.get('_abort_reason') or '')
     if reason in INTERNAL_FENCE_ABORT_REASONS:
@@ -853,12 +862,23 @@ def stream_llm_response(task, body, tag='', on_tool_call_ready=None,
                 'idle': _idle_secs,
             }
         else:
+            _cooldown_cause = str(getattr(status, 'cooldown_cause', '') or '')
             _phase = Phase.WAITING_MODEL
-            _detail_key = 'stream.phase.waitingForResponse'
-            _detail = f'Waiting {_secs}s for {_label} to respond…'
-            _args = {'model': _label, 'elapsed': _secs}
+            if _cooldown_cause == 'quota':
+                # Subscription/billing quota hold — the slot is parked for a
+                #   KNOWN reset (often hours/days). A bare "waiting for the
+                #   model" would mislabel it as an imminent-recovery stall.
+                _detail_key = 'stream.phase.waitingQuotaReset'
+                _detail = (f'{_label} subscription quota exhausted — waiting '
+                           f'for the usage window to reset (already {_secs}s)…')
+                _args = {'model': _label, 'elapsed': _secs}
+            else:
+                _detail_key = 'stream.phase.waitingForResponse'
+                _detail = f'Waiting {_secs}s for {_label} to respond…'
+                _args = {'model': _label, 'elapsed': _secs}
         if not _retry_phase_budget.should_emit(
-                ('transport_wait', _status_kind)):
+                ('transport_wait', _status_kind,
+                 str(getattr(status, 'cooldown_cause', '') or ''))):
             return
         append_event(task, build_phase(
             _phase,

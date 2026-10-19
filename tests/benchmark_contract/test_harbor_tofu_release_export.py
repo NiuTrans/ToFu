@@ -400,7 +400,8 @@ def test_export_accounts_for_failed_tofu_attempt_usage_and_artifacts(
             "completion_tokens": 4,
             "cache_read_tokens": 4,
         },
-        "apiRounds": [{"round": 1, "usage": failed_usage}],
+        "apiRounds": [{"round": 1, "usage": failed_usage},
+                      {"round": "compaction-1", "usage": failed_compaction}],
         "compactionUsage": failed_compaction,
     })
     failed_artifacts = [

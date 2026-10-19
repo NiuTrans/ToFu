@@ -37,7 +37,7 @@ use crate::entity::EntityKey;
 use crate::generated_tofudb_ir::{
     ARTIFACT_CONVERSATION_INDEX_NAMESPACE, ARTIFACT_DEDUPE_NAMESPACE, ARTIFACT_DOCUMENT_NAMESPACE,
     ARTIFACT_LIBRARY_INDEX_NAMESPACE, ARTIFACT_PARENT_INDEX_NAMESPACE,
-    ARTIFACT_PATH_HEAD_NAMESPACE, MAX_ARTIFACT_BYTES, MAX_TOOL_RESULT_ARTIFACT_BYTES,
+    ARTIFACT_PATH_HEAD_NAMESPACE, MAX_TOOL_RESULT_ARTIFACT_BYTES,
     MIGRATION_SESSION_MAX_PAGE_ROWS, TOOL_RESULT_ARTIFACT_NAMESPACE,
     TOOL_RESULT_EXPIRY_INDEX_NAMESPACE,
 };
@@ -187,7 +187,6 @@ fn valid_chat_request(request: &ChatRestoreRequest) -> bool {
             .bytes()
             .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
         && request.content_sha256 == hex_digest(request.content.as_bytes())
-        && request.content.len() <= MAX_ARTIFACT_BYTES
         && request.size_bytes == request.content.len() as u64
         && request.source_ref.is_object()
         && request.meta.is_object()
@@ -410,7 +409,7 @@ fn read_chat_snapshot(
             .ok_or_else(|| invalid_data("artifact document is malformed"))
     };
     let reference = decode_blob_reference(object.get("content"))?;
-    let content = materialize_blob(database, transaction, reference, MAX_ARTIFACT_BYTES)?;
+    let content = materialize_blob(database, transaction, reference, usize::MAX)?;
     let content =
         String::from_utf8(content).map_err(|_| invalid_data("artifact content is not UTF-8"))?;
     Ok(Some(ChatRestoreRequest {
@@ -819,6 +818,7 @@ fn tool_restore(
     if !valid_tool_request(&request) {
         return Err(invalid_input("invalid tool result snapshot"));
     }
+    crate::artifact::query::ensure_key(database, transaction)?;
     if let Some(existing) = read_tool_snapshot(database, transaction, &request.content_sha256)? {
         if tool_snapshot_value(&existing) == tool_snapshot_value(&request) {
             return Ok(false);
@@ -1225,8 +1225,9 @@ mod tests {
             &mut transaction,
             &format!("tool-result:{digest_hex}"),
             1501,
-            0,
+            &json!(0),
             content.len(),
+            "",
         )
         .unwrap()
         .unwrap();

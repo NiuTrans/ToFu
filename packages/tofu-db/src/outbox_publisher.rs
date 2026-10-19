@@ -1,4 +1,4 @@
-//! Bounded logical-outbox delivery without borrowing the database writer.
+//! Complete logical-outbox delivery without borrowing the database writer.
 //!
 //! `publish_batch` accepts only owned records previously fetched from the
 //! authority, performs all sink I/O through `LogicalOutboxSink`, and returns
@@ -41,9 +41,7 @@ pub struct LogicalOutboxPublishBudget {
 impl LogicalOutboxPublishBudget {
     pub fn new(max_records: usize, max_bytes: usize) -> io::Result<Self> {
         if max_records == 0
-            || max_records > MAX_LOGICAL_OUTBOX_FETCH_RECORDS
             || max_bytes == 0
-            || max_bytes > MAX_LOGICAL_OUTBOX_FETCH_BYTES
         {
             return Err(invalid_input("invalid logical outbox publish budget"));
         }
@@ -195,11 +193,6 @@ pub(crate) fn validate_batch(
     budget: LogicalOutboxPublishBudget,
 ) -> io::Result<usize> {
     LogicalOutboxPublishBudget::new(budget.max_records, budget.max_bytes)?;
-    if pending.len() > budget.max_records {
-        return Err(invalid_input(
-            "logical outbox batch exceeds its record budget",
-        ));
-    }
     let mut published_bytes = 0_usize;
     let mut previous_identity: Option<(u64, u64, u64)> = None;
     let mut event_ids = BTreeSet::new();
@@ -211,8 +204,7 @@ pub(crate) fn validate_batch(
         }
         published_bytes = published_bytes
             .checked_add(encoded_len)
-            .filter(|bytes| *bytes <= budget.max_bytes)
-            .ok_or_else(|| invalid_input("logical outbox batch exceeds its byte budget"))?;
+            .ok_or_else(|| invalid_input("logical outbox batch byte count overflow"))?;
         let identity = &pending_record.record.identity;
         if let Some((tenant_id, owner_user_id, sequence)) = previous_identity {
             if identity.tenant_id != tenant_id
@@ -343,15 +335,15 @@ mod tests {
     }
 
     #[test]
-    fn publish_budget_is_hard_and_checked_before_sink_io() {
+    fn publish_hints_never_refuse_an_already_selected_valid_batch() {
         let records = vec![sealed(1), sealed(2)];
         let mut sink = MemorySink::default();
         let one_record_budget = LogicalOutboxPublishBudget::new(1, 1024).unwrap();
-        assert!(publish_batch(&mut sink, &records, one_record_budget).is_err());
-        assert_eq!(sink.append_calls, 0);
+        assert!(publish_batch(&mut sink, &records, one_record_budget).is_ok());
+        assert_eq!(sink.append_calls, 2);
         let too_few_bytes = LogicalOutboxPublishBudget::new(2, 1).unwrap();
-        assert!(publish_batch(&mut sink, &records, too_few_bytes).is_err());
-        assert_eq!(sink.append_calls, 0);
+        assert!(publish_batch(&mut sink, &records, too_few_bytes).is_ok());
+        assert_eq!(sink.append_calls, 4);
     }
 
     #[test]

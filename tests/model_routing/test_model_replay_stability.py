@@ -188,7 +188,7 @@ def test_valid_json_cache_corruption_is_a_cold_miss(tmp_path):
 
 
 def test_local_image_version_is_pinned_in_the_task_copy(monkeypatch, tmp_path):
-    from lib import runtime_paths
+    from lib.runtime import runtime_paths
     from lib.tasks_pkg.model_images import pin_model_images
     monkeypatch.setattr(runtime_paths, 'uploads_root', lambda: str(tmp_path))
     folder = tmp_path / 'images'
@@ -223,7 +223,7 @@ def test_read_only_hooks_cannot_mutate_nested_history(monkeypatch):
 def test_screenshot_model_blocks_survive_settlement_segments_and_continue(monkeypatch):
     from lib.tasks_pkg.tool_dispatch import _pipeline as pipeline
     from lib.tasks_pkg import segments
-    from lib.tool_history_projection import build_tool_history_round
+    from lib.tool_results.tool_history_projection import build_tool_history_round
     monkeypatch.setattr(pipeline, 'append_event', lambda *args, **kwargs: None)
     row = _row(1, 'browser_screenshot')
     task = {'id': 'transient', 'model': 'gpt-4o', 'config': {}, 'toolRounds': [row]}
@@ -420,3 +420,42 @@ def test_final_wire_text_shape_survives_marker_movement(model):
     first, second = (wire(original), wire(later))
     assert isinstance(first[1]['content'], list)
     assert isinstance(second[1]['content'], list)
+
+
+def test_completed_replay_keeps_child_context_without_delivery_authority(replay_store, monkeypatch):
+    from lib.tasks_pkg.model_replay import policy_witness, restore_prefix, turn_witness
+    from lib.tasks_pkg.message_input_receipts import remember, stream_with_receipts
+    from lib.swarm.run_messages import confirm_input
+    from lib.swarm.run_messages import RunMessageRepository
+    prior = [_turn('u1', 'human', 'work', 1), _turn('a1', 'assistant', 'done', 2)]
+    cfg = {'model': 'kimi-k3'}
+    carrier = {'role': 'user', '_isMeta': True,
+               'content': '<agent-message>nonhuman historical evidence</agent-message>',
+               '_swarmMessageIds': ['old-message'], '_swarmMessageMailbox': 'old-run'}
+    projection = {'policy': policy_witness(cfg), 'turns': [turn_witness(row) for row in prior],
+                  'messages': [carrier, {'role': 'assistant', 'content': 'done'}]}
+    replay_store.put(user_id=1, conversation_id='timer-conv', lane_id='main', projection=projection)
+    def no_mailbox_io(*args, **kwargs):
+        pytest.fail('Historical projection must not consume or rebind a mailbox')
+    monkeypatch.setattr(RunMessageRepository, 'load', no_mailbox_io)
+    monkeypatch.setattr(RunMessageRepository, 'confirm', no_mailbox_io)
+    rebuilt, covered = restore_prefix(prior + [_turn('a2', 'assistant', '', 3)], cfg,
+                                      conversation_id='timer-conv', user_id=1)
+    assert covered == 2
+    assert rebuilt == [{key: value for key, value in carrier.items()
+                        if key not in {'_swarmMessageIds', '_swarmMessageMailbox'}},
+                       {'role': 'assistant', 'content': 'done'}]
+    task = {'id': 'new-timer-root'}
+    remember(task, rebuilt)
+    seen = []
+    def provider(task, body):
+        seen.extend(body['messages'])
+        from lib.llm.stream_result import ProviderStreamResult
+        return ProviderStreamResult.from_legacy(
+            {'role': 'assistant', 'content': 'continued'}, 'stop', None)
+    assert stream_with_receipts(provider, task, {'messages': rebuilt}).is_verified_complete
+    confirm_input(task, round_num=0)
+    assert seen == rebuilt
+    assert '_swarmMessageBinding' not in task
+    assert task['_verifiedMessageInputIds'] == {'swarm': [], 'project': []}
+    assert replay_store.get(user_id=1, conversation_id='timer-conv', lane_id='main') == projection

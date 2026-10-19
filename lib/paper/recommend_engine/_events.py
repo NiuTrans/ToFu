@@ -8,7 +8,7 @@ thin blocking consumer of this generator.
 
 """
 
-from lib.llm_errors import AbortedError
+from lib.llm.llm_errors import AbortedError
 from lib.log import get_logger
 
 from ._ground import (

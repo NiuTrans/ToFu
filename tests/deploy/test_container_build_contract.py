@@ -70,7 +70,7 @@ def test_docker_has_pinned_rootless_api_worker_and_agent_targets():
     runtime = instructions.split('FROM ${PYTHON_IMAGE} AS runtime-base', 1)[1]
     api = runtime.split('FROM runtime-base AS api', 1)[1].split(
         'FROM runtime-base AS worker', 1)[0]
-    assert 'gcc' not in runtime
+    assert 'gcc' not in runtime.split()  # libgcc-s1 is a runtime dependency
     assert 'g++' not in runtime
     assert 'playwright' not in api.lower()
 

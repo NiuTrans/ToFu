@@ -7,16 +7,12 @@ and remains the certified heavy hammer.
 
 ## Problem
 
-Physical reclamation (dead blocks, dead segment contents, orphan files)
-today runs only in the offline `collect-garbage` CLI, which holds an
-exclusive engine borrow for the whole session and refuses to start while any
-MVCC pin is active. The serving daemon therefore never reclaims: disk grows
-until an operator schedules downtime. `system.reclaim` is a documented
-no-op returning `offline_required: true` because "a full graph mark has no
-resumable foreground-safe cursor yet" (docs/STORAGE_TOFUDB.md, "Online
-reclaim boundary"). A personal-assistant authority must reclaim online, in
-bounded slices, without starving foreground commits or the snapshot read
-lane, and without any operator knob.
+Physical reclamation needs a foreground-safe owner: the exclusive offline
+collector cannot run with live MVCC pins. The serving source authority now
+mounts the two-mark collector, but the independent search projection was left
+without that owner and could retain unreachable blocks indefinitely. Because
+search and credential state can share a filesystem, exhausting projection
+inodes also prevents unrelated applications from creating state and locks.
 
 ## Decision
 
@@ -25,6 +21,29 @@ Run a **two-mark epoch collector** on a dedicated daemon thread
 short holds of the authority mutex ever happen, and every hold is O(in-memory
 clone) or O(one bounded batch publish). Long work (graph traversal, directory
 scans, segment rebuild, fsync chains) happens off-mutex.
+
+### Search projection mounting
+
+Daemon and embedded transports also mount the same collector against the
+selected search runtime's existing mutex. `OnlineGcDatabase` exposes the
+actual opened authority; there is no second marking/deletion implementation.
+Marks, active pins, WAL references, relink fences and scratch directories belong
+to that index, never the source database. A deferred index installs its GC
+handle when background maintenance successfully opens it. The derived collector
+stops before the index checkpoint; its failure does not change source liveness.
+`system.metrics.searchGarbageCollector` reports the existing bounded counters.
+
+Each projection epoch clamps temporary bytes to at most one percent of the
+index volume's currently available bytes and the launch-derived GC budget.
+Capacity rejection rings the collector doorbell while retaining the common
+120-second start floor and 50-percent duty bound. Index writes independently
+check the reserve specified by `conversation_search_v2.json::nativeProjection`;
+GC remains allowed to reclaim under that reserve. A completely full volume may
+still need external space released before a safe mark can be staged.
+
+Alternatives rejected: a recursive file sweep lacks root/pin/relink proof;
+restarting the source collector does not cover another authority; periodically
+rebuilding the index adds downtime and another publication lifecycle.
 
 ### Epoch state machine
 
@@ -343,3 +362,19 @@ Problem. Catalog windows selected only by CONTROL generation can repeat forever 
 Decision. The online collector owns a volatile catalog-window cursor. It starts with the captured generation for the original first-window choice, then advances after two successfully completed epochs per window. Deferred, cancelled and failed attempts retain the cursor and confirmation phase. The existing fresh marks, exact dead-set comparison, relink fence, 16-segment scan bound and pacing floors remain mandatory. Catalog changes may invalidate a confirmation; exact segment identities and dead sets remain authoritative. Restart discards the cursor and previous marks together.
 
 Alternatives considered. Waiting for foreground writes to rotate generation fails for idle databases. Rotating after every epoch discards the preceding window's suspects before its second confirmation. Retaining dead sets for every window would grow resident tracking; paired bounded windows keep the existing memory bound.
+
+The `idle_epoch_sweeps_expired_retirement_without_another_catalog_publication` regression also verifies that an idle epoch removes a grace-expired parked predecessor without changing the catalog or losing live payloads. Its test-only clock helper ages existing parks; production retirement grace and durable bytes remain unchanged.
+
+## Search mounting verification
+
+The deterministic runtime regression performs 24 generation replacements and
+stages one abandoned publication block per generation. Three shared collector
+epochs reduce loose files from 27 to 3, reclaiming exactly 24 blocks / 2,054
+bytes; current hits survive both collection and reopen. This proves projection
+mounting and orphan reclamation, not the original incident's unreachable-byte
+ratio or a production throughput claim. Runtime object size is 2,480 bytes
+(including the opened index), collector size 376 bytes; the additional selected
+index driver reserves the existing 1 MiB stack and creates scratch lazily.
+The regression also covers driver stop/join, capacity loss without file writes,
+independent source writes, a deferred missing index, source admission and
+recovery of capacity with the installed GC handle.

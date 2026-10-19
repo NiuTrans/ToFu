@@ -85,7 +85,7 @@ encrypted handover. These checks establish protocol boundaries, not all SQLite
 performance metrics.
 
 Current generation measurements and failed attempts are retained in
-[generation evidence](evidence/tofudb_generational_checkpoint_20261002.json).
+`tofudb_generational_checkpoint_20261002.json`.
 The comparisons use the frozen prior default with both CLI/library source
 `d47361a362622c77df217227d0ab1a7a72b07dfe7e68cf0c89b7a1cf54983147`.
 
@@ -312,7 +312,7 @@ Generation implementation failures are also retained in the evidence:
 ## Verification and limits
 
 Canonical measurements and failures are retained in
-[rotation evidence](evidence/tofudb_rotation_window_20261002.json).
+`tofudb_rotation_window_20261002.json`.
 The negative control lives on `perf/tofudb-rotation-read-control-20261002` at
 `bae946d00`; it changes only the regression test, not the original engine.
 The rejected-candidate I/O pause test blocks a real sync in window persistence, admits a foreground
@@ -406,3 +406,5 @@ and the exact successor transaction and authority root (eight crash cases).
 A negative control restoring the old fence fails the same admission regression.
 The fixed eight-case regression completed in 0.01 seconds on this host; that is
 fixture runtime, not production latency. No workers, queues or capacity are added.
+
+<!-- Evidence note: former docs/evidence/ artifact snapshots cited here were retired from the tree; cited JSON artifacts remain recoverable from git history. -->

@@ -11,6 +11,15 @@ import pytest
 
 pytest_plugins = ('tests._artifact_sidecar',)
 
+pytestmark = pytest.mark.unit
+
+
+@pytest.fixture
+def flask_app(artifact_storage):
+    """Bind deterministic PDF tests to the disposable artifact authority."""
+    import server
+    server.app.config.update(TESTING=True)
+    return server.app
 
 class TestStripScripts:
     def test_inline_script_removed(self):
@@ -40,8 +49,8 @@ class TestStripScripts:
 
 class TestMarkdownToHtml:
     def test_renders_h1_paragraph(self):
-        from lib.artifacts.pdf_export import _render_markdown_to_html
-        out = _render_markdown_to_html('# Title\n\nBody text.\n')
+        from lib.artifacts.markdown_view import render_markdown_html
+        out = render_markdown_html('# Title\n\nBody text.\n')
         assert '<h1>' in out
         assert 'Title' in out
         assert '<p>' in out
@@ -50,10 +59,17 @@ class TestMarkdownToHtml:
         """html=False in markdown_it config — model HTML in markdown
         source MUST be escaped, not passed through, since the document
         renders in our browser pool."""
-        from lib.artifacts.pdf_export import _render_markdown_to_html
-        out = _render_markdown_to_html('Hello <script>alert(1)</script> world.')
+        from lib.artifacts.markdown_view import render_markdown_html
+        out = render_markdown_html('Hello <script>alert(1)</script> world.')
         assert '<script>' not in out
         assert 'alert(1)' in out  # text content escaped, but visible
+
+    def test_missing_renderer_keeps_escaped_source(self, monkeypatch):
+        import sys
+        from lib.artifacts.markdown_view import render_markdown_html
+        monkeypatch.setitem(sys.modules, 'markdown_it', None)
+        assert render_markdown_html('# 距离 <script>bad()</script>') == (
+            '<pre># 距离 &lt;script&gt;bad()&lt;/script&gt;</pre>')
 
 
 class TestBuildPrintHtml:

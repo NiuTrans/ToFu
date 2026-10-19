@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pytest
 
-from tests._runtime_sections import runtime_section
+from tests._runtime_sections import native_module_path, runtime_section
 
 
 pytestmark = pytest.mark.unit
@@ -37,7 +37,8 @@ def test_quota_facts_render_as_individual_wrappable_items(tmp_path):
     )
     fn_end = finish_owner.index(fn_end_marker, fn_start) + len(fn_end_marker)
     source_path = tmp_path / 'finish-quota.js'
-    source_path.write_text(finish_owner[fn_start:fn_end], encoding='utf-8')
+    source_path.write_text(Path(native_module_path('.native/token-usage.js', ROOT / 'frontend/src/token-usage.ts')).read_text()
+        + '\n' + finish_owner[fn_start:fn_end], encoding='utf-8')
 
     harness = tmp_path / 'finish-quota-harness.js'
     harness.write_text(r"""

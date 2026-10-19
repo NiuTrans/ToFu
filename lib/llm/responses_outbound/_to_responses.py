@@ -47,7 +47,7 @@ from lib.llm.conversion import (
 )
 from lib.llm.responses_outbound._message_phase import replay_phase_messages
 from lib.log import get_logger
-from lib.tool_history_pairing import adjacent_tool_call_result_pairs
+from lib.tool_results.tool_history_pairing import adjacent_tool_call_result_pairs
 
 logger = get_logger(__name__)
 
@@ -873,8 +873,9 @@ def _convert_tools(tools: list, reverse: dict) -> list:
 
     Non-function tools pass through untouched (server-side built-ins like
     ``web_search`` have no chat-completions wrapper). Function fields are
-    carried only when the source specifies them — the converter mirrors,
-    it does not invent.
+    carried from the source. Omitted strictness preserves Chat Completions'
+    non-strict default explicitly: Responses otherwise attempts to normalize
+    optional properties into a strict schema.
     """
     converted: list = []
     for tool in tools:
@@ -890,8 +891,7 @@ def _convert_tools(tools: list, reverse: dict) -> list:
             t['description'] = func['description']
         if 'parameters' in func:
             t['parameters'] = func['parameters']
-        if func.get('strict') is not None:
-            t['strict'] = func['strict']
+        t['strict'] = func.get('strict', False)
         converted.append(t)
     return converted
 

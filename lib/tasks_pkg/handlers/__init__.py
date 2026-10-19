@@ -29,6 +29,7 @@ from lib.tasks_pkg.handlers import (  # noqa: F401
     retained_agents,
     skills,
     tool_gateway,
+    tool_effect_inspection,
 )
 
 # Miscellaneous handlers are split by capability; import the concrete owners

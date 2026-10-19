@@ -126,8 +126,8 @@ def test_optimizer_task_rebuilds_the_durable_row_owner_principal(monkeypatch):
 
 def test_schema_36_retires_database_specific_tasks_and_adds_system_identity(
         tmp_path):
-    from lib.storage_sidecar.adapters.sqlite import SQLiteSession
-    from lib.storage_sidecar import schema
+    from lib.storage_authority_sql.adapters.sqlite import SQLiteSession
+    from lib.storage_authority_sql import schema
 
     connection = sqlite3.connect(tmp_path / 'schema-v35.db')
     connection.row_factory = sqlite3.Row

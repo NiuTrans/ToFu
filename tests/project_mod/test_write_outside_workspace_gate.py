@@ -216,7 +216,7 @@ class BatchGateTest(_Base):
             self.assertEqual(fh.read(), 'b\n')
         self.assertIn(os.path.abspath(self._sibling), self._conv_root_paths('c1'))
 
-class SameRepoWorktreeTest(_Base):
+class _SameRepoWorktreeBase(_Base):
     """The 2026-10-04 exemption: writing into a git worktree of an already
     registered repo must NOT require allow_outside_workspace.
 
@@ -254,6 +254,8 @@ class SameRepoWorktreeTest(_Base):
         subprocess.run([git, 'worktree', 'add', self._wt],
                        cwd=self._proj, check=True)
 
+
+class SameRepoWorktreeTest(_SameRepoWorktreeBase):
     def test_unflagged_write_into_same_repo_worktree_succeeds(self):
         target = os.path.join(self._wt, 'pkg', 'mod.py')
         res = tool_write_file(self._proj, target, 'x = 1\n',
@@ -373,3 +375,195 @@ class WireSchemaTest(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class TempWorktreeJournalTest(_SameRepoWorktreeBase):
+    """Real linked checkouts under the OS temp root are projects, not scratch."""
+
+    def setUp(self):
+        super().setUp()
+        wt._temp_roots._cache = {os.path.realpath(tempfile.gettempdir())}
+
+    def test_created_modified_and_nested_edits_have_checkout_relative_history(self):
+        from lib.project_mod import modifications as mods
+        from lib.project_mod.config import set_conv_roots
+        set_conv_roots('other-conv', self._proj)
+        roots_before = self._roots_paths()
+        observed = []
+        listener = lambda task_id, entry: observed.append((task_id, entry))
+        mods.register_live_change_listener(listener)
+        self.addCleanup(mods._live_change_listeners.remove, listener)
+
+        # Existing nested directory must not become the registered root.
+        nested = os.path.join(self._wt, 'pkg', 'existing')
+        os.makedirs(nested)
+        existing = os.path.join(nested, 'modified.py')
+        with open(existing, 'w') as fh:
+            fh.write('value = 1\n')
+        result = tool_edit_file(self._proj, [
+            {'path': existing, 'operation': 'replace',
+             'anchor': 'value = 1', 'content': 'value = 2'},
+        ], conv_id='c1', task_id='t1')
+        self.assertIn('1/1', result)
+        for rel in ('created.py', 'pkg/new/deeper/created.py'):
+            result = tool_write_file(self._proj, os.path.join(self._wt, rel),
+                                     'value = 3\n', conv_id='c1', task_id='t1')
+            self.assertTrue(result['ok'], result)
+
+        self.assertEqual(self._roots_paths(), roots_before)
+        self.assertEqual(self._conv_root_paths('c1'), {self._proj, self._wt})
+        self.assertEqual(self._conv_root_paths('other-conv'), {self._proj})
+
+        self.assertFalse(wt._should_record_modification(existing,
+                                                       conv_id='other-conv'))
+        self.assertEqual(drain_root_added_signals(), [
+            {'rootName': os.path.basename(self._wt), 'path': self._wt}])
+        records = mods.get_modifications(self._wt, conv_id='c1')
+        self.assertEqual({m['path'] for m in records}, {
+            'pkg/existing/modified.py', 'created.py',
+            'pkg/new/deeper/created.py'})
+        self.assertEqual(len(records), 3)
+        self.assertEqual(len(observed), 3)
+        self.assertEqual(mods.get_modifications(self._proj, conv_id='c1'), [])
+        self.assertEqual(mods.get_modifications(self._wt, conv_id='other-conv'), [])
+        for record in records:
+            self.assertEqual(record['basePath'], self._wt)
+            self.assertEqual(record['convId'], 'c1')
+            self.assertEqual(record['taskId'], 't1')
+
+            self.assertIs(record['undoAvailable'], False)
+            self.assertEqual(record['root'], os.path.basename(self._wt))
+            self.assertNotIn('..', record['path'].split(os.sep))
+            self.assertFalse(os.path.isabs(record['path']))
+        self.assertTrue(all(task_id == 't1' for task_id, _ in observed))
+
+        self.assertEqual({entry['path'] for _, entry in observed},
+                         {record['path'] for record in records})
+        self.assertTrue(all(entry['rootPath'] == self._wt
+                            for _, entry in observed))
+
+        self.assertTrue(all(entry['undoAvailable'] is False
+                            for _, entry in observed))
+    def test_primary_project_and_primary_temp_worktree_keep_undo_capability(self):
+        from lib.project_mod import modifications as mods
+        from lib.project_mod.config import set_conv_roots
+        observed = []
+        listener = lambda task_id, entry: observed.append(entry)
+        mods.register_live_change_listener(listener)
+        self.addCleanup(mods._live_change_listeners.remove, listener)
+        for primary, conv_id in ((self._proj, 'main-conv'),
+                                 (self._wt, 'managed-conv')):
+            set_conv_roots(conv_id, primary)
+            target = os.path.join(primary, 'primary-created.py')
+            result = tool_write_file(primary, target, 'value = 1\n',
+                                     conv_id=conv_id, task_id=conv_id)
+            self.assertTrue(result['ok'], result)
+            records = mods.get_modifications(primary, conv_id=conv_id)
+            self.assertEqual(len(records), 1)
+            self.assertIsNot(records[0].get('undoAvailable'), False)
+            self.assertEqual(records[0]['basePath'], primary)
+        self.assertEqual(len(observed), 2)
+        self.assertTrue(all(entry.get('undoAvailable') is not False
+                            for entry in observed))
+        self.assertEqual(drain_root_added_signals(), [])
+
+    def test_scratch_and_unrelated_temp_repo_stay_untracked(self):
+        import subprocess
+        from lib.project_mod import modifications as mods
+        other = os.path.join(self._tmp_root, 'other-repo')
+        os.makedirs(other)
+        subprocess.run(['git', 'init', '-q', other], check=True)
+        before = self._roots_paths()
+        for target in (os.path.join(self._tmp_root, 'scratch.py'),
+                       os.path.join(other, 'mod.py')):
+            result = tool_write_file(self._proj, target, 'x = 1\n',
+                                     conv_id='c1', task_id='t1')
+            self.assertTrue(result['ok'], result)
+            self.assertFalse(wt._should_record_modification(target, conv_id='c1'))
+        self.assertNotIn('c1', cfg._conv_roots)
+        self.assertEqual(self._roots_paths(), before)
+        self.assertEqual(drain_root_added_signals(), [])
+        self.assertEqual(mods.get_modifications(self._proj, conv_id='c1'), [])
+
+    def test_restricted_caller_cannot_auto_register_temp_worktree(self):
+        from lib.project_mod.abs_path_guard import set_restricted, reset_restricted
+        token = set_restricted(True)
+        try:
+            result = tool_write_file(self._proj, os.path.join(self._wt, 'denied.py'),
+                                     'x\n', conv_id='c1', task_id='t1')
+        finally:
+            reset_restricted(token)
+        self.assertFalse(result['ok'], result)
+        self.assertFalse(os.path.exists(os.path.join(self._wt, 'denied.py')))
+        self.assertNotIn('c1', cfg._conv_roots)
+        self.assertEqual(drain_root_added_signals(), [])
+
+    def test_registered_readonly_worktree_stays_readonly(self):
+        from lib.project_mod.config import add_conv_root, set_conv_roots
+        set_conv_roots('c1', self._proj)
+        add_conv_root('c1', self._wt, access='ro')
+        result = tool_write_file(self._proj, os.path.join(self._wt, 'denied.py'),
+                                 'x\n', conv_id='c1', task_id='t1')
+        self.assertFalse(result['ok'], result)
+        self.assertIn('READ-ONLY', result['error'])
+        self.assertFalse(os.path.exists(os.path.join(self._wt, 'denied.py')))
+        self.assertEqual(drain_root_added_signals(), [])
+
+    def test_fallback_attribution_uses_actual_checkout_not_main_parent(self):
+        target = os.path.join(self._wt, 'README')
+        self.assertEqual(wt._mod_attribution(target, self._proj, target),
+                         (self._wt, 'README'))
+
+        nested = os.path.join(self._wt, 'pkg', 'existing')
+        os.makedirs(nested)
+        target = os.path.join(nested, 'new.py')
+        self.assertEqual(wt._mod_attribution(target, self._proj, target),
+                         (self._wt, 'pkg/existing/new.py'))
+    def test_gitfile_lookalike_is_not_a_registered_linked_checkout(self):
+        fake = os.path.join(self._tmp_root, 'fake')
+        os.makedirs(fake)
+        with open(os.path.join(fake, '.git'), 'w') as fh:
+            fh.write('gitdir: ' + os.path.join(
+                self._proj, '.git', 'worktrees', 'missing') + '\n')
+        target = os.path.join(fake, 'scratch.py')
+        # Writer leasing independently refuses missing Git metadata; exercise
+        # the resolution boundary directly to pin that it grants no root.
+        self.assertEqual(_resolve_write_path(self._proj, target, conv_id='c1'),
+                         target)
+        self.assertNotIn('c1', cfg._conv_roots)
+        self.assertFalse(wt._should_record_modification(target, conv_id='c1'))
+        self.assertEqual(drain_root_added_signals(), [])
+
+    def test_merge_and_worktree_removal_keep_settled_panel_without_canonical_undo(self):
+        import subprocess
+        from lib.project_mod import modifications as mods
+        from lib.tasks_pkg.commit_round._derive import derive_round_modified_files
+        from lib.turn_lifecycle import _task_projection
+        observed = []
+        listener = lambda task_id, entry: observed.append(entry)
+        mods.register_live_change_listener(listener)
+        self.addCleanup(mods._live_change_listeners.remove, listener)
+        target = os.path.join(self._wt, 'feature.py')
+        result = tool_write_file(self._proj, target, 'value = 1\n',
+                                 conv_id='c1', task_id='t1')
+        self.assertTrue(result['ok'], result)
+        task = {'id': 't1', 'convId': 'c1', 'created_at': 1,
+                'modifiedFileList': observed}
+        subprocess.run(['git', 'add', 'feature.py'], cwd=self._wt, check=True)
+        subprocess.run(['git', 'commit', '-q', '-m', 'feature'], cwd=self._wt, check=True)
+        subprocess.run(['git', 'merge', '--ff-only', 'wt1'], cwd=self._proj, check=True)
+        subprocess.run(['git', 'worktree', 'remove', self._wt], cwd=self._proj, check=True)
+        self.assertFalse(os.path.exists(self._wt))
+        self.assertTrue(os.path.isfile(os.path.join(self._proj, 'feature.py')))
+        files, count, fallback = derive_round_modified_files(
+            task, self._proj, [self._proj])
+        self.assertEqual(count, 1)
+        self.assertFalse(fallback)
+        self.assertEqual(files[0]['path'], 'feature.py')
+        self.assertEqual(files[0]['rootPath'], self._wt)
+        self.assertEqual(files[0]['changeId'], observed[0]['changeId'])
+        self.assertIs(files[0]['undoAvailable'], False)
+        task.update(modifiedFileList=files, modifiedFiles=count)
+        block = _task_projection(task, {})['fileChanges']
+        self.assertEqual(block['files'], files)
+        self.assertIs(block['undoAvailable'], False)

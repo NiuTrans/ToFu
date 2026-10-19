@@ -16,8 +16,6 @@ from lib.log import get_logger
 
 from ._router import (
     IMAGE_EXTENSIONS,
-    MAX_FILE_BYTES,
-    MAX_TEXT_CHARS,
     OFFICE_EXTENSIONS,
 )
 
@@ -26,9 +24,6 @@ logger = get_logger(__name__)
 
 def _read_pdf(path: str, file_size: int) -> str:
     """Read a PDF file and extract text."""
-    if file_size > MAX_FILE_BYTES:
-        return (f'Error: PDF too large: {file_size:,} bytes '
-                f'(max {MAX_FILE_BYTES // (1024*1024)} MB)')
 
     try:
         with open(path, 'rb') as f:
@@ -39,7 +34,7 @@ def _read_pdf(path: str, file_size: int) -> str:
 
     try:
         from lib.pdf_parser.text import extract_pdf_text
-        text = extract_pdf_text(pdf_bytes, MAX_TEXT_CHARS)
+        text = extract_pdf_text(pdf_bytes)
         if not text:
             return f'Error: PDF appears to be scanned/image-only — no text could be extracted from: {os.path.basename(path)}'
 
@@ -54,9 +49,6 @@ def _read_pdf(path: str, file_size: int) -> str:
 
 def _read_office(path: str, filename: str, file_size: int) -> str:
     """Read an Office document and extract text."""
-    if file_size > MAX_FILE_BYTES:
-        return (f'Error: Document too large: {file_size:,} bytes '
-                f'(max {MAX_FILE_BYTES // (1024*1024)} MB)')
 
     try:
         with open(path, 'rb') as f:
@@ -67,9 +59,9 @@ def _read_office(path: str, filename: str, file_size: int) -> str:
 
     try:
         from lib.doc_parser import extract_document_text
-        result = extract_document_text(file_bytes, filename, max_chars=MAX_TEXT_CHARS)
+        result = extract_document_text(file_bytes, filename)
         text = result.get('text', '')
-        if not text:
+        if not text or result.get('textLength') == 0:
             return f'Error: No text could be extracted from: {filename}'
 
         method = result.get('method', '?')
@@ -88,10 +80,6 @@ def _read_office(path: str, filename: str, file_size: int) -> str:
 
 def _read_text(path: str, filename: str, file_size: int) -> str:
     """Read a text file with encoding detection."""
-    if file_size > MAX_FILE_BYTES:
-        return (f'Error: File too large: {file_size:,} bytes '
-                f'(max {MAX_FILE_BYTES // (1024*1024)} MB)')
-
     # Quick binary check — read first 8KB to detect binary
     try:
         with open(path, 'rb') as f:
@@ -114,7 +102,7 @@ def _read_text(path: str, filename: str, file_size: int) -> str:
     for encoding in ('utf-8', 'utf-8-sig', 'gbk', 'gb18030', 'latin-1'):
         try:
             with open(path, encoding=encoding) as f:
-                text = f.read(MAX_TEXT_CHARS + 100)
+                text = f.read()
             break
         except (UnicodeDecodeError, LookupError) as _e_audit:
             logger.debug('[file_reader] _read_text caught %s: %s', type(_e_audit).__name__, _e_audit)
@@ -123,18 +111,11 @@ def _read_text(path: str, filename: str, file_size: int) -> str:
     if text is None:
         # Last resort
         with open(path, encoding='utf-8', errors='replace') as f:
-            text = f.read(MAX_TEXT_CHARS + 100)
-
-    truncated = len(text) > MAX_TEXT_CHARS
-    if truncated:
-        text = text[:MAX_TEXT_CHARS]
+            text = f.read()
 
     ext = os.path.splitext(filename)[1].lower()
-    logger.info('[FileReader] Text file read: %s (%s, %s chars%s)',
-                filename, ext, f'{len(text):,}',
-                ', truncated' if truncated else '')
+    logger.info('[FileReader] Text file read: %s (%s, %s chars)',
+                filename, ext, f'{len(text):,}')
 
     header = f'File: {filename} ({file_size:,} bytes)'
-    if truncated:
-        header += f' [truncated at {MAX_TEXT_CHARS:,} chars]'
     return f'{header}\n\n{text}'

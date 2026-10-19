@@ -22,8 +22,11 @@ from lib.tools.result_envelope import typed_tool_error
 from lib.tasks_pkg.handlers.search._display import (
     _format_fetch_display,
     _format_search_display_for_results,
-    _vertical_header_for_llm,
     _vertical_to_sse_payload,
+)
+
+from lib.tasks_pkg.handlers.search._presentation import (
+    failed_search_observation, format_search_observations, search_observation,
 )
 
 logger = get_logger(__name__)
@@ -31,31 +34,11 @@ logger = get_logger(__name__)
 
 def _load_search_backend():
     """Activate providers, then resolve the authoritative search primitives."""
-    from lib.search_runtime import ensure_search_runtime
+    from lib.search.search_runtime import ensure_search_runtime
     ensure_search_runtime()
     from lib.tasks_pkg.handlers.search import _core as search_core
     from tofu_search.search import format_search_for_tool_response
     return search_core, format_search_for_tool_response
-
-
-def _retain_search_observations(text, observations):
-    """Keep uncertain candidates in the ordinary owner-scoped result artifact.
-
-    The model pays for a small preview; omission from ranked evidence cannot
-    destroy the bounded engine observations needed for a follow-up query.
-    """
-    if not any(getattr(results, '_unverified_candidates', None)
-               for _, results in observations):
-        return text
-    from lib.tools.result_value import CapturedToolResult, ResultPart, TrustedResultText
-    original = {'observations': [
-        {'query': query, 'results': list(results),
-         'unverified_candidates': getattr(results, '_unverified_candidates', []),
-         'diagnostics': getattr(results, '_search_diag', None)}
-        for query, results in observations]}
-    return TrustedResultText(text, source_omitted=True, canonical=CapturedToolResult(
-        (ResultPart('json', json.dumps(original, ensure_ascii=False)),),
-        source_coverage='unknown'))
 
 
 def _batch_progress_reporter(task, rn, round_entry, total, label_of):
@@ -157,7 +140,7 @@ def _handle_web_search(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, 
         return tc_id, tool_content, False
 
     search_core, format_search_for_tool_response = _load_search_backend()
-    from lib.search_bridge import bind_search_browser
+    from lib.search.search_bridge import bind_search_browser
     with bind_search_browser(
             user_id=task.get('_userId', '') or '',
             client_id=cfg.get('browserClientId') or ''):
@@ -165,6 +148,12 @@ def _handle_web_search(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, 
             query, user_question, freshness, vertical=vertical_param)
     display_results = _format_search_display_for_results(results)
 
+    if not display_results:
+        # A zero-result search is not reusable evidence. Mark it uncacheable
+        # so a later identical query re-executes instead of replaying this
+        # failure (network error / deadline / no usable evidence) from the
+        # prefetch/dedup cache.
+        round_entry['_cacheableResult'] = False
     round_entry['results'] = display_results
     round_entry['status'] = 'done'
     event_payload = {'type': 'tool_result', 'roundNum': rn, 'query': query, 'results': display_results, 'status': 'done'}
@@ -181,9 +170,9 @@ def _handle_web_search(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, 
         event_payload['vertical'] = vertical_payload
     append_event(task, event_payload)
 
-    tool_content = format_search_for_tool_response(results, search_diag=search_diag, query=query)
-    if vertical_result:
-        tool_content = _vertical_header_for_llm(vertical_result) + tool_content
+    tool_content = format_search_observations([
+        search_observation(query, results, search_diag, engine_breakdown,
+                           vertical_result)], format_search_for_tool_response)
 
     handler_elapsed = _time.time() - handler_t0
     _vlabel = (vertical_payload.get('domain') if vertical_payload else 'none')
@@ -194,7 +183,7 @@ def _handle_web_search(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, 
     if handler_elapsed > 30:
         logger.warning('[Search] ⚠ web_search handler SLOW: %.1fs (>30s)  query=%r',
                        handler_elapsed, query[:60])
-    return tc_id, _retain_search_observations(tool_content, [(query, results)]), True
+    return tc_id, tool_content, True
 
 
 def _handle_web_search_batch(task, tc, fn_name, tc_id, fn_args, queries, rn, round_entry, cfg, project_path, project_enabled, all_tools=None):
@@ -233,16 +222,13 @@ def _handle_web_search_batch(task, tc, fn_name, tc_id, fn_args, queries, rn, rou
 
     def _worker(spec):
         q, f, v = spec
-        from lib.search_bridge import bind_search_browser
+        from lib.search.search_bridge import bind_search_browser
         with bind_search_browser(
                 user_id=task.get('_userId', '') or '',
                 client_id=cfg.get('browserClientId') or ''):
             results, search_diag, engine_breakdown, vertical_result = search_core._web_search_one(
                 q, user_question, f, vertical=v)
-        formatted = format_search_for_tool_response(results, search_diag=search_diag, query=q)
-        if vertical_result:
-            formatted = _vertical_header_for_llm(vertical_result) + formatted
-        return (q, results, search_diag, engine_breakdown, formatted, vertical_result)
+        return (q, results, search_diag, engine_breakdown, vertical_result)
 
     ordered = run_batch_concurrent(query_specs, _worker, max_workers=5, tag='Search',
                                    abort=lambda: bool(task.get('aborted')),
@@ -253,15 +239,15 @@ def _handle_web_search_batch(task, tc, fn_name, tc_id, fn_args, queries, rn, rou
     all_display_results = []
     all_search_diags = []
     search_observations = []
-    all_formatted = []
     all_verticals = []
     for idx, item in enumerate(ordered):
         q = query_list[idx]
         if item is None:
-            all_formatted.append(f'Search failed for "{q}": internal error (see logs)')
+            search_observations.append(failed_search_observation(q))
             continue
-        _q, results, _diag, _breakdown, formatted, vertical_result = item
-        search_observations.append((q, results))
+        _q, results, _diag, _breakdown, vertical_result = item
+        search_observations.append(search_observation(
+            q, results, _diag, _breakdown, vertical_result))
         if _diag:
             all_search_diags.append({'query': q, **_diag})
         display_results = _format_search_display_for_results(results)
@@ -276,10 +262,6 @@ def _handle_web_search_batch(task, tc, fn_name, tc_id, fn_args, queries, rn, rou
                 v_payload = dict(v_payload)
                 v_payload['query'] = q
                 all_verticals.append(v_payload)
-        if n > 1:
-            all_formatted.append(f'=== Search: {q} ===\n{formatted}')
-        else:
-            all_formatted.append(formatted)
 
     # Finalize the round with all results combined
     round_entry['results'] = all_display_results
@@ -296,16 +278,33 @@ def _handle_web_search_batch(task, tc, fn_name, tc_id, fn_args, queries, rn, rou
     if all_search_diags:
         round_entry['searchDiags'] = all_search_diags
         event_payload['searchDiags'] = all_search_diags
+        # The batch emits the plural per-query list, but the frontend's
+        # zero-result renderer reads the SINGULAR `searchDiag`. When the whole
+        # batch produced nothing, surface the primary (first) failing diag
+        # there too so the UI shows the honest network/deadline/no-evidence
+        # reason instead of the fabricated "all engines responded, no matches".
+        primary_diag = next(
+            (d for d in all_search_diags if d.get('reason') != 'no_matches'),
+            all_search_diags[0],
+        )
+        round_entry['searchDiag'] = primary_diag
+        event_payload['searchDiag'] = primary_diag
+    if not all_display_results:
+        # A zero-result batch is not reusable evidence. Mark it uncacheable so
+        # a later identical search re-executes instead of replaying this
+        # failure from the prefetch/dedup cache.
+        round_entry['_cacheableResult'] = False
     if all_verticals:
         round_entry['verticals'] = all_verticals
         event_payload['verticals'] = all_verticals
     append_event(task, event_payload)
 
-    tool_content = '\n\n'.join(all_formatted)
+    tool_content = format_search_observations(
+        search_observations, format_search_for_tool_response)
     handler_elapsed = _time.time() - handler_t0
     logger.info('[Search] web_search BATCH: %d queries in %.1fs  total_results=%d  content_chars=%d',
                 n, handler_elapsed, len(all_display_results), len(tool_content))
-    return tc_id, _retain_search_observations(tool_content, search_observations), True
+    return tc_id, tool_content, True
 
 
 # ══════════════════════════════════════════════════════════
@@ -369,7 +368,7 @@ def _handle_fetch_url(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, p
         return tc_id, tool_content, False
 
     search_core, _format_search_for_tool_response = _load_search_backend()
-    from lib.search_bridge import bind_search_browser
+    from lib.search.search_bridge import bind_search_browser
     with bind_search_browser(
             user_id=task.get('_userId', '') or '',
             client_id=cfg.get('browserClientId') or ''):
@@ -417,7 +416,7 @@ def _handle_fetch_url(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, p
     extract_q = str(fn_args.get('extract') or '').strip()
     if page_content and extract_q:
         try:
-            from lib.search_extract import extract_answer
+            from lib.search.search_extract import extract_answer
             from lib.agent_core.execution_budget import model_budget_admission
             from lib.identity import require_user_id
             from lib.tasks_pkg.manager import make_task_abort_check
@@ -543,7 +542,7 @@ def _handle_browser_download_url_to_server(
         return tc_id, failure, False
 
     search_core, _format_search_for_tool_response = _load_search_backend()
-    from lib.search_bridge import bind_search_browser
+    from lib.search.search_bridge import bind_search_browser
     with bind_search_browser(
             user_id=task.get('_userId', '') or '',
             client_id=(resolved_browser_client_id
@@ -556,8 +555,7 @@ def _handle_browser_download_url_to_server(
         failure = typed_tool_error(
             result['error_code'],
             retryable=bool(result.get('retryable')),
-            next_action=result.get('next_action') or (
-                'Stop and report that the URL could not be downloaded.'),
+            next_action=result.get('next_action') or '',
             message=result.get('error_msg') or 'The URL could not be downloaded.',
         ).to_envelope_text()
         _finalize_tool_round(
@@ -636,7 +634,7 @@ def _handle_fetch_url_batch(task, tc, fn_name, tc_id, fn_args, urls_specs, rn, r
     n = len(url_list)
 
     def _worker(target_url):
-        from lib.search_bridge import bind_search_browser
+        from lib.search.search_bridge import bind_search_browser
         with bind_search_browser(
                 user_id=task.get('_userId', '') or '',
                 client_id=cfg.get('browserClientId') or ''):

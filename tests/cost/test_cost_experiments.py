@@ -7,7 +7,7 @@ import time
 
 import pytest
 
-from lib.cost_experiments import (
+from lib.cost_experiments.cost_experiments import (
     CostExperimentTransitionError,
     aggregate_cost_experiment_rows,
     apply_cost_experiment,
@@ -258,7 +258,7 @@ def test_enabled_experiment_requires_explicit_owner_identity():
 
 
 def test_turn_hot_path_compiles_the_pinned_application_plan_once(monkeypatch):
-    import lib.cost_experiments as experiment_module
+    import lib.cost_experiments.cost_experiments as experiment_module
 
     exp = _enabled_config()
     original = experiment_module.compile_experiment_application
@@ -391,7 +391,7 @@ def test_task_outcome_exists_before_task_result_persistence():
 
 
 def test_turn_prelude_fails_open_if_experiment_observer_breaks(monkeypatch):
-    import lib.cost_experiments as experiment_module
+    import lib.cost_experiments.cost_experiments as experiment_module
     from lib.tasks_pkg.orchestrator._turn_prelude import run_turn_prelude
 
     def broken_observer(_task, _cfg):
@@ -450,7 +450,7 @@ def test_task_outcome_report_rows_mirror_the_conversation_scan_shape():
 
 def test_load_cost_experiment_config_reparse_only_on_mtime_change(
         monkeypatch, tmp_path):
-    import lib.cost_experiments as experiment_module
+    import lib.cost_experiments.cost_experiments as experiment_module
     from lib.json_store import write_json_atomic
 
     path = tmp_path / 'server_config.json'
@@ -742,7 +742,7 @@ def test_report_endpoint_reads_task_results_projection(flask_client,
 
 def test_cost_experiment_repository_resumes_bounded_storage_pages():
     """A cold legacy scan resumes pages instead of restarting one giant RPC."""
-    from lib.cost_experiment_repository import scan_cost_experiment_outcomes
+    from lib.cost_experiments.cost_experiment_repository import scan_cost_experiment_outcomes
 
     calls = []
 

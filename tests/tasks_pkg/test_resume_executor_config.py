@@ -16,10 +16,41 @@ from lib.conversation_sync.command_service import (
     _journal_resume_file_fields,
     _resume_executor_config,
 )
-from lib.tool_round_replay import scan_replayable_tool_round_prefix
+from lib.tool_results.tool_round_replay import scan_replayable_tool_round_prefix
 
 pytestmark = pytest.mark.unit
 _AUDIT_SYNTHETIC_REPO_PATHS = {'lib/foo.py'}
+
+
+@pytest.mark.parametrize('operation', ['continue', 'checkpoint_resume', 'answer_guidance'])
+def test_resume_preserves_unknown_usage_independently_of_paid_counters(operation):
+    from lib.tasks_pkg.orchestrator._resume_state import prepare_resume_state
+    projection = {'usage': {'total_tokens': 5}, 'usageComplete': False}
+    if operation == 'answer_guidance':
+        projection['toolRounds'] = [_awaiting_human('call-ask', 'hg-1')]
+    config = _resume_executor_config(operation, projection, {
+        'guidanceId': 'hg-1', 'toolCallId': 'call-ask', 'response': 'proceed'})
+    prepared = prepare_resume_state(config)
+    assert prepared.checkpoint_usage == {'total_tokens': 5}
+    assert prepared.checkpoint_usage_complete is False
+
+
+@pytest.mark.parametrize('value', [0, 1, 'false', [], {}])
+def test_resume_rejects_non_boolean_usage_completeness(value):
+    from lib.tasks_pkg.orchestrator._resume_state import (
+        ContinueResumeStateProtocolError, prepare_resume_state)
+    with pytest.raises(ContinueResumeStateProtocolError, match='checkpointUsageComplete'):
+        prepare_resume_state({'checkpointUsageComplete': value})
+
+
+def test_resume_complete_claim_never_clears_existing_unknown_usage():
+    import threading
+    from lib.tasks_pkg.orchestrator._resume_state import apply_resume_state
+    task = {'id': 'task-1', 'convId': 'conv-1', 'content': '', 'thinking': '',
+            'content_lock': threading.Lock(), '_executionActualsComplete': False}
+    apply_resume_state(task=task, cfg={'checkpointUsageComplete': True},
+                       messages=[], model='gpt-4o', tid='task-1')
+    assert task['_executionActualsComplete'] is False
 
 
 def _completed(call_id: str) -> dict:
@@ -235,7 +266,7 @@ def test_answer_guidance_rejects_mismatched_or_missing_answer() -> None:
 def test_resume_ops_carry_the_settled_modified_file_ledger() -> None:
     files = [
         {'path': 'JOURNAL.md', 'action': 'patched'},
-        {'path': 'lib/tool_round_replay.py', 'action': 'written', 'root': 'chatui'},
+        {'path': 'lib/tool_results/tool_round_replay.py', 'action': 'written', 'root': 'chatui'},
     ]
     projection = {
         'content': 'partial',
@@ -310,7 +341,8 @@ def test_journal_fallback_rebuilds_the_ledger_after_restart(
     import lib.tasks_pkg.commit_round._derive as derive_mod
     captured = {}
 
-    def fake_derive(task, project_path, project_paths):
+    def fake_derive(task, project_path, project_paths, **kwargs):
+        captured['recovery'] = kwargs.get('recover_conversation_journal')
         captured['task'] = task
         captured['project_path'] = project_path
         captured['project_paths'] = project_paths
@@ -331,6 +363,8 @@ def test_journal_fallback_rebuilds_the_ledger_after_restart(
     # Empty task id: no taskId-stamped row matches, so the conv-scoped
     # timestamp scan covers every attempt of the turn in one pass.
     assert captured['task']['id'] == ''
+
+    assert captured['recovery'] is True
     assert captured['task']['convId'] == 'conv-1'
     # Turn timestamps are epoch ms; journal rows are time.time() seconds.
     assert captured['task']['created_at'] == pytest.approx(1788137746.471)
@@ -343,7 +377,7 @@ def test_journal_fallback_is_silent_without_floor_rows_or_project(
     import lib.tasks_pkg.commit_round._derive as derive_mod
     monkeypatch.setattr(
         derive_mod, 'derive_round_modified_files',
-        lambda task, project_path, project_paths: ([], 0, False))
+        lambda task, project_path, project_paths, **kwargs: ([], 0, False))
     turn = {'createdAt': 1788137746471, 'conversationId': 'conv-1'}
 
     assert _journal_resume_file_fields(turn, {'projectPath': '/repo'}) == {}

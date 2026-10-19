@@ -74,7 +74,7 @@ def test_claims_on_distinct_timers_do_not_interfere():
 # ── 2. lease loss stops the local watcher cooperatively ─────────────────────
 
 def test_lease_loss_stops_local_watcher(monkeypatch):
-    from lib.runtime_state_store import get_store
+    from lib.runtime.runtime_state_store import get_store
     from lib.scheduler.timer import _lease, _loop
 
     tid = _tid()
@@ -104,7 +104,7 @@ def test_lease_loss_stops_local_watcher(monkeypatch):
 # ── 3. foreign-held lease blocks a local start ───────────────────────────────
 
 def test_foreign_lease_blocks_local_start(monkeypatch):
-    from lib.runtime_state_store import get_store
+    from lib.runtime.runtime_state_store import get_store
     from lib.scheduler.timer import _lease, _loop
 
     tid = _tid()
@@ -150,7 +150,7 @@ def test_release_allows_prompt_reclaim():
 
 
 def test_renew_detects_takeover():
-    from lib.runtime_state_store import get_store
+    from lib.runtime.runtime_state_store import get_store
     from lib.scheduler.timer import _lease
 
     tid = _tid()

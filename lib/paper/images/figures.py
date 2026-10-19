@@ -14,7 +14,7 @@ logger = get_logger(__name__)
 
 # Bump this when changing figure-extraction params (resolution, layout, …)
 # so old manifests regenerate at the new quality on next access.
-_FIG_EXTRACT_VERSION = 7
+_FIG_EXTRACT_VERSION = 8
 
 
 def load_image_manifest(phash):
@@ -37,7 +37,9 @@ def load_image_manifest(phash):
         # New versioned format only — legacy bare-list manifests point at
         # low-resolution PNGs, so we ignore them here and let the caller's
         # fallback (ensure_paper_images) regenerate at the current quality.
-        if isinstance(data, dict) and data.get('version') == _FIG_EXTRACT_VERSION:
+        if (isinstance(data, dict) and data.get('version') == _FIG_EXTRACT_VERSION
+                and data.get('complete') is True
+                and data.get('selection', {}).get('max_images', 0) is None):
             imgs = data.get('images') or []
             if isinstance(imgs, list):
                 return [im for im in imgs if isinstance(im, dict) and im.get('url')]
@@ -46,13 +48,19 @@ def load_image_manifest(phash):
     return []
 
 
-def extract_paper_figures(filepath, phash, *, max_images=30, max_image_width=1800):
+def extract_paper_figures(filepath, phash, *, max_images=None, max_image_width=1800):
     """Run pymupdf figure/table extraction and persist a manifest.
 
     Returns the manifest list. Cached: re-uses the on-disk manifest if it
-    already exists AND was produced by the current extractor version.
+    already exists, matches the requested selection and current extractor
+    version, and every selected page/image was processed successfully.
+    None requests all detected figures; zero explicitly disables images.
     Caller is responsible for ensuring ``filepath`` exists.
     """
+    from lib.pdf_parser.policy import bounded_pdf_image_count, bounded_pdf_image_width
+    max_images = bounded_pdf_image_count(max_images)
+    max_image_width = bounded_pdf_image_width(max_image_width)
+    selection = {"max_images": max_images, "max_image_width": max_image_width}
     out_dir = os.path.join(PAPER_IMG_DIR, phash)
     manifest_path = os.path.join(out_dir, 'manifest.json')
     if os.path.isfile(manifest_path):
@@ -62,7 +70,8 @@ def extract_paper_figures(filepath, phash, *, max_images=30, max_image_width=180
             # New format: {'version': N, 'images': [...]}
             # Legacy format: bare list — predates the resolution bump,
             # regenerate so figures aren't blurry on retina displays.
-            if isinstance(cached, dict) and cached.get('version') == _FIG_EXTRACT_VERSION:
+            if (isinstance(cached, dict) and cached.get('version') == _FIG_EXTRACT_VERSION
+                    and cached.get('complete') is True and cached.get('selection') == selection):
                 imgs = cached.get('images')
                 if isinstance(imgs, list):
                     return imgs
@@ -72,7 +81,9 @@ def extract_paper_figures(filepath, phash, *, max_images=30, max_image_width=180
             logger.warning('[Paper:Images] Cached manifest unreadable, regenerating: %s', e)
 
     try:
-        import pymupdf
+        from lib.pdf_parser._common import pymupdf
+        if pymupdf is None:
+            raise ImportError("no working PyMuPDF backend")
     except ImportError as e:
         logger.error('[Paper:Images] pymupdf not available: %s', e)
         return []
@@ -88,6 +99,7 @@ def extract_paper_figures(filepath, phash, *, max_images=30, max_image_width=180
 
     os.makedirs(out_dir, exist_ok=True)
     images_out = []
+    complete = True
     t0 = time.time()
     try:
         with PYMUPDF_LOCK:
@@ -95,7 +107,7 @@ def extract_paper_figures(filepath, phash, *, max_images=30, max_image_width=180
             try:
                 total_pages = len(doc)
                 for pi in range(total_pages):
-                    if len(images_out) >= max_images:
+                    if max_images is not None and len(images_out) >= max_images:
                         break
                     try:
                         page_imgs = detect_and_clip_figures(
@@ -104,10 +116,11 @@ def extract_paper_figures(filepath, phash, *, max_images=30, max_image_width=180
                             doc=doc,
                         )
                     except Exception as pe:
+                        complete = False
                         logger.warning('[Paper:Images] detect failed on page %d: %s', pi, pe)
                         continue
                     for img in page_imgs:
-                        if len(images_out) >= max_images:
+                        if max_images is not None and len(images_out) >= max_images:
                             break
                         try:
                             raw = _b64.b64decode(img['base64'])
@@ -126,6 +139,7 @@ def extract_paper_figures(filepath, phash, *, max_images=30, max_image_width=180
                                 'height': img.get('height'),
                             })
                         except Exception as se:
+                            complete = False
                             logger.warning('[Paper:Images] Failed to save figure %d: %s',
                                            len(images_out)+1, se)
             finally:
@@ -136,7 +150,8 @@ def extract_paper_figures(filepath, phash, *, max_images=30, max_image_width=180
 
     try:
         with open(manifest_path, 'w', encoding='utf-8') as f:
-            json.dump({'version': _FIG_EXTRACT_VERSION, 'images': images_out},
+            json.dump({'version': _FIG_EXTRACT_VERSION, 'images': images_out,
+                       'selection': selection, 'complete': complete},
                       f, ensure_ascii=False)
     except Exception as e:
         logger.warning('[Paper:Images] Failed to write manifest: %s', e)

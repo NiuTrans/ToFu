@@ -20,7 +20,7 @@ def _compose(task, primary, *, enabled=True):
 
     messages = [{'role': 'user', 'content': 'Use $secondary-guide.'}]
     compose_task_context(
-        messages, user_id=7, model='test', task=task, has_real_tools=True,
+        messages, user_id=7, model='test', task=task, has_real_tools=True, tool_names={'load_skill'},
         project_path=str(primary), project_enabled=enabled)
     return '\n'.join(str(m.get('content')) for m in messages)
 

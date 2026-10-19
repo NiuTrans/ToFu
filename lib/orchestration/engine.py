@@ -176,6 +176,7 @@ class FlowExecutor:
                  human_gate_scope: str = '',
                  human_gate_owner_user_id: int | None = None,
                  execution_journal=None,
+                 native_flow_library=None,
                  _agent_budget: OrchestrationAgentBudget | None = None,
                  _human_gate_identity: HumanGateRequestIdentity | None = None,
                  _subflow_depth: int = 0):
@@ -245,7 +246,8 @@ class FlowExecutor:
                 self._runner, on_replay=self._agent_budget.release,
                 context_snapshot=self._default_runner_adapter.snapshot_worker_context,
                 context_restore=self._default_runner_adapter.restore_worker_context,
-                prepare_before_admission=agent_runner is None)
+                prepare_before_admission=agent_runner is None,
+                runner_owner=self._default_runner_adapter)
         # Whether a runner was explicitly injected (tests / custom). A nested
         # executor for an isolated subflow must reuse an injected runner, but
         # let a default-runner parent hand the child its OWN default runner
@@ -285,10 +287,38 @@ class FlowExecutor:
 
         # Pure graph-topology queries (walk targets, loop body/exit, barrier
         # join, reachability and adjacency) live on the navigator.
-        self._nav = GraphNavigator.from_edges(
-            self.nodes,
-            definition.get('edges', []),
-        )
+        self._native_flow_library=native_flow_library
+        native_parent=(parent_task or {}).get('_nativePreparedInvocation')
+        if native_parent is not None:
+            from lib.tasks_pkg.native_invocation import NativePreparedInvocation
+            if not isinstance(native_parent,NativePreparedInvocation):
+                raise FlowExecutionError('native Flow parent execution owner is not issued')
+            if native_parent.flow_scheduler is not None:
+                if native_flow_library is not None and native_flow_library is not native_parent.flow_scheduler:
+                    raise FlowExecutionError('native Flow scheduler differs from the parent execution owner')
+                self._native_flow_library=native_parent.flow_scheduler
+        if self._native_flow_library is None:
+            self._nav=GraphNavigator.from_edges(self.nodes,definition.get('edges',[]))
+        else:
+            from lib.orchestration.native_flow import NativeFlowBinding,NativeFlowLibrary
+            from lib.identity import PrincipalContext
+            from lib.tasks_pkg.manager import task_user_id
+            if not isinstance(self._native_flow_library,NativeFlowLibrary) or not parent_task or not parent_task.get('id'):
+                raise FlowExecutionError('native Flow scheduler requires its explicit parent identity')
+            task_user_id(parent_task)
+            principal=PrincipalContext.from_payload(parent_task['_principalContext'])
+            if native_parent is not None:
+                from lib.agent_core.execution_budget import ExecutionBudget
+                account=parent_task.get('_executionBudget')
+                if (native_parent.principal!=principal or parent_task.get('status') not in {'pending','running'}
+                        or not isinstance(account,ExecutionBudget)):
+                    raise FlowExecutionError('native Flow scheduler parent authority differs')
+                try:account.validate_child_model_parent(parent_task,parent_task['_userId'])
+                except ValueError as error:
+                    raise FlowExecutionError('native Flow scheduler parent is not the live actor') from error
+            self._nav=NativeFlowBinding(self._native_flow_library,
+                PrincipalContext.from_payload(parent_task['_principalContext']),parent_task['id'],
+                self.nodes,definition.get('edges',[]))
         self.fwd = self._nav.fwd
         self.rev = self._nav.rev
 
@@ -403,6 +433,9 @@ class FlowExecutor:
     def run(self, *, initial_context: str = '') -> dict:
         """Execute the flow through the focused top-level lifecycle."""
         try:
+            if self._native_flow_library is not None:
+                with self._nav.run_scope():
+                    return self._execution_runtime.run(initial_context=initial_context)
             return self._execution_runtime.run(initial_context=initial_context)
         finally:
             self._default_runner_adapter.clear_worker_context()
@@ -447,6 +480,12 @@ class FlowExecutor:
         Returns the accumulated context (latest output last). Control nodes
         (parallel / loop / branch) recurse into their sub-regions.
         """
+        if self._native_flow_library is not None:
+            return self._walk_native(node_id,context,stop_at=stop_at)
+        return self._walk_python(node_id,context,stop_at=stop_at)
+
+    def _walk_python(self,node_id,context,*,stop_at=None):
+        """Retained legacy interpreter until native default promotion qualifies."""
         guard = 0
         while node_id and node_id != stop_at:
             if self._abort_check():
@@ -511,6 +550,45 @@ class FlowExecutor:
             node_id = self._nav.single_next(node_id)
         return context
 
+    def _walk_native(self,node_id,context,*,stop_at=None):
+        """Rust owns the cursor/targets; callbacks retain existing effect owners."""
+        from lib.orchestration.native_flow_contract import SPEC
+        actions=SPEC['actions']
+        graph=self._nav._active()
+        with graph.cursor(node_id,stop=stop_at,budget=len(self.nodes)*(self.max_iterations+2)) as cursor:
+            if self._abort_check():raise _AbortSignal()
+            step=cursor.step()
+            while True:
+                if self._abort_check():raise _AbortSignal()
+                if step.action==actions['halt']:return context
+                current=graph.name(step.node);node=self.nodes[current]
+                target=graph.name(step.next)
+                if step.action==actions['role']:
+                    context=self._run_role(node,context)
+                elif step.action==actions['subflow']:
+                    context=self._run_subflow_isolated(node,context)
+                elif step.action==actions['parallel']:
+                    context,target=self._run_parallel(current,context)
+                elif step.action==actions['fanout']:
+                    from lib.orchestration.fanout_runtime import run_fanout
+                    context=run_fanout(node,context,role_runtime=self._role_runtime,
+                        emit=self._emit,abort_check=self._abort_check,max_parallel=self.max_parallel,
+                        iteration=self._cur_iteration,execution_scope=(self._journal.identity(
+                            'fanout',current,self._cur_iteration) if self._journal is not None else ''))
+                elif step.action==actions['loop']:
+                    context,target=self._run_loop(current,context)
+                elif step.action==actions['branch']:
+                    target=self._run_branch(current,context)
+                elif step.action==actions['artifact']:
+                    self._declare_artifact(node)
+                elif step.action==actions['human']:
+                    context,target=self._run_human(node,context)
+                else:
+                    logger.warning('[FlowEngine] skipping unknown node %s (kind=%s type=%s)',
+                        current,node.get('kind'),node.get('type'))
+                if self._abort_check():raise _AbortSignal()
+                step=cursor.transition(target)
+
     def _run_role(self, node: dict, context: str) -> str:
         return self._role_runtime.run(
             node,
@@ -552,6 +630,7 @@ class FlowExecutor:
             **self._default_runner_config.executor_options(),
             subflow_resolver=self._source_resolver,
             execution_journal=journal,
+            native_flow_library=self._native_flow_library,
             human_gate_ports=self._human_gate_ports,
             human_gate_owner_user_id=self._human_gate_owner_user_id,
             _agent_budget=self._agent_budget,
@@ -717,6 +796,11 @@ class FlowExecutor:
         and the TOFU_FLOW_REPLAN=0 kill-switch all live in the shared
         core — there is no longer an engine-local copy to drift.
         """
+        if self._native_flow_library is not None:
+            graph=self._nav._active()
+            if graph.supports_native_verdict():
+                result=graph.classify_verdict(text,verifier_role=verifier_role,loose_fallback=True)
+                return result['phase'],result['plan_defect']
         res = _classify_verdict_core(
             text, verifier_role=verifier_role, loose_fallback=True)
         return res['phase'], res['plan_defect']

@@ -5,8 +5,8 @@ import json
 
 import pytest
 
-from lib.storage_sidecar import native_fastpath_settings as settings
-from lib.storage_sidecar.storage_capabilities import MountDescription
+from lib.storage_authority_sql import native_fastpath_settings as settings
+from lib.storage_authority_sql.storage_capabilities import MountDescription
 from lib.database_panel import probe
 
 pytestmark = pytest.mark.unit

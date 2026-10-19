@@ -11,7 +11,7 @@ pytestmark = pytest.mark.unit
 
 
 def test_command_stream_preserves_runtime_spool_ref_not_printed_ref():
-    from lib.tool_result_artifact_writer import ToolResultArtifact
+    from lib.tool_results.tool_result_artifact_writer import ToolResultArtifact
     from lib.tasks_pkg.handlers.code_exec import _project_output_artifact
     ref = 'tool-result:' + 'c' * 64
     artifact = ToolResultArtifact(
@@ -29,7 +29,7 @@ def test_command_stream_preserves_runtime_spool_ref_not_printed_ref():
 
 
 def test_command_retention_failure_is_not_silently_complete():
-    from lib.tool_result_artifact_writer import ToolResultArtifact
+    from lib.tool_results.tool_result_artifact_writer import ToolResultArtifact
     from lib.tasks_pkg.handlers.code_exec import _project_output_artifact
     artifact = ToolResultArtifact(
         text='only prefix', artifact_ref=None, sha256=None,

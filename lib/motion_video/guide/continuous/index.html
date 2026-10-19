@@ -1,0 +1,222 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=1280, height=720" />
+    <title>Carry it forward — a continuous motion study</title>
+    <script src="assets/gsap-3.14.2.min.js"></script>
+    <style>
+      * { box-sizing: border-box; margin: 0; padding: 0; }
+      html, body { width: 1280px; height: 720px; overflow: hidden; }
+      body { font-family: Inter, system-ui, sans-serif; color: #193b37; }
+      #root { position: relative; width: 1280px; height: 720px; overflow: hidden; }
+      .bgfill { position: absolute; inset: 0; background: #f4f1e8; }
+      .clip { position: absolute; inset: 0; }
+      #world { position: absolute; inset: 0; width: 1280px; height: 720px; transform-origin: 640px 360px; }
+      #landscape { position: absolute; left: -240px; top: -190px; width: 1760px; height: 1100px; opacity: 0.7; }
+      .field-line { fill: none; stroke: #c8d3c7; stroke-width: 1; }
+      .field-dot { fill: #acbfb2; }
+      .copy { position: absolute; inset: 0; display: flex; align-items: center; padding: 84px; }
+      .copy-inner { width: 100%; max-width: 560px; }
+      .eyebrow { margin-bottom: 24px; font-size: 13px; font-weight: 600; line-height: 1.4; letter-spacing: 3px; text-transform: uppercase; }
+      .headline { font-size: 112px; font-weight: 500; line-height: 1.04; letter-spacing: -6px; }
+      .caption { max-width: 340px; margin-top: 28px; font-size: 21px; font-weight: 400; line-height: 1.55; color: #50665f; }
+      #copy-seed, #copy-network { opacity: 0; }
+      #copy-network .copy-inner { max-width: 450px; }
+      #copy-network .headline { max-width: 430px; font-size: 92px; letter-spacing: -4.5px; }
+      #copy-signal .copy-inner { max-width: 535px; margin-left: 550px; }
+      #copy-signal .headline { max-width: 530px; font-size: 98px; letter-spacing: -5px; }
+      #copy-signal .caption { max-width: 360px; }
+      #focal-rig { position: absolute; left: 278px; top: 288px; width: 112px; height: 112px; }
+      .orbit { position: absolute; border: 1px solid #6d9d90; border-radius: 50%; }
+      #orbit-inner { left: -87px; top: -87px; width: 286px; height: 286px; opacity: 0.55; }
+      #orbit-outer { left: -151px; top: -151px; width: 414px; height: 414px; opacity: 0.3; }
+      .branch { position: absolute; left: 56px; top: 55px; height: 2px; transform-origin: 0 1px; }
+      .branch-line { width: 100%; height: 2px; background: #78a396; opacity: 0; transform-origin: left center; }
+      .branch-tip { position: absolute; left: calc(100% - 8px); top: -7px; width: 16px; height: 16px; background: #277e71; border-radius: 50%; }
+      .branch-packet { position: absolute; left: 0; top: -3px; width: 8px; height: 8px; border-radius: 50%; background: #146e63; opacity: 0; }
+      #branch-a { width: 232px; }
+      #branch-b { width: 255px; }
+      #branch-c { width: 220px; }
+      #branch-d { width: 242px; }
+      #branch-e { width: 226px; }
+      #branch-f { width: 214px; }
+      #continuity-seed { position: absolute; inset: 0; width: 112px; height: 112px; display: grid; place-items: center; background: #087f73; border-radius: 22%; }
+      #seed-aperture { width: 28px; height: 28px; border-radius: 18%; background: #f4f1e8; }
+      #seed-note { position: absolute; left: -74px; top: 230px; width: 260px; text-align: center; font-size: 12px; letter-spacing: 2.4px; line-height: 1.5; color: #50665f; opacity: 0; }
+      .folio { position: absolute; inset: 0; display: flex; flex-direction: column; justify-content: space-between; padding: 46px 72px 42px; pointer-events: none; }
+      .folio-row { display: flex; justify-content: space-between; align-items: center; gap: 36px; }
+      .masthead, .edition { font-size: 12px; font-weight: 600; line-height: 1.4; letter-spacing: 2px; text-transform: uppercase; }
+      .edition { color: #50665f; }
+      .footer { border-top: 1px solid #cbd3c8; padding-top: 17px; }
+      .footer-copy { font-size: 13px; line-height: 1.5; color: #50665f; }
+      .footer-index { font-size: 11px; line-height: 1.5; letter-spacing: 1.8px; text-transform: uppercase; }
+    </style>
+  </head>
+  <body>
+    <div id="root" data-composition-id="main" data-start="0" data-duration="12" data-width="1280" data-height="720">
+      <div class="bgfill"></div>
+      <!-- One 12-second clip: editorial beats never mount or replace scenes. -->
+      <section id="continuous-world" class="clip" data-start="0" data-duration="12" data-track-index="1" aria-label="A seed becomes a network, then a signal">
+        <div id="world">
+          <svg id="landscape" viewBox="0 0 1760 1100" aria-hidden="true">
+            <g class="field-line">
+              <path d="M-80 930 C240 870 380 780 665 775 S1100 990 1510 800 S1740 400 1850 310" />
+              <path d="M-100 973 C250 890 388 817 665 817 S1120 1032 1542 840 S1790 430 1860 330" />
+              <path d="M890 -90 C780 135 1100 155 1355 180 S1710 185 1850 440" />
+              <path d="M932 -90 C822 110 1125 115 1380 140 S1740 165 1880 400" />
+              <path d="M154 297 h18 M163 288 v18 M1547 627 h18 M1556 618 v18 M1152 967 h18 M1161 958 v18" />
+            </g>
+            <g class="field-dot">
+              <circle cx="430" cy="287" r="2" /><circle cx="1450" cy="388" r="2" />
+              <circle cx="1220" cy="795" r="2" /><circle cx="736" cy="906" r="2" />
+            </g>
+          </svg>
+
+          <div id="copy-seed" class="copy">
+            <div class="copy-inner">
+              <p id="seed-eyebrow" class="eyebrow">01 / A beginning</p>
+              <h1 id="seed-headline" class="headline">One idea.</h1>
+              <p id="seed-caption" class="caption">A small beginning, with room to grow.</p>
+            </div>
+          </div>
+          <div id="copy-network" class="copy">
+            <div class="copy-inner">
+              <p id="network-eyebrow" class="eyebrow">02 / A connection</p>
+              <h2 id="network-headline" class="headline">Better together.</h2>
+              <p id="network-caption" class="caption">New connections. A wider world.</p>
+            </div>
+          </div>
+          <div id="copy-signal" class="copy">
+            <div class="copy-inner">
+              <p id="signal-eyebrow" class="eyebrow">03 / A possibility</p>
+              <h2 id="signal-headline" class="headline">Carry it forward.</h2>
+              <p id="signal-caption" class="caption">The form changes. The idea continues.</p>
+            </div>
+          </div>
+
+          <div id="focal-rig" aria-hidden="true">
+            <div id="orbit-inner" class="orbit"></div>
+            <div id="orbit-outer" class="orbit"></div>
+            <div id="branch-a" class="branch"><div class="branch-line"></div><div class="branch-tip"></div><div class="branch-packet"></div></div>
+            <div id="branch-b" class="branch"><div class="branch-line"></div><div class="branch-tip"></div><div class="branch-packet"></div></div>
+            <div id="branch-c" class="branch"><div class="branch-line"></div><div class="branch-tip"></div><div class="branch-packet"></div></div>
+            <div id="branch-d" class="branch"><div class="branch-line"></div><div class="branch-tip"></div><div class="branch-packet"></div></div>
+            <div id="branch-e" class="branch"><div class="branch-line"></div><div class="branch-tip"></div><div class="branch-packet"></div></div>
+            <div id="branch-f" class="branch"><div class="branch-line"></div><div class="branch-tip"></div><div class="branch-packet"></div></div>
+            <!-- This actual painted square is the carrier, not a screen-sized wrapper.
+                 It stays visible and keeps its DOM identity across BOTH handoffs. -->
+            <div id="continuity-seed"><div id="seed-aperture"></div></div>
+            <p id="seed-note">A POINT OF POSSIBILITY</p>
+          </div>
+        </div>
+      </section>
+      <div id="film-folio" class="clip folio" data-start="0" data-duration="12" data-track-index="2">
+        <div class="folio-row">
+          <p class="masthead">Tofu / Motion studies</p>
+          <p class="edition">An exercise in continuity</p>
+        </div>
+        <div class="folio-row footer">
+          <p class="footer-copy">An unbroken line of thought.</p>
+          <p class="footer-index">One world &nbsp; / &nbsp; Twelve seconds</p>
+        </div>
+      </div>
+    </div>
+    <script>
+      window.__timelines = window.__timelines || {};
+      // Avoid reverse-seek edge rasterization drift from composited 3D layers.
+      gsap.config({ force3D: false });
+      const tl = gsap.timeline({ paused: true, defaults: { ease: 'power2.inOut', immediateRender: false } });
+
+      // Synchronous initial state renders correctly even at exactly frame zero.
+      // Finite tweens live on one paused timeline; no seek runs callbacks.
+      gsap.set('#world', { x: 0, y: 0, scale: 1, rotation: 0 });
+      gsap.set('#landscape', { x: 0, y: 0, scale: 1, opacity: 0.7 });
+      gsap.set('#focal-rig', { x: 590, y: 14 });
+      gsap.set('#continuity-seed', { scale: 1.18, rotation: -9, borderRadius: '16%' });
+      gsap.set('#seed-aperture', { scale: 0.2, rotation: 0, borderRadius: '50%', opacity: 0 });
+      gsap.set('#orbit-inner', { scale: 0.62, opacity: 0.32 });
+      gsap.set('#orbit-outer', { scale: 0.78, opacity: 0.18 });
+      gsap.set('#seed-note', { y: 12, opacity: 0 });
+      gsap.set('#copy-seed', { opacity: 1, x: 0, y: 0 });
+      gsap.set('#copy-network', { opacity: 0, x: 42, y: 0 });
+      gsap.set('#copy-signal', { opacity: 0, x: 48, y: 0 });
+      gsap.set('#seed-eyebrow', { opacity: 1, y: 0 });
+      gsap.set('#seed-headline', { opacity: 0, y: 26 });
+      gsap.set('#seed-caption', { opacity: 0, y: 18 });
+      gsap.set('#network-eyebrow, #network-headline, #network-caption', { opacity: 0, y: 22 });
+      gsap.set('#signal-eyebrow, #signal-headline, #signal-caption', { opacity: 0, y: 22 });
+
+      // The camera belongs to the world, not the three pieces of editorial copy.
+      // Long moves cross 4s and 8s; neither boundary is a reset or a hidden cut.
+      tl.to('#world', { x: -10, y: -5, scale: 1.055, rotation: 0.6, duration: 2.6, ease: 'sine.inOut' }, 0);
+      tl.to('#world', { x: 24, y: 12, scale: 0.94, rotation: -4.5, duration: 2.2 }, 2.6);
+      tl.to('#world', { x: 8, y: 4, scale: 1.015, rotation: -1, duration: 1.9, ease: 'sine.inOut' }, 4.8);
+      tl.to('#world', { x: -28, y: 8, scale: 1.1, rotation: 3.3, duration: 2.6 }, 6.7);
+      tl.to('#world', { x: 0, y: 0, scale: 1, rotation: 0, duration: 1.3, ease: 'power2.out' }, 9.3);
+      tl.to('#world', { x: -3, y: -2, scale: 1.018, duration: 1.4, ease: 'sine.inOut' }, 10.6);
+      tl.to('#landscape', { x: -45, y: 28, scale: 1.04, duration: 6.7, ease: 'sine.inOut' }, 0);
+      tl.to('#landscape', { x: 62, y: -24, scale: 1.12, duration: 5.3, ease: 'sine.inOut' }, 6.7);
+
+      // The same solid teal surface becomes square -> hub -> diamond emblem.
+      tl.to('#focal-rig', { x: 610, y: -8, duration: 2.6, ease: 'sine.inOut' }, 0);
+      tl.to('#focal-rig', { x: 466, y: 16, duration: 2.2 }, 2.6);
+      tl.to('#focal-rig', { x: 454, y: 4, duration: 1.9, ease: 'sine.inOut' }, 4.8);
+      tl.to('#focal-rig', { x: 0, y: 0, duration: 2.6 }, 6.7);
+      tl.fromTo('#continuity-seed', { scale: 1.18, rotation: -9 }, { scale: 1.28, rotation: 10, duration: 2.6, ease: 'sine.inOut' }, 0);
+      tl.fromTo('#continuity-seed', { scale: 1.28, rotation: 10, borderRadius: '16%' }, { scale: 0.72, rotation: 0, borderRadius: '50%', duration: 2.2 }, 2.6);
+      tl.fromTo('#continuity-seed', { scale: 0.72 }, { scale: 0.76, duration: 1.9, ease: 'sine.inOut' }, 4.8);
+      tl.fromTo('#continuity-seed', { scale: 0.76, rotation: 0, borderRadius: '50%' }, { scale: 1.06, rotation: 135, borderRadius: '22%', duration: 2.6 }, 6.7);
+      tl.fromTo('#continuity-seed', { scale: 1.06 }, { scale: 1.12, duration: 1.3, ease: 'power2.out' }, 9.3);
+      tl.to('#seed-aperture', { scale: 0.48, opacity: 1, duration: 0.9, ease: 'power2.out' }, 3.15);
+      tl.to('#seed-aperture', { scale: 1, rotation: 45, borderRadius: '18%', duration: 2.6 }, 6.7);
+      tl.to('#orbit-inner', { scale: 1.12, opacity: 0.42, duration: 2.2 }, 2.6);
+      tl.to('#orbit-outer', { scale: 1.22, opacity: 0.22, duration: 2.2 }, 2.6);
+      tl.to('#orbit-inner', { scale: 1, opacity: 0.55, duration: 2.6 }, 6.7);
+      tl.to('#orbit-outer', { scale: 1, opacity: 0.3, duration: 2.6 }, 6.7);
+
+      // Fixed geometry, not a random scatter. The existing satellite nodes
+      // gather into the final signal marks instead of being replaced by a logo.
+      const branches = [
+        { id: 'branch-a', reach: 232, angle: -35 },
+        { id: 'branch-b', reach: 255, angle: 25 },
+        { id: 'branch-c', reach: 220, angle: 82 },
+        { id: 'branch-d', reach: 242, angle: 155 },
+        { id: 'branch-e', reach: 226, angle: 218 },
+        { id: 'branch-f', reach: 214, angle: 282 }
+      ];
+      branches.forEach((branch, index) => {
+        const selector = '#' + branch.id;
+        gsap.set(selector, { rotation: branch.angle, scale: 1 });
+        gsap.set(selector + ' .branch-line', { scaleX: 0, opacity: 0 });
+        gsap.set(selector + ' .branch-tip', { scaleX: 0.3, scaleY: 0.3, opacity: 0 });
+        gsap.set(selector + ' .branch-packet', { x: 0, opacity: 0 });
+        tl.to(selector + ' .branch-line', { scaleX: 1, opacity: 0.7, duration: 1.35, ease: 'power2.out' }, 2.9 + index * 0.12);
+        tl.to(selector + ' .branch-tip', { scaleX: 1, scaleY: 1, opacity: 1, duration: 0.65, ease: 'power2.out' }, 3.5 + index * 0.12);
+        tl.to(selector + ' .branch-packet', { x: branch.reach - 12, opacity: 1, duration: 1.1, ease: 'power1.inOut' }, 4.65 + index * 0.1);
+        tl.to(selector + ' .branch-packet', { opacity: 0, duration: 0.25 }, 5.75 + index * 0.1);
+        tl.to(selector, { rotation: index * 60, scale: 206 / branch.reach, duration: 2.6 }, 6.7);
+        tl.to(selector + ' .branch-line', { scaleX: 0.2, opacity: 0, duration: 1.65 }, 6.7);
+        tl.to(selector + ' .branch-tip', { scaleX: 2.4, scaleY: 0.22, duration: 2.1 }, 7.2);
+      });
+
+      // Copy enters and leaves a shared space; no opaque panels or slide swaps.
+      tl.to('#seed-headline', { opacity: 1, y: 0, duration: 0.85, ease: 'power3.out' }, 0.08);
+      tl.to('#seed-caption', { opacity: 1, y: 0, duration: 0.8, ease: 'power3.out' }, 0.38);
+      tl.to('#seed-note', { opacity: 1, y: 0, duration: 0.8, ease: 'power2.out' }, 0.65);
+      tl.to('#seed-note', { opacity: 0, y: -10, duration: 0.55 }, 2.5);
+      tl.to('#copy-seed', { opacity: 0, x: -68, y: -12, duration: 0.85 }, 2.55);
+      tl.to('#copy-network', { opacity: 1, x: 0, duration: 0.95, ease: 'power2.out' }, 3.65);
+      tl.to('#network-eyebrow', { opacity: 1, y: 0, duration: 0.65, ease: 'power3.out' }, 3.7);
+      tl.to('#network-headline', { opacity: 1, y: 0, duration: 0.8, ease: 'power3.out' }, 3.85);
+      tl.to('#network-caption', { opacity: 1, y: 0, duration: 0.75, ease: 'power3.out' }, 4.05);
+      tl.to('#copy-network', { opacity: 0, x: -110, y: 20, duration: 0.95 }, 6.65);
+      tl.to('#copy-signal', { opacity: 1, x: 0, duration: 1.1, ease: 'power2.out' }, 8.15);
+      tl.to('#signal-eyebrow', { opacity: 1, y: 0, duration: 0.65, ease: 'power3.out' }, 8.2);
+      tl.to('#signal-headline', { opacity: 1, y: 0, duration: 0.9, ease: 'power3.out' }, 8.38);
+      tl.to('#signal-caption', { opacity: 1, y: 0, duration: 0.8, ease: 'power3.out' }, 8.65);
+
+      window.__timelines['main'] = tl;
+    </script>
+  </body>
+</html>

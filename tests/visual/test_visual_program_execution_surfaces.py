@@ -80,7 +80,7 @@ def test_shared_card_preserves_evidence_and_reader_choices(
     assert card.evaluate('node=>node.open') is True
     assert card.locator('.ptc-technical').evaluate('node=>node.open') is False
     assert not card.locator('.ptc-measurements').is_visible()
-    assert ('3 retained results reused' if surface == 'default' else
+    assert ('Saved results read 3 times' if surface == 'default' else
             messages['ptc.measurement.reused'].replace('{n}', '3')) in card.inner_text()
     assert page.evaluate('''()=>{
       const card=document.querySelector('.ptc-card');
@@ -140,3 +140,128 @@ def test_business_observation_is_rendered_as_a_return_value(frontend_visual_page
     card.locator('.ptc-result summary').click()
     assert json.loads(card.locator('.ptc-result pre').inner_text()) == {
         'kind':'observation','reason':'a business field','data':[1]}
+
+
+@pytest.mark.parametrize('width', [1280, 390])
+def test_gateway_lookup_has_one_standard_header(frontend_visual_page, width, tmp_path):
+    """Real Chromium/local HTTP: adapter and parent become one glanceable card."""
+    page = frontend_visual_page
+    page.set_viewport_size({'width': width, 'height': 880})
+    page.add_script_tag(path=native_module_path('.native/unified-program-groups.js',
+        ROOT/'frontend/src/conversation/ui/tool-groups/index.ts'))
+    page.add_script_tag(path=native_module_path('.native/unified-program-card.js',
+        ROOT/'frontend/src/conversation/ui/program-execution-card.ts'))
+    page.evaluate('''()=>{
+      const code='return await tools.inputs({name:"mcp__llm__experiment_get"});';
+      const gateway={toolName:'execute_program',toolCallId:'lookup',llmRound:15,
+        attemptId:'attempt',status:'done',toolArgs:{code},query:'Programmatic tool call · tool gateway · R15'};
+      const parent={_programSynthetic:true,_programCallId:'lookup',llmRound:15,attemptId:'attempt',
+        roundNum:15,programStatus:'completed',programCode:code,programResult:[],
+        programStats:{tool_calls:0,successful_tool_calls:0},childToolNames:[]};
+      const text=(key,values)=>key.replace(/\\{(\\w+)\\}/g,(_,name)=>values?.[name]??'');
+      const ports={text,icon:()=>'',markdown:value=>value,cleanTranslation:value=>value,
+        renderLine:round=>'<p class="gateway-row">'+round.query+'</p>',renderSwarm:()=>null,
+        renderProgram:round=>programExecutionCardHtml(round),debugEnabled:()=>false,
+        taskIdForRound:()=>'',debugLog:()=>{}};
+      document.body.innerHTML='<main id="unified"></main>';
+      document.getElementById('unified').innerHTML=createToolGroupPresentation(ports)
+        .createSession([gateway,parent]).renderGroups([gateway,parent]);
+    }''')
+    page.add_style_tag(content='body{display:block;overflow:auto;height:auto}#unified{max-width:960px;margin:24px auto;padding:0 16px}')
+    card = page.locator('.ptc-card')
+    assert card.count() == 1
+    assert page.locator('.gateway-row').count() == 0
+    assert page.locator('.ptool-turn-head,.ptool-turn-rno-solo').count() == 0
+    header = card.locator('.ptc-head')
+    assert header.locator('.ptc-title').inner_text() == 'Program execution'
+    assert 'Script: look up prior results' in header.inner_text()
+    assert 'No source tools called again' not in header.inner_text()
+    assert 'No source tools called again' in card.locator('.ptc-measurements').text_content()
+    assert 'Result: []' not in header.inner_text()
+    assert card.locator('.ptc-preview').text_content() == 'Result: []'
+    assert header.get_attribute('class') == 'ptc-head ptool-line'
+    assert card.evaluate('node=>node.getBoundingClientRect().right<=innerWidth+1 && node.scrollWidth<=node.clientWidth+1')
+    header.focus()
+    page.keyboard.press('Enter')
+    assert card.evaluate('node=>node.open')
+    card.locator('.ptc-result summary').click()
+    assert card.locator('.ptc-result pre').inner_text() == '[]'
+    page.screenshot(path=str(tmp_path/f'unified-program-{width}.png'), full_page=True)
+
+
+@pytest.mark.parametrize('width', [1280, 390])
+def test_llm_canvas_links_are_safe_in_retained_and_fallback_titles(frontend_visual_page, width, tmp_path):
+
+    # The default Surface sheet is a real lazy browser import, not critical CSS.
+    from lib.tasks_pkg.tool_display._renderers import _tool_display_mcp
+
+    frontend_visual_page.add_style_tag(path=str(ROOT/'frontend/src/conversation/ui/conversation-surface.css'))
+    page = frontend_visual_page
+    page.set_viewport_size({'width': width, 'height': 880})
+    for name, source in [('canvas-links', 'frontend/src/conversation/presentation/mcp-resource-links.ts'),
+                         ('canvas-fallback', 'frontend/src/conversation/presentation/tool-fallback-presentation.ts'),
+                         ('canvas-escape', 'frontend/src/html-safety.ts')]:
+        page.add_script_tag(path=native_module_path(f'.native/{name}.js', ROOT/source))
+    query, extra = _tool_display_mcp('mcp__llm__experiment_get',
+        {'experiment_id': '381153'}, '', '', user_id=917)
+    page.evaluate('''row=>{
+      document.body.innerHTML='<main id="canvas"></main>';
+      const root=document.querySelector('#canvas');
+      const retained=document.createElement('div'); retained.className='ptool-line';
+      retained.innerHTML=renderMcpResourceLinks(escapeHtmlText(row.query),row);
+      root.append(retained,buildToolFallbackCard(document,{title:row.query,
+        resourceRound:row,status:'done',sections:[]}));
+    }''', {'query': query, **extra})
+    page.add_style_tag(content='body{display:block;overflow:auto;height:auto}#canvas{max-width:960px;margin:24px auto;padding:0 16px}')
+    anchors=page.locator('#canvas a.ptool-mcp-link')
+    assert anchors.count() == 2
+    for link in anchors.all():
+        assert link.get_attribute('href') == 'https://model.internal.example.com/user/modelManage/experimentalTaskDetail/381153'
+        assert link.get_attribute('target') == '_blank'
+        assert link.get_attribute('rel') == 'noopener noreferrer'
+        link.focus()
+        assert link.evaluate('node=>document.activeElement===node')
+    assert not page.evaluate('document.documentElement.scrollWidth>innerWidth+1')
+    page.screenshot(path=str(tmp_path/f'canvas-links-{width}.png'), full_page=True)
+    assert page.evaluate('''()=>renderMcpResourceLinks('canvas',
+      {_mcpLinks:{canvas:'javascript:alert(1)'}})==='canvas' ''')
+    assert page.evaluate('''()=>renderMcpResourceLinks('<a href="/known">canvas</a>',
+      {_mcpLinks:{canvas:'https://model.internal.example.com/'}})==='<a href="/known">canvas</a>' ''')
+
+
+@pytest.mark.parametrize('width', [1280, 390])
+def test_saved_result_reads_have_plain_chinese_headers(frontend_visual_page, width):
+    page = frontend_visual_page
+    page.set_viewport_size({'width': width, 'height': 880})
+    messages = json.loads((ROOT/'frontend/src/i18n/locales/zh.json').read_text())
+    page.add_script_tag(path=native_module_path('.native/program-saved-result.js',
+        ROOT/'frontend/src/conversation/ui/program-execution-card.ts'))
+    page.evaluate("""messages=>{
+      document.body.innerHTML='<main id="card"></main>';
+      const text=(key,fallback,values)=>String(messages[key]||fallback)
+        .replace(/\{(\w+)\}/g,(_,k)=>values?.[k]??'');
+      const node=document.getElementById('card');
+      renderProgramExecutionCard(node,{programStatus:'completed',
+        programCode:'return tools.keep(value);',
+        programStats:{tool_calls:1,successful_tool_calls:1},
+        programResult:{kind:'program_value',ref:'input_'+'a'.repeat(32),
+          bytes:22144,sourceCoverage:'unknown'}},text);
+      window.renderSavedRead=()=>renderProgramExecutionCard(node,{programStatus:'completed',
+        programCode:'return tools.result({ref:reference});',
+        programStats:{tool_calls:0,successful_tool_calls:0,result_reads:1},
+        programResult:{keys:['0','1']}},text);
+    }""", messages)
+    card = page.locator('.ptc-card')
+    header = card.locator('.ptc-head')
+    assert '已保存程序结果（21.6 KiB）' in header.inner_text()
+    assert 'input_' not in header.inner_text()
+    header.click()
+    card.locator('.ptc-result summary').click()
+    assert 'input_' in card.locator('.ptc-result pre').inner_text()
+    page.evaluate('renderSavedRead()')
+    assert '读取已保存的结果 1 次' in header.inner_text()
+    assert '未发起' not in header.inner_text()
+    assert 'tools.result' not in header.inner_text()
+    assert '本次没有再次执行源工具' in card.locator('.ptc-measurements').text_content()
+    assert card.locator('.ptc-technical').evaluate('node=>node.open') is False
+    assert card.evaluate('node=>node.getBoundingClientRect().right<=innerWidth+1')

@@ -190,7 +190,6 @@
           "items": {
             "$ref": "#/$defs/step"
           },
-          "maxItems": 32,
           "minItems": 1
         },
         "budget": {
@@ -236,6 +235,12 @@
         },
         "research_source": {
           "$ref": "#/$defs/research_source_request"
+        },
+        "executor_plugins": {
+          "$ref": "urn:tofu:evolution-run:v1#/$defs/executor_plugins"
+        },
+        "executor_schema_budget_tokens": {
+          "$ref": "urn:tofu:evolution-run:v1#/$defs/executor_schema_budget_tokens"
         }
       },
       "required": [
@@ -257,8 +262,7 @@
           "$ref": "urn:tofu:evolution-run:v1#/$defs/request"
         },
         "context_seed": {
-          "type": "string",
-          "maxLength": 24000
+          "type": "string"
         },
         "run_id": {
           "type": "string",
@@ -351,7 +355,6 @@
           "items": {
             "$ref": "#/$defs/step"
           },
-          "maxItems": 32,
           "minItems": 1
         }
       },
@@ -475,7 +478,6 @@
       "properties": {
         "program_ids": {
           "type": "array",
-          "maxItems": 4096,
           "uniqueItems": true,
           "items": {
             "type": "string",
@@ -625,7 +627,6 @@
         "steps": {
           "type": "array",
           "minItems": 1,
-          "maxItems": 8,
           "items": {
             "$ref": "#/$defs/proposal_step"
           }
@@ -859,7 +860,6 @@
         "steps": {
           "type": "array",
           "minItems": 1,
-          "maxItems": 8,
           "items": {
             "$ref": "#/$defs/step"
           }
@@ -1471,6 +1471,12 @@
         },
         "review_reserve": {
           "$ref": "urn:tofu:evolution-run:v1#/$defs/review_reserve"
+        },
+        "executor_plugins": {
+          "$ref": "urn:tofu:evolution-run:v1#/$defs/executor_plugins"
+        },
+        "executor_schema_budget_tokens": {
+          "$ref": "urn:tofu:evolution-run:v1#/$defs/executor_schema_budget_tokens"
         }
       },
       "required": []
@@ -1489,8 +1495,7 @@
       "type": "array",
       "items": {
         "$ref": "#/$defs/step"
-      },
-      "maxItems": 32
+      }
     },
     "current": {
       "anyOf": [

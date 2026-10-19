@@ -13,6 +13,8 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
+from .unix_socket import connect_unix_socket
+
 
 _MAX_RESPONSE_BYTES = 24 * 1024 * 1024
 _FILE_CHUNK_BYTES = 128 * 1024
@@ -78,7 +80,7 @@ class GuestAgent:
         deadline = time.monotonic() + timeout
         with self._lock, socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
             client.settimeout(timeout)
-            client.connect(str(self.socket_path))
+            connect_unix_socket(client, self.socket_path)
             stream = client.makefile("rwb", buffering=0)
             sync_payload = {
                 "execute": "guest-sync-delimited",

@@ -1810,5 +1810,48 @@
       ]
     },
     "reverse": {}
+  },
+  {
+    "name": "codex_cache_affinity",
+    "profile": "codex",
+    "body": {
+      "model": "fixture",
+      "max_tokens": 128,
+      "messages": [
+        {
+          "role": "user",
+          "content": "hello"
+        }
+      ],
+      "prompt_cache_key": "fb28e665-9974-51ca-b3a6-15a0665777ed"
+    },
+    "replay": false,
+    "output": {
+      "model": "fixture",
+      "store": false,
+      "stream": true,
+      "instructions": "",
+      "parallel_tool_calls": true,
+      "reasoning": {
+        "summary": "auto"
+      },
+      "include": [
+        "reasoning.encrypted_content"
+      ],
+      "input": [
+        {
+          "type": "message",
+          "role": "user",
+          "content": [
+            {
+              "type": "input_text",
+              "text": "hello"
+            }
+          ]
+        }
+      ],
+      "prompt_cache_key": "fb28e665-9974-51ca-b3a6-15a0665777ed"
+    },
+    "reverse": {}
   }
 ]

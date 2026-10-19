@@ -119,7 +119,18 @@ class ConversationWakeSubscription:
             else:
                 self._close_callbacks.append(callback)
         if run_now:
+            self._release(callback)
+
+    @staticmethod
+    def _release(callback: Callable[[], None]) -> None:
+        """Keep release failures isolated on both sides of the close/bind race."""
+        try:
             callback()
+        except Exception as exc:
+            logger.warning(
+                "Conversation stream close callback failed: %s", exc,
+                exc_info=True,
+            )
 
     def arm_body_start_deadline(self, timeout_seconds: float) -> None:
         """Reclaim admission if ASGI never begins consuming the response."""
@@ -168,13 +179,7 @@ class ConversationWakeSubscription:
         except RuntimeError:
             pass
         for callback in callbacks:
-            try:
-                callback()
-            except Exception as exc:
-                logger.warning(
-                    "Conversation stream close callback failed: %s", exc,
-                    exc_info=True,
-                )
+            self._release(callback)
         return True
 
 

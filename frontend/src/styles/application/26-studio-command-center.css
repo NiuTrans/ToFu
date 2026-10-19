@@ -1,0 +1,234 @@
+/* Studio composition: one objective, a quiet room directory, an unobstructed
+   illustration, and evidence beside its actions. No execution or scene policy. */
+.evo-workspace.evo-studio{
+ --bg-primary:inherit;--bg-secondary:inherit;--bg-hover:inherit;
+ --border:inherit;--text-primary:inherit;--text-secondary:inherit;
+ --accent:inherit;--accent-hover:inherit;--accent-light:inherit;
+ --evo-hud:var(--bg-primary);--evo-hud-deep:var(--bg-secondary);
+ --evo-hud-line:var(--border);--evo-hud-paper:var(--text-primary);--evo-hud-muted:var(--text-secondary);
+ --evo-rail-width:calc(var(--space-16)*3 + var(--space-4));
+ color:var(--text-primary);font-family:var(--font-ui);
+}
+.evo-workspace.evo-studio .evo-main{
+ padding:var(--space-6);gap:var(--space-5) var(--space-6);
+ grid-template-columns:var(--evo-rail-width) minmax(0,1fr) minmax(calc(var(--space-16)*5),calc(var(--space-16)*6));
+ grid-template-rows:minmax(var(--space-16),auto) minmax(0,1fr) auto;
+ background:var(--bg-primary);
+}
+/* The goal is a page heading, not another card. Its full text remains in details. */
+.evo-workspace.evo-studio .evo-live-ledger{
+ grid-template-columns:minmax(0,1fr) auto;grid-template-rows:auto auto;
+ border:0;border-bottom:1px solid var(--border);border-radius:0;background:transparent;overflow:hidden;
+}
+.evo-workspace.evo-studio .evo-ledger-heading{grid-column:1;grid-row:1/3;display:flex;min-width:0;margin:0;}
+.evo-workspace.evo-studio .evo-ledger-head{
+ width:100%;min-width:0;padding:var(--space-2) var(--space-6) var(--space-4) 0;
+ border:0;gap:var(--space-2);align-content:center;
+}
+.evo-workspace.evo-studio .evo-ledger-head:hover{background:var(--bg-hover);}
+.evo-workspace.evo-studio .evo-ledger-head>strong{
+ font-size:var(--font-size-3xl);font-weight:var(--weight-semibold);line-height:var(--leading-title);-webkit-line-clamp:2;
+ letter-spacing:-.025em;
+}
+.evo-workspace.evo-studio .evo-ledger-head>span{
+ font-size:var(--font-size-sm);color:var(--text-secondary);font-weight:var(--weight-medium);letter-spacing:0;
+}
+.evo-workspace.evo-studio .evo-ledger-head>span:is([data-status=executing],[data-status=reviewing]){color:var(--success-text);}
+.evo-workspace.evo-studio .evo-ledger-head>span[data-status=failed]{color:var(--error-text);}
+.evo-workspace.evo-studio .evo-studio-actions{
+ position:static;grid-column:2;grid-row:1;gap:var(--space-2);padding:0 0 var(--space-2);
+}
+.evo-workspace.evo-studio .evo-studio-actions wa-button::part(base){
+ border:1px solid var(--border);border-radius:var(--radius);color:var(--text-secondary);background:transparent;
+}
+.evo-workspace.evo-studio .evo-ledger-roles{grid-column:2;grid-row:2;padding:0 0 var(--space-4);}
+.evo-workspace.evo-studio .evo-ledger-role{border-color:var(--border);padding-inline:var(--space-3);}
+.evo-workspace.evo-studio .evo-ledger-role:first-child{border:0;}
+.evo-workspace.evo-studio .evo-ledger-role i{box-shadow:none;background:var(--text-secondary);}
+.evo-workspace.evo-studio .evo-ledger-role:is([data-status=working],[data-status=reviewing],[data-status=coordinatorThinking]) i{background:var(--success-text);}
+/* Room navigation is a list, not six competing cards. */
+.evo-workspace.evo-studio .evo-room-rail{
+ padding:0 var(--space-4) 0 0;border:0;border-inline-end:1px solid var(--border);background:transparent;
+}
+.evo-workspace.evo-studio .evo-studio-brand{
+ min-height:var(--space-16);padding:0 var(--space-2) var(--space-5);gap:var(--space-3);align-items:center;border:0;
+}
+.evo-workspace.evo-studio .evo-brand-mark{
+ position:relative;display:grid;place-items:center;flex:none;width:var(--space-10);height:var(--space-10);
+ border-radius:var(--radius);background:var(--success-text);color:var(--bg-primary);
+ font-family:Georgia,serif;font-size:var(--font-size-3xl);font-weight:var(--weight-bold);
+}
+.evo-workspace.evo-studio .evo-brand-mark>span{
+ position:absolute;inset-block-start:var(--space-1);inset-inline-end:var(--space-1);font-size:var(--font-size-xs);color:inherit;
+}
+.evo-workspace.evo-studio .evo-brand-copy{display:grid;gap:var(--space-1);}
+.evo-workspace.evo-studio .evo-brand-copy b{font-family:var(--font-ui);font-size:var(--font-size-2xl);letter-spacing:-.04em;}
+.evo-workspace.evo-studio .evo-brand-copy>span{font-size:var(--font-size-xs);color:var(--text-secondary);}
+.evo-destinations{padding:var(--space-4) 0 var(--space-5);gap:var(--space-1);border-bottom:1px solid var(--border);}
+.evo-destinations button{justify-content:flex-start;gap:var(--space-3);font-weight:var(--weight-medium);}
+.evo-destination-icon{display:flex;flex:none;width:var(--space-5);line-height:1;}
+.evo-workspace.evo-studio .evo-room-switch h2{
+ margin:var(--space-6) var(--space-2) var(--space-3);color:var(--text-secondary);font-size:var(--font-size-xs);font-weight:var(--weight-medium);
+}
+.evo-workspace.evo-studio .evo-room-list{gap:var(--space-1);}
+.evo-workspace.evo-studio .evo-room-tab{
+ min-height:calc(var(--space-12) + var(--space-3));padding:var(--space-2);gap:var(--space-3);
+ border:0;border-radius:var(--radius);box-shadow:none;transition:background var(--motion-fast) var(--ease-standard);
+}
+.evo-workspace.evo-studio .evo-room-tab[aria-pressed=true]{background:var(--success-bg);color:var(--text-primary);box-shadow:none;}
+.evo-workspace.evo-studio .evo-room-tab:hover{background:var(--bg-hover);}
+.evo-workspace.evo-studio .evo-room-tab img{
+ border:0;border-radius:var(--radius);width:var(--space-10);height:var(--space-10);box-shadow:none;
+}
+.evo-workspace.evo-studio .evo-room-tab-copy{gap:var(--space-1);}
+.evo-workspace.evo-studio .evo-room-tab-copy strong{font-size:var(--font-size-md);font-weight:var(--weight-medium);}
+.evo-workspace.evo-studio .evo-room-tab-copy small{opacity:1;color:var(--text-secondary);font-size:var(--font-size-xs);}
+.evo-workspace.evo-studio .evo-rail-footer{padding:var(--space-4) 0 0;gap:var(--space-3);border-color:var(--border);}
+.evo-workspace.evo-studio .evo-room-rail .evo-concierge{border:0;border-radius:var(--radius);padding:var(--space-3) var(--space-2);}
+.evo-workspace.evo-studio .evo-room-rail .evo-concierge:hover{background:var(--bg-hover);}
+.evo-workspace.evo-studio .evo-room-rail .evo-concierge-avatar{background:var(--success-bg);color:var(--success-text);border-radius:var(--radius);}
+/* The image has a clean letterbox, not an enlarged blurry copy of itself. */
+.evo-workspace.evo-studio .evo-studio-grid{
+ display:flex;flex-direction:column;gap:0;border:1px solid var(--border);border-radius:var(--space-3);
+ overflow:hidden;background:var(--bg-secondary);
+}
+.evo-scene-toolbar{flex:none;padding:var(--space-3) var(--space-4);min-width:0;border-bottom:1px solid var(--border);background:var(--bg-primary);}
+.evo-workspace.evo-studio .evo-current-room{padding:0;gap:var(--space-2);min-width:0;height:auto;border:0;flex-wrap:wrap;}
+.evo-workspace.evo-studio .evo-current-room>strong{font-size:var(--font-size-md);}
+.evo-workspace.evo-studio .evo-current-room>span{font-size:var(--font-size-xs);}
+.evo-workspace.evo-studio .evo-office{position:relative;inset:auto;flex:1;height:auto;min-height:0;background:var(--bg-secondary);}
+.evo-workspace.evo-studio .evo-office-backdrop{display:none;}
+.evo-workspace.evo-studio .evo-office-stage{box-shadow:none;}
+.evo-scene-guide{
+ flex:none;margin:0;padding:var(--space-3) var(--space-4);font-size:var(--font-size-xs);line-height:var(--leading-body);
+ color:var(--text-secondary);background:var(--bg-primary);border-top:1px solid var(--border);
+}
+/* One compact shelf, visually attached to the room instead of another card. */
+.evo-workspace.evo-studio .evo-bottom-chrome{
+ padding:0;gap:var(--space-4);border:0;border-radius:0;background:transparent;
+}
+.evo-workspace.evo-studio .evo-game-dock .evo-place-shortcuts{gap:var(--space-1);}
+.evo-workspace.evo-studio .evo-game-dock .evo-place-shortcut{
+ min-height:var(--space-10);min-width:0;padding:var(--space-2) var(--space-3);border:0;border-radius:var(--radius);
+}
+.evo-workspace.evo-studio .evo-game-dock .evo-place-shortcut>span{flex-direction:row;align-items:center;gap:var(--space-2);font-size:var(--font-size-sm);}
+.evo-workspace.evo-studio .evo-game-dock .evo-place-shortcut svg{width:var(--space-4);height:var(--space-4);}
+.evo-workspace.evo-studio .evo-game-dock .evo-place-shortcut b{
+ position:static;min-width:var(--space-4);font-size:var(--font-size-xs);font-variant-numeric:tabular-nums;color:var(--text-secondary);opacity:1;
+}
+.evo-workspace.evo-studio .evo-game-dock .evo-place-shortcut[aria-pressed=true]{background:var(--success-bg);color:var(--text-primary);}
+.evo-workspace.evo-studio .evo-ledger-facts{border:0;padding:0;gap:var(--space-1) var(--space-3);}
+.evo-workspace.evo-studio .evo-scene-pause{border:0;color:var(--text-secondary);padding-inline:var(--space-3);}
+.evo-workspace.evo-studio .evo-scene-pause:hover{background:var(--bg-hover);}
+/* Task command, progress and evidence share a single reading column. */
+.evo-workspace.evo-studio .evo-mission-panel{border:1px solid var(--border);border-radius:var(--space-3);background:var(--bg-primary);}
+.evo-workspace.evo-studio .evo-mission-header{padding:var(--space-5);background:transparent;border:0;}
+.evo-workspace.evo-studio .evo-mission-header h2{font-size:var(--font-size-lg);font-weight:var(--weight-semibold);line-height:var(--leading-title);}
+.evo-mission-eyebrow{color:var(--success-text);font-size:var(--font-size-xs);font-weight:var(--weight-semibold);letter-spacing:.05em;}
+.evo-workspace.evo-studio .evo-mission-status{
+ display:inline-flex;align-items:center;gap:var(--space-2);margin:var(--space-3) 0;
+ font-size:var(--font-size-sm);font-weight:var(--weight-medium);color:var(--text-secondary);
+}
+.evo-mission-status::before{content:'';width:var(--space-2);height:var(--space-2);border-radius:50%;background:currentColor;flex:none;}
+.evo-workspace.evo-studio .evo-mission-status:is([data-state=executing],[data-state=reviewing],[data-state=completed]){color:var(--success-text);}
+.evo-workspace.evo-studio .evo-mission-status:is([data-state=failed],[data-state=needs_attention]){color:var(--error-text);}
+.evo-workspace.evo-studio .evo-mission-status[data-state=waiting]{color:var(--warning-text);}
+.evo-workspace.evo-studio .evo-mission-notice{font-size:var(--font-size-xs);line-height:var(--leading-body);}
+.evo-workspace.evo-studio .evo-mission-body{padding:0 var(--space-5) var(--space-5);}
+.evo-mission-section h3{font-size:var(--font-size-sm);color:var(--text-secondary);font-weight:var(--weight-medium);}
+.evo-mission-section[data-inspection-section=missionLatestWork] .evo-mission-prose{font-size:var(--font-size-lg);}
+.evo-mission-section[data-inspection-section=deliverable]>.evo-mission-prose{
+ padding:var(--space-4);border:0;border-radius:var(--radius);background:var(--success-bg);font-family:var(--font-ui);
+}
+.evo-inspection-fold{font-size:var(--font-size-sm);}
+.evo-inspection-fold>summary{display:flex;align-items:center;justify-content:space-between;gap:var(--space-3);cursor:pointer;font-weight:var(--weight-medium);line-height:var(--leading-body);list-style:none;}
+.evo-inspection-fold>summary::-webkit-details-marker{display:none;}
+.evo-inspection-fold>summary::after{content:'+';font-size:var(--font-size-xl);color:var(--text-secondary);}
+.evo-inspection-fold[open]>summary::after{content:'−';}
+.evo-inspection-fold>summary:focus-visible{box-shadow:var(--focus-ring);outline:0;border-radius:var(--radius);}
+.evo-inspection-content{padding-top:var(--space-4);}
+.evo-mission-hud{flex:none;margin:0 var(--space-5);padding:var(--space-3) 0;border-block:1px solid var(--border);}
+.evo-mission-hud[hidden]{display:none;}
+.evo-mission-route{list-style:none;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:var(--space-1);margin:0;padding:0;}
+.evo-mission-route li{position:relative;display:grid;grid-template-columns:minmax(0,1fr);gap:var(--space-1);justify-items:center;padding:var(--space-1) 0;color:var(--text-secondary);}
+.evo-mission-route li>span{
+ display:grid;place-items:center;width:var(--space-6);height:var(--space-6);border:1px solid var(--border);border-radius:50%;
+ font-family:var(--font-mono);font-size:var(--font-size-xs);background:var(--bg-primary);z-index:1;
+}
+.evo-mission-route li:not(:last-child)::after{content:'';position:absolute;inset-inline-start:calc(50% + var(--space-4));inset-block-start:var(--space-4);width:calc(100% - var(--space-8));border-top:1px solid var(--border);}
+.evo-mission-route li button{min-height:var(--space-6);padding:0 var(--space-1);font-size:var(--font-size-xs);}
+.evo-mission-route small{font-size:var(--font-size-xs);line-height:var(--leading-tight);text-align:center;overflow-wrap:anywhere;}
+.evo-mission-route li[data-state=current]{color:var(--success-text);}
+.evo-mission-route li[data-state=current]>span{background:var(--success-text);border-color:var(--success-text);color:var(--bg-primary);}
+.evo-mission-route li[data-state=recorded]>span{border-color:var(--info-border);color:var(--info-text);background:var(--info-bg);}
+.evo-mission-hud[data-state=waiting] li[data-state=current]{color:var(--warning-text);}
+.evo-mission-signal{display:flex;align-items:center;gap:var(--space-2);margin-top:var(--space-3);padding-top:var(--space-2);border-top:1px solid var(--border);}
+.evo-mission-signal[hidden]{display:none;}
+.evo-mission-signal p{flex:1;min-width:0;margin:0;color:var(--text-secondary);font-size:var(--font-size-xs);line-height:var(--leading-body);}
+.evo-mission-panel[data-briefing=true]>.evo-mission-header,.evo-mission-panel[data-briefing=true]>.evo-mission-body{display:none;}
+/* The stable intake island is unchanged by progress refreshes. */
+.evo-workspace.evo-studio .evo-briefing{padding:var(--space-6);margin:0;border:0;border-radius:0;background:transparent;display:grid;gap:var(--space-5);}
+.evo-workspace.evo-studio .evo-briefing[hidden]{display:none;}
+.evo-briefing-heading{gap:var(--space-3);}
+.evo-briefing-heading .evo-mission-eyebrow{margin:0;}
+.evo-briefing h3{margin:0;font-size:var(--font-size-4xl);font-weight:var(--weight-semibold);line-height:var(--leading-title);letter-spacing:-.04em;text-wrap:balance;}
+.evo-briefing-intro{margin:0;color:var(--text-secondary);font-size:var(--font-size-md);line-height:var(--leading-body);}
+.evo-briefing-examples{grid-template-columns:repeat(3,minmax(0,1fr));gap:var(--space-2);}
+.evo-briefing-examples button{flex-direction:column;gap:var(--space-2);}
+.evo-example-icon{display:flex;align-items:center;justify-content:center;line-height:1;}
+.evo-example-icon svg,.evo-destination-icon svg{width:var(--space-5);height:var(--space-5);}
+.evo-briefing-settings{padding:var(--space-3);border:1px solid var(--border);border-radius:var(--radius);background:var(--bg-secondary);}
+.evo-briefing-settings summary{cursor:pointer;font-size:var(--font-size-sm);color:var(--text-secondary);line-height:var(--leading-body);}
+.evo-briefing-settings[open]{display:grid;gap:var(--space-3);}
+.evo-briefing-dispatch{display:grid;gap:var(--space-2);}
+.evo-workspace.evo-studio[data-scene-focus=true] .evo-main{grid-template-columns:var(--evo-rail-width) minmax(0,1fr);}
+.evo-workspace.evo-studio[data-scene-focus=true] .evo-mission-panel{display:none;}
+.evo-workspace.evo-studio[data-scene-focus=true] :is(.evo-live-ledger,.evo-bottom-chrome){grid-column:2;}
+@media(max-width:1250px){
+ .evo-workspace.evo-studio{--evo-rail-width:calc(var(--space-16)*2 + var(--space-12));}
+ .evo-workspace.evo-studio .evo-main{padding:var(--space-4);gap:var(--space-4);}
+ .evo-workspace.evo-studio .evo-room-rail{padding-inline-end:var(--space-3);}
+ .evo-workspace.evo-studio .evo-ledger-head>strong{font-size:var(--font-size-2xl);}
+ .evo-workspace.evo-studio .evo-bottom-chrome{flex-wrap:wrap;}
+ .evo-workspace.evo-studio .evo-ledger-facts{max-width:none;}
+ .evo-workspace.evo-studio .evo-game-dock{flex-wrap:wrap;}
+ .evo-workspace.evo-studio .evo-game-dock .evo-place-shortcut{padding:var(--space-2);}
+ .evo-briefing-examples{grid-template-columns:minmax(0,1fr);}
+ .evo-briefing-examples button{flex-direction:row;justify-content:flex-start;}
+}
+@media(max-width:850px){
+ .evo-workspace.evo-studio .evo-main,.evo-workspace.evo-studio[data-scene-focus=true] .evo-main{
+  grid-template-columns:minmax(0,1fr);grid-template-rows:max-content max-content minmax(calc(var(--space-16)*7),65vh) auto;
+ }
+ .evo-workspace.evo-studio .evo-live-ledger{grid-column:1;grid-row:1;min-height:0;grid-template-columns:minmax(0,1fr);grid-template-rows:auto auto;}
+ .evo-workspace.evo-studio .evo-ledger-heading{grid-column:1;grid-row:1;}
+ .evo-workspace.evo-studio .evo-ledger-head{grid-column:1;grid-row:1;padding:var(--space-2) 0 var(--space-4);}
+ .evo-workspace.evo-studio .evo-studio-actions{grid-column:1;grid-row:2;justify-self:start;padding:0 0 var(--space-4);flex-wrap:wrap;}
+ .evo-workspace.evo-studio .evo-ledger-roles{display:none;}
+ .evo-workspace.evo-studio .evo-rooms-open{border-color:var(--border);border-radius:var(--radius);background:var(--bg-secondary);color:var(--text-primary);}
+ .evo-workspace.evo-studio .evo-studio-grid{grid-column:1;grid-row:3;min-height:calc(var(--space-16)*7);}
+ .evo-workspace.evo-studio .evo-mission-panel{grid-column:1;grid-row:2;overflow:visible;}
+ .evo-workspace.evo-studio .evo-bottom-chrome{grid-column:1;grid-row:4;}
+ .evo-mission-body{display:block;}
+ .evo-workspace.evo-studio .evo-room-rail{--evo-rail-width:calc(var(--space-16)*3);border:0;padding:var(--space-4);}
+ .evo-workspace.evo-studio[data-scene-focus=true] :is(.evo-live-ledger,.evo-bottom-chrome){grid-column:1;}
+ .evo-workspace.evo-studio[data-scene-focus=true] .evo-main{grid-template-rows:max-content minmax(calc(var(--space-16)*8),70vh) auto;}
+ .evo-workspace.evo-studio[data-scene-focus=true] .evo-studio-grid{grid-row:2;}
+ .evo-workspace.evo-studio[data-scene-focus=true] .evo-bottom-chrome{grid-row:3;}
+}
+@media(max-width:550px){
+ .evo-workspace.evo-studio .evo-main{padding:var(--space-3);gap:var(--space-4);}
+ .evo-workspace.evo-studio .evo-briefing{padding:var(--space-5);}
+ .evo-briefing h3{font-size:var(--font-size-3xl);}
+ .evo-workspace.evo-studio .evo-mission-header,.evo-workspace.evo-studio .evo-mission-body{padding-inline:var(--space-4);}
+ .evo-mission-hud{margin-inline:var(--space-4);}
+ .evo-workspace.evo-studio .evo-current-room>strong{max-width:none;white-space:normal;}
+ .evo-workspace.evo-studio .evo-game-dock .evo-place-shortcuts{flex-wrap:wrap;gap:var(--space-1);}
+ .evo-workspace.evo-studio .evo-game-dock .evo-place-shortcut>span{flex-direction:column;}
+ .evo-workspace.evo-studio .evo-game-dock .evo-place-shortcut b{display:none;}
+ .evo-workspace.evo-studio .evo-pan-hint{inset-block-end:var(--space-16);background:var(--bg-primary);color:var(--text-primary);border:1px solid var(--border);}
+}
+@media(max-width:350px){
+ .evo-briefing-examples{grid-template-columns:minmax(0,1fr);}
+ .evo-briefing-examples button{flex-direction:row;justify-content:flex-start;}
+}

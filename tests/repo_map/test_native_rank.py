@@ -1,4 +1,7 @@
 """Production native selection, independent weighted graph oracle and fallback."""
+
+# Synthetic repository/package fixtures, never shipped-source anchors.
+_AUDIT_SYNTHETIC_REPO_PATHS = ('tests/test_fixture.py', 'tests/test_leaf.py')
 from concurrent.futures import ThreadPoolExecutor
 import sys
 from types import SimpleNamespace

@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "tofu.native-goal-actor-claim/v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "format",
+    "tenant_id",
+    "source_run_id",
+    "target_attempt_id",
+    "source_cursor",
+    "launch_sequence",
+    "account_sequence",
+    "actors",
+    "invoice"
+  ],
+  "properties": {
+    "format": {
+      "const": "tofu.native-goal-actor-claim/v1"
+    },
+    "source_run_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512
+    },
+    "target_attempt_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512
+    },
+    "source_cursor": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 18446744073709551615
+    },
+    "launch_sequence": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 18446744073709551615
+    },
+    "account_sequence": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 18446744073709551615
+    },
+    "actors": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "event_sequence",
+          "registration_version"
+        ],
+        "properties": {
+          "event_sequence": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 18446744073709551615
+          },
+          "registration_version": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 18446744073709551615
+          },
+          "checkpoint_version": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 18446744073709551615
+          }
+        }
+      }
+    },
+    "invoice": {
+      "oneOf": [
+        {
+          "$ref": "native_agent_checkpoint_v1.schema.json#/properties/host_fee_projection/properties/wallet_settlement"
+        },
+        {
+          "$ref": "native_aggregate_cost_v1.schema.json"
+        }
+      ]
+    },
+    "tenant_id": {
+      "type": "string"
+    }
+  }
+}

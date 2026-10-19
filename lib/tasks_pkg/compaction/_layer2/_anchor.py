@@ -16,7 +16,7 @@ import json
 import posixpath
 
 from lib.log import get_logger
-from lib.tool_history_pairing import adjacent_tool_call_result_pairs
+from lib.tool_results.tool_history_pairing import adjacent_tool_call_result_pairs
 from lib.tasks_pkg.compaction._constants import (
     _INTRA_TURN_HOT_ROUNDS,
     _MAX_PRESERVE_TURNS,
@@ -364,8 +364,10 @@ def _fold_recent_intra_turn(
 def _plan_cross_turn_tail(messages, *, budget_tokens, max_turns):
     """Select global complete execution rounds before the whole-turn cut.
 
-    Include preceding assistant commentary/reasoning in its execution unit;
-    otherwise a long single turn retains every old assistant row forever.
+    Include preceding assistant commentary/reasoning and consumed non-human
+    inbox evidence in its execution unit; otherwise a long single turn retains
+    those rows forever. A later assistant call proves inbox consumption; unread
+    tail deliveries and human steering remain outside the cold execution units.
     Count the preserved shells and unfinished batches, then admit one newest
     contiguous round suffix. Synthetic compaction receipts are cold, not recent
     execution. The newest complete batch and unfinished batches are irreducible
@@ -381,7 +383,9 @@ def _plan_cross_turn_tail(messages, *, budget_tokens, max_turns):
     for start, end in spans:
         indices = set(range(start, end))
         indices.update(i for i in range(previous_end, start)
-                       if messages[i].get('role') == 'assistant'
+                       if (messages[i].get('role') == 'assistant'
+                           or (messages[i].get('_isInboxInject')
+                               and not is_human_message(messages[i])))
                        and not messages[i].get('_contextComposer')
                        and not messages[i].get('_isMeta')
                        and not history_entries(messages[i])

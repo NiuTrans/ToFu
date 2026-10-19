@@ -44,7 +44,7 @@ pytestmark = pytest.mark.unit
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from lib.agent_loop import unparseable_tool_calls  # noqa: E402
+from lib.agent_loop.agent_loop import unparseable_tool_calls  # noqa: E402
 from lib.tasks_pkg.stream_handler.api import (  # noqa: E402
     RecoveryDecision,
     analyse_stream_result,
@@ -114,7 +114,7 @@ def _missing_done_usage(**over):
 
 
 # ─────────────────────────────────────────────────────────────────────
-#  unparseable_tool_calls (shared helper, lib/agent_loop.py)
+#  unparseable_tool_calls (shared helper, lib/agent_loop/agent_loop.py)
 # ─────────────────────────────────────────────────────────────────────
 
 class TestUnparseableToolCalls(unittest.TestCase):
@@ -196,17 +196,18 @@ class TestTruncatedToolArgsRetry(unittest.TestCase):
         self.assertTrue(phases and phases[-1].get('bucket')
                         == 'truncated_tool_args', task['events'])
 
-    def test_valid_args_proceed_despite_missing_done(self):
-        """A cut after the last real chunk loses only terminal frames —
-        every arguments string parses, so proceeding is provably safe."""
+    def test_valid_args_without_provider_completion_retry(self):
+        """A parseable prefix cannot prove that the response has completed."""
         task = _fresh_task(content='work so far',
                            round_base_content='', round_base_thinking='')
         msg = {'role': 'assistant', 'content': 'some narration',
                'tool_calls': [_tc('read_files', '{"path": "x"}')]}
-        d = self._analyse(task, msg, _missing_done_usage())
-        self.assertEqual(d['action'], 'proceed')
+        with registered_chat_task(task), _no_sleep():
+            d = self._analyse(task, msg, _missing_done_usage())
+        self.assertEqual(d['action'], 'continue')
         self.assertIsNone(task['error'])
-        self.assertEqual(task['events'], [])
+        self.assertTrue(any(event.get('bucket') == 'incomplete_tool_stream'
+                            for event in task['events']))
 
     def test_malformed_frame_never_executes_even_parseable_tool_calls(self):
         """A dropped frame may contain an additional call, so a later clean
@@ -437,17 +438,16 @@ class TestTruncatedToolArgsRetry(unittest.TestCase):
         self.assertEqual(task['error']['kind'], 'internal')
         self.assertIn('unknown', decision['loop_exit_reason'])
 
-    def test_guard_gated_on_missing_done(self):
-        """Corrupt args WITHOUT _missing_done (e.g. a model glitch, not a
-        transport cut) must not enter the retry bucket — the guard keys on
-        data-loss evidence, not on parse failure alone."""
+    def test_missing_finish_evidence_retries_without_missing_done_flag(self):
+        """An absent finish marker is sufficient even without a DONE hint."""
         task = _fresh_task()
         usage = _missing_done_usage()
         usage.pop('_missing_done')
         msg = {'role': 'assistant', 'content': '',
                'tool_calls': [_tc('write_file', '{"path":')]}
-        d = self._analyse(task, msg, usage)
-        self.assertEqual(d['action'], 'proceed')
+        with registered_chat_task(task), _no_sleep():
+            d = self._analyse(task, msg, usage)
+        self.assertEqual(d['action'], 'continue')
 
     def test_exhausted_budget_surfaces_premature_close_envelope(self):
         task = _fresh_task(phase_counter=_PREMATURE_RETRY_MAX_CLASSIC)

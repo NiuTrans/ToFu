@@ -1,9 +1,10 @@
-"""Launch-derived Push file-segment and idle worker reuse hints.
+"""Launch-derived Push file-segment, idle worker reuse, and event-queue bounds.
 
-No connection, event-count, byte or frame admission quota is defined here.
-Existing launch observations size file reuse; Demand workers start accepted
-encoding/reads immediately and retire when idle. Retired Push limit overrides
-are intentionally ignored.
+No connection or byte admission quota is defined here. Existing launch
+observations size file reuse; Demand workers start accepted encoding/reads
+immediately and retire when idle. Retired Push limit overrides are
+intentionally ignored except ``TOFU_PUSH_EVENT_QUEUE_CAPACITY``, which
+bounds one reconstructible per-socket event backlog before disconnect.
 """
 from __future__ import annotations
 from collections.abc import Mapping
@@ -26,3 +27,28 @@ def resolve_push_budget(environment: Mapping[str, str] | None = None) -> PushBud
                                      minimum=1, maximum=65536)
     return PushBudget(spool_segment_bytes=registry * 64 * 1024,
                       worker_reuse_target=workers)
+
+
+def resolve_push_event_queue_capacity(
+    environment: Mapping[str, str] | None = None,
+) -> int:
+    """Return one probe-derived bound for a socket's reconstructible backlog.
+
+    An explicit ``TOFU_PUSH_EVENT_QUEUE_CAPACITY`` override is clamped to the
+    documented 64..16384 envelope.  Otherwise the budget follows useful local
+    task concurrency: 256 queued events per probed agent worker with a floor
+    above the historical 1,000-frame burst envelope, so larger hosts absorb
+    longer bursts while a stalled socket can never grow without limit.
+    Probe failure keeps the lean 8,192 floor.
+    """
+    environment = os.environ if environment is None else environment
+    try:
+        raw = str(environment.get('TOFU_PUSH_EVENT_QUEUE_CAPACITY') or '')
+        override = int(raw) if raw.strip() else 0
+    except (TypeError, ValueError, OverflowError):
+        override = 0
+    if override > 0:
+        return max(64, min(16384, override))
+    workers = resolve_resource_budget('TOFU_AGENT_WORKERS', environment,
+                                     minimum=1, maximum=65536)
+    return max(8192, min(16384, workers * 256))

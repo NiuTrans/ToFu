@@ -5,13 +5,10 @@ dispatch is active, event persistence, browser/WebSocket fan-out and recovery
 checkpoints are observers: they may lag, but they must never hold the thread
 that is draining the upstream model stream.  The drain thread only mints the
 event sequence (single sequence authority) and hands a persist→push closure
-to a bounded per-task delivery queue; one task-local worker thread drains it
-FIFO, so durable-before-visible ordering is preserved without coupling socket
-consumption to a slow Sidecar or push listener.  If observers fall more than
-``_DELIVERY_QUEUE_MAX`` events behind, the oldest queued event is dropped —
-the first post-ingress authoritative event carries the cumulative projection
-and can converge cumulative content again. Unique diagnostic spans cannot be
-reconstructed from that projection; dropped events remain an observer gap.
+to a task-local FIFO; one demand-started worker drains it without coupling
+socket consumption to a slow Sidecar or push listener. Both root fallback and
+child queues retain every accepted closure until delivery or an explicit
+publication fence. Observer lag never evicts unique events.
 
 The guard is task-local, retaining one bounded diagnostic receipt per task.
 Child delivery starts on demand and retains FIFO events without a capacity
@@ -30,7 +27,7 @@ import time
 from typing import Any, Callable
 
 from lib.log import get_logger
-from lib.storage.errors import describe_storage_failure
+from lib.agent_core.storage_errors import describe_storage_failure
 
 logger = get_logger(__name__)
 
@@ -39,12 +36,8 @@ _LOCK_KEY = '_providerIngressIsolationLock'
 _STATE_KEY = '_providerIngressIsolation'
 _MAX_EVENT_TYPE_RECEIPT = 16
 _MAX_RECEIPT_COUNT = (1 << 31) - 1
-# A full queue means observers are seconds-to-minutes behind; dropping the
-# oldest event keeps the live tail fresh and bounds memory per task.
-_DELIVERY_QUEUE_MAX = 256
-# The boundary flush shares the drain thread with the first post-ingress
-# authoritative event, which would perform the same persistence work
-# synchronously anyway.  The timeout only caps a truly wedged observer.
+# Root observers may disclose an incomplete flush. Child evidence is required
+# settlement and instead follows the invocation's cancellation/liveness policy.
 _FLUSH_JOIN_TIMEOUT_SEC = 30.0
 
 # Bounded redelivery for a transient persist failure. A supervised sidecar
@@ -199,6 +192,10 @@ def _delivery_worker(
             else:
                 state['deliveredEvents'] = _bounded_count(
                     state.get('deliveredEvents'))
+                beacon = task.get('_invocationProgressBeacon')
+                if beacon is not None:
+                    beacon.touch(task.get('_invocationProgressKey') or task['id'],
+                                 'evidence_delivered')
         finally:
             delivery_queue.task_done()
 
@@ -218,7 +215,7 @@ def begin_provider_ingress(task: dict[str, Any], *, span_id: str) -> str:
                 raise RuntimeError('Child ingress already failed')
         from lib.tasks_pkg.event_delivery import delivery_lane_for
         task_delivery = delivery_lane_for(task) is not None
-        delivery_queue = None if task_delivery else queue.Queue(maxsize=0 if child else _DELIVERY_QUEUE_MAX)
+        delivery_queue = None if task_delivery else queue.Queue()
         state = {
             'contract': 'tofu.provider-ingress-isolation/v1',
             'token': token,
@@ -336,23 +333,7 @@ def enqueue_ingress_delivery(
             return False
         context = copy_context()
         item = (int(sequence), lambda: context.run(deliver))
-        try:
-            delivery_queue.put_nowait(item)
-        except queue.Full:
-            if task.get('_invocationPublicationFence'):
-                # A scheduler's required evidence handoff cannot lose an
-                # ordered child frame and still report successful execution.
-                _fail_child_delivery(task, 'Invocation evidence queue overflow')
-            try:
-                delivery_queue.get_nowait()
-                delivery_queue.task_done()
-            except queue.Empty:
-                pass
-            state['droppedEvents'] = _bounded_count(state.get('droppedEvents'))
-            try:
-                delivery_queue.put_nowait(item)
-            except queue.Full:
-                return False
+        delivery_queue.put_nowait(item)
         _record_event_receipt(state, sequence=sequence, event_type=event_type)
         return True
 
@@ -377,10 +358,11 @@ def end_provider_ingress(task: dict[str, Any], *, token: str,
 
     The flush join keeps every queued event ahead of the first post-ingress
     authoritative frame (strict seq ordering for both storage and push).  It
-    is bounded by ``_FLUSH_JOIN_TIMEOUT_SEC`` including stop signaling. If
-    an observer stays wedged, the receipt discloses an incomplete flush:
-    subsequent authoritative frames cannot repair unique diagnostics or
-    guarantee ordering relative to the still-running callback.
+    gives root observers ``_FLUSH_JOIN_TIMEOUT_SEC``. Required child evidence
+    waits under the existing invocation cancellation, deadline and progress
+    policy; storage latency alone cannot revoke an unsettled child. Disposal
+    or an invocation stop retains the short revocation window. An incomplete
+    flush cannot establish ordering or repair unique diagnostics.
     """
     lock = task.get(_LOCK_KEY)
     if lock is None:
@@ -402,10 +384,19 @@ def end_provider_ingress(task: dict[str, Any], *, token: str,
             delivery_queue.put_nowait(_STOP)
         except queue.Full:
             pass
-        cancelling_child = task.get('_invocationPublicationFence') and (
-            disposing or task.get('aborted'))
-        worker.join(timeout=(_CHILD_FLUSH_TIMEOUT_SEC if cancelling_child
-                             else _FLUSH_JOIN_TIMEOUT_SEC))
+        if task.get('_invocationPublicationFence'):
+            from lib.tasks_pkg.invocation import invocation_abort_requested
+            # Never classify an entered required sink as failed merely because
+            # the root observer grace period elapsed. Join in control-check
+            # intervals so inherited Stop, deadlines and genuine silence still
+            # revoke publication without waiting for blocked storage to return.
+            while worker.is_alive():
+                if disposing or invocation_abort_requested(task):
+                    worker.join(timeout=_CHILD_FLUSH_TIMEOUT_SEC)
+                    break
+                worker.join(timeout=_CHILD_FLUSH_TIMEOUT_SEC)
+        else:
+            worker.join(timeout=_FLUSH_JOIN_TIMEOUT_SEC)
         if worker.is_alive():
             logger.warning(
                 '[ProviderIngress] delivery flush timed out task=%s '

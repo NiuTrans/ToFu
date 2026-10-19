@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tests for lib.runtime_layout — the single-source install-tree runtime-state
+"""Tests for lib.runtime.runtime_layout — the single-source install-tree runtime-state
 registry that self_update (and, later, export.py + .gitignore generation)
 derive from.
 
@@ -55,7 +55,7 @@ _GOLDEN_OVERLAY_SKIP = _GOLDEN_RUNTIME_STATE + (
 
 
 def test_golden_byte_identity():
-    from lib.runtime_layout import OVERLAY_SKIP_PREFIXES, RUNTIME_STATE_PREFIXES
+    from lib.runtime.runtime_layout import OVERLAY_SKIP_PREFIXES, RUNTIME_STATE_PREFIXES
     assert RUNTIME_STATE_PREFIXES == _GOLDEN_RUNTIME_STATE, (
         f'RUNTIME_STATE_PREFIXES drifted:\n'
         f'  got:  {RUNTIME_STATE_PREFIXES}\n  want: {_GOLDEN_RUNTIME_STATE}')
@@ -68,7 +68,7 @@ def test_golden_byte_identity():
 def test_self_update_reexports_match():
     """self_update must re-export the SAME tuples (its dirty-classify + overlay
     decisions are the registry's now)."""
-    import lib.runtime_layout as rl
+    import lib.runtime.runtime_layout as rl
     import lib.self_update as su
     assert su._RUNTIME_STATE_PREFIXES == rl.RUNTIME_STATE_PREFIXES
     assert su._OVERLAY_SKIP_PREFIXES == rl.OVERLAY_SKIP_PREFIXES
@@ -76,7 +76,7 @@ def test_self_update_reexports_match():
 
 
 def test_classification():
-    from lib.runtime_layout import is_overlay_skipped, is_runtime_state
+    from lib.runtime.runtime_layout import is_overlay_skipped, is_runtime_state
     # Mutable runtime/user state — tolerated as dirty, preserved by overlay.
     state = ['data/tofu.db', 'data/config/server_config.json', 'logs/app.log',
              'uploads/images/x.png', 'outputs/run1/report.md',
@@ -108,7 +108,7 @@ def test_classification():
 def test_neuter_drop_data_entry():
     """Poison the registry (drop the data/ entry) → is_runtime_state must wrongly
     wave the DB through, proving the positive assertion has teeth."""
-    import lib.runtime_layout as rl
+    import lib.runtime.runtime_layout as rl
     orig = rl.RUNTIME_STATE_PREFIXES
     try:
         rl.RUNTIME_STATE_PREFIXES = tuple(p for p in orig if p != 'data/')
@@ -124,7 +124,7 @@ def test_neuter_drop_data_entry():
 
 
 def test_gitignore_lines():
-    from lib.runtime_layout import gitignore_lines
+    from lib.runtime.runtime_layout import gitignore_lines
     lines = gitignore_lines()
     joined = '\n'.join(lines)
     # Every INSTALL_STATE dir + the .tofu* glob must appear.
@@ -146,7 +146,7 @@ def _registry_dir_prefixes():
     (e.g. ``static/js/bundle-``) are covered by an export GLOB / a .gitignore
     glob, not a dir-name membership check, so they're asserted separately.
     """
-    from lib.runtime_layout import INSTALL_STATE
+    from lib.runtime.runtime_layout import INSTALL_STATE
     return [e.prefix.rstrip('/') for e in INSTALL_STATE if e.prefix.endswith('/')]
 
 
@@ -195,7 +195,7 @@ def test_neuter_export_guard_has_teeth():
     proving it actually cross-checks the registry against export (not a
     tautology)."""
     pytest.importorskip('export', reason='export.py not shipped in opensource')
-    import lib.runtime_layout as rl
+    import lib.runtime.runtime_layout as rl
     orig = rl.INSTALL_STATE
     try:
         rl.INSTALL_STATE = orig + (
@@ -256,7 +256,7 @@ def test_neuter_gitignore_guard_has_teeth():
     """Poison the registry with a fake dir → the .gitignore drift-guard must
     fail (the fake dir is not in the real .gitignore), proving it cross-checks
     reality."""
-    import lib.runtime_layout as rl
+    import lib.runtime.runtime_layout as rl
     orig = rl.INSTALL_STATE
     try:
         rl.INSTALL_STATE = orig + (

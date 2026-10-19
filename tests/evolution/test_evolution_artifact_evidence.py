@@ -152,13 +152,15 @@ def test_failed_partial_capture_preserves_cost_but_never_accepts_missing_content
     assert final['actuals']['tokens']==30 and final['actuals'].get('tokens')!=0
 
 
-def test_capacity_refuses_before_extra_parts_and_keeps_existing_generations(runtime,tmp_path):
+def test_all_declared_generations_survive_terminal_closure(runtime,tmp_path):
     from lib.evolution import artifact_evidence as evidence
-    run,executor=project_run(runtime,tmp_path);p=tmp_path/'value'
-    for i in range(evidence.MAX_FILES):p.write_text(str(i));evidence.declare(executor,{'path':'value'})
-    before=runtime[1].writes;p.write_text('over limit')
-    with pytest.raises(EvolutionStateError,match='bound'):evidence.declare(executor,{'path':'value'})
-    assert runtime[1].writes==before
+    _,executor=project_run(runtime,tmp_path);p=tmp_path/'value'
+    for i in range(33):
+        p.write_text(str(i));evidence.declare(executor,{'path':'value'})
+    p.unlink()
+    run=finish(runtime,executor,'All generations retained.')
+    rows=[json.loads(line) for line in read_artifacts(runtime[2][-1],run).splitlines()]
+    assert [row['content'] for row in rows]==[str(i) for i in range(33)]
 
 
 def test_reviewer_foreign_owner_and_stale_executor_cannot_declare(runtime,tmp_path):
@@ -168,7 +170,7 @@ def test_reviewer_foreign_owner_and_stale_executor_cannot_declare(runtime,tmp_pa
         with pytest.raises(EvolutionStateError):declare(task,{'path':'result.json'})
 
 
-def test_concurrent_generations_share_the_bounded_manifest(runtime,tmp_path):
+def test_concurrent_generations_share_the_owned_manifest(runtime,tmp_path):
     from lib.evolution.artifact_evidence import declare
     run,executor=project_run(runtime,tmp_path)
     for i in range(4):(tmp_path/str(i)).write_text(str(i))
@@ -275,3 +277,35 @@ def test_artifact_reviewer_can_read_short_inline_delivery_and_tool_sources(runti
     with pytest.raises(EvolutionStateError,match='outside'):
         source_tools.execute(reviewer,{'action':'read','run_id':run['run_id'],'task_id':'foreign',
             'source_sha256':listed[-1]['source_sha256'],'source_kind':'tool_evidence'})
+
+
+def test_large_complete_source_survives_live_loss_and_owner_paged_recovery(runtime,tmp_path):
+    from lib.evolution import artifact_evidence as evidence, stage_outcomes
+    _,executor=project_run(runtime,tmp_path)
+    # Escaping doubles the terminal JSONL body: exceed all historical byte and part ceilings.
+    original='\n'*(13*1024*1024)+'complete tail 🧪'
+    p=tmp_path/'large.txt';p.write_text(original,encoding='utf-8')
+    snapshot=evidence.declare(executor,{'path':'large.txt'})
+    assert snapshot['bytes']==len(original.encode())
+    assert snapshot['content_parts']>420 and snapshot['entry_bytes']>16*1024*1024
+    p.unlink()
+    run=finish(runtime,executor,'Complete large source retained.')
+    source=run['artifact_evidence_source']
+    assert source['complete']
+    descriptor=stage_outcomes.read_metadata(run['run_id'],executor['id'],user_id=OWNER)['artifact_evidence']
+    assert descriptor['content_parts']>560
+    offset=0;pages=[]
+    while True:
+        page=stage_outcomes.page(run['run_id'],executor['id'],user_id=OWNER,
+            source_kind='artifact_evidence',offset=offset)
+        pages.append(page['content'])
+        if page['next_offset'] is None:break
+        offset=page['next_offset']
+    text=''.join(pages)
+    assert hashlib.sha256(text.encode()).hexdigest()==source['source_sha256']
+    row=json.loads(text)
+    assert row['content']==original and row['content_sha256']==hashlib.sha256(original.encode()).hexdigest()
+    with pytest.raises(EvolutionStateError):
+        stage_outcomes.page(run['run_id'],executor['id'],user_id=OWNER+1,source_kind='artifact_evidence')
+    print(json.dumps({'original_bytes':snapshot['bytes'],'snapshot_parts':snapshot['content_parts'],
+        'terminal_jsonl_bytes':len(text.encode()),'terminal_parts':descriptor['content_parts']}))

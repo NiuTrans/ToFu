@@ -3,7 +3,7 @@ import logging
 
 import pytest
 
-from lib.log_record_values import BoundedFormatter, sanitize_value, text_value
+from lib.logging_pkg.log_record_values import BoundedFormatter, sanitize_value, text_value
 
 pytestmark = pytest.mark.unit
 

@@ -480,6 +480,14 @@ def test_the_shared_list_carries_a_machine_readable_platform_key():
     assert mod.REQUIRED_PLATFORM_ASSETS == tuple(
         (label, glob) for _o, _a, label, glob, _min in (
             mod.PLATFORM_ASSETS + mod.AGENT_PLATFORM_ASSETS)) + (
+                *tuple((f'Python wheels {platform}/{machine}{suffix}',
+                        f'python-wheels-*-cpython-312-{platform}-{machine}.tar.gz{suffix}')
+                       for platform, machine in mod.PYTHON_BUNDLE_TARGETS
+                       for suffix in ('', '.sha256')),
+                *tuple((f'Prebuilt TofuDB {target}{suffix}', f'tofu-db-*-{target}.tar.gz{suffix}')
+                       for target in ('x86_64-unknown-linux-musl', 'aarch64-unknown-linux-musl',
+                                      'x86_64-apple-darwin', 'aarch64-apple-darwin')
+                       for suffix in ('', '.sha256')),
                 ('prebuilt frontend graph', 'frontend-dist-*.tar.gz'),
                 ('prebuilt frontend SHA-256', 'frontend-dist-*.tar.gz.sha256'),
             ), (
@@ -871,8 +879,8 @@ def test_local_control_never_offers_the_full_desktop_installer():
                 'agent_downloads': [{
                     'os': 'windows', 'arch': 'x86_64',
                     'label': 'Windows agent installer',
-                    'filename': 'TofuAgent-Setup-0.16.0-win64.exe',
-                    'url': 'https://example.invalid/d/TofuAgent-Setup-0.16.0-win64.exe'}],
+                    'filename': 'TofuRemote-Setup-0.16.0-win64.exe',
+                    'url': 'https://example.invalid/d/TofuRemote-Setup-0.16.0-win64.exe'}],
                 'downloads': [{
                     'os': 'windows', 'arch': 'x86_64', 'label': 'Windows installer',
                     'filename': 'Tofu-Setup-0.16.0-win64.exe',
@@ -884,7 +892,7 @@ def test_local_control_never_offers_the_full_desktop_installer():
         assert '完整桌面版' not in out['text'], (
             f"{state}: the full-desktop role block is still rendered")
         # The AGENT stays primary — the one action this panel exists for.
-        assert any('TofuAgent' in (l['href'] or '') or
+        assert any('TofuRemote' in (l['href'] or '') or
                    'agent-installer' in (l['href'] or '')
                    for l in out['links']), (
             f"{state}: the agent installer lost its primary slot: "
@@ -898,7 +906,7 @@ def test_a_mac_visitor_is_never_offered_the_windows_agent_exe():
     construction, so `agent_installer_ready` means "the WINDOWS installer
     is ready" — and the renderer used to take that as licence to offer the
     .exe to EVERY visitor. A Mac client's primary button therefore
-    downloaded TofuAgent-Setup-*-win64.exe, a package it cannot run. A
+    downloaded TofuRemote-Setup-*-win64.exe, a package it cannot run. A
     macOS visitor must get the mirrored agent DMGs from `agent_downloads`
     instead, with the .exe button nowhere on the surface.
     """
@@ -908,11 +916,11 @@ def test_a_mac_visitor_is_never_offered_the_windows_agent_exe():
         " server_url:'https://tofu.invalid',"
         " agent_downloads:[{os:'macos',arch:'arm64',"
         " label:'macOS agent arm64 DMG',"
-        " filename:'TofuAgent-0.16.0-macos-arm64.dmg',"
-        " url:'https://example.invalid/d/TofuAgent-0.16.0-macos-arm64.dmg'},"
+        " filename:'TofuRemote-0.16.0-macos-arm64.dmg',"
+        " url:'https://example.invalid/d/TofuRemote-0.16.0-macos-arm64.dmg'},"
         " {os:'macos',arch:'x86_64',label:'macOS agent x86_64 DMG',"
-        " filename:'TofuAgent-0.16.0-macos-x86_64.dmg',"
-        " url:'https://example.invalid/d/TofuAgent-0.16.0-macos-x86_64.dmg'}],"
+        " filename:'TofuRemote-0.16.0-macos-x86_64.dmg',"
+        " url:'https://example.invalid/d/TofuRemote-0.16.0-macos-x86_64.dmg'}],"
         " downloads:[]}")
     hrefs = [l["href"] for l in out["links"]]
     assert not any('agent-installer' in (h or '') for h in hrefs), (
@@ -922,7 +930,7 @@ def test_a_mac_visitor_is_never_offered_the_windows_agent_exe():
         "the .exe button must not even render for a macOS visitor")
     direct = [l for l in out["links"]
               if "lc-dl-direct" in (l["cls"] or "")
-              and "TofuAgent" in (l["href"] or "")]
+              and "TofuRemote" in (l["href"] or "")]
     assert len(direct) == 2, (
         f"expected BOTH mirrored agent DMGs as the primary offer (arch "
         f"unknowable ⇒ offer both, never guess): {out['links']!r}")
@@ -971,8 +979,8 @@ def test_agent_installer_ready_transition_replaces_unavailable_copy(setup_state,
     if os_key == 'macos':
         ready['agent_downloads'] = [{
             'os': 'macos', 'arch': 'arm64', 'label': 'macOS agent arm64 DMG',
-            'filename': 'TofuAgent-macos-arm64.dmg',
-            'url': 'https://example.invalid/d/TofuAgent-macos-arm64.dmg',
+            'filename': 'TofuRemote-macos-arm64.dmg',
+            'url': 'https://example.invalid/d/TofuRemote-macos-arm64.dmg',
         }]
     out = _run_lc_desktop(','.join(map(json.dumps, [missing, ready, missing])), 'en')
     before, installed, after = out['snapshots']
@@ -984,7 +992,7 @@ def test_agent_installer_ready_transition_replaces_unavailable_copy(setup_state,
         assert 'lcAgentInstallerBtn' in installed['html']
         assert any('/api/v4/desktop/agent-installer' in href for href in hrefs)
     else:
-        assert 'https://example.invalid/d/TofuAgent-macos-arm64.dmg' in hrefs
+        assert 'https://example.invalid/d/TofuRemote-macos-arm64.dmg' in hrefs
         assert 'macOS agent arm64 DMG' in installed['text']
         assert not any('agent-installer' in href or '.exe' in href for href in hrefs)
 
@@ -1011,8 +1019,8 @@ def test_a_windows_visitor_keeps_the_personalized_agent_installer():
         " server_url:'https://tofu.invalid',"
         " agent_downloads:[{os:'windows',arch:'x86_64',"
         " label:'Windows agent installer',"
-        " filename:'TofuAgent-Setup-0.16.0-win64.exe',"
-        " url:'https://example.invalid/d/TofuAgent-Setup-0.16.0-win64.exe'}],"
+        " filename:'TofuRemote-Setup-0.16.0-win64.exe',"
+        " url:'https://example.invalid/d/TofuRemote-Setup-0.16.0-win64.exe'}],"
         " downloads:[]}")
     assert "lcAgentInstallerBtn" in out["html"], (
         f"the personalized installer button vanished for the one platform "

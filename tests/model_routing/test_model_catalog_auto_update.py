@@ -179,7 +179,7 @@ def test_summary_is_json_serializable_and_bounded(monkeypatch):
 
 
 def test_template_feed_precedes_registry_and_failure_keeps_other_phases(monkeypatch):
-    import lib.provider_template_feed as feed
+    import lib.provider.provider_template_feed as feed
     import lib.model_routing.world_catalog as world_catalog
 
     events = []

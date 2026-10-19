@@ -8,8 +8,8 @@ import json
 import pytest
 from quart import request
 
-from lib.app_factory import create_base_app
-from lib.http_compat_middleware import (
+from lib.app.app_factory import create_base_app
+from lib.http_transport.compat_middleware import (
     register_method_override,
     register_static_cache_headers,
 )

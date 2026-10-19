@@ -154,6 +154,11 @@ class OrchestrationFeedbackState:
             self._vu_progress.append(entry)
             return dict(entry)
 
+    def append_native_progress(self, entry: dict) -> None:
+        """Project an accepted native loop receipt into the existing run ledger."""
+        with self._lock:
+            self._vu_progress.append({**entry, 'targets': list(entry['targets'])})
+
     def detects_stuck(self, *, verifier_role: str = '') -> bool:
         """Detect repeated feedback for an advisory strategy nudge.
 

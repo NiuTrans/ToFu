@@ -1,6 +1,6 @@
 """tests/llm/test_llm_replay_scenarios.py — LLM record/replay scenario suite.
 
-Six scenarios replay recorded provider streams through the REAL root agent
+Scenarios replay recorded provider streams through the REAL root agent
 loop (``run_root_agent_loop``), the REAL dispatch chain
 (``stream_llm_response`` → ``dispatch_stream`` → slot), the REAL tool
 pipeline, and REAL sidecar persistence.  Only the three LLM transport
@@ -213,7 +213,9 @@ def _make_task(conv_id: str, user_prompt: str,
         {'role': 'assistant', 'content': '', 'thinking': '',
          'toolRounds': [], 'timestamp': 2},
     ], title=f'llm-replay-{conv_id[-8:]}')
-    config = {'model': _REPLAY_MODEL, 'webSearchEnabled': False}
+    # Recorded requests own their tool surface. An earlier application import
+    # can load deployment plugin defaults from .env into this test process.
+    config = {'model': _REPLAY_MODEL, 'webSearchEnabled': False, 'plugins': []}
     if project_path is not None:
         config['projectPath'] = str(project_path)
         config['projectPaths'] = [str(project_path)]
@@ -411,6 +413,54 @@ def test_write_file_tool(tmp_path, monkeypatch):
     ]
     assert 'write_file' in tool_names
     _assert_invariants_clean(task)
+
+
+def test_incomplete_tool_stream_retries_before_any_write(tmp_path, monkeypatch):
+    from lib.tasks_pkg.stream_handler import _budget
+    monkeypatch.setenv('TOFU_DEFAULT_TOOL_PLUGINS', '*')
+    monkeypatch.setattr(_budget, '_interruptible_sleep', lambda *args: None)
+    run = _run_loop_scenario(
+        'incomplete_tool_stream', tmp_path=tmp_path, monkeypatch=monkeypatch,
+        user_prompt='Create the replay marker file, then confirm.',
+        with_project=True)
+    expected = _expected('incomplete_tool_stream')
+    assert not (run['project_path'] / 'unverified-write.txt').exists()
+    assert (run['project_path'] / expected['file']['path']).read_text() == expected['file']['content']
+    task = run['task']
+    assert task['finishReason'] == 'stop'
+    assert not task.get('error')
+    assert expected['content_contains'][0] in task['content']
+    calls = [call['id'] for message in run['messages']
+             for call in message.get('tool_calls', [])]
+    assert calls == ['call_write_1']
+    assert len(_tool_result_messages(run['messages'])) == 1
+    assert len(run['state'].api_rounds) == 3  # Includes the paid incomplete attempt.
+    assert any(event.get('bucket') == 'incomplete_tool_stream'
+               for event in _durable_events(task))
+    completed = [event for event in _durable_events(task)
+                 if event.get('type') == 'tool_complete'
+                 and event.get('toolCallId') == 'call_unverified']
+    assert len(completed) == 1
+    assert completed[0]['status'] == 'aborted'
+    assert completed[0]['toolContent'] == ''
+    _assert_invariants_clean(task)
+
+
+def test_incomplete_tool_stream_exhaustion_closes_announcements_and_round(tmp_path, monkeypatch):
+    from lib.tasks_pkg.stream_handler import _budget
+    def exhaust(task):
+        task['_premature_retry_count_phase'] = _budget._PREMATURE_RETRY_MAX_CLASSIC
+    run = _run_loop_scenario(
+        'incomplete_tool_stream', tmp_path=tmp_path, monkeypatch=monkeypatch,
+        user_prompt='Create the replay marker file, then confirm.',
+        with_project=True, prepare=exhaust)
+    assert not (run['project_path'] / 'unverified-write.txt').exists()
+    assert not (run['project_path'] / 'replay-marker.txt').exists()
+    assert run['task']['finishReason'] == 'premature_close'
+    assert run['task']['error']['kind'] == 'premature_close'
+    assert len(run['state'].api_rounds) == 1
+    assert not _tool_result_messages(run['messages'])
+    _assert_invariants_clean(run['task'])
 
 
 # ═════════════════════════════════════════════════════════════════════

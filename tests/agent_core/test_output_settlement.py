@@ -170,3 +170,37 @@ def test_terminal_metadata_seals_without_replacing_observed_evidence(finish_reas
     for key in ('content', 'thinking', 'toolRounds', 'segments'):
         assert sealed[key] == live[key]
     assert seal_output_projection(sealed, completion) == sealed
+
+
+@pytest.mark.parametrize('marker', [
+    '[PROGRESS: resolved=2 remaining=2]', '[VERDICT: CONTINUE]',
+    '[VU: TASK_DONE]',
+])
+def test_virtual_user_visible_settlement_normalizes_before_shared_seal(marker):
+    """Machine metadata changes presentation, not the answer's occurrence."""
+    from lib.storage_authority_sql.operations_pkg._turns_read import _visible_shape
+    from lib.agent_verdict import strip_machine_tokens
+
+    raw = 'Verified evidence; remaining work is explicit.\n' + marker
+    clean = strip_machine_tokens(raw)
+    live = projection_with_stable_segments({
+        'content': raw, 'thinking': 'Independent review reasoning',
+        'toolRounds': [{'toolCallId': 'review-read', 'toolName': 'read_files',
+                        'roundNum': 1, 'llmRound': 0, 'status': 'done',
+                        'toolContent': 'Exact evidence'}],
+    }, actor='virtual_user', status='running')
+    original = deepcopy(live)
+    message = {'role': 'user', '_isVirtualUser': True,
+               'content': clean, 'finishReason': 'stop'}
+    actor, _, sealed = _visible_shape(message, 'flow_node', live, seal_live=True)
+    assert actor == 'virtual_user'
+    assert sealed['content'] == clean
+    text = [block for block in sealed['segments'] if block['type'] == 'text']
+    assert [block['text'] for block in text] == [clean]
+    assert text[0]['blockId'] == next(
+        block['blockId'] for block in original['segments'] if block['type'] == 'text')
+    assert sealed['toolRounds'][0]['toolContent'] == 'Exact evidence'
+    assert any(block.get('text') == 'Independent review reasoning'
+               for block in sealed['segments'] if block['type'] == 'thinking')
+    assert _visible_shape(message, 'flow_node', sealed, seal_live=True)[2] == sealed
+    assert live == original

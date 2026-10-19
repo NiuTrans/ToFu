@@ -88,6 +88,7 @@ const ACTION_ICON_PATHS: Record<string, ReadonlyArray<string>> = {
     'm7 10 5 5 5-5',
     'M12 15V3',
   ],
+  review: ['M9 5H5v16h14V5h-4', 'M9 3h6v4H9z', 'm8 14 3 3 5-6'],
   'promote-decision': [
     'M9 18h6',
     'M10 22h4',

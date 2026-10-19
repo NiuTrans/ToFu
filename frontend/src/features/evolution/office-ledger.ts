@@ -18,7 +18,7 @@ type Snapshot = {
 
 export function mountOfficeLedger(host:HTMLElement, copy:(key:string)=>string) {
   host.innerHTML=`<div class="evo-ledger-brand" aria-hidden="true"><b>Tofu</b><small>让 AI 研究发生</small></div>
-    <button type="button" class="evo-ledger-head" data-studio-action="details"><span></span><strong></strong></button>
+    <h1 class="evo-ledger-heading"><button type="button" class="evo-ledger-head" data-studio-action="details"><span></span><strong></strong></button></h1>
     <div class="evo-ledger-roles"></div>
     <footer class="evo-ledger-facts"><span data-fact="materials"></span><span data-fact="agents"></span><span data-fact="usage"></span></footer>
     <p class="evo-ledger-error" hidden></p>`;
@@ -41,7 +41,7 @@ export function mountOfficeLedger(host:HTMLElement, copy:(key:string)=>string) {
     const {run,workspace,coordination}=snapshot;
     host.hidden=false;
     if(!run){
-      headStatus.textContent=copy('studio');headTitle.textContent=copy('roomNoGoal');
+      headStatus.textContent=copy('studio');delete headStatus.dataset.status;headTitle.textContent=copy('roomNoGoal');
       rows.forEach(({row,state})=>{row.dataset.status='idle';state.textContent=copy('idle');});
       materials.textContent='';agents.textContent='';usage.textContent='';error.hidden=true;
       return;

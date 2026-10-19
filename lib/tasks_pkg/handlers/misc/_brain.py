@@ -36,13 +36,32 @@ def _handle_conv_ref_tool(
             user_id=owner_user_id,
         )
 
+    def _search_meta(meta, content, _args):
+        receipt = getattr(content, 'conversation_search', None)
+        if fn_name == 'list_conversations' and isinstance(receipt, dict):
+            meta['conversationSearch'] = receipt
+
     detail = (fn_args.get('keyword', 'all') if fn_name == 'list_conversations'
               else str(fn_args.get('conversation_id') or '?')[:8])
     return simple_call(
         task, fn_name, fn_args, rn, round_entry, tc_id,
         executor=_run, source='Conversations', module_tag='ConvRef',
         title=f'{fn_name}: {detail}',
+
+        post_build=_search_meta if fn_name == 'list_conversations' else None,
     )
+
+
+@tool_registry.tool_set(
+    frozenset({'create_conversation', 'dispatch_project_assignment', 'get_project_assignment', 'report_to_user',
+               'delegate_project_work', 'await_project_workers', 'review_project_work', 'get_project_workers', 'cancel_project_work', 'finish_project_request'}),
+    category='coordination', description='Independent worker conversations and authorized dispatch')
+def _handle_coordinator_tools(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg,
+                              project_path, project_enabled, all_tools=None):
+    from lib.conversations.coordinator_tools import execute_coordinator_tool
+    return simple_call(task, fn_name, fn_args, rn, round_entry, tc_id,
+                       executor=lambda name, args: execute_coordinator_tool(task, name, args),
+                       source='Coordinator', module_tag='Coordinator')
 
 
 from lib.conversations.project_messages import NAMES as PROJECT_MESSAGE_NAMES
@@ -87,15 +106,23 @@ def _handle_integration_tool(
             ensure_work_item,
             run_all_enabled_checkers,
         )
+        from lib.tasks_pkg.workspace_delivery import canonical_work_path
+        canonical_path = canonical_work_path(task, project_path)
         work_id = ensure_work_item(
-            task, project_path, trigger='isolated_workspace')
+            task, canonical_path, trigger='isolated_workspace')
         if not work_id:
             return 'Error: this execution has no automatic Project work ID.'
         call_args = dict(_fn_args)
-        call_args['task_id'] = work_id
-        if _fn_name == 'integration_submit':
+        # Checkers/Feed address logical Project work; workspace registrations
+        # address the physical execution task under its canonical repository.
+        call_args['task_id'] = str(task['id'])
+        from lib import integration_state_repository
+        workspace = integration_state_repository.find_workspace(
+            canonical_path, str(task['id']), user_id=owner_user_id)
+        automatic = bool(workspace and (workspace.get('origin') or {}).get('executionMode') == 'isolated-task')
+        if _fn_name == 'integration_submit' and not automatic:
             results = run_all_enabled_checkers(
-                project_path, user_id=owner_user_id, work_id=work_id,
+                canonical_path, user_id=owner_user_id, work_id=work_id,
                 reason='integration')
             failed = [result for result in results if not result.get('ok')]
             if failed:
@@ -107,7 +134,7 @@ def _handle_integration_tool(
         return execute_integration_tool(
             _fn_name,
             call_args,
-            project_path=project_path,
+            project_path=canonical_path,
             user_id=owner_user_id,
             conv_id=current_conv_id,
         )

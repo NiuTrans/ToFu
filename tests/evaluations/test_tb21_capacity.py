@@ -44,3 +44,22 @@ def test_unknown_or_exhausted_hardware_cannot_schedule_speculative_work():
                      replace(_snapshot(), effective_cpu_count=2)):
         with pytest.raises(ValueError):
             plan_rootless_pair(snapshot, _tasks())
+
+
+def test_local_disk_headroom_bounds_width_after_cache_placement():
+    plan = plan_rootless_pair(_snapshot(), _tasks(), state_disk_free_mb=80*1024,
+                             per_vm_disk_bound_mb=22*1024)
+    assert plan['concurrencyPerArm'] == 1
+    assert plan['worstCasePairDiskMb'] == 44*1024
+    larger = plan_rootless_pair(_snapshot(), _tasks(), state_disk_free_mb=600*1024,
+                               per_vm_disk_bound_mb=22*1024)
+    assert larger['concurrencyPerArm'] == 12
+    with pytest.raises(ValueError, match='together'):
+        plan_rootless_pair(_snapshot(), _tasks(), state_disk_free_mb=1)
+
+
+def test_repeated_heavy_tasks_can_share_the_active_roster():
+    plan = plan_rootless_pair(_snapshot(), _tasks(), attempts_per_task=5)
+    assert plan['concurrencyPerArm'] == 7
+    assert plan['worstCasePairCpus'] == 56
+    assert plan['attemptsPerTask'] == 5

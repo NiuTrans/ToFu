@@ -10,7 +10,7 @@
     returns: list of {path, action, ok, count, pending, root}
 
 Both routes are thin facades over ``lib/log_clean.py`` and
-``lib/tool_changes.py`` so the UI, SDKs, and CI pipelines all see
+``lib/tool_results/tool_changes.py`` so the UI, SDKs, and CI pipelines all see
 exactly the same heuristic / extraction logic.
 """
 
@@ -43,7 +43,7 @@ def detect_log_noise(*args, **kwargs):
 
 def extract_file_changes_dicts(*args, **kwargs):
     """Patchable request-loaded tool-round projection seam."""
-    from lib.tool_changes import extract_file_changes_dicts as implementation
+    from lib.tool_results.tool_changes import extract_file_changes_dicts as implementation
 
     return implementation(*args, **kwargs)
 
@@ -463,19 +463,33 @@ def client_logs_relay():
         'error.log tail) without contacting SQLite, PostgreSQL, or the '
         'storage sidecar. Returns ranked fingerprints, true coalesced '
         'occurrence counts, correlation ids, retention health and short '
-        'redacted samples under a strict output-byte budget. Admin-only '
+        'samples under a strict output-byte budget. Summary distinguishes '
+        'byte-limited scans and read failures from output truncation and '
+        'counts correlated occurrences after identity/selector filtering. Admin-only '
         'because diagnostics can span users and contain operational '
         'metadata. Query filters: request_id, conversation_id, task_id, '
         'trace_id; window_hours (0.05..720), max_items (1..100), '
         'max_bytes (4096..131072).'),
     tags=['logs'],
     scope='admin',
+    responses={'200': {'description': 'Bounded incident diagnosis', 'content': {
+        'application/json': {'schema': {'type': 'object', 'properties': {
+            'summary': {'type': 'object', 'properties': {
+                'scan_truncated': {'type': 'boolean', 'description':
+                    'Retained source bytes were omitted by the scan limit; counts are partial.'},
+                'scan_read_errors': {'type': 'integer', 'minimum': 0},
+                'correlation_occurrences': {'type': ['object', 'null'],
+                    'additionalProperties': {'type': 'integer', 'minimum': 0},
+                    'description': 'Scoped occurrence counts per correlation field; null for legacy text.'},
+            }},
+        }}},
+    }}},
 )
 def log_diagnostics_view():
     from quart import request
 
-    from lib.log_diagnostics import diagnose_logs
-    from lib.runtime_paths import data_root
+    from lib.logging_pkg.log_diagnostics import diagnose_logs
+    from lib.runtime.runtime_paths import data_root
 
     try:
         window_hours = float(request.args.get('window_hours') or 24)
@@ -532,7 +546,7 @@ def log_diagnostics_view():
 def log_aggregates_view():
     from quart import request
 
-    from lib.log_aggregates import query_aggregates
+    from lib.logging_pkg.log_aggregates import query_aggregates
 
     level = (request.args.get('level') or '').strip().upper()
     if level and level not in ('DEBUG', 'INFO', 'WARNING', 'ERROR',
@@ -565,7 +579,7 @@ def log_aggregates_view():
     summary='LLM-facing differential log digest (NEW/ESCALATING/RECURRING/RESOLVED)',
     description=(
         'The bounded, LLM-consumable answer to "what needs fixing right '
-        'now" (layer ③ of the log-signal design, lib/log_signals.py). '
+        'now" (layer ③ of the log-signal design, lib/logging_pkg/log_signals.py). '
         'Built on the log_aggregates fingerprint table plus an hourly '
         'count baseline (data/config/log_digest_baseline.json): each '
         'fingerprint is labelled NEW (first seen inside ``window_hours``), '
@@ -583,7 +597,7 @@ def log_aggregates_view():
 def log_digest_view():
     from quart import request
 
-    from lib.log_signals import compute_digest
+    from lib.logging_pkg.log_signals import compute_digest
 
     try:
         window_hours = float(request.args.get('window_hours') or 24)
@@ -611,8 +625,8 @@ def log_digest_view():
         logger.warning('[Logs.digest] aggregate store unavailable; using '
                        'incident journal fallback: %s', e)
         try:
-            from lib.log_diagnostics import diagnose_logs
-            from lib.runtime_paths import data_root
+            from lib.logging_pkg.log_diagnostics import diagnose_logs
+            from lib.runtime.runtime_paths import data_root
 
             ctx = current_auth()
             fallback = diagnose_logs(

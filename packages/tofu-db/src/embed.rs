@@ -36,6 +36,10 @@ use crate::server::{
 };
 use crate::turn_search_projection::TurnSearchProjection;
 
+#[path = "embed_command_phases.rs"]
+mod command_phases;
+pub(crate) use command_phases::EmbeddedCommandOutcome;
+
 fn io_other(message: impl std::fmt::Display) -> io::Error {
     io::Error::other(message.to_string())
 }
@@ -51,20 +55,19 @@ pub struct EmbeddedRequest<'payload> {
     pub deadline_unix_ms: u64,
 }
 
-/// All semantic requests get the same bounded aggregate in either transport.
+/// All semantic requests admit complete aggregates in either transport.
 /// Frame size controls chunking, never operation eligibility.
-/// Serialization is capped before growth; FFI also reserves its encoded bytes
+/// Serialization checks length overflow; FFI also reserves its encoded bytes
 /// against the handle's launch-probed queue budget before decoding/copying.
 pub(crate) const MAX_EMBEDDED_PAYLOAD_BYTES: usize = crate::protocol::MAX_PAYLOAD_BYTES;
 
 pub(crate) fn payload_limit_for_operation(_operation: &str) -> usize {
-    crate::generated_storage_v2::MAX_STREAMED_REQUEST_PAYLOAD_BYTES
+    usize::MAX
 }
 
-/// Payload serializer with the wire ceiling built in: `serde_json::to_vec`
-/// buffers the whole document before any bound could run, while this writer
-/// rejects the first byte past the cap, so a hostile payload can never force
-/// an allocation beyond the operation's declared protocol limit.
+/// Apply checked encoded lengths and any explicit caller bound while growing.
+/// Complete embedded requests use the addressable vector domain; normal frame
+/// windows still select inline versus streamed admission.
 struct CappedPayloadWriter {
     bytes: Vec<u8>,
     maximum_bytes: usize,
@@ -117,6 +120,7 @@ pub struct EmbeddedRuntime {
     adoption_driver: PackAdoptionDriver,
     rotation_driver: RotationDriver,
     online_gc_driver: Option<crate::authority_gc_online::OnlineGarbageCollectionDriver>,
+    search_gc_driver: Option<crate::authority_gc_online::OnlineGarbageCollectionDriver<TurnSearchProjection>>,
     online_backup_driver: Option<crate::online_backup::OnlineBackupDriver>,
     authority_watch: crate::authority_watch::AuthorityContentionWatch,
     /// Immutable launch data and live coordinator handles borrowed by each
@@ -195,10 +199,11 @@ impl EmbeddedRuntime {
                 "embedded transport serves strict durability only",
             ));
         }
-        let (barrier, barrier_driver) = crate::wal::WalBarrierDriver::start(
-            std::sync::Arc::new(crate::vfs::RealVfs),
+        let (barrier, barrier_driver) = crate::wal::WalBarrierDriver::start_with_write_buffer(
+            authority.wal_vfs()?,
             authority.wal_path()?,
             Duration::from_millis(1),
+            crate::wal::WalBarrierDriver::capacity_for_headroom(config.resource_budget.snapshot.memory_headroom_bytes),
         )?;
         authority.attach_wal_barrier(&barrier)?;
         if let Some(tenant) = config.scope.tenant_id {
@@ -215,24 +220,17 @@ impl EmbeddedRuntime {
         let foreground_admissions = authority.foreground_admissions();
         let canonical_json_cache = Some(authority.canonical_json_cache_observer());
         let decoded_chunk_cache = Some(authority.decoded_chunk_cache_observer());
+        authority.configure_blob_codecs(config.resource_budget.snapshot)?;
+        let blob_codec_pool = Some(authority.blob_codec_pool_observer()?);
         let published_queries = authority.enable_published_queries()?;
         let database = Arc::new(Mutex::new(authority));
         let search_projection = config
             .search_projection_dir
             .as_ref()
             .map(|path| {
-                let mut projection = if path.exists() {
-                    TurnSearchProjection::open(
-                        path,
-                        config.resource_budget.search_projection_maximum_bytes_per_owner,
-                    )
-                } else {
-                    TurnSearchProjection::initialize(
-                        path,
-                        config.resource_budget.search_projection_maximum_bytes_per_owner,
-                    )
-                }?;
-                projection.require_source_admission(authority_uuid);
+                let projection = TurnSearchProjection::open_or_defer(
+                    path, config.resource_budget.search_projection_maximum_bytes_per_owner, authority_uuid,
+                )?;
                 Ok::<_, io::Error>(Arc::new(Mutex::new(projection)))
             })
             .transpose()?;
@@ -300,6 +298,17 @@ impl EmbeddedRuntime {
                 config.resource_budget.has_volume_pressure(),
             )?)
         };
+        let search_gc_driver = if background_disabled {
+            None
+        } else {
+            search_projection.as_ref().map(|projection| {
+                crate::authority_gc_online::OnlineGarbageCollectionDriver::start(
+                    projection,
+                    AuthorityGarbageCollectionBudget::from_resource_budget(config.resource_budget),
+                    config.resource_budget.has_volume_pressure(),
+                )
+            }).transpose()?
+        };
         let online_backup_driver = if background_disabled {
             None
         } else {
@@ -315,13 +324,16 @@ impl EmbeddedRuntime {
         let authority_watch = crate::authority_watch::AuthorityContentionWatch::start(&database, foreground_admissions)?;
         let control_observers = crate::control_ops::ControlObservers {
             canonical_json_cache,
+        wal_write_buffer: Some(barrier.clone()),
         decoded_chunk_cache,
+        blob_codec_pool,
         published_queries: Some(published_queries.observer()),
             listener: None,
             maintenance: maintenance.as_ref().map(MaintenanceScheduler::observer),
             packer: background_packer
                 .as_ref()
                 .map(crate::background_pack::BackgroundPacker::observer),
+            search_gc: search_gc_driver.as_ref().map(|driver| driver.observer()),
             online_gc: online_gc_driver
                 .as_ref()
                 .map(crate::authority_gc_online::OnlineGarbageCollectionDriver::observer),
@@ -333,7 +345,7 @@ impl EmbeddedRuntime {
             wal_flush_interval_milliseconds: Some(config.wal_flush_interval.as_millis() as u64),
             resource_budget: Some(crate::daemon::resource_budget_json(
                 &config,
-                search_projection.is_some(),
+                search_projection.as_ref().is_some_and(|index| index.lock().is_ok_and(|index| index.available())),
             )),
         };
         Ok(Self {
@@ -348,9 +360,11 @@ impl EmbeddedRuntime {
             adoption_driver,
             rotation_driver,
             online_gc_driver,
+            search_gc_driver,
             online_backup_driver,
             authority_watch,
             dispatch_bindings: crate::server::StorageV2Bindings {
+                checkpoint_control: None,
                 authority_admission: Arc::default(),
                 published_queries: Some(published_queries),
                 authority_gc_budget: AuthorityGarbageCollectionBudget::from_resource_budget(config.resource_budget),
@@ -392,8 +406,38 @@ impl EmbeddedRuntime {
             .map(|response| response_to_json(&response))
     }
 
-    /// Preserve the dispatcher's encoded payload for the C ABI. The owned
-    /// bytes stay inside the watchdog worker and never reference caller memory.
+    /// Reuse an already executed, snapshot-certified query. Every lock is a
+    /// try-lock, and the cache accepts only one-frame owned inputs/results.
+    /// No engine/IR execution, I/O or caller pointer escapes this branch.
+    pub(crate) fn try_cached_json(&self, operation: &str, payload: &[u8],
+        command_id: Option<&str>, deadline_unix_ms: u64, transport_is_healthy: impl FnOnce() -> bool) -> Option<io::Result<Vec<u8>>> {
+        if command_id.is_some() || payload.len() > crate::protocol::MAX_PAYLOAD_BYTES { return None; }
+        let started = crate::request_profile::enabled().then(std::time::Instant::now);
+        let view = self.dispatch_bindings.published_queries.as_ref()?;
+        let cached = view.try_cached(crate::query_result_cache::Lookup {
+            owner_id: self.scope.owner_id, tenant_id: self.scope.tenant_id,
+            schema_id: STORAGE_SCHEMA_VERSION, operation, payload })?;
+        // Empty/cold keys pay only the optional cache lookup. Health is still
+        // mandatory before admission and before any cached bytes can escape.
+        if self.database.is_poisoned() || *self.closed.try_lock().ok()?
+            || self.dispatch_bindings.wal_barrier.is_none() || !transport_is_healthy() { return None; }
+        // Correlation is not exposed by the C ABI JSON envelope. This local
+        // nonzero ID still passes the identical protocol admission validator.
+        let request = Request { correlation_id: [1; 16], deadline_unix_ms,
+            owner_id: self.scope.owner_id, tenant_id: self.scope.tenant_id,
+            command_id: None, schema_id: STORAGE_SCHEMA_VERSION,
+            operation: operation.to_owned(), payload: payload.to_vec() };
+        let admitted = self.session.admit(&request, now_unix_ms()).ok()?;
+        if admitted.operation.kind != crate::generated_storage_operations::StorageOperationKind::Query { return None; }
+        crate::fsync_stats::note_foreground_request();
+        let _queue = crate::request_profile::QueueContext::completed_inline();
+        let mut profile = started.and_then(|start| crate::request_profile::RequestGuard::start_at(operation, start));
+        let response = crate::server::response::DispatchedResponse::successful(&request, cached.into_response());
+        if let Some(profile) = profile.as_mut() { profile.finish("ok"); }
+        drop(profile);
+        Some(dispatched_response_to_encoded_json(&response))
+    }
+
     pub(crate) fn execute_encoded_json_with_alive(
         &self, operation: String, payload: Vec<u8>, command_id: Option<String>,
         deadline_unix_ms: u64, alive: &mut impl FnMut() -> bool,
@@ -407,6 +451,12 @@ impl EmbeddedRuntime {
         &self, operation: String, payload: Vec<u8>, command_id: Option<String>,
         deadline_unix_ms: u64, alive: &mut impl FnMut() -> bool,
     ) -> io::Result<crate::server::response::DispatchedResponse> {
+        let wire_request=self.request_from_encoded(operation,payload,command_id,deadline_unix_ms)?;
+        self.execute_wire_response_with_alive(wire_request,alive,true)
+    }
+
+    fn request_from_encoded(&self, operation:String, payload:Vec<u8>, command_id:Option<String>,
+        deadline_unix_ms:u64) -> io::Result<Request> {
         #[cfg(test)]
         test_fault::inject(&operation);
         if *self.closed.lock().map_err(|_| io_other("embedded close state poisoned"))? {
@@ -429,6 +479,12 @@ impl EmbeddedRuntime {
         if self.dispatch_bindings.wal_barrier.is_none() {
             return Err(io_other("embedded runtime lost its WAL barrier"));
         }
+        Ok(wire_request)
+    }
+
+    fn execute_wire_response_with_alive(
+        &self, wire_request: Request, alive: &mut impl FnMut() -> bool, allow_parallel: bool,
+    ) -> io::Result<crate::server::response::DispatchedResponse> {
         let outcome = crate::server::profile_request_dispatch(&wire_request.operation, || {
             let stores = {
                 let _bindings = crate::fsync_stats::StageTimer::diagnostic(crate::fsync_stats::STAGE_EMBEDDED_BINDINGS);
@@ -437,9 +493,9 @@ impl EmbeddedRuntime {
             };
             let mut now = now_unix_ms;
             let admitted_at = now();
-            crate::server::dispatch_one_request_inner(&stores, &self.session, &wire_request,
+            crate::server::dispatch_one_request_inner_mode(&stores, &self.session, &wire_request,
                 wire_request.payload.len() > MAX_EMBEDDED_PAYLOAD_BYTES,
-                admitted_at, &mut now, alive)
+                admitted_at, &mut now, alive, allow_parallel)
         })?;
         let response = match outcome {
             RequestDispatch::Responded(response) => response,
@@ -448,6 +504,14 @@ impl EmbeddedRuntime {
             }
         };
         Ok(response)
+    }
+
+    pub(crate) fn execute_serialized_fallback(&self,request:Request,alive:&mut impl FnMut()->bool)->io::Result<Vec<u8>> {
+        if *self.closed.lock().map_err(|_|io_other("embedded close state poisoned"))? {
+            return Err(io::Error::new(io::ErrorKind::BrokenPipe,"embedded runtime is closed"));
+        }
+        let response=self.execute_wire_response_with_alive(request,alive,false)?;
+        dispatched_response_to_encoded_json(&response)
     }
 
     /// Graceful stop: join every driver, then retire both engines' active
@@ -513,6 +577,9 @@ impl EmbeddedRuntime {
                 .map(crate::authority_gc_online::OnlineGarbageCollectionDriver::stop_and_join)
                 .transpose()
         });
+        let search_gc_result = self.search_gc_driver.as_ref()
+            .map(crate::authority_gc_online::OnlineGarbageCollectionDriver::stop_and_join)
+            .transpose();
         let online_backup_result = embedded_stop_phase(crate::fsync_stats::STAGE_EMBEDDED_STOP_BACKUP, || {
             self
                 .online_backup_driver
@@ -551,6 +618,7 @@ impl EmbeddedRuntime {
         packer_result?;
         barrier_result?;
         online_gc_result?;
+        search_gc_result?;
         online_backup_result?;
         archive_seal_result?;
         authority_watch_result?;
@@ -863,9 +931,9 @@ mod tests {
             let encoded = serialize_payload(&payload, payload_limit_for_operation(operation)).unwrap();
             assert_eq!(encoded.len(), MAX_EMBEDDED_PAYLOAD_BYTES + 2);
         }
-        let maximum = crate::generated_storage_v2::MAX_STREAMED_REQUEST_PAYLOAD_BYTES;
-        let oversized = Value::String("x".repeat(maximum - 1));
-        assert!(serialize_payload(&oversized, payload_limit_for_operation("task_results.checkpoint")).is_err());
+        let demand = Value::String("x".repeat(70 * 1024 * 1024));
+        let encoded = serialize_payload(&demand, payload_limit_for_operation("task_results.checkpoint")).unwrap();
+        assert_eq!(encoded.len(), 70 * 1024 * 1024 + 2);
     }
 
     #[test]
@@ -991,3 +1059,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "embed_query_cache_tests.rs"]
+mod query_cache_tests;

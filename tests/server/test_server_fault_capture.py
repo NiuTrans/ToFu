@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from lib import server_fault_watchdog as faults
+from lib.server import server_fault_watchdog as faults
 
 pytestmark = pytest.mark.unit
 

@@ -23,7 +23,7 @@ import time
 from typing import Any, Iterable
 
 from lib.log import get_logger
-from lib.runtime_state_store import get_store
+from lib.runtime.runtime_state_store import get_store
 
 
 logger = get_logger(__name__)

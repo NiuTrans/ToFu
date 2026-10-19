@@ -13,8 +13,8 @@ import pytest
 from lib.storage.errors import StorageError
 from lib.storage.protocol import canonical_json
 from lib.storage.v2_client import StorageV2Client
-from lib.storage_sidecar.receipt_codec import command_receipt_key_v2, encode_receipt_response
-from lib.storage_sidecar.tofudb_migration_target import OfflineMigrationSession
+from lib.storage_authority_sql.receipt_codec import command_receipt_key_v2, encode_receipt_response
+from lib.storage_authority_sql.migration.tofudb_migration_target import OfflineMigrationSession
 from tofu_db.wire import StorageV2Error
 
 pytestmark = pytest.mark.unit

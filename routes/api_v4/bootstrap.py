@@ -13,7 +13,7 @@ import time
 
 from quart import Blueprint, Response
 
-from lib.api_v4_constants_generated import (
+from lib.generated_api_v4_constants import (
     API_MAJOR,
     MIN_ANDROID_BUILD,
     MIN_DESKTOP_BUILD,
@@ -86,7 +86,7 @@ def _json_response(payload: object, *, cache_control: str) -> Response:
 
 @api_v4_bp.get('/api/v4/meta')
 def api_meta() -> Response:
-    from lib.api_v4_generated import validate_api_meta_response
+    from lib.generated_api_v4 import validate_api_meta_response
 
     payload = validate_api_meta_response({
         'data': {
@@ -108,7 +108,7 @@ def api_meta() -> Response:
 def api_v4_openapi() -> Response:
     # OpenAPI tooling requires a raw document, so this one self-describing
     # endpoint is the declared exception to the v4 data/meta success envelope.
-    from lib.api_v4_generated import OPENAPI_DOCUMENT
+    from lib.generated_api_v4 import OPENAPI_DOCUMENT
     return _json_response(OPENAPI_DOCUMENT, cache_control='no-cache')
 
 

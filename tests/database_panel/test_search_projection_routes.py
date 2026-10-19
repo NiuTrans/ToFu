@@ -12,7 +12,7 @@ from unittest.mock import Mock
 import pytest
 
 from lib.database_panel import probe
-from lib.storage_sidecar import projection_paths
+from lib.storage_authority_sql import projection_paths
 
 pytestmark = pytest.mark.api
 pytest_plugins = ('tests._credential_sidecar',)
@@ -34,7 +34,7 @@ def panel(tmp_path, monkeypatch):
 
     app = Quart(__name__)
     app.config['TESTING'] = True
-    from lib.http_error_handlers import register_http_error_handlers
+    from lib.http_transport.error_handlers import register_http_error_handlers
     register_http_error_handlers(app)
     from routes.api_v1.auth import attach_rate_headers, bearer_auth_before_request
     app.before_request(bearer_auth_before_request)

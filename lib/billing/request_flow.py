@@ -27,6 +27,7 @@ identical to before billing existed.
 
 from __future__ import annotations
 
+import json
 from typing import Optional
 
 from lib.log import get_logger
@@ -34,11 +35,11 @@ from lib.log import get_logger
 logger = get_logger(__name__)
 
 
-def estimate_prompt_tokens(messages: list) -> int:
+def estimate_prompt_tokens(messages: list, *, tools: list | None = None) -> int:
     """Cheap prompt-token estimate from an OpenAI-style messages array.
 
-    Counts characters across string and multimodal ``text`` parts and
-    divides by 4 (the same rough heuristic the chat route used inline).
+    Counts text, assistant tool calls and explicit tool declarations, then
+    divides by 4. This reservation heuristic is not actual billable usage.
     Returns at least 1.
     """
     prompt_chars = 0
@@ -52,6 +53,10 @@ def estimate_prompt_tokens(messages: list) -> int:
             for part in c:
                 if isinstance(part, dict) and part.get('type') == 'text':
                     prompt_chars += len(part.get('text') or '')
+        if m.get('tool_calls'):
+            prompt_chars += len(json.dumps(m['tool_calls'], ensure_ascii=False))
+    if tools:
+        prompt_chars += len(json.dumps(tools, ensure_ascii=False))
     return max(1, prompt_chars // 4)
 
 
@@ -87,6 +92,7 @@ def reserve_for_task(task: dict, *, user_id: str, model: str,
         reserve(user_id, micro, ref_id=task['id'],
                 note=f'reserve {model or "?"}')
         task['_billing_reservation_micro'] = micro
+    task['_billingUserId'] = user_id
     return micro
 
 
@@ -159,9 +165,20 @@ def settle_task(task: dict, *, user_id: str, model: str,
         # also maps vendor spellings (kimi cached_tokens, DeepSeek
         # prompt_cache_hit_tokens, nested prompt_tokens_details) onto the
         # canonical keys so those hits are billed at the read multiplier.
-        cost = compute_request_cost(
-            model or '', provider_id=task.get('provider_id') or None,
-            raw_usage=u)
+        if '_nativeBillingSettlement' in task:
+            from lib.billing.native_settlement import decode
+            cost = decode(task['_nativeBillingSettlement'], task_id=task['id'],
+                owner_user_id=task['_userId'], wallet_user_id=user_id)
+            if task.get('_billing_reservation_micro', 0) != task['_nativeBillingSettlement']['reserved_micro']:
+                raise ValueError('native billing recovery request differs from frozen settlement')
+            model = cost.matched_model
+        elif task.get('_nativePricingRequired') is True or task.get('_nativeFrozenCostProjection') is True:
+            from lib.billing.cost import native_task_cost
+            cost = native_task_cost(task, model=model or '')
+        else:
+            cost = compute_request_cost(
+                model or '', provider_id=task.get('provider_id') or None,
+                raw_usage=u)
         import json
         snapshot = dict(cost.snapshot)
         task['_billing_cost_snapshot'] = snapshot

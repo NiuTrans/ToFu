@@ -126,6 +126,33 @@ class TestOomLadder:
         i = attempts[1].index('--max-model-len')
         assert attempts[1][i + 1] == '4096'
 
+    def test_ollama_parallel_oom_restarts_with_reduced_environment(self, sandbox):
+        from lib.local_serve._plan import plan_launch
+        model = {'format': 'gguf', 'path': '/models/test.gguf',
+                 'architecture': 'qwen3', 'weight_bytes': 5 << 30,
+                 'max_context': 8192, 'served_name': 'test',
+                 'attention_dimensions': {'block_count': 32, 'embedding_length': 4096,
+                                          'attention.head_count': 32,
+                                          'attention.head_count_kv': 8}}
+        hardware = {'gpus': [{'index': 0, 'vram_free_bytes': 24 << 30,
+                              'vram_total_bytes': 24 << 30}], 'cpu_count': 8}
+        plan = plan_launch(model, hardware, engine='ollama')
+        row = _record(engine='ollama', degrade=plan['degrade'])
+        store.update_fields(row['id'], env=plan['env'])
+        environments = []
+        def spawn(argv, **kwargs):
+            environments.append(kwargs['env'])
+            if len(environments) == 1:
+                kwargs['stdout'].write(b'CUDA out of memory')
+                return FakeProc([1])
+            return FakeProc([None])
+        result = proc.start_instance(row['id'], popen=spawn,
+                                     http_get=_ready_http, sleep=lambda _: None)
+        assert result['ok'] and result['degrade_index'] == 1
+        assert int(environments[1]['OLLAMA_NUM_PARALLEL']) == (
+            int(environments[0]['OLLAMA_NUM_PARALLEL']) // 2)
+        assert environments[1]['OLLAMA_CONTEXT_LENGTH'] == environments[0]['OLLAMA_CONTEXT_LENGTH']
+
     def test_terminal_rung_is_never_executed(self, sandbox):
         _record(degrade=[{'note': '换更小的量化', 'terminal': True}])
 
@@ -190,3 +217,127 @@ class TestPortAllocation:
         store.update_fields('ls_b', port=18101)
         p = proc.allocate_port(bind_test=False)
         assert p == 18102
+
+
+def test_port_allocation_is_not_limited_to_one_hundred_plans():
+    rows = [{'id': str(port), 'port': port, 'status': 'planned'}
+            for port in range(18100, 18200)]
+    assert proc.allocate_port(ledger_rows=rows, bind_test=False) == 18200
+    selected = proc.allocate_port(ledger_rows=rows)
+    assert selected not in {row['port'] for row in rows}
+    assert selected not in (8000, 30000, 11434)
+    assert 1024 <= selected <= 65535
+
+
+def test_terminal_history_does_not_reserve_ports():
+    rows = [{'port': 18100, 'status': 'stopped'}, {'port': 18101, 'status': 'failed'}]
+    assert proc.allocate_port(ledger_rows=rows, bind_test=False) == 18100
+
+
+def test_bound_socket_and_planned_port_are_both_skipped():
+    import socket
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as occupied:
+        occupied.bind(('127.0.0.1', 0))
+        occupied.listen()
+        bound = occupied.getsockname()[1]
+        selected = proc.allocate_port(ledger_rows=[{'port': bound, 'status': 'planned'}])
+        assert selected != bound
+
+
+def test_kernel_choice_colliding_with_plan_falls_back(monkeypatch):
+    import socket
+    class Candidate:
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def bind(self, address): self.address = address
+        def getsockname(self): return ('127.0.0.1', 18100)
+    monkeypatch.setattr(socket, 'socket', lambda *args: Candidate())
+    assert proc.allocate_port(ledger_rows=[{'port': 18100, 'status': 'planned'}]) == 18101
+
+
+def test_real_socket_failure_is_not_reported_as_range_exhaustion(monkeypatch):
+    import errno
+    import socket
+    def no_descriptor(*args): raise OSError(errno.EMFILE, 'descriptor unavailable')
+    monkeypatch.setattr(socket, 'socket', no_descriptor)
+    with pytest.raises(OSError) as failure:
+        proc.allocate_port(ledger_rows=[])
+    assert failure.value.errno == errno.EMFILE
+
+
+@pytest.mark.parametrize('engine', ['vllm', 'sglang', 'llamacpp', 'ollama'])
+def test_terminal_restart_updates_endpoint_before_spawn(sandbox, monkeypatch, engine):
+    row = _record(engine=engine)
+    store.update_fields(row['id'], status='stopped')
+    monkeypatch.setattr(proc, 'allocate_port', lambda **kwargs: 18234)
+    observed = []
+    def spawn(argv, **kwargs):
+        current = store.get_instance(row['id'])
+        assert current['port'] == 18234
+        assert current['base_url'] == 'http://127.0.0.1:18234/v1'
+        observed.append((argv, kwargs['env']))
+        return FakeProc([None])
+    result = proc.start_instance(row['id'], popen=spawn, http_get=_ready_http,
+                                 sleep=lambda _: None)
+    assert result['ok'] and result['status'] == 'running'
+    argv, env = observed[0]
+    if engine == 'ollama': assert env['OLLAMA_HOST'] == '127.0.0.1:18234'
+    else: assert argv[argv.index('--port') + 1] == '18234'
+
+
+def test_prepare_preserves_real_port_failure(monkeypatch):
+    import errno
+    from lib.local_serve import api
+    monkeypatch.setattr(api.probe, 'inspect_model_path', lambda _: {'format': 'gguf'})
+    monkeypatch.setattr(api.probe, 'probe_hardware', lambda: {})
+    def unavailable(): raise OSError(errno.EMFILE, 'descriptor unavailable')
+    monkeypatch.setattr(proc, 'allocate_port', unavailable)
+    result = api.prepare('/synthetic.gguf')
+    assert not result['ok'] and result['stage'] == 'plan'
+    assert 'descriptor unavailable' in result['error']
+
+
+def test_port_search_can_wrap_below_preview_default():
+    rows = [{'port': port, 'status': 'planned'} for port in range(18100, 65536)]
+    assert proc.allocate_port(ledger_rows=rows, bind_test=False) == 1024
+
+
+def test_terminal_restart_port_failure_preserves_endpoint_and_does_not_spawn(sandbox, monkeypatch):
+    import errno
+    row = _record()
+    store.update_fields(row['id'], status='stopped')
+    def unavailable(**kwargs): raise OSError(errno.EMFILE, 'descriptor unavailable')
+    monkeypatch.setattr(proc, 'allocate_port', unavailable)
+    result = proc.start_instance(row['id'], popen=lambda *a, **k: pytest.fail('must not spawn'))
+    assert not result['ok'] and result['status'] == 'failed'
+    assert result['port'] == row['port'] and result['base_url'] == row['base_url']
+    assert 'descriptor unavailable' in result['last_error']
+
+
+@pytest.mark.parametrize('engine,graph_flag', [
+    ('vllm', '--enforce-eager'), ('sglang', '--disable-cuda-graph'),
+])
+def test_estimated_overflow_reaches_spawn_and_recovers_from_real_oom(sandbox, engine, graph_flag):
+    from lib.local_serve._plan import plan_launch
+    inspection = {'format': 'hf', 'path': '/models/M', 'served_name': 'M',
+                  'weight_bytes': 24 << 30, 'max_context': 65536}
+    hardware = {'gpus': [{'index': 0, 'vram_total_bytes': 24 << 30,
+                          'vram_free_bytes': 4 << 30}], 'ram_available_bytes': 64 << 30}
+    plan = plan_launch(inspection, hardware, engine=engine)
+    assert plan['ok']
+    row = _record(engine=engine, degrade=plan['degrade'])
+    store.update_fields(row['id'], argv=plan['argv'], env=plan['env'])
+    attempts = []
+    def spawn(argv, **kwargs):
+        attempts.append(argv)
+        if len(attempts) == 1:
+            kwargs['stdout'].write(b'CUDA out of memory')
+            return FakeProc([1])
+        return FakeProc([None])
+    result = proc.start_instance(row['id'], popen=spawn, http_get=_ready_http,
+                                 sleep=lambda _: None)
+    assert result['ok'] and result['degrade_index'] == 1
+    assert '--cpu-offload-gb' in attempts[0]
+    assert graph_flag not in attempts[0] and graph_flag in attempts[1]
+    for argv in attempts:
+        assert not {'--max-num-seqs', '--max-running-requests', '--max-total-tokens'}.intersection(argv)

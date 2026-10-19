@@ -36,9 +36,6 @@ from ._image import (
 )
 from ._router import (
     IMAGE_EXTENSIONS,
-    MAX_FILE_BYTES,
-    MAX_IMAGE_BYTES,
-    MAX_TEXT_CHARS,
     OFFICE_EXTENSIONS,
     PDF_EXTENSIONS,
     SUPPORTED_EXTENSIONS,

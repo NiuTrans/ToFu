@@ -199,7 +199,7 @@ def test_every_template_reasoning_choice_compiles_without_legacy_names(monkeypat
     from lib.model_routing.inference import candidate_inference_metadata
     from lib.model_routing.controls import _choices
     from lib.model_routing.model_defaults import official_model_directory
-    from lib.provider_template_recipes import compile_provider_template_bundle, load_provider_templates
+    from lib.provider.provider_template_recipes import compile_provider_template_bundle, load_provider_templates
     def forbidden(*args, **kwargs):
         pytest.fail('a declared route reached the legacy name compiler')
     monkeypatch.setattr('lib.llm._reasoning_legacy.apply_legacy', forbidden)

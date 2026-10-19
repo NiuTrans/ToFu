@@ -72,7 +72,7 @@ def test_programmatic_server_rejects_fake_multiworker_flag():
 #  Supersede index externalized onto the shared store
 # ══════════════════════════════════════════════════════════════════════
 def _reset_state_store():
-    import lib.runtime_state_store as rss
+    import lib.runtime.runtime_state_store as rss
     rss.reset_for_test()
 
 
@@ -95,7 +95,7 @@ def test_supersede_index_is_cross_replica_via_store():
     it. This is what lets a stale task on A recognise B's newer task."""
     _reset_state_store()
     import lib.tasks_pkg.manager.runtime as m
-    import lib.runtime_state_store as rss
+    import lib.runtime.runtime_state_store as rss
     # Replica B records the newest task directly in the shared store (as its
     # _record_latest_task would), WITHOUT touching replica A's local dict.
     rss.get_store().set_value(m._LATEST_KIND, 'conv-x', 'task-from-B', m._LATEST_TTL)
@@ -110,7 +110,7 @@ def test_store_set_get_value_roundtrip_and_expiry():
     """set_value/get_value roundtrip + TTL expiry (the primitive the supersede
     index rides on)."""
     import time
-    from lib.runtime_state_store import InProcRuntimeStateStore
+    from lib.runtime.runtime_state_store import InProcRuntimeStateStore
     s = InProcRuntimeStateStore()
     s.set_value('latest', 'c1', 'tA', ttl=100)
     assert s.get_value('latest', 'c1') == 'tA'

@@ -17,7 +17,7 @@ NAMESPACE = 'research.loop_checkpoints.v1'
 class LoopCheckpoints(RequestContexts):
     def _validate_accounted_material(self, intent, material):
         _validate(material, 'loopMaterial')
-        from lib.agent_loop import validate_agent_loop_checkpoint
+        from lib.agent_loop.agent_loop import validate_agent_loop_checkpoint
         try:
             validate_agent_loop_checkpoint(material['chassis'], require_continuable=False)
         except (ValueError, TypeError, KeyError) as exc:

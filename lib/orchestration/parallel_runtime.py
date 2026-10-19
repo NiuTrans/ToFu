@@ -102,8 +102,12 @@ class OrchestrationParallelRuntime:
         return merged
 
     def run(self, parallel_id: str, context: str) -> tuple[str, str | None]:
-        branches = list(self._branches(parallel_id))
-        barrier = self._navigator.find_common_barrier(branches)
+        native_parallel = getattr(self._navigator, 'supports_native_parallel', lambda: False)()
+        if native_parallel:
+            branches, barrier, next_node = self._navigator.parallel_plan(parallel_id)
+        else:
+            branches = list(self._branches(parallel_id))
+            barrier = self._navigator.find_common_barrier(branches)
         self._emit({
             'type': 'parallel_start',
             'node_id': parallel_id,
@@ -153,10 +157,16 @@ class OrchestrationParallelRuntime:
                         future = Future()
                         future.set_exception(error)
                     futures[future] = (index, branch)
+                from lib.orchestration.continuation import FlowSuspended
+                suspended = False
                 for future in as_completed(futures):
                     index, branch = futures[future]
                     try:
                         ordered_outputs[index] = future.result()
+                    except FlowSuspended:
+                        # All siblings must report their boundaries/failures;
+                        # shutdown joining alone does not consume their results.
+                        suspended = True
                     except FlowEventDeliveryError:
                         raise
                     except Exception as error:
@@ -164,12 +174,17 @@ class OrchestrationParallelRuntime:
                             raise OrchestrationParallelAborted() from error
                         ordered_outputs[index] = self._branch_failure(
                             branch, error)
+                if suspended:
+                    raise FlowSuspended()
             outputs = [
                 output for output in ordered_outputs if output is not None
             ]
 
-        merged = self._merge(context, outputs)
-        next_node = self._navigator.single_next(barrier) if barrier else None
+        if native_parallel:
+            merged = self._navigator.parallel_merge(parallel_id, context, outputs)
+        else:
+            merged = self._merge(context, outputs)
+            next_node = self._navigator.single_next(barrier) if barrier else None
         return merged, next_node
 
 

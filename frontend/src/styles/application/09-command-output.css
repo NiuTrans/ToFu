@@ -31,17 +31,17 @@
 }
 /* Under 10s left — the command is about to be killed, so stop being quiet. */
 .ptool-cmd-timer-soon {
-  color: #d97706;
+  color: var(--warning-text);
   opacity: 1;
 }
 /* Past the deadline: the backend is SIGKILLing the process tree. */
 .ptool-cmd-timer-over {
-  color: #dc2626;
+  color: var(--error-text);
   opacity: 1;
 }
 .ptool-cmd-code {
   margin: 0;
-  padding: 3px 0 5px;
+  padding: var(--space-1) 0 var(--space-1);
   background: none;
   border: none;
   white-space: pre-wrap;
@@ -72,7 +72,7 @@
 .ptool-cmd-output {
   display: none;
   margin: 0;
-  padding: var(--space-1) 0 var(--space-1) 10px;
+  padding: var(--space-1) 0 var(--space-1) var(--space-3);
   background: none;
   white-space: pre-wrap;
   word-break: break-all;
@@ -94,7 +94,7 @@
  * scanners require, and keeps the code readable under a dark theme where a
  * transparent PNG would invert to unscannable. */
 .ptool-qr-strip {
-  margin: 6px 0 2px;
+  margin: var(--space-2) 0 var(--space-1);
 }
 .ptool-qr-label {
   font-size: 10.5px;
@@ -109,7 +109,7 @@
 .ptool-qr-tile {
   margin: 0;
   padding: var(--space-2);
-  background: #fff;
+  background: var(--qr-plate-background);
   border: 1px solid var(--border);
   border-radius: 6px;
   line-height: 0;
@@ -131,7 +131,7 @@
   max-height: 220px;
   overflow-y: auto;
   margin: 0;
-  padding: var(--space-1) 0 var(--space-1) 10px;
+  padding: var(--space-1) 0 var(--space-1) var(--space-3);
   background: none;
   border-left: 2px solid var(--border);
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
@@ -162,6 +162,11 @@
   display: block;
 }
 
+/* Lazy historical output uses native disclosure state, not legacy fold state. */
+.ptool-cmd-block details.ptool-result-block[open] .ptool-cmd-output {
+  display: block;
+}
+
 /* ── Fold chips: the explicit per-pane disclosures (owner call 2026-09-05)
  * ──
  * A matched pair of ghost buttons on the header row — 命令 for the command
@@ -176,9 +181,9 @@
   flex-shrink: 0;
   display: inline-flex;
   align-items: center;
-  gap: 3px;
+  gap: var(--space-1);
   margin: 0;
-  padding: 1px 5px;
+  padding: var(--control-edge-inset) var(--space-1);
   border: none;
   border-radius: 4px;
   background: none;
@@ -192,7 +197,7 @@
 }
 .ptool-cmd-fold:hover {
   color: var(--accent-hover);
-  background: rgba(148, 163, 184, 0.12);
+  background: var(--bg-hover);
 }
 .ptool-cmd-fold svg {
   width: 10px;

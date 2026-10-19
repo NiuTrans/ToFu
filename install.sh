@@ -136,7 +136,7 @@ API_KEY=""
 API_KEY_FILE=""
 API_KEY_SOURCE="not-configured"
 NO_LAUNCH=0
-SKIP_PLAYWRIGHT=0
+SKIP_PLAYWRIGHT=1
 SKIP_NODE=0
 NO_TOFUDB=0
 NO_UPDATE_CONDA=0
@@ -177,7 +177,8 @@ Common options:
 Advanced options:
   --env NAME              Conda environment name; selects conda (default: tofu)
   --python VERSION        Python version (default: 3.12)
-  --skip-playwright       Skip the optional browser-engine download
+  --with-playwright       Install and verify Chromium (deferred by default)
+  --skip-playwright       Defer the optional browser-engine download (default)
   --skip-node             Legacy no-op (frontend bundles are prebuilt)
   --no-tofudb             Skip the optional tofu-db storage-engine install
   --no-update-conda       Select conda; do not update installer-owned conda
@@ -231,6 +232,7 @@ while [[ $# -gt 0 ]]; do
         --no-update)        NO_UPDATE=1; shift ;;
         --result-json)      require_option_value "$1" "$#" "${2-}"; RESULT_JSON="$2"; shift 2 ;;
         --result-json=*)    RESULT_JSON="${1#*=}"; [[ -n "$RESULT_JSON" ]] || usage_error "--result-json requires a value"; shift ;;
+        --with-playwright)  SKIP_PLAYWRIGHT=0; shift ;;
         --skip-playwright)  SKIP_PLAYWRIGHT=1; shift ;;
         --skip-node)        SKIP_NODE=1; shift ;;
         --no-tofudb)        NO_TOFUDB=1; shift ;;
@@ -732,6 +734,12 @@ if [[ -n "${TOFU_PYPI_INDEX:-}" ]]; then
     # certificate authorities use SSL_CERT_FILE / REQUESTS_CA_BUNDLE instead.
 fi
 
+# Managed Python downloads use the same operator-owned mirror contract as wheels.
+if [[ -n "${TOFU_PYTHON_MIRROR:-}" ]]; then
+    info "Using configured managed Python mirror (URL redacted)"
+    export UV_PYTHON_INSTALL_MIRROR="${TOFU_PYTHON_MIRROR}"
+fi
+
 # ── Playwright browser CDN mirror (opt-in) ──
 # cdn.playwright.dev is slow-to-unreachable from mainland China. Honour a
 # mirror when the operator sets one; empty = upstream, so public installs are
@@ -895,15 +903,6 @@ _try_uv_install() {
         return 1
     fi
     _ensure_uv || { warn "Could not obtain uv — falling back to conda"; return 1; }
-    _TOFU_SEARCH_WHL="$(_install_run 360 python3 -m bootstrap_pkg.install_artifacts \
-        --root "$INSTALL_DIR" --python "$(command -v python3)" | tail -1)" || return 1
-    [[ -f "$_TOFU_SEARCH_WHL" ]] || return 1
-    mkdir -p "${INSTALL_DIR}/.tofu-install-cache" || return 1
-    local _uv_requirements="${INSTALL_DIR}/.tofu-install-cache/uv-requirements.txt"
-    sed '/^[[:space:]]*tofu-search[<>=]/d' "$REQ_FILE" > "$_uv_requirements" || return 1
-    printf '%s\n' "$_TOFU_SEARCH_WHL" >> "$_uv_requirements" || return 1
-
-
     # Only this fresh candidate may be populated; never reuse the selected env.
     if [[ -x "${_venv}/bin/python" ]]; then
         if ! "${_venv}/bin/python" -c 'import sys; sys.exit(sys.version_info < (3, 12))' >/dev/null 2>&1; then
@@ -939,7 +938,15 @@ _try_uv_install() {
     local _uvpy="${_venv}/bin/python"
     [[ -x "$_uvpy" ]] || { warn "uv venv produced no python — falling back to conda"; return 1; }
 
-    local _wheelhouse="${_venv}/wheelhouse"
+    _TOFU_SEARCH_WHL="$(_install_run 360 "$_uvpy" -m bootstrap_pkg.install_artifacts \
+        --root "$INSTALL_DIR" --python "$_uvpy" | tail -1)" || return 1
+    [[ -f "$_TOFU_SEARCH_WHL" ]] || return 1
+    mkdir -p "${INSTALL_DIR}/.tofu-install-cache" || return 1
+    local _uv_requirements="${INSTALL_DIR}/.tofu-install-cache/uv-requirements.txt"
+    sed '/^[[:space:]]*tofu-search[<>=]/d' "$REQ_FILE" > "$_uv_requirements" || return 1
+    printf '%s\n' "$_TOFU_SEARCH_WHL" >> "$_uv_requirements" || return 1
+
+    local _wheelhouse="${INSTALL_DIR}/.tofu-install-cache/wheels/uv"
     _install_run 1900 "$_uvpy" - "$_uvpy" "$_uv_requirements" "$_wheelhouse" <<'PYEOF' || return 1
 from pathlib import Path
 import sys
@@ -1739,6 +1746,8 @@ PDF_STACK_PKGS=(
 )
 
 PIP_ONLY_PKGS=(
+    # Programmatic tool execution uses the pinned Wasmtime runtime.
+    "wasmtime==49.0.0"
     # vtracer — Rust-backed raster→vector tracer for generate_image(svg=true)
     # (scripts/png_to_svg.py). Self-contained wheel: no Python deps, does not
     # touch lxml/icu, so --no-deps is safe. Hard dep — the svg parameter on
@@ -2092,7 +2101,7 @@ _safe_pip_install() {
 step "Prefetching and hashing all remaining mandatory Python artifacts"
 _PIP_STAGE_REQUIREMENTS="${ENV_PREFIX}/install-requirements.txt"
 printf '%s\n' "${PDF_STACK_PKGS[@]}" "${PIP_ONLY_PKGS[@]}" "$_TOFU_SEARCH_WHL" > "$_PIP_STAGE_REQUIREMENTS"
-_WHEELHOUSE="${ENV_PREFIX}/wheelhouse"
+_WHEELHOUSE="${INSTALL_DIR}/.tofu-install-cache/wheels/conda"
 _install_run 1900 "$ENV_PYTHON" - "$ENV_PYTHON" "$_PIP_STAGE_REQUIREMENTS" "$_WHEELHOUSE" <<'PYEOF' \
     || fail "Mandatory Python artifact resolution failed; selected environment is unchanged"
 from pathlib import Path
@@ -2515,7 +2524,7 @@ else
 _FRONTEND_VERSION="$(tr -d '[:space:]' < "${INSTALL_DIR}/VERSION")"
 [[ -n "$_FRONTEND_VERSION" ]] || fail "VERSION is empty; cannot resolve frontend artifact"
 _FRONTEND_NAME="frontend-dist-${_FRONTEND_VERSION}.tar.gz"
-_FRONTEND_BASE="${TOFU_FRONTEND_DIST_BASE_URL:-https://github.com/rangehow/ToFu/releases/download/v${_FRONTEND_VERSION}}"
+_FRONTEND_BASE="${TOFU_FRONTEND_DIST_BASE_URL:-${TOFU_GH_RELEASE_BASE:-https://github.com}/rangehow/ToFu/releases/download/v${_FRONTEND_VERSION}}"
 _FRONTEND_TMP="$(mktemp -d "${TMPDIR:-/tmp}/tofu-frontend.XXXXXX")"
 _FRONTEND_ARCHIVE="${_FRONTEND_TMP}/${_FRONTEND_NAME}"
 _FRONTEND_CHECKSUM="${_FRONTEND_ARCHIVE}.sha256"

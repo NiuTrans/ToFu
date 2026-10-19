@@ -98,6 +98,7 @@ def run_fanout(node: dict, context: str, *, role_runtime, emit, abort_check,
     emit({'type': 'fanout_expanded', 'node_id': node['id'], 'execution_id': scope,
           'specs': [spec.to_dict() for spec in specs]})
     failures = []
+    suspended = threading.Event()
     statuses = {}
     status_lock = threading.Lock()
     failed_publication = threading.Event()
@@ -126,6 +127,13 @@ def run_fanout(node: dict, context: str, *, role_runtime, emit, abort_check,
                     {**nodes[self.spec.id], '_runtimeAbortCheck':
                      lambda: failed_publication.is_set() or abort_check()}, '\n\n'.join(filter(None, (
                         context, self.spec.context, dependency_context))), iteration=iteration)
+            except FlowSuspended:
+                # Release this scheduler worker so other independent members
+                # can reach their boundary. No journal result is fabricated.
+                suspended.set()
+                with status_lock:
+                    statuses[self.spec.id] = 'cancelled'
+                return SubAgentResult(status='cancelled')
             except FlowEventDeliveryError as exc:
                 failures.append(exc)
                 failed_publication.set()
@@ -135,6 +143,7 @@ def run_fanout(node: dict, context: str, *, role_runtime, emit, abort_check,
             return SubAgentResult(status=result.status, final_answer=result.output,
                                   error_message=result.error)
 
+    from lib.orchestration.continuation import FlowSuspended
     scheduler = StreamingScheduler(agent_factory=RoleAgent,
         max_parallel=max_parallel, default_retries=0,
         abort_check=lambda: failed_publication.is_set() or abort_check())
@@ -145,6 +154,8 @@ def run_fanout(node: dict, context: str, *, role_runtime, emit, abort_check,
         results = scheduler.run_until_idle()
         if failures:
             raise failures[0]
+        if suspended.is_set():
+            raise FlowSuspended()
         if len(results) != len(specs) or any(result.status != 'completed' for _, result in results):
             raise FlowExecutionError('fanout did not complete every dependency')
         outputs = {spec.id: result.final_answer for spec, result in results}

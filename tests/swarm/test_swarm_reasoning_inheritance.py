@@ -115,3 +115,12 @@ def test_spawn_and_restart_preserve_parent_reasoning_policy(monkeypatch, tmp_pat
         assert session.thinking_enabled is enabled
         assert session._parent_task_proxy['config']['thinkingDepth'] == 'max'
         assert session._parent_task_proxy['config']['_pinned_provider_id'] == 'scoped-provider'
+
+
+def test_child_preserves_explicit_personal_context_policy():
+    from lib.tasks_pkg.child_invocation import inherit_child_config
+    from lib.agent_core.personal_scope import resolve_preferences_enabled
+    for enabled in (False, True):
+        child = inherit_child_config({'preferencesEnabled': enabled, 'memoryEnabled': False})
+        assert resolve_preferences_enabled(child) is enabled
+        assert child['memoryEnabled'] is False

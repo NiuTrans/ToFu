@@ -37,13 +37,16 @@ class Cancellation:
 
 
 def admission_timeout():
-    raw = os.environ.get('TOFU_WORKSPACE_TOOL_WAIT_SECONDS', '5')
+    """An optional operator wait bound; default admission owns completion."""
+    raw = os.environ.get('TOFU_WORKSPACE_TOOL_WAIT_SECONDS', '')
+    if not raw.strip():
+        return None
     try:
         value = float(raw)
     except ValueError as error:
-        raise ValueError('TOFU_WORKSPACE_TOOL_WAIT_SECONDS must be finite in [0, 600]') from error
-    if not math.isfinite(value) or not 0 <= value <= 600:
-        raise ValueError('TOFU_WORKSPACE_TOOL_WAIT_SECONDS must be finite in [0, 600]')
+        raise ValueError('TOFU_WORKSPACE_TOOL_WAIT_SECONDS must be nonnegative and finite') from error
+    if not math.isfinite(value) or value < 0:
+        raise ValueError('TOFU_WORKSPACE_TOOL_WAIT_SECONDS must be nonnegative and finite')
     return value
 
 

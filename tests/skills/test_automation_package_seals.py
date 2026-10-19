@@ -1,4 +1,7 @@
 """Complete immutable package seals preserve the existing release digest format."""
+
+# Synthetic repository/package fixtures, never shipped-source anchors.
+_AUDIT_SYNTHETIC_REPO_PATHS = ('scripts/setup.sh',)
 import io
 from pathlib import Path
 import subprocess

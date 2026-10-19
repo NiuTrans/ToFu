@@ -171,7 +171,7 @@ def _transcribe_rendered_pages(page_images, *, models, batch_pages, max_workers,
 
     def _process_batch(idx, p_start, p_end, label, use_model):
         if abort_check is not None and abort_check():
-            from lib.llm_errors import AbortedError
+            from lib.llm.llm_errors import AbortedError
             raise AbortedError('VLM PDF transcription aborted')
         md = _vlm_call_pages(
             page_images[p_start:p_end],
@@ -207,7 +207,7 @@ def _transcribe_rendered_pages(page_images, *, models, batch_pages, max_workers,
                 results[batch_idx] = md
                 logger.debug('VLM parse: %s done ✓', label)
             except Exception as exc:
-                from lib.llm_errors import AbortedError
+                from lib.llm.llm_errors import AbortedError
                 if isinstance(exc, AbortedError):
                     for pending in future_map:
                         pending.cancel()

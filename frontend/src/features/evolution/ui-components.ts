@@ -5,7 +5,7 @@ import '@awesome.me/webawesome/dist/components/button/button.js';
 import '@awesome.me/webawesome/dist/translations/zh-cn.js';
 import theme from '@awesome.me/webawesome/dist/styles/themes/default.css?inline';
 
-import './studio/studio-workbench.css';
+import '../../styles/application/26-studio-workbench.css';
 // Scope the vendor's root tokens; never reset the surrounding chat application.
 const style=document.createElement('style');
 style.dataset.evolutionComponents='';

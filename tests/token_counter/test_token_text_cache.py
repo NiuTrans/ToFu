@@ -26,6 +26,7 @@ class _FakeEncoder:
         self.calls = 0
         self.batch_calls = 0
         self.batches = []
+        self.encoded_texts = []
 
     @staticmethod
     def _tokens(text):
@@ -33,11 +34,13 @@ class _FakeEncoder:
 
     def encode(self, text, *, disallowed_special=()):
         self.calls += 1
+        self.encoded_texts.append(text)
         return self._tokens(text)
 
     def encode_batch(self, texts, *, disallowed_special=()):
         self.batch_calls += 1
         self.batches.append(list(texts))
+        self.encoded_texts.extend(texts)
         return [self._tokens(text) for text in texts]
 
 
@@ -240,8 +243,7 @@ def test_full_request_batches_cold_text_and_reuses_large_prefix(monkeypatch):
         messages, model='kimi-k3', tools=[private_tool])
 
     assert first == second
-    assert encoder.batch_calls == 1
-    assert len(encoder.batches[0]) == 2
+    assert len(encoder.encoded_texts) == 2
     assert counter.text_count_cache_snapshot()['hits'] == 2
     assert counter.text_count_cache_snapshot()['misses'] == 2
     assert private_message not in repr(counter._text_count_cache)
@@ -324,9 +326,7 @@ def test_full_request_batches_only_short_text_and_new_large_tail(monkeypatch):
         model='kimi-k3',
     )
 
-    assert encoder.batch_calls == 2
-    assert encoder.batches[0] == [stable]
-    assert encoder.batches[1] == ['short tail']
+    assert encoder.encoded_texts == [stable, 'short tail']
 
 
 def test_full_request_encodes_same_large_miss_once_per_batch(monkeypatch):
@@ -343,7 +343,7 @@ def test_full_request_encodes_same_large_miss_once_per_batch(monkeypatch):
 
     text_tokens = len(_FakeEncoder._tokens(repeated))
     assert result == text_tokens * 2 + 4 * len(messages) + 400
-    assert encoder.batches == [[repeated]]
+    assert encoder.encoded_texts == [repeated]
     assert counter.text_count_cache_snapshot()['misses'] == 1
     assert counter.text_count_cache_snapshot()['hits'] == 1
 
@@ -380,6 +380,7 @@ def test_failed_full_request_batch_publishes_no_cache_entry(monkeypatch):
         'encode_batch',
         lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError('broken')),
     )
+    monkeypatch.setattr(encoder, 'encode', lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError('broken')))
 
     private_tool_result = 'private failure payload'
     measurement = {}
@@ -391,3 +392,19 @@ def test_failed_full_request_batch_publishes_no_cache_entry(monkeypatch):
     assert result is None
     assert counter.text_count_cache_snapshot()['entries'] == 0
     assert REUSABLE_TEXT_TOKEN_COUNTS_BY_IDENTITY_KEY not in measurement
+
+
+@pytest.mark.parametrize('encoding,model',[('cl100k_base','gpt-4'),('o200k_base','gpt-4o')])
+@pytest.mark.parametrize('texts',[
+    ['Hello 世界', '<|endoftext|>🙂 café'],
+    ['a'*512, '🙂'*512],
+    ['a'*513, '🙂'*512],
+])
+def test_request_cache_preserves_exact_special_and_unicode_counts(encoding,model,texts):
+    import tiktoken
+    encoder=tiktoken.get_encoding(encoding)
+    expected=sum(len(row) for row in encoder.encode_batch(texts,disallowed_special=()))
+    selected={id(text):None for text in texts}
+    result=counter._count_request_texts_with_cache(texts,model=model,encoder=encoder,selected_text_token_counts=selected)
+    assert result==expected
+    assert [selected[id(text)] for text in texts]==[len(encoder.encode(text,disallowed_special=())) for text in texts]

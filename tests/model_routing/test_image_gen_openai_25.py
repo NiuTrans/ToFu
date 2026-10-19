@@ -71,7 +71,7 @@ def test_sunburst_excluded_from_chat_pickers():
 # ── registration admission (maintained exact knowledge) ─────────────
 
 def _compiled_sunburst_bundle():
-    from lib.provider_template_recipes import (
+    from lib.provider.provider_template_recipes import (
         compile_provider_template_bundle, load_provider_templates)
     from lib.model_routing.model_defaults import official_model_directory
     templates = load_provider_templates()

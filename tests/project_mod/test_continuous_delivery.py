@@ -37,7 +37,7 @@ def spy_merges(monkeypatch):
     original = ic._git
 
     def spy(root, args, **kwargs):
-        if args[:2] == ['apply', '--3way']:
+        if args[:3] == ['apply', '--cached', '--3way']:
             calls.append(tuple(args))
         return original(root, args, **kwargs)
 
@@ -53,15 +53,17 @@ def test_same_file_compatible_changes_three_way_merge_preserves_staged_index(rep
     git(root, 'commit', '-m', 'multiline baseline')
     work = automatic_workspace(repo, monkeypatch)
     (work / 'base.txt').write_text(original.replace('line 2\n', 'task line\n'))
-    concurrent = original.replace('line 4\n', 'concurrent line\n')
+    concurrent = original.replace('line 14\n', 'concurrent line\n')
     (root / 'base.txt').write_text(concurrent)
     git(root, 'add', 'base.txt')
     before_index = git(root, 'write-tree')
     before_head = git(root, 'rev-parse', 'HEAD')
     assert automatic_settle(repo)['state'] == 'delivered'
-    assert (root / 'base.txt').read_text() == concurrent.replace('line 2\n', 'task line\n')
     assert git(root, 'write-tree') == before_index
     assert git(root, 'rev-parse', 'HEAD') == before_head
+    assert receipt(root)['state'] == 'delivered'
+    assert (root / 'base.txt').read_text() == concurrent.replace('line 2\n', 'task line\n')
+    assert git(root, 'status', '--porcelain') != ''
 
 
 def test_conflict_evidence_is_durable_bounded_and_no_partial_publication(repo, monkeypatch):
@@ -103,28 +105,14 @@ def test_restart_and_unrelated_edits_do_not_repeat_conflict_merge(repo, monkeypa
     assert (root / 'unrelated.txt').read_text() == 'other task\n'
 
 
-def test_gate_failure_waits_for_combined_tree_or_verification_change(repo, monkeypatch):
+def test_gate_failure_does_not_delay_workspace_delivery(repo, monkeypatch):
     root, _, _ = repo
     work = automatic_workspace(repo, monkeypatch)
     (work / 'new.txt').write_text('candidate\n')
-    calls = []
-
-    def gate(*args, **kwargs):
-        calls.append(args[2])
-        return len(calls) > 1, 'injected semantic failure'
-
-    monkeypatch.setattr(ic, '_gate_commands', gate)
-    first = automatic_settle(repo)
-    assert first['state'] == 'failed'
-    assert first['retry']['condition'] == 'validation_inputs_changed'
-    assert not delivery.resume_pending_workspace_deliveries()
-    assert len(calls) == 1
-    assert not (root / 'new.txt').exists()
-    # Gate configuration is itself an input; no checkpoint mutation required.
-    monkeypatch.setenv('TOFU_INTEGRATION_TEST_CMD', 'python -m unittest')
-    assert delivery.resume_pending_workspace_deliveries()
-    assert len(calls) == 2
-    assert receipt(root)['state'] == 'delivered'
+    monkeypatch.setattr(ic, '_gate_commands', lambda *a, **k: pytest.fail('workspace delivery invoked release gate'))
+    git(root, 'config', 'tofu.integrationTestCommand', 'missing-release-command')
+    assert automatic_settle(repo)['state'] == 'delivered'
+    assert (root / 'new.txt').read_text() == 'candidate\n'
 
 
 def test_failed_owner_does_not_get_publication_by_retry_evidence(repo, monkeypatch):
@@ -191,6 +179,9 @@ def test_explicit_retry_routes_to_delivery_and_repaired_checkpoint_not_candidate
     assert automatic_settle(repo)['state'] == 'blocked'
     # Agent/human repair remains in the registered source; the canonical
     # change is preserved in the proposed resolution before it can publish.
+
+    git(root, 'add', 'base.txt')
+    git(root, 'commit', '-m', 'peer owns conflict input')
     (work / 'base.txt').write_text('canonical version\nresolved task addition\n')
     ic.checkpoint_workspace(str(root), 'automatic', user_id=1)
     result = ic.retry_workspace(str(root), 'automatic', user_id=1)
@@ -234,6 +225,9 @@ def test_repair_preserves_unrelated_canonical_wip_and_original_source(repo, monk
     git(root, 'add', 'unrelated.txt')
     index = git(root, 'write-tree')
     automatic_settle(repo)
+
+    git(root, 'commit', '--only', '-m', 'peer owns conflict input', '--', 'base.txt')
+    index = git(root, 'write-tree')
     (work / 'base.txt').write_text('canonical version\nresolved task addition\n')
     ic.checkpoint_workspace(str(root), 'automatic', user_id=1)
     ic.retry_workspace(str(root), 'automatic', user_id=1)
@@ -247,7 +241,9 @@ def test_repair_preserves_unrelated_canonical_wip_and_original_source(repo, monk
     delivery.resume_pending_workspace_deliveries()
     assert receipt(root)['state'] == 'delivered'
     assert (root / 'unrelated.txt').read_text() == 'user wip\n'
-    assert git(root, 'write-tree') == index
+    assert git(root, 'show', ':unrelated.txt') == 'user wip'
+    assert git(root, 'diff', '--cached', '--name-only') == 'unrelated.txt'
+    assert git(root, 'write-tree') == index  # delivery leaves staging untouched
 
 
 def test_repair_cannot_expand_original_delta_paths(repo, monkeypatch):
@@ -270,6 +266,8 @@ def test_repair_preparation_does_not_hold_repository_or_writer_admission(repo, m
     original = ic._alternate_index_checkpoint
     entered, release = threading.Event(), threading.Event()
 
+    git(root, 'add', 'base.txt')
+    git(root, 'commit', '-m', 'peer owns conflict input')
     def pause(checkout, *args, **kwargs):
         if Path(checkout).name == 'proposal':
             entered.set()
@@ -341,6 +339,9 @@ def test_repair_pin_rolls_back_on_durable_receipt_failure(repo, monkeypatch):
 def test_lost_repair_publication_receipt_recovers_without_reapplying(repo, monkeypatch):
     root, work = setup_conflict(repo, monkeypatch)
     automatic_settle(repo)
+
+    git(root, 'add', 'base.txt')
+    git(root, 'commit', '-m', 'peer owns conflict input')
     (work / 'base.txt').write_text('canonical version\nappend once\n')
     ic.checkpoint_workspace(str(root), 'automatic', user_id=1)
     ic.retry_workspace(str(root), 'automatic', user_id=1)
@@ -391,23 +392,14 @@ def test_git_pathspec_shaped_names_are_literal_retry_inputs(repo, monkeypatch):
     assert (root / name).read_text() == 'task version\n'
 
 
-def test_gate_timeout_retains_transient_retry_without_input_change(repo, monkeypatch):
+def test_gate_timeout_does_not_delay_workspace_delivery(repo, monkeypatch):
     root, _, _ = repo
     work = automatic_workspace(repo, monkeypatch)
     (work / 'new.txt').write_text('candidate\n')
-    calls = []
-
-    def gate(*args, **kwargs):
-        calls.append(1)
-        return (False, 'integration_gate_timeout: temporary test deadline') if len(calls) == 1 else (True, '')
-
-    monkeypatch.setattr(ic, '_gate_commands', gate)
-    first = automatic_settle(repo)
-    assert first['state'] == 'blocked'
-    assert first['retry'] is None
-    delivery.resume_pending_workspace_deliveries()
-    assert len(calls) == 2
-    assert receipt(root)['state'] == 'delivered'
+    monkeypatch.setattr(ic, '_gate_commands', lambda *a, **k: pytest.fail('workspace delivery invoked release gate'))
+    git(root, 'config', 'tofu.integrationTestCommand', 'missing-release-command')
+    assert automatic_settle(repo)['state'] == 'delivered'
+    assert (root / 'new.txt').read_text() == 'candidate\n'
 
 
 def test_failed_optional_repair_narrative_does_not_lose_durable_blocker(repo, monkeypatch):
@@ -435,3 +427,23 @@ def test_real_gate_deadline_is_transient_integration_failure(repo, monkeypatch, 
     assert not passed
     assert detail.startswith('integration_gate_timeout: ')
     assert git(root, 'worktree', 'list', '--porcelain').count('worktree ') == 2
+
+
+def test_local_gate_change_does_not_block_workspace_merge(repo, monkeypatch):
+    root, _, _ = repo
+    work = automatic_workspace(repo, monkeypatch)
+    (work / 'new.txt').write_text('candidate\n')
+    monkeypatch.setattr(ic, '_gate_commands', lambda *a, **k: pytest.fail('workspace delivery invoked release gate'))
+    git(root, 'config', 'tofu.integrationTestCommand', 'missing-release-command')
+    assert automatic_settle(repo)['state'] == 'delivered'
+    assert (root / 'new.txt').read_text() == 'candidate\n'
+
+
+def test_task_delta_gate_policy_change_does_not_control_workspace_merge(repo, monkeypatch):
+    root, _, _ = repo
+    work = automatic_workspace(repo, monkeypatch)
+    (work / 'new.txt').write_text('candidate\n')
+    monkeypatch.setattr(ic, '_gate_commands', lambda *a, **k: pytest.fail('workspace delivery invoked release gate'))
+    git(root, 'config', 'tofu.integrationTestCommand', 'missing-release-command')
+    assert automatic_settle(repo)['state'] == 'delivered'
+    assert (root / 'new.txt').read_text() == 'candidate\n'

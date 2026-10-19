@@ -18,7 +18,7 @@ from __future__ import annotations
 import importlib
 import os
 import platform
-import py_compile
+import subprocess
 import sys
 
 import pytest
@@ -61,8 +61,7 @@ class TestImportValidation:
         "lib.pdf_parser",
         "lib.pricing",
         "lib.protocols",
-        "lib.rate_limiter",
-        "lib.search_bridge",
+        "lib.search.search_bridge",
         "tofu_search.search",
         "lib.memory",
     ]
@@ -175,13 +174,15 @@ class TestPythonSyntax:
         )
 
     def _collect_py_files(self):
-        py_files = []
-        for root, dirs, files in os.walk(PROJECT_ROOT):
-            dirs[:] = [d for d in dirs if not self._is_skip_dir(d)]
-            for f in files:
-                if f.endswith(".py"):
-                    py_files.append(os.path.join(root, f))
-        return py_files
+        listing = subprocess.run(
+            ['git', 'ls-files', '--cached', '--others', '--exclude-standard',
+             '-z', '--', '*.py'], cwd=PROJECT_ROOT,
+            capture_output=True, check=True, timeout=30).stdout
+        paths = {os.fsdecode(path) for path in listing.split(b'\0') if path}
+        return sorted(
+            os.path.join(PROJECT_ROOT, path) for path in paths
+            if not any(self._is_skip_dir(part) for part in path.split('/')[:-1])
+            and os.path.isfile(os.path.join(PROJECT_ROOT, path)))
 
     def test_all_py_files_compile(self):
         """Every .py file in the project compiles without SyntaxError."""
@@ -191,8 +192,9 @@ class TestPythonSyntax:
         errors = []
         for path in py_files:
             try:
-                py_compile.compile(path, doraise=True)
-            except py_compile.PyCompileError as e:
+                with open(path, 'rb') as source:
+                    compile(source.read(), path, 'exec', dont_inherit=True)
+            except SyntaxError as e:
                 errors.append(str(e))
 
         assert not errors, f"Syntax errors in {len(errors)} file(s):\n" + "\n".join(errors)

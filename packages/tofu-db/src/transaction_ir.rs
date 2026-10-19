@@ -8,6 +8,9 @@
 //! certificates follow actual immutable output; any mutable slot access invalidates
 //! them. execute_transaction_ir_with_json_proof exposes this to semantic validation.
 
+mod slots;
+use slots::SparseSlotValues;
+
 use std::io;
 use std::time::{Duration, Instant};
 
@@ -17,15 +20,14 @@ use crate::authority::{AuthorityDatabase, AuthorityTransaction};
 use crate::entity::EntityKey;
 use crate::generated_storage_operations::StorageOperationKind;
 pub use crate::generated_tofudb_ir::{
-    MAX_ENTITY_RANGE_ROWS, MAX_TRANSACTION_IR_LITERAL_BYTES, MAX_TRANSACTION_IR_SLOTS,
-    MAX_TRANSACTION_IR_STEPS,
+    MAX_ENTITY_RANGE_ROWS,
 };
 use crate::generated_tofudb_ir::{
-    MAX_MODEL_ROUTING_CIPHERTEXT_CHARACTERS, MAX_MODEL_ROUTING_DOCUMENT_BYTES,
+    MAX_MODEL_ROUTING_CIPHERTEXT_CHARACTERS,
     MAX_MODEL_ROUTING_KEY_HINT_CHARACTERS,
     MAX_MODEL_ROUTING_SECRET_REFERENCE_CHARACTERS, MAX_MODEL_ROUTING_TIMESTAMP_SECONDS,
     MAX_PROVIDER_TENANT_LABEL_CHARACTERS, MAX_RECENT_PROJECT_PATH_CHARACTERS,
-    MAX_RECENT_PROJECT_TOUCH_BATCH, MAX_TASK_RESULT_CACHE_FACT,
+    MAX_TASK_RESULT_CACHE_FACT,
     MAX_TASK_RESULT_COST_EXPERIMENT_ROWS, MAX_TASK_RESULT_COST_EXPERIMENT_SCAN_ROWS,
     MAX_TASK_RESULT_DOCUMENT_BYTES, MAX_TASK_RESULT_RECOVERY_ROWS,
     MAX_TASK_RESULT_RECOVERY_SCAN_ROWS, MAX_TASK_RESULT_SUMMARY_ROWS,
@@ -39,8 +41,8 @@ use crate::stream::{StreamEvent, StreamKey};
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum EntityWriteCondition {
     Always,
-    SlotMissing(u8),
-    SlotPresent(u8),
+    SlotMissing(usize),
+    SlotPresent(usize),
 }
 
 #[derive(Clone, Debug)]
@@ -108,31 +110,31 @@ fn execute_fenced_indexed_append(
 pub enum TransactionIrStep {
     BillingLedgerAppend {
         entry: crate::billing::LedgerEntry,
-        slot: u8,
+        slot: usize,
     },
     BillingLedgerFind {
         user_id: String,
         kind: String,
         ref_type: String,
         ref_id: String,
-        slot: u8,
+        slot: usize,
     },
     BillingLedgerList {
         request: crate::billing::LedgerListRequest,
-        slot: u8,
+        slot: usize,
     },
     BillingLedgerRecompute {
         user_id: String,
-        slot: u8,
+        slot: usize,
     },
     BillingPaymentFind {
         provider: String,
         provider_id: String,
-        slot: u8,
+        slot: usize,
     },
     BillingPaymentList {
         request: crate::billing::PaymentListRequest,
-        slot: u8,
+        slot: usize,
     },
     BillingPaymentRecord {
         provider: String,
@@ -140,109 +142,111 @@ pub enum TransactionIrStep {
         payload_json: Vec<u8>,
         created_at: u64,
         physical_updated_at_ms: u64,
-        slot: u8,
+        slot: usize,
     },
     BillingPaymentSettle {
         payment_id: String,
         payload_json: Vec<u8>,
         settled_at: u64,
         physical_updated_at_ms: u64,
-        slot: u8,
+        slot: usize,
     },
     BillingRedeemCodeApply {
         request: crate::billing::RedeemApplyRequest,
-        slot: u8,
+        slot: usize,
     },
     BillingRedeemCodesList {
         request: crate::billing::RedeemListRequest,
-        slot: u8,
+        slot: usize,
     },
     BillingRedeemCodesMint {
         request: crate::billing::RedeemMintRequest,
-        slot: u8,
+        slot: usize,
     },
     BillingReserveStale {
         cutoff_ts: u64,
         limit: usize,
-        slot: u8,
+        slot: usize,
     },
     BillingWalletApply {
         request: crate::billing::WalletApplyRequest,
-        slot: u8,
+        slot: usize,
     },
     BillingWalletGet {
         user_id: String,
-        slot: u8,
+        slot: usize,
     },
     BillingWalletSettle {
         request: crate::billing::WalletSettleRequest,
-        slot: u8,
+        slot: usize,
     },
     ArtifactCreate {
         request: crate::artifact::CreateRequest,
-        slot: u8,
+        slot: usize,
     },
     ArtifactGet {
         artifact_id: String,
         include_content: bool,
-        slot: u8,
+        slot: usize,
     },
     ArtifactList {
         conversation_id: String,
         include_deleted: bool,
-        slot: u8,
+        slot: usize,
     },
     ArtifactDelete {
         artifact_id: String,
         deleted_at_ms: u64,
-        slot: u8,
+        slot: usize,
     },
     ArtifactVersions {
         artifact_id: String,
-        slot: u8,
+        slot: usize,
     },
     ArtifactLibrary {
         limit: usize,
-        slot: u8,
+        slot: usize,
     },
     ArtifactPin {
         artifact_id: String,
         pinned: bool,
-        slot: u8,
+        slot: usize,
     },
     ToolResultArtifactPut {
         content: String,
         media_type: String,
         created_at_ms: u64,
         expires_at_ms: u64,
-        slot: u8,
+        slot: usize,
     },
     ToolResultArtifactRead {
         artifact_ref: String,
         now_ms: u64,
-        offset: usize,
+        offset: serde_json::Value,
+        selector: String,
         limit: usize,
-        slot: u8,
+        slot: usize,
     },
     ToolResultArtifactSearch {
         artifact_ref: String,
         query: String,
         now_ms: u64,
-        cursor: usize,
+        cursor: serde_json::Value,
+        selector: String,
         limit: usize,
-        slot: u8,
+        slot: usize,
     },
     ToolResultArtifactPrune {
         now_ms: u64,
         limit: usize,
-        slot: u8,
+        slot: usize,
     },
     SystemSchemaVersion {
-        slot: u8,
+        slot: usize,
     },
     RateLimitRecordAndCheck {
         request: crate::rate_limit::RecordAndCheckRequest,
-        slot: u8,
+        slot: usize,
     },
     CompactionArchiveCreate {
         archive_id: String,
@@ -262,13 +266,13 @@ pub enum TransactionIrStep {
         reason: String,
         created_at_ms: u64,
         committed_at_ms: u64,
-        slot: u8,
+        slot: usize,
     },
     CompactionArchiveList {
         conversation_id: String,
         archive_scope: String,
         limit: usize,
-        slot: u8,
+        slot: usize,
     },
     CompactionArchiveGet {
         conversation_id: String,
@@ -276,7 +280,7 @@ pub enum TransactionIrStep {
         archive_scope: String,
         include_messages: bool,
         include_post_messages: bool,
-        slot: u8,
+        slot: usize,
     },
     CompactionArchiveUpdateSummary {
         archive_id: String,
@@ -287,18 +291,18 @@ pub enum TransactionIrStep {
         receipt_json: Option<Vec<u8>>,
         post_messages_json: Option<Vec<u8>>,
         committed_at_ms: u64,
-        slot: u8,
+        slot: usize,
     },
     CompactionArchiveDeleteConversation {
         conversation_id: String,
         archive_scope: String,
-        slot: u8,
+        slot: usize,
     },
     CompactionArchivePrune {
         conversation_id: String,
         archive_scope: String,
         keep: usize,
-        slot: u8,
+        slot: usize,
     },
     ConversationCreate {
         conversation_id: String,
@@ -314,48 +318,48 @@ pub enum TransactionIrStep {
         title: Option<String>,
         identity_seed: [u8; 32],
         committed_at_ms: u64,
-        slot: u8,
+        slot: usize,
     },
     ConversationDelete {
         conversation_id: String,
         deleted_at_ms: u64,
-        slot: u8,
+        slot: usize,
     },
     ConversationRestore {
         conversation_id: String,
         committed_at_ms: u64,
-        slot: u8,
+        slot: usize,
     },
     ConversationPurge {
         conversation_id: String,
         purged_at_ms: u64,
-        slot: u8,
+        slot: usize,
     },
     ConversationTrashPrune {
         deleted_before_ms: u64,
         maximum_conversations: usize,
-        slot: u8,
+        slot: usize,
     },
     ConversationCount {
-        slot: u8,
+        slot: usize,
     },
     ConversationActivityDates {
         updated_at_gte: i64,
         created_at_lt: Option<i64>,
         day_boundaries_ms: Vec<i64>,
         limit: usize,
-        slot: u8,
+        slot: usize,
     },
     ConversationDiagnostic {
         request: crate::turn::diagnostic::Request,
-        slot: u8,
+        slot: usize,
     },
     ConversationGet {
         conversation_id: String,
         include_messages: bool,
         message_window: usize,
         before_sequence: Option<i64>,
-        slot: u8,
+        slot: usize,
     },
     ConversationSettingsUpdate {
         conversation_id: String,
@@ -364,14 +368,14 @@ pub enum TransactionIrStep {
         expected_settings_json: Option<Vec<u8>>,
         expected_revision: Option<u64>,
         committed_at_ms: u64,
-        slot: u8,
+        slot: usize,
     },
     ConversationMetadataUpdate {
         conversation_id: String,
         title: Option<String>,
         updated_at_ms: Option<u64>,
         committed_at_ms: u64,
-        slot: u8,
+        slot: usize,
     },
     ConversationCatalogPage {
         folder_id: Option<String>,
@@ -379,7 +383,7 @@ pub enum TransactionIrStep {
         before_id: String,
         limit: usize,
         settings_keys: Option<Vec<String>>,
-        slot: u8,
+        slot: usize,
     },
     ConversationList {
         project_path: Option<String>,
@@ -392,11 +396,11 @@ pub enum TransactionIrStep {
         settings_keys: Option<Vec<String>>,
         include_messages: bool,
         limit: usize,
-        slot: u8,
+        slot: usize,
     },
     ModelRoutingGet {
         tenant_label: String,
-        slot: u8,
+        slot: usize,
     },
     ModelRoutingCommit {
         tenant_label: String,
@@ -404,18 +408,18 @@ pub enum TransactionIrStep {
         document_json: Vec<u8>,
         migration_receipt_json: Option<Vec<u8>>,
         updated_at: f64,
-        slot: u8,
+        slot: usize,
     },
     ModelRoutingMigrationReceiptGet {
         tenant_label: String,
-        slot: u8,
+        slot: usize,
     },
     ModelRoutingMigrationReceiptPut {
         tenant_label: String,
         receipt_json: Vec<u8>,
         initial_document_json: Option<Vec<u8>>,
         updated_at: f64,
-        slot: u8,
+        slot: usize,
     },
     ModelRoutingSecretPut {
         tenant_label: String,
@@ -423,43 +427,43 @@ pub enum TransactionIrStep {
         ciphertext: String,
         key_hint: String,
         updated_at: f64,
-        slot: u8,
+        slot: usize,
     },
     ModelRoutingSecretGet {
         tenant_label: String,
         secret_reference: String,
-        slot: u8,
+        slot: usize,
     },
     ModelRoutingSecretList {
         tenant_label: String,
-        slot: u8,
+        slot: usize,
     },
     ModelRoutingSecretDelete {
         tenant_label: String,
         secret_reference: String,
-        slot: u8,
+        slot: usize,
     },
     ModelRoutingSecretPrune {
         tenant_label: String,
         active_secret_references: std::collections::BTreeSet<String>,
         updated_before: f64,
-        slot: u8,
+        slot: usize,
     },
     ProviderCreate {
         tenant_label: String,
         provider_id: String,
         document_json: Vec<u8>,
         physical_updated_at_ms: u64,
-        slot: u8,
+        slot: usize,
     },
     ProviderGet {
         tenant_label: String,
         provider_id: String,
-        slot: u8,
+        slot: usize,
     },
     ProviderList {
         tenant_label: String,
-        slot: u8,
+        slot: usize,
     },
     ProviderUpdate {
         tenant_label: String,
@@ -467,19 +471,19 @@ pub enum TransactionIrStep {
         updates_json: Vec<u8>,
         updated_at: f64,
         physical_updated_at_ms: u64,
-        slot: u8,
+        slot: usize,
     },
     ProviderDelete {
         tenant_label: String,
         provider_id: String,
-        slot: u8,
+        slot: usize,
     },
     ProviderTouch {
         tenant_label: String,
         provider_id: String,
         used_at: f64,
         physical_updated_at_ms: u64,
-        slot: u8,
+        slot: usize,
     },
     TaskResultCheckpoint {
         task_id: String,
@@ -490,19 +494,19 @@ pub enum TransactionIrStep {
         require_parent: bool,
         cache_prefix_hwm: Option<u64>,
         last_turn_cache_read: Option<u64>,
-        slot: u8,
+        slot: usize,
     },
     TaskResultRecordGet {
         task_id: String,
         requested_user_id: u64,
-        slot: u8,
+        slot: usize,
     },
     TaskResultReplayGet {
         task_id: String,
         requested_user_id: u64,
         include_terminal_payload: bool,
         include_metadata: bool,
-        slot: u8,
+        slot: usize,
     },
     TaskResultSummaryList {
         requested_user_id: Option<u64>,
@@ -513,29 +517,29 @@ pub enum TransactionIrStep {
         scan_limit: usize,
         order_by: String,
         after_key: String,
-        slot: u8,
+        slot: usize,
     },
     TaskResultAbort {
         task_id: String,
         requested_user_id: u64,
         source: String,
         requested_at_ms: u64,
-        slot: u8,
+        slot: usize,
     },
     TaskResultAbortRequested {
         task_id: String,
         requested_user_id: u64,
-        slot: u8,
+        slot: usize,
     },
     TaskResultRecoverRunning {
         interrupted_reason: String,
         maximum_rows: usize,
         scan_limit: usize,
         updated_at_ms: u64,
-        slot: u8,
+        slot: usize,
     },
     TaskResultRecoveryPending {
-        slot: u8,
+        slot: usize,
     },
     TaskResultCostExperimentScan {
         requested_user_id: u64,
@@ -544,108 +548,108 @@ pub enum TransactionIrStep {
         limit: usize,
         scan_limit: usize,
         after_key: String,
-        slot: u8,
+        slot: usize,
     },
     TenantUserCreate {
         request: crate::tenant_user::CreateRequest,
-        slot: u8,
+        slot: usize,
     },
     TenantUserGet {
         selector: crate::tenant_user::Selector,
-        slot: u8,
+        slot: usize,
     },
     TenantUserList {
         request: crate::tenant_user::ListRequest,
-        slot: u8,
+        slot: usize,
     },
     TenantUserSetStatus {
         user_id: String,
         status: String,
-        slot: u8,
+        slot: usize,
     },
     TenantUserSetRole {
         user_id: String,
         role: String,
-        slot: u8,
+        slot: usize,
     },
     TenantUserAuthentication {
         email: String,
-        slot: u8,
+        slot: usize,
     },
     TenantUserRecordLogin {
         user_id: String,
         last_login_at: u64,
-        slot: u8,
+        slot: usize,
     },
     CredentialCreate {
         request: crate::credential::CreateRequest,
-        slot: u8,
+        slot: usize,
     },
     CredentialCreateIfOwnerEmpty {
         request: crate::credential::CreateRequest,
-        slot: u8,
+        slot: usize,
     },
     CredentialGet {
         boundary: crate::credential::Boundary,
         credential_id: String,
-        slot: u8,
+        slot: usize,
     },
     CredentialList {
         boundary: crate::credential::Boundary,
-        slot: u8,
+        slot: usize,
     },
     CredentialExists {
         boundary: crate::credential::Boundary,
-        slot: u8,
+        slot: usize,
     },
     CredentialAuthenticate {
         secret_hash: String,
         now: f64,
-        slot: u8,
+        slot: usize,
     },
     CredentialValidate {
         secret_hash: String,
         now: f64,
-        slot: u8,
+        slot: usize,
     },
     CredentialIdentify {
         secret_hash: String,
-        slot: u8,
+        slot: usize,
     },
     CredentialTouch {
         boundary: crate::credential::Boundary,
         credential_id: String,
         used_at: f64,
         touch_if_before: f64,
-        slot: u8,
+        slot: usize,
     },
     CredentialUpdate {
         boundary: crate::credential::Boundary,
         credential_id: String,
         request: crate::credential::UpdateRequest,
-        slot: u8,
+        slot: usize,
     },
     CredentialRevoke {
         boundary: crate::credential::Boundary,
         credential_id: String,
         revoked_at: f64,
-        slot: u8,
+        slot: usize,
     },
     AutomationSkillSourceUpdate {
         request: crate::automation_skill_source::Request,
-        slot: u8,
+        slot: usize,
     },
     AutomationProjectUpdate {
         request: crate::automation_project::Request,
-        slot: u8,
+        slot: usize,
     },
     AutomationDefinitionUpdate {
         request: crate::automation_definition::Request,
-        slot: u8,
+        slot: usize,
     },
     AutomationEventSettle {
         request: crate::automation_events::Request,
-        slot: u8,
+        slot: usize,
     },
     AutomationDefinitionDraftGuard {
         key: String,
@@ -653,15 +657,15 @@ pub enum TransactionIrStep {
     AutomationRunMutation {
         request: crate::automation_run::Request,
         advance: bool,
-        slot: u8,
+        slot: usize,
     },
     AutomationRunCancel {
         request: crate::automation_run::CancelRequest,
-        slot: u8,
+        slot: usize,
     },
     AutomationRunApprove {
         request: crate::automation_approval::ApproveRequest,
-        slot: u8,
+        slot: usize,
     },
     WorkerJobEnqueue {
         task_id: String,
@@ -674,19 +678,19 @@ pub enum TransactionIrStep {
         priority: u16,
         available_at_ms: u64,
         now_ms: u64,
-        slot: u8,
+        slot: usize,
     },
     WorkerJobGet {
         task_id: String,
         user_id: u64,
-        slot: u8,
+        slot: usize,
     },
     WorkerJobClaimNext {
         worker_id: String,
         now_ms: u64,
         lease_ms: u64,
         task_kinds: Vec<String>,
-        slot: u8,
+        slot: usize,
     },
     WorkerJobDefer {
         task_id: String,
@@ -697,7 +701,7 @@ pub enum TransactionIrStep {
         replay_cursor: u64,
         observed_cancel_sequence: u64,
         observed_wake_sequence: u64,
-        slot: u8,
+        slot: usize,
     },
     WorkerJobHeartbeat {
         task_id: String,
@@ -706,21 +710,21 @@ pub enum TransactionIrStep {
         now_ms: u64,
         lease_ms: u64,
         replay_cursor: u64,
-        slot: u8,
+        slot: usize,
     },
     WorkerJobClaimState {
         task_id: String,
         worker_id: String,
         fencing_token: u64,
         now_ms: u64,
-        slot: u8,
+        slot: usize,
     },
     WorkerJobRequestCancel {
         task_id: String,
         user_id: u64,
         now_ms: u64,
         reason: String,
-        slot: u8,
+        slot: usize,
     },
     WorkerJobComplete {
         task_id: String,
@@ -731,7 +735,7 @@ pub enum TransactionIrStep {
         result_ref: String,
         replay_cursor: u64,
         error_json: Vec<u8>,
-        slot: u8,
+        slot: usize,
     },
     TurnAppendSettled {
         conversation_id: String,
@@ -752,151 +756,151 @@ pub enum TransactionIrStep {
         default_title: String,
         default_settings_json: Vec<u8>,
         default_created_at_ms: u64,
-        slot: u8,
+        slot: usize,
     },
     TurnCreatePair {
         request: Box<crate::turn::CreatePairRequest>,
-        slot: u8,
+        slot: usize,
     },
     TurnQueueActivate {
         request: crate::turn::QueueTransitionRequest,
-        slot: u8,
+        slot: usize,
     },
     TurnQueueCancel {
         request: crate::turn::QueueTransitionRequest,
-        slot: u8,
+        slot: usize,
     },
     TurnSteerCommit {
         request: crate::turn::SteerCommitRequest,
-        slot: u8,
+        slot: usize,
     },
     TurnRelatedAnnounce {
         request: crate::turn::RelatedAnnounceRequest,
-        slot: u8,
+        slot: usize,
     },
     TurnVisibleSync {
         request: Box<crate::turn::VisibleSyncRequest>,
-        slot: u8,
+        slot: usize,
     },
     TurnExists {
         conversation_id: String,
-        slot: u8,
+        slot: usize,
     },
     TurnGet {
         conversation_id: String,
         turn_id: String,
-        slot: u8,
+        slot: usize,
     },
     TurnImageGet {
         conversation_id: String,
         turn_id: String,
         projection_revision: u64,
         image_index: usize,
-        slot: u8,
+        slot: usize,
     },
     TurnContextRead {
         conversation_id: String,
         turn_id: String,
         replay: bool,
         after_turn_id: Option<String>,
-        slot: u8,
+        slot: usize,
     },
     TurnList {
         conversation_id: String,
         lane_id: Option<String>,
-        slot: u8,
+        slot: usize,
     },
     TurnListDelta {
         conversation_id: String,
         since_ms: u64,
         known_revisions: std::collections::BTreeMap<String, u64>,
         server_now_ms: u64,
-        slot: u8,
+        slot: usize,
     },
     TurnRevision {
         conversation_id: String,
-        slot: u8,
+        slot: usize,
     },
     TurnTimingTraceGet {
         task_id: String,
-        slot: u8,
+        slot: usize,
     },
     TurnTimingTraceList {
         conversation_id: String,
         before_created_at: Option<u64>,
         limit: usize,
-        slot: u8,
+        slot: usize,
     },
     TurnPerceptionRecord {
         request: crate::turn::PerceptionRecordRequest,
-        slot: u8,
+        slot: usize,
     },
     TurnRecover {
         request: crate::turn::RecoverRequest,
-        slot: u8,
+        slot: usize,
     },
     TurnEventRecord {
         request: crate::turn::EventRecordRequest,
-        slot: u8,
+        slot: usize,
     },
     TurnAttemptCreate {
         request: crate::turn::AttemptCreateRequest,
-        slot: u8,
+        slot: usize,
     },
     TurnAttemptDispatchableList {
         created_before_ms: u64,
         limit: usize,
-        slot: u8,
+        slot: usize,
     },
     TurnAttemptDispatchWorker {
         request: crate::turn::AttemptDispatchWorkerRequest,
-        slot: u8,
+        slot: usize,
     },
     TurnAttemptGet {
         attempt_id: String,
         include_execution_config: bool,
-        slot: u8,
+        slot: usize,
     },
     TurnAttemptClaim {
         attempt_id: String,
         dispatch_owner_id: String,
         committed_at_ms: u64,
-        slot: u8,
+        slot: usize,
     },
     TurnAttemptBind {
         attempt_id: String,
         task_id: String,
         dispatch_owner_id: String,
         committed_at_ms: u64,
-        slot: u8,
+        slot: usize,
     },
     TurnAttemptStart {
         attempt_id: String,
         task_id: String,
         automation_context: Option<crate::automation_events::TaskStartedContext>,
         committed_at_ms: u64,
-        slot: u8,
+        slot: usize,
     },
     TurnEventsList {
         attempt_id: String,
         after: u64,
         limit: usize,
         patch_mode: bool,
-        slot: u8,
+        slot: usize,
     },
     TurnEventsPrune {
         request: crate::turn::EventPruneRequest,
-        slot: u8,
+        slot: usize,
     },
     TurnDelete {
         conversation_id: String,
         turn_ids: Vec<String>,
         deleted_at_ms: u64,
-        slot: u8,
+        slot: usize,
     },
     TurnCompact {
         request: crate::turn::CompactRequest,
-        slot: u8,
+        slot: usize,
     },
     TurnBranchCreate {
         conversation_id: String,
@@ -909,7 +913,7 @@ pub enum TransactionIrStep {
         expected_projection_revision: u64,
         updated_at_ms: u64,
         committed_at_ms: u64,
-        slot: u8,
+        slot: usize,
     },
     TurnBranchDelete {
         conversation_id: String,
@@ -917,23 +921,29 @@ pub enum TransactionIrStep {
         lane_id: String,
         deleted_at_ms: u64,
         committed_at_ms: u64,
-        slot: u8,
+        slot: usize,
     },
     TurnProjectionUpdate {
         preserve_activity: bool,
+        human_guidance_answer_json: Option<Vec<u8>>,
         conversation_id: String,
         turn_id: String,
         projection_json: Vec<u8>,
         expected_projection_revision: u64,
         updated_at_ms: u64,
         committed_at_ms: u64,
-        slot: u8,
+        slot: usize,
     },
     TurnSyncSnapshot {
         conversation_id: String,
         turn_limit: usize,
+        max_projection_bytes: usize,
         include_artifact_hint: bool,
-        slot: u8,
+        slot: usize,
+    },
+    TurnSyncRoundDirectory {
+        conversation_id: String, lane_id: String, offset: u64, limit: usize,
+        sync_sequence: u64, anchor_turn_id: String, slot: usize,
     },
     TurnSyncPage {
         conversation_id: String,
@@ -941,29 +951,30 @@ pub enum TransactionIrStep {
         before_ordinal: u64,
         limit: usize,
         sync_sequence: u64,
-        slot: u8,
+        max_projection_bytes: usize,
+        slot: usize,
     },
     TurnSyncChanges {
         conversation_id: String,
         after: u64,
         limit: usize,
-        slot: u8,
+        slot: usize,
     },
     TurnSyncPrune {
         request: crate::turn::SyncPruneRequest,
-        slot: u8,
+        slot: usize,
     },
     TurnCleanup {
         request: crate::turn::CleanupRequest,
-        slot: u8,
+        slot: usize,
     },
     TurnSearchBackfillGlobal {
         request: crate::semantic_executor::search_backfill_global::GlobalBackfillRequest,
-        slot: u8,
+        slot: usize,
     },
     EntityRead {
         key: EntityKey,
-        slot: u8,
+        slot: usize,
     },
     EntityPut {
         key: EntityKey,
@@ -978,15 +989,17 @@ pub enum TransactionIrStep {
         key: EntityKey,
         namespace: String,
         logical_key: String,
-        slot: u8,
+        slot: usize,
     },
     VersionedDocumentList {
+
+        include_value: bool,
         start: EntityKey,
         end: EntityKey,
         namespace: String,
         limit: usize,
         reverse: bool,
-        slot: u8,
+        slot: usize,
     },
     VersionedDocumentPut {
         key: EntityKey,
@@ -995,82 +1008,82 @@ pub enum TransactionIrStep {
         value_json: Vec<u8>,
         expected_version: Option<u64>,
         updated_at_ms: u64,
-        slot: u8,
+        slot: usize,
     },
     VersionedDocumentDelete {
         key: EntityKey,
         namespace: String,
         logical_key: String,
         expected_version: Option<u64>,
-        slot: u8,
+        slot: usize,
     },
     RecentProjectList {
-        slot: u8,
+        slot: usize,
     },
     RecentProjectTouch {
         path: String,
         last_used: u64,
         updated_at_ms: u64,
-        slot: u8,
+        slot: usize,
     },
     RecentProjectTouchMany {
         paths: Vec<String>,
         last_used: u64,
         updated_at_ms: u64,
-        slot: u8,
+        slot: usize,
     },
     RecentProjectClear {
-        slot: u8,
+        slot: usize,
     },
     ProjectRelink {
         old_path: String,
         new_path: String,
         updated_at_ms: u64,
-        slot: u8,
+        slot: usize,
     },
     Queue {
         request: crate::queue::Request,
-        slot: u8,
+        slot: usize,
     },
     ModelContinuation {
         request: crate::model_continuation::Request,
-        slot: u8,
+        slot: usize,
     },
     Invocation {
         request: crate::invocation::Request,
-        slot: u8,
+        slot: usize,
     },
     Orchestration {
         request: crate::orchestration::Request,
-        slot: u8,
+        slot: usize,
     },
     IntegrationWorkspace {
         request: crate::integration_workspace::Request,
-        slot: u8,
+        slot: usize,
     },
     Swarm {
         request: crate::swarm::Request,
-        slot: u8,
+        slot: usize,
     },
     Scheduler {
         request: crate::scheduler::Request,
-        slot: u8,
+        slot: usize,
     },
     Timer {
         request: crate::timer::Request,
-        slot: u8,
+        slot: usize,
     },
     DailyCostMonth {
         year: u64,
         month: u64,
-        slot: u8,
+        slot: usize,
     },
     DailyCostLatest {
-        slot: u8,
+        slot: usize,
     },
     DailyCostPersistedDates {
         dates: Vec<String>,
-        slot: u8,
+        slot: usize,
     },
     DailyCostUpsert {
         date: String,
@@ -1078,107 +1091,107 @@ pub enum TransactionIrStep {
         conversations_json: Vec<u8>,
         computed_at: u64,
         updated_at_ms: u64,
-        slot: u8,
+        slot: usize,
     },
     DailyCostDelete {
         date: Option<String>,
-        slot: u8,
+        slot: usize,
     },
     LogAggregateFlush {
         rows_json: Vec<u8>,
         cutoff_ms: Option<u64>,
         updated_at_ms: u64,
-        slot: u8,
+        slot: usize,
     },
     LogAggregateQuery {
         level: String,
         q: String,
         sort: crate::log_aggregate::QuerySort,
         limit: usize,
-        slot: u8,
+        slot: usize,
     },
     PluginRegister {
         manifest_json: Vec<u8>,
         updated_at_ms: u64,
-        slot: u8,
+        slot: usize,
     },
     PluginManifestGet {
         namespace: String,
-        slot: u8,
+        slot: usize,
     },
     PluginRowOperation {
         request: crate::plugin_rows::DynRequest,
-        slot: u8,
+        slot: usize,
     },
     Paper {
         request: crate::paper::Request,
-        slot: u8,
+        slot: usize,
     },
     PaperBuildArtifact {
         request: crate::paper_build_artifact::Request,
-        slot: u8,
+        slot: usize,
     },
     PaperDocument {
         request: crate::paper_document::Request,
-        slot: u8,
+        slot: usize,
     },
     PaperArtifact {
         request: crate::paper_artifact::Request,
-        slot: u8,
+        slot: usize,
     },
     PaperLibrary {
         request: crate::paper_library::Request,
-        slot: u8,
+        slot: usize,
     },
     PaperPodcast {
         request: crate::paper_podcast::Request,
-        slot: u8,
+        slot: usize,
     },
     RawArchive {
         request: crate::raw_archive::Request,
-        slot: u8,
+        slot: usize,
     },
     Research {
         request: crate::research::ResearchRequest,
-        slot: u8,
+        slot: usize,
     },
     Optimizer {
         request: crate::optimizer::Request,
-        slot: u8,
+        slot: usize,
     },
     Knowledge {
         request: crate::knowledge::KnowledgeRequest,
-        slot: u8,
+        slot: usize,
     },
     ProjectBrainActiveList {
-        slot: u8,
+        slot: usize,
     },
     ProjectBrainRecoverySnapshot {
         cursor: Option<crate::project_brain::RecoveryCursor>,
-        slot: u8,
+        slot: usize,
     },
     ProjectBrainGet {
         project_key: String,
-        slot: u8,
+        slot: usize,
     },
     ProjectBrainCommand {
         project_key: String,
         action: crate::project_brain::CommandAction,
         payload_json: Vec<u8>,
         timestamp: u64,
-        slot: u8,
+        slot: usize,
     },
     ProjectBrainRebuild {
         project_key: String,
         timestamp: u64,
-        slot: u8,
+        slot: usize,
     },
     BrowserSiteObservationGet {
         origin: String,
         route_family: String,
         operation: String,
         now_ms: u64,
-        slot: u8,
+        slot: usize,
     },
     BrowserSiteObservationRecord {
         origin: String,
@@ -1188,7 +1201,7 @@ pub enum TransactionIrStep {
         observed_at_ms: u64,
         observation_json: Option<Vec<u8>>,
         committed_at_ms: u64,
-        slot: u8,
+        slot: usize,
     },
     StreamAppend {
         key: StreamKey,
@@ -1202,11 +1215,11 @@ pub enum TransactionIrStep {
         payload_json: Vec<u8>,
         created_at_ms: i64,
         require_attempts_live: Vec<String>,
-        slot: u8,
+        slot: usize,
     },
     IndexedStreamAppendBatch {
         items: Vec<IndexedStreamAppendItem>,
-        slot: u8,
+        slot: usize,
     },
     IndexedStreamList {
         task_id: String,
@@ -1215,35 +1228,35 @@ pub enum TransactionIrStep {
         types: Vec<String>,
         type_prefixes: Vec<String>,
         payload_types: Option<Vec<String>>,
-        slot: u8,
+        slot: usize,
     },
     IndexedStreamInspectorSummary {
         root_task_ids: Vec<String>,
-        slot: u8,
+        slot: usize,
     },
     IndexedStreamPrune {
         created_before_ms: i64,
         limit: usize,
         retention_class: IndexedStreamRetentionClass,
-        slot: u8,
+        slot: usize,
     },
     IndexedStreamBounds {
         task_id: String,
         include_read_guard: bool,
         types: Option<Vec<String>>,
-        slot: u8,
+        slot: usize,
     },
     IndexedStreamLatest {
         task_id: String,
         metadata_only: bool,
-        slot: u8,
+        slot: usize,
     },
 }
 
 #[derive(Clone, Debug)]
 pub enum TransactionIrResult {
     Literal(Vec<u8>),
-    SlotOrLiteral { slot: u8, missing: Vec<u8> },
+    SlotOrLiteral { slot: usize, missing: Vec<u8> },
 }
 
 #[derive(Clone, Debug)]
@@ -1284,14 +1297,13 @@ fn invalid_input(message: &str) -> io::Error {
 }
 
 fn validate_provider_step_slot(
-    initialized_slots: &mut [bool; MAX_TRANSACTION_IR_SLOTS],
-    slot: u8,
+    initialized_slots: &mut SparseSlotValues<bool>,
+    slot: usize,
     tenant_label: &str,
     provider_id: Option<&str>,
 ) -> io::Result<()> {
     let initialized = initialized_slots
-        .get_mut(slot as usize)
-        .ok_or_else(|| invalid_input("Transaction IR slot exceeds its bound"))?;
+        .get_or_insert(slot as usize);
     if *initialized {
         return Err(invalid_input("Transaction IR initializes a slot twice"));
     }
@@ -1305,13 +1317,12 @@ fn validate_provider_step_slot(
 }
 
 fn validate_model_routing_slot(
-    initialized_slots: &mut [bool; MAX_TRANSACTION_IR_SLOTS],
-    slot: u8,
+    initialized_slots: &mut SparseSlotValues<bool>,
+    slot: usize,
     tenant_label: &str,
 ) -> io::Result<()> {
     let initialized = initialized_slots
-        .get_mut(slot as usize)
-        .ok_or_else(|| invalid_input("Transaction IR slot exceeds its bound"))?;
+        .get_or_insert(slot as usize);
     if *initialized {
         return Err(invalid_input("Transaction IR initializes a slot twice"));
     }
@@ -1323,19 +1334,17 @@ fn validate_model_routing_slot(
 }
 
 fn valid_model_routing_json_object(bytes: &[u8]) -> bool {
-    bytes.len() <= MAX_MODEL_ROUTING_DOCUMENT_BYTES
-        && serde_json::from_slice::<serde_json::Value>(bytes)
+    serde_json::from_slice::<serde_json::Value>(bytes)
             .ok()
             .is_some_and(|value| value.is_object())
 }
 
 fn validate_worker_job_slot(
-    initialized_slots: &mut [bool; MAX_TRANSACTION_IR_SLOTS],
-    slot: u8,
+    initialized_slots: &mut SparseSlotValues<bool>,
+    slot: usize,
 ) -> io::Result<()> {
     let initialized = initialized_slots
-        .get_mut(slot as usize)
-        .ok_or_else(|| invalid_input("Transaction IR slot exceeds its bound"))?;
+        .get_or_insert(slot as usize);
     if *initialized {
         return Err(invalid_input("Transaction IR initializes a slot twice"));
     }
@@ -1372,18 +1381,7 @@ fn valid_billing_text(value: &str, maximum: usize, required: bool) -> bool {
 }
 
 fn valid_billing_kind(value: &str) -> bool {
-    matches!(
-        value,
-        "topup"
-            | "redeem"
-            | "bonus"
-            | "refund"
-            | "adjust_credit"
-            | "reserve"
-            | "reserve_release"
-            | "debit"
-            | "adjust_debit"
-    )
+    crate::generated_tofudb_ir::BILLING_LEDGER_KINDS.contains(&value)
 }
 
 fn literal_bytes(result: &TransactionIrResult) -> usize {
@@ -1393,7 +1391,7 @@ fn literal_bytes(result: &TransactionIrResult) -> usize {
     }
 }
 
-fn referenced_slot(condition: EntityWriteCondition) -> Option<u8> {
+fn referenced_slot(condition: EntityWriteCondition) -> Option<usize> {
     match condition {
         EntityWriteCondition::Always => None,
         EntityWriteCondition::SlotMissing(slot) | EntityWriteCondition::SlotPresent(slot) => {
@@ -1407,12 +1405,10 @@ impl TransactionIr {
         if self.tenant_id == 0
             || self.owner_user_id == 0
             || self.operation.is_empty()
-            || self.steps.len() > MAX_TRANSACTION_IR_STEPS
-            || literal_bytes(&self.result) > MAX_TRANSACTION_IR_LITERAL_BYTES
         {
             return Err(invalid_input("invalid Transaction IR envelope"));
         }
-        let mut initialized_slots = [false; MAX_TRANSACTION_IR_SLOTS];
+        let mut initialized_slots = SparseSlotValues::<bool>::new();
         let mut literal_bytes = literal_bytes(&self.result);
         let mut task_result_bytes = 0_usize;
         let mut swarm_document_bytes = 0_usize;
@@ -1858,8 +1854,7 @@ impl TransactionIr {
                 | TransactionIrStep::CredentialUpdate { slot, .. }
                 | TransactionIrStep::CredentialRevoke { slot, .. } => {
                     let initialized = initialized_slots
-                        .get_mut(*slot as usize)
-                        .ok_or_else(|| invalid_input("Transaction IR slot exceeds its bound"))?;
+                        .get_or_insert(*slot as usize);
                     if *initialized {
                         return Err(invalid_input("Transaction IR initializes a slot twice"));
                     }
@@ -2044,8 +2039,7 @@ impl TransactionIr {
                     ..
                 } => {
                     let initialized = initialized_slots
-                        .get_mut(*slot as usize)
-                        .ok_or_else(|| invalid_input("Transaction IR slot exceeds its bound"))?;
+                        .get_or_insert(*slot as usize);
                     if *initialized {
                         return Err(invalid_input("Transaction IR initializes a slot twice"));
                     }
@@ -2098,8 +2092,7 @@ impl TransactionIr {
                     ]
                     .into_iter()
                     .try_fold(literal_bytes, |bytes, value| bytes.checked_add(value))
-                    .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
-                    .ok_or_else(|| invalid_input("Transaction IR literal bytes exceed 8 MiB"))?;
+                    .ok_or_else(|| invalid_input("Transaction IR literal byte count overflow"))?;
                 }
                 TransactionIrStep::CompactionArchiveUpdateSummary {
                     archive_id,
@@ -2112,8 +2105,7 @@ impl TransactionIr {
                     ..
                 } => {
                     let initialized = initialized_slots
-                        .get_mut(*slot as usize)
-                        .ok_or_else(|| invalid_input("Transaction IR slot exceeds its bound"))?;
+                        .get_or_insert(*slot as usize);
                     if *initialized {
                         return Err(invalid_input("Transaction IR initializes a slot twice"));
                     }
@@ -2156,10 +2148,8 @@ impl TransactionIr {
                         .and_then(|bytes| {
                             bytes.checked_add(receipt_json.as_ref().map_or(0, Vec::len))
                         })
-
-                        .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
                         .ok_or_else(|| {
-                            invalid_input("Transaction IR literal bytes exceed 8 MiB")
+                            invalid_input("Transaction IR literal byte count overflow")
                         })?;
                 }
                 TransactionIrStep::VersionedDocumentPut {
@@ -2171,8 +2161,7 @@ impl TransactionIr {
                     ..
                 } => {
                     let initialized = initialized_slots
-                        .get_mut(*slot as usize)
-                        .ok_or_else(|| invalid_input("Transaction IR slot exceeds its bound"))?;
+                        .get_or_insert(*slot as usize);
                     if *initialized {
                         return Err(invalid_input("Transaction IR initializes a slot twice"));
                     }
@@ -2181,9 +2170,8 @@ impl TransactionIr {
                         .checked_add(namespace.len())
                         .and_then(|bytes| bytes.checked_add(logical_key.len()))
                         .and_then(|bytes| bytes.checked_add(value_json.len()))
-                        .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
                         .ok_or_else(|| {
-                            invalid_input("Transaction IR literal bytes exceed 8 MiB")
+                            invalid_input("Transaction IR literal byte count overflow")
                         })?;
                     if *updated_at_ms == 0 {
                         return Err(invalid_input("Transaction IR document timestamp is zero"));
@@ -2196,8 +2184,7 @@ impl TransactionIr {
                     ..
                 } => {
                     let initialized = initialized_slots
-                        .get_mut(*slot as usize)
-                        .ok_or_else(|| invalid_input("Transaction IR slot exceeds its bound"))?;
+                        .get_or_insert(*slot as usize);
                     if *initialized {
                         return Err(invalid_input("Transaction IR initializes a slot twice"));
                     }
@@ -2210,9 +2197,8 @@ impl TransactionIr {
                     }
                     literal_bytes = literal_bytes
                         .checked_add(path.len())
-                        .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
                         .ok_or_else(|| {
-                            invalid_input("Transaction IR literal bytes exceed 8 MiB")
+                            invalid_input("Transaction IR literal byte count overflow")
                         })?;
                 }
                 TransactionIrStep::ProjectRelink {
@@ -2222,8 +2208,7 @@ impl TransactionIr {
                     slot,
                 } => {
                     let initialized = initialized_slots
-                        .get_mut(*slot as usize)
-                        .ok_or_else(|| invalid_input("Transaction IR slot exceeds its bound"))?;
+                        .get_or_insert(*slot as usize);
                     if *initialized {
                         return Err(invalid_input("Transaction IR initializes a slot twice"));
                     }
@@ -2240,90 +2225,78 @@ impl TransactionIr {
                     literal_bytes = literal_bytes
                         .checked_add(old_path.len())
                         .and_then(|bytes| bytes.checked_add(new_path.len()))
-                        .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
                         .ok_or_else(|| {
-                            invalid_input("Transaction IR literal bytes exceed 8 MiB")
+                            invalid_input("Transaction IR literal byte count overflow")
                         })?;
                 }
                 TransactionIrStep::Queue { request, slot } => {
                     let initialized = initialized_slots
-                        .get_mut(*slot as usize)
-                        .ok_or_else(|| invalid_input("Transaction IR slot exceeds its bound"))?;
+                        .get_or_insert(*slot as usize);
                     if *initialized {
                         return Err(invalid_input("Transaction IR initializes a slot twice"));
                     }
                     *initialized = true;
                     literal_bytes = literal_bytes
                         .checked_add(request.validate()?)
-                        .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
                         .ok_or_else(|| {
-                            invalid_input("Transaction IR literal bytes exceed 8 MiB")
+                            invalid_input("Transaction IR literal byte count overflow")
                         })?;
                 }
                 TransactionIrStep::ModelContinuation { request, slot } => {
                     let initialized = initialized_slots
-                        .get_mut(*slot as usize)
-                        .ok_or_else(|| invalid_input("Transaction IR slot exceeds its bound"))?;
+                        .get_or_insert(*slot as usize);
                     if *initialized {
                         return Err(invalid_input("Transaction IR initializes a slot twice"));
                     }
                     *initialized = true;
                     literal_bytes = literal_bytes
                         .checked_add(request.validate()?)
-                        .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
                         .ok_or_else(|| {
-                            invalid_input("Transaction IR literal bytes exceed 8 MiB")
+                            invalid_input("Transaction IR literal byte count overflow")
                         })?;
                 }
                 TransactionIrStep::Invocation { request, slot } => {
                     let initialized = initialized_slots
-                        .get_mut(*slot as usize)
-                        .ok_or_else(|| invalid_input("Transaction IR slot exceeds its bound"))?;
+                        .get_or_insert(*slot as usize);
                     if *initialized {
                         return Err(invalid_input("Transaction IR initializes a slot twice"));
                     }
                     *initialized = true;
                     literal_bytes = literal_bytes
                         .checked_add(request.validate()?)
-                        .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
                         .ok_or_else(|| {
-                            invalid_input("Transaction IR literal bytes exceed 8 MiB")
+                            invalid_input("Transaction IR literal byte count overflow")
                         })?;
                 }
                 TransactionIrStep::Orchestration { request, slot } => {
                     let initialized = initialized_slots
-                        .get_mut(*slot as usize)
-                        .ok_or_else(|| invalid_input("Transaction IR slot exceeds its bound"))?;
+                        .get_or_insert(*slot as usize);
                     if *initialized {
                         return Err(invalid_input("Transaction IR initializes a slot twice"));
                     }
                     *initialized = true;
                     literal_bytes = literal_bytes
                         .checked_add(request.validate()?)
-                        .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
                         .ok_or_else(|| {
-                            invalid_input("Transaction IR literal bytes exceed 8 MiB")
+                            invalid_input("Transaction IR literal byte count overflow")
                         })?;
                 }
                 TransactionIrStep::IntegrationWorkspace { request, slot } => {
                     let initialized = initialized_slots
-                        .get_mut(*slot as usize)
-                        .ok_or_else(|| invalid_input("Transaction IR slot exceeds its bound"))?;
+                        .get_or_insert(*slot as usize);
                     if *initialized {
                         return Err(invalid_input("Transaction IR initializes a slot twice"));
                     }
                     *initialized = true;
                     literal_bytes = literal_bytes
                         .checked_add(request.validate()?)
-                        .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
                         .ok_or_else(|| {
-                            invalid_input("Transaction IR literal bytes exceed 8 MiB")
+                            invalid_input("Transaction IR literal byte count overflow")
                         })?;
                 }
                 TransactionIrStep::Swarm { request, slot } => {
                     let initialized = initialized_slots
-                        .get_mut(*slot as usize)
-                        .ok_or_else(|| invalid_input("Transaction IR slot exceeds its bound"))?;
+                        .get_or_insert(*slot as usize);
                     if *initialized {
                         return Err(invalid_input("Transaction IR initializes a slot twice"));
                     }
@@ -2339,32 +2312,28 @@ impl TransactionIr {
                 }
                 TransactionIrStep::Scheduler { request, slot } => {
                     let initialized = initialized_slots
-                        .get_mut(*slot as usize)
-                        .ok_or_else(|| invalid_input("Transaction IR slot exceeds its bound"))?;
+                        .get_or_insert(*slot as usize);
                     if *initialized {
                         return Err(invalid_input("Transaction IR initializes a slot twice"));
                     }
                     *initialized = true;
                     literal_bytes = literal_bytes
                         .checked_add(request.validate(self.owner_user_id)?)
-                        .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
                         .ok_or_else(|| {
-                            invalid_input("Transaction IR literal bytes exceed 8 MiB")
+                            invalid_input("Transaction IR literal byte count overflow")
                         })?;
                 }
                 TransactionIrStep::Timer { request, slot } => {
                     let initialized = initialized_slots
-                        .get_mut(*slot as usize)
-                        .ok_or_else(|| invalid_input("Transaction IR slot exceeds its bound"))?;
+                        .get_or_insert(*slot as usize);
                     if *initialized {
                         return Err(invalid_input("Transaction IR initializes a slot twice"));
                     }
                     *initialized = true;
                     literal_bytes = literal_bytes
                         .checked_add(request.validate(self.owner_user_id)?)
-                        .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
                         .ok_or_else(|| {
-                            invalid_input("Transaction IR literal bytes exceed 8 MiB")
+                            invalid_input("Transaction IR literal byte count overflow")
                         })?;
                 }
                 TransactionIrStep::DailyCostUpsert {
@@ -2376,8 +2345,7 @@ impl TransactionIr {
                     ..
                 } => {
                     let initialized = initialized_slots
-                        .get_mut(*slot as usize)
-                        .ok_or_else(|| invalid_input("Transaction IR slot exceeds its bound"))?;
+                        .get_or_insert(*slot as usize);
                     if *initialized {
                         return Err(invalid_input("Transaction IR initializes a slot twice"));
                     }
@@ -2386,8 +2354,6 @@ impl TransactionIr {
                         || !cost.is_finite()
                         || !(0.0..=1_000_000_000.0).contains(cost)
                         || *updated_at_ms == 0
-                        || conversations_json.len()
-                            > crate::generated_tofudb_ir::MAX_DAILY_COST_DOCUMENT_BYTES
                         || !serde_json::from_slice::<serde_json::Value>(conversations_json)
                             .is_ok_and(|value| value.is_object())
                     {
@@ -2396,15 +2362,13 @@ impl TransactionIr {
                     literal_bytes = literal_bytes
                         .checked_add(date.len())
                         .and_then(|bytes| bytes.checked_add(conversations_json.len()))
-                        .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
                         .ok_or_else(|| {
-                            invalid_input("Transaction IR literal bytes exceed 8 MiB")
+                            invalid_input("Transaction IR literal byte count overflow")
                         })?;
                 }
                 TransactionIrStep::DailyCostMonth { year, month, slot } => {
                     let initialized = initialized_slots
-                        .get_mut(*slot as usize)
-                        .ok_or_else(|| invalid_input("Transaction IR slot exceeds its bound"))?;
+                        .get_or_insert(*slot as usize);
                     if *initialized {
                         return Err(invalid_input("Transaction IR initializes a slot twice"));
                     }
@@ -2415,14 +2379,12 @@ impl TransactionIr {
                 }
                 TransactionIrStep::DailyCostPersistedDates { dates, slot } => {
                     let initialized = initialized_slots
-                        .get_mut(*slot as usize)
-                        .ok_or_else(|| invalid_input("Transaction IR slot exceeds its bound"))?;
+                        .get_or_insert(*slot as usize);
                     if *initialized {
                         return Err(invalid_input("Transaction IR initializes a slot twice"));
                     }
                     *initialized = true;
-                    if dates.len() > crate::generated_tofudb_ir::MAX_DAILY_COST_PERSISTED_DATES
-                        || dates
+                    if dates
                             .iter()
                             .any(|date| !crate::daily_cost::valid_date(date))
                         || dates
@@ -2436,15 +2398,13 @@ impl TransactionIr {
                     literal_bytes = dates
                         .iter()
                         .try_fold(literal_bytes, |bytes, date| bytes.checked_add(date.len()))
-                        .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
                         .ok_or_else(|| {
-                            invalid_input("Transaction IR literal bytes exceed 8 MiB")
+                            invalid_input("Transaction IR literal byte count overflow")
                         })?;
                 }
                 TransactionIrStep::DailyCostDelete { date, slot } => {
                     let initialized = initialized_slots
-                        .get_mut(*slot as usize)
-                        .ok_or_else(|| invalid_input("Transaction IR slot exceeds its bound"))?;
+                        .get_or_insert(*slot as usize);
                     if *initialized {
                         return Err(invalid_input("Transaction IR initializes a slot twice"));
                     }
@@ -2457,9 +2417,8 @@ impl TransactionIr {
                     }
                     literal_bytes = literal_bytes
                         .checked_add(date.as_ref().map_or(0, String::len))
-                        .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
                         .ok_or_else(|| {
-                            invalid_input("Transaction IR literal bytes exceed 8 MiB")
+                            invalid_input("Transaction IR literal byte count overflow")
                         })?;
                 }
                 TransactionIrStep::LogAggregateFlush {
@@ -2469,8 +2428,7 @@ impl TransactionIr {
                     ..
                 } => {
                     let initialized = initialized_slots
-                        .get_mut(*slot as usize)
-                        .ok_or_else(|| invalid_input("Transaction IR slot exceeds its bound"))?;
+                        .get_or_insert(*slot as usize);
                     if *initialized {
                         return Err(invalid_input("Transaction IR initializes a slot twice"));
                     }
@@ -2487,9 +2445,8 @@ impl TransactionIr {
                     }
                     literal_bytes = literal_bytes
                         .checked_add(rows_json.len())
-                        .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
                         .ok_or_else(|| {
-                            invalid_input("Transaction IR literal bytes exceed 8 MiB")
+                            invalid_input("Transaction IR literal byte count overflow")
                         })?;
                 }
                 TransactionIrStep::LogAggregateQuery {
@@ -2500,8 +2457,7 @@ impl TransactionIr {
                     ..
                 } => {
                     let initialized = initialized_slots
-                        .get_mut(*slot as usize)
-                        .ok_or_else(|| invalid_input("Transaction IR slot exceeds its bound"))?;
+                        .get_or_insert(*slot as usize);
                     if *initialized {
                         return Err(invalid_input("Transaction IR initializes a slot twice"));
                     }
@@ -2518,9 +2474,8 @@ impl TransactionIr {
                     literal_bytes = literal_bytes
                         .checked_add(level.len())
                         .and_then(|bytes| bytes.checked_add(q.len()))
-                        .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
                         .ok_or_else(|| {
-                            invalid_input("Transaction IR literal bytes exceed 8 MiB")
+                            invalid_input("Transaction IR literal byte count overflow")
                         })?;
                 }
                 TransactionIrStep::PluginRegister {
@@ -2529,8 +2484,7 @@ impl TransactionIr {
                     ..
                 } => {
                     let initialized = initialized_slots
-                        .get_mut(*slot as usize)
-                        .ok_or_else(|| invalid_input("Transaction IR slot exceeds its bound"))?;
+                        .get_or_insert(*slot as usize);
                     if *initialized {
                         return Err(invalid_input("Transaction IR initializes a slot twice"));
                     }
@@ -2540,15 +2494,13 @@ impl TransactionIr {
                     }
                     literal_bytes = literal_bytes
                         .checked_add(manifest_json.len())
-                        .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
                         .ok_or_else(|| {
-                            invalid_input("Transaction IR literal bytes exceed 8 MiB")
+                            invalid_input("Transaction IR literal byte count overflow")
                         })?;
                 }
                 TransactionIrStep::PluginManifestGet { namespace, slot } => {
                     let initialized = initialized_slots
-                        .get_mut(*slot as usize)
-                        .ok_or_else(|| invalid_input("Transaction IR slot exceeds its bound"))?;
+                        .get_or_insert(*slot as usize);
                     if *initialized {
                         return Err(invalid_input("Transaction IR initializes a slot twice"));
                     }
@@ -2560,120 +2512,104 @@ impl TransactionIr {
                     }
                     literal_bytes = literal_bytes
                         .checked_add(namespace.len())
-                        .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
                         .ok_or_else(|| {
-                            invalid_input("Transaction IR literal bytes exceed 8 MiB")
+                            invalid_input("Transaction IR literal byte count overflow")
                         })?;
                 }
                 TransactionIrStep::PluginRowOperation { request, slot } => {
                     let initialized = initialized_slots
-                        .get_mut(*slot as usize)
-                        .ok_or_else(|| invalid_input("Transaction IR slot exceeds its bound"))?;
+                        .get_or_insert(*slot as usize);
                     if *initialized {
                         return Err(invalid_input("Transaction IR initializes a slot twice"));
                     }
                     *initialized = true;
                     literal_bytes = literal_bytes
                         .checked_add(request.validate()?)
-                        .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
                         .ok_or_else(|| {
-                            invalid_input("Transaction IR literal bytes exceed 8 MiB")
+                            invalid_input("Transaction IR literal byte count overflow")
                         })?;
                 }
                 TransactionIrStep::Paper { request, slot } => {
                     let initialized = initialized_slots
-                        .get_mut(*slot as usize)
-                        .ok_or_else(|| invalid_input("Transaction IR slot exceeds its bound"))?;
+                        .get_or_insert(*slot as usize);
                     if *initialized {
                         return Err(invalid_input("Transaction IR initializes a slot twice"));
                     }
                     *initialized = true;
                     literal_bytes = literal_bytes
                         .checked_add(request.validate()?)
-                        .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
                         .ok_or_else(|| {
-                            invalid_input("Transaction IR literal bytes exceed 8 MiB")
+                            invalid_input("Transaction IR literal byte count overflow")
                         })?;
                 }
                 TransactionIrStep::PaperLibrary { request, slot } => {
                     let initialized = initialized_slots
-                        .get_mut(*slot as usize)
-                        .ok_or_else(|| invalid_input("Transaction IR slot exceeds its bound"))?;
+                        .get_or_insert(*slot as usize);
                     if *initialized {
                         return Err(invalid_input("Transaction IR initializes a slot twice"));
                     }
                     *initialized = true;
                     literal_bytes = literal_bytes
                         .checked_add(request.validate()?)
-                        .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
                         .ok_or_else(|| {
-                            invalid_input("Transaction IR literal bytes exceed 8 MiB")
+                            invalid_input("Transaction IR literal byte count overflow")
                         })?;
                 }
                 TransactionIrStep::PaperArtifact { request, slot } => {
                     let initialized = initialized_slots
-                        .get_mut(*slot as usize)
-                        .ok_or_else(|| invalid_input("Transaction IR slot exceeds its bound"))?;
+                        .get_or_insert(*slot as usize);
                     if *initialized {
                         return Err(invalid_input("Transaction IR initializes a slot twice"));
                     }
                     *initialized = true;
                     literal_bytes = literal_bytes
                         .checked_add(request.validate()?)
-                        .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
                         .ok_or_else(|| {
-                            invalid_input("Transaction IR literal bytes exceed 8 MiB")
+                            invalid_input("Transaction IR literal byte count overflow")
                         })?;
                 }
                 TransactionIrStep::PaperBuildArtifact { request, slot } => {
                     let initialized = initialized_slots
-                        .get_mut(*slot as usize)
-                        .ok_or_else(|| invalid_input("Transaction IR slot exceeds its bound"))?;
+                        .get_or_insert(*slot as usize);
                     if *initialized {
                         return Err(invalid_input("Transaction IR initializes a slot twice"));
                     }
                     *initialized = true;
                     literal_bytes = literal_bytes
                         .checked_add(request.validate()?)
-                        .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
                         .ok_or_else(|| {
-                            invalid_input("Transaction IR literal bytes exceed 8 MiB")
+                            invalid_input("Transaction IR literal byte count overflow")
                         })?;
                 }
                 TransactionIrStep::PaperDocument { request, slot } => {
                     let initialized = initialized_slots
-                        .get_mut(*slot as usize)
-                        .ok_or_else(|| invalid_input("Transaction IR slot exceeds its bound"))?;
+                        .get_or_insert(*slot as usize);
                     if *initialized {
                         return Err(invalid_input("Transaction IR initializes a slot twice"));
                     }
                     *initialized = true;
                     literal_bytes = literal_bytes
                         .checked_add(request.validate()?)
-                        .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
                         .ok_or_else(|| {
-                            invalid_input("Transaction IR literal bytes exceed 8 MiB")
+                            invalid_input("Transaction IR literal byte count overflow")
                         })?;
                 }
                 TransactionIrStep::PaperPodcast { request, slot } => {
                     let initialized = initialized_slots
-                        .get_mut(*slot as usize)
-                        .ok_or_else(|| invalid_input("Transaction IR slot exceeds its bound"))?;
+                        .get_or_insert(*slot as usize);
                     if *initialized {
                         return Err(invalid_input("Transaction IR initializes a slot twice"));
                     }
                     *initialized = true;
                     literal_bytes = literal_bytes
                         .checked_add(request.validate()?)
-                        .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
                         .ok_or_else(|| {
-                            invalid_input("Transaction IR literal bytes exceed 8 MiB")
+                            invalid_input("Transaction IR literal byte count overflow")
                         })?;
                 }
                 TransactionIrStep::RawArchive { request, slot } => {
                     let initialized = initialized_slots
-                        .get_mut(*slot as usize)
-                        .ok_or_else(|| invalid_input("Transaction IR slot exceeds its bound"))?;
+                        .get_or_insert(*slot as usize);
                     if *initialized {
                         return Err(invalid_input("Transaction IR initializes a slot twice"));
                     }
@@ -2682,15 +2618,13 @@ impl TransactionIr {
                     // routing metadata against the inline IR literal budget.
                     literal_bytes = literal_bytes
                         .checked_add(request.validate()?)
-                        .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
                         .ok_or_else(|| {
-                            invalid_input("Transaction IR literal bytes exceed 8 MiB")
+                            invalid_input("Transaction IR literal byte count overflow")
                         })?;
                 }
                 TransactionIrStep::Research { request, slot } => {
                     let initialized = initialized_slots
-                        .get_mut(*slot as usize)
-                        .ok_or_else(|| invalid_input("Transaction IR slot exceeds its bound"))?;
+                        .get_or_insert(*slot as usize);
                     if *initialized {
                         return Err(invalid_input("Transaction IR initializes a slot twice"));
                     }
@@ -2699,30 +2633,26 @@ impl TransactionIr {
                     // inputs rather than inline Transaction IR literals.
                     literal_bytes = literal_bytes
                         .checked_add(request.validate()?)
-                        .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
                         .ok_or_else(|| {
-                            invalid_input("Transaction IR literal bytes exceed 8 MiB")
+                            invalid_input("Transaction IR literal byte count overflow")
                         })?;
                 }
                 TransactionIrStep::Optimizer { request, slot } => {
                     let initialized = initialized_slots
-                        .get_mut(*slot as usize)
-                        .ok_or_else(|| invalid_input("Transaction IR slot exceeds its bound"))?;
+                        .get_or_insert(*slot as usize);
                     if *initialized {
                         return Err(invalid_input("Transaction IR initializes a slot twice"));
                     }
                     *initialized = true;
                     literal_bytes = literal_bytes
                         .checked_add(request.validate(self.owner_user_id)?)
-                        .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
                         .ok_or_else(|| {
-                            invalid_input("Transaction IR literal bytes exceed 8 MiB")
+                            invalid_input("Transaction IR literal byte count overflow")
                         })?;
                 }
                 TransactionIrStep::Knowledge { request, slot } => {
                     let initialized = initialized_slots
-                        .get_mut(*slot as usize)
-                        .ok_or_else(|| invalid_input("Transaction IR slot exceeds its bound"))?;
+                        .get_or_insert(*slot as usize);
                     if *initialized {
                         return Err(invalid_input("Transaction IR initializes a slot twice"));
                     }
@@ -2731,9 +2661,8 @@ impl TransactionIr {
                     // inputs rather than inline Transaction IR literals.
                     literal_bytes = literal_bytes
                         .checked_add(request.validate()?)
-                        .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
                         .ok_or_else(|| {
-                            invalid_input("Transaction IR literal bytes exceed 8 MiB")
+                            invalid_input("Transaction IR literal byte count overflow")
                         })?;
                 }
                 TransactionIrStep::ProjectBrainCommand {
@@ -2744,8 +2673,7 @@ impl TransactionIr {
                     ..
                 } => {
                     let initialized = initialized_slots
-                        .get_mut(*slot as usize)
-                        .ok_or_else(|| invalid_input("Transaction IR slot exceeds its bound"))?;
+                        .get_or_insert(*slot as usize);
                     if *initialized {
                         return Err(invalid_input("Transaction IR initializes a slot twice"));
                     }
@@ -2753,8 +2681,6 @@ impl TransactionIr {
                     if crate::project_brain::normalize_project_key(project_key).as_deref()
                         != Some(project_key.as_str())
                         || *timestamp > i64::MAX as u64
-                        || payload_json.len()
-                            > crate::generated_tofudb_ir::MAX_PROJECT_BRAIN_DOCUMENT_BYTES
                         || !serde_json::from_slice::<serde_json::Value>(payload_json)
                             .is_ok_and(|value| value.is_object())
                     {
@@ -2763,9 +2689,8 @@ impl TransactionIr {
                     literal_bytes = literal_bytes
                         .checked_add(project_key.len())
                         .and_then(|bytes| bytes.checked_add(payload_json.len()))
-                        .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
                         .ok_or_else(|| {
-                            invalid_input("Transaction IR literal bytes exceed 8 MiB")
+                            invalid_input("Transaction IR literal byte count overflow")
                         })?;
                 }
                 TransactionIrStep::ProjectBrainActiveList { slot }
@@ -2778,14 +2703,12 @@ impl TransactionIr {
                         cursor.validate(self.owner_user_id)?;
                         literal_bytes = literal_bytes
                             .checked_add(cursor.project_key.len())
-                            .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
                             .ok_or_else(|| {
-                                invalid_input("Transaction IR literal bytes exceed 8 MiB")
+                                invalid_input("Transaction IR literal byte count overflow")
                             })?;
                     }
                     let initialized = initialized_slots
-                        .get_mut(*slot as usize)
-                        .ok_or_else(|| invalid_input("Transaction IR slot exceeds its bound"))?;
+                        .get_or_insert(*slot as usize);
                     if *initialized {
                         return Err(invalid_input("Transaction IR initializes a slot twice"));
                     }
@@ -2797,8 +2720,7 @@ impl TransactionIr {
                     slot,
                 } => {
                     let initialized = initialized_slots
-                        .get_mut(*slot as usize)
-                        .ok_or_else(|| invalid_input("Transaction IR slot exceeds its bound"))?;
+                        .get_or_insert(*slot as usize);
                     if *initialized {
                         return Err(invalid_input("Transaction IR initializes a slot twice"));
                     }
@@ -2811,15 +2733,13 @@ impl TransactionIr {
                     }
                     literal_bytes = literal_bytes
                         .checked_add(project_key.len())
-                        .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
                         .ok_or_else(|| {
-                            invalid_input("Transaction IR literal bytes exceed 8 MiB")
+                            invalid_input("Transaction IR literal byte count overflow")
                         })?;
                 }
                 TransactionIrStep::ProjectBrainGet { project_key, slot } => {
                     let initialized = initialized_slots
-                        .get_mut(*slot as usize)
-                        .ok_or_else(|| invalid_input("Transaction IR slot exceeds its bound"))?;
+                        .get_or_insert(*slot as usize);
                     if *initialized {
                         return Err(invalid_input("Transaction IR initializes a slot twice"));
                     }
@@ -2831,9 +2751,8 @@ impl TransactionIr {
                     }
                     literal_bytes = literal_bytes
                         .checked_add(project_key.len())
-                        .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
                         .ok_or_else(|| {
-                            invalid_input("Transaction IR literal bytes exceed 8 MiB")
+                            invalid_input("Transaction IR literal byte count overflow")
                         })?;
                 }
                 TransactionIrStep::RecentProjectTouchMany {
@@ -2843,14 +2762,12 @@ impl TransactionIr {
                     ..
                 } => {
                     let initialized = initialized_slots
-                        .get_mut(*slot as usize)
-                        .ok_or_else(|| invalid_input("Transaction IR slot exceeds its bound"))?;
+                        .get_or_insert(*slot as usize);
                     if *initialized {
                         return Err(invalid_input("Transaction IR initializes a slot twice"));
                     }
                     *initialized = true;
                     if paths.is_empty()
-                        || paths.len() > MAX_RECENT_PROJECT_TOUCH_BATCH
                         || paths.iter().any(|path| {
                             path.is_empty()
                                 || path.chars().count() > MAX_RECENT_PROJECT_PATH_CHARACTERS
@@ -2867,9 +2784,8 @@ impl TransactionIr {
                     literal_bytes = paths
                         .iter()
                         .try_fold(literal_bytes, |bytes, path| bytes.checked_add(path.len()))
-                        .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
                         .ok_or_else(|| {
-                            invalid_input("Transaction IR literal bytes exceed 8 MiB")
+                            invalid_input("Transaction IR literal byte count overflow")
                         })?;
                 }
                 TransactionIrStep::BrowserSiteObservationRecord {
@@ -2883,8 +2799,7 @@ impl TransactionIr {
                     slot,
                 } => {
                     let initialized = initialized_slots
-                        .get_mut(*slot as usize)
-                        .ok_or_else(|| invalid_input("Transaction IR slot exceeds its bound"))?;
+                        .get_or_insert(*slot as usize);
                     if *initialized {
                         return Err(invalid_input("Transaction IR initializes a slot twice"));
                     }
@@ -2923,9 +2838,8 @@ impl TransactionIr {
                         .and_then(|bytes| {
                             bytes.checked_add(observation_json.as_ref().map_or(0, Vec::len))
                         })
-                        .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
                         .ok_or_else(|| {
-                            invalid_input("Transaction IR literal bytes exceed 8 MiB")
+                            invalid_input("Transaction IR literal byte count overflow")
                         })?;
                 }
                 TransactionIrStep::BrowserSiteObservationGet {
@@ -2936,8 +2850,7 @@ impl TransactionIr {
                     ..
                 } => {
                     let initialized = initialized_slots
-                        .get_mut(*slot as usize)
-                        .ok_or_else(|| invalid_input("Transaction IR slot exceeds its bound"))?;
+                        .get_or_insert(*slot as usize);
                     if *initialized {
                         return Err(invalid_input("Transaction IR initializes a slot twice"));
                     }
@@ -2953,9 +2866,8 @@ impl TransactionIr {
                         .checked_add(origin.len())
                         .and_then(|bytes| bytes.checked_add(route_family.len()))
                         .and_then(|bytes| bytes.checked_add(operation.len()))
-                        .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
                         .ok_or_else(|| {
-                            invalid_input("Transaction IR literal bytes exceed 8 MiB")
+                            invalid_input("Transaction IR literal byte count overflow")
                         })?;
                 }
                 TransactionIrStep::ConversationCreate {
@@ -2978,9 +2890,8 @@ impl TransactionIr {
                         .checked_add(conversation_id.len())
                         .and_then(|bytes| bytes.checked_add(title.len()))
                         .and_then(|bytes| bytes.checked_add(settings_json.len()))
-                        .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
                         .ok_or_else(|| {
-                            invalid_input("Transaction IR literal bytes exceed 8 MiB")
+                            invalid_input("Transaction IR literal byte count overflow")
                         })?;
                 }
                 TransactionIrStep::ConversationDelete {
@@ -2989,8 +2900,7 @@ impl TransactionIr {
                     slot,
                 } => {
                     let initialized = initialized_slots
-                        .get_mut(*slot as usize)
-                        .ok_or_else(|| invalid_input("Transaction IR slot exceeds its bound"))?;
+                        .get_or_insert(*slot as usize);
                     if *initialized {
                         return Err(invalid_input("Transaction IR initializes a slot twice"));
                     }
@@ -3003,9 +2913,8 @@ impl TransactionIr {
                     }
                     literal_bytes = literal_bytes
                         .checked_add(conversation_id.len())
-                        .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
                         .ok_or_else(|| {
-                            invalid_input("Transaction IR literal bytes exceed 8 MiB")
+                            invalid_input("Transaction IR literal byte count overflow")
                         })?;
                 }
                 TransactionIrStep::ConversationRestore {
@@ -3014,8 +2923,7 @@ impl TransactionIr {
                     slot,
                 } => {
                     let initialized = initialized_slots
-                        .get_mut(*slot as usize)
-                        .ok_or_else(|| invalid_input("Transaction IR slot exceeds its bound"))?;
+                        .get_or_insert(*slot as usize);
                     if *initialized {
                         return Err(invalid_input("Transaction IR initializes a slot twice"));
                     }
@@ -3028,9 +2936,8 @@ impl TransactionIr {
                     }
                     literal_bytes = literal_bytes
                         .checked_add(conversation_id.len())
-                        .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
                         .ok_or_else(|| {
-                            invalid_input("Transaction IR literal bytes exceed 8 MiB")
+                            invalid_input("Transaction IR literal byte count overflow")
                         })?;
                 }
                 TransactionIrStep::ConversationPurge {
@@ -3039,8 +2946,7 @@ impl TransactionIr {
                     slot,
                 } => {
                     let initialized = initialized_slots
-                        .get_mut(*slot as usize)
-                        .ok_or_else(|| invalid_input("Transaction IR slot exceeds its bound"))?;
+                        .get_or_insert(*slot as usize);
                     if *initialized {
                         return Err(invalid_input("Transaction IR initializes a slot twice"));
                     }
@@ -3053,9 +2959,8 @@ impl TransactionIr {
                     }
                     literal_bytes = literal_bytes
                         .checked_add(conversation_id.len())
-                        .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
                         .ok_or_else(|| {
-                            invalid_input("Transaction IR literal bytes exceed 8 MiB")
+                            invalid_input("Transaction IR literal byte count overflow")
                         })?;
                 }
                 TransactionIrStep::ConversationTrashPrune {
@@ -3064,8 +2969,7 @@ impl TransactionIr {
                     slot,
                 } => {
                     let initialized = initialized_slots
-                        .get_mut(*slot as usize)
-                        .ok_or_else(|| invalid_input("Transaction IR slot exceeds its bound"))?;
+                        .get_or_insert(*slot as usize);
                     if *initialized {
                         return Err(invalid_input("Transaction IR initializes a slot twice"));
                     }
@@ -3082,9 +2986,8 @@ impl TransactionIr {
                     request.validate()?;
                     literal_bytes = literal_bytes
                         .checked_add(request.conversation_id.len())
-                        .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
                         .ok_or_else(|| {
-                            invalid_input("Transaction IR literal bytes exceed 8 MiB")
+                            invalid_input("Transaction IR literal byte count overflow")
                         })?;
                 }
                 TransactionIrStep::ConversationGet {
@@ -3095,8 +2998,7 @@ impl TransactionIr {
                     slot,
                 } => {
                     let initialized = initialized_slots
-                        .get_mut(*slot as usize)
-                        .ok_or_else(|| invalid_input("Transaction IR slot exceeds its bound"))?;
+                        .get_or_insert(*slot as usize);
                     if *initialized {
                         return Err(invalid_input("Transaction IR initializes a slot twice"));
                     }
@@ -3111,9 +3013,8 @@ impl TransactionIr {
                     }
                     literal_bytes = literal_bytes
                         .checked_add(conversation_id.len())
-                        .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
                         .ok_or_else(|| {
-                            invalid_input("Transaction IR literal bytes exceed 8 MiB")
+                            invalid_input("Transaction IR literal byte count overflow")
                         })?;
                 }
                 TransactionIrStep::ConversationSettingsUpdate {
@@ -3126,8 +3027,7 @@ impl TransactionIr {
                     ..
                 } => {
                     let initialized = initialized_slots
-                        .get_mut(*slot as usize)
-                        .ok_or_else(|| invalid_input("Transaction IR slot exceeds its bound"))?;
+                        .get_or_insert(*slot as usize);
                     if *initialized {
                         return Err(invalid_input("Transaction IR initializes a slot twice"));
                     }
@@ -3153,9 +3053,8 @@ impl TransactionIr {
                         .and_then(|bytes| {
                             bytes.checked_add(expected_settings_json.as_ref().map_or(0, Vec::len))
                         })
-                        .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
                         .ok_or_else(|| {
-                            invalid_input("Transaction IR literal bytes exceed 8 MiB")
+                            invalid_input("Transaction IR literal byte count overflow")
                         })?;
                 }
                 TransactionIrStep::ConversationMetadataUpdate {
@@ -3166,8 +3065,7 @@ impl TransactionIr {
                     slot,
                 } => {
                     let initialized = initialized_slots
-                        .get_mut(*slot as usize)
-                        .ok_or_else(|| invalid_input("Transaction IR slot exceeds its bound"))?;
+                        .get_or_insert(*slot as usize);
                     if *initialized {
                         return Err(invalid_input("Transaction IR initializes a slot twice"));
                     }
@@ -3182,9 +3080,8 @@ impl TransactionIr {
                     literal_bytes = literal_bytes
                         .checked_add(conversation_id.len())
                         .and_then(|bytes| bytes.checked_add(title.as_ref().map_or(0, String::len)))
-                        .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
                         .ok_or_else(|| {
-                            invalid_input("Transaction IR literal bytes exceed 8 MiB")
+                            invalid_input("Transaction IR literal byte count overflow")
                         })?;
                 }
                 TransactionIrStep::EntityPut {
@@ -3192,9 +3089,8 @@ impl TransactionIr {
                 } => {
                     literal_bytes = literal_bytes
                         .checked_add(value.len())
-                        .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
                         .ok_or_else(|| {
-                            invalid_input("Transaction IR literal bytes exceed 8 MiB")
+                            invalid_input("Transaction IR literal byte count overflow")
                         })?;
                     if let Some(slot) = referenced_slot(*condition) {
                         if !initialized_slots
@@ -3232,9 +3128,8 @@ impl TransactionIr {
                     literal_bytes = events.iter().try_fold(literal_bytes, |bytes, event| {
                         bytes
                             .checked_add(event.encoded_len())
-                            .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
                             .ok_or_else(|| {
-                                invalid_input("Transaction IR literal bytes exceed 8 MiB")
+                                invalid_input("Transaction IR literal byte count overflow")
                             })
                     })?;
                 }
@@ -3247,8 +3142,7 @@ impl TransactionIr {
                     ..
                 } => {
                     let initialized = initialized_slots
-                        .get_mut(*slot as usize)
-                        .ok_or_else(|| invalid_input("Transaction IR slot exceeds its bound"))?;
+                        .get_or_insert(*slot as usize);
                     if *initialized {
                         return Err(invalid_input("Transaction IR initializes a slot twice"));
                     }
@@ -3269,9 +3163,8 @@ impl TransactionIr {
                         .checked_add(source_conversation_id.len())
                         .and_then(|bytes| bytes.checked_add(destination_conversation_id.len()))
                         .and_then(|bytes| bytes.checked_add(title.as_ref().map_or(0, String::len)))
-                        .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
                         .ok_or_else(|| {
-                            invalid_input("Transaction IR literal bytes exceed 8 MiB")
+                            invalid_input("Transaction IR literal byte count overflow")
                         })?;
                 }
                 TransactionIrStep::IndexedStreamAppend {
@@ -3283,8 +3176,7 @@ impl TransactionIr {
                     ..
                 } => {
                     let initialized = initialized_slots
-                        .get_mut(*slot as usize)
-                        .ok_or_else(|| invalid_input("Transaction IR slot exceeds its bound"))?;
+                        .get_or_insert(*slot as usize);
                     if *initialized {
                         return Err(invalid_input("Transaction IR initializes a slot twice"));
                     }
@@ -3301,20 +3193,18 @@ impl TransactionIr {
                                 .iter()
                                 .try_fold(bytes, |total, id| total.checked_add(id.len()))
                         })
-                        .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
                         .ok_or_else(|| {
-                            invalid_input("Transaction IR literal bytes exceed 8 MiB")
+                            invalid_input("Transaction IR literal byte count overflow")
                         })?;
                 }
                 TransactionIrStep::IndexedStreamAppendBatch { items, slot } => {
                     let initialized = initialized_slots
-                        .get_mut(*slot as usize)
-                        .ok_or_else(|| invalid_input("Transaction IR slot exceeds its bound"))?;
+                        .get_or_insert(*slot as usize);
                     if *initialized {
                         return Err(invalid_input("Transaction IR initializes a slot twice"));
                     }
                     *initialized = true;
-                    if items.is_empty() || items.len() > 500 {
+                    if items.is_empty() {
                         return Err(invalid_input("Transaction IR event batch is invalid"));
                     }
                     for item in items {
@@ -3330,9 +3220,8 @@ impl TransactionIr {
                                     .iter()
                                     .try_fold(bytes, |total, id| total.checked_add(id.len()))
                             })
-                            .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
                             .ok_or_else(|| {
-                                invalid_input("Transaction IR literal bytes exceed 8 MiB")
+                                invalid_input("Transaction IR literal byte count overflow")
                             })?;
                     }
                 }
@@ -3345,8 +3234,7 @@ impl TransactionIr {
                     slot,
                 } => {
                     let initialized = initialized_slots
-                        .get_mut(*slot as usize)
-                        .ok_or_else(|| invalid_input("Transaction IR slot exceeds its bound"))?;
+                        .get_or_insert(*slot as usize);
                     if *initialized {
                         return Err(invalid_input("Transaction IR initializes a slot twice"));
                     }
@@ -3374,9 +3262,8 @@ impl TransactionIr {
                                     .map_or(0, |keys| keys.iter().map(String::len).sum()),
                             )
                         })
-                        .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
                         .ok_or_else(|| {
-                            invalid_input("Transaction IR literal bytes exceed 8 MiB")
+                            invalid_input("Transaction IR literal byte count overflow")
                         })?;
                 }
                 TransactionIrStep::ConversationList {
@@ -3389,8 +3276,7 @@ impl TransactionIr {
                     ..
                 } => {
                     let initialized = initialized_slots
-                        .get_mut(*slot as usize)
-                        .ok_or_else(|| invalid_input("Transaction IR slot exceeds its bound"))?;
+                        .get_or_insert(*slot as usize);
                     if *initialized {
                         return Err(invalid_input("Transaction IR initializes a slot twice"));
                     }
@@ -3429,9 +3315,8 @@ impl TransactionIr {
                                     .map_or(0, |keys| keys.iter().map(String::len).sum()),
                             )
                         })
-                        .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
                         .ok_or_else(|| {
-                            invalid_input("Transaction IR literal bytes exceed 8 MiB")
+                            invalid_input("Transaction IR literal byte count overflow")
                         })?;
                 }
                 TransactionIrStep::ConversationActivityDates {
@@ -3441,8 +3326,7 @@ impl TransactionIr {
                     ..
                 } => {
                     let initialized = initialized_slots
-                        .get_mut(*slot as usize)
-                        .ok_or_else(|| invalid_input("Transaction IR slot exceeds its bound"))?;
+                        .get_or_insert(*slot as usize);
                     if *initialized {
                         return Err(invalid_input("Transaction IR initializes a slot twice"));
                     }
@@ -3455,9 +3339,8 @@ impl TransactionIr {
                     }
                     literal_bytes = literal_bytes
                         .checked_add(day_boundaries_ms.len() * std::mem::size_of::<i64>())
-                        .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
                         .ok_or_else(|| {
-                            invalid_input("Transaction IR literal bytes exceed 8 MiB")
+                            invalid_input("Transaction IR literal byte count overflow")
                         })?;
                 }
                 TransactionIrStep::ModelRoutingGet { tenant_label, slot }
@@ -3466,9 +3349,8 @@ impl TransactionIr {
                     validate_model_routing_slot(&mut initialized_slots, *slot, tenant_label)?;
                     literal_bytes = literal_bytes
                         .checked_add(tenant_label.len())
-                        .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
                         .ok_or_else(|| {
-                            invalid_input("Transaction IR literal bytes exceed 8 MiB")
+                            invalid_input("Transaction IR literal byte count overflow")
                         })?;
                 }
                 TransactionIrStep::ModelRoutingCommit {
@@ -3489,16 +3371,11 @@ impl TransactionIr {
                     {
                         return Err(invalid_input("invalid model-routing commit step"));
                     }
+                    // The owner-bound blob codec owns durable document bodies.
+                    // The shared literal budget still applies to IR metadata.
                     literal_bytes = literal_bytes
                         .checked_add(tenant_label.len())
-                        .and_then(|bytes| bytes.checked_add(document_json.len()))
-                        .and_then(|bytes| {
-                            bytes.checked_add(migration_receipt_json.as_ref().map_or(0, Vec::len))
-                        })
-                        .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
-                        .ok_or_else(|| {
-                            invalid_input("Transaction IR literal bytes exceed 8 MiB")
-                        })?;
+                        .ok_or_else(|| invalid_input("Transaction IR metadata exceeds its bound"))?;
                 }
                 TransactionIrStep::ModelRoutingMigrationReceiptPut {
                     tenant_label,
@@ -3517,16 +3394,11 @@ impl TransactionIr {
                     {
                         return Err(invalid_input("invalid model-routing receipt step"));
                     }
+                    // The owner-bound blob codec owns durable document bodies.
+                    // The shared literal budget still applies to IR metadata.
                     literal_bytes = literal_bytes
                         .checked_add(tenant_label.len())
-                        .and_then(|bytes| bytes.checked_add(receipt_json.len()))
-                        .and_then(|bytes| {
-                            bytes.checked_add(initial_document_json.as_ref().map_or(0, Vec::len))
-                        })
-                        .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
-                        .ok_or_else(|| {
-                            invalid_input("Transaction IR literal bytes exceed 8 MiB")
-                        })?;
+                        .ok_or_else(|| invalid_input("Transaction IR metadata exceeds its bound"))?;
                 }
                 TransactionIrStep::ModelRoutingSecretGet {
                     tenant_label,
@@ -3548,9 +3420,8 @@ impl TransactionIr {
                     literal_bytes = literal_bytes
                         .checked_add(tenant_label.len())
                         .and_then(|bytes| bytes.checked_add(secret_reference.len()))
-                        .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
                         .ok_or_else(|| {
-                            invalid_input("Transaction IR literal bytes exceed 8 MiB")
+                            invalid_input("Transaction IR literal byte count overflow")
                         })?;
                 }
                 TransactionIrStep::ModelRoutingSecretPut {
@@ -3578,9 +3449,8 @@ impl TransactionIr {
                         .and_then(|bytes| bytes.checked_add(secret_reference.len()))
                         .and_then(|bytes| bytes.checked_add(ciphertext.len()))
                         .and_then(|bytes| bytes.checked_add(key_hint.len()))
-                        .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
                         .ok_or_else(|| {
-                            invalid_input("Transaction IR literal bytes exceed 8 MiB")
+                            invalid_input("Transaction IR literal byte count overflow")
                         })?;
                 }
                 TransactionIrStep::ModelRoutingSecretPrune {
@@ -3605,9 +3475,8 @@ impl TransactionIr {
                         .try_fold(literal_bytes + tenant_label.len(), |bytes, reference| {
                             bytes.checked_add(reference.len())
                         })
-                        .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
                         .ok_or_else(|| {
-                            invalid_input("Transaction IR literal bytes exceed 8 MiB")
+                            invalid_input("Transaction IR literal byte count overflow")
                         })?;
                 }
                 TransactionIrStep::ProviderCreate {
@@ -3630,9 +3499,8 @@ impl TransactionIr {
                         .checked_add(tenant_label.len())
                         .and_then(|bytes| bytes.checked_add(provider_id.len()))
                         .and_then(|bytes| bytes.checked_add(document_json.len()))
-                        .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
                         .ok_or_else(|| {
-                            invalid_input("Transaction IR literal bytes exceed 8 MiB")
+                            invalid_input("Transaction IR literal byte count overflow")
                         })?;
                 }
                 TransactionIrStep::ProviderGet {
@@ -3654,18 +3522,16 @@ impl TransactionIr {
                     literal_bytes = literal_bytes
                         .checked_add(tenant_label.len())
                         .and_then(|bytes| bytes.checked_add(provider_id.len()))
-                        .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
                         .ok_or_else(|| {
-                            invalid_input("Transaction IR literal bytes exceed 8 MiB")
+                            invalid_input("Transaction IR literal byte count overflow")
                         })?;
                 }
                 TransactionIrStep::ProviderList { tenant_label, slot } => {
                     validate_provider_step_slot(&mut initialized_slots, *slot, tenant_label, None)?;
                     literal_bytes = literal_bytes
                         .checked_add(tenant_label.len())
-                        .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
                         .ok_or_else(|| {
-                            invalid_input("Transaction IR literal bytes exceed 8 MiB")
+                            invalid_input("Transaction IR literal byte count overflow")
                         })?;
                 }
                 TransactionIrStep::ProviderUpdate {
@@ -3693,9 +3559,8 @@ impl TransactionIr {
                         .checked_add(tenant_label.len())
                         .and_then(|bytes| bytes.checked_add(provider_id.len()))
                         .and_then(|bytes| bytes.checked_add(updates_json.len()))
-                        .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
                         .ok_or_else(|| {
-                            invalid_input("Transaction IR literal bytes exceed 8 MiB")
+                            invalid_input("Transaction IR literal byte count overflow")
                         })?;
                 }
                 TransactionIrStep::ProviderTouch {
@@ -3717,63 +3582,55 @@ impl TransactionIr {
                     literal_bytes = literal_bytes
                         .checked_add(tenant_label.len())
                         .and_then(|bytes| bytes.checked_add(provider_id.len()))
-                        .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
                         .ok_or_else(|| {
-                            invalid_input("Transaction IR literal bytes exceed 8 MiB")
+                            invalid_input("Transaction IR literal byte count overflow")
                         })?;
                 }
                 TransactionIrStep::AutomationSkillSourceUpdate {request,slot} => {
                     validate_worker_job_slot(&mut initialized_slots,*slot)?;
                     request.validate(self.owner_user_id,u64::MAX)?;
                     literal_bytes=literal_bytes.checked_add(request.literal_bytes()?)
-                        .filter(|bytes|*bytes<=MAX_TRANSACTION_IR_LITERAL_BYTES)
                         .ok_or_else(||invalid_input("skill source literal bytes exceed bound"))?;
                 }
                 TransactionIrStep::AutomationProjectUpdate {request,slot} => {
                     validate_worker_job_slot(&mut initialized_slots,*slot)?;
                     request.validate(self.owner_user_id,u64::MAX)?;
                     literal_bytes=literal_bytes.checked_add(request.literal_bytes()?)
-                        .filter(|bytes|*bytes<=MAX_TRANSACTION_IR_LITERAL_BYTES)
                         .ok_or_else(||invalid_input("project registration literal bytes exceed bound"))?;
                 }
                 TransactionIrStep::AutomationDefinitionUpdate {request,slot} => {
                     validate_worker_job_slot(&mut initialized_slots,*slot)?;
                     request.validate(self.owner_user_id,u64::MAX)?;
                     literal_bytes=literal_bytes.checked_add(request.literal_bytes()?)
-                        .filter(|bytes|*bytes<=MAX_TRANSACTION_IR_LITERAL_BYTES)
                         .ok_or_else(||invalid_input("publication literal bytes exceed bound"))?;
                 }
                 TransactionIrStep::AutomationEventSettle { request, slot } => {
                     validate_worker_job_slot(&mut initialized_slots, *slot)?;
                     request.validate(self.owner_user_id, u64::MAX)?;
                     literal_bytes = literal_bytes.checked_add(request.literal_bytes()?)
-                        .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
                         .ok_or_else(|| invalid_input("event settlement literal bytes exceed bound"))?;
                 }
                 TransactionIrStep::AutomationDefinitionDraftGuard {key} => {
                     if key.is_empty() || key.chars().count()>512 { return Err(invalid_input("invalid draft key")); }
-                    literal_bytes=literal_bytes.checked_add(key.len()).filter(|bytes|*bytes<=MAX_TRANSACTION_IR_LITERAL_BYTES)
+                    literal_bytes=literal_bytes.checked_add(key.len())
                         .ok_or_else(||invalid_input("draft guard literal bytes exceed bound"))?;
                 }
                 TransactionIrStep::AutomationRunCancel { request, slot } => {
                     validate_worker_job_slot(&mut initialized_slots, *slot)?;
                     request.validate(self.owner_user_id, u64::MAX)?;
                     literal_bytes = literal_bytes.checked_add(request.literal_bytes()?)
-                        .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
                         .ok_or_else(|| invalid_input("automation cancellation literal bytes exceed bound"))?;
                 }
                 TransactionIrStep::AutomationRunApprove { request, slot } => {
                     validate_worker_job_slot(&mut initialized_slots, *slot)?;
                     request.validate(self.owner_user_id, u64::MAX)?;
                     literal_bytes = literal_bytes.checked_add(request.literal_bytes()?)
-                        .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
                         .ok_or_else(|| invalid_input("automation approval literal bytes exceed bound"))?;
                 }
             TransactionIrStep::AutomationRunMutation { request, advance, slot } => {
                     validate_worker_job_slot(&mut initialized_slots, *slot)?;
                     request.validate(*advance, self.owner_user_id, u64::MAX)?;
                     literal_bytes = literal_bytes.checked_add(request.literal_bytes()?)
-                        .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
                         .ok_or_else(|| invalid_input("automation literal bytes exceed bound"))?;
                 }
                 TransactionIrStep::WorkerJobEnqueue {
@@ -3818,9 +3675,8 @@ impl TransactionIr {
                         .and_then(|bytes| bytes.checked_add(payload_json.len()))
                         .and_then(|bytes| bytes.checked_add(idempotency_key.len()))
                         .and_then(|bytes| bytes.checked_add(request_digest.len()))
-                        .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
                         .ok_or_else(|| {
-                            invalid_input("Transaction IR literal bytes exceed 8 MiB")
+                            invalid_input("Transaction IR literal byte count overflow")
                         })?;
                 }
                 TransactionIrStep::WorkerJobGet {
@@ -3834,9 +3690,8 @@ impl TransactionIr {
                     }
                     literal_bytes = literal_bytes
                         .checked_add(task_id.len())
-                        .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
                         .ok_or_else(|| {
-                            invalid_input("Transaction IR literal bytes exceed 8 MiB")
+                            invalid_input("Transaction IR literal byte count overflow")
                         })?;
                 }
                 TransactionIrStep::WorkerJobClaimNext {
@@ -3865,9 +3720,8 @@ impl TransactionIr {
                         .try_fold(literal_bytes + worker_id.len(), |bytes, kind| {
                             bytes.checked_add(kind.len())
                         })
-                        .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
                         .ok_or_else(|| {
-                            invalid_input("Transaction IR literal bytes exceed 8 MiB")
+                            invalid_input("Transaction IR literal byte count overflow")
                         })?;
                 }
                 TransactionIrStep::WorkerJobDefer {
@@ -3889,7 +3743,6 @@ impl TransactionIr {
                     literal_bytes = literal_bytes
                         .checked_add(task_id.len())
                         .and_then(|b| b.checked_add(worker_id.len()))
-                        .filter(|b| *b <= MAX_TRANSACTION_IR_LITERAL_BYTES)
                         .ok_or_else(|| {
                             invalid_input("worker suspension literal bytes exceed bound")
                         })?;
@@ -3915,9 +3768,8 @@ impl TransactionIr {
                     literal_bytes = literal_bytes
                         .checked_add(task_id.len())
                         .and_then(|bytes| bytes.checked_add(worker_id.len()))
-                        .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
                         .ok_or_else(|| {
-                            invalid_input("Transaction IR literal bytes exceed 8 MiB")
+                            invalid_input("Transaction IR literal byte count overflow")
                         })?;
                 }
                 TransactionIrStep::WorkerJobClaimState {
@@ -3938,9 +3790,8 @@ impl TransactionIr {
                     literal_bytes = literal_bytes
                         .checked_add(task_id.len())
                         .and_then(|bytes| bytes.checked_add(worker_id.len()))
-                        .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
                         .ok_or_else(|| {
-                            invalid_input("Transaction IR literal bytes exceed 8 MiB")
+                            invalid_input("Transaction IR literal byte count overflow")
                         })?;
                 }
                 TransactionIrStep::WorkerJobRequestCancel {
@@ -3961,9 +3812,8 @@ impl TransactionIr {
                     literal_bytes = literal_bytes
                         .checked_add(task_id.len())
                         .and_then(|bytes| bytes.checked_add(reason.len()))
-                        .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
                         .ok_or_else(|| {
-                            invalid_input("Transaction IR literal bytes exceed 8 MiB")
+                            invalid_input("Transaction IR literal byte count overflow")
                         })?;
                 }
                 TransactionIrStep::WorkerJobComplete {
@@ -4001,15 +3851,13 @@ impl TransactionIr {
                         .and_then(|bytes| bytes.checked_add(terminal_status.len()))
                         .and_then(|bytes| bytes.checked_add(result_ref.len()))
                         .and_then(|bytes| bytes.checked_add(error_json.len()))
-                        .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
                         .ok_or_else(|| {
-                            invalid_input("Transaction IR literal bytes exceed 8 MiB")
+                            invalid_input("Transaction IR literal byte count overflow")
                         })?;
                 }
                 TransactionIrStep::TurnCreatePair { request, slot } => {
                     let initialized = initialized_slots
-                        .get_mut(*slot as usize)
-                        .ok_or_else(|| invalid_input("Transaction IR slot exceeds its bound"))?;
+                        .get_or_insert(*slot as usize);
                     if *initialized {
                         return Err(invalid_input("Transaction IR initializes a slot twice"));
                     }
@@ -4036,16 +3884,14 @@ impl TransactionIr {
                     }
                     literal_bytes = literal_bytes
                         .checked_add(encoded.len())
-                        .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
                         .ok_or_else(|| {
-                            invalid_input("Transaction IR literal bytes exceed 8 MiB")
+                            invalid_input("Transaction IR literal byte count overflow")
                         })?;
                 }
                 TransactionIrStep::TurnQueueActivate { request, slot }
                 | TransactionIrStep::TurnQueueCancel { request, slot } => {
                     let initialized = initialized_slots
-                        .get_mut(*slot as usize)
-                        .ok_or_else(|| invalid_input("Transaction IR slot exceeds its bound"))?;
+                        .get_or_insert(*slot as usize);
                     if *initialized {
                         return Err(invalid_input("Transaction IR initializes a slot twice"));
                     }
@@ -4061,15 +3907,13 @@ impl TransactionIr {
                     literal_bytes = literal_bytes
                         .checked_add(request.conversation_id.len())
                         .and_then(|bytes| bytes.checked_add(request.queue_id.len()))
-                        .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
                         .ok_or_else(|| {
-                            invalid_input("Transaction IR literal bytes exceed 8 MiB")
+                            invalid_input("Transaction IR literal byte count overflow")
                         })?;
                 }
                 TransactionIrStep::TurnSteerCommit { request, slot } => {
                     let initialized = initialized_slots
-                        .get_mut(*slot as usize)
-                        .ok_or_else(|| invalid_input("Transaction IR slot exceeds its bound"))?;
+                        .get_or_insert(*slot as usize);
                     if *initialized {
                         return Err(invalid_input("Transaction IR initializes a slot twice"));
                     }
@@ -4092,15 +3936,13 @@ impl TransactionIr {
                         .and_then(|bytes| bytes.checked_add(request.attempt_id.len()))
                         .and_then(|bytes| bytes.checked_add(request.command_id.len()))
                         .and_then(|bytes| bytes.checked_add(request.text.len()))
-                        .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
                         .ok_or_else(|| {
-                            invalid_input("Transaction IR literal bytes exceed 8 MiB")
+                            invalid_input("Transaction IR literal byte count overflow")
                         })?;
                 }
                 TransactionIrStep::TurnRelatedAnnounce { request, slot } => {
                     let initialized = initialized_slots
-                        .get_mut(*slot as usize)
-                        .ok_or_else(|| invalid_input("Transaction IR slot exceeds its bound"))?;
+                        .get_or_insert(*slot as usize);
                     if *initialized {
                         return Err(invalid_input("Transaction IR initializes a slot twice"));
                     }
@@ -4129,14 +3971,10 @@ impl TransactionIr {
                             })
                         },
                     )?;
-                    if literal_bytes > MAX_TRANSACTION_IR_LITERAL_BYTES {
-                        return Err(invalid_input("Transaction IR literal bytes exceed 8 MiB"));
-                    }
                 }
                 TransactionIrStep::TurnVisibleSync { request, slot } => {
                     let initialized = initialized_slots
-                        .get_mut(*slot as usize)
-                        .ok_or_else(|| invalid_input("Transaction IR slot exceeds its bound"))?;
+                        .get_or_insert(*slot as usize);
                     if *initialized {
                         return Err(invalid_input("Transaction IR initializes a slot twice"));
                     }
@@ -4174,9 +4012,8 @@ impl TransactionIr {
                                     })?
                                     .len(),
                             )
-                            .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
                             .ok_or_else(|| {
-                                invalid_input("Transaction IR literal bytes exceed 8 MiB")
+                                invalid_input("Transaction IR literal byte count overflow")
                             })?;
                     }
                 }
@@ -4201,8 +4038,7 @@ impl TransactionIr {
                     ..
                 } => {
                     let initialized = initialized_slots
-                        .get_mut(*slot as usize)
-                        .ok_or_else(|| invalid_input("Transaction IR slot exceeds its bound"))?;
+                        .get_or_insert(*slot as usize);
                     if *initialized {
                         return Err(invalid_input("Transaction IR initializes a slot twice"));
                     }
@@ -4243,9 +4079,8 @@ impl TransactionIr {
                         })
                         .and_then(|bytes| bytes.checked_add(default_title.len()))
                         .and_then(|bytes| bytes.checked_add(default_settings_json.len()))
-                        .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
                         .ok_or_else(|| {
-                            invalid_input("Transaction IR literal bytes exceed 8 MiB")
+                            invalid_input("Transaction IR literal byte count overflow")
                         })?;
                 }
                 TransactionIrStep::TurnExists {
@@ -4257,8 +4092,7 @@ impl TransactionIr {
                     slot,
                 } => {
                     let initialized = initialized_slots
-                        .get_mut(*slot as usize)
-                        .ok_or_else(|| invalid_input("Transaction IR slot exceeds its bound"))?;
+                        .get_or_insert(*slot as usize);
                     if *initialized {
                         return Err(invalid_input("Transaction IR initializes a slot twice"));
                     }
@@ -4268,9 +4102,8 @@ impl TransactionIr {
                     }
                     literal_bytes = literal_bytes
                         .checked_add(conversation_id.len())
-                        .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
                         .ok_or_else(|| {
-                            invalid_input("Transaction IR literal bytes exceed 8 MiB")
+                            invalid_input("Transaction IR literal byte count overflow")
                         })?;
                 }
                 TransactionIrStep::TurnGet {
@@ -4291,8 +4124,7 @@ impl TransactionIr {
                     ..
                 } => {
                     let initialized = initialized_slots
-                        .get_mut(*slot as usize)
-                        .ok_or_else(|| invalid_input("Transaction IR slot exceeds its bound"))?;
+                        .get_or_insert(*slot as usize);
                     if *initialized {
                         return Err(invalid_input("Transaction IR initializes a slot twice"));
                     }
@@ -4320,15 +4152,13 @@ impl TransactionIr {
                     literal_bytes = literal_bytes
                         .checked_add(conversation_id.len())
                         .and_then(|bytes| bytes.checked_add(turn_id.len()))
-                        .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
                         .ok_or_else(|| {
-                            invalid_input("Transaction IR literal bytes exceed 8 MiB")
+                            invalid_input("Transaction IR literal byte count overflow")
                         })?;
                 }
                 TransactionIrStep::TurnTimingTraceGet { task_id, slot } => {
                     let initialized = initialized_slots
-                        .get_mut(*slot as usize)
-                        .ok_or_else(|| invalid_input("Transaction IR slot exceeds its bound"))?;
+                        .get_or_insert(*slot as usize);
                     if *initialized {
                         return Err(invalid_input("Transaction IR initializes a slot twice"));
                     }
@@ -4338,9 +4168,8 @@ impl TransactionIr {
                     }
                     literal_bytes = literal_bytes
                         .checked_add(task_id.len())
-                        .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
                         .ok_or_else(|| {
-                            invalid_input("Transaction IR literal bytes exceed 8 MiB")
+                            invalid_input("Transaction IR literal byte count overflow")
                         })?;
                 }
                 TransactionIrStep::TurnTimingTraceList {
@@ -4350,8 +4179,7 @@ impl TransactionIr {
                     slot,
                 } => {
                     let initialized = initialized_slots
-                        .get_mut(*slot as usize)
-                        .ok_or_else(|| invalid_input("Transaction IR slot exceeds its bound"))?;
+                        .get_or_insert(*slot as usize);
                     if *initialized {
                         return Err(invalid_input("Transaction IR initializes a slot twice"));
                     }
@@ -4366,15 +4194,13 @@ impl TransactionIr {
                     }
                     literal_bytes = literal_bytes
                         .checked_add(conversation_id.len())
-                        .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
                         .ok_or_else(|| {
-                            invalid_input("Transaction IR literal bytes exceed 8 MiB")
+                            invalid_input("Transaction IR literal byte count overflow")
                         })?;
                 }
                 TransactionIrStep::TurnPerceptionRecord { request, slot } => {
                     let initialized = initialized_slots
-                        .get_mut(*slot as usize)
-                        .ok_or_else(|| invalid_input("Transaction IR slot exceeds its bound"))?;
+                        .get_or_insert(*slot as usize);
                     if *initialized {
                         return Err(invalid_input("Transaction IR initializes a slot twice"));
                     }
@@ -4401,15 +4227,13 @@ impl TransactionIr {
                         .and_then(|bytes| bytes.checked_add(request.turn_id.len()))
                         .and_then(|bytes| bytes.checked_add(request.attempt_id.len()))
                         .and_then(|bytes| bytes.checked_add(observation_bytes))
-                        .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
                         .ok_or_else(|| {
-                            invalid_input("Transaction IR literal bytes exceed 8 MiB")
+                            invalid_input("Transaction IR literal byte count overflow")
                         })?;
                 }
                 TransactionIrStep::TurnRecover { request, slot } => {
                     let initialized = initialized_slots
-                        .get_mut(*slot as usize)
-                        .ok_or_else(|| invalid_input("Transaction IR slot exceeds its bound"))?;
+                        .get_or_insert(*slot as usize);
                     if *initialized {
                         return Err(invalid_input("Transaction IR initializes a slot twice"));
                     }
@@ -4434,14 +4258,10 @@ impl TransactionIr {
                             })
                         },
                     )?;
-                    if literal_bytes > MAX_TRANSACTION_IR_LITERAL_BYTES {
-                        return Err(invalid_input("Transaction IR literal bytes exceed 8 MiB"));
-                    }
                 }
                 TransactionIrStep::TurnEventRecord { request, slot } => {
                     let initialized = initialized_slots
-                        .get_mut(*slot as usize)
-                        .ok_or_else(|| invalid_input("Transaction IR slot exceeds its bound"))?;
+                        .get_or_insert(*slot as usize);
                     if *initialized {
                         return Err(invalid_input("Transaction IR initializes a slot twice"));
                     }
@@ -4463,8 +4283,6 @@ impl TransactionIr {
                             || item.task_id.chars().count() > 512
                             || item.event_type.is_empty()
                             || item.event_type.chars().count() > 128
-                            || item.payload_json.len()
-                                > crate::generated_tofudb_ir::MAX_TRANSACTION_IR_LITERAL_BYTES
                         {
                             return Err(invalid_input("invalid carried Turn task event"));
                         }
@@ -4525,9 +4343,8 @@ impl TransactionIr {
                                     .map_or(0, |item| item.payload_json.len()),
                             )
                         })
-                        .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
                         .ok_or_else(|| {
-                            invalid_input("Transaction IR literal bytes exceed 8 MiB")
+                            invalid_input("Transaction IR literal byte count overflow")
                         })?;
                 }
                 TransactionIrStep::TurnList {
@@ -4536,8 +4353,7 @@ impl TransactionIr {
                     slot,
                 } => {
                     let initialized = initialized_slots
-                        .get_mut(*slot as usize)
-                        .ok_or_else(|| invalid_input("Transaction IR slot exceeds its bound"))?;
+                        .get_or_insert(*slot as usize);
                     if *initialized {
                         return Err(invalid_input("Transaction IR initializes a slot twice"));
                     }
@@ -4555,9 +4371,8 @@ impl TransactionIr {
                         .and_then(|bytes| {
                             bytes.checked_add(lane_id.as_ref().map_or(0, String::len))
                         })
-                        .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
                         .ok_or_else(|| {
-                            invalid_input("Transaction IR literal bytes exceed 8 MiB")
+                            invalid_input("Transaction IR literal byte count overflow")
                         })?;
                 }
                 TransactionIrStep::TurnListDelta {
@@ -4568,8 +4383,7 @@ impl TransactionIr {
                     ..
                 } => {
                     let initialized = initialized_slots
-                        .get_mut(*slot as usize)
-                        .ok_or_else(|| invalid_input("Transaction IR slot exceeds its bound"))?;
+                        .get_or_insert(*slot as usize);
                     if *initialized {
                         return Err(invalid_input("Transaction IR initializes a slot twice"));
                     }
@@ -4596,14 +4410,10 @@ impl TransactionIr {
                             })
                         },
                     )?;
-                    if literal_bytes > MAX_TRANSACTION_IR_LITERAL_BYTES {
-                        return Err(invalid_input("Transaction IR literal bytes exceed 8 MiB"));
-                    }
                 }
                 TransactionIrStep::TurnAttemptCreate { request, slot } => {
                     let initialized = initialized_slots
-                        .get_mut(*slot as usize)
-                        .ok_or_else(|| invalid_input("Transaction IR slot exceeds its bound"))?;
+                        .get_or_insert(*slot as usize);
                     if *initialized {
                         return Err(invalid_input("Transaction IR initializes a slot twice"));
                     }
@@ -4698,8 +4508,7 @@ impl TransactionIr {
                     ]
                     .into_iter()
                     .try_fold(literal_bytes, |total, bytes| total.checked_add(bytes))
-                    .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
-                    .ok_or_else(|| invalid_input("Transaction IR literal bytes exceed 8 MiB"))?;
+                    .ok_or_else(|| invalid_input("Transaction IR literal byte count overflow"))?;
                 }
                 TransactionIrStep::TurnAttemptDispatchableList {
                     created_before_ms,
@@ -4736,15 +4545,13 @@ impl TransactionIr {
                         .checked_add(request.attempt_id.len())
                         .and_then(|bytes| bytes.checked_add(request.tenant_label.len()))
                         .and_then(|bytes| bytes.checked_add(principal_bytes))
-                        .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
                         .ok_or_else(|| {
-                            invalid_input("Transaction IR literal bytes exceed 8 MiB")
+                            invalid_input("Transaction IR literal byte count overflow")
                         })?;
                 }
                 TransactionIrStep::TurnAttemptGet { attempt_id, slot, .. } => {
                     let initialized = initialized_slots
-                        .get_mut(*slot as usize)
-                        .ok_or_else(|| invalid_input("Transaction IR slot exceeds its bound"))?;
+                        .get_or_insert(*slot as usize);
                     if *initialized {
                         return Err(invalid_input("Transaction IR initializes a slot twice"));
                     }
@@ -4754,9 +4561,8 @@ impl TransactionIr {
                     }
                     literal_bytes = literal_bytes
                         .checked_add(attempt_id.len())
-                        .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
                         .ok_or_else(|| {
-                            invalid_input("Transaction IR literal bytes exceed 8 MiB")
+                            invalid_input("Transaction IR literal byte count overflow")
                         })?;
                 }
                 TransactionIrStep::TurnAttemptClaim {
@@ -4766,8 +4572,7 @@ impl TransactionIr {
                     slot,
                 } => {
                     let initialized = initialized_slots
-                        .get_mut(*slot as usize)
-                        .ok_or_else(|| invalid_input("Transaction IR slot exceeds its bound"))?;
+                        .get_or_insert(*slot as usize);
                     if *initialized {
                         return Err(invalid_input("Transaction IR initializes a slot twice"));
                     }
@@ -4782,9 +4587,8 @@ impl TransactionIr {
                     literal_bytes = literal_bytes
                         .checked_add(attempt_id.len())
                         .and_then(|bytes| bytes.checked_add(dispatch_owner_id.len()))
-                        .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
                         .ok_or_else(|| {
-                            invalid_input("Transaction IR literal bytes exceed 8 MiB")
+                            invalid_input("Transaction IR literal byte count overflow")
                         })?;
                 }
                 TransactionIrStep::TurnAttemptBind {
@@ -4795,8 +4599,7 @@ impl TransactionIr {
                     slot,
                 } => {
                     let initialized = initialized_slots
-                        .get_mut(*slot as usize)
-                        .ok_or_else(|| invalid_input("Transaction IR slot exceeds its bound"))?;
+                        .get_or_insert(*slot as usize);
                     if *initialized {
                         return Err(invalid_input("Transaction IR initializes a slot twice"));
                     }
@@ -4814,9 +4617,8 @@ impl TransactionIr {
                         .checked_add(attempt_id.len())
                         .and_then(|bytes| bytes.checked_add(task_id.len()))
                         .and_then(|bytes| bytes.checked_add(dispatch_owner_id.len()))
-                        .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
                         .ok_or_else(|| {
-                            invalid_input("Transaction IR literal bytes exceed 8 MiB")
+                            invalid_input("Transaction IR literal byte count overflow")
                         })?;
                 }
                 TransactionIrStep::TurnAttemptStart {
@@ -4828,8 +4630,7 @@ impl TransactionIr {
                 } => {
                     if let Some(context) = automation_context { context.validate()?; }
                     let initialized = initialized_slots
-                        .get_mut(*slot as usize)
-                        .ok_or_else(|| invalid_input("Transaction IR slot exceeds its bound"))?;
+                        .get_or_insert(*slot as usize);
                     if *initialized {
                         return Err(invalid_input("Transaction IR initializes a slot twice"));
                     }
@@ -4845,9 +4646,8 @@ impl TransactionIr {
                     literal_bytes = literal_bytes
                         .checked_add(attempt_id.len())
                         .and_then(|bytes| bytes.checked_add(task_id.len()))
-                        .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
                         .ok_or_else(|| {
-                            invalid_input("Transaction IR literal bytes exceed 8 MiB")
+                            invalid_input("Transaction IR literal byte count overflow")
                         })?;
                 }
                 TransactionIrStep::TurnEventsList {
@@ -4857,8 +4657,7 @@ impl TransactionIr {
                     ..
                 } => {
                     let initialized = initialized_slots
-                        .get_mut(*slot as usize)
-                        .ok_or_else(|| invalid_input("Transaction IR slot exceeds its bound"))?;
+                        .get_or_insert(*slot as usize);
                     if *initialized {
                         return Err(invalid_input("Transaction IR initializes a slot twice"));
                     }
@@ -4871,15 +4670,13 @@ impl TransactionIr {
                     }
                     literal_bytes = literal_bytes
                         .checked_add(attempt_id.len())
-                        .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
                         .ok_or_else(|| {
-                            invalid_input("Transaction IR literal bytes exceed 8 MiB")
+                            invalid_input("Transaction IR literal byte count overflow")
                         })?;
                 }
                 TransactionIrStep::TurnEventsPrune { request, slot } => {
                     let initialized = initialized_slots
-                        .get_mut(*slot as usize)
-                        .ok_or_else(|| invalid_input("Transaction IR slot exceeds its bound"))?;
+                        .get_or_insert(*slot as usize);
                     if *initialized {
                         return Err(invalid_input("Transaction IR initializes a slot twice"));
                     }
@@ -4899,8 +4696,7 @@ impl TransactionIr {
                     slot,
                 } => {
                     let initialized = initialized_slots
-                        .get_mut(*slot as usize)
-                        .ok_or_else(|| invalid_input("Transaction IR slot exceeds its bound"))?;
+                        .get_or_insert(*slot as usize);
                     if *initialized {
                         return Err(invalid_input("Transaction IR initializes a slot twice"));
                     }
@@ -4928,14 +4724,10 @@ impl TransactionIr {
                             })
                         },
                     )?;
-                    if literal_bytes > MAX_TRANSACTION_IR_LITERAL_BYTES {
-                        return Err(invalid_input("Transaction IR literal bytes exceed 8 MiB"));
-                    }
                 }
                 TransactionIrStep::TurnCompact { request, slot } => {
                     let initialized = initialized_slots
-                        .get_mut(*slot as usize)
-                        .ok_or_else(|| invalid_input("Transaction IR slot exceeds its bound"))?;
+                        .get_or_insert(*slot as usize);
                     if *initialized {
                         return Err(invalid_input("Transaction IR initializes a slot twice"));
                     }
@@ -4995,9 +4787,6 @@ impl TransactionIr {
                                 invalid_input("Transaction IR literal byte count overflow")
                             })?;
                     }
-                    if literal_bytes > MAX_TRANSACTION_IR_LITERAL_BYTES {
-                        return Err(invalid_input("Transaction IR literal bytes exceed 8 MiB"));
-                    }
                 }
                 TransactionIrStep::TurnBranchCreate {
                     conversation_id,
@@ -5013,8 +4802,7 @@ impl TransactionIr {
                     slot,
                 } => {
                     let initialized = initialized_slots
-                        .get_mut(*slot as usize)
-                        .ok_or_else(|| invalid_input("Transaction IR slot exceeds its bound"))?;
+                        .get_or_insert(*slot as usize);
                     if *initialized {
                         return Err(invalid_input("Transaction IR initializes a slot twice"));
                     }
@@ -5042,9 +4830,8 @@ impl TransactionIr {
                         .and_then(|bytes| bytes.checked_add(kind.len()))
                         .and_then(|bytes| bytes.checked_add(anchor_text.len()))
                         .and_then(|bytes| bytes.checked_add(parent_selection.len()))
-                        .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
                         .ok_or_else(|| {
-                            invalid_input("Transaction IR literal bytes exceed 8 MiB")
+                            invalid_input("Transaction IR literal byte count overflow")
                         })?;
                 }
                 TransactionIrStep::TurnBranchDelete {
@@ -5056,8 +4843,7 @@ impl TransactionIr {
                     slot,
                 } => {
                     let initialized = initialized_slots
-                        .get_mut(*slot as usize)
-                        .ok_or_else(|| invalid_input("Transaction IR slot exceeds its bound"))?;
+                        .get_or_insert(*slot as usize);
                     if *initialized {
                         return Err(invalid_input("Transaction IR initializes a slot twice"));
                     }
@@ -5077,13 +4863,13 @@ impl TransactionIr {
                         .checked_add(conversation_id.len())
                         .and_then(|bytes| bytes.checked_add(parent_turn_id.len()))
                         .and_then(|bytes| bytes.checked_add(lane_id.len()))
-                        .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
                         .ok_or_else(|| {
-                            invalid_input("Transaction IR literal bytes exceed 8 MiB")
+                            invalid_input("Transaction IR literal byte count overflow")
                         })?;
                 }
                 TransactionIrStep::TurnProjectionUpdate {
                     preserve_activity: _,
+                    human_guidance_answer_json,
                     conversation_id,
                     turn_id,
                     projection_json,
@@ -5093,8 +4879,7 @@ impl TransactionIr {
                     slot,
                 } => {
                     let initialized = initialized_slots
-                        .get_mut(*slot as usize)
-                        .ok_or_else(|| invalid_input("Transaction IR slot exceeds its bound"))?;
+                        .get_or_insert(*slot as usize);
                     if *initialized {
                         return Err(invalid_input("Transaction IR initializes a slot twice"));
                     }
@@ -5105,6 +4890,10 @@ impl TransactionIr {
                         || turn_id.chars().count() > 128
                         || *updated_at_ms == 0
                         || *committed_at_ms == 0
+                        || human_guidance_answer_json.as_ref().is_some_and(|bytes| {
+                            bytes.len() > crate::generated_tofudb_ir::MAX_HUMAN_GUIDANCE_PAYLOAD_BYTES || serde_json::from_slice::<serde_json::Value>(bytes)
+                                .ok().is_none_or(|value| !value.is_object())
+                        })
                         || serde_json::from_slice::<serde_json::Value>(projection_json)
                             .ok()
                             .and_then(|value| value.as_object().cloned())
@@ -5116,22 +4905,20 @@ impl TransactionIr {
                         .checked_add(conversation_id.len())
                         .and_then(|bytes| bytes.checked_add(turn_id.len()))
                         .and_then(|bytes| bytes.checked_add(projection_json.len()))
+                        .and_then(|bytes| bytes.checked_add(human_guidance_answer_json.as_ref().map_or(0, Vec::len)))
                         .ok_or_else(|| {
                             invalid_input("Transaction IR literal byte count overflow")
                         })?;
-                    if literal_bytes > MAX_TRANSACTION_IR_LITERAL_BYTES {
-                        return Err(invalid_input("Transaction IR literal bytes exceed 8 MiB"));
-                    }
                 }
                 TransactionIrStep::TurnSyncSnapshot {
                     conversation_id,
                     turn_limit,
+                    max_projection_bytes,
                     slot,
                     ..
                 } => {
                     let initialized = initialized_slots
-                        .get_mut(*slot as usize)
-                        .ok_or_else(|| invalid_input("Transaction IR slot exceeds its bound"))?;
+                        .get_or_insert(*slot as usize);
                     if *initialized {
                         return Err(invalid_input("Transaction IR initializes a slot twice"));
                     }
@@ -5139,26 +4926,40 @@ impl TransactionIr {
                     if conversation_id.is_empty()
                         || conversation_id.chars().count() > 256
                         || *turn_limit > 256
+                        || (*max_projection_bytes != 0 && !(65536..=16777216).contains(max_projection_bytes))
                     {
                         return Err(invalid_input("invalid Turn sync snapshot"));
                     }
                     literal_bytes = literal_bytes
                         .checked_add(conversation_id.len())
-                        .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
                         .ok_or_else(|| {
-                            invalid_input("Transaction IR literal bytes exceed 8 MiB")
+                            invalid_input("Transaction IR literal byte count overflow")
                         })?;
+                }
+                TransactionIrStep::TurnSyncRoundDirectory { conversation_id, lane_id, anchor_turn_id, limit, slot, .. } => {
+                    let initialized = initialized_slots.get_or_insert(*slot as usize);
+                    if *initialized { return Err(invalid_input("Transaction IR initializes a slot twice")); }
+                    *initialized = true;
+                    if conversation_id.is_empty() || conversation_id.chars().count() > 256
+                        || lane_id.is_empty() || lane_id.chars().count() > 128
+                        || anchor_turn_id.chars().count() > 128 || !(1..=100).contains(limit) {
+                        return Err(invalid_input("invalid Turn round directory"));
+                    }
+                    literal_bytes = literal_bytes.checked_add(conversation_id.len())
+                        .and_then(|n| n.checked_add(lane_id.len()))
+                        .and_then(|n| n.checked_add(anchor_turn_id.len()))
+                        .ok_or_else(|| invalid_input("Transaction IR literal byte count overflow"))?;
                 }
                 TransactionIrStep::TurnSyncPage {
                     conversation_id,
                     lane_id,
                     limit,
+                    max_projection_bytes,
                     slot,
                     ..
                 } => {
                     let initialized = initialized_slots
-                        .get_mut(*slot as usize)
-                        .ok_or_else(|| invalid_input("Transaction IR slot exceeds its bound"))?;
+                        .get_or_insert(*slot as usize);
                     if *initialized {
                         return Err(invalid_input("Transaction IR initializes a slot twice"));
                     }
@@ -5168,15 +4969,15 @@ impl TransactionIr {
                         || lane_id.is_empty()
                         || lane_id.chars().count() > 128
                         || !(1..=256).contains(limit)
+                        || (*max_projection_bytes != 0 && !(65536..=16777216).contains(max_projection_bytes))
                     {
                         return Err(invalid_input("invalid Turn sync page"));
                     }
                     literal_bytes = literal_bytes
                         .checked_add(conversation_id.len())
                         .and_then(|bytes| bytes.checked_add(lane_id.len()))
-                        .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
                         .ok_or_else(|| {
-                            invalid_input("Transaction IR literal bytes exceed 8 MiB")
+                            invalid_input("Transaction IR literal byte count overflow")
                         })?;
                 }
                 TransactionIrStep::TurnSyncChanges {
@@ -5186,8 +4987,7 @@ impl TransactionIr {
                     ..
                 } => {
                     let initialized = initialized_slots
-                        .get_mut(*slot as usize)
-                        .ok_or_else(|| invalid_input("Transaction IR slot exceeds its bound"))?;
+                        .get_or_insert(*slot as usize);
                     if *initialized {
                         return Err(invalid_input("Transaction IR initializes a slot twice"));
                     }
@@ -5200,15 +5000,13 @@ impl TransactionIr {
                     }
                     literal_bytes = literal_bytes
                         .checked_add(conversation_id.len())
-                        .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
                         .ok_or_else(|| {
-                            invalid_input("Transaction IR literal bytes exceed 8 MiB")
+                            invalid_input("Transaction IR literal byte count overflow")
                         })?;
                 }
                 TransactionIrStep::TurnSyncPrune { request, slot } => {
                     let initialized = initialized_slots
-                        .get_mut(*slot as usize)
-                        .ok_or_else(|| invalid_input("Transaction IR slot exceeds its bound"))?;
+                        .get_or_insert(*slot as usize);
                     if *initialized {
                         return Err(invalid_input("Transaction IR initializes a slot twice"));
                     }
@@ -5219,8 +5017,7 @@ impl TransactionIr {
                 }
                 TransactionIrStep::TurnCleanup { request, slot } => {
                     let initialized = initialized_slots
-                        .get_mut(*slot as usize)
-                        .ok_or_else(|| invalid_input("Transaction IR slot exceeds its bound"))?;
+                        .get_or_insert(*slot as usize);
                     if *initialized {
                         return Err(invalid_input("Transaction IR initializes a slot twice"));
                     }
@@ -5234,8 +5031,7 @@ impl TransactionIr {
                 }
                 TransactionIrStep::TurnSearchBackfillGlobal { request, slot } => {
                     let initialized = initialized_slots
-                        .get_mut(*slot as usize)
-                        .ok_or_else(|| invalid_input("Transaction IR slot exceeds its bound"))?;
+                        .get_or_insert(*slot as usize);
                     if *initialized {
                         return Err(invalid_input("Transaction IR initializes a slot twice"));
                     }
@@ -5251,8 +5047,7 @@ impl TransactionIr {
                     }
                     literal_bytes = literal_bytes
                         .checked_add(request.cursor.len())
-                        .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
-                        .ok_or_else(|| invalid_input("Transaction IR literal bytes exceed 8 MiB"))?
+                        .ok_or_else(|| invalid_input("Transaction IR literal byte count overflow"))?
                 }
             }
             let identity_bytes = match step {
@@ -5270,7 +5065,6 @@ impl TransactionIr {
                         || request.parent_id.chars().count() > 256
                         || !request.source_ref.is_object()
                         || !request.meta.is_object()
-                        || request.content.len() > crate::generated_tofudb_ir::MAX_ARTIFACT_BYTES
                     {
                         return Err(invalid_input("invalid artifact create step"));
                     }
@@ -5329,9 +5123,12 @@ impl TransactionIr {
                 TransactionIrStep::ToolResultArtifactRead {
                     artifact_ref,
                     now_ms,
+                    offset,
+                    selector,
                     limit,
                     ..
                 } => {
+                    crate::artifact::query::validate_input(offset, selector)?;
                     if artifact_ref.is_empty()
                         || artifact_ref.chars().count() > 96
                         || *now_ms == 0
@@ -5340,15 +5137,18 @@ impl TransactionIr {
                     {
                         return Err(invalid_input("invalid tool-result read step"));
                     }
-                    artifact_ref.len()
+                    offset.to_string().len() + selector.len() + artifact_ref.len()
                 }
                 TransactionIrStep::ToolResultArtifactSearch {
                     artifact_ref,
                     query,
                     now_ms,
+                    cursor,
+                    selector,
                     limit,
                     ..
                 } => {
+                    crate::artifact::query::validate_input(cursor, selector)?;
                     if artifact_ref.is_empty()
                         || artifact_ref.chars().count() > 96
                         || query.is_empty()
@@ -5358,7 +5158,7 @@ impl TransactionIr {
                     {
                         return Err(invalid_input("invalid tool-result search step"));
                     }
-                    artifact_ref.len() + query.len()
+                    cursor.to_string().len() + selector.len() + artifact_ref.len() + query.len()
                 }
                 TransactionIrStep::ToolResultArtifactPrune { now_ms, limit, .. } => {
                     if *now_ms == 0
@@ -5494,7 +5294,6 @@ impl TransactionIr {
                 | TransactionIrStep::IndexedStreamLatest { task_id, .. } => task_id.len(),
                 TransactionIrStep::IndexedStreamInspectorSummary { root_task_ids, .. } => {
                     if root_task_ids.is_empty()
-                        || root_task_ids.len() > 100
                         || root_task_ids
                             .iter()
                             .any(|task_id| task_id.is_empty() || task_id.chars().count() > 512)
@@ -5519,8 +5318,7 @@ impl TransactionIr {
             };
             literal_bytes = literal_bytes
                 .checked_add(identity_bytes)
-                .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
-                .ok_or_else(|| invalid_input("Transaction IR literal bytes exceed 8 MiB"))?;
+                .ok_or_else(|| invalid_input("Transaction IR literal byte count overflow"))?;
         }
         let result_slot = match self.result {
             TransactionIrResult::Literal(_) => None,
@@ -5647,7 +5445,6 @@ impl TransactionIr {
                     || effects.schema_version == 0
                     || effects.registry_version == 0
                     || effects.committed_at_ms == 0
-                    || effects.outbox_payload.len() > MAX_TRANSACTION_IR_LITERAL_BYTES
                 {
                     return Err(invalid_input("invalid Transaction IR command effects"));
                 }
@@ -5670,7 +5467,7 @@ impl TransactionIr {
 
 fn condition_matches(
     condition: EntityWriteCondition,
-    slots: &[Option<Option<Vec<u8>>>; MAX_TRANSACTION_IR_SLOTS],
+    slots: &SparseSlotValues<Option<Option<Vec<u8>>>>,
 ) -> io::Result<bool> {
     match condition {
         EntityWriteCondition::Always => Ok(true),
@@ -5694,6 +5491,8 @@ pub(crate) struct IrResponse {
     bytes: Vec<u8>,
     json_proven: bool,
     receipt_cacheable_proven: bool,
+    snapshot_stable: Option<crate::query_result_cache::Admission>,
+    snapshot_read_complete: bool,
 }
 impl IrResponse {
     pub(crate) fn unverified(bytes: Vec<u8>) -> Self {
@@ -5701,10 +5500,51 @@ impl IrResponse {
             bytes,
             json_proven: false,
             receipt_cacheable_proven: false,
+            snapshot_stable: None,
+            snapshot_read_complete: false,
         }
     }
     pub(crate) fn json_proven(&self) -> bool {
         self.json_proven
+    }
+    pub(crate) fn snapshot_stable(&self) -> bool { self.snapshot_stable.is_some() }
+    pub(crate) fn cache_admission(&self) -> Option<crate::query_result_cache::Admission> { self.snapshot_stable }
+    pub(crate) fn certify_snapshot_stable(&mut self, ir: &TransactionIr) {
+        // compile_records binds this operation's key only from request scope,
+        // namespace and key. A pure storage step alone cannot certify a future
+        // compiler that selects its document from a clock or another live input.
+        let deterministic_record = ir.operation == "record.get"
+            && matches!((&ir.steps[..], &ir.result),
+                ([TransactionIrStep::VersionedDocumentGet { slot, .. }],
+                 TransactionIrResult::SlotOrLiteral { slot: result, missing })
+                    if slot == result && missing == b"null");
+        // Snapshot fields come from the same entity root, including the
+        // execution epoch, attempts and phase head. A deadline-shortened window
+        // is request-dependent and must never become a reusable response.
+        let complete_snapshot = self.snapshot_read_complete
+            && ir.operation == "turn.sync.snapshot"
+            && matches!((&ir.steps[..], &ir.result),
+                ([TransactionIrStep::TurnSyncSnapshot { slot, .. }],
+                 TransactionIrResult::SlotOrLiteral { slot: result, missing })
+                    if slot == result && missing == b"null");
+        self.snapshot_stable = ((deterministic_record || complete_snapshot)
+            && ir.operation_kind == crate::generated_storage_operations::StorageOperationKind::Query
+            && ir.command_effects.is_none()).then_some(if complete_snapshot {
+                crate::query_result_cache::Admission::RepeatedSnapshot
+            } else { crate::query_result_cache::Admission::RepeatedKey });
+        // The selected absence literal is a complete canonical scalar. This
+        // proves only these exact bytes, never a general unverified response.
+        if self.snapshot_stable.is_some() && self.bytes == b"null" { self.json_proven = true; }
+    }
+    // Only the private dispatch certificate reconstructs this immutable proof.
+    pub(crate) fn from_snapshot_cache(bytes: Vec<u8>, admission: crate::query_result_cache::Admission) -> Self {
+        Self { bytes, json_proven: true, receipt_cacheable_proven: false, snapshot_stable: Some(admission), snapshot_read_complete: false }
+    }
+
+
+    fn from_encoded(response: crate::response_json::EncodedResponse) -> Self {
+        let json_proven = response.json_proven();
+        Self { bytes: response.into_bytes(), json_proven, receipt_cacheable_proven: false, snapshot_stable: None, snapshot_read_complete: false }
     }
     pub(crate) fn into_bytes(self) -> Vec<u8> {
         self.bytes
@@ -5718,18 +5558,18 @@ impl std::ops::Deref for IrResponse {
 }
 
 /// Every mutable slot access invalidates its certificate before exposing bytes.
-/// Read-only array coercion preserves existing condition/dataflow behavior.
+/// Sparse cells preserve condition/dataflow behavior without reserving unused slots.
 struct IrSlots {
-    bytes: [Option<Option<Vec<u8>>>; MAX_TRANSACTION_IR_SLOTS],
-    json_proven: [bool; MAX_TRANSACTION_IR_SLOTS],
-    receipt_cacheable_proven: [bool; MAX_TRANSACTION_IR_SLOTS],
+    bytes: SparseSlotValues<Option<Option<Vec<u8>>>>,
+    json_proven: SparseSlotValues<bool>,
+    receipt_cacheable_proven: SparseSlotValues<bool>,
 }
 impl IrSlots {
     fn new() -> Self {
         Self {
-            bytes: std::array::from_fn(|_| None),
-            json_proven: [false; MAX_TRANSACTION_IR_SLOTS],
-            receipt_cacheable_proven: [false; MAX_TRANSACTION_IR_SLOTS],
+            bytes: SparseSlotValues::new(),
+            json_proven: SparseSlotValues::new(),
+            receipt_cacheable_proven: SparseSlotValues::new(),
         }
     }
     fn set_projection(
@@ -5737,10 +5577,16 @@ impl IrSlots {
         slot: usize,
         projection: Option<crate::versioned_document::DocumentProjection>,
     ) {
+        self.set_response(slot, projection.map(|value| {
+            let json_proven = value.json_proven();
+            IrResponse { bytes: value.into_bytes(), json_proven, receipt_cacheable_proven: false, snapshot_stable: None, snapshot_read_complete: false }
+        }));
+    }
+
+    fn set_response(&mut self, slot: usize, response: Option<IrResponse>) {
         self.receipt_cacheable_proven[slot] = false;
-        self.json_proven[slot] = projection.as_ref().is_some_and(|value| value.json_proven());
-        self.bytes[slot] =
-            Some(projection.map(crate::versioned_document::DocumentProjection::into_bytes));
+        self.json_proven[slot] = response.as_ref().is_some_and(|value| value.json_proven());
+        self.bytes[slot] = Some(response.map(IrResponse::into_bytes));
     }
 }
 impl IrSlots {
@@ -5751,7 +5597,7 @@ impl IrSlots {
     }
 }
 impl std::ops::Deref for IrSlots {
-    type Target = [Option<Option<Vec<u8>>>; MAX_TRANSACTION_IR_SLOTS];
+    type Target = SparseSlotValues<Option<Option<Vec<u8>>>>;
     fn deref(&self) -> &Self::Target {
         &self.bytes
     }
@@ -5792,7 +5638,7 @@ fn result_bytes(result: &TransactionIrResult, slots: &mut IrSlots) -> io::Result
             Ok(match value {
                 Some(bytes) => {
                     crate::request_profile::work(crate::request_profile::Work::IrResultMovedBytes, bytes.len() as u64);
-                    IrResponse { bytes, json_proven: proven, receipt_cacheable_proven }
+                    IrResponse { bytes, json_proven: proven, receipt_cacheable_proven, snapshot_stable: None, snapshot_read_complete: false }
                 }
                 None => {
                     crate::request_profile::work(crate::request_profile::Work::IrResultCopiedBytes, missing.len() as u64);
@@ -5887,12 +5733,43 @@ pub(crate) fn prepare_transaction_ir_with_deadline(
     ir: &TransactionIr,
     deadline_budget: Duration,
 ) -> io::Result<PreparedTransactionIr> {
+    prepare_transaction_ir_mode(database, ir, deadline_budget, IrStepExecution::Sequential)
+}
+
+/// Experimental explicit frame preparation. No production compiler or public
+/// transport calls this port. The caller supplies one already-atomic IR; this
+/// never joins requests, waits for future events or acknowledges before commit.
+#[cfg(test)]
+pub(crate) fn prepare_execution_frame_ir_with_deadline(
+    database: &mut AuthorityDatabase,
+    ir: &TransactionIr,
+    deadline_budget: Duration,
+) -> io::Result<PreparedTransactionIr> {
+    if !ir.operation_kind.mutates_state() {
+        return Err(invalid_input("execution frame requires a command transaction"));
+    }
+    prepare_transaction_ir_mode(database, ir, deadline_budget, IrStepExecution::ExperimentalTurnFrame)
+}
+
+enum IrStepExecution {
+    Sequential,
+    #[cfg(test)]
+    ExperimentalTurnFrame,
+}
+
+fn prepare_transaction_ir_mode(
+    database: &mut AuthorityDatabase,
+    ir: &TransactionIr,
+    deadline_budget: Duration,
+    execution: IrStepExecution,
+) -> io::Result<PreparedTransactionIr> {
     // One wall-clock budget for the whole IR execution, shared by the long
     // read loops that materialize per-row payload documents (sync replay,
     // attempt event replay). They truncate to a resumable prefix instead of
     // holding the authority mutex past the caller's deadline.
     let started_at = Instant::now();
     let mut deadline_elapsed = || started_at.elapsed() >= deadline_budget;
+    let mut snapshot_read_complete = false;
     ir.validate()?;
     let needs_identity_claim_scopes = ir.steps.iter().any(|step| {
         matches!(
@@ -5938,6 +5815,7 @@ pub(crate) fn prepare_transaction_ir_with_deadline(
                 | TransactionIrStep::TurnEventsList { .. }
                 | TransactionIrStep::TurnEventsPrune { .. }
                 | TransactionIrStep::TurnSyncSnapshot { .. }
+                | TransactionIrStep::TurnSyncRoundDirectory { .. }
                 | TransactionIrStep::TurnSyncPage { .. }
                 | TransactionIrStep::TurnSearchBackfillGlobal { .. }
                 | TransactionIrStep::TurnCleanup { .. }
@@ -6013,6 +5891,10 @@ pub(crate) fn prepare_transaction_ir_with_deadline(
                 | TransactionIrStep::BillingWalletSettle { .. }
         )
     }) || ir.steps.iter().any(|step| match step {
+        // Scoped live answers resolve the owned attempt and update its existing
+        // recovery sizing; ordinary settled projection edits retain their scope.
+        TransactionIrStep::TurnProjectionUpdate { human_guidance_answer_json, .. } =>
+            human_guidance_answer_json.is_some(),
         // A fenced stream append resolves attempt identity claims in the
         // tenant-global namespace, like the turn steps above.
         TransactionIrStep::IndexedStreamAppend {
@@ -6053,7 +5935,19 @@ pub(crate) fn prepare_transaction_ir_with_deadline(
     }
     let mut slots = IrSlots::new();
     let _steps_timer = crate::fsync_stats::StageTimer::new(crate::fsync_stats::STAGE_IR_STEPS);
-    for step in &ir.steps {
+    let steps = match execution {
+        IrStepExecution::Sequential => ir.steps.as_slice(),
+        #[cfg(test)]
+        IrStepExecution::ExperimentalTurnFrame => {
+            for (slot, response) in crate::turn::execution_frame::record(
+                database, &mut transaction, &ir.steps, &mut deadline_elapsed,
+            )? {
+                slots[slot] = Some(Some(response));
+            }
+            &[]
+        }
+    };
+    for step in steps {
         match step {
             TransactionIrStep::Queue { request, slot } => {
                 slots[*slot as usize] =
@@ -6335,6 +6229,7 @@ pub(crate) fn prepare_transaction_ir_with_deadline(
                 artifact_ref,
                 now_ms,
                 offset,
+                selector,
                 limit,
                 slot,
             } => {
@@ -6343,8 +6238,9 @@ pub(crate) fn prepare_transaction_ir_with_deadline(
                     &mut transaction,
                     artifact_ref,
                     *now_ms,
-                    *offset,
+                    offset,
                     *limit,
+                    selector,
                 )?);
             }
             TransactionIrStep::ToolResultArtifactSearch {
@@ -6352,6 +6248,7 @@ pub(crate) fn prepare_transaction_ir_with_deadline(
                 query,
                 now_ms,
                 cursor,
+                selector,
                 limit,
                 slot,
             } => {
@@ -6361,8 +6258,9 @@ pub(crate) fn prepare_transaction_ir_with_deadline(
                     artifact_ref,
                     query,
                     *now_ms,
-                    *cursor,
+                    cursor,
                     *limit,
+                    selector,
                 )?);
             }
             TransactionIrStep::ToolResultArtifactPrune {
@@ -7308,9 +7206,9 @@ pub(crate) fn prepare_transaction_ir_with_deadline(
                 )?);
             }
             TransactionIrStep::TurnContextRead { conversation_id, turn_id, replay, after_turn_id, slot } => {
-                slots[*slot as usize] = Some(crate::turn::model_context::read(
+                slots.set_response(*slot as usize, crate::turn::model_context::read(
                     database, &mut transaction, conversation_id, turn_id, *replay,
-                    after_turn_id.as_deref())?);
+                    after_turn_id.as_deref())?.map(IrResponse::from_encoded));
             }
             TransactionIrStep::TurnList {
                 conversation_id,
@@ -7570,6 +7468,7 @@ pub(crate) fn prepare_transaction_ir_with_deadline(
             }
             TransactionIrStep::TurnProjectionUpdate {
                 preserve_activity,
+                human_guidance_answer_json,
                 conversation_id,
                 turn_id,
                 projection_json,
@@ -7578,6 +7477,12 @@ pub(crate) fn prepare_transaction_ir_with_deadline(
                 committed_at_ms,
                 slot,
             } => {
+                if let Some(answer_json) = human_guidance_answer_json {
+                    slots[*slot as usize] = Some(Some(crate::turn::answer_guidance(
+                        database, &mut transaction, conversation_id, turn_id, answer_json, *committed_at_ms,
+                    )?));
+                    continue;
+                }
                 slots[*slot as usize] = Some(Some(crate::turn::update_projection(
                     database,
                     &mut transaction,
@@ -7595,17 +7500,32 @@ pub(crate) fn prepare_transaction_ir_with_deadline(
             TransactionIrStep::TurnSyncSnapshot {
                 conversation_id,
                 turn_limit,
+                max_projection_bytes,
                 include_artifact_hint,
                 slot,
             } => {
-                slots[*slot as usize] = Some(crate::turn::sync_snapshot(
+                let mut deadline_seen = false;
+                slots.set_response(*slot as usize, crate::turn::sync_snapshot_with_proof(
                     database,
                     &mut transaction,
                     conversation_id,
                     *turn_limit,
+                    *max_projection_bytes,
                     *include_artifact_hint,
-                    &mut deadline_elapsed,
-                )?);
+                    &mut || {
+                        let elapsed = deadline_elapsed();
+                        deadline_seen |= elapsed;
+                        elapsed
+                    },
+                )?.map(IrResponse::from_encoded));
+                snapshot_read_complete = !deadline_seen;
+            }
+            TransactionIrStep::TurnSyncRoundDirectory {
+                conversation_id, lane_id, offset, limit, sync_sequence, anchor_turn_id, slot,
+            } => {
+                slots[*slot as usize] = Some(crate::turn::sync_round_directory(database,
+                    &mut transaction, conversation_id, lane_id, *offset, *limit,
+                    *sync_sequence, anchor_turn_id, &mut deadline_elapsed)?);
             }
             TransactionIrStep::TurnSyncPage {
                 conversation_id,
@@ -7613,6 +7533,7 @@ pub(crate) fn prepare_transaction_ir_with_deadline(
                 before_ordinal,
                 limit,
                 sync_sequence,
+                max_projection_bytes,
                 slot,
             } => {
                 slots[*slot as usize] = Some(crate::turn::sync_page(
@@ -7623,6 +7544,7 @@ pub(crate) fn prepare_transaction_ir_with_deadline(
                     *before_ordinal,
                     *limit,
                     *sync_sequence,
+                    *max_projection_bytes,
                     &mut deadline_elapsed,
                 )?);
             }
@@ -8028,15 +7950,24 @@ pub(crate) fn prepare_transaction_ir_with_deadline(
             }
             TransactionIrStep::VersionedDocumentList {
                 start,
+
+                include_value,
                 end,
                 namespace,
                 limit,
                 reverse,
                 slot,
             } => {
-                slots.set_projection(*slot as usize, Some(crate::versioned_document::list_direction_with_response_proof(
-                    database, &mut transaction, start, end, namespace, *limit, *reverse,
-                )?));
+                let projection = if *include_value {
+                    crate::versioned_document::list_direction_with_response_proof(
+                        database, &mut transaction, start, end, namespace, *limit, *reverse,
+                    )?
+                } else {
+                    crate::versioned_document::list_headers_direction_with_response_proof(
+                        database, &mut transaction, start, end, namespace, *limit, *reverse,
+                    )?
+                };
+                slots.set_projection(*slot as usize, Some(projection));
             }
             TransactionIrStep::VersionedDocumentPut {
                 key,
@@ -8613,7 +8544,10 @@ pub(crate) fn prepare_transaction_ir_with_deadline(
         }
     }
     drop(_steps_timer);
-    let response = result_bytes(&ir.result, &mut slots)?;
+    let mut response = result_bytes(&ir.result, &mut slots)?;
+    // This completion witness alone grants no cache eligibility. The semantic
+    // boundary still checks the exact single-step IR and selected result slot.
+    response.snapshot_read_complete = snapshot_read_complete;
     let Some(effects) = &ir.command_effects else {
         return Ok(PreparedTransactionIr {
             response,
@@ -8765,7 +8699,7 @@ mod tests {
         assert!(result_bytes(&selected, &mut slots).is_err());
         slots[0] = Some(None);
         assert_eq!(result_bytes(&selected, &mut slots).unwrap().into_bytes(), b"null");
-        let invalid = TransactionIrResult::SlotOrLiteral { slot: u8::MAX, missing: Vec::new() };
+        let invalid = TransactionIrResult::SlotOrLiteral { slot: usize::MAX, missing: Vec::new() };
         assert!(result_bytes(&invalid, &mut slots).is_err());
     }
 
@@ -8819,7 +8753,7 @@ mod tests {
         assert!(!result_bytes(&selected, &mut slots).unwrap().receipt_cacheable_proven);
         eprintln!("receipt_resource_layout: slots={} response={} slot_payloads={} slot_count={}",
             std::mem::size_of::<IrSlots>(), std::mem::size_of::<IrResponse>(),
-            std::mem::size_of::<[Option<Option<Vec<u8>>>; MAX_TRANSACTION_IR_SLOTS]>(), MAX_TRANSACTION_IR_SLOTS);
+            std::mem::size_of::<SparseSlotValues<Option<Option<Vec<u8>>>>>(), slots.bytes.len());
     }
 
     #[test]
@@ -9050,6 +8984,143 @@ mod tests {
         database.finish_rotation_checkpoint(prepared, Ok(outcome)).unwrap();
         assert_eq!(execute_transaction_ir(&mut database, &fresh).unwrap_err().kind(), io::ErrorKind::WouldBlock);
         assert_eq!(execute_transaction_ir(&mut database, &command).unwrap(), committed);
+    }
+
+    #[test]
+    fn ordered_step_demand_exceeds_former_quota_with_late_conflict_rollback_and_reopen() {
+        let directory = tempfile::tempdir().unwrap();
+        let stream = StreamKey::new(7, 11, "task_event", b"step-demand").unwrap();
+        let make_key = |ordinal: u64| EntityKey::new(7, 11, "ir-test", &ordinal.to_be_bytes()).unwrap();
+        {
+            let mut database = AuthorityDatabase::initialize(directory.path()).unwrap();
+            let mut command = stream_command(stream.clone());
+            let mut tail = command.steps.pop().unwrap();
+            if let TransactionIrStep::StreamAppend { expected_next_sequence, .. } = &mut tail {
+                *expected_next_sequence = 2;
+            }
+            command.steps = (0..1001_u64).map(|ordinal| TransactionIrStep::EntityPut {
+                key: make_key(ordinal), value: ordinal.to_be_bytes().to_vec(),
+                condition: EntityWriteCondition::Always,
+            }).collect();
+            command.steps.push(tail);
+            command.validate().unwrap();
+            let before = database.wal_len().unwrap();
+            assert_eq!(execute_transaction_ir(&mut database, &command).unwrap_err().kind(), io::ErrorKind::WouldBlock);
+            assert_eq!(database.wal_len().unwrap(), before);
+            let mut read = database.begin(7, 11).unwrap();
+            for ordinal in 0..1001 { assert_eq!(database.entity_get(&mut read, &make_key(ordinal)).unwrap(), None); }
+            drop(read);
+            if let TransactionIrStep::StreamAppend { expected_next_sequence, .. } = command.steps.last_mut().unwrap() {
+                *expected_next_sequence = 1;
+            }
+            assert_eq!(execute_transaction_ir(&mut database, &command).unwrap(), br#"{"inserted":true}"#);
+        }
+        let database = AuthorityDatabase::open(directory.path()).unwrap();
+        let mut read = database.begin(7, 11).unwrap();
+        for ordinal in 0..1001_u64 {
+            assert_eq!(database.entity_get(&mut read, &make_key(ordinal)).unwrap(), Some(ordinal.to_be_bytes().to_vec()));
+        }
+        assert_eq!(database.stream_read(7, 11, &stream, 1, 2).unwrap().events.len(), 1);
+    }
+
+    #[test]
+    fn sparse_slot_demand_exceeds_former_capacity_and_large_identifier_reopens_exactly() {
+        let directory = tempfile::tempdir().unwrap();
+        let source_key = |ordinal: u64| EntityKey::new(7, 11, "ir-test", &ordinal.to_be_bytes()).unwrap();
+        let target_key = |ordinal: u64| EntityKey::new(7, 11, "ir-test", format!("target-{ordinal}").as_bytes()).unwrap();
+        {
+            let mut database = AuthorityDatabase::initialize(directory.path()).unwrap();
+            let mut seed = database.begin(7, 11).unwrap();
+            for ordinal in 0..513_u64 {
+                database.entity_put(&mut seed, source_key(ordinal), ordinal.to_be_bytes().to_vec()).unwrap();
+            }
+            database.commit(seed).unwrap();
+            let stream = StreamKey::new(7, 11, "task_event", b"slot-demand").unwrap();
+            let mut command = stream_command(stream);
+            command.steps.clear();
+            for ordinal in 0..513_u64 {
+                command.steps.push(TransactionIrStep::EntityRead { key: source_key(ordinal), slot: ordinal as usize });
+                command.steps.push(TransactionIrStep::EntityPut { key: target_key(ordinal),
+                    value: ordinal.to_be_bytes().to_vec(), condition: EntityWriteCondition::SlotPresent(ordinal as usize) });
+            }
+            command.steps.push(TransactionIrStep::EntityRead { key: source_key(512), slot: usize::MAX });
+            command.result = TransactionIrResult::SlotOrLiteral { slot: usize::MAX, missing: Vec::new() };
+            command.validate().unwrap();
+            let mut duplicate = command.clone();
+            duplicate.steps.push(TransactionIrStep::EntityRead { key: source_key(0), slot: 0 });
+            assert!(duplicate.validate().is_err());
+            let mut unread = command.clone();
+            unread.steps.push(TransactionIrStep::EntityPut { key: target_key(999), value: Vec::new(),
+                condition: EntityWriteCondition::SlotPresent(999) });
+            assert!(unread.validate().is_err());
+            assert_eq!(execute_transaction_ir(&mut database, &command).unwrap(), 512_u64.to_be_bytes());
+        }
+        let database = AuthorityDatabase::open(directory.path()).unwrap();
+        let mut read = database.begin(7, 11).unwrap();
+        for ordinal in 0..513_u64 {
+            assert_eq!(database.entity_get(&mut read, &target_key(ordinal)).unwrap(), Some(ordinal.to_be_bytes().to_vec()));
+        }
+    }
+
+    #[test]
+    fn sparse_slot_proof_and_residency_follow_touched_identifiers() {
+        let mut slots = IrSlots::new();
+        assert!(slots.bytes.get(usize::MAX).is_none());
+        assert_eq!(slots.bytes.len(), 0);
+        slots.set_settled_append_response(usize::MAX, settled_receipt_response_fixture());
+        assert_eq!(slots.bytes.len(), 1);
+        let selected = TransactionIrResult::SlotOrLiteral { slot: usize::MAX, missing: Vec::new() };
+        assert!(slots.receipt_cacheable_proven[usize::MAX]);
+        slots[usize::MAX].as_mut().unwrap().as_mut().unwrap()[0] = b'!';
+        assert!(!slots.receipt_cacheable_proven[usize::MAX]);
+        assert!(!result_bytes(&selected, &mut slots).unwrap().receipt_cacheable_proven);
+        assert_eq!(slots.bytes.len(), 1);
+        eprintln!("sparse_ir_slots: resident_header_bytes={} touched_slots={}",
+            std::mem::size_of::<IrSlots>(), slots.bytes.len());
+    }
+
+    #[test]
+    fn literal_demand_exceeds_former_aggregate_quota_with_atomic_rollback_and_reopen() {
+        let directory = tempfile::tempdir().unwrap();
+        let make_key = |ordinal: u64| EntityKey::new(7, 11, "ir-test", &ordinal.to_be_bytes()).unwrap();
+        let stream = StreamKey::new(7, 11, "task_event", b"literal-demand").unwrap();
+        {
+            let mut database = AuthorityDatabase::initialize(directory.path()).unwrap();
+            let mut command = stream_command(stream.clone());
+            let mut tail = command.steps.pop().unwrap();
+            if let TransactionIrStep::StreamAppend { expected_next_sequence, .. } = &mut tail {
+                *expected_next_sequence = 2;
+            }
+            command.steps = (0..1501_u64).map(|ordinal| TransactionIrStep::EntityPut {
+                key: make_key(ordinal), value: vec![(ordinal % 251) as u8; 7000],
+                condition: EntityWriteCondition::Always,
+            }).collect();
+            command.steps.push(tail);
+            command.result = TransactionIrResult::Literal(vec![b'x'; 9 * 1024 * 1024]);
+            command.validate().unwrap();
+            let before = database.wal_len().unwrap();
+            assert_eq!(execute_transaction_ir(&mut database, &command).unwrap_err().kind(), io::ErrorKind::WouldBlock);
+            assert_eq!(database.wal_len().unwrap(), before);
+            let mut read = database.begin(7, 11).unwrap();
+            for ordinal in 0..1501 { assert!(database.entity_get(&mut read, &make_key(ordinal)).unwrap().is_none()); }
+            drop(read);
+            if let TransactionIrStep::StreamAppend { expected_next_sequence, .. } = command.steps.last_mut().unwrap() {
+                *expected_next_sequence = 1;
+            }
+            let response = execute_transaction_ir(&mut database, &command).unwrap();
+            if let TransactionIrResult::Literal(expected) = &command.result {
+                assert_eq!(response.len(), expected.len());
+                assert_eq!(blake3::hash(&response), blake3::hash(expected));
+            } else { panic!("literal fixture changed"); }
+        }
+        let database = AuthorityDatabase::open(directory.path()).unwrap();
+        let mut read = database.begin(7, 11).unwrap();
+        for ordinal in 0..1501_u64 {
+            let value = database.entity_get(&mut read, &make_key(ordinal)).unwrap().unwrap();
+            assert_eq!(value.len(), 7000);
+            assert!(value.iter().all(|byte| *byte == (ordinal % 251) as u8));
+        }
+        assert_eq!(database.stream_read(7, 11, &stream, 1, 2).unwrap().events.len(), 1);
     }
 
     #[test]
@@ -9356,3 +9427,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "transaction_ir_query_cache_tests.rs"]
+mod transaction_ir_query_cache_tests;

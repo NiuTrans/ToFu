@@ -5,7 +5,7 @@ Standalone installers for Windows, macOS, and Linux — no Python, no conda, no 
 **Two components (docs/modules/remote_execution.md):** this
 directory builds BOTH the full desktop app (`tofu.spec` → `Tofu-Setup-*`,
 server + client + tray, ~153 MB) and the agent-only controlled endpoint
-(`tofu-agent.spec` → `TofuAgent-Setup-*`, no server, no UI, ~53 MB).
+(`tofu-agent.spec` → `TofuRemote-Setup-*`, no server, no UI, ~53 MB).
 `agent_launcher.py` is the agent's entry; `connect_ui.py` is the shared
 connect-line dialog + preseed import both launchers use.
 
@@ -119,7 +119,7 @@ prompt). This matters: the app keeps its `data/` (config and SQLite DB) and
 user-writable. A `Program Files` install under `lowest` privileges is NOT
 writable and used to crash the app on first launch. If the exe dir ever ends up
 read-only anyway, the backend falls back to a per-user data dir
-(`%LOCALAPPDATA%\Tofu`) — see `lib/runtime_paths.py`.
+(`%LOCALAPPDATA%\Tofu`) — see `lib/runtime/runtime_paths.py`.
 
 ## Architecture
 
@@ -145,6 +145,14 @@ Enterprise deployments connect server-side Sidecars to platform-managed,
 TLS-verified PostgreSQL/Redis; the desktop package remains a client and does
 not provision those services.
 
+## Product names
+
+**Tofu Remote（Tofu 受控端）** runs on a controlled computer and connects to
+Tofu. Its release assets start with `TofuRemote-`; `tofu-agent` is the distinct
+AI runtime SDK. Windows keeps the existing install directory, uninstall identity and
+startup registry key, and macOS keeps its bundle identifier, so upgrades retain
+settings and replace the existing installation.
+
 ## CI / Automated Builds
 
 Push a version tag to trigger builds on all platforms:
@@ -156,22 +164,22 @@ git push origin v0.10.0
 
 This runs `.github/workflows/build-desktop.yml` which produces:
 - `Tofu-Setup-<ver>-win64.exe` — Windows installer (Inno Setup)
-- `TofuAgent-Setup-<ver>-win64.exe` — Windows **agent** installer (Inno Setup,
+- `TofuRemote-Setup-<ver>-win64.exe` — Windows **agent** installer (Inno Setup,
   default-on start-with-Windows task; HKCU, removed at uninstall)
 - `Tofu-<ver>-macos-arm64.dmg` — macOS disk image, Apple Silicon
 - `Tofu-<ver>-macos-x86_64.dmg` — macOS disk image, Intel
-- `TofuAgent-<ver>-macos-{arm64,x86_64}.dmg` — macOS agent disk images
-- `TofuAgent-<ver>-linux-x86_64.tar.gz` — Linux agent archive (tar.gz only;
+- `TofuRemote-<ver>-macos-{arm64,x86_64}.dmg` — macOS agent disk images
+- `TofuRemote-<ver>-linux-{x86_64,aarch64}.tar.gz` — Linux controlled-end archive (tar.gz only;
   .deb stays full-only)
-- `Tofu-<ver>-linux-x86_64.deb` — **primary Linux installer** (Debian/Ubuntu):
+- `Tofu-<ver>-linux-{x86_64,aarch64}.deb` — **primary Linux installer** (Debian/Ubuntu):
   installs to `/opt/Tofu` with a system-wide menu entry and icon; user data
   lives in `~/.local/share/Tofu` (the app never writes into `/opt`).
-  Install with `sudo apt install ./Tofu-<ver>-linux-x86_64.deb`.
+  Install with `sudo apt install ./Tofu-<ver>-linux-{x86_64,aarch64}.deb`.
   (Evaluated against AppImage, which lost on three axes: dpkg-deb ships in
   the CI base image — no downloaded tooling; no FUSE at build time; and no
   FUSE at RUN time, whereas type-2 AppImages need `libfuse2`, which
   Ubuntu 22.04+ no longer installs by default.)
-- `Tofu-<ver>-linux-x86_64.tar.gz` — Linux portable archive, the no-sudo /
+- `Tofu-<ver>-linux-{x86_64,aarch64}.tar.gz` — Linux portable archive, the no-sudo /
   non-Debian fallback (includes `install.sh` — per-user — which registers an
   application-menu entry and themed icon; run it once after extracting)
 - `SHA256SUMS` — checksums covering all of the above
@@ -179,8 +187,8 @@ This runs `.github/workflows/build-desktop.yml` which produces:
 The release is **published immediately and promoted to Latest** (`draft: false` +
 `make_latest`), so `…/releases/latest` resolves to it. Two native macOS DMGs are
 built (not a universal2 fat binary — the runner interpreter and some C-extension
-wheels are single-arch). A completeness gate refuses to publish unless all four
-platform/arch assets are present, so a partial build never ships as Latest.
+wheels are single-arch). A completeness gate refuses to publish unless all supported
+platform/architecture assets are present, so a partial build never ships as Latest.
 
 ## Manual workflow dispatch
 

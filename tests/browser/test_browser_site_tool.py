@@ -132,7 +132,7 @@ def test_content_modes_preserve_target(runtime):
 
 def test_host_provider_refusal_is_terminal_not_unavailable(monkeypatch):
     import tofu_search
-    from lib.search_bridge import _ChatuiSiteSearchProvider
+    from lib.search.search_bridge import _ChatuiSiteSearchProvider
     monkeypatch.setattr(adapters, 'invoke_adapter', lambda *a, **k: (_ for _ in ()).throw(adapters.AdapterExecutionError('rate_limited', 'private-sentinel')))
     provider = _ChatuiSiteSearchProvider(user_id='41', client_id='a', bound=True)
     with pytest.raises(tofu_search.SiteSearchTerminalError) as exc:

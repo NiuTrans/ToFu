@@ -86,7 +86,7 @@ def test_init_database_runs_complete_recovery_sequence(monkeypatch):
         'log-aggregate-flusher',
     ]
 
-    import lib.server_assembly as assembly
+    import lib.server.server_assembly as assembly
     assembly._run_post_ready_deferred()
     assert calls[-4:] == [
         ('warmup', True),
@@ -104,7 +104,7 @@ def _retryable_storage_error(message='storage.v2 authority is unavailable'):
 
 def test_readiness_critical_step_rides_out_transient_storage_error(monkeypatch):
     """A sidecar recycle that transiently fails one step must not fail boot."""
-    import lib.server_assembly as assembly
+    import lib.server.server_assembly as assembly
 
     monkeypatch.setattr(assembly.time, 'sleep', lambda _seconds: None)
     monkeypatch.setattr(assembly, '_server_log', __import__('logging').getLogger('test'))
@@ -122,7 +122,7 @@ def test_readiness_critical_step_rides_out_transient_storage_error(monkeypatch):
 
 
 def test_readiness_critical_step_fails_fast_on_non_retryable(monkeypatch):
-    import lib.server_assembly as assembly
+    import lib.server.server_assembly as assembly
 
     def broken():
         raise RuntimeError('Project Brain cutover verification failed')
@@ -133,7 +133,7 @@ def test_readiness_critical_step_fails_fast_on_non_retryable(monkeypatch):
 
 
 def test_readiness_critical_step_reraises_after_budget(monkeypatch):
-    import lib.server_assembly as assembly
+    import lib.server.server_assembly as assembly
 
     monkeypatch.setattr(assembly.time, 'sleep', lambda _seconds: None)
     monkeypatch.setattr(assembly, '_server_log', __import__('logging').getLogger('test'))
@@ -148,7 +148,7 @@ def test_readiness_critical_step_reraises_after_budget(monkeypatch):
 
 def test_start_storage_retries_while_previous_owner_releases_lease(monkeypatch):
     """Phase 3 must not hard-fail the lifespan on a restart data-root race."""
-    import lib.server_assembly as assembly
+    import lib.server.server_assembly as assembly
     import lib.storage as storage_pkg
 
     monkeypatch.setattr(assembly, '_server_log', __import__('logging').getLogger('test'))
@@ -171,12 +171,12 @@ def test_start_storage_retries_while_previous_owner_releases_lease(monkeypatch):
         storage_pkg, 'storage_status',
         lambda: {'ready': True, 'backend': 'tofudb', 'pid': 4242})
 
-    assembly._start_storage_sidecar()
+    assembly._start_storage_authority_sql()
     assert len(calls) == 3
 
 
 def test_start_storage_raises_after_exhausting_retries(monkeypatch):
-    import lib.server_assembly as assembly
+    import lib.server.server_assembly as assembly
     import lib.storage as storage_pkg
 
     monkeypatch.setattr(assembly, '_server_log', __import__('logging').getLogger('test'))
@@ -191,11 +191,11 @@ def test_start_storage_raises_after_exhausting_retries(monkeypatch):
     monkeypatch.setattr(storage_pkg, 'start_storage', always_contended)
 
     with pytest.raises(RuntimeError):
-        assembly._start_storage_sidecar()
+        assembly._start_storage_authority_sql()
 
 
 def test_start_storage_does_not_retry_typed_integrity_failure(monkeypatch):
-    import lib.server_assembly as assembly
+    import lib.server.server_assembly as assembly
     import lib.storage as storage_pkg
     from lib.storage.errors import StorageError
     import serverctl
@@ -209,13 +209,13 @@ def test_start_storage_does_not_retry_typed_integrity_failure(monkeypatch):
         raise failure
     monkeypatch.setattr(storage_pkg, 'start_storage', fail)
     with pytest.raises(StorageError) as result:
-        assembly._start_storage_sidecar()
+        assembly._start_storage_authority_sql()
     assert result.value is failure
     assert calls == ['start']
 
 
 def test_distributed_preview_skips_all_task_recovery(monkeypatch):
-    import lib.server_assembly as assembly
+    import lib.server.server_assembly as assembly
 
     calls = []
     monkeypatch.setattr(
@@ -243,7 +243,7 @@ def test_distributed_preview_skips_all_task_recovery(monkeypatch):
     pytest.param(None, id='non-retryable-storage-protocol-error'),
 ])
 def test_best_effort_recovery_does_not_sleep_on_permanent_errors(monkeypatch, error):
-    import lib.server_assembly as assembly
+    import lib.server.server_assembly as assembly
     from lib.storage.errors import StorageError
 
     if error is None:
@@ -261,7 +261,7 @@ def test_best_effort_recovery_does_not_sleep_on_permanent_errors(monkeypatch, er
 
 
 def test_best_effort_recovery_preserves_transient_storage_retries(monkeypatch):
-    import lib.server_assembly as assembly
+    import lib.server.server_assembly as assembly
 
     calls, sleeps = [], []
     monkeypatch.setattr(assembly.time, 'sleep', sleeps.append)
@@ -279,7 +279,7 @@ def test_best_effort_recovery_preserves_transient_storage_retries(monkeypatch):
 
 @pytest.mark.parametrize('kind', ['protocol', 'programming'])
 def test_task_recovery_failure_blocks_readiness_without_retry_sleep(monkeypatch, caplog, kind):
-    import lib.server_assembly as assembly
+    import lib.server.server_assembly as assembly
     import lib.conversations.project_brain_startup as brain
     import lib.shutdown_marker as marker
     import lib.tasks_pkg.manager as manager

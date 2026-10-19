@@ -3,7 +3,7 @@
 Entry: ModelRequest, ModelSettlement, ModelPolicy; internal ModelControl joins
 callbacks and cleanup. No counter, account mirror, backend, routing or retry.
 """
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from collections.abc import Mapping as Mapping
 from typing import Protocol
 import asyncio
@@ -67,15 +67,58 @@ class ModelDispatch:
         return values
 
 
+class NativePricingError(ValueError):
+    """Resolved pricing failed after token settlement; caller cause is preserved."""
+
+
+@dataclass(frozen=True, slots=True)
+class ModelPricing:
+    """One bounded resolved numeric snapshot, never a wallet authorization."""
+    snapshot_json: bytes
+
+    @staticmethod
+    def _validate(values):
+        import math
+        from lib.agent_core.native_content_contract import MODEL_PRICE_SCHEMA
+        if not isinstance(values,dict) or set(values)!=set(MODEL_PRICE_SCHEMA['required']):
+            raise ValueError('native resolved price invalid')
+        for key,rule in MODEL_PRICE_SCHEMA['properties'].items():
+            value=values[key]
+            if 'enum' in rule:
+                valid=value in rule['enum']
+            elif rule['type']=='integer':
+                valid=type(value) is int and rule['minimum']<=value<=rule['maximum']
+            else:
+                try: valid=type(value) in (int,float) and math.isfinite(value) and value>=rule.get('minimum',0) and value>rule.get('exclusiveMinimum',-1)
+                except OverflowError: valid=False
+            if not valid: raise ValueError('native resolved price invalid')
+
+    @classmethod
+    def resolved(cls,values):
+        cls._validate(values)
+        return cls(json.dumps(values,allow_nan=False,separators=(',',':')).encode())
+
+    def values(self):
+        if not isinstance(self.snapshot_json,bytes) or len(self.snapshot_json)>4096:
+            raise ValueError('native resolved price exceeds bound')
+        values=json.loads(self.snapshot_json)
+        self._validate(values)
+        return values
+
+
 class ModelPolicy(Protocol):
     async def reserve(self, request: ModelRequest) -> int: ...
     async def dispatch(self, request: ModelRequest) -> ModelDispatch | None: ...
-    async def settle(self, result: ModelSettlement) -> None: ...
+    async def settle(self, result: ModelSettlement) -> ModelPricing | None: ...
 
 
 class ModelControl:
-    def __init__(self, client, policy, task_id):
+    def __init__(self, client, policy, task_id, *, pricing=False, unbounded_ack=False):
+        if type(unbounded_ack) is not bool:
+            raise TypeError('native model callback budget selection must be explicit')
         self.client, self.policy, self.task_id = client, policy, task_id
+        self.pricing=pricing
+        self.unbounded_ack=unbounded_ack
         self.pending = None
         self.dispatch_attempted = False
         self.next_ordinal = 1
@@ -88,6 +131,7 @@ class ModelControl:
         required = {'version','type','request_id','owner_user_id','task_id','attempt_ordinal','action',
                     'input_tokens','max_output_tokens','minimum_output_tokens','expires_monotonic_ns'}
         action = value.get('action')
+        expires = value.get('expires_monotonic_ns')
         expected = required | ({'usage','unsent'} if action == 'settle' else set())
         if (set(value) != expected or value.get('version') != self.client.protocol_version
                 or value.get('type') != 'model_request' or value.get('task_id') != self.task_id
@@ -95,8 +139,10 @@ class ModelControl:
                 or value['owner_user_id'] != self.client.principal.require_owner(context='native model control')
                 or not isinstance(value.get('request_id'),str) or not value['request_id']
                 or any(type(value.get(key)) is not int or not 0 <= value[key] <= 18446744073709551615
-                       for key in ('attempt_ordinal','input_tokens','max_output_tokens','minimum_output_tokens','expires_monotonic_ns'))
-                or any(value[key] <= 0 for key in ('attempt_ordinal','max_output_tokens','minimum_output_tokens','expires_monotonic_ns'))
+                       for key in ('attempt_ordinal','input_tokens','max_output_tokens','minimum_output_tokens'))
+                or any(value[key] <= 0 for key in ('attempt_ordinal','max_output_tokens','minimum_output_tokens'))
+                or (expires is None and not self.unbounded_ack)
+                or (expires is not None and (type(expires) is not int or not 0 < expires <= 18446744073709551615))
                 or value['minimum_output_tokens'] > value['max_output_tokens']):
             raise NativeProcessError('native model control identity differs')
         if action == 'reserve':
@@ -113,6 +159,7 @@ class ModelControl:
             raise NativeProcessError('native model lease changed')
         accepted, output = False, None
         headers = None
+        price = None
         if closing:
             request.cancelled.set()
         try:
@@ -135,7 +182,8 @@ class ModelControl:
                 call = self.policy.settle(self.settlement)
             work = asyncio.create_task(call)
             try:
-                at = asyncio.get_running_loop().time() + max(0,value['expires_monotonic_ns']-time.monotonic_ns()) / 1e9
+                at = (None if expires is None else asyncio.get_running_loop().time()
+                      + max(0,expires-time.monotonic_ns()) / 1e9)
                 async with asyncio.timeout_at(at):
                     result = await asyncio.shield(work)
             except (TimeoutError, asyncio.CancelledError) as primary:
@@ -151,8 +199,14 @@ class ModelControl:
                 output = result
             elif action == 'dispatch' and isinstance(result, ModelDispatch):
                 headers = result.values()
+            elif action == 'settle' and isinstance(result,ModelPricing):
+                if not self.pricing or self.settlement.unsent:
+                    raise TypeError('native pricing requires explicit sent settlement')
+                try: price=result.values()
+                except (ValueError,TypeError,OverflowError) as error:
+                    raise NativePricingError('native resolved price validation failed') from error
             elif result is not None:
-                raise TypeError('native model callback must return None or dispatch headers')
+                raise TypeError('native model callback result differs')
             if action == 'settle':
                 self.pending = None
                 self.settlement = None
@@ -162,16 +216,20 @@ class ModelControl:
         except Exception as error:
             if self.failure is None:
                 self.failure = error
-        if time.monotonic_ns() < value['expires_monotonic_ns']:
+        if expires is None or time.monotonic_ns() < expires:
             reply = dict(version=self.client.protocol_version,type='model_decision',request_id=value['request_id'],accepted=accepted)
             if accepted and action == 'reserve':
                 reply['output_tokens'] = output
             if accepted and action == 'dispatch' and headers is not None:
                 reply['headers'] = headers
+            if accepted and action == 'settle' and price is not None:
+                reply['price'] = price
             if not accepted and self.failure is not None:
                 from lib.agent_core.execution_budget import ModelBudgetExceeded
                 if isinstance(self.failure,ModelBudgetExceeded):
                     reply['error'] = {'kind':self.failure.reason}
+                elif isinstance(self.failure,NativePricingError):
+                    reply['error'] = {'kind':'model_pricing'}
             async with asyncio.timeout(self.client.budget.shutdown_seconds):
                 process.stdin.write(self.client._encode(reply,self.client.budget.frame_bytes))
                 await process.stdin.drain()
@@ -194,4 +252,4 @@ class ModelControl:
             raise NativeProcessError('shared checkpoint load must precede model admission')
         if not isinstance(state,dict) or state.get('model_account') is not None or not isinstance(state.get('shared_model_account'),dict):
             raise NativeProcessError('shared checkpoint account missing or mixed')
-        await self.policy.restore_checkpoint(request,state['shared_model_account'],self.counter_policy)
+        await self.policy.restore_checkpoint(replace(request,state=state),state['shared_model_account'],self.counter_policy)

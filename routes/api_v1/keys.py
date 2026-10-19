@@ -93,7 +93,9 @@ def list_keys_route():
                               'name': {'type': 'string'},
                               'scopes': {'type': 'array',
                                           'items': {'type': 'string'}},
-                              'rate_limit_rpm': {'type': 'integer'},
+                              'rate_limit_rpm': {'type': 'integer', 'default': 0,
+                                                 'deprecated': True,
+                                                 'description': 'Retired request-rate metadata; does not limit throughput'},
                               'rate_limit_tpd': {'type': 'integer'},
                               'expires_at': {'type': 'number',
                                               'description': 'Unix timestamp; null = never'},
@@ -104,7 +106,7 @@ def create_key_route():
     body = parse_body(exact=('admin', 'expires_at', 'metadata', 'name', 'rate_limit_rpm', 'rate_limit_tpd', 'scopes',))
     name = require_str(body, 'name', max_len=80)
     scopes = optional_list(body, 'scopes', item_type=str, default=[]) or []
-    rpm = optional_int(body, 'rate_limit_rpm', default=60, min=0,
+    rpm = optional_int(body, 'rate_limit_rpm', default=0, min=0,
                         max=100_000) or 0
     tpd = optional_int(body, 'rate_limit_tpd', default=0, min=0,
                         max=10_000_000_000) or 0

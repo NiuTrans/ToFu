@@ -710,7 +710,7 @@ def test_task_handoff_claims_exact_transfer_not_newest_same_url(
     store, clock, _tmp_path = transfer_store
     monkeypatch.setattr(transfer_mod, 'file_transfer_store', store)
     import lib.browser.queue as queue
-    import lib.search_bridge as search_bridge
+    import lib.search.search_bridge as search_bridge
 
     monkeypatch.setattr(
         queue, 'get_connected_clients',
@@ -759,7 +759,7 @@ def test_unclaimed_task_handoff_is_reclaimed_at_binding_exit(
     store, _clock, tmp_path = transfer_store
     monkeypatch.setattr(transfer_mod, 'file_transfer_store', store)
     import lib.browser.queue as queue
-    import lib.search_bridge as search_bridge
+    import lib.search.search_bridge as search_bridge
 
     monkeypatch.setattr(
         queue, 'get_connected_clients',
@@ -794,7 +794,7 @@ def test_completed_browser_file_stops_legacy_text_fallback_before_second_get(
     import lib.config_dir as config_dir
     import lib.browser.fetch as browser_fetch
     import lib.browser.queue as queue
-    import lib.search_bridge as search_bridge
+    import lib.search.search_bridge as search_bridge
     import lib.tasks_pkg.handlers.search._core as core
 
     monkeypatch.setattr(
@@ -861,7 +861,7 @@ def test_completed_browser_file_stops_legacy_text_fallback_before_second_get(
 
 
 def test_missing_exact_handoff_fails_closed_without_replay(monkeypatch):
-    import lib.search_bridge as search_bridge
+    import lib.search.search_bridge as search_bridge
     import lib.tasks_pkg.handlers.search._core as core
 
     url = 'https://x.test/download?signature=already-consumed'
@@ -881,7 +881,7 @@ def test_missing_exact_handoff_fails_closed_without_replay(monkeypatch):
 def test_file_handoff_signal_crosses_tofu_provider_failure_catch(monkeypatch):
     import lib.browser.fetch as browser_fetch
     import lib.browser.queue as queue
-    import lib.search_bridge as search_bridge
+    import lib.search.search_bridge as search_bridge
     import tofu_search.fetch.http as tofu_http
 
     monkeypatch.setattr(
@@ -916,7 +916,7 @@ def test_file_handoff_signal_crosses_tofu_provider_failure_catch(monkeypatch):
 def test_text_provider_outside_file_owner_does_not_request_staging(
         monkeypatch):
     import lib.browser.fetch as browser_fetch
-    import lib.search_bridge as search_bridge
+    import lib.search.search_bridge as search_bridge
 
     calls = []
 
@@ -1007,7 +1007,7 @@ def test_login_capture_retry_keeps_file_transfer_on_same_response(
 def test_search_binary_fallback_surfaces_browser_to_server_receipt(
         monkeypatch):
     import lib.config_dir as config_dir
-    import lib.search_bridge as search_bridge
+    import lib.search.search_bridge as search_bridge
     import lib.tasks_pkg.handlers.search._core as core
 
     filename = f'browser-transfer-test-{os.getpid()}.zip'
@@ -1042,7 +1042,7 @@ def test_search_binary_fallback_surfaces_browser_to_server_receipt(
 
 def test_search_handoff_rejects_same_size_staging_corruption(monkeypatch):
     import lib.config_dir as config_dir
-    import lib.search_bridge as search_bridge
+    import lib.search.search_bridge as search_bridge
     import lib.tasks_pkg.handlers.search._core as core
 
     filename = f'browser-transfer-corrupt-{os.getpid()}.zip'

@@ -99,16 +99,16 @@ def write_file(base, target, data, *, expected_content=None, expected_image=None
 
 
 def read_text(base, target):
-    """Read a bounded regular file for reverse-patch matching, never a FIFO."""
+    """Read a complete regular file for reverse-patch matching, never a FIFO."""
     with _parent(base, target) as (parent, name, validate_parent):
         flags = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, 'O_NONBLOCK', 0) | getattr(os, 'O_CLOEXEC', 0)
         descriptor = os.open(name, flags, dir_fd=parent)
         with os.fdopen(descriptor, 'rb') as handle:
             before = os.fstat(handle.fileno())
-            if not stat.S_ISREG(before.st_mode) or before.st_size > recovery_file_bytes():
-                raise ValueError('Undo reverse-patch read exceeds regular-file budget')
-            data = handle.read(recovery_file_bytes() + 1)
-            if len(data) > recovery_file_bytes() or file_fingerprint(os.fstat(handle.fileno())) != file_fingerprint(before):
+            if not stat.S_ISREG(before.st_mode):
+                raise ValueError('Undo reverse-patch source is not a regular file')
+            data = handle.read()
+            if len(data) != before.st_size or file_fingerprint(os.fstat(handle.fileno())) != file_fingerprint(before):
                 raise ValueError('Undo reverse-patch file changed while reading')
         validate_parent()
         return data.decode('utf-8')
@@ -118,7 +118,7 @@ def fingerprint_file(base, target, *, byte_budget=None, file_byte_limit=None):
     """Capture bounded post-image content evidence, never a stat-only promise.
 
     byte_budget is a caller-owned one-element remaining-byte counter. Command
-    batches retain their shared budget; direct writes use the recovery cap.
+    batches retain their shared budget; direct writes have no recovery quota.
     Command capture explicitly supplies its separate per-file display cap.
     A missing file is explicit evidence; errors/oversized files are unavailable.
     """
@@ -172,6 +172,14 @@ def _postimage_validator():
 def valid_postimage(value):
     """Validate persisted evidence before it can authorize a mutation."""
     return next(_postimage_validator().iter_errors(value), None) is None
+
+
+def stat_file(base, target):
+    """Read regular-file restore metadata without reopening a path-based target."""
+    with _parent(base, target) as (parent, name, validate_parent):
+        metadata = _stat_regular(parent, name)
+        validate_parent()
+        return metadata
 
 
 def touch_file(base, target):

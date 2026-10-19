@@ -29,7 +29,8 @@ logger = get_logger(__name__)
 
 
 def derive_round_modified_files(task: dict, project_path: str | None,
-                                project_paths: list[str] | None) -> tuple[list[dict], int, bool]:
+                                project_paths: list[str] | None, *,
+                                recover_conversation_journal: bool = False) -> tuple[list[dict], int, bool]:
     """Build this round's authoritative file-change list from the journal.
 
     The modifications journal is keyed per-root (``session_dir =
@@ -73,6 +74,27 @@ def derive_round_modified_files(task: dict, project_path: str | None,
             seen_roots.add(p)
             scan_roots.append(p)
 
+    # Roots admitted during this turn (for example linked worktrees) need
+    # not be in the executor's frozen projectPaths. Committed live facts
+    # retain the journal address even after Git removes the checkout. They
+    # are discovery hints only: re-read the conversation/task journal rather
+    # than promoting presentation rows into durable change evidence.
+    configured_roots = set(scan_roots)
+    if conv_id and task.get('id'):
+        from lib.project_mod.config import get_conv_roots
+        # Production roots are keyed by the physical executor. Legacy direct
+        # file-tool callers still use the conversation key.
+        root_policy = get_conv_roots(str(task['id'])) or get_conv_roots(conv_id)
+        runtime_roots = [row['path'] for row in root_policy.values()]
+        live_roots = [row.get('rootPath') for row in (task.get('modifiedFileList') or [])
+                      if isinstance(row, dict) and row.get('changeId')
+                      and row.get('source') == 'local']
+        for root in runtime_roots + live_roots:
+            if (isinstance(root, str) and os.path.isabs(root)
+                    and root not in seen_roots):
+                seen_roots.add(root)
+                scan_roots.append(root)
+
     turn_mods: list[dict] = []
     used_ts_fallback = False
     for root in scan_roots:
@@ -80,9 +102,15 @@ def derive_round_modified_files(task: dict, project_path: str | None,
         if not root_mods:
             continue
         own = [m for m in root_mods if m.get('taskId') == task.get('id')]
-        if not own:
+        if not own and root in configured_roots:
             task_start = task.get('created_at', 0)
-            own = [m for m in root_mods if m.get('timestamp', 0) >= task_start]
+            # Orphan recovery explicitly covers prior physical attempts in
+            # this conversation. Normal settlement never borrows their IDs.
+            recover_prior_attempts = (recover_conversation_journal
+                                      and not task.get('id') and bool(conv_id))
+            own = [m for m in root_mods if (not m.get('taskId') or recover_prior_attempts)
+                   and isinstance(task_start, (int, float)) and task_start > 0
+                   and m.get('timestamp', 0) >= task_start]
             if own:
                 used_ts_fallback = True
         turn_mods.extend(own)
@@ -101,6 +129,10 @@ def derive_round_modified_files(task: dict, project_path: str | None,
             action = 'patched'
         elif t in ('insert_content', 'insert_contents'):
             action = 'inserted'
+        elif t == 'run_command' and m.get('action') in ('created', 'deleted', 'modified'):
+            # This is a committed command observation. Worktree removal after
+            # integration cannot rewrite a modification as a command deletion.
+            action = m['action']
         elif t == 'run_command':
             # Resolve the exists-check against the mod's OWN root
             # (basePath), not the primary, so extra-root deletes classify
@@ -117,11 +149,14 @@ def derive_round_modified_files(task: dict, project_path: str | None,
             action = t
         seen[(m.get('basePath') or root_name, p)] = {'action': action, 'root': root_name,
                                 **({'changeId': m['changeId'], 'source': 'local'} if m.get('changeId') else {}),
-                                **({'rootPath': m['basePath']} if m.get('changeId') and m.get('basePath') else {})}
+                                **({'rootPath': m['basePath']} if m.get('changeId') and m.get('basePath') else {}),
+                                **({'undoAvailable': False} if m.get('undoAvailable') is False else {})}
     file_list = [
         {'path': p, 'action': info['action'],
          **({'changeId': info['changeId'], 'source': info['source']} if info.get('changeId') else {}),
          **({'rootPath': info['rootPath']} if info.get('rootPath') else {}),
+
+         **({'undoAvailable': False} if info.get('undoAvailable') is False else {}),
          **({'root': info['root']} if info['root'] else {})}
         for (root_name, p), info in seen.items()
     ]
@@ -196,11 +231,12 @@ def note_live_file_change(task_id: str | None, entry: dict) -> bool:
             # This is a later observation, not proof of state at stamp time.
             try:
                 probe = chat_task_runtime.get(task_id)
-            except Exception:
+            except Exception as diagnostic_error:
+                logger.debug('note_live_file_change failure handled: %s', type(diagnostic_error).__name__)
                 probe = None
             status = (probe or {}).get('status')
             aborted = bool((probe or {}).get('aborted'))
-            from lib.task_replay import TASK_REPLAY_TERMINAL_STATUSES
+            from lib.task_replay.task_replay import TASK_REPLAY_TERMINAL_STATUSES
             expected_late = aborted or status in TASK_REPLAY_TERMINAL_STATUSES
             # Status is diagnostic metadata, never arbitrary task content.
             if status not in ('pending', 'running') + TASK_REPLAY_TERMINAL_STATUSES:

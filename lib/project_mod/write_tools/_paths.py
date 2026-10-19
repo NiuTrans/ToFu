@@ -29,7 +29,8 @@ logger = get_logger(__name__)
 # ═══════════════════════════════════════════════════════
 #  Temp-directory detection (scratch writes are untracked)
 # ═══════════════════════════════════════════════════════
-# Absolute-path writes into the OS temp dir are TRUE scratch: they must not
+# Absolute-path writes into the OS temp dir outside registered roots or
+# genuine same-repo linked checkouts are TRUE scratch: they must not
 # auto-register a workspace root (which would invent a bogus ``tmp:`` project
 # in the file-changes bar) and must not be recorded in the undo history.
 # This mirrors run_command, whose snapshot/diff only walks ``base_path`` and
@@ -231,8 +232,8 @@ class OutsideWorkspaceError(ValueError):
 def _git_common_dir(checkout_path):
     """Return the normalized main-repo working dir for a git checkout.
 
-    Handles both a real ``.git`` directory (main checkout) and a gitfile
-    (worktree / submodule: a one-line file ``gitdir: <path>``). Returns None
+    Handles a real ``.git`` directory (main checkout) and a linked-worktree
+    gitfile with a valid common directory and checkout backlink. Returns None
     for anything that is not a git checkout. Pure path parsing — never
     invokes git (a subprocess on the FUSE mount per gated write is too
     costly) and never raises.
@@ -240,7 +241,7 @@ def _git_common_dir(checkout_path):
     try:
         dot_git = os.path.join(checkout_path, '.git')
         if os.path.isdir(dot_git):
-            return os.path.normpath(checkout_path)
+            return os.path.realpath(checkout_path)
         if os.path.isfile(dot_git):
             with open(dot_git, 'r', encoding='utf-8', errors='replace') as fh:
                 line = fh.readline().strip()
@@ -249,25 +250,29 @@ def _git_common_dir(checkout_path):
             gitdir = line[len('gitdir:'):].strip()
             if not os.path.isabs(gitdir):
                 gitdir = os.path.normpath(os.path.join(checkout_path, gitdir))
-            # A linked worktree's gitdir is <main>/.git/worktrees/<name>; the
-            # main repo root is the parent of the .git directory.
-            parts = gitdir.split(os.sep)
-            if 'worktrees' in parts:
-                idx = parts.index('worktrees')
-                if idx >= 1 and parts[idx - 1] == '.git':
-                    main_git = os.sep.join(parts[:idx]) or os.sep
-                    return os.path.normpath(os.path.dirname(main_git))
-            # Unknown gitfile layout (e.g. submodule): fall back to the
-            # checkout itself so same-repo equality still holds.
-            return os.path.normpath(checkout_path)
+            # Validate Git's common-directory and checkout backlink rather
+            # than trusting a path that merely contains '.git/worktrees'.
+            with open(os.path.join(gitdir, 'commondir'), encoding='utf-8') as fh:
+                common = fh.readline().strip()
+            if not common:
+                return None
+            main_git = os.path.realpath(os.path.join(gitdir, common))
+            with open(os.path.join(gitdir, 'gitdir'), encoding='utf-8') as fh:
+                backlink = fh.readline().strip()
+            if not backlink or os.path.realpath(backlink) != os.path.realpath(dot_git):
+                return None
+            if (not os.path.isfile(os.path.join(main_git, 'HEAD'))
+                    or not os.path.isdir(os.path.join(main_git, 'objects'))):
+                return None
+            return os.path.dirname(main_git)
     except Exception as e:
         logger.debug('[WriteTools] _git_common_dir(%s) failed: %s',
                      checkout_path, e)
     return None
 
 
-def _is_same_repo_worktree(abs_path, anchor, roots_snapshot):
-    """True if *abs_path* sits in a git worktree of a registered root's repo.
+def _same_repo_checkout_root(anchor, roots_snapshot):
+    """Return the actual checkout root of a registered root's repository.
 
     *anchor* is the would-be auto-registered directory (deepest existing
     ancestor of the target). The walk starts there — not at the file parent —
@@ -282,13 +287,19 @@ def _is_same_repo_worktree(abs_path, anchor, roots_snapshot):
             for root_path in roots_snapshot:
                 root_common = _git_common_dir(root_path)
                 if root_common is not None and root_common == common:
-                    return True
-            return False  # nearest git boundary decided: unrelated repo
+                    return d
+            return None  # nearest git boundary decided: unrelated repo
         parent = os.path.dirname(d)
         if parent == d:
             break
         d = parent
-    return False
+    return None
+
+
+def _is_same_repo_worktree(abs_path, anchor, roots_snapshot):
+    """Compatibility predicate for callers of the former boolean helper."""
+    return _same_repo_checkout_root(anchor, roots_snapshot) is not None
+
 
 def _nearest_existing_dir(abs_path):
     """Return the deepest already-existing ancestor directory of *abs_path*.
@@ -357,8 +368,10 @@ def _resolve_write_path(base, rel_path, conv_id=None, allow_outside=False,
          (or the root is itself a worktree of that repo), the write is a
          bounded expansion of the current project — proceed exactly like a
          confirmed write (conv-scoped registration, root-added signal)
-         without requiring ``allow_outside_workspace``. A non-git directory
-         still requires explicit confirmation.
+         without requiring ``allow_outside_workspace``. This check precedes
+         temp scratch classification and registers the checkout root, not a
+         nested target directory. A non-git, non-temp directory still requires
+         explicit confirmation.
       3. Forbidden system paths are still rejected outright, confirmation
          or not.
 
@@ -400,7 +413,9 @@ def _resolve_write_path(base, rel_path, conv_id=None, allow_outside=False,
         #      containing root → the caller's _should_record_modification()
         #      skips the journal entry, matching run_command (which only
         #      snapshots base_path and so already ignores /tmp).
-        if _is_temp_path(abs_path):
+        anchor = _nearest_existing_dir(abs_path)
+        checkout_root = _same_repo_checkout_root(anchor, roots_snapshot)
+        if _is_temp_path(abs_path) and checkout_root is None:
             logger.debug('[WriteTools] temp-dir scratch write (untracked, no root '
                          'registered): %s', abs_path)
             return abs_path
@@ -416,15 +431,14 @@ def _resolve_write_path(base, rel_path, conv_id=None, allow_outside=False,
         #    gated on the caller's explicit confirmation (see docstring §2).
         #    The refusal happens BEFORE add_project_root/add_conv_root so a
         #    rejected attempt leaves both registries byte-identical.
-        anchor = _nearest_existing_dir(abs_path)
+        anchor = checkout_root or anchor
         if anchor and not _is_forbidden_create_path(anchor):
             # Same-repo worktree exemption: a write into a git worktree of an
             # already-registered repo is a bounded expansion of the CURRENT
             # project, not a silent workspace mutation — register it like a
             # confirmed write without requiring allow_outside_workspace.
             if not _confirmed and not allow_outside:
-                _confirmed = _is_same_repo_worktree(abs_path, anchor,
-                                                    roots_snapshot)
+                _confirmed = checkout_root is not None
             if not allow_outside and not _confirmed:
                 raise OutsideWorkspaceError(abs_path, anchor)
             try:
@@ -611,19 +625,10 @@ def _mod_attribution(target, base, rel_path, conv_id=None):
             if best_path is None or len(norm_root) > len(best_path):
                 best_path = norm_root
     if best_path is None:
-        # No literal prefix match. A same-repo worktree target (2026-10-04
-        # exemption) attributes to the registered root of that repo so the
-        # undo journal / file-changes bar still resolve it as part of the
-        # project, not as an out-of-workspace escape.
-        target_anchor = _nearest_existing_dir(abs_target)
-        if target_anchor and _is_same_repo_worktree(abs_target, target_anchor,
-                                                    roots_snapshot):
-            target_common = _git_common_dir(target_anchor)
-            for root_path in roots_snapshot:
-                norm_root = os.path.abspath(root_path).rstrip(os.sep) or root_path
-                if _git_common_dir(norm_root) == target_common:
-                    best_path = norm_root
-                    break
+        # Legacy callers may arrive before registration. The actual checkout
+        # owns undo authority; a main-root '../worktree/file' path does not.
+        best_path = _same_repo_checkout_root(
+            _nearest_existing_dir(abs_target), roots_snapshot)
     if best_path is None:
         return base, rel_path
     mod_rel = os.path.relpath(abs_target, best_path)

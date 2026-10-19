@@ -34,7 +34,7 @@ def test_index_matches_every_registered_operation_and_owner():
 
 def test_index_keeps_missing_metadata_explicit():
     from quart import Blueprint
-    from lib.app_factory import create_base_app
+    from lib.app.app_factory import create_base_app
 
     app = create_base_app('index-metadata')
     bp = Blueprint('index_example', __name__)
@@ -52,7 +52,7 @@ def test_index_keeps_missing_metadata_explicit():
 
 
 def test_index_reports_unresolvable_source_owners():
-    from lib.app_factory import create_base_app
+    from lib.app.app_factory import create_base_app
 
     app = create_base_app('index-unresolved')
     # A foreign callable must not disappear without an explicit diagnostic.

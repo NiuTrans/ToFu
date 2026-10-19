@@ -101,7 +101,7 @@ class ToolContext:
     # Built-in specs are NEVER affected by this field. Populated from
     # ``cfg['plugins']`` (per-request) falling back to the
     # ``TOFU_DEFAULT_TOOL_PLUGINS`` env var — see :meth:`resolve_enabled_plugins`.
-    enabled_plugins: set[str] | None = None
+    enabled_plugins: set[str] | None = field(default_factory=set)
 
     # ── Mutated by the assembler between phases ──
     current_count: int = 0
@@ -422,6 +422,13 @@ class ToolSpec:
     # Appended for positional compatibility. These live tools must remain
     # direct across discovery/budget/PTC projection; this grants no authority.
     direct_wire_tools: frozenset[str] = field(default_factory=frozenset)
+    # Handler/schema compatibility is distinct from current tool availability.
+    compatibility_tools: frozenset[str] = field(default_factory=frozenset)
+    contextual_tools: frozenset[str] = field(default_factory=frozenset)
+    # Bundled optional tools retain host name/schema ownership. External
+    # entry-point discovery always clears this provenance marker.
+    host_owned: bool = False
+    discovery_policy_by_name: dict[str, str] = field(default_factory=dict)
 
 
 # ── Module-level registry ─────────────────────────────────
@@ -557,7 +564,7 @@ def _register_tool_spec_unlocked(spec: ToolSpec, *, replace: bool) -> None:
         if (existing.key != spec.key
             and claims & _ordinary_claims(existing))
     ]
-    if name_collisions and spec.source == 'plugin':
+    if name_collisions and spec.source == 'plugin' and not spec.host_owned:
         details = ', '.join(
             f'{owner.key}:{names}' for owner, names in name_collisions)
         logger.warning(
@@ -568,7 +575,7 @@ def _register_tool_spec_unlocked(spec: ToolSpec, *, replace: bool) -> None:
     if name_collisions:
         builtin_collisions = [
             (owner, names) for owner, names in name_collisions
-            if owner.source == 'builtin'
+            if owner.source == 'builtin' or owner.host_owned
         ]
         if builtin_collisions:
             details = ', '.join(
@@ -597,13 +604,13 @@ def _register_tool_spec_unlocked(spec: ToolSpec, *, replace: bool) -> None:
         # idempotency partitions in addition to schemas, so replacing a core
         # spec is just as dangerous as replacing its dispatch handler.
         if spec.source == 'plugin':
-            if existing.source == 'builtin':
+            if existing.source == 'builtin' or existing.host_owned:
                 logger.warning(
                     '[ToolRegistry] plugin %r REFUSED spec key=%r — that key '
                     'belongs to a built-in spec', spec.plugin_name or '?',
                     spec.key)
                 return
-            if existing.plugin_name != spec.plugin_name:
+            if existing.plugin_name != spec.plugin_name and not spec.host_owned:
                 logger.warning(
                     '[ToolRegistry] plugin %r REFUSED spec key=%r — already '
                     'provided by plugin %r', spec.plugin_name or '?', spec.key,
@@ -612,7 +619,8 @@ def _register_tool_spec_unlocked(spec: ToolSpec, *, replace: bool) -> None:
 
         # Preserve the same arrival-order-independent authority as handler
         # registration: core can reclaim a key a plugin registered first.
-        if spec.source == 'builtin' and existing.source == 'plugin':
+        if ((spec.source == 'builtin' or spec.host_owned)
+                and existing.source == 'plugin' and not existing.host_owned):
             replace = True
             logger.warning(
                 '[ToolRegistry] built-in spec key=%r reclaimed from plugin %r',
@@ -632,6 +640,15 @@ def _register_tool_spec_unlocked(spec: ToolSpec, *, replace: bool) -> None:
     if spec.phase not in ('base', 'capability'):
         logger.warning('[ToolRegistry] spec key=%s has unknown phase=%r; '
                        'treating as capability', spec.key, spec.phase)
+    if (not spec.contextual_tools <= spec.provides
+            or spec.contextual_tools & spec.compatibility_tools):
+        raise ValueError('contextual tools must be distinct declared names')
+    if not spec.compatibility_tools <= spec.provides:
+        raise ValueError('compatibility_tools must be declared in provides')
+    if (not spec.discovery_policy_by_name.keys() <= spec.provides
+            or any(v not in ('eager', 'searchable')
+                   for v in spec.discovery_policy_by_name.values())):
+        raise ValueError('invalid per-tool discovery policy')
     if spec.discovery_policy not in ('eager', 'searchable'):
         raise ValueError(
             f'ToolSpec {spec.key!r} discovery_policy must be eager or searchable')
@@ -940,7 +957,9 @@ def assemble_tool_list(ctx: ToolContext) -> tuple[list[dict], bool]:
         # tool surface on a shared server.
         if spec.source != 'plugin':
             return True
-        if ctx.plugin_allowed(spec.plugin_name):
+        if (ctx.plugin_allowed(spec.plugin_name)
+                or (spec.plugin_name == 'image_generation'
+                    and ctx.image_gen_enabled and 'plugins' not in ctx.cfg)):
             return True
         logger.debug('[Task %s] plugin spec key=%s (plugin=%s) hidden — not in '
                      'enabled_plugins', ctx.tid, spec.key, spec.plugin_name)
@@ -999,12 +1018,8 @@ def assemble_tool_list(ctx: ToolContext) -> tuple[list[dict], bool]:
         # becomes a budget pin; otherwise every eager family collapses the
         # priority tiers back into registry order.
         pin = exposed and spec.pin_on_exposure
-        # An explicit plugin allow-list is also a caller selection.  A legacy
-        # single-tenant "all plugins" default (None) remains searchable.
-        if (spec.source == 'plugin'
-                and ctx.enabled_plugins is not None
-                and ctx.plugin_allowed(spec.plugin_name)):
-            pin = True
+        # Plugin enablement grants task availability, not eager schema pins.
+        # A plugin can declare pin_on_exposure for a genuinely direct surface.
         authority = list(contributed)
         if spec.key == 'mcp':
             authority = _validated_contribution(
@@ -1039,7 +1054,8 @@ def assemble_tool_list(ctx: ToolContext) -> tuple[list[dict], bool]:
             is_active_mcp = spec.key == 'mcp' and name in active_mcp
             ctx.discovery_policy_by_name[name] = (
                 'eager' if is_active_mcp else (
-                    spec.discovery_policy if exposed else 'searchable'))
+                    spec.discovery_policy_by_name.get(name, spec.discovery_policy)
+                    if exposed else 'searchable'))
             ctx.script_safe_by_name[name] = bool(spec.script_safe)
             # MCP tools scope by their owning server, not the shared 'mcp'
             # bucket: a server-name filter or query (namespace='xuecheng')
@@ -1082,6 +1098,9 @@ def assemble_tool_list(ctx: ToolContext) -> tuple[list[dict], bool]:
                                 name, 'artifact')),
                     )
                 document = contract.search_document()
+                if spec.key == 'custom':
+                    document = (ctx.cfg.get('_customToolContracts') or {}).get(
+                        name, document)
                 ctx.tool_contract_documents_by_name[name] = document
                 ctx.search_text_by_name[name] = ' '.join(filter(None, (
                     ctx.search_text_by_name[name],
@@ -1098,7 +1117,8 @@ def assemble_tool_list(ctx: ToolContext) -> tuple[list[dict], bool]:
     def _wire_visible(spec: ToolSpec, exposed: bool) -> bool:
         if not exposed:
             return False
-        if selected_native is None or spec.key in selected_native:
+        if (selected_native is None or spec.key in selected_native
+                or spec.source == 'plugin'):
             return True
         ctx.omitted_spec_keys.add(spec.key)
         logger.debug('[Task %s] native spec key=%s hidden by routed exposure',
@@ -1115,7 +1135,7 @@ def assemble_tool_list(ctx: ToolContext) -> tuple[list[dict], bool]:
         try:
             contributed = spec.build(ctx) or []
         except Exception as e:
-            from lib.storage.mcp_declarations import MCPDeclarationError
+            from lib.agent_core.tool_errors import MCPDeclarationError
             if isinstance(e, MCPDeclarationError):
                 raise
             logger.error('[ToolRegistry] spec %s build failed: %s',
@@ -1138,7 +1158,7 @@ def assemble_tool_list(ctx: ToolContext) -> tuple[list[dict], bool]:
         try:
             contributed = spec.build(ctx) or []
         except Exception as e:
-            from lib.storage.mcp_declarations import MCPDeclarationError
+            from lib.agent_core.tool_errors import MCPDeclarationError
             if isinstance(e, MCPDeclarationError):
                 raise
             logger.error('[ToolRegistry] spec %s build failed: %s',

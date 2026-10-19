@@ -52,7 +52,7 @@
 [data-theme="tofu"] .recent-path-item:hover .recent-path-name{color:#A67B52}
 
 /* ── Capability mode picker — tofu (clay) theme ──
- * The trigger inherits the pixel-pill [data-theme="tofu"] .submenu-trigger
+ * The trigger inherits the shared composer .submenu-trigger
  * style and the popover inherits [data-theme="tofu"] .flow-menu, so only the
  * active-Studio accent is bespoke here. */
 [data-theme="tofu"] .chat-mode-trigger[data-mode="studio"]{color:#A67B52;background:rgba(196,149,106,0.12);border-color:rgba(196,149,106,0.35)}
@@ -67,35 +67,6 @@
 .mobile-mode-item.active .mobile-sheet-item-check{opacity:1}
 
 /* ── Submenu triggers — pixel pill buttons with JetBrains Mono ── */
-[data-theme="tofu"] .submenu-trigger{
-  border-radius:4px;
-  border:1.5px solid rgba(194,188,164,0.4);
-  border-top-color:rgba(255,252,246,0.6);
-  border-left-color:rgba(255,252,246,0.6);
-  border-right-color:rgba(168,152,120,0.4);
-  border-bottom-color:rgba(168,152,120,0.4);
-  background:linear-gradient(180deg, rgba(245,242,234,0.6) 0%, rgba(235,232,222,0.6) 100%);
-  /* Item 2 — true frosted glass matching the project bar's pills */
-  -webkit-backdrop-filter:blur(6px) saturate(1.05);
-  backdrop-filter:blur(6px) saturate(1.05);
-  color:#3D3022;
-  box-shadow:0 1px 0 rgba(154,144,122,0.3);
-  clip-path:none;
-  padding:var(--space-1) 10px;
-  font-family:var(--sans-body);
-  font-size:var(--font-size-xs);
-  font-weight:700;
-  letter-spacing:0.02em;
-  -webkit-font-smoothing:antialiased;
-  -moz-osx-font-smoothing:grayscale;
-  transition:color 0.15s,background 0.15s,transform 0.08s ease,box-shadow 0.08s ease
-}
-[data-theme="tofu"] .submenu-trigger:hover{
-  background:linear-gradient(180deg, rgba(251,248,240,0.8) 0%, rgba(242,239,229,0.8) 100%);
-  color:#2A2018;
-  box-shadow:0 2px 0 rgba(154,144,122,0.3), 0 2px 6px rgba(74,63,47,0.06);
-  transform:translateY(-1px)
-}
 [data-theme="tofu"] .submenu-trigger:active{
   transform:translateY(1px);
   box-shadow:0 0 0 rgba(154,144,122,0.3)
@@ -111,12 +82,6 @@
 [data-theme="tofu"] .submenu-trigger.open{
   background:rgba(196,149,106,0.12);
   color:#3D3022;
-  border-color:rgba(196,149,106,0.35);
-  font-weight:700
-}
-[data-theme="tofu"] .submenu-trigger.has-active{
-  color:#6A4E2E;
-  background:rgba(196,149,106,0.1);
   border-color:rgba(196,149,106,0.35);
   font-weight:700
 }

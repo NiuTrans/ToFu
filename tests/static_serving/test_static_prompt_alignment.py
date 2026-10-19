@@ -59,15 +59,15 @@ class TestSystemPromptSections:
     def test_summarize_section_exists(self):
         from lib.tasks_pkg.system_prompt_base import section_summarize_tool_results
         section = section_summarize_tool_results()
-        assert 'important information' in section.lower()
-        assert 'write down' in section.lower()
+        assert 'essential evidence' in section.lower()
+        assert 'concise summary' in section.lower()
 
     def test_tool_usage_guidance_exists(self):
         from lib.tasks_pkg.system_prompt_base import section_using_tools
         section = section_using_tools()
         assert 'parallel' in section.lower()
         assert 'read_files' in section or 'grep_search' in section
-        assert 'apply_diff' in section
+        assert 'description' in section and 'authoritative' in section
 
     def test_tool_usage_guidance_parallel_calls(self):
         """Ensures the guidance tells the model about independent parallel calls."""
@@ -119,7 +119,7 @@ class TestSystemPromptSections:
 
         full_text = '\n\n'.join(_plain(m['content']) for m in messages)
         assert 'Function Result Clearing' in full_text
-        assert 'important information' in full_text
+        assert 'essential evidence' in full_text
         assert 'parallel' in full_text.lower()
         assert 'concise' in full_text.lower()
 
@@ -487,11 +487,11 @@ class TestFullPipelineIntegration:
         tool_pos = full.find('Using your tools')
         output_pos = full.find('Output efficiency')
         frc_pos = full.find('Function Result Clearing')
-        summarize_pos = full.find('important information')
+        summarize_pos = full.find('essential evidence')
         for label, pos in [('Using your tools', tool_pos),
                             ('Output efficiency', output_pos),
                             ('Function Result Clearing', frc_pos),
-                            ('important information (summarize)', summarize_pos)]:
+                            ('essential evidence (summarize)', summarize_pos)]:
             assert pos >= 0, f'Missing section: {label}'
         # Section order matches build_static_prompt()'s assembly
         assert tool_pos < output_pos < frc_pos < summarize_pos

@@ -18,7 +18,7 @@ use crate::generated_tofudb_ir::{
     MAX_LOG_AGGREGATE_LEVEL_CHARACTERS, MAX_LOG_AGGREGATE_LOGGER_CHARACTERS,
     MAX_LOG_AGGREGATE_QUERY_ROWS, MAX_LOG_AGGREGATE_ROW_COUNT, MAX_LOG_AGGREGATE_SAMPLE_CHARACTERS,
     MAX_LOG_AGGREGATE_SCAN_ROWS, MAX_LOG_AGGREGATE_SWEEP_BATCH,
-    MAX_LOG_AGGREGATE_TEMPLATE_CHARACTERS, MAX_TRANSACTION_IR_LITERAL_BYTES,
+    MAX_LOG_AGGREGATE_TEMPLATE_CHARACTERS, MAX_LEGACY_DOCUMENT_BYTES,
 };
 use crate::versioned_document::{self, PutRequest};
 
@@ -472,7 +472,7 @@ pub(crate) fn query(
                     .len()
                     + 1,
             )
-            .filter(|bytes| *bytes <= MAX_TRANSACTION_IR_LITERAL_BYTES)
+            .filter(|bytes| *bytes <= MAX_LEGACY_DOCUMENT_BYTES)
             .ok_or_else(|| resource_exhausted("log-aggregate response exceeds 8 MiB"))?;
         items.push(item);
     }

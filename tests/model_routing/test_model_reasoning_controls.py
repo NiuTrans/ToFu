@@ -256,3 +256,16 @@ def test_declared_none_token_provides_disable_without_duplicate_alias_metadata()
     body = {'_reasoning_intent': capture_intent(thinking_depth='off')}
     compile_reasoning(body, 'unknown-future-name', inference_profile=p)
     assert body['reasoning_effort'] == 'none'
+
+
+
+def test_reasoning_controls_preserve_every_configured_offering_beyond_old_tail_limit():
+    document = _document()
+    prototype = document['offerings'][0]
+    document['deployments'] = []
+    document['offerings'] = [{**copy.deepcopy(prototype), 'offering_id': f'visible-{i:05}'}
+                              for i in range(8193)]
+    controls = reasoning_controls(document)
+    visible = {row['offering_id'] for row in controls if row['offering_id']}
+    assert visible == {f'visible-{i:05}' for i in range(8193)}
+    assert all(row['availability'] == 'no_route' for row in controls)

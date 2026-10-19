@@ -82,7 +82,7 @@ def test_expiry_reclaims_only_acknowledged_completed_work(state):
     runtime, clock = state
     assert runtime.admit('work', expires_at=1001)
     clock[0] = 2
-    assert runtime.available_slots() == 1
+    assert runtime.available_slots() == limit("command_batch")
     assert 'work' in runtime.seen  # Running work survives its admission deadline.
     runtime.results.append({'id': 'work', 'result': {}, 'error': None})
     runtime.streams.append({'cmd_id': 'work', 'seq': 1})
@@ -95,7 +95,7 @@ def test_expiry_reclaims_only_acknowledged_completed_work(state):
     assert 'work' in runtime.seen
     with runtime.lock:
         del runtime.streams[:1]
-    assert runtime.available_slots() == 2
+    assert runtime.available_slots() == limit("command_batch")
     assert 'work' not in runtime.seen
     assert not runtime.admit('work', expires_at=1001)  # Old redelivery cannot execute.
     assert 'expired' in list(runtime.results)[-1]['error']
@@ -154,17 +154,17 @@ def enqueue(queue, cid, kind='desktop_system_info', target='device-a'):
     assert error is None and result == cid
 
 
-def test_server_dispatches_slots_with_stable_deadlines_and_explicit_address(queue):
+def test_server_dispatches_demand_with_stable_replay_horizon_and_explicit_address(queue):
     for index in range(4):
         enqueue(queue, str(index))
     first = queue.take_pending_commands(agent_id='device-a', user_id='owner')
-    assert [cmd['id'] for cmd in first] == ['0', '1']
+    assert [cmd['id'] for cmd in first] == ['0', '1', '2', '3']
     assert all(cmd['target_agent_id'] == 'device-a' for cmd in first)
     replay = queue.take_pending_commands(agent_id='device-a', user_id='owner')
     assert replay == first  # Lost response retries do not extend expiry.
     queue.register_agent('device-a', {'protocol_version': 3, 'execution_slots': 1,
                                      'active_command_ids': ['0']}, user_id='owner')
-    assert [c['id'] for c in queue.take_pending_commands(agent_id='device-a', user_id='owner')] == ['1']
+    assert [c['id'] for c in queue.take_pending_commands(agent_id='device-a', user_id='owner')] == ['1', '2', '3']
     queue.register_agent('device-a', {'protocol_version': 3, 'execution_slots': 2,
                                      'active_command_ids': ['0', '1']}, user_id='owner')
     assert [c['id'] for c in queue.take_pending_commands(agent_id='device-a', user_id='owner')] == ['2', '3']
@@ -178,8 +178,8 @@ def test_cancel_bypasses_saturated_execution_slots(queue):
     enqueue(queue, 'cancel', kind='egress_cancel')
     queue.register_agent('device-a', {'protocol_version': 3, 'execution_slots': 0,
                                      'active_command_ids': []}, user_id='owner')
-    assert [c['id'] for c in queue.take_pending_commands(agent_id='device-a', user_id='owner')] == ['cancel']
-    assert queue.command_queue['work'].get('claimed_agent_id') is None
+    assert [c['id'] for c in queue.take_pending_commands(agent_id='device-a', user_id='owner')] == ['cancel', 'work']
+    assert queue.command_queue['work'].get('claimed_agent_id') == 'device-a'
 
 
 def test_legacy_response_batch_is_bounded(queue):
@@ -324,6 +324,7 @@ def test_real_poll_connection_is_reused_and_closed(monkeypatch):
 def test_live_execution_outlives_pickup_deadline_on_other_device_poll(queue):
     import time
     enqueue(queue, 'long-work')
+    queue.command_queue['long-work']['ttl'] = 90
     queue.take_pending_commands(agent_id='device-a', user_id='owner')
     queue.command_queue['long-work']['created_at'] = time.time() - 1000
     queue.register_agent('device-a', {'protocol_version': 3, 'execution_slots': 1,
@@ -369,3 +370,57 @@ def test_delayed_first_response_cannot_execute_expired_command(state):
     runtime.observe_server_time(1000, request_elapsed=20)
     assert not runtime.admit('delayed', expires_at=1010)
     assert runtime.admit('fresh', expires_at=1030)
+
+
+def test_zero_slots_and_old_queue_age_cannot_refuse_accepted_work(queue):
+    import time
+    for i in range(40):
+        enqueue(queue,str(i));queue.command_queue[str(i)]['created_at']=time.time()-1000
+    queue.register_agent('device-a',{'protocol_version':3,'execution_slots':0,'active_command_ids':[]},user_id='owner')
+    batch=queue.take_pending_commands(agent_id='device-a',user_id='owner')
+    assert len(batch)==40 and all(row['deadline_enforced'] is False for row in batch)
+    assert all(not queue.command_queue[str(i)]['event'].is_set() for i in range(40))
+    assert queue.take_pending_commands(agent_id='device-a',user_id='owner')==batch
+
+
+def test_old_default_replay_horizon_does_not_refuse_execution(state):
+    runtime,_=state
+    assert runtime.admit('accepted',expires_at=900,deadline_enforced=False)
+    assert not runtime.admit('accepted',expires_at=900,deadline_enforced=False)
+    assert not runtime.admit('explicit-expired',expires_at=900,deadline_enforced=True)
+
+
+def test_rotating_active_pages_keep_delivery_acknowledged_and_allow_new_work(queue,state,monkeypatch):
+    from lib.desktop_agent import _runtime
+    runtime,_=state;original=_runtime.limit
+    monkeypatch.setattr(_runtime,'limit',lambda name:2 if name=='legacy_execution_ids' else original(name))
+    for i in range(5):enqueue(queue,str(i))
+    queue.take_pending_commands(agent_id='device-a',user_id='owner')
+    for i in range(4):assert runtime.admit(str(i))
+    seen=set()
+    for _ in range(2):
+        ids=runtime.active_command_ids();assert len(ids)==2;seen.update(ids)
+        queue.register_agent('device-a',{'protocol_version':3,'execution_slots':0,'active_command_ids':ids},user_id='owner')
+    assert seen=={'0','1','2','3'}
+    assert [row['id'] for row in queue.take_pending_commands(agent_id='device-a',user_id='owner')]==['4']
+    queue.register_agent('device-a',{'protocol_version':3,'execution_slots':0,'active_command_ids':[]},user_id='owner')
+    assert [row['id'] for row in queue.take_pending_commands(agent_id='device-a',user_id='owner')]==['4']
+
+
+def test_explicit_pickup_ttl_still_refuses_before_dispatch(queue):
+    import time
+    enqueue(queue,'explicit');row=queue.command_queue['explicit'];row.update(ttl=1,created_at=time.time()-2)
+    assert queue.take_pending_commands(agent_id='device-a',user_id='owner')==[]
+    assert row['event'].is_set() and 'expired' in row['error']
+
+
+def test_active_metadata_pages_obey_bytes_without_losing_ids(state,monkeypatch):
+    from lib.desktop_agent import _runtime
+    runtime,_=state;original=_runtime.limit
+    monkeypatch.setattr(_runtime,'limit',lambda name:200 if name=='stream_bytes_floor' else original(name))
+    expected={('材料'*10)+str(i) for i in range(9)}
+    runtime.running.update(expected);observed=set()
+    for _ in range(9):
+        page=runtime.active_command_ids();observed.update(page)
+        assert len(json.dumps(page,ensure_ascii=True).encode('ascii'))<=200
+    assert observed==expected

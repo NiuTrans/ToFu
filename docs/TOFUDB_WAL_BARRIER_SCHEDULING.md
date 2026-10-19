@@ -95,7 +95,7 @@ missing. The failed authority/logs remain; successful scalar legs were not
 repeated, and the repaired array cohort used fresh parent identities. Neither
 setup error is a database regression. All adverse timing/CPU/tail legs,
 observer off/16/16/off costs, resource reports, three-engine controls and sources:
-[decoded-page/handoff evidence](evidence/tofudb_page_probes_20261004.json).
+`tofudb_page_probes_20261004.json`.
 
 ## Defeated publication cohort experiment
 
@@ -107,7 +107,7 @@ scheduling remain unproven. Two grouped wire runs closed connections while the
 daemon stayed alive; a diagnostic repeat recovered 10,002 exact payloads after
 two SIGKILLs. That repeat does not erase the failed runs or certify all tails.
 The isolated candidate and raw reports remain named in
-[measurement evidence](evidence/tofudb_wal_barrier_scheduling_20261001.json).
+`tofudb_wal_barrier_scheduling_20261001.json`.
 
 ## Verification and limits
 
@@ -161,7 +161,7 @@ capacity and still copies bytes; dropping CRC or changing the hash/record format
 weakens the recovery boundary or requires migration. Borrowed segment writes
 preserve the existing durable bytes and remove the second allocation on RealFile.
 
-The [source-pinned evidence](evidence/tofudb_wal_vectored_append_20261006.json)
+The `tofudb_wal_vectored_append_20261006.json`
 separates observer attribution from default-off measurements. Isolated 1,000-active
 candidate stream P99 was 967.5/999.6 ms against baseline 994.2/1,222.9 ms; the
 near-budget second result and an adverse settle tail do not prove stable capacity
@@ -183,3 +183,5 @@ errors. A new deterministic nine-cut crash test forces partial frames to disk,
 retains the acknowledged prefix, truncates exact residual bytes and retries
 successfully. Final source-pinned checks pass 1,585 native tests (two existing
 ignores), 38 cross-process tests and 39 original SQL/native application cases.
+
+<!-- Evidence note: former docs/evidence/ artifact snapshots cited here were retired from the tree; cited JSON artifacts remain recoverable from git history. -->

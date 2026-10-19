@@ -19,7 +19,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from lib.identity import require_user_id
-from lib.llm_json import extract_json
+from lib.llm.llm_json import extract_json
 from lib.log import audit_log, get_logger
 
 from .persistence import load_research_artifacts

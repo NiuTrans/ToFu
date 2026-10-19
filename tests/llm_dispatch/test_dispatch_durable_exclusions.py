@@ -53,7 +53,7 @@ class TestStreamRetryStateDurable:
     def test_route_missing_model_survives_reset_and_is_not_healable(self):
         from lib.llm_dispatch.api import _StreamRetryState
         from lib.llm_dispatch._api_stream_state import _cycling_can_ever_serve
-        from lib.llm_errors import ModelRouteMissingError
+        from lib.llm.llm_errors import ModelRouteMissingError
 
         route_error = ModelRouteMissingError(
             '不支持的模型类型(model=moonshotai/kimi-k3)',

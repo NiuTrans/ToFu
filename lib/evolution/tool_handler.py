@@ -67,10 +67,11 @@ def handle_evolution_reindex(task, tc, fn_name, tc_id, fn_args, rn, round_entry,
         if role not in ('executing', 'coordinator'):
             raise EvolutionStateError(
                 'reindex requires a bound executor or coordinator')
+        observation_actor = 'executor' if role == 'executing' else 'coordinator'
         args = fn_args or {}
         result = reindex_for_run(
             run['run_id'], [str(q) for q in (args.get('queries') or [])],
-            user_id=int(task.get('_userId') or 0), actor=role,
+            user_id=int(task.get('_userId') or 0), actor=observation_actor,
             task_id=str(task.get('id') or task.get('task_id') or ''),
             reason=str(args.get('reason') or ''))
     except (EvolutionContractError, EvolutionStateError, ValueError,

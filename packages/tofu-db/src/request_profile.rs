@@ -3,6 +3,10 @@
 //! Only catalog operation names and local sample numbers are retained: never
 //! request IDs, owners, keys, paths, payloads, or arbitrary error messages.
 //! No I/O and no authority acquisition. Collection happens after dispatch.
+//! Overlay head/original-blind/range probes add three fixed Stage slots
+//! (72 bytes per Sample and operation aggregate); reported active/retained
+//! budgets derive from these structure sizes. Five document/Turn read stages
+//! add 120 bytes per Sample/operation aggregate; no per-key labels are created.
 
 use std::cell::RefCell;
 use std::marker::PhantomData;
@@ -26,9 +30,19 @@ pub(crate) const VFS_SYNC: usize = BASE + 9;
 pub(crate) const VFS_METADATA: usize = BASE + 10;
 pub(crate) const VFS_DIRECTORY: usize = BASE + 11;
 pub(crate) const VFS_MUTATE: usize = BASE + 12;
-const EXTRA_NAMES: [&str; 13] = ["fifo_wait", "mutex_wait", "authority_hold",
+pub(crate) const BLOB_CODEC_WAIT: usize = BASE + 13;
+pub(crate) const BLOB_CODEC_COMPRESS: usize = BASE + 14;
+pub(crate) const STREAM_SEGMENT_ENCODE: usize = BASE + 15;
+pub(crate) const STREAM_SEGMENT_FRESH_PUBLISH: usize = BASE + 16;
+pub(crate) const DOCUMENT_MATERIALIZE: usize = BASE + 17;
+pub(crate) const TURN_PUBLIC: usize = BASE + 18;
+pub(crate) const TURN_SNAPSHOT_ENCODE: usize = BASE + 19;
+pub(crate) const TURN_SNAPSHOT_WINDOW: usize = BASE + 20;
+pub(crate) const TURN_SNAPSHOT_ATTEMPTS: usize = BASE + 21;
+const EXTRA_NAMES: [&str; 22] = ["fifo_wait", "mutex_wait", "authority_hold",
     "replica_build", "parallel_compile", "query_execute", "vfs_open", "vfs_read",
-    "vfs_write", "vfs_sync", "vfs_metadata", "vfs_directory", "vfs_mutate"];
+    "vfs_write", "vfs_sync", "vfs_metadata", "vfs_directory", "vfs_mutate",
+    "blob_codec_wait", "blob_codec_compress", "stream_segment_encode", "stream_segment_fresh_publish", "document_materialize", "turn_public", "turn_snapshot_encode", "turn_snapshot_window", "turn_snapshot_attempts"];
 const STAGES: usize = BASE + EXTRA_NAMES.len();
 const MAX_DEPTH: usize = 64;
 const SLOW_SAMPLES: usize = 32;
@@ -36,10 +50,10 @@ const HISTOGRAM_BUCKETS: usize = 64;
 
 #[derive(Clone, Copy)]
 pub(crate) enum Work { EntityGet, EntityReadReuse, EntityOverlayRead, EntityTreeRead,
-    WalBytes, OverlayBytes, ReadBytes, WriteBytes, PointConflict, BlindWriteConflict, RangeConflict, RootConflict, AbandonedPreparationNanos, HistoryDecodeAttempts, HistoryDecodeSourceBytes, HistoryDecodedTransactions, ProjectionCheckpointBytes, ProjectionPatchBytes, ProjectionPatchesApplied, JsonBorrowedStrings, JsonBorrowedStringBytes, JsonResponseProofReuse, JsonResponseProofBytes, JsonCanonicalProofReuse, JsonCanonicalProofBytes, JsonCanonicalProofMiss, BlobDecodedBytes, BlobContentHashBytes, BlobCollectedBytes, BlobChunkProofReuse, BlobChunkProofBytes, BlobWholeProofReuse, BlobWholeProofBytes, BlobWholeProofMiss, BlobCurrentEncodedBytes, PublishedReadReuse, PublishedReadFallback, PublishedReadPublication, EmbeddedBindingsReuse, PinRegistryAcquire, PinBudgetReserve, PinBudgetRelease, PinReleaseNotifications, EmbeddedReplyReuse, EmbeddedReplyCreate, IrResultMovedBytes, IrResultCopiedBytes, SemanticPayloadDecodedBytes, EntityPointRetainedBytes, ReceiptPolicyProofReuse }
-const WORK_NAMES: [&str; 50] = ["entity_get", "entity_read_reuse", "entity_overlay_read",
+    WalBytes, OverlayBytes, ReadBytes, WriteBytes, PointConflict, BlindWriteConflict, RangeConflict, RootConflict, AbandonedPreparationNanos, HistoryDecodeAttempts, HistoryDecodeSourceBytes, HistoryDecodedTransactions, ProjectionCheckpointBytes, ProjectionPatchBytes, ProjectionPatchesApplied, JsonBorrowedStrings, JsonBorrowedStringBytes, JsonResponseProofReuse, JsonResponseProofBytes, JsonCanonicalProofReuse, JsonCanonicalProofBytes, JsonCanonicalProofMiss, BlobDecodedBytes, BlobContentHashBytes, BlobCollectedBytes, BlobChunkProofReuse, BlobChunkProofBytes, BlobWholeProofReuse, BlobWholeProofBytes, BlobWholeProofMiss, BlobCurrentEncodedBytes, PublishedReadReuse, PublishedReadFallback, PublishedReadPublication, EmbeddedBindingsReuse, PinRegistryAcquire, PinBudgetReserve, PinBudgetRelease, PinReleaseNotifications, EmbeddedReplyReuse, EmbeddedReplyCreate, IrResultMovedBytes, IrResultCopiedBytes, SemanticPayloadDecodedBytes, EntityPointRetainedBytes, ReceiptPolicyProofReuse, ColdHistoryDedupeBypass, FreshStreamSegments, FreshStreamBytes }
+const WORK_NAMES: [&str; 53] = ["entity_get", "entity_read_reuse", "entity_overlay_read",
     "entity_tree_read", "wal_encoded_bytes", "overlay_materialized_bytes",
-    "vfs_read_requested_bytes", "vfs_write_requested_bytes", "point_conflict", "blind_write_conflict", "range_conflict", "root_conflict", "abandoned_preparation_nanos", "history_decode_attempts", "history_decode_source_bytes", "history_decoded_transactions", "projection_checkpoint_bytes", "projection_patch_bytes", "projection_patches_applied", "json_borrowed_strings", "json_borrowed_string_bytes", "json_response_proof_reuse", "json_response_proof_bytes", "json_canonical_proof_reuse", "json_canonical_proof_bytes", "json_canonical_proof_miss", "blob_decoded_bytes", "blob_content_hash_bytes", "blob_collected_bytes", "blob_chunk_proof_reuse", "blob_chunk_proof_bytes", "blob_whole_proof_reuse", "blob_whole_proof_bytes", "blob_whole_proof_miss", "blob_current_encoded_bytes", "published_read_reuse", "published_read_fallback", "published_read_publication", "embedded_bindings_reuse", "pin_registry_acquire", "pin_budget_reserve_ops", "pin_budget_release_ops", "pin_release_notifications", "embedded_reply_reuse", "embedded_reply_create", "ir_result_moved_bytes", "ir_result_copied_bytes", "semantic_payload_decoded_bytes", "entity_point_retained_bytes", "receipt_policy_proof_reuse"];
+    "vfs_read_requested_bytes", "vfs_write_requested_bytes", "point_conflict", "blind_write_conflict", "range_conflict", "root_conflict", "abandoned_preparation_nanos", "history_decode_attempts", "history_decode_source_bytes", "history_decoded_transactions", "projection_checkpoint_bytes", "projection_patch_bytes", "projection_patches_applied", "json_borrowed_strings", "json_borrowed_string_bytes", "json_response_proof_reuse", "json_response_proof_bytes", "json_canonical_proof_reuse", "json_canonical_proof_bytes", "json_canonical_proof_miss", "blob_decoded_bytes", "blob_content_hash_bytes", "blob_collected_bytes", "blob_chunk_proof_reuse", "blob_chunk_proof_bytes", "blob_whole_proof_reuse", "blob_whole_proof_bytes", "blob_whole_proof_miss", "blob_current_encoded_bytes", "published_read_reuse", "published_read_fallback", "published_read_publication", "embedded_bindings_reuse", "pin_registry_acquire", "pin_budget_reserve_ops", "pin_budget_release_ops", "pin_release_notifications", "embedded_reply_reuse", "embedded_reply_create", "ir_result_moved_bytes", "ir_result_copied_bytes", "semantic_payload_decoded_bytes", "entity_point_retained_bytes", "receipt_policy_proof_reuse", "cold_history_dedupe_bypass", "fresh_stream_segments", "fresh_stream_bytes"];
 
 static CONFIG: OnceLock<u64> = OnceLock::new();
 static SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -176,6 +190,7 @@ impl Drop for Probe {
 /// Embedded enqueue-to-worker delay is adjacent to, NOT part of dispatch time.
 pub(crate) struct QueueContext(Option<u64>, Option<bool>, PhantomData<Rc<()>>);
 impl QueueContext {
+    pub(crate) fn completed_inline() -> Self { Self::with_context(Some(0), None) }
     pub(crate) fn with_reply_reuse(nanos: Option<u64>, reused: bool) -> Self { Self::with_context(nanos, Some(reused)) }
     fn with_context(nanos: Option<u64>, reused: Option<bool>) -> Self {
         Self(QUEUE.with(|q| q.replace(nanos)), REPLY_REUSED.with(|q| q.replace(reused)), PhantomData)
@@ -188,6 +203,14 @@ impl Drop for QueueContext { fn drop(&mut self) { QUEUE.with(|q| q.set(self.0));
 pub(crate) struct RequestGuard { start: Instant, selected: bool, outcome: &'static str,
     _thread: PhantomData<Rc<()>> }
 impl RequestGuard {
+    /// An owned result-cache hit has already proved it will complete here.
+    /// Attribute its bounded lookup prelude without sampling failed probes a
+    /// second time when they later enter the ordinary worker dispatch.
+    pub(crate) fn start_at(operation: &str, started_at: Instant) -> Option<Self> {
+        let mut guard = Self::start(operation)?;
+        guard.start = started_at;
+        Some(guard)
+    }
     pub(crate) fn start(operation: &str) -> Option<Self> {
         let every = sample_every();
         if every == 0 || crate::control_ops::is_control_operation(operation) { return None; }
@@ -283,6 +306,21 @@ fn sample_json(sample: &Sample) -> Value {
         "stages": stages, "work": work})
 }
 
+fn aggregate_json(a: &Aggregate) -> Value {
+    let mut value = sample_json(&a.total);
+    // Totals combine successes and errors. A synthetic Sample's initial
+    // outcome/sequence is not an observed request and must not escape here.
+    let object = value.as_object_mut().expect("sample JSON object");
+    object.remove("outcome");
+    object.remove("sample");
+    value["kind"] = json!("aggregate");
+        value["requests"] = json!(a.requests); value["errors"] = json!(a.errors);
+        value["dispatchLog2NanosHistogram"] = json!(a.histogram.as_slice());
+        value["maxDispatchNanos"] = json!(a.maximum);
+        value["embeddedQueueSamples"] = json!(a.queue_samples);
+        value
+}
+
 pub(crate) fn snapshot() -> Value {
     let every = sample_every();
     if every == 0 { return json!({"enabled": false}); }
@@ -294,12 +332,7 @@ pub(crate) fn snapshot() -> Value {
     let collector = locked.clone();
     drop(locked);
     let operations: Vec<_> = collector.operations.iter().map(|a| {
-        let mut value = sample_json(&a.total);
-        value["requests"] = json!(a.requests); value["errors"] = json!(a.errors);
-        value["dispatchLog2NanosHistogram"] = json!(a.histogram.as_slice());
-        value["maxDispatchNanos"] = json!(a.maximum);
-        value["embeddedQueueSamples"] = json!(a.queue_samples);
-        value
+        aggregate_json(a)
     }).collect();
     json!({"enabled": true, "available": true, "contract": "tofudb.request-profile/v1",
         "scope": "process lifetime; completed sampled dispatches; wall time, not CPU time",

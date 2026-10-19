@@ -104,7 +104,8 @@ def test_cached_apply_preserves_worktree_and_normal_commit_appends_history(repo)
 def test_ordinary_write_classification_still_requires_checkout_lease(repo, command):
     root, _git = repo
     assert _git_guard_classify(command) == 'safe_write'
-    assert ('root', str(root)) in command_write_lease_claims(str(root), command)
+    kind = 'metadata' if command == 'git commit -m append' else 'root'
+    assert (kind, str(root)) in command_write_lease_claims(str(root), command)
 
 
 @pytest.mark.parametrize('command', [

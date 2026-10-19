@@ -99,9 +99,29 @@ def test_regular_file_claim_does_not_implicitly_claim_cwd(repo, command, target)
     'touch target -c', 'tee target -a', 'POSIXLY_CORRECT=1 touch target -c',
     'touch target --', 'truncate target -s 0',
 ])
-def test_directory_alias_metadata_and_uncertain_sets_remain_root(repo, command):
+def test_directory_alias_metadata_and_uncertain_sets_have_affected_scope(repo, command):
     claims = commands.command_write_lease_claims(str(repo), command)
-    assert ('root', str(repo)) in claims
+    # These literal shapes have complete write sets; input-only paths and
+    # unrelated source files must not acquire a whole-checkout writer.
+    precise = {
+        'cp source outdir': {('file', 'outdir/source')},
+        'cp -r outdir newdir': {('tree', 'newdir')},
+        'cp source target outdir': {('file', 'outdir/source'), ('file', 'outdir/target')},
+        'mv source target': {('file', 'source'), ('file', 'target')},
+        'rm -rf outdir': {('tree', 'outdir')},
+        'cp source missing-parent/target': {('tree', 'missing-parent/target')},
+        'cp source alias': {('tree', 'alias'), ('tree', 'target')},
+        'cp source dir-alias/created': {('tree', 'dir-alias/created'), ('tree', 'outdir/created')},
+        'cp source outdir/../target': {('tree', 'target')},
+        'cp alias target': {('file', 'target')},
+        'cp source .git/config': {('tree', '.git/config')},
+    }
+    if command in precise:
+        assert set(claims) == {(scope, str(repo / path)) for scope, path in precise[command]}
+    else:
+        # Unknown backups/options/redirects may traverse descendants. Preserve
+        # a real tree fence, not an ordinary checkout lock that misses children.
+        assert ('tree', str(repo)) in claims
     assert commands.command_write_lease_paths(str(repo), command) == tuple(
         sorted({path for _scope, path in claims}))
 
@@ -172,12 +192,12 @@ def test_scoped_file_writer_cannot_escape_supervision(repo, command):
     assert not workspace_lease.workspace_lease_fds()
 
 
-def test_external_git_metadata_remains_a_root_action(tmp_path):
+def test_external_git_metadata_remains_a_protected_action(tmp_path):
     root, metadata = tmp_path / 'separate-checkout', tmp_path / 'git-storage'
     subprocess.run(['git', 'init', '-q', '--separate-git-dir', str(metadata), str(root)], check=True)
     command = f'echo changed > {metadata / "config"}'
     claims = commands.command_write_lease_claims(str(root), command)
-    assert ('root', str(root)) in claims
+    assert ('tree', str(root)) in claims
     assert not any(scope == 'file' for scope, _path in claims)
 
 
@@ -190,7 +210,7 @@ def test_actual_file_mutator_a_overlaps_actual_file_mutator_b(repo, monkeypatch,
 
     def pause_a(execution_source, *args, **kwargs):
         if 'cp source target' in execution_source:
-            assert len(workspace_lease.workspace_lease_fds()) == 2
+            assert len(workspace_lease.workspace_lease_fds()) >= 2
             entered.set()
             assert release.wait(10)
         return process(execution_source, *args, **kwargs)

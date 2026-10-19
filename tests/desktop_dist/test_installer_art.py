@@ -39,7 +39,7 @@ _RETITLING = {'WelcomePageCreate': 'welcome', 'FinishPageCreate': 'finish',
 @pytest.fixture(scope='module')
 def art(tmp_path_factory):
     out = tmp_path_factory.mktemp('art')
-    return installer_art.render(str(out), 'Tofu Agent', '0.16.0',
+    return installer_art.render(str(out), 'Tofu Remote', '0.16.0',
                                 autostart=True)
 
 
@@ -86,7 +86,7 @@ def test_band_is_purple_header_not_a_full_page(art):
 
 def test_product_name_is_baked_in_the_band(tmp_path):
     a = installer_art.render(str(tmp_path / 'a'), 'Tofu', '1.0.0')
-    b = installer_art.render(str(tmp_path / 'b'), 'Tofu Agent', '1.0.0')
+    b = installer_art.render(str(tmp_path / 'b'), 'Tofu Remote', '1.0.0')
     band_h = min(100, installer_art.BAND_PX[1])
     band_a = Image.open(a['welcome']).convert('RGB') \
         .crop((0, 0, installer_art.BAND_PX[0], band_h))
@@ -98,9 +98,9 @@ def test_product_name_is_baked_in_the_band(tmp_path):
 
 
 def test_autostart_flag_does_not_change_header_bands(tmp_path):
-    on = installer_art.render(str(tmp_path / 'on'), 'Tofu Agent', '1.0.0',
+    on = installer_art.render(str(tmp_path / 'on'), 'Tofu Remote', '1.0.0',
                               autostart=True)
-    off = installer_art.render(str(tmp_path / 'off'), 'Tofu Agent',
+    off = installer_art.render(str(tmp_path / 'off'), 'Tofu Remote',
                                '1.0.0', autostart=False)
     for page in ('welcome', 'directory', 'progress', 'finish'):
         assert Path(on[page]).read_bytes() == Path(off[page]).read_bytes()

@@ -34,7 +34,7 @@ from ._registry import (
     mark_poll, get_connected_clients, is_extension_connected, _cleanup_stale,
     mark_locked_out, get_locked_out_clients, client_owner_user_id,
     mark_incompatible_client, get_incompatible_clients,
-    get_credit_hub_quota,
+    get_credit_hub_quota, wait_for_connected_clients,
 )
 
 # ── Command dispatch & resolution (SYNC + ASYNC) ──
@@ -54,7 +54,7 @@ __all__ = [
     'resolve_command', 'resolve_batch', 'is_extension_connected',
     'mark_locked_out', 'get_locked_out_clients',
     'mark_incompatible_client', 'get_incompatible_clients',
-    'get_credit_hub_quota',
+    'get_credit_hub_quota', 'wait_for_connected_clients',
     'client_owner_user_id',
     'MAX_COMMANDS_PER_POLL', 'MAX_RESULTS_PER_POLL',
     '_commands', '_commands_lock',

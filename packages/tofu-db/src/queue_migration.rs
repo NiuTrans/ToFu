@@ -29,7 +29,7 @@ use crate::authority::{AuthorityDatabase, AuthorityTransaction};
 use crate::conversation_header::TENANT_GLOBAL_OWNER_ID;
 use crate::entity::EntityKey;
 use crate::generated_tofudb_ir::{
-    MAX_QUEUE_CONVERSATION_ID_CHARACTERS, MAX_QUEUE_ID_CHARACTERS, MAX_QUEUE_ITEM_CORE_BYTES,
+    MAX_QUEUE_CONVERSATION_ID_CHARACTERS, MAX_QUEUE_ID_CHARACTERS,
     MIGRATION_SESSION_MAX_PAGE_ROWS, QUEUE_AUTOPILOT_MARKER_NAMESPACE,
     QUEUE_CONVERSATION_ORDER_INDEX_NAMESPACE, QUEUE_GLOBAL_AUTOPILOT_INDEX_NAMESPACE,
     QUEUE_GLOBAL_CONVERSATION_INDEX_NAMESPACE, QUEUE_GLOBAL_LEASE_INDEX_NAMESPACE,
@@ -291,12 +291,12 @@ fn read_core(
         CORE_LOGICAL_NAMESPACE,
         id,
         TENANT_GLOBAL_OWNER_ID,
-        MAX_QUEUE_ITEM_CORE_BYTES,
+        usize::MAX,
     )?
     .map(|raw| {
         serde_json::from_slice::<Value>(&raw)
             .ok()
-            .and_then(|value| value.as_object().cloned())
+            .and_then(|value| match value { Value::Object(object) => Some(object), _ => None })
             .ok_or_else(|| invalid_data("queue core is malformed"))
     })
     .transpose()
@@ -379,14 +379,6 @@ fn validate_item(request: &ItemRestoreRequest) -> io::Result<()> {
     {
         return Err(invalid_input("invalid queue snapshot metadata"));
     }
-    let core = core_value(request, 1);
-    if serde_json::to_vec(&core)
-        .map_err(|_| invalid_input("queue core cannot be encoded"))?
-        .len()
-        > MAX_QUEUE_ITEM_CORE_BYTES
-    {
-        return Err(invalid_input("queue core exceeds its byte bound"));
-    }
     Ok(())
 }
 
@@ -423,6 +415,7 @@ fn restore_item(
             }
         }
     }
+    crate::queue::invalidate_append_metadata(database, tx, &request.conv_id)?;
     // Rewrite the whole conversation order index in the same transaction so
     // summary locators track the exact restored (priority, position) rows.
     let (start, end) = order_range(tx, &request.conv_id)?;
@@ -435,16 +428,13 @@ fn restore_item(
             &end,
             crate::generated_tofudb_ir::MAX_ENTITY_RANGE_ROWS,
         )?;
-        let full = page.len() == crate::generated_tofudb_ir::MAX_ENTITY_RANGE_ROWS;
+        if page.is_empty() { break; }
         let next = page
             .last()
             .map(|(key, _)| key.clone().exact_range())
             .transpose()?;
         for (_, raw) in page {
             items.push(decode::<IndexIdentity>(&raw, "queue order index")?);
-        }
-        if !full {
-            break;
         }
         page_start = next
             .ok_or_else(|| invalid_data("queue order index pagination lost its continuation"))?

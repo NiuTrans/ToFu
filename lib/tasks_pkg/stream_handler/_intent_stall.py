@@ -39,7 +39,7 @@ import re
 from typing import Any
 
 from lib.log import get_logger
-from lib.tool_round_identity import execution_batch_keys
+from lib.tool_results.tool_round_identity import execution_batch_keys
 
 logger = get_logger(__name__)
 
@@ -208,7 +208,7 @@ def known_external_blocker(task: dict[str, Any]) -> dict | None:
     may have resolved the condition. A successful sibling in the same batch
     does not prove that the blocked operation executed.
     """
-    from lib.tool_rejection import tool_rejection_descriptor
+    from lib.tool_results.tool_rejection import tool_rejection_descriptor
 
     ordered = _ordered_rounds(task)
     keys = execution_batch_keys(ordered)

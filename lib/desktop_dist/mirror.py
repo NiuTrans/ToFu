@@ -235,7 +235,7 @@ def _download(url: str, dest_part: str) -> tuple:
     makes a completed download visible, so a killed refresh never leaves a
     truncated file under the final name.
     """
-    from lib.http_client import http_stream
+    from lib.http_transport.client import http_stream
     h = hashlib.sha256()
     size = 0
     deadline = time.monotonic() + _DOWNLOAD_MAX_SECONDS

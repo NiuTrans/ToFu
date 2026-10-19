@@ -11,7 +11,6 @@ from lib.identity import require_user_id
 from lib.project_recent_contract import (
     PROJECT_RELINK_STORAGE_DEADLINE_SECONDS,
     RECENT_PROJECT_PATH_MAX_CHARS,
-    RECENT_PROJECT_TOUCH_BATCH_LIMIT,
 )
 
 
@@ -64,13 +63,14 @@ class RecentProjectRepository:
         if (
             not isinstance(project_paths, (list, tuple))
             or not project_paths
-            or len(project_paths) > RECENT_PROJECT_TOUCH_BATCH_LIMIT
         ):
-            raise ValueError("project_paths must be a bounded non-empty list")
+            raise ValueError("project_paths must be a non-empty list")
         paths: list[str] = []
+        seen: set[str] = set()
         for candidate in project_paths:
             path = self._path(candidate)
-            if path not in paths:
+            if path not in seen:
+                seen.add(path)
                 paths.append(path)
         result = self._client(write=True).command(
             "project.recent.touch_many",

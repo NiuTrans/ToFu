@@ -16,9 +16,10 @@ from lib.cost import accumulate_usage_into
 from lib.agent_core.events import EventType, Phase, build_event, build_phase
 from lib.cgroup_guard import MemoryPressureError, approx_body_bytes
 from lib.llm import AbortedError, build_body, model_supports_vision
+from lib.llm.conversion import ProtocolConversionError
 from lib.llm.stream_result import ensure_provider_stream_result
-from lib.llm_error_format import format_llm_error_for_user
-from lib.llm_errors import _ERR_BODY_LIMIT
+from lib.llm.llm_error_format import format_llm_error_for_user
+from lib.llm.llm_errors import _ERR_BODY_LIMIT
 from lib.log import audit_log, get_logger
 from lib.llm_dispatch.retry_i18n import display_model_name as _display_model_name
 from lib.tasks_pkg.llm_fallback._credential_recovery import (
@@ -51,6 +52,8 @@ logger = get_logger(__name__)
 
 def _stream_with_message_receipts(task, body, **kwargs):
     from lib.tasks_pkg.message_input_receipts import stream_with_receipts
+    from lib.tasks_pkg.context_dependencies import observe_wire
+    observe_wire(task, None)  # Only the physical attempt observer can replace this.
     return stream_with_receipts(stream_llm_response, task, body, **kwargs)
 
 
@@ -363,6 +366,19 @@ def _prepare_reactive_retry_body(task, body, model, messages, tool_list,
 
         if task.get('aborted'):
             return None
+    except Exception as prep_error:
+        logger.error(
+            '[%s] Reactive compaction could not prepare a smaller projection; '
+            'preserving original %s: %s',
+            tid, type(cause).__name__, prep_error, exc_info=True)
+        return None
+
+    # Required acquisition is outside best-effort compaction recovery. Let its
+    # failure terminate this dispatch; returning None would allow a fallback
+    # model to rebuild the now-compacted messages without current requirements.
+    from lib.tasks_pkg.context_composer.turn_requirements import refresh_turn_requirements
+    refresh_turn_requirements(messages, task=task, model=model)
+    try:
         from lib.tasks_pkg.context_composer.checklist import restore_checklist_context
         # Reactive recovery bypasses ordinary round preparation and can drop
         # the checklist even during LLM-free, byte-targeted head truncation.
@@ -567,7 +583,8 @@ def _clear_failed_fallback_stamp(task):
 
 
 def _settle_failed_fallback(task, error, *, original_model, fallback_model,
-                            preset, thinking_enabled, round_num):
+                            preset, thinking_enabled, round_num,
+                            blocked_error: ProtocolConversionError | None = None):
     """Return a normal loop break carrying a typed terminal fallback error.
 
     A configured fallback is already an inner recovery attempt. Once it (and
@@ -576,11 +593,14 @@ def _settle_failed_fallback(task, error, *, original_model, fallback_model,
     retries to reset the same wait budget. Normal loop finalization guarantees
     one ``done`` event with ``done.error``; ``autoRetryExhausted`` keeps the
     bounded failure bounded while preserving manual Retry.
+    A continuity-blocked fallback reports the primary error and policy.
     """
     envelope = format_llm_error_for_user(
         error,
-        model=fallback_model,
-        context=f'both-failed ({original_model}→{fallback_model})',
+        model=original_model if blocked_error is not None else fallback_model,
+        context=(f'fallback-unrepresentable ({original_model}→{fallback_model})'
+                 if blocked_error is not None
+                 else f'both-failed ({original_model}→{fallback_model})'),
         source='llm-fallback',
     )
     envelope.update({
@@ -589,6 +609,15 @@ def _settle_failed_fallback(task, error, *, original_model, fallback_model,
         'fallbackFrom': original_model,
         'fallbackModel': fallback_model,
     })
+    if blocked_error is not None:
+        # The destination rejected native continuity before provider ingress.
+        # Keep the primary availability failure actionable without pretending
+        # the fallback generated a reply or erasing provider-bound history.
+        envelope.update({
+            'fallbackDetail': str(blocked_error),
+            'fallbackFailureStage': blocked_error.stage,
+            'fallbackProviderReached': False,
+        })
     for field in ('attempts', 'limit',
                   'credential_delivery_anomaly_attempts',
                   'credential_delivery_anomaly_limit'):
@@ -600,11 +629,13 @@ def _settle_failed_fallback(task, error, *, original_model, fallback_model,
         'assistant_msg': {'role': 'assistant', 'content': ''},
         'finish_reason': 'error',
         'usage': None,
-        'model': fallback_model,
+        'model': original_model if blocked_error is not None else fallback_model,
         'preset': preset,
         'thinking_enabled': thinking_enabled,
         '_loop_action': 'break',
-        '_loop_exit_reason': f'both_models_failed_round_{round_num}',
+        '_loop_exit_reason': (
+            f'fallback_unrepresentable_round_{round_num}' if blocked_error is not None
+            else f'both_models_failed_round_{round_num}'),
     }
 
 
@@ -792,6 +823,8 @@ def _llm_call_with_fallback(task, body, model, round_num, max_tokens,
                     api_rounds.append({'round': round_num + 1, 'model': model,
                                        'usage': project_usage_for_round_record(charge),
                                        'tag': tag, 'responseAuthoring': False})
+            e._user_message = format_llm_error_for_user(
+                e, model=model, context='request-rejected', source='llm-stream')
             raise
         # AbortedError must escape — never fallback/retry on user abort
 
@@ -939,22 +972,43 @@ def _llm_call_with_fallback(task, body, model, round_num, max_tokens,
                              tid, _attr_err)
             raise
 
-        # Local request construction failed before provider ingress. This is
-        # our defect, not model availability; rotating models only hides the
-        # cause and spends unrelated capacity.
+        # Local request construction failed before provider ingress. A
+        # deterministic body/contract defect is OUR bug — rotating models
+        # only hides it and spends unrelated capacity. But a SUBSCRIPTION
+        # CREDENTIAL / source outage (the ``__cause__`` chain names a typed
+        # subscription error) is model-scoped availability, not a payload
+        # defect: another model/provider can serve the same payload. After
+        # the same-credential recovery budget is exhausted
+        # (``stream_with_credential_recovery``), rotate like any other
+        # primary-model failure.
         if _is_local_request_preparation_error(e):
-            logger.error(
-                '[%s] Local request preparation failed on model=%s at %s — '
-                'NOT switching models or attempting pool rescue',
-                tid, model, getattr(e, 'stage', 'request_prepare'))
-            try:
-                e._user_message = format_llm_error_for_user(  # type: ignore[attr-defined]
-                    e, model=model, context='request-prepare',
-                    source='llm-stream')
-            except Exception as attribute_error:
-                logger.debug('[%s] Could not attach _user_message: %s',
-                             tid, attribute_error)
-            raise
+            from lib.llm.llm_errors import (
+                SubscriptionCredentialUnavailableError,
+                SubscriptionLoginRequiredError,
+            )
+            _cred_cause = e.__cause__
+            _credential_unavailable = isinstance(
+                _cred_cause,
+                (SubscriptionCredentialUnavailableError,
+                 SubscriptionLoginRequiredError))
+            if not _credential_unavailable:
+                logger.error(
+                    '[%s] Local request preparation failed on model=%s at %s — '
+                    'NOT switching models or attempting pool rescue',
+                    tid, model, getattr(e, 'stage', 'request_prepare'))
+                try:
+                    e._user_message = format_llm_error_for_user(  # type: ignore[attr-defined]
+                        e, model=model, context='request-prepare',
+                        source='llm-stream')
+                except Exception as attribute_error:
+                    logger.debug('[%s] Could not attach _user_message: %s',
+                                 tid, attribute_error)
+                raise
+            logger.warning(
+                '[%s] Subscription credential unavailable on model=%s '
+                '(reason=%s) — rotating like a primary-model failure',
+                tid, model,
+                getattr(_cred_cause, 'reason', type(_cred_cause).__name__))
 
         # Deterministic request rejection — never switch models or attempt a
         # pool-wide rescue. A 400/404/422 says the payload/route is invalid;
@@ -1093,6 +1147,10 @@ def _llm_call_with_fallback(task, body, model, round_num, max_tokens,
                 and not model_supports_vision(_FALLBACK_MODEL))
             else ''
         )
+        # A rebuilt fallback is another admission, unlike a transport resend of
+        # an already frozen body. Compaction may have partially changed messages.
+        from lib.tasks_pkg.context_composer.turn_requirements import refresh_turn_requirements
+        refresh_turn_requirements(messages, task=task, model=_FALLBACK_MODEL)
         fallback_body = build_body(
             _FALLBACK_MODEL, messages,
             reasoning_intent=body.get('_reasoning_intent'),
@@ -1224,6 +1282,20 @@ def _llm_call_with_fallback(task, body, model, round_num, max_tokens,
                 return _finish_local_memory_pressure(
                     task, e2, _FALLBACK_MODEL, 'medium', True, round_num)
 
+            if (isinstance(e2, ProtocolConversionError)
+                    and e2.code == 'mandatory_continuity_unrepresentable'
+                    and not e2.provider_reached):
+                _clear_failed_fallback_stamp(task)
+                logger.warning(
+                    '[%s] Fallback %s cannot represent native continuity; '
+                    'preserving the primary failure from %s',
+                    tid, _FALLBACK_MODEL, original_model)
+                return _settle_failed_fallback(
+                    task, e, original_model=original_model,
+                    fallback_model=_FALLBACK_MODEL, preset=preset,
+                    thinking_enabled=thinking_enabled, round_num=round_num,
+                    blocked_error=e2)
+
             # Pool-wide last resort (owner directive 2026-08-03) — the
             #   configured fallback dying must not kill the turn while the
             #   pool still has healthy (key, model) slots. EXCEPTION (owner
@@ -1231,8 +1303,19 @@ def _llm_call_with_fallback(task, body, model, round_num, max_tokens,
             #   failure is waitable, not proof any model is dead — the
             #   rescue's arbitrary-pool-model pick is the silent switch the
             #   user forbade. Fall through to the honest error envelope.
+            # A subscription-credential outage is model-scoped availability,
+            # so pool rescue applies; a genuine local payload defect stays
+            # non-rotatable (it would only replay the same bug elsewhere).
+            from lib.llm.llm_errors import (
+                SubscriptionCredentialUnavailableError as _SCUE,
+                SubscriptionLoginRequiredError as _SLRE,
+            )
+            _rescue_blocked = (
+                _is_local_request_preparation_error(e2)
+                and not isinstance(getattr(e2, '__cause__', None),
+                                   (_SCUE, _SLRE)))
             if (not _fb_disabled_by_request and not _is_gateway_error(e2)
-                    and not _is_local_request_preparation_error(e2)
+                    and not _rescue_blocked
                     and not _is_request_payload_error(e2)):
                 _rescue = _attempt_pool_rescue(
                     task, fallback_body, round_num, max_tokens, tool_list,

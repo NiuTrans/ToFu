@@ -1,7 +1,7 @@
 const {test}=require('node:test');const assert=require('node:assert/strict');
 const fs=require('node:fs'),path=require('node:path'),ts=require('typescript'),{JSDOM}=require('jsdom');
 function load(name,parent=path.resolve(__dirname,'..','index.ts')){
- const full=path.resolve(path.dirname(parent),name+'.ts'),exports={};
+ let full=path.resolve(path.dirname(parent),name+'.ts');if(!fs.existsSync(full))full=path.join(full.slice(0,-3),'index.ts');const exports={};
  const js=ts.transpileModule(fs.readFileSync(full,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText;
  new Function('require','exports',js)(name=>name.endsWith('/i18n')?{t:k=>k}:load(name,full),exports);return exports;
 }

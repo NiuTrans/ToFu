@@ -79,6 +79,22 @@ _JS_PHASE_RE = re.compile(
 # scan fails on any value not in this set and not in the registry, so a NEW
 # out-of-channel use must be justified here.
 _NON_PHASE_EVENT_VALUES: dict[str, str] = {
+    'intent': 'root tool-attempt observation intent',
+    'not_entered': 'root tool-attempt admission receipt',
+    'refresh': 'OAuth credential operation',
+    'checkpoint': 'project delivery receipt stage',
+    'no_changes': 'project delivery receipt stage',
+    'integration': 'project delivery receipt stage',
+    'adoption': 'project delivery receipt stage',
+    'workspace_adoption': 'project delta delivery receipt stage',
+    'dispatch_intent': 'research model-attempt journal',
+    'executor_exception': 'task fault-attribution stage',
+    'executor_returned': 'task fault-attribution stage',
+    'skipped': 'memory-prefetch trace stage',
+    'model_in_flight': 'root execution-budget checkpoint',
+    'tools_in_flight': 'root execution-budget checkpoint',
+    'serializing': 'JavaScript executor internal lifecycle',
+
 
     # Restart pause belongs to SWARM_PHASE/SWARM_AGENT_PHASE, not chat PHASE.
     'interrupted': 'restart-suspended swarm lifecycle state',
@@ -147,7 +163,7 @@ _NON_PHASE_EVENT_VALUES: dict[str, str] = {
     # stalled/timeout/no_progress rows carved out above.
     'pending': 'swarm_agent_phase retry wait row',
     # PostgreSQL adapter transaction-stage label — a local variable in
-    # lib/storage_sidecar/adapters/postgres.py used for sqlstate failure
+    # lib/storage_authority_sql/adapters/postgres.py used for sqlstate failure
     # classification and COMMIT-phase replay gating, never emitted on
     # EventType.PHASE.
     'execute': 'postgres adapter transaction stage',
@@ -158,6 +174,7 @@ _NON_PHASE_EVENT_VALUES: dict[str, str] = {
 
 # Frontend ``.phase === "x"`` values that are NOT pushed PHASE values.
 _FRONTEND_PHASE_EXEMPTIONS: dict[str, str] = {
+    'pending': 'client-local context provenance disclosure status',
     # Derived CLIENT-side from thinking deltas (sse_pipeline.js /
     # streaming_render.js → setStreamPhase) — never pushed by the backend.
     'thinking_active': 'client-local derived phase state',

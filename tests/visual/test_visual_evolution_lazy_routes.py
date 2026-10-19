@@ -27,10 +27,42 @@ def _open(page, origin):
     from tests.conftest import _dismiss_onboarding_modals
     from playwright.sync_api import expect
     _fixture_reads(page)
-    page.goto(origin)
+    page.goto(origin + '/#/evolution/programs')
     _dismiss_onboarding_modals(page)
-    page.locator('#evolutionBtn').click()
     expect(page.locator('.exp-create-form')).to_be_visible(timeout=20000)
+
+
+@pytest.mark.parametrize('width', [390, 1536])
+def test_default_entry_is_interactive_studio_without_setup_modal(browser, live_server, width, tmp_path):
+    from playwright.sync_api import expect
+    from tests.conftest import _dismiss_onboarding_modals
+    page = browser.new_page(viewport={'width': width, 'height': 1024})
+    page.add_init_script("localStorage.setItem('tofu_onboarding_v1_done', '1')")
+    errors, requests = [], []
+    page.on('pageerror', lambda error: errors.append(str(error)))
+    page.on('request', lambda request: requests.append(request.url))
+    try:
+        _fixture_reads(page)
+        page.goto(live_server)
+        _dismiss_onboarding_modals(page)
+        page.locator('#evolutionBtn').click()
+        expect(page.locator('.evo-studio')).to_be_visible(timeout=20000)
+        expect(page.locator('.evo-mission-hud')).to_be_visible()
+        expect(page.locator('.evo-office-live')).to_be_visible()
+        assert page.locator('wa-drawer[open]').count() == 0
+        assert not page.locator('.exp-create-form').count()
+        assert not any('/evolution/programs' in request for request in requests)
+        page.locator('.evo-mission-route li').nth(1).locator('button').click()
+        expect(page.locator('#evo-room-drawer')).to_have_attribute('open', '')
+        expect(page.locator('.evo-room-intro-actions button')).to_be_visible()
+        page.locator('.evo-room-intro-actions button').click()
+        expect(page.locator('#evo-objective')).to_be_focused()
+        assert page.locator('wa-drawer[open]').count() == 0
+        assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+        page.screenshot(path=str(tmp_path / f'studio-entry-{width}.png'), full_page=True)
+        assert not errors
+    finally:
+        page.close()
 
 
 def test_notebook_loads_no_studio_or_other_page_graph(browser, live_server):
@@ -45,9 +77,7 @@ def test_notebook_loads_no_studio_or_other_page_graph(browser, live_server):
         objective = page.locator('.exp-create-form [name=objective]')
         objective.fill('Retain the unsent notebook goal')
         page.evaluate("window.notebookForm=document.querySelector('.exp-create-form')")
-        # Re-enter through the same delegated action used by intent replay;
-        # the chat toolbar is hidden while this workspace is visible.
-        page.evaluate("document.getElementById('evolutionBtn').click()")
+        page.evaluate("location.hash='/evolution/programs/new'")
         expect(objective).to_have_value('Retain the unsent notebook goal')
         assert page.evaluate("document.querySelector('.exp-create-form') === window.notebookForm")
         requested = lambda key: any(url.endswith('/' + manifest[key]['file']) for url in requests)

@@ -18,9 +18,9 @@ build_request_body: BodyBuilder = build_body
 
 def rerun_task(task: dict[str, Any]) -> None:
     """Start one whole-turn retry through the canonical run implementation."""
-    from lib.tasks_pkg.orchestrator._run import run_task
+    from lib.tasks_pkg.invocation import execute_invocation, ROOT_INVOCATION_POLICY
 
-    run_task(task)
+    execute_invocation(task, policy=task.get('_invocationPolicy') or ROOT_INVOCATION_POLICY)
 
 
 __all__ = ('build_request_body', 'rerun_task')

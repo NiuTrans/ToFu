@@ -22,6 +22,7 @@ export interface ExplorationHypothesis {
 }
 export type ProgramAdvanceMode = 'continuous' | 'checkpoint';
 export interface CreateProgramBody {
+  executor_schema_budget_tokens?: number;
   objective: string; research_source?: {task_id: string; idea_id: string}; acceptance?: string[]; steps?: ExplorationStep[];
   auto_replan?: boolean;
   advance_mode?: ProgramAdvanceMode;
@@ -39,7 +40,7 @@ export interface ExplorationProgram {
   replan_proposal?: ReplanProposal;
   actuals_complete?: boolean;
   tool_calls_complete?: boolean;
-  execution_options?: Pick<CreateProgramBody, 'project_path' | 'budget' | 'review_reserve' | 'model' | 'role_models' | 'max_attempts' | 'max_review_recoveries' | 'max_review_format_retries'>;
+  execution_options?: Pick<CreateProgramBody, 'executor_schema_budget_tokens' | 'project_path' | 'budget' | 'review_reserve' | 'model' | 'role_models' | 'max_attempts' | 'max_review_recoveries' | 'max_review_format_retries'>;
   current: {sequence: number; step: ExplorationStep; payload: CreateRunBody; context_seed: string; run_id: string; deadline_at: number | null; cancellation_accounting?: {actuals: EvolutionRun['actuals']; prior_complete: boolean}} | null;
   settled_through: number; actuals: EvolutionRun['actuals']; error: string;
   created_at: number; updated_at: number;

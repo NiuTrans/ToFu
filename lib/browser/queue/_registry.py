@@ -10,7 +10,7 @@ import time
 from lib.log import get_logger
 
 from ._state import (
-    _clients, _clients_lock, _commands, _commands_lock, _STALE_GRACE,
+    _clients, _clients_lock, _clients_changed, _commands, _commands_lock, _STALE_GRACE,
     _locked_out, _locked_out_lock,
     _incompatible_clients, _incompatible_clients_lock,
 )
@@ -111,6 +111,8 @@ def mark_poll(client_id, *, owner_user_id, protocol_version, capabilities,
             _quota = _normalize_credit_hub_quota(credit_hub_quota)
             if _quota:
                 row['credit_hub_quota'] = _quota
+    with _clients_changed:
+        _clients_changed.notify_all()
     with _locked_out_lock:
         for recovery_key in [
             key for key in _locked_out if key[1] == client_id
@@ -301,6 +303,35 @@ def get_connected_clients(*, owner_user_id: str | None):
             if (client.get('owner_user_id') or '') == wanted_owner
         ]
     return out
+
+
+def wait_for_connected_clients(*, owner_user_id, client_id=None, timeout=0,
+                               cancellation=None):
+    """Wait only for an authenticated route before any command is enqueued.
+
+    This borrows the invoking tool thread, creates no worker/timer, and never
+    changes grants or replays a command. Poll registration wakes the wait.
+    """
+    import math
+    if not math.isfinite(timeout) or timeout < 0:
+        raise ValueError('Browser connection wait must be finite and nonnegative')
+    owner_user_id = str(owner_user_id or '').strip()
+    if not owner_user_id.isdigit() or int(owner_user_id) < 1:
+        raise ValueError('Browser connection wait requires an authenticated owner')
+    deadline = time.monotonic() + timeout
+    with _clients_changed:
+        while True:
+            if cancellation is not None and cancellation.is_set():
+                return []
+            clients = get_connected_clients(owner_user_id=owner_user_id)
+            if client_id:
+                clients = [row for row in clients if row['client_id'] == str(client_id)]
+            if clients:
+                return clients
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return []
+            _clients_changed.wait(min(remaining, 0.1) if cancellation is not None else remaining)
 
 
 def get_credit_hub_quota(*, owner_user_id):

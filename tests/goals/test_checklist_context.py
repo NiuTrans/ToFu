@@ -7,7 +7,7 @@ import json
 
 import pytest
 
-from lib.llm_errors import PromptTooLongError
+from lib.llm.llm_errors import ContextCompactionError, PromptTooLongError
 from lib.tasks_pkg.compaction import _prompt_admission as admission
 from lib.tasks_pkg.context_composer.checklist import CHECKLIST_HEADING
 from lib.tools import todo
@@ -102,7 +102,7 @@ def test_required_checklist_overflow_refuses_instead_of_dispatching_partial_stat
     _measure_chars(monkeypatch, ceiling=20)
     monkeypatch.setattr(admission, 'force_compact_if_needed', lambda *a, **k: False)
 
-    with pytest.raises(PromptTooLongError):
+    with pytest.raises(ContextCompactionError):
         _admit(messages, task)
 
     _assert_current(messages, task)

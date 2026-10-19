@@ -4,13 +4,13 @@ import sqlite3
 
 import pytest
 
-from lib.storage_sidecar.tofudb_migration_coverage import source_table_coverage
-from lib.storage_sidecar.tofudb_migration_project_brain import (
+from lib.storage_authority_sql.migration.tofudb_migration_coverage import source_table_coverage
+from lib.storage_authority_sql.migration.tofudb_migration_project_brain import (
     CONSUMED_TABLES,
     consumed_populated_tables,
     fold_legacy_projections,
 )
-from lib.storage_sidecar.tofudb_migration_source import SQLiteMigrationSource
+from lib.storage_authority_sql.migration.tofudb_migration_source import SQLiteMigrationSource
 
 pytestmark = pytest.mark.unit
 
@@ -149,3 +149,17 @@ INSERT INTO project_events VALUES (1);
         broken = source_table_coverage(source, _cutover_plan(['project_events']))
         assert broken['sourceTableCoverageComplete'] is False
         assert broken['legacyCutoverVerificationFailed'] is True
+
+
+def test_legacy_watch_fold_keeps_every_record_above_the_former_tail_limit(tmp_path):
+    path = _source(tmp_path, _WATCH_SCHEMA)
+    with sqlite3.connect(path) as connection:
+        connection.executemany("INSERT INTO storage_watch_items VALUES (?,?,?,?,?,?,?,?,?,?,?)",[
+            (f"watch-{n:04}","/complete","concern",f"intent-{n}","open",0,"","conversation",n,n,1) for n in range(151)
+        ])
+    with SQLiteMigrationSource(path) as source:
+        rows = list(fold_legacy_projections(source,now_ms=1000))
+    assert len(rows) == 1
+    watch = rows[0]["projection"]["watch"]
+    assert len(watch) == 151
+    assert {item["id"] for item in watch} == {f"watch-{n:04}" for n in range(151)}

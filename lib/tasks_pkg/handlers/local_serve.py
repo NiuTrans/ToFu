@@ -15,7 +15,7 @@ from lib.local_serve.tool_defs import LOCAL_SERVE_TOOL_NAMES
 from lib.log import get_logger
 from lib.tasks_pkg.executor import _build_simple_meta, _finalize_tool_round
 from lib.tasks_pkg.executor import tool_registry
-from lib.tool_rejection import stamp_tool_rejection
+from lib.tool_results.tool_rejection import stamp_tool_rejection
 
 logger = get_logger(__name__)
 

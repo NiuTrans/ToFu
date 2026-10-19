@@ -57,7 +57,7 @@ APP_MODEL_RPM_BODY = (
 
 
 def _classify(err_msg):
-    from lib.llm_errors import _classify_http_error, RateLimitError
+    from lib.llm.llm_errors import _classify_http_error, RateLimitError
     with pytest.raises(RateLimitError) as ei:
         _classify_http_error(429, err_msg, 'kimi-k3', '[t]')
     return ei.value
@@ -210,7 +210,7 @@ class TestDispatchLoopIntegration:
     def test_contention_429_then_success_feeds_nothing(
             self, monkeypatch, key_stats_recorders):
         from lib.llm_dispatch import api
-        from lib.llm_errors import RateLimitError
+        from lib.llm.llm_errors import RateLimitError
         from tests.providers.test_vendor_transient_dispatch import (
             _FakeDispatcher, _make_slot)
 

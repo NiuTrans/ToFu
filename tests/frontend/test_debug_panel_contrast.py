@@ -68,7 +68,7 @@ def _theme_block(css: str, theme: str, token: str) -> str:
     else:
         pattern = r'\[data-theme="' + theme + r'"\]\{(.*?)\n\}'
     for m in re.finditer(pattern, css, re.S):
-        if token in m.group(1):
+        if re.search(re.escape(token) + r'\s*:', m.group(1)):
             return m.group(1)
     raise AssertionError(f'{theme} token block not found')
 
@@ -77,9 +77,8 @@ def _theme_bg(css: str, theme: str) -> str:
     """The --bg-secondary of one theme — the ground .ri-state-panel and the
     .ri-drawer are both painted on, so it is the correct comparison surface."""
     block = _theme_block(css, theme, '--bg-secondary')
-    bg = re.search(r'--bg-secondary\s*:\s*(#[0-9a-fA-F]{3,6})', block)
-    assert bg, f'{theme} does not declare --bg-secondary'
-    return bg.group(1)
+    assert '--bg-secondary' in block
+    return _resolve(css, theme, 'var(--bg-secondary)')
 
 
 def _resolve(css: str, theme: str, value: str) -> str:
@@ -212,12 +211,12 @@ def test_theme_secondary_token_clears_aa_on_the_panel_ground():
     css = _read(_STYLES)
     for theme in ('dark', 'light', 'tofu'):
         block = _theme_block(css, theme, '--text-secondary')
-        sec = re.search(r'--text-secondary\s*:\s*(#[0-9a-fA-F]{3,6})', block)
-        assert sec, f'{theme} does not declare --text-secondary'
+        assert '--text-secondary' in block
+        sec = _resolve(css, theme, 'var(--text-secondary)')
         bg = _theme_bg(css, theme)
-        ratio = _contrast(sec.group(1), bg)
+        ratio = _contrast(sec, bg)
         assert ratio >= _AA, (
-            f'{theme}: --text-secondary {sec.group(1)} on {bg} is '
+            f'{theme}: --text-secondary {sec} on {bg} is '
             f'{ratio:.2f}:1, below AA {_AA}:1')
 
 

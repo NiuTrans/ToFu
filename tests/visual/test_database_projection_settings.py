@@ -86,7 +86,9 @@ def test_database_projection_paths_and_sqlite_toggle_in_real_browser(page, live_
     assert page.locator('#dbFastPathToggle').is_visible()
     assert not page.locator('#dbFastPathToggle').is_checked()
     assert page.locator('#dbFastPathToggle').is_enabled()
-    assert page.locator('#dbFastPathField').is_visible()
+    # An off Fast Path has no candidate rows; the editable directory remains
+    # available without rendering a decorative empty picker box.
+    assert page.locator('#dbFastPathCustom').is_visible()
     assert page.locator('#dbSearchProjectionCustom').is_enabled()
     page.locator('#dbSearchProjectionCustom').fill('/tmp/native-index')
     page.locator('#dbSearchProjectionApply').click()
@@ -231,3 +233,159 @@ def test_native_fastpath_pending_and_locked_state_is_separate_from_index(page, l
     assert 'fastpath-export' in text
     assert '/network/data/tofudb-fastpath-shadow/namespace' in text
     page.screenshot(path=str(Path(screenshot_dir) / 'database-native-fastpath-locked.png'))
+
+
+def _database_text_contrast(page):
+    return page.locator('''#settingsTab_database .settings-section-title,
+        #settingsTab_database .db-save-note, #settingsTab_database .db-card-title,
+        #settingsTab_database .db-meta-label, #settingsTab_database .db-config-status,
+        #settingsTab_database .db-disclosure-action, #dbEngineState''').evaluate_all(r'''elements => {
+      const color = value => {
+        const values = value.match(/[\d.]+/g).map(Number);
+        return [...values.slice(0,3).map(v => value.startsWith('color(srgb') ? v : v / 255), values[3] ?? 1];
+      };
+      const blend = (fg,bg) => fg.slice(0,3).map((v,i) => v * fg[3] + bg[i] * (1 - fg[3]));
+      const background = el => {
+        if (!el) return [1,1,1];
+        const c = color(getComputedStyle(el).backgroundColor);
+        return c[3] === 1 ? c.slice(0,3) : blend(c,background(el.parentElement));
+      };
+      const luminance = c => c.map(v => v <= .04045 ? v / 12.92 : ((v + .055) / 1.055) ** 2.4)
+        .reduce((sum,v,i) => sum + v * [.2126,.7152,.0722][i],0);
+      return elements.filter(el => el.getClientRects().length && getComputedStyle(el).visibility !== 'hidden')
+        .map(el => {
+          const bg = background(el), fg = blend(color(getComputedStyle(el).color),bg);
+          const a = luminance(fg), b = luminance(bg);
+          return {text:el.textContent, ratio:(Math.max(a,b)+.05)/(Math.min(a,b)+.05)};
+        });
+    }''')
+
+
+@pytest.mark.parametrize('theme', ['tofu', 'light', 'dark'])
+@pytest.mark.parametrize('language', ['zh', 'en'])
+def test_database_layout_keyboard_and_read_only_refresh(
+    page, live_server, screenshot_dir, assert_no_js_errors, theme, language,
+):
+    """Consistent summaries, exact evidence and drafts at every supported width."""
+    status = _status('tofudb')
+    long_path = '/network/' + 'long-authority-segment/' * 12 + 'tofudb'
+    status['engine']['authorityPath'] = long_path
+    counts = {'status': 0, 'paths': 0}
+    mutations = []
+
+    def database_response(route):
+        if route.request.method != 'GET':
+            mutations.append(route.request.url)
+            route.fulfill(status=403, json={'error': 'Writes forbidden in layout test'})
+        elif '/status' in route.request.url:
+            counts['status'] += 1
+            route.fulfill(json=status)
+        elif '/paths' in route.request.url:
+            counts['paths'] += 1
+            route.fulfill(json={'candidates': []})
+        else:
+            route.fulfill(status=404, json={'error': 'Unexpected database read'})
+
+    page.route('**/api/v4/database/**', database_response)
+    page.add_init_script(f"""localStorage.setItem('tofu_onboarding_v1_done','1');
+      localStorage.setItem('tofu_ui_lang', {language!r});
+      localStorage.setItem('claude_ui_theme', {theme!r});""")
+    page.set_viewport_size({'width': 1440, 'height': 1000})
+    page.goto(live_server, wait_until='networkidle')
+    page.wait_for_function("typeof window.openSettings === 'function' && typeof window.switchSettingsTab === 'function'")
+    page.evaluate("() => { window.openSettings(); window.switchSettingsTab('database'); }")
+    page.wait_for_function("document.querySelector('#dbEngineName').textContent === 'TofuDB'")
+
+    assert page.locator('html').get_attribute('data-theme') == theme
+    assert page.locator('#settingsTab_database details[open]').count() == 0
+    assert counts['paths'] == 0 and not mutations
+    assert page.locator('#dbPathCurrent .db-overview-item').count() == 2
+
+    for editor in ('dbFastPathCustom', 'dbSearchProjectionCustom', 'dbBackupCustom'):
+        assert not page.locator('#' + editor).is_visible()
+    collapsed_heights = {}
+    contrast = _database_text_contrast(page)
+    assert contrast and all(row['ratio'] >= 4.5 for row in contrast), contrast
+    page.screenshot(path=str(Path(screenshot_dir) / f'database-{theme}-{language}-summary.png'))
+
+    for width in (1280, 768, 390, 320):
+        page.set_viewport_size({'width': width, 'height': 1000})
+
+        collapsed_heights[width] = page.locator('#dbPathCard').evaluate('(el) => el.getBoundingClientRect().height')
+        assert not page.locator('#settingsTab_database').evaluate('(el) => el.scrollWidth > el.clientWidth + 2')
+        summaries = page.locator('.db-config-summary').evaluate_all('''(rows) => rows.map(el => {
+          const r=el.getBoundingClientRect();
+          return {height:r.height, children:[...el.children].map(child => {
+            const c=child.getBoundingClientRect();
+            return c.left >= r.left-1 && c.right <= r.right+1;
+          })};
+        })''')
+        assert all(row['height'] >= 44 and all(row['children']) for row in summaries)
+    page.screenshot(path=str(Path(screenshot_dir) / f'database-{theme}-{language}-mobile.png'))
+
+    # Native keyboard disclosure must work even after custom summary styling.
+    storage = page.locator('#dbStorageDisclosure > summary')
+    storage.focus()
+    storage.press('Enter')
+    assert page.locator('#dbEngineMeta').is_visible()
+    assert long_path in page.locator('#dbEngineMeta').inner_text()
+    assert counts['paths'] == 0
+    for name in ('dbFastPathDisclosure', 'dbSearchProjectionDisclosure', 'dbBackupDisclosure'):
+        summary = page.locator('#' + name + ' > summary')
+        summary.focus()
+        summary.press('Space')
+        page.wait_for_function('(id) => document.getElementById(id).open', arg=name)
+    assert counts['paths'] == 1
+    draft = '/draft/search-index-base'
+    page.locator('#dbSearchProjectionCustom').fill(draft)
+
+    # Collapsing a native disclosure must reclaim space without losing an
+    # unapplied edit or performing an implicit save / candidate rescan.
+    projection_summary = page.locator('#dbSearchProjectionDisclosure > summary')
+    expanded_height = page.locator('#dbPathCard').evaluate('(el) => el.getBoundingClientRect().height')
+    projection_summary.focus()
+    projection_summary.press('Enter')
+    assert not page.locator('#dbSearchProjectionCustom').is_visible()
+    assert page.locator('#dbPathCard').evaluate('(el) => el.getBoundingClientRect().height') < expanded_height
+    projection_summary.press('Enter')
+    assert page.locator('#dbSearchProjectionCustom').is_visible()
+    assert page.locator('#dbSearchProjectionCustom').input_value() == draft
+    assert counts['paths'] == 1 and not mutations
+    before_refresh = counts['status']
+    page.locator('#dbPathRefresh').click()
+    page.wait_for_function("document.querySelector('#settingsTab_database').getAttribute('aria-busy') === 'false'")
+    assert counts['status'] == before_refresh + 1
+    assert page.locator('#dbSearchProjectionCustom').input_value() == draft
+    assert page.locator('#settingsTab_database details[open]').count() == 4
+    assert counts['paths'] == 1 and not mutations
+    for width in (1440, 390, 320):
+        page.set_viewport_size({'width': width, 'height': 1000})
+        assert not page.locator('#settingsTab_database').evaluate('(el) => el.scrollWidth > el.clientWidth + 2')
+
+        if width in collapsed_heights:
+            assert page.locator('#dbPathCard').evaluate('(el) => el.getBoundingClientRect().height') > collapsed_heights[width]
+        # Also verify individual controls remain inside the viewport after
+        # scrolling them into view, not only the panel's scroll dimensions.
+        for control in ('dbSearchProjectionCustom', 'dbSearchProjectionApply', 'dbPathRefresh'):
+            locator = page.locator('#' + control)
+            locator.scroll_into_view_if_needed()
+            assert locator.evaluate('''el => {
+                const rect = el.getBoundingClientRect();
+                return rect.width > 0 && rect.left >= -1 && rect.right <= innerWidth + 1;
+            }'''), f'{control} must remain reachable at {width}px'
+        if width == 390:
+            page.locator('#dbSearchProjectionCustom').scroll_into_view_if_needed()
+            page.screenshot(path=str(Path(screenshot_dir) / f'database-{theme}-{language}-expanded-mobile.png'))
+    page.set_viewport_size({'width': 1440, 'height': 1000})
+    page.screenshot(path=str(Path(screenshot_dir) / f'database-{theme}-{language}-expanded.png'))
+
+    status['fastpath'].update(active=True, enabled=True, locked=True,
+                             restartRequired=True, lockReason='Offline export required: ' + long_path)
+    page.locator('#dbPathRefresh').click()
+    page.wait_for_function("document.querySelector('#dbFastPathLockSummary').textContent.includes('Offline export required')")
+    page.set_viewport_size({'width': 390, 'height': 844})
+    assert page.locator('#dbFastPathLockSummary').is_visible()
+    assert page.locator('#dbFastPathToggle').is_disabled()
+    assert page.locator('#dbFastPathStatus').evaluate('(el) => el.scrollHeight <= el.clientHeight + 1')
+    assert not page.locator('#settingsTab_database').evaluate('(el) => el.scrollWidth > el.clientWidth + 2')
+    assert not mutations

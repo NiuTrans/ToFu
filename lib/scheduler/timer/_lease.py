@@ -23,7 +23,7 @@ WATCHER_LEASE_TTL = 120.0
 
 
 def _store():
-    from lib.runtime_state_store import get_store
+    from lib.runtime.runtime_state_store import get_store
     return get_store()
 
 

@@ -94,7 +94,7 @@ def test_instance_lock_precedes_every_database_backed_import():
     with open(source, encoding='utf-8') as f:
         text = f.read()
     acquire = text.index('mark_booting=True')
-    assert acquire < text.index('from lib.log_aggregates import')
+    assert acquire < text.index('from lib.logging_pkg.log_aggregates import')
     # Storage startup belongs to the production lifecycle, after the instance
     # lock. Keep the assertion on ordering instead of a retired import string.
 

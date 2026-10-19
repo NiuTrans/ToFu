@@ -120,3 +120,46 @@ def test_authcontext_admin_implicitly_grants_closed_scopes():
     assert context.has_scope('chat')
     assert context.has_scope('tasks')
     assert context.has_scope('agents:trading')
+
+
+def test_new_and_historical_credentials_have_unrestricted_request_throughput(monkeypatch):
+    from lib.api_keys import create_key, validate_token
+    from lib.rate_limit.rate_limit_api import check_request
+    import lib.rate_limit.rate_limit_store as store
+    monkeypatch.setattr(store, 'get_token_bucket_store',
+                        lambda: pytest.fail('uncapped credential initialized a quota backend'))
+    for rpm in (None, 1, 60):
+        options = {} if rpm is None else {'rate_limit_rpm': rpm}
+        row, token = create_key(name='throughput', scopes=['chat'],
+                                owner_user_id=OWNER, **options)
+        assert row['rate_limit_rpm'] == (0 if rpm is None else rpm)
+        context = validate_token(token)
+        assert context is not None
+        assert all(check_request(context, request_cost=4097).allowed
+                   for _ in range(4097))
+
+
+def test_http_key_creation_defaults_to_no_request_quota(monkeypatch):
+    import asyncio
+    import inspect
+    from quart import Quart, g
+    from lib.api_keys import local_admin_context
+    import routes.api_v1.keys as keys
+    observed = []
+    def create(**fields):
+        observed.append(fields)
+        return {'id': 'synthetic-key', 'name': fields['name']}, 'synthetic-token'
+    monkeypatch.setattr(keys, 'create_key', create)
+    app = Quart(__name__)
+    async def run():
+        async with app.test_request_context('/api/v4/keys', method='POST',
+                json={'name': 'throughput', 'scopes': ['chat']}):
+            g.auth_ctx = local_admin_context()
+            result = await app.ensure_async(inspect.unwrap(keys.create_key_route))()
+            assert result is not None
+    asyncio.run(run())
+    assert observed[0]['rate_limit_rpm'] == 0
+    metadata = keys.create_key_route._api_meta
+    property_schema = metadata['request_body']['content']['application/json']['schema']['properties']['rate_limit_rpm']
+    assert property_schema['default'] == 0
+    assert property_schema['deprecated'] is True

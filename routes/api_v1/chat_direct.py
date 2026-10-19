@@ -15,22 +15,22 @@ The dispatch is a background ``asyncio.Task`` and an async generator drains the
 queue into SSE frames; completion flushes the queue, emits the terminal frame,
 and closes with ``[DONE]``.
 
-Deliberate scope (NOT a replacement for /chat/completions)
-----------------------------------------------------------
-This is a single-turn, loop-resident streaming relay: NO tool loop, NO MCP, NO
-multi-round orchestration, NO task-replay/abort handle. Those require the full
-orchestrator, which is correctly thread-based. Callers needing tools/replay use
-``/chat/completions``. This endpoint is for low-latency, pure-text (± thinking)
-streaming that benefits from staying on the loop. It shares authenticated v2
-model routing, provider isolation, billing settlement, usage accounting, and
-admission control with task-backed chat. A disconnected HTTP observer does not
-cancel an already-started dispatch; relay chunks are dropped while the provider
-response is consumed up to its finite request deadline.
+Tool ownership and request lifetime
+-----------------------------------
+``serve_direct_completion`` also serves explicit-client-tool OpenAI requests.
+Declarations and tool choice go to the selected provider; verified calls return
+to the client after settlement. No tool executor or continuation loop runs here.
+Native task-backed chat owns server tools, orchestration, task replay and abort.
+This service shares authenticated model routing, billing, usage and admission.
+A disconnected observer does not cancel a started dispatch: chunks are dropped
+while the provider response is consumed up to its finite request deadline.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
+import time
 
 from quart import Blueprint
 
@@ -49,7 +49,7 @@ from lib.agent_core.direct_stream import (
     run_direct_stream,
 )
 from lib.agent_core.sse_limit import limiter as sse_limiter
-from lib.api_response import api_bad_request, api_error, sse_response
+from lib.api_response import api_bad_request, api_error, api_payload, sse_response
 from lib.billing.request_flow import (
     estimate_prompt_tokens, release_reservation, reserve_for_task, settle_task,
 )
@@ -59,7 +59,7 @@ from lib.llm.stream_result import ProviderStreamResult
 from lib.log import audit_log, get_logger
 from lib.model_routing import ModelRoutingError
 from lib.openapi import api_meta
-from lib.rate_limit_api import record_tokens
+from lib.rate_limit.rate_limit_api import record_tokens
 from lib.request_parser import (
     async_parse_body, optional_dict, optional_int, optional_str, require_list,
 )
@@ -73,6 +73,7 @@ from .chat import _try_acquire_sse_slot, _validate_messages
 from routes.model_routing_adapter import (
     dispose_routed_slot_group,
     mint_native_request_route,
+    mint_compatible_request_route,
     routing_error_fields,
 )
 
@@ -107,6 +108,15 @@ api_v1_chat_direct_bp = Blueprint('api_v1_chat_direct', __name__)
 )
 async def chat_stream_direct():
     body = await async_parse_body()
+    return await serve_direct_completion(body)
+
+
+async def serve_direct_completion(body, *, compatibility=False):
+    """Share one authenticated dispatch/settlement owner across wire adapters.
+
+    Compatibility requests with explicit tools return their calls to the client;
+    native stream-direct remains an SSE-only, task-free execution surface.
+    """
     try:
         messages = _validate_messages(require_list(body, 'messages'))
     except ValueError as e:
@@ -114,7 +124,17 @@ async def chat_stream_direct():
     if not messages:
         return api_bad_request('messages is empty', field='messages')
 
-    cfg_in = optional_dict(body, 'config') or {}
+    client_tools = None
+    client_tool_choice = None
+    if compatibility:
+        from lib.compat.openai import translate_openai_request, validate_client_tools
+        try:
+            _, cfg_in, options = translate_openai_request(body)
+            client_tools, client_tool_choice = validate_client_tools(body)
+        except ValueError as error:
+            return api_bad_request(str(error))
+    else:
+        cfg_in = optional_dict(body, 'config') or {}
     timeout_s = optional_int(
         body, 'timeout_s', default=_DIRECT_DEFAULT_TIMEOUT_S,
         min=1, max=_DIRECT_MAX_TIMEOUT_S,
@@ -131,12 +151,15 @@ async def chat_stream_direct():
 
     route_group = None
     try:
+        route_options = ({'model_id': str(cfg_in.get('model') or ''), 'protocol': ''}
+                         if compatibility else {})
         model, model_selection, route_group = await asyncio.to_thread(
-            mint_native_request_route,
+            mint_compatible_request_route if compatibility else mint_native_request_route,
             body,
             owner_user_id=auth.owner_user_id,
             tenant_id=auth.tenant_id,
             owner_tag=f'direct-chat:{owner_user_id}',
+            **route_options,
         )
     except ModelRoutingError as exc:
         return api_bad_request(str(exc), **routing_error_fields(exc))
@@ -193,7 +216,7 @@ async def chat_stream_direct():
                 request_record,
                 user_id=billing_user_id,
                 model=cfg.get('model', '') or '',
-                prompt_tokens=estimate_prompt_tokens(messages),
+                prompt_tokens=estimate_prompt_tokens(messages, tools=client_tools),
                 max_completion_tokens=int(cfg.get('maxTokens') or 1024),
             )
         except InsufficientFunds as exc:
@@ -210,16 +233,30 @@ async def chat_stream_direct():
                 ExecutionPhase.FAILED, cause='billing_reservation_failed')
             raise
 
+    request_settlement = None
+    if request_record.get('_billing_reservation_micro', 0) > 0:
+        from lib.billing.request_settlement import RequestSettlement
+        request_settlement = RequestSettlement(request_id=request_record['id'],
+            owner=owner_user_id, wallet=billing_user_id, held=reservation_micro)
+
     terminal_metadata: dict = {}
 
     if billing_user_id:
         def _settle_direct_billing():
-            billing = settle_task(
-                request_record,
-                user_id=billing_user_id,
-                model=cfg.get('model', '') or '',
-                raise_on_error=True,
-            )
+            from lib.billing.request_settlement import IncompleteRequestUsage
+            try:
+                billing = request_settlement.settle() if request_settlement else settle_task(
+                    request_record,
+                    user_id=billing_user_id,
+                    model=cfg.get('model', '') or '',
+                    raise_on_error=True,
+                )
+            except IncompleteRequestUsage:
+                terminal_metadata['billing_status'] = 'pending_usage'
+                raise
+            except Exception:
+                terminal_metadata['billing_status'] = 'pending_settlement'
+                raise
             if billing:
                 terminal_metadata['billing'] = billing
             return billing
@@ -319,6 +356,9 @@ async def chat_stream_direct():
             return
         await asyncio.to_thread(_settle_dispatch_sync)
 
+    async def _protect_before_dispatch():
+        await asyncio.to_thread(request_settlement.protect)
+
     inner = run_direct_stream(
         messages,
         model=cfg.get('model', model or '?'),
@@ -331,7 +371,11 @@ async def chat_stream_direct():
         dispatch_terminal=dispatch_terminal,
         terminal_metadata=terminal_metadata,
         on_dispatch_started=_dispatch_started,
+        before_dispatch=_protect_before_dispatch if request_settlement else None,
+        model_budget_admit=request_settlement,
         on_dispatch_settled=_dispatch_settled,
+        client_tools=client_tools,
+        client_tool_choice=client_tool_choice,
     )
 
     async def _gen():
@@ -358,6 +402,31 @@ async def chat_stream_direct():
                 )
             sse_limiter.release(sse_slot_token)
 
+    if compatibility and not options['stream']:
+        wire_error = None
+        async for frame in _gen():
+            if frame.startswith('data: ') and frame.strip() != 'data: [DONE]':
+                value = json.loads(frame[6:])
+                if value.get('error'):
+                    wire_error = value
+        if wire_error is not None:
+            response, status = api_payload(wire_error, status=502)
+            response.status_code = status
+            response.headers['X-Tofu-Request-Id'] = request_record['id']
+            return response
+        result = dispatch_terminal['result']
+        from lib.compat.openai import build_direct_openai_response
+        payload = build_direct_openai_response(
+            result, model=cfg.get('model', model or '?'),
+            completion_id=completion_id, created=int(time.time()))
+        if terminal_metadata.get('billing'):
+            payload['billing'] = terminal_metadata['billing']
+        if terminal_metadata.get('billing_status'):
+            payload['billing_status'] = terminal_metadata['billing_status']
+        response, status = api_payload(payload)
+        response.status_code = status
+        response.headers['X-Tofu-Request-Id'] = request_record['id']
+        return response
     return sse_response(
         _gen(), extra_headers={'X-Tofu-Request-Id': request_record['id']})
 

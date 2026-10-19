@@ -6,6 +6,12 @@ This package owns one root agent loop and its per-turn/per-round coordination.
 Model transport, tools, compaction, persistence, and event vocabularies retain
 their separate owners.
 
+_tool_request_metadata owns shared task orchestration intent and bounded prompt
+latches for both adapters. _tool_assembly_prep.attach_gateway_contract_documents
+declares local gateway contracts without broadening nested execution authority.
+The same assembly owns initial visibility and admission estimates for every role;
+retain provider candidates for final wire projection and child policy snapshots.
+
 > **Name disambiguation**: this is the *task-turn root loop*
 > (`lib/tasks_pkg/orchestrator/`). It is NOT the durable orchestration-graph
 > owner — that is `lib/orchestration/` (definitions, runs, DAG runtime), a
@@ -40,3 +46,19 @@ tool settlement, event order/fold, cancellation, and turn-settlement neighbors.
 prepare_round_context/admit_round_context are shared by the default adapter and
 NativeContextPolicy. Verify ordered injection, child inbox scope, post-notice
 admission and verified/cancelled delivery confirmation; never fork this policy.
+
+_completion_projection.py owns final Request Inspector state snapshots shared
+with native execution. It never appends history, closes rounds or commits done.
+Preserve sanitization, tool/context metadata and best-effort publication; verify
+completion projection and root/native terminal retry tests.
+
+An explicit _nativePreparedInvocation hands the prepared RootLoopRequest to
+native task ownership. Skip Python loop/finalization after handoff; retain common
+teardown. Projected terminal failures propagate unchanged, and preterminal
+fatal writing disables whole-turn retry. Verify native-root-selection, failed
+invocation history, child and terminal tests; no default selection is implied.
+
+_completion_translation owns one final prose submission before terminal handoff.
+_post_commit owns shared acknowledged-terminal observers and heavy-field release;
+never invoke it from a projected/pending candidate. Verify native-completion
+retry/cancel tests, finalize tests, heavy-state release and actual native tasks.

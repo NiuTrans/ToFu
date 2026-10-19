@@ -181,6 +181,63 @@ class _RacyRepository(InMemoryModelRoutingRepository):
 
 class TestProvisioning(unittest.TestCase):
 
+    def test_new_catalog_window_replaces_inherited_model_fallback(self):
+        model = {'model_id': 'gpt-6-astra',
+                 'capabilities': ['text', 'vision', 'thinking'],
+                 'inherited_model_fields': ['context_window']}
+        with mock.patch('lib.oauth.codex_catalog.cached_codex_provider_models',
+                        side_effect=lambda: [dict(model)]):
+            self._run(outbound.provision_oauth_provider, 'codex')
+
+            def offering(document):
+                return next(o for o in document['offerings']
+                            if o.get('model', {}).get('model_id') == 'gpt-6-astra')
+
+            initial = self._load()
+            self.assertIn('context_window', offering(initial)['inherited_model_fields'])
+            models_before = initial['models']
+            model.update(context_window=272000, inherited_model_fields=[])
+            self._run(outbound.provision_oauth_provider, 'codex')
+            refreshed = self._load()
+            self.assertEqual(refreshed['models'], models_before)
+            self.assertEqual(offering(refreshed)['context_window'], 272000)
+            self.assertEqual(offering(refreshed)['catalog_context_window'], 272000)
+            self.assertNotIn('context_window', offering(refreshed)['inherited_model_fields'])
+            self.assertFalse(self._run(outbound.provision_oauth_provider, 'codex'))
+
+    def test_catalog_window_recovers_after_stale_model_limit_is_repaired(self):
+        model = {'model_id': 'gpt-6-astra',
+                 'capabilities': ['text', 'vision', 'thinking'],
+                 'inherited_model_fields': ['context_window']}
+        with mock.patch('lib.oauth.codex_catalog.cached_codex_provider_models',
+                        side_effect=lambda: [dict(model)]):
+            self._run(outbound.provision_oauth_provider, 'codex')
+
+            def set_model_window(window):
+                current = self.repository.get(self.boundary)
+                document = current.document
+                next(m for m in document['models']
+                     if m['model_id'] == 'gpt-6-astra')['context_window'] = window
+                self.repository.compare_and_swap(
+                    self.boundary, document, expected_revision=current.revision)
+
+            def offering():
+                return next(o for o in self._load()['offerings']
+                            if o.get('model', {}).get('model_id') == 'gpt-6-astra')
+
+            set_model_window(128000)
+            model.update(context_window=272000, inherited_model_fields=[])
+            self._run(outbound.provision_oauth_provider, 'codex')
+            self.assertEqual(offering()['context_window'], 128000)
+            self.assertEqual(offering()['catalog_context_window'], 128000)
+            # Catalog refresh cannot author official Model facts. Once the
+            # owner repairs those facts through registration, supply can grow.
+            set_model_window(1050000)
+            self._run(outbound.provision_oauth_provider, 'codex')
+            self.assertEqual(offering()['context_window'], 272000)
+            self.assertEqual(offering()['catalog_context_window'], 272000)
+            self.assertNotIn('context_window', offering()['inherited_model_fields'])
+
     def test_catalog_window_tracks_updates_but_preserves_owner_override(self):
         model = {'model_id': 'gpt-6.1-sol',
                  'capabilities': ['text', 'vision', 'thinking'],

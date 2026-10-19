@@ -39,23 +39,26 @@ import subprocess
 
 from lib.cgroup_guard import mem_limit_bytes, mem_usage_bytes
 from lib.log import get_logger
-from lib.runtime_paths import data_root
+from lib.runtime.runtime_paths import data_root
 
 logger = get_logger(__name__)
 
 __all__ = ['inspect_model_path', 'probe_hardware']
 
 _NVIDIA_SMI_TIMEOUT = 5
-_MAX_GGUF_KV = 10000        # metadata section is always far smaller; a bound, not an expectation
-_MAX_GGUF_KEY = 1024
-_MAX_GGUF_ARRAY = 1_000_000
-_MAX_GGUF_STRING = 1 << 20
 
 # GGUF metadata value type tags (little-endian section, gguf v3 layout).
 _GGUF_SCALAR_SIZE = {0: 1, 1: 1, 2: 2, 3: 2, 4: 4, 5: 4, 6: 4, 7: 1,
                      10: 8, 11: 8, 12: 8}
 _GGUF_FMT = {0: '<B', 1: '<b', 2: '<H', 3: '<h', 4: '<I', 5: '<i',
              6: '<f', 7: '<?', 10: '<Q', 11: '<q', 12: '<d'}
+
+# Dense-attention dimensions needed by resource-derived local launch planning.
+_GGUF_ATTENTION_FIELDS = ('block_count', 'embedding_length',
+                          'attention.head_count', 'attention.head_count_kv',
+                          'attention.key_length', 'attention.value_length')
+_GGUF_PLANNING_SUFFIXES = ('.context_length',) + tuple(
+    '.' + field for field in _GGUF_ATTENTION_FIELDS)
 
 # llama.cpp file_type enum → human quant label (common values only).
 _GGUF_FILE_TYPES = {
@@ -168,46 +171,60 @@ def _gguf_read(f, fmt: str):
     return struct.unpack(fmt, buf)[0]
 
 
-def _gguf_string(f, max_len: int) -> str:
-    n = _gguf_read(f, '<Q')
-    if n > max_len:
-        raise ValueError('string too long: %d' % n)
-    return f.read(n).decode('utf-8', 'replace')
+def _gguf_require_bytes(f, file_end: int, count: int) -> None:
+    """Reject truncated declarations before allocating, iterating or seeking."""
+    if count > file_end - f.tell():
+        raise ValueError('unexpected EOF')
 
 
-def _gguf_skip_value(f, vtype: int, depth: int = 0) -> None:
-    if depth > 2:
-        raise ValueError('nested array too deep')
-    if vtype == 8:
-        _gguf_string(f, _MAX_GGUF_STRING)
-        return
-    if vtype == 9:
-        etype = _gguf_read(f, '<I')
-        count = _gguf_read(f, '<Q')
-        if count > _MAX_GGUF_ARRAY:
-            raise ValueError('array too long: %d' % count)
-        if etype == 8:
-            for _ in range(count):
-                _gguf_string(f, _MAX_GGUF_STRING)
-        elif etype == 9:
-            for _ in range(count):
-                _gguf_skip_value(f, etype, depth + 1)
+def _gguf_skip_bytes(f, file_end: int, count: int) -> None:
+    _gguf_require_bytes(f, file_end, count)
+    f.seek(count, os.SEEK_CUR)
+
+
+def _gguf_string(f, file_end: int) -> str:
+    count = _gguf_read(f, '<Q')
+    _gguf_require_bytes(f, file_end, count)
+    data = f.read(count)
+    if len(data) != count:
+        raise ValueError('unexpected EOF')
+    return data.decode('utf-8', 'replace')
+
+
+def _gguf_skip_value(f, vtype: int, file_end: int) -> None:
+    """Skip unused metadata without string allocations or recursive calls."""
+    pending = [(vtype, 1)]
+    while pending:
+        value_type, remaining = pending.pop()
+        if value_type == 8:
+            # Each string needs at least its uint64 length prefix.
+            _gguf_require_bytes(f, file_end, remaining * 8)
+            for _ in range(remaining):
+                _gguf_skip_bytes(f, file_end, _gguf_read(f, '<Q'))
+        elif value_type == 9:
+            # Each nested array needs its element type and uint64 count.
+            _gguf_require_bytes(f, file_end, remaining * 12)
+            if not remaining:
+                continue
+            element_type = _gguf_read(f, '<I')
+            count = _gguf_read(f, '<Q')
+            if element_type not in _GGUF_SCALAR_SIZE and element_type not in (8, 9):
+                raise ValueError('bad array elem type: %d' % element_type)
+            if remaining > 1:
+                pending.append((value_type, remaining - 1))
+            pending.append((element_type, count))
         else:
-            size = _GGUF_SCALAR_SIZE.get(etype)
+            size = _GGUF_SCALAR_SIZE.get(value_type)
             if size is None:
-                raise ValueError('bad array elem type: %d' % etype)
-            f.seek(size * count, os.SEEK_CUR)
-        return
-    size = _GGUF_SCALAR_SIZE.get(vtype)
-    if size is None:
-        raise ValueError('bad value type: %d' % vtype)
-    f.seek(size, os.SEEK_CUR)
+                raise ValueError('bad value type: %d' % value_type)
+            _gguf_skip_bytes(f, file_end, size * remaining)
 
 
 def _inspect_gguf(path: str) -> dict:
     wanted_scalars = ('general.file_type',)
     try:
         with open(path, 'rb') as f:
+            file_end = os.fstat(f.fileno()).st_size
             if f.read(4) != b'GGUF':
                 return {'format': 'unknown', 'path': path,
                         'error': '文件不是 GGUF（magic 不匹配）'}
@@ -217,24 +234,23 @@ def _inspect_gguf(path: str) -> dict:
                         'error': '不支持的 GGUF 版本: %d' % version}
             _gguf_read(f, '<Q')  # tensor_count
             kv_count = _gguf_read(f, '<Q')
-            if kv_count > _MAX_GGUF_KV:
-                return {'format': 'unknown', 'path': path,
-                        'error': 'GGUF 元数据条目数异常: %d' % kv_count}
+            # A KV entry has a uint64 key length, uint32 type and at least
+            # one value byte. Use physical remaining bytes, not a quota.
+            _gguf_require_bytes(f, file_end, kv_count * 13)
             meta = {}
             for _ in range(kv_count):
-                key = _gguf_string(f, _MAX_GGUF_KEY)
+                key = _gguf_string(f, file_end)
                 vtype = _gguf_read(f, '<I')
-                if key.endswith('.context_length') or key in (
-                        'general.architecture', 'general.name',
-                        'general.size_label') or key in wanted_scalars:
+                if key.endswith(_GGUF_PLANNING_SUFFIXES) or key in (
+                        'general.architecture',) or key in wanted_scalars:
                     if vtype == 8:
-                        meta[key] = _gguf_string(f, _MAX_GGUF_STRING)
+                        meta[key] = _gguf_string(f, file_end)
                     elif vtype in _GGUF_FMT and vtype != 9:
                         meta[key] = _gguf_read(f, _GGUF_FMT[vtype])
                     else:
-                        _gguf_skip_value(f, vtype)
+                        _gguf_skip_value(f, vtype, file_end)
                 else:
-                    _gguf_skip_value(f, vtype)
+                    _gguf_skip_value(f, vtype, file_end)
     except (OSError, ValueError, struct.error) as e:
         return {'format': 'unknown', 'path': path,
                 'error': 'GGUF 头解析失败: %s' % e}
@@ -252,6 +268,10 @@ def _inspect_gguf(path: str) -> dict:
         'path': path,
         'architecture': arch,
         'model_type': arch,
+        'attention_dimensions': {
+            field: meta.get('%s.%s' % (arch, field))
+            for field in _GGUF_ATTENTION_FIELDS
+        } if arch else {},
         'max_context': ctx,
         'quantization': _GGUF_FILE_TYPES.get(file_type, 'FT%s' % file_type
                                              if file_type is not None else None),
@@ -362,4 +382,5 @@ def probe_hardware(*, nvidia_timeout: float = _NVIDIA_SMI_TIMEOUT,
         **ram,
         **disk,
         'cpu_count': _allowed_cpu_count(),
+        'ollama_env': {'OLLAMA_NUM_PARALLEL': os.environ.get('OLLAMA_NUM_PARALLEL')},
     }

@@ -67,7 +67,7 @@ def test_dispatch_snapshot_uses_actual_attempts(routed_group, monkeypatch, mode,
     import lib.llm as llm
     from lib.llm_dispatch import api
     from lib.llm_dispatch.provider_pin import provider_pin
-    from lib.llm_errors import PermissionError_
+    from lib.llm.llm_errors import PermissionError_
     from lib.llm.reasoning import capture_intent
     dispatcher, group = routed_group
     monkeypatch.setattr(api, 'get_dispatcher', lambda: dispatcher)

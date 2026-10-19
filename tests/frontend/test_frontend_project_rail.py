@@ -54,11 +54,17 @@ _SHELL = native_module_path(
     '.native/shell-localization.js',
     os.path.join(REPO_ROOT, 'frontend/src/conversation/presentation/shell-localization.ts'))
 
+_PRESETS = native_module_path(
+    '.native/folder-presets.js',
+    os.path.join(REPO_ROOT, 'frontend/src/conversation/application/folder-presets.ts'))
+
 
 def _node_deps_available() -> bool:
     if not shutil.which('node'):
         return False
-    return os.path.isdir(os.path.join(ROOT, 'node_modules', 'jsdom'))
+    result = subprocess.run(['node', '-p', 'require.resolve("jsdom")'],
+                            cwd=REPO_ROOT, capture_output=True, timeout=10)
+    return result.returncode == 0
 
 
 _HARNESS = r"""
@@ -68,7 +74,8 @@ const CONV = process.argv[2];
 const ROOT = process.argv[3];
 const FOLDERS = process.argv[4];
 const SHELL = process.argv[5];
-const { JSDOM } = require(path.join(ROOT, 'node_modules', 'jsdom'));
+const PRESETS = process.argv[6];
+const { JSDOM } = require('jsdom');
 
 const dom = new JSDOM(`<!DOCTYPE html><body>
   <aside class="sidebar" id="sidebar">
@@ -85,7 +92,16 @@ global.window = window; global.document = window.document;
 global.navigator = window.navigator;
 global.localStorage = window.localStorage;
 
+global.HTMLElement = window.HTMLElement;
+global.HTMLDialogElement = window.HTMLDialogElement;
+window.HTMLDialogElement.prototype.showModal = function() { this.open = true; };
+window.HTMLDialogElement.prototype.close = function() {
+  if (!this.open) return;
+  this.open = false; this.dispatchEvent(new window.Event('close'));
+};
+
 // ── i18n / html helpers ──
+global.retainedCompositionLifecycle = { add: () => {}, listen: (target, type, fn, options) => target.addEventListener(type, fn, options) };
 global.t = (k) => k;
 global.escapeHtml = (s) => String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 global.CSS = window.CSS || { escape: (s) => s };
@@ -100,6 +116,9 @@ let _setActiveCalls = [];
 global.setActiveFolderId = (id) => { _ACTIVE_FOLDER = id || null; _setActiveCalls.push(id); };
 global.areFoldersLoaded = () => true;
 global.getFolderById = (id) => _FOLDERS_STATE.find(f => f.id === id) || null;
+
+(0, eval)(fs.readFileSync(PRESETS, 'utf8'));
+global.folderDefaultProjectPaths = id => folderPresetWorkspace(getFolderById(id)).projectPaths;
 let _setFolderCalls = [];
 global.setConversationFolder = (convId, folderId) => { _setFolderCalls.push([convId, folderId]); };
 global._promptCreateFolder = () => {};
@@ -159,7 +178,7 @@ if (typeof _initFolderDragDrop === 'function') _initFolderDragDrop();
 
 // ══ Scenario A: ≥1 folder → vertical rail renders. ══
 _FOLDERS_STATE = [
-  { id: 'f1', name: 'cadtrans', color: '#3b82f6', order: 0 },
+  { id: 'f1', name: 'cadtrans', color: '#3b82f6', order: 0, projectPaths: ['/workspace/demo'], readOnlyPaths: ['/workspace/demo'], revision: 3 },
   { id: 'f2', name: 'auto-verifier', color: '#10b981', order: 1 },
 ];
 _ACTIVE_FOLDER = null;
@@ -178,7 +197,7 @@ const rows = tabsEl.querySelectorAll('.folder-tab[data-folder-id]');
 check('rail_row_count', rows.length === 3);
 check('rail_has_uncat', !!tabsEl.querySelector('.folder-tab[data-folder-id=""]'));
 check('rail_has_f1', !!tabsEl.querySelector('.folder-tab[data-folder-id="f1"]'));
-check('rail_has_add', !!tabsEl.querySelector('.folder-tab.folder-tab-add'));
+check('rail_has_add', !!tabsEl.querySelector('button.folder-tab-add .folder-tab-dot svg'));
 check('rail_f1_count_badge',
   (tabsEl.querySelector('.folder-tab[data-folder-id="f1"] .folder-tab-count')||{}).textContent === '2');
 check('sidebar_has_rail_class', sidebar.classList.contains('has-rail'));
@@ -253,6 +272,28 @@ _toggleProjectRail();
 check('collapse_class_off', !sidebar.classList.contains('rail-collapsed'));
 check('collapse_persist_cleared', localStorage.getItem('tofu_project_rail_collapsed') === '0');
 
+// Settings opens the real dialog without selecting its folder, expanded or collapsed.
+global.Api = { project: { recentList: async () => [], browse: async () => ({ path: '/workspace', parent: '/', dirs: [] }) } };
+for (const collapsed of [false, true]) {
+  sidebar.classList.toggle('rail-collapsed', collapsed);
+  const before = _ACTIVE_FOLDER;
+  _setActiveCalls = [];
+  const settings = tabsEl.querySelector('[data-folder-config-id="f1"]');
+  check('settings_accessible_' + collapsed, !!settings && settings.type === 'button' &&
+    settings.getAttribute('aria-label').includes('cadtrans') && !settings.closest('.folder-tab'));
+  settings.querySelector('svg').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  const dialog = document.querySelector('dialog[open]');
+  check('settings_dialog_' + collapsed, !!dialog && dialog.querySelector('input[type="text"]').value === 'cadtrans' &&
+    !!dialog.querySelector('select') && dialog.querySelector('.folder-settings-full-path').textContent === '/workspace/demo' &&
+    dialog.querySelector('.folder-settings-root input[type="checkbox"]').checked);
+  check('settings_no_switch_' + collapsed, _ACTIVE_FOLDER === before && _setActiveCalls.length === 0);
+  [...dialog.querySelectorAll('button')].find(button => button.textContent === 'folder.cancel').click();
+}
+tabsEl.querySelector('.folder-tab[data-folder-id="f1"] .folder-tab-dot').click();
+check('ordinary_click_selects', _ACTIVE_FOLDER === 'f1');
+renderConversationList();
+check('ordinary_click_filters', [...convList.querySelectorAll('.conv-item[data-conv-id]')].map(r => r.dataset.convId).sort().join(',') === 'c1,c2');
+
 // ══ Scenario F: ZERO-FOLDER degradation — no rail, no .has-rail ══
 _FOLDERS_STATE = [];
 _ACTIVE_FOLDER = null;
@@ -274,7 +315,7 @@ def _run(conv_path, folders_path):
         f.write(_HARNESS)
     try:
         proc = subprocess.run(
-            ['node', harness, conv_path, ROOT, folders_path, _SHELL],
+            ['node', harness, conv_path, ROOT, folders_path, _SHELL, _PRESETS],
             capture_output=True, text=True, timeout=60)
     finally:
         try:
@@ -287,6 +328,11 @@ def _run(conv_path, folders_path):
 
 
 _EXPECTED = (
+
+    'settings_accessible_false', 'settings_accessible_true',
+    'settings_dialog_false', 'settings_dialog_true',
+    'settings_no_switch_false', 'settings_no_switch_true',
+    'ordinary_click_selects', 'ordinary_click_filters',
     'rail_has_list', 'rail_row_count', 'rail_has_uncat', 'rail_has_f1',
     'rail_has_add', 'rail_f1_count_badge', 'sidebar_has_rail_class',
     'no_legacy_pill_scroll',

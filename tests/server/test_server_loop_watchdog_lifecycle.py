@@ -12,7 +12,7 @@ from contextlib import nullcontext
 
 import pytest
 
-from lib.server_loop_watchdog import LoopWatchdog
+from lib.server.server_loop_watchdog import LoopWatchdog
 
 
 pytestmark = pytest.mark.unit
@@ -111,7 +111,7 @@ def test_probe_resource_failure_does_not_exit_a_previously_live_listener(
         monkeypatch, local_errno, initial_success):
     """Inject an undispatched socket failure into the real heartbeat owner."""
     import socket
-    from lib import server_fault_watchdog as decisions
+    from lib.server import server_fault_watchdog as decisions
 
     async def exercise():
         observations = []; attempts = [0]
@@ -165,7 +165,7 @@ def test_probe_resource_failure_does_not_exit_a_previously_live_listener(
 def test_listener_outages_recover_without_exiting_or_flooding_diagnostics(
         monkeypatch, caplog, error):
     import socket
-    from lib import server_fault_watchdog as decisions
+    from lib.server import server_fault_watchdog as decisions
 
     async def exercise():
         attempts = [0]; shutdown = threading.Event()
@@ -186,14 +186,14 @@ def test_listener_outages_recover_without_exiting_or_flooding_diagnostics(
         try:
             async def recovered():
                 while attempts[0] < 20: await asyncio.sleep(0.005)
-            with caplog.at_level('INFO', logger='lib.server_loop_watchdog'):
+            with caplog.at_level('INFO', logger='lib.server.server_loop_watchdog'):
                 await asyncio.wait_for(recovered(), timeout=2)
             assert not shutdown.is_set()
             assert runtime.heartbeat_task is not None
             assert not runtime.heartbeat_task.done()
             assert runtime.listen_state == {'was_bound': True, 'misses': 0}
             messages = [record.getMessage() for record in caplog.records
-                        if record.name == 'lib.server_loop_watchdog']
+                        if record.name == 'lib.server.server_loop_watchdog']
             assert sum('preserving tasks' in message for message in messages) == 2
             assert sum('recovered in place' in message for message in messages) == 2
         finally:
@@ -204,7 +204,7 @@ def test_listener_outages_recover_without_exiting_or_flooding_diagnostics(
 @pytest.mark.parametrize('was_bound,misses', [(False,0),(True,0),(True,4)])
 def test_unobserved_listener_does_not_arm_or_complete_a_loss_streak(
         was_bound, misses):
-    from lib.server_fault_watchdog import _listener_death_decide
+    from lib.server.server_fault_watchdog import _listener_death_decide
     assert _listener_death_decide(was_bound, None, misses, 5) == (
         was_bound, 0, False)
 

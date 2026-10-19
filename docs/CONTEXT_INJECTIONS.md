@@ -23,6 +23,22 @@ separate virtual-user reviewer still uses isolated bootstrap inputs. See
 
 Both snapshots and events enforce closed tool-call/result batches. Snapshots defer; inbox producers check `can_append_injection` **before draining**. Human-steer classification and producer-owned delivery ACK remain unchanged. Appended never means consumed or acknowledged.
 
+
+**Scoped guidance — Problem:** Requiring a delivered raw-file version before
+each operation blocked edits and even read-only commands whenever nested rules
+were discovered or changed. **Decision:** Before the first
+model request, acquire declared-root rules and deliver the complete required
+`project_scoped_rules` snapshot through the normal composer. Subsequent rounds
+reuse that snapshot by actual retained content. Tool access acquires nested
+rules, changed raw-file hashes and verified removals for the next closed model
+request without refusing edits or commands. Unresolved shell targets do not
+create a guidance gate; path permissions and command approval remain separate.
+Open tool batches defer injection without blocking execution.
+**Alternatives rejected:** A read-only-command exemption still blocks ordinary
+edits; disabling acquisition loses applicable instructions. The scoped snapshot owns rule bodies during task preparation; session
+`project_rules` retains topology and journal locators. Rule acquisition remains
+bounded and unchanged rounds reuse the snapshot without a second rules copy. Tests: `tests/tasks_pkg/test_project_guidance_bootstrap.py`
+and `tests/project_mod/test_scoped_instructions.py`.
 `systemPromptBlocks.disabled` suppresses optional **registry IDs** through the shared interface. Required rules, accepted checklist state, explicit user branch input, human/background/peer delivery and evidence-triggered safety/recovery cannot be suppressed by advisory ablations. Their explicit product modes/permission controls retain their existing owners. Budget diagnostics are not an opt-in model notice.
 
 **Private-input discovery — Problem:** A model-visible snapshot directory adds changing context, but availability does not establish adoption or a correct, cheaper answer.
@@ -84,7 +100,8 @@ The toolbar measures last prompt usage / **full** model window, falling back to 
 | `platform_static` | Keep platform operating contract as dedicated system prefix; absent in explicit replace-system mode | Required; no advisory clipping; not lossy history |
 | `role_directive` | Keep only for an explicitly specialized role | Required; 5,000 tokens |
 | `goal_objective` | Chat Goal worker's durable objective restated verbatim (inline bound 4,000 chars; byte-stable per run so prefix caching holds and compaction cannot drift scope) | Required; 8,000 tokens |
-| `project_rules` | Keep applicable AGENTS/CLAUDE/etc. rules in full; JOURNAL is locator-only | Required; no advisory clipping |
+| `project_rules` | Task project topology/JOURNAL locator; standalone/remote context retains root rules in full | Required; no advisory clipping |
+| `project_scoped_rules` | Accessed-path ancestor guidance from declared roots; acquired versions refresh at closed model boundaries without an execution gate | Required; no advisory clipping; acquisition rejects over 128 files or 1 MiB rather than omitting rules |
 | `user_context` | Optional enabled, nonempty preferences; not task evidence | 1,000 tokens |
 | `memory_guidance` | Short evidence/retention boundary when memory and tools are enabled; no duplicate CRUD tutorial | 180 tokens |
 | `skills_index` | Discovery index only with admitted `load_skill` in the frozen wire or executable catalog; task-frozen; bodies on demand; capability removal suppresses even a cached index | 1,400 tokens |
@@ -95,7 +112,10 @@ The toolbar measures last prompt usage / **full** model window, falling back to 
 | `programmatic_execution` | Enabled mode and a wire/deferred code action or admission-compiled execution gateway; use the actual exposed action | 128 tokens |
 | `programmatic_inputs` | Explicit `context.programmaticInputs=true` experiment (default false), owner-bound captures and admitted program action; versioned references, no arguments or source bodies; failed acquisition or opt-out withdraws stale snapshots | 256 content tokens, 4 entries, 4,096 bytes; omit whole block under global budget pressure |
 | `project_context` | Only the exact available owner/project-bound coordinator receives unseen Project Brain narrative and overview; ordinary workers use scoped inbox/overlap notices, never the global feed. Absent pages, disabling and acquisition failures stay diagnostic-only. Only a complete admitted/reused page may await provider-success cursor ACK | Optional; 1,800 tokens; omit whole page under block/global budget pressure |
+| `project_presence` | Live same-project worker status for the bound Coordinator only; reads `chat_task_runtime.snapshot_owned()` in-memory state, filtered to the same `projectPath`. Terminal tasks age out after ~5 minutes. Content-addressed reuse suppresses re-append when worker status is unchanged. No DB writes, no new storage. | Optional; 1,500 tokens; omit whole block under block/global budget pressure |
+| `turn_requirements` | Current owner objective, criterion generations and declared output scope for the bound ordinary assistant Turn; refreshed at final admission and after compaction/retry. Failed acquisition refuses dispatch. See [review contract](contracts/ARTIFACT_REVIEW.md#shared-execution-context) | Required; complete snapshot, no local clipping; canonical prompt limit |
 | `active_checklist` | Restore only when no complete current accepted snapshot survives: a paired direct/gateway todo result (including load/lookup) or owned recovery carrier proves visibility, without any hash in its prose. Keep at most one current recovery carrier; preserve real dialogue and audit history. Compaction carries state transactionally inside its own projection. See [continuity contract](CONTEXT_COMPACTION.md#authoritative-checklist-restoration) | Required; no advisory clipping |
+| `working_facts` | Conversation-scoped version-bound evidence; newest complete facts, explicit unknown freshness on acquisition failure; owner corrections supersede old snapshots; see [contract](contracts/WORKING_FACTS.md) | 4,096 tokens; omitted count; content-addressed reuse; optional initial block, required correction |
 | `task_state_v1` | Required projection only with explicit global-context-plan feature | 2,400 tokens |
 | `relevant_memories` | Optional high-confidence owner-scoped retrieval from the latest authored request; evidence, not instructions. No match adds no prompt/timeline notice and does not invalidate historical evidence. Explicit disabling withdraws the block; provider failure retains last-known evidence with a diagnostic receipt, never claiming a fresh empty selection | 1,500 tokens; zero appended tokens for no match |
 | `plan_mode` | Contract only while explicitly enabled | Required; 900 tokens |
@@ -106,7 +126,7 @@ The toolbar measures last prompt usage / **full** model window, falling back to 
 | `current_date` | Reuse the latest complete owned clock section or top-level system/developer date fact still in the working input. Reintroduce after loss/compaction or a day change; user/tool quotes, XML excerpts and fenced examples are not witnesses. No independent watermark/cache | 80 tokens; zero appended tokens when present |
 | `modified_files` | Only files changed OUTSIDE this conversation (other-conversation/unattributed journal records stamped at/after task start); own-conv writes excluded; fires the round after detection, never repeats an unchanged file set (task-held signature watermark); journal poll throttled to once per few seconds of task time | 1,600 tokens; at most 5 paths |
 | `tool_progress` | Corrections for observed no-ops/redundant reads/unresolved evidence, not productive serial work | Required; breaker-owned caps |
-| `execution_allowance` | Finite invocation allowance after pre-notice full-prompt measurement and before final admission: input/output headroom after tree/local consumption and live reservations, effective tool slots and earliest deadline. Reports an input-only comparable-request upper bound excluding output/notice/growth/provider adaptation; 6/3/1 settled-headroom request milestones complement 50/20/5-percent milestones. Required archive/review handoffs remain original checks; never waives original checks or role permissions | Required; final prompt is remeasured after an appended notice; 350 tokens per notice, compact complete facts when needed; if still over the ceiling, explicitly defer in Inspector without advancing the watermark; at most four finite milestones plus one unknown-usage observation per invocation |
+| `execution_allowance` | Finite invocation allowance after pre-notice full-prompt measurement and before final admission: input/output headroom after tree/local consumption and live reservations, effective tool slots and earliest deadline. Reports an input-only comparable-request upper bound excluding output/notice/growth/provider adaptation; 6/3/1 settled-headroom request milestones complement 50/20/5-percent milestones. Required archive/review handoffs remain original checks; never waives original checks or role permissions | Required; final prompt is remeasured after an appended notice; 350 tokens per notice, compact complete facts when needed; if still over the ceiling, explicitly defer in Inspector without advancing the watermark; at most four finite milestones plus one unknown-usage observation per invocation. Emitted as a round-lifecycle snapshot block so the renderer's content-addressed reuse supersedes the prior carrier (and compaction retires superseded copies) instead of stacking a permanent bare `_isMeta` message per milestone |
 | `tool_stagnation` | Repeated identical outcomes, not elapsed time or call count | Required; breaker-owned caps |
 | `tool_repeat_reminder` | Early exact-repeat notice one rung below the corrective nudge; never vetoes, audits on its own ledger, cleared by a real human steer | Required; once per repeat digest |
 | `partial_stream_retry` | Partial transport cut without assistant-prefill support | Required; recovery-owned caps |
@@ -266,3 +286,54 @@ Programmatic guidance reuses action-schema details and stays within its 128-toke
 contract; avoid duplicating operation descriptions or increasing the budget.
 
 Workspace environment projects the admitted root policy with stable labels, execution paths, canonical paths and access per root. Isolation is repository-specific; an unbound non-Git primary root remains independent of an isolated additional root. Bare relative file paths use primary; command cwd retains its valid sticky directory. History must not relocate paths between roots.
+
+## Accessed-path project guidance
+
+**Problem:** root-only rules miss nested `AGENTS.md`, and command/background
+CWD changes can execute against rules for another directory. **Decision:**
+`lib/project_mod/instructions.py` acquires only declared-root/target ancestors;
+`lib/tasks_pkg/project_guidance.py` holds the task-owned required snapshot and
+exact-version delivery fence. Nested sources carry their own subtree label.
+Read acquisition is descriptor-relative/no-follow on POSIX and stops at remaining
+aggregate file/byte budgets, without clipping or publishing a partial snapshot.
+Verified removals are pruned before validating replacement bounds.
+
+Project command dispatch pins explicit/sticky CWD once before guidance and
+foreground/background handoff. The shared command parser's concrete targets
+survive an incomplete aggregate parse. Unresolved CD/group structure and dynamic
+write targets refuse without execution and request explicit scoped operations.
+Opaque interpreter effects remain cooperative and retain existing command/write
+admission; this is not an all-program filesystem sandbox. **Alternatives
+rejected:** recursive instruction scans mix siblings and tax idle; tool-output
+clipping loses mandatory rules; post-gate CWD resolution races detached work.
+Executable specifications: `tests/project_mod/test_scoped_instructions.py`,
+context refresh-failure tests and the workspace/browser acceptance ladder.
+
+### One initial project-rule snapshot
+
+**Problem.** Task startup included root rule bodies in both session project
+context and scoped guidance, inflating required, non-compacting input.
+**Decision.** Ordinary task preparation obtains project topology/journal
+locators without rule bodies and delivers complete raw-file-witness guidance
+through `project_scoped_rules` before admission, including native preparation.
+Later path reads reuse the same guidance owner for changes and removals.
+Standalone context callers and remote projects retain their existing complete
+context. No required file is clipped or silently omitted.
+**Alternative rejected.** Inferring delivery from prose cannot preserve raw
+file hashes or distinguish changed instructions. Verify
+`tests/tasks_pkg/test_project_guidance_bootstrap.py`.
+
+### Shared agent startup context
+
+**Problem.** Treating a delegated execution catalog as an all-eager wire catalog
+made local prompt admission count every schema before the first model request.
+**Decision.** Chat, Coordinator and children share tool preparation. Children inherit
+discovery policy restricted to their authorized catalog. The startup admission
+estimate uses shared local search/execute projection for auto/local; the unprojected
+visible candidates remain available for final provider-native discovery and exact
+routed admission. Snapshots inherit those candidates, not the compact estimate.
+Required/selected tools remain visible; catalog contracts retain execution authority.
+**Alternatives rejected.** Child-only projection forks policy; replacing candidates
+with the estimate loses native discovery. Raising limits or summarizing contracts
+hides the assembly defect or weakens validation. Verify `tests/tasks_pkg/test_agent_tool_policy.py`
+and `tests/swarm/test_swarm_startup_context.py`.

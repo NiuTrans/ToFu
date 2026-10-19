@@ -2224,160 +2224,404 @@ async function _cdpRun(tabId, fn, purpose = 'command') {
 // Every interaction failure is classified so the model can tell WHY an
 // action could not be applied and choose a real next step instead of a
 // blind retry. Codes are stable strings; Python surfaces them verbatim.
-const TARGET = {
-  NOT_FOUND: 'TARGET_NOT_FOUND',
-  DETACHED: 'TARGET_DETACHED',
-  NOT_VISIBLE: 'TARGET_NOT_VISIBLE',
-  DISABLED: 'TARGET_DISABLED',
-  OBSCURED: 'TARGET_OBSCURED',
-  NOT_EDITABLE: 'TARGET_NOT_EDITABLE',
-  NOT_CHECKABLE: 'TARGET_NOT_CHECKABLE',
-  NOT_SELECTABLE: 'TARGET_NOT_SELECTABLE',
-};
+// All dependencies travel with the function serialized by Chrome.
+// This page-local owner needs no worker globals, persistent injection or eval.
+function _pageInteraction(operation, args) {
+  const TARGET = {
+    NOT_FOUND: 'TARGET_NOT_FOUND',
+    DETACHED: 'TARGET_DETACHED',
+    NOT_VISIBLE: 'TARGET_NOT_VISIBLE',
+    DISABLED: 'TARGET_DISABLED',
+    OBSCURED: 'TARGET_OBSCURED',
+    NOT_EDITABLE: 'TARGET_NOT_EDITABLE',
+    NOT_CHECKABLE: 'TARGET_NOT_CHECKABLE',
+    NOT_SELECTABLE: 'TARGET_NOT_SELECTABLE',
+  };
+
+  function _rendered(el) {
+    if (!el || !el.getBoundingClientRect) return false;
+    const r = el.getBoundingClientRect();
+    if (r.width === 0 && r.height === 0) return false;
+    const cs = window.getComputedStyle(el);
+    return !(cs.display === 'none' || cs.visibility === 'hidden' || cs.opacity === '0');
+  }
+
+  function _checkableProxy(input) {
+    let node = input;
+    for (let depth = 0; node && depth < 5; depth++) {
+      const p = node.parentElement;
+      if (!p || p === document.body || p === document.documentElement) break;
+      const role = (p.getAttribute && p.getAttribute('role')) || '';
+      const cls = (p.className && p.className.baseVal !== undefined)
+        ? '' : String(p.className || '');
+      const isWrapper = p.tagName === 'LABEL' ||
+        /^(radio|checkbox|switch|button|toggle)$/.test(role) ||
+        /(radio|checkbox|switch|toggle|check)-?(wrap|wrapper|inner|input|label|button)?/i.test(cls) ||
+        /(mtd|el|ant|van|nut|arco)-.*(radio|checkbox|switch|select|check)/i.test(cls);
+      if (isWrapper && _rendered(p)) return p;
+      node = p;
+    }
+    if (input.id) {
+      const lab = document.querySelector(`label[for="${CSS.escape(input.id)}"]`);
+      if (lab && _rendered(lab)) return lab;
+    }
+    // Wrapping <label> ancestor even without a recognised class.
+    const wrapLabel = input.closest && input.closest('label');
+    if (wrapLabel && _rendered(wrapLabel)) return wrapLabel;
+    return null;
+  }
+
+  function _isCheckable(el) {
+    if (!el || !el.tagName) return false;
+    const role = (el.getAttribute && el.getAttribute('role')) || '';
+    if (/^(radio|checkbox|switch|menuitemcheckbox|menuitemradio)$/.test(role)) return true;
+    return el.tagName === 'INPUT' && /^(radio|checkbox)$/.test((el.type || '').toLowerCase());
+  }
+
+  function _resolveCheckable(el) {
+    if (!el) return null;
+    if (_isCheckable(el) && el.tagName === 'INPUT') {
+      return { input: el, proxy: _rendered(el) ? el : (_checkableProxy(el) || el) };
+    }
+    if (_isCheckable(el) && el.tagName !== 'INPUT') {
+      const inner = el.querySelector && el.querySelector('input[type=radio],input[type=checkbox]');
+      return { input: inner || null, proxy: el, ariaOnly: !inner };
+    }
+    const inner = el.querySelector && el.querySelector('input[type=radio],input[type=checkbox]');
+    if (inner) return { input: inner, proxy: _rendered(el) ? el : (_checkableProxy(inner) || el) };
+    const lab = el.closest && el.closest('label');
+    if (lab) {
+      const li = lab.querySelector('input[type=radio],input[type=checkbox]');
+      if (li) return { input: li, proxy: lab };
+    }
+    return null;
+  }
+
+  function _actionablePoint(selector, scrollTo, forwardTarget) {
+    const el = document.querySelector(selector);
+    if (!el) return { error: `Element not found: ${selector}`, targetCode: TARGET.NOT_FOUND };
+    if (!el.isConnected) return { error: 'Element left the document', targetCode: TARGET.DETACHED };
+
+    // Forwarding: a custom-control wrapper carries the hidden input it drives.
+    // Prefer interacting with the real control; fall back to the wrapper when
+    // the control is itself hidden (the common MTD/Element/AntD case).
+    let target = el;
+    let forwarded = false;
+    if (forwardTarget) {
+      const real = document.querySelector(forwardTarget);
+      if (real) { target = real; forwarded = true; }
+    }
+    if (target.disabled || (target.closest && target.closest('[disabled],fieldset[disabled]'))) {
+      return { error: 'Element is disabled', targetCode: TARGET.DISABLED,
+               tag: target.tagName.toLowerCase() };
+    }
+    // Pick a visible point: the real control if rendered, else its proxy/wrapper.
+    let pointEl = target;
+    if (!_rendered(pointEl)) {
+      const proxy = _isCheckable(target) ? _checkableProxy(target) : null;
+      if (proxy && _rendered(proxy)) pointEl = proxy;
+      else if (forwarded && _rendered(el)) pointEl = el;
+      else return { error: 'Element is not visible', targetCode: TARGET.NOT_VISIBLE,
+                    tag: target.tagName.toLowerCase() };
+    }
+    if (scrollTo) pointEl.scrollIntoView({ behavior: 'instant', block: 'center' });
+    const r = pointEl.getBoundingClientRect();
+    const x = r.left + r.width / 2;
+    const y = r.top + r.height / 2;
+    // Obscured check: another element sits on top of the click point.
+    const top = document.elementFromPoint(x, y);
+    if (top && top !== pointEl && !pointEl.contains(top) && !(target.contains && target.contains(top))) {
+      const cs = window.getComputedStyle(top);
+      if (cs.pointerEvents !== 'none' && cs.visibility !== 'hidden' && cs.display !== 'none') {
+        return { error: 'Element is obscured by another element',
+                 targetCode: TARGET.OBSCURED,
+                 obscuring: top.tagName.toLowerCase() +
+                   (top.className && top.className.baseVal === undefined
+                     ? '.' + String(top.className).trim().split(/\s+/).slice(0, 2).join('.')
+                     : ''), };
+      }
+    }
+    return {
+      ok: true, x, y,
+      tag: target.tagName.toLowerCase(),
+      text: (pointEl.innerText || target.innerText || '').trim().substring(0, 100),
+      forwarded,
+      // Let the synthetic path act on the real control (hidden ok) when we
+      // resolved one; otherwise it dispatches at the visible point element.
+      targetSelector: forwarded ? forwardTarget : selector,
+      pointIsProxy: pointEl !== target,
+    };
+  }
+
+  function _locateElement(selector, scrollTo, forwardTarget) {
+    const res = _actionablePoint(selector, scrollTo, forwardTarget);
+    if (res.error) return { error: res.error, targetCode: res.targetCode, obscuring: res.obscuring };
+    return { x: res.x, y: res.y, tag: res.tag, text: res.text, forwarded: res.forwarded };
+  }
+
+  function _clickElement(selector, rightClick, scrollTo, forwardTarget) {
+    const el = document.querySelector(selector);
+    if (!el) return { clicked: false, error: `Element not found: ${selector}`,
+                      targetCode: TARGET.NOT_FOUND };
+    // Forward custom controls to their real (possibly hidden) input: dispatch
+    // the trusted-equivalent event sequence at the visible point element but
+    // call .click() on the control so native checked toggling + framework
+    // handlers fire on the right node.
+    let control = el;
+    let forwarded = false;
+    if (forwardTarget) {
+      const real = document.querySelector(forwardTarget);
+      if (real) { control = real; forwarded = true; }
+    }
+    if (control.disabled || (control.closest && control.closest('[disabled],fieldset[disabled]'))) {
+      return { clicked: false, error: 'Element is disabled', targetCode: TARGET.DISABLED,
+               tag: control.tagName.toLowerCase() };
+    }
+
+    // Scroll into view
+    if (scrollTo) {
+      el.scrollIntoView({ behavior: 'instant', block: 'center' });
+    }
+
+    const rect = el.getBoundingClientRect();
+    const x = rect.left + rect.width / 2;
+    const y = rect.top + rect.height / 2;
+
+    if (rightClick) {
+      // Dispatch contextmenu event (right-click)
+      const contextEvent = new MouseEvent('contextmenu', {
+        bubbles: true, cancelable: true, view: window,
+        clientX: x, clientY: y, button: 2,
+      });
+      el.dispatchEvent(contextEvent);
+      return {
+        clicked: true, rightClick: true,
+        tag: el.tagName.toLowerCase(),
+        text: (el.innerText || '').trim().substring(0, 100),
+        position: { x: Math.round(x), y: Math.round(y) },
+      };
+    }
+
+    // Standard left-click sequence: mousedown → mouseup → click on the
+    // visible element (this is what real users hit and what overlays expect).
+    for (const eventType of ['mousedown', 'mouseup', 'click']) {
+      const event = new MouseEvent(eventType, {
+        bubbles: true, cancelable: true, view: window,
+        clientX: x, clientY: y, button: 0,
+      });
+      el.dispatchEvent(event);
+    }
+
+    // Also call .click() on the resolved control for good measure (some
+    // frameworks only listen for this, and a hidden input needs its own
+    // .click() to toggle checked when the wrapper's listeners don't forward).
+    try { control.click(); } catch {}
+
+    return {
+      clicked: true, rightClick: false,
+      tag: el.tagName.toLowerCase(),
+      text: (el.innerText || '').trim().substring(0, 100),
+      position: { x: Math.round(x), y: Math.round(y) },
+    };
+  }
+
+  function _setChecked(selector, forwardTarget, wantChecked, scrollTo) {
+    const start = document.querySelector(selector);
+    if (!start) return { applied: false, error: `Element not found: ${selector}`,
+                         targetCode: TARGET.NOT_FOUND };
+    const forwardEl = forwardTarget ? document.querySelector(forwardTarget) : null;
+    const res = _resolveCheckable(forwardEl || start) || _resolveCheckable(start);
+    if (!res) return { applied: false, error: 'Target is not a checkable control',
+                       targetCode: TARGET.NOT_CHECKABLE,
+                       tag: start.tagName.toLowerCase() };
+    const { input, proxy } = res;
+    const disabled = (input && input.disabled) ||
+      (proxy && proxy.getAttribute && proxy.getAttribute('aria-disabled') === 'true') ||
+      (proxy && proxy.closest && proxy.closest('[disabled],fieldset[disabled]'));
+    if (disabled) return { applied: false, error: 'Control is disabled',
+                           targetCode: TARGET.DISABLED };
+
+    const readState = () => input ? !!input.checked
+      : (proxy.getAttribute('aria-checked') === 'true');
+    const before = readState();
+    if (before === wantChecked) {
+      return { applied: true, already: true, checked: before,
+               role: input ? input.type : (proxy.getAttribute('role') || 'checkbox'),
+               tag: (proxy || input).tagName.toLowerCase() };
+    }
+    if (scrollTo && proxy && proxy.scrollIntoView) {
+      proxy.scrollIntoView({ behavior: 'instant', block: 'center' });
+    }
+    // Preferred path: click the visible proxy/label — native behaviour toggles
+    // the associated input and fires the framework's handlers. For a radio we
+    // can only set true; a click on an unchecked radio checks it.
+    const clickTarget = (proxy && _rendered(proxy)) ? proxy : (input || proxy);
+    try { clickTarget.click(); } catch (e) {}
+    // Ensure the end-state even if the proxy click didn't forward (some
+    // wrappers swallow the event): set the control + dispatch the sequence.
+    if (readState() !== wantChecked) {
+      if (input) {
+        if (input.type === 'radio') {
+          input.checked = true;
+        } else {
+          input.checked = wantChecked;
+        }
+        input.dispatchEvent(new Event('click', { bubbles: true }));
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+      } else if (proxy && proxy.setAttribute) {
+        proxy.setAttribute('aria-checked', wantChecked ? 'true' : 'false');
+        proxy.dispatchEvent(new Event('input', { bubbles: true }));
+        proxy.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+    }
+    const after = readState();
+    return {
+      applied: after === wantChecked,
+      checked: after, before,
+      role: input ? input.type : (proxy.getAttribute('role') || 'checkbox'),
+      tag: (proxy || input).tagName.toLowerCase(),
+      ...(after === wantChecked ? {} : { error: 'state did not reach requested value',
+                                         targetCode: TARGET.NOT_CHECKABLE }),
+    };
+  }
+
+  async function _selectOptionAsync(selector, forwardTarget, optionText, exact, timeoutMs) {
+    const norm = (s) => String(s || '').replace(/\s+/g, ' ').trim();
+    const start = document.querySelector(selector) ||
+      (forwardTarget && document.querySelector(forwardTarget));
+    if (!start) return { selected: false, error: `Element not found: ${selector}`,
+                         targetCode: TARGET.NOT_FOUND };
+
+    // Native <select> fast path (incl. when the trigger IS a real select).
+    const nativeSelect = start.tagName === 'SELECT' ? start
+      : (start.closest && start.closest('select')) ||
+        (start.querySelector && start.querySelector('select'));
+    if (nativeSelect) {
+      const wanted = norm(optionText).toLowerCase();
+      const opt = Array.from(nativeSelect.options).find(o => {
+        const t = norm(o.text).toLowerCase();
+        return exact ? t === wanted : t.includes(wanted);
+      });
+      if (!opt) return { selected: false, error: `No option matches "${optionText}"`,
+                         targetCode: TARGET.NOT_SELECTABLE,
+                         options: Array.from(nativeSelect.options).slice(0, 12).map(o => norm(o.text)) };
+      nativeSelect.value = opt.value;
+      nativeSelect.dispatchEvent(new Event('input', { bubbles: true }));
+      nativeSelect.dispatchEvent(new Event('change', { bubbles: true }));
+      return { selected: true, native: true, value: opt.value, text: norm(opt.text) };
+    }
+
+    const trigger = forwardTarget && document.querySelector(forwardTarget)
+      ? document.querySelector(forwardTarget) : start;
+    if (trigger.disabled || (trigger.closest && trigger.closest('[disabled],fieldset[disabled]'))) {
+      return { selected: false, error: 'Select is disabled', targetCode: TARGET.DISABLED };
+    }
+    if (trigger.scrollIntoView) trigger.scrollIntoView({ behavior: 'instant', block: 'center' });
+
+    const OPTION_SELECTOR =
+      '[role="option"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], ' +
+      '.mtd-select-dropdown__item, .el-select-dropdown__item, .ant-select-item-option, ' +
+      '.el-select-dropdown li, .mtd-select-dropdown li, .ant-select-dropdown li, ' +
+      '[class*="select"][class*="option"], [class*="dropdown"][class*="item"]';
+    const visibleOptions = () => Array.from(document.querySelectorAll(OPTION_SELECTOR))
+      .filter(_rendered);
+
+    // Open the dropdown. A trusted click would be ideal, but this path is
+    // already MAIN-world; dispatch the full sequence on the trigger.
+    const openDropdown = () => {
+      const r = trigger.getBoundingClientRect();
+      const x = r.left + r.width / 2, y = r.top + r.height / 2;
+      for (const type of ['mousedown', 'mouseup', 'click']) {
+        trigger.dispatchEvent(new MouseEvent(type, {
+          bubbles: true, cancelable: true, view: window, clientX: x, clientY: y, button: 0 }));
+      }
+      try { trigger.click(); } catch (e) {}
+      const inner = trigger.querySelector && trigger.querySelector('input');
+      if (inner) { try { inner.focus(); inner.click(); } catch (e) {} }
+    };
+
+    const deadline = Date.now() + timeoutMs;
+    let options = visibleOptions();
+    if (!options.length) {
+      openDropdown();
+      while (Date.now() < deadline) {
+        await new Promise(r => setTimeout(r, 80));
+        options = visibleOptions();
+        if (options.length) break;
+      }
+    }
+    if (!options.length) {
+      return { selected: false, error: 'Dropdown did not open (no options became visible)',
+               targetCode: TARGET.NOT_SELECTABLE,
+               tag: trigger.tagName.toLowerCase() };
+    }
+
+    const wanted = norm(optionText).toLowerCase();
+    const scored = options.map(o => {
+      const t = norm(o.innerText || o.textContent).toLowerCase();
+      let s = 0;
+      if (t === wanted) s = 100;
+      else if (!exact && t.includes(wanted)) s = 60;
+      else if (!exact && wanted && t.startsWith(wanted)) s = 70;
+      return { s, o, t };
+    }).filter(x => x.s > 0).sort((a, b) => b.s - a.s);
+
+    if (!scored.length) {
+      return { selected: false, error: `No visible option matches "${optionText}"`,
+               targetCode: TARGET.NOT_SELECTABLE,
+               options: options.slice(0, 12).map(o => norm(o.innerText || o.textContent)) };
+    }
+    const chosen = scored[0].o;
+    const r = chosen.getBoundingClientRect();
+    const x = r.left + r.width / 2, y = r.top + r.height / 2;
+    for (const type of ['mousedown', 'mouseup', 'click']) {
+      chosen.dispatchEvent(new MouseEvent(type, {
+        bubbles: true, cancelable: true, view: window, clientX: x, clientY: y, button: 0 }));
+    }
+    try { chosen.click(); } catch (e) {}
+    return { selected: true, native: false, text: norm(chosen.innerText || chosen.textContent),
+             matched: scored[0].t, optionsShown: options.length };
+  }
+  const operations = { _locateElement, _clickElement, _setChecked, _selectOptionAsync, _actionablePoint };
+  if (!Object.hasOwn(operations, operation)) throw new Error('Unknown page interaction');
+  return operations[operation](...args);
+}
 
 // MAIN-world: is this element perceivably rendered (has a box and is not
 // display:none / visibility:hidden / fully transparent)? A hidden native
 // <input> (MTD/Element/AntD custom control) fails this even though it is
 // perfectly actionable via its styled wrapper.
-function _rendered(el) {
-  if (!el || !el.getBoundingClientRect) return false;
-  const r = el.getBoundingClientRect();
-  if (r.width === 0 && r.height === 0) return false;
-  const cs = window.getComputedStyle(el);
-  return !(cs.display === 'none' || cs.visibility === 'hidden' || cs.opacity === '0');
-}
+
 
 // Walk up from a hidden checkable input to the visible control the user
 // actually clicks: the styled wrapper (<label class="mtd-radio">,
 // .el-checkbox, .ant-checkbox-wrapper, [role=radio/checkbox/switch]) or an
 // explicit <label for=id>. Component-library-generic: matches ARIA roles,
 // the <label> association, and common wrapper class families.
-function _checkableProxy(input) {
-  let node = input;
-  for (let depth = 0; node && depth < 5; depth++) {
-    const p = node.parentElement;
-    if (!p || p === document.body || p === document.documentElement) break;
-    const role = (p.getAttribute && p.getAttribute('role')) || '';
-    const cls = (p.className && p.className.baseVal !== undefined)
-      ? '' : String(p.className || '');
-    const isWrapper = p.tagName === 'LABEL' ||
-      /^(radio|checkbox|switch|button|toggle)$/.test(role) ||
-      /(radio|checkbox|switch|toggle|check)-?(wrap|wrapper|inner|input|label|button)?/i.test(cls) ||
-      /(mtd|el|ant|van|nut|arco)-.*(radio|checkbox|switch|select|check)/i.test(cls);
-    if (isWrapper && _rendered(p)) return p;
-    node = p;
-  }
-  if (input.id) {
-    const lab = document.querySelector(`label[for="${CSS.escape(input.id)}"]`);
-    if (lab && _rendered(lab)) return lab;
-  }
-  // Wrapping <label> ancestor even without a recognised class.
-  const wrapLabel = input.closest && input.closest('label');
-  if (wrapLabel && _rendered(wrapLabel)) return wrapLabel;
-  return null;
-}
 
-function _isCheckable(el) {
-  if (!el || !el.tagName) return false;
-  const role = (el.getAttribute && el.getAttribute('role')) || '';
-  if (/^(radio|checkbox|switch|menuitemcheckbox|menuitemradio)$/.test(role)) return true;
-  return el.tagName === 'INPUT' && /^(radio|checkbox)$/.test((el.type || '').toLowerCase());
-}
+
+
 
 // Resolve any element (wrapper or hidden input) to the underlying checkable
 // control. Returns {input, proxy} or null when nothing checkable is found.
-function _resolveCheckable(el) {
-  if (!el) return null;
-  if (_isCheckable(el) && el.tagName === 'INPUT') {
-    return { input: el, proxy: _rendered(el) ? el : (_checkableProxy(el) || el) };
-  }
-  if (_isCheckable(el) && el.tagName !== 'INPUT') {
-    const inner = el.querySelector && el.querySelector('input[type=radio],input[type=checkbox]');
-    return { input: inner || null, proxy: el, ariaOnly: !inner };
-  }
-  const inner = el.querySelector && el.querySelector('input[type=radio],input[type=checkbox]');
-  if (inner) return { input: inner, proxy: _rendered(el) ? el : (_checkableProxy(inner) || el) };
-  const lab = el.closest && el.closest('label');
-  if (lab) {
-    const li = lab.querySelector('input[type=radio],input[type=checkbox]');
-    if (li) return { input: li, proxy: lab };
-  }
-  return null;
-}
+
 
 // Classify a click target. Runs MAIN-world. Returns {ok:true,...} with the
 // measured point + the element to use, or {error, targetCode, ...detail}.
-function _actionablePoint(selector, scrollTo, forwardTarget) {
-  const el = document.querySelector(selector);
-  if (!el) return { error: `Element not found: ${selector}`, targetCode: TARGET.NOT_FOUND };
-  if (!el.isConnected) return { error: 'Element left the document', targetCode: TARGET.DETACHED };
 
-  // Forwarding: a custom-control wrapper carries the hidden input it drives.
-  // Prefer interacting with the real control; fall back to the wrapper when
-  // the control is itself hidden (the common MTD/Element/AntD case).
-  let target = el;
-  let forwarded = false;
-  if (forwardTarget) {
-    const real = document.querySelector(forwardTarget);
-    if (real) { target = real; forwarded = true; }
-  }
-  if (target.disabled || (target.closest && target.closest('[disabled],fieldset[disabled]'))) {
-    return { error: 'Element is disabled', targetCode: TARGET.DISABLED,
-             tag: target.tagName.toLowerCase() };
-  }
-  // Pick a visible point: the real control if rendered, else its proxy/wrapper.
-  let pointEl = target;
-  if (!_rendered(pointEl)) {
-    const proxy = _isCheckable(target) ? _checkableProxy(target) : null;
-    if (proxy && _rendered(proxy)) pointEl = proxy;
-    else if (forwarded && _rendered(el)) pointEl = el;
-    else return { error: 'Element is not visible', targetCode: TARGET.NOT_VISIBLE,
-                  tag: target.tagName.toLowerCase() };
-  }
-  if (scrollTo) pointEl.scrollIntoView({ behavior: 'instant', block: 'center' });
-  const r = pointEl.getBoundingClientRect();
-  const x = r.left + r.width / 2;
-  const y = r.top + r.height / 2;
-  // Obscured check: another element sits on top of the click point.
-  const top = document.elementFromPoint(x, y);
-  if (top && top !== pointEl && !pointEl.contains(top) && !(target.contains && target.contains(top))) {
-    const cs = window.getComputedStyle(top);
-    if (cs.pointerEvents !== 'none' && cs.visibility !== 'hidden' && cs.display !== 'none') {
-      return { error: 'Element is obscured by another element',
-               targetCode: TARGET.OBSCURED,
-               obscuring: top.tagName.toLowerCase() +
-                 (top.className && top.className.baseVal === undefined
-                   ? '.' + String(top.className).trim().split(/\s+/).slice(0, 2).join('.')
-                   : ''), };
-    }
-  }
-  return {
-    ok: true, x, y,
-    tag: target.tagName.toLowerCase(),
-    text: (pointEl.innerText || target.innerText || '').trim().substring(0, 100),
-    forwarded,
-    // Let the synthetic path act on the real control (hidden ok) when we
-    // resolved one; otherwise it dispatches at the visible point element.
-    targetSelector: forwarded ? forwardTarget : selector,
-    pointIsProxy: pointEl !== target,
-  };
-}
 
 // MAIN-world locator: scroll + element-center viewport coords + label bits.
 // Shared by the CDP click/hover paths. Now forwards custom controls to their
 // hidden input and classifies failures with the TARGET_* taxonomy.
-function _locateElement(selector, scrollTo, forwardTarget) {
-  const res = _actionablePoint(selector, scrollTo, forwardTarget);
-  if (res.error) return { error: res.error, targetCode: res.targetCode, obscuring: res.obscuring };
-  return { x: res.x, y: res.y, tag: res.tag, text: res.text, forwarded: res.forwarded };
-}
+
 
 async function _cdpLocate(tabId, selector, scrollTo, forwardTarget) {
   const results = await chrome.scripting.executeScript({
     target: { tabId },
     world: 'MAIN',
-    func: _locateElement,
-    args: [selector, scrollTo, forwardTarget || null],
+    func: _pageInteraction,
+    args: ['_locateElement', [selector, scrollTo, forwardTarget || null]],
   });
   const loc = results && results[0] && results[0].result;
   if (!loc) throw new Error('No result from locator script');
@@ -2551,9 +2795,9 @@ async function cmdClickElement(params) {
   const results = await chrome.scripting.executeScript({
     target: _pageTarget(params),
     world: 'MAIN',
-    func: _clickElement,
-    args: [params.selector, params.rightClick || false, params.scrollTo !== false,
-           forwardTarget],
+    func: _pageInteraction,
+    args: ['_clickElement', [params.selector, params.rightClick || false, params.scrollTo !== false,
+           forwardTarget]],
   });
 
   if (results && results[0] && results[0].result) {
@@ -2567,71 +2811,7 @@ async function cmdClickElement(params) {
   return { clicked: false, error: 'No result from script' };
 }
 
-function _clickElement(selector, rightClick, scrollTo, forwardTarget) {
-  const el = document.querySelector(selector);
-  if (!el) return { clicked: false, error: `Element not found: ${selector}`,
-                    targetCode: TARGET.NOT_FOUND };
-  // Forward custom controls to their real (possibly hidden) input: dispatch
-  // the trusted-equivalent event sequence at the visible point element but
-  // call .click() on the control so native checked toggling + framework
-  // handlers fire on the right node.
-  let control = el;
-  let forwarded = false;
-  if (forwardTarget) {
-    const real = document.querySelector(forwardTarget);
-    if (real) { control = real; forwarded = true; }
-  }
-  if (control.disabled || (control.closest && control.closest('[disabled],fieldset[disabled]'))) {
-    return { clicked: false, error: 'Element is disabled', targetCode: TARGET.DISABLED,
-             tag: control.tagName.toLowerCase() };
-  }
 
-  // Scroll into view
-  if (scrollTo) {
-    el.scrollIntoView({ behavior: 'instant', block: 'center' });
-  }
-
-  const rect = el.getBoundingClientRect();
-  const x = rect.left + rect.width / 2;
-  const y = rect.top + rect.height / 2;
-
-  if (rightClick) {
-    // Dispatch contextmenu event (right-click)
-    const contextEvent = new MouseEvent('contextmenu', {
-      bubbles: true, cancelable: true, view: window,
-      clientX: x, clientY: y, button: 2,
-    });
-    el.dispatchEvent(contextEvent);
-    return {
-      clicked: true, rightClick: true,
-      tag: el.tagName.toLowerCase(),
-      text: (el.innerText || '').trim().substring(0, 100),
-      position: { x: Math.round(x), y: Math.round(y) },
-    };
-  }
-
-  // Standard left-click sequence: mousedown → mouseup → click on the
-  // visible element (this is what real users hit and what overlays expect).
-  for (const eventType of ['mousedown', 'mouseup', 'click']) {
-    const event = new MouseEvent(eventType, {
-      bubbles: true, cancelable: true, view: window,
-      clientX: x, clientY: y, button: 0,
-    });
-    el.dispatchEvent(event);
-  }
-
-  // Also call .click() on the resolved control for good measure (some
-  // frameworks only listen for this, and a hidden input needs its own
-  // .click() to toggle checked when the wrapper's listeners don't forward).
-  try { control.click(); } catch {}
-
-  return {
-    clicked: true, rightClick: false,
-    tag: el.tagName.toLowerCase(),
-    text: (el.innerText || '').trim().substring(0, 100),
-    position: { x: Math.round(x), y: Math.round(y) },
-  };
-}
 
 // ══════════════════════════════════════════
 //  Hover Element (Playwright-style hover)
@@ -2949,11 +3129,11 @@ function _typeText(selector, text, clearFirst, pressEnter) {
 
   // Type character by character for frameworks that listen to individual keystrokes
   // But set .value directly first for reliability
-  const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
-    window.HTMLInputElement.prototype, 'value'
-  )?.set || Object.getOwnPropertyDescriptor(
-    window.HTMLTextAreaElement.prototype, 'value'
-  )?.set;
+  const nativePrototype = el.tagName === 'TEXTAREA'
+    ? window.HTMLTextAreaElement.prototype
+    : el.tagName === 'INPUT' ? window.HTMLInputElement.prototype : null;
+  const nativeInputValueSetter = nativePrototype
+    ? Object.getOwnPropertyDescriptor(nativePrototype, 'value')?.set : null;
 
   if (nativeInputValueSetter) {
     nativeInputValueSetter.call(el, text);
@@ -3006,74 +3186,15 @@ async function cmdSetChecked(params) {
   const results = await chrome.scripting.executeScript({
     target: _pageTarget(params),
     world: 'MAIN',
-    func: _setChecked,
-    args: [params.selector, params.forwardTarget || null,
-           params.checked !== false, params.scrollTo !== false],
+    func: _pageInteraction,
+    args: ['_setChecked', [params.selector, params.forwardTarget || null,
+           params.checked !== false, params.scrollTo !== false]],
   });
   const r = results && results[0] && results[0].result;
   return r || { checked: false, applied: false, error: 'No result from script' };
 }
 
-function _setChecked(selector, forwardTarget, wantChecked, scrollTo) {
-  const start = document.querySelector(selector);
-  if (!start) return { applied: false, error: `Element not found: ${selector}`,
-                       targetCode: TARGET.NOT_FOUND };
-  const forwardEl = forwardTarget ? document.querySelector(forwardTarget) : null;
-  const res = _resolveCheckable(forwardEl || start) || _resolveCheckable(start);
-  if (!res) return { applied: false, error: 'Target is not a checkable control',
-                     targetCode: TARGET.NOT_CHECKABLE,
-                     tag: start.tagName.toLowerCase() };
-  const { input, proxy } = res;
-  const disabled = (input && input.disabled) ||
-    (proxy && proxy.getAttribute && proxy.getAttribute('aria-disabled') === 'true') ||
-    (proxy && proxy.closest && proxy.closest('[disabled],fieldset[disabled]'));
-  if (disabled) return { applied: false, error: 'Control is disabled',
-                         targetCode: TARGET.DISABLED };
 
-  const readState = () => input ? !!input.checked
-    : (proxy.getAttribute('aria-checked') === 'true');
-  const before = readState();
-  if (before === wantChecked) {
-    return { applied: true, already: true, checked: before,
-             role: input ? input.type : (proxy.getAttribute('role') || 'checkbox'),
-             tag: (proxy || input).tagName.toLowerCase() };
-  }
-  if (scrollTo && proxy && proxy.scrollIntoView) {
-    proxy.scrollIntoView({ behavior: 'instant', block: 'center' });
-  }
-  // Preferred path: click the visible proxy/label — native behaviour toggles
-  // the associated input and fires the framework's handlers. For a radio we
-  // can only set true; a click on an unchecked radio checks it.
-  const clickTarget = (proxy && _rendered(proxy)) ? proxy : (input || proxy);
-  try { clickTarget.click(); } catch (e) {}
-  // Ensure the end-state even if the proxy click didn't forward (some
-  // wrappers swallow the event): set the control + dispatch the sequence.
-  if (readState() !== wantChecked) {
-    if (input) {
-      if (input.type === 'radio') {
-        input.checked = true;
-      } else {
-        input.checked = wantChecked;
-      }
-      input.dispatchEvent(new Event('click', { bubbles: true }));
-      input.dispatchEvent(new Event('input', { bubbles: true }));
-      input.dispatchEvent(new Event('change', { bubbles: true }));
-    } else if (proxy && proxy.setAttribute) {
-      proxy.setAttribute('aria-checked', wantChecked ? 'true' : 'false');
-      proxy.dispatchEvent(new Event('input', { bubbles: true }));
-      proxy.dispatchEvent(new Event('change', { bubbles: true }));
-    }
-  }
-  const after = readState();
-  return {
-    applied: after === wantChecked,
-    checked: after, before,
-    role: input ? input.type : (proxy.getAttribute('role') || 'checkbox'),
-    tag: (proxy || input).tagName.toLowerCase(),
-    ...(after === wantChecked ? {} : { error: 'state did not reach requested value',
-                                       targetCode: TARGET.NOT_CHECKABLE }),
-  };
-}
 
 // ══════════════════════════════════════════
 //  Select Option (custom dropdown)  — v5.7.0
@@ -3100,10 +3221,10 @@ async function cmdSelectOption(params) {
     target: _pageTarget(params),
     world: 'MAIN',
     awaitPromise: true,
-    func: _selectOptionAsync,
-    args: [params.selector, params.forwardTarget || null,
+    func: _pageInteraction,
+    args: ['_selectOptionAsync', [params.selector, params.forwardTarget || null,
            String(params.option != null ? params.option : params.optionText),
-           params.exact !== false, timeoutMs],
+           params.exact !== false, timeoutMs]],
   });
   const r = results && results[0] && results[0].result;
   return r || { selected: false, error: 'No result from script' };
@@ -3111,103 +3232,7 @@ async function cmdSelectOption(params) {
 
 // Async because it polls for the dropdown to open. Injected via
 // chrome.scripting with awaitPromise.
-async function _selectOptionAsync(selector, forwardTarget, optionText, exact, timeoutMs) {
-  const norm = (s) => String(s || '').replace(/\s+/g, ' ').trim();
-  const start = document.querySelector(selector) ||
-    (forwardTarget && document.querySelector(forwardTarget));
-  if (!start) return { selected: false, error: `Element not found: ${selector}`,
-                       targetCode: TARGET.NOT_FOUND };
 
-  // Native <select> fast path (incl. when the trigger IS a real select).
-  const nativeSelect = start.tagName === 'SELECT' ? start
-    : (start.closest && start.closest('select')) ||
-      (start.querySelector && start.querySelector('select'));
-  if (nativeSelect) {
-    const wanted = norm(optionText).toLowerCase();
-    const opt = Array.from(nativeSelect.options).find(o => {
-      const t = norm(o.text).toLowerCase();
-      return exact ? t === wanted : t.includes(wanted);
-    });
-    if (!opt) return { selected: false, error: `No option matches "${optionText}"`,
-                       targetCode: TARGET.NOT_SELECTABLE,
-                       options: Array.from(nativeSelect.options).slice(0, 12).map(o => norm(o.text)) };
-    nativeSelect.value = opt.value;
-    nativeSelect.dispatchEvent(new Event('input', { bubbles: true }));
-    nativeSelect.dispatchEvent(new Event('change', { bubbles: true }));
-    return { selected: true, native: true, value: opt.value, text: norm(opt.text) };
-  }
-
-  const trigger = forwardTarget && document.querySelector(forwardTarget)
-    ? document.querySelector(forwardTarget) : start;
-  if (trigger.disabled || (trigger.closest && trigger.closest('[disabled],fieldset[disabled]'))) {
-    return { selected: false, error: 'Select is disabled', targetCode: TARGET.DISABLED };
-  }
-  if (trigger.scrollIntoView) trigger.scrollIntoView({ behavior: 'instant', block: 'center' });
-
-  const OPTION_SELECTOR =
-    '[role="option"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], ' +
-    '.mtd-select-dropdown__item, .el-select-dropdown__item, .ant-select-item-option, ' +
-    '.el-select-dropdown li, .mtd-select-dropdown li, .ant-select-dropdown li, ' +
-    '[class*="select"][class*="option"], [class*="dropdown"][class*="item"]';
-  const visibleOptions = () => Array.from(document.querySelectorAll(OPTION_SELECTOR))
-    .filter(_rendered);
-
-  // Open the dropdown. A trusted click would be ideal, but this path is
-  // already MAIN-world; dispatch the full sequence on the trigger.
-  const openDropdown = () => {
-    const r = trigger.getBoundingClientRect();
-    const x = r.left + r.width / 2, y = r.top + r.height / 2;
-    for (const type of ['mousedown', 'mouseup', 'click']) {
-      trigger.dispatchEvent(new MouseEvent(type, {
-        bubbles: true, cancelable: true, view: window, clientX: x, clientY: y, button: 0 }));
-    }
-    try { trigger.click(); } catch (e) {}
-    const inner = trigger.querySelector && trigger.querySelector('input');
-    if (inner) { try { inner.focus(); inner.click(); } catch (e) {} }
-  };
-
-  const deadline = Date.now() + timeoutMs;
-  let options = visibleOptions();
-  if (!options.length) {
-    openDropdown();
-    while (Date.now() < deadline) {
-      await new Promise(r => setTimeout(r, 80));
-      options = visibleOptions();
-      if (options.length) break;
-    }
-  }
-  if (!options.length) {
-    return { selected: false, error: 'Dropdown did not open (no options became visible)',
-             targetCode: TARGET.NOT_SELECTABLE,
-             tag: trigger.tagName.toLowerCase() };
-  }
-
-  const wanted = norm(optionText).toLowerCase();
-  const scored = options.map(o => {
-    const t = norm(o.innerText || o.textContent).toLowerCase();
-    let s = 0;
-    if (t === wanted) s = 100;
-    else if (!exact && t.includes(wanted)) s = 60;
-    else if (!exact && wanted && t.startsWith(wanted)) s = 70;
-    return { s, o, t };
-  }).filter(x => x.s > 0).sort((a, b) => b.s - a.s);
-
-  if (!scored.length) {
-    return { selected: false, error: `No visible option matches "${optionText}"`,
-             targetCode: TARGET.NOT_SELECTABLE,
-             options: options.slice(0, 12).map(o => norm(o.innerText || o.textContent)) };
-  }
-  const chosen = scored[0].o;
-  const r = chosen.getBoundingClientRect();
-  const x = r.left + r.width / 2, y = r.top + r.height / 2;
-  for (const type of ['mousedown', 'mouseup', 'click']) {
-    chosen.dispatchEvent(new MouseEvent(type, {
-      bubbles: true, cancelable: true, view: window, clientX: x, clientY: y, button: 0 }));
-  }
-  try { chosen.click(); } catch (e) {}
-  return { selected: true, native: false, text: norm(chosen.innerText || chosen.textContent),
-           matched: scored[0].t, optionsShown: options.length };
-}
 
 // ══════════════════════════════════════════
 //  Scroll Page
@@ -6054,7 +6079,7 @@ function _textForDiagnostic(value) {
 
 // Binary assets that Chrome downloads (instead of rendering) when a tab
 // navigates to them, and which yield no scrapable text. Mirrors the
-// server-side _BROWSER_UNRENDERABLE_EXTS list in lib/search_bridge.py.
+// server-side _BROWSER_UNRENDERABLE_EXTS list in lib/search/search_bridge.py.
 // `.svg` is intentionally excluded (it renders as text/markup).
 function isBinaryAssetUrl(url) {
   let path;

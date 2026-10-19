@@ -14,7 +14,8 @@
     "readAdmission": "reserve-declared-body-before-allocation",
     "writeAdmission": "reserve-exact-encoded-body-before-allocation",
     "canonicalFieldOrder": "strictly-increasing-numeric-id",
-    "unknownFieldPolicy": "reject"
+    "unknownFieldPolicy": "reject",
+    "memoryHintAdmission": "all-usize-targets-including-zero-file-only"
   },
   "messageKinds": {
     "hello": 1,
@@ -263,7 +264,7 @@
       "system.metrics": {
         "kind": "query",
         "payloadContract": "tofu-db.system-metrics.v1",
-        "answers": "listener/maintenance/background-packer counters, durability counters, nonzero commit-stage totals, launch resourceBudget"
+        "answers": "listener/maintenance/background-packer counters, source onlineGarbageCollector and independent searchGarbageCollector counters, durability counters, nonzero commit-stage totals, launch resourceBudget"
       },
       "system.backup": {
         "kind": "command",
@@ -331,8 +332,9 @@
     }
   },
   "streamedRequests": {
-    "maximumPayloadBytes": 67108864,
-    "maximumChunks": 64,
+    "payloadByteCountEncoding": "u64",
+    "chunkIndexEncoding": "u32",
+    "aggregateAdmission": "complete-stream-without-private-byte-or-chunk-count-quota",
     "ordering": "one-incomplete-stream-per-connection-strict-zero-based-chunk-index",
     "identity": "every-chunk-exactly-matches-correlation-deadline-owner-tenant-command-schema-stream-and-declared-total; terminator-matches-request-identity",
     "terminator": "final-chunk-then-empty-payload-request-carries-operation",
@@ -340,8 +342,9 @@
     "eligibility": "all-semantic-requests-larger-than-one-frame"
   },
   "streamedResponses": {
-    "maximumPayloadBytes": 67108864,
-    "maximumChunks": 64,
+    "payloadByteCountEncoding": "u64",
+    "chunkIndexEncoding": "u32",
+    "aggregateAdmission": "complete-stream-without-private-byte-or-chunk-count-quota",
     "chunkPayloadBytes": 1048576,
     "eligibility": "successful-response-payload-larger-than-one-chunk",
     "ordering": "strict-zero-based-chunk-index-with-final-on-last-chunk",
@@ -355,14 +358,14 @@
     "Correlation and blob stream IDs are fixed-width and nonzero.",
     "Write semantics require a non-null commandId at semantic dispatch, never from a client-supplied write flag.",
     "A zero response status has null error fields and retryable=false; nonzero status has both error fields and an empty payload.",
-    "Blob request chunks carry nullable commandId and an identical positive totalPayloadBytes no larger than 64 MiB, are ordered by streamId plus chunkIndex, reserve that aggregate before exact-capacity allocation, and final must complete the declared total before one identity-matched empty-payload Request consumes it.",
-    "A successful payload above one chunk is emitted as responseChunk frames followed by one empty success Response; correlation, schema, stream identity, order, final placement, aggregate size, and chunk count are exact and bounded.",
+    "Blob request chunks carry nullable commandId and an identical positive totalPayloadBytes within the u64 count representation, are ordered by streamId plus chunkIndex, reserve that aggregate before exact-capacity allocation, and final must complete the declared total before one identity-matched empty-payload Request consumes it.",
+    "A successful payload above one chunk is emitted as responseChunk frames followed by one empty success Response; correlation, schema, stream identity, order, final placement, declared aggregate size, and u32 chunk ordinals are exact; there is no private stream byte/count quota.",
     "CRC, canonical encoding, field set, and semantic invariants are validated before dispatch.",
     "A server session is constructible only after constant-time comparison of a SHA-256 token witness, negotiates exactly once, fixes its authenticated owner and tenant authority, emits only the negotiated schema plus the request correlation ID in every response, and never formats token material.",
-    "A connection requires Hello as its first frame, returns a zero-status response as negotiation acknowledgement, distinguishes clean boundary EOF from truncated frames, and shares a 64-frame/134217728-byte in-flight admission budget across connections; streamed aggregates consume one frame slot and their full declared byte capacity until dispatch.",
-    "The network acceptor binds only a numeric loopback address, admits at most 64 connections, holds the authority mutex for one semantic request rather than a connection lifetime, uses bounded socket I/O and accept polling, and treats EOF on an inherited nonblocking empty pipe as the signal to stop admission, cancel connections at frame boundaries, and join them.",
+    "A connection requires Hello as its first frame, acknowledges negotiation with a zero-status response, distinguishes clean boundary EOF from truncated frames, and shares frame ownership accounting across connections; a RAM hint selects memory or anonymous-file buffers without count/aggregate-byte admission. Streamed request payloads retain their owned reservation until dispatch completes.",
+    "The network acceptor binds only a numeric loopback address, accepts connections on demand; launch-derived connection targets size initial reservations and idle reuse, never active admission, holds the authority mutex for one semantic request rather than a connection lifetime, uses bounded socket I/O and accept polling, and treats EOF on an inherited nonblocking empty pipe as the signal to stop admission, cancel connections at frame boundaries, and join them.",
     "The pre-authority daemon opens only an existing explicit authority, derives its wire token from a bounded ASCII environment secret that is removed after reading, publishes one bounded credential-free readiness line, and is selectable by the application Supervisor as a certified backend that is not the default.",
-    "Daemon connection and frame budgets derive from one launch observation of affinity/cgroup CPU, host/cgroup memory headroom and authority-volume free bytes; missing CPU or memory selects the fixed lean profile, and every derived value remains under the contract hard ceilings."
+    "Daemon connection and frame budgets derive from one launch observation of affinity/cgroup CPU, host/cgroup memory headroom and authority-volume free bytes; missing CPU or memory selects the fixed lean profile, and frame memory hints scale directly with observed headroom, including zero/file-only under pressure; active connections, owned payloads and job counts are not capped by reuse or memory hints."
   ],
   "committedEvents": {
     "envelopeContract": "storage.committed-events/v1",
@@ -422,5 +425,37 @@
     "privacy": "only fixed reason labels and counts; never paths, keys, request bodies or original error text",
     "lifecycle": "process-local counters; no worker, cache, persistent state or per-request log IO",
     "snapshotConsistency": "independent atomic loads; not a transactional multi-counter snapshot"
+  },
+  "walWriteBuffer": {
+    "contract": "tofudb.wal-write-buffer/v1",
+    "metricsField": "walWriteBuffer",
+    "headroomDivisor": 256,
+    "fallbackCapacityBytes": 262144,
+    "worker": "existing-wal-barrier-worker",
+    "durability": "exact-captured-prefix-after-physical-write-and-sync",
+    "overflow": "synchronous-original-write-path-no-admission",
+    "vfs": "explicit-independent-handle-capability-stateful-wrappers-default-disabled",
+    "accounting": "queued-and-inflight-exact-frame-bytes-through-deallocation-excludes-queue-and-allocator-metadata",
+    "close": "refuse-new-queued-writes-drain-final-prefix-join-before-reclamation",
+    "writeCounters": "fully-successful-batches-only-even-if-subsequent-sync-fails",
+    "writeNanos": "physical-write-time-excludes-sync; all attempts",
+    "fields": [
+      "available",
+      "contract",
+      "enabled",
+      "failed",
+      "closing",
+      "capacityBytes",
+      "retainedFrameBytes",
+      "peakFrameBytes",
+      "queuedFrames",
+      "writtenFrames",
+      "writtenBatches",
+      "writtenBytes",
+      "writeNanos",
+      "synchronousFallbacks",
+      "scope"
+    ],
+    "physicalPublication": "captured-generation-prefix-worker-write-and-sync-before-original-lost-sync-cover-and-CONTROL; applies-to-Strict-and-Normal"
   }
 }

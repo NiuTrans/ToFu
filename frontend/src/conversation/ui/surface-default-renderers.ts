@@ -13,6 +13,8 @@ import type {
 import { buildToolFallbackCard } from '../presentation/tool-fallback-presentation';
 import { renderProgramExecutionCard } from './program-execution-card';
 
+import { isNativeProgramGateway } from '../presentation/program-gateway-presentation';
+
 import { programChildParentCallId } from '../presentation/tool-execution-groups';
 
 function jsonText(value: unknown): string {
@@ -53,6 +55,12 @@ export function renderDefaultBlock(
   }
   if (block.kind === 'tool') {
 
+    if (isNativeProgramGateway(block.round ?? { toolName: block.name })) {
+      renderProgramExecutionCard(node, { ...block.round, toolName: block.name,
+        toolArgs: block.input, status: block.round?.status ?? block.result?.status, result: block.result });
+      return;
+    }
+
     const parentId = programChildParentCallId(block.round);
     node.classList.toggle('ptool-parent-child', Boolean(parentId));
     if (parentId) node.dataset.parentToolCallId = parentId;
@@ -60,7 +68,8 @@ export function renderDefaultBlock(
     const status = typeof block.result?.status === 'string'
       ? block.result.status : '';
     const card = buildToolFallbackCard(document, {
-      title: block.name || 'Tool',
+      title: block.round?.query || block.name || 'Tool',
+      resourceRound: block.round,
       status,
       sections: [
         { label: 'Input', text: jsonText(block.input) },

@@ -13,7 +13,7 @@ import pytest
 
 from lib.llm.conversion import ProtocolConversionError, object_arguments
 from lib.llm.reasoning import ReasoningContractError, capture_intent
-from lib.llm_errors import LocalRequestPreparationError
+from lib.llm.llm_errors import LocalRequestPreparationError
 
 pytestmark = pytest.mark.unit
 

@@ -99,6 +99,19 @@ def test_commit_spawn_thread_is_a_daemon(spawned):
     assert spawned[0]['daemon'] is True
 
 
+def test_transient_history_finishes_on_its_existing_worker_before_return(monkeypatch, spawned):
+    import threading
+    calls = []
+    task = _task(_transientRuntime=True, toolRounds=[_round('code_exec')])
+    def commit(*args):
+        calls.append((threading.get_ident(), args))
+    monkeypatch.setattr(commit_mod, '_run_commit_round_async', commit)
+    commit_mod._spawn_async_commit_round(task, True, '/proj', ['/other'])
+    assert spawned == []
+    assert len(calls) == 1 and calls[0][0] == threading.get_ident()
+    assert calls[0][1][:4] == (task, '/proj', ['/other'], True)
+
+
 def test_commit_spawn_captures_opaque_writer_before_terminal_release(spawned):
     """The daemon must not retain or later reread the structural projection."""
     task = _task(toolRounds=[_round('code_exec')])
@@ -538,12 +551,17 @@ def test_terminal_finalizer_schedules_profile_consolidation():
 
     finalizer = ast.parse(
         inspect.getsource(_finalize._finalize_and_emit_done)).body[0]
-    calls = {
-        node.func.id
+    calls = [
+        node
         for node in ast.walk(finalizer)
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-    }
-    assert '_spawn_async_profile_consolidation' in calls
+        and node.func.id == 'finish_committed_task'
+    ]
+    assert len(calls) == 1
+    assert any(keyword.arg == 'consolidate_profile'
+               and isinstance(keyword.value, ast.Name)
+               and keyword.value.id == '_spawn_async_profile_consolidation'
+               for keyword in calls[0].keywords)
 
 
 @pytest.fixture

@@ -76,7 +76,7 @@ class ProgressBeacon:
     killing real work is far more expensive than reaping a wedged agent late.
     """
 
-    __slots__ = ('_lock', '_last', '_notes', '_stall_timeout', '_created')
+    __slots__ = ('_lock', '_last', '_notes', '_stall_timeout', '_created', '_persistence_waits')
 
     def __init__(self, stall_timeout: float = DEFAULT_STALL_TIMEOUT_SEC):
         self._lock = threading.Lock()
@@ -84,6 +84,8 @@ class ProgressBeacon:
         self._notes: dict[str, str] = {}
         self._stall_timeout = float(stall_timeout)
         self._created = time.monotonic()
+
+        self._persistence_waits: dict[str, set[object]] = {}
 
     # ── Recording ────────────────────────────────────
 
@@ -103,6 +105,23 @@ class ProgressBeacon:
             if note:
                 self._notes[agent_id] = note
 
+    def begin_persistence_wait(self, agent_id: str, token: object) -> None:
+        """An owned pending write is explained waiting, not fabricated progress."""
+        with self._lock:
+            self._last.setdefault(agent_id, time.monotonic())
+            self._persistence_waits.setdefault(agent_id, set()).add(token)
+
+    def end_persistence_wait(self, agent_id: str, token: object, *, acknowledged: bool) -> None:
+        with self._lock:
+            waits = self._persistence_waits.get(agent_id)
+            if waits is not None:
+                waits.discard(token)
+                if not waits:
+                    self._persistence_waits.pop(agent_id, None)
+            if acknowledged and agent_id in self._last:
+                self._last[agent_id] = time.monotonic()
+                self._notes[agent_id] = 'storage_ack'
+
     def forget(self, agent_id: str) -> None:
         """Drop *agent_id* once it has settled, so it can't hold a swarm open."""
         if not agent_id:
@@ -110,6 +129,8 @@ class ProgressBeacon:
         with self._lock:
             self._last.pop(agent_id, None)
             self._notes.pop(agent_id, None)
+
+            self._persistence_waits.pop(agent_id, None)
 
     def tracked_agents(self) -> list[str]:
         """Ids currently being tracked (i.e. started and not yet settled)."""
@@ -148,6 +169,10 @@ class ProgressBeacon:
         disagree about the same running agent.
         """
         try:
+            with self._lock:
+                if (self._persistence_waits if agent_id is None else
+                        self._persistence_waits.get(agent_id)):
+                    return True
             return self.seconds_since_activity(agent_id) < self._stall_timeout
         except Exception as e:
             # Fail OPEN: a broken beacon must not become a new way to kill a
@@ -180,7 +205,7 @@ class ProgressBeacon:
         with self._lock:
             for aid, ts in self._last.items():
                 silent = max(0.0, now - ts)
-                if silent >= self._stall_timeout:
+                if silent >= self._stall_timeout and not self._persistence_waits.get(aid):
                     out.append((aid, silent, self._notes.get(aid, '')))
         out.sort(key=lambda x: -x[1])
         return out

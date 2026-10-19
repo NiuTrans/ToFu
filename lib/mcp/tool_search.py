@@ -33,7 +33,6 @@ from lib.mcp.types import parse_namespaced_name
 DEFAULT_ACTIVE_LIMIT = 8
 MAX_DEPENDENCY_DEPTH = 8
 _STATE_TTL_SECONDS = 24 * 60 * 60
-_MAX_STICKY_USED_TOOLS = 32
 _MAX_INLINE_STATE_KEY_CHARS = 256
 
 _LOCK = threading.RLock()
@@ -41,7 +40,6 @@ _INDEX_CACHE: OrderedDict[str, 'CatalogIndex'] = OrderedDict()
 _SELECTION_STATE: OrderedDict[str, dict[str, Any]] = OrderedDict()
 _CACHE_METRICS = {
     'indexEvictions': 0,
-    'stateEvictions': 0,
     'stateExpirations': 0,
 }
 
@@ -51,9 +49,6 @@ def _catalog_index_capacity() -> int:
     return tool_search_catalog_index_capacity()
 
 
-def _selection_state_capacity() -> int:
-    from lib.tools.resource_policy import tool_search_selection_state_capacity
-    return tool_search_selection_state_capacity()
 
 
 def canonical_schema_hash(schema: Any) -> str:
@@ -112,7 +107,7 @@ def _normalized_meta(value: Any) -> dict[str, Any]:
 
 
 def mcp_selection_scope_id(
-    *, task_id: str, conv_id: str = '', owner_user_id: int = 0,
+    *, task_id: str, conv_id: str = '', owner_user_id: int = 0, storage_free: bool = False,
 ) -> str:
     """Return the bounded-state key for one owner's conversation or task.
 
@@ -120,10 +115,23 @@ def mcp_selection_scope_id(
     state merely because their clients supplied the same conversation ID.
     Headless callers without a conversation retain the historical task scope.
     """
-    conversation = str(conv_id or '').strip()
+    if type(storage_free) is not bool:
+        raise ValueError('MCP selector lifetime must be explicit')
+    conversation = '' if storage_free else str(conv_id or '').strip()
     if conversation:
         return f'conversation:{int(owner_user_id or 0)}:{conversation}'
     return f'task:{str(task_id or "anonymous")}'
+
+
+def release_transient_task_selection(task: dict) -> bool:
+    """Retire reconstructible task wire only after its physical execution joins."""
+    if (task.get('_transientRuntime') is not True or type(task.get('_userId')) is not int
+            or task['_userId']<=0 or not isinstance(task.get('id'),str) or not task['id']):
+        raise ValueError('MCP task selector disposal requires owned transient identity')
+    scope=mcp_selection_scope_id(task_id=task['id'],owner_user_id=task['_userId'],storage_free=True)
+    key=_bounded_state_key(scope)
+    with _LOCK:
+        return _SELECTION_STATE.pop(key,None) is not None
 
 
 def _mcp_name_from_call(value: Any) -> str:
@@ -419,10 +427,6 @@ def _prune_states(now: float) -> None:
             break
         _SELECTION_STATE.popitem(last=False)
         _CACHE_METRICS['stateExpirations'] += 1
-    capacity = max(1, int(_selection_state_capacity()))
-    while len(_SELECTION_STATE) > capacity:
-        _SELECTION_STATE.popitem(last=False)
-        _CACHE_METRICS['stateEvictions'] += 1
 
 
 def _bounded_state_key(value: Any) -> str:
@@ -441,10 +445,6 @@ def _state_for_update_locked(
     _prune_states(now)
     state = _SELECTION_STATE.pop(state_key, None)
     if state is None:
-        capacity = max(1, int(_selection_state_capacity()))
-        while len(_SELECTION_STATE) >= capacity:
-            _SELECTION_STATE.popitem(last=False)
-            _CACHE_METRICS['stateEvictions'] += 1
         state = {
             'used': [],
             'touched': now,
@@ -454,17 +454,15 @@ def _state_for_update_locked(
     return state
 
 
-def _append_bounded_unique(
-    values: list[str],
-    value: str,
-    *,
-    limit: int,
-) -> None:
-    if value in values:
-        return
-    values.append(value)
-    if len(values) > limit:
-        del values[:len(values) - limit]
+def _record_used_name(state: dict[str, Any], value: str) -> None:
+    """Retain insertion order and constant-time duplicate membership."""
+    seen = state.get('used_set')
+    if seen is None:
+        seen = set(state['used'])
+        state['used_set'] = seen
+    if value not in seen:
+        seen.add(value)
+        state['used'].append(value)
 
 
 def record_mcp_tool_used(
@@ -481,8 +479,7 @@ def record_mcp_tool_used(
     now = time.monotonic()
     with _LOCK:
         state = _state_for_update_locked(state_key, now=now)
-        _append_bounded_unique(
-            state['used'], namespaced_name, limit=_MAX_STICKY_USED_TOOLS)
+        _record_used_name(state, namespaced_name)
 
 
 def _resolve_dependency(index: CatalogIndex, owner: CatalogTool,
@@ -593,7 +590,7 @@ def _apply_query_phrase_boosts(
 def _conversation_identity(selection_scope_id: str) -> dict | None:
     if not selection_scope_id.startswith('conversation:'):
         return None
-    from lib.storage.mcp_declarations import MCPDeclarationError
+    from lib.agent_core.tool_errors import MCPDeclarationError
     try:
         _, owner, conversation = selection_scope_id.split(':', 2)
         return {'user_id': int(owner), 'conversation_id': conversation}
@@ -629,7 +626,7 @@ def freeze_wire_definitions(
     if identity is not None:
         from lib.storage.mcp_declarations import MCPDeclarationStore
         return MCPDeclarationStore().freeze(definitions, **identity)
-    from lib.storage.mcp_declarations import validate_definitions
+    from lib.mcp.declarations import validate_definitions
     definitions = validate_definitions(definitions)
     state_key = _bounded_state_key(selection_scope_id)
     if not state_key:
@@ -697,8 +694,7 @@ def select_active_mcp_tools(
         state = _state_for_update_locked(state_key, now=now)
         for name in used_names or ():
             if name in index.by_name:
-                _append_bounded_unique(
-                    state['used'], name, limit=_MAX_STICKY_USED_TOOLS)
+                _record_used_name(state, name)
         retained_used = [name for name in state.get('used', [])
                          if name in index.by_name]
     if len(index.tools) <= max(1, int(limit or DEFAULT_ACTIVE_LIMIT)):
@@ -764,13 +760,20 @@ def catalog_cache_stats() -> dict[str, int]:
             'indexes': len(_INDEX_CACHE),
             'indexCapacity': max(1, int(_catalog_index_capacity())),
             'tasks': len(_SELECTION_STATE),
-            'taskCapacity': max(1, int(_selection_state_capacity())),
             **_CACHE_METRICS,
         }
 
 
+def reclaim_tool_search_indexes() -> int:
+    """Reclaim reconstructible catalog indexes without altering task state."""
+    with _LOCK:
+        dropped = len(_INDEX_CACHE)
+        _INDEX_CACHE.clear()
+        return dropped
+
+
 def clear_tool_search_caches() -> int:
-    """Release reconstructible indexes/sticky state; return entries removed."""
+    """Explicit lifecycle/test reset of indexes and task state; never pressure relief."""
     with _LOCK:
         dropped = len(_INDEX_CACHE) + len(_SELECTION_STATE)
         _INDEX_CACHE.clear()
@@ -785,5 +788,6 @@ __all__ = [
     'frozen_wire_tool_names', 'frozen_wire_definitions', 'invalidate_server_catalog',
     'mcp_selection_scope_id',
     'recent_conversation_mcp_tool_names', 'record_mcp_tool_used',
+    'reclaim_tool_search_indexes',
     'select_active_mcp_tools',
 ]

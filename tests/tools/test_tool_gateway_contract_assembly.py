@@ -62,15 +62,16 @@ def test_provider_unsafe_tool_names_still_fail_closed(name):
 
 def test_gateway_contracts_are_attached_when_schemas_become_executable():
     from lib.tasks_pkg.orchestrator._tool_assembly_prep import (
-        _attach_gateway_contract_documents,
+        attach_gateway_contract_documents,
     )
     from lib.tools.contracts import validate_tool_arguments_from_documents
 
     direct_document = {'contractVersion': 'tofu.tool-contract/v2'}
     task = {
+        'config': {'tools': {'programmaticCalling': 'on'}},
         '_toolContractDocumentsByName': {'direct_tool': direct_document},
     }
-    _attach_gateway_contract_documents(task, 'local')
+    attach_gateway_contract_documents(task, 'local')
 
     assert set(task['_tool_gateway_names']) == {'execute_tools', 'execute_program', 'search_tools'}
     assert task['_toolContractDocumentsByName']['direct_tool'] is direct_document
@@ -92,20 +93,63 @@ def test_gateway_contracts_are_attached_when_schemas_become_executable():
 
 def test_execute_contract_remains_available_when_search_is_off():
     from lib.tasks_pkg.orchestrator._tool_assembly_prep import (
-        _attach_gateway_contract_documents,
+        attach_gateway_contract_documents,
     )
 
     task = {'_toolContractDocumentsByName': {}}
-    _attach_gateway_contract_documents(task, 'off')
-    assert set(task['_tool_gateway_names']) == {'execute_tools', 'execute_program'}
-    assert set(task['_toolContractDocumentsByName']) == {'execute_tools', 'execute_program'}
+    attach_gateway_contract_documents(task, 'off')
+    assert set(task['_tool_gateway_names']) == {'execute_tools'}
+    assert set(task['_toolContractDocumentsByName']) == {'execute_tools'}
+
+
+@pytest.mark.parametrize('programmatic', ['off', 'on', 'auto'])
+@pytest.mark.parametrize('schema_field', ['tools', '_explicitToolSchemas'])
+def test_explicit_tool_assembly_keeps_contracts_and_normalized_gateway_policy(
+        programmatic, schema_field):
+    from lib.compat.openai import translate_openai_request
+    from lib.tasks_pkg.orchestrator._tool_assembly_prep import assemble_round_tools
+    from lib.tools.contracts import ToolContractError, validate_tool_arguments_from_documents
+
+    schema = {'type': 'function', 'function': {
+        'name': 'deliver_probe', 'description': 'Return a marker to the caller.',
+        'parameters': {'type': 'object', 'properties': {'marker': {'type': 'string'}},
+                       'required': ['marker'], 'additionalProperties': False}}}
+    messages, cfg, _ = translate_openai_request({
+        'model': 'fixture', 'messages': [{'role': 'user', 'content': 'Return the marker'}],
+        'tools': [schema],
+    })
+    if schema_field == '_explicitToolSchemas':
+        cfg['_explicitToolSchemas'] = cfg.pop('tools')
+        cfg['tools'] = {'programmaticCalling': programmatic}
+    else:
+        cfg['tools.programmaticCalling'] = programmatic
+    task = {'id': 'compat-tool-contract', 'convId': 'compat-tool-contract',
+            'messages': messages, 'config': cfg}
+    model_config = {
+        'project_path': '', 'project_enabled': False,
+        'search_mode': 'off', 'search_enabled': False, 'fetch_enabled': False,
+        'code_exec_enabled': False, 'browser_enabled': False, 'desktop_enabled': False,
+        'image_gen_enabled': False, 'human_guidance_enabled': False, 'scheduler_enabled': False,
+    }
+    tools, enabled = assemble_round_tools(cfg, task, model_config)
+
+    assert enabled
+    assert 'deliver_probe' in {tool['function']['name'] for tool in tools}
+    assert {tool['function']['name'] for tool in task['_executable_tool_catalog']} == {'deliver_probe'}
+    assert ('execute_program' in task['_tool_gateway_names']) == (programmatic == 'on')
+    documents = task['_toolContractDocumentsByName']
+    assert validate_tool_arguments_from_documents(documents, 'deliver_probe',
+        {'marker': 'HARNESS_READY'}) == {'marker': 'HARNESS_READY'}
+    with pytest.raises(ToolContractError):
+        validate_tool_arguments_from_documents(documents, 'deliver_probe', {})
+    assert 'read_files' not in documents
 
 
 def test_gateway_contract_compile_failure_disables_gateway_without_raising(
         monkeypatch):
     import lib.tools.contracts as contracts
     from lib.tasks_pkg.orchestrator._tool_assembly_prep import (
-        _attach_gateway_contract_documents,
+        attach_gateway_contract_documents,
     )
 
     direct_document = {'contractVersion': 'tofu.tool-contract/v2'}
@@ -119,7 +163,7 @@ def test_gateway_contract_compile_failure_disables_gateway_without_raising(
     monkeypatch.setattr(
         contracts, 'compile_execution_contract_documents', _fail_compile)
 
-    attached = _attach_gateway_contract_documents(task, 'local')
+    attached = attach_gateway_contract_documents(task, 'local')
 
     assert attached is False
     assert task['_tool_gateway_names'] == []
@@ -142,7 +186,7 @@ def test_round_assembly_degrades_contract_defect_to_text_only(monkeypatch):
         prep, '_assemble_tool_list',
         lambda *_args, **_kwargs: ([direct_tool], True))
     monkeypatch.setattr(
-        prep, '_attach_gateway_contract_documents',
+        prep, 'attach_gateway_contract_documents',
         lambda *_args, **_kwargs: False)
     task = {'id': 'task-text-only', 'convId': 'conv-text-only', 'messages': []}
     mcfg = {

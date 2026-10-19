@@ -15,10 +15,10 @@ Settings → 数据库 panel backend. Authority contract: `docs/STORAGE.md`
 - `backup.py` — mirrors `system.backup` artifact + manifest to the user's
   stable directory; prunes only its own ledger entries.
 - `maintenance.py` — one daemon thread for daily dual-path backup; no idle benchmark.
-- `lib/storage_sidecar/native_fastpath_settings.py` — native next-launch configuration and activation/lineage lock boundary; no live migration. The panel exposes optional Fast Path for both engines independently of required native search placement.
+- `lib/storage_authority_sql/native_fastpath_settings.py` — native next-launch configuration and activation/lineage lock boundary; no live migration. The panel exposes optional Fast Path for both engines independently of required native search placement.
 
 Tests: `tests/database_panel/`, `tests/frontend/test_database_path_settings.py`,
 `tests/visual/test_database_projection_settings.py`.
 Never import database drivers here — the storage boundary scanner
-(`lib/storage_boundary.py`) fails startup on driver names outside the
+(`lib/storage/storage_boundary.py`) fails startup on driver names outside the
 storage layer.

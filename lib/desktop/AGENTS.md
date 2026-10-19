@@ -15,8 +15,9 @@ agent implementation lives in `lib/desktop_agent/`; install artifacts live in
   or settlement. Pairing/attach tokens are expiring, one-use, and owner-bound.
 - Claim/settlement is atomic and idempotent. Disconnect, timeout, cancellation,
   expiry, and restart release leases and leave recoverable command state.
-- Bound devices, queues, frames, streams, payloads, wake hints, TTLs, and
-  diagnostic history. Redis or in-memory state is ephemeral only.
+- Bound transport frames/windows and idle diagnostic retention; accepted work
+  has no slot or default queue-age admission gate. Explicit TTLs remain.
+  Redis or in-memory transport is ephemeral only.
 - Redact credentials, host secrets, command content, and user files from logs;
   expose only typed actionable failures.
 

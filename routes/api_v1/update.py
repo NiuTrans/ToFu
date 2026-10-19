@@ -30,7 +30,7 @@ import uuid
 from quart import Blueprint, request
 
 from lib import lifecycle_approval as _lca
-from lib.runtime_paths import data_root
+from lib.runtime.runtime_paths import data_root
 from lib.api_response import (
     api_conflict, api_error, api_forbidden, api_internal_error, api_not_found,
     api_ok,
@@ -376,7 +376,7 @@ def _perform_server_reexec(reason: str, *, frontend_prevalidated: bool = False,
             '(%s)', reason)
         return True
 
-    from lib.server_reexec import (
+    from lib.server.server_reexec import (
         begin_server_reexec,
         finish_server_reexec_preparation,
     )

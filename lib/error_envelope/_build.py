@@ -158,7 +158,7 @@ def from_exception(exc: BaseException, *, model: str = '',
             raw = f'{raw}: {type(exc.__cause__).__name__}: {exc.__cause__}'
     extensions = None
     message, hint = '', None
-    from lib.llm_errors import ProviderToolCallFloodError, RequestTransportError
+    from lib.llm.llm_errors import ProviderToolCallFloodError, RequestTransportError
     if isinstance(exc, ProviderToolCallFloodError):
         message = ('⚠️ 响应中重复工具调用超限，已主动停止\n'
                    'Repeated tool calls exceeded the response limit; stopped locally')
@@ -195,23 +195,68 @@ def from_exception(exc: BaseException, *, model: str = '',
     if (isinstance(status_code, int) and not isinstance(status_code, bool)
             and 100 <= status_code <= 599):
         extensions = {'statusCode': status_code}
-    from lib.llm_errors import (LocalRequestPreparationError,
+    from lib.llm.llm_errors import (LocalRequestPreparationError,
                                 SubscriptionCredentialUnavailableError)
     credential_error = exc.__cause__ if isinstance(exc, LocalRequestPreparationError) else exc
     severity, retryable = None, None
     if isinstance(credential_error, SubscriptionCredentialUnavailableError):
-        message = ('⚠️ 无法读取 Codex 共享登录凭据\n'
-                   'Codex shared sign-in credentials unavailable')
-        hint = ('尚未向模型发送请求。可重试；若持续失败，请检查「设置 → 订阅登录」中的'
-                '共享登录来源，并查看错误详情中的原因。无需仅凭此提示重新登录。\n'
-                'The model request was not sent. Retry; if it persists, check the shared '
-                'sign-in source in Settings → Subscription sign-in and the reason in '
-                'error details. This failure alone does not establish session expiry.')
+        if credential_error.reason == 'codex_home_storage_full':
+            message = ('⚠️ Codex 主目录空间或 inode 不足，无法读取共享登录凭据\n'
+                       'Codex home storage is full; shared sign-in credentials unavailable')
+            hint = ('尚未向模型发送请求，无需重新登录。请释放 Codex 主目录所在卷的空间或 inode 后重试；'
+                    '若持续失败，请检查「设置 → 订阅登录」中的共享登录来源，并查看错误详情中的原因。\n'
+                    'The model request was not sent and no re-login is needed. Free space '
+                    'or inodes on the Codex home volume and retry; if it persists, check the shared '
+                    'sign-in source in Settings → Subscription sign-in and the reason in '
+                    'error details.')
+        else:
+            message = ('⚠️ 无法读取 Codex 共享登录凭据\n'
+                       'Codex shared sign-in credentials unavailable')
+            hint = ('尚未向模型发送请求。可重试；若持续失败，请检查「设置 → 订阅登录」中的'
+                    '共享登录来源，并查看错误详情中的原因。无需仅凭此提示重新登录。\n'
+                    'The model request was not sent. Retry; if it persists, check the shared '
+                    'sign-in source in Settings → Subscription sign-in and the reason in '
+                    'error details. This failure alone does not establish session expiry.')
         severity, retryable = 'warning', credential_error.transient
         extensions = {'credentialSource': credential_error.credential_source,
                       'authIssue': credential_error.reason,
                       'failureStage': 'subscription_credentials',
                       'providerReached': False}
+    from lib.llm.llm_errors import PromptTooLongError
+    if isinstance(exc, PromptTooLongError) and exc.origin == 'local':
+        # Local evidence never copies the exception message: it may contain
+        # prompt/tool bodies. Custom bilingual text deliberately has no default
+        # i18n keys, which would replace it with the provider-overflow guidance.
+        message = '⚠️ 本地提示词准入检查未通过，未发送模型请求\nLocal prompt admission refused; no model request sent'
+        if exc.reason == 'tool_schema_floor':
+            hint = ('所选工具的定义已超过本地提示词预算；仅压缩对话历史无法解决。'
+                    '请检查提示词预算配置或减少本轮启用的工具。\n'
+                    'The selected tool schemas alone exceed the local prompt budget; '
+                    'compacting conversation history alone cannot fix this. '
+                    'Check prompt-budget configuration or enable fewer tools for this round.')
+        elif exc.reason == 'summary_route_unavailable':
+            hint = ('本轮需要上下文摘要，但没有可用的已授权摘要路由。请检查摘要路由配置。\n'
+                    'This round requires a context summary, but no owned summary route '
+                    'is available. Check summary-route configuration.')
+        else:
+            hint = ('必要上下文超过本地提示词预算。请检查提示词预算配置及本轮所需上下文。\n'
+                    'Required context exceeds the local prompt budget. Check prompt-budget '
+                    'configuration and the context required for this round.')
+        extensions = {'origin': 'local', 'providerReached': False,
+                      'reason': exc.reason, 'failureStage': 'prompt_admission'}
+        for attribute, field in (
+                ('tool_schema_tokens', 'toolSchemaTokens'),
+                ('prompt_budget_tokens', 'promptBudgetTokens'),
+                ('total_tokens', 'totalTokens'),
+                ('context_window_tokens', 'contextWindowTokens')):
+            count = getattr(exc, attribute)
+            if count is not None:
+                extensions[field] = count
+        raw = 'Local prompt admission refused: ' + exc.reason
+        raw += ''.join(f'; {field}={value}' for field, value in extensions.items()
+                       if field.endswith('Tokens'))
+        source = 'prompt-admission'
+        retryable = False
     return make_envelope(
         kind,
         severity=severity,

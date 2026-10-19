@@ -6,6 +6,7 @@ import sys
 import os
 import time
 
+from types import SimpleNamespace
 import pytest
 
 from serverctl_pkg import native_engine as engines
@@ -96,18 +97,35 @@ def test_failed_build_preserves_engine_pin_and_project_configuration(project, mo
     assert (project / '.env').read_bytes() == config
 
 
-def test_source_change_during_build_never_publishes_candidate(project, monkeypatch):
+def test_source_change_during_build_recovers_without_publishing_stale_candidate(project, monkeypatch):
     dest = binary(project / 'packages/tofu-db/target/release/tofu-db', '0' * 64)
-    old = dest.read_bytes()
+    old, config = dest.read_bytes(), (project / '.env').read_bytes()
+    builds, frames, stages = [], [], []
     monkeypatch.setattr(engines, '_prebuilt', lambda *_: None)
     def build(root, staging, env):
-        candidate = binary(staging / 'new', engines.source_fingerprint(root))
-        (root / 'packages/tofu-db/src/lib.rs').write_text('concurrent source edit')
+        assert dest.read_bytes() == old
+        assert (project / '.env').read_bytes() == config
+        builds.append(engines.source_fingerprint(root))
+        stages.append(staging)
+        candidate = binary(staging / 'new', builds[-1])
+        if len(builds) == 1:
+            (root / 'packages/tofu-db/src/lib.rs').write_text('concurrent source edit')
         return candidate
     monkeypatch.setattr(engines, '_build', build)
-    with pytest.raises(engines.EnginePreparationError):
-        engines.prepare(project, {})
-    assert dest.read_bytes() == old
+    with engines.observe_preparation(frames.append):
+        assert engines.prepare(project, {})
+    assert len(builds) == 2 and builds[0] != builds[1]
+    assert 'retrying' in [frame['phase'] for frame in frames]
+    assert frames[-1]['phase'] == 'prepared'
+    assert all(not stage.exists() for stage in stages)
+
+    assert frames[-1]['recovering'] is True
+    fresh_frames = []
+    with engines.observe_preparation(fresh_frames.append):
+        assert engines.prepare(project, {}) is False
+    assert all(not frame.get('recovering') for frame in fresh_frames)
+    engines.verify_current(dest, project)
+    assert next(dest.parent.glob('tofu-db.bak-*')).read_bytes() == old
 
 
 def test_explicit_process_pin_is_not_silently_rewritten(project, monkeypatch):
@@ -185,7 +203,7 @@ def test_cli_uses_canonical_native_selection(project, monkeypatch):
 
 def test_cold_boot_prepares_before_storage_and_stops_on_failure(monkeypatch):
     import serverctl
-    import lib.server_assembly as assembly
+    import lib.server.server_assembly as assembly
     import lib.storage as storage
     calls = []
     monkeypatch.setattr(assembly, '_boot', lambda *_: None)
@@ -194,12 +212,12 @@ def test_cold_boot_prepares_before_storage_and_stops_on_failure(monkeypatch):
                         lambda *a, **k: calls.append('prepare') or '')
     monkeypatch.setattr(storage, 'start_storage', lambda: calls.append('storage'))
     monkeypatch.setattr(storage, 'storage_status', lambda: {'ready': True})
-    assembly._start_storage_sidecar()
+    assembly._start_storage_authority_sql()
     assert calls == ['prepare', 'storage']
     calls.clear()
     monkeypatch.setattr(serverctl, 'prepare_native_engine_artifact', lambda *a, **k: 'engine unavailable')
     with pytest.raises(RuntimeError, match='engine unavailable'):
-        assembly._start_storage_sidecar()
+        assembly._start_storage_authority_sql()
     assert calls == []
 
 
@@ -246,7 +264,7 @@ def test_build_uses_owned_source_snapshot_and_launch_capacity(project, monkeypat
         assert environment['CARGO_PROFILE_RELEASE_CODEGEN_UNITS'] == '4'
         assert environment['CARGO_PROFILE_RELEASE_LTO'] == 'thin'
         assert environment['CARGO_PROFILE_RELEASE_INCREMENTAL'] == 'true'
-        assert cwd == project / 'packages/tofu-db/target/update-source'
+        assert cwd == project / 'packages/tofu-db/target/update-source-root/packages/tofu-db'
         assert (cwd / 'src/lib.rs').read_bytes() == (project / 'packages/tofu-db/src/lib.rs').read_bytes()
         assert timeout == engines.PREPARATION_TOTAL_TIMEOUT_SECONDS - engines.BUILD_FINALIZATION_RESERVE_SECONDS
         return ''
@@ -624,3 +642,387 @@ def test_staged_path_dependency_closure_is_accepted_by_cargo(project):
     engine = next(package for package in packages if package['name'] == 'tofu-db')
     dependency = next(item for item in engine['dependencies'] if item['name'] == 'tofu-runtime')
     assert Path(dependency['path']) == snapshot.parent / 'tofu-runtime'
+
+
+def test_continuous_source_changes_exhaust_bounded_recovery_without_publication(project, monkeypatch):
+    dest = binary(project / 'packages/tofu-db/target/release/tofu-db', '0' * 64)
+    old, config = dest.read_bytes(), (project / '.env').read_bytes()
+    builds = []
+    monkeypatch.setattr(engines, 'SOURCE_PREPARATION_SETTLE_SECONDS', 0)
+    monkeypatch.setattr(engines, '_prebuilt', lambda *_: None)
+    def build(root, staging, env):
+        builds.append(staging)
+        candidate = binary(staging / 'new', engines.source_fingerprint(root))
+        (root / 'packages/tofu-db/src/lib.rs').write_text(f'edit {len(builds)}')
+        return candidate
+    monkeypatch.setattr(engines, '_build', build)
+    with pytest.raises(engines.EnginePreparationError, match='Automatic preparation retries were exhausted') as failure:
+        engines.prepare(project, {})
+    assert 'current server is still running' in str(failure.value)
+    assert 'then choose Restart again' in str(failure.value)
+    assert len(builds) == engines.SOURCE_PREPARATION_MAX_ATTEMPTS
+    assert dest.read_bytes() == old and (project / '.env').read_bytes() == config
+    assert all(not stage.exists() for stage in builds)
+    assert not list(dest.parent.glob('tofu-db.bak-*'))
+
+
+def test_source_change_during_semantic_validation_rebuilds_before_publication(project, monkeypatch):
+    builds, validations = [], []
+    monkeypatch.setattr(engines, 'SOURCE_PREPARATION_SETTLE_SECONDS', 0)
+    monkeypatch.setattr(engines, '_prebuilt', lambda *_: None)
+    def build(root, staging, env):
+        builds.append(engines.source_fingerprint(root))
+        return binary(staging / 'new', builds[-1])
+    def validate(candidate, root, env):
+        validations.append(engines.build_identity(candidate)['source_sha256'])
+        if len(validations) == 1:
+            (root / 'packages/tofu-db/src/lib.rs').write_text('edited during validation')
+    monkeypatch.setattr(engines, '_build', build)
+    monkeypatch.setattr(engines, '_validate_candidate', validate)
+    assert engines.prepare(project, {})
+    assert len(builds) == 2 and builds == validations and builds[0] != builds[1]
+    engines.verify_current(project / 'packages/tofu-db/target/release/tofu-db', project)
+
+
+def test_config_change_is_not_automatically_accepted_even_with_source_drift(project, monkeypatch):
+    builds = []
+    monkeypatch.setattr(engines, '_prebuilt', lambda *_: None)
+    def build(root, staging, env):
+        builds.append(staging)
+        candidate = binary(staging / 'new', engines.source_fingerprint(root))
+        (root / 'packages/tofu-db/src/lib.rs').write_text('source drift')
+        with (root / '.env').open('a') as config:
+            config.write('TOFUDB_TRANSPORT=embedded\n')
+        return candidate
+    monkeypatch.setattr(engines, '_build', build)
+    with pytest.raises(engines.EnginePreparationError, match='Storage configuration changed'):
+        engines.prepare(project, {})
+    assert len(builds) == 1
+    assert 'TOFUDB_TRANSPORT=embedded' in (project / '.env').read_text()
+    assert not (project / 'packages/tofu-db/target/release/tofu-db').exists()
+
+
+def test_config_change_cannot_escape_through_cached_success(project, monkeypatch):
+    binary(project / 'packages/tofu-db/target/release/tofu-db', engines.source_fingerprint(project))
+    def verify_pin(*_):
+        with (project / '.env').open('a') as config:
+            config.write('TOFUDB_TRANSPORT=embedded\n')
+    monkeypatch.setattr(engines, '_verify_pin', verify_pin)
+    monkeypatch.setattr(engines, '_prebuilt', lambda *_: pytest.fail('configuration change must not download'))
+    monkeypatch.setattr(engines, '_build', lambda *_: pytest.fail('configuration change must not build'))
+    with pytest.raises(engines.EnginePreparationError, match='Storage configuration changed'):
+        engines.prepare(project, {})
+
+
+def test_mismatched_build_without_source_drift_is_not_retried(project, monkeypatch):
+    builds = []
+    monkeypatch.setattr(engines, '_prebuilt', lambda *_: None)
+    def build(root, staging, env):
+        builds.append(staging)
+        return binary(staging / 'wrong', '0' * 64)
+    monkeypatch.setattr(engines, '_build', build)
+    with pytest.raises(engines.EnginePreparationError, match='does not match'):
+        engines.prepare(project, {})
+    assert len(builds) == 1
+    assert not (project / 'packages/tofu-db/target/release/tofu-db').exists()
+
+
+def test_retry_cancellation_releases_lock_and_restores_context(project, monkeypatch):
+    builds = []
+    parent_deadline, parent_phase = engines._deadline.get(), engines._progress_phase.get()
+    monkeypatch.setattr(engines, '_prebuilt', lambda *_: None)
+    def build(root, staging, env):
+        builds.append(staging)
+        candidate = binary(staging / 'new', engines.source_fingerprint(root))
+        (root / 'packages/tofu-db/src/lib.rs').write_text('source drift')
+        return candidate
+    def interrupt(_):
+        raise KeyboardInterrupt()
+    monkeypatch.setattr(engines, '_build', build)
+    monkeypatch.setattr(engines, 'time', SimpleNamespace(monotonic=time.monotonic, sleep=interrupt))
+    with pytest.raises(KeyboardInterrupt):
+        engines.prepare(project, {})
+    assert len(builds) == 1 and not builds[0].exists()
+    assert engines._deadline.get() == parent_deadline
+    assert engines._progress_phase.get() == parent_phase
+    with engines._prepare_lock(project / 'packages/tofu-db/target/.engine-update.lock'):
+        pass
+
+
+@pytest.mark.parametrize('exhaust_budget', [False, True])
+def test_source_recovery_uses_original_deadline(project, monkeypatch, exhaust_budget):
+    now, deadlines = [100.0], []
+    monkeypatch.setattr(engines, 'time', SimpleNamespace(
+        monotonic=lambda: now[0],
+        sleep=lambda seconds: now.__setitem__(0, now[0] + seconds)))
+    monkeypatch.setattr(engines, 'PREPARATION_TOTAL_TIMEOUT_SECONDS', 30)
+    monkeypatch.setattr(engines, '_prebuilt', lambda *_: None)
+    def build(root, staging, env):
+        deadlines.append(engines._deadline.get())
+        candidate = binary(staging / 'new', engines.source_fingerprint(root))
+        if len(deadlines) == 1:
+            now[0] += 31 if exhaust_budget else 4
+            (root / 'packages/tofu-db/src/lib.rs').write_text('source drift')
+        return candidate
+    monkeypatch.setattr(engines, '_build', build)
+    if exhaust_budget:
+        with pytest.raises(engines.EnginePreparationError, match='timed out'):
+            engines.prepare(project, {})
+        assert deadlines == [130.0]
+    else:
+        assert engines.prepare(project, {})
+        assert deadlines == [130.0, 130.0]
+    assert engines._deadline.get() == float('inf')
+
+
+def test_queued_preparation_hashes_source_after_lock_acquisition(project, monkeypatch):
+    from contextlib import contextmanager
+    original_lock, builds, frames = engines._prepare_lock, [], []
+    @contextmanager
+    def changing_queue(path):
+        with original_lock(path):
+            (project / 'packages/tofu-db/src/lib.rs').write_text('changed while waiting for lock')
+            yield
+    def build(root, staging, env):
+        builds.append(staging)
+        return binary(staging / 'new', engines.source_fingerprint(root))
+    monkeypatch.setattr(engines, '_prepare_lock', changing_queue)
+    monkeypatch.setattr(engines, '_prebuilt', lambda *_: None)
+    monkeypatch.setattr(engines, '_build', build)
+    with engines.observe_preparation(frames.append):
+        assert engines.prepare(project, {})
+    assert len(builds) == 1
+    assert 'retrying' not in [frame['phase'] for frame in frames]
+
+
+def test_disappearing_source_during_retry_is_not_a_packaged_install(project, monkeypatch):
+    monkeypatch.setattr(engines, 'SOURCE_PREPARATION_SETTLE_SECONDS', 0)
+    monkeypatch.setattr(engines, '_prebuilt', lambda *_: None)
+    builds = []
+    def build(root, staging, env):
+        builds.append(staging)
+        candidate = binary(staging / 'new', engines.source_fingerprint(root))
+        (root / 'packages/tofu-db/Cargo.toml').unlink()
+        return candidate
+    monkeypatch.setattr(engines, '_build', build)
+    with pytest.raises(engines.EnginePreparationError, match='Automatic preparation retries were exhausted'):
+        engines.prepare(project, {})
+    assert len(builds) == 1
+    assert not (project / 'packages/tofu-db/target/release/tofu-db').exists()
+
+
+@pytest.mark.parametrize('during_identity', [False, True])
+def test_source_change_during_publication_does_not_retry_with_stale_pins(project, monkeypatch, during_identity):
+    from scripts import deploy_tofudb_engine
+    original_deploy, deployments = deploy_tofudb_engine.deploy, []
+    original_identity = engines.build_identity
+    def identity(candidate):
+        result = original_identity(candidate)
+        if deployments and during_identity:
+            (project / 'packages/tofu-db/src/lib.rs').write_text('changed during final identity check')
+        return result
+    monkeypatch.setattr(engines, 'build_identity', identity)
+    monkeypatch.setattr(engines, '_prebuilt', lambda *_: None)
+    monkeypatch.setattr(engines, '_build', lambda root, staging, env:
+                        binary(staging / 'new', engines.source_fingerprint(root)))
+    def deploy(args):
+        result = original_deploy(args)
+        deployments.append(result)
+        if not during_identity:
+            (project / 'packages/tofu-db/src/lib.rs').write_text('changed during publication')
+        return result
+    monkeypatch.setattr(deploy_tofudb_engine, 'deploy', deploy)
+    with pytest.raises(engines.EnginePreparationError, match='engine was published, but activation was cancelled'):
+        engines.prepare(project, {})
+    assert len(deployments) == 1
+    dest = project / 'packages/tofu-db/target/release/tofu-db'
+    assert dest.exists()
+    assert f'TOFUDB_EXPECTED_SHA256={hashlib.sha256(dest.read_bytes()).hexdigest()}' in (project / '.env').read_text()
+
+
+@pytest.mark.parametrize('cached', [False, True])
+@pytest.mark.parametrize('boundary_change', ['configuration', 'deadline'])
+def test_final_source_hash_cannot_hide_config_change_or_expired_budget(
+        project, monkeypatch, cached, boundary_change):
+    original_fingerprint = engines.source_fingerprint
+    expected = original_fingerprint(project)
+    dest = project / 'packages/tofu-db/target/release/tofu-db'
+    if cached:
+        binary(dest, expected)
+    config = (project / '.env').read_bytes()
+    now, armed = [100.0], [False]
+    monkeypatch.setattr(engines, 'time', SimpleNamespace(monotonic=lambda: now[0], sleep=lambda _: None))
+    monkeypatch.setattr(engines, 'PREPARATION_TOTAL_TIMEOUT_SECONDS', 30)
+    monkeypatch.setattr(engines, '_prebuilt', lambda *_: None)
+    monkeypatch.setattr(engines, '_build', lambda root, staging, env: binary(staging / 'new', expected))
+    def arm(*_):
+        armed[0] = True
+    monkeypatch.setattr(engines, '_verify_pin' if cached else '_validate_candidate', arm)
+    def fingerprint(root):
+        value = original_fingerprint(root)
+        if armed[0]:
+            armed[0] = False
+            if boundary_change == 'configuration':
+                with (root / '.env').open('a') as handle:
+                    handle.write('TOFUDB_TRANSPORT=embedded\n')
+            else:
+                now[0] += 31
+        return value
+    monkeypatch.setattr(engines, 'source_fingerprint', fingerprint)
+    reason = 'Storage configuration changed' if boundary_change == 'configuration' else 'timed out'
+    with pytest.raises(engines.EnginePreparationError, match=reason):
+        engines.prepare(project, {})
+    assert dest.exists() == cached
+    if boundary_change == 'deadline':
+        assert (project / '.env').read_bytes() == config
+
+
+@pytest.mark.parametrize('change_source', [False, True])
+def test_failed_probe_only_recovers_when_source_changed(project, monkeypatch, change_source):
+    builds, probes = [], []
+    monkeypatch.setattr(engines, 'SOURCE_PREPARATION_SETTLE_SECONDS', 0)
+    monkeypatch.setattr(engines, '_prebuilt', lambda *_: None)
+    def build(root, staging, env):
+        builds.append(staging)
+        return binary(staging / 'new', engines.source_fingerprint(root))
+    def validate(candidate, root, env):
+        probes.append(candidate)
+        if len(probes) == 1:
+            if change_source:
+                (root / 'packages/tofu-db/src/lib.rs').write_text('changed during probe startup')
+            engines._run([sys.executable, '-c', 'raise SystemExit(1)'], cwd=root,
+                         environment=env, timeout=5, progress='Validating storage engine')
+    monkeypatch.setattr(engines, '_build', build)
+    monkeypatch.setattr(engines, '_validate_candidate', validate)
+    if change_source:
+        assert engines.prepare(project, {})
+        assert len(builds) == len(probes) == 2
+        engines.verify_current(project / 'packages/tofu-db/target/release/tofu-db', project)
+    else:
+        with pytest.raises(engines.EngineCommandFailedError, match='failed .*exit 1'):
+            engines.prepare(project, {})
+        assert len(builds) == len(probes) == 1
+        assert not (project / 'packages/tofu-db/target/release/tofu-db').exists()
+
+
+@pytest.mark.skipif(os.name == 'nt', reason='POSIX child signal return codes')
+@pytest.mark.parametrize('signal_number', [15, 9])
+def test_signalled_probe_is_terminal_despite_source_drift(project, monkeypatch, signal_number):
+    builds = []
+    config = (project / '.env').read_bytes()
+    monkeypatch.setattr(engines, '_prebuilt', lambda *_: None)
+    def build(root, staging, env):
+        builds.append(staging)
+        return binary(staging / 'new', engines.source_fingerprint(root))
+    def validate(candidate, root, env):
+        (root / 'packages/tofu-db/src/lib.rs').write_text('source drift coincides with child signal')
+        engines._run([sys.executable, '-c', f'import os; os.kill(os.getpid(), {signal_number})'],
+                     cwd=root, environment=env, timeout=5, progress='Validating storage engine')
+    monkeypatch.setattr(engines, '_build', build)
+    monkeypatch.setattr(engines, '_validate_candidate', validate)
+    frames = []
+    with engines.observe_preparation(frames.append):
+        with pytest.raises(engines.EnginePreparationCancelledError, match='terminated by signal'):
+            engines.prepare(project, {})
+    assert len(builds) == 1 and not builds[0].exists()
+    assert 'retrying' not in [frame['phase'] for frame in frames]
+    assert not (project / 'packages/tofu-db/target/release/tofu-db').exists()
+    assert (project / '.env').read_bytes() == config
+
+
+@pytest.mark.parametrize('reason', ['cancelled', 'timed out'])
+def test_probe_cancellation_or_timeout_is_not_retried_even_with_source_drift(project, monkeypatch, reason):
+    builds = []
+    monkeypatch.setattr(engines, '_prebuilt', lambda *_: None)
+    def build(root, staging, env):
+        builds.append(staging)
+        return binary(staging / 'new', engines.source_fingerprint(root))
+    def validate(candidate, root, env):
+        (root / 'packages/tofu-db/src/lib.rs').write_text('source drift coincides with cancellation')
+        raise engines.EnginePreparationError(f'Storage engine preparation {reason}.')
+    monkeypatch.setattr(engines, '_build', build)
+    monkeypatch.setattr(engines, '_validate_candidate', validate)
+    with pytest.raises(engines.EnginePreparationError, match=reason):
+        engines.prepare(project, {})
+    assert len(builds) == 1 and not builds[0].exists()
+    assert not (project / 'packages/tofu-db/target/release/tofu-db').exists()
+
+
+def test_configuration_change_during_publication_refuses_without_retry(project, monkeypatch):
+    from scripts import deploy_tofudb_engine
+    original_deploy, deployments = deploy_tofudb_engine.deploy, []
+    monkeypatch.setattr(engines, '_prebuilt', lambda *_: None)
+    monkeypatch.setattr(engines, '_build', lambda root, staging, env:
+                        binary(staging / 'new', engines.source_fingerprint(root)))
+    def deploy(args):
+        result = original_deploy(args)
+        deployments.append(result)
+        with (project / '.env').open('a') as handle:
+            handle.write('TOFUDB_TRANSPORT=embedded\n')
+        return result
+    monkeypatch.setattr(deploy_tofudb_engine, 'deploy', deploy)
+    with pytest.raises(engines.EnginePreparationError, match='Storage configuration changed'):
+        engines.prepare(project, {})
+    assert len(deployments) == 1
+    assert 'TOFUDB_TRANSPORT=embedded' in (project / '.env').read_text()
+
+
+@pytest.mark.parametrize('stage', ['installed', 'cached', 'download'])
+def test_cancellation_is_terminal_even_in_repair_fallbacks(project, monkeypatch, stage):
+    dest = binary(project / 'packages/tofu-db/target/release/tofu-db', '0' * 64)
+    cached = binary(project / 'packages/tofu-db/target/update-build/release/tofu-db', '0' * 64)
+    old, config = dest.read_bytes(), (project / '.env').read_bytes()
+    original_identity = engines.build_identity
+    def cancelled(*_):
+        raise engines.EnginePreparationCancelledError('Storage engine preparation was cancelled.')
+    def identity(candidate):
+        if candidate == (dest if stage == 'installed' else cached):
+            cancelled()
+        return original_identity(candidate)
+    if stage in ('installed', 'cached'):
+        monkeypatch.setattr(engines, 'build_identity', identity)
+        monkeypatch.setattr(engines, '_prebuilt', lambda *_: pytest.fail('cancel must not download'))
+    else:
+        monkeypatch.setattr(engines, '_prebuilt', cancelled)
+    monkeypatch.setattr(engines, '_build', lambda *_: pytest.fail('cancel must not compile'))
+    frames = []
+    with engines.observe_preparation(frames.append):
+        with pytest.raises(engines.EnginePreparationCancelledError, match='cancelled'):
+            engines.prepare(project, {})
+    assert 'retrying' not in [frame['phase'] for frame in frames]
+    assert dest.read_bytes() == old and (project / '.env').read_bytes() == config
+
+
+@pytest.mark.parametrize('failure', ['disappeared', 'permission'])
+def test_fingerprint_input_disappearance_recovers_but_io_failure_does_not(project, monkeypatch, failure):
+    dest = binary(project / 'packages/tofu-db/target/release/tofu-db', '0' * 64)
+    source = project / 'packages/tofu-db/src/lib.rs'
+    old, config = dest.read_bytes(), (project / '.env').read_bytes()
+    monkeypatch.setattr(engines, 'SOURCE_PREPARATION_SETTLE_SECONDS', 0)
+    original_open = Path.open
+    changed = False
+    def open_path(path, *args, **kwargs):
+        nonlocal changed
+        if path == source and args == ('rb',) and not changed:
+            changed = True
+            if failure == 'disappeared':
+                source.unlink()  # Already enumerated; the next scan sees the new tree.
+            else:
+                raise PermissionError('source is unreadable')
+        return original_open(path, *args, **kwargs)
+    monkeypatch.setattr(Path, 'open', open_path)
+    monkeypatch.setattr(engines, '_prebuilt',
+                        lambda root, staging, _env: binary(staging / 'new', engines.source_fingerprint(root)))
+    frames = []
+    with engines.observe_preparation(frames.append):
+        if failure == 'disappeared':
+            assert engines.prepare(project, {})
+        else:
+            with pytest.raises(PermissionError, match='unreadable'):
+                engines.prepare(project, {})
+    assert ('retrying' in [frame['phase'] for frame in frames]) == (failure == 'disappeared')
+    if failure == 'disappeared':
+        engines.verify_current(dest, project)
+        assert frames[-1]['recovering'] is True
+    else:
+        assert dest.read_bytes() == old and (project / '.env').read_bytes() == config

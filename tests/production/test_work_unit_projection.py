@@ -259,3 +259,21 @@ def test_handler_kind_literals_match_runtime_definitions():
         'edit_video': _motion_runtime.kind,
         'revert_video': _motion_runtime.kind,
     }
+
+
+@pytest.mark.parametrize('status,quality,expected', [
+    ('done', None, True), ('done', {'degraded': True}, True),
+    ('running', None, False), ('error', None, False), ('aborted', None, False),
+])
+def test_video_file_requires_published_result_and_terminal_delivery(status, quality, expected):
+    unit = project_work_unit(_task(
+        id='motion_one', kind='motion-video', status=status,
+        artifact_quality=quality, result={'final_path': '/private/owner/film.mp4'}))
+    assert unit['artifacts'] == ([{'label': 'mp4', 'href': '/api/v4/motion/videos/motion_one/file'}] if expected else [])
+    assert '/private/owner' not in str(unit)
+
+
+@pytest.mark.parametrize('result', [None, {}, {'scene_id': 'scene-001'}, {'final_path': ''}])
+def test_finished_video_subtask_without_published_film_has_no_download(result):
+    unit = project_work_unit(_task(kind='motion-video', status='done', result=result))
+    assert unit['artifacts'] == []

@@ -285,13 +285,13 @@ def test_subscriber_reconnects_and_resubscribes_after_socket_failure():
 #  Subscription-registry lease lifecycle (Epic B B.5.1 — acquire/release/refresh)
 # ══════════════════════════════════════════════════════════════════════
 def _reset_state_store():
-    import lib.runtime_state_store as rss
+    import lib.runtime.runtime_state_store as rss
     rss.reset_for_test()
 
 
 def test_registry_acquires_on_subscribe():
     _reset_state_store()
-    import lib.runtime_state_store as rss
+    import lib.runtime.runtime_state_store as rss
     h = _make_hub()
     c = _SyncClient()
     h.subscribe(c, 'paper', 't1')
@@ -301,7 +301,7 @@ def test_registry_acquires_on_subscribe():
 
 def test_registry_releases_on_last_unsubscribe():
     _reset_state_store()
-    import lib.runtime_state_store as rss
+    import lib.runtime.runtime_state_store as rss
     h = _make_hub()
     c1, c2 = _SyncClient(), _SyncClient()
     h.subscribe(c1, 'paper', 't1')
@@ -318,7 +318,7 @@ def test_registry_releases_on_last_unsubscribe():
 
 def test_registry_releases_on_unregister():
     _reset_state_store()
-    import lib.runtime_state_store as rss
+    import lib.runtime.runtime_state_store as rss
     h = _make_hub()
     c = _SyncClient()
     h.register(c)
@@ -334,7 +334,7 @@ def test_NC_registry_acquire_without_release_leaks():
     client is gone. We prove the CORRECT path releases; and that skipping the
     release (simulated) leaves a stale entry — the latent bug."""
     _reset_state_store()
-    import lib.runtime_state_store as rss
+    import lib.runtime.runtime_state_store as rss
     h = _make_hub()
     c = _SyncClient()
     h.subscribe(c, 'paper', 't1')
@@ -351,7 +351,7 @@ def test_registry_refresh_keeps_living_lease_alive():
     expire under a short TTL. We shrink the TTL and prove refresh keeps it
     live past that window while the subscriber is still connected."""
     _reset_state_store()
-    import lib.runtime_state_store as rss
+    import lib.runtime.runtime_state_store as rss
     import time as _t
     h = _make_hub()
     h._SUB_TTL = 0.15  # shrink for the test

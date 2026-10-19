@@ -55,7 +55,7 @@ DEFAULT_SIDECAR_LEASE_RELEASE_WAIT = 10.0
 DEFAULT_ORPHAN_SIDECAR_REAP_WAIT = 15.0
 DEFAULT_STORAGE_LEASE_POLL_INTERVAL = 0.1
 # SIGKILL escalation must outlast the worker's own graceful-shutdown hard
-# budget (TOFU_SHUTDOWN_HARD_SECS, default 30s in lib/server_shutdown.py):
+# budget (TOFU_SHUTDOWN_HARD_SECS, default 30s in lib/server/server_shutdown.py):
 # killing the worker mid-sequence skips its bounded storage-sidecar stop and
 # orphans the authority's project lease.  The manager mirrors the worker's
 # configured budget — deployments may raise it well past 30s — and adds a
@@ -429,10 +429,10 @@ def _legacy_storage_lease_owner(cmdline: str | None) -> tuple[str, str]:
         )
         if operation:
             return 'offline_maintenance', f'Storage {operation}'
-    if '-m lib.storage_sidecar' in command:
-        return 'storage_sidecar', 'Storage sidecar'
+    if '-m lib.storage_authority_sql' in command:
+        return 'storage_authority_sql', 'Storage sidecar'
     # The native Tofu-DB authority (``tofu-db serve``) is exec'd by
-    # lib.storage_sidecar.native_launch; it is the same child sidecar role,
+    # lib.storage_authority_sql.native_launch; it is the same child sidecar role,
     # never an independent daemon.
     try:
         tokens = shlex.split(command)
@@ -441,7 +441,7 @@ def _legacy_storage_lease_owner(cmdline: str | None) -> tuple[str, str]:
     if (len(tokens) >= 2
             and os.path.basename(tokens[0]).lower() in ('tofu-db', 'tofu-db.exe')
             and tokens[1] == 'serve'):
-        return 'storage_sidecar', 'Storage sidecar'
+        return 'storage_authority_sql', 'Storage sidecar'
     return 'unknown', 'Storage operation'
 
 
@@ -516,9 +516,9 @@ def read_storage_lease_status(data_dir: str | Path) -> dict[str, Any]:
     # to the sidecar role it plays so drain grace and orphan reaping apply.
     known_kinds = {
         'offline_maintenance': 'offline_maintenance',
-        'storage_sidecar': 'storage_sidecar',
+        'storage_authority_sql': 'storage_authority_sql',
         'storage_operation': 'storage_operation',
-        'tofudb': 'storage_sidecar',
+        'tofudb': 'storage_authority_sql',
     }
     kind = known_kinds.get(kind, '')
     same_host = bool(host and host == _hostname())
@@ -534,7 +534,7 @@ def read_storage_lease_status(data_dir: str | Path) -> dict[str, Any]:
     if not label:
         label = {
             'offline_maintenance': 'Offline storage maintenance',
-            'storage_sidecar': 'Storage sidecar',
+            'storage_authority_sql': 'Storage sidecar',
             'storage_operation': 'Storage operation',
         }.get(kind, 'Storage operation')
     age_seconds = (
@@ -1047,10 +1047,13 @@ def run_frontend_preflight(
     # value; explicit external overrides retain their fail-closed semantics.
     project_after = read_dotenv_values(Path(project_path) / '.env')
     for key in ('TOFUDB_BIN', 'TOFUDB_EXPECTED_SHA256'):
-        if project_before.get(key) and project_after.get(key):
-            for target in (environment, os.environ):
-                if target.get(key) == project_before[key]:
-                    target[key] = project_after[key]
+        if project_after.get(key):
+            # Freeze project-managed artifact selection for this exact launch,
+            # including pins previously read only from dotenv by the worker.
+            if environment.get(key) in (None, project_before.get(key)):
+                environment[key] = project_after[key]
+            if project_before.get(key) and os.environ.get(key) == project_before[key]:
+                os.environ[key] = project_after[key]
     logger.info(
         'frontend preflight passed in %.1fs (operation=%s)', elapsed, operation)
     return True, ''
@@ -1382,7 +1385,7 @@ class LifecycleManager:
         while True:
             lease = self._active_storage_lease()
             if (not lease.get('held')
-                    or lease.get('kind') != 'storage_sidecar'):
+                    or lease.get('kind') != 'storage_authority_sql'):
                 waited = time.monotonic() - started
                 if waited >= DEFAULT_STORAGE_LEASE_POLL_INTERVAL:
                     logger.info(
@@ -1396,10 +1399,10 @@ class LifecycleManager:
                     'stopped storage sidecar still holds its lease after %.1fs',
                     max(0.0, float(timeout)),
                 )
-                return self._reap_orphaned_storage_sidecar(lease)
+                return self._reap_orphaned_storage_authority_sql(lease)
             time.sleep(min(DEFAULT_STORAGE_LEASE_POLL_INTERVAL, remaining))
 
-    def _reap_orphaned_storage_sidecar(
+    def _reap_orphaned_storage_authority_sql(
         self,
         lease: dict[str, Any],
         *,
@@ -1416,12 +1419,12 @@ class LifecycleManager:
         """
         pid = lease.get('pid')
         if (not lease.get('held')
-                or lease.get('kind') != 'storage_sidecar'
+                or lease.get('kind') != 'storage_authority_sql'
                 or not lease.get('holderVerified')
                 or not isinstance(pid, int)):
             return lease
         inferred_kind, _ = _legacy_storage_lease_owner(proc_cmdline(pid))
-        if inferred_kind != 'storage_sidecar':
+        if inferred_kind != 'storage_authority_sql':
             logger.warning(
                 'storage lease holder pid=%s no longer matches a sidecar '
                 'identity; refusing to reap', pid)
@@ -1696,8 +1699,8 @@ class LifecycleManager:
             return
         self._last_log_maintenance_at = now
         try:
-            from lib.log_policy import stream_backup_count, stream_max_bytes
-            from lib.log_retention import (
+            from lib.logging_pkg.log_policy import stream_backup_count, stream_max_bytes
+            from lib.logging_pkg.log_retention import (
                 copytruncate_if_oversize, ensure_private_log_directory,
                 ensure_private_log_file,
             )
@@ -2056,12 +2059,8 @@ class LifecycleManager:
             self.project, effective_environment)
         return project_environment, candidate, environment_error
 
-    def _spawn(self, source: str) -> dict[str, Any]:
-        # A persisted planned-recovery intent is consumed by this exact spawn
-        # attempt.  If process creation itself fails, _spawn latches a real
-        # crashloop instead of replaying the old clean marker forever.
-        self._state['pendingRecoverySource'] = ''
-        self._state['pendingWorkerExitIntent'] = {}
+    def _worker_environment(self, server_env: dict[str, str], port: int) -> dict[str, str]:
+        """Compose the same launch environment for preparation and spawning."""
         env = os.environ.copy()
         env['TOFU_SERVER_WORKER'] = '1'
         env['TOFU_MANAGED_BY'] = 'supervisor'
@@ -2071,9 +2070,33 @@ class LifecycleManager:
         # supplied this module. Probe that project's persistent data volume,
         # never an incidental source/supervisor filesystem.
         env['TOFU_PROJECT_PATH'] = self.project
-        env['PORT'] = str(self.port)
+        env['PORT'] = str(port)
         env.update({str(key): str(value)
-                    for key, value in (self._state.get('serverEnv') or {}).items()})
+                    for key, value in server_env.items()})
+        install_process_resource_defaults(env)
+        return env
+
+    def _restart_configuration(self) -> str:
+        """Detect another lifecycle operation while preparation releases the lock."""
+        worker = self._state.get('worker') or {}
+        return json.dumps({
+            'desired': self._state.get('desired'),
+            'pid': worker.get('pid'),
+            'processStartTime': worker.get('processStartTime'),
+            'serverArgs': self._state.get('serverArgs'),
+            'serverEnv': self._state.get('serverEnv'),
+            'port': self.port,
+        }, sort_keys=True)
+
+    def _spawn(self, source: str, *,
+               prepared_environment: dict[str, str] | None = None) -> dict[str, Any]:
+        # A persisted planned-recovery intent is consumed by this exact spawn
+        # attempt.  If process creation itself fails, _spawn latches a real
+        # crashloop instead of replaying the old clean marker forever.
+        self._state['pendingRecoverySource'] = ''
+        self._state['pendingWorkerExitIntent'] = {}
+        env = (dict(prepared_environment) if prepared_environment is not None
+               else self._worker_environment(self._state.get('serverEnv') or {}, self.port))
         environment_error = production_server_environment_error(
             self.project, env)
         if environment_error:
@@ -2092,21 +2115,18 @@ class LifecycleManager:
         self._maintain_process_logs(force=True)
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self._disable_legacy_guard()
-        # Apply native-process settings only after the project .env overlay is
-        # present. glibc reads MALLOC_ARENA_MAX at exec time; translating the
-        # Tofu knob before this merge would silently ignore a user's override.
-        install_process_resource_defaults(env)
         self.worker_rss_recycle_bytes = worker_rss_recycle_limit_bytes(
             env.get('TOFU_PROCESS_RSS_RECYCLE_MB'), environment=env)
-        frontend_ready, frontend_error = run_frontend_preflight(
-            self.project,
-            self.python,
-            env,
-            f'manager {source}',
-        )
+        # A restart carries its one verified launch environment across stop.
+        # Cold starts/recovery still prepare here; never rebuild changing source
+        # after an approved restart has removed the last serving worker.
+        frontend_ready, frontend_error = (True, '')
+        if prepared_environment is None:
+            frontend_ready, frontend_error = run_frontend_preflight(
+                self.project, self.python, env, f'manager {source}')
         if not frontend_ready:
             message = (
-                'worker spawn refused before lifecycle change: '
+                'worker spawn refused during artifact preparation: '
                 f'{frontend_error}')
             self._set_observed('crashloop', message)
             self._save()
@@ -2180,7 +2200,8 @@ class LifecycleManager:
 
     def start(self, *, server_args: list[str] | None = None,
               server_env: dict[str, str] | None = None,
-              source: str = 'cli', explicit: bool = True) -> dict[str, Any]:
+              source: str = 'cli', explicit: bool = True,
+              _prepared_environment: dict[str, str] | None = None) -> dict[str, Any]:
         with self._lock:
             if server_args is not None and not isinstance(server_args, list):
                 return {'ok': False, 'message': 'serverArgs must be a JSON array'}
@@ -2267,6 +2288,8 @@ class LifecycleManager:
                     'message': self._storage_blocker_message(storage_lease),
                     **self.status(),
                 }
+            if _prepared_environment is not None:
+                return self._spawn(source, prepared_environment=_prepared_environment)
             return self._spawn(source)
 
     def _worker_shutdown_hard_seconds(self) -> float:
@@ -2444,38 +2467,39 @@ class LifecycleManager:
         # stage logs reference it so a slow restart attributes its time.
         self._trace_requested_at = requested_at
         started = time.monotonic()
-        # Prepare outside the manager mutex while the old worker still serves.
-        # _spawn validates again; a failed download/build must never kill the
-        # only working application merely to discover an incompatible engine.
-        from tofu_dotenv import read_dotenv_values
-        preparation_environment = {
-            **read_dotenv_values(Path(self.project) / '.env'), **os.environ}
-        if isinstance(server_env, dict):
-            preparation_environment.update(server_env)
-        from runtime_guards import load_deployment_configuration
-        try:
-            native_selected = load_deployment_configuration(preparation_environment).storage_backend == 'tofudb'
-        except RuntimeError as exc:
-            return {'ok': False, 'message': str(exc)}
-        if native_selected:
-            ready, error = run_frontend_preflight(
-                self.project, self.python, preparation_environment,
-                f'manager {source} before shutdown')
-            if not ready:
-                return {'ok': False, 'message': error}
+        # Validate and snapshot launch policy while the old worker serves.
+        # Builds run outside the mutex so status/stop remain available.
         with self._lock:
             if server_args is not None and not isinstance(server_args, list):
                 return {'ok': False, 'message': 'serverArgs must be a JSON array'}
             if server_env is not None and not isinstance(server_env, dict):
                 return {'ok': False, 'message': 'serverEnv must be a JSON object'}
-            project_environment, forwarded_environment, environment_error = (
-                self._validated_server_environment(server_env))
-            if environment_error:
-                return {'ok': False, 'message': environment_error}
             if server_args is None and server_env is None:
                 live = read_lock_status(self.project)
                 if live.get('running') and not self._identity_error(live):
                     self._reconcile_live_worker_port(live)
+            launch_args = [str(arg) for arg in (
+                server_args if server_args is not None else self._state.get('serverArgs') or [])]
+            if len(launch_args) > 32 or any(len(arg) > 4096 for arg in launch_args):
+                return {'ok': False, 'message': 'serverArgs exceeds safety limit'}
+            project_environment, forwarded_environment, environment_error = (
+                self._validated_server_environment(server_env))
+            if environment_error:
+                return {'ok': False, 'message': environment_error}
+            effective_env = {**os.environ, **forwarded_environment}
+            launch_port = (_server_port(launch_args, effective_env)
+                           if server_args is not None or server_env is not None else self.port)
+            preparation_environment = self._worker_environment(forwarded_environment, launch_port)
+            configuration = self._restart_configuration()
+        ready, error = run_frontend_preflight(
+            self.project, self.python, preparation_environment,
+            f'manager {source} before shutdown')
+        if not ready:
+            return {'ok': False, 'message': error}
+        with self._lock:
+            if configuration != self._restart_configuration():
+                return {'ok': False, 'message': (
+                    'Worker lifecycle changed during restart preparation; retry against current state.')}
             if server_args is not None:
                 self._state['serverArgs'] = [str(arg) for arg in server_args]
             if server_env is not None:
@@ -2499,7 +2523,8 @@ class LifecycleManager:
             self._clear_failure_budget()
             result = self.start(server_args=self._state.get('serverArgs') or [],
                                 server_env=self._state.get('serverEnv') or {},
-                                source=source, explicit=True)
+                                source=source, explicit=True,
+                                _prepared_environment=preparation_environment)
             if result.get('ok'):
                 logger.info(
                     'worker restart replacement spawned in %.1fs%s',

@@ -41,18 +41,20 @@ Outbound adapters resolve the shared synchronous HTTP transport only at the
 actual egress boundary; registering webhook, skill-catalog, or paper routes
 must not initialize `requests`/`urllib3`. Webhook URLs are still checked at
 registration and again immediately before the no-redirect signed delivery.
-Webhook subscription writes are one locked cross-process read-modify-write,
-with explicit process and owner capacities. The synchronous PushHub listener
-uses a one-second, write-through subscription projection instead of parsing
-the JSON store for every streamed event; deletion/disable authority is still
-read uncached immediately before each outbound request. Event JSON is encoded
-once per fan-out and admitted only when both item and retained-byte budgets
-allow it. The immediate queue and single worker-owned retry heap share a
-launch-derived aggregate byte ceiling; retry attempts count only actual HTTP
-requests. One finite subscription-keyed transient-failure gate defers sibling
-events behind the same cooldown without spending their attempts; one request
-probes recovery before the rest resume. Overload checkpoints contain no
-payloads, full capability URLs, or secrets.
+Webhook subscriptions persist without process/owner count quotas. The PushHub
+listener resolves one write-through subscription projection; revocation is
+rechecked at physical HTTP entry. One immutable, file-backed JSON frame is
+shared across fan-out and retry references. Each owner/subscription preserves
+FIFO order across retries, while unrelated subscriptions send independently.
+Actual encoding/network failures remain visible and physical workers stay
+owned through shutdown. Delivery has no item/byte admission or drop-on-pressure
+path; see [`../RESOURCE_CONTROL.md`](../RESOURCE_CONTROL.md).
+
+Authorized HTTP routes have no endpoint/IP request-frequency decorators.
+Project, Project Brain, integration, media, and optional trading intelligence
+handlers invoke their domain service on every admitted request. The former
+`TOFU_RATE_LIMIT` kill-switch is retired; changing it has no effect. Authentication,
+scopes, owner binding, typed domain errors, and trade-risk authority still apply.
 
 ## Native API flow
 
@@ -65,7 +67,7 @@ payloads, full capability URLs, or secrets.
 
 Credential resolution may synchronously authenticate and stamp `last_used_at`
 in the Sidecar. The async HTTP boundary therefore runs token/bridge credential
-lookups, the optional shared open-mode limiter, and amortized usage-file flushes
+lookups and amortized usage-file flushes
 on the serving loop's bounded sync executor. Storage deadlines may increase
 one request's latency, but must not stop loop heartbeats or unrelated requests.
 Usage telemetry retains 90 UTC days and bounds each day to 1,024 key buckets

@@ -1,6 +1,8 @@
 """Owned Desktop Agent fixture using the real polling loop and bridge."""
 import json
 import threading
+import time
+from lib.desktop_wire import protocol_version
 from types import SimpleNamespace
 
 import pytest
@@ -35,10 +37,10 @@ def desktop_paper_device(tmp_path, monkeypatch, request):
     monkeypatch.setattr(_paper, 'PaperBuildWorker', OwnedTemporaryWorker)
     ready, stop = threading.Event(), threading.Event()
     commands, sent_frames = [], []
-    original_post = _run.requests.post
-    def post(url, **kwargs):
+    original_post = _run.requests.Session.post
+    def post(session, url, **kwargs):
         if not url.startswith('https://isolated-device.test/'):
-            return original_post(url, **kwargs)
+            return original_post(session, url, **kwargs)
         body = kwargs['json']
         assert body['agent']['capabilities']['paper_build'] == 1
         bridge.register_agent('device', body['agent'], user_id=owner)
@@ -48,8 +50,8 @@ def desktop_paper_device(tmp_path, monkeypatch, request):
         pending = bridge.take_pending_commands(agent_id='device', user_id=owner)
         commands.extend(pending)
         ready.set()
-        return SimpleNamespace(status_code=200, json=lambda: {'commands': pending})
-    monkeypatch.setattr(_run.requests, 'post', post)
+        return SimpleNamespace(status_code=200, json=lambda: {'commands': pending, 'protocol_version': protocol_version(), 'server_time': time.time()})
+    monkeypatch.setattr(_run.requests.Session, 'post', post)
     thread = threading.Thread(target=_run.run_agent,
         args=('https://isolated-device.test', {'allow_exec': True, 'allow_write': bool(options.get('allow_write'))}),
         kwargs={'poll_interval': .01, 'stop_event': stop}, daemon=True)

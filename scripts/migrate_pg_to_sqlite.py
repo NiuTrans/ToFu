@@ -48,8 +48,8 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from lib.storage_sidecar import offline_maintenance as _PG_TOOLING
-from lib.storage_sidecar import offline_maintenance as _SQLITE_TOOLING
+from lib.storage_authority_sql import offline_maintenance as _PG_TOOLING
+from lib.storage_authority_sql import offline_maintenance as _SQLITE_TOOLING
 
 
 _MODULUS = 1 << 256
@@ -443,8 +443,8 @@ def _initialize_target(target: Path) -> None:
     child_code = """
 import sqlite3
 import sys
-from lib.storage_sidecar.adapters.sqlite import SQLiteSession
-from lib.storage_sidecar.schema import initialize_schema, validate_schema_version
+from lib.storage_authority_sql.adapters.sqlite import SQLiteSession
+from lib.storage_authority_sql.schema import initialize_schema, validate_schema_version
 
 target = sys.argv[1]
 connection = sqlite3.connect(target, isolation_level=None)

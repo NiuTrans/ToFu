@@ -35,6 +35,13 @@ _DECLARED: tuple[tuple[re.Pattern, dict], ...] = (
                   'researcher', 'analyst', 'general'),
         'evidence': 'provider_catalog', 'confidence': 1.0,
     }),
+    # Exact current catalog product, also maintained in model_inference_defaults.
+    # User-authorized light summarization tier; not inferred AA performance.
+    (re.compile(r'^gpt-6-luna$', re.I), {
+        'family': 'gpt-6', 'quality': 'light',
+        'roles': ('writer', 'researcher', 'analyst', 'browser', 'general'),
+        'evidence': 'provider_catalog', 'confidence': 1.0,
+    }),
     (re.compile(r'gpt[-_.]?5[.-]?6[-_.]?luna(?:$|[-_.])', re.I), {
         'family': 'gpt-5.6', 'quality': 'light',
         'roles': ('writer', 'researcher', 'analyst', 'browser', 'general'),

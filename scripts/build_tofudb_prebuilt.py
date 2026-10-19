@@ -109,7 +109,10 @@ def _rust_target_installed(triple: str) -> bool:
 def _musl_cross_env(triple: str) -> dict:
     """Resolve the musl C toolchain for the bundled C deps (sqlite/mimalloc/zstd)."""
     arch = triple.split('-', 1)[0]
-    candidates = [f'{arch}-linux-musl-gcc', 'musl-gcc'] if arch == 'x86_64' else [f'{arch}-linux-musl-gcc']
+    host_arch = {'arm64': 'aarch64', 'amd64': 'x86_64'}.get(platform.machine().lower(), platform.machine().lower())
+    candidates = [f'{arch}-linux-musl-gcc']
+    if host_arch == arch:
+        candidates.append('musl-gcc')
     compiler = next((shutil.which(name) for name in candidates if shutil.which(name)), None)
     if compiler is None:
         raise BuildError(
@@ -149,7 +152,7 @@ def build_engine(triple: str) -> Path:
     # host toolchain pin (old base images) is honoured exactly as a manual
     # `cd packages/tofu-db && cargo build` would honour it.
     result = _run(
-        [cargo, 'build', '--release', '--manifest-path', str(CRATE_MANIFEST),
+        [cargo, 'build', '--locked', '--release', '--manifest-path', str(CRATE_MANIFEST),
          '--target', triple],
         timeout=CARGO_TIMEOUT_S, env=env, cwd=CRATE_MANIFEST.parent)
     if result.returncode != 0:

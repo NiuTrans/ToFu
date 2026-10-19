@@ -71,7 +71,7 @@ def audit_round_outcome(
             detail['source'] = source
         if round_entry.get('_programCallId'):
             detail['program_child'] = True
-        from lib.tool_rejection import tool_rejection_descriptor
+        from lib.tool_results.tool_rejection import tool_rejection_descriptor
         rejection = tool_rejection_descriptor(round_entry)
         if status == 'rejected':
             detail['outcome'] = 'rejected'

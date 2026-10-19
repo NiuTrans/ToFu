@@ -38,7 +38,7 @@ def test_server_boot_keeps_cipher_implementation_dormant():
         'import sys; import server; '
         'print("SERVER-SECRET", '
         '"lib.secret_envelope" in sys.modules, '
-        '"lib.byo_providers" in sys.modules, '
+        '"lib.byo.byo_providers" in sys.modules, '
         '"cryptography" in sys.modules, '
         '"cryptography.fernet" in sys.modules)'
     )

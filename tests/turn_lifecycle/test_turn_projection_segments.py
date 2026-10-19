@@ -1347,3 +1347,142 @@ def test_legacy_null_status_mirror_is_normalized_before_decode(status):
     assert tools[0]['result']['content'] is None
     segment_schema = OPENAPI_SCHEMAS['TurnContentSegment']
     assert _validate(segment_schema, tools[0], '$') == []
+
+
+def _content_reference_turn(content, *, turn_id="turn-a", block_id="text:a"):
+    return {
+        "turnId": turn_id,
+        "status": "completed",
+        "projection": {
+            "content": content,
+            "segments": [{"type": "text", "blockId": block_id, "text": content}],
+        },
+    }
+
+
+@pytest.mark.parametrize("content", [
+    "x" * 125, "x" * 126, "x" * 127,
+    "汉🙂" * 40, '\"\\\n\t' * 40, "", "tiny",
+])
+def test_content_reference_sizing_matches_exact_inline_encoding(content):
+    import orjson
+
+    from lib.turn_projection_segments import _turns_with_referenced_projection_fields
+
+    source = [_content_reference_turn(content)]
+    before = deepcopy(source)
+    encoded_size = len(orjson.dumps(content))
+    inline_size = len(orjson.dumps({"content": content}))
+    reference_size = len(orjson.dumps({"turn-a": {"content": "text:a"}}))
+    assert inline_size == encoded_size + len(b'{"content":}')
+    expected = encoded_size >= 128 and inline_size - reference_size >= 64
+
+    projected, references = _turns_with_referenced_projection_fields(source)
+
+    assert source == before
+    assert bool(references) is expected
+    if expected:
+        assert references == {"turn-a": {"content": "text:a"}}
+        assert "content" not in projected[0]["projection"]
+        assert projected[0]["projection"]["segments"] is source[0]["projection"]["segments"]
+        restored = deepcopy(projected)
+        restored[0]["projection"]["content"] = content
+        assert restored == source
+    else:
+        assert projected is source
+
+
+@pytest.mark.parametrize("savings", [63, 64, 65])
+def test_content_reference_savings_boundary(savings):
+    import orjson
+
+    from lib.turn_projection_segments import _turns_with_referenced_projection_fields
+
+    content = "x" * 200
+    inline_size = len(orjson.dumps({"content": content}))
+    base_reference_size = len(orjson.dumps({"t": {"content": "b"}}))
+    block_id = "b" + "x" * (inline_size - base_reference_size - savings)
+    source = [_content_reference_turn(content, turn_id="t", block_id=block_id)]
+    assert inline_size - len(orjson.dumps({"t": {"content": block_id}})) == savings
+
+    projected, references = _turns_with_referenced_projection_fields(source)
+
+    assert bool(references) is (savings >= 64)
+    assert ("content" not in projected[0]["projection"]) is (savings >= 64)
+
+
+@pytest.mark.parametrize("ineligible", [
+    None, "missing", "mismatch", "duplicate-text", "duplicate-block",
+    "invalid-block", "running", "duplicate-turn",
+])
+def test_content_reference_encodes_only_eligible_content_once(monkeypatch, ineligible):
+    import lib.turn_projection_segments as segments
+
+    content = "汉🙂\"\\\n" * 1000
+    source = [_content_reference_turn(content)]
+    projection = source[0]["projection"]
+    if ineligible == "missing":
+        projection["segments"] = []
+    elif ineligible == "mismatch":
+        projection["segments"][0]["text"] = "different"
+    elif ineligible == "duplicate-text":
+        projection["segments"].append({"type": "text", "blockId": "other", "text": content})
+    elif ineligible == "duplicate-block":
+        projection["segments"].append({"type": "thinking", "blockId": "text:a", "text": "other"})
+    elif ineligible == "invalid-block":
+        projection["segments"][0]["blockId"] = ""
+    elif ineligible == "running":
+        source[0]["status"] = "running"
+    elif ineligible == "duplicate-turn":
+        source.append(deepcopy(source[0]))
+    before = deepcopy(source)
+    original_dumps = segments.orjson.dumps
+    encoded_values = []
+
+    def tracked_dumps(value, *args, **kwargs):
+        encoded_values.append(value)
+        return original_dumps(value, *args, **kwargs)
+
+    monkeypatch.setattr(segments.orjson, "dumps", tracked_dumps)
+    projected, references = segments._turns_with_referenced_projection_fields(source)
+
+    assert source == before
+    if ineligible is None:
+        assert encoded_values == [content, {"turn-a": {"content": "text:a"}}]
+        assert references == {"turn-a": {"content": "text:a"}}
+    else:
+        assert encoded_values == []
+        assert references == {}
+        assert projected is source
+
+
+@pytest.mark.parametrize("status", ["completed", "failed", "interrupted", "truncated", "cancelled"])
+def test_content_reference_retains_terminal_status_eligibility(status):
+    from lib.turn_projection_segments import _turns_with_referenced_projection_fields
+
+    source = [_content_reference_turn("x" * 200)]
+    source[0]["status"] = status
+    _, references = _turns_with_referenced_projection_fields(source)
+    expected = {} if status == "cancelled" else {"turn-a": {"content": "text:a"}}
+    assert references == expected
+
+
+@pytest.mark.parametrize("invalid_field", ["content", "turnId", "blockId"])
+def test_content_reference_encoding_errors_remain_inline(invalid_field):
+    from lib.turn_projection_segments import _turns_with_referenced_projection_fields
+
+    source = [_content_reference_turn("x" * 200)]
+    if invalid_field == "content":
+        source[0]["projection"]["content"] += "\ud800"
+        source[0]["projection"]["segments"][0]["text"] = source[0]["projection"]["content"]
+    elif invalid_field == "turnId":
+        source[0]["turnId"] += "\ud800"
+    else:
+        source[0]["projection"]["segments"][0]["blockId"] += "\ud800"
+    before = deepcopy(source)
+
+    projected, references = _turns_with_referenced_projection_fields(source)
+
+    assert references == {}
+    assert projected is source
+    assert source == before

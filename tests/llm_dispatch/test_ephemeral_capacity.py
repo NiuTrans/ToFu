@@ -34,16 +34,16 @@ def pool(monkeypatch):
         ephemeral.dispose_ephemeral_slot(handle)
 
 
-def _repository():
+def _repository(count=64):
     document = _full_document()
     for connection in document['connections']:
         connection['base_url'] = 'http://127.0.0.1:1/v1'
     prototype = document['deployments'][0]
     document['deployments'] = [
         {**copy.deepcopy(prototype), 'deployment_id': f'deployment-{index}',
-         'wire_model_id': f'wire-{index}'} for index in range(64)
+         'wire_model_id': f'wire-{index}'} for index in range(count)
     ]
-    return SimpleNamespace(get=lambda owner: SimpleNamespace(document=document))
+    return SimpleNamespace(get=lambda owner: SimpleNamespace(document=document, revision=7))
 
 
 def _group(repository, owner=23):
@@ -181,3 +181,68 @@ def test_high_rpm_history_cannot_make_a_healthy_target_overflow_or_unselectable(
     for _ in range(64):
         slot.release()
     assert slot.inflight == 0
+
+
+
+def test_default_group_retains_every_authorized_candidate_and_full_rank(pool):
+    repository = _repository(131)
+    group = _group(repository)
+    try:
+        assert len(group.handles) == len(group.candidates) == 131
+        assert {c.deployment['deployment_id'] for c in group.candidates} == {f'deployment-{i}' for i in range(131)}
+        assert [h.slot.route_rank for h in group.handles] == list(range(131))
+    finally:
+        adapter.dispose_routed_slot_group(group)
+    assert not pool.slots and ephemeral.count_ephemeral_slots() == 0
+
+
+def test_planned_route_beyond_old_prefix_matches_before_secret_resolution(pool, monkeypatch):
+    from lib.model_routing.routing import compile_candidates
+    from lib.model_routing.domain import ModelRoutingError
+    repository = _repository(131)
+    owner = OwnerBoundary.create(23)
+    selection = NativeModelSelection(ModelRef('creator', 'alpha'), None, 'provider-a')
+    target = compile_candidates(repository.get(owner).document, selection)[100]
+    witness = adapter.candidate_route_identity(target, 7)
+    group = adapter.mint_routed_slot_group(repository, owner, selection,
+        max_candidates=1, expected_route_identity=witness)
+    try:
+        assert len(group.handles) == 1
+        assert group.candidates[0].deployment['deployment_id'] == witness['deploymentId']
+    finally:
+        adapter.dispose_routed_slot_group(group)
+    def forbidden(*args, **kwargs):
+        pytest.fail('changed planned witness resolved a secret or minted a handle')
+    monkeypatch.setattr(adapter, 'mint_ephemeral_slot', forbidden)
+    repository.resolve_secret = forbidden
+    with pytest.raises(ModelRoutingError) as failure:
+        adapter.mint_routed_slot_group(repository, owner, selection,
+            expected_route_identity={**witness, 'revision': 6})
+    assert failure.value.kind == 'model_route_changed'
+    assert not pool.slots
+
+
+def test_explicit_shortlist_above_old_quota_is_honored(pool):
+    repository = _repository(131)
+    group = adapter.mint_routed_slot_group(repository, OwnerBoundary.create(23),
+        NativeModelSelection(ModelRef('creator', 'alpha'), None, 'provider-a'), max_candidates=100)
+    try:
+        assert len(group.handles) == 100
+    finally:
+        adapter.dispose_routed_slot_group(group)
+
+
+def test_all_primary_routes_precede_fallbacks_when_the_primary_set_exceeds_old_quota(pool):
+    repository = _repository(70)
+    document = repository.get(OwnerBoundary.create(23)).document
+    document['deployments'].append(copy.deepcopy(_full_document()['deployments'][-1]))
+    document['deployments'][-1]['deployment_id'] = 'late-fallback'
+    group = _group(repository)
+    try:
+        primary = [c for c in group.candidates if c.model['model_id'] == 'alpha']
+        fallback = [c for c in group.candidates if c.model['model_id'] == 'beta']
+        assert len(primary) == 70 and len(fallback) == 1
+        assert group.candidates[:70] == primary
+        assert group.candidates[70:] == fallback
+    finally:
+        adapter.dispose_routed_slot_group(group)

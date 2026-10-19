@@ -262,7 +262,7 @@ def _fetch_catalog(cache: dict, *, user_id: str = '') -> tuple[list[dict], str, 
     from lib.desktop import egress as _eg
     route = _eg.route_request(url, user_id=user_id)
     if route == 'direct':
-        from lib.http_client import http_get
+        from lib.http_transport.client import http_get
         response = http_get(url, headers=headers,
                             timeout=CODEX_CATALOG_TIMEOUT_S)
     else:

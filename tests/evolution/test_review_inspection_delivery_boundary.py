@@ -22,9 +22,9 @@ def test_uninspected_judgment_cannot_close_or_create_an_executor_repair(runtime,
     with pytest.raises(EvolutionStateError, match='inspection is unfinished') as refused:
         delivery.prepare(task, args, call_id='review-call', round_num=0)
     progress = json.loads(str(refused.value)[str(refused.value).index('{'):])
-    assert not progress['all_sources_delivered']
-    assert progress['next_action'] == 'read_missing_sources'
-    assert progress['sources'][0]['next_unread_offset'] == 0
+    assert not progress['current']['all_sources_delivered']
+    assert progress['review_next_action'] == 'read_current_sources'
+    assert progress['current']['sources'][0]['next_unread_offset'] == 0
     assert '_explicitToolDeliveryRequest' not in task and args == before
     assert runtime[1].writes == writes
     assert runtime[0].get_run(run['run_id'], user_id=OWNER)['status'] == 'reviewing'
@@ -39,8 +39,8 @@ def test_partial_delivery_returns_the_exact_next_gap_and_preserves_the_author(ru
     with pytest.raises(EvolutionStateError) as refused:
         delivery.prepare(task, args, call_id='review-call', round_num=0)
     progress = json.loads(str(refused.value)[str(refused.value).index('{'):])
-    assert progress['sources'][0]['next_unread_offset'] == 6000
-    assert progress['sources'][0]['delivered_chars'] == 6000
+    assert progress['current']['sources'][0]['next_unread_offset'] == 6000
+    assert progress['current']['sources'][0]['delivered_chars'] == 6000
     assert task['id'] == runtime[2][-1]['id'] and len(runtime[2]) == 2
 
 
@@ -97,10 +97,10 @@ def test_wire_refusal_delivers_complete_gaps_to_the_same_reviewer(runtime, monke
     _, text, _ = _handle_evolution_teach(task, None, delivery.NAME, 'review-call', args, 0,
         {'llmRound': 0}, task['config'], '', False)
     progress = json.loads(text[text.index('{'):])
-    assert progress['next_action'] == 'read_missing_sources'
+    assert progress['review_next_action'] == 'read_current_sources'
     expected = [run[key] for key in ['result_source', 'tool_evidence_source', 'artifact_evidence_source'] if run.get(key)]
-    assert len(progress['sources']) == len(expected)
-    for source, original in zip(progress['sources'], expected):
+    assert len(progress['current']['sources']) == len(expected)
+    for source, original in zip(progress['current']['sources'], expected):
         assert source['source']['task_id'] == original['task_id']
         assert source['source']['source_sha256'] == original['source_sha256']
         assert source['next_unread_offset'] == 0

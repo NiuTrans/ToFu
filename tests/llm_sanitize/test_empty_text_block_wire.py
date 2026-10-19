@@ -38,7 +38,7 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 from lib.llm.body import build_body  # noqa: E402
-from lib.llm_errors import (  # noqa: E402
+from lib.llm.llm_errors import (  # noqa: E402
     BadRequestError,
     RateLimitError,
     _classify_http_error,
@@ -93,13 +93,13 @@ class TestStripEmptyTextBlocks:
         assert len(msgs[0]['content']) == 1
         assert 'PROJECT BOARD' in msgs[0]['content'][0]['text']
 
-    def test_whitespace_only_block_dropped(self):
+    def test_whitespace_only_block_folds_into_compatible_text(self):
         msgs = [{'role': 'user', 'content': [
             {'type': 'text', 'text': '   \n '},
             {'type': 'text', 'text': 'real'},
         ]}]
         _strip_empty_text_blocks(msgs)
-        assert [b['text'] for b in msgs[0]['content']] == ['real']
+        assert [b['text'] for b in msgs[0]['content']] == ['   \n real']
 
     def test_non_text_blocks_preserved(self):
         img = {'type': 'image_url', 'image_url': {'url': 'data:image/png;base64,AA=='}}

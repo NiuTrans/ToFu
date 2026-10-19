@@ -9,6 +9,9 @@ invariant mechanical: a shipped test must be collectable against the shipped
 tree.
 """
 
+# Synthetic repository/package fixtures, never shipped-source anchors.
+_AUDIT_SYNTHETIC_REPO_PATHS = ('scripts/helper.py', 'scripts/private.py')
+
 import pytest
 
 pytest.importorskip('export', reason='export.py is not shipped in opensource builds')

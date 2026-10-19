@@ -247,7 +247,7 @@ def test_generated_image_url_download_is_stream_bounded(monkeypatch):
         yield Response()
 
     monkeypatch.setattr(errors, '_MAX_GENERATED_IMAGE_BYTES', 100)
-    monkeypatch.setattr('lib.http_client.http_stream', stream)
+    monkeypatch.setattr('lib.http_transport.client.http_stream', stream)
 
     encoded, mime = image_gen._download_image(
         'https://example.test/generated.png')

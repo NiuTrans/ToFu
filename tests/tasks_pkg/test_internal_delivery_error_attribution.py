@@ -48,10 +48,12 @@ def test_delivery_error_bypasses_all_model_recovery(monkeypatch, failure_attempt
     assert 'error' not in task
 
 
-def test_fatal_delivery_keeps_original_envelope_over_secondary_failure(monkeypatch):
+@pytest.mark.parametrize('aborted', [False, True])
+def test_fatal_delivery_keeps_original_envelope_over_secondary_failure(monkeypatch, aborted):
     import lib.tasks_pkg.orchestrator._post_loop as post
 
     task = _task()
+    task['aborted'] = aborted
     first = EventDeliveryError('first durable write failed')
     first.__cause__ = RuntimeError('original disk fault, not HTTP 401 429 timeout')
     first._user_message = {'kind': 'permission', 'message': 'wrong provider attribution'}
@@ -135,3 +137,142 @@ def test_reactive_retry_propagates_delivery_error(monkeypatch):
         assert raised.value is error
     finally:
         call._reactive_compact_attempts.pop(task['id'], None)
+
+
+@pytest.mark.parametrize('marker', ['EventDeliveryCancelled', 'EventDeliveryRevoked'])
+def test_later_admission_preserves_cancellation_identity(marker):
+    from lib.tasks_pkg import event_delivery
+    from lib.tasks_pkg.manager import _events
+    from lib.error_envelope import from_exception
+    task = _task()
+    task['_eventDeliveryLane'] = DeliveryLane(task)
+    task['_eventDeliveryAdmissionError'] = marker
+    with pytest.raises(getattr(event_delivery, marker)) as raised:
+        _events.append_event(task, {'type': 'round_end', 'roundNum': 8})
+    assert from_exception(raised.value)['kind'] == 'aborted'
+
+
+@pytest.mark.parametrize('reason', ['', 'server_shutdown'])
+def test_cancelled_delivery_settles_interrupted_without_capacity_error(monkeypatch, reason):
+    import lib.tasks_pkg.orchestrator._post_loop as post
+    from lib.tasks_pkg.event_delivery import EventDeliveryCancelled
+    from lib.turn_verdict import derive_task_verdict
+    task = _task()
+    task.update(status='running', aborted=True, _abort_reason=reason,
+                content='retained partial output', toolRounds=[], usage={'total_tokens': 23})
+    emitted, persisted = [], []
+    monkeypatch.setattr(post, '_settle_fatal_tool_rounds', lambda task: None)
+    monkeypatch.setattr('lib.tasks_pkg.compaction._settlement.settle_compaction_usage', lambda task: None)
+    monkeypatch.setattr(post, '_maybe_auto_retry_turn', lambda *a: pytest.fail('cancel replay'))
+    monkeypatch.setattr(post, 'append_event', lambda task, event: emitted.append(event))
+    monkeypatch.setattr(post, 'persist_task_result', lambda task: persisted.append(dict(task)))
+    assert post.handle_task_fatal(task, EventDeliveryCancelled('cancelled by owner')) is False
+    assert task['status'] == task['finishReason'] == 'aborted'
+    assert task['error'] is None
+    assert emitted[0]['finishReason'] == 'aborted' and not emitted[0].get('error')
+    verdict = derive_task_verdict(task, emitted[0])
+    assert verdict.status.value == 'interrupted'
+    assert verdict.cause == ('server_restart' if reason else 'user_abort')
+    assert persisted[0]['content'] == 'retained partial output'
+    assert persisted[0]['usage'] == {'total_tokens': 23}
+    assert task['_chat_terminal_stamped'] and task['finished_at'] > 0
+
+
+@pytest.mark.parametrize('guard', ['stalled', 'deadline', 'internal_fence'])
+def test_delivery_cancellation_does_not_hide_internal_stop(monkeypatch, guard):
+    import lib.tasks_pkg.orchestrator._post_loop as post
+    from lib.tasks_pkg.event_delivery import EventDeliveryCancelled
+    from lib.turn_verdict import derive_task_verdict
+    from lib.error_envelope import make_envelope
+    task = _task()
+    task.update(status='running', aborted=True)
+    diagnostic = make_envelope('internal', context='invocation-guard', source='task-engine')
+    if guard == 'internal_fence':
+        task['_abort_reason'] = 'storage_authority_integrity'
+    else:
+        task['_invocationStopReason'] = guard
+        diagnostic['invocationStopReason'] = guard
+    task['error'] = diagnostic
+    monkeypatch.setattr(post, '_settle_fatal_tool_rounds', lambda task: None)
+    monkeypatch.setattr('lib.tasks_pkg.compaction._settlement.settle_compaction_usage', lambda task: None)
+    monkeypatch.setattr(post, 'append_event', lambda *a: None)
+    monkeypatch.setattr(post, 'persist_task_result', lambda *a: None)
+    post.handle_task_fatal(task, EventDeliveryCancelled('physical cancellation'))
+    assert task['status'] == task['finishReason'] == 'error'
+    assert task['error']['kind'] == 'internal'
+    assert derive_task_verdict(task).status.value == 'failed'
+
+
+def test_shutdown_cancels_new_admission_but_drains_accepted_evidence():
+    from lib.tasks_pkg.event_delivery import EventDeliveryCancelled
+    owner = EventDeliveryCoordinator(workers=1)
+    lane = DeliveryLane(_task())
+    entered, release, committed = threading.Event(), threading.Event(), []
+    def persist():
+        entered.set()
+        assert release.wait(5)
+        committed.append(1)
+    try:
+        owner.submit(lane, 1, 32, persist, lambda: None)
+        assert entered.wait(5)
+        assert not owner.close(0)
+        with pytest.raises(EventDeliveryCancelled):
+            owner.submit(lane, 2, 32, lambda: committed.append(2), lambda: None)
+        release.set()
+        owner.flush(lane)
+        assert committed == [1]
+    finally:
+        release.set()
+        assert owner.close(5)
+
+
+@pytest.mark.parametrize('status,finish', [('done', 'stop'), ('error', 'error'), ('aborted', 'aborted')])
+def test_late_delivery_cancellation_preserves_stamped_terminal(monkeypatch, status, finish):
+    import lib.tasks_pkg.orchestrator._post_loop as post
+    from lib.tasks_pkg.event_delivery import EventDeliveryCancelled
+    from lib.tasks_pkg.manager import stamp_chat_task_terminal
+    task = _task()
+    stamp_chat_task_terminal(task, status=status, finish_reason=finish)
+    before = dict(task)
+    monkeypatch.setattr(post, 'append_event', lambda *a: pytest.fail('terminal rewrite'))
+    monkeypatch.setattr(post, 'persist_task_result', lambda *a: pytest.fail('candidate rewrite'))
+    assert post.handle_task_fatal(task, EventDeliveryCancelled('late callback')) is True
+    assert task == before
+
+
+@pytest.mark.parametrize('error_type', ['delivery', 'persistence'])
+@pytest.mark.parametrize('guard', ['', 'stalled', 'deadline', 'storage_authority_integrity'])
+def test_typed_cancellation_preserves_history_and_guarded_failures(monkeypatch, error_type, guard):
+    import lib.tasks_pkg.orchestrator._post_loop as post
+    from lib.tasks_pkg.event_delivery import EventDeliveryCancelled
+    from lib.llm.llm_errors import AbortedError
+    task = _task()
+    task['aborted'] = True
+    task['content'] = 'partial work'
+    task['messages'] = [{'role': 'tool', 'content': 'committed evidence'}]
+    if guard in {'stalled', 'deadline'}:
+        task['_invocationStopReason'] = guard
+    elif guard:
+        task['_abort_reason'] = guard
+    emitted, persisted, stamps = [], [], []
+    monkeypatch.setattr(post, '_settle_fatal_tool_rounds', lambda task: None)
+    monkeypatch.setattr('lib.tasks_pkg.compaction._settlement.settle_compaction_usage', lambda task: None)
+    monkeypatch.setattr('lib.tasks_pkg.manager.stamp_chat_task_terminal',
+                        lambda task, **kw: stamps.append(kw))
+    monkeypatch.setattr(post, 'append_event', lambda task, event: emitted.append(event))
+    monkeypatch.setattr(post, 'persist_task_result', lambda task: persisted.append(dict(task)))
+    monkeypatch.setattr(post, '_maybe_auto_retry_turn', lambda *a: pytest.fail('Stop must not retry'))
+    error = (EventDeliveryCancelled('owner Stop') if error_type == 'delivery'
+             else AbortedError('stopped at persistence checkpoint'))
+    assert post.handle_task_fatal(task, error) is False
+    assert task['content'] == 'partial work'
+    assert persisted[0]['messages'] == [{'role': 'tool', 'content': 'committed evidence'}]
+    if guard:
+        assert task['status'] == task['finishReason'] == 'error'
+        assert task['error']['failureAttribution']['phase'] == 'task-fatal'
+    else:
+        assert task['status'] == task['finishReason'] == 'aborted'
+        assert not task.get('error') and not emitted[0].get('error')
+        assert stamps == [{'status': 'aborted', 'finish_reason': 'aborted'}]
+        from lib.tasks_pkg.manager._stream import _abort_request_attribution
+        assert _abort_request_attribution(task, error) == ('aborted', None, None)

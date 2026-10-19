@@ -133,18 +133,23 @@ def test_faults_keep_prepublication_safe_and_postpublication_recoverable(repo, m
 
 @pytest.mark.parametrize('race', ['edit', 'checkpoint', 'discard', 'cancel'])
 def test_automatic_source_lease_released_but_checkpoint_is_fenced(repo, monkeypatch, race):
+    from lib.project_mod import task_delta_delivery
     root, _, owner = repo
     work = automatic_workspace(repo, monkeypatch)
     (work / 'task.txt').write_text('captured task delta\n')
-    delivery.settle_task_workspace(str(work), 'automatic', user_id=owner, outcome='completed')
-    row = _row(root, 'automatic')
-    entered, release = _pause(monkeypatch, '_gate_commands')
+    entered, release = threading.Event(), threading.Event()
+    original = task_delta_delivery._merge_workspace_delta
+    def merge(*args):
+        entered.set()
+        assert release.wait(15)
+        return original(*args)
+    monkeypatch.setattr(task_delta_delivery, '_merge_workspace_delta', merge)
     before = git(root, 'rev-parse', 'HEAD')
     with ThreadPoolExecutor(max_workers=2) as pool:
-        adoption = pool.submit(delivery._settle_registered, row, delivery._receipt(row))
+        adoption = pool.submit(delivery.settle_task_workspace, str(root), 'automatic',
+                               user_id=owner, outcome='completed')
         try:
             assert entered.wait(15)
-
             def source_writer():
                 with workspace_write_lease(str(work), timeout=0.0):
                     (work / 'later.txt').write_text('not in captured checkpoint\n')
@@ -153,22 +158,19 @@ def test_automatic_source_lease_released_but_checkpoint_is_fenced(repo, monkeypa
                     elif race == 'discard':
                         ic.discard_workspace(str(root), 'automatic', user_id=owner)
                     elif race == 'cancel':
-                        delivery.settle_task_workspace(str(work), 'automatic', user_id=owner, outcome='cancelled')
-
+                        delivery.settle_task_workspace(str(root), 'automatic', user_id=owner, outcome='cancelled')
             pool.submit(source_writer).result(timeout=5)
         finally:
             release.set()
         result = adoption.result(timeout=20)
-    assert git(root, 'rev-parse', 'HEAD') == before
     assert not (root / 'later.txt').exists()
+    assert git(root, 'rev-parse', 'HEAD') == before
     if race == 'edit':
         assert result['state'] == 'delivered'
         assert (root / 'task.txt').read_text() == 'captured task delta\n'
-        assert (work / 'later.txt').read_text() == 'not in captured checkpoint\n'
     else:
         assert result['state'] != 'delivered'
         assert not (root / 'task.txt').exists()
-        assert work.exists()
         if race == 'cancel':
             assert result['taskOutcome'] == 'cancelled'
 
@@ -203,7 +205,9 @@ def test_discard_entrypoint_waits_for_inflight_publication_fence(repo, monkeypat
     root, _, owner = repo
     work = automatic_workspace(repo, monkeypatch)
     (work / 'task.txt').write_text('linearized publication\n')
-    delivery.settle_task_workspace(str(work), 'automatic', user_id=owner, outcome='completed')
+    with monkeypatch.context() as setup:
+        setup.setattr(delivery, '_settle_registered', lambda row, receipt: receipt)
+        delivery.settle_task_workspace(str(work), 'automatic', user_id=owner, outcome='completed')
     row = _row(root, 'automatic')
     at_intent, release, discard_requested, discarded = (threading.Event() for _ in range(4))
     save = delivery._save
@@ -249,7 +253,9 @@ def test_discard_entrypoint_waits_for_inflight_publication_fence(repo, monkeypat
 def test_cleanup_scan_does_not_hold_canonical_repo_admission(repo, monkeypatch):
     root, _, owner = repo
     work = automatic_workspace(repo, monkeypatch)
-    delivery.settle_task_workspace(str(work), 'automatic', user_id=owner, outcome='completed')
+    with monkeypatch.context() as setup:
+        setup.setattr(delivery, '_settle_registered', lambda row, receipt: receipt)
+        delivery.settle_task_workspace(str(work), 'automatic', user_id=owner, outcome='completed')
     row = _row(root, 'automatic')
     entered, release = threading.Event(), threading.Event()
     git_call = ic._git

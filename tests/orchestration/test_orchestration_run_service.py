@@ -786,5 +786,5 @@ def test_http_adapter_uses_run_service_instead_of_direct_persistence_calls():
     assert "@orchestration_route(blueprint, 'task-create')" in task_routes
     assert "@orchestration_route(blueprint, 'task-list')" in task_routes
     assert "'/api/v4/orchestrations/tasks" not in route
-    server = open(os.path.join(ROOT, 'lib/server_assembly.py'), encoding='utf-8').read()
+    server = open(os.path.join(ROOT, 'lib/server/server_assembly.py'), encoding='utf-8').read()
     assert 'retire_interrupted_orchestration_runs_detailed(' in server

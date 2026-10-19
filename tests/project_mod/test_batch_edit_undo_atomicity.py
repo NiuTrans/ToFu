@@ -39,8 +39,11 @@ def test_batch_roundtrip_has_one_physical_undo_record(tmp_path, monkeypatch, ent
     assert mods.get_modifications(str(base)) == []
 
 
-def test_group_inverse_budget_refuses_before_file_or_journal_changes(tmp_path, monkeypatch):
-    monkeypatch.setattr(_ops, 'recovery_file_bytes', lambda: 32)
+def test_group_evidence_io_failure_refuses_before_file_or_journal_changes(tmp_path, monkeypatch):
+    from lib.project_mod import write_intents
+    def fail_prepare(*args,**kwargs):
+        raise write_intents.IntentError('injected recovery evidence I/O failure')
+    monkeypatch.setattr(write_intents.IntentStore,'prepare',fail_prepare)
     monkeypatch.setattr(mods, 'SESSIONS_DIR', str(tmp_path / 'journals'))
     base = tmp_path / 'project'
     base.mkdir()
@@ -52,7 +55,7 @@ def test_group_inverse_budget_refuses_before_file_or_journal_changes(tmp_path, m
         {'path':'file.txt', 'operation':'replace', 'anchor':'A', 'content':'x' * 20},
         {'path':'file.txt', 'operation':'replace', 'anchor':'C', 'content':'y' * 20},
     ], task_id='task')
-    assert 'undo-budget-exceeded' in result
+    assert 'injected recovery evidence I/O failure' in result
     assert target.read_bytes() == b'A\nC\n'
     assert mods.get_modifications(str(base)) == []
 

@@ -85,6 +85,11 @@ observe('empty',[turn('first',0,[file('main.tex','remote-commit',
   {root:'project',rootPath:'remote:device:project'})])]);
 assert.equal(received.at(-1).path,'main.tex');
 assert.equal(received.at(-1).projectRoot,'remote:device:project');
+const largeBefore=received.length;
+const completeFiles=Array.from({length:1101},(_,i)=>file('part-'+i+'.tex','wide-'+i));
+observe('empty',[turn('first',0,completeFiles)]);
+assert.equal(received.length-largeBefore,1101);
+assert.equal(received.at(-1).changeId,'wide-1100');
 console.log('ok');
 """
     result = subprocess.run(['node','-e',script,str(module),str(store_module)], cwd=ROOT, capture_output=True, text=True, timeout=30)

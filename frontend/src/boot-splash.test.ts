@@ -220,3 +220,38 @@ describe('BOOT_SPLASH_POLICY', () => {
     expect(BOOT_SPLASH_POLICY.probeTimeoutMs).toBeGreaterThan(0);
   });
 });
+
+it('keeps submission blocked through unknown/failed probes and releases only at readiness', async () => {
+  const blocked: boolean[] = [];
+  const pending: (() => void)[] = [];
+  let verdict: Awaited<ReturnType<BootSplashPorts['probeBoot']>> = {kind: 'unavailable'};
+  const ports = controllerPorts({
+    onBlockedChange: value => blocked.push(value),
+    probeBoot: async () => verdict,
+    schedule: {setTimeout: cb => { pending.push(cb); return pending.length; }, clearTimeout: () => {}},
+  });
+  const controller = createBootSplashController(ports);
+  expect(blocked).toEqual([true]);
+  await Promise.resolve();
+  verdict = {kind: 'failed', snapshot: FAILED_SNAPSHOT};
+  pending.shift()!();
+  await Promise.resolve();
+  expect(blocked).toEqual([true]);
+  verdict = {kind: 'ready'};
+  pending.shift()!();
+  await Promise.resolve();
+  expect(blocked).toEqual([true, false]);
+  expect(controller.isActive()).toBe(false);
+  expect(pending).toHaveLength(0);
+  controller.destroy();
+});
+
+it('does not deliver a late probe after teardown', async () => {
+  let resolve!: (value: {kind: 'starting'; snapshot: BootSnapshot}) => void;
+  const ports = controllerPorts({probeBoot: () => new Promise(r => { resolve = r; })});
+  const controller = createBootSplashController(ports);
+  controller.destroy();
+  resolve({kind: 'starting', snapshot: RUNNING_SNAPSHOT});
+  await Promise.resolve();
+  expect((ports.document.body as unknown as StubElement).children).toHaveLength(0);
+});

@@ -11,7 +11,12 @@ use std::{
     sync::{Arc, Mutex, MutexGuard},
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
-use tofu_runtime::checkpoint_journal::{Error, Header, SnapshotWrite, Store};
+use tofu_runtime::checkpoint_journal::{Error, Header, Handoff, SnapshotWrite, Store};
+
+#[path = "native_checkpoint_handoff.rs"]
+mod handoff;
+#[path = "native_goal_actor_claim.rs"]
+mod goal_claim;
 
 use super::{HEADERS, REPLAY, SNAPSHOTS};
 use crate::logical_outbox::{
@@ -26,6 +31,8 @@ pub struct NativeCheckpointStore {
     owner: u64,
     header_bytes: usize,
     snapshot_bytes: usize,
+    writer_process: Option<Value>,
+    goal_claim_replay_bytes: Option<usize>,
 }
 impl NativeCheckpointStore {
     /// Supply the selected shared authority and explicit launch-derived bounds.
@@ -40,8 +47,8 @@ impl NativeCheckpointStore {
         if owner == 0
             || header_bytes == 0
             || snapshot_bytes == 0
-            || header_bytes > crate::generated_tofudb_ir::MAX_TRANSACTION_IR_LITERAL_BYTES
-            || snapshot_bytes > crate::generated_tofudb_ir::MAX_TRANSACTION_IR_LITERAL_BYTES
+            || header_bytes > crate::generated_tofudb_ir::MAX_LEGACY_DOCUMENT_BYTES
+            || snapshot_bytes > crate::generated_tofudb_ir::MAX_LEGACY_DOCUMENT_BYTES
         {
             return Err(Error::Invalid);
         }
@@ -54,15 +61,27 @@ impl NativeCheckpointStore {
             return Err(Error::Invalid);
         }
         // Unsupported deferred durability refuses before acquiring a lease.
-        authority.lock().map_err(|_| Error::Storage)?
-            .wal_durability_witness().map_err(map_io)?;
+        authority
+            .lock()
+            .map_err(|_| Error::Storage)?
+            .wal_durability_witness()
+            .map_err(map_io)?;
         Ok(Self {
             authority,
             tenant,
             owner,
             header_bytes,
             snapshot_bytes,
+            writer_process: super::writer::capture(),
+            goal_claim_replay_bytes: None,
         })
+    }
+    /// Explicit launch-derived aggregate evidence budget for a passive replica.
+    /// This enables validation of composite claim records, never active leases.
+    pub fn with_goal_claim_replay_budget(mut self, evidence_bytes: usize) -> Result<Self, Error> {
+        if evidence_bytes == 0 { return Err(Error::Invalid); }
+        self.goal_claim_replay_bytes = Some(evidence_bytes);
+        Ok(self)
     }
     fn task(&self, owner: u64, task: &str) -> Result<(), Error> {
         if owner != self.owner || task.is_empty() {
@@ -74,7 +93,7 @@ impl NativeCheckpointStore {
 }
 fn map_io(error: io::Error) -> Error {
     match error.kind() {
-        io::ErrorKind::WouldBlock => Error::Conflict,
+        io::ErrorKind::WouldBlock | io::ErrorKind::AlreadyExists => Error::Conflict,
         io::ErrorKind::InvalidInput
         | io::ErrorKind::InvalidData
         | io::ErrorKind::PermissionDenied => Error::Invalid,
@@ -87,7 +106,8 @@ fn durable<T>(database: MutexGuard<'_, AuthorityDatabase>, value: T) -> Result<T
     let witness = database.wal_durability_witness().map_err(map_io)?;
     drop(database);
     if let Some((barrier, witness)) = witness {
-        barrier.wait_witness(&witness, Instant::now() + crate::wal::MAX_BARRIER_WAIT)
+        barrier
+            .wait_witness(&witness, Instant::now() + crate::wal::MAX_BARRIER_WAIT)
             .map_err(map_io)?;
     }
     Ok(value)
@@ -132,6 +152,41 @@ fn encode<T: Serialize + ?Sized>(value: &T, maximum: usize) -> Result<Vec<u8>, E
     Ok(output.value)
 }
 impl Store for NativeCheckpointStore {
+    fn handoff_retired_actors(&self, actors: &[tofu_runtime::checkpoint_journal::ActorHandoff],
+        authorization: &Value, evidence_bytes: usize) -> Result<(),Error> {
+        self.consume_goal_actors(actors,authorization,evidence_bytes)
+    }
+    fn handoff(&self, request: Handoff<'_>) -> Result<u64, Error> {
+        self.handoff_atomic(request)
+    }
+    fn writer_process(&self) -> Option<Value> {
+        self.writer_process.clone()
+    }
+    fn writer_quiescent(&self, owner: u64, task: &str, identity: &Value) -> Result<bool, Error> {
+        self.task(owner, task)?;
+        // A passive replay witness is not local writer-death authority. A stale
+        // replicated header cannot grant promotion while its source advances.
+        let database = self.authority.lock().map_err(|_| Error::Storage)?;
+        let mut transaction = database.begin(self.tenant, owner).map_err(map_io)?;
+        let key =
+            versioned_document::record_key(self.tenant, owner, REPLAY, task).map_err(map_io)?;
+        let passive = versioned_document::get_value_with_version_bounded(
+            &database,
+            &mut transaction,
+            &key,
+            REPLAY,
+            task,
+            self.header_bytes,
+        )
+        .map_err(map_io)?
+        .is_some();
+        drop(transaction);
+        drop(database);
+        if passive {
+            return Ok(false);
+        }
+        super::writer::quiescent(identity)
+    }
     fn header(&self, owner: u64, task: &str) -> Result<Option<Header>, Error> {
         self.task(owner, task)?;
         let database = self.authority.lock().map_err(|_| Error::Storage)?;
@@ -216,6 +271,7 @@ impl Store for NativeCheckpointStore {
                 expected_version: expected,
                 header,
                 snapshot: snapshot_value,
+                handoff_source: None,
                 updated_at_ms: now,
             };
             let clear_payload = encode(&mutation, MAX_LOGICAL_PAYLOAD_BYTES)?;
@@ -326,6 +382,8 @@ struct Mutation<'a> {
     expected_version: u64,
     header: &'a Value,
     snapshot: Option<&'a Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    handoff_source: Option<&'a RetiredSource>,
     updated_at_ms: u64,
 }
 #[derive(Deserialize)]
@@ -338,13 +396,24 @@ struct ReceivedMutation {
     expected_version: u64,
     header: Value,
     snapshot: Value,
+    #[serde(default)]
+    handoff_source: Option<RetiredSource>,
     updated_at_ms: u64,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RetiredSource {
+    task_id: String,
+    expected_version: u64,
+    header: Value,
 }
 impl NativeCheckpointStore {
     /// Explicit passive-target replay. Cipher authenticates the source; source_uuid
     /// is pinned by trusted composition. Target must not have its own outbox.
     /// Current-version redelivery is idempotent. Older/gapped deliveries refuse:
     /// caller resumes from its confirmed per-task version, never guesses a prefix.
+    /// Aggregate Goal claims require an explicit evidence budget and return the
+    /// next source Goal cursor; they grant no active execution capability.
     pub fn replay(
         &self,
         cipher: &LogicalOutboxCipher,
@@ -389,7 +458,7 @@ impl NativeCheckpointStore {
     ) -> Result<u64, Error> {
         if record.identity.tenant_id != self.tenant
             || record.identity.owner_user_id != self.owner
-            || record.identity.operation != OPERATION
+            || !matches!(record.identity.operation.as_str(), OPERATION | goal_claim::GOAL_CLAIM_OPERATION | goal_claim::GOAL_HANDOFF_OPERATION)
             || record.identity.schema_version
                 != crate::generated_storage_operations::STORAGE_SCHEMA_VERSION
             || record.identity.registry_version
@@ -400,6 +469,14 @@ impl NativeCheckpointStore {
         let clear = cipher.open(record).map_err(map_io)?;
         if <[u8; 32]>::from(Sha256::digest(&clear)) != record.identity.request_digest {
             return Err(Error::Invalid);
+        }
+        if record.identity.operation == goal_claim::GOAL_CLAIM_OPERATION {
+            return self.replay_goal_claim_clear(&clear, source_uuid, record, archive_uuid, verified_old,
+                self.goal_claim_replay_bytes.ok_or(Error::Ineligible)?);
+        }
+        if record.identity.operation == goal_claim::GOAL_HANDOFF_OPERATION {
+            return self.replay_goal_handoff_clear(&clear,source_uuid,record,archive_uuid,verified_old,
+                self.goal_claim_replay_bytes.ok_or(Error::Ineligible)?);
         }
         let mutation: ReceivedMutation =
             serde_json::from_slice(&clear).map_err(|_| Error::Invalid)?;
@@ -501,6 +578,39 @@ impl NativeCheckpointStore {
         {
             return Err(Error::Conflict);
         }
+        if let Some(source) = &mutation.handoff_source {
+            if mutation.expected_version != 0 || mutation.snapshot.is_null()
+                || source.task_id == mutation.task_id
+                || !matches!(mutation.header["phase"].as_str(), Some("completed" | "tools_pending"))
+                || (mutation.header["phase"] == "tools_pending")
+                    != (mutation.snapshot.get("tools_pending") == Some(&Value::Bool(true)))
+                || mutation.header["epoch"] != source.header["epoch"]
+                || mutation.header["binding"] != source.header["binding"]
+                || mutation.header["next_round"] != source.header["next_round"]
+            { return Err(Error::Invalid); }
+            let source_receipt_key = versioned_document::record_key(self.tenant, self.owner, REPLAY,
+                &source.task_id).map_err(map_io)?;
+            let source_receipt = versioned_document::get_value_with_version_bounded(&database,
+                &mut transaction, &source_receipt_key, REPLAY, &source.task_id, self.header_bytes)
+                .map_err(map_io)?.ok_or(Error::Conflict)?;
+            let source_receipt: Value = serde_json::from_slice(&source_receipt.0).map_err(|_| Error::Invalid)?;
+            if source_receipt["source_uuid"] != source_uuid
+                || source_receipt["version"].as_u64() != Some(source.expected_version)
+                || match archive_uuid {
+                    Some(id) => source_receipt["archive_uuid"].as_str() != Some(id.to_string().as_str()),
+                    None => source_receipt.get("archive_uuid").is_some(),
+                }
+            { return Err(Error::Conflict); }
+            self.retire_handoff_source(&database, &mut transaction, source,
+                mutation.header["phase"].as_str().ok_or(Error::Invalid)?, false, mutation.updated_at_ms)?;
+            let mut retired_receipt = expected_receipt.clone();
+            retired_receipt["version"] = Value::from(source.expected_version.checked_add(1).ok_or(Error::Invalid)?);
+            versioned_document::put(&database, &mut transaction, PutRequest {
+                key: source_receipt_key, namespace: REPLAY.into(), logical_key: source.task_id.clone(),
+                value_json: encode(&retired_receipt, self.header_bytes)?, expected_version: None,
+                updated_at_ms: mutation.updated_at_ms,
+            }).map_err(map_io)?;
+        }
         versioned_document::put_known_version_returning_envelope(
             &database,
             &mut transaction,
@@ -557,9 +667,9 @@ impl NativeCheckpointStore {
 
 impl NativeCheckpointStore {
     pub fn is_restart_required(&self) -> bool {
-        self.authority
-            .lock()
-            .map_or(true, |database| database.is_restart_required() || database.wal_durability_witness().is_err())
+        self.authority.lock().map_or(true, |database| {
+            database.is_restart_required() || database.wal_durability_witness().is_err()
+        })
     }
     pub fn source_uuid(&self) -> Result<String, Error> {
         Ok(self

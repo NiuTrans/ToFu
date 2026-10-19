@@ -62,8 +62,7 @@ fn classify(error: &io::Error) -> Reason {
             | "Turn compaction mutation set exceeds its bound" | "Turn compaction reparenting exceeds 64 MiB"
             | "legacy Turn image response exceeds the streaming bound"
             | "turn delta exceeds 2000 changed rows" | "turn delta exceeds its bounded streamed payload"
-            | "turn delta exceeds 2000 tombstones" | "daily-cost document exceeds its bound"
-            | "daily-cost month response exceeds 8 MiB" => Reason::DomainBound,
+            | "turn delta exceeds 2000 tombstones" => Reason::DomainBound,
         _ => Reason::Other,
     }
 }

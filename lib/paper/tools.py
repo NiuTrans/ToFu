@@ -20,7 +20,9 @@ Also here: ``make_paper_exec_shim`` (the task-dict shim the shared dispatch
 expects, with the explicit unattended auto-approval policy),
 ``PaperToolResultBudgetV2`` (the shared 8k/result + 24k/round owner-scoped
 artifact contract), and ``paper_effective_tool_name`` (the no-project
-run_command → code_exec flip).
+run_command → code_exec flip). ``make_paper_task_tool_executor`` shares Q&A /
+Deepen live tool-round projection over these ports; workflows own their loops
+and terminal settlement adapters.
 """
 
 import copy
@@ -84,6 +86,7 @@ def load_paper_search_backend() -> PaperSearchBackend:
 
 
 __all__ = ['execute_paper_tool', 'make_research_tool_executor',
+           'make_paper_task_tool_executor',
            'make_paper_exec_shim', 'cap_tool_result',
            'paper_effective_tool_name', 'freeze_paper_tool_epoch',
            'build_research_tool_schemas', 'build_paper_full_tool_context',
@@ -978,7 +981,7 @@ def _execute_shared_tool(name, args, shim, round_entry, abort):
     return content, display, None, None, None
 
 
-from lib.search_budget import budgeted_search_tool
+from lib.search.search_budget import budgeted_search_tool
 
 
 @budgeted_search_tool
@@ -1350,5 +1353,96 @@ def make_research_tool_executor(messages, *, user_question, abort_signal,
             tool_call_id=tc_id, content=result, round_entry=round_entry,
             tool_arguments=fn_args)
         return visible_result
+
+    return _execute_tool
+
+
+def make_paper_task_tool_executor(
+    task, messages, *, user_question, abort_signal, exec_shim, result_budget,
+    paper_tool_executor, on_tool_event, log_prefix,
+):
+    """Adapt full-catalog tool calls for Q&A and section Deepen tasks.
+
+    Own only tool-round projection and bounded feedback, not model iteration,
+    prompts, authority, cancellation policy or terminal task settlement. The
+    explicit executor retains each workflow's injectable dispatch binding.
+    Exceptions propagate unchanged to the workflow; no synthetic tool_done
+    or successful feedback is published for a failed execution.
+    """
+    import time
+
+    def _execute_tool(rnd, tc):
+        fn_name = tc['function']['name']
+        fn_args_raw = tc['function']['arguments']
+        tc_id = tc.get('id', '')
+
+        # Parse + schema-repair args ONCE (shared with the executor), so the
+        # display label and the actual search see the SAME normalized shape — a
+        # bare-string `queries`/`urls` is coerced to a single-element array,
+        # never iterated per-character.
+        fn_args, _ = parse_and_repair_tool_args(fn_name, fn_args_raw)
+
+        task['round_counter'] += 1
+        rn = task['round_counter']
+        display_query = display_query_for(fn_name, fn_args)
+        # run_command → code_exec in a project-less engine (mirrors chat).
+        effective_name = paper_effective_tool_name(fn_name)
+
+        round_entry = {
+            'roundNum': rn, 'llmRound': rnd,
+            'toolName': effective_name, 'query': display_query,
+            'toolCallId': tc_id,
+            'toolArgs': (fn_args_raw if isinstance(fn_args_raw, str)
+                         else json.dumps(fn_args, ensure_ascii=False)),
+            'status': 'searching', 'results': None,
+        }
+        task['tool_rounds'].append(round_entry)
+        on_tool_event({
+            'type': 'tool_start', 'roundNum': rn, 'toolName': effective_name,
+            'query': display_query, 'toolCallId': tc_id,
+            'toolArgs': round_entry['toolArgs'],
+        })
+
+        tool_t0 = time.time()
+        result, display_results, search_diag, engine_breakdown, verticals = paper_tool_executor(
+            fn_name, fn_args_raw, user_question=user_question,
+            abort=abort_signal.is_set,
+            exec_shim=exec_shim, round_entry=round_entry)
+        tool_elapsed = time.time() - tool_t0
+        logger.info('%s:Tool %s → %d chars in %.1fs',
+                    log_prefix, fn_name, len(result), tool_elapsed)
+
+        tool_status = ('rejected' if round_entry.get('status') == 'rejected'
+                       else 'done')
+        round_entry['status'] = tool_status
+        round_entry['_elapsed'] = f'{tool_elapsed:.1f}s'
+        round_entry['results'] = display_results
+        if engine_breakdown:
+            round_entry['engineBreakdown'] = engine_breakdown
+        if verticals:
+            round_entry['verticals'] = verticals
+        round_entry['toolContent'] = result[:4000]
+
+        done_ev = {
+            'type': 'tool_done', 'roundNum': rn, 'toolName': effective_name,
+            'toolCallId': tc_id, 'elapsed': round(tool_elapsed, 1),
+            'toolContent': result[:4000], 'results': display_results,
+            'status': tool_status,
+        }
+        if round_entry.get('contractError'):
+            done_ev['contractError'] = round_entry['contractError']
+        if search_diag:
+            done_ev['searchDiag'] = search_diag
+        if engine_breakdown:
+            done_ev['engineBreakdown'] = engine_breakdown
+        if verticals:
+            done_ev['verticals'] = verticals
+        on_tool_event(done_ev)
+
+        return result_budget.append(
+            messages, round_index=rnd, tool_name=fn_name,
+            tool_call_id=tc_id, content=result, round_entry=round_entry,
+            world_version=str(task.get('_worldVersion') or ''),
+            tool_arguments=fn_args)
 
     return _execute_tool

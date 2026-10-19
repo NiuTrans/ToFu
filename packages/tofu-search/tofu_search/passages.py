@@ -97,7 +97,9 @@ def select_relevant_passages(
     if len(body) <= max_chars:
         return body
 
-    chunk_chars = max(240, min(chunk_chars, max_chars))
+    # Keep scoring windows bounded even for a one-character budget; when no
+    # window fits, truncate the strongest window, not the document lead.
+    chunk_chars = max(80, min(chunk_chars, max_chars))
     chunks = _chunks(body, chunk_chars)
     if not chunks:
         return body[:max_chars].rstrip()
@@ -127,7 +129,7 @@ def select_relevant_passages(
 
     used = sum(len(chunks[i]) for i in chosen)
     for _score, idx in sorted(positive, key=lambda item: (-item[0], item[1])):
-        separator_cost = 18 if chosen else 0
+        separator_cost = len('\n\n[... omitted ...]\n\n') if chosen else 0
         if idx in chosen:
             continue
         if used + separator_cost + len(chunks[idx]) > max_chars:
@@ -137,7 +139,8 @@ def select_relevant_passages(
 
     # A single chunk can be larger than a small remaining budget.
     if not chosen:
-        return chunks[0][:max_chars].rstrip()
+        best = max(scored, key=lambda item: (item[0], -item[1]))[1]
+        return chunks[best][:max_chars].rstrip()
 
     ordered = sorted(chosen)
     parts: list[str] = []

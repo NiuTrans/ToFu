@@ -90,7 +90,7 @@ def test_unknown_kind_downgrades_to_generic_keys():
 
 def test_endpoint_exception_carries_localizable_keys():
     from lib.error_envelope import from_exception
-    from lib.llm_errors import EndpointUnreachableError
+    from lib.llm.llm_errors import EndpointUnreachableError
     envelope = from_exception(
         EndpointUnreachableError("All endpoints for model 'kimi-k3' are unreachable"),
         model='kimi-k3', context='no-fallback', source='llm-stream',

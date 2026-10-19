@@ -237,11 +237,16 @@ def _extract_timeline_fns() -> str:
     project_start = src.index('function _projectTodoRoundsForDisplay(')
     project_end = src.index('\nfunction ', project_start + 1)
     project = src[project_start:project_end]
-    start = src.index('function _roundsByToolCallId(')
+    start = src.index('function _groupSegContextNotes(')
     end = src.index('\nfunction _renderUnifiedGroup(')
     chunk = project + '\n' + src[start:end]
     assert 'renderSegmentTimelineHTML' in chunk
-    return groups_native + '\n' + chunk
+    timeline_native = open(native_module_path(
+        '.native/segment-timeline.js',
+        os.path.join(ROOT, 'frontend', 'src', 'conversation', 'ui',
+                     'segment-timeline', 'index.ts'),
+    ), encoding='utf-8').read()
+    return groups_native + '\n' + timeline_native + '\n' + chunk
 
 
 _TIMELINE_STUBS = r"""
@@ -332,14 +337,12 @@ def test_settled_timeline_renders_chip_at_anchor():
 
 
 _L4_NC_HARNESS = _TIMELINE_STUBS + r"""
-// NEUTER: strip the inject-extraction block from renderSegmentTimelineHTML so it
-// reverts to the pre-fix behaviour (chip in no batch → dropped). Proves the
-// extraction/prepend is load-bearing for settled visibility.
-let src = process.env.FN_SRC;
-const neutered = src.replace(/const _injByAnchor = new Map\(\);[\s\S]*?\/\* END_INJECT_EXTRACTION \*\//,
-                             'const _injByAnchor = new Map(); const _supersededTcIds = new Set(); const realRounds = allRounds;');
-if (neutered === src) { console.log('FAIL nc_pattern_matched'); process.exit(0); }
-eval(neutered);
+// Disable the injection renderer port while keeping the real timeline owner.
+// This proves the ordering assertions exercise visible injection rows.
+eval(process.env.FN_SRC);
+_createToolGroupRenderer = function(allRounds) {
+  return {renderSlot: () => '', renderGroups: rounds => _renderToolGroupsHTML(rounds, allRounds)};
+};
 const out = [];
 function check(name, cond){ out.push((cond ? 'PASS ' : 'FAIL ') + name); }
 const msg = { toolRounds: [

@@ -452,7 +452,7 @@ class TestBridgeTTL(unittest.TestCase):
             with bridge.command_queue_lock:
                 bridge.command_queue.pop('c1', None)
 
-    def test_default_ttl_still_90(self):
+    def test_default_wait_has_no_queue_age_expiry(self):
         from lib.desktop import bridge
         now = time.time()
         cmd = {'id': 'c2', 'type': 'desktop_list_files', 'params': {},
@@ -464,8 +464,9 @@ class TestBridgeTTL(unittest.TestCase):
         try:
             pending = bridge.take_pending_commands(
                 agent_id='ttl-agent', user_id='owner')
-            self.assertEqual(pending, [])
-            self.assertEqual(cmd['error'], 'Command expired (stale cleanup)')
+            self.assertEqual([c['id'] for c in pending], ['c2'])
+            self.assertIsNone(cmd['error'])
+            self.assertFalse(cmd['event'].is_set())
         finally:
             with bridge.command_queue_lock:
                 bridge.command_queue.pop('c2', None)

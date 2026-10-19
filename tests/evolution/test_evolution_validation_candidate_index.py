@@ -12,6 +12,7 @@ from lib.research.source_index import empty_reference
 from lib.storage.errors import StorageError
 from tests.support.evolution_store import EvolutionRecordStore
 from tests.evolution.test_evolution_validation_generation import failed_validation as failed_validation, accept_diagnosis
+from tests.evolution.test_evolution_validation_generation import identified_observations as identified_observations
 from tests.evolution.test_evolution_runs import runtime as runtime, OWNER
 from tests.research.test_research_workspace_evidence_guard import storage as storage
 

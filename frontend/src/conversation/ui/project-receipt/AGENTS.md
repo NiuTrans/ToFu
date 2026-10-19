@@ -5,8 +5,10 @@ and `policy.ts` own human verbs, captions, routine-read folding and count chips.
 `board.ts`, `peers.ts`, `activity.ts` and `commit.ts` project their receipt
 families. `contracts.ts` and `time.ts` supply presentation types and clock
 projection. All scalar escaping uses the shared `html-safety.ts` authority.
-The obsolete conversation-digest projection and stylesheet are removed; raw
-same-call backend conversation results retain the ordinary result-view owner.
+`search.ts` projects same-query `conversationSearch` metadata with localized
+keywords, scope, returned counts and incomplete-coverage notices. Historical
+records without that metadata retain raw same-call output; never infer
+coverage or counts from prose.
 
 No content owner imports the facade or reaches into retained globals. Metadata
 comes from the same tool result; never infer success from prose, bypass human

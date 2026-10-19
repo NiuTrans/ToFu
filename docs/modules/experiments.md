@@ -11,7 +11,7 @@ registry; it does not import routes, task managers, or a database backend.
 
 The machine-readable durable definition is
 [`contracts/experiments_v1.schema.json`](../../contracts/experiments_v1.schema.json).
-`lib/cost_experiments.py` is the product adapter for the maintained context-cost
+`lib/cost_experiments/cost_experiments.py` is the product adapter for the maintained context-cost
 experiment. It owns compatibility fields and diagnostic rollups, but delegates
 strategy resolution, assignment, metric extraction, and the final decision to
 the generic capability layer.
@@ -188,7 +188,7 @@ registry, assignment service, or decision vocabulary.
   compiled metric/analyzer dispatch.
 - `tests/cost/test_cost_experiments.py`: product adapter, persistence outcome,
   repository cursor resumption, report, and HTTP capability/report surfaces.
-- `tests/storage/test_storage_sidecar_contract.py::test_task_results_cost_experiment_scan_projects_only_outcomes`:
+- `tests/storage/test_storage_authority_sql_contract.py::test_task_results_cost_experiment_scan_projects_only_outcomes`:
   compact owner/experiment projection and post-filter cap semantics.
 - `tests/context/test_context_efficiency_audit.py::test_benchmark_jsonl_budget_public_price_and_acceptance`:
   benchmark non-inferiority release gate.

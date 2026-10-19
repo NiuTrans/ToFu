@@ -114,6 +114,16 @@ def _read(archive, events=None, **kwargs):
         tenant_id=kwargs.get('tenant_id', 'tenant-a'))
 
 
+@pytest.mark.parametrize('wallet,reserved', [(None, 0), ('w', 0), ('w', 9)])
+def test_launch_preserves_personal_zero_estimate_and_paid_fee_identity(archive, wallet, reserved):
+    archive.task.update(_billingUserId=wallet, _billing_reservation_micro=reserved)
+    create_goal_execution_journal(archive.task, archive.definition, archive.launch, runs=archive.runs)
+    archive.task['_billingUserId'] = 'changed-after-launch'
+    frozen, _ = _read(archive)
+    assert frozen['fee_account'] == ({'mode': 'cost'} if wallet is None else
+        {'mode': 'wallet', 'wallet_user_id': wallet, 'reserved_micro': reserved})
+
+
 def test_launch_is_frozen_before_effects_and_survives_context_mutation(archive):
     journal = create_goal_execution_journal(
         archive.task, archive.definition, archive.launch, runs=archive.runs)
@@ -129,6 +139,7 @@ def test_launch_is_frozen_before_effects_and_survives_context_mutation(archive):
     assert frozen['worker_state']['_todos'] == archive.task['_todos']
     assert [event['type'] for event in _events(archive)] == [
         'goal_run_started', 'execution_journal_start', 'execution_journal_ready',
+        'execution_account_frontier',
         'execution_effect_started', 'execution_effect_completed']
     assert len(records) == 1
     with pytest.raises(GoalRunLifecycleError, match='already has a journal'):

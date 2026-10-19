@@ -186,8 +186,10 @@ def test_retired_same_mailbox_checkpoint_cannot_dispatch(run_context, monkeypatc
     monkeypatch.setattr('lib.swarm.persistence.load_session', lambda *a, **kw: {
         'task_id': ctx.parent['id'], 'status': 'terminated', 'agents': []})
     provider = Mock()
-    with pytest.raises(ValueError, match='ended or superseded'):
+    from lib.tasks_pkg.message_input_receipts import MessageInputScopeError
+    with pytest.raises(MessageInputScopeError) as caught:
         stream_with_receipts(provider, child, {'messages': rebuilt})
+    assert 'ended or superseded' in str(caught.value.__cause__)
     provider.assert_not_called()
     assert '_verifiedMessageInputIds' not in child
     assert ctx.repo.load()[0]['messages'][0]['state'] == 'submitted'
@@ -233,3 +235,30 @@ def test_subagent_recovery_passes_binding_before_checkpoint_projection(run_conte
     finally:
         for child in observed:
             discard_task(child['id'])
+
+
+@pytest.mark.parametrize('confirmed', [False, True])
+def test_historical_projection_preserves_original_pending_or_confirmed_row(run_context, confirmed):
+    from lib.tasks_pkg.message_input_receipts import historical_swarm_context
+    ctx = run_context
+    row = ctx.repo.submit(content='original delivery', kind='reference', key='history',
+                          sender_task_id=ctx.parent['id'])
+    source = []
+    inject_messages({'id': 'original', '_swarmMessageBinding': ctx.binding}, source, 0)
+    if confirmed:
+        ctx.repo.confirm([row['id']], child_task_id='original', round_num=0)
+    original = copy.deepcopy(source)
+    before = ctx.repo.load()
+    restored = historical_swarm_context(source)
+    task = {'id': 'new-root'}
+    remember(task, restored)
+    stream_with_receipts(_verified_stream, task, {'messages': restored})
+    confirm_input(task, round_num=0)
+    assert source == original
+    assert restored[0]['content'] == original[0]['content']
+    assert ctx.repo.load() == before
+    assert before[0]['messages'][0]['state'] == ('input_confirmed' if confirmed else 'submitted')
+    # Exact trusted recovery binding retains witnesses for normal validation.
+    same_run = historical_swarm_context(source, binding=ctx.binding)
+    assert same_run == original
+    assert same_run is not source

@@ -16,10 +16,10 @@ from lib.log import audit_log, get_logger
 from lib.tasks_pkg.executor import SWARM_TOOL_NAMES
 from lib.tasks_pkg.manager import append_event
 from lib.tasks_pkg.tool_display import _build_tool_round_entry
-from lib.tool_caller_identity import normalize_tool_caller
-from lib.llm.tool_call_flood import validate_tool_call_response
+from lib.tool_results.tool_caller_identity import normalize_tool_caller
+from lib.llm.tool_call_flood import dedupe_tool_call_response
 from lib.tool_input_repair import HALLUCINATION_ABORT_THRESHOLD, ingest_tool_call
-from lib.tool_rejection import stamp_tool_rejection
+from lib.tool_results.tool_rejection import stamp_tool_rejection
 
 from lib.tasks_pkg.tool_dispatch._labels import _known_tool_names
 from lib.tasks_pkg.tool_dispatch._repair import _apply_repair_to_round, _build_repair_summary
@@ -128,6 +128,14 @@ def _reject_undispatched(tc, display_name, tc_id, receipt_msg, rejected_meta,
             tool_round_num)
 
 
+def publish_tool_call_entry(task, round_entry, event_payload, name, number):
+    """Announce one prepared occurrence only when its execution owner enters."""
+    task['toolRounds'].append(round_entry)
+    append_event(task, event_payload)
+    if name in SWARM_TOOL_NAMES:
+        task['_swarmRoundNum'] = number
+
+
 def parse_tool_calls(
     assistant_msg: dict[str, Any],
     task: dict[str, Any],
@@ -135,6 +143,7 @@ def parse_tool_calls(
     tool_round_num: int,
     project_enabled: bool,
     early_announced: dict[str, tuple] | None = None,
+    *, tool_entry_publisher=None,
 ) -> tuple[list[tuple], int]:
     """Parse raw tool_calls from the assistant message into structured tuples.
 
@@ -186,8 +195,12 @@ def parse_tool_calls(
         tool_calls = [raw_tool_calls]
     assistant_msg['tool_calls'] = tool_calls
     # Callback-free resends and non-streaming adapters share stream admission.
-    # Validate the entire response before creating rows or authorizing effects.
-    validate_tool_call_response(tool_calls)
+    # A repeated identical occurrence is collapsed, not rejected: keep the
+    # first of each exact signature, stamp the bounded evidence, and proceed.
+    tool_calls, _flood_evidence = dedupe_tool_call_response(tool_calls)
+    if _flood_evidence is not None:
+        assistant_msg['tool_calls'] = tool_calls
+        assistant_msg['_flood_collapsed'] = _flood_evidence
     parsed_tcs = []
     _early = early_announced or {}
     _early_claimed: set[str] = set()
@@ -243,6 +256,16 @@ def parse_tool_calls(
     # tool wins the exact check and is never aliased over) and hallucination
     # classification (an unknown name not in this set is a fake tool).
     _known = _known_tool_names(task)
+
+    # Frozen MCP wire declarations can outlive their live execution grants.
+    # They are diagnosis evidence only, never additions to the allowlist.
+    _declared_mcp = {
+        name for schema in (task.get('_tool_schema') or [])
+        if isinstance(schema, dict)
+        and isinstance(schema.get('function'), dict)
+        and isinstance(name := schema['function'].get('name'), str)
+        and name.startswith('mcp__')
+    }
     for tool_call_index, raw_tc in enumerate(tool_calls):
         if not isinstance(raw_tc, dict):
             tc_id = f'call_{uuid.uuid4().hex[:12]}'
@@ -338,6 +361,24 @@ def parse_tool_calls(
         # The chat-specific PRESENTATION layered on the result below (UI
         # auto-fixed badge, autopilot loop-break, raw-
         # args diagnostic log) stays here — it's not shared behaviour.
+        if fn_name in _declared_mcp and fn_name not in _known:
+            _unavailable_msg = (
+                f'Error: `{fn_name}` was declared to the model but is not '
+                'currently available in this task\'s live tool catalog and '
+                'was NOT executed. The retained MCP declaration is not an '
+                'execution grant. Connection, discovery, or permission state '
+                'may have changed; restore availability before retrying, or '
+                'use a currently available tool. This is not a fabricated '
+                'tool name.')
+            _receipt, tool_round_num = _reject_undispatched(
+                tc, fn_name, tc_id, _unavailable_msg,
+                {'kind': 'tool_unavailable', 'attempted': fn_name,
+                 'suggestions': [], 'reason': 'declared_without_live_authority',
+                 'declared': True, 'executable': False},
+                task, tool_round_num, round_num, project_enabled,
+                early_entry=_take_early(tc_id))
+            parsed_tcs.append(_receipt)
+            continue
         _ingested = ingest_tool_call(
             tool_call=tc, known_tools=_known,
             model=task.get('model', '') or '',
@@ -714,12 +755,8 @@ def parse_tool_calls(
         if tc.get('extra_content'):
             round_entry['extraContent'] = tc['extra_content']
             event_payload['extraContent'] = tc['extra_content']
-        task['toolRounds'].append(round_entry)
-        append_event(task, event_payload)
-
-        # Swarm tools need extra bookkeeping for sub-agent event routing
-        if fn_name in SWARM_TOOL_NAMES:
-            task['_swarmRoundNum'] = rn
+        publisher = publish_tool_call_entry if tool_entry_publisher is None else tool_entry_publisher
+        publisher(task,round_entry,event_payload,fn_name,rn)
 
         parsed_tcs.append((tc, fn_name, tc_id, fn_args, rn, round_entry, _args_parse_error))
 

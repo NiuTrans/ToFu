@@ -32,6 +32,8 @@ def begin_live_flow_turn(task: dict, event: dict) -> None:
         'content': '', 'thinking': '', '_flowLivePhase': True,
         '_flowIteration': event.get('iteration'),
     }
+    if task.get('_goalRunId'):
+        message['orchestration'] = {'goalRunId': task['_goalRunId']}
     if role == 'virtual_user':
         message.update(_isVirtualUser=True, _autopilotRunId=event.get('autopilotRunId'))
     elif message['role'] == 'user':

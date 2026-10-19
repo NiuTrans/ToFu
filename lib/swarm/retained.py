@@ -11,6 +11,9 @@ from __future__ import annotations
 import json
 import uuid
 
+from lib.swarm.retained_launch import (
+    LaunchOutcome, apply_launch_outcome, classify_launch, launch_lookup,
+)
 from lib.swarm.retained_repository import (
     RetainedAgentError, RetainedAgentRepository, scope_for,
 )
@@ -26,6 +29,16 @@ def _public(value: dict, *, memory: bool = False) -> dict:
                                   else len(value.get('messages') or []))
     result['last_result'] = str(value.get('last_result') or '')[:4000]
     if memory:
+        if value.get('state') == 'busy':
+            result['assignment'] = {
+                'agent_id': value.get('run_id') or '',
+                'swarm_run_id': value.get('run_session_id') or '',
+                'conversation_id': value.get('run_conversation_id') or '',
+            }
+            result['launch_state'] = value.get('run_launch_state') or 'unknown'
+            result['launch_lookup'] = value.get('run_launch_lookup') or launch_lookup(
+                run_id=value.get('run_id') or '', swarm_key=value.get('swarm_key') or '',
+                session_id=value.get('run_session_id') or '')
         # Inspectable without injecting the entire transcript into the root.
         result['recent_messages'] = [
             {'role': str(item.get('role') or ''),
@@ -57,9 +70,10 @@ def _repository(task: dict, *, project_path: str, requested_scope: str = ''):
 
 def complete_assignment(*, user_id: int, tenant_id: str, scope: str,
                         agent_id: str, run_id: str, messages: list,
-                        result: dict) -> bool:
-    """Commit the final child checkpoint before releasing its identity."""
-    repository = RetainedAgentRepository(user_id, tenant_id=tenant_id)
+                        result: dict, task: dict | None = None) -> bool:
+    """Commit final memory; pressure waits on the exact repository receipt."""
+    repository = RetainedAgentRepository(user_id, tenant_id=tenant_id,
+                                         task=task, cancellable=False)
 
     class SupersededAssignment(Exception):
         pass
@@ -68,12 +82,17 @@ def complete_assignment(*, user_id: int, tenant_id: str, scope: str,
         if value.get('state') != 'busy' or value.get('run_id') != run_id:
             # A reset/abandon generation fences a late completion.
             raise SupersededAssignment
+        value['last_assignment'] = {
+            'agent_id': run_id, 'swarm_run_id': value.get('run_session_id') or '',
+            'conversation_id': value.get('run_conversation_id') or '',
+            'swarm_key': value.get('swarm_key') or '',
+        }
         value.update(
             state='idle', run_id='', swarm_key='',
-            messages=list(messages),
             last_result=str(result.get('final_answer') or '')[:4000],
             last_status=str(result.get('status') or '')[:32],
         )
+        value['messages'] = list(messages)
         return value
 
     found = repository.get(scope, agent_id)
@@ -90,19 +109,52 @@ def _reconcile(repository: RetainedAgentRepository, scope: str, value: dict) -> 
     """Complete a lost callback from the durable Swarm checkpoint if settled."""
     if value.get('state') != 'busy' or not value.get('swarm_key'):
         return value
+    if value.get('run_launch_state') == 'unknown' and not value.get('run_session_id'):
+        # Lookup hints (including a returned unknown-launch session ID) cannot
+        # settle a reservation. The ordinary child factory can bind the actual
+        # session before execution; its exact terminal checkpoint may recover a
+        # lost launch ACK and completion callback without replaying either.
+        return value
     from lib.swarm import persistence
     session = persistence.load_session(str(value['swarm_key']))
     if not isinstance(session, dict):
         return value
-    config = session.get('config') or {}
-    if (str(config.get('user_id')) != str(repository.user_id)
-            or str((config.get('parent_cfg') or {}).get('_tenant_id') or '')
-            != repository.tenant_id):
+    # The conversation key and child ID are reusable lookup names, not proof
+    # that this checkpoint belongs to the saved assignment. Legacy incomplete
+    # witnesses stay busy/unknown; never import their memory or release the run.
+    run_id = value.get('run_id')
+    session_id = value.get('run_session_id')
+    conversation_id = value.get('run_conversation_id')
+    if (not run_id or not session_id or not conversation_id
+            or session.get('task_id') != session_id
+            or session.get('conv_id') != conversation_id):
         return value
-    child = next((row for row in (session.get('agents') or [])
-                  if row.get('agent_id') == value.get('run_id')), None)
-    if not isinstance(child, dict):
+    config = session.get('config')
+    if not isinstance(config, dict):
         return value
+    parent_cfg = config.get('parent_cfg') or {}
+    if (not isinstance(parent_cfg, dict)
+            or str(config.get('user_id')) != str(repository.user_id)
+            or str(parent_cfg.get('_tenant_id') or '') != repository.tenant_id):
+        return value
+    specs = session.get('specs')
+    agents = session.get('agents')
+    if not isinstance(specs, list) or not isinstance(agents, list):
+        return value
+    matching_specs = [spec for spec in specs
+                      if isinstance(spec, dict) and spec.get('id') == run_id]
+    if len(matching_specs) != 1:
+        return value
+    spec = matching_specs[0]
+    if (spec.get('retained_agent_id') != value.get('id')
+            or spec.get('retained_scope') != scope
+            or spec.get('retained_run_id') != run_id):
+        return value
+    matching_children = [row for row in agents
+                         if isinstance(row, dict) and row.get('agent_id') == run_id]
+    if len(matching_children) != 1:
+        return value
+    child = matching_children[0]
     if child.get('status') in {'completed', 'failed', 'cancelled'}:
         complete_assignment(
             user_id=repository.user_id, tenant_id=repository.tenant_id,
@@ -190,7 +242,9 @@ def execute_manage_agents(args: dict, *, task: dict, cfg: dict,
                     raise RetainedAgentError('Agent is working; set abandon=true to fence its late result')
                 current.update(
                     state='idle', generation=int(current.get('generation') or 1) + 1,
-                    run_id='', swarm_key='', messages=[], last_result='', last_status='',
+                    run_id='', swarm_key='', run_session_id='', run_conversation_id='',
+                    run_launch_state='', run_launch_lookup={},
+                    messages=[], last_result='', last_status='',
                 )
                 return current
             return json.dumps({'agent': _public(repository.change(scope, agent_id, reset))},
@@ -226,34 +280,54 @@ def execute_manage_agents(args: dict, *, task: dict, cfg: dict,
             def reserve(current):
                 if current.get('state') != 'idle':
                     raise RetainedAgentError('Agent is busy or archived')
-                current.update(state='busy', run_id=run_id, swarm_key=swarm_key)
+                current.update(state='busy', run_id=run_id, swarm_key=swarm_key,
+                               run_session_id='', run_launch_state='unknown',
+                               run_launch_lookup=launch_lookup(run_id=run_id, swarm_key=swarm_key),
+                               run_conversation_id=str(task.get('convId') or ''))
                 return current
 
-            repository.change(scope, agent_id, reserve)
-            from lib.swarm.integration import execute_swarm_tool
-            launched = execute_swarm_tool(
-                'spawn_agents', {'agents': [{
-                    'id': run_id, 'role': value['role'],
-                    'objective': objective, 'context': context,
-                    'tools': tools, 'max_retries': 0,
-                }]}, task, cfg=cfg, all_tools=all_tools,
-                project_path=project_path, on_event=on_event,
-                abort_check=abort_check,
-                retained_binding={'scope': scope, 'agent_id': agent_id,
-                                  'run_id': run_id},
-            )
+            reserved = repository.change(scope, agent_id, reserve)
             try:
-                handle = json.loads(launched)
-            except (TypeError, ValueError):
-                handle = {}
-            if handle.get('status') != 'async_launched' or not handle.get('agents'):
-                # CAS release refuses to undo a concurrently completed run.
-                def release(current):
-                    if current.get('state') == 'busy' and current.get('run_id') == run_id:
-                        current.update(state='idle', run_id='', swarm_key='')
-                    return current
-                repository.change(scope, agent_id, release)
-                return launched
+                from lib.swarm.integration import execute_swarm_tool
+                launched = execute_swarm_tool(
+                    'spawn_agents', {'agents': [{
+                        'id': run_id, 'role': reserved['role'],
+                        'objective': objective, 'context': context,
+                        'tools': tools, 'max_retries': 0,
+                    }]}, task, cfg=cfg, all_tools=all_tools,
+                    project_path=project_path, on_event=on_event,
+                    abort_check=abort_check,
+                    retained_binding={'scope': scope, 'agent_id': agent_id,
+                                      'run_id': run_id},
+                )
+                outcome = classify_launch(launched, run_id=run_id, swarm_key=swarm_key,
+                    conversation_id=reserved['run_conversation_id'])
+            except Exception as error:
+                # Worker entry can precede an exception or lost launch reply.
+                # Control exceptions still propagate with the durable fence.
+                outcome = LaunchOutcome('unknown', {'exception_type': type(error).__name__})
+            try:
+                repository.change(scope, agent_id, lambda current: apply_launch_outcome(
+                    current, run_id=run_id, generation=reserved['generation'], outcome=outcome))
+            except Exception:
+                # Acceptance/rejection may be known locally but not durably
+                # recorded. Preserve the original lookup, never replay launch.
+                outcome = LaunchOutcome('unknown', outcome.handle)
+            handle = dict(outcome.handle)
+            if outcome.state == 'rejected':
+                return json.dumps({**handle, 'submission_state': 'rejected'}, ensure_ascii=False)
+            if outcome.state == 'unknown':
+                return json.dumps({
+                    **{key: item for key, item in handle.items() if key != 'agents'},
+                    'status': 'error', 'code': 'swarm_launch_unknown',
+                    'submission_state': 'unknown', 'retryable': False,
+                    'retained_agent_id': agent_id,
+                    **launch_lookup(run_id=run_id, swarm_key=swarm_key, handle=handle),
+                    'next_action': 'Inspect manage_agents with this retained agent_id and '
+                        'get_agent_result with the original requested_agent_ids; '
+                        'do not launch a replacement or assume rollback.',
+                    'message': 'The original assignment is reserved; launch acceptance is unconfirmed.',
+                }, ensure_ascii=False)
             handle['retained_agent_id'] = agent_id
             handle['message'] = (
                 f"Assigned {value['name']} ({agent_id}). The result arrives as a "

@@ -30,7 +30,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 import pytest
 
-from lib.provider_template_recipes import offering_recipes
+from lib.provider.provider_template_recipes import offering_recipes
 
 pytestmark = [pytest.mark.auth_mode('open'), pytest.mark.unit]
 

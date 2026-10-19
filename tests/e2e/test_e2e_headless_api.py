@@ -521,50 +521,28 @@ class E2EHeadlessApiTest(unittest.TestCase):
 
     # ── 5. Rate limiting ───────────────────────────────────────────
 
-    def test_rate_limit_headers_present(self):
+    def test_legacy_request_limit_does_not_emit_throughput_headers(self):
         async def go():
-            r = await self._client().get('/api/v4/keys/whoami',
-                                          headers=_hdr(self.user))
-            # User key has rpm=120 → headers should appear
+            r = await self._client().get('/api/v4/usage?days=1', headers=_hdr(self.user))
             self.assertEqual(r.status_code, 200)
-            self.assertEqual(r.headers.get('X-RateLimit-Limit-Requests'),
-                              '120')
+            self.assertIsNone(r.headers.get('X-RateLimit-Limit-Requests'))
         _run(go())
 
-    def test_rate_limit_kicks_in_at_threshold(self):
-        """A key with rpm=2 must 429 on the third call."""
-        from lib import rate_limit_api
+    def test_explicit_daily_spending_allowance_is_enforced(self):
+        from lib.rate_limit import rate_limit_api
         from lib.api_keys import create_key
-        _row, tok = create_key(owner_user_id=1, name='rate-limited', scopes=['capabilities'],
-                                rate_limit_rpm=2)
-        rate_limit_api._state.pop(_row['id'], None)
-
+        row, token = create_key(owner_user_id=1, name='spending-limited', scopes=['usage'],
+                                rate_limit_rpm=2, rate_limit_tpd=2)
         async def go():
-            c = self._client()
-            r1 = await c.get('/api/v4/keys/whoami', headers=_hdr(tok))
-            r2 = await c.get('/api/v4/keys/whoami', headers=_hdr(tok))
-            r3 = await c.get('/api/v4/keys/whoami', headers=_hdr(tok))
-            # whoami is PUBLIC — bypasses rate limit by design.
-            # Use a scope-gated route instead.
-            for r in (r1, r2, r3):
-                self.assertEqual(r.status_code, 200)
-            # Hit a rate-limited route.
-            r4 = await c.get('/api/v4/capabilities', headers=_hdr(tok))
-            r5 = await c.get('/api/v4/capabilities', headers=_hdr(tok))
-            r6 = await c.get('/api/v4/capabilities', headers=_hdr(tok))
-            statuses = [r4.status_code, r5.status_code, r6.status_code]
-            # Whoami is public so doesn't decrement the bucket. capabilities
-            # is also public via _PUBLIC_API_PATHS, but a Bearer-auth call
-            # to a public path STILL goes through the middleware. Check
-            # /api/v1/usage instead — that's scope-gated.
-            # Burn down the bucket by hitting usage:
-            results = []
+            client = self._client()
             for _ in range(5):
-                r = await c.get('/api/v4/usage?days=1', headers=_hdr(tok))
-                results.append(r.status_code)
-            # At least one 429 within the 5 calls.
-            self.assertIn(429, results,
-                f'expected at least one 429, got {results}')
+                response = await client.get('/api/v4/usage?days=1', headers=_hdr(token))
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.headers.get('X-RateLimit-Limit-Tokens'), '2')
+            # Spending, not request count, exhausts the explicit allowance.
+            rate_limit_api.record_tokens(row['id'], 3)
+            denied = await client.get('/api/v4/usage?days=1', headers=_hdr(token))
+            self.assertEqual(denied.status_code, 429)
         _run(go())
 
     # ── 6. Tasks lifecycle ─────────────────────────────────────────

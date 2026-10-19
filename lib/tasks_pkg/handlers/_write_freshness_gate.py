@@ -8,13 +8,13 @@ is: conversation A reads a file at T0, thinks for many rounds, and at T2
 writes from its stale memory — silently discarding sibling B's T1 change.
 
 The check is an optimistic-concurrency token (``lib/write_freshness.py``):
-successful reads AND writes record a fingerprint per
-``(conv_key, abs_path)`` — content-addressed (blake2b) for files ≤ 4 MiB,
-``(mtime_ns, size)`` above — and a write whose recorded fingerprint no
-longer matches the disk is refused with a re-read instruction. The content
-signal matters because this deployment's FUSE mount has 1-SECOND mtime
-granularity: ``(mtime_ns, size)`` alone is blind to same-second same-size
-edits (measured; see lib/write_freshness.py).
+successful text reads carry a descriptor-pinned, full-source digest and
+semantic-root identity for ``(actor_key, abs_path)``. Successful writes renew
+that evidence through the common writer. A write whose observed fingerprint
+no longer matches disk is refused with a re-read instruction. Legacy explicit
+recording keeps its old compatibility format; rendered tool text alone never
+mints a digest. Content evidence matters because FUSE metadata may miss
+same-second, same-size edits (see lib/write_freshness.py).
 
 Deliberate scope (fail-open everywhere else):
 
@@ -39,8 +39,8 @@ from lib.tasks_pkg.handlers._read_gate import _collect_target_paths, _resolve_ab
 
 logger = get_logger(__name__)
 
-# Single-target write tools gated wholesale; batch tools are partitioned
-# per-path (mirrors the read gate's two shapes).
+# Single-target write tools are gated wholesale. Batch helpers report original
+# blocked indexes; the handler refuses an atomic request before partitioning.
 _GATED_SINGLE_TOOLS = ('write_file', 'apply_diff', 'insert_content')
 _GATED_BATCH_TOOLS = ('edit_file', 'apply_diffs', 'insert_contents')
 
@@ -81,6 +81,11 @@ def check_write_freshness(task: dict, fn_name: str, fn_args: dict,
     to surface back to the model (the call must NOT execute).
     """
     if fn_name not in _GATED_SINGLE_TOOLS:
+        return None
+
+    # Append recomputes from the live preimage under exact file admission;
+    # it does not replace the prefix described by an older observed token.
+    if fn_name == 'write_file' and fn_args.get('append') is True:
         return None
     raw_paths = _collect_target_paths(fn_name, fn_args)
     if not raw_paths:
@@ -135,15 +140,12 @@ def _format_stale_refusal(fn_name: str, raw_paths: list) -> str:
     """Build the model-facing refusal message naming the stale file(s)."""
     paths_list = ', '.join(raw_paths)
     return (
-        f'Error: {fn_name} refused — file changed on disk since this '
-        f'conversation last read/wrote it.\n'
+        f'Error: {fn_name} refused — file changed on disk; the observed '
+        f'content version differs from the current content.\n'
         f'Stale file(s): {paths_list}\n'
-        f'Another conversation or process modified the file after your last '
-        f'read/write of it here, so writing now would silently discard '
-        f'their change. Re-read the file(s) with read_files, reconcile your '
-        f'edit against the current content, then re-issue {fn_name}. This '
-        f'is the shared-worktree overwrite guard; set env '
-        f'TOFU_WRITE_FRESHNESS_GATE=0 to disable it.'
+        f'Writing from the older version could discard changes. Re-read '
+        f'the file(s) with read_files, reconcile your edit against the '
+        f'current content, then re-issue {fn_name}.'
     )
 
 
@@ -196,44 +198,22 @@ def cached_read_is_stale(task: dict, fn_args: dict,
     return False
 
 
-def _read_result_ok(tool_content) -> bool:
-    """True when a read_files/inspect_image result carries real content.
-
-    Dict results (image/binary descriptors) count as success. String results
-    fail only on the standard error prefix — a batch read with a per-file
-    error mid-string still counts (same imprecision the read gate accepts
-    for its satisfied-set; the stale-token direction stays safe).
-    """
-    if isinstance(tool_content, dict):
-        return True
-    if not isinstance(tool_content, str) or not tool_content:
-        return False
-    return not tool_content.lstrip().startswith(('Error:', 'ERROR:'))
-
-
 def record_read_paths(task: dict, fn_args: dict, project_path: str | None,
-                      tool_content) -> int:
-    """Record freshness tokens for the paths a successful read just surfaced.
+                      tool_content, *, observations=None) -> int:
+    """Install only per-item observations captured while rendering the read.
 
-    Called by the project-tool handler AFTER read_files/inspect_image
-    execution. Imprecision is fail-safe: recording a token for a path whose
-    individual read failed can only ever ALLOW a later write (never refuse
-    a good one), and the read-before-edit gate independently owns the
-    "never actually saw it" axis. Returns the number of tokens recorded.
+    Failed/unsupported items issue none. Legacy/preexecuted text without the
+    host-owned carrier is still displayable, but cannot certify bytes through
+    a later filesystem read. Mixed batches install only their successful items.
     """
-    if not isinstance(fn_args, dict) or not _read_result_ok(tool_content):
+    if not isinstance(fn_args, dict) or not isinstance(observations, (list, tuple)):
         return 0
     key = _conv_key(task)
-    if not key:
-        return 0
-    recorded = 0
-    for rp in _covered_read_paths(fn_args):
-        ap = _resolve_abs(project_path, _conv_key(task), rp)
-        if not ap or not os.path.isfile(ap):
-            continue
-        write_freshness.record(key, ap)
-        recorded += 1
-    return recorded
+    covered = {_resolve_abs(project_path, key, rp) for rp in _covered_read_paths(fn_args)}
+    return sum(write_freshness.record_observation(key, observation)
+               for observation in observations
+               if isinstance(observation, write_freshness.ReadObservation)
+               and observation.abs_path in covered)
 
 
 __all__ = [

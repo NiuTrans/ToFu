@@ -217,27 +217,19 @@ def test_drain_with_max_items_respects_priority():
 
 # ── Cap enforcement ──────────────────────────────────────────
 
-def test_cap_drops_oldest_later_item():
-    cap = agent_inbox.MAX_PER_TASK
-    # Fill to cap-1 with 'later', then add one more 'later' → first dropped
-    for i in range(cap):
-        agent_inbox.enqueue('t1', f'L{i}', mode='test', priority='later')
-    assert agent_inbox.peek('t1') == cap
-    agent_inbox.enqueue('t1', 'NEW', mode='test', priority='later')
-    assert agent_inbox.peek('t1') == cap
-    items = agent_inbox.drain('t1')
-    values = [it['value'] for it in items]
-    # L0 dropped, L1..L(cap-1) + NEW remain
-    assert 'L0' not in values
-    assert values[-1] == 'NEW'
+def test_demand_beyond_former_capacity_retains_every_item():
+    for i in range(1025):
+        assert agent_inbox.enqueue('t1', f'L{i}', mode='test', priority='later')
+    assert agent_inbox.peek('t1') == 1025
+    assert [item['value'] for item in agent_inbox.drain('t1')] == [f'L{i}' for i in range(1025)]
 
 
 # ── Concurrency — many threads enqueueing ────────────────────
 
 def test_concurrent_enqueue_no_drops_or_dups():
-    """Stay under MAX_PER_TASK so we can verify nothing is dropped or duplicated."""
+    """Concurrent demand retains every item above the former per-task quota."""
     THREADS = 8
-    N = (agent_inbox.MAX_PER_TASK // THREADS) - 1  # safely below cap
+    N = 131
 
     def worker(thread_id: int):
         for i in range(N):
@@ -411,22 +403,34 @@ def test_consumed_queue_fence_is_scoped_and_survives_repeated_revival():
     assert commits == []
 
 
-def test_consumed_queue_fence_retention_has_a_hard_resource_budget():
+def test_consumed_identities_survive_other_traffic_clear_and_revival():
     from lib.agent_inbox import _state
-
-    cap = _state._CONSUMED_QUEUE_MAX
-    for index in range(cap + 1):
-        agent_inbox.consume_peer(f'slot-{index}', [f'id-{index}'])
-    assert len(_state._consumed_queue_ids) == cap
-    assert agent_inbox.stats() == {}  # absent consumes never create buckets
-    assert agent_inbox.enqueue('slot-0', 'evicted', mode='background-command',
-                               extra={'queueId': 'id-0'})
-    assert not agent_inbox.enqueue(f'slot-{cap}', 'retained',
-                                    mode='background-command',
-                                    extra={'queueId': f'id-{cap}'})
-    agent_inbox.reset_for_test(f'slot-{cap}')
-    assert agent_inbox.enqueue(f'slot-{cap}', 'reset',
-                              mode='background-command',
-                              extra={'queueId': f'id-{cap}'})
+    ids = [f'id-{index}' for index in range(32_769)]
+    agent_inbox.consume_peer('dense-slot', ids)
+    for index in range(2049):
+        agent_inbox.consume_peer(f'other-{index}', [f'delivery-{index}'])
+    assert len(_state._consumed_queue_ids['dense-slot']) == len(ids)
+    assert agent_inbox.stats() == {}
+    agent_inbox.clear('dense-slot')
+    agent_inbox.untombstone('dense-slot')
+    for queue_id in [ids[0], ids[16_384], ids[-1]]:
+        assert not agent_inbox.enqueue('dense-slot', 'late', mode='background-command', extra={'queueId':queue_id})
+    commits = []
+    assert agent_inbox.enqueue_after_durable_commit('dense-slot', 'late', lambda: commits.append(True),
+        mode='background-command', extra={'queueId':ids[0]}) == (False, None)
+    assert commits == []
+    agent_inbox.reset_for_test('other-0')
+    assert 'other-0' not in _state._consumed_queue_ids
+    assert len(_state._consumed_queue_ids['dense-slot']) == len(ids)
     agent_inbox.reset_for_test()
     assert not _state._consumed_queue_ids
+
+
+def test_every_ended_slot_stays_closed_until_explicit_revival():
+    for index in range(2049):
+        agent_inbox.clear(f'ended-{index}')
+    assert all(agent_inbox.is_tombstoned(f'ended-{index}') for index in range(2049))
+    assert not agent_inbox.enqueue('ended-0', 'late', mode='test')
+    agent_inbox.untombstone('ended-0')
+    assert agent_inbox.enqueue('ended-0', 'fresh', mode='test')
+    assert agent_inbox.is_tombstoned('ended-2048')

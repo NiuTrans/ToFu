@@ -1,7 +1,7 @@
 """Process-isolated storage client API.
 
 Application, worker, and plugin processes import this package.  Database
-drivers and database paths deliberately live in :mod:`lib.storage_sidecar`.
+drivers and database paths deliberately live in :mod:`lib.storage_authority_sql`.
 """
 
 from lib.storage.client import StorageClient

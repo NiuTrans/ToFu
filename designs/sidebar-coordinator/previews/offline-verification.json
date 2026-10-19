@@ -1,0 +1,9 @@
+{
+  "scope": "offline artifact narrow check; synthetic only",
+  "named_modals": true,
+  "review_does_not_execute": true,
+  "consent_required": true,
+  "focus_restored": true,
+  "errors": [],
+  "external_attempts": []
+}

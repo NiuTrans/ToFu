@@ -1508,16 +1508,36 @@ class TestAggregateRoundBudget:
         assert total <= MAX_ROUND_TOOL_RESULTS_CHARS + 50_000  # some slack
 
     def test_exempt_tools_not_persisted_by_aggregate(self):
+        from lib.tasks_pkg.compaction._budget import (
+            SOURCE_TOOL_RESULT_V2_MAX_TOKENS)
         from lib.tasks_pkg.compaction.api import enforce_round_aggregate_budget
+        # Exempt read_files is preserved below 2x the source allowance
+        # (2*24000*4 = 192_000 chars); only non-exempt siblings spill first.
+        under = SOURCE_TOOL_RESULT_V2_MAX_TOKENS * 2 * 4 - 8_000
         results = {
-            'tc_1': ('x' * 200_000, 'read_files', 'tc_1'),  # exempt
+            'tc_1': ('x' * under, 'read_files', 'tc_1'),  # exempt, preserved
             'tc_2': ('y' * 200_000, 'grep_search', 'tc_2'),  # not exempt
         }
         updated = enforce_round_aggregate_budget(results)
-        # read_files should be untouched
-        assert updated['tc_1'][0] == 'x' * 200_000
+        # read_files below the threshold is untouched
+        assert updated['tc_1'][0] == 'x' * under
         # grep_search should be persisted
         assert '[Persisted to:' in updated['tc_2'][0]
+
+    def test_exempt_tools_spilled_by_aggregate_beyond_source_allowance(self):
+        from lib.tasks_pkg.compaction._budget import (
+            SOURCE_TOOL_RESULT_V2_MAX_TOKENS)
+        from lib.tasks_pkg.compaction.api import enforce_round_aggregate_budget
+        # Beyond 2x the source allowance an exempt read result no longer rides
+        # the hot tail; the aggregate guard persists it.
+        over = SOURCE_TOOL_RESULT_V2_MAX_TOKENS * 2 * 4 + 50_000
+        results = {
+            'tc_1': ('x' * over, 'read_files', 'tc_1'),
+            'tc_2': ('y' * 200_000, 'grep_search', 'tc_2'),
+        }
+        updated = enforce_round_aggregate_budget(results)
+        assert updated['tc_1'][0].startswith('[Persisted to:')
+        assert len(updated['tc_1'][0]) < over
 
 
 # ═══════════════════════════════════════════════════════════

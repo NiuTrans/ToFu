@@ -131,7 +131,7 @@ class DatabasePanelRouteTest(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
 
     def test_native_fastpath_typed_lock_conflict(self):
-        from lib.storage_sidecar.native_fastpath_settings import NativeFastpathSettingsError
+        from lib.storage_authority_sql.native_fastpath_settings import NativeFastpathSettingsError
 
         with patch('lib.database_panel.probe.deployment_mode', return_value='personal'), \
                 patch('lib.database_panel.probe.engine_status', return_value=dict(_ENGINE)), \

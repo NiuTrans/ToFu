@@ -10,6 +10,66 @@ from scripts.tofudb_perf_compare import LegacyEngine
 pytestmark = pytest.mark.unit
 
 
+def test_resource_observation_distinguishes_requested_zero_from_effective_budget(monkeypatch, tmp_path):
+    import scripts.tofudb_perf_compare as bench
+
+    monkeypatch.setenv('TOFU_DB_PAGE_CACHE_MIB', '0')
+    monkeypatch.setenv('TOFU_DB_BLOCK_CACHE_MIB', '32')
+    monkeypatch.setenv('TOFU_STORAGE_TOKEN', 'must-not-appear')
+    engine = bench.TofuDbEngine(tmp_path / 'unused-binary', client_mode='embedded')
+    monkeypatch.setattr(engine, '_launch_embedded', lambda: None)
+    engine._launch_serve()
+    # Later environment changes must not rewrite the launch request history.
+    monkeypatch.setenv('TOFU_DB_PAGE_CACHE_MIB', '16')
+    calls = []
+    budget = {'blockCacheBytes': 32 * 1024**2, 'entityPageCacheBytes': 512 * 1024**2}
+
+    def execute(operation, payload, command):
+        calls.append((operation, payload, command))
+        return {'resourceBudget': budget, 'unrelated': 'must-not-appear'}
+
+    monkeypatch.setattr(engine, 'prepare_workload', lambda: calls.append('renew'))
+    monkeypatch.setattr(engine, 'execute', execute)
+    result = bench._native_resource_budget_observation(engine)
+    assert calls == ['renew', ('system.metrics', {}, False)]
+    assert result['available'] is True
+    assert result['requested_cache_environment'] == {
+        'TOFU_DB_PAGE_CACHE_MIB': '0', 'TOFU_DB_BLOCK_CACHE_MIB': '32'}
+    assert result['effective'] == budget
+    assert 'must-not-appear' not in str(result)
+
+
+@pytest.mark.parametrize('metrics', [None, {}, {'resourceBudget': {}},
+    {'resourceBudget': {'blockCacheBytes': 1, 'entityPageCacheBytes': True}}])
+def test_resource_observation_does_not_infer_effective_values_from_environment(monkeypatch, metrics):
+    import scripts.tofudb_perf_compare as bench
+
+    monkeypatch.setenv('TOFU_DB_PAGE_CACHE_MIB', '16')
+    result = bench._native_resource_budget_observation(SimpleNamespace(
+        prepare_workload=lambda: None, execute=lambda *args: metrics))
+    assert result['available'] is False
+    assert 'effective' not in result
+    assert 'valid effective cache budgets' in result['error']
+
+
+def test_resource_observation_failure_retains_physical_measurement(monkeypatch, tmp_path):
+    import scripts.tofudb_perf_compare as bench
+
+    engine = bench.TofuDbEngine(tmp_path / 'unused-binary', client_mode='embedded')
+    engine._data_dir = tmp_path
+    (tmp_path / 'synthetic-data').write_bytes(b'owned-state')
+    engine._write_bytes_baseline = 10
+    monkeypatch.setattr(bench, '_pid_write_bytes', lambda _: 30)
+    def fail(*args):
+        raise bench.BenchError('metrics unavailable')
+    monkeypatch.setattr(engine, 'execute', fail)
+    result = bench._engine_resource_report(engine)
+    assert result['data_size_bytes'] == len(b'owned-state')
+    assert result['engine_write_bytes'] == 20
+    assert result['native_resource_budget']['available'] is False
+    assert result['native_resource_budget']['error'] == 'BenchError: metrics unavailable'
+
+
 @pytest.mark.parametrize('transport', ['application', 'embedded'])
 def test_read_driver_omits_unused_command_identity_and_retries_commands_with_one_id(monkeypatch, transport):
     import scripts.tofudb_perf_compare as bench
@@ -270,6 +330,8 @@ def test_latency_windows_preserve_growth_and_all_samples(monkeypatch):
     assert len(calls) == 25
     assert result['mean_ms'] == 12.0
     assert result['p99_ms'] == 23.0
+    assert result['samples_ms'] == durations
+    assert result['sample_order'] == 'sequential-operation-start'
     windows = result['windows']
     assert len(windows) <= 10
     assert sum(window['iterations'] for window in windows) == 23
@@ -277,6 +339,25 @@ def test_latency_windows_preserve_growth_and_all_samples(monkeypatch):
     assert windows[0]['mean_ms'] == 2.0
     assert windows[-1]['start_iteration'] == 23
     assert windows[-1]['mean_ms'] == 22.5
+    assert all('samples_ms' not in window for window in windows)
+
+
+def test_microsecond_floor_keeps_clock_precision_and_capture_order(monkeypatch, capsys):
+    import scripts.tofudb_perf_compare as bench
+
+    durations_ns = [6123, 6555, 6001]
+    ticks = iter(t for duration in durations_ns for t in (0, duration))
+    monkeypatch.setattr(bench.time, 'perf_counter_ns', lambda: next(ticks))
+    engine = SimpleNamespace(execute=lambda *args: None)
+    result = bench.measure_workload(
+        engine, None, lambda i: ('probe', {'i': i}, False), 3, warmup=0)
+    assert [round(value * 1_000_000) for value in result['samples_ms']] == durations_ns
+    assert result['p50_ms'] == 0.006123
+    assert result['min_ms'] == 0.006001
+    assert result['max_ms'] == 0.006555
+    assert not result['p99_sample_count_sufficient']
+    bench._print_report({'engines': ['rawsqlite'], 'workloads': {'point': {'rawsqlite': result}}})
+    assert 'p50 6.123us' in capsys.readouterr().out
 
 
 @pytest.mark.parametrize('iterations,warmup', [(0, 5), (-1, 5), (1, -1)])
@@ -459,7 +540,7 @@ def test_postgres_reset_refuses_non_disposable_database(dbname):
 
 def test_postgres_reset_drops_recreates_then_migrates(monkeypatch):
     import psycopg
-    import lib.storage_sidecar.migrate as migrate
+    import lib.storage_authority_sql.migrate as migrate
     import scripts.tofudb_perf_compare as bench
 
     executed = []
@@ -495,6 +576,7 @@ def _concurrent_row(bench, scale):
 def test_tofudb_durability_reaches_serve_args_and_readiness_is_verified(
         monkeypatch, tmp_path):
     from serverctl_pkg import native_engine
+    monkeypatch.setattr(native_engine, 'source_fingerprint', lambda root: 'a' * 64)
     monkeypatch.setattr(native_engine, 'build_identity', lambda binary: {
         'format': 'tofu-db-build.v1', 'source_sha256': 'a' * 64})
     import scripts.tofudb_perf_compare as bench
@@ -539,6 +621,7 @@ def test_tofudb_durability_reaches_serve_args_and_readiness_is_verified(
 def test_tofudb_durability_mismatch_with_daemon_readiness_fails_closed(
         monkeypatch, tmp_path):
     from serverctl_pkg import native_engine
+    monkeypatch.setattr(native_engine, 'source_fingerprint', lambda root: 'a' * 64)
     monkeypatch.setattr(native_engine, 'build_identity', lambda binary: {
         'format': 'tofu-db-build.v1', 'source_sha256': 'a' * 64})
     import scripts.tofudb_perf_compare as bench
@@ -573,6 +656,7 @@ def test_tofudb_schema_mismatch_is_rejected_before_opening_a_wire_session(
         monkeypatch, tmp_path):
     import json
     from serverctl_pkg import native_engine
+    monkeypatch.setattr(native_engine, 'source_fingerprint', lambda root: 'a' * 64)
     from tofu_db.generated_contract import STORAGE_SCHEMA_VERSION
     import scripts.tofudb_perf_compare as bench
 

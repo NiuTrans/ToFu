@@ -6,15 +6,15 @@ the shared frozen-source compiler; only manifest/artifact bytes cross the
 bridge. No server path or persistent device artifact registry is accepted.
 """
 from __future__ import annotations
+from lib.paper.builds.contract import limit as limit
 
 import threading
-import time
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from lib.paper.builds.bundle import iter_bundle
 from lib.paper.builds.compiler import compile_snapshot
-from lib.paper.builds.contract import limit, validate
+from lib.paper.builds.contract import validate
 from lib.paper.builds.errors import BuildError, check_cancelled
 from lib.paper.builds.location import build_location
 from lib.paper.builds.sources import contained_path, resolve_main, snapshot_sources
@@ -40,10 +40,9 @@ class _Cancellation:
     def __init__(self, stopped, connected):
         self.local = threading.Event()
         self.stopped, self.connected = stopped, connected
-        self.deadline = time.monotonic() + limit('compile_timeout_seconds') + limit('transfer_timeout_seconds')
 
     def is_set(self):
-        return self.local.is_set() or self.stopped.is_set() or not self.connected() or time.monotonic() >= self.deadline
+        return self.local.is_set() or self.stopped.is_set() or not self.connected()
 
 
 class PaperBuildWorker:

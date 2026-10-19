@@ -11,7 +11,7 @@ import time
 import requests
 
 from lib.log import get_logger
-from lib.http_client import http_post
+from lib.http_transport.client import http_post
 
 from ._config import _normalize_lang, _REQUEST_TIMEOUT
 

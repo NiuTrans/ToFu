@@ -357,10 +357,11 @@ def test_immersive_components_focus_and_goal_drafts(browser,office_preview,width
         # Goal switching lives in the menu drawer since the studio has no top bar.
         menu=page.locator('wa-button[data-studio-action=menu]')
         menu.click();page.locator('.evo-goal-switcher a').click();field=page.locator('#evo-objective')
-        field.fill('Keep this draft across closing the drawer')
-        page.keyboard.press('Escape');expect(field).not_to_be_visible()
-        menu.click();page.locator('.evo-goal-switcher a').click();expect(field).to_have_value('Keep this draft across closing the drawer')
-        page.keyboard.press('Escape')
+        field.fill('Keep this draft while inspecting another mission')
+        expect(page.locator('wa-drawer[open]')).to_have_count(0)
+        menu.click();page.locator('#evo-goal').select_option(index=1)
+        expect(field).not_to_be_visible()
+        menu.click();page.locator('.evo-goal-switcher a').click();expect(field).to_have_value('Keep this draft while inspecting another mission')
         menu.click();page.locator('#evo-goal').select_option('csv-export');page.keyboard.press('Escape')
         delivery=page.locator('.evo-place-shortcut[data-place=delivery]');delivery.click()
         page.locator('[data-room-action=delivery]').click()
@@ -633,5 +634,63 @@ def test_required_original_review_retry_notice_is_visible_and_distinct(browser, 
         assert 'could not be read' not in notice.inner_text()
         page.evaluate('window.disposeOriginalInspector()')
         assert not errors
+    finally:
+        context.close()
+
+
+@pytest.mark.parametrize('theme', ['tofu', 'light', 'dark'])
+@pytest.mark.parametrize('width', [320, 390, 768, 1024, 1536])
+def test_studio_hierarchy_and_intake_in_source_preview(browser, office_preview, theme, width):
+    """The real source graph stays legible and draft-safe without a storage server."""
+    from playwright.sync_api import expect
+    context = browser.new_context(viewport={'width': width, 'height': 1024}, reduced_motion='reduce')
+    page = context.new_page()
+    errors = []
+    page.on('pageerror', lambda error: errors.append(str(error)))
+    page.add_init_script("localStorage.setItem('tofu_ui_lang', 'en')")
+    try:
+        page.goto(office_preview)
+        expect(page.locator('.evo-mission-hud')).to_be_visible()
+        page.evaluate('(theme) => document.documentElement.dataset.theme = theme', theme)
+        heading = page.locator('h1.evo-ledger-heading')
+        expect(heading).to_be_visible()
+        assert page.locator('.evo-mission-panel .evo-mission-hud').count() == 1
+        assert page.locator('.evo-studio-grid .evo-mission-hud').count() == 0
+        expect(page.locator('.evo-office-backdrop')).to_be_hidden()
+        expect(page.locator('.evo-mission-signal')).to_be_hidden()
+        assert page.locator('#evo-mission-title').inner_text() != heading.locator('strong').inner_text()
+        assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+        if width < 850:
+            assert page.evaluate('''() => document.querySelector('.evo-mission-panel').getBoundingClientRect().bottom
+                <= document.querySelector('.evo-studio-grid').getBoundingClientRect().top''')
+        page.goto(office_preview + '?scenario=empty#/evolution/start')
+        field = page.locator('#evo-objective')
+        expect(field).to_be_visible()
+        page.evaluate('(theme) => document.documentElement.dataset.theme = theme', theme)
+        expect(page.locator('.evo-mission-hud')).to_be_hidden()
+        page.locator('[data-example=research]').click()
+        expect(field).to_be_focused()
+        draft = field.input_value()
+        assert draft
+        page.locator('[data-scene-focus-toggle]').click()
+        expect(page.locator('.evo-mission-panel')).to_be_hidden()
+        page.locator('[data-scene-focus-toggle]').click()
+        expect(field).to_have_value(draft)
+        assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+        contrast = page.evaluate('''() => {
+          const lum = value => {
+            const [r,g,b] = value.match(/[\\d.]+/g).slice(0,3).map(Number).map(v => {
+              v /= 255; return v <= .04045 ? v/12.92 : ((v+.055)/1.055)**2.4;
+            });
+            return .2126*r + .7152*g + .0722*b;
+          };
+          const bg = lum(getComputedStyle(document.querySelector('.evo-mission-panel')).backgroundColor);
+          return ['.evo-briefing-intro','.evo-briefing-heading .evo-mission-eyebrow','.evo-briefing h3'].map(selector => {
+            const fg = lum(getComputedStyle(document.querySelector(selector)).color);
+            return (Math.max(fg,bg)+.05)/(Math.min(fg,bg)+.05);
+          });
+        }''')
+        assert min(contrast) >= 4.5, contrast
+        assert not errors, errors
     finally:
         context.close()

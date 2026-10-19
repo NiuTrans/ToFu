@@ -23,15 +23,15 @@ from lib.log import (
     set_principal,
     set_req_id,
 )
-from lib.log_diagnostics import diagnose_logs
-from lib.log_policy import LOG_DIRECTORY_MODE, LOG_FILE_MODE
-import lib.log_rate_limit as log_rate_limit
-from lib.log_rate_limit import DuplicateCoalescingFilter
-from lib.log_record_values import BoundedFormatter, text_value, sanitize_value
-import lib.log_retention as log_retention
+from lib.logging_pkg.log_diagnostics import diagnose_logs
+from lib.logging_pkg.log_policy import LOG_DIRECTORY_MODE, LOG_FILE_MODE
+import lib.logging_pkg.log_rate_limit as log_rate_limit
+from lib.logging_pkg.log_rate_limit import DuplicateCoalescingFilter
+from lib.logging_pkg.log_record_values import BoundedFormatter, text_value, sanitize_value
+import lib.logging_pkg.log_retention as log_retention
 from tests.support.envelope import v1_get_json
 from lib.api_v4 import attach_v4_envelope, copy_blueprint_to_v4
-from lib.log_retention import (
+from lib.logging_pkg.log_retention import (
     copytruncate_if_oversize, ensure_private_log_file, maintain_logs,
 )
 
@@ -430,6 +430,92 @@ def datetime_iso(timestamp):
     return datetime.fromtimestamp(timestamp, timezone.utc).isoformat()
 
 
+def test_diagnosis_keeps_newest_timeline_across_rotations_and_unordered_rows(tmp_path):
+    now = time.time()
+    for filename, age in [('incident.jsonl', 0), ('incident.jsonl.1', 1000)]:
+        rows = [{
+            'timestamp': datetime_iso(now - age - index), 'level': 'ERROR',
+            'logger': 'lib.synthetic', 'fingerprint': 'same',
+            'sample': 'failure', 'occurrence_delta': 1,
+        } for index in range(250)]
+        (tmp_path / filename).write_text(''.join(json.dumps(row) + '\n' for row in rows))
+    report = diagnose_logs(tmp_path, now=now, max_items=20)
+    assert [row['timestamp'] for row in report['timeline']] == [
+        datetime_iso(now - index) for index in range(20)]
+    assert report['summary']['occurrences'] == 500
+    assert report['summary']['scan_truncated'] is False
+
+
+def test_diagnosis_reports_scan_limit_and_counts_physical_bytes(tmp_path):
+    now = time.time()
+    row = {'timestamp': datetime_iso(now), 'level': 'ERROR',
+           'logger': 'lib.synthetic', 'fingerprint': 'same',
+           'sample': '界' * 120, 'occurrence_delta': 1}
+    line = json.dumps(row, ensure_ascii=False) + '\n'
+    (tmp_path / 'incident.jsonl').write_text(line * 250)
+    (tmp_path / 'incident.jsonl.1').write_text(line)
+    report = diagnose_logs(tmp_path, now=now, scan_bytes=64 * 1024)
+    assert report['summary']['scan_truncated'] is True
+    assert report['summary']['bytes_scanned'] == 64 * 1024
+    assert report['summary']['invalid_lines'] == 0
+    full = diagnose_logs(tmp_path, now=now, scan_bytes=256 * 1024)
+    assert full['summary']['scan_truncated'] is False
+    assert full['summary']['occurrences'] == 251
+
+
+def test_diagnosis_correlation_coverage_uses_scoped_occurrence_deltas(tmp_path):
+    now = time.time()
+    rows = [
+        {'user_id': 'owner', 'occurrence_delta': 5, 'request_id': 'r', 'task_id': 't'},
+        {'user_id': 'owner', 'occurrence_delta': 2, 'conversation_id': 'c', 'trace_id': 'x'},
+        {'user_id': 'other', 'occurrence_delta': 99, 'request_id': 'other-owner-correlation'},
+    ]
+    for row in rows:
+        row.update(timestamp=datetime_iso(now), level='ERROR', logger='lib.synthetic',
+                   fingerprint='same', sample='failure')
+    (tmp_path / 'incident.jsonl').write_text(''.join(json.dumps(row) + '\n' for row in rows))
+    report = diagnose_logs(tmp_path, now=now, requesting_user_id='owner')
+    assert report['summary']['occurrences'] == 7
+    assert report['summary']['correlation_occurrences'] == {
+        'request_id': 5, 'conversation_id': 2, 'task_id': 5, 'trace_id': 2}
+    assert 'other-owner-correlation' not in json.dumps(report)
+
+
+def test_diagnosis_exposes_journal_read_failure_during_legacy_fallback(tmp_path, monkeypatch):
+    path = tmp_path / 'incident.jsonl'
+    path.write_text('{}\n')
+    now = time.time()
+    from datetime import datetime, timezone
+    timestamp = datetime.fromtimestamp(now, timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
+    (tmp_path / 'error.log').write_text(
+        timestamp + ' [ERROR] lib.synthetic [MainThread]: legacy failure\n')
+    original_open = Path.open
+
+    def fail_journal_open(candidate, *args, **kwargs):
+        if candidate == path:
+            raise OSError('simulated unreadable journal')
+        return original_open(candidate, *args, **kwargs)
+
+    monkeypatch.setattr(Path, 'open', fail_journal_open)
+    report = diagnose_logs(tmp_path, now=now)
+    assert report['summary']['scan_read_errors'] == 1
+    assert report['summary']['correlation_occurrences'] is None
+    assert report['summary']['occurrences'] == 1
+
+
+def test_legacy_fallback_shares_the_physical_scan_budget(tmp_path):
+    now = time.time()
+    from datetime import datetime, timezone
+    timestamp = datetime.fromtimestamp(now, timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
+    (tmp_path / 'incident.jsonl').write_text('{}\n')
+    (tmp_path / 'error.log').write_text(
+        (timestamp + ' [ERROR] lib.synthetic [MainThread]: failure\n') * 2000)
+    report = diagnose_logs(tmp_path, now=now, scan_bytes=64 * 1024)
+    assert report['summary']['bytes_scanned'] == 64 * 1024
+    assert report['summary']['scan_truncated'] is True
+    assert report['summary']['correlation_occurrences'] is None
+
+
 def test_selector_miss_never_falls_back_to_unscoped_legacy_log(tmp_path):
     log_dir = tmp_path / 'logs'
     log_dir.mkdir()
@@ -466,7 +552,7 @@ def test_user_scoped_diagnosis_fails_closed_for_unattributed_incidents(tmp_path)
 
 def test_cli_pretty_output_falls_back_to_compact_to_honor_byte_budget(
         tmp_path, capsys):
-    from lib.log_diagnostics import main
+    from lib.logging_pkg.log_diagnostics import main
 
     log_dir = tmp_path / 'logs'
     data_dir = tmp_path / 'data'
@@ -774,7 +860,7 @@ def test_maintenance_skips_symlinks_and_reports_recent_unmanaged(
     outside.write_text('do not touch')
     (log_dir / 'server-console.log').symlink_to(outside)
     (log_dir / 'custom-live.log').write_bytes(b'x' * 100)
-    monkeypatch.setattr('lib.log_retention.total_log_budget_bytes', lambda: 50)
+    monkeypatch.setattr('lib.logging_pkg.log_retention.total_log_budget_bytes', lambda: 50)
 
     result = maintain_logs(log_dir, data_dir=data_dir)
     assert outside.read_text() == 'do not touch'
@@ -843,8 +929,8 @@ def test_diagnostics_endpoint_is_admin_only_and_storage_independent(
     from quart import g
 
     from lib.api_keys import AuthContext, local_admin_context
-    from lib.app_factory import create_base_app
-    import lib.runtime_paths as runtime_paths
+    from lib.app.app_factory import create_base_app
+    import lib.runtime.runtime_paths as runtime_paths
     import routes.api_v1.logs as logs_route
 
     log_dir = tmp_path / 'logs'
@@ -884,6 +970,11 @@ def test_diagnostics_endpoint_is_admin_only_and_storage_independent(
         assert body['ok'] is True
         assert body['summary']['storage_independent'] is True
         assert body['summary']['occurrences'] == 9
+        assert body['summary']['scan_truncated'] is False
+        assert body['summary']['scan_read_errors'] == 0
+        schema = logs_route.log_diagnostics_view._api_meta['responses']['200'][
+            'content']['application/json']['schema']['properties']['summary']
+        Draft202012Validator(schema).validate(body['summary'])
 
         chat_only = AuthContext(
             key_id='chat-key', scopes=frozenset({'chat'}))

@@ -1,0 +1,26 @@
+/* Selection actions: fixed to the selected line and clamped by the typed owner. */
+.selection-popup {
+  position:fixed; z-index:var(--z-tooltip); display:flex; flex-direction:column;
+  max-width:calc(100vw - var(--space-4)); padding:var(--space-1);
+  color:var(--text-primary); background:var(--bg-secondary);
+  border:1px solid var(--border); border-radius:var(--radius); box-shadow:var(--shadow);
+}
+.selection-popup[hidden], .reply-quote-container[hidden] { display:none; }
+.selection-popup-actions { display:flex; gap:var(--space-1); }
+.selection-action-icon { display:inline-flex; flex-shrink:0; }
+.selection-popup-hint {
+  padding:var(--space-1) var(--space-2); max-width:30ch;
+  font-size:var(--font-size-xs); line-height:var(--leading-title); color:var(--text-secondary);
+}
+.reply-quote-container { max-height:40vh; overflow:auto; display:flex; flex-direction:column; gap:var(--space-2); padding:var(--space-2) var(--space-3); }
+.reply-quote-preview {
+  display:flex; align-items:flex-start; gap:var(--space-2); min-width:0;
+  padding:var(--space-2); border-inline-start:var(--space-1) solid var(--accent);
+  border-radius:var(--radius-sm); background:var(--bg-tertiary);
+}
+.reply-quote-preview details { flex:1; min-width:0; }
+.reply-quote-preview summary { cursor:pointer; font-size:var(--font-size-sm); line-height:var(--leading-body); }
+.reply-quote-preview summary:focus-visible { outline:2px solid var(--accent); outline-offset:var(--space-1); }
+.reply-quote-preview-label { color:var(--text-secondary); font-weight:var(--weight-medium); margin-inline-end:var(--space-2); }
+.reply-quote-preview-text { overflow-wrap:anywhere; color:var(--text-primary); display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
+.reply-quote-preview blockquote { margin:var(--space-2) 0 0; padding:0; white-space:pre-wrap; overflow-wrap:anywhere; max-height:30vh; overflow:auto; font-size:var(--font-size-md); line-height:var(--leading-body); color:var(--text-primary); }

@@ -61,8 +61,11 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__
 # deliberate, reviewable act of saying "yes, this export-excluded file stays in
 # the private repo" — the guard fails loudly for anything NOT listed.
 _EXTRA_KEEPERS = {
+
+    # The internal canvas adapter is excluded publicly; keep its offline tests
+    # private with that owner rather than publishing a dangling provider import.
+    'tests/evaluations/test_meituan_sandbox_submit_watch.py',
     # Maintainer-only diagnostics; they do not participate in public builds.
-    'scripts/db_performance_catalog.py',
     'scripts/inspect_native_crash.py',
     'scripts/tofudb_profile_report.py',
     'scripts/trace_experiment_reads.py',
@@ -143,8 +146,8 @@ _KEEPER_PREFIXES = (
     # the release tool, but never published: export_pkg/_lists.py carries
     # private markers (real API keys, Feishu secrets, internal
     # usernames/domains) as sanitization patterns, so the whole package is in
-    # OPENSOURCE_EXTRA_EXCLUDE_DIRS. Same contract as the export.py keeper
-    # above (ALWAYS_EXCLUDE_FILES) — registered as a prefix so adding a
+    # ALWAYS_EXCLUDE_DIRS. Same contract as the root export.py keeper
+    # above — registered as a prefix so adding a
     # module to the package never requires editing this list.
     'export_pkg/',
 )
@@ -159,7 +162,7 @@ def _tracked_files():
     """
     out = subprocess.run(
         ['git', 'ls-files', '-z'], cwd=_ROOT,
-        capture_output=True, text=True)
+        capture_output=True, text=True, check=True)
     return [
         path for path in out.stdout.split('\0')
         if path and os.path.isfile(os.path.join(_ROOT, path))
@@ -226,7 +229,9 @@ def _offenders(export, tracked):
 
 
 def _require_git_repo():
-    if not os.path.isdir(os.path.join(_ROOT, '.git')):
+    # Linked worktrees use a .git pointer file, not a directory. A broken
+    # pointer must reach the checked inventory read rather than skip the gate.
+    if not os.path.lexists(os.path.join(_ROOT, '.git')):
         pytest.skip('not a git checkout (e.g. running inside an exported tree)')
 
 

@@ -156,6 +156,30 @@ def test_inactive_owner_generation_history_has_a_global_hard_bound():
     asyncio.run(exercise())
 
 
+@pytest.mark.parametrize('already_closed', [False, True])
+def test_failed_release_does_not_break_other_releases_or_escape_close(already_closed, caplog):
+    from lib.conversation_sync.broker import ConversationWakeBroker
+
+    async def exercise():
+        broker = ConversationWakeBroker(owner_history_capacity=16)
+        subscription = broker.subscribe(7, 'conv-release')
+        released = []
+
+        def broken():
+            raise RuntimeError('injected release failure')
+
+        if already_closed:
+            subscription.close()
+        subscription.add_close_callback(broken)
+        subscription.add_close_callback(lambda: released.append('exact-token'))
+        subscription.close()
+        assert released == ['exact-token']
+        assert broker.snapshot()['active'] == 0
+
+    asyncio.run(exercise())
+    assert 'Conversation stream close callback failed' in caplog.text
+
+
 def test_unconsumed_response_deadline_releases_subscription_and_slot():
     from lib.conversation_sync.broker import ConversationWakeBroker
 

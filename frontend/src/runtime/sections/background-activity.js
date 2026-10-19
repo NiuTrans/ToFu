@@ -36,6 +36,37 @@ let backgroundConversationActivity = new Map();
   /* _state: cached chip nodes (see context-bar.js for the pattern). */
   let _state = null;
 
+  let _dock = null;
+
+  function _mountDock() {
+    if (_disposed) return;
+    const convId = typeof activeConvId !== 'undefined' ? activeConvId : '';
+    const input = runtimeScope.ConversationTurnRead?.latest?.(convId, turn => turn.actor === 'human', 'main');
+    const host = backgroundAgentContextHost(document.getElementById('chatInner'), convId, input?.turnId);
+    if (!_dock && host) _dock = createAgentSidebarDock({ host, translate: _tt });
+    _dock?.mount(host);
+  }
+
+  function _updateDock() {
+    if (_disposed) return;
+    _mountDock();
+    if (!_dock) return;
+    const convId = typeof activeConvId !== 'undefined' ? activeConvId : '';
+    const conv = getConvById(convId);
+    // Temporary retained rendering ports; remove when swarm cards migrate.
+    const messageTurns = conv ? runtimeScope.ConversationSwarmPresentation?.candidates(conv) || [] : [];
+    const messageSwarms = summarizeBackgroundActivity(_last, convId).swarms;
+    _dock.update(convId || '', agentDockProjection({
+      turns: conv ? runtimeScope.ConversationSwarmPresentation?.candidates(conv) || [] : [],
+      swarms: summarizeBackgroundActivity(_last, convId).swarms,
+      recover: (...args) => _recoverSwarmAgents(...args),
+      renderPanel: (...args) => _buildSwarmPanelHTML(...args),
+      renderActivity: agent => renderBackgroundActivityAgent(document, agent, _tt),
+      openConversation: loadConversation,
+      translate: _tt,
+    }), swarmMessagesProjection(messageTurns, messageSwarms));
+  }
+
   let _disposed = false;
   /* Last applied snapshot + its repaint signature. */
   let _last = { swarms: [], backgroundCommands: [] };
@@ -93,7 +124,9 @@ let backgroundConversationActivity = new Map();
 
   function _summarize(data) {
     const convId = typeof activeConvId !== 'undefined' ? activeConvId : null;
-    return summarizeBackgroundActivity(data, convId);
+    // Agents live in the right dock; the composer retains command visibility.
+    const summary = summarizeBackgroundActivity(data, convId);
+    return { ...summary, swarms: [], agentsActive: 0, agentsRunning: 0, agentsQueued: 0 };
   }
 
   function _chipLabel(sum) {
@@ -102,9 +135,6 @@ let backgroundConversationActivity = new Map();
 
   function _chipTitle(sum) {
     const lines = [_tt('bgActivity.title', 'Background activity')];
-    for (const s of sum.swarms) {
-      lines.push('· ' + backgroundActivitySummary(s, _tt));
-    }
     for (const c of sum.commands) {
       lines.push('· $ ' + (c.command || ''));
     }
@@ -112,6 +142,8 @@ let backgroundConversationActivity = new Map();
   }
 
   function _apply(sum) {
+
+    _updateDock();
     const s = _ensureChip();
     if (!s) return;
     const active = sum.agentsActive > 0 || sum.commandsActive > 0;
@@ -147,29 +179,10 @@ let backgroundConversationActivity = new Map();
     return Math.floor(m / 60) + 'h ' + String(m % 60).padStart(2, '0') + 'm';
   }
 
-  function _swarmElapsed(swarm) {
-    const created = Number(swarm.created_at) || 0;
-    if (!created) return '';
-    return _fmtElapsed(Date.now() / 1000 - created);
-  }
-
-  function _convLabel(convId) {
-    if (!convId) return '';
-    if (typeof getConvById === 'function') {
-      const conv = getConvById(convId);
-      const title = conv && (conv.title || conv.summary);
-      if (title) return title;
-    }
-    return convId;
-  }
-
   function _sigOf(sum) {
     /* Only fields that affect the popover body — chip text follows the
      * same signature cheaply via label/title guards. */
     return JSON.stringify([
-      sum.swarms.map(s => [s.swarm_key, s.conv_id, _convLabel(s.conv_id),
-        s.created_at, s.running, s.pending, s.completed,
-        (s.agents || []).map(a => [a.id, a.role, a.objective, a.status, a.phase, a.round, a.waitReason, a.dependsOn])]),
       sum.commands.map(c => [c.command_id, c.command, c.status]),
     ]);
   }
@@ -220,7 +233,7 @@ let backgroundConversationActivity = new Map();
     el.style.left = Math.round(r.left) + 'px';
     /* Opens UPWARD — the strip sits directly above the composer. */
     el.style.bottom = Math.round(window.innerHeight - r.top + 6) + 'px';
-    _popover = { el, bodyNode: body, sig: '', swarmClocks: [], commandClocks: [] };
+    _popover = { el, bodyNode: body, sig: '', commandClocks: [] };
 
     s.el.setAttribute('aria-expanded', 'true');
     _renderPopoverBody(_summarize(_last), true);
@@ -232,34 +245,17 @@ let backgroundConversationActivity = new Map();
     const sig = _sigOf(sum);
     if (!force && sig === _popover.sig) {
       // Update only clock leaves: preserve open rows, selection and scroll.
-      _popover.swarmClocks.forEach(({ node, index }) => {
-        const text = _swarmElapsed(sum.swarms[index]);
-        if (node.textContent !== text) node.textContent = text;
-      });
       _popover.commandClocks.forEach((node, index) => {
         const text = _fmtElapsed(sum.commands[index].elapsed_s);
         if (node.textContent !== text) node.textContent = text;
       });
       return;
     }
-    _popover.swarmClocks = [];
     _popover.commandClocks = [];
     _popover.sig = sig;
     const body = _popover.bodyNode;
     body.textContent = '';
 
-    if (sum.swarms.length) {
-      const secTitle = document.createElement('div');
-      secTitle.className = 'bg-act-pop-section';
-      secTitle.textContent = _tt('bgActivity.sectionAgents', 'Sub-agents');
-      body.appendChild(secTitle);
-      sum.swarms.forEach((swarm, index) => {
-        const row = _swarmRow(swarm);
-        const node = row.querySelector('.bg-act-elapsed');
-        if (node) _popover.swarmClocks.push({ node, index });
-        body.appendChild(row);
-      });
-    }
     if (sum.commands.length) {
       const secTitle = document.createElement('div');
       secTitle.className = 'bg-act-pop-section';
@@ -271,47 +267,6 @@ let backgroundConversationActivity = new Map();
         body.appendChild(row);
       }
     }
-  }
-
-  function _swarmRow(swarm) {
-    const row = document.createElement('div');
-    row.className = 'bg-act-swarm';
-    const head = document.createElement('div');
-    head.className = 'bg-act-swarm-head';
-    const label = document.createElement('span');
-    label.className = 'bg-act-swarm-conv';
-    label.textContent = _convLabel(swarm.conv_id) || swarm.swarm_key || '';
-    head.appendChild(label);
-    const summary = document.createElement('span');
-    summary.className = 'bg-act-swarm-summary';
-    summary.textContent = backgroundActivitySummary(swarm, _tt);
-    head.appendChild(summary);
-    const elapsed = _swarmElapsed(swarm);
-    if (elapsed) {
-      const el = document.createElement('span');
-      el.className = 'bg-act-elapsed';
-      el.textContent = elapsed;
-      head.appendChild(el);
-    }
-    row.appendChild(head);
-    for (const agent of (swarm.agents || [])) {
-      row.appendChild(_agentRow(agent));
-    }
-    /* Deep-link: the swarm outlives its spawning turn, but its
-     * conversation is where the auto-dispatched results will land. */
-    if (swarm.conv_id && typeof loadConversation === 'function') {
-      row.classList.add('is-clickable');
-      row.addEventListener('click', (e) => {
-        e.stopPropagation();
-        _closePopover();
-        loadConversation(swarm.conv_id);
-      });
-    }
-    return row;
-  }
-
-  function _agentRow(agent) {
-    return renderBackgroundActivityAgent(document, agent, _tt);
   }
 
   function _commandRow(cmd) {
@@ -343,6 +298,8 @@ let backgroundConversationActivity = new Map();
           refreshBackgroundConversationStatuses(changedIds);
         }
         const sum = _summarize(data);
+
+        _updateDock();
         const sig = _sigOf(sum);
         const active = sum.agentsActive > 0 || sum.commandsActive > 0;
         if (sig !== _lastSig) {
@@ -387,6 +344,10 @@ let backgroundConversationActivity = new Map();
 
   runtimeScope.updateBackgroundActivity = updateBackgroundActivity;
 
+  // Render/mount only: commits and the existing rail follower never start reads.
+  runtimeScope.renderBackgroundAgents = _updateDock;
+  runtimeScope.mountBackgroundAgents = _mountDock;
+
   function _onVisibilityChange() {
     controller.visibilityChanged();
   }
@@ -397,6 +358,9 @@ let backgroundConversationActivity = new Map();
     if (_disposed) return;
     _disposed = true;
     controller.dispose();
+
+    _dock?.dispose();
+    _dock = null;
 
     _unsubscribeReconnect?.();
     _unsubscribeNativeVisibility?.();

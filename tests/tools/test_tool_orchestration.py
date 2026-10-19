@@ -71,16 +71,14 @@ def test_local_wire_composes_execute_tools_and_read_only_swarm():
     assert names.count('spawn_agents') == 1
     spawn = next(tool for tool in plan.body['tools']
                  if (tool.get('function') or {}).get('name') == 'spawn_agents')
-    # routing stamps the per-request wave ceiling (min of the decision's
-    # maxConcurrentAgents, 8, and the resource probe) onto a private copy.
+    # A launch hint does not cap the caller's requested dependency-ready batch.
     expected_spawn = deepcopy(SPAWN_AGENTS_TOOL)
-    expected_spawn['function']['parameters']['properties']['agents'][
-        'maxItems'] = 2
     assert spawn == expected_spawn
     assert plan.body['messages'] == [
         {'role': 'user', 'content': [{'type': 'text', 'text': 'compare modules'}]}]
     assert decision_sink == {
         'programmaticBackend': 'local',
+        'programmaticTier': 'program',
         'multiAgentBackend': 'local_swarm',
     }
     assert not [key for key in plan.body if key.startswith('_')]
@@ -359,29 +357,9 @@ def test_native_and_local_workers_share_noninteractive_leaf_boundary():
     assert 'project_message' not in banned
 
 
-def test_read_only_spawn_wave_budget_rejects_before_launch():
-    from lib.swarm.integration._tools import _handle_spawn_agents
-
-    task = {
-        'id': 'task',
-        '_toolOrchestration': {
-            'multiAgent': 'read_only', 'maxConcurrentAgents': 2,
-        },
-    }
-    raw = _handle_spawn_agents(
-        {'agents': [{'objective': str(index)} for index in range(3)]},
-        task_id='task', task=task, cfg={}, all_tools=[], model='m',
-        thinking_enabled=False, project_path='', abort_check=None,
-        on_event=None)
-    result = json.loads(raw)
-    assert result['error']['code'] == 'multi_agent_wave_limit'
-    assert result['error']['retryable'] is True
-    assert '2 agents' in result['error']['next_action']
-    assert result['limit'] == 2
-
-
+@pytest.mark.parametrize("agent_count", [1, 3])
 def test_local_spawn_propagates_identity_budget_and_worker_contract(
-        monkeypatch, tmp_path):
+        monkeypatch, tmp_path, agent_count):
     import lib.swarm.integration._tools as swarm_tools
 
     captured = {}
@@ -408,7 +386,7 @@ def test_local_spawn_propagates_identity_budget_and_worker_contract(
         'compositionMode': 'multi_agent_with_programmatic_workers',
     }
     raw = swarm_tools._handle_spawn_agents(
-        {'agents': [{'id': 'audit', 'objective': 'inspect'}]},
+        {'agents': [{'id': f'audit-{i}', 'objective': 'inspect'} for i in range(agent_count)]},
         task_id='task',
         task={'id': 'task', 'convId': 'conv', '_userId': 17,
               '_toolOrchestration': decision},
@@ -420,13 +398,14 @@ def test_local_spawn_propagates_identity_budget_and_worker_contract(
     handle = json.loads(raw)
     assert captured['started'] is True
     assert captured['user_id'] == 17
-    assert captured['max_parallel'] == 2
+    assert captured['max_parallel'] == min(8, swarm_tools.swarm_max_parallel())
+    assert len(captured['specs']) == agent_count
     assert _wire_names(captured['all_tools']) == ['read_files']
     assert captured['parent_config']['_toolOrchestration'] == decision
     assert handle['orchestration'] == {
         'backend': 'local_swarm', 'mode': 'read_only',
         'compositionMode': 'multi_agent_with_programmatic_workers',
-        'programmaticWorkers': True, 'maxConcurrentAgents': 2,
+        'programmaticWorkers': True,
     }
 
 

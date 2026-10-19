@@ -53,7 +53,14 @@ function pushSubscribe(channel, key, callback) {
   if (channel === 'translate') pushHandler = callback;
 }
 function setTimeout(callback) { callback(); return 1; }
-const calls = {start:[], poll:0, hydrate:0, activity:[], toasts:[]};
+const calls = {start:[], poll:0, hydrate:0, activity:[], toasts:[], receipts:[]};
+const receiptOwners = new Set();
+const composerTranslationStatus = {
+  begin:(id, kind) => { const token = {id, kind}; receiptOwners.add(token); return token; },
+  finish:(token, status, model) => {
+    if (receiptOwners.delete(token)) calls.receipts.push([token.id, token.kind, status, model || null]);
+  },
+};
 const turn = {
   turnId:'turn-a', conversationId:'conv-a', laneId:'main', ordinal:1,
   actor:'assistant', kind:'reply', status:'completed', currentAttemptId:null,
@@ -71,7 +78,7 @@ const Api = {
     },
     poll:async () => {
       calls.poll += 1;
-      return {taskId:'task-a', status:'done'};
+      return {taskId:'task-a', status:'done', model:'actual-translator'};
     },
     pollBatch:async () => [],
   },
@@ -123,6 +130,8 @@ return (async () => {
     hydrate:calls.hydrate,
     activity:calls.activity,
     toastCount:calls.toasts.length,
+
+    receipts:calls.receipts,
     released:!TRANSLATION_CLAIMS.isClaimed('conv-a', 'turn-a'),
   };
 })();
@@ -148,6 +157,8 @@ return (async () => {
     assert result["hydrate"] == 2
     assert result["toastCount"] == 1
     assert result["released"] is True
+
+    assert result["receipts"] == [["conv-a", "turn", "completed", "actual-translator"]]
     assert result["activity"] == [
         ["conv-a", "turn-a", "pending"],
         ["conv-a", "turn-a", None],

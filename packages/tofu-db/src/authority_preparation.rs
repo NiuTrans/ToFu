@@ -539,4 +539,34 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn prepared_effects_cross_execution_threads_and_release_on_commit_or_cancel() {
+        for commit in [false, true] {
+            let (vfs, mut db) = authority();
+            let replica = db.build_preparation_replica().unwrap();
+            vfs.arm_fault(None).unwrap();
+            let (tx, blob) = std::thread::spawn(move || {
+                let mut tx = replica.begin(1, 1).unwrap();
+                let blob = replica.stage_blob(&mut tx, &mut b"cross-thread private".as_slice(), 100).unwrap();
+                replica.entity_put(&mut tx, key(), b"cross-thread".to_vec()).unwrap();
+                (tx, blob)
+            }).join().unwrap();
+            assert!(!vfs.trace().unwrap().contains(&Operation::Write));
+            assert!(db.snapshot_pin_metrics().unwrap().retained_transaction_bytes > 0);
+            assert!(db.blob_reader(1, 1, blob).is_err());
+            if commit {
+                db.commit(tx).unwrap();
+                assert_eq!(db.blob_reader(1, 1, blob).unwrap().next_chunk().unwrap().unwrap(), b"cross-thread private");
+                let reopened = AuthorityDatabase::open_with_vfs(Path::new("/data"), Arc::new(vfs.fork_durable().unwrap())).unwrap();
+                assert_eq!(reopened.blob_reader(1, 1, blob).unwrap().next_chunk().unwrap().unwrap(), b"cross-thread private");
+            } else {
+                std::thread::spawn(move || drop(tx)).join().unwrap();
+                assert!(db.blob_reader(1, 1, blob).is_err());
+            }
+            let released = db.snapshot_pin_metrics().unwrap();
+            assert_eq!(released.active_handles, 0);
+            assert_eq!(released.retained_transaction_bytes, 0);
+        }
+    }
+
 }

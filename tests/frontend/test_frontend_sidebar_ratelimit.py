@@ -16,20 +16,20 @@ ROOT = Path(__file__).resolve().parents[2]
 
 def test_sidebar_reads_typed_phase_selector_without_a_phase_writer():
     source = runtime_section('ui/conversation_list.js')
-    start = source.index('function convRateLimitPhase(')
-    end = source.index('function _convStatusFlags(', start)
+    start = source.index('function _convStatusFlags(')
+    end = source.index('function _convStatusHtml(', start)
     boundary = source[start:end]
     assert 'ConversationTurnRead' in boundary
     assert 'livePhase' in boundary
-    assert 'presentConversationRateLimit(phase)' in boundary
+    assert 'presentConversationActivity({' in boundary
     for retired in ('streamSessions', 'setStreamPhase', 'activeTaskId'):
         assert retired not in source
 
 
 def test_sidebar_status_and_markup_keep_the_rate_limit_flag():
     source = runtime_section('ui/conversation_list.js')
-    assert 'const rateLimited = !!(streaming && convRateLimitPhase(c));' in source
-    assert 'unconfirmed, rateLimited };' in source
+    assert '...presentConversationActivity({' in source
+    assert 'livePhase: runtimeScope.ConversationTurnRead?.state?.(c)?.livePhase' in source
     assert 'conv-ratelimit-dot' in source
     assert 'conv-status-ratelimit' in source
 

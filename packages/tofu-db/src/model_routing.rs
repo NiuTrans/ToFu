@@ -15,7 +15,7 @@ use sha2::{Digest, Sha256};
 use crate::authority::{AuthorityDatabase, AuthorityTransaction};
 use crate::entity::EntityKey;
 use crate::generated_tofudb_ir::{
-    MAX_MODEL_ROUTING_DOCUMENT_BYTES, MAX_MODEL_ROUTING_PRUNED_PER_COMMAND,
+    MAX_MODEL_ROUTING_PRUNED_PER_COMMAND,
     MODEL_ROUTING_AUTHORITY_METADATA_NAMESPACE, MODEL_ROUTING_AUTHORITY_NAMESPACE,
     MODEL_ROUTING_BACKUP_NAMESPACE, MODEL_ROUTING_MIGRATION_RECEIPT_NAMESPACE,
     MODEL_ROUTING_SECRET_COUNT_NAMESPACE, MODEL_ROUTING_SECRET_NAMESPACE,
@@ -130,10 +130,9 @@ fn put_document(
 ) -> io::Result<()> {
     let value_json = serde_json::to_vec(value)
         .map_err(|_| invalid_input("model-routing document cannot be encoded"))?;
-    if value_json.len() > MAX_MODEL_ROUTING_DOCUMENT_BYTES {
-        return Err(invalid_input("model-routing document exceeds 8 MiB"));
-    }
-    versioned_document::put(
+    // Domain documents spill through the existing owner-bound blob codec;
+    // the generic IR literal quota is not a model-routing admission policy.
+    versioned_document::put_with_blob_owner_bounded(
         database,
         transaction,
         PutRequest {
@@ -144,6 +143,8 @@ fn put_document(
             expected_version: None,
             updated_at_ms: physical_timestamp_milliseconds(updated_at),
         },
+        transaction.owner_user_id(),
+        usize::MAX,
     )?;
     Ok(())
 }
@@ -154,12 +155,14 @@ fn get_document(
     namespace: &str,
     tenant_label: &str,
 ) -> io::Result<Option<Value>> {
-    versioned_document::get_value(
+    versioned_document::get_value_with_blob_owner_bounded(
         database,
         transaction,
         &boundary_key(transaction, namespace, tenant_label)?,
         namespace,
         &logical_boundary_key(tenant_label),
+        transaction.owner_user_id(),
+        usize::MAX,
     )?
     .map(|raw| {
         serde_json::from_slice(&raw)
@@ -950,16 +953,17 @@ mod tests {
     }
 
     #[test]
-    fn authority_document_uses_the_complete_eight_mib_blob_budget() {
+    fn authority_document_preserves_bytes_beyond_former_eight_mib_limit() {
         let directory = tempfile::tempdir().unwrap();
         let mut database = AuthorityDatabase::initialize(directory.path()).unwrap();
+        const DOCUMENT_BYTES_BEYOND_FORMER_LIMIT: usize = 9 * 1024 * 1024;
         let empty_bytes = serde_json::to_vec(&json!({"padding": ""})).unwrap().len();
         let document = json!({
-            "padding": "x".repeat(MAX_MODEL_ROUTING_DOCUMENT_BYTES - empty_bytes)
+            "padding": "x".repeat(DOCUMENT_BYTES_BEYOND_FORMER_LIMIT - empty_bytes)
         });
         assert_eq!(
             serde_json::to_vec(&document).unwrap().len(),
-            MAX_MODEL_ROUTING_DOCUMENT_BYTES
+            DOCUMENT_BYTES_BEYOND_FORMER_LIMIT
         );
         let mut write = database.begin(7, 11).unwrap();
         put_document(
@@ -984,7 +988,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             serde_json::to_vec(&restored).unwrap().len(),
-            MAX_MODEL_ROUTING_DOCUMENT_BYTES
+            DOCUMENT_BYTES_BEYOND_FORMER_LIMIT
         );
     }
 

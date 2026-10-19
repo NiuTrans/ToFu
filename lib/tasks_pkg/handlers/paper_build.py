@@ -17,7 +17,7 @@ from lib.paper.builds.contract import validate
 from lib.paper.builds.errors import BuildError
 from lib.paper.builds.runtime import get_scheduler
 from lib.paper.builds.service import start_preview
-from lib.storage.errors import StorageError
+from lib.agent_core.storage_errors import StorageError
 from lib.tasks_pkg.executor import _build_simple_meta, _finalize_tool_round
 from lib.tasks_pkg.executor import tool_registry
 from lib.tasks_pkg.manager._registry import task_user_id

@@ -1,11 +1,11 @@
-"""Bounded, SSRF-guarded downloads for user-controlled public URLs.
+"""File-owned, SSRF-guarded downloads for user-controlled public URLs.
 
 This module is intentionally small and dependency-neutral: it builds on the
 already-required ``requests`` package and the project's proxy configuration.
 The request adapter validates *every* redirect hop immediately before it is
-sent; the body reader enforces both a decoded-byte ceiling and a wall clock
-deadline.  Callers that deliberately need an internal hostname must name that
-hostname explicitly in their feature-specific allow-list environment variable.
+sent; the body reader honors explicit decoded-byte and deadline policies while
+an owned file backs the download. Callers needing an internal hostname must
+name that hostname explicitly in their feature-specific allow-list environment variable.
 """
 
 from __future__ import annotations
@@ -15,6 +15,8 @@ import os
 import socket
 import threading
 import time
+import tempfile
+from typing import BinaryIO
 from urllib.parse import urlparse
 
 import requests
@@ -148,20 +150,22 @@ def _session_for(allow_hosts_env: str) -> requests.Session:
     return session
 
 
-def fetch_public_bytes(
+def fetch_public_file(
     url: str,
     *,
-    max_bytes: int,
+    max_bytes: int | None = None,
     timeout: float = 30.0,
     max_redirects: int = 3,
     allow_hosts_env: str = 'TOFU_PUBLIC_FETCH_ALLOW_HOSTS',
-) -> tuple[bytes, str, str]:
-    """Download a bounded public response as ``(body, content_type, final_url)``.
+    enforce_total_timeout: bool = True,
+) -> tuple[BinaryIO, str, str]:
+    """Download into an anonymous file; successful callers own and close it.
 
-    ``max_bytes`` applies to decoded response bytes, so compressed transfer
-    encoding cannot bypass the memory ceiling.  The response is always closed.
+    An explicit byte ceiling applies to decoded bytes. Without one, file space
+    backs the complete response. Failures close the file and response. Per-read
+    timeouts remain active even when a caller disables the total deadline.
     """
-    if max_bytes <= 0:
+    if max_bytes is not None and max_bytes <= 0:
         raise ValueError('max_bytes must be positive')
     timeout = max(0.25, float(timeout))
     max_redirects = max(0, min(int(max_redirects), 10))
@@ -170,6 +174,8 @@ def fetch_public_bytes(
     previous_redirect_cap = session.max_redirects
     session.max_redirects = max_redirects
     response = None
+    source = None
+    handed_off = False
     started = time.monotonic()
     # A per-read timeout alone permits an endless slow trickle.  Keep a
     # generous total deadline without changing legitimate 30-second fetches.
@@ -192,25 +198,31 @@ def fetch_public_bytes(
                 logger.debug('[SafeFetch] invalid Content-Length %r: %s',
                              raw_length, exc)
                 declared = -1
-            if declared > max_bytes:
+            if max_bytes is not None and declared > max_bytes:
                 raise SafeFetchError(
                     f'response too large: Content-Length={declared} > max={max_bytes}')
 
-        chunks: list[bytes] = []
+        source = tempfile.TemporaryFile(mode='w+b')
         total = 0
         for chunk in response.iter_content(chunk_size=64 * 1024):
             if not chunk:
                 continue
             total += len(chunk)
-            if total > max_bytes:
+            if max_bytes is not None and total > max_bytes:
                 raise SafeFetchError(
                     f'response too large: streamed {total} > max={max_bytes}')
-            if time.monotonic() > deadline:
+            if enforce_total_timeout and time.monotonic() > deadline:
                 raise SafeFetchError('response body exceeded total time budget')
-            chunks.append(chunk)
+            source.write(chunk)
         content_type = (response.headers.get('Content-Type') or '')
         content_type = content_type.split(';', 1)[0].strip().lower()
-        return b''.join(chunks), content_type, str(response.url)
+        source.seek(0)
+        final_url = str(response.url)
+        completed_response = response
+        response = None
+        completed_response.close()
+        handed_off = True
+        return source, content_type, final_url
     except SafeFetchError:
         raise
     except requests.TooManyRedirects as exc:
@@ -220,11 +232,31 @@ def fetch_public_bytes(
         raise SafeFetchError(f'HTTP fetch failed: {exc}') from exc
     finally:
         session.max_redirects = previous_redirect_cap
-        if response is not None:
-            response.close()
+        try:
+            if source is not None and not handed_off:
+                source.close()
+        finally:
+            if response is not None:
+                response.close()
+
+
+def fetch_public_bytes(
+    url: str,
+    *,
+    max_bytes: int,
+    timeout: float = 30.0,
+    max_redirects: int = 3,
+    allow_hosts_env: str = 'TOFU_PUBLIC_FETCH_ALLOW_HOSTS',
+) -> tuple[bytes, str, str]:
+    """Compatibility byte result for callers with explicit decoded-byte bounds."""
+    source, content_type, final_url = fetch_public_file(
+        url, max_bytes=max_bytes, timeout=timeout, max_redirects=max_redirects,
+        allow_hosts_env=allow_hosts_env)
+    with source:
+        return source.read(), content_type, final_url
 
 
 __all__ = [
-    'SafeFetchError', 'fetch_public_bytes', 'ip_is_public',
+    'SafeFetchError', 'fetch_public_bytes', 'fetch_public_file', 'ip_is_public',
     'validate_public_url',
 ]

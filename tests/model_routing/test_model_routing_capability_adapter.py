@@ -190,3 +190,21 @@ def test_grouped_capability_listing_reads_and_indexes_one_authority_once(
     assert groups["transcription"] == []
     assert reads == [boundary]
     assert len(normalizations) == 1
+
+
+
+def test_capability_groups_above_old_quota_share_one_authority_revision(monkeypatch):
+    from lib.model_routing import capability_adapter as adapter
+    repository, boundary = _owner_with_image_route(41)
+    reads = []
+    get = repository.get
+    def counted(owner):
+        reads.append(owner)
+        return get(owner)
+    monkeypatch.setattr(repository, 'get', counted)
+    requirements = {f'capability-{i}': frozenset() for i in range(33)}
+    requirements['image_gen'] = frozenset()
+    groups = list_capability_route_groups(repository, boundary, requirements)
+    assert list(groups) == list(requirements)
+    assert len(groups['image_gen']) == 1
+    assert reads == [boundary]

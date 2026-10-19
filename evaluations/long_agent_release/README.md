@@ -82,7 +82,39 @@ python -m evaluations.long_agent_release run-finalize \
 The store rejects cross-arm records, unresolved oracles/infrastructure errors,
 unpriced usage, mutable artifacts, malformed raw JSONL, excess retries, and all
 three byte-limit overruns. It recalculates model/compaction/paid-tool cost from
-the frozen price card. Codex records additionally require one proxy-metrics
+the frozen price card. Every priced model call, including failed attempts in
+both arms, requires explicit non-negative integer input and output counters;
+missing counters cannot normalize into a free call. Optional cache/reasoning
+counters use the shared `lib.cost` alias authority and must be valid when
+present; reasoning cannot exceed output. A zero-call compaction summary is
+zero only when the call-count/round evidence agrees. Unknown failed-call usage
+leaves the original attempt open, so it cannot silently unlock a retry.
+
+**Problem:** incomplete candidate evidence could pass at an artificially lower
+cost. **Decision:** validate exact usage at the common benchmark pricing
+boundary and reuse it in success/failure projection. **Alternative considered:**
+fill absent provider counters with zero, as display normalization does; rejected
+because missing evidence cannot establish a free call. Explicit provider zeros
+remain valid; this does not prove that every physical dispatch was recorded.
+
+Successful and failed candidate evidence reconcile the same per-call compaction
+rows against `compactionUsage` and its optional `calls` detail. The summary is
+never another charged call. A compaction model differing from the frozen model
+is refused rather than priced with the wrong card. Failed `modelUsages` retain
+the API-round list exactly once, including compaction rows. Responses retry
+counters declare their wire format and use the same cache-inclusive conversion
+as successful Codex rounds; Anthropic residual-input semantics remain separate.
+Problem: failure projection added the compaction summary twice and lost
+Responses cache discounts. Decision: share reconciliation and explicit format
+conversion. Alternative rejected: normalize each success/failure adapter alone.
+
+Known incomplete or pending `usageAccounting` refuses export/attempt closure.
+A complete execution-tree witness must belong to the task and match the billed
+token total. Legacy/explicitly unobserved evidence remains readable, but cannot
+certify physical-dispatch completeness; instrumenting every admitted request is
+still required before claiming complete failed-call coverage.
+
+Codex records additionally require one proxy-metrics
 artifact whose call count and CPU fields match the task; candidate latency may
 not subtract Codex proxy overhead. An infrastructure failure is closed with
 `attempt-fail`; post-dispatch failures require `taskStartedAtUnixMs`, usage,

@@ -12,7 +12,7 @@ pytestmark = pytest.mark.unit
 
 def test_auto_certificate_uses_configured_and_bind_sans(tmp_path, monkeypatch):
     x509 = pytest.importorskip('cryptography.x509')
-    from lib import server_tls
+    from lib.server import server_tls
     import server
 
     monkeypatch.setenv('TOFU_TLS_SANS', 'tofu.test,192.0.2.44')
@@ -36,7 +36,7 @@ def test_auto_certificate_uses_configured_and_bind_sans(tmp_path, monkeypatch):
 
 
 def test_missing_explicit_certificate_never_downgrades_to_http(tmp_path):
-    from lib.server_tls import ensure_tls_certificates
+    from lib.server.server_tls import ensure_tls_certificates
 
     with pytest.raises(FileNotFoundError, match='configured TLS file'):
         ensure_tls_certificates(

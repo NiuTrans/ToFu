@@ -17,7 +17,7 @@ prune tests
 prune uploads
 prune lib/database
 prune lib/storage
-prune lib/storage_sidecar
+prune lib/storage_authority_sql
 prune lib/tests
 
 exclude audit_codex_session.py
@@ -28,3 +28,6 @@ global-exclude __pycache__
 include README.md
 include LICENSE
 include VERSION
+
+# Inputs for setup.py's exact package-local schema projection.
+recursive-include contracts *.json *.yaml *.yml

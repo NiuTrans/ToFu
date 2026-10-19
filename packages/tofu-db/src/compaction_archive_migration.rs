@@ -147,7 +147,7 @@ fn restore(
         .transpose()?;
     if post
         .as_ref()
-        .is_some_and(|bytes| bytes.len() > MAX_TRANSACTION_IR_LITERAL_BYTES)
+        .is_some_and(|bytes| bytes.len() > MAX_LEGACY_DOCUMENT_BYTES)
     {
         return Err(invalid_input("archive post messages exceed bound"));
     }

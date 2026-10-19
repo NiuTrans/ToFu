@@ -74,6 +74,9 @@ _FIELD_SAMPLES = {
 # Explicit samples for pattern-constrained strings, keyed by the exact
 # declared pattern. The sampler proves each against the pattern before use.
 _PATTERN_SAMPLES = {
+    "^[a-f0-9]{24}$": "a" * 24,
+    "^[a-f0-9]{32}$": "a" * 32,
+    "^[a-f0-9]{64}$": "a" * 64,
     "^plan_[0-9a-f]{24}$": "plan_" + "a" * 24,
     "^[0-9a-f]{24}$": "a" * 24,
     "^[0-9a-f]{64}$": "a" * 64,

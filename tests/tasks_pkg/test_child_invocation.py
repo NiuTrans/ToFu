@@ -370,29 +370,28 @@ def test_child_evidence_append_transient_stall_retries_before_sink(monkeypatch):
         _discard(child)
 
 
-def test_child_evidence_append_transient_exhaustion_poisons_once(monkeypatch):
+def test_child_evidence_append_long_pressure_does_not_poison_invocation(monkeypatch):
     import lib.tasks_pkg.event_log as log
     from lib.storage.errors import StorageError
     child = _child()
     child['_invocationStorageFree'] = False
     child['abort_event'] = _NeverAbort()
     attempts = []
-    def always_down(task_id, seq, event):
+    def pressured(task_id, seq, event):
         attempts.append(seq)
-        raise StorageError('database_timeout', 'deadline_elapsed', False)
-    monkeypatch.setattr(log, 'append_persistent_event', always_down)
+        if len(attempts) <= 20:
+            raise StorageError('database_timeout', 'deadline_elapsed', False)
+    monkeypatch.setattr(log, 'append_persistent_event', pressured)
+    monkeypatch.setattr('lib.tasks_pkg.persistence_wait._BASE_DELAY_SECONDS', 0)
     try:
-        with pytest.raises(StorageError, match='deadline_elapsed'):
-            invocation.deliver_invocation_event(
-                child, {'type': 'messages_snapshot', 'seq': 3})
-        assert attempts == [3] * 4
-        assert child['aborted'] and child['abort_event'].set_calls == 1
-        # The failure stays latched: a later delivery fails fast instead of
-        # reordering evidence around the lost handoff.
-        with pytest.raises(RuntimeError, match='previously failed'):
-            invocation.deliver_invocation_event(
-                child, {'type': 'messages_snapshot', 'seq': 4})
-        assert attempts == [3] * 4
+        invocation.deliver_invocation_event(
+            child, {'type': 'messages_snapshot', 'seq': 3})
+        assert attempts == [3] * 21
+        assert not child['aborted'] and child['abort_event'].set_calls == 0
+        assert not child.get('_invocationDeliveryError')
+        invocation.deliver_invocation_event(
+            child, {'type': 'messages_snapshot', 'seq': 4})
+        assert attempts[-1] == 4 and len(attempts) == 22
     finally:
         _discard(child)
 
@@ -738,3 +737,23 @@ def test_all_child_monitors_start_despite_old_global_worker_setting(monkeypatch)
             _discard(child)
     assert not errors
     assert not any(thread.is_alive() for thread in threads)
+
+
+@pytest.mark.parametrize('lost_ack',[False,True])
+def test_fatal_child_uses_required_receiver_and_retains_delivery_debt_without_root_write(monkeypatch,lost_ack):
+    from lib.tasks_pkg.orchestrator import _post_loop
+    from lib.agent_core.terminal_delivery import bind_terminal_delivery
+    child=_child();received=[];error=OSError('lost required child ACK')
+    def receiver(task):
+        received.append(task['id'])
+        if lost_ack:raise error
+    bind_terminal_delivery(child,receiver)
+    monkeypatch.setattr(_post_loop,'persist_task_result',lambda *_a,**_k:pytest.fail('child attempted root result write'))
+    try:
+        outcome=_post_loop.handle_task_fatal(child,RuntimeError('child failure'),allow_retry=False)
+        assert received==[child['id']] and child['status']=='error'
+        if lost_ack:
+            assert outcome is False and child['_invocationDeliveryError'] is error
+            assert child['_terminalPersistencePending'] and child['_terminalPersistenceRetryReady']
+        else:assert outcome is True
+    finally:_discard(child)

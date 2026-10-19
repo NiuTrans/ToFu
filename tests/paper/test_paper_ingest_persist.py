@@ -457,7 +457,7 @@ def test_arxiv_stream_persists_row_end_to_end_zero_client_puts():
     import asyncio
     app = _load_app()
     import routes.paper_pkg._arxiv as rp
-    import lib.http_client as _hc
+    import lib.http_transport.client as _hc
 
     restore_parse = _patch_parse(rp)
 

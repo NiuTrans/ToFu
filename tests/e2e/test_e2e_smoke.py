@@ -71,7 +71,7 @@ def _disable_open_mode_rate_limit(monkeypatch):
     session-scoped live server across the visual suite must not make later
     journeys depend on how many earlier pages were opened.
     """
-    from lib.rate_limit_store import reset_for_test
+    from lib.rate_limit.rate_limit_store import reset_for_test
 
     monkeypatch.setenv('TOFU_OPEN_MODE_RPM', '0')
     reset_for_test()
@@ -102,10 +102,10 @@ def _stub_stream_llm_response_factory():
             task['_e2e_program_done'] = True
             tc = {
                 'id': 'call_e2e_program', 'index': 0, 'type': 'function',
-                'function': {'name': 'execute_tools', 'arguments': json.dumps({
-                    'program': 'const evidence = tools.value(tools.call("web_search", {query:"e2e query"}));'
+                'function': {'name': 'execute_program', 'arguments': json.dumps({
+                    'code': 'const evidence = await tools.invoke("web_search", {query:"e2e query"});'
                                'tools.observe("Choose between candidates <script>unsafe()</script>", {evidence:evidence});'
-                               'tools.call("web_search", {query:"must not run"});',
+                               'await tools.invoke("web_search", {query:"must not run"});',
                 })},
             }
             if on_tool_call_ready:
@@ -244,6 +244,45 @@ def _select_stub_model(page):
     page.locator(selector).first.click()
 
 
+@pytest.fixture
+def _programmatic_calling_enabled(page):
+    """Opt this JavaScript scenario in through Settings, not task internals.
+
+    ``auto`` intentionally admits JSON batches, not ``execute_program``.
+    Keep that default for the other journeys and restore this page's setting
+    even when a rendering or reload assertion fails.
+    """
+    _wait_app_ready(page)
+
+    def open_control():
+        page.evaluate("""async () => {
+            const jump = window.TofuModules.resolveAction('jumpToSetting');
+            await jump('programmatic-calling');
+        }""")
+        control = page.locator('#settingProgrammaticCalling')
+        control.wait_for(state='visible', timeout=15000)
+        # Opening Settings loads and populates the controls asynchronously.
+        page.locator('#stgPresetTable .stg-loading').wait_for(state='detached')
+        return control
+
+    def save_mode(control, mode):
+        control.select_option(mode)
+        page.locator('#settingsSaveBtn').click()
+        page.locator('#settingsModal.open').wait_for(state='hidden', timeout=15000)
+        assert page.evaluate("""expected =>
+            JSON.parse(localStorage.getItem('claude_client_config'))
+                .tools.programmaticCalling === expected
+        """, mode), 'Settings did not persist the requested programmatic mode'
+
+    control = open_control()
+    previous_mode = control.input_value()
+    try:
+        save_mode(control, 'on')
+        yield
+    finally:
+        save_mode(open_control(), previous_mode)
+
+
 def test_bundle_loaded_in_browser(page, assert_no_js_errors):
     """The served Vite entry reaches app-ready with the two allowed bridges."""
     _wait_app_ready(page)
@@ -305,6 +344,8 @@ def test_tool_round_renders(page, assert_no_js_errors):
     search_before = _SENTINEL['search_calls']
     page.locator('#userInput').fill('__e2e_tool__ please search')
     page.locator('#sendBtn').click()
+    page.get_by_text(_STREAM_TEXT, exact=False).first.wait_for(state='visible')
+    page.locator('.conversation-history-process > summary').click()
 
     try:
         page.wait_for_selector(
@@ -332,7 +373,7 @@ def test_tool_round_renders(page, assert_no_js_errors):
 
 @pytest.mark.parametrize('width', [1280, 390])
 def test_program_observation_and_measurements_render_and_restore(
-        page, width, tmp_path, assert_no_js_errors):
+        page, width, tmp_path, assert_no_js_errors, _programmatic_calling_enabled):
     """Real gateway → sync projection → rich card; include narrow and reload."""
     page.set_viewport_size({'width': width, 'height': 900})
     _wait_app_ready(page)
@@ -341,6 +382,9 @@ def test_program_observation_and_measurements_render_and_restore(
     search_before = _SENTINEL['search_calls']
     page.locator('#userInput').fill('__e2e_program__ inspect candidates')
     page.locator('#sendBtn').click()
+    page.get_by_text(_STREAM_TEXT, exact=False).first.wait_for(
+        state='visible', timeout=30000)
+    page.locator('.conversation-history-process > summary').click()
     card = page.locator('.conversation-block--program .ptc-needs-model')
     try:
         card.wait_for(state='visible', timeout=30000)
@@ -357,6 +401,8 @@ def test_program_observation_and_measurements_render_and_restore(
     assert card.locator('script').count() == 0
     assert card.locator('.ptc-result').evaluate('(node) => node.open') is True
     assert card.locator('.ptc-code').evaluate('(node) => node.open') is False
+    assert card.locator('.ptc-technical').evaluate('(node) => node.open') is False
+    card.locator('.ptc-technical > summary').click()
     assert card.locator('.ptc-measurements').inner_text()
     assert _SENTINEL['search_calls'] == search_before + 1
     assert card.evaluate('(node) => node.scrollWidth <= node.clientWidth + 1')
@@ -367,7 +413,9 @@ def test_program_observation_and_measurements_render_and_restore(
     page.reload(wait_until='domcontentloaded')
     _wait_app_ready(page)
     restored = page.locator('.conversation-block--program .ptc-needs-model')
+    page.locator('.conversation-history-process > summary').click()
     restored.wait_for(state='visible', timeout=30000)
+    restored.locator('.ptc-technical > summary').click()
     assert restored.locator('.ptc-measurements').inner_text()
     assert _SENTINEL['search_calls'] == search_before + 1
 

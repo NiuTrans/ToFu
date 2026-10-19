@@ -1,35 +1,38 @@
 
 /* ── Update modal ── */
-.update-modal{width:480px;max-width:92vw;padding:0;display:flex;flex-direction:column;overflow:hidden;border-radius:18px;box-shadow:0 24px 64px rgba(0,0,0,0.45),0 2px 8px rgba(0,0,0,0.3);animation:updModalIn .26s cubic-bezier(0.16,1,0.3,1)}
+.update-modal{width:480px;max-width:92vw;padding:0;display:flex;flex-direction:column;overflow:hidden;border-radius:18px;box-shadow:var(--shadow);animation:updModalIn .26s cubic-bezier(0.16,1,0.3,1)}
 @keyframes updModalIn{from{opacity:0;transform:translateY(10px) scale(.97)}to{opacity:1;transform:none}}
-.update-modal-header{display:flex;align-items:center;justify-content:space-between;gap:var(--space-3);padding:18px var(--space-5);border-bottom:1px solid var(--border)}
-.update-modal-head-l{display:flex;align-items:center;gap:13px;min-width:0}
+.update-modal-header{display:flex;align-items:center;justify-content:space-between;gap:var(--space-3);padding:calc(var(--space-1) * 4.5) var(--space-5);border-bottom:1px solid var(--border)}
+.update-modal-head-l{display:flex;align-items:center;gap:calc(var(--space-1) * 3.25);min-width:0}
 .upd-head-icon{width:38px;height:38px;border-radius:11px;flex-shrink:0;display:flex;align-items:center;justify-content:center;color:var(--accent);background:var(--accent-subtle)}
 .upd-head-icon svg{width:20px;height:20px}
 .upd-head-text{min-width:0}
 .update-modal-header h3{margin:0;font-size:var(--font-size-xl);font-weight:700;color:var(--text-primary);letter-spacing:-0.01em;line-height:1.2}
-.upd-head-sub{margin:2px 0 0;font-size:var(--font-size-sm);color:var(--text-tertiary);line-height:1.3;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.upd-head-sub{margin:calc(var(--space-1) / 2) 0 0;font-size:var(--font-size-sm);color:var(--text-tertiary);line-height:1.3;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .modal-close-btn{width:30px;height:30px;flex-shrink:0;display:flex;align-items:center;justify-content:center;background:none;border:none;border-radius:8px;cursor:pointer;color:var(--text-tertiary);font-size:20px;line-height:1;padding:0;transition:color .15s ease,background-color .15s ease}
 .modal-close-btn:hover{color:var(--text-primary);background:var(--bg-hover)}
 .modal-close-btn:active{transform:scale(.92)}
-.update-modal-body{padding:22px;min-height:148px;display:flex;flex-direction:column;justify-content:center}
+.update-modal-body{padding:calc(var(--space-1) * 5.5);min-height:148px;display:flex;flex-direction:column;justify-content:center}
+
+/* Independent status notices must not share a border (e.g. local edits + latest release). */
+.upd-action > .upd-badge + .upd-badge{margin-top:var(--space-4)}
 /* Checking state — centered spinner + label */
-.upd-checking-wrap{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;padding:14px 0;text-align:center}
+.upd-checking-wrap{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:calc(var(--space-1) * 3.5);padding:calc(var(--space-1) * 3.5) 0;text-align:center}
 .upd-checking-wrap .upd-big-spin{width:32px;height:32px;border:3px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin .8s linear infinite}
 .upd-checking-wrap span{font-size:var(--font-size-md);color:var(--text-tertiary)}
-.upd-retry-btn{margin-top:13px;padding:9px 18px;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border);border-radius:9px;font-size:var(--font-size-md);font-weight:600;cursor:pointer;transition:background-color .15s ease}
+.upd-retry-btn{margin-top:calc(var(--space-1) * 3.25);padding:calc(var(--space-1) * 2.25) calc(var(--space-1) * 4.5);background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border);border-radius:9px;font-size:var(--font-size-md);font-weight:600;cursor:pointer;transition:background-color .15s ease}
 .upd-retry-btn:hover{background:var(--bg-hover)}
 /* Version hero — current → latest */
-.upd-hero{display:flex;align-items:center;justify-content:center;gap:10px;padding:var(--space-5) 18px;background:linear-gradient(180deg,var(--bg-tertiary),var(--bg-secondary));border:1px solid var(--border);border-radius:14px;margin-bottom:18px}
+.upd-hero{display:flex;align-items:center;justify-content:center;gap:calc(var(--space-1) * 2.5);padding:var(--space-5) calc(var(--space-1) * 4.5);background:linear-gradient(180deg,var(--bg-tertiary),var(--bg-secondary));border:1px solid var(--border);border-radius:14px;margin-bottom:calc(var(--space-1) * 4.5)}
 .upd-ver{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:var(--space-2);padding:var(--space-1)}
 .upd-ver-label{font-size:10px;text-transform:uppercase;letter-spacing:.1em;color:var(--text-tertiary);font-weight:700}
 .upd-ver-num{font-size:var(--font-size-3xl);font-weight:800;font-variant-numeric:tabular-nums;color:var(--text-primary);line-height:1;letter-spacing:-0.01em}
 /* Up-to-date hero: collapse the duplicate "same version" pair into one clear
    statement — dim the arrow and de-emphasize the redundant latest column. */
-.upd-hero.up-to-date{gap:6px}
+.upd-hero.up-to-date{gap:calc(var(--space-1) * 1.5)}
 .upd-hero.up-to-date .upd-arrow{opacity:.4}
 .upd-ver.latest .upd-ver-num{color:var(--accent)}
 .upd-hero.up-to-date .upd-ver.latest .upd-ver-num{color:var(--text-primary)}
 .upd-arrow{display:flex;align-items:center;justify-content:center;width:30px;height:30px;border-radius:50%;flex-shrink:0;color:var(--text-tertiary);background:var(--bg-hover)}
 .upd-arrow svg{width:16px;height:16px}
-.upd-hero:not(.up-to-date) .upd-arrow{color:#fff;background:var(--accent)}
+.upd-hero:not(.up-to-date) .upd-arrow{color:var(--text-on-accent);background:var(--accent)}

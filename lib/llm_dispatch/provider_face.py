@@ -179,7 +179,7 @@ def dual_face_hosts(refresh: bool = False) -> set:
         # The layered loader is the catalog authority (package < deployment <
         # bundle < user tiers, docs/SITE_PACKS.md §4) — deriving from it keeps
         # release-tiered and user-tier gateways visible to the invariant.
-        from lib.provider_template_recipes import load_provider_templates
+        from lib.provider.provider_template_recipes import load_provider_templates
         templates = load_provider_templates()
     except Exception as e:
         logger.warning('[Face] template catalog unavailable (%s) — dual-face '

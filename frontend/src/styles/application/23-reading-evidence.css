@@ -13,9 +13,9 @@
  * scrollbar. */
 
 .conversation-surface .conversation-block--file-changes {
-  border: 1px solid var(--turn-rule);
-  border-radius: 8px;
-  background: var(--turn-process-surface);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
   box-shadow: none;
 }
 
@@ -31,8 +31,11 @@
 
 .conversation-surface .conversation-file-changes .fc-summary {
   min-width: 0;
-  padding: var(--space-2) var(--space-2);
-  border-radius: 7px;
+  min-height: var(--conversation-process-row-height);
+  padding: var(--space-2) var(--conversation-process-inset);
+  gap: var(--conversation-process-gap);
+  border-radius: var(--radius-sm);
+  font-size: var(--conversation-process-font-size);
 }
 
 .conversation-surface .conversation-file-changes .fc-summary:hover {
@@ -152,8 +155,8 @@
 }
 
 .conversation-surface .bilingual-header {
-  min-height: 34px;
-  padding: var(--space-1) var(--space-1);
+  min-height: var(--conversation-process-row-height);
+  padding: var(--space-2) var(--conversation-process-inset);
   background: transparent;
 }
 
@@ -165,6 +168,27 @@
 .conversation-surface .bilingual-label {
   font-size: var(--conversation-font-size-caption);
   font-weight: var(--weight-medium);
+}
+
+/* Recorded translation attribution is text beside the fold/answer, not a panel.
+ * Provider-qualified IDs must wrap at narrow widths rather than hiding evidence. */
+.conversation-surface .bilingual-model {
+  min-width: 0;
+  max-width: 100%;
+  margin-inline-start: var(--space-2);
+  padding: 0;
+  color: var(--text-tertiary);
+  background: transparent;
+  font-family: inherit;
+  font-size: var(--conversation-font-size-caption);
+  font-weight: var(--weight-regular);
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.conversation-surface .bilingual-attribution {
+  display: block;
+  margin: var(--space-1) 0;
 }
 
 .conversation-surface .bilingual-body .md-content {
@@ -251,4 +275,19 @@
 }
 .sw-note-group .sw-note-group-item-head > :is(.ptool-icon, .sw-note-badge) {
   flex-shrink: 0;
+}
+
+/* Message intent outranks the passive outcome chip on narrow tool cards. */
+.ptool-agent-message > .ptool-result-header {
+  flex-wrap: wrap;
+}
+.ptool-agent-message > .ptool-result-header .ptool-text {
+  flex: 1 1 auto;
+  min-width: min(100%, calc(var(--tool-receipt-label-width) * 2));
+}
+.ptool-agent-message > .ptool-result-header .ptool-line-status {
+  flex: 0 1 auto;
+  margin-inline-start: var(--space-6);
+  max-width: 100%;
+  white-space: normal;
 }

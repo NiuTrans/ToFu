@@ -125,7 +125,23 @@ pub(crate) fn sync_directory_barrier(vfs: &dyn Vfs, path: &Path) -> io::Result<(
     vfs.sync_directory(path)
 }
 
+/// Independently observed filesystem dimensions; unknown accounting is explicit.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct FilesystemCapacity {
+    pub total_bytes: Option<u64>,
+    pub available_bytes: Option<u64>,
+    pub total_inodes: Option<u64>,
+    pub available_inodes: Option<u64>,
+}
+
 pub trait Vfs: Send + Sync {
+    /// Independent ordinary file handles share current lengths and may append
+    /// disjoint WAL regions. Stateful/encrypting wrappers default to fallback.
+    fn supports_buffered_wal_writes(&self) -> bool { false }
+
+    fn filesystem_capacity(&self, _path: &Path) -> io::Result<FilesystemCapacity> {
+        Ok(FilesystemCapacity::default())
+    }
     fn open(&self, path: &Path, request: OpenRequest) -> io::Result<Box<dyn VfsFile>>;
     fn open_positioned_reader(&self, _path: &Path) -> io::Result<Option<Arc<dyn VfsPositionedReader>>> {
         Ok(None)
@@ -269,6 +285,45 @@ impl VfsFile for RealFile {
 }
 
 impl Vfs for RealVfs {
+    fn supports_buffered_wal_writes(&self) -> bool { true }
+    fn filesystem_capacity(&self, path: &Path) -> io::Result<FilesystemCapacity> {
+        let mut probe = path;
+        loop {
+            match fs::metadata(probe) {
+                Ok(_) => break,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    probe = probe.parent().ok_or(error)?;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            let path = std::ffi::CString::new(probe.as_os_str().as_bytes())
+                .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "filesystem path contains NUL"))?;
+            let mut info = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+            // SAFETY: path is NUL terminated and info points to writable statvfs storage.
+            if unsafe { libc::statvfs(path.as_ptr(), info.as_mut_ptr()) } != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            // SAFETY: a successful statvfs initialized the complete structure.
+            let info = unsafe { info.assume_init() };
+            let bytes_known = info.f_blocks > 0 && info.f_frsize > 0;
+            let inodes_known = info.f_files > 0;
+            Ok(FilesystemCapacity {
+                total_bytes: bytes_known.then(|| (info.f_blocks as u64).saturating_mul(info.f_frsize as u64)),
+                available_bytes: bytes_known.then(|| (info.f_bavail as u64).saturating_mul(info.f_frsize as u64)),
+                total_inodes: inodes_known.then_some(info.f_files as u64),
+                available_inodes: inodes_known.then_some(info.f_favail as u64),
+            })
+        }
+        #[cfg(not(unix))]
+        {
+            Ok(FilesystemCapacity { total_bytes: fs2::total_space(probe).ok(), available_bytes: fs2::available_space(probe).ok(), ..FilesystemCapacity::default() })
+        }
+    }
+
     fn open_positioned_reader(&self, path: &Path) -> io::Result<Option<Arc<dyn VfsPositionedReader>>> {
         #[cfg(unix)]
         {
@@ -438,6 +493,8 @@ struct SimulatedState {
     trace: Vec<Operation>,
     #[cfg(test)]
     operation_fault: Option<(Operation, usize, FaultAction, bool)>,
+    #[cfg(test)]
+    capacity: FilesystemCapacity,
 }
 
 struct SimulatedFile {
@@ -512,6 +569,12 @@ fn before(state: &mut SimulatedState, operation: Operation) -> io::Result<Option
 }
 
 impl DeterministicVfs {
+    #[cfg(test)]
+    pub(crate) fn set_filesystem_capacity(&self, capacity: FilesystemCapacity) -> io::Result<()> {
+        state(&self.shared)?.capacity = capacity;
+        Ok(())
+    }
+
     pub fn new(fault: Option<FaultRule>) -> Self {
         let root = PathBuf::from("/");
         Self {
@@ -527,6 +590,8 @@ impl DeterministicVfs {
                 trace: Vec::new(),
                 #[cfg(test)]
                 operation_fault: None,
+                #[cfg(test)]
+                capacity: FilesystemCapacity::default(),
             })),
         }
     }
@@ -550,6 +615,8 @@ impl DeterministicVfs {
                 trace: Vec::new(),
                 #[cfg(test)]
                 operation_fault: None,
+                #[cfg(test)]
+                capacity: FilesystemCapacity::default(),
             })),
         })
     }
@@ -619,6 +686,14 @@ impl DeterministicVfs {
 }
 
 impl Vfs for DeterministicVfs {
+    fn supports_buffered_wal_writes(&self) -> bool { true }
+    fn filesystem_capacity(&self, _path: &Path) -> io::Result<FilesystemCapacity> {
+        #[cfg(test)]
+        { Ok(state(&self.shared)?.capacity) }
+        #[cfg(not(test))]
+        { Ok(FilesystemCapacity::default()) }
+    }
+
     fn open_positioned_reader(&self, path: &Path) -> io::Result<Option<Arc<dyn VfsPositionedReader>>> {
         // Use ordinary admission and the same Open fault before sharing a
         // cursor-free simulated handle; every read still records its fault.

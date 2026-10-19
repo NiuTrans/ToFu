@@ -1,13 +1,7 @@
-"""lib/pdf_parser/images/_resize.py — Image resize/crop utilities."""
+"""Image resize/crop utilities; load Pillow only inside actual resize work."""
 
 import base64
 import io
-
-try:
-    from PIL import Image as PILImage
-except ImportError:
-    PILImage = None  # type: ignore[assignment]
-    # Warning already logged by lib/fetch/utils.py — debug-only here
 
 from lib.log import get_logger
 
@@ -54,6 +48,8 @@ def resize_image_bytes(img_bytes: bytes, max_width: int = 1800,
     source_buf: io.BytesIO | None = None
     out_buf: io.BytesIO | None = None
     try:
+        from PIL import Image as PILImage
+
         source_buf = io.BytesIO(img_bytes)
         img = PILImage.open(source_buf)
         w, h = img.size

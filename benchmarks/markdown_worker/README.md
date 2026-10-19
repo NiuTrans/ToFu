@@ -88,7 +88,7 @@ The full inline-cache run verifies 3,000 latency samples in 60 independent
 browser processes and every captured production DOM frame. Prose P50 improves
 about 19%, but renderer RSS rises 37%; reference workloads regress latency/CPU
 and several P99 guards fail. The current candidate is unpromoted; full
-[inline rejection evidence](../../docs/evidence/system_markdown_inline_20261008.json)
+`system_markdown_inline_20261008.json`
 retains per-pair ratios, source/artifact identities and CPU/coverage limitations.
 
 `reader_measure.py` and `reader_measure.js` compare current reader reconciliation
@@ -111,7 +111,7 @@ latency/RSS browsers. Mixed-tail P50 falls 46–69%; completion P50 falls 79–8
 The first-pair renderer RSS rises 11.7%/16.1%, exceeding the 1.05 guard; later
 near-neutral pairs cannot erase those failures. The correctness fix is integrated,
 but measured performance admission remains false.
-[Retained reader evidence](../../docs/evidence/system_markdown_reader_20261008.json)
+`system_markdown_reader_20261008.json`
 records all pairs, raw/bundle identities and concurrent-host/CPU/coverage limits.
 
 `reader_memory_profile.py` privately reuses the frozen-owner reader comparison
@@ -130,7 +130,7 @@ latency/CPU cohorts, three pairs per case. Post-disposal/GC JS heaps are similar
 (about 3.1–3.3 MiB), while active DOM counters exceed 100,000 before dropping.
 This points to transient DOM allocation pressure in this fixture; one lifetime
 does not prove long-run retention or remove the original RSS guard failures.
-[Retained phase evidence](../../docs/evidence/system_markdown_reader_memory_profile_20261008.json)
+`system_markdown_reader_memory_profile_20261008.json`
 keeps all observed phases and instrumentation/concurrency limits.
 
 `inplace_sanitizer.js` tests owner-scoped DOMPurify IN_PLACE adapters. The
@@ -150,7 +150,7 @@ CPU remains a cohort mean; no raw CPU/op or whole-app admission follows.
 The full in-place document trial verifies 3,000 canonical DOM frames across 60
 independent latency/RSS browsers. Prose P50 regresses 11–15%, references 22–27%,
 and terminal 40–50%; CPU and several RSS guards also fail. The candidate remains
-unpromoted. [Retained rejection evidence](../../docs/evidence/system_markdown_inplace_sanitation_20261008.json)
+unpromoted. `system_markdown_inplace_sanitation_20261008.json`
 keeps all pairs, dependency/artifact identities and resolution/coverage limits.
 
 `tests/visual/test_visual_streaming_markdown_security.py` serves actual renderer
@@ -160,7 +160,7 @@ checks raw/partial/code/table HTML and SVG/MathML attack inputs against complete
 authorized DOM on every stream/terminal frame, including unchanged prefix node
 identity and dangerous attribute/URI/element absence. Results are delivered
 through DOM text, avoiding CSP-forbidden string evaluation by the test driver.
-[Streaming security evidence](../../docs/evidence/system_markdown_stream_security_20261008.json)
+`system_markdown_stream_security_20261008.json`
 records 84 streams/918 frames and actual CSP/dependency/bundle identities.
 Adjacent reader/streaming DOM tests pass (full performance is opt-in). This
 fixture does not deploy CSP to the main app, prove Trusted Types/custom hooks,
@@ -198,3 +198,5 @@ Multiple-renderer high-water sums may exceed simultaneous peak; one disposal
 interval is not long-run leak proof. Sources, compiled graphs and dependencies
 are frozen. API/full-app, physical paint, math and deployment-security remain
 separate gates. Run streaming DOM/security neighbors; do not waive their errors.
+
+> Evidence note: the the former evidence/ artifact snapshots cited here were retired from the tree. The cited JSON artifacts remain recoverable from git history.

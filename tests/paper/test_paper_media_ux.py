@@ -550,8 +550,8 @@ def test_narrate_on_scene_done_counts(monkeypatch, tmp_path):
                                            'scene-003']
 
 
-def test_narrate_on_scene_done_sequential_order(monkeypatch, tmp_path):
-    """Sequential rendering (max_workers=1) settles scenes in scene order."""
+def test_narrate_idle_reuse_hint_preserves_scene_result_order(monkeypatch, tmp_path):
+    """Idle reuse does not cap live demand; returned scenes retain input order."""
     from lib.motion_video._audio import synthesize_scene_narrations
     _fake_tts(monkeypatch)
     calls = []
@@ -561,8 +561,9 @@ def test_narrate_on_scene_done_sequential_order(monkeypatch, tmp_path):
         scenes, str(tmp_path / 'audio'), max_workers=1,
         on_scene_done=lambda i, n, sid: calls.append((i, n, sid)))
     assert res['ok'] is True
-    assert calls == [(1, 3, 'scene-001'), (2, 3, 'scene-002'),
-                     (3, 3, 'scene-003')]
+    assert [c[0] for c in calls] == [1, 2, 3]
+    assert sorted(c[2] for c in calls) == ['scene-001', 'scene-002', 'scene-003']
+    assert [entry['scene_id'] for entry in res['scenes']] == [sc['id'] for sc in scenes]
 
 
 # ══════════════════════════════════════════════════════════

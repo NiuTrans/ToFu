@@ -16,8 +16,7 @@ use crate::authority_gc::AuthorityGarbageCollectionBudget;
 use crate::generated_storage_operations::{StorageOperationKind, STORAGE_SCHEMA_VERSION};
 use crate::generated_storage_v2::{
     MAX_FRAME_BODY_BYTES, DEFAULT_FRAME_MEMORY_BYTES,
-    MAX_STREAMED_REQUEST_CHUNKS, MAX_STREAMED_REQUEST_PAYLOAD_BYTES, MAX_STREAMED_RESPONSE_CHUNKS,
-    MAX_STREAMED_RESPONSE_PAYLOAD_BYTES, STATUS_BAD_REQUEST, STATUS_CONFLICT,
+    STATUS_BAD_REQUEST, STATUS_CONFLICT,
     STATUS_DEADLINE_ELAPSED, STATUS_FORBIDDEN, STATUS_INTEGRITY_FAILURE, STATUS_NOT_IMPLEMENTED,
     STATUS_RESOURCE_EXHAUSTED, STATUS_UNAVAILABLE, STREAMED_RESPONSE_CHUNK_BYTES,
 };
@@ -38,7 +37,7 @@ use response::DispatchedResponse;
 #[derive(Clone, Debug)]
 pub struct FrameAdmissionBudget {
     shared: Arc<Mutex<FrameAdmissionState>>,
-    maximum_bytes: usize,
+    memory_hint_bytes: usize,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -68,17 +67,10 @@ pub struct FrameAdmissionGuard {
 enum FrameStorage { Memory, File, Payload }
 
 impl FrameAdmissionBudget {
-    pub fn new(maximum_bytes: usize) -> io::Result<Self> {
-        if maximum_bytes < MAX_FRAME_BODY_BYTES
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "invalid storage.v2 aggregate frame budget",
-            ));
-        }
+    pub fn new(memory_hint_bytes: usize) -> io::Result<Self> {
         Ok(Self {
             shared: Arc::default(),
-            maximum_bytes,
+            memory_hint_bytes,
         })
     }
 
@@ -100,14 +92,14 @@ impl FrameAdmissionBudget {
     pub fn plan_frame(&self, bytes: usize) -> io::Result<FrameBufferPlan<FrameAdmissionGuard>> {
         if bytes == 0 || bytes > MAX_FRAME_BODY_BYTES { return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid storage.v2 frame size")); }
         let mut state = self.shared.lock().map_err(|_| io::Error::other("storage.v2 frame budget is poisoned"))?;
-        let spilled = state.metrics.memory_buffer_bytes.checked_add(bytes).is_none_or(|next| next > self.maximum_bytes);
+        let spilled = state.metrics.memory_buffer_bytes.checked_add(bytes).is_none_or(|next| next > self.memory_hint_bytes);
         let storage = if spilled { FrameStorage::File } else { FrameStorage::Memory };
         let guard = self.admit_locked(&mut state, bytes, storage)?;
         Ok(FrameBufferPlan { guard, spilled })
     }
 
     fn admit_streamed_payload(&self, bytes: usize) -> io::Result<FrameAdmissionGuard> {
-        if bytes == 0 || bytes > MAX_STREAMED_REQUEST_PAYLOAD_BYTES {
+        if bytes == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "storage.v2 streamed payload reservation is invalid",
@@ -185,6 +177,11 @@ pub struct ConnectionMetrics {
     pub response_frames: u64,
 }
 
+/// Wire representation, shared by response emission and pre-effect admission.
+/// It is not a resident-memory quota: existing frame owners admit each chunk.
+pub(crate) const MAX_STREAMED_RESPONSE_BYTES: u64 =
+    (u32::MAX as u64 + 1) * STREAMED_RESPONSE_CHUNK_BYTES as u64;
+
 fn write_response_frames(
     writer: &mut impl Write,
     mut response: Response,
@@ -196,23 +193,11 @@ fn write_response_frames(
         })?;
         return Ok(1);
     }
-    if response.payload.len() > MAX_STREAMED_RESPONSE_PAYLOAD_BYTES {
-        response.payload.clear();
-        response.status = STATUS_RESOURCE_EXHAUSTED;
-        response.error_code = Some("response_too_large".to_owned());
-        response.error_message = Some("response_too_large".to_owned());
-        response.retryable = false;
-        write_frame_with_buffer_plan(writer, &Message::Response(response), |bytes| {
-            frame_budget.plan_frame(bytes)
-        })?;
-        return Ok(1);
-    }
-
     let chunk_count = response
         .payload
         .len()
         .div_ceil(STREAMED_RESPONSE_CHUNK_BYTES);
-    if chunk_count > MAX_STREAMED_RESPONSE_CHUNKS as usize {
+    if response.payload.len() as u64 > MAX_STREAMED_RESPONSE_BYTES {
         return Err(io::Error::other(
             "storage.v2 streamed response chunk contract is inconsistent",
         ));
@@ -250,7 +235,7 @@ struct PendingStreamedRequest {
     command_id: Option<String>,
     schema_id: u32,
     stream_id: [u8; 16],
-    next_chunk_index: u32,
+    next_chunk_index: u64,
     complete: bool,
     total_payload_bytes: usize,
     payload: Vec<u8>,
@@ -277,7 +262,6 @@ impl PendingStreamedRequest {
             || chunk.deadline_unix_ms <= now_unix_ms
             || chunk.payload.is_empty()
             || total_payload_bytes == 0
-            || total_payload_bytes > MAX_STREAMED_REQUEST_PAYLOAD_BYTES
         {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
@@ -331,8 +315,7 @@ impl PendingStreamedRequest {
             || chunk.schema_id != state.schema_id
             || chunk.stream_id != state.stream_id
             || total_payload_bytes != state.total_payload_bytes
-            || chunk.chunk_index != state.next_chunk_index
-            || chunk.chunk_index >= MAX_STREAMED_REQUEST_CHUNKS
+            || u64::from(chunk.chunk_index) != state.next_chunk_index
             || next_payload_bytes.is_none()
             || chunk.final_chunk != (next_payload_bytes == Some(state.total_payload_bytes))
         {
@@ -400,6 +383,8 @@ impl StorageV2Authenticator {
         })
     }
 
+    pub(crate) fn scope(&self) -> AuthenticatedScope { self.authenticated_scope }
+
     pub fn authenticate(&self, hello: &Hello) -> io::Result<StorageV2Session> {
         let mut candidate_witness: [u8; 32] = Sha256::digest(hello.auth_token.as_slice()).into();
         let authenticated = bool::from(candidate_witness.ct_eq(&self.token_witness));
@@ -445,6 +430,13 @@ mod bindings;
 pub(crate) use bindings::{StorageV2Bindings, StorageV2Stores};
 
 impl StorageV2Session {
+    pub(crate) fn admit_owned(&self, request: Request, now_unix_ms: u64, streamed: bool)
+        -> Result<crate::semantic::OwnedAdmittedRequest, Response> {
+        crate::semantic::admit_owned_request_preserving_request(request, self.negotiated,
+            self.authenticated_scope, now_unix_ms, streamed).map_err(|(error, request)|
+                error_response(&request, self.negotiated.schema_id, SessionDispatchError::Admission(error)))
+    }
+
     pub const fn negotiated(&self) -> NegotiatedProtocol {
         self.negotiated
     }
@@ -474,7 +466,7 @@ impl StorageV2Session {
         ).into_response()
     }
 
-    fn admit<'request>(
+    pub(crate) fn admit<'request>(
         &self,
         request: &'request Request,
         now_unix_ms: u64,
@@ -504,7 +496,7 @@ impl StorageV2Session {
             self.negotiated,
             self.authenticated_scope,
             now_unix_ms,
-            MAX_STREAMED_REQUEST_PAYLOAD_BYTES,
+            usize::MAX,
         )
         .map_err(|error| {
             error_response(
@@ -610,9 +602,14 @@ enum AuthorityAcquisition<'database> {
 /// Field drop order releases the mutex before waking the next FIFO waiter.
 /// Returning a bare mutex guard dropped the permit at acquisition and made
 /// its successor poll at 1 ms intervals for the entire current transaction.
+enum AuthorityPermit<'database> {
+    Synchronous(crate::authority_admission::Permit<'database>),
+    Queued(crate::authority_admission::OwnedPermit),
+}
+
 struct AuthorityGuard<'database> {
     authority: MutexGuard<'database, AuthorityDatabase>,
-    _permit: crate::authority_admission::Permit<'database>,
+    _permit: AuthorityPermit<'database>,
     _profile_hold: crate::request_profile::Probe,
 }
 
@@ -648,11 +645,39 @@ fn acquire_authority_until<'database>(
     let wait_budget = Duration::from_millis(remaining_millis);
     let fifo = crate::request_profile::Probe::new(crate::request_profile::FIFO_WAIT);
     let _permit = match admission.acquire(started_at + wait_budget, connection_alive)? {
-        crate::authority_admission::Admission::Entered(permit) => permit,
+        crate::authority_admission::Admission::Entered(permit) => AuthorityPermit::Synchronous(permit),
         crate::authority_admission::Admission::DeadlineElapsed => return Ok(AuthorityAcquisition::DeadlineElapsed),
         crate::authority_admission::Admission::ConnectionClosed => return Ok(AuthorityAcquisition::ConnectionClosed),
     };
     drop(fifo);
+    acquire_authority_permit_until(database, started_at, wait_budget, connection_alive, _permit, _stage)
+}
+
+fn acquire_authority_owned_until<'database>(
+    database: &'database Mutex<AuthorityDatabase>,
+    remaining_millis: u64,
+    connection_alive: &mut impl FnMut() -> bool,
+    admission: &crate::authority_admission::AuthorityAdmission,
+    permit: crate::authority_admission::OwnedPermit,
+) -> io::Result<AuthorityAcquisition<'database>> {
+    if !permit.belongs_to(admission) {
+        return Err(io::Error::new(io::ErrorKind::PermissionDenied,
+            "queued permit belongs to another authority admission"));
+    }
+    let _wait = crate::fsync_stats::ForegroundWait::start();
+    let stage = crate::fsync_stats::StageTimer::new(crate::fsync_stats::STAGE_AUTHORITY_WAIT);
+    acquire_authority_permit_until(database, Instant::now(), Duration::from_millis(remaining_millis),
+        connection_alive, AuthorityPermit::Queued(permit), stage)
+}
+
+fn acquire_authority_permit_until<'database>(
+    database: &'database Mutex<AuthorityDatabase>,
+    started_at: Instant,
+    wait_budget: Duration,
+    connection_alive: &mut impl FnMut() -> bool,
+    _permit: AuthorityPermit<'database>,
+    _stage: crate::fsync_stats::StageTimer,
+) -> io::Result<AuthorityAcquisition<'database>> {
     let mutex_wait = crate::request_profile::Probe::new(crate::request_profile::MUTEX_WAIT);
     loop {
         match database.try_lock() {
@@ -995,8 +1020,24 @@ pub(crate) fn dispatch_one_request_inner(
     now_unix_ms: &mut impl FnMut() -> u64,
     connection_alive: &mut impl FnMut() -> bool,
 ) -> io::Result<RequestDispatch> {
-    crate::fsync_stats::note_foreground_request();
-    let response = if crate::control_ops::is_control_operation(&request.operation) {
+    dispatch_one_request_inner_mode(stores,session,request,streamed,admitted_at_ms,now_unix_ms,connection_alive,true)
+}
+
+pub(crate) fn dispatch_one_request_inner_mode(
+    stores: &StorageV2Stores<'_>,
+    session: &StorageV2Session,
+    request: &Request,
+    streamed: bool,
+    admitted_at_ms: u64,
+    now_unix_ms: &mut impl FnMut() -> u64,
+    connection_alive: &mut impl FnMut() -> bool,
+    allow_parallel: bool,
+) -> io::Result<RequestDispatch> {
+    if allow_parallel {crate::fsync_stats::note_foreground_request();}
+    let response = if matches!(request.operation.as_str(), crate::daemon_checkpoint::CAPABILITIES | crate::daemon_checkpoint::CONTROL)
+        && stores.checkpoint_control.is_some() {
+        stores.checkpoint_control.as_ref().unwrap().respond(request, session.negotiated.schema_id, admitted_at_ms).into()
+    } else if crate::control_ops::is_control_operation(&request.operation) {
         // Control operations observe the daemon from observer handles and
         // static launch data; they never touch the authority mutex, so
         // they answer even while a commit holds it, and they stay out of
@@ -1041,6 +1082,12 @@ pub(crate) fn dispatch_one_request_inner(
                 }
             }
             Ok(admitted) if admitted.operation.kind == StorageOperationKind::Query => {
+                if request.command_id.is_none() && !stores.authority.is_poisoned()
+                    && connection_alive() && now_unix_ms() < request.deadline_unix_ms {
+                    if let Some(cached) = stores.published_queries.as_ref().and_then(|view| view.try_cached(request.into())) {
+                        return Ok(RequestDispatch::Responded(DispatchedResponse::successful(request, cached.into_response())));
+                    }
+                }
                 match build_query_replica_until(
                     stores.authority,
                     admitted.remaining_millis,
@@ -1050,7 +1097,10 @@ pub(crate) fn dispatch_one_request_inner(
                 )? {
                     ReadReplicaAcquisition::Built(mut replica) => {
                         let _probe = crate::request_profile::Probe::new(crate::request_profile::QUERY_EXECUTE);
-                        session.dispatch_admitted(&mut replica, admitted, now_unix_ms(), stores.authority_gc_budget)
+                        let snapshot = replica.query_snapshot();
+                        let response = session.dispatch_admitted(&mut replica, admitted, now_unix_ms(), stores.authority_gc_budget);
+                        if let Some(view) = &stores.published_queries { view.remember(request, snapshot, &response); }
+                        response
                     },
                     ReadReplicaAcquisition::DeadlineElapsed => error_response(
                         request,
@@ -1063,10 +1113,10 @@ pub(crate) fn dispatch_one_request_inner(
                 }
             }
             Ok(mut admitted) => {
-                if let Some(outcome) = try_parallel_command(
-                    stores, session, admitted, now_unix_ms, connection_alive,
-                )? {
-                    return Ok(outcome);
+                if allow_parallel {
+                    if let Some(outcome)=try_parallel_command(stores,session,admitted,now_unix_ms,connection_alive)? {
+                        return Ok(outcome);
+                    }
                 }
                 let is_command = admitted.request.command_id.is_some();
                 let mut parks = 0_u8;
@@ -1185,6 +1235,18 @@ pub(crate) fn dispatch_one_request_inner(
 /// Evaluate a certified transaction against a pinned snapshot without holding
 /// the sequencer. A conflict falls back to the existing FIFO execution lane,
 /// so hot keys cannot livelock through repeated optimistic retries.
+/// Owned phase boundary: preparation may leave its execution carrier while
+/// the transaction retains pins/private blobs until commit or cancellation.
+#[path = "server_command_continuation.rs"]
+mod command_continuation;
+pub(crate) use command_continuation::{CompiledOwnedCommand, PreparedOwnedCommand, OwnedCommandOutcome};
+
+enum ParallelPreparationOutcome {
+    Fallback,
+    Finished(RequestDispatch),
+    Prepared(crate::transaction_ir::PreparedTransactionIr),
+}
+
 fn try_parallel_command(
     stores: &StorageV2Stores<'_>,
     session: &StorageV2Session,
@@ -1192,6 +1254,22 @@ fn try_parallel_command(
     now_unix_ms: &mut impl FnMut() -> u64,
     connection_alive: &mut impl FnMut() -> bool,
 ) -> io::Result<Option<RequestDispatch>> {
+    match prepare_parallel_command(stores, session, admitted, now_unix_ms, connection_alive)? {
+        ParallelPreparationOutcome::Fallback => Ok(None),
+        ParallelPreparationOutcome::Finished(response) => Ok(Some(response)),
+        ParallelPreparationOutcome::Prepared(prepared) => finish_parallel_command(
+            stores, session, admitted, prepared, now_unix_ms, connection_alive,
+        ),
+    }
+}
+
+fn prepare_parallel_command(
+    stores: &StorageV2Stores<'_>,
+    session: &StorageV2Session,
+    admitted: crate::semantic::AdmittedRequest<'_>,
+    now_unix_ms: &mut impl FnMut() -> u64,
+    connection_alive: &mut impl FnMut() -> bool,
+) -> io::Result<ParallelPreparationOutcome> {
     let request = admitted.request;
     let compiled = {
         let _probe = crate::request_profile::Probe::new(crate::request_profile::PARALLEL_COMPILE);
@@ -1199,9 +1277,9 @@ fn try_parallel_command(
     };
     let ir = match compiled {
         Ok(Some(ir)) => ir,
-        Ok(None) => return Ok(None),
+        Ok(None) => return Ok(ParallelPreparationOutcome::Fallback),
         Err(error) => {
-            return Ok(Some(RequestDispatch::Responded(session.finish_admitted(
+            return Ok(ParallelPreparationOutcome::Finished(RequestDispatch::Responded(session.finish_admitted(
                 admitted,
                 Err(error),
                 Vec::new(),
@@ -1218,27 +1296,38 @@ fn try_parallel_command(
     )? {
         ReplicaBuildOutcome::Built(replica) => replica,
         ReplicaBuildOutcome::DeadlineElapsed => {
-            return Ok(Some(RequestDispatch::Responded(session.finish_admitted(
+            return Ok(ParallelPreparationOutcome::Finished(RequestDispatch::Responded(session.finish_admitted(
                 admitted, Err(SemanticExecutionError::DeadlineElapsed), Vec::new(),
             ))));
         }
-        ReplicaBuildOutcome::ConnectionClosed => return Ok(Some(RequestDispatch::ConnectionClosed)),
+        ReplicaBuildOutcome::ConnectionClosed => return Ok(ParallelPreparationOutcome::Finished(RequestDispatch::ConnectionClosed)),
         ReplicaBuildOutcome::Rejected(error) if error.kind() == io::ErrorKind::WouldBlock
             || crate::engine::is_rotation_backpressure(&error) => {
             crate::fsync_stats::note_parallel_fallback(
                 crate::fsync_stats::ParallelFallbackPhase::Snapshot, &error,
             );
-            return Ok(None);
+            return Ok(ParallelPreparationOutcome::Fallback);
         }
-        ReplicaBuildOutcome::Rejected(error) => return Ok(Some(RequestDispatch::Responded(session.finish_admitted(
+        ReplicaBuildOutcome::Rejected(error) => return Ok(ParallelPreparationOutcome::Finished(RequestDispatch::Responded(session.finish_admitted(
             admitted, Err(crate::semantic_executor::map_storage_error(error)), Vec::new(),
         )))),
     };
+    prepare_parallel_ir(replica, session, admitted, &ir, now_unix_ms)
+}
+
+fn prepare_parallel_ir(
+    mut replica: AuthorityDatabase,
+    session: &StorageV2Session,
+    admitted: crate::semantic::AdmittedRequest<'_>,
+    ir: &crate::transaction_ir::TransactionIr,
+    now_unix_ms: &mut impl FnMut() -> u64,
+) -> io::Result<ParallelPreparationOutcome> {
+    let request = admitted.request;
     let preparation_timer =
         crate::fsync_stats::StageTimer::new(crate::fsync_stats::STAGE_PARALLEL_PREPARE);
     let prepared = crate::transaction_ir::prepare_transaction_ir_with_deadline(
         &mut replica,
-        &ir,
+        ir,
         Duration::from_millis(request.deadline_unix_ms.saturating_sub(now_unix_ms())),
     );
     // The prepared transaction retains the snapshot registration and private
@@ -1254,16 +1343,40 @@ fn try_parallel_command(
             crate::fsync_stats::note_parallel_fallback(
                 crate::fsync_stats::ParallelFallbackPhase::Preparation, &error,
             );
-            return Ok(None);
+            return Ok(ParallelPreparationOutcome::Fallback);
         }
         Err(error) => {
-            return Ok(Some(RequestDispatch::Responded(session.finish_admitted(
+            return Ok(ParallelPreparationOutcome::Finished(RequestDispatch::Responded(session.finish_admitted(
                 admitted,
                 Err(crate::semantic_executor::map_storage_error(error)),
                 Vec::new(),
             ))))
         }
     };
+    Ok(ParallelPreparationOutcome::Prepared(prepared))
+}
+
+fn finish_parallel_command(
+    stores: &StorageV2Stores<'_>,
+    session: &StorageV2Session,
+    admitted: crate::semantic::AdmittedRequest<'_>,
+    prepared: crate::transaction_ir::PreparedTransactionIr,
+    now_unix_ms: &mut impl FnMut() -> u64,
+    connection_alive: &mut impl FnMut() -> bool,
+) -> io::Result<Option<RequestDispatch>> {
+    finish_parallel_command_with_permit(stores, session, admitted, prepared, None, now_unix_ms, connection_alive)
+}
+
+pub(crate) fn finish_parallel_command_with_permit(
+    stores: &StorageV2Stores<'_>,
+    session: &StorageV2Session,
+    admitted: crate::semantic::AdmittedRequest<'_>,
+    prepared: crate::transaction_ir::PreparedTransactionIr,
+    permit: Option<crate::authority_admission::OwnedPermit>,
+    now_unix_ms: &mut impl FnMut() -> u64,
+    connection_alive: &mut impl FnMut() -> bool,
+) -> io::Result<Option<RequestDispatch>> {
+    let request = admitted.request;
     let remaining = request.deadline_unix_ms.saturating_sub(now_unix_ms());
     if remaining == 0 {
         return Ok(Some(RequestDispatch::Responded(session.finish_admitted(
@@ -1272,12 +1385,13 @@ fn try_parallel_command(
             Vec::new(),
         ))));
     }
-    let mut authority = match acquire_authority_until(
-        stores.authority,
-        remaining,
-        connection_alive,
-        &stores.authority_admission,
-    )? {
+    let acquisition = match permit {
+        Some(permit) => acquire_authority_owned_until(stores.authority, remaining,
+            connection_alive, &stores.authority_admission, permit)?,
+        None => acquire_authority_until(stores.authority, remaining,
+            connection_alive, &stores.authority_admission)?,
+    };
+    let mut authority = match acquisition {
         AuthorityAcquisition::Acquired(authority) => authority,
         AuthorityAcquisition::DeadlineElapsed => {
             return Ok(Some(RequestDispatch::Responded(session.finish_admitted(
@@ -1536,8 +1650,13 @@ mod tests {
         let missing = request("record.get", 11, json!({"namespace":"proof","key":"missing","user_id":11}));
         let response = session.dispatch_admitted(&mut database, session.admit(&missing,1000).unwrap(),1000,
             AuthorityGarbageCollectionBudget::conservative());
-        assert!(response.canonical_payload().is_none());
+        // The exact absence literal is certified by the immutable IR shape.
+        // Public extraction still destroys both canonical and snapshot proof.
+        assert_eq!(response.canonical_payload(),Some(b"null".as_slice()));
         assert_eq!(response.payload,b"null");
+        let public=DispatchedResponse::from(response.into_response());
+        assert!(public.canonical_payload().is_none());
+        assert!(!public.snapshot_cacheable());
         let denied = request("record.get",12,json!({"namespace":"proof","key":"proof-0","user_id":12}));
         assert_eq!(session.dispatch(&mut database,&denied,1000).status,STATUS_FORBIDDEN);
     }
@@ -2134,6 +2253,32 @@ mod tests {
     }
 
     #[test]
+    fn streamed_request_demand_beyond_former_byte_and_chunk_quotas_completes_and_releases() {
+        let session = authenticator().authenticate(&hello()).unwrap();
+        let budget = FrameAdmissionBudget::maximum();
+        let mut pending = None;
+        for ordinal in 0..70 {
+            PendingStreamedRequest::append(&mut pending,crate::protocol::BlobChunk {
+                correlation_id:[7;16], deadline_unix_ms:10_000, owner_id:11, tenant_id:Some(7),
+                command_id:Some("request-demand".to_owned()), schema_id:STORAGE_SCHEMA_VERSION,
+                payload:vec![9;1024*1024],stream_id:[8;16],chunk_index:ordinal,
+                final_chunk:ordinal==69,total_payload_bytes:70*1024*1024,
+            },&session,&budget,1_000).unwrap();
+        }
+        let (request,reservations) = pending.take().unwrap().consume(Request {
+            correlation_id:[7;16], deadline_unix_ms:10_000, owner_id:11, tenant_id:Some(7),
+            command_id:Some("request-demand".to_owned()), schema_id:STORAGE_SCHEMA_VERSION,
+            operation:"record.get".to_owned(),payload:Vec::new(),
+        }).unwrap();
+        assert_eq!(request.payload.len(),70*1024*1024);
+        assert!(request.payload.iter().all(|byte| *byte==9));
+        assert_eq!(budget.metrics().unwrap().owned_payload_bytes,70*1024*1024);
+        drop(request);
+        drop(reservations);
+        assert_eq!(budget.metrics().unwrap().in_flight_bytes,0);
+    }
+
+    #[test]
     fn maximum_streamed_request_has_owned_accounting_without_raw_buffer_quota() {
         let session = authenticator().authenticate(&hello()).unwrap();
         let chunk = || crate::protocol::BlobChunk {
@@ -2147,13 +2292,13 @@ mod tests {
             stream_id: [8; 16],
             chunk_index: 0,
             final_chunk: false,
-            total_payload_bytes: MAX_STREAMED_REQUEST_PAYLOAD_BYTES as u64,
+            total_payload_bytes: (70 * 1024 * 1024) as u64,
         };
 
         let constrained = FrameAdmissionBudget::new(MAX_FRAME_BODY_BYTES).unwrap();
         let mut requested = None;
         PendingStreamedRequest::append(&mut requested, chunk(), &session, &constrained, 1_000).unwrap();
-        assert_eq!(constrained.metrics().unwrap().owned_payload_bytes, MAX_STREAMED_REQUEST_PAYLOAD_BYTES);
+        assert_eq!(constrained.metrics().unwrap().owned_payload_bytes, (70 * 1024 * 1024));
         assert_eq!(constrained.metrics().unwrap().memory_buffer_bytes, 0);
         drop(requested);
         assert_eq!(constrained.metrics().unwrap().in_flight_bytes, 0);
@@ -2165,12 +2310,12 @@ mod tests {
         let accepted_state = accepted.as_ref().unwrap();
         assert_eq!(
             accepted_state.payload.capacity(),
-            MAX_STREAMED_REQUEST_PAYLOAD_BYTES
+            (70 * 1024 * 1024)
         );
         assert_eq!(accepted_state.payload.len(), 1);
         let metrics = sufficient.metrics().unwrap();
         assert_eq!(metrics.in_flight_frames, 1);
-        assert_eq!(metrics.in_flight_bytes, MAX_STREAMED_REQUEST_PAYLOAD_BYTES);
+        assert_eq!(metrics.in_flight_bytes, (70 * 1024 * 1024));
         drop(accepted);
         let released = sufficient.metrics().unwrap();
         assert_eq!(released.in_flight_frames, 0);
@@ -2178,7 +2323,7 @@ mod tests {
         assert_eq!(released.peak_in_flight_frames, 1);
         assert_eq!(
             released.peak_in_flight_bytes,
-            MAX_STREAMED_REQUEST_PAYLOAD_BYTES
+            (70 * 1024 * 1024)
         );
     }
 
@@ -2226,29 +2371,27 @@ mod tests {
     }
 
     #[test]
-    fn response_above_stream_bound_becomes_one_resource_error() {
-        let response = Response {
-            correlation_id: [13; 16],
-            schema_id: STORAGE_SCHEMA_VERSION,
-            payload: vec![0; MAX_STREAMED_RESPONSE_PAYLOAD_BYTES + 1],
-            status: 0,
-            error_code: None,
-            error_message: None,
-            retryable: false,
-        };
+    fn response_demand_beyond_former_byte_and_chunk_quotas_reassembles_exactly() {
+        let expected = vec![9; 70 * 1024 * 1024 + 7];
+        let response = Response { correlation_id:[13;16], schema_id:STORAGE_SCHEMA_VERSION,
+            payload:expected.clone(), status:0, error_code:None, error_message:None, retryable:false };
         let budget = FrameAdmissionBudget::maximum();
         let mut encoded = Vec::new();
-        assert_eq!(
-            write_response_frames(&mut encoded, response, &budget).unwrap(),
-            1
-        );
-        let Message::Response(response) = read_frame(&mut Cursor::new(encoded)).unwrap() else {
-            panic!("oversized response did not become a bounded error");
-        };
-        assert_eq!(response.correlation_id, [13; 16]);
-        assert_eq!(response.status, STATUS_RESOURCE_EXHAUSTED);
-        assert_eq!(response.error_code.as_deref(), Some("response_too_large"));
-        assert!(response.payload.is_empty());
+        assert_eq!(write_response_frames(&mut encoded,response,&budget).unwrap(),72);
+        let mut reader = Cursor::new(encoded);
+        let mut restored = Vec::new();
+        for ordinal in 0..71 {
+            let Message::ResponseChunk(chunk) = read_frame(&mut reader).unwrap() else { panic!("missing response chunk"); };
+            assert_eq!(chunk.chunk_index,ordinal);
+            assert_eq!(chunk.final_chunk,ordinal==70);
+            restored.extend_from_slice(&chunk.payload);
+        }
+        let Message::Response(end) = read_frame(&mut reader).unwrap() else { panic!("missing terminator"); };
+        assert_eq!(end.status,0);
+        assert_eq!(end.correlation_id,[13;16]);
+        assert!(end.payload.is_empty());
+        assert_eq!(blake3::hash(&restored),blake3::hash(&expected));
+        assert_eq!(budget.metrics().unwrap().in_flight_bytes,0);
     }
 
     #[test]
@@ -2541,6 +2684,44 @@ mod tests {
     }
 
     #[test]
+    fn sub_frame_and_zero_memory_hints_select_file_buffers_without_refusal() {
+        for hint in [0, 1, 1024, MAX_FRAME_BODY_BYTES - 1] {
+            let budget = FrameAdmissionBudget::new(hint).unwrap();
+            let plan = budget.plan_frame(MAX_FRAME_BODY_BYTES).unwrap();
+            assert!(plan.spilled);
+            assert_eq!(budget.metrics().unwrap().memory_buffer_bytes, 0);
+            assert_eq!(budget.metrics().unwrap().file_buffer_bytes, MAX_FRAME_BODY_BYTES);
+            drop(plan);
+            assert_eq!(budget.metrics().unwrap().in_flight_bytes, 0);
+        }
+    }
+
+    #[test]
+    fn zero_memory_hint_round_trips_real_frames_through_anonymous_files() {
+        let budget = FrameAdmissionBudget::new(0).unwrap();
+        let message = Message::Response(Response {correlation_id:[9;16],schema_id:STORAGE_SCHEMA_VERSION,
+            payload:vec![7;4096],status:0,error_code:None,error_message:None,retryable:false});
+        let mut encoded = Vec::new();
+        write_frame_with_buffer_plan(&mut encoded,&message,|bytes| {
+            let plan = budget.plan_frame(bytes)?;
+            assert!(plan.spilled);
+            Ok(plan)
+        }).unwrap();
+        let restored = crate::protocol::read_frame_or_eof_with_buffer_plan(&mut Cursor::new(encoded),|bytes| {
+            let plan = budget.plan_frame(bytes)?;
+            assert!(plan.spilled);
+            Ok(plan)
+        }).unwrap();
+        assert_eq!(restored.unwrap(),message);
+        let metrics = budget.metrics().unwrap();
+        assert_eq!(metrics.in_flight_frames,0);
+        assert_eq!(metrics.in_flight_bytes,0);
+        assert_eq!(metrics.memory_buffer_bytes,0);
+        assert_eq!(metrics.file_buffer_bytes,0);
+        assert!(metrics.peak_in_flight_bytes>4096);
+    }
+
+    #[test]
     fn aggregate_frame_threshold_spills_without_refusal_and_releases_each_owner() {
         let budget = FrameAdmissionBudget::new(MAX_FRAME_BODY_BYTES).unwrap();
         let memory = budget.plan_frame(MAX_FRAME_BODY_BYTES).unwrap();
@@ -2667,6 +2848,125 @@ mod tests {
         drop(replica);
         drop(replicas);
     }
+    struct QueuedNoopWake;
+    impl std::task::Wake for QueuedNoopWake { fn wake(self: Arc<Self>) {} }
+    fn queued_permit(gate: &Arc<crate::authority_admission::AuthorityAdmission>) -> crate::authority_admission::OwnedPermit {
+        let ticket = gate.enqueue(std::task::Waker::from(Arc::new(QueuedNoopWake))).unwrap();
+        let crate::authority_admission::AdmissionPoll::Entered(permit) = ticket.try_enter().unwrap()
+            else { panic!("test queue must be empty") };
+        permit
+    }
+
+    #[test]
+    fn queued_parallel_completion_reuses_position_and_cancels_without_publication() {
+        for outcome in ["commit", "deadline", "disconnect"] {
+            let directory = tempfile::tempdir().unwrap();
+            let authority = AuthorityDatabase::initialize(directory.path()).unwrap();
+            let wal_before = authority.wal_len().unwrap();
+            let database = Mutex::new(authority);
+            let stores = StorageV2Stores::new(&database, None);
+            let session = authenticator().authenticate(&hello()).unwrap();
+            let mut command = request("record.put", 11,
+                json!({"namespace":"queued-test", "key":"k", "value":{"v":1}}));
+            command.command_id = Some("queued-completion".to_owned());
+            command.deadline_unix_ms = 2_000;
+            let admitted = session.admit(&command, 1_000).unwrap();
+            let ParallelPreparationOutcome::Prepared(prepared) = prepare_parallel_command(
+                &stores, &session, admitted, &mut ||1_000, &mut ||true).unwrap()
+                else { panic!("record.put must prepare") };
+            let permit = queued_permit(&stores.authority_admission);
+            assert_eq!(stores.authority_admission.waiting_count(), 1);
+            let response = finish_parallel_command_with_permit(&stores, &session, admitted,
+                prepared, Some(permit), &mut ||if outcome=="deadline" {2_000} else {1_000},
+                &mut ||outcome!="disconnect").unwrap().unwrap();
+            match response {
+                RequestDispatch::Responded(response) if outcome=="commit" => assert_eq!(response.status,0),
+                RequestDispatch::Responded(response) if outcome=="deadline" => assert_eq!(response.error_code.as_deref(),Some("deadline_elapsed")),
+                RequestDispatch::ConnectionClosed if outcome=="disconnect" => {},
+                _ => panic!("unexpected queued completion outcome"),
+            }
+            assert_eq!(stores.authority_admission.waiting_count(),0);
+            let authority = database.lock().unwrap();
+            if outcome=="commit" { assert!(authority.wal_len().unwrap()>wal_before); }
+            else { assert_eq!(authority.wal_len().unwrap(),wal_before); }
+            assert_eq!(authority.snapshot_pin_metrics().unwrap().active_handles,0);
+        }
+    }
+
+    #[test]
+    fn queued_permit_from_another_gate_is_denied_and_released() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = Mutex::new(AuthorityDatabase::initialize(directory.path()).unwrap());
+        let expected = Arc::new(crate::authority_admission::AuthorityAdmission::default());
+        let other = Arc::new(crate::authority_admission::AuthorityAdmission::default());
+        let permit = queued_permit(&other);
+        let Err(error) = acquire_authority_owned_until(&database, 100, &mut ||true, &expected, permit)
+            else { panic!("another admission gate must be refused") };
+        assert_eq!(error.kind(),io::ErrorKind::PermissionDenied);
+        assert_eq!(other.waiting_count(),0);
+        assert_eq!(expected.waiting_count(),0);
+    }
+
+    #[test]
+    fn queued_guard_unlocks_authority_before_notifying_next_claimant() {
+        struct ObserveUnlock { database: std::sync::Weak<Mutex<AuthorityDatabase>>, observed: std::sync::atomic::AtomicBool }
+        impl std::task::Wake for ObserveUnlock {
+            fn wake(self: Arc<Self>) {
+                let database = self.database.upgrade().unwrap();
+                self.observed.store(database.try_lock().is_ok(),std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let database = Arc::new(Mutex::new(AuthorityDatabase::initialize(directory.path()).unwrap()));
+        let gate = Arc::new(crate::authority_admission::AuthorityAdmission::default());
+        let permit = queued_permit(&gate);
+        let AuthorityAcquisition::Acquired(guard) = acquire_authority_owned_until(&database,100,&mut ||true,&gate,permit).unwrap()
+            else { panic!("owned head must enter without waiting on itself") };
+        let observer = Arc::new(ObserveUnlock { database:Arc::downgrade(&database), observed:std::sync::atomic::AtomicBool::new(false) });
+        let next = gate.enqueue(std::task::Waker::from(Arc::clone(&observer))).unwrap();
+        drop(guard);
+        assert!(observer.observed.load(std::sync::atomic::Ordering::Relaxed));
+        let crate::authority_admission::AdmissionPoll::Entered(next) = next.try_enter().unwrap()
+            else { panic!("successor was stranded") };
+        drop(next);
+        assert_eq!(gate.waiting_count(),0);
+    }
+
+    #[test]
+    fn owned_command_phases_cross_workers_and_cancel_without_wal_or_pin_leaks() {
+        for commit in [false,true] {
+            let directory=tempfile::tempdir().unwrap();
+            let authority=AuthorityDatabase::initialize(directory.path()).unwrap();
+            let wal_before=authority.wal_len().unwrap();
+            let database=Mutex::new(authority);
+            let stores=StorageV2Stores::new(&database,None);
+            let session=authenticator().authenticate(&hello()).unwrap();
+            let mut command=request("record.put",11,json!({"namespace":"owned-phase","key":"k","value":{"v":1}}));
+            command.command_id=Some("owned-phase-command".to_owned());
+            let owned=crate::semantic::admit_owned_request(command,session.negotiated,scope(),1_000).unwrap();
+            let OwnedCommandOutcome::Ready(compiled)=CompiledOwnedCommand::compile(owned,&session,1_000)
+                else {panic!("record.put must compile")};
+            let permit=queued_permit(&stores.authority_admission);
+            let prepared=std::thread::scope(|threads| {
+                threads.spawn(||compiled.prepare(&stores,&session,permit,&mut ||1_000,&mut ||true)).join().unwrap().unwrap()
+            });
+            let OwnedCommandOutcome::Ready(prepared)=prepared else {panic!("must prepare")};
+            assert_eq!(stores.authority_admission.waiting_count(),0);
+            assert_eq!(database.lock().unwrap().wal_len().unwrap(),wal_before);
+            if commit {
+                let permit=queued_permit(&stores.authority_admission);
+                let result=std::thread::scope(|threads| {
+                    threads.spawn(||prepared.finish(&stores,&session,permit,&mut ||1_000,&mut ||true)).join().unwrap().unwrap()
+                });
+                let OwnedCommandOutcome::Finished(RequestDispatch::Responded(response))=result else {panic!("must respond")};
+                assert_eq!(response.status,0);
+                assert!(database.lock().unwrap().wal_len().unwrap()>wal_before);
+            } else {std::thread::spawn(move||drop(prepared)).join().unwrap();}
+            assert_eq!(stores.authority_admission.waiting_count(),0);
+            assert_eq!(database.lock().unwrap().snapshot_pin_metrics().unwrap().active_handles,0);
+        }
+    }
+
 }
 
 #[cfg(test)]

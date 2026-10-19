@@ -39,7 +39,8 @@ class BoundedProcessResult:
 
     @property
     def ok(self) -> bool:
-        return self.returncode == 0 and not self.timed_out and not self.error
+        return (self.returncode == 0 and not self.timed_out
+                and not self.cancelled and not self.error)
 
 
 class _ProcessCancelled(RuntimeError):
@@ -161,6 +162,8 @@ def run_bounded_process(
     )
     process = None
     try:
+        if cancel_event is not None and cancel_event.is_set():
+            raise _ProcessCancelled('scheduler shutdown requested')
         process = subprocess.Popen(
             list(arguments),
             stdout=subprocess.PIPE,

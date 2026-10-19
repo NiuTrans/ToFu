@@ -1,5 +1,30 @@
 # Knowledge HTML verification
 
+`native_check.py` compares the actual Python owner with a Rust binary whose
+embedded source digests match this checkout. Preserve counterexamples and the
+declared tokenizer profile. `native_measure.py` measures only warm kernel work:
+fresh paired workers, exact output and raw clocks; no cold/memory/ABI/ingestion
+admission. The native implementation lives in tofu-runtime, not this directory.
+native_ingest_check.py binds the actual sealed projector through the production
+port into a private native corpus. The Python reference is the current owner;
+the historical durable reference remains independent through cloned namespaces.
+native_ingest_measure.py compares current Python with an explicit installed or
+archived projector through all five ingest cases. Keep first-use activation in
+cold clocks, original bytes/output checks, joined descendant CPU and independent
+full memory cohorts. Unsupported exit topology remains unqualified. Its
+interruption case kills only an owned producer after durable commit; it does not
+certify HTTP cancellation. Verify meta/test_native_html_ingest_measure.py.
+native_ingest_provenance.py brackets worker clocks with frozen source/artifact
+checks; timed opens still verify actual exported identity. Preserve both checks
+and the versioned clock scope. Verify meta/test_native_ingest_provenance.py;
+moving harness provenance outside clocks or bounding its buffers never counts
+as product acceleration. v3 preserves v2 clocks and streams provenance buffers;
+retain both cohorts and reject cross-scope comparisons.
+native_ingest_memory.py reconciles each producer's original descendant waits
+with observed process groups and thread snapshots. Require sequential siblings,
+exact identities and joined descendants before summing overlapping ancestry.
+Verify meta/test_native_ingest_thread_memory.py and actual cancellation memory.
+
 `lib/knowledge/html_text.py` owns the parser; `extractor.py` is a thin benchmark
 view. `reference.py` loads the pre-promotion function from immutable Git source
 so changing production cannot turn differential checks into self-comparison.
@@ -19,6 +44,8 @@ latency and memory workers must agree on fixture, output and build witnesses.
 stages through private bindings. Keep phase vectors aligned with measured samples;
 warmup, cold and reopen checks are excluded. Nested totals are not additive, and
 instrumented profiles cannot waive any original latency/memory rejection.
+Verify `tests/meta/test_html_upload_phases.py`; explicit native partials retain
+their projector and failed instrumentation closes the acquired corpus.
 
 `token_projection.py` is an unpromoted per-call token-work candidate. Its
 immutable reference comes from `f2ea9f0ea`; both upload arms retain current fast

@@ -137,12 +137,18 @@ def test_run_command_simple_watchdog_interrupt_live(tmp_path):
     _interrupt_after(task, 0.6, {'source': 'watchdog', 'ts': time.time(),
                                  'note': 'no output for 1818s'})
     t0 = time.monotonic()
-    out = tool_run_command(str(tmp_path), 'echo part1 && sleep 30', task=task)
+    out = tool_run_command(str(tmp_path),
+                           'echo committed >> effect.txt && echo part1 && sleep 30',
+                           task=task)
     dt = time.monotonic() - t0
     assert dt < 15
     assert 'part1' in out
     assert '[Command interrupted by stall-watchdog: no output for 1818s' in out
     assert 'the task was NOT stopped' in out
+    assert (tmp_path / 'effect.txt').read_text() == 'committed\n'
+    assert 'may have partially taken effect' in out
+    assert 'do not automatically replay writes' in out
+    assert task['aborted'] is False
 
 
 def test_run_command_interactive_user_interrupt_live(tmp_path):

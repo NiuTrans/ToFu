@@ -12,6 +12,15 @@ from datetime import datetime, timezone
 from lib.identity import require_user_id
 
 
+class ConversationListing(str):
+    """Model text carrying a same-query browser receipt out of band."""
+
+    def __new__(cls, text, receipt=None):
+        result = super().__new__(cls, text)
+        result.conversation_search = receipt
+        return result
+
+
 def _timestamp_label(value) -> str:
     if not value:
         return "unknown"
@@ -46,19 +55,34 @@ def list_conversations(
     if effective_scope not in {"project", "all"}:
         raise ValueError("scope must be 'auto', 'project', or 'all'")
     if effective_scope == "project" and not project_path:
-        effective_scope = "all"
+        raise ValueError("scope='project' requires a project context; use 'all' explicitly")
 
     from lib.conversations.repository import (
         list_conversations as read_conversations,
-        search_conversation_ids,
+        search_conversation_page,
     )
 
     keyword_text = str(keyword or "").strip()
-    body_hit_ids = set(
-        search_conversation_ids(keyword_text, user_id=owner_id, limit=200)
-        if keyword_text
-        else []
-    )
+    body_hit_ids = set()
+    coverage = 'ready'
+    coverage_reasons = []
+    cursor = None
+    incomplete = False
+    if keyword_text:
+        # The v2 reference-tool contract bounds foreground work to four pages.
+        # Empty pages with a cursor are not terminal zero-hit results.
+        for _ in range(4):
+            page = search_conversation_page(keyword_text, user_id=owner_id,
+                                            limit=200, cursor=cursor)
+            body_hit_ids.update(hit['id'] for hit in page['items'])
+            coverage = page.get('coverage', 'unknown')
+            coverage_reasons = list(dict.fromkeys([
+                *coverage_reasons, *page.get('coverage_reasons', []),
+            ]))[:8]
+            cursor = page['next_cursor']
+            incomplete = bool(cursor or page['incomplete'])
+            if cursor is None:
+                break
     # A non-search listing is already ordered and project-filtered by the
     # authority. Title matches and body-hit IDs are independently bounded,
     # then merged by the same authority order.
@@ -82,7 +106,7 @@ def list_conversations(
             read_conversations(
                 **common_read,
                 ids=sorted(body_hit_ids),
-                limit=min(200, len(body_hit_ids)),
+                limit=len(body_hit_ids),
             )
             if body_hit_ids
             else []
@@ -126,21 +150,36 @@ def list_conversations(
         if len(selected) >= limit:
             break
 
+    receipt = {
+        'keyword': keyword_text, 'scope': effective_scope,
+        'projectPath': project_path if effective_scope == 'project' else None,
+        'returnedCount': len(selected), 'limit': limit,
+        'coverage': coverage, 'incomplete': incomplete,
+        'coverageReasons': coverage_reasons,
+        'items': [{'id': str(row['id']), 'title': row.get('title') or ''}
+                  for row in selected],
+    }
     scope_note = (
         f" in this project ({project_path})"
         if effective_scope == "project" and project_path
-        else ""
+        else " across your other conversations"
     )
     if not selected:
         if keyword_text:
-            return (
-                f"No conversations found matching '{keyword_text}'{scope_note}. "
-                "Try a different keyword, or pass scope='all' to search every "
-                "conversation."
-            )
-        return f"No other conversations found{scope_note}."
+            advice = "Try a shorter or different keyword."
+            if effective_scope == 'project':
+                advice += " Or pass scope='all' to search your other projects."
+            status = ('No conversations returned' if incomplete or coverage != 'ready'
+                      else 'No conversations found')
+            warning = (' Search is incomplete or coverage is not ready; this is not proof of absence.'
+                       if incomplete or coverage != 'ready' else '')
+            return ConversationListing(
+                f"{status} matching '{keyword_text}'{scope_note}. {advice}{warning} "
+                "Search covers titles and indexed public text, not tool arguments/results.", receipt)
+        return ConversationListing(f"No other conversations found{scope_note}.", receipt)
 
-    lines = [f"Found {len(selected)} conversation(s){scope_note}:\n"]
+    keyword_note = f" matching '{keyword_text}'" if keyword_text else ''
+    lines = [f"Found {len(selected)} conversation(s){keyword_note}{scope_note}:\n"]
     for snapshot in selected:
         conversation_id = snapshot["id"]
         title = snapshot.get("title") or "(untitled)"
@@ -153,7 +192,9 @@ def list_conversations(
     lines.append(
         '\nUse get_conversation(conversation_id="<id>") to retrieve full content.'
     )
-    return "\n".join(lines)
+    if incomplete or coverage != 'ready':
+        lines.append('Search is incomplete or coverage is not ready; results are not exhaustive.')
+    return ConversationListing("\n".join(lines), receipt)
 
 
 __all__ = ["list_conversations"]

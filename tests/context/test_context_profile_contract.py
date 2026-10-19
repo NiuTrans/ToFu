@@ -32,6 +32,7 @@ def test_sankuai_catalog_models_promoted_to_vendor_windows():
     from lib.model_info import context_profile
 
     exact = {
+        'gemini-4-argon': 1_048_576,
         'gemini-3.5-flash': 1_000_000,
         'gemini-3.5-flash-lite': 1_000_000,
         'gemini-3.6-flash': 1_000_000,
@@ -127,7 +128,7 @@ def test_shipped_deepseek_v4_spellings_resolve_their_line_window():
 
     from lib.model_info import context_profile
     from lib.model_info._family import deepseek_line_version
-    from lib.provider_template_recipes import load_provider_templates
+    from lib.provider.provider_template_recipes import load_provider_templates
 
     checked = 0
     for template in load_provider_templates():

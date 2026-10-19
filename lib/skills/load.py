@@ -22,8 +22,6 @@ logger = get_logger(__name__)
 
 __all__ = ['load_skill', 'read_skill_resource', 'list_skill_files']
 
-_RESOURCE_PAGE_CHARS = 6_000
-_RESOURCE_PAGE_MAX_CHARS = 12_000
 _RESOURCE_MAX_BYTES = 2 * 1024 * 1024
 _SKILL_MD_MAX_BYTES = 2 * 1024 * 1024
 _MANIFEST_MAX_FILES = 2_000
@@ -341,12 +339,11 @@ def read_skill_resource(
     resource: str,
     *,
     cursor: int = 0,
-    max_chars: int = _RESOURCE_PAGE_CHARS,
     project_path: str | None = None,
     extra_paths: list[str] | None = None,
     owner_user_id: int | None = None,
 ) -> str:
-    """Read one text resource page without disclosing its filesystem path."""
+    """Read the authorized UTF-8 suffix; shared L0 owns output budgeting."""
     from lib.skills.registry import get_skill
 
     sid = str(skill_id or '').strip()
@@ -367,12 +364,10 @@ def read_skill_resource(
     try:
         relative = _resource_relative_path(sid, resource)
         start = int(cursor)
-        requested = int(max_chars)
     except (TypeError, ValueError) as exc:
         return f'Invalid skill resource request: {exc}'
     if start < 0:
         return 'Invalid skill resource request: cursor must be non-negative.'
-    page_chars = max(1, min(requested, _RESOURCE_PAGE_MAX_CHARS))
 
     package_value = (
         skill.get('package_dir') or os.path.dirname(skill.get('filepath') or ''))
@@ -420,7 +415,7 @@ def read_skill_resource(
         _meta, text = _parse_frontmatter(text)
         text = text.strip()
     start = min(start, len(text))
-    end = min(len(text), start + page_chars)
+    end = len(text)
     page = text[start:end]
     digest = hashlib.sha256(raw).hexdigest()[:16]
     next_cursor = end if end < len(text) else None

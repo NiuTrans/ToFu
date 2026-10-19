@@ -127,8 +127,10 @@ class TestTurnDiffBlock(_JournalSandbox):
         self._write('mine.py', 'now\n')
         other = _mod('mine.py', task_id='OTHER', original='zzz\n')
         block = self._block([other])
-        # Legacy fallback: the foreign-task mod is newer than task start,
-        # so the ts filter adopts it (mirrors _derive semantics).
+        # A positive foreign identity cannot become ours through timestamps.
+        self.assertIsNone(block)
+        # Only a genuinely unstamped legacy record may use the fallback.
+        block = self._block([_mod('mine.py', task_id=None, original='zzz\n')])
         self.assertIn('-zzz', block)
         # An OLD foreign mod (before task start) is ignored entirely.
         block = self._block([_mod('mine.py', task_id='OTHER',

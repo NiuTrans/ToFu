@@ -86,10 +86,11 @@ class TestBindingContract:
 class TestProjection:
     def test_remote_hint_same_names_same_params(self, monkeypatch):
         monkeypatch.setenv('TOFU_REMOTE_WORKTREE', '1')
-        from lib.tools.project import PROJECT_TOOLS
+        local_cfg = {**_REMOTE_CFG, 'project_remote': None}
+        local_tools = _build_project_or_code_exec(_ctx(cfg=local_cfg))
         tools = _build_project_or_code_exec(_ctx())
         # create_project 已退出模型面向 schema；拍板 3A 契约对剩余项目工具不变。
-        base = {t['function']['name']: t for t in PROJECT_TOOLS}
+        base = {t['function']['name']: t for t in local_tools}
         hinted = {t['function']['name']: t for t in tools}
         # 路由说明进入尾部 user context；工具声明保持完全一致。
         assert set(hinted) == set(base)
@@ -98,10 +99,11 @@ class TestProjection:
 
     def test_master_switch_off_no_hint(self, monkeypatch):
         monkeypatch.delenv('TOFU_REMOTE_WORKTREE', raising=False)
-        from lib.tools.project import PROJECT_TOOLS
+        local_cfg = {**_REMOTE_CFG, 'project_remote': None}
+        local_tools = _build_project_or_code_exec(_ctx(cfg=local_cfg))
         tools = _build_project_or_code_exec(_ctx())  # cfg 带绑定但总闸关
         by = {t['function']['name']: t for t in tools}
-        base = {t['function']['name']: t for t in PROJECT_TOOLS}
+        base = {t['function']['name']: t for t in local_tools}
         assert by['write_file']['function']['description'] == \
             base['write_file']['function']['description']
 
@@ -126,9 +128,9 @@ def routed(monkeypatch):
     box = {'send': [], 'meta': []}
 
     def fake_send(cmd_type, params=None, timeout=30, target_agent_id=None,
-                  user_id='', cmd_id=None):
+                  user_id='', cmd_id=None, cancellation=None):
         box['send'].append({'cmd_type': cmd_type, 'params': params,
-                            'timeout': timeout,
+                            'timeout': timeout, 'cancellation': cancellation,
                             'target_agent_id': target_agent_id})
         return {'content': 'done', 'path': (params or {}).get('path')}, None
 
@@ -174,11 +176,12 @@ class TestRouting:
         assert routed['send'][0]['cmd_type'] == cmd_type
         assert routed['send'][0]['params']['root'] == 'myapp'
 
-    def test_run_command_bridge_timeout_tracks_cmd(self, routed):
+    def test_run_command_bridge_lifetime_follows_cancellation(self, routed):
         _call('run_command', {'command': 'npm test', 'timeout': 600})
         call = routed['send'][0]
         assert call['cmd_type'] == 'project_run_command'
-        assert call['timeout'] == 630.0
+        assert call['timeout'] is None
+        assert call['cancellation'].is_set() is False
 
     def test_plain_ls_run_command_routes_to_bounded_directory_backend(self, routed):
         _call('run_command', {
@@ -229,7 +232,7 @@ class TestRouting:
         import lib.desktop
 
         def fake_send(cmd_type, params=None, timeout=30,
-                      target_agent_id=None, user_id='', cmd_id=None):
+                      target_agent_id=None, user_id='', cmd_id=None, cancellation=None):
             routed['send'].append({
                 'cmd_type': cmd_type,
                 'params': params,

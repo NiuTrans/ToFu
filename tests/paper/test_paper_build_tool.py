@@ -40,12 +40,13 @@ class TestRegistryWiring:
         assert declared_tool_timeout_ms('paper_propose_edits') == 60_000
 
     def test_builder_follows_project_gate(self):
-        from lib.tools.registry._build import _build_paper_build
-        ready = _build_paper_build(_ctx(project_enabled=True))
+        from lib.tools.registry import all_specs
+        build = next(spec for spec in all_specs() if spec.key == 'paper_build').build
+        ready = build(_ctx(project_enabled=True))
         assert [t['function']['name'] for t in ready] == [
             'paper_build', 'paper_layout', 'paper_import_arxiv',
             'paper_propose_edits']
-        assert _build_paper_build(_ctx(project_enabled=False)) == []
+        assert build(_ctx(project_enabled=False)) == []
 
     def test_paper_citations_spec_partitions(self):
         from lib.tools.registry import all_specs, declared_tool_timeout_ms

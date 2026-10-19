@@ -654,18 +654,65 @@ def infrastructure_retry_allowed(*, failure_class: str, attempt: int,
             and int(attempt) <= int(max_infra_retries))
 
 
-def public_price_cost_from_usage(usage: dict | None, pricing: dict) -> dict:
+def canonical_benchmark_usage(usage: dict, *, usage_format: str = 'provider') -> dict[str, int]:
+    """Normalize complete reported counters; unknown usage cannot become zero."""
+    from lib.cost import (
+        normalize_usage, split_input_tokens, validate_reported_usage_counters)
+
+    if usage_format == 'responses':
+        if not isinstance(usage, dict) or any(
+                key not in usage for key in ('input_tokens', 'output_tokens')):
+            raise BenchmarkContractError('missing provider usage for Responses call')
+        details = {}
+        for parent in ('input_tokens_details', 'output_tokens_details'):
+            value = usage.get(parent)
+            if value is not None and not isinstance(value, dict):
+                raise BenchmarkContractError(f'provider usage.{parent} must be an object')
+            details[parent] = value or {}
+        # Responses input is cache-inclusive; the similarly named Anthropic
+        # field is residual input. The caller must declare the wire format.
+        usage = {
+            'prompt_tokens': usage['input_tokens'],
+            'completion_tokens': usage['output_tokens'],
+            'cache_read_tokens': details['input_tokens_details'].get('cached_tokens', 0),
+            'reasoning_tokens': details['output_tokens_details'].get('reasoning_tokens', 0),
+            **({'total_tokens': usage['total_tokens']} if 'total_tokens' in usage else {}),
+        }
+    elif usage_format != 'provider':
+        raise BenchmarkContractError('unknown benchmark usage format')
+    try:
+        validate_reported_usage_counters(usage)
+    except ValueError as exc:
+        raise BenchmarkContractError(str(exc)) from exc
+    normalized = normalize_usage(usage)
+    if usage_format == 'responses' and normalized['cache_read'] > normalized['input']:
+        raise BenchmarkContractError('provider usage cached input exceeds input tokens')
+    _, total_input = split_input_tokens(usage)
+    if normalized['thinking'] > normalized['output']:
+        raise BenchmarkContractError('provider usage reasoning exceeds output tokens')
+    return {
+        'prompt_tokens': total_input,
+        'completion_tokens': normalized['output'],
+        'cache_read_tokens': normalized['cache_read'],
+        'cache_write_tokens': normalized['cache_write'],
+        'reasoning_tokens': normalized['thinking'],
+        'total_tokens': total_input + normalized['output'],
+    }
+
+
+def public_price_cost_from_usage(usage: dict | None, pricing: dict, *,
+                                 usage_format: str = 'provider') -> dict:
     """Apply one frozen public price card to provider-reported usage.
 
     Rates are USD per million tokens. ``outputTokens`` is assumed to include
     reasoning tokens, matching the Responses API billing representation; the
-    reasoning count is still returned separately for observability.
+    reasoning count is still returned separately for observability. Missing
+    input/output counters are invalid evidence, never a zero-cost call.
     """
-    from lib.cost import normalize_usage, split_input_tokens
+    from lib.cost import split_input_tokens
 
-    usage = usage if isinstance(usage, dict) else {}
-    normalized = normalize_usage(usage)
-    uncached, total_input = split_input_tokens(usage)
+    canonical = canonical_benchmark_usage(usage, usage_format=usage_format)
+    uncached, total_input = split_input_tokens(canonical)
 
     def rate(*keys: str) -> float:
         for key in keys:
@@ -678,13 +725,13 @@ def public_price_cost_from_usage(usage: dict | None, pricing: dict) -> dict:
             uncached * rate('uncachedInputUsdPerMillion',
                             'inputUsdPerMillion') / 1_000_000),
         'cacheReadCostUsd': (
-            normalized['cache_read']
+            canonical['cache_read_tokens']
             * rate('cacheReadUsdPerMillion') / 1_000_000),
         'cacheWriteCostUsd': (
-            normalized['cache_write']
+            canonical['cache_write_tokens']
             * rate('cacheWriteUsdPerMillion') / 1_000_000),
         'outputCostUsd': (
-            normalized['output']
+            canonical['completion_tokens']
             * rate('outputUsdPerMillion') / 1_000_000),
     }
     return {
@@ -692,10 +739,10 @@ def public_price_cost_from_usage(usage: dict | None, pricing: dict) -> dict:
         **{key: round(value, 9) for key, value in components.items()},
         'promptTokens': int(total_input),
         'uncachedInputTokens': int(uncached),
-        'cacheReadTokens': int(normalized['cache_read']),
-        'cacheWriteTokens': int(normalized['cache_write']),
-        'outputTokens': int(normalized['output']),
-        'reasoningTokens': int(normalized['thinking']),
+        'cacheReadTokens': canonical['cache_read_tokens'],
+        'cacheWriteTokens': canonical['cache_write_tokens'],
+        'outputTokens': canonical['completion_tokens'],
+        'reasoningTokens': canonical['reasoning_tokens'],
         'pricingSnapshot': dict(pricing),
     }
 

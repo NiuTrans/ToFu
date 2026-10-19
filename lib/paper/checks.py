@@ -20,6 +20,7 @@ the agent. Pure functions only: no model calls, no writes outside a temp
 file for the PDF probe. See docs/PAPER_QUALITY.md for the authority record.
 """
 from __future__ import annotations
+from lib.paper.builds.contract import limit as limit
 
 from lib.log import get_logger
 
@@ -34,7 +35,6 @@ from pathlib import Path
 
 from lib.paper.builds.citation_audit import (_LABEL, _REF, _STRIP_COMMENTS,
                                              audit_citations)
-from lib.paper.builds.contract import limit
 from lib.paper.builds.errors import BuildError
 from lib.paper.builds.runtime import get_scheduler
 from lib.paper.builds.sources import read_source
@@ -147,9 +147,7 @@ def read_tex_sources(root: Path, *, budget_bytes: int = _SOURCE_BUDGET_BYTES
             return
         relative = path.relative_to(root).as_posix()
         try:
-            data = read_source(root, path, limit=min(
-                limit('source_file_bytes'),
-                budget_bytes - budget['bytes'] + 1))
+            data = read_source(root, path, limit=budget_bytes - budget['bytes'] + 1)
         except (BuildError, OSError):
             return
         budget['bytes'] += len(data)

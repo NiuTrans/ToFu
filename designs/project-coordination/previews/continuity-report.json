@@ -1,0 +1,2498 @@
+{
+  "fixture": "STATIC MOCK HTTP · built real modules · no backend/native/paid acceptance",
+  "cases": [
+    {
+      "theme": "tofu",
+      "width": 1440,
+      "geometry": {
+        "bodyOverflow": 0,
+        "sections": [
+          {
+            "id": "project-dispatch",
+            "overflow": 0
+          },
+          {
+            "id": "dispatch-dependencies",
+            "overflow": 0
+          },
+          {
+            "id": "project-scope-changes",
+            "overflow": 0
+          },
+          {
+            "id": "project-responsibilities",
+            "overflow": 0
+          },
+          {
+            "id": "project-shared-files",
+            "overflow": 0
+          }
+        ],
+        "width": 420
+      },
+      "httpCalls": [
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/assignments",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/assignments",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/scope-changes",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/responsibilities",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/shared-files",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/scope-changes",
+          "method": "POST",
+          "body": {
+            "projectPath": "/mock/project",
+            "coordinatorId": "mock-coord",
+            "authorizationSource": {
+              "conversationId": "mock-coord",
+              "turnId": "mock-human",
+              "projectionRevision": 7
+            },
+            "kind": "stop_project",
+            "note": "",
+            "targets": [
+              {
+                "assignmentId": "grant-a",
+                "grantRevision": 2
+              }
+            ]
+          },
+          "key": "71b578a0-e14d-4455-afc3-77a8bd7b7e74"
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/assignments",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/scope-changes",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/responsibilities",
+          "method": "POST",
+          "body": {
+            "projectPath": "/mock/project",
+            "name": "Finite review",
+            "assignment": {
+              "projectPath": "/mock/project",
+              "coordinatorId": "mock-coord",
+              "recipientId": "mock-worker",
+              "authorizationSource": {
+                "conversationId": "mock-coord",
+                "turnId": "mock-human",
+                "projectionRevision": 7
+              },
+              "brief": "Consultation only; no file work",
+              "model": "mock.not-callable",
+              "budget": {
+                "maxTokens": 200,
+                "maxModelRequests": 2,
+                "deadline": 4102444800
+              },
+              "profile": {
+                "mode": "consult",
+                "tools": [],
+                "readPaths": [],
+                "writePaths": [],
+                "maxToolCalls": 0
+              }
+            },
+            "trigger": {
+              "kind": "schedule",
+              "schedule": "0 9 * * 1",
+              "timezone": "UTC",
+              "catchUp": "skip"
+            },
+            "allowance": {
+              "maxRuns": 3,
+              "maxTotalTokens": 600,
+              "deadline": 4102444800
+            },
+            "perRunSeconds": 60
+          },
+          "key": "b0020339-e422-4710-977f-ebc9f07fb052"
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/responsibilities",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/responsibilities/pause",
+          "method": "POST",
+          "body": {
+            "projectPath": "/mock/project",
+            "responsibilityId": "finite-review",
+            "expectedRevision": 1
+          },
+          "key": "2442d774-1fbe-4613-b400-c6440ae7e7b3"
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/responsibilities",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/responsibilities/cancel",
+          "method": "POST",
+          "body": {
+            "projectPath": "/mock/project",
+            "responsibilityId": "finite-review",
+            "expectedRevision": 2
+          },
+          "key": "5d05b85a-e882-4d4e-9910-ea1db73f1cf7"
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/responsibilities",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/shared-files/read",
+          "method": "POST",
+          "body": {
+            "projectPath": "/mock/project",
+            "reference": {
+              "id": "file-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+              "revision": 4,
+              "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            }
+          },
+          "key": "0ff13866-1a52-4e81-beab-3380d97ae44f"
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/shared-files/register",
+          "method": "POST",
+          "body": {
+            "projectPath": "/mock/project",
+            "path": "notes/new-reference.txt",
+            "purpose": "Explicit human declaration",
+            "expectedRevision": 0,
+            "authorizationSource": {
+              "conversationId": "mock-coord",
+              "turnId": "mock-human",
+              "projectionRevision": 7
+            }
+          },
+          "key": "1a3e9337-3bfe-4b64-b697-e0c90cb6724d"
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/shared-files",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/shared-files/refresh",
+          "method": "POST",
+          "body": {
+            "projectPath": "/mock/project",
+            "reference": {
+              "id": "file-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+              "revision": 4,
+              "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            }
+          },
+          "key": "16fd0d9c-2baf-4573-8688-d346d23db0f4"
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/shared-files",
+          "method": "GET",
+          "body": null,
+          "key": null
+        }
+      ],
+      "errors": [],
+      "passed": true
+    },
+    {
+      "theme": "tofu",
+      "width": 390,
+      "geometry": {
+        "bodyOverflow": 0,
+        "sections": [
+          {
+            "id": "project-dispatch",
+            "overflow": 0
+          },
+          {
+            "id": "dispatch-dependencies",
+            "overflow": 0
+          },
+          {
+            "id": "project-scope-changes",
+            "overflow": 0
+          },
+          {
+            "id": "project-responsibilities",
+            "overflow": 0
+          },
+          {
+            "id": "project-shared-files",
+            "overflow": 0
+          }
+        ],
+        "width": 390
+      },
+      "httpCalls": [
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/assignments",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/assignments",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/scope-changes",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/responsibilities",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/shared-files",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/scope-changes",
+          "method": "POST",
+          "body": {
+            "projectPath": "/mock/project",
+            "coordinatorId": "mock-coord",
+            "authorizationSource": {
+              "conversationId": "mock-coord",
+              "turnId": "mock-human",
+              "projectionRevision": 7
+            },
+            "kind": "stop_project",
+            "note": "",
+            "targets": [
+              {
+                "assignmentId": "grant-a",
+                "grantRevision": 2
+              }
+            ]
+          },
+          "key": "22759a5b-251e-4c97-96bd-4103e8e5af71"
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/assignments",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/scope-changes",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/responsibilities",
+          "method": "POST",
+          "body": {
+            "projectPath": "/mock/project",
+            "name": "Finite review",
+            "assignment": {
+              "projectPath": "/mock/project",
+              "coordinatorId": "mock-coord",
+              "recipientId": "mock-worker",
+              "authorizationSource": {
+                "conversationId": "mock-coord",
+                "turnId": "mock-human",
+                "projectionRevision": 7
+              },
+              "brief": "Consultation only; no file work",
+              "model": "mock.not-callable",
+              "budget": {
+                "maxTokens": 200,
+                "maxModelRequests": 2,
+                "deadline": 4102444800
+              },
+              "profile": {
+                "mode": "consult",
+                "tools": [],
+                "readPaths": [],
+                "writePaths": [],
+                "maxToolCalls": 0
+              }
+            },
+            "trigger": {
+              "kind": "schedule",
+              "schedule": "0 9 * * 1",
+              "timezone": "UTC",
+              "catchUp": "skip"
+            },
+            "allowance": {
+              "maxRuns": 3,
+              "maxTotalTokens": 600,
+              "deadline": 4102444800
+            },
+            "perRunSeconds": 60
+          },
+          "key": "02d4311c-01e3-451e-98f8-991033b78a2c"
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/responsibilities",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/responsibilities/pause",
+          "method": "POST",
+          "body": {
+            "projectPath": "/mock/project",
+            "responsibilityId": "finite-review",
+            "expectedRevision": 1
+          },
+          "key": "efa51517-c98d-4254-aabb-a49248d5f29c"
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/responsibilities",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/responsibilities/cancel",
+          "method": "POST",
+          "body": {
+            "projectPath": "/mock/project",
+            "responsibilityId": "finite-review",
+            "expectedRevision": 2
+          },
+          "key": "3abb6937-8c62-46cb-9fe8-db906bf1e76b"
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/responsibilities",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/shared-files/read",
+          "method": "POST",
+          "body": {
+            "projectPath": "/mock/project",
+            "reference": {
+              "id": "file-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+              "revision": 4,
+              "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            }
+          },
+          "key": "8bde53b5-5d8d-468e-b857-23481e069be8"
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/shared-files/register",
+          "method": "POST",
+          "body": {
+            "projectPath": "/mock/project",
+            "path": "notes/new-reference.txt",
+            "purpose": "Explicit human declaration",
+            "expectedRevision": 0,
+            "authorizationSource": {
+              "conversationId": "mock-coord",
+              "turnId": "mock-human",
+              "projectionRevision": 7
+            }
+          },
+          "key": "871b1510-7a2f-4f18-b93c-f666512b06d4"
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/shared-files",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/shared-files/refresh",
+          "method": "POST",
+          "body": {
+            "projectPath": "/mock/project",
+            "reference": {
+              "id": "file-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+              "revision": 4,
+              "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            }
+          },
+          "key": "dc27fe1c-03a1-4dc0-9ff3-4c8c4f1cca3d"
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/shared-files",
+          "method": "GET",
+          "body": null,
+          "key": null
+        }
+      ],
+      "errors": [],
+      "passed": true
+    },
+    {
+      "theme": "tofu",
+      "width": 320,
+      "geometry": {
+        "bodyOverflow": 0,
+        "sections": [
+          {
+            "id": "project-dispatch",
+            "overflow": 0
+          },
+          {
+            "id": "dispatch-dependencies",
+            "overflow": 0
+          },
+          {
+            "id": "project-scope-changes",
+            "overflow": 0
+          },
+          {
+            "id": "project-responsibilities",
+            "overflow": 0
+          },
+          {
+            "id": "project-shared-files",
+            "overflow": 0
+          }
+        ],
+        "width": 320
+      },
+      "httpCalls": [
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/assignments",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/assignments",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/scope-changes",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/responsibilities",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/shared-files",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/scope-changes",
+          "method": "POST",
+          "body": {
+            "projectPath": "/mock/project",
+            "coordinatorId": "mock-coord",
+            "authorizationSource": {
+              "conversationId": "mock-coord",
+              "turnId": "mock-human",
+              "projectionRevision": 7
+            },
+            "kind": "stop_project",
+            "note": "",
+            "targets": [
+              {
+                "assignmentId": "grant-a",
+                "grantRevision": 2
+              }
+            ]
+          },
+          "key": "ac8aac8c-a189-498f-a5b5-6e683a5bc8d9"
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/assignments",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/scope-changes",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/responsibilities",
+          "method": "POST",
+          "body": {
+            "projectPath": "/mock/project",
+            "name": "Finite review",
+            "assignment": {
+              "projectPath": "/mock/project",
+              "coordinatorId": "mock-coord",
+              "recipientId": "mock-worker",
+              "authorizationSource": {
+                "conversationId": "mock-coord",
+                "turnId": "mock-human",
+                "projectionRevision": 7
+              },
+              "brief": "Consultation only; no file work",
+              "model": "mock.not-callable",
+              "budget": {
+                "maxTokens": 200,
+                "maxModelRequests": 2,
+                "deadline": 4102444800
+              },
+              "profile": {
+                "mode": "consult",
+                "tools": [],
+                "readPaths": [],
+                "writePaths": [],
+                "maxToolCalls": 0
+              }
+            },
+            "trigger": {
+              "kind": "schedule",
+              "schedule": "0 9 * * 1",
+              "timezone": "UTC",
+              "catchUp": "skip"
+            },
+            "allowance": {
+              "maxRuns": 3,
+              "maxTotalTokens": 600,
+              "deadline": 4102444800
+            },
+            "perRunSeconds": 60
+          },
+          "key": "26b292d0-4655-4213-a852-8e2f8a6c5ea1"
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/responsibilities",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/responsibilities/pause",
+          "method": "POST",
+          "body": {
+            "projectPath": "/mock/project",
+            "responsibilityId": "finite-review",
+            "expectedRevision": 1
+          },
+          "key": "e9235286-09e2-4789-ba78-0d3509d4cec4"
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/responsibilities",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/responsibilities/cancel",
+          "method": "POST",
+          "body": {
+            "projectPath": "/mock/project",
+            "responsibilityId": "finite-review",
+            "expectedRevision": 2
+          },
+          "key": "d5360711-2a2b-42b1-9184-db3e239ae2e7"
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/responsibilities",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/shared-files/read",
+          "method": "POST",
+          "body": {
+            "projectPath": "/mock/project",
+            "reference": {
+              "id": "file-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+              "revision": 4,
+              "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            }
+          },
+          "key": "08a5947d-e849-4aaa-a2ad-bf4d6dccc054"
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/shared-files/register",
+          "method": "POST",
+          "body": {
+            "projectPath": "/mock/project",
+            "path": "notes/new-reference.txt",
+            "purpose": "Explicit human declaration",
+            "expectedRevision": 0,
+            "authorizationSource": {
+              "conversationId": "mock-coord",
+              "turnId": "mock-human",
+              "projectionRevision": 7
+            }
+          },
+          "key": "4f5e0336-07ba-4960-b375-4fe6c089dd5a"
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/shared-files",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/shared-files/refresh",
+          "method": "POST",
+          "body": {
+            "projectPath": "/mock/project",
+            "reference": {
+              "id": "file-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+              "revision": 4,
+              "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            }
+          },
+          "key": "9adde45f-7bc7-4470-814f-16755ffeb753"
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/shared-files",
+          "method": "GET",
+          "body": null,
+          "key": null
+        }
+      ],
+      "errors": [],
+      "passed": true
+    },
+    {
+      "theme": "light",
+      "width": 1440,
+      "geometry": {
+        "bodyOverflow": 0,
+        "sections": [
+          {
+            "id": "project-dispatch",
+            "overflow": 0
+          },
+          {
+            "id": "dispatch-dependencies",
+            "overflow": 0
+          },
+          {
+            "id": "project-scope-changes",
+            "overflow": 0
+          },
+          {
+            "id": "project-responsibilities",
+            "overflow": 0
+          },
+          {
+            "id": "project-shared-files",
+            "overflow": 0
+          }
+        ],
+        "width": 420
+      },
+      "httpCalls": [
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/assignments",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/assignments",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/scope-changes",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/responsibilities",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/shared-files",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/scope-changes",
+          "method": "POST",
+          "body": {
+            "projectPath": "/mock/project",
+            "coordinatorId": "mock-coord",
+            "authorizationSource": {
+              "conversationId": "mock-coord",
+              "turnId": "mock-human",
+              "projectionRevision": 7
+            },
+            "kind": "stop_project",
+            "note": "",
+            "targets": [
+              {
+                "assignmentId": "grant-a",
+                "grantRevision": 2
+              }
+            ]
+          },
+          "key": "ab567308-353d-4dce-9797-3887ea136dd9"
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/assignments",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/scope-changes",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/responsibilities",
+          "method": "POST",
+          "body": {
+            "projectPath": "/mock/project",
+            "name": "Finite review",
+            "assignment": {
+              "projectPath": "/mock/project",
+              "coordinatorId": "mock-coord",
+              "recipientId": "mock-worker",
+              "authorizationSource": {
+                "conversationId": "mock-coord",
+                "turnId": "mock-human",
+                "projectionRevision": 7
+              },
+              "brief": "Consultation only; no file work",
+              "model": "mock.not-callable",
+              "budget": {
+                "maxTokens": 200,
+                "maxModelRequests": 2,
+                "deadline": 4102444800
+              },
+              "profile": {
+                "mode": "consult",
+                "tools": [],
+                "readPaths": [],
+                "writePaths": [],
+                "maxToolCalls": 0
+              }
+            },
+            "trigger": {
+              "kind": "schedule",
+              "schedule": "0 9 * * 1",
+              "timezone": "UTC",
+              "catchUp": "skip"
+            },
+            "allowance": {
+              "maxRuns": 3,
+              "maxTotalTokens": 600,
+              "deadline": 4102444800
+            },
+            "perRunSeconds": 60
+          },
+          "key": "54c87b27-58fb-484d-97d0-b6b0beeab85e"
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/responsibilities",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/responsibilities/pause",
+          "method": "POST",
+          "body": {
+            "projectPath": "/mock/project",
+            "responsibilityId": "finite-review",
+            "expectedRevision": 1
+          },
+          "key": "55ccded8-a51e-4ab5-8c91-2ecda59bc39e"
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/responsibilities",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/responsibilities/cancel",
+          "method": "POST",
+          "body": {
+            "projectPath": "/mock/project",
+            "responsibilityId": "finite-review",
+            "expectedRevision": 2
+          },
+          "key": "e78b5cd8-809b-42a1-ad53-63cb7222df11"
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/responsibilities",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/shared-files/read",
+          "method": "POST",
+          "body": {
+            "projectPath": "/mock/project",
+            "reference": {
+              "id": "file-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+              "revision": 4,
+              "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            }
+          },
+          "key": "bcea8dc9-986f-4eb1-a615-5aedd9174651"
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/shared-files/register",
+          "method": "POST",
+          "body": {
+            "projectPath": "/mock/project",
+            "path": "notes/new-reference.txt",
+            "purpose": "Explicit human declaration",
+            "expectedRevision": 0,
+            "authorizationSource": {
+              "conversationId": "mock-coord",
+              "turnId": "mock-human",
+              "projectionRevision": 7
+            }
+          },
+          "key": "d15510b2-427e-4a5c-8b29-c894ec841bce"
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/shared-files",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/shared-files/refresh",
+          "method": "POST",
+          "body": {
+            "projectPath": "/mock/project",
+            "reference": {
+              "id": "file-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+              "revision": 4,
+              "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            }
+          },
+          "key": "be01059a-1ace-4b4e-9bd7-52f2a0637ea1"
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/shared-files",
+          "method": "GET",
+          "body": null,
+          "key": null
+        }
+      ],
+      "errors": [],
+      "passed": true
+    },
+    {
+      "theme": "light",
+      "width": 390,
+      "geometry": {
+        "bodyOverflow": 0,
+        "sections": [
+          {
+            "id": "project-dispatch",
+            "overflow": 0
+          },
+          {
+            "id": "dispatch-dependencies",
+            "overflow": 0
+          },
+          {
+            "id": "project-scope-changes",
+            "overflow": 0
+          },
+          {
+            "id": "project-responsibilities",
+            "overflow": 0
+          },
+          {
+            "id": "project-shared-files",
+            "overflow": 0
+          }
+        ],
+        "width": 390
+      },
+      "httpCalls": [
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/assignments",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/assignments",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/scope-changes",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/responsibilities",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/shared-files",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/scope-changes",
+          "method": "POST",
+          "body": {
+            "projectPath": "/mock/project",
+            "coordinatorId": "mock-coord",
+            "authorizationSource": {
+              "conversationId": "mock-coord",
+              "turnId": "mock-human",
+              "projectionRevision": 7
+            },
+            "kind": "stop_project",
+            "note": "",
+            "targets": [
+              {
+                "assignmentId": "grant-a",
+                "grantRevision": 2
+              }
+            ]
+          },
+          "key": "e425fe7c-fdb2-44cf-b423-452fcdcf9c80"
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/assignments",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/scope-changes",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/responsibilities",
+          "method": "POST",
+          "body": {
+            "projectPath": "/mock/project",
+            "name": "Finite review",
+            "assignment": {
+              "projectPath": "/mock/project",
+              "coordinatorId": "mock-coord",
+              "recipientId": "mock-worker",
+              "authorizationSource": {
+                "conversationId": "mock-coord",
+                "turnId": "mock-human",
+                "projectionRevision": 7
+              },
+              "brief": "Consultation only; no file work",
+              "model": "mock.not-callable",
+              "budget": {
+                "maxTokens": 200,
+                "maxModelRequests": 2,
+                "deadline": 4102444800
+              },
+              "profile": {
+                "mode": "consult",
+                "tools": [],
+                "readPaths": [],
+                "writePaths": [],
+                "maxToolCalls": 0
+              }
+            },
+            "trigger": {
+              "kind": "schedule",
+              "schedule": "0 9 * * 1",
+              "timezone": "UTC",
+              "catchUp": "skip"
+            },
+            "allowance": {
+              "maxRuns": 3,
+              "maxTotalTokens": 600,
+              "deadline": 4102444800
+            },
+            "perRunSeconds": 60
+          },
+          "key": "9d1a8a73-2a8c-44fe-adca-1bceed0a8edc"
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/responsibilities",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/responsibilities/pause",
+          "method": "POST",
+          "body": {
+            "projectPath": "/mock/project",
+            "responsibilityId": "finite-review",
+            "expectedRevision": 1
+          },
+          "key": "098c7192-f0c6-46c1-b50c-57f7c55f9c0a"
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/responsibilities",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/responsibilities/cancel",
+          "method": "POST",
+          "body": {
+            "projectPath": "/mock/project",
+            "responsibilityId": "finite-review",
+            "expectedRevision": 2
+          },
+          "key": "9c0aacbf-5c5f-4512-9f35-4f295527b6a3"
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/responsibilities",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/shared-files/read",
+          "method": "POST",
+          "body": {
+            "projectPath": "/mock/project",
+            "reference": {
+              "id": "file-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+              "revision": 4,
+              "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            }
+          },
+          "key": "f33a954b-f23b-41e3-b05c-d21a7873ff1f"
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/shared-files/register",
+          "method": "POST",
+          "body": {
+            "projectPath": "/mock/project",
+            "path": "notes/new-reference.txt",
+            "purpose": "Explicit human declaration",
+            "expectedRevision": 0,
+            "authorizationSource": {
+              "conversationId": "mock-coord",
+              "turnId": "mock-human",
+              "projectionRevision": 7
+            }
+          },
+          "key": "46f519e1-b766-48a4-85fd-763581f21392"
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/shared-files",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/shared-files/refresh",
+          "method": "POST",
+          "body": {
+            "projectPath": "/mock/project",
+            "reference": {
+              "id": "file-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+              "revision": 4,
+              "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            }
+          },
+          "key": "8cab6cfe-6a19-4751-a3ca-c8a6f6231f5c"
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/shared-files",
+          "method": "GET",
+          "body": null,
+          "key": null
+        }
+      ],
+      "errors": [],
+      "passed": true
+    },
+    {
+      "theme": "light",
+      "width": 320,
+      "geometry": {
+        "bodyOverflow": 0,
+        "sections": [
+          {
+            "id": "project-dispatch",
+            "overflow": 0
+          },
+          {
+            "id": "dispatch-dependencies",
+            "overflow": 0
+          },
+          {
+            "id": "project-scope-changes",
+            "overflow": 0
+          },
+          {
+            "id": "project-responsibilities",
+            "overflow": 0
+          },
+          {
+            "id": "project-shared-files",
+            "overflow": 0
+          }
+        ],
+        "width": 320
+      },
+      "httpCalls": [
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/assignments",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/assignments",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/scope-changes",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/responsibilities",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/shared-files",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/scope-changes",
+          "method": "POST",
+          "body": {
+            "projectPath": "/mock/project",
+            "coordinatorId": "mock-coord",
+            "authorizationSource": {
+              "conversationId": "mock-coord",
+              "turnId": "mock-human",
+              "projectionRevision": 7
+            },
+            "kind": "stop_project",
+            "note": "",
+            "targets": [
+              {
+                "assignmentId": "grant-a",
+                "grantRevision": 2
+              }
+            ]
+          },
+          "key": "afb7a133-3872-4471-aace-b5631e65a523"
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/assignments",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/scope-changes",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/responsibilities",
+          "method": "POST",
+          "body": {
+            "projectPath": "/mock/project",
+            "name": "Finite review",
+            "assignment": {
+              "projectPath": "/mock/project",
+              "coordinatorId": "mock-coord",
+              "recipientId": "mock-worker",
+              "authorizationSource": {
+                "conversationId": "mock-coord",
+                "turnId": "mock-human",
+                "projectionRevision": 7
+              },
+              "brief": "Consultation only; no file work",
+              "model": "mock.not-callable",
+              "budget": {
+                "maxTokens": 200,
+                "maxModelRequests": 2,
+                "deadline": 4102444800
+              },
+              "profile": {
+                "mode": "consult",
+                "tools": [],
+                "readPaths": [],
+                "writePaths": [],
+                "maxToolCalls": 0
+              }
+            },
+            "trigger": {
+              "kind": "schedule",
+              "schedule": "0 9 * * 1",
+              "timezone": "UTC",
+              "catchUp": "skip"
+            },
+            "allowance": {
+              "maxRuns": 3,
+              "maxTotalTokens": 600,
+              "deadline": 4102444800
+            },
+            "perRunSeconds": 60
+          },
+          "key": "96d9e56b-1a91-442b-bbff-28d6b016a34a"
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/responsibilities",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/responsibilities/pause",
+          "method": "POST",
+          "body": {
+            "projectPath": "/mock/project",
+            "responsibilityId": "finite-review",
+            "expectedRevision": 1
+          },
+          "key": "00bbc54b-330c-4b5f-8317-3231764e5581"
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/responsibilities",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/responsibilities/cancel",
+          "method": "POST",
+          "body": {
+            "projectPath": "/mock/project",
+            "responsibilityId": "finite-review",
+            "expectedRevision": 2
+          },
+          "key": "e4fcea91-3b65-48aa-bf15-31258a36f25a"
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/responsibilities",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/shared-files/read",
+          "method": "POST",
+          "body": {
+            "projectPath": "/mock/project",
+            "reference": {
+              "id": "file-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+              "revision": 4,
+              "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            }
+          },
+          "key": "73eddd18-3c14-4683-be4d-fb4a16198b9e"
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/shared-files/register",
+          "method": "POST",
+          "body": {
+            "projectPath": "/mock/project",
+            "path": "notes/new-reference.txt",
+            "purpose": "Explicit human declaration",
+            "expectedRevision": 0,
+            "authorizationSource": {
+              "conversationId": "mock-coord",
+              "turnId": "mock-human",
+              "projectionRevision": 7
+            }
+          },
+          "key": "6c80c674-f6ee-4fcc-b546-5001f9ee823d"
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/shared-files",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/shared-files/refresh",
+          "method": "POST",
+          "body": {
+            "projectPath": "/mock/project",
+            "reference": {
+              "id": "file-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+              "revision": 4,
+              "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            }
+          },
+          "key": "c4768062-8539-426b-b906-ad256b1b8c62"
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/shared-files",
+          "method": "GET",
+          "body": null,
+          "key": null
+        }
+      ],
+      "errors": [],
+      "passed": true
+    },
+    {
+      "theme": "dark",
+      "width": 1440,
+      "geometry": {
+        "bodyOverflow": 0,
+        "sections": [
+          {
+            "id": "project-dispatch",
+            "overflow": 0
+          },
+          {
+            "id": "dispatch-dependencies",
+            "overflow": 0
+          },
+          {
+            "id": "project-scope-changes",
+            "overflow": 0
+          },
+          {
+            "id": "project-responsibilities",
+            "overflow": 0
+          },
+          {
+            "id": "project-shared-files",
+            "overflow": 0
+          }
+        ],
+        "width": 420
+      },
+      "httpCalls": [
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/assignments",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/assignments",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/scope-changes",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/responsibilities",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/shared-files",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/scope-changes",
+          "method": "POST",
+          "body": {
+            "projectPath": "/mock/project",
+            "coordinatorId": "mock-coord",
+            "authorizationSource": {
+              "conversationId": "mock-coord",
+              "turnId": "mock-human",
+              "projectionRevision": 7
+            },
+            "kind": "stop_project",
+            "note": "",
+            "targets": [
+              {
+                "assignmentId": "grant-a",
+                "grantRevision": 2
+              }
+            ]
+          },
+          "key": "0f26c3de-ffed-4ba6-92c7-c4ed4eb4a13d"
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/assignments",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/scope-changes",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/responsibilities",
+          "method": "POST",
+          "body": {
+            "projectPath": "/mock/project",
+            "name": "Finite review",
+            "assignment": {
+              "projectPath": "/mock/project",
+              "coordinatorId": "mock-coord",
+              "recipientId": "mock-worker",
+              "authorizationSource": {
+                "conversationId": "mock-coord",
+                "turnId": "mock-human",
+                "projectionRevision": 7
+              },
+              "brief": "Consultation only; no file work",
+              "model": "mock.not-callable",
+              "budget": {
+                "maxTokens": 200,
+                "maxModelRequests": 2,
+                "deadline": 4102444800
+              },
+              "profile": {
+                "mode": "consult",
+                "tools": [],
+                "readPaths": [],
+                "writePaths": [],
+                "maxToolCalls": 0
+              }
+            },
+            "trigger": {
+              "kind": "schedule",
+              "schedule": "0 9 * * 1",
+              "timezone": "UTC",
+              "catchUp": "skip"
+            },
+            "allowance": {
+              "maxRuns": 3,
+              "maxTotalTokens": 600,
+              "deadline": 4102444800
+            },
+            "perRunSeconds": 60
+          },
+          "key": "9c106d6a-77b2-4f54-8f09-838f9b61488a"
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/responsibilities",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/responsibilities/pause",
+          "method": "POST",
+          "body": {
+            "projectPath": "/mock/project",
+            "responsibilityId": "finite-review",
+            "expectedRevision": 1
+          },
+          "key": "5315853b-607e-473d-a506-3f9d1a39dbff"
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/responsibilities",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/responsibilities/cancel",
+          "method": "POST",
+          "body": {
+            "projectPath": "/mock/project",
+            "responsibilityId": "finite-review",
+            "expectedRevision": 2
+          },
+          "key": "59ff6dcf-1ae0-4df7-9acd-ee49bc03568d"
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/responsibilities",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/shared-files/read",
+          "method": "POST",
+          "body": {
+            "projectPath": "/mock/project",
+            "reference": {
+              "id": "file-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+              "revision": 4,
+              "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            }
+          },
+          "key": "95dd3e1f-ae52-493a-bbed-224b4f747e0d"
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/shared-files/register",
+          "method": "POST",
+          "body": {
+            "projectPath": "/mock/project",
+            "path": "notes/new-reference.txt",
+            "purpose": "Explicit human declaration",
+            "expectedRevision": 0,
+            "authorizationSource": {
+              "conversationId": "mock-coord",
+              "turnId": "mock-human",
+              "projectionRevision": 7
+            }
+          },
+          "key": "686bcd27-8cf8-4af1-9374-15e114f5b132"
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/shared-files",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/shared-files/refresh",
+          "method": "POST",
+          "body": {
+            "projectPath": "/mock/project",
+            "reference": {
+              "id": "file-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+              "revision": 4,
+              "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            }
+          },
+          "key": "0f07e723-52c1-4adb-8db0-aad5120660f5"
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/shared-files",
+          "method": "GET",
+          "body": null,
+          "key": null
+        }
+      ],
+      "errors": [],
+      "passed": true
+    },
+    {
+      "theme": "dark",
+      "width": 390,
+      "geometry": {
+        "bodyOverflow": 0,
+        "sections": [
+          {
+            "id": "project-dispatch",
+            "overflow": 0
+          },
+          {
+            "id": "dispatch-dependencies",
+            "overflow": 0
+          },
+          {
+            "id": "project-scope-changes",
+            "overflow": 0
+          },
+          {
+            "id": "project-responsibilities",
+            "overflow": 0
+          },
+          {
+            "id": "project-shared-files",
+            "overflow": 0
+          }
+        ],
+        "width": 390
+      },
+      "httpCalls": [
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/assignments",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/assignments",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/scope-changes",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/responsibilities",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/shared-files",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/scope-changes",
+          "method": "POST",
+          "body": {
+            "projectPath": "/mock/project",
+            "coordinatorId": "mock-coord",
+            "authorizationSource": {
+              "conversationId": "mock-coord",
+              "turnId": "mock-human",
+              "projectionRevision": 7
+            },
+            "kind": "stop_project",
+            "note": "",
+            "targets": [
+              {
+                "assignmentId": "grant-a",
+                "grantRevision": 2
+              }
+            ]
+          },
+          "key": "ba9a216c-aa15-406d-b25e-a7903dbb58d5"
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/assignments",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/scope-changes",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/responsibilities",
+          "method": "POST",
+          "body": {
+            "projectPath": "/mock/project",
+            "name": "Finite review",
+            "assignment": {
+              "projectPath": "/mock/project",
+              "coordinatorId": "mock-coord",
+              "recipientId": "mock-worker",
+              "authorizationSource": {
+                "conversationId": "mock-coord",
+                "turnId": "mock-human",
+                "projectionRevision": 7
+              },
+              "brief": "Consultation only; no file work",
+              "model": "mock.not-callable",
+              "budget": {
+                "maxTokens": 200,
+                "maxModelRequests": 2,
+                "deadline": 4102444800
+              },
+              "profile": {
+                "mode": "consult",
+                "tools": [],
+                "readPaths": [],
+                "writePaths": [],
+                "maxToolCalls": 0
+              }
+            },
+            "trigger": {
+              "kind": "schedule",
+              "schedule": "0 9 * * 1",
+              "timezone": "UTC",
+              "catchUp": "skip"
+            },
+            "allowance": {
+              "maxRuns": 3,
+              "maxTotalTokens": 600,
+              "deadline": 4102444800
+            },
+            "perRunSeconds": 60
+          },
+          "key": "de1d038b-59b1-4d67-bfc4-5d79dca3a254"
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/responsibilities",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/responsibilities/pause",
+          "method": "POST",
+          "body": {
+            "projectPath": "/mock/project",
+            "responsibilityId": "finite-review",
+            "expectedRevision": 1
+          },
+          "key": "ce12d157-c4c3-48ca-bfbd-696800174105"
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/responsibilities",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/responsibilities/cancel",
+          "method": "POST",
+          "body": {
+            "projectPath": "/mock/project",
+            "responsibilityId": "finite-review",
+            "expectedRevision": 2
+          },
+          "key": "3ed63372-f247-45d1-b0f1-49c4cf8d6f7f"
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/responsibilities",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/shared-files/read",
+          "method": "POST",
+          "body": {
+            "projectPath": "/mock/project",
+            "reference": {
+              "id": "file-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+              "revision": 4,
+              "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            }
+          },
+          "key": "558e3163-f49a-4dd2-bc07-255329300a5d"
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/shared-files/register",
+          "method": "POST",
+          "body": {
+            "projectPath": "/mock/project",
+            "path": "notes/new-reference.txt",
+            "purpose": "Explicit human declaration",
+            "expectedRevision": 0,
+            "authorizationSource": {
+              "conversationId": "mock-coord",
+              "turnId": "mock-human",
+              "projectionRevision": 7
+            }
+          },
+          "key": "3cb90fb9-a725-45b6-99fa-72a4e7c03c27"
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/shared-files",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/shared-files/refresh",
+          "method": "POST",
+          "body": {
+            "projectPath": "/mock/project",
+            "reference": {
+              "id": "file-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+              "revision": 4,
+              "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            }
+          },
+          "key": "f9bf47bc-50aa-437c-b736-9363b9586c41"
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/shared-files",
+          "method": "GET",
+          "body": null,
+          "key": null
+        }
+      ],
+      "errors": [],
+      "passed": true
+    },
+    {
+      "theme": "dark",
+      "width": 320,
+      "geometry": {
+        "bodyOverflow": 0,
+        "sections": [
+          {
+            "id": "project-dispatch",
+            "overflow": 0
+          },
+          {
+            "id": "dispatch-dependencies",
+            "overflow": 0
+          },
+          {
+            "id": "project-scope-changes",
+            "overflow": 0
+          },
+          {
+            "id": "project-responsibilities",
+            "overflow": 0
+          },
+          {
+            "id": "project-shared-files",
+            "overflow": 0
+          }
+        ],
+        "width": 320
+      },
+      "httpCalls": [
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/assignments",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/assignments",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/scope-changes",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/responsibilities",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/shared-files",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/scope-changes",
+          "method": "POST",
+          "body": {
+            "projectPath": "/mock/project",
+            "coordinatorId": "mock-coord",
+            "authorizationSource": {
+              "conversationId": "mock-coord",
+              "turnId": "mock-human",
+              "projectionRevision": 7
+            },
+            "kind": "stop_project",
+            "note": "",
+            "targets": [
+              {
+                "assignmentId": "grant-a",
+                "grantRevision": 2
+              }
+            ]
+          },
+          "key": "c15dc509-4e10-4e1b-b4bc-72b5826570fc"
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/assignments",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/scope-changes",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/responsibilities",
+          "method": "POST",
+          "body": {
+            "projectPath": "/mock/project",
+            "name": "Finite review",
+            "assignment": {
+              "projectPath": "/mock/project",
+              "coordinatorId": "mock-coord",
+              "recipientId": "mock-worker",
+              "authorizationSource": {
+                "conversationId": "mock-coord",
+                "turnId": "mock-human",
+                "projectionRevision": 7
+              },
+              "brief": "Consultation only; no file work",
+              "model": "mock.not-callable",
+              "budget": {
+                "maxTokens": 200,
+                "maxModelRequests": 2,
+                "deadline": 4102444800
+              },
+              "profile": {
+                "mode": "consult",
+                "tools": [],
+                "readPaths": [],
+                "writePaths": [],
+                "maxToolCalls": 0
+              }
+            },
+            "trigger": {
+              "kind": "schedule",
+              "schedule": "0 9 * * 1",
+              "timezone": "UTC",
+              "catchUp": "skip"
+            },
+            "allowance": {
+              "maxRuns": 3,
+              "maxTotalTokens": 600,
+              "deadline": 4102444800
+            },
+            "perRunSeconds": 60
+          },
+          "key": "6c07feab-ac3f-4461-b0e9-fd71b54c9b1e"
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/responsibilities",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/responsibilities/pause",
+          "method": "POST",
+          "body": {
+            "projectPath": "/mock/project",
+            "responsibilityId": "finite-review",
+            "expectedRevision": 1
+          },
+          "key": "be2fe5de-2da9-41ca-b0b1-4861d8d53b54"
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/responsibilities",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/responsibilities/cancel",
+          "method": "POST",
+          "body": {
+            "projectPath": "/mock/project",
+            "responsibilityId": "finite-review",
+            "expectedRevision": 2
+          },
+          "key": "ead439b7-d477-4bd6-a9be-e79b7acda20e"
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/responsibilities",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/shared-files/read",
+          "method": "POST",
+          "body": {
+            "projectPath": "/mock/project",
+            "reference": {
+              "id": "file-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+              "revision": 4,
+              "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            }
+          },
+          "key": "f4b5f449-3f99-4f48-870c-08d4f98a0dbe"
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/shared-files/register",
+          "method": "POST",
+          "body": {
+            "projectPath": "/mock/project",
+            "path": "notes/new-reference.txt",
+            "purpose": "Explicit human declaration",
+            "expectedRevision": 0,
+            "authorizationSource": {
+              "conversationId": "mock-coord",
+              "turnId": "mock-human",
+              "projectionRevision": 7
+            }
+          },
+          "key": "f7db11a9-bf77-4354-8474-3f3dd599239f"
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/shared-files",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination",
+          "method": "GET",
+          "body": null,
+          "key": null
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/shared-files/refresh",
+          "method": "POST",
+          "body": {
+            "projectPath": "/mock/project",
+            "reference": {
+              "id": "file-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+              "revision": 4,
+              "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            }
+          },
+          "key": "0ca4772b-6fcd-47f2-8b1a-029066a54ac4"
+        },
+        {
+          "url": "/designs/project-coordination/continuity-preview.html/api/v4/project/coordination/shared-files",
+          "method": "GET",
+          "body": null,
+          "key": null
+        }
+      ],
+      "errors": [],
+      "passed": true
+    }
+  ]
+}

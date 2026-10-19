@@ -41,6 +41,18 @@ def _payload(project_path: str) -> dict:
                 'state': state, 'reason': REASON, 'headSha': HEAD,
                 'targetSha': TARGET, 'updatedAt': UPDATED,
             }
+        acceptance_status = ('verified', 'failed', 'stale', 'unverified')[index % 4]
+        row['acceptance'] = {
+            'status': acceptance_status,
+            'record': {'targetRevision': 'c' * 40, 'checks': [
+                {'id': 'builtin', 'outcome': 'passed'},
+                {'id': 'project_command', 'outcome': 'failed' if acceptance_status == 'failed' else 'passed'},
+            ]},
+        }
+        if state is None:
+            row.pop('acceptance')
+        elif state == 'bogus':
+            row['acceptance'] = {'status': 'verified', 'record': {'targetRevision': HEAD}}
         workspaces.append(row)
     return {
         'ok': True, 'autorun': False,
@@ -139,6 +151,17 @@ def test_candidate_merge_is_not_checkout_delivery(
         label = row.locator('.pbi-writer-state')
         expect(label).to_have_text(merged_label + ' · ' + labels[expected_state])
         expect(label).to_be_visible()
+        acceptance_status = ('verified', 'failed', 'stale', 'unverified')[index % 4]
+        if state in (None, 'bogus'):
+            acceptance_status = 'unverified'
+        receipt = row.locator('[data-acceptance-status]')
+        expect(receipt).to_have_attribute('data-acceptance-status', acceptance_status)
+        expect(receipt).to_contain_text(catalog[key + 'acceptance.' + acceptance_status])
+        if state not in (None, 'bogus'):
+            expect(receipt.locator('code')).to_have_attribute('title', 'c' * 40)
+            expect(receipt).to_contain_text(catalog[key + 'acceptance.builtin'])
+            expect(receipt).to_contain_text(catalog[key + 'acceptance.project_command'])
+
         if state != 'delivered':
             assert labels['delivered'] not in row.inner_text()
         if state is not None:
@@ -147,7 +170,7 @@ def test_candidate_merge_is_not_checkout_delivery(
             else:
                 expect(row.locator('.pbi-writer-error')).to_have_count(0)
             # Git evidence is a tooltip, not duplicate visible status text.
-            detail = row.locator('.pbi-writer-meta [title]').get_attribute('title')
+            detail = row.locator('.pbi-writer-meta:not([data-acceptance-status]) [title]').get_attribute('title')
             assert REASON in detail and HEAD in detail and TARGET in detail
             # Malformed timestamps may render Invalid Date, never markup.
             assert UPDATED not in row.inner_html()

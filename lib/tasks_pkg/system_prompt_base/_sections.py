@@ -20,9 +20,10 @@ logger = get_logger(__name__)
 
 
 _TOOL_DISCOVERY_GUIDANCE = (
-    "Hidden built-in tools may include image/video, PPTX/slides, reports, "
+    "Hidden built-in tools may include rich responses, file publication, image/video, PPTX/slides, reports, "
     "browser/desktop, and real-browser rendering. If no visible tool fits, use "
-    "Tool Search for the user's outcome; results define availability."
+    "Tool Search for the user's outcome; results define availability. "
+    "Workspace paths are not web links: publish deliverables and use returned IDs/URLs; verify browser delivery."
 )
 
 # Full profile only: the lean profile has a hard token budget
@@ -357,7 +358,11 @@ _DOING_TASKS_CODE_ONLY = [
 
     # — Verification fidelity & bounded-budget discipline —
     "Self-verification must match how the work will actually be judged, "
-    "not just that *some* check passed. Implement interface parameters "
+    "not just that *some* check passed. Derive acceptance checks from the "
+    "original request and existing external contracts before copying details "
+    "from your implementation. Independently check exact public names, fields, "
+    "types, units and boundary behavior; tests that repeat an implementation\'s "
+    "assumptions cannot validate those assumptions. Implement interface parameters "
     "according to their documented contract and tool schema: exact delays "
     "wait the requested duration; completion-driven waits may return as "
     "soon as work completes, within the schema's wait bound. Do not pad "

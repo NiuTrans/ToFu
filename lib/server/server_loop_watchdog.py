@@ -1,0 +1,375 @@
+"""Explicit lifecycle owner for production event-loop stall diagnostics."""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import os
+import sys
+import threading
+import time
+from collections.abc import Mapping
+from typing import Any, TextIO
+
+from lib.server.server_fault_watchdog import capture_thread_stacks, format_frame_stack
+
+
+def _float_setting(
+    environ: Mapping[str, str],
+    key: str,
+    default: float,
+    logger: logging.Logger,
+) -> float:
+    try:
+        return float(environ.get(key, '') or str(default))
+    except (ValueError, TypeError, OverflowError) as exc:
+        logger.debug('[Server] bad %s, using %.1f: %s', key, default, exc)
+        return default
+
+
+class LoopWatchdog:
+    """Own the on-loop heartbeat and a safe off-loop frame watcher.
+
+    ``hooks`` is the module containing the existing pure fault-sink and stall
+    decision helpers. Keeping those helpers injected preserves their focused
+    tests while moving process-resource ownership out of ``server.py``.
+    """
+
+    def __init__(
+        self,
+        loop: asyncio.AbstractEventLoop,
+        shutdown_requested: Any,
+        *,
+        host: str,
+        port: int,
+        hooks: Any,
+        fault_shm_log: TextIO | None,
+        fault_log: TextIO | None,
+        environ: Mapping[str, str] | None = None,
+        logger: logging.Logger | None = None,
+        ready_event: Any | None = None,
+    ) -> None:
+        self.loop = loop
+        self.shutdown_requested = shutdown_requested
+        self.host = host
+        self.port = port
+        self.hooks = hooks
+        self.fault_shm_log = fault_shm_log
+        self.fault_log = fault_log
+        self.environ = os.environ if environ is None else environ
+        self.logger = logger or logging.getLogger(__name__)
+        # Optional serving-readiness gate. Quart startup intentionally performs
+        # synchronous asset validation/bundling before Hypercorn accepts a
+        # request. Measuring that phase as an event-loop outage generated an
+        # ERROR and all-thread dump on every healthy boot. The watchdog still
+        # starts early (so lifecycle ownership/rollback remains unchanged),
+        # but stall diagnostics and the C timer arm only after this gate.
+        self.ready_event = ready_event
+
+        self.heartbeat_task: asyncio.Task[None] | None = None
+        self.watcher_thread: threading.Thread | None = None
+        self._stop = threading.Event()
+        self._started = False
+        self._stopped = False
+        self._loop_thread_id: int | None = None
+
+        self.threshold = 0.0
+        self.bump_interval = 1.0
+        self.active_max_bytes = 0
+        self.heartbeat = {'ts': time.monotonic()}
+        self._persisted_heartbeat_sample = None
+        self.listen_state = {'was_bound': False, 'misses': 0}
+        self.listen_probe_host = '127.0.0.1'
+
+    def _should_stop(self) -> bool:
+        return self._stop.is_set() or self.shutdown_requested.is_set()
+
+    def start(self) -> 'LoopWatchdog':
+        if self._started:
+            return self
+        if self._stopped:
+            raise RuntimeError('loop watchdog cannot restart after stop')
+
+        self.threshold = _float_setting(
+            self.environ, 'TOFU_LOOP_STALL_SECS', 5.0, self.logger)
+        self.bump_interval = _float_setting(
+            self.environ, 'TOFU_LOOP_HEARTBEAT_SECS', 1.0, self.logger)
+        if self.bump_interval <= 0:
+            self.bump_interval = 1.0
+
+        self._started = True
+        if self.threshold <= 0:
+            self.logger.info(
+                '[Server] Loop-stall watchdog disabled '
+                '(TOFU_LOOP_STALL_SECS=0)')
+            return self
+
+        self.active_max_bytes = self.hooks._fault_dump_limits()[
+            'active_bytes']
+        self.listen_probe_host = (
+            self.host
+            if self.host not in ('0.0.0.0', '::', '')
+            else '127.0.0.1'
+        )
+        self._loop_thread_id = threading.get_ident()
+        try:
+            self.heartbeat_task = self.loop.create_task(
+                self._heartbeat_loop(), name='tofu-loop-heartbeat')
+            self.watcher_thread = threading.Thread(
+                target=self._stall_watch,
+                name='tofu-loopwatch',
+                daemon=True,
+            )
+            self.watcher_thread.start()
+        except BaseException:
+            self._stop.set()
+            if self.heartbeat_task is not None:
+                self.heartbeat_task.cancel()
+                self.heartbeat_task = None
+            raise
+
+        self.logger.info(
+            '[Server] Loop-stall watchdog armed (threshold=%.1fs, '
+            'heartbeat=%.1fs, retained Python frames; '
+            'GIL-held native stalls require the external manager)',
+            self.threshold,
+            self.bump_interval,
+        )
+        return self
+
+    async def _heartbeat_loop(self) -> None:
+        previous_tick = None
+        listener_loss_reported = False
+        while not self._should_stop():
+            tick_now = time.monotonic()
+            self.heartbeat['ts'] = tick_now
+            if previous_tick is not None:
+                try:
+                    from lib.observability import set_event_loop_lag
+                    set_event_loop_lag(max(
+                        0.0,
+                        tick_now - previous_tick - self.bump_interval,
+                    ))
+                except Exception as exc:
+                    self.logger.debug(
+                        '[Metrics] loop-lag observation skipped: %s', exc)
+            previous_tick = tick_now
+            try:
+                bound = await asyncio.to_thread(
+                    self.hooks._port_bound,
+                    self.port,
+                    self.listen_probe_host,
+                )
+            except Exception as exc:
+                self.logger.debug(
+                    '[LoopWatch] listener probe unavailable; preserving '
+                    'process: %s', exc)
+                bound = None
+            was_bound, misses, listener_lost = (
+                self.hooks._listener_death_decide(
+                    self.listen_state['was_bound'],
+                    bound,
+                    self.listen_state['misses'],
+                    5,
+                )
+            )
+            self.listen_state.update(
+                was_bound=was_bound, misses=misses)
+            if bound is True and listener_loss_reported:
+                self.logger.info(
+                    '[LoopWatch] serve listener on :%d recovered in place',
+                    self.port,
+                )
+                listener_loss_reported = False
+            if listener_lost and not listener_loss_reported:
+                listener_loss_reported = True
+                self.logger.critical(
+                    '[LoopWatch] serve listener on :%d lost for %d '
+                    'consecutive checks while the loop is alive — '
+                    'preserving tasks and continuing recovery probes',
+                    self.port,
+                    misses,
+                )
+                try:
+                    from lib.log import audit_log
+                    audit_log(
+                        'serve_listener_unavailable',
+                        port=self.port,
+                        misses=misses,
+                        pid=os.getpid(),
+                    )
+                except Exception as exc:
+                    self.logger.debug(
+                        '[LoopWatch] listener-loss audit failed: %s', exc)
+
+            await asyncio.sleep(self.bump_interval)
+
+    def _persist_loop_heartbeat(self) -> None:
+        """Persist observed loop progress from the existing watchdog thread.
+
+        A blocked filesystem must not block HTTP processing. Stamp the last
+        actual loop tick, not writer activity, so a wedged loop stays stale.
+        """
+        sample = self.heartbeat['ts']
+        if sample == self._persisted_heartbeat_sample:
+            return
+        timestamp = time.time() - max(0.0, time.monotonic() - sample)
+        try:
+            written = self.hooks._write_heartbeat(ts=timestamp)
+        except Exception as exc:
+            self.logger.warning('[LoopWatch] heartbeat persistence failed: %s', exc)
+            return
+        if written is not False:
+            self._persisted_heartbeat_sample = sample
+
+    def _stall_watch(self) -> None:
+        poll = max(0.5, min(self.bump_interval, self.threshold / 2.0))
+        already_dumped = False
+        ready_seen = self.ready_event is None
+        while not self._should_stop():
+            self._stop.wait(poll)
+            if self._should_stop():
+                break
+            self._persist_loop_heartbeat()
+            if self.ready_event is not None:
+                if not self.ready_event.is_set():
+                    already_dumped = False
+                    ready_seen = False
+                    continue
+                if not ready_seen:
+                    # Do not inherit startup's stale heartbeat at the instant
+                    # readiness flips. The next interval is the first one a
+                    # serving-loop stall can honestly occupy.
+                    self.heartbeat['ts'] = time.monotonic()
+                    already_dumped = False
+                    ready_seen = True
+                    continue
+            age = time.monotonic() - self.heartbeat['ts']
+            should_dump, already_dumped = self.hooks._loop_stall_decide(
+                age, self.threshold, already_dumped)
+            if not should_dump:
+                continue
+
+            top_frame = ''
+            loop_stack = ''
+            try:
+                frames = sys._current_frames()
+                loop_frame = frames.get(self._loop_thread_id)
+                top_frame = self.hooks._extract_loop_top_frame(loop_frame)
+                # The faulthandler dump below is byte-budgeted and truncates
+                # on busy processes (observed 2026-09-18: the loop thread
+                # itself was cut, leaving stalls undiagnosable). The loop
+                # thread's own stack is the one piece of evidence that must
+                # survive any budget, so write it explicitly ahead of the
+                # all-thread dump, bounded independently.
+                if loop_frame is not None:
+                    loop_stack = format_frame_stack(loop_frame)
+            except Exception as exc:
+                self.logger.debug(
+                    '[LoopWatch] top-frame extract failed: %s', exc)
+            pressure = self.hooks._stall_pressure_context()
+            try:
+                from lib.log import audit_log
+                audit_log(
+                    'event_loop_stall',
+                    duration=round(age, 1),
+                    threshold=self.threshold,
+                    top_frame=top_frame,
+                    pressure=pressure,
+                    pid=os.getpid(),
+                )
+            except Exception as exc:
+                self.logger.debug('[LoopWatch] audit_log failed: %s', exc)
+            self.logger.error(
+                '[LoopWatch] event loop STALLED ~%.1fs (threshold=%.1fs) at '
+                '%s%s — dumping all-thread stacks to faulthandler sinks',
+                age,
+                self.threshold,
+                top_frame or '?',
+                (' [' + pressure + ']') if pressure else '',
+            )
+            # 2026-09-22: stalls recurred hours apart and the per-pid fault
+            # sink keeps only the LATEST dump, so every earlier culprit stack
+            # was overwritten before anyone could read it. Mirror the bounded
+            # loop-thread stack into the app log (it is the one piece of
+            # evidence that must survive rotations and later stalls); other
+            # threads still go to the byte-budgeted fault sinks below.
+            if loop_stack:
+                try:
+                    self.logger.error(
+                        '[LoopWatch] loop-thread stack at stall:\n%s',
+                        loop_stack[:16 * 1024],
+                    )
+                except Exception as exc:
+                    self.logger.debug(
+                        '[LoopWatch] loop-stack log mirror failed: %s', exc)
+
+            try:
+                snapshot = capture_thread_stacks(
+                    max_bytes=max(0, self.active_max_bytes - 1024),
+                    priority_thread_id=self._loop_thread_id,
+                )
+            except Exception as exc:
+                self.logger.warning('[LoopWatch] frame snapshot failed: %s', exc)
+                snapshot = loop_stack or '<unavailable>\n'
+            manual_sinks = [self.fault_shm_log, self.fault_log]
+            for sink in manual_sinks:
+                if sink is None:
+                    continue
+                try:
+                    self.hooks._reset_fault_sink(
+                        sink,
+                        header=(
+                            '=== latest loop-stall dump pid=%d ===\n'
+                            % os.getpid()
+                        ),
+                    )
+                    sink.write(
+                        '\n=== LOOP STALL pid=%d age=%.1fs at %s ===\n'
+                        % (os.getpid(), age, time.strftime(
+                            '%Y-%m-%d %H:%M:%S'))
+                    )
+                    sink.write(
+                        '=== LOOP THREAD stack (bounded, survives dump '
+                        'budget) ===\n'
+                    )
+                    # The prioritized snapshot already includes the loop.
+                    sink.write(snapshot or '<unavailable>\n')
+                    sink.flush()
+                except Exception as exc:
+                    self.logger.warning(
+                        '[LoopWatch] dump to sink failed: %s', exc)
+
+    async def stop(self, *, timeout: float = 2.0) -> bool:
+        """Wake both diagnostics paths and release their resource owners."""
+        if self._stopped:
+            thread = self.watcher_thread
+            return thread is None or not thread.is_alive()
+        self._stopped = True
+        self._stop.set()
+
+        task = self.heartbeat_task
+        self.heartbeat_task = None
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:
+                self.logger.warning(
+                    '[LoopWatch] heartbeat stop failed: %s', exc)
+
+        thread = self.watcher_thread
+        if thread is not None and thread.is_alive():
+            await asyncio.to_thread(thread.join, max(0.0, timeout))
+        stopped = thread is None or not thread.is_alive()
+        if stopped:
+            self.watcher_thread = None
+        else:
+            self.logger.warning(
+                '[LoopWatch] watcher thread did not stop within %.1fs', timeout)
+        return stopped
+
+
+__all__ = ['LoopWatchdog']

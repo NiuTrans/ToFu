@@ -65,8 +65,6 @@ class TestForwardedHeaderNeverTrusted:
     """A spoofed ``X-Forwarded-For`` must not change the peer address the
     app sees, because that address keys real security decisions:
 
-      * per-IP rate-limit buckets — ``lib/rate_limit_api.py:226``,
-        ``lib/rate_limiter.py:40``
       * the open-mode loopback grant — ``routes/api_v1/auth.py:173``
       * audit trails — ``routes/api_v1/auth.py:326,360,394``
 

@@ -1111,7 +1111,8 @@ class TestMemoryPrefetch:
                    '</available_skills>')
         proj_future = Future()
         proj_future.set_result('Proj ctx')
-        task = {'_prefetch_project': proj_future, '_userId': 1}
+        task = {'_prefetch_project': proj_future, '_userId': 1,
+                '_executable_tool_catalog': [{'function': {'name': 'load_skill'}}]}
         messages = [{'role': 'system', 'content': 'Base'},
                     {'role': 'user', 'content': 'Help me'}]
 

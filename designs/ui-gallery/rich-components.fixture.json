@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "title": "Native response components",
+  "summary": "Illustrative data and supplied source metadata, not measured product performance.",
+  "blocks": [
+    {"type":"data_chart","id":"line-chart","title":"Capture latency trend","kind":"line","xLabel":"Time","xUnit":"s","yLabel":"Latency","yUnit":"ms","series":[{"id":"capture","label":"Capture","points":[{"x":0,"value":4},{"x":1,"value":2},{"x":2,"value":5}]}]},
+    {"type":"data_chart","id":"scatter-chart","title":"Audio timing offsets","kind":"scatter","xLabel":"Time","xUnit":"s","yLabel":"Offset","yUnit":"ms","series":[{"id":"audio","label":"Audio","points":[{"x":0,"value":-2},{"x":1,"value":0},{"x":2,"value":3}]}]},
+    {"type":"data_chart","id":"bar-chart","title":"Buffer allocation","kind":"bar","xLabel":"Component","yLabel":"Size","yUnit":"MB","series":[{"id":"buffer","label":"Buffer","points":[{"label":"Video","value":24},{"label":"Audio","value":2},{"label":"Metadata","value":0}]}]},
+    {"type":"data_chart","id":"pie-chart","title":"Storage share","kind":"pie","series":[{"id":"storage","label":"Storage","points":[{"label":"Video","value":80},{"label":"Audio","value":15},{"label":"Metadata","value":5}]}]},
+    {"type":"citations","id":"sources","title":"Supplied source evidence","sources":[{"id":"guide","title":"Camera integration guide","url":"https://fixture.example/guide","publisher":"Fixture publisher","excerpt":"Supplied excerpt for interaction tests. No remote preview is fetched or verified."}]}
+  ]
+}

@@ -14,7 +14,7 @@ from tests.support.loopback import LoopbackThreadingHTTPServer
 
 @pytest.fixture
 def extraction_provider(monkeypatch):
-    import lib.search_extract as extract
+    import lib.search.search_extract as extract
     import lib.token_counter
     from lib.llm.stream import stream_chat
     monkeypatch.setattr(lib.token_counter, 'count_tokens', lambda *a, **k: {'tokens': 20})
@@ -31,7 +31,10 @@ def extraction_provider(monkeypatch):
             final = {'choices': [{'delta': {}, 'finish_reason': 'stop'}]}
             if options['usage']:
                 final['usage'] = {'prompt_tokens': 20, 'completion_tokens': min(5, body['max_tokens'])}
-            payload = (b'data: {"choices":[{"delta":{"content":"source-grounded answer"}}]}\n\n'
+            extraction = json.dumps({'findings': [{'fact': 'source-grounded answer',
+                'quote': 'retained original source'}], 'unresolved': []})
+            delta = {'choices': [{'delta': {'content': extraction}}]}
+            payload = (b'data: ' + json.dumps(delta).encode() + b'\n\n'
                        + b'data: ' + json.dumps(final).encode() + b'\n\n'
                        + b'data: [DONE]\n\n')
             self.send_response(200)
@@ -90,7 +93,7 @@ def fetch(monkeypatch, task):
     backend = SimpleNamespace(_fetch_url_one=lambda *a, **k: item)
     monkeypatch.setattr(handlers, '_load_search_backend', lambda: (backend, None))
     monkeypatch.setattr(handlers, '_finalize_tool_round', lambda *a, **k: None)
-    monkeypatch.setattr('lib.search_bridge.bind_search_browser', lambda **k: nullcontext())
+    monkeypatch.setattr('lib.search.search_bridge.bind_search_browser', lambda **k: nullcontext())
     entry = {}
     _, content, fetched = handlers._handle_fetch_url(
         task, {}, 'fetch_url', 'extract-call',

@@ -15,7 +15,7 @@ import pytest
 from lib.llm._sse_core import SSEAccumulator
 from lib.llm.anthropic_outbound._sse import AnthropicSSETranslator
 from lib.llm.diagnostics import RawSSEDumper
-from lib.llm_errors import ProviderToolCallFloodError
+from lib.llm.llm_errors import ProviderToolCallFloodError
 from lib.tasks_pkg.streaming_tool_executor import StreamingToolAccumulator
 from lib.llm.tool_call_flood import ToolCallFloodGuard, identical_tool_call_limit
 from tests._registered_chat_task import registered_chat_task
@@ -79,35 +79,45 @@ def test_flood_stops_while_stream_is_open(monkeypatch, native, callback_enabled,
     acc = _sse(with_acc.on_tool_call_ready if callback_enabled else None,
                native=native)
     try:
-        with pytest.raises(ProviderToolCallFloodError) as caught:
-            for index in range(919):
-                _feed_call(acc, index, native=native)
-        assert caught.value.count == 33
-        assert caught.value.limit == 32
-        assert len(task['toolRounds']) <= 32
-        assert len(acc.tool_calls_acc) <= 33
-        # No terminal frame, final parse or dispatch was required to stop it.
+        # The first repetition triggers the salvage: the guard flags the
+        # accumulator and every subsequent payload is refused, so the stream
+        # stops without any terminal frame from the provider.
+        _feed_call(acc, 0, native=native)
+        _feed_call(acc, 1, native=native)
+        assert acc._flood_salvage is True
+        for index in range(2, 919):
+            _feed_call(acc, index, native=native)
+        # No exception, no further accumulation, no extra UI rows.
+        assert len(acc.tool_calls_acc) == 2
+        assert len(task['toolRounds']) <= 1
     finally:
         with_acc.close()
 
 
-def test_final_parser_rejects_callback_free_flood_before_rows(monkeypatch, task):
+def test_final_parser_collapses_callback_free_flood_before_rows(monkeypatch, task):
     from lib.tasks_pkg.tool_dispatch._parse import parse_tool_calls
     monkeypatch.setenv('TOFU_TOOL_CALL_FLOOD_HARD_CAP', '4')
-    with pytest.raises(ProviderToolCallFloodError):
-        parse_tool_calls({'tool_calls': [_call(i) for i in range(233)]},
-                         task, 0, 0, False)
-    assert task['toolRounds'] == []
-    assert task['events'] == []
+    calls = [_call(i) for i in range(233)]
+    msg = {'tool_calls': calls}
+    parsed, _ = parse_tool_calls(msg, task, 0, 0, False)
+    # 233 identical occurrences collapse to the first 3 (limit 4 − 1); the
+    # repetition is evidence on the message, not an error and not extra rows.
+    assert len(parsed) == 3
+    assert len(task['toolRounds']) == 3
+    assert msg.get('_flood_collapsed')
+    assert sum(v['dropped'] for v in msg['_flood_collapsed'].values()) == 230
 
 
 def test_native_mixed_batch_then_generation_loop_preserves_wire_identity(monkeypatch):
-    """Distinct wire blocks precede a repeating suffix; none are retransmissions."""
+    """Distinct wire blocks precede a repeating suffix; none are retransmissions.
+
+    The salvage triggers on the FIRST repeated signature (index 19 repeats
+    ``experiment_or_url='0'``) and keeps the stream adoption honest.
+    """
     monkeypatch.delenv('TOFU_TOOL_CALL_FLOOD_HARD_CAP', raising=False)
     announced = []
     acc = _sse(announced.append, native=True)
     name = 'mcp__llm__experiment_canvas_diagnose'
-    # One gateway call and 17 independent canvas calls precede the suffix.
     for index in range(18 + 121):
         tool = 'execute_tools' if index == 0 else name
         arguments = ({'calls': [{'name': 'other_tool', 'arguments': {}}]}
@@ -120,36 +130,50 @@ def test_native_mixed_batch_then_generation_loop_preserves_wire_identity(monkeyp
              'delta': {'type': 'input_json_delta', 'partial_json': json.dumps(arguments)}},
             {'type': 'content_block_stop', 'index': index},
         )
-        try:
-            for event in events:
-                acc.feed_line('data:' + json.dumps(event))
-        except ProviderToolCallFloodError as error:
-            assert error.count == 33
-            assert index == 49
+        for event in events:
+            acc.feed_line('data:' + json.dumps(event))
+        if acc._flood_salvage:
+            # min(18, 17) == 17 repeats the canvas call from index 17.
+            assert index == 18
             break
     else:
-        pytest.fail('A repeating native suffix must terminate before the stream ends')
-    assert len(announced) == 49
-    assert len({call['id'] for call in announced}) == 49
+        pytest.fail('A repeating native suffix must trigger the flood salvage')
+    assert len(announced) == 18
+    assert len({call['id'] for call in announced}) == 18
     assert announced[0]['function']['name'] == 'execute_tools'
-    assert announced[-1]['id'] == f'{name}_48_abcdef01'
+    # The triggering occurrence was accumulated but never announced upstream.
+    assert announced[-1]['id'] == f'{name}_17_abcdef01'
+    result = acc.finalize()
+    # Collapsed: execute_tools + 17 distinct canvas calls (indices 17/18 share
+    # one signature and collapse to the first) = 18 adopted calls, not 139.
+    assert len(result.message['tool_calls']) == 18
+    assert result.message.get('_flood_collapsed')
+    assert result.usage.get('_flood_salvage')
 
 
 
-def test_accepted_twins_execute_and_pair_independently(monkeypatch, task):
+def test_accepted_twins_collapse_to_one(monkeypatch, task):
+    """Repeated identical calls in one response execute exactly once.
+
+    The old 'accepted twins execute independently' contract is replaced: an
+    exact same-argument repetition is collapsed before dispatch, so the
+    transcript and the tool/result pairing both see a single occurrence.
+    """
     from lib.tasks_pkg.tool_dispatch._parse import parse_tool_calls
     import lib.tasks_pkg.tool_dispatch._pipeline as pipeline
-    monkeypatch.setenv('TOFU_TOOL_CALL_FLOOD_HARD_CAP', '32')
+    monkeypatch.delenv('TOFU_TOOL_CALL_FLOOD_HARD_CAP', raising=False)
     early = StreamingToolAccumulator(task, '.', round_num=0)
     calls = [_call(i) for i in range(5)]
     try:
-        for call in calls:
-            early.on_tool_call_ready(call)
+        # The early-announcer can only register the calls the stream actually
+        # let through; a flood stops at the first repetition.
+        early.on_tool_call_ready(calls[0])
         message = {'role': 'assistant', 'tool_calls': calls}
         parsed, _ = parse_tool_calls(message, task, 0, early.tool_round_num,
                                      False, early_announced=early.announced_tc_map)
-        assert len(task['toolRounds']) == 5
-        assert len([e for e in task['events'] if e.get('type') == 'tool_start']) == 5
+        assert len(task['toolRounds']) == 1
+        assert len([e for e in task['events'] if e.get('type') == 'tool_start']) == 1
+        assert message.get('_flood_collapsed')
         executed = []
 
         def execute(task, tc, name, call_id, args, rn, row, *a, **kw):
@@ -167,81 +191,82 @@ def test_accepted_twins_execute_and_pair_independently(monkeypatch, task):
             task, parsed, cfg={}, project_path='.', project_enabled=False,
             tool_list=[], messages=messages, all_search_results_text=[],
             round_num=0, model='test-model')
-        ids = [call['id'] for call in calls]
-        assert sorted(executed) == sorted(ids)
-        assert [m['tool_call_id'] for m in messages if m['role'] == 'tool'] == ids
+        assert executed == [calls[0]['id']]
+        assert [m['tool_call_id'] for m in messages if m['role'] == 'tool'] == [calls[0]['id']]
         assert all(row['status'] == 'done' for row in task['toolRounds'])
     finally:
         early.close()
 
 
 def test_guard_counts_positions_not_callback_volume(monkeypatch):
+    """Only distinct positions count; a repeated callback on one slot is one."""
     monkeypatch.setenv('TOFU_TOOL_CALL_FLOOD_HARD_CAP', '2')
     guard = ToolCallFloodGuard()
     for _ in range(100):
-        guard.observe(0, _call(0))
-    guard.observe(1, _call(1))
-    with pytest.raises(ProviderToolCallFloodError):
-        guard.observe(2, _call(2, '{ "conv_id" : "example" }'))
+        assert guard.observe(0, _call(0)) is None
+    # The second DISTINCT position carrying the same signature triggers.
+    error = guard.observe(1, _call(1))
+    assert isinstance(error, ProviderToolCallFloodError)
+    assert error.count == 2
+    assert error.limit == 2
+    # Once triggered the guard stays triggered without producing a new error.
+    assert guard.observe(2, _call(2)) is error
 
 
 def test_guard_replaces_provisional_slot_identity(monkeypatch):
-    monkeypatch.setenv('TOFU_TOOL_CALL_FLOOD_HARD_CAP', '2')
+    monkeypatch.setenv('TOFU_TOOL_CALL_FLOOD_HARD_CAP', '3')
     guard = ToolCallFloodGuard()
-    guard.observe(0, _call(0))
-    guard.observe(0, _call(0, '{"conv_id":"changed"}'))
-    guard.observe(1, _call(1))
-    guard.observe(2, _call(2))
+    assert guard.observe(0, _call(0)) is None
+    assert guard.observe(0, _call(0, '{"conv_id":"changed"}')) is None
+    assert guard.observe(1, _call(1)) is None
+    assert guard.observe(2, _call(2)) is None
 
 
 def test_distinct_arguments_and_authorities_are_not_a_total_fanout_cap(monkeypatch):
     monkeypatch.setenv('TOFU_TOOL_CALL_FLOOD_HARD_CAP', '2')
     guard = ToolCallFloodGuard()
     for index in range(100):
-        guard.observe(index, _call(index, json.dumps({'conv_id': str(index)})))
-    guard.observe(100, _call(100, caller={'type': 'multi_agent', 'agent_name': '/root/a'}))
-    guard.observe(101, _call(101, caller={'type': 'multi_agent', 'agent_name': '/root/b'}))
+        assert guard.observe(index, _call(index, json.dumps({'conv_id': str(index)}))) is None
+    assert guard.observe(100, _call(100, caller={'type': 'multi_agent', 'agent_name': '/root/a'})) is None
+    assert guard.observe(101, _call(101, caller={'type': 'multi_agent', 'agent_name': '/root/b'})) is None
 
 
-def test_fresh_physical_attempt_does_not_inherit_prior_counts(monkeypatch):
+
+def test_fresh_physical_attempt_collapses_identical_calls(monkeypatch):
+    """A fresh accumulator per attempt collapses repeats within ONE response."""
     monkeypatch.setenv('TOFU_TOOL_CALL_FLOOD_HARD_CAP', '2')
     for _ in range(2):
         acc = _sse()
         _feed_call(acc, 0)
         _feed_call(acc, 1)
         acc.fire_final_tool_callback()
-        assert len(acc.finalize().message['tool_calls']) == 2
+        result = acc.finalize()
+        assert len(result.message['tool_calls']) == 1
+        assert result.message.get('_flood_collapsed')
+        assert result.usage.get('_flood_salvage')
 
 
 def test_native_flood_evidence_links_wire_positions_and_archive(monkeypatch, caplog):
-    from lib.error_envelope import from_exception, normalize_envelope
+    """The trigger still captures wire identity + archive; nothing is raised."""
     monkeypatch.setenv('TOFU_TOOL_CALL_FLOOD_HARD_CAP', '2')
     acc = _sse(native=True)
     reference = {'archiveId': 'raw-test', 'taskId': 'task-test',
                  'attemptId': 'attempt-test', 'turnId': 'turn-test', 'roundNum': 1}
     acc.raw_dumper.raw_archive_ref = reference
-    for index in range(2):
-        _feed_call(acc, index, '{"password":"private-synthetic-input"}', native=True)
-    with pytest.raises(ProviderToolCallFloodError) as caught:
-        _feed_call(acc, 2, '{"password":"private-synthetic-input"}', native=True)
-    envelope = from_exception(caught.value)
-    evidence = envelope['toolCallEvidence']
-    assert evidence['origin'] == 'provider_wire'
-    assert evidence['wireMatchedPositions'] == evidence['canonicalMatchedPositions'] == 3
-    assert evidence['distinctCallIds'] == 3
-    assert evidence['wirePositionSample'] == [0, 1, 2]
-    assert evidence['traceId'] == 'flood-trace'
-    assert envelope['rawArchiveRef'] == reference
-    assert normalize_envelope(envelope)['toolCallEvidence'] == evidence
-    assert envelope['kind'] == 'tool_loop'
-    assert 'titleKey' not in envelope and 'hintKey' not in envelope
-    assert 'outage' in envelope['hint']
-    assert 'private-synthetic-input' not in json.dumps(envelope) + caplog.text
-    assert 'call_0' not in json.dumps(evidence) + caplog.text
+    _feed_call(acc, 0, '{"password":"private-synthetic-input"}', native=True)
+    assert acc._flood_salvage is False
+    _feed_call(acc, 1, '{"password":"private-synthetic-input"}', native=True)
+    assert acc._flood_salvage is True
+    # Evidence lives on the accumulator and was dumped to the raw anomaly log;
+    # the adopted message carries the bounded marker instead of a raised error.
+    assert acc._flood_evidence['tool'] == 'get_conversation'
+    assert acc._flood_evidence['count'] == 2
+    assert acc._flood_evidence['rawArchiveRef'] == reference
     incident = next(record for record in caplog.records
                     if getattr(record, 'tofu_event_name', '') == 'llm.tool_call_flood')
     assert incident.tofu_event_fields['trace_id'] == 'flood-trace'
     assert incident.tofu_event_fields['raw_archive_ref']['archiveId'] == 'raw-test'
+    assert 'private-synthetic-input' not in caplog.text
 
 
 def test_native_start_retransmission_is_observed_without_counting_another_call(monkeypatch):
@@ -253,10 +278,11 @@ def test_native_start_retransmission_is_observed_without_counting_another_call(m
     for _ in range(100):
         acc.feed_line('data: ' + json.dumps(event))
     _feed_call(acc, 1, native=True)
-    with pytest.raises(ProviderToolCallFloodError) as caught:
-        _feed_call(acc, 2, native=True)
-    assert caught.value.tool_call_evidence['wireReplayedToolStarts'] == 99
-    assert caught.value.count == 3
+    # The second completed call with identical args triggers the salvage.
+    _feed_call(acc, 2, native=True)
+    assert acc._flood_salvage is True
+    assert acc._flood_evidence['tool'] == 'get_conversation'
+    assert acc._flood_evidence['count'] == 2
 
 
 def test_fatal_flood_settles_pending_cards_before_done_and_persist(monkeypatch, task):
@@ -293,13 +319,37 @@ def test_interleaved_argument_placeholders_do_not_look_like_completed_twins(monk
     assert len(acc.finalize().message['tool_calls']) == 5
 
 
-def test_final_empty_argument_twins_still_obey_admission(monkeypatch):
+def test_final_empty_argument_twins_collapse(monkeypatch):
     monkeypatch.setenv('TOFU_TOOL_CALL_FLOOD_HARD_CAP', '2')
     acc = _sse()
     for index in range(3):
         _feed_call(acc, index, '')
-    with pytest.raises(ProviderToolCallFloodError):
-        acc.finalize()
+    result = acc.finalize()
+    assert len(result.message['tool_calls']) == 1
+    assert result.message.get('_flood_collapsed')
+    assert result.usage.get('_flood_salvage')
+
+
+def test_salvaged_prefix_without_provider_finish_still_requires_recovery(monkeypatch, task):
+    """Collapsing duplicate calls cannot manufacture provider completion."""
+    from lib.tasks_pkg.stream_handler.api import analyse_stream_result
+    from lib.tasks_pkg.stream_handler import _budget
+    monkeypatch.setattr(_budget, '_interruptible_sleep', lambda *args: None)
+    task.update(content='', thinking='')
+    monkeypatch.delenv('TOFU_TOOL_CALL_FLOOD_HARD_CAP', raising=False)
+    acc = _sse()
+    _feed_call(acc, 0)
+    _feed_call(acc, 1)
+    result = acc.finalize()
+    msg = result.message
+    assert msg.get('_flood_collapsed')
+    usage = result.usage
+    assert usage.get('_flood_salvage')
+    assert usage.get('_missing_done')  # we aborted before any DONE marker
+    decision = analyse_stream_result(
+        msg, result.compatibility_finish_reason, task, 'flood-ad', 'test-model',
+        0, 0, [], usage=usage)
+    assert decision['action'] == 'continue'
 
 
 @pytest.mark.parametrize('asynchronous', [False, True])
@@ -326,7 +376,7 @@ def test_transport_never_retries_flood(monkeypatch, asynchronous):
     assert attempts == [0]
 
 
-@pytest.mark.parametrize(('value', 'expected'), [('invalid', 32), ('1', 2), ('99999', 4096)])
+@pytest.mark.parametrize(('value', 'expected'), [('invalid', 2), ('1', 2), ('99999', 4096)])
 def test_limit_is_bounded(monkeypatch, value, expected):
     monkeypatch.setenv('TOFU_TOOL_CALL_FLOOD_HARD_CAP', value)
     assert identical_tool_call_limit() == expected

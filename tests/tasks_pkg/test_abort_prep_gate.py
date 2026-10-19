@@ -294,8 +294,8 @@ class TestStartTaskAbortRace:
         import lib.conversation_sync.task_start as cts
         monkeypatch.setattr(cts, 'cleanup_old_tasks', lambda: None)
         def _create_task(conv_id, msgs, cfg, *, user_id, supersede=True,
-                         execution_clock=None):
-            assert user_id == 1
+                         execution_clock=None, principal=None):
+            assert principal.owner_user_id == user_id == 1
             assert supersede is False
             return task_dict
 
@@ -312,7 +312,7 @@ class TestStartTaskAbortRace:
         return spawned
 
     def _clear_marker(self):
-        from lib.runtime_state_store import reset_for_test
+        from lib.runtime.runtime_state_store import reset_for_test
         reset_for_test()
 
     def teardown_method(self):

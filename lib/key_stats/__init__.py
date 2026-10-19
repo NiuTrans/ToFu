@@ -2,7 +2,10 @@
 
 Tracks daily request outcomes per (provider_id, key_name) pair and automatically
 disables a key for the rest of the day when it proves unhealthy
-(attempts ≥ MIN_ATTEMPTS and success rate < MIN_SUCCESS_RATE).
+(successes + attributed credential failures ≥ MIN_ATTEMPTS and their
+success rate < MIN_SUCCESS_RATE). Generic request failures remain telemetry;
+only typed credential rejection can contribute to automatic disabling.
+Historical failures without credential attribution are never backfilled.
 
 Users can also manually toggle a key via the Settings UI
 (routes/key_stats_routes). Manual overrides take precedence over auto-disable

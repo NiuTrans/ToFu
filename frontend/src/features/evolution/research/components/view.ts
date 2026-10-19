@@ -1039,9 +1039,8 @@ function researchHeader(stream: ResearchStream, t: Translator): string {
     + 'data-tofu-action="_newResearchDirection()" title="'
     + escapeHtml(tr(t, 'evolution.research.backToWorkbench', 'Start a new direction')) + '">←</button>'
     + '<div><div class="rs-eyebrow">' + escapeHtml(tr(t, 'evolution.research.activeProgram', 'Active research program'))
-    + '</div><h1>' + escapeHtml(stream.direction) + '</h1><p>'
-    + escapeHtml(tr(t, 'evolution.research.subtitle', 'Literature → gap map → novelty gate → independent review'))
-    + '</p></div></div><div class="rs-run-meta"><span role="status" class="rs-status ' + statusClass + '"><i></i>'
+    + '</div><h1>' + escapeHtml(stream.direction) + '</h1>'
+    + '</div></div><div class="rs-run-meta"><span role="status" class="rs-status ' + statusClass + '"><i></i>'
     + escapeHtml(stream.status === 'interrupted' ? (_i18nLang === 'zh' ? '已中断 · 记录已保存' : 'Interrupted · saved') : researchStatusLabel(stream, t)) + '</span>'
     + (stream.status === 'interrupted' ? '<button type="button" id="researchResumeSaved" class="rs-btn">' + (_i18nLang === 'zh' ? '从已保存阶段继续' : 'Resume saved stages') + '</button>' : '')
     + (researchTimestamp(stream.startedAt) ? '<time>' + escapeHtml(researchTimestamp(stream.startedAt)) + '</time>' : '')

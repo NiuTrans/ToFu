@@ -77,7 +77,7 @@ acceptance gates in this runbook plus an explicit release change.
 2. Build both digest-pinned, non-root image targets. Verify the `api` image has
    no Playwright, compiler, or PostgreSQL server binaries; verify the `worker`
    image contains the declared browser runtime.
-3. Run `python -m lib.storage_sidecar.migrate` as the chart's one-shot hook Job. The Job takes
+3. Run `python -m lib.storage_authority_sql.migrate` as the chart's one-shot hook Job. The Job takes
    the PostgreSQL advisory migration lock and advances the schema. Application
    Pods only validate the exact schema version and execute no startup DDL.
 4. Start the default one API replica, one worker, and one scheduler with the

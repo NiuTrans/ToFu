@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from lib.server_background_services import (
+from lib.server.server_background_services import (
     start_background_services,
     start_deferred_background_services,
     start_lan_discovery_responder,
@@ -114,7 +114,7 @@ def test_distributed_preview_starts_no_background_owner(monkeypatch):
 
 def test_lan_discovery_has_one_exact_lifecycle_owner(monkeypatch):
     import lib.desktop.pairing as pairing
-    import lib.server_background_services as background_services
+    import lib.server.server_background_services as background_services
 
     class Responder:
         def __init__(self):
@@ -152,7 +152,7 @@ def test_lan_discovery_has_one_exact_lifecycle_owner(monkeypatch):
 @pytest.mark.parametrize('role',['all','worker','api','scheduler'])
 @pytest.mark.parametrize('read_only',[False,True])
 def test_action_resume_obeys_worker_role_and_preview_fence(monkeypatch,role,read_only):
-    import lib.server_background_services as services
+    import lib.server.server_background_services as services
     import lib.research.action_startup as action_startup
     import lib.netpath as netpath
     calls=[]

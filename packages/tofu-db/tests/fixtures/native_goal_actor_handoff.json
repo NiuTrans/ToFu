@@ -1,0 +1,200 @@
+{
+  "before": {
+    "format": "tofu.execution-account-frontier/v1",
+    "version": 3,
+    "reason": "attached",
+    "snapshot": {
+      "format": "tofu.execution-budget-snapshot/v1",
+      "owner_user_id": 7,
+      "root_task_id": "target-root",
+      "tokens": 30600,
+      "root_tokens": 0,
+      "tool_calls": 0,
+      "model_ordinal": 3,
+      "tool_ordinal": 0,
+      "complete": false,
+      "settled": true,
+      "usage_known": true,
+      "limits": {
+        "max_tokens": null,
+        "max_tool_calls": null,
+        "deadline": null
+      }
+    },
+    "actors": {
+      "target-root": {
+        "parent_task_id": "",
+        "tokens": 0,
+        "tool_calls": 0,
+        "model_ordinal": 0,
+        "tool_ordinal": 0
+      },
+      "target-a": {
+        "parent_task_id": "target-root",
+        "tokens": 0,
+        "tool_calls": 0,
+        "model_ordinal": 0,
+        "tool_ordinal": 0
+      },
+      "target-b": {
+        "parent_task_id": "target-root",
+        "tokens": 0,
+        "tool_calls": 0,
+        "model_ordinal": 0,
+        "tool_ordinal": 0
+      }
+    },
+    "child_ordinal": 2,
+    "closed_tokens": 10200,
+    "closed_tool_calls": 0,
+    "model_requests": [],
+    "recovery": {
+      "source_root_task_id": "source-root",
+      "source_frontier_version": 11,
+      "pending_actors": {
+        "pending-a": {
+          "parent_task_id": "source-root",
+          "tokens": 10200,
+          "tool_calls": 0,
+          "model_ordinal": 1,
+          "tool_ordinal": 0
+        },
+        "pending-b": {
+          "parent_task_id": "source-root",
+          "tokens": 10200,
+          "tool_calls": 0,
+          "model_ordinal": 2,
+          "tool_ordinal": 0
+        }
+      }
+    }
+  },
+  "frontiers": [
+    {
+      "format": "tofu.execution-account-frontier/v1",
+      "version": 4,
+      "reason": "actor_rebound",
+      "snapshot": {
+        "format": "tofu.execution-budget-snapshot/v1",
+        "owner_user_id": 7,
+        "root_task_id": "target-root",
+        "tokens": 30600,
+        "root_tokens": 0,
+        "tool_calls": 0,
+        "model_ordinal": 3,
+        "tool_ordinal": 0,
+        "complete": false,
+        "settled": true,
+        "usage_known": true,
+        "limits": {
+          "max_tokens": null,
+          "max_tool_calls": null,
+          "deadline": null
+        }
+      },
+      "actors": {
+        "target-root": {
+          "parent_task_id": "",
+          "tokens": 0,
+          "tool_calls": 0,
+          "model_ordinal": 0,
+          "tool_ordinal": 0
+        },
+        "target-a": {
+          "parent_task_id": "target-root",
+          "tokens": 10200,
+          "tool_calls": 0,
+          "model_ordinal": 1,
+          "tool_ordinal": 0
+        },
+        "target-b": {
+          "parent_task_id": "target-root",
+          "tokens": 0,
+          "tool_calls": 0,
+          "model_ordinal": 0,
+          "tool_ordinal": 0
+        }
+      },
+      "child_ordinal": 2,
+      "closed_tokens": 10200,
+      "closed_tool_calls": 0,
+      "model_requests": [],
+      "recovery": {
+        "source_root_task_id": "source-root",
+        "source_frontier_version": 11,
+        "pending_actors": {
+          "pending-b": {
+            "parent_task_id": "source-root",
+            "tokens": 10200,
+            "tool_calls": 0,
+            "model_ordinal": 2,
+            "tool_ordinal": 0
+          }
+        }
+      },
+      "actor_rebinding": {
+        "source_task_id": "pending-a",
+        "target_task_id": "target-a"
+      }
+    },
+    {
+      "format": "tofu.execution-account-frontier/v1",
+      "version": 5,
+      "reason": "actor_rebound",
+      "snapshot": {
+        "format": "tofu.execution-budget-snapshot/v1",
+        "owner_user_id": 7,
+        "root_task_id": "target-root",
+        "tokens": 30600,
+        "root_tokens": 0,
+        "tool_calls": 0,
+        "model_ordinal": 3,
+        "tool_ordinal": 0,
+        "complete": false,
+        "settled": true,
+        "usage_known": true,
+        "limits": {
+          "max_tokens": null,
+          "max_tool_calls": null,
+          "deadline": null
+        }
+      },
+      "actors": {
+        "target-root": {
+          "parent_task_id": "",
+          "tokens": 0,
+          "tool_calls": 0,
+          "model_ordinal": 0,
+          "tool_ordinal": 0
+        },
+        "target-a": {
+          "parent_task_id": "target-root",
+          "tokens": 10200,
+          "tool_calls": 0,
+          "model_ordinal": 1,
+          "tool_ordinal": 0
+        },
+        "target-b": {
+          "parent_task_id": "target-root",
+          "tokens": 10200,
+          "tool_calls": 0,
+          "model_ordinal": 2,
+          "tool_ordinal": 0
+        }
+      },
+      "child_ordinal": 2,
+      "closed_tokens": 10200,
+      "closed_tool_calls": 0,
+      "model_requests": [],
+      "recovery": {
+        "source_root_task_id": "source-root",
+        "source_frontier_version": 11,
+        "pending_actors": {}
+      },
+      "actor_rebinding": {
+        "source_task_id": "pending-b",
+        "target_task_id": "target-b"
+      }
+    }
+  ]
+}

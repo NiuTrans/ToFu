@@ -64,7 +64,7 @@ def test_conversation_backed_checkpoint_requires_its_owner_parent():
 def test_checkpoint_commits_staged_cache_facts_with_the_task_result(
         monkeypatch):
     from lib.storage import get_storage_client
-    from lib.task_result_checkpoint_contract import (
+    from lib.task_replay.task_result_checkpoint_contract import (
         TASK_CACHE_PREFIX_HWM_CANDIDATE_FIELD,
         TASK_LAST_TURN_CACHE_READ_CANDIDATE_FIELD,
         TASK_RESULT_CACHE_PREFIX_HWM_FIELD,
@@ -167,7 +167,7 @@ def test_checkpoint_without_owner_fails_closed():
 
 def test_confirmed_guard_collapses_steady_checkpoint_to_one_sidecar_rpc(
         monkeypatch):
-    from lib.task_result_checkpoint_contract import (
+    from lib.task_replay.task_result_checkpoint_contract import (
         TASK_RESULT_CHECKPOINT_GUARD_CONTRACT,
     )
     from lib.tasks_pkg.manager._persist import _upsert_task_row
@@ -291,7 +291,7 @@ def test_old_sidecar_response_retains_legacy_preflight_reads(monkeypatch):
 
 
 def test_old_sidecar_response_falls_back_per_cache_fact(monkeypatch):
-    from lib.task_result_checkpoint_contract import (
+    from lib.task_replay.task_result_checkpoint_contract import (
         TASK_CACHE_PREFIX_HWM_CANDIDATE_FIELD,
         TASK_LAST_TURN_CACHE_READ_CANDIDATE_FIELD,
         TASK_RESULT_CACHE_PREFIX_HWM_FIELD,
@@ -361,7 +361,7 @@ def test_old_sidecar_response_falls_back_per_cache_fact(monkeypatch):
 
 
 def test_checkpoint_does_not_clear_newer_staged_cache_facts(monkeypatch):
-    from lib.task_result_checkpoint_contract import (
+    from lib.task_replay.task_result_checkpoint_contract import (
         TASK_CACHE_PREFIX_HWM_CANDIDATE_FIELD,
         TASK_LAST_TURN_CACHE_READ_CANDIDATE_FIELD,
         TASK_RESULT_CACHE_PREFIX_HWM_FIELD,
@@ -421,7 +421,7 @@ def test_checkpoint_does_not_clear_newer_staged_cache_facts(monkeypatch):
 
 
 def test_incomplete_guard_echo_does_not_authorize_cached_fast_path(monkeypatch):
-    from lib.task_result_checkpoint_contract import (
+    from lib.task_replay.task_result_checkpoint_contract import (
         TASK_RESULT_CHECKPOINT_GUARD_CONTRACT,
     )
     from lib.tasks_pkg.manager._persist import _upsert_task_row
@@ -467,7 +467,7 @@ def test_incomplete_guard_echo_does_not_authorize_cached_fast_path(monkeypatch):
 
 def test_cas_exhaustion_is_pressure_not_an_ownership_fence(monkeypatch):
     from lib.storage import StorageError
-    from lib.task_result_checkpoint_contract import (
+    from lib.task_replay.task_result_checkpoint_contract import (
         TASK_RESULT_CHECKPOINT_GUARD_CONTRACT,
     )
     from lib.tasks_pkg.manager._persist import _upsert_task_row

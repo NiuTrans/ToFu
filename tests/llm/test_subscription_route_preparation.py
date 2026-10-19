@@ -83,7 +83,7 @@ def test_responses_protocol_does_not_invent_support_or_override_explicit_dialect
     ('https://user@chatgpt.com/v1', False),
 ])
 def test_subscription_dns_failure_defers_to_approved_egress_only(monkeypatch, url, allowed):
-    from lib.byo_egress import is_egress_allowed
+    from lib.byo.byo_egress import is_egress_allowed
 
     monkeypatch.delenv('TOFU_BYO_ALLOW_HOSTS', raising=False)
     def no_local_dns(*a, **kw):
@@ -93,7 +93,7 @@ def test_subscription_dns_failure_defers_to_approved_egress_only(monkeypatch, ur
 
 
 def test_subscription_resolving_to_metadata_is_still_denied(monkeypatch):
-    from lib.byo_egress import is_egress_allowed
+    from lib.byo.byo_egress import is_egress_allowed
 
     monkeypatch.delenv('TOFU_BYO_ALLOW_HOSTS', raising=False)
     monkeypatch.setattr(socket, 'getaddrinfo', lambda *a, **kw: [
@@ -102,7 +102,7 @@ def test_subscription_resolving_to_metadata_is_still_denied(monkeypatch):
 
 
 def test_local_fallback_failure_does_not_attempt_another_model(monkeypatch):
-    from lib.llm_errors import LocalRequestPreparationError, PermissionError_
+    from lib.llm.llm_errors import LocalRequestPreparationError, PermissionError_
     from lib.tasks_pkg.llm_fallback import _call
     from tests.tasks_pkg.test_pool_rescue_fallback import _base_task, _patch_common, _set_gate
 

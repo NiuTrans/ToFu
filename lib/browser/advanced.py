@@ -11,7 +11,7 @@ from typing import Any
 
 from lib.browser._resolve import resolve_element
 from lib.log import get_logger
-from lib.runtime_paths import get_runtime_base
+from lib.runtime.runtime_paths import get_runtime_base
 
 logger = get_logger(__name__)
 

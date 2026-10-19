@@ -50,6 +50,28 @@
     "updated_at_ms": {
       "type": "integer",
       "minimum": 1
+    },
+    "handoff_source": {
+      "type": "object",
+      "required": [
+        "task_id",
+        "expected_version",
+        "header"
+      ],
+      "properties": {
+        "task_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "expected_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "header": {
+          "$ref": "native_agent_journal_v1.schema.json"
+        }
+      },
+      "additionalProperties": false
     }
   },
   "additionalProperties": false

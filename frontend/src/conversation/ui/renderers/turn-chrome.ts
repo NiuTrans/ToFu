@@ -6,6 +6,7 @@
  * Dependencies: conversation-view-model, turn-finish, ports, stable-dom,
  * icons, localized-copy.
  */
+import { createButton } from '../../../ui';
 import { appendTaskTimePresentations } from '../task-time-presentations';
 import {
   type ConversationTurnAction,
@@ -166,9 +167,11 @@ export function renderTurnActions(
   node.className = 'conversation-turn-actions message-actions';
   node.replaceChildren();
   for (const action of turn.actions ?? []) {
-    const button = node.ownerDocument.createElement('button');
+    const button = action.action === 'review'
+      ? createButton({ label: '', variant: 'ghost', size: 'sm' }, node.ownerDocument)
+      : node.ownerDocument.createElement('button');
     button.type = 'button';
-    button.className = `msg-action-btn conversation-action--${action.action}`;
+    button.classList.add('msg-action-btn', `conversation-action--${action.action}`);
     if (action.action === 'inspect') {
       button.classList.add('ri-anchor');
       button.title = textFor(
@@ -188,6 +191,7 @@ export function renderTurnActions(
     labelNode.textContent = label;
     button.appendChild(labelNode);
     button.setAttribute('aria-label', label);
+    if (!button.title) button.title = label;
     node.appendChild(button);
   }
   node.hidden = node.childElementCount === 0;

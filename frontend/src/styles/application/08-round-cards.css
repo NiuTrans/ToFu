@@ -99,9 +99,9 @@
 .ptc-title { font-weight: var(--weight-semibold); color: var(--text-primary); }
 .ptc-status { margin-left: auto; max-width: 100%; overflow-wrap: anywhere; font-size: var(--font-size-xs); color: var(--text-tertiary); }
 .ptc-running .ptc-status { color: var(--accent); }
-.ptc-status-error { color: var(--error-text); font-weight: var(--weight-semibold); }
-.ptc-meta { flex-basis: 100%; padding-inline-start: var(--space-3); color: var(--text-tertiary); font-size: var(--font-size-xs); overflow-wrap: anywhere; }
-@media (min-width: 640px) { .ptc-meta { flex-basis: auto; padding-inline-start: 0; } .ptc-status { order: 1; } }
+.ptc-status.ptc-status-error { color: var(--chip-err-color); background: var(--chip-err-bg); font-weight: var(--weight-semibold); }
+.ptc-meta { flex-basis: 100%; min-width: 0; padding-inline-start: var(--space-3); color: var(--text-secondary); font-size: var(--font-size-xs); overflow-wrap: anywhere; white-space: normal; }
+.ptc-status { padding: var(--space-1) var(--space-2); border-radius: var(--radius-sm); background: var(--chip-neutral-bg); color: var(--chip-neutral-color); }
 .ptc-tools { display: flex; flex-wrap: wrap; gap: var(--space-1); margin: 0 0 var(--space-2); }
 .ptc-tool-chip { padding: var(--space-1) var(--space-2); max-width: 100%; overflow-wrap: anywhere; border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text-secondary); font: var(--font-size-xs)/var(--leading-title) var(--font-mono); background: var(--bg-primary); }
 .ptc-detail { min-width: 0; margin: var(--space-2) 0 0; color: var(--text-secondary); font-size: var(--font-size-sm); }

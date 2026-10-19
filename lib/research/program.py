@@ -32,9 +32,6 @@ from .observation_audit import AUDIT_VERSION as OBSERVATION_AUDIT_VERSION
 
 PROGRAM_CONTRACT_VERSION = 'tofu.research-program/v1'
 MAX_PROGRAM_BYTES = 640 * 1024
-MAX_SOURCE_FILES = 24
-MAX_SOURCE_FILE_CHARS = 65_536
-MAX_SOURCE_TOTAL_CHARS = 384 * 1024
 MAX_BINDINGS = 24
 MAX_RUNS = 32
 MAX_TOOL_RECEIPTS = 64
@@ -99,7 +96,9 @@ def normalize_source_path(value: Any) -> str:
 def source_tree_digest(source_files: Any) -> str:
     """Hash canonical source paths and bytes for compile/publish receipts."""
     rows = []
-    for row in _records(source_files, MAX_SOURCE_FILES):
+    for row in (source_files if isinstance(source_files, list) else []):
+        if not isinstance(row, Mapping):
+            continue
         path = normalize_source_path(row.get('path'))
         if path:
             rows.append((path, str(row.get('content') or '')))
@@ -327,14 +326,14 @@ def _normalize_manuscript(value: Any) -> dict[str, str]:
 def _normalize_source_files(value: Any) -> list[dict[str, Any]]:
     result = []
     seen = set()
-    remaining = MAX_SOURCE_TOTAL_CHARS
-    for row in _records(value, MAX_SOURCE_FILES):
+    for row in (value if isinstance(value, list) else []):
+        if not isinstance(row, Mapping):
+            continue
         path = normalize_source_path(row.get('path'))
-        if not path or path in seen or remaining <= 0:
+        if not path or path in seen:
             continue
         seen.add(path)
-        content = str(row.get('content') or '')[:min(MAX_SOURCE_FILE_CHARS, remaining)]
-        remaining -= len(content)
+        content = str(row.get('content') or '')
         result.append({
             'path': path,
             'content': content,
@@ -620,7 +619,7 @@ def encoded_program_size(program: Mapping[str, Any]) -> int:
 
 __all__ = [
     'MAX_BINDINGS', 'MAX_CLAIMS', 'MAX_PROGRAM_BYTES', 'MAX_RUNS',
-    'MAX_SOURCE_FILES', 'MAX_VISUALS', 'PROGRAM_CONTRACT_VERSION',
+    'MAX_VISUALS', 'PROGRAM_CONTRACT_VERSION',
     'default_program_fields', 'encoded_program_size', 'normalize_program_fields',
     'normalize_source_path', 'readiness', 'source_tree_digest',
     'scientific_dependency_digest',

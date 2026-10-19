@@ -2,7 +2,7 @@
 
 The SQLite write front may run on a measured-local filesystem while the
 durable truth stays on the persistent data dir as a continuously-shipped
-shadow (`data/fastpath-shadow/`). See `lib/storage_sidecar/fastpath.py` for
+shadow (`data/fastpath-shadow/`). See `lib/storage_authority_sql/fastpath.py` for
 the design invariants. SQLite's own [WAL documentation](https://sqlite.org/wal.html)
 also treats a network filesystem as outside WAL's supported topology; Tofu's
 single-host preflight reduces risk but does not turn network fsync tail latency

@@ -216,3 +216,23 @@ def test_new_target_parent_failure_stops_file_publication_and_retries(project, m
     result = write()
     assert result['ok'] is True
     assert (base / 'new/nested/file.txt').read_bytes() == b'created'
+
+
+@pytest.mark.parametrize('phase', ['prepared', 'replaced', 'journalled'])
+def test_task_path_projection_recovers_before_selection(project, phase):
+    base, sessions = project
+    crash_tool(base, sessions, phase)
+    paths = mods.get_task_modification_paths(str(base), 'task', conv_id='conv', limit=1)
+    assert paths == ([] if phase == 'prepared' else [
+        {'path': 'file.txt', 'rootPath': str(base)}])
+    with locked_intents(mods._get_session_dir(str(base))) as store:
+        assert store.read() == []
+
+
+def test_task_path_projection_preserves_recovery_conflict(project):
+    base, sessions = project
+    crash_tool(base, sessions, 'replaced')
+    (base / 'file.txt').write_bytes(b'later user change')
+    with pytest.raises(IntentError, match='write-recovery-conflict'):
+        mods.get_task_modification_paths(str(base), 'other-task', limit=1)
+    assert (base / 'file.txt').read_bytes() == b'later user change'

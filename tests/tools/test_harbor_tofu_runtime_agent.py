@@ -51,6 +51,45 @@ def _install_fake_harbor(monkeypatch) -> None:
         monkeypatch.setitem(sys.modules, name, module)
 
 
+@pytest.mark.parametrize('wire_model, creator, official_model, context, effort, wire_format', [
+    ('glm-5.3-m17', 'zhipu', 'glm-5.3', 200_000, 'high', 'thinking_type'),
+    ('kimi-k3', 'moonshot', 'kimi-k3', 262_144, 'max', 'reasoning_effort'),
+])
+def test_benchmark_routes_pass_production_admission_with_native_model_defaults(
+    monkeypatch, wire_model, creator, official_model, context, effort, wire_format,
+):
+    _install_fake_harbor(monkeypatch)
+    name = 'rootless_vm.harbor_tofu_runtime_agent'
+    monkeypatch.delitem(sys.modules, name, raising=False)
+    module = importlib.import_module(name)
+    from lib.model_routing import (
+        InMemoryModelRoutingRepository, OwnerBoundary, parse_native_model_selection,
+    )
+    from lib.model_routing.routing import compile_candidates
+    from lib.model_routing.registration import registration_missing_fields
+
+    access = module._harbor_model_routing(
+        base_url='https://models.example/v1', api_key='host-only-test-secret',
+        thinking_format='', model=wire_model)
+    repository = InMemoryModelRoutingRepository()
+    boundary = OwnerBoundary.create(9123)
+    stored = repository.compare_and_swap(boundary, access.document, expected_revision=0)
+    model = stored.public_document()['models'][0]
+    assert access.model == {'creator_id': creator, 'model_id': official_model}
+    assert model['registration_state'] == 'ready'
+    assert registration_missing_fields(model) == []
+    reasoning = model['inference_profile']['reasoning']
+    assert reasoning['default_effort'] == effort
+    assert reasoning['wire_format'] == wire_format
+    selection = parse_native_model_selection({'model': access.model, 'routing': access.routing})
+    candidates = compile_candidates(stored.document, selection)
+    assert len(candidates) == 1
+    assert candidates[0].deployment['wire_model_id'] == wire_model
+    assert candidates[0].offering['context_window'] == context
+    assert model['context_window'] >= context
+    assert 'host-only-test-secret' not in json.dumps(stored.document)
+
+
 @pytest.mark.parametrize('cancel', [False, True])
 def test_slow_evidence_fsync_does_not_block_other_trials_or_lose_cancelled_write(
     tmp_path, monkeypatch, cancel,
@@ -101,9 +140,10 @@ def test_slow_evidence_fsync_does_not_block_other_trials_or_lose_cancelled_write
     assert writer.metrics()['eventWriteTotalMs'] > 0
 
 
-@pytest.mark.parametrize('resolution_accepted', [True, False])
+@pytest.mark.parametrize('resolution_accepted,runtime_ok', [(True, True), (False, True), (True, False)])
+@pytest.mark.parametrize("reasoning", ["default", "high"])
 def test_adapter_uses_exclusive_production_runtime_and_guest_exec(
-    tmp_path, monkeypatch, resolution_accepted,
+    tmp_path, monkeypatch, resolution_accepted, runtime_ok, reasoning,
 ):
     _install_fake_harbor(monkeypatch)
     module_name = "rootless_vm.harbor_tofu_runtime_agent"
@@ -124,7 +164,10 @@ def test_adapter_uses_exclusive_production_runtime_and_guest_exec(
                 "toolName": "custom__run_command",
                 "arguments": {"command": "printf ready"},
             }
-            yield {"type": "done", "seq": 2, "finishReason": "stop"}
+            terminal = {"type": "done", "seq": 2, "finishReason": "stop"}
+            if not runtime_ok:
+                terminal.update(finishReason="error", error={"kind": "network", "retryable": True})
+            yield terminal
 
         def resolve_custom_tool_call(self, call_id, content, *, is_error=False):
             captured["resolution"] = {
@@ -135,7 +178,7 @@ def test_adapter_uses_exclusive_production_runtime_and_guest_exec(
 
         async def result_async(self, **_kwargs):
             return SimpleNamespace(
-                ok=True,
+                ok=runtime_ok,
                 content="fixture complete",
                 status="done",
                 finish_reason="stop",
@@ -201,7 +244,7 @@ def test_adapter_uses_exclusive_production_runtime_and_guest_exec(
         experiment_arm="prompt_lean_kimi",
         runtime_config=runtime_config,
         runtime_config_sha256=config_digest,
-        reasoning_effort="high",
+        reasoning_effort=reasoning,
         timeout_sec=30,
         command_timeout_sec=17,
     )
@@ -219,8 +262,18 @@ def test_adapter_uses_exclusive_production_runtime_and_guest_exec(
         assert (logs / 'tofu-kimi-evidence/runtime-evidence.json').is_file()
         assert not (logs / 'trajectory.json').exists()
         return
+    if not runtime_ok:
+        with pytest.raises(RuntimeError, match="did not reach a successful terminal state"):
+            asyncio.run(agent.run("Solve the fixture.", Environment(), context))
+        assert context.metadata["tofuKimiEvidence"]["runtimeFailure"] == {
+            "kind": "network", "retryable": True}
+        assert (logs / 'tofu-kimi-evidence/runtime-evidence.json').is_file()
+        assert (logs / 'trajectory.json').is_file()
+        return
     asyncio.run(agent.run("Solve the fixture.", Environment(), context))
 
+    actual_config = captured["start_kwargs"]["config"]
+    assert actual_config.get("thinking") == (None if reasoning == "default" else reasoning)
     assert captured["start_kwargs"]["custom_tools_mode"] == "exclusive"
     for tool in captured['start_kwargs']['custom_tools']:
         assert tool['execution']['timeout_s'] > tool['function']['parameters']['properties']['timeout_sec']['maximum']

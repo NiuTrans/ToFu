@@ -23,6 +23,9 @@ from .audit import audit_run
 from .constants import BENCHMARKS, terminal_bench_21_task_digests
 from .opencode_runtime import OPENCODE_AGENT
 from .tofu_kimi_runtime import TOFU_KIMI_AGENT
+from .usage_statistics import (
+    observe_trial_usage, paired_statistics, summarize_usage, validate_reference_prices,
+)
 
 SCHEMA = 'tofu.tb21-comparison/v2'
 MAX_FILE_BYTES = 64 * 1024 * 1024
@@ -79,7 +82,8 @@ def _shared(manifest: dict, config: dict) -> dict:
     if manifest.get('agent') == TOFU_KIMI_AGENT:
         runtime = manifest.get('tofu_kimi_runtime') or {}
         context_tokens = runtime.get('contextWindowTokens')
-        output_tokens = (runtime.get('runtimeConfig') or {}).get('maxTokens')
+        output_tokens = runtime.get('requestedMaxOutputTokens',
+            (runtime.get('runtimeConfig') or {}).get('maxTokens'))
     else:
         runtime = manifest.get('opencode_runtime') or {}
         context_tokens = runtime.get('contextTokens')
@@ -155,8 +159,12 @@ def _create_json(path: Path, value: dict) -> None:
 
 
 def register_comparison(baseline: Path, candidate: Path, *, output_root: Path,
-                        run_id: str, target_pp: float = 10, seed: int = 1729) -> Path:
+                        run_id: str, target_pp: float = 10, seed: int = 1729,
+                        reference_prices: dict | None = None,
+                        infrastructure_retry_limit: int = 0) -> Path:
     """Freeze two prepared Harbor runs before either has dispatched a trial."""
+    if type(infrastructure_retry_limit) is not int or not 0 <= infrastructure_retry_limit <= 10:
+        raise ValueError('infrastructure_retry_limit must be in 0..10')
     arms = {'baseline': _load_run(baseline), 'candidate': _load_run(candidate)}
     if arms['baseline'][0] == arms['candidate'][0]:
         raise ValueError('comparison arms must be distinct')
@@ -167,11 +175,14 @@ def register_comparison(baseline: Path, candidate: Path, *, output_root: Path,
         # Re-read after claiming the same locks as Harbor dispatch.
         arms = {role: _load_run(run[0]) for role, run in arms.items()}
         return _register_prepared(arms, output_root=output_root, run_id=run_id,
-                                  target_pp=target_pp, seed=seed)
+                                  target_pp=target_pp, seed=seed,
+                                  reference_prices=validate_reference_prices(reference_prices),
+                                  infrastructure_retry_limit=infrastructure_retry_limit)
 
 
 def _register_prepared(arms: dict, *, output_root: Path, run_id: str,
-                       target_pp: float, seed: int) -> Path:
+                       target_pp: float, seed: int, reference_prices=None,
+                       infrastructure_retry_limit: int = 0) -> Path:
     issues = _compatibility(arms['baseline'], arms['candidate'])
     if issues:
         raise ValueError('incomparable prepared runs: ' + ', '.join(issues))
@@ -195,6 +206,8 @@ def _register_prepared(arms: dict, *, output_root: Path, run_id: str,
         'samplingPolicy': 'Each native harness configuration is frozen separately; equal wire sampling is not claimed.',
         'targetPercentagePoints': target_pp, 'bootstrapSeed': seed,
         'bootstrapSamples': 10000, 'confidence': 0.95,
+        'referencePrices': reference_prices,
+        'maxInfrastructureRetries': infrastructure_retry_limit,
         'metric': 'task-macro-mean-binary-reward', 'taskNames': task_names,
         'attemptsPerTask': arms['baseline'][1]['attempts_per_task'],
         'shared': _shared(arms['baseline'][1], arms['baseline'][2]),
@@ -227,8 +240,12 @@ def validate_registration(run_dir: Path, manifest: dict, config: dict) -> dict |
 
 class EvidenceIndex:
     """One bounded pass; paths+hashes are receipts, raw content stays private."""
-    def __init__(self, root: Path):
+    def __init__(self, root: Path, *, attempts: int = 1):
         self.root = root
+        if type(attempts) is not int or not 1 <= attempts <= 100:
+            raise ValueError('evidence attempt multiplier must be in 1..100')
+        self.max_bytes = MAX_RUN_BYTES * attempts
+        self.max_files = MAX_FILES * attempts
         self.files: list[dict] = []
         self.total = 0
         self.unstable = False
@@ -237,17 +254,21 @@ class EvidenceIndex:
     def add(self, path: Path) -> None:
         if path.is_symlink() or not path.resolve().is_relative_to(self.root):
             raise ValueError('evidence symlink or escaped path')
+        if any(parent.is_symlink() for parent in path.parents if parent != self.root):
+            raise ValueError('evidence ancestor symlink')
+        if path in self.signatures:
+            return
         before = path.stat()
         if not path.is_file() or before.st_size > MAX_TRACE_BYTES:
             raise ValueError('evidence exceeds per-file bound or is not regular')
-        if len(self.files) >= MAX_FILES or self.total + before.st_size > MAX_RUN_BYTES:
+        if len(self.files) >= self.max_files or self.total + before.st_size > self.max_bytes:
             raise ValueError('evidence exceeds run file/byte budget')
         digest = hashlib.sha256()
         size = 0
         with path.open('rb') as stream:
             while chunk := stream.read(1024 * 1024):
                 size += len(chunk)
-                if size > MAX_TRACE_BYTES or self.total + size > MAX_RUN_BYTES:
+                if size > MAX_TRACE_BYTES or self.total + size > self.max_bytes:
                     raise ValueError('growing evidence exceeds byte budget')
                 digest.update(chunk)
         after = path.stat()
@@ -389,9 +410,9 @@ def _trial(path: Path, result: dict, expected_model: str) -> dict:
     }
 
 
-def _observe(run: tuple) -> dict:
+def _observe(run: tuple, *, reference_prices=None) -> dict:
     root, manifest, config, job = run
-    index = EvidenceIndex(root)
+    index = EvidenceIndex(root, attempts=manifest.get('attempts_per_task', 1))
     for name in ('manifest.json', 'job-config.json', 'comparison-registration.json'):
         if (root / name).exists():
             index.add(root / name)
@@ -423,6 +444,29 @@ def _observe(run: tuple) -> dict:
                             index.add(path)
         if (job / 'result.json').exists():
             index.add(job / 'result.json')
+    infrastructure_rows = []
+    archive = root / 'infrastructure-attempts'
+    if archive.exists():
+        if archive.is_symlink():
+            raise ValueError('infrastructure archive symlink')
+        for current, dirs, files in os.walk(archive, followlinks=False):
+            if any((Path(current) / name).is_symlink() for name in dirs):
+                raise ValueError('infrastructure archive directory symlink')
+            if 'result.json' in files:
+                path = Path(current) / 'result.json'
+                result = _read(path)
+                if result.get('task_name'):
+                    index.add(path)
+                    cycle_name = path.relative_to(archive).parts[0]
+                    if not cycle_name.startswith('attempt-') or not cycle_name[8:].isdigit():
+                        raise ValueError('unrecognized infrastructure archive cycle')
+                    row = _trial(path, result, str((manifest.get('models') or [''])[0]))
+                    row['infrastructureCycle'] = int(cycle_name[8:])
+                    infrastructure_rows.append(row)
+    for row in rows + infrastructure_rows:
+        row['usageAccounting'] = observe_trial_usage(
+            root, Path(row['resultPath']).parent, read_json=_read,
+            add_evidence=index.add, rates=reference_prices)
     try:
         audit = audit_run(root, allow_errors=True)
         failures = [c['name'] for c in audit['checks'] if not c['ok']]
@@ -465,6 +509,9 @@ def _observe(run: tuple) -> dict:
                             for t in tasks if t not in means],
         'evidenceBytes': index.total, 'evidence': index.files,
         'evidenceIndexSha256': _sha(index.files), 'trials': rows,
+        'infrastructureTrials': infrastructure_rows,
+        'currentAttemptUsage': summarize_usage(rows, rates=reference_prices),
+        'allAttemptUsage': summarize_usage(rows + infrastructure_rows, rates=reference_prices),
     }
 
 
@@ -528,12 +575,15 @@ def verify_report(path: Path) -> dict:
     for role in ('baseline', 'candidate'):
         arm = report['arms'][role]
         descriptors = arm['evidence']
-        if len(descriptors) > MAX_FILES or _sha(descriptors) != arm['evidenceIndexSha256']:
+        attempts = arm.get('attemptsPerTask', 1)
+        if type(attempts) is not int or not 1 <= attempts <= 100:
+            raise ValueError('invalid evidence attempt multiplier')
+        if len(descriptors) > MAX_FILES * attempts or _sha(descriptors) != arm['evidenceIndexSha256']:
             raise ValueError('evidence index digest or file bound violated')
         root = Path(arm['runRoot'])
         if root.is_symlink() or not root.is_dir():
             raise ValueError('evidence run root is missing or a symlink')
-        index = EvidenceIndex(root.resolve())
+        index = EvidenceIndex(root.resolve(), attempts=attempts)
         for expected in descriptors:
             relative = Path(expected['path'])
             if relative.is_absolute() or '..' in relative.parts:
@@ -572,6 +622,19 @@ def render_report(report: dict) -> str:
     lines += ['', '失败边界统计：', '', '| 运行 | 观察到的结果/异常 | 数量 |', '|---|---|---:|']
     for role, arm in report['arms'].items():
         lines += [f'| {role} | {key} | {value} |' for key, value in arm['diagnoses'].items()]
+    if report.get('efficiency'):
+        efficiency = report['efficiency']
+        lines += ['', '用量与费用（包括归档重跑；参考价不是实际账单）：', '',
+                  '| 运行 | 已知调用 | 未完整计量试次 | 非缓存输入 | 缓存读取 | 输出 | 已知参考费用 USD |',
+                  '|---|---:|---:|---:|---:|---:|---:|']
+        for role, arm in report['arms'].items():
+            u = arm['allAttemptUsage']
+            lines.append(f"| {role} | {u['observedCalls']} | {u['incompleteUsageTrials']} | "
+                         f"{u['uncachedInputTokens']} | {u['cacheReadTokens']} | "
+                         f"{u['outputTokens']} | {u['knownReferenceCostUsd']} |")
+        lines += ['', f"费用比 95% 任务簇区间：{efficiency['costRatio95CI']}。",
+                  f"平均 agent 耗时差 95% 区间（秒）：{efficiency['meanAgentSecondsDelta95CI']}。",
+                  '用量不完整时只报告已知费用，不以缺失当零或给出费用显著性结论。']
     lines += ['', '全部 89 题账本（每格为 成功 / 已评分失败 / 未评分 / 缺失）：', '',
               '| 任务 | OpenCode | Tofu |', '|---|---|---|']
     for baseline, candidate in zip(report['arms']['baseline']['fullDomain']['tasks'],
@@ -591,7 +654,8 @@ def render_report(report: dict) -> str:
 
 
 def compare_runs(baseline: Path, candidate: Path, *, output_root: Path,
-                 run_id: str, target_pp: float = 10, seed: int = 1729) -> tuple[dict, Path]:
+                 run_id: str, target_pp: float = 10, seed: int = 1729,
+                 reference_prices: dict | None = None) -> tuple[dict, Path]:
     arms = {'baseline': _load_run(baseline), 'candidate': _load_run(candidate)}
     if arms['baseline'][0] == arms['candidate'][0]:
         raise ValueError('comparison arms must be distinct')
@@ -608,9 +672,14 @@ def compare_runs(baseline: Path, candidate: Path, *, output_root: Path,
         issues.append('pair_not_preregistered')
     else:
         target_pp, seed = protocol['targetPercentagePoints'], protocol['bootstrapSeed']
+        frozen_prices = protocol.get('referencePrices')
+        if reference_prices is not None and validate_reference_prices(reference_prices) != frozen_prices:
+            raise ValueError('reference prices differ from preregistered protocol')
+        reference_prices = frozen_prices
+    reference_prices = validate_reference_prices(reference_prices)
     if not math.isfinite(target_pp) or not 0 < target_pp <= 100:
         raise ValueError('target_pp must be finite and in (0, 100]')
-    observed = {role: _observe(run) for role, run in arms.items()}
+    observed = {role: _observe(run, reference_prices=reference_prices) for role, run in arms.items()}
     a, b = observed['baseline'], observed['candidate']
     full_tasks = sorted(terminal_bench_21_task_digests())
     all_scored = all(obs['fullDomain']['allTrialsScored'] for obs in observed.values())
@@ -619,6 +688,9 @@ def compare_runs(baseline: Path, candidate: Path, *, output_root: Path,
     for role, obs in observed.items():
         if obs['expectedTasks'] != 89 or obs['attemptsPerTask'] != 5 or obs['completeTasks'] != 89:
             issues.append(f'{role}:incomplete_89x5')
+        if protocol and any(row['infrastructureCycle'] > protocol.get('maxInfrastructureRetries', 0)
+                            for row in obs['infrastructureTrials']):
+            issues.append(f'{role}:infrastructure_retry_allowance_exceeded')
         if obs['surplus']:
             issues.append(f'{role}:surplus_trials')
         if obs['auditFailures']:
@@ -634,6 +706,7 @@ def compare_runs(baseline: Path, candidate: Path, *, output_root: Path,
             name: hashlib.sha256(path.read_bytes()).hexdigest()
             for name, path in {
                 'comparison': Path(__file__),
+                'usageStatistics': Path(__file__).with_name('usage_statistics.py'),
                 'harborAudit': Path(__file__).with_name('audit.py'),
                 'tofuProjection': Path(__file__).parent.parent / 'long_agent_release/tofu_projection.py',
                 'taskDigestLock': Path(__file__).with_name('terminal_bench_21_task_digests.json'),
@@ -658,6 +731,8 @@ def compare_runs(baseline: Path, candidate: Path, *, output_root: Path,
             'inferencePolicy': 'No subset comparison. Confidence interval requires scored outcomes for every planned attempt in both arms.',
         },
         'arms': observed,
+        'efficiency': paired_statistics(
+            a, b, task_names=full_tasks, seed=seed, rates=reference_prices),
     }
     ok, detail = output_guard_status(output_root)
     if not ok:

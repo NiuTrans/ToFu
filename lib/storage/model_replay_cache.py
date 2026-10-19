@@ -13,7 +13,7 @@ from pathlib import Path
 import time
 
 from lib.json_store import locked_path, write_bytes_atomic
-from lib.runtime_paths import data_root
+from lib.runtime.runtime_paths import data_root
 from runtime_guards import resolve_resource_budget
 
 MAX_ENTRY_BYTES = 8 * 1024 * 1024

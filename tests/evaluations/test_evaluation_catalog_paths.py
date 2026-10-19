@@ -48,6 +48,9 @@ def test_new_catalog_entry_drives_existing_runner_without_benchmark_branches(hos
 @pytest.mark.parametrize("mutation", [
     lambda p: p["benchmarks"].append(copy.deepcopy(p["benchmarks"][0])),
     lambda p: p["benchmarks"][0].update(dataset="suite@latest"),
+    lambda p: p["benchmarks"][0].update(required_capabilities=[[]]),
+    lambda p: p["benchmarks"][0].update(required_capabilities=["unreviewed-capability"]),
+    lambda p: p["benchmarks"][0].update(required_capabilities=["separate-verifier"] * 2),
     lambda p: p["benchmarks"][0].update(task_count=True),
     lambda p: p["benchmarks"][0].update(task_digest_lock="../escape.json"),
     lambda p: p["benchmarks"][0].update(source_commit="main"),
@@ -67,7 +70,8 @@ def test_catalog_task_digest_drift_and_surplus_fail_closed(host_tmp_path):
     (host_tmp_path / "tasks.json").write_text(json.dumps({"task": "sha256:not-a-digest"}))
     with pytest.raises(ValueError, match="task digest lock"):
         load_catalog(path)
-    assert set(BENCHMARKS) == {"terminal-bench-2.1", "swebench-verified"}
+    assert {"terminal-bench-2.1", "swebench-verified"} <= set(BENCHMARKS)
+    assert "frontier-harness" not in BENCHMARKS
 
 
 def test_default_storage_stays_on_checkout_volume_not_home_or_tmp(monkeypatch):

@@ -39,7 +39,7 @@ from lib.llm.stream_result import (
     ProviderStreamState,
     ensure_provider_stream_result,
 )
-from lib.llm_errors import (
+from lib.llm.llm_errors import (
     AbortedError,
     ContentFilterError,
     EndpointUnreachableError,
@@ -50,6 +50,7 @@ from lib.llm_errors import (
     PROVIDER_RESPONSE_ERRORS,
     RateLimitError,
     RetryableAPIError,
+    SubscriptionConnectionError,
     _RETRYABLE,
 )
 from lib.log import get_logger
@@ -100,6 +101,46 @@ def _close_abandoned_raw_dumper(plan, log_prefix: str, reason: str) -> None:
     except Exception as error:
         logger.debug('%s RawSSEDumper close before %s raised: %s',
                      log_prefix, reason, error)
+
+
+@contextlib.asynccontextmanager
+async def _abortable_stream_open(context, abort_check, log_prefix: str = ''):
+    """Own and join HTTP setup before handing the response to its body reader.
+
+    Register response cleanup before the opening task completes, so Stop or
+    caller cancellation racing with headers cannot abandon a socket or POST.
+    """
+    if abort_check is None:
+        async with context as opened:
+            yield opened
+        return
+
+    from lib.llm import _transport as _tp
+
+    def check_abort():
+        try:
+            aborted = abort_check()
+        except Exception as exc:
+            logger.debug('%s abort_check raised: %s', log_prefix, exc)
+            return
+        if aborted:
+            raise AbortedError('Aborted by user')
+
+    check_abort()  # A pre-stopped request must not open a connection.
+    async with contextlib.AsyncExitStack() as stack:
+        opening = asyncio.create_task(stack.enter_async_context(context))
+        try:
+            while not opening.done():
+                check_abort()
+                await asyncio.wait(
+                    {opening}, timeout=max(0.01, _tp.ABORT_POLL_INTERVAL))
+            opened = opening.result()
+            check_abort()  # Stop wins a simultaneous header arrival.
+            yield opened
+        finally:
+            if not opening.done():
+                opening.cancel()
+            await asyncio.gather(opening, return_exceptions=True)
 
 
 @contextlib.asynccontextmanager
@@ -157,10 +198,10 @@ async def _open_server_stream(plan, log_prefix: str = ''):
         try:
             mark_model_request_dispatched(plan)
             response = await stream_context.__aenter__()
-        except (httpx.ConnectTimeout, httpx.ConnectError):
+        except (httpx.ConnectTimeout, httpx.ConnectError, httpx.ProxyError) as error:
             report_subscription_route(plan.url, route, False)
-            logger.info('%s connection failed via %s — trying next '
-                        'subscription route', log_prefix, route.label)
+            logger.info('%s connection failed via %s (%s) — trying next '
+                        'subscription route', log_prefix, route.label, type(error).__name__)
             known = {item.route_id for item in routes}
             refreshed = await asyncio.to_thread(
                 subscription_route_candidates, plan.url)
@@ -185,9 +226,7 @@ async def _open_server_stream(plan, log_prefix: str = ''):
         finally:
             await stream_context.__aexit__(None, None, None)
         return
-    raise EndpointUnreachableError(
-        'all server subscription routes failed during connection setup',
-        base_url=plan.url) from None
+    raise SubscriptionConnectionError(base_url=plan.url) from None
 
 
 async def async_stream_chat(body, *, on_thinking=None, on_content=None,
@@ -262,6 +301,7 @@ async def _async_stream_chat_once(body, **kwargs):
     with ModelRequestBudgetScope(body) as scope:
         result = ensure_provider_stream_result(await _async_stream_chat_once_impl(scope.body, **kwargs))
         scope.usage = result.usage
+        scope.verified_complete = result.is_verified_complete
         return result
 
 
@@ -338,11 +378,17 @@ async def _async_stream_chat_once_impl(body, *, on_thinking=None, on_content=Non
         egress_route = 'direct'
     else:
         try:
-            egress_route = await asyncio.to_thread(
-                _eg.route_request, plan.url, user_id=_owner_scope)
+            from lib.llm.egress_recovery import async_resolve_egress_route
+            egress_route = await async_resolve_egress_route(
+                _eg, plan.url, user_id=_owner_scope,
+                abort_check=abort_check, on_wait=on_stream_wait)
+            _progress.mark_transport_activity()
         except _eg.EgressUnavailable as e:
             _close_abandoned_raw_dumper(plan, log_prefix, 'egress failure')
             raise EndpointUnreachableError(str(e), base_url=plan.url) from e
+        except BaseException:
+            _close_abandoned_raw_dumper(plan, log_prefix, 'egress recovery interrupted')
+            raise
     if egress_route != 'direct':
         # The sync bridge attempt prepares its own plan; close this abandoned
         # async plan first so debug raw-dump file descriptors never leak.
@@ -400,7 +446,9 @@ async def _async_stream_chat_once_impl(body, *, on_thinking=None, on_content=Non
 
     raw_chunks = None
     try:
-        async with _open_server_stream(plan, log_prefix) as (resp, route):
+        async with _abortable_stream_open(
+                _open_server_stream(plan, log_prefix), abort_check,
+                log_prefix) as (resp, route):
             _active_subscription_route = route
             route_extension = resp.extensions.get('tofu_network_route')
             if isinstance(route_extension, dict):

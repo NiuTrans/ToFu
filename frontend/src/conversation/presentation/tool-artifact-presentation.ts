@@ -8,6 +8,8 @@
 import { escapeHtmlText } from '../../html-safety';
 import type { Translator } from '../../i18n';
 
+import { toolFailureText } from './tool-failure-presentation';
+
 type RecordValue = Readonly<Record<string, unknown>>;
 type ArtifactRequest = Readonly<{
   search: boolean;
@@ -158,37 +160,7 @@ function cursorLabel(raw: unknown, search: boolean, translate: Translator): stri
 
 /** Raw result JSON stays in evidence. Only safe error copy reaches the summary. */
 export function toolArtifactFailureText(raw: string, translate: Translator): string {
-  const fallback = () => translate('toolArtifact.failureDetails');
-  const safeLine = (value: string): string => {
-    const shown = value.slice(0, 513).trim();
-    // A prose diagnostic can quote private retrieval metadata too. Do not guess
-    // how to redact arbitrary signed tokens; leave the whole line in evidence.
-    if (/tool-result:|\btr:|\btrq\d+\.|nextCursor|resumeCursor|artifactRef|artifact_ref|\bcursor\b/i.test(shown)) return '';
-    return bounded(shown, 512);
-  };
-  const prefix = raw.slice(0, TOOL_ARTIFACT_PRESENTATION_LIMITS.argumentUnits).trim();
-  if (prefix.startsWith('{') || prefix.startsWith('[')) {
-    if (raw.length > TOOL_ARTIFACT_PRESENTATION_LIMITS.argumentUnits) return fallback();
-    let parsed: RecordValue | null;
-    try { parsed = record(JSON.parse(raw) as unknown); } catch { return fallback(); }
-    if (!parsed) return fallback();
-    const items = field(parsed, 'items');
-    const failures = Array.isArray(items)
-      ? items.slice(0, TOOL_ARTIFACT_PRESENTATION_LIMITS.items).map(record)
-        .filter((item): item is RecordValue => item !== null && field(item, 'status') === 'error')
-      : [parsed];
-    for (const failure of failures) {
-      const error = record(field(failure, 'error'));
-      if (!error) continue;
-      const rawCode = text(field(error, 'code'));
-      const code = /^[a-z][a-z0-9_.-]{0,79}$/i.test(rawCode) ? rawCode : '';
-      const message = safeLine(text(field(error, 'message')) || text(field(error, 'detail')));
-      if (code || message) return bounded([code, message].filter(Boolean).join(': '), 512);
-    }
-    return fallback();
-  }
-  const firstLine = prefix.split('\n', 1)[0];
-  return safeLine(firstLine) || fallback();
+  return toolFailureText(raw, translate('toolArtifact.failureDetails'));
 }
 
 /** Requested scope is technical evidence, never claimed returned coverage. */

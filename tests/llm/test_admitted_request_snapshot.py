@@ -6,7 +6,7 @@ import pytest
 
 from lib.llm._sse_core import prepare_request
 from lib.llm.request import AdmittedRequest, transport_body
-from lib.llm_errors import PromptTooLongError
+from lib.llm.llm_errors import PromptTooLongError
 
 pytestmark = pytest.mark.unit
 

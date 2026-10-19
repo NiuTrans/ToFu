@@ -11,8 +11,8 @@ pytestmark = pytest.mark.unit
 
 def test_server_import_defers_route_workers_to_serving_lifecycle():
     import server
-    import lib.app_assembly as app_assembly
-    import lib.server_background_services as background_services
+    import lib.app.app_assembly as app_assembly
+    import lib.server.server_background_services as background_services
 
     source = inspect.getsource(server)
     assert 'register_all(app, start_workers=False)' in inspect.getsource(

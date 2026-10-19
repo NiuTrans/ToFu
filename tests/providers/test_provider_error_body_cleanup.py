@@ -4,7 +4,7 @@ import asyncio
 import pytest
 
 from lib.llm import provider_error_body as bodies
-from lib.llm_errors import AbortedError
+from lib.llm.llm_errors import AbortedError
 
 pytestmark = pytest.mark.unit
 

@@ -3,6 +3,8 @@ import { escapeHtml } from '../../../html-safety';
 import { computeToolBatches, shouldCollapseToolBatch, summarizeToolAttention,
   toolGroupRoundDisplay, toolGroupRoundNumber, toolGroupRoundTitle } from '../../presentation/tool-execution-groups';
 import { isProgramToolRound } from '../../presentation/tool-round-presentation';
+
+import { programOwnsGateway } from '../../presentation/program-activity';
 import { renderNarration } from './narration';
 import type { createToolGroupContext } from './context';
 import type { ToolGroupRound, ToolNarrationSegment, ToolGroupPorts } from './contracts';
@@ -32,7 +34,8 @@ function _renderTurnHead(size: number, group: unknown, collapsed: boolean, ports
 export function renderToolGroups(rounds: readonly ToolGroupRound[], allRounds: readonly ToolGroupRound[],
   context: ReturnType<typeof createToolGroupContext>, slot: (round: ToolGroupRound) => string,
   ports: ToolGroupPorts, narrByRound?: ReadonlyMap<string, readonly ToolNarrationSegment[]>): string {
-  const localGroups = rounds === allRounds ? context.groups : computeToolBatches(rounds);
+  const localGroups = rounds === allRounds ? context.groups
+    : computeToolBatches(rounds.filter(round => !programOwnsGateway(round, allRounds)));
   return localGroups.map(g => {
     const contextGroup = context.groupFor(g);
     const slots = g.rounds.map(slot).join('');

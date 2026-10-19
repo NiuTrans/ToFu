@@ -6,8 +6,8 @@ import time
 import uuid
 import pytest
 from lib.storage import StorageError
-from lib.task_event_contract import EVENT_READ_GUARD_CONTRACT, EVENT_READ_GUARD_SCOPED_CONTRACT
-from tests.storage.test_storage_sidecar_contract import storage as storage
+from lib.task_replay.task_event_contract import EVENT_READ_GUARD_CONTRACT, EVENT_READ_GUARD_SCOPED_CONTRACT
+from tests.storage.test_storage_authority_sql_contract import storage as storage
 
 pytestmark = pytest.mark.unit
 
@@ -239,3 +239,27 @@ def test_scoped_guard_rejects_invalid_type_scope(storage, types):
     with pytest.raises(StorageError) as error:
         storage.client.query('event.bounds', {'task_id':uuid.uuid4().hex, 'types':types, 'include_read_guard':True})
     assert error.value.code == 'database_protocol_error'
+
+
+def test_event_batch_exceeds_former_quota_preserves_every_row_and_deduplicates(storage):
+    client = storage.client
+    prefix = uuid.uuid4().hex
+    events = [{"task_id": f"{prefix}-{index}", "sequence": 1,
+               "event": {"type": "round_end", "value": index}}
+              for index in range(513)]
+    result = client.command("event.append_batch", {"events": events}, None)
+    assert result["inserted"] == 513
+    assert len(result["results"]) == 513
+    staged = [dict(item, sequence=2) for item in events]
+    staged.append(dict(events[0], event={"type": "round_end", "value": "conflict"}))
+    with pytest.raises(StorageError):
+        client.command("event.append_batch", {"events": staged}, None)
+    for item in events:
+        task = item["task_id"]
+        assert bounds(client, task, False)["retained_count"] == 1
+        rows = client.query("event.list", {"task_id": task, "after_sequence": 0, "limit": 2})
+        assert len(rows) == 1
+        assert rows[0]["event"]["value"] == item["event"]["value"]
+    replay = client.command("event.append_batch", {"events": events}, None)
+    assert replay["inserted"] == 0
+    assert replay["deduplicated"] == 513

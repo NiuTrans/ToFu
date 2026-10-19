@@ -19,6 +19,13 @@ function failureModule() {
     { exports, Date, Map, Set, require: () => presentationModule() });
   return exports;
 }
+function receiptModule() {
+  const exports = {};
+  const source = fs.readFileSync(`${root}/frontend/src/conversation/presentation/agent-message-receipts.ts`, 'utf8');
+  vm.runInNewContext(ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText,
+    { exports, require: () => ({ escapeHtmlText: value => String(value ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;') }) });
+  return exports;
+}
 function runtime() {
   const locale = JSON.parse(fs.readFileSync(`${root}/frontend/src/i18n/locales/en.json`, 'utf8'));
   const context = vm.createContext({ console, Date, Set, Map,
@@ -31,7 +38,7 @@ function runtime() {
 
     createSwarmReconciliationScheduler: () => ({}),
   });
-  Object.assign(context, presentationModule(), failureModule());
+  Object.assign(context, presentationModule(), failureModule(), receiptModule());
   for (const name of ['streaming_swarm_panel', 'swarm_live_projection']) {
     vm.runInContext(fs.readFileSync(`${root}/frontend/src/runtime/sections/ui/${name}.js`, 'utf8'), context);
   }
@@ -86,11 +93,17 @@ test('failed agent card distinguishes no-slot admission from generic errors and 
   const edited = render(undefined, 'Worker failed', 2);
   assert.match(edited, /Partial edits may remain/);
 });
+function entityRecordModule() {
+  const exports = {};
+  const source = fs.readFileSync(`${root}/frontend/src/core/entity-record.ts`, 'utf8');
+  vm.runInNewContext(ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText, { exports });
+  return exports;
+}
 function overlayModule() {
   const source = fs.readFileSync(`${root}/frontend/src/conversation/application/swarm-presentation-overlay.ts`, 'utf8');
   const exports = {};
   vm.runInNewContext(ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText,
-    { exports, Date, Map, Set, structuredClone, require: name => name.includes('swarm-failure') ? failureModule() : presentationModule() });
+    { exports, Date, Map, Set, structuredClone, require: name => name.includes('turn-store') ? entityRecordModule() : name.includes('agent-message-receipts') ? receiptModule() : name.includes('swarm-failure') ? failureModule() : presentationModule() });
   return exports;
 }
 const turn = rounds => ({ turnId: 't', actor: 'assistant', status: 'completed', projectionRevision: 1, projection: { toolRounds: rounds } });
@@ -931,6 +944,110 @@ test('only the current live producer can provision a launch before durable tool-
 });
 
 
+test('legacy provisional follow-up reconciles to its durable roster without inventing an execution task', () => {
+  const first = { toolName: 'spawn_agents', toolCallId: 'first-launch', roundNum: 4,
+    taskId: 'parent-exec', attemptId: 'attempt',
+    _swarmSnapshot: { swarm_id: 'shared-run', settled: false,
+      agents: ['a', 'b'].map(id => ({ id, status: 'running' })) } };
+  const durable = freezeDeep({ ...turn([first]), status: 'running', currentAttemptId: 'attempt' });
+  const h = pushHarness([durable]), before = JSON.stringify(durable);
+  const reducePhase = h.r._handleSwarmPhase;
+  let producerTaskId;
+  h.r._handleSwarmPhase = (frame, context) => {
+    producerTaskId = context.taskId;
+    return reducePhase(frame, context);
+  };
+  // The old mirror has conversation routing and a run, but no execution task.
+  // Its disjoint second roster arrives before that launch's durable tool row.
+  const scope = { conversationId: 'conv', taskId: 'conv', swarmId: 'shared-run' };
+  h.controller.handleFrame({ ...scope, type: 'swarm_phase', phase: 'spawning', agents: [{ id: 'c' }] });
+  h.controller.handleFrame({ ...scope, type: 'swarm_agent_tool_call', agentId: 'c',
+    callId: 'live-c', toolName: 'read_files', callStatus: 'done', preview: 'second launch evidence' });
+  const provisional = h.overlays.get('t').projection.toolRounds.find(round => !round.toolCallId);
+  assert.ok(provisional, 'the actual push controller created a provisional follow-up');
+  const second = { toolName: 'spawn_agents', toolCallId: 'second-launch', roundNum: 9,
+    taskId: 'parent-exec', attemptId: 'attempt',
+    _swarmSnapshot: { swarm_id: 'shared-run', settled: false, agents: [{ id: 'c', status: 'running' }] } };
+  const snapshot = freezeDeep({ ...durable, projectionRevision: 2, projection: {
+    content: 'new parent snapshot', toolRounds: [first, { toolName: 'read_files', roundNum: 8 }, second],
+  } });
+  h.state.turnsById.t = snapshot;
+  const snapshotBefore = JSON.stringify(snapshot);
+  const composed = h.controller.presentation.compose({ id: 'conv' }, h.state, h.state).turnsById.t;
+  const rounds = composed.projection.toolRounds;
+  assert.equal(rounds.length, 3, 'the provisional launch must not survive beside its durable occurrence');
+  assert.equal(provisional.taskId, undefined, 'a run id is never an inferred execution task');
+
+  assert.equal(producerTaskId, '', 'the reducer context must not invent a producer either');
+  assert.equal(composed.projection.content, 'new parent snapshot');
+  assert.equal(JSON.stringify(rounds[0]), JSON.stringify(first), 'the earlier disjoint roster remains unchanged');
+  assert.equal(rounds[2].toolCallId, 'second-launch');
+  assert.equal(rounds[2].taskId, 'parent-exec');
+  assert.equal(rounds[2].attemptId, 'attempt');
+  assert.equal(rounds[2]._swarmRunId, 'shared-run');
+  assert.equal(rounds[2]._swarmAgents[0]._toolCalls[0].preview, 'second launch evidence');
+  h.controller.handleFrame({ ...scope, executionTaskId: 'parent-exec', attemptId: 'attempt',
+    type: 'swarm_agent_tool_call', agentId: 'c', callId: 'after-snapshot',
+    toolName: 'grep_search', callStatus: 'done' });
+  const updated = h.overlays.get('t').projection.toolRounds;
+  assert.equal(updated.length, 3);
+  assert.equal(updated[2]._swarmAgents[0]._toolCalls.at(-1).callId, 'after-snapshot');
+  assert.equal(JSON.stringify(durable), before);
+  assert.equal(JSON.stringify(snapshot), snapshotBefore);
+});
+
+test('provisional current producer keeps execution and attempt separate from run through durable snapshot', () => {
+  for (const identity of [
+    { conversationId: 'conv', taskId: 'parent-exec' },
+    { conversationId: 'conv', taskId: 'conv', executionTaskId: 'parent-exec' },
+  ]) {
+    const durable = freezeDeep({ ...turn([]), status: 'running', currentAttemptId: 'attempt' });
+    const h = pushHarness([durable]);
+    h.state.attemptsById = { attempt: { attemptId: 'attempt', turnId: 't', taskId: 'parent-exec', status: 'running' } };
+    h.controller.handleFrame({ ...identity, attemptId: 'attempt', swarmId: 'different-run',
+      type: 'swarm_phase', phase: 'spawning', agents: [{ id: 'child' }] });
+    const provisional = h.overlays.get('t').projection.toolRounds[0];
+    assert.equal(provisional.taskId, 'parent-exec');
+    assert.equal(provisional.attemptId, 'attempt');
+    assert.equal(provisional._swarmRunId, 'different-run');
+    const launch = { toolName: 'spawn_agents', toolCallId: 'durable-launch', roundNum: 7,
+      taskId: 'parent-exec', attemptId: 'attempt',
+      _swarmSnapshot: { swarm_id: 'different-run', settled: false, agents: [{ id: 'child', status: 'running' }] } };
+    h.state.turnsById.t = freezeDeep({ ...durable, projectionRevision: 2, projection: { toolRounds: [launch] } });
+    const rounds = h.controller.presentation.compose({ id: 'conv' }, h.state, h.state).turnsById.t.projection.toolRounds;
+    assert.equal(rounds.length, 1);
+    assert.equal(rounds[0].toolCallId, 'durable-launch');
+    assert.equal(rounds[0].taskId, 'parent-exec');
+    assert.equal(rounds[0].attemptId, 'attempt');
+    assert.equal(rounds[0]._swarmAgents[0].id, 'child');
+    assert.equal(durable.projection.toolRounds.length, 0);
+  }
+});
+
+test('provisional reconciliation never merges conflicting execution, attempt, run or disjoint launch roster', () => {
+  const h = pushHarness([freezeDeep({ ...turn([]), status: 'running', currentAttemptId: 'attempt' })]);
+  h.state.attemptsById = { attempt: { attemptId: 'attempt', turnId: 't', taskId: 'parent-exec', status: 'running' } };
+  h.controller.handleFrame({ conversationId: 'conv', taskId: 'conv', executionTaskId: 'parent-exec',
+    attemptId: 'attempt', swarmId: 'different-run', type: 'swarm_phase', phase: 'spawning', agents: [{ id: 'child' }] });
+  const previous = freezeDeep(h.overlays.get('t'));
+  const launch = { toolName: 'spawn_agents', toolCallId: 'durable-launch', roundNum: 1,
+    taskId: 'parent-exec', attemptId: 'attempt',
+    _swarmSnapshot: { swarm_id: 'different-run', settled: false, agents: [{ id: 'child', status: 'running' }] } };
+  for (const conflict of [
+    { taskId: 'foreign-exec' }, { attemptId: 'foreign-attempt' },
+    { _swarmSnapshot: { ...launch._swarmSnapshot, swarm_id: 'foreign-run' } },
+    { _swarmSnapshot: { ...launch._swarmSnapshot, agents: [{ id: 'other-child', status: 'running' }] } },
+  ]) {
+    const authority = freezeDeep(turn([{ ...launch, ...conflict }]));
+    const before = JSON.stringify([authority, previous]);
+    const rounds = overlayModule().swarmPresentationOverlay.rebase(authority, previous).projection.toolRounds;
+    assert.equal(rounds.length, 2, 'incompatible launches must remain separate');
+    assert.deepEqual(rounds.find(round => round.toolCallId), authority.projection.toolRounds[0]);
+    assert.equal(rounds.find(round => !round.toolCallId)._swarmAgents[0].id, 'child');
+    assert.equal(JSON.stringify([authority, previous]), before);
+  }
+});
+
 test('internal silence failure shows an error card live and after reload while preserving partial work', () => {
   const c = runtime();
   const reason = 'Invocation stalled after 900 seconds without progress';
@@ -961,4 +1078,159 @@ test('internal silence failure shows an error card live and after reload while p
     assert.equal(JSON.stringify(round), before);
   }
   assert.match(c._buildSwarmPanelHTML(cold, [cold]), /Partial implementation evidence remains available/);
+});
+
+test('message receipt push updates exact send and child cards without accepting wrong-run input', () => {
+  const launch = activeRound('live');
+  const send = { toolName: 'send_agent_message', toolArgs: { content: 'received body <safe>' }, toolContent: JSON.stringify({ swarm_run_id: 'exec-1', agent_id: 'live', message_id: 'msg' }) };
+  const h = pushHarness([turn([launch, send])]);
+  h.send({ type: 'swarm_message_receipt', swarmRunId: 'other', agentId: 'live', messageId: 'msg', state: 'input_confirmed' });
+  assert.equal(h.overlays.size, 0);
+  h.send({ type: 'swarm_message_receipt', swarmRunId: 'exec-1', agentId: 'live', messageId: 'msg', state: 'submitted', inputInjectedAt: 123 });
+  const rounds = h.overlays.get('t').projection.toolRounds;
+  assert.equal(rounds[1]._agentMessageReceipt.state, 'submitted');
+  const renderer = runtime();
+  renderer.escapeHtml = value => String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  assert.match(renderer._buildSwarmPanelHTML(rounds[0], rounds), /received body &lt;safe&gt;/);
+  h.send({ type: 'swarm_message_receipt', swarmRunId: 'exec-1', agentId: 'live', messageId: 'msg', state: 'unconfirmed' });
+  assert.equal(h.overlays.get('t').projection.toolRounds[1]._agentMessageReceipt.state, 'unconfirmed');
+});
+
+test('coordinator receipts survive push without a child recipient and stale sends cannot downgrade them', () => {
+  const launch = activeRound('live');
+  const h = pushHarness([turn([launch])]);
+  const receipt = { type: 'swarm_message_receipt', swarmRunId: 'exec-1', agentId: 'exec-1', messageId: 'root-message',
+    senderTaskId: 'child-task', content: 'Message to coordinator', state: 'input_confirmed', inputConfirmedAt: 123 };
+  h.send(receipt);
+  const live = h.overlays.get('t').projection.toolRounds[0];
+  assert.equal(live._swarmMessageReceipts.length, 1);
+  assert.equal(live._swarmMessageReceipts[0].content, receipt.content);
+  assert.equal(live._swarmSnapshot.agents[0].messageReceipts, undefined);
+  h.send({ ...receipt, state: 'submitted', inputConfirmedAt: undefined });
+  const next = h.overlays.get('t').projection.toolRounds[0]._swarmMessageReceipts;
+  assert.equal(next.length, 1);
+  assert.equal(next[0].state, 'input_confirmed');
+  assert.equal(next[0].inputConfirmedAt, 123);
+});
+
+
+const settledRecoveryAgent = (executionTaskId = 'worker-exec', status = 'completed') => ({
+  id: 'shared-agent', role: 'review', status, executionTaskId, conversationId: `child-${executionTaskId}`,
+  model: 'recorded-model', objective: 'Verify the recorded execution', preview: 'Final worker result',
+  tools: ['read_files', 'grep_search'], toolCallsOmitted: 4,
+  toolCalls: [
+    { callId: `${executionTaskId}-read`, toolName: 'read_files', status: 'done',
+      argsBrief: 'source.js', elapsed: 1.2, preview: `Recorded output for ${executionTaskId}`,
+      previewTruncated: true, previewFullChars: 3000 },
+    { callId: `${executionTaskId}-grep`, toolName: 'grep_search', status: 'failed',
+      elapsed: 0.3, error: `Recorded error for ${executionTaskId}` },
+  ],
+});
+const settledRecoveryRound = recorded => ({
+  toolName: 'spawn_agents', toolCallId: `launch-${recorded.executionTaskId}`, roundNum: 1,
+  taskId: 'parent-exec', attemptId: 'parent-attempt', conversationId: 'parent-conversation',
+  _swarm: true, _swarmActive: true, _asyncRunning: true,
+  toolContent: JSON.stringify({ swarm_run_id: 'shared-run', agents: [{ id: recorded.id }] }),
+  _swarmSnapshot: { settled: true, swarm_id: 'shared-run', agents: [recorded] },
+  _swarmAgents: [
+    { id: recorded.id, status: 'running', executionTaskId: 'stale-worker', conversationId: 'stale-child',
+      _toolCalls: [{ callId: 'stale-call', toolName: 'run_command', status: 'running', preview: 'Stale live detail' }] },
+    { id: 'foreign-agent', status: 'running' },
+  ],
+});
+
+test('actual snapshot recovery preserves worker execution and child conversation identity', () => {
+  const c = runtime();
+  for (const normalized of [false, true]) {
+    const recorded = settledRecoveryAgent();
+    const round = freezeDeep(settledRecoveryRound(normalized ? c.normalizeSwarmAgent(recorded) : recorded));
+    const before = JSON.stringify(round);
+    const recovered = c._recoverSwarmAgents(round, [round]);
+    assert.equal(recovered.length, 1);
+    assert.equal(recovered[0].id, recorded.id);
+    assert.equal(recovered[0].executionTaskId, 'worker-exec');
+    assert.equal(recovered[0].conversationId, 'child-worker-exec');
+    assert.notEqual(recovered[0], round._swarmSnapshot.agents[0]);
+    assert.equal(JSON.stringify(c.mergeSwarmAgentCards(round, recovered)), JSON.stringify(recovered),
+      'settled snapshot, not stale live identity or a foreign roster, remains authoritative');
+    assert.equal(JSON.stringify(round), before);
+  }
+});
+
+test('actual settled snapshot renderer keeps normalized tool records and omission evidence without live fallback', () => {
+  const c = runtime();
+  for (const status of ['completed', 'failed', 'unknown']) {
+    const recorded = settledRecoveryAgent('worker-exec', status);
+    const normalized = c.normalizeSwarmAgent(recorded);
+    assert.equal(normalized.toolCalls, undefined, 'exercise the dock normalized shape, not wire aliases');
+    const round = freezeDeep(settledRecoveryRound(normalized)), before = JSON.stringify(round);
+    const [recovered] = c._recoverSwarmAgents(round, [round]);
+    assert.equal(recovered.status, normalized.status);
+    assert.equal(JSON.stringify(recovered._toolCalls), JSON.stringify(recorded.toolCalls));
+    assert.equal(recovered._toolCallsOmitted, 4);
+    const html = c._buildSwarmPanelHTML(round, [round]);
+    assert.match(html, /data-call-id="worker-exec-read"/);
+    assert.match(html, /data-call-id="worker-exec-grep"/);
+    assert.match(html, /Recorded output for worker-exec/);
+    assert.match(html, /Recorded error for worker-exec/);
+    assert.match(html, /sw-tl-omitted/);
+    assert.match(html, /sw-tl-truncated/);
+    assert.doesNotMatch(html, /stale-call|Stale live detail|foreign-agent|sw-a-running|data-sw-start=/);
+    if (status !== 'completed') assert.doesNotMatch(html, /> Complete</);
+    assert.equal(JSON.stringify(round), before);
+  }
+});
+
+function dockProjectionModule(document) {
+  const dependencies = { './conversation/presentation/swarm-agent-presentation': presentationModule() };
+  for (const name of ['html-safety', 'agent-sidebar-dock-projection']) {
+    const exports = {};
+    const source = fs.readFileSync(`${root}/frontend/src/${name}.ts`, 'utf8');
+    vm.runInNewContext(ts.transpileModule(source, { compilerOptions: {
+      module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022,
+    } }).outputText, { exports, document, DOMParser: document.defaultView.DOMParser, require: name => {
+      assert.ok(dependencies[name], `unexpected dock dependency: ${name}`);
+      return dependencies[name];
+    } });
+    dependencies[`./${name}`] = exports;
+  }
+  return dependencies['./agent-sidebar-dock-projection'];
+}
+
+test('dock uses actual recovery and rendering to retain distinct settled workers, child links and tool details', async () => {
+  const { JSDOM } = require('jsdom');
+  const dom = new JSDOM('<!doctype html>');
+  try {
+    const c = runtime(), { agentDockProjection } = dockProjectionModule(dom.window.document);
+    const rounds = [settledRecoveryRound(settledRecoveryAgent('worker-old')),
+      settledRecoveryRound(settledRecoveryAgent('worker-new', 'failed'))];
+    const turns = freezeDeep([turn(rounds)]), before = JSON.stringify(turns), opened = [];
+    const items = agentDockProjection({ turns, swarms: [],
+      recover: c._recoverSwarmAgents, renderPanel: c._buildSwarmPanelHTML,
+      renderActivity: () => assert.fail('settled canonical records must not use the activity fallback'),
+      openConversation: id => opened.push(id),
+      translate: (_key, fallback) => fallback,
+    });
+    assert.equal(items.length, 2, 'same run and spec id do not erase explicit worker execution conflicts');
+    assert.notEqual(items[0].key, items[1].key);
+    assert.deepEqual(Array.from(items, item => item.status), ['done', 'failed']);
+    for (const [index, worker] of ['worker-old', 'worker-new'].entries()) {
+      const other = index ? 'worker-old' : 'worker-new';
+      assert.equal(typeof items[index].openConversation, 'function');
+      items[index].openConversation();
+      const html = await items[index].render();
+      assert.ok(html.includes(`data-call-id="${worker}-read"`));
+      assert.ok(html.includes(`data-call-id="${worker}-grep"`));
+      assert.ok(html.includes(`Recorded output for ${worker}`));
+      assert.ok(html.includes(`Recorded error for ${worker}`));
+      assert.ok(!html.includes(`Recorded output for ${other}`));
+      assert.match(html, /sw-tl-omitted/);
+      assert.match(html, /sw-tl-truncated/);
+      assert.doesNotMatch(html, /Stale live detail|foreign-agent|sw-tl-running/);
+    }
+    assert.deepEqual(opened, ['child-worker-old', 'child-worker-new']);
+    assert.equal(JSON.stringify(turns), before);
+  } finally {
+    dom.window.close();
+  }
 });

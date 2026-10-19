@@ -27,6 +27,6 @@ def test_server_skill_route_registration_does_not_load_http_transport():
         '"routes.api_v1.webhooks" in sys.modules, '
         '"routes.paper_pkg._arxiv" in sys.modules, '
         '"lib.paper.arxiv" in sys.modules, '
-        '"lib.http_client" in sys.modules, "requests" in sys.modules)')
+        '"lib.http_transport.client" in sys.modules, "requests" in sys.modules)')
     assert proc.returncode == 0, proc.stderr[-1200:]
     assert 'ROUTES-HTTP True True True False False False' in proc.stdout

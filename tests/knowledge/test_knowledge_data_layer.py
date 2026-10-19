@@ -6,6 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import io
 import json
+from pathlib import Path
 import threading
 import time
 
@@ -504,97 +505,386 @@ def test_candidate_limit_prefers_chunks_matching_more_query_terms(
     assert rare['matched_terms'] == 2
 
 
-def _footprint_chunk(ordinal: int, terms: int, refs: int = 0) -> dict:
-    return {
-        'ordinal': ordinal,
-        'section': '',
-        'location': '',
-        'content': f'chunk {ordinal} content',
-        'search_text': ' '.join(f'term{ordinal}x{index}' for index in range(terms)),
-        'assets': [{'id': f'asset{ordinal}x{index}', 'relation': 'primary'}
-                   for index in range(refs)],
-    }
-
-
-def test_index_write_footprint_is_trimmed_to_the_authority_budget():
-    from lib.knowledge.store import (
-        _INDEX_WRITE_RESERVE,
-        _MAX_INDEX_TRANSACTION_WRITES,
-        _index_write_overhead,
-        _trim_index_write_footprint,
-    )
-
-    assets = [{'enrichment_status': 'pending'} for _ in range(4)]
-    chunks = [_footprint_chunk(ordinal, 4096, refs=1) for ordinal in range(16)]
-
-    trimmed = _trim_index_write_footprint(chunks, assets)
-
-    assert trimmed > 0
-    total_terms = sum(len(chunk['search_text'].split()) for chunk in chunks)
-    assert total_terms + _index_write_overhead(chunks, assets) <= (
-        _MAX_INDEX_TRANSACTION_WRITES - _INDEX_WRITE_RESERVE)
-    assert all(chunk['search_text'].strip() for chunk in chunks)
-    # Proportional trimming keeps every chunk retrievable.
-    per_chunk = [len(chunk['search_text'].split()) for chunk in chunks]
-    assert min(per_chunk) > 0
-    assert max(per_chunk) - min(per_chunk) <= 1
-
-
-def test_index_write_footprint_under_budget_is_untouched():
-    from lib.knowledge.store import _trim_index_write_footprint
-
-    chunks = [_footprint_chunk(0, 10), _footprint_chunk(1, 20)]
-    before = [chunk['search_text'] for chunk in chunks]
-
-    assert _trim_index_write_footprint(chunks, []) == 0
-    assert [chunk['search_text'] for chunk in chunks] == before
-
-
-def test_index_write_footprint_refuses_an_unfittable_document():
-    from lib.knowledge.ingest import KnowledgeIngestError
-    from lib.knowledge.store import (
-        _MAX_INDEX_TRANSACTION_WRITES,
-        _trim_index_write_footprint,
-    )
-
-    chunks = [
-        _footprint_chunk(ordinal, 1)
-        for ordinal in range(_MAX_INDEX_TRANSACTION_WRITES)
-    ]
-    with pytest.raises(KnowledgeIngestError):
-        _trim_index_write_footprint(chunks, [])
-
-
-def test_large_document_ingest_fits_the_authority_write_budget(
-    isolated_knowledge,
-):
-    # ~20k unique tokens across ~80 chunks: an aggregate term footprint that
-    # exceeds the tofu-db per-transaction write budget unless trimmed.
-    lines = []
-    token = 0
-    while token < 20_000:
-        row = ' '.join(f'w{token + offset:05d}' for offset in range(10))
-        lines.append(row)
-        token += 10
-    raw = ('\n'.join(lines)).encode()
-
+def test_large_document_retains_all_index_terms_and_tail_retrieval(isolated_knowledge):
+    tokens = [f'w{index:05d}' for index in range(20_000)]
+    raw = ('\n'.join(' '.join(tokens[offset:offset + 10])
+                     for offset in range(0, len(tokens), 10))).encode()
     document = isolated_knowledge.add_document(
         raw, 'large-manuscript.txt', user_id=TEST_OWNER_USER_ID)
-
     assert document['chunk_count'] > 40
-    assert any('Index trimmed' in warning
-               for warning in document['warnings'])
-
-    from lib.knowledge.store import (
-        _INDEX_WRITE_RESERVE,
-        _MAX_INDEX_TRANSACTION_WRITES,
-        _index_write_overhead,
-    )
+    assert not any('Index trimmed' in warning for warning in document['warnings'])
     repository = KnowledgeRepository(TEST_OWNER_USER_ID)
-    stored = repository.document_content(
-        document['id'], offset=0, limit=document['chunk_count'])
-    total_terms = sum(
-        len(chunk['search_text'].split()) for chunk in stored['chunks'])
-    assert total_terms + _index_write_overhead(stored['chunks'], []) <= (
-        _MAX_INDEX_TRANSACTION_WRITES - _INDEX_WRITE_RESERVE)
-    assert all(chunk['search_text'].strip() for chunk in stored['chunks'])
+    stored = repository.document_content(document['id'], offset=0, limit=document['chunk_count'])
+    indexed = {token for chunk in stored['chunks'] for token in chunk['search_text'].split()}
+    assert set(tokens) <= indexed
+    matches = isolated_knowledge.search_document_candidates(
+        document['id'], tokens[-1], user_id=TEST_OWNER_USER_ID)
+    assert matches and tokens[-1] in matches[0]['content']
+    source = isolated_knowledge.read_source_path(document['id'], user_id=TEST_OWNER_USER_ID)
+    assert source.read_bytes() == raw
+    print(f'knowledge_index_demand: {len(raw)} source bytes, {len(tokens)} retained unique terms, '
+          f'{document["chunk_count"]} chunks')
+
+
+def test_complete_attachment_refs_beyond_20_are_resolved_and_retained(isolated_knowledge):
+    from lib.media_attachments import resolve_client_refs
+    documents = [isolated_knowledge.add_document(
+        f'document evidence {index}'.encode(), f'doc-{index}.txt',
+        user_id=TEST_OWNER_USER_ID, scope='draft') for index in range(33)]
+    candidates = [{'attachmentId': document['id'], 'name': 'forged name', 'status': 'forged'}
+                  for document in documents]
+    # Invalid and duplicate inputs must not consume capacity for later refs.
+    inputs = [None, {}, *candidates[:20], candidates[0], *candidates[20:]]
+    resolved = resolve_client_refs(inputs, user_id=TEST_OWNER_USER_ID, retain=True)
+    assert [item['attachmentId'] for item in resolved] == [document['id'] for document in documents]
+    assert [item['name'] for item in resolved] == [f'doc-{index}.txt' for index in range(33)]
+    for document in documents:
+        assert isolated_knowledge.get_document_metadata(
+            document['id'], user_id=TEST_OWNER_USER_ID)['scope'] == 'attachment'
+
+
+def test_complete_media_index_can_exceed_old_write_and_chunk_term_limits(isolated_knowledge):
+    document = isolated_knowledge.add_document(
+        b'original source', 'source.txt', user_id=TEST_OWNER_USER_ID, scope='draft')
+    chunks = [{'content': f'evidence{index}', 'section': '', 'location': ''}
+              for index in range(14_400)]
+    updated = isolated_knowledge.replace_media_evidence(
+        document['id'], chunks=chunks, assets=[], media_metadata={'status': 'ready'},
+        user_id=TEST_OWNER_USER_ID)
+    assert updated['chunk_count'] == len(chunks)
+    matches = isolated_knowledge.search_document_candidates(
+        document['id'], 'evidence14399', user_id=TEST_OWNER_USER_ID)
+    assert matches and 'evidence14399' in matches[0]['content']
+    tokens = [f'wide{index}' for index in range(5501)]
+    updated = isolated_knowledge.replace_media_evidence(
+        document['id'], chunks=[{'content': ' '.join(tokens)}], assets=[],
+        media_metadata={'status': 'ready'}, user_id=TEST_OWNER_USER_ID)
+    assert updated['chunk_count'] == 1
+    matches = isolated_knowledge.search_document_candidates(
+        document['id'], tokens[-1], user_id=TEST_OWNER_USER_ID)
+    assert matches and tokens[-1] in matches[0]['content']
+    assert isolated_knowledge.read_source_path(
+        document['id'], user_id=TEST_OWNER_USER_ID).read_bytes() == b'original source'
+
+
+def test_video_evidence_beyond_200_frames_persists_and_late_failure_rolls_back(
+        isolated_knowledge, tmp_path, monkeypatch):
+    from PIL import Image
+    from lib.media_attachments import create_video, complete_video
+    import lib.knowledge.store as store
+    source = tmp_path / 'original.mp4'
+    original = b'owned video source fixture'
+    source.write_bytes(original)
+    attachment, duplicate = create_video(
+        str(source), 'long.mp4', user_id=TEST_OWNER_USER_ID)
+    assert duplicate is False
+    frames = []
+    for index in range(257):
+        path = tmp_path / f'frame-{index}.jpg'
+        Image.new('RGB', (8, 8), (index % 256, index // 256, 7)).save(path, format='JPEG')
+        frames.append({'path': str(path), 't': float(index * 10)})
+    ready = complete_video(
+        attachment['attachmentId'], frames=frames, transcript='complete audio',
+        transcript_status='ok', transcript_model='fixture-stt',
+        storyboard='complete visual evidence', storyboard_status='ok',
+        storyboard_model='fixture-vision', probe={'duration': 2570, 'filename': 'long.mp4'},
+        user_id=TEST_OWNER_USER_ID)
+    assert ready['status'] == 'ready' and ready['frameCount'] == 257
+    document_id = attachment['attachmentId']
+    assets = []
+    offset = 0
+    while page := isolated_knowledge.list_document_assets(
+            document_id, user_id=TEST_OWNER_USER_ID, offset=offset, limit=200):
+        assets.extend(page)
+        offset += len(page)
+    assert len(assets) == len(frames)
+    assert [asset['ordinal'] for asset in assets] == list(range(len(frames)))
+    for frame, asset in zip(frames, assets):
+        row, persisted = isolated_knowledge.read_asset(asset['id'], user_id=TEST_OWNER_USER_ID)
+        assert persisted == Path(frame['path']).read_bytes()
+        assert json.loads(row['metadata_json'])['timestamp_s'] == frame['t']
+    source_path = isolated_knowledge.read_source_path(document_id, user_id=TEST_OWNER_USER_ID)
+    assert source_path.read_bytes() == original
+    root = store._asset_root(TEST_OWNER_USER_ID)
+    names_before = {path.name for path in root.iterdir()}
+    old_document = KnowledgeRepository(TEST_OWNER_USER_ID).document(document_id)
+    write = store._write_asset
+    writes = 0
+    def fail_late(raw, name, *, user_id):
+        nonlocal writes
+        writes += 1
+        if writes == 213:
+            raise OSError('injected late evidence write failure')
+        return write(raw, name, user_id=user_id)
+    monkeypatch.setattr(store, '_write_asset', fail_late)
+    with pytest.raises(OSError, match='late evidence write failure'):
+        complete_video(
+            document_id, frames=frames, transcript='replacement',
+            transcript_status='ok', transcript_model='fixture-stt',
+            storyboard='replacement', storyboard_status='ok',
+            storyboard_model='fixture-vision', probe={'duration': 2570, 'filename': 'long.mp4'},
+            user_id=TEST_OWNER_USER_ID)
+    assert writes == 213
+    assert {path.name for path in root.iterdir()} == names_before
+    assert KnowledgeRepository(TEST_OWNER_USER_ID).document(document_id) == old_document
+    assert source_path.read_bytes() == original
+    print(f'media_asset_demand: {len(assets)} frames, '
+          f'{sum(Path(frame["path"]).stat().st_size for frame in frames)} JPEG bytes')
+    assert isolated_knowledge.delete_document(document_id, user_id=TEST_OWNER_USER_ID)
+    assert not source_path.exists()
+    assert all(not (root / asset['stored_name']).exists() for asset in assets)
+
+
+@pytest.mark.auth_mode('open')
+def test_large_document_upload_preserves_original_and_digest_identity(
+        isolated_knowledge, flask_client):
+    from werkzeug.datastructures import FileStorage
+    import zipfile
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, 'w', compression=zipfile.ZIP_STORED) as archive:
+        archive.writestr('mimetype', 'application/vnd.oasis.opendocument.text')
+        archive.writestr('content.xml', '<?xml version="1.0" encoding="UTF-8"?>'
+            '<office:document-content '
+            'xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" '
+            'xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" office:version="1.2">'
+            '<office:body><office:text><text:p>Large upload searchable evidence '
+            'and tailuploadmarker</text:p></office:text></office:body></office:document-content>')
+        archive.writestr('META-INF/manifest.xml', '<?xml version="1.0"?>'
+            '<manifest:manifest xmlns:manifest="urn:oasis:names:tc:opendocument:xmlns:manifest:1.0" '
+            'manifest:version="1.2"><manifest:file-entry manifest:full-path="/" '
+            'manifest:media-type="application/vnd.oasis.opendocument.text"/>'
+            '<manifest:file-entry manifest:full-path="content.xml" manifest:media-type="text/xml"/>'
+            '<manifest:file-entry manifest:full-path="payload.bin" '
+            'manifest:media-type="application/octet-stream"/></manifest:manifest>')
+        # An uncompressed package resource grows the actual original without
+        # substituting a fake parser or demanding a huge searchable corpus.
+        archive.writestr('payload.bin', b'x' * (51 * 1024 * 1024))
+    raw = buffer.getvalue()
+    assert len(raw) > 50 * 1024 * 1024
+    def upload():
+        return flask_client.post('/api/v4/media/attachments', form={}, files={
+            'file': FileStorage(stream=io.BytesIO(raw), filename='large-source.odt',
+                                content_type='application/vnd.oasis.opendocument.text')})
+    first = upload()
+    assert first.status_code == 200, first.get_json()
+    attachment = first.get_json()['attachment']
+    assert attachment['sizeBytes'] == len(raw)
+    assert attachment['status'] == 'ready'
+    document_id = attachment['attachmentId']
+    matches = isolated_knowledge.search_document_candidates(
+        document_id, 'tailuploadmarker', user_id=TEST_OWNER_USER_ID)
+    assert matches and 'tailuploadmarker' in matches[0]['content']
+    response = flask_client.get(f'/api/v4/media/attachments/{document_id}/source')
+    assert response.status_code == 200
+    assert hashlib.sha256(response.data).digest() == hashlib.sha256(raw).digest()
+    source_path = isolated_knowledge.read_source_path(document_id, user_id=TEST_OWNER_USER_ID)
+    assert source_path.stat().st_size == len(raw)
+    second = upload()
+    assert second.status_code == 200
+    assert second.get_json()['attachment']['attachmentId'] == document_id
+    assert isolated_knowledge.delete_document(document_id, user_id=TEST_OWNER_USER_ID)
+    assert not source_path.exists()
+    print(f'document_upload_demand: {len(raw)} original ODT bytes, searchable, exact source and digest reuse')
+
+
+@pytest.mark.auth_mode('open')
+def test_document_receive_failure_returns_existing_error_envelope(flask_client, monkeypatch):
+    from types import SimpleNamespace
+    import routes.api_v1.media as routes
+    class FailedSource:
+        def read(self):
+            raise OSError('injected document receive failure')
+    monkeypatch.setattr(routes, 'request_files', lambda: {
+        'file': SimpleNamespace(filename='source.txt', stream=FailedSource())})
+    response = flask_client.post('/api/v4/media/attachments')
+    assert response.status_code == 500
+    assert response.get_json()['ok'] is False
+    assert 'injected document receive failure' not in str(response.get_json())
+
+
+def test_text_beyond_old_default_is_indexed_and_tail_remains_searchable(isolated_knowledge):
+    line = 'Repeated source evidence preserved across the complete document.\n'
+    text = line * (12_000_000 // len(line) + 1) + 'lateevidencemarker'
+    raw = text.encode('utf-8')
+    assert len(text) > 12_000_000
+    document = isolated_knowledge.add_document(
+        raw, 'complete-text.txt', user_id=TEST_OWNER_USER_ID)
+    assert document['text_chars'] == len(text)
+    assert not any('truncat' in warning.lower() for warning in document['warnings'])
+    matches = isolated_knowledge.search_document_candidates(
+        document['id'], 'lateevidencemarker', user_id=TEST_OWNER_USER_ID)
+    assert matches and 'lateevidencemarker' in matches[0]['content']
+    path = isolated_knowledge.read_source_path(document['id'], user_id=TEST_OWNER_USER_ID)
+    assert hashlib.sha256(path.read_bytes()).digest() == hashlib.sha256(raw).digest()
+    final_page = isolated_knowledge.get_document_content(
+        document['id'], user_id=TEST_OWNER_USER_ID, offset=document['chunk_count'] - 1, limit=1)
+    assert 'lateevidencemarker' in final_page['chunks'][0]['content']
+    print(f'knowledge_text_demand: {len(text)} characters, {document["chunk_count"]} chunks, exact source and tail retrieval')
+
+
+@pytest.mark.parametrize('case', ['member_count', 'aggregate_bytes', 'required_member_ratio'])
+def test_office_packages_beyond_old_admission_limits_are_complete(isolated_knowledge, case):
+    import zipfile
+    buffer = io.BytesIO()
+    xml_start = ('<office:document-content '
+        'xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" '
+        'xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" office:version="1.2">'
+        '<office:body><office:text>').encode()
+    xml_end = ('<text:p>Complete Office evidence packageendmarker</text:p>'
+        '</office:text></office:body></office:document-content>').encode()
+    resource_names = []
+    with zipfile.ZipFile(buffer, 'w', compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr('mimetype', 'application/vnd.oasis.opendocument.text',
+                         compress_type=zipfile.ZIP_STORED)
+        with archive.open('content.xml', 'w') as content:
+            content.write(xml_start)
+            if case == 'required_member_ratio':
+                for _ in range(33):
+                    content.write(b' ' * (1024 * 1024))
+            content.write(xml_end)
+        if case == 'member_count':
+            resource_names = [f'resources/{index}.bin' for index in range(20_001)]
+            for name in resource_names:
+                archive.writestr(name, b'')
+        elif case == 'aggregate_bytes':
+            resource_names = ['resources/large.bin']
+            with archive.open(resource_names[0], 'w') as resource:
+                for _ in range(257):
+                    resource.write(b'x' * (1024 * 1024))
+        manifest = ('<manifest:manifest '
+            'xmlns:manifest="urn:oasis:names:tc:opendocument:xmlns:manifest:1.0" '
+            'manifest:version="1.2"><manifest:file-entry manifest:full-path="/" '
+            'manifest:media-type="application/vnd.oasis.opendocument.text"/>'
+            '<manifest:file-entry manifest:full-path="content.xml" manifest:media-type="text/xml"/>'
+            + ''.join(f'<manifest:file-entry manifest:full-path="{name}" '
+                      'manifest:media-type="application/octet-stream"/>' for name in resource_names)
+            + '</manifest:manifest>')
+        archive.writestr('META-INF/manifest.xml', manifest)
+    raw = buffer.getvalue()
+    with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+        infos = archive.infolist()
+        expanded = sum(info.file_size for info in infos)
+        compressed = max(1, sum(info.compress_size for info in infos))
+        if case == 'member_count':
+            assert len(infos) > 20_000
+        elif case == 'aggregate_bytes':
+            assert expanded > 256 * 1024 * 1024
+        else:
+            assert expanded > 32 * 1024 * 1024 and expanded / compressed > 200
+    document = isolated_knowledge.add_document(
+        raw, f'complete-{case}.odt', user_id=TEST_OWNER_USER_ID)
+    assert document['method'] == 'opendocument-local'
+    matches = isolated_knowledge.search_document_candidates(
+        document['id'], 'packageendmarker', user_id=TEST_OWNER_USER_ID)
+    assert matches and 'packageendmarker' in matches[0]['content']
+    path = isolated_knowledge.read_source_path(document['id'], user_id=TEST_OWNER_USER_ID)
+    assert hashlib.sha256(path.read_bytes()).digest() == hashlib.sha256(raw).digest()
+    print(f'office_package_demand: {case}, {len(infos)} members, {expanded} declared expanded bytes, '
+          f'{len(raw)} source bytes')
+    assert isolated_knowledge.delete_document(document['id'], user_id=TEST_OWNER_USER_ID)
+    assert not path.exists()
+
+
+def test_corrupt_required_office_member_fails_before_publication(isolated_knowledge):
+    import zipfile
+    from lib.knowledge.ingest import KnowledgeIngestError
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, 'w', compression=zipfile.ZIP_STORED) as archive:
+        archive.writestr('mimetype', 'application/vnd.oasis.opendocument.text')
+        archive.writestr('content.xml', '<uniquecontent>broken member</uniquecontent>')
+    raw = buffer.getvalue().replace(b'<uniquecontent>', b'<Uniquecontent>', 1)
+    before = isolated_knowledge.list_documents(user_id=TEST_OWNER_USER_ID)
+    with pytest.raises(KnowledgeIngestError, match='Invalid OpenDocument content'):
+        isolated_knowledge.add_document(raw, 'corrupt.odt', user_id=TEST_OWNER_USER_ID)
+    assert isolated_knowledge.list_documents(user_id=TEST_OWNER_USER_ID) == before
+
+
+@pytest.mark.auth_mode('open')
+@pytest.mark.parametrize('source_mib', [51, 201])
+def test_large_knowledge_upload_preserves_source_and_search(
+        isolated_knowledge, flask_client, source_mib):
+    from werkzeug.datastructures import FileStorage
+    import zipfile
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, 'w', compression=zipfile.ZIP_STORED) as archive:
+        archive.writestr('mimetype', 'application/vnd.oasis.opendocument.text')
+        archive.writestr('content.xml', '<?xml version="1.0" encoding="UTF-8"?>'
+            '<office:document-content '
+            'xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" '
+            'xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" office:version="1.2">'
+            '<office:body><office:text><text:p>Large upload searchable evidence '
+            'and tailuploadmarker</text:p></office:text></office:body></office:document-content>')
+        archive.writestr('META-INF/manifest.xml', '<?xml version="1.0"?>'
+            '<manifest:manifest xmlns:manifest="urn:oasis:names:tc:opendocument:xmlns:manifest:1.0" '
+            'manifest:version="1.2"><manifest:file-entry manifest:full-path="/" '
+            'manifest:media-type="application/vnd.oasis.opendocument.text"/>'
+            '<manifest:file-entry manifest:full-path="content.xml" manifest:media-type="text/xml"/>'
+            '<manifest:file-entry manifest:full-path="payload.bin" '
+            'manifest:media-type="application/octet-stream"/></manifest:manifest>')
+        # An uncompressed package resource grows the actual original without
+        # substituting a fake parser or demanding a huge searchable corpus.
+        archive.writestr('payload.bin', b'x' * (source_mib * 1024 * 1024))
+    raw = buffer.getvalue()
+    assert len(raw) > 50 * 1024 * 1024
+    def upload():
+        boundary = 'knowledge-complete-original'
+        header = (f'--{boundary}\r\nContent-Disposition: form-data; name="files"; filename="large-source.odt"\r\nContent-Type: application/vnd.oasis.opendocument.text\r\n\r\n').encode()
+        body = header + raw + f'\r\n--{boundary}--\r\n'.encode()
+        return flask_client.post('/api/v4/knowledge/documents', data=body,
+            headers={'Content-Type': f'multipart/form-data; boundary={boundary}'})
+    first = upload()
+    assert first.status_code == 200, first.get_json()
+    assert first.get_json()['errors'] == []
+    attachment = first.get_json()['indexed'][0]
+    assert attachment['size_bytes'] == len(raw)
+    document_id = attachment['id']
+    matches = isolated_knowledge.search_document_candidates(
+        document_id, 'tailuploadmarker', user_id=TEST_OWNER_USER_ID)
+    assert matches and 'tailuploadmarker' in matches[0]['content']
+    source_path = isolated_knowledge.read_source_path(document_id, user_id=TEST_OWNER_USER_ID)
+    assert source_path.stat().st_size == len(raw)
+    assert hashlib.sha256(source_path.read_bytes()).digest() == hashlib.sha256(raw).digest()
+    if source_mib == 51:
+        second = upload()
+        assert second.status_code == 200
+        assert second.get_json()['indexed'][0]['id'] == document_id
+    assert isolated_knowledge.delete_document(document_id, user_id=TEST_OWNER_USER_ID)
+    assert not source_path.exists()
+    print(f'document_upload_demand: {len(raw)} original ODT bytes, searchable, exact source and digest reuse')
+
+
+@pytest.mark.auth_mode('open')
+def test_knowledge_batch_indexes_all_files_past_old_count_limit(isolated_knowledge, flask_client):
+    boundary = 'knowledge-owned-batch'
+    body = b''.join((f'--{boundary}\r\nContent-Disposition: form-data; name="files"; filename="evidence-{i}.md"\r\nContent-Type: text/markdown\r\n\r\nUnique evidence batchmarker{i}\r\n').encode() for i in range(33))
+    body += f'--{boundary}--\r\n'.encode()
+    response = flask_client.post('/api/v4/knowledge/documents', data=body,
+        headers={'Content-Type': f'multipart/form-data; boundary={boundary}'})
+    assert response.status_code == 200, response.get_json()
+    payload = response.get_json()
+    assert payload['errors'] == []
+    assert len(payload['indexed']) == 33
+    for i, document in enumerate(payload['indexed']):
+        assert document['name'] == f'evidence-{i}.md'
+        assert isolated_knowledge.read_source_path(document['id'], user_id=TEST_OWNER_USER_ID).read_bytes() == f'Unique evidence batchmarker{i}'.encode()
+        assert isolated_knowledge.delete_document(document['id'], user_id=TEST_OWNER_USER_ID)
+
+
+@pytest.mark.auth_mode('open')
+def test_knowledge_receive_failure_reports_file_and_continues_batch(isolated_knowledge, flask_client, monkeypatch):
+    from types import SimpleNamespace
+    import routes.api_v1.knowledge as routes
+    class FailedSource:
+        def read(self):
+            raise OSError('injected receive failure')
+    uploads = [SimpleNamespace(filename='failed.md', stream=FailedSource()),
+               SimpleNamespace(filename='accepted.md', stream=io.BytesIO(b'accepted evidence'))]
+    monkeypatch.setattr(routes, '_uploaded_files', lambda: uploads)
+    response = flask_client.post('/api/v4/knowledge/documents')
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload['errors'] == [{'name': 'failed.md', 'error': 'Unexpected indexing failure'}]
+    assert len(payload['indexed']) == 1
+    document = payload['indexed'][0]
+    assert isolated_knowledge.read_source_path(document['id'], user_id=TEST_OWNER_USER_ID).read_bytes() == b'accepted evidence'
+    assert isolated_knowledge.delete_document(document['id'], user_id=TEST_OWNER_USER_ID)

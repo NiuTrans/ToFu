@@ -19,12 +19,40 @@ import zipfile
 
 
 REQUIRED_MEMBERS = frozenset({
+    'contracts/swarm_messages_v1.json',
+    'contracts/paper_build_v1.schema.json',
+    'contracts/resource_policy_v1.json',
+    'tofu_agent/native_runtime.py',
+    'tofu_agent/native_repository.py',
+    'lib/repo_map/native_runtime.py',
+    'lib/repo_map/_native_stream.py',
+    'lib/repo_map/_native_discovery_fallback.py',
+    'lib/repo_map/_native_owned.py',
+    'lib/repo_map/_native_limits.py',
+    'lib/repo_map/_native_source_admission.py',
+    'lib/repo_map/_native_catalog.py',
+    'lib/repo_map/LICENSE.grep-ast.txt',
+    'lib/tasks_pkg/native_invocation.py',
+    'lib/tasks_pkg/native_prepared.py',
+    'lib/tasks_pkg/native_terminal.py',
+    'lib/billing/native_settlement.py',
+    'lib/tasks_pkg/native_cost_projection.py',
+    'lib/tasks_pkg/native_pricing.py',
+    'lib/agent_core/native_model_control.py',
+    'lib/tasks_pkg/native_model_account.py',
+    'lib/agent_core/abort_signal.py',
+    'lib/agent_core/storage_errors.py',
+    'lib/agent_core/generated_task_event_delivery_contract.py',
+    'lib/agent_core/generated_task_event_delivery_profile.py',
+    'lib/agent_core/native_artifact.py',
+    'lib/agent_core/native_content_contract.py',
+    'lib/agent_core/native_html_projection_contract.py',
     'bootstrap_pkg/runtime_checks.py',
     'bootstrap_pkg/runtime_repair.py',
 
     'lib/tools/result_value.py',
-    'lib/tool_result_query_contract.py',
-    'lib/tool_result_query_generated.py',
+    'lib/tool_results/tool_result_query_contract.py',
+    'lib/tool_results/tool_result_query_generated.py',
     'tofu_agent/provider_setup.py',
     'tofu_agent/provider_store.py',
     'tofu_agent/setup_ui/index.html',
@@ -32,11 +60,15 @@ REQUIRED_MEMBERS = frozenset({
     'tofu_agent/setup_ui/setup.js',
 })
 
+REQUIRED_SOURCE_MEMBERS = frozenset({'setup.py'})
+REQUIRED_WHEEL_MEMBERS = frozenset()
+
+
 FORBIDDEN_PREFIXES = (
     'frontend/',
     'lib/database/',
     'lib/storage/',
-    'lib/storage_sidecar/',
+    'lib/storage_authority_sql/',
     'lib/tests/',
     'routes/',
     'static/',
@@ -53,7 +85,9 @@ def _validate_members(
         *,
         artifact_key: str,
 ) -> dict[str, int | str]:
-    missing = sorted(REQUIRED_MEMBERS - members)
+    required = REQUIRED_MEMBERS | (REQUIRED_WHEEL_MEMBERS if artifact_key == 'wheel'
+                                   else REQUIRED_SOURCE_MEMBERS)
+    missing = sorted(required - members)
     leaked = sorted(
         member for member in members
         if (
@@ -70,7 +104,7 @@ def _validate_members(
     return {
         artifact_key: path.name,
         'members': len(members),
-        'required_members': len(REQUIRED_MEMBERS),
+        'required_members': len(required),
         'leaked_members': 0,
     }
 

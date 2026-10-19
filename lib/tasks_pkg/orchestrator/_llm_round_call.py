@@ -175,7 +175,8 @@ def run_llm_call_with_fallback(
             return 'break'
         return 'proceed'
     except Exception as e:
-        if isinstance(e, AbortedError):
+        from lib.tasks_pkg.event_delivery import EventDeliveryCancelled
+        if isinstance(e, (AbortedError, EventDeliveryCancelled)):
             if task.get('_executionLimitReason'):
                 from lib.agent_core.execution_budget import ModelBudgetAdmissionDenied
                 if isinstance(e, ModelBudgetAdmissionDenied) and on_admission_denied is not None:

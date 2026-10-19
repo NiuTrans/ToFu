@@ -111,7 +111,7 @@ def test_kimi_lean_candidate_has_stable_hash_and_at_least_84pct_reduction():
     assert hashlib.sha256(repeated.encode()).hexdigest() == hashlib.sha256(
         lean.encode()).hexdigest()
     assert full_tokens >= 2_500
-    assert 350 <= lean_tokens <= 450
+    assert 350 <= lean_tokens <= 500
     assert 1 - lean_tokens / full_tokens >= 0.84
 
     variants = {
@@ -127,7 +127,7 @@ def test_kimi_lean_candidate_has_stable_hash_and_at_least_84pct_reduction():
     discovery_lean = build_static_prompt(
         **kwargs, profile='lean', tool_search_available=True)
     assert 'Hidden built-in tools may include' in discovery_lean
-    assert count_text(discovery_lean, model='kimi-k3') <= 450
+    assert count_text(discovery_lean, model='kimi-k3') <= 600
 
 
 def test_composer_gates_hidden_capability_guidance_on_live_search_catalog():

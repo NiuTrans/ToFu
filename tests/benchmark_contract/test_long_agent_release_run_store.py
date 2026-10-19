@@ -131,7 +131,7 @@ def _task(
         thinking=manifest["thinking"],
         experiment_arm=manifest["experimentArm"],
         oracle={"passed": True, "type": "exact"},
-        rounds=[{"round": 1, "usage": {"prompt_tokens": 10}}],
+        rounds=[{"round": 1, "usage": {"prompt_tokens": 10, "completion_tokens": 0}}],
         context_blocks=[], tool_schemas=[], tool_results=[], compactions=[],
         call_graph=[], retries=[], cost={
             "modelCostUsd": model_cost,
@@ -312,7 +312,8 @@ def test_candidate_failed_attempt_usage_requires_runtime_evidence(tmp_path):
             "completion_tokens": 6,
             "cache_read_tokens": 7,
         },
-        "apiRounds": [{"round": 1, "usage": usage}],
+        "apiRounds": [{"round": 1, "usage": usage},
+                      {"round": "compaction-1", "usage": compaction_usage}],
         "compactionUsage": compaction_usage,
     }), encoding="utf-8")
     runtime_artifact = store_run_artifact(
@@ -613,3 +614,63 @@ def test_pair_report_is_immutable_and_pilot_can_never_make_release_claim(
         cli_report = json.loads(capsys.readouterr().out)
         assert cli_report["status"] == expected_status
         assert cli_report["releaseEligible"] is False
+
+
+@pytest.mark.parametrize("role", ["baseline", "candidate"])
+@pytest.mark.parametrize("usage", [{}, {"prompt_tokens": 0}, {"completion_tokens": 0}])
+def test_unknown_failed_call_cannot_close_attempt_or_unlock_retry(tmp_path, role, usage):
+    root = tmp_path / "unknown-failure"
+    initialize_release_run(root, _manifest(role))
+    claim = claim_release_task_attempts(
+        root, task_ids=["pilot:task-1"], execution_id="execution-1", runner_kind="tofu-runner")
+    trajectory = tmp_path / "failed.jsonl"
+    trajectory.write_text('{"type":"round_usage","roundNum":1}\n')
+    runtime = tmp_path / "runtime.json"
+    runtime.write_text(json.dumps({
+        "contractVersion": "tofu.agent-runtime-evidence/v1", "model": "kimi-k3",
+        "status": "error", "usage": usage, "apiRounds": [{"round": 1, "usage": usage}],
+        "compactionUsage": {},
+    }))
+    artifacts = [store_run_artifact(root, task_id="pilot:task-1", kind=kind, source=path)
+                 for kind, path in (("failed_attempt_trajectory", trajectory),
+                                    ("failed_attempt_runtime_evidence", runtime))]
+    with pytest.raises(ReleaseRunError, match="missing (input tokens|output tokens|provider usage)"):
+        fail_release_task_attempt(
+            root, task_id="pilot:task-1", execution_id="execution-1", code="stream_truncated",
+            model_usages=[usage], paid_tool_cost_usd=0, artifacts=artifacts, no_paid_calls=False,
+            task_started_at_unix_ms=claim["claims"][0]["occurredAt"])
+    audit = audit_release_attempts(root)
+    assert audit["openAttempts"] == 1
+    assert audit["failedAttempts"] == 0
+    with pytest.raises(ReleaseRunError):
+        claim_release_task_attempts(
+            root, task_ids=["pilot:task-1"], execution_id="execution-2", runner_kind="tofu-runner")
+
+
+@pytest.mark.parametrize("compaction", [{}, {"n_calls": 0}])
+def test_explicit_zero_failed_call_with_no_compaction_can_close_attempt(tmp_path, compaction):
+    root = tmp_path / "known-zero-failure"
+    initialize_release_run(root, _manifest("candidate"))
+    claim = claim_release_task_attempts(
+        root, task_ids=["pilot:task-1"], execution_id="execution-1", runner_kind="tofu-runner")
+    usage = {"prompt_tokens": 0, "completion_tokens": 0}
+    trajectory = tmp_path / "failed.jsonl"
+    trajectory.write_text('{"type":"round_usage","roundNum":1}\n')
+    runtime = tmp_path / "runtime.json"
+    runtime.write_text(json.dumps({
+        "contractVersion": "tofu.agent-runtime-evidence/v1", "model": "kimi-k3",
+        "status": "error", "usage": usage, "apiRounds": [{"round": 1, "usage": usage}],
+        "compactionUsage": compaction,
+    }))
+    artifacts = [store_run_artifact(root, task_id="pilot:task-1", kind=kind, source=path)
+                 for kind, path in (("failed_attempt_trajectory", trajectory),
+                                    ("failed_attempt_runtime_evidence", runtime))]
+    fail_release_task_attempt(
+        root, task_id="pilot:task-1", execution_id="execution-1", code="stream_truncated",
+        model_usages=[usage], paid_tool_cost_usd=0, artifacts=artifacts, no_paid_calls=False,
+        task_started_at_unix_ms=claim["claims"][0]["occurredAt"])
+    audit = audit_release_attempts(root)
+    assert audit["openAttempts"] == 0
+    assert audit["failedAttempts"] == 1
+    retry = release_task_retry_evidence(root, task_id="pilot:task-1")
+    assert retry[0]["modelUsages"] == [usage]

@@ -5,7 +5,6 @@ results, never execute expressions. Session references are routing hints, not
 credentials or authorization grants.
 """
 
-MAX_OUTPUT_CHARS = 80000
 MAX_DURATION_S = 120
 
 SESSION_REF_SCHEMA = {'type': 'string', 'minLength': 1, 'maxLength': 1024,
@@ -25,7 +24,6 @@ WORKFLOW_SCHEMA = {
     'type': 'object', 'additionalProperties': False, 'required': ['steps'],
     'properties': {
         'timeout_s': {'type': 'integer', 'minimum': 1, 'maximum': MAX_DURATION_S},
-        'max_chars': {'type': 'integer', 'minimum': 4096, 'maximum': MAX_OUTPUT_CHARS},
         'steps': {
             'type': 'array', 'minItems': 1,
             'items': {
@@ -60,7 +58,7 @@ WORKFLOW_TOOL_SCHEMA = {
     'type': WORKFLOW_SCHEMA['type'], 'required': WORKFLOW_SCHEMA['required'],
     'additionalProperties': False,
     'properties': {
-        **{name: WORKFLOW_SCHEMA['properties'][name] for name in ('timeout_s', 'max_chars')},
+        **{name: WORKFLOW_SCHEMA['properties'][name] for name in ('timeout_s',)},
         'steps': {**{key: value for key, value in WORKFLOW_SCHEMA['properties']['steps'].items()
                      if key != 'items'}, 'items': {'type': 'object'}},
     },

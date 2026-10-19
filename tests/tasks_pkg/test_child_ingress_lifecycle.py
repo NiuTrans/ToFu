@@ -90,8 +90,7 @@ def test_wedged_child_delivery_cannot_refuse_another_child(monkeypatch):
     assert not blocked['_providerIngressIsolation']['worker'].is_alive()
 
 
-def test_child_event_backlog_is_delivered_in_order_without_queue_capacity_failure(monkeypatch):
-    monkeypatch.setattr(guard, '_DELIVERY_QUEUE_MAX', 2)
+def test_child_event_backlog_is_delivered_in_order_without_queue_capacity_failure():
     child = _carrier('delivery-backlog')
     entered, release = threading.Event(), threading.Event()
     observed = []
@@ -113,3 +112,149 @@ def test_child_event_backlog_is_delivered_in_order_without_queue_capacity_failur
     finally:
         release.set()
         child['_providerIngressIsolation']['worker'].join(5)
+
+
+def test_normal_child_completion_waits_for_slow_evidence_in_fifo_order(monkeypatch):
+    from lib.tasks_pkg import child_invocation as owner
+    from lib.tasks_pkg.invocation import deliver_invocation_event
+    from lib.tasks_pkg.invocation import InvocationPolicy
+
+    monkeypatch.setattr(guard, '_FLUSH_JOIN_TIMEOUT_SEC', 0.01)
+    entered, release, joining, finished = (threading.Event() for _ in range(4))
+    observed, results, failures = [], [], []
+    child = _carrier('slow-required-evidence')
+    child['_invocationPolicy'] = InvocationPolicy.child('parent')
+    child['_invocationAbortCheck'] = lambda: False
+
+    def sink(event):
+        if event['seq'] == 0:
+            entered.set()
+            assert release.wait(5)
+        commit_child_publication(lambda: observed.append(event['seq']))
+
+    child['_invocationEventSink'] = lambda event: child['_invocationPublicationFence'].deliver(sink, event)
+
+    def execute(task, **kwargs):
+        token = guard.begin_provider_ingress(task, span_id='slow-storage')
+        for sequence in range(3):
+            event = {'type': 'delta', 'seq': sequence}
+            _enqueue(task, token, lambda event=event: deliver_invocation_event(task, event), sequence)
+        assert entered.wait(2)
+        joining.set()
+        receipt = guard.end_provider_ingress(task, token=token)
+        assert not receipt['flushIncomplete']
+        assert receipt['deliveredEvents'] == 3
+        # The first post-stream event must follow every queued event.
+        deliver_invocation_event(task, {'type': 'complete', 'seq': 3})
+
+    monkeypatch.setattr(owner, 'execute_invocation', execute)
+
+    def run():
+        try:
+            results.append(owner.run_child_invocation(child))
+        except BaseException as exc:
+            failures.append(exc)
+        finally:
+            finished.set()
+
+    runner = threading.Thread(target=run)
+    runner.start()
+    try:
+        assert joining.wait(2)
+        # Outlast the observer timeout while the required sink is still live.
+        assert not finished.wait(0.1)
+        assert not child.get('_invocationDeliveryError')
+        release.set()
+        assert finished.wait(3)
+        assert failures == []
+        assert results == [child]
+        assert observed == [0, 1, 2, 3]
+        assert not child['_providerIngressIsolation']['worker'].is_alive()
+    finally:
+        release.set()
+        runner.join(5)
+        state = child.get('_providerIngressIsolation') or {}
+        if state.get('worker') is not None:
+            state['worker'].join(5)
+
+
+@pytest.mark.parametrize('stop', ['owner', 'deadline', 'stalled'])
+def test_required_evidence_wait_observes_invocation_control(monkeypatch, stop):
+    from lib.swarm.liveness import ProgressBeacon
+
+    monkeypatch.setattr(guard, '_CHILD_FLUSH_TIMEOUT_SEC', 0.01)
+    entered, release, stopping, finished = (threading.Event() for _ in range(4))
+    child = _carrier('controlled-evidence-wait')
+    child['_invocationAbortCheck'] = lambda: stop == 'owner' and stopping.is_set()
+    beacon = ProgressBeacon()
+    child['_invocationProgressBeacon'] = beacon
+    monkeypatch.setattr(ProgressBeacon, 'is_making_progress',
+                        lambda self, key: not (stop == 'stalled' and stopping.is_set()))
+    observed, receipts, failures = [], [], []
+
+    def sink():
+        entered.set()
+        assert release.wait(5)
+        commit_child_publication(lambda: observed.append('late'))
+
+    token = guard.begin_provider_ingress(child, span_id='controlled-storage')
+    _enqueue(child, token, lambda: child['_invocationPublicationFence'].deliver(
+        lambda event: sink(), {}))
+    assert entered.wait(2)
+
+    def flush():
+        try:
+            receipts.append(guard.end_provider_ingress(child, token=token))
+        except BaseException as exc:
+            failures.append(exc)
+        finally:
+            finished.set()
+
+    runner = threading.Thread(target=flush)
+    runner.start()
+    try:
+        if stop == 'deadline':
+            child['_invocationDeadline'] = 0
+        stopping.set()
+        assert finished.wait(2)
+        assert failures == []
+        assert child['aborted'] and child['abort_event'].is_set()
+        if stop != 'owner':
+            assert child['_invocationStopReason'] == stop
+        assert receipts[0]['flushIncomplete']
+        assert child['_invocationDeliveryError'] is not None
+        assert child['_providerIngressIsolation']['worker'].is_alive()
+    finally:
+        release.set()
+        runner.join(5)
+        child['_providerIngressIsolation']['worker'].join(5)
+    assert observed == []
+
+
+@pytest.mark.parametrize('fails', [False, True])
+def test_only_successful_evidence_delivery_refreshes_progress(monkeypatch, fails):
+    from lib.swarm.liveness import ProgressBeacon
+
+    child = _carrier('delivery-progress')
+    beacon = ProgressBeacon()
+    child['_invocationProgressBeacon'] = beacon
+    child['_invocationProgressKey'] = 'worker-progress'
+    observed = []
+    monkeypatch.setattr(ProgressBeacon, 'touch',
+                        lambda self, key, note='': observed.append((key, note)))
+
+    def deliver():
+        assert observed == []  # Entering a blocked sink is not completion.
+        if fails:
+            raise RuntimeError('required sink refused')
+
+    token = guard.begin_provider_ingress(child, span_id='progress')
+    _enqueue(child, token, deliver)
+    receipt = guard.end_provider_ingress(child, token=token)
+    if fails:
+        assert receipt['deliveryFailures'] == 1
+        assert child['_invocationDeliveryError'] is not None
+        assert observed == []
+    else:
+        assert receipt['deliveredEvents'] == 1
+        assert observed == [('worker-progress', 'evidence_delivered')]

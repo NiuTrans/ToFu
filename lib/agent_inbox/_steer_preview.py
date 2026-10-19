@@ -7,7 +7,7 @@ the text, so the operator's images silently vanished from the rendered chip
 even though the model received them. This helper projects ``images`` into the
 bounded ``{preview, caption, sizeKB}`` shape the frontend renders
 (``TurnImageAttachment``), shared by the durable pending record
-(``lib/storage_sidecar/operations_pkg/_turns_write.py``) and the delivered
+(``lib/storage_authority_sql/operations_pkg/_turns_write.py``) and the delivered
 flush (``lib/tasks_pkg/orchestrator/_deferred_inbox_flush.py``).
 
 Bounded and never raises: image entries are capped, and only already-resolved

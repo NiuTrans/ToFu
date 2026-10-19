@@ -6,7 +6,7 @@ from lib.log import get_logger
 from lib.skills import SKILL_TOOL_NAMES
 from lib.tasks_pkg.executor import _build_simple_meta, _finalize_tool_round
 from lib.tasks_pkg.executor import tool_registry
-from lib.tool_rejection import stamp_tool_rejection
+from lib.tool_results.tool_rejection import stamp_tool_rejection
 
 logger = get_logger(__name__)
 
@@ -98,7 +98,6 @@ def _handle_skill_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry,
                 str(fn_args.get('skill_id') or ''),
                 str(fn_args.get('resource') or ''),
                 cursor=fn_args.get('cursor', 0),
-                max_chars=fn_args.get('max_chars', 6000),
                 project_path=primary,
                 extra_paths=extras,
                 owner_user_id=owner_user_id,

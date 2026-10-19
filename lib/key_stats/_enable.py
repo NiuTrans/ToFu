@@ -37,10 +37,10 @@ def _pkg():
 def _raw_enabled_unlocked(pk: str) -> bool:
     """Raw (pre-last-resort) enabled check for one pair-key.
 
-    Caller MUST hold _lock.  Implements the ORIGINAL auto-disable logic:
+    Caller MUST hold _lock. Implements automatic credential admission:
       1. Manual override wins (True or False).
       2. Exhausted flag (HTTP 402 / insufficient_quota 429) — disable.
-      3. Auto-disable (attempts >= MIN_ATTEMPTS AND success rate < threshold).
+      3. Auto-disable only from attributed credential health outcomes.
       4. Otherwise enabled.
 
     This helper deliberately does NOT know about siblings — the last-resort
@@ -51,13 +51,15 @@ def _raw_enabled_unlocked(pk: str) -> bool:
     entry = _cache['stats'].get(pk) or {}
     if entry.get('exhausted'):
         return False
-    s = int(entry.get('success') or 0)
-    f = int(entry.get('failure') or 0)
-    total = s + f
-    if total < MIN_ATTEMPTS:
-        return True
-    sr = s / total if total else 1.0
-    return sr >= MIN_SUCCESS_RATE
+    return not _credential_auto_disabled(entry)
+
+
+def _credential_auto_disabled(entry: dict) -> bool:
+    """One policy for picker and UI; unattributed history is telemetry only."""
+    successes = int(entry.get('success') or 0)
+    failures = int(entry.get('credential_failures') or 0)
+    total = successes + failures
+    return total >= MIN_ATTEMPTS and successes / total < MIN_SUCCESS_RATE
 
 
 def _has_explicit_false_override_unlocked(pk: str) -> bool:

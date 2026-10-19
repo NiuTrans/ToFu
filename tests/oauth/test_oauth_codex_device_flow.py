@@ -409,7 +409,7 @@ class TestDeviceLoginRoute(unittest.TestCase):
             Quart.default_config = {**Quart.default_config,
                                     'PROVIDE_AUTOMATIC_OPTIONS': True}
         app = Quart(__name__)
-        from lib.http_error_handlers import register_http_error_handlers
+        from lib.http_transport.error_handlers import register_http_error_handlers
         from routes.api_v1.oauth import api_v1_oauth_bp
         app.register_blueprint(api_v1_oauth_bp)
         register_http_error_handlers(app)

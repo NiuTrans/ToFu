@@ -10,7 +10,7 @@ lives here as the shared contents assembler.
 
 import time
 
-from lib.http_client import http_post
+from lib.http_transport.client import http_post
 from lib.log import get_logger
 
 from ._errors import _IMAGE_GEN_BASE_DEFAULT, _HttpError, _RateLimitError

@@ -73,7 +73,7 @@ def plant_durable_abort(task_id: str, *, user_id: int, source: str) -> bool:
     if not _distributed_mode():
         return False
     try:
-        from lib.runtime_state_store import get_store
+        from lib.runtime.runtime_state_store import get_store
         get_store().set_value(
             _FLAG_KIND, str(task_id), str(int(user_id)), _FLAG_TTL_S)
     except Exception as e:
@@ -107,7 +107,7 @@ def plant_durable_interrupt(task_id: str, *, user_id: int, source: str) -> bool:
     if not _distributed_mode():
         return False
     try:
-        from lib.runtime_state_store import get_store
+        from lib.runtime.runtime_state_store import get_store
         get_store().set_value(
             _INTERRUPT_FLAG_KIND, str(task_id), str(int(user_id)),
             _INTERRUPT_FLAG_TTL_S)
@@ -140,7 +140,7 @@ def ensure_watcher() -> None:
 
 
 def _sweep_once() -> None:
-    from lib.runtime_state_store import get_store
+    from lib.runtime.runtime_state_store import get_store
     store = get_store()
     with _runtimes_lock:
         runtimes = list(_runtimes)

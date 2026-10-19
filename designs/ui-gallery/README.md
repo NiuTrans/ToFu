@@ -13,6 +13,15 @@ Every shared control must be registered on this page.
   ramp, theme-invariant geometry, 320px overflow, dialog focus-trap /
   Escape / backdrop / action resolution, field error wiring, focus ring,
   per-theme token resolution.
+- `previews/timeline-*.png` — mixed conversation chronology from the production
+  Surface and tool presenters: continuous activity surfaces, answer typography,
+  desktop, phone and expanded history. `timeline-shell-*.png` places the same
+  mounted renderer in the real `index.html` shell markup, with application
+  scripts absent (layout review, not a backend/boot test).
+  Regenerate with `tests/visual/test_visual_timeline_reading.py`; its JSON
+  measurements check label alignment and contrast against the actual activity
+  surface across all themes. The rationale and visual references are in
+  `docs/DESIGN_SYSTEM.md#conversation-reading-grammar`.
 
 Workflow for a new/changed control:
 

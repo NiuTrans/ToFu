@@ -280,6 +280,28 @@ os.environ['LLM_API_KEY'] = 'test-key-placeholder'
 os.environ['LLM_API_KEYS'] = 'test-key-placeholder'
 os.environ.setdefault('TOFU_AUTH_MODE', 'open')
 
+def _configure_explicit_test_engine(environment) -> None:
+    """Opt in to an exact source-matched artifact; never prepare during pytest."""
+    raw = environment.get('TOFU_TEST_TOFUDB_BIN')
+    if not raw:
+        return
+    import hashlib
+    from serverctl_pkg import native_engine
+
+    candidate = Path(raw).expanduser().resolve()
+    try:
+        native_engine.verify_current(candidate, Path(__file__).resolve().parents[1])
+        if environment.get('TOFUDB_TRANSPORT') == 'embedded':
+            native_engine.verify_library(candidate)
+    except (OSError, ValueError, native_engine.EnginePreparationError) as exc:
+        raise pytest.UsageError(f'Explicit test engine refused: {exc}') from exc
+    environment['TOFUDB_BIN'] = str(candidate)
+    environment['TOFUDB_EXPECTED_SHA256'] = hashlib.sha256(candidate.read_bytes()).hexdigest()
+
+
+_configure_explicit_test_engine(os.environ)
+
+
 # tofu_search's public facade imports pymupdf4llm.  Keep its optional, known-
 # incompatible layout/OCR backend from creating a host-sized ONNX pool merely
 # to collect tests.  The classic Markdown extractor remains available; ONNX is
@@ -493,16 +515,14 @@ def _shield_private_loop_helpers(request):
     ``_run_coro`` already bridges the same case for the sync test client with
     a helper thread; here we simply detach the foreign marker for the duration
     of tests that never touch the browser loop, and restore it afterwards.
-    Tests using playwright fixtures or pytest-asyncio/anyio markers manage
-    their own loops and are left alone.
+    Tests using playwright fixtures keep the browser loop. Async test runners
+    also need the foreign marker detached while creating and closing their loop.
     """
     playwright_fixtures = frozenset({
         'page', 'context', 'browser', 'browser_context', 'browser_type',
         'browser_name', 'browser_channel',
     })
-    if (playwright_fixtures.intersection(request.fixturenames)
-            or request.node.get_closest_marker('asyncio') is not None
-            or request.node.get_closest_marker('anyio') is not None):
+    if playwright_fixtures.intersection(request.fixturenames):
         yield
         return
     import asyncio
@@ -700,9 +720,10 @@ def host_tmp_path():
     this fixture ONLY for those guarded APIs; everything else keeps tmp_path
     (full POSIX semantics — no FUSE readdir/hard-link degradation).
     """
-    root = (Path(__file__).resolve().parent.parent
-            / '.eval-runs' / '.runtime' / 'pytest-host-scratch')
-    root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    from rootless_vm.host_paths import private_temporary_root
+    # Honor the same explicit private scratch override as guarded operations,
+    # including isolated source checkouts placed on a different volume.
+    root = private_temporary_root()
     path = Path(tempfile.mkdtemp(prefix='host-', dir=str(root)))
     try:
         yield path

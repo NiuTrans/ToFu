@@ -88,12 +88,24 @@ def chat_human_response():
         return api_bad_request('No response text')
 
     from lib.tasks_pkg.human_guidance import resolve_human_guidance
+
+    from lib.storage import StorageError
+    from lib.turn_lifecycle import LifecycleConflict, LifecycleNotFound
+    from routes.conversation_turn_errors import lifecycle_conflict_response, storage_failure_response
     try:
         ok = resolve_human_guidance(
             guidance_id,
             response_text,
             owner_user_id=request_user_id(),
         )
+    except LifecycleNotFound as exc:
+        return api_not_found(str(exc))
+    except LifecycleConflict as exc:
+        return lifecycle_conflict_response(exc)
+    except StorageError as exc:
+        return storage_failure_response(exc, operation='human_guidance.answer')
+    except ValueError as exc:
+        return api_bad_request(str(exc))
     except Exception as e:
         logger.error('[HumanGuidance] Exception resolving %s: %s',
                      guidance_id, e, exc_info=True)

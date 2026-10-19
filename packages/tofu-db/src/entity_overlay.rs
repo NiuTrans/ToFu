@@ -28,7 +28,7 @@ use crate::entity::invalid_data;
 
 /// Wire encoding of one committed delta: a count-prefixed sorted run of
 /// (key, value-or-tombstone) entries. Bounded by
-/// `MAX_ENTITY_TRANSACTION_WRITES` keys and the family inline payload budget.
+/// The count field is u32; transaction staging validates representable counts.
 pub(crate) fn encode_overlay_delta(writes: &BTreeMap<Vec<u8>, Option<Vec<u8>>>) -> Vec<u8> {
     let mut encoded = Vec::with_capacity(4 + writes.len() * 16);
     encoded.extend_from_slice(&(writes.len() as u32).to_le_bytes());
@@ -53,8 +53,10 @@ pub(crate) fn decode_overlay_delta(
         return Err(invalid_data("entity overlay delta header is truncated"));
     }
     let count = u32::from_le_bytes(payload[0..4].try_into().unwrap()) as usize;
-    if count > crate::generated_tofudb_ir::MAX_ENTITY_TRANSACTION_WRITES {
-        return Err(invalid_data("entity overlay delta exceeds the write bound"));
+    // Every row needs key-length and value-length words before any bytes.
+    // Reject impossible counts from the actual payload before iterating.
+    if count > (payload.len() - 4) / 8 {
+        return Err(invalid_data("entity overlay delta count exceeds its encoded bytes"));
     }
     let mut offset = 4_usize;
     let mut writes = BTreeMap::new();

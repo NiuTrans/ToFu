@@ -50,6 +50,18 @@ Never hand-edit generated artifacts. Edit their source and run the owner:
 
 Checks use the corresponding `check:*` command and fail on stale output.
 
+Python generated modules live beside their consumer under a package-local
+`generated_*.py` (or legacy `*_generated.py`) name — never a loose `api_*` /
+`tool_*` module name that hides its generated status. The generator’s
+`--check` mode and the owning contract test must agree on the path.
+
+The i18n locale authorities (`frontend/src/i18n/locales/{en,zh}.json`) also
+feed a dead-key scan, `scripts/check_i18n_dead_keys.mjs`, wired into
+`check:i18n` / `check:frontend` as a non-failing warning. It flags catalog
+keys not referenced anywhere in `frontend/src` (accounting for dynamic-prefix
+families such as `t('swarm.phase.' + phase)` via an allowlist). Run it with
+`--json` to list dead keys for a pruning pass.
+
 ## Change workflow
 
 1. State the invariant and the current owner.
@@ -88,11 +100,14 @@ semantics live in [docs/TESTING_STRATEGY.md](docs/TESTING_STRATEGY.md).
 
 ## Documentation lifecycle
 
-Every `docs/**/*.md` file must be present in `docs/catalog.json`. Run:
+`docs/README.md` and `docs/catalog.json` provide navigation. Documentation
+changes have no automatic catalog, length, link, prose, or generated-index gate.
 
-```bash
-make docs-check
-```
+Problem: editorial checks blocked unrelated implementation work. Decision:
+remove documentation checks from local commands, CI, and tests. Retaining the
+checks with larger limits or non-blocking CI steps was rejected because it
+keeps the same maintenance machinery. Runtime behavior, machine-readable
+contracts, packaging, and security remain covered by their owning tests.
 
 Documentation describes the running system. Completed plans, audit snapshots,
 incident reports, migration diaries, and duplicated tutorials are deleted after

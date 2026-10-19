@@ -92,11 +92,12 @@ def test_frontend_preflight_passes_worker_interpreter_to_nested_canary(tmp_path)
     project.mkdir()
     (project / 'serverctl.py').write_text(
         'import os,sys\n'
-        'assert os.environ["TOFU_PYTHON"] == sys.executable\n'
+        'assert os.environ["TOFU_PYTHON"] == os.environ["TOFU_EXPECTED_PREFLIGHT_PYTHON"]\n'
         'assert sys.argv[1] == "prepare-frontend"\n')
     ok, error = manager_module.run_frontend_preflight(
         str(project), sys.executable,
-        {'PATH': '/usr/bin:/bin', 'TOFU_PYTHON': '/missing/stale/python'},
+        {'PATH': '/usr/bin:/bin', 'TOFU_PYTHON': '/missing/stale/python',
+         'TOFU_EXPECTED_PREFLIGHT_PYTHON': sys.executable},
         'isolated crash-recovery contract')
     assert ok is True
     assert error == ''

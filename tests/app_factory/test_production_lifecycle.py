@@ -10,7 +10,7 @@ import pytest
 from quart import current_app
 from quart.testing.app import LifespanError
 
-from lib.app_factory import create_base_app
+from lib.app.app_factory import create_base_app
 from lib.production_lifecycle import (
     ProductionStartupSteps,
     register_production_lifecycle,
@@ -163,9 +163,9 @@ def test_inline_phase_failure_uses_native_rollback_cleanup():
     stop = threading.Event()
     calls = []
 
-    def fail_boundary():
-        calls.append('boundary')
-        raise RuntimeError('boundary validation failed')
+    def fail_assets():
+        calls.append('assets')
+        raise RuntimeError('artifact validation failed')
 
     async def shutdown_runtime(event, **_kwargs):
         calls.append('shutdown')
@@ -174,8 +174,8 @@ def test_inline_phase_failure_uses_native_rollback_cleanup():
     register_production_lifecycle(
         app,
         steps=ProductionStartupSteps(
-            build_assets=lambda: calls.append('assets'),
-            validate_storage_boundary=fail_boundary,
+            build_assets=fail_assets,
+            validate_storage_boundary=lambda: calls.append('boundary'),
             init_database=lambda: calls.append('database'),
             start_storage=lambda: calls.append('storage'),
             bootstrap_model_routing=lambda: calls.append('model-routing'),
@@ -187,13 +187,13 @@ def test_inline_phase_failure_uses_native_rollback_cleanup():
     )
 
     async def exercise():
-        with pytest.raises(LifespanError, match='boundary validation failed'):
+        with pytest.raises(LifespanError, match='artifact validation failed'):
             async with app.test_app():
                 pass
 
     asyncio.run(exercise())
     assert stop.is_set()
-    assert calls == ['assets', 'boundary', 'shutdown']
+    assert calls == ['assets', 'shutdown']
     assert app.extensions['tofu_lifecycle']['status'] == 'startup_failed'
 
 
@@ -527,7 +527,7 @@ def test_storage_handshake_failure_blocks_workers_without_killing_listener():
             assert app.extensions['tofu_production_lifecycle'][
                 'status'] == 'boot_failed'
             assert runner.snapshot()['failedPhase']['key'] == (
-                'storage_sidecar')
+                'storage_authority_sql')
 
     asyncio.run(exercise())
     assert stop.is_set()
@@ -557,10 +557,65 @@ def test_server_composition_wires_required_storage_phase(monkeypatch):
     ) == 'registered'
     assert captured['target_app'] is app_sentinel
     steps = captured['steps']
-    assert steps.start_storage is server_module._start_storage_sidecar
+    assert steps.start_storage is server_module._start_storage_authority_sql
     from lib.model_routing import bootstrap_personal_model_routing
     assert steps.bootstrap_model_routing is bootstrap_personal_model_routing
     assert (
         steps.validate_storage_boundary
         is server_module._validate_storage_cutover_boundary
     )
+
+
+def test_slow_storage_boundary_leaves_shell_and_boot_available(monkeypatch):
+    """Required storage admission may block; it must not hold HTTP startup."""
+    from lib.http_transport.request_lifecycle import register_request_lifecycle
+    from routes.api_v4.bootstrap import api_v4_bp
+
+    app = create_base_app('early-shell-storage-boundary', {'TESTING': True})
+    register_request_lifecycle(app)
+    app.register_blueprint(api_v4_bp)
+    monkeypatch.setattr('lib.storage.storage_status', lambda: {'ready': True})
+    started, release = threading.Event(), threading.Event()
+    calls = []
+
+    @app.route('/')
+    async def shell():
+        return '<main>Tofu shell</main>'
+
+    @app.route('/api/send', methods=['POST'])
+    async def send():
+        calls.append('send')
+        return {'ok': True}
+
+    def boundary():
+        started.set()
+        assert release.wait(5), 'test did not release its storage gate'
+
+    async def shutdown(*_args, **_kwargs):
+        release.set()
+
+    register_production_lifecycle(app, steps=ProductionStartupSteps(
+        build_assets=lambda: None, validate_storage_boundary=boundary,
+        start_storage=lambda: calls.append('storage'),
+        init_database=lambda: None, bootstrap_model_routing=lambda: None,
+        validate_imports=lambda: None, start_workers=lambda _: None,
+    ), shutdown_runtime=shutdown, optional_services=lambda **_: ({}, False))
+
+    async def exercise():
+        try:
+            async with app.test_app():
+                assert await asyncio.to_thread(started.wait, 1)
+                async with app.test_client() as client:
+                    assert (await asyncio.wait_for(client.get('/'), 1)).status_code == 200
+                    response = await asyncio.wait_for(client.get('/api/v4/boot'), 1)
+                    body = await response.get_json()
+                    assert body['currentPhase']['key'] == 'storage_boundary'
+                    assert (await client.post('/api/send')).status_code == 503
+                    assert calls == []
+                    release.set()
+                    assert await app.extensions['tofu_boot_runner'].wait_done() == 'ready'
+                    assert (await client.post('/api/send')).status_code == 200
+        finally:
+            release.set()
+    asyncio.run(exercise())
+    assert calls == ['storage', 'send']

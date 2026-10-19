@@ -9,11 +9,9 @@ import orjson
 import pytest
 
 from lib.storage.errors import StorageError
-from lib.storage_sidecar.receipt_codec import (
+from lib.storage_authority_sql.receipt_codec import (
     COMMAND_RECEIPT_LOOKUP_SQL,
     COMPRESSED_RECEIPT_MAGIC,
-    MAX_DECODED_RECEIPT_BYTES,
-    MAX_STORED_RECEIPT_BYTES,
     command_receipt_identity_v2,
     decode_command_receipt_lookup,
     decode_receipt_response,
@@ -198,27 +196,21 @@ def test_large_repeated_commit_response_is_compressed_and_exactly_replayed():
     encoded = encode_receipt_response(response)
 
     assert encoded.startswith(COMPRESSED_RECEIPT_MAGIC)
-    assert len(encoded) <= MAX_STORED_RECEIPT_BYTES
+    assert len(encoded) < 4*1024*1024
     assert decode_receipt_response(encoded) == response
 
 
-def test_incompressible_or_decoded_oversize_responses_keep_hard_limits():
+def test_incompressible_and_large_decoded_responses_preserve_complete_content():
     incompressible = "".join(
         hashlib.sha256(str(index).encode()).hexdigest()
         for index in range(5_000)
     )
     response = {"value": incompressible}
     encoded = encode_receipt_response(response)
-    assert 65536 < len(encoded) <= MAX_STORED_RECEIPT_BYTES
+    assert 65536 < len(encoded) < 4*1024*1024
     assert decode_receipt_response(encoded) == response
-    with pytest.raises(StorageError) as stored_limit:
-        decode_receipt_response(b' ' * (MAX_STORED_RECEIPT_BYTES + 1))
-    assert stored_limit.value.code == "database_integrity"
-
-    with pytest.raises(StorageError) as decoded_limit:
-        encode_receipt_response({"value": "x" * MAX_DECODED_RECEIPT_BYTES})
-    assert decoded_limit.value.code == "database_protocol_error"
-    assert "decoded receipt budget" in decoded_limit.value.message
+    response = {"value":"x" * (9*1024*1024)}
+    assert decode_receipt_response(encode_receipt_response(response)) == response
 
 
 def test_corrupt_or_unknown_compressed_receipts_fail_as_integrity_errors():

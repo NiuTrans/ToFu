@@ -37,7 +37,7 @@ from lib.mcp.types import MCP_CONFIG_FILENAME, MCPServerConfig
 logger = get_logger(__name__)
 
 # ── Locate config dir (writable data root — see lib/runtime_paths) ──
-from lib.runtime_paths import data_root
+from lib.runtime.runtime_paths import data_root
 _CONFIG_DIR = os.path.join(data_root(), 'config')
 
 

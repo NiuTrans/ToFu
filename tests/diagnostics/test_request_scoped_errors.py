@@ -23,20 +23,20 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 
 def _classify(status, body):
-    from lib.llm_errors import _classify_http_error
+    from lib.llm.llm_errors import _classify_http_error
     _classify_http_error(status, body, 'some-model', '[t]')
 
 
 @pytest.mark.unit
 class TestRequestScopedClassification:
     def test_404_is_request_scoped(self):
-        from lib.llm_errors import RequestScopedError
+        from lib.llm.llm_errors import RequestScopedError
         with pytest.raises(RequestScopedError) as ei:
             _classify(404, '{"error":{"message":"model not found"}}')
         assert ei.value.status_code == 404
 
     def test_422_is_request_scoped(self):
-        from lib.llm_errors import RequestScopedError
+        from lib.llm.llm_errors import RequestScopedError
         with pytest.raises(RequestScopedError) as ei:
             _classify(422, '{"error":{"message":"Unprocessable Entity: '
                            'messages.0.content is required"}}')
@@ -45,7 +45,7 @@ class TestRequestScopedClassification:
     def test_400_still_bad_request_error(self):
         """Guard: 400 keeps its existing typed classification (dispatcher
         already releases the slot for it)."""
-        from lib.llm_errors import BadRequestError, RequestScopedError
+        from lib.llm.llm_errors import BadRequestError, RequestScopedError
         with pytest.raises(BadRequestError):
             _classify(400, '{"error":{"type":"invalid_request_error",'
                            '"message":"weird payload"}}')
@@ -58,7 +58,7 @@ class TestRequestScopedClassification:
             pass
 
     def test_429_not_request_scoped(self):
-        from lib.llm_errors import RateLimitError
+        from lib.llm.llm_errors import RateLimitError
         with pytest.raises(RateLimitError):
             _classify(429, '{"error":{"message":"rate limited"}}')
 
@@ -71,7 +71,7 @@ class TestRequestScopedEnvelopeKind:
 
     def test_404_envelope_kind_is_not_found(self):
         from lib.error_envelope import from_exception
-        from lib.llm_errors import RequestScopedError
+        from lib.llm.llm_errors import RequestScopedError
         envelope = from_exception(
             RequestScopedError('API HTTP 404: {"detail":"Not Found"}',
                                status_code=404),
@@ -88,7 +88,7 @@ class TestRequestScopedEnvelopeKind:
 
     def test_422_envelope_kind_stays_bad_request(self):
         from lib.error_envelope import from_exception
-        from lib.llm_errors import RequestScopedError
+        from lib.llm.llm_errors import RequestScopedError
         envelope = from_exception(
             RequestScopedError('API HTTP 422: unprocessable', status_code=422))
         assert envelope['kind'] == 'bad_request'
@@ -140,7 +140,7 @@ def _make_slot(key='k0'):
 class TestRequestScopedDispatch:
     def test_dispatch_chat_surfaces_without_slot_damage(self, monkeypatch):
         from lib.llm_dispatch import api
-        from lib.llm_errors import RequestScopedError
+        from lib.llm.llm_errors import RequestScopedError
 
         slot = _make_slot()
         disp = _FakeDispatcher([slot, slot])
@@ -164,7 +164,7 @@ class TestRequestScopedDispatch:
 
     def test_dispatch_stream_surfaces_without_slot_damage(self, monkeypatch):
         from lib.llm_dispatch import api
-        from lib.llm_errors import RequestScopedError
+        from lib.llm.llm_errors import RequestScopedError
 
         slot = _make_slot()
         disp = _FakeDispatcher([slot, slot])
@@ -210,9 +210,9 @@ class TestRequestScopedDispatch:
 
 @pytest.mark.unit
 @pytest.mark.parametrize('error_factory', [
-    lambda: __import__('lib.llm_errors', fromlist=['BadRequestError'])
+    lambda: __import__('lib.llm.llm_errors', fromlist=['BadRequestError'])
         .BadRequestError('invalid moonshot tool schema'),
-    lambda: __import__('lib.llm_errors', fromlist=['RequestScopedError'])
+    lambda: __import__('lib.llm.llm_errors', fromlist=['RequestScopedError'])
         .RequestScopedError('unprocessable request', status_code=422),
 ])
 def test_request_rejection_never_switches_model_or_pool_rescues(
@@ -254,7 +254,7 @@ def test_request_rejection_never_switches_model_or_pool_rescues(
 @pytest.mark.unit
 def test_local_request_preparation_never_switches_or_pool_rescues(monkeypatch):
     import lib.tasks_pkg.llm_fallback._call as fallback
-    from lib.llm_errors import LocalRequestPreparationError
+    from lib.llm.llm_errors import LocalRequestPreparationError
 
     error = LocalRequestPreparationError(
         'ptc projection signature mismatch', stage='wire_projection')

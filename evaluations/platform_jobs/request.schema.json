@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "run_id", "benchmark", "dataset_ref", "task_lock_sha256", "runner_revision", "harbor_commit", "arguments", "credential_env_names", "limits"],
+  "properties": {
+    "version": {"const": 1},
+    "run_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$"},
+    "benchmark": {"type": "string", "minLength": 1, "maxLength": 96},
+    "dataset_ref": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "task_lock_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "runner_revision": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "harbor_commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "arguments": {"type": "array", "minItems": 4, "maxItems": 256, "items": {"type": "string", "minLength": 1, "maxLength": 4096}},
+    "credential_env_names": {"type": "array", "maxItems": 64, "uniqueItems": true, "items": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,127}$"}},
+    "limits": {
+      "type": "object", "additionalProperties": false,
+      "required": ["runtime_seconds", "result_bytes", "console_bytes"],
+      "properties": {
+        "runtime_seconds": {"type": "integer", "minimum": 1},
+        "result_bytes": {"type": "integer", "minimum": 8192},
+        "console_bytes": {"type": "integer", "minimum": 1}
+      }
+    }
+  }
+}

@@ -93,7 +93,7 @@ _VISUAL_MODALITIES = (
 def _web_search(query: str, *, user_question: str = '', freshness: str = '',
                 max_results: int = 12, deepen: bool = False):
     """Run one web search through the tofu-search service. Returns results."""
-    from lib.search_runtime import ensure_search_runtime
+    from lib.search.search_runtime import ensure_search_runtime
     search_runtime = ensure_search_runtime()
     return search_runtime.perform_web_search(
         query, user_question=user_question, freshness=freshness,
@@ -112,10 +112,10 @@ def _source_beats_agent_call(messages, **kwargs):
     Source facts are already supplied; this stage grants no tool authority.
     Provider finish evidence and cancellation must precede JSON adoption.
     """
-    from lib.agent_loop import AbortSignal, run_agent_loop
+    from lib.agent_loop.agent_loop import AbortSignal, run_agent_loop
     from lib.llm_dispatch.api import dispatch_stream
     from lib.llm.stream_result import require_verified_provider_stream_result
-    from lib.llm_errors import AbortedError
+    from lib.llm.llm_errors import AbortedError
 
     content = []
     result = None
@@ -595,7 +595,7 @@ def _run_script(ctx: dict) -> dict:
         except StageAborted:
             raise
         except Exception as exc:
-            from lib.llm_errors import AbortedError
+            from lib.llm.llm_errors import AbortedError
             if isinstance(exc, AbortedError):
                 raise StageAborted(str(exc)) from exc
             if mode == 'standard':
@@ -622,7 +622,7 @@ def _run_script(ctx: dict) -> dict:
         except StageAborted:
             raise
         except Exception as exc:
-            from lib.llm_errors import AbortedError
+            from lib.llm.llm_errors import AbortedError
             if isinstance(exc, AbortedError):
                 raise StageAborted(str(exc)) from exc
             logger.warning('[Recipe:script] critic failed; using score: %s', exc)
@@ -779,7 +779,7 @@ def script_stage_for_source(source_text: str, *, lang: str = 'zh',
         source_text, lang=lang, max_scenes=max_scenes,
         char_budget=char_budget, caption_capacity=caption_capacity)
     if abort_check is not None and abort_check():
-        from lib.llm_errors import AbortedError
+        from lib.llm.llm_errors import AbortedError
         raise AbortedError('aborted before source-beat dispatch')
     content, _usage = _source_beats_agent_call([{'role': 'user', 'content': prompt}],
                                 max_tokens=4096, temperature=0.4,
@@ -790,7 +790,7 @@ def script_stage_for_source(source_text: str, *, lang: str = 'zh',
                                     max_429_attempts=max_429_attempts),
                                 log_prefix='[Recipe:source-beats]')
     if abort_check is not None and abort_check():
-        from lib.llm_errors import AbortedError
+        from lib.llm.llm_errors import AbortedError
         raise AbortedError('aborted after source-beat dispatch')
     text = (content or '').strip()
     m = _JSON_BLOCK_RE.search(text)

@@ -1,0 +1,53 @@
+name: Installer artifact portability
+
+on:
+  pull_request:
+    paths:
+      - 'bootstrap_pkg/**'
+      - 'install.sh'
+      - 'scripts/build_python_wheels.py'
+      - 'tests/installer/**'
+      - '.github/workflows/installer-portability.yml'
+  push:
+    branches: [main, master]
+    paths:
+      - 'bootstrap_pkg/**'
+      - 'install.sh'
+      - 'scripts/build_python_wheels.py'
+      - 'tests/installer/**'
+      - '.github/workflows/installer-portability.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  wheel-admission:
+    name: Offline wheel admission (${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-22.04, ubuntu-22.04-arm, macos-15, macos-15-intel, windows-latest, windows-11-arm]
+    env:
+      PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'
+      TOFU_PYTHON_BUNDLE_NO_DOWNLOAD: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          enable-cache: true
+      - name: Install artifact test tools
+        run: python -m pip install 'pytest>=9,<10' 'pytest-timeout>=2.1' 'pytest-xdist>=3' 'anyio>=4'
+      - name: Verify real offline acquisition, cache, ABI and rollback
+        # The bootstrap authority is stdlib-only. Avoid full-app fixture imports
+        # so this gate tests a genuinely lean target interpreter on each host.
+        run: >-
+          python -m pytest --noconftest -q
+          tests/installer/test_python_wheels.py
+          tests/installer/test_install_transaction.py
+          --tb=short

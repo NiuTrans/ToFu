@@ -1,4 +1,4 @@
-"""Bounded write-ahead evidence for project file replacement.
+"""Complete write-ahead evidence for project file replacement.
 
 Entry point: locked_intents(session_dir). The caller owns authorization and
 must hold the store lock through prepare, file publication and journal commit.
@@ -15,6 +15,7 @@ import hashlib
 import json
 import os
 import stat
+import sys
 import uuid
 
 from lib.project_mod.snapshot_content import anchored_parent, file_fingerprint
@@ -38,20 +39,13 @@ def _validator():
 
 @lru_cache(maxsize=1)
 def recovery_file_bytes():
-    """One launch-resolved write budget, independent of tool display limits."""
-    from runtime_guards import resolve_resource_budget
-    policy = contract()['x-resource-budget']
-    return resolve_resource_budget('TOFU_PROJECT_WRITE_RECOVERY_MAX_MIB',
-        maximum=policy['maximumMiB']) * 1024 * 1024
+    """Compatibility extent for callers; no launch-derived admission quota."""
+    return sys.maxsize
 
 
 def _limit(name):
-    if name in ('originalBytes', 'postImageBytes'):
-        return recovery_file_bytes()
-    if name == 'recordBytes':
-        # Exact base64 expansion plus a bounded envelope; multibyte text
-        # changes the pre-image byte count, never this encoding calculation.
-        return 4 * ((recovery_file_bytes() + 2) // 3) + contract()['x-resource-budget']['recordEnvelopeBytes']
+    if name in ('originalBytes', 'postImageBytes', 'recordBytes'):
+        return sys.maxsize
     return contract()['x-resource-limits'][name]
 
 
@@ -59,7 +53,9 @@ def _identity(metadata):
     return [metadata.st_dev, metadata.st_ino]
 
 
-def _relative(value):
+def validate_relative_path(value):
+
+    """Validate a destination against the same contract used by prepared writes."""
     if (not isinstance(value, str) or not value or os.path.isabs(value)
             or '\\' in value or any(part in ('', '.', '..') for part in value.split('/'))):
         raise IntentError('Invalid write intent relative path')
@@ -69,32 +65,28 @@ def _relative(value):
 def _validate(record):
     if next(_validator().iter_errors(record), None):
         raise IntentError('Invalid write intent envelope')
-    _relative(record['path'])
+    validate_relative_path(record['path'])
     if not os.path.isabs(record['basePath']) or not os.path.isabs(record['rootPath']):
         raise IntentError('Write intent root must be absolute')
-    if record['postBytes'] > _limit('postImageBytes'):
-        raise IntentError('Post-image exceeds recovery budget')
     original = record['original']
     if original is not None:
         try:
-            decoded = base64.b64decode(original, validate=True)
+            base64.b64decode(original, validate=True)
         except (ValueError, binascii.Error) as exc:
             raise IntentError('Invalid original file encoding') from exc
-        if len(decoded) > _limit('originalBytes'):
-            raise IntentError('Original file exceeds recovery budget')
     return record
 
 
-def _read_regular(parent, name, limit):
+def _read_regular(parent, name):
     flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, 'O_CLOEXEC', 0)
     descriptor = os.open(name, flags, dir_fd=parent)
     with os.fdopen(descriptor, 'rb') as handle:
         before = os.fstat(handle.fileno())
-        if not stat.S_ISREG(before.st_mode) or before.st_size > limit:
-            raise IntentError('Recovery evidence is not a bounded regular file')
-        data = handle.read(limit + 1)
+        if not stat.S_ISREG(before.st_mode):
+            raise IntentError('Recovery evidence is not a regular file')
+        data = handle.read()
         after = os.fstat(handle.fileno())
-    if len(data) > limit or len(data) != before.st_size or file_fingerprint(before) != file_fingerprint(after):
+    if len(data) != before.st_size or file_fingerprint(before) != file_fingerprint(after):
         raise IntentError('Recovery evidence changed while reading')
     current = os.stat(name, dir_fd=parent, follow_symlinks=False)
     if file_fingerprint(current) != file_fingerprint(before):
@@ -120,7 +112,7 @@ def classify(record):
     try:
         with anchored_parent(record['rootPath'], record['path'], root) as (parent, name):
             try:
-                current, metadata = _read_regular(parent, name, _limit('postImageBytes'))
+                current, metadata = _read_regular(parent, name)
             except FileNotFoundError:
                 current, metadata = None, None
             expected_original = (None if record['original'] is None
@@ -129,7 +121,7 @@ def classify(record):
                     and len(current) == record['postBytes'] and _digest(current) == record['postDigest']):
                 result = 'applied'
             elif current == expected_original:
-                staged, stage_meta = _read_regular(parent, record['stageName'], _limit('postImageBytes'))
+                staged, stage_meta = _read_regular(parent, record['stageName'])
                 result = ('unpublished' if _identity(stage_meta) == record['stagedIdentity']
                           and len(staged) == record['postBytes'] and _digest(staged) == record['postDigest']
                           else 'conflict')
@@ -159,19 +151,14 @@ class IntentStore:
         # session would be invisible to the cached descriptor — freshly
         # recorded crash evidence would be unrecoverable exactly when needed.
         records = []
-        visited = 0
         descriptor = os.open(
             self.directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         try:
             with os.scandir(descriptor) as entries:
-                for visited, entry in enumerate(entries, 1):
-                    if visited > _limit('directoryEntries'):
-                        raise IntentError('Write recovery directory entry budget exhausted')
+                for entry in entries:
                     if not entry.name.endswith('.json'):
                         continue
-                    if len(records) >= _limit('pendingIntents'):
-                        raise IntentError('Pending write recovery budget exhausted')
-                    data, _ = _read_regular(descriptor, entry.name, _limit('recordBytes'))
+                    data, _ = _read_regular(descriptor, entry.name)
                     try:
                         record = _validate(json.loads(data))
                     except (ValueError, UnicodeError, RecursionError) as exc:
@@ -181,7 +168,6 @@ class IntentStore:
                     records.append(record)
         finally:
             os.close(descriptor)
-        self._entry_count = visited
         return records
 
     def prepare(self, *, base_path, path, original, post_content, stage_name,
@@ -192,16 +178,10 @@ class IntentStore:
         This method flushes its directory entry before publishing the intent.
         """
         from lib.project_mod.modifications import _atomic_json_write
-        _relative(path)
+        validate_relative_path(path)
         if original is not None and not isinstance(original, bytes):
             raise IntentError('Original must be exact bytes or explicit absence')
-        if (original is not None and len(original) > _limit('originalBytes')
-                or len(post_content) > _limit('postImageBytes')):
-            raise IntentError('File exceeds write recovery byte budget')
-        if len(self.read()) >= _limit('pendingIntents'):
-            raise IntentError('Pending write recovery budget exhausted')
-        if self._entry_count >= _limit('directoryEntries'):
-            raise IntentError('Write recovery directory entry budget exhausted')
+        self.read()  # Existing evidence must still validate before publication.
         base_path = os.path.abspath(base_path)
         root_path = os.path.realpath(base_path)
         root = os.stat(root_path, follow_symlinks=False)
@@ -211,7 +191,7 @@ class IntentStore:
             import re
             if not isinstance(stage_name, str) or not re.fullmatch(r'\.tofu_atomic_[0-9a-f]{32}', stage_name):
                 raise IntentError('Invalid write stage name')
-            staged, metadata = _read_regular(parent, stage_name, _limit('postImageBytes'))
+            staged, metadata = _read_regular(parent, stage_name)
             if staged != post_content:
                 raise IntentError('Staged content differs from requested write')
             os.fsync(parent)  # Make the stage name durable before its intent.
@@ -244,7 +224,7 @@ class IntentStore:
             raise IntentError('Write intent has not been aborted')
         with anchored_parent(record['rootPath'], record['path'], tuple(record['rootIdentity'])) as (parent, _):
             try:
-                data, metadata = _read_regular(parent, record['stageName'], _limit('postImageBytes'))
+                data, metadata = _read_regular(parent, record['stageName'])
             except FileNotFoundError:
                 pass
             else:

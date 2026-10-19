@@ -97,7 +97,7 @@ def test_loaded_request_read_failure_keeps_non_reconnectable_fallback(monkeypatc
 @pytest.fixture
 def durable_ports(monkeypatch):
     from lib.automations import events
-    from lib import runtime_state_store
+    from lib.runtime import runtime_state_store
     from lib.tasks_pkg.manager import runtime
     values = {}; birth = []
     class Store:

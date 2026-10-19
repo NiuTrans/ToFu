@@ -29,6 +29,7 @@ KINDS = frozenset({
     'tool_not_available', 'tool_call_rejected',
     'storage_fence',
     'oauth_reauth',
+    'execution_token_usage_unknown',
 })
 
 # Default severities — warnings are recoverable / user-actionable, errors
@@ -43,6 +44,7 @@ _WARNING_KINDS = frozenset({
     'tool_not_available', 'tool_call_rejected',
     'storage_fence',
     'oauth_reauth',
+    'execution_token_usage_unknown',
 })
 
 # Kinds where retrying THE SAME REQUEST is genuinely likely to help
@@ -142,6 +144,18 @@ _OAUTH_REAUTH_HINT_EN = (
 # multi-line; titles are one line.
 
 _TITLES: dict[str, tuple[str, str, str, str]] = {
+    'execution_token_usage_unknown': (
+        '先前的模型用量尚未确认',
+        'Previous model usage is unconfirmed',
+        '先前模型请求的实际 token 用量未确认，当前预算已阻止新的模型调用。'
+        '已有内容和已知用量仍然保留。\n'
+        '在对话中点击“检查并继续”，可检查是否能使用新预算继续。'
+        '检查本身不会调用模型或补全先前的未知用量，继续前仍需你确认。',
+        'Actual token usage from an earlier model request is unconfirmed, so the current '
+        'budget blocks another model call. Existing output and known usage are preserved.\n'
+        'Choose “Check and continue” in the conversation to check whether a new budget '
+        'can be used. The check does not call a model or recover earlier unknown usage; '
+        'continuing still requires your confirmation.'),
     'quota':              ('⚠️ API Key 余额/配额已用尽',
                             'API key quota exhausted',
                             _SETTINGS_HINT_CN, _SETTINGS_HINT_EN),
@@ -327,7 +341,7 @@ _TITLES: dict[str, tuple[str, str, str, str]] = {
                             '• 这不是你手动停止，也不是模型或网络问题——服务端存储权威端拒绝了本轮的事件写入'
                             '（database_integrity），为保护数据一致性中止了本轮，已生成的内容已保留。\n'
                             '• 点「重试」或「重新生成」通常会成功；若反复出现：先运行 '
-                            'python3 -m lib.log_diagnostics --conversation-id <会话ID>'
+                            'python3 -m lib.logging_pkg.log_diagnostics --conversation-id <会话ID>'
                             '（或 GET /api/v4/logs/diagnostics?conversation_id=<会话ID>），'
                             '再把故障时段 logs/app.log 中 tofu.storage.engine / lib.turn_lifecycle '
                             '的记录发给维护者定位。',
@@ -335,7 +349,7 @@ _TITLES: dict[str, tuple[str, str, str, str]] = {
                             'storage authority rejected this turn\'s event writes (database_integrity) '
                             'and stopped the turn to protect consistency; generated content is preserved.\n'
                             '• Retry / Regenerate usually succeeds; if it recurs, run '
-                            'python3 -m lib.log_diagnostics --conversation-id <id> '
+                            'python3 -m lib.logging_pkg.log_diagnostics --conversation-id <id> '
                             '(or GET /api/v4/logs/diagnostics?conversation_id=<id>) first, '
                             'then share the logs/app.log entries from tofu.storage.engine / '
                             'lib.turn_lifecycle around the failure time with the maintainers.'),

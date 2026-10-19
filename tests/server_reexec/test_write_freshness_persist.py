@@ -155,7 +155,7 @@ def test_reexec_arms_shutdown_before_saving_snapshot(monkeypatch, tmp_path):
     the main thread is allowed to replace the stopped production lifespan.
     """
     from routes.api_v1 import update as upd
-    import lib.server_reexec as reexec
+    import lib.server.server_reexec as reexec
     calls = []
     monkeypatch.delenv('TOFU_MANAGED_BY', raising=False)
     monkeypatch.setattr(

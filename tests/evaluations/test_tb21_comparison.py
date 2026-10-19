@@ -331,3 +331,16 @@ def test_cli_target_gate_requires_confirmed_evidence(host_tmp_path, monkeypatch,
     assert main(['compare', '--baseline', 'b', '--candidate', 'c', '--output-root',
                  str(host_tmp_path), '--run-id', 'test', '--require-target']) == expected
     assert json.loads(capsys.readouterr().out)['decision'] == decision
+
+
+def test_retry_allowance_is_frozen_before_archive_mutation(host_tmp_path):
+    from evaluations.swebench.infrastructure_retry import infrastructure_retry_cycle
+    baseline, candidate = [_prepared(host_tmp_path, role) for role in ('baseline', 'candidate')]
+    path = subject.register_comparison(baseline, candidate, output_root=host_tmp_path/'protocols',
+        run_id='bounded-retry', infrastructure_retry_limit=2)
+    protocol = json.loads(path.read_text())
+    assert protocol['maxInfrastructureRetries'] == 2
+    with pytest.raises(ValueError, match='frozen protocol'):
+        infrastructure_retry_cycle(candidate, attempt_index=1, max_infrastructure_retries=3,
+                                   resume=lambda *args: pytest.fail('must not dispatch'))
+    assert not (candidate/'infrastructure-attempts').exists()

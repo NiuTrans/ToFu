@@ -226,7 +226,7 @@ def test_semantic_rank_uses_common_child_http_pipeline_and_the_parent_budget(inv
 
 @pytest.mark.unit
 def test_cancelled_parent_creates_no_semantic_child(invocation_runtime):
-    from lib.llm_errors import AbortedError
+    from lib.llm.llm_errors import AbortedError
     parent = invocation_runtime.parent
     parent['aborted'] = True
     with pytest.raises(AbortedError, match='cancelled'):
@@ -237,7 +237,7 @@ def test_cancelled_parent_creates_no_semantic_child(invocation_runtime):
 @pytest.mark.unit
 def test_unknown_ranking_usage_survives_cache_and_fences_new_finite_requests(runtime, archived, monkeypatch):
     from lib.agent_core.execution_budget import model_budget_admission
-    from lib.llm_errors import AbortedError
+    from lib.llm.llm_errors import AbortedError
     program, task, _ = archived
     task['config']['executionLimits'] = {'max_tokens': 100, 'max_tool_calls': None, 'deadline': None}
     def rank(parent, query, chunks):
@@ -432,7 +432,7 @@ def test_original_spending_respects_pause_and_cached_original_cost(runtime,origi
 @pytest.mark.parametrize('kind',['deliverable','tool_evidence'])
 def test_original_spending_never_converts_unknown_usage_to_free_or_automatic_retries(runtime,original_sources,monkeypatch,kind):
     from lib.agent_core.execution_budget import model_budget_admission
-    from lib.llm_errors import AbortedError
+    from lib.llm.llm_errors import AbortedError
     program,task,*_=original_sources
     task['config']['executionLimits']={'max_tokens':100,'max_tool_calls':None,'deadline':None}
     def unknown(parent,query,chunks):

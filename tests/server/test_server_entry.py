@@ -93,8 +93,8 @@ def test_import_context_skips_executable_wrappers():
                                   '_load_early_resource_environment')]
     namespace = {'__name__': 'server'}
     exec(compile(ast.Module(body=wrappers, type_ignores=[]), 'server.py', 'exec'), namespace)
-    namespace['_delegate_executable_to_manager']()
-    namespace['_load_early_resource_environment']()
+    assert namespace['_delegate_executable_to_manager']() is None
+    assert namespace['_load_early_resource_environment']() is None
 
 
 def test_early_environment_loaded_by_imported_helper(tmp_path, monkeypatch):

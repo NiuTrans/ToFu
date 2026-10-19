@@ -171,7 +171,7 @@ from routes.api_v1.auth import (  # noqa: E402
 @api_v1_common_bp.route("/api/v1/logs/compress", methods=["POST"])
 def log_compress():
     """Use a cheap LLM to intelligently compress verbose logs."""
-    from lib.log_compression import (
+    from lib.logging_pkg.log_compression import (
         LogCompressionBusyError,
         compress_logs,
     )

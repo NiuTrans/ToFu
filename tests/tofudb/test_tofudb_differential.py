@@ -53,7 +53,7 @@ metadata, project status, and events.
 Three tiers define the denominator honestly:
 
 * the 331-op storage catalog — the OperationSpec registries in
-  ``lib/storage_sidecar/operation_domains/*`` and the ``name:`` table in
+  ``lib/storage_authority_sql/operation_domains/*`` and the ``name:`` table in
   ``packages/tofu-db/src/generated_storage_operations.rs`` enumerate
   exactly the same names (earlier 75/85 figures were snapshots of the
   still-growing Rust port);
@@ -334,10 +334,12 @@ def _drop_comparison_fields(value: Any, fields: frozenset[str]) -> Any:
 class LegacyDriver:
     """Drives the real Python storage authority through its public client."""
 
-    def __init__(self):
-        from lib.storage import get_storage_client
-
-        self._client = get_storage_client(write=True)
+    def __init__(self, client=None):
+        if client is None:
+            # Neighboring contracts install and restart their own test runtime.
+            from lib.storage import get_storage_client
+            client = get_storage_client(write=True)
+        self._client = client
 
     def execute(
         self, operation: str, payload: dict[str, Any], command_id: str | None,
@@ -476,8 +478,16 @@ def integration_owner_daemon(tofudb_binary: Path):
 
 
 @pytest.fixture()
-def legacy_driver(chat_sidecar) -> LegacyDriver:  # noqa: ARG001
-    return LegacyDriver()
+def legacy_driver(tmp_path):
+    # Both sides begin with a fresh authority; global library/reclamation reads
+    # must not observe rows left by an earlier differential script.
+    from lib.storage import StorageSupervisor
+    supervisor = StorageSupervisor(project_root=tmp_path / 'legacy-authority', backend='sqlite', startup_timeout=60)
+    supervisor.start()
+    try:
+        yield LegacyDriver(supervisor.client)
+    finally:
+        supervisor.stop()
 
 
 # ── Operation scripts ────────────────────────────────────────────────────
@@ -704,6 +714,23 @@ def _record_scripts() -> dict[str, list[Step]]:
                  command=True),
             Step('record.list', {'namespace': ns, 'prefix': 'p/'}),
             Step('record.list', {'namespace': ns, 'prefix': ''}),
+        ]),
+        'record list metadata only preserves versions and keyset pages': build(lambda ns: [
+            *[Step('record.put', {'namespace': ns, 'key': key,
+                                 'value': {'dialogue': 'large original ' * 8000}}, command=True)
+              for key in ['p/a', 'p/c', 'p/z', 'q/a']],
+            Step('record.list', {'namespace': ns, 'prefix': 'p/', 'limit': 2,
+                                 'include_value': False}),
+            Step('record.list', {'namespace': ns, 'prefix': 'p/', 'limit': 2,
+                                 'include_value': False, 'after_key': 'p/c'}),
+            Step('record.list', {'namespace': ns, 'prefix': 'p/', 'limit': 2,
+                                 'include_value': False, 'before_key': 'p/z'}),
+            Step('record.list', {'namespace': ns, 'prefix': 'p/', 'limit': 1,
+                                 'include_value': True}),
+        ]),
+        'record list metadata only rejects nonboolean flags': build(lambda ns: [
+            Step('record.list', {'namespace': ns, 'include_value': invalid})
+            for invalid in [None, 0, 1, 'false', [], {}]
         ]),
         'record list limit bound is rejected': build(lambda ns: [
             Step('record.list', {'namespace': ns, 'limit': 0}),
@@ -1441,6 +1468,25 @@ def _artifact_scripts() -> dict[str, list[Step]]:
         'meta': {'words': 2},
     }
     return {
+        'artifact complete conversation and history beyond old count quota': [
+            *[Step('artifact.create', {
+                **base, 'artifact_id': f'{conversation_id}_count_{index}',
+                'content': f'count version {index}', 'created_at': index + 1,
+            }, command=True) for index in range(1005)],
+            Step('artifact.list', {'conv_id': conversation_id}),
+            Step('artifact.versions', {'artifact_id': f'{conversation_id}_count_0'}),
+            Step('artifact.versions', {'artifact_id': f'{conversation_id}_count_1004'}),
+        ],
+        'artifact complete content above old byte quota': [
+            Step('artifact.create', {
+                **base, 'artifact_id': f'{conversation_id}_large',
+                'content': '<html><!--' + 'x' * (9 * 1024 * 1024) + '--><p>late</p></html>',
+                'created_at': 100,
+            }, command=True),
+            Step('artifact.get', {
+                'artifact_id': f'{conversation_id}_large', 'include_content': True,
+            }),
+        ],
         'artifact dedupe versions library pin delete lifecycle': [
             Step('artifact.create', {
                 **base, 'artifact_id': first_id,
@@ -2484,6 +2530,23 @@ def _turn_scripts() -> dict[str, list[Step]]:
                 'turn_ids': [f'{ns}_missing'],
             }, command=True),
             read('turn.revision', f'{ns}_conv'),
+        ]),
+        'turn round directory ranks pagination stale head and ownership': build(lambda ns: [
+            append(f'{ns}_conv', f'{ns}_t1', 0),
+            append(f'{ns}_conv', f'{ns}_answer', 1, actor='assistant'),
+            append(f'{ns}_conv', f'{ns}_t2', 2),
+            read('turn.sync.snapshot', f'{ns}_conv'),
+            read('turn.sync.round_directory', f'{ns}_conv', lane_id='main',
+                 sync_sequence=_Ref(3, ('syncSequence',)), limit=1,
+                 anchor_turn_id=f'{ns}_answer'),
+            read('turn.sync.round_directory', f'{ns}_conv', lane_id='main',
+                 sync_sequence=_Ref(3, ('syncSequence',)), offset=1),
+            read('turn.sync.round_directory', f'{ns}_conv', lane_id='main', sync_sequence=0),
+            read('turn.sync.round_directory', f'{ns}_conv', lane_id='side',
+                 sync_sequence=_Ref(3, ('syncSequence',))),
+            Step('turn.sync.round_directory', {'conversation_id': f'{ns}_conv',
+                 'user_id': user + 1, 'lane_id': 'main', 'sync_sequence': 0},
+                 expect_divergence='turn.domain foreign-owner payload identity'),
         ]),
         'turn sync snapshot page and changes': build(lambda ns: [
             append(f'{ns}_conv', f'{ns}_t1', 0),
@@ -4439,6 +4502,29 @@ def _scheduler_scripts() -> dict[str, list[Step]]:
             Step('scheduler.poll.log', {
                 'task_id': first, 'user_id': user, 'limit': 20,
             }),
+            Step('scheduler.task.update', {
+                'task_id': first, 'user_id': user,
+                'last_execution_task_id': 'execution-1',
+                'last_execution_status': 'running', 'now': '2026-09-05T10:04:00',
+            }, command=True),
+            # The first settlement backfills the native owner's execution
+            # index. Until then its lookup deliberately reports indexed=False;
+            # the manager must settle rather than mistake unknown for absent.
+            Step('scheduler.task.settle_execution', {
+                'execution_task_id': 'missing-execution', 'user_id': user,
+                'status': 'ok', 'now': '2026-09-05T10:05:00',
+            }, command=True),
+            Step('scheduler.task.execution_lookup', {
+                'execution_task_id': 'execution-1', 'user_id': user,
+            }),
+            Step('scheduler.task.execution_lookup', {
+                'execution_task_id': 'missing-execution', 'user_id': user,
+            }),
+            Step('scheduler.task.settle_execution', {
+                'execution_task_id': 'execution-1', 'user_id': user,
+                'status': 'ok', 'now': '2026-09-05T10:05:00',
+            }, command=True),
+            Step('scheduler.task.get', {'task_id': first, 'user_id': user}),
             Step('scheduler.task.delete', {
                 'task_id': first, 'user_id': user,
             }, command=True),
@@ -4975,6 +5061,114 @@ def _automation_scripts() -> dict[str, list[Step]]:
         Step('automation.run.cancel', cancellation, command=True),
         Step('worker_job.complete', {'task_id':run['jobId'],'worker_id':tenant,'fencing_token':1,
             'now_ms':now_ms+5000,'terminal_status':'succeeded'}, command=True),
+    ]}
+
+
+def _automation_owned_settings_scripts() -> dict[str, list[Step]]:
+    """Project and skill-source CAS includes exact replay and refused evidence."""
+    import hashlib
+    from lib.automations.projects import project_id
+    from lib.skills.automation.source_records import credential_scope, source_key
+
+    tenant = 'settings_' + uuid.uuid4().hex
+    owner = _OWNER_ID
+    now = int(time.time() * 1000)
+    root = '/differential/projects/' + tenant
+    project = {'user_id': owner, 'tenant_id': tenant,
+        'project_key': f'{owner}:{hashlib.sha256(tenant.encode()).hexdigest()[:32]}:' + project_id(root),
+        'root': root, 'label': 'Owned project', 'active': True,
+        'expected_version': 0, 'request_id': 'register',
+        'actor_subject_id': 'owner', 'now_ms': now}
+    source = {'user_id': owner, 'tenant_id': tenant, 'source_key': source_key(owner, tenant),
+        'expected_version': 0, 'request_id': 'register', 'actor_subject_id': 'owner',
+        'environment': 'prod', 'active': True,
+        'credential_ref': credential_scope(owner, tenant) + '_' + 'a' * 32,
+        'credential_seal': 'b' * 64, 'now_ms': now}
+    return {
+        'automation owned project registration replay retirement and conflict': [
+            Step('automation.project.update', project, command=True),
+            Step('automation.project.update', dict(project, now_ms=now + 1), command=True),
+            Step('automation.project.update', dict(project, expected_version=1,
+                 request_id='retire', active=False, now_ms=now + 2), command=True),
+            Step('automation.project.update', dict(project, request_id='stale'), command=True),
+            Step('automation.project.update', dict(project, root=root + '/foreign'), command=True),
+        ],
+        'automation owned skill source replay retirement and conflict': [
+            Step('automation.skills.source.update', source, command=True),
+            Step('automation.skills.source.update', dict(source, now_ms=now + 1,
+                 credential_ref=credential_scope(owner, tenant) + '_' + 'c' * 32), command=True),
+            Step('automation.skills.source.update', dict(source, expected_version=1,
+                 request_id='retire', active=False, credential_ref=None,
+                 credential_seal=None, now_ms=now + 2), command=True),
+            Step('automation.skills.source.update', dict(source, request_id='stale'), command=True),
+            Step('automation.skills.source.update', dict(source,
+                 credential_ref=credential_scope(owner + 1, tenant) + '_' + 'a' * 32), command=True),
+        ],
+    }
+
+
+def _automation_approval_scripts() -> dict[str, list[Step]]:
+    """Compare a real manual wait, owner approval, one wake and exact replay."""
+    import hashlib
+    from lib.automations.approval import canonical
+    from lib.automations.definitions import prepare_definition
+    from lib.automations.publication import publication_record
+    from lib.automations.registry import builtin_registry
+    from lib.automations.repository import VersionedEntity
+    from lib.automations.transitions import new_run, bind_fence, prepare_step, ExecutionFence
+    from lib.identity import PrincipalContext
+    from tests.support.automation_fixtures import clock_definition, trigger
+
+    tenant = 'approval_' + uuid.uuid4().hex
+    prefix = f'{_OWNER_ID}:{hashlib.sha256(tenant.encode()).hexdigest()[:32]}:'
+    now_ms = int(time.time() * 1000)
+    now = now_ms / 1000
+    definition = clock_definition()
+    definition['id'] = tenant
+    definition['policy'].update(permissionMode='manual', maxRuntimeSeconds=120)
+    definition['steps'] = [{'id': 'activate', 'action': 'skills.activate', 'after': [],
+                            'arguments': {'snapshotId': 'differential-snapshot'}}]
+    prepared = prepare_definition(definition)
+    action = builtin_registry().get('skills.activate')
+    actor = PrincipalContext.user(subject_id='reviewer', owner_user_id=_OWNER_ID,
+        tenant_id=tenant, scopes={'automations:read', 'automations:manage',
+                                 'automations:execute', *action.required_scopes})
+    record = publication_record(prepared, actor)
+    value = dict(record, schemaVersion=1, updatedAt=now, deleted=False)
+    event = trigger(event_id=tenant)
+    event.update(occurredAt=now, evidence={'startedAt': now})
+    run = new_run(VersionedEntity(tenant, 1, canonical(value)), event, now=now)
+    key = prefix + run['id']
+    run.update(ownerId=_OWNER_ID, tenantId=tenant, principal=record['grant']['principal'],
+               jobId='automation-run:' + hashlib.sha256(key.encode()).hexdigest())
+    fence = ExecutionFence(run['jobId'], tenant, 1)
+    bound = bind_fence(run, fence, now=now + 1)
+    waiting, selected = prepare_step(bound, fence, now=now + 2)
+    assert selected is None and waiting['status'] == 'waiting_permission'
+    base = {'user_id': _OWNER_ID, 'tenant_id': tenant, 'run_key': key}
+    approval = dict(base, step_id='activate', expected_version=3, request_id='approve',
+        now_ms=now_ms + 3000, actor_principal=actor.to_payload(),
+        arguments_json=canonical(waiting['steps']['activate']['arguments']),
+        action_json=canonical(action.document()))
+    return {'automation manual approval wake replay and changed evidence': [
+        Step('automation.definition.update', {'user_id': _OWNER_ID, 'tenant_id': tenant,
+            'definition_key': prefix + tenant, 'expected_version': 0, 'request_id': 'publish',
+            'actor_subject_id': 'reviewer', 'mode': 'publish', 'record': record,
+            'definition_json': prepared.definition_json, 'actions_json': prepared.action_contracts_json,
+            'first_due_ms': None, 'now_ms': now_ms}, command=True),
+        Step('automation.run.admit', dict(base, run=run, now_ms=now_ms,
+            definition_key=prefix + tenant, definition_revision=1,
+            definition_digest=prepared.digest), command=True),
+        Step('worker_job.claim_next', {'worker_id': tenant, 'task_kinds': ['automation-run'],
+            'now_ms': now_ms + 1000, 'lease_ms': 60000}, command=True),
+        Step('automation.run.advance', dict(base, run=bound, now_ms=now_ms + 1000,
+            expected_version=1, worker_id=tenant, fencing_token=1), command=True),
+        Step('automation.run.advance', dict(base, run=waiting, now_ms=now_ms + 2000,
+            expected_version=2, worker_id=tenant, fencing_token=1), command=True),
+        Step('automation.run.approve', approval, command=True),
+        Step('automation.run.approve', dict(approval, now_ms=now_ms + 4000), command=True),
+        Step('worker_job.get', {'task_id': run['jobId'], 'user_id': _OWNER_ID}),
+        Step('automation.run.approve', dict(approval, request_id='changed'), command=True),
     ]}
 
 
@@ -7529,6 +7723,8 @@ def _all_scripts() -> dict[str, list[Step]]:
     scripts.update(_project_brain_scripts())
     scripts.update(_worker_job_scripts())
     scripts.update(_automation_scripts())
+    scripts.update(_automation_owned_settings_scripts())
+    scripts.update(_automation_approval_scripts())
     scripts.update(_invocation_scripts())
     scripts.update(_search_scripts())
     scripts.update(_compaction_archive_scripts())
@@ -7803,6 +7999,48 @@ def _format_divergence(
     )
 
 
+def _assert_management_outcomes(name, outcomes):
+    """Successful commands must mutate state, not merely agree on rejection."""
+    values = [outcome for _, outcome in outcomes]
+    if name.startswith(('automation owned project', 'automation owned skill')):
+        assert all(value.ok for value in values[:3])
+        assert values[0].value == values[1].value
+        assert values[0].value['version'] == 1
+        assert values[2].value['version'] == 2
+        assert values[2].value['value']['active'] is False
+        assert values[3].error_code == 'database_conflict'
+        assert values[4].error_code == 'database_protocol_error'
+    elif name == 'automation manual approval wake replay and changed evidence':
+        assert all(value.ok for value in values[:8])
+        assert values[5].value['accepted'] is True
+        assert values[5].value['alreadyApproved'] is False
+        assert values[6].value['alreadyApproved'] is True
+        assert values[5].value['run']['version'] == values[6].value['run']['version']
+        assert values[5].value['run']['value'] == values[6].value['run']['value']
+        assert values[7].value['wakeSequence'] == 1
+        assert values[8].error_code == 'database_conflict'
+    elif name == 'turn round directory ranks pagination stale head and ownership':
+        assert all(value.ok for value in values[:8])
+        first, second = values[4].value, values[5].value
+        assert first['totalRounds'] == 2 and first['nextOffset'] == 1
+        assert first['activeRound'] == 1 and first['entries'][0]['roundNumber'] == 1
+        assert second['entries'][0]['roundNumber'] == 2 and 'nextOffset' not in second
+        assert values[6].value['stale'] is True and values[6].value['entries'] == []
+        assert values[7].value['totalRounds'] == 0
+        assert ((values[8].ok and values[8].value is None)
+                or values[8].error_code == 'authority_scope_mismatch')
+    elif name == 'scheduler task CRUD ordering and enabled projection':
+        lookup = [outcome for step, outcome in outcomes if step.operation == 'scheduler.task.execution_lookup']
+        settled = [outcome for step, outcome in outcomes if step.operation == 'scheduler.task.settle_execution']
+        assert all(value.ok for value in [*lookup, *settled])
+        assert [value.value for value in lookup] == [
+            {'indexed': True, 'matched': True}, {'indexed': True, 'matched': False}]
+        assert [value.value for value in settled] == [{'changed': 0}, {'changed': 1}]
+        current = [outcome.value for step, outcome in outcomes
+                   if step.operation == 'scheduler.task.get' and outcome.value][-1]
+        assert current['last_execution_status'] == 'ok'
+
+
 @pytest.mark.parametrize(
     'script_name',
     sorted(_all_scripts()),
@@ -7814,6 +8052,17 @@ def test_operation_matches_legacy_authority(
     script = _all_scripts()[script_name]
     legacy_outcomes = _run_script(script, legacy_driver)
     tofu_outcomes = _run_script(script, tofudb_daemon)
+    for outcomes in (legacy_outcomes, tofu_outcomes):
+        _assert_management_outcomes(script_name, outcomes)
+
+    if script_name == 'artifact complete conversation and history beyond old count quota':
+        for outcomes in (legacy_outcomes, tofu_outcomes):
+            assert all(outcome.ok for _, outcome in outcomes)
+            for _, outcome in outcomes[-3:]:
+                assert len(outcome.value) == 1005
+            for _, outcome in outcomes[-2:]:
+                assert outcome.value[0]['version'] == 1
+                assert outcome.value[-1]['version'] == 1005
 
     if script_name == 'model routing secret demand reaches idle rows after a large active prefix':
         for outcomes in (legacy_outcomes, tofu_outcomes):
@@ -8250,7 +8499,7 @@ def _catalog_operations() -> set[str]:
     pattern = re.compile(
         r"""["']([a-z_]+(?:\.[a-z_0-9]+)+)["']:\s*(?:ops\.)?OperationSpec""")
     names: set[str] = set()
-    domains = _PROJECT_ROOT / 'lib/storage_sidecar/operation_domains'
+    domains = _PROJECT_ROOT / 'lib/storage_authority_sql/operation_domains'
     for path in domains.glob('*.py'):
         names.update(pattern.findall(path.read_text()))
     return names
@@ -8774,7 +9023,6 @@ def test_search_v2_pages_preserve_title_sources_and_long_message_tail(legacy_dri
 def test_large_incompressible_receipt_replay_conflict_and_rollback(driver_name, request):
     import base64
     import random
-    from lib.storage_sidecar.generated_storage_receipts import MAX_DECODED_RECEIPT_BYTES
     driver = request.getfixturevalue(driver_name)
     conv = 'large-receipt-' + uuid.uuid4().hex
     owner = _OWNER_ID
@@ -8792,11 +9040,11 @@ def test_large_incompressible_receipt_replay_conflict_and_rollback(driver_name, 
     rows = driver.execute('turn.list', base, None)
     assert rows.ok and len(rows.value) == 1 and rows.value[0]['projection']['content'] == content
     oversized = payload | {'turn_id': conv + '-oversized', 'command_id': 'too-large',
-                           'projection': {'content': 'x' * MAX_DECODED_RECEIPT_BYTES}}
-    refused = driver.execute('turn.append_settled', oversized, _cid())
-    assert not refused.ok and refused.error_code == 'database_protocol_error', refused
-    assert driver.execute('turn.get', base | {'turn_id': oversized['turn_id']}, None).value is None
-    assert len(driver.execute('turn.list', base, None).value) == 1
+                           'projection': {'content': 'x' * (9*1024*1024)}}
+    demand = driver.execute('turn.append_settled', oversized, _cid())
+    assert demand.ok, demand
+    assert driver.execute('turn.get', base | {'turn_id': oversized['turn_id']}, None).value['projection']['content'] == oversized['projection']['content']
+    assert len(driver.execute('turn.list', base, None).value) == 2
 
 
 def test_native_rpc_connection_enables_tcp_nodelay(tofudb_daemon):
@@ -8808,7 +9056,7 @@ def test_native_rpc_connection_enables_tcp_nodelay(tofudb_daemon):
 
 
 def test_scoped_event_guard_fences_dependencies_without_restart_for_noise(legacy_driver, tofudb_daemon):
-    from lib.task_event_contract import EVENT_READ_GUARD_SCOPED_CONTRACT
+    from lib.task_replay.task_event_contract import EVENT_READ_GUARD_SCOPED_CONTRACT
 
     scope = ['messages_snapshot', 'tool_wire_projection']
     for driver in [legacy_driver, tofudb_daemon]:
@@ -8857,7 +9105,7 @@ def test_conversation_diagnostic_reconstructs_across_backends(legacy_driver, tof
     decoding the declared format must yield the identical expected projection.
     """
     import base64
-    from lib.storage_sidecar.projection_codec import decode_projection_from_storage
+    from lib.storage_authority_sql.projection_codec import decode_projection_from_storage
     from lib.turn_projection_patch import apply_projection_patch
 
     conv = 'diagnostic_projection_' + uuid.uuid4().hex

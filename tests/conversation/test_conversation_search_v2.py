@@ -10,8 +10,8 @@ import pytest
 
 from lib.conversations.search import search_conversation_page
 from lib.storage.errors import StorageError
-from lib.storage_sidecar.adapters.sqlite import SQLiteSession
-from lib.storage_sidecar.turn_search_query import SCAN_PAGE, search_conversations
+from lib.storage_authority_sql.adapters.sqlite import SQLiteSession
+from lib.storage_authority_sql.turn_search_query import SCAN_PAGE, search_conversations
 
 pytestmark = pytest.mark.unit
 
@@ -63,8 +63,8 @@ def test_contract_limits_match_runtime():
     contract = json.loads(Path('contracts/conversation_search_v2.json').read_text())
     assert contract['limits']['candidateScanPage'] == SCAN_PAGE
     assert contract['limits']['pageResults'] == 50
-    from lib.storage_sidecar.turn_search_query import CHUNK_SCAN_PAGE, CHUNK_SCAN_BATCH, CURSOR_BYTES
-    from lib.storage_sidecar.adapters.search_support import ACCELERATOR_VM_STEPS
+    from lib.storage_authority_sql.turn_search_query import CHUNK_SCAN_PAGE, CHUNK_SCAN_BATCH, CURSOR_BYTES
+    from lib.storage_authority_sql.adapters.search_support import ACCELERATOR_VM_STEPS
     assert contract['limits']['chunkScanPage'] == CHUNK_SCAN_PAGE
     assert contract['limits']['chunkScanBatch'] == CHUNK_SCAN_BATCH
     assert contract['limits']['cursorBytes'] == CURSOR_BYTES
@@ -193,8 +193,8 @@ def test_service_empty_queries_do_not_fetch_storage():
 
 @pytest.mark.parametrize('query', ['xy', 'alpha gamma'])
 def test_one_huge_conversation_resumes_inside_chunks(search_db, query, monkeypatch):
-    from lib.storage_sidecar.turn_search_query import CHUNK_SCAN_PAGE
-    monkeypatch.setattr('lib.storage_sidecar.turn_search_query._fts_available', lambda _: False)
+    from lib.storage_authority_sql.turn_search_query import CHUNK_SCAN_PAGE
+    monkeypatch.setattr('lib.storage_authority_sql.turn_search_query._fts_available', lambda _: False)
     count = CHUNK_SCAN_PAGE * 2 + 3
     for i in range(count):
         text = ('alpha' if i == 0 else 'gamma' if i == count - 1 else 'other') if ' ' in query else ('xy' if i == count - 1 else 'other')
@@ -230,7 +230,7 @@ def test_one_huge_conversation_resumes_inside_chunks(search_db, query, monkeypat
 def test_accelerator_exhaustion_resumes_portable_and_restores_deadline(search_db, monkeypatch):
     if not search_db[1]:
         return
-    from lib.storage_sidecar.adapters import search_support
+    from lib.storage_authority_sql.adapters import search_support
     monkeypatch.setattr(search_support, 'ACCELERATOR_VM_STEPS', 1000)
     for i in range(600):
         seed(search_db, f'c{i:04}', 'needle' if i == 0 else 'other', updated=i)
@@ -238,7 +238,7 @@ def test_accelerator_exhaustion_resumes_portable_and_restores_deadline(search_db
     assert first['incomplete'] and first['next_cursor'] and not first['items']
     def no_restart(*_args):
         pytest.fail('resumed fallback must not restart the expensive FTS query')
-    monkeypatch.setattr('lib.storage_sidecar.turn_search_query._fast_page', no_restart)
+    monkeypatch.setattr('lib.storage_authority_sql.turn_search_query._fast_page', no_restart)
     cursor, found = first['next_cursor'], []
     for _ in range(5):
         result = page(search_db, 'needle', cursor=cursor)
@@ -258,7 +258,7 @@ def test_accelerator_exhaustion_resumes_portable_and_restores_deadline(search_db
 
 def test_extended_cursor_validation(search_db):
     import base64
-    from lib.storage_sidecar.turn_search_query import _binding
+    from lib.storage_authority_sql.turn_search_query import _binding
     for pending in ([], {'after': None, 'mask': -1, 'best': None},
                     {'after': [0, 't', -1], 'mask': 0, 'best': None}):
         value = [2, _binding(1, 'needle'), 0, 1, 'c', {'scan': 1, 'pending': pending}]

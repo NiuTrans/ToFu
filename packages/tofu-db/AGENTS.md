@@ -9,21 +9,76 @@ evidence to the actual build and covered domains.
 
 `build.rs` embeds the engine source digest reported by `--build-info`; its framing
 matches `serverctl_pkg/native_engine.py`. Deployment metadata is not build evidence.
+`billing.rs` serializes native admission with standalone reserve release on the
+existing immutable ledger. Verify admission/refund races, cold missing-invoice
+recovery and exact settlement; a zero-value admission is never a fee quote.
+Checkpoint-resume creation rebuilds retained tool blocks after rolling back the
+unfinished prose tail, before publishing the pending attempt. Committed-projection
+integrity stays strict. Verify resume-tail/replay tests and actual v4 queued startup.
 
-native_checkpoint_store.rs reserves journal namespaces. The explicit
-native-runtime-checkpoints feature exposes NativeCheckpointStore over a supplied
+native_checkpoint_store.rs reserves journal namespaces. Standard builds include
+native-runtime-checkpoints; --no-default-features omits this capability. It exposes NativeCheckpointStore over a supplied
 shared authority; native_checkpoint_store_adapter.rs owns scoped CAS/byte bounds,
 not journal transitions. Verify real reopen, abrupt process loss, blob/Keep and
 VFS commit-fault tests, plus generic namespace denial and versioned codec neighbors.
 Never open another authority, bypass logical-outbox capture or steal active leases.
-embedded_checkpoint.rs binds OwnedLease to the running EmbeddedRuntime authority.
-Verify generation-bound shared-WAL waits outside writer, failed/current replay,
+native_checkpoint_handoff.rs owns the one transaction for accepted-attempt proof,
+source retirement and target creation. Pending handoff rechecks kernel writer
+death inside the active transaction; authenticated passive replay grants no
+promotion. Pending wallet retirement freezes canonical debt in the existing
+header before reclaiming its private snapshot; active and passive transactions
+revalidate the original quotes. The read-only invoice C ABI joins runtime close,
+waits for WAL durability and denies passive settlement. Verify real wallet
+janitor/lost ACK plus invoice write/sync faults and repeated handoff.
+Global identity reads use declared claim
+scopes; all writes stay owned. Composite outbox replay also retires source and
+updates its witness. Only the retired private snapshot is reclaimed. Verify
+native_checkpoint_handoff_tests plus actual SDK/wallet handoff; no blind retry.
+orchestration_goal_claim.rs supplies bounded owner-filtered transaction reads
+to tofu_runtime::checkpoint_goal_context; it keeps native cursor mutation.
+Fee mode, wallet holds and prepared births use checkpoint_goal_policy.
+native_goal_actor_claim.rs composes whole-Goal source retirement and original
+wallet settlement (or explicit cost-only proof) in one transaction, retaining
+actor snapshots. checkpoint_goal_claim/consume in tofu-runtime own the shared
+financial/protected-header rules; native_goal_read.rs supplies scoped reads. It is
+an internal port; native_goal_claim_replay.rs captures the actor/wallet/Goal decision
+atomically and reuses its transaction for authenticated passive replay. Explicit
+evidence budgets, exact prefix witnesses and original quotes remain required.
+native_goal_actor_handoff.rs consumes the whole set with account cuts and fresh
+parent admission in one transaction; its replay module uses the existing outbox.
+checkpoint_goal_claim authenticates consumed preparations and original effect
+origins against retired protected headers; native_goal_preparation.rs is test-only. Ordinary journal events grant no lease;
+verify bound preparation, repeated SIGKILL and enriched outbox fault/retry cases.
+Verify native_goal_actor_handoff tests for all-or-none transfer, byte refusal,
+source/target WAL faults and publisher retries. Embedded C ABI claims/consumption
+are explicit ports; automatic pending Goal/Flow admission remains fenced. Verify
+native_goal_actor_claim_tests for exact retry/reopen, version races, forged
+ordinary claims and WAL faults; native_goal_claim_replay_tests adds capture rollback,
+source/target faults and lost publisher ACKs. Policy: docs/contracts/EXECUTION_ACCOUNT_CONTINUITY.md.
+The shared `tofu_runtime::checkpoint_writer` captures Linux boot/procfs PID-view/start identity.
+Explicit recover requires proven old-process exit and new/completed/tools_pending phase; legacy,
+live/foreign/unknown evidence and inflight frontiers refuse. Verify actual SIGKILL
+ROOT recovery, stale generation, unknown CAS delivery and copied/foreign identity.
+checkpoint_runtime.rs shares OwnedLease/Store callbacks across transports;
+embedded_checkpoint.rs binds the existing EmbeddedRuntime close guard.
+daemon_checkpoint.rs binds the same authority to authenticated storage.v2
+control frames and existing joined listener workers; its runtime UUID fences
+stale capability IDs. No automatic retry or ordinary semantic dispatch is added.
+Normal daemons already own the shared WAL barrier via Engine::start_wal_flusher.
+Verify Strict/Normal shared-WAL waits outside writer, failed/current replay,
 source ACK, owner/close/reopen and close joining before driver retirement. The
 opt-in lifecycle guard creates no worker/authority; closed/disarmed calls refuse.
-embedded_checkpoint_control.rs owns volatile C ABI capability IDs and buffer
-preflight; OwnedLease still owns transitions. Verify loaded-library SDK, one-shot
-load/undersized buffers, monotonic IDs, owner/expiry/close and forgotten inflight
-fences. Reuse embedded workers/watchdog; never route ordinary storage operations
+embedded_checkpoint_control.rs binds the shared runtime control owner without
+extra allocation; OwnedLease owns transitions. Verify loaded-library SDK, one-shot
+frontier reads with no capability allocation and closed positive byte bounds,
+whole Goal claims and grouped capabilities through the shared tofu-runtime checkpoint control owner,
+exact lost-response retry until first member use, and joined runtime close;
+load/undersized buffers, pending paid-state preservation, monotonic IDs, owner/expiry/close and forgotten inflight
+fences. Verify daemon owner/tenant/schema/instance/byte admission, actual ROOT/Flow
+and selected-daemon SIGKILL Goal recovery. The public production Goal matrix
+also verifies managed parent-only death under Strict/Normal: stdin EOF retires
+the actual writer; external client disconnect remains a distinct lifetime. Generated transport constants and the
+packaged schema share gen_native_checkpoint_control.py. Reuse embedded workers/watchdog; never route ordinary storage operations
 into checkpoint control or automatically retry ambiguous commands.
 NativeCheckpointStore captures native_checkpoint_outbox_v1 mutations in the
 same transaction when outbox is configured. Verify authenticated passive replay,
@@ -40,13 +95,45 @@ identical retries use OwnedLease.finish and changed candidates refuse. Verify
 schema/parser closure, real C ABI retry, pause/reopen and metadata reclamation.
 The per-capability mutex adds metadata only; no journal, receipt log or worker.
 
+turn_effect_interruption.rs records exact unresolved file-call observations inside
+Turn retirement; verify selected-store crash/Continue/query parity and recovery guards.
+
 ## Boundaries
+
+- `src/wal_publication.rs` shares captured-prefix coverage across rotation,
+  history pruning and pack adoption before off-authority CONTROL publication.
+
+- `src/wal_write_buffer.rs` owns queued/inflight physical frames for the existing
+  WAL barrier worker. The actual authority VFS must opt in; encryption stays on
+  the original append path. `wal_buffer_tests.rs` covers failed write/sync,
+  gaps, real close/drain and source reads. Contract: `contracts/storage_v2.json`.
+
+- Rejected current-WAL payload-prefix caching and its source/recovery boundaries:
+  `docs/TOFUDB_PUBLICATION_LATENCY.md#rejected-current-wal-carried-payload-prefix-witnesses`.
+
+- Complete-payload staging uses existing fresh-page/WAL owners; generic source
+  validation remains separate. Tests: `authority_stream_staging_tests.rs`,
+  `engine_write_staging_tests.rs`; policy and costs:
+  `docs/TOFUDB_PUBLICATION_LATENCY.md#complete-payload-writer-staging-revisited`.
+
+- `src/blob_codec.rs` owns authority-lifetime reusable Zstd leases and probe-derived
+  idle reclamation; `blob_codec_tests.rs` checks independent leases, exact frames,
+  resizing, poison and disposal. Measurements and alternatives live in
+  `docs/TOFUDB_JSON_MATERIALIZATION.md#authority-owned-parallel-blob-compression`.
+
+- Embedded phase/continuation modules own parked command dependency waits;
+  authority and verification boundaries: `docs/TOFUDB_EMBEDDED_PHASES.md`.
 
 - `src/entity.rs` owns root registration and escaped snapshot leases;
   `entity_pin_registry.rs` owns GC topology and exact byte accounting.
   Replica capture registers every live root under writer/GC exclusion without
   a count quota or capacity queue. Lifecycle tests live in
   `entity_pin_registry_tests.rs`; rationale is in `docs/STORAGE_PERFORMANCE_CHARTER.md`.
+- `src/entity_page_codec.rs` owns version-1 reads and version-2 prefix-coded
+  page writes, streamed leaf framing and physical/expanded packing bounds.
+  Contract: `docs/TOFUDB_ENTITY_PAGES.md`; verify its format tests, mixed-format
+  power-loss upgrade, entity/overlay fault matrices and backup/GC neighbors.
+  Decoded cache accounting includes expanded owned allocations; no new authority.
 - `src/control.rs` exclusively owns the alternating, checksummed `CONTROL`
   slots and their publication order.
 - `src/entity_overlay.rs` owns the deferred-application write overlay ("the
@@ -87,11 +174,12 @@ The per-capability mutex adds metadata only; no journal, receipt log or worker.
   that is retryable by design.
 - `src/versioned_document.rs` owns bounded byte/decoded JSON reads;
   `src/turn_projection_patch.rs` consumes private reconstruction buffers.
-  `src/response_json.rs` validates encoded semantic responses without rebuilding objects.
+  `src/response_json.rs` validates encoded responses and certifies its own Value encoder.
   `turn.rs` consumes the scoped reader's parsed private object; legacy-message
   conversion moves projection/metadata fields and retains public/error/byte fences.
-  `SyncSnapshotResponse` borrows private turns/settings for encoding; attempt
-  RawValue bytes retain their original Value normalization and response bounds.
+  `SyncSnapshotResponse` moves private turns/settings into a complete Value whose
+  frozen encoding carries canonical/depth evidence; attempt RawValue bytes retain
+  their original normalization and response bounds. No arbitrary-byte proof factory.
   Event publication reuses the measured byte witness only after freezing the
   final projection; text-head and legacy compact evidence retain separate paths.
   `src/canonical_json_bytes.rs` recognizes exact Value serialization; borrowed-string skipping requires input alias/offset proof, legacy JSON uses its original parser/serializer.
@@ -220,10 +308,12 @@ The per-capability mutex adds metadata only; no journal, receipt log or worker.
   Load-bearing rules: only the `tofu-db-archive-seal` driver writes pages
   (window materialization on a pinned read replica, publication in a short
   `try_lock` hold with a fresh lane-count fence); every other lane
-  mutation tombstones the archive and readers fall back to the exact
-  per-document lane read — never serve archive content past a fence
-  mismatch. `turn.rs` keeps the sealed-prefix + exact-tail read fusion in
-  `legacy_messages_full` and the bounded window path.
+  rewrite uses `turn::store_changed_lane_turn` to invalidate atomically;
+  count alone cannot certify content. Restore also fences execution epoch.
+  v1 caches rebuild from exact Turns; v2 format comes from the IR contract.
+  `legacy_messages_full` retains sealed-prefix + exact-tail fusion. Verify
+  `transcript_archive` and `transcript_archive_mutation_tests`; rationale and
+  upgrade behavior: `docs/STORAGE_TOFUDB.md#restart-recovery-of-materialized-turns`.
 - `src/online_backup.rs` owns the daemon's online incremental backup:
   pre-anchor overlay drain in certified bounded chunks (one short hold
   per chunk, contention defers the epoch), checkpoint anchoring under one
@@ -277,6 +367,10 @@ The per-capability mutex adds metadata only; no journal, receipt log or worker.
   references in the replay journal. Contract: `docs/STORAGE_EVENT_REPLAY.md`.
   Preserve expanded byte admission, same-owner source/version checks and atomic
   retention release; export emits public envelopes, never internal locators.
+- `src/turn/event_retirement.rs` owns deletion-time identity pins and bounded
+  cleanup cursors on the existing event-maintenance path. Verify generation,
+  identity reuse, empty-event progress and cursor/pin crash tests; lifecycle and
+  retained-state costs live in `docs/STORAGE_EVENT_REPLAY.md`.
 - `src/turn/tombstone_migration.rs` preserves source deletion clocks through
   atomic Turn claims and delta/age indexes; private get/scan validate both.
 - `src/turn/attempt_migration.rs` owns terminal Attempt snapshots and their
@@ -311,6 +405,16 @@ The per-capability mutex adds metadata only; no journal, receipt log or worker.
   acknowledge touches the writer. Native limits derive from
   `contracts/conversation_search_v2.json` through `gen_tofudb_ir_contract.py`;
   the index design record is in `docs/STORAGE_TOFUDB.md`.
+- `src/turn_search_runtime.rs` owns capacity admission and retryable deferred
+  opening; `search_volume.rs` consumes generated geometry policy. The opened
+  codec is crate-private. Source and index reuse `OnlineGcDatabase` ports and
+  the same collector; verify `turn_search_runtime` and online-GC fault suites.
+- `artifact_query.rs` is the shared canonical tool-result read/search owner.
+  Policy comes from `contracts/tool_result_query_v1.json`; typed result manifests,
+  owner-private signed route cursors and verified raw blob ranges stay in this
+  owner. Generic records never expose cursor keys. Verify `artifact::query`,
+  artifact/migration neighbors and both stores in
+  `tests/tools/test_tool_result_query_backends.py` before changing traversal.
 - `paper_build_artifact.rs` owns retained upload/lease/quota transitions;
   `research.rs` couples verified pins to workspace CAS. Receipt validation and
   limits derive from `paper_build_v1.schema.json`; payloads reuse the generic
@@ -412,6 +516,21 @@ The per-capability mutex adds metadata only; no journal, receipt log or worker.
 
 ## Verification
 
+`semantic_project_dispatch.rs` compiles the owner/project segmented dispatch
+port using existing versioned-document IR. The head CAS, child mutations and
+receipt are one transaction; generic record access refuses its private
+namespaces. Bounds/names are generated from
+`contracts/project_dispatch_storage_v2.json` by
+`scripts/gen_project_dispatch_storage.py`. Verify
+`tests/storage/test_project_dispatch_segments.py` against a source-matched
+native artifact and both SQL authorities; repository cutover status lives in
+`docs/PROJECT_COORDINATION.md`.
+
+`recovery_profile.rs` owns the non-default `recovery-profile` diagnostic feature;
+ordinary builds use a zero-sized no-op. Source/volume/fixture and startup-boundary
+qualification live in `docs/TOFUDB_RECOVERY_ATTRIBUTION.md`. Verify `recovery_profile`
+and `tests/startup_integrity.rs` in both default and diagnostic feature builds.
+
 `engine.rs` has a bounded test-only checkpoint ID source: history fault probes
 and replays must use the same segment IDs, compare full traces, and assert every
 armed fault fires. Production still generates UUIDs; never skip unexercised cells.
@@ -450,6 +569,8 @@ Keep the asset layout (exactly one engine binary per archive) and the
 
 - `src/turn/model_context.rs` owns main-lane context proof reads; keep it in parity
   with `contracts/model_context_v1.schema.json` and `tests/model_routing/test_model_context_read.py`.
+  Owned normalization, exact byte accounting and selected-response evidence follow
+  `docs/TOFUDB_CONTEXT_READ.md`; verify parser fallback and multi-page parity.
 
 WAL worker scheduling and nested page-read probes: `docs/TOFUDB_WAL_BARRIER_SCHEDULING.md`.
 
@@ -460,7 +581,9 @@ Rotation window ownership, exact read pins, and probes: `docs/TOFUDB_ROTATION_WI
 Online sealed-WAL handover and crash cases: `src/engine_generation_tests.rs`; protocol and resource bounds: `docs/TOFUDB_ROTATION_WINDOW.md`.
 
 Published query capture: `entity_query_view.rs` owns root/pin handoff;
-`authority_query_view.rs` owns replica configuration. Contract and tests:
+`authority_query_view.rs` owns replica configuration and certified result reuse.
+`query_result_cache.rs` owns bounded memoized bytes; the exact IR certificate,
+live health/generation proof and verification map are in `docs/TOFUDB_QUERY_RESULT_CACHE.md`. Contract and tests:
 `docs/STORAGE_TOFUDB.md#snapshot-read-lane`, `entity_query_view_tests.rs`.
 
 `server_bindings.rs` owns immutable dispatch bindings; embedded requests borrow
@@ -482,3 +605,8 @@ shadow uses the existing online-backup worker and native backup/restore fault
 boundaries; never substitute a WAL-only or filesystem-only replica. Admission,
 loss window, cadence and operations: `docs/TOFUDB_FASTPATH.md` and
 `contracts/storage_v2.json`.
+
+Scheduler execution indexes are owner-scoped and maintained with document
+transitions; first settlement backfills legacy ownership atomically. Verify
+scheduler_execution_tests for stale/current, foreign owner, OCC, reopen and
+index growth/deletion. Never infer execution identity from the digest alone.

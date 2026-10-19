@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="zh" data-theme="tofu">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>动态任务工作台 · Tofu UI kit</title>
+<link rel="stylesheet" href="../../frontend/src/styles/fonts.css">
+<link rel="stylesheet" href="../../static/styles.css">
+<style>
+/* Derived from the gallery scaffold: geometry only, existing kit and tokens. */
+body{height:auto;overflow:auto;display:block;background:var(--bg-primary)}
+.shell{display:grid;grid-template-columns:240px 1fr;min-height:100vh}
+.side{border-right:var(--control-edge-inset) solid var(--border);background:var(--bg-secondary);padding:var(--space-4);display:flex;flex-direction:column;gap:var(--space-4)}
+.brand{font-family:var(--font-ui);font-weight:var(--weight-bold);font-size:var(--font-size-xl);color:var(--text-primary)}
+.main{padding:var(--space-6);display:flex;flex-direction:column;gap:var(--space-5);min-width:0}
+.page-title{font-family:var(--font-ui);font-size:var(--font-size-3xl);font-weight:var(--weight-bold);color:var(--text-primary);margin:0}
+.side p{color:var(--text-secondary);font-size:var(--font-size-sm);line-height:var(--leading-body)}
+#gallery-actions{display:flex;gap:var(--space-2);flex-wrap:wrap}
+@media(max-width:720px){.shell{grid-template-columns:1fr}.side{display:none}.main{padding:var(--space-3)}}
+</style></head>
+<body data-theme="tofu"><div class="shell">
+<aside class="side"><div class="brand">Tofu · 动态工作台</div><p>根据任务组合界面，让状态、证据和下一步都看得见。</p><p>指标 · 状态 · 队列 · 图表 · 表单</p><p>此页使用明确标注的示例数据，便于验证界面与交互。</p></aside>
+<main class="main"><h1 class="page-title">任务驱动的动态界面</h1><div id="gallery-actions"></div><section id="rich-preview" aria-label="Native comparison report"></section></main>
+</div><script type="module" src="./dynamic-response.bundle.js"></script></body></html>

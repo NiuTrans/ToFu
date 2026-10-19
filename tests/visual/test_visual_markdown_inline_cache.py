@@ -111,4 +111,15 @@ def test_inline_cache_paired_browser_measurement(browser, frontend_visual_origin
     if not destination:
         pytest.skip('opt-in independent-process inline cache performance measurement')
     from benchmarks.markdown_worker.browser_measure import measure
-    measure(browser, frontend_visual_origin, destination)
+    report = measure(browser, frontend_visual_origin, destination)
+    assert len(report['cases']) == 5
+    for case in report['cases']:
+        assert len(case['pairs']) == 3
+        for pair in case['pairs']:
+            identities = []
+            for value in pair.values():
+                assert len(value['wall_samples_ms']) == 100
+                assert value['rss_samples'] > 0
+                identities.extend((value['browser_pid'], value['memory_browser_pid']))
+            assert len(set(identities)) == 4
+    assert report['whole_system_verdict'] == 'incomplete'

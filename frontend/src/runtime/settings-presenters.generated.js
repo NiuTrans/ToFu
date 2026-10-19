@@ -757,8 +757,7 @@ function _renderModelRoutingProvidersTab(list) {
       expandedIds.add(String(card.getAttribute('data-provider-id') || ''));
     });
   }
-  var html = '<div class="stg-v2-intro"><strong>服务商</strong>' +
-    '<span>这里管理供给、请求 alias 和接入状态；官方模型身份不会因此改变。</span></div>';
+  var html = '';
   providers.forEach(function(provider) {
     var context = _modelRoutingProviderContext(provider.provider_id);
     if (!context) return;
@@ -4148,7 +4147,7 @@ function _populateResponsesExperimentControls() {
   var responsesCfg = (config && config.responses) || {};
   var orchestrationCfg = (config && config.orchestration) || {};
   _setSelectValue('settingToolSearch', toolsCfg.toolSearch, 'auto');
-  _setSelectValue('settingProgrammaticCalling', toolsCfg.programmaticCalling, 'on');
+  _setSelectValue('settingProgrammaticCalling', toolsCfg.programmaticCalling, 'auto');
   _setSelectValue('settingResponsesPromptProfile', responsesCfg.promptProfile, 'auto');
   _setSelectValue('settingResponsesTransport', responsesCfg.transport, 'sse');
   _setSelectValue('settingResponsesReasoning', responsesCfg.reasoningMode, 'standard');
@@ -4187,7 +4186,7 @@ function _collectResponsesExperimentControls() {
     // turns those switches into an execution allow-list. ``selected_only``
     // remains a headless/API compatibility input only.
     executionScope: 'available',
-    programmaticCalling: value('settingProgrammaticCalling', 'on'),
+    programmaticCalling: value('settingProgrammaticCalling', 'auto'),
   });
   config.responses = Object.assign({}, config.responses || {}, {
     transport: value('settingResponsesTransport', 'sse'),

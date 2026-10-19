@@ -204,6 +204,23 @@ def test_owner_stop_keeps_cancellation_without_a_budget_error(monkeypatch):
     assert result.outcome.aborted and task['error'] is None
 
 
+def test_unknown_model_usage_is_not_reported_as_exhausted_budget(monkeypatch):
+    from lib.agent_core.execution_budget import model_budget_admission
+    from tests.agent_core.test_model_budget_admission import task as make_task
+
+    task = make_task(100)
+    lease = model_budget_admission(task)(input_tokens=2, max_output_tokens=2)
+    lease.mark_dispatched()
+    lease.settle(None)
+    state = _state(); events = []
+    _install_common(monkeypatch, events)
+    root_loop.run_root_agent_loop(_request(task, state))
+    assert task['error']['kind'] == 'execution_token_usage_unknown'
+    assert task['error']['retryable'] is False
+    assert task['_executionActualsComplete'] is False
+    assert not [event for event in events if event[0] == 'llm']
+
+
 def test_provider_break_closes_stream_prefetch_without_settling(monkeypatch):
     task = {'aborted': False, 'error': None}
     state = _state()
@@ -543,7 +560,7 @@ def test_resume_retains_paid_accounting_when_next_provider_dispatch_raises(monke
 @pytest.mark.parametrize('prior', ['none', 'known', 'unknown', 'sticky', 'foreign', 'untyped'])
 def test_actual_budget_denial_preserves_only_proven_complete_usage(monkeypatch, prior):
     from lib.agent_core.execution_budget import model_budget_admission
-    from lib.llm_errors import AbortedError
+    from lib.llm.llm_errors import AbortedError
     from lib.evolution.bridge import terminal_actuals
     from lib.tasks_pkg.orchestrator import _llm_round_call as call
     from tests.agent_core.test_model_budget_admission import task as make_task
@@ -579,3 +596,44 @@ def test_actual_budget_denial_preserves_only_proven_complete_usage(monkeypatch, 
         assert owner['_usageActualsIncomplete'] is True
     else:
         assert owner.get('_usageActualsIncomplete') is not True
+
+
+@pytest.mark.parametrize('round_index', [0, 1])
+def test_local_admission_failure_has_public_round_without_dispatch(monkeypatch, round_index):
+    from lib.error_envelope import from_exception
+    from lib.llm.llm_errors import PromptTooLongError
+    from lib.tasks_pkg.compaction import _prompt_admission as admission
+    from lib.tasks_pkg.failure_attribution import attach_failure_attribution
+
+    task = {'config': {'model': 'kimi-k3'}}
+    events = []
+    _install_common(monkeypatch, events)
+    monkeypatch.setattr(root_loop, 'prepare_round_context', lambda *a, **k: None)
+    monkeypatch.setattr(
+        admission, '_measure', lambda *a, **k: {
+            'messageTokens': 10_000, 'toolSchemaTokens': 800_000,
+            'totalTokens': 810_000, 'method': 'test', 'messageCount': 1})
+    monkeypatch.setattr(root_loop, 'build_round_request',
+                        lambda *a, **k: pytest.fail('refusal must precede body construction'))
+    monkeypatch.setattr(root_loop, 'run_llm_call_with_fallback',
+                        lambda *a, **k: pytest.fail('refusal must precede model transport'))
+    monkeypatch.setattr(admission, 'force_compact_if_needed',
+                        lambda *a, **k: pytest.fail('schemas cannot be summarized'))
+
+    with pytest.raises(PromptTooLongError) as caught:
+        root_loop._RootLoopHooks(_request(task, _state())).dispatch(round_index, [])
+
+    envelope = attach_failure_attribution(
+        from_exception(caught.value, model='kimi-k3', context='task-fatal'),
+        task, phase='task-fatal')
+    assert envelope['origin'] == 'local'
+    assert envelope['providerReached'] is False
+    assert envelope['reason'] == 'tool_schema_floor'
+    assert envelope['toolSchemaTokens'] == 800_000
+    assert envelope['totalTokens'] == 810_000
+    assert 'titleKey' not in envelope and 'hintKey' not in envelope
+    assert envelope['retryable'] is False
+    assert envelope['failureAttribution'] == {
+
+        'roundNum': round_index + 1, 'phase': 'task-fatal'}
+    assert task['_lastPromptAdmission']['action'] == 'refuse_tool_surface'

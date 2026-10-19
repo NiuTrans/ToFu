@@ -15,7 +15,8 @@ than a wrong patch.
 
 Recognised "fresh enough" sources for a target file:
   1. A successful ``read_files`` in ``task['toolRounds']`` (current turn,
-     status=='done'). Sibling reads in the SAME turn don't count because
+     status=='done' AND affirmative result evidence). A done refusal or
+     missing/failed result proves no read. Sibling reads don't count because
      they haven't completed yet — write tools run before parallel reads.
   2. A successful ``read_files`` / ``write_file`` / ``apply_diff`` /
      ``insert_content`` in a prior assistant turn (``task['messages']``).
@@ -48,11 +49,12 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import threading
 
 from lib.log import get_logger
 from lib.project_mod.path_resolution import _resolve_base
-from lib.tool_history_pairing import adjacent_tool_call_result_pairs
+from lib.tool_results.tool_history_pairing import adjacent_tool_call_result_pairs
 
 logger = get_logger(__name__)
 
@@ -225,29 +227,25 @@ def _collect_satisfied_paths_from_rounds(task: dict, project_path: str | None) -
 
         from lib.tasks_pkg.workspace_delivery import route_project_tool_args
         args = route_project_tool_args(task, tn, args)
-        # read_files supports batch ``reads`` array; the others use ``edits``
-        # or top-level ``path``. Re-use the same collector.
-        if tn == 'read_files':
-            reads = args.get('reads')
-            if isinstance(reads, list):
-                for spec in reads:
-                    if isinstance(spec, dict) and spec.get('path'):
-                        ap = _resolve_abs(project_path, conv_id, str(spec['path']))
-                        if ap:
-                            out.add(ap)
-                    elif isinstance(spec, str) and spec.strip():
-                        ap = _resolve_abs(project_path, conv_id, spec.strip())
-                        if ap:
-                            out.add(ap)
-            if isinstance(args.get('path'), str) and args['path'].strip():
-                ap = _resolve_abs(project_path, conv_id, args['path'].strip())
-                if ap:
-                    out.add(ap)
-        else:
-            for p in _collect_target_paths(tn, args):
-                ap = _resolve_abs(project_path, conv_id, p)
-                if ap:
-                    out.add(ap)
+        # Terminal status alone is not success: refusals and failed edits
+        # settle as done too. Modern reads/writes use the shared tokens; old
+        # rounds need an affirmative, complete result (not a clipped preview).
+        observed = r.get('_readObservedPaths')
+        if tn == 'read_files' and isinstance(observed, list):
+            requested = {_resolve_abs(project_path, conv_id, path)
+                         for path in _read_target_paths(args)}
+            out.update(path for path in observed if isinstance(path, str) and path in requested)
+            continue
+        results = r.get('results') or []
+        if any(isinstance(item, dict) and item.get('refusal') for item in results):
+            continue
+        result_text = r.get('result') or ''
+        if not isinstance(result_text, str):
+            continue
+        for raw in _successful_paths(tn, args, result_text):
+            ap = _resolve_abs(project_path, conv_id, raw)
+            if ap:
+                out.add(ap)
     return out
 
 
@@ -260,8 +258,8 @@ def _collect_satisfied_paths_from_messages(task: dict, project_path: str | None,
     with its adjacent ``role: tool`` result message.  IDs select a queue only
     inside that provider batch; repeated legacy positional IDs are consumed
     by occurrence instead of collapsing into one conversation-global value.
-    Only pairs whose tool result is non-empty AND does not start with the
-    standard error markers count. ``start`` is the incremental-cache seam:
+    Only affirmative successful receipts count. Legacy multi-read text cannot
+    prove per-item success and requires a token or a new observed read. ``start`` is the incremental-cache seam:
     the suffix it cuts is always a whole-message boundary, and a tool result
     always follows its assistant message, so indexing only the suffix is
     equivalent to indexing the whole list.
@@ -303,28 +301,10 @@ def _collect_satisfied_paths_from_messages(task: dict, project_path: str | None,
 
         from lib.tasks_pkg.workspace_delivery import route_project_tool_args
         args = route_project_tool_args(task, name, args)
-        if name == 'read_files':
-            reads = args.get('reads')
-            if isinstance(reads, list):
-                for spec in reads:
-                    if isinstance(spec, dict) and spec.get('path'):
-                        ap = _resolve_abs(
-                            project_path, conv_id, str(spec['path']))
-                        if ap:
-                            out.add(ap)
-                    elif isinstance(spec, str) and spec.strip():
-                        ap = _resolve_abs(project_path, conv_id, spec.strip())
-                        if ap:
-                            out.add(ap)
-            if isinstance(args.get('path'), str) and args['path'].strip():
-                ap = _resolve_abs(project_path, conv_id, args['path'].strip())
-                if ap:
-                    out.add(ap)
-        else:
-            for path in _collect_target_paths(name, args):
-                absolute_path = _resolve_abs(project_path, conv_id, path)
-                if absolute_path:
-                    out.add(absolute_path)
+        for raw in _successful_paths(name, args, result_text):
+            ap = _resolve_abs(project_path, conv_id, raw)
+            if ap:
+                out.add(ap)
     return out
 
 
@@ -392,23 +372,77 @@ def _reset_satisfied_cache_for_tests() -> None:
 def _result_indicates_success(name: str, result_text: str) -> bool:
     """Return True when *result_text* suggests the tool succeeded.
 
-    For read_files, an "Error:" prefix (e.g. "Error: File not found") means
-    the model never actually saw the file — those don't satisfy the gate.
-    For write_file / apply_diff / insert_content the success path begins
-    with words like "File created" / "Applied" / "Inserted"; failures
-    begin with "Write failed" / "Diff failed" / "Insert failed". We use
-    a simple negative-prefix check for robustness.
+    Terminal status and lack of an error prefix are not success evidence.
+    Require an affirmative legacy receipt, and leave per-item proof to
+    _successful_paths (or the host-owned observation carrier for modern reads).
     """
-    if not result_text:
+    if not isinstance(result_text, str) or not result_text.strip():
         return False
     s = result_text.lstrip()
-    if s.startswith(('Error:', 'ERROR:')):
-        return False
-    if name in ('edit_file', 'apply_diff', 'apply_diffs',
-                'insert_content', 'insert_contents', 'write_file'):
-        if s.startswith(('Diff failed', 'Insert failed', 'Write failed', 'Failed')):
+    if name == 'read_files':
+        # Mixed legacy output has no trustworthy per-item carrier. Do not
+        # bless all requested paths merely because its first read succeeded.
+        if re.search(r'(?im)^(?:\[\d+\]\s*)?(?:Error\b|File not found\b|\[Binary file:|\[Unverified file read:)', s):
             return False
-    return True
+        return s.startswith('File: ') or bool(re.match(r'=== .+ ===(?:\n|$)', s))
+    if name == 'write_file':
+        return s.startswith(('File created', 'File written', 'File updated', 'File appended',
+                             'Wrote ', 'Appended '))
+    return bool(re.match(r'(?:Applied|Inserted)\s+(?:[1-9]\d*/\d+\s|diff\b|content\b)', s))
+
+
+def _read_target_paths(args: dict) -> list[str]:
+    reads = args.get('reads')
+    specs = reads if isinstance(reads, list) else [args]
+    paths = [spec.get('path') if isinstance(spec, dict) else spec for spec in specs]
+    return [path.strip() for path in paths if isinstance(path, str) and path.strip()]
+
+
+def _successful_paths(name: str, args: dict, result_text: str) -> list[str]:
+    """Conservative legacy compatibility, not a source of freshness digests."""
+    if not _result_indicates_success(name, result_text):
+        return []
+    if name == 'read_files':
+        paths = _read_target_paths(args)
+        # File bodies can contain arbitrary File:/=== headers and refusal text.
+        # Therefore formatted multi-read text cannot prove per-item success,
+        # even if a header count happens to equal the number of requested paths.
+        # Modern rounds use host-only observations above; old ambiguous batches
+        # must be re-read, not upgraded into invented evidence.
+        return paths if len(paths) == 1 else []
+    edits = args.get('edits')
+    if isinstance(edits, list):
+        # Support complete older zero-based receipts, but do not guess the
+        # convention from clipped output: that can certify the wrong target.
+        statuses = re.findall(r'(?m)^\[(\d+)\] (OK|FAIL|SKIP)\b', result_text)
+        indexes = {int(index) for index, _ in statuses}
+        if len(statuses) != len(edits):
+            return []
+        if indexes == set(range(len(edits))):
+            offset = 0
+        elif indexes == set(range(1, len(edits) + 1)):
+            offset = 1
+        else:
+            return []
+        ok = {int(index) - offset for index, status in statuses if status == 'OK'}
+        return [edit['path'] for index, edit in enumerate(edits)
+                if index in ok and isinstance(edit, dict) and isinstance(edit.get('path'), str)]
+    return _collect_target_paths(name, args)
+
+
+def restore_batch_result_indexes(content: str, edits: list, admitted: list[int], skipped: dict) -> str:
+    """Project a non-atomic reduced execution back onto the original request."""
+    if not isinstance(content, str):
+        return content
+    def reindex(match):
+        position = int(match[1]) - 1
+        return f'[{admitted[position] + 1}] {match[2]}' if 0 <= position < len(admitted) else match[0]
+    content = re.sub(r'(?m)^\[(\d+)\] (OK|FAIL|SKIP)\b', reindex, content)
+    content = re.sub(r'^(Applied|Inserted) (\d+)/\d+',
+                     lambda match: f'{match[1]} {match[2]}/{len(edits)}', content)
+    lines = [f'[{index + 1}] SKIP {edits[index].get("path", "?")}: {reason}'
+             for index, reason in sorted(skipped.items())]
+    return content + '\n' + '\n'.join(lines)
 
 
 def check_read_before_edit(task: dict, fn_name: str, fn_args: dict,

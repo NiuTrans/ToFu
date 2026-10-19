@@ -3,7 +3,7 @@
 Responsibility: append bounded, operator-facing support reports sent by the
 Android shell (``POST /api/v1/mobile/client-report``) to a JSONL log and read
 them back newest-first. Entry points: :func:`append_report`,
-:func:`read_recent`, :func:`store_dir`. Dependencies: ``lib.runtime_paths`` and
+:func:`read_recent`, :func:`store_dir`. Dependencies: ``lib.runtime.runtime_paths`` and
 ``lib.log`` only; never imports ``routes``.
 
 The report is diagnostic evidence a user chose to send, not durable domain
@@ -23,7 +23,7 @@ import time
 from pathlib import Path
 
 from lib.log import get_logger
-from lib.runtime_paths import data_root
+from lib.runtime.runtime_paths import data_root
 
 logger = get_logger(__name__)
 

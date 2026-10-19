@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
+from contextlib import ExitStack
 import hmac
 import json
 import re
@@ -41,7 +42,7 @@ from lib.conversation_sync.turn_images import (
 )
 from lib.conversation_sync.snapshot_admission import snapshot_admission
 from lib.conversation_sync.validation import ContractViolation, decode
-from lib.http_request_lifecycle import request_execution_clock
+from lib.http_transport.request_lifecycle import request_execution_clock
 from lib.log import get_logger
 from lib.observability import record_stream_admission
 from lib.request_parser import parse_body
@@ -120,10 +121,28 @@ def _snapshot_turn_limit() -> int | None:
     """Decode the contract-owned browser tail-window profile."""
     values = request.args.getlist("turnWindow")
     if not values:
+        if request.args.getlist("windowLimit"):
+            raise ValueError("windowLimit requires a bounded conversation tail")
         return None
     if len(values) != 1 or values[0] not in _SNAPSHOT_TURN_WINDOWS:
         raise ValueError("Invalid conversation snapshot turn window")
-    return _SNAPSHOT_TURN_WINDOWS[values[0]]
+    limit = _SNAPSHOT_TURN_WINDOWS[values[0]]
+    requested = _window_integer("windowLimit", 1, 96)
+    if requested and limit is None:
+        raise ValueError("windowLimit requires a bounded conversation tail")
+    return requested or limit
+
+
+def _window_integer(name: str, minimum: int, maximum: int) -> int:
+    values = request.args.getlist(name)
+    if not values:
+        return 0
+    if len(values) != 1 or re.fullmatch(r"[0-9]+", values[0]) is None:
+        raise ValueError(f"Invalid conversation {name}")
+    value = int(values[0])
+    if not minimum <= value <= maximum:
+        raise ValueError(f"Invalid conversation {name}")
+    return value
 
 
 def _snapshot_artifact_hint() -> bool:
@@ -318,6 +337,10 @@ async def conversation_sync_snapshot(conversation_id: str):
         segment_payload = _snapshot_segment_payload()
         tool_payload = _snapshot_tool_payload(segment_payload)
         turn_limit = _snapshot_turn_limit()
+
+        max_projection_bytes = _window_integer("windowBytes", 65536, 16777216)
+        if max_projection_bytes and turn_limit is None:
+            raise ValueError("windowBytes requires a bounded conversation tail")
         include_artifact_hint = _snapshot_artifact_hint()
     except ValueError as exc:
         return api_bad_request(str(exc))
@@ -333,6 +356,9 @@ async def conversation_sync_snapshot(conversation_id: str):
             admission_view += ":artifact-hint"
         if tool_payload == "lazy":
             admission_view += ":tools-lazy"
+
+        if max_projection_bytes:
+            admission_view += f":bytes-{max_projection_bytes}"
         admission = snapshot_admission.enter(
             user_id=user_id,
             conversation_id=conversation_id,
@@ -352,6 +378,7 @@ async def conversation_sync_snapshot(conversation_id: str):
         # Read-side wedge signal: the live task's withheld pushes can never
         # carry it (the write path is what is broken), so the snapshot does.
         withheld = push_withheld_for_conv(conversation_id) is not None
+        read_started = time.perf_counter()
         snapshot = await asyncio.to_thread(
             _service.snapshot,
             conversation_id,
@@ -361,8 +388,17 @@ async def conversation_sync_snapshot(conversation_id: str):
             tool_payload=tool_payload,
             turn_limit=turn_limit,
             include_artifact_hint=include_artifact_hint,
+
+            **({"max_projection_bytes": max_projection_bytes} if max_projection_bytes else {}),
         )
-        return api_prevalidated_payload(snapshot)
+        read_ms = (time.perf_counter() - read_started) * 1000
+        encode_started = time.perf_counter()
+        response, status = api_prevalidated_payload(snapshot)
+        encode_ms = (time.perf_counter() - encode_started) * 1000
+        response.headers["Server-Timing"] = (
+            f"snapshot;dur={read_ms:.2f}, encode;dur={encode_ms:.2f}"
+        )
+        return response, status
     except ConversationSyncNotFound as exc:
         return api_not_found(str(exc))
     except StorageError as exc:
@@ -377,6 +413,41 @@ async def conversation_sync_snapshot(conversation_id: str):
 
 
 @conversation_sync_v3_bp.route(
+    "/api/v4/conversations/<conversation_id>/turns/rounds", methods=["GET"]
+)
+@require_scope("chat")
+async def conversation_round_directory(conversation_id: str):
+    try:
+        lane = str(request.args.get("laneId") or "").strip()
+        anchor = str(request.args.get("anchorTurnId") or "").strip()
+        if not lane or len(lane) > 128 or len(anchor) > 128:
+            raise ValueError("Invalid laneId or anchorTurnId")
+        def integer(name, default, maximum):
+            raw = request.args.get(name)
+            if raw is None and default is None:
+                raise ValueError(f"{name} is required")
+            value = int(raw) if raw is not None else default
+            if value < (1 if name == "limit" else 0) or value > maximum:
+                raise ValueError(f"Invalid {name}")
+            return value
+        result = await asyncio.to_thread(
+            _service.round_directory, conversation_id, _request_user_id(),
+            lane_id=lane, expected_sync_sequence=integer("syncSeq", None, 9223372036854775807),
+            offset=integer("offset", 0, 9223372036854775807),
+            limit=integer("limit", 50, 100), anchor_turn_id=anchor,
+        )
+        return api_prevalidated_payload(result)
+    except ContractViolation as exc:
+        return contract_violation_response(exc, operation="conversation.sync.round_directory")
+    except ValueError as exc:
+        return api_bad_request(str(exc))
+    except ConversationSyncNotFound as exc:
+        return api_not_found(str(exc))
+    except StorageError as exc:
+        return storage_failure_response(exc, operation="conversation.sync.round_directory")
+
+
+@conversation_sync_v3_bp.route(
     "/api/v4/conversations/<conversation_id>/turns/history", methods=["GET"]
 )
 @require_scope("chat")
@@ -386,6 +457,8 @@ async def conversation_turn_history_page(conversation_id: str):
         lane_id, sync_sequence, before_ordinal, limit, segment_payload = (
             _turn_history_page_request()
         )
+
+        max_projection_bytes = _window_integer("windowBytes", 65536, 16777216)
         tool_payload = _snapshot_tool_payload(segment_payload)
         page = await asyncio.to_thread(
             _service.turn_page,
@@ -393,6 +466,8 @@ async def conversation_turn_history_page(conversation_id: str):
             user_id,
             lane_id=lane_id,
             expected_sync_sequence=sync_sequence,
+
+            **({"max_projection_bytes": max_projection_bytes} if max_projection_bytes else {}),
             before_ordinal=before_ordinal,
             limit=limit,
             segment_payload=segment_payload,
@@ -438,6 +513,37 @@ async def conversation_turn_read(conversation_id: str, turn_id: str):
         return storage_failure_response(exc, operation="conversation.sync.turn_read")
     except ContractViolation as exc:
         return contract_violation_response(exc, operation="conversation.sync.turn_read")
+
+
+@conversation_sync_v3_bp.route(
+    "/api/v4/conversations/<conversation_id>/turns/<turn_id>/tool-effects/<operation_id>",
+    methods=["GET"],
+)
+@require_scope("chat")
+async def conversation_tool_effect_inspection(conversation_id: str, turn_id: str, operation_id: str):
+    user_id = _request_user_id()
+    if (not 0 < len(conversation_id) <= 256 or not 0 < len(turn_id) <= 128
+            or re.fullmatch(r"[a-f0-9]{32}", operation_id) is None):
+        return api_bad_request("Invalid tool occurrence identity")
+    scopes = request.args.getlist("ownerScope")
+    if len(scopes) != 1 or _OWNER_CACHE_SCOPE.fullmatch(scopes[0]) is None:
+        return api_bad_request("A valid tool effect ownerScope is required")
+    if not hmac.compare_digest(scopes[0], turn_image_owner_scope(user_id, conversation_id)):
+        return api_not_found("Tool occurrence not found")
+    try:
+        value = await asyncio.to_thread(
+            _service.inspect_tool_effect, conversation_id, turn_id, user_id,
+            operation_id=operation_id,
+        )
+        response, status = api_prevalidated_payload(value)
+        response.headers["Cache-Control"] = "private, no-store"
+        return response, status
+    except ConversationSyncNotFound as exc:
+        return api_not_found(str(exc))
+    except StorageError as exc:
+        return storage_failure_response(exc, operation="conversation.sync.tool_effect")
+    except ContractViolation as exc:
+        return contract_violation_response(exc, operation="conversation.sync.tool_effect")
 
 
 @conversation_sync_v3_bp.route(
@@ -567,124 +673,131 @@ async def conversation_sync_events(conversation_id: str):
     if subscription.closed:
         return _stream_stop_response(subscription.close_reason)
 
-    try:
+    # One rollback boundary covers cancellation and every setup/early-return
+    # path, including failures outside the typed ownership probe.
+    with ExitStack() as setup:
+        setup.callback(subscription.close, "setup_failed")
         slot_token = sse_limiter.try_acquire(request_principal)
-    except BaseException:
-        subscription.close("setup_failed")
-        raise
-    subscription.add_close_callback(
-        lambda: sse_limiter.release(slot_token))
-    if subscription.closed:
-        return _stream_stop_response(subscription.close_reason)
-    record_stream_admission("conversation-sync", "admitted")
-    try:
-        await asyncio.to_thread(
-            _service.changes,
-            conversation_id,
-            user_id,
-            after_sequence=after_sequence,
-            limit=1,
-        )
-    except ConversationSyncNotFound as exc:
-        subscription.close()
-        return api_not_found(str(exc))
-    except StorageError as exc:
-        subscription.close()
-        return storage_failure_response(
-            exc, operation="conversation.sync.events")
-    except ContractViolation as exc:
-        subscription.close()
-        return contract_violation_response(
-            exc, operation="conversation.sync.events")
-    if subscription.closed:
-        return _stream_stop_response(subscription.close_reason)
-    subscription.arm_body_start_deadline(10.0)
-
-    async def generate():
-        subscription.mark_body_started()
-        sequence = after_sequence
-        heartbeat_due = False
-        storage_failures = 0
-        slot_refresh_due = (
-            time.monotonic() + sse_limiter.refresh_interval_seconds)
-
-        def refresh_slot_if_due() -> None:
-            nonlocal slot_refresh_due
-            now = time.monotonic()
-            if now < slot_refresh_due:
-                return
-            sse_limiter.refresh(slot_token)
-            slot_refresh_due = now + sse_limiter.refresh_interval_seconds
-
+        if slot_token is None:
+            # A bounded 204 stops native EventSource retry without dropping
+            # the subscription's generation fencing; the client reconnects
+            # through its normal durable sync path.
+            record_stream_admission("conversation-sync", "capacity")
+            return _stream_stop_response('capacity')
+        subscription.add_close_callback(
+            lambda: sse_limiter.release(slot_token))
+        if subscription.closed:
+            return _stream_stop_response(subscription.close_reason)
+        record_stream_admission("conversation-sync", "admitted")
         try:
-            while not subscription.closed:
-                refresh_slot_if_due()
-                try:
-                    page = await asyncio.to_thread(
-                        _service.changes,
-                        conversation_id,
-                        user_id,
-                        after_sequence=sequence,
-                        limit=500,
-                    )
-                except StorageError as exc:
-                    if (not exc.retryable
-                            and exc.code not in _DEGRADABLE_READ_FAILURES):
-                        raise
-                    storage_failures += 1
-                    heartbeat = _service.heartbeat(
-                        conversation_id, user_id, sequence, degraded=True,
-                        push_withheld=(
-                            push_withheld_for_conv(conversation_id) is not None),
-                    )
-                    yield _sse_frame(heartbeat)
-                    await asyncio.sleep(min(0.25 * storage_failures, 2.0))
-                    continue
+            await asyncio.to_thread(
+                _service.changes,
+                conversation_id,
+                user_id,
+                after_sequence=after_sequence,
+                limit=1,
+            )
+        except ConversationSyncNotFound as exc:
+            return api_not_found(str(exc))
+        except StorageError as exc:
+            return storage_failure_response(
+                exc, operation="conversation.sync.events")
+        except ContractViolation as exc:
+            return contract_violation_response(
+                exc, operation="conversation.sync.events")
+        if subscription.closed:
+            return _stream_stop_response(subscription.close_reason)
+        subscription.arm_body_start_deadline(10.0)
 
+        async def generate():
+            try:
+                subscription.mark_body_started()
+                sequence = after_sequence
+                heartbeat_due = False
                 storage_failures = 0
-                reset = page.get("reset")
-                if isinstance(reset, dict):
-                    yield _sse_frame(reset, cursor=str(reset["cursor"]))
-                    return
+                slot_refresh_due = (
+                    time.monotonic() + sse_limiter.refresh_interval_seconds)
 
-                events = page.get("events") or []
-                if events:
-                    for event in events:
-                        sequence = int(event["syncSeq"])
-                        cursor = _service.cursor_for_sequence(
-                            conversation_id, user_id, sequence)
-                        yield _sse_frame(event, cursor=cursor)
-                    heartbeat_due = False
-                    if page.get("hasMore"):
+                def refresh_slot_if_due() -> None:
+                    nonlocal slot_refresh_due
+                    now = time.monotonic()
+                    if now < slot_refresh_due:
+                        return
+                    sse_limiter.refresh(slot_token)
+                    slot_refresh_due = now + sse_limiter.refresh_interval_seconds
+
+                while not subscription.closed:
+                    refresh_slot_if_due()
+                    try:
+                        page = await asyncio.to_thread(
+                            _service.changes,
+                            conversation_id,
+                            user_id,
+                            after_sequence=sequence,
+                            limit=500,
+                        )
+                    except StorageError as exc:
+                        if (not exc.retryable
+                                and exc.code not in _DEGRADABLE_READ_FAILURES):
+                            raise
+                        storage_failures += 1
+                        heartbeat = _service.heartbeat(
+                            conversation_id, user_id, sequence, degraded=True,
+                            push_withheld=(
+                                push_withheld_for_conv(conversation_id) is not None),
+                        )
+                        yield _sse_frame(heartbeat)
+                        await asyncio.sleep(min(0.25 * storage_failures, 2.0))
                         continue
-                elif heartbeat_due:
-                    # A write-side wedge (withheld authoritative pushes) keeps
-                    # the change log quiet, so heartbeats are the ONLY frame
-                    # that can still reach the client — they carry the signal.
-                    withheld = (
-                        push_withheld_for_conv(conversation_id) is not None)
-                    yield _sse_frame(_service.heartbeat(
-                        conversation_id, user_id, sequence, degraded=withheld,
-                        push_withheld=withheld,
-                    ))
-                    heartbeat_due = False
 
-                awakened = await subscription.wait(
-                    _service.heartbeat_interval_ms / 1000.0
-                )
-                refresh_slot_if_due()
-                heartbeat_due = not awakened
-        finally:
-            subscription.close("generator_closed")
+                    storage_failures = 0
+                    reset = page.get("reset")
+                    if isinstance(reset, dict):
+                        yield _sse_frame(reset, cursor=str(reset["cursor"]))
+                        return
 
-    return sse_response(
-        generate(),
-        timeout_none=True,
-        extra_headers={
-            "X-Tofu-Task-Kind": "conversation-sync",
-            "X-Tofu-Contract": "tofu.conversation-sync.events/v1",
-        },
-    )
+                    events = page.get("events") or []
+                    if events:
+                        for event in events:
+                            sequence = int(event["syncSeq"])
+                            cursor = _service.cursor_for_sequence(
+                                conversation_id, user_id, sequence)
+                            yield _sse_frame(event, cursor=cursor)
+                        heartbeat_due = False
+                        if page.get("hasMore"):
+                            continue
+                    elif heartbeat_due:
+                        # A write-side wedge (withheld authoritative pushes) keeps
+                        # the change log quiet, so heartbeats are the ONLY frame
+                        # that can still reach the client — they carry the signal.
+                        withheld = (
+                            push_withheld_for_conv(conversation_id) is not None)
+                        yield _sse_frame(_service.heartbeat(
+                            conversation_id, user_id, sequence, degraded=withheld,
+                            push_withheld=withheld,
+                        ))
+                        heartbeat_due = False
+
+                    awakened = await subscription.wait(
+                        _service.heartbeat_interval_ms / 1000.0
+                    )
+                    refresh_slot_if_due()
+                    heartbeat_due = not awakened
+            finally:
+                subscription.close("generator_closed")
+
+        response = sse_response(
+            generate(),
+            timeout_none=True,
+            extra_headers={
+                "X-Tofu-Task-Kind": "conversation-sync",
+                "X-Tofu-Contract": "tofu.conversation-sync.events/v1",
+            },
+        )
+        # Ownership transfers only after response construction succeeds. The
+        # generator finalizer and the unconsumed-body deadline now own release.
+        setup.pop_all()
+        return response
 
 
 @conversation_sync_v3_bp.route(
@@ -809,6 +922,37 @@ def conversation_plan_execute_v3(conversation_id: str, turn_id: str):
             principal=_request_principal(),
         ),
     )
+
+
+@conversation_sync_v3_bp.route(
+    "/api/v4/conversations/<conversation_id>/turns/<turn_id>/usage-recovery", methods=["GET"]
+)
+@require_scope("chat")
+def conversation_usage_recovery_v3(conversation_id: str, turn_id: str):
+    user_id = _request_user_id()
+    response, status = _command_response("turn.usage_recovery.inspect", lambda:
+        conversation_turn_commands.usage_recovery(conversation_id, turn_id, user_id))
+    response.headers['Cache-Control'] = 'private, no-store'
+    return response, status
+
+
+@conversation_sync_v3_bp.route(
+    "/api/v4/conversations/<conversation_id>/turns/<turn_id>/usage-recovery", methods=["POST"]
+)
+@require_scope("chat")
+def conversation_recover_usage_v3(conversation_id: str, turn_id: str):
+    execution_clock = request_execution_clock()
+    request_started_at = time.time()
+    try:
+        _validate_body("RecoverUsageRequest")
+    except ContractViolation as exc:
+        return api_bad_request(str(exc), violations=list(exc.violations))
+    body = parse_body()
+    user_id = _request_user_id()
+    principal = _request_principal()
+    return _command_response("turn.usage_recovery", lambda:
+        conversation_turn_commands.recover_usage(conversation_id, turn_id, user_id, body,
+            request_started_at=request_started_at, execution_clock=execution_clock, principal=principal))
 
 
 def _conversation_file_changes_command(

@@ -1,12 +1,12 @@
-"""SSRF + size-cap tests for routes.upload._safe_image_fetch (B10).
+"""SSRF + complete source tests for routes.upload._safe_image_fetch (B10).
 
 Covers:
   * Scheme allow-list (http/https only).
   * IP allow-list: loopback / RFC1918 / link-local / multicast / reserved
     are all rejected by default.
   * TOFU_IMAGE_FETCH_ALLOW_HOSTS escapes the IP check for trusted hosts.
-  * Response size cap aborts mid-stream when bytes exceed the limit.
-  * Content-Length pre-check rejects oversized responses.
+  * Sources beyond the former byte cap are retained in owned files.
+  * Complete history encoding closes files on success and failure.
   * The wrapper raises _ImageFetchError on policy violations (caught by
     callers, treated as a soft skip in _resolve_history_images).
 
@@ -110,11 +110,13 @@ class TestSchemeAndHostGuards:
         Err, _is_blocked, fetch = _import_helpers()
         monkeypatch.setenv('TOFU_IMAGE_FETCH_ALLOW_HOSTS', 'internal.example.com')
 
-        with patch('lib.safe_fetch.fetch_public_bytes',
-                   return_value=(b'PNGDATA000', 'image/png',
+        source = __import__('io').BytesIO(b'PNGDATA000')
+        with patch('lib.safe_fetch.fetch_public_file',
+                   return_value=(source, 'image/png',
                                  'http://internal.example.com/cat.png')) as guarded:
             body, ct = fetch('http://internal.example.com/cat.png')
-        assert body == b'PNGDATA000'
+        with body:
+            assert body.read() == b'PNGDATA000'
         assert ct == 'image/png'
         assert guarded.call_args.kwargs['allow_hosts_env'] == \
             'TOFU_IMAGE_FETCH_ALLOW_HOSTS'
@@ -125,57 +127,59 @@ class TestSchemeAndHostGuards:
 # ═══════════════════════════════════════════════════════════
 
 @pytest.mark.unit
-class TestSizeCap:
+class TestCompleteSource:
 
-    def test_content_length_precheck_rejects(self, monkeypatch):
+    @pytest.mark.parametrize('declared', [True, False])
+    def test_large_source_is_complete_and_owned(self, monkeypatch, declared):
+        import hashlib
         Err, _is_blocked, fetch = _import_helpers()
         monkeypatch.setenv('TOFU_IMAGE_FETCH_ALLOW_HOSTS', 'cdn.example.com')
-        monkeypatch.setenv('TOFU_IMAGE_FETCH_MAX_BYTES', '1024')
-
+        block = bytes(range(256)) * 256
+        count = 177
+        expected = hashlib.sha256(block * count).digest()
         with patch('lib.safe_fetch._session_for') as session_for:
             session = session_for.return_value
             session.max_redirects = 30
-            mock_resp = session.get.return_value
-            mock_resp.raise_for_status.return_value = None
-            mock_resp.headers = {'Content-Length': '999999999', 'Content-Type': 'image/png'}
-            mock_resp.iter_content = lambda chunk_size: [b'never seen']
-            mock_resp.url = 'https://cdn.example.com/huge.bin'
-            with pytest.raises(Err, match='Content-Length'):
-                fetch('https://cdn.example.com/huge.bin')
+            response = session.get.return_value
+            response.headers = {'Content-Type': 'image/png'}
+            if declared:
+                response.headers['Content-Length'] = str(len(block) * count)
+            response.iter_content = lambda chunk_size: (block for _ in range(count))
+            response.url = 'https://cdn.example.com/large.png'
+            source, content_type = fetch(response.url)
+            assert response.close.call_count == 1
+            assert session.max_redirects == 30
+            with source:
+                assert source.fileno() >= 0
+                assert hashlib.sha256(source.read()).digest() == expected
+            assert source.closed
+            assert content_type == 'image/png'
+        print(f'remote_image_demand: {len(block) * count} bytes, declared={declared}')
 
-    def test_streaming_aborts_when_exceeds_max(self, monkeypatch):
-        Err, _is_blocked, fetch = _import_helpers()
-        monkeypatch.setenv('TOFU_IMAGE_FETCH_ALLOW_HOSTS', 'cdn.example.com')
-        monkeypatch.setenv('TOFU_IMAGE_FETCH_MAX_BYTES', '100')
+    def test_history_encodes_complete_source_and_closes_it(self, monkeypatch):
+        import base64
+        import tempfile
+        import routes.upload as upload
+        raw = bytes(range(256)) * 44000 + b'end'
+        source = tempfile.TemporaryFile(mode='w+b')
+        source.write(raw)
+        monkeypatch.setattr(upload, '_safe_image_fetch', lambda url: (source, 'image/webp'))
+        result = upload._resolve_history_images([{
+            'prompt': 'edit', 'text': '', 'image_url': 'https://example.com/image.webp'}])
+        assert base64.b64decode(result[0]['image_b64'], validate=True) == raw
+        assert result[0]['mime_type'] == 'image/webp'
+        assert source.closed
 
-        with patch('lib.safe_fetch._session_for') as session_for:
-            session = session_for.return_value
-            session.max_redirects = 30
-            mock_resp = session.get.return_value
-            mock_resp.raise_for_status.return_value = None
-            # No Content-Length header → forces the streaming path.
-            mock_resp.headers = {'Content-Type': 'image/png'}
-            mock_resp.iter_content = lambda chunk_size: [b'A' * 60, b'B' * 60]
-            mock_resp.url = 'https://cdn.example.com/sneaky.bin'
-            with pytest.raises(Err, match='response too large'):
-                fetch('https://cdn.example.com/sneaky.bin')
-
-    def test_within_cap_succeeds(self, monkeypatch):
-        Err, _is_blocked, fetch = _import_helpers()
-        monkeypatch.setenv('TOFU_IMAGE_FETCH_ALLOW_HOSTS', 'cdn.example.com')
-        monkeypatch.setenv('TOFU_IMAGE_FETCH_MAX_BYTES', '1024')
-
-        with patch('lib.safe_fetch._session_for') as session_for:
-            session = session_for.return_value
-            session.max_redirects = 30
-            mock_resp = session.get.return_value
-            mock_resp.raise_for_status.return_value = None
-            mock_resp.headers = {'Content-Length': '15', 'Content-Type': 'image/jpeg'}
-            mock_resp.iter_content = lambda chunk_size: [b'JPEGBYTES012345']
-            mock_resp.url = 'https://cdn.example.com/cat.jpg'
-            body, ct = fetch('https://cdn.example.com/cat.jpg')
-        assert body == b'JPEGBYTES012345'
-        assert ct == 'image/jpeg'
+    def test_history_encoding_failure_closes_source(self, monkeypatch):
+        import tempfile
+        import routes.upload as upload
+        source = tempfile.TemporaryFile(mode='w+b')
+        monkeypatch.setattr(upload, '_safe_image_fetch', lambda url: (source, 'image/png'))
+        def fail(source):
+            raise OSError('injected source read failure')
+        monkeypatch.setattr(upload, '_encode_image_source', fail)
+        assert upload._resolve_history_images([{'image_url': 'https://example.com/x'}]) == []
+        assert source.closed
 
 
 # ═══════════════════════════════════════════════════════════

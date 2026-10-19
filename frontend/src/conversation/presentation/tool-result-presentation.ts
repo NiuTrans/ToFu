@@ -11,7 +11,10 @@
 
 import { escapeHtmlText } from '../../html-safety';
 
-import { renderToolArtifactHeaderHtml, renderToolArtifactRequestHtml, toolArtifactFailureText } from './tool-artifact-presentation';
+import { renderSendAgentMessageHtml } from './send-agent-message-presentation';
+
+import { renderToolArtifactHeaderHtml, renderToolArtifactRequestHtml } from './tool-artifact-presentation';
+import { toolFailureText } from './tool-failure-presentation';
 import { renderRepoMapHeaderHtml } from './tool-repo-map-presentation';
 import { resolveToolResultText, toolResultSurfacePolicy } from './tool-result-surfaces';
 import type { Translator } from '../../i18n';
@@ -36,6 +39,7 @@ export type ToolResultHeaderHtml = Readonly<{
 }>;
 
 export type ToolResultPresentation = Readonly<{
+  renderRepairKindsHtml(round: unknown): string;
   renderCompactionLabelHtml(round: unknown): string;
   renderWriteResultHtml(
     round: unknown,
@@ -249,7 +253,7 @@ function parseEditOutcomeBody(body: string): Readonly<{
 }
 
 /* Parse the model-facing batch outcome text into per-edit entries. Lines
-   that do not open a new ``[N] OK/FAIL`` marker continue the previous
+   that do not open a new ``[N] OK/FAIL/SKIP`` marker continue the previous
    entry's message (multi-line hints such as the "Most similar block"
    excerpt ride the same failure). */
 function parseEditOutcomeEntries(text: string): EditOutcomeEntry[] {
@@ -264,7 +268,7 @@ function parseEditOutcomeEntries(text: string): EditOutcomeEntry[] {
     message: string;
   }> = [];
   for (const line of text.split('\n')) {
-    const head = line.match(/^\[(\d+)\]\s+(OK|FAIL)\b\s*:?\s*([\s\S]*)$/);
+    const head = line.match(/^\[(\d+)\]\s+(OK|FAIL|SKIP)\b\s*:?\s*([\s\S]*)$/);
     if (head) {
       const parsed = parseEditOutcomeBody(head[3]);
       entries.push({
@@ -292,6 +296,23 @@ function parseEditOutcomeEntries(text: string): EditOutcomeEntry[] {
     const body = entry.body.replace(/\s+$/, '').slice(0, EDIT_FAILURE_LIMITS.tooltipChars);
     return Object.freeze({ ...entry, message, body });
   });
+}
+
+function renderRepairKindsHtml(value: unknown): string {
+  const round = record(value), repair = record(round._repaired);
+  if (!Array.isArray(repair.patterns)) return '';
+  const patterns = [...new Set(repair.patterns.filter((item): item is string => typeof item === 'string' && !!item))];
+  const labels: Readonly<Record<string, string>> = {
+    json_repaired: 'recovered JSON', stringified_primitive: 'coerced primitive',
+    stringified_json: 'parsed string JSON', null_omission: 'omitted null',
+    schema_default: 'applied default', param_alias: 'renamed arg',
+  };
+  const failed = Array.isArray(round.results) && record(round.results[0]).writeOk === false;
+  const classes = 'ptool-badge ptool-repair-kind ' + (failed ? 'ptool-badge-warn ptool-repair-kind--warn' : 'ptool-badge-info');
+  const chip = (label: string, title: string) => `<code class="${classes}" title="${escapeHtmlText(title)}">${escapeHtmlText(label)}</code>`;
+  const visible = patterns.slice(0, 3).map(pattern => chip(labels[pattern] || pattern, pattern));
+  if (patterns.length > 3) visible.push(chip(`+${patterns.length - 3}`, patterns.slice(3).map(pattern => labels[pattern] || pattern).join(', ')));
+  return visible.join('');
 }
 
 function record(value: unknown): UnknownRecord {
@@ -682,7 +703,7 @@ export function createToolResultPresentation(
   /* A gate/executor refusal used to hide inside the collapsed <details> of
      the failed edit, so a rejected edit_file looked identical to a running
      one until expanded. Render a one-line truncation directly on the failed
-     row's summary line (and on the collapsed batch header) — the full text
+     row's summary line — the batch header shows counts only. The full text
      stays in the title tooltip and the expanded detail block. */
   function inlineFailureReasonHtml(reason: string): string {
     const oneLine = reason.replace(/\s+/g, ' ').trim();
@@ -725,7 +746,6 @@ export function createToolResultPresentation(
       return '';
     }
 
-    const refusal = writeGateRefusal.resolveRefusal(round, resultMetadata);
     const authoritative = authoritativeResultText(round);
     const deferred = record(round._snapshotToolResult);
     const isDeferred = typeof deferred.preview === 'string' && typeof deferred.chars === 'number';
@@ -861,15 +881,6 @@ export function createToolResultPresentation(
       </details>`;
     }).join('');
 
-    let headerFailureHtml = '';
-    if (!refusal) {
-      for (const row of rows) {
-        if (row.ok) continue;
-        headerFailureHtml = inlineFailureReasonHtml(row.message);
-        if (headerFailureHtml) break;
-      }
-    }
-
     return `<details class="ptool-batch-done-block"${isDeferred ? ' data-lazy-tool-result=""' : ''} data-rn="${
       escapeHtmlText(round.roundNum)
     }">
@@ -879,7 +890,6 @@ export function createToolResultPresentation(
            ${header.rootPillHtml}
            <span class="ptool-text">${header.queryHtml}</span>
            ${header.badgeHtml}
-           ${headerFailureHtml}
          </summary>${writeGateNoticeHtml(round, resultMetadata)}
          <div class="ptool-result-body">
            ${isDeferred ? `<p class="ptool-result-trunc">${escapeHtmlText(translate('tool.resultDeferred'))}</p>` : ''}
@@ -918,11 +928,6 @@ export function createToolResultPresentation(
     const isMultiFile = editSummaries.some(
       (summary) => stringField(summary, 'path') !== firstPath,
     );
-
-    /* A structured refusal (outside-workspace) gets one brief notice under
-       the header; the per-item verbose model-facing text and the 110-char
-       truncated header reason are noise next to it. */
-    const refusal = writeGateRefusal.resolveRefusal(round, resultMetadata);
 
     const deferred = record(round._snapshotToolResult);
     const isDeferred = typeof deferred.preview === 'string' && typeof deferred.chars === 'number';
@@ -1033,19 +1038,6 @@ export function createToolResultPresentation(
       </details>`;
     }).join('');
 
-    let headerFailureHtml = '';
-    if (!refusal) {
-      for (let index = 0; index < editSummaries.length; index += 1) {
-        if (stringField(editSummaries[index], 'status') !== 'fail') continue;
-        headerFailureHtml = inlineFailureReasonHtml(
-          failureLineByIndex.get(index + 1)
-            || stringField(editSummaries[index], 'detail')
-            || translate(isDeferred ? 'tool.resultDeferred' : 'tool.editFailureUnavailable'),
-        );
-        if (headerFailureHtml) break;
-      }
-    }
-
     return `<details class="ptool-batch-done-block"${isDeferred ? ' data-lazy-tool-result=""' : ''} data-rn="${
       escapeHtmlText(round.roundNum)
     }">
@@ -1055,7 +1047,6 @@ export function createToolResultPresentation(
            ${header.rootPillHtml}
            <span class="ptool-text">${header.queryHtml}</span>
            ${header.badgeHtml}
-           ${headerFailureHtml}
          </summary>${writeGateNoticeHtml(round, resultMetadata)}
          <div class="ptool-result-body">
            ${isDeferred ? `<p class="ptool-result-trunc">${escapeHtmlText(translate('tool.resultDeferred'))}</p>` : ''}
@@ -1132,15 +1123,26 @@ export function createToolResultPresentation(
     header: ToolResultHeaderHtml,
   ): string {
     const round = record(roundValue);
+
+    const sentMessageHtml = renderSendAgentMessageHtml(
+      round, header, translate, renderCompactionLabelHtml(round),
+    );
+    if (sentMessageHtml) return sentMessageHtml;
     if (!['done', 'completed', 'error', 'failed', 'aborted', 'interrupted', 'unanswerable']
       .includes(stringField(round, 'status'))) return '';
     const deferred = record(round._snapshotToolResult);
     const isDeferred = typeof deferred.preview === 'string' && typeof deferred.chars === 'number';
     const requestHtml = renderToolArtifactRequestHtml(round, translate);
+    const failed = ['error', 'failed'].includes(stringField(round, 'status'));
+    // Older failure snapshots retained only the first frontend result's content.
+    // Canonical result property presence still wins, including explicit empties.
+    const legacyResult = failed && Array.isArray(round.results) ? record(round.results[0]) : {};
+    const legacyAuthority = Object.prototype.hasOwnProperty.call(legacyResult, 'content')
+      ? authoritativeResultText({ result: legacyResult }) : null;
     const authoritative = (isDeferred
       ? { source: 'deferred', text: String(deferred.preview) }
-      : authoritativeResultText(round)) || (requestHtml ? { source: 'request', text: '' } : null);
-    if (!authoritative || (!isDeferred && !authoritative.text.trim() && !requestHtml)) return '';
+      : authoritativeResultText(round) || legacyAuthority) || (requestHtml || failed ? { source: 'request', text: '' } : null);
+    if (!authoritative || (!failed && !isDeferred && !authoritative.text.trim() && !requestHtml)) return '';
 
     if (stringField(round, 'toolName') === PAPER_PROPOSAL_TOOL_NAME) {
       const proposalId = extractPaperProposalId(authoritative.text);
@@ -1155,12 +1157,12 @@ export function createToolResultPresentation(
 
     const awaitScopeBadgeHtml = renderAwaitScopeBadgeHtml(round, translate);
     const queryHtml = renderRepoMapHeaderHtml(round, translate) || header.queryHtml;
-    const artifactFailure = ['error', 'failed'].includes(stringField(round, 'status'))
-      && renderToolArtifactHeaderHtml(round, translate)
-      ? toolArtifactFailureText(authoritative.text, translate) : '';
-    const failureHtml = artifactFailure
-      ? `<span class="ptool-artifact-failure">${escapeHtmlText(artifactFailure)}</span>` : '';
-    const openingHtml = `<details class="ptool-result-block"${isDeferred ? ' data-lazy-tool-result=""' : ''} data-tool-result-authority="${
+    const failure = failed ? toolFailureText(authoritative.text, translate(
+      renderToolArtifactHeaderHtml(round, translate) ? 'toolArtifact.failureDetails' : 'tool.failedTip',
+    )) : '';
+    const failureHtml = failure
+      ? `<span class="ptool-artifact-failure ptool-error-reason">${escapeHtmlText(failure)}</span>` : '';
+    const openingHtml = `<details class="ptool-result-block"${failure ? ' data-tool-failure-evidence="collapsed"' : ''}${isDeferred ? ' data-lazy-tool-result=""' : ''} data-tool-result-authority="${
       authoritative.source
     }" data-rn="${escapeHtmlText(round.roundNum)}">
        <summary class="ptool-line ptool-result-header">
@@ -1259,5 +1261,6 @@ export function createToolResultPresentation(
     renderCompactionLabelHtml,
     renderWriteResultHtml,
     renderGenericResultHtml,
+    renderRepairKindsHtml,
   });
 }

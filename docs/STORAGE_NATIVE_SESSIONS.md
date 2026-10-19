@@ -71,7 +71,7 @@ producer persistence and exact public patch folding before/after SIGKILL.
 query P99 increases; this is not a universal tail-latency certification. Native
 serialization/settlement and client scheduling remain measured concerns.
 Complete workload scopes, preliminary variants, pins and test outcomes are in
-[session-pool evidence](evidence/tofudb_session_pool_20261001.json).
+`tofudb_session_pool_20261001.json`.
 
 Frame accounting — Problem: a 64-frame aggregate count gate closed valid tiny
 requests despite available byte budget. Decision: the native frame budget
@@ -168,3 +168,5 @@ idle-reuse target, holding a peak of 16,778,112 owned payload bytes; all calls
 settled in 1009.03 ms and input accounting returned to zero before close.
 The standalone probe measures acceptance and retirement, not production tail
 latency, decoded-object RSS or authority throughput.
+
+<!-- Evidence note: former docs/evidence/ artifact snapshots cited here were retired from the tree; cited JSON artifacts remain recoverable from git history. -->

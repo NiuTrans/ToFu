@@ -8,35 +8,27 @@ import pytest
 pytestmark = pytest.mark.unit
 
 
-def test_smart_chat_direct_fallback_preserves_owner_tools_and_extra(
-        monkeypatch):
+def test_smart_chat_preserves_authority_and_dispatch_failure(monkeypatch):
     from lib.llm_dispatch import api
 
     captured = {}
-    monkeypatch.setattr(
-        'lib.llm_dispatch._api_multi.dispatch_chat',
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            RuntimeError('dispatch unavailable')),
-    )
+    failure = RuntimeError('dispatch unavailable')
 
-    def _chat(**kwargs):
+    def dispatch(messages, **kwargs):
         captured.update(kwargs)
-        return 'ok', {}
+        raise failure
 
-    monkeypatch.setattr('lib.llm.chat', _chat)
+    monkeypatch.setattr('lib.llm_dispatch._api_multi.dispatch_chat', dispatch)
+    monkeypatch.setattr('lib.llm.chat', lambda **kwargs: pytest.fail('unauthorized direct fallback'))
     tools = [{'type': 'function', 'function': {
         'name': 'lookup', 'parameters': {'type': 'object'}}}]
-
-    content, _usage = api.smart_chat(
-        [{'role': 'user', 'content': 'use the tool'}],
-        tools=tools,
-        extra={'response_format': {'type': 'json_object'}},
-        owner_user_id=41,
-    )
-
-    assert content == 'ok'
+    with pytest.raises(RuntimeError) as caught:
+        api.smart_chat(
+            [{'role': 'user', 'content': 'use the tool'}], tools=tools,
+            extra={'response_format': {'type': 'json_object'}}, owner_user_id=41)
+    assert caught.value is failure
     assert captured['owner_user_id'] == 41
-    assert captured['extra']['tools'] == tools
+    assert captured['tools'] == tools
     assert captured['extra']['response_format'] == {'type': 'json_object'}
 
 

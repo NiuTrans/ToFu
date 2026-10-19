@@ -29,7 +29,7 @@ logger = get_logger(__name__)
 
 def _http_get(*args, **kwargs):
     """Load the shared HTTP stack only inside an explicit online refresh."""
-    from lib.http_client import http_get
+    from lib.http_transport.client import http_get
     return http_get(*args, **kwargs)
 
 

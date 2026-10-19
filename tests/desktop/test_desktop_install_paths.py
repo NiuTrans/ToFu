@@ -56,7 +56,7 @@ class RuntimePathsTest(unittest.TestCase):
     def test_source_mode_uses_repo_root(self):
         """A plain source checkout keeps the legacy repo-root paths (no drift)."""
         r = _run_py("""
-            import lib.runtime_paths as rp
+            import lib.runtime.runtime_paths as rp
             print('DATA', rp.data_root())
             print('LOGS', rp.logs_root())
         """)
@@ -69,7 +69,7 @@ class RuntimePathsTest(unittest.TestCase):
         base = os.path.realpath(tempfile.mkdtemp())
         data = os.path.join(base, 'data')
         r = _run_py("""
-            import lib.runtime_paths as rp
+            import lib.runtime.runtime_paths as rp
             print('DATA', rp.data_root())
             print('LOGS', rp.logs_root())
         """, env_extra={'TOFU_DATA_DIR': data})
@@ -85,7 +85,7 @@ class RuntimePathsTest(unittest.TestCase):
             import sys
             sys.frozen = True
             sys.executable = {fake_exe!r}
-            import lib.runtime_paths as rp
+            import lib.runtime.runtime_paths as rp
             print('DATA', rp.data_root())
         """)
         self.assertEqual(r.returncode, 0, r.stderr)
@@ -109,7 +109,7 @@ class RuntimePathsTest(unittest.TestCase):
                 import sys
                 sys.frozen = True
                 sys.executable = {fake_exe!r}
-                import lib.runtime_paths as rp
+                import lib.runtime.runtime_paths as rp
                 print('DATA', rp.data_root())
             """)
             self.assertEqual(r.returncode, 0, r.stderr)
@@ -147,7 +147,7 @@ class LogDirTwinTest(unittest.TestCase):
 
     def _runtime_logs_root(self, code_prelude: str, env_extra=None):
         r = _run_py(code_prelude + """
-            import lib.runtime_paths as rp
+            import lib.runtime.runtime_paths as rp
             print('RTLOGS', rp.logs_root())
         """, env_extra=env_extra)
         self.assertEqual(r.returncode, 0, r.stderr)
@@ -220,7 +220,7 @@ class CoLocationTest(unittest.TestCase):
         """Return (data_root, logs_root, LOG_DIR) from ONE child process so all
         three are resolved under identical env/frozen state."""
         r = _run_py(prelude + """
-            import lib.runtime_paths as rp
+            import lib.runtime.runtime_paths as rp
             import lib.log as L
             print('DATA', rp.data_root())
             print('LOGS', rp.logs_root())

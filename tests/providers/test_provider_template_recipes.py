@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from lib.provider_template_recipes import (
+from lib.provider.provider_template_recipes import (
     RECIPE_VERSION,
     ProviderTemplateRecipeError,
     compile_provider_template_bundle,
@@ -63,7 +63,7 @@ def test_invalid_category_or_provenance_is_rejected(changes):
 
 
 def test_connection_only_discovery_compiles_without_guessing_models(monkeypatch):
-    import lib.provider_template_recipes as recipes
+    import lib.provider.provider_template_recipes as recipes
     template = normalize_provider_template(_recipe(
         catalog_mode='discovery', offering_recipes=[],
         catalog_source={'url': 'https://example.test/docs', 'checked_at': '2026-09-08'}))
@@ -77,7 +77,7 @@ def test_connection_only_discovery_compiles_without_guessing_models(monkeypatch)
 
 def test_api_metadata_is_generated_from_recipe_authority():
     from scripts.gen_api_v1_model_routing_contract import _load_contract
-    from lib.api_v1_model_routing_generated import decode, ContractViolation
+    from lib.generated_api_v1_model_routing import decode, ContractViolation
     authored = json.loads((ROOT / 'contracts/provider_offering_recipe_v1.schema.json').read_text())
     generated = _load_contract()['components']['schemas']['ProviderTemplate']['properties']
     for field in ('category', 'catalog_mode', 'catalog_source'):
@@ -98,7 +98,7 @@ def test_authored_recipe_preserves_exact_logical_and_wire_identity():
 
 
 def test_relay_prices_never_become_official_list_prices(monkeypatch):
-    import lib.provider_template_recipes as recipes
+    import lib.provider.provider_template_recipes as recipes
     template = normalize_provider_template(_recipe(offering_recipes=[{
         'model_id': 'openai/gpt-test-provider-price-only-20260908',
         'capabilities': ['text'], 'pricing': {'input': 3, 'output': 7, 'currency': 'USD'},
@@ -111,7 +111,7 @@ def test_relay_prices_never_become_official_list_prices(monkeypatch):
 
 
 def test_official_operator_hosting_other_creators_cannot_set_their_list_prices(monkeypatch):
-    import lib.provider_template_recipes as recipes
+    import lib.provider.provider_template_recipes as recipes
     price = {'input': 2, 'output': 5, 'currency': 'USD'}
     template = normalize_provider_template(_recipe(category='official', brand='qwen',
         offering_recipes=[
@@ -128,7 +128,7 @@ def test_official_operator_hosting_other_creators_cannot_set_their_list_prices(m
 
 
 def test_template_seeds_never_claim_inference_probe_success(monkeypatch):
-    import lib.provider_template_recipes as recipes
+    import lib.provider.provider_template_recipes as recipes
     template = normalize_provider_template(_recipe(offering_recipes=[{
         'model_id': 'openai/gpt-test-unprobed-template', 'capabilities': ['text'],
     }]))
@@ -208,7 +208,7 @@ def test_settings_templates_share_bootstrap_builtins():
         _load_provider_templates as bootstrap_load,
     )
 
-    from lib.provider_template_recipes import load_provider_templates
+    from lib.provider.provider_template_recipes import load_provider_templates
 
     settings_rows = {row['key']: row for row in load_provider_templates()}
     bootstrap_rows = {
@@ -230,7 +230,7 @@ def test_settings_templates_share_bootstrap_builtins():
 
 
 def test_static_template_overrides_builtin_recipe_list():
-    from lib.provider_template_recipes import load_provider_templates
+    from lib.provider.provider_template_recipes import load_provider_templates
 
     templates = {row['key']: row for row in load_provider_templates()}
     static_glm = json.loads((TEMPLATES / 'glm.json').read_text(encoding='utf-8'))
@@ -242,8 +242,8 @@ def test_static_template_overrides_builtin_recipe_list():
 
 def test_loader_passes_static_overrides_to_the_feed_exclusion(
         monkeypatch, tmp_path):
-    import lib.provider_template_feed as feed
-    from lib.provider_template_recipes import load_provider_templates
+    import lib.provider.provider_template_feed as feed
+    from lib.provider.provider_template_recipes import load_provider_templates
 
     captured = {}
     sentinel = {'version': 2}
@@ -270,7 +270,7 @@ def test_loader_passes_static_overrides_to_the_feed_exclusion(
 
 
 def test_every_shared_builtin_compiles_an_onboarding_bundle():
-    from lib.provider_template_recipes import load_provider_templates
+    from lib.provider.provider_template_recipes import load_provider_templates
 
     for row in load_provider_templates():
         recipes = row['offering_recipes']
@@ -315,7 +315,7 @@ def test_meituan_v41_identity_keeps_its_v4_wire_names():
 
 
 def test_compiled_offerings_follow_their_model_authority():
-    from lib.provider_template_recipes import load_provider_templates
+    from lib.provider.provider_template_recipes import load_provider_templates
     for template in load_provider_templates():
         if template.get('category') == 'local':
             continue

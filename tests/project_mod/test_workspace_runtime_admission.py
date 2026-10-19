@@ -67,7 +67,7 @@ def test_runtime_setup_fds_fence_children_without_blocking_file_edits(repo):
     try:
         with leases.workspace_runtime_setup_lease(repo):
             fds = leases.workspace_lease_fds()
-            assert len(fds) == 2
+            assert len(fds) >= 2  # Setup identity plus inherited lifecycle barriers.
             with leases.workspace_runtime_setup_lease(repo):
                 assert leases.workspace_lease_fds() == fds
             child = subprocess.Popen(

@@ -1,0 +1,5 @@
+{
+  "description": "A parseable write call arrives without provider completion. The real root loop retries before executing it, executes only the verified retry, and retains usage for every attempt.",
+  "recorded_at": "2026-10-19",
+  "mode": "replay"
+}

@@ -4,8 +4,8 @@ import sqlite3
 
 import pytest
 
-from lib.storage_sidecar.tofudb_migration_coverage import source_table_coverage
-from lib.storage_sidecar.tofudb_migration_source import MigrationSourceError, SQLiteMigrationSource
+from lib.storage_authority_sql.migration.tofudb_migration_coverage import source_table_coverage
+from lib.storage_authority_sql.migration.tofudb_migration_source import MigrationSourceError, SQLiteMigrationSource
 
 pytestmark = pytest.mark.unit
 
@@ -30,7 +30,7 @@ def test_presence_does_not_load_large_body_or_ignore_internal_looking_names(tmp_
 
 
 def test_cli_refuses_unmapped_data_before_starting_native_target(tmp_path, monkeypatch, capsys):
-    from lib.storage_sidecar import tofudb_migration_import as importer
+    from lib.storage_authority_sql.migration import tofudb_migration_import as importer
 
     path = tmp_path / 'source.db'
     with sqlite3.connect(path) as connection:
@@ -62,7 +62,7 @@ def test_empty_unknown_table_is_reported_without_claiming_cutover(tmp_path):
 
 
 def test_import_rechecks_coverage_inside_its_own_source_snapshot(tmp_path):
-    from lib.storage_sidecar.tofudb_migration_import import import_sqlite_authority, MigrationImportError
+    from lib.storage_authority_sql.migration.tofudb_migration_import import import_sqlite_authority, MigrationImportError
 
     path = tmp_path / 'source.db'
     with sqlite3.connect(path) as connection:

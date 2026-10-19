@@ -142,6 +142,7 @@ class TestChildReceivesItsSlice:
         captured = {}
 
         def fake_create(parent, **kwargs):
+            captured['execution_limits']=kwargs.get('execution_limits')
             return {'id': 'child-1', 'config': {}, 'messages': [],
                     'usage': {'prompt_tokens': 3}}
         monkeypatch.setattr(
@@ -162,7 +163,7 @@ class TestChildReceivesItsSlice:
                          all_tools=[], model='m')
         result = agent.run()
         assert result.status == 'completed'
-        assert captured['child']['config']['executionLimits'] == {
+        assert captured['execution_limits'] == {
             'max_tokens': 5, 'max_tool_calls': 1, 'deadline': 4_000_000_000}
 
 

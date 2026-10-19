@@ -16,6 +16,24 @@ from lib.agent_core.worker_executor import (
 pytestmark = pytest.mark.unit
 
 
+def test_queue_wait_observer_failure_does_not_strand_job(monkeypatch):
+    from lib import observability
+
+    def fail_observation(*args, **kwargs):
+        raise RuntimeError('queue observation unavailable')
+
+    monkeypatch.setattr(observability, 'observe_executor_queue_wait', fail_observation)
+    executor = RecoverableAgentExecutor(
+        max_workers=1, queue_capacity=0, max_abandoned_workers=1)
+    try:
+        future = executor.submit(lambda: 42)
+        assert future.result(timeout=2) == 42
+        assert executor.resource_snapshot()['used'] == 0
+        assert executor.resource_snapshot()['completed'] == 1
+    finally:
+        executor.shutdown(wait=True)
+
+
 def test_idle_carrier_releases_completed_payload_without_cycle_collection():
     class Payload:
         pass

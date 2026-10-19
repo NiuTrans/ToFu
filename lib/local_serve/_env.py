@@ -12,17 +12,9 @@ never system-wide:
       logs/                 managed server logs (owned by _process.py)
       tmp/                  modelfiles and other launch scratch
 
-Budget
-------
-Two prechecks run before any byte is downloaded:
-
-* free space on the data volume must cover the engine's
-  ``ENGINE_SPECS[engine]['disk_need_bytes']`` (with 20% slack);
-* total bytes under ``data/local_serve/`` must stay within
-  ``TOFU_LOCAL_SERVE_BUDGET_GB`` (default **20 GiB** — owner-ratified).
-
-Both failures are structured dicts the agent relays verbatim; nothing here
-raises on a full disk.
+Disk observations are diagnostic. Installation and bounded-chunk downloads
+proceed without directory quotas or estimated-space admission; real network,
+filesystem and installer failures are returned by ensure_engine.
 
 Testability: every subprocess goes through an injectable ``runner``
 (``subprocess.run`` signature) and every download through an injectable
@@ -39,7 +31,7 @@ import urllib.request
 import zipfile
 
 from lib.log import get_logger
-from lib.runtime_paths import data_root
+from lib.runtime.runtime_paths import data_root
 
 from ._plan import ENGINE_SPECS
 
@@ -54,20 +46,11 @@ _LLAMACPP_LATEST_API = ('https://api.github.com/repos/ggml-org/llama.cpp/'
                         'releases/latest')
 _LLAMACPP_ASSET_SUBSTR = ('-bin-ubuntu-x64', '.zip')
 
-_DOWNLOAD_CAP_BYTES = 4 * (1 << 30)
 _DOWNLOAD_TIMEOUT = 1800
 _UV_INSTALL_TIMEOUT = 600
 _ENGINE_INSTALL_TIMEOUT = 5400   # vllm+torch is a multi-GB resolve; keep a ceiling
 
 _UV_ENV_NAMES = {'vllm', 'sglang'}
-
-
-def _budget_bytes() -> int:
-    try:
-        gb = float(os.environ.get('TOFU_LOCAL_SERVE_BUDGET_GB', '20'))
-    except (TypeError, ValueError):
-        gb = 20.0
-    return max(1, int(gb)) * (1 << 30)
 
 
 def serve_root() -> str:
@@ -76,63 +59,32 @@ def serve_root() -> str:
     return root
 
 
-def _tree_bytes(path: str) -> int:
-    total = 0
-    for dirpath, _dirnames, filenames in os.walk(path):
-        for name in filenames:
-            try:
-                total += os.path.getsize(os.path.join(dirpath, name))
-            except OSError:
-                continue
-    return total
-
-
 def check_disk_budget(engine: str, *, disk_free: int | None = None) -> dict:
-    """Precheck one engine's install against free space and the serve budget."""
+    """Compatibility entry point for disk diagnostics, never install admission."""
     spec = ENGINE_SPECS.get(engine)
     if spec is None:
         return {'ok': False, 'error': '未知引擎: %s' % engine}
-    need = spec['disk_need_bytes']
+    result = {'ok': True, 'need_bytes': spec['disk_need_bytes'],
+              'free_bytes': disk_free}
     if disk_free is None:
         try:
-            disk_free = shutil.disk_usage(serve_root()).free
-        except OSError as e:
-            return {'ok': False, 'error': '无法读取磁盘余量: %s' % e}
-    if disk_free < need * 1.2:
-        return {'ok': False,
-                'error': '磁盘余量不足：%s 安装约需 %.1f GiB，当前可用 %.1f GiB'
-                         % (spec['display'], need / (1 << 30),
-                            disk_free / (1 << 30))}
-    used = _tree_bytes(serve_root())
-    budget = _budget_bytes()
-    if used + need > budget:
-        return {'ok': False,
-                'error': '本地部署目录 %.1f GiB 将超出预算 %.1f GiB'
-                         '（TOFU_LOCAL_SERVE_BUDGET_GB 可调）；'
-                         '可先删除不再使用的引擎环境'
-                         % ((used + need) / (1 << 30), budget / (1 << 30))}
-    return {'ok': True, 'need_bytes': need, 'free_bytes': disk_free,
-            'used_bytes': used, 'budget_bytes': budget}
+            result['free_bytes'] = shutil.disk_usage(serve_root()).free
+        except OSError as exc:
+            result['disk_probe_error'] = str(exc)
+    return result
 
 
 # ─────────────────────────── helpers ───────────────────────────
 
 def _fetch(url: str, dest: str, timeout: int = _DOWNLOAD_TIMEOUT) -> None:
-    """Stream one URL to disk with a hard size cap. Raises on failure."""
+    """Stream one URL in bounded chunks; propagate actual network and I/O failures."""
     req = urllib.request.Request(url, headers={'User-Agent': 'tofu-local-serve'})
     with urllib.request.urlopen(req, timeout=timeout) as resp, \
             open(dest, 'wb') as out:
-        total = 0
         while True:
             chunk = resp.read(1 << 20)
             if not chunk:
                 break
-            total += len(chunk)
-            if total > _DOWNLOAD_CAP_BYTES:
-                out.close()
-                os.unlink(dest)
-                raise RuntimeError('下载超过 %d GiB 上限，已中止'
-                                   % (_DOWNLOAD_CAP_BYTES // (1 << 30)))
             out.write(chunk)
 
 
@@ -304,8 +256,7 @@ def engine_status(engine: str) -> dict:
 def ensure_engine(engine: str, *, log=None, runner=None, fetcher=None) -> dict:
     """Install *engine* when absent; returns ``{ok, error?, ...}``.
 
-    The disk budget is checked BEFORE any install, and an already-installed
-    engine short-circuits — this function is safe to call on every launch.
+    An already-installed engine short-circuits; safe to call on every launch.
     """
     spec = ENGINE_SPECS.get(engine)
     if spec is None:
@@ -314,9 +265,6 @@ def ensure_engine(engine: str, *, log=None, runner=None, fetcher=None) -> dict:
     if status.get('installed'):
         return {'ok': True, 'installed': False, 'binary': status['binary'],
                 'system': status.get('system', False)}
-    budget = check_disk_budget(engine)
-    if not budget['ok']:
-        return budget
     runner = runner or subprocess.run
     fetcher = fetcher or _fetch
     try:

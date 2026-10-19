@@ -98,7 +98,7 @@ class AcademicDiscovery:
         self.requests += 1
         if self.get_json:
             return self.get_json(url, params)
-        from lib.http_client import http_get
+        from lib.http_transport.client import http_get
         from tofu_search.search.vertical.semantic_scholar import _ss_headers
         # Fixed authorities only, no followed redirects or metadata-supplied URLs.
         if not (url.startswith(S2_BASE + '/') or url == CROSSREF_BASE):

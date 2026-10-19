@@ -1,270 +1,132 @@
-"""routes/api_v1/folders.py — Conversation folder CRUD.
+"""Sidebar folder preset HTTP adapters, delivered through the v4 route map.
 
-Folders are lightweight per-user organizational groups for conversations
-(``conv.settings.folderId`` is the link). Stored as a flat JSON array at
-``data/config/folders.json`` via :mod:`lib.json_store` (atomic + locked).
-
-Routes:
-  GET    /api/v1/folders                     — list all folders
-  POST   /api/v1/folders                     — create
-  PUT    /api/v1/folders/{folder_id}         — update fields
-  DELETE /api/v1/folders/{folder_id}         — remove
-  POST   /api/v1/folders/reorder             — bulk reorder by id list
+The repository lib/conversations/folders.py owns atomic records, owner checks,
+validation and revision fencing. Routes resolve identity, parse declared fields,
+and publish the existing folders_changed hint only after committed mutation.
+Legacy unowned personal records belong to the composition's bootstrap owner.
 """
-
 from __future__ import annotations
 
-import secrets
-import time
-
 from quart import Blueprint
-
-from lib.api_response import (
-    api_bad_request, api_created, api_not_found, api_ok,
-)
+from lib.api_response import api_conflict, api_created, api_not_found, api_ok
 from lib.config_dir import config_path as _config_path
-from lib.json_store import read_json, update_json_atomic
+from lib.conversations.folders import FolderRepository, FolderRevisionConflict
+from lib.identity import PERSONAL_USER_ID
 from lib.log import get_logger
 from lib.openapi import api_meta
-from lib.request_parser import optional_list, optional_str, parse_body
-
+from lib.request_parser import optional_list, parse_body
 from .auth import request_user_id, require_auth
 
 logger = get_logger(__name__)
-
 api_v1_folders_bp = Blueprint('api_v1_folders', __name__)
-
-
 _FOLDERS_PATH = _config_path('folders.json')
 
-
-def _read_folders() -> list[dict]:
-    data = read_json(_FOLDERS_PATH, default=[])
-    return data if isinstance(data, list) else []
-
-
-def _new_folder_id() -> str:
-    return 'f_' + hex(int(time.time() * 1000))[2:] + secrets.token_hex(2)
+# Composition-level legacy migration, never an inferred request/record owner.
+def _repository() -> FolderRepository:
+    return FolderRepository(_FOLDERS_PATH, legacy_owner_user_id=PERSONAL_USER_ID)
 
 
-def _notify_folders_changed(*, deleted_folder_id: str | None = None,
-                            user_id: int) -> None:
-    """Push a real-time ``folders_changed`` frame to connected clients.
-
-    Folders are NOT a ``conversations`` row, so this does NOT reuse
-    ``notify_conv_changed`` (which would fake a ``conv_changed`` frame). Instead
-    it emits a dedicated folder-scoped frame on the SAME ``notify`` channel the
-    conversation-sync subscription already listens on fleet-wide:
-
-        { type:'folders_changed', deletedFolderId?, userId }
-
-    The client refreshes the folder tree in place (mirroring the debounced
-    non-destructive sidebar pattern) and, when ``deletedFolderId`` is present,
-    unassigns local conversations off the removed folder on EVERY device — not
-    just the one that clicked delete.
-
-    Best-effort: a push failure never breaks the folder mutation (the periodic
-    poll + next refocus still reconcile).
-    """
+def _notify_folders_changed(*, deleted_folder_id: str | None = None, user_id: int) -> None:
     try:
         from lib.agent_core.events import build_push_frame
         from lib.agent_core.push import push_event
-        frame_fields = {'userId': user_id}
+        fields = {'userId': user_id}
         if deleted_folder_id is not None:
-            frame_fields['deletedFolderId'] = deleted_folder_id
-        payload = build_push_frame('folders_changed', **frame_fields)
-        # taskId is a routing key only; folders aren't task-scoped, so a stable
-        # sentinel is fine — the client subscribes notify:* (channel-wide).
-        push_event('notify', '__folders__', payload, user_id=user_id)
-    except Exception as e:
-        logger.debug('[Folders] folders_changed push skipped: %s', e)
+            fields['deletedFolderId'] = deleted_folder_id
+        push_event('notify', '__folders__', build_push_frame('folders_changed', **fields), user_id=user_id)
+    except Exception as error:
+        logger.debug('[Folders] committed folder push skipped: %s', error)
 
 
+_ROOT_LIST_SCHEMA = {'type': 'array', 'items': {'type': 'string', 'minLength': 1, 'maxLength': 512}, 'maxItems': 32}
+_DEFAULT_PROPERTIES = {
+    'projectPath': {'type': 'string', 'maxLength': 512},
+    'projectPaths': _ROOT_LIST_SCHEMA,
+    'readOnlyPaths': _ROOT_LIST_SCHEMA,
+}
 _FOLDER_SCHEMA = {
-    'type': 'object',
-    'properties': {
-        'id': {'type': 'string'},
-        'name': {'type': 'string'},
-        'color': {'type': 'string'},
-        'collapsed': {'type': 'boolean'},
-        'order': {'type': 'integer'},
-        'createdAt': {'type': 'integer'},
-    },
-    'required': ['id', 'name'],
+    'type': 'object', 'properties': {
+        'id': {'type': 'string'}, 'name': {'type': 'string'},
+        'color': {'type': 'string'}, 'collapsed': {'type': 'boolean'},
+        'order': {'type': 'integer'}, **_DEFAULT_PROPERTIES,
+        'revision': {'type': 'integer', 'minimum': 0}, 'createdAt': {'type': 'integer'},
+    }, 'required': ['id', 'name'],
+}
+_WRITE_PROPERTIES = {
+    'name': {'type': 'string', 'minLength': 1, 'maxLength': 80},
+    'color': {'type': 'string', 'maxLength': 7, 'pattern': '^(?:#[0-9a-fA-F]{3}|#[0-9a-fA-F]{6})?$'}, **_DEFAULT_PROPERTIES,
 }
 
 
 @api_v1_folders_bp.route('/api/v1/folders', methods=['GET'])
 @require_auth
-@api_meta(
-    summary='List conversation folders',
-    description='Returns the full ordered folder list for the caller.',
-    tags=['conversations'],
-    responses={
-        '200': {'description': 'OK', 'content': {'application/json': {
-            'schema': {'type': 'object', 'properties': {
-                'ok': {'type': 'boolean'},
-                'items': {'type': 'array', 'items': _FOLDER_SCHEMA}}}}}},
-    },
-)
+@api_meta(summary='List conversation folders', tags=['conversations'], responses={
+    '200': {'description': 'Owner-visible confirmed folder presets', 'content': {'application/json': {
+        'schema': {'type': 'object', 'properties': {'ok': {'type': 'boolean'}, 'items': {'type': 'array', 'items': _FOLDER_SCHEMA}}}}}},
+})
 def list_folders():
-    # Coordinated bare-array migration (batch 19): array under ``items``;
-    # Api.folders.list unwraps with an Array.isArray fallback.
-    return api_ok({'items': _read_folders()})
+    return api_ok({'items': _repository().list(request_user_id())})
 
 
 @api_v1_folders_bp.route('/api/v1/folders', methods=['POST'])
 @require_auth
-@api_meta(
-    summary='Create a folder',
-    tags=['conversations'],
-    request_body={'required': True, 'content': {'application/json': {
-        'schema': {'type': 'object', 'required': ['name'], 'properties': {
-            'name': {'type': 'string', 'maxLength': 80},
-            'color': {'type': 'string', 'maxLength': 32}}}}}},
+@api_meta(summary='Create a folder', tags=['conversations'], request_body={
+    'required': True, 'content': {'application/json': {'schema': {
+        'type': 'object', 'required': ['name'], 'properties': _WRITE_PROPERTIES}}}},
+    responses={'201': {'description': 'Created confirmed preset', 'content': {'application/json': {'schema': _FOLDER_SCHEMA}}}},
 )
 def create_folder():
-    user_id = int(request_user_id())
-    body = parse_body(exact=('color', 'name',))
-    name = optional_str(body, 'name', default='', max_len=80).strip()
-    if not name:
-        return api_bad_request('Folder name is required', field='name')
-    color = optional_str(body, 'color', default='', max_len=32)
-
-    new_folder: dict = {}
-
-    def _mutate(folders):
-        if not isinstance(folders, list):
-            folders = []
-        new_folder.update({
-            'id': _new_folder_id(),
-            'name': name,
-            'color': color,
-            'collapsed': False,
-            'order': len(folders),
-            'createdAt': int(time.time() * 1000),
-        })
-        folders.append(new_folder)
-        return folders
-
-    update_json_atomic(_FOLDERS_PATH, _mutate, default=[])
-    logger.info('[Folders] created id=%s name=%r', new_folder['id'], name)
+    user_id = request_user_id()
+    body = parse_body(strict=True, exact=tuple(_WRITE_PROPERTIES))
+    created = _repository().create(user_id, body)
     _notify_folders_changed(user_id=user_id)
-    return api_created(new_folder)
+    return api_created(created)
 
 
 @api_v1_folders_bp.route('/api/v1/folders/<folder_id>', methods=['PUT'])
 @require_auth
-@api_meta(
-    summary='Update a folder',
-    description='Patch any subset of: name / color / collapsed / order.',
-    tags=['conversations'],
-    request_body={'required': True, 'content': {'application/json': {
-        'schema': {'type': 'object', 'properties': {
-            'name': {'type': 'string', 'maxLength': 80},
-            'color': {'type': 'string', 'maxLength': 32},
-            'collapsed': {'type': 'boolean'},
-            'order': {'type': 'integer'}}}}}},
+@api_meta(summary='Update project folder settings', tags=['conversations'], request_body={
+    'required': True, 'content': {'application/json': {'schema': {
+        'type': 'object', 'properties': {**_WRITE_PROPERTIES,
+            'collapsed': {'type': 'boolean'}, 'order': {'type': 'integer', 'minimum': 0},
+            'expectedRevision': {'type': 'integer', 'minimum': 0}}}}}},
+    responses={'200': {'description': 'Updated confirmed preset', 'content': {'application/json': {'schema': _FOLDER_SCHEMA}}},
+               '409': {'description': 'Settings revision changed; reload before applying draft'}},
 )
 def update_folder(folder_id):
-    user_id = int(request_user_id())
-    body = parse_body(exact=('collapsed', 'color', 'name', 'order',))
-    found: list[dict] = []
-
-    def _mutate(folders):
-        if not isinstance(folders, list):
-            folders = []
-        for f in folders:
-            if f.get('id') == folder_id:
-                if 'name' in body:
-                    new_name = optional_str(body, 'name', default='',
-                                            max_len=80).strip()
-                    if new_name:
-                        f['name'] = new_name
-                if 'color' in body:
-                    f['color'] = optional_str(body, 'color', default='',
-                                              max_len=32)
-                if 'collapsed' in body:
-                    f['collapsed'] = bool(body['collapsed'])
-                if 'order' in body:
-                    try:
-                        f['order'] = int(body['order'])
-                    except (TypeError, ValueError) as e:
-                        logger.debug('[Folders] bad order=%r: %s',
-                                     body['order'], e)
-                found.append(f)
-                break
-        return folders
-
-    update_json_atomic(_FOLDERS_PATH, _mutate, default=[])
-    if not found:
+    user_id = request_user_id()
+    body = parse_body(strict=True, exact=(*_WRITE_PROPERTIES, 'collapsed', 'order', 'expectedRevision'))
+    try:
+        updated = _repository().update(user_id, folder_id, body)
+    except FolderRevisionConflict as error:
+        return api_conflict(str(error))
+    if updated is None:
         return api_not_found('Folder not found')
-    logger.info('[Folders] updated id=%s name=%r', folder_id,
-                found[0].get('name'))
     _notify_folders_changed(user_id=user_id)
-    return api_ok(found[0])
+    return api_ok(updated)
 
 
 @api_v1_folders_bp.route('/api/v1/folders/<folder_id>', methods=['DELETE'])
 @require_auth
-@api_meta(
-    summary='Delete a folder',
-    description=(
-        'Removes the folder. Conversations referencing it via '
-        '``settings.folderId`` are not modified server-side; the '
-        'frontend unassigns them after the response.'
-    ),
-    tags=['conversations'],
-)
+@api_meta(summary='Delete a folder', tags=['conversations'],
+          description='Removes only this owner\'s folder grouping; conversation workspaces are unchanged.')
 def delete_folder(folder_id):
-    user_id = int(request_user_id())
-    deleted = {'flag': False}
-
-    def _mutate(folders):
-        if not isinstance(folders, list):
-            return []
-        kept = [f for f in folders if f.get('id') != folder_id]
-        deleted['flag'] = len(kept) != len(folders)
-        return kept
-
-    update_json_atomic(_FOLDERS_PATH, _mutate, default=[])
-    if not deleted['flag']:
+    user_id = request_user_id()
+    if not _repository().delete(user_id, folder_id):
         return api_not_found('Folder not found')
-    logger.info('[Folders] deleted id=%s', folder_id)
-    _notify_folders_changed(
-        deleted_folder_id=folder_id, user_id=user_id)
+    _notify_folders_changed(user_id=user_id, deleted_folder_id=folder_id)
     return api_ok()
 
 
 @api_v1_folders_bp.route('/api/v1/folders/reorder', methods=['POST'])
 @require_auth
-@api_meta(
-    summary='Reorder folders',
-    description='Pass the desired folder-id sequence; missing ids keep '
-                'their current relative order (placed after the listed ones).',
-    tags=['conversations'],
-    request_body={'required': True, 'content': {'application/json': {
-        'schema': {'type': 'object', 'required': ['order'],
-                    'properties': {
-                        'order': {'type': 'array',
-                                   'items': {'type': 'string'}}}}}}},
-)
+@api_meta(summary='Reorder folders', tags=['conversations'], request_body={
+    'required': True, 'content': {'application/json': {'schema': {
+        'type': 'object', 'required': ['order'], 'properties': {'order': {'type': 'array', 'items': {'type': 'string'}}}}}}})
 def reorder_folders():
-    user_id = int(request_user_id())
-    body = parse_body(exact=('order',))
-    order = optional_list(body, 'order', item_type=str, default=[]) or []
-
-    def _mutate(folders):
-        if not isinstance(folders, list):
-            return []
-        idx_map = {fid: i for i, fid in enumerate(order)}
-        for f in folders:
-            fid = f.get('id')
-            if fid in idx_map:
-                f['order'] = idx_map[fid]
-        return folders
-
-    update_json_atomic(_FOLDERS_PATH, _mutate, default=[])
+    user_id = request_user_id()
+    body = parse_body(strict=True, exact=('order',))
+    _repository().reorder(user_id, optional_list(body, 'order', item_type=str, default=[]) or [])
     _notify_folders_changed(user_id=user_id)
     return api_ok()
 

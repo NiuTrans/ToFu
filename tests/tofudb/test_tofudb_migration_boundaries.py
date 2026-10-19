@@ -12,12 +12,12 @@ from uuid import uuid4
 
 import pytest
 
-from lib.storage_sidecar import durability
-from lib.storage_sidecar.generated_tofudb_migration import MAX_CURSOR_BYTES, MAX_DOMAINS
-from lib.storage_sidecar.tofudb_migration_checkpoint import (
+from lib.storage_authority_sql import durability
+from lib.storage_authority_sql.migration.generated_tofudb_migration import MAX_CURSOR_BYTES, MAX_DOMAINS
+from lib.storage_authority_sql.migration.tofudb_migration_checkpoint import (
     MigrationBinding, MigrationCheckpoint, MigrationCheckpointError,
 )
-from lib.storage_sidecar.tofudb_migration_source import MigrationSourceError, SQLiteMigrationSource
+from lib.storage_authority_sql.migration.tofudb_migration_source import MigrationSourceError, SQLiteMigrationSource
 
 
 pytestmark = pytest.mark.unit
@@ -185,8 +185,8 @@ def test_process_exit_without_cleanup_resumes_verified_progress(tmp_path, bindin
     script = '''
 import json, os, sys
 from pathlib import Path
-from lib.storage_sidecar import durability
-from lib.storage_sidecar.tofudb_migration_checkpoint import MigrationBinding, MigrationCheckpoint
+from lib.storage_authority_sql import durability
+from lib.storage_authority_sql.migration.tofudb_migration_checkpoint import MigrationBinding, MigrationCheckpoint
 checkpoint = MigrationCheckpoint(Path(sys.argv[1]), MigrationBinding(**json.loads(sys.argv[2])))
 phase = sys.argv[3]
 original_sync, original_replace = os.fsync, os.replace

@@ -140,7 +140,7 @@ class PhantomEmptyBlockTest(unittest.TestCase):
                  if b['type'] == 'text']
         self.assertEqual(texts, ['<system-reminder>\nx\n</system-reminder>'])
 
-    def test_whitespace_only_blocks_and_strings_skipped(self):
+    def test_whitespace_only_blocks_fold_into_compatible_text(self):
         body = {'model': 'm', 'max_tokens': 8, 'messages': [
             {'role': 'system', 'content': [
                 {'type': 'text', 'text': 'sys'},
@@ -149,9 +149,9 @@ class PhantomEmptyBlockTest(unittest.TestCase):
                 {'type': 'text', 'text': '\n '},
                 {'type': 'text', 'text': 'hi'}]}]}
         a = openai_body_to_anthropic(body)
-        self.assertEqual(a['system'], 'sys')
+        self.assertEqual(a['system'], 'sys   ')
         self.assertEqual([b['text'] for b in a['messages'][0]['content']],
-                         ['hi'])
+                         ['\n hi'])
 
     def test_assistant_tool_calls_only_no_phantom_text(self):
         """content='' + tool_calls → only tool_use blocks (existing contract)."""

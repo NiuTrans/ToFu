@@ -515,12 +515,11 @@ def _validate_project_run(params):
         raise ProjectError(
             f'command blocked: catastrophic delete target {bad!r}')
     _check_delete_targets_within(command, root_real)
+    from lib.desktop_agent._exec import command_timeout
     try:
-        timeout = float(params.get('timeout', 300))
-    except (TypeError, ValueError) as _e:
-        logger.debug('validate project run: unexpected type/unparseable (%s)', _e)
-        timeout = 300.0
-    timeout = min(max(timeout, 1.0), 3600.0)
+        timeout = command_timeout(params.get('timeout'))
+    except ValueError as error:
+        raise ProjectError(str(error)) from error
     return {
         'command': command,
         'cwd': target,

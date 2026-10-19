@@ -1,0 +1,88 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "format",
+    "task_id",
+    "owner_user_id",
+    "model",
+    "componentsMicro",
+    "roundCount"
+  ],
+  "properties": {
+    "format": {
+      "const": "tofu.native-aggregate-cost/v1"
+    },
+    "task_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096
+    },
+    "owner_user_id": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "model": {
+      "type": "string",
+      "maxLength": 4096
+    },
+    "roundCount": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9223372036854775807
+    },
+    "componentsMicro": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "input",
+        "output",
+        "cache_read",
+        "cache_write",
+        "baseMicro",
+        "marginMicro",
+        "totalMicro"
+      ],
+      "properties": {
+        "input": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "output": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "cache_read": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "cache_write": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "baseMicro": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "marginMicro": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "totalMicro": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        }
+      }
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "tofu.native-aggregate-cost/v1",
+  "description": "Exact original actor costs with no wallet settlement authority. Native Goal takeover requires an immutable cost-only launch and absence of financial activity."
+}

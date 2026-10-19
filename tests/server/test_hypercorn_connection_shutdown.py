@@ -758,7 +758,7 @@ def test_http2_disconnected_reader_reclaims_connection_before_keepalive(tmp_path
     """Native SSE EOF must release layered producers and owned connection tasks."""
     from quart import jsonify
     from tofu_agent.server import HeadlessServerConfig,create_app
-    from lib.server_tls import ensure_tls_certificates
+    from lib.server.server_tls import ensure_tls_certificates
     from benchmarks.http_stream_lifecycle import StreamingRuntime,TOKEN,check
 
     async def scenario():

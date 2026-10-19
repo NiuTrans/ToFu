@@ -79,6 +79,7 @@ except (ValueError, TypeError) as _e:
 # Per-client tracking: client_id → {last_poll, first_seen, name}
 _clients = {}           # client_id → metadata dict
 _clients_lock = threading.Lock()
+_clients_changed = threading.Condition()
 
 # ── Locked-out fleet registry (2026-08-04, stranded-extension fix) ──
 # A poll that dies at the bridge-auth gate carries a stale/revoked

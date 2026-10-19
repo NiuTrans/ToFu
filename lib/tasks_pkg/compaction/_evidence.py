@@ -9,7 +9,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from lib.log import get_logger
-from lib.tool_history_pairing import adjacent_tool_call_result_pairs
+from lib.tool_results.tool_history_pairing import adjacent_tool_call_result_pairs
 
 
 logger = get_logger(__name__)

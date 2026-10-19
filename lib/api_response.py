@@ -523,17 +523,20 @@ def api_internal_error(exc: BaseException | str | None = None, *,
                 type(exc).__name__,
                 exc,
                 exc_info=(type(exc), exc, exc.__traceback__),
+                extra={'tofu_no_coalesce': True},
             )
         elif exc is not None:
             # Legacy callers still pass a string. Keep the detail in backend
             # evidence with the call stack, but never return it to the browser.
             logger.error(
                 '[api_internal_error] %s', exc, stack_info=True,
+                extra={'tofu_no_coalesce': True},
             )
         else:
             logger.error(
                 '[api_internal_error] generated without an attached cause',
                 stack_info=True,
+                extra={'tofu_no_coalesce': True},
             )
 
     if isinstance(exc, BaseException):

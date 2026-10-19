@@ -8,6 +8,8 @@ from typing import Any
 from lib.identity import PrincipalContext, require_user_id
 from lib.storage.errors import StorageError
 
+from .publication import KnowledgePublicationAttempt
+
 
 def _required_command_id(value: str, *, operation: str) -> str:
     command_id = str(value or "").strip()
@@ -39,18 +41,24 @@ class KnowledgeRepository:
     def _payload(self, **values) -> dict:
         return {"user_id": self.owner_user_id, **values}
 
-    def _command(self, operation: str, payload: Mapping, command_id: str):
+    def _command(self, operation: str, payload: Mapping, command_id: str, *,
+                 publication: KnowledgePublicationAttempt | None = None):
         """Replay one receipted command once after an ambiguous transport loss."""
         stable_command_id = _required_command_id(
             command_id, operation=operation)
+        def dispatch():
+            client = self._client(write=True)
+            request = dict(payload)
+            if publication is not None:
+                publication.begin_dispatch()
+            return client.command(operation, request, stable_command_id)
+
         try:
-            return self._client(write=True).command(
-                operation, dict(payload), stable_command_id)
+            return dispatch()
         except StorageError as exc:
             if not exc.retryable:
                 raise
-            return self._client(write=True).command(
-                operation, dict(payload), stable_command_id)
+            return dispatch()
 
     def documents(self) -> list[dict]:
         rows = self._client().query(
@@ -106,23 +114,27 @@ class KnowledgeRepository:
 
     def create_document(
         self, document: Mapping, *, command_id: str,
+        publication: KnowledgePublicationAttempt | None = None,
     ) -> tuple[dict, bool]:
         document_id = str(document.get("id") or "")
         result = self._command(
             "knowledge.document.create",
             self._payload(document_id=document_id, document=dict(document)),
             command_id,
+            publication=publication,
         )
         return dict(result["document"]), bool(result["created"])
 
     def replace_document(
         self, document: Mapping, *, command_id: str,
+        publication: KnowledgePublicationAttempt | None = None,
     ) -> dict | None:
         document_id = str(document.get("id") or "")
         result = self._command(
             "knowledge.document.replace",
             self._payload(document_id=document_id, document=dict(document)),
             command_id,
+            publication=publication,
         )
         return dict(result) if isinstance(result, Mapping) else None
 

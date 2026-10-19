@@ -45,7 +45,7 @@ def _swarm_base_dir() -> str:
     """Root dir holding all ``<task_id>/`` sub-agent log folders.
 
     Honours the ``TOFU_SWARM_OUTPUT_DIR`` override, else ``<data_root>/swarm``.
-    Uses ``lib.runtime_paths.data_root()`` — the single source of truth — so
+    Uses ``lib.runtime.runtime_paths.data_root()`` — the single source of truth — so
     these sub-agent logs co-locate with the DB under the resolved writable root,
     not the code tree (which a fresh source checkout may place on a different
     mount).
@@ -53,7 +53,7 @@ def _swarm_base_dir() -> str:
     if SWARM_OUTPUT_DIR:
         return SWARM_OUTPUT_DIR
     try:
-        from lib.runtime_paths import data_root
+        from lib.runtime.runtime_paths import data_root
         return os.path.join(data_root(), 'swarm')
     except Exception as e:  # pragma: no cover — defensive
         logger.warning('[swarm] runtime_paths.data_root() unavailable, '

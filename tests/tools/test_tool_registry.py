@@ -337,7 +337,7 @@ class TestMemoryExecutionDefaults(unittest.TestCase):
             ctx = _ctx(scheduler_enabled=flag)
             wire, _ = assemble_tool_list(ctx)
             self.assertIn('timer_create', _names(wire))
-            self.assertEqual(ctx.discovery_policy_by_name['timer_create'], 'eager')
+            self.assertEqual(ctx.discovery_policy_by_name['timer_create'], 'searchable')
             self.assertIn('timer_create', ctx.direct_wire_tool_names)
             self.assertEqual(ctx.discovery_policy_by_name['timer_manage'], 'searchable')
 
@@ -487,9 +487,8 @@ class TestLegacyShim(unittest.TestCase):
         # load_skill must remain authorized for an approved same-turn install.
         assert 'search_skills' in names
         assert 'load_skill' in names
-        # High-level production tools merely ride the search gate; the human
-        # did not explicitly select them, so they remain eligible for search.
-        assert 'produce_report' in _names(cfg['_executableToolCatalog'])
+        # Search enablement does not grant the separate production plugin.
+        assert 'produce_report' not in _names(cfg['_executableToolCatalog'])
         assert 'produce_report' not in pins
 
 

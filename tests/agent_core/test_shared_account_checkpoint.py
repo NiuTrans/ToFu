@@ -71,6 +71,39 @@ def test_any_prior_admission_refuses_credit_reset():
     with pytest.raises(ValueError,match='pristine'):account.restore_shared_account(snapshot,owner=7,task=task,counter_policy=PROFILE)
 
 
+@pytest.mark.parametrize('fault',[None,'missing_authority','changed_usage','changed_tokens','prior_admission','child_usage'])
+def test_hydrated_paid_usage_reconciles_once_without_resetting_credit(fault):
+    task,account=fresh()
+    usage={'prompt_tokens':20,'completion_tokens':30}
+    lease=account.reserve_model(task,input_tokens=20,max_output_tokens=30)
+    lease.mark_dispatched();lease.settle(usage)
+    snapshot=capture(task,account)
+    task,account=fresh()
+    task['usage']=dict(usage)
+    task['_checkpointUsage']=dict(usage)
+    if fault=='missing_authority':task.pop('_checkpointUsage')
+    elif fault=='changed_usage':task['usage']['completion_tokens']+=1
+    elif fault=='changed_tokens':snapshot['tokens']+=1
+    elif fault=='prior_admission':
+        lease=account.reserve_model(task,input_tokens=1,max_output_tokens=1)
+        lease.settle(unsent=True)
+    elif fault=='child_usage':account._settled_tokens=1
+    before=account.consumption_snapshot()
+    if fault is not None:
+        with pytest.raises(ValueError,match='pristine'):
+            account.restore_shared_account(snapshot,owner=7,task=task,counter_policy=PROFILE)
+        assert account.consumption_snapshot()==before
+    else:
+        account.restore_shared_account(snapshot,owner=7,task=task,counter_policy=PROFILE)
+        assert account.consumption_snapshot()==(50,0,True)
+        assert capture(task,account)==snapshot
+        with pytest.raises(ValueError,match='pristine'):
+            account.restore_shared_account(snapshot,owner=7,task=task,counter_policy=PROFILE)
+        lease=account.reserve_model(task,input_tokens=10,max_output_tokens=100)
+        assert lease.max_output_tokens==40 and lease.ordinal==2
+        lease.settle(unsent=True)
+
+
 def test_pending_tool_intent_refuses_capture_until_return_and_restores_ordinal():
     task,account=fresh()
     account.bind_model_attempt_observer(lambda event: None,tool_observer=lambda event: None)
@@ -83,3 +116,41 @@ def test_pending_tool_intent_refuses_capture_until_return_and_restores_ordinal()
     task,account=restored(snapshot)
     assert account.tool_calls_for_control(task)==1
     assert account.consumption_snapshot()==(0,1,True)
+
+
+def test_proved_pending_tool_consumption_never_recreates_budget_or_changes_model_cost():
+    task, account = fresh()
+    snapshot = capture(task, account)
+    task, account = restored(snapshot)
+    account.reconcile_pending_tools(snapshot, owner=7, task=task, count=2)
+    after = capture(task, account)
+    assert after == dict(snapshot, tool_calls=2, control_tool_calls=2)
+    assert task['_executionToolsAdmitted'] == 2
+    with pytest.raises(ValueError, match='exact'):
+        account.reconcile_pending_tools(snapshot, owner=7, task=task, count=2)
+    assert account.reserve_tool(task) is None
+    assert account.reserve_tool(task) == 'execution_tool_budget_exhausted'
+
+
+@pytest.mark.parametrize('fault', ['count', 'owner', 'overspend', 'observer', 'not_restored'])
+def test_pending_tool_consumption_refuses_unproven_or_changed_account(fault):
+    task, account = fresh()
+    if fault == 'observer':
+        account.bind_model_attempt_observer(lambda event: None, tool_observer=lambda event: None)
+    snapshot = capture(task, account)
+    if fault not in {'observer', 'not_restored'}:
+        task, account = restored(snapshot)
+    with pytest.raises(ValueError):
+        account.reconcile_pending_tools(snapshot, owner=8 if fault=='owner' else 7, task=task,
+            count=True if fault=='count' else 4 if fault=='overspend' else 1)
+    assert capture(task, account) == snapshot
+
+
+def test_unknown_pending_tools_remain_incomplete_and_cannot_spend_as_zero():
+    task, account = fresh()
+    snapshot = capture(task, account)
+    task, account = restored(snapshot)
+    account.refuse_pending_tool_recovery(snapshot, owner=7, task=task)
+    assert account.consumption_snapshot() == (0, 0, False)
+    with pytest.raises(ModelBudgetExceeded):
+        account.reserve_model(task, input_tokens=1, max_output_tokens=1)

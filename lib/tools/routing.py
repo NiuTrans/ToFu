@@ -200,9 +200,6 @@ _STICKY_STATE: OrderedDict[str, dict[str, Any]] = OrderedDict()
 _STICKY_LOCK = threading.Lock()
 
 
-def _sticky_state_capacity() -> int:
-    from lib.tools.resource_policy import tool_routing_sticky_state_capacity
-    return tool_routing_sticky_state_capacity()
 
 
 def _union_conversation_sticky(ctx: Any, selected: set[str]) -> set[str]:
@@ -227,9 +224,6 @@ def _union_conversation_sticky(ctx: Any, selected: set[str]) -> set[str]:
             _STICKY_STATE.popitem(last=False)
         state = _STICKY_STATE.pop(key, None)
         if state is None:
-            capacity = max(1, int(_sticky_state_capacity()))
-            while len(_STICKY_STATE) >= capacity:
-                _STICKY_STATE.popitem(last=False)
             state = {'keys': set(), 'touched': now}
         union = set(state['keys']) | set(selected)
         state['keys'] = union

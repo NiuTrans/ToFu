@@ -208,11 +208,6 @@ def flow_structured_result_meta(fn_name: str, results) -> dict:
     return {key: _sanitize_flow_public_value(meta[key])
             for key in keys if key in meta}
 
-try:
-    SWARM_MAX_429_ATTEMPTS = int(os.environ.get('TOFU_SWARM_MAX_429_ATTEMPTS', '') or 120)
-except (TypeError, ValueError, OverflowError):
-    SWARM_MAX_429_ATTEMPTS = 120
-SWARM_MAX_429_ATTEMPTS = max(1, min(4096, SWARM_MAX_429_ATTEMPTS))
 _PRESENCE_EDIT_ACTIONS = {'write_file': 'written', 'edit_file': 'edited',
     'apply_diff': 'patched', 'apply_diffs': 'patched', 'insert_content': 'inserted',
     'insert_contents': 'inserted'}
@@ -223,6 +218,9 @@ SWARM_OUTPUT_LOG_BUFFER_BYTES = 16 * 1024
 
 class SubAgent:
     """Runnable scheduler leaf; the shared invocation is its only executor."""
+
+
+    retry_owner = 'invocation'
 
     def __init__(self, spec: SubTaskSpec, *, parent_task: dict, all_tools: list,
                  system_prompt_base: str = '', model: str = '',
@@ -243,6 +241,12 @@ class SubAgent:
         self.tools = scope_tools_for_spec(spec, all_tools)
         if artifact_store is not None:
             self._inject_artifact_tools()
+
+        if spec.retained_agent_id:
+            # An implicit artifact helper cannot expand a narrowed assignment.
+            from lib.swarm.routing import tool_schema_name
+            selected = {tool_schema_name(tool) for tool in all_tools}
+            self.tools = [tool for tool in self.tools if tool_schema_name(tool) in selected]
         decision = (parent_task.get('config') or {}).get('_toolOrchestration') or {}
         if str(decision.get('multiAgent') or '').lower() == 'read_only':
             from lib.swarm.routing import read_only_swarm_tools
@@ -289,6 +293,9 @@ class SubAgent:
 
     def _message_binding(self):
         """Declared run identity for both recovery projection and allocation."""
+
+        if getattr(self, '_assignment_message_binding', None) is not None:
+            return copy.deepcopy(self._assignment_message_binding)
         if (not self.swarm_key or self.parent_task.get('_transientRuntime')
                 or self.parent_task.get('_invocationStorageFree')):
             return None
@@ -526,18 +533,30 @@ class SubAgent:
                 if timeout_seconds <= 0:
                     raise TimeoutError('Invocation active-time allowance exhausted before resume')
             message_binding = self._message_binding()
+            role_policy = self._role_policy
+            if message_binding is not None:
+                from lib.swarm.team_messages import team_guidance
+                role_policy += team_guidance(message_binding)
             child = create_child_invocation(
                 self.parent_task, model=self.model, tools=self.tools,
                 objective=self.spec.objective, context=self.spec.context,
-                system_prompt=self._system_prompt, role_policy=self._role_policy,
+                system_prompt=self._system_prompt, role_policy=role_policy,
                 artifact_hint=self._artifact_hint,
                 project_path=self.project_path, thinking_enabled=self.thinking_enabled,
                 checkpoint_messages=self.messages, checkpoint_sink=self._save_checkpoint,
                 swarm_message_binding=message_binding,
                 checkpoint_result=recovered_result,
                 event_sink=self._on_invocation_event, abort_check=self.abort_check,
-                timeout_seconds=timeout_seconds, max_429_attempts=SWARM_MAX_429_ATTEMPTS)
+                timeout_seconds=timeout_seconds,
+                progress_beacon=self.progress_beacon, progress_key=self.spec.id,
+                execution_limits=self.spec.execution_limits)
             self._child = child
+            from lib.swarm.message_contract import worker_message_contracts
+            child['_invocationToolContracts'] = worker_message_contracts(
+                child.get('_invocationToolContracts') or {})
+
+            if self.spec.max_retries is not None:
+                child['config']['autoTurnRetryMax'] = self.spec.max_retries
 
             if message_binding is not None and child.get('_invocationStorageFree'):
                 child.pop('_swarmMessageBinding', None)
@@ -546,12 +565,6 @@ class SubAgent:
                 # authority. Keep two retained browser colleagues on the
                 # same owner/device from switching each other's implicit tab.
                 child['config']['browserWorkKey'] = self.spec.retained_agent_id
-            child['_invocationProgressBeacon'] = self.progress_beacon
-            child['_invocationProgressKey'] = self.spec.id
-            if self.spec.execution_limits:
-                # The child's own admission boundaries enforce its budget
-                # slice (inherit_child_config never forwards executionLimits).
-                child['config']['executionLimits'] = dict(self.spec.execution_limits)
             child['_tool_env'] = self._artifact_environment()
             child['_flow_phase'] = 'swarm-agent'
             with thread_progress_sink(self.progress_beacon, self.spec.id):
@@ -562,7 +575,7 @@ class SubAgent:
                 error = child['error']
                 self.result.error_message = str(error.get('detail') or error.get('message') or error) if isinstance(error, dict) else str(error)
         except Exception as error:
-            from lib.llm_errors import AbortedError
+            from lib.llm.llm_errors import AbortedError
             child = self._child or {}
             internal_stop = child.get('_invocationStopReason') in {'stalled', 'deadline'}
             cancelled = not internal_stop and not child.get('_invocationDeliveryError') and (
@@ -601,44 +614,62 @@ class SubAgent:
             self.result.total_tokens = usage.get('total_tokens', self.result.prompt_tokens + self.result.completion_tokens)
             self.result.cost_usd = usage.get('cost_usd', 0)
             self.result.elapsed_seconds = recovered_elapsed + time.monotonic() - start
+
+            self.result.retry_count = int(child.get('_auto_turn_retry_count') or 0)
             if child.get('_abort_reason') == 'server_shutdown':
                 self.result.status = 'interrupted'
                 self.result.recovery_reason = 'server_shutdown'
+            if self.result.status == 'cancelled' and getattr(self, '_swarm_parent_stopped', False):
+                self.result.recovery_reason = 'parent_stop'
             self.result.checkpoint_phase = child.get('_invocationCheckpointPhase') or self.result.checkpoint_phase
             if self._child is not None:
                 self.result.actuals_complete = not (child.get('_executionActualsComplete') is False
                     or child.get('_usageActualsIncomplete')
                     or self.result.checkpoint_phase == 'model_in_flight')
-            if self.spec.retained_agent_id and self.result.status != 'interrupted':
-                try:
-                    from lib.swarm.retained import complete_assignment
-                    from lib.tasks_pkg.manager import task_user_id
-                    saved = complete_assignment(
-                        user_id=task_user_id(self.parent_task),
-                        tenant_id=str(self.parent_task.get('_tenant_id') or ''),
-                        scope=self.spec.retained_scope,
-                        agent_id=self.spec.retained_agent_id,
-                        run_id=self.spec.retained_run_id,
-                        messages=self.messages,
-                        result=self.result.to_dict(),
-                    )
-                    if not saved:
+            try:
+                terminal_saved = False
+                terminal_outcome = (self.result.status, self.result.error_message)
+                if self.spec.retained_agent_id and self.result.status != 'interrupted':
+                    # The exact Swarm transcript is the durable witness. ACK it
+                    # before retained memory can reduce its working checkpoint.
+                    # Required-write failure skips memory publication entirely.
+                    if not self._checkpoint(final=True):
+                        raise RuntimeError('Retained settlement requires a durable Swarm checkpoint')
+                    terminal_saved = True
+                    try:
+                        from lib.swarm.retained import complete_assignment
+                        from lib.tasks_pkg.manager import task_user_id
+                        saved = complete_assignment(
+                            user_id=task_user_id(self.parent_task),
+                            tenant_id=str(self.parent_task.get('_tenant_id') or ''),
+                            scope=self.spec.retained_scope,
+                            agent_id=self.spec.retained_agent_id,
+                            run_id=self.spec.retained_run_id,
+                            messages=self.messages,
+                            result=self.result.to_dict(),
+                            task=child,
+                        )
+                        if not saved:
+                            self.result.status = 'failed'
+                            self.result.error_message = (
+                                'Retained memory was reset or superseded before '
+                                'this run could save it')
+                    except Exception as error:
+                        # The worker may already have changed external state.
+                        # Surface lost durable memory rather than a green result.
                         self.result.status = 'failed'
                         self.result.error_message = (
-                            'Retained memory was reset or superseded before '
-                            'this run could save it')
-                except Exception as error:
-                    # The worker may already have changed external state.
-                    # Surface lost durable memory rather than a green result.
-                    self.result.status = 'failed'
-                    self.result.error_message = (
-                        'Work finished but retained memory could not be saved: '
-                        f'{type(error).__name__}')
-                    logger.error('[%s] retained memory commit failed',
-                                 self.agent_id, exc_info=True)
-            self._checkpoint(final=True)
-            self._presence_idle()
-            self._cleanup()
+                            'Work finished but retained memory could not be saved: '
+                            f'{type(error).__name__}')
+                        logger.error('[%s] retained memory commit failed',
+                                     self.agent_id, exc_info=True)
+                if (not terminal_saved or terminal_outcome !=
+                        (self.result.status, self.result.error_message)):
+                    # Preserve error publication if retained settlement fails.
+                    self._checkpoint(final=True)
+            finally:
+                self._presence_idle()
+                self._cleanup()
         return self.result
 
     def _cleanup(self) -> None:
@@ -652,6 +683,14 @@ class SubAgent:
 
     def _resolve_model(self, spec: SubTaskSpec, default_model: str) -> str:
         """Resolve override → evidence-backed role tier → parent model."""
+
+        if spec.retained_agent_id:
+            # Selection was resolved under this assignment's current route.
+            # Never re-resolve remembered role hints under the old session.
+            context = spec.retained_execution_context
+            if not isinstance(context, dict) or context.get('model') != default_model:
+                raise ValueError('Retained assignment has no resolved model authority')
+            return default_model
         if spec.model_override:
             return spec.model_override
         tier = get_role_model_hint(spec.role)
@@ -855,18 +894,20 @@ class SubAgent:
 
 
     def _checkpoint(self, *, final: bool = False):
-        """Persist this agent's resumable state to the DB (best-effort).
+        """Persist resumable state through the shared required-write lifecycle.
 
         Called at every round boundary (after the assistant message +
         tool results for the round are in ``self.messages``) and once more
         at run end. No-op unless ``self.swarm_key`` was set by the master.
-        Tool-intent persistence is required before dispatch; other snapshots
-        remain best-effort. A failed intent write cannot authorize execution.
+        Model/tool intent, ready receipts and terminal results require ACK.
+        Classified pressure waits on one frozen command; it never authorizes
+        another effect or restarts the agent.
         """
-        required = self.result.checkpoint_phase in ('tools_in_flight', 'model_in_flight', 'terminal_delivery')
+        required = final or self.result.checkpoint_phase in (
+            'ready', 'tools_in_flight', 'model_in_flight', 'terminal_delivery')
         if (not self.swarm_key or self.parent_task.get('_transientRuntime')
                 or self.parent_task.get('_invocationStorageFree')):
-            return
+            return False
         try:
             from lib.swarm import persistence
             status = self.result.status or SubAgentStatus.RUNNING.value
@@ -879,7 +920,11 @@ class SubAgent:
                 result=self.result.to_dict(),
                 rounds_used=self.result.rounds_used,
                 required=required,
+                task=self._child or self.context_task,
+                cancellable=not final,
             )
+
+            return True
         except Exception as e:
             logger.debug('[Agent:%s] checkpoint failed (non-fatal): %s',
                          self.agent_id, e)

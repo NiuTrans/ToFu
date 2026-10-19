@@ -36,14 +36,14 @@ def close_child_ingress(child):
 _INHERITED_CONFIG = frozenset({
     'projectPath', 'projectPaths', 'readOnlyPaths', 'canonicalProjectPath', 'canonicalProjectPaths',
     'workspaceRuntimeRoots', 'project_remote', 'browserClientId',
-    'runtimeScope', 'systemPromptMode', 'systemPromptBlocks',
+    'runtimeScope', 'systemPromptMode', 'systemPromptBlocks', '_storageFreeRuntime',
     'contextExperiments', 'contextPolicy', 'grantedToolPermissions',
-    'memoryEnabled', 'searchMode', 'fetchEnabled', 'codeExecEnabled',
+    'memoryEnabled', 'preferencesEnabled', 'searchMode', 'fetchEnabled', 'codeExecEnabled',
     'browserEnabled', 'desktopEnabled', 'imageGenEnabled', 'schedulerEnabled',
     'thinkingEnabled', 'thinkingDepth', 'defaultThinkingDepth', 'maxTokens', 'temperature',
     'enabledPlugins', 'toolApprovals', 'toolPermissions', 'planMode',
     'workspace', 'workspacePolicy', 'compaction', 'responseFormat', '_toolOrchestration',
-    'disableModelFallback', '_pinned_provider_id',
+    'disableModelFallback', 'disableAutoTurnRetry', 'autoTurnRetryMax', '_pinned_provider_id',
 })
 
 
@@ -57,7 +57,39 @@ def inherit_child_config(parent_config: dict, overrides: dict | None = None) -> 
                        if key in _INHERITED_CONFIG})
         config.update({product: copy.deepcopy(source[key]) for key, product in aliases.items()
                        if key in source})
+        # Carry explicit discovery/schema-cost policy, not tool visibility or
+        # execution-scope overrides. Child authority still has its own owner.
+        tools = source.get('tools')
+        for key in ('schemaBudgetTokens', 'toolSearch', 'programmaticCalling',
+                    'programmaticExposure', 'resultEnvelope'):
+            if isinstance(tools, dict) and key in tools:
+                config.setdefault('tools', {})[key] = copy.deepcopy(tools[key])
+            elif 'tools.' + key in source:
+                config.setdefault('tools', {})[key] = copy.deepcopy(source['tools.' + key])
     return config
+
+
+def delegated_tool_discovery_policy(parent: dict, tools: list) -> dict:
+    """Copy discovery metadata only for the child's already-authorized catalog."""
+    from lib.swarm.routing import tool_schema_name
+    names = {tool_schema_name(tool) for tool in tools}
+    source = {**(parent.get('config') or {}), **parent}
+    initial = source.get('_toolInitialVisibleNames')
+    if initial is None and isinstance(parent.get('_tool_schema'), list):
+        initial = [tool_schema_name(tool) for tool in parent['_tool_schema']]
+    policy = {}
+    if initial is not None:
+        catalog = source.get('_executable_tool_catalog', source.get('_executableToolCatalog', tools))
+        parent_names = {tool_schema_name(tool) for tool in catalog}
+        # New child-owned helpers (e.g. artifacts) are not inherited hidden tools.
+        policy['_toolInitialVisibleNames'] = sorted(names & (set(initial) | (names - parent_names)))
+    for key in ('_toolDiscoveryPolicyByName', '_executableToolNamespaceByName',
+                '_executableToolSearchTextByName'):
+        policy[key] = {name: copy.deepcopy(value)
+                       for name, value in (source.get(key) or {}).items() if name in names}
+    for key in ('_requiredDirectToolNames', '_frontendSelectedToolNames'):
+        policy[key] = [name for name in (source.get(key) or []) if name in names]
+    return policy
 
 
 def build_child_messages(*, objective: str, context: str = '', system_prompt: str = '',
@@ -121,6 +153,7 @@ _CONVERSATION_TOOL_POLICY_FIELDS = frozenset({
     '_toolScriptSafeByName', '_executableToolNamespaceByName',
     '_executableToolSearchTextByName', '_toolContractDocumentsByName',
     '_toolExposureTelemetry', '_frontendSelectedToolNames', '_toolNamespaceByName',
+    '_toolInitialVisibleNames', '_requiredDirectToolNames',
 })
 
 
@@ -139,6 +172,10 @@ def _conversation_tool_policy(parent: dict, tools: list) -> dict:
             policy.get('_toolContractDocumentsByName')
             or parent.get('_toolContractDocumentsByName')), namespace='invocation')
     policy['_toolSearchCatalogSize'] = len(policy['_executableToolCatalog'])
+    if isinstance(parent.get('_toolInitialVisibleNames'), list):
+        policy['_toolInitialVisibleNames'] = list(parent['_toolInitialVisibleNames'])
+    elif isinstance(parent.get('_tool_schema'), list):
+        policy['_toolInitialVisibleNames'] = [tool_schema_name(tool) for tool in parent['_tool_schema']]
     return policy
 
 
@@ -165,15 +202,26 @@ def resolve_child_config(parent: dict, *, model: str, project_path: str = '',
     if parent_ref is not None:
         parent_model = parent.get('model') or (parent.get('config') or {}).get('model')
         if model != parent_model:
+            from lib.tasks_pkg.native_invocation import NativePreparedInvocation
             from lib.model_routing import ModelRoutingError
-            raise ModelRoutingError(
-                'Child model override is outside the parent route selection',
-                kind='model_route_unavailable')
-        cfg['modelRef'] = copy.deepcopy(parent_ref)
+            from lib.tasks_pkg.native_parent import resolve_native_parent
+            native, execution_parent = resolve_native_parent(parent)
+            if not isinstance(native,NativePreparedInvocation):
+                raise ModelRoutingError(
+                    'Child model override is outside the parent route selection',
+                    kind='model_route_unavailable')
+            selected=native.resolve_child_model_selection(execution_parent,model)
+            cfg['modelRef']=selected.model.public_dict()
+        else:
+            cfg['modelRef'] = copy.deepcopy(parent_ref)
         for key in ('routing', 'preferredProviderId'):
             if key in (parent.get('config') or {}):
                 cfg[key] = copy.deepcopy(parent['config'][key])
         cfg.pop('_pinned_provider_id', None)
+        from lib.model_routing.domain import NativeModelSelection
+        selected=parent.get('_model_routing_selection')
+        if isinstance(selected,NativeModelSelection) and selected.preferred_provider_id:
+            cfg.setdefault('routing',{})['preferred_provider_id']=selected.preferred_provider_id
     # An unresolved preset must never silently select another model at prep.
     cfg['preset'] = ''
     cfg['effort'] = ''
@@ -211,6 +259,8 @@ def create_child_invocation(
     checkpoint_result: dict | None = None,
     timeout_seconds: float = 0,
     max_429_attempts: int | None = None,
+    progress_beacon=None, progress_key: str = '',
+    execution_limits: dict | None = None,
 ) -> dict:
     """Allocate a task-local carrier; borrow authority, never parent lifecycle."""
     from lib.identity import PrincipalContext
@@ -218,6 +268,8 @@ def create_child_invocation(
     task_user_id(parent)  # Validate the structured principal before allocation.
     if not parent.get('id') or not model:
         raise ValueError('Child invocation requires parent identity and resolved model')
+    from lib.tasks_pkg.requirement_source import requirement_source
+    requirements = requirement_source(parent)
     policy = InvocationPolicy.child(
         parent['id'], timeout_seconds=timeout_seconds, max_429_attempts=max_429_attempts)
     policy.validate()
@@ -238,6 +290,11 @@ def create_child_invocation(
     else:
         cfg = resolve_child_config(parent, model=model, project_path=project_path,
                                    thinking_enabled=thinking_enabled)
+
+    if execution_limits is not None:
+        from lib.agent_core.execution_limits import validate_execution_limits
+        validate_execution_limits(execution_limits)
+        cfg['executionLimits'] = copy.deepcopy(execution_limits)
 
     # Resolve execution locations only after declared/frozen input authority.
     # Isolation changes paths, never model routing, tools or delivery ownership.
@@ -276,10 +333,14 @@ def create_child_invocation(
         conversation_tool_policy = (
             copy.deepcopy(frozen_policy['conversation_tool_policy'])
             if frozen_policy is not None else _conversation_tool_policy(parent, tools))
+    from lib.tasks_pkg.native_parent import resolve_native_parent
+    native_parent, execution_parent = resolve_native_parent(parent)
+    native_child_owner=native_parent if native_parent is not None and (native_parent._transient or native_parent.pricing_resolver is not None) else None
     child = create_task(
         parent.get('convId') or '', messages, cfg,
         principal=PrincipalContext.from_payload(parent['_principalContext']),
-        supersede=False, transient=True)
+        supersede=False, transient=True,
+        **({'model_routing_repository':native_child_owner.repository} if native_child_owner is not None else {}))
     fence = ChildPublicationFence()
 
     def fenced_sink(event):
@@ -288,6 +349,7 @@ def create_child_invocation(
     child.update(
         _parentTaskId=parent['id'],
         _invocationTools=copy.deepcopy(tools),
+        _invocationToolDiscoveryPolicy=delegated_tool_discovery_policy(parent, tools),
         _invocationToolContracts=copy.deepcopy(
             frozen_policy['tool_contracts'] if frozen_policy is not None
             else parent.get('_toolContractDocumentsByName') or {}),
@@ -326,31 +388,63 @@ def create_child_invocation(
             child['_executionActualsComplete'] = False
     if repositories:
         child['_workspaceExecution'] = {'repositories': copy.deepcopy(repositories)}
-        child['_workspaceRootPolicy'] = copy.deepcopy(ensure_execution_roots(parent))
+    parent_policy = ensure_execution_roots(parent)
+    if parent_policy is not None:
+        child['_workspaceRootPolicy'] = copy.deepcopy(parent_policy)
     if conversation_tool_policy is not None:
         child['_invocationConversationToolPolicy'] = conversation_tool_policy
     from lib.tasks_pkg.invocation_registration import register_child_invocation, storage_free_parent
     child['_invocationStorageFree'] = storage_free_parent(parent)
     child['_inspectorTaskId'] = f'{parent["id"]}#agent:{child["id"]}'
 
-    from lib.agent_core.execution_budget import inherit_execution_budget,close_execution_budget
+    if policy.timeout_seconds:
+        import time
+        child['_invocationDeadline'] = time.monotonic() + policy.timeout_seconds
+    if progress_beacon is not None:
+        child['_invocationProgressBeacon'] = progress_beacon
+        child['_invocationProgressKey'] = progress_key or child['id']
+
+    from lib.agent_core.execution_budget import inherit_execution_budget
     try:
+        if requirements is not None:
+            child['_turnRequirementSource'] = requirements.validate(child)
         inherit_execution_budget(parent, child)
         register_child_invocation(child, parent,discard_on_failure=False)
-    except BaseException:
-        from lib.tasks_pkg.manager import reject_unstarted_chat_task
+        if native_child_owner is not None:
+            native_child_owner.bind_transient_child(child, parent_task_id=parent['id'], parent_task=execution_parent)
+    except BaseException as primary:
         from lib.log import get_logger
         logger=get_logger(__name__)
-        try:close_child_ingress(child)
-        except Exception:logger.exception('Rejected child ingress cleanup failed')
-        try:close_execution_budget(child)
-        except Exception:logger.exception('Rejected child budget cleanup failed')
         try:
-            reject_unstarted_chat_task(child,'Child budget or registration admission failed',
-                cause='child_admission_failed',conv_id=child.get('convId') or '')
-        except Exception:logger.exception('Rejected child terminal cleanup failed')
+            close_unstarted_child_invocation(child, reason='Child budget or registration admission failed',
+                cause='child_admission_failed')
+        except BaseException as cleanup:
+            primary.add_note('Rejected child cleanup failed: '+type(cleanup).__name__)
+            logger.exception('Rejected child cleanup failed')
         raise
     return child
+
+
+def close_unstarted_child_invocation(child: dict, *, reason: str,
+                                    cause: str = 'child_preparation_cancelled') -> None:
+    """Release an unused prepared child through the ordinary settlement owner."""
+    from lib.agent_core.execution_budget import close_execution_budget
+    from lib.agent_core.execution_session import execution_session_for_task
+    from lib.tasks_pkg.manager import reject_unstarted_chat_task
+    if execution_session_for_task(child).dispatch_started:
+        raise ValueError('A dispatched child must close through its invocation owner')
+    failures = []
+    for cleanup in (
+            lambda: reject_unstarted_chat_task(child, reason,
+                cause=cause, conv_id=child.get('convId') or ''),
+            lambda: close_child_ingress(child),
+            lambda: close_execution_budget(child)):
+        try:
+            cleanup()
+        except BaseException as error:
+            failures.append(error)
+    if failures:
+        raise BaseExceptionGroup('Unstarted child cleanup failed', failures)
 
 
 def run_child_invocation(child: dict, *, before_dispatch=None) -> dict:
@@ -379,9 +473,19 @@ def run_child_invocation(child: dict, *, before_dispatch=None) -> dict:
             # Required durable admission, after preparation and
             # before the invocation can enter any model/tool work. Failure
             # follows the same ingress, budget and registry cleanup as execution.
+            from contextlib import nullcontext
+            native = child.get('_nativePreparedInvocation')
+            admission = nullcontext()
             if before_dispatch is not None:
-                before_dispatch()
-            execute_invocation(child, policy=child['_invocationPolicy'])
+                if native is not None:
+                    from lib.tasks_pkg.native_invocation import NativePreparedInvocation
+                    if not isinstance(native, NativePreparedInvocation):
+                        raise ValueError('Child native admission requires an issued invocation')
+                    admission = native.admission_scope(child, before_dispatch)
+                else:
+                    before_dispatch()
+            with admission:
+                execute_invocation(child, policy=child['_invocationPolicy'])
 
         close_child_ingress(child)
         failure = child.get('_invocationDeliveryError')
@@ -404,8 +508,11 @@ def run_child_invocation(child: dict, *, before_dispatch=None) -> dict:
         child.pop('_invocationProgressKey', None)
         if owns_beacon:
             beacon.forget(progress_key)
+        if child.get('_nativePreparedInvocation') is not None:
+            from lib.mcp.tool_search import release_transient_task_selection
+            release_transient_task_selection(child)
         discard_task(child['id'])
 
 
 __all__ = ['create_child_invocation', 'run_child_invocation',
-           'commit_child_publication']
+           'commit_child_publication', 'close_unstarted_child_invocation']

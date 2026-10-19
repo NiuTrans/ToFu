@@ -115,3 +115,24 @@ def test_declared_huge_count_cannot_allocate_untrusted_history(runtime):
     header['receipt_archive']['count']=10**30
     with pytest.raises(EvolutionStateError,match='identity changed'):
         runs.get_run(run['run_id'],user_id=OWNER)
+
+
+def test_expanded_archived_history_does_not_refuse_next_stage(runtime):
+    import json
+    runs, store, run, version = long_run(runtime)
+    template = run['receipts'][0]
+    run['receipts'] = [{**deepcopy(template), 'task_id': f'past-stage-{i}'} for i in range(9000)]
+    run['actuals'] = {key: sum(row['actuals'][key] for row in run['receipts']) for key in run['actuals']}
+    version = runs._save(run, version, OWNER)
+    expanded, version = runs._read(run['run_id'], OWNER)
+    assert len(json.dumps(expanded).encode()) > records.MAX_RECORD_BYTES
+    before = len(runtime[2])
+    launched = runs._launch(expanded, version, OWNER, stage='executing')
+    assert launched['status'] == 'executing'
+    assert len(runtime[2]) == before + 1
+    stored = records.get_record(records.NAMESPACE_RUNS, runs._key(run['run_id'], OWNER))
+    assert len(stored['receipts']) <= 64
+    assert len(json.dumps(stored).encode()) < records.MAX_RECORD_BYTES
+    assert runs.get_run(run['run_id'], user_id=OWNER)['receipts'] == run['receipts']
+    pages=[value for (namespace,_),value in store.rows.items() if namespace==run_receipts.NAMESPACE]
+    print(f'expanded_receipts=9000 head_receipts={len(stored["receipts"])} head_bytes={len(json.dumps(stored).encode())} archive_pages={len(pages)} archive_bytes={sum(len(json.dumps(page).encode()) for page in pages)}')

@@ -68,12 +68,6 @@ def diagnose_failure(record: dict, log_tail: str = '') -> dict:
     engine = str((record or {}).get('engine') or '')
 
     # ── install stage ────────────────────────────────────────────────
-    if '将超出预算' in err or '磁盘余量不足' in err:
-        return _diag('disk_budget',
-                     '本地部署目录的磁盘预算不足，引擎环境装不下',
-                     ['删除不再使用的引擎环境（data/local_serve/envs/ 下）',
-                      '或调大 TOFU_LOCAL_SERVE_BUDGET_GB 后重新部署'],
-                     retryable=True)
     if 'No space left on device' in err or _any(_DISK_FULL_PATTERNS, tail):
         return _diag('disk_full',
                      '磁盘已写满，安装或模型加载中断',

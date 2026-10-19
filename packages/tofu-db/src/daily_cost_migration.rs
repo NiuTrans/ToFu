@@ -24,7 +24,7 @@ use crate::authority::{AuthorityDatabase, AuthorityTransaction};
 use crate::daily_cost::{upsert, valid_date, UpsertRequest};
 use crate::entity::EntityKey;
 use crate::generated_tofudb_ir::{
-    DAILY_COST_COUNT_NAMESPACE, DAILY_COST_DOCUMENT_NAMESPACE, MAX_DAILY_COST_DOCUMENT_BYTES,
+    DAILY_COST_COUNT_NAMESPACE, DAILY_COST_DOCUMENT_NAMESPACE,
     MIGRATION_SESSION_MAX_PAGE_ROWS,
 };
 
@@ -92,9 +92,6 @@ fn snapshot_value_json(request: &RestoreRequest) -> io::Result<Vec<u8>> {
         "computed_at": request.computed_at,
     }))
     .map_err(|_| invalid_input("daily cost document cannot be encoded"))?;
-    if value.len() > MAX_DAILY_COST_DOCUMENT_BYTES {
-        return Err(invalid_input("daily cost document exceeds its byte bound"));
-    }
     Ok(value)
 }
 
@@ -113,12 +110,13 @@ fn read_document(
     date: &str,
 ) -> io::Result<Option<(Vec<u8>, u64)>> {
     let key = document_key(transaction, date)?;
-    let Some(snapshot) = crate::versioned_document::read_snapshot(
+    let Some(snapshot) = crate::versioned_document::read_snapshot_bounded(
         database,
         transaction,
         &key,
         "daily_cost_cache",
         date,
+        usize::MAX,
     )?
     else {
         return Ok(None);

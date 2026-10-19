@@ -194,7 +194,7 @@ def test_corrupt_frozen_part_refuses_completion_after_successful_handler_ack(run
 @pytest.mark.parametrize('delivery_kind',['authored_text','artifact_source'])
 def test_real_registered_pipeline_root_close_and_owned_terminal_commit(persisted_runtime,tmp_path,monkeypatch,terminal_fault,delivery_kind):
     """Controlled provider payload; actual registered tool, root and native result CAS."""
-    from lib.agent_loop import run_agent_loop, AbortSignal
+    from lib.agent_loop.agent_loop import run_agent_loop, AbortSignal
     from lib.tasks_pkg.orchestrator._root_agent_loop import RootLoopRequest, _RootLoopHooks
     from lib.tasks_pkg.orchestrator._round_state import RoundState
     from lib.tasks_pkg.orchestrator._post_loop import finalize_after_loop
@@ -384,8 +384,8 @@ def test_source_ack_cannot_ignore_cancellation_consumption_or_corruption(runtime
         lease.settle(unsent=True)
 
 
-def test_source_delivery_preserves_the_existing_full_file_byte_bound(runtime,tmp_path):
-    content = 'A' * artifacts.MAX_FILE_BYTES
+def test_source_delivery_retains_complete_body_above_old_file_quota(runtime,tmp_path):
+    content = 'A' * (3 * 1024 * 1024) + 'complete tail 🧪'
     _,task,args,message,_ = source_request(runtime,tmp_path,content)
     prepared = delivery.prepare(task,args,call_id='delivery-call',round_num=0)
     assert acknowledge(task,args,message,prepared)[0]

@@ -2,8 +2,8 @@
  * tofu-ui modal dialog.
  *
  * Responsibility: promise-based modal built on the NATIVE <dialog> element —
- * focus trapping, Escape-to-close and top-layer rendering come from the
- * platform, so this module only adds structure (header/body/footer), a
+ * Escape-to-close and top-layer rendering come from the platform; an explicit
+ * boundary cycle prevents Tab from landing on the document body. Adds structure (header/body/footer), a
  * footer action row, and backdrop-click dismissal.
  * Entry points: createDialog.
  * Dependencies: createButton (button.ts); styles from 30-ui-kit.css.
@@ -21,6 +21,9 @@ export interface DialogAction {
 export interface DialogOptions {
   title: string;
   body: Node | string; // string is inserted as text, never as HTML
+
+  /** Project workbench chrome; default dialogs remain unchanged. */
+  appearance?: 'default' | 'project';
   actions?: DialogAction[]; // empty/omitted → single "OK"-less informational modal
   onClose?: (actionId: string | null) => void;
 }
@@ -36,6 +39,8 @@ export interface DialogHandle {
 export function createDialog(options: DialogOptions): DialogHandle {
   const el = document.createElement('dialog');
   el.className = 'ui-dialog';
+
+  if (options.appearance === 'project') el.classList.add('ui-dialog--project');
 
   const header = document.createElement('div');
   header.className = 'ui-dialog__header';
@@ -82,6 +87,23 @@ export function createDialog(options: DialogOptions): DialogHandle {
     }
     el.appendChild(footer);
   }
+
+  // Chromium's native modal cycle may briefly focus the document body after
+  // the last control. Keep keyboard users on the meaningful modal controls.
+  el.addEventListener('keydown', event => {
+    if (event.key !== 'Tab' || !el.open) return;
+    const controls = [...el.querySelectorAll<HTMLElement>('a[href],button,input,select,textarea,[tabindex]')]
+      .filter(node => node.tabIndex >= 0 && !node.matches(':disabled')
+        && !node.closest('[hidden],[inert]') && getComputedStyle(node).display !== 'none'
+        && getComputedStyle(node).visibility !== 'hidden');
+    const first = controls[0], last = controls.at(-1);
+    if (!first || !last) { event.preventDefault(); el.focus(); return; }
+    const active = document.activeElement;
+    if (event.shiftKey ? active === first || active === el || !el.contains(active)
+      : active === last || active === el || !el.contains(active)) {
+      event.preventDefault(); (event.shiftKey ? last : first).focus();
+    }
+  });
 
   // Native 'cancel' event = Escape key. 'close' fires for every dismissal
   // path; el.returnValue is '' for Escape and programmatic close().

@@ -28,6 +28,8 @@ from tofu_search.fetch import fetch_page_content
 from tofu_search.log import get_logger
 from tofu_search.providers import submit_with_provider_context
 from tofu_search.search.dedup import canonical_url_key
+from tofu_search.search.prefetch_gate import query_terms
+from tofu_search.search.quality import annotate_relevance, matches_site_constraints, site_scopes
 from tofu_search.search.rerank import _tokenize
 
 logger = get_logger(__name__)
@@ -57,6 +59,9 @@ def _harvest_links(results):
     """Pull (anchor, url) candidates from the link sections of fetched pages."""
     candidates = []
     for r in results:
+
+        if r.get('relevance') in ('weak_match', 'unverified'):
+            continue
         content = r.get('full_content') or ''
         idx = content.find(_LINKS_HEADER)
         if idx < 0:
@@ -94,14 +99,16 @@ def _score_candidate(query_terms: set, anchor: str, url: str) -> float:
 
 
 def deepen_results(query, results, *, max_links=4, max_chars=None,
-                   pdf_max_chars=None, fetch_workers=8):
+                   pdf_max_chars=None, fetch_workers=8, deadline_ts=None):
     """Fetch the most query-relevant outbound links one hop deeper.
 
     Returns a list of NEW result dicts (source='DeepCrawl') with
     ``full_content`` populated. Empty list when nothing worth fetching.
+    ``deadline_ts`` is an optional absolute ``time.monotonic()`` deadline;
+    pending results are not awaited past it and never mutate published results.
     """
-    t0 = time.time()
-    if not results:
+    t0 = time.monotonic()
+    if not results or max_links <= 0 or (deadline_ts is not None and t0 >= deadline_ts):
         return []
     cfg = get_config()
     if max_chars is None:
@@ -109,7 +116,8 @@ def deepen_results(query, results, *, max_links=4, max_chars=None,
     if pdf_max_chars is None:
         pdf_max_chars = cfg.fetch_max_chars_pdf
 
-    query_terms = set(_tokenize(query))
+    subject_terms = query_terms(query)
+    scopes = site_scopes(query)
     skip_domains = cfg.skip_domains
 
     visited = {_dedup_key(r['url']) for r in results if r.get('url')}
@@ -119,13 +127,16 @@ def deepen_results(query, results, *, max_links=4, max_chars=None,
     for cand in _harvest_links(results):
         url = cand['url']
         key = _dedup_key(url)
+
+        if not matches_site_constraints(url, scopes):
+            continue
         if key in visited or key in seen_cand:
             continue
         dom = _domain(url)
         if not dom or any(skip in dom for skip in skip_domains):
             continue
         seen_cand.add(key)
-        score = _score_candidate(query_terms, cand['anchor'], url)
+        score = _score_candidate(subject_terms, cand['anchor'], url)
         if score <= 0:
             continue
         scored.append((score, cand))
@@ -142,27 +153,51 @@ def deepen_results(query, results, *, max_links=4, max_chars=None,
     new_results = []
 
     def _do_fetch(cand):
-        url = cand['url']
-        content = fetch_page_content(url, max_chars=max_chars, pdf_max_chars=pdf_max_chars)
+        kwargs = {'max_chars': max_chars, 'pdf_max_chars': pdf_max_chars}
+        if deadline_ts is not None:
+            remaining = deadline_ts - time.monotonic()
+            if remaining <= 0:
+                return cand, None
+            per_url = cfg.fetch_url_deadline_secs
+            kwargs['deadline_secs'] = min(per_url, remaining) if per_url > 0 else remaining
+        content = fetch_page_content(cand['url'], **kwargs)
         return cand, content
 
-    with ThreadPoolExecutor(max_workers=min(fetch_workers, len(chosen))) as pool:
-        futs = [submit_with_provider_context(pool, _do_fetch, c) for c in chosen]
-        for fut in as_completed(futs):
+    pool = ThreadPoolExecutor(max_workers=max(1, min(fetch_workers, len(chosen))))
+    futs = []
+    timed_out = False
+    try:
+        for cand in chosen:
+            if deadline_ts is not None and time.monotonic() >= deadline_ts:
+                timed_out = True
+                break
             try:
-                cand, content = fut.result()
-            except Exception as e:
-                logger.warning('[Deepen] deeper fetch failed: %s', e, exc_info=True)
-                continue
-            if content and len(content) > 50:
-                new_results.append({
-                    'title': cand['anchor'][:200] or cand['url'],
-                    'snippet': '',
-                    'url': cand['url'],
-                    'source': 'DeepCrawl',
-                    'full_content': content,
-                })
+                futs.append(submit_with_provider_context(pool, _do_fetch, cand))
+            except Exception as exc:
+                logger.warning('[Deepen] fetch startup failed: %s', exc)
+        timeout = None if deadline_ts is None else max(0, deadline_ts - time.monotonic())
+        try:
+            for fut in as_completed(futs, timeout=timeout):
+                try:
+                    cand, content = fut.result()
+                except Exception as e:
+                    logger.warning('[Deepen] deeper fetch failed: %s', e, exc_info=True)
+                    continue
+                if content and len(content) > 50 and matches_site_constraints(cand['url'], scopes):
+                    result = {
+                        'title': cand['anchor'][:200] or cand['url'],
+                        'snippet': '',
+                        'url': cand['url'],
+                        'source': 'DeepCrawl',
+                        'full_content': content,
+                    }
+                    annotate_relevance(result, query)
+                    new_results.append(result)
+        except TimeoutError:
+            timed_out = True
+    finally:
+        pool.shutdown(wait=not timed_out, cancel_futures=True)
 
     logger.info('[Deepen] Fetched %d/%d deeper pages in %.1fs',
-                len(new_results), len(chosen), time.time() - t0)
+                len(new_results), len(chosen), time.monotonic() - t0)
     return new_results

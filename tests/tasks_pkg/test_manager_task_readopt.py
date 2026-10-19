@@ -250,6 +250,8 @@ def test_readopt_seeds_stale_attempt_fence_still_unwinds(
     import lib.turn_lifecycle as turn_lifecycle
     monkeypatch.setattr(turn_lifecycle, 'record_task_event',
                         lambda *a, **k: False)
+    monkeypatch.setattr(turn_lifecycle, 'get_attempt',
+                        lambda *a, **k: {'status': 'superseded', 'taskId': 'old-task'})
     task = _chat_task(
         't-readopt-stale',
         _turnId='turn-1',

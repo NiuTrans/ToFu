@@ -10,17 +10,17 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::engine::Engine;
+use crate::engine::{Engine, CommittedTransaction};
+use sha2::{Digest, Sha256};
 use crate::logical_outbox::{SealedLogicalOutboxRecord, MAX_ENCODED_LOGICAL_OUTBOX_BYTES};
 use crate::outbox_publisher::{DurableLogicalOutboxReceipt, LogicalOutboxSink};
 use crate::vfs::Vfs;
-use crate::ACTIVE_LOG_MAX_BYTES;
 
 const MAGIC: &[u8; 8] = b"TDBSNK01";
 const VERSION: u32 = 1;
+const BLOCK_ENTRY_MAGIC: &[u8; 8] = b"TDBSNKB1";
+const BLOCK_ENTRY_DESCRIPTOR_BYTES: usize = 8 + 8 + 32;
 const HEADER_BYTES: usize = 8 + 4 + 8 + 8 + 8 + 32 + 8 + 4;
-pub(crate) const MIN_FREE_RESERVE_BYTES: u64 = 2 * ACTIVE_LOG_MAX_BYTES;
-pub const MAX_SINK_LOGICAL_BYTES: u64 = 1024 * 1024 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct EngineLogicalOutboxSinkStatus {
@@ -60,8 +60,6 @@ pub struct EngineLogicalOutboxSink {
     tenant_id: u64,
     owner_user_id: u64,
     logical_bytes: u64,
-    max_logical_bytes: u64,
-    real_capacity_path: Option<PathBuf>,
 }
 
 fn invalid_input(message: &str) -> io::Error {
@@ -72,49 +70,25 @@ fn invalid_data(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
 }
 
-fn storage_full(message: &str) -> io::Error {
-    io::Error::new(io::ErrorKind::StorageFull, message)
-}
-
 fn validate_configuration(
     tenant_id: u64,
     owner_user_id: u64,
-    max_logical_bytes: u64,
+    _legacy_max_bytes: u64,
 ) -> io::Result<()> {
     if tenant_id == 0
         || owner_user_id == 0
-        || max_logical_bytes < HEADER_BYTES as u64 + 1
-        || max_logical_bytes > MAX_SINK_LOGICAL_BYTES
     {
         return Err(invalid_input("invalid logical outbox sink configuration"));
     }
     Ok(())
 }
 
-pub(crate) fn preflight_real_capacity(path: &Path, max_logical_bytes: u64) -> io::Result<()> {
+pub(crate) fn preflight_real_capacity(path: &Path, _legacy_bytes: u64) -> io::Result<()> {
     if !path.is_absolute() {
         return Err(invalid_input("logical outbox sink path must be absolute"));
     }
-    let probe = if path.exists() {
-        path
-    } else {
-        path.parent()
-            .ok_or_else(|| invalid_input("logical outbox sink has no parent volume"))?
-    };
-    assess_capacity(max_logical_bytes, fs2::available_space(probe)?)?;
+    // No guessed free-space reservation: real engine I/O owns ENOSPC.
     Ok(())
-}
-
-pub(crate) fn assess_capacity(max_logical_bytes: u64, available_bytes: u64) -> io::Result<u64> {
-    let required = max_logical_bytes
-        .checked_add(MIN_FREE_RESERVE_BYTES)
-        .ok_or_else(|| invalid_input("logical outbox sink capacity overflow"))?;
-    if available_bytes < required {
-        return Err(storage_full(
-            "logical outbox sink volume lacks configured capacity and recovery reserve",
-        ));
-    }
-    Ok(required)
 }
 
 impl SinkEntry {
@@ -194,6 +168,40 @@ impl SinkEntry {
     }
 }
 
+fn decode_transaction_entry(engine: &Engine, transaction: &CommittedTransaction) -> io::Result<SinkEntry> {
+    let inline = &transaction.envelope.inline_payload;
+    if inline.starts_with(MAGIC) {
+        if !transaction.envelope.block_ids.is_empty() {
+            return Err(invalid_data("inline logical outbox entry unexpectedly references blocks"));
+        }
+        return SinkEntry::decode(inline);
+    }
+    if inline.len() != BLOCK_ENTRY_DESCRIPTOR_BYTES || !inline.starts_with(BLOCK_ENTRY_MAGIC)
+        || transaction.envelope.block_ids.is_empty() {
+        return Err(invalid_data("invalid logical outbox block entry descriptor"));
+    }
+    let expected = usize::try_from(u64::from_le_bytes(inline[8..16].try_into().unwrap()))
+        .map_err(|_| invalid_data("logical outbox block entry length is unrepresentable"))?;
+    if expected <= crate::transaction::MAX_INLINE_BYTES
+        || expected > HEADER_BYTES + MAX_ENCODED_LOGICAL_OUTBOX_BYTES {
+        return Err(invalid_data("logical outbox block entry length is invalid"));
+    }
+    let mut bytes = Vec::new();
+    for id in &transaction.envelope.block_ids {
+        let fragment = engine.read_block(*id)?;
+        if bytes.len().checked_add(fragment.len()).is_none_or(|length| length > expected) {
+            return Err(invalid_data("logical outbox fragments exceed declared length"));
+        }
+        bytes.try_reserve(fragment.len()).map_err(|error|
+            io::Error::other(format!("logical outbox record allocation failed: {error}")))?;
+        bytes.extend_from_slice(&fragment);
+    }
+    if bytes.len() != expected || Sha256::digest(&bytes).as_slice() != &inline[16..48] {
+        return Err(invalid_data("logical outbox block entry length or digest differs"));
+    }
+    SinkEntry::decode(&bytes)
+}
+
 impl EngineLogicalOutboxSink {
     pub fn initialize(
         data_dir: &Path,
@@ -209,8 +217,6 @@ impl EngineLogicalOutboxSink {
             tenant_id,
             owner_user_id,
             logical_bytes: 0,
-            max_logical_bytes,
-            real_capacity_path: Some(data_dir.to_owned()),
         })
     }
 
@@ -231,11 +237,6 @@ impl EngineLogicalOutboxSink {
             max_logical_bytes,
             Some(data_dir.to_owned()),
         )?;
-        let remaining_bytes = sink
-            .max_logical_bytes
-            .checked_sub(sink.logical_bytes)
-            .ok_or_else(|| invalid_data("logical outbox sink exceeds configured capacity"))?;
-        assess_capacity(remaining_bytes, fs2::available_space(data_dir)?)?;
         Ok(sink)
     }
 
@@ -253,8 +254,6 @@ impl EngineLogicalOutboxSink {
             tenant_id,
             owner_user_id,
             logical_bytes: 0,
-            max_logical_bytes,
-            real_capacity_path: None,
         })
     }
 
@@ -279,22 +278,16 @@ impl EngineLogicalOutboxSink {
         engine: Engine,
         tenant_id: u64,
         owner_user_id: u64,
-        max_logical_bytes: u64,
-        real_capacity_path: Option<PathBuf>,
+        _legacy_max_bytes: u64,
+        _legacy_capacity_path: Option<PathBuf>,
     ) -> io::Result<Self> {
         let logical_bytes = match engine.transaction_at(engine.state().durable_sequence)? {
             None => 0,
             Some(transaction) => {
-                if !transaction.envelope.block_ids.is_empty() {
-                    return Err(invalid_data(
-                        "logical outbox sink transaction references blocks",
-                    ));
-                }
-                let entry = SinkEntry::decode(&transaction.envelope.inline_payload)?;
+                let entry = decode_transaction_entry(&engine, &transaction)?;
                 if entry.tenant_id != tenant_id
                     || entry.owner_user_id != owner_user_id
                     || entry.sequence != transaction.sequence
-                    || entry.cumulative_bytes > max_logical_bytes
                 {
                     return Err(invalid_data(
                         "logical outbox sink scope or capacity differs",
@@ -308,8 +301,6 @@ impl EngineLogicalOutboxSink {
             tenant_id,
             owner_user_id,
             logical_bytes,
-            max_logical_bytes,
-            real_capacity_path,
         })
     }
 
@@ -369,12 +360,7 @@ impl EngineLogicalOutboxSink {
             .engine
             .transaction_at(record.identity.sequence)?
             .ok_or_else(|| invalid_data("logical outbox sink sequence is missing"))?;
-        if !transaction.envelope.block_ids.is_empty() {
-            return Err(invalid_data(
-                "logical outbox sink transaction references blocks",
-            ));
-        }
-        let entry = SinkEntry::decode(&transaction.envelope.inline_payload)?;
+        let entry = decode_transaction_entry(&self.engine, &transaction)?;
         if entry.record_encoded != record.encode()? {
             return Err(invalid_data(
                 "logical outbox sink sequence contains another record",
@@ -411,18 +397,7 @@ impl LogicalOutboxSink for EngineLogicalOutboxSink {
         let next_logical_bytes = self
             .logical_bytes
             .checked_add(entry_bytes)
-            .filter(|bytes| *bytes <= self.max_logical_bytes)
-            .ok_or_else(|| storage_full("logical outbox sink reached its byte ceiling"))?;
-        if let Some(path) = &self.real_capacity_path {
-            let required = entry_bytes
-                .checked_add(MIN_FREE_RESERVE_BYTES)
-                .ok_or_else(|| invalid_input("logical outbox sink capacity overflow"))?;
-            if fs2::available_space(path)? < required {
-                return Err(storage_full(
-                    "logical outbox sink volume lacks append and recovery headroom",
-                ));
-            }
-        }
+            .ok_or_else(|| invalid_data("logical outbox sink byte counter overflow"))?;
         let entry = SinkEntry {
             tenant_id: self.tenant_id,
             owner_user_id: self.owner_user_id,
@@ -432,7 +407,16 @@ impl LogicalOutboxSink for EngineLogicalOutboxSink {
             record_encoded,
         }
         .encode()?;
-        let committed_sequence = self.engine.commit(&entry)?;
+        let committed_sequence = if entry.len() <= crate::transaction::MAX_INLINE_BYTES {
+            self.engine.commit(&entry)?
+        } else {
+            let mut descriptor = Vec::with_capacity(BLOCK_ENTRY_DESCRIPTOR_BYTES);
+            descriptor.extend_from_slice(BLOCK_ENTRY_MAGIC);
+            descriptor.extend_from_slice(&(entry.len() as u64).to_le_bytes());
+            descriptor.extend_from_slice(&Sha256::digest(&entry));
+            let fragments = entry.chunks(crate::block::MAX_BLOCK_BYTES).collect::<Vec<_>>();
+            self.engine.commit_transaction(&descriptor, &fragments)?.sequence
+        };
         if committed_sequence != record.identity.sequence {
             return Err(invalid_data(
                 "logical outbox sink committed another sequence",
@@ -535,7 +519,7 @@ mod tests {
     }
 
     #[test]
-    fn sink_rejects_gaps_cross_owner_records_and_capacity_overflow() {
+    fn sink_preserves_scope_and_gap_fences_without_capacity_refusal() {
         let vfs = prepared_vfs();
         let mut sink = initialized(vfs.clone());
         assert_eq!(
@@ -557,33 +541,29 @@ mod tests {
         let mut reopened =
             EngineLogicalOutboxSink::open_with_vfs(Path::new("/sink"), vfs, 7, 11, exact_capacity)
                 .unwrap();
-        assert_eq!(
-            reopened
-                .append_durable(&record(2, b"second"))
-                .unwrap_err()
-                .kind(),
-            io::ErrorKind::StorageFull
-        );
-    }
-
-    #[test]
-    fn capacity_preflight_reserves_two_active_log_windows() {
-        let configured = 1024 * 1024;
-        let required = configured + MIN_FREE_RESERVE_BYTES;
-        assert_eq!(assess_capacity(configured, required).unwrap(), required);
-        assert_eq!(
-            assess_capacity(configured, required - 1)
-                .unwrap_err()
-                .kind(),
-            io::ErrorKind::StorageFull
-        );
+        reopened.append_durable(&record(2, b"second")).unwrap();
+        assert!(reopened.status().logical_bytes > exact_capacity);
     }
 
     #[test]
     fn every_append_fault_recovers_an_empty_or_complete_sink_prefix() {
+        verify_append_fault_recovery(b"payload");
+    }
+
+    #[test]
+    fn every_block_append_fault_recovers_an_empty_or_complete_sink_prefix() {
+        verify_append_fault_recovery(&vec![37; crate::transaction::MAX_INLINE_BYTES + 1]);
+    }
+
+    #[test]
+    fn every_noncarried_multi_block_append_fault_recovers_complete_or_empty_prefix() {
+        verify_append_fault_recovery(&vec![37; crate::block::MAX_BLOCK_BYTES + 1]);
+    }
+
+    fn verify_append_fault_recovery(payload: &[u8]) {
         let baseline_vfs = prepared_vfs();
         let mut baseline = initialized(baseline_vfs.clone());
-        let first = record(1, b"payload");
+        let first = record(1, payload);
         baseline.append_durable(&first).unwrap();
         let trace = baseline_vfs.trace().unwrap();
         drop(baseline);

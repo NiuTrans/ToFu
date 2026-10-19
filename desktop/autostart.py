@@ -11,6 +11,7 @@ import sys
 import tempfile
 
 RUN_KEY = r'Software\Microsoft\Windows\CurrentVersion\Run'
+# Stable registry identity preserves existing startup settings across the rename.
 RUN_VALUE = 'TofuAgent'
 LABEL = 'com.tofu.agent'
 
@@ -87,7 +88,7 @@ def apply(choice):
         if '\n' in cwd or '\r' in cwd:
             raise ValueError('Autostart working directory contains a newline')
         cwd = cwd.replace('\\', '\\\\')
-        data = ('[Desktop Entry]\nType=Application\nName=Tofu Agent\n'
+        data = ('[Desktop Entry]\nType=Application\nName=Tofu Remote\n'
                 'Exec=' + command + '\nPath=' + cwd + '\nTerminal=false\n'
                 'X-GNOME-Autostart-enabled=true\n').encode('utf-8')
     target.parent.mkdir(parents=True, exist_ok=True)

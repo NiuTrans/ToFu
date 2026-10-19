@@ -166,7 +166,7 @@ def test_route_group_skips_one_uninitializable_candidate(monkeypatch):
             model={'creator_id': 'creator', 'model_id': f'model-{number}'},
             provider={'provider_id': f'provider-{number}'},
             provider_id=f'provider-{number}',
-            provider_access={},
+            provider_access={'provider_access_id': f'access-{number}'},
             offering={
                 'offering_id': f'offering-{number}',
                 'pending_model_id': '', 'capabilities': ['text'],
@@ -209,7 +209,7 @@ def test_route_group_skips_one_uninitializable_candidate(monkeypatch):
 
     class Repository:
         def get(self, boundary):
-            return SimpleNamespace(document={})
+            return SimpleNamespace(document={}, revision=1)
 
         def resolve_secret(self, boundary, reference):
             return ''

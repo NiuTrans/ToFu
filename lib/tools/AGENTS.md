@@ -21,6 +21,8 @@ Read `docs/modules/tools_execution.md`.
 - Bound inline output, artifacts, pagination/cursors, search candidates,
   subprocess streams, and retained diagnostics; redact secrets before events or
   persistence.
+- Optional bundled domains are declared in `lib/tools/optional_plugins.py` and
+  use the same plugin allow-list; they never add another execution loop.
 - `docs/contracts/TOOL_INVENTORY.md` is generated. Change the schema/registry owner and run
   `scripts/gen_tool_inventory.py`.
 
@@ -34,7 +36,7 @@ tool half-visible (callable but undocumented, or documented but unrouted):
    decorate it: `@tool_registry.handler('name', category=..., description=...)`
    (or `.special(...)` for synthetic/internal tools like `__code_exec__`).
 2. Declare the JSON schema/spec in the registry's spec owner
-   (`lib/tools/registry/_builtin_specs.py`) with capability, side-effect
+   (`lib/tools/registry/_build.py`, exported by `_builtin_specs.py`) with capability, side-effect
    class, approval requirement, timeout, and result budget.
 3. Regenerate the inventory: `python3 scripts/gen_tool_inventory.py`
    (drift-gated by `make contracts-check`).

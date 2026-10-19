@@ -1,0 +1,34 @@
+/* Source citations: supplied metadata only, with no remote thumbnail residency. */
+.rich-citation-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  padding-block: var(--space-2);
+}
+.rich-citation-chip {
+  display: inline-flex;
+  max-width: 100%;
+  vertical-align: baseline;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-secondary);
+  overflow-wrap: anywhere;
+}
+.rich-citation-preview {
+  min-width: 0;
+  max-width: 100%;
+  font-size: var(--font-size-md);
+  line-height: var(--leading-body);
+  overflow-wrap: anywhere;
+}
+.rich-citation-preview p,
+.rich-citation-preview blockquote {
+  margin: 0 0 var(--space-3);
+  white-space: pre-wrap;
+}
+.rich-citation-preview a {
+  display: block;
+  color: var(--accent);
+  margin-bottom: var(--space-4);
+}
+.rich-citation-preview a:focus-visible { box-shadow: var(--focus-ring); }

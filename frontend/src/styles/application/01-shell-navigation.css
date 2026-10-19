@@ -48,7 +48,11 @@ html[data-rail] .folder-quickadd{display:none}
 .sidebar-header-actions{display:flex;gap:2px;align-items:center}
 .sidebar-header-actions .action-btn{width:30px;height:30px}
 .sidebar-action-row{display:flex;gap:6px;padding:var(--space-3) var(--space-4);align-items:stretch}
-.new-chat-btn{flex:1;padding:10px var(--space-4);margin:0;background:var(--accent);color:white;border:none;border-radius:var(--radius-sm);font-family:inherit;font-size:var(--font-size-md);font-weight:600;cursor:pointer;transition:background var(--transition);display:flex;align-items:center;gap:var(--space-2);justify-content:center}.new-chat-btn:hover{background:var(--accent-hover)}
+/* One flat primary action; no texture, bevel or animated icon rotation. */
+.new-chat-btn{flex:1;min-height:var(--control-h-lg);padding:var(--space-2) var(--space-4);margin:0;background:var(--text-primary);color:var(--bg-primary);border:var(--control-edge-inset) solid transparent;border-radius:var(--conversation-process-radius);font-family:var(--font-ui);font-size:var(--font-size-lg);font-weight:var(--weight-medium);cursor:pointer;box-shadow:none;display:flex;align-items:center;gap:var(--space-2);justify-content:center;transition:background var(--motion-fast) var(--ease-standard)}
+.new-chat-btn:hover{background:color-mix(in srgb,var(--text-primary) 86%,var(--bg-primary))}
+.new-chat-btn:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.new-chat-btn:active{opacity:.9}
 /* new-folder-btn removed — folders use tab bar with "+" button */
 /* ── Folder create/rename dialog ── */
 .folder-dialog-overlay{position:fixed;inset:0;height:var(--vh100,100vh);background:rgba(0,0,0,0.5);z-index:9999;display:flex;align-items:center;justify-content:center;animation:fadeIn 0.15s ease}
@@ -56,6 +60,33 @@ html[data-rail] .folder-quickadd{display:none}
 .folder-dialog-title{font-size:15px;font-weight:600;color:var(--text-primary);margin-bottom:14px}
 .folder-dialog-input{width:100%;padding:9px var(--space-3);background:var(--bg-primary);border:1px solid var(--border);border-radius:var(--radius-xs);color:var(--text-primary);font-size:var(--font-size-lg);font-family:inherit;outline:none;transition:border-color var(--transition)}
 .folder-dialog-input:focus{border-color:var(--accent)}
+.folder-dialog-path{margin-top:var(--space-2)}
+.folder-dialog-label{font-size:var(--font-size-md);font-weight:600;color:var(--text-secondary);margin:12px 1px 6px}
+.folder-dialog-hint{font-size:var(--font-size-sm);color:var(--text-tertiary);margin:6px 1px 0}
+/* ── Multi-path default-root picker ── */
+.fpp{margin-top:2px}
+.fpp-chips{display:flex;flex-wrap:wrap;gap:var(--space-1);min-height:26px;padding:var(--space-1);background:var(--bg-primary);border:1px solid var(--border);border-radius:var(--radius-xs)}
+.fpp-chip{display:inline-flex;align-items:center;gap:6px;padding:3px 6px 3px 9px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:999px;font-size:var(--font-size-sm);color:var(--text-primary);max-width:100%}
+.fpp-chip-primary{border-color:var(--accent)}
+.fpp-chip-name{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:180px}
+.fpp-chip-badge{font-size:10px;line-height:14px;padding:0 5px;border-radius:6px;background:var(--accent-subtle);color:var(--accent);font-weight:600}
+.fpp-chip-x{display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;padding:0;border:none;background:transparent;color:var(--text-tertiary);cursor:pointer;border-radius:50%;font-size:14px;line-height:1}
+.fpp-chip-x:hover{color:var(--text-primary);background:var(--bg-hover)}
+.fpp-empty{font-size:var(--font-size-sm);color:var(--text-tertiary);padding:2px 4px}
+.fpp-toolbar{display:flex;gap:var(--space-2);margin-top:var(--space-2)}
+.fpp-path-input{flex:1;min-width:0;padding:6px var(--space-2);background:var(--bg-primary);border:1px solid var(--border);border-radius:var(--radius-xs);color:var(--text-primary);font-size:var(--font-size-md);font-family:inherit;outline:none}
+.fpp-path-input:focus{border-color:var(--accent)}
+.fpp-add-btn{flex:none;padding:6px var(--space-3);background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius-xs);color:var(--text-primary);font-size:var(--font-size-md);cursor:pointer}
+.fpp-add-btn:hover{background:var(--bg-hover)}
+.fpp-browse-btn{flex:none;padding:6px var(--space-3);background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius-xs);color:var(--text-primary);font-size:var(--font-size-md);cursor:pointer}
+.fpp-recent-label{font-size:var(--font-size-sm);font-weight:600;color:var(--text-tertiary);margin:10px 1px 4px}
+.fpp-recent{display:flex;flex-direction:column;gap:var(--space-1);max-height:150px;overflow-y:auto;scrollbar-width:thin}
+.fpp-recent-item{display:flex;align-items:center;gap:var(--space-2);padding:6px 8px;background:transparent;border:1px solid transparent;border-radius:var(--radius-xs);cursor:pointer;text-align:left;font-family:inherit;min-width:0}
+.fpp-recent-item:hover{background:var(--bg-hover);border-color:var(--border)}
+.fpp-recent-plus{flex:none;width:18px;height:18px;display:inline-flex;align-items:center;justify-content:center;border-radius:50%;background:var(--accent-subtle);color:var(--accent);font-size:14px;font-weight:600}
+.fpp-recent-text{flex:1;min-width:0;display:flex;flex-direction:column;gap:1px}
+.fpp-recent-name{font-size:var(--font-size-md);font-weight:600;color:var(--text-primary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.fpp-recent-full{font-size:10.5px;color:var(--text-tertiary);font-family:'JetBrains Mono',monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;direction:rtl;text-align:left}
 .folder-dialog-colors{display:flex;gap:var(--space-2);margin:14px 0 18px;flex-wrap:wrap}
 .folder-color-dot{width:22px;height:22px;border-radius:50%;cursor:pointer;border:2px solid transparent;transition:border-color 0.15s,transform 0.15s;flex-shrink:0}
 .folder-color-dot:hover{transform:scale(1.15)}
@@ -96,8 +127,10 @@ html[data-rail] .folder-quickadd{display:none}
 .sidebar.rail-collapsed .project-rail-head{justify-content:center;padding:10px 0 6px}
 .project-rail-list{display:flex;flex-direction:column;gap:2px;flex:1;overflow-y:auto;overflow-x:hidden;padding:2px var(--space-2) var(--space-1);min-height:0}
 
+.folder-tab-row{display:flex;align-items:center;min-width:0;position:relative}
+.folder-tab-row>.folder-tab{flex:1;min-width:0}
 /* Project ROW (reuses .folder-tab so all JS handlers still match) */
-.folder-tab{display:flex;align-items:center;gap:var(--space-2);width:100%;padding:7px 9px;border:1px solid transparent;border-radius:var(--radius-xs);background:transparent;color:var(--text-secondary);font-size:12.5px;font-weight:600;font-family:inherit;cursor:pointer;white-space:nowrap;transition:background 0.15s,color 0.15s;user-select:none;line-height:1.3;position:relative;text-align:left}
+.folder-tab{display:flex;align-items:center;gap:var(--space-2);width:100%;min-height:var(--control-h-lg);box-sizing:border-box;padding:var(--space-2);border:1px solid transparent;border-radius:var(--radius-xs);background:transparent;color:var(--text-secondary);font-size:12.5px;font-weight:600;font-family:inherit;cursor:pointer;white-space:nowrap;transition:background 0.15s,color 0.15s;user-select:none;line-height:1.3;position:relative;text-align:left}
 .folder-tab:hover{background:var(--bg-hover);color:var(--text-primary)}
 .folder-tab.active{background:var(--accent-subtle);color:var(--accent);font-weight:700}
 /* Left accent bar for the active project — reads as "you are here" */
@@ -110,15 +143,12 @@ html[data-rail] .folder-quickadd{display:none}
 .folder-tab-dot[data-mono-len="1"]{font-size:var(--font-size-sm);letter-spacing:0}
 .folder-tab-dot.streaming{animation:folderDotPulse 1.6s ease-in-out infinite}
 @keyframes folderDotPulse{0%,100%{opacity:1}50%{opacity:0.45}}
-/* Default (未分类) home tile: its glyph blinks periodically so it reads
- * "alive" and stops clashing with the flat colored project tiles. */
-@keyframes folderInboxBlink{0%,88%,100%{opacity:1}94%{opacity:0.3}}
 /* Inbox (未分类) + add tiles share the tile footprint but read as "system"
  * chips: a neutral surface square with a centered glyph, not a colored brand
  * tile — so they group with, yet stay distinct from, the projects. */
 .folder-tab-inbox-dot,.folder-tab-add-dot{width:20px;height:20px;border-radius:6px;display:inline-flex;align-items:center;justify-content:center;color:var(--text-tertiary);background:var(--bg-hover);box-shadow:inset 0 0 0 1px var(--border)}
 .folder-tab-inbox-dot svg,.folder-tab-add-dot svg{width:12px;height:12px}
-.folder-tab-inbox-dot svg{width:15px;height:15px;animation:folderInboxBlink 4.8s ease-in-out infinite}
+.folder-tab-inbox-dot svg{width:15px;height:15px}
 .folder-tab.active .folder-tab-inbox-dot{color:var(--accent);background:var(--accent-subtle);box-shadow:inset 0 0 0 1px var(--accent)}
 .folder-tab-add:hover .folder-tab-add-dot{color:var(--accent);background:var(--accent-subtle);box-shadow:inset 0 0 0 1px var(--accent)}
 .folder-tab-name{flex:1;overflow:hidden;text-overflow:ellipsis}
@@ -730,7 +760,7 @@ html[data-rail] .folder-quickadd{display:none}
 /* Legacy bare img fallback (markdown-rendered images)
  * ★ Excludes image-gen cards: :not() specificity (0,2,2) was beating the (0,2,1) overrides
  *   in .ig-result-card / .imagegen-card, squishing generated images to 300×200px */
-.message-body img:not(.msg-img-thumb img, .ig-result-card img, .imagegen-card img, .ig-batch-slot img, .rf-img-tile img){max-width:300px;max-height:200px;border-radius:var(--radius-sm);margin-bottom:var(--space-2);border:1px solid var(--border);cursor:pointer;transition:opacity .2s}.message-body img:not(.msg-img-thumb img, .ig-result-card img, .imagegen-card img, .ig-batch-slot img, .rf-img-tile img):hover{opacity:0.85}
+.message-body img:not(.md-image, .msg-img-thumb img, .ig-result-card img, .imagegen-card img, .ig-batch-slot img, .rf-img-tile img){max-width:300px;max-height:200px;border-radius:var(--radius-sm);margin-bottom:var(--space-2);border:1px solid var(--border);cursor:pointer;transition:opacity .2s}.message-body img:not(.md-image, .msg-img-thumb img, .ig-result-card img, .imagegen-card img, .ig-batch-slot img, .rf-img-tile img):hover{opacity:0.85}
 .md-content{font-family:var(--md-sans);font-size:14.5px;line-height:1.75;letter-spacing:0.005em;color:var(--text-primary);contain:layout style;overflow-x:hidden;max-width:100%;overflow-wrap:break-word;word-wrap:break-word}.md-content p{margin-bottom:13px}.md-content p:last-child{margin-bottom:0}.md-content strong{font-weight:650}.md-content em{font-style:italic;color:var(--text-secondary)}.md-content a{color:var(--accent);text-decoration:none;word-break:break-word;text-underline-offset:2px}.md-content a:hover{text-decoration:underline}.md-content ul,.md-content ol{margin:10px 0 13px 22px}.md-content li{margin-bottom:5px}.md-content li::marker{color:var(--text-tertiary)}.md-content h1,.md-content h2,.md-content h3,.md-content h4{margin:22px 0 9px;font-weight:650;letter-spacing:-0.01em;line-height:1.35}.md-content h1{font-size:20px}.md-content h2{font-size:17px}.md-content h3{font-size:15px}.md-content blockquote{border-left:3px solid var(--accent);padding:var(--space-2) var(--space-4);margin:var(--space-3) 0;color:var(--text-secondary);background:var(--bg-tertiary);border-radius:0 var(--radius-xs) var(--radius-xs) 0}.md-content code{font-family:'JetBrains Mono',monospace;font-size:12.5px;background:var(--bg-tertiary);padding:2px 6px;border-radius:4px;border:1px solid var(--border)}.md-content pre{margin:var(--space-3) 0;border-radius:var(--radius-sm);overflow:hidden;border:1px solid var(--border)}.md-content pre code{display:block;padding:var(--space-4);overflow-x:auto;background:var(--bg-secondary);border:none;line-height:1.5}.code-header{display:flex;align-items:center;gap:var(--space-2);padding:6px var(--space-3);background:var(--bg-tertiary);border-bottom:1px solid var(--border);font-size:var(--font-size-xs);font-family:'JetBrains Mono',monospace;color:var(--text-tertiary)}.code-header span{flex:1}.copy-btn{background:none;border:none;color:var(--text-tertiary);cursor:pointer;font-size:var(--font-size-xs);font-family:inherit;padding:2px var(--space-2);border-radius:4px;transition:color var(--transition),background-color var(--transition);flex-shrink:0}.copy-btn:hover{color:var(--text-primary);background:var(--bg-hover)}.md-content.user-content{white-space:pre-wrap;word-break:break-word}pre.code-long{position:relative}pre.code-long[data-collapsed="true"]>code{max-height:200px;overflow:hidden}pre.code-long[data-collapsed="true"]::after{content:'';position:absolute;bottom:0;left:0;right:0;height:60px;background:linear-gradient(to bottom,transparent,var(--bg-secondary));pointer-events:none;border-radius:0 0 var(--radius-sm) var(--radius-sm)}.code-collapse-btn{background:none;border:none;color:var(--accent);cursor:pointer;font-size:var(--font-size-xs);font-family:'JetBrains Mono',monospace;padding:2px var(--space-2);border-radius:4px;transition:color var(--transition),background-color var(--transition);flex-shrink:0;white-space:nowrap}.code-collapse-btn:hover{background:var(--accent-subtle);color:var(--accent-hover)}.table-header{display:flex;align-items:center;gap:var(--space-2);padding:var(--space-1) var(--space-3);background:var(--bg-tertiary);border-bottom:1px solid var(--border);font-size:var(--font-size-xs);font-family:'JetBrains Mono',monospace;color:var(--text-tertiary)}.table-header span{flex:1}.md-table-wrapper{overflow-x:auto;margin:var(--space-3) 0;border:1px solid var(--border);border-radius:var(--radius-sm);scrollbar-width:thin;scrollbar-color:var(--text-tertiary) transparent}.md-table-wrapper::-webkit-scrollbar{height:6px}.md-table-wrapper::-webkit-scrollbar-track{background:transparent}.md-table-wrapper::-webkit-scrollbar-thumb{background:var(--text-tertiary);border-radius:3px}.md-content table{width:max-content;min-width:100%;border-collapse:collapse;font-size:var(--font-size-md);margin:0}.md-content th,.md-content td{padding:var(--space-2) var(--space-3);border:1px solid var(--border);text-align:left;white-space:normal;word-break:break-word}.md-content th{background:var(--bg-tertiary);font-weight:600;white-space:nowrap}
 /* Thinking content retains its own layout containment. */
 .thinking-block{margin-bottom:var(--space-2);border:1px solid var(--border);border-radius:var(--radius-sm);background:transparent;overflow:hidden;contain:content}

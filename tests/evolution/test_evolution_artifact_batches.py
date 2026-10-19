@@ -44,7 +44,7 @@ def test_complete_set_one_call_retains_each_body_after_live_file_loss(runtime, t
 
 @pytest.mark.parametrize('args', [
     {}, {'path': 'x', 'paths': ['x']}, {'paths': []}, {'paths': ['x', 'x']},
-    {'paths': [str(i) for i in range(17)]}, {'paths': 'x'}, {'paths': [3]},
+    {'paths': 'x'}, {'paths': [3]},
     {'paths': ['x'], 'extra': True},
 ])
 def test_invalid_batch_shape_refuses_before_any_capture(runtime, tmp_path, args):
@@ -115,18 +115,18 @@ def test_partial_batch_retry_seals_same_reservation_without_extra_generation(run
     assert len(rows) == 2 and all(r['state'] == 'sealed' for r in rows)
 
 
-def test_generation_capacity_partial_response_cannot_discard_or_expand_old_set(runtime, tmp_path):
+def test_more_generations_preserve_old_set_and_idempotent_capture(runtime, tmp_path):
     _, executor = project_run(runtime, tmp_path)
-    bodies = files(tmp_path, evidence.MAX_FILES + 1)
+    bodies = files(tmp_path, 17)
     initial = evidence.declare(executor, {'paths': list(bodies)[:15]})
     batch = evidence.declare(executor, {'paths': ['result-15.json', 'result-16.json', 'result-0.json']})
-    assert initial['complete'] and not batch['complete']
-    assert 'snapshot' in batch['results'][0] and 'error' in batch['results'][1]
+    assert initial['complete'] and batch['complete']
+    assert all('snapshot' in row for row in batch['results'])
     assert batch['results'][2]['snapshot'] == initial['results'][0]['snapshot']
-    run = finish(runtime, executor, 'Seventeen requested; one capacity refusal remains explicit.')
+    run = finish(runtime, executor, 'Seventeen complete generations retained.')
     rows = [json.loads(line) for line in read_artifacts(runtime[2][-1], run).splitlines()]
-    assert len(rows) == evidence.MAX_FILES
-    assert 'result-16.json' not in {r['relative_path'] for r in rows}
+    assert len(rows) == 17
+    assert {r['relative_path']: r['content'] for r in rows} == bodies
 
 
 def test_authority_loss_mid_batch_never_reads_later_paths(runtime, tmp_path, monkeypatch):
@@ -156,12 +156,12 @@ def test_reviewer_foreign_owner_and_terminal_executor_refuse_batch(runtime, tmp_
             evidence.declare(task, {'paths': list(bodies)})
 
 
-def test_concurrent_batch_and_scalar_share_one_generation_bound(runtime, tmp_path):
+def test_concurrent_batch_and_scalar_share_one_manifest(runtime, tmp_path):
     _, executor = project_run(runtime, tmp_path)
-    bodies = files(tmp_path, 4)
+    bodies = files(tmp_path, 33)
     with ThreadPoolExecutor(max_workers=2) as pool:
-        batch = pool.submit(evidence.declare, executor, {'paths': list(bodies)[:3]})
-        single = pool.submit(evidence.declare, executor, {'path': 'result-3.json'})
+        batch = pool.submit(evidence.declare, executor, {'paths': list(bodies)[:32]})
+        single = pool.submit(evidence.declare, executor, {'path': 'result-32.json'})
         assert batch.result()['complete'] and single.result()['state'] == 'sealed'
     run = finish(runtime, executor, 'Both clients used the same manifest.')
     rows = [json.loads(line) for line in read_artifacts(runtime[2][-1], run).splitlines()]
@@ -250,14 +250,14 @@ def test_exposed_tool_schema_is_self_contained_and_cannot_mutate_contract():
     Draft202012Validator(schema).validate({'path': 'a'})
     assert 'oneOf' not in schema
     schema['properties']['paths']['maxItems'] = 999
-    assert load_schema('evolution_run_v1.schema.json')['$defs']['artifact_declare_request']['properties']['paths']['maxItems'] == 16
+    assert 'maxItems' not in load_schema('evolution_run_v1.schema.json')['$defs']['artifact_declare_request']['properties']['paths']
 
 
 def test_last_admitted_tool_slot_captures_whole_batch_without_extra_slots(runtime, tmp_path):
     from lib.agent_core.execution_budget import model_budget_admission
     from lib.agent_core.execution_limits import admit_tool_execution
     _, executor = project_run(runtime, tmp_path)
-    bodies = files(tmp_path, evidence.MAX_FILES)
+    bodies = files(tmp_path, 33)
     executor['config']['executionLimits']['max_tool_calls'] = 1
     model_budget_admission(executor)
     assert admit_tool_execution(executor) is None

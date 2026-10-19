@@ -55,12 +55,16 @@ _STRUCT_NAMES = {'jsonify', 'abort', 'make_response'}
 # Keyed by repo-relative path → count of pinned sites in that file.
 # Each entry documents WHY the handler must not log/raise.
 ALLOWED: dict[str, int] = {
+    # Timing emission is a logging safety net; retrying that same sink can recurse.
+    'lib/llm/diagnostic_timing.py': 1,
+    'lib/observability.py': 1,
+    'lib/tools/execution_timing.py': 1,
     # These handlers ARE the logging/incident safety net. Recursing into the
     # same pipeline after formatting, sanitization, stderr, or sink failure can
     # turn a diagnostic fault into an application failure.
     'lib/incident_journal.py': 1,
     'lib/log.py': 2,
-    'lib/log_rate_limit.py': 3,
+    'lib/logging_pkg/log_rate_limit.py': 3,
     # _emit_context_summary guards the logging backend itself. A second log
     # attempt can recurse into the same failure, so this last-resort swallow is
     # deliberately silent and prompt assembly remains authoritative.

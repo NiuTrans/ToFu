@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Unit tests for lib.llm_json — the shared LLM-JSON parsing helpers.
+"""Unit tests for lib.llm.llm_json — the shared LLM-JSON parsing helpers.
 
 Covers the behaviour that ``lib/optimizer/proposer.py``,
 ``lib/orchestration_composer.py`` and ``lib/scheduler/_shared.py`` now
@@ -15,7 +15,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from lib import llm_json
+from lib.llm import llm_json
 
 
 def _color(s, c): return f'\033[{c}m{s}\033[0m'
@@ -141,12 +141,12 @@ def test_consumers_still_import_helper():
     # composer._extract_json delegates to extract_json.
     assert composer._extract_json('```json\n{"reply":"x","definition":{}}\n```') == {
         'reply': 'x', 'definition': {}}
-    _ok('consumers: proposer/composer delegate to lib.llm_json')
+    _ok('consumers: proposer/composer delegate to lib.llm.llm_json')
 
 
 def main():
     print()
-    print(_color('═══ lib/llm_json.py Unit Tests ═══', '36'))
+    print(_color('═══ lib/llm/llm_json.py Unit Tests ═══', '36'))
     print()
     tests = [
         test_strip_plain_json_fence,

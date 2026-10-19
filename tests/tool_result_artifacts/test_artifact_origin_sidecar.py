@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import pytest
 
-import lib.tool_result_artifacts as tra
+import lib.tool_results.tool_result_artifacts as tra
 
 
 pytest_plugins = ('tests._chat_sidecar',)

@@ -68,7 +68,7 @@ _TOOL_TOKENS = ('tool_calls', 'execute_tool', 'tool_call_id')
 # LLM/dispatcher internals (their loops are
 # retry/stream plumbing, not agent loops).
 _HEURISTIC_EXEMPT = frozenset({
-    'lib/agent_loop.py',
+    'lib/agent_loop/agent_loop.py',
     'lib/llm/stream.py',
     'lib/llm/astream.py',
     'lib/llm/_sse_core.py',
@@ -175,6 +175,7 @@ def _while_is_agent_loop(node: ast.While) -> bool:
         if _is_abort_handcheck(sub):
             has_abort_handcheck = True
         elif isinstance(sub, ast.Call) \
+                and _call_name(sub) != 'compact_turn_transcript' \
                 and _TURN_HELPER_RE.search(_call_name(sub)):
             has_turn_helper = True
         if (has_llm_call and has_tool_handling) \
@@ -205,7 +206,7 @@ def _imports_run_agent_loop(src: str) -> bool:
         return False
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom) \
-                and node.module == 'lib.agent_loop' \
+                and node.module == 'lib.agent_loop.agent_loop' \
                 and any(a.name == 'run_agent_loop' for a in node.names):
             return True
     return False
@@ -263,6 +264,13 @@ def run(items):
         harmless_loop = next(node for node in ast.walk(harmless)
                              if isinstance(node, ast.While))
         self.assertFalse(_while_is_agent_loop(harmless_loop))
+        # A transcript CAS retries persistence after one completed summary;
+        # its name contains "turn" but it never dispatches a model or tool.
+        persistence = ast.parse('''
+while not task.get("aborted"):
+    store.compact_turn_transcript(conv_id, previous, current, revision)
+''')
+        self.assertFalse(_while_is_agent_loop(persistence.body[0]))
 
     def test_loop_adoption_never_regresses(self):
         importers = _loop_importer_files()

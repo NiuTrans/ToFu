@@ -20,7 +20,7 @@ from __future__ import annotations
 from typing import Any, Optional
 
 from lib.log import get_logger
-from lib.http_client import http_post
+from lib.http_transport.client import http_post
 
 from .base import TokenCounter
 from .config import API_TIMEOUT

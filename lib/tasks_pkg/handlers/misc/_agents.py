@@ -43,7 +43,7 @@ def _handle_scheduler_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, c
     )
 
 
-def _run_desktop(fn_name, fn_args, user_id=''):
+def _run_desktop(fn_name, fn_args, user_id='', cancellation=None):
     """Desktop tool executor — wraps send_desktop_command + format_desktop_result.
 
     The wire cmd_type is the full tool name verbatim: the agent's dispatch
@@ -52,8 +52,9 @@ def _run_desktop(fn_name, fn_args, user_id=''):
     command to the caller's own agents on relay deployments.
     """
     from lib.desktop import format_desktop_result, send_desktop_command
-    result, error = send_desktop_command(fn_name, fn_args, timeout=30,
-                                         user_id=user_id)
+    wait_options = {} if cancellation is None else {'cancellation': cancellation}
+    result, error = send_desktop_command(
+        fn_name, fn_args, timeout=None, user_id=user_id, **wait_options)
     if error:
         return f'Desktop Agent Error: {error}'
     return format_desktop_result(fn_name, result)
@@ -72,9 +73,12 @@ def _desktop_post_build(meta, tool_content, _fn_args):
 def _handle_desktop_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, project_path, project_enabled, all_tools=None):
     # Closure (same pattern as _run_swarm) so the task's bridge user rides
     # into the command — RWA P4a user scoping on relay deployments.
+    from lib.project_mod.tool_admission import Cancellation
+
     def _exec_desktop(_fn_name, _fn_args):
-        return _run_desktop(_fn_name, _fn_args,
-                            user_id=task.get('_userId', '') or '')
+        return _run_desktop(
+            _fn_name, _fn_args, user_id=task.get('_userId', '') or '',
+            cancellation=Cancellation(task))
     return simple_call(
         task, fn_name, fn_args, rn, round_entry, tc_id,
         executor=_exec_desktop,
@@ -131,7 +135,11 @@ def _handle_swarm_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, 
             thinking_enabled=cfg.get('thinking_enabled'),
             search_mode=cfg.get('search_mode', 'multi'),
             cfg=cfg,
-            all_tools=all_tools or [],
+            # Wire visibility is a prompt projection. Delegation starts from
+            # the same task-owned authority used by direct/gateway execution;
+            # an explicit empty catalog must remain empty.
+            all_tools=(task['_executable_tool_catalog']
+                       if '_executable_tool_catalog' in task else all_tools or []),
         )
 
     verb = _SWARM_BADGE_VERB.get(fn_name, 'swarm')

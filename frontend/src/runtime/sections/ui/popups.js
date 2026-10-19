@@ -9,106 +9,52 @@
    exports / imports needed.
    ═══════════════════════════════════════════════════════════════════ */
 
+// Temporary composition bridge; delete when composer orchestration migrates.
 let _selectionPopup = null;
 let _pendingReplyQuotes = [];
 
 function _initSelectionPopup() {
-  _selectionPopup = document.createElement("div");
-  _selectionPopup.className = "selection-popup";
-  _selectionPopup.style.display = "none";
-  _selectionPopup.innerHTML = `
-    <button class="selection-popup-btn" data-action="branch">${t('conv.branch')}</button>
-    <button class="selection-popup-btn" data-action="reply">${t('conv.reply')}</button>`;
-  document.body.appendChild(_selectionPopup);
-
-  _selectionPopup.addEventListener("click", (e) => {
-    const btn = e.target.closest("[data-action]");
-    if (!btn) return;
-    const action = btn.dataset.action;
-    const sel = window.getSelection();
-    const text = sel.toString().trim();
-    if (!text) { _hideSelectionPopup(); return; }
-
-    const msgEl = sel.anchorNode?.parentElement
-      ?.closest?.('.message[data-turn-id]');
-    const turnId = msgEl?.dataset?.turnId || '';
-
-    if (action === "branch" && turnId) {
-      const title = text.slice(0, 40) + (text.length > 40 ? "…" : "");
-      promptNewBranch(turnId, title, text);
-    } else if (action === "reply") {
+  _selectionPopup?.destroy();
+  _selectionPopup = createSelectionPopup({
+    t,
+    conversationId: () => getActiveConv()?.id || null,
+    quote: ({ text }) => {
       _addReplyQuote(text);
-    }
-    sel.removeAllRanges();
-    _hideSelectionPopup();
+      document.getElementById('userInput')?.focus();
+    },
+    branch: ({ conversationId, turnId, text }) => {
+      if (getActiveConv()?.id !== conversationId) return Promise.resolve(false);
+      const title = Array.from(text.replace(/\s+/g, ' ')).slice(0, 40).join('');
+      return promptNewBranch(turnId, title, text);
+    },
   });
-
-  // Show popup on selection in chat area
-  let _selMouseUpRaf = 0;
-  document.addEventListener("mouseup", (e) => {
-    if (_selectionPopup.contains(e.target)) return;
-    cancelAnimationFrame(_selMouseUpRaf);
-    _selMouseUpRaf = requestAnimationFrame(() => {
-      const sel = window.getSelection();
-      if (!sel || sel.isCollapsed || sel.toString().trim().length < 5) {
-        _hideSelectionPopup();
-        return;
-      }
-      const msgEl = sel.anchorNode?.parentElement
-        ?.closest?.('.message[data-turn-id]');
-      if (!msgEl) { _hideSelectionPopup(); return; }
-
-      const range = sel.getRangeAt(0);
-      const rect = range.getBoundingClientRect();
-      _selectionPopup.style.left = `${rect.left + rect.width / 2 - 60}px`;
-      _selectionPopup.style.top = `${rect.top - 40 + window.scrollY}px`;
-      _selectionPopup.style.display = "flex";
-    });
-  });
-
-  document.addEventListener("mousedown", (e) => {
-    if (!_selectionPopup.contains(e.target)) _hideSelectionPopup();
-  });
+  if (typeof retainedCompositionLifecycle !== 'undefined') {
+    retainedCompositionLifecycle.add(_selectionPopup.destroy);
+  }
 }
 
-function _hideSelectionPopup() {
-  if (_selectionPopup) _selectionPopup.style.display = "none";
-}
-
-// ── Reply quotes (multi-quote support) ──
+// ── Reply quotes: existing send/ACK/rollback owner retains the state. ──
 function _addReplyQuote(text) {
+  if (!text?.trim() || _pendingReplyQuotes.includes(text)) return;
   _pendingReplyQuotes.push(text);
   _renderReplyQuoteChips();
 }
 
 function _renderReplyQuoteChips() {
-  let container = document.getElementById("reply-quote-container");
+  let container = document.getElementById('reply-quote-container');
   if (!container) {
-    container = document.createElement("div");
-    container.id = "reply-quote-container";
-    container.className = "reply-quote-container";
-    const inputActions = document.querySelector(".input-box .input-actions");
-    if (inputActions) inputActions.parentElement.insertBefore(container, inputActions);
+    if (!_pendingReplyQuotes.length) return;
+    const inputActions = document.querySelector('.input-box .input-actions');
+    if (!inputActions) return;
+    container = document.createElement('div');
+    container.id = 'reply-quote-container';
+    container.className = 'reply-quote-container';
+    inputActions.parentElement.insertBefore(container, inputActions);
   }
-  if (!_pendingReplyQuotes.length) {
-    container.style.display = "none";
-    return;
-  }
-  container.style.display = "flex";
-  container.innerHTML = _pendingReplyQuotes.map((q, i) => {
-    const preview = q.replace(/\s+/g, " ").slice(0, 50);
-    const chars = q.length;
-    const lines = q.split("\n").length;
-    return `<div class="reply-quote-chip">
-
-      <span class="reply-quote-chip-body">
-        <span class="reply-quote-chip-label">${escapeHtml(preview)}${chars > 50 ? "…" : ""}</span>
-        <span class="reply-quote-chip-meta">${chars} chars · ${lines} line${lines > 1 ? "s" : ""}</span>
-      </span>
-      <button class="reply-quote-chip-close" data-tofu-action="_removeReplyQuote(${i})" title="Remove">✕</button>
-    </div>`;
-  }).join("");
+  renderReplyQuotePreviews(container, _pendingReplyQuotes, t, _removeReplyQuote);
 }
+
+window.addEventListener('tofu:language-change', _renderReplyQuoteChips);
 
 function _removeReplyQuote(idx) {
   _pendingReplyQuotes.splice(idx, 1);

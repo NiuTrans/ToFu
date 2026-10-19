@@ -291,6 +291,10 @@ function _sendAbortError() {
 }
 
 async function sendMessage() {
+  if (isBootSendBlocked()) {
+    showToast(t('boot.sendPaused'), 'info');
+    return;
+  }
   /* A stale restore can carry both flags. Plan wins so direct artifact
    * generation cannot bypass the backend's read-only authority. */
   if (imageGenMode && !planMode) {
@@ -395,17 +399,14 @@ async function _submitComposerDraft() {
 
   let conv = getActiveConv();
   if (conv?._genStartCtrl) return;
-  const projectAtSend = projectState;
   const modelAtSend = captureComposerModel(config);
-  const commitProjectAtSend = !!(projectAtSend.active && projectAtSend.path)
-    || _conversationProjectController.preservesDraft();
   const selectedConvId = activeConvId;
   if (conv?._turnSnapshotRequired) {
     if (!runtimeScope.ConversationTurnStore) {
       throw new Error('Conversation turn runtime is unavailable.');
     }
     try {
-      await runtimeScope.ConversationTurnStore.hydrateConversation(conv);
+      await withProjectHydration(conv, () => runtimeScope.ConversationTurnStore.hydrateConversation(conv));
     } catch (hydrateError) {
       /* Snapshot reads are bounded, so a stalled server rejects here instead
        * of latching the composer lock until reload. Keep the draft and
@@ -429,18 +430,9 @@ async function _submitComposerDraft() {
       updatedAt: now,
       _localOnly: true,
     };
-    if (projectState.active && projectState.path) {
-      conv.projectPath = projectState.path;
-      const projectPaths = [projectState.path];
-      for (const root of projectState.extraRoots || []) {
-        const path = typeof root === 'string' ? root : root.path;
-        if (path && !projectPaths.includes(path)) projectPaths.push(path);
-      }
-      conv.projectPaths = projectPaths;
-    }
-    const folderId = typeof getActiveFolderId === 'function'
-      ? getActiveFolderId() : null;
-    if (folderId) conv.folderId = folderId;
+    // Includes explicit empty roots. Never re-inherit from the sidebar filter
+    // or mutable folder defaults at first send.
+    Object.assign(conv, _conversationProjectController.captureDraftIdentity());
     conversations.unshift(conv);
     activeConvId = conv.id;
     sessionStorage.setItem('tofu_activeConvId', conv.id);
@@ -448,14 +440,10 @@ async function _submitComposerDraft() {
     renderConversationList();
   }
 
-  // Sending is an explicit context commit, unlike navigation/settings capture.
-  // Preserve a saved binding when a failed restore left the local bar empty.
-  if (commitProjectAtSend) {
-    const binding = _deriveConvPathsFromState(projectAtSend);
-    conv.projectPath = binding.allPaths[0] || '';
-    conv.projectPaths = binding.allPaths;
-    conv.readOnlyPaths = binding.roList;
-  }
+  // Capture after cold settings hydration, before further asynchronous work.
+  // A draft or ambient project bar can never rebind this conversation.
+  const projectAtSend = captureConversationProject(conv);
+  const folderAtSend = conv.folderId;
   commitComposerModel(conv, modelAtSend);
   const convId = conv.id;
   const capturedReplyQuotes = typeof getPendingReplyQuotes === 'function'
@@ -523,9 +511,7 @@ async function _submitComposerDraft() {
   }
   if (draft.replyQuotes.length > 0) msgPayload.replyQuotes = draft.replyQuotes;
   if (draft.convRefs.length > 0) msgPayload.convRefs = draft.convRefs;
-  const folderId = typeof getActiveFolderId === 'function'
-    ? getActiveFolderId() : null;
-  if (folderId) msgPayload.folderId = folderId;
+  if (folderAtSend) msgPayload.folderId = folderAtSend;
 
   const draftProjection = {
     role: 'user',
@@ -543,6 +529,8 @@ async function _submitComposerDraft() {
 
   const sendStart = createSendStartupLease(conv, { timeoutMs: 90000 });
   let willTranslate = false;
+
+  let translationWait = null;
   let accepted = false;
   let userStopped = false;
   /* Optimistic pair: an ordinary/queued command paints the user input and
@@ -597,7 +585,9 @@ async function _submitComposerDraft() {
     const {
       config: sendConfig,
       settings: sendSettings,
-    } = await awaitSendPreparation(_buildConvSubmission(conv),
+    } = await awaitSendPreparation(_buildConvSubmission(conv, {
+      ...projectAtSend, folderId: folderAtSend,
+    }),
       t('send.preparationTimeout'), sendStart.signal);
     draft.submittedModelId = sendConfig.model;
     sendConfig.assistantMsgId = (typeof _newClientMsgId === 'function')
@@ -609,6 +599,8 @@ async function _submitComposerDraft() {
     );
     if (willTranslate) {
       conv._translating = true;
+
+      translationWait = composerTranslationStatus.begin(convId, 'send');
       conv._translateAborted = false;
       conv._translateAbortCtrl = sendStart.controller;
       showSendPreparation('translating', t('sidebar.translating'));
@@ -675,6 +667,14 @@ async function _submitComposerDraft() {
       throw new Error('The server returned an invalid turn acknowledgement.');
     }
 
+    if (translationWait) {
+      const projection = acknowledgement.submittedTurn?.projection;
+      composerTranslationStatus.finish(translationWait,
+        projection?.translation?.sendFailure || projection?._translateFailed
+          ? 'failed' : 'completed',
+        projection?.translation?.model || projection?._translateModel);
+    }
+
     clearOptimisticEcho();
     _consumeAcceptedComposerDraft(draft);
     _applyAcceptedConversationTitle(conv, draft);
@@ -710,7 +710,7 @@ async function _submitComposerDraft() {
     clearOptimisticEcho();
     let committed = false;
     try {
-      await runtimeScope.ConversationTurnStore?.hydrateConversation(conv);
+      await withProjectHydration(conv, () => runtimeScope.ConversationTurnStore?.hydrateConversation(conv));
       committed = _commandIsVisibleInAuthority(conv, draft.commandId);
       if (committed) {
         accepted = true;
@@ -758,6 +758,9 @@ async function _submitComposerDraft() {
     }
   } finally {
     clearOptimisticEcho();
+
+    if (translationWait) composerTranslationStatus.finish(translationWait,
+      userStopped || sendStart.signal.aborted ? 'cancelled' : 'failed');
     sendStart.finish();
     if (willTranslate) {
       conv._translating = false;
@@ -988,7 +991,7 @@ async function _refreshServerQueue(convId) {
   const conv = conversations.find((item) => item && item.id === convId);
   if (!conv) return;
   try {
-    await runtimeScope.ConversationTurnStore.hydrateConversation(conv);
+    await withProjectHydration(conv, () => runtimeScope.ConversationTurnStore.hydrateConversation(conv));
     renderPendingQueueUI(convId);
     updateSendButton();
   } catch (err) {

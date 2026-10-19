@@ -38,7 +38,7 @@ import os
 import time
 import uuid
 
-from lib.llm_json import extract_json
+from lib.llm.llm_json import extract_json
 from lib.log import get_logger
 from lib.paper.report_artifact_keys import termfill_lang_key
 

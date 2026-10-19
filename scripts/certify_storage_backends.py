@@ -40,7 +40,7 @@ def verification_sources() -> dict[str, str]:
         'git', 'ls-files', '--others', '--ignored', '--exclude-standard', '--',
         'static/vite'], cwd=ROOT, text=True).splitlines())
     names.extend(['scripts/generated_storage_operations.py',
-                  'lib/storage_sidecar/generated_storage_receipts.py'])
+                  'lib/storage_authority_sql/generated_storage_receipts.py'])
     return {name: fingerprint(ROOT / name) for name in sorted(set(names))
             if (ROOT / name).is_file()}
 

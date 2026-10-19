@@ -50,7 +50,7 @@ backends changes authority rather than fixing the read path.
 ## Physical reads and public projection
 
 Owners are `lib/conversations/diagnostic.py`,
-`lib/storage_sidecar/operations_pkg/_conversation_diagnostic.py`, and
+`lib/storage_authority_sql/operations_pkg/_conversation_diagnostic.py`, and
 `packages/tofu-db/src/conversation_diagnostic.rs`. The operation catalogue and
 native `ConversationDiagnostic` IR step are generated from machine contracts.
 
@@ -98,11 +98,33 @@ nonzero. A failed final consistency witness is an error, not a partial success.
 The per-response `DiagnosticResponseTooLarge` error remains distinct from total
 budget exhaustion. Credentials and response bodies are not included in errors.
 
+### Concurrent-write recovery
+
+**Problem:** a writer may advance the conversation after the inspector reads its
+header. A valid storage revision/source fence then returns HTTP 409; treating
+that as an authorization failure makes a transient race unnecessarily terminal.
+
+**Decision:** the inspector retries the entire selected read at most three times.
+Only a turn/chunk HTTP 409 v4 problem with `status: 409`, `code: conflict`, and
+`detail: database_conflict`, or a changed final header revision/count, triggers
+a restart. Every restart fetches a fresh header and discards all prior turns,
+source tokens and archives. The same transport retains cumulative request/byte
+consumption (including conflict bodies) and the original deadline. Continuous
+churn fails explicitly with no transcript and suggests waiting for writes to
+settle or selecting a smaller `--start-index` / `--max-turns` range. Other
+conflicts, authorization failures and malformed responses remain terminal.
+
+**Alternatives rejected:** retrying just the failed page could mix snapshots;
+resetting budgets could make retries unbounded; relaxing storage fences or
+switching backends would misrepresent authority. No server or storage behavior
+changes are needed for this client recovery.
+
 ## Executable specifications
 
 - `tests/diagnostics/test_inspect_conversation_api.py`: >8 MiB single fields,
   exact reconstruction, codec/patches, identity/source fences, restored state,
-  actual archive budget consumption, partial evidence and explicit allowance.
+  actual archive budget consumption, partial evidence, explicit allowance,
+  whole-snapshot conflict recovery, retry exhaustion and cumulative retry budgets.
 - `tests/conversation/test_conversation_diagnostic_http.py`: authorization,
   strict query variants, typed errors and no unsupported-service fallback.
 - `tests/storage/test_conversation_diagnostic_sql.py`: SQLite and disposable
@@ -118,4 +140,6 @@ budget exhaustion. Credentials and response bodies are not included in errors.
   source/revision fences and owner isolation. Physical source format and byte
   lengths are validated per authority, rather than assumed to match.
 
-Build-specific verification: [native parity evidence](../evidence/tofudb_native_parity_20261001.json).
+Build-specific verification: `tofudb_native_parity_20261001.json`.
+
+<!-- Evidence note: former docs/evidence/ artifact snapshots cited here were retired from the tree; cited JSON artifacts remain recoverable from git history. -->

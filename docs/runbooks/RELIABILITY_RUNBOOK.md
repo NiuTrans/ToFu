@@ -331,7 +331,7 @@ python serverctl.py support-bundle \
 python serverctl.py status --json
 python serverctl.py doctor --json
 python serverctl.py logs -n 200
-python3 -m lib.log_diagnostics --max-bytes 32768 --pretty
+python3 -m lib.logging_pkg.log_diagnostics --max-bytes 32768 --pretty
 ```
 
 日志分流、脱敏、重复故障合并、保留预算和数据库无关诊断的权威契约见
@@ -403,53 +403,23 @@ python serverctl.py doctor
 
 ## Request route residency
 
-Problem: one model execution can materialize 64 primary/fallback candidates
-before worker admission. A fixed 1,024-slot pool therefore rejects ordinary
-parent/child concurrency after only 16 full groups, independently of hardware.
-Decision: `lib/llm_dispatch/ephemeral_policy.py` owns the shared 64-candidate
-bound and derives process slot capacity from the launch-resolved root workers,
-root admission, pending-root queue, child fan-out and ingress workers. It
-reserves one additional root per worker for replacement/settlement overlap.
-There is no second machine probe or eager allocation. The explicit
-`TOFU_EPHEMERAL_SLOT_CAPACITY` override is bounded to 64..1,048,576 slots;
-missing/non-positive/malformed values use the adaptive budget, resolved once
-at first materialization. Queue and worker overrides remain included.
+Computed request routes are owned execution state and have no local slot quota.
+The registry publishes each owned handle atomically and never evicts a live
+request to make space. Requests retain the complete eligible primary/fallback
+set by default; a caller may explicitly select a positive shortlist. Planned
+route witnesses match the full primary set before secret resolution and keep
+exact route identity. Capability queries and composer controls retain all
+eligible groups. The resource controller observes registry counts; it neither
+estimates a route ceiling nor resizes admission. TOFU_EPHEMERAL_SLOT_CAPACITY is
+retired, and no second resource probe or eager pool allocation is added.
 
-Admission and pool publication are atomic under the registry/pool lock order.
-Saturation reports slot and group counts, without declaring a leak or exposing
-owner identities. Group construction rolls back on cancellation as well as
-ordinary failure; audit failures cannot orphan handles or interrupt release.
-Disposal tries every sibling and remains retryable if release fails. Execution
-settlement/discard still owns release; no TTL evicts a productive task's routes.
-Alternatives considered: increasing one fixed constant retains the hardware
-mismatch; reducing candidates silently removes authorized fallback paths;
-age-based eviction can break a live long-running task.
-
-Measurement: three waves of 20 synthetic groups × 64 routes each (1,280 live
-slots) returned both registries to zero after every wave. Python tracemalloc
-peaked at 11.72 MiB including diagnostics; live-wave residency stabilized at
-11.70 MiB on waves two and three, with 4.56 MiB retained in the traced runtime
-after release. This is Python allocation evidence, not a process RSS ceiling.
-Specs: `tests/llm_dispatch/test_ephemeral_capacity.py` and
-`test_ephemeral_policy.py`; provider isolation and fallback remain unchanged.
-
-原生 daemon 的动态端口申请若因 Linux 临时端口区间已占用而返回
-`AddrInUse`，监听 owner 读取内核区间，在区间之外最多尝试 128 个不同的
-非特权 loopback 端口；成功绑定的 socket 直接用于服务并通过原有 readiness
-信封发布。没有先探测再重绑的窗口，也不会抢占已绑定端口。显式指定端口、
-其它绑定错误及无法读取内核策略时保留原来的失败。拒绝调整全机端口区间或
-切换存储 transport，因为那会改变其它进程或已选定的持久化策略。
-
-Problem: 本机临时连接 tuple 耗尽使健康探测无法发送，但不能据此判断 worker
-未就绪。Decision: 仅对 numeric `127.0.0.1` 探测的地址分配错误
-(`EADDRNOTAVAIL` / `EADDRINUSE`)，从 `127.0.0.2` 源地址向同一目标
-进行一次直接重试；HTTP Host、目标端口、TLS context、响应大小上限和 PID
-核验保持原来的契约。重试不跟随重定向；两次失败仍是未证实的探测。
-响应与连接在成功、拒绝、超限和读取异常时都关闭。拒绝放宽 PID 核验、
-修改访问地址或干预其它进程；该恢复不证明其它客户端的连接路径已经恢复。
-状态查询中，同一 worker 的身份与就绪探测均通过时，将裸 TCP 探测未成功的
-`starting` 修正为 `running`；不覆盖停止请求、身份或端口冲突，也不持久化
-查询推断。未就绪、PID 不匹配或未执行探测时保留原来的状态判断。
+Group construction rolls back on cancellation and ordinary failure; audit
+failures cannot orphan handles or interrupt release. Disposal tries every sibling
+and remains retryable after a release failure. Execution settlement/discard owns
+release; TTL never evicts productive routes. Registration completeness, owner,
+capability, egress, credential and exact planned-witness checks remain mandatory.
+Specifications: tests/llm_dispatch/test_ephemeral_capacity.py and the model-routing
+capability/control contracts; slot materialization preserves provider isolation.
 
 ## Restart source validation latency
 

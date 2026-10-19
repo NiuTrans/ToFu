@@ -187,7 +187,7 @@ def test_run_command_prefers_absolute_paths_no_persistent_shell():
     # or working directory persists across calls.
     from lib.tools.project import PROJECT_TOOL_RUN_COMMAND
     desc = PROJECT_TOOL_RUN_COMMAND['function']['description']
-    assert 'avoid `cd`' in desc, 'must advise avoiding cd'
+    assert 'working_dir' in desc and 'over `cd`' in desc, 'must prefer an explicit working directory'
     assert 'absolute path' in desc, 'must advise preferring absolute paths'
     assert 'no persistent' in desc.lower(), (
         'must state there is no persistent shell (fresh subprocess per call)')
@@ -207,12 +207,10 @@ def test_run_command_prefers_absolute_paths_no_persistent_shell():
     assert 'STICKY' in wd_desc, 'project-mode working_dir must keep the sticky note'
 
 
-def test_batch_caps_documented():
+def test_batches_do_not_advertise_retired_admission_caps():
     src = _src('lib/tools/project.py')
-    # grep/find batch cap = 20; apply_diffs/insert_contents = 30.
-    assert src.count('max 20 entries') >= 2, 'grep+find batch caps'
-    assert src.count('max 30 per call') >= 2, 'apply_diffs+insert_contents caps'
-    # count_only ignores max_results.
+    assert 'max 20 entries' not in src
+    assert 'max 30 per call' not in src
     assert 'ignored in count_only mode' in src
 
 

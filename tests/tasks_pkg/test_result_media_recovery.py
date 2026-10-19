@@ -46,7 +46,7 @@ def test_original_survives_storage_restart_and_model_resize(
     from lib.tasks_pkg.compaction._budget import budget_tool_result_v2
     from lib.tasks_pkg.compaction._builtin_steps._toolresults import compact_tool_results
     from lib.tasks_pkg.compaction._steps import CompactionContext
-    from lib.tool_result_artifacts import ToolResultArtifactRepository
+    from lib.tool_results.tool_result_artifacts import ToolResultArtifactRepository
     from types import SimpleNamespace
     import json
     canonical = capture_result(result)

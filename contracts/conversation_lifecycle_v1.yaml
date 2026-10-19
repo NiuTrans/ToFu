@@ -27,7 +27,8 @@ operations:
     effects:
       - active header and turns become unreachable in the committing transaction
       - pending and running trashed turns settle as interrupted
-      - attempts, attempt events, queues, timers, and sync replay state are removed
+      - attempts, attempt events, queues, timers, and sync replay state become unreachable atomically
+      - detached reconstructible event bytes are reclaimed through bounded durable maintenance without restoring executable state
       - scheduled work targeting the conversation is disabled
       - immutable search fragments and compaction archives remain detached for restore
   restore:

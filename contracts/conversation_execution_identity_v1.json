@@ -9,6 +9,22 @@
   "executionScopes": [],
   "legacyPolicy": "Only absent envelopes retain the existing explicit-owner user path; present malformed or nonhuman envelopes never fall back.",
   "publicPolicy": "Discard reserved identity and attendance fields, then stamp authenticated owner and tenant at command acceptance.",
-  "reservedConfigFields": ["_conversationExecutionIdentity", "_conversationExecutionAdmission", "_turnPrincipalTenantId", "_turnPrincipalKind", "_turnPrincipalSubjectId", "_turnPrincipalScopes", "_turnOwnerUserId", "_turnId", "_attemptId", "_principalContext", "_userId", "_attended", "_unattended", "_principal"],
-  "nonhumanPolicy": "Deny before model context or registry creation until trusted grant, scope, revocation and cost admission exists."
+  "reservedConfigFields": ["_conversationExecutionIdentity", "_conversationExecutionAdmission", "_projectDispatchAdmission", "_turnPrincipalTenantId", "_turnPrincipalKind", "_turnPrincipalSubjectId", "_turnPrincipalScopes", "_turnOwnerUserId", "_turnId", "_attemptId", "_principalContext", "_userId", "_attended", "_unattended", "_principal", "_conversationWorkspace", "canonicalProjectPath", "canonicalProjectPaths", "workspaceRuntimeRoots", "_turnReviewSource"],
+  "nonhumanPolicy": "Deny before model context or registry creation until trusted grant, scope, revocation and cost admission exists.",
+  "reviewSource": {
+    "configKey": "_turnReviewSource",
+    "schema": {
+      "type": "object", "additionalProperties": false,
+      "required": ["version", "owner", "tenant", "conversation", "turn", "attempt", "task"],
+      "properties": {
+        "version": {"type": "integer", "const": 1},
+        "owner": {"type": "integer", "minimum": 1},
+        "tenant": {"type": "string", "maxLength": 256},
+        "conversation": {"type": "string", "minLength": 1, "maxLength": 512},
+        "turn": {"type": "string", "minLength": 1, "maxLength": 512},
+        "attempt": {"type": "string", "minLength": 1, "maxLength": 512},
+        "task": {"type": "string", "minLength": 1, "maxLength": 512}
+      }
+    }
+  }
 }

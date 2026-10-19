@@ -21,7 +21,6 @@ import json
 import os
 import shlex
 import shutil
-import signal
 import threading
 import time
 import uuid
@@ -193,7 +192,9 @@ class BackgroundCommandTask(dict):
         repositories = execution_repositories(parent)
         if repositories:
             self['_workspaceExecution'] = {'repositories': deepcopy(repositories)}
-            self['_workspaceRootPolicy'] = deepcopy(ensure_execution_roots(parent))
+        parent_policy = ensure_execution_roots(parent)
+        if parent_policy is not None:
+            self['_workspaceRootPolicy'] = deepcopy(parent_policy)
             config = parent.get('config') or {}
             self['config'] = {key: deepcopy(config[key]) for key in (
                 'projectPath', 'projectPaths', 'readOnlyPaths', 'canonicalProjectPath')
@@ -554,7 +555,7 @@ def _posix_durable() -> bool:
 
 
 def _records_root() -> str:
-    from lib.runtime_paths import data_root
+    from lib.runtime.runtime_paths import data_root
     return os.path.join(data_root(), 'background_commands')
 
 
@@ -672,12 +673,11 @@ def _result_from_record(record: dict, paths: dict, *, aborted: bool = False,
 
 
 def _pid_starttime(pid: int) -> str | None:
-    """Linux /proc start-time token — the PID-reuse guard."""
+    """Linux start-time token from the shared comm-safe process-stat parser."""
+    from lib.project_mod.process_group import ProcessGroupRetirementError, read_process_fields
     try:
-        with open(f'/proc/{pid}/stat', 'rb') as fh:
-            return fh.read().rsplit(b')', 1)[-1].split()[19].decode(
-                'ascii', 'replace')
-    except (OSError, IndexError):
+        return read_process_fields(pid)[19].decode('ascii')
+    except (OSError, IndexError, TypeError, ValueError, UnicodeError, ProcessGroupRetirementError):
         return None
 
 
@@ -695,23 +695,24 @@ def _record_pid_alive(record: dict) -> bool:
     return True
 
 
-def _kill_record_tree(record: dict) -> None:
-    """Mirror _kill_process_tree's TERM → 3s → KILL escalation via the pgid."""
-    pgid = record.get('pgid')
-    if not pgid:
-        return
+def _kill_record_tree(record: dict) -> bool:
+    """Return confirmed retirement, never equate missing signal authority to it."""
+    import sys
+    from lib.project_mod.process_group import retire_process_group
+    token = record.get('pid_starttime')
+    if sys.platform.startswith('linux') and not (
+            isinstance(token, str) and token.isascii() and token.isdecimal()):
+        return False  # Numeric PID/PGID existence is not recovered signal authority.
+    if not _record_pid_alive(record):
+        return False  # An absent/stale leader may still have surviving descendants.
     try:
-        os.killpg(int(pgid), signal.SIGTERM)
-    except (OSError, TypeError, ValueError):
-        return
-    deadline = time.monotonic() + 3.0
-    while time.monotonic() < deadline and _record_pid_alive(record):
-        time.sleep(0.1)
-    if _record_pid_alive(record):
-        try:
-            os.killpg(int(pgid), signal.SIGKILL)
-        except (OSError, TypeError, ValueError):
-            pass
+        pgid = int(record['pgid'])
+        if pgid <= 1 or pgid == os.getpgrp() or os.getpgid(int(record['pid'])) != pgid:
+            return False
+    except (KeyError, OSError, TypeError, ValueError):
+        return False
+    retire_process_group(pgid, leader_alive=lambda: _record_pid_alive(record))
+    return True
 
 
 def _deliver_record(record: dict, result: str) -> bool:
@@ -726,12 +727,24 @@ def _deliver_record(record: dict, result: str) -> bool:
         command=record['command'], result=result))
 
 
-_DIED_NOTE = ('server restart — the process died with the server; '
-              'partial output above; rerun the command if still needed')
+_DIED_NOTE = ('server restart — the recorded process is no longer running and '
+              'no exit receipt is available; partial output above. Completion '
+              'and effects are unconfirmed. Inspect outputs and current state '
+              'before repeating any operation; do not automatically replay writes. '
+              'Continue independent work')
 
 
 def _reattach(record: dict, paths: dict) -> None:
     """Re-register a surviving process and watch it to settlement."""
+
+    try:
+        group_id = int(record['pgid'])
+        if isinstance(record['pgid'], bool) or group_id <= 1 or group_id == os.getpgrp():
+            raise ValueError('Recovered record has no valid owned process group')
+    except (KeyError, TypeError, ValueError) as error:
+        # Startup recovery retains the unreadable/unsafe record and reports
+        # incomplete recovery; never manufacture a worker or signal authority.
+        raise ValueError('Cannot reattach an unverified process-group record') from error
     command_id = record['command_id']
     done = threading.Event()
     state: dict[str, Any] = {
@@ -776,11 +789,30 @@ def _reattach(record: dict, paths: dict) -> None:
         logger.info('[BackgroundCommand:%s] reattached command settled',
                     command_id)
 
+    def _retire_before_settlement() -> None:
+        from lib.project_mod.process_group import ProcessGroupRetirementError, group_has_live_members
+        try:
+            if _kill_record_tree(record) is not True:
+                raise ProcessGroupRetirementError('No verified recovered leader identity; no signal was authorized')
+        except ProcessGroupRetirementError as error:
+            # Do not orphan this watcher or publish an aborted result while an
+            # owned descendant may still hold inherited exclusion/resources.
+            with _lock:
+                state['error'] = 'Cancellation requested; group retirement is not yet confirmed: ' + str(error)
+            logger.warning('[BackgroundCommand:%s] retirement remains pending: %s', command_id, error)
+            while True:
+                try:
+                    if not group_has_live_members(int(record['pgid'])):
+                        break
+                except ProcessGroupRetirementError:
+                    pass  # Observation is still unavailable; neither signal nor settle by guess.
+                time.sleep(REATTACH_POLL_S)
+
     def _worker() -> None:
         deadline = time.monotonic() + REATTACH_MAX_S
         while time.monotonic() < deadline:
             if task.get('aborted'):
-                _kill_record_tree(record)
+                _retire_before_settlement()
                 _finish(_result_from_record(record, paths, aborted=True))
                 return
             if _read_exit_code(paths) is not None:
@@ -791,10 +823,10 @@ def _reattach(record: dict, paths: dict) -> None:
                                             interrupted_by=_DIED_NOTE))
                 return
             time.sleep(REATTACH_POLL_S)
-        _kill_record_tree(record)
+        _retire_before_settlement()
         _finish(_result_from_record(
             record, paths,
-            interrupted_by='reattach lifetime exceeded — process killed'))
+            interrupted_by='reattach lifetime exceeded — group retirement observed'))
 
     thread = threading.Thread(target=_worker, daemon=True,
                               name=f'bg-cmd-reattach-{command_id[3:]}')

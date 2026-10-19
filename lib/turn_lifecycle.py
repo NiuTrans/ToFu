@@ -28,13 +28,13 @@ from lib.tasks_pkg.failure_attribution import (
     ensure_failure_attribution,
     turn_retry_chain,
 )
-from lib.storage_projection import (
+from lib.storage.storage_projection import (
     compact_tool_rounds_for_frame_budget,
     sanitize_api_rounds_for_persist,
     trim_tool_round_for_persist,
 )
-from lib.tool_round_identity import tool_rounds_with_execution_identity
-from lib.tool_round_replay import (
+from lib.tool_results.tool_round_identity import tool_rounds_with_execution_identity
+from lib.tool_results.tool_round_replay import (
     checkpoint_retention_positions,
     scan_replayable_tool_round_prefix,
 )
@@ -82,6 +82,7 @@ _PROJECTION_PROVENANCE_FIELDS = (
 
 _PROJECTION_TASK_FIELDS = (
         ('segments', 'segments'), ('usage', 'usage'), ('model', 'model'),
+        ('_executionActualsComplete', 'usageComplete'),
         ('provider_id', 'providerId'),
         ('preset', 'preset'), ('thinkingDepth', 'thinkingDepth'),
         ('modifiedFiles', 'modifiedFiles'),
@@ -162,13 +163,25 @@ _delta_last_recorded: dict[str, float] = {}
 _DELTA_THROTTLE_MAX_KEYS = 4096
 
 
-def _delta_throttle_allows(attempt_id: str) -> bool:
-    """Peek: True when a delta projection write is due for this attempt."""
-    if _delta_record_min_interval_s() <= 0:
-        return True
+def next_progress_projection_deadline(attempt_id: str) -> float | None:
+    """Observe the committed projection cadence; never reserve or authorize a write.
+
+    Provider text may shorten its existing trailing window to this monotonic
+    deadline. Missing observations retain the caller's own window; an eager
+    projection policy returns an already-due deadline. No storage read occurs.
+    """
+    interval = _delta_record_min_interval_s()
+    if interval <= 0:
+        return 0.0
     with _delta_throttle_lock:
         last = _delta_last_recorded.get(attempt_id)
-        return last is None or (time.monotonic() - last) >= _delta_record_min_interval_s()
+    return None if last is None else last + interval
+
+
+def _delta_throttle_allows(attempt_id: str) -> bool:
+    """Peek: True when a delta projection write is due for this attempt."""
+    deadline = next_progress_projection_deadline(attempt_id)
+    return deadline is None or time.monotonic() >= deadline
 
 
 def _delta_throttle_stamp(attempt_id: str) -> None:
@@ -282,7 +295,7 @@ def create_turn_pair(conversation_id: str, *, command_id: str,
                      run_id: str = '', user_id: Any,
                      input_actor: str = 'human', input_kind: str = 'input',
                      require_parent_is_lane_tail: bool = False,
-
+                     expected_parent_projection_revision: int | None = None,
                      require_parent_not_stopped: bool = False,
                      require_lane_idle: bool = False,
                      reject_if_human_queued: bool = False,
@@ -328,6 +341,11 @@ def create_turn_pair(conversation_id: str, *, command_id: str,
             output_presentation_id or f'{command_id}:output'),
         'queue_binding': queue_binding or {},
     }
+    if expected_parent_projection_revision is not None:
+        if (type(expected_parent_projection_revision) is not int
+                or expected_parent_projection_revision < 0 or not parent_turn_id):
+            raise ValueError('Invalid parent projection revision')
+        payload['expected_parent_projection_revision'] = expected_parent_projection_revision
     try:
         return public_value_with_stable_segments(_turn_client(write=True).command(
             'turn.create_pair', payload, command_id)
@@ -922,6 +940,12 @@ def capture_task_projection_source(task, event, *, previous_source=None):
                 trim_tool_round_for_persist(dict(row)) if isinstance(row, dict) else row
                 for row in values['toolRounds']])
         source = deepcopy(values)
+        if task.get('_todoState'):
+            # The owned checklist changes during tool execution, before any
+            # terminal projection. Structural round receipts must preserve it
+            # so a hard restart never needs to replay a completed tool.
+            from lib.tools.todo import public_todo_state
+            source['todoState'] = public_todo_state(task['_todoState'])
         source['config'] = deepcopy({'checkpointToolRounds':
             (task.get('config') or {}).get('checkpointToolRounds', [])})
     from lib.tasks_pkg.manager._events import snapshot_task_text
@@ -1000,6 +1024,9 @@ def _task_projection(
             continue
         if task.get(source) is not None:
             projection[target] = task[source]
+    if not owns_visible_run_turns and task.get('_todoState'):
+        from lib.tools.todo import public_todo_state
+        projection['todoState'] = public_todo_state(task['_todoState'])
     # Display-only injection records are copied and normalized independently:
     # unlike content/tool facts, their stable render identity is part of the
     # projection contract and must survive hydration.  Normalize previous
@@ -1068,8 +1095,9 @@ def _task_projection(
                 projection.get('apiRounds'),
                 fallback_model_id=_fallback_model,
                 fallback_provider_id=_fallback_provider,
+                use_frozen_costs=task.get('_nativeFrozenCostProjection') is True,
             )
-            if _settled_cost is None:
+            if _settled_cost is None and task.get('_nativeFrozenCostProjection') is not True:
                 _settled_cost = compute_cost(
                     projection['usage'],
                     model_id=_fallback_model,
@@ -1128,7 +1156,7 @@ def automatic_recovery_blocker(error: Any) -> dict[str, Any] | None:
     """
     if not isinstance(error, Mapping):
         return None
-    from lib.tool_rejection import tool_rejection_descriptor
+    from lib.tool_results.tool_rejection import tool_rejection_descriptor
 
     rejection = tool_rejection_descriptor(error)
     if rejection and rejection.get('kind') == 'git_guard':
@@ -1457,10 +1485,9 @@ def _drain_queue_after_settlement(task: dict[str, Any], conversation_id: str,
     the reaper's next tick, never dropped.
     """
     try:
-        # 'failed' mirrors the v1 skip-on-error discipline (the human may
-        # want to fix something before the queued message runs); aborts and
-        # truncations drain, exactly like v1.
-        if status not in ('completed', 'interrupted', 'truncated'):
+        # Failure reports can wake the explicit Coordinator continuation policy,
+        # while ordinary human/background queues keep their skip-on-error rule.
+        if status not in ('completed', 'interrupted', 'truncated', 'failed'):
             return
         if not conversation_id:
             return
@@ -1472,17 +1499,16 @@ def _drain_queue_after_settlement(task: dict[str, Any], conversation_id: str,
         from lib.tasks_pkg.manager import task_user_id
         owner_user_id = int(task_user_id(task))
         from lib.message_queue import get_queue_depth
-        has_queued_work = get_queue_depth(
+        has_queued_work = status != 'failed' and get_queue_depth(
             conversation_id, user_id=owner_user_id) > 0
-        if not has_queued_work:
-            from lib.tasks_pkg.background_commands import conversation_has_known_commands
-            if not conversation_has_known_commands(
-                    conv_id=conversation_id, user_id=owner_user_id):
-                return
         import threading
 
         def _drain():
             try:
+                if status == 'failed':
+                    from lib.project_dispatch.recovery import recover_conversation_dispatch
+                    recover_conversation_dispatch(conversation_id, user_id=owner_user_id, coordinator_only=True)
+                    return
                 from lib.message_queue import (dispatch_next_queued,
                                                dispatch_completed_background_batch)
                 new_task_id = (dispatch_next_queued(
@@ -1495,6 +1521,10 @@ def _drain_queue_after_settlement(task: dict[str, Any], conversation_id: str,
                     logger.info('[Queue] turn-native settlement drain dispatched '
                                 'queued message → task %s for conv=%s',
                                 new_task_id[:8], conversation_id[:8])
+                else:
+                    from lib.project_dispatch.recovery import recover_conversation_dispatch
+                    recover_conversation_dispatch(
+                        conversation_id, user_id=owner_user_id)
             except Exception as exc:
                 logger.debug('[Queue] turn-native settlement drain failed conv=%s: %s',
                              conversation_id[:8], exc)
@@ -1783,7 +1813,8 @@ def _record_task_event_locked(
         and time.monotonic() < oversize_retry_at
     )
     background_receipt = event_kind == 'background_command_inject'
-    slim = not terminal and not background_receipt and (
+    effect_intent = event_kind == 'tool_effect'
+    slim = not terminal and not background_receipt and not effect_intent and (
         oversize_circuit_open
         or (
             event_kind in _COALESCIBLE_EVENT_KINDS
@@ -1986,7 +2017,7 @@ def _record_task_event_locked(
         # writable shape left (task mtdx825fjmhmx5 burned 2.5h emitting
         # rejected full-projection terminal frames).
         if (not _is_frame_overflow_error(exc)
-                or task_event is None or slim or background_receipt):
+                or task_event is None or slim or background_receipt or effect_intent):
             raise
         retry_count = int(task.get('_turnProjectionOversizeCount') or 0) + 1
         task['_turnProjectionOversizeCount'] = retry_count
@@ -2586,7 +2617,7 @@ def _notify_abort_busy_projection(conversation_id: Any, user_id: Any) -> None:
         logger.debug('[turns] abort busy-notify failed: %s', exc)
 
 
-def abort_attempt(attempt_id: str, *, user_id: Any) -> dict[str, Any]:
+def abort_attempt(attempt_id: str, *, user_id: Any, withdraw_dispatch: bool = True) -> dict[str, Any]:
     user_id = require_user_id(user_id, context='abort turn attempt')
     row = _turn_client().query(
         'turn.attempt.get', {'attempt_id': attempt_id, 'user_id': user_id,
@@ -2600,6 +2631,9 @@ def abort_attempt(attempt_id: str, *, user_id: Any) -> dict[str, Any]:
     task_id = str(row.get('taskId') or '')
     status = row['status']
     if status not in LIVE_ATTEMPT_STATUSES:
+        if withdraw_dispatch:
+            from lib.project_dispatch.recovery import revoke_conversation_dispatch
+            revoke_conversation_dispatch(row['conversationId'], user_id=user_id)
         return {'attemptId': attempt_id, 'status': status, 'alreadyTerminal': True}
     queue_binding = row.get('queueBinding')
     if isinstance(queue_binding, dict) and queue_binding.get('queueId'):
@@ -2610,6 +2644,9 @@ def abort_attempt(attempt_id: str, *, user_id: Any) -> dict[str, Any]:
         cancelled = cancel_queued_turn_pair(
             str(row['conversationId']), str(queue_binding['queueId']),
             user_id=user_id)
+        if withdraw_dispatch:
+            from lib.project_dispatch.recovery import revoke_conversation_dispatch
+            revoke_conversation_dispatch(row['conversationId'], user_id=user_id)
         return {
             'attemptId': attempt_id,
             'status': 'cancelled',
@@ -2643,6 +2680,9 @@ def abort_attempt(attempt_id: str, *, user_id: Any) -> dict[str, Any]:
              'toolRounds': projection.get('toolRounds') or [],
              'segments': projection.get('segments') or [],
              'model': projection.get('model') or ''}, {'type': 'aborted'})
+    if withdraw_dispatch:
+        from lib.project_dispatch.recovery import revoke_conversation_dispatch
+        revoke_conversation_dispatch(row['conversationId'], user_id=user_id)
     _notify_abort_busy_projection(row.get('conversationId'), user_id)
     return {'attemptId': attempt_id, 'status': 'abort_signaled'}
 
@@ -2727,10 +2767,16 @@ def build_api_messages(
         selected, config, conversation_id=conversation_id, user_id=owner_user_id,
         validated_context=context)
     if context and context.get('covered') and not prefix_messages:
-        # Policy/media/provider recovery refusal must rebuild the whole selected
-        # history, never accidentally submit only the validated suffix.
-        return build_api_messages(conversation_id, turn_id, config,
-                                  user_id=owner_user_id, allow_model_replay=False)
+        # Policy/media/provider refusal needs the full selected history, never
+        # just the validated suffix. The explicit cold read reports replay_disabled;
+        # retain the original refusal which actually caused this rebuild.
+        refusal = config.get('_modelReplayStatus', 'unknown')
+        rebuilt = build_api_messages(conversation_id, turn_id, config,
+                                     user_id=owner_user_id, allow_model_replay=False)
+        config['_modelReplayStatus'] = refusal
+        logger.warning('[ModelReplay] conv=%s restore=%s fallback=full_history messages=%d',
+                       conversation_id[:8], refusal, len(rebuilt) if rebuilt is not None else 0)
+        return rebuilt
     logger.info('[ModelReplay] conv=%s restore=%s turns=%d messages=%d',
                 conversation_id[:8], config.get('_modelReplayStatus'),
                 covered, len(prefix_messages))
@@ -2967,9 +3013,9 @@ __all__ = [
     'create_attempt', 'attempt_dispatch_lock', 'claim_attempt_start',
     'dispatch_attempt_to_worker',
     'bind_task', 'mark_task_started', 'fail_start',
-    'record_task_event', 'sync_visible_run_turns',
+    'record_task_event', 'sync_visible_run_turns', 'next_progress_projection_deadline',
     'list_turns', 'get_turn', 'get_attempt', 'list_dispatchable_attempts',
-    'update_turn_projection',
+    'update_turn_projection', 'accept_live_guidance_answer',
     'create_branch_lane', 'delete_branch_lane',
     'delete_turns',
     'get_conversation_revision', 'read_events',
@@ -2977,3 +3023,24 @@ __all__ = [
     'backfill_turn_search_index', 'start_turn_search_backfill',
     'recover_running_attempts', 'cleanup_superseded_attempts', 'retry_turn_commit',
 ]
+
+
+def accept_live_guidance_answer(conversation_id: str, turn_id: str, *,
+                                guidance_id: str, response: str, command_id: str,
+                                expected_projection_revision: int, user_id: Any) -> dict[str, Any]:
+    """Commit the exact question's answer before any process-local wake."""
+    user_id = require_user_id(user_id, context='answer live human guidance')
+    from lib.storage import StorageError
+    try:
+        return _turn_client(write=True).command('turn.projection.update', {
+            'conversation_id': conversation_id, 'turn_id': turn_id, 'user_id': user_id,
+            'expected_projection_revision': expected_projection_revision,
+            'human_guidance_answer': {'guidanceId': guidance_id, 'response': response,
+                                      'commandId': command_id},
+        }, f'human-guidance:{turn_id}:{command_id}')
+    except StorageError as exc:
+        if exc.code == 'database_not_found':
+            raise LifecycleNotFound(str(exc)) from exc
+        if exc.code == 'database_conflict':
+            raise LifecycleConflict(exc.code, str(exc)) from exc
+        raise

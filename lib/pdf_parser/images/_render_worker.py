@@ -53,6 +53,7 @@ def main():
             pymupdf, sys.stdin.buffer.read(), dpi=int(sys.argv[1]),
             max_pages=None if sys.argv[2] == '-' else int(sys.argv[2]), sink=_FrameSink())
     except Exception as error:
+        print('main failed:', type(error).__name__, file=sys.stderr)
         completion['error'] = {'type': type(error).__name__, 'message': str(error)[:4096]}
     sys.stdout.buffer.write(bytes(FRAME_HEADER_BYTES))
     sys.stdout.buffer.write(json.dumps(completion).encode('utf-8'))

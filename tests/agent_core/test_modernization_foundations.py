@@ -127,15 +127,13 @@ def test_idempotency_metrics_expose_capacity_retention_and_evictions(
         assert metric in text
 
 
-def test_memory_rate_limit_metrics_expose_both_resident_bounds(monkeypatch):
+def test_spending_metrics_expose_state_without_count_quota(monkeypatch):
     import routes.metrics as metrics
 
-    monkeypatch.setattr('lib.rate_limit_api.api_rate_limit_stats', lambda: {
+    monkeypatch.setattr('lib.rate_limit.rate_limit_api.api_rate_limit_stats', lambda: {
         'entries': 7,
-        'capacity': 1_024,
-        'capacity_evictions': 6,
     })
-    monkeypatch.setattr('lib.rate_limit_store.rate_limit_store_stats', lambda: {
+    monkeypatch.setattr('lib.rate_limit.rate_limit_store.rate_limit_store_stats', lambda: {
         'backend': 'memory',
         'buckets': 12,
         'bucket_capacity': 1_024,
@@ -151,8 +149,6 @@ def test_memory_rate_limit_metrics_expose_both_resident_bounds(monkeypatch):
     text = '\n'.join(out)
     for metric in (
         'tofu_rate_limit_buckets 7',
-        'tofu_rate_limit_bucket_capacity 1024',
-        'tofu_rate_limit_bucket_evictions_total 6',
         'tofu_rate_limit_memory_buckets 12',
         'tofu_rate_limit_memory_bucket_capacity 1024',
         'tofu_rate_limit_memory_events 80',
@@ -163,6 +159,8 @@ def test_memory_rate_limit_metrics_expose_both_resident_bounds(monkeypatch):
         'tofu_rate_limit_memory_event_rejections_total 5',
     ):
         assert metric in text
+    assert 'tofu_rate_limit_bucket_capacity' not in text
+    assert 'tofu_rate_limit_bucket_evictions_total' not in text
 
 
 def test_task_metrics_expose_registry_and_event_retention(monkeypatch):

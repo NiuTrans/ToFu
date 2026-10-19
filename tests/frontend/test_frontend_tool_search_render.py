@@ -185,6 +185,40 @@ check('exception_and_clean_no_match_have_distinct_copy',
     toolName: 'web_search', searchDiag: { reason: 'no_matches' },
   }, [], header).includes('Try different keywords'));
 
+const deadlineZeroHtml = presentation.renderSearchHtml({
+  toolName: 'web_search', searchDiag: { reason: 'deadline' },
+}, [], header);
+check('deadline_is_not_presented_as_no_matches',
+  deadlineZeroHtml.includes('timed out')
+  && deadlineZeroHtml.includes('time budget expired')
+  && !deadlineZeroHtml.includes('Try different keywords'));
+const noUsableEvidenceHtml = presentation.renderSearchHtml({
+  toolName: 'web_search', searchDiag: { reason: 'no_usable_evidence' },
+}, [], header);
+check('no_usable_evidence_is_not_presented_as_no_matches',
+  noUsableEvidenceHtml.includes('no usable evidence')
+  && noUsableEvidenceHtml.includes('not proof')
+  && !noUsableEvidenceHtml.includes('Try different keywords'));
+const batchFallbackHtml = presentation.renderSearchHtml({
+  toolName: 'web_search',
+  searchDiags: [
+    { query: 'a', reason: 'no_matches' },
+    { query: 'b', reason: 'deadline' },
+  ],
+}, [], header);
+check('batch_searchDiags_recovers_primary_failing_reason',
+  batchFallbackHtml.includes('timed out')
+  && !batchFallbackHtml.includes('Try different keywords'));
+const batchAllNoMatchHtml = presentation.renderSearchHtml({
+  toolName: 'web_search',
+  searchDiags: [
+    { query: 'a', reason: 'no_matches' },
+    { query: 'b', reason: 'no_matches' },
+  ],
+}, [], header);
+check('batch_all_no_matches_stays_clean_no_matches',
+  batchAllNoMatchHtml.includes('Try different keywords'));
+
 const webResults = Object.freeze([
   Object.freeze({
     _q: 'safe <query>', title: 'Safe <title>', source: 'PDF',
@@ -498,7 +532,7 @@ def test_tool_search_presentation_owner_contract() -> None:
     passes = [
         line for line in process.stdout.splitlines() if line.startswith('PASS ')
     ]
-    assert len(passes) == 35, process.stdout
+    assert len(passes) == 39, process.stdout
 
 
 def test_retained_dispatch_wires_search_owner_and_filters_gateway() -> None:

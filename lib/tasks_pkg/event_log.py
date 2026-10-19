@@ -29,10 +29,10 @@ from lib.event_envelope import (
     EventFormatError,
     check_event_readable,
 )
-from lib.storage_projection import (
+from lib.storage.storage_projection import (
     project_event_usage_for_storage,
 )
-from lib.task_event_contract import (
+from lib.task_replay.task_event_contract import (
     STRUCTURAL_EVENT_TYPES,
     TASK_EVENT_STREAMING_RETENTION_MS,
     TASK_EVENT_STRUCTURAL_RETENTION_MS,

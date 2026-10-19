@@ -19,9 +19,13 @@ The matrix pins three product decisions:
 
 from __future__ import annotations
 
+import shlex
+
 import pytest
 
-from lib.project_mod.command_analysis import _git_guard_classify
+from lib.project_mod.command_analysis import (
+    _git_guard_classify, git_integration_option_evidence, git_invocation_parts,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -424,3 +428,223 @@ def test_ordinary_integration_is_not_discard_policy(command):
                                      'git cherry-pick -X ours HEAD', 'git merge --strategy=ours feature'])
 def test_forced_or_recovery_integration_keeps_discard_policy(command):
     assert _git_guard_classify(command) == 'tree_destroying'
+
+
+@pytest.mark.parametrize('command', [
+    'git merge --no-ff fix/workspace-message-receipts-20261010 -m "merge: concise agent-message surfaces and verified checkout contention docs"',
+    'git merge --no-ff topic --message "ordinary merge"',
+    'git merge topic --message=--abort',
+    'git merge topic -m --autostash',
+    'git merge topic -m"--strategy=ours"',
+    'git merge --no-autostash --log=3 --stat topic -m message',
+    'git merge topic -m first -m second',
+    'git merge -- --abort',
+    'git cherry-pick -s -x HEAD',
+    'git cherry-pick -m 1 HEAD',
+    'git cherry-pick -m2 HEAD',
+    'git cherry-pick --mainline=1 HEAD',
+    'git revert -m 1 HEAD',
+    'git revert -s --no-edit HEAD',
+])
+def test_integration_option_values_and_verb_specific_flags(command):
+    assert _git_guard_classify(command, require_known_segments=True) == 'safe_write'
+
+
+@pytest.mark.parametrize('command', [
+    'git merge -s ours topic',
+    'git merge -sours topic',
+    'git merge -m message --abort',
+    'git merge --message=message --autostash topic',
+    'git cherry-pick -m 1 --abort',
+])
+def test_integration_strategy_or_real_recovery_flags_require_presence_policy(command):
+    assert _git_guard_classify(command) == 'tree_destroying'
+
+
+@pytest.mark.parametrize('command', [
+    'git merge --message',
+    'git merge topic -m',
+    'git merge --future-option topic',
+    'git cherry-pick -m 0 HEAD',
+    'git cherry-pick -m --abort HEAD',
+    'git cherry-pick --mainline',
+    'git cherry-pick --mainline=invalid HEAD',
+    'git revert -m -1 HEAD',
+    'git merge --log=unknown topic',
+])
+def test_integration_unknown_or_invalid_options_use_attended_fallback(command):
+    # Intentional policy change: uncertainty is approval, not tree discard.
+    assert _git_guard_classify(command) is None
+    assert _git_guard_classify(command, require_known_segments=True) is None
+
+
+def test_dynamic_merge_message_cannot_mint_ordinary_write_receipt():
+    assert _git_guard_classify(
+        'git merge topic -m "$(touch marker)"', require_known_segments=True) is None
+
+
+@pytest.mark.parametrize('args, expected', [
+    ([], ('', [])),
+    (['-C/repo', '-ccolor.ui=false', 'merge', '--no-ff', 'topic'],
+     ('merge', ['--no-ff', 'topic'])),
+    (['-C', '', '-c', 'core.bare', 'status'], ('status', [])),
+    (['--git-dir=/repo/.git', '--work-tree=/repo', '--namespace=ns',
+      '--config-env=core.editor=EDITOR', 'status', '--short'], ('status', ['--short'])),
+    (['--exec-path=/bin', '-P', 'status'], ('status', [])),
+    (['--exec-path'], ('', [])),
+    (['-C', '--abort', 'merge', '-m', '--abort', 'topic'],
+     ('merge', ['-m', '--abort', 'topic'])),
+])
+def test_git_invocation_parts_consumes_only_validated_globals(args, expected):
+    original = list(args)
+    assert git_invocation_parts(args) == expected
+    assert args == original
+    # Syntax acceptance alone cannot authorize configured helpers.
+    if expected[0] and any(x.startswith(('--config-env', '--exec-path'))
+                           or x == 'core.bare' for x in args):
+        assert _git_guard_classify('git ' + shlex.join(args)) is None
+
+
+@pytest.mark.parametrize('args', [
+    ['-C'], ['-c'], ['--git-dir'], ['--work-tree='], ['--namespace='],
+    ['--unknown=anything', 'status'], ['--unknown', 'status'],
+    ['-cnot-a-key', 'status'], ['-c', '=value', 'status'],
+    ['--config-env=core.editor=', 'status'], ['--config-env=core.editor', 'status'],
+    ['-C', '\x00', 'status'], [''],
+])
+def test_invalid_global_syntax_is_not_inferred_readonly(args):
+    assert git_invocation_parts(args) is None
+
+
+@pytest.mark.parametrize('command', [
+    'git -C', 'git -c', 'git --git-dir', 'git --unknown=value status',
+    'git --unknown=value merge topic', 'git --work-tree= status',
+    'git -cnot-a-key status',
+])
+def test_invalid_globals_keep_attended_fallback(command):
+    assert _git_guard_classify(command) is None
+    assert _git_guard_classify(command, require_known_segments=True) is None
+
+
+@pytest.mark.parametrize('verb', ['merge', 'cherry-pick', 'revert'])
+@pytest.mark.parametrize('option', [
+    '--cleanup strip', '--cleanup=whitespace', '--cleanup=verbatim',
+    '--cleanup scissors', '--cleanup=default', '--rerere-autoupdate',
+    '--no-rerere-autoupdate', '--commit', '--no-commit', '--no-gpg-sign',
+])
+def test_common_known_integration_option_modes(verb, option):
+    assert _git_guard_classify(
+        f'git {verb} {option} HEAD', require_known_segments=True) == 'safe_write'
+
+
+@pytest.mark.parametrize('option', [
+    '--ff', '--no-ff', '--empty=drop', '--empty=keep', '--empty=stop',
+    '--empty drop', '--empty keep', '--empty stop', '--keep-redundant-commits',
+])
+def test_cherry_pick_known_empty_and_fast_forward_modes(option):
+    assert _git_guard_classify(
+        f'git cherry-pick {option} HEAD', require_known_segments=True) == 'safe_write'
+
+
+@pytest.mark.parametrize('verb', ['merge', 'cherry-pick', 'revert'])
+@pytest.mark.parametrize('option', [
+    '--future-option', '--cleanup', '--cleanup=unknown', '--cleanup --abort',
+    '--cleanup=', '--strategy', '--strategy=', '--strategy --abort',
+    '--strategy-option', '--strategy-option=', '--rerere-autoupdate=true',
+    '--no-gpg-sign=key', '--ff=true',
+])
+def test_unknown_missing_or_invalid_integration_option_is_approval(verb, option):
+    assert _git_guard_classify(f'git {verb} HEAD {option}') is None
+
+
+@pytest.mark.parametrize('command', [
+    'git merge --empty=keep topic', 'git revert --empty=drop HEAD',
+    'git revert --ff HEAD', 'git revert -x HEAD',
+    'git cherry-pick --message=hello HEAD', 'git cherry-pick --empty=',
+    'git cherry-pick --empty=unknown HEAD', 'git cherry-pick --empty --abort HEAD',
+])
+def test_integration_options_do_not_leak_across_verbs(command):
+    assert _git_guard_classify(command) is None
+
+
+@pytest.mark.parametrize('verb', ['merge', 'cherry-pick', 'revert'])
+@pytest.mark.parametrize('option', ['--abort', '--quit', '--skip', '--autostash',
+                                   '--strategy=ours', '--strategy-option=ours', '-Xours'])
+@pytest.mark.parametrize('unknown', ['--future-option', '--cleanup=invalid', '--mainline=0'])
+def test_real_integration_danger_outranks_unknown_but_cannot_mint_receipt(verb, option, unknown):
+    for arguments in (f'{unknown} {option}', f'{option} {unknown}'):
+        command = f'git {verb} {arguments} HEAD'
+        assert _git_guard_classify(command) == 'tree_destroying'
+        assert _git_guard_classify(command, require_known_segments=True) is None
+
+
+@pytest.mark.parametrize('verb', ['merge', 'cherry-pick', 'revert'])
+@pytest.mark.parametrize('option', ['-S', '-Skey', '--gpg-sign', '--gpg-sign=key'])
+def test_signing_is_external_approval_not_tree_discard(verb, option):
+    command = f'git {verb} {option} HEAD'
+    assert _git_guard_classify(command) is None
+    assert _git_guard_classify(command, require_known_segments=True) is None
+    assert _git_guard_classify(command + ' --abort') == 'tree_destroying'
+    assert _git_guard_classify(command + ' --abort', require_known_segments=True) is None
+
+
+def test_integration_evidence_omits_consumed_values_and_separates_reasons():
+    evidence = git_integration_option_evidence(
+        'merge', ['-m', '--abort', '--cleanup=bad', '--future', '--strategy=ours', '-Ssecret'])
+    assert evidence.risky_options == ('--strategy',)
+    assert evidence.unknown_options == ('--cleanup', '--future')
+    assert evidence.external_options == ('-S',)
+    assert git_integration_option_evidence('merge', ['--', '--abort']).risky_options == ()
+
+
+@pytest.mark.parametrize('arguments', [
+    '-n', '--dry-run', '-nd', '-ndx', '-nff', '-ffn', '-qndX',
+    '-n -e --abort', '-n --exclude=--interactive', '-ne--abort',
+    '-n -- --interactive', '--dry-run --no-force',
+    '--no-dry-run --dry-run', '-n --quiet -- path',
+])
+def test_clean_proven_preview_is_readonly(arguments):
+    from lib.project_mod.command_analysis import _is_destructive_command
+    command = f'git clean {arguments}'
+    assert _git_guard_classify(command, require_known_segments=True) == 'readonly'
+    assert not _is_destructive_command(command)
+
+
+@pytest.mark.parametrize('arguments', [
+    '-n -i', '-ni', '--interactive -n', '-n --no-interactive',
+    '-n --future', '-nz', '-n -e', '-n --exclude', '-n --dry-run=true',
+    '-n --force=yes', '-n --exclud=pattern',
+])
+def test_clean_interactive_unknown_or_missing_value_is_approval(arguments):
+    assert _git_guard_classify(f'git clean {arguments}') is None
+    assert _git_guard_classify(f'git clean {arguments}', require_known_segments=True) is None
+
+
+@pytest.mark.parametrize('arguments', [
+    '', '-fd', '-ffdx', '-e --dry-run', '-e--dry-run', '-- --dry-run',
+    '--exclude=--dry-run', '-n --no-dry-run',
+])
+def test_actual_clean_and_option_looking_values_are_not_preview(arguments):
+    assert _git_guard_classify(f'git clean {arguments}') == 'tree_destroying'
+
+
+@pytest.mark.parametrize('command', [
+    'git -C "$ROOT" merge topic', 'git merge --cleanup="$MODE" topic',
+    'git cherry-pick --empty="$(touch marker)" HEAD', 'git clean -n "$PATHSPEC"',
+    'git clean -n && echo "$(touch marker)"',
+    'echo `touch marker` && git merge --cleanup=strip topic',
+    'git clean -n > tracked-file',
+])
+def test_expanded_safe_syntax_never_authorizes_dynamic_or_output_writes(command):
+    assert _git_guard_classify(command) is None
+    assert _git_guard_classify(command, require_known_segments=True) is None
+
+
+@pytest.mark.parametrize('prefix', [
+    'git clean -n "$PATHSPEC"', 'git cherry-pick --empty="$MODE" HEAD',
+    'git merge --cleanup=invalid topic',
+])
+def test_new_unknown_forms_preserve_chain_risk_and_strict_receipt(prefix):
+    for command in (prefix + ' && git merge --abort', 'git merge --abort && ' + prefix):
+        assert _git_guard_classify(command) == 'tree_destroying'
+        assert _git_guard_classify(command, require_known_segments=True) is None

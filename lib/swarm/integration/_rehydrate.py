@@ -257,6 +257,8 @@ def _continue_execution_parent(config: dict, task: dict) -> dict:
 
     from lib.agent_core.execution_budget import share_execution_budget
     share_execution_budget(task, parent)
+    from lib.tasks_pkg.native_parent import share_native_parent
+    share_native_parent(task, parent)
     return parent
 
 
@@ -317,6 +319,32 @@ def _rehydrate_one_locked(sess: dict, *, resume_task: dict | None = None,
                     'authority; retained checkpoints remain inspectable', swarm_key)
         return False
     config = deepcopy(config)
+    if 'native_execution_required' in config and type(config['native_execution_required']) is not bool:
+        raise ValueError('Invalid durable native delegation binding')
+    if config.get('native_execution_required'):
+        agents = {row.get('agent_id'): row for row in sess.get('agents') or []}
+        def needs_actor_checkpoint(spec):
+            agent = agents.get(spec.id, {})
+            return (agent.get('status') not in ('completed', 'failed', 'cancelled')
+                or (resume_task is not None and agent.get('status') == 'cancelled'
+                    and (agent.get('result') or {}).get('recovery_reason') == 'parent_stop'
+                    and not spec.retained_agent_id))
+        if any(needs_actor_checkpoint(spec) for spec in specs):
+            # Transcript checkpoints cannot authorize native actor takeover.
+            # Keep the original evidence until whole-tree handoff is admitted.
+            if resume_task is not None:
+                from lib.error_envelope import make_envelope
+                # The accepted lineage lacks a complete actor accounting cut.
+                # Preserve known spend; common admission and settlement read
+                # these existing completeness fields, including uncapped runs.
+                resume_task['_executionActualsComplete'] = False
+                resume_task['_checkpointUsageComplete'] = False
+                error = RuntimeError('Native delegated recovery requires acknowledged actor checkpoints; no worker resumed')
+                error._user_message = make_envelope('execution_token_usage_unknown',
+                    source='swarm-recovery', detail=str(error), retryable=False)
+                raise error
+            logger.info('[Swarm:%s] native actor takeover unavailable; evidence retained', swarm_key)
+            return False
     execution_context = {}
     execution_parent = resume_task
     all_tools = [] if resume_task is not None else _rebuild_tool_list(config)
@@ -419,6 +447,23 @@ def _rehydrate_one_locked(sess: dict, *, resume_task: dict | None = None,
         config.setdefault('parent_cfg', {})['_principalContext'] = PrincipalContext.user(
             subject_id=f'swarm-recovery:{task_id}', owner_user_id=owner_user_id,
             tenant_id=(config.get('parent_cfg') or {}).get('_tenant_id'))
+    if resume_task is None:
+        from lib.tasks_pkg.requirement_source import restore_requirement_source
+        parent_cfg = config.get('parent_cfg') or {}
+        principal = execution_context.get('_principalContext') or parent_cfg['_principalContext']
+        if not isinstance(principal, PrincipalContext):
+            principal = PrincipalContext.from_payload(principal)
+        execution_parent = {'id': task_id, 'convId': conv_id, '_userId': owner_user_id,
+            '_tenant_id': principal.tenant_id, '_principalContext': principal.to_payload(),
+            'config': parent_cfg, **execution_context}
+        source = config.get('requirement_source')
+        if 'requirement_source' not in config and parent_cfg.get('_swarmParentTurnId'):
+            source = dict(owner=owner_user_id, tenant=str(principal.tenant_id or ''),
+                conversation=conv_id, turn=parent_cfg['_swarmParentTurnId'],
+                attempt=parent_cfg.get('_swarmParentAttemptId'),
+                task=parent_cfg.get('_swarmParentTaskId') or task_id)
+        if source is not None:
+            restore_requirement_source(execution_parent, source)
     def recovery_still_allowed():
         if resume_task is not None:
             return continue_recovery_allowed(
@@ -427,8 +472,31 @@ def _rehydrate_one_locked(sess: dict, *, resume_task: dict | None = None,
 
     def before_agent_admission():
         if not recovery_still_allowed():
-            from lib.llm_errors import AbortedError
+            from lib.llm.llm_errors import AbortedError
             raise AbortedError('Durable recovery authority cancelled before worker admission')
+
+    if resume_task is not None:
+        from lib.swarm.master import bind_assignment_context, _retained_assignment_proxy
+        for spec in specs:
+            if spec.retained_execution_context is None:
+                continue  # Legacy sessions use their original session receipt.
+            _, assignment = _retained_assignment_proxy(spec, execution_parent)
+            names = {tool_schema_name(tool) for tool in assignment['tools']}
+            selected = [tool for tool in current_catalog if tool_schema_name(tool) in names]
+            assignment_parent = execution_parent
+            if assignment['execution_context'].get('_workspaceExecution'):
+                assignment_parent = _continue_execution_parent({
+                    'workspace_execution_context': {'schema': 1, **assignment['execution_context']},
+                    'project_path': assignment['project_path'],
+                }, resume_task)
+            bind_assignment_context(spec, parent_task=assignment_parent,
+                parent_config=resume_task.get('config') or {}, all_tools=selected,
+                model=config['model'], project_path=str(
+                    (assignment_parent.get('_workspaceRootPolicy') or {}).get('primaryPath')
+                    or config['project_path']),
+                thinking_enabled=config['thinking_enabled'],
+                abort_check=lambda: bool(resume_task.get('aborted')),
+                on_agent_usage=on_agent_usage)
 
     session = MasterOrchestrator(
         task_id=task_id,
@@ -446,10 +514,7 @@ def _rehydrate_one_locked(sess: dict, *, resume_task: dict | None = None,
         max_retries=config.get('max_retries', 1),
         output_dir=output_dir,
         parent_config=config.get('parent_cfg', {}),
-        parent_task=(execution_parent if resume_task is not None else
-                     {'id': task_id, 'convId': conv_id, '_userId': owner_user_id,
-                      'config': config.get('parent_cfg') or {}, **execution_context}
-                     if execution_context else None),
+        parent_task=execution_parent,
         on_agent_usage=on_agent_usage,
 
         before_agent_admission=before_agent_admission,
@@ -488,7 +553,10 @@ def _rehydrate_one_locked(sess: dict, *, resume_task: dict | None = None,
                     session.abort()
                     _remove_session(swarm_key, preserve_durable=True)
                     return False
-            session.rehydrate_in_background(sess.get('agents') or [])
+            if resume_task is not None:
+                session.rehydrate_in_background(sess.get('agents') or [], resume_parent_stop=True)
+            else:
+                session.rehydrate_in_background(sess.get('agents') or [])
     except Exception as e:
         logger.error('[Swarm:%s] activation failed: %s', swarm_key, e, exc_info=True)
         # Submission may have preceded driver startup failure. Internal pause
@@ -521,19 +589,44 @@ def _rehydrate_one_locked(sess: dict, *, resume_task: dict | None = None,
 
 
 def resume_swarm_for_continue(task: dict, tool_list: list) -> bool:
-    """Restore only restart-interrupted descendants of this accepted attempt."""
+    """Restore safe descendants of this exact accepted restart/Stop Continue."""
     cfg = task.get('config') or {}
     if cfg.get('_turnOperation') not in ('continue', 'checkpoint_resume'):
         return False
     from lib.swarm import persistence
     from lib.swarm.integration._config import swarm_key_for
+    from lib.swarm.restart_recovery import recovery_lock, continue_recovery_allowed
+    from lib.tasks_pkg.manager import task_user_id
+    import time
+
     key = swarm_key_for(task)
-    if _get_session(key) is not None:
-        return False
-    sess = persistence.load_session(key, required=True)
-    if sess is None:
-        return False
-    return _rehydrate_one(sess, resume_task=task, tool_list=tool_list)
+    with recovery_lock(key):
+        live = _get_session(key)
+        sess = persistence.load_session(key, required=True)
+        if sess is None or not continue_recovery_allowed(sess, task, user_id=task_user_id(task)):
+            return False
+        if live is not None:
+            # Stop is signal-only. Its final writes must not overwrite the new
+            # activation; keep the stop handle until the old driver has exited.
+            if not getattr(live, '_aborted', False):
+                return False
+            driver = getattr(live, '_driver_thread', None)
+            deadline = time.monotonic() + 30.0
+            while driver is not None and driver.is_alive():
+                if task.get('aborted'):
+                    return False
+                if time.monotonic() >= deadline:
+                    raise RuntimeError('Stopped swarm is still draining; recovery was not launched')
+                driver.join(timeout=0.1)
+            scheduler = getattr(live, '_scheduler', None)
+            if scheduler is not None and scheduler.running_count:
+                raise RuntimeError('Stopped swarm still has live workers; recovery was not launched')
+            # The final checkpoint may differ from the admission row.
+            sess = persistence.load_session(key, required=True)
+            if sess is None or not continue_recovery_allowed(sess, task, user_id=task_user_id(task)):
+                return False
+            _remove_session(key, preserve_durable=True)
+        return _rehydrate_one(sess, resume_task=task, tool_list=tool_list)
 
 
 def rehydrate_swarms_on_startup() -> int:

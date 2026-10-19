@@ -66,6 +66,10 @@ export const AUTOMATION_STEP_STATES = ["pending", "dispatching", "waiting_agent"
 export type AutomationStepStatus = typeof AUTOMATION_STEP_STATES[number];
 
 export interface AutomationActionInputs {
+  readonly "project.responsibility.run": {
+  readonly "projectPath": string;
+  readonly "responsibilityId": string;
+};
   readonly "task.show_time": {
   readonly "timezone"?: string;
 };
@@ -106,6 +110,11 @@ export interface AutomationActionInputs {
 }
 
 export interface AutomationActionOutputs {
+  readonly "project.responsibility.run": {
+  readonly "responsibilityId": string;
+  readonly "occurrenceId": string;
+  readonly "status": "queued" | "running" | "succeeded" | "failed" | "cancelled";
+};
   readonly "task.show_time": {
   readonly "startedAt": number;
   readonly "timezone": string;

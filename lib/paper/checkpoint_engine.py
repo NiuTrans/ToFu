@@ -39,8 +39,8 @@ import os
 import time
 import uuid
 
-from lib.agent_loop import AbortSignal
-from lib.llm_errors import AbortedError
+from lib.agent_loop.agent_loop import AbortSignal
+from lib.llm.llm_errors import AbortedError
 from lib.llm_dispatch.api import dispatch_stream
 from lib.log import get_logger
 from lib.paper.report_artifact_keys import checkpoints_lang_key

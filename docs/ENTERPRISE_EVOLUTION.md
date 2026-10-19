@@ -90,7 +90,7 @@ If an answer is “the only process/user knows”, the design is incomplete.
 
 ## Verification owners
 
-- Storage boundaries: `tests/storage_sidecar/test_storage_process_boundary.py`,
+- Storage boundaries: `tests/storage_authority_sql/test_storage_process_boundary.py`,
   `tests/meta/test_database_access_boundary.py`, and storage certification tests.
 - Request identity: auth, owner-isolation, bridge, upload, task, and push tests.
 - Replica safety: runtime guard, lease, committed-event, and push-bus tests.

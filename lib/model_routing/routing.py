@@ -261,6 +261,24 @@ class RouteCandidateCompiler:
     def __init__(self, document: Mapping[str, Any]) -> None:
         self._indexes = _indexes(document)
 
+    def resolve_model_id(self, model_id: str) -> ModelRef:
+        """Resolve one exact logical ID using this request's validated authority.
+
+        A string selector cannot choose between creators. Keep that ambiguity
+        explicit rather than interpreting display names or provider wire IDs.
+        """
+        resolved=None
+        for reference in self._indexes['models']:
+            if reference.model_id!=model_id:
+                continue
+            if resolved is not None:
+                raise ModelRoutingError('logical model ID has multiple creator identities',
+                    kind='model_identity_ambiguous')
+            resolved=reference
+        if resolved is None:
+            raise ModelRoutingError('logical model ID is not registered',kind='model_not_found')
+        return resolved
+
     def compile_deployments(
         self,
         selection: NativeModelSelection,

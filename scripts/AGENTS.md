@@ -28,9 +28,12 @@ an undocumented second source of product policy.
   lifetimes. Redact credentials and user content.
 - Reuse application contracts and storage maintenance ports; do not copy SQL or
   lifecycle logic into a convenience script.
+- Native archives use build_native_runtime.py's named compression profiles:
+  distribution for transport, local stored gzip blocks for repeated activation.
+  Verify byte bounds after gzip closes and before exclusive publication.
 
 ## Verification
 
 Run the script's focused test and both write/check paths for a generator. For
-cross-cutting changes, run `make docs-check`, `npm run check:frontend`, or the
+cross-cutting changes, run `npm run check:frontend` or the
 specific storage/developer-runtime certification command that owns the output.

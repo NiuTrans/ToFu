@@ -14,9 +14,9 @@ from typing import Any, Callable
 from lib.storage.client import StorageClient
 from lib.storage.errors import ERROR_CODES, StorageError
 from lib.storage.protocol import canonical_json
-from lib.storage_event_policy import resolve_storage_event_budget
+from lib.storage.storage_event_policy import resolve_storage_event_budget
 from lib.log import get_logger
-from lib.storage_metric_policy import bounded_storage_metric_sample_capacity
+from lib.storage.storage_metric_policy import bounded_storage_metric_sample_capacity
 from lib.storage.event_composition import EventBatchCompositionBudget
 from lib.storage.frame_admission import FrameByteAdmission
 
@@ -282,7 +282,8 @@ class StorageEventBatcher:
         # Optional estimation cannot introduce a new admission failure.
         try:
             raw_event_json_bytes = wire_bytes - len(canonical_json({**payload, 'event': None})) + 4
-        except Exception:
+        except Exception as diagnostic_error:
+            logger.debug('_build_pending_event failure handled: %s', type(diagnostic_error).__name__)
             raw_event_json_bytes = wire_bytes
         task_id_bytes = len(task_id.encode('utf-8')) if type(task_id) is str else 2048
         if type(event) is dict:
@@ -541,6 +542,7 @@ class StorageEventBatcher:
                 try:
                     client = self._client_provider(write=True)
                 except BaseException as exc:
+                    logger.debug('_run failure handled: %s', type(exc).__name__)
                     client_error = exc
                 else:
                     # Cached capability decoding is optional performance
@@ -552,7 +554,8 @@ class StorageEventBatcher:
                         composition = reader() if callable(reader) else None
                         self._composition_budget = (
                             composition if isinstance(composition, EventBatchCompositionBudget) else None)
-                    except Exception:
+                    except Exception as diagnostic_error:
+                        logger.debug('_run failure handled: %s', type(diagnostic_error).__name__)
                         self._composition_budget = None
             batch, stop_after = self._take_batch(barrier_only=barrier_only, expected_head=expected_head)
             if not batch:

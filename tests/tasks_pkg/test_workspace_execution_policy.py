@@ -39,6 +39,8 @@ def _repo(path):
 
 @pytest.fixture
 def bindings(monkeypatch):
+
+    monkeypatch.setenv('TOFU_WORKSPACE_MODE', 'isolated')
     from lib import integration_control as control
     from lib import integration_state_repository as repository
     registered = {}
@@ -61,11 +63,16 @@ def bindings(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def clear_policy_roots():
+def clear_policy_roots(monkeypatch):
+    monkeypatch.setattr('lib.tasks_pkg.coordinator_policy.coordinator_scope',
+                        lambda *_args, **_kwargs: None)
     with config._lock:
         before_roots = deepcopy(config._conv_roots)
         before_primary = dict(config._conv_primary)
         before_cwd = dict(config._conv_cwd)
+        config._conv_roots.clear()
+        config._conv_primary.clear()
+        config._conv_cwd.clear()
     yield
     with config._lock:
         config._conv_roots.clear()
@@ -297,13 +304,15 @@ def test_acknowledged_expansion_and_label_survive_rehydration_and_eviction(tmp_p
         'canonicalRoot': str(tmp_path / 'canonical'), 'workspacePath': str(private)}]}
     monkeypatch.setattr(config, 'MAX_CONV_ROOTS', 1)
     policy = delivery.ensure_execution_roots(task)
-    label = config.add_conv_root(task['id'], str(extra), name='acknowledged', access='ro')
+    with config.execution_root_scope(task['id'], policy):
+        label = config.add_conv_root(task['id'], str(extra), name='acknowledged', access='ro')
     assert label == 'acknowledged'
     config.set_conv_roots('unrelated-peer', str(peer))
     assert task['id'] not in config._conv_roots
     delivery.ensure_execution_roots(task)
-    assert config.get_root_path(label, task['id']) == str(extra)
-    assert config.is_readonly_path(str(extra / 'f.txt'), task['id'])
+    with config.execution_root_scope(task['id'], policy):
+        assert config.get_root_path(label, task['id']) == str(extra)
+        assert config.is_readonly_path(str(extra / 'f.txt'), task['id'])
     assert str(peer) not in {state['path'] for state in policy['roots'].values()}
     with config.execution_root_scope(task['id'], policy):
         config.set_conv_roots('unrelated-peer', str(peer))

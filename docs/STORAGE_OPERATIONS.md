@@ -1,10 +1,16 @@
 # Storage operations and verification
 
+Coordinator reports keep one attention pointer per owner/project and transient publication intents; [record sizing, recovery and retention](PROJECT_COORDINATION.md#proactive-reports-and-durable-attention) belong to the shared report contract.
+
+## Knowledge publication candidates
+
+Problem: a lost committed reply triggered file rollback and left readable metadata pointing to deleted original/visual evidence. Decision: retain each call's candidate bytes once storage entry makes the outcome uncertain, including controls and both receipt retries. Pre-entry failures and positive duplicate/vanished responses still clean candidates. Successful replacement/deletion owns referenced files; uncertain, unreferenced candidates require quiescent reconciliation against the owning authority before removal. There is no automatic age-based deletion or orphan collector. Repeated unresolved publications can accumulate source/asset bytes; monitor the existing owner file roots and available disk, and never infer orphanhood from timeout or age. No worker, queue, payload copy or persistent registry is added; the witness is one call-local boolean. The native regression measures three refused evidence replacements retaining exactly three 31-byte assets (93 bytes) plus the existing 70-byte original. This is logical file-byte accounting, not allocated-block/RSS or latency admission. Alternatives rejected: unconditional rollback loses committed data; trusting only the last error forgets earlier dispatch; deleting by age can race publication. Verify `test_knowledge_publication.py` and `test_native_knowledge_publication.py`, including actual restart, idempotent retry and control failures. `system_native_knowledge_publication_20261015.json`.
+
+Knowledge directory barriers — Problem: file fsync followed by rename does not flush the containing directory entry. Decision: `file_durability.py` synchronizes changed source/asset directories and their owner/base ancestors through the already-existing durable application data root before metadata dispatch. Test overrides supply an equivalent existing anchor; a missing anchor refuses before file creation. Shared ancestors are deduplicated per call, with children before parents, including entries left by concurrent/failed creators. There is no process cache, new worker, persistent registry or additional file copy. A real native publication of 64 visual files plus one source performs five directory flushes; all bytes and metadata survive normal close/reopen. This verifies the ordering/batching contract, not power-loss behavior. On platforms without `O_DIRECTORY`, the prior file-fsync/rename path remains and this stronger guarantee is unverified. Alternatives rejected: file fsync alone misses rename durability; per-image ancestor flushing repeats identical barriers; swallowing directory errors can commit dangling evidence. Directory faults and controls stop before metadata entry and preserve previous files. Verify directory-durability and native publication tests. In the separate-root native diagnostic (seven directories), the complete barrier median was 0.180 ms for one visual and 0.185 ms for 64, over 100 samples after 20 warmups each. These nested phase clocks are not paired incremental-cost or performance admission. `system_knowledge_directory_durability_20261015.json`.
 
 ## Native loose-block read cost
 
-Real loose-block reads reuse one observed length instead of querying it twice.
-It remains an allocation hint: bounded EOF reading, actual returned size,
+Real loose-block reads reuse one observed length instead of querying it twice. It remains an allocation hint: bounded EOF reading, actual returned size,
 CRC/content hash and wrapper read-fault boundaries still apply. The bounded
 read owns only its existing call-local buffer; no worker, resident cache or
 persistent growth is added. Paired FUSE warm-read component measurement and
@@ -25,30 +31,7 @@ release returned both to zero. Method, timing limits and rationale:
 
 ## Native checkpoint record lifecycle
 
-Explicit native embedding retains one current header and one current snapshot
-per owner/task, replacing both through the existing WAL/blob authority. Header
-CAS has no permanent per-command receipt, new thread, process or task cache.
-Snapshot residency is bounded by caller-supplied bytes and retired blob/history
-versions follow existing GC/backup retention; this adapter never deletes durable
-user state. The synthetic 32 KiB tool-result test checks blob recovery and proves
-its physical document version remains 1 through release, reacquisition and begin,
-while header versions advance. This is write-avoidance evidence, not latency/RSS
-or whole-system admission. Configured outbox adds one bounded encrypted mutation per header CAS; Keep
-borrows metadata only and never reads old history. Payload admission precedes
-blob staging and the existing outbox ACK/retention lifecycle owns source growth.
-Passive replay keeps one current witness per task (source UUID/version/digest),
-committed with state; no per-command receipt history or worker is introduced.
-The 32 KiB fixture produces four source mutations; only completion contains
-history. Latest redelivery and failed sync recover atomically. This establishes
-bounded record shape and write avoidance, not end-to-end timing/RSS. Explicit
-publish_pending connects bounded fetch, passive target, the existing immutable
-engine archive and ordered source ACK; source writer is released during sink I/O.
-One archive UUID joins the latest target witness; no extra receipt log/cache,
-worker or background lifecycle is added. Existing archive byte limits and caller
-lifecycle own its retained encrypted records. The four-record fixture proves
-whole-batch lost-ACK retry leaves target version 4 and archive sequence 4.
-Archive replacement, archive-sync and source-ACK-sync cases fence or reopen before
-converging. Direct old/gapped records still refuse; cross-domain routing is pending.
+Explicit native checkpoint control retains one current header and one current snapshot per owner/task, replacing both through the existing WAL/blob authority; [paid pending-tool cost](contracts/TOOL_EFFECT_RECOVERY.md#native-paid-tool-frontier) uses that same lifecycle. Header CAS has no permanent per-command receipt, new thread, process or task cache. Embedded and daemon transports share the same journal. The daemon retains one volatile capability map and runtime UUID within its existing listener lifetime; caller forget and listener retirement reclaim capabilities; release changes the durable lease only. **Problem:** group-kill coverage could hide orphaned children. **Decision:** qualify the existing managed supervisor's close-on-exec stdin ownership pipe, which retires the daemon on parent loss; public Goal tests kill only the application PID under Strict and Normal, observe the actual daemon and native worker exit without observer kills, then verify unchanged file publication and exact original costs through automatic recovery. An external long-lived daemon can retain capabilities after client loss until explicit forget or listener retirement; disconnect alone grants no takeover. **Alternatives rejected:** killing descendants in the observer would conceal missing lifecycle ownership; inferring safe takeover from a broken socket would weaken the writer-death fence. This qualification does not admit automatic application selection. Negotiation adds no worker, connection pool or durable receipt log. A disposable strict-daemon observation ran 100 acquire/load/release/forget/refusal cycles (500 control requests): daemon threads stayed at 12, RSS changed from 7,675,904 to 8,888,320 bytes with 100 durable task headers, and the writer joined with exit 0. The 0.544 ms median cycle is a component observation, not system performance admission. A one-shot response must fit the caller bound and storage.v2 chunk-index representation before effects; existing streamed requests/replies cross the single-frame size without a separate checkpoint quota; transport loss never triggers an implicit replay. Snapshot residency is bounded by caller-supplied bytes and retired blob/history versions follow existing GC/backup retention; this adapter never deletes durable user state. Registered child receipt lifecycle and measured costs are specified in the [file-effect contract](contracts/TOOL_EFFECT_RECOVERY.md#registered-child-file-receipts). The synthetic 32 KiB tool-result test checks blob recovery and proves its physical document version remains 1 through release, reacquisition and begin, while header versions advance. This is write-avoidance evidence, not latency/RSS or whole-system admission. Configured outbox adds one bounded encrypted mutation per header CAS; Keep borrows metadata only and never reads old history. Payload admission precedes blob staging and the existing outbox ACK/retention lifecycle owns source growth. Passive replay keeps one current witness per task (source UUID/version/digest), committed with state; no per-command receipt history or worker is introduced. The 32 KiB fixture produces four source mutations; only completion contains history. Latest redelivery and failed sync recover atomically. This establishes bounded record shape and write avoidance, not end-to-end timing/RSS. Explicit publish_pending connects bounded fetch, passive target, the existing immutable engine archive and ordered source ACK; source writer is released during sink I/O. One archive UUID joins the latest target witness; no extra receipt log/cache, worker or background lifecycle is added. Existing archive byte limits and caller lifecycle own its retained encrypted records. The four-record fixture proves whole-batch lost-ACK retry leaves target version 4 and archive sequence 4. Archive replacement, archive-sync and source-ACK-sync cases fence or reopen before converging. Direct old/gapped records still refuse; cross-domain routing is pending.
 ## Embedded native checkpoint lifecycle and cost
 
 The opt-in embedded checkpoint binding shares the selected runtime authority and
@@ -102,47 +85,44 @@ only when its final model message exactly represents delivered content.
 
 Synthetic comparison: 32 rounds / 8,388,918 evidence characters / 30 calls measured 1.621 ms median and 16,656 temporary bytes on Python 3.12.13. At value one, private offset/header fields add 30/24 compact JSON bytes excluding braces/separators; no payload copy or new worker. These are comparison/storage measurements, not production cache-hit, latency or billed-savings claims.
 
-Search projection failures use independent per-scope retry feedback in
-`packages/tofu-db/src/maintenance.rs`. Problem: other maintenance work resets
-the shared idle cadence, so a persistently failing derived index can repeatedly
-rescan its source while foreground storage is under pressure. Decision: failed
-search batches wait the launch-derived maintenance interval, doubling on each
-consecutive failure up to the existing 60-second maintenance ceiling. Success
-resets only that scope. Dirty tokens remain durable until the existing exact-token
-acknowledgement; retention and overlay draining keep their original scheduling.
-`searchRetryDeferrals` and `searchMaximumFailureBackoffMilliseconds` expose the
-feedback. Warnings at failure counts 1, 2, 4, … contain only I/O kind and retry
-spacing. Alternative rejected: backing off the whole maintenance worker delays
-unrelated retention/draining and healthy owners; dropping failed dirty tokens
-would silently leave search incomplete. One in-memory retry record per admitted
-scope is owned and reclaimed by the existing worker; no thread, queue, persistent
-state, startup scan, or performance cap is added to healthy work. Tests inject a
-derived-index failure, verify unrelated maintenance proceeds, repair the index,
-and verify exact-token acknowledgement and source reopen. A zero-cost, persistent
-failure at a 250-ms scheduling cadence makes eight attempts in 60 seconds versus
-240 without feedback; this is a scheduling bound, not a production latency claim.
-Linux retry records measure 40 bytes each (2,560 bytes at 64 admitted scopes,
-excluding the Vec header/allocation rounding). Counters, limits and verification:
-[search retry feedback](evidence/tofudb_search_retry_feedback_20261008.json).
+Search projection growth and failures have independent owners. Both native
+transports mount the [common online GC](TOFUDB_ONLINE_GC.md) on the selected
+index. Per-write byte/inode reserves pause only index writes; StorageFull at
+open keeps source service ready and maintenance retries automatically. Settings
+admit a new base with the same generated geometry policy. Observe
+`system.metrics.searchGarbageCollector` and free inodes as well as free bytes.
+The 24-generation orphan regression reclaims 24 / 27 loose files while retaining
+live hits and reopen integrity. Runtime object size is 2,480 bytes including the
+opened index; collector size is 376 bytes plus one reserved 1 MiB driver stack.
+A 200-call host probe measured 37.37 microseconds median for statvfs. These are
+synthetic mounting/host measurements, not production throughput or RSS claims.
 
-Host-keyed build outputs participate in the same reuse checks. Restart builds
-keep release opt-level 3, use Thin LTO and incremental code generation, and derive
-LLVM codegen units from the launch CPU/memory worker budget; explicit Cargo
-profile overrides win. Problem: full LTO plus one codegen
-unit serialized the large engine despite many available CPUs. Alternative
-rejected: lowering optimization to debug builds would tax storage operations.
-Measured on the same 63-CPU host: a cold optimized build took 90.9s; the preceding
-production full-LTO build took 528.5s (different concurrent load, not a fixed SLA).
-Preparation reports actual stages via the existing admin approval GET's bounded
-`preparation` projection, defined in `contracts/restart_preparation_v1.json`.
-The browser observes at 2s intervals with one request in flight, stops on every
-terminal/retry transition, and shows stage plus elapsed time without invented
-compilation percentages. Compiler logs remain local. Fifty retained approval
-records bound progress storage; preparation never changes approval authority.
+`maintenance.rs` retains independent per-scope retry feedback: Problem — other
+maintenance resets idle cadence and can repeatedly rescan a failing index.
+Decision — failed search batches double the launch-derived interval up to the
+existing 60-second ceiling; success resets only that scope. Exact dirty tokens
+stay durable until acknowledgement; retention and overlay draining continue.
+`searchRetryDeferrals` and `searchMaximumFailureBackoffMilliseconds` expose
+feedback; warnings at failures 1, 2, 4, … contain only I/O kind and retry spacing.
+Alternatives rejected: backing off the whole worker delays healthy work;
+dropping failed tokens silently leaves search incomplete. One owned retry
+record per admitted scope introduces no additional retry thread or history.
+Fault tests prove unrelated maintenance proceeds, repaired indexes resume,
+and exact-token acknowledgement survives source reopen. At a 250-ms cadence,
+a zero-cost persistent failure makes eight attempts in 60 seconds versus 240
+without feedback. Linux records measure 40 bytes each (2,560 bytes at 64 scopes,
+excluding Vec allocation), a scheduling bound rather than production latency:
+search retry feedback.
 
-An unchanged build on that host took 0.785s; disposable engine/library validation
-took 2.974s. Incremental intermediates live in the existing host Cargo cache,
-retain reconstructible state only and follow Cargo session reclamation.
+Host-keyed build outputs participate in the same reuse checks. Restart builds keep release opt-level 3, use Thin LTO and incremental code generation, and derive LLVM codegen units from the launch CPU/memory worker budget; explicit Cargo profile overrides win. Problem: full LTO plus one codegen unit serialized the large engine despite many available CPUs. Alternative rejected: debug optimization would tax storage operations.
+
+Preparation reports actual stages through the existing admin approval GET's bounded `preparation` projection (`contracts/restart_preparation_v1.json`). The browser observes at 2s intervals with one request in flight, stops when the restart attempt settles or is replaced, and shows stage plus elapsed time without invented compilation percentages. Compiler logs remain local. Fifty retained approval records bound progress storage; preparation never changes approval authority.
+
+Source drift has bounded automatic recovery: up to three preparation attempts share the existing lock and 1,200-second total budget (including queue time), with a two-second pause between attempts. Only observed prepublication source changes are retried; each attempt reads the current identity and retains artifact, library, disposable semantic-probe and pin validation. The `retrying` phase and a request-scoped `recovering` flag explain that recovery is automatic and the current server is still running; the flag survives subsequent native stages so a slower poll cannot miss the recovery explanation.
+
+Continued source churn refuses before shutdown and asks users to finish the update or edits before choosing Restart again, not to clear caches or compile manually. The English/Chinese failure screen confirms Tofu remains usable and directs users to copy/report the diagnostic if no update is in progress or retrying fails. Configuration drift, genuine build/validation failures and cancellation fail closed; publication is never replayed with old pins. No new worker, persistent retry record or cache is introduced: temporary candidates are removed and the existing source snapshot/build cache is reused. Tests: `tests/server/test_native_engine_update.py` covers convergence, bounded churn, the shared clock, cancellation, immutable configuration and publication boundaries. See [runtime rationale](modules/infra_runtime.md).
+
+Measured on the same 63-CPU host: a cold optimized build took 90.9s versus 528.5s for the preceding full-LTO build (different concurrent load, not a fixed SLA); unchanged build 0.785s; disposable engine/library validation 2.974s. Incremental intermediates live in the existing host Cargo cache, retain reconstructible state only and follow Cargo session reclamation.
 
 Automation execution uses launch-probed `TOFU_AGENT_WORKERS` capacity with lazy
 growth and one idle claim per 250 ms; empty claims retain no command receipt.
@@ -166,7 +146,7 @@ polls; explicitly unlimited watchers retain durable audit rows and can grow.
 No extra resident thread, cache or storage backend is introduced. SQL/native
 admission both accept code-only definitions; native zero poll budgets remain zero.
 Executable checks live in `tests/scheduler/test_timer_readiness_reliability.py`,
-`tests/storage/test_storage_sidecar_contract.py`, and native semantic timer tests.
+`tests/storage/test_storage_authority_sql_contract.py`, and native semantic timer tests.
 
 Execution event metadata retains the producer's epoch-anchored monotonic
 timestamp before asynchronous observation. This adds 30 serialized bytes per
@@ -192,7 +172,7 @@ Problem: caller clocks can revive expired leases, and independent PostgreSQL
 Sidecar clocks can disagree after a UTC adjustment. Decision: native TofuDB owns
 its clock; SQLite shares its backend clock; PostgreSQL worker operations require
 an optional PostgreSQL 17+ server module under
-`lib/storage_sidecar/native_worker_clock/`. One lazy named dynamic shared-memory
+`lib/storage_authority_sql/native_worker_clock/`. One lazy named dynamic shared-memory
 state owns the random server epoch and atomic clock floors. The adapter scopes
 that epoch by database OID. Connection/pool turnover preserves authority; server
 restart revokes it. Alternatives rejected: caller time, wall time alone,
@@ -306,40 +286,17 @@ proof that pressure came from bytes alone. Unreadable records fail explicitly. L
 enumeration under insertion/deletion. Alternative rejected: offsets or client
 accumulation repeatedly scan/retain growing catalogs and lose stable key seeks.
 
-Native engine updates are prepared before lifecycle shutdown. The preparation
-process has one 1,200-second total deadline (1,230-second caller ceiling), a
-600-second maximum lock wait, 8 MiB subprocess logs, and bounded HTTPS downloads.
-Work uses the remaining total time after lock acquisition; compilation retains
-30 seconds for identity, semantic probes and publication. A shorter caller
-deadline always wins. Problem: independent 600-second work/compiler caps discarded
-unused queue time and timed out healthy compilation. Decision: share the fixed
-total clock, not extend it. Alternatives rejected: increasing the total timeout
-blindly or renewing a full work budget after a contested lock would weaken bounds. Source compilation
-uses an owned input snapshot and the smaller of launch-probed effective CPUs
-and available GiB of memory as its worker count (minimum one; explicit Cargo
-worker overrides remain). One reconstructible `target/update-build` cache is
-reused; staging sources/downloads and logs are released on every outcome.
-The existing deployment owner retains rollback binaries and updates content
-pins. Candidate semantic probes use disposable authorities with live connection
-locators cleared. In a local debug validation, hashing the source took 37 ms
-and the three semantic probes completed in 3.5 s; these are preparation
-measurements, not production latency claims. Compiler/process groups are
-terminated and reaped on deadline or cancellation. A failed preparation does
-not stop a live worker or change backend selection.
-Source attestation uses SHA-256 over `tofu-db-source-v2\0` followed by sorted
-logical UTF-8 path keys, NUL, an unsigned 64-bit little-endian byte length, and
-exact file bytes. The root key prefix is always `tofu-db/`; dependency prefixes
-are the normalized Cargo-relative snapshot locations. Inputs include each
-transitive path crate's manifest, existing lockfile/build script, `src/**/*.rs`
-and `.cargo` files, including optional, target, build and dev dependencies.
-Existing explicit package include selection is retained (for publishable crates):
-literal included files plus Cargo manifests/lockfiles replace the default source
-selection; `.cargo` configuration remains included. This selection is not a
-complete Cargo glob implementation.
-Malformed manifests and logical path collisions fail preparation. Rust
-`packages/tofu-db/build.rs` and Python `serverctl_pkg/native_engine.py` share
-this contract; `tests/server/test_native_engine_identity.py` compiles the real
-build script and checks relocation, configuration and transitive edits.
+Problem: whole-file source hashing retained large tokenizer or contract buffers during native preparation and verification. Decision: the Python fingerprint owner streams each retained input with reads bounded to 1 MiB, preserving the existing v2 path/length/exact-byte protocol and compiled build identity. It reads only the descriptor's original byte length plus an EOF witness; truncation, growth or changed size/mtime/ctime refuses that fingerprint. Manifest parsing retains its child timeout, failure isolation and operation-local memo. Alternatives rejected: whole-file buffers tie memory to the largest retained input; cross-call digest caches can hide edits; substituting per-file digests would break the compiled identity protocol. This is preparation memory behavior, not workload performance admission. See the `system_native_provenance_streaming_20261016.json` for exact-output diagnostics, retained adverse component timing and mutation-failure checks.
+
+Native engine updates are prepared before lifecycle shutdown. The preparation process has one 1,200-second total deadline (1,230-second caller ceiling), a 600-second maximum lock wait, 8 MiB subprocess logs, and bounded HTTPS downloads. Work uses the remaining total time after lock acquisition; compilation retains 30 seconds for identity, semantic probes and publication. A shorter caller deadline always wins. Problem: independent 600-second work/compiler caps discarded unused queue time and timed out healthy compilation. Decision: share the fixed total clock, not extend it. Alternatives rejected: increasing the total timeout blindly or renewing a full work budget after a contested lock would weaken bounds. Source compilation uses an owned input snapshot and the smaller of launch-probed effective CPUs and available GiB of memory as its worker count (minimum one; explicit Cargo worker overrides remain). One reconstructible `target/update-build` cache is reused; staging sources/downloads and logs are released on every outcome. The existing deployment owner retains rollback binaries and updates content pins. Candidate semantic probes use disposable authorities with live connection locators cleared. In a local debug validation, hashing the source took 37 ms and the three semantic probes completed in 3.5 s; these are preparation measurements, not production latency claims. Compiler/process groups are terminated and reaped on deadline or cancellation. A failed preparation does not stop a live worker or change backend selection. Source attestation uses SHA-256 over `tofu-db-source-v2\0` followed by sorted logical UTF-8 path keys, NUL, an unsigned 64-bit little-endian byte length, and exact file bytes. The root key prefix is always `tofu-db/`; dependency prefixes are the normalized Cargo-relative snapshot locations. Inputs include each transitive path crate's manifest, existing lockfile/build script, `src/**/*.rs` and `.cargo` files, including optional, target, build and dev dependencies. Existing explicit package include selection is retained (for publishable crates): literal included files plus Cargo manifests/lockfiles replace the default source selection; `.cargo` configuration remains included. This selection is not a complete Cargo glob implementation. Project-root `include_str!`/`include_bytes!` inputs are declared once in the engine manifest's `package.metadata.tofu.external-inputs` list. Both fingerprint owners hash their exact bytes under `@external/` keys. Preparation mirrors them at the same relative depth, preserving unchanged mtimes; its private ledger prunes only previously copied inputs. Missing files, traversal, symlinks and unowned target collisions fail preparation. New external compile references must join this list. Problem: crate-only snapshots omitted runtime schema and version inputs. Decision: declare the shared external closure in Cargo metadata; keep Cargo's crate selection unchanged. Alternatives: copying all contracts needlessly invalidates builds; parsing Rust macros cannot reliably cover generated paths. Verification: the identity/update/preparation neighbors passed 84 checks; the final identity suite passed 10 checks including maintained literal coverage, real Rust relocation/edit builds and unowned-target preservation. A fresh owned snapshot compiled the complete binary and embedded-mimalloc library offline in 46.56 seconds; compiled identity matched the maintained source fingerprint. No running application or storage backend was changed. Malformed manifests and logical path collisions fail preparation. Rust `packages/tofu-db/build.rs` and Python `serverctl_pkg/native_engine.py` share this contract; `tests/server/test_native_engine_identity.py` compiles the real build script and checks relocation, configuration and transitive edits.
+
+### Isolated native test preparation
+
+Problem: lifecycle preparation publishes managed artifacts and synchronizes `.env`; tests must not mutate a running deployment. Decision: `python3 -m serverctl_pkg.native_engine --project "$PWD" --prepare-only /tmp/tofu-native-test-artifacts` uses existing source/build/candidate-validation owners without reading or synchronizing dotenv, selecting a backend or restarting services. The output directory must not exist and must be outside the source checkout. Append `--candidate /absolute/path/to/tofu-db` to certify those exact bytes without any rebuild fallback. Otherwise compilation is explicit and potentially expensive; toolchain/profile settings come only from the command environment.
+
+Private snapshots/compiler targets are removed on success or failure; certified binary/library, content pins and provenance remain in the new output directory. Failed runs may leave their new output directory; retry with a fresh path. Source identity, library compatibility, disposable semantic probes and post-probe source rechecking remain mandatory; publication reuses the deployment owner with `no_env_sync=True`. Normal lifecycle preparation is unchanged. Alternatives rejected: bypassing freshness or borrowing a live deployment to avoid compilation.
+
+Run `TOFU_TEST_TOFUDB_BIN=/tmp/tofu-native-test-artifacts/tofu-db python3 -m pytest tests/server/test_native_engine_isolated.py -q` to select an explicit source-certified test artifact. Pytest never builds implicitly: it validates source identity before project imports and replaces inherited binary/content-pin values only in its process; embedded transport also requires the paired library. Existing per-worker disposable storage roots remain authoritative. Unit regressions mock compilation and semantic probes, not source identity or publication.
 
 Problem: root-only compiled identity omitted runtime/vendor edits, while
 physical-path closure hashing changed when `tofu-db` became `update-source`.
@@ -362,29 +319,7 @@ confirms model consumption or the user cancels delivery. A collective workflow
 row is added only after all known commands finish and publish; startup and the
 existing maintenance tick rebuild missed wakes without a new worker or timer.
 
-The complete JSON-safe request freezes before the first enqueue: owner,
-conversation, command identity, message, timestamp and configuration. The
-bounded command registry retains it for maintenance retries; explicit POSIX
-background commands fsync `delivery.json` in their existing record directory
-before enqueue, then delete it only after acknowledgement. Restart recovery
-loads the identical envelope. Foreground handoffs retain their process-local
-recovery limit. Freezing only the command ID fails when a lost ACK is retried
-with changed configuration or time; reusing just the result is insufficient.
-Completion configuration retains execution preferences/policy and excludes the
-previous attempt's `checkpoint*`, prefill, content prefix, exclusion and private
-buffers. Problem: legacy frozen envelopes copied multi-MiB checkpoints into a
-1 MiB native queue core. Decision: replay the original first; only a permanent
-size/protocol refusal permits a deterministic config projection under the same
-queue/command identity. The original `delivery.json`, result, owner and timestamp
-are never overwritten; authority fingerprint conflicts fail closed. Transient
-failures/lost ACKs continue replaying identical original bytes. Alternatives
-rejected: minting a new identity duplicates completion; discarding the original
-or truncating results destroys evidence. Maintenance retries claim one publisher
-per result, back off from 2 seconds to 5 minutes and start no further publication
-after a one-second tick budget; an already-started storage call retains its
-ordinary deadline. Failed controls/records remain available for later recovery. Once the queue ACK
-arrives, frozen retry bytes are released from completed-history memory; the
-ordinary delivered/headless result retention policy remains.
+The complete JSON-safe request freezes before the first enqueue: owner, conversation, command identity, message, timestamp and configuration. The bounded command registry retains it for maintenance retries; explicit POSIX background commands fsync `delivery.json` in their existing record directory before enqueue, then delete it only after acknowledgement. Restart recovery loads the identical envelope. Foreground handoffs retain their process-local recovery limit. Freezing only the command ID fails when a lost ACK is retried with changed configuration or time; reusing just the result is insufficient. Completion configuration retains execution preferences/policy and excludes the previous attempt's `checkpoint*`, prefill, content prefix, exclusion and private buffers. Problem: legacy frozen envelopes copied multi-MiB checkpoints into a 1 MiB native queue core. Decision: replay the original first; only a permanent size/protocol refusal permits a deterministic config projection under the same queue/command identity. The original `delivery.json`, result, owner and timestamp are never overwritten; authority fingerprint conflicts fail closed. Transient failures/lost ACKs continue replaying identical original bytes. Alternatives rejected: minting a new identity duplicates completion; discarding the original or truncating results destroys evidence. Maintenance retries claim one publisher per result, back off from 2 seconds to 5 minutes and start no further publication after a one-second tick budget; an already-started storage call retains its ordinary deadline. Failed controls/records remain available for later recovery. Once the queue ACK arrives, frozen retry bytes are released from completed-history memory; the ordinary delivered/headless result retention policy remains.
 
 
 `queue.list` retains legacy array modes. Background application reads use
@@ -411,7 +346,7 @@ markers); only 68,938 bytes were retained on the live event projection. These
 are durable user history, removed with explicit run deletion, not TTL cache.
 Ordinary Flow agent/iteration limits and storage frame limits still apply;
 oversize/unacknowledged receipt writes fail closed before successors dispatch.
-Recovery adds no daemon, queue or timer. A complete copied seed survives parent
+Recovery adds no daemon, queue or timer. SQL event writers, Goal sequence allocation, run transitions and deletion serialize on the exact owner/tenant/run row; separate PostgreSQL runs still progress independently. The 32 serial + 8 concurrent append probe retained exactly 40 events on each backend and joined all temporary writers; source, resource observations and the five reproduced PostgreSQL races are in `system_native_goal_authority_port_20261016.json`. Whole-Goal SQL claim/consumption uses the same Rust policy as TofuDB through one joined transaction; temporary callback/context and run-lock memoization end with that transaction. No new worker, queue or retention store is introduced. Successful consumption reclaims only the retired reconstructible actor snapshots, retaining protected headers, history, account cuts and durable receipts. `system_native_goal_sql_transaction_20261016.json` records paired rollback/lost-ACK/lifetime checks and measured rows/bytes/resources. These checks grant no release performance admission. A complete copied seed survives parent
 history deletion; an interrupted seed copy requires its parent's history and
 refuses recovery if that history is absent. Source launch claims prevent
 recreating a deleted successor. Detailed semantics live in
@@ -512,37 +447,7 @@ explicit loss list, then `tofu-db restore --backup-dir <target>
 --data-dir <fresh>`; a fatally damaged CONTROL pair fails closed instead
 of guessing.
 
-SQL deployments use `scripts/storagectl.py` for preflight, status, baseline, backup, restore,
-handoff, and integrity checks. Classic SQLite backup is page-wise. When the
-measured-local fastpath is active, backup instead asks the sole checkpoint
-owner for a deadline-bounded stable shadow generation: acknowledged commits at
-the checkpoint become one standalone database image, same-filesystem targets
-pin it with a hard link (on same-directory-link filesystems such as BeeGFS, by
-linking beside the source and atomically renaming the second name across
-directories), and a separately mounted target receives one sequential copy. Commits accepted during that image copy remain in the next WAL/backup.
-Both paths remain capacity-checked, fully integrity-verified, checksummed,
-fsynced, and atomically published; checksum reads release their scanned page
-cache best-effort. PostgreSQL backup/PITR is requested through the deployment
-platform. The distributed scheduler neither
-registers nor executes the legacy application-managed database backup tasks.
-Online and offline SQLite backup paths share one artifact policy: a job
-manifest identifies each temporary copy, expired artifacts are reclaimed only
-after their recorded process is dead, and publication retains two verified
-recovery points by default. `TOFU_STORAGE_SQLITE_BACKUP_RETENTION`,
-`TOFU_STORAGE_SQLITE_BACKUP_TEMP_TTL_SECONDS`, and
-`TOFU_STORAGE_SQLITE_BACKUP_RESERVE_BYTES` may tune those bounded personal-mode
-budgets. Before allocating a temporary copy, admission also requires the
-estimated copy plus retained same-volume verified backups and deep-clean
-rollbacks to fit `TOFU_STORAGE_RECOVERY_COPY_BUDGET_MIB`. The personal default
-is half of the launch-probed data-volume capacity, clamped to 4..512 GiB; an
-unknown probe falls back to 64 GiB, distributed mode defaults to 1 TiB, and an
-explicit override remains hard-capped at 8 TiB. A backup directory mounted on
-a different device owns a separate footprint and does not charge local
-rollback points. Successful backup results expose retained, projected, limit,
-and same-volume rollback bytes. Budget refusal creates or deletes nothing; the
-operator can use an independent backup volume or an explicit bounded override.
-One Sidecar accepts at most one full backup at a time; a concurrent request
-receives a retryable `database_busy` result.
+SQL deployments use `scripts/storagectl.py` for preflight, status, baseline, backup, restore, handoff, and integrity checks. Classic SQLite backup is page-wise. When the measured-local fastpath is active, backup instead asks the sole checkpoint owner for a deadline-bounded stable shadow generation: acknowledged commits at the checkpoint become one standalone database image, same-filesystem targets pin it with a hard link (on same-directory-link filesystems such as BeeGFS, by linking beside the source and atomically renaming the second name across directories), and a separately mounted target receives one sequential copy. Commits accepted during that image copy remain in the next WAL/backup. Both paths remain capacity-checked, fully integrity-verified, checksummed, fsynced, and atomically published; checksum reads release their scanned page cache best-effort. PostgreSQL backup/PITR is requested through the deployment platform. The distributed scheduler neither registers nor executes the legacy application-managed database backup tasks. Online and offline SQLite backup paths share one artifact policy: a job manifest identifies each temporary copy, expired artifacts are reclaimed only after their recorded process is dead, and publication retains two verified recovery points by default. `TOFU_STORAGE_SQLITE_BACKUP_RETENTION`, `TOFU_STORAGE_SQLITE_BACKUP_TEMP_TTL_SECONDS`, and `TOFU_STORAGE_SQLITE_BACKUP_RESERVE_BYTES` may tune those bounded personal-mode budgets. Before allocating a temporary copy, admission also requires the estimated copy plus retained same-volume verified backups and deep-clean rollbacks to fit `TOFU_STORAGE_RECOVERY_COPY_BUDGET_MIB`. The personal default is half of the launch-probed data-volume capacity, clamped to 4..512 GiB; an unknown probe falls back to 64 GiB, distributed mode defaults to 1 TiB, and an explicit override remains hard-capped at 8 TiB. A backup directory mounted on a different device owns a separate footprint and does not charge local rollback points. Successful backup results expose retained, projected, limit, and same-volume rollback bytes. Budget refusal creates or deletes nothing; the operator can use an independent backup volume or an explicit bounded override. One Sidecar accepts at most one full backup at a time; a concurrent request receives a retryable `database_busy` result.
 
 Fastpath may refresh a verified recovery point when the pre-publication peak
 exceeds that copy budget but the post-rotation set fits. This exception is
@@ -584,41 +489,7 @@ and filesystem-allocated totals are reported separately for operator-controlled
 retirement after an independent canonical backup. Diagnostics never delete
 those legacy artifacts.
 
-Serialized frame allocation has two independent bounds. The four-byte fixed
-header remains bounded by active RPC count; the weighted budget below counts
-JSON body bytes. The decoder reserves the declared request bytes before
-allocating and receives into one exact `bytearray`; the old fragmented
-chunk-list plus `join` retained a second full
-copy at the join boundary. In a frozen local benchmark of a 46 MiB frame split
-into 64 KiB receives (seven untraced timing trials), the retained path reduced
-traced Python peak allocation from 92.09 to 46.00 MiB and median receive time
-from 30.31 to 22.27 ms. Before response encoding, each handler reserves the
-maximum 64 MiB frame, then releases it after the loopback send. Both directions
-share `TOFU_STORAGE_RPC_INFLIGHT_MAX_MIB`; completed responses use their own
-FIFO ahead of new request bodies so resource pressure does not preferentially
-discard already-committed command results. Waits are bounded to five seconds.
-Every application/worker process independently resolves the same numeric
-profile for its shared `StorageClient` response decoder. After reading the
-four-byte header, it reserves the declared body through receive and JSON decode,
-then releases before returning the semantic result to its caller. Command
-responses use the priority FIFO; if the client-side wait expires, a read may use
-the existing retry loop, while a command remains a single ambiguous attempt.
-The budget is per process rather than a host-wide aggregate.
-On the 8 GiB reference profile this changes the serialized-buffer envelope
-from the slot-only 8 × 64 = 512 MiB to 128 MiB; the measured high-capacity
-launch profile resolves from 12 × 64 = 768 MiB to 512 MiB, and distributed mode
-from 4 GiB to 1 GiB. These are enforced admitted frame-body envelopes; one
-response serialization attempt can still exceed 64 MiB before `encode_frame`
-rejects it, so operation-level result limits remain authoritative. They are not
-claims about the decoded Python result graph, SQLite pages, kernel socket
-buffers, or a deployed RSS saving. `system.metrics.rpc` and Prometheus expose
-current/capacity/peak reservations, wait/rejection/admitted totals, and
-observed request/response byte totals and maxima. Client-process Prometheus
-series expose the same response fields. The shared admission hot path (acquire, observe,
-release) measured 1.969 µs best / 2.016 µs median over five 500,000-iteration
-loops; that is about 0.14% of the previously measured 1.41 ms median physical
-commit acknowledgement, not an end-to-end query-latency claim. It adds one
-condition object and integer counters per process, with no worker thread.
+Serialized frame allocation has two independent bounds. The four-byte fixed header remains bounded by active RPC count; the weighted budget below counts JSON body bytes. The decoder reserves the declared request bytes before allocating and receives into one exact `bytearray`; the old fragmented chunk-list plus `join` retained a second full copy at the join boundary. In a frozen local benchmark of a 46 MiB frame split into 64 KiB receives (seven untraced timing trials), the retained path reduced traced Python peak allocation from 92.09 to 46.00 MiB and median receive time from 30.31 to 22.27 ms. Before response encoding, each handler reserves the maximum 64 MiB frame, then releases it after the loopback send. Both directions share `TOFU_STORAGE_RPC_INFLIGHT_MAX_MIB`; completed responses use their own FIFO ahead of new request bodies so resource pressure does not preferentially discard already-committed command results. Waits are bounded to five seconds. Every application/worker process independently resolves the same numeric profile for its shared `StorageClient` response decoder. After reading the four-byte header, it reserves the declared body through receive and JSON decode, then releases before returning the semantic result to its caller. Command responses use the priority FIFO; if the client-side wait expires, a read may use the existing retry loop, while a command remains a single ambiguous attempt. The budget is per process rather than a host-wide aggregate. On the 8 GiB reference profile this changes the serialized-buffer envelope from the slot-only 8 × 64 = 512 MiB to 128 MiB; the measured high-capacity launch profile resolves from 12 × 64 = 768 MiB to 512 MiB, and distributed mode from 4 GiB to 1 GiB. These are enforced admitted frame-body envelopes; one response serialization attempt can still exceed 64 MiB before `encode_frame` rejects it, so operation-level result limits remain authoritative. They are not claims about the decoded Python result graph, SQLite pages, kernel socket buffers, or a deployed RSS saving. `system.metrics.rpc` and Prometheus expose current/capacity/peak reservations, wait/rejection/admitted totals, and observed request/response byte totals and maxima. Client-process Prometheus series expose the same response fields. The shared admission hot path (acquire, observe, release) measured 1.969 µs best / 2.016 µs median over five 500,000-iteration loops; that is about 0.14% of the previously measured 1.41 ms median physical commit acknowledgement, not an end-to-end query-latency claim. It adds one condition object and integer counters per process, with no worker thread.
 
 Large bounded RPC frames can leave freed allocator arenas resident after the
 handler thread exits. At the transition to zero active RPCs, the Sidecar checks
@@ -780,59 +651,7 @@ The command accepts no path or glob, holds the project lease, rejects links or
 WAL/SHM companions, quick-checks the current authority, fsyncs the deletion,
 and verifies the postcondition.
 
-For an authority created before bounded attempt frames/retention, first run the
-read-only `python3 scripts/storage_deep_clean.py --analyze`. Its
-`compaction_plan` reports live/source bytes, required reserve, available space,
-the bulk-compaction verdict, and missing deferred indexes. The deferred
-catalogue includes the attempt-retention trio
-(`idx_storage_generation_attempts_settled`,
-`idx_storage_conversation_turns_current_attempt`,
-`idx_storage_conversation_changes_attempt`) that covers the
-`turn.events.prune` / `turn.cleanup` candidate queries; without them one
-maintenance call full-scans three large tables inside the single SQLite
-writer and starves user-priority writes past their acquisition cap. The
-`tables` section
-measures exact encoded payload bytes and real row counts rather than multiplying
-a sparse `max(rowid)` by a sample average; it also exposes rowid holes and a
-64-group exact `storage_events` stream/type breakdown. The same canonical
-selectors used by offline deletion report exact settled Sidecar
-`storage_attempt_events`, legacy `attempt_events`, and streaming/structural
-`task_events` rows plus encoded bytes for the requested `--ttl-days`; invalid
-horizons fail before opening the authority. These logical
-payload totals exclude SQLite page/index overhead. All measurements share one
-60-second SQL progress deadline: a slow authority returns explicit
-`analysis_budget_exhausted` partial results instead of continuing an unbounded
-diagnostic scan. `offline_compaction_recommended` describes existing freelist
-pressure only; `offline_maintenance` combines that signal with exact expired
-transport, conditional legacy-mirror payload, deferred indexes, copy capacity,
-and one stopped-server command. A capacity-blocked verified copy returns no
-command rather than silently choosing the no-rollback low-space mode. Physical
-compaction is intentionally offline and explicit:
-`python3 scripts/storage_deep_clean.py --offline --confirm`. It acquires the
-project lease, deletes only expired transport rows, verifies a compact copy,
-and retains the pre-clean authority for operator-controlled rollback. Never run
-the offline mode while Tofu is serving, and verify free space before the
-maintenance window. While that lease is held, the lifecycle manager reports
-`maintenance` with the safe owner label/PID, queues an explicit start request
-without consuming the crash-loop budget, and starts Tofu automatically after
-the OS lock is released. The lease stamp is diagnostic only; the OS lock stays
-authoritative, so a stale `running` stamp never blocks startup. The verified
-compact copy also receives every missing deferred performance index and
-retires superseded indexes before building their replacement, so their pages
-can be reused; established authorities never build such indexes implicitly
-during startup. When `--analyze` reports only missing/obsolete deferred indexes
-and no physical compaction need, use
-`python3 scripts/storage_deep_clean.py --offline --no-vacuum --confirm`: it
-performs current transport retention and the in-place index transition under
-the same lease without allocating a second authority copy. It deliberately
-skips task-event type recovery/codec backfill and does not delete frozen legacy
-transport rows because either would create a large freelist without returning
-physical space. If a personal disk cannot hold both the compact copy and the
-old authority, first make and verify an independent backup, then use
-`python3 scripts/storage_deep_clean.py --offline --low-space --confirm`. That
-mode returns free pages in bounded in-place batches and verifies integrity plus
-authority row counts, but intentionally cannot retain an on-volume rollback
-copy.
+For an authority created before bounded attempt frames/retention, first run the read-only `python3 scripts/storage_deep_clean.py --analyze`. Its `compaction_plan` reports live/source bytes, required reserve, available space, the bulk-compaction verdict, and missing deferred indexes. The deferred catalogue includes the attempt-retention trio (`idx_storage_generation_attempts_settled`, `idx_storage_conversation_turns_current_attempt`, `idx_storage_conversation_changes_attempt`) that covers the `turn.events.prune` / `turn.cleanup` candidate queries; without them one maintenance call full-scans three large tables inside the single SQLite writer and starves user-priority writes past their acquisition cap. The `tables` section measures exact encoded payload bytes and real row counts rather than multiplying a sparse `max(rowid)` by a sample average; it also exposes rowid holes and a 64-group exact `storage_events` stream/type breakdown. The same canonical selectors used by offline deletion report exact settled Sidecar `storage_attempt_events`, legacy `attempt_events`, and streaming/structural `task_events` rows plus encoded bytes for the requested `--ttl-days`; invalid horizons fail before opening the authority. These logical payload totals exclude SQLite page/index overhead. All measurements share one 60-second SQL progress deadline: a slow authority returns explicit `analysis_budget_exhausted` partial results instead of continuing an unbounded diagnostic scan. `offline_compaction_recommended` describes existing freelist pressure only; `offline_maintenance` combines that signal with exact expired transport, conditional legacy-mirror payload, deferred indexes, copy capacity, and one stopped-server command. A capacity-blocked verified copy returns no command rather than silently choosing the no-rollback low-space mode. Physical compaction is intentionally offline and explicit: `python3 scripts/storage_deep_clean.py --offline --confirm`. It acquires the project lease, deletes only expired transport rows, verifies a compact copy, and retains the pre-clean authority for operator-controlled rollback. Never run the offline mode while Tofu is serving, and verify free space before the maintenance window. While that lease is held, the lifecycle manager reports `maintenance` with the safe owner label/PID, queues an explicit start request without consuming the crash-loop budget, and starts Tofu automatically after the OS lock is released. The lease stamp is diagnostic only; the OS lock stays authoritative, so a stale `running` stamp never blocks startup. The verified compact copy also receives every missing deferred performance index and retires superseded indexes before building their replacement, so their pages can be reused; established authorities never build such indexes implicitly during startup. When `--analyze` reports only missing/obsolete deferred indexes and no physical compaction need, use `python3 scripts/storage_deep_clean.py --offline --no-vacuum --confirm`: it performs current transport retention and the in-place index transition under the same lease without allocating a second authority copy. It deliberately skips task-event type recovery/codec backfill and does not delete frozen legacy transport rows because either would create a large freelist without returning physical space. If a personal disk cannot hold both the compact copy and the old authority, first make and verify an independent backup, then use `python3 scripts/storage_deep_clean.py --offline --low-space --confirm`. That mode returns free pages in bounded in-place batches and verifies integrity plus authority row counts, but intentionally cannot retain an on-volume rollback copy.
 
 The verified-copy and low-space modes make one rowid-keyset pass over current
 `storage_events` task streams before reclaim. Explicit event types receive the
@@ -906,48 +725,7 @@ flag because deleting mirrors without returning disk space has no user-visible
 value; low-space mode requires the same explicit independent-backup contract as
 its other in-place mutations.
 
-For SQLite on a high-tail-latency FUSE/network volume, see
-[`TRB-fastpath.md`](contracts/TRB-fastpath.md). The local-front mode preserves
-`synchronous=FULL` on the serving database and activates only after filesystem,
-WAL-recovery, capacity, lineage, and measured-speedup checks. It deliberately
-has a bounded RPO if the local disk itself is lost; enabling it is an operator
-durability decision, not an automatic response to a slow mount. New activation
-never creates or restores an absent implicit `/tmp` front; it requires an
-explicit persistent-local directory. A surviving legacy temporary front stays
-readable so it can be retired without losing an unshipped crash tail. If a
-shadow exists while no verified front is selectable, startup fails closed
-rather than opening the stale classic file. The explicit offline command
-`python3 scripts/storagectl.py retire-fastpath --confirm` is the exclusive
-transition back to classic SQLite. It prefers a uniquely verified surviving
-front, WAL-checkpoints and
-integrity-checks a private candidate, publishes only after authority-UUID
-validation, retains rollback authorities, and reclaims only exact incomplete
-shipper artifacts after success. First activation uses source-fingerprinted,
-fsynced copy checkpoints and resumes only
-owned partial bytes whose classic database/WAL identity is unchanged. The
-Sidecar reports bounded startup progress to a renewable stall watchdog inside
-one immutable topology-aware hard deadline; the ASGI lifespan shares that
-deadline plus a fixed reserve, so no outer layer repeatedly kills valid work.
-Completed 256 MiB copy ranges are fsynced before their page-cache pages are
-released best-effort. The first verified shadow reuses the immutable classic
-database through a same-filesystem hard link; later generations copy the stable
-post-checkpoint database image sequentially and capture concurrent commits in
-the new WAL prefix. Thus a large authority neither needs a second durable
-database-sized allocation on first activation nor restarts page-wise backup
-work whenever the live front receives a write. Full-copy rebases are triggered
-by an adaptive WAL maintenance watermark: one quarter of the current
-authority (at least 64 MiB), capped as a trigger by two percent of launch-time
-free disk and 16 GiB. Shipper construction considers both local-front and
-durable-shadow volumes; probe failure retains the launch hint. Rebase starts
-at 15/16 of the watermark to create an early maintenance opportunity. This
-sizes copy frequency and reports pressure; it never rejects new transactions
-or guarantees a four-percent disk envelope. Every accepted transaction retains
-SQLite FULL fsync and caller deadlines. The existing ship-to-end, checkpoint,
-stable image, concurrent WAL prefix and manifest-generation owners catch up;
-physical SQLite I/O failures keep their typed failure and rollback behavior.
-Publication still verifies image-plus-tail capacity and preserves the previous
-recovery generation on failure. WAL-stat failure reports untrusted size and zero watermark headroom without
-blocking writes. Retired refusal counters remain zero for dashboards.
+For SQLite on a high-tail-latency FUSE/network volume, see [`TRB-fastpath.md`](contracts/TRB-fastpath.md). The local-front mode preserves `synchronous=FULL` on the serving database and activates only after filesystem, WAL-recovery, capacity, lineage, and measured-speedup checks. It deliberately has a bounded RPO if the local disk itself is lost; enabling it is an operator durability decision, not an automatic response to a slow mount. New activation never creates or restores an absent implicit `/tmp` front; it requires an explicit persistent-local directory. A surviving legacy temporary front stays readable so it can be retired without losing an unshipped crash tail. If a shadow exists while no verified front is selectable, startup fails closed rather than opening the stale classic file. The explicit offline command `python3 scripts/storagectl.py retire-fastpath --confirm` is the exclusive transition back to classic SQLite. It prefers a uniquely verified surviving front, WAL-checkpoints and integrity-checks a private candidate, publishes only after authority-UUID validation, retains rollback authorities, and reclaims only exact incomplete shipper artifacts after success. First activation uses source-fingerprinted, fsynced copy checkpoints and resumes only owned partial bytes whose classic database/WAL identity is unchanged. The Sidecar reports bounded startup progress to a renewable stall watchdog inside one immutable topology-aware hard deadline; the ASGI lifespan shares that deadline plus a fixed reserve, so no outer layer repeatedly kills valid work. Completed 256 MiB copy ranges are fsynced before their page-cache pages are released best-effort. The first verified shadow reuses the immutable classic database through a same-filesystem hard link; later generations copy the stable post-checkpoint database image sequentially and capture concurrent commits in the new WAL prefix. Thus a large authority neither needs a second durable database-sized allocation on first activation nor restarts page-wise backup work whenever the live front receives a write. Full-copy rebases are triggered by an adaptive WAL maintenance watermark: one quarter of the current authority (at least 64 MiB), capped as a trigger by two percent of launch-time free disk and 16 GiB. Shipper construction considers both local-front and durable-shadow volumes; probe failure retains the launch hint. Rebase starts at 15/16 of the watermark to create an early maintenance opportunity. This sizes copy frequency and reports pressure; it never rejects new transactions or guarantees a four-percent disk envelope. Every accepted transaction retains SQLite FULL fsync and caller deadlines. The existing ship-to-end, checkpoint, stable image, concurrent WAL prefix and manifest-generation owners catch up; physical SQLite I/O failures keep their typed failure and rollback behavior. Publication still verifies image-plus-tail capacity and preserves the previous recovery generation on failure. WAL-stat failure reports untrusted size and zero watermark headroom without blocking writes. Retired refusal counters remain zero for dashboards.
 
 WAL demand ownership — Problem: maintenance estimates and stat failures fenced
 writes. Decision: remove resource-admission hooks; observe watermarks.
@@ -958,7 +736,7 @@ silently select an older authority. Verify `test_storage_fastpath.py` and
 bytes above the former 1 MiB refusal threshold in 9.47 ms, then all 32 payloads
 recover after local loss. This measures local commits, not volume throughput. A physical SQLITE_FULL before
 BEGIN still fails without executing the handler or retrying blindly. Closing
-an unstarted shipper preserves startup failures; closed shippers cannot restart.
+an unstarted shipper preserves startup failures; closed shippers cannot restart. SQLite COMMIT delivery uses the existing writer and receipt owner; one replay-authority slot adds 8 inline bytes per queued job (128 → 136 in the measured interpreter), with no new worker or durable row. A 32-command disposable probe returned from 4 threads / 15 descriptors to its baseline 1 / 7 on close; RSS retained allocator residency. `system_native_sql_commit_delivery_20261016.json` includes real before/after-COMMIT faults, mixed receipts and later batch segments; this resource diagnostic does not admit throughput or defaults.
 
 After backend startup, the process-held project lease publishes a
 credential-free `tofu.storage-locator/v1` record: backend identity, the active
@@ -980,9 +758,9 @@ maintenance-watermark headroom; retired refusal counters remain zero. Required m
 readiness on a degraded, blocked, or poisoned publisher. A healthy
 deployment should alert on nonzero stall-interrupt growth, persistent user-lane
 queueing, p95 commit latency approaching the command deadline, or advancing
-ship lag/age. It should also alert before the logical outbox or sink reaches its
-byte ceiling; a full sink intentionally backpressures rather than discards
-durable history.
+ship lag/age. It should also alert on growing logical publication age and durable backlog
+bytes. Capacity hints do not backpressure business commits or delete history;
+real write/allocation failures and failed publication remain visible.
 
 The native TofuDB backend exports its own observation surface through the
 authenticated `system.health`/`system.metrics` control operations (contract
@@ -1038,7 +816,7 @@ For a storage change, verify in this order:
 3. PostgreSQL adapter contract when enabled;
 4. schema migration from the previous version;
 5. affected HTTP/application contract;
-6. storage boundary and documentation gates;
+6. storage boundary tests;
 7. representative FUSE fault/load certification for transaction changes.
 
 Never preserve an old runtime path as rollback. Recovery restores verified data
@@ -1081,7 +859,7 @@ the conservative directory path.
 
 Whole-blob positive certificates share the decoded-cache lifecycle and retain exact current immutable manifest/chunk dependencies only after a complete scoped hash. Their separate launch capacity is the hot block-cache budget /64; encoded capacities, vector/Arc metadata and bounded index records are charged. Oversize admission drops attempted pins; zero/resize/eviction releases metadata after bounded in-flight readers finish. Small bodies below 4 KiB retain the hash path. Three opt-in stages/four work dimensions add 384 fixed bytes and 104 bytes per sampled request/sample/operation aggregate. No workers, persisted state or format growth: [whole-blob ownership](TOFUDB_JSON_MATERIALIZATION.md#verified-whole-blob-dependencies).
 
-Measured whole-proof capacity is 33,554,432 bytes; six corpus entries account for 27,152 bytes, alongside 1,294,583 decoded-cache bytes. Both SDK cohorts retain 130 threads; end-of-corpus RSS means are 74,486→74,394 KiB (−92 KiB, including Python/runtime/allocator). This does not prove free metadata. Sampled active/retained bytes are 6,400/165,104 with the same two labels. Native scalar eight-caller materialized followup remains 5.0% slower; concurrency/queue costs and all adverse cohorts are retained in the [whole-blob evidence](evidence/tofudb_whole_proof_20261003.json).
+Measured whole-proof capacity is 33,554,432 bytes; six corpus entries account for 27,152 bytes, alongside 1,294,583 decoded-cache bytes. Both SDK cohorts retain 130 threads; end-of-corpus RSS means are 74,486→74,394 KiB (−92 KiB, including Python/runtime/allocator). This does not prove free metadata. Sampled active/retained bytes are 6,400/165,104 with the same two labels. Native scalar eight-caller materialized followup remains 5.0% slower; concurrency/queue costs and all adverse cohorts are retained in the `tofudb_whole_proof_20261003.json`.
 
 Published read views retain one current immutable descriptor with no permanent
 MVCC pin, worker or persisted bytes. `publishedReadView` exposes availability,
@@ -1089,7 +867,7 @@ metadata bytes, publication/reuse counts and zero owned pin handles without
 taking authority. Four optional stages and three work dimensions add 512 fixed
 counter bytes and 120 bytes per sampled request/sample/operation aggregate;
 measurements and adverse cohorts live in the
-[published-view evidence](evidence/tofudb_published_read_20261003.json).
+`tofudb_published_read_20261003.json`.
 
 Measured view-owned metadata is 1,472 bytes with zero permanent pin handles;
 SDK end-of-corpus RSS means are 76,088→74,414 KiB, with 130 threads in both
@@ -1106,7 +884,7 @@ remains. Framed builders keep owned bindings and isolated overrides. No added
 worker, persisted format or retained root belongs to this change. Two opt-in
 stages (binding preparation, pin release) and one work dimension add 256 fixed
 counter bytes and 56 bytes per sampled request/sample/operation aggregate.
-[Binding evidence](evidence/tofudb_borrowed_bindings_20261003.json) retains paired results and rejected attempts.
+`tofudb_borrowed_bindings_20261003.json` retains paired results and rejected attempts.
 
 Measured binding reuse preserves all launch data/coordinator references without
 per-request allocation; sampled preparation is 0.175 µs in mixed scalar reads.
@@ -1136,7 +914,7 @@ Three optional stages (`pin_registry_wait`, `pin_byte_reserve`,
 `pin_byte_release`) and four work dimensions add 384 fixed counter bytes and
 104 bytes per sampled request/sample/operation aggregate. Diagnostic nested
 spans overlap; registry wait includes acquisition only. Results, regressions
-and observer costs belong to [pin evidence](evidence/tofudb_pin_accounting_20261003.json).
+and observer costs belong to `tofudb_pin_accounting_20261003.json`.
 
 Problem: pin release consumed 9.419 µs per mixed scalar request in the prior
 sampled cohort; byte reservations and two releases shared the GC registry lock,
@@ -1185,7 +963,7 @@ implementation. Two stages/two work fields add 256 fixed bytes and 64 bytes per
 sampled request/sample/operation aggregate. No cache, worker, handle field or
 queued-job growth is added. Three rejected reuse/mailbox implementations,
 exact correctness/build receipts, long/short/tail regressions and observer
-costs remain in [reply evidence](evidence/tofudb_reply_reuse_20261003.json).
+costs remain in `tofudb_reply_reuse_20261003.json`.
 
 
 Embedded delivery preserves its original FIFO/byte limits, worker maximum and
@@ -1195,7 +973,7 @@ notification under the handle lock. Four opt-in edge probes cover
 No handle word, worker, reply cache or persistent growth is added. Six rejected
 wake strategies, exact default-off/observer measurements and source receipts
 live in `TOFUDB_WORKER_DELIVERY.md` and
-`evidence/tofudb_admission_lock_20261003.json`.
+`tofudb_admission_lock_20261003.json`.
 
 Final IR extraction transfers the selected result allocation and its immutable
 JSON proof after the last step. New optional `ir_result_extract` and
@@ -1257,7 +1035,7 @@ passes three disposable contract probes. The source-matched unit/process gate pa
 release. Later concurrent shared-source changes are outside that gate; historical
 tests and timing controls retain their separate source identities. Measurement and gate coverage, installed
 hashes, source ownership and live activation are retained in
-[publication evidence](evidence/tofudb_handoff_20261004.json).
+`tofudb_handoff_20261004.json`.
 
 ### Owned automation project bindings
 
@@ -1478,4 +1256,5 @@ with counts; labelling every quota as allocator failure invents a root cause.
 
 ### Compaction archive body admission
 
-Compaction archive pre/post message bodies have a dedicated 64 MiB aggregate transaction budget in `contracts/tofudb_ir_v1.json`; metadata, receipts and ordinary IR literals retain their existing bounds. Native writes use owner-bound blob documents and publish content hashes/byte counts through the compact logical outbox. Identical command IDs still validate the complete original request digest. SQL keeps the same semantic repository entry points. Suspended working snapshots reuse the existing compaction archive ring and pruning policy, with no added worker or independent retention store. The regression writes a 9 MiB UTF-8 pre-view, restarts the real authority, reads it losslessly and restores a bounded post-view; this measures storage/recovery, not provider latency.
+Compaction archive pre/post message bodies have a dedicated 64 MiB aggregate transaction budget in `contracts/tofudb_ir_v1.json`; metadata, receipts and ordinary IR literals retain their existing bounds. Native writes use owner-bound blob documents and publish content hashes/byte counts through the compact logical outbox. Identical command IDs still validate the complete original request digest. SQL keeps the same semantic repository entry points. Suspended working snapshots reuse the existing compaction archive ring and pruning policy, with no added worker or independent retention store. The regression writes a 9 MiB UTF-8 pre-view, restarts the real authority, reads it losslessly and restores a bounded post-view; this measures storage/recovery, not provider latency. Native fee producer provenance adds 48 JSON bytes per quote in the v4 wallet fixture, retained with existing durable apiRounds; it adds no worker/cache/ledger and preserves cumulative allowance evidence while charging each executor once. Explicit abandoned native journal recover uses the selected checkpoint C ABI once, after kernel-proven writer exit; accepted projection events flush before completed-frontier publication, and inflight/terminal/legacy or passive-replay journals refuse. A SIGKILL ROOT fixture measured 114 JSON bytes of current writer identity (132 bytes including its header member), overwritten at acquisition under header_bytes, with no extra worker, cache or retained history. See system_native_abrupt_recovery_20261011.json. Private SQL checkpoint callbacks add no worker, pool or cache: each task retains one header and at most one snapshot under explicit byte bounds, with full tenant/owner/task identity alongside a bounded digest key. Header-only transitions retain snapshot bytes/version. Native calls hold their code/context through SQL retirement; SQLite join_on_timeout waits for an entered writer job while preserving its timeout failure, under the existing watchdog. PostgreSQL uses its synchronous transaction and advisory lock. Read-only preview refuses before loading code. SQL checkpoint capture requires the selected, already-started outbox when configured; it never opens another backend or publisher. CAS, accepted handoff and whole Goal transactions capture their ordered locks, bounded read digests, exact private write prefixes and typed JSON/binary mutations in the same commit. Replay verifies each observation and row count in transaction order, rolls back every effect plus cursor on divergence, and preserves header-only Keep without snapshot reads. Each touched actor gains one overwritten passive fence; its header envelope is also passive so older controllers refuse it. A distinct encrypted payload codec makes older readers/publishers fail closed. SQLite/PostgreSQL replay shares logical JSON normalization and only the owned byte-length SQL expressions need dialect translation. Problem: raw mutation counts neither prove the source prefix nor prevent a recovered copy from issuing leases. Decision: authenticated ordered IO proof and passive envelopes; alternatives rejected are unchecked UPSERT replay, a second journal, automatic promotion and replay forwarding into another outbox. Source capture adds no worker/pool/cache; proof memory follows one admitted transaction and is released with it. Existing outbox retention/publication owns durable growth. The two-actor Goal fixture retains four overwritten replay fences and eight native records (152,428–153,116 encrypted bytes across both financial modes/backends); the mixed stream has 41–45 records. Header-only records stayed at 4,831 encrypted bytes for 6 KB and 120 KB snapshot bodies. A two-backend lifecycle returned from 7 threads/27 descriptors to baseline 1/7 with no child; RSS remained 86,732,800 versus initial 62,689,280 bytes, so this is cleanup evidence, not memory admission. The optional SQL application service uses generated `TOFU_STORAGE_NATIVE_CHECKPOINT` launch configuration: explicit scope, pinned installed image and document/identity ceilings (document maximum 8 MiB). No extra worker, pool or store is added. One controller per service process loads on first authenticated capability query, and failure is sticky until replacement. Close withdraws admission, wakes negotiation waiters, joins initialization and entered native calls, then permits existing outbox/backend teardown. The shared v1/v2 client retains an instance UUID and performs exactly one control attempt; expired, foreign-owner, receipt-bearing and stale controls refuse. Eight actual SQLite service cycles returned to baseline 1 thread/7 descriptors with no child; 16 private rows remained as durable state. RSS ended at 66,834,432 versus baseline 55,508,992 bytes including allocator retention, so this is cleanup evidence, not memory admission. See `system_native_sql_checkpoint_application_20261016.json`. Availability, offline cutover and performance/default admission remain separate. Evidence: SQL checkpoint outbox. Resource observations and limitations are retained in `system_native_sql_checkpoint_store_20261016.json`. Accepted SQL handoff removes only the reconstructible source snapshot while retaining its terminal header and original invoice, and adds one target header/snapshot atomically. The observed unbilled transfer retained three private rows (7,468 bytes); controller close restored the backend thread/fd counts (4/16), and backend close restored baseline (1/7), with no child process. Retained debug-process RSS increased 19,197,952 bytes including Turn setup and native code; one transfer provides no latency or memory admission. See `system_native_sql_checkpoint_lineage_20261016.json`.
+<!-- Evidence note: former docs/evidence/ artifact snapshots cited here were retired from the tree; cited JSON artifacts remain recoverable from git history. -->

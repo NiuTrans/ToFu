@@ -16,6 +16,9 @@ export interface ButtonOptions {
   variant?: ButtonVariant;
   size?: ButtonSize;
   type?: 'button' | 'submit';
+
+  /** Long localized actions may wrap at narrow widths. */
+  wrap?: boolean;
   disabled?: boolean;
   title?: string;
   onClick?: (event: MouseEvent) => void;
@@ -43,6 +46,8 @@ export function createButton(
   const button = ownerDocument.createElement('button');
   button.type = options.type ?? 'button';
   button.className = `ui-btn${VARIANT_CLASS[variant]}${SIZE_CLASS[size]}`;
+
+  if (options.wrap) button.classList.add('ui-btn--wrap');
   button.textContent = options.label;
   if (options.title) button.title = options.title;
   if (options.disabled) button.disabled = true;

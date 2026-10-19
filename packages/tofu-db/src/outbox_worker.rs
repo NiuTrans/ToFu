@@ -1,11 +1,10 @@
-//! Single bounded worker for logical-outbox sink I/O.
+//! FIFO logical-outbox sink delivery with immediate demand acceptance.
 //!
-//! Callers validate and enqueue owned publisher batches with an absolute
-//! deadline. Queue admission counts both queued and in-flight resident bytes;
-//! sink work therefore cannot exceed the configured memory budget when the
-//! worker releases the foreground authority. Shutdown stops admission and
-//! drains accepted work. An ambiguous or integrity-class sink failure closes
-//! the worker and fans the same terminal error out to every queued request.
+//! Callers validate and enqueue owned batches with an absolute deadline.
+//! No queue slot/byte settings refuse or delay accepted work. Metrics count
+//! actual queued and active residency; allocation failures stay visible.
+//! Shutdown stops acceptance and drains queued work. Ambiguous/integrity sink
+//! failures close the worker and fan the terminal error to every queued request.
 
 use std::collections::VecDeque;
 use std::io;
@@ -23,70 +22,27 @@ use crate::outbox_publisher::{
     LogicalOutboxPublisherMetrics, LogicalOutboxSink,
 };
 
-pub const MIN_OUTBOX_WORKER_QUEUE_BYTES: usize = 16 * 1024 * 1024;
-pub const MAX_OUTBOX_WORKER_QUEUE_BYTES: usize = 64 * 1024 * 1024;
-pub const MAX_OUTBOX_WORKER_QUEUE_BATCHES: usize = 4;
-const TARGET_RESIDENT_BYTES_PER_BATCH: usize = 16 * 1024 * 1024;
 const DROP_DRAIN_WAIT: Duration = Duration::from_millis(100);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LogicalOutboxWorkerConfig {
-    pub queue_batches: usize,
-    pub queue_bytes: usize,
     pub publish_budget: LogicalOutboxPublishBudget,
 }
 
 impl Default for LogicalOutboxWorkerConfig {
     fn default() -> Self {
-        Self::lean_fallback()
+        Self {
+            publish_budget: LogicalOutboxPublishBudget::default(),
+        }
     }
 }
 
 impl LogicalOutboxWorkerConfig {
-    pub const fn lean_fallback() -> Self {
-        Self {
-            queue_batches: 1,
-            queue_bytes: MIN_OUTBOX_WORKER_QUEUE_BYTES,
-            publish_budget: LogicalOutboxPublishBudget {
-                max_records: 16,
-                max_bytes: 8 * 1024 * 1024,
-            },
-        }
-    }
-
-    pub fn from_memory_headroom(memory_headroom_bytes: u64) -> Self {
-        if memory_headroom_bytes == 0 {
-            return Self::lean_fallback();
-        }
-        let queue_bytes = usize::try_from(memory_headroom_bytes / 256)
-            .unwrap_or(usize::MAX)
-            .clamp(MIN_OUTBOX_WORKER_QUEUE_BYTES, MAX_OUTBOX_WORKER_QUEUE_BYTES);
-        let queue_batches = (queue_bytes / TARGET_RESIDENT_BYTES_PER_BATCH)
-            .clamp(1, MAX_OUTBOX_WORKER_QUEUE_BATCHES);
-        Self {
-            queue_batches,
-            queue_bytes,
-            publish_budget: LogicalOutboxPublishBudget::default(),
-        }
-    }
-
     fn validate(self) -> io::Result<Self> {
         LogicalOutboxPublishBudget::new(
             self.publish_budget.max_records,
             self.publish_budget.max_bytes,
         )?;
-        if self.queue_batches == 0 || self.queue_batches > MAX_OUTBOX_WORKER_QUEUE_BATCHES {
-            return Err(invalid_input(
-                "outbox worker queue batch bound must be between 1 and 4",
-            ));
-        }
-        if self.queue_bytes < MIN_OUTBOX_WORKER_QUEUE_BYTES
-            || self.queue_bytes > MAX_OUTBOX_WORKER_QUEUE_BYTES
-        {
-            return Err(invalid_input(
-                "outbox worker queue byte bound must be between 16 and 64 MiB",
-            ));
-        }
         Ok(self)
     }
 }
@@ -148,7 +104,6 @@ struct Shared {
     config: LogicalOutboxWorkerConfig,
     state: Mutex<QueueState>,
     ready: Condvar,
-    space: Condvar,
 }
 
 pub struct LogicalOutboxWorker<S: LogicalOutboxSink + 'static> {
@@ -263,7 +218,6 @@ fn finish_request(shared: &Shared, request: &Request, outcome: &PublishResponse,
         guard.metrics.failed_batches = guard.metrics.failed_batches.saturating_add(1);
     }
     drop(guard);
-    shared.space.notify_all();
 }
 
 fn is_terminal_sink_error<S: LogicalOutboxSink>(
@@ -290,7 +244,7 @@ fn close_terminal(shared: &Shared, terminal_error: ErrorSnapshot) {
         guard.terminal_error = Some(terminal_error.clone());
     }
     guard.metrics.terminal = true;
-    let pending = guard.requests.drain(..).collect::<Vec<_>>();
+    let pending = std::mem::take(&mut guard.requests);
     let failed = pending.len() as u64;
     guard.queued_bytes = 0;
     guard.metrics.queued_batches = 0;
@@ -298,7 +252,6 @@ fn close_terminal(shared: &Shared, terminal_error: ErrorSnapshot) {
     guard.metrics.failed_batches = guard.metrics.failed_batches.saturating_add(failed);
     drop(guard);
     shared.ready.notify_all();
-    shared.space.notify_all();
     for request in pending {
         let _ = request.response.send(Err(terminal_error.clone()));
     }
@@ -373,7 +326,6 @@ impl<S: LogicalOutboxSink + 'static> LogicalOutboxWorker<S> {
                 metrics: LogicalOutboxWorkerMetrics::default(),
             }),
             ready: Condvar::new(),
-            space: Condvar::new(),
         });
         let worker_shared = Arc::clone(&shared);
         let (finished_sender, finished_receiver) = mpsc::sync_channel(1);
@@ -414,11 +366,6 @@ impl<S: LogicalOutboxSink + 'static> LogicalOutboxWorker<S> {
     ) -> io::Result<LogicalOutboxPublishTicket> {
         validate_batch(&pending, self.shared.config.publish_budget)?;
         let resident_bytes = batch_resident_bytes(&pending)?;
-        if resident_bytes > self.shared.config.queue_bytes {
-            return Err(invalid_input(
-                "logical outbox batch exceeds worker resident byte budget",
-            ));
-        }
         if Instant::now() >= deadline {
             let mut guard = state(self.shared.as_ref())?;
             guard.metrics.deadline_expirations =
@@ -428,39 +375,16 @@ impl<S: LogicalOutboxSink + 'static> LogicalOutboxWorker<S> {
         let (response_sender, response_receiver) = mpsc::sync_channel(1);
         let deadline_counted = Arc::new(AtomicBool::new(false));
         let mut guard = state(self.shared.as_ref())?;
-        loop {
-            if !guard.accepting {
-                return Err(closed_error(&guard));
-            }
-            let resident_fits = guard
-                .queued_bytes
-                .checked_add(guard.active_bytes)
-                .and_then(|bytes| bytes.checked_add(resident_bytes))
-                .is_some_and(|bytes| bytes <= self.shared.config.queue_bytes);
-            if guard.requests.len() + guard.active_batches < self.shared.config.queue_batches
-                && resident_fits
-            {
-                break;
-            }
-            let now = Instant::now();
-            if now >= deadline {
-                drop(guard);
-                mark_deadline(self.shared.as_ref(), deadline_counted.as_ref());
-                return Err(timed_out());
-            }
-            let (next_guard, timeout) = self
-                .shared
-                .space
-                .wait_timeout(guard, deadline.saturating_duration_since(now))
-                .map_err(|_| io::Error::other("logical outbox worker lock is poisoned"))?;
-            guard = next_guard;
-            if timeout.timed_out() {
-                drop(guard);
-                mark_deadline(self.shared.as_ref(), deadline_counted.as_ref());
-                return Err(timed_out());
-            }
+        if !guard.accepting {
+            return Err(closed_error(&guard));
         }
-        guard.queued_bytes += resident_bytes;
+        guard.requests.try_reserve(1).map_err(|error| {
+            io::Error::other(format!("logical outbox queue allocation failed: {error}"))
+        })?;
+        guard.queued_bytes = guard
+            .queued_bytes
+            .checked_add(resident_bytes)
+            .ok_or_else(|| invalid_input("logical outbox resident byte count overflow"))?;
         guard.requests.push_back(Request {
             pending,
             resident_bytes,
@@ -510,7 +434,6 @@ impl<S: LogicalOutboxSink + 'static> LogicalOutboxWorker<S> {
         guard.accepting = false;
         drop(guard);
         self.shared.ready.notify_all();
-        self.shared.space.notify_all();
     }
 
     pub fn shutdown_until(
@@ -615,7 +538,7 @@ mod tests {
         }
     }
 
-    fn pending(sequence: u64) -> Vec<PendingLogicalOutboxRecord> {
+    pub(super) fn pending(sequence: u64) -> Vec<PendingLogicalOutboxRecord> {
         let record = LogicalOutboxCipher::new(&[61; 32])
             .seal(
                 LogicalOutboxIdentity {
@@ -637,22 +560,6 @@ mod tests {
             record_bytes: record.encoded_len().unwrap() as u64,
             record,
         }]
-    }
-
-    #[test]
-    fn queue_budget_derives_from_headroom_and_clamps_extremes() {
-        assert_eq!(
-            LogicalOutboxWorkerConfig::from_memory_headroom(0),
-            LogicalOutboxWorkerConfig::lean_fallback()
-        );
-        assert_eq!(
-            LogicalOutboxWorkerConfig::from_memory_headroom(u64::MAX).queue_bytes,
-            MAX_OUTBOX_WORKER_QUEUE_BYTES
-        );
-        assert_eq!(
-            LogicalOutboxWorkerConfig::from_memory_headroom(u64::MAX).queue_batches,
-            MAX_OUTBOX_WORKER_QUEUE_BATCHES
-        );
     }
 
     #[test]
@@ -729,11 +636,7 @@ mod tests {
                     terminal_after_first: true,
                     restart_required: false,
                 },
-                LogicalOutboxWorkerConfig {
-                    queue_batches: 2,
-                    queue_bytes: MIN_OUTBOX_WORKER_QUEUE_BYTES,
-                    ..LogicalOutboxWorkerConfig::default()
-                },
+                LogicalOutboxWorkerConfig::default(),
             )
             .unwrap(),
         );
@@ -760,7 +663,7 @@ mod tests {
     }
 
     #[test]
-    fn active_batch_counts_against_queue_admission_and_shutdown_drains() {
+    fn caller_deadline_expires_while_fifo_sink_is_busy_and_shutdown_drains() {
         let calls = Arc::new(AtomicUsize::new(0));
         let worker = Arc::new(
             LogicalOutboxWorker::start(
@@ -797,7 +700,6 @@ mod tests {
         assert_eq!(metrics.completed_batches, 1);
         assert_eq!(metrics.deadline_expirations, 1);
         assert!(metrics.peak_resident_bytes > 0);
-        assert!(metrics.peak_resident_bytes <= MIN_OUTBOX_WORKER_QUEUE_BYTES);
         assert_eq!(metrics.resident_bytes, 0);
     }
 
@@ -811,11 +713,7 @@ mod tests {
                 terminal_after_first: false,
                 restart_required: false,
             },
-            LogicalOutboxWorkerConfig {
-                queue_batches: 2,
-                queue_bytes: MIN_OUTBOX_WORKER_QUEUE_BYTES,
-                ..LogicalOutboxWorkerConfig::default()
-            },
+            LogicalOutboxWorkerConfig::default(),
         )
         .unwrap();
         let first = worker
@@ -870,7 +768,7 @@ mod tests {
     }
 
     #[test]
-    fn concrete_engine_sink_runs_only_on_the_bounded_worker() {
+    fn concrete_engine_sink_runs_only_on_the_owned_worker() {
         let directory = tempfile::tempdir().unwrap();
         let sink_path = directory.path().join("sink");
         let sink = EngineLogicalOutboxSink::initialize(&sink_path, 7, 11, 1024 * 1024).unwrap();
@@ -886,5 +784,79 @@ mod tests {
         assert_eq!(sink.status().durable_sequence, 1);
         assert_eq!(publisher_metrics.published_records, 1);
         assert_eq!(worker_metrics.completed_batches, 1);
+    }
+}
+
+#[cfg(test)]
+mod demand_queue_tests {
+    use super::*;
+    use crate::outbox_publisher::DurableLogicalOutboxReceipt;
+    struct GateSink {
+        entered: Option<mpsc::Sender<()>>,
+        release: mpsc::Receiver<()>,
+        seen: Vec<u64>,
+    }
+    impl LogicalOutboxSink for GateSink {
+        fn append_durable(
+            &mut self,
+            record: &crate::logical_outbox::SealedLogicalOutboxRecord,
+        ) -> io::Result<DurableLogicalOutboxReceipt> {
+            if let Some(entered) = self.entered.take() {
+                entered.send(()).unwrap();
+                self.release.recv().unwrap();
+            }
+            self.seen.push(record.identity.sequence);
+            Ok(DurableLogicalOutboxReceipt {
+                tenant_id: record.identity.tenant_id,
+                owner_user_id: record.identity.owner_user_id,
+                sequence: record.identity.sequence,
+                event_id: record.event_id,
+            })
+        }
+    }
+    #[test]
+    fn blocked_sink_accepts_every_ticket_without_slot_or_byte_wait_and_drains_fifo() {
+        let (entered, blocked) = mpsc::channel();
+        let (release, released) = mpsc::channel();
+        let worker = LogicalOutboxWorker::start(
+            GateSink {
+                entered: Some(entered),
+                release: released,
+                seen: Vec::new(),
+            },
+            LogicalOutboxWorkerConfig {
+                publish_budget: LogicalOutboxPublishBudget::new(1, 1).unwrap(),
+            },
+        )
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let first = worker.enqueue(super::tests::pending(1), deadline).unwrap();
+        blocked.recv_timeout(Duration::from_secs(1)).unwrap();
+        let started = Instant::now();
+        let mut tickets = vec![first];
+        for sequence in 2..=32 {
+            tickets.push(
+                worker
+                    .enqueue(super::tests::pending(sequence), deadline)
+                    .unwrap(),
+            );
+        }
+        let enqueue_elapsed = started.elapsed();
+        let snapshot = worker.metrics().unwrap();
+        assert_eq!(snapshot.submitted_batches, 32);
+        assert_eq!(snapshot.queued_batches, 31);
+        assert!(snapshot.resident_bytes > 1);
+        release.send(()).unwrap();
+        for ticket in tickets {
+            assert_eq!(ticket.wait().unwrap().receipts.len(), 1);
+        }
+        let (sink, _, metrics) = worker.shutdown_until(deadline).unwrap();
+        assert_eq!(sink.seen, (1..=32).collect::<Vec<_>>());
+        assert_eq!(metrics.resident_bytes, 0);
+        eprintln!(
+            "outbox_demand queued=31 enqueue_us={} peak_resident_bytes={} remaining_workers=0",
+            enqueue_elapsed.as_micros(),
+            metrics.peak_resident_bytes
+        );
     }
 }

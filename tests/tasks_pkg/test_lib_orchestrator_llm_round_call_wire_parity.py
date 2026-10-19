@@ -55,7 +55,7 @@ class TestLlmRoundCallWireParity:
 
     def test_body_catches_aborted_error(self):
         src = inspect.getsource(_llm_round_call.run_llm_call_with_fallback)
-        assert "isinstance(e, AbortedError)" in src
+        assert "isinstance(e, (AbortedError, EventDeliveryCancelled))" in src
         assert "rs.exit_reason = 'user_abort'" in src
         assert "User abort caught at round" in src
 

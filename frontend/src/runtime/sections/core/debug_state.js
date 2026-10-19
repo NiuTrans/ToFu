@@ -44,8 +44,14 @@ const DebugShellState = _debugRuntimeOwner.shellState;
 runtimeScope.__tofuDiagRing = _debugRuntimeOwner.diagnosticRing;
 
 // Passive diagnostics use the canonical read service and the existing relay.
+const _responsivenessInteractions = createBrowserInteractionContext(document, () => performance.now());
+retainedCompositionLifecycle.add(() => _responsivenessInteractions.dispose());
 const _responsivenessMonitor = startBrowserResponsivenessMonitor({
   now: () => performance.now(),
+  wallNow: () => Date.now(),
+  schedule: window,
+  lifecycle: window,
+  interactionContext: (startMs, endMs) => _responsivenessInteractions.context(startMs, endMs),
   timeOriginMs: performance.timeOrigin,
   visibility: document,
   observe: (type, receive) => {
@@ -53,7 +59,7 @@ const _responsivenessMonitor = startBrowserResponsivenessMonitor({
         || !PerformanceObserver.supportedEntryTypes.includes(type)) return null;
     const observer = new PerformanceObserver((list) => receive(list.getEntries()));
     observer.observe({ type, buffered: false });
-    return () => observer.disconnect();
+    return { disconnect: () => observer.disconnect(), takeRecords: () => observer.takeRecords() };
   },
   context: () => responsivenessContext(activeConvId,
     runtimeScope.ConversationTurnRead?.state?.(activeConvId)),

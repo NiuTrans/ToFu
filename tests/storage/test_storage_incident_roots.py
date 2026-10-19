@@ -103,7 +103,7 @@ def test_task_result_checkpoint_replays_from_authority_without_receipt():
 
 
 def test_clean_none_command_result_is_not_a_permanent_receipt():
-    from lib.storage_sidecar.adapters.base import receipt_cacheable
+    from lib.storage_authority_sql.adapters.base import receipt_cacheable
 
     assert receipt_cacheable(None) is False
 
@@ -144,7 +144,7 @@ def test_watch_updates_can_cycle_back_to_an_earlier_value():
 
 def test_oversized_response_encoding_returns_a_classified_error(monkeypatch):
     from lib.storage.frame_admission import FrameByteAdmission
-    from lib.storage_sidecar import server as sidecar_server
+    from lib.storage_authority_sql import server as sidecar_server
 
     handler = object.__new__(sidecar_server._StorageHandler)
     handler.request = object()
@@ -179,7 +179,7 @@ def test_oversized_response_encoding_returns_a_classified_error(monkeypatch):
 
 
 def test_reclaim_checks_wall_budget_between_single_page_units(monkeypatch):
-    from lib.storage_sidecar.operations_pkg import _common
+    from lib.storage_authority_sql.operations_pkg import _common
 
     class FakeSession:
         backend = 'sqlite'

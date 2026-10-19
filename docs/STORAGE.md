@@ -13,7 +13,7 @@ timeout without dispatch. Existing receipt/retry authority and frame budgets rem
 slow volume I/O into a mutex polling storm; adding connections alone does not. Session lifecycle: [native sessions](STORAGE_NATIVE_SESSIONS.md).
 Retryable command backpressure uses the existing aggregate deadline with capped
 exponential backoff and stable receipt identity. Sixteen fast retries are not a
-second, shorter timeout; persistent overload still returns a classified error.
+second, shorter timeout; persistent overload still returns a classified error. `StorageClient.request_timeout_seconds` and its native counterpart expose the already configured per-request timeout without opening a session; embedded transport inherits the native value. Native Goal recovery reads this policy when no explicit I/O override is supplied, independently of terminal ACK waiting.
 
 Boot recovery freezes its attempt creation cutoff and drains bounded
 `turn.recover` transactions until no eligible work remains. Positive progress
@@ -28,10 +28,10 @@ Application calls use `StorageClient`; one selected authority owns durable state
 ```text
 route / application service / worker
   -> owner-scoped repository or semantic operation
-  -> StorageClient query | command
+  -> StorageClient query | command            (lib/storage/ — client facade)
   -> selected authority (exclusive process lease)
-     -> native storage.v2 -> Rust TofuDB
-     OR storage.v1 -> Python Sidecar -> SQLite / PostgreSQL
+     -> native storage.v2 -> Rust TofuDB      (packages/tofu-db/ — native authority)
+     OR storage.v1 -> lib/storage_authority_sql/ -> SQLite / PostgreSQL  (SQL authority)
 ```
 
 `TOFU_PERSONAL_STORAGE_BACKEND=tofudb` selects the native authority. Preserve
@@ -128,6 +128,19 @@ Settings → 数据库 (`lib/database_panel/`, `routes/api_v1/database_panel.py`
 `frontend/src/features/settings/database.ts`) is the user-facing surface of
 this authority. Its guarantees:
 
+
+The panel presents engine identity/health together, then filesystem/free-space
+facts and three independent native disclosures for Fast Path, required search
+index, and backup. Summary rows are full keyboard/touch targets; editable drafts
+and exact selectable/copyable paths remain inside their own disclosure. Lock and
+pending-restart evidence wraps rather than being clipped. The immediate-Apply
+note distinguishes this section from the modal's global Save/Cancel. Theme-token
+surfaces and gap-owned sections replace conflicting per-ID margin overrides;
+more shadowed nested cards and permanently expanded path walls were rejected.
+Browser specifications in `tests/visual/test_database_projection_settings.py`
+cover three themes, both languages, 320–1440px widths, native keyboard toggles,
+long authority/lock paths and read-only refresh preserving drafts/open folds.
+
 - A successful dual-path backup publishes the durable `lastBackup` witness
   after its stable-directory mirror and ledger complete, for both native
   directory snapshots and file snapshots. Snapshot or mirror failure records
@@ -142,7 +155,7 @@ this authority. Its guarantees:
   keeps its own data; a switch deletes nothing.
 - **Both engines have optional Fast Path, off by default.** SQLite uses capability-gated `TOFU_STORAGE_FASTPATH*`; native uses explicit `TOFU_DB_FASTPATH_DIR` ([native lifecycle](TOFUDB_FASTPATH.md)). The panel distinguishes saved next-launch configuration from actual activation and pending restart. Native local commits are Strict; remote shadow snapshots are asynchronous, so local-volume loss can lose the unreplicated tail. Native activation/fencing locks disable and relocation; exit requires offline verified export, not flipping a checkbox.
 - **TofuDB's reconstructible search projection is required and independent of Fast Path.** It has its own placement controls; changing the index never relocates the database authority. Active/pending/default paths and reset semantics follow [Database path settings](contracts/API_CONTRACT.md#database-path-settings). Before initial status resolves, the panel renders a stable loading structure with disabled actions, never a generic engine's fake state; refresh invalidates editable state and preserves only the loading structure, not stale running-state claims. Failed status disables mutations and offers retry. Normal entry performs no disk capability scan or engine artifact verification; runtime reads, placement discovery and mandatory launch admission are independent.
-- Daemon and embedded launchers share `lib/storage_sidecar/projection_paths.py`. `TOFUDB_SEARCH_PROJECTION_DIR` overrides persisted `tofudb_search_projection_dir`; custom bases receive an authority-path namespace, preventing shared-disk collisions. No authority bytes are moved or deleted.
+- Daemon and embedded launchers share `lib/storage_authority_sql/projection_paths.py`. `TOFUDB_SEARCH_PROJECTION_DIR` overrides persisted `tofudb_search_projection_dir`; custom bases receive an authority-path namespace, preventing shared-disk collisions. No authority bytes are moved or deleted.
 - Preferences are durable: hold the shared thread/advisory-process JSON lock across strict reread, field-preserving merge, private same-directory temporary write, flush → file fsync → replace → parent-directory fsync; create missing directories privately and sync parent entries. Pre-replacement failures preserve old bytes/absence. Post-replacement fsync failure raises but leaves new bytes visible; never roll back an uncertain commit or change the live index. Reread/retry reconciles it. Problem: shared `update_json_atomic(strict=True)` enforces parsing, not fsync success. Decision: reuse its locks with this local durability boundary, rather than weaken guarantees or alter all callers. Advisory coordination requires filesystem locking support.
 - Dual-path backup mirrors the authority-owned `system.backup` artifact and manifest, pruning only previously copied files. Disposable-index candidates may be ephemeral; backup candidates must exclude known ephemeral storage.
 **Decision: separate authority acceleration from index placement.** Problem: generic static switches appeared before status, then disappeared for TofuDB while the same picker became an index picker; native Fast Path existed but lacked a panel entry. Keep independent optional Fast Path, required search index and verified backup sections with explicit configured/active/pending witnesses. Reject equating search with Fast Path, claiming an absent runtime witness is active, and silently disabling a fenced native authority. Search candidates may be ephemeral because the index is reconstructible; authority/front and backup candidates may not.
@@ -154,23 +167,23 @@ this authority. Its guarantees:
 | Client API, deadlines, supervision | `lib/storage/` |
 | Native RPC client and semantic adaptation | `lib/storage/v2_client.py`, `lib/storage/v2_semantics.py` |
 | Native engine, transactions and recovery | `packages/tofu-db/src/` |
-| SQL RPC server and operation dispatch | `lib/storage_sidecar/server.py`, `operation_registry.py` |
-| Semantic operation domains | `lib/storage_sidecar/operation_domains/` |
-| Transaction implementations | `lib/storage_sidecar/operations_pkg/` |
-| Durable schema and migrations | `lib/storage_sidecar/schema.py` |
-| SQLite/PostgreSQL adaptation | `lib/storage_sidecar/adapters/` |
-| Deployment/preflight | `lib/storage_sidecar/config.py`, `preflight.py` |
-| Operator CLI | `scripts/storagectl.py`, `python -m lib.storage_sidecar.migrate`, `python -m lib.storage_sidecar.tofudb_migration_import` |
+| SQL RPC server and operation dispatch | `lib/storage_authority_sql/server.py`, `operation_registry.py` |
+| Semantic operation domains | `lib/storage_authority_sql/operation_domains/` |
+| Transaction implementations | `lib/storage_authority_sql/operations_pkg/` |
+| Durable schema and migrations | `lib/storage_authority_sql/schema.py` |
+| SQLite/PostgreSQL adaptation | `lib/storage_authority_sql/adapters/` |
+| Deployment/preflight | `lib/storage_authority_sql/config.py`, `preflight.py` |
+| Operator CLI | `scripts/storagectl.py`, `python -m lib.storage_authority_sql.migrate`, `python -m lib.storage_authority_sql.migration.tofudb_migration_import` |
 
 Protocol, schema and registry versions come from their code constants and the
 machine-readable operation catalog, not a separately maintained prose version:
-`lib/storage_sidecar/schema.py`, `lib/storage_sidecar/operation_domains/`,
+`lib/storage_authority_sql/schema.py`, `lib/storage_authority_sql/operation_domains/`,
 `contracts/storage_operations_v1.json`, and the native v2 wire contract.
 
 The native import CLI checks every source table against the declared mapping
 plan before opening its target, then repeats this gate in the import snapshot.
 Any unmapped populated table refuses operator import; table names never imply
-safe deletion. Run `python -m lib.storage_sidecar.tofudb_migration_coverage
+safe deletion. Run `python -m lib.storage_authority_sql.migration.tofudb_migration_coverage
 --source /absolute/source.db` for the JSON inventory (exit 2 means incomplete).
 Empty unknown tables remain visible. This is table coverage only: field fidelity,
 managed namespaces, replay state, target verification and cutover certification
@@ -298,12 +311,25 @@ require a command receipt written in that same transaction.
 - a read-only refusal or empty lease claim is not receipt-cached;
 - maintenance commands use the low-priority writer lane and bounded batches.
 
-Command receipt byte budgets derive from `contracts/tofudb_ir_v1.json` through
-`generated_storage_receipts.py`: stored and decoded responses are capped at
-4 MiB on both backends. Responses above 64 KiB get one private zlib level-1
-attempt and retain the smaller representation; normal incompressible content
-is not rejected by compression ratio. Oversize responses still reject and roll
-back atomically. The versioned decoder bounds output before parsing, fails
+Knowledge source/asset files precede metadata publication. `KnowledgePublicationAttempt`
+records storage-client entry monotonically across same-receipt retries; failure afterward
+may follow a commit. Only failure before every entry permits candidate deletion.
+The guarded boundary includes index preparation, source naming/writing and metadata
+conversion/encoding after returned visual ownership. Cleanup attempts every returned candidate,
+preserves the original error and records secondary cleanup failures.
+Unknown outcomes retain files; a later retry refusal cannot authorize their deletion. Successful duplicate/vanished results retain their existing cleanup semantics.
+See [candidate retention](STORAGE_OPERATIONS.md#knowledge-publication-candidates).
+On `O_DIRECTORY` platforms, knowledge publication fsyncs changed file directories
+and ancestors through the existing data-root anchor, children first and once per
+call, before metadata entry. File fsync remains strict; directory failure rolls
+back new candidates without dispatch. Other platforms retain file fsync/rename only.
+
+Command receipt encoding and admission derive from `contracts/tofudb_ir_v1.json` through
+`generated_storage_receipts.py`: stored and decoded responses have no private
+byte quota on either backend. Responses above 64 KiB get one private zlib level-1
+attempt when their length fits the existing u32 compressed header; larger
+responses retain plain JSON. Both paths retain the smaller representation.
+The versioned decoder verifies exact declared output before parsing, fails
 corrupt/unknown envelopes as `database_integrity`, and reads legacy plain JSON
 and compressed receipts. Older 64 KiB readers cannot read newly accepted large
 receipts; a binary downgrade requires a compatible reader or an upgrade backup.
@@ -546,8 +572,8 @@ Conversation Sync v3 owns turn commands, snapshots, and replay; see
   and natural-key deduplication by `(task_id, sequence)`. The 1 ms gather window
   preserves concurrent-stream amortization and commit-before-visibility.
 - Commands use `BEGIN IMMEDIATE`, caller-bounded waits, and progress-handler
-  deadlines. Rollback precedes error classification. Diagnostics publish the
-  current `begin` / `execute` / `commit` / `rollback` / `post_commit` phase.
+  deadlines. Rollback precedes error classification. A COMMIT failure may replay only with a durable receipt or a still-active transaction observed before successful rollback; absent transaction evidence means unknown delivery. Batch failures retain the exact uncertain segment: its receipt-free jobs fail once, while receipt-backed and later unexecuted jobs retain service. Raw callbacks have no implicit replay.
+  Diagnostics publish the current `begin` / `execute` / `commit` / `rollback` / `post_commit` phase. Problem: rollback after a completed COMMIT cannot undo its effects. Decision: carry receipt authority and inspect transaction state before rollback. Alternatives: unconditional batch fallback can duplicate mutations; disabling all retries would also discard proven rollback and durable-receipt recovery. See [SQLite transaction semantics](https://www.sqlite.org/lang_transaction.html) and `test_sqlite_commit_delivery.py`.
   A failed ROLLBACK on the sole writer is a writer-fatal event: it logs
   ERROR, fences the writer (new submissions and queued jobs fail fast with
   retryable `database_unavailable` "poisoned"), counts
@@ -585,35 +611,7 @@ Conversation Sync v3 owns turn commands, snapshots, and replay; see
   `incremental_vacuum(1)` can be an uninterruptible kernel/filesystem call on
   BeeGFS/NFS/FUSE. Known host-local block, memory, and container-overlay
   authorities may enter the bounded online path.
-- Eligible reclamation checks its wall budget between
-  `incremental_vacuum(1)` units.
-  A freelist of at least 1,048,576 pages that also occupies 25% of the file is
-  classified as bulk compaction: online page moves stop for that process and
-  the response points to the explicit offline deep-clean workflow.
-  Transactional retention operations are registered once with kind
-  `maintenance` and dispatched through the same backend-neutral operation
-  catalog as commands; they run at maintenance writer priority and never
-  accumulate command receipts. Task-event streaming and structural tiers use
-  six-hour and 30-day horizons respectively. By default, each tier deletes at
-  most 16 separately committed pages of 25 rows; a remaining backlog is
-  revisited in 30 seconds, while a drained backlog is probed only every five
-  minutes. The
-  mutually exclusive, age-only partial indexes make both an empty probe and
-  `ORDER BY created_at_ms LIMIT` range-bounded without scanning the other tier.
-  Streaming backlog drains before the longer-lived structural
-  tier, so one maintenance cycle cannot stack both workloads. An established
-  SQLite authority missing the v2 age-leading partial index does **not** use
-  the v1 `(stream_kind, event_type, created_at_ms)` compatibility index while
-  serving. A deleted-row limit cannot bound how long that legacy search holds
-  SQLite's sole writer on a multi-GiB event table. The semantic prune therefore
-  returns `legacy_index_offline_required` before any scan, the maintenance
-  owner disables that tier for the process, and the explicit offline
-  deep-clean/index workflow below owns legacy classification and transition.
-  An authority with neither index similarly returns `missing_index`. All
-  online retention and reclamation work shares a process-lifetime circuit:
-  if any bounded maintenance unit trips the writer watchdog, optional
-  housekeeping stops instead of repeatedly starving user/event writes;
-  restart performs one fresh probe.
+- Eligible reclamation checks its wall budget between `incremental_vacuum(1)` units. A freelist of at least 1,048,576 pages that also occupies 25% of the file is classified as bulk compaction: online page moves stop for that process and the response points to the explicit offline deep-clean workflow. Transactional retention operations are registered once with kind `maintenance` and dispatched through the same backend-neutral operation catalog as commands; they run at maintenance writer priority and never accumulate command receipts. Task-event streaming and structural tiers use six-hour and 30-day horizons respectively. By default, each tier deletes at most 16 separately committed pages of 25 rows; a remaining backlog is revisited in 30 seconds, while a drained backlog is probed only every five minutes. The mutually exclusive, age-only partial indexes make both an empty probe and `ORDER BY created_at_ms LIMIT` range-bounded without scanning the other tier. Streaming backlog drains before the longer-lived structural tier, so one maintenance cycle cannot stack both workloads. An established SQLite authority missing the v2 age-leading partial index does **not** use the v1 `(stream_kind, event_type, created_at_ms)` compatibility index while serving. A deleted-row limit cannot bound how long that legacy search holds SQLite's sole writer on a multi-GiB event table. The semantic prune therefore returns `legacy_index_offline_required` before any scan, the maintenance owner disables that tier for the process, and the explicit offline deep-clean/index workflow below owns legacy classification and transition. An authority with neither index similarly returns `missing_index`. All online retention and reclamation work shares a process-lifetime circuit: if any bounded maintenance unit trips the writer watchdog, optional housekeeping stops instead of repeatedly starving user/event writes; restart performs one fresh probe.
 - Best-effort log aggregates persist counts separately from their TTL sweep.
   Failed flushes back off exponentially to five minutes; TTL deletion runs in
   the maintenance lane and removes at most 500 indexed rows per transaction,
@@ -633,7 +631,7 @@ Conversation Sync v3 owns turn commands, snapshots, and replay; see
 - `fsync`, synchronous commit, full-page writes, primary status, schema version,
   and transaction deadlines are verified.
 - Application startup validates only. `python -m
-  lib.storage_sidecar.migrate` is the one schema migration entry point and
+  lib.storage_authority_sql.migrate` is the one schema migration entry point and
   publishes a new version only after the migration transaction commits.
 - Distributed worker claims use adapter-owned `FOR UPDATE SKIP LOCKED` row
   selection. SQLite executes the same operation inside its serialized writer
@@ -653,7 +651,7 @@ Conversation Sync v3 owns turn commands, snapshots, and replay; see
 
 ### Adaptive topology and transactional logical shadow
 
-`lib/storage_sidecar/storage_capabilities.py` is the single vocabulary for
+`lib/storage_authority_sql/storage_capabilities.py` is the single vocabulary for
 storage topology and primitive capabilities. One bounded probe reports the
 mount/filesystem class, persistence confidence, free bytes, private-file
 creation, file and directory fsync, atomic replace, exclusive locking, and a
@@ -689,7 +687,7 @@ event ID, tenant, and numeric owner. The table and segment contain ciphertext,
 codec/key identity, and non-secret routing metadata—not a second plaintext copy
 of credential/provider inputs.
 
-After commit, `lib/storage_sidecar/logical_outbox.py` wakes one bounded
+After commit, `lib/storage_authority_sql/logical_outbox.py` wakes one bounded
 publisher. It reads a small page, releases the database connection, appends and
 fsyncs through the `LogicalCommitSink` boundary, then performs a tiny ordered
 ack transaction. Network/FUSE file I/O therefore never runs while the SQLite
@@ -698,7 +696,7 @@ ack is safe: retrying the same sequence and event ID compares the canonical
 record and acknowledges it as a duplicate; a divergent reuse, gap, checksum,
 or lineage fault poisons the publisher and fails closed.
 
-The built-in sink is `lib/storage_sidecar/logical_shadow.py`. Its private,
+The built-in sink is `lib/storage_authority_sql/logical_shadow.py`. Its private,
 single-writer segments contain a checksummed lineage header and length-prefixed
 canonical semantic records with explicit tenant/user identity, command
 identity, schema/operation-registry contract, and sequence. Append fsyncs before
@@ -728,13 +726,32 @@ Activation is intentionally low-mind but never implicit durability consent:
   world-inaccessible group-rwx directory and group-rw files; existing modes
   are validated and never broadened implicitly. Payloads remain encrypted in
   either mode;
-- `TOFU_STORAGE_LOGICAL_OUTBOX_MAX_MIB`,
-  `TOFU_STORAGE_LOGICAL_SHADOW_MAX_MIB`,
-  `TOFU_STORAGE_LOGICAL_SEGMENT_MIB`,
-  `TOFU_STORAGE_LOGICAL_RECORD_MAX_MIB`, and
-  `TOFU_STORAGE_LOGICAL_PUBLISH_BATCH` are hard bounded. Defaults derive the
-  outbox from the launch-time log budget and keep every batch/record/segment
-  finite. History is never deleted merely to regain capacity.
+- `TOFU_STORAGE_LOGICAL_SEGMENT_MIB` selects a positive rotation target;
+  `TOFU_STORAGE_LOGICAL_PUBLISH_BATCH` selects a positive cursor page size.
+  Neither has a fixed upper ceiling. The former OUTBOX_MAX_MIB,
+  SHADOW_MAX_MIB and RECORD_MAX_MIB environment knobs are retired.
+  Record, outbox and total shadow sizes do not grant or deny business writes.
+  A large record owns its segment. History remains durable until its declared
+  publication/ACK lifecycle; it is never deleted to regain capacity.
+
+Problem: record/backlog quotas rolled back valid business writes, and shadow
+quotas stranded their publication. Decision: capture every replayable mutation
+and preserve complete encrypted records, using segment rotation as a work hint.
+Alternatives: increasing separate ceilings leaves the next refusal; truncating
+mutations or deleting history loses recovery evidence. SQL mutation prefixes,
+transaction atomicity, frame lengths/checksums, sequence lineage, file ownership,
+permissions, fsync and exact ACK checks remain authoritative. Reads check actual
+remaining file bytes before allocating a claimed frame; real I/O/allocation
+failures stay visible and cannot ACK unpublished records. A complete frame with
+an intact checksum and a damaged length is corruption, even at the open tail;
+recovery never truncates it as an unfinished append.
+Verification: 44 capture/shadow/replay/config checks retain a 9 MiB record,
+a complete 4,097-mutation replay into a fresh SQLite authority, exact ACK and
+legacy-hint retirement, alongside corruption/permissions/crash-tail behavior.
+A synthetic 9,437,184-byte body produces a 9,437,527-byte frame / 9,437,684-byte
+file; fsynced append took 115.50 ms with 37,750,533 bytes traced peak, excluding
+input construction, and reopen retained exact content. This measures the shadow
+writer, not encryption, database throughput or model work.
 
 Logical payload encryption reuses `TOFU_SECRET_ENCRYPTION_KEY`; distributed
 replicas must receive the same key. Personal mode uses the existing private
@@ -971,25 +988,25 @@ background producers never observe a storage outage.
   externally addressable generation attempt. Native Turn authority also keeps one compact deletion directory per Turn: at most 64 Attempts and 64 KiB, with a 16 KiB versioned tombstone containing every retained Attempt identity. Creation and lifecycle changes update it in the same OCC transaction. Turn and branch deletion use the directory to retire all historical Attempt/event and timing/dispatch state without reading blob-capable Attempt payloads; claims remain fenced for seven days. Trash capsules retain and restore only the inert directory/count identity evidence, not Attempt documents or events, so later deletion/purge releases every claim without reviving work.
 - Conversation sync replay rows: 7 days; expired cursors require a snapshot.
 
-Generic cold chat replay uses two compact semantic reads rather than exposing
-raw storage records: `task_results.replay_get` filters the requested key by
-positive `user_id` before returning status/clocks and withholds cumulative
-content/thinking unless the caller explicitly reaches the terminal page;
-`event.bounds` returns exact count/min/max cursors without materializing event
-bodies. Ordered bodies still come from bounded `event.list` pages.
+Cold chat replay uses owner-scoped `task_results.replay_get` for status/clocks
+(with terminal content/thinking opt-in), `event.bounds` for count/min/max, and
+bounded `event.list` pages for ordered bodies; raw records are not exposed.
 
-`event.list` also accepts optional `payload_types` (at most 64 strings, each
-1–128 characters): SQL selects bodies only for those event types; other rows
-retain `sequence`, `created_at_ms` and `event.type` without decoding or transferring
-payloads. Omission preserves ordinary full replay. Empty lists select metadata
-only. This projection has identical SQLite/PostgreSQL semantics and does not
-change the existing internal task-id ownership boundary or filter/page limits.
+`event.list(payload_types)` selects bodies only for those types (at most 64
+strings of 1–128 characters); other rows retain sequence/time/type without body
+decoding/transfer. Omission preserves full replay; empty lists select metadata.
+SQLite/PostgreSQL keep identical task ownership and filter/page limits.
 
-`event.latest(metadata_only:true)` likewise returns the independent final sequence,
-time and type without its body; the default remains full replay. Trace readers
-use this boundary plus a separately type-filtered terminal read when their
-200,000-row detail budget is exhausted, reporting partial `event-limit` coverage.
-Routes own neither JSON decoding nor SQL; missing/foreign task results are indistinguishable.
+`event.latest(metadata_only:true)` returns final sequence/time/type without body
+(default: full replay). After 200,000 detail rows, trace readers use it plus a
+type-filtered terminal read and report partial `event-limit` coverage. Routes own
+neither JSON decoding nor SQL; missing/foreign task results are indistinguishable.
+
+`record.list(include_value:false)` returns only key/version/updated_at_ms with
+unchanged prefix/cursor/order/scope/page bounds. SQL omits the value column;
+native reads only the document header, not JSON/blob content. Default/true keeps
+full reads; nonboolean flags fail protocol admission. Repositories use this to
+check reconstructible roster versions without hydrating dialogue.
 
 Task-result writes remain receipt-free, version-witnessed snapshots. The
 additive `tofu.task-results.checkpoint.guard/v1` mode first takes the same
@@ -1074,64 +1091,9 @@ JSON rows remain readable without migration.
 source、retention、view coverage 与 executionStatus 独立；图片原始 bytes 继续归既有 attachment authority。
 同内容重写不缩短已有有效期；到期/缺失/超额明确不可用，绝不通过重执行伪造历史证据。
 
-**Spill-origin persistence (decision 2026-09-22).** An oversized tool result
-is replaced at dispatch time by a v2 envelope whose `artifactRef` is a bare
-content digest — by construction it carries NO provenance. The in-task
-`_artifactProvenance` map (source round + tool display) lets a same-turn
-`read_tool_artifact`/`search_tool_artifact` row label itself `R54 compacted ·
-web_search: …`, but that map dies with its turn, so a cross-turn read-back
-fell back to the opaque digest label. Problem: recover the origin after the
-source turn. Decision: mirror the tiny origin record through the GENERIC
-`record.put/get` store (namespace `tool_result_artifact_origin`, keyed by
-content digest, value carrying `user_id` + `expiresAtMs`); the read boundary
-(`artifact_provenance`) consults the in-task map first, then the durable
-record when an owner is resolvable. Alternatives considered: (a) a dedicated
-`tool_result_artifact_origin.*` operation pair + owner-keyed table was
-rejected — provenance is a reconstructible advisory read-model, and
-`record.*` already owns the dual-backend-certified "small JSON by key"
-contract on both TofuDB and the SQL sidecar, so a parallel table would
-re-implement that subset (and force an IR `logicalTables` bump + new
-semantic-executor layout + differential scripts) for zero behavioural gain;
-(b) embedding the origin inside the artifact body's envelope was rejected —
-it pollutes the evidence the model reads back and breaks the content-digest
-dedup (two turns spilling identical content must share one artifact row).
-The origin record is overwrite-on-respill (latest source wins) and lazily
-expires with its artifact's TTL; a store hiccup degrades to the in-task map
-only and never fails a tool settle. TODO(enterprise): `storage_records` has
-no `user_id` column, so owner isolation is carried inside the value and
- enforced at the read boundary (the `task_results` pattern); a second real
- user requires keeping that filter and moving to an owner-keyed store.
+**Spill-origin persistence (decision 2026-09-22).** An oversized tool result is replaced at dispatch time by a v2 envelope whose `artifactRef` is a bare content digest — by construction it carries NO provenance. The in-task `_artifactProvenance` map (source round + tool display) lets a same-turn `read_tool_artifact`/`search_tool_artifact` row label itself `R54 compacted · web_search: …`, but that map dies with its turn, so a cross-turn read-back fell back to the opaque digest label. Problem: recover the origin after the source turn. Decision: mirror the tiny origin record through the GENERIC `record.put/get` store (namespace `tool_result_artifact_origin`, keyed by content digest, value carrying `user_id` + `expiresAtMs`); the read boundary (`artifact_provenance`) consults the in-task map first, then the durable record when an owner is resolvable. Alternatives considered: (a) a dedicated `tool_result_artifact_origin.*` operation pair + owner-keyed table was rejected — provenance is a reconstructible advisory read-model, and `record.*` already owns the dual-backend-certified "small JSON by key" contract on both TofuDB and the SQL sidecar, so a parallel table would re-implement that subset (and force an IR `logicalTables` bump + new semantic-executor layout + differential scripts) for zero behavioural gain; (b) embedding the origin inside the artifact body's envelope was rejected — it pollutes the evidence the model reads back and breaks the content-digest dedup (two turns spilling identical content must share one artifact row). The origin record is overwrite-on-respill (latest source wins) and lazily expires with its artifact's TTL; a store hiccup degrades to the in-task map only and never fails a tool settle. TODO(enterprise): `storage_records` has no `user_id` column, so owner isolation is carried inside the value and enforced at the read boundary (the `task_results` pattern); a second real user requires keeping that filter and moving to an owner-keyed store.
 
-**Model-facing semantic alias (decision 2026-09-22).** Problem: the sparse
-model projection of a spilled result quoted the raw `tool-result:<sha256>`
-pointer — 76 chars of random hex that tokenizes poorly and carries no
-meaning, and every `read_tool_artifact`/`search_tool_artifact` call had to
-re-quote it. Decision: storage keeps the bare digest as its ONLY key (CAS
-dedup, manifest children, signed cursor binding, and compaction anchors all
-depend on that shape), while the model-visible envelope projection carries a
-deterministic alias `tr:<slug>:<digest-prefix>` (semantic slug from the tool
-display, 8-hex digest prefix, schema stays within the 96-char ceiling). The
-alias is minted at settle time and persisted through the generic `record.*`
-store (namespace `tool_result_artifact_alias`, owner + lazy expiry in the
-value, same TODO(enterprise) caveat as the origin record); read/search
-handlers and the display relabel resolve it back to the digest BEFORE any
-storage call, so cursors keep binding the digest and a wrong alias fails
-loud (`artifact_unavailable`) instead of silently reading neighbouring
-evidence. Determinism keeps re-spills idempotent and replay/dedup
-projections stable; a same-slug same-prefix collision with different content
-lengthens the suffix (8/16/32/64, read-after-write verified, foreign rows
-never overwritten), so a wrong-content mapping is structurally impossible
-rather than merely unlikely. Mint/claim failures degrade to the digest
-projection, never failing a settle. Alternatives considered: (a) a truncated
-digest as the storage key was rejected — a collision would silently return
-the wrong evidence, strictly worse than a typed error, and would rewrite
-both backends' validators; (b) a monotonic short counter (`tr:7`) was
-rejected — it needs atomic counter state, is unstable across turns, breaks
-loop-breaker projection identity, and is no more memorable; (c) a bare
-semantic slug without hex was rejected — same-tool spills collide and a
-hallucinated slug cannot be distinguished from a wrong one; (d) re-encoding
-the digest (base32/base64) was rejected — ~20% shorter but still meaningless
-to BPE and to the model.
+**Model-facing semantic alias (decision 2026-09-22).** Problem: the sparse model projection of a spilled result quoted the raw `tool-result:<sha256>` pointer — 76 chars of random hex that tokenizes poorly and carries no meaning, and every `read_tool_artifact`/`search_tool_artifact` call had to re-quote it. Decision: storage keeps the bare digest as its ONLY key (CAS dedup, manifest children, signed cursor binding, and compaction anchors all depend on that shape), while the model-visible envelope projection carries a deterministic alias `tr:<slug>:<digest-prefix>` (semantic slug from the tool display, 8-hex digest prefix, schema stays within the 96-char ceiling). The alias is minted at settle time and persisted through the generic `record.*` store (namespace `tool_result_artifact_alias`, owner + lazy expiry in the value, same TODO(enterprise) caveat as the origin record); read/search handlers and the display relabel resolve it back to the digest BEFORE any storage call, so cursors keep binding the digest and a wrong alias fails loud (`artifact_unavailable`) instead of silently reading neighbouring evidence. Determinism keeps re-spills idempotent and replay/dedup projections stable; a same-slug same-prefix collision with different content lengthens the suffix (8/16/32/64, read-after-write verified, foreign rows never overwritten), so a wrong-content mapping is structurally impossible rather than merely unlikely. Mint/claim failures degrade to the digest projection, never failing a settle. Alternatives considered: (a) a truncated digest as the storage key was rejected — a collision would silently return the wrong evidence, strictly worse than a typed error, and would rewrite both backends' validators; (b) a monotonic short counter (`tr:7`) was rejected — it needs atomic counter state, is unstable across turns, breaks loop-breaker projection identity, and is no more memorable; (c) a bare semantic slug without hex was rejected — same-tool spills collide and a hallucinated slug cannot be distinguished from a wrong one; (d) re-encoding the digest (base32/base64) was rejected — ~20% shorter but still meaningless to BPE and to the model.
 
 ## Failure contract
 
@@ -1161,31 +1123,7 @@ closed. A legacy message-array write receives
 `conversation_authority_conflict`; clients must use turn commands rather than
 GET/rebase/retry.
 
-**`deadline_elapsed` classification (decision 2026-09-19).** The native
-daemon emits `deadline_elapsed` with the wire `retryable=false` because that
-single flag also gates command replay; both server variants are nevertheless
-replay-safe for an identical operation — the admission variant is a
-pre-dispatch rejection by construction, the execution variant aborts the
-transaction pre-commit, and committed commands always leave a durable
-`(tenant, owner, command_id)` receipt whose replay returns the recorded
-outcome. The storage.v2 client therefore classifies retry eligibility by
-code for `database_timeout`: reads replay freely, commands replay with the
-preserved command ID inside the same bounded aggregate budget; a
-connection-level `database_unavailable` without dispatch proof stays
-fail-fast. Turn-critical writers (`deliver_invocation_event`, Flow chat
-turn commit) add one bounded backoff layer (`lib/storage/retry.py`) on top
-so a sub-minute authority brownout degrades to a wait instead of a fatal
-turn error — the 2026-09-19 incident killed a healthy 15-round
-conversation at round 16 from a single transient `deadline_elapsed` under
-cgroup memory pressure. Alternatives considered: (a) marking admission
-`deadline_elapsed` retryable on the wire was rejected — it conflates the
-two server variants behind one flag and requires a daemon rebuild for a
-client-side policy; (b) the 2026-09-18 rejection of client read retry
-(`docs/STORAGE_TOFUDB.md`, "would only queue more full scans") predates the
-server-side mid-operation deadline budgets that now bound every scan, so
-the amplification it feared no longer exists; (c) leaving each caller to
-invent its own classification (the `lib/evolution/records.py` precedent)
-was rejected — the policy belongs at one client chokepoint.
+**`deadline_elapsed` classification (decision 2026-09-19).** The native daemon emits `deadline_elapsed` with the wire `retryable=false` because that single flag also gates command replay; both server variants are nevertheless replay-safe for an identical operation — the admission variant is a pre-dispatch rejection by construction, the execution variant aborts the transaction pre-commit, and committed commands always leave a durable `(tenant, owner, command_id)` receipt whose replay returns the recorded outcome. The storage.v2 client therefore classifies retry eligibility by code for `database_timeout`: reads replay freely, commands replay with the preserved command ID inside the same bounded aggregate budget; a connection-level `database_unavailable` without dispatch proof stays fail-fast. Turn-critical writers (`deliver_invocation_event`, Flow chat turn commit) add one bounded backoff layer (`lib/storage/retry.py`) on top so a sub-minute authority brownout degrades to a wait instead of a fatal turn error — the 2026-09-19 incident killed a healthy 15-round conversation at round 16 from a single transient `deadline_elapsed` under cgroup memory pressure. Alternatives considered: (a) marking admission `deadline_elapsed` retryable on the wire was rejected — it conflates the two server variants behind one flag and requires a daemon rebuild for a client-side policy; (b) the 2026-09-18 rejection of client read retry (`docs/STORAGE_TOFUDB.md`, "would only queue more full scans") predates the server-side mid-operation deadline budgets that now bound every scan, so the amplification it feared no longer exists; (c) leaving each caller to invent its own classification (the `lib/evolution/records.py` precedent) was rejected — the policy belongs at one client chokepoint.
 
 **Availability retry spacing (decision 2026-09-22).** The flat
 `retry_after_ms` hint (50–100 ms) is tuned for a healthy authority's
@@ -1245,7 +1183,7 @@ Independent probes use the shared demand executor: launch capacity sizes idle re
 an active read quota. Cross-pass merging applies only to the same client, operation and canonical
 payload; completed entries retire. Genuine unstarted worker failure is a failed probe, and does
 not prevent the other reads from starting. A timed-out shutdown join retains the keeper handle;
-`lib/server_shutdown.py` stops the keeper before the storage authority; once the keeper exits,
+`lib/server/server_shutdown.py` stops the keeper before the storage authority; once the keeper exits,
 shutdown cancels unstarted probes and retains physical ownership of running reads
 until they finish. Warming is fail-soft; durable recovery stays fail-closed. A larger fixed pool
 was rejected because it would retain a count queue and stale ownership semantics.
@@ -1261,7 +1199,7 @@ with zero workers left after joined shutdown (`test_storage_warmup_executor.py`)
 **Problem:** one measured recovery phase took 86.4 s and reported 7,088 Project Brain reconciliations;
 the old retry policy slept 49.5 s across six attempts on a deterministic protocol failure. These are
 old-path observations, not a claimed production speedup.
-**Decision:** `lib/server_assembly.py::_init_database` keeps task/turn settlement and active work-item
+**Decision:** `lib/server/server_assembly.py::_init_database` keeps task/turn settlement and active work-item
 reconciliation behind readiness. Only typed `retryable=True` failures retry within a bound; permanent
 protocol/schema/programming faults log step, elapsed time and code, then fail instead of publishing ready.
 Optional pending-resume/background-command enrichment retries only typed transient failures; cache
@@ -1270,7 +1208,7 @@ before task reads: older native snapshots include terminal history, not just act
 must not incur task replay/no-op writes every boot; genuine active rows still settle durably.
 **Alternatives rejected:** swallowed recovery errors leave active orphans behind a healthy UI; blanket
 retries cannot repair deterministic errors; dropping history/switching authority weakens user durability.
-Specs: `tests/server/test_server_startup_recovery.py`, `tests/storage/test_storage_warmup.py`,
+The SQL orphan probe reads only root task status with each backend's JSON operator and returns an existence bit; nested status text is not recovery authority. Problem: textual LIKE is invalid for PostgreSQL JSONB and can match nested objects. Decision: use typed root-field extraction; casting JSONB to text preserves false positives. Specs: `tests/storage/test_task_recovery_probe.py`, `tests/server/test_server_startup_recovery.py`, `tests/storage/test_storage_warmup.py`,
 `tests/storage/test_storage_warmup_executor.py`, `tests/project_mod/test_project_brain_recovery_pagination.py`,
 `tests/storage/test_boot_recovery_probe.py`.
 
@@ -1306,3 +1244,17 @@ and completed in 60.00 ms with zero admission wait/refusal, returning handler
 accounting to zero. Socket/worker cleanup, startup failure before/after
 publication and a blocked heap trim have dedicated lifecycle checks. This is
 acceptance/lifecycle evidence, not database throughput certification.
+
+Command receipt demand admission: **Problem:** shared 4 MiB stored/decoded
+receipt quotas refused otherwise supported domain commands and rolled back their
+mutations. **Decision:** complete responses reuse existing exact command identity,
+compression and native authenticated overflow blobs without private byte quotas.
+The retained compressed codec has a u32 decoded length; responses outside that
+representation use its existing plain encoding. Decoders grow from actual source
+bytes and retain exact length, codec, compressed-stream completion and request
+conflict checks. **Alternatives considered:** larger quotas postpone refusal;
+truncated receipts break exactly-once replay; domain exceptions create different
+receipt authorities. Tests exercise complete large compressible/incompressible
+receipts, actual commits/replays, changed-request conflicts, corrupt envelopes,
+offline restore and domain/outbox rollback faults. No worker or queue is added;
+receipt growth follows retained command results and existing lifecycle ownership.

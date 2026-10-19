@@ -226,3 +226,127 @@ def test_publication_pins_input_policy_before_runtime_config_normalization(monke
     replay.publish_completed_task(task)
     assert task['_modelReplayPublishStatus'] == 'stored'
     assert replay_store.get(user_id=1, conversation_id='c', lane_id='main')['policy'] == original_policy
+
+
+@pytest.mark.parametrize('model', ['kimi-k3', 'claude-opus-5'])
+@pytest.mark.parametrize('resume_config,target_projection,initial_status', [
+    ({'contentPrefix': 'partial'}, {}, 'unsupported_mode'),
+    ({'checkpointToolRounds': [{'toolName': 'read_files'}]}, {}, 'unsupported_mode'),
+    ({'_resumeSource': 'checkpoint'}, {}, 'unsupported_mode'),
+    ({}, {'content': 'partial'}, 'resume_target'),
+    ({}, {'toolRounds': [{'toolName': 'read_files'}]}, 'resume_target'),
+])
+def test_completed_resume_pins_ingress_policy_and_reuses_compaction_twice(
+        monkeypatch, replay_store, model, resume_config, target_projection, initial_status):
+    """Runtime defaults/worktree rebinding must not resurrect folded history."""
+    from lib import storage
+    from lib.tasks_pkg import model_replay as replay
+    original = {'model': model, 'projectPath': '/project'}
+    cfg = {**original, **resume_config}
+    rows = [_turn('u1', 'human', 'work', 1), _turn('a1', 'assistant', '', 2)]
+    rows[-1]['projection'] = copy.deepcopy(target_projection)
+    assert replay.restore_prefix(rows, cfg, conversation_id='c', user_id=1) == ([], 0)
+    assert cfg['_modelReplayStatus'] == initial_status
+    expected = (replay.policy_witness(original), replay.portable_policy_witness(original),
+                replay.effort_policy_witness(original))
+    # These are runtime resolutions, not a new request or new authorization.
+    cfg.update(thinkingEnabled=True, projectPath='/isolated/task-1')
+    rows[-1].update(status='completed', projection={'content': 'done'})
+    class Client:
+        def query(self, operation, payload, **kwargs):
+            assert operation == 'turn.get'
+            return copy.deepcopy(rows[-1])
+    monkeypatch.setattr(storage, 'get_storage_client', lambda: Client())
+    compacted = [
+        {'role': 'user', 'content': 'work'},
+        {'role': 'assistant', 'content': 'Retained compact state: all old tool facts summarized.'},
+    ]
+    rows[-1]['projection']['content'] = compacted[-1]['content']
+    task = {'config': cfg, '_userId': 1, 'convId': 'c', '_turnId': 'a1',
+            'model': model, 'content': compacted[-1]['content'],
+            '_resumeContextHydrated': True, 'messages': copy.deepcopy(compacted)}
+    replay.publish_completed_task(task)
+    assert task['_modelReplayPublishStatus'] == 'stored'
+    checkpoint = replay_store.get(user_id=1, conversation_id='c', lane_id='main')
+    assert (checkpoint['policy'], checkpoint['portablePolicy'], checkpoint['effortPolicy']) == expected
+    for index in (2, 3):
+        rows.extend([_turn(f'u{index}', 'human', 'continue', index * 2 - 1),
+                     _turn(f'a{index}', 'assistant', '', index * 2)])
+        next_config = dict(original)
+        prefix, covered = replay.restore_prefix(rows, next_config, conversation_id='c', user_id=1)
+        assert next_config['_modelReplayStatus'] == 'restored'
+        assert covered == len(rows) - 2
+        assert prefix == compacted
+        compacted += [{'role': 'user', 'content': 'continue'},
+                      {'role': 'assistant', 'content': f'progress {index}'}]
+        rows[-1].update(status='completed', projection={'content': f'progress {index}'})
+        replay.publish_completed_task({
+            'config': next_config, '_userId': 1, 'convId': 'c', '_turnId': f'a{index}',
+            'model': model, 'content': f'progress {index}', 'messages': copy.deepcopy(compacted),
+        })
+
+
+@pytest.mark.parametrize('change', [
+    {'projectPath': '/different-project'},
+    {'systemPrompt': 'new operator rules'},
+    {'grantedToolPermissions': ['read_files']},
+])
+def test_resumed_checkpoint_still_refuses_real_policy_changes(monkeypatch, replay_store, change):
+    from lib import storage
+    from lib.tasks_pkg import model_replay as replay
+    original = {'model': 'kimi-k3', 'projectPath': '/project'}
+    cfg = {**original, 'contentPrefix': 'partial'}
+    rows = [_turn('u1', 'human', 'work', 1), _turn('a1', 'assistant', '', 2)]
+    replay.restore_prefix(rows, cfg, conversation_id='c', user_id=1)
+    cfg.update(thinkingEnabled=True, projectPath='/isolated/task-1')
+    rows[-1].update(status='completed', projection={'content': 'done'})
+    class Client:
+        def query(self, operation, payload, **kwargs):
+            return copy.deepcopy(rows[-1])
+    monkeypatch.setattr(storage, 'get_storage_client', lambda: Client())
+    replay.publish_completed_task({
+        'config': cfg, '_userId': 1, 'convId': 'c', '_turnId': 'a1',
+        'model': 'kimi-k3', 'content': 'done', '_resumeContextHydrated': True,
+        'messages': [{'role': 'assistant', 'content': 'done'}],
+    })
+    next_cfg = {**original, **change}
+    assert replay.restore_prefix(rows + [_turn('a2', 'assistant', '', 3)], next_cfg,
+                                 conversation_id='c', user_id=1) == ([], 0)
+    assert next_cfg['_modelReplayStatus'] == 'policy_changed'
+
+
+def test_completed_resume_keeps_ingress_policy_after_builtin_profile_resolution(
+        monkeypatch, replay_store, tmp_path):
+    from lib import storage
+    from lib.agent_core import profiles
+    from lib.tasks_pkg import model_replay as replay
+
+    monkeypatch.setattr(profiles, '_PROFILES_DIR', str(tmp_path / 'profiles'))
+    original = {'model': 'kimi-k3', 'profile': 'minimal'}
+    cfg = {**original, 'contentPrefix': 'partial'}
+    rows = [_turn('u1', 'human', 'work', 1), _turn('a1', 'assistant', '', 2)]
+    assert replay.restore_prefix(rows, cfg, conversation_id='c', user_id=1) == ([], 0)
+    cfg = profiles.apply_profile(cfg)
+    assert cfg['memoryEnabled'] is False
+    assert replay.portable_policy_witness(cfg) != replay.portable_policy_witness(original)
+    rows[-1].update(status='completed', projection={'content': 'done'})
+
+    class Client:
+        def query(self, operation, payload, **kwargs):
+            assert operation == 'turn.get'
+            return copy.deepcopy(rows[-1])
+
+    monkeypatch.setattr(storage, 'get_storage_client', lambda: Client())
+    messages = [{'role': 'user', 'content': 'work'},
+                {'role': 'assistant', 'content': 'done'}]
+    task = {'config': cfg, '_userId': 1, 'convId': 'c', '_turnId': 'a1',
+            'model': 'kimi-k3', 'content': 'done', '_resumeContextHydrated': True,
+            'messages': messages}
+    replay.publish_completed_task(task)
+    assert task['_modelReplayPublishStatus'] == 'stored'
+    next_cfg = dict(original)
+    prefix, covered = replay.restore_prefix(
+        rows + [_turn('a2', 'assistant', '', 3)], next_cfg, conversation_id='c', user_id=1)
+    assert next_cfg['_modelReplayStatus'] == 'restored'
+    assert prefix == messages
+    assert covered == 2

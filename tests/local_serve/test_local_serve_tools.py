@@ -35,18 +35,21 @@ def _ctx(**over):
 
 class TestRegistryBuild:
     def test_family_builds_with_base_tools(self):
-        from lib.tools.registry._build import _build_local_serve
+        from lib.tools.registry import all_specs
+        _build_local_serve = next(spec for spec in all_specs() if spec.key == 'local_serve').build
         tools = _build_local_serve(_ctx())
         names = {t['function']['name'] for t in tools}
         assert names == set(LOCAL_SERVE_TOOL_NAMES)
 
     def test_env_kill_switch(self, monkeypatch):
-        from lib.tools.registry._build import _build_local_serve
+        from lib.tools.registry import all_specs
+        _build_local_serve = next(spec for spec in all_specs() if spec.key == 'local_serve').build
         monkeypatch.setenv('TOFU_LOCAL_SERVE', '0')
         assert _build_local_serve(_ctx()) == []
 
     def test_no_base_tools_no_family(self):
-        from lib.tools.registry._build import _build_local_serve
+        from lib.tools.registry import all_specs
+        _build_local_serve = next(spec for spec in all_specs() if spec.key == 'local_serve').build
         assert _build_local_serve(_ctx(has_base_tools=False)) == []
 
     def test_spec_partitions(self):

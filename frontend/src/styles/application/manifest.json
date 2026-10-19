@@ -3,12 +3,32 @@
   "responsibility": "Ordered authoring sections for the generated application stylesheet.",
   "output": "static/styles.css",
   "sections": [
+    { "path": "34-working-facts.css", "responsibility": "On-demand source-bound working facts and task impact", "featureEntry": "frontend/src/features/working-facts/dialog.ts" },
+    { "path": "03-rich-surfaces.css", "responsibility": "Composable native response surfaces" },
+    { "path": "18-artifact-review.css", "responsibility": "Version-bound owner review within the artifact panel" },
+    { "path": "33-project-coordination.css", "responsibility": "Demand-loaded project coordinator workspace", "featureEntry": "frontend/src/features/project-coordination.ts" },
+
+    { "path": "03-rich-response.css" },
+
+    { "path": "03-rich-choices.css", "responsibility": "Owner-bound human guidance layout" },
+
+    { "path": "03-rich-citations.css", "responsibility": "Supplied-source citation chips and preview dialogs" },
+
+    { "path": "03-data-chart.css", "responsibility": "Native bounded numeric data charts" },
     {
       "path": "00-design-tokens.css"
     },
     {
       "path": "01-shell-navigation.css"
     },
+    { "path": "01-conversation-review.css", "responsibility": "Completed replies awaiting review in the conversation sidebar" },
+
+    {
+      "path": "31-folder-settings.css",
+      "responsibility": "Accessible sidebar folder settings, default roots and read-only directory picker"
+    },
+
+    { "path": "32-agent-sidebar-dock.css", "responsibility": "Keyed background-agent dock and responsive right-hand rail" },
     {
       "path": "02-inspector-tool-anchors.css",
       "responsibility": "inspector tool anchors",
@@ -30,13 +50,11 @@
     },
     {
       "path": "02-shell-actions.css",
-      "responsibility": "shell actions",
-      "legacyTokenSha256": "5e8870e017e3bd7b54fddbaef739e7d25574d9c13aff83cc6b48c3a5dae794aa"
+      "responsibility": "shell actions"
     },
     {
       "path": "02-update-shell.css",
-      "responsibility": "update shell",
-      "legacyTokenSha256": "4b46ec4884064302602bb3b0ce300bc2fb8b289cb2bc748ab7398a632d227c98"
+      "responsibility": "update shell and separated status cards"
     },
     {
       "path": "02-update-steps.css",
@@ -94,8 +112,7 @@
     },
     {
       "path": "02-message-residency.css",
-      "responsibility": "message residency",
-      "legacyTokenSha256": "5a413c59685fb3af3702e8ed71b6568c7b7cd6223a5fc814070daf77c701e620"
+      "responsibility": "message residency"
     },
     {
       "path": "02-message-navigation.css",
@@ -138,6 +155,10 @@
       "path": "08-swarm-shell.css",
       "responsibility": "Swarm summary, status and progress",
       "legacyTokenSha256": "4f1b170a580ce45bdf49c998dd89c9fff87dc658c7a35e36ae9ea15d6cfa92f0"
+    },
+    {
+      "path": "08-swarm-messages.css",
+      "responsibility": "Run-level agent communication and delivery evidence"
     },
     {
       "path": "08-swarm-agent-cards.css",
@@ -290,8 +311,7 @@
     },
     {
       "path": "09-tool-diffs.css",
-      "responsibility": "Inline diff and batch result previews",
-      "legacyTokenSha256": "8053d1a0b6de98191c4fa8b0075218924ce217f7cde5f1f4c33d88b565fad13d"
+      "responsibility": "Token-based inline diffs and compact batch result previews"
     },
     {
       "path": "09-tool-memory.css",
@@ -315,6 +335,10 @@
       "path": "09-diff-details.css",
       "responsibility": "Per-edit disclosure, diff detail and approval actions",
       "legacyTokenSha256": "94db988c6249faec48f0d1107125430c8e21d7ea63ddd70f0baf483b4b8194a3"
+    },
+    {
+      "path": "09-diff-review.css",
+      "responsibility": "Revision action inside an expanded edit diff"
     },
     {
       "path": "09-guidance-question.css",
@@ -348,13 +372,11 @@
     },
     {
       "path": "09-workunit.css",
-      "responsibility": "WorkUnit status, page gallery and motion cards",
-      "legacyTokenSha256": "dd8134612a7c8d3b0e5a306190d4530a79974f85559ab891907fa77db1caa930"
+      "responsibility": "WorkUnit status, page gallery and motion cards"
     },
     {
       "path": "09-workunit-outline.css",
-      "responsibility": "Interactive slide outline review",
-      "legacyTokenSha256": "df50006d54d555d6a30b3a814c894a67663ab8f041e684f95d8e747f1cc3f488"
+      "responsibility": "Interactive slide outline review"
     },
     {
       "path": "09-browser-command.css",
@@ -444,6 +466,7 @@
     {
       "path": "13-tofu-theme-composer-tools.css"
     },
+    { "path": "14-selection-popup.css", "responsibility": "Selection actions and composer quote previews" },
     {
       "path": "14-bridges-memory-branches.css"
     },
@@ -509,6 +532,18 @@
     }
   ],
   "deferredSections": [
+    {
+      "path": "26-studio-workbench.css",
+      "featureEntry": "frontend/src/features/evolution/ui-components.ts"
+    },
+    {
+      "path": "26-evolution-observations.css",
+      "featureEntry": "frontend/src/features/evolution/programs/page.ts"
+    },
+    {
+      "path": "26-studio-command-center.css",
+      "featureEntry": "frontend/src/features/evolution/studio-entry.ts"
+    },
     {
       "path": "26-evolution.css",
       "featureEntry": "frontend/src/features/evolution.ts"

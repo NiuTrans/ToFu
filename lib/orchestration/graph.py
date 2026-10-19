@@ -116,9 +116,10 @@ class GraphNavigator:
         candidates = barriers or list(common)
         if not candidates:
             return None
+        order={node_id:index for index,node_id in enumerate(self.nodes)}
         return min(
             candidates,
-            key=lambda node_id: self.distance(branches[0], node_id),
+            key=lambda node_id: (self.distance(branches[0], node_id),order[node_id]),
         )
 
     def reachable(self, start: str) -> set[str]:

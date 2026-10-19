@@ -7,13 +7,26 @@ The read-before-edit gate (``lib/tasks_pkg/handlers/_read_gate.py``) proves
 "the file has not changed SINCE". This module closes that gap with an
 optimistic-concurrency token:
 
-  • Every successful read / write / edit records a fingerprint
-    ``(mtime_ns, size)`` of the target under ``(conv_key, abs_path)``.
+  • Readers carry descriptor-pinned observations of their actual bytes under
+    ``(actor_key, abs_path)``. A snapshot token is
+    ``('s', size, SHA256, semantic_root, root_dev, root_ino)``. Ranges retain
+    the full source digest; failed/unsupported items and legacy result text
+    without an observation carrier never mint freshness evidence.
+  • Successful writes renew tokens through the common writer from committed
+    bytes, preserving an existing snapshot's semantic-root identity.
   • Write tools are CHECKED before execution (see
     ``lib/tasks_pkg/handlers/_write_freshness_gate.py``): a recorded
     fingerprint that no longer matches the on-disk one means someone else
     touched the file → the write is refused with a re-read instruction
     instead of silently clobbering the sibling's change.
+
+Owned command mutations may advance an EXISTING matched content token with
+``capture_owned_write`` / ``reconcile_owned_write``. The command admission
+owner retains exact target exclusion through supervised process quiescence;
+entry-identity CAS prevents overwriting an interleaved observation. An already
+stale, missing or metadata-only preimage never gains ownership. Pure append
+uses its live preimage inside the file transaction rather than stale replacement
+knowledge; replacement and anchor edits retain their checks.
 
 Deliberate failure directions:
 
@@ -21,9 +34,9 @@ Deliberate failure directions:
     flows that never read the file keep working — the read-before-edit gate
     owns the "must read first" axis for the edit tools; this module owns
     ONLY the "your knowledge went stale" axis.
-  • A VANISHED file drops the token and allows the write (creation
-    semantics); the read gate surfaces the cleaner "File not found" path
-    for the edit tools.
+  • A missing or substituted path/root cannot validate a snapshot token.
+    Legacy non-snapshot tokens keep creation compatibility while the path is
+    absent, without erasing evidence needed to detect a changed reborn file.
 
 Fingerprint — why content, not mtime (MEASURED, do not "simplify" back):
 
@@ -36,7 +49,12 @@ Fingerprint — why content, not mtime (MEASURED, do not "simplify" back):
   produces. Verified live: 10 same-size writes within one second changed
   the fingerprint ZERO times.
 
-  So for files ≤ ``_CONTENT_HASH_MAX_BYTES`` the fingerprint is
+  Actual read observations always hash their full source with SHA-256, with
+  no size cutoff and no later disk read during token creation. Only legacy
+  explicit ``record()`` calls use the following weaker compatibility format;
+  they are never used to certify already-rendered bytes.
+
+  For files ≤ ``_CONTENT_HASH_MAX_BYTES`` the legacy fingerprint is
   CONTENT-addressed: ``('c', size, blake2b-128)``. Same-second same-size
   edits with different content are caught; a content-preserving touch is
   NOT stale (nothing to clobber). Files ABOVE the threshold keep the
@@ -85,8 +103,27 @@ import hashlib
 import os
 import threading
 import time
+
+
+# One process-local fence, not a token/cache owner registry. Owned formatter
+# completion conservatively invalidates project-read receipts across tasks.
+# Old objects survive only while bounded receipts/in-flight reads reference them.
+_project_read_cache_generation = object()
+
+
+def project_read_cache_generation() -> object:
+    """Snapshot BEFORE a project read starts; never bind at late insertion."""
+    return _project_read_cache_generation
+
+
+def advance_project_read_cache_generation() -> None:
+    """Fence receipts at proven owned formatter supervised completion."""
+    global _project_read_cache_generation
+    _project_read_cache_generation = object()
+
 from collections import OrderedDict
 
+from dataclasses import dataclass
 from lib.log import get_logger
 
 logger = get_logger(__name__)
@@ -117,7 +154,7 @@ def _gate_enabled() -> bool:
 _CONTENT_HASH_MAX_BYTES = 16 * 1024 * 1024
 
 
-def _fingerprint(abs_path: str) -> tuple | None:
+def _fingerprint(abs_path: str, *, force_content=False) -> tuple | None:
     """Fingerprint of *abs_path*, or None when it can't be read.
 
     Two shapes (see module docstring):
@@ -129,7 +166,7 @@ def _fingerprint(abs_path: str) -> tuple | None:
     except OSError as _e:
         logger.debug('fingerprint: unreadable (%s)', _e)
         return None
-    if st.st_size <= _CONTENT_HASH_MAX_BYTES:
+    if force_content or st.st_size <= _CONTENT_HASH_MAX_BYTES:
         try:
             digest = hashlib.blake2b(digest_size=16)
             with open(abs_path, 'rb') as f:
@@ -145,23 +182,61 @@ def _fingerprint(abs_path: str) -> tuple | None:
 def _fingerprint_bytes(abs_path: str, data) -> tuple | None:
     """Fingerprint of *abs_path* given the bytes just written there.
 
-    The post-write fast path: small files are hashed directly from *data*
-    (the caller already holds the bytes — never re-read the file); large
-    files keep the stat-only ``('m', mtime_ns, size)`` fast path (one stat,
-    still no content read). Non-bytes input degrades to ``_fingerprint``.
+    Hash the actual committed bytes at every size without re-reading the path.
+    Non-bytes input retains the legacy explicit ``_fingerprint`` fallback.
     """
     if not isinstance(data, (bytes, bytearray)):
         return _fingerprint(abs_path)
     data = bytes(data)
-    size = len(data)
-    if size <= _CONTENT_HASH_MAX_BYTES:
-        return ('c', size, hashlib.blake2b(data, digest_size=16).hexdigest())
+    return ('c', len(data), hashlib.blake2b(data, digest_size=16).hexdigest())
+
+
+@dataclass(frozen=True)
+class ReadObservation:
+    """Host-owned evidence from the bytes actually rendered, never a later read.
+
+    Digest/size cover the entire source even for ranged reads. The physical
+    semantic root is part of the token; an equal-byte replacement root is not
+    the project the caller observed. This carrier retains no file bodies.
+    """
+
+    abs_path: str
+    fingerprint: tuple
+
+
+def observation_from_snapshot(snapshot) -> ReadObservation:
+    return ReadObservation(snapshot.path, (
+        's', snapshot.size, snapshot.sha256, snapshot.root, *snapshot.root_identity))
+
+
+def record_observation(conv_key: str, observation: ReadObservation) -> bool:
+    """Install only an issued snapshot digest, with NO filesystem re-read."""
+    if not conv_key or not _gate_enabled() or not isinstance(observation, ReadObservation):
+        return False
+    _store_fingerprint(conv_key, observation.abs_path, observation.fingerprint)
+    return True
+
+
+def _current_fingerprint(abs_path: str, previous: tuple) -> tuple | None:
+    if previous[0] != 's':
+        return (_fingerprint(abs_path, force_content=True) if previous[0] == 'c'
+                else _fingerprint(abs_path))
+    from lib.artifacts.file_snapshot import read_project_snapshot
     try:
-        st = os.stat(abs_path)
-    except OSError as _e:
-        logger.debug('fingerprint: unreadable (%s)', _e)
+        snapshot = read_project_snapshot(abs_path, [previous[3]],
+            expected_root_identity=previous[4:6], allow_empty=True)
+        return observation_from_snapshot(snapshot).fingerprint
+    except (OSError, ValueError):
+        # A missing/substituted root, unsafe path or failed read cannot certify
+        # freshness. Retain the observation so a later retry stays fenced.
         return None
-    return ('m', st.st_mtime_ns, st.st_size)
+
+
+def fingerprint_for_written_bytes(abs_path: str, data: bytes, previous=None) -> tuple:
+    """Keep an existing snapshot's root binding through the common writer."""
+    if previous and previous[0] == 's':
+        return ('s', len(data), hashlib.sha256(data).hexdigest(), *previous[3:6])
+    return _fingerprint_bytes(abs_path, data)
 
 
 def _store_fingerprint(conv_key: str, abs_path: str, fp: tuple | None) -> None:
@@ -179,9 +254,9 @@ def _store_fingerprint(conv_key: str, abs_path: str, fp: tuple | None) -> None:
 def record(conv_key: str, abs_path: str) -> None:
     """Record the current fingerprint of *abs_path* for *conv_key*.
 
-    Called after every successful read of the file by this conversation
-    (the read-side stamp). The content is not in hand here, so this
-    re-fingerprints the file. Never raises; a stat failure simply skips.
+    Legacy explicit observation API. Not a post-read adapter: callers that
+    already rendered bytes must use record_observation, or a race would bless
+    content the model never saw. Never raises; a stat failure simply skips.
     """
     if not conv_key or not abs_path or not _gate_enabled():
         return
@@ -191,19 +266,82 @@ def record(conv_key: str, abs_path: str) -> None:
 def record_written(conv_key: str, abs_path: str, data: bytes) -> None:
     """Record the post-write fingerprint of *abs_path* WITHOUT re-reading.
 
-    The bytes just written are in hand, so small files are hashed directly
-    from *data*; large files keep the stat-only fast path. Never raises.
+    The bytes just written are in hand, so all sizes are hashed directly from
+    *data*. Existing snapshot observations retain their semantic-root binding.
     """
     if not conv_key or not abs_path or not _gate_enabled():
         return
-    _store_fingerprint(conv_key, abs_path, _fingerprint_bytes(abs_path, data))
+    with _lock:
+        entry = _tokens.get((conv_key, abs_path))
+    fp = fingerprint_for_written_bytes(abs_path, data, entry[0] if entry else None)
+    _store_fingerprint(conv_key, abs_path, fp)
+
+
+@dataclass(frozen=True)
+class OwnedWriteEvidence:
+    """An existing observation matched under the caller's writer exclusion.
+
+    This is not authorization or a lease. Only the command admission owner may
+    capture it for a proven literal output, and must retain exclusion through
+    supervised process quiescence and reconciliation. No file bytes are retained.
+    """
+
+    conv_key: str
+    abs_path: str
+    token_entry: tuple
+
+
+def capture_owned_write(conv_key: str, abs_path: str) -> OwnedWriteEvidence | None:
+    """Pin a content-proven existing observation before an owned mutation.
+
+    Never bless an already-stale preimage, create a missing token, or rely on
+    the large-file metadata fallback as proof of byte ownership. Call after
+    writer admission, before execution. Interleaved observations invalidate CAS.
+    """
+    if not conv_key or not abs_path or not _gate_enabled():
+        return None
+    key = (conv_key, abs_path)
+    with _lock:
+        entry = _tokens.get(key)
+    if entry is None or entry[0][0] not in ('c', 's'):
+        return None
+    if _current_fingerprint(abs_path, entry[0]) != entry[0]:
+        return None
+    with _lock:
+        if _tokens.get(key) is not entry:
+            return None
+    return OwnedWriteEvidence(conv_key, abs_path, entry)
+
+
+def reconcile_owned_write(evidence: OwnedWriteEvidence | None) -> bool:
+    """Advance only the captured observation to the owned, settled postimage.
+
+    Call while the same writer exclusion remains held. Failure/partial writes
+    can settle here too, but launch/admission failure and unretired descendants
+    provide no authority to reconcile. A newer read/write, eviction or reset
+    wins: compare entry identity, not just its fingerprint (ABA-safe). Never
+    create a token for an unobserved file or advance another conversation.
+    """
+    if evidence is None or not _gate_enabled():
+        return False
+    current = _current_fingerprint(evidence.abs_path, evidence.token_entry[0])
+    if current is None or current[0] not in ('c', 's') or current == evidence.token_entry[0]:
+        return False
+    key = (evidence.conv_key, evidence.abs_path)
+    with _lock:
+        if _tokens.get(key) is not evidence.token_entry:
+            return False
+        _tokens.pop(key)
+        _tokens[key] = (current, time.time())
+    return True
 
 
 def is_stale(conv_key: str, abs_path: str) -> bool:
     """True iff a token exists AND the file exists AND its fingerprint moved.
 
-    False (fail-open) when: gate disabled, no token recorded, or the file
-    has since vanished (creation semantics — the stale token is dropped).
+    False when disabled or no token exists. Missing/substituted snapshot
+    paths/roots stay stale; legacy tokens retain creation compatibility while
+    absent, without forgetting the observation needed to detect a reborn file.
 
     Pre-write cost note: a content token (``'c'``) can NOT be verified with
     a stat-only ``(mtime_ns, size)`` short-circuit — the very reason content
@@ -219,10 +357,12 @@ def is_stale(conv_key: str, abs_path: str) -> bool:
         entry = _tokens.get(key)
     if entry is None:
         return False
-    cur = _fingerprint(abs_path)
+    cur = _current_fingerprint(abs_path, entry[0])
     if cur is None:
-        with _lock:
-            _tokens.pop(key, None)
+        if entry[0][0] == 's':
+            return True
+        # Legacy creation semantics remain fail-open while the file is gone,
+        # but do not erase history: a changed reborn file must still be stale.
         return False
     return cur != entry[0]
 
@@ -258,7 +398,7 @@ def _snapshot_path() -> str:
     separate data dirs (e.g. the e2e harness's instance A/B) get isolated
     snapshots and cannot leak tokens into each other.
     """
-    from lib.runtime_paths import data_root
+    from lib.runtime.runtime_paths import data_root
     return os.path.join(data_root(), 'write_freshness_tokens.json')
 
 
@@ -340,6 +480,9 @@ def _reset_for_tests() -> None:
 
 
 __all__ = ['record', 'record_written', 'is_stale', 'has_token', 'drop',
+           'ReadObservation', 'observation_from_snapshot', 'record_observation',
+           'fingerprint_for_written_bytes',
+           'OwnedWriteEvidence', 'capture_owned_write', 'reconcile_owned_write',
            '_reset_for_tests', '_fingerprint', '_fingerprint_bytes',
            '_CONTENT_HASH_MAX_BYTES', 'save_snapshot', 'load_snapshot',
            '_snapshot_path']

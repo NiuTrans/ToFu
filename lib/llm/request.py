@@ -54,6 +54,7 @@ class AdmittedRequest(Mapping):
     provider_prefix_id: str
 
     _fields: Mapping = field(repr=False, compare=False)
+    logical_model: str = ''
     def wire_body(self):
         return json.loads(self.payload)
 
@@ -93,6 +94,7 @@ class ModelRequestBudgetScope:
         self.body = body
         self.leases = []
         self.usage = None
+        self.verified_complete = True
         self._lock = threading.Lock()
         self._closed = False
 
@@ -108,7 +110,7 @@ class ModelRequestBudgetScope:
                 with self._lock:
                     if self._closed:
                         lease.settle(unsent=True)
-                        from lib.llm_errors import AbortedError
+                        from lib.llm.llm_errors import AbortedError
                         raise AbortedError('Model request scope closed before dispatch')
                     self.leases.append(lease)
                 return lease
@@ -125,7 +127,7 @@ class ModelRequestBudgetScope:
             lease.settle(usage, unsent=not lease.dispatched and usage is None)
             confirm = getattr(lease, 'confirm_input', None)
             if confirm is not None:
-                confirm(successful=error is None and lease is leases[-1])
+                confirm(successful=error is None and self.verified_complete and lease is leases[-1])
 
 
 def mark_model_request_dispatched(plan):
@@ -145,7 +147,7 @@ def dispatch_model_request(plan, send, *args, **kwargs):
 
 
 def seal_request(body, *, model, provider_id='', protocol='openai',
-                 endpoint='', input_tokens, semantic_id):
+                 endpoint='', input_tokens, semantic_id, logical_model=''):
     """Seal a translated body; admission evidence is supplied by ingress only."""
     wire = strip_internal_request_fields(body)
     # Encode each field once; offsets retain no second image/prompt copy.
@@ -169,7 +171,7 @@ def seal_request(body, *, model, provider_id='', protocol='openai',
     prefix_id = _digest([model, provider_id, protocol, endpoint, prefix])
     return AdmittedRequest(payload, model, provider_id, protocol, endpoint,
                            input_tokens, semantic_id, prefix_id,
-                           MappingProxyType(offsets))
+                           MappingProxyType(offsets), logical_model or model)
 
 
 def recount_anthropic_input(body, *, model, provider_id=''):

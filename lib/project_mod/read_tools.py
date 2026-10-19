@@ -13,16 +13,14 @@ import subprocess
 import threading
 import time
 from concurrent.futures import Future
+from collections import deque
 from lib.observability import InstrumentedThreadPoolExecutor
 
 from lib.log import get_logger
 from lib.project_mod.config import (
     BINARY_EXTENSIONS,
     IGNORE_DIRS,
-    MAX_DATA_FILE_PREVIEW,
-    MAX_FILE_SIZE,
     MAX_GREP_RESULTS,
-    MAX_READ_CHARS,
 )
 from lib.project_mod.config import (
     _state as _project_state,
@@ -30,8 +28,6 @@ from lib.project_mod.config import (
 from lib.project_mod.scanner import (
     _estimate_lines,
     _fmt_size,
-    _is_data_file,
-    _is_likely_data_content,
     _safe_path,
     _should_ignore,
 )
@@ -147,7 +143,6 @@ def _maybe_signal_svg(target, rel_path):
 _LIST_DIR_SCAN_LIMIT = 10_000
 _LIST_DIR_ENTRY_LIMIT = 1_000
 _LIST_DIR_OUTPUT_CHAR_LIMIT = 64_000
-_FIND_SCAN_LIMIT = 250_000
 
 
 def _scan_directory_entries(target, *, show_hidden=False,
@@ -420,7 +415,8 @@ def _read_absolute_file(path: str, start_line=None, end_line=None):
     return result
 
 
-def _read_project_file(base, rel_path, start_line=None, end_line=None, _pre_stat=None):
+def _read_project_file(base, rel_path, start_line=None, end_line=None, _pre_stat=None,
+                       *, source_capture=None, source_roots=(), read_observations=None):
     """Read a single project-relative file.  Internal helper for tool_read_files.
 
     Handles safe-path validation, data-file detection, symbol TOC extraction,
@@ -470,9 +466,21 @@ def _read_project_file(base, rel_path, start_line=None, end_line=None, _pre_stat
         from lib.file_reader import read_local_file
         return read_local_file(target)
 
-    if sz > MAX_FILE_SIZE and not _has_explicit_line_range(start_line, end_line):
-        return (f'File too large ({_fmt_size(sz)}). Use grep_search to find specific content, '
-                f'or read_files with start_line/end_line for a specific range.')
+    snapshot = None
+    from lib.artifacts.file_snapshot import read_project_snapshot
+    try:
+        if source_capture is not None and os.path.abspath(base) not in source_roots:
+            raise PermissionError('File source requires a verified project root')
+        snapshot = read_project_snapshot(rel_path, [os.path.abspath(base)], include_bytes=True,
+            check=source_capture.check if source_capture is not None else None,
+            utf8_text=True, allow_empty=True)
+        sz = snapshot.size
+    except (OSError, ValueError) as error:
+        if source_capture is not None:
+            return f'Error binding file source for {rel_path}: {error}'
+        # Preserve legacy display for unsupported encodings/paths, but it is
+        # not descriptor/root-bound evidence and must not issue a token.
+        logger.debug('[Tools] read snapshot unavailable for %s: %s', rel_path, error)
 
     # ── Content-based binary sniff ──
     # Catches binaries whose extension is NOT image/pdf/office (e.g. .so,
@@ -480,11 +488,14 @@ def _read_project_file(base, rel_path, start_line=None, end_line=None, _pre_stat
     # stops raw bytes from being decoded as U+FFFD text.  Clean text files
     # — including .svg / minified JS — pass this fine.
     try:
-        with open(target, 'rb') as _bf:
-            _head = _bf.read(8192)
+        if snapshot is not None:
+            _head = snapshot.content[:8192]
+        else:
+            with open(target, 'rb') as _bf:
+                _head = _bf.read(8192)
         if _head:
             _nontext = sum(1 for b in _head if b < 8 or (13 < b < 32 and b != 27))
-            if _nontext > len(_head) * 0.30:
+            if b'\x00' in _head or _nontext > len(_head) * 0.30:
                 return (f'[Binary file: {rel_path} ({_fmt_size(sz)}) — not shown. '
                         f'Content is not valid text. Images are read via the native '
                         f'image protocol; other binaries (archives, compiled objects) '
@@ -492,11 +503,11 @@ def _read_project_file(base, rel_path, start_line=None, end_line=None, _pre_stat
     except OSError as e:
         logger.debug('[Tools] read_file binary sniff failed for %s: %s', rel_path, e)
 
-    filename = os.path.basename(rel_path)
-    is_data = _is_data_file(filename, sz)
-
     try:
-        with open(target, errors='replace') as f:
+        import io
+        reader = (io.TextIOWrapper(io.BytesIO(snapshot.content), encoding='utf-8')
+                  if snapshot is not None else open(target, errors='replace'))
+        with reader as f:
             if _has_explicit_line_range(start_line, end_line):
                 all_lines = f.readlines()
                 total = len(all_lines)
@@ -519,26 +530,20 @@ def _read_project_file(base, rel_path, start_line=None, end_line=None, _pre_stat
                     except (OSError, AttributeError) as e:
                         logger.debug('[Tools] fadvise skipped for %s: %s', rel_path, e)
 
-                if is_data or (sz > 20_000 and _is_likely_data_content(text)):
-                    preview = text[:MAX_DATA_FILE_PREVIEW]
-                    nl = preview.rfind('\n')
-                    if nl > 0:
-                        preview = preview[:nl]
-                    preview_lines = preview.count('\n') + 1
-                    header = (f'File: {rel_path} ({total} lines, {_fmt_size(sz)}) '
-                              f'[DATA FILE — showing first {preview_lines} lines]\n')
-                    text = preview + (
-                        f'\n\n… [{total - preview_lines} more lines not shown. '
-                        f'This appears to be a data file. Use grep_search to find specific content, '
-                        f'or read_file with start_line/end_line for a specific range.]')
-                else:
-                    if len(text) > MAX_READ_CHARS:
-                        text = text[:MAX_READ_CHARS] + f'\n\n… [truncated at {MAX_READ_CHARS:,} chars]'
-                    header = f'File: {rel_path} ({total} lines, {_fmt_size(sz)})\n'
-                    ext = os.path.splitext(rel_path)[1].lower()
-                    sym_toc = _extract_symbols(text, ext)
-                    if sym_toc:
-                        header += sym_toc
+                header = f'File: {rel_path} ({total} lines, {_fmt_size(sz)})\n'
+                ext = os.path.splitext(rel_path)[1].lower()
+                sym_toc = _extract_symbols(text, ext)
+                if sym_toc:
+                    header += sym_toc
+        if snapshot is None:
+            header = '[Unverified file read: descriptor/root-bound snapshot unavailable]\n' + header
+        if snapshot is not None and source_capture is not None:
+            source = source_capture.bind(snapshot, roots=source_roots)
+            import json
+            text += '\n[File source: ' + json.dumps(source, ensure_ascii=False) + ']'
+        if snapshot is not None and isinstance(read_observations, list):
+            from lib.write_freshness import observation_from_snapshot
+            read_observations.append(observation_from_snapshot(snapshot))
         return header + text
     except Exception as e:
         logger.warning('[Tools] read_file failed for %s: %s', rel_path, e, exc_info=True)
@@ -704,7 +709,8 @@ def _read_attachment_text_ref(ref, start_line, end_line, *, task):
     return header + text
 
 
-def tool_read_files(base, reads, *, result_items=None, task=None):
+def tool_read_files(base, reads, *, result_items=None, task=None, source_capture=None,
+                    source_roots=(), read_observations=None):
     """Batch-read multiple files (or file ranges) in one call.
 
     Each spec in *reads* is ``{path, start_line?, end_line?}``.
@@ -727,9 +733,6 @@ def tool_read_files(base, reads, *, result_items=None, task=None):
             'Error: "reads" must be a non-empty array of {path, start_line?, end_line?} objects. '
             'Example: {"reads": [{"path": "src/main.py"}]}'
         )
-    MAX_BATCH = 20
-    if len(reads) > MAX_BATCH:
-        reads = reads[:MAX_BATCH]
 
     # Coerce LLM-emitted string line numbers to int. The model
     # occasionally returns ``start_line: "70"`` instead of ``70`` and
@@ -772,8 +775,6 @@ def tool_read_files(base, reads, *, result_items=None, task=None):
 
     parts = []
     image_results = {}  # index → dict for __screenshot__ results
-    total_chars = 0
-    BATCH_CHAR_BUDGET = 50 * 1024 * 1024  # lifted; per-file size bounds are the real limit
 
     def _record_result(index, spec, result, *, status=None):
         if not isinstance(result_items, list):
@@ -789,13 +790,6 @@ def tool_read_files(base, reads, *, result_items=None, task=None):
             status=status,
         ))
 
-    def _record_batch_skips(start_index):
-        for skipped_index in range(start_index, len(reads)):
-            skipped_spec = reads[skipped_index]
-            _record_result(
-                skipped_index, skipped_spec,
-                'Read skipped because the batch output budget was exhausted.',
-                status='skipped')
 
     for i, spec in enumerate(reads):
         if not isinstance(spec, dict) or 'path' not in spec:
@@ -813,6 +807,23 @@ def tool_read_files(base, reads, *, result_items=None, task=None):
         el = spec.get('end_line')
         spec_base = spec.get('_base', base)  # per-spec base override (multi-root)
 
+        if _is_absolute_path(rel_path):
+            from lib.project_mod.abs_path_guard import AbsPathDenied, enforce_abs_read
+            try:
+                enforce_abs_read(rel_path)
+            except AbsPathDenied as error:
+                result = f'Error: {error}'
+                parts.append(result)
+                _record_result(i, spec, result, status='error')
+                continue
+            absolute = os.path.abspath(os.path.expanduser(rel_path))
+            roots = source_roots or ([base] if base else [])
+            matching = [root for root in roots
+                        if os.path.commonpath([root, absolute]) == root and root != absolute]
+            if matching:
+                spec_base = max(matching, key=len)
+                rel_path = os.path.relpath(absolute, spec_base)
+
         # Route: uploaded-attachment reference (att_media_ / att_txt_) → the
         # durable attachment store, read as a virtual line-paged text file.
         if isinstance(rel_path, str) and rel_path.startswith(
@@ -824,16 +835,6 @@ def tool_read_files(base, reads, *, result_items=None, task=None):
                 _exact = attachment_display_name(rel_path)
                 if _exact:
                     spec['_display_path'] = _exact
-            if total_chars + len(result) > BATCH_CHAR_BUDGET:
-                remaining = BATCH_CHAR_BUDGET - total_chars
-                if remaining > 200:
-                    result = result[:remaining] + '\n… [truncated — batch budget exceeded]'
-                else:
-                    notice = f'[{i+1}] … [{len(reads) - i} more files skipped — batch budget exceeded]'
-                    parts.append(notice)
-                    _record_batch_skips(i)
-                    break
-            total_chars += len(result)
             parts.append(result)
             _record_result(i, spec, result)
             continue
@@ -850,21 +851,10 @@ def tool_read_files(base, reads, *, result_items=None, task=None):
                 text_fallback = result.get('_text_fallback', 'Image loaded.')
                 image_results[i] = result
                 parts.append(text_fallback)
-                total_chars += len(text_fallback)
                 _record_result(i, spec, result)
                 continue
-            # Text/PDF/Office result — budget as normal string
+            # Text/PDF/Office result — retain the complete observation
             if isinstance(result, str):
-                if total_chars + len(result) > BATCH_CHAR_BUDGET:
-                    remaining = BATCH_CHAR_BUDGET - total_chars
-                    if remaining > 200:
-                        result = result[:remaining] + '\n… [truncated — batch budget exceeded]'
-                    else:
-                        notice = f'[{i+1}] … [{len(reads) - i} more files skipped — batch budget exceeded]'
-                        parts.append(notice)
-                        _record_batch_skips(i)
-                        break
-                total_chars += len(result)
                 parts.append(result)
                 _record_result(i, spec, result)
                 continue
@@ -879,7 +869,9 @@ def tool_read_files(base, reads, *, result_items=None, task=None):
         # project-relative range based on file size.  Omitting both bounds is
         # the one and only whole-file request shape, matching absolute paths
         # and uploaded-attachment virtual files above.
-        result = _read_project_file(spec_base, rel_path, sl, el)
+        result = _read_project_file(spec_base, rel_path, sl, el,
+            source_capture=source_capture, source_roots=source_roots,
+            read_observations=read_observations)
         # Relative-path images/PDFs/Office now return a __screenshot__ dict
         # (parity with the absolute branch) — track separately so base64
         # never reaches the text accumulator below.
@@ -888,7 +880,6 @@ def tool_read_files(base, reads, *, result_items=None, task=None):
             text_fallback = result.get('_text_fallback', 'Image loaded.')
             image_results[i] = result
             parts.append(text_fallback)
-            total_chars += len(text_fallback)
             _record_result(i, spec, result)
             continue
         # SVG reads as text (model sees the markup); ALSO signal its source
@@ -899,16 +890,6 @@ def tool_read_files(base, reads, *, result_items=None, task=None):
                 _maybe_signal_svg(_svg_target, rel_path)
             except ValueError as e:
                 logger.debug('[Tools] svg signal safe_path rejected %s: %s', rel_path, e)
-        if total_chars + len(result) > BATCH_CHAR_BUDGET:
-            remaining = BATCH_CHAR_BUDGET - total_chars
-            if remaining > 200:
-                result = result[:remaining] + '\n… [truncated — batch budget exceeded]'
-            else:
-                notice = f'[{i+1}] … [{len(reads) - i} more files skipped — batch budget exceeded]'
-                parts.append(notice)
-                _record_batch_skips(i)
-                break
-        total_chars += len(result)
         parts.append(result)
         _record_result(i, spec, result)
 
@@ -1075,9 +1056,6 @@ def _build_rg_cmd(base, target, pattern, include, ctx_n, cap=MAX_GREP_RESULTS, c
         cmd.extend(['-C', str(ctx_n)])
     # Do not use rg -m here: it is a PER-FILE limit. The shared executor
     # enforces ``cap`` globally and terminates the backend once reached.
-    # Safety caps: skip huge files and limit search depth
-    cmd.extend(['--max-filesize', _RG_MAX_FILESIZE])
-    cmd.extend(['--max-depth', str(_TOOL_MAX_DEPTH)])
     cmd.extend(['--', pattern, target])
     return cmd
 
@@ -1357,15 +1335,6 @@ def grep_result_was_truncated(result):
     return isinstance(result, str) and any(
         marker in result for marker in _GREP_TRUNCATION_MARKERS)
 
-
-# Max filesize that rg should bother searching (skip huge data/binary files)
-_RG_MAX_FILESIZE = '2M'
-# Numeric twin of _RG_MAX_FILESIZE for the index candidate filter (rg size
-# suffixes are 1024-based).
-_RG_MAX_BYTES = 2 * 1024 * 1024
-
-# Max depth for rg/fd to search (safety cap)
-_TOOL_MAX_DEPTH = 30
 
 # Real-match line discriminator for rg/grep output. Two emitted shapes:
 #   multi-file : "<path>:<lineno>:<content>"   (path prefix present)
@@ -1647,7 +1616,7 @@ def _index_chunk_env_override():
     """Explicit operator profile ``(jobs, chunk_cap)`` or None (auto-probe)."""
     if 'TOFU_GREP_INDEX_JOBS' not in os.environ and 'TOFU_GREP_INDEX_CHUNK' not in os.environ:
         return None
-    jobs = max(1, min(8, int(os.environ.get('TOFU_GREP_INDEX_JOBS', '4') or 4)))
+    jobs = max(1, int(os.environ.get('TOFU_GREP_INDEX_JOBS', '4') or 4))
     cap = max(1, min(100_000, int(os.environ.get('TOFU_GREP_INDEX_CHUNK', '1500') or 1500)))
     return jobs, cap
 
@@ -1688,6 +1657,8 @@ def _run_index_chunks(base, pattern, ctx_n, cap, count_only, cands, deadline,
     the skipped tail.
     """
 
+    cancel_event = threading.Event()
+
     def _is_match_line(line):
         try:
             return bool(_RG_MATCH_LINE.match(line.decode('utf-8', errors='replace')))
@@ -1714,13 +1685,14 @@ def _run_index_chunks(base, pattern, ctx_n, cap, count_only, cands, deadline,
 
     def _run_one(i, chunk):
         remaining = deadline - time.monotonic()
-        if remaining <= 0.05:
+        if remaining <= 0.05 or cancel_event.is_set():
             return i, b'', True, False, 0.0, None
         t0 = time.perf_counter()
         req = SearchRequest(cwd=base, rg_argv=tuple(_mk_cmd(chunk)), preferred_backend='rg',
                             max_results=None if count_only else cap,
                             from_line=from_line,
-                            timeout=remaining, match_line=_is_match_line)
+                            timeout=remaining, match_line=_is_match_line,
+                            cancel_event=cancel_event)
         res = run_search(req)
         dt = time.perf_counter() - t0
         if res.unavailable:
@@ -1787,14 +1759,16 @@ def _run_index_chunks(base, pattern, ctx_n, cap, count_only, cands, deadline,
         pool_chunks = chunks[1:]
         results, timed_out, unavailable, cap_stop, withheld, last = _run_pool(
             _run_one, pool_chunks, jobs, results, offset=1,
-            count_only=count_only, cap=cap, match_re=_RG_MATCH_LINE)
+            count_only=count_only, cap=cap, match_re=_RG_MATCH_LINE,
+            cancel_event=cancel_event)
         withheld = _finish_withheld(cap_stop, timed_out, withheld, chunks, last)
         raw = b''.join(b for b in results if b)
         return raw, timed_out, unavailable, withheld
 
     results, timed_out, unavailable, cap_stop, withheld, last = _run_pool(
         _run_one, chunks, jobs, [None] * len(chunks), offset=0,
-        count_only=count_only, cap=cap, match_re=_RG_MATCH_LINE)
+        count_only=count_only, cap=cap, match_re=_RG_MATCH_LINE,
+        cancel_event=cancel_event)
     withheld = _finish_withheld(cap_stop, timed_out, withheld, chunks, last)
     raw = b''.join(b for b in results if b)
     return raw, timed_out, unavailable, withheld
@@ -1815,6 +1789,20 @@ def _submit_index_chunk(pool, function, *args):
         return future
 
 
+def _index_chunk_window(pool, function, chunks, jobs):
+    """Bound internal prefetch before demand submission, retaining input order."""
+    source = iter(enumerate(chunks))
+    pending = deque()
+    for _ in range(min(max(1, jobs), len(chunks))):
+        index, chunk = next(source)
+        pending.append(_submit_index_chunk(pool, function, index, chunk))
+    while pending:
+        yield pending.popleft()
+        item = next(source, None)
+        if item is not None:
+            pending.append(_submit_index_chunk(pool, function, *item))
+
+
 def _count_skipped_chunks(base, pattern, chunks, deadline):
     """Exact per-file match counts for candidate chunks the capped scan skipped.
 
@@ -1828,15 +1816,17 @@ def _count_skipped_chunks(base, pattern, chunks, deadline):
     total = 0
     capped = False
     files: dict[str, list[int]] = {}
+    cancel_event = threading.Event()
 
-    def _run_count(chunk):
+    def _run_count(_index, chunk):
         remaining = deadline - time.monotonic()
-        if remaining <= 0.05:
+        if remaining <= 0.05 or cancel_event.is_set():
             return b'', True
         cmd = ['rg', '-ci', '--color=never', '--no-heading', '--no-messages',
                '-H', '--', pattern, *chunk]
         req = SearchRequest(cwd=base, rg_argv=tuple(cmd),
-                            preferred_backend='rg', timeout=remaining)
+                            preferred_backend='rg', timeout=remaining,
+                            cancel_event=cancel_event)
         res = run_search(req)
         if res.unavailable:
             return b'', False
@@ -1845,7 +1835,7 @@ def _count_skipped_chunks(base, pattern, chunks, deadline):
     pool = InstrumentedThreadPoolExecutor(max_workers=2,
         metric_pool='project-count', thread_name_prefix='project-count')
     try:
-        futs = [_submit_index_chunk(pool, _run_count, chunk) for chunk in chunks]
+        futs = _index_chunk_window(pool, _run_count, chunks, 2)
         for fut in futs:
             try:
                 out, to = fut.result()
@@ -1867,7 +1857,8 @@ def _count_skipped_chunks(base, pattern, chunks, deadline):
                 capped = True
                 break
     finally:
-        pool.shutdown(wait=False, cancel_futures=True)
+        cancel_event.set()
+        pool.shutdown(wait=True, cancel_futures=True)
     if not files and not capped:
         return None
     return {
@@ -1880,7 +1871,8 @@ def _count_skipped_chunks(base, pattern, chunks, deadline):
     }
 
 
-def _run_pool(_run_one, chunks, jobs, results, offset, count_only, cap, match_re):
+def _run_pool(_run_one, chunks, jobs, results, offset, count_only, cap, match_re,
+              cancel_event=None):
     """Schedule ``_run_one(i+offset, chunk)`` over *chunks* with early exits.
 
     Writes into *results* (probe pre-seed honoured via *offset*); returns
@@ -1902,7 +1894,8 @@ def _run_pool(_run_one, chunks, jobs, results, offset, count_only, cap, match_re
     pool = InstrumentedThreadPoolExecutor(max_workers=max(1, jobs),
         metric_pool='project-read', thread_name_prefix='project-read')
     try:
-        futs = [_submit_index_chunk(pool, _run_one, offset + i, chunk) for i, chunk in enumerate(chunks)]
+        futs = _index_chunk_window(pool,
+            lambda i, chunk: _run_one(offset + i, chunk), chunks, jobs)
         got = 0
         for i, fut in enumerate(futs):
             try:
@@ -1934,10 +1927,11 @@ def _run_pool(_run_one, chunks, jobs, results, offset, count_only, cap, match_re
                     cap_stop = True
                     break  # already have a full page of matches — skip the tail
     finally:
-        # Return the requested page without waiting for excess chunks.
-        # Unstarted work cancels; the demand owner retains running carriers
-        # until their run_search timeout/completion. They cannot mutate results.
-        pool.shutdown(wait=False, cancel_futures=True)
+        # Cancel only this internal search's prefetched tail, then join owned
+        # carriers so process cleanup cannot outlive the returned result.
+        if cancel_event is not None:
+            cancel_event.set()
+        pool.shutdown(wait=True, cancel_futures=True)
     withheld = None
     if limit_hit:
         withheld = {
@@ -1975,7 +1969,7 @@ def _grep_via_index(base, target, pattern, include, ctx_n, cap, count_only,
             return None
         rel_target = os.path.relpath(target_abs, base_abs)
         cands, total_bytes = tree_index.grep_candidates(
-            entry, '' if rel_target == '.' else rel_target, include, _RG_MAX_BYTES)
+            entry, '' if rel_target == '.' else rel_target, include)
         if not cands:
             formatted = _format_grep_output(
                 base, '', pattern, include, ctx_n, cap, count_only,
@@ -2095,8 +2089,6 @@ def _python_grep(base, target, pattern, include=None, cap=MAX_GREP_RESULTS,
                 if _gitignore_match(f_rel, False, gi_patterns):
                     continue
             try:
-                if os.path.getsize(fp) > MAX_FILE_SIZE:
-                    continue
                 with open(fp, errors='replace') as f:
                     for i, line in enumerate(f, 1):
                         if from_line and i < from_line:
@@ -2189,7 +2181,6 @@ def _fd_find(target, base, pattern, cap, *, case_sensitive=False,
            '--max-results', str(cap)]
     cmd.append('--case-sensitive' if case_sensitive else '--ignore-case')
     if respect_project_ignores:
-        cmd.extend(['--max-depth', str(_TOOL_MAX_DEPTH)])
         # Exclude ignored dirs + hidden dirs.
         for d in sorted(IGNORE_DIRS):
             cmd.extend(['--exclude', d])
@@ -2240,7 +2231,8 @@ def _python_find(target, base, pattern, cap, *, case_sensitive=False,
     """Find files using a bounded ``scandir`` DFS + fnmatch fallback.
 
     Unlike ``os.walk``, this does not first materialize every name in a huge
-    directory. Work, depth, notices, and matches all have explicit bounds.
+    directory. Traversal retains a directory stack; notices and returned matches have
+    explicit presentation bounds. Directory depth does not discard candidates.
     """
     gi_patterns = (
         _load_gitignore_patterns(base) if respect_project_ignores else [])
@@ -2251,7 +2243,6 @@ def _python_find(target, base, pattern, cap, *, case_sensitive=False,
     comparable_pattern = pattern if case_sensitive else pattern.lower()
     stack = [(target, 0)]
     error_notices = 0
-    depth_truncated = False
     while stack:
         root, depth = stack.pop()
         child_directories = []
@@ -2259,14 +2250,6 @@ def _python_find(target, base, pattern, cap, *, case_sensitive=False,
             with os.scandir(root) as iterator:
                 for entry in iterator:
                     scanned += 1
-                    if scanned > _FIND_SCAN_LIMIT:
-                        matches.append((
-                            None,
-                            f'[search stopped after scanning '
-                            f'{_FIND_SCAN_LIMIT} entries - try a more '
-                            'specific path]',
-                        ))
-                        return matches
                     if scanned % 256 == 0 and time.time() > deadline:
                         matches.append((
                             None,
@@ -2283,9 +2266,6 @@ def _python_find(target, base, pattern, cap, *, case_sensitive=False,
                                      entry.path, exc)
                         continue
                     if is_dir:
-                        if depth >= _TOOL_MAX_DEPTH:
-                            depth_truncated = True
-                            continue
                         if respect_project_ignores and (
                                 name in IGNORE_DIRS or name.startswith('.')):
                             continue
@@ -2332,12 +2312,6 @@ def _python_find(target, base, pattern, cap, *, case_sensitive=False,
                 'try a more specific path]',
             ))
             return matches
-    if depth_truncated:
-        matches.append((
-            None,
-            f'[search depth capped at {_TOOL_MAX_DEPTH} - '
-            'try a more specific path]',
-        ))
     return matches
 
 
@@ -2354,13 +2328,8 @@ def tool_grep_batch(base, searches, *, owner_user_id=None):
     """
     if not searches or not isinstance(searches, list):
         return 'Error: "searches" must be a non-empty array of {pattern, ...} objects.'
-    MAX_BATCH = 20
-    if len(searches) > MAX_BATCH:
-        searches = searches[:MAX_BATCH]
 
     parts = []
-    total_chars = 0
-    BATCH_CHAR_BUDGET = 100_000
     for i, spec in enumerate(searches):
         if not isinstance(spec, dict) or 'pattern' not in spec:
             parts.append(f'[{i+1}] Error: each entry must have a "pattern" field')
@@ -2376,14 +2345,6 @@ def tool_grep_batch(base, searches, *, owner_user_id=None):
             owner_user_id=owner_user_id,
             from_line=spec.get('from_line'),
         )
-        if total_chars + len(result) > BATCH_CHAR_BUDGET:
-            remaining = BATCH_CHAR_BUDGET - total_chars
-            if remaining > 200:
-                result = result[:remaining] + '\n… [truncated — batch budget exceeded]'
-            else:
-                parts.append(f'[{i+1}] … [{len(searches) - i} more searches skipped — batch budget exceeded]')
-                break
-        total_chars += len(result)
         parts.append(result)
 
     return '\n\n'.join(parts)
@@ -2401,13 +2362,8 @@ def tool_find_files_batch(base, searches):
     """
     if not searches or not isinstance(searches, list):
         return 'Error: "searches" must be a non-empty array of {pattern, ...} objects.'
-    MAX_BATCH = 20
-    if len(searches) > MAX_BATCH:
-        searches = searches[:MAX_BATCH]
 
     parts = []
-    total_chars = 0
-    BATCH_CHAR_BUDGET = 100_000
     for i, spec in enumerate(searches):
         if not isinstance(spec, dict) or 'pattern' not in spec:
             parts.append(f'[{i+1}] Error: each entry must have a "pattern" field')
@@ -2418,14 +2374,6 @@ def tool_find_files_batch(base, searches):
             rel_path=spec.get('path'),
             max_results=spec.get('max_results'),
         )
-        if total_chars + len(result) > BATCH_CHAR_BUDGET:
-            remaining = BATCH_CHAR_BUDGET - total_chars
-            if remaining > 200:
-                result = result[:remaining] + '\n… [truncated — batch budget exceeded]'
-            else:
-                parts.append(f'[{i+1}] … [{len(searches) - i} more finds skipped — batch budget exceeded]')
-                break
-        total_chars += len(result)
         parts.append(result)
 
     return '\n\n'.join(parts)

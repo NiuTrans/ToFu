@@ -13,7 +13,6 @@
 #    make test-all      — Run all tests (unit + api + visual)
 #    make audit-tests   — Census the test suite's own health (report)
 #    make suite-health  — Gate: test-suite health must not regress (ratchet)
-#    make docs-check    — Validate the current-only documentation catalog
 #    make healthcheck   — Run project diagnostics
 #    make ci            — Full CI pipeline (lint + unit + api + healthcheck)
 #    make smoke         — Run smoke tests only
@@ -24,7 +23,7 @@
 #
 # ═══════════════════════════════════════════════════════════════
 
-.PHONY: lint docs-check architecture-check contracts-check monorepo-check test-unit test-api test-api-core test-slow test-visual test-e2e test-frontend test-all test-coverage healthcheck ci smoke help desktop desktop-icons stop vendor-mcp audit-tests suite-health
+.PHONY: lint architecture-check contracts-check monorepo-check test-unit test-api test-api-core test-slow test-visual test-e2e test-frontend test-all test-coverage healthcheck ci smoke help desktop desktop-icons stop vendor-mcp audit-tests suite-health
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -37,9 +36,6 @@ lint: ## Run ruff linter (errors only — blocks CI)
 	# scripts/, evaluations/ or any other shipped dir fails the PUBLIC lint
 	# gate even though a lib/-routes/-tests-only scan cannot see it.
 	python -m ruff check .
-
-docs-check: ## Validate the current-only documentation catalog and links
-	python3 scripts/check_documentation.py
 
 architecture-check: ## Reject retired surfaces and incident-only source notation
 	python3 scripts/check_architecture.py
@@ -159,7 +155,6 @@ FRONTEND_UNIT_IGNORES = \
 	--ignore=tests/static_serving/test_static_route_offload.py \
 	--ignore=tests/static_serving/test_static_serving_registration.py \
 	--ignore=tests/conversation_sync/test_snapshot_document_refs_frontend.py \
-	--ignore=tests/test_task_mode_states.py \
 	--ignore=tests/orchestration/test_orchestration_endpoint_parity.py \
 	--ignore=tests/orchestration/test_orchestration_wire_contracts.py \
 	--ignore=tests/agent_core/test_agent_mode_selector.py \
@@ -211,8 +206,7 @@ FRONTEND_ESM_TESTS = \
 	tests/static_serving/test_stale_i18n_pack_self_heal.py \
 	tests/static_serving/test_static_route_offload.py \
 	tests/static_serving/test_static_serving_registration.py \
-	tests/conversation_sync/test_snapshot_document_refs_frontend.py \
-	tests/test_task_mode_states.py
+	tests/conversation_sync/test_snapshot_document_refs_frontend.py
 
 test-bundles: ## Run release-tier bundle tests (bundles/*/tests; internal checkouts only)
 	$(PYTEST) bundles/ --timeout=300 --tb=short -q
@@ -247,7 +241,7 @@ test-visual: ## Run Playwright visual E2E tests (needs chromium)
 	$(PYTEST) $(PYTEST_BASE) -m visual --tb=short -q
 
 test-e2e: ## Run hermetic E2E journeys — real app + real browser + stub LLM (P0-3 主干道巡检)
-	$(PYTEST) $(PYTEST_BASE) tests/e2e/test_e2e_smoke.py tests/e2e/test_e2e_journeys.py tests/e2e/test_e2e_pending_narration.py -m visual -ra --tb=short -q
+	$(PYTEST) $(PYTEST_BASE) tests/e2e/test_e2e_smoke.py tests/e2e/test_e2e_journeys.py tests/e2e/test_e2e_pending_narration.py tests/e2e/test_e2e_reload_selection.py -m visual -ra --tb=short -q
 
 test-frontend: frontend-build ## Run Vite ESM source, artifact and serving contracts
 	@if [ ! -d node_modules/jsdom ]; then echo '⚠️  Run `npm install` first (installs jsdom + typescript dev-deps)'; exit 1; fi
@@ -275,7 +269,7 @@ healthcheck: ## Run project health diagnostics
 
 # ── CI Pipeline ────────────────────────────────────────────────
 
-ci: lint docs-check architecture-check contracts-check monorepo-check typing-check test-unit test-api suite-health healthcheck ## Full CI pipeline
+ci: lint architecture-check contracts-check monorepo-check typing-check test-unit test-api suite-health healthcheck ## Full CI pipeline
 	@echo ""
 	@echo "  ✅ CI pipeline passed"
 	@echo ""

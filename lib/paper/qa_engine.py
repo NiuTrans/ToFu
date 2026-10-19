@@ -14,15 +14,12 @@ Emits chat-compatible events (tool_start / tool_done / delta / done / error)
 so the frontend reuses ``renderToolRoundsHTML`` and the report poll renderer.
 """
 
-import json
 import time
 
 import lib as _lib
-from lib.agent_loop import AbortSignal
+from lib.agent_loop.agent_loop import AbortSignal
 from lib.llm_dispatch.api import dispatch_stream
 from lib.log import get_logger
-from lib.tasks_pkg.tool_display import tool_round_label as _display_query_for
-from lib.tool_input_repair import parse_and_repair_tool_args
 
 from .agent_loop_policy import run_guarded_paper_agent_loop
 from .agent_usage import PaperAgentUsageMeter
@@ -33,7 +30,7 @@ from .tools import (
     apply_paper_tool_epoch_guidance,
     build_paper_full_tool_epoch,
     make_paper_exec_shim,
-    paper_effective_tool_name,
+    make_paper_task_tool_executor,
 )
 
 logger = get_logger(__name__)
@@ -131,79 +128,13 @@ def _run_qa_task(task, messages):
     def _publish_agent_usage(_rnd, _msg, _finish, _usage):
         task['agentUsageV1'] = _agent_usage.snapshot()
 
-    def _execute_tool(rnd, tc):
-        fn_name = tc['function']['name']
-        fn_args_raw = tc['function']['arguments']
-        tc_id = tc.get('id', '')
-
-        # Parse + schema-repair args ONCE (shared with the executor), so the
-        # display label and the actual search see the SAME normalized shape — a
-        # bare-string `queries`/`urls` is coerced to a single-element array,
-        # never iterated per-character.
-        fn_args, _ = parse_and_repair_tool_args(fn_name, fn_args_raw)
-
-        task['round_counter'] += 1
-        rn = task['round_counter']
-        display_query = _display_query_for(fn_name, fn_args)
-        # run_command → code_exec in a project-less engine (mirrors chat).
-        effective_name = paper_effective_tool_name(fn_name)
-
-        round_entry = {
-            'roundNum': rn, 'llmRound': rnd,
-            'toolName': effective_name, 'query': display_query,
-            'toolCallId': tc_id,
-            'toolArgs': (fn_args_raw if isinstance(fn_args_raw, str)
-                         else json.dumps(fn_args, ensure_ascii=False)),
-            'status': 'searching', 'results': None,
-        }
-        task['tool_rounds'].append(round_entry)
-        _append_qa_event(task, {
-            'type': 'tool_start', 'roundNum': rn, 'toolName': effective_name,
-            'query': display_query, 'toolCallId': tc_id,
-            'toolArgs': round_entry['toolArgs'],
-        })
-
-        tool_t0 = time.time()
-        result, display_results, search_diag, engine_breakdown, verticals = execute_paper_tool(
-            fn_name, fn_args_raw, user_question=user_question,
-            abort=abort_signal.is_set,
-            exec_shim=_exec_shim, round_entry=round_entry)
-        tool_elapsed = time.time() - tool_t0
-        logger.info('[Paper:QA:Tool] %s → %d chars in %.1fs',
-                    fn_name, len(result), tool_elapsed)
-
-        tool_status = ('rejected' if round_entry.get('status') == 'rejected'
-                       else 'done')
-        round_entry['status'] = tool_status
-        round_entry['_elapsed'] = f'{tool_elapsed:.1f}s'
-        round_entry['results'] = display_results
-        if engine_breakdown:
-            round_entry['engineBreakdown'] = engine_breakdown
-        if verticals:
-            round_entry['verticals'] = verticals
-        round_entry['toolContent'] = result[:4000]
-
-        done_ev = {
-            'type': 'tool_done', 'roundNum': rn, 'toolName': effective_name,
-            'toolCallId': tc_id, 'elapsed': round(tool_elapsed, 1),
-            'toolContent': result[:4000], 'results': display_results,
-            'status': tool_status,
-        }
-        if round_entry.get('contractError'):
-            done_ev['contractError'] = round_entry['contractError']
-        if search_diag:
-            done_ev['searchDiag'] = search_diag
-        if engine_breakdown:
-            done_ev['engineBreakdown'] = engine_breakdown
-        if verticals:
-            done_ev['verticals'] = verticals
-        _append_qa_event(task, done_ev)
-
-        return _result_budget.append(
-            messages, round_index=rnd, tool_name=fn_name,
-            tool_call_id=tc_id, content=result, round_entry=round_entry,
-            world_version=str(task.get('_worldVersion') or ''),
-            tool_arguments=fn_args)
+    _execute_tool = make_paper_task_tool_executor(
+        task, messages, user_question=user_question,
+        abort_signal=abort_signal, exec_shim=_exec_shim,
+        result_budget=_result_budget, paper_tool_executor=execute_paper_tool,
+        on_tool_event=lambda event: _append_qa_event(task, event),
+        log_prefix='[Paper:QA]',
+    )
 
     try:
         _outcome = run_guarded_paper_agent_loop(

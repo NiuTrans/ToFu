@@ -10,7 +10,7 @@ Entry points: ``append_client_trace_observation``,
 
 Dependencies: standard library only, deliberately. Both the task-execution
 fold (``lib/tasks_pkg/turn_trace.py``) and the persistence sidecar
-(``lib/storage_sidecar/operations_pkg/``) consume this module; the sidecar is
+(``lib/storage_authority_sql/operations_pkg/``) consume this module; the sidecar is
 a separate process and must never import the task-execution graph. Keep this
 module free of imports from ``lib.agent_core``, ``lib.orchestration``,
 ``lib.tasks_pkg`` and any other execution owner — ``make architecture-check``

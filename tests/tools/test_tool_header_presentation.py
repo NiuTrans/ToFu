@@ -85,7 +85,8 @@ def test_fresh_success_has_clean_header_and_intact_diff(render, tool, count, tok
     markup = render(value)
     header = _header(markup)
     assert _spans(header, 'ptool-text') == [value['query']]
-    assert not _spans(header, 'ptool-badge')
+    assert _spans(header, 'ptool-badge') == [f'{count}/{count}']
+    assert 'ptool-badge-ok' in header
     if count > 1 or tool == 'edit_file':
         assert 'new_0 (7 edits)' in _text(markup)
     else:
@@ -108,9 +109,10 @@ def test_historical_generated_counts_removed_without_losing_author_text(render, 
     markup = render(value)
     header = _header(markup)
     assert _spans(header, 'ptool-text') == [expected]
-    assert not _spans(header, 'ptool-badge')
+    assert _spans(header, 'ptool-badge') == [f'{2 - failures}/2']
+    assert ('ptool-badge-err' if failures else 'ptool-badge-ok') in header
     if failures:
-        assert 'anchor missing' in _text(header)
+        assert 'anchor missing' not in _text(header)
         assert 'anchor missing' in _text(markup)
     else:
         assert 'new_0 (7 edits)' in _text(markup)
@@ -133,7 +135,8 @@ def test_large_history_uses_metadata_without_rewriting_stored_title(render, tool
     value['results'][0]['badge'] = '18/18 edits'
     header = _header(render(value))
     assert _spans(header, 'ptool-text') == [expected]
-    assert '18/18 edits' not in _spans(header, 'ptool-badge')
+    if status == 'done':
+        assert _spans(header, 'ptool-badge') == ['18/18']
     assert value['query'].endswith(f'(18 {unit})')
 
 
@@ -146,7 +149,7 @@ def test_ambiguous_history_title_is_preserved(render, tool):
     value['results'][0]['badge'] = '2 edits'
     header = _header(render(value))
     assert _spans(header, 'ptool-text') == ['Edit notes (2 edits)']
-    assert not _spans(header, 'ptool-badge')
+    assert _spans(header, 'ptool-badge') == ['2/2']
 
 
 @pytest.mark.parametrize('tool', BATCH_TOOLS)
@@ -165,8 +168,9 @@ def test_refusal_badge_wins_over_count_and_token_policy(render, tool, kind, lega
         meta['refusal'] = {'kind': kind, 'paths': ['src/a.py']}
     value['toolTokens'] = 321
     header = _header(render(value))
-    assert label in _spans(header, 'ptool-badge')
-    assert 'ptool-badge-gate' in header
+    assert _spans(header, 'ptool-badge') == ['0/2']
+    assert 'ptool-badge-err' in header
+    assert label not in _text(header)
     assert '321 tok' not in _text(header)
 
 
@@ -178,8 +182,9 @@ def test_backend_outside_workspace_stamp_is_visible(render, tool):
     value = _round(tool, json.loads(value['toolArgs']), content)
     assert value['results'][0]['refusal']['kind'] == 'outside_workspace'
     header = _header(render(value))
-    assert 'tool.gateOutsideWorkspaceBadge' in _spans(header, 'ptool-badge')
-    assert 'ptool-badge-gate' in header
+    assert _spans(header, 'ptool-badge') == ['0/2']
+    assert 'ptool-badge-err' in header
+    assert 'ptool-gate-note' in render(value)
 
 
 @pytest.mark.parametrize('tool', BATCH_TOOLS)
@@ -190,7 +195,7 @@ def test_terminal_error_keeps_refusal_without_count_or_success_badge(render, too
              'results': [{'writeOk': False, 'badge': '0/2 edits',
                           'refusal': {'kind': 'outside_workspace', 'paths': ['src/a.py']}}]}
     markup = render(value)
-    assert _spans(markup, 'ptool-badge') == ['tool.gateOutsideWorkspaceBadge']
+    assert _spans(_header(markup), 'ptool-badge') == ['0/2']
     # The compact outcome card replaced the raw ptool-error log dump for
     # settled-failed batch edits; the refusal keeps its typed gate notice.
     assert 'ptool-error' not in markup
@@ -207,9 +212,10 @@ def test_custom_batch_error_badge_and_detail_survive(render, tool):
     value = _batch(tool, failures=2)
     value['results'][0]['badge'] = 'transaction rejected'
     header = _header(render(value))
-    assert _spans(header, 'ptool-badge') == ['transaction rejected']
+    assert _spans(header, 'ptool-badge') == ['0/2']
     assert 'ptool-badge-err' in header
-    assert 'anchor missing' in _text(header)
+    assert 'anchor missing' not in _text(header)
+    assert 'anchor missing' in _text(render(value))
 
 
 @pytest.mark.parametrize('tool', BATCH_TOOLS)
@@ -271,14 +277,14 @@ const frozen = Object.freeze({toolName:'edit_file', query:'Edit <a>.py (2 edits)
 const before = JSON.stringify(frozen);
 check('frozen history is normalized without mutation',
   header.queryText(frozen) === 'Edit <a>.py — <intent>'
-  && header.renderBadgeHtml(frozen, frozen.results[0]) === ''
+  && header.renderBadgeHtml(frozen, frozen.results[0]).includes('2/2')
   && JSON.stringify(frozen) === before);
 function node(markup) { const n = document.createElement('div'); n.innerHTML = markup; return n; }
 const hostile = '<img src=x onerror="pwn()"> & " <script>';
 const escaped = node(header.renderBadgeHtml({toolName:'write_file'}, {badge:hostile}));
 check('explicit badges contain text, never injected markup',
   escaped.textContent === hostile && !escaped.querySelector('img,script'));
-const refusalHtml = node(header.renderBadgeHtml({toolName:'edit_file'}, {refusal:{kind:hostile, paths:[hostile]}}));
+const refusalHtml = node(header.renderBadgeHtml({toolName:'write_file'}, {refusal:{kind:hostile, paths:[hostile]}}));
 check('unknown refusal kind remains an escaped warning',
   refusalHtml.textContent === hostile && !refusalHtml.querySelector('img,script')
   && refusalHtml.querySelector('.ptool-badge-gate'));
@@ -299,7 +305,7 @@ const refusal = gate.resolveRefusal({toolName:'edit_file'}, {refusal:{kind:'read
 check('refusal path normalization is bounded and truncation remains visible',
   refusal.paths.length < paths.length && refusal.paths[0].length < paths[0].length
   && gate.renderNoticeHtml(refusal).includes('…') && Object.isFrozen(refusal.paths));
-const enormous = node(header.renderBadgeHtml({toolName:'edit_file'}, {refusal:{kind:'x'.repeat(10000), paths}}));
+const enormous = node(header.renderBadgeHtml({toolName:'write_file'}, {refusal:{kind:'x'.repeat(10000), paths}}));
 check('unknown refusal badges honor the header budget',
   enormous.textContent.length <= limits.badgeUnits + 1 && enormous.textContent.endsWith('…'));
 check('prototype property names are not legacy refusals',

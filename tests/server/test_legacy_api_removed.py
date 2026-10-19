@@ -77,6 +77,12 @@ ALLOWED_UNVERSIONED = frozenset({
     '/api/artifacts/<artifact_id>/raw',
     '/api/artifacts/<artifact_id>/view',
     '/api/artifacts/<artifact_id>/export',
+    # Owned rich-response asset/surface protocol (API_CONTRACT rich responses).
+    '/api/artifacts/<artifact_id>/download',
+    '/api/response-assets/<asset_id>',
+    '/api/response-assets/artifacts/<artifact_id>',
+    '/api/response-surfaces/resources',
+    '/api/response-surfaces/providers',
     # Bridge-Secret long-poll RPC (browser extension + desktop agent)
     '/api/browser/poll',
     '/api/browser/download',
@@ -87,7 +93,7 @@ ALLOWED_UNVERSIONED = frozenset({
     '/api/desktop/poll',
     # Pairing-code exchange for the desktop agent (RWA P4a): the 6-digit
     # one-time code IS the credential (code + audit, no bearer), and the
-    # SHIPPED TofuAgent-Setup-0.16.0 installer embeds this exact path —
+    # SHIPPED TofuRemote-Setup-0.16.0 installer embeds this exact path —
     # moving it to /api/v1/* would break in-field agents.
     '/api/desktop/pair',
     # Static video-bytes serving (frontend playback / re-download) — same

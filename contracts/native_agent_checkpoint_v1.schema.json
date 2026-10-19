@@ -60,12 +60,18 @@
       "minItems": 1
     },
     "round_limit": {
-      "type": "integer",
+      "type": [
+        "integer",
+        "null"
+      ],
       "minimum": 1
     },
     "tool_limit": {
-      "type": "integer",
-      "minimum": 1
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
     },
     "no_progress_limit": {
       "type": "integer",
@@ -306,10 +312,438 @@
             }
           },
           "additionalProperties": false
+        },
+        "root_tokens": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        },
+        "actor_task_id": {
+          "type": "string",
+          "minLength": 1
         }
       },
       "additionalProperties": false
+    },
+    "host_fee_projection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "format",
+        "owner_user_id",
+        "tenant_id",
+        "task_id",
+        "logical_model",
+        "provider_id",
+        "wallet_user_id",
+        "reserved_micro",
+        "rounds"
+      ],
+      "properties": {
+        "format": {
+          "enum": [
+            "tofu.native-fee-checkpoint/v1"
+          ]
+        },
+        "owner_user_id": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        },
+        "tenant_id": {
+          "type": "string"
+        },
+        "task_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "logical_model": {
+          "type": "string",
+          "minLength": 1
+        },
+        "provider_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "wallet_user_id": {
+          "type": "string"
+        },
+        "reserved_micro": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        },
+        "rounds": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "round",
+              "cost"
+            ],
+            "properties": {
+              "task_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "round": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 18446744073709551615
+              },
+              "cost": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "amounts",
+                  "price",
+                  "credits"
+                ],
+                "properties": {
+                  "amounts": {
+                    "type": [
+                      "object",
+                      "null"
+                    ]
+                  },
+                  "price": {
+                    "type": "object"
+                  },
+                  "credits": {
+                    "type": "object"
+                  }
+                }
+              },
+              "public_round": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 18446744073709551615
+              },
+              "billable_task_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              }
+            }
+          }
+        },
+        "child_rounds": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "round",
+              "task_id",
+              "source_round",
+              "billable_task_id",
+              "usage",
+              "cost"
+            ],
+            "properties": {
+              "round": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 18446744073709551615
+              },
+              "task_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "source_round": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 18446744073709551615
+              },
+              "billable_task_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "usage": {
+                "type": "object"
+              },
+              "cost": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "amounts",
+                  "price",
+                  "credits"
+                ],
+                "properties": {
+                  "amounts": {
+                    "type": [
+                      "object",
+                      "null"
+                    ]
+                  },
+                  "price": {
+                    "type": "object"
+                  },
+                  "credits": {
+                    "type": "object"
+                  }
+                }
+              },
+              "route": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "logical_model",
+                  "provider_id"
+                ],
+                "properties": {
+                  "logical_model": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "provider_id": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
+              }
+            }
+          }
+        },
+        "wallet_settlement": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "format",
+            "task_id",
+            "owner_user_id",
+            "wallet_user_id",
+            "model",
+            "reserved_micro",
+            "componentsMicro",
+            "roundCount"
+          ],
+          "properties": {
+            "format": {
+              "enum": [
+                "tofu.native-billing/v1"
+              ]
+            },
+            "task_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            },
+            "owner_user_id": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "wallet_user_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            },
+            "model": {
+              "type": "string",
+              "maxLength": 4096
+            },
+            "reserved_micro": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9223372036854775807
+            },
+            "roundCount": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9223372036854775807
+            },
+            "componentsMicro": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "input",
+                "output",
+                "cache_read",
+                "cache_write",
+                "baseMicro",
+                "marginMicro",
+                "totalMicro"
+              ],
+              "properties": {
+                "input": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9223372036854775807
+                },
+                "output": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9223372036854775807
+                },
+                "cache_read": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9223372036854775807
+                },
+                "cache_write": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9223372036854775807
+                },
+                "baseMicro": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9223372036854775807
+                },
+                "marginMicro": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9223372036854775807
+                },
+                "totalMicro": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9223372036854775807
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "tools_pending": {
+      "enum": [
+        true
+      ]
+    },
+    "tool_recovery": {
+      "type": "object"
     }
   },
-  "additionalProperties": false
+  "additionalProperties": false,
+  "$defs": {
+    "file_tool_recovery": {
+      "type": "object",
+      "required": [
+        "format",
+        "producer_task_id",
+        "calls"
+      ],
+      "properties": {
+        "format": {
+          "const": "tofu.native-file-tool-recovery/v1"
+        },
+        "producer_task_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "calls": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": [
+              "call_id",
+              "inspection"
+            ],
+            "properties": {
+              "call_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "inspection": {
+                "type": "object"
+              },
+              "tool_round": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 18446744073709551615
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "registered_actor_fees": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "format",
+        "owner_user_id",
+        "root_task_id",
+        "actor_task_id",
+        "tokens",
+        "rounds"
+      ],
+      "properties": {
+        "format": {
+          "const": "tofu.native-actor-fees/v1"
+        },
+        "owner_user_id": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        },
+        "root_task_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "actor_task_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "tokens": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        },
+        "rounds": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "round",
+              "producer_task_id",
+              "payer_task_id",
+              "logical_model",
+              "provider_id",
+              "quote"
+            ],
+            "properties": {
+              "round": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 18446744073709551615
+              },
+              "producer_task_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              },
+              "payer_task_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              },
+              "logical_model": {
+                "type": "string",
+                "minLength": 1
+              },
+              "provider_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "quote": {
+                "$ref": "#/properties/host_fee_projection/properties/rounds/items/properties/cost"
+              }
+            }
+          }
+        }
+      }
+    }
+  }
 }

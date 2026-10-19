@@ -18,6 +18,13 @@ def runtime_capabilities(runtime=None) -> dict:
         'tofu_version': version,
         'api_version': 'v1',
         'runtime': 'tofu-agent',
+        'execution': {'backend': 'rust' if getattr(runtime,'_native_execution',None) is not None else 'python',
+                      'selection': 'trusted runtime composition'},
+        'repository_extraction': {
+            'selection': 'native' if getattr(runtime, '_repository_runtime', None) is not None else 'reference',
+            'authority': 'trusted runtime composition',
+            'default': 'reference',
+        },
         'features': {
             'agent_run': True,
             'streaming': True,

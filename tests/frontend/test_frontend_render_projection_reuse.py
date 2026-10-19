@@ -56,8 +56,14 @@ def conversation_bundle(tmp_path_factory: pytest.TempPathFactory) -> Path:
 
 def _run(bundle: Path, source: str) -> dict:
     script = f"""
+// The public browser composition imports browser API/renderer ports. Install
+// its document before loading it, as in the neighboring Surface harness.
+const importDom = new (require('jsdom').JSDOM)('<!doctype html><body></body>', {{url:'http://localhost/'}});
+global.window = importDom.window;
+global.document = importDom.window.document;
 const feature = require({json.dumps(str(bundle))});
 {source}
+importDom.window.close();
 """
     result = subprocess.run(
         [shutil.which("node"), "-e", script],

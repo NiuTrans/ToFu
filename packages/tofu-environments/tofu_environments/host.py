@@ -38,6 +38,28 @@ def configure_provider_context(**context):
         _PROVIDER_CONTEXT.clear()
         _PROVIDER_CONTEXT.update(context)
 
+def configured_compute_providers():
+    """Return explicitly configured provider IDs without loading providers."""
+    with _LOCK:
+        return tuple(_PROVIDER_CONTEXT.get('compute_provider_ids') or ())
+
+def read_compute_catalog(actor, provider, *, cancelled=lambda: False):
+    """Request-owned read port; the host retains composition and teardown."""
+    with _LOCK:
+        service = _JOB_SERVICE
+        enabled = tuple(_PROVIDER_CONTEXT.get('compute_provider_ids') or ())
+    if service is None and provider not in enabled:
+        raise EnvironmentError('provider_unavailable', 'Configure an owner-bound compute provider to view live resources')
+    with ExitStack() as lifecycle:
+        task = {'_userId': actor.owner_id, '_tenantId': actor.tenant_id}
+        service = service or _default_service(task, jobs=True, lifecycle=lifecycle, cancelled=cancelled)
+        if cancelled():
+            raise InterruptedError('Resource read cancelled')
+        result = service.catalog(actor, provider)
+        if cancelled():
+            raise InterruptedError('Resource read cancelled')
+        return result
+
 def _capacity_defaults(observation):
     """Use the host's cached launch memory/volume probe; missing data stays lean."""
     available = max(1, observation.effective_memory_available_mb or 32) * 1048576
@@ -46,7 +68,7 @@ def _capacity_defaults(observation):
             "context_byte_limit": max(1, min(available * 2, disk // 4)),
             "context_file_limit": max(1, min(1000000, available // 4096, disk // 8192))}
 
-def _default_service(task, *, jobs=False, lifecycle=None):
+def _default_service(task, *, jobs=False, lifecycle=None, cancelled=None):
     from lib.storage import get_storage_client
     from runtime_guards import probe_system_resources
     get_storage_client(write=True).command("plugin.register", {"manifest": MANIFEST},
@@ -55,7 +77,7 @@ def _default_service(task, *, jobs=False, lifecycle=None):
     with _LOCK: context = dict(_PROVIDER_CONTEXT)
     for name, value in _capacity_defaults(observation).items():
         context.setdefault(name, value)
-    context["cancelled"] = lambda: bool(task.get('abort') or task.get('_abort'))
+    context["cancelled"] = cancelled or (lambda: bool(task.get('abort') or task.get('_abort')))
     repository = HostRepository(get_storage_client)
     context['repository'] = repository
     if lifecycle is not None:
@@ -73,46 +95,41 @@ def _default_service(task, *, jobs=False, lifecycle=None):
         return found[0].load()(actor, context)
     return (JobService if jobs else EnvironmentService)(repository, resolve)
 
-def _schemas(_context):
-    if _context.owner_user_id <= 0:
+def _schemas(context):
+    """Only configured provider families contribute executable schemas."""
+    if context.owner_user_id <= 0:
         return []
-    from pathlib import Path
-    spec_schema = json.loads(Path(__file__).with_name("spec.schema.json").read_text())
-    spec_schema.pop('$schema', None)
-    job_schema = json.loads(Path(__file__).with_name("job.schema.json").read_text())
-    job_schema.pop("$schema", None)
-    string = {"type": "string", "minLength": 1, "maxLength": 128}
-    def function(name, description, properties, required):
-        return {"type": "function", "function": {"name": name, "description": description,
-            "parameters": {"type": "object", "properties": properties, "required": required, "additionalProperties": False}}}
-    schemas = [function("environment_providers", "List installed environment providers without starting a daemon or authenticating.", {}, []),
-        function("environment_catalog", "Read available base-image references, revisions, queue names and provider constraints before planning. Authentication is owner-bound; this creates no resource.",
-                 {"provider": string, "project": string, "query": {"type": "string", "maxLength": 256}}, ["provider", "project"]),
-        function("environment_plan", "Validate and seal a provider-neutral image/workspace plan. Returns exact resource and build scope; creates no external resource. Profiles support deploying Tofu or project development/training. Supply explicit CPU/memory and owned project.",
-        {"provider": string, "request_id": string, "spec": spec_schema}, ["provider", "request_id", "spec"]),
-        function("environment_apply", "Apply the next stage of an immutable environment plan under exact write approval. May build an image or allocate a workspace; use the plan returned by environment_plan. Repeated or uncertain writes are never blindly resubmitted.",
-        {"operation_id": string, "plan_hash": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
-         "plan": {"type": "object", "required": ["provider", "spec", "evidence", "project_root", "scope"],
-                  "properties": {"provider": string, "spec": spec_schema, "evidence": {"type": "object"},
-                                 "project_root": {"type": "string"}, "scope": {"type": "string"}}, "additionalProperties": False}},
-         ["operation_id", "plan_hash", "plan"]),
-        function("environment_status", "Read image/workspace progress and reconcile uncertain results without creating resources. When next_action=apply, request the approved next stage. Ready requires provider-specific readiness evidence.",
-        {"operation_id": string}, ["operation_id"]),
-        function("compute_plan", "Validate and seal a bounded batch job with an installed actor-bound compute provider. No resource is allocated. Source identity, command, resources and cost limits are explicit.",
-                 {"provider": string, "request_id": string, "spec": job_schema}, ["provider", "request_id", "spec"]),
-        function("compute_submit", "Submit the exact approved compute plan once. Uncertain results are reconciled through compute_status; never replay a submission with a new request ID.",
-                 {"operation_id": string, "plan_hash": {"type":"string", "pattern":"^[a-f0-9]{64}$"},
-                  "plan": {"type":"object", "additionalProperties":False,
-                           "required":["scope","project_root","provider","spec","admission"],
-                           "properties":{"scope":string,"project_root":{"type":"string"},"provider":string,"spec":job_schema,"admission":{"type":"object"}}}},
-                 ["operation_id","plan_hash","plan"]),
-        function("compute_status", "Read scoped batch job status or reconcile unknown submission without allocation. Success requires a proven zero exit code.",
-                 {"operation_id":string}, ["operation_id"]) ]
-    schemas.append(function('compute_collect', 'Collect declared outputs from an owned proven-successful job into a fresh private directory in the active project. Returns file sizes and SHA256 receipts; does not allocate compute or resubmit jobs.', {'operation_id': string}, ['operation_id']))
-    submit_schema = next(row for row in schemas if row['function']['name'] == 'compute_submit')
-    schemas.append(function('compute_cancel', 'Request cancellation of the exact approved owned job. An acknowledgement is not terminal proof; follow compute_status. Unknown stop outcomes are not replayed.',
-                            submit_schema['function']['parameters']['properties'], ['operation_id','plan_hash','plan']))
-    return schemas
+    from .schemas import tool_schemas
+    with _LOCK:
+        env_ready = _SERVICE is not None or bool(_PROVIDER_CONTEXT.get('environment_provider_ids'))
+        jobs_ready = _JOB_SERVICE is not None or bool(_PROVIDER_CONTEXT.get('compute_provider_ids'))
+    cfg = getattr(context, 'cfg', {}) or {}
+    binding = cfg.get('evolution') or {}
+    rows = []
+    for row in tool_schemas():
+        name = row['function']['name']
+        if name == 'environment_providers':
+            rows.append(row)
+        elif name.startswith('environment_') and env_ready:
+            rows.append(row)
+        elif name.startswith('compute_') and jobs_ready:
+            if name == 'compute_wait' and not (
+                    binding.get('run_id') and binding.get('stage') == 'executing'):
+                continue
+            if name == 'compute_collect' and not getattr(context, 'project_ready', False):
+                continue
+            rows.append(row)
+    return rows
+
+
+def _environment_schemas(context):
+    return [row for row in _schemas(context)
+            if row['function']['name'].startswith('environment_')]
+
+
+def _compute_schemas(context):
+    return [row for row in _schemas(context)
+            if row['function']['name'].startswith('compute_')]
 
 def _collect_into_project(service, actor, operation_id):
     """Host-owned fresh destination; model arguments never select filesystem paths.
@@ -144,7 +161,18 @@ def _handler(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, project_pa
     try:
         if fn_name.startswith('compute_'):
             job_service = job_service or _default_service(task, jobs=True, lifecycle=lifecycle)
-            if fn_name == 'compute_plan':
+            if fn_name == 'compute_wait':
+                binding=(task.get('config') or {}).get('evolution') or {}
+                if not binding.get('run_id') or binding.get('stage')!='executing':
+                    raise EnvironmentError('evolution_required','Durable compute waiting requires an Evolution executor')
+                from lib.evolution.compute_wait import register as register_wait
+                from lib.evolution.contracts import EvolutionStateError,EvolutionContractError
+                try:result=register_wait(task,actor,job_service.status(actor,fn_args['operation_id']))
+                except (EvolutionStateError,EvolutionContractError) as exc:
+                    raise EnvironmentError('compute_wait_refused',str(exc)) from exc
+            elif fn_name == 'compute_catalog':
+                result = job_service.catalog(actor, fn_args['provider'])
+            elif fn_name == 'compute_plan':
                 result = job_service.plan(actor, fn_args['provider'], fn_args['spec'], fn_args['request_id'])
             elif fn_name in {'compute_submit', 'compute_cancel'}:
                 from lib.tasks_pkg.tool_dispatch._approval import consume_approval_receipt
@@ -184,11 +212,25 @@ def _handler(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, project_pa
     return tc_id, content, False
 
 def register(register_tool_spec):
+    """Explicit legacy native environment adapter; MCP is the platform entry."""
     from lib.tools.registry import ToolSpec
-    names = frozenset({'environment_providers', 'environment_catalog', 'environment_plan', 'environment_apply', 'environment_status', 'compute_plan', 'compute_submit', 'compute_status', 'compute_cancel', 'compute_collect'})
-    register_tool_spec(ToolSpec('environments', _schemas, provides=names,
-        handler=_handler, category='environments', description='Optional provider-neutral image/workspace provisioning',
-        write_tools=frozenset({'environment_apply', 'compute_submit', 'compute_cancel'}), confirmation_tools=frozenset({'environment_apply', 'compute_submit', 'compute_cancel'}),
-        auto_approval_tools=frozenset({'environment_apply', 'compute_submit', 'compute_cancel'}), cacheable_tools=frozenset(),
-        discovery_policy='searchable', timeout_ms_by_name={'environment_providers': 10000, 'environment_catalog': 90000,
-                            'environment_plan': 900000, 'environment_apply': 3600000, 'environment_status': 180000, 'compute_plan': 180000, 'compute_submit': 900000, 'compute_status': 180000, 'compute_cancel': 180000, 'compute_collect': 900000}))
+    names = frozenset({'environment_providers', 'environment_catalog', 'environment_plan', 'environment_apply', 'environment_status'})
+    register_tool_spec(ToolSpec('environments', _environment_schemas, provides=names,
+        handler=_handler, category='environments', description='Optional configured image/workspace provisioning',
+        gate='config.plugins: environments; trusted provider configuration',
+        write_tools=frozenset({'environment_apply'}), confirmation_tools=frozenset({'environment_apply'}),
+        auto_approval_tools=frozenset({'environment_apply'}), cacheable_tools=frozenset(),
+        discovery_policy='searchable', timeout_ms_by_name={'environment_providers':10000, 'environment_catalog':90000, 'environment_plan':900000, 'environment_apply':3600000, 'environment_status':180000}))
+
+
+def register_compute(register_tool_spec):
+    """Explicit legacy native compute adapter, independent of environments."""
+    from lib.tools.registry import ToolSpec
+    names = frozenset({'compute_catalog', 'compute_plan', 'compute_submit', 'compute_status', 'compute_cancel', 'compute_collect', 'compute_wait'})
+    writes = frozenset({'compute_submit', 'compute_cancel'})
+    register_tool_spec(ToolSpec('compute', _compute_schemas, provides=names,
+        handler=_handler, category='compute', description='Optional configured remote batch compute',
+        gate='config.plugins: compute; trusted provider configuration',
+        write_tools=writes, confirmation_tools=writes, auto_approval_tools=writes,
+        cacheable_tools=frozenset(), discovery_policy='searchable',
+        timeout_ms_by_name={'compute_catalog':90000, 'compute_plan':180000, 'compute_submit':900000, 'compute_status':180000, 'compute_wait':180000, 'compute_cancel':180000, 'compute_collect':900000}))

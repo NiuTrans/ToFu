@@ -274,7 +274,7 @@ class TestFallbackTerminalSettlement:
             'lib.llm_dispatch._api_errors',
             fromlist=['DispatchRateLimitBudgetExceeded'],
         ).DispatchRateLimitBudgetExceeded(
-            __import__('lib.llm_errors', fromlist=['RateLimitError'])
+            __import__('lib.llm.llm_errors', fromlist=['RateLimitError'])
             .RateLimitError('glm throttled', status_code=429),
             attempts=3,
             limit=3,

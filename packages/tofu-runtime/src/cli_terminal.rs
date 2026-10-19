@@ -29,17 +29,30 @@ impl Drop for Stdout {
 }
 pub(crate) struct Persistence {
     pub runtime: Arc<tokio::runtime::Runtime>,
+    pub scope: Option<Arc<crate::cli_agent_worker::Scope>>,
     pub reader: Arc<ReaderLease>,
     pub schemas: Arc<Catalog>,
     pub version: String,
     pub operation: String,
     pub bytes: usize,
-    pub grace: Duration,
+    pub grace: Option<Duration>,
     pub attempts: usize,
     pub retry: AtomicBool,
     pub ordinal: AtomicUsize,
     pub input: Mutex<Option<Input>>,
     pub checkpoint_suspended: Option<Arc<AtomicBool>>,
+    pub usage_summary: bool,
+    pub frozen_summary: Mutex<Option<serde_json::Value>>,
+    pub retry_reference: bool,
+    /// Immutable allocation identity, outcome and checkpoint disposition; no history mirror.
+    pub frozen_binding: Mutex<Option<(usize,tofu_runtime::task::TaskStatus,Option<bool>)>>,
+}
+impl Persistence {
+    pub(crate) fn take_tail(&self) -> Result<Vec<u8>, ()> {
+        self.reader.finish()?;
+        if let Some(input) = self.input.lock().map_err(|_| ())?.take() { Ok(input.tail()) }
+        else { self.reader.take_tail() }
+    }
 }
 impl TerminalPersistence for Persistence {
     fn persist_once(&self, candidate: &TerminalCandidate) -> Result<(), PortError> {
@@ -48,35 +61,63 @@ impl TerminalPersistence for Persistence {
         if ordinal > self.attempts {
             return Err(PortError);
         }
-        let receipt = &candidate.receipt;
-        let mut value = json!({"version":self.version,"type":"terminal_request","request_id":self.operation,"owner_user_id":candidate.identity.owner_user_id,"task_id":candidate.identity.task_id,"attempt":ordinal,"event":candidate.event(),"receipt":{"execution_id":receipt.execution_id,"requested_outcome":receipt.requested_outcome.as_str(),"outcome":receipt.outcome.as_str(),"invariants_satisfied":receipt.invariants_satisfied,"resource_count":receipt.resource_dispositions.len()}});
-        if let Some(marker) = &self.checkpoint_suspended {
-            value["checkpoint_suspended"] = json!(marker.load(Ordering::SeqCst)
-                && candidate.status == tofu_runtime::task::TaskStatus::Aborted);
-        }
-        self.schemas
-            .validate(
-                candidate.identity.owner_user_id,
-                "terminal_request",
-                value.clone(),
-            )
-            .map_err(|_| PortError)?;
-        let mut bytes = serde_json::to_vec(&value).map_err(|_| PortError)?;
+        let suspended=self.checkpoint_suspended.as_ref().map(|marker|marker.load(Ordering::SeqCst)
+            && candidate.status==tofu_runtime::task::TaskStatus::Aborted);
+        let binding=(candidate as *const TerminalCandidate as usize,candidate.status,suspended);
+        let mut bytes=if self.retry_reference && ordinal>1 {
+            if self.frozen_binding.lock().map_err(|_| PortError)?.as_ref()!=Some(&binding) { return Err(PortError); }
+            let value=json!({"version":self.version,"type":"terminal_retry","request_id":self.operation,
+                "owner_user_id":candidate.identity.owner_user_id,"task_id":candidate.identity.task_id,
+                "attempt":ordinal,"status":candidate.status.as_str()});
+            self.schemas.validate_protocol(candidate.identity.owner_user_id,"terminal_retry",value.clone()).map_err(|_|PortError)?;
+            serde_json::to_vec(&value).map_err(|_|PortError)?
+        } else {
+            let receipt = &candidate.receipt;
+            let mut value = json!({"version":self.version,"type":"terminal_request","request_id":self.operation,"owner_user_id":candidate.identity.owner_user_id,"task_id":candidate.identity.task_id,"attempt":ordinal,"event":candidate.event(),"receipt":{"execution_id":receipt.execution_id,"requested_outcome":receipt.requested_outcome.as_str(),"outcome":receipt.outcome.as_str(),"invariants_satisfied":receipt.invariants_satisfied,"resource_count":receipt.resource_dispositions.len()}});
+            if self.usage_summary && candidate.status == tofu_runtime::task::TaskStatus::Done {
+                let mut frozen = self.frozen_summary.lock().map_err(|_| PortError)?;
+                if frozen.is_none() {
+                    let rounds = candidate.result.as_ref()
+                        .and_then(|result| result.get("usage"))
+                        .and_then(serde_json::Value::as_array).ok_or(PortError)?;
+                    let counts = tofu_runtime::usage_aggregate::aggregate(rounds).map_err(|_| PortError)?;
+                    *frozen = Some(json!({"profile":tofu_runtime::execution_contract::ADDITIVE_USAGE_PROFILE,"counts":counts}));
+                }
+                value["usage_summary"] = frozen.as_ref().ok_or(PortError)?.clone();
+            }
+            if let Some(suspended) = suspended {
+                value["checkpoint_suspended"] = json!(suspended);
+            }
+            self.schemas
+                .validate(
+                    candidate.identity.owner_user_id,
+                    "terminal_request",
+                    value.clone(),
+                )
+                .map_err(|_| PortError)?;
+            let bytes = serde_json::to_vec(&value).map_err(|_| PortError)?;
+            if self.retry_reference { *self.frozen_binding.lock().map_err(|_| PortError)?=Some(binding); }
+            bytes
+
+        };
         if bytes.len() > self.bytes {
             return Err(PortError);
         }
+        if let Some(scope) = &self.scope { bytes = scope.wrap(&bytes).map_err(|_| PortError)?; }
+        if bytes.len() > self.bytes { return Err(PortError); }
         bytes.push(b'\n');
         let mut carrier = self.input.lock().map_err(|_| PortError)?;
         if carrier.is_none() {
             let tail = self.reader.take_tail().map_err(|_| PortError)?;
             let _enter = self.runtime.enter();
-            *carrier = Some(Input::with_tail(tail).map_err(|_| PortError)?);
+            let mut input = Input::with_tail(tail).map_err(|_| PortError)?;
+            if let Some(scope) = &self.scope { input.set_scope(scope.clone()); }
+            *carrier = Some(input);
         }
         let reply = self.runtime.block_on(async {
-            let until = tokio::time::Instant::now()
-                .checked_add(self.grace)
-                .ok_or(PortError)?;
-            tokio::time::timeout_at(until, async {
+            let until = self.grace.map(|grace| tokio::time::Instant::now()
+                .checked_add(grace).ok_or(PortError)).transpose()?;
+            let io = async {
                 let flags = unsafe { libc::fcntl(1, libc::F_GETFL) };
                 if flags < 0
                     || unsafe { libc::fcntl(1, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0
@@ -109,7 +150,7 @@ impl TerminalPersistence for Persistence {
                 }
                 drop(out);
                 loop {
-                    if tokio::time::Instant::now() >= until {
+                    if until.is_some_and(|until| tokio::time::Instant::now() >= until) {
                         return Err(PortError);
                     }
                     let reply = carrier
@@ -137,13 +178,15 @@ impl TerminalPersistence for Persistence {
                     }
                     return Ok(reply);
                 }
-            })
-            .await
-            .map_err(|_| PortError)?
+            };
+            match until {
+                Some(until) => tokio::time::timeout_at(until, io).await.map_err(|_| PortError)?,
+                None => io.await,
+            }
         });
         match reply {
             Ok(reply) if reply["accepted"] == true && reply["retry"] == false => {
-                *carrier = None;
+                if self.scope.is_none() { *carrier = None; }
                 Ok(())
             }
             Ok(reply)

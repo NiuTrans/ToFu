@@ -569,6 +569,32 @@ def test_glm_projection_requires_the_registered_physical_model(tmp_path):
         _project_paths(native, runtime, audit, expected_model='glm-5.3-m17')
 
 
+@pytest.mark.parametrize('wrong_field', [None, 'logical', 'physical'])
+def test_projection_distinguishes_canonical_model_from_exact_wire_alias(tmp_path, wrong_field):
+    native, runtime, audit = _evidence(tmp_path)
+    for path in (native, runtime, audit):
+        path.write_text(path.read_text().replace('"kimi-k3"', '"glm-5.3"'))
+    evidence = json.loads(runtime.read_text())
+    for row in evidence['apiRounds']:
+        row['usage']['_dispatch']['model'] = 'glm-5.3-m17'
+    if wrong_field == 'logical':
+        evidence['apiRounds'][0]['model'] = 'glm-5.2'
+    elif wrong_field == 'physical':
+        evidence['apiRounds'][0]['usage']['_dispatch']['model'] = 'glm-5.3-other'
+    _write_json(runtime, evidence)
+    rows = [json.loads(line) for line in native.read_text().splitlines()]
+    for row in rows:
+        usage = row['event'].get('usage') or {}
+        if usage.get('_dispatch'):
+            usage['_dispatch']['model'] = 'glm-5.3-m17'
+    _write_jsonl(native, rows)
+    if wrong_field:
+        with pytest.raises(TofuProjectionError, match='another model|different physical model'):
+            _project_paths(native, runtime, audit, expected_model='glm-5.3-m17')
+    else:
+        assert _project_paths(native, runtime, audit, expected_model='glm-5.3-m17')['finalOutput'] == 'done'
+
+
 def _insert_native_event(native: Path, event: dict, *, before_done_ms: int = 5):
     """Insert one event before the final done row, re-sequencing seq/stamps."""
     rows = [json.loads(line) for line in native.read_text().splitlines()]
@@ -807,3 +833,89 @@ def test_projection_tolerates_unobserved_ttft_on_incomplete_stream(tmp_path):
     assert projection["rounds"][0]["ttftMs"] == 100
     assert projection["rounds"][0]["firstModelOutputAtUnixNs"] == \
         projection["rounds"][0]["streamCompletedAtUnixNs"]
+
+
+@pytest.mark.parametrize("target", ["all", "api_round", "aggregate", "round_event", "terminal"])
+def test_projection_rejects_missing_provider_counters(tmp_path, target):
+    native, runtime, audit = _evidence(tmp_path)
+    evidence = json.loads(runtime.read_text())
+    events = [json.loads(line) for line in native.read_text().splitlines()]
+
+    def remove_counters(value):
+        if isinstance(value, list):
+            for child in value:
+                remove_counters(child)
+        elif isinstance(value, dict):
+            for key, child in list(value.items()):
+                if key == "usage" and isinstance(child, dict):
+                    value[key] = {k: v for k, v in child.items()
+                                  if k.startswith("_") or k == "stream_elapsed_ms"}
+                else:
+                    remove_counters(child)
+
+    if target == "all":
+        remove_counters(evidence)
+        remove_counters(events)
+    elif target == "api_round":
+        remove_counters(evidence["apiRounds"][0])
+    elif target == "aggregate":
+        evidence["usage"] = {}
+    else:
+        event_type = "round_usage" if target == "round_event" else "done"
+        for row in events:
+            if row.get("event", {}).get("type") == event_type:
+                remove_counters(row)
+    runtime.write_text(json.dumps(evidence))
+    native.write_text("".join(json.dumps(row) + "\n" for row in events))
+    with pytest.raises(TofuProjectionError, match="missing input tokens"):
+        _project_paths(native, runtime, audit)
+
+
+@pytest.mark.parametrize("compaction,reason", [
+    ({"n_calls": 0, "total_tokens": 1}, "tokens but no model calls"),
+    ({"n_calls": 0, "prompt_tokens": 1}, "tokens but no model calls"),
+    ({"n_calls": 0, "prompt_tokens_details": []}, "must be an object"),
+])
+def test_zero_call_compaction_cannot_hide_reported_or_malformed_tokens(tmp_path, compaction, reason):
+    native, runtime, audit = _evidence(tmp_path)
+    evidence = json.loads(runtime.read_text())
+    evidence["compactionUsage"] = compaction
+    runtime.write_text(json.dumps(evidence))
+    with pytest.raises(TofuProjectionError, match=reason):
+        _project_paths(native, runtime, audit)
+
+
+@pytest.mark.parametrize("accounting,reason", [
+    ({"complete": False, "observedTokens": None, "scope": "unobserved", "rootTaskId": ""}, "incomplete"),
+    ({"complete": True, "observedTokens": 60, "scope": "execution_tree", "rootTaskId": "task-fixture"}, "differs from the execution account"),
+    ({"complete": True, "observedTokens": 59, "scope": "execution_tree", "rootTaskId": "another-task"}, "execution tree witness"),
+    ({"complete": None, "observedTokens": 59, "scope": "unobserved", "rootTaskId": ""}, "unobserved"),
+    ({}, "required observation fields"),
+])
+def test_successful_projection_cannot_hide_incomplete_or_mismatched_account(tmp_path, accounting, reason):
+    native, runtime, audit = _evidence(tmp_path)
+    evidence = json.loads(runtime.read_text())
+    evidence["usageAccounting"] = accounting
+    runtime.write_text(json.dumps(evidence))
+    with pytest.raises(TofuProjectionError, match=reason):
+        _project_paths(native, runtime, audit)
+
+
+def test_successful_projection_accepts_matching_execution_tree_witness(tmp_path):
+    native, runtime, audit = _evidence(tmp_path)
+    evidence = json.loads(runtime.read_text())
+    evidence["usageAccounting"] = {
+        "complete": True, "observedTokens": 59, "scope": "execution_tree", "rootTaskId": "task-fixture"}
+    runtime.write_text(json.dumps(evidence))
+    assert _project_paths(native, runtime, audit)["aggregateUsage"]["total_tokens"] == 59
+
+
+
+def test_compaction_round_requires_typed_provider_counters(tmp_path):
+    native, runtime, audit = _evidence(tmp_path)
+    evidence = json.loads(runtime.read_text())
+    evidence["apiRounds"].append({"round": "compaction-1", "usage": [1]})
+    evidence["compactionUsage"] = {"n_calls": 1, "prompt_tokens": 0, "completion_tokens": 0}
+    runtime.write_text(json.dumps(evidence))
+    with pytest.raises(TofuProjectionError, match="usage must be an object"):
+        _project_paths(native, runtime, audit)

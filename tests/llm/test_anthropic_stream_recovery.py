@@ -10,7 +10,7 @@ from lib.llm._sse_core import SSEAccumulator
 from lib.llm._sse_framer import SSEFramer
 from lib.llm.anthropic_outbound._sse import AnthropicSSETranslator
 from lib.llm.stream_result import ProviderStreamState
-from lib.llm_errors import RateLimitError, RetryableAPIError
+from lib.llm.llm_errors import RateLimitError, RetryableAPIError
 from lib.tasks_pkg.stream_handler import _budget
 from lib.tasks_pkg.stream_handler.api import analyse_stream_result
 from tests._registered_chat_task import registered_chat_task

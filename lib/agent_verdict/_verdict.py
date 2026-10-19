@@ -330,6 +330,17 @@ def classify_verdict(
             'feedback': feedback, 'had_tag': had_tag}
 
 
+def emit_native_verdict_result(result):
+    """Emit the existing audit effects from a trusted native policy result."""
+    for raw in result.get('audits',()):
+        fields=dict(raw);event=fields.pop('event')
+        if 'remaining_decimal' in fields:
+            fields['remaining']=int(fields.pop('remaining_decimal'))
+        logger.warning('[Verdict] Native override: %s',fields.get('reason'))
+        _audit(event,**fields)
+    return {key:result[key] for key in ('phase','plan_defect','feedback','had_tag')}
+
+
 # ══════════════════════════════════════════════════════════
 #  Loop terminal-outcome classification
 # ══════════════════════════════════════════════════════════

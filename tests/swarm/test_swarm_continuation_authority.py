@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pytest
 
-from tests.storage.test_storage_sidecar_contract import storage
+from tests.storage.test_storage_authority_sql_contract import storage
 
 pytestmark = pytest.mark.unit
 

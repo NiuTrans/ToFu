@@ -1,5 +1,14 @@
 //! Real C ABI capabilities, one-shot buffer admission and durable lease fences.
 use super::*;
+use serde_json::{json, Value};
+use std::sync::LazyLock;
+static CONTRACT: LazyLock<Value> = LazyLock::new(|| serde_json::from_str(include_str!(
+    "../../../contracts/native_checkpoint_control_v1.schema.json")).unwrap());
+fn headroom() -> usize { CONTRACT["limits"]["responseHeadroomBytes"].as_u64().unwrap() as usize }
+fn parse(operation: &str, bytes: &[u8]) -> io::Result<usize> {
+    Registry::default().response_bound(operation, bytes)
+}
+use crate::embed::EmbeddedRuntime;
 use crate::embed_ffi::{
     EmbedHandle, tofudb_embed_checkpoint_execute, tofudb_embed_close, tofudb_embed_execute,
     tofudb_embed_open,
@@ -316,9 +325,73 @@ fn checkpoint_cabi_finish_freezes_candidate_and_retries_without_new_generation()
 fn checkpoint_registry_retains_only_live_metadata_and_reclaims_forgotten_capabilities() {
     let handle=Handle::open();let created=create(&handle,parameters());let id=created["capability_id"].as_u64().unwrap();
     let registry=unsafe {&*handle.pointer}.checkpoints.get().unwrap();
-    assert_eq!(registry.entries.lock().unwrap().live.len(),1);
+    assert_eq!(registry.live_capabilities().unwrap(),1);
     assert_eq!(handle.call("forget",payload(id),1048576+headroom())["accepted"],true);
-    assert!(registry.entries.lock().unwrap().live.is_empty());
-    println!("checkpoint_registry_inline_bytes={} capability_inline_bytes={} registry_lazy_slot_bytes={}",
-        std::mem::size_of::<Registry>(),std::mem::size_of::<Entry>(),std::mem::size_of::<std::sync::OnceLock<Arc<Registry>>>());
+    assert!(registry.live_capabilities().unwrap() == 0);
+    println!("checkpoint_registry_inline_bytes={} registry_lazy_slot_bytes={}",
+        std::mem::size_of::<Registry>(),std::mem::size_of::<std::sync::OnceLock<Arc<Registry>>>());
+}
+
+#[test]
+fn checkpoint_cabi_pending_batch_preserves_paid_state_and_blocks_next_begin() {
+    let handle=Handle::open();
+    let id=create(&handle,parameters())["capability_id"].as_u64().unwrap();
+    let capacity=1048576+headroom();
+    assert_eq!(handle.call("load",payload(id),capacity)["accepted"],true);
+    let mut begin=payload(id);begin["round"]=json!(0);
+    assert_eq!(handle.call("begin",begin,capacity)["accepted"],true);
+    let mut saved=state();saved["tools_pending"]=json!(true);
+    saved["messages"][1]=json!({"role":"assistant","tool_calls":[{"id":"write-1","type":"function","function":{"name":"write_file","arguments":"{}"}}]});
+    let mut pending=payload(id);pending["state"]=saved.clone();
+    assert_eq!(handle.call("pending",pending,capacity)["accepted"],true);
+    assert_eq!(handle.call("release",payload(id),capacity)["error"],"ineligible");
+    let mut begin=payload(id);begin["round"]=json!(1);
+    assert_eq!(handle.call("begin",begin.clone(),capacity)["error"],"ineligible");
+    saved.as_object_mut().unwrap().remove("tools_pending");
+    saved["messages"].as_array_mut().unwrap().push(json!({"role":"tool","tool_call_id":"write-1","content":"observed"}));
+    let mut changed=saved.clone();changed["usage"]=json!([{"total_tokens":0}]);
+    let mut complete=payload(id);complete["state"]=changed;
+    assert_eq!(handle.call("complete",complete.clone(),capacity)["error"],"invalid");
+    complete["state"]=saved;
+    assert_eq!(handle.call("complete",complete,capacity)["accepted"],true);
+    assert_eq!(handle.call("begin",begin,capacity)["accepted"],true);
+}
+
+#[test]
+fn invoice_read_cannot_acquire_a_lease_or_cross_owner_scope() {
+    let handle=Handle::open();let capacity=4096+headroom();
+    let query=json!({"format":"tofu.native-checkpoint-control/v1", "invoice":{"owner_user_id":7,"task_id":"task","header_bytes":4096}});
+    let missing=handle.call("invoice",query.clone(),capacity);
+    assert_eq!(missing["accepted"],true);assert!(missing["state"].is_null());assert!(missing["capability_id"].is_null());
+    let created=create(&handle,parameters());assert_eq!(created["accepted"],true);
+    let found=handle.call("invoice",query.clone(),capacity);
+    assert_eq!(found["accepted"],true);assert_eq!(found["state"]["phase"],"new");
+    assert!(found["state"]["wallet_settlement"].is_null());assert!(found["capability_id"].is_null());
+    let mut foreign=query;foreign["invoice"]["owner_user_id"]=json!(8);
+    assert_eq!(handle.call("invoice",foreign,capacity)["accepted"],false);
+    let registry=unsafe {&*handle.pointer}.checkpoints.get().unwrap();
+    assert_eq!(registry.live_capabilities().unwrap(),1);
+}
+
+#[test]
+fn frontier_preflight_has_closed_bounds_and_never_allocates_a_capability() {
+    let handle=Handle::open();let capacity=4096+1048576+headroom();
+    let query=json!({"format":"tofu.native-checkpoint-control/v1", "frontier":{
+        "owner_user_id":7,"task_id":"task","header_bytes":4096,"snapshot_bytes":1048576,"identity_bytes":1024}});
+    let missing=handle.call("frontier",query.clone(),capacity);
+    assert_eq!(missing["accepted"],true);assert!(missing["state"].is_null());assert!(missing["capability_id"].is_null());
+    let created=create(&handle,parameters());assert_eq!(created["capability_id"],1);
+    assert_eq!(handle.call("frontier",query.clone(),capacity)["accepted"],false);
+    for field in ["header_bytes","snapshot_bytes","identity_bytes","owner_user_id"] {
+        let mut invalid=query.clone();invalid["frontier"][field]=json!(0);
+        assert!(parse("frontier",&serde_json::to_vec(&invalid).unwrap()).is_err(),"{field}");
+    }
+    for extra in ["capability_id","parameters","invoice","resume"] {
+        let mut invalid=query.clone();invalid[extra]=json!(1);
+        assert!(parse("frontier",&serde_json::to_vec(&invalid).unwrap()).is_err(),"{extra}");
+    }
+    let mut foreign=query;foreign["frontier"]["owner_user_id"]=json!(8);
+    assert_eq!(handle.call("frontier",foreign,capacity)["accepted"],false);
+    let registry=unsafe {&*handle.pointer}.checkpoints.get().unwrap();
+    assert_eq!(registry.live_capabilities().unwrap(),1);
 }

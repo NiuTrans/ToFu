@@ -8,7 +8,7 @@
 use super::{attempt_event_key, attempt_sync_reference_key, conversation_sync_event_key, invalid_data,
     invalid_input, AuthorityDatabase, AuthorityTransaction, EntityKey,
     ATTEMPT_EVENT_DOCUMENT_IDENTITY, SYNC_DOCUMENT_IDENTITY};
-use crate::generated_tofudb_ir::MAX_TRANSACTION_IR_LITERAL_BYTES;
+use crate::generated_tofudb_ir::MAX_LEGACY_DOCUMENT_BYTES;
 use serde_json::{Map, Value};
 use std::io;
 
@@ -44,7 +44,7 @@ pub(super) fn encode(envelope: &Value, canonical_event_bytes: usize) -> io::Resu
         .ok_or_else(|| invalid_data("attempt sync reference size overflows"))?;
     // Keep the former full-envelope put admission and its classified error.
     // A smaller physical locator must not admit an unreadable larger event.
-    if expanded_bytes > MAX_TRANSACTION_IR_LITERAL_BYTES {
+    if expanded_bytes > MAX_LEGACY_DOCUMENT_BYTES {
         return Err(invalid_input("invalid versioned document mutation"));
     }
     Ok(raw)

@@ -39,6 +39,7 @@ def repository(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     _run(repo, 'git', 'commit', '-m', 'base')
     monkeypatch.setenv('TOFU_INTEGRATION_WORKSPACE_DIR', str(tmp_path / 'worktrees'))
     monkeypatch.setenv('TOFU_INTEGRATION_AUTORUN', '0')
+    monkeypatch.setenv('TOFU_INTEGRATION_TEST_ROOT', str(repo))
     monkeypatch.delenv('TOFU_INTEGRATION_TEST_CMD', raising=False)
     monkeypatch.delenv('TOFU_INTEGRATION_STABLE_TEST_CMD', raising=False)
     control._STATUS_CACHE.clear()
@@ -89,6 +90,47 @@ def test_checkpoint_captures_untracked_without_touching_writer_index(
     assert _run(writer, 'git', 'diff', '--cached', '--name-only') == ''
     assert _run(repository, 'git', 'show', f"{result['checkpointSha']}:new.txt") == 'untracked'
     assert _run(repository, 'git', 'show', f"{result['checkpointSha']}:shared.txt") == 'writer edit'
+
+
+@pytest.mark.parametrize('holder_api', [
+    'workspace_write_lease', 'workspace_read_lease', 'workspace_git_metadata_lease',
+])
+def test_checkpoint_and_submit_during_another_worktree_lease(
+        repository: Path, tmp_path: Path, holder_api: str) -> None:
+    writer = _worktree(repository, tmp_path / 'writer')
+    (writer / 'shared.txt').write_text('checkpoint edit\n', encoding='utf-8')
+    (repository / 'shared.txt').write_text('peer staged\n', encoding='utf-8')
+    _run(repository, 'git', 'add', 'shared.txt')
+    (repository / 'shared.txt').write_text('peer unstaged\n', encoding='utf-8')
+    control.register_workspace(str(repository), 'parallel-checkpoint', str(writer), user_id=1)
+    before = {root: (_run(root, 'git', 'rev-parse', 'HEAD'),
+                     _run(root, 'git', 'write-tree'),
+                     _run(root, 'git', 'status', '--porcelain=v1'))
+              for root in (repository, writer)}
+    source = ('import sys; from lib.project_mod import workspace_lease as m; '
+              'cm=getattr(m,sys.argv[1])(sys.argv[2]); cm.__enter__(); '
+              'print("ready",flush=True); sys.stdin.read()')
+    child = subprocess.Popen([sys.executable, '-c', source, holder_api, str(repository)],
+                             stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+    try:
+        assert child.stdout.readline().strip() == 'ready'
+        result = control.checkpoint_workspace(str(repository), 'parallel-checkpoint', user_id=1)
+        control.submit_workspace(str(repository), 'parallel-checkpoint', user_id=1)
+        assert _row(repository, 'parallel-checkpoint')['state'] == 'ready'
+        assert _run(repository, 'git', 'show', f"{result['checkpointSha']}:shared.txt") == 'checkpoint edit'
+        for root, state in before.items():
+            assert (_run(root, 'git', 'rev-parse', 'HEAD'),
+                    _run(root, 'git', 'write-tree'),
+                    _run(root, 'git', 'status', '--porcelain=v1')) == state
+        assert (repository / 'shared.txt').read_text() == 'peer unstaged\n'
+    finally:
+        child.stdin.close()
+        try:
+            child.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            child.kill()
+            child.wait(timeout=5)
+        child.stdout.close()
 
 
 def test_active_workspace_lookup_is_owner_scoped_and_terminal_at_submit(
@@ -860,3 +902,62 @@ def test_failed_status_scan_retains_unknown_freshness_without_dropping_row(monke
     result = control._scan_status_rows([{'id': i} for i in range(3)])
     assert [row['id'] for row in result] == [0, 1, 2]
     assert [row['dirty']['scanned'] for row in result] == [True, False, True]
+
+
+def test_local_gate_selection_drives_candidate_reconcile_release_and_status(
+        repository, tmp_path, monkeypatch):
+    import shlex
+    import sys
+    marker = tmp_path / 'integration-marker'
+    release = tmp_path / 'release-marker'
+    def command(path):
+        code = f'from pathlib import Path; p=Path({str(path)!r}); p.write_text(p.read_text()+"x" if p.exists() else "x")'
+        return f'{shlex.quote(sys.executable)} -c {shlex.quote(code)}'
+    monkeypatch.delenv('TOFU_INTEGRATION_TEST_ROOT', raising=False)
+    monkeypatch.setenv('TOFU_INTEGRATION_TEST_CMD', 'missing-global-command')
+    _run(repository, 'git', 'config', '--local', 'tofu.integrationTestCommand', command(marker))
+    _run(repository, 'git', 'config', '--local', 'tofu.integrationStableTestCommand', command(release))
+    writer = _worktree(repository, tmp_path / 'local-gate-writer')
+    (writer / 'local.txt').write_text('task\n')
+    control.register_workspace(str(repository), 'local-gate', str(writer), user_id=1)
+    control.submit_workspace(str(repository), 'local-gate', user_id=1)
+    assert control.process_ready_once()
+    assert _row(repository, 'local-gate')['state'] == 'merged'
+    assert marker.read_text() == 'x'
+    status = control.integration_status(str(repository), user_id=1, use_cache=False)
+    assert status['gates']['testCommandConfigured']
+    assert status['gates']['stableCommandConfigured']
+    # Fast-forward canonical history to candidate, then reconcile one new commit.
+    _run(repository, 'git', 'merge', '--ff-only', status['refs']['candidate'])
+    (repository / 'head.txt').write_text('head\n')
+    _run(repository, 'git', 'add', 'head.txt')
+    _run(repository, 'git', 'commit', '-m', 'head')
+    control.reconcile_candidate_with_head(str(repository), user_id=1)
+    assert marker.read_text() == 'xx'
+    control.promote_stable(str(repository), user_id=1)
+    assert release.read_text() == 'x'
+
+
+def test_invalid_local_policy_quarantines_text_candidate(repository, tmp_path):
+    writer = _worktree(repository, tmp_path / 'invalid-policy-writer')
+    (writer / 'note.txt').write_text('task\n')
+    control.register_workspace(str(repository), 'invalid-policy', str(writer), user_id=1)
+    control.submit_workspace(str(repository), 'invalid-policy', user_id=1)
+    _run(repository, 'git', 'config', '--local', 'tofu.integrationTestCommand', '')
+    assert control.process_ready_once()
+    row = _row(repository, 'invalid-policy')
+    assert row['state'] == 'quarantined'
+    assert 'empty' in row['error']
+
+
+def test_invalid_local_policy_refuses_stable_with_typed_error(repository, tmp_path):
+    writer = _worktree(repository, tmp_path / 'stable-policy-writer')
+    (writer / 'note.txt').write_text('task\n')
+    control.register_workspace(str(repository), 'stable-policy', str(writer), user_id=1)
+    control.submit_workspace(str(repository), 'stable-policy', user_id=1)
+    assert control.process_ready_once()
+    before = _run(repository, 'git', 'rev-parse', 'refs/tofu/stable')
+    _run(repository, 'git', 'config', '--local', 'tofu.integrationStableTestCommand', '')
+    with pytest.raises(control.IntegrationError, match='empty'):
+        control.promote_stable(str(repository), user_id=1)
+    assert _run(repository, 'git', 'rev-parse', 'refs/tofu/stable') == before

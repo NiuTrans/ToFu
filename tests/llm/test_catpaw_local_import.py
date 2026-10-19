@@ -19,7 +19,7 @@ from unittest import mock
 
 import pytest
 
-from lib.api_v1_model_routing_generated import decode_response
+from lib.generated_api_v1_model_routing import decode_response
 from lib.model_routing import ModelRoutingRepository, OwnerBoundary
 from tests.support.model_routing import clear_test_model_routing
 

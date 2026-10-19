@@ -5,7 +5,7 @@ import threading
 
 import pytest
 
-from lib.server_fault_watchdog import capture_thread_stacks
+from lib.server.server_fault_watchdog import capture_thread_stacks
 
 pytestmark = pytest.mark.unit
 

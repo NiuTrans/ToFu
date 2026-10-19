@@ -4,6 +4,11 @@
  * transport or settlement.
  */
 import './conversation-surface.css';
+
+import { createButton } from '../../ui';
+
+import { markdownImagePreviewSource } from '../../markdown/images';
+import { scheduleAnimationFrame } from './animation-frame-scheduler';
 import type {
   ConversationBlockViewModel,
   ConversationLaneViewModel,
@@ -12,7 +17,9 @@ import type {
   ConversationViewModel,
 } from '../presentation/conversation-view-model';
 import { RoundOutline } from './round-outline';
-import { blockRoundIdentity } from '../presentation/round-outline';
+import { HistoricalProcess, historicalTurnPlan } from './history-process';
+import { t } from '../../i18n';
+
 import { moveRetainedNodeBefore } from './rich-card-reconciliation';
 import type {
   ConversationTurnRenderContext,
@@ -29,7 +36,7 @@ import {
   CONVERSATION_BLOCK_INITIAL_MINIMUM,
   conversationWindowOptions,
 } from './surface-windowing';
-import { createConversationViewportPort } from './conversation-viewport';
+import { createConversationViewportPort, isConversationViewportEvent } from './conversation-viewport';
 import {
   sameBlock,
   sameTurnHeader,
@@ -116,6 +123,7 @@ export function createConversationSurface(
   root.dataset.conversationSurface = 'turn-store';
   container.appendChild(root);
   const removeRenderedNode = (node: HTMLElement): void => {
+    historyProcess.unmount(node);
     if (options.disposeBlock) {
       if (node.hasAttribute('data-block-id')) options.disposeBlock(node);
       node.querySelectorAll<HTMLElement>('[data-block-id]').forEach(
@@ -126,7 +134,11 @@ export function createConversationSurface(
   };
   const windowOptions = conversationWindowOptions(options.windowing);
   const ownedScrollAnchor = !options.scrollAnchor && options.scrollViewport
-    ? createConversationViewportPort(options.scrollViewport, options.viewport)
+    ? createConversationViewportPort(options.scrollViewport, {
+      ...options.viewport,
+      canFollowLatest: () => root.dataset.hasLaterContent !== 'true'
+        && (options.viewport?.canFollowLatest?.() ?? true),
+    })
     : null;
   const scrollAnchor = options.scrollAnchor ?? ownedScrollAnchor;
   let disposed = false;
@@ -143,7 +155,7 @@ export function createConversationSurface(
   /* Turn nodes mounted by the current commit.  Counted as they are rendered so
    * the diagnostic `data-dom-turn-count` never needs a full-DOM attribute
    * scan on every frame. */
-  let mountedTurnCount = 0;
+  let mountedTurnIds: string[] = [];
   let lanesById = new Map<string, ConversationLaneViewModel>();
   /* presentationId → first mounted block index. Only Turns whose block count
    * exceeds the window get an entry; a stored start can only widen the tail
@@ -151,9 +163,38 @@ export function createConversationSurface(
    * rewinds it in batches. Cleared when the conversation changes. */
   const blockWindows = new Map<string, number>();
 
+  const historyProcess = new HistoricalProcess(removeRenderedNode,
+    (node, blocks) => {
+      const presentationId = node.closest<HTMLElement>('[data-presentation-id]')?.dataset.presentationId;
+      const laneId = node.closest<HTMLElement>('[data-lane-id]')?.dataset.laneId || 'main';
+      const lane = lanesById.get(laneId);
+      const turn = lane?.turns.find(turn => (turn.presentationId || turn.turnId) === presentationId);
+      if (lane && turn) renderBlocks(node, blocks, lane, turn);
+    }, () => scrollAnchor?.suspendFollow?.());
+
+  const historyFlights = new Map<string, { state: 'loading' | 'failed'; cursor: number }>();
+  let historyEpoch = 0;
+  let lastViewportTop = options.scrollViewport?.scrollTop ?? 0;
+  let cancelHistoryFrame: (() => void) | null = null;
+  let scrollDirection: 'earlier' | 'later' = 'earlier';
+
   const emitIntent = (event: Event): void => {
     const eventTarget = event.target instanceof Element ? event.target : null;
     if (!eventTarget || !root.contains(eventTarget)) return;
+
+    // Markdown sources are not positional attachments. Linked images retain
+    // native navigation, even if model markup supplied preview metadata.
+    const markdownImage = eventTarget.closest<HTMLImageElement>('.md-content img.md-image');
+    if (markdownImage) {
+      if (!markdownImage.classList.contains('md-preview-image')
+          || markdownImage.closest('a, button') || !options.onPreviewImage) return;
+      const source = markdownImagePreviewSource(markdownImage);
+      if (source) {
+        event.preventDefault();
+        options.onPreviewImage(source);
+      }
+      return;
+    }
     /* Injection-lane thumbnails (steer/peer image attachments) carry their
      * own data-preview-src instead of an action attribute or a positional
      * attachments index — their previews live on the injection block, not the
@@ -184,9 +225,10 @@ export function createConversationSurface(
       moveWindow(windowAction, target.dataset.laneId || 'main');
       return;
     }
-    if (target.dataset.conversationBlockWindowAction === 'earlier') {
+    const blockAction = target.dataset.conversationBlockWindowAction;
+    if (blockAction === 'earlier' || blockAction === 'later') {
       event.preventDefault();
-      expandBlockWindow(target.dataset.turnKey || '');
+      moveBlockWindow(target.dataset.turnKey || '', blockAction);
       return;
     }
     const turnNode = target.closest<HTMLElement>('[data-turn-id]');
@@ -204,6 +246,14 @@ export function createConversationSurface(
     });
   };
   root.addEventListener('click', emitIntent);
+
+  const onImageKeydown = (event: KeyboardEvent): void => {
+    if (event.defaultPrevented || event.repeat || event.altKey || event.ctrlKey || event.metaKey
+        || (event.key !== 'Enter' && event.key !== ' ')) return;
+    const target = event.target instanceof Element ? event.target : null;
+    if (target?.matches('.md-content img.md-preview-image')) emitIntent(event);
+  };
+  root.addEventListener('keydown', onImageKeydown);
 
   const renderBlocks = (
     containerNode: HTMLElement,
@@ -239,7 +289,7 @@ export function createConversationSurface(
       if (cursor === node) cursor = node.nextElementSibling;
       else moveRetainedNodeBefore(containerNode, node, cursor);
     };
-    place(outline.toolbar);
+
     blocks.forEach((block) => {
 
       let node = existing.get(block.blockId) as ManagedBlockElement | undefined;
@@ -319,34 +369,35 @@ export function createConversationSurface(
     }
     let turnCursor: Element | null = turnsContainer.firstElementChild;
     visibleTurns.forEach((turn) => {
-      mountedTurnCount += 1;
+      mountedTurnIds.push(turn.turnId);
       const presentationId = turn.presentationId || turn.turnId;
       let turnNode = existingTurns.get(
         presentationId,
       ) as ManagedTurnElement | undefined;
       /* Block window is part of a Turn's rendered identity: expanding it must
        * defeat the whole-Turn fast path. */
-      const maxBlocks = viewportBlockBudget;
+      const historyPlan = historicalTurnPlan(turn);
+      const historical = historyPlan && !historyPlan.fallback;
+      const visibleBlocks = historical ? historyPlan.outside : turn.blocks;
+      const maxBlocks = historical ? Math.max(viewportBlockBudget, visibleBlocks.length) : viewportBlockBudget;
       let blockStart = 0;
       let blockTurnKey = '';
-      if (turn.blocks.length > maxBlocks) {
+      if (visibleBlocks.length > maxBlocks) {
         blockTurnKey = presentationId;
         blockStart = Math.min(
           blockWindows.get(blockTurnKey) ?? Number.POSITIVE_INFINITY,
-          Math.max(0, turn.blocks.length - maxBlocks),
+          Math.max(0, visibleBlocks.length - maxBlocks),
         );
-        // A window counts renderable blocks, not model rounds. Do not hide one
-        // internal note or cut the prose off its first tool and call it history.
-        if (blockStart < 4) blockStart = 0;
-        else {
-          const boundary = blockRoundIdentity(turn.blocks[blockStart]);
-          while (boundary && blockStart > 0
-              && blockRoundIdentity(turn.blocks[blockStart - 1])?.key === boundary.key) {
-            blockStart -= 1;
-          }
-        }
+        // Small prefixes do not merit a history boundary. Oversized rounds
+        // may span windows: rounding backward would hide the tail and make
+        // forward navigation non-monotonic.
+        if (visibleBlocks.length <= maxBlocks + 3) blockStart = 0;
         blockWindows.set(blockTurnKey, blockStart);
       }
+
+      const blockEnd = Math.min(visibleBlocks.length, blockStart + Math.max(
+        maxBlocks, blockStart === 0 && visibleBlocks.length <= maxBlocks + 3 ? visibleBlocks.length : 0,
+      ));
       const activePlanDecision = latestViewModel?.planDecision;
       const planDecisionForTurn = activePlanDecision
           && activePlanDecision.sourceTurnId === turn.turnId
@@ -360,6 +411,8 @@ export function createConversationSurface(
           && turn.branches.length === 0
           && turnNode._tofuTurnVm === turn
           && turnNode._tofuTurnBlockStart === blockStart
+
+          && turnNode._tofuTurnBlockEnd === blockEnd
           && turnNode._tofuTurnPlanDecision === planDecisionForTurn
           && turnNode._tofuTurnSurfaceOptions === options) {
         if (turnCursor === turnNode) turnCursor = turnNode.nextElementSibling;
@@ -441,32 +494,35 @@ export function createConversationSurface(
       if (managedBlocks._tofuBlocksSource !== turn.blocks
           || managedBlocks._tofuOutlineStatus !== turn.status
           || managedBlocks._tofuBlocksStart !== blockStart
+
+          || managedBlocks._tofuBlocksEnd !== blockEnd
           || managedBlocks._tofuBlocksRenderer !== options.renderBlock) {
         renderBlocks(
-          blocksContainer, turn.blocks.slice(blockStart), lane, turn,
+          blocksContainer, visibleBlocks.slice(blockStart, blockEnd), lane, turn,
         );
         managedBlocks._tofuBlocksSource = turn.blocks;
         managedBlocks._tofuOutlineStatus = turn.status;
         managedBlocks._tofuBlocksStart = blockStart;
+
+        managedBlocks._tofuBlocksEnd = blockEnd;
         managedBlocks._tofuBlocksRenderer = options.renderBlock;
       }
-      blocksContainer.hidden = turn.blocks.length === 0;
-      const blocksEarlier = ensurePart(content, 'turn-blocks-earlier', 'nav');
-      blocksEarlier.hidden = blockStart === 0;
-      const blocksEarlierButton = ensurePart(
-        blocksEarlier, 'turn-blocks-earlier-button', 'button',
-      ) as HTMLButtonElement;
-      blocksEarlierButton.type = 'button';
-      blocksEarlierButton.disabled = blockStart === 0;
-      blocksEarlierButton.dataset.conversationBlockWindowAction = 'earlier';
-      blocksEarlierButton.dataset.turnKey = blockTurnKey;
-      const earlierCount = Math.min(
-        windowOptions.blockBatchSize, blockStart,
-      );
-      blocksEarlierButton.dataset.blockCount = String(earlierCount);
-      blocksEarlierButton.textContent = options.windowing?.blockLabel?.(
-        earlierCount,
-      ) ?? `Show ${earlierCount} earlier blocks`;
+      blocksContainer.hidden = visibleBlocks.length === 0;
+      let historyNotice = directPart(content, 'turn-history-notice');
+      if (historyPlan?.fallback) {
+        historyNotice = historyNotice ?? ensurePart(content, 'turn-history-notice');
+        historyNotice.className = 'conversation-history-notice';
+        historyNotice.textContent = t('conversation.historyFinalFallback');
+        historyNotice.hidden = false;
+      } else {
+        historyNotice?.remove();
+        historyNotice = null;
+      }
+      const processHost = ensurePart(content, 'turn-history-process');
+      historyProcess.update(processHost, turn, historyPlan, viewportBlockBudget);
+      processHost.hidden = !processHost.hasChildNodes();
+      const blocksEarlier = renderBlockBoundary(content, blockTurnKey, 'earlier', blockStart);
+      const blocksLater = renderBlockBoundary(content, blockTurnKey, 'later', visibleBlocks.length - blockEnd);
       let planDecisionNode = directPart(
         content, 'turn-plan-decision',
       ) as ManagedPlanDecisionElement | null;
@@ -540,8 +596,13 @@ export function createConversationSurface(
        * remains above the turn's action and finish shelves. */
       let contentPartIndex = 0;
       placeManagedAt(content, header, contentPartIndex++);
+      if (historyPlan) placeManagedAt(content, processHost, contentPartIndex++);
+      else processHost.remove();
       placeManagedAt(content, blocksEarlier, contentPartIndex++);
       placeManagedAt(content, blocksContainer, contentPartIndex++);
+      if (historyNotice) placeManagedAt(content, historyNotice, contentPartIndex++);
+
+      placeManagedAt(content, blocksLater, contentPartIndex++);
       if (planDecisionNode) {
         placeManagedAt(content, planDecisionNode, contentPartIndex++);
       }
@@ -560,23 +621,30 @@ export function createConversationSurface(
         turnNode, 'turn-context-rail', 'aside',
       ) as ManagedTurnContextRailElement;
       const contextRailRenderer = options.renderTurnContextRail;
+
+      const contextContent = ensurePart(contextRail, 'turn-context-content');
       if (!contextRail._tofuTurnContextRailRendered
           || contextRail._tofuContextBlock?.source !== contextBlock?.source
           || contextRail._tofuTurnContextRailRenderer !== contextRailRenderer) {
         (contextRailRenderer ?? renderDefaultTurnContextRail)(
-          contextRail, contextBlock, turnContext,
+          contextContent, contextBlock, turnContext,
         );
         contextRail._tofuContextBlock = contextBlock ?? undefined;
         contextRail._tofuTurnContextRailRenderer = contextRailRenderer;
         contextRail._tofuTurnContextRailRendered = true;
       }
-      contextRail.hidden = !hasRenderableContent(contextRail);
+      contextRail.className = 'conversation-turn-context-rail turn-ctx';
+      contextContent.className = 'turn-context-content';
+      contextRail.hidden = !Array.from(contextRail.children).some(child =>
+        !(child as HTMLElement).hidden && hasRenderableContent(child as HTMLElement));
 
       placeAt(turnNode, avatar, 0);
       placeAt(turnNode, content, 1);
       placeAt(turnNode, contextRail, 2);
       turnNode._tofuTurnVm = turn;
       turnNode._tofuTurnBlockStart = blockStart;
+
+      turnNode._tofuTurnBlockEnd = blockEnd;
       turnNode._tofuTurnPlanDecision = planDecisionForTurn;
       turnNode._tofuTurnSurfaceOptions = options;
       if (turnCursor === turnNode) turnCursor = turnNode.nextElementSibling;
@@ -652,6 +720,11 @@ export function createConversationSurface(
   ): void => {
     const lanes = collectLanes(viewModel);
     lanesById = lanes.all;
+
+    for (const [laneId, flight] of historyFlights) {
+      const history = lanes.all.get(laneId)?.history;
+      if (!history?.hasMore || history.nextBeforeOrdinal !== flight.cursor) historyFlights.delete(laneId);
+    }
     laneBudgets = new Map<string, number>();
     const laneCount = Math.max(1, lanes.expanded.length);
     // Read geometry once before DOM reconciliation, never between insertions.
@@ -682,7 +755,8 @@ export function createConversationSurface(
       const maximumStart = maxWindowStart(lane.turns.length, maxTurns);
       const previous = laneWindows.get(laneId);
       let start = previous?.start ?? maximumStart;
-      const atTail = reset || !previous ? true : previous.atTail;
+      const atTail = reset || !previous ? true
+        : scrollAnchor?.following ?? previous.atTail;
       if (atTail) start = maximumStart;
       else if (previous?.firstVisibleTurnId) {
         const anchoredIndex = lane.turns.findIndex(
@@ -692,7 +766,8 @@ export function createConversationSurface(
           const prepended = lane.turns.length > previous.loadedTurns
             && anchoredIndex > previous.start && previous.start === 0;
           start = prepended
-            ? Math.max(0, anchoredIndex - windowOptions.batchSize)
+            ? Math.max(0, anchoredIndex - Math.min(windowOptions.batchSize,
+              Math.max(1, Math.floor(maxTurns / 2))))
             : anchoredIndex;
         }
       }
@@ -743,6 +818,62 @@ export function createConversationSurface(
       }
   );
 
+  const boundaryButton = (control: HTMLElement): HTMLButtonElement => {
+    let button = control.querySelector<HTMLButtonElement>('button');
+    if (!button) {
+      button = createButton({ label: '', variant: 'ghost', size: 'sm' }, control.ownerDocument);
+      button.classList.add('conversation-history-fallback');
+      control.append(button);
+    }
+    return button;
+  };
+
+  const renderBlockBoundary = (content: HTMLElement, key: string,
+    direction: 'earlier' | 'later', count: number): HTMLElement => {
+    const control = ensurePart(content, `turn-blocks-${direction}`, 'nav');
+    control.classList.add('conversation-history-boundary');
+    control.hidden = count === 0;
+    control.dataset.historyBoundary = direction;
+    const button = boundaryButton(control);
+    button.disabled = count === 0;
+    button.dataset.conversationBlockWindowAction = direction;
+    button.dataset.turnKey = key;
+    button.dataset.blockCount = String(Math.min(count, windowOptions.blockBatchSize));
+    button.textContent = direction === 'earlier'
+      ? options.windowing?.blockLabel?.(count) ?? `View earlier content (${count} items)`
+      : options.windowing?.label?.('later', count) ?? `View later content (${count} items)`;
+    return control;
+  };
+
+  const requestHistory = (laneId: string, cursor: number): boolean => {
+    if (!options.onIntent || historyFlights.get(laneId)?.state === 'loading') return false;
+    const flight = { state: 'loading' as 'loading' | 'failed', cursor };
+    const epoch = historyEpoch;
+    historyFlights.set(laneId, flight);
+    scrollAnchor?.suspendFollow?.();
+    commit();
+    let result: void | Promise<unknown>;
+    try {
+      result = options.onIntent({ type: 'load-earlier-turns', conversationId: currentConversationId,
+        laneId, beforeOrdinal: cursor, limit: CONVERSATION_HISTORY_PAGE_TURNS });
+    } catch {
+      flight.state = 'failed'; commit(); return true;
+    }
+    // Legacy void intent hosts own their settlement; production forwards the
+    // coordinator promise. Never invent successful storage reads from DOM.
+    if (!result || typeof result.then !== 'function') {
+      historyFlights.delete(laneId); commit(); return true;
+    }
+    void result.then(() => {
+      if (disposed || historyEpoch !== epoch || historyFlights.get(laneId) !== flight) return;
+      historyFlights.delete(laneId); commit();
+    }, () => {
+      if (disposed || historyEpoch !== epoch || historyFlights.get(laneId) !== flight) return;
+      flight.state = 'failed'; commit();
+    });
+    return true;
+  };
+
   const renderWindowControl = (
     laneNode: HTMLElement,
     laneId: string,
@@ -752,27 +883,36 @@ export function createConversationSurface(
     const control = ensurePart(
       laneNode, `turn-window-${direction}`, 'nav',
     );
-    control.hidden = count === 0;
+    const flight = direction === 'earlier' ? historyFlights.get(laneId) : undefined;
+    control.classList.add('conversation-history-boundary');
+    control.hidden = count === 0 && !flight;
     control.dataset.windowDirection = direction;
-    const button = ensurePart(
-      control,
-      'turn-window-button',
-      'button',
-    ) as HTMLButtonElement;
-    button.type = 'button';
-    button.disabled = count === 0;
+    control.dataset.historyBoundary = direction;
+    control.dataset.historyState = flight?.state ?? 'idle';
+    let status = control.querySelector<HTMLElement>('[role="status"]');
+    if (!status) { status = control.ownerDocument.createElement('span'); status.setAttribute('role', 'status'); control.append(status); }
+    status.hidden = !flight;
+    status.textContent = flight ? options.windowing?.historyStatusLabel?.(flight.state)
+      ?? (flight.state === 'loading' ? 'Loading earlier messages…' : 'Could not load earlier messages. Scroll up or retry.') : '';
+    const button = boundaryButton(control);
+    button.disabled = count === 0 || flight?.state === 'loading';
     button.dataset.conversationWindowAction = direction;
     button.dataset.laneId = laneId;
     button.dataset.turnCount = String(count);
     button.textContent = options.windowing?.label?.(direction, count)
       ?? String(count);
+
+    if (flight?.state === 'failed') button.textContent = options.windowing?.historyRetryLabel?.() ?? 'Retry';
   };
 
   const commit = (): void => {
     const viewModel = latestViewModel;
     if (!viewModel) return;
-    mountedTurnCount = 0;
+    mountedTurnIds = [];
     const anchor = scrollAnchor?.capture(root);
+
+    const focused = root.ownerDocument.activeElement as HTMLElement | null;
+    const boundaryFocus = focused?.classList.contains('conversation-history-fallback') ? focused : null;
     currentConversationId = viewModel.conversationId;
     root.dataset.conversationId = viewModel.conversationId;
     root.dataset.transport = viewModel.transport;
@@ -818,17 +958,48 @@ export function createConversationSurface(
     });
     for (const stale of existingOrphans.values()) removeRenderedNode(stale);
     renderQueue(ensurePart(root, 'queue'), viewModel.queue);
-    root.dataset.domTurnCount = String(mountedTurnCount);
+    root.dataset.domTurnCount = String(mountedTurnIds.length);
+
+    root.dataset.hasLaterContent = String(Boolean(root.querySelector(
+      '[data-history-boundary="later"]:not([hidden])',
+    )));
     if (anchor !== undefined) scrollAnchor?.restore(root, anchor);
+
+    if (boundaryFocus && (!boundaryFocus.isConnected
+      || (boundaryFocus as HTMLButtonElement).disabled || boundaryFocus.closest('[hidden]'))) {
+      const viewportTop = options.scrollViewport?.getBoundingClientRect().top ?? 0;
+      const target = [...root.querySelectorAll<HTMLElement>('[data-block-id]')]
+        .find(node => !node.hidden && node.getBoundingClientRect().bottom > viewportTop);
+      if (target) {
+        const disclosure = target.querySelector<HTMLElement>('summary, button, a[href]');
+        if (disclosure) disclosure.focus({ preventScroll: true });
+        else { target.tabIndex = -1; target.focus({ preventScroll: true }); }
+      }
+    }
+
+    lastViewportTop = options.scrollViewport?.scrollTop ?? 0;
+    options.onCommit?.(mountedTurnIds);
   };
 
-  const expandBlockWindow = (turnKey: string): void => {
+  const moveBlockWindow = (turnKey: string, direction: 'earlier' | 'later'): boolean => {
+
+    if (disposed) return false;
     const current = blockWindows.get(turnKey);
-    if (current == null) return;
-    const next = Math.max(0, current - windowOptions.blockBatchSize);
-    if (next === current) return;
+    if (current == null) return false;
+    let turn: ConversationTurnViewModel | undefined;
+    for (const lane of lanesById.values()) {
+      turn = lane.turns.find(item => (item.presentationId || item.turnId) === turnKey);
+      if (turn) break;
+    }
+    if (!turn) return false;
+    const step = Math.min(windowOptions.blockBatchSize, Math.max(1, Math.floor(viewportBlockBudget / 2)));
+    const next = Math.max(0, Math.min(turn.blocks.length - viewportBlockBudget,
+      current + (direction === 'earlier' ? -step : step)));
+    if (next === current) return false;
+    scrollAnchor?.suspendFollow?.();
     blockWindows.set(turnKey, next);
     commit();
+    return true;
   };
 
   const moveWindow = (
@@ -836,47 +1007,93 @@ export function createConversationSurface(
     laneId = 'main',
   ): boolean => {
     const lane = lanesById.get(laneId);
-    if (!latestViewModel || !lane) return false;
+    if (disposed || !latestViewModel || !lane) return false;
     const state = currentLaneWindowState(lane);
     if (state.maxTurns <= 0) return false;
     const laneWindow = laneWindows.get(laneId);
     if (!laneWindow) return false;
     const nextStart = Math.max(0, Math.min(
       maxWindowStart(state.total, state.maxTurns),
-      laneWindow.start + (direction === 'earlier'
-        ? -state.batchSize : state.batchSize),
+      laneWindow.start + (direction === 'earlier' ? -1 : 1)
+        * Math.min(state.batchSize, Math.max(1, Math.floor(state.maxTurns / 2))),
     ));
     if (nextStart === laneWindow.start) {
       if (direction === 'earlier' && lane.history?.hasMore
           && lane.history.nextBeforeOrdinal !== null) {
-        options.onIntent?.({
-          type: 'load-earlier-turns',
-          conversationId: currentConversationId,
-          laneId,
-          beforeOrdinal: lane.history.nextBeforeOrdinal,
-          limit: CONVERSATION_HISTORY_PAGE_TURNS,
-        });
-        return true;
+        laneWindow.atTail = false;
+        return requestHistory(laneId, lane.history.nextBeforeOrdinal);
       }
       return false;
     }
     laneWindow.start = nextStart;
+
+    scrollAnchor?.suspendFollow?.();
     laneWindow.atTail = nextStart === maxWindowStart(state.total, state.maxTurns);
     commit();
     return true;
   };
 
+  const onHistoryScroll = (event: Event): void => {
+    const viewport = options.scrollViewport;
+    if (!viewport || disposed) return;
+    // Native inner wheel events bubble even when CSS contains scroll chaining.
+    // Browsing process evidence must never schedule outer turn history demand.
+    if (!isConversationViewportEvent(event)) return;
+    const top = viewport.scrollTop;
+    const wheelDelta = event.type === 'wheel' ? (event as WheelEvent).deltaY : 0;
+    if (Math.abs(top - lastViewportTop) < 1 && wheelDelta === 0) return;
+    scrollDirection = wheelDelta !== 0 ? (wheelDelta < 0 ? 'earlier' : 'later')
+      : top < lastViewportTop ? 'earlier' : 'later';
+    lastViewportTop = top;
+    if (cancelHistoryFrame) return;
+    const view = viewport.ownerDocument.defaultView;
+    if (!view) return;
+    cancelHistoryFrame = scheduleAnimationFrame(view, () => {
+      cancelHistoryFrame = null;
+      if (disposed) return;
+      const bounds = viewport.getBoundingClientRect();
+      const threshold = Math.min(240, viewport.clientHeight / 2);
+      const controls = [...root.querySelectorAll<HTMLElement>(`[data-history-boundary="${scrollDirection}"]:not([hidden])`)];
+      if (scrollDirection === 'later') controls.reverse();
+      for (const control of controls) {
+        if (control.closest('.conversation-lane-turns[hidden]')) continue;
+        const rect = control.getBoundingClientRect();
+        const near = scrollDirection === 'earlier'
+          ? rect.top >= bounds.top - 64 && rect.top <= bounds.top + threshold
+          : rect.bottom <= bounds.bottom + 64 && rect.bottom >= bounds.bottom - threshold;
+        if (!near) continue;
+        const button = control.querySelector<HTMLButtonElement>('button');
+        if (!button || button.disabled) continue;
+        const moved = button.dataset.conversationBlockWindowAction
+          ? moveBlockWindow(button.dataset.turnKey || '', scrollDirection)
+          : moveWindow(scrollDirection, button.dataset.laneId || 'main');
+        if (moved) break;
+      }
+    });
+  };
+  options.scrollViewport?.addEventListener('scroll', onHistoryScroll, { passive: true });
+
+  options.scrollViewport?.addEventListener('wheel', onHistoryScroll, { passive: true });
+
   return {
     root,
     get windowState() { return currentWindowState(); },
+    get mountedTurnIds() { return mountedTurnIds; },
     render(viewModel) {
       if (disposed) throw new Error('ConversationSurface is disposed.');
       const previous = latestViewModel;
       const reset = !previous || previous.conversationId !== viewModel.conversationId;
-      if (reset) blockWindows.clear();
+      if (reset) {
+        blockWindows.clear();
+        historyProcess.reset(); historyFlights.clear(); historyEpoch += 1;
+        cancelHistoryFrame?.(); cancelHistoryFrame = null;
+      }
       prepareLaneWindows(viewModel, reset);
+
+      if (scrollAnchor?.following) blockWindows.clear();
       latestViewModel = viewModel;
       commit();
+      if (reset && previous) scrollAnchor?.followLatest?.(root);
     },
     showEarlier() { return moveWindow('earlier', 'main'); },
     showLater() { return moveWindow('later', 'main'); },
@@ -895,23 +1112,47 @@ export function createConversationSurface(
       commit();
       return true;
     },
-    followLatest() {
-      if (latestViewModel) {
-        const lane = latestViewModel.mainLane;
-        const state = currentLaneWindowState(lane);
-        const laneWindow = laneWindows.get(lane.laneId)!;
-        laneWindow.start = maxWindowStart(state.total, state.maxTurns);
-        laneWindow.atTail = true;
+    isNearLatest(threshold) {
+      return !disposed && root.dataset.hasLaterContent !== 'true'
+        && (scrollAnchor?.isNearBottom?.(threshold) ?? true);
+    },
+    followLatest(intent) {
+      if (disposed) return;
+      const force = intent?.force !== false;
+      if (!force && (scrollAnchor?.following === false
+        || root.dataset.hasLaterContent === 'true')) return;
+      // Routine layout nudges never rebuild a correct transcript. Explicit
+      // latest intent restores every expanded lane and block window first.
+      if (force && latestViewModel
+        && (blockWindows.size || root.dataset.hasLaterContent === 'true')) {
+        blockWindows.clear();
+        for (const [laneId, laneWindow] of laneWindows) {
+          const lane = lanesById.get(laneId);
+          if (!lane) continue;
+          const state = currentLaneWindowState(lane);
+          laneWindow.start = maxWindowStart(state.total, state.maxTurns);
+          laneWindow.atTail = true;
+          laneWindow.firstVisibleTurnId = lane.turns[laneWindow.start]?.turnId ?? '';
+        }
         commit();
       }
-      scrollAnchor?.followLatest?.(root);
+      scrollAnchor?.followLatest?.(root, { force });
     },
     dispose() {
       if (disposed) return;
       disposed = true;
       root.removeEventListener('click', emitIntent);
+
+      root.removeEventListener('keydown', onImageKeydown);
+
+      options.scrollViewport?.removeEventListener('scroll', onHistoryScroll);
+
+      options.scrollViewport?.removeEventListener('wheel', onHistoryScroll);
+      cancelHistoryFrame?.(); cancelHistoryFrame = null;
+      historyEpoch += 1; historyFlights.clear();
       ownedScrollAnchor?.dispose?.();
       removeRenderedNode(root);
+      historyProcess.reset();
     },
   };
 }

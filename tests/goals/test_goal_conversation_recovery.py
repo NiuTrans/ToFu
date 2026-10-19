@@ -32,10 +32,14 @@ pytestmark = pytest.mark.unit
 
 
 @pytest.fixture
-def recovery(semantic_authority, monkeypatch):
+def recovery(semantic_authority, monkeypatch, request):
     client, owner, engine = semantic_authority
     monkeypatch.setattr('lib.storage.get_storage_client', client)
     config = {'autopilot': True, 'model': 'fixture-model', '_goalObjective': 'full objective'}
+    options = getattr(request, 'param', None)
+    options = options if isinstance(options, dict) else {'isolation': options}
+    if 'executionLimits' in options:
+        config['executionLimits'] = deepcopy(options['executionLimits'])
     pair = create_turn_pair(
         'recover-conversation', command_id='source',
         input_projection={'role': 'user', 'content': 'full objective'},
@@ -49,6 +53,8 @@ def recovery(semantic_authority, monkeypatch):
              {'id': 'a', 'type': 'role', 'role': 'general', 'params': {}},
              {'id': 'b', 'type': 'role', 'role': 'virtual_user', 'params': {}},
              {'id': 'stop', 'type': 'control', 'kind': 'stop'}]
+    if options.get('isolation'):
+        nodes[1]['params']['isolation'] = options['isolation']
     definition = {'schema': 'tofu.orchestration/v1', 'name': 'Recovery proof', 'nodes': nodes,
                   'edges': [{'from': left['id'], 'to': right['id']}
                             for left, right in zip(nodes, nodes[1:])]}
@@ -330,3 +336,94 @@ def test_production_goal_distinguishes_preparation_from_external_admission(recov
         assert successor == 'goal_successor-task'
         assert len(recovery.started) == 1
         assert recovery.started[0]['config']['_goalObjective'] == 'full objective'
+
+
+@pytest.mark.parametrize('damage', ['', 'pending_effect', 'new_human', 'stopped'])
+def test_public_resume_facade_uses_goal_admission_and_preserves_refusal(recovery, monkeypatch, damage):
+    from lib.orchestration.runtime_start_service import OrchestrationRuntimeStartService
+    from lib.orchestration.errors import RunRecoveryError, RunServiceError
+    case = recovery
+    journal = create_goal_execution_journal(case.task, case.definition, case.launch, runs=case.runs)
+    if damage == 'pending_effect':
+        class Crash(BaseException):
+            pass
+        with pytest.raises(Crash):
+            journal.runner(lambda *args: (_ for _ in ()).throw(Crash()),
+                context_snapshot=lambda: {}, context_restore=lambda state: None)(
+                    case.definition['nodes'][1], case.launch.initial_context, 0)
+    case.retire()
+    if damage == 'new_human':
+        create_turn_pair(case.task['convId'], command_id='later-human',
+            input_projection={'content': 'different requirement'}, config={}, user_id=case.owner)
+    if damage == 'stopped':
+        case.ports = replace(case.ports, commands=ConversationTurnCommandService(
+            build_user_message=lambda *args: None, was_aborted_after=lambda *args: True,
+            start_task=lambda *args: pytest.fail('Stop must prevent dispatch')))
+    monkeypatch.setattr(GoalRecoveryPorts, 'defaults', classmethod(lambda cls, *args: case.ports))
+    monkeypatch.setattr('lib.orchestration.runtime_start_service.spawn_runtime_flow',
+                        lambda *args, **kwargs: pytest.fail('Goal cannot spawn a Studio Flow'))
+    facade = OrchestrationRuntimeStartService(object(), definition_service=lambda: None,
+                                              run_service=lambda: case.runs)
+    source = case.task['_goalRunId']
+    if damage:
+        with pytest.raises(RunRecoveryError) as error:
+            facade.resume(source, owner_user_id=case.owner)
+        assert not error.value.not_found
+        assert not case.started
+    else:
+        successor = facade.resume(source, owner_user_id=case.owner)
+        assert successor == goal_run_id_for_task(case.started[0]['id'])
+        seed = bind_goal_recovery_task(case.started[0], runs=case.runs,
+            conversation_repository=case.ports.conversation_repository, get_attempt=get_attempt)
+        case.service.start(case.started[0], seed.definition)
+        assert facade.resume(source, owner_user_id=case.owner) == successor
+        assert len(case.started) == 1
+    with pytest.raises(RunRecoveryError) as missing:
+        facade.resume('missing-source', owner_user_id=case.owner)
+    assert missing.value.not_found
+    other_runs = OrchestrationRunService(SidecarOrchestrationRunStore(case.owner + 1, client=case.client))
+    other_facade = OrchestrationRuntimeStartService(object(), definition_service=lambda: None,
+                                                    run_service=lambda: other_runs)
+    with pytest.raises((RunRecoveryError, RunServiceError)) as denied:
+        other_facade.resume(source, owner_user_id=case.owner + 1)
+    if isinstance(denied.value, RunRecoveryError):
+        assert denied.value.not_found
+    else:
+        # Native clients bind a principal capability and reject a forged owner
+        # before the query. SQL repositories filter it to the same absent view.
+        assert denied.value.__cause__.__cause__.code == 'database_forbidden'
+
+
+def test_goal_identity_survives_first_live_worker_and_settled_projection(recovery):
+    from lib.orchestration.chat_live_turn import begin_live_flow_turn
+    from lib.orchestration.chat_flow_adapter import FlowEventAdapter
+    from lib.turn_lifecycle import get_turn, sync_visible_run_turns
+    case = recovery
+    begin_live_flow_turn(case.task, {'flowProjection': 'autopilot', 'turnRole': 'worker', 'iteration': 1})
+    live = get_turn(case.task['convId'], case.task['_turnId'], user_id=case.owner)
+    assert live['runId'] == case.task['_attemptId']
+    assert live['projection']['orchestration']['goalRunId'] == case.task['_goalRunId']
+    assert not live['projection'].get('_autopilotRunId')
+    from lib.turn_lifecycle import record_task_event
+    case.task.update(content='saved worker progress', status='running')
+    assert record_task_event(case.task, {'type': 'delta', 'content': 'saved worker progress'})
+    adapter = FlowEventAdapter(projection='autopilot', vu_run_id=case.task['_goalRunId'])
+    adapter.on_event({'type': 'step_start', 'role': 'worker'})
+    adapter.on_event({'type': 'step_complete', 'role': 'worker', 'status': 'completed',
+                      'output': 'saved worker progress'})
+    sync_visible_run_turns(case.task, adapter.messages)
+    settled = get_turn(case.task['convId'], case.task['_turnId'], user_id=case.owner)
+    assert settled['projection']['orchestration']['goalRunId'] == case.task['_goalRunId']
+    assert settled['projection']['content'] == 'saved worker progress'
+
+
+def test_first_live_goal_worker_can_be_retired_before_any_delta(recovery):
+    from lib.orchestration.chat_live_turn import begin_live_flow_turn
+    from lib.turn_lifecycle import get_turn
+    begin_live_flow_turn(recovery.task, {
+        'flowProjection': 'autopilot', 'turnRole': 'worker', 'iteration': 1})
+    recovery.retire()
+    turn = get_turn(recovery.task['convId'], recovery.task['_turnId'], user_id=recovery.owner)
+    assert turn['status'] == 'interrupted'
+    assert turn['settlement']['cause'] == 'server_restart'
+    assert turn['projection']['orchestration']['goalRunId'] == recovery.task['_goalRunId']

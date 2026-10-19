@@ -20,6 +20,12 @@ from lib.tools.registry import (
 _ULTRATHINK_RE = re.compile(r'\bultrathink\b', re.IGNORECASE)
 
 
+def resolve_max_output_tokens(cfg):
+    """Production request budget before model/context transport clamps."""
+    value = cfg.get('maxTokens')
+    return value if isinstance(value, int) and value > 0 else 128000
+
+
 def _has_ultrathink_keyword(text: str) -> bool:
     """Check if text contains the 'ultrathink' keyword (case-insensitive).
 
@@ -83,9 +89,7 @@ def _resolve_model_config(cfg, task_id):
     # through to build_body → _clamp_max_tokens → ``min(None, int)`` raises
     # "'<' not supported between instances of 'int' and 'NoneType'" and the
     # whole turn FATALs. Coerce a missing/None/invalid value to the default.
-    max_tokens = cfg.get('maxTokens')
-    if not isinstance(max_tokens, int) or max_tokens <= 0:
-        max_tokens = 128000
+    max_tokens = resolve_max_output_tokens(cfg)
     temperature = cfg.get('temperature', 1.0)
     thinking_enabled = cfg.get('thinkingEnabled')
     search_mode = cfg.get('searchMode', 'multi')
@@ -300,6 +304,9 @@ def _assemble_tool_list(cfg, project_path, project_enabled, task_id,
                         '[Task %s] dropping caller-supplied tool %s: '
                         'contract compile failed: %s', tid, name, exc)
                     continue
+                custom_document = (cfg.get('_customToolContracts') or {}).get(name)
+                if custom_document is not None:
+                    contract_documents[name] = custom_document
                 contracted.append(tool)
             ok = contracted
             cfg['_toolContractDocumentsByName'] = contract_documents

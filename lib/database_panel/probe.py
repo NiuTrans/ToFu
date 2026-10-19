@@ -16,15 +16,15 @@ import time
 from typing import Any
 
 from lib.log import get_logger
-from lib.runtime_paths import data_root
+from lib.runtime.runtime_paths import data_root
 
-from lib.storage_sidecar.projection_paths import (
+from lib.storage_authority_sql.projection_paths import (
     MAX_DIRECTORY_LENGTH as MAX_DIRECTORY_LENGTH,
     SearchProjectionEnvironmentOverrideError as SearchProjectionEnvironmentOverrideError,
     resolve_search_projection_paths as resolve_search_projection_paths,
     save_search_projection_directory as save_search_projection_directory,
 )
-from lib.storage_sidecar.native_fastpath_settings import NativeFastpathSettingsError as NativeFastpathSettingsError
+from lib.storage_authority_sql.native_fastpath_settings import NativeFastpathSettingsError as NativeFastpathSettingsError
 
 logger = get_logger(__name__)
 
@@ -171,7 +171,7 @@ def _fs_report(path: Path) -> dict[str, Any]:
                     if _fs_cache['path'] == str(path) and _fs_cache['report']
                     else {})
     try:
-        from lib.storage_sidecar.storage_capabilities import describe_mount
+        from lib.storage_authority_sql.storage_capabilities import describe_mount
         import shutil
 
         mount = describe_mount(path)
@@ -361,7 +361,7 @@ def fastpath_state(backend: str, runtime: dict[str, Any] | None = None) -> dict[
 
         runtime = storage_status()
     if backend == 'tofudb':
-        from lib.storage_sidecar.native_fastpath_settings import native_fastpath_state
+        from lib.storage_authority_sql.native_fastpath_settings import native_fastpath_state
 
         return native_fastpath_state(Path(data_root()), runtime)
     state = {
@@ -392,7 +392,7 @@ def configure_native_fastpath(enabled: bool, directory: str) -> dict[str, Any]:
     """Delegate next-launch admission to the storage lifecycle owner."""
     from lib.database_panel.switch import env_file_path
     from lib.storage.service import storage_status
-    from lib.storage_sidecar.native_fastpath_settings import save_native_fastpath_settings
+    from lib.storage_authority_sql.native_fastpath_settings import save_native_fastpath_settings
 
     return save_native_fastpath_settings(
         Path(data_root()), env_file_path(), enabled, directory, storage_status())
@@ -428,7 +428,7 @@ def _is_volatile(path: Path, storage_class: str) -> bool:
 def probe_single_path(path: Path, *, create_directory: bool = False
                       ) -> dict[str, Any]:
     """Bounded capability probe of one explicit path (fast-path admission)."""
-    from lib.storage_sidecar.storage_capabilities import probe_storage_path
+    from lib.storage_authority_sql.storage_capabilities import probe_storage_path
 
     report = probe_storage_path(path, create_directory=create_directory)
     return report.as_dict()
@@ -454,7 +454,7 @@ def _discover_paths(*, refresh: bool = False) -> dict[str, Any]:
                 and time.monotonic() - _probe_cache['at'] < _PROBE_CACHE_TTL_S):
             return dict(_probe_cache['result'])
 
-    from lib.storage_sidecar.storage_capabilities import probe_storage_path
+    from lib.storage_authority_sql.storage_capabilities import probe_storage_path
 
     current_root = os.path.realpath(str(data_root()))
     seen: set[str] = set()

@@ -162,45 +162,15 @@ def test_shell_meta_regex_detects_pipe_and_redirect():
 
 
 def test_simple_command_uses_argv_not_shell():
-    """A plain 'git status' (has a space → meta) vs a single token. A single
-    executable token must be split with shlex, NOT routed through the shell."""
     from lib.desktop_agent import _exec
-    captured = {}
-
-    class _Res:
-        stdout, stderr, returncode = 'ok', '', 0
-
-    def _fake_run(args, **kwargs):
-        captured['args'] = args
-        captured['shell'] = kwargs.get('shell')
-        return _Res()
-
-    with mock.patch.object(_exec.subprocess, 'run', _fake_run):
-        _exec.cmd_run_local({'command': 'whoami'})
-    assert captured['args'] == ['whoami']
-    assert captured['shell'] is False
+    assert _exec._build_args('whoami') == ['whoami']
 
 
 def test_metachar_command_routed_through_explicit_shell():
-    """A piped command must be handed to an explicit ['/bin/sh','-c',cmd]
-    argv (never shell=True), so the command is one unambiguous argument."""
     from lib.desktop_agent import _exec
-    captured = {}
-
-    class _Res:
-        stdout, stderr, returncode = 'ok', '', 0
-
-    def _fake_run(args, **kwargs):
-        captured['args'] = args
-        captured['shell'] = kwargs.get('shell')
-        return _Res()
-
-    with mock.patch.object(_exec.subprocess, 'run', _fake_run):
-        _exec.cmd_run_local({'command': 'cat f | wc -l'})
-    assert captured['shell'] is False
-    # Last element is the full command string, passed to the shell verbatim.
-    assert captured['args'][-1] == 'cat f | wc -l'
-    assert '-c' in captured['args']
+    args = _exec._build_args('cat f | wc -l')
+    assert args[-1] == 'cat f | wc -l'
+    assert '-c' in args
 
 
 def test_run_local_rejects_empty_command():

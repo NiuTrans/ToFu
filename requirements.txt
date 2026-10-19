@@ -7,6 +7,7 @@ hypercorn>=0.17
 # cryptography — auto-generates TLS certificates for zero-config HTTP/2.
 # Also pulls in the standard Python crypto stack (used transitively by many packages).
 cryptography>=42.0
+cffi>=2.0
 requests>=2.31
 # urllib3 — transitive via requests; pinned explicitly to a floor that clears
 # the redirect-leak CVE trio (CVE-2023-43804 / CVE-2023-45803 Cookie+body leak
@@ -23,7 +24,7 @@ jsonschema>=4.18
 # tofu-search — standalone multi-engine web search + content fetch pipeline,
 # extracted from this repo's former lib/search + lib/fetch. chatui wires its
 # own LLM routing / browser-extension / auth-source behavior into tofu-search's
-# provider seams via lib/search_bridge.py at startup.
+# provider seams via lib/search/search_bridge.py at startup.
 # >=0.3.1: the browser-search fallback now relies on the BrowserProvider.fetch_html
 # seam (the SERP parser lives IN the library); the bridge no longer ships its own
 # parser, so an older tofu-search would leave browser-search dead.
@@ -43,7 +44,7 @@ jsonschema>=4.18
 # (search/rerank.py::_diversify_by_entity + shared authority.host_brand_labels)
 # — internal reranking improvement, no public-API change.
 # >=0.5.0: hard wall-clock deadlines (search_deadline_secs / fetch_url_deadline_secs).
-# HARD FLOOR — not optional: lib/search_bridge.py::sync_search_config passes both
+# HARD FLOOR — not optional: lib/search/search_bridge.py::sync_search_config passes both
 # kwargs to tofu_search.configure() UNCONDITIONALLY, and server.py calls
 # install_search_bridge() at boot with no guard. An older configure() rejects the
 # unknown kwargs with `TypeError: SearchConfig.__init__() got an unexpected keyword
@@ -64,7 +65,7 @@ jsonschema>=4.18
 # (the your-llm-gateway.example.com failure shape). Deployed-package acceptance:
 # tests/_acceptance_fetch_identity_fallback.py.
 # >=0.5.3: `allow_private_hosts` — the hostname-anchored SSRF exemption.
-# HARD floor, same shape as 0.5.0: lib/search_bridge.py::sync_search_config
+# HARD floor, same shape as 0.5.0: lib/search/search_bridge.py::sync_search_config
 # passes `allow_private_hosts` (and `block_private_addresses` /
 # `allow_insecure_ssl_fallback`) to tofu_search.configure() UNCONDITIONALLY,
 # and server.py calls install_search_bridge() at boot with no guard, so an
@@ -109,7 +110,7 @@ jsonschema>=4.18
 # proxy fix is operationally critical on no-egress hosts — do not lower.
 # >=0.10.4: public SiteSearchTerminalError + native-adapter isolation. The
 # site packs (friday/modelplaza native adapters) need both halves: (1)
-# lib/search_bridge.py converts adapter execution/validation/browser-upgrade
+# lib/search/search_bridge.py converts adapter execution/validation/browser-upgrade
 # refusals into tofu_search.SiteSearchTerminalError UNCONDITIONALLY so a
 # recognized adapter's refusal never widens into cookie replay or another
 # transport — on an older library the attribute does not exist, so the
@@ -123,7 +124,11 @@ jsonschema>=4.18
 # >=0.11.0: search observation quality and structured HTML evidence. SOFT floor
 # for startup; enforces site scopes before fetching and exposes degraded engines
 # and unverified candidates instead of presenting wrong-topic snippets as facts.
-tofu-search>=0.11.0
+# >=0.12.0: concurrent, lazy async Playwright contexts and owned task submission.
+# HARD floor for the current browser integration: get_playwright_pool, submit_task
+# and joined async handler shutdown preserve request cancellation and cleanup.
+# Older workers cannot provide the application browser ownership contract.
+tofu-search>=0.12.0
 trafilatura>=1.6
 # playwright is mandatory for slide preview/layout rendering and also powers
 # the JS-rendered fallback in tofu_search.fetch. Slide admission smoke-launches
@@ -203,7 +208,7 @@ olefile>=0.46
 mcp>=2,<3
 # httpx — the async HTTP client the LLM transport imports UNCONDITIONALLY at
 # module top (lib/llm/_transport.py, plus lib/llm/astream.py and the guarded
-# async branch of lib/http_client.py). Undeclared for months because this env
+# async branch of lib/http_transport/client.py). Undeclared for months because this env
 # happened to carry it transitively; the desktop_dist builder's clean venv
 # proved the gap: PyInstaller packed a binary whose boot smoke dies on
 # ModuleNotFoundError: httpx (2026-08-01, desktop build attempt 4). NOTE the
@@ -300,3 +305,5 @@ tree-sitter-language-pack>=0.10
 # silently, which for a login prompt looks like a broken feature rather than a
 # missing optional extra.
 qrcode>=7.4
+
+wasmtime==49.0.0

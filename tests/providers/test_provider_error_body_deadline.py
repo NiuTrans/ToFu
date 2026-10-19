@@ -6,7 +6,7 @@ import httpx
 import pytest
 
 from lib.llm import provider_error_body as bodies
-from lib.llm_errors import AbortedError
+from lib.llm.llm_errors import AbortedError
 
 pytestmark = pytest.mark.unit
 
@@ -85,7 +85,7 @@ def test_non_yielding_empty_chunks_cannot_renew_deadline(monkeypatch):
 
 def test_timed_out_diagnostics_still_classify_known_http_status(monkeypatch):
     from tests.sse.test_sse_core_parity import _run_async, _FakeAsyncStreamCtx
-    from lib.llm_errors import RateLimitError
+    from lib.llm.llm_errors import RateLimitError
     monkeypatch.setattr(bodies, 'ERROR_BODY_TIMEOUT_S', .02)
     async def stalled(self):
         yield '网关不可用'.encode()

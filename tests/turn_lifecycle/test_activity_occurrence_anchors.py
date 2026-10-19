@@ -277,7 +277,7 @@ def test_exact_parent_span_requires_a_scoped_settled_unique_child(unsafe_child):
 
 def test_real_artifact_child_stamp_deduplicates_after_terminal_and_reload():
     from lib.tasks_pkg.tool_display._dispatch import _build_tool_round_entry
-    from lib.tool_result_artifacts import register_artifact_provenance
+    from lib.tool_results.tool_result_artifacts import register_artifact_provenance
 
     owner = task(toolRounds=[gateway_round()])
     ref = 'tool-result:' + 'd' * 64

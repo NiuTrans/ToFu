@@ -21,7 +21,7 @@ logger = get_logger(__name__)
 # code tree. Byte-identical to <repo>/uploads/pptx in the default in-tree
 # layout; falls back to it if runtime_paths is unavailable.
 try:
-    from lib.runtime_paths import uploads_root as _uploads_root
+    from lib.runtime.runtime_paths import uploads_root as _uploads_root
     _PPTX_UPLOAD_DIR = os.path.join(_uploads_root(), 'pptx')
 except Exception as _rp_e:  # pragma: no cover — defensive
     logger.debug('[PPTX-Translate] uploads_root() unavailable, using in-tree: %s', _rp_e)

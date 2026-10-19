@@ -45,7 +45,7 @@ def _record(name: str, level: int = logging.WARNING) -> logging.LogRecord:
 
 
 def test_tofu_storage_loggers_are_business_records_not_vendor():
-    from lib.server_logging import _BizAndServerOnly, _BizOnly, _VendorOnly
+    from lib.server.server_logging import _BizAndServerOnly, _BizOnly, _VendorOnly
 
     for name in (
         'tofu.storage.supervisor',
@@ -60,7 +60,7 @@ def test_tofu_storage_loggers_are_business_records_not_vendor():
 
 
 def test_underscore_namespaces_keep_their_existing_routing():
-    from lib.server_logging import _BizOnly, _VendorOnly
+    from lib.server.server_logging import _BizOnly, _VendorOnly
 
     # tofu_search was already business; tofu_agent/tofu_db keep vendor
     # routing (only their own WARNING+ diagnostics exist today).

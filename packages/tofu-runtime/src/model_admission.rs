@@ -76,6 +76,13 @@ pub trait Lease: Send {
         Ok(None)
     }
     fn settle(&mut self, usage: Option<&Value>, unsent: bool) -> Result<(), Value>;
+    /// Optional owned fee projection after budget settlement. It grants no
+    /// wallet authority and must be delivered through the existing round port.
+    fn settle_with_cost(&mut self,usage:Option<&Value>,unsent:bool) -> Result<Option<Box<Value>>,Value> {
+        self.settle(usage,unsent)?;
+        Ok(None)
+    }
+
 }
 
 #[cfg(test)]

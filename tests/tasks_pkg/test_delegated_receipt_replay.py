@@ -5,7 +5,7 @@ import json
 
 import pytest
 
-from lib.tool_round_replay import scan_replayable_tool_round_prefix, checkpoint_retention_positions
+from lib.tool_results.tool_round_replay import scan_replayable_tool_round_prefix, checkpoint_retention_positions
 from lib.tasks_pkg.conv_message_builder._toolcalls import _reconstruct_tool_call_messages
 
 pytestmark = pytest.mark.unit

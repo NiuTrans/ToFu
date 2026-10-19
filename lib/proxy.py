@@ -63,7 +63,7 @@ __all__ = [
     'global_proxy_failover_urls',
     'global_egress_route_specs',
     'subscription_route_specs', 'subscription_route_candidates',
-    'subscription_route_verdict', 'report_subscription_route',
+    'subscription_route_verdict', 'subscription_route_recovery_delay', 'report_subscription_route',
 ]
 
 
@@ -96,7 +96,7 @@ def report_outcome(url: str, ok: bool, latency_ms=None, *,
     """Forward a real request outcome to the netpath scorer AND attribute
     it to the pool entry the request actually used (when one did).
 
-    Called by the LLM transports and lib.http_client on success/failure.
+    Called by the LLM transports and lib.http_transport.client on success/failure.
     Never raises; a no-op when netpath is disabled or the host is not
     managed (explicit bypass rules win over learned decisions).
     """
@@ -767,7 +767,7 @@ def subscription_route_specs(url: str) -> list:
 
 
 def subscription_route_candidates(url: str, *, wait_timeout: float = 5.5,
-                                  force_probe: bool = False) -> list:
+                                  force_probe: bool = False, cancelled=None) -> list:
     """Health-ordered server routes for one subscription endpoint."""
     from lib.subscription_routes import manager
     routes = subscription_route_specs(url)
@@ -783,13 +783,19 @@ def subscription_route_candidates(url: str, *, wait_timeout: float = 5.5,
             return configured
     return manager.candidates(
         url, routes,
-        wait_timeout=wait_timeout, force_probe=force_probe)
+        wait_timeout=wait_timeout, force_probe=force_probe, cancelled=cancelled)
 
 
 def subscription_route_verdict(url: str) -> str:
     """Cached aggregate reachability verdict; never performs network I/O."""
     from lib.subscription_routes import manager
     return manager.verdict(url, subscription_route_specs(url))
+
+
+def subscription_route_recovery_delay(url: str) -> float | None:
+    """Cached transient recovery deadline, shared by every transport caller."""
+    from lib.subscription_routes import manager
+    return manager.recovery_delay(url, subscription_route_specs(url))
 
 
 def report_subscription_route(url: str, route, ok: bool,

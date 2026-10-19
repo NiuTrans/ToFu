@@ -17,9 +17,21 @@ class TestStreamAccSettleWireParity:
         params = set(sig.parameters.keys())
         assert {'stream_acc', 'task', 'rs', 'tid'} <= params
 
-    def test_body_reconciles_announced_rounds(self):
-        src = inspect.getsource(_stream_acc_settle.settle_stream_accumulator)
-        assert "reconcile_announced_rounds(rs.assistant_msg)" in src
+    def test_unverified_response_retires_announcements_without_cache_adoption(self):
+        from unittest.mock import Mock
+        from lib.llm.stream_result import ProviderStreamResult, ProviderStreamState
+        message = {'role': 'assistant', 'tool_calls': [{'id': 'unverified'}]}
+        result = ProviderStreamResult(message, 'stop', None, ProviderStreamState.PREMATURE_CLOSE)
+        accumulator = Mock(announced_tc_map={}, announced_count=1,
+                           tool_round_num=7, submitted_count=1)
+        state = SimpleNamespace(assistant_msg=message, last_stream_result=result,
+                                tool_round_num=0)
+        _stream_acc_settle.settle_stream_accumulator(
+            accumulator, {'id': 'unverified'}, state, tid='test')
+        accumulator.on_provider_attempt_restart.assert_called_once()
+        accumulator.reconcile_announced_rounds.assert_called_once_with({})
+        accumulator.inject_into_cache.assert_not_called()
+        assert state.tool_round_num == 7
 
     def test_body_reads_back_tool_round_num(self):
         src = inspect.getsource(_stream_acc_settle.settle_stream_accumulator)

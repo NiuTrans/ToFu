@@ -10,8 +10,6 @@ import time
 from . import records
 from .contracts import EvolutionContractError, EvolutionStateError
 
-MAX_WORKSPACE_BYTES = 768 * 1024
-MAX_UPDATES = 128
 PAGE_CHARS = 8000
 
 
@@ -37,13 +35,6 @@ def mutate(run_id, user_id, change):
     return _mutate(run_id,user_id,lambda items:None,row_change=lambda row:change(state_in(row)))
 
 
-def reply_capacity(row):
-    """Keep the last slot and 48 KiB for the run's terminal-result notice."""
-    has_result=any(e['kind']=='run_result' for e in state_in(row)['updates'])
-    return (MAX_UPDATES if has_result else MAX_UPDATES-1,
-            MAX_WORKSPACE_BYTES if has_result else MAX_WORKSPACE_BYTES-48*1024)
-
-
 def append_to_row(row, *, event_id, kind, content, origin, target='all', task_id='', references=None, source_seq=None):
     state=state_in(row)
     payload=dict(event_id=event_id,kind=kind,content=content,origin=origin,
@@ -54,16 +45,9 @@ def append_to_row(row, *, event_id, kind, content, origin, target='all', task_id
         if any(existing.get(k)!=v for k,v in payload.items()):
             raise EvolutionStateError('update id already belongs to different content')
         return existing
-    limit=MAX_UPDATES if kind=='run_result' else reply_capacity(row)[0] if kind=='reply' else 96
-    if len(state['updates'])>=limit:
-        raise EvolutionStateError('goal update capacity reached; start a follow-up goal; history was not deleted')
     state['revision']+=1
     event={**payload,'seq':state['revision'],'created_at':int(time.time())}
     state['updates'].append(event)
-    if kind=='reply' and len(json.dumps(row,ensure_ascii=False).encode())>reply_capacity(row)[1]:
-        raise EvolutionStateError('goal reply capacity reached; reserve retained for terminal result')
-    if kind not in ('reply','run_result') and len(json.dumps(row,ensure_ascii=False).encode())>MAX_WORKSPACE_BYTES-128*1024:
-        raise EvolutionStateError('goal input capacity reached; reserve retained for acknowledgement and coordinator reply')
     return event
 
 
@@ -244,27 +228,12 @@ def unacknowledged_guidance(run, *, user_id):
 
 def record_run_result(run, *, user_id):
     from .library import _mutate
-    from copy import deepcopy
     def record(row):
         state=state_in(row)
         event_id='terminal:'+run['task_id']
         existing=next((e for e in state['updates'] if e['event_id']==event_id),None)
         if existing:return existing
-        candidate=deepcopy(row)
-        try:
-            event=append_to_row(candidate,event_id=event_id,kind='run_result',origin='system',target='coordinator',
-                task_id=run['task_id'],content=json.dumps({'status':run['status'],'error':run.get('error',''),
-                'review':run.get('review'),'deliverable':run.get('result','')[:3500]},ensure_ascii=False)[:8000])
-            if len(json.dumps(candidate,ensure_ascii=False).encode())>MAX_WORKSPACE_BYTES:
-                raise EvolutionStateError('terminal result notice does not fit')
-        except EvolutionStateError:
-            # Legacy records may predate the terminal reserve. The run itself
-            # is the durable result authority; do not delete events or prevent
-            # reconciliation of a running coordinator because its notice is full.
-            state['manager']['error']='run_result_capacity_exhausted; inspect run'
-            if state['manager']['status']!='running':
-                state['manager']['status']='needs_attention'
-            return None
-        row.update(candidate)
-        return event
+        return append_to_row(row,event_id=event_id,kind='run_result',origin='system',target='coordinator',
+            task_id=run['task_id'],content=json.dumps({'status':run['status'],'error':run.get('error',''),
+            'review':run.get('review'),'deliverable':run.get('result','')[:3500]},ensure_ascii=False)[:8000])
     return _mutate(run['run_id'],user_id,lambda items:None,row_change=record)

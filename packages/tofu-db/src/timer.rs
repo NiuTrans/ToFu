@@ -15,7 +15,7 @@ use crate::entity::EntityKey;
 use crate::generated_tofudb_ir::{
     MAX_ENTITY_RANGE_ROWS, MAX_TIMER_DOCUMENT_BYTES,
     MAX_TIMER_GLOBAL_ACTIVE_ROWS, MAX_TIMER_ID_CHARACTERS, MAX_TIMER_LIST_ROWS,
-    MAX_TIMER_POLL_DOCUMENT_BYTES, MAX_TIMER_POLL_ROWS, MAX_TRANSACTION_IR_LITERAL_BYTES,
+    MAX_TIMER_POLL_DOCUMENT_BYTES, MAX_TIMER_POLL_ROWS, MAX_LEGACY_DOCUMENT_BYTES,
     TIMER_ACTIVE_COUNT_NAMESPACE, TIMER_CONVERSATION_INDEX_NAMESPACE, TIMER_DOCUMENT_NAMESPACE,
     TIMER_GLOBAL_ACTIVE_CREATED_INDEX_NAMESPACE, TIMER_ID_CLAIM_NAMESPACE,
     TIMER_POLL_DOCUMENT_NAMESPACE, TIMER_POLL_ID_CLAIM_NAMESPACE, TIMER_POLL_SEQUENCE_NAMESPACE,
@@ -673,7 +673,7 @@ impl Request {
             }
             _ => return Err(invalid_input("invalid timer request")),
         };
-        if size > MAX_TRANSACTION_IR_LITERAL_BYTES
+        if size > MAX_LEGACY_DOCUMENT_BYTES
             || self.timer_id().is_some_and(|id| !valid_timer_id(id))
         {
             return Err(invalid_input("timer request exceeds its bound"));
@@ -981,7 +981,7 @@ where
 fn encode_response(documents: &[Value], name: &str) -> io::Result<Option<Vec<u8>>> {
     let response = serde_json::to_vec(documents)
         .map_err(|_| invalid_data("timer response cannot be encoded"))?;
-    if response.len() > MAX_TRANSACTION_IR_LITERAL_BYTES {
+    if response.len() > MAX_LEGACY_DOCUMENT_BYTES {
         return Err(exhausted(&format!("{name} exceeds 8 MiB")));
     }
     Ok(Some(response))

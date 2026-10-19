@@ -8,7 +8,8 @@ export function renderProperties(side: HTMLElement, element: SlideElement | unde
   if (!element) {
     const hint = doc.createElement('div'); hint.className = 'sled-side-empty';
     hint.textContent = t('sled.selectHint');
-    side.append(hint); return;
+    const ask = createButton({ label: t('sled.askAi'), size: 'sm' }, doc);
+    ask.dataset.sledAsk = '1'; side.append(hint, ask); return;
   }
   const id = doc.createElement('div'); id.className = 'sled-side-id'; id.textContent = element.elementId;
   const type = doc.createElement('span'); type.className = 'sled-side-type'; type.textContent = element.elementType;

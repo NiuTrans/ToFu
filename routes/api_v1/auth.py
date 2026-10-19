@@ -79,7 +79,7 @@ from lib.auth_mode import requires_credential as _mode_requires_credential
 from lib.auth_mode import is_multi_user
 from lib.identity import PrincipalContext, principal_from_auth_context
 from lib.log import audit_log, get_logger, set_principal
-from lib.rate_limit_api import RateDecision, apply_headers, check_request
+from lib.rate_limit.rate_limit_api import RateDecision, apply_headers, check_request
 from lib.usage_tracker import record as record_usage
 
 logger = get_logger(__name__)
@@ -453,7 +453,7 @@ async def auth_before_request():
     # ones do NOT 401 — every request gets a synthetic full-privilege
     # context. Rate limiting and idempotency keying treat the
     # synthetic context as "no real principal" (see
-    # ``lib.rate_limit_api`` / ``lib.idempotency``).
+    # ``lib.rate_limit.rate_limit_api`` / ``lib.idempotency``).
     if not _mode_requires_credential():
         token = _extract_bearer_or_cookie()
         ctx_open: Optional[AuthContext] = None
@@ -483,12 +483,8 @@ async def auth_before_request():
             except (PermissionError, ValueError) as exc:
                 return _principal_binding_rejection(exc)
             if ctx_open.via_open_mode and _is_api_path(path):
-                # The open-mode limiter can use the shared DB backend. Keep
-                # that optional storage path off the serving loop as well.
-                decision = await asyncio.to_thread(check_request, ctx_open)
-                g.rate_decision = decision
-                if not decision.allowed:
-                    return _rate_limit_rejection(decision)
+                # Open-mode admission has no resource counter or worker hop.
+                g.rate_decision = check_request(ctx_open)
             return None
         # else: fall through to the credential-required gate below.
 

@@ -135,7 +135,8 @@ class AgentExecution:
 
     @property
     def done(self) -> bool:
-        return self.status in _TERMINAL_STATES
+        return (self.status in _TERMINAL_STATES
+                and (self._runtime._native_execution is None or self._terminal.is_set()))
 
     def abort(self) -> bool:
         """Request cooperative cancellation for this owned run."""
@@ -143,6 +144,8 @@ class AgentExecution:
 
     def result(self, timeout_s: float | None = None) -> AgentResult:
         """Wait for the terminal task and return its typed projection."""
+        if not self.done and self._runtime._native_execution is not None:
+            self._runtime._native_execution.assert_sync_lane()
         timeout = self._request.timeout_s if timeout_s is None else float(timeout_s)
         if timeout <= 0:
             raise AgentConfigurationError('timeout_s must be positive')
@@ -208,8 +211,10 @@ class AgentExecution:
 
     def event_page(self, *, cursor: int = 0) -> dict:
         """Return one bounded in-memory replay page."""
+        if not self.done and self._runtime._native_execution is not None:
+            self._runtime._native_execution.assert_sync_lane()
         from lib.agent_core.run_contract import project_agent_event_evidence
-        from lib.task_replay import task_memory_replay_page
+        from lib.task_replay.task_replay import task_memory_replay_page
         payload = task_memory_replay_page(
             self._task, max(0, int(cursor))).payload({
                 'task_id': self.task_id,
@@ -233,7 +238,7 @@ class AgentExecution:
         to the sidecar/SDK to resume a disconnected stream.
         """
         from lib.agent_core.run_contract import project_agent_event_evidence
-        from lib.task_replay import task_memory_replay_page
+        from lib.task_replay.task_replay import task_memory_replay_page
 
         deadline = None
         if timeout_s is not None:
@@ -310,7 +315,7 @@ class AgentExecution:
         timeout_s: float | None = None,
     ) -> AsyncIterator[dict]:
         from lib.agent_core.run_contract import project_agent_event_evidence
-        from lib.task_replay import task_memory_replay_page
+        from lib.task_replay.task_replay import task_memory_replay_page
 
         if timeout_s is not None and float(timeout_s) <= 0:
             raise AgentConfigurationError('timeout_s must be positive')
@@ -361,9 +366,11 @@ class AgentRuntime:
         model_routing: ModelRoutingConfig | Mapping[str, Any] | None = None,
         model_routing_source: str = 'runtime',
         max_inflight: int | None = None,
-        max_retained_runs: int = 1024,
+        max_retained_runs: int | None = None,
 
         harness_profile: str = 'auto',
+        native_execution=None,
+        native_repository=None,
     ) -> None:
         if not isinstance(principal, PrincipalContext):
             raise TypeError('AgentRuntime principal must be PrincipalContext')
@@ -371,6 +378,17 @@ class AgentRuntime:
         if model_routing is not None and not isinstance(
                 model_routing, ModelRoutingConfig):
             model_routing = ModelRoutingConfig.from_mapping(model_routing)
+        if native_execution is not None:
+            from tofu_agent.native_runtime import NativeAgentConfiguration
+            if not isinstance(native_execution,NativeAgentConfiguration):
+                raise AgentConfigurationError('native_execution requires NativeAgentConfiguration')
+        self._native_execution=native_execution
+        self._repository_runtime = None
+        if native_repository is not None:
+            from tofu_agent.native_repository import NativeRepositoryConfiguration
+            if not isinstance(native_repository, NativeRepositoryConfiguration):
+                raise AgentConfigurationError('native_repository requires NativeRepositoryConfiguration')
+            self._repository_runtime = native_repository.create_runtime()
         self.principal = principal
 
         from tofu_agent.harness_profile import validate_harness_profile
@@ -397,7 +415,14 @@ class AgentRuntime:
             max_workers=capacity, queue_capacity=capacity,
             max_abandoned_workers=1, thread_name_prefix='tofu-embedded-agent',
             metric_pool='embedded-agent')
-        self._max_retained_runs = max(16, int(max_retained_runs))
+        # Retained terminal executions are reconstructible transport state,
+        # not durable user data; the bound scales with the same launch-time
+        # task-parallelism probe as the worker pool, and an explicit
+        # ``max_retained_runs`` always wins.
+        self._max_retained_runs = (
+            max(16, int(max_retained_runs))
+            if max_retained_runs is not None else
+            max(16, min(4096, capacity * 64)))
         self._executions: dict[str, AgentExecution] = {}
         self._active: set[str] = set()
         self._lock = threading.RLock()
@@ -413,6 +438,8 @@ class AgentRuntime:
         subject_id: str = 'local:developer',
         max_inflight: int | None = None,
         harness_profile: str = 'auto',
+        native_execution=None,
+        native_repository=None,
     ) -> 'AgentRuntime':
         """Compose a personal runtime, loading only the complete v2 envelope."""
         if model_routing is None:
@@ -429,6 +456,8 @@ class AgentRuntime:
             max_inflight=max_inflight,
 
             harness_profile=harness_profile,
+            native_execution=native_execution,
+            native_repository=native_repository,
         )
 
     @property
@@ -586,7 +615,7 @@ class AgentRuntime:
             )
             repository = InMemoryModelRoutingRepository()
             boundary = OwnerBoundary.create(
-                self.principal.require_owner(context='AgentRuntime.start'))
+                self.principal.require_owner(context='AgentRuntime.start'), self.principal.tenant_id)
             repository.compare_and_swap(
                 boundary, selected_access.document, expected_revision=0)
             for secret_reference, secret_value in (
@@ -606,6 +635,7 @@ class AgentRuntime:
                 tool_env = mint_tool_env(
                     tools=request.custom_tools, owner=owner_tag)
                 cfg['_customToolSchemas'] = tool_env.schemas
+                cfg['_customToolContracts'] = tool_env.contract_documents
                 cfg['_customToolsMode'] = request.custom_tools_mode
                 if request.custom_tools_mode == 'exclusive':
                     # Reuse the established explicit-tool precedence branch:
@@ -642,6 +672,8 @@ class AgentRuntime:
         task['_api_v1'] = True
         task['_via_agent_run'] = True
         task['_publicAgentRuntime'] = True
+        if self._repository_runtime is not None:
+            task['_repository_runtime'] = self._repository_runtime
         if request.request_id:
             task['_requestId'] = request.request_id
         if tool_env is not None:
@@ -658,18 +690,23 @@ class AgentRuntime:
         )
         task['_transientEventNotifier'] = execution._notify
         cleaned = {'value': False}
+        worker_joined = {'value': False}
 
         def _cleanup(_task_id: str) -> None:
             with self._lock:
-                if cleaned['value']:
+                if cleaned['value'] or not worker_joined['value']:
                     return
                 cleaned['value'] = True
+            if self._native_execution is not None:
+                from lib.mcp.tool_search import release_transient_task_selection
+                release_transient_task_selection(task)
+            self._dispose_resources(route_group, tool_env)
+            self._gate.release()
+            with self._lock:
                 self._active.discard(_task_id)
-            execution._terminal.set()
+                execution._terminal.set()
             execution._notify()
             task.pop('_transientEventNotifier', None)
-            self._gate.release()
-            self._dispose_resources(route_group, tool_env)
 
         from lib.agent_core.admission import on_terminal
         on_terminal(task['id'], _cleanup)
@@ -679,8 +716,20 @@ class AgentRuntime:
             self._prune_retained_locked()
 
         try:
+            if self._native_execution is not None:
+                self._native_execution.bind_task(task,principal=self.principal,repository=repository,
+                    selection=selection,route_group=route_group)
             from lib.tasks_pkg.spawn import spawn_task
-            spawn_task(task, executor=self._executor)
+            worker=spawn_task(task, executor=self._executor)
+            def joined(_future=None):
+                with self._lock:
+                    worker_joined['value']=True
+                if task.get('status') in _TERMINAL_STATES:
+                    _cleanup(task['id'])
+            if worker is not None:
+                worker.add_done_callback(joined)
+            else:
+                joined()
         except Exception as exc:
             task['status'] = 'error'
             task['finishReason'] = 'error'
@@ -688,8 +737,11 @@ class AgentRuntime:
                 'kind': 'runtime_spawn_failed',
                 'message': str(exc),
             }
+            with self._lock:
+                worker_joined['value']=True
             from lib.agent_core.admission import fire_terminal_callbacks
             fire_terminal_callbacks(task['id'])
+            _cleanup(task['id'])
             raise
         return execution
 
@@ -751,6 +803,8 @@ class AgentRuntime:
         return False
 
     def run(self, messages: list[dict] | AgentRequest, **kwargs) -> AgentResult:
+        if self._native_execution is not None:
+            self._native_execution.assert_sync_lane()
         execution = self.start(messages, **kwargs)
         return execution.result()
 
@@ -759,6 +813,8 @@ class AgentRuntime:
         messages: list[dict] | AgentRequest,
         **kwargs,
     ) -> Iterator[dict]:
+        if self._native_execution is not None:
+            self._native_execution.assert_sync_lane()
         execution = self.start(messages, **kwargs)
         yield from execution.events(timeout_s=execution.timeout_s)
 
@@ -781,8 +837,14 @@ class AgentRuntime:
             yield event
 
     def close(self, *, abort: bool = True, timeout_s: float = 5.0) -> None:
-        """Reject new work and optionally abort/wait briefly for active runs."""
+        """Reject new work, optionally abort, and require joined worker cleanup.
+
+        Timeout retains borrowed resources; callers may retry close after the
+        accepted work joins. A terminal status alone is not physical completion.
+        """
         with self._lock:
+            if self._active and self._native_execution is not None:
+                self._native_execution.assert_sync_lane()
             self._closed = True
             active = [self._executions[task_id]
                       for task_id in tuple(self._active)
@@ -796,7 +858,15 @@ class AgentRuntime:
             if remaining <= 0:
                 break
             execution._terminal.wait(remaining)
+        if any(not execution._terminal.is_set() for execution in active):
+            raise AgentTimeoutError('SDK teardown has not joined; retain borrowed resources and retry close')
+        if self._repository_runtime is not None:
+            self._repository_runtime.close()
         self._executor.shutdown(wait=False, cancel_futures=abort)
+
+    async def close_async(self, *, abort: bool = True, timeout_s: float = 5.0) -> None:
+        """Join active worker teardown without blocking the borrowed native loop."""
+        await asyncio.to_thread(self.close,abort=abort,timeout_s=timeout_s)
 
     def __enter__(self) -> 'AgentRuntime':
         return self

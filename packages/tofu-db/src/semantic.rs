@@ -117,6 +117,71 @@ pub struct AdmittedRequest<'request> {
     pub remaining_millis: u64,
 }
 
+/// Queue-owned admission receipt. Private fields prevent mutation of the
+/// validated request or operation metadata while an execution carrier is free.
+/// Construction uses the same default-deny boundary as synchronous dispatch.
+#[derive(Debug)]
+pub(crate) struct OwnedAdmittedRequest {
+    request: Request,
+    domain: &'static str,
+    kind: StorageOperationKind,
+    receipt_required: bool,
+    transaction_timeout_millis: Option<u64>,
+    owner_scope: StorageOwnerScope,
+    remaining_millis: u64,
+}
+
+impl OwnedAdmittedRequest {
+    pub(crate) fn into_request(self) -> Request { self.request }
+    pub(crate) fn as_borrowed(&self) -> AdmittedRequest<'_> {
+        AdmittedRequest {
+            request: &self.request,
+            operation: AdmittedOperation {
+                name: &self.request.operation,
+                domain: self.domain,
+                kind: self.kind,
+                receipt_required: self.receipt_required,
+                transaction_timeout_millis: self.transaction_timeout_millis,
+                owner_scope: self.owner_scope,
+            },
+            remaining_millis: self.remaining_millis,
+        }
+    }
+}
+
+pub(crate) fn admit_owned_request(
+    request: Request, negotiated: NegotiatedProtocol,
+    authenticated_scope: AuthenticatedScope, now_unix_ms: u64,
+) -> Result<OwnedAdmittedRequest, AdmissionError> {
+    admit_owned_request_preserving_request(request, negotiated, authenticated_scope, now_unix_ms, false)
+        .map_err(|(error, _request)| error)
+}
+
+pub(crate) fn admit_owned_request_preserving_request(
+    request: Request,
+    negotiated: NegotiatedProtocol,
+    authenticated_scope: AuthenticatedScope,
+    now_unix_ms: u64,
+    streamed: bool,
+) -> Result<OwnedAdmittedRequest, (AdmissionError, Request)> {
+    let admission = if streamed {admit_streamed_request(&request, negotiated, authenticated_scope, now_unix_ms, usize::MAX)}
+        else {admit_request(&request, negotiated, authenticated_scope, now_unix_ms)};
+    let admitted = match admission {
+        Ok(admitted) => admitted,
+        Err(error) => return Err((error, request)),
+    };
+    debug_assert_eq!(admitted.operation.name, request.operation);
+    Ok(OwnedAdmittedRequest {
+        domain: admitted.operation.domain,
+        kind: admitted.operation.kind,
+        receipt_required: admitted.operation.receipt_required,
+        transaction_timeout_millis: admitted.operation.transaction_timeout_millis,
+        owner_scope: admitted.operation.owner_scope,
+        remaining_millis: admitted.remaining_millis,
+        request,
+    })
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AuthenticatedScope {
     pub owner_id: u64,
@@ -420,4 +485,40 @@ mod tests {
             50_000
         );
     }
+    #[test]
+    fn owned_admission_moves_payload_across_threads_without_copy_or_metadata_drift() {
+        for operation in ["artifact.get", "event.append", "plugin.example.put"] {
+            let request = request(operation, Some("owned-command"));
+            let pointer = request.payload.as_ptr() as usize;
+            let expected = admit_request(&request, negotiated(), authenticated_scope(), 100_000).unwrap();
+            let expected_metadata = (expected.operation.domain, expected.operation.kind,
+                expected.operation.receipt_required, expected.operation.transaction_timeout_millis,
+                expected.operation.owner_scope, expected.remaining_millis);
+            let owned = admit_owned_request(request, negotiated(), authenticated_scope(), 100_000).unwrap();
+            let (actual_pointer, name, actual_metadata) = std::thread::spawn(move || {
+                let borrowed = owned.as_borrowed();
+                (borrowed.request.payload.as_ptr() as usize, borrowed.operation.name.to_owned(),
+                    (borrowed.operation.domain, borrowed.operation.kind,
+                     borrowed.operation.receipt_required, borrowed.operation.transaction_timeout_millis,
+                     borrowed.operation.owner_scope, borrowed.remaining_millis))
+            }).join().unwrap();
+            assert_eq!(actual_pointer, pointer);
+            assert_eq!(name, operation);
+            assert_eq!(actual_metadata, expected_metadata);
+        }
+    }
+
+    #[test]
+    fn owned_admission_preserves_scope_schema_deadline_and_unknown_denials() {
+        let mut wrong_owner = request("artifact.get", None);
+        wrong_owner.owner_id += 1;
+        assert!(matches!(admit_owned_request(wrong_owner, negotiated(), authenticated_scope(), 100_000), Err(AdmissionError::AuthorityScopeMismatch)));
+        let mut wrong_schema = request("artifact.get", None);
+        wrong_schema.schema_id += 1;
+        assert!(matches!(admit_owned_request(wrong_schema, negotiated(), authenticated_scope(), 100_000), Err(AdmissionError::SchemaNotNegotiated)));
+        assert!(matches!(admit_owned_request(request("unknown.operation", None), negotiated(), authenticated_scope(), 100_000), Err(AdmissionError::UnknownOperation)));
+        assert!(matches!(admit_owned_request(request("artifact.get", None), negotiated(), authenticated_scope(), u64::MAX), Err(AdmissionError::DeadlineElapsed)));
+        assert!(matches!(admit_owned_request(request("event.append", None), negotiated(), authenticated_scope(), 100_000), Err(AdmissionError::CommandIdRequired)));
+    }
+
 }

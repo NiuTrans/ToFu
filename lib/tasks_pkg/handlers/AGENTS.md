@@ -28,3 +28,9 @@ settle-all-lanes, wire-shape, and cancellation tests.
 
 `_mcp_files.py` binds declared file-write receipts before MCP settlement;
 verify with `tests/tasks_pkg/test_overleaf_write_receipts.py` and MCP wrapper neighbors.
+
+`../working_file_sources.py` owns task-local host witnesses for opt-in file reads.
+Both generic and file-scoped project handlers publish only after the common
+successful terminal boundary; working-fact admission rechecks current scope.
+No raw tool JSON grants filesystem authority. Verify native gateway, cancellation,
+root replacement and terminal receipt release in the working-file-source suites.

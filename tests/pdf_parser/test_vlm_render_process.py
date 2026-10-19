@@ -9,7 +9,7 @@ import time
 
 import pytest
 
-from lib.llm_errors import AbortedError
+from lib.llm.llm_errors import AbortedError
 from lib.pdf_parser.images import _render
 
 pytestmark = pytest.mark.unit

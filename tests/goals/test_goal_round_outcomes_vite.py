@@ -39,6 +39,12 @@ def goal_outcome_harness(tmp_path_factory: pytest.TempPathFactory) -> Path:
     work = tmp_path_factory.mktemp("goal-round-outcomes")
     entry = work / "entry.ts"
     entry.write_text(f"""
+import {{ renderChecklistCard }} from {json.dumps(str(ROOT / 'frontend/src/conversation/ui/checklist-card/index.ts'))};
+(globalThis as any).renderChecklistCard = renderChecklistCard;
+import {{ renderMcpResourceLinks }} from {json.dumps(str(ROOT / 'frontend/src/conversation/presentation/mcp-resource-links.ts'))};
+(globalThis as any).renderMcpResourceLinks = renderMcpResourceLinks;
+import {{ createToolGroupPresentation }} from {json.dumps(str(ROOT / 'frontend/src/conversation/ui/tool-groups/index.ts'))};
+(globalThis as any).createToolGroupPresentation = createToolGroupPresentation;
 import {{ createToolHeaderPresentation }} from {json.dumps(str(ROOT / 'frontend/src/conversation/presentation/tool-header-presentation.ts'))};
 import {{ createToolResultPresentation }} from {json.dumps(str(ROOT / 'frontend/src/conversation/presentation/tool-result-presentation.ts'))};
 import {{ createToolImagePresentation }} from {json.dumps(str(ROOT / 'frontend/src/conversation/presentation/tool-image-presentation.ts'))};
@@ -87,6 +93,7 @@ const command = createToolCommandExecutionPresentation({{translate}});
 (globalThis as any).toolHeaderQueryText = header.queryText;
 
 (globalThis as any).renderToolArtifactHeaderHtml = header.artifactHeaderHtml;
+(globalThis as any).renderRepoMapHeaderHtml = header.repoMapHeaderHtml;
 (globalThis as any).renderToolHeaderBadgeHtml = header.renderBadgeHtml;
 // tool_rounds.js calls inspectorReference (bundle-resolved via _prelude.js
 // since the 2026-09 squash merges); expose the REAL evidence routing.

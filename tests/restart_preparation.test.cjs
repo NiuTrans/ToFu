@@ -89,3 +89,44 @@ test('unknown and older phases cannot replace the last confirmed phase', async (
     stop();
   });
 });
+
+test('automatic retry relays on the same bounded observer and keeps elapsed progress', async () => {
+  await withTimers(async (timers, tick) => {
+    let finish;
+    let reads = 0;
+    const snapshots = [];
+    const stop = watchRestartPreparation(() => {
+      reads++;
+      return new Promise(resolve => { finish = resolve; });
+    }, value => snapshots.push(value));
+    for (const [index, phase] of ['compiling', 'retrying', 'checking', 'frontend'].entries()) {
+      assert.equal(reads, index + 1);
+      assert.equal(timers.size, 0, 'only one observation may be in flight');
+      finish({ record: { status: 'approved', preparation: {
+        phase, updatedAt: 10 + index, elapsedSeconds: 20 + index * 10,
+      } } });
+      await settle();
+      assert.equal(timers.size, 1);
+      if (index < 3) tick();
+    }
+    assert.deepEqual(snapshots.map(value => value.phase), ['compiling', 'retrying', 'checking', 'frontend']);
+    assert.deepEqual(snapshots.map(value => value.elapsedSeconds), [20, 30, 40, 50]);
+    stop();
+    assert.equal(timers.size, 0);
+  });
+});
+
+test('every shipped locale explains each preparation phase and its hint', () => {
+  const schema = require('../contracts/restart_preparation_v1.json');
+  const localesDir = path.resolve(__dirname, '../frontend/src/i18n/locales');
+  for (const file of fs.readdirSync(localesDir).filter(name => name.endsWith('.json'))) {
+    const locale = JSON.parse(fs.readFileSync(path.join(localesDir, file), 'utf8'));
+    for (const phase of schema.properties.phase.enum) {
+      for (const suffix of ['', 'Hint']) {
+        const key = `update.preparation.${phase}${suffix}`;
+        assert.equal(typeof locale[key], 'string', `${file}: missing ${key}`);
+        assert.ok(locale[key].trim(), `${file}: empty ${key}`);
+      }
+    }
+  }
+});

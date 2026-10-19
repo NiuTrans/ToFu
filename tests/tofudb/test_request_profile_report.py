@@ -108,3 +108,19 @@ def test_missing_or_unknown_profile_cannot_produce_an_attribution(field, value):
     document["storage_metrics"]["requestProfile"][field] = value
     with pytest.raises(ValueError):
         analyze(document)
+
+
+def test_commit_diagnostics_remain_work_and_do_not_double_count_parent():
+    document = fixture()
+    operation = document["storage_metrics"]["requestProfile"]["operations"][0]
+    operation["stages"][-1]["exclusiveNanos"] = 0
+    names = ["authority_commit_validate_rebase", "authority_commit_private_blob_publish",
+             "authority_commit_indexes", "authority_commit_outbox_capture",
+             "authority_commit_stream_prepare"]
+    operation["stages"].extend({"stage": name, "calls": 1, "inclusiveNanos": 20,
+                               "exclusiveNanos": 20} for name in names)
+    result = analyze(document)
+    assert result["wait_percent"] == pytest.approx(70)
+    assert result["operations"][0]["authority_hold_ms"] == .0001
+    stages = result["operations"][0]["largest_exclusive_stages"]
+    assert set(names).issubset({stage["stage"] for stage in stages})

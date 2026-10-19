@@ -20,9 +20,9 @@ import threading
 
 import pytest
 
-from lib.app_factory import create_base_app
+from lib.app.app_factory import create_base_app
 from lib.production_lifecycle import BootPhase, BootRunner
-from lib.http_request_lifecycle import register_request_lifecycle
+from lib.http_transport.request_lifecycle import register_request_lifecycle
 
 
 pytestmark = pytest.mark.unit
@@ -38,12 +38,12 @@ class _StubRunner:
             'phaseTotal': 9,
             'phases': [],
             'currentPhase': {
-                'index': 3, 'key': 'storage_sidecar',
+                'index': 3, 'key': 'storage_authority_sql',
                 'label': 'Storage sidecar', 'status': 'running',
                 'duration_s': None, 'error': None,
             },
             'failedPhase': {
-                'index': 3, 'key': 'storage_sidecar',
+                'index': 3, 'key': 'storage_authority_sql',
                 'label': 'Storage sidecar', 'status': 'failed',
                 'duration_s': None, 'error': 'RuntimeError: boom',
             } if self.status == 'failed' else None,
@@ -104,7 +104,7 @@ def test_boot_gate_response_carries_phase_truth():
     assert status == 503
     assert body['ok'] is False
     assert body['boot']['status'] == 'running'
-    assert body['boot']['currentPhase']['key'] == 'storage_sidecar'
+    assert body['boot']['currentPhase']['key'] == 'storage_authority_sql'
     assert body['boot']['phaseTotal'] == 9
 
 
@@ -121,7 +121,7 @@ def test_boot_gate_failed_reports_latched_error_and_retry_hint():
     assert status == 503
     assert body['ok'] is False
     assert 'server_boot_failed' in str(body)
-    assert body['boot']['failedPhase']['key'] == 'storage_sidecar'
+    assert body['boot']['failedPhase']['key'] == 'storage_authority_sql'
     assert body['boot']['retryCount'] == 1
 
 
@@ -300,7 +300,7 @@ def test_boot_endpoints_project_runner_state():
      fenced_status) = asyncio.run(call())
     assert boot_status == 200
     assert boot_body['status'] == 'failed'
-    assert boot_body['failedPhase']['key'] == 'storage_sidecar'
+    assert boot_body['failedPhase']['key'] == 'storage_authority_sql'
     assert health_boot['status'] == 'failed'
     assert health_boot['retryCount'] == 1
     assert retry_status == 200

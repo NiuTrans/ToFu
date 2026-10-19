@@ -11,7 +11,7 @@ import orjson
 import pytest
 
 from lib.storage.errors import StorageError
-from lib.storage_sidecar import task_result_field_codec as codec
+from lib.storage_authority_sql import task_result_field_codec as codec
 
 
 pytestmark = pytest.mark.unit

@@ -849,3 +849,34 @@ fn cancelled_and_contended_epochs_do_not_advance_catalog_confirmation() {
     assert_eq!(collector.payload_window_cursor, Some(cursor.wrapping_add(1)));
     assert!(!collector.payload_window_second_epoch);
 }
+
+#[test]
+fn idle_epoch_sweeps_expired_retirement_without_another_catalog_publication() {
+    let (vfs, database) = authority();
+    let (live_id, victim) = {
+        let mut guard = database.lock().unwrap();
+        let live_id = guard.commit_block_payload_for_test(b"idle-expiry-live").unwrap();
+        let dead_id = guard.write_orphan_block_for_test(b"idle-expiry-dead").unwrap();
+        guard.compact_payload_blocks_for_test(&[live_id, dead_id]).unwrap();
+        let victim = guard.engine_mut_for_test().payload_segment_references()[0].segment_id;
+        (live_id, victim)
+    };
+    let mut collector = OnlineGarbageCollector::new(test_budget());
+    run_epoch(&mut collector, &database);run_epoch(&mut collector, &database);
+    assert_eq!(metrics(&collector).total_segments_rewritten, 1);
+    let path = Path::new("/data/payload-segments").join(format!("{}.pseg", victim.simple()));
+    assert!(vfs.metadata(&path).is_ok(), "retirement must first preserve reader grace");
+    let catalog = {
+        let mut guard = database.lock().unwrap();
+        let store = guard.block_store_shared();
+        let age = crate::payload_segment::segment_retirement_delay().saturating_add(Duration::from_secs(1));
+        assert_eq!(store.payload_segment_store().unwrap().age_deferred_retirements_for_test(age).unwrap(), 1);
+        guard.engine_mut_for_test().payload_segment_references().to_vec()
+    };
+    run_epoch(&mut collector, &database);
+    assert_eq!(database.lock().unwrap().engine_mut_for_test().payload_segment_references(), catalog.as_slice(),
+        "expiry reclamation must not require another catalog publication");
+    assert_eq!(database.lock().unwrap().read_block_for_test(live_id).unwrap(), b"idle-expiry-live");
+    assert_eq!(vfs.metadata(&path).unwrap_err().kind(), io::ErrorKind::NotFound,
+        "an expired predecessor must not remain parked indefinitely on an idle authority");
+}

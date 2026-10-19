@@ -9,7 +9,7 @@ from __future__ import annotations
 from typing import Any, Callable
 
 from lib.cost import normalize_usage
-from lib.llm_errors import AbortedError
+from lib.llm.llm_errors import AbortedError
 from lib.tasks_pkg.message_input_receipts import MessageInputScopeError
 from lib.llm.stream_result import (
     ProviderStreamResult,

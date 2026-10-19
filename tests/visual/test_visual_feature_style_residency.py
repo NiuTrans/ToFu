@@ -10,6 +10,7 @@ import json
 from pathlib import Path
 
 import pytest
+from playwright.sync_api import Error as PlaywrightError
 
 pytestmark = pytest.mark.visual
 ROOT = Path(__file__).resolve().parents[2]
@@ -99,7 +100,7 @@ def test_optional_styles_follow_feature_intent_and_settings_waits_before_open(br
         for route in held:
             try:
                 route.abort()
-            except Exception:
+            except PlaywrightError:
                 pass  # Resolved routes no longer own a request.
         context.close()
 

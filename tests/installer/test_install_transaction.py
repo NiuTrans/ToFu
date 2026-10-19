@@ -91,16 +91,21 @@ def test_wheel_prefetch_locks_downloaded_artifacts_without_installing(tmp_path, 
     requirements.write_text('tofu-search==0.10.4\n')
     house = tmp_path / 'wheelhouse'
     calls = []
+    from bootstrap_pkg import python_wheels
+    monkeypatch.setattr(python_wheels, 'identity', lambda python: {
+        'python': 'cpython-312', 'platform': 'linux', 'machine': 'x86_64',
+        'tags': ['py3-none-any']})
+    monkeypatch.setattr(artifacts.shutil, 'which', lambda name: None)
     def run(command, **kwargs):
         calls.append(command)
         if '--dry-run' in command:
-            (house / 'resolution.json').write_text(json.dumps({'install': [{
+            (Path(command[command.index('--report') + 1])).write_text(json.dumps({'install': [{
                 'metadata': {'name': 'tofu-search', 'version': '0.10.4'},
                 'download_info': {'url': 'https://example.invalid/search.whl',
                                   'archive_info': {'hashes': {'sha256': 'a' * 64}}}}]}))
         else:
             assert '--require-hashes' in command and '--no-deps' in command
-            wheel(house / 'tofu_search-0.10.4-py3-none-any.whl')
+            wheel(Path(command[command.index('--wheel-dir') + 1]) / 'tofu_search-0.10.4-py3-none-any.whl')
     monkeypatch.setattr(artifacts.subprocess, 'run', run)
     lock = artifacts.prepare_python_wheels('python', requirements, house)
     assert 'tofu-search==0.10.4 --hash=sha256:' in lock.read_text()

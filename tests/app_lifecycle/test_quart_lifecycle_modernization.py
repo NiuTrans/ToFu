@@ -7,12 +7,12 @@ import threading
 
 import pytest
 
-from lib.app_lifecycle import (
+from lib.app.app_lifecycle import (
     add_shutdown_handler,
     add_startup_handler,
     register_app_lifecycle,
 )
-from lib.app_factory import create_base_app
+from lib.app.app_factory import create_base_app
 from lib.hypercorn_runtime import build_hypercorn_config
 
 

@@ -274,8 +274,23 @@ def validate_program_reference_selector(selector, arguments):
 def read_program_result(task, name, arguments, *, user_id, budget, catalog_names):
     """Read owned canonical evidence; never execute tools or recover previews."""
     def unavailable(reason):
+        next_action = (
+            'Do not re-execute the source tool to recover historical output. '
+            'This lookup made no call; absence does not prove no earlier operation ran. '
+            'Use tools.inputs to locate an accessible retained input or read '
+            'an existing artifact for historical output; never repeat completed '
+            'or uncertain effects to recover it. To obtain new data with an '
+            'authorized read tool, explicitly use tools.invoke(name,args) in a '
+            'new program. That is a new observation, not historical recovery. '
+            'Otherwise report the evidence gap and continue independent work.')
+        if reason == 'input_byte_budget':
+            next_action = (
+                'Do not re-execute the source tool. Read retained inputs in '
+                'smaller groups across programs, or page an existing artifact '
+                'through an available tool. Return only the needed findings.')
         return {'status':'error','error':{'code':'retained_result_unavailable',
-            'reason':reason,'tool':name},'output_truncated':False}
+            'reason':reason,'tool':name, 'retryable':False,
+            'next_action':next_action},'output_truncated':False}
 
     if task.get('aborted'):
         raise ProgramExecutionError('cancelled', 'Program result read cancelled')

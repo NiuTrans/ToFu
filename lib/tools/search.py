@@ -17,7 +17,7 @@ def _vertical_domains() -> list[dict]:
     Auto-detection remains available; later turns gain the runtime-derived
     explicit domain enum once the library is resident.
     """
-    from lib.search_runtime import search_library_is_loaded
+    from lib.search.search_runtime import search_library_is_loaded
     if not search_library_is_loaded():
         return []
     try:
@@ -318,7 +318,7 @@ def build_update_search_settings_tool() -> dict:
 
     STATIC description (prompt-cache contract): current values are NOT baked
     in — the model reads them by calling the tool with no arguments, which is
-    a pure read. Writes go through lib.search_settings.apply_updates
+    a pure read. Writes go through lib.search.search_settings.apply_updates
     (validate → clamp → persist → hot-reload → audit), never through raw
     file edits.
     """
@@ -336,8 +336,7 @@ def build_update_search_settings_tool() -> dict:
                 "deep=10/100k/filter+link deepening. overrides customizes a profile; "
                 "legacy concrete knobs remain accepted and are stored as overrides.\n"
                 "Trade-offs: fetch_top_n adds coverage, latency, and tokens; "
-                "fetch_timeout is seconds; max_chars_* cap search/direct/PDF text "
-                "(PDF 0=unlimited); max_download_mb is MB, not bytes; "
+                "fetch_timeout is seconds; max_download_mb is MB, not bytes; "
                 "llm_content_filter=true uses a slower selective LLM gate, false uses "
                 "faster/cheaper lexical ranking. block_domain/unblock_domain edit the "
                 "normalized fetch blocklist.\n"
@@ -357,7 +356,6 @@ def build_update_search_settings_tool() -> dict:
                         "description": "Custom values layered on the preset.",
                         "properties": {
                             "fetch_top_n": {"type": "integer"},
-                            "max_chars_search": {"type": "integer"},
                             "llm_content_filter": {"type": "boolean"},
                             "deepen_enabled": {"type": "boolean"}
                         }
@@ -369,18 +367,6 @@ def build_update_search_settings_tool() -> dict:
                     "fetch_timeout": {
                         "type": "integer",
                         "description": "Per-page fetch timeout in seconds (5-120)."
-                    },
-                    "max_chars_search": {
-                        "type": "integer",
-                        "description": "Search-page character cap (1000-500000)."
-                    },
-                    "max_chars_direct": {
-                        "type": "integer",
-                        "description": "Direct-fetch character cap (1000-1000000)."
-                    },
-                    "max_chars_pdf": {
-                        "type": "integer",
-                        "description": "PDF character cap (0=unlimited; max 2000000)."
                     },
                     "max_download_mb": {
                         "type": "integer",

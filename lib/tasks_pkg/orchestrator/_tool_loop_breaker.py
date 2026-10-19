@@ -60,11 +60,13 @@ from lib.tasks_pkg.manager import append_event
 from lib.tasks_pkg import segments
 
 from lib.tasks_pkg.context_composer import append_injection
-from lib.tool_round_replay import is_superseded_provider_attempt_round
+from lib.tool_results.tool_round_replay import is_superseded_provider_attempt_round
 
 logger = get_logger(__name__)
 
 _STATE_KEY = '_tool_loop_guard'
+
+
 _READ_TOOL = 'read_files'
 _SHELL_TOOL_NAMES = frozenset({'run_command', 'code_exec'})
 _LINE_INFINITY = 2**63 - 1
@@ -157,6 +159,24 @@ _BATCH_WRITE_RECEIPT_RE = re.compile(
     r'(?:^|\n)(?:Applied|Inserted)\s+(?P<ok>\d+)/\d+\s+edits\b',
     re.IGNORECASE,
 )
+
+
+def guide_nonretryable_tool_recovery(task, messages, *, round_num, consecutive, limit):
+    """Explain the shared failure counter before its final recovery round."""
+    if limit <= 1 or consecutive != limit - 1 or task.get('aborted'):
+        return
+    if task.get('abort_event') is not None and task['abort_event'].is_set():
+        return
+    append_injection(
+        messages, 'tool_progress',
+        'The same tool operation has been rejected repeatedly. retryable=false applies '
+        'to repeating that unchanged call; it does not stop your whole task. Read the '
+        'tool error and correct the arguments, choose another authorized approach, or '
+        'continue independent work. An optional progress message is not a prerequisite '
+        'for your assigned work. Do not invent identities, broaden permissions or repeat '
+        'uncertain side effects. Another identical non-retryable failure without progress '
+        'will stop this loop; if the task is truly blocked, report the blocker and findings.',
+        task=task, round_num=round_num, reason='nonretryable_tool_recovery')
 
 
 def _bounded_count(value: Any, maximum: int) -> int:
@@ -298,10 +318,19 @@ def reset_tool_loop_guard(task: dict[str, Any]) -> bool:
     return had_chain
 
 
-def _is_explicit_noop_row(row: dict[str, Any]) -> bool:
-    if str(row.get('toolName') or '') not in _SHELL_TOOL_NAMES:
-        return False
-    command = _parse_args(row).get('command')
+def _shell_command_argument(task: dict[str, Any], name: str) -> str | None:
+    """Read declared execution semantics, never tool-name/description guesses."""
+    document = (task.get('_toolContractDocumentsByName') or {}).get(name) or {}
+    argument = document.get('shellCommandArgument')
+    if isinstance(argument, str) and argument:
+        return argument
+    # Checkpoint compatibility for the two historical built-in display names.
+    return 'command' if name in _SHELL_TOOL_NAMES else None
+
+
+def _is_explicit_noop_row(row: dict[str, Any], task: dict[str, Any]) -> bool:
+    argument = _shell_command_argument(task, str(row.get('toolName') or ''))
+    command = _parse_args(row).get(argument) if argument else None
     return isinstance(command, str) and bool(
         _EXPLICIT_NOOP_RE.fullmatch(command.strip()))
 
@@ -385,9 +414,9 @@ def _round_action_kind(
     saw_opaque_action = False
     for row in rows:
         name = str(row.get('toolName') or '')
-        if _is_explicit_noop_row(row):
+        if _is_explicit_noop_row(row, task):
             continue
-        if name in _SHELL_TOOL_NAMES:
+        if _shell_command_argument(task, name):
             saw_opaque_action = True
             continue
         if name in write_tools:
@@ -905,7 +934,8 @@ def _shell_exit_code(row: dict[str, Any]) -> int | None:
         candidates.append(str(envelope.get('summary') or ''))
     candidates.append(_outcome_text(row))
     for text in candidates:
-        match = _EXIT_CODE_RE.search(text or '')
+        match = (_EXIT_CODE_RE.search(text or '')
+                 or re.match(r'\Aexit_code=(-?\d+)\n', text or ''))
         if match:
             return int(match.group(1))
     return None
@@ -966,11 +996,11 @@ def _classify_round_rows(
     kinds: list[str] = []
     for row in rows:
         name = str(row.get('toolName') or '')
-        if name in _SHELL_TOOL_NAMES:
-            if _is_explicit_noop_row(row):
+        if _shell_command_argument(task, name):
+            if _is_explicit_noop_row(row, task):
                 kinds.append('shell_obs')
                 continue
-            command = _parse_args(row).get('command')
+            command = _parse_args(row).get(_shell_command_argument(task, name))
             if (isinstance(command, str)
                     and _shell_command_is_observation(command)):
                 kinds.append('shell_obs')
@@ -1563,7 +1593,7 @@ def _handle_semantic_stall(
     ):
         return True
 
-    if any(_is_explicit_noop_row(row) for row in rows):
+    if any(_is_explicit_noop_row(row, task) for row in rows):
         noop_rounds = state['explicit_noop_rounds']
         noop_rounds.append(round_num)
         if (len(noop_rounds) >= max_explicit_noop_rounds

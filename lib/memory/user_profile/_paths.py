@@ -81,7 +81,7 @@ def profile_path(scope: str = '') -> str:
     prefix is preserved on the filename, and rooting under ``data/`` keeps the
     profile project-independent (follows the user across projects).
     """
-    from lib.agent_artifacts import USER_PROFILE_FILE
+    from lib.agent_loop.agent_artifacts import USER_PROFILE_FILE
     base = _server_memories_dir()
     sid = _sanitize_scope(scope)
     if not sid:
@@ -91,7 +91,7 @@ def profile_path(scope: str = '') -> str:
 
 def context_path(scope: str = '') -> str:
     """Absolute path to the structured, per-user context document."""
-    from lib.agent_artifacts import USER_CONTEXT_FILE
+    from lib.agent_loop.agent_artifacts import USER_CONTEXT_FILE
     base = _server_memories_dir()
     sid = _sanitize_scope(scope)
     if not sid:
@@ -101,7 +101,7 @@ def context_path(scope: str = '') -> str:
 
 def context_changes_path(scope: str = '') -> str:
     """Absolute path to the bounded undo log for assistant-learned context."""
-    from lib.agent_artifacts import USER_CONTEXT_CHANGES_FILE
+    from lib.agent_loop.agent_artifacts import USER_CONTEXT_CHANGES_FILE
     base = _server_memories_dir()
     sid = _sanitize_scope(scope)
     if not sid:
@@ -116,7 +116,7 @@ def _pending_path(scope: str = '') -> str:
     context.  They must follow the context's tenant boundary instead of using
     one process-global file for every authenticated user.
     """
-    from lib.agent_artifacts import USER_PROFILE_PENDING_FILE
+    from lib.agent_loop.agent_artifacts import USER_PROFILE_PENDING_FILE
     base = _server_memories_dir()
     sid = _sanitize_scope(scope)
     if not sid:

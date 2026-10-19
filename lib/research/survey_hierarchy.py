@@ -7,7 +7,7 @@ import hashlib
 import json
 from pathlib import Path
 
-from lib.llm_errors import AbortedError
+from lib.llm.llm_errors import AbortedError
 from lib.paper.contracts import PAPER_SURVEY_CONTEXT_CHARS
 
 VERSION = 'survey-hierarchy-v1'

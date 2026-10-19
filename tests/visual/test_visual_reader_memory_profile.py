@@ -25,4 +25,12 @@ def test_reader_memory_profile_pairs(browser, frontend_visual_origin, tmp_path):
     destination = os.environ.get('TOFU_READER_MEMORY_PROFILE_OUTPUT')
     if not destination:
         pytest.skip('set TOFU_READER_MEMORY_PROFILE_OUTPUT for phase-level diagnosis')
-    profile(browser, frontend_visual_origin, tmp_path, destination)
+    report = profile(browser, frontend_visual_origin, tmp_path, destination)
+    assert report['cases']
+    for case in report['cases']:
+        assert len(case['pairs']) == 3
+        for pair in case['pairs']:
+            for value in pair.values():
+                assert value['canonical_final_cpu_dom_verified']
+                assert value['phases'][-1]['phase'] == 'disposed_after_gc'
+                assert not value['phases'][-1]['fixture_mounted']

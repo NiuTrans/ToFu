@@ -56,10 +56,12 @@ def test_mcp_turn_image_renders_as_interactive_thumbnail(
     conversation_bundle: Path,
 ) -> None:
     script = f"""
-const feature = require({json.dumps(str(conversation_bundle))});
 const {{ JSDOM }} = require('jsdom');
 const dom = new JSDOM('<main><div id="block"></div></main>');
+global.window = dom.window;
+global.document = dom.window.document;
 global.Element = dom.window.Element;
+const feature = require({json.dumps(str(conversation_bundle))});
 const document = dom.window.document;
 const source = {{
   turnId:'turn-1', conversationId:'conv-a', laneId:'main', ordinal:1,

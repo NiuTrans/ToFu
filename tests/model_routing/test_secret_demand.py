@@ -5,12 +5,12 @@ import sqlite3
 import pytest
 
 from lib.model_routing import InMemoryModelRoutingRepository, OwnerBoundary
-from lib.storage_sidecar.adapters.sqlite import SQLiteSession
-from lib.storage_sidecar.operations_pkg._model_routing import (
+from lib.storage_authority_sql.adapters.sqlite import SQLiteSession
+from lib.storage_authority_sql.operations_pkg._model_routing import (
     _model_routing_secret_put, _model_routing_secret_get,
     _model_routing_secret_list, _model_routing_secret_prune,
 )
-from lib.storage_sidecar.schema import initialize_schema
+from lib.storage_authority_sql.schema import initialize_schema
 
 pytestmark = pytest.mark.unit
 

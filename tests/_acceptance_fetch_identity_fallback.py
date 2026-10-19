@@ -136,7 +136,7 @@ def main():
 
     # ── 4. chatui seam: install_search_bridge registers both providers ──
     try:
-        from lib.search_bridge import install_search_bridge
+        from lib.search.search_bridge import install_search_bridge
         install_search_bridge()
         check('chatui browser provider registered', get_browser_provider() is not None)
         check('chatui auth-source provider registered', get_auth_source_provider() is not None)

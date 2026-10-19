@@ -239,18 +239,12 @@ def test_punctuation_only_query_preserves_intent_substring_boost():
     assert _names(selected) == ['mcp__compiler__compile']
 
 
-def test_small_catalog_record_path_enforces_state_capacity(monkeypatch):
-    monkeypatch.setattr(tool_search, '_selection_state_capacity', lambda: 2)
-
-    for index in range(3):
-        record_mcp_tool_used(
-            f'small-catalog-task-{index}', 'mcp__docs__read')
-
-    assert tuple(tool_search._SELECTION_STATE) == (
-        'small-catalog-task-1',
-        'small-catalog-task-2',
-    )
-    assert tool_search.catalog_cache_stats()['tasks'] == 2
+def test_small_catalog_records_survive_unrelated_task_churn():
+    for index in range(4097):
+        record_mcp_tool_used(f'small-catalog-task-{index}', 'mcp__docs__read')
+    assert len(tool_search._SELECTION_STATE) == 4097
+    assert tool_search._SELECTION_STATE['small-catalog-task-0']['used'] == ['mcp__docs__read']
+    assert tool_search.catalog_cache_stats()['tasks'] == 4097
 
 
 def test_selection_state_expiration_only_reads_ordered_prefix(monkeypatch):
@@ -264,7 +258,6 @@ def test_selection_state_expiration_only_reads_ordered_prefix(monkeypatch):
                 touched_reads += 1
             return super().get(key, default)
 
-    monkeypatch.setattr(tool_search, '_selection_state_capacity', lambda: 4096)
     for index in range(4096):
         tool_search._SELECTION_STATE[str(index)] = CountingState(
             touched=now - 4095 + index)
@@ -279,7 +272,6 @@ def test_selection_state_expiration_removes_only_expired_prefix(monkeypatch):
     now = 100_000.0
     ttl = tool_search._STATE_TTL_SECONDS
     expiration_count = tool_search.catalog_cache_stats()['stateExpirations']
-    monkeypatch.setattr(tool_search, '_selection_state_capacity', lambda: 8)
     tool_search._SELECTION_STATE.update({
         'expired-oldest': {'touched': now - ttl - 2},
         'expired-newer': {'touched': now - ttl - 1},
@@ -361,13 +353,15 @@ def test_punctuation_variant_query_cannot_rotate_frozen_wire(monkeypatch):
     assert profile_calls == 1
 
 
-def test_recorded_tool_names_are_content_bounded():
-    for index in range(80):
+def test_recorded_tool_history_is_complete_and_unique():
+    for index in range(4097):
         record_mcp_tool_used('bounded-tools', f'mcp__docs__tool_{index}')
 
     state = tool_search._SELECTION_STATE['bounded-tools']
-    assert len(state['used']) == tool_search._MAX_STICKY_USED_TOOLS
-    assert state['used'][-1] == 'mcp__docs__tool_79'
+    record_mcp_tool_used('bounded-tools', 'mcp__docs__tool_0')
+    assert len(state['used']) == 4097
+    assert state['used'][0] == 'mcp__docs__tool_0'
+    assert state['used'][-1] == 'mcp__docs__tool_4096'
 
 
 def test_tool_search_term_budget_is_resolved_once_per_process(monkeypatch):
@@ -385,8 +379,6 @@ def test_tool_search_term_budget_is_resolved_once_per_process(monkeypatch):
     try:
         assert resource_policy.tool_search_term_cache_capacity() == 512
         assert resource_policy.tool_search_catalog_index_capacity() == 4
-        assert resource_policy.tool_search_selection_state_capacity() == 1024
-        assert resource_policy.tool_search_selection_state_capacity() == 1024
         assert calls == 1
     finally:
         resource_policy.tool_search_term_cache_capacity.cache_clear()
@@ -398,12 +390,10 @@ def test_tool_search_cache_capacities_derive_from_term_budget(monkeypatch):
     monkeypatch.setattr(
         resource_policy, 'tool_search_term_cache_capacity', lambda: 512)
     assert resource_policy.tool_search_catalog_index_capacity() == 4
-    assert resource_policy.tool_search_selection_state_capacity() == 1024
 
     monkeypatch.setattr(
         resource_policy, 'tool_search_term_cache_capacity', lambda: 4096)
     assert resource_policy.tool_search_catalog_index_capacity() == 32
-    assert resource_policy.tool_search_selection_state_capacity() == 4096
 
 
 def test_selection_is_stable_bounded_and_expands_workflow_dependencies():
@@ -834,3 +824,48 @@ def test_registry_query_respects_message_source_identity(monkeypatch, request, s
             {'role': 'user', 'content': content, **source_fields}])
     _build._build_mcp(ctx)
     assert seen == [content if genuine else 'Read the requested source']
+
+
+def test_frozen_provider_wire_survives_unrelated_live_state_churn():
+    snapshot = _large_snapshot()
+    first = select_active_mcp_tools(snapshot, task_id='oldest-live-wire',
+                                    query='hope search', limit=4)
+    for index in range(4097):
+        record_mcp_tool_used(f'unrelated-wire-{index}', 'mcp__docs__read')
+    later = select_active_mcp_tools(snapshot, task_id='oldest-live-wire',
+                                    query='edit document', limit=4)
+    assert later == first
+
+
+def test_index_reclamation_preserves_wire_and_complete_tool_history():
+    snapshot = _large_snapshot()
+    original = select_active_mcp_tools(snapshot, task_id='pressure-owned-wire',
+                                        query='hope search', limit=4)
+    for index in range(129):
+        record_mcp_tool_used('pressure-owned-wire', f'mcp__docs__tool_{index}')
+    assert tool_search.reclaim_tool_search_indexes() >= 1
+    assert tool_search.catalog_cache_stats()['indexes'] == 0
+    assert select_active_mcp_tools(snapshot, task_id='pressure-owned-wire',
+                                   query='edit document', limit=4) == original
+    assert len(tool_search._SELECTION_STATE['pressure-owned-wire']['used']) == 129
+
+
+def test_storage_free_named_conversation_uses_task_selector_without_store(monkeypatch):
+    scope=mcp_selection_scope_id(task_id='headless-unique',conv_id='named-conversation',owner_user_id=73,storage_free=True)
+    assert scope=='task:headless-unique'
+    monkeypatch.setattr('lib.storage.get_storage_client',lambda *_a,**_k:pytest.fail('headless selector read storage'))
+    assert tool_search.frozen_wire_definitions(scope) is None
+    assert mcp_selection_scope_id(task_id='root',conv_id='named-conversation',owner_user_id=73)=='conversation:73:named-conversation'
+
+
+def test_transient_task_selector_disposal_preserves_other_tasks_and_durable_scope():
+    first={'id':'headless-dispose-first','_userId':73,'_transientRuntime':True}
+    second={'id':'headless-dispose-second','_userId':73,'_transientRuntime':True}
+    scopes=[mcp_selection_scope_id(task_id=task['id'],owner_user_id=73,storage_free=True) for task in (first,second)]
+    for scope in scopes:freeze_wire_definitions(scope,[])
+    assert tool_search.release_transient_task_selection(first)
+    assert not tool_search.release_transient_task_selection(first)
+    assert tool_search.frozen_wire_definitions(scopes[0]) is None
+    assert tool_search.frozen_wire_definitions(scopes[1])==[]
+    with pytest.raises(ValueError):tool_search.release_transient_task_selection(dict(second,_transientRuntime=False))
+    assert tool_search.release_transient_task_selection(second)

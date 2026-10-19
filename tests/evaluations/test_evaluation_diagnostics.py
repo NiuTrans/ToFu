@@ -117,3 +117,40 @@ def test_registered_coverage_is_bounded_before_allocating_trials(tmp_path, monke
     monkeypatch.setattr(diagnostics, "MAX_TRIALS", 1)
     with pytest.raises(ValueError, match="coverage exceeds"):
         diagnose_run(tmp_path)
+
+
+def test_native_compaction_failure_and_actual_main_request_are_visible(tmp_path, monkeypatch):
+    trial = fixture_run(tmp_path, monkeypatch)
+    native = trial / "agent/tofu-kimi-evidence"
+    native.mkdir(parents=True)
+    (native / "runtime-evidence.json").write_text(json.dumps({"status": "error", "apiRounds": [
+        {"kind": "main", "usage": {"_request_parameters": {
+            "max_tokens": 128000, "temperature": 1.0}}},
+        {"kind": "compaction", "usage": {"_request_parameters": {"max_tokens": 2048}}},
+    ]}))
+    # The original transcript can exceed the per-file budget; only the bounded
+    # terminal slice is inspected, with its own byte offset and checksum.
+    events = native / "events.jsonl"
+    events.write_text(json.dumps({"event": {"type": "content", "text": "private" * 15000}})
+        + "\n" + json.dumps({"event": {"type": "done", "error": {
+            "kind": "internal", "retryable": False,
+            "raw": "summary_budget_exhausted private-provider-key"}}}) + "\n")
+    report = diagnose_run(tmp_path)
+    assert report["native_failure_counts"] == {"context_compaction_budget_exhausted": 1}
+    assert report["observed_request_parameters"][0]["parameters"]["max_tokens"] == 128000
+    assert len(report["observed_request_parameters"]) == 1
+    receipt = report["evidence_slices"]["jobs/run/trial/agent/tofu-kimi-evidence/events.jsonl"]
+    assert receipt["offset"] > 0 and receipt["bytes"] == 65536
+    assert "private-provider-key" not in json.dumps(report)
+    assert report["formal_score"] is None
+
+
+def test_native_tail_symlink_cannot_escape_run_root(tmp_path, monkeypatch):
+    trial = fixture_run(tmp_path, monkeypatch)
+    native = trial / "agent/tofu-kimi-evidence"
+    native.mkdir(parents=True)
+    (native / "runtime-evidence.json").write_text('{"status":"error"}')
+    (native / "events.jsonl").symlink_to(tmp_path / "manifest.json")
+    report = diagnose_run(tmp_path)
+    assert report["evidence_issue_counts"]["unreadable_or_invalid_evidence"] == 1
+    assert report["native_failure_counts"] == {}

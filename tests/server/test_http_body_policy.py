@@ -7,8 +7,8 @@ import asyncio
 import pytest
 from quart import request
 
-from lib.app_factory import create_base_app
-from lib.http_body_policy import HttpBodyPolicy, register_http_body_policy
+from lib.app.app_factory import create_base_app
+from lib.http_transport.body_policy import HttpBodyPolicy, register_http_body_policy
 
 
 pytestmark = pytest.mark.unit

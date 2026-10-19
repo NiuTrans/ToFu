@@ -73,6 +73,7 @@ from lib.agent_verdict._verdict import (  # noqa: E402,F401
     _WORKER_RATIONALIZATIONS,
     _clean_feedback,
     classify_verdict,
+    emit_native_verdict_result,
     INCOMPLETE_STOP_REASONS,
     is_incomplete_stop,
 )
@@ -128,6 +129,7 @@ __all__ = [
     'strip_machine_tokens',
     # ._verdict
     'classify_verdict',
+    'emit_native_verdict_result',
     'is_incomplete_stop',
     'INCOMPLETE_STOP_REASONS',
     # ._stuck

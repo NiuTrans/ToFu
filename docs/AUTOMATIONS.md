@@ -246,6 +246,21 @@ latency, not physical allocation or steady-state throughput. This registration r
 and disabled in production until operational actions are integrated. Tofu-DB source-matched native recovery is the primary acceptance
 path; SQL tests enforce the same storage contract.
 
+## Ordinary task-start validation cost
+
+Problem: ordinary task-start admission imported the optional full schema engine
+inside its storage transaction. Decision: `contract.py` evaluates a closed small
+vocabulary directly from `taskStartedContext`; unfamiliar semantics fall back to
+the full validator. Canonical bounds, owner checks and failure behavior remain.
+Alternatives: eager loading taxes startup; copied limits create another authority;
+a validator-only Rust port leaves the measured transport waits unresolved.
+The process caches one schema/support tuple, adds no workers or durable growth.
+Full-schema differential tests and SQLite/native automation neighbors pass.
+The 2026-10-13 HTTP cohort improves warm median time, but cold p99 is 2.072 times
+Python; separate unique-VM RSS/PSS improve. This fails default admission.
+Raw observations, source digests and scope limits are in
+`system_native_start_context_fastpath_20261013.json`.
+
 ## Step lifecycle
 
 Pure transitions accept a claim fence proved by the canonical durable worker.
@@ -348,6 +363,15 @@ Focused gates: `pytest -q tests/automations tests/scheduler/test_automation_cale
 occurrence admission, stale CAS rejection, cancellation races, lost acknowledgements,
 and exact state after authority reopen. SQL gates cover SQLite/PostgreSQL; differential gates compare cancellation and
 replay with native TofuDB, including late cancellation after run success.
+
+Project acceptance runs the native parameter of
+`tests/automations/test_project_responsibility_worker.py`, the seven native
+cases in `tests/automations/test_projects.py`, and both cases in
+`tests/storage/test_native_project_dispatch.py`. Select the candidate through
+process-only `TOFUDB_BIN`; require its actual `--build-info` source SHA to
+match the tested application source. With concurrent writers, test a frozen
+source/application snapshot and report checkout drift separately: snapshot
+acceptance is not acceptance of a subsequently changed checkout or deployment.
 A synthetic four-step run measured 6,741 definition and 7,699 run bytes in client
 JSON, with one occurrence after four concurrent deliveries. These are logical
 sizes, excluding physical disk usage; no resident concurrency is added. Atomic admission adds one canonical worker job and two small
@@ -422,8 +446,10 @@ owner/tenant target namespace. `project_ + sha256(canonical root)` provides dire
 root lookup without a second index. Registration requires read/manage scope and an
 available canonical directory; this metadata confers no filesystem write grant.
 Root/owner/tenant identity is immutable; labels and active state use revision CAS
-and exact request replay. Retirement preserves metadata and history. Root movement
-requires a new explicit binding/rule revision; general project relink does not
+and exact request replay. Retirement preserves metadata and history. Registration
+and replay use the same public record envelope (`value`, `version`,
+`updated_at_ms`) in every backend; internal record keys are not reply fields.
+Root movement requires a new explicit binding/rule revision; general project relink does not
 silently retarget a rule. Generic writes/deletes cannot forge or erase bindings.
 Retirement names the registered root without following changed filesystem aliases.
 Publication and first run admission prove an active binding in their transaction;
@@ -440,5 +466,13 @@ recovery. The default attempt query/public DTO never includes this private confi
 The task manager resolves the accepted primary root against registered bindings
 before freezing its task-start context. Unregistered roots confer no scoped
 trigger; browser project IDs and global project selection cannot confer ownership.
+
+Typed remote workspace locators remain owned by `lib/desktop/remote.py`; optional
+local automation capture leaves those ordinary chats unscoped without consulting
+local binding storage. An explicit automation project still requires its owned
+canonical local-root binding. Rejecting remote tool routing as an invalid local
+root would let optional automation metadata prevent otherwise valid chat entry.
 No pool/timer or cache eviction is added. `test_projects.py`, owned project HTTP
 contracts and conversation/task ownership tests cover replay, isolation and capture.
+
+<!-- Evidence note: former docs/evidence/ artifact snapshots cited here were retired from the tree; cited JSON artifacts remain recoverable from git history. -->

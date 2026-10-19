@@ -46,7 +46,7 @@ def _wire_t2v(monkeypatch, *, task_status='success', video_url='https://cdn.test
     def fake_post(url, **kw):
         posts.append((url, kw.get('json')))
         return _Resp(json.dumps({'id': 'task-1'}).encode())
-    monkeypatch.setattr('lib.http_client.http_post', fake_post)
+    monkeypatch.setattr('lib.http_transport.client.http_post', fake_post)
 
     def fake_get(url, **kw):
         if 'generations/task-1' in url:
@@ -54,7 +54,7 @@ def _wire_t2v(monkeypatch, *, task_status='success', video_url='https://cdn.test
             return _Resp(json.dumps(
                 {'status': task_status, 'video_url': video_url}).encode())
         return _Resp(clip, content_type=content_type)
-    monkeypatch.setattr('lib.http_client.http_get', fake_get)
+    monkeypatch.setattr('lib.http_transport.client.http_get', fake_get)
     return posts, state
 
 

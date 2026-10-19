@@ -9,6 +9,7 @@ directly from `types.ts` and never re-enter the facade.
 
 | Module | Responsibility |
 |---|---|
+| `selection-deltas.ts` | Canonical delta eligibility and presentation-input snapshots |
 | `types.ts` | Block, Turn, lane, local display and diagnostics contracts |
 | `turn-blocks.ts` | Ordered projection pipeline and weak per-Turn block memo |
 | `segment-blocks.ts` | Durable segment conversion and tool occurrence matching |

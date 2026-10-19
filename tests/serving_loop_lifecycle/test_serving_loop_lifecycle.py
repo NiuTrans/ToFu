@@ -9,7 +9,7 @@ import threading
 import pytest
 from quart.testing.app import LifespanError
 
-from lib.app_factory import create_base_app
+from lib.app.app_factory import create_base_app
 from lib.serving_loop_lifecycle import register_serving_loop_lifecycle
 
 

@@ -45,4 +45,11 @@ def test_schedulers_enter_one_child_factory_and_executor():
         names = [node.func.id for node in ast.walk(tree)
                  if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)]
         assert names.count('create_child_invocation') == 1, relative
-        assert names.count('run_child_invocation') == 1, relative
+        # Registered and transient admission use mutually exclusive branches
+        # of the same executor and the same child from the one factory above.
+        executions = [node for node in ast.walk(tree) if isinstance(node, ast.Call)
+                      and isinstance(node.func, ast.Name)
+                      and node.func.id == 'run_child_invocation']
+        assert executions, relative
+        assert all(isinstance(call.args[0], ast.Name) and call.args[0].id == 'child'
+                   for call in executions), relative

@@ -15,7 +15,7 @@ from collections.abc import Callable
 from lib.agent_core.worker_executor import RecoverableAgentExecutor
 from lib.production.runtime import ProductionRuntime
 from lib.log import get_logger
-from lib.storage.errors import StorageError
+from lib.agent_core.storage_errors import StorageError
 
 from .budget import BuildBudget, build_budget
 from .cache import LocalBuildCache
@@ -269,7 +269,7 @@ def get_scheduler() -> PreviewBuildScheduler:
     with _scheduler_lock:
         if _scheduler is None:
             from pathlib import Path
-            from lib.runtime_paths import data_root
+            from lib.runtime.runtime_paths import data_root
             from .cache import default_spool_root
             cache_root = Path(data_root()) / 'cache' / 'paper-builds'
             _scheduler = PreviewBuildScheduler(

@@ -21,15 +21,12 @@ const KEY_ID_BYTES: usize = 8;
 const TAG_BYTES: usize = 16;
 const FIXED_BYTES: usize = 8 + 4 + 8 + 8 + 8 + 4 + 4 + 2 + 2 + 2 + 2 + 32 + 8 + 8 + 12 + 4;
 const AAD_DOMAIN: &[u8] = b"tofu-db:logical-outbox:aes-256-gcm:v1\0";
-pub const MAX_LOGICAL_PAYLOAD_BYTES: usize = 4 * 1024 * 1024;
+// The v1 ciphertext and stored-record length fields are u32. These are
+// representation bounds, not a configured resource admission quota.
+pub const MAX_LOGICAL_PAYLOAD_BYTES: usize = u32::MAX as usize - TAG_BYTES;
 pub const MAX_REQUEST_ID_BYTES: usize = 128;
 pub const MAX_INLINE_LOGICAL_OUTBOX_BYTES: usize = 4 * 1024;
-pub const MAX_ENCODED_LOGICAL_OUTBOX_BYTES: usize = MAX_LOGICAL_PAYLOAD_BYTES
-    + FIXED_BYTES
-    + MAX_OPERATION_BYTES
-    + MAX_REQUEST_ID_BYTES
-    + MAX_RECEIPT_COMMAND_ID_BYTES
-    + TAG_BYTES;
+pub const MAX_ENCODED_LOGICAL_OUTBOX_BYTES: usize = u32::MAX as usize;
 const STORED_HEADER_BYTES: usize = 8 + 4 + 1 + 3 + 4;
 const BLOB_REFERENCE_BYTES: usize = 32 + 32 + 8;
 const FAMILY_HEADER_BYTES: usize = 8 + 4 + 8 + 8 + 8 + 32 + 4;
@@ -190,7 +187,7 @@ impl LogicalOutboxCapture {
     ) -> io::Result<(LogicalOutboxIdentity, Vec<u8>)> {
         if self.clear_payload.is_empty() || self.clear_payload.len() > MAX_LOGICAL_PAYLOAD_BYTES {
             return Err(invalid_input(
-                "logical outbox payload is empty or unbounded",
+                "logical outbox payload is empty or cannot fit its ciphertext length field",
             ));
         }
         let identity = LogicalOutboxIdentity {
@@ -253,7 +250,7 @@ impl LogicalOutboxCipher {
     ) -> io::Result<SealedLogicalOutboxRecord> {
         if clear_payload.is_empty() || clear_payload.len() > MAX_LOGICAL_PAYLOAD_BYTES {
             return Err(invalid_input(
-                "logical outbox payload is empty or unbounded",
+                "logical outbox payload is empty or cannot fit its ciphertext length field",
             ));
         }
         let event_id = identity.event_id()?;
@@ -655,9 +652,7 @@ mod tests {
         assert_eq!(cipher.open(&decoded).unwrap(), secret);
         assert!(encoded.starts_with(MAGIC));
         assert!(!encoded.windows(secret.len()).any(|window| window == secret));
-        assert!(cipher
-            .seal_with_nonce(identity(), &vec![0; MAX_LOGICAL_PAYLOAD_BYTES + 1], [3; 12])
-            .is_err());
+        assert!(cipher.seal_with_nonce(identity(), &[], [3; 12]).is_err());
         for length in 0..encoded.len() {
             assert!(SealedLogicalOutboxRecord::decode(&encoded[..length]).is_err());
         }
@@ -752,5 +747,28 @@ mod tests {
         let mut trailing = oversized_blob.encode().unwrap();
         trailing.push(0);
         assert!(StoredLogicalOutboxRecord::decode(&trailing).is_err());
+    }
+}
+
+
+#[cfg(test)]
+mod demand_payload_tests {
+    use super::*;
+    #[test]
+    fn payload_above_former_four_mib_quota_round_trips_and_authenticates() {
+        let identity = LogicalOutboxIdentity {
+            sequence: 1, tenant_id: 7, owner_user_id: 11,
+            schema_version: 1, registry_version: 1,
+            operation: "model_routing.commit".into(), request_id: "large".into(),
+            request_digest: [5; 32], command_id: Some("large-command".into()),
+            committed_at_ms: 1,
+        };
+        let payload = vec![91; 9 * 1024 * 1024];
+        let cipher = LogicalOutboxCipher::new(&[7; 32]);
+        let record = cipher.seal(identity, &payload).unwrap();
+        let encoded = record.encode().unwrap();
+        let restored = SealedLogicalOutboxRecord::decode(&encoded).unwrap();
+        assert_eq!(cipher.open(&restored).unwrap(), payload);
+        assert!(LogicalOutboxCipher::new(&[8; 32]).open(&restored).is_err());
     }
 }

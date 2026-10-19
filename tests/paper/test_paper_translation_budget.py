@@ -152,7 +152,7 @@ def test_translation_storage_enforces_utf8_budget_and_bounds_legacy_reads(
     monkeypatch,
 ):
     from lib.storage.errors import StorageError
-    import lib.storage_sidecar.operations_pkg._papers as operations
+    import lib.storage_authority_sql.operations_pkg._papers as operations
 
     class _Session:
         def __init__(self):

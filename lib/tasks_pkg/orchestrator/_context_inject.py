@@ -121,6 +121,9 @@ def inject_context_and_emit_chips(
     task['_contextToolNames'] = sorted(_tool_names)
     task['_contextHasRealTools'] = bool(has_real_tools)
 
+    task['_projectGuidanceOwnsRoot'] = bool(
+        project_enabled and project_path and not cfg.get('project_remote'))
+
     # 3. Do the injection (mutates messages in place; stashes chip metadata
     #    on task).
     compose_task_context(
@@ -138,6 +141,10 @@ def inject_context_and_emit_chips(
         tool_names=_tool_names or None,
         disabled_blocks=disabled_context_blocks(cfg),
     )
+
+    if task['_projectGuidanceOwnsRoot']:
+        from lib.tasks_pkg.project_guidance import refresh_project_guidance
+        refresh_project_guidance(task, messages, model=model)
 
     # 4. Preferences-applied chip.
     _applied_prefs = task.get('_appliedPreferences')

@@ -1,7 +1,7 @@
 //! Bounded authority-to-search projection maintenance round.
 //! Source pages are read from a batch-scoped pinned read replica, never
-//! under the foreground authority mutex; only the exact-token acknowledge
-//! touches the writer (2026-09-22 FUSE: one cold source page had
+//! under the foreground authority mutex. Activation/backfill commits and the
+//! exact-token acknowledge use the writer (2026-09-22 FUSE: one cold source page had
 //! serialized swarm writers for ~0.5 s).
 //!
 //! The worker holds an immutable MVCC source transaction across pages on the
@@ -104,7 +104,9 @@ fn process_conversation(
     mut source: AuthorityTransaction,
     metrics: &mut TurnSearchWorkerMetrics,
     replica: &AuthorityDatabase,
+    should_stop: &impl Fn() -> bool,
 ) -> io::Result<bool> {
+    if should_stop() { return Ok(false); }
     // Source reads run on the pinned read replica: they never hold the
     // foreground authority mutex, so a slow-mount page read can never
     // serialize a foreground writer behind it (2026-09-22 FUSE bench:
@@ -153,6 +155,10 @@ fn process_conversation(
     let mut archives = false;
     let mut source_complete = false;
     for _ in 0..MAX_SOURCE_PAGES {
+        // Only stop between complete storage operations. The unpublished
+        // generation and its exact dirty tokens remain retryable; never ACK
+        // or publish a truncated source as complete during shutdown.
+        if should_stop() { return Ok(false); }
         let page = if archives {
             crate::compaction_archive::search_source::page(
                 replica,
@@ -179,6 +185,7 @@ fn process_conversation(
         }
         let documents = page.turns;
         for batch in documents.chunks(crate::generated_conversation_search::SOURCE_PAGE_ROWS) {
+            if should_stop() { return Ok(false); }
             projection_lock(projection)?.append_conversation_page(
                 scope.tenant_id,
                 scope.owner_user_id,
@@ -206,6 +213,7 @@ fn process_conversation(
             break;
         }
     }
+    if should_stop() { return Ok(false); }
     if !source_complete {
         // The page budget spans both sources, including the final archive
         // probe. Publish explicitly partial coverage rather than retrying an
@@ -264,6 +272,18 @@ pub(crate) fn process_turn_search_batch_with_pressure(
     })
 }
 
+pub(crate) fn process_turn_search_batch_with_pressure_and_stop(
+    authority: &Arc<Mutex<AuthorityDatabase>>,
+    projection: &Arc<Mutex<TurnSearchProjection>>,
+    scope: crate::maintenance::MaintenanceScope,
+    hot_sample: &mut crate::fsync_stats::ForegroundSampler,
+    should_stop: impl Fn() -> bool,
+) -> io::Result<TurnSearchWorkerMetrics> {
+    process_turn_search_batch_with_control(authority, projection, scope,
+        || crate::fsync_stats::defer_search_projection(hot_sample),
+        wait_for_authority_durability, should_stop)
+}
+
 fn wait_for_authority_durability(
     witness: Option<(crate::wal::WalBarrier, crate::wal::WalWitness)>,
 ) -> io::Result<()> {
@@ -295,15 +315,26 @@ fn process_turn_search_batch_with_durability(
     authority: &Arc<Mutex<AuthorityDatabase>>,
     projection: &Arc<Mutex<TurnSearchProjection>>,
     scope: crate::maintenance::MaintenanceScope,
-    mut defer: impl FnMut() -> bool,
+    defer: impl FnMut() -> bool,
     wait: impl FnOnce(Option<(crate::wal::WalBarrier, crate::wal::WalWitness)>) -> io::Result<()>,
 ) -> io::Result<TurnSearchWorkerMetrics> {
+    process_turn_search_batch_with_control(authority, projection, scope, defer, wait, || false)
+}
+
+fn process_turn_search_batch_with_control(
+    authority: &Arc<Mutex<AuthorityDatabase>>,
+    projection: &Arc<Mutex<TurnSearchProjection>>,
+    scope: crate::maintenance::MaintenanceScope,
+    mut defer: impl FnMut() -> bool,
+    wait: impl FnOnce(Option<(crate::wal::WalBarrier, crate::wal::WalWitness)>) -> io::Result<()>,
+    should_stop: impl Fn() -> bool,
+) -> io::Result<TurnSearchWorkerMetrics> {
     let mut metrics = TurnSearchWorkerMetrics::default();
-    let Some(mut database) = try_authority(authority, &mut metrics)? else {
+    if should_stop() { return Ok(metrics); }
+    let Some(database) = try_authority(authority, &mut metrics)? else {
         return Ok(metrics);
     };
-    let search_hold = crate::authority_watch::AuthorityHoldTimer::probe("search.prepare");
-    let activation_hold = crate::authority_watch::AuthorityHoldTimer::probe("search.activation");
+    let capture_hold = crate::authority_watch::AuthorityHoldTimer::probe("search.activation-capture");
     // Fail closed before touching either store if deferred WAL durability has
     // no healthy coordinator. Capture a fresh covering witness after commits.
     database.wal_durability_witness()?;
@@ -314,12 +345,38 @@ fn process_turn_search_batch_with_durability(
         &mut activation_read,
     )?;
     drop(activation_read);
+    drop(capture_hold);
+    drop(database);
+    // The target has its own durable store. Never hold the foreground writer
+    // across its read/commit I/O. Keep the existing source-key read boundary;
+    // reacquisition validates its identity/version before any source mutation.
     let (activation, needs_acknowledgement) = projection_lock(projection)?.prepare_owner(
         scope.tenant_id,
         scope.owner_user_id,
         source_uuid,
         authority_activation,
     )?;
+    if should_stop() { return Ok(metrics); }
+    let Some(mut database) = try_authority(authority, &mut metrics)? else {
+        return Ok(metrics);
+    };
+    let search_hold = crate::authority_watch::AuthorityHoldTimer::probe("search.prepare");
+    let activation_hold = crate::authority_watch::AuthorityHoldTimer::probe("search.activation");
+    database.wal_durability_witness()?;
+    if database.authority_uuid() != source_uuid {
+        metrics.foreground_deferrals += 1;
+        return Ok(metrics);
+    }
+    let mut activation_read = database.begin(scope.tenant_id, scope.owner_user_id)?;
+    let current_activation = crate::semantic_executor::search_backfill::load_activation(
+        &database, &mut activation_read)?;
+    drop(activation_read);
+    if current_activation != authority_activation {
+        // A pending target remains invisible and retryable. It must never
+        // overwrite or acknowledge a newer source activation/authority.
+        metrics.foreground_deferrals += 1;
+        return Ok(metrics);
+    }
     if needs_acknowledgement {
         let mut transaction = database.begin(scope.tenant_id, scope.owner_user_id)?;
         if crate::semantic_executor::search_backfill::activate(
@@ -335,20 +392,19 @@ fn process_turn_search_batch_with_durability(
     // fresh projection first drains every existing token and then invalidates
     // the same corpus again. While backfill is pending, leave tokens beyond
     // its cursor queued so each source header is scheduled before rebuilding.
-    {
+    let checkpoint = {
         let _hold = crate::authority_watch::AuthorityHoldTimer::probe("search.backfill");
         crate::semantic_executor::search_backfill::consume_page(
-            &mut database, scope.tenant_id, scope.owner_user_id)?;
-    }
+            &mut database, scope.tenant_id, scope.owner_user_id)?.checkpoint
+    };
     let mut dirty = {
         let _hold = crate::authority_watch::AuthorityHoldTimer::probe("search.dirty-list");
         search_dirty::list(&database, scope.tenant_id, scope.owner_user_id)?
     };
-    let mut coverage_read = database.begin(scope.tenant_id, scope.owner_user_id)?;
-    let checkpoint =
-        crate::semantic_executor::search_backfill::load(&database, &mut coverage_read)?;
+    // consume_page returned the exact read/committed state. The writer hold
+    // is uninterrupted and dirty-list is read-only, so another checkpoint
+    // transaction adds no validation; the WAL publication fence stays below.
     let indexed = dirty.is_empty() && checkpoint.as_ref().is_some_and(|state| state.complete);
-    drop(coverage_read);
     if let Some(checkpoint) = checkpoint.filter(|state| !state.complete) {
         dirty.retain(|item| item.conversation_id.as_bytes() <= checkpoint.cursor.as_slice());
     }
@@ -422,6 +478,7 @@ fn process_turn_search_batch_with_durability(
             source,
             &mut metrics,
             &replica,
+            &should_stop,
         )? {
             break;
         }
@@ -430,11 +487,67 @@ fn process_turn_search_batch_with_durability(
 }
 
 #[cfg(test)]
+#[path = "turn_search_worker_activation_tests.rs"]
+mod activation_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::conversation_header::{CreateRequest, DeleteRequest, TurnDefaults};
     use crate::turn::AppendSettledRequest;
     use crate::turn_search_projection::ConversationSearchRequest;
+
+    #[test]
+    fn shutdown_stops_between_source_pages_without_ack_and_retry_finishes() {
+        use std::cell::Cell;
+        let source_dir = tempfile::tempdir().unwrap();
+        let target_dir = tempfile::tempdir().unwrap();
+        let mut database = AuthorityDatabase::initialize(source_dir.path()).unwrap();
+        let mut transaction = database.begin_with_identity_claim_scopes(7, 11).unwrap();
+        crate::conversation_header::create(&database, &mut transaction, &CreateRequest {
+            conversation_id: "conversation".into(), title: "shutdownneedle".into(),
+            settings_json: b"{}".to_vec(), created_at_ms: 100,
+            updated_at_ms: 100, committed_at_ms: 100,
+        }).unwrap();
+        database.commit(transaction).unwrap();
+        append_turn(&mut database, "one", "assistant", "main", "completed",
+            serde_json::json!({"content": "shutdownneedle"}), 101);
+        let authority = Arc::new(Mutex::new(database));
+        let projection = Arc::new(Mutex::new(
+            TurnSearchProjection::initialize(target_dir.path(), 16 * 1024 * 1024).unwrap()));
+        let scope = crate::maintenance::MaintenanceScope::new(7, 11).unwrap();
+        let checkpoints = Cell::new(0);
+        // First source page is complete, but the archive source still needs
+        // its probe. Stop there, before publish or exact-token ACK.
+        let interrupted = process_turn_search_batch_with_control(
+            &authority, &projection, scope, || false, wait_for_authority_durability,
+            || { let n = checkpoints.get() + 1; checkpoints.set(n); n >= 6 },
+        ).unwrap();
+        assert_eq!(interrupted.source_pages, 1);
+        assert_eq!(interrupted.rebuilt_conversations, 0);
+        assert_eq!(interrupted.acknowledged_tokens, 0);
+        assert!(search(&projection, "shutdownneedle").is_empty());
+        {
+            let database = authority.lock().unwrap();
+            assert!(!search_dirty::list(&database, 7, 11).unwrap().is_empty());
+        }
+        // A process replacement must also recover the unpublished staging
+        // state and exact dirty tokens, not just an in-memory retry.
+        drop(authority);
+        drop(projection);
+        let authority = Arc::new(Mutex::new(AuthorityDatabase::open(source_dir.path()).unwrap()));
+        let projection = Arc::new(Mutex::new(TurnSearchProjection::open(target_dir.path(), 16 * 1024 * 1024).unwrap()));
+        let finished = process_turn_search_batch_with_admission(
+            &authority, &projection, scope, || false).unwrap();
+        assert_eq!(finished.rebuilt_conversations, 1);
+        assert!(finished.acknowledged_tokens > 0);
+        assert_eq!(search(&projection, "shutdownneedle").len(), 1);
+        // No new work is admitted once stop is already set.
+        let stopped = process_turn_search_batch_with_control(
+            &authority, &projection, scope, || false, wait_for_authority_durability,
+            || true).unwrap();
+        assert_eq!(stopped, TurnSearchWorkerMetrics::default());
+    }
 
     #[test]
     fn activation_ack_waits_off_mutex_for_durable_authority_and_survives_rotation() {
@@ -1380,6 +1493,7 @@ mod tests {
                     source,
                     &mut retry_metrics,
                     &replica,
+                    &|| false,
                 )
                 .unwrap());
                 assert_eq!(retry_metrics.rebuilt_conversations, 0);
@@ -1634,6 +1748,7 @@ mod tests {
             source,
             &mut metrics,
             &replica,
+            &|| false,
         )
         .unwrap();
         assert!(!done, "the acknowledge defers while the writer is held");
@@ -1653,6 +1768,7 @@ mod tests {
             source,
             &mut metrics,
             &replica,
+            &|| false,
         )
         .unwrap();
         assert!(done);

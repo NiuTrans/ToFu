@@ -226,7 +226,7 @@ def test_fill_document_skips_priced_rows_and_zero_fills():
 
 def test_route_refresh_fills_authority_and_get_reports(monkeypatch):
     import lib.pricing
-    import lib.http_client
+    import lib.http_transport.client
     from routes.api_v1 import model_intelligence as route
 
     repository = InMemoryModelRoutingRepository()
@@ -244,7 +244,7 @@ def test_route_refresh_fills_authority_and_get_reports(monkeypatch):
     }]
     repository.compare_and_swap(boundary, document, expected_revision=0)
     monkeypatch.setattr(route, "_repository", lambda: repository)
-    monkeypatch.setattr(lib.http_client, "http_get", _fetcher)
+    monkeypatch.setattr(lib.http_transport.client, "http_get", _fetcher)
     monkeypatch.setattr(lib.pricing, "pricing_for_model", lambda _model_id: None)
 
     app = Quart(__name__, static_folder=None)

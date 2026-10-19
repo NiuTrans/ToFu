@@ -36,11 +36,26 @@ when the cached quota snapshot is stale or missing, kicks one singleflight
 `/wham/usage` refresh so opening Settings populates the subscription-usage card
 real-time without requiring a model turn first.
 
-The reconstructible mode-0600 cache contains no token or raw account ID, keeps
-at most 16 owner/account rows, uses a 30-minute success TTL, permits two refresh
-threads, and bounds failure retry. Network I/O is singleflight per owner/account
-on 16 identity-hashed lock stripes without holding the cache write lock, so
-unrelated owners refresh concurrently and logout avoids upstream blocking.
+The mode-0600 owner/account store contains no token or raw account ID and has
+no row-count admission/truncation. Passive observations use a 30-minute freshness
+TTL and actual observation lifecycle; old unprotected none/unknown rows reclaim
+after 24 hours on a refresh/command write, and expired positive observations
+reclaim by their reported expiry. Unexpired positive/notification evidence and
+pending redemption records remain until resolution or scoped logout. It bounds retry
+after actual upstream failures. Independent identities start refresh threads on
+demand without a process count quota; repeated requests for one identity reuse
+its live claim through completion publication. Failed/partial startup releases
+the claim without querying or publishing before activation succeeds. Refresh
+and redemption share the exact opaque owner/account lock in
+`lib/oauth/identity_flight.py`. Network work holds its active file; one persistent
+registry guard covers only inode creation/reclamation. Waiters release failed
+nonblocking probes, so completed files can be unlinked without splitting a lock
+between old/new inodes. Crash-orphan active files are reaped by a fresh kernel
+lock probe, without an age lease. Forked children close inherited descriptors
+and reset thread-lock pools. POSIX locking failures fail closed; platforms with
+no fcntl retain the existing process-local behavior. All cooperating processes
+must use this lock protocol; legacy stripe files are not unlinked by it.
+Logout remains independent of upstream network waits.
 Logout in `lib/oauth/manager/_exchange.py` clears passive quota and the known
 account projection only after credential deletion; absent identity never
 broad-clears the cache.
@@ -64,8 +79,9 @@ credit details under the owner/account refresh lock, spends the
 soonest-expiring available credit, and persists its `redeem_request_id` in
 the cache BEFORE the upstream POST so a retry of an ambiguous outcome
 (transport error or non-definitive status) reuses the same idempotency key
-instead of risking a second spend; the record is retained for 24 hours and
-only reused for the same credit. Definitive outcomes — success
+instead of risking a second spend. Pending evidence survives count churn and
+observation expiry until explicit resolution/scoped logout; the existing request
+ID reuse rule still applies only to the same credit within its 24-hour window. Definitive outcomes — success
 (`code=reset`), no-spend codes (`nothing_to_reset`/`already_redeemed`), and
 4xx rejections — clear the record. Every attempt ends with a forced refresh
 plus owner-scoped push so the card reconciles immediately, and the response

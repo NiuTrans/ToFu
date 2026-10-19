@@ -13,7 +13,7 @@ pytestmark = pytest.mark.unit
 
 def test_sidecar_projection_selects_only_requested_owner_papers():
     from lib.storage.errors import StorageError
-    from lib.storage_sidecar import operations
+    from lib.storage_authority_sql import operations
 
     captured = {}
 
@@ -52,7 +52,7 @@ def test_sidecar_projection_selects_only_requested_owner_papers():
 
 
 def test_sidecar_identity_projection_bounds_text_before_owner_result():
-    from lib.storage_sidecar import operations
+    from lib.storage_authority_sql import operations
 
     calls = []
 
@@ -80,7 +80,7 @@ def test_sidecar_identity_projection_bounds_text_before_owner_result():
 
 
 def test_bookshelf_summaries_are_light_and_compute_report_presence_once():
-    from lib.storage_sidecar import operations
+    from lib.storage_authority_sql import operations
 
     captured = {}
 
@@ -111,7 +111,7 @@ def test_bookshelf_summaries_are_light_and_compute_report_presence_once():
 
 
 def test_compatibility_bookshelf_list_keeps_one_statement_full_projection():
-    from lib.storage_sidecar import operations
+    from lib.storage_authority_sql import operations
 
     class Session:
         def fetch_all(self, _sql, args):
@@ -134,7 +134,7 @@ def test_compatibility_bookshelf_list_keeps_one_statement_full_projection():
 
 
 def test_bookshelf_detail_reads_one_owned_complete_row():
-    from lib.storage_sidecar import operations
+    from lib.storage_authority_sql import operations
 
     captured = {}
 
@@ -165,7 +165,7 @@ def test_bookshelf_detail_reads_one_owned_complete_row():
 
 
 def test_reader_detail_never_selects_or_decodes_legacy_babel_cache():
-    from lib.storage_sidecar import operations
+    from lib.storage_authority_sql import operations
 
     captured = {}
 
@@ -192,7 +192,7 @@ def test_reader_detail_never_selects_or_decodes_legacy_babel_cache():
 
 
 def test_sidecar_report_excerpt_omits_unneeded_large_metadata():
-    from lib.storage_sidecar import operations
+    from lib.storage_authority_sql import operations
 
     captured = {}
 
@@ -216,7 +216,7 @@ def test_sidecar_report_excerpt_omits_unneeded_large_metadata():
 
 
 def test_sidecar_report_excerpts_batch_is_owner_scoped_and_text_only():
-    from lib.storage_sidecar import operations
+    from lib.storage_authority_sql import operations
 
     captured = {}
 
@@ -245,8 +245,8 @@ def test_sidecar_report_excerpts_batch_is_owner_scoped_and_text_only():
 
 
 def test_sidecar_report_reopen_is_one_owner_scoped_query(monkeypatch):
-    from lib.storage_sidecar import operations
-    from lib.storage_sidecar.operations_pkg import _papers
+    from lib.storage_authority_sql import operations
+    from lib.storage_authority_sql.operations_pkg import _papers
 
     calls = []
     original_load = _papers._load

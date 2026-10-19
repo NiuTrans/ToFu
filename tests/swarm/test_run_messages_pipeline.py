@@ -102,7 +102,7 @@ def test_provider_failure_does_not_ack_input(runtime, monkeypatch):
 
 
 def test_cancellation_does_not_ack_or_create_a_second_child(runtime, monkeypatch):
-    from lib.llm_errors import AbortedError
+    from lib.llm.llm_errors import AbortedError
     scripted_provider(monkeypatch, runtime, [AbortedError('operator Stop')])
     repo = install_mailbox(runtime, monkeypatch)
     repo.submit(content='Keep evidence', kind='steer', key='abort', sender_task_id=runtime.parent['id'])

@@ -22,10 +22,10 @@ from lib.paper.builds.compiler import artifact_metadata
 from lib.paper.builds.contract import limit
 from lib.paper.builds.errors import BuildError
 from lib.storage.errors import StorageError
-from lib.storage_sidecar.operations_pkg import _paper_artifacts as artifacts
+from lib.storage_authority_sql.operations_pkg import _paper_artifacts as artifacts
 from tests.api import test_api_v1_paper_builds as api_support
 from tests.paper import test_paper_build_retention_faults as retention_support
-from tests.storage import test_storage_sidecar_contract as sidecar_support
+from tests.storage import test_storage_authority_sql_contract as sidecar_support
 from tests.paper.test_paper_build_cache import _build, _cache
 from tests.paper.test_paper_build_retention import _call, _pin, _repository
 from tests.support.envelope import v1_get_json

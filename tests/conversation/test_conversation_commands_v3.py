@@ -1215,3 +1215,40 @@ def test_oversize_turn_is_actionable_413(
     assert "Remove a large inline attachment" in body["error"]
     assert body["storageCode"] == "storage_payload_too_large"
     assert body["operationId"] == "storage-op-oversize"
+
+
+def test_chat_acceptance_freezes_private_workspace_without_persisting_attachment(
+    flask_client, conversation_command_db, monkeypatch, tmp_path,
+):
+    import lib.conversation_sync.task_start as task_start
+    import lib.conversation_sync.workspace as workspace
+    from lib.turn_lifecycle import get_attempt
+    from lib.conversations.repository import get_conversation
+
+    monkeypatch.setattr(workspace, 'get_runtime_base', lambda: str(tmp_path))
+    captured = []
+    def start(conversation_id, config, **kwargs):
+        captured.append(dict(config))
+        kwargs['on_task_registered']('automatic-workspace-task')
+        return 'automatic-workspace-task', None
+    monkeypatch.setattr(task_start, 'start_conversation_attempt_executor', start)
+    body = {'commandId': 'automatic-workspace-command',
+            'config': {'chatMode': 'chat', 'projectPath': '',
+                       'projectPaths': [], 'readOnlyPaths': [],
+                       '_conversationWorkspace': {'path': '/foreign'}},
+            'inputTurn': {'content': 'create a demo'}}
+    response = flask_client.post(_create_path(), json=body)
+    assert response.status_code == 200
+    attempt = response.get_json()['attempt']
+    frozen = get_attempt(attempt['attemptId'], user_id=1,
+                         include_execution_config=True)['config']
+    assert frozen['_conversationWorkspace']['ownerUserId'] == 1
+    assert frozen['_conversationWorkspace']['conversationId'] == CONVERSATION_ID
+    assert frozen['projectPath'] == captured[0]['projectPath']
+    assert not __import__('pathlib').Path(frozen['projectPath']).exists()
+    saved = get_conversation(CONVERSATION_ID, user_id=1, include_messages=False)
+    assert not saved.metadata.get('settings', {}).get('projectPath')
+    replay = flask_client.post(_create_path(), json=body)
+    assert replay.status_code == 200
+    assert replay.get_json()['attempt']['attemptId'] == attempt['attemptId']
+    assert len(captured) == 1

@@ -185,7 +185,12 @@ function _recoverSwarmAgents(round, allRounds) {
          master._snapshot_tool_timeline). Without this the reloaded card
          showed no tools/timeline even though the agent used them live. */
       const tools = Array.isArray(a.tools) ? a.tools : [];
-      const toolCalls = Array.isArray(a.toolCalls) ? a.toolCalls : [];
+      /* The dock sends normalized snapshot agents back through this adapter;
+         their wire aliases have already become `_toolCalls`/`_toolCallsOmitted`. */
+      const toolCalls = Array.isArray(a.toolCalls) ? a.toolCalls
+        : (Array.isArray(a._toolCalls) ? a._toolCalls : []);
+      const toolCallsOmitted = typeof a.toolCallsOmitted === "number"
+        ? a.toolCallsOmitted : a._toolCallsOmitted;
       /* Restore the live stopwatch's anchor (backend `startedAt`, epoch ms
          — see master._build_agent_snapshot). The per-agent timer renders only
          while the agent is running AND has a `_startedAt`; that field used to
@@ -215,6 +220,8 @@ function _recoverSwarmAgents(round, allRounds) {
       }
       return {
         id: a.id || "",
+        executionTaskId: a.executionTaskId,
+        conversationId: a.conversationId,
         role: a.role || "agent",
         model: a.model || "",
         objective: a.objective || "",
@@ -228,10 +235,13 @@ function _recoverSwarmAgents(round, allRounds) {
         modifiedFiles: typeof a.modifiedFiles === "number" ? a.modifiedFiles : 0,
         error: swarmFailureReason(a.error),
         failure: a.failure || a.error,
+
+        messageReceipts: a.messageReceipts,
+        messageReceiptsVersion: a.messageReceiptsVersion,
         tools,
         _toolCalls: toolCalls,
-        _toolCallsOmitted: (typeof a.toolCallsOmitted === "number" && a.toolCallsOmitted > 0)
-          ? a.toolCallsOmitted : 0,
+        _toolCallsOmitted: (typeof toolCallsOmitted === "number" && toolCallsOmitted > 0)
+          ? toolCallsOmitted : 0,
         _startedAt: startedAt || undefined,
         /* Stall evidence persisted by the backend (master._build_agent_snapshot)
            — without carrying it here a reloaded stalled card loses its
@@ -616,11 +626,14 @@ function _buildSwarmPanelHTML(round, allRounds) {
       // Per-tool-call execution timeline — same look as ptool-panel rows.
       // Each row has a status dot, tool name, args brief, and elapsed.
       // Click a row to expand its preview/error.
-      const timelineCalls = Array.isArray(a._toolCalls) ? a._toolCalls : [];
+      const projectedCalls = projectAgentTimeline(a, t);
+      const timelineCalls = projectedCalls.filter(call => call.entryKind !== 'message_receipt');
+      const messageCalls = projectedCalls.filter(call => call.entryKind === 'message_receipt');
       const omittedToolCalls = Number(a._toolCallsOmitted || 0);
-      if (timelineCalls.length > 0 || omittedToolCalls > 0) {
-        const rowsHTML = timelineCalls.map((c, index) => {
-          const dot = c.status === "running" ? '<span class="sw-tl-dot sw-tl-running"></span>'
+      if (timelineCalls.length > 0 || messageCalls.length > 0 || omittedToolCalls > 0) {
+        const renderCall = (c, index) => {
+          const dot = c.entryKind === 'message_receipt' ? '<span class="sw-tl-dot"></span>'
+                    : c.status === "running" ? '<span class="sw-tl-dot sw-tl-running"></span>'
                     : c.status === "failed"  ? `<span class="sw-tl-dot sw-tl-failed">${_SW_STATUS_SVG.failed}</span>`
                     :                          `<span class="sw-tl-dot sw-tl-done">${_SW_STATUS_SVG.done}</span>`;
           const td = _TOOL_DISPLAY[c.toolName];
@@ -638,11 +651,11 @@ function _buildSwarmPanelHTML(round, allRounds) {
             ? `<div class="sw-tl-truncated">${escapeHtml(t("swarm.toolPreviewTruncated", { count: omittedChars.toLocaleString() }))}</div>`
             : "";
           const expandable = !!detail || detailTruncated;
-          const latest = index === timelineCalls.length - 1;
-          const toggle = expandable && !latest;
+          const latest = c.entryKind !== 'message_receipt' && index === timelineCalls.length - 1;
+          const toggle = expandable && (!latest || c.entryKind === 'message_receipt');
           const rowTag = toggle ? 'details' : 'div';
           const lineTag = toggle ? 'summary' : 'div';
-          const row = `<${rowTag} class="sw-tl-row sw-tl-${escapeHtml(c.status || 'unknown')}${toggle ? ' sw-tl-expandable' : ''}" data-call-id="${escapeHtml(c.callId || '')}">` +
+          const row = `<${rowTag} class="sw-tl-row sw-tl-${escapeHtml(c.entryKind === 'message_receipt' ? 'receipt' : c.status || 'unknown')}${toggle ? ' sw-tl-expandable' : ''}" data-call-id="${escapeHtml(c.callId || '')}">` +
               `<${lineTag} class="sw-tl-line">` +
                 dot +
                 `<span class="sw-tl-icon">${icon}</span>` +
@@ -655,15 +668,18 @@ function _buildSwarmPanelHTML(round, allRounds) {
                 ? `<div class="sw-tl-detail${detailIsError ? ' sw-tl-detail-error' : ''}">${escapeHtml(detail)}${truncationNote}</div>`
                 : "") +
             `</${rowTag}>`;
-          return latest ? `<div class="sw-a-latest"><div class="sw-a-activity-label">${escapeHtml(t('swarm.latestTool'))}</div>${row}</div>` : row;
-        });
+          return latest ? `<div class="sw-a-latest"><div class="sw-a-activity-label">${escapeHtml(c.entryKind === 'message_receipt' ? t('tool.agentMessageReceived') : t('swarm.latestTool'))}</div>${row}</div>` : row;
+        };
+        const rowsHTML = timelineCalls.map(renderCall);
+        const messageHTML = messageCalls.length
+          ? `<details class="sw-a-messages"><summary>${escapeHtml(t('swarm.messagesTitle'))} · ${messageCalls.length}</summary>${messageCalls.map(renderCall).join('')}</details>` : '';
         const omittedHTML = omittedToolCalls > 0
           ? `<div class="sw-tl-omitted">${escapeHtml(t("swarm.toolCallsOmitted", { count: omittedToolCalls.toLocaleString() }))}</div>`
           : "";
         const latestHTML = rowsHTML.pop() || '';
         const historyHTML = rowsHTML.length || omittedToolCalls > 0
           ? `<details class="sw-a-tool-history"><summary>${escapeHtml(t('swarm.recentTools', { count: rowsHTML.length }))}</summary>${omittedHTML}${rowsHTML.join('')}</details>` : '';
-        bodyContent += `<div class="sw-a-timeline">${latestHTML}${historyHTML}</div>`;
+        bodyContent += `<div class="sw-a-timeline">${latestHTML}${historyHTML}${messageHTML}</div>`;
       } else if (aRunning) {
         bodyContent += `<div class="sw-a-activity-empty">${escapeHtml(t('swarm.awaitingTools'))}</div>`;
       }

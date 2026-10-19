@@ -13,7 +13,7 @@ import logging
 import os
 import time
 
-from lib.runtime_paths import data_root as _tofu_data_root
+from lib.runtime.runtime_paths import data_root as _tofu_data_root
 
 
 def _pid_alive(pid):

@@ -166,11 +166,16 @@ def resolve_conv_config(
             _coerce_bool(conv.get('schedulerEnabled')),
             is_active=is_active,
         ),
-        'projectPath': ov.get('projectPath') or conv.get('projectPath') or '',
+        # Presence, not truthiness: an explicit empty selection clears a
+        # saved root. Inactive work ignores another conversation's overrides.
+        'projectPath': (ov.get('projectPath', conv.get('projectPath') or '')
+                        if is_active else conv.get('projectPath') or ''),
         # RWA 伪路径(remote:<agent>:<root>)在下方翻译为 project_remote。
         'project_remote': None,
-        'projectPaths': list(conv.get('projectPaths') or []),
-        'readOnlyPaths': list(conv.get('readOnlyPaths') or []),
+        'projectPaths': list((ov.get('projectPaths', conv.get('projectPaths'))
+                              if is_active else conv.get('projectPaths')) or []),
+        'readOnlyPaths': list((ov.get('readOnlyPaths', conv.get('readOnlyPaths'))
+                               if is_active else conv.get('readOnlyPaths')) or []),
         # Write-approval default is AUTO everywhere (2026-08-21 policy): the
         # approval gate fires only on an EXPLICIT per-conv Manual choice.
         # Active conv reads the live toolbar value (falling back to the conv's

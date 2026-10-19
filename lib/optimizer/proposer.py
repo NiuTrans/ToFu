@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import re
 
-from lib.llm_json import extract_json
+from lib.llm.llm_json import extract_json
 from lib.log import get_logger
 
 from .actions import ACTION_REGISTRY

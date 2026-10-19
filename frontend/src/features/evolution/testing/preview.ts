@@ -2,6 +2,8 @@ import '../../../styles/application/00-design-tokens.css';
 import '../ui-components';
 /** Vite-only design entry. Synthetic data, no production API imports or writes. */
 import '../../../styles/application/01-shell-navigation.css';
+import '../../../styles/application/10-light-foundation.css';
+import '../../../styles/application/11-tofu-theme-foundation.css';
 import '../../../styles/application/26-evolution.css';
 
 import '../../../styles/application/30-ui-kit.css';
@@ -30,6 +32,7 @@ if(scenario==='legacy-failed'){
 if(scenario==='terminal'){
   Object.assign(observedPreview,{status:'completed',result:'设计预览：已整理研究报告与可复现脚本。\n验收证据：引用核验测试 12 项通过。',receipts:[{task_id:observedPreview.task_id,stage:'executing',status:'completed'}],review:{outcome:'success',criterion_results:[{criterion_id:'delivery',outcome:'pass',evidence_ref:'设计预览：12 tests passed；参考来源已记录。'}]}});
 }
+if(scenario==='terminal') observedPreview.result += '\n\n```tofu-ui\n'+JSON.stringify({version:1,title:'设计预览 · 实验对比',blocks:[{type:'data_chart',id:'demo-latency',title:'设计预览：相同输入下的耗时对比',kind:'bar',yLabel:'耗时',yUnit:'ms',xLabel:'方案',series:[{id:'preview',label:'合成演示数据',points:[{label:'基线',value:240},{label:'方案 A',value:165},{label:'方案 B',value:128}]}]}]})+'\n```';
 if(scenario==='needs-attention')Object.assign(observedPreview,{status:'needs_attention',error:'stage_handoff_interrupted'});
 if(scenario==='missing-limits')delete observedPreview.budget;
 const previewMaterials=[
@@ -72,7 +75,7 @@ Object.assign(records,{listPrograms:{programs:[{...notebook,objective:notebook.o
  step:{...notebookStep,title:['检查真实问题和依赖','建立可复现基线','探索顺序存储方案','故障注入与并发比较','验证恢复边界','保留失败与修复证据','检查前端操作链路'][i]},
  run_id:`preview-history-${i+1}`,outcome:i===2?'failed':'completed',result:'设计预览中的证据示例，不代表真实执行结果。\n实际记录会保存执行结果与评审依据。',
  review:{hypothesis_assessment:{...notebookAssessment,feasibility:i===2?{outcome:'fail',evidence_ref:'设计预览：并发原型失败。'}:notebookAssessment.feasibility},outcome:i===2?'failure':'success',requirement_results:[{requirement_id:'requirement-1',outcome:i===2?'fail':'pass',evidence_ref:'设计预览：重启故障测试结果和复现命令。'}]},
- actuals:{tokens:1000,tool_calls:3,wall_clock_seconds:60},error:i===2?'设计预览：发现并发写入缺少冲突恢复。':'',created_at:i+1})),settled_through:7,next_cursor:null}});
+ actuals:{tokens:[5400,7800,14200,10600,8400,6200,5100][i]!,tool_calls:[4,7,12,9,7,5,4][i]!,wall_clock_seconds:[45,66,120,92,78,54,48][i]!},actuals_complete:i!==2,error:i===2?'设计预览：发现并发写入缺少冲突恢复。':'',created_at:i+1})),settled_through:7,next_cursor:null}});
 let previewRoster=scenario==='swarm'?[{id:'demo-scout',role:'researcher',status:'running',objective:'比较长期记忆方案的评测方法'},{id:'demo-coder',role:'coder',status:'running',objective:'实现可复现原型'}]:[];
 let previewRosterKnown=scenario==='swarm';
 const api = new Proxy({} as EvolutionApi,{get:(_target,key)=>async(...args:unknown[])=>{

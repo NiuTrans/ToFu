@@ -13,7 +13,21 @@ import sys
 import uuid
 
 import pytest
-from tests.research.test_research_workspace_evidence_guard import storage as storage
+from tests.research.test_research_workspace_evidence_guard import storage as _base_storage_fixture
+
+
+base_storage = _base_storage_fixture
+
+
+@pytest.fixture(autouse=True)
+def daemon_transport(monkeypatch):
+    # A fresh interpreter needs the native authenticated daemon endpoint.
+    monkeypatch.setenv("TOFUDB_TRANSPORT", "daemon")
+
+
+@pytest.fixture
+def storage(daemon_transport, base_storage):
+    return base_storage
 from tests.support.research_observations import observation_payload
 
 pytestmark = pytest.mark.unit

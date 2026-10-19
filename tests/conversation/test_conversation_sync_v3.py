@@ -1801,3 +1801,110 @@ def test_snapshot_reads_legacy_null_status_tool_mirror(
     )
     assert segment["result"] == {"content": None}
     assert stored["projection"]["toolRounds"][0]["status"] == "done"
+
+
+def test_round_directory_exact_actor_ranks_without_projection_reads(conversation_sync_db, monkeypatch):
+    from lib.conversation_sync.repository import SidecarConversationSyncRepository
+    from lib.conversation_sync.service import ConversationSyncService
+    client = conversation_sync_db
+    actors = ["assistant", "human", "assistant", "critic", "virtual_user", "assistant", "assistant"]
+    ids = []
+    for i, actor in enumerate(actors):
+        result = client.command("turn.append_settled", {
+            "conversation_id": "conv-sync-a", "user_id": 1, "command_id": f"rank-{i}",
+            "actor": actor, "kind": "fixture", "projection": {"content": "界" * 40000},
+            "created_at": i + 1,
+        }, f"rank-{i}")
+        ids.append(result["turn"]["turnId"])
+    head = client.query("turn.sync.snapshot", {"conversation_id": "conv-sync-a", "user_id": 1})["syncSequence"]
+    service = ConversationSyncService(SidecarConversationSyncRepository(client_factory=lambda write=False: client))
+    page = service.round_directory("conv-sync-a", 1, lane_id="main", expected_sync_sequence=head,
+                                   offset=1, limit=1, anchor_turn_id=ids[-1])
+    assert page["totalRounds"] == 3
+    assert page["activeRound"] == 3
+    assert page["entries"] == [{"turnId": ids[3], "ordinal": 3, "actor": "critic", "roundNumber": 2}]
+    assert page["nextOffset"] == 2
+    assert "projection" not in str(page)
+    assert service.round_directory("conv-sync-a", 1, lane_id="main", expected_sync_sequence=head + 1)["stale"]
+    assert service.round_directory("conv-sync-a", 1, lane_id="different", expected_sync_sequence=head)["totalRounds"] == 0
+    assert client.query("turn.sync.round_directory", {"conversation_id": "conv-sync-a", "user_id": 2,
+        "lane_id": "main", "sync_sequence": head}) is None
+    from lib.storage_authority_sql.adapters.sqlite import SQLiteSession as Session
+    original = Session.fetch_all
+    def body_free(self, sql, params=()):
+        if "storage_conversation_turns" in sql:
+            assert "projection_json" not in sql and "head_json" not in sql
+        return original(self, sql, params)
+    monkeypatch.setattr(Session, "fetch_all", body_free)
+    assert service.round_directory("conv-sync-a", 1, lane_id="main", expected_sync_sequence=head,
+                                   offset=2, limit=1)["entries"][0]["turnId"] == ids[4]
+
+
+def test_round_directory_route_validates_explicit_lane_and_head(flask_client, conversation_sync_db):
+    path = "/api/v4/conversations/conv-sync-a/turns/rounds"
+    response = flask_client.get(path + "?laneId=main&syncSeq=0&limit=1")
+    assert response.status_code == 200
+    assert response.get_json()["totalRounds"] == 0
+    for query in ("", "?laneId=main", "?laneId=main&syncSeq=-1", "?syncSeq=0",
+                  "?laneId=main&syncSeq=0&limit=101", "?laneId=main&syncSeq=0&offset=-1"):
+        assert flask_client.get(path + query).status_code == 400
+    assert flask_client.get("/api/v4/conversations/not-visible/turns/rounds?laneId=main&syncSeq=0").status_code == 404
+
+
+def test_round_directory_deletion_invalidates_and_recomputes_ranks(conversation_sync_db):
+    client = conversation_sync_db
+    ids = []
+    for i, actor in enumerate(("human", "assistant", "critic", "assistant")):
+        response = client.command("turn.append_settled", {"conversation_id": "conv-sync-a", "user_id": 1,
+            "command_id": f"delete-rank-{i}", "actor": actor, "projection": {"content": "rank"}}, f"delete-rank-{i}")
+        ids.append(response["turn"]["turnId"])
+    payload = {"conversation_id": "conv-sync-a", "user_id": 1, "lane_id": "main"}
+    head = client.query("turn.sync.snapshot", payload)["syncSequence"]
+    assert client.query("turn.sync.round_directory", {**payload, "sync_sequence": head})["totalRounds"] == 2
+    client.command("turn.delete", {**payload, "turn_ids": [ids[0]]}, "delete-first-rank")
+    assert client.query("turn.sync.round_directory", {**payload, "sync_sequence": head})["stale"] is True
+    head = client.query("turn.sync.snapshot", payload)["syncSequence"]
+    page = client.query("turn.sync.round_directory", {**payload, "sync_sequence": head})
+    assert page["totalRounds"] == 1
+    assert page["entries"][0]["turnId"] == ids[2]
+    assert page["entries"][0]["roundNumber"] == 1
+
+
+def test_round_directory_detects_head_advance_during_read(monkeypatch):
+    from lib.storage_authority_sql.operations_pkg import _turns_read
+    seen = iter([0, 1])
+    monkeypatch.setattr(_turns_read, "_conversation_sync_head", lambda *args: next(seen))
+    class Session:
+        def fetch_one(self, sql, params):
+            return {"present": 1} if "storage_conversations" in sql else {"n": 0}
+        def fetch_all(self, sql, params):
+            assert "projection_json" not in sql and "head_json" not in sql
+            return []
+    result = _turns_read._turn_sync_round_directory(Session(), {
+        "conversation_id": "conv-sync-a", "user_id": 1, "lane_id": "main", "sync_sequence": 0})
+    assert result == {"ownerId": 1, "conversationId": "conv-sync-a", "laneId": "main",
+                      "syncSeq": 1, "stale": True, "totalRounds": 0, "offset": 0, "entries": []}
+
+
+def test_turn_preserves_complete_media_lists_beyond_20(flask_client, conversation_sync_db):
+    from lib.conversation_sync.validation import decode, ContractViolation
+    images = [{'preview': f'/api/images/{index}.png', 'name': f'image-{index}'}
+              for index in range(33)]
+    attachments = [{'attachmentId': f'media-{index}', 'kind': 'document',
+                    'name': f'doc-{index}.txt', 'status': 'ready'} for index in range(33)]
+    projection = {'content': 'all evidence', 'images': images, 'attachments': attachments}
+    assert decode('TurnProjection', projection) == projection
+    invalid = {**projection, 'attachments': [*attachments, {**attachments[-1], 'status': 'forged'}]}
+    with pytest.raises(ContractViolation):
+        decode('TurnProjection', invalid)
+    conversation_sync_db.command('turn.append_settled', {
+        'conversation_id': 'conv-sync-a', 'user_id': 1,
+        'command_id': 'complete-media-lists', 'actor': 'assistant', 'kind': 'fixture',
+        'projection': projection, 'created_at': 2,
+    }, 'complete-media-lists')
+    response = flask_client.get('/api/v4/conversations/conv-sync-a/sync')
+    assert response.status_code == 200
+    saved = response.get_json()['turns'][0]['projection']
+    assert saved['images'] == images
+    assert saved['attachments'] == attachments
+    assert decode('TurnProjection', saved) == saved

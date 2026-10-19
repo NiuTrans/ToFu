@@ -54,6 +54,8 @@ def test_live_swarm_activity_is_readable_and_consistent(frontend_visual_page, tm
         '.native/swarm-visual-chip.js', ROOT / 'frontend/src/background-activity-presentation.ts'))
     frame.add_script_tag(path=native_module_path(
         '.native/swarm-visual-failure.js', ROOT / 'frontend/src/conversation/presentation/swarm-failure-presentation.ts'))
+    frame.add_script_tag(path=native_module_path(
+        '.native/swarm-message-receipts.js', ROOT / 'frontend/src/conversation/presentation/agent-message-receipts.ts'))
     frame.add_script_tag(content=runtime_section('ui/streaming_swarm_panel.js'))
     frame.add_script_tag(content=runtime_section('ui/swarm_live_projection.js'))
     frame.add_script_tag(content=runtime_section('background-activity.js'))
@@ -135,37 +137,17 @@ def test_live_swarm_activity_is_readable_and_consistent(frontend_visual_page, tm
     frame.locator('.sw-a-task > summary').click()
     frame.locator('.sw-a-id').click()
     assert frame.evaluate('copiedId') == 'agent-coder-rust_port'
-    frame.locator('#bgActivityChip').click()
-    assert frame.locator('.bg-act-agent-id').inner_text() == 'agent-coder-rust_port'
-    assert locale['bgActivity.agentRound'].replace('{round}', '24') in frame.locator('.bg-act-agent-status').inner_text()
-    assert frame.locator('.bg-act-swarm-summary').inner_text() == locale['bgActivity.summaryRunning'].replace('{count}', '1')
-    # Reproduce the old mixed snapshot: 2 running / 0 queued, two pending rows.
-    frame.evaluate("""() => {
-      activitySnapshot.swarms[0].running = 2;
-      activitySnapshot.swarms[0].agents = [
-        {id:'rust_port',role:'coder',status:'pending',waitReason:'capacity',objective:'Port the storage response envelope'},
-        {id:'review',role:'reviewer',status:'pending',waitReason:'dependencies',dependsOn:['rust_port'],objective:'Review changes'}];
-      runtimeScope.updateBackgroundActivity();
-    }""")
-    frame.locator('#bgActivityChip').click()
-    frame.wait_for_function("document.querySelectorAll('.bg-act-agent').length === 2")
-    assert frame.locator('.bg-act-swarm-summary').inner_text() == locale['bgActivity.summaryWaiting'].replace('{count}', '2')
-    assert frame.locator('.bg-act-agent-status').all_inner_texts() == [
-        locale['swarm.wait.capacity'], locale['swarm.wait.dependencies']]
-    assert frame.locator('.bg-act-agent-status').nth(1).get_attribute('title') == 'rust_port'
-    assert '0' not in frame.locator('.bg-act-swarm-summary').inner_text()
-    frame.locator('.bg-act-agent-id').first.click()
+    # Agent navigation/evidence now belongs to the right dock. Its responsive,
+    # keyboard and history journey is in test_visual_agent_sidebar_dock.py.
+    assert not frame.locator('#bgActivityChip').is_visible()
     assert not frame.evaluate('Boolean(window.unexpectedNavigation)')
-    assert frame.locator('#bgActivityPopover').is_visible()
     bounds = frame.locator('.sw-panel').bounding_box()
     assert bounds and bounds['width'] <= width
     assert frame.locator('.sw-agent').evaluate('(el)=>el.scrollWidth <= el.clientWidth+1')
-    assert frame.locator('#bgActivityPopover').evaluate('(el)=>el.scrollWidth <= el.clientWidth+1')
     screenshot = tmp_path / f'swarm-activity-{language}-{width}.png'
     page.locator('#swarm-activity-fixture').screenshot(path=str(screenshot))
     print(f'Swarm screenshot: {screenshot}')
     # Reader collapse is not undone by the next actual push.
-    frame.locator('#bgActivityChip').click()
     frame.locator('.sw-a-header .sw-a-role-tag').click()
     assert not frame.locator('.sw-a-body').is_visible(), 'reader closes card before next push'
     frame.evaluate("""sendSwarm({type:'swarm_agent_tool_call',agentId:'rust_port',callId:'read-2',
@@ -274,6 +256,8 @@ def test_missed_swarm_push_recovers_and_resumes_with_real_scheduler(frontend_vis
     frame.add_script_tag(path=native_module_path(
         '.native/swarm-recovery-surface.js', ROOT / 'frontend/src/conversation/index.ts'))
 
+    frame.add_script_tag(path=native_module_path(
+        '.native/swarm-message-receipts.js', ROOT / 'frontend/src/conversation/presentation/agent-message-receipts.ts'))
     frame.add_script_tag(content=runtime_section('ui/streaming_swarm_panel.js'))
     frame.add_script_tag(content=runtime_section('ui/swarm_live_projection.js'))
     frame.evaluate("""liveParent => {

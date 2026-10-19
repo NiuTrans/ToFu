@@ -143,6 +143,9 @@ def _build_display_dispatch_table():
     # Memory tools
     for name in MEMORY_TOOL_NAMES:
         table[name] = _tool_display_memory
+    from lib.tools.working_facts import WORKING_FACT_CONTRACTS
+    for contract in WORKING_FACT_CONTRACTS:
+        table[contract.name] = _tool_display_memory
 
     # Skill tools (load_skill — read-only progressive disclosure)
     for name in SKILL_TOOL_NAMES:
@@ -234,6 +237,12 @@ def _build_display_dispatch_table():
     # Structured task-checklist tool (todo_write) — friendly progress label,
     # no spurious "unregistered tool" WARNING on every checklist update.
     table['todo_write'] = _tool_display_todo
+
+    from lib.tasks_pkg.tool_display._renderers import (
+        _WORKFLOW_TOOL_LABELS, _tool_display_workflow,
+    )
+    for name in _WORKFLOW_TOOL_LABELS:
+        table[name] = _tool_display_workflow
 
     return table
 
@@ -331,7 +340,7 @@ def _build_tool_round_entry(fn_name, fn_args, tc_id, tc_args_str, tool_round_num
     # round, and every replay are all born with the readable label.
     if task is not None and fn_name in TOOL_RESULT_ARTIFACT_NAMES:
         try:
-            from lib.tool_result_artifacts import (
+            from lib.tool_results.tool_result_artifacts import (
                 artifact_provenance, continuation_display_label,
                 continuation_origin_meta, resolve_artifact_ref)
             # Resolve the owner once so a cross-turn read-back can fall back

@@ -18,9 +18,13 @@ never change the schema version by hand. `generated_v2.py` comes from
 
 EmbeddedRuntime.checkpoint_control is explicit native checkpoint C ABI, not a
 second Python journal. Generated constants come from gen_native_checkpoint_control.py.
+The generator also owns daemon transport constants and the packaged schema.
 Verify test_checkpoint_control and actual private library/binary probes; capacity
 is admitted before effects and commands never grow-replay. Close joins callers;
-forget does not release a durable lease. Package remains application-independent.
+forget does not release a durable lease. Whole Goal claim/handoff commands reuse
+this port; only explicit identical successful group delivery may retrieve its
+existing IDs before first member use. No automatic retry is added to the client.
+Package remains application-independent.
 Verify optional acceleration with `tests/tofudb/test_tofudb_crc_accelerator.py`.
 Verify the protocol with `tests/storage/test_storage_public_boundary.py`,
 `tests/tofudb/test_tofudb_v2_client.py`, `tests/storage/test_storage_v2_client.py`, and the native

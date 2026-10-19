@@ -24,21 +24,21 @@ import pytest
 
 from lib.storage.errors import StorageError
 from lib.conversations.project_brain import deterministic_work_id
-from lib.storage_sidecar.adapters.sqlite import SQLiteSession
-from lib.storage_sidecar.schema import initialize_schema
-from lib.storage_sidecar.operations_pkg._project_brain import (
+from lib.storage_authority_sql.adapters.sqlite import SQLiteSession
+from lib.storage_authority_sql.schema import initialize_schema
+from lib.storage_authority_sql.operations_pkg._project_brain import (
     _project_brain_get,
     _project_brain_narrative_add,
     _project_brain_rebuild,
     _project_brain_work_start,
 )
-from lib.storage_sidecar.operations_pkg._project import (
+from lib.storage_authority_sql.operations_pkg._project import (
     _conversation_project_relink,
     _project_recent_list,
     _project_recent_touch,
     _project_relink,
 )
-from lib.storage_sidecar.operations_pkg._common import _dump, _load
+from lib.storage_authority_sql.operations_pkg._common import _dump, _load
 
 pytestmark = pytest.mark.unit
 
@@ -280,25 +280,19 @@ def test_relink_moves_recoverable_trashed_conversation_pin(session):
     assert rev == 4
 
 
-def test_conversation_pin_relink_fails_before_writes_above_bound(
-    session, monkeypatch
-):
-    from lib.storage_sidecar.operations_pkg import _project as project_ops
-
-    monkeypatch.setattr(project_ops, "_PROJECT_RELINK_CONVERSATION_LIMIT", 1)
-    _conversation(session, "active-a", 7, {"projectPath": "/old/p"})
-    _trashed_conversation(session, "trashed-a", 7, {"projectPath": "/old/p"})
-
-    with pytest.raises(StorageError) as raised:
-        project_ops._conversation_project_relink(
-            session, 7, "/old/p", "/new/p"
-        )
-
-    assert raised.value.code == "database_conflict"
-    active, _ = _settings(session, "active-a", 7)
-    trashed, _ = _trashed_settings(session, "trashed-a", 7)
-    assert active["projectPath"] == "/old/p"
-    assert trashed["projectPath"] == "/old/p"
+def test_conversation_pin_relink_exceeds_former_total_and_preserves_owner(session):
+    for index in range(10001):
+        _conversation(session,f'active-{index:05}',7,{'projectPath':'/old/p','keep':index},rev=4)
+    _trashed_conversation(session,'trashed-a',7,{'projectPath':'/old/p'},rev=3)
+    _conversation(session,'foreign',8,{'projectPath':'/old/p'})
+    moved,trashed = _conversation_project_relink(session,7,'/old/p','/new/p')
+    assert (moved,trashed)==(10001,1)
+    for index in [0,9999,10000]:
+        settings,rev = _settings(session,f'active-{index:05}',7)
+        assert settings=={'projectPath':'/new/p','keep':index}
+        assert rev==4
+    assert _trashed_settings(session,'trashed-a',7)[0]['projectPath']=='/new/p'
+    assert _settings(session,'foreign',8)[0]['projectPath']=='/old/p'
 
 
 def test_conversation_pin_relink_uses_one_bounded_backend_batch(session):
@@ -397,7 +391,7 @@ def test_repository_relink_dispatches_project_relink():
 
 
 def test_relink_operation_declares_only_its_own_extended_transaction_budget():
-    from lib.storage_sidecar.operations import resolve_operation_contract
+    from lib.storage_authority_sql.operations import resolve_operation_contract
 
     receipt_required, _execute, transaction_timeout_s = (
         resolve_operation_contract(

@@ -29,7 +29,7 @@ CONFIG = os.path.join(ROOT, "pyrightconfig.json")
 # scope name -> path prefix (repository-relative). First match wins.
 SCOPES = (
     ("routes", ("routes/",)),
-    ("lib/storage_sidecar", ("lib/storage_sidecar/",)),
+    ("lib/storage_authority_sql", ("lib/storage_authority_sql/",)),
     ("lib/agent_core", ("lib/agent_core/",)),
     (
         "lib-strict-files",

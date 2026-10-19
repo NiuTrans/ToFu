@@ -48,6 +48,7 @@ class RetryPhaseEventBudget:
 
     def __init__(self) -> None:
         self._occurrences: dict[tuple, int] = {}
+        self._pending_waits: set[tuple] = set()
 
     @property
     def maximum_events(self) -> int:
@@ -72,6 +73,25 @@ class RetryPhaseEventBudget:
             return False
         return occurrence & (occurrence - 1) == 0
 
+    def should_emit_wait(self, signature: tuple) -> bool:
+        """Reserve half this signature's frame budget for matching recovery.
+
+        Completion cannot be sampled independently: dropping it could leave a
+        previously displayed network wait visible after connectivity returns.
+        """
+        emit = self.should_emit(signature)
+        if self._occurrences.get(signature, 0) > (1 << (self.MAX_EVENTS_PER_SIGNATURE // 2 - 1)):
+            return False
+        if emit:
+            self._pending_waits.add(signature)
+        return emit
+
+    def complete_wait(self, signature: tuple) -> bool:
+        if signature not in self._pending_waits:
+            return False
+        self._pending_waits.remove(signature)
+        return True
+
 
 def display_model_name(model: str) -> str:
     """Strip internal gateway/provider prefixes for a user-facing label."""
@@ -87,10 +107,11 @@ def display_model_name(model: str) -> str:
 # `stream.retryReason.*`). Unknown tokens fall back to the raw reason on the
 # frontend (same ruling as an unknown detailKey).
 # The dispatcher's reason token for a gateway/upstream-outage retry cycle
-# (raised ONLY with RateLimitError.is_gateway=True — see lib/llm_errors.py
+# (raised ONLY with RateLimitError.is_gateway=True — see lib/llm/llm_errors.py
 # _GATEWAY_THROTTLE_STATUS and the vendor-transient 4xx escalations).
 GATEWAY_RETRY_TOKEN = 'Upstream error'
 RETRY_REASON_KEYS = {
+    'Waiting for network recovery': 'stream.retryReason.networkRecovery',
     'Endpoint unreachable': 'stream.retryReason.endpointUnreachable',
     'Request timed out': 'stream.retryReason.requestTimedOut',
     'Waiting for model (rate-limited)': 'stream.retryReason.waitingForModel',
@@ -99,6 +120,7 @@ RETRY_REASON_KEYS = {
     'Waiting for model (retry backoff)': 'stream.retryReason.waitingBackoff',
     'Waiting for model (shared project limit)': 'stream.retryReason.waitingSharedProject',
     'Rate limited (429)': 'stream.retryReason.rateLimited',
+    'Subscription quota reached': 'stream.retryReason.subscriptionQuotaReached',
 }
 
 # These tokens describe the dispatcher's 300 ms all-slots-cooling poll, not
@@ -106,6 +128,7 @@ RETRY_REASON_KEYS = {
 # still retained on the phase event for diagnostics/coalescing, but must not
 # be interpolated into user-facing copy as "attempt N".
 COOLDOWN_WAIT_REASON_TOKENS = frozenset({
+    'Waiting for network recovery',
     'Waiting for model (retry backoff)',
     'Waiting for model (shared project limit)',
 })
@@ -122,6 +145,14 @@ def cooldown_wait_label(causes: set) -> tuple:
     retry_phase_fields takes the reason branch — a 429 status would swallow
     it into the generic rate-limited detailKey.
     """
+    # Subscription-quota exhaustion outranks every other cause: the window
+    # resets at a known time (often hours/days), so 'queued retry' copy would
+    # lie about an imminent recovery that a plain 429 implies. It must also
+    # outrank 'contention' — a quota slot's ``cooldown_reason`` is 'quota'
+    # (slot.py), never contention, but billing 429s on OTHER slots can mix
+    # into the same wait; the honest label is the one that won't recover soon.
+    if causes and 'quota' in causes:
+        return 'Subscription quota reached', 429
     if causes and 'contention' in causes:
         return 'Waiting for model (shared project limit)', 0
     if causes and 'rate_limit' not in causes:
@@ -148,7 +179,20 @@ def retry_phase_fields(*, model: str, attempt: int, reason: str = '',
         ``reasonKey`` only when the token is known.
     """
     label = display_model_name(model)
-    if status_code == 429:
+    if reason == 'Network recovered':
+        # Recovery is decided BEFORE the next POST is sent; claiming the
+        # request already reached the model would be false on a subsequent
+        # connect failure. Use the honest pre-send label.
+        detail_key = 'stream.phase.connectingModel'
+        detail_args = {'model': label}
+    elif reason == 'Subscription quota reached':
+        # OAuth-subscription quota exhaustion (Codex usage_limit_reached). The
+        # window resets at a known time (often hours/days), NOT in seconds —
+        # the generic status-429 'queued retry' branch would mislabel it as an
+        # imminent-recovery 限流, so this reason must win over status_code.
+        detail_key = 'stream.phase.subscriptionQuotaReached'
+        detail_args = {'model': label, 'attempt': attempt}
+    elif status_code == 429:
         detail_key = 'stream.phase.retryRateLimited'
         detail_args = {'model': label, 'attempt': attempt}
     elif reason == GATEWAY_RETRY_TOKEN:

@@ -1,8 +1,20 @@
 /** conversations endpoint facade. Owns wire paths and projections; transport/retry policy arrives through explicit ports. */
+import type { TurnReviewCommand, TurnReviewView } from '../artifact-review.generated';
 import type { EndpointPorts, EndpointOptions, JsonObject } from './contracts';
+import type { WorkingFactsView, WorkingFactOwnerDecision, WorkingFactConsumersView } from '../working-facts.generated';
 export function createConversationsEndpoints(ports: EndpointPorts) {
   const { request, get, post, patch, newIdempotencyKey, _idempotentResponseWrite, _resolveAcrossWorkerRecovery, readLanguage } = ports;
   const conversations = {
+    turnReview: (id: string, turnId: string, signal?: AbortSignal) => get<TurnReviewView>(
+      `/api/v4/conversations/${encodeURIComponent(id)}/turns/${encodeURIComponent(turnId)}/review`, { signal }),
+    saveTurnReview: (id: string, turnId: string, command: TurnReviewCommand, signal?: AbortSignal) => post<TurnReviewView>(
+      `/api/v4/conversations/${encodeURIComponent(id)}/turns/${encodeURIComponent(turnId)}/review`, command, { signal }),
+    workingFacts: (id: string, signal?: AbortSignal) => get<WorkingFactsView>(
+      `/api/v4/conversations/${encodeURIComponent(id)}/working-facts`, { signal }),
+    saveWorkingFact: (id: string, command: WorkingFactOwnerDecision, signal?: AbortSignal) => post<WorkingFactsView>(
+      `/api/v4/conversations/${encodeURIComponent(id)}/working-facts`, command, { signal }),
+    workingFactConsumers: (id: string, cursor = '', signal?: AbortSignal) => get<WorkingFactConsumersView>(
+      `/api/v4/conversations/${encodeURIComponent(id)}/working-facts/consumers`, { query: { cursor, limit: 50 }, signal }),
     get: (convId: string, opts?: EndpointOptions) => get(`/api/v4/conversations/${encodeURIComponent(convId)}`, Object.assign({ onError: 'null', coalesce: true }, opts || {})),
     getResponse: (convId: string, opts?: EndpointOptions) =>
       request<Response | null>(`/api/v4/conversations/${encodeURIComponent(convId)}`,

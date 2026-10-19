@@ -94,10 +94,11 @@ def register_orchestration_task_routes(
     @orchestration_route(blueprint, 'task-resume')
     @require_auth
     @api_meta(
-        summary='Resume a server-interrupted Flow from committed node results',
+        summary='Resume a server-interrupted Flow or conversation Goal',
         description='Creates one durable successor per source run. Repeated requests '
                     'return the same successor. Completed effects are replayed from '
-                    'receipts; an unfinished model/tool invocation is a conflict. '
+                    'receipts. Chat Goals use their conversation recovery guards; ambiguous '
+                    'unfinished effects are a conflict. '
                     'Pending human decisions are requested again. No request body.',
         tags=['orchestrations'],
         request_body=False,

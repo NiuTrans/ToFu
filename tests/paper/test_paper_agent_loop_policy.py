@@ -4,8 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from lib.agent_loop import AbortSignal
-from lib.llm_errors import AbortedError
+from lib.agent_loop.agent_loop import AbortSignal
+from lib.llm.llm_errors import AbortedError
 from lib.paper.agent_loop_policy import (
     PaperAgentLoopHalted,
     run_guarded_paper_agent_loop,

@@ -1,0 +1,18 @@
+{
+  "toolName": "mcp__llm__experiment_fork",
+  "status": "done",
+  "toolArgs": {"base_id": 379851, "dry_run": false},
+  "toolContent": {
+    "items": [{"data": {"experimentId": 381491, "experimentName": "repair2788167074-CPU-Simple-sdklock-r4-1q-7d-oct9", "modelId": 3819071, "modelSource": "inherit-node", "page": "https://model.internal.example.com/user/modelManage/experimentalTaskDetail/381491"}, "ok": true}],
+    "summary": "Tool returned a structured result.\n[Original source retained; use search_tool_artifact or read_tool_artifact with artifactRef to inspect it.]"
+  },
+  "toolResultEvidence": {
+    "contractVersion": "tofu.tool-result-evidence/v1", "resultContractVersion": "tofu.tool-result/v2",
+    "status": "ok", "executionStatus": "ok", "projectionKind": "summary_items",
+    "retentionCoverage": "complete", "viewCoverage": "complete", "truncated": false,
+    "rawBytes": 252, "visibleBytes": 407, "envelopeBytes": 929,
+    "artifactRef": "tool-result:99b36d5826c2df6f4d9464e0de836e60a7c3e9eac604f3a24e4b19704cddfd98",
+    "evidenceId": "ev_35d854d24525e9a4ed0e8486", "resultId": "99f22162-ed43-45da-8d98-d341e9bc0556",
+    "sourceCoverage": "unknown"
+  }
+}

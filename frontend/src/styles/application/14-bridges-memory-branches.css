@@ -934,26 +934,6 @@
 [data-theme="light"] .branch-msg.user{background:rgba(0,0,0,0.03);border-left-color:var(--user-bubble)}
 [data-theme="light"] .branch-input{background:#fff}
 
-/* ── Text Selection Popup (Branch / Reply) ── */
-.selection-popup{
-  position:fixed;z-index:9999;
-  display:flex;gap:0;
-  background:var(--bg-secondary);border:1px solid var(--border);
-  border-radius:8px;box-shadow:0 4px 20px rgba(0,0,0,0.25);
-  overflow:hidden;animation:selPopIn .15s ease;
-  pointer-events:auto;
-}
-@keyframes selPopIn{from{opacity:0;transform:scale(.9) translateY(4px)}to{opacity:1;transform:scale(1) translateY(0)}}
-.selection-popup-btn{
-  display:flex;align-items:center;gap:5px;
-  padding:7px 14px;font-size:var(--font-size-sm);font-weight:500;
-  color:var(--text-primary);background:transparent;
-  border:none;cursor:pointer;transition:background-color .15s,color .15s;
-  white-space:nowrap;font-family:inherit;
-}
-.selection-popup-btn:hover{background:var(--accent-subtle);color:var(--accent)}
-.selection-popup-btn:first-child{border-right:1px solid var(--border)}
-
 /* ── Reply Quote — in user message ── */
 /* ── Reply Quote Badge — in-message (looks like file upload badge) ── */
 .reply-quote-badge{
@@ -970,32 +950,6 @@
 .reply-quote-badge-info{display:flex;flex-direction:column;gap:1px;min-width:0;overflow:hidden}
 .reply-quote-badge-name{font-size:12.5px;font-weight:500;color:var(--text-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .reply-quote-badge-meta{font-size:var(--font-size-xs);color:var(--text-tertiary)}
-
-/* ── Reply Quote Container (multi-quote) ── */
-.reply-quote-container{
-  display:flex;flex-wrap:wrap;gap:6px;
-  padding:6px 14px 2px;
-}
-.reply-quote-container:empty{display:none}
-/* ── Reply Quote Chip — floating above input (same file-badge look) ── */
-.reply-quote-chip{
-  display:inline-flex;align-items:center;gap:6px;
-  padding:var(--space-1) 10px;
-  background:var(--thinking-bg);
-  border:1px solid var(--thinking-border);
-  border-radius:6px;
-  max-width:320px;
-  font-size:var(--font-size-sm);
-  animation:quoteChipIn .2s ease;
-}
-@keyframes quoteChipIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
-.reply-quote-chip-meta{font-size:10.5px;color:var(--text-tertiary)}
-.reply-quote-chip-close{
-  background:none;border:none;color:var(--text-tertiary);cursor:pointer;
-  padding:2px var(--space-1);font-size:var(--font-size-lg);line-height:1;transition:color .15s;flex-shrink:0;
-  border-radius:4px;
-}
-.reply-quote-chip-close:hover{color:var(--text-primary);background:var(--bg-tertiary)}
 
 /* ── @ button active state in input toolbar ── */
 #convRefBtn.has-refs{
@@ -1245,7 +1199,6 @@
 
 /* ── Reply quote inside branch message ── */
 
-[data-theme="light"] .selection-popup{background:#fff;box-shadow:0 4px 20px rgba(0,0,0,0.12)}
 [data-theme="light"] .reply-quote-badge{background:rgba(0,0,0,0.03);border-color:rgba(0,0,0,0.08)}
 [data-theme="light"] .reply-quote-chip{background:#f8f8f8;border-color:rgba(0,0,0,0.08)}
 

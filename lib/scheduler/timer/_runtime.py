@@ -13,6 +13,10 @@ from concurrent.futures import CancelledError as FutureCancelled, TimeoutError a
 
 from tofu_workers import DemandExecutor
 
+from lib.log import get_logger
+
+logger = get_logger(__name__)
+
 _current_handle = contextvars.ContextVar('timer_watcher_handle', default=None)
 _worker_owner = threading.local()
 
@@ -179,7 +183,8 @@ async def run_blocking(callback, *args, _allow_stopping=False, **kwargs):
                 await asyncio.shield(future)
             except asyncio.CancelledError:
                 continue
-            except Exception:
+            except Exception as diagnostic_error:
+                logger.debug('run_blocking failure handled: %s', type(diagnostic_error).__name__)
                 break  # The physical callback settled with its own failure.
         if future.done() and not future.cancelled():
             future.exception()  # Retrieve any error before propagating cancellation.

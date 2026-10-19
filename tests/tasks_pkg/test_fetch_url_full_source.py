@@ -44,7 +44,7 @@ def test_direct_fetch_preserves_json_past_both_preview_and_cache_caps(monkeypatc
 
 
 def test_extract_scans_source_after_first_48k_without_a_second_model_pass(monkeypatch):
-    import lib.search_extract as extract
+    import lib.search.search_extract as extract
     # Keep provider verification isolated from lexical retrieval.
     monkeypatch.setattr('lib.llm.stream_result.require_verified_provider_stream_result',
                         lambda stream, **kwargs: stream)
@@ -74,7 +74,7 @@ def test_extract_scans_source_after_first_48k_without_a_second_model_pass(monkey
 def test_direct_fetch_handler_retains_full_source_and_exposes_tail(monkeypatch):
     from lib.tasks_pkg.handlers.search import _core, _handlers
     from lib.tasks_pkg.compaction import _budget
-    from lib.tool_result_artifacts import ToolResultArtifactRepository
+    from lib.tool_results.tool_result_artifacts import ToolResultArtifactRepository
     from lib.tools.result_envelope import split_tool_result_delivery
 
     body = 'x' * 420_000 + 'UNIQUE_TAIL_ENTRY=9281'
@@ -106,7 +106,7 @@ def test_direct_fetch_handler_retains_full_source_and_exposes_tail(monkeypatch):
 def test_rewrite_retains_original_source_not_only_rewritten_preview(monkeypatch):
     from lib.tasks_pkg.handlers.search import _core, _handlers
     from lib.tasks_pkg.compaction import _budget
-    from lib.tool_result_artifacts import ToolResultArtifactRepository
+    from lib.tool_results.tool_result_artifacts import ToolResultArtifactRepository
     from lib.tools.result_envelope import split_tool_result_delivery
 
     url = 'https://example.test/rewrite'
@@ -132,10 +132,10 @@ def test_rewrite_retains_original_source_not_only_rewritten_preview(monkeypatch)
 def test_extract_answer_keeps_long_source_behind_visible_reference(monkeypatch):
     from lib.tasks_pkg.handlers.search import _core, _handlers
     from lib.tasks_pkg.compaction import _budget
-    from lib.tool_result_artifacts import ToolResultArtifactRepository
+    from lib.tool_results.tool_result_artifacts import ToolResultArtifactRepository
     from lib.tools.result_envelope import split_tool_result_delivery
     from lib.tools.result_value import TrustedResultText
-    import lib.search_extract as extract
+    import lib.search.search_extract as extract
 
     url = 'https://example.test/page'
     body = 'x' * 100_000 + 'LATE_SOURCE_VALUE=347'
@@ -163,7 +163,7 @@ def test_extract_answer_keeps_long_source_behind_visible_reference(monkeypatch):
 
 def test_real_four_megabyte_chunk_boundary_retains_tail():
     from lib.tools.result_value import CapturedToolResult, ResultPart, persist_result
-    from lib.tool_result_artifacts import ToolResultArtifactRepository
+    from lib.tool_results.tool_result_artifacts import ToolResultArtifactRepository
 
     source = 'A' * (4 * 1024 * 1024 - 2) + '🙂' + 'TAIL_RECORD=61'
     result = CapturedToolResult((ResultPart('text', source),))
@@ -176,7 +176,7 @@ def test_real_four_megabyte_chunk_boundary_retains_tail():
 
 def test_large_result_chunks_preserve_tail_and_unicode_for_artifact_queries(monkeypatch):
     from lib.tasks_pkg.compaction import _budget
-    from lib.tool_result_artifacts import ToolResultArtifactRepository
+    from lib.tool_results.tool_result_artifacts import ToolResultArtifactRepository
     from lib.tools.result_envelope import split_tool_result_delivery
     import lib.tools.result_value as result_value
 
@@ -207,7 +207,7 @@ def test_large_result_chunks_preserve_tail_and_unicode_for_artifact_queries(monk
 def test_search_unknown_candidates_survive_preview_omission_in_original_artifact(monkeypatch):
     from lib.tasks_pkg.handlers.search import _core, _handlers
     from lib.tasks_pkg.compaction import _budget
-    from lib.tool_result_artifacts import ToolResultArtifactRepository
+    from lib.tool_results.tool_result_artifacts import ToolResultArtifactRepository
     from lib.tools.result_envelope import split_tool_result_delivery
     from tofu_search.search.orchestrator import SearchResultList
 

@@ -2,7 +2,7 @@
 
 Exact-first matching already covered CRLF / trailing-whitespace /
 unicode-escape normalization. These tests pin the uniform-indent rung
-(aider's relative-indent tolerance): whitespace-stripped comparison, unique
+(aider's relative-indent tolerance): one uniform prefix offset, unique
 match, and re-framing of the replacement into the file's own indentation —
 plus the ambiguity guard and undo round-trip.
 """
@@ -116,3 +116,60 @@ class TestIndentRung:
         outcome = _ops._indent_tolerant_splice(
             'a\n\nb\n', '  \n  ', 'x\ny', False, decode=False, rel_path='f')
         assert outcome == {'ok': False}
+
+
+@pytest.mark.parametrize(('source', 'anchor'), [
+    ('    if ready:\n        run()\n    done()\n', 'if ready:\nrun()\ndone()'),
+    ('    first()\n    second()\n', 'first()\n   second()'),
+    ('    first()\n        second()\n', '  first()\n  second()'),
+    ('\tfirst()\n\tsecond()\n', 'first()\n  \tsecond()'),
+    ('\tfirst()\n    second()\n', 'first()\nsecond()'),
+    ('    label = "\\u2014"\n        emit()\n', 'label = "—"\nemit()'),
+    ('    label = "\\n"\n    emit()\n', 'label = "\n"\nemit()'),
+])
+def test_independent_line_deindent_and_escape_attacks_never_match(
+        tmp_path, monkeypatch, source, anchor):
+    base, target = _base(tmp_path, monkeypatch, source)
+    result = _ops.tool_edit_file(base, [{
+        'path': 'file.txt', 'operation': 'replace', 'anchor': anchor, 'content': 'WRONG',
+    }])
+    assert result.startswith('Applied 0/1 edits'), result
+    assert '[match-not-found]' in result
+    assert target.read_text() == source
+
+
+@pytest.mark.parametrize(('source', 'anchor', 'replacement', 'expected'), [
+    ('    first()\n        second()\n', '  first()\n      second()',
+     '  changed()\n      second()', '    changed()\n        second()\n'),
+    ('  first()\n      second()\n', '    first()\n        second()',
+     '    changed()\n        second()', '  changed()\n      second()\n'),
+    ('\tfirst()\n\t\tsecond()\n', 'first()\n\tsecond()',
+     'changed()\n\tsecond()', '\tchanged()\n\t\tsecond()\n'),
+    ('    label = "\\u2014"\n    emit()\n', 'label = "—"\nemit()',
+     'label = "—!"\nemit()', '    label = "—!"\n    emit()\n'),
+])
+def test_one_uniform_offset_preserves_relative_structure(
+        tmp_path, monkeypatch, source, anchor, replacement, expected):
+    base, target = _base(tmp_path, monkeypatch, source)
+    result = _ops.tool_edit_file(base, [{
+        'path': 'file.txt', 'operation': 'replace', 'anchor': anchor, 'content': replacement,
+    }])
+    assert result.startswith('Applied 1/1 edits'), result
+    assert target.read_text() == expected
+
+
+def test_invalid_indentation_candidate_does_not_create_false_ambiguity(tmp_path, monkeypatch):
+    source = '    first()\n        second()\n\n    first()\n    second()\n'
+    base, target = _base(tmp_path, monkeypatch, source)
+    result = _ops.tool_apply_diff(base, 'file.txt', 'first()\nsecond()', 'changed()')
+    assert result['ok'], result
+    assert target.read_text() == '    first()\n        second()\n\n    changed()\n'
+
+
+def test_uniform_offset_rejects_replacement_that_cannot_keep_relative_indent(tmp_path, monkeypatch):
+    source = 'first()\nsecond()\n'
+    base, target = _base(tmp_path, monkeypatch, source)
+    result = _ops.tool_apply_diff(base, 'file.txt', '    first()\n    second()',
+                                  '    changed()\n  broken_structure()')
+    assert not result['ok'], result
+    assert target.read_text() == source

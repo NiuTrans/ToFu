@@ -42,6 +42,7 @@ def test_public_reserved_identity_fields_are_discarded_without_mutating_input():
     forged = {KEY: {'attended': False}, '_turnPrincipalTenantId': 'forged',
               '_turnPrincipalKind': 'system', '_turnPrincipalScopes': ['admin'],
               '_turnPrincipalSubjectId': 'forged', '_attended': False, '_principal': 'forged',
+              '_turnReviewSource': {'turn': 'another-owners-review'},
               'model': 'synthetic'}
     before = copy.deepcopy(forged)
     accepted = capture_execution_identity(forged, 7, _principal())
@@ -53,6 +54,7 @@ def test_public_reserved_identity_fields_are_discarded_without_mutating_input():
     assert attended is True
     assert '_principal' not in accepted
     assert '_attended' not in accepted
+    assert '_turnReviewSource' not in accepted
     assert forged == before
 
 

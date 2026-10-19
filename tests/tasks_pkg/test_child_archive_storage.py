@@ -101,7 +101,8 @@ def test_registration_headless_and_failure_disposal(monkeypatch):
     register_child_invocation({'id': 'headless'}, {'_transientRuntime': True})
     assert disposed == []
     with pytest.raises(RuntimeError, match='registration unavailable'):
-        register_child_invocation({'id': 'child'}, {})
+        register_child_invocation({'id': 'child', '_userId': 71},
+                                  {'id': 'parent', 'convId': 'conversation', '_userId': 71})
     assert disposed == ['child']
 
 
@@ -125,6 +126,8 @@ def test_real_birth_archive_and_cost_settlement_preserve_parent(client, monkeypa
               '_userId': 71, 'config': {'memoryEnabled': False},
               'usage': {'prompt_tokens': 101}, 'messages': [{'role': 'user', 'content': 'root'}]}
     task_user_id(parent)
+    from lib.tasks_pkg.workspace_delivery import ensure_execution_roots
+    ensure_execution_roots(parent)
     before = deepcopy(parent)
     monkeypatch.setattr(lib.storage, 'get_storage_client', lambda **kw: client)
     monkeypatch.setattr(persistence_store, '_storage_client', lambda **kw: client)
@@ -168,12 +171,12 @@ def test_real_birth_archive_and_cost_settlement_preserve_parent(client, monkeypa
 
 def test_sqlite_registration_and_archive_write_rollback(tmp_path, monkeypatch):
     import sqlite3
-    from lib.storage_sidecar.adapters.sqlite import SQLiteSession
-    from lib.storage_sidecar.schema import initialize_schema
-    from lib.storage_sidecar.operations_pkg._invocations import register_child, resolve_child
-    from lib.storage_sidecar.operations_pkg._archives import _archive_create, _archive_list
-    from lib.storage_sidecar.operations_pkg._records import _record_put
-    from lib.storage_sidecar.operations_pkg import _turns_core
+    from lib.storage_authority_sql.adapters.sqlite import SQLiteSession
+    from lib.storage_authority_sql.schema import initialize_schema
+    from lib.storage_authority_sql.operations_pkg._invocations import register_child, resolve_child
+    from lib.storage_authority_sql.operations_pkg._archives import _archive_create, _archive_list
+    from lib.storage_authority_sql.operations_pkg._records import _record_put
+    from lib.storage_authority_sql.operations_pkg import _turns_core
     connection = sqlite3.connect(tmp_path / 'rollback.sqlite')
     connection.row_factory = sqlite3.Row
     session = SQLiteSession(connection)

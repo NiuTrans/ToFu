@@ -34,8 +34,8 @@ from lib.model_routing import (
     plan_legacy_migration,
 )
 from lib.openapi import api_meta
-from lib.provider_headers import sanitise_extra_headers as sanitise_extra_headers
-from lib.provider_template_recipes import (
+from lib.provider.provider_headers import sanitise_extra_headers as sanitise_extra_headers
+from lib.provider.provider_template_recipes import (
     ProviderTemplateRecipeError,
     compile_provider_template_bundle,
     load_provider_templates,
@@ -49,7 +49,7 @@ from lib.catpaw_local_import import (
     secret_envelope as catpaw_secret_envelope,
 )
 from lib.request_parser import parse_body
-from lib.api_v1_model_routing_generated import (
+from lib.generated_api_v1_model_routing import (
     ContractViolation,
     decode_request,
 )
@@ -60,7 +60,7 @@ from .auth import current_auth, require_scope
 # are resolved server-side from the owner-scoped secret store; the browser
 # only ever addresses credentials by their column index.
 from lib.json_store import read_json, write_json_atomic
-from lib.provider_probe import (
+from lib.provider.provider_probe import (
     CELL_PROBE_LOCK,
     CELL_PROBE_TASKS,
     build_probe_work,
@@ -71,7 +71,7 @@ from lib.provider_probe import (
     run_cell_probe_task,
     submit_provider_probe_task,
 )
-from lib.provider_probe_policy import (
+from lib.provider.provider_probe_policy import (
     PROVIDER_PROBE_MAX_ATTEMPTS,
     PROVIDER_PROBE_MAX_TIMEOUT_SECONDS,
     PROVIDER_PROBE_MIN_TIMEOUT_SECONDS,
@@ -1169,7 +1169,7 @@ def reveal_credential_secret(credential_id: str):
 
 def _legacy_sources_for_owner(boundary: OwnerBoundary) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     from lib import _load_server_config
-    from lib.byo_providers import get_provider, list_providers
+    from lib.byo.byo_providers import get_provider, list_providers
 
     config = _load_server_config()
     rows = list_providers(

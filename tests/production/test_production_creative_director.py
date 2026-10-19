@@ -215,7 +215,7 @@ def test_stock_provider_bounds_download_and_never_returns_credential(
     import contextlib
     import json
 
-    import lib.http_client as http_client
+    import lib.http_transport.client as http_client
     from lib.production.stock_media import resolve_stock_media
 
     captured = {}

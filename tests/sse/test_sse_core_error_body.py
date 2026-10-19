@@ -3,7 +3,7 @@
 
 The transport half of the 2026-07-26 toio-gateway incident (companion to
 tests/llm/test_llm_error_body_display.py, which pins the classifier half in
-lib/llm_errors.py). Two defects lived in lib/llm/_sse_core.py:
+lib/llm/llm_errors.py). Two defects lived in lib/llm/_sse_core.py:
 
   1. TRUNCATION — ``classify_status_error`` built the error string as
      ``err_text[:800]``. The gateway envelope carries its diagnostic tail
@@ -18,7 +18,7 @@ lib/llm_errors.py). Two defects lived in lib/llm/_sse_core.py:
      through into logs, the raised exception, AND the Chinese pattern matchers
      (which then miss ``稍后重试``/``负载较高``).
 
-Both fixes reuse ``_ERR_BODY_LIMIT`` + ``repair_mojibake`` from lib.llm_errors
+Both fixes reuse ``_ERR_BODY_LIMIT`` + ``repair_mojibake`` from lib.llm.llm_errors
 (single source of truth) — this file pins that they are actually applied in the
 transport layer.
 """
@@ -33,7 +33,7 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 from lib.llm._sse_core import SSEAccumulator, classify_status_error  # noqa: E402
-from lib.llm_errors import (  # noqa: E402
+from lib.llm.llm_errors import (  # noqa: E402
     ModelLimitError,
     RateLimitError,
     RetryableAPIError,
@@ -91,7 +91,7 @@ class TestClassifyStatusErrorDetruncation:
     def test_long_prompt_envelope_still_classified(self):
         """A prompt-too-long envelope whose JSON extends past 800 chars must
         still be detected — the 800-cap could sever the matched phrase's JSON."""
-        from lib.llm_errors import PromptTooLongError
+        from lib.llm.llm_errors import PromptTooLongError
         with pytest.raises(PromptTooLongError):
             classify_status_error(400, _ENVELOPE, body={'model': 'm'},
                                   log_prefix='[t]', raw_dumper=_Dumper())

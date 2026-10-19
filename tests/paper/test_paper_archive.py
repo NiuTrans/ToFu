@@ -7,8 +7,7 @@ import zipfile
 
 import pytest
 
-from lib.paper.archive import (MAX_FILES, MAX_FILE_BYTES, extract_archive,
-                               stream_to_temp)
+from lib.paper.archive import extract_archive, stream_to_temp
 from lib.paper.builds.errors import BuildError
 
 pytestmark = pytest.mark.unit
@@ -82,23 +81,25 @@ def test_absolute_member_names_never_escape(tmp_path):
     assert receipt.files == 2  # sanitized to a relative member
 
 
-def test_member_count_limit_removes_everything(tmp_path):
+def test_complete_member_count_beyond_old_limit(tmp_path):
     archive = tmp_path / 'many.zip'
-    _zip(archive, [(f'f{i}.tex', 'x') for i in range(MAX_FILES + 2)])
+    _zip(archive, [(f'f{i}.tex', 'x') for i in range(1101)])
     dest = tmp_path / 'root'
     dest.mkdir()
-    with pytest.raises(BuildError) as excinfo:
-        extract_archive(archive, dest)
-    assert excinfo.value.code == 'archive_limit'
-    assert list(dest.iterdir()) == []
+    receipt = extract_archive(archive, dest)
+    assert receipt.files == 1101
+    assert (receipt.directory / 'f1100.tex').read_text() == 'x'
 
 
-def test_single_file_byte_limit(tmp_path):
+def test_complete_large_member_and_total_bytes(tmp_path):
     archive = tmp_path / 'big.zip'
-    _zip(archive, [('big.bin', b'x' * (MAX_FILE_BYTES + 1))])
-    with pytest.raises(BuildError) as excinfo:
-        extract_archive(archive, tmp_path)
-    assert excinfo.value.code == 'archive_limit'
+    with zipfile.ZipFile(archive, 'w', compression=zipfile.ZIP_DEFLATED) as bundle:
+        with bundle.open('big.bin', 'w') as output:
+            for _ in range(65):
+                output.write(b'x' * (1024 * 1024))
+    receipt = extract_archive(archive, tmp_path)
+    assert receipt.bytes_written == 65 * 1024 * 1024
+    assert (receipt.directory / 'big.bin').stat().st_size == receipt.bytes_written
 
 
 def test_unknown_format_and_empty_archive_are_typed(tmp_path):
@@ -114,13 +115,65 @@ def test_unknown_format_and_empty_archive_are_typed(tmp_path):
     assert excinfo.value.code == 'archive_empty'
 
 
-def test_stream_spool_is_bounded_and_private(tmp_path):
-    with pytest.raises(BuildError) as excinfo:
-        stream_to_temp(io.BytesIO(b'x' * 2048), max_bytes=1024)
-    assert excinfo.value.code == 'archive_limit'
+def test_spool_is_complete_and_private(tmp_path):
     path = stream_to_temp(io.BytesIO(b'x' * 100))
     try:
         assert path.stat().st_size == 100
         assert path.name.startswith('tofu-archive-')
     finally:
         path.unlink()
+
+
+def test_default_spool_receives_source_beyond_old_128_mib_limit():
+    import hashlib
+    class Source:
+        remaining = 129 * 1024 * 1024
+        def read(self, size):
+            count = min(size, self.remaining)
+            self.remaining -= count
+            return b'x' * count
+    path = stream_to_temp(Source())
+    try:
+        assert path.stat().st_size == 129 * 1024 * 1024
+        digest = hashlib.sha256()
+        with path.open('rb') as source:
+            while chunk := source.read(1024 * 1024):
+                digest.update(chunk)
+        expected = hashlib.sha256()
+        for _ in range(129):
+            expected.update(b'x' * (1024 * 1024))
+        assert digest.digest() == expected.digest()
+    finally:
+        path.unlink()
+
+
+def test_premature_member_eof_rolls_back_complete_staging_tree(tmp_path, monkeypatch):
+    import lib.paper.archive as archive_module
+    archive = tmp_path / 'source.zip'
+    _zip(archive, [('ok.tex', 'complete'), ('broken.bin', 'required')])
+    copy = archive_module._copy_stream
+    def short_read(source, target, size):
+        if target.name == 'broken.bin':
+            source = io.BytesIO(b'x')
+        return copy(source, target, size)
+    monkeypatch.setattr(archive_module, '_copy_stream', short_read)
+    destination = tmp_path / 'root'
+    destination.mkdir()
+    with pytest.raises(BuildError) as error:
+        extract_archive(archive, destination)
+    assert error.value.code == 'archive_invalid'
+    assert list(destination.iterdir()) == []
+
+
+def test_directory_collision_has_no_private_count_gate(tmp_path):
+    archive = tmp_path / 'source.zip'
+    name = 'main.tex'
+    _zip(archive, [(name, 'complete')])
+    destination = tmp_path / 'root'
+    destination.mkdir()
+    (destination / 'source').mkdir()
+    for index in range(1, 71):
+        (destination / f'source ({index})').mkdir()
+    result = extract_archive(archive, destination)
+    assert result.directory.name == 'source (71)'
+    assert (result.directory / name).read_text() == 'complete'

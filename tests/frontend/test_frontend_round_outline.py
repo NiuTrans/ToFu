@@ -50,6 +50,37 @@ const vm=t=>({conversationId:'c',conversationRevision:1,transport:'ready',
 '''
 
 
+def test_activity_surface_follows_adjacency_without_reparenting_or_losing_focus(round_bundle):
+    result = run_js(round_bundle, HELPERS + r'''
+      const root=document.createElement('main');document.body.append(root);
+      const blocks=[block('thought',0),block('read',0,'a','tool'),
+        block('narration',1,'a','text'),block('check',1,'a','tool'),
+        block('answer',2,'a','text',{deliverable:true,terminal:true})];
+      const surface=createConversationSurface(root,{renderBlock(node,b){
+        node.innerHTML='<details><summary>'+b.blockId+'</summary><p>Evidence</p></details>';
+      }});
+      surface.render(vm(turn(blocks,'running')));
+      const read=root.querySelector('[data-block-id="read"]');
+      const parent=read.parentElement,summary=read.querySelector('summary');summary.focus();
+      const edges=()=>[...root.querySelectorAll('[data-block-id]')].map(n=>[n.dataset.blockId,n.dataset.processEdge??null]);
+      const initial=edges();
+      const inserted=block('interlude',0,'a','text');
+      surface.render(vm(turn([blocks[0],inserted,...blocks.slice(1)],'running')));
+      const split=edges();
+      const retained=read===root.querySelector('[data-block-id="read"]')
+        && read.parentElement===parent && document.activeElement===summary;
+      surface.render(vm(turn(blocks,'running')));
+      const joined=edges();surface.dispose();
+      return JSON.stringify({initial,split,retained,joined});
+    ''')
+    expected = [['thought', 'start'], ['read', 'end'], ['narration', None],
+                ['check', 'single'], ['answer', None]]
+    assert result['initial'] == result['joined'] == expected
+    assert result['split'] == [['thought', 'single'], ['interlude', None], ['read', 'single'],
+                               ['narration', None], ['check', 'single'], ['answer', None]]
+    assert result['retained']
+
+
 def test_outline_uses_explicit_scope_and_segments_not_inspector_or_diagnostics(round_bundle):
     result = run_js(round_bundle, HELPERS + r'''
       const blocks=[block('one',0), block('two',0),
@@ -102,7 +133,7 @@ def test_outline_states_do_not_treat_background_work_as_completed(round_bundle):
 
 
 def test_outline_controls_preserve_nodes_focus_reader_choice_and_answer(round_bundle):
-    """Action blocks keep their summary visible; toolbar operates evidence, not shells."""
+    """Action summaries stay visible without bulk controls."""
     result = run_js(round_bundle, HELPERS + r'''
       const root=document.createElement('main');document.body.append(root);
       const surface=createConversationSurface(root);
@@ -117,8 +148,8 @@ def test_outline_controls_preserve_nodes_focus_reader_choice_and_answer(round_bu
       const allVisible=[doneBlock,liveBlock,answerBlock].every(n=>!n.hidden);
       // Tool blocks carry action state.
       const states=[...root.querySelectorAll('[data-action-state]')].map(n=>n.dataset.actionState);
-      // No toolbar with <4 actions.
-      const toolbarHidden=root.querySelector('.conversation-round-toolbar').hidden;
+      // No toolbar, regardless of action count.
+      const toolbarHidden=!root.querySelector('.conversation-round-toolbar');
       // Replay preserves keyed nodes and reader state.
       const leaf=root.querySelector('[data-block-id="done"]');
       for(let i=0;i<20;i++) surface.render(vm(turn(JSON.parse(JSON.stringify(blocks)),'running')));
@@ -196,7 +227,7 @@ def test_any_unresolved_background_result_keeps_a_round_open(round_bundle):
     assert result == ['background', True, 'returned']
 
 
-def test_round_controls_belong_to_the_surface_document_without_global_document(round_bundle):
+def test_card_controls_belong_to_the_surface_document_without_global_document(round_bundle):
     result = run_js(round_bundle, HELPERS + r'''
       const doc=document;
       delete globalThis.document;
@@ -204,10 +235,10 @@ def test_round_controls_belong_to_the_surface_document_without_global_document(r
       const surface=createConversationSurface(root);
       surface.render(vm(turn([block('thinking',0,'a','tool',{round:{toolName:'read_files',status:'done'}})])));
       const buttons=[...root.querySelectorAll('button')];
-      const result={count:buttons.length,owned:buttons.every(b=>b.ownerDocument===doc)};
+      const result={noBulkControls:!root.querySelector('[data-round-action]'),owned:buttons.every(b=>b.ownerDocument===doc)};
       surface.dispose();return JSON.stringify(result);
     ''')
-    assert result['count'] >= 4
+    assert result['noBulkControls'] is True
     assert result['owned'] is True
 
 
@@ -220,6 +251,7 @@ def test_collapsed_rounds_render_on_reveal_with_latest_projection(round_bundle):
       }});
       let blocks=[block('history',0,'a','tool',{round:{toolName:'read_files',status:'done'}}),block('answer',1,'a','text',{deliverable:true})];
       surface.render(vm(turn(blocks)));
+      for (const process of root.querySelectorAll('.conversation-history-process')) { process.open=true; process.dispatchEvent(new window.Event('toggle')); }
       const shell=root.querySelector('[data-block-id="history"]');
       const initial={calls:[...calls],visible:!shell.hidden};
       // Replay with identical data: nodes retained, no re-render needed.
@@ -229,12 +261,13 @@ def test_collapsed_rounds_render_on_reveal_with_latest_projection(round_bundle):
       // New data triggers re-render.
       blocks[0]={...blocks[0],round:{...blocks[0].round,status:'running'}};
       surface.render(vm(turn(blocks)));
+      for (const process of root.querySelectorAll('.conversation-history-process')) { process.open=true; process.dispatchEvent(new window.Event('toggle')); }
       const reRendered=calls.length>2;
       surface.dispose();
       return JSON.stringify({initial,retained,stable,reRendered});
     ''')
     assert result == {
-        'initial': {'calls': ['history', 'answer'], 'visible': True},
+        'initial': {'calls': ['answer', 'history'], 'visible': True},
         'retained': True, 'stable': True, 'reRendered': True,
     }
 
@@ -256,7 +289,7 @@ def test_content_is_visible_before_details_and_short_turn_has_no_false_history(r
         tool2Visible:!root.querySelector('[data-block-id="tool-2"]').hidden,
         noRoundHeaders:root.querySelectorAll('.conversation-round-header').length===0,
         history:!!root.querySelector('.conversation-block-window-control'),
-        toolbarHidden:root.querySelector('.conversation-round-toolbar').hidden};
+        toolbarHidden:!root.querySelector('.conversation-round-toolbar')};
       surface.dispose();return JSON.stringify(result);
     ''')
     assert result == {'proseVisible': True, 'toolVisible': True,
@@ -277,6 +310,7 @@ def test_program_summary_remains_visible_while_child_details_are_deferred(round_
         block('child',0,'a','tool',{round:{toolName:'web_search',status:'done'}}),
         block('answer',1,'a','text',{deliverable:true})];
       surface.render(vm(turn(blocks)));
+      for (const process of root.querySelectorAll('.conversation-history-process')) { process.open=true; process.dispatchEvent(new window.Event('toggle')); }
       const program=root.querySelector('[data-block-id="program"]');
       const child=root.querySelector('[data-block-id="child"]');
       const result={programVisible:!program.hidden,childVisible:!child.hidden,
@@ -285,7 +319,7 @@ def test_program_summary_remains_visible_while_child_details_are_deferred(round_
     ''')
     assert result == {
         'programVisible': True, 'childVisible': True,
-        'rendered': ['program', 'child', 'answer'],
+        'rendered': ['answer', 'program', 'child'],
         'noHeaders': True,
     }
 
@@ -323,12 +357,13 @@ def test_self_contained_tool_cards_never_join_a_round_disclosure(round_bundle):
       ];
       const before=JSON.stringify(blocks);
       surface.render(vm(turn(blocks)));
+      for (const process of root.querySelectorAll('.conversation-history-process')) { process.open=true; process.dispatchEvent(new window.Event('toggle')); }
       const cards=[...root.querySelectorAll('[data-tool-summary="self-contained"]')];
       const counts={noHeaders:root.querySelectorAll('.conversation-round-header').length===0,
         cards:cards.length,allVisible:cards.every(n=>!n.hidden),
         immutable:before===JSON.stringify(blocks),
         visibleProse:!root.querySelector('[data-block-id="intent"]').hidden,
-        toolbarHidden:root.querySelector('.conversation-round-toolbar').hidden,
+        toolbarHidden:!root.querySelector('.conversation-round-toolbar'),
         mounted:cards.every(n=>renders.includes(n.dataset.blockId)),
         actionStates:[...root.querySelectorAll('[data-action-state]')].map(n=>[n.dataset.blockId,n.dataset.actionState])};
       const first=cards[0];
@@ -340,7 +375,7 @@ def test_self_contained_tool_cards_never_join_a_round_disclosure(round_bundle):
     assert result == {
         'noHeaders': True, 'cards': 7, 'allVisible': True,
         'immutable': True, 'visibleProse': True,
-        'toolbarHidden': False, 'mounted': True,
+        'toolbarHidden': True, 'mounted': True,
         'actionStates': [
             ['checklist', 'returned'], ['terminal', 'returned'],
             ['browser', 'returned'], ['python', 'returned'],
@@ -366,21 +401,19 @@ def test_outline_does_not_open_nested_swarm_task_or_history_disclosures(round_bu
       const task=root.querySelector('.sw-a-task');
       const history=root.querySelector('.sw-a-tool-history');
       const initiallyClosed=!task.open&&!history.open;
-      root.querySelector('[data-round-action="expandAll"]').click();
-      const bulkPreserves=!task.open&&!history.open;
+      const noBulkControls=!root.querySelector('[data-round-action]');
       task.open=true;
       surface.render(vm(turn(JSON.parse(JSON.stringify(blocks)),'running')));
       const readerRetained=task===root.querySelector('.sw-a-task')&&task.open;
       blocks.forEach(b=>b.round.status='done');
       surface.render(vm(turn(blocks,'completed')));
-      root.querySelector('[data-round-action="collapseCompleted"]').click();
-      const collapsePreserves=task.open&&!history.open;
+      const settlementPreserves=task.open&&!history.open;
       surface.dispose();
-      return JSON.stringify({initiallyClosed,bulkPreserves,readerRetained,collapsePreserves});
+      return JSON.stringify({initiallyClosed,noBulkControls,readerRetained,settlementPreserves});
     ''')
     assert result == {
-        'initiallyClosed': True, 'bulkPreserves': True,
-        'readerRetained': True, 'collapsePreserves': True,
+        'initiallyClosed': True, 'noBulkControls': True,
+        'readerRetained': True, 'settlementPreserves': True,
     }
 
 
@@ -389,10 +422,11 @@ def test_swarm_internal_disclosures_are_not_generic_action_evidence(round_bundle
       const root=document.createElement('main');document.body.append(root);
       const surface=createConversationSurface(root,{renderBlock(node,b){
         if(b.blockId==='swarm'){
+          if(node.querySelector('.sw-panel')) return;
           node.innerHTML='<section class="sw-panel"><details class="sw-a-task"><summary>Task</summary>'
             +'<div>Instructions</div></details><details class="sw-a-history"><summary>History</summary>'
             +'<div>Tool activity</div></details></section>';
-        }else node.innerHTML='<details class="generic-evidence"><summary>Tool result</summary><div>Evidence</div></details>';
+        }else if(!node.querySelector('.generic-evidence')) node.innerHTML='<details class="generic-evidence"><summary>Tool result</summary><div>Evidence</div></details>';
       }});
       const actions=[block('swarm',0,'a','tool',{round:{toolName:'spawn_agents',status:'running'}}),
         ...Array.from({length:3},(_,i)=>block('generic-'+i,i+1,'a','tool',{
@@ -401,22 +435,75 @@ def test_swarm_internal_disclosures_are_not_generic_action_evidence(round_bundle
       const task=root.querySelector('.sw-a-task'),history=root.querySelector('.sw-a-history');
       const initial={task:task.open,history:history.open,
         generic:root.querySelector('.generic-evidence').open};
-      root.querySelector('[data-round-action="expandAll"]').click();
-      const expanded={task:task.open,history:history.open,
-        generic:[...root.querySelectorAll('.generic-evidence')].every(n=>n.open)};
-      // A user opens instructions; unrelated completion and bulk collapsing
-      // must not undo that intent or open internal tool history.
+      // Per-card reader choices survive unrelated settlement.
+      const generic=[...root.querySelectorAll('.generic-evidence')];
+      generic[0].open=false;
+      const readerChoice={first:generic[0].open,second:generic[1].open};
       task.open=true;actions.forEach(b=>b.round.status='done');
       surface.render(vm(turn(actions)));
-      root.querySelector('[data-round-action="collapseCompleted"]').click();
-      const collapsed={task:task.open,history:history.open,
-        generic:[...root.querySelectorAll('.generic-evidence')].some(n=>n.open)};
+      const settled={task:task.open,history:history.open,
+        generic:[...root.querySelectorAll('.generic-evidence')].map(n=>n.open)};
       const retained=task===root.querySelector('.sw-a-task');
-      surface.dispose();return JSON.stringify({initial,expanded,collapsed,retained});
+      surface.dispose();return JSON.stringify({initial,readerChoice,settled,retained});
     ''')
     assert result == {
         'initial': {'task': False, 'history': False, 'generic': True},
-        'expanded': {'task': False, 'history': False, 'generic': True},
-        'collapsed': {'task': True, 'history': False, 'generic': False},
+        'readerChoice': {'first': False, 'second': True},
+        'settled': {'task': True, 'history': False, 'generic': [False, True, True]},
         'retained': True,
+    }
+
+
+def test_viewport_anchors_visible_block_with_scoped_identity_and_turn_fallback(round_bundle):
+    result = run_js(round_bundle, r'''
+      const viewport=document.createElement('main');document.body.append(viewport);
+      const root=document.createElement('div');viewport.append(root);
+      viewport.innerHTML='<div id="root"><section data-turn-id="t" data-presentation-id="input">'
+        +'<div data-block-id="same"></div></section>'
+        +'<section data-turn-id="t" data-presentation-id="output">'
+        +'<div data-block-id="above"></div><div data-block-id="same"></div></section></div>';
+      const content=viewport.firstChild;
+      viewport.scrollTop=400;
+      Object.defineProperty(viewport,'scrollHeight',{get:()=>2000});
+      Object.defineProperty(viewport,'clientHeight',{get:()=>200});
+      viewport.getBoundingClientRect=()=>({top:20,bottom:220});
+      const turns=content.querySelectorAll('[data-turn-id]');
+      const above=turns[1].firstChild,visible=turns[1].lastChild;
+      let shift=0;
+      turns[0].getBoundingClientRect=()=>({top:-400,bottom:0});
+      turns[0].firstChild.getBoundingClientRect=()=>({top:900,bottom:950});
+      turns[1].getBoundingClientRect=()=>({top:300-viewport.scrollTop,bottom:1000-viewport.scrollTop});
+      above.getBoundingClientRect=()=>({top:300-viewport.scrollTop,bottom:400-viewport.scrollTop});
+      visible.getBoundingClientRect=()=>({top:410+shift-viewport.scrollTop,bottom:600+shift-viewport.scrollTop});
+      const frames=[];
+      const port=createConversationViewportPort(viewport,{scheduleAfterLayout(callback){
+        const frame={callback,cancelled:false};frames.push(frame);
+        return ()=>{frame.cancelled=true;};
+      }});
+      port.suspendFollow();
+      const snapshot=port.capture(content);
+      shift=120;port.restore(content,snapshot);
+      const prependTop=viewport.scrollTop;
+      const offset=visible.getBoundingClientRect().top-20;
+      // Removing the captured leaf falls back to its owning presentation,
+      // never the sibling presentation with the same Turn and block identity.
+      visible.remove();port.restore(content,snapshot);
+      const fallbackTop=viewport.scrollTop;
+      const suspended=!port.following;
+      port.followLatest();const tail=port.capture(content);
+      port.suspendFollow();port.restore(content,tail);
+      const cancelled=frames.at(-1).cancelled;
+      const stillSuspended=!port.following;
+      port.dispose();
+      return JSON.stringify({identity:[snapshot.anchorTurnId,snapshot.anchorPresentationId,snapshot.anchorBlockId],
+        initialOffset:snapshot.anchorOffset,prependTop,offset,fallbackTop,suspended,
+        tailHasNoAnchor:!tail.anchorBlockId,cancelled,stillSuspended});
+    ''')
+    assert result == {
+        'identity': ['t', 'output', 'same'], 'initialOffset': -10,
+        # The owning Turn returns to its captured offset (-120), rather than
+        # inheriting the removed leaf's offset (-10).
+        'prependTop': 520, 'offset': -10, 'fallbackTop': 400,
+        'suspended': True, 'tailHasNoAnchor': True,
+        'cancelled': True, 'stillSuspended': True,
     }

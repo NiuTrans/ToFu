@@ -674,6 +674,49 @@ pub(crate) fn scan_conversation(
     Ok(json!({"rows": rows, "cursor": cursor}))
 }
 
+/// Explicit offline upgrade of legacy compact heads. Kept out of storage.v2
+/// and directory queries: only the exclusive migration-session may materialize
+/// old documents, one at a time, to populate immutable actor metadata.
+fn upgrade_round_heads(
+    database: &AuthorityDatabase, transaction: &mut AuthorityTransaction, payload: Value,
+) -> io::Result<Value> {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Request { cursor: Option<String>, limit: Option<usize> }
+    let request: Request = serde_json::from_value(payload)
+        .map_err(|_| invalid_input("invalid compact round head upgrade"))?;
+    let limit = request.limit.unwrap_or(16);
+    if !(1..=32).contains(&limit) { return Err(invalid_input("compact head upgrade limit exceeds 32")); }
+    let suffix = cursor_start("round_heads", request.cursor.as_deref())?;
+    let start = super::entity_key(transaction, TURN_DOCUMENT_NAMESPACE, &suffix)?;
+    let (_, end) = EntityKey::prefix_range(transaction.tenant_id(), transaction.owner_user_id(),
+        TURN_DOCUMENT_NAMESPACE, b"")?;
+    let rows = database.entity_scan(transaction, &start, &end, limit)?;
+    let mut repaired = 0;
+    for (key, stored) in &rows {
+        let document = super::materialize_turn(database, transaction, stored)?;
+        let map = &document;
+        let conv = required_text(&document, "conversationId")?;
+        let id = required_text(&document, "turnId")?;
+        if *key != super::turn_key(transaction, &conv, &id)? {
+            return Err(invalid_data("Turn upgrade document identity differs"));
+        }
+        let lane = required_text(&document, "laneId")?;
+        let ordinal = unsigned_field(map, "ordinal")?;
+        let head_key = super::lane_compaction_index_key(transaction, &conv, &lane, ordinal)?;
+        let expected = super::lane_compaction_index_value(map)?;
+        if database.entity_get(transaction, &head_key)?.as_deref() != Some(expected.as_slice()) {
+            super::put_lane_compaction_index(database, transaction, map)?;
+            repaired += 1;
+        }
+    }
+    let cursor = if rows.len() == limit {
+        Some(format!("round_heads:{}", rows.last().unwrap().0.key_bytes().iter()
+            .map(|b| format!("{b:02x}")).collect::<String>()))
+    } else { None };
+    Ok(json!({"scanned": rows.len(), "repaired": repaired, "cursor": cursor}))
+}
+
 pub(crate) fn execute(
     database: &mut AuthorityDatabase,
     tenant: u64,
@@ -683,6 +726,11 @@ pub(crate) fn execute(
 ) -> io::Result<Value> {
     let mut transaction = database.begin_with_identity_claim_scopes(tenant, owner)?;
     match operation {
+        "migration.turn.round_heads.upgrade" => {
+            let result = upgrade_round_heads(database, &mut transaction, payload)?;
+            if result["repaired"].as_u64().unwrap_or(0) > 0 { database.commit(transaction)?; }
+            Ok(result)
+        }
         operation if operation.starts_with("migration.turn.tombstone.") => {
             tombstones::execute(database, transaction, operation, payload)
         }

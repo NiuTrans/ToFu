@@ -1,6 +1,6 @@
 """Key-pick convenience and the non-streaming dispatch_chat operation."""
 
-from lib.llm_errors import (
+from lib.llm.llm_errors import (
     is_subscription_quota_error,
     parse_subscription_retry_after,
 )
@@ -17,6 +17,8 @@ from lib.llm_dispatch._api_hygiene import (
 )
 from lib.llm_dispatch._api_stream_state import _cycling_can_ever_serve
 from ._route_trace import RouteAttemptTrace
+
+from lib.llm.diagnostic_timing import timed_call, timed_call_with_fields, timed_stage
 
 logger = get_logger('lib.llm_dispatch.api')
 
@@ -40,6 +42,7 @@ def pick_key_for_model(model: str) -> tuple:
     return get_dispatcher().pick_key_for_model(model)
 
 
+@timed_stage('dispatch_total')
 def dispatch_chat(messages, *, max_tokens=4096, temperature=0,
                   thinking_enabled=None, preset='low', effort=None,
                   thinking_depth=None,
@@ -75,7 +78,7 @@ def dispatch_chat(messages, *, max_tokens=4096, temperature=0,
         raise ValueError('model_budget_admit must be callable')
     from lib.llm import AbortedError, BadRequestError, ContentFilterError, InvalidImageError, PermissionError_, PromptTooLongError, RateLimitError, StreamOnlyError, chat
     from lib.llm._transport import abortable_sleep
-    from lib.llm_errors import (
+    from lib.llm.llm_errors import (
         EndpointUnreachableError, LocalRequestPreparationError,
         ModelRouteMissingError, RequestScopedError,
     )
@@ -87,7 +90,7 @@ def dispatch_chat(messages, *, max_tokens=4096, temperature=0,
     # change is discoverable in audit.log without a code-search.
     _audit_severity_downgrade()
     max_429_attempts = _validate_429_attempt_budget(max_429_attempts)
-    dispatcher = get_dispatcher()
+    dispatcher = timed_call('route_resolution', get_dispatcher)
     exclude = set(exclude_models) if exclude_models else set()
     exclude_keys = set()      # keys to exclude entirely (transient classes)
     exclude_pairs = set()     # (key_name, model) pairs to exclude (transient classes)
@@ -141,6 +144,7 @@ def dispatch_chat(messages, *, max_tokens=4096, temperature=0,
     _credential_delivery_anomaly_count = 0
     _queue_wait_ms = 0.0
 
+    @timed_stage('dispatcher_wait')
     def _queue_sleep(seconds: float) -> None:
         nonlocal _queue_wait_ms
         wait_started = time.monotonic()
@@ -196,7 +200,7 @@ def dispatch_chat(messages, *, max_tokens=4096, temperature=0,
         # Caller-provided exclude_models must apply on attempt 1 too
         # (failure-driven exclusions only kick in after total_attempts>0).
         _eff_exclude = exclude if exclude else None
-        slot = dispatcher.pick_and_reserve(
+        slot = timed_call('route_selection', dispatcher.pick_and_reserve,
             capability=capability,
             prefer_model=prefer_model,
             exclude_models=_eff_exclude,
@@ -271,7 +275,11 @@ def dispatch_chat(messages, *, max_tokens=4096, temperature=0,
                 route_trace.note_cause('route_rescore')
             route_trace.start(slot)
             from lib.llm_dispatch.context_policy import slot_context_window
-            content, usage = chat(
+            content, usage = timed_call_with_fields('provider_call', {
+                'model': slot.model,
+                'provider_id': getattr(slot, 'routing_provider_id', '') or slot.provider_id,
+                'protocol': slot.protocol or 'openai',
+            }, chat,
                 context_window=slot_context_window(slot),
                 model=slot.model, messages=messages,
                 max_tokens=max_tokens, temperature=temperature,
@@ -294,7 +302,7 @@ def dispatch_chat(messages, *, max_tokens=4096, temperature=0,
                     getattr(slot, 'responses_profile', '') or 'compatible'),
                 oauth=slot.oauth or '',
                 adapter=slot.adapter or None,
-                owner_user_id=owner_user_id,
+                owner_user_id=owner_user_id, abort_check=abort_check,
                 **({'model_budget_admit': model_budget_admit} if model_budget_admit is not None else {}),
             )
             latency = (time.time() - t0) * 1000
@@ -443,7 +451,7 @@ def dispatch_chat(messages, *, max_tokens=4096, temperature=0,
                                'forced refresh failed; normal failover',
                                log_prefix, slot.key_name, slot.model, slot.oauth)
             latency = (time.time() - t0) * 1000
-            slot.record_error(is_rate_limit=False, error=str(e)[:200])
+            slot.record_error(is_rate_limit=False, error=e)
             last_err = e
             route_trace.note_cause(type(e).__name__)
             hard_attempts += 1

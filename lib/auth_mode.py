@@ -184,17 +184,10 @@ def requires_credential() -> bool:
 
 
 def open_mode_allows_remote() -> bool:
-    """Whether the operator opted remote peers into the open-mode grant.
+    """Whether the operator explicitly admitted remote open-mode peers.
 
-    ``TOFU_OPEN_MODE_ALLOW_REMOTE`` (1/true/yes/on) lets NON-loopback peers
-    receive the synthetic local-admin context in open mode — the only
-    configuration where unauthenticated, IP-distinguishable strangers can
-    reach the API. Single source of truth for both the auth gate
-    (``routes/api_v1/auth.py``) and the open-mode per-IP throttle
-    (``lib/rate_limit_api.py``): the throttle auto-arms only when this is
-    set, because in a loopback-only install every throttled IP is the
-    operator themselves (owner incident 2026-08-14: the UI's own ambient
-    polling ate the 120/min anti-hammer budget, 606 self-429s/day).
+    This is the authentication grant boundary's configuration parser.
+    Request throughput does not influence peer admission.
     """
     return os.environ.get('TOFU_OPEN_MODE_ALLOW_REMOTE', '').strip().lower() \
         in ('1', 'true', 'yes', 'on')

@@ -78,7 +78,12 @@ class OrchestrationBranchRuntime:
 
     def run(self, branch_id: str, context: str) -> str | None:
         """Return the selected successor, falling back to edge order."""
-        next_nodes = list(self._successors(branch_id))
+        native_branch = getattr(self._navigator, 'supports_native_branch', lambda: False)()
+        if native_branch:
+            configured_classifier = (self._nodes[branch_id].get('params') or {}).get('classifier')
+            next_nodes, needs_classifier = self._navigator.branch_plan(branch_id, bool(configured_classifier))
+        else:
+            next_nodes = list(self._successors(branch_id))
         if not next_nodes:
             self._emit({
                 'type': 'branch_pick',
@@ -91,10 +96,12 @@ class OrchestrationBranchRuntime:
         node = self._nodes[branch_id]
         params = node.get('params') or {}
         classifier_role = params.get('classifier')
-        chosen = next_nodes[0]
+        chosen = None if native_branch else next_nodes[0]
         how = 'first-edge'
 
-        if classifier_role and len(next_nodes) > 1:
+        labels = {}
+        verdict = ''
+        if (needs_classifier if native_branch else (classifier_role and len(next_nodes) > 1)):
             labels = {
                 target: self._navigator.node_label(target)
                 for target in next_nodes
@@ -115,10 +122,15 @@ class OrchestrationBranchRuntime:
                     'tier': params.get('tier') or 'light',
                 },
             }
-            classifier_choice = self._classifier_choice(
-                self._run_classifier(classifier, context), labels)
-            if classifier_choice is not None:
-                chosen, how = classifier_choice, 'classifier'
+            verdict = self._run_classifier(classifier, context)
+            if not native_branch:
+                classifier_choice = self._classifier_choice(verdict, labels)
+                if classifier_choice is not None:
+                    chosen, how = classifier_choice, 'classifier'
+
+        if native_branch:
+            chosen, classifier_selected = self._navigator.branch_choose(branch_id, verdict, labels)
+            how = 'classifier' if classifier_selected else 'first-edge'
 
         self._emit({
             'type': 'branch_pick',

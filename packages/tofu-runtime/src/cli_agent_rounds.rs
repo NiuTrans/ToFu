@@ -18,7 +18,12 @@ impl Serialize for Frame<'_> {
         let mut map=serializer.serialize_map(Some(fields.len()+usize::from(self.history.is_some())+usize::from(self.checkpoint.is_some())))?;
         for (key,value) in fields {map.serialize_entry(key,value)?;}
         if let Some(history)=self.history {map.serialize_entry("messages",history)?;}
-        if let Some(checkpoint)=self.checkpoint {let mut state=*checkpoint;state.model_account=self.account;state.deadline_unix_ms=self.deadline_unix_ms;map.serialize_entry("state",&state)?;}
+        if let Some(checkpoint)=self.checkpoint {
+            let mut state=*checkpoint;state.model_account=self.account;state.deadline_unix_ms=self.deadline_unix_ms;
+            if self.metadata["action"] == "pending" {
+                map.serialize_entry("state",&tofu_runtime::agent_checkpoint::PendingView(state))?;
+            } else { map.serialize_entry("state",&state)?; }
+        }
         map.end()
     }
 }
@@ -42,11 +47,17 @@ pub(crate) struct Rounds {
     pub epoch: String,
     pub frame_bytes: usize,
     pub prepare_history: bool,
+    pub tool_siblings: bool,
+    pub prepared_tools: Option<Arc<tofu_runtime::prepared_tool_wire::PreparedToolWire>>,
     pub progress_limits: tofu_runtime::progress::Limits,
     pub checkpoint_binding: Option<String>,
     pub checkpoint_account: Option<Arc<tofu_runtime::model_account::Account>>,
     pub checkpoint_account_policy: Option<Value>,
     pub shared_counter_policy: Option<Value>,
+    pub priced_checkpoint: bool,
+    pub tree_checkpoint: bool,
+    pub actor_checkpoint: bool,
+    pub pending_checkpoint: bool,
     pub deadline_unix_ms: Option<u64>,
     pub checkpoint_suspended: Option<Arc<std::sync::atomic::AtomicBool>>,
     pub preparation_deadline: Option<Arc<std::sync::OnceLock<Option<u64>>>>,
@@ -139,7 +150,10 @@ impl Rounds {
                 }
             };
             let publish = async {
-                if (self.prepare_history && kind == "round_request") || checkpoint.is_some() {
+                if (self.prepare_history && kind == "round_request") || checkpoint.is_some()
+                    // Reconciliation carries the loaded history too. It owns
+                    // this same exclusive control slot and frame/deadline bound.
+                    || (kind == "checkpoint_request" && value.get("state").is_some()) {
                     crate::cli_agent::publish_preparation(&self.runtime, &bytes, publication_cancelled, &self.control, session).await
                 } else {
                     crate::cli_agent::publish_request(&self.runtime, &bytes, publication_cancelled, &self.control).await
@@ -196,12 +210,22 @@ impl Admission for Rounds {
         let prepared = decision.as_object_mut().and_then(|v|v.remove("messages"));
         if self.prepare_history != prepared.is_some() { return Err(failure()); }
         let prepared = prepared.map(|v| match v { Value::Array(values)=>Ok(values),_=>Err(failure()) }).transpose()?;
+        let tools=decision.as_object_mut().and_then(|v|v.remove("wire_tools"));
+        if self.prepared_tools.is_some()!=tools.is_some() { return Err(failure()); }
+        if let (Some(state),Some(tools))=(&self.prepared_tools,tools) {
+            state.install(round,&tools).map_err(|_|failure())?;
+        }
         let rounds = self.clone();
         let session = self.session.clone();
         let permit = Permit::new(Box::new(move |outcome| {
             let evidence = match outcome {
                 Evidence::Returned(r) => {
-                    json!({"kind":"returned","usage":r.usage,"usage_observation":tofu_runtime::usage::evidence(&r.usage),"provider_state":r.state.as_str(),"finish_reason":r.finish_reason,"malformed_frames":r.malformed_frames})
+                    let mut evidence=json!({"kind":"returned","usage":r.usage,"usage_observation":tofu_runtime::usage::evidence(&r.usage),"provider_state":r.state.as_str(),"finish_reason":r.finish_reason,"malformed_frames":r.malformed_frames});
+                    if let Some(cost)=&r.cost { evidence["cost"]=(**cost).clone(); }
+                    if rounds.tool_siblings {
+                        evidence["model_calls"] = r.message.get("tool_calls").cloned().unwrap_or(json!([]));
+                    }
+                    evidence
                 }
                 Evidence::Failed(e) => json!({"kind":"failed","error":e}),
                 Evidence::Stopped => json!({"kind":"stopped"}),
@@ -259,6 +283,16 @@ impl tofu_runtime::agent_checkpoint::Port for Rounds {
         let mut reply=self.checkpoint_exchange("load",0,None,identity.session)?;
         let state=reply.as_object_mut().and_then(|v|v.remove("state"));
         if let Some(state)=&state {
+            if !self.tree_checkpoint && (state["shared_model_account"].get("root_tokens").is_some()
+                || state["host_fee_projection"].get("child_rounds").is_some()) {
+                return Err(failure());
+            }
+            match (self.priced_checkpoint,state.get("host_fee_projection")) {
+                (false,None) => {},
+                (true,Some(fees)) if fees["owner_user_id"] == self.owner && fees["task_id"] == self.task_id
+                    && fees["rounds"].as_array().map(|rows|rows.len() as u64) == state["next_round"].as_u64() => {},
+                _ => return Err(failure()),
+            }
             match (self.deadline_unix_ms, state.get("deadline_unix_ms")) {
                 (None, None) => {},
                 (Some(expected), Some(saved)) if saved.as_u64() == Some(expected) => {},
@@ -267,7 +301,12 @@ impl tofu_runtime::agent_checkpoint::Port for Rounds {
             match (&self.shared_counter_policy,state.get("shared_model_account")) {
                 (None,None) => {},
                 (Some(policy),Some(saved)) if saved["counter_policy"] == *policy && saved["owner_user_id"] == self.owner
-                    && saved["root_task_id"] == self.task_id && state.get("model_account").is_none() => {},
+                    && (if self.actor_checkpoint {
+                        saved["actor_task_id"] == self.task_id && saved["root_task_id"].as_str()
+                            .is_some_and(|root| !root.is_empty() && root != self.task_id)
+                            && saved.get("root_tokens").is_none()
+                    } else { saved.get("actor_task_id").is_none() && saved["root_task_id"] == self.task_id })
+                    && state.get("model_account").is_none() => {},
                 _ => return Err(failure()),
             }
             match (&self.checkpoint_account,state.get("model_account")) {
@@ -285,6 +324,24 @@ impl tofu_runtime::agent_checkpoint::Port for Rounds {
     fn begin(&self,identity:tofu_runtime::agent_checkpoint::Identity<'_>,round:usize)->Result<(),Value>{
         self.checkpoint_exchange("begin",round,None,identity.session).map(|_|())
     }
+    fn pending(&self,view:tofu_runtime::agent_checkpoint::View<'_>)->Result<(),Value>{
+        if !self.pending_checkpoint { return Ok(()); }
+        self.checkpoint_exchange("pending",view.next_round-1,Some(&view),view.identity.session).map(|_|())
+    }
+    fn reconcile(&self,identity:tofu_runtime::agent_checkpoint::Identity<'_>,state:&Value)
+        ->Result<Vec<tofu_runtime::agent_checkpoint::ReconciledTool>,Value>{
+        if !self.pending_checkpoint || state["tools_pending"] != true { return Err(failure()); }
+        let round=state["next_round"].as_u64().and_then(|value|value.checked_sub(1)).ok_or_else(failure)?;
+        let request=json!({"version":self.version,"type":"checkpoint_request","request_id":format!("{}-checkpoint-reconcile-{round}",self.task_id),"owner_user_id":self.owner,"task_id":self.task_id,"epoch":self.epoch,"binding":self.checkpoint_binding,"round":round,"action":"reconcile","state":state,"deadline_monotonic_ns":self.inherited_deadline()?});
+        let reply=self.exchange(request,"checkpoint_decision",identity.session,false,None)?;
+        if reply["accepted"] != true || reply["disposition"] != "continue" || reply.get("state").is_some() { return Err(failure()); }
+        reply["tool_observations"].as_array().ok_or_else(failure)?.iter().map(|row| {
+            Ok(tofu_runtime::agent_checkpoint::ReconciledTool {
+                call_id:row["call_id"].as_str().ok_or_else(failure)?.into(),
+                content:row.get("content").ok_or_else(failure)?.clone(),
+            })
+        }).collect()
+    }
     fn complete(&self,view:tofu_runtime::agent_checkpoint::View<'_>)->Result<tofu_runtime::agent_checkpoint::Disposition,Value>{
         let reply=self.checkpoint_exchange("complete",view.next_round-1,Some(&view),view.identity.session)?;
         let suspended = reply["disposition"] == "suspend";
@@ -298,7 +355,8 @@ impl Rounds {
     fn checkpoint_exchange<'a>(&'a self,action:&str,round:usize,state:Option<&'a tofu_runtime::agent_checkpoint::View<'a>>,session:&ExecutionSession)->Result<Value,Value>{
         let reply=self.exchange_checkpoint(json!({"version":self.version,"type":"checkpoint_request","request_id":format!("{}-checkpoint-{action}-{round}",self.task_id),"owner_user_id":self.owner,"task_id":self.task_id,"epoch":self.epoch,"binding":self.checkpoint_binding,"round":round,"action":action,"deadline_monotonic_ns":self.inherited_deadline()?}),"checkpoint_decision",session,false,None,state)?;
         if reply["accepted"]!=true {return Err(json!({"kind":"checkpoint_policy_failed","message":"native host checkpoint policy refused"}));}
-        if (action!="load" && reply.get("state").is_some()) || (action!="complete" && reply["disposition"]!="continue") {return Err(failure());}
+        if (action!="load" && reply.get("state").is_some()) || (action!="complete" && reply["disposition"]!="continue")
+            || reply.get("tool_observations").is_some() {return Err(failure());}
         Ok(reply)
     }
 }

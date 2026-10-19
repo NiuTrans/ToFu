@@ -4,6 +4,8 @@ import base64
 import io
 import os
 import time
+import tempfile
+from typing import BinaryIO
 
 from quart import Blueprint, request
 
@@ -47,7 +49,7 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # runtime base (co-located with the DB that references them by /api/images/
 # URL), NOT the code tree — see lib/runtime_paths.uploads_root(). In the
 # default in-tree layout this is byte-identical to <repo>/uploads/images.
-from lib.runtime_paths import uploads_root  # noqa: E402
+from lib.runtime.runtime_paths import uploads_root  # noqa: E402
 # TODO(enterprise, I6): flat single-tenant directory — serve_image performs
 # no ownership check; namespace keys per principal and authorize reads.
 # docs/ENTERPRISE_EVOLUTION.md
@@ -56,12 +58,13 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 
 # ══════════════════════════════════════════════════════
-#  SSRF / size guard for user-supplied image URLs (B10)
+#  SSRF / transport guard for user-supplied image URLs (B10)
 # ══════════════════════════════════════════════════════
 # /api/images/generate accepts arbitrary `image_url` strings in its
 # `history` and `source_images` payloads. Without guards a tunnel-
 # authenticated client can probe internal services or cloud-metadata
-# endpoints, or stream multi-GB bodies into RAM. ``_safe_image_fetch``
+# endpoints. File-backed intake avoids accumulating download chunks in RAM.
+# ``_safe_image_fetch``
 # is the single chokepoint: every place that resolves a remote
 # user-supplied image URL goes through it.
 #
@@ -70,37 +73,11 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 # exact-match hostnames) when self-hosting requires reaching a
 # private endpoint.
 
-_DEFAULT_IMAGE_FETCH_MAX_BYTES = 10 * 1024 * 1024  # 10 MB
-_DEFAULT_IMAGE_UPLOAD_MAX_BYTES = 32 * 1024 * 1024  # compressed/on-wire image
 _DEFAULT_IMAGE_UPLOAD_MAX_PIXELS = 40_000_000       # ~160 MiB RGBA decode
 
 
-def _image_fetch_max_bytes() -> int:
-    raw = (os.environ.get('TOFU_IMAGE_FETCH_MAX_BYTES') or '').strip()
-    if not raw:
-        return _DEFAULT_IMAGE_FETCH_MAX_BYTES
-    try:
-        n = int(raw)
-        if n > 0:
-            return n
-    except ValueError as e:
-        logger.debug('[ImageFetch] Invalid TOFU_IMAGE_FETCH_MAX_BYTES=%r: %s', raw, e)
-    return _DEFAULT_IMAGE_FETCH_MAX_BYTES
-
-
 class _ImageFetchError(Exception):
-    """Raised when a user-supplied image URL fails the SSRF / size guard."""
-
-
-def _image_upload_max_bytes() -> int:
-    raw = (os.environ.get('TOFU_IMAGE_UPLOAD_MAX_BYTES') or '').strip()
-    try:
-        value = int(raw) if raw else _DEFAULT_IMAGE_UPLOAD_MAX_BYTES
-    except ValueError as exc:
-        logger.debug('[ImageUpload] Invalid TOFU_IMAGE_UPLOAD_MAX_BYTES=%r: %s',
-                     raw, exc)
-        value = _DEFAULT_IMAGE_UPLOAD_MAX_BYTES
-    return max(1024, min(value, _DEFAULT_IMAGE_UPLOAD_MAX_BYTES))
+    """Raised when a user-supplied image URL fails the SSRF / transport guard."""
 
 
 def _image_upload_max_pixels() -> int:
@@ -114,14 +91,42 @@ def _image_upload_max_pixels() -> int:
     return max(1_000_000, min(value, _DEFAULT_IMAGE_UPLOAD_MAX_PIXELS))
 
 
-def _upload_image_dimension_error(image_bytes: bytes) -> tuple[str, bool] | None:
+def _image_source_length(source):
+    if isinstance(source, bytes):
+        return len(source)
+    source.seek(0, 2)
+    length = source.tell()
+    source.seek(0)
+    return length
+
+
+def _image_decode_source(source):
+    if isinstance(source, bytes):
+        return io.BytesIO(source)
+    source.seek(0)
+    return source
+
+
+def _write_image_source(source, output):
+    if isinstance(source, bytes):
+        output.write(source)
+        return
+    source.seek(0)
+    while True:
+        chunk = source.read(64 * 1024)
+        if not chunk:
+            return
+        output.write(chunk)
+
+
+def _upload_image_dimension_error(image_bytes: bytes | BinaryIO) -> tuple[str, bool] | None:
     """Return ``(message, oversized)`` before any full Pillow decode."""
     try:
         from PIL import Image
     except ImportError:
         return None
     try:
-        with Image.open(io.BytesIO(image_bytes)) as image:
+        with Image.open(_image_decode_source(image_bytes)) as image:
             width, height = image.size
     except Exception as exc:
         logger.debug('[ImageUpload] image header validation failed: %s', exc)
@@ -146,30 +151,36 @@ def _is_blocked_ip(ip_str: str) -> bool:
     return not ip_is_public(ip_str)
 
 
-def _safe_image_fetch(url: str, *, timeout: int = 30) -> tuple[bytes, str]:
-    """Fetch ``url`` with SSRF + size guards. Returns (body_bytes, content_type).
+def _safe_image_fetch(url: str, *, timeout: int = 30) -> tuple[BinaryIO, str]:
+    """Return a caller-owned complete image file through public egress checks.
 
-    Raises ``_ImageFetchError`` (caught by callers) when:
-      * scheme is not http/https
-      * hostname resolves to a private/loopback/link-local IP (and is not in
-        the explicit allow-list)
-      * response body exceeds ``TOFU_IMAGE_FETCH_MAX_BYTES`` (default 10 MB)
-
-    The request streams (``stream=True``) and aborts as soon as the size cap
-    is reached, so an attacker cannot OOM the server with a huge body.
+    Validate every redirect hop; keep per-read network timeouts. Source bytes
+    and ongoing download duration have no private admission ceiling.
     """
-    from lib.safe_fetch import SafeFetchError, fetch_public_bytes
+    from lib.safe_fetch import SafeFetchError, fetch_public_file
     try:
-        body, content_type, _final_url = fetch_public_bytes(
-            url,
-            max_bytes=_image_fetch_max_bytes(),
-            timeout=timeout,
-            max_redirects=3,
+        source, content_type, _final_url = fetch_public_file(
+            url, timeout=timeout, max_redirects=3,
             allow_hosts_env='TOFU_IMAGE_FETCH_ALLOW_HOSTS',
-        )
-        return body, content_type
+            enforce_total_timeout=False)
+        return source, content_type
     except SafeFetchError as exc:
         raise _ImageFetchError(str(exc)) from exc
+
+
+def _encode_image_source(source: BinaryIO) -> tuple[str, int]:
+    """Encode complete file bytes without retaining a decoded source copy."""
+    source.seek(0)
+    encoded = io.StringIO()
+    total = 0
+    # Every non-final block is divisible by three; padding occurs only at EOF.
+    with encoded:
+        while True:
+            chunk = source.read(65535)
+            if not chunk:
+                return encoded.getvalue(), total
+            total += len(chunk)
+            encoded.write(base64.b64encode(chunk).decode('ascii'))
 
 
 # ══════════════════════════════════════════════════════
@@ -223,7 +234,7 @@ def get_upload_policy() -> dict:
     }
 
 
-def _shrink_upload_image(img_bytes: bytes, detected_fmt: str) -> tuple[bytes, str, dict]:
+def _shrink_upload_image(img_bytes: bytes | BinaryIO, detected_fmt: str) -> tuple[bytes | BinaryIO, str, dict]:
     """Downscale + re-encode an uploaded image if it exceeds wire-size targets.
 
     Never modifies GIFs (they may be animated) or BMPs (edge case, rare).
@@ -234,7 +245,8 @@ def _shrink_upload_image(img_bytes: bytes, detected_fmt: str) -> tuple[bytes, st
         (new_bytes, new_ext, info_dict). If unchanged, returns the original
         bytes, the original extension, and info with ``shrunk=False``.
     """
-    info = {'shrunk': False, 'reason': '', 'original_bytes': len(img_bytes)}
+    source_bytes = _image_source_length(img_bytes)
+    info = {'shrunk': False, 'reason': '', 'original_bytes': source_bytes}
 
     # Never touch GIF (animated) or BMP (uncommon, tiny population)
     if detected_fmt in ('gif', 'bmp'):
@@ -251,7 +263,7 @@ def _shrink_upload_image(img_bytes: bytes, detected_fmt: str) -> tuple[bytes, st
         return img_bytes, ext, info
 
     try:
-        img = Image.open(io.BytesIO(img_bytes))
+        img = Image.open(_image_decode_source(img_bytes))
         img.load()  # force full decode so we catch corrupt files here
     except Exception as e:
         logger.warning('[UploadShrink] PIL open failed (%s) — keeping original', e)
@@ -282,8 +294,8 @@ def _shrink_upload_image(img_bytes: bytes, detected_fmt: str) -> tuple[bytes, st
             logger.debug('[UploadShrink] alpha probe failed (%s) — keeping alpha path', e)
 
     # Skip if already small enough
-    if long_side <= SHRINK_SKIP_LONG_SIDE_PX and len(img_bytes) <= SHRINK_SKIP_MAX_BYTES:
-        info['reason'] = (f'already_small dims={w}x{h} bytes={len(img_bytes)}')
+    if long_side <= SHRINK_SKIP_LONG_SIDE_PX and source_bytes <= SHRINK_SKIP_MAX_BYTES:
+        info['reason'] = (f'already_small dims={w}x{h} bytes={source_bytes}')
         ext = '.' + ('jpg' if detected_fmt == 'jpeg' else detected_fmt)
         return img_bytes, ext, info
 
@@ -330,8 +342,8 @@ def _shrink_upload_image(img_bytes: bytes, detected_fmt: str) -> tuple[bytes, st
 
     # Sanity check: if re-encode somehow got LARGER (rare — tiny already-JPEGs
     # with high-entropy noise), keep original.
-    if len(new_bytes) >= len(img_bytes) and (new_w, new_h) == (w, h):
-        info['reason'] = f'reencode_bigger {len(new_bytes)}>={len(img_bytes)}'
+    if len(new_bytes) >= source_bytes and (new_w, new_h) == (w, h):
+        info['reason'] = f'reencode_bigger {len(new_bytes)}>={source_bytes}'
         ext = '.' + ('jpg' if detected_fmt == 'jpeg' else detected_fmt)
         return img_bytes, ext, info
 
@@ -343,7 +355,7 @@ def _shrink_upload_image(img_bytes: bytes, detected_fmt: str) -> tuple[bytes, st
         'from_fmt': detected_fmt,
         'to_fmt': new_fmt,
         'new_bytes': len(new_bytes),
-        'ratio': round(len(new_bytes) / max(1, len(img_bytes)), 3),
+        'ratio': round(len(new_bytes) / max(1, source_bytes), 3),
     })
     return new_bytes, new_ext, info
 
@@ -354,156 +366,74 @@ def _shrink_upload_image(img_bytes: bytes, detected_fmt: str) -> tuple[bytes, st
 
 @upload_bp.route('/api/images/upload', methods=['POST'])
 def upload_image():
-    # ── JSON base64 upload (from frontend uploadImageToServer) ──
     if request.is_json:
         data = parse_body(exact=('base64', 'mediaType',))
-        b64_data = data.get('base64', '')
+        encoded = data.get('base64', '')
+        if not isinstance(encoded, str) or not encoded:
+            return api_bad_request('Invalid base64 payload')
         media_type = data.get('mediaType', 'image/png')
-        if not b64_data:
-            return api_bad_request('No base64 data')
-        max_upload_bytes = _image_upload_max_bytes()
-        max_encoded = ((max_upload_bytes + 2) // 3) * 4 + 8
-        if not isinstance(b64_data, str) or len(b64_data) > max_encoded:
-            return api_error(
-                f'Image exceeds the {max_upload_bytes // (1024 * 1024)} MiB upload limit',
-                status=413)
-        # SVG is intentionally excluded — user-supplied SVGs can embed
-        # <script> and enable stored XSS when served inline. See §10.4.
-        ext_map = {
-            'image/png': '.png', 'image/jpeg': '.jpg', 'image/jpg': '.jpg',
-            'image/gif': '.gif', 'image/webp': '.webp',
-            'image/bmp': '.bmp',
-        }
-        if media_type not in ext_map:
-            logger.warning('[upload_image] Rejected media_type=%s (SVG/other not allowed)', media_type)
+        if media_type not in ('image/png', 'image/jpeg', 'image/jpg', 'image/gif', 'image/webp', 'image/bmp'):
             return api_error('Unsupported image type — SVG uploads are disabled for security. '
                              'Allowed: png, jpeg, gif, webp, bmp.', status=400)
-        ext = ext_map.get(media_type, '.png')
-        try:
-            img_bytes = base64.b64decode(b64_data)
-        except Exception as e:
-            logger.warning('[upload_image] base64 decode failed: %s', e)
-            return api_bad_request('Invalid base64 payload')
-        if len(img_bytes) > max_upload_bytes:
-            return api_error(
-                f'Image exceeds the {max_upload_bytes // (1024 * 1024)} MiB upload limit',
-                status=413)
-        # ── Magic-bytes sanity check (defence in depth against content-type spoofing) ──
-        detected = _detect_image_format(img_bytes[:32])
-        if detected not in ('png', 'jpeg', 'gif', 'webp', 'bmp'):
-            logger.warning('[upload_image] Magic-bytes check failed: media_type=%s detected=%s len=%d',
-                           media_type, detected, len(img_bytes))
-            return api_bad_request('Payload does not match any supported image format')
-        dimension_error = _upload_image_dimension_error(img_bytes)
-        if dimension_error:
-            message, oversized = dimension_error
-            return api_error(message, status=413 if oversized else 400)
+        with tempfile.TemporaryFile(mode='w+b') as source:
+            try:
+                # Decode aligned base64 chunks to the existing local-file path;
+                # retain the complete source without a second whole byte copy.
+                for offset in range(0, len(encoded), 64 * 1024):
+                    source.write(base64.b64decode(encoded[offset:offset+64 * 1024], validate=True))
+            except (ValueError, TypeError) as error:
+                logger.warning('[upload_image] base64 decode failed: %s',error)
+                return api_bad_request('Invalid base64 payload')
+            return _persist_uploaded_image(source)
 
-        # Wire-size shrink (see module-level _shrink_upload_image docstring)
-        try:
-            img_bytes, ext, shrink_info = _shrink_upload_image(img_bytes, detected)
-        except Exception as e:
-            logger.warning('[upload_image] shrink unexpectedly raised: %s — keeping original',
-                           e, exc_info=True)
-            shrink_info = {'shrunk': False, 'reason': f'exc:{e}'}
-
-        # Append a short random suffix so two images uploaded in the SAME
-        # millisecond (the frontend now fires parallel uploads) can't collide
-        # on one filename — a collision would overwrite the first file and
-        # leave BOTH message rows pointing at the same image.
-        filename = f"{int(time.time()*1000)}_{os.urandom(4).hex()}{ext}"
-        filepath = os.path.join(UPLOAD_DIR, filename)
-        try:
-            # UPLOAD_DIR is normally created at module import, but the
-            # writable data mount can be replaced or cleaned while this
-            # long-lived process remains alive.  Re-establish the directory
-            # at the write boundary so one external cleanup does not make all
-            # later uploads fail until the server is restarted.
-            os.makedirs(UPLOAD_DIR, exist_ok=True)
-            with open(filepath, 'wb') as f:
-                f.write(img_bytes)
-        except Exception as e:
-            logger.error('[Common] image upload (base64) save failed: %s', e, exc_info=True)
-            return api_internal_error('internal_error')
-        if shrink_info.get('shrunk'):
-            logger.info('[upload_image] Saved %s — shrunk %s→%s, %d→%d bytes (ratio=%.2f, %s→%s)',
-                        filename, shrink_info.get('from_dims'), shrink_info.get('to_dims'),
-                        shrink_info.get('original_bytes'), shrink_info.get('new_bytes'),
-                        shrink_info.get('ratio'),
-                        shrink_info.get('from_fmt'), shrink_info.get('to_fmt'))
-        else:
-            logger.info('[upload_image] Saved %s (%d bytes) from base64 (detected=%s, shrink_skipped=%s)',
-                        filename, len(img_bytes), detected, shrink_info.get('reason', '?'))
-        return api_ok({'url': f'/api/images/{filename}', 'filename': filename})
-
-    # ── Multipart form upload (traditional file upload) ──
     files = request_files()
     if 'file' not in files:
         return api_bad_request('No file')
-    file = files['file']
-    if not file.filename:
+    upload = files['file']
+    if not upload.filename:
         return api_bad_request('No filename')
-    ext = os.path.splitext(file.filename)[1].lower()
-    # SVG is intentionally excluded — user-supplied SVGs can embed <script>
-    # and enable stored XSS when served inline. See §10.4.
-    if ext not in ('.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp'):
-        logger.warning('[upload_image] Rejected extension=%s (SVG/other not allowed)', ext)
+    extension = os.path.splitext(upload.filename)[1].lower()
+    if extension not in ('.png','.jpg','.jpeg','.gif','.webp','.bmp'):
         return api_error('Unsupported image type — SVG uploads are disabled for security. '
-                         'Allowed: .png, .jpg, .jpeg, .gif, .webp, .bmp.', status=400)
-    # ── Magic-bytes sanity check ──
-    head = file.stream.read(32)
-    file.stream.seek(0)
-    detected = _detect_image_format(head)
-    if detected not in ('png', 'jpeg', 'gif', 'webp', 'bmp'):
-        logger.warning('[upload_image] Magic-bytes check failed: ext=%s detected=%s', ext, detected)
-        return api_bad_request('Payload does not match any supported image format')
+                         'Allowed: .png, .jpg, .jpeg, .gif, .webp, .bmp.',status=400)
+    return _persist_uploaded_image(upload.stream, upload.filename)
 
-    # Read full bytes so we can run the wire-size shrink before writing to disk
-    try:
-        file.stream.seek(0)
-        raw_bytes = file.stream.read(_image_upload_max_bytes() + 1)
-    except Exception as e:
-        logger.error('[upload_image] failed to read uploaded stream: %s', e, exc_info=True)
-        return api_internal_error('internal_error')
-    if len(raw_bytes) > _image_upload_max_bytes():
-        return api_error(
-            f'Image exceeds the {_image_upload_max_bytes() // (1024 * 1024)} MiB upload limit',
-            status=413)
-    dimension_error = _upload_image_dimension_error(raw_bytes)
+
+def _persist_uploaded_image(source, original_filename=None):
+    source.seek(0)
+    detected = _detect_image_format(source.read(32))
+    if detected not in ('png','jpeg','gif','webp','bmp'):
+        return api_bad_request('Payload does not match any supported image format')
+    dimension_error = _upload_image_dimension_error(source)
     if dimension_error:
         message, oversized = dimension_error
-        return api_error(message, status=413 if oversized else 400)
-
+        return api_error(message,status=413 if oversized else 400)
     try:
-        new_bytes, new_ext, shrink_info = _shrink_upload_image(raw_bytes, detected)
-    except Exception as e:
-        logger.warning('[upload_image] shrink unexpectedly raised: %s — keeping original',
-                       e, exc_info=True)
-        new_bytes, new_ext, shrink_info = raw_bytes, ext, {'shrunk': False, 'reason': f'exc:{e}'}
-
-    # Preserve user-supplied filename stem but use the (possibly new) extension
-    from werkzeug.utils import secure_filename
-    stem = os.path.splitext(secure_filename(os.path.basename(file.filename)))[0]
-    stem = (stem or 'image')[:80]
-    filename = f"{int(time.time()*1000)}_{os.urandom(4).hex()}_{stem}{new_ext}"
-    filepath = os.path.join(UPLOAD_DIR, filename)
+        image_source, extension, shrink_info = _shrink_upload_image(source,detected)
+    except Exception as error:
+        logger.warning('[upload_image] shrink failed: %s — keeping original',error,exc_info=True)
+        image_source,extension,shrink_info = source,'.'+('jpg' if detected=='jpeg' else detected),{'shrunk':False}
+    stem = ''
+    if original_filename is not None:
+        from werkzeug.utils import secure_filename
+        value = os.path.splitext(secure_filename(os.path.basename(original_filename)))[0]
+        stem = '_' + (value or 'image')[:80]
+    filename = f"{int(time.time()*1000)}_{os.urandom(4).hex()}{stem}{extension}"
+    filepath = os.path.join(UPLOAD_DIR,filename)
     try:
-        os.makedirs(UPLOAD_DIR, exist_ok=True)
-        with open(filepath, 'wb') as f:
-            f.write(new_bytes)
-    except Exception as e:
-        logger.error('[Common] image upload save failed: %s', e, exc_info=True)
+        os.makedirs(UPLOAD_DIR,exist_ok=True)
+        with open(filepath,'wb') as output:
+            _write_image_source(image_source,output)
+    except Exception as error:
+        logger.error('[upload_image] save failed: %s',error,exc_info=True)
+        try:
+            os.unlink(filepath)
+        except OSError as cleanup_error:
+            logger.warning('[upload_image] partial cleanup failed: %s', cleanup_error)
         return api_internal_error('internal_error')
-    if shrink_info.get('shrunk'):
-        logger.info('[upload_image] Saved %s — shrunk %s→%s, %d→%d bytes (ratio=%.2f, %s→%s)',
-                    filename, shrink_info.get('from_dims'), shrink_info.get('to_dims'),
-                    shrink_info.get('original_bytes'), shrink_info.get('new_bytes'),
-                    shrink_info.get('ratio'),
-                    shrink_info.get('from_fmt'), shrink_info.get('to_fmt'))
-    else:
-        logger.info('[upload_image] Saved %s (%d bytes) detected=%s shrink_skipped=%s',
-                    filename, len(new_bytes), detected, shrink_info.get('reason', '?'))
-    return api_ok({'url': f'/api/images/{filename}', 'filename': filename})
+    logger.info('[upload_image] Saved %s (%d source bytes, shrunk=%s)',filename,
+                _image_source_length(source),shrink_info.get('shrunk',False))
+    return api_ok({'url':f'/api/images/{filename}','filename':filename})
 
 
 @upload_bp.route('/api/images/<filename>')
@@ -721,21 +651,22 @@ def _resolve_history_images(history: list) -> list:
             filepath = os.path.join(UPLOAD_DIR, filename)
             try:
                 with open(filepath, 'rb') as f:
-                    raw = f.read()
-                image_b64 = base64.b64encode(raw).decode('ascii')
+                    image_b64, source_bytes = _encode_image_source(f)
                 if filename.endswith(('.jpg', '.jpeg')):
                     mime_type = 'image/jpeg'
                 elif filename.endswith('.webp'):
                     mime_type = 'image/webp'
-                logger.info('[ImageGen] Resolved local history image %s → %d bytes', filename, len(raw))
+                logger.info('[ImageGen] Resolved local history image %s → %d bytes', filename, source_bytes)
             except Exception as e:
                 logger.warning('[ImageGen] Failed to read local history image %s: %s', filepath, e)
                 continue
 
-        # ── Remote URL: download with SSRF + size guard ──
+        # ── Remote URL: download to an owned file with SSRF checks ──
         elif image_url.startswith(('http://', 'https://')):
             try:
-                body, ct = _safe_image_fetch(image_url)
+                source, ct = _safe_image_fetch(image_url)
+                with source:
+                    image_b64, source_bytes = _encode_image_source(source)
             except _ImageFetchError as e:
                 logger.warning('[ImageGen] Blocked history image %.80s: %s', image_url[:80], e)
                 continue
@@ -743,11 +674,10 @@ def _resolve_history_images(history: list) -> list:
                 logger.warning('[ImageGen] Failed to download history image %.80s: %s',
                                image_url[:80], e)
                 continue
-            image_b64 = base64.b64encode(body).decode('ascii')
             if ct.startswith('image/'):
                 mime_type = ct
             logger.info('[ImageGen] Downloaded history image %d: %.80s → %d bytes',
-                        i, image_url[:80], len(body))
+                        i, image_url[:80], source_bytes)
         else:
             logger.warning('[ImageGen] Unrecognized history image_url format: %.80s', image_url[:80])
             continue
@@ -791,26 +721,16 @@ def list_image_models():
 
 @upload_bp.route('/api/pdf/parse', methods=['POST'])
 def parse_pdf():
-    from lib.pdf_parser._common import MAX_PDF_BYTES
     files = request_files()
     if 'file' not in files:
         logger.warning('[parse_pdf] No file in request (content_length=%s)',
                        request.content_length)
         return api_bad_request('No file provided')
-    if request.content_length and request.content_length > MAX_PDF_BYTES:
-        logger.warning('[parse_pdf] File too large by content_length: %d bytes (%.1f MB, max %d MB)',
-                       request.content_length, request.content_length / 1048576,
-                       MAX_PDF_BYTES // 1048576)
-        return api_bad_request(f'File too large (max {MAX_PDF_BYTES // 1048576}MB)')
     file = files['file']
     if not file.filename:
         logger.warning('[parse_pdf] No filename in uploaded file')
         return api_bad_request('No filename')
     pdf_bytes = file.read()
-    if len(pdf_bytes) > MAX_PDF_BYTES:
-        logger.warning('[parse_pdf] File too large: %s (%d bytes, max %d)',
-                       file.filename, len(pdf_bytes), MAX_PDF_BYTES)
-        return api_bad_request('File too large')
     if pdf_bytes[:5] != b'%PDF-' and not file.filename.lower().endswith('.pdf'):
         logger.warning('[parse_pdf] Not a PDF: %s (header=%.10s)', file.filename, pdf_bytes[:10])
         return api_bad_request('Not a PDF')
@@ -824,7 +744,7 @@ def parse_pdf():
     try:
         max_text_chars = int(form.get('maxTextChars', 0))
         max_image_width = int(form.get('maxImageWidth', 1024))
-        max_images = int(form.get('maxImages', 20))
+        max_images = int(form['maxImages']) if 'maxImages' in form else None
 
     except (ValueError, TypeError) as e:
         logger.warning('[parse_pdf] Invalid numeric parameter: %s', e, exc_info=True)
@@ -884,28 +804,17 @@ def parse_pdf():
 def pdf_vlm_parse():
     """Start async VLM-based PDF parsing."""
     from lib.pdf_parser.vlm import start_vlm_task
-    from lib.pdf_parser._common import MAX_PDF_BYTES
 
     files = request_files()
     if 'file' not in files:
         logger.warning('[VLM-Parse] No file in request (content_length=%s)',
                        request.content_length)
         return api_bad_request('No file provided')
-    if request.content_length and request.content_length > MAX_PDF_BYTES:
-        logger.warning('[VLM-Parse] File too large by content_length: %d bytes (%.1f MB, max %d MB)',
-                       request.content_length, request.content_length / 1048576,
-                       MAX_PDF_BYTES // 1048576)
-        return api_bad_request(f'File too large (max {MAX_PDF_BYTES // 1048576}MB)')
     file = files['file']
     pdf_bytes = file.read()
     if not pdf_bytes:
         logger.warning('[VLM-Parse] Empty file: %s', file.filename)
         return api_bad_request('Empty file')
-    if len(pdf_bytes) > MAX_PDF_BYTES:
-        logger.warning('[VLM-Parse] File too large after read: %s (%d bytes, %.1f MB, max %d MB)',
-                       file.filename, len(pdf_bytes), len(pdf_bytes) / 1048576,
-                       MAX_PDF_BYTES // 1048576)
-        return api_bad_request(f'File too large (max {MAX_PDF_BYTES // 1048576}MB)')
 
     filename = file.filename or 'document.pdf'
     try:
@@ -983,14 +892,11 @@ def parse_document():
 
     Supports: .docx, .pptx, .xlsx, and plain text formats.
     """
-    from lib import FETCH_MAX_BYTES
     from lib.doc_parser import extract_document_text, is_supported_document
 
     files = request_files()
     if 'file' not in files:
         return api_bad_request('No file provided')
-    if request.content_length and request.content_length > FETCH_MAX_BYTES:
-        return api_bad_request(f'File too large (max {FETCH_MAX_BYTES // 1048576}MB)')
     file = files['file']
     if not file.filename:
         return api_bad_request('No filename')
@@ -999,11 +905,13 @@ def parse_document():
     if not is_supported_document(filename):
         return api_bad_request(f'Unsupported file format: {filename}')
 
-    file_bytes = file.read()
+    try:
+        file_bytes = file.read()
+    except Exception as exc:
+        logger.error('[parse_doc] receive failed for %s: %s', filename, type(exc).__name__)
+        return api_internal_error('Document receiving failed')
     if not file_bytes:
         return api_bad_request('Empty file')
-    if len(file_bytes) > FETCH_MAX_BYTES:
-        return api_bad_request('File too large')
 
     try:
         max_text_chars = int(request_form().get('maxTextChars', 0))

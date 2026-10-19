@@ -18,8 +18,8 @@ use std::{
 
 #[derive(Clone, Copy)]
 pub struct Budget {
-    pub rounds: usize,
-    pub tool_calls: usize,
+    pub rounds: Option<usize>,
+    pub tool_calls: Option<usize>,
     pub retained_bytes: usize,
     pub feedback_bytes: usize,
 }
@@ -136,6 +136,11 @@ struct Call {
     caller: Option<Value>,
     proof: Option<Result<crate::tool_contract::AdmittedCall, AdmissionError>>,
 }
+struct History {
+    messages: Vec<Value>,
+    usage: Vec<Value>,
+    admitted: bool,
+}
 impl Agent<'_> {
     pub fn run(
         &self,
@@ -145,33 +150,95 @@ impl Agent<'_> {
         messages: Vec<Value>,
     ) -> Result<Arc<TerminalCandidate>, TaskError> {
         let session = task.execution_session(owner)?;
-        task.run(owner, |_| self.drive(owner, task_id, &session, messages))
+        let mut history = History { messages, usage: Vec::new(), admitted: false };
+        task.run(owner, |_| self.drive(owner, task_id, &session, &mut history))
+    }
+    pub fn run_retained(
+        &self, task: &Task, owner: u64, task_id: &str, messages: Vec<Value>,
+    ) -> Result<Arc<TerminalCandidate>, TaskError> {
+        let session = task.execution_session(owner)?;
+        let mut history = History { messages, usage: Vec::new(), admitted: false };
+        task.run_captured(owner, |_| {
+            let output = std::panic::catch_unwind(std::panic::AssertUnwindSafe(||
+                self.drive(owner, task_id, &session, &mut history)))
+                .unwrap_or_else(|_| Err(json!({"kind":"generic","message":"native task execution panicked"})));
+            let execution = if history.admitted && (output.is_err() || output.as_ref().is_ok_and(Value::is_null)) {
+                let mut value = json!({});
+                value["messages"] = Value::Array(std::mem::take(&mut history.messages));
+                value["usage"] = Value::Array(std::mem::take(&mut history.usage));
+                Some(value)
+            } else {None};
+            (output, execution)
+        })
     }
     fn drive(
         &self,
         owner: u64,
         task_id: &str,
         session: &Arc<ExecutionSession>,
-        messages: Vec<Value>,
+        history: &mut History,
     ) -> Result<Value, Value> {
         let b = self.budget;
         if !session.belongs_to(owner, task_id)
             || !self.catalog.belongs_to(owner, self.epoch)
             || !self.handlers.belongs_to(owner, self.epoch)
-            || [b.rounds, b.tool_calls, b.retained_bytes, b.feedback_bytes].contains(&0)
-            || messages.iter().any(|v| !v.is_object())
+            || b.rounds == Some(0)
+            || [b.retained_bytes, b.feedback_bytes].contains(&0)
+            || history.messages.iter().any(|v| !v.is_object())
         {
             return Err(error("agent_configuration"));
         }
         let progress_limits = self.progress.map(|p| p.limits()).unwrap_or_default();
         let progress_enabled = progress_limits.no_progress_rounds > 0 || progress_limits.nonretryable_failure_rounds > 0;
         let mut progress = crate::progress::Ledger::default();
-        let mut messages = messages;
-        let mut usage = Vec::new();
+        let History {messages, usage, admitted} = history;
         let mut tool_count = 0usize;
         let mut next_round = 0usize;
         let checkpoint_binding = self.checkpoints.map(|port|port.binding()).unwrap_or("");
         let identity = || crate::agent_checkpoint::Identity {owner,task_id,epoch:self.epoch,binding:checkpoint_binding,session};
+        let finish_tool_round = |round: usize, tool_count: usize, messages: &[Value], usage: &[Value],
+                                 progress: &mut crate::progress::Ledger, call_signatures: &[[u8; 32]]|
+                                 -> Result<bool, Value> {
+            if progress_enabled {
+                if stopped(session)? { return Ok(true); }
+                let observation = match self.progress.unwrap().observe(crate::progress::Context {
+                    owner, task_id, round, tool_calls: call_signatures.len(), messages, session,
+                }) {
+                    Ok(observation) => observation,
+                    Err(error) => {
+                        if stopped(session)? { return Ok(true); }
+                        return Err(error);
+                    }
+                };
+                if stopped(session)? { return Ok(true); }
+                if !observation.fits_bytes(b.feedback_bytes) { return Err(error("agent_progress_budget")); }
+                if let Some(halt) = progress.observe(call_signatures, observation, progress_limits) {
+                    return Err(json!({
+                        "kind": match halt {crate::progress::Halt::NoProgress => "agent_no_progress", crate::progress::Halt::NonretryableFailure => "agent_nonretryable_tool_failure"},
+                        "message": "native agent halted by trusted post-tool progress evidence",
+                        "halted": true,
+                        "noProgressStreak": progress.no_progress_streak,
+                        "nonretryableFailureStreak": progress.nonretryable_failure_streak,
+                    }));
+                }
+            }
+            if let Some(port)=self.checkpoints {
+                if stopped(session)? {return Ok(true);}
+                let disposition=match port.complete(crate::agent_checkpoint::View {
+                    identity:identity(),next_round:round+1,tool_calls:tool_count,
+                    messages,usage,progress,budget:b,limits:progress_limits,model_account:None,deadline_unix_ms:None,
+                }) {
+                    Ok(value)=>value,
+                    Err(error)=>{if stopped(session)? {return Ok(true);} return Err(error);}
+                };
+                if matches!(disposition,crate::agent_checkpoint::Disposition::Suspend) {
+                    session.request_cancel("checkpoint_suspend").map_err(|_|error("execution_state"))?;
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        };
+        let mut pending_recovery = None;
         if let Some(port) = self.checkpoints {
             if checkpoint_binding.is_empty() {return Err(error("agent_checkpoint_binding"));}
             if stopped(session)? {return Ok(Value::Null);}
@@ -181,17 +248,58 @@ impl Agent<'_> {
             };
             if stopped(session)? {return Ok(Value::Null);}
             if let Some(state) = loaded {
+                // Retain the bounded saved authority only on the recovery path.
+                // Live execution and completed checkpoints allocate no extra copy.
+                let pending = (state["tools_pending"] == true).then(|| state.clone());
                 let state=crate::agent_checkpoint::restore(state,identity(),b,progress_limits)?;
-                next_round=state.next_round;tool_count=state.tool_calls;messages=state.messages;usage=state.usage;progress=state.progress;
+                pending_recovery = if state.tools_pending { pending } else { None };
+                next_round=state.next_round;tool_count=state.tool_calls;*messages=state.messages;*usage=state.usage;progress=state.progress;
             }
         }
         let mut usage_bytes = encoded_size(&usage,b.retained_bytes)?;
         let mut retained = encoded_size(&messages,b.retained_bytes.saturating_sub(usage_bytes))?
             .checked_add(usage_bytes).filter(|v|*v<=b.retained_bytes).ok_or_else(||error("agent_context_budget"))?;
+        *admitted = true;
+        if let Some(saved) = pending_recovery {
+            let port = self.checkpoints.expect("pending restoration requires its checkpoint port");
+            if stopped(session)? { return Ok(Value::Null); }
+            let observations = match port.reconcile(identity(), &saved) {
+                Ok(value) => value,
+                Err(error) => { if stopped(session)? { return Ok(Value::Null); } return Err(error); }
+            };
+            if stopped(session)? { return Ok(Value::Null); }
+            let calls = crate::agent_checkpoint::pending_calls(messages)
+                .ok_or_else(|| error("agent_checkpoint_invalid"))?.to_vec();
+            if observations.len() != calls.len() || observations.iter().zip(&calls)
+                .any(|(result, call)| call["id"] != result.call_id) {
+                return Err(error("agent_checkpoint_reconciliation"));
+            }
+            let mut signatures = Vec::new();
+            for (call, observation) in calls.iter().zip(observations) {
+                if progress_enabled {
+                    let arguments = crate::tool_policy::lossless_arguments(call["function"]["arguments"].as_str().unwrap())
+                        .map_err(|_| error("agent_tool_arguments"))?;
+                    signatures.push(crate::progress::call_signature(call["function"]["name"].as_str().unwrap(), &arguments)
+                        .map_err(|_| error("agent_tool_arguments"))?);
+                }
+                let content = observation.content;
+                let bytes = match &content { Value::String(text) => text.len(),
+                    _ => encoded_size(&content, b.feedback_bytes).map_err(|_| error("agent_feedback_budget"))? };
+                if bytes > b.feedback_bytes { return Err(error("agent_feedback_budget")); }
+                let mut feedback = json!({"role":"tool","tool_call_id":call["id"],"content":content});
+                if let Some(caller) = call.get("caller") { feedback["caller"] = caller.clone(); }
+                append(messages, feedback, &mut retained, b.retained_bytes)?;
+            }
+            // The same post-tool ledger and commit fence run before any new
+            // model reservation. The paid round and its tools are never replayed.
+            if finish_tool_round(next_round - 1, tool_count, messages, usage, &mut progress, &signatures)? {
+                return Ok(Value::Null);
+            }
+        }
         let ledger = if self.round_admission.is_some() {
             Some(crate::round_admission::Ledger::bind(session)?)
         } else {None};
-        for round in next_round..b.rounds {
+        for round in next_round..b.rounds.unwrap_or(usize::MAX) {
             if stopped(session)? {
                 return Ok(Value::Null);
             }
@@ -206,7 +314,7 @@ impl Agent<'_> {
                     task_id,
                     round,
                     session,
-                    messages: &messages,
+                    messages,
                 }) {
                     Ok(permit) => Some(permit.attach(ledger.as_ref().unwrap())),
                     Err(error) => {
@@ -230,7 +338,7 @@ impl Agent<'_> {
                         return Err(error);
                     }
                 };
-                messages = prepared;
+                *messages = prepared;
                 retained = size;
             }
             if stopped(session)? {
@@ -239,7 +347,7 @@ impl Agent<'_> {
                 }
                 return Ok(Value::Null);
             }
-            let response = self.provider.round(&messages, session);
+            let response = self.provider.round(messages, session);
             if let Some(permit) = permit {
                 permit.settle(&response)?;
             }
@@ -271,7 +379,7 @@ impl Agent<'_> {
             };
             tool_count = tool_count
                 .checked_add(calls.len())
-                .filter(|n| *n <= b.tool_calls)
+                .filter(|n| b.tool_calls.is_none_or(|limit| *n <= limit))
                 .ok_or_else(|| error("agent_tool_budget"))?;
             // Preflight the complete provider batch before any physical effect.
             let mut ids = BTreeSet::new();
@@ -312,26 +420,40 @@ impl Agent<'_> {
                     proof: Some(proof),
                 });
             }
-            if !prepared.is_empty() && round + 1 == b.rounds {
+            if !prepared.is_empty() && Some(round + 1) == b.rounds {
                 return Err(error("agent_round_budget"));
             }
             append(
-                &mut messages,
+                messages,
                 response.message,
                 &mut retained,
                 b.retained_bytes,
             )?;
             let before_usage = retained;
-            append(&mut usage, response.usage, &mut retained, b.retained_bytes)?;
+            append(usage, response.usage, &mut retained, b.retained_bytes)?;
             // Charge only the newly appended usage; never rescan older rounds.
             usage_bytes += retained - before_usage;
             if prepared.is_empty() {
-                return Ok(
-                    json!({"messages":messages,"usage":usage,"llm_rounds":round+1,"tool_calls":tool_count}),
-                );
+                let mut result = json!({});
+                result["messages"] = Value::Array(std::mem::take(messages));
+                result["usage"] = Value::Array(std::mem::take(usage));
+                result["llm_rounds"] = (round+1).into();
+                result["tool_calls"] = tool_count.into();
+                return Ok(result);
             }
             if stopped(session)? {
                 return Ok(Value::Null);
+            }
+            if let Some(port) = self.checkpoints {
+                if let Err(error) = port.pending(crate::agent_checkpoint::View {
+                    identity:identity(), next_round:round+1, tool_calls:tool_count,
+                    messages, usage, progress:&progress, budget:b, limits:progress_limits,
+                    model_account:None, deadline_unix_ms:None,
+                }) {
+                    if stopped(session)? { return Ok(Value::Null); }
+                    return Err(error);
+                }
+                if stopped(session)? { return Ok(Value::Null); }
             }
             let mut results: Vec<Option<Result<Value, ToolFailure>>> =
                 (0..prepared.len()).map(|_| None).collect();
@@ -431,44 +553,10 @@ impl Agent<'_> {
                 if let Some(caller) = call.caller {
                     feedback["caller"] = caller;
                 }
-                append(&mut messages, feedback, &mut retained, b.retained_bytes)?;
+                append(messages, feedback, &mut retained, b.retained_bytes)?;
             }
-            if progress_enabled {
-                if stopped(session)? { return Ok(Value::Null); }
-                let observation = match self.progress.unwrap().observe(crate::progress::Context {
-                    owner, task_id, round, tool_calls: call_signatures.len(), messages: &messages, session,
-                }) {
-                    Ok(observation) => observation,
-                    Err(error) => {
-                        if stopped(session)? { return Ok(Value::Null); }
-                        return Err(error);
-                    }
-                };
-                if stopped(session)? { return Ok(Value::Null); }
-                if !observation.fits_bytes(b.feedback_bytes) { return Err(error("agent_progress_budget")); }
-                if let Some(halt) = progress.observe(&call_signatures, observation, progress_limits) {
-                    return Err(json!({
-                        "kind": match halt {crate::progress::Halt::NoProgress => "agent_no_progress", crate::progress::Halt::NonretryableFailure => "agent_nonretryable_tool_failure"},
-                        "message": "native agent halted by trusted post-tool progress evidence",
-                        "halted": true,
-                        "noProgressStreak": progress.no_progress_streak,
-                        "nonretryableFailureStreak": progress.nonretryable_failure_streak,
-                    }));
-                }
-            }
-            if let Some(port)=self.checkpoints {
-                if stopped(session)? {return Ok(Value::Null);}
-                let disposition=match port.complete(crate::agent_checkpoint::View {
-                    identity:identity(),next_round:round+1,tool_calls:tool_count,
-                    messages:&messages,usage:&usage,progress:&progress,budget:b,limits:progress_limits,model_account:None,deadline_unix_ms:None,
-                }) {
-                    Ok(value)=>value,
-                    Err(error)=>{if stopped(session)? {return Ok(Value::Null);} return Err(error);}
-                };
-                if matches!(disposition,crate::agent_checkpoint::Disposition::Suspend) {
-                    session.request_cancel("checkpoint_suspend").map_err(|_|error("execution_state"))?;
-                    return Ok(Value::Null);
-                }
+            if finish_tool_round(round, tool_count, messages, usage, &mut progress, &call_signatures)? {
+                return Ok(Value::Null);
             }
         }
         Err(error("agent_round_budget"))

@@ -9,7 +9,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from lib.llm_json import extract_json
+from lib.llm.llm_json import extract_json
 from lib.tools.gateway import search_enabled_catalog
 
 from .dataset import CASES, CATALOG, SEARCH_TEXT_BY_NAME

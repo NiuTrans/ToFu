@@ -34,6 +34,43 @@ MAX_CANDIDATES = 16
 _FLAT_UTILITY = 0.5
 
 
+def baseline_stages() -> list[dict]:
+    """Generic procedure; the current objective has its own authoritative input."""
+    return [
+        {'kind': 'inspect', 'detail': 'Inspect the current objective context and constraints.'},
+        {'kind': 'plan', 'detail': (
+            'Translate each requirement into an acceptance check. Decompose broad scope '
+            'into actionable milestones with dependencies and concrete deliverables; '
+            'identify unresolved authorization or information without inventing answers.')},
+        {'kind': 'implement', 'detail': (
+            'Produce the requested deliverables incrementally, preserving existing work. '
+            'Use observed context rather than assuming files, sources or capabilities exist.')},
+        {'kind': 'verify', 'detail': (
+            'Run relevant checks against each acceptance criterion, capture real receipts, '
+            'and repair observed failures. Mark unavailable evidence unknown, not passed.')},
+        {'kind': 'deliver', 'detail': (
+            'Provide usable artifact references, the verification results, and remaining '
+            'limitations. A plan or self-reported success alone does not establish completion.')},
+    ]
+
+
+def reusable_stages(stages: list[dict]) -> list[dict]:
+    """Rebind only the recognized legacy scaffold; preserve custom procedures.
+
+    Historical plans and episode evidence stay immutable. Old baseline plans
+    embedded a (possibly truncated) goal in their inspect step. Copying that
+    target into a new goal's guidance or replay is neither reuse nor learning.
+    """
+    result = deepcopy(stages)
+    baseline = baseline_stages()
+    if (len(result) == len(baseline) and result[1:] == baseline[1:]
+            and result[0].get('kind') == 'inspect'
+            and str(result[0].get('detail') or '').startswith(
+                'Inspect the current context and constraints for this objective: ')):
+        result[0]['detail'] = baseline[0]['detail']
+    return result
+
+
 def load_active_policy(*, user_id):
     """The active planner-policy program (R3), or None.
 
@@ -203,7 +240,7 @@ def suggest_candidates(goal: dict, *, user_id,
             'path_id': f"replay-{episode['episode_id']}",
             'title': f"Replay local {episode['status']} path",
             'summary': f"adapted from episode {episode['episode_id']}",
-            'stages': deepcopy(past.get('stages') or []),
+            'stages': reusable_stages(past.get('stages') or []),
             'resource_refs': [ref],
             'expected_utility': 0.7 if episode['status'] == 'success' else 0.55,
             'expected_information_gain': _clamp_unit(ref.get('relevance')),
@@ -214,23 +251,7 @@ def suggest_candidates(goal: dict, *, user_id,
         'title': 'Inspect, implement and verify the goal',
         'summary': ('Generic milestone scaffold, not a researched or completed plan. '
                     'The executor must refine it from inspected context and report observed evidence.'),
-        'stages': [
-            {'kind': 'inspect', 'detail': (
-                'Inspect the current context and constraints for this objective: ' + query)[:1000]},
-            {'kind': 'plan', 'detail': (
-                'Translate each requirement into an acceptance check. Decompose broad scope '
-                'into actionable milestones with dependencies and concrete deliverables; '
-                'identify unresolved authorization or information without inventing answers.')},
-            {'kind': 'implement', 'detail': (
-                'Produce the requested deliverables incrementally, preserving existing work. '
-                'Use observed context rather than assuming files, sources or capabilities exist.')},
-            {'kind': 'verify', 'detail': (
-                'Run relevant checks against each acceptance criterion, capture real receipts, '
-                'and repair observed failures. Mark unavailable evidence unknown, not passed.')},
-            {'kind': 'deliver', 'detail': (
-                'Provide usable artifact references, the verification results, and remaining '
-                'limitations. A plan or self-reported success alone does not establish completion.')},
-        ],
+        'stages': baseline_stages(),
         'resource_refs': resources,
         'expected_utility': _FLAT_UTILITY,
         'expected_information_gain': _FLAT_UTILITY,

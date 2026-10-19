@@ -13,7 +13,7 @@ removed response aliases live only in Git history.
 | Authoring catalogue, Composer, built-ins, dry-run plans | `lib/orchestration/authoring_*.py` |
 | Stored-definition use cases | `lib/orchestration/definition_service.py` |
 | Stored-definition repository | `lib/orchestration/store.py` → Sidecar `orchestration.definition.*` operations |
-| Graph execution | `lib/orchestration/engine.py`, `lib/orchestration/execution_runtime.py` |
+| Graph execution | `lib/orchestration/engine.py`, `execution_runtime.py`, optional `native_flow.py` → Rust `flow_graph.rs` ([contract](../NATIVE_FLOW_CONTROL.md)) |
 | Role invocation execution | `lib/orchestration/agent_runner.py` → shared `lib/tasks_pkg/invocation.py` |
 | Ephemeral and durable start, boot continuity auto-resume | `lib/orchestration/runtime_start_service.py`, `continuity.py` |
 | Durable run application API | `lib/orchestration/run_service.py` |
@@ -40,12 +40,7 @@ the run APIs. Gating, fencing, and translation policy:
 
 ## Application boundary
 
-`OrchestrationApplicationServices` supplies late-bound ports for definitions,
-authoring, durable runs, starts, mutations, and human gates. HTTP/chat adapters
-only parse and project typed results; repositories, SQL, graphs, and outcome
-classification remain behind those ports. Registration creates the bounded
-`TaskRuntime`, container, and contract metadata; implementations load on the
-first authorized operation.
+`OrchestrationApplicationServices` supplies late-bound ports for definitions, authoring, durable runs, starts, mutations, and human gates. HTTP/chat adapters only parse and project typed results; repositories, SQL, graphs, and outcome classification remain behind those ports. Registration creates the bounded `TaskRuntime`, container, and contract metadata; implementations load on the first authorized operation.
 
 Use-case routes live in `orchestration_{definition,authoring,runtime,task,
 mutation}_routes.py`; sibling `*_http.py` modules own shared parsing and
@@ -98,12 +93,7 @@ python3 scripts/gen_orchestration_authoring_metadata.py
 python3 scripts/gen_orchestration_compatibility_defaults.py
 ```
 
-The HTTP contract generator writes only
-`frontend/src/features/orchestration/request-contracts.generated.ts`. It joins
-canonical paths, verbs, path/query/body mappings, response metadata, and
-browser method names into one immutable typed registry. Response adaptation is
-not another generated runtime: `frontend/src/core/http-result.ts` owns the
-status-preserving HTTP boundary and `api-client.ts` consumes it directly.
+The HTTP contract generator writes only `frontend/src/features/orchestration/request-contracts.generated.ts`. It joins canonical paths, verbs, path/query/body mappings, response metadata, and browser method names into one immutable typed registry. Response adaptation is not another generated runtime: `frontend/src/core/http-result.ts` owns the status-preserving HTTP boundary and `api-client.ts` consumes it directly.
 
 The generated snapshot named `compatibility-defaults` is a build-time copy of
 current backend contracts. It is not permission to accept retired wire shapes.
@@ -138,17 +128,7 @@ around that flow:
 5. map the shared `TerminalOutcome` once to `completed`, `blocked`, `failed`,
    or `cancelled`, then persist the transition before chat emits `done`.
 
-The machine-readable policy in `lib/goal_runs/contract.py` requires a
-long-term solution horizon, root-cause work, verification evidence, and
-forbids shrinking the original objective scope; the canonical worker and
-virtual-user prompts consume the same directive. A compatibility summary or
-marker-cleanup failure may not rewrite GoalRun truth; a failed required
-GoalRun transition fails the chat terminal boundary closed. Goal budget is a
-checkpoint **window** (default 40 iterations), never a stop reason: a closing
-window that still advances is extended; only a full window with zero state
-changes and zero verified progress ends the loop as `stalled`
-(`blocked/no_verified_progress`), and a gated VU `[VERDICT: BLOCKED]` ends it
-as `vu_blocked` (`blocked/verifier_declared_blocked`).
+The machine-readable policy in `lib/goal_runs/contract.py` requires a long-term solution horizon, root-cause work, verification evidence, and forbids shrinking the original objective scope; the canonical worker and virtual-user prompts consume the same directive. A compatibility summary or marker-cleanup failure may not rewrite GoalRun truth; a failed required GoalRun transition fails the chat terminal boundary closed. Goal budget is a checkpoint **window** (default 40 iterations), never a stop reason: a closing window that still advances is extended; only a full window with zero state changes and zero verified progress ends the loop as `stalled` (`blocked/no_verified_progress`), and a gated VU `[VERDICT: BLOCKED]` ends it as `vu_blocked` (`blocked/verifier_declared_blocked`).
 
 Arming behind a live ordinary turn creates one deduplicated,
 `goal_continuation` queue command. It is lower priority than an ordinary human
@@ -163,15 +143,7 @@ failure must close the durable row, never leaving an apparently active run
 without a worker. Post-ready, the [continuity pass](../RUN_CONTINUITY.md)
 auto-resumes the boot's retired `auto`-policy runs.
 
-At worker/all-process startup, every non-terminal durable run is settled as
-`worker_lost` before clients reconnect. GoalRuns also receive an atomic typed
-`failed / worker_lost` transition event, so their semantic projection never
-falls back to a bare physical `error`. This is an explicit cross-owner
-Sidecar **maintenance** operation because all executor threads died with the
-previous process; ordinary run repositories and mutations remain bound to an
-explicit owner and tenant. [Flow recovery](../TASK_EXECUTION_MODES.md#durable-flow-restart-recovery)
-creates an owner-scoped successor from committed effect receipts. Startup recovery must never impersonate the
-personal owner or weaken request-time owner predicates.
+At worker/all-process startup, every non-terminal durable run is settled as `worker_lost` before clients reconnect. GoalRuns also receive an atomic typed `failed / worker_lost` transition event, so their semantic projection never falls back to a bare physical `error`. This is an explicit cross-owner Sidecar **maintenance** operation because all executor threads died with the previous process; ordinary run repositories and mutations remain bound to an explicit owner and tenant. [Flow recovery](../TASK_EXECUTION_MODES.md#durable-flow-restart-recovery) creates an owner-scoped successor from committed effect receipts. Startup recovery must never impersonate the personal owner or weaken request-time owner predicates.
 
 ## Invariants
 
@@ -228,53 +200,15 @@ into the ephemeral child, but the runner and chat adapter previously dropped
 visible phase text is incomplete; absent historical details cannot be
 reconstructed into a bill.
 
-**Decision.** `usage_accounting.py` projects settled accounting through both
-whitelists. Each compact API row retains the original round/model/provider and
-available request IDs, plus canonical child `invocationId` and positional
-`ledgerIndex`. Repeated round numbers (including discarded/retried calls) remain
-distinct requests. `_finalize.py` stamps child per-request prices through the
-existing `lib.cost.compute_cost` authority before child release; existing
-snapshots are never repriced. Missing usage or unavailable pricing stays missing,
-not an invented zero-cost call. Task totals already include compaction; the
-compaction breakdown and API rows are **not** added to those totals again.
+**Decision.** `usage_accounting.py` projects settled accounting through both whitelists. Each compact API row retains the original round/model/provider and available request IDs, plus canonical child `invocationId` and positional `ledgerIndex`. Repeated round numbers (including discarded/retried calls) remain distinct requests. `_finalize.py` stamps child per-request prices through the existing `lib.cost.compute_cost` authority before child release; existing snapshots are never repriced. Missing usage or unavailable pricing stays missing, not an invented zero-cost call. Task totals already include compaction; the compaction breakdown and API rows are **not** added to those totals again.
 
-`FlowEventAdapter.usage_summary` is a **child-only snapshot**, not an additive
-delta or complete run bill. It folds one terminal receipt per canonical child,
-normalizes cache/token conventions per request, and reports coverage separately
-for usage, recorded token totals, and stamped costs. Exact replay (including a
-lost persistence ACK or replay after `drain()`) reuses the original phase ID;
-conflicting terminal output/accounting is rejected. Empty, failed, cancelled,
-and empty-output children preserve any reported paid usage. Partial costs remain
-under `usageAccounting.recordedCost` and per-call snapshots rather than being
-misrepresented as a complete phase `cost`.
+`FlowEventAdapter.usage_summary` is a **child-only snapshot**, not an additive delta or complete run bill. It folds one terminal receipt per canonical child, normalizes cache/token conventions per request, and reports coverage separately for usage, recorded token totals, and stamped costs. Exact replay (including a lost persistence ACK or replay after `drain()`) reuses the original phase ID; conflicting terminal output/accounting is rejected. Empty, failed, cancelled, and empty-output children preserve any reported paid usage. Partial costs remain under `usageAccounting.recordedCost` and per-call snapshots rather than being misrepresented as a complete phase `cost`.
 
-Bounds: one fixed-vocabulary row per recorded paid call; no request prompts,
-wire messages, timing payloads, or nested compaction call copies. The ledger is
-O(child invocations) and holds only compact receipts, while the adapter reuses
-existing phase-message references for replay. The executable payload bound uses
-multi-megabyte synthetic prompts/timing and asserts a projection below 1.6 KB;
-the three-call finalizer/runner/adapter fixture remains below 6 KB. Call counts
-are not arbitrarily truncated by Flow. The upstream compaction accumulator does
-cap detail at 16 rows; `n_calls` versus retained rows explicitly marks that gap.
+Bounds: one fixed-vocabulary row per recorded paid call; no request prompts, wire messages, timing payloads, or nested compaction call copies. The ledger is O(child invocations) and holds only compact receipts, while the adapter reuses existing phase-message references for replay. The executable payload bound uses multi-megabyte synthetic prompts/timing and asserts a projection below 1.6 KB; the three-call finalizer/runner/adapter fixture remains below 6 KB. Call counts are not arbitrarily truncated by Flow. The upstream compaction accumulator does cap detail at 16 rows; `n_calls` versus retained rows explicitly marks that gap.
 
-**Remaining durable boundary.** Public `TurnProjection` normalization retains
-`usage`, compact `apiRounds`, and complete `cost`; compact compaction rows have
-`kind=compaction`. It does **not** retain `usageAccounting` or `compactionUsage`,
-and `TurnOrchestration` is a closed contract, not an arbitrary metadata bag.
-The child summary is not yet consumed by `chat_flow_runtime` / `chat_completion`
-or persisted as a distinct run/header accounting receipt. Contract, settlement,
-and storage owners must integrate that field and coverage before claiming a
-complete durable run bill (especially when compaction detail is truncated).
-No historical backfill or native/SQL persistence success is claimed here.
-Fatal/preparation paths bypassing ordinary finalization can retain usage without
-price snapshots and are reported as unpriced rather than guessed.
+**Remaining durable boundary.** Public `TurnProjection` normalization retains `usage`, compact `apiRounds`, and complete `cost`; compact compaction rows have `kind=compaction`. It does **not** retain `usageAccounting` or `compactionUsage`, and `TurnOrchestration` is a closed contract, not an arbitrary metadata bag. The child summary is not yet consumed by `chat_flow_runtime` / `chat_completion` or persisted as a distinct run/header accounting receipt. Contract, settlement, and storage owners must integrate that field and coverage before claiming a complete durable run bill (especially when compaction detail is truncated). No historical backfill or native/SQL persistence success is claimed here. Fatal/preparation paths bypassing ordinary finalization can retain usage without price snapshots and are reported as unpriced rather than guessed.
 
-**Alternatives rejected.** Copying children into root `task.usage` / `apiRounds`
-would overwrite phase zero with the run total and double count root plus child
-phases. Repricing merged usage under the terminal model misbills mixed-model and
-mixed-cache conventions. Hiding unknown receipts under orchestration metadata
-violates the closed durable contract. Dropping older paid calls to achieve a
-constant-size bill conceals usage rather than bounding raw diagnostic payloads.
+**Alternatives rejected.** Copying children into root `task.usage` / `apiRounds` would overwrite phase zero with the run total and double count root plus child phases. Repricing merged usage under the terminal model misbills mixed-model and mixed-cache conventions. Hiding unknown receipts under orchestration metadata violates the closed durable contract. Dropping older paid calls to achieve a constant-size bill conceals usage rather than bounding raw diagnostic payloads.
 
 Executable boundary specification:
 `tests/orchestration/test_flow_child_accounting.py` (real child finalizer → runner

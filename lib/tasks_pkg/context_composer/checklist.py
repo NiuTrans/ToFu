@@ -104,15 +104,62 @@ def _complete_carrier(message: dict, state: dict) -> bool:
     return text.count(standalone) + text.count(merged) == 1
 
 
-def _current_evidence(messages: list[dict], state: dict) -> dict | None:
+def _current_evidence(messages: list[dict], state: dict, *,
+                      task: dict | None = None,
+                      memoize: bool = True) -> dict | None:
     """Find a complete visible witness of the runtime's current accepted state.
 
     Pair within each assistant call batch, not a global id set: providers can
     recycle ids and a foreign result must not inherit an earlier todo identity.
+
+    When ``task`` is supplied the full-history scan is memoized on it for the
+    scope of one round's composition/admission: callers resolve a stable
+    ``(round, list identity, state)`` key via ``_evidence_memo_scope`` and the
+    memo records how far the last scan reached. The next lookup re-scans ONLY
+    the appended suffix and folds it into the memoized result; any structural
+    change (replacement, truncation, compaction, removed carrier) misses the
+    memo and falls back to a full scan, so behavior is identical while the
+    2-4 identical per-round walks collapse to one. The memo is round-scoped:
+    in-place content edits landing AFTER a memo write could stay unobserved
+    within that round, which is why cross-round reuse always re-validates.
+    """
+    memo_key = None
+    if memoize and isinstance(task, dict):
+        memo_key = _evidence_memo_scope(messages, state, task)
+        memo = task.get('_checklistEvidenceMemo') if memo_key else None
+        if (isinstance(memo, dict) and memo.get('key') == memo_key
+                and memo.get('scanned', 0) <= len(messages)
+                and all(messages[index] is candidate for index, candidate in
+                        enumerate(memo.get('prefix') or ()))):
+            return _evidence_scan_suffix(messages, state, memo)
+    newest = _evidence_scan_range(messages, state, 0, len(messages), None)
+    if memo_key is not None:
+        task['_checklistEvidenceMemo'] = {
+            'key': memo_key,
+            'scanned': len(messages),
+            'prefix': [id(message) for message in messages],
+            'evidence': newest,
+        }
+    return newest
+
+
+def _evidence_scan_range(messages: list[dict], state: dict, start: int,
+                         end: int, newest: dict | None) -> dict | None:
+    """Scan messages[start:end] for the newest complete witness.
+
+    Assistant call batching is per-message: each assistant turn RESETS the
+    open call-id map, and a tool message pairs only with an unmatched id from
+    the CURRENT batch. A suffix scan therefore re-seeds the batch from the
+    last assistant turn BEFORE ``start`` — older unmatched ids are
+    unreachable because tool results always follow their own batch.
     """
     calls: dict[str, str] = {}
-    newest = None
-    for message in messages:
+    for message in messages[max(0, start - 1):start]:
+        if message.get('role') == 'assistant':
+            calls = {call.get('id'): (call.get('function') or {}).get('name', '')
+                     for call in message.get('tool_calls') or []
+                     if isinstance(call, dict) and call.get('id')}
+    for message in messages[start:end]:
         role = message.get('role')
         if role == 'assistant':
             calls = {call.get('id'): (call.get('function') or {}).get('name', '')
@@ -133,17 +180,44 @@ def _current_evidence(messages: list[dict], state: dict) -> dict | None:
     return newest
 
 
-def reconcile_checklist_context(messages: list[dict], task: dict | None) -> None:
+def _evidence_memo_scope(messages: list[dict], state: dict,
+                         task: dict) -> tuple | None:
+    """Stable round scope for memoizing the checklist evidence scan."""
+    try:
+        from lib.tasks_pkg.context_composer import _round_num
+        round_num = _round_num(task)
+    except Exception:
+        return None
+    return (round_num, id(messages), id(state))
+
+
+def _evidence_scan_suffix(messages: list[dict], state: dict,
+                          memo: dict) -> dict | None:
+    """Fold the appended suffix into the memoized evidence and prefix."""
+    start = int(memo.get('scanned') or 0)
+    newest = _evidence_scan_range(messages, state, start, len(messages),
+                                  memo.get('evidence'))
+    memo['scanned'] = len(messages)
+    memo['prefix'] = [id(message) for message in messages]
+    memo['evidence'] = newest
+    return newest
+
+
+def reconcile_checklist_context(messages: list[dict], task: dict | None,
+                                *, memoize: bool = True) -> None:
     """Retain at most one current recovery carrier; keep historical tool rows.
 
     Only runtime-owned active_checklist sections may be removed. User text and
     neighboring managed sections are untouched. Durable UI audit notes are not
-    messages and are never rewritten by this reconciliation.
+    messages and are never rewritten by this reconciliation. ``memoize=False``
+    is the transient compaction-candidate path: it must not write the
+    task-scoped evidence memo (rejected candidates leave no runtime effects).
     """
     if not task or not (isinstance(task.get('_todoState'), dict) or task.get('_todos')):
         return
     from lib.tasks_pkg.context_composer._sections import remove_managed_section
-    evidence = _current_evidence(messages, todo_state_from_task(task))
+    evidence = _current_evidence(messages, todo_state_from_task(task),
+                                 task=task, memoize=memoize)
     kept = []
     for message in messages:
         if _is_checklist_carrier(message) and message is not evidence:
@@ -153,12 +227,13 @@ def reconcile_checklist_context(messages: list[dict], task: dict | None) -> None
     messages[:] = kept
 
 
-def build_checklist_context_block(messages: list[dict], task: dict | None
+def build_checklist_context_block(messages: list[dict], task: dict | None,
+                                  *, memoize: bool = True
                                   ) -> ContextBlock | None:
     if not task or not (isinstance(task.get('_todoState'), dict) or task.get('_todos')):
         return None
     state = todo_state_from_task(task)
-    if _current_evidence(messages, state) is not None:
+    if _current_evidence(messages, state, task=task, memoize=memoize) is not None:
         return None
     return checklist_context_block(_snapshot_body(state))
 
@@ -187,8 +262,8 @@ def carry_checklist_through_compaction(messages: list[dict], task: dict | None,
     another independent intervention next round. No task mutations or notes:
     rejected candidates must leave no runtime effects.
     """
-    reconcile_checklist_context(messages, task)
-    block = build_checklist_context_block(messages, task)
+    reconcile_checklist_context(messages, task, memoize=False)
+    block = build_checklist_context_block(messages, task, memoize=False)
     if block is not None:
         from lib.tasks_pkg.context_composer._render import render_context
         render_context(messages, [block], ComposeRequest(model=model), replace_managed=False)

@@ -21,7 +21,7 @@ Entry points
 - ``audit_document(base, ...)``            — one-pass local + remote audit
 - ``rewrite_bibtex_key`` / ``validate_key`` — key helpers
 
-Dependencies: ``lib.http_client`` (proxy-aware pooled HTTP; the only network
+Dependencies: ``lib.http_transport.client`` (proxy-aware pooled HTTP; the only network
 path), ``lib.paper.bib.parse_entries`` (key index reuse),
 ``lib.project_mod.write_tools`` (journaled mutations),
 ``lib.paper.builds.errors.BuildError`` (typed failures). No Flask, no handler
@@ -41,7 +41,7 @@ import unicodedata
 from functools import lru_cache
 from urllib.parse import quote
 
-from lib.http_client import http_get
+from lib.http_transport.client import http_get
 from lib.log import get_logger
 from lib.paper.bib import parse_entries
 from lib.paper.builds.errors import BuildError

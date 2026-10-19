@@ -178,7 +178,10 @@ def test_public_runtime_uses_reference_from_partial_tool_view_without_directory(
             delivered_failure=json.loads(delivered[-1]['content'])
             failure=delivered_failure
             assert failure['status']=='error' and failure['code']=='javascript_error'
-            assert failure['retryable'] is True and 'Do not repeat completed tool effects' in failure['nextAction']
+            assert failure['retryable'] is True
+            assert failure['nextAction'].startswith('Do not repeat completed child operations;')
+            assert 'inspect uncertain outcomes' in failure['nextAction']
+            assert 'tools.inputs' in failure['nextAction'] and 'tools.result' in failure['nextAction']
             assert 'stats' not in failure
             metadata=json.loads(delivered[0]['content'])['programInput']
             name,args='execute_program',{'code':'const rows='+metadata['read']+'; return {total:rows.reduce((s,r)=>s+r.amount,0)};'}

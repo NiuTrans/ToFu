@@ -176,7 +176,12 @@ def _execute_task_invocation(
     )
     _prefetch_executor = None
     messages = None
+    native_invocation = task.get('_nativePreparedInvocation')
     try:
+        if native_invocation is not None:
+            from lib.tasks_pkg.native_invocation import NativePreparedInvocation
+            if not isinstance(native_invocation,NativePreparedInvocation):
+                raise ValueError('native task invocation requires an issued application port')
         # Keep the prelude inside the same no-escape teardown boundary as the
         # main loop. Snapshot/log/presence helpers are fault-injectable; if one
         # fails, a pooled thread still must clear task/conv/trace/user context.
@@ -186,8 +191,10 @@ def _execute_task_invocation(
         _emit_startup_phase(task, 'config')
         cfg = task['config']
 
+        conversation_presentation = not callable(task.get('_invocationEventSink'))
+
         # ── Turn prelude (slice 33 → _turn_prelude; returns the rebound cfg).
-        if not policy.is_child:
+        if conversation_presentation:
             cfg = run_turn_prelude(task, cfg, tid)
 
         # ── Provider binding: hard pin + conv affinity
@@ -249,7 +256,7 @@ def _execute_task_invocation(
             # ── One-shot project-scope startup (slice 4 →
             #    setup_project_context). This may touch FUSE-backed state, so
             #    never enter it for a task already cancelled in the queue.
-            if not policy.is_child:
+            if conversation_presentation:
                 setup_project_context(task, cfg, project_path, project_enabled)
             _prep_aborted = handle_abort_during_prep(
                 task, rs, stage='project_setup', tid=tid)
@@ -344,10 +351,10 @@ def _execute_task_invocation(
 
         round_num = -1
         if not _prep_aborted:
-            if not policy.is_child:
+            if conversation_presentation:
                 from lib.swarm.integration._rehydrate import resume_swarm_for_continue
                 resume_swarm_for_continue(task, tool_list)
-            loop_result = run_root_agent_loop(RootLoopRequest(
+            prepared_request = RootLoopRequest(
                 task=task,
                 state=rs,
                 messages=messages,
@@ -362,7 +369,11 @@ def _execute_task_invocation(
                 project_path=project_path,
                 project_enabled=project_enabled,
                 search_enabled=search_enabled,
-            ))
+            )
+            if native_invocation is not None:
+                native_invocation.run(prepared_request)
+                return  # Native already owns terminal projection and durable commit.
+            loop_result = run_root_agent_loop(prepared_request)
             round_num = loop_result.last_round_num
         # ── Post-loop success tail (slice 6 → _post_loop.finalize_after_loop).
         finalize_after_loop(
@@ -385,12 +396,17 @@ def _execute_task_invocation(
             abort_detected_phase=rs.abort_phase,
         )
     except Exception as e:
+        if native_invocation is not None and task.get('status') in {'done','error','aborted'}:
+            raise  # Preserve native terminal/commit evidence without a second finalizer.
         retain_failure_messages(task, messages)
         # FATAL-path handling (slice 6 → _post_loop.handle_task_fatal;
         # True → return early).
-        if handle_task_fatal(task, e):
+        fatal = handle_task_fatal(task,e,allow_retry=False) if native_invocation is not None else handle_task_fatal(task,e)
+        if fatal:
             return
     except BaseException as be:
+        if native_invocation is not None and task.get('status') in {'done','error','aborted'}:
+            raise
         retain_failure_messages(task, messages)
         # ── Non-Exception fatal (slice 34 → _post_loop
         #    .handle_task_base_exception; finalizes + re-raises).

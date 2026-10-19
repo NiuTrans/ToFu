@@ -7,10 +7,15 @@ External processes not using workspace_write_lease remain an explicit limit.
 """
 from __future__ import annotations
 
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
 from lib import integration_state_repository as state
+
+from lib.log import get_logger
+
+logger = get_logger(__name__)
 
 _RECOVERY_CURSOR = 0
 _DELIVERY_KEY = 'delivery'
@@ -23,14 +28,29 @@ def _control():
 
 def _canonical(path: str) -> tuple[Path, Path]:
     ic = _control()
-    workspace = ic._repo_root(path)
+    raw = str(path or '').strip()
+    if not raw:
+        raise ic.IntegrationError('No project path is active')
+    candidate = Path(raw).expanduser().resolve()
+    if not candidate.exists():
+        raise ic.IntegrationError(f'Project path does not exist: {candidate}')
+    # One observation binds both values to the same cwd/environment. Do not
+    # reuse this identity across calls or publication admission boundaries.
+    values = ic._git(candidate, ['rev-parse', '--show-toplevel', '--git-common-dir'],
+                     check=True).stdout.strip().splitlines()
+    if len(values) != 2 or not all(values):
+        raise ic.IntegrationError('Incomplete workspace repository identity')
+    workspace = Path(values[0]).resolve()
+    common = (candidate / values[1]).resolve()
     listing = ic._git(workspace, ['worktree', 'list', '--porcelain'], check=True).stdout
     first = next((line[9:] for line in listing.splitlines()
                   if line.startswith('worktree ')), '')
     if not first:
         raise ic.IntegrationError('Git did not identify a canonical worktree')
     root = Path(first).resolve()
-    if ic._common_dir(root) != ic._common_dir(workspace):
+    # Identical resolved paths have identical repository identity. A linked
+    # destination still requires an independent canonical-repository check.
+    if root != workspace and ic._common_dir(root) != common:
         raise ic.IntegrationError('Workspace and canonical repository differ')
     return root, workspace
 
@@ -70,6 +90,55 @@ def _save(row: dict, delivery: dict, **updates: Any) -> dict:
             from lib.log import get_logger
             get_logger(__name__).warning('Delivery repair projection pending', exc_info=True)
     return value
+
+
+def _publication_hold(row: dict, receipt: dict) -> dict | None:
+    from lib.project_dispatch.publication import publication_reason
+    reason = publication_reason(row, receipt)
+    if reason:
+        return _save(row, receipt, state='blocked', phase=receipt.get('phase') or 'checkpoint',
+                     reason=reason, retry=None)
+    return None
+
+
+def _wake_delivered_dependents(row: dict, receipt: dict | None) -> None:
+    """Notify from the receiver's unlocked return, never from its save callback.
+
+    Ref publication is insufficient. A successful delivered ACK or a durable
+    delivered reread after uncertain ACK/crash is required. Readiness still
+    checks exact task association, checkpoint, review and publication pins.
+    """
+    from lib.project_dispatch.admission import KEY
+    binding = (row.get('origin') or {}).get(KEY)
+    if not isinstance(binding, dict) or not receipt or receipt.get('state') != 'delivered':
+        return
+    try:
+        latest = state.get_workspace(row['project_root'], row['task_id'], user_id=int(row['user_id']))
+        if (_receipt(latest).get('state') != 'delivered'
+                or (latest.get('origin') or {}).get(KEY) != binding
+                or binding['owner'] != latest['user_id']
+                or binding['projectPath'] != latest['project_root']):
+            return
+        from lib.project_dispatch.recovery import wake_project_dependents
+        wake_project_dependents(binding['owner'], binding['projectPath'], binding['assignmentId'])
+    except Exception:
+        from lib.log import get_logger
+        get_logger(__name__).warning('Delivered dependency wake retained for recovery task=%s',
+                                     row['task_id'], exc_info=True)
+
+
+def _wake_workspace_dependents(project_path: str, task_id: str, user_id: int,
+                               receipt: dict | None) -> None:
+    if not receipt or receipt.get('state') != 'delivered':
+        return
+    try:
+        root = str(_control()._repo_root(project_path))
+        row = state.get_workspace(root, str(task_id), user_id=user_id)
+        _wake_delivered_dependents(row, receipt)
+    except Exception:
+        from lib.log import get_logger
+        get_logger(__name__).warning('Delivered dependency wake read retained for recovery task=%s',
+                                     task_id, exc_info=True)
 
 
 def bind_task_workspace(project_path: str, task_id: str, *, user_id: int,
@@ -113,16 +182,29 @@ def bind_task_workspace(project_path: str, task_id: str, *, user_id: int,
 
 def settle_task_workspace(project_path: str, task_id: str, *, user_id: int,
                           outcome: str) -> dict | None:
+    """Persist intent and immediately deliver automatic tasks before returning."""
+    result = _settle_task_workspace(project_path, task_id, user_id=user_id, outcome=outcome)
+    _wake_workspace_dependents(project_path, task_id, user_id, result)
+    return result
+
+
+def _settle_task_workspace(project_path: str, task_id: str, *, user_id: int,
+                           outcome: str) -> dict | None:
     """Persist intention BEFORE checkpoint/submit, so restart can finish it."""
     ic = _control()
     if outcome not in {'completed', 'failed', 'cancelled', 'stopped'}:
         raise ic.IntegrationError('Unknown task outcome; publication denied')
-    # A no-change automatic task may have reclaimed its source clone after
+    # A delivered automatic task may have reclaimed its source clone after
     # durable completion. Terminal receipts remain idempotent without opening
     # that removed checkout again.
     canonical, _selected = _canonical(project_path)
     existing = state.find_workspace(str(canonical), str(task_id), user_id=user_id)
     if existing and _receipt(existing).get('state') in {'delivered', 'preserved'}:
+        if _receipt(existing).get('state') == 'delivered':
+            held = _publication_hold(existing, _receipt(existing))
+            if held is not None:
+                return held
+            _reclaim_completed_source(existing)
         return _receipt(existing)
     bound = bind_task_workspace(project_path, task_id, user_id=user_id)
     if bound is None:
@@ -132,11 +214,21 @@ def settle_task_workspace(project_path: str, task_id: str, *, user_id: int,
         row = state.get_workspace(bound['canonicalRoot'], str(task_id), user_id=user_id)
         receipt = _receipt(row)
         if receipt.get('state') in {'delivered', 'preserved'}:
+            if receipt.get('state') == 'delivered':
+                held = _publication_hold(row, receipt)
+                if held is not None:
+                    return held
             return receipt
         previous = receipt.get('taskOutcome')
         original_outcome = previous if previous in {'failed', 'cancelled', 'stopped'} else outcome
-        receipt = _save(row, receipt, state='pending', phase='checkpoint',
-                        taskOutcome=original_outcome, reason='')
+        if receipt.get('taskOutcome') != original_outcome or receipt.get('state') == 'working':
+            receipt = _save(row, receipt, state='pending', phase='checkpoint',
+                            taskOutcome=original_outcome, reason='')
+    if (row.get('origin') or {}).get('executionMode') == 'isolated-task':
+        result = _settle_registered(row, receipt)
+        if result.get('state') not in {'delivered', 'preserved'}:
+            ic._start_or_wake_worker()
+        return result
     ic._start_or_wake_worker()
     return receipt
 
@@ -185,13 +277,109 @@ def retry_task_delivery(project_path: str, task_id: str, *, user_id: int) -> dic
 
 
 def _settle_registered(row: dict, receipt: dict) -> dict:
+    result = _settle_registered_delivery(row, receipt)
+    if result.get('state') == 'delivered':
+        _reclaim_completed_source(row)
+    _wake_delivered_dependents(row, result)
+    return result
+
+
+def _reclaim_completed_source(row: dict) -> None:
+    """Acknowledge source retirement once; transient errors use the existing worker.
+
+    This marker records cleanup only. It neither grants publication authority
+    nor changes the terminal delivery receipt. Retained artifacts are not
+    repeatedly scanned; missing ACKs and busy leases remain retryable.
+    """
+    origin = row.get('origin') or {}
+    if (not row.get('managed') or origin.get('executionMode') != 'isolated-task'
+            or origin.get('sourceRetirement') in {'reclaimed', 'retained'}):
+        return
+    ic = _control()
+    root, task_id, owner = row['project_root'], row['task_id'], int(row['user_id'])
+    try:
+        from lib.project_mod.task_delta_delivery import reclaim_delivered_workspace
+        from lib.project_mod.workspace_lease import workspace_claims_lease
+        row = state.get_workspace(root, task_id, user_id=owner)
+        with workspace_claims_lease(
+                [('metadata', root), ('tree', row['workspace_path'])], timeout=0.0):
+            latest = state.get_workspace(root, task_id, user_id=owner)
+            receipt = _receipt(latest)
+            if (_checkpoint_identity(latest) != _checkpoint_identity(row)
+                    or receipt.get('state') != 'delivered'
+                    or receipt.get('taskOutcome') != 'completed'):
+                return
+            from lib.project_dispatch.publication import publication_reason
+            if publication_reason(latest, receipt):
+                return
+            reclaimed = reclaim_delivered_workspace(latest)
+            with ic._repo_lock(root):
+                state.set_workspace_meta(
+                    project_root=root, task_id=task_id, user_id=owner, now=ic._now(),
+                    patch={'sourceRetirement': 'reclaimed' if reclaimed else 'retained'})
+    except Exception as cleanup_error:
+        logger.warning('Completed source clone retained for retry: %s', cleanup_error)
+
+
+def _checkpoint_delivered_workspace(row: dict) -> None:
+    """Recover the existing opt-in checkpoint when delivery outlives its turn.
+
+    A terminal receipt proves task outcome; it does not waive the checkpoint
+    owner's opt-in, workspace-coalescing policy or verification gates. One
+    acknowledgement on the existing origin avoids rescanning cold history.
+    """
+    origin = row.get('origin') or {}
+    receipt = _receipt(row)
+    if (origin.get('executionMode') != 'isolated-task'
+            or 'deliveryCheckpoint' in origin
+            or receipt.get('state') != 'delivered'
+            or receipt.get('taskOutcome') != 'completed'
+            or receipt.get('publicationMode') != 'working_tree'):
+        return
+    try:
+        from lib.project_dispatch.publication import publication_reason
+        if publication_reason(row, receipt):
+            return
+        from lib.linear_git_checkpoint import settle_task_checkpoint
+        task = {'id': row['task_id'], 'convId': origin.get('conversationId', ''),
+                'status': 'done', 'finishReason': 'stop'}
+        result = settle_task_checkpoint(task, user_id=int(row['user_id']),
+                                        project_path=row['project_root'])
+        if result and result.get('status') == 'deferred':
+            return
+        state.set_workspace_meta(
+            project_root=row['project_root'], task_id=row['task_id'],
+            user_id=int(row['user_id']), now=_control()._now(),
+            patch={'deliveryCheckpoint': result or {'status': 'disabled'}})
+    except Exception as error:
+        logger.warning('Delivered workspace checkpoint retained for retry: %s', error)
+
+
+def _settle_registered_delivery(row: dict, receipt: dict) -> dict:
     ic = _control()
     root, task_id, user_id = row['project_root'], row['task_id'], int(row['user_id'])
     from lib.project_mod.workspace_lease import WorkspaceBusyError, workspace_write_lease
     try:
-        with workspace_write_lease(row['workspace_path'], timeout=0.0):
+        frozen = ((row.get('origin') or {}).get('executionMode') == 'isolated-task'
+                  and row['state'] == 'checkpointed'
+                  and receipt.get('taskOutcome') == 'completed'
+                  and receipt.get('checkpointSha') == row.get('checkpoint_sha')
+                  and bool(row.get('checkpoint_sha')))
+        captured_identity = _checkpoint_identity(row)
+        # Once captured, recovery consumes immutable objects. The source may
+        # have unrelated ongoing edits; only fresh capture needs its writer
+        # lease. Canonical publication and descendants remain independently
+        # fenced below and in the delta receiver.
+        admission = (nullcontext() if frozen else
+                     workspace_write_lease(row['workspace_path'], timeout=0.0))
+        with admission:
             row = state.get_workspace(root, task_id, user_id=user_id)
             receipt = _receipt(row)
+            if frozen and _checkpoint_identity(row) != captured_identity:
+                raise ic.IntegrationError('checkpoint_changed_during_recovery')
+            if receipt.get('state') in {'delivered', 'preserved'}:
+                held = _publication_hold(row, receipt) if receipt.get('state') == 'delivered' else None
+                return held if held is not None else receipt
             if row['state'] == 'discarded':
                 return _save(row, receipt, state='preserved', reason='Workspace was explicitly discarded')
             automatic = (row.get('origin') or {}).get('executionMode') == 'isolated-task'
@@ -218,28 +406,25 @@ def _settle_registered(row: dict, receipt: dict) -> dict:
             if receipt.get('taskOutcome') != 'completed':
                 return _save(row, receipt, state='preserved', phase='checkpoint',
                              reason='Task did not complete; checkpoint retained without publication')
+            held = _publication_hold(row, receipt)
+            if held is not None:
+                return held
             if automatic:
-                # Gates consume immutable Git objects, not the source checkout.
+                # Merge computation consumes immutable objects, not the source checkout.
                 # Leave source admission below; publication saves fence the row.
                 captured = row
             else:
                 return _settle_explicit_checkpoint(row, receipt)
         result = _deliver_task_delta(captured, receipt)
-        if result.get('state') == 'delivered':
-            try:
-                from lib.project_mod.task_delta_delivery import reclaim_no_change_workspace
-                with workspace_write_lease(captured['workspace_path'], timeout=0.0):
-                    latest = state.get_workspace(root, task_id, user_id=user_id)
-                    if _checkpoint_identity(latest) == _checkpoint_identity(captured):
-                        reclaim_no_change_workspace(latest)
-            except Exception as cleanup_error:
-                from lib.log import get_logger
-                get_logger(__name__).warning('Completed source clone retained: %s', cleanup_error)
         return result
     except WorkspaceBusyError:
         with ic._repo_lock(root):
             row = state.get_workspace(root, task_id, user_id=user_id)
             receipt = _receipt(row)
+            if receipt.get('state') == 'delivered' and receipt.get('taskOutcome') == 'completed':
+                held = _publication_hold(row, receipt)
+                if held is not None:
+                    return held
             if receipt.get('state') in {'delivered', 'preserved'} or receipt.get('taskOutcome') != 'completed':
                 return receipt
             if row['state'] == 'discarded':
@@ -250,6 +435,10 @@ def _settle_registered(row: dict, receipt: dict) -> dict:
     except Exception as exc:
         row = state.get_workspace(root, task_id, user_id=user_id)
         receipt = _receipt(row)
+        if receipt.get('state') == 'delivered' and receipt.get('taskOutcome') == 'completed':
+            held = _publication_hold(row, receipt)
+            if held is not None:
+                return held
         if receipt.get('state') in {'delivered', 'preserved'}:
             return receipt
         permanent = any(term in str(exc).lower() for term in ('forbidden', 'prohibited', 'not allowed'))
@@ -260,6 +449,9 @@ def _settle_registered(row: dict, receipt: dict) -> dict:
 def _settle_explicit_checkpoint(row: dict, receipt: dict) -> dict:
     ic = _control()
     root, task_id, user_id = row['project_root'], row['task_id'], int(row['user_id'])
+    held = _publication_hold(row, receipt)
+    if held is not None:
+        return held
     publication = ic.task_publication_checkpoint(row)
     if publication == (row.get('origin') or {}).get('inputHeadSha'):
         return _save(row, receipt, state='delivered', phase='no_changes', reason='',
@@ -277,14 +469,17 @@ def _canonical_in_use(root: Path, conversation_id: str, user_id: int) -> bool:
     try:
         peers = presence.snapshot(str(root), user_id=user_id).get('peers') or []
         return any(p.get('convId') != conversation_id for p in peers)
-    except Exception:
+    except Exception as diagnostic_error:
+        logger.debug('_canonical_in_use failure handled: %s', type(diagnostic_error).__name__)
         return True
 
 
 def _checkpoint_identity(row: dict) -> tuple:
+    from lib.project_dispatch.admission import KEY
     origin = row.get('origin') or {}
     return (row['state'], row.get('checkpoint_sha'), row['workspace_path'],
-            origin.get('sourceSnapshot'), origin.get('inputBaseSha'), origin.get('inputHeadSha'))
+            origin.get('sourceSnapshot'), origin.get('inputBaseSha'), origin.get('inputHeadSha'),
+            KEY in origin, origin.get(KEY))
 
 
 def _deliver_task_delta(row: dict, receipt: dict) -> dict:
@@ -294,7 +489,7 @@ def _deliver_task_delta(row: dict, receipt: dict) -> dict:
     def save_exact(latest, current, **updates):
         # The delta receiver calls its save boundary under the repository lock,
         # including the durable intent immediately before git apply. Fence the
-        # mutable registration, not source bytes that gates never consume.
+        # mutable registration, independently of uncheckpointed source bytes.
         if (_checkpoint_identity(latest) != captured or latest['state'] == 'discarded'
                 or (current.get('repair') or {}) != (receipt.get('repair') or {})):
             raise _control().IntegrationError('checkpoint_changed_during_validation')
@@ -304,6 +499,13 @@ def _deliver_task_delta(row: dict, receipt: dict) -> dict:
 
 
 def deliver_registered_workspace(project_path: str, task_id: str, *, user_id: int) -> dict:
+    """Adopt the checkpoint, then notify after ACK and all publication release."""
+    result = _deliver_registered_workspace(project_path, task_id, user_id=user_id)
+    _wake_workspace_dependents(project_path, task_id, user_id, result)
+    return result
+
+
+def _deliver_registered_workspace(project_path: str, task_id: str, *, user_id: int) -> dict:
     """Adopt exactly this checkpoint onto its pinned target, never old candidate.
 
     The cooperative checkout lease covers dirty/ref revalidation and git's own
@@ -313,6 +515,10 @@ def deliver_registered_workspace(project_path: str, task_id: str, *, user_id: in
     ic = _control()
     row = state.get_workspace(str(ic._repo_root(project_path)), str(task_id), user_id=user_id)
     receipt = _receipt(row)
+    if receipt.get('taskOutcome') == 'completed':
+        held = _publication_hold(row, receipt)
+        if held is not None:
+            return held
     if receipt.get('taskOutcome') != 'completed' or receipt.get('state') in {'preserved', 'delivered', 'failed'}:
         return receipt
     if row['state'] != 'merged':
@@ -327,6 +533,10 @@ def deliver_registered_workspace(project_path: str, task_id: str, *, user_id: in
         with workspace_write_lease(str(root), timeout=0.0), ic._repo_lock(str(root)):
             row = state.get_workspace(str(root), str(task_id), user_id=user_id)
             receipt = _receipt(row)
+            if receipt.get('taskOutcome') == 'completed':
+                held = _publication_hold(row, receipt)
+                if held is not None:
+                    return held
             if receipt.get('taskOutcome') != 'completed' or receipt.get('state') in {'preserved', 'delivered', 'failed'}:
                 return receipt
             if _checkpoint_identity(row) != captured:
@@ -348,12 +558,22 @@ def deliver_registered_workspace(project_path: str, task_id: str, *, user_id: in
         # Validation consumes only immutable commits. Neither cooperative
         # canonical writers nor terminal task revocation wait for these gates.
         target, conflict = ic._merge_checkpoint(root, head, checkpoint, str(task_id))
-        import os
-        passed, detail = (False, '') if conflict else ic._gate_commands(
-            root, head, target, os.environ.get('TOFU_INTEGRATION_TEST_CMD', '').strip())
+        from lib.git_checkpoint_policy import GatePolicyError, select_gate_commands, require_unchanged_gates
+        try:
+            selected_policy = select_gate_commands(root)
+            acceptance = {}
+            passed, detail = (False, '') if conflict else ic._gate_commands(
+                root, head, target, selected_policy.integration, evidence_out=acceptance)
+        except GatePolicyError as error:
+            acceptance = {}
+            passed, detail = False, str(error)
         with workspace_write_lease(str(root), timeout=0.0), ic._repo_lock(str(root)):
             row = state.get_workspace(str(root), str(task_id), user_id=user_id)
             receipt = _receipt(row)
+            if receipt.get('taskOutcome') == 'completed':
+                held = _publication_hold(row, receipt)
+                if held is not None:
+                    return held
             if receipt.get('taskOutcome') != 'completed' or receipt.get('state') in {'preserved', 'delivered', 'failed'}:
                 return receipt
             if _checkpoint_identity(row) != captured:
@@ -365,6 +585,8 @@ def deliver_registered_workspace(project_path: str, task_id: str, *, user_id: in
                     or latest_dirty.get('timedOut')
                     or ic._git(root, ['symbolic-ref', '-q', 'HEAD']).stdout.strip() != branch):
                 return _save(row, receipt, state='blocked', reason='canonical_changed_during_validation')
+            from lib.project_mod.delivery_acceptance import persist_gate_record
+            persist_gate_record(row, acceptance, checkpoint=row['checkpoint_sha'])
             if _canonical_in_use(root, conversation_id, user_id):
                 return _save(row, receipt, state='blocked', phase='adoption', reason='workspace_busy', headSha=head)
             if conflict:
@@ -373,6 +595,15 @@ def deliver_registered_workspace(project_path: str, task_id: str, *, user_id: in
                 return _save(row, receipt, state='failed', phase='adoption', reason='Gate failed: ' + detail[:700], headSha=head)
             # Only fresh validation may persist publication intent.
             receipt = _save(row, receipt, state='pending', phase='adoption', targetSha=target, headSha=head, reason='')
+            # A durable intent ACK is not fresh publication authority.
+            row = state.get_workspace(str(root), str(task_id), user_id=user_id)
+            held = _publication_hold(row, _receipt(row))
+            if held is not None:
+                return held
+            try:
+                require_unchanged_gates(root, selected_policy)
+            except GatePolicyError as error:
+                return _save(row, receipt, state='blocked', phase='adoption', reason=str(error))
             cp = ic._git(root, ['merge', '--ff-only', '--no-edit', '--no-overwrite-ignore', target])
             actual = ic._rev(root, 'HEAD')
             if cp.returncode != 0 or actual != target:
@@ -382,6 +613,10 @@ def deliver_registered_workspace(project_path: str, task_id: str, *, user_id: in
         with ic._repo_lock(str(root)):
             row = state.get_workspace(str(root), str(task_id), user_id=user_id)
             receipt = _receipt(row)
+            if receipt.get('state') == 'delivered' and receipt.get('taskOutcome') == 'completed':
+                held = _publication_hold(row, receipt)
+                if held is not None:
+                    return held
             if receipt.get('taskOutcome') != 'completed' or receipt.get('state') in {'preserved', 'delivered', 'failed'}:
                 return receipt
             return _save(row, receipt, state='blocked', phase='adoption', reason='workspace_busy')
@@ -431,6 +666,10 @@ def resume_pending_workspace_deliveries() -> bool:
         row = state.get_workspace(base_row['project_root'], base_row['task_id'],
                                   user_id=int(base_row['user_id']))
         before = _receipt(row)
+        if before.get('state') == 'delivered':
+            _checkpoint_delivered_workspace(row)
+            _reclaim_completed_source(row)
+            continue
         if before.get('state') == 'working':
             try:
                 after = _recover_working_registration(row)
@@ -452,5 +691,8 @@ def resume_pending_workspace_deliveries() -> bool:
             after = _settle_registered(row, before)
         else:
             after = deliver_registered_workspace(row['project_root'], row['task_id'], user_id=int(row['user_id']))
+        if after.get('state') == 'delivered':
+            latest = state.get_workspace(row['project_root'], row['task_id'], user_id=int(row['user_id']))
+            _checkpoint_delivered_workspace(latest)
         changed = changed or before != after
     return changed or bool(page.get('hasMore'))

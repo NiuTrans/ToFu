@@ -47,10 +47,67 @@
     }
 
     #[test]
+    fn bulk_occ_cached_paths_release_before_missing_source_reads_and_propagate_errors() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::Relaxed};
+        struct Source<'a> {
+            inner: &'a dyn EntityBlockIo,
+            cache: &'a std::sync::RwLock<DecodedPageCache>,
+            reads: AtomicUsize,
+            fail: AtomicBool,
+        }
+        impl EntityBlockIo for Source<'_> {
+            fn read_verified(&self, id: BlockId) -> io::Result<Arc<Vec<u8>>> {
+                assert!(self.cache.try_write().is_ok(), "source read retained the cache lock");
+                self.reads.fetch_add(1, Relaxed);
+                if self.fail.load(Relaxed) { return Err(io::Error::other("injected source failure")); }
+                self.inner.read_verified(id)
+            }
+            fn write_fresh(&self, bytes: &[u8]) -> io::Result<BlockId> { self.inner.write_fresh(bytes) }
+            fn write_fresh_owned(&self, bytes: Vec<u8>) -> io::Result<BlockId> { self.inner.write_fresh_owned(bytes) }
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let database = EntityDatabase::initialize(directory.path()).unwrap();
+        let plain = Tree { backend: database.backend(), page_cache: None };
+        let root = plain.apply_batch(None, (0..256u16).map(|index|
+            (key(index).0, (index % 3 != 0).then(|| vec![7; 200]), u64::from(index) + 10))
+            .collect(), TombstoneReclaim { below: 0, mounts: &[] }).unwrap().0.unwrap();
+        let owned: Vec<_> = (0..300u16).map(|index| key(index).0).collect();
+        let keys: Vec<_> = owned.iter().map(Vec::as_slice).collect();
+        let expected = plain.versions(Some(root), &keys).unwrap();
+        let cache = std::sync::RwLock::new(DecodedPageCache::new(DEFAULT_PAGE_CACHE_BYTES));
+        let source = Source { inner: database.backend(), cache: &cache,
+            reads: AtomicUsize::new(0), fail: AtomicBool::new(false) };
+        let tree = Tree { backend: &source, page_cache: Some(&cache) };
+        assert_eq!(tree.versions(Some(root), &keys).unwrap(), expected);
+        assert!(source.reads.swap(0, Relaxed) > 1);
+        assert_eq!(tree.versions(Some(root), &keys).unwrap(), expected);
+        assert_eq!(source.reads.load(Relaxed), 0, "warm batch must reuse verified nodes");
+        let node = tree.load_node(root).unwrap();
+        {
+            let mut cache = cache.write().unwrap();
+            cache.set_capacity_bytes(0);
+            cache.set_capacity_bytes(DEFAULT_PAGE_CACHE_BYTES);
+            cache.insert(root, node, PAGE_PACK_TARGET_BYTES);
+        }
+        source.fail.store(true, Relaxed);
+        assert_eq!(tree.versions(Some(root), &keys).unwrap_err().to_string(), "injected source failure");
+        assert_eq!(cache.read().unwrap().entries.len(), 1, "failed read must not populate cache");
+        source.fail.store(false, Relaxed);
+        assert_eq!(tree.versions(Some(root), &keys).unwrap(), expected);
+        cache.write().unwrap().set_capacity_bytes(0);
+        assert_eq!(tree.versions(Some(root), &keys).unwrap(), expected);
+        assert!(cache.read().unwrap().entries.is_empty());
+        let _ = std::panic::catch_unwind(|| { let _guard = cache.write().unwrap(); panic!("poison"); });
+        assert!(tree.versions(Some(root), &keys).unwrap_err().to_string().contains("poisoned"));
+    }
+
+    #[test]
     fn large_key_internal_splits_and_torn_commits_preserve_one_complete_tree() {
         let large_key = |index: u32| {
-            let mut bytes = vec![b'k'; MAX_ENTITY_KEY_BYTES - 4];
-            bytes.extend_from_slice(&index.to_be_bytes());
+            // Distinct long separators must still exercise target overflow;
+            // identical padding now correctly compresses into short separators.
+            let mut bytes = index.to_be_bytes().to_vec();
+            bytes.resize(MAX_ENTITY_KEY_BYTES, index as u8);
             EntityKey::new(7, 11, "large_keys", &bytes).unwrap()
         };
         let setup = |vfs: Arc<DeterministicVfs>| {
@@ -896,7 +953,7 @@
     }
 
     #[test]
-    fn entity_page_encoding_preserves_v1_golden_bytes_with_exact_capacity() {
+    fn entity_page_encoding_reads_v1_golden_and_writes_v2_with_exact_capacity() {
         let leaf = Page::Leaf(vec![
             (
                 b"a".to_vec(),
@@ -915,7 +972,9 @@
         ]);
         let expected_leaf = b"TDBENT01\x01\0\0\0\0\0\x02\0\x01\0\x02\0\x07\0\0\0\0\0\0\0\0ahi\x01\0\0\0\x09\0\0\0\0\0\0\0\x01b";
         let encoded = leaf.encode().unwrap();
-        assert_eq!(encoded.as_slice(), expected_leaf);
+        let expected_compact_leaf = b"TDBENT01\x02\0\0\0\0\0\x02\0\0\0\x01\0\x02\0\x07\0\0\0\0\0\0\0\0ahi\0\0\x01\0\0\0\x09\0\0\0\0\0\0\0\x01b";
+        assert_eq!(Page::decode(expected_leaf).unwrap(), leaf);
+        assert_eq!(encoded.as_slice(), expected_compact_leaf);
         assert_eq!(encoded.capacity(), encoded.len());
         assert_eq!(
             Page::decode(expected_leaf).unwrap().encode().unwrap(),
@@ -931,7 +990,10 @@
         let mut expected_internal = b"TDBENT01\x01\0\0\0\x01\x01\x01\0\x01\0a".to_vec();
         expected_internal.extend_from_slice(&[42; 32]);
         let encoded = internal.encode().unwrap();
-        assert_eq!(encoded, expected_internal);
+        let mut expected_compact_internal = b"TDBENT01\x02\0\0\0\x01\x01\x01\0\0\0\x01\0a".to_vec();
+        expected_compact_internal.extend_from_slice(&[42; 32]);
+        assert_eq!(Page::decode(&expected_internal).unwrap(), internal);
+        assert_eq!(encoded, expected_compact_internal);
         assert_eq!(encoded.capacity(), encoded.len());
         assert_eq!(
             Page::decode(&expected_internal).unwrap().encode().unwrap(),
@@ -946,14 +1008,14 @@
                 b"a".to_vec(),
                 EntityValue {
                     version: 1,
-                    value: Some(vec![11; 8170]),
+                    value: Some(vec![11; 8168]),
                 },
             ),
             (
                 b"b".to_vec(),
                 EntityValue {
                     version: 2,
-                    value: Some(vec![12; 8170]),
+                    value: Some(vec![12; 8168]),
                 },
             ),
         ];
@@ -1814,36 +1876,26 @@
     }
 
     #[test]
-    fn transaction_write_budget_admits_secondary_indexes_and_rejects_the_next_key() {
+    fn transaction_demand_admits_secondary_indexes_beyond_former_write_quota() {
         let directory = tempfile::tempdir().unwrap();
         let mut database = EntityDatabase::initialize(directory.path()).unwrap();
         database.set_write_overlay_enabled(false);
         let indexed_key =
             |index: u32| EntityKey::new(7, 11, "event_indexes", &index.to_be_bytes()).unwrap();
         let mut transaction = database.begin(7, 11).unwrap();
-        for index in 0..MAX_ENTITY_TRANSACTION_WRITES as u32 {
+        for index in 0..20_000 {
             database
                 .put(&mut transaction, indexed_key(index), vec![1])
                 .unwrap();
         }
-        assert_eq!(
-            database
-                .put(
-                    &mut transaction,
-                    indexed_key(MAX_ENTITY_TRANSACTION_WRITES as u32),
-                    vec![1],
-                )
-                .unwrap_err()
-                .kind(),
-            io::ErrorKind::InvalidInput
-        );
+        database.put(&mut transaction, indexed_key(20_000), vec![1]).unwrap();
         database.commit(transaction).unwrap();
         let mut read = database.begin(7, 11).unwrap();
         assert_eq!(
             database
                 .get(
                     &mut read,
-                    &indexed_key(MAX_ENTITY_TRANSACTION_WRITES as u32 - 1),
+                    &indexed_key(20_000 - 1),
                 )
                 .unwrap(),
             Some(vec![1])

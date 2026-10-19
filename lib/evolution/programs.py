@@ -1,6 +1,6 @@
 """Durable exploration programs composed from the existing evolution run port.
 
-The program owns an immutable objective, a bounded frontier, frozen launch
+The program owns an immutable objective, a complete frontier, frozen launch
 intents and sequential, immutable experiment receipts. Runs own all execution,
 review, task journals and learning. No thread, model loop or database dialect
 lives here. Entry points: create_program, advance_program, command_program,
@@ -405,7 +405,7 @@ def create_program(payload, *, user_id, idempotency_key):
              'advance_mode': request.get('advance_mode', 'continuous'),
              'started_at': None,
              'execution_options': {key: request[key] for key in
-                 ('budget', 'review_reserve', 'model', 'role_models', 'project_path', 'max_attempts', 'max_review_recoveries', 'max_review_format_retries') if key in request},
+                 ('executor_plugins', 'executor_schema_budget_tokens', 'budget', 'review_reserve', 'model', 'role_models', 'project_path', 'max_attempts', 'max_review_recoveries', 'max_review_format_retries') if key in request},
              'status': 'ready', 'queue': steps, 'current': None,
              'settled_through': 0, 'tool_calls_complete': True, 'actuals': {key: 0 for key in
                  ('tokens', 'wall_clock_seconds', 'tool_calls')},
@@ -471,41 +471,9 @@ def continuation_source(program):
     return source
 
 
-def _fit_context(seed):
-    """Budget presentation only; immutable requirements and receipts never shrink."""
-    def encode(value):
-        return json.dumps(value, ensure_ascii=False)
-    encoded = encode(seed)
-    if len(encoded) <= 24000:
-        return encoded
-    def previews(width):
-        rows = deepcopy(seed['recent_experiments'])
-        for row in rows:
-            result, error = row['result_preview'], row['error']
-            row['result_preview'] = result[:width]
-            row['preview_truncated'] = row['preview_truncated'] or len(result) > width
-            row['error'] = error[:width]
-            row['error_truncated'] = len(error) > width
-        return rows
-    # Keep all recent outcome/uncertainty/source pointers even if prose cannot fit.
-    if len(encode({**seed, 'recent_experiments': previews(0)})) > 24000:
-        from .semantic_memory import receipt_text, _digest
-        source = {key: deepcopy(seed[key]) for key in
-            ('program_id', 'original_objective', 'original_acceptance', 'current_experiment', 'current_hypothesis')
-            if key in seed}
-        seed['current_context_source'] = {'source_digest': _digest(source),
-            'total_chars': len(receipt_text(source)), 'offset': 0, 'action': 'read_context',
-            'read_required': 'Read every evolution_explore read_context page with this exact '
-                             'source_digest before the experiment; previews are incomplete input.'}
-        seed['original_objective_preview'] = seed.pop('original_objective')[:200]
-        seed['original_acceptance_count'] = len(seed.pop('original_acceptance'))
-        seed.pop('current_hypothesis', None)
-    for width in (MEMORY_PREVIEW_CHARS, 400, 200, 100, 0):
-        encoded = encode({**seed, 'recent_experiments': previews(width)})
-        if len(encoded) <= 24000:
-            return encoded
-    # Only bounded routing/source metadata remains; never fabricate lost evidence.
-    raise EvolutionStateError('continuation source metadata exceeds its presentation bound')
+def _encode_context(seed):
+    """Freeze the selected continuation window without a size admission gate."""
+    return json.dumps(seed, ensure_ascii=False)
 
 
 def _context(program, user_id):
@@ -535,7 +503,7 @@ def _context(program, user_id):
             'read_required':'Read the exact prior research pages before using them as grounding. Follow next_offset with source_digest; prior proposals are unverified.'}
     current_step = program['current']['step'] if program['current'] else program['queue'][0]
     # Checks already live in the frozen run payload; do not duplicate their
-    # full text into the bounded continuation window.
+    # full text into the paged continuation window.
     seed['current_experiment'] = {key: current_step[key] for key in ('kind', 'title')}
     seed['exploration_tools'] = {
         'tool': 'evolution_explore',
@@ -561,7 +529,7 @@ def _context(program, user_id):
             'original_failed_step_retained': True}
     if program['current'] is None and program['queue'][0].get('hypothesis'):
         seed['current_hypothesis'] = program['queue'][0]['hypothesis']
-    return _fit_context(seed)
+    return _encode_context(seed)
 
 
 def _remaining_budget(program):
@@ -611,6 +579,8 @@ def _launch_intent(program, user_id):
     requirements = _step_requirements(program, step)
     payload = {**options, 'objective': objective, 'acceptance_requirements': requirements,
                'budget': remaining}
+    if step['kind'] == 'final':
+        payload['execution_instruction'] = step['instruction']
     if step['kind'] == 'final' and program.get('final_evidence_version') == 1:
         payload['require_requirement_originals'] = True
     _require_frozen_measurement_scope(step, step.get('scientific_protocol') or {})
@@ -848,11 +818,8 @@ def advance_program(program_id, *, user_id):
                 program.update(status='completed', error='')
     elif (program.get('auto_replan', False) and current['step']['kind'] != 'replan'
           and replanning.definitive_failure(run,scientific_audit=scientific_failure_audit)):
-        if len(program['queue']) < 32:
-            program['queue'].insert(0, replanning.diagnosis_step(current['sequence']))
-            program['error'] = ''
-        else:
-            program.update(status='needs_attention', error='replan_frontier_full; failed evidence retained')
+        program['queue'].insert(0, replanning.diagnosis_step(current['sequence']))
+        program['error'] = ''
     else:
         program.update(status='needs_attention', error=run['error'] or
                        'experiment did not pass; inspect evidence before retrying')
@@ -958,8 +925,6 @@ def append_steps(program_id, payload, *, user_id, idempotency_key, executor_run_
         raise EvolutionStateError('final audit is already launched or program is terminal')
     if any(step['kind'] == 'final' for step in payload['steps']):
         raise EvolutionContractError('the original final audit must remain last')
-    if len(program['queue']) + len(payload['steps']) > 32:
-        raise EvolutionStateError('frontier is full; settle experiments before expanding')
     program['queue'][-1:-1] = deepcopy(payload['steps'])
     program['last_expansion'] = {'expansion_id': expansion_id, 'request_digest': digest,
                                  'program_id': program_id}
@@ -969,7 +934,7 @@ def append_steps(program_id, payload, *, user_id, idempotency_key, executor_run_
 
 
 def propose_replan(program_id, payload, *, user_id, request_id, executor_run_id):
-    """Stage a bounded plan for independent diagnosis review; launch nothing."""
+    """Stage a complete plan for independent diagnosis review; launch nothing."""
     program, version = _read(program_id, user_id)
     current = program['current']
     if (program['status'] != 'active' or not current
@@ -1023,56 +988,64 @@ def _registry_change(user_id, change):
 def _enroll(program_id, user_id):
     def add(registry):
         if program_id not in registry['program_ids']:
-            if len(registry['program_ids']) >= 4096:
-                raise EvolutionStateError('too many unfinished exploration programs')
             registry['program_ids'].append(program_id)
     _registry_change(user_id, add)
 
 
-def _unenroll(program_id, user_id):
-    def remove(registry):
-        if program_id in registry['program_ids']:
-            registry['program_ids'].remove(program_id)
-            registry['cursor'] %= max(1, len(registry['program_ids']))
-    _registry_change(user_id, remove)
-
-
 def sweep_programs(*, user_id, batch_size=32):
-    """Reaper-owned progression, fair across active programs, with no new timer.
+    """Advance every enrolled owner program through joined demand workers.
 
-    The durable queue survives boot and never enumerates historical programs.
-    Each visit performs one frozen launch or settlement. A missed callback or
-    transient failure remains enrolled for a later cadence.
+    The legacy batch size controls idle reuse only. A registry change defers
+    cleanup, preserving concurrent enrollment/resume before its state CAS.
     """
-    if not isinstance(batch_size, int) or not 1 <= batch_size <= 200:
-        raise EvolutionContractError('sweep batch_size must be between 1 and 200')
+    from tofu_workers import DemandThreadPoolExecutor
+    if type(batch_size) is not int or batch_size < 1:
+        raise EvolutionContractError('sweep idle reuse hint must be a positive integer')
     key = records.entity_key('programs', user_id, kind='program registry')
-    existing = records.get_record(REGISTRY, key)
+    existing, version = records.get_versioned_record(REGISTRY, key)
     if not existing or not existing['program_ids']:
         return []
-    def select(registry):
-        ids = registry['program_ids']
-        count = min(batch_size, len(ids))
-        start = registry['cursor'] % max(1, len(ids))
-        selected = [ids[(start + index) % len(ids)] for index in range(count)]
-        registry['cursor'] = (start + count) % max(1, len(ids))
-        return selected
-    selected = _registry_change(user_id, select)
+    _validate(existing, 'registry')
+    selected = tuple(existing['program_ids'])
+
+    def visit(program_id):
+        program = advance_program(program_id, user_id=user_id)
+        retire = ((program['status'] in TERMINAL and program['current'] is None)
+                  or program['status'] == 'needs_attention'
+                  or (program['status'] == 'paused' and program['current'] is None))
+        return {'program_id': program_id, 'status': program['status']}, retire
+
     outcomes = []
-    for program_id in selected:
+    retired = set()
+    with DemandThreadPoolExecutor(max_workers=batch_size,
+                                  thread_name_prefix='tofu-evolution-program') as workers:
+        pending = [(program_id, workers.submit(visit, program_id)) for program_id in selected]
+        for program_id, future in pending:
+            try:
+                outcome, retire = future.result()
+                outcomes.append(outcome)
+                if retire:
+                    retired.add(program_id)
+            except Exception as exc:
+                logger.warning('[Evolution:Programs] sweep deferred for %s: %s',
+                               program_id, type(exc).__name__)
+                outcomes.append({'program_id': program_id, 'status': 'deferred',
+                                 'error': type(exc).__name__})
+    if retired:
+        remaining = [program_id for program_id in selected if program_id not in retired]
+        registry = {**existing, 'program_ids': remaining,
+                    'cursor': existing['cursor'] % max(1, len(remaining))}
         try:
-            program = advance_program(program_id, user_id=user_id)
-            if ((program['status'] in TERMINAL and program['current'] is None)
-                    or program['status'] == 'needs_attention'
-                    or (program['status'] == 'paused' and program['current'] is None)):
-                _unenroll(program_id, user_id)
-            outcomes.append({'program_id': program_id, 'status': program['status']})
-        except Exception as exc:
-            logger.warning('[Evolution:Programs] sweep deferred for %s: %s',
-                           program_id, type(exc).__name__)
-            outcomes.append({'program_id': program_id, 'status': 'deferred',
-                             'error': type(exc).__name__})
+            records.put_record(REGISTRY, key, registry, kind='program registry',
+                               expected_version=version)
+        except StorageError as exc:
+            if exc.code != 'database_conflict':
+                raise
+            # Enrollment/resume writes the registry before program state. Never
+            # retry cleanup against that intermediate state. Terminal IDs can
+            # safely be revisited on the next cadence, without replaying work.
     return outcomes
+
 
 
 def _validation_generation_parent(program, sequence, *, user_id):

@@ -20,7 +20,7 @@ pytestmark = pytest.mark.unit
 def tmp_data_dir(monkeypatch):
     """Redirect the server data dir so the profile lands in a tmp tree.
 
-    ``lib.runtime_paths`` freezes its ``_BASE`` (and thus ``data_root()``) at
+    ``lib.runtime.runtime_paths`` freezes its ``_BASE`` (and thus ``data_root()``) at
     import time, so setting ``$TOFU_DATA_DIR`` here is a no-op — the profile
     path would still resolve to the real ``<repo>/data`` and, on a dev box that
     already has a ``.tofu_user_profile.md``, the test would read the operator's
@@ -37,7 +37,7 @@ def tmp_data_dir(monkeypatch):
 # ───────────────────────── storage / registry ─────────────────────────
 
 def test_profile_registered_in_artifact_registry():
-    from lib.agent_artifacts import (USER_PROFILE_FILE, KNOWN_ARTIFACT_NAMES,
+    from lib.agent_loop.agent_artifacts import (USER_PROFILE_FILE, KNOWN_ARTIFACT_NAMES,
                                       is_agent_artifact)
     assert USER_PROFILE_FILE == '.tofu_user_profile.md'
     assert USER_PROFILE_FILE in KNOWN_ARTIFACT_NAMES
@@ -286,7 +286,7 @@ def test_empty_scope_uses_global_file_unchanged(tmp_data_dir):
     """scope='' must resolve to the EXACT legacy global path — no migration,
     byte-identical for every open/private personal install."""
     import lib.memory.user_profile as up
-    from lib.agent_artifacts import USER_PROFILE_FILE
+    from lib.agent_loop.agent_artifacts import USER_PROFILE_FILE
     p = up.profile_path('')
     assert p.endswith(os.path.join('memories', USER_PROFILE_FILE))
     assert 'profiles' not in p  # NOT under the per-tenant subtree

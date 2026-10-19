@@ -10,6 +10,24 @@ from lib.log import get_logger
 logger = get_logger(__name__)
 
 
+def summary_dispatch_calls(usage) -> list[dict]:
+    """Bound observed call identities only; selection is not dispatch proof."""
+    if not isinstance(usage, dict):
+        return []
+    calls = usage.get('_summaryCalls')
+    calls = calls if isinstance(calls, list) else [{'usage': usage}]
+    result = []
+    for call in calls[:16]:
+        observed = call.get('usage') if isinstance(call, dict) else None
+        metadata = observed.get('_dispatch') if isinstance(observed, dict) else None
+        metadata = metadata if isinstance(metadata, dict) else {}
+        result.append({key: value[:160] for key, value in (
+            ('model', metadata.get('model')),
+            ('providerId', metadata.get('provider_id')),
+        ) if isinstance(value, str) and value})
+    return result
+
+
 def cancel_compaction_archive(archive_id, messages: list, task: dict, *,
                               trigger: str, round_num: int,
                               tokens_before: int, msgs_before: int,
@@ -55,7 +73,8 @@ def cancel_compaction_archive(archive_id, messages: list, task: dict, *,
             tokenCountKind='estimated', msgsBefore=int(msgs_before),
             msgsAfter=len(messages), reductionPct=round(
                 (1 - tokens_after / max(1, tokens_before)) * 100, 1),
-            roundNum=int(round_num), receipt=receipt))
+            roundNum=int(round_num), receipt=receipt,
+            summaryDispatchCalls=summary_dispatch_calls(summary_usage)))
     except Exception as exc:
         logger.debug('[Compact] cancellation archive event failed: %s', exc)
 
@@ -64,7 +83,7 @@ def fail_compaction_archive(task, archive_id, meta, cause=None):
     from lib.agent_core.events import EventType, build_event
     from lib.tasks_pkg.manager import append_event
     from lib.tasks_pkg.compaction._receipt import build_compaction_receipt
-    from lib.storage.errors import StorageError
+    from lib.agent_core.storage_errors import StorageError
     receipt = build_compaction_receipt(
         trigger=meta.get('trigger') or 'window', status='failed',
         strategy='unchanged', implementation='archive_commit_failed',
@@ -216,6 +235,9 @@ def _archive_transcript(conv_id: str, messages: list, summary: str = '',
                 msgsBefore=int(msgs_before or 0),
                 msgsAfter=int(msgs_after or 0),
                 model=model,
+
+                taskModel=model,
+                **({'receipt': receipt} if receipt is not None else {}),
                 reason=(reason or '')[:300],
                 snapshotKind='pre_compaction_transcript',
                 ts=int(time.time()),

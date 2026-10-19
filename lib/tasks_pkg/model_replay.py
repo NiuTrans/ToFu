@@ -47,7 +47,7 @@ def turn_witness(row):
 
 def policy_witness(config):
     from lib.context_experiment_flags import normalize_context_experiment_flags
-    from lib.tool_round_replay import TOOL_REPLAY_PROJECTION_VERSION
+    from lib.tool_results.tool_round_replay import TOOL_REPLAY_PROJECTION_VERSION
     return _digest([VERSION, TOOL_REPLAY_PROJECTION_VERSION,
                     {key: config.get(key) for key in _POLICY_FIELDS},
                     normalize_context_experiment_flags(config)])
@@ -163,6 +163,12 @@ def restore_prefix(rows, config, *, conversation_id, user_id, validated_context=
     if validated_context is not None:
         config['_modelReplayHistoryProof'] = validated_context['historyProof']
         config['_modelReplayProofEligible'] = bool(validated_context.get('proofEligible'))
+    # Pin ingress policy even when this target cannot replay a completed prefix.
+    # A successful resumed turn can publish a continuation after runtime defaults
+    # or task-workspace rebinding have mutated its configuration.
+    config['_modelReplayPolicy'] = policy_witness(config)
+    config['_modelReplayPortablePolicy'] = portable_policy_witness(config)
+    config['_modelReplayEffortPolicy'] = effort_policy_witness(config)
     # Resume cannot reuse a completed-turn prefix blindly, but it still needs
     # fresh history witnesses to validate an accepted compaction archive.
     if not _supports_prefix_restore(config):
@@ -172,9 +178,6 @@ def restore_prefix(rows, config, *, conversation_id, user_id, validated_context=
     if target.get('projection', {}).get('content') or target.get('projection', {}).get('toolRounds'):
         config['_modelReplayStatus'] = 'resume_target'
         return [], 0
-    config['_modelReplayPolicy'] = policy_witness(config)
-    config['_modelReplayPortablePolicy'] = portable_policy_witness(config)
-    config['_modelReplayEffortPolicy'] = effort_policy_witness(config)
     try:
         cached = (validated_context.get('continuation') if validated_context is not None
                   else ModelContinuationStore().get(user_id=user_id, conversation_id=conversation_id,
@@ -248,6 +251,9 @@ def restore_prefix(rows, config, *, conversation_id, user_id, validated_context=
         config['_modelReplayStatus'] = (
             'restored_portable' if portable else
             'restored_effort' if not same_policy and same_effort_policy else 'restored')
+        # This is a completed prior execution, not recovery of its mailbox.
+        from lib.tasks_pkg.message_input_receipts import historical_swarm_context
+        messages = historical_swarm_context(messages)
         return messages, len(prior) if validated_context is None or legacy_prefix else 0
     except Exception as exc:
         config['_modelReplayStatus'] = 'unavailable'

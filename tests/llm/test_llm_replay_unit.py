@@ -237,7 +237,7 @@ class TestReplayer:
             session.stream_chat(_body())
 
     def test_error_step_raises_recorded_type(self, tmp_path):
-        from lib.llm_errors import RateLimitError
+        from lib.llm.llm_errors import RateLimitError
         line = json.dumps({'kind': 'error', 'request_digest': 'd',
                            'exception': 'RateLimitError',
                            'message': 'slow down',
@@ -379,7 +379,7 @@ class TestRecordReplayRoundTrip:
         assert recorded_calls == [body]
 
     def test_recorder_captures_exceptions(self, tmp_path):
-        from lib.llm_errors import RetryableAPIError
+        from lib.llm.llm_errors import RetryableAPIError
 
         def boom(_body, **_kwargs):
             raise RetryableAPIError('gateway 502', status_code=502)

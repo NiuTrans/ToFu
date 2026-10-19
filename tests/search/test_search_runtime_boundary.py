@@ -48,7 +48,7 @@ def test_server_registration_and_bootstrap_schema_do_not_load_search():
 def test_server_boot_does_not_load_dormant_v4_validators():
     proc = _run_isolated(
         'import sys; import server; '
-        'print("V4-GENERATED", "lib.api_v4_generated" in sys.modules, '
+        'print("V4-GENERATED", "lib.generated_api_v4" in sys.modules, '
         '"PYDANTIC", "pydantic" in sys.modules)')
     assert proc.returncode == 0, proc.stderr[-800:]
     assert 'V4-GENERATED False PYDANTIC False' in proc.stdout
@@ -58,11 +58,11 @@ def test_server_boot_does_not_load_dormant_v4_validators():
 def test_unrelated_hot_reload_does_not_cold_import_search():
     proc = _run_isolated(
         'import sys; import lib; '
-        'from lib.search_runtime import sync_search_config_if_loaded; '
+        'from lib.search.search_runtime import sync_search_config_if_loaded; '
         'print("SYNC", sync_search_config_if_loaded()); '
         'lib.reload_config(); '
         'print("TOFU", "tofu_search" in sys.modules, '
-        '"BRIDGE", "lib.search_bridge" in sys.modules)')
+        '"BRIDGE", "lib.search.search_bridge" in sys.modules)')
     assert proc.returncode == 0, proc.stderr[-800:]
     assert 'SYNC False' in proc.stdout
     assert 'TOFU False BRIDGE False' in proc.stdout
@@ -72,7 +72,7 @@ def test_unrelated_hot_reload_does_not_cold_import_search():
 def test_direct_optional_import_applies_classic_pdf_policy_without_threads():
     proc = _run_isolated(
         'import sys, threading; '
-        'from lib.search_runtime import prepare_search_dependency_import; '
+        'from lib.search.search_runtime import prepare_search_dependency_import; '
         'prepare_search_dependency_import(); import tofu_search; '
         'print("LAYOUT-BLOCKED", sys.modules.get("pymupdf.layout", "missing") '
         'is None, "THREADS", threading.active_count())')
@@ -86,14 +86,14 @@ def test_direct_bridge_policy_failure_is_fail_soft_and_observable(
     caplog,
 ):
     import runtime_guards
-    import lib.search_bridge as bridge
+    import lib.search.search_bridge as bridge
 
     def fail_policy():
         raise RuntimeError('synthetic policy failure')
 
     monkeypatch.setattr(
         runtime_guards, 'install_pymupdf_classic_policy', fail_policy)
-    with caplog.at_level(logging.WARNING, logger='lib.search_bridge'):
+    with caplog.at_level(logging.WARNING, logger='lib.search.search_bridge'):
         assert bridge._install_search_import_policy() is False
 
     assert 'classic PyMuPDF policy installation failed: RuntimeError' in caplog.text
@@ -104,14 +104,14 @@ def test_linkage_forensics_failure_preserves_bounded_diagnostic(
     monkeypatch,
     caplog,
 ):
-    import lib.search_runtime as runtime
-    import lib.server_linkage_forensics as forensics
+    import lib.search.search_runtime as runtime
+    import lib.server.server_linkage_forensics as forensics
 
     def fail_forensics():
         raise OSError('synthetic maps failure')
 
     monkeypatch.setattr(forensics, 'capture_linkage_forensics', fail_forensics)
-    with caplog.at_level(logging.DEBUG, logger='lib.search_runtime'):
+    with caplog.at_level(logging.DEBUG, logger='lib.search.search_runtime'):
         diagnostic = runtime._linkage_diagnostic(
             ImportError('GLIBCXX symbol is unavailable'))
 
@@ -121,7 +121,7 @@ def test_linkage_forensics_failure_preserves_bounded_diagnostic(
 
 @pytest.mark.unit
 def test_bridge_first_install_is_exactly_once_under_concurrency(monkeypatch):
-    import lib.search_bridge as bridge
+    import lib.search.search_bridge as bridge
 
     calls: list[str] = []
     calls_lock = threading.Lock()
@@ -155,7 +155,7 @@ def test_bridge_first_install_is_exactly_once_under_concurrency(monkeypatch):
 
 def test_browser_shutdown_does_not_import_an_unused_pool(monkeypatch):
     import sys
-    import lib.search_runtime as runtime
+    import lib.search.search_runtime as runtime
     monkeypatch.delitem(sys.modules,'tofu_search.fetch.playwright_pool',raising=False)
     runtime.shutdown_search_browser_runtime()
     assert 'tofu_search.fetch.playwright_pool' not in sys.modules

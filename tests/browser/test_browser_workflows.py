@@ -130,13 +130,22 @@ def test_failure_preserves_completed_reads_and_never_retries(fixture, monkeypatc
     assert all(page.closed for page in pages)
 
 
-def test_budget_overflow_returns_valid_bounded_partial_result(fixture, monkeypatch):
+def test_large_workflow_results_reach_shared_l0_without_output_budget(fixture, monkeypatch):
     runtime, adapter, pages, _ = fixture
-    monkeypatch.setattr(adapters, 'invoke_adapter', lambda *a, **k: {'result': ['x' * 5000]})
-    result = workflows.execute_workflow(adapter, {'max_chars': 4096, 'steps': plan()['steps'][:1]}, runtime)
-    assert result['error']['code'] == 'output_budget_exhausted'
-    assert len(json.dumps(result)) <= 4096
+    payload = ['x' * 5000 for _ in range(20)]
+    monkeypatch.setattr(adapters, 'invoke_adapter', lambda *a, **k: {'result': payload})
+    result = workflows.execute_workflow(adapter, {'steps': plan()['steps'][:1]}, runtime)
+    assert result['status'] == 'ok' and result['error'] is None
+    assert result['steps'][0]['result'] == payload
+    assert len(json.dumps(result)) > 80000
     assert all(page.closed for page in pages)
+
+
+def test_workflow_output_budget_is_not_an_execution_parameter(fixture):
+    runtime, adapter, pages, calls = fixture
+    with pytest.raises(adapters.AdapterValidationError):
+        workflows.execute_workflow(adapter, {'max_chars': 4096, **plan()}, runtime)
+    assert not calls and not pages
 
 
 def test_independent_workflows_for_same_owner_start_without_global_quota(fixture, monkeypatch):

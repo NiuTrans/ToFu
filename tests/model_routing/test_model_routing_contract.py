@@ -12,7 +12,6 @@ from jsonschema import Draft202012Validator
 
 from lib.model_routing import (
     CONTRACT_VERSION,
-    MAX_COUNTS,
     MAX_ROUTE_SNAPSHOT_BYTES,
     HealthTarget,
     InMemoryModelRoutingRepository,
@@ -34,7 +33,7 @@ from lib.model_routing import (
     plan_legacy_migration,
 )
 
-from lib.provider_headers import is_credential_header, split_header_secrecy
+from lib.provider.provider_headers import is_credential_header, split_header_secrecy
 from lib.secret_envelope import secret_hint
 
 
@@ -662,12 +661,6 @@ def test_model_fallback_prefers_same_provider_then_highest_quality() -> None:
 
 
 def test_catalog_health_and_route_snapshot_resource_budgets() -> None:
-    oversized = empty_document()
-    oversized['creators'] = [{}] * (MAX_COUNTS['creators'] + 1)
-    with pytest.raises(ModelRoutingError, match='resource budget') as error:
-        normalize_document(oversized)
-    assert error.value.field == 'creators'
-
     clock = [10.0]
     health = RouteHealthRegistry(
         max_entries=64, ttl_seconds=60, clock=lambda: clock[0])
@@ -831,8 +824,8 @@ def test_encrypted_credential_headers_share_reserved_header_guard() -> None:
 
 def test_schema_54_migrates_model_routing_authority_and_secret_tables() -> None:
     """A v53 authority gains v2 stores and publishes the current version."""
-    from lib.storage_sidecar.adapters.sqlite import SQLiteSession
-    from lib.storage_sidecar.schema import SCHEMA_VERSION, initialize_schema
+    from lib.storage_authority_sql.adapters.sqlite import SQLiteSession
+    from lib.storage_authority_sql.schema import SCHEMA_VERSION, initialize_schema
 
     connection = sqlite3.connect(':memory:')
     connection.row_factory = sqlite3.Row
@@ -864,12 +857,12 @@ def test_schema_54_migrates_model_routing_authority_and_secret_tables() -> None:
 
 
 def test_storage_commit_acknowledgement_stays_receipt_small_for_large_authority() -> None:
-    from lib.storage_sidecar.adapters.sqlite import SQLiteSession
-    from lib.storage_sidecar.operations_pkg._model_routing import (
+    from lib.storage_authority_sql.adapters.sqlite import SQLiteSession
+    from lib.storage_authority_sql.operations_pkg._model_routing import (
         _model_routing_commit,
     )
-    from lib.storage_sidecar.receipt_codec import encode_receipt_response
-    from lib.storage_sidecar.schema import initialize_schema
+    from lib.storage_authority_sql.receipt_codec import encode_receipt_response
+    from lib.storage_authority_sql.schema import initialize_schema
 
     connection = sqlite3.connect(':memory:')
     connection.row_factory = sqlite3.Row
@@ -1113,3 +1106,69 @@ def test_explicit_zero_priority_is_not_replaced_by_default(entity):
     candidates = compile_candidates(document,
         NativeModelSelection(ModelRef('creator', 'alpha'), None, ''))
     assert [candidate.provider_id for candidate in candidates] == ['provider-a', 'provider-b']
+
+
+@pytest.mark.parametrize('collection,identity,previous_limit', [
+    ('creators', 'creator_id', 1024), ('models', 'model_id', 4096),
+    ('providers', 'provider_id', 256), ('provider_accesses', 'provider_access_id', 256),
+    ('connections', 'connection_id', 512), ('credentials', 'credential_id', 1024),
+    ('offerings', 'offering_id', 4096), ('deployments', 'deployment_id', 8192),
+])
+def test_all_entity_collections_preserve_entries_beyond_former_quotas(collection, identity, previous_limit):
+    document = _full_document()
+    prototype = copy.deepcopy(document[collection][0])
+    for index in range(previous_limit + 1 - len(document[collection])):
+        row = {**copy.deepcopy(prototype), identity: f'demand-{index}'}
+        if collection == 'models':
+            row['display_name'] = f'Demand model {index}'
+        if collection == 'provider_accesses':
+            provider_id = f'demand-provider-{index}'
+            document['providers'].append({'provider_id': provider_id, 'name': provider_id, 'scope': 'owner'})
+            row['provider_id'] = provider_id
+        if collection == 'deployments':
+            row['wire_model_id'] = f'demand-wire-{index}'
+        document[collection].append(row)
+    normalized = normalize_document(document)
+    assert len(normalized[collection]) == previous_limit + 1
+    assert {row[identity] for row in normalized[collection]} == {row[identity] for row in document[collection]}
+    _validator().validate(normalized)
+
+
+def test_credential_reference_lists_preserve_complete_grants():
+    document = _full_document()
+    connection = copy.deepcopy(document['connections'][0])
+    document['connections'].extend({**copy.deepcopy(connection), 'connection_id': f'connection-{i}'} for i in range(513))
+    grant = document['credentials'][0]['authorization']
+    grant['connection_ids'] = [row['connection_id'] for row in document['connections']
+                               if row['provider_access_id'] == document['credentials'][0]['provider_access_id']]
+    grant['models'][0]['excluded_wire_model_ids'] = [f'excluded-{i}' for i in range(4097)]
+    normalized = normalize_document(document)
+    saved = normalized['credentials'][0]['authorization']
+    assert set(saved['connection_ids']) == set(grant['connection_ids'])
+    assert len(saved['models'][0]['excluded_wire_model_ids']) == 4097
+    _validator().validate(normalized)
+
+
+@pytest.mark.parametrize('model_id', ['beta', 'Beta', 'beta-wire-a'])
+def test_request_compiler_resolves_only_exact_logical_model_identity(model_id):
+    from lib.model_routing.routing import RouteCandidateCompiler
+    compiler=RouteCandidateCompiler(_full_document())
+    if model_id=='beta':
+        reference=compiler.resolve_model_id(model_id)
+        assert reference==ModelRef('creator','beta')
+        candidates=compiler.compile(NativeModelSelection(reference,None,'provider-a'),max_candidates=1)
+        assert len(candidates)==1 and candidates[0].deployment['wire_model_id']=='beta-wire-a'
+    else:
+        with pytest.raises(ModelRoutingError) as caught:compiler.resolve_model_id(model_id)
+        assert caught.value.kind=='model_not_found'
+
+
+def test_string_selector_cannot_choose_a_creator_even_when_only_one_has_a_route():
+    from lib.model_routing.routing import RouteCandidateCompiler
+    document=_full_document()
+    document['creators'].append(dict(creator_id='other',name='Other'))
+    row=copy.deepcopy(document['models'][1]);row['creator_id']='other'
+    document['models'].append(row)
+    compiler=RouteCandidateCompiler(document)
+    with pytest.raises(ModelRoutingError) as caught:compiler.resolve_model_id('beta')
+    assert caught.value.kind=='model_identity_ambiguous'

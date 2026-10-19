@@ -20,7 +20,7 @@ CONTRACT = yaml.safe_load(
 
 
 def test_lifecycle_operations_are_registered_with_the_declared_durability():
-    from lib.storage_sidecar.operation_domains.conversations import OPERATIONS
+    from lib.storage_authority_sql.operation_domains.conversations import OPERATIONS
 
     declared = {
         row["storage"]
@@ -37,8 +37,8 @@ def test_lifecycle_operations_are_registered_with_the_declared_durability():
 def test_schema_and_maintenance_match_the_contract():
     import sqlite3
 
-    from lib.storage_sidecar import schema
-    from lib.storage_sidecar.adapters.sqlite import SQLiteSession
+    from lib.storage_authority_sql import schema
+    from lib.storage_authority_sql.adapters.sqlite import SQLiteSession
     from lib.tasks_pkg import event_log
 
     connection = sqlite3.connect(":memory:")

@@ -1,7 +1,7 @@
 """tests/agent_core/test_agent_core_boundary.py — Core/plugin boundary enforcement.
 
 The reusable agent base (orchestrator, llm, llm_dispatch, swarm scheduling,
-compaction, push, task_runtime — see ``lib/agent_core_manifest.py``) must
+compaction, push, task_runtime — see ``lib/agent_loop/agent_core_manifest.py``) must
 NEVER import a concrete plugin (an individual tool family or provider dialect).
 It may only reach plugins through the registry seams (``lib.tools.registry``,
 ``lib.llm_dispatch.provider_registry``).
@@ -28,7 +28,7 @@ import os
 
 import pytest
 
-from lib.agent_core_manifest import (
+from lib.agent_loop.agent_core_manifest import (
     CORE_MODULES,
     is_concrete_plugin_import,
     is_forbidden_persistence_import,

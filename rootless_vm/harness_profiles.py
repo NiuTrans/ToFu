@@ -44,6 +44,18 @@ class HarnessProfile:
 
 
 _PROFILES = {
+    "mini-swe-agent": HarnessProfile(
+        profile_id="mini-swe-agent", harbor_agent="mini-swe-agent",
+        agent_name="mini-swe-agent", agent_version=None,
+        credential_boundary="guest-explicit", trajectory_format="ATIF-v1.7",
+        comparison_target="Upstream mini-SWE-agent; DeepSWE reference harness",
+        default_max_output_tokens=None, default_context_window_tokens=None,
+        default_max_rounds=None, default_context_checkpoint_tokens=None,
+        host_dispatch=False,
+        notes=("Installed agent version must be pinned for a measured run; "
+               "use explicit short-lived guest credentials and a verified "
+               "Docker/cloud backend. Pier leaderboard parity is not implied."),
+    ),
     "tofu": HarnessProfile(
         profile_id="tofu",
         harbor_agent="rootless_vm.harbor_tofu_agent:TofuHostAgent",
@@ -143,7 +155,7 @@ _PROFILES = {
         profile_id="opencode",
         harbor_agent="rootless_vm.harbor_opencode_agent:OpenCodeGuestAgent",
         agent_name="opencode-guest",
-        agent_version="1.18.29",
+        agent_version="1.19.0",
         credential_boundary="host-only",
         trajectory_format="ATIF-v1.7",
         comparison_target="Pinned OpenCode through a host-only model proxy",

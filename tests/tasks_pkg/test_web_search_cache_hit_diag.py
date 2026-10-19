@@ -283,3 +283,158 @@ def test_cache_hit_never_calls_meta_fallback_for_web_search(rec, monkeypatch):
     # one directly must NOT yield the old 'Search: {query}' fabrication.
     meta = real('web_search', {'query': 'q'}, 'body', True)
     assert not str(meta.get('title', '')).startswith('Search:'), meta
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  5. A zero-result batch surfaces the SINGULAR searchDiag the frontend
+#     actually reads — and the failure is NOT cached for replay.
+#
+#  Regression for 2026-10-17: a 2-query batch failed during a network
+#  outage (reason=partial_network_error / deadline), but the handler only
+#  stamped the PLURAL ``searchDiags``. The frontend's zero-result renderer
+#  reads ``searchDiag`` (singular) only, so both queries rendered the
+#  fabricated "All engines responded but found no matching results — try
+#  different keywords" row. Worse, the failed result was cached, so a later
+#  identical search replayed the outage instead of re-executing.
+# ═══════════════════════════════════════════════════════════════════
+
+from types import SimpleNamespace
+
+
+def _fake_batch_backend(diags):
+    """A search backend whose per-query results/diags come from ``diags``."""
+    import importlib
+    formatter = importlib.import_module(
+        'tofu_search.search').format_search_for_tool_response
+
+    def _one(query, user_question, freshness='', vertical='auto'):
+        return [], diags[query], None, None
+
+    return SimpleNamespace(_web_search_one=_one), formatter
+
+
+def _capture_tool_result_events(monkeypatch):
+    events = []
+    import lib.tasks_pkg.handlers.search._handlers as handlers
+    monkeypatch.setattr(handlers, 'append_event',
+                        lambda task, ev, *a, **k: events.append(dict(ev)))
+    return events
+
+
+def test_batch_zero_result_emits_singular_search_diag(monkeypatch):
+    """A fully-failed batch must stamp the singular ``searchDiag`` (the field
+    the frontend's zero-result renderer reads), not only the plural list."""
+    from lib.tasks_pkg.handlers.search import _handlers
+
+    diags = {
+        'query one': {'reason': 'partial_network_error',
+                      'engine_errors': {'Bing': 'down'}, 'engine_empty': []},
+        'query two': {'reason': 'deadline', 'deadline_hit': True,
+                      'engine_errors': {}, 'engine_empty': []},
+    }
+    backend, formatter = _fake_batch_backend(diags)
+    monkeypatch.setattr(_handlers, '_load_search_backend',
+                        lambda: (backend, formatter))
+    events = _capture_tool_result_events(monkeypatch)
+
+    task = _mk_task(lastUserQuery='q')
+    round_entry = {'query': 'batch'}
+    args = {'queries': [{'query': 'query one'}, {'query': 'query two'}]}
+    _handlers._handle_web_search(
+        task, {}, 'web_search', 'tc-batch', args, 1, round_entry,
+        {'autoApply': True}, '/tmp', False)
+
+    # Singular diag surfaces the PRIMARY failing reason (not a bare no_matches).
+    primary = round_entry.get('searchDiag')
+    assert primary is not None, 'batch must stamp the singular searchDiag'
+    assert primary['reason'] in ('partial_network_error', 'deadline')
+    # Plural per-query list is preserved for completeness.
+    assert len(round_entry.get('searchDiags') or []) == 2
+    # The tool_result event carries the same singular diag.
+    tool_results = [e for e in events if e.get('type') == 'tool_result']
+    assert tool_results and tool_results[-1].get('searchDiag') == primary
+
+
+def test_batch_zero_result_prefers_failing_diag_over_clean_no_matches(
+        monkeypatch):
+    """When one query cleanly finds nothing and another fails, the surfaced
+    singular diag must be the FAILURE, so the UI never reports a failed
+    search as a clean 'no matches'."""
+    from lib.tasks_pkg.handlers.search import _handlers
+
+    diags = {
+        'clean': {'reason': 'no_matches', 'engine_errors': {},
+                  'engine_empty': ['Bing']},
+        'failed': {'reason': 'deadline', 'deadline_hit': True,
+                   'engine_errors': {}, 'engine_empty': []},
+    }
+    backend, formatter = _fake_batch_backend(diags)
+    monkeypatch.setattr(_handlers, '_load_search_backend',
+                        lambda: (backend, formatter))
+    _capture_tool_result_events(monkeypatch)
+
+    task = _mk_task(lastUserQuery='q')
+    round_entry = {'query': 'batch'}
+    # 'clean' is listed FIRST — the picker must not just take [0].
+    args = {'queries': [{'query': 'clean'}, {'query': 'failed'}]}
+    _handlers._handle_web_search(
+        task, {}, 'web_search', 'tc-batch', args, 1, round_entry,
+        {'autoApply': True}, '/tmp', False)
+
+    assert round_entry['searchDiag']['reason'] == 'deadline'
+
+
+def test_zero_result_search_is_not_cached(monkeypatch):
+    """A zero-result search (single or batch) must set ``_cacheableResult``
+    False so a later identical query re-executes instead of replaying the
+    failure from the prefetch/dedup cache."""
+    from lib.tasks_pkg.handlers.search import _handlers
+
+    diag = {'reason': 'deadline', 'deadline_hit': True,
+            'engine_errors': {}, 'engine_empty': []}
+    backend, formatter = _fake_batch_backend({'q': diag, 'q2': diag})
+    monkeypatch.setattr(_handlers, '_load_search_backend',
+                        lambda: (backend, formatter))
+    _capture_tool_result_events(monkeypatch)
+
+    # Single-query path.
+    task = _mk_task(lastUserQuery='q')
+    single_entry = {'query': 'q'}
+    _handlers._handle_web_search(
+        task, {}, 'web_search', 'tc-single', {'query': 'q'}, 1, single_entry,
+        {'autoApply': True}, '/tmp', False)
+    assert single_entry.get('_cacheableResult') is False
+
+    # Batch path.
+    batch_entry = {'query': 'batch'}
+    _handlers._handle_web_search(
+        task, {}, 'web_search', 'tc-batch', {'queries': ['q', 'q2']}, 2,
+        batch_entry, {'autoApply': True}, '/tmp', False)
+    assert batch_entry.get('_cacheableResult') is False
+
+
+def test_successful_batch_stays_cacheable_and_diag_free(monkeypatch):
+    """A batch with real results must NOT be marked uncacheable and must not
+    fabricate a singular searchDiag — the new behavior is failure-only."""
+    import importlib
+    from lib.tasks_pkg.handlers.search import _handlers
+
+    formatter = importlib.import_module(
+        'tofu_search.search').format_search_for_tool_response
+
+    def _one(query, user_question, freshness='', vertical='auto'):
+        return ([{'title': 'T', 'url': 'https://x.org', 'source': 'Web',
+                  'snippet': 's'}], None, None, None)
+
+    backend = SimpleNamespace(_web_search_one=_one)
+    monkeypatch.setattr(_handlers, '_load_search_backend',
+                        lambda: (backend, formatter))
+    _capture_tool_result_events(monkeypatch)
+
+    task = _mk_task(lastUserQuery='q')
+    round_entry = {'query': 'batch'}
+    _handlers._handle_web_search(
+        task, {}, 'web_search', 'tc-ok', {'queries': ['a', 'b']}, 1,
+        round_entry, {'autoApply': True}, '/tmp', False)
+    assert '_cacheableResult' not in round_entry
+    assert 'searchDiag' not in round_entry

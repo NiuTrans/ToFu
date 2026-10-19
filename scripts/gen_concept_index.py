@@ -1,38 +1,12 @@
 #!/usr/bin/env python3
-"""Generate the cross-layer concept index — one row per change concept.
+"""Generate the optional cross-layer navigation index.
 
-WHY THIS EXISTS
----------------
-A real change is never confined to one directory: "conversation delete" spans
-a contract, a route, a sidecar operation, a frontend module, and a focused
-test set. The repository already documents each layer separately
-(``docs/README.md``'s change table, ``docs/catalog.json``'s contract guards,
-the focused tests named inside each domain/authority document), but nothing
-JOINED them — so a contributor editing one side discovered the others only
-when a distant test broke.
+Concepts and owners come from docs/README.md; contract guards come from
+docs/catalog.json; focused test references come from the linked documents.
+Unresolved references are reported for the reader and do not gate generation.
+This utility has no documentation verification mode and is not a CI gate.
 
-This script derives that join instead of anyone maintaining it:
-
-* **Concepts and owners** come from the change table in ``docs/README.md``
-  (the hand-maintained documentation map — the single source).
-* **Guard tests** come from ``docs/catalog.json`` (every cataloged contract
-  names the test that pins it).
-* **Focused tests** are the ``test_*.py`` references inside the documents
-  each row links, resolved against the real ``tests/`` tree.
-
-Derivation is STRICT: an owner path that no longer exists, a linked document
-that cannot be read, a contract missing from the catalog, or a test reference
-that does not resolve to exactly one (or, for globs, at least one) real file
-fails the build with an actionable message. A stale-looking index that is
-wrong is worse than none, so the generator refuses to render one.
-
-The output doubles as the drift guard: ``--check`` fails when the committed
-``docs/CONCEPT_INDEX.md`` does not match what the sources derive now.
-
-USAGE
-    python3 scripts/gen_concept_index.py            # write the index
-    python3 scripts/gen_concept_index.py --check    # CI: fail if stale
-    python3 scripts/gen_concept_index.py --json     # machine consumption
+Usage: python3 scripts/gen_concept_index.py [--json]
 """
 
 from __future__ import annotations
@@ -337,9 +311,8 @@ def render(data: dict) -> str:
     out: list[str] = []
     out.append("# Concept index (GENERATED — do not edit)")
     out.append("")
-    out.append("Regenerate with `python3 scripts/gen_concept_index.py`; drift is")
-    out.append("pinned by `make docs-check` and")
-    out.append("`tests/meta/test_concept_index_generated.py`.")
+    out.append("Regenerate with `python3 scripts/gen_concept_index.py`.")
+    out.append("This navigation index has no automatic documentation gate.")
     out.append("")
     out.append("One row per change concept from [the documentation")
     out.append("map](README.md). The join is DERIVED from that table,")
@@ -370,8 +343,6 @@ def render(data: dict) -> str:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--check", action="store_true",
-                        help="exit 1 if the committed index is stale")
     parser.add_argument("--json", action="store_true",
                         help="dump the derived index as JSON to stdout")
     args = parser.parse_args()
@@ -382,33 +353,15 @@ def main() -> int:
         print(f"concept-index: source parse failed: {exc}", file=sys.stderr)
         return 1
     if data["failures"]:
-        print("concept-index: stale source references — fix the owning "
-              "document, then regenerate:", file=sys.stderr)
+        print("concept-index: unresolved navigation references:", file=sys.stderr)
         for failure in data["failures"]:
             print(f"  - {failure}", file=sys.stderr)
-        return 1
 
     if args.json:
         print(json.dumps(data["concepts"], indent=2, ensure_ascii=False))
         return 0
 
     rendered = render(data)
-    if args.check:
-        try:
-            current = OUTPUT_PATH.read_text(encoding="utf-8")
-        except OSError:
-            print(f"MISSING: {OUTPUT_PATH} — run scripts/gen_concept_index.py",
-                  file=sys.stderr)
-            return 1
-        if current != rendered:
-            print(f"STALE: {OUTPUT_PATH} does not match the documentation "
-                  f"sources. Run: python3 scripts/gen_concept_index.py",
-                  file=sys.stderr)
-            return 1
-        print(f"OK: {OUTPUT_PATH} is in sync "
-              f"({len(data['concepts'])} concepts)")
-        return 0
-
     OUTPUT_PATH.write_text(rendered, encoding="utf-8")
     print(f"Wrote {OUTPUT_PATH} ({len(data['concepts'])} concepts)")
     return 0

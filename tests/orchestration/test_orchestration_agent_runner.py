@@ -19,7 +19,7 @@ def _parent():
             'config': {'model': 'chosen', 'preset': 'wrong-model',
                        'assistantMsgId': 'parent-message', 'checkpointContent': 'parent checkpoint',
                        '_turnId': 'parent-turn', '_attemptId': 'parent-attempt',
-                       'modelRef': {'must': 'not rebind'}, 'projectPaths': ['/repo']}}
+                       'projectPaths': ['/repo']}}
 
 
 def _node():
@@ -205,3 +205,26 @@ def test_selected_goal_model_cannot_be_overridden_by_node():
         emit=lambda event: None, abort_check=lambda: False)
     with pytest.raises(ValueError, match='selected-model authority'):
         runner(node, '', 0)
+
+
+@pytest.mark.parametrize('preferred_provider', ['provider-a', ''])
+def test_native_role_tier_uses_durable_preference_and_principal_tenant(preferred_provider):
+    from lib.identity import PrincipalContext
+    from lib.model_routing.domain import NativeModelSelection,ModelRef
+    parent=_parent()
+    parent['_principalContext']=PrincipalContext.user(
+        subject_id='graph-owner',owner_user_id=71,tenant_id='owned-tenant').to_payload()
+    parent['_tenant_id']='stale-task-hint'
+    parent['config']['_pinned_provider_id']='ephemeral-root-slot-group'
+    parent['_model_routing_selection']=NativeModelSelection(ModelRef('creator','chosen'),None,
+        preferred_provider_id=preferred_provider)
+    seen=[]
+    def resolve(tier,model,**kwargs):
+        seen.append(kwargs);return 'routed-model'
+    runner=OrchestrationInvocationRunner(
+        OrchestrationAgentRunnerConfig(parent_task=parent,model='chosen'),
+        emit=lambda event:None,abort_check=lambda:False,model_resolver=resolve)
+    route=runner._resolve_model_route(_node())
+    assert route.resolved_model=='routed-model'
+    assert seen==[dict(role='worker',provider_id=preferred_provider,
+        owner_user_id=71,tenant_id='owned-tenant')]

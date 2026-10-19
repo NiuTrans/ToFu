@@ -1035,7 +1035,10 @@ impl BlockStore {
             return Ok((id, false));
         }
         let existing = if probe_loose { self.probe_dedupe(id)? }
-            else { self.probe_packed_dedupe(id)? };
+            else {
+                crate::request_profile::work(crate::request_profile::Work::ColdHistoryDedupeBypass, 1);
+                self.probe_packed_dedupe(id)?
+            };
         match existing {
             DedupeProbe::Present(existing) => {
                 if existing.as_slice() != payload.as_ref() {
@@ -2339,7 +2342,9 @@ impl BlockStore {
     /// a bloom false positive and degrades to `Missing`, which restages —
     /// existence is claimed only on bytes, never on the filter alone.
     fn probe_packed_dedupe(&self, id: BlockId) -> io::Result<DedupeProbe> {
-        if let Some(payload) = self.get_from_history(id)? { return Ok(DedupeProbe::Present(payload)); }
+        // Complete new Blob bytes already supply their exact WAL recovery
+        // witness. Cold history dedup is optional: keep verified warm/packed
+        // reuse and carry a complete copy when history is not resident.
         if let Some(payload) = self.get_from_read_hint(id) {
             return Ok(DedupeProbe::Present(payload));
         }
@@ -2360,6 +2365,11 @@ impl BlockStore {
     }
 
     fn probe_dedupe(&self, id: BlockId) -> io::Result<DedupeProbe> {
+        // Generic block publication retains its original source-validation
+        // reads and errors; only complete-payload optional Blob dedup omits it.
+        if let Some(payload) = self.get_from_history(id)? {
+            return Ok(DedupeProbe::Present(payload));
+        }
         if let present @ DedupeProbe::Present(_) = self.probe_packed_dedupe(id)? {
             return Ok(present);
         }

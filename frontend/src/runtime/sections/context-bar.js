@@ -281,6 +281,11 @@
       read: _meterSnapshot,
       onCompact: _runManualCompaction,
       onHistory: (convId) => runtimeScope.openCompactionViewer?.(convId),
+      workingFacts: {
+        load: (id, signal) => Api.conversations.workingFacts(id, signal),
+        save: (id, command, signal) => Api.conversations.saveWorkingFact(id, command, signal),
+        consumers: (id, cursor, signal) => Api.conversations.workingFactConsumers(id, cursor, signal),
+      },
     });
     return _state;
   }

@@ -18,7 +18,7 @@ from lib.agent_core.events import EventType
 from lib.conversation_sync.attempt_identity import is_conversation_attempt
 from lib.error_envelope import make_envelope
 from lib.log import get_logger
-from lib.task_replay import (
+from lib.task_replay.task_replay import (
     TASK_REPLAY_TERMINAL_EVENT_TYPES,
     TASK_REPLAY_TERMINAL_STATUSES,
 )
@@ -55,6 +55,8 @@ _SWARM_OBSERVER_EVENT_TYPES = frozenset({
     'swarm_agent_progress',
     'swarm_agent_complete',
     'swarm_agent_tool_call',
+
+    'swarm_message_receipt',
 })
 
 
@@ -287,8 +289,16 @@ def append_event(task, event):
     from lib.tasks_pkg.event_delivery import delivery_lane_for
     lane = delivery_lane_for(task)
     if task.get('_eventDeliveryAdmissionError') and event.get('type') not in TASK_REPLAY_TERMINAL_EVENT_TYPES:
-        from lib.tasks_pkg.event_delivery import EventDeliveryError
-        raise EventDeliveryError('Task event delivery admission previously failed') from (
+        from lib.tasks_pkg.event_delivery import (
+            EventDeliveryCancelled, EventDeliveryError, EventDeliveryRevoked,
+        )
+        # Keep only the bounded type marker, not an exception/traceback graph.
+        # Cancellation must survive a later request-complete/round-end emission.
+        error_type = {
+            'EventDeliveryCancelled': EventDeliveryCancelled,
+            'EventDeliveryRevoked': EventDeliveryRevoked,
+        }.get(task['_eventDeliveryAdmissionError'], EventDeliveryError)
+        raise error_type('Task event delivery admission previously failed') from (
             lane.error if lane is not None else None)
     with lane.producer_lock if lane is not None else nullcontext():
         current_lane = lane if task.get('_eventDeliveryLane') is lane else None
@@ -318,6 +328,7 @@ def _append_event_ordered(task, event, *, lane=None):
     """
 
     check_publication()
+    effect_durable = False
     if task.get('_invocationPublicationClosed'):
         raise RuntimeError('Child invocation publication revoked')
     if task.get('_suppressEvents'):
@@ -383,7 +394,7 @@ def _append_event_ordered(task, event, *, lane=None):
     # labels, so they remain safe for end-to-end diagnostics.
     # Fill only a compatible local envelope. A relayed child with just one
     # producer stamp must not acquire the display carrier's other stamp.
-    from lib.tool_round_identity import execution_identity
+    from lib.tool_results.tool_round_identity import execution_identity
     _producer_attempt, _producer_task = execution_identity(event)
     if ((_producer_task in ('', task.get('id')))
             and (_producer_attempt in ('', task.get('_attemptId')))):
@@ -496,7 +507,7 @@ def _append_event_ordered(task, event, *, lane=None):
         from lib.agent_core.events import interaction_types
         barrier = event.get('type') in (
             frozenset(TASK_REPLAY_TERMINAL_EVENT_TYPES) | interaction_types()
-            | {'background_command_inject'})
+            | {'background_command_inject', EventType.TOOL_EFFECT})
         publication_status = task.get('status')
         projection_source = None
         projection_bytes = 0
@@ -523,6 +534,7 @@ def _append_event_ordered(task, event, *, lane=None):
 
         prepared_durable_wire = None
         def _persist_before_push(_seq, *, preceding_task_events=None):
+            nonlocal effect_durable
             nonlocal prepared_durable_wire
             check_publication()
             if task.get('_invocationPublicationClosed'):
@@ -631,7 +643,7 @@ def _append_event_ordered(task, event, *, lane=None):
                     reset_persistent_event_projection(task['id'], durable_wire)
                     from lib.turn_lifecycle import get_attempt, LIVE_ATTEMPT_STATUSES
                     from lib.tasks_pkg.manager._registry import task_user_id
-                    from lib.storage.errors import StorageError
+                    from lib.agent_core.storage_errors import StorageError
                     current_attempt = get_attempt(task['_attemptId'], user_id=task_user_id(task))
                     if (current_attempt['status'] in LIVE_ATTEMPT_STATUSES
                             and current_attempt.get('taskId') in (None, '', task['id'])):
@@ -673,6 +685,8 @@ def _append_event_ordered(task, event, *, lane=None):
                     from lib.tasks_pkg.event_delivery import EventDeliveryRevoked
                     raise EventDeliveryRevoked(
                         'conversation event rejected: attempt is stale or no longer current')
+                if event.get('type') == EventType.TOOL_EFFECT and (outcome is True or outcome == 'carried'):
+                    effect_durable = True
             else:
                 # Inline/headless tasks have no conversation-attempt row; the
                 # standalone event log is their durable replay authority.
@@ -929,3 +943,8 @@ def _append_event_ordered(task, event, *, lane=None):
     except Exception as e:
         logger.debug('[Manager] admission notify failed task=%s: %s',
                      task['id'][:8], e)
+
+    # Only this exact synchronous attempt commit authorizes effect entry. A
+    # queued/unregistered/suppressed frame or unrelated sibling cannot attest it.
+    if event.get('type') == EventType.TOOL_EFFECT:
+        return effect_durable

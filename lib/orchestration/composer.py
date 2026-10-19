@@ -18,7 +18,7 @@ logger = get_logger(__name__)
 
 def _extract_json(text: str) -> dict | None:
     """Best-effort parse through the shared model-JSON boundary."""
-    from lib.llm_json import extract_json
+    from lib.llm.llm_json import extract_json
     result = extract_json(text)
     return result if isinstance(result, dict) else None
 

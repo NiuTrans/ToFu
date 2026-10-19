@@ -247,8 +247,11 @@ const rejectedBatchHtml = presentation.renderWriteResultHtml({
     detail: 'metadata fallback detail that must lose to the FAIL line',
   }],
 }, header);
-check('rejected_batch_edit_renders_reason_inline_on_row_and_header',
-  rejectedBatchHtml.match(/ptool-batch-fail-reason/g).length === 2);
+check('rejected_batch_edit_preserves_reason_in_body_without_header_duplication',
+  !rejectedBatchHtml.split('</summary>')[0].includes('ptool-batch-fail-reason')
+  && rejectedBatchHtml.slice(rejectedBatchHtml.indexOf('</summary>')).includes(
+    'Refusing to write to path outside workspace roots without'));
+
 check('inline_reason_prefers_authoritative_fail_line_and_truncates',
   rejectedBatchHtml.includes(
     'title="Refusing to write to path outside workspace roots without '
@@ -498,9 +501,10 @@ check('partial_failure_lists_applied_and_failed_edits',
   && partialEditHtml.includes('1 lines changed')
   && partialEditHtml.includes('ptool-edit-kind--input')
   && partialEditHtml.includes('title="src/b.py">b.py</span>'));
-check('partial_failure_header_carries_first_failure_reason',
-  partialEditHtml.split('</summary>')[0].includes('ambiguous-match')
-  || partialEditHtml.split('</summary>')[0].includes('matches 3 locations'));
+check('partial_failure_reason_is_accessible_in_body_not_duplicated_in_header',
+  !partialEditHtml.split('</summary>')[0].includes('matches 3 locations')
+  && partialEditHtml.slice(partialEditHtml.indexOf('</summary>')).includes('matches 3 locations')
+  && partialEditHtml.includes('Make it more specific (add surrounding lines).'));
 
 const failedSingleDiffHtml = presentation.renderWriteResultHtml({
   roundNum: 32,
@@ -906,7 +910,10 @@ check('empty_rounds_blank', renderToolRoundsHTML([], false) === '' &&
       toolContent: 'Tool execution timed out: get_conversation' },
   ], false);
   const d = frag(html);
-  check('error_line_class', !!d.querySelector('.ptool-error'));
+  check('error_unified_disclosure_starts_collapsed',
+    !!d.querySelector('details[data-tool-failure-evidence="collapsed"]')
+    && !d.querySelector('details[data-tool-failure-evidence="collapsed"]').open
+    && d.querySelector('details code').textContent.includes('Tool execution timed out: get_conversation'));
   check('error_badge_err', !!d.querySelector('.ptool-badge-err'));
   check('error_reason_inline',
     html.includes('Tool execution timed out: get_conversation'));
@@ -952,7 +959,9 @@ check('empty_rounds_blank', renderToolRoundsHTML([], false) === '' &&
       query: 'good one', results: [{ title: 'ok' }] },
   ], false);
   const d = frag(html);
-  check('error_batch_error_row', !!d.querySelector('.ptool-error'));
+  check('error_batch_keeps_unified_failure_evidence',
+    !!d.querySelector('details[data-tool-failure-evidence="collapsed"]')
+    && d.querySelector('details[data-tool-failure-evidence="collapsed"] code').textContent.includes('Tool execution error: boom'));
   check('error_batch_done_kept', html.includes('good one'));
   check('error_batch_reason', html.includes('Tool execution error: boom'));
 }
@@ -1001,8 +1010,10 @@ check('empty_rounds_blank', renderToolRoundsHTML([], false) === '' &&
       toolContent: 'fetch failed: 502' },
   ], false);
   const d = frag(html);
-  check('non_edit_error_keeps_classic_row',
-    !!d.querySelector('.ptool-error') && !d.querySelector('.ptool-edit-kind'));
+  check('non_edit_error_uses_unified_failure_disclosure_not_edit_card',
+    !!d.querySelector('details[data-tool-failure-evidence="collapsed"]')
+    && !d.querySelector('.ptool-edit-kind')
+    && d.querySelector('details code').textContent.includes('fetch failed: 502'));
 }
 
 // ── 13. local knowledge uses the grounded-search card, not a bare tool row ──

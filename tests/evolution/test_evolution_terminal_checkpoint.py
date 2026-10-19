@@ -9,7 +9,28 @@ from tests.evolution.test_evolution_runs import OWNER, runtime as runtime
 from tests.evolution.test_evolution_stage_outcomes import terminal
 from tests.evolution.test_evolution_background_execution import attach_background_launch
 
+pytest_plugins = ('tests._credential_sidecar',)
 pytestmark = pytest.mark.unit
+
+
+@pytest.fixture(scope='module')
+def _terminal_checkpoint_authority_owner():
+    """The isolated native authority owns the same subject as these tasks."""
+    import os
+    previous = os.environ.get('TOFUDB_OWNER_ID')
+    os.environ['TOFUDB_OWNER_ID'] = str(OWNER)
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop('TOFUDB_OWNER_ID', None)
+        else:
+            os.environ['TOFUDB_OWNER_ID'] = previous
+
+
+@pytest.fixture(scope='module')
+def credential_storage(_terminal_checkpoint_authority_owner, credential_storage):
+    return credential_storage
 
 
 def committed(runtime, monkeypatch, *, content='Observed experiment result 🧪'):
@@ -323,3 +344,34 @@ def test_acknowledged_background_parts_release_raw_snapshot_before_late_result_r
     from lib.evolution.terminal_checkpoint import materialize_committed
     assert materialize_committed(run,user_id=OWNER)['command_execution_observed'] is True
     assert outcomes.page(run['run_id'],task['id'],user_id=OWNER,source_kind='tool_evidence')['content']
+
+
+@pytest.mark.parametrize('credential_storage', ['sqlite', 'tofudb'], indirect=True)
+def test_large_terminal_context_commits_and_recovers_exact_frozen_prompt(credential_storage, runtime, monkeypatch):
+    from lib.evolution import stage_outcomes as outcomes
+    from lib.storage import get_storage_client
+    import time
+    import tracemalloc
+    runs, _, tasks = runtime
+    frozen_prompt = '完整冻结评审输入 🧪' * 60000
+    monkeypatch.setattr(runs, '_review_prompt', lambda *args, **kwargs: frozen_prompt)
+    tracemalloc.start(); started = time.perf_counter()
+    run, task = committed(runtime, monkeypatch)
+    row = get_storage_client().query('task_results.replay_get',
+        {'key': task['id'], 'user_id': OWNER, 'include_metadata': True})
+    capsule = row['metadata']['terminalContext']
+    size = len(json.dumps(capsule, ensure_ascii=False).encode())
+    assert size > 1 << 20 and len(frozen_prompt) > 200000
+    assert row['status'] == 'done' and capsule['outcome']['review_prompt'] == frozen_prompt
+    assert outcomes.read_metadata(run['run_id'], task['id'], user_id=OWNER) is None
+    task['content'] = 'Uncommitted changed output'
+    monkeypatch.setattr(runs, 'default_task_loader', lambda *args, **kwargs: None)
+    monkeypatch.setattr(runs, '_review_prompt', lambda *args, **kwargs: pytest.fail('must restore frozen input'))
+    resumed = runs.advance_run(run['run_id'], user_id=OWNER)
+    elapsed = time.perf_counter()-started; _, peak = tracemalloc.get_traced_memory(); tracemalloc.stop()
+    assert resumed['status'] == 'reviewing' and len(tasks) == 2
+    assert tasks[1]['messages'][0]['content'] == frozen_prompt
+    assert resumed['attempt'] == 1 and resumed['episode_id'] == run['episode_id']
+    runs.advance_run(run['run_id'], user_id=OWNER)
+    assert len(tasks) == 2
+    print(f'terminal_context_utf8_bytes={size} commit_restore_seconds={elapsed:.4f} traced_peak_bytes={peak}')

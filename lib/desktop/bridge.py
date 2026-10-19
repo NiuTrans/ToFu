@@ -8,6 +8,7 @@ agent without importing the routes package.
 """
 
 import asyncio
+import math
 import threading
 import time
 import uuid
@@ -69,7 +70,7 @@ _streams: dict = {}
 # seconds.
 _CONNECTED_WINDOW_S = 15
 # Pending commands older than this are expired (agent never picked them up).
-_COMMAND_TTL_S = limit('command_pickup_seconds')
+_COMMAND_TTL_S = limit('replay_retention_seconds')
 # Long-poll wait window (seconds) for the async poll route. Env-overridable
 # (tests set a small value) to match the browser bridge knob.
 import os as _os
@@ -99,10 +100,13 @@ def is_desktop_agent_connected() -> bool:
 def _sweep_streams_locked(now):
     # Per-command TTL: an egress stream (ttl=1800s) must survive a long
     # upstream silence (LLM thinking blocks produce NO frames for minutes);
-    # default commands keep the 90s window. The command row carries the ttl.
+    # Unsettled default commands retain accepted transport; completed/orphaned
+    # transport has an idle replay-retention window.
     stale = []
     for cid, e in _streams.items():
         cmd = command_queue.get(cid)
+        if cmd and not cmd['event'].is_set() and not cmd.get('ttl'):
+            continue  # Unsettled accepted work owns its pending transport.
         ttl = (cmd or {}).get('ttl') or _COMMAND_TTL_S
         if now - e['updated_at'] > ttl and not _command_active_locked(cmd, now):
             stale.append(cid)
@@ -270,6 +274,11 @@ def register_agent(agent_id, meta=None, user_id='', key_id='') -> None:
             'registered_at': prev.get('registered_at') or time.time(),
             'last_seen': time.time(),
         }
+        for command_id in _agents[agent_id]['active_command_ids']:
+            command = command_queue.get(command_id)
+            if (command and command.get('user_id') == str(user_id or '')
+                    and command.get('claimed_agent_id') == agent_id):
+                command['delivery_acknowledged'] = True
         _last_poll[0] = time.time()
 
 
@@ -354,18 +363,24 @@ def _addressing_enqueue_error(target_agent_id, user_id=''):
     return None
 
 
-def send_desktop_command(cmd_type, params=None, timeout=30, target_agent_id=None,
-                         user_id='', cmd_id=None, ttl=None):
-    """Queue a command for the desktop agent. Blocks until result or timeout.
+def send_desktop_command(cmd_type, params=None, timeout=None, target_agent_id=None,
+                         user_id='', cmd_id=None, ttl=None, cancellation=None):
+    """Queue a command and wait for settlement or an explicit caller stop.
 
     ``target_agent_id`` routes the command to one registered agent; when
     omitted, the single-agent selection applies and with
     several agents online the command is REFUSED up front — never
     delivered to a lucky poller. ``user_id`` (RWA P4a) scopes the command
     to agents registered by the same bridge user; it stays INTERNAL (never
-    projected onto the wire). ``ttl`` overrides the default 90s pickup
-    expiry (egress streams run far longer than 90s — design §4.3).
+    projected onto the wire). ``ttl`` sets an explicit pickup deadline; omitted
+    TTLs grant no queue-age refusal. Completed replay/transport retention is separate.
     """
+    if timeout is not None and (
+            type(timeout) not in (int, float)
+            or not math.isfinite(timeout) or timeout < 0):
+        raise ValueError('Desktop wait timeout must be nonnegative and finite or None')
+    if cancellation is not None and cancellation.is_set():
+        return None, 'Desktop command cancelled before dispatch'
     err = _addressing_enqueue_error(target_agent_id, user_id=user_id)
     if err:
         logger.warning('[Desktop] refusing %s: %s', cmd_type, err)
@@ -391,12 +406,32 @@ def send_desktop_command(cmd_type, params=None, timeout=30, target_agent_id=None
         command_queue[cmd_id] = cmd
     _wake_async_waiters(cmd)
 
-    event.wait(timeout=timeout)
+    deadline = time.monotonic() + timeout if timeout is not None else None
+    cancelled = False
+    while not event.is_set():
+        if cancellation is not None and cancellation.is_set():
+            cancelled = True
+            break
+        remaining = None if deadline is None else deadline - time.monotonic()
+        if remaining is not None and remaining <= 0:
+            break
+        # Poll only a supplied cancellation signal; otherwise block on settlement.
+        interval = remaining
+        if cancellation is not None:
+            interval = .25 if remaining is None else min(.25, remaining)
+        event.wait(timeout=interval)
 
     with command_queue_lock:
-        cmd = command_queue.pop(cmd_id, cmd)
+        cmd = command_queue.get(cmd_id, cmd)
+        if not event.is_set() and cmd.get('claimed_agent_id'):
+            # The caller stopped waiting; remote work still owns settlement.
+            cmd['caller_detached'] = True
+        else:
+            command_queue.pop(cmd_id, None)
 
     if not event.is_set():
+        if cancelled:
+            return None, 'Desktop command cancelled; remote completion is unconfirmed'
         return None, 'Desktop agent timeout — is the agent running?'
 
     return cmd.get('result'), cmd.get('error')
@@ -498,15 +533,19 @@ def resolve_results(results, *, agent_id: str, user_id: str) -> int:
             continue
         with command_queue_lock:
             cmd = command_queue.get(cmd_id)
-        if _command_owned_by_poller(cmd, agent_id, user_id):
-            cmd['result'] = r.get('result')
-            cmd['error'] = r.get('error')
-            cmd['event'].set()
-            resolved += 1
-        elif cmd is not None:
-            logger.warning(
-                '[Desktop] rejected result for unowned command %s from '
-                'agent %s', cmd_id[:8], agent_id[:8])
+            if _command_owned_by_poller(cmd, agent_id, user_id):
+                if cmd['event'].is_set():
+                    continue  # A repeated delivery cannot replace first settlement.
+                cmd['result'] = r.get('result')
+                cmd['error'] = r.get('error')
+                cmd['event'].set()
+                if cmd.get('caller_detached'):
+                    command_queue.pop(cmd_id, None)
+                resolved += 1
+            elif cmd is not None:
+                logger.warning(
+                    '[Desktop] rejected result for unowned command %s from '
+                    'agent %s', cmd_id[:8], agent_id[:8])
     return resolved
 
 
@@ -522,18 +561,17 @@ def take_pending_commands(*, agent_id: str, user_id: str) -> list:
         online_ids = _online_ids_locked(user_id)
         agent = _agents.get(agent_id) or {}
         negotiated = agent.get('protocol_version') == protocol_version()
-        slots = agent.get('execution_slots', 0) if negotiated else limit('command_batch')
         active = agent.get('active_command_ids') or set()
         ordered = sorted(command_queue.items(),
                          key=lambda entry: entry[1]['type'] not in ('egress_cancel', 'paper_build_cancel'))
         for cmd_id, cmd in ordered:
             if cmd['event'].is_set():
                 continue  # already resolved
-            if (now - cmd['created_at'] > (cmd.get('ttl') or _COMMAND_TTL_S)
+            if (cmd.get('ttl') and now - cmd['created_at'] > cmd['ttl']
                     and not _command_active_locked(cmd, now)):
                 cmd['error'] = 'Command expired (stale cleanup)'
                 cmd['event'].set()
-                if cmd.get('fire_and_forget'):
+                if cmd.get('fire_and_forget') or cmd.get('caller_detached'):
                     command_queue.pop(cmd_id, None)
                 continue
             if not _deliverable(cmd, agent_id, online_ids, user_id):
@@ -542,9 +580,8 @@ def take_pending_commands(*, agent_id: str, user_id: str) -> list:
             if len(pending) >= limit('command_batch'):
                 continue
             if negotiated and not control:
-                if cmd_id in active or slots <= 0:
+                if cmd_id in active or cmd.get('delivery_acknowledged'):
                     continue
-                slots -= 1
             cmd['claimed_agent_id'] = agent_id
             if cmd.get('fire_and_forget'):
                 command_queue.pop(cmd_id, None)
@@ -557,7 +594,12 @@ def take_pending_commands(*, agent_id: str, user_id: str) -> list:
                 wire['target_agent_id'] = cmd['target_agent_id']
             if negotiated:
                 wire['target_agent_id'] = agent_id
-                wire['expires_at'] = cmd['created_at'] + (cmd.get('ttl') or _COMMAND_TTL_S)
+                if cmd.get('ttl'):
+                    wire['expires_at'] = cmd['created_at'] + cmd['ttl']
+                    wire['deadline_enforced'] = True
+                else:
+                    wire['expires_at'] = cmd.setdefault('replay_expires_at', now + _COMMAND_TTL_S)
+                    wire['deadline_enforced'] = False
             pending.append(wire)
     return pending
 

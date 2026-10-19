@@ -83,7 +83,7 @@ def _post_to_provider(slot, audio_bytes: bytes, filename: str, mime: str,
     (proxy-aware). Raises :class:`TranscriptionError` on any transport or
     HTTP-status failure.
     """
-    from lib.http_client import http_post
+    from lib.http_transport.client import http_post
 
     base = (slot.base_url or '').rstrip('/')
     if not base:

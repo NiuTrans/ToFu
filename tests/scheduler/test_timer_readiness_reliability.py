@@ -271,8 +271,26 @@ def test_resume_does_not_age_expire_a_ready_dispatch_obligation(monkeypatch):
         def query(self, *a):
             return [row]
     monkeypatch.setattr(_loop, '_timer_client', lambda **k: Client())
-    monkeypatch.setattr(_loop, '_mark_expired', lambda *a, **k: pytest.fail('ready obligation expired'))
+    monkeypatch.setattr('lib.scheduler.timer._poll._mark_expired', lambda *a, **k: pytest.fail('ready obligation expired'))
     resumed = []
     monkeypatch.setattr(timer, 'start_timer_loop', lambda tid, **k: resumed.append(tid) or True)
     assert timer.resume_active_timers() == 1
     assert resumed == [row['id']]
+
+
+def test_poll_dispatch_carries_owner_and_observes_cancellation(monkeypatch):
+    import lib.scheduler.timer as timer
+    import lib.llm_dispatch as llm
+    row = dict(id='tmr_owned', user_id=41, status='active',
+               check_instruction='Check readiness', tools_config={},
+               condition_kind='llm', poll_count=0)
+    monkeypatch.setattr(timer, '_get_timer_row', lambda *a, **k: row)
+    monkeypatch.setattr(_poll, '_build_poll_tools', lambda *a, **k: None)
+    def dispatch(messages, **kwargs):
+        assert kwargs['owner_user_id'] == 41
+        assert kwargs['abort_check']() is False
+        row['status'] = 'cancelled'
+        assert kwargs['abort_check']() is True
+        return '{"ready":false}', {'total_tokens': 1}
+    monkeypatch.setattr(llm, 'smart_chat', dispatch)
+    assert timer.poll_timer(row['id'], user_id=41)[0] is False

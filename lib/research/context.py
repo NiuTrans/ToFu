@@ -97,7 +97,7 @@ def prepare_action_messages(messages, *, model, tools, user_id):
         projected['research_artifacts'] = descriptor
         prepared[1]['content'] = json.dumps(projected, ensure_ascii=False, separators=(',', ':'))
         admit_messages(prepared, model=model, tools=tools)
-        from lib.tool_result_artifacts import ToolResultArtifactRepository
+        from lib.tool_results.tool_result_artifacts import ToolResultArtifactRepository
         stored = ToolResultArtifactRepository().put(user_id=user_id, content=original,
                                                    media_type='application/json')
         artifact_ref = str((stored or {}).get('artifactRef') or '')
@@ -117,7 +117,7 @@ def restore_source_reference(messages, *, user_id, artifact_ref, load_source):
     if (descriptor.get('delivery') != 'read_tool_artifact'
             or not artifact_ref or descriptor.get('artifact_ref') != artifact_ref):
         return False
-    from lib.tool_result_artifacts import ToolResultArtifactRepository
+    from lib.tool_results.tool_result_artifacts import ToolResultArtifactRepository
     repository = ToolResultArtifactRepository()
     if repository.read_range(user_id=user_id, artifact_ref=artifact_ref, limit=1) is not None:
         return False

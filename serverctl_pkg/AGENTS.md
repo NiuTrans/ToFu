@@ -8,6 +8,13 @@ begins with `debug/inspect_conversation.py`.
 
 `native_engine.py` owns compiled source identity, bounded staging/build/download, and
 pre-shutdown preparation. It never opens user databases or restarts a service.
+Manifest parses are reused only within one layout/fingerprint operation; retain
+child timeout/failure isolation, standard-library-only startup (`-I -S`), and
+fresh reads on the next call. Verify identity,
+root-input and manifest-read tests before measuring startup/recovery costs.
+Source hashing streams the existing length-prefixed protocol with bounded reads;
+file growth, truncation or changed metadata refuses identity. Verify
+`tests/server/test_native_engine_streamed_identity.py` and compiled identity parity.
 
 `application_restart.py` runs artifact preparation and deferred manager handoff
 from current disk code in bounded child interpreters; the application retains

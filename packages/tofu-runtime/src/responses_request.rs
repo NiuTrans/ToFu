@@ -357,6 +357,7 @@ impl Serialize for Body<'_> {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let allowed = [
             "model",
+            "prompt_cache_key",
             "max_tokens",
             "stream",
             "temperature",
@@ -407,6 +408,12 @@ impl Serialize for Body<'_> {
         )?;
         if self.profile == Profile::Codex {
             map.serialize_entry("instructions", crate::execution_contract::RESPONSES_CODEX_INSTRUCTIONS)?;
+        }
+        if let Some(value) = self.template.get("prompt_cache_key") {
+            let key = value.as_str().filter(|key| !key.is_empty() && key.len() <= crate::execution_contract::MODEL_CACHE_AFFINITY_KEY_BYTES)
+                .filter(|_| self.profile == Profile::Codex)
+                .ok_or_else(|| S::Error::custom("native Responses cache binding invalid"))?;
+            map.serialize_entry("prompt_cache_key", key)?;
         }
         map.serialize_entry("store", &false)?;
         map.serialize_entry("stream", &true)?;

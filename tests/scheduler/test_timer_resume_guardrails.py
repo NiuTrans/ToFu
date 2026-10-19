@@ -1,20 +1,8 @@
-"""tests/scheduler/test_timer_resume_guardrails.py — guardrails added after the
-2026-06-26 zombie-timer search storm.
+"""Timer restart preserves durable active work, owner identity and poll policy.
 
-Covers the four defense-in-depth fixes in ``lib/scheduler/timer.py``:
-
-  1. ``_build_poll_tools`` does NOT grant web_search/fetch to a bare watcher
-     (tools_config={}) — the ungrounded "is X done?" instruction made cheap
-     poll models hallucinate web queries. Search/fetch only when explicitly
-     enabled.
-  2. ``resume_active_timers`` auto-expires over-age zombie timers (status →
-     'expired') instead of re-spawning them forever.
-  3. ``resume_active_timers`` resumes every eligible timer despite retired boot caps.
-  4. ``_increment_poll_count`` is now called on the skipped-poll branch so a
-     timer whose check_command output never changes still reaches max_polls
-     and retires (verified indirectly via the helper here).
-
-Durability assertions use a disposable real Sidecar runtime.
+Polling tools still require explicit capability configuration, and skipped
+polls retain actual poll-count accounting. Restart has no age-based expiry
+or batch-count gate.
 """
 
 from __future__ import annotations
@@ -86,22 +74,28 @@ def test_fetch_added_when_fetch_enabled_alone():
     assert 'web_search' not in names
 
 
-# ── Fix 2: age-sweep expires zombies on resume ──────────────────────────────
+# ── Restart retains old active work ──────────────────────────────
 
-def test_resume_expires_overage_timer(monkeypatch):
-    old = _new_timer(poll_interval=10, max_polls=120)
-    monkeypatch.setattr(
-        'lib.scheduler.timer._loop._resume_max_age_seconds',
-        lambda _timer: -1)
-
-    spawned: list[str] = []
+@pytest.mark.parametrize('max_polls', [0, 120])
+@pytest.mark.parametrize('created_at', ['2000-01-01T00:00:00', 'unknown'])
+def test_resume_keeps_old_active_work_without_storage_mutation(monkeypatch, max_polls, created_at):
+    from lib.scheduler.timer import _loop
+    row = {'id': 'old-active', 'user_id': 7, 'status': 'active',
+           'poll_interval': 10, 'max_polls': max_polls, 'poll_count': 0,
+           'created_at': created_at}
+    class ReadOnlyClient:
+        def query(self, operation, payload):
+            assert operation == 'timer.active.list_all'
+            assert payload == {'limit': 0}
+            return [row]
+    monkeypatch.setenv('TOFU_TIMER_MAX_AGE_HOURS', '0')
+    monkeypatch.setattr(_loop, '_timer_client', lambda: ReadOnlyClient())
+    spawned = []
     monkeypatch.setattr(timer_mod, 'start_timer_loop',
-                        lambda tid, **_kwargs: spawned.append(tid))
-
-    timer_mod.resume_active_timers()
-
-    assert _status(old) == 'expired', 'over-age timer must be auto-expired'
-    assert old not in spawned, 'expired timer must NOT be re-spawned'
+                        lambda tid, *, user_id: spawned.append((tid, user_id)) or True)
+    assert timer_mod.resume_active_timers() == 1
+    assert row['status'] == 'active'
+    assert spawned == [('old-active', 7)]
 
 
 def test_resume_keeps_fresh_timer(monkeypatch):
@@ -117,7 +111,7 @@ def test_resume_keeps_fresh_timer(monkeypatch):
     assert fresh in spawned, 'a fresh active timer must be resumed'
 
 
-# ── Fix 3: resume concurrency cap ───────────────────────────────────────────
+# ── Resume every eligible identity ───────────────────────────────────────────
 
 def test_retired_resume_cap_does_not_limit_respawns(monkeypatch):
     ids = [_new_timer() for _ in range(5)]

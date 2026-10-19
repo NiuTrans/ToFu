@@ -30,7 +30,7 @@ logger = get_logger(__name__)
 
 
 def _start_project_run_streamed(cmd_id, cmd_params, permissions,
-                                result_queue, stream_outbox, io_lock):
+                                result_queue, stream_outbox, io_lock, *, cmd_type='project_run_command'):
     """RWA P2: run project_run_command OFF the poll loop, streaming frames.
 
     Chunks land in ``stream_outbox`` as ``{cmd_id, seq, stream, data, done}``
@@ -41,10 +41,13 @@ def _start_project_run_streamed(cmd_id, cmd_params, permissions,
         with io_lock:
             result_queue.append({
                 'id': cmd_id, 'result': None,
-                'error': 'Command project_run_command requires --allow-exec flag',
+                'error': f'Command {cmd_type} requires --allow-exec flag',
             })
         return
-    from lib.desktop_agent._project import start_project_run
+    if cmd_type == 'desktop_run_command':
+        from lib.desktop_agent._exec import start_local_run as start_run
+    else:
+        from lib.desktop_agent._project import start_project_run as start_run
     seq = itertools.count(1)
 
     def on_chunk(stream, data):
@@ -62,14 +65,14 @@ def _start_project_run_streamed(cmd_id, cmd_params, permissions,
                                           'stream': 'meta', 'data': '', 'done': True})
         finally:
             result_queue.append({'id': cmd_id, 'result': outcome, 'error': None})
-        logger.info('     ✅ project_run_command done (exit=%s%s)',
-                    outcome.get('exit_code'),
+        logger.info('     ✅ %s done (exit=%s%s)',
+                    cmd_type, outcome.get('exit_code'),
                     ', timed out' if outcome.get('timed_out') else '')
 
-    err = start_project_run(cmd_id, cmd_params, on_chunk, on_exit,
+    err = start_run(cmd_id, cmd_params, on_chunk, on_exit,
                             cancel=getattr(result_queue, 'stop', None))
     if err:
-        logger.warning('     ❌ project_run_command refused: %s', err)
+        logger.warning('     ❌ %s refused: %s', cmd_type, err)
         with io_lock:
             result_queue.append({'id': cmd_id, 'result': None, 'error': err})
 
@@ -285,9 +288,11 @@ def run_agent(server_url, permissions, poll_interval=1.0, bridge_secret='',
                 result = paper_build_worker().execute(cmd_id, params, emit)
                 completion.append({'id': cmd_id, 'result': result, 'error': None})
                 return
-            if cmd_type == 'project_run_command':
+            if cmd_type in ('project_run_command', 'desktop_run_command'):
+                stream_options = ({'cmd_type': cmd_type}
+                                  if cmd_type == 'desktop_run_command' else {})
                 _start_project_run_streamed(cmd_id, params, permissions,
-                                            completion, stream_outbox, io_lock)
+                                            completion, stream_outbox, io_lock, **stream_options)
                 return
             if cmd_type == 'egress_http_stream':
                 _start_egress_stream_streamed(cmd_id, params, permissions,
@@ -340,7 +345,7 @@ def run_agent(server_url, permissions, poll_interval=1.0, bridge_secret='',
             raise
         finally:
             # Project execution delegates to an asynchronous process callback.
-            if cmd['type'] != 'project_run_command':
+            if cmd['type'] not in ('project_run_command', 'desktop_run_command'):
                 runtime.finish(cmd['id'])
 
     def _route_dead_hit():
@@ -410,7 +415,7 @@ def run_agent(server_url, permissions, poll_interval=1.0, bridge_secret='',
                 with io_lock:
                     out_results = result_queue.prefix(limit('result_items_floor'), limit('result_bytes_floor'))
                     agent_frame['execution_slots'] = runtime.available_slots()
-                    agent_frame['active_command_ids'] = sorted(runtime.running)
+                    agent_frame['active_command_ids'] = runtime.active_command_ids()
                     out_streams = stream_outbox.prefix(limit('stream_items_floor'), limit('stream_bytes_floor'))
                 poll_payload = {'results': out_results,
                                 'streams': out_streams,
@@ -529,7 +534,8 @@ def run_agent(server_url, permissions, poll_interval=1.0, bridge_secret='',
                         if paper_worker is not None:
                             paper_worker.cancel(str(cmd.get('params', {}).get('cmd_id') or ''))
                         continue
-                    if not stop_event.is_set() and runtime.admit(cmd['id'], expires_at=cmd.get('expires_at')):
+                    if not stop_event.is_set() and runtime.admit(cmd['id'], expires_at=cmd.get('expires_at'),
+                            deadline_enforced=cmd.get('deadline_enforced', True)):
                         if cmd['type'] == 'paper_build' and permissions.get('allow_exec'):
                             if not paper_build_worker().admit(cmd['id']):
                                 CompletionQueue().append({'id': cmd['id'], 'result': None,
@@ -586,7 +592,7 @@ def run_agent(server_url, permissions, poll_interval=1.0, bridge_secret='',
 def main(argv=None):
     """Parse CLI args and start the agent loop."""
     parser = argparse.ArgumentParser(
-        description='Tofu Desktop Agent — control your computer from AI',
+        description='Tofu Remote — control your computer from AI',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:

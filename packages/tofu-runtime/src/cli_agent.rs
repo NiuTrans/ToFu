@@ -82,7 +82,9 @@ async fn publish_frame_mode(
         return Err(io::ErrorKind::InvalidInput.into());
     }
     let atomic = unsafe { libc::fpathconf(1, libc::_PC_PIPE_BUF) };
-    let mut frame = bytes.to_vec();
+    let mut frame = if let Some(scope) = control.and_then(|control|control.scope.as_ref()) {
+        scope.wrap(bytes)?
+    } else { bytes.to_vec() };
     frame.push(b'\n');
     if atomic <= 0 || (!allow_large && frame.len() > atomic as usize) {
         return Err(io::ErrorKind::InvalidData.into());
@@ -136,6 +138,10 @@ async fn publish_frame_mode(
 pub(crate) struct Input {
     fd: tokio::io::unix::AsyncFd<Stdin>,
     bytes: Vec<u8>,
+    // Persist across cancellation of frame(): already-scanned bytes contain no newline.
+    scan_offset: usize,
+    scope: Option<Arc<crate::cli_agent_worker::Scope>>,
+    scope_failed: bool,
 }
 impl Input {
     pub(crate) fn new() -> io::Result<Self> {
@@ -148,10 +154,13 @@ impl Input {
         }
         let stdin = Stdin(flags);
         let fd = tokio::io::unix::AsyncFd::new(stdin)?;
-        Ok(Self { fd, bytes: vec![] })
+        Ok(Self { fd, bytes: vec![], scan_offset: 0, scope: None, scope_failed: false })
     }
+    pub(crate) fn is_empty(&self) -> bool { self.bytes.is_empty() }
+    pub(crate) fn set_scope(&mut self, scope: Arc<crate::cli_agent_worker::Scope>) { self.scope = Some(scope); }
+    pub(crate) fn scope(&self) -> Option<Arc<crate::cli_agent_worker::Scope>> { self.scope.clone() }
     pub(crate) fn tail(self) -> Vec<u8> {
-        let Self { fd, bytes } = self;
+        let Self { fd, bytes, .. } = self;
         drop(fd);
         bytes
     }
@@ -161,16 +170,28 @@ impl Input {
         Ok(input)
     }
     pub(crate) async fn frame(&mut self, limit: usize) -> io::Result<Value> {
+        if self.scope_failed { return Err(io::ErrorKind::InvalidData.into()); }
+        let frame_limit = limit;
+        let limit = if let Some(scope) = &self.scope {
+            limit.checked_add(scope.control_overhead()?).ok_or(io::ErrorKind::InvalidData)?
+        } else { limit };
         loop {
-            if let Some(end) = self.bytes.iter().position(|b| *b == b'\n') {
+            if let Some(offset) = memchr::memchr(b'\n', &self.bytes[self.scan_offset..]) {
+                let end = self.scan_offset + offset;
                 if end > limit {
                     return Err(io::ErrorKind::InvalidData.into());
                 }
                 let value = serde_json::from_slice(&self.bytes[..end])
                     .map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?;
                 self.bytes.drain(..=end);
-                return Ok(value);
+                self.scan_offset = 0;
+                return if let Some(scope) = &self.scope {
+                    let result = scope.unwrap(value,frame_limit);
+                    if result.is_err() { self.scope_failed = true; }
+                    result
+                } else { Ok(value) };
             }
+            self.scan_offset = self.bytes.len();
             if self.bytes.len() > limit {
                 return Err(io::ErrorKind::InvalidData.into());
             }
@@ -300,39 +321,21 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     if limit == 0 || limit == usize::MAX {
         return Err("invalid configuration frame limit".into());
     }
-    let runtime = Arc::new(
-        tokio::runtime::Builder::new_current_thread()
-            .max_blocking_threads(1)
-            .enable_all()
-            .build()?,
-    );
+    let runtime = Arc::new(tofu_runtime::reactor::build()?);
     let mut input = {
         let _enter = runtime.enter();
         Input::new()?
     };
     let config = runtime.block_on(input.frame(limit))?;
+    run_configuration(runtime, input, config, None).map(|_| ())
+}
+pub(crate) fn run_configuration(runtime: Arc<tokio::runtime::Runtime>, input: Input,
+    config: Value, encoders: Option<&crate::cli_agent_worker::Encoders>) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let worker_scope = input.scope();
     let policy = crate::cli_http::policy(&config)?;
     if policy.connections == 0 {
         return Err("invalid connection capacity".into());
     }
-    // Rebind the exclusively owned stdin carrier to the configured runtime.
-    // The bootstrap reactor started no provider/blocking work.
-    let Input { fd, bytes } = input;
-    let stdin = fd.into_inner();
-    drop(runtime);
-    let runtime = Arc::new(
-        tokio::runtime::Builder::new_current_thread()
-            .max_blocking_threads(policy.connections)
-            .enable_all()
-            .build()?,
-    );
-    let input = {
-        let _enter = runtime.enter();
-        Input {
-            fd: tokio::io::unix::AsyncFd::new(stdin)?,
-            bytes,
-        }
-    };
     let owner = number(&config, "owner_user_id")?;
     if owner == 0 {
         return Err("invalid owner".into());
@@ -352,9 +355,9 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         .as_str()
         .ok_or("invalid stdio contract")?
         .to_owned();
-    let schemas=Arc::new(Catalog::compile(owner,epoch,&Value::Object(contract["$defs"].as_object().ok_or("invalid frame schemas")?.iter().map(|(name,schema)|(name.clone(),json!({"name":name,"contractVersion":tofu_runtime::execution_contract::TOOL_CONTRACT_VERSION,"arguments_schema":schema}))).collect())).map_err(|_|"invalid frame contract")?);
+    let schemas=Arc::new(Catalog::compile(owner,epoch,&Value::Object(contract["$defs"].as_object().ok_or("invalid frame schemas")?.iter().filter(|(name,_)| !name.starts_with("worker_")).map(|(name,schema)|(name.clone(),json!({"name":name,"contractVersion":tofu_runtime::execution_contract::TOOL_CONTRACT_VERSION,"arguments_schema":schema}))).collect())).map_err(|_|"invalid frame contract")?);
     schemas
-        .validate(owner, "configure", config.clone())
+        .validate_protocol(owner, "configure", config.clone())
         .map_err(|_| "invalid native agent configuration frame")?;
     if !config["proxy"].is_null() && !config["proxy"].is_string() {
         return Err("invalid proxy".into());
@@ -372,11 +375,48 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     if template.contains_key("tools") {
         return Err("tools derive from compiled catalog".into());
     }
-    template.insert("tools".into(),Value::Array(tofu_runtime::execution_contract::native_model_tools(tools)));
+    let prepared_tools = if config["wire_tool_preparation"] == true {
+        if config["round_preparation"] != true || config["round_control"] != true || config.get("wire_tools").is_some() {
+            return Err("prepared tools require exclusive round preparation".into());
+        }
+        Some(Arc::new(tofu_runtime::prepared_tool_wire::PreparedToolWire::new(template.clone(),tools.clone())?))
+    } else { None };
+    let model_tools = if prepared_tools.is_some() {Vec::new()} else {tofu_runtime::model_tool_wire::project(tools, config.get("wire_tools"))?};
+    template.insert("tools".into(),Value::Array(model_tools));
     let messages = config["messages"]
         .as_array()
         .ok_or("missing messages")?
         .clone();
+    if config["checkpoint_control"] == true && config["model_control"]["pricing"] == true && config["checkpoint_fee_projection"] != true {
+        return Err("priced checkpoint requires explicit fee projection".into());
+    }
+    if config["checkpoint_fee_projection"] == true && (config["checkpoint_control"] != true
+        || config["checkpoint_shared_account"] != true || config["model_control"]["pricing"] != true) {
+        return Err("fee checkpoint requires priced shared checkpoint composition".into());
+    }
+    if config["checkpoint_fee_executor_origins"] == true && config["checkpoint_fee_projection"] != true {
+        return Err("fee executor origins require fee checkpoint composition".into());
+    }
+    if config["checkpoint_tree_usage"] == true && (config["checkpoint_shared_account"] != true
+        || config["checkpoint_control"] != true) {
+        return Err("tree usage requires shared checkpoint composition".into());
+    }
+    if config["checkpoint_actor_account"] == true && (config["checkpoint_shared_account"] != true
+        || config["checkpoint_control"] != true || config["checkpoint_tree_usage"] == true) {
+        return Err("actor checkpoint requires exclusive shared-account scope".into());
+    }
+    if config["checkpoint_fee_payer_origins"] == true && (config["checkpoint_actor_account"] != true
+        || config["checkpoint_fee_projection"] != true) {
+        return Err("fee payer origins require priced actor checkpoint composition".into());
+    }
+    if config["checkpoint_actor_account"] == true && config["checkpoint_fee_projection"] == true
+        && config["checkpoint_fee_payer_origins"] != true {
+        return Err("priced actor checkpoints require original payer support".into());
+    }
+    if config["checkpoint_child_routes"] == true && (config["checkpoint_tree_usage"] != true
+        || config["checkpoint_fee_projection"] != true) {
+        return Err("child routes require priced tree checkpoint composition".into());
+    }
     let frame_bytes = size(&config, "tool_frame_bytes")?;
     let preparation_bytes = if config["round_preparation"] == true {
         if config["round_control"] != true { return Err("round preparation requires round control".into()); }
@@ -415,7 +455,11 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         },
         &cancellation,
     )
-    .map_err(|_| "invalid provider composition")?;
+    .map_err(|_| "invalid provider composition")?
+    .with_chat_text_parts(config["chat_preserve_text_parts"].as_bool().unwrap_or(true));
+    let provider = if let Some(state)=&prepared_tools {
+        provider.with_prepared_tools(state.clone(),tools.keys().cloned().collect())
+    } else {provider};
     if config.get("responses_profile").is_some() && config["provider_protocol"] != "responses" {
         return Err("Responses profile requires Responses protocol".into());
     }
@@ -436,7 +480,10 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     if external_model != config.get("model_counter").is_some() || (external_model && (config.get("token_admission").is_some() || (config["checkpoint_control"] == true && config["checkpoint_shared_account"] != true))) {
         return Err("model control requires one counter/authority and explicit external recovery".into());
     }
-    if external_model { schemas.validate(owner,"model_control",config["model_control"].clone()).map_err(|_|"invalid model control")?; }
+    if external_model { schemas.validate_protocol(owner,"model_control",config["model_control"].clone()).map_err(|_|"invalid model control")?; }
+    if config["model_control"]["pricing"] == true && config["round_control"] != true {
+        return Err("native pricing requires round settlement delivery".into());
+    }
     if config["checkpoint_shared_account"] == true && (!external_model || config["checkpoint_control"] != true) {
         return Err("shared checkpoint requires host account and checkpoint control".into());
     }
@@ -470,7 +517,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 .as_str()
                 .ok_or("missing model")?
                 .into(),
-            tofu_runtime::token_ingress::Encoder::new(encoding),
+            encoders.map_or_else(|| tofu_runtime::token_ingress::Encoder::new(encoding), |encoders|encoders.get(encoding)),
             tofu_runtime::token_ingress::Bounds {
                 input_bytes: size(profile, "input_bytes")?,
                 text_bytes: size(profile, "text_bytes")?,
@@ -505,7 +552,11 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     } else { CliProvider::Raw(provider) };
     let sessions = Sessions::new();
-    let relative = duration(&config, "deadline_ms")?;
+    let relative = if config["deadline_ms"].is_null() {
+        None
+    } else {
+        Some(duration(&config, "deadline_ms")?)
+    };
     let deadline_unix_ms = config.get("deadline_unix_ms").map(|value|
         value.as_u64().ok_or("invalid absolute deadline")
     ).transpose()?;
@@ -513,11 +564,13 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         let observed = std::time::Instant::now();
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
             .map_err(|_| "absolute deadline clock unavailable")?;
-        let remaining = std::time::Duration::from_millis(deadline).saturating_sub(now).min(relative);
+        let remaining = std::time::Duration::from_millis(deadline).saturating_sub(now);
+        let remaining = relative.map_or(remaining, |limit| remaining.min(limit));
         sessions.start_observed(task_id, "native_agent", owner, "", remaining, observed)
     } else {
-        sessions.start(task_id, "native_agent", owner, "", Some(relative))
+        sessions.start(task_id, "native_agent", owner, "", relative)
     }.map_err(|_| "invalid session")?;
+    if config["cancel_requested"] == true { session.request_cancel("client_cancel").map_err(|_| "initial cancellation refused")?; }
     let (control, reader) = crate::cli_agent_control::start(
         runtime.clone(),
         input,
@@ -580,7 +633,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         let port = Arc::new(crate::cli_model_control::Port {
             runtime:runtime.clone(),control:control.clone(),schemas:schemas.clone(),owner,
             task:task_id.into(),version:version.clone(),frame_bytes,
-            ack:duration(&config["model_control"],"ack_ms")?,ordinal:std::sync::atomic::AtomicU64::new(0),
+            ack:crate::cli_http::nullable_duration(&config["model_control"],"ack_ms")?,pricing:config["model_control"]["pricing"]==true,ordinal:std::sync::atomic::AtomicU64::new(0),
         });
         CliProvider::Counted(provider.with_model_admission(Arc::new(crate::cli_model_control::Authority(port)),owner,task_id.into(),counter,output)
             .map_err(|_|"invalid host model authority")?)
@@ -599,9 +652,10 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     } else { None };
     let persistence = if let Some(profile) = config.get("terminal_persistence") {
         schemas
-            .validate(owner, "terminal_persistence", profile.clone())
+            .validate_protocol(owner, "terminal_persistence", profile.clone())
             .map_err(|_| "invalid persistence profile")?;
         Some(Arc::new(crate::cli_terminal::Persistence {
+            scope: worker_scope.clone(),
             runtime: runtime.clone(),
             reader: reader.clone(),
             schemas: schemas.clone(),
@@ -611,12 +665,16 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 .ok_or("missing terminal operation")?
                 .into(),
             bytes: size(profile, "frame_bytes")?,
-            grace: duration(profile, "ack_ms")?,
+            grace: crate::cli_http::nullable_duration(profile, "ack_ms")?,
             attempts: size(profile, "attempts")?,
             retry: std::sync::atomic::AtomicBool::new(false),
             ordinal: std::sync::atomic::AtomicUsize::new(0),
             input: Mutex::new(None),
             checkpoint_suspended: checkpoint_suspended.clone(),
+            usage_summary: profile["usage_summary"] == true,
+            frozen_summary: Mutex::new(None),
+            retry_reference: profile["retry_reference"] == true,
+            frozen_binding: Mutex::new(None),
         }))
     } else {
         None
@@ -644,6 +702,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         limits
     } else {tofu_runtime::progress::Limits::default()};
     if config["checkpoint_control"]==true && (config["round_control"]!=true || config["checkpoint_binding"].as_str().is_none_or(|v|v.is_empty())) {return Err("checkpoint composition requires round policy and binding".into());}
+    if config["checkpoint_pending_tools"]==true && config["checkpoint_control"]!=true {return Err("pending tools require checkpoint composition".into());}
     let rounds = crate::cli_agent_rounds::Rounds {
         session: task_session.clone(),
         runtime: runtime.clone(),
@@ -657,11 +716,17 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         checkpoint_account,
         checkpoint_account_policy,
         shared_counter_policy: (config["checkpoint_shared_account"] == true).then(|| json!({"encoding":config["model_counter"]["encoding"],"output_field":config["model_counter"]["output_field"],"wire_model":config["template"]["model"]})),
+        priced_checkpoint: config["checkpoint_fee_projection"] == true,
+        actor_checkpoint: config["checkpoint_actor_account"] == true,
+        tree_checkpoint: config["checkpoint_tree_usage"] == true,
+        pending_checkpoint: config["checkpoint_pending_tools"] == true,
         deadline_unix_ms,
         checkpoint_suspended,
         frame_bytes: preparation_bytes.max(checkpoint_bytes),
         progress_limits,
         prepare_history: config["round_preparation"] == true,
+        tool_siblings: config["tool_sibling_control"] == true,
+        prepared_tools,
         preparation_deadline: (config["round_preparation"] == true || config["progress_control"] == true || config["checkpoint_control"]==true).then(||Arc::new(std::sync::OnceLock::new())),
     };
     let approvals = if let Some(profile) = config.get("approval_control") {
@@ -682,8 +747,12 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         sessions: &sessions,
         epoch,
         budget: tofu_runtime::agent::Budget {
-            rounds: size(&config, "rounds")?,
-            tool_calls: size(&config, "tool_calls")?,
+            rounds: if config["rounds"].is_null() {None} else {Some(size(&config, "rounds")?)},
+            tool_calls: match config.get("total_tool_calls") {
+                None => Some(size(&config, "tool_calls")?),
+                Some(Value::Null) => None,
+                Some(value) => Some(usize::try_from(value.as_u64().ok_or("invalid total tool limit")?)?),
+            },
             retained_bytes: size(&config, "retained_bytes")?,
             feedback_bytes: size(&config, "feedback_bytes")?,
         },
@@ -697,7 +766,9 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         progress: if config["progress_control"] == true {Some(&rounds)} else {None},
         scheduling: None,
     };
-    let mut finished = agent.run(&task, owner, task_id, messages);
+    let mut finished = if config["retain_execution_history"] == true {
+        agent.run_retained(&task, owner, task_id, messages)
+    } else {agent.run(&task, owner, task_id, messages)};
     while matches!(
         finished,
         Err(tofu_runtime::task::TaskError::PersistencePending)
@@ -715,19 +786,32 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     {
         return Err("native session cleanup failed".into());
     }
-    println!(
-        "{}",
-        output
-            .0
-            .lock()
-            .map_err(|_| "terminal output unavailable")?
-            .as_ref()
-            .ok_or("missing native terminal")?
-    );
+    {
+        let reference = if config["terminal_persistence"]["completion_reference"] == true {
+            let persistence = persistence.as_ref().ok_or("terminal reference requires persistence")?;
+            let value = json!({"version":version,"type":"terminal_committed",
+                "request_id":persistence.operation,"owner_user_id":owner,"task_id":task_id,
+                "attempt":persistence.ordinal.load(std::sync::atomic::Ordering::SeqCst),
+                "status":candidate.status.as_str()});
+            schemas.validate_protocol(owner,"terminal_committed",value.clone())
+                .map_err(|_| "invalid terminal reference")?;
+            Some(value)
+        } else {None};
+        let terminal = output.0.lock().map_err(|_| "terminal output unavailable")?;
+        let terminal = reference.as_ref().or(terminal.as_ref()).ok_or("missing native terminal")?;
+        if let Some(scope) = &worker_scope {
+            let bytes = scope.wrap(&serde_json::to_vec(terminal)?)?;
+            println!("{}", std::str::from_utf8(&bytes)?);
+        } else { println!("{terminal}"); }
+    }
     if candidate.error.is_some() {
         return Err("native agent failed".into());
     }
-    Ok(())
+    let tail = if worker_scope.is_some() {
+        if let Some(persistence) = &persistence { persistence.take_tail() } else { reader.take_tail() }
+    } else { Ok(Vec::new()) }.map_err(|_| "native reader cleanup failed")?;
+    if worker_scope.is_some() && !control.quiescent() { return Err("native worker control not quiescent".into()); }
+    Ok(tail)
 }
 
 enum CliProvider<'a> {

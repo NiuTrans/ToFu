@@ -3,9 +3,9 @@ import sqlite3
 
 import pytest
 
-from lib.storage_sidecar.tofudb_migration_coverage import source_table_coverage
-from lib.storage_sidecar.tofudb_migration_source import SQLiteMigrationSource
-from lib.storage_sidecar.tofudb_migration_transport import (
+from lib.storage_authority_sql.migration.tofudb_migration_coverage import source_table_coverage
+from lib.storage_authority_sql.migration.tofudb_migration_source import SQLiteMigrationSource
+from lib.storage_authority_sql.migration.tofudb_migration_transport import (
     RETIRED_TRANSPORT_POLICY,
     verified_reconstructible_projections,
     verified_retired_transport,
@@ -103,8 +103,8 @@ def test_populated_checkpoint_blocks_but_empty_checkpoint_classified(tmp_path):
     assert report['unmappedPopulatedTables'] == ['storage_turn_projection_checkpoints']
     assert report['sourceTableCoverageComplete'] is False
 
-    from lib.storage_sidecar.tofudb_migration_projection import require_materialized_turns
-    from lib.storage_sidecar.tofudb_migration_import import MigrationImportError
+    from lib.storage_authority_sql.migration.tofudb_migration_projection import require_materialized_turns
+    from lib.storage_authority_sql.migration.tofudb_migration_import import MigrationImportError
     with SQLiteMigrationSource(populated) as source:
         with pytest.raises(MigrationImportError, match='projection checkpoints'):
             require_materialized_turns(source)

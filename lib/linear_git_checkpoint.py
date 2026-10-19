@@ -38,6 +38,8 @@ from typing import Any, BinaryIO
 from lib.git_checkpoint_policy import (
     forbidden_checkpoint_paths,
     semantic_gate_paths,
+    GatePolicyError, git_policy_environment, select_gate_commands,
+    require_unchanged_gates,
 )
 from lib.git_runtime import git_executable
 from lib.log import get_logger
@@ -67,13 +69,7 @@ def _git(
     check: bool = False,
     input_text: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    merged_env = os.environ.copy()
-
-    # Ambient routing variables must not redirect capture/CAS/index writes.
-    for key in ('GIT_DIR', 'GIT_COMMON_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE',
-                'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES',
-                'GIT_NAMESPACE'):
-        merged_env.pop(key, None)
+    merged_env = git_policy_environment()
     if env:
         merged_env.update(env)
     try:
@@ -155,17 +151,93 @@ def is_enabled(project_path: str | Path) -> bool:
     return process.returncode == 0 and process.stdout.strip().lower() == 'true'
 
 
+def resolve_publication_mode(project_path: str | Path) -> dict[str, Any]:
+    """Read-only admission decision; opt-in alone is not publication ownership.
+
+    Known incompatible history selects isolated-task mode without adopting or
+    changing any ref. Both publication refs absent permit the existing first
+    settlement's CAS baseline activation. Failed/incomplete observations raise
+    instead of authorizing shared execution. Settlement still rechecks ownership.
+    """
+    def decision(requested: bool, eligible: bool, reason: str) -> dict[str, Any]:
+        return {'requested': requested, 'eligible': eligible,
+                'mode': 'linear-checkpoint' if eligible else 'isolated-task',
+                'reason': reason[:500]}
+
+    def probe(root: Path, args: list[str], *, missing=False):
+        result = _git(root, args)
+        if (missing and result.returncode == 1
+                and not result.stdout.strip() and not result.stderr.strip()):
+            return result
+        if result.returncode != 0 or result.stderr.strip():
+            raise LinearCheckpointError(
+                f'Cannot resolve publication mode: Git {args[0]} probe failed')
+        return result
+
+    raw_mode = os.environ.get('TOFU_LINEAR_GIT_CHECKPOINT', '').strip().lower()
+    if raw_mode and raw_mode not in _TRUE_VALUES | _FALSE_VALUES:
+        raise LinearCheckpointError('Cannot resolve publication mode: invalid linear opt-in')
+    if raw_mode in _FALSE_VALUES:
+        return decision(False, False, 'Linear checkpoint was not requested')
+    if not str(project_path or '').strip():
+        raise LinearCheckpointError('Cannot resolve publication mode: missing repository path')
+    root = Path(project_path).expanduser().resolve()
+    identity = probe(root, ['rev-parse', '--show-toplevel']).stdout.strip()
+    if not identity or len(identity.splitlines()) != 1 or not Path(identity).is_absolute():
+        raise LinearCheckpointError('Cannot resolve publication mode: incomplete repository identity')
+    root = Path(identity).resolve()
+    if not raw_mode:
+        configured = probe(root, ['config', '--bool', '--get',
+                                  'tofu.linearCheckpoint'], missing=True)
+        value = configured.stdout.strip().lower()
+        if configured.returncode == 1 or value == 'false':
+            return decision(False, False, 'Linear checkpoint was not requested')
+        if value != 'true':
+            raise LinearCheckpointError('Cannot resolve publication mode: incomplete linear opt-in')
+
+    refs = {}
+    expected = {'refs/tofu/candidate', STABLE_REF, CHECKPOINT_BASELINE_REF}
+    observed = probe(root, ['for-each-ref', '--count=4',
+                           '--format=%(refname) %(objectname) %(objecttype)',
+                           *sorted(expected)])
+    for line in observed.stdout.splitlines():
+        fields = line.split()
+        if (len(fields) != 3 or fields[0] not in expected or fields[0] in refs
+                or not re.fullmatch(r'(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})', fields[1])
+                or fields[2] != 'commit'):
+            raise LinearCheckpointError('Cannot resolve publication mode: incomplete publication refs')
+        refs[fields[0]] = fields[1]
+    if 'refs/tofu/candidate' in refs:
+        return decision(True, False, 'Integration candidate exists; linear checkpoint does not own publication')
+
+    branch = probe(root, ['symbolic-ref', '-q', 'HEAD'], missing=True)
+    if branch.returncode == 1:
+        return decision(True, False, 'Detached HEAD cannot receive linear publication')
+    if not branch.stdout.strip().startswith('refs/heads/') or len(branch.stdout.splitlines()) != 1:
+        raise LinearCheckpointError('Cannot resolve publication mode: incomplete HEAD identity')
+    head = probe(root, ['rev-parse', '--verify', '--quiet', 'HEAD^{commit}'], missing=True)
+    if head.returncode == 1:
+        return decision(True, False, 'Unborn HEAD cannot receive linear publication')
+    head_sha = head.stdout.strip()
+    if not re.fullmatch(r'(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})', head_sha):
+        raise LinearCheckpointError('Cannot resolve publication mode: incomplete HEAD revision')
+    marker, stable = refs.get(CHECKPOINT_BASELINE_REF), refs.get(STABLE_REF)
+    if stable and not marker:
+        return decision(True, False, 'Existing stable history has no linear baseline ownership')
+    if marker and not stable:
+        return decision(True, False, 'Linear baseline exists but stable ref is missing')
+    if stable and stable != head_sha:
+        return decision(True, False, 'Stable and HEAD differ; linear publication requires reconciliation')
+    if marker:
+        ancestor = probe(root, ['merge-base', '--is-ancestor', marker, head_sha], missing=True)
+        if ancestor.returncode == 1:
+            return decision(True, False, 'HEAD is outside the linear baseline history')
+        return decision(True, True, 'Linear baseline owns stable at HEAD')
+    return decision(True, True, 'Unowned refs permit initial linear baseline activation')
+
+
 def _configured_gate_command(root: Path) -> str:
-    for name in (
-        'TOFU_LINEAR_GIT_CHECKPOINT_TEST_CMD',
-        'TOFU_INTEGRATION_TEST_CMD',
-    ):
-        value = os.environ.get(name, '').strip()
-        if value:
-            return value
-    process = _git(root, ['config', '--get',
-                          'tofu.linearCheckpointTestCommand'])
-    return process.stdout.strip() if process.returncode == 0 else ''
+    return select_gate_commands(root).linear
 
 
 def _valid_source_ref(value: str) -> bool:
@@ -612,7 +684,11 @@ def _run_verification_gate(
     ruff_ok, ruff_detail = _ruff_check(root, paths)
     if not ruff_ok:
         return 'failed', ruff_detail[:3000]
-    command = _configured_gate_command(root)
+    try:
+        selected_policy = select_gate_commands(root)
+        command = selected_policy.linear
+    except GatePolicyError as error:
+        return 'failed', str(error)
     semantic_paths = semantic_gate_paths(paths)
     if semantic_paths and not command:
         return (
@@ -634,7 +710,7 @@ def _run_verification_gate(
         return 'failed', f'Invalid checkpoint test command: {error}'
     if not argv:
         return 'failed', 'Configured checkpoint test command is empty'
-    environment = os.environ.copy()
+    environment = git_policy_environment()
     environment.update({
         'TOFU_LINEAR_CHECKPOINT_BASE_SHA': verification_base,
         'TOFU_LINEAR_CHECKPOINT_TARGET_SHA': probe_sha,
@@ -656,6 +732,12 @@ def _run_verification_gate(
         output = '\n'.join(
             part for part in (process.stdout, process.stderr) if part)
         return 'failed', output.strip()[-3000:]
+
+    try:
+        if select_gate_commands(root) != selected_policy:
+            return 'failed', 'Git gate policy changed during verification'
+    except GatePolicyError as error:
+        return 'failed', str(error)
     return 'passed', ''
 
 
@@ -845,6 +927,12 @@ def _verify_captured_checkpoint(task: dict[str, Any],
             'promotion refuses to merge divergent history')
         return row
 
+    try:
+        selected_policy = select_gate_commands(root)
+    except GatePolicyError as error:
+        row['verification'] = 'failed'
+        row['verificationDetail'] = str(error)
+        return row
     verification_paths = _changed_paths(root, stable_sha, target_sha)
     verification, detail = _run_verification_gate(
         root, stable_sha, target_sha, verification_paths, task)
@@ -862,7 +950,7 @@ def _verify_captured_checkpoint(task: dict[str, Any],
         return row
     try:
         with workspace_write_lease(root):
-            return _promote_captured_checkpoint(task, row, root, target_sha, stable_sha)
+            return _promote_captured_checkpoint(task, row, root, target_sha, stable_sha, selected_policy)
     except WorkspaceBusyError as error:
         row['verification'] = 'promotion_deferred'
         row['verificationDetail'] = str(error)
@@ -918,7 +1006,7 @@ def _prepared_index_publication(root, base_sha, target_sha):
                 os.unlink(temporary)
 
 
-def _promote_captured_checkpoint(task, row, root, target_sha, stable_sha):
+def _promote_captured_checkpoint(task, row, root, target_sha, stable_sha, selected_policy):
     handle = _acquire_checkpoint_lock(
         root,
         user_id=int(row.get('userId') or 1),
@@ -933,6 +1021,12 @@ def _promote_captured_checkpoint(task, row, root, target_sha, stable_sha):
         return row
     try:
         branch_ref = str(row.get('branchRef') or '')
+        try:
+            require_unchanged_gates(root, selected_policy)
+        except GatePolicyError as error:
+            row['verification'] = 'failed'
+            row['verificationDetail'] = str(error)
+            return row
         base_sha = str(row.get('baseSha') or '')
         current_branch = _git(root, ['symbolic-ref', '-q', 'HEAD'])
         if (

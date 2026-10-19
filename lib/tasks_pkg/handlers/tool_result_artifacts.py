@@ -14,7 +14,7 @@ from lib.tasks_pkg.executor import _build_simple_meta, _finalize_tool_round
 from lib.tasks_pkg.executor import tool_registry
 from lib.tasks_pkg.handlers._adapter import run_batch_concurrent
 from lib.tasks_pkg.manager import task_user_id
-from lib.tool_result_artifacts import (
+from lib.tool_results.tool_result_artifacts import (
     ToolResultArtifactRepository, resolve_artifact_ref)
 from lib.tools.contracts import ToolContractError
 from lib.tools.tool_result_artifacts import (
@@ -64,7 +64,7 @@ def _mime_ext(mime):
 
 #: Stay inside ``budget_tool_result_v2``'s pass-through band. Otherwise a
 #: continuation response can itself spill into another artifact pointer.
-from lib.tool_result_query_contract import CONTRACT
+from lib.tool_results.tool_result_query_contract import CONTRACT
 _RESPONSE_TOKEN_BUDGET = CONTRACT['response']['tokens']
 _MAX_BATCH_WORKERS = 4
 _BATCH_KEYS = {

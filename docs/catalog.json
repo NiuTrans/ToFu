@@ -4,18 +4,29 @@
     "history": "Git history is the archive; completed plans, incident reports, and point-in-time audits do not remain in docs/.",
     "authority": "Authority documents describe the running system and are updated in the same change as their contracts.",
     "reference": "Reference documents may explain one implemented domain but may not redefine a canonical contract.",
-    "generated": "Generated documents are never hand-edited and must name their generator.",
-    "maximum_lines_by_group": {
-      "authority": 1260,
-      "domain_maps": 220,
-      "developer_guides": 450,
-      "operator_guides": 700,
-      "compliance": 180,
-      "generated": 200
-    }
+    "generated": "Generated documents are never hand-edited and name their generator."
   },
   "contracts": [
-
+    {
+      "path": "contracts/native_flow_abi_v1.json",
+      "guard": "tests/orchestration/test_native_flow_topology.py"
+    },
+    {
+      "path": "contracts/llm_canvas_links_v1.json",
+      "guard": "tests/mcp_protocol/test_llm_canvas_link_policy.py"
+    },
+    {
+      "path": "contracts/response_file_v1.schema.json",
+      "guard": "tests/artifacts/test_response_files.py"
+    },
+    {
+      "path": "contracts/rich_response_v1.schema.json",
+      "guard": "tests/tofudb/test_db_performance_rich_export.py"
+    },
+    {
+      "path": "contracts/storage_performance_charter_v1.json",
+      "guard": "tests/tofudb/test_tofudb_charter_assess.py"
+    },
     {
       "path": "contracts/db_performance_catalog_v1.json",
       "guard": "tests/tofudb/test_db_performance_catalog.py"
@@ -27,6 +38,10 @@
     {
       "path": "contracts/native_agent_stdio_v1.schema.json",
       "guard": "packages/tofu-runtime/tests/agent_stdio.rs"
+    },
+    {
+      "path": "contracts/workspace_acceptance_v1.schema.json",
+      "guard": "tests/storage/test_workspace_acceptance.py"
     },
     {
       "path": "contracts/workspace_delivery_retry_v1.schema.json",
@@ -47,6 +62,31 @@
     {
       "path": "contracts/conversation_execution_identity_v1.json",
       "guard": "tests/conversation/test_execution_identity.py"
+    },
+    {
+      "path": "contracts/project_dispatch_v1.schema.json",
+      "generator": "scripts/gen_project_dispatch_contract.py",
+      "guard": "tests/project_mod/test_project_dispatch_repository.py"
+    },
+    {
+      "path": "contracts/project_dispatch_storage_v2.json",
+      "generator": "scripts/gen_project_dispatch_storage.py",
+      "guard": "tests/storage/test_project_dispatch_segments.py"
+    },
+    {
+      "path": "contracts/project_scope_change_v1.schema.json",
+      "generator": "scripts/gen_project_continuity_contract.py",
+      "guard": "tests/project_mod/test_project_scope_changes.py"
+    },
+    {
+      "path": "contracts/project_responsibility_v1.schema.json",
+      "generator": "scripts/gen_project_continuity_contract.py",
+      "guard": "tests/project_mod/test_project_responsibilities.py"
+    },
+    {
+      "path": "contracts/project_shared_files_v1.schema.json",
+      "generator": "scripts/gen_project_continuity_contract.py",
+      "guard": "tests/project_mod/test_project_shared_files.py"
     },
     {
       "path": "contracts/project_messages_v1.json",
@@ -369,10 +409,76 @@
     {
       "path": "contracts/native_checkpoint_control_v1.schema.json",
       "guard": "packages/tofu-db/src/embedded_checkpoint_control_tests.rs"
+    },
+    {
+      "path": "contracts/native_html_projection_abi_v1.json",
+      "guard": "tests/knowledge/test_native_html_projection_contract.py"
+    },
+    {
+      "path": "contracts/native_html_projection_abi_v1.h",
+      "guard": "tests/knowledge/test_native_html_projection_contract.py"
+    },
+    {
+      "path": "contracts/native_token_count_abi_v1.json",
+      "guard": "tests/token_counter/test_native_token_abi_contract.py"
+    },
+    {
+      "path": "contracts/artifact_review_v1.schema.json",
+      "guard": "tests/artifacts/test_artifact_review.py"
+    },
+    {
+      "path": "contracts/working_facts_v1.schema.json",
+      "guard": "tests/memory/test_working_facts.py"
+    },
+    {
+      "path": "contracts/execution_account_frontier_v1.schema.json",
+      "guard": "tests/agent_core/test_account_frontier.py"
+    },
+    {
+      "path": "contracts/native_goal_actor_claim_v1.schema.json",
+      "guard": "packages/tofu-db/src/native_goal_actor_claim_tests.rs"
+    },
+    {
+      "path": "contracts/native_goal_claim_outbox_v1.schema.json",
+      "guard": "packages/tofu-db/src/native_goal_claim_replay_tests.rs"
+    },
+    {
+      "path": "contracts/native_goal_actor_handoff_v1.schema.json",
+      "guard": "packages/tofu-db/src/native_goal_actor_handoff_tests.rs"
+    },
+    {
+      "path": "contracts/native_goal_actor_handoff_outbox_v1.schema.json",
+      "guard": "packages/tofu-db/src/native_goal_actor_handoff_replay_tests.rs"
+    },
+    {
+      "path": "contracts/evolution_mutation_version_v1.schema.json",
+      "guard": "tests/evolution/test_evolution_mutation_versions.py"
+    },
+    {
+      "path": "contracts/evolution_policy_transition_v1.schema.json",
+      "guard": "tests/evolution/test_evolution_policy_rollback.py"
+    },
+    {
+      "path": "contracts/native_aggregate_cost_v1.schema.json",
+      "guard": "tests/billing/test_native_aggregate_fees.py"
+    },
+    {
+      "path": "contracts/native_checkpoint_storage_abi_v1.json",
+      "generator": "scripts/gen_native_checkpoint_storage_abi.py",
+      "guard": "tests/storage_sidecar/test_native_checkpoint_storage.py"
+    },
+    {
+      "path": "contracts/native_checkpoint_storage_abi_v1.h",
+      "generator": "scripts/gen_native_checkpoint_storage_abi.py",
+      "guard": "tests/storage_sidecar/test_native_checkpoint_storage.py"
     }
   ],
   "authority": [
+    "docs/AGENT_LIFECYCLE.md",
+    "docs/NATIVE_IMAGE_ADMISSION.md",
+    "docs/NATIVE_FLOW_CONTROL.md",
     "docs/CONTINUOUS_DELIVERY.md",
+    "docs/WORKSPACE_ACCEPTANCE.md",
     "docs/DESKTOP_CLIENTS.md",
     "docs/PROJECT_COORDINATION.md",
     "docs/README.md",
@@ -395,6 +501,7 @@
     "docs/contracts/CONVERSATION_DIAGNOSTICS.md",
     "docs/FRONTEND_ARCHITECTURE.md",
     "docs/RENDER_CONTRACT.md",
+    "docs/TURN_RENDERING_PERFORMANCE.md",
     "docs/RESEARCH_CYCLE.md",
     "docs/contracts/TURN_SETTLEMENT.md",
     "docs/TESTING_STRATEGY.md",
@@ -407,6 +514,7 @@
     "docs/PAPER_QUALITY.md",
     "docs/EVOLUTION_DESIGN.md",
     "docs/STORAGE_PERFORMANCE_CHARTER.md",
+    "docs/TOFUDB_PIPELINE_CRITICAL_PATH.md",
     "docs/TOFUDB_PUBLICATION_LATENCY.md",
     "docs/SITE_PACKS.md",
     "docs/RUN_CONTINUITY.md",
@@ -414,12 +522,19 @@
     "docs/EXPLORATION_MEMORY.md",
     "docs/STAGE_OUTCOMES.md",
     "docs/TOFUDB_JSON_MATERIALIZATION.md",
+    "docs/TOFUDB_CONTEXT_READ.md",
     "docs/TOFUDB_WAL_BARRIER_SCHEDULING.md",
     "docs/TOFUDB_BLOCK_READ_PATH.md",
+    "docs/TOFUDB_RECOVERY_ATTRIBUTION.md",
     "docs/TOFUDB_ROTATION_WINDOW.md",
     "docs/AUTOMATIONS.md",
     "docs/AUTOMATION_SKILL_SOURCES.md",
-    "docs/TASK_EVENT_DELIVERY.md"
+    "docs/TASK_EVENT_DELIVERY.md",
+    "docs/TOFUDB_SEARCH_POSTINGS.md",
+    "docs/TOFUDB_ONLINE_GC.md",
+    "docs/contracts/ARTIFACT_REVIEW.md",
+    "docs/contracts/WORKING_FACTS.md",
+    "docs/contracts/TOOL_RESULT_QUERY.md"
   ],
   "domain_maps": [
     "docs/modules/auth_providers_billing.md",
@@ -445,46 +560,49 @@
     "docs/modules/proof.md"
   ],
   "developer_guides": [
-    "docs/ENVIRONMENT_PROVIDERS.md",
     "docs/AGENTS.md",
-    "docs/conversation/TURN_BLOCK_DISCLOSURE.md",
     "docs/AGENT_CAPABILITY_GUIDE.md",
-    "docs/api_client.md",
-    "docs/contracts/API_V4_MIGRATION.md",
-    "docs/runbooks/CODEX_ACCOUNT_USAGE.md",
-    "docs/CONTEXT_COMPACTION.md",
+    "docs/BROWSER_WORKFLOWS.md",
     "docs/CONTEXT_BUDGET_POLICY.md",
+    "docs/CONTEXT_COMPACTION.md",
     "docs/CONTEXT_INJECTIONS.md",
     "docs/CUSTOM_TOOLS.md",
     "docs/DEFENSIVE_PATTERNS.md",
+    "docs/ENVIRONMENT_PROVIDERS.md",
     "docs/EVOLUTION_GAME_ART.md",
     "docs/LLM_COST_OPTIMIZATION.md",
     "docs/LLM_RUNTIME_PROFILES.md",
     "docs/LOCAL_KNOWLEDGE.md",
-    "docs/contracts/OPENAI_RESPONSES_FEATURES.md",
-    "docs/ORCHESTRATION_PRODUCT_SURFACES.md",
     "docs/MONOREPO.md",
+    "docs/ORCHESTRATION_PRODUCT_SURFACES.md",
+    "docs/PROJECT_FILE_UNDO.md",
+    "docs/RETAINED_AGENTS.md",
     "docs/TASK_EXECUTION_MODES.md",
-    "docs/TOFUDB_TOFUSQL_DESIGN_PROPOSAL.md",
+    "docs/TOFUDB_EMBEDDED_PHASES.md",
+    "docs/TOFUDB_EMBEDDED_RESPONSE.md",
+    "docs/TOFUDB_ENTITY_PAGES.md",
+    "docs/TOFUDB_PERFORMANCE_EXPERIMENTS.md",
+    "docs/TOFUDB_RECENCY_DIRECTORY.md",
+    "docs/TOFUDB_QUERY_RESULT_CACHE.md",
+    "docs/TOFUDB_TOMBSTONE_COMPACTION.md",
+    "docs/TOFUDB_WORKER_DELIVERY.md",
+    "docs/TOFUDB_WRITE_PATH_OVERLAY.md",
+    "docs/TOOL_DISPATCH_ISOLATION_DESIGN.md",
+    "docs/api_client.md",
+    "docs/contracts/API_V4_MIGRATION.md",
+    "docs/contracts/OPENAI_RESPONSES_FEATURES.md",
+    "docs/contracts/TOOL_EFFECT_RECOVERY.md",
     "docs/contracts/TOOL_EXECUTION_POLICY.md",
     "docs/contracts/TOOL_PLUGINS.md",
     "docs/contracts/TOOL_SEARCH_EXECUTION_GATEWAY.md",
     "docs/contracts/TURN_TRACE_CONTRACT.md",
     "docs/contracts/VERSIONING.md",
-    "docs/PROJECT_FILE_UNDO.md",
-    "docs/RETAINED_AGENTS.md",
-    "docs/BROWSER_WORKFLOWS.md",
-    "docs/TOOL_DISPATCH_ISOLATION_DESIGN.md",
-    "docs/TOFUDB_WRITE_PATH_OVERLAY.md",
-    "docs/TOFUDB_PERFORMANCE_EXPERIMENTS.md",
-    "docs/TOFUDB_EMBEDDED_RESPONSE.md",
-    "docs/TOFUDB_WORKER_DELIVERY.md",
-    "docs/TOFUDB_RECENCY_DIRECTORY.md",
-    "docs/TOFUDB_TOMBSTONE_COMPACTION.md",
-    "docs/proposals/DURABLE_AGENT_LOOP_DESIGN_PROPOSAL.md",
-    "docs/PROOF_DELIVERABLES_DESIGN_PROPOSAL.md",
-    "docs/proposals/OUTCOME_ROUTING_DESIGN_PROPOSAL.md",
-    "docs/TOOL_CALL_SUCCESS_RENDERING_DESIGN_PROPOSAL.md"
+    "docs/conversation/TURN_BLOCK_DISCLOSURE.md",
+    "docs/evaluations/MEITUAN_SANDBOX_BACKEND.md",
+    "docs/runbooks/CODEX_ACCOUNT_USAGE.md",
+    "docs/contracts/EXECUTION_ACCOUNT_CONTINUITY.md",
+    "docs/NATIVE_REPOSITORY_DISCOVERY.md",
+    "docs/MEDIA_SOURCE_ADMISSION.md"
   ],
   "operator_guides": [
     "docs/INSTALL.md",

@@ -12,7 +12,7 @@ from urllib3.exceptions import NewConnectionError, ProtocolError, ReadTimeoutErr
 
 from lib.error_envelope import from_exception
 from lib.llm._transport import classify_request_transport_error
-from lib.llm_errors import (
+from lib.llm.llm_errors import (
     EndpointUnreachableError, RequestTransportError, RequestUploadTimeoutError,
 )
 
@@ -91,7 +91,7 @@ def test_cyclic_exception_chain_is_bounded():
 
 
 def test_read_timeout_preserves_bounded_retry_semantics():
-    from lib.llm_errors import RetryableAPIError
+    from lib.llm.llm_errors import RetryableAPIError
     error = classify_request_transport_error(requests.exceptions.ReadTimeout('read'))
     assert isinstance(error, RetryableAPIError)
     assert from_exception(error)['kind'] == 'timeout'

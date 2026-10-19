@@ -56,6 +56,16 @@ export function displayThinkingDepth(depth: string | null | undefined): Thinking
   if (depth === 'ultra') return 'ultra';
   return (THINKING_DEPTH_LEVELS as readonly string[]).includes(depth as string) ? depth as ThinkingDepth : 'medium';
 }
+/* A stored depth the current ladder cannot select stays committed verbatim
+ * (persistence is gesture-only), but the slider paints the server's mapped
+ * replacement rung instead of manufacturing an unusable flagged one. The
+ * replacement was clamped against the final route intersection, so the
+ * painted position is exactly what the wire would execute. */
+function restoredDepth(depth: string, selectable: readonly string[], restoration: DepthOptions['restoration'] | undefined): string {
+  if (depth === 'default' || selectable.includes(depth)) return depth;
+  const replacement = restoration?.replacements?.[depth] ?? restoration?.fallback;
+  return replacement && selectable.includes(replacement) ? replacement : depth;
+}
 export function createThinkingDepthSlider(ports: {
   document: Document;
   translate: (key: string) => string;
@@ -67,7 +77,9 @@ export function createThinkingDepthSlider(ports: {
   const maxIndex = () => Math.max(1, levels.length - 1);
   let defaultDepth: string | null | undefined;
   let notice = '';
-  const committedIndex = () => Math.max(0, levels.indexOf(committed === 'default' ? defaultDepth ?? '' : committed));
+  let restoration: DepthOptions['restoration'] | undefined;
+  const committedIndex = () => Math.max(0, levels.indexOf(committed === 'default'
+    ? defaultDepth ?? '' : restoredDepth(committed, selectable, restoration)));
   let position = 2;
   let enabled = false;
   let drag: {
@@ -84,8 +96,14 @@ export function createThinkingDepthSlider(ports: {
   function paint(value: number, source?: HTMLInputElement) {
     position = clamp(value);
     const depth = depthAt(position);
-    const available = selectable.includes(depth);
-    const displayDepth = committed === 'default' && !drag && !defaultDepth && position === committedIndex() ? 'default' : depth;
+    const restored = restoredDepth(committed, selectable, restoration);
+    const parked = !drag && restored !== committed && depth === restored;
+    const displayDepth = parked ? committed
+      : committed === 'default' && !drag && !defaultDepth && position === committedIndex() ? 'default' : depth;
+    /* The parked thumb still marks the saved intent as unavailable, even
+     * though its painted rung is selectable — the rung is the mapped
+     * replacement, not the stored choice. */
+    const available = !parked && selectable.includes(depth);
     const display = THINKING_DEPTH_LABELS[displayDepth] || displayDepth;
     const label = (THINKING_DEPTH_LABELS[displayDepth] ? ports.translate(`mobile.${displayDepth}`) : displayDepth)
       + (available ? '' : ` — ${ports.translate('mobile.depthUnavailable')}`);
@@ -102,6 +120,8 @@ export function createThinkingDepthSlider(ports: {
       }
       reset.textContent = ports.translate('mobile.default');
       reset.setAttribute('aria-pressed', String(committed === 'default' && !drag));
+      reset.hidden = !drag && committed !== 'default' && !selectable.includes(committed)
+        && restoredDepth(committed, selectable, restoration) !== committed;
       let note = control.querySelector<HTMLElement>('[data-depth-notice]');
       if (!note) {
         note = ports.document.createElement('p'); note.dataset.depthNotice = '';
@@ -290,13 +310,20 @@ export function createThinkingDepthSlider(ports: {
       selectable = nextSelectable;
       // Renderer-only, verbatim intent. committed is always the saved depth,
       // never rewritten by the render path. A depth the current ladder cannot
-      // select stays committed and is appended as an unavailable, flagged rung
-      // (the same projection as 'dynamic levels ... preserve unavailable stored
-      // intent'). sync() persists nothing: persistence is gesture-only
-      // (finish/resetDefault), so the choice survives a later rebinding back to
-      // a ladder that can represent it.
+      // select stays committed: the server restoration table maps it onto an
+      // executable rung when one exists (parked, flagged); only an unmapped
+      // depth is appended as an unavailable, flagged rung. sync() persists
+      // nothing: persistence is gesture-only (finish/resetDefault), so the
+      // choice survives a later rebinding back to a ladder that can
+      // represent it.
       committed = nextCommitted;
-      levels = committed === 'default' || selectable.includes(committed) ? selectable : [...selectable, committed];
+      restoration = legacy ? undefined : capable.restoration;
+      /* levels drive the native range's indices. The native ladder excludes
+       * the non-positional 'default' intent rung (it is the reset button),
+       * so the parked replacement's index aligns with the physical thumb. */
+      levels = committed === 'default' || selectable.includes(committed)
+        || restoredDepth(committed, selectable, restoration) !== committed
+        ? selectable : [...selectable, committed];
       const unavailable = !selectable.includes(committed);
       const visible = legacy ? capable : capable.visible !== false || unavailable;
       enabled = nextEnabled;

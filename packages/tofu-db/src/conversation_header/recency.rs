@@ -402,7 +402,7 @@ pub(crate) fn try_directory_list(
     let maximum_bytes = if request.include_messages {
         crate::generated_tofudb_ir::MAX_FROZEN_TRANSCRIPT_PAGE_BYTES
     } else {
-        crate::generated_tofudb_ir::MAX_TRANSACTION_IR_LITERAL_BYTES
+        crate::generated_tofudb_ir::MAX_LEGACY_DOCUMENT_BYTES
     };
     let mut response = vec![b'['];
     for (updated_at_ms, conversation_id) in entries.iter().take(request.limit) {

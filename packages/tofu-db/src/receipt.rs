@@ -1,4 +1,4 @@
-//! Bounded, owner-scoped command receipt identity and storage encoding.
+//! Owner-scoped command receipt identity and complete storage encoding.
 
 use std::io::{self, Cursor, Read, Write};
 
@@ -22,7 +22,7 @@ const COMMAND_KEY_DOMAIN: &[u8] = b"tofu.command-receipt.command.v2\0";
 const RECEIPT_CODEC_PREFIX: &[u8] = b"tofu.receipt.";
 pub const COMPRESSED_RECEIPT_MAGIC: &[u8] = b"tofu.receipt.zlib.v1\0";
 pub use crate::generated_tofudb_ir::{
-    MAX_STORED_RECEIPT_BYTES, MAX_DECODED_RECEIPT_BYTES, MAX_INLINE_RECEIPT_BYTES,
+    MAX_INLINE_RECEIPT_BYTES,
 };
 use crate::generated_tofudb_ir::RECEIPT_COMPRESSION_THRESHOLD_BYTES;
 pub const MAX_RECEIPT_COMMAND_ID_BYTES: usize = 200;
@@ -118,11 +118,7 @@ pub fn encode_receipt_response(raw: &[u8]) -> io::Result<Vec<u8>> {
     if raw.len() <= RECEIPT_COMPRESSION_THRESHOLD_BYTES {
         return Ok(raw.to_vec());
     }
-    if raw.len() > MAX_DECODED_RECEIPT_BYTES {
-        return Err(invalid_input(
-            "command response exceeds decoded receipt budget",
-        ));
-    }
+    if u32::try_from(raw.len()).is_err() { return Ok(raw.to_vec()); }
     let compressed = {
         let _compress = crate::fsync_stats::StageTimer::diagnostic(crate::fsync_stats::STAGE_RECEIPT_COMPRESS);
         let mut encoder = ZlibEncoder::new(Vec::new(), Compression::new(1));
@@ -137,11 +133,6 @@ pub fn encode_receipt_response(raw: &[u8]) -> io::Result<Vec<u8>> {
 }
 
 pub fn decode_receipt_response(encoded: &[u8]) -> io::Result<Vec<u8>> {
-    if encoded.len() > MAX_STORED_RECEIPT_BYTES {
-        return Err(invalid_data(
-            "stored command receipt exceeds its byte budget",
-        ));
-    }
     if !encoded.starts_with(COMPRESSED_RECEIPT_MAGIC) {
         if encoded.starts_with(RECEIPT_CODEC_PREFIX) {
             return Err(invalid_data(
@@ -159,12 +150,12 @@ pub fn decode_receipt_response(encoded: &[u8]) -> io::Result<Vec<u8>> {
             .try_into()
             .unwrap(),
     ) as usize;
-    if decoded_length <= RECEIPT_COMPRESSION_THRESHOLD_BYTES || decoded_length > MAX_DECODED_RECEIPT_BYTES {
+    if decoded_length <= RECEIPT_COMPRESSION_THRESHOLD_BYTES {
         return Err(invalid_data("stored compressed receipt length is invalid"));
     }
     let compressed = &encoded[payload_start..];
     let mut decoder = ZlibDecoder::new(Cursor::new(compressed));
-    let mut raw = Vec::with_capacity(decoded_length);
+    let mut raw = Vec::new();
     decoder
         .by_ref()
         .take(decoded_length as u64 + 1)
@@ -190,7 +181,6 @@ impl CommandReceipt {
             }
             StoredReceiptResponse::Blob(reference) => {
                 if reference.logical_bytes == 0
-                    || reference.logical_bytes > MAX_STORED_RECEIPT_BYTES as u64
                 {
                     return Err(invalid_input("receipt blob reference is invalid"));
                 }
@@ -261,7 +251,7 @@ impl CommandReceipt {
             }
             RESPONSE_BLOB if response_bytes.len() == BLOB_REFERENCE_BYTES => {
                 let logical_bytes = u64::from_le_bytes(response_bytes[64..72].try_into().unwrap());
-                if logical_bytes == 0 || logical_bytes > MAX_STORED_RECEIPT_BYTES as u64 {
+                if logical_bytes == 0 {
                     return Err(invalid_data("receipt blob reference is invalid"));
                 }
                 StoredReceiptResponse::Blob(BlobReference {
@@ -345,7 +335,7 @@ mod tests {
     }
 
     #[test]
-    fn response_codec_round_trips_raw_and_bounded_compressed_bytes() {
+    fn response_codec_round_trips_raw_and_large_compressed_bytes() {
         let raw = br#"{"ok":true}"#;
         assert_eq!(
             decode_receipt_response(&encode_receipt_response(raw).unwrap()).unwrap(),
@@ -354,13 +344,13 @@ mod tests {
         let large = vec![b'x'; 100_000];
         let encoded = encode_receipt_response(&large).unwrap();
         assert!(encoded.starts_with(COMPRESSED_RECEIPT_MAGIC));
-        assert!(encoded.len() <= MAX_STORED_RECEIPT_BYTES);
         assert_eq!(decode_receipt_response(&encoded).unwrap(), large);
-        assert!(encode_receipt_response(&vec![1; MAX_DECODED_RECEIPT_BYTES + 1]).is_err());
+        let demand = vec![b'x';9*1024*1024];
+        assert_eq!(decode_receipt_response(&encode_receipt_response(&demand).unwrap()).unwrap(),demand);
     }
 
     #[test]
-    fn incompressible_receipts_round_trip_with_bounded_storage() {
+    fn incompressible_receipts_round_trip_beyond_former_storage_quota() {
         let mut seed = 0x12345678_u32;
         let raw: Vec<u8> = (0..262144).map(|_| {
             seed ^= seed << 13; seed ^= seed >> 17; seed ^= seed << 5;
@@ -370,7 +360,8 @@ mod tests {
         assert_eq!(encoded, raw);
         assert!(encoded.len() > RECEIPT_COMPRESSION_THRESHOLD_BYTES);
         assert_eq!(decode_receipt_response(&encoded).unwrap(), raw);
-        assert!(decode_receipt_response(&vec![0; MAX_STORED_RECEIPT_BYTES + 1]).is_err());
+        let demand = raw.repeat(20);
+        assert_eq!(decode_receipt_response(&encode_receipt_response(&demand).unwrap()).unwrap(),demand);
     }
 
     #[test]

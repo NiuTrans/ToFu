@@ -1,8 +1,18 @@
 # Storage performance charter (Tofu-DB vs SQLite)
 
+Full-catalog history promotion and accepted-event-to-push anchors follow
+[publication latency](TOFUDB_PUBLICATION_LATENCY.md#full-catalog-history-promotion-and-write-delivery-anchors).
+Effective cache-budget evidence and eager-admission qualification follow
+[decoded-page admission](TOFUDB_WRITE_PATH_OVERLAY.md#decoded-page-admission-and-benchmark-budgets).
 This document defines how we measure Tofu-DB against the legacy sidecar and what "comprehensively better" means. It is intentionally separate from
 `STORAGE_TOFUDB.md` (which documents the certified durability/correctness
 guarantees) — this file is about *speed, footprint, and tail behavior under the agent-harness workload*.
+
+The [Harness database architecture experiments](TOFUDB_HARNESS_DATABASE.md)
+target work that grows with history, branching and repeated projection updates.
+They distinguish a better execution data model from a native-engine advantage
+and from whole-Agent results; experimental primitives do not change production
+storage selection or weaken the acceptance criteria below.
 
 ## Loose-block length reuse
 
@@ -38,18 +48,7 @@ Alternatives rejected: larger fixed caps merely move the plateau; relying on
 kernel caching does not retain decoded proofs; unlimited overrides can consume
 all launch-observed headroom.
 
-The opt-in `hot_cache_scaling_tests::hot_cache_scaling_measurement` runs three
-alternating pairs against the production verified decoder/cache, using 300
-distinct 1 MiB chunks and the same current encoded allocations. With 128 GiB
-declared headroom, old/scaled decode capacities were 128/512 MiB. Three timed
-passes produced identical output digests: old/scaled hits 0/900, misses 900/0,
-median 401.26/1.27 ms in the debug build. Accounted residency was
-133,252,159/314,763,240 bytes, within each budget, and returned to zero after
-release. This measures verified decode reuse, excluding source I/O, JSON, RPC
-and whole-task latency; it does not establish a production speedup.
-Run with `cargo test --manifest-path packages/tofu-db/Cargo.toml --lib
-hot_cache_scaling_measurement -- --ignored --nocapture`. Ordinary resource
-tests cover lean/pressured hosts and continued growth on larger hosts.
+The opt-in `hot_cache_scaling_tests::hot_cache_scaling_measurement` runs three alternating pairs against the production verified decoder/cache, using 300 distinct 1 MiB chunks and the same current encoded allocations. With 128 GiB declared headroom, old/scaled decode capacities were 128/512 MiB. Three timed passes produced identical output digests: old/scaled hits 0/900, misses 900/0, median 401.26/1.27 ms in the debug build. Accounted residency was 133,252,159/314,763,240 bytes, within each budget, and returned to zero after release. This measures verified decode reuse, excluding source I/O, JSON, RPC and whole-task latency; it does not establish a production speedup. Run with `cargo test --manifest-path packages/tofu-db/Cargo.toml --lib hot_cache_scaling_measurement -- --ignored --nocapture`. Ordinary resource tests cover lean/pressured hosts and continued growth on larger hosts.
 
 ## Native event batch composition
 
@@ -83,18 +82,7 @@ alone with the original event admission ceiling. Queue residency, worker count
 and connection pools retain the existing launch-probed sizing. Metrics expose
 the active composition ceiling and maximum estimated composition bytes.
 
-A flush barrier ends its FIFO prefix; future events and their provider failures
-cannot join or invalidate it. Accepted events receive an ordinal, and a barrier
-records the last accepted ordinal. One bounded primitive failure summary and
-its earliest ordinal persist until batcher closure, covering actual provider/RPC
-failure and accepted events cancelled before dispatch. The summary retains no
-exception, traceback or event graph. Every covered barrier receives a fresh
-typed error; later success is not proof that the failed accepted prefix became
-durable. The explicit per-row `attempt_not_live` rejection also records an
-unstored accepted event without changing its business result or sibling ACKs;
-natural-key deduplication remains durable. Claimed ambiguous confirmation timeouts and observational callback
-failures do not invent persistence failure. Six added integer/slot fields cost
-256 additional retained bytes per queued event within the existing byte quota.
+A flush barrier ends its FIFO prefix; future events and their provider failures cannot join or invalidate it. Accepted events receive an ordinal, and a barrier records the last accepted ordinal. One bounded primitive failure summary and its earliest ordinal persist until batcher closure, covering actual provider/RPC failure and accepted events cancelled before dispatch. The summary retains no exception, traceback or event graph. Every covered barrier receives a fresh typed error; later success is not proof that the failed accepted prefix became durable. The explicit per-row `attempt_not_live` rejection also records an unstored accepted event without changing its business result or sibling ACKs; natural-key deduplication remains durable. Claimed ambiguous confirmation timeouts and observational callback failures do not invent persistence failure. Six added integer/slot fields cost 256 additional retained bytes per queued event within the existing byte quota.
 
 Alternatives: a fixed small item cap starves cheap events and ignores payload
 size; increasing the native carried ceiling changes bounded replay memory and
@@ -112,13 +100,13 @@ Decision: `src/request_profile.rs` adds an opt-in, content-free dispatch profile
 `TOFU_DB_REQUEST_PROFILE_EVERY=1` before launching a disposable authority to
 record every request; N records every Nth request. Zero/unset disables it. Configuration is read once per process. Sampling is deterministic and may alias
 periodic workloads; use every request for bounded experiments, and measure observer overhead with the same binary off/on/on/off before drawing conclusions.
-It does not change admission, durability, retry, ownership or request results.
+It does not change admission, durability, retry, ownership or request results. Document materialization and public-Turn/snapshot boundaries use the same opt-in collector; their bounded memory, matched window driver and equal-work limits live in [JSON materialization](TOFUDB_JSON_MATERIALIZATION.md#window-read-ownership-and-attribution).
 
 Existing stage timers join a thread-bound span stack. Exclusive elapsed time subtracts immediate children; exclusive stages plus `unattributedNanos` must
 equal dispatch elapsed time. Inclusive stages remain available to understand nested work but must never be added together. Non-LIFO, unclosed and overflowed
 spans invalidate accounting explicitly. `scripts/tofudb_profile_report.py` rejects inconsistent ledgers rather than manufacturing an attribution.
 
-Additional spans cover FIFO admission, mutex acquisition, authority holds, replica creation, transaction compilation, query execution, and real-VFS
+Default-off authority commit spans separate validated rebase, private blob publication, deferred indexes/recency, outbox capture, and stream encoding/catalog preparation; they add five fixed anonymous ledger slots. Overlay head-version, original blind-version and range-witness validation add three more fixed slots (72 bytes per sample/operation aggregate); existing sample bounds and size-derived byte reports remain. Additional spans cover FIFO admission, mutex acquisition, authority holds, replica creation, transaction compilation, query execution, and real-VFS
 open/read/write/sync/metadata/directory/mutation operations. Fixed work counters record entity reads/reuse, overlay/tree resolutions, conflict classes, abandoned
 preparation time, logical WAL/materialization bytes and requested VFS bytes. Failed operations still contribute elapsed time and attempted bytes. VFS byte
 counts are not successful I/O or physical-device amplification. Requested read-all bytes come from the length observation, including a rejected bound.
@@ -141,7 +129,7 @@ representative distribution and not a source of P99 estimates. Control requests 
 
 Alternatives rejected: pausing threads at debugger breakpoints (changes queue behavior), synchronous per-key logging (I/O and unbounded labels), and adding
 nested elapsed totals as a CPU/latency breakdown (double counting). Verification: native `request_profile_tests.rs`, server/lifecycle tests, and
-`tests/tofudb/test_request_profile_report.py`. Example after a benchmark run:
+`tests/tofudb/test_request_profile_report.py`. Exact windows and search activation: [ownership and evidence](TOFUDB_PIPELINE_CRITICAL_PATH.md). Example after a benchmark run:
 
 ```sh
 TOFU_DB_REQUEST_PROFILE_EVERY=1 python3 benchmarks/conversation_concurrency.py \
@@ -213,17 +201,7 @@ not a live deployment or a process-kill capacity certification.
 
 ## Profiling evidence and optimization priorities (2026-09-30)
 
-Diagnostic source `48987578274ccb6b06d8bc8bc1ce2c576045d09cac5e70a09860f51b551b8d39`
-adds observation, not a new storage algorithm. Executable SHA
-`51f7721f761318f99ebddb4e8da8a51e2369340a2b847516262a3f40ab4eb6aa`
-and loaded library SHA
-`787d3c913dfee7246906eff4315d33f791968960d66bcf18601485a538febedf`
-are verified in every native load report. Runs use strict durability, DolphinFS,
-four unique 8-KiB chunks per conversation and fixed one-second arrivals.
-All native staircase runs complete exact readback and offline integrity with
-zero errors. The shared benchmark checkout still reported the previous native
-source before integration; the isolated-source/build receipt is the matching
-provenance. These are diagnostic runs, not new capacity certification.
+Diagnostic source `48987578274ccb6b06d8bc8bc1ce2c576045d09cac5e70a09860f51b551b8d39` adds observation, not a new storage algorithm. Executable SHA `51f7721f761318f99ebddb4e8da8a51e2369340a2b847516262a3f40ab4eb6aa` and loaded library SHA `787d3c913dfee7246906eff4315d33f791968960d66bcf18601485a538febedf` are verified in every native load report. Runs use strict durability, DolphinFS, four unique 8-KiB chunks per conversation and fixed one-second arrivals. All native staircase runs complete exact readback and offline integrity with zero errors. The shared benchmark checkout still reported the previous native source before integration; the isolated-source/build receipt is the matching provenance. These are diagnostic runs, not new capacity certification.
 
 | Concurrent conversations | Streaming P99 incl. schedule debt (ms) | Identified waits / summed sampled dispatch | Dropped / selected profiles |
 |---|---:|---:|---:|
@@ -274,30 +252,9 @@ comparison. The initial SQLite launch with the new diagnostic env was rejected;
 its failure is retained, the native env is now admitted by the deployment guard,
 and the successful comparison scopes that env out of the SQLite child.
 
-The 128-conversation off/on/on/off probe-cost test records productive intervals
-of 4.696/4.636/4.705/4.532 s: ranges overlap, not proof of zero overhead. Retained
-profile buffers are 99,072 bytes plus 3,944 bytes per active sampled request.
-Default-disabled hooks are also compared against the preceding build: 1,000
-append samples show worse P99 (1.36/1.49 -> 1.68/1.89 ms), while the 5,000-sample
-follow-up overlaps (2.43/2.67 -> 2.40/2.89 ms); median latency and throughput do not
-regress in the latter. Keep both observations; there is no all-metric claim.
-Native tests pass 1,400 with 2 ignored while profiling is enabled. The host's
-system CPU profiler cannot provide usable symbol attribution (missing initial
-mappings, then proc-map timeouts/incomplete capture); those captures are retained
-but excluded from CPU conclusions. Shared-host activity and the absence of
-running-process SIGKILL/provider/browser coverage remain explicit limits.
+The 128-conversation off/on/on/off probe-cost test records productive intervals of 4.696/4.636/4.705/4.532 s: ranges overlap, not proof of zero overhead. Retained profile buffers are 99,072 bytes plus 3,944 bytes per active sampled request. Default-disabled hooks are also compared against the preceding build: 1,000 append samples show worse P99 (1.36/1.49 -> 1.68/1.89 ms), while the 5,000-sample follow-up overlaps (2.43/2.67 -> 2.40/2.89 ms); median latency and throughput do not regress in the latter. Keep both observations; there is no all-metric claim. Native tests pass 1,400 with 2 ignored while profiling is enabled. The host's system CPU profiler cannot provide usable symbol attribution (missing initial mappings, then proc-map timeouts/incomplete capture); those captures are retained but excluded from CPU conclusions. Shared-host activity and the absence of running-process SIGKILL/provider/browser coverage remain explicit limits.
 
-Decision: prioritize generation-scoped WAL/payload draining with a short final
-publication fence; commit-owned deltas for shared metadata plus precise range
-validation; and removal of repeated JSON conversion across the embedded path.
-The immutable query view now bypasses writer FIFO capture under the
-[snapshot read contract](STORAGE_TOFUDB.md#snapshot-read-lane). Embedded transport now borrows runtime bindings instead of copying launch metadata per request; its binding/pin-release stages measure the boundary.
-Remaining changes need their own before/after experiment and existing conflict/crash/ownership
-contracts. Measure fence duration, bytes per new stream byte, discarded work,
-read admission and low-load boundary cost separately. Alternatives rejected:
-increasing worker count around the same serial gate, relaxing durability, or
-ranking optimizations only by tree call counts. Current measurements do not
-justify a promised multiplier for those architecture changes.
+Decision: prioritize generation-scoped WAL/payload draining with a short final publication fence; commit-owned deltas for shared metadata plus precise range validation; and removal of repeated JSON conversion across the embedded path. The immutable query view now bypasses writer FIFO capture under the [snapshot read contract](STORAGE_TOFUDB.md#snapshot-read-lane). Embedded transport now borrows runtime bindings instead of copying launch metadata per request; its binding/pin-release stages measure the boundary. Remaining changes need their own before/after experiment and existing conflict/crash/ownership contracts. Measure fence duration, bytes per new stream byte, discarded work, read admission and low-load boundary cost separately. Alternatives rejected: increasing worker count around the same serial gate, relaxing durability, or ranking optimizations only by tree call counts. Current measurements do not justify a promised multiplier for those architecture changes.
 
 Raw reports, failed captures, source receipts and paired observer-cost evidence
 are under `.tmp/tofudb-profiling-20260930/`. The retained report command above
@@ -476,18 +433,7 @@ bundle; missing artifacts must not be replaced by these rounded summary numbers.
 
 ## Write-path diagnostic accounting
 
-`commitStages` retains the aggregate `parallel_fallback` count and partitions
-it into `parallel_{snapshot,preparation,commit}_{busy,rotation}`. These six
-fixed counters record the actual fallback branch and have zero elapsed time;
-`busy` means `WouldBlock`, not necessarily a business OCC conflict. Rotation
-uses the engine's existing classified backpressure. Unsupported operations
-that never enter optimistic preparation do not increment these counters.
-Problem: the old aggregate conflated pin admission, preparation and commit
-failures. Decision: attribute both phase and classified rotation without
-changing retries or errors. Alternatives rejected: parsing arbitrary error
-messages into guessed conflicts and adding per-key labels/unbounded metrics.
-Preparation pin saturation now waits outside authority; `parallel_snapshot_wait`
-records those wait intervals separately from commands that actually fall back.
+`commitStages` retains the aggregate `parallel_fallback` count and partitions it into `parallel_{snapshot,preparation,commit}_{busy,rotation}`. These six fixed counters record the actual fallback branch and have zero elapsed time; `busy` means `WouldBlock`, not necessarily a business OCC conflict. Rotation uses the engine's existing classified backpressure. Unsupported operations that never enter optimistic preparation do not increment these counters. Problem: the old aggregate conflated pin admission, preparation and commit failures. Decision: attribute both phase and classified rotation without changing retries or errors. Alternatives rejected: parsing arbitrary error messages into guessed conflicts and adding per-key labels/unbounded metrics. Preparation pin saturation now waits outside authority; `parallel_snapshot_wait` records those wait intervals separately from commands that actually fall back.
 
 `conversation_concurrency.py` captures storage metrics once at the admission
 barrier and again after streaming/settlement. A running restart resets native
@@ -553,10 +499,10 @@ each backend's production client stack** — not raw engine primitives:
   that once showed raw SQLite ~25× ahead per commit (see "Reconciling the
   raw baseline" below).
 
-It reports per-workload P50/P95/P99, throughput and time-windowed samples, plus per-engine durable bytes and OS `/proc/<pid>/io` serving-window writes.
-Native reports declare scope and missing-counter completeness. Embedded open/close/abandon/reopen windows fold once before resetting.
+It reports per-workload P50/P95/P99, throughput, time-windowed samples and OS `/proc/<pid>/io` serving-window writes. `resources.<engine>.footprint` separately accounts for authority and external search projection: logical bytes, allocated bytes when supported, unique files, overlap, scan errors and complete/observed totals. The old `data_size_bytes` is only apparent path bytes under the original driver root; it excludes the external native projection and is not the total-footprint gate. Failed/unresolved scans cannot become complete totals. SQLite's broad project directory is not silently relabeled as a precise authority/projection inventory.
+Footprints are post-workload, before-shutdown observations, not live-payload bytes or verified steady state. Maintenance/reopen evidence is retained separately; waiting for background work or seeing a checkpoint does not establish steady state. Native reports declare write-counter scope/completeness; embedded open/close/abandon/reopen windows fold once before resetting.
 In-process counters cover the harness: an upper bound, not device IO or isolated database amplification. Daemon startup/shutdown tails and separate authority init are excluded.
-[Verified lifecycle accounting](evidence/tofudb_embedded_write_accounting_20261010.json) invalidates historical embedded totals reset across reopen; latency and footprint remain separate evidence.
+Verified lifecycle accounting invalidates historical embedded totals reset across reopen; latency and footprint remain separate evidence.
 PostgreSQL is not a benchmark dimension (see below).
 
 ### History-scaled phases
@@ -640,53 +586,38 @@ on the same hardware in the same run, against a freshness-verified binary:
 | **History-scaled read** (`open_windowed_long_history`, `sidebar_with_history`) | P50 ≤ sidecar-SQLite P50, flat vs history length | The real sidebar/open corpora carry turns; wins here matter more than header-only micro-ops. |
 | **Search** (`conversation.search`) | query P50 and complete-corpus visibility time ≤ sidecar-SQLite | Report indexing stabilization separately; a fast query after minutes of unmeasured preparation is not a search win. |
 | **Mixed 80/10/10** | throughput ≥ sidecar-SQLite | The realistic blended load. |
-| **Footprint** (post-run data size, process write bytes) | data size ≤ **1×** sidecar for the same logical corpus | Smaller is better, full stop: every durable byte is FUSE pain, backup time, and cache pressure, bounded against runaway growth (AGENTS.md constraint 3). A purpose-built store has no excuse for a larger footprint than the embedded engine it replaces — parity is the loosest acceptable bound, and every byte above it must carry a named structural cause in this charter. |
-| **Engine floor** (`rawsqlite` baseline) | every comparison run includes the raw-SQLite floor; any workload where tofu-db p50 exceeds 2× the floor names the structural cause in this charter | The client stack is ours and the engine is ours; an unexplained gap to the bare embedded engine is unpaid debt, and it must stay visible in every baseline table instead of hiding behind sidecar comparisons. |
+| **Footprint** (complete authority + projection logical bytes; allocation/write counters reported separately) | total data size ≤ **1×** sidecar for the same logical corpus and lifecycle phase | Smaller is better, full stop: every durable byte is FUSE pain, backup time, and cache pressure, bounded against runaway growth (AGENTS.md constraint 3). A purpose-built store has no excuse for a larger footprint than the embedded engine it replaces — parity is the loosest acceptable bound, and every byte above it must carry a named structural cause in this charter. |
+| **Engine floor** (`rawsqlite` baseline) | every operation comparison includes raw SQLite; P50 > 2× names its structural cause but still fails the numeric gate | The client stack is ours and the engine is ours; an unexplained gap to the bare embedded engine is unpaid debt, and it must stay visible in every baseline table instead of hiding behind sidecar comparisons. |
 | **Maintenance** (checkpoint + reopen) | wall ≤ sidecar-SQLite | Bounded, non-blocking lifecycle. |
 | **Degraded filesystem** (FUSE/network mount) | **strict win** | Verify locking, acknowledged recovery, and latency on the actual mount for both engines; the FUSE label alone proves neither failure nor superiority. |
 | **Distracted hardware** (CPU < 4 cores, memory pressure) | no P99 blow-up vs idle | A personal PC is not a server; the OS and browser compete. |
 | **Horizontal** (writer + N concurrent readers) | reads must not block writer | WAL-readers + single-writer is the harness's real concurrency shape. |
 
+| **Swarm-write tails** | writer and reader P99 ≤ sidecar-SQLite with sufficient equal populations | Fast writer averages cannot hide reader starvation. |
+| **Active-conversation capacity** | complete paired application acceptance below | Storage micro-ops do not prove 1,000 running attempts. |
 A single global "N× faster" number is meaningless and is explicitly rejected:
 it lets a 50× search win hide a 25× write regression. Each dimension must pass
 on its own.
 
+### Executable assessment, not another benchmark
+
+[`storage_performance_charter_v1.json`](../contracts/storage_performance_charter_v1.json) owns the operation-to-dimension rules. `scripts/tofudb_charter_assess.py` reassesses raw receipts without launching an engine or opening a database: `python3 scripts/tofudb_charter_assess.py <operation-report.json> ... <paired-report.json> --json-output <new-assessment.json> --markdown-output <new-assessment.md>`. Exit 0 means every gate passes; 1 retains non-pass evidence; 2 refuses malformed input or conflicting output. Existing outputs are never overwritten with different content.
+
+For new operation receipts, explicitly add `--capture-provenance --native-client embedded` to `tofudb_perf_compare.py`; collect all three engines on both actual volumes, at least two independent same-work repeats per volume with reversed engine order. Capture occurs outside timed work. It reuses native build-info/fingerprints and the certification source inventory, plus measured benchmark, delivery, executor and resource-policy owners. Binary/library bytes, complete start/end source inventories, observed strict/FULL/profile-off policy, host/affinity, work and actual volume devices must agree; requested settings or a supplied `passed` boolean are not proof.
+
+The five outcomes are **PASS**, **FAIL**, **INSUFFICIENT**, **INCOMPARABLE**, and **HISTORICAL**. Each dimension retains observations and reasons; no averaging erases an adverse repeat. Stable old evidence remains historical, not a current win or current regression. Missing tails, coverage or provenance remain explicit. History-length scaling, actual-volume recovery, idle-versus-pressure P99 and writer-versus-reader scaling still need joined measurements; their unautomated clauses remain insufficient even when numeric subgates pass. Raw SQLite has narrower semantics: the 2× diagnostic excludes incompatible lifecycle boundaries, not lifecycle acceptance. This assessment is neither power-loss certification nor a deployment decision.
+
+Verification: `tests/tofudb/test_tofudb_charter_assess.py`, `test_tofudb_footprint_accounting.py` and the conversation provenance/acceptance tests. Correctness tests use synthetic metrics, never wall-clock performance thresholds. A green test suite proves assessment behavior, not that measured product gates passed.
+
 ## What we deliberately do NOT benchmark
 
-* **PostgreSQL as a gate.** AGENTS.md constraint 3 ("performance scales to
-  the user's machine") means zero-configuration Tofu cannot require a
-  server-class dependency, so
-  PostgreSQL is not a *win gate* here. The harness does ship a guarded
-  PostgreSQL engine (`--postgres-dsn` + `--postgres-reset`, hard-refused
-  against any database not named `tofu_perf*`/`tofu_bench*`) as an informal
-  reference against a disposable, default-configuration instance. Those
-  numbers answer "how does the native path compare to a same-host server
-  database on this workload"; they say nothing about tuned or production
-  PostgreSQL and must not be quoted as such.
-* **Raw micro-ops** (single-row insert loops, pure KV). They reward engine
-  constants the harness never exercises. We only measure through the real
-  operation catalog. Cross-engine micro-benchmarks (db_bench-style vs
-  LMDB/RocksDB numbers) are admissible evidence only when run through one
-  shared harness on one machine with symmetric durability settings.
-* **Averaged or dimension-dropping win claims.** "Beats SQLite" means beats
-  it on **every gated dimension** in this charter — sidecar *and* raw floor —
-  in the same run on the same hardware. A claim that survives only by
-  dropping a dimension, an engine, or a volume class is a rejected claim.
+* **PostgreSQL as a gate.** Zero-configuration Tofu cannot require a server dependency. `--postgres-dsn`/`--postgres-reset` permit only explicitly disposable `tofu_perf*`/`tofu_bench*` databases as informal same-host, default-configuration references, never tuned/production PostgreSQL claims.
+* **Raw micro-ops** (single-row insert loops, pure KV). We measure the real operation catalog. Cross-engine microbenchmarks are admissible only through one shared same-host harness with symmetric durability.
+* **Averaged or dimension-dropping win claims.** Every gated dimension, both volume classes and sidecar/raw-floor baselines must hold; dropping one cannot establish victory.
 
 ## Measurement discipline
 
-* **Freshness gate.** Default binary discovery verifies the embedded
-  `--build-info` source digest against the retained checkout before measurement;
-  an old executable fails closed. `--binary` permits an intentional historical
-  comparison, whose report records `tofudb_build_identity`,
-  `checkout_source_sha256`, and `source_matches_checkout`. Binary SHA pins keep
-  a run reproducible; neither that SHA nor file mtime proves source freshness.
-  Build from a recorded current-source snapshot, retain its digest and the
-  executable SHA, then keep that executable immutable throughout the run.
-  Embedded runs also retain the loaded library hash and self-reported source
-  digest; historical ABIs without that export report identity unavailable.
-  `cargo build --release` from `packages/tofu-db/` uses the package's pinned C
-  compiler. A source edit during a run does not turn its old binary into latest.
+* **Attribution controls.** Calibrate sensitive workloads with balanced repeats   of identical executable/library artifacts before interpreting small deltas.   Preserve every window and failed gate. Source digests, build context, daemon   readiness and client initialization are separate witnesses; follow   [recovery qualification](TOFUDB_RECOVERY_ATTRIBUTION.md#build-and-startup-boundaries). * **Freshness gate.** Default binary discovery verifies the embedded   `--build-info` source digest against the retained checkout before measurement;   an old executable fails closed. `--binary` permits an intentional historical   comparison, whose report records `tofudb_build_identity`,   `checkout_source_sha256`, and `source_matches_checkout`. Binary SHA pins keep   a run reproducible; neither that SHA nor file mtime proves source freshness.   Build from a recorded current-source snapshot, retain its digest and the   executable SHA, then keep that executable immutable throughout the run.   Embedded runs also retain the loaded library hash and self-reported source   digest; historical ABIs without that export report identity unavailable.   `cargo build --release` from `packages/tofu-db/` uses the package's pinned C   compiler. A source edit during a run does not turn its old binary into latest.
 * **Complete lifecycle.** Report shutdown, reopen, and first read separately.
   `maintenance_reopen`'s top-level latency is reopen only. The native harness
   closes its application pool before parent EOF and counts that cleanup in
@@ -835,69 +766,10 @@ reassess every dimension against a current build:
   harness measures post-run size with no GC round. Closing it is the P4
   pacer/GC-rebalance work (merge-before-measure plus retention trim), not
   new write-path structure.
-* **Engine floor ≤2× (OPEN, 2.7–11× by workload; one workload now BEATS
-  the floor).** The embedded in-process transport landed 2026-09-20
-  (`packages/tofu-db/src/embed.rs` + C ABI + `tofu_db/embedded.py`;
-  `--native-client embedded` in the harness): every request executes
-  through the same extracted `server::dispatch_one_request` as the framed
-  daemon, minus the socket. Measured (`data/benchmarks/embedded-2026-09-20.json`,
-  small, /tmp, overlay on): record.get 44 µs (2.7× floor), record.put
-  120 µs (2.7×), conversation_open 58 µs (2.9×), and **concurrent_read p50
-  0.157 ms BEATS the raw floor's 0.357 ms** (read-replica lane + Rust
-  execution under concurrency). Remaining gaps: search 11× (projection
-  store vs FTS5-in-process), hydration 21× (hydration layout), create 9×
-  (receipt/outbox envelope per op). The transport is harness-verified
-  (differential 178/178, application contract 36/36, lib suite clean);
-  production wiring (supervisor integration + certification) is the
-  follow-up — the floor gate stays OPEN until the production path ships
-  it, never by weakening the durability or ownership semantics the
-  envelope buys.
-* **Swarm write P99 (OPEN, 26–41 vs 14–18 ms; was 76–82).** Root-fixed
-  2026-09-20 in three parts: (1) the write fence that quiesced every
-  commit from rotation-prepare to install-end is gone — the covered
-  staged set is now a separate pending generation (`rotation_draining`)
-  drained independently by the packer, so window commits flow through the
-  encode and only the hard WAL ceiling binds, exactly as the install's
-  final-segment design always anticipated; (2) a deferred install now
-  parks the fully encoded (snapshot, segments) pair instead of
-  re-encoding the covered prefix on every publication round trip, and the
-  driver starts on a prepare signal instead of a 10 ms poll; (3) two
-  invariant violations the load exposed are pinned by regression tests:
-  window-era history staging is frozen for the whole parked period (the
-  manifest hash chain can never orphan), and fresh window restaging of a
-  covered block content-address-dedups across pending generations (the
-  pack batch can never fail its duplicate-ID check). Three consecutive
-  small-scale suite runs: writer p50 2.10–2.45 ms vs sidecar 4.66–5.16
-  (**2.2× win**), aggregate 763–952 vs 544–593 op/s (**1.4–1.7× win**),
-  p99 26.0/40.9/37.6 ms — the residual is the bounded install window
-  (encode+drain+swap) of a full 60 MiB rotation landing mid-burst;
-  rawsqlite's own single-writer tail spans 9–34 ms on the same phase.
-  p99_sample_count_sufficient is false on this phase, so the number is
-  indicative, not gated.
+* **Engine floor ≤2× (OPEN, 2.7–11× by workload; one workload now BEATS the floor).** The embedded in-process transport landed 2026-09-20 (`packages/tofu-db/src/embed.rs` + C ABI + `tofu_db/embedded.py`; `--native-client embedded` in the harness): every request executes through the same extracted `server::dispatch_one_request` as the framed daemon, minus the socket. Measured (`data/benchmarks/embedded-2026-09-20.json`, small, /tmp, overlay on): record.get 44 µs (2.7× floor), record.put 120 µs (2.7×), conversation_open 58 µs (2.9×), and **concurrent_read p50 0.157 ms BEATS the raw floor's 0.357 ms** (read-replica lane + Rust execution under concurrency). Remaining gaps: search 11× (projection store vs FTS5-in-process), hydration 21× (hydration layout), create 9× (receipt/outbox envelope per op). The transport is harness-verified (differential 178/178, application contract 36/36, lib suite clean); production wiring (supervisor integration + certification) is the follow-up — the floor gate stays OPEN until the production path ships it, never by weakening the durability or ownership semantics the envelope buys.
+* **Swarm write P99 (OPEN, 26–41 vs 14–18 ms; was 76–82).** Root-fixed 2026-09-20 in three parts: (1) the write fence that quiesced every commit from rotation-prepare to install-end is gone — the covered staged set is now a separate pending generation (`rotation_draining`) drained independently by the packer, so window commits flow through the encode and only the hard WAL ceiling binds, exactly as the install's final-segment design always anticipated; (2) a deferred install now parks the fully encoded (snapshot, segments) pair instead of re-encoding the covered prefix on every publication round trip, and the driver starts on a prepare signal instead of a 10 ms poll; (3) two invariant violations the load exposed are pinned by regression tests: window-era history staging is frozen for the whole parked period (the manifest hash chain can never orphan), and fresh window restaging of a covered block content-address-dedups across pending generations (the pack batch can never fail its duplicate-ID check). Three consecutive small-scale suite runs: writer p50 2.10–2.45 ms vs sidecar 4.66–5.16 (**2.2× win**), aggregate 763–952 vs 544–593 op/s (**1.4–1.7× win**), p99 26.0/40.9/37.6 ms — the residual is the bounded install window (encode+drain+swap) of a full 60 MiB rotation landing mid-burst; rawsqlite's own single-writer tail spans 9–34 ms on the same phase. p99_sample_count_sufficient is false on this phase, so the number is indicative, not gated.
 
-  Update 2026-09-22 (install-hold + rotation-drain storms): the small-scale
-  FUSE phase regressed to p99 415–543 ms (p50 ~1.7 ms) with every writer
-  stalled at the same wall-clock instant. system.metrics correlation
-  pinned one rotation checkpoint crossing the stall window (~460 ms
-  continuous authority contention) and, in a worse run, the packer
-  publishing 8 segments/33 MiB mid-rotation (~1.5 s): the install's
-  fsync chain runs under the authority hold, and the quiet-gated packer
-  lets ~32 MiB of staged blocks accumulate under a hot foreground, so
-  the install's drain precondition inherited that whole backlog as one
-  fenced storm. Fixes: the driver pre-creates the next-generation WAL
-  off the mutex, install blocks write through the loose path (no dedupe
-  probe read), and — the decisive change — the commit path requests the
-  background drain at half the WAL window so the backlog is retired
-  before rotation (a window pre-encode variant was measured and
-  REVERTED: it lengthened the fenced cycle). Three reruns: swarm p99
-  21.9–35.6 ms, zero >100 ms stalls, aggregate 1,126–1,195 op/s (was
-  228–314). Full-suite head-to-head
-  (`data/benchmarks/baseline-2026-09-22-optimized.json`): 15/16
-  workloads faster (1.41×–16×); record_put p99 0.54 vs 0.78 ms and
-   turn_append p99 1.34 vs 3.00 ms now win; swarm p99 21.3 vs 15.2 ms
-   (was 489 vs 14.75); footprint 1.76× (was 2.04×). Remaining open gaps:
-   turn_append_large (p99 25.3 vs 13.9 ms), footprint ≤1×, engine floor,
-   and a decisive (not weather-parity) swarm p99 close.
+  Update 2026-09-22 (install-hold + rotation-drain storms): the small-scale FUSE phase regressed to p99 415–543 ms (p50 ~1.7 ms) with every writer stalled at the same wall-clock instant. system.metrics correlation pinned one rotation checkpoint crossing the stall window (~460 ms continuous authority contention) and, in a worse run, the packer publishing 8 segments/33 MiB mid-rotation (~1.5 s): the install's fsync chain runs under the authority hold, and the quiet-gated packer lets ~32 MiB of staged blocks accumulate under a hot foreground, so the install's drain precondition inherited that whole backlog as one fenced storm. Fixes: the driver pre-creates the next-generation WAL off the mutex, install blocks write through the loose path (no dedupe probe read), and — the decisive change — the commit path requests the background drain at half the WAL window so the backlog is retired before rotation (a window pre-encode variant was measured and REVERTED: it lengthened the fenced cycle). Three reruns: swarm p99 21.9–35.6 ms, zero >100 ms stalls, aggregate 1,126–1,195 op/s (was 228–314). Full-suite head-to-head (`data/benchmarks/baseline-2026-09-22-optimized.json`): 15/16 workloads faster (1.41×–16×); record_put p99 0.54 vs 0.78 ms and turn_append p99 1.34 vs 3.00 ms now win; swarm p99 21.3 vs 15.2 ms (was 489 vs 14.75); footprint 1.76× (was 2.04×). Remaining open gaps: turn_append_large (p99 25.3 vs 13.9 ms), footprint ≤1×, engine floor, and a decisive (not weather-parity) swarm p99 close.
 
 ## Measured baseline (2026-09-23, embedded transport, floor decomposition)
 
@@ -1025,32 +897,7 @@ fixed; every future workload must state which production call site it models:
 2. **Sidebar cardinality path (S3).** Post-overlay namespace consolidation:
    one recency-directory document per owner instead of per-append updated-
    index rekeys (no tombstone history, no read-all+sort).
-3. **`turn_append_large` (0.85× → 1.3× repetitive, 2026-09-19).**
-   The carried-block spill path is NOT the cost (`put_deferred` 6.6 µs,
-   `put_stage` 0.6 µs); the deficit is inline-JSON payload processing,
-   split by stage: admission (outer parse + deep clone + canonical
-   re-encode of the nested projection/settlement documents) and
-   execution (projection parse, search chunking, document store) in
-   `turn.rs`. The admission half is fixed: `compile_turn` now splits
-   `projection`/`settlement` off as `RawValue` slices before the typed
-   parse (   `semantic_executor.rs`), normalizes top-level keys without
-   unescaping/cloning/re-escaping megabyte-class strings, and preserves
-   the producer's exact bytes (semantic-identical to the legacy
-   normalization, proven by tests in `semantic_executor_tests.rs`).
-   The receipt canonical bytes/digest/outbox are computed over the
-   intact raw map (`canonical_request_raw`), byte-identical to the typed
-   path for the compact wire producers — receipt replay/conflict fencing
-   is unchanged (differential 178/178 both flag states).
-   Measured p50 with the receipt-correct build: repetitive 3.20 →
-   **3.07 ms (beats the sidecar's 4.24 ms)**, escaped ≈13 ms (par; the
-   run-to-run spread on this shared host is ±10%, and the admission
-   share was ~0.3–0.4 ms of the total).
-   Remaining cost is execution-side (escaped pattern: ir_steps ≈5 ms)
-   plus wire escape inflation (up to 1.5 MB for adversarial payloads) —
-   the structural fix is routing oversized payload fields through the
-   owner-bound document/blob codec instead of the inline IR literal,
-   assigned to the `turn.rs` codec owner (the file is under active
-   concurrent work as of this writing).
+3. **`turn_append_large` (0.85× → 1.3× repetitive, 2026-09-19).** The carried-block spill path is NOT the cost (`put_deferred` 6.6 µs, `put_stage` 0.6 µs); the deficit is inline-JSON payload processing, split by stage: admission (outer parse + deep clone + canonical re-encode of the nested projection/settlement documents) and execution (projection parse, search chunking, document store) in `turn.rs`. The admission half is fixed: `compile_turn` now splits `projection`/`settlement` off as `RawValue` slices before the typed parse (   `semantic_executor.rs`), normalizes top-level keys without unescaping/cloning/re-escaping megabyte-class strings, and preserves the producer's exact bytes (semantic-identical to the legacy normalization, proven by tests in `semantic_executor_tests.rs`). The receipt canonical bytes/digest/outbox are computed over the intact raw map (`canonical_request_raw`), byte-identical to the typed path for the compact wire producers — receipt replay/conflict fencing is unchanged (differential 178/178 both flag states). Measured p50 with the receipt-correct build: repetitive 3.20 → **3.07 ms (beats the sidecar's 4.24 ms)**, escaped ≈13 ms (par; the run-to-run spread on this shared host is ±10%, and the admission share was ~0.3–0.4 ms of the total). Remaining cost is execution-side (escaped pattern: ir_steps ≈5 ms) plus wire escape inflation (up to 1.5 MB for adversarial payloads) — the structural fix is routing oversized payload fields through the owner-bound document/blob codec instead of the inline IR literal, assigned to the `turn.rs` codec owner (the file is under active concurrent work as of this writing).
 4. **Write p99 (7.8ms vs 1.8ms).** The foreground deficit-pacing tax
    (`checkpoint_if` ≈79µs/commit, `drain_step` ≈2.2ms on threshold
    crossings); subsumed by target 1.
@@ -1112,61 +959,13 @@ not a correctness one.
 
 ## Reconciling the raw baseline
 
-A prior out-of-band micro-benchmark (single-row `INSERT` via Python `sqlite3`
-vs `tofu-db certify-resource-gate`) showed SQLite ~25× faster per commit
-because it bypassed the client stack and exercised a different durability
-policy. That comparison is **retired as evidence**: the in-harness `rawsqlite`
-engine now measures the bare-SQLite floor on the *same* logical operation
-mix, the *same* machine, and *symmetric* durability (WAL +
-`synchronous=FULL`), in every comparison run. The two baselines answer two
-different questions and both are first-class: the sidecar baseline prices
-the production path personal mode ships today; the raw baseline prices the
-embedded engine itself and bounds the client-stack tax both production
-stacks pay. A "why does Tofu-DB exist" review must quote both, plus the
-dimensions raw SQLite cannot price: FUSE/network-mount correctness
-(POSIX-lock/mmap soundness), crash-recovery wall time, and the cold-read
-ratchet (`packages/tofu-db/src/cold_read_tests.rs`).
+A prior out-of-band micro-benchmark (single-row `INSERT` via Python `sqlite3` vs `tofu-db certify-resource-gate`) showed SQLite ~25× faster per commit because it bypassed the client stack and exercised a different durability policy. That comparison is **retired as evidence**: the in-harness `rawsqlite` engine now measures the bare-SQLite floor on the *same* logical operation mix, the *same* machine, and *symmetric* durability (WAL + `synchronous=FULL`), in every comparison run. The two baselines answer two different questions and both are first-class: the sidecar baseline prices the production path personal mode ships today; the raw baseline prices the embedded engine itself and bounds the client-stack tax both production stacks pay. A "why does Tofu-DB exist" review must quote both, plus the dimensions raw SQLite cannot price: FUSE/network-mount correctness (POSIX-lock/mmap soundness), crash-recovery wall time, and the cold-read ratchet (`packages/tofu-db/src/cold_read_tests.rs`).
 
 ## Write-path tail latency, current state (2026-09-21, post-P1 series)
 
-Problem. The 2026-09-10 baseline left `turn_append` creation/append p99
-trailing SQLite's, and the certification contract listed "performance
-superiority at P99" as uncovered. Decision. Close the tail with runtime
-feedback instead of operator knobs: dynamic group-commit window (the
-coalescing window closes immediately once four requests queue), adaptive
-pack pacing with a self-calibrating EWMA baseline and a 2 ms absolute pain
-floor (the 10 ms floor never fired on fast mounts), pack quiet-gating
-(defer ordinary batches while the foreground is hot; 32 MiB pressure or
-drain overrides), pain-bounded pack batch sizes, 30 s boot grace and
-crash-safe bounded stop joins for both background drivers, and GC mark
-traversals that check the stop flag every 4,096 visits. Alternatives
-considered: barrier pipelining (WAL append of group N+1 overlapping the
-fsync of group N) — defeated for now: measurement showed the tail is
-coalescing-window/queue dominated at this scale, not barrier-serialization
-dominated, and pipelining is a much larger correctness surface; fixed
-operator pacing rates — defeated: they cap throughput below what each
-machine can deliver and go stale per mount.
+Problem. The 2026-09-10 baseline left `turn_append` creation/append p99 trailing SQLite's, and the certification contract listed "performance superiority at P99" as uncovered. Decision. Close the tail with runtime feedback instead of operator knobs: dynamic group-commit window (the coalescing window closes immediately once four requests queue), adaptive pack pacing with a self-calibrating EWMA baseline and a 2 ms absolute pain floor (the 10 ms floor never fired on fast mounts), pack quiet-gating (defer ordinary batches while the foreground is hot; 32 MiB pressure or drain overrides), pain-bounded pack batch sizes, 30 s boot grace and crash-safe bounded stop joins for both background drivers, and GC mark traversals that check the stop flag every 4,096 visits. Alternatives considered: barrier pipelining (WAL append of group N+1 overlapping the fsync of group N) — defeated for now: measurement showed the tail is coalescing-window/queue dominated at this scale, not barrier-serialization dominated, and pipelining is a much larger correctness surface; fixed operator pacing rates — defeated: they cap throughput below what each machine can deliver and go stale per mount.
 
-Measured (`tofudb_perf_compare.py`, small scale, FUSE, application client,
-strict durability): record_put_burst 1.52× faster mean (2473 vs 1627 op/s;
-p99 2.42 vs 2.09 ms), conversation_create_burst 1.11× faster (p99 1.02 vs
-1.66 ms), turn_append_burst 1.01× faster (p99 2.80 vs 3.18 ms);
-maintenance_reopen 119.6× faster; concurrent_read 2.73× faster. The
-pre-P1 state on this checkout measured record_put 0.90×, conversation_create
-0.48×, turn_append 0.44× slower. Certification-grade repeats (medium
-scale, 1,000 samples per workload — the certification contract's own
-tail-sample floor): mean superiority is stable (record_put 1.38–1.88×,
-turn_append 1.01–1.05×, conversation_create 0.87–1.84×), p99 is
-competitive with mount-weather variance (7–8 of 12 independent samples
-favour Tofu-DB; the recurring ~15 ms outliers were traced to concurrent
-background fsync storms and driven the global quiet-gating of every
-background write stream — packer, pack adoption, search projection,
-online GC, online backup — behind one shared mount-aware hotness gate in
-`fsync_stats`). Remaining known gaps, pre-existing and out of this
-slice's scope: read-heavy setup-dominated workloads
-(sidebar_list_page 0.31–0.34×, transcript_bulk_hydration 0.34×) and
-turn_append_large 0.11× (identical at the pre-P1 baseline; large-value
-write path).
+Measured (`tofudb_perf_compare.py`, small scale, FUSE, application client, strict durability): record_put_burst 1.52× faster mean (2473 vs 1627 op/s; p99 2.42 vs 2.09 ms), conversation_create_burst 1.11× faster (p99 1.02 vs 1.66 ms), turn_append_burst 1.01× faster (p99 2.80 vs 3.18 ms); maintenance_reopen 119.6× faster; concurrent_read 2.73× faster. The pre-P1 state on this checkout measured record_put 0.90×, conversation_create 0.48×, turn_append 0.44× slower. Certification-grade repeats (medium scale, 1,000 samples per workload — the certification contract's own tail-sample floor): mean superiority is stable (record_put 1.38–1.88×, turn_append 1.01–1.05×, conversation_create 0.87–1.84×), p99 is competitive with mount-weather variance (7–8 of 12 independent samples favour Tofu-DB; the recurring ~15 ms outliers were traced to concurrent background fsync storms and driven the global quiet-gating of every background write stream — packer, pack adoption, search projection, online GC, online backup — behind one shared mount-aware hotness gate in `fsync_stats`). Remaining known gaps, pre-existing and out of this slice's scope: read-heavy setup-dominated workloads (sidebar_list_page 0.31–0.34×, transcript_bulk_hydration 0.34×) and turn_append_large 0.11× (identical at the pre-P1 baseline; large-value write path).
 
 **Soak wedge root cause (2026-09-21).** A 120-minute medium-scale soak
 wedged the authority permanently at ~6.5 minutes: the 2,048-entry overlay
@@ -1180,55 +979,13 @@ RSS inside the personal-computer budget.
 
 ## Read-path analysis (2026-09-22, measured)
 
-Problem. Read-heavy workloads trail the SQLite sidecar: sidebar_list_page
-0.31–0.34×, transcript_bulk_hydration 0.34×, turn_append_large 0.11×.
-Decision on record. turn_append_large moved to 0.16× by eliminating the
-settled-turn semantic chain's double full-projection parse/escape (the
-compiler's canonical RawValue escape is spliced verbatim; the compiler
-also extracts `projection.timestamp` into the IR step so the hot path
-never re-parses). The gate also now covers read/query activity, not just
-write commits, in the shared quiet-gate hotness signal. What remains is
-structural and must not be micro-fixed: per-document hydration cost is
-diffuse (measured ~190 µs/turn doc, content-size independent, spread over
-envelope decode, typed document parse, public-turn rebuild, legacy-message
-construction, key encodings and allocation churn — no single hotspot),
-because bulk hydration materializes ~500 turn documents per 50-conversation
-page while the sidecar reads ~50 per-conversation archive columns. The
-durable fix is an archive-backed hydration path: maintain a compact
-per-conversation transcript projection (like the sidecar's `messages_json`
-archive) updated incrementally at append time, so bulk reads hit ~50
-compact records; full-document materialization stays the certified
-fallback. Alternatives considered: per-doc zero-copy splices (bounded
-win — the cost is per-doc fixed overhead, not content scans), read-side
-quiet-gating alone (necessary but not sufficient), and batch tree probes
-(scan already amortizes lane indexes).
+Problem. Read-heavy workloads trail the SQLite sidecar: sidebar_list_page 0.31–0.34×, transcript_bulk_hydration 0.34×, turn_append_large 0.11×. Decision on record. turn_append_large moved to 0.16× by eliminating the settled-turn semantic chain's double full-projection parse/escape (the compiler's canonical RawValue escape is spliced verbatim; the compiler also extracts `projection.timestamp` into the IR step so the hot path never re-parses). The gate also now covers read/query activity, not just write commits, in the shared quiet-gate hotness signal. What remains is structural and must not be micro-fixed: per-document hydration cost is diffuse (measured ~190 µs/turn doc, content-size independent, spread over envelope decode, typed document parse, public-turn rebuild, legacy-message construction, key encodings and allocation churn — no single hotspot), because bulk hydration materializes ~500 turn documents per 50-conversation page while the sidecar reads ~50 per-conversation archive columns. The durable fix is an archive-backed hydration path: maintain a compact per-conversation transcript projection (like the sidecar's `messages_json` archive) updated incrementally at append time, so bulk reads hit ~50 compact records; full-document materialization stays the certified fallback. Alternatives considered: per-doc zero-copy splices (bounded win — the cost is per-doc fixed overhead, not content scans), read-side quiet-gating alone (necessary but not sufficient), and batch tree probes (scan already amortizes lane indexes).
 
 ## Transcript archive (2026-09-22, shipped)
 
-Problem. Bulk hydration (`conversation.list/get` with full transcripts)
-materialized every turn document at ~190 µs each, so a 50-conversation
-page cost ~95 ms. Decision. A live per-conversation transcript archive
-(`transcriptArchives` in the IR contract): the `tofu-db-archive-seal`
-daemon worker seals pending legacy-message windows into immutable,
-digest-witnessed page documents — materialization on a pinned read
-replica (never the authority mutex), publication in a short `try_lock`
-hold with a fresh lane-count fence. Reads fuse sealed pages with the
-exact bounded lane read of the unsealed tail; every non-append lane
-mutation tombstones the archive, and any count/shape mismatch falls back
-to the exact per-document read, so an untracked mutation can never serve
-a wrong answer. Measured: a 50-turn conversation's full hydration drops
-37.4 ms → 10.0 ms on FUSE (3.7×), and larger conversations scale with
-page count, not document count (frozen-history audit showed ~6.7
-messages/page). The harness's `transcript_bulk_hydration` phase (seed
-then measure instantly) measures the cold burst path, which stays
-per-document by design; steady-state hydration (conversations sealed by
-the background driver inside ~1 s) is what the archive accelerates.
-Alternatives considered: live-frozen pages (immutability vs
-projection-update/reparent/tombstone — defeated), append-time tail
-rewrites (WAL amplification — defeated), per-document zero-copy splices
-(the cost is per-doc fixed overhead, not content scans).
+Problem. Bulk hydration (`conversation.list/get` with full transcripts) materialized every turn document at ~190 µs each, so a 50-conversation page cost ~95 ms. Decision. A live per-conversation transcript archive (`transcriptArchives` in the IR contract): the `tofu-db-archive-seal` daemon worker seals pending legacy-message windows into immutable, digest-witnessed page documents — materialization on a pinned read replica (never the authority mutex), publication in a short `try_lock` hold with a fresh lane-count fence. Reads fuse sealed pages with the exact bounded lane read of the unsealed tail; every non-append lane mutation tombstones the archive, and any count/shape mismatch falls back to the exact per-document read, so an untracked mutation can never serve a wrong answer. Measured: a 50-turn conversation's full hydration drops 37.4 ms → 10.0 ms on FUSE (3.7×), and larger conversations scale with page count, not document count (frozen-history audit showed ~6.7 messages/page). The harness's `transcript_bulk_hydration` phase (seed then measure instantly) measures the cold burst path, which stays per-document by design; steady-state hydration (conversations sealed by the background driver inside ~1 s) is what the archive accelerates. Alternatives considered: live-frozen pages (immutability vs projection-update/reparent/tombstone — defeated), append-time tail rewrites (WAL amplification — defeated), per-document zero-copy splices (the cost is per-doc fixed overhead, not content scans).
 
-Rejected follow-up: [rebase attribution](evidence/tofudb_rebase_attribution_20261006.json) measured 400.5→277.8 µs rebase and 672.0→558.9 µs commit under an observer, but default-off embedded settlement P99 mean regressed 18.3%; immutable-root point-validation reuse remains unintegrated.
+Rejected follow-up: rebase attribution measured 400.5→277.8 µs rebase and 672.0→558.9 µs commit under an observer, but default-off embedded settlement P99 mean regressed 18.3%; immutable-root point-validation reuse remains unintegrated.
 ## Snapshot ownership without capacity admission
 
 Problem: fixed total/reader pin quotas refused work or sent it through a second
@@ -1240,33 +997,15 @@ capacity claims, release notifications and capacity FIFO are removed. Exact byte
 accounting, owner checks, OCC and durability fences remain. Request deadlines,
 connection close and authority/registry poison retain their error boundaries.
 
-Alternatives: larger or launch-derived slot counts retain refusals; capturing
-roots outside GC exclusion risks premature deletion; permanently pinning the
-published view retains obsolete roots beyond request lifetimes. Verification:
-96 simultaneous distinct root owners rendezvous before release; writer and
-root repinning remain eligible. Published-query and dispatch tests retain 512
-readers while new work completes, including 32 queries with authority/FIFO
-writer guards held. Escaped leases and overflow tests verify exact teardown and
-atomic registration. Existing recovery, GC and fault matrices remain required.
-Controlled registration measurement: 96 concurrent synthetic root owners plus
-one root and writer reach the ownership barrier in 4.0 ms on this host. No
-root is released to admit the writer; teardown removes every registration.
-This measures root metadata/thread startup, not page I/O, peak RSS or durable
-throughput. A separate 96-version real-page test retains every historical value
-and GC root across subsequent writes, then releases all root registrations.
-Historical [reader admission evidence](evidence/tofudb_reader_admission_20261006.json)
-measures the retired queue; its latency values do not certify this change or
-universal SQLite parity.
+Alternatives: larger or launch-derived slot counts retain refusals; capturing roots outside GC exclusion risks premature deletion; permanently pinning the published view retains obsolete roots beyond request lifetimes. Verification: 96 simultaneous distinct root owners rendezvous before release; writer and root repinning remain eligible. Published-query and dispatch tests retain 512 readers while new work completes, including 32 queries with authority/FIFO writer guards held. Escaped leases and overflow tests verify exact teardown and atomic registration. Existing recovery, GC and fault matrices remain required. Controlled registration measurement: 96 concurrent synthetic root owners plus one root and writer reach the ownership barrier in 4.0 ms on this host. No root is released to admit the writer; teardown removes every registration. This measures root metadata/thread startup, not page I/O, peak RSS or durable throughput. A separate 96-version real-page test retains every historical value and GC root across subsequent writes, then releases all root registrations. Historical `tofudb_reader_admission_20261006.json` measures the retired queue; its latency values do not certify this change or universal SQLite parity.
 
 ## Active conversation acceptance
 
-Problem. Storage-operation microbenchmarks do not certify interactive capacity.
-The panel covers at most eight writers, `tofudb_perf_compare.py` at most eight
-swarm writers, and `tofudb_bench.py` up to 64 ingestion writers. Settled Turn
-appends and generic event appends omit the live Attempt/projection/event path.
-A completion/recovery pass alone permits a 47-second stream P99; a throughput
-geometric mean hides losing tails. The old comparison's authority-directory
-option also only relocated TofuDB; SQLite could remain on the system temp volume.
+Problem: plain reports could qualify instrumented timings, foreign delivery implementations, absent source witnesses or equal filesystem labels. Decision: acceptance checks requested and observed client/native/delivery profiling at every captured boundary, including productive start. The existing pipeline manifest binds coordinator/benchmark aliases to the full source inventory; direct/pipeline and barrier/queued modes cannot be pooled. Physical authority `stat().st_dev` witnesses must match on this same-host runner.
+Current admission requires identical complete source inventories before/after and against a freshly captured checkout, including the actual executor/resource owners, plus unchanged declared/pinned executable and loaded-library build identities. The source/artifact receipt is a provenance witness, not a new native identity implementation. Stable old binaries/coordinators retain `frozen_build_comparable` diagnostic value but not `current_source_qualified`; missing, contradictory or changed evidence refuses qualification. Unqualified pairs emit no speedup ratios. Alternatives rejected: trusting a wrapper's optimistic verdict, file mtime, the thin executor re-export or equal FUSE labels. `tofudb_benchmark_feedback_20261014.json` remains historical.
+
+Problem. Storage-operation microbenchmarks do not certify interactive capacity. The panel and `tofudb_perf_compare.py` cover at most eight writers; `tofudb_bench.py` covers up to 64 ingestion writers. Settled Turn appends and generic event appends omit the live Attempt/projection/event path.
+A completion/recovery pass alone permits a 47-second stream P99; a throughput geometric mean hides losing tails. The old comparison's authority-directory option only relocated TofuDB; SQLite could remain on the system temp volume.
 
 Decision. `benchmarks/conversation_compare.py` is the paired application-workload
 acceptance entry; `conversation_concurrency_contract.json` owns its machine-readable
@@ -1279,32 +1018,7 @@ exactly. SQLite and native authorities use the same explicit scratch volume,
 strict durability, and no SQLite fastpath relocation. The raw-SQLite floor stays
 in the separate operation suite because it cannot implement application attempts.
 
-Latency starts at submission for admission, at scheduled provider arrival for
-stream persistence (including backlog behind preceding events), and at terminal
-publication for settlement. RPC service latency remains a separate diagnostic.
-Failed/timed-out calls stay in distributions; missing observations fail acceptance.
-Recovery coverage requires measured running/final restart durations, the full
-requested peak and running readback, an explicit crash mechanism, and successful
-integrity verification. Problem: a requested restart may be skipped after partial
-admission. Decision: require completed phase evidence. Alternative rejected:
-trusting request flags would certify an unexecuted crash/reopen phase.
-Reports also retain `phase_ms`: productive work through settlement, recovery
-readback, executor shutdown, sampler shutdown, verification, final freeze and
-temporary-authority cleanup. `verification_phase_ms` separates native freeze
-from offline integrity traversal, or records SQLite's online integrity check.
-Nested verification timings must not be added again to their parent duration;
-`wall_seconds` remains the complete run. `restart_ms` is separate from productive
-load unless the restart intentionally occurs while attempts are running. The
-resource-observation scope ends after readback, before offline verification and
-cleanup. A fast streaming percentile cannot hide a slow verification/teardown
-phase. Older reports without these fields cannot identify such an outlier's
-cause; retain the observation without inventing an attribution.
-Initial budgets: admission P99 ≤ 5 s, scheduled stream P99 ≤ 1 s, settlement P99
-≤ 5 s; these are requirements, not claims that the engine currently meets them.
-Correctness, coverage, absolute latency and per-metric SQLite parity are separate
-verdicts. No average score offsets a failure. Readiness failures retain startup/productive phase and bounded component details. The CLI saves each failed leg and
-returns nonzero for incomplete/slow evidence. Unit CI tests verdict behavior,
-not machine timing. Standalone embedded SIGKILL: `python3 benchmarks/embedded_process_recovery.py --binary /path/to/tofu-db --directory /scratch --output /tmp/embedded-recovery.json` verifies running/final state; it does not upgrade in-process coverage or certify latency. Success cleans temporary state; `--retain-authority` preserves it. Run operator acceptance:
+Latency starts at submission for admission, at scheduled provider arrival for stream persistence (including backlog behind preceding events), and at terminal publication for settlement. RPC service latency remains a separate diagnostic. Failed/timed-out calls stay in distributions; missing observations fail acceptance. Recovery coverage requires measured running/final restart durations, the full requested peak and running readback, an explicit crash mechanism, and successful integrity verification. Problem: a requested restart may be skipped after partial admission. Decision: require completed phase evidence. Alternative rejected: trusting request flags would certify an unexecuted crash/reopen phase. Reports also retain `phase_ms`: productive work through settlement, recovery readback, executor shutdown, sampler shutdown, verification, final freeze and temporary-authority cleanup. `verification_phase_ms` separates native freeze from offline integrity traversal, or records SQLite's online integrity check. Nested verification timings must not be added again to their parent duration; `wall_seconds` remains the complete run. `restart_ms` is separate from productive load unless the restart intentionally occurs while attempts are running. The resource-observation scope ends after readback, before offline verification and cleanup. A fast streaming percentile cannot hide a slow verification/teardown phase. Older reports without these fields cannot identify such an outlier's cause; retain the observation without inventing an attribution. Initial budgets: admission P99 ≤ 5 s, scheduled stream P99 ≤ 1 s, settlement P99 ≤ 5 s; these are requirements, not claims that the engine currently meets them. Correctness, coverage, absolute latency and per-metric SQLite parity are separate verdicts. No average score offsets a failure. Readiness failures retain startup/productive phase and bounded component details. The CLI saves each failed leg and returns nonzero for incomplete/slow evidence. Unit CI tests verdict behavior, not machine timing. Standalone embedded SIGKILL: `python3 benchmarks/embedded_process_recovery.py --binary /path/to/tofu-db --directory /scratch --output /tmp/embedded-recovery.json` verifies running/final state; it does not upgrade in-process coverage or certify latency. Success cleans temporary state; `--retain-authority` preserves it. Run operator acceptance:
 
 ```bash
 python3 benchmarks/conversation_compare.py --binary /path/to/tofu-db \
@@ -1322,7 +1036,7 @@ samples, comparing different filesystems, or treating correctness as speed.
 ## Retained performance experiments
 
 The user-requested [experiment decisions](TOFUDB_PERFORMANCE_EXPERIMENTS.md)
-and [measured evidence](evidence/tofudb_performance_20260930.json) retain rejected
+and `tofudb_performance_20260930.json` retain rejected
 WAL suffix copying, permanent snapshots and fair query admission, including
 regressions, source identities, attribution limits and retry conditions.
 The runtime retains single FIFO admission; no publication snapshot or query
@@ -1333,7 +1047,7 @@ include embedded queue coverage and application latency, not dispatch alone.
 Indexed history now supplies durable carried payloads without requiring a second
 ordinary-payload copy before WAL retirement. Pruning relocates bytes outside the
 authority mutex and preserves the entity replay cursor. The
-[history payload evidence](evidence/tofudb_history_payloads_20260930.json) keeps
+`tofudb_history_payloads_20260930.json` keeps
 rejected locking pruning, empty-WAL recovery and mixed-shard GC assumptions,
 versioned candidate comparisons, default-off profiling controls and process
 SIGKILL readback. Root-path improvement does not constitute capacity acceptance
@@ -1341,51 +1055,12 @@ or SQLite parity: remaining queues, operator verification cost and losing tail
 metrics remain separate verdicts.
 
 
-Recovery attribution adds fixed `history_decode`, `history_lookup`,
-`history_range`, `overlay_replay`, overlay selection/carried-budget/publication,
-and complete checkpoint spans. Embedded shutdown attributes each driver join
-and checkpoint; opt-in `TOFU_DB_FSYNC_STATS` emits fixed phase names/times.
-The benchmark splits client close from embedded abandon or process kill/join.
-Verification reports sequential calling-thread
-phases with elapsed nanoseconds and history decode attempts, source bytes and
-validated transaction counts; early fatal returns retain completed/failed phase
-timings, including verify authority teardown (salvage keeps its authority open).
-Attempts/bytes include failed decodes. Process totals also appear in
-`system.metrics.durability`; optional request work uses the existing bounded
-collector. Totals and inclusive spans overlap and must not be added as disjoint
-latency. These counters retain no identifiers or payloads and perform no I/O.
-[Recovery evidence](evidence/tofudb_replay_costs_20261001.json) distinguishes the
-instrumented diagnostic control from the existing production baseline and
-retains observer controls, correctness and remaining capacity failures.
-Pin diagnostics separate registry acquisition, byte reservation and byte repayment; work counts acquisitions, budget operations and waiter notifications. [Pin evidence](evidence/tofudb_pin_accounting_20261003.json) retains exact quotas, rejected alternatives and default-off results. Reply acquisition/recycle anchors are global caller-edge spans; reuse/create work is attached to worker requests. [Reply evidence](evidence/tofudb_reply_reuse_20261003.json) retains fresh-channel lifetime, three rejected reuse/mailbox designs, observer costs and default-off comparisons.
-`pack_filter_incomplete` counts conservative probes when the Bloom filter
-does not cover the installed catalog; it is an event count, not elapsed time.
-`overlay_prepare_capture`, `overlay_prepare_encode`, and
-`overlay_prepare_publish` distinguish brief authority holds from private tree
-preparation outside authority. `overlay_prepare_stale` is a rejection event,
-not a duration. Private pages account actual transaction memory without an aggregate quota and
-release after each slice; retention and resource peaks must accompany comparisons.
-`overlay_prepare_budget_wait` remains a compatibility counter for retired
-quota deferrals and receives no new increments; it does not classify physical I/O errors. Results and limitations
-live in [merge evidence](evidence/tofudb_overlay_preparation_20261001.json).
-Projection probes `projection_head_materialize`, `projection_head_checkpoint`, `projection_head_patch_load`, and `projection_head_patch_apply` separate reconstruction work; inclusive and child durations overlap.
-Checkpoint/patch bytes count valid materialized JSON; applied patches may precede a later rejected head. Global counters include background consumers; optional request work attributes the caller, with existing bounded retention.
-Ownership and admission rules live in [JSON materialization](TOFUDB_JSON_MATERIALIZATION.md); [measured evidence](evidence/tofudb_projection_reconstruction_20261001.json) retains observer controls and limits. WAL/page attribution lives in [barrier scheduling](TOFUDB_WAL_BARRIER_SCHEDULING.md). Block branch attribution lives in [verified reads](TOFUDB_BLOCK_READ_PATH.md). Rotation ownership and attribution live in [window preparation](TOFUDB_ROTATION_WINDOW.md). The source-pinned 2026-10-05 matrix, named remaining raw-SQLite gaps and structural causes are retained in the [receipt-proof retest](evidence/tofudb_receipt_proof_retry_20261005.json). Fresh [point-ingress evidence](evidence/tofudb_point_ingress_20261005.json) separates application input-classification gains from removing unused benchmark read UUIDs; raw-SQLite, delivery and remaining coverage gaps remain open. Publication lock placement and measured slow-I/O isolation follow [publication latency](TOFUDB_PUBLICATION_LATENCY.md).
+Recovery attribution adds fixed `history_decode`, `history_lookup`, `history_range`, `overlay_replay`, overlay selection/carried-budget/publication, and complete checkpoint spans. Embedded shutdown attributes each driver join and checkpoint; opt-in `TOFU_DB_FSYNC_STATS` emits fixed phase names/times. The benchmark splits client close from embedded abandon or process kill/join. Verification reports sequential calling-thread phases with elapsed nanoseconds and history decode attempts, source bytes and validated transaction counts; early fatal returns retain completed/failed phase timings, including verify authority teardown (salvage keeps its authority open). Attempts/bytes include failed decodes. Process totals also appear in `system.metrics.durability`; optional request work uses the existing bounded collector. Totals and inclusive spans overlap and must not be added as disjoint latency. These counters retain no identifiers or payloads and perform no I/O. `tofudb_replay_costs_20261001.json` distinguishes the instrumented diagnostic control from the existing production baseline and retains observer controls, correctness and remaining capacity failures. Pin diagnostics separate registry acquisition, byte reservation and byte repayment; work counts acquisitions, budget operations and waiter notifications. `tofudb_pin_accounting_20261003.json` retains exact quotas, rejected alternatives and default-off results. Reply acquisition/recycle anchors are global caller-edge spans; reuse/create work is attached to worker requests. `tofudb_reply_reuse_20261003.json` retains fresh-channel lifetime, three rejected reuse/mailbox designs, observer costs and default-off comparisons. `pack_filter_incomplete` counts conservative probes when the Bloom filter does not cover the installed catalog; it is an event count, not elapsed time. `overlay_prepare_capture`, `overlay_prepare_encode`, and `overlay_prepare_publish` distinguish brief authority holds from private tree preparation outside authority. `overlay_prepare_stale` is a rejection event, not a duration. Private pages account actual transaction memory without an aggregate quota and release after each slice; retention and resource peaks must accompany comparisons. `overlay_prepare_budget_wait` remains a compatibility counter for retired quota deferrals and receives no new increments; it does not classify physical I/O errors. Results and limitations live in `tofudb_overlay_preparation_20261001.json`. Projection probes `projection_head_materialize`, `projection_head_checkpoint`, `projection_head_patch_load`, and `projection_head_patch_apply` separate reconstruction work; inclusive and child durations overlap. Checkpoint/patch bytes count valid materialized JSON; applied patches may precede a later rejected head. Global counters include background consumers; optional request work attributes the caller, with existing bounded retention. Ownership and admission rules live in [JSON materialization](TOFUDB_JSON_MATERIALIZATION.md); `tofudb_projection_reconstruction_20261001.json` retains observer controls and limits. WAL/page attribution lives in [barrier scheduling](TOFUDB_WAL_BARRIER_SCHEDULING.md). Block branch attribution lives in [verified reads](TOFUDB_BLOCK_READ_PATH.md). Rotation ownership and attribution live in [window preparation](TOFUDB_ROTATION_WINDOW.md). The source-pinned 2026-10-05 matrix, named remaining raw-SQLite gaps and structural causes are retained in the receipt-proof retest. Fresh `tofudb_point_ingress_20261005.json` separates application input-classification gains from removing unused benchmark read UUIDs; raw-SQLite, delivery and remaining coverage gaps remain open. Publication lock placement and measured slow-I/O isolation follow [publication latency](TOFUDB_PUBLICATION_LATENCY.md).
 
 
 ## Entity transaction byte ownership
 
-Problem: a fixed 160 MiB aggregate quota rejected valid reads and writes and
-deferred private overlay encoding despite available host memory. Decision:
-transaction leases account actual retained bytes without an aggregate admission
-ceiling. Checked arithmetic and poison fences remain authoritative; drop and
-replacement repay ownership exactly. OCC witnesses, source I/O failures and
-per-operation protocol validation retain their existing behavior. Alternatives:
-raising the quota only moves the refusal point; disabling accounting obscures
-retained memory and leaks. Snapshot counts are also ownership observations without admission quotas. Verify concurrent lease accounting above the retired threshold, real
-reads/writes and overlay publication under that observation, plus atomic
-overflow and poisoned-registry tests. Accounting-only large reservations do not
-measure real allocation capacity or certify behavior under OS memory exhaustion.
+Problem: a fixed 160 MiB aggregate quota rejected valid reads and writes and deferred private overlay encoding despite available host memory. Decision: transaction leases account actual retained bytes without an aggregate admission ceiling. Checked arithmetic and poison fences remain authoritative; drop and replacement repay ownership exactly. OCC witnesses, source I/O failures and per-operation protocol validation retain their existing behavior. Alternatives: raising the quota only moves the refusal point; disabling accounting obscures retained memory and leaks. Snapshot counts are also ownership observations without admission quotas. Verify concurrent lease accounting above the retired threshold, real reads/writes and overlay publication under that observation, plus atomic overflow and poisoned-registry tests. Accounting-only large reservations do not measure real allocation capacity or certify behavior under OS memory exhaustion.
 
 Controlled staging measurement: 32 simultaneous transactions each retain 700
 8-KiB values: 183,500,800 real payload bytes and 185,707,880 accounted bytes,
@@ -1480,89 +1155,23 @@ cover the same transition boundaries.
 
 ## Timer wait and physical work ownership
 
-Problem: removing admission quotas exposed the cost of one sleeping daemon
-thread per active watcher. Decision: one lazy process-owned asyncio loop keeps
-independent timer waits; synchronous storage and polling calls use demand workers
-with zero idle retention. Independent work starts without a worker/queue ceiling.
-Stop wakes waits and fences subsequent calls. Cancellation drains physical work;
-lease release is an awaited cleanup step. Production shutdown joins the runtime
-before task quiescence and closing HTTP clients, runtime leases or storage; an
-unsettled join keeps those dependencies live. Alternatives: a larger fixed pool
-queues independent polls, and cancelling a proxy Future can release a lease
-while its callback still runs. Per-watcher sleeping threads retain unnecessary
-idle stacks.
+Problem: removing admission quotas exposed the cost of one sleeping daemon thread per active watcher. Decision: one lazy process-owned asyncio loop keeps independent timer waits; synchronous storage and polling calls use demand workers with zero idle retention. Independent work starts without a worker/queue ceiling. Stop wakes waits and fences subsequent calls. Cancellation drains physical work; lease release is an awaited cleanup step. Production shutdown joins the runtime before task quiescence and closing HTTP clients, runtime leases or storage; an unsettled join keeps those dependencies live. Alternatives: a larger fixed pool queues independent polls, and cancelling a proxy Future can release a lease while its callback still runs. Per-watcher sleeping threads retain unnecessary idle stacks.
 
-Measurement: 512 simultaneously waiting watchers retain one wait thread and zero
-blocking workers. With 32 blocked callbacks, a healthy 33rd finishes within two
-seconds; shutdown remains pending beyond 1.1 seconds until callbacks return,
-then all callbacks and worker threads retire. Explicit stop and task cancellation
-retain ownership through a blocked call. These are controlled local lifecycle
-measurements, not provider throughput, production peak RSS or volume benchmarks.
-No new durable records, polling backlog or per-watcher OS thread is introduced;
-coroutine/handle state scales with live durable watcher definitions and retires
-on completion. The shared loop retires on joined process shutdown. Gates:
-`tests/scheduler/test_timer_wait_runtime.py`, `test_timer_live_capacity.py` and
-`tests/server/test_server_shutdown_lifecycle.py`.
+Measurement: 512 simultaneously waiting watchers retain one wait thread and zero blocking workers. With 32 blocked callbacks, a healthy 33rd finishes within two seconds; shutdown remains pending beyond 1.1 seconds until callbacks return, then all callbacks and worker threads retire. Explicit stop and task cancellation retain ownership through a blocked call. These are controlled local lifecycle measurements, not provider throughput, production peak RSS or volume benchmarks. No new durable records, polling backlog or per-watcher OS thread is introduced; coroutine/handle state scales with live durable watcher definitions and retires on completion. The shared loop retires on joined process shutdown. Gates: `tests/scheduler/test_timer_wait_runtime.py`, `test_timer_live_capacity.py` and `tests/server/test_server_shutdown_lifecycle.py`.
 
 
 ## Scheduled-task definitions and complete dispatch feeds
 
-Problem: 100-task owner quotas rejected creation and migration; 1,000-row
-runtime reads stranded accepted definitions, while native integrity/adoption
-scans reused the quota and response/list caps imposed further refusals.
-Decision: counts observe integrity with checked representability/overflow;
-creation retains exact identity/system-key claims without quota-only owner
-locking. Internal limit=0 traverses every matching row; positive limits are
-caller-selected projections. Native index windows share one snapshot and retain
-all OCC witnesses. Built-in adoption checks the complete catalog. Migration
-keeps resumable cursor pages, and due claims preserve occurrence fencing.
-Alternatives: larger count/response caps postpone refusal; a partial feed leaves
-work unserviced; dropping claims or OCC allows duplicate effects and stale writes.
+Problem: 100-task owner quotas rejected creation and migration; 1,000-row runtime reads stranded accepted definitions, while native integrity/adoption scans reused the quota and response/list caps imposed further refusals. Decision: counts observe integrity with checked representability/overflow; creation retains exact identity/system-key claims without quota-only owner locking. Internal limit=0 traverses every matching row; positive limits are caller-selected projections. Native index windows share one snapshot and retain all OCC witnesses. Built-in adoption checks the complete catalog. Migration keeps resumable cursor pages, and due claims preserve occurrence fencing. Alternatives: larger count/response caps postpone refusal; a partial feed leaves work unserviced; dropping claims or OCC allows duplicate effects and stale writes.
 
-Controlled native measurement: 2,105 same-owner definitions and their complete
-9,835,556-byte response take 1.54 seconds for grouped creation plus readback on
-the temporary volume. A 2,001-row projection succeeds; the full cross-owner feed,
-late-window built-in adoption, exact deletion count and late OCC conflict retain
-authority. Migration reads all 130 restored records across its 128-row cursor
-pages and repeated restore remains idempotent. SQL creation/listing keeps all
-105 same-owner records; runtime dispatch handles 1,105 due definitions instead
-of its old 1,000-row prefix. No thread, durable history or retained cache is
-added. Result vectors live only for their call and scale with selected output;
-complete feeds still materialize responses, so these measurements do not prove
-production peak RSS, arbitrarily large transport frames or provider throughput.
-Gates: native scheduler demand/semantic/migration tests, SQL storage contract,
-paired SQLite/private PostgreSQL operation lane and scheduler reconciliation.
+Controlled native measurement: 2,105 same-owner definitions and their complete 9,835,556-byte response take 1.54 seconds for grouped creation plus readback on the temporary volume. A 2,001-row projection succeeds; the full cross-owner feed, late-window built-in adoption, exact deletion count and late OCC conflict retain authority. Migration reads all 130 restored records across its 128-row cursor pages and repeated restore remains idempotent. SQL creation/listing keeps all 105 same-owner records; runtime dispatch handles 1,105 due definitions instead of its old 1,000-row prefix. No thread, durable history or retained cache is added. Result vectors live only for their call and scale with selected output; complete feeds still materialize responses, so these measurements do not prove production peak RSS, arbitrarily large transport frames or provider throughput. Gates: native scheduler demand/semantic/migration tests, SQL storage contract, paired SQLite/private PostgreSQL operation lane and scheduler reconciliation.
 
 
 ## Credential catalog admission and complete projections
 
-Problem: both authorities rejected the 1,001st live credential for an exact
-owner/tenant boundary; native list traversal and aggregate encoding repeated
-that quota. SQL creation also scanned the boundary to count every accepted key.
-Decision: retain exact active counts as integrity observations with checked
-representability/overflow before any native document, hash or index mutation.
-SQL keeps exact ID/hash conflict locking and account ownership guards without
-count admission. Native lists traverse all bounded index windows in one snapshot
-and retain every OCC witness, owner/tenant check and secret redaction. Per-record
-response validation is separate from aggregate list output. First-key bootstrap
-still checks atomic owner-boundary emptiness; account inactivity, expiry,
-disabled/revoked state and exact secret-hash uniqueness remain authority.
-Alternatives: increasing counts/aggregate bytes postpones refusal; truncated
-lists hide administered credentials; weakening bootstrap or authentication
-fences can grant unintended authority.
+Problem: both authorities rejected the 1,001st live credential for an exact owner/tenant boundary; native list traversal and aggregate encoding repeated that quota. SQL creation also scanned the boundary to count every accepted key. Decision: retain exact active counts as integrity observations with checked representability/overflow before any native document, hash or index mutation. SQL keeps exact ID/hash conflict locking and account ownership guards without count admission. Native lists traverse all bounded index windows in one snapshot and retain every OCC witness, owner/tenant check and secret redaction. Per-record response validation is separate from aggregate list output. First-key bootstrap still checks atomic owner-boundary emptiness; account inactivity, expiry, disabled/revoked state and exact secret-hash uniqueness remain authority. Alternatives: increasing counts/aggregate bytes postpones refusal; truncated lists hide administered credentials; weakening bootstrap or authentication fences can grant unintended authority.
 
-Controlled native measurement: grouped creation and full readback retain 1,801
-live credentials and 11,356,207 public bytes in 2.43 seconds on the temporary
-volume. Last-window changes still abort dependent stale writes; revocation
-repays the active count and prevents authentication. Retiring all transactions
-repays retained byte/handle observations to zero. SQL admits 1,001 same-boundary
-keys with complete order, cross-owner/tenant exclusion, duplicate-secret refusal,
-bootstrap non-creation and revoked-key rejection. No new worker, durable audit or
-retained cache is added. Output vectors scale with the administered catalog and
-retire after the call; the measurement does not certify arbitrary transport-frame
-sizes, production peak RSS or provider throughput. Gates: native credential tests,
-credential demand SQL/private-PG lane, bearer/account contracts and differential
-credential demand scripts.
+Controlled native measurement: grouped creation and full readback retain 1,801 live credentials and 11,356,207 public bytes in 2.43 seconds on the temporary volume. Last-window changes still abort dependent stale writes; revocation repays the active count and prevents authentication. Retiring all transactions repays retained byte/handle observations to zero. SQL admits 1,001 same-boundary keys with complete order, cross-owner/tenant exclusion, duplicate-secret refusal, bootstrap non-creation and revoked-key rejection. No new worker, durable audit or retained cache is added. Output vectors scale with the administered catalog and retire after the call; the measurement does not certify arbitrary transport-frame sizes, production peak RSS or provider throughput. Gates: native credential tests, credential demand SQL/private-PG lane, bearer/account contracts and differential credential demand scripts.
 
 ## Centralized offline performance catalog
 
@@ -1603,7 +1212,7 @@ From the primary checkout:
 
 ```sh
 python3 scripts/db_performance_catalog.py import --owner db-team --version review-20261010 \
-  --source docs/evidence/tofudb_direct_sqlite_pair_20261008.json
+  --source PATH/TO/tofudb_direct_sqlite_pair_20261008.json  # retired evidence/ artifact; recover from git history
 python3 scripts/db_performance_catalog.py list --owner db-team --version review-20261010
 python3 scripts/db_performance_catalog.py report --owner db-team --version review-20261010 \
   --id RUN_SHA256 --baseline sqlite --candidate native
@@ -1630,3 +1239,17 @@ roots must be operator-controlled. Inputs are regular files bounded to 16 MiB;
 exports/listings are bounded. No background worker or automatic deletion is
 added. Persistent growth occurs only on explicit imports/exports; retain or
 reclaim these operator artifacts deliberately, separately from live user data.
+
+## Native comparison-card exports
+
+`db_performance_catalog.py report` also emits a `rich.json` payload conforming
+to `contracts/rich_response_v1.schema.json`. It carries original measured values,
+direction, window aggregation, matching absolute budgets, recorded source/build
+provenance and coverage limits. Failed correctness/coverage/budget gates outrank
+relative improvement; an absent gate remains unknown. Payloads use bounded
+comparison cards and evidence blocks, not generated scripts or filesystem image
+URLs. Full raw windows remain in the adjacent report JSON. Producers may publish
+the payload through the native rich-response tool; publication and owner checks
+are distinct from the offline catalog's measurement identity.
+
+<!-- Evidence note: former docs/evidence/ artifact snapshots cited here were retired from the tree; cited JSON artifacts remain recoverable from git history. -->

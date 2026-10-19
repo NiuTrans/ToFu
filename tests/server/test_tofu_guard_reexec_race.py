@@ -347,7 +347,7 @@ class TestReexecRace(unittest.TestCase):
         with open(os.path.join(ROOT, 'routes', 'api_v1', 'update.py'),
                   encoding='utf-8') as f:
             upd = f.read()
-        with open(os.path.join(ROOT, 'lib', 'server_boot_report.py'),
+        with open(os.path.join(ROOT, 'lib', 'server', 'server_boot_report.py'),
                   encoding='utf-8') as f:
             boot_report = f.read()
         with open(GUARD_SRC, encoding='utf-8') as f:

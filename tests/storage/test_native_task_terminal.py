@@ -2,6 +2,7 @@
 
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -12,6 +13,7 @@ import uuid
 
 import pytest
 
+from lib.agent_core.abort_signal import AbortSignal
 from lib.agent_core.native_process import TerminalRequest
 from lib.identity import PrincipalContext
 from lib.tasks_pkg.native_terminal import NativeTaskTerminalPolicy
@@ -20,6 +22,13 @@ from tests.storage import test_storage_application_contract as application_contr
 
 pytestmark = pytest.mark.api
 application_storage = application_contract.application_storage
+
+
+@pytest.fixture
+def application_storage_owner_id(request):
+    # Paid tests use the first registered user, distinct from local owner 1.
+    params = getattr(getattr(request.node, 'callspec', None), 'params', {})
+    return 2 if params.get('outcome') == 'native_cost' else 1
 
 
 @pytest.mark.parametrize('commit_debt', [False, True])
@@ -116,8 +125,8 @@ def test_native_terminal_ack_requires_owned_turn_task_and_replay_commit(
 
 @pytest.mark.parametrize('streaming', [False, True])
 @pytest.mark.parametrize('outcome', ['done', 'error', 'aborted', 'text_fault', 'long_text',
-                                     'approved_write','denied_write','approval_fault','gateway_write','gateway_rounds','anthropic_gateway','anthropic_image','chat_image','image_without_admission','image_feedback_overflow','anthropic_schema','responses_gateway','responses_preparation','preparation_fault','native_context','native_context_refusal','native_context_deadline','native_context_inbox','responses_image','absolute_deadline','native_model_account'])
-def test_real_native_route_commits_application_terminal(application_storage, monkeypatch, tmp_path, outcome, streaming):
+                                     'approved_write','denied_write','approval_fault','gateway_write','gateway_rounds','anthropic_gateway','anthropic_image','chat_image','image_without_admission','image_feedback_overflow','anthropic_schema','responses_gateway','responses_preparation','preparation_fault','native_context','native_context_refusal','native_context_deadline','native_context_inbox','responses_image','absolute_deadline','native_model_account','native_cost'])
+def test_real_native_route_commits_application_terminal(application_storage, monkeypatch, tmp_path, outcome, streaming, canonical_approval=None, application_template=False, application_catalog=False, application_account=False, application_counter=False, application_prepared=False, after_tool_error=False, source_footer=False, issued_route=False, application_root=False, root_stop=False):
     """Rust success, stream failure and cancellation reach the actual authority."""
     archive_path = os.environ.get('TOFU_NATIVE_TERMINAL_TEST_ARCHIVE')
     if not archive_path:
@@ -125,8 +134,10 @@ def test_real_native_route_commits_application_terminal(application_storage, mon
     if outcome in {'text_fault', 'long_text','approved_write','denied_write','approval_fault','gateway_write','gateway_rounds','anthropic_gateway','anthropic_image','chat_image','image_without_admission','image_feedback_overflow','anthropic_schema','responses_gateway','responses_preparation','preparation_fault','native_context','native_context_refusal','native_context_deadline','native_context_inbox','responses_image'} and not streaming:
         pytest.skip('text fault requires streaming composition')
     expected_outcome = {'text_fault':'error','long_text':'done','approved_write':'done',
-                        'denied_write':'done','approval_fault':'error','gateway_write':'done','gateway_rounds':'done','anthropic_gateway':'done','anthropic_image':'done','chat_image':'done','image_without_admission':'error','image_feedback_overflow':'error','anthropic_schema':'done','responses_gateway':'done','responses_preparation':'done','preparation_fault':'error','native_context':'done','native_context_refusal':'error','native_context_deadline':'aborted','native_context_inbox':'done','responses_image':'done','absolute_deadline':'aborted','native_model_account':'done'}.get(outcome,outcome)
+                        'denied_write':'done','approval_fault':'error','gateway_write':'done','gateway_rounds':'done','anthropic_gateway':'done','anthropic_image':'done','chat_image':'done','image_without_admission':'error','image_feedback_overflow':'error','anthropic_schema':'done','responses_gateway':'done','responses_preparation':'done','preparation_fault':'error','native_context':'done','native_context_refusal':'error','native_context_deadline':'aborted','native_context_inbox':'done','responses_image':'done','absolute_deadline':'aborted','native_model_account':'done','native_cost':'done'}.get(outcome,outcome)
     schema_mode=outcome=='anthropic_schema'
+    if after_tool_error:expected_outcome='error'
+    if root_stop:expected_outcome='aborted'
     output_schema={'type':'object','properties':{'answer':{'type':'string'}},'required':['answer'],'additionalProperties':False}
     answer = 'Rust durable answer' if outcome != 'long_text' else '"\\\n😀中文' * 500
     if schema_mode:
@@ -146,10 +157,10 @@ def test_real_native_route_commits_application_terminal(application_storage, mon
     from tests.model_routing.test_native_route import Repository, selection
     from tests.support.native_process_probe import config
 
-    application_root = os.environ.get('TOFU_NATIVE_TERMINAL_TEST_APPLICATION_ROOT')
-    if application_root:
+    expected_application_root = os.environ.get('TOFU_NATIVE_TERMINAL_TEST_APPLICATION_ROOT')
+    if expected_application_root:
         assert Path(native_execution.__file__).resolve() == (
-            Path(application_root) / 'lib/tasks_pkg/native_execution.py'
+            Path(expected_application_root) / 'lib/tasks_pkg/native_execution.py'
         ).resolve()
 
     archive = Path(archive_path)
@@ -158,21 +169,63 @@ def test_real_native_route_commits_application_terminal(application_storage, mon
     binary_dir.mkdir()
     with tarfile.open(archive) as bundle:
         bundle.extractall(binary_dir, filter='data')
+    owner_id = 1
+    if outcome == 'native_cost':
+        from lib.billing import users
+        wallet = users.create_user(uuid.uuid4().hex+'@native-terminal.example')
+        owner_id = wallet.owner_user_id
     task_id, conv_id = f'native-{uuid.uuid4().hex}', f'native-{uuid.uuid4().hex}'
     pair = create_turn_pair(
         conv_id, command_id=f'create-{conv_id}', input_projection={'content': 'question'},
-        config={'model': 'fixture-model'}, user_id=1,
+        config={'model': 'fixture-model'}, user_id=owner_id,
         conversation_defaults={'allowCreate': True, 'title': 'Rust terminal', 'settings': {}},
     )
-    bind_task(pair['attempt']['attemptId'], task_id, user_id=1)
-    task = dict(id=task_id, convId=conv_id, _attemptId=pair['attempt']['attemptId'],
-                _userId=1, status='running', content='', thinking='', toolRounds=[],
-                segments=[], config={}, created_at=time.time(), abort_event=threading.Event())
+    bind_task(pair['attempt']['attemptId'], task_id, user_id=owner_id)
+    task = dict(id=task_id, convId=conv_id, _turnId=pair['turn']['turnId'], _attemptId=pair['attempt']['attemptId'],
+                _userId=owner_id, status='running', content='', thinking='', toolRounds=[],
+                segments=[], config={}, created_at=time.time(), abort_event=AbortSignal())
+    default_text = streaming and outcome in {'done', 'error', 'aborted', 'native_cost', 'absolute_deadline'}
+    post_commit_snapshot={}
+    if application_prepared:
+        from lib.tasks_pkg.orchestrator import _post_commit
+        complete=_post_commit.finish_committed_task
+        def observe_completion(owner_task,**kwargs):
+            post_commit_snapshot.update(owner_task)
+            complete(owner_task,**kwargs,commit_round=lambda *a,**k:None,
+                consolidate_profile=lambda *a,**k:None)
+            assert owner_task['messages'] is None and owner_task['toolRounds'] in (None,[])
+        monkeypatch.setattr(_post_commit,'finish_committed_task',observe_completion)
+    task.update(content_lock=threading.Lock(), events=[], events_lock=threading.Lock(),
+                _attended=True, _dispatch_heartbeat=0.0, _t_last_event=0.0)
+    if application_template:
+        task['config'].update(maxTokens=64,temperature=.25,thinkingDepth='high')
+        if schema_mode:
+            task['config']['responseFormat']={'type':'json_schema','json_schema':{
+                'name':'answer','schema':output_schema,'strict':True}}
     assert record_task_event(task, {'type': 'phase', 'phase': 'text'})
+    if outcome=='native_cost':
+        from lib.billing import deposit, reserve
+        wallet_owner=wallet.id
+        deposit(wallet_owner,1000,ref_id='initial-'+task_id)
+        reserve(wallet_owner,100,ref_id=task_id)
+        task.update(_billing_reservation_micro=100,_billingUserId=wallet_owner)
     seen, calls, projections, text_observations = [], [], [], []
     checkpoint_observations=[]
     progress_observations=[]
     approval_decisions=[]
+    application_prompts=[]
+    if canonical_approval is not None:
+        from lib.tasks_pkg.tool_dispatch import _approval
+        from lib.tasks_pkg.approval import request_write_approval, resolve_write_approval
+        def actual_confirmation(approval_id, *, on_registered, timeout, **kwargs):
+            application_prompts.append(approval_id)
+            assert canonical_approval != 'auto'
+            def registered():
+                on_registered()
+                assert not resolve_write_approval(approval_id, True, owner_user_id=owner_id+1)
+                assert resolve_write_approval(approval_id, canonical_approval=='manual', owner_user_id=owner_id)
+            return request_write_approval(approval_id, timeout=2, on_registered=registered, **kwargs)
+        monkeypatch.setattr(_approval,'request_write_approval',actual_confirmation)
     write_target=tmp_path/'approved-native-tool.txt'
     image_mode=outcome in {'responses_image','anthropic_image','chat_image','image_without_admission','image_feedback_overflow'}
     media_admitted=image_mode and outcome!='image_without_admission'
@@ -183,6 +236,7 @@ def test_real_native_route_commits_application_terminal(application_storage, mon
     second_target=tmp_path/'second-native-tool.txt'
     tool_name = 'write_file' if gateway_mode else 'lookup'
     tool_args = {'path':str(write_target),'content':'registered native application write'} if gateway_mode else {}
+    if application_root:tool_args['description']='Native application verification'
     if image_mode:
         import base64
         image_path=tmp_path/'native-image.png'
@@ -206,6 +260,14 @@ def test_real_native_route_commits_application_terminal(application_storage, mon
                 assert self.headers['anthropic-version']=='2023-06-01'
             assert self.headers['Authorization'] == 'Bearer private-fixture-token'
             assert body['model'] == 'alpha-wire-a'
+            if application_template:
+                assert body['temperature']==.25
+                if anthropic_mode:
+                    assert body['output_config']['effort']=='high'
+                elif responses_mode:
+                    assert body['reasoning']['effort']=='high'
+                else:
+                    assert body['reasoning_effort']=='high'
             if outcome=='responses_preparation':
                 assert body['input'][-1]['role']=='developer'
                 assert body['input'][-1]['content'][0]['text']==f'prepared round {len(seen)}'
@@ -217,6 +279,8 @@ def test_real_native_route_commits_application_terminal(application_storage, mon
             if outcome=='native_context_inbox':
                 assert any('actual operator steer' in str(row) for row in body['input'])
             seen.append(body)
+            if after_tool_error and len(seen)==2:
+                self.send_response(500);self.send_header('Content-Length','0');self.end_headers();return
             provider_entered.set()
             if outcome == 'aborted':
                 self.send_response(200)
@@ -250,6 +314,8 @@ def test_real_native_route_commits_application_terminal(application_storage, mon
                             media_type=header.split(';',1)[0].removeprefix('data:')
                         assert data and media_type==sniff_image_mime(base64.b64decode(data))
                         assert evidence[-1]['type']==('input_text' if responses_mode else 'text')
+                    elif canonical_approval=='denied':
+                        assert evidence=='Tool call denied by owner approval policy'
                     else:
                         assert 'File created:' in evidence
                 else:
@@ -284,7 +350,7 @@ def test_real_native_route_commits_application_terminal(application_storage, mon
                 if outcome == 'native_context':
                     events[-1]['response']['usage'] = {'input_tokens': 760, 'output_tokens': 10, 'total_tokens': 770}
                 wire=''.join('data: '+json.dumps(event)+'\n\n' for event in events).encode()
-            if outcome == 'native_model_account':
+            if outcome in {'native_model_account','native_cost'}:
                 wire = ('data: '+json.dumps({'choices':[{'delta':delta,'finish_reason':finish}],
                     'usage':{'prompt_tokens':3,'completion_tokens':2}})+'\n\ndata: [DONE]\n\n').encode()
                 if streaming and len(seen) == 1:
@@ -308,34 +374,8 @@ def test_real_native_route_commits_application_terminal(application_storage, mon
             assert slow_entered.is_set() and slow_exited.is_set()
         if outcome in {'preparation_fault','native_context_refusal'}:
             assert event['error']['kind']=='round_preparation_failed'
-        reason = 'stop' if expected_outcome == 'done' else expected_outcome
-        if outcome == 'absolute_deadline':
-            from lib.agent_core.execution_limits import execution_limit_reason
-            reason = execution_limit_reason(owner_task)
-            assert reason == 'execution_deadline_exceeded'
-        if expected_outcome == 'done':
-            reset_task_text(owner_task, content=event['result']['messages'][-1]['content'],
-                            thinking=owner_task.get('thinking', ''))
-        elif expected_outcome == 'error':
-            owner_task['error'] = normalize_envelope(event['error'], context='native-test', source='native')
-            assert owner_task['error']
-        else:
-            owner_task['aborted'] = True
-            owner_task['abort_event'].set()
-        stamp_chat_task_terminal(owner_task, status=expected_outcome, finish_reason=reason)
-        terminal = {'type': 'done', 'finishReason': reason}
-        if expected_outcome == 'error':
-            terminal['error'] = owner_task['error']
-        elif expected_outcome == 'aborted' and not gateway_mode:
-            terminal['aborted'] = True
-        if gateway_mode:
-            from lib.tasks_pkg.manager._events import append_event
-            append_event(owner_task, terminal)
-            assert get_turn(conv_id,pair['turn']['turnId'],user_id=1)['status']=={'error':'failed','done':'completed','aborted':'interrupted'}[expected_outcome]
-            return
-        assert record_task_event(owner_task, terminal, task_event={
-            'task_id': task_id, 'sequence': 1 + len(text_observations), 'event': terminal,
-        }) == 'carried'
+        from lib.tasks_pkg.native_terminal import project_native_terminal
+        project_native_terminal(owner_task, candidate)
 
     def project_text(owner_task, delta):
         if outcome == 'text_fault':
@@ -344,52 +384,75 @@ def test_real_native_route_commits_application_terminal(application_storage, mon
         owner_task[field] = owner_task.get(field, '') + delta.text
         owner_task['_contentEpoch'] = int(owner_task.get('_contentEpoch') or 0) + 1
         event = {'type': 'delta', field: delta.text}
-        if gateway_mode:
-            from lib.tasks_pkg.manager._events import append_event
-            append_event(owner_task,event)
-            # The canonical publisher owns coalescing; terminal verifies the
-            # complete projection rather than inventing a per-delta ACK.
-            delivery=None
-        else:
-            delivery = record_task_event(owner_task, event, task_event={
-                'task_id': task_id, 'sequence': 1 + len(text_observations), 'event': event,
-            })
-        if not gateway_mode:
-            assert delivery in {'carried', 'coalesced'}
+        from lib.tasks_pkg.manager import append_event
+        append_event(owner_task, event)
+        # The canonical publisher owns coalescing and its event sequence.
+        delivery = None
         text_observations.append(delta)
         assert owner_task['status'] == 'running'
+        if root_stop:owner_task['abort_event'].set()
         if delivery == 'carried':
-            visible = get_turn(conv_id, pair['turn']['turnId'], user_id=1)
+            visible = get_turn(conv_id, pair['turn']['turnId'], user_id=owner_id)
             assert visible['status'] == 'running'
             assert visible['projection'][field] == owner_task[field]
         text_projected.set()
 
+    if default_text:
+        from lib.tasks_pkg import manager
+        canonical_append = manager.append_event
+        def observe_default_text(owner_task, event):
+            result = canonical_append(owner_task, event)
+            if event.get('type') == 'delta':
+                text_observations.append(dict(event))
+                assert owner_task['status'] == 'running'
+                assert int(owner_task.get('_contentEpoch') or 0) == 0
+                visible = get_turn(conv_id, pair['turn']['turnId'], user_id=owner_id)
+                assert visible['status'] == 'running'
+                # Ordinary delivery may coalesce durable text between structural
+                # boundaries. The producer ACK is not a durable projection ACK.
+                assert owner_task['content'].startswith(visible['projection']['content'])
+                assert owner_task['thinking'].startswith(visible['projection']['thinking'])
+                assert any(row.get('type') == 'delta' for row in owner_task['events'])
+                text_projected.set()
+            return result
+        monkeypatch.setattr(manager, 'append_event', observe_default_text)
+
     server = HTTPServer(('127.0.0.1', 0), Handler)
     thread = threading.Thread(target=server.serve_forever, kwargs={'poll_interval': 0.01})
     thread.start()
-    principal = PrincipalContext.user(subject_id='native-terminal-e2e', owner_user_id=1)
+    principal = PrincipalContext.user(subject_id='native-terminal-e2e', owner_user_id=owner_id)
     repo = Repository()
-    repo.boundary = OwnerBoundary.create(1)
+    repo.document['connections'][1]['enabled']=False
+    repo.boundary = OwnerBoundary.create(owner_id)
     repo.document['connections'][0]['base_url'] = f'http://127.0.0.1:{server.server_port}/v1'
     if anthropic_mode:
         repo.document['connections'][0]['protocol']='anthropic'
     if responses_mode:
         repo.document['connections'][0].update(protocol='openai_responses',inference_profile={'features':{'responses_reasoning_replay':'supported'}})
+    if application_template:
+        profile=repo.document['connections'][0].setdefault('inference_profile',{})
+        profile['reasoning']={'support':'supported','wire_format':'reasoning_effort','can_disable':True,
+            'supported_efforts':['none','high'],'disabled_effort':'none','default_effort':'high'}
+        if application_template=='unsupported':
+            profile['reasoning']['supported_efforts']=['none']
+            profile['reasoning']['default_effort']='none'
     if outcome=='native_context_refusal':
         repo.document['offerings'][0]['context_window']=2048
         repo.document['deployments'][0]['max_output_tokens']=32
-    route = compile_native_route(repo, repo.boundary, selection())
+    route = None if application_prepared else compile_native_route(repo, repo.boundary, selection())
     if outcome == 'absolute_deadline':
         task['config']['executionLimits'] = dict(max_tokens=None, max_tool_calls=None, deadline=0)
     settings = config('ignored', task_id)
+    if default_text:
+        settings['text_progress'] = True
     for key in ('endpoint', 'headers', 'template'):
         settings.pop(key)
-    settings.update(owner_user_id=1, terminal_persistence={
+    settings.update(owner_user_id=owner_id, terminal_persistence={
         'operation_id': f'commit-{task_id}', 'ack_ms': 5000, 'attempts': 2, 'frame_bytes': 65536,
     })
     class Policy:
         async def decide(self,request):
-            assert request.principal.owner_user_id==1 and request.call_id=='call'
+            assert request.principal.owner_user_id==owner_id and request.call_id=='call'
             expected_args=dict(tool_args,path=str(second_target)) if approval_decisions else tool_args
             assert request.arguments==expected_args and request.name==tool_name
             approval_decisions.append(request.call_id)
@@ -417,7 +480,7 @@ def test_real_native_route_commits_application_terminal(application_storage, mon
         async def prepare(self, request):
             if outcome=='preparation_fault':
                 raise OSError('fixture preparation failure')
-            assert request.principal.require_owner(context='native prepare test')==1
+            assert request.principal.require_owner(context='native prepare test')==owner_id
             assert request.messages and request.history_messages==len(request.messages)
             messages=[dict(row) for row in request.messages if row.get('role')!='developer']
             if request.round==0:
@@ -449,12 +512,28 @@ def test_real_native_route_commits_application_terminal(application_storage, mon
         monkeypatch.setattr(_prompt_admission,'enforce_dispatch_prompt_limit',slow_admission)
 
     async def run(executor):
+        shared_image=None
+        application_scope=None
         client = NativeProcessClient(
             binary=binary_dir / 'bin/tofu-native',
             sha256=manifest['files']['bin/tofu-native']['sha256'],
             protocol_version=manifest['build']['stdio_contract'], principal=principal,
-            budget=Budget(1, 16 * 1024 * 1024, 65536, 131072, 5),
+            budget=Budget(1, 16 * 1024 * 1024,
+                1<<20 if application_root else 65536,
+                1<<20 if application_root else 131072, 5),
         )
+        if application_prepared:
+            from lib.agent_core.native_image import NativeArchiveImage
+            shared_image=NativeArchiveImage(archive=Path(archive_path),
+                sha256=hashlib.sha256(Path(archive_path).read_bytes()).hexdigest(),
+                application_version=manifest['build']['application_version'],budget=client.budget)
+            await client.close()
+            from lib.app.app_factory import create_base_app
+            from lib.tasks_pkg.native_host import register_native_host
+            application=create_base_app(__name__)
+            host=register_native_host(application,image=shared_image)
+            application_scope=application.test_app()
+            await application_scope.__aenter__()
         async def lookup(candidate):
             assert candidate.task_id == task_id
             calls.append(candidate.name)
@@ -474,14 +553,28 @@ def test_real_native_route_commits_application_terminal(application_storage, mon
                     preparation_events.append(('settle',result.request.round))
             context_policy=NativeContextPolicy(principal=principal,task=task,executor=executor,round_policy=Accounting())
         model_policy = None
-        if outcome == 'native_model_account':
+        pricing_resolver = None
+        if outcome in {'native_model_account','native_cost'}:
             from lib.agent_core.execution_budget import ExecutionBudget
             from lib.tasks_pkg.native_model_account import NativeModelAccountPolicy
             task['config']['executionLimits'] = dict(max_tokens=1000000,max_tool_calls=None,deadline=None)
             task['_executionBudget'] = ExecutionBudget(task)
-            model_policy = NativeModelAccountPolicy(principal=principal,task=task,executor=executor)
+            model_policy = None if application_account else NativeModelAccountPolicy(principal=principal,task=task,executor=executor)
+            if outcome=='native_cost':
+                from lib.tasks_pkg.native_pricing import NativeRoutePricing
+                pricing_resolver=NativeRoutePricing(principal=principal,margin=.125,
+                    lookup=lambda *args,**kwargs:dict(input=2.5,output=10.,currency='USD'),
+                    rates=lambda owner:7.24)
+                model_policy=None
+                class Delivery:
+                    async def reserve(self,request):return True
+                    async def settle(self,result):return None
+                context_policy=Delivery()
             settings['model_control'] = {'ack_ms':5000}
+            if outcome=='native_cost':settings['model_control']['pricing']=True
             settings['model_counter'] = dict(encoding='cl100k_base',output_field='max_tokens',input_bytes=1048576,text_bytes=1048576,tool_json_bytes=1048576,depth=128,worker_stack_bytes=1048576)
+            if application_counter:
+                settings['model_counter'].pop('encoding');settings['model_counter'].pop('output_field')
         checkpoint_policy = None
         if outcome == 'native_context':
             settings.update(progress_control=True, no_progress_rounds=2, nonretryable_failure_rounds=0)
@@ -503,7 +596,7 @@ def test_real_native_route_commits_application_terminal(application_storage, mon
                     assert request.state['model_account']['tokens'] == 770
                     assert request.state['model_account']['complete'] is True
                     assert request.state['messages'][-1]['role'] == 'tool'
-                    assert request.state['owner_user_id'] == 1 and request.deadline_monotonic_ns > time.monotonic_ns()
+                    assert request.state['owner_user_id'] == owner_id and request.deadline_monotonic_ns > time.monotonic_ns()
                     assert preparation_events == [('reserve', 0), ('settle', 0)]
                     assert write_target.read_text() == 'registered native application write'
                     checkpoint_observations.append(('complete', request.round))
@@ -536,23 +629,58 @@ def test_real_native_route_commits_application_terminal(application_storage, mon
                         _executable_tool_catalog=definitions)
             from lib.tasks_pkg.manager._events import append_event
             append_event(task, {'type':'phase','phase':'text'})
-            gateway=NativeGateway(principal=principal,task=task,executor=executor,
-                configuration={'autoApply':False},tool_list=definitions,permissions={tool_name:'read' if image_mode else 'write'},
-                project_path=str(tmp_path),project_enabled=True,model='fixture',round_source=None,
-                decision_policy=None if image_mode else Policy(),pending_calls=8,pending_bytes=8192,multimodal=media_admitted)
+            if not application_prepared:
+                gateway=NativeGateway(principal=principal,task=task,executor=executor,
+                    configuration={'autoApply':canonical_approval=='auto'},tool_list=definitions,permissions=None if application_catalog else {tool_name:'read' if image_mode else 'write'},
+                    project_path=str(tmp_path),project_enabled=True,model='fixture',round_source=None,
+                    decision_policy=None if image_mode or canonical_approval is not None else Policy(),pending_calls=8,pending_bytes=8192,multimodal=media_admitted)
+            if application_catalog:
+                settings.pop('tools')
         try:
-            run = asyncio.create_task(run_native_task(
-                client, route, settings, task=task, executor=executor,
-                project_terminal=project, prepare_template=lambda metadata: {
-                    'model': metadata['wire_model'], 'max_tokens': 100000,
-                    **({'response_format':{'type':'json_schema','json_schema':{'name':'answer','schema':output_schema,'strict':True}},'effort':'high'} if schema_mode else {}),
-                }, callbacks={} if gateway_mode else {'lookup': lookup}, working_directory=binary_dir,
-                gateway=gateway,
-                round_policy=context_policy or (PreparationPolicy() if outcome in {'responses_preparation','preparation_fault'} else None),
-                checkpoint_policy=checkpoint_policy, model_policy=model_policy,
-                project_text=project_text if streaming else None,
-                approval_policy=Policy() if write_mode and not gateway_mode else None,
-            ))
+            if application_prepared:
+                from lib.tasks_pkg.native_invocation import NativePreparedInvocation
+                from lib.tasks_pkg.orchestrator._root_agent_loop import RootLoopRequest
+                from types import SimpleNamespace
+                from lib.model_routing.native_route import ROUTE_OVERRIDE_FIELDS
+                task['config'].update(model='alpha',autoApply=True,projectPath=str(tmp_path))
+                root=RootLoopRequest(task=task,state=SimpleNamespace(model='alpha'),messages=settings['messages'],
+                    tool_list=definitions,all_search_results_text=[],cfg=task['config'],tid=task_id[:8],
+                    thinking_depth='high',temperature=.25,max_tokens=64,response_format=task['config'].get('responseFormat'),
+                    project_path=str(tmp_path),project_enabled=True,search_enabled=False)
+                if source_footer:root.all_search_results_text.append('URL: https://example.test/retrieved')
+                resource={key:value for key,value in settings.items() if key not in
+                    ({'version','type','owner_user_id','task_id','messages','tools'} | ROUTE_OVERRIDE_FIELDS)}
+                from lib.resource_control.runtime import launch_policy
+                for key in ('event_bytes','output_bytes','request_bytes','retained_bytes',
+                            'feedback_bytes','tool_frame_bytes','tool_calls','rounds','deadline_ms'):
+                    resource.pop(key,None)
+                invocation=NativePreparedInvocation(host=host,loop=asyncio.get_running_loop(),principal=principal,
+                    repository=repo,selection=selection(),configuration=resource,budget=client.budget,
+                    executor=executor,working_directory=binary_dir,pending_calls=8,pending_bytes=8192,
+                    resource_policy=launch_policy({}),project_terminal=project,
+                    project_text=project_text if streaming and not default_text else None)
+                if application_root:
+                    from lib.tasks_pkg.orchestrator._run import execute_task_invocation, ROOT_INVOCATION_POLICY
+                    task['_nativePreparedInvocation']=invocation
+                    task['config'].update(projectEnabled=True,memoryEnabled=False)
+                    task['messages']=settings['messages']
+                    run=asyncio.create_task(asyncio.to_thread(execute_task_invocation,task,
+                        policy=ROOT_INVOCATION_POLICY))
+                else:
+                    run=asyncio.create_task(asyncio.to_thread(invocation.run,root))
+            else:
+                run = asyncio.create_task(run_native_task(
+                    client, route, settings, task=task, executor=executor,
+                    project_terminal=project, prepare_template=None if application_template else lambda metadata: {
+                        'model': metadata['wire_model'], 'max_tokens': 100000,
+                        **({'response_format':{'type':'json_schema','json_schema':{'name':'answer','schema':output_schema,'strict':True}},'effort':'high'} if schema_mode else {}),
+                    }, callbacks={} if gateway_mode else {'lookup': lookup}, working_directory=binary_dir,
+                    gateway=gateway,
+                    round_policy=context_policy or (PreparationPolicy() if outcome in {'responses_preparation','preparation_fault'} else None),
+                    checkpoint_policy=checkpoint_policy, model_policy=model_policy, pricing_resolver=pricing_resolver,
+                    project_text=project_text if streaming and not default_text else None,
+                    approval_policy=Policy() if write_mode and not gateway_mode else None,
+                ))
             if outcome == 'aborted':
                 async with asyncio.timeout(5):
                     while not provider_entered.is_set():
@@ -562,6 +690,12 @@ def test_real_native_route_commits_application_terminal(application_storage, mon
                             await asyncio.sleep(0.001)
                 run.cancel()
                 with pytest.raises(asyncio.CancelledError):
+                    await run
+            elif root_stop:
+                with pytest.raises(asyncio.CancelledError):await run
+            elif application_template=='unsupported':
+                from lib.llm.reasoning import ReasoningContractError
+                with pytest.raises(ReasoningContractError):
                     await run
             elif outcome=='image_without_admission':
                 from lib.agent_core.native_process import NativeToolError
@@ -574,7 +708,7 @@ def test_real_native_route_commits_application_terminal(application_storage, mon
                 assert isinstance(caught.value.__cause__,TimeoutError)
                 assert slow_entered.is_set() and slow_exited.is_set()
             elif outcome=='native_context_refusal':
-                from lib.llm_errors import PromptTooLongError
+                from lib.llm.llm_errors import PromptTooLongError
                 with pytest.raises(NativeProcessError) as caught:
                     await run
                 assert isinstance(caught.value.__cause__,PromptTooLongError)
@@ -584,19 +718,52 @@ def test_real_native_route_commits_application_terminal(application_storage, mon
                 assert isinstance(caught.value.__cause__, OSError)
             else:
                 result = await run
-                assert result.event['status'] == expected_outcome
+                if application_root:
+                    assert result is None and task['status']==expected_outcome
+                else:
+                    assert result.event['status'] == expected_outcome
             assert client.active_runs == 0
         finally:
             await client.close()
+            if application_scope is not None:await application_scope.__aexit__(None,None,None)
+            if shared_image is not None:
+                assert shared_image._closed
+                assert host._closed and not host._clients
+    issued_group=None
     try:
+        if issued_route:
+            from lib.model_routing.dispatch_adapter import mint_routed_slot_group
+            issued_group=mint_routed_slot_group(repo,repo.boundary,selection(),owner_tag='task:'+task_id)
+            task['_model_routing_group']=issued_group
+            task['_pinned_provider_id']=issued_group.pin_id
         with ThreadPoolExecutor(max_workers=1) as executor:
             asyncio.run(run(executor))
     finally:
+        if issued_group is not None:
+            from lib.model_routing.dispatch_adapter import dispose_routed_slot_group
+            dispose_routed_slot_group(issued_group)
         provider_release.set()
         server.shutdown()
         thread.join()
         server.server_close()
-    if outcome == 'native_model_account':
+    if application_template=='unsupported':
+        assert not seen and not calls and not projections and not task['toolRounds']
+        assert not write_target.exists() and task['status']=='running'
+        return
+    if expected_outcome=='done' and outcome!='responses_preparation':
+        if application_prepared:
+            assert post_commit_snapshot and task['messages'] is None and task['toolRounds'] in (None,[])
+            task=post_commit_snapshot
+        final_snapshots=[event for event in task['events'] if event.get('type')=='messages_snapshot' and event.get('kind')=='state' and event.get('roundNum')=='final']
+        assert len(final_snapshots)==1
+        assert final_snapshots[0]['messages'][-1]['role']=='assistant'
+    if application_prepared and expected_outcome!='done':
+        assert post_commit_snapshot and task['messages'] is None and task['toolRounds'] in (None,[])
+        task=post_commit_snapshot
+    if outcome in {'done','gateway_write','native_model_account','native_cost'}:
+        assert task['_contextBudgetDecision']['contextWindowSource']=='model_routing_v2'
+        assert task['_lastPromptAdmission']['action']=='admit'
+    if outcome in {'native_model_account','native_cost'}:
         assert task['_executionBudget'].consumption_snapshot() == (10,0,True)
         assert task['_executionBudget'].continuity_snapshot()['pending_model_requests'] == 0
     if outcome in {'native_context','native_context_inbox'}:
@@ -616,36 +783,107 @@ def test_real_native_route_commits_application_terminal(application_storage, mon
     if outcome=='responses_preparation':
         assert [row[:2] for row in preparation_events]==[('prepare',0),('reserve',0),('settle',0),('prepare',1),('reserve',1),('settle',1)]
         print('NATIVE_PREPARATION_MEASUREMENT '+json.dumps(preparation_events))
-    assert len(seen) == (0 if outcome in {'preparation_fault','native_context_refusal','native_context_deadline','absolute_deadline'} else 3 if multiple_rounds else 2 if expected_outcome == 'done' else 1)
+    assert len(seen) == (2 if after_tool_error else 0 if outcome in {'preparation_fault','native_context_refusal','native_context_deadline','absolute_deadline'} else 3 if multiple_rounds else 2 if expected_outcome == 'done' else 1)
     assert calls == (['lookup'] if expected_outcome == 'done' and outcome != 'denied_write' and not gateway_mode else [])
     assert len(projections) == 1 and projections[0].event['status'] == expected_outcome
-    assert len(repo.secret_calls) == 1
-    result = application_storage.query('task_results.replay_get', {'key': task_id, 'user_id': 1})
+    boundaries = [event for event in task['events'] if event.get('type') in {'round_start','round_end'}]
+    starts = [event['roundNum'] for event in boundaries if event['type']=='round_start']
+    ends = [event['roundNum'] for event in boundaries if event['type']=='round_end']
+    assert starts == list(range(len(starts)))
+    cancelled_tail = expected_outcome == 'aborted' and bool(starts)
+    # Stop withdraws the final presentation frame, but must still commit the
+    # interrupted Turn and joined terminal ACK checked below.
+    assert ends == (starts[:-1] if cancelled_tail else starts)
+    expected_boundaries = [(kind, number) for number in ends
+                           for kind in ('round_start', 'round_end')]
+    if cancelled_tail:
+        expected_boundaries.append(('round_start', starts[-1]))
+    assert [(event['type'],event['roundNum']) for event in boundaries] == expected_boundaries
+    if starts and not cancelled_tail:
+        assert boundaries[-1]['reason'] == ('stop' if expected_outcome=='done' else expected_outcome)
+    assert len(repo.secret_calls) == 1 + int(issued_route)
+    result = application_storage.query('task_results.replay_get', {'key': task_id, 'user_id': owner_id})
     assert result['status'] == expected_outcome
-    turn = get_turn(conv_id, pair['turn']['turnId'], user_id=1)
+    if after_tool_error:
+        assert len(seen)==2 and task['_messages_include_current_run']
+        assert task['messages'][-1]['role']=='tool'
+        history=projections[0].event['execution']['messages']
+        assert history==task['messages']
+        assert len(history)>=3 if application_root else len(history)==3
+    if outcome=='native_cost':
+        assert len(task['apiRounds'])==2
+        assert [row['nativeCredits']['total'] for row in task['apiRounds']]==[31,31]
+        assert task['cost']['costUsd']==.0001
+    turn = get_turn(conv_id, pair['turn']['turnId'], user_id=owner_id)
     expected_status = {'done': 'completed', 'error': 'failed', 'aborted': 'interrupted'}[expected_outcome]
     assert turn['status'] == expected_status
-    assert get_attempt(pair['attempt']['attemptId'], user_id=1)['status'] == expected_status
+    if outcome=='native_cost':
+        assert [row['nativeCredits']['total'] for row in turn['projection']['apiRounds']]==[31,31]
+        assert turn['projection']['cost']['costUsd']==.0001
+        from lib.billing import deposit, reserve, get_balance, list_entries
+        from lib.billing.request_flow import settle_task
+        stored=application_storage.query('task_results.replay_get',
+            {'key':task_id,'user_id':owner_id,'include_metadata':True})
+        capsule=stored['metadata']['nativeBillingSettlement']
+        assert capsule['reserved_micro']==100 and capsule['componentsMicro']['totalMicro']==62
+        monkeypatch.setattr('lib.relay_config.billing_enabled',lambda:True)
+        def refuse_repricing(*args,**kwargs):
+            raise AssertionError('native wallet must not reprice paid rounds')
+        monkeypatch.setattr('lib.billing.compute_request_cost',refuse_repricing)
+        import lib.billing as billing
+        canonical_settle=billing.settle
+        def lost_ack(*args,**kwargs):
+            canonical_settle(*args,**kwargs)
+            raise OSError('wallet committed before lost acknowledgement')
+        monkeypatch.setattr(billing,'settle',lost_ack)
+        with pytest.raises(OSError,match='lost acknowledgement'):
+            settle_task(task,user_id=wallet_owner,model='alpha',raise_on_error=True)
+        assert get_balance(wallet_owner)==938
+        monkeypatch.setattr(billing,'settle',canonical_settle)
+        first=settle_task(task,user_id=wallet_owner,model='alpha',raise_on_error=True)
+        again=settle_task(task,user_id=wallet_owner,model='alpha',raise_on_error=True)
+        assert first['cost_micro']==again['cost_micro']==62
+        assert get_balance(wallet_owner)==938
+        from lib.storage_authority_sql.generated_billing_contract import NATIVE_ADMISSION_KIND
+        movements=[entry for entry in list_entries(wallet_owner) if entry.ref_id==task_id]
+        assert sorted((entry.kind,entry.amount_micro) for entry in movements)==sorted([
+            ('debit',-62),(NATIVE_ADMISSION_KIND,0),('reserve',-100),('reserve_release',100)])
+    assert get_attempt(pair['attempt']['attemptId'], user_id=owner_id)['status'] == expected_status
     assert not task.get('_terminalPersistencePending')
     if expected_outcome == 'done':
-        assert turn['projection']['content'] == answer
+        expected_answer=answer+('\n\n---\n**来源 / Sources**（本轮检索所用，供核对）：\n- https://example.test/retrieved' if source_footer else '')
+        assert turn['projection']['content'] == expected_answer
+        if source_footer:
+            assert projections[0].event['result']['messages'][-1]['content']==answer
     elif expected_outcome == 'error':
         assert task['error']
     else:
         assert task['aborted'] is True
     if outcome in {'preparation_fault','native_context_refusal','native_context_deadline'}:
         assert not approval_decisions and not write_target.exists() and not task.get('toolRounds')
-    if write_mode and outcome not in {'preparation_fault','native_context_refusal','native_context_deadline'}:
+    if root_stop:
+        assert task['abort_event'].is_set()
+        assert not write_target.exists() and not task['toolRounds']
+        assert not turn['projection'].get('toolRounds')
+        assert len(seen)==1 and text_observations
+    elif canonical_approval is not None:
+        assert not approval_decisions
+        assert len(application_prompts)==(0 if canonical_approval=='auto' else 1)
+        assert write_target.exists()==(canonical_approval!='denied')
+        assert len(task['toolRounds'])==1
+        assert task['toolRounds'][0]['status']==('rejected' if canonical_approval=='denied' else 'done')
+        assert len(turn['projection']['toolRounds'])==1
+    elif write_mode and outcome not in {'preparation_fault','native_context_refusal','native_context_deadline'}:
         assert approval_decisions==(['call','call'] if multiple_rounds else ['call'])
         assert write_target.exists()==(outcome in {'approved_write','gateway_write','gateway_rounds','anthropic_gateway','anthropic_schema','responses_gateway','responses_preparation','native_context','native_context_inbox'})
-    if gateway_mode and outcome not in {'preparation_fault','native_context_refusal','native_context_deadline'}:
+    if gateway_mode and not root_stop and outcome not in {'preparation_fault','native_context_refusal','native_context_deadline'}:
         if image_mode:
             assert not approval_decisions and not write_target.exists()
             assert task['toolRounds'][0].get('toolModelContent')
-        else:
+        elif canonical_approval!='denied':
             assert write_target.read_text()=='registered native application write'
         assert len(task['toolRounds'])==(2 if multiple_rounds else 1)
-        assert all(row['status']=='done' for row in task['toolRounds'])
+        assert all(row['status']==('rejected' if canonical_approval=='denied' else 'done') for row in task['toolRounds'])
         if multiple_rounds:
             assert second_target.read_text()=='registered native application write'
             assert [row['llmRound'] for row in task['toolRounds']]==[0,1]
@@ -653,8 +891,104 @@ def test_real_native_route_commits_application_terminal(application_storage, mon
         assert not text_observations and not seen and task['finishReason'] == 'execution_deadline_exceeded'
     if streaming and outcome not in {'text_fault','approval_fault','preparation_fault','native_context_refusal','native_context_deadline','absolute_deadline'}:
         assert text_observations
-        assert [delta.sequence for delta in text_observations] == list(range(1, len(text_observations) + 1))
+        if not default_text:
+            assert [delta.sequence for delta in text_observations] == list(range(1, len(text_observations) + 1))
         if expected_outcome != 'done' and outcome not in {'image_without_admission','image_feedback_overflow'}:
-            assert turn['projection']['content'] == 'partial'
-        if outcome != 'error':
+            assert turn['projection']['content'] == (task.get('content') or '' if root_stop else '' if after_tool_error else 'partial')
+        if root_stop:
+            assert turn['projection']['thinking']==task.get('thinking','')
+        elif outcome != 'error':
             assert turn['projection']['thinking'] == ('thinking\n\n' if responses_mode else 'thinking')
+
+
+@pytest.mark.parametrize('approval_mode',['auto','manual','denied'])
+def test_real_native_gateway_uses_application_approval(application_storage,monkeypatch,tmp_path,approval_mode):
+    test_real_native_route_commits_application_terminal(application_storage,monkeypatch,tmp_path,
+        'gateway_write',True,canonical_approval=approval_mode)
+
+
+@pytest.mark.parametrize('protocol_outcome',['gateway_write','responses_gateway','anthropic_schema'])
+def test_real_native_generation_uses_task_and_selected_profile(application_storage,monkeypatch,tmp_path,protocol_outcome):
+    test_real_native_route_commits_application_terminal(application_storage,monkeypatch,tmp_path,
+        protocol_outcome,True,application_template=True)
+
+
+def test_real_native_generation_refuses_before_provider_dispatch(application_storage,monkeypatch,tmp_path):
+    test_real_native_route_commits_application_terminal(application_storage,monkeypatch,tmp_path,
+        'gateway_write',True,application_template='unsupported')
+
+
+@pytest.mark.parametrize('protocol_outcome',['gateway_write','responses_gateway','anthropic_schema'])
+def test_real_native_catalog_uses_prepared_tools(application_storage,monkeypatch,tmp_path,protocol_outcome):
+    test_real_native_route_commits_application_terminal(application_storage,monkeypatch,tmp_path,
+        protocol_outcome,True,canonical_approval='auto',application_template=True,application_catalog=True)
+
+
+def test_real_native_model_account_defaults_to_existing_task_budget(application_storage,monkeypatch,tmp_path):
+    test_real_native_route_commits_application_terminal(application_storage,monkeypatch,tmp_path,
+        'native_model_account',False,application_account=True)
+
+
+def test_real_native_counter_defaults_from_selected_route(application_storage,monkeypatch,tmp_path):
+    test_real_native_route_commits_application_terminal(application_storage,monkeypatch,tmp_path,
+        'native_model_account',False,application_account=True,application_counter=True)
+
+
+@pytest.mark.parametrize('protocol_outcome',['gateway_write','responses_gateway','anthropic_schema'])
+def test_native_failure_after_tool_keeps_observed_history_and_durable_effect(application_storage,monkeypatch,tmp_path,protocol_outcome):
+    test_real_native_route_commits_application_terminal(application_storage,monkeypatch,tmp_path,
+        protocol_outcome,True,canonical_approval='auto',application_template=True,
+        application_prepared=True,after_tool_error=True)
+
+
+@pytest.mark.parametrize('protocol_outcome',['gateway_write','responses_gateway','anthropic_gateway'])
+def test_native_source_footer_is_committed_with_final_display_text(application_storage,monkeypatch,tmp_path,protocol_outcome):
+    test_real_native_route_commits_application_terminal(application_storage,monkeypatch,tmp_path,
+        protocol_outcome,True,canonical_approval='auto',application_template=True,
+        application_prepared=True,source_footer=True)
+
+
+@pytest.mark.parametrize('protocol_outcome',['gateway_write','responses_gateway','anthropic_schema'])
+def test_real_prepared_root_request_executes_in_native_runtime(application_storage,monkeypatch,tmp_path,protocol_outcome):
+    test_real_native_route_commits_application_terminal(application_storage,monkeypatch,tmp_path,
+        protocol_outcome,True,canonical_approval='auto',application_template=True,application_prepared=True)
+
+
+@pytest.mark.parametrize('protocol_outcome',['gateway_write','responses_gateway','anthropic_schema'])
+def test_real_prepared_native_task_keeps_its_issued_route(application_storage,monkeypatch,tmp_path,protocol_outcome):
+    test_real_native_route_commits_application_terminal(application_storage,monkeypatch,tmp_path,
+        protocol_outcome,True,canonical_approval='auto',application_template=True,
+        application_prepared=True,issued_route=True)
+
+
+@pytest.mark.parametrize('protocol_outcome',['gateway_write','responses_gateway','anthropic_schema'])
+def test_real_application_root_selects_native_without_python_rounds(application_storage,monkeypatch,tmp_path,protocol_outcome):
+    from lib.tasks_pkg.orchestrator import _run as root_owner
+    def refuse_python_rounds(*args,**kwargs):
+        raise AssertionError('native root handoff entered the Python model loop')
+    monkeypatch.setattr(root_owner,'run_root_agent_loop',refuse_python_rounds)
+    test_real_native_route_commits_application_terminal(application_storage,monkeypatch,tmp_path,
+        protocol_outcome,True,canonical_approval='auto',application_template=True,
+        application_prepared=True,issued_route=True,application_root=True)
+
+
+@pytest.mark.parametrize('protocol_outcome',['gateway_write','responses_gateway','anthropic_schema'])
+def test_real_application_root_native_failure_preserves_history_and_tool_effect(application_storage,monkeypatch,tmp_path,protocol_outcome):
+    from lib.tasks_pkg.orchestrator import _run as root_owner
+    def refuse_python_rounds(*args,**kwargs):
+        raise AssertionError('native root failure replayed the Python model loop')
+    monkeypatch.setattr(root_owner,'run_root_agent_loop',refuse_python_rounds)
+    test_real_native_route_commits_application_terminal(application_storage,monkeypatch,tmp_path,
+        protocol_outcome,True,canonical_approval='auto',application_template=True,
+        application_prepared=True,issued_route=True,application_root=True,after_tool_error=True)
+
+
+@pytest.mark.parametrize('protocol_outcome',['gateway_write','responses_gateway','anthropic_schema'])
+def test_real_application_root_native_owner_stop_joins_before_terminal(application_storage,monkeypatch,tmp_path,protocol_outcome):
+    from lib.tasks_pkg.orchestrator import _run as root_owner
+    def refuse_python_rounds(*args,**kwargs):
+        raise AssertionError('native owner stop entered the Python model loop')
+    monkeypatch.setattr(root_owner,'run_root_agent_loop',refuse_python_rounds)
+    test_real_native_route_commits_application_terminal(application_storage,monkeypatch,tmp_path,
+        protocol_outcome,True,canonical_approval='auto',application_template=True,
+        application_prepared=True,issued_route=True,application_root=True,root_stop=True)

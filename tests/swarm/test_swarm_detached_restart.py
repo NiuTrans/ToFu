@@ -6,8 +6,8 @@ import pytest
 
 from lib.swarm.integration import _rehydrate
 from lib.swarm.restart_recovery import detached_recovery_allowed
-from lib.llm_errors import AbortedError
-from tests.storage.test_storage_sidecar_contract import storage as storage  # noqa: F401
+from lib.llm.llm_errors import AbortedError
+from tests.storage.test_storage_authority_sql_contract import storage as storage  # noqa: F401
 
 pytestmark = pytest.mark.unit
 
@@ -53,7 +53,7 @@ def test_startup_restores_detached_children_without_reopening_completed_parent(d
 @pytest.mark.parametrize('mutation', [
     'owner', 'attempt', 'task', 'conversation', 'source_status', 'replacement',
     'turn_status', 'cause', 'ordinal', 'lane', 'terminated', 'later_stop',
-    'later_interrupt', 'truncated', 'missing_page',
+    'later_interrupt', 'missing_page',
 ])
 def test_detached_restart_never_crosses_cancel_or_foreign_authority(detached, mutation):
     row, source, turn, page, session, factory, _ = detached
@@ -70,7 +70,6 @@ def test_detached_restart_never_crosses_cancel_or_foreign_authority(detached, mu
     elif mutation == 'terminated': row['status'] = 'terminated'
     elif mutation == 'later_stop': page['turns'] = [{'status': 'cancelled'}, {'status': 'completed'}]
     elif mutation == 'later_interrupt': page['turns'] = [{'status': 'interrupted'}]
-    elif mutation == 'truncated': page['turns'] = [{'status': 'completed'}] * 2000
     elif mutation == 'missing_page': page.clear()
     assert not detached_recovery_allowed(row, user_id=7)
     # Owner mismatch alone is tested at the owner-scoped admission function.
@@ -146,4 +145,12 @@ def test_real_completed_turn_authorizes_detached_checkpoint_until_replacement(st
     current = get_turn(conv, turn_id, user_id=7)
     create_attempt(conv, turn_id, command_id='replace-' + conv, operation='regenerate',
                    expected_projection_revision=current['projectionRevision'], config={}, user_id=7)
+    assert not detached_recovery_allowed(row, user_id=7)
+
+
+def test_long_completed_history_preserves_detached_authority_and_early_stop(detached):
+    row, _, _, page, *_ = detached
+    page['turns'] = [{'status': 'completed'} for _ in range(5001)]
+    assert detached_recovery_allowed(row, user_id=7)
+    page['turns'][0]['status'] = 'cancelled'
     assert not detached_recovery_allowed(row, user_id=7)

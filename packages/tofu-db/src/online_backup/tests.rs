@@ -520,3 +520,48 @@ fn native_shadow_doorbell_reuses_an_unchanged_restored_generation() {
     assert_eq!(report.manifest_bytes,0);
     assert!(report.ok);
 }
+
+
+#[test]
+fn epoch_resumes_interrupted_prune_before_copying_latest_state() {
+    use crate::vfs::{FaultAction, FaultRule};
+    fn seed() -> (Arc<DeterministicVfs>, Arc<Mutex<AuthorityDatabase>>, EpochContext) {
+        let (vfs, database) = authority();
+        let mut context = context(&vfs); context.retention = 4;
+        for value in [b"one", b"two", b"new"] {
+            commit_value(&database, b"rolling", value);
+            run(&database, &context);
+        }
+        (vfs, database, context)
+    }
+    let (baseline, _, _) = seed();
+    baseline.arm_fault(None).unwrap();
+    crate::backup::prune_backup_with_vfs(Path::new("/backup"), 1, baseline.clone()).unwrap();
+    let operations = baseline.trace().unwrap().len();
+    let mut exercised = false;
+    for operation_number in 1..=operations as u64 {
+        let (vfs, database, mut context) = seed();
+        vfs.arm_fault(Some(FaultRule { operation_number,
+            action: FaultAction::ErrorBefore(io::ErrorKind::Interrupted) })).unwrap();
+        let failed = crate::backup::prune_backup_with_vfs(Path::new("/backup"), 1, vfs.clone());
+        vfs.arm_fault(None).unwrap();
+        if failed.is_err() && crate::backup::ensure_no_prune(Path::new("/backup"), vfs.as_ref())
+            .is_err_and(|error| error.kind() == io::ErrorKind::WouldBlock) {
+            commit_value(&database, b"rolling", b"latest");
+            context.retention = 2; // the pending plan still owns its old retention set
+            let report = run(&database, &context);
+            assert!(report.ok);
+            crate::backup::ensure_no_prune(Path::new("/backup"), vfs.as_ref()).unwrap();
+            vfs.create_dir(Path::new("/restore")).unwrap();
+            crate::backup::restore_latest_backup_with_vfs(Path::new("/backup"),
+                Path::new("/restore"), vfs.clone()).unwrap();
+            let restored = AuthorityDatabase::open_with_vfs(Path::new("/restore"), vfs).unwrap();
+            let mut tx = restored.begin(7, 11).unwrap();
+            assert_eq!(restored.entity_get(&mut tx, &EntityKey::new(7, 11,
+                "record", b"rolling").unwrap()).unwrap().unwrap(), b"latest");
+            exercised = true;
+            break;
+        }
+    }
+    assert!(exercised, "fault injection must leave a committed pending prune plan");
+}

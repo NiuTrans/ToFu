@@ -70,8 +70,6 @@ class BundleReceiver:
                     not receipt['version_verified'] or receipt['status'] != 'success'
                     or manifest['location']['build_id'] != receipt['build_id']):
                 raise BuildError('build_identity', 'Remote paper location does not match the verified build')
-            if sum(row['size_bytes'] for row in receipt['artifacts']) > limit('build_output_bytes'):
-                raise BuildError('transfer_limit', 'Paper bundle exceeds its byte limit')
             self.directory.mkdir(parents=True, exist_ok=False)
             self.manifest = manifest
             self.artifacts = {row['name']: row for row in receipt['artifacts']}

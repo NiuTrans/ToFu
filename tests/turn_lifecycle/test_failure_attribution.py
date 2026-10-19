@@ -9,7 +9,7 @@ import logging
 
 import pytest
 
-from lib.agent_loop import AbortSignal
+from lib.agent_loop.agent_loop import AbortSignal
 from lib.error_envelope import make_envelope
 pytestmark = pytest.mark.unit
 
@@ -34,14 +34,32 @@ def test_record_active_round_stamps_ints_only():
     assert task['_activeRoundNum'] == 3
 
 
+@pytest.mark.parametrize('index', [0, 1, 7])
+def test_loop_index_projects_one_based_failure_round(index):
+    task = {}
+    record_active_round(task, index)
+    assert task['_activeRoundNum'] == index
+    assert build_failure_attribution(task, phase='task-fatal') == {
+        'roundNum': index + 1, 'phase': 'task-fatal'}
+
+
+@pytest.mark.parametrize('index', [-1, True, None, '0'])
+def test_invalid_loop_index_does_not_invent_failure_round(index):
+    task = {}
+    record_active_round(task, index)
+    assert build_failure_attribution(task) == {}
+    assert build_failure_attribution({'_activeRoundNum': index}) == {}
+
+
 def test_attach_adds_round_phase_and_tool_without_overriding():
+
     task = {'_activeRoundNum': 7}
     envelope = make_envelope('tool_loop', detail='same op failed')
     attach_failure_attribution(
         envelope, task, phase='nonretryable_tool_failure',
         tool_name='bash', tool_call_id='call_1')
     assert envelope[ATTRIBUTION_KEY] == {
-        'roundNum': 7,
+        'roundNum': 8,
         'phase': 'nonretryable_tool_failure',
         'toolName': 'bash',
         'toolCallId': 'call_1',
@@ -58,7 +76,7 @@ def test_attribution_derives_tool_from_last_failed_projection_round():
         {'toolName': 'bash', 'toolCallId': 'bad-9', 'status': 'error'},
     ]}
     attribution = build_failure_attribution(task, projection=projection)
-    assert attribution['roundNum'] == 2
+    assert attribution['roundNum'] == 3
     assert attribution['toolName'] == 'bash'
     assert attribution['toolCallId'] == 'bad-9'
 
@@ -76,7 +94,7 @@ def test_retry_receipt_links_attempts_and_stays_bounded():
     assert chain[-1]['attempt'] == 11
     assert chain[0]['kind'] == 'ratelimit'
     assert chain[0]['backoff_s'] == 1.5
-    assert chain[0][ATTRIBUTION_KEY]['roundNum'] == 4
+    assert chain[0][ATTRIBUTION_KEY]['roundNum'] == 5
     assert chain[0]['detail'] == 'HTTP 429'
     # The returned chain is a copy — mutating it cannot corrupt the task.
     chain[0]['attempt'] = 999
@@ -102,7 +120,7 @@ def test_failed_settlement_carries_attribution_backstop_and_retry_chain():
     status, settlement = _settlement(task, {'type': 'error'}, projection)
     assert status == 'failed'
     attribution = settlement['error'][ATTRIBUTION_KEY]
-    assert attribution['roundNum'] == 5
+    assert attribution['roundNum'] == 6
     assert attribution['toolName'] == 'bash'
     assert attribution['toolCallId'] == 'call-x'
     assert settlement['retryChain'] == [
@@ -184,7 +202,7 @@ def test_retry_settlement_decodes_live_and_after_reload(schema):
     status, settlement = _settlement(task, {'type': 'error'}, {'content': '', 'toolRounds': []})
     assert len(settlement['retryChain']) == 8
     assert settlement['retryChain'][0]['attempt'] == 4
-    assert settlement['retryChain'][-1]['failureAttribution']['roundNum'] == 2
+    assert settlement['retryChain'][-1]['failureAttribution']['roundNum'] == 3
     if schema == 'TurnSettlement':
         payload = settlement
     elif schema == 'ConversationSyncSnapshot':

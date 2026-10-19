@@ -29,7 +29,7 @@ pub enum Error {
 }
 pub struct Encoder {
     encoding: Encoding,
-    core: OnceLock<Result<tiktoken_rs::CoreBPE, Error>>,
+    core: OnceLock<Result<crate::token_rank_counter::RankCounter, Error>>,
 }
 impl Encoder {
     pub fn new(encoding: Encoding) -> Arc<Self> {
@@ -41,19 +41,14 @@ impl Encoder {
     pub fn loaded(&self) -> bool {
         self.core.get().is_some()
     }
-    fn count(&self, text: &str) -> Result<u64, Error> {
+    pub(crate) fn count(&self, text: &str, scratch: &mut Option<fancy_regex::Regex>) -> Result<u64, Error> {
         if text.is_empty() {
             return Ok(0);
         }
-        let core = self.core.get_or_init(|| {
-            match self.encoding {
-                Encoding::Cl100k => tiktoken_rs::cl100k_base(),
-                Encoding::O200k => tiktoken_rs::o200k_base(),
-            }
-            .map_err(|_| Error::Encoder)
-        });
+        let core = self.core.get_or_init(|| crate::token_rank_counter::RankCounter::new(self.encoding));
         let core = core.as_ref().map_err(|e| *e)?;
-        Ok(core.encode_ordinary(text).len() as u64)
+        core.count(text, scratch)
+
     }
 }
 #[derive(Clone, Copy)]
@@ -118,6 +113,7 @@ impl Counter {
             .and_then(|v| v.checked_add(TOKEN_REQUEST_OVERHEAD))
             .ok_or(Error::Overflow)?;
         let mut bytes = 0usize;
+        let mut scratch = None;
         let mut add = |text: &str| -> Result<(), Error> {
             if text.len() > self.bounds.text_bytes {
                 return Err(Error::InputBytes);
@@ -127,7 +123,7 @@ impl Counter {
                 .filter(|n| *n <= self.bounds.input_bytes)
                 .ok_or(Error::InputBytes)?;
             total = total
-                .checked_add(self.encoder.count(text)?)
+                .checked_add(self.encoder.count(text, &mut scratch)?)
                 .ok_or(Error::Overflow)?;
             Ok(())
         };

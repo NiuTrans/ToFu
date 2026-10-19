@@ -1,6 +1,6 @@
 """tests/provider_probe/test_probe_cells.py — Provider reachability classification.
 
-Covers ``lib.provider_probe.probe_one_cell`` — the provider-owned reachability
+Covers ``lib.provider.provider_probe.probe_one_cell`` — the provider-owned reachability
 boundary. We patch the HTTP layer so no network is touched and assert each
 HTTP status maps to the right verdict.
 """
@@ -24,8 +24,8 @@ class _FakeResp:
 class ProbeCellClassificationTest(unittest.TestCase):
 
     def _probe(self, status_code, text='', protocol='openai'):
-        import lib.provider_probe as probe
-        with mock.patch('lib.http_client.http_post',
+        import lib.provider.provider_probe as probe
+        with mock.patch('lib.http_transport.client.http_post',
                         return_value=_FakeResp(status_code, text)):
             return probe.probe_one_cell(
                 'https://gw.example.com/v1', 'sk-x', 'modelX', {}, 5, protocol)
@@ -164,8 +164,8 @@ class ProbeCellClassificationTest(unittest.TestCase):
         self.assertEqual(self._probe(503, 'service unavailable')[0], 'unavailable')
 
     def test_network_error_is_unavailable(self):
-        import lib.provider_probe as probe
-        with mock.patch('lib.http_client.http_post', side_effect=OSError('boom')):
+        import lib.provider.provider_probe as probe
+        with mock.patch('lib.http_transport.client.http_post', side_effect=OSError('boom')):
             status, _ = probe.probe_one_cell(
                 'https://gw.example.com/v1', 'sk-x', 'modelX', {}, 5)
         self.assertEqual(status, 'unavailable')
@@ -178,10 +178,10 @@ class ProbeMultiAttemptTest(unittest.TestCase):
     """`_probe_cell_multi` filters out FALSE 429s via retries."""
 
     def setUp(self):
-        # The cell-probe engine moved to lib/provider_probe.py (2026-06).
+        # The cell-probe engine moved to lib/provider/provider_probe.py (2026-06).
         # probe_cell_multi calls probe_one_cell THROUGH that module's global,
-        # so patches must target lib.provider_probe, not the routes re-export.
-        import lib.provider_probe as pp
+        # so patches must target lib.provider.provider_probe, not the routes re-export.
+        import lib.provider.provider_probe as pp
         self.pp = pp
 
     def _multi(self, statuses, attempts=3):
@@ -235,7 +235,7 @@ class ProbeSnapshotMigrationTest(unittest.TestCase):
     """Old cache must never preserve the v1 false-green contract."""
 
     def test_legacy_ok_http_400_becomes_bad_request(self):
-        import lib.provider_probe as pp
+        import lib.provider.provider_probe as pp
         snap = pp.normalize_probe_snapshot({
             'cells': {'0::fable': {
                 'status': 'ok', 'detail': 'HTTP 400',
@@ -251,7 +251,7 @@ class ProbeSnapshotMigrationTest(unittest.TestCase):
         self.assertEqual(snap['summary']['disable'], 1)
 
     def test_legacy_chat_200_is_neutral_until_retested(self):
-        import lib.provider_probe as pp
+        import lib.provider.provider_probe as pp
         snap = pp.normalize_probe_snapshot({
             'cells': {'0::m': {
                 'status': 'ok', 'detail': 'HTTP 200',
@@ -262,7 +262,7 @@ class ProbeSnapshotMigrationTest(unittest.TestCase):
         self.assertEqual(snap['summary']['neutral'], 1)
 
     def test_legacy_modality_200_keeps_validated_proof(self):
-        import lib.provider_probe as pp
+        import lib.provider.provider_probe as pp
         snap = pp.normalize_probe_snapshot({
             'cells': {'0::embed': {
                 'status': 'ok', 'detail': 'HTTP 200 via /embeddings',
@@ -278,7 +278,7 @@ class ProbeProtocolTest(unittest.TestCase):
     """``protocol='anthropic'`` probes the Messages API with anthropic auth."""
 
     def _capture(self, protocol):
-        import lib.provider_probe as probe
+        import lib.provider.provider_probe as probe
         seen = {}
 
         def fake_post(url, json=None, headers=None, timeout=None):
@@ -290,7 +290,7 @@ class ProbeProtocolTest(unittest.TestCase):
                        else {'choices': [{'message': {'content': 'OK'}}]})
             return _FakeResp(200, jsonlib.dumps(payload))
 
-        with mock.patch('lib.http_client.http_post', side_effect=fake_post):
+        with mock.patch('lib.http_transport.client.http_post', side_effect=fake_post):
             status, _ = probe.probe_one_cell(
                 'https://api.openai.com/v1/anthropic', 'app-id-123',
                 'yuju-claude-opus-4.7-evaDaily', {'M-X': '1'}, 5, protocol)
@@ -304,7 +304,7 @@ class ProbeProtocolTest(unittest.TestCase):
         self.assertEqual(seen['headers'].get('x-api-key'), 'app-id-123')
         self.assertEqual(seen['headers'].get('anthropic-version'), '2023-06-01')
         self.assertEqual(seen['headers'].get('M-X'), '1')  # extra_headers merged
-        import lib.provider_probe as _pp
+        import lib.provider.provider_probe as _pp
         self.assertEqual(seen['body']['max_tokens'], _pp._CHAT_PROBE_MAX_TOKENS)
         self.assertNotIn('stream', seen['body'])
 

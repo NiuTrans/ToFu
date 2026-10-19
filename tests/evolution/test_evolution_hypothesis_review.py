@@ -101,7 +101,7 @@ def test_idempotency_refuses_changed_hypothesis_before_new_dispatch(runtime):
 def test_missing_full_original_cannot_leave_positive_axes_as_verified():
     from lib.evolution import runs
     h = candidate()['hypothesis']
-    task = {'content': judgment(h, **dict.fromkeys(AXES, 'pass'))}
+    task = {'content': judgment(h, **dict.fromkeys(AXES, 'pass')), '_userId': OWNER}
     run = {'exploration_hypothesis': h, 'result_source': {
         'task_id': 'original', 'source_sha256': '1' * 64, 'total_chars': 50000}}
     parsed = runs._parse_review(task, run=run)

@@ -41,7 +41,7 @@ def test_startup_recovery_uses_cross_owner_maintenance_operation():
 
 
 def test_cross_owner_recovery_is_maintenance_not_user_command():
-    from lib.storage_sidecar.operation_domains.workflows import OPERATIONS
+    from lib.storage_authority_sql.operation_domains.workflows import OPERATIONS
 
     system_recovery = OPERATIONS[
         'orchestration.run.retire_interrupted_all']
@@ -52,7 +52,7 @@ def test_cross_owner_recovery_is_maintenance_not_user_command():
 
 
 def test_cross_owner_handler_has_no_synthetic_personal_owner():
-    from lib.storage_sidecar.operations_pkg._runs import (
+    from lib.storage_authority_sql.operations_pkg._runs import (
         _orchestration_run_retire_all,
     )
 

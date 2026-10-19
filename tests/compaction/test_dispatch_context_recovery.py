@@ -420,3 +420,20 @@ def test_continue_cannot_publish_unverified_or_omitted_prose(change, reason):
         task['_resumeContextHydrated'] = True
     assert prepare_completed_task(task) is None
     assert task['_modelReplayPublishStatus'] == reason
+
+
+def test_root_archive_restores_child_history_without_old_mailbox_authority(monkeypatch):
+    from lib.tasks_pkg.compaction._resume_projection import restore_compacted_resume
+    task = _task()
+    rounds = [_round(1)]
+    _, post, _ = _archive_fixture(monkeypatch, task, rounds)
+    post.insert(1, {'role': 'user', '_isMeta': True,
+                    'content': '<agent-message>historical evidence</agent-message>',
+                    '_swarmMessageIds': ['old-id'], '_swarmMessageMailbox': 'old-run'})
+    before = deepcopy(post)
+    restored = restore_compacted_resume(task, task['config'], rounds)
+    assert restored is not None
+    assert restored[1] == {'role': 'user', '_isMeta': True,
+                           'content': '<agent-message>historical evidence</agent-message>'}
+    assert post == before
+    assert '_swarmMessageBinding' not in task

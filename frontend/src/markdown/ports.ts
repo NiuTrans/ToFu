@@ -26,6 +26,9 @@ export interface MarkdownRenderEnvironment {
   readonly mathRenderer: MarkdownMathRenderer | null;
   readonly basePath: string;
   readonly projectActive: boolean;
+
+  readonly language?: string;
+  readonly text?: (key: string, fallback: string) => string;
 }
 
 export interface MarkdownRendererPorts {
@@ -42,5 +45,6 @@ export interface MarkdownRendererPorts {
 export function sameRenderEnvironment(a: MarkdownRenderEnvironment, b: MarkdownRenderEnvironment): boolean {
   return a.document === b.document && a.parser === b.parser && a.sanitizer === b.sanitizer
     && a.highlighter === b.highlighter && a.mathRenderer === b.mathRenderer
-    && a.basePath === b.basePath && a.projectActive === b.projectActive;
+    && a.basePath === b.basePath && a.projectActive === b.projectActive
+    && a.language === b.language && a.text === b.text;
 }

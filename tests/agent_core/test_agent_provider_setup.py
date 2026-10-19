@@ -253,9 +253,9 @@ def test_probe_uses_computed_deployment_without_persisting(
     captured = {}
 
     monkeypatch.setattr(
-        'lib.byo_egress.validate_egress_url', lambda url: captured.update(url=url))
+        'lib.byo.byo_egress.validate_egress_url', lambda url: captured.update(url=url))
     monkeypatch.setattr(
-        'lib.provider_probe.probe_one_cell',
+        'lib.provider.provider_probe.probe_one_cell',
         lambda base_url, api_key, model, headers, timeout_s, protocol: (
             captured.update(
                 base_url=base_url,

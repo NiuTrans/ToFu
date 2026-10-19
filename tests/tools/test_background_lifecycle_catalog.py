@@ -135,6 +135,8 @@ def test_gateway_projections_and_tiny_budget_keep_canonical_controls(gateway_onl
     fitted = gateway.fit_tool_schema_budget(projected, budget_tokens=1)
     by_name = {_name(tool): tool for tool in fitted}
     expected = {'poll', 'kill', 'execute_tools'}
+    if tier == 'program':
+        expected.add('execute_program')
     if not gateway_only:
         expected.add('search_tools')
     assert set(by_name) == expected

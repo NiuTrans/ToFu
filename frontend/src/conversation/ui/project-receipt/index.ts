@@ -6,6 +6,8 @@ import { renderBoardSnapshot, renderBoardTransition } from "./board";
 import { renderPeerStatus, renderPeerDelivery, renderCharterProposal } from "./peers";
 import { renderFeedActivity } from "./activity";
 import { renderCommitResult } from "./commit";
+
+import { renderConversationSearch, conversationSearchLabel } from "./search";
 import type { ProjectReceiptRound, ProjectReceiptMeta, ProjectReceiptPorts } from "./contracts";
 const PROJECT_RECEIPT_SOURCES: Record<string, [string, string]> = {
   Board: ["brainSrc.board", "Team board"],
@@ -17,6 +19,8 @@ const PROJECT_RECEIPT_SOURCES: Record<string, [string, string]> = {
 };
 
 function renderStructuredProjectBody(meta: ProjectReceiptMeta, ports: ProjectReceiptPorts): string {
+
+  if (meta.conversationSearch) return renderConversationSearch(meta.conversationSearch, ports);
   if (meta.boardSnapshot) return renderBoardSnapshot(meta.boardSnapshot, ports);
   if (meta.boardTransition) return renderBoardTransition(meta.boardTransition, ports);
   if (meta.peerStatus) return renderPeerStatus(meta.peerStatus, ports);
@@ -35,14 +39,15 @@ export function renderProjectReceipt(round: ProjectReceiptRound, svg: string, ba
   const source = (round.toolName === "project_commit") ? "Git" : (meta.source || "");
   const srcEntry = Object.hasOwn(PROJECT_RECEIPT_SOURCES, source) ? PROJECT_RECEIPT_SOURCES[source] : undefined;
   const sourceLabel = srcEntry ? _t(srcEntry[0], srcEntry[1]) : (source || "");
-  const sourceChip = sourceLabel
+  const sourceChip = sourceLabel && round.toolName !== "list_conversations"
     ? `<span class="ptool-convmeta-src">${escapeValue(sourceLabel)}</span>`
     : "";
   // Localized, plain-language header + a "why this ran / what it means"
   //   caption. Replaces the raw English backend display string (round.query)
   //   that the user found meaningless.
-  const headLabel = projectReceiptLabel(round, _t);
-  const purpose = projectReceiptPurpose(round, _t);
+  const headLabel = round.toolName === "list_conversations"
+    ? conversationSearchLabel(round, _t) : projectReceiptLabel(round, _t);
+  const purpose = round.toolName === "list_conversations" ? "" : projectReceiptPurpose(round, _t);
   const purposeHtml = purpose
     ? `<div class="ptool-convmeta-why">${escapeValue(purpose)}</div>`
     : "";

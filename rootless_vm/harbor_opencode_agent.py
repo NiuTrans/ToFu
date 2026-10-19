@@ -418,6 +418,21 @@ class OpenCodeGuestAgent(BaseAgent):
             except OpenCodeProjectionError as exc:
                 projection_error = str(exc)
         finally:
+            # Harbor timeouts cancel run() before its normal download path.
+            # Preserve partial CLI evidence before removing the owned guest
+            # directory. Host proxy rows remain the independent usage authority.
+            if not raw_host.exists():
+                async def preserve_partial():
+                    for guest, host in ((guest_raw, raw_host), (guest_stderr, stderr_host)):
+                        try:
+                            await environment.download_file(guest, host)
+                            host.chmod(0o600)
+                        except Exception:
+                            pass  # missing is unknown; never invent an empty trace
+                try:
+                    await asyncio.wait_for(preserve_partial(), timeout=30)
+                except Exception:
+                    pass  # preserve the original timeout/transport exception
             try:
                 await environment.exec(
                     f"rm -rf {shlex.quote(guest_attempt)}",

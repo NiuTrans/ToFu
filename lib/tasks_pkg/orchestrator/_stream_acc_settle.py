@@ -35,6 +35,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from lib.llm.stream_result import ProviderStreamResult
 from lib.log import get_logger
 
 logger = get_logger(__name__)
@@ -73,7 +74,13 @@ def settle_stream_accumulator(
     #   per-round complement of the task-end dangling sweep — BEFORE
     #   parse_tool_calls so the orphan never reaches the render/persist
     #   path unsettled.
-    stream_acc.reconcile_announced_rounds(rs.assistant_msg)
+    result = getattr(rs, 'last_stream_result', None)
+    unverified = isinstance(result, ProviderStreamResult) and not result.is_verified_complete
+    if unverified:
+        # A parseable prefix is not an adopted response. Retire announcements
+        # and speculative reads before retry/terminal policy sees this round.
+        stream_acc.on_provider_attempt_restart(reason='unverified provider stream')
+    stream_acc.reconcile_announced_rounds({} if unverified else rs.assistant_msg)
 
     # Read back updated tool_round_num from streaming accumulator
     #   (tool_start events emitted during streaming already consumed
@@ -81,6 +88,9 @@ def settle_stream_accumulator(
     if (stream_acc.announced_tc_map
             or getattr(stream_acc, 'announced_count', 0)):
         rs.tool_round_num = stream_acc.tool_round_num
+
+    if unverified:
+        return
 
     # Inject pre-computed streaming tool results into dedup cache.
     #   execute_tool_pipeline will find these and skip re-execution.

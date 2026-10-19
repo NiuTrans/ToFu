@@ -6,6 +6,7 @@ from lib.automations.management import AutomationManagement
 from lib.identity import PrincipalContext
 from lib.skills.automation.source_settings import AutomationSkillSources
 from tests.storage.test_storage_application_contract import application_storage as application_storage
+from tests.storage.test_storage_application_contract import application_storage_owner_id as application_storage_owner_id
 
 pytestmark = pytest.mark.api
 

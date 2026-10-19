@@ -1,0 +1,205 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "tofu.native-goal-actor-handoff/v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "format",
+    "claim_request",
+    "target_launch_sequence",
+    "target_account_sequence",
+    "target_cursor",
+    "target_reserved_micro",
+    "actors",
+    "account_frontiers"
+  ],
+  "properties": {
+    "format": {
+      "const": "tofu.native-goal-actor-handoff/v1"
+    },
+    "claim_request": {
+      "$ref": "native_goal_actor_claim_v1.schema.json"
+    },
+    "target_launch_sequence": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 18446744073709551615
+    },
+    "target_account_sequence": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 18446744073709551615
+    },
+    "target_cursor": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 18446744073709551615
+    },
+    "target_reserved_micro": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 18446744073709551615
+    },
+    "actors": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "source_task_id",
+          "target_task_id",
+          "target_registration_version"
+        ],
+        "properties": {
+          "source_task_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "target_task_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "target_registration_version": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 18446744073709551615
+          }
+        }
+      }
+    },
+    "account_frontiers": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "execution_account_frontier_v1.schema.json"
+      }
+    }
+  },
+  "$defs": {
+    "consumption_receipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "source_run_id",
+        "source_cursor",
+        "request_sha256",
+        "actors"
+      ],
+      "properties": {
+        "type": {
+          "const": "execution_recovery_consumed"
+        },
+        "source_run_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "source_cursor": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        },
+        "request_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "actors": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/consumed_actor"
+          }
+        }
+      }
+    },
+    "consumed_actor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_task_id",
+        "target_task_id",
+        "target_registration_version"
+      ],
+      "properties": {
+        "source_task_id": {
+          "$ref": "#/properties/actors/items/properties/source_task_id"
+        },
+        "target_task_id": {
+          "$ref": "#/properties/actors/items/properties/target_task_id"
+        },
+        "target_registration_version": {
+          "$ref": "#/properties/actors/items/properties/target_registration_version"
+        },
+        "preparation": {
+          "$ref": "#/$defs/invocation_preparation"
+        },
+        "effect_origin": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "task_id",
+            "parent_task_id"
+          ],
+          "properties": {
+            "task_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512
+            },
+            "parent_task_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512
+            }
+          }
+        }
+      },
+      "dependentRequired": {
+        "effect_origin": [
+          "preparation"
+        ]
+      }
+    },
+    "invocation_preparation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "key",
+        "kind",
+        "input_hash",
+        "invocation_id",
+        "invocation_completion"
+      ],
+      "properties": {
+        "type": {
+          "const": "execution_effect_prepared"
+        },
+        "key": {
+          "type": "string",
+          "minLength": 1
+        },
+        "kind": {
+          "const": "agent"
+        },
+        "input_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "invocation_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "invocation_completion": {
+          "type": "object",
+          "description": "Validated by the shared registered invocation completion binding owner and exact native registered-birth identity."
+        }
+      }
+    }
+  }
+}

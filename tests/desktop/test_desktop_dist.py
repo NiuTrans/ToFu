@@ -254,7 +254,7 @@ def test_an_agent_artifact_never_shadows_the_full_installer(tmp_store):
     introduced the moment it landed)."""
     _seed(tmp_store, 'Tofu-Setup-0.16.0-win64.exe', source='built',
           version='0.16.0', fetched_at=time.time() - 100)
-    agent = _entry('TofuAgent-Setup-0.16.0-win64.exe', source='built',
+    agent = _entry('TofuRemote-Setup-0.16.0-win64.exe', source='built',
                    version='0.16.0', label='Windows agent installer')
     agent['kind'] = 'agent'
     (tmp_store / agent['filename']).write_bytes(b'x' * 1024)
@@ -264,7 +264,7 @@ def test_an_agent_artifact_never_shadows_the_full_installer(tmp_store):
         'the agent shadowed the full installer on its own row')
     rows = store.find_for_platform('windows', 'x86_64', kind='agent')
     assert [r['filename'] for r in rows] == [
-        'TofuAgent-Setup-0.16.0-win64.exe']
+        'TofuRemote-Setup-0.16.0-win64.exe']
     # Legacy kindless entries read as 'full' — zero manifest migration.
     e = store.artifacts()['Tofu-Setup-0.16.0-win64.exe']
     assert 'kind' not in e
@@ -448,7 +448,7 @@ def test_the_real_downloader_streams_hashes_and_fsyncs(tmp_store,
         assert method == 'GET'
         yield _Resp()
 
-    monkeypatch.setattr('lib.http_client.http_stream', _stream)
+    monkeypatch.setattr('lib.http_transport.client.http_stream', _stream)
     dest = str(tmp_store / 'file.bin.part')
     size, sha = mirror._download('https://example.test/x', dest)
     body = b''.join(chunks)
@@ -472,7 +472,7 @@ def test_the_real_downloader_rejects_non_200_and_empty(tmp_store,
     def _stream(method, url, **kw):
         yield _Resp()
 
-    monkeypatch.setattr('lib.http_client.http_stream', _stream)
+    monkeypatch.setattr('lib.http_transport.client.http_stream', _stream)
     with pytest.raises(RuntimeError):
         mirror._download('https://example.test/x',
                          str(tmp_store / 'x.part'))
@@ -747,7 +747,7 @@ def test_the_status_endpoint_serves_downloads_with_the_network_hard_down(
         raise AssertionError('network touched in the request path')
 
     monkeypatch.setattr(platforms, 'fetch_latest_release', _boom)
-    monkeypatch.setattr('lib.http_client.http_get', _boom)
+    monkeypatch.setattr('lib.http_transport.client.http_get', _boom)
     monkeypatch.setattr(mirror, 'ensure_fresh', lambda *a, **k: False)
     r = flask_client.get('/api/v4/desktop/status',
                          headers={**_bearer(), 'User-Agent': _UA_WIN})
@@ -765,7 +765,7 @@ def test_the_status_payload_carries_both_component_downloads(
           version='0.16.0')
     agent = {'os': 'windows', 'arch': 'x86_64',
              'label': 'Windows agent installer',
-             'filename': 'TofuAgent-Setup-0.16.0-win64.exe',
+             'filename': 'TofuRemote-Setup-0.16.0-win64.exe',
              'size': 2048, 'sha256': 'ab' * 32, 'source': 'built',
              'version': '0.16.0', 'kind': 'agent',
              'fetched_at': time.time()}
@@ -781,11 +781,11 @@ def test_the_status_payload_carries_both_component_downloads(
         'Tofu-Setup-0.16.0-win64.exe']
     assert body['downloads'][0]['kind'] == 'full'
     assert [d['filename'] for d in body['agent_downloads']] == [
-        'TofuAgent-Setup-0.16.0-win64.exe']
+        'TofuRemote-Setup-0.16.0-win64.exe']
     ad = body['agent_downloads'][0]
     assert ad['kind'] == 'agent' and ad['hosted'] == 'server'
     assert ad['size'] == 2048
-    assert '/api/v4/desktop/download/TofuAgent-Setup-0.16.0-win64.exe' \
+    assert '/api/v4/desktop/download/TofuRemote-Setup-0.16.0-win64.exe' \
         in ad['url']
     # No preseed recorded ⇒ nothing advertised (the panel then renders
     # the mint-and-paste flow, never a false auto-connect promise).
@@ -816,11 +816,11 @@ def test_the_status_payload_advertises_only_usable_preseeds(
         assert r.status_code == 200
         return r.get_json()['agent_downloads'][0]
 
-    _seed_agent('TofuAgent-Setup-0.16.0-win64.exe', '0.16.0',
+    _seed_agent('TofuRemote-Setup-0.16.0-win64.exe', '0.16.0',
                 'http://127.0.0.1:15000')
     assert _agent_row()['preseed_url'] == '', (
         'a loopback preseed must never be advertised as auto-connect')
-    _seed_agent('TofuAgent-Setup-0.16.1-win64.exe', '0.16.1',
+    _seed_agent('TofuRemote-Setup-0.16.1-win64.exe', '0.16.1',
                 'https://tofu.example.com')
     assert _agent_row()['preseed_url'] == 'https://tofu.example.com'
 
@@ -953,7 +953,7 @@ def test_the_windows_autobuild_gate(tmp_store, flask_client, monkeypatch):
     kicks.clear()
     agent = {'os': 'windows', 'arch': 'x86_64',
              'label': 'Windows agent installer',
-             'filename': 'TofuAgent-Setup-0.16.0-win64.exe',
+             'filename': 'TofuRemote-Setup-0.16.0-win64.exe',
              'size': 1024, 'sha256': 'ab' * 32, 'source': 'built',
              'version': '0.16.0', 'kind': 'agent',
              'fetched_at': time.time()}

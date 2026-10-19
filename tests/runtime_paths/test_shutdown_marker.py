@@ -30,7 +30,7 @@ def _restore_data_root_after_test():
         os.environ.pop('TOFU_DATA_DIR', None)
     else:
         os.environ['TOFU_DATA_DIR'] = original
-    import lib.runtime_paths as rp
+    import lib.runtime.runtime_paths as rp
     importlib.reload(rp)
     import lib.shutdown_marker as sm
     importlib.reload(sm)
@@ -43,7 +43,7 @@ def _fresh_marker_module(data_dir):
     reload both modules to bind the temp dir.
     """
     os.environ['TOFU_DATA_DIR'] = data_dir
-    import lib.runtime_paths as rp
+    import lib.runtime.runtime_paths as rp
     importlib.reload(rp)
     import lib.shutdown_marker as sm
     importlib.reload(sm)

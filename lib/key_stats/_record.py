@@ -28,7 +28,7 @@ def _entry_for_update(stats: dict, pk: str) -> dict:
 
 
 def record_outcome(provider_id: str, key_name: str, success: bool,
-                   error: str = '') -> None:
+                   error: str = '', *, credential_failure: bool = False) -> None:
     """Record a single request outcome (non-429).
 
     Called from Slot.record_success / Slot.record_error. Must be cheap:
@@ -37,6 +37,10 @@ def record_outcome(provider_id: str, key_name: str, success: bool,
     Rate-limit (HTTP 429) errors should call :func:`record_rate_limit`
     instead — they're tracked separately because they reflect contention
     or balance exhaustion, not request-level key health.
+
+    ``failure`` retains request telemetry. Only an explicitly attributed
+    credential failure contributes to automatic key disabling; legacy and
+    unclassified failures must never acquire that authority retroactively.
     """
     if not key_name:
         return
@@ -53,6 +57,10 @@ def record_outcome(provider_id: str, key_name: str, success: bool,
             entry['failure'] = int(entry.get('failure') or 0) + 1
             if error:
                 entry['last_error'] = str(error)[:200]
+            if credential_failure:
+                entry['credential_failures'] = (
+                    int(entry.get('credential_failures') or 0) + 1)
+                entry['last_credential_error'] = str(error)[:200]
 
     with _lock:
         _update_store_unlocked(_mutate)
@@ -107,8 +115,8 @@ def record_gateway_error(provider_id: str, key_name: str,
     (pure UI telemetry, like ``rate_limited``):
       * NOT ``failure`` — the success-rate denominator and the
         auto-disable gate must never see a gateway storm. The dead-key
-        safety net lives on the unchanged classes instead: auth death
-        (401/403) and endpoint-unreachable still record genuine failures.
+        safety net requires explicit credential rejection; endpoint failures
+        and model-specific permissions never prove a bad key.
       * NOT ``consecutive_429`` — the 429 streak is per-key contention
         telemetry.
       * NOT ``last_error`` — a bare ``<html>`` 502 body is diagnostic

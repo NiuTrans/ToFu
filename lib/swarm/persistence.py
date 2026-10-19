@@ -52,9 +52,16 @@ def _storage(*, write: bool = False):
     return get_storage_client(write=write)
 
 
-def _command(operation: str, payload: dict) -> dict:
+def _command(operation: str, payload: dict, *, task: dict | None = None,
+             cancellable: bool = True) -> dict:
     command_id = f'{operation}:{uuid.uuid4().hex}'
-    return _storage(write=True).command(operation, payload, command_id)
+    if task is None:
+        return _storage(write=True).command(operation, payload, command_id)
+    from copy import deepcopy
+    from lib.tasks_pkg.persistence_wait import wait_for_persistence
+    frozen = deepcopy(payload)
+    return wait_for_persistence(task, lambda: _storage(write=True).command(
+        operation, frozen, command_id), label=operation, cancellable=cancellable)
 
 
 # ═══════════════════════════════════════════════════════════
@@ -152,7 +159,8 @@ def save_agent(swarm_key: str, agent_id: str, *,
                role: str, objective: str, status: str,
                messages: list, result: dict | None = None,
                rounds_used: int = 0, delivered: bool | None = None,
-               required: bool = False) -> None:
+               required: bool = False, task: dict | None = None,
+               cancellable: bool = True) -> None:
     """Upsert one agent's checkpoint.
 
     ``messages`` is the agent's full conversation array — the resumable state.
@@ -175,7 +183,7 @@ def save_agent(swarm_key: str, agent_id: str, *,
             'rounds_used': rounds_used,
             'delivered': delivered,
             'now_ms': now,
-        })
+        }, task=task if required else None, cancellable=cancellable)
         logger.debug('[SwarmPersist] saved agent key=%s id=%s status=%s rounds=%d msgs=%d',
                      swarm_key, agent_id, status, rounds_used, len(messages or []))
     except Exception as e:

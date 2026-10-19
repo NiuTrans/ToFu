@@ -9,7 +9,7 @@ import time as _time
 
 from lib.log import get_logger
 from lib.scheduler.executor._common import _coerce_int_arg
-from lib.task_replay import TASK_REPLAY_TERMINAL_STATUSES
+from lib.task_replay.task_replay import TASK_REPLAY_TERMINAL_STATUSES
 
 logger = get_logger(__name__)
 

@@ -267,7 +267,7 @@ def _ensure_durable_session_directory(directory):
         _sync_journal_directory(os.path.dirname(current))
 
 
-def _get_session_dir(base_path):
+def _get_session_dir(base_path, *, create=True):
     """Get session directory for storing modification history."""
     if not base_path:
         return None
@@ -275,7 +275,7 @@ def _get_session_dir(base_path):
     session_dir = os.path.join(SESSIONS_DIR, session_id)
     # The outer admission already initialized and flushed this directory.
     # Nested recovery/recording must not re-fsync its ancestors at every layer.
-    if session_state(session_dir) is None:
+    if create and session_state(session_dir) is None:
         _ensure_durable_session_directory(session_dir)
         _remember_project_root(session_dir, base_path)
     return session_dir
@@ -706,6 +706,28 @@ def _record_modification(base_path, mod_type, path, original_content=None, rever
         mod['basePath'] = os.path.abspath(base_path) if base_path else ''
     except Exception as e:
         logger.debug('[Modifications] basePath abspath failed for %s: %s', base_path, e)
+    # Freeze auxiliary-worktree capability before the checkout can be merged
+    # or removed. A task's primary managed checkout keeps normal undo; a
+    # manually added checkout sharing its Git history is display evidence,
+    # not authority for the single-root undo gateway to undo canonical bytes.
+    try:
+        from lib.project_mod.config import get_conv_roots
+        from lib.project_mod.write_tools._paths import _git_common_dir
+        execution_roots = get_conv_roots(conv_id)
+        primary = next(iter(execution_roots.values()), {}).get('path')
+        abs_base = mod.get('basePath')
+        if primary and abs_base:
+            for name, state in execution_roots.items():
+                if os.path.abspath(state['path']) == abs_base:
+                    mod['root'] = name
+                    break
+            if os.path.abspath(primary) != abs_base:
+                common = _git_common_dir(abs_base)
+                if common and common == _git_common_dir(primary):
+                    mod['undoAvailable'] = False
+    except Exception as error:
+        logger.debug('[Modifications] auxiliary root capability probe failed: %s',
+                     type(error).__name__)
     from lib.project_mod.tool_admission import journal_conv_id
     conv_id = journal_conv_id(conv_id)
     if conv_id:
@@ -723,7 +745,7 @@ def _record_modification(base_path, mod_type, path, original_content=None, rever
         with _lock:
             for rn, rs in _roots.items():
                 if os.path.abspath(rs['path']) == abs_base:
-                    mod['root'] = rn
+                    mod.setdefault('root', rn)
                     break
     except Exception as e:
         logger.debug('[Modifications] root-name lookup failed for %s: %s', base_path, e)
@@ -823,6 +845,8 @@ def _record_modification(base_path, mod_type, path, original_content=None, rever
             **({'rootPath': mod['basePath']} if mod.get('basePath') else {}),
             'action': action or _default_live_action(mod_type, mod.get('existed', True)),
             **({'root': mod['root']} if mod.get('root') else {}),
+
+            **({'undoAvailable': False} if mod.get('undoAvailable') is False else {}),
         }
         for listener in listeners:
             try:
@@ -849,6 +873,44 @@ def get_modifications(base_path, conv_id=None, *, include_content=True):
         if not include_content:
             return [dict(mod) for mod in mods]
         return [undo_payloads.hydrate_record(session_dir, mod) for mod in mods]
+
+
+@_with_recovered_session
+def get_task_modification_paths(base_path, task_id, *, conv_id=None, limit,
+                                exclude=()):
+    """Project at most ``limit`` distinct exact-task file addresses.
+
+    Recovery and journal identity validation are the same as ordinary history
+    reads. Borrow the validated cache under session admission, without copying
+    historical rows or hydrating undo contents. A cold cache still loads the
+    complete authoritative index; this is a bounded projection, not a new index.
+    Returned dictionaries contain only immutable string values, never cache rows.
+    """
+    if type(limit) is not int or limit < 0:
+        raise ValueError('Modification path limit must be a nonnegative integer')
+    if not task_id or not limit:
+        return []
+    session_dir = _get_session_dir(base_path)
+    if not session_dir:
+        return []
+    seen = set(exclude)
+    result = []
+    with locked_session(session_dir):
+        for row in _cache_get(session_dir):
+            if row.get('taskId') != task_id or (conv_id and row.get('convId') != conv_id):
+                continue
+            path = row.get('path')
+            root = row.get('basePath') or base_path
+            if not isinstance(path, str) or not path or str(root).startswith('remote:'):
+                continue
+            address = (path, str(root))
+            if address in seen:
+                continue
+            seen.add(address)
+            result.append({'path': path, 'rootPath': str(root)})
+            if len(result) >= limit:
+                break
+    return result
 
 
 @_with_recovered_session
@@ -1104,7 +1166,7 @@ def redo_task_modifications(base_path, task_id):
     Unlike undo_*, this does NOT replay individual modification records —
     instead it locates the snapshot tagged with ``task_id`` and calls
     :func:`lib.file_history.restore_from` to re-apply the full set of
-    file versions atomically.  Returns the same shape as
+    file versions with per-file anchored mutations. Returns the same shape as
     :func:`undo_task_modifications` so the frontend can reuse display code.
     """
     try:
@@ -1122,8 +1184,11 @@ def redo_task_modifications(base_path, task_id):
                 'error': 'No snapshot found for this task (was it ever committed?)'}
     result = fh.restore_from(base_path, snap_id)
     if not result.get('ok'):
+        files = [f['path'] for f in result.get('files', [])]
         return {'ok': False, 'taskId': task_id,
-                'error': result.get('error') or 'restore failed'}
+                'error': result.get('error') or 'restore failed',
+                'redone': len(files), 'files': files,
+                'details': {'failed': result.get('failed', [])}}
     files = [f.get('path') for f in result.get('files', []) if f.get('path')]
     logger.info('[Modifications] redo task=%s files=%d snap=%s',
                 task_id, len(files), snap_id[:8])

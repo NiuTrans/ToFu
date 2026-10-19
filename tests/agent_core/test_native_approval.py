@@ -36,6 +36,39 @@ class NativeApprovalTests(unittest.IsolatedAsyncioTestCase):
             control.consume(tool)
         self.assertEqual(process.stdin.frames[0]['decision'],'auto_write_mode')
 
+    async def test_absent_deadline_preserves_approval_and_cancellation_join(self):
+        entered,release=asyncio.Event(),asyncio.Event()
+        class Policy:
+            async def decide(self,request):
+                self_request.append(request)
+                entered.set()
+                await release.wait()
+                return 'human'
+        self_request=[]
+        control,process=self.control(Policy())
+        run=asyncio.create_task(control.handle(dict(frame(),remaining_ms=None),process))
+        await entered.wait()
+        self.assertIsNone(self_request[0].remaining_seconds)
+        run.cancel()
+        await asyncio.sleep(0)
+        self.assertTrue(self_request[0].cancelled.is_set())
+        self.assertFalse(run.done())
+        release.set()
+        with self.assertRaises(asyncio.CancelledError):await run
+        self.assertEqual(control.pending,{})
+        self.assertEqual(process.stdin.frames[-1]['decision'],'denied')
+
+    async def test_missing_or_invalid_remaining_time_refuses_before_policy(self):
+        calls=[]
+        class Policy:
+            async def decide(self,request):calls.append(request);return 'human'
+        for value in [0,-1,True,1.5,'unlimited','missing']:
+            control,process=self.control(Policy())
+            request=dict(frame(),remaining_ms=value)
+            if value=='missing':request.pop('remaining_ms')
+            with self.assertRaises(NativeProcessError):await control.handle(request,process)
+        self.assertEqual(calls,[])
+
     async def test_changed_arguments_or_caller_cannot_execute_and_consumes_the_old_proof(self):
         class Policy:
             async def decide(self,_request): return 'human'
@@ -130,4 +163,8 @@ class NativeApprovalTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(values,_ApprovalControl.AUTHORITIES|{'denied','failed'})
 
 
-if __name__=='__main__':unittest.main()
+if __name__ == '__main__':
+    # Use the shared pytest storage and lifecycle isolation for direct runs.
+    import sys as _runner_sys
+    import pytest
+    raise SystemExit(pytest.main([__file__, *_runner_sys.argv[1:]]))

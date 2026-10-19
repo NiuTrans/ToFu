@@ -31,7 +31,7 @@ from lib.orchestration.mutation_endpoint_contract import (
     mutation_endpoint_contracts,
 )
 from lib.orchestration.runtime_wire_contracts import run_start_response_schema
-from lib.task_replay import live_task_replay_response_schema
+from lib.task_replay.task_replay import live_task_replay_response_schema
 
 
 def _mutation_required_fields() -> tuple[str, ...]:

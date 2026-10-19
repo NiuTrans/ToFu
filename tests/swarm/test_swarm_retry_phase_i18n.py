@@ -103,8 +103,10 @@ class TestSharedRetryPhaseFields(unittest.TestCase):
             'Waiting for model (rate-limited)',
             'Waiting for model (retry backoff)',
             'Waiting for model (shared project limit)',
+            'Waiting for network recovery',
             'Key balance exhausted',
             'Rate limited (429)',
+            'Subscription quota reached',
             'Upstream error',
         }
         self.assertEqual(set(RETRY_REASON_KEYS), expected)

@@ -3,6 +3,8 @@
 This optional distribution owns provider contracts, immutable plans, external
 operation checkpoints and the Tofu tool adapter. Read README.md first.
 
+`schemas.py` defines shared native/MCP arguments; `mcp_adapter.py` invokes the
+existing services and `mcp_server.py` owns only protocol and connection cleanup.
 The SDK and public providers contain no vendor hosts or credentials. Provider
 side effects happen only after authorization and a successful repository CAS.
 Never retry an uncertain external write. Every owner/project is explicit.

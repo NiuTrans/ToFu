@@ -78,3 +78,11 @@ fn dialect_validation_keeps_local_output_admission_and_explicit_policy() {
     assert!(serde_json::to_vec(&Body { profile:Profile::Codex, template:template.as_object().unwrap(), messages:&[], output:Some(7), replay:false, reverse:&Default::default() }).is_err());
     println!("profile_bytes={} previous_policy_bytes={} profiled_policy_bytes={}",std::mem::size_of::<Profile>(),std::mem::size_of::<(tofu_runtime::responses::Budget,bool)>(),std::mem::size_of::<(tofu_runtime::responses::Budget,bool,Profile)>());
 }
+
+#[test]
+fn cache_key_is_bounded_and_only_admitted_for_explicit_codex_dialect() {
+    for (profile,key) in [(Profile::Compatible,json!("key")),(Profile::Codex,json!("")),(Profile::Codex,json!(true)),(Profile::Codex,json!("x".repeat(tofu_runtime::execution_contract::MODEL_CACHE_AFFINITY_KEY_BYTES+1)))] {
+        let template=json!({"model":"fixture","max_tokens":100,"prompt_cache_key":key});
+        assert!(serde_json::to_vec(&Body{profile,template:template.as_object().unwrap(),messages:&[],output:None,replay:false,reverse:&Default::default()}).is_err());
+    }
+}

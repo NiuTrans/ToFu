@@ -12,6 +12,7 @@ trusting every future producer.
 """
 
 import copy
+import json
 import logging
 
 from jsonschema import Draft7Validator
@@ -608,7 +609,7 @@ class TestPrepareRequestBoundary:
                 }
 
         def post(_url, **kwargs):
-            captured['body'] = kwargs['json']
+            captured['body'] = kwargs['json'] if 'json' in kwargs else json.loads(kwargs['data'])
             return Response()
 
         monkeypatch.setattr(chat_module, 'http_post', post)

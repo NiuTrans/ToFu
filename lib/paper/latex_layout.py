@@ -40,6 +40,7 @@ import os
 import re
 import subprocess
 from pathlib import Path
+from collections.abc import Iterable
 
 from lib.log import get_logger
 
@@ -418,7 +419,7 @@ _SYNCTEX_BOX_RE = re.compile(
 _BODY_BOTTOM_EPS_BP = 3.0
 
 
-def parse_synctex(raw: str) -> dict:
+def parse_synctex(raw: str | Iterable[str]) -> dict:
     """Decode a raw (decompressed) ``.synctex`` body into a queryable map.
 
     Returns ``{inputs, by_line, hbox_last_by_line, lines_by_tag,
@@ -445,7 +446,7 @@ def parse_synctex(raw: str) -> dict:
     page = None
     max_page = 0
 
-    for line in raw.split('\n'):
+    for line in raw.split('\n') if isinstance(raw, str) else raw:
         if not line:
             continue
         c = line[0]

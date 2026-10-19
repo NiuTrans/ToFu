@@ -111,7 +111,7 @@ def test_wire_controls_survive_routing_ptc_and_tiny_budget(
     names = set(_functions(plan.body))
     if programmatic_mode != 'off':
         assert plan.programmatic_backend == 'local'
-        assert 'execute_tools' in names
+        assert ('execute_program' if tier == 'program' else 'execute_tools') in names
     if search_mode == 'local' and exposure != 'gateway_only':
         assert 'search_tools' in names
     if search_mode == 'local' or exposure == 'gateway_only':
@@ -211,7 +211,7 @@ def test_real_assembly_reaches_gateway_only_wire_with_canonical_controls(
     assert plan.programmatic_backend == 'local'
     assert body == before
     _assert_canonical(plan.body)
-    assert set(_functions(plan.body)) == {'poll', 'kill', 'execute_tools'}
+    assert set(_functions(plan.body)) == {'poll', 'kill', 'execute_tools', 'execute_program'}
 
 
 def test_read_only_worker_authority_cannot_regain_stale_lifecycle_controls():
@@ -227,7 +227,7 @@ def test_read_only_worker_authority_cannot_regain_stale_lifecycle_controls():
     })
     plan = _request(body)
     assert plan.programmatic_backend == 'local'
-    assert set(_functions(plan.body)) == {'execute_tools'}
+    assert set(_functions(plan.body)) == {'execute_tools', 'execute_program'}
 
 
 def test_gateway_only_hidden_count_does_not_count_persistent_controls():
@@ -245,7 +245,7 @@ def test_gateway_only_hidden_count_does_not_count_persistent_controls():
         api_protocol='openai')
     _assert_canonical(plan.body)
     assert decision['programmaticHiddenDirectToolCount'] == 18
-    assert set(_functions(plan.body)) == {'poll', 'kill', 'execute_tools'}
+    assert set(_functions(plan.body)) == {'poll', 'kill', 'execute_program'}
 
 
 @pytest.mark.parametrize('search_mode', ['off', 'auto'])

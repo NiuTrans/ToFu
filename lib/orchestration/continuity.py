@@ -12,27 +12,25 @@ Election is durable: the startup retire maintenance operation returns freshly
 settled runs and pending Chat Goal handoffs from earlier generations; the
 composition root hands them here once after readiness. A candidate already carrying a recovery claim is
 skipped, so repeated passes never spawn twice. Refusals, resumes, deferrals
-and crash-loop exhaustion land as typed ``continuity_*`` audit events on the
+land as typed ``continuity_*`` audit events on the
 source run's durable stream.
 """
 
 from __future__ import annotations
 
 import os
-import time
 
 from lib.log import get_logger
 from lib.orchestration.events import CONTINUITY_EVENT_TYPES
 
 logger = get_logger(__name__)
 
+
+# Exhausted remains a historical event alias; this pass no longer produces it.
 EVENT_RESUMED, EVENT_REFUSED, EVENT_DEFERRED, EVENT_EXHAUSTED = (
     CONTINUITY_EVENT_TYPES)
 
 _REFUSAL_REASON_CHARS = 300
-_LINEAGE_WALK_LIMIT = 16
-_RESUME_WINDOW_SECONDS = 600
-_MAX_RESUMES_IN_WINDOW = 3
 
 
 def auto_resume_enabled(environ=None) -> bool:
@@ -40,33 +38,6 @@ def auto_resume_enabled(environ=None) -> bool:
     env = os.environ if environ is None else environ
     return str(env.get('TOFU_CONTINUITY_AUTO_RESUME', '')
                ).strip().lower() not in ('0', 'off', 'false', 'no')
-
-
-def max_resumes_per_boot(environ=None) -> int:
-    """Use launch-derived task capacity unless the operator sets a boot bound.
-
-    This bounds recovery admissions without changing normal worker dispatch.
-    """
-    from runtime_guards import (
-        MAX_TASK_CONCURRENCY, resolve_resource_budget,
-        task_concurrency_hard_ceiling,
-    )
-
-    env = os.environ if environ is None else environ
-    raw = str(env.get('TOFU_CONTINUITY_AUTO_RESUME_MAX', '')).strip()
-    try:
-        value = int(raw) if raw else 0
-    except ValueError:
-        value = 0
-    if value > 0:
-        return min(MAX_TASK_CONCURRENCY, value)
-    workers = resolve_resource_budget(
-        'TOFU_AGENT_WORKERS', env, minimum=1, maximum=MAX_TASK_CONCURRENCY)
-    admission = resolve_resource_budget(
-        'TOFU_MAX_INFLIGHT_TASKS', env, minimum=0,
-        maximum=MAX_TASK_CONCURRENCY)
-    return max(1, min(workers, admission or workers,
-                      task_concurrency_hard_ceiling(env)))
 
 
 def _append_source_event(runs, run_id: str, event: dict) -> bool:
@@ -99,54 +70,8 @@ def _source_claim_exists(runs, run_id: str) -> bool:
         cursor = page.next_cursor
 
 
-def _journal_parent(runs, run_id: str) -> str:
-    """First journal header's parent link; '' when absent or unreadable."""
-    from lib.goal_runs.journal_codec import decode_events
-    def packets():
-        cursor = 0
-        while True:
-            page = runs.replay(run_id, cursor)
-            if page is None or page.cursor_reset:
-                return
-            yield from page.events
-            if page.caught_up or page.next_cursor <= cursor:
-                return
-            cursor = page.next_cursor
-    for event in decode_events(packets()):
-        if event.get('type') == 'execution_journal_start':
-            parent = event.get('parent_run_id')
-            return parent if isinstance(parent, str) else ''
-    return ''
-
-
-def _rapid_lineage_resumes(runs, run_id: str, *, now_ms: int) -> int:
-    """Count recovery links retired inside the crash-loop window.
-
-    Healthy restarts are days apart and never trip the guard; a boot loop
-    leaves a chain of just-retired successors minutes apart. The walk is
-    bounded and follows journal parent links only, never run-id naming.
-    """
-    window_ms = _RESUME_WINDOW_SECONDS * 1000
-    count = 0
-    current = run_id
-    for _ in range(_LINEAGE_WALK_LIMIT):
-        snapshot = runs.get_execution_snapshot(current)
-        if snapshot is None:
-            break
-        finished = int(snapshot.get('finished_at') or 0)
-        if finished and now_ms - finished <= window_ms:
-            count += 1
-        else:
-            break
-        parent = _journal_parent(runs, current)
-        if not parent:
-            break
-        current = parent
-    return count
-
-
 def _resume_candidate(candidate: dict, *, runtime, definition_service_for_owner,
-                      run_service_for_owner, resume_for_created_by=None) -> str:
+                      run_service_for_owner, resume_for_created_by=None, before_submit=None) -> str:
     """Run the ordinary explicit-resume protocol for one retired run."""
     from lib.orchestration.runtime_start_service import (
         OrchestrationRuntimeStartService,
@@ -156,7 +81,8 @@ def _resume_candidate(candidate: dict, *, runtime, definition_service_for_owner,
     callback = (resume_for_created_by or {}).get(candidate.get('created_by'))
     if callback is not None:
         return callback(run_service_for_owner(owner, tenant),
-                        str(candidate['run_id']), owner_user_id=owner, tenant_id=tenant)
+                        str(candidate['run_id']), owner_user_id=owner, tenant_id=tenant,
+                        **({'before_submit': before_submit} if before_submit is not None else {}))
     service = OrchestrationRuntimeStartService(
         runtime,
         definition_service=lambda: definition_service_for_owner(owner, tenant),
@@ -191,6 +117,7 @@ def run_boot_continuity_pass(
     definition_service_for_owner=None,
     run_service_for_owner=None,
     resume_for_created_by=None,
+    source_cursor_bound_created_by=frozenset(),
     environ=None,
     now: float | None = None,
 ) -> dict:
@@ -224,54 +151,53 @@ def run_boot_continuity_pass(
         )
         run_service_for_owner = lambda owner, tenant: OrchestrationRunService(
             SidecarOrchestrationRunStore(owner, tenant_id=tenant))
-    capacity = max_resumes_per_boot(environ)
-    now_ms = int((time.time() if now is None else now) * 1000)
     for row in rows:
         run_id = str(row.get('run_id') or '')
         if not run_id or row.get('created_by') not in auto_created_by:
             summary['skipped'] += 1
             continue
+        source_issued = False
+        source_cursor_bound = row.get('created_by') in source_cursor_bound_created_by
         try:
             runs = run_service_for_owner(
                 int(row['user_id']), str(row.get('tenant_id') or ''))
             if _source_claim_exists(runs, run_id):
                 summary['skipped'] += 1
                 continue
-            if summary['resumed'] >= capacity:
-                _append_source_event(runs, run_id, {
-                    'type': EVENT_DEFERRED, 'reason': 'boot_capacity',
-                    'capacity': capacity})
-                summary['deferred'] += 1
-                continue
-            if _rapid_lineage_resumes(runs, run_id, now_ms=now_ms) \
-                    >= _MAX_RESUMES_IN_WINDOW:
-                _append_source_event(runs, run_id, {
-                    'type': EVENT_EXHAUSTED,
-                    'window_seconds': _RESUME_WINDOW_SECONDS,
-                    'max_resumes': _MAX_RESUMES_IN_WINDOW})
-                summary['exhausted'] += 1
-                continue
+            def before_submit():
+                nonlocal source_issued
+                from lib.orchestration.execution_journal import RecoveryDeferred
+                if source_issued or not _append_source_event(runs, run_id, {
+                        'type': EVENT_DEFERRED, 'automatic': True,
+                        'reason': 'awaiting_successor_journal'}):
+                    raise RecoveryDeferred('Recovery source audit was not acknowledged before submission')
+                source_issued = True
             successor = _resume_candidate(
                 row, runtime=runtime,
                 definition_service_for_owner=definition_service_for_owner,
                 run_service_for_owner=run_service_for_owner,
-                resume_for_created_by=resume_for_created_by)
-            acknowledged = _source_claim_exists(runs, run_id)
-            _append_source_event(runs, run_id, {
-                'type': EVENT_RESUMED if acknowledged else EVENT_DEFERRED,
-                'successor_run_id': successor, 'automatic': True,
-                **({} if acknowledged else {'reason': 'awaiting_successor_journal'})})
+                resume_for_created_by=resume_for_created_by,
+                before_submit=before_submit if source_cursor_bound else None)
+            # An asynchronous executor may already have read this exact source
+            # cursor. Its claim/consumption owners now own all further writes.
+            if not source_cursor_bound:
+                acknowledged = _source_claim_exists(runs, run_id)
+                _append_source_event(runs, run_id, {
+                    'type': EVENT_RESUMED if acknowledged else EVENT_DEFERRED,
+                    'successor_run_id': successor, 'automatic': True,
+                    **({} if acknowledged else {'reason': 'awaiting_successor_journal'})})
             summary['resumed'] += 1
         except Exception as exc:  # one bad candidate never blocks the others
-            retryable = _retryable_recovery_failure(exc)
+            retryable = source_issued or _retryable_recovery_failure(exc)
             event_type = EVENT_DEFERRED if retryable else EVENT_REFUSED
             reason = str(exc)[:_REFUSAL_REASON_CHARS]
             logger.warning('[Continuity] auto-resume %s run=%s: %s',
                            'deferred' if retryable else 'refused', run_id, reason)
             try:
-                _append_source_event(runs, run_id, {
-                    'type': event_type, 'reason': reason,
-                    **({'retryable': True} if retryable else {})})
+                if not source_issued:
+                    _append_source_event(runs, run_id, {
+                        'type': event_type, 'reason': reason,
+                        **({'retryable': True} if retryable else {})})
             except Exception:
                 logger.warning('[Continuity] recovery decision event failed run=%s',
                                run_id, exc_info=True)
@@ -281,5 +207,5 @@ def run_boot_continuity_pass(
 
 __all__ = [
     'EVENT_RESUMED', 'EVENT_REFUSED', 'EVENT_DEFERRED', 'EVENT_EXHAUSTED',
-    'auto_resume_enabled', 'max_resumes_per_boot', 'run_boot_continuity_pass',
+    'auto_resume_enabled', 'run_boot_continuity_pass',
 ]

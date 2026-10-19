@@ -1,0 +1,34 @@
+{
+  "version": "motion-continuity-v1",
+  "duration_s": 12,
+  "beats": [
+    {
+      "id": "seed",
+      "start_s": 0,
+      "end_s": 4,
+      "purpose": "Introduce one teal square as a small idea in a spacious, paper-colored world. Let the camera begin its journey before the next beat."
+    },
+    {
+      "id": "network",
+      "start_s": 4,
+      "end_s": 8,
+      "purpose": "Round the original square into the center of an unfolding network. Connections grow from it while the same world pulls back and turns.",
+      "handoff": {
+        "kind": "transform",
+        "carrier_id": "continuity-seed",
+        "reason": "The same visible seed moves and scales continuously through 3.8–4.2 seconds as the camera pulls back and its connections unfold; it is never replaced."
+      }
+    },
+    {
+      "id": "signal",
+      "start_s": 8,
+      "end_s": 12,
+      "purpose": "Carry the network center across the frame and turn it into a diamond emblem. Its existing satellite nodes become radial signal marks, then the film breathes.",
+      "handoff": {
+        "kind": "transform",
+        "carrier_id": "continuity-seed",
+        "reason": "The original hub travels left and rotates through 7.8–8.2 seconds while the network gathers into a signal. The carrier and its parent world retain their DOM identities."
+      }
+    }
+  ]
+}

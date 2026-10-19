@@ -1,44 +1,22 @@
 #!/usr/bin/env python3
-"""Affected-test selection (P2-3 — docs/TESTING_STRATEGY.md §4).
+"""Select affected Python tests for the inner loop; not a release certificate.
 
-WHY
----
-The unit tier measured 19m58s at 16 workers (2026-08-04) — past the ~15min
-industry threshold for an inner iteration loop. The full suite stays the GATE
-(CI / pre-push); this script is the LOOP: given the files you changed, run the
-tests that can actually see them.
-
-HOW (no ML — a transparent, auditable mapping beats a model at 15k tests)
----
-  index : test file → source files it references, extracted statically:
-          • AST imports    (``import lib.foo.bar`` → lib/foo/bar.py, plus the
-                            package/__init__.py candidate)
-          • literal paths  (``'static/js/core/api.js'``, ``'docs/X.md'`` …)
-  select: changed ∩ referenced, PLUS
-          • every changed test file itself,
-          • a BLAST-RADIUS table (conftest → whole suite; the jsdom helpers and
-            api.js → the frontend family — their dependents are structural,
-            not greppable),
-          • the GUARD CORE (contract / ratchet guards) — a handful of seconds,
-            always worth it: a cross-cutting regression must never slip
-            through because the mapping missed an indirect edge.
-  If the selection exceeds ~40% of the suite, just run everything — the
-  bookkeeping stops paying for itself.
-
-CLI
----
-  python scripts/test_select.py [--base REF] [--jobs N] [--print] [--run]
-  default change set: working tree vs HEAD (staged + unstaged + untracked);
-  --base REF diffs REF...HEAD instead (branch mode).
+Entry point: main (--base REF, --print, --run, --jobs N). Git enumerates current
+tracked/untracked tests recursively; AST imports and literal paths give an
+advisory reverse index, supplemented by blast-radius rules and live guards.
+The pytest configuration owns execution plugins. docs/TESTING_STRATEGY.md owns
+the verification ladder; domain, browser and release gates remain mandatory.
 """
 from __future__ import annotations
 
+import argparse
 import ast
 import json
 import os
 import re
 import subprocess
 import sys
+import tempfile
 
 ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
 TESTS_DIR = os.path.join(ROOT, 'tests')
@@ -47,7 +25,7 @@ CACHE_PATH = os.path.join(ROOT, '.tofu', 'test_select_index.json')
 _REPO_MODULE_ROOTS = ('lib', 'routes', 'tests')
 
 _LITERAL_REF_RE = re.compile(
-    r"""(?x)['"`]((?:frontend/src|static/vite|lib|routes|docs|scripts|tests)/[\w.\-]+(?:/[\w.\-]+)*\.(?:js|mjs|ts|py|md))['"`]""")
+    r"""(?x)['"`]((?:frontend/src|static/vite|lib|routes|docs|scripts|tests|contracts|\.github)/[\w.\-]+(?:/[\w.\-]+)*\.(?:js|mjs|ts|py|md|json|yaml|yml|toml))['"`]""")
 
 # Files whose change invalidates whole FAMILIES of tests — their dependents
 # are structural (eval'd, session-wide, or manifest-driven), so no per-file
@@ -57,7 +35,10 @@ BLAST_RADIUS = {
     'tests/conftest.py': 'ALL',
     'tests/_jsdom.py': 'test_frontend_',
     'tests/_jsdom_harness.js': 'test_frontend_',
-    'tests/_conv_bundle_sources.py': 'test_frontend_',
+    'tests/_runtime_sections.py': 'test_frontend_',
+    'pyproject.toml': 'ALL',
+    'Makefile': 'ALL',
+    'scripts/test_select.py': 'ALL',
     'frontend/src/api/transport.ts': 'test_frontend_',
     'lib/vite_assets.py': 'test_frontend_',
 }
@@ -105,43 +86,66 @@ def refs_of_test_file(source: str) -> set[str]:
                     refs.update(_module_to_path_candidates(alias.name))
             elif isinstance(node, ast.ImportFrom) and node.module:
                 refs.update(_module_to_path_candidates(node.module))
+                for alias in node.names:
+                    refs.update(_module_to_path_candidates(f'{node.module}.{alias.name}'))
     refs.update(_LITERAL_REF_RE.findall(source))
     return refs
 
 
 def build_index(tests_dir: str = TESTS_DIR, cache_path: str | None = CACHE_PATH) -> dict:
-    """test_file (repo-relative) → sorted refs, with an mtime-keyed JSON cache
-    so repeat selection costs ~0. Cache is advisory only — a stale entry just
-    re-parses that file."""
+    """Enumerate via Git (also on FUSE); a failed/empty census cannot pass.
+
+    The advisory cache has a versioned stat key and atomic, unique replacement.
+    Removed/ignored tests never survive merely because they were cached.
+    """
+    root = os.path.dirname(os.path.abspath(tests_dir))
+    out = subprocess.run(
+        ['git', 'ls-files', '--cached', '--others', '--exclude-standard',
+         '-z', '--', os.path.basename(tests_dir)],
+        cwd=root, capture_output=True, text=True, check=True, timeout=30).stdout
+    paths = sorted({p for p in out.split('\0') if p
+                    and os.path.basename(p).startswith('test_') and p.endswith('.py')
+                    and os.path.isfile(os.path.join(root, p))})
+    if not paths:
+        raise ValueError('test census is empty; check the repository and tests directory')
     cache = {}
     if cache_path and os.path.isfile(cache_path):
         try:
             with open(cache_path, encoding='utf-8') as fh:
-                cache = json.load(fh)
+                saved = json.load(fh)
+            if isinstance(saved, dict) and saved.get('version') == 2:
+                cache = saved.get('index', {})
+                if not isinstance(cache, dict):
+                    cache = {}
         except (json.JSONDecodeError, OSError):
-            cache = {}
-    index: dict[str, dict] = {}
-    dirty = False
-    for name in sorted(os.listdir(tests_dir)):
-        if not (name.startswith('test_') and name.endswith('.py')):
-            continue
-        path = os.path.join(tests_dir, name)
-        rel = f'tests/{name}'
-        mtime = os.path.getmtime(path)
+            pass  # Cache is reconstructible; discovery/source failures are not.
+    index = {}
+    for rel in paths:
+        path = os.path.join(root, rel)
+        stat = os.stat(path)
+        fingerprint = [stat.st_mtime_ns, stat.st_size]
         cached = cache.get(rel)
-        if cached and cached.get('mtime') == mtime:
+        if (isinstance(cached, dict) and cached.get('fingerprint') == fingerprint
+                and isinstance(cached.get('refs'), list)
+                and all(isinstance(ref, str) for ref in cached['refs'])):
             index[rel] = cached
-            continue
-        with open(path, encoding='utf-8') as fh:
-            refs = sorted(refs_of_test_file(fh.read()))
-        index[rel] = {'mtime': mtime, 'refs': refs}
-        dirty = True
-    if dirty and cache_path:
-        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
-        tmp = cache_path + '.tmp'
-        with open(tmp, 'w', encoding='utf-8') as fh:
-            json.dump(index, fh)
-        os.replace(tmp, cache_path)
+        else:
+            with open(path, encoding='utf-8') as fh:
+                refs = sorted(refs_of_test_file(fh.read()))
+            index[rel] = {'fingerprint': fingerprint, 'refs': refs}
+    if cache_path and index != cache:
+        parent = os.path.dirname(os.path.abspath(cache_path))
+        os.makedirs(parent, exist_ok=True)
+        with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8',
+                                         dir=parent, delete=False) as fh:
+            tmp = fh.name
+            try:
+                json.dump({'version': 2, 'index': index}, fh)
+                fh.close()
+                os.replace(tmp, cache_path)
+            finally:
+                if os.path.exists(tmp):
+                    os.unlink(tmp)
     return index
 
 
@@ -163,8 +167,12 @@ def select_tests(index: dict, changed: list[str]):
     all_tests = set(index)
 
     for f in changed_set:
-        if f.startswith('tests/') and '/test_' in f:
+        if f in all_tests:
             selected.setdefault(f, 'self')
+        if f.endswith('/conftest.py'):
+            for t in all_tests:
+                if t.startswith(f.rsplit('/', 1)[0] + '/'):
+                    selected.setdefault(t, f'fixture:{f}')
         blast = BLAST_RADIUS.get(f)
         if blast == 'ALL':
             for t in all_tests:
@@ -178,7 +186,11 @@ def select_tests(index: dict, changed: list[str]):
                 selected.setdefault(t, 'direct')
 
     for name in GUARD_CORE_BASENAMES:
-        selected.setdefault(f'tests/{name}', 'guard-core')
+        matches = [path for path in all_tests if os.path.basename(path) == name]
+        if not matches:
+            raise ValueError(f'required guard is missing: {name}; update the selector')
+        for path in matches:
+            selected.setdefault(path, 'guard-core')
 
     return set(selected), selected
 
@@ -187,21 +199,21 @@ def select_tests(index: dict, changed: list[str]):
 
 def changed_files(base: str | None) -> list[str]:
     if base:
+        revision = subprocess.run(
+            ['git', 'rev-parse', '--verify', '--end-of-options', f'{base}^{{commit}}'],
+            cwd=ROOT, capture_output=True, text=True, check=True, timeout=30).stdout.strip()
         out = subprocess.run(
-            ['git', 'diff', '--name-only', f'{base}...HEAD'],
-            cwd=ROOT, capture_output=True, text=True, check=True).stdout
-        return [ln.strip() for ln in out.splitlines() if ln.strip()]
-    out = subprocess.run(['git', 'status', '--porcelain'],
-                         cwd=ROOT, capture_output=True, text=True, check=True).stdout
-    files = []
-    for ln in out.splitlines():
-        if not ln.strip():
-            continue
-        path = ln[3:]
-        if ' -> ' in path:  # rename: take the new name
-            path = path.split(' -> ', 1)[1]
-        files.append(path.strip())
-    return files
+            ['git', 'diff', '--name-only', '--no-renames', '-z', f'{revision}...HEAD', '--'],
+            cwd=ROOT, capture_output=True, text=True, check=True, timeout=30).stdout
+        return sorted(set(filter(None, out.split('\0'))))
+    # Include both rename endpoints; deleted sources still select their importers.
+    paths = set()
+    for args in (['diff', 'HEAD', '--name-only', '--no-renames', '-z', '--'],
+                 ['ls-files', '--others', '--exclude-standard', '-z']):
+        out = subprocess.run(['git', *args], cwd=ROOT, capture_output=True,
+                             text=True, check=True, timeout=30).stdout
+        paths.update(filter(None, out.split('\0')))
+    return sorted(paths)
 
 
 def _parallel_workers(existing: list[str] | None,
@@ -229,12 +241,13 @@ def build_pytest_command(existing: list[str] | None,
     of the inner loop. pyproject.toml explicitly loads xdist and owns the
     ``worksteal`` scheduler, so this command only selects the worker count.
     """
+    if existing == []:
+        raise ValueError('empty selection must not launch unscoped pytest')
     workers = _parallel_workers(existing, jobs)
     cmd = [sys.executable, '-m', 'pytest', '-p', 'no:napari']
     if existing is not None:
         cmd += existing
-    else:
-        cmd += ['-m', 'unit']
+    cmd += ['-m', '(unit or api) and not (visual or slow or live_llm)']
     if workers is not None:
         cmd += ['-n', workers]
     cmd += ['--timeout=300', '--tb=short', '-q']
@@ -242,27 +255,30 @@ def build_pytest_command(existing: list[str] | None,
 
 
 def main(argv: list[str]) -> int:
-    base = jobs = None
-    do_run = '--run' in argv
-    for i, a in enumerate(argv):
-        if a == '--base' and i + 1 < len(argv):
-            base = argv[i + 1]
-        elif a == '--jobs' and i + 1 < len(argv):
-            jobs = argv[i + 1]
-    changed = [f for f in changed_files(base) if not f.startswith('.github/')]
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--base')
+    parser.add_argument('--jobs')
+    parser.add_argument('--print', action='store_true', dest='print_selection')
+    parser.add_argument('--run', action='store_true')
+    args = parser.parse_args(argv)
+    base, jobs, do_run = args.base, args.jobs, args.run
+    if jobs is not None and jobs != 'auto' and not (jobs.isdigit() and int(jobs) >= 0):
+        parser.error('--jobs must be auto or a nonnegative integer')
+    changed = changed_files(base)
     if not changed:
         print('[test-select] no changes vs', base or 'working tree',
               '— nothing to select. Run the guard core manually if in doubt.')
         return 0
+    print('[test-select] advisory inner-loop selection; domain/release gates still required')
     index = build_index()
     selected, reasons = select_tests(index, changed)
-    existing = sorted(f for f in selected
-                      if os.path.isfile(os.path.join(ROOT, f)))
+    existing = sorted(selected)
     n_all = len(index)
     if len(existing) > _RUN_ALL_FRACTION * n_all:
         print(f'[test-select] selection is {len(existing)}/{n_all} suites '
-              f'(>{_RUN_ALL_FRACTION:.0%}) — running the WHOLE unit tier instead')
-        existing = None  # None → whole tier
+              f'(>{_RUN_ALL_FRACTION:.0%}) — broadening to all offline unit/API test files')
+        existing = sorted(index)
+        reasons.update({f: reasons.get(f, 'broad') for f in existing})
     print(f'[test-select] changed: {len(changed)} file(s)')
     for f in changed[:12]:
         print(f'  ~ {f}')
@@ -272,7 +288,7 @@ def main(argv: list[str]) -> int:
             by_reason[reasons.get(f, '?')] = by_reason.get(reasons.get(f, '?'), 0) + 1
         print(f'[test-select] selected {len(existing)}/{n_all} test files '
               f'({", ".join(f"{k}×{v}" for k, v in sorted(by_reason.items()))})')
-        if '--print' in argv:
+        if args.print_selection:
             for f in existing:
                 print(f'  {f}  [{reasons.get(f)}]')
     if not do_run:
@@ -285,4 +301,8 @@ def main(argv: list[str]) -> int:
 
 
 if __name__ == '__main__':
-    raise SystemExit(main(sys.argv[1:]))
+    try:
+        raise SystemExit(main(sys.argv[1:]))
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        print(f'[test-select] failed: {error}', file=sys.stderr)
+        raise SystemExit(2)

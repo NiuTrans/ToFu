@@ -32,6 +32,8 @@ require no database. They execute the same `lib.tasks_pkg` orchestrator as the
 full application—not a smaller second agent loop. The sidecar adds only a tiny
 static `/setup` control plane for no-code default-model configuration.
 
+**Controlled computers:** install **Tofu Remote** from [Releases](https://github.com/rangehow/ToFu/releases/latest). This connects a computer to Tofu; the `tofu-agent` package below is the AI runtime SDK. You can also use the full workspace in a browser connected to your Tofu server.
+
 ## Start Tofu Agent in 60 seconds
 
 Install and start the runtime. A fresh installation does not require Provider
@@ -359,7 +361,6 @@ Requirements are Python 3.12 and Node 20.19.x:
 
 ```bash
 uv sync --frozen --extra dev
-uv run make docs-check
 npm run check:frontend
 uv run make test-unit
 ```
@@ -405,8 +406,8 @@ its integration boundaries. The full subsystem catalogue lives in
 │   │   ├── compaction/
 │   │   ├── handlers/
 │   │   └── orchestrator/
-│   ├── byo_egress.py
-│   └── provider_probe.py
+│   ├── byo/
+│   └── provider/
 ├── packages/
 │   └── tofu-search/       # standalone search/fetch distribution
 ├── plugins/

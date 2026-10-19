@@ -9,7 +9,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from lib.llm_errors import AbortedError
+from lib.llm.llm_errors import AbortedError
 from lib.paper.builds.errors import BuildError
 from lib.research.compilation import compile_workspace
 from lib.research.program import normalize_program_fields, readiness, source_tree_digest
@@ -91,18 +91,9 @@ def test_workspace_http_rejects_a_well_formed_forged_success(source, storage):
     assert not next(row['ok'] for row in body['readiness']['gates'] if row['id'] == 'compile')
 
 
-@pytest.mark.parametrize('fault', ['file_count', 'file_text', 'total_text', 'duplicate_path', 'path_normalization'])
+@pytest.mark.parametrize('fault', ['duplicate_path', 'path_normalization'])
 def test_workspace_never_silently_drops_source_edits(source, storage, fault):
-    from lib.research.program import MAX_SOURCE_FILE_CHARS, MAX_SOURCE_FILES
-    if fault == 'file_count':
-        source['source_files'] = [{'path': f'{n}.tex', 'content': 'source'}
-                                  for n in range(MAX_SOURCE_FILES + 1)]
-    elif fault == 'file_text':
-        source['source_files'][0]['content'] = 'x' * (MAX_SOURCE_FILE_CHARS + 1)
-    elif fault == 'total_text':
-        source['source_files'] = [{'path': f'{n}.tex', 'content': 'x' * MAX_SOURCE_FILE_CHARS}
-                                  for n in range(7)]
-    elif fault == 'path_normalization':
+    if fault == 'path_normalization':
         source['source_files'][0]['path'] = 'would-be-dropped%.tex'
     else:
         source['source_files'].append(dict(source['source_files'][0]))
@@ -241,3 +232,23 @@ def test_research_action_compiles_without_a_model_or_mcp_binding(source, storage
     assert 'error' not in result, result
     assert _compile_gate(result['result']['workspace'])
     assert result['result']['workspace']['revision'] == 2
+
+
+def test_complete_large_source_workspace_round_trip_and_digest(source, storage):
+    import hashlib
+    from lib.research.program import source_tree_digest
+    large = '证据' * (1536 * 1024)
+    source['source_files'] = [{'path': 'main.tex', 'content': large}] + [
+        {'path': f'section-{i:04d}.tex', 'content': f'Exact source {i}'} for i in range(1101)]
+    saved = save_workspace(DIRECTION, 'en', source, expected_revision=0, user_id=1)
+    loaded = load_workspace(DIRECTION, 'en', user_id=1)
+    assert len(loaded['source_files']) == 1102
+    assert loaded['source_files'][0]['content'] == large
+    assert loaded['source_files'][0]['sha256'] == hashlib.sha256(large.encode()).hexdigest()
+    assert loaded['source_files'][-1]['content'] == 'Exact source 1100'
+    before = source_tree_digest(loaded['source_files'])
+    loaded['source_files'][-1]['content'] += ' changed'
+    assert source_tree_digest(loaded['source_files']) != before
+    updated = save_workspace(DIRECTION, 'en', loaded, expected_revision=saved['revision'], user_id=1)
+    assert updated['revision'] == 2
+    assert load_workspace(DIRECTION, 'en', user_id=1)['source_files'][-1]['content'].endswith(' changed')

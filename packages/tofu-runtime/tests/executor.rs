@@ -1,7 +1,7 @@
 //! Native ownership contracts: bounds, unwind, receiver disposal and teardown.
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
-    mpsc, Arc,
+    Arc,
 };
 use tofu_runtime::executor::{AdmissionError, Budget, Executor, TaskError};
 

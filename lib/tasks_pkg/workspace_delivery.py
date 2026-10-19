@@ -2,9 +2,12 @@
 
 Entry points: bind_worker_workspace before the runner, capture_workspace_evidence
 before terminal tool state is released, and settle_task_workspaces at settlement.
-Writable configured roots create owner/task registrations before execution;
-only those registrations authorize binding. File/cwd receipts are diagnostic,
-never proof of workspace ownership; no sibling inventory infers ownership.
+Ordinary canonical roots execute directly by default; workspace_policy makes
+isolation opt-in independent of Git publication. Dispatched file grants still
+require isolated candidates. Existing owner/task registrations always retain
+their binding and settlement authority. File/cwd
+receipts are diagnostic, never proof of workspace ownership; no sibling inventory
+infers ownership.
 Runtime metadata caches the existing integration origin, not a second schema or
 store. File/cwd arguments under the canonical root route to the bound checkout;
 literal cross-checkout shell writes are refused, not rewritten. Opaque programs
@@ -21,9 +24,10 @@ import subprocess
 import time
 
 from lib.git_runtime import git_executable
-from lib.git_checkpoint_policy import FORBIDDEN_CHECKPOINT_ROOTS
+from lib.git_checkpoint_policy import FORBIDDEN_CHECKPOINT_ROOTS, git_policy_environment
 from lib.log import get_logger
 
+from lib.observability import observe_task_completion
 logger = get_logger(__name__)
 _MAX_EVIDENCE = 200
 _SCHEMA = 'tofu.workspace-delivery/v1'
@@ -31,6 +35,14 @@ _SCHEMA = 'tofu.workspace-delivery/v1'
 
 class WorkspaceBindingError(RuntimeError):
     """The requested execution root could not be safely bound."""
+
+
+def _check_workspace_cancelled(task: dict) -> None:
+    """Keep cooperative Stop distinct from a failed workspace binding."""
+    event = task.get('abort_event')
+    if task.get('aborted') or (event is not None and event.is_set()):
+        from lib.llm.llm_errors import AbortedError
+        raise AbortedError('Task cancelled during workspace admission')
 
 
 def task_outcome(task: dict) -> str:
@@ -73,7 +85,8 @@ def _checkout(path: str) -> tuple[str, str] | None:
     result = subprocess.run(
         [git_executable(), '-c', 'core.fsmonitor=false', '-C', str(candidate),
          'rev-parse', '--show-toplevel', '--git-common-dir'],
-        capture_output=True, text=True, timeout=10, check=False)
+        capture_output=True, text=True, timeout=10, check=False,
+        env=git_policy_environment())
     if result.returncode:
         detail = (result.stderr or result.stdout).strip()[:800]
         raise WorkspaceBindingError(
@@ -128,8 +141,22 @@ def _owner(task: dict) -> int:
     return int(task_user_id(task))
 
 
+def _emit_workspace_preparing(task: dict) -> None:
+    """Present expensive isolation only when it is actually about to happen."""
+    if task.get('_workspacePreparing'):
+        return
+    task['_workspacePreparing'] = True
+    try:
+        from lib.agent_core.events import Phase, emit_phase
+        emit_phase(
+            task, Phase.WORKING,
+            detail='Preparing the task workspace; capturing project input and creating an isolated checkout…',
+            detailKey='stream.phase.workspacePreparing')
+    except Exception as error:
+        logger.debug('[WorkspaceDelivery] preparation phase emit failed: %s', error)
+
+
 def _binding(path: str, task: dict, *, create=False) -> dict | None:
-    from lib.integration_control import bind_task_workspace
     from lib.integration_state_repository import find_workspace
 
     source = _checkout(path)
@@ -150,12 +177,24 @@ def _binding(path: str, task: dict, *, create=False) -> dict | None:
             raise WorkspaceBindingError('Linked workspace was not registered')
         if not create:
             return None
-        from lib.linear_git_checkpoint import is_enabled
-        if is_enabled(source[1]):
-            return None  # explicit linear mode owns shared-checkout publication
-        if task.get('aborted'):
-            raise WorkspaceBindingError('Task cancelled before workspace admission')
+        from lib.project_mod.workspace_policy import resolve_workspace_mode
+        from lib.project_dispatch.admission import requires_isolated_workspace
+        try:
+            mode = resolve_workspace_mode(source[1])
+            # Dispatch file grants require an owned candidate and explicit
+            # publication. This is an additional restriction, never authority;
+            # consult roots are readonly and do not reach workspace creation.
+            if requires_isolated_workspace(task):
+                mode = 'isolated'
+        except Exception as exc:
+            raise WorkspaceBindingError(
+                'Workspace mode admission failed: ' + str(exc)[:500]) from exc
+        _check_workspace_cancelled(task)
+        task.setdefault('_workspaceExecutionModes', {})[source[1]] = mode
+        if mode == 'direct':
+            return None
         from lib.integration_control import create_task_workspace
+        _emit_workspace_preparing(task)
         create_task_workspace(source[1], str(task['id']), user_id=_owner(task),
             conversation_id=str(task.get('convId') or ''),
             title=str(task.get('lastUserQuery') or '')[:500], task=task)
@@ -173,6 +212,7 @@ def _binding(path: str, task: dict, *, create=False) -> dict | None:
         raise WorkspaceBindingError('Task already owns a different linked workspace')
     # Pass the canonical root: even a disappearing registration must not fall
     # through integration's linked-checkout adoption path.
+    from lib.integration_control import bind_task_workspace
     result = bind_task_workspace(
         source[1], str(task['id']), user_id=_owner(task),
         conversation_id=str(task.get('convId') or ''),
@@ -186,15 +226,14 @@ def _binding(path: str, task: dict, *, create=False) -> dict | None:
         'canonicalRoot', 'workspacePath', 'workId')}
     durable_runtime = (registered.get('origin') or {}).get('_workspaceDelivery') or {}
     if isinstance(durable_runtime, dict):
-        for key in ('verification', 'runtimePaths', 'runtimePrepared'):
+        for key in ('verification', 'runtimePaths', 'runtimePrepared', 'publicationMode'):
             if key in durable_runtime:
                 row[key] = durable_runtime[key]
-    if 'verification' not in row:
-        for cached in (task.get('_workspaceDelivery') or {}).get('repositories') or []:
-            if cached.get('workspacePath') == row['workspacePath'] and cached.get('verification'):
-                row['verification'] = cached['verification']
-                break
-
+    for cached in (task.get('_workspaceDelivery') or {}).get('repositories') or []:
+        if cached.get('workspacePath') == row['workspacePath']:
+            for key in ('verification', 'publicationMode'):
+                if key not in row and cached.get(key):
+                    row[key] = cached[key]
     actual = _checkout(row['workspacePath'])
     if (not actual or actual[0] != _local_path(row['workspacePath'])
             or actual[1] != _local_path(row['canonicalRoot'])
@@ -227,14 +266,27 @@ def _remember(task: dict, rows: list[dict], *, errors=None) -> dict:
 def bind_worker_workspace(task: dict) -> dict | None:
     """Bind every configured local root before tools can observe task config.
 
-    Canonical writable Git roots are isolated from an immutable input snapshot,
-    except explicit linear mode. Registration remains the only ownership proof.
+    Canonical writable Git roots execute directly unless isolation is selected.
+    Existing registration remains the only ownership proof for linked roots.
     Any binding/persistence failure escapes to the worker's terminal error lane.
     Config changes are applied atomically after all roots and origins validate.
     """
     if task.get('_transientRuntime') or not task.get('id'):
         return None
+    _check_workspace_cancelled(task)
+
+    from lib.tasks_pkg.coordinator_policy import coordinator_scope
+    if coordinator_scope(task):
+        # Planning/dispatch needs no checkout or filesystem execution workspace.
+        return None
     config = task.get('config') or {}
+    from lib.conversation_sync.workspace import provision_workspace
+    from lib.observability import measure_task_startup
+    identity = {'task_id': task['id'], 'conversation_id': task.get('convId'),
+                'turn_id': task.get('_turnId'), 'attempt_id': task.get('_attemptId'),
+                'user_id': task.get('_userId')}
+    with measure_task_startup('workspace_provision', identity=identity):
+        managed = provision_workspace(task)
     configured_scopes = [_local_path(value) for value in [config.get('projectPath'), *(config.get('projectPaths') or [])] if _local_path(value)]
     mappings = []
     rows = {}
@@ -242,14 +294,17 @@ def bind_worker_workspace(task: dict) -> dict | None:
     from lib.project_mod.config import build_root_policy, register_root_policy
     original_policy = build_root_policy(config['projectPath'],
         config.get('projectPaths'), config.get('readOnlyPaths')) if config.get('projectPath') else None
-    for path in _roots(task):
+    with measure_task_startup('workspace_roots', identity=identity):
+        writable_roots = [] if managed else _roots(task)
+    for path in writable_roots:
 
-        if task.get('aborted'):
-            raise WorkspaceBindingError('Task cancelled during workspace admission')
-        info = _checkout(path)
+        _check_workspace_cancelled(task)
+        with measure_task_startup('workspace_identity', identity=identity):
+            info = _checkout(path)
         if info is None:
             continue
-        row = _binding(path, task, create=True)
+        with measure_task_startup('workspace_root_binding', identity=identity):
+            row = _binding(path, task, create=True)
         if row is None:
             continue
         previous = rows.get(row['canonicalRoot'])
@@ -259,6 +314,10 @@ def bind_worker_workspace(task: dict) -> dict | None:
         rows[row['canonicalRoot']] = row
         mappings.append((info[0], row['workspacePath'], row['canonicalRoot']))
     if not rows:
+        _check_workspace_cancelled(task)
+        if original_policy:
+            task['_workspaceRootPolicy'] = original_policy
+            register_root_policy(str(task['id']), original_policy)
         return None
 
     def mapped(value, *, canonical=False):
@@ -275,9 +334,14 @@ def bind_worker_workspace(task: dict) -> dict | None:
             return str(Path(root if canonical else workspace) / suffix)
         return value
 
-    for row in rows.values():
-        _persist(task, row)  # persist before allowing any runner/tool write
+    with measure_task_startup('workspace_persist', identity=identity):
+        for row in rows.values():
+            _persist(task, row)  # persist before allowing any runner/tool write
     updated = dict(config)
+
+    updated['workspacePublicationModes'] = [
+        {'canonicalRoot': row['canonicalRoot'], **row['publicationMode']}
+        for row in list(rows.values())[:_MAX_EVIDENCE] if row.get('publicationMode')]
     if config.get('projectPath'):
         updated.setdefault('canonicalProjectPath', mapped(config['projectPath'], canonical=True))
         updated['projectPath'] = mapped(config['projectPath'])
@@ -293,8 +357,7 @@ def bind_worker_workspace(task: dict) -> dict | None:
             if Path(candidate).is_dir() and any(Path(candidate).is_relative_to(scope) for scope in configured_scopes):
                 runtime_roots.append(candidate)
     updated['workspaceRuntimeRoots'] = list(dict.fromkeys(runtime_roots))
-    if task.get('aborted'):
-        raise WorkspaceBindingError('Task cancelled before workspace activation')
+    _check_workspace_cancelled(task)
     task['config'] = updated
 
     if original_policy:
@@ -322,17 +385,19 @@ def execution_repositories(task: dict) -> list:
 
 
 def execution_root_key(task: dict) -> str:
-    """Namespace execution roots by physical task whenever isolation is bound."""
-    if execution_repositories(task):
-        return str(task.get('id') or '')
-    return str(task.get('convId') or task.get('id') or '')
+    """Every physical task owns its policy, including deliberate empty roots."""
+    return str(task.get('id') or task.get('convId') or '')
 
 
 def ensure_execution_roots(task: dict) -> dict | None:
     """Rehydrate task-owned labels/access/additions; the LRU is not authority."""
-    if not execution_repositories(task):
-        return None
     policy = task.get('_workspaceRootPolicy')
+    if (not execution_repositories(task) and policy is None
+            and not (task.get('config') or {}).get('projectPath')):
+        # Empty selection is positive authority, not a miss in a shared cache.
+        # Never clear another conversation's roots or borrow its prior binding.
+        policy = {'primaryPath': '', 'roots': {}}
+        task['_workspaceRootPolicy'] = policy
     from lib.project_mod.config import build_root_policy, register_root_policy
     if policy is None:
         config = task.get('config') or {}
@@ -442,29 +507,22 @@ def route_project_tool_args(task: dict, name: str, arguments: dict) -> dict:
     return result
 
 
+@observe_task_completion('workspace_evidence')
 def capture_workspace_evidence(task: dict, project_path: str = '', project_paths=None) -> dict:
     """Capture bounded plain data synchronously; never retain tool transcripts."""
     roots = _roots(task, project_path, project_paths)
     # The presentation list can include timestamp-fallback / continued-turn
     # facts. Exact taskId journal stamps retain diagnostics, not ownership.
-    from lib.project_mod import get_modifications
+    from lib.project_mod.modifications import get_task_modification_paths
     previous = task.get('_workspaceDeliveryEvidence') or {}
-    files = list(previous.get('files') or [])[:_MAX_EVIDENCE]
+    files = [dict(fact) for fact in (previous.get('files') or [])[:_MAX_EVIDENCE]]
     for root in roots:
         if len(files) >= _MAX_EVIDENCE:
             break
-        for entry in get_modifications(root, conv_id=task.get('convId'), include_content=False) or ():
-            if not isinstance(entry, dict) or entry.get('taskId') != task.get('id'):
-                continue
-            path = entry.get('path')
-            base = entry.get('basePath') or root
-            if not isinstance(path, str) or not path or str(base).startswith('remote:'):
-                continue
-            fact = {'path': path, 'rootPath': str(base)}
-            if fact not in files:
-                files.append(fact)
-            if len(files) >= _MAX_EVIDENCE:
-                break
+        files.extend(get_task_modification_paths(
+            root, task.get('id'), conv_id=task.get('convId'),
+            limit=_MAX_EVIDENCE - len(files),
+            exclude=((fact['path'], fact['rootPath']) for fact in files)))
     cwd_paths = list(previous.get('workingDirs') or [])[:_MAX_EVIDENCE]
     for record in task.get('toolRounds') or ():
         if not isinstance(record, dict) or record.get('toolName') != 'run_command':
@@ -552,9 +610,11 @@ def settle_task_workspaces(task: dict, project_path: str = '', project_paths=Non
             row['status'] = 'intent_recorded'
             row['deliveryStatus'] = str(result.get('state') or result.get('status'))[:500]
             for key in ('status', 'deliveryStatus', 'checkpointSha', 'candidateSha',
-                        'stableSha', 'phase', 'reason', 'error', 'detail'):
+                        'stableSha', 'targetSha', 'sourceSha', 'phase', 'reason', 'error', 'detail'):
                 if key in result:
                     row[key] = str(result[key])[:500]
+            if result.get('publicationMode') == 'working_tree':
+                row['deliveryPublicationMode'] = 'working_tree'
             _persist(task, row)
         except Exception as exc:
             errors.append({'path': path, 'status': 'error', 'detail': str(exc)[:500]})
@@ -570,8 +630,8 @@ def persist_terminal_workspace_intent(task: dict) -> bool:
     """Required completion receiver: false keeps the existing eviction fence.
 
     Run after executor ownership is acknowledged and before heavy evidence is
-    released. Integration synchronously owns the durable intent; its worker
-    owns checkpoint/gates/publication. Maintenance retries through the ordinary
+    released. Integration synchronously records intent and attempts automatic workspace
+    merging before returning; its worker retries delivery debt. Maintenance uses the ordinary
     terminal-persistence lane, rather than creating another queue or store.
     """
     try:
@@ -598,7 +658,16 @@ def work_result_summary(task: dict) -> str:
     statuses = ', '.join(sorted({str(row.get('deliveryStatus') or row.get('status') or 'pending') for row in rows}))
     if receipt.get('errors'):
         statuses = (statuses + ', error').strip(', ')
-    return 'Workspace delivery: ' + statuses + ' (task outcome is not delivery confirmation).'
+    summary = 'Workspace delivery: ' + statuses + ' (task outcome is not delivery confirmation).'
+    if any(row.get('deliveryStatus') == 'delivered' and row.get('deliveryPublicationMode') == 'working_tree' for row in rows):
+        summary += ' Changes are merged into the current workspace; Git commit history is independent.'
+    reasons = sorted({str(mode['reason'])[:500] for row in rows
+                      if isinstance(mode := row.get('publicationMode'), dict)
+                      and mode.get('requested') and not mode.get('eligible')
+                      and mode.get('reason')})[:3]
+    if reasons:
+        summary += ' Publication mode: isolated-task (' + '; '.join(reasons)[:500] + ').'
+    return summary
 
 
 def canonical_work_path(task: dict, project_path: str) -> str:
@@ -614,18 +683,35 @@ def canonical_work_path(task: dict, project_path: str) -> str:
 
 
 def checkpoint_roots_without_workspaces(paths: list[str], receipt: dict | None) -> list[str]:
-    """Never use legacy shared-root publication for an isolated task checkout."""
+    """Route confirmed working-tree delivery to the existing opt-in checkpoint.
+
+    The checkpoint owner still decides opt-in, gates and coalesced-workspace
+    authority. Pending/failed or explicit candidate delivery cannot borrow it.
+    A reclaimed source path is replaced using the durable canonical binding.
+    """
     if not receipt:
         return paths
     if receipt.get('errors') or receipt.get('status') == 'error':
         return []
-    isolated = {row['canonicalRoot'] for row in receipt.get('repositories') or []}
+    rows = receipt.get('repositories') or []
+    isolated = {row['canonicalRoot'] for row in rows}
+    delivered = {row['canonicalRoot'] for row in rows
+                 if row.get('deliveryStatus') == 'delivered'
+                 and row.get('deliveryPublicationMode') == 'working_tree'}
+    bindings = {root: row['canonicalRoot'] for row in rows
+                for root in (row['canonicalRoot'], row['workspacePath'])}
     result = []
     for path in paths:
-        info = _checkout(_local_path(path))
-        if not info or info[1] not in isolated:
+        local = _local_path(path)
+        canonical = bindings.get(local)
+        if canonical is None:
+            info = _checkout(local)
+            canonical = info[1] if info else None
+        if canonical in delivered:
+            result.append(canonical)
+        elif canonical not in isolated:
             result.append(path)
-    return result
+    return list(dict.fromkeys(result))
 
 
 def workspace_target_refusal(task: dict, path: str) -> str:
@@ -660,7 +746,7 @@ def command_workspace_refusal(task: dict, command: str, cwd: str) -> str:
     if not rows:
         return ''
     from lib.project_mod.command_analysis import (
-        _command_checkout_mutation, _extract_write_targets, _split_pipeline,
+        _command_checkout_mutation, command_segment_literal_targets, _split_pipeline,
         _shell_words, _unwrap_command_parts, _ENV_ASSIGNMENT_GUARD_RE,
     )
     active = _local_path(cwd)
@@ -693,11 +779,13 @@ def command_workspace_refusal(task: dict, command: str, cwd: str) -> str:
                 target_cwd = repository[0]
         if _command_checkout_mutation(segment, target_cwd) and forbidden(target_cwd):
             return refusal()
-        for target in _extract_write_targets(segment, target_cwd) or ():
-            if '$' not in target and '`' not in target:
-                path = os.path.join(target_cwd, os.path.expanduser(target.strip('\"\'')))
-                if forbidden(path):
-                    return refusal()
+        # Snapshot completeness is not admission evidence: opaque builds can
+        # still redirect into a known foreign checkout. Preserve source-aware
+        # literal targets (including quoted dollar signs) and expansion parents.
+        for target in command_segment_literal_targets(segment):
+            path = os.path.join(target_cwd, os.path.expanduser(target))
+            if forbidden(path):
+                return refusal()
     return ''
 
 

@@ -6,7 +6,7 @@ const source=path.resolve(__dirname,'..');
 const locale=JSON.parse(fs.readFileSync(path.resolve(source,'../../i18n/locales/en.json'),'utf8'));
 const copy=key=>locale['evolution.studio.'+key]||key;
 function load(file,cache=new Map()){
- const full=path.resolve(source,file+'.ts');if(cache.has(full))return cache.get(full);
+ let full=path.resolve(source,file+'.ts');if(!fs.existsSync(full))full=path.resolve(source,file,'index.ts');if(cache.has(full))return cache.get(full);
  const exports={};cache.set(full,exports);
  const js=ts.transpileModule(fs.readFileSync(full,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText;
  new Function('require','exports',js)(name=>name.endsWith('/i18n')?{t:key=>locale[key]||key}:load(path.relative(source,path.resolve(path.dirname(full),name)),cache),exports);return exports;

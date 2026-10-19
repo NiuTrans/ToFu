@@ -12,6 +12,7 @@ import {
   type TurnState,
 } from '../../domain/turn-store';
 import {
+  transientTurnPresentation,
   type TransientTurnPresentation,
 } from '../../domain/transient-turn';
 import {
@@ -21,6 +22,65 @@ import {
   type ConversationBlockViewModel,
   type ConversationPresentationState,
 } from './types';
+
+import { normalizeSwarmAgent, mergeSwarmAgentCards, swarmLaunchReceipt, swarmRoundIsActive } from '../swarm-agent-presentation';
+
+import { goalRunAffiliations } from '../goal-run-affiliation';
+
+/** Only join active phases with explicit run AND producing execution identity. */
+export function selectGoalProgress(
+  state: TurnState,
+  liveTurnId: string | null,
+): ReadonlyMap<string, NonNullable<TransientTurnPresentation['goalProgress']>> {
+  const result = new Map<string, NonNullable<TransientTurnPresentation['goalProgress']>>();
+  const worker = liveTurnId ? state.turnsById[liveTurnId] : undefined;
+  const iteration = worker?.projection.orchestration?.iteration;
+  if (!worker || !worker.runId || iteration == null || String(iteration) === '') return result;
+  const attempt = worker.currentAttemptId ? state.attemptsById[worker.currentAttemptId] : undefined;
+  if (!attempt?.taskId) return result;
+  const role = worker.actor === 'assistant' ? 'worker' : worker.actor;
+  if (!['worker', 'planner', 'critic', 'virtual_user'].includes(role)) return result;
+  // Swarm overlay has already fenced these rounds before composition. Read only
+  // active rounds; a settled snapshot must never revive a worker label.
+  const workers: NonNullable<TransientTurnPresentation['goalProgress']>['workers'][number][] = [];
+  for (const round of worker.projection.toolRounds ?? []) {
+    if (workers.length >= 8) break;
+    if ((!round._swarm && round.toolName !== 'spawn_agents') || round._swarmEndTime
+        || (round._swarmSnapshot as { settled?: boolean } | undefined)?.settled) continue;
+    const snapshot = round._swarmSnapshot as { agents?: Record<string, unknown>[] } | undefined;
+    const recovered = snapshot?.agents ?? swarmLaunchReceipt(round).agents ?? [];
+    const agents = mergeSwarmAgentCards(round, recovered).map(normalizeSwarmAgent);
+    if (!swarmRoundIsActive(round, agents)) continue;
+    for (const agent of agents) {
+      if (workers.length >= 8) break;
+      if (!['running', 'pending'].includes(agent.status)) continue;
+      const calls = Array.isArray(agent._toolCalls) ? agent._toolCalls : [];
+      const latest = calls[calls.length - 1];
+      workers.push({
+        text: String(agent.name || agent.id).slice(0, 160),
+        phase: String(agent.phase || agent.status), waitReason: String(agent.waitReason || ''),
+        ...(latest ? { latestTool: [latest.toolName || latest.tool, latest.argsBrief].filter(Boolean).join(' · ').slice(0, 500) } : {}),
+        ...(typeof latest?.error === 'string' ? { toolError: latest.error.slice(0, 500) } : {}),
+      });
+    }
+  }
+  const context = { iteration: String(iteration), role, rootSummary: false, workers };
+  result.set(worker.turnId, context);
+  for (const id of state.laneOrder.main ?? []) {
+    const root = state.turnsById[id];
+    if (!root || root.turnId === worker.turnId || root.ordinal >= worker.ordinal
+        || root.status !== 'running' || root.runId !== worker.runId
+        || transientTurnPresentation(root)) continue;
+    const rootAttempt = root.currentAttemptId ? state.attemptsById[root.currentAttemptId] : undefined;
+    if (rootAttempt?.taskId === attempt.taskId && !rootAttempt.queueBinding) {
+      result.set(root.turnId, { ...context, rootSummary: true,
+        currentPhase: state.livePhase ? liveAttemptPresentation(state.livePhase as object, worker.status) : undefined,
+      });
+      break;
+    }
+  }
+  return result;
+}
 
 const AUTOPILOT_NOTICE_REASONS = new Set<AutopilotRunNoticeReason>([
   'yielded_to_human',
@@ -129,7 +189,7 @@ export function waitingPlaceholderRedundant(
   const isBareWaiting = liveStatus.phase === 'waiting'
     && (!liveStatus.detailKey
       || liveStatus.detailKey === 'stream.phase.waitingWorkerStatus');
-  if (!isBareWaiting) return false;
+  if (!isBareWaiting || liveStatus.goalProgress) return false;
   if (liveStatus.detail || liveStatus.model
       || liveStatus.toolContext || liveStatus.tools?.length) return false;
   const tail = blocks[blocks.length - 1];
@@ -150,34 +210,39 @@ export function selectAutopilotRunNotices(
   state: TurnState,
   presentation: ConversationPresentationState,
 ): ReadonlyMap<string, ReadonlyArray<AutopilotRunNoticeBlockViewModel>> {
-  const summaries = presentation.autopilotSummaries;
-  if (!summaries) return new Map();
+  const summaries = presentation.autopilotSummaries ?? {};
   const turns = (state.laneOrder.main ?? []).flatMap((turnId) => {
     const turn = state.turnsById[turnId];
     return turn ? [turn] : [];
   });
-  const lastStampedIndexByRun = new Map<string, number>();
-  turns.forEach((turn, index) => {
-    const runId = turn.projection._autopilotRunId;
-    if (runId) lastStampedIndexByRun.set(runId, index);
-  });
+  const affiliations = goalRunAffiliations(turns);
+  const lastTurnByRun = new Map<string, TurnRecord>();
+  // Conclusions follow the whole affiliated run. Restart evidence belongs
+  // to the last explicitly stamped phase, even before a successor starts.
+  const lastExplicitGoalTurn = new Map<string, TurnRecord>();
+  for (const turn of turns) {
+    const runId = affiliations.get(turn.turnId);
+    if (runId) lastTurnByRun.set(runId, turn);
+    const goalRunId = turn.projection.orchestration?.goalRunId;
+    if (goalRunId) lastExplicitGoalTurn.set(goalRunId, turn);
+  }
   const noticesByTurn = new Map<string, AutopilotRunNoticeBlockViewModel[]>();
-  for (const [runId, stampedIndex] of lastStampedIndexByRun) {
+  for (const [runId, turn] of lastExplicitGoalTurn) {
+    if (turn.status !== 'interrupted' || turn.settlement?.cause !== 'server_restart'
+        || summaries[runId]?.status === 'concluded') continue;
+    noticesByTurn.set(turn.turnId, [{
+      blockId: `${turn.turnId}:autopilot-run-notice:${runId}`,
+      kind: 'autopilot-run-notice', identitySource: 'contract', source: turn,
+      value: { runId, reason: 'worker_lost', unsent: false,
+        canRequestRecovery: turn === turns[turns.length - 1] },
+    }]);
+  }
+  for (const [runId, target] of lastTurnByRun) {
     const source = summaries[runId];
     if (!source || typeof source !== 'object' || Array.isArray(source)
         || source.status !== 'concluded') continue;
     const reason = autopilotNoticeReason(source.reason);
     if (!reason) continue;
-    let targetIndex = stampedIndex;
-    for (let index = stampedIndex + 1; index < turns.length; index += 1) {
-      const candidate = turns[index];
-      if (candidate.actor === 'human') break;
-      const candidateRunId = candidate.projection._autopilotRunId;
-      if (candidateRunId && candidateRunId !== runId) break;
-      targetIndex = index;
-    }
-    const target = turns[targetIndex];
-    if (!target) continue;
     const content = source.content == null ? '' : String(source.content);
     const notice: AutopilotRunNoticeBlockViewModel = {
       blockId: `${target.turnId}:autopilot-run-notice:${runId}`,

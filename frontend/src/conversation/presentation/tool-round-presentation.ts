@@ -10,6 +10,8 @@
  */
 import { swarmLaunchFailure, swarmLaunchReceipt } from './swarm-agent-presentation';
 
+import { isNativeProgramGateway } from './program-gateway-presentation';
+
 type UnknownRecord = Readonly<Record<string, unknown>>;
 
 const EMPTY_RECORD: UnknownRecord = Object.freeze({});
@@ -324,9 +326,9 @@ export function imageGenerationMode(round: unknown): 'edit' | 'generate' {
   return first.imageMode === 'edit' ? 'edit' : 'generate';
 }
 
-/** Identify display-only ToolScript/OpenAI program parent rows. */
+/** Identify metadata-rich parents and exact native raw gateway presentation rows. */
 export function isProgramToolRound(round: unknown): boolean {
-  return Boolean(record(round)._programSynthetic);
+  return Boolean(record(round)._programSynthetic) || isNativeProgramGateway(round);
 }
 
 /** Normalize a program result for its retained HTML `<pre>` adapter. */

@@ -1,6 +1,6 @@
 """Upstream rate-limit attempt budgets, outage/saturation escalation and cooldown policy."""
 
-from lib.llm_errors import RateLimitError
+from lib.llm.llm_errors import RateLimitError
 import os
 import time
 from lib.log import get_logger
@@ -186,7 +186,7 @@ def _raise_dispatch_exhausted(last_err, *, max_retries, capability,
     bubble to the user. Otherwise propagate ``last_err`` unchanged (or a
     no-slot RuntimeError when no upstream attempt produced an error).
     """
-    from lib.llm_errors import BadRequestError, EndpointUnreachableError
+    from lib.llm.llm_errors import BadRequestError, EndpointUnreachableError
     if last_err is None:
         from lib.key_stats import is_strict_billing_stop_admission
         if is_strict_billing_stop_admission():
@@ -226,7 +226,7 @@ def _remember_route_missing_error(previous, route_missing_error):
     replace a 401/403, payload rejection, timeout, or upstream error already
     observed on another wire ID that actually reaches the model.
     """
-    from lib.llm_errors import ModelRouteMissingError
+    from lib.llm.llm_errors import ModelRouteMissingError
     if previous is not None and not isinstance(
             previous, ModelRouteMissingError):
         return previous

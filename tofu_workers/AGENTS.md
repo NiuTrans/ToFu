@@ -11,3 +11,8 @@ and copy-helper tests, then a wheel import in a fresh process.
 joined non-daemon fan-out. `scripts/gen_packaged_demand_workers.py` emits its
 private installed-package copy; verify drift and fresh wheel execution after
 kernel changes. Package copies are generated, never separate implementations.
+
+`json_frames.py` owns shared immutable JSON file ranges and demand encoding/read
+workers and associated blocking transport I/O. Callers inject reuse hints and transport identity; no app imports or
+admission quotas belong here. Verify Push frame-spool and webhook-delivery tests,
+including actual joined close after an observation timeout.

@@ -82,7 +82,8 @@ function toggleTimerPanel(e) {
   // The panel is a DOM descendant of the badge, so clicks (and the click
   // that ends a text-selection drag) inside the panel bubble up to this
   // onclick handler. Without this guard they would flip the panel shut.
-  if (e && panel.contains(/** @type {Node} */ (e.target))) return;
+  if (e && (panel.contains(/** @type {Node} */ (e.target))
+      || e.composedPath?.().includes(panel))) return;
   if (e) e.stopPropagation();
   _timerPanelOpen = !_timerPanelOpen;
   panel.classList.toggle("visible", _timerPanelOpen);
@@ -90,8 +91,14 @@ function toggleTimerPanel(e) {
 }
 
 // ── Refresh panel data from API ──
-async function _refreshTimerPanel() {
+async function _refreshTimerPanel(afterMutation = false) {
   try {
+    // A read admitted before a successful mutation cannot acknowledge it.
+    // Drain that read (including failure), then join/start a fresh one through
+    // the same single-flight owner used by push and background refreshes.
+    if (afterMutation && _timerListInFlight) {
+      await _timerListInFlight.request.catch(() => null);
+    }
     const data = await _fetchTimerList(false);
     if (!data || !data.ok) return;
 
@@ -271,9 +278,9 @@ async function _triggerTimer(timerId) {
   try {
     const data = await Api.timer.trigger(timerId);
     if (data && data.ok) {
-      _timerClearPending(timerId, true);   // the refresh renders the fresh state
       debugLog(`⏱️ Timer ${timerId} triggered! Execution: ${data.execution_task_id}`, "success");
-      await _refreshTimerPanel();
+      await _refreshTimerPanel(true);
+      _timerClearPending(timerId);
     } else {
       _timerClearPending(timerId);       // restore the row
       debugLog(`⏱️ Trigger failed: ${data && data.error}`, "error");
@@ -299,9 +306,9 @@ async function _cancelTimer(timerId) {
       debugLog(`⏱️ Cancel failed: ${data && data.error}`, "error");
       return;
     }
-    _timerClearPending(timerId, true);   // the refresh renders the fresh state
     debugLog(`⏱️ Timer ${timerId} cancelled.`, "info");
-    await _refreshTimerPanel();
+    await _refreshTimerPanel(true);
+    _timerClearPending(timerId);
   } catch (e) {
     _timerClearPending(timerId);         // restore the row
     debugLog(`⏱️ Cancel error: ${e.message}`, "error");
@@ -475,7 +482,11 @@ document.addEventListener("click", (e) => {
   // backdrop (mobile_panels.js) owns closing, so skip the badge-based check.
   if (panel && panel.classList.contains("mobile-panel-portaled")) return;
   const badge = document.getElementById("timerBadge");
-  if (badge && !badge.contains(/** @type {Node} */ (e.target))) {
+  // A row action synchronously replaces its button with the pending label.
+  // The original event path still proves the click came from inside the badge
+  // even though its detached target no longer passes contains().
+  if (badge && !badge.contains(/** @type {Node} */ (e.target))
+      && !e.composedPath?.().includes(badge)) {
     _timerPanelOpen = false;
     if (panel) panel.classList.remove("visible");
   }

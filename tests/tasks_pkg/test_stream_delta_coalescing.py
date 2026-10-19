@@ -44,6 +44,7 @@ def test_first_delta_is_immediate_and_worker_flushes_lossless_tail():
         'emitted_events': 2,
         'failed_emits': 0,
         'pending_chars': 0,
+        'peak_pending_chars': 13,
         'worker_started': 1,
         'worker_alive': 1,
     }
@@ -319,3 +320,87 @@ def test_dispatch_tool_pre_hook_preserves_original_callback_identity_and_order()
     tool('call-1')
 
     assert order == [('before', None), ('tool', 'call-1')]
+
+
+def test_projection_deadline_can_shorten_an_existing_text_window():
+    import time
+    deadline = [None]
+    flushed = threading.Event()
+    emitted = []
+    def emit(content, thinking):
+        emitted.append((content, thinking))
+        if len(emitted) > 1:
+            flushed.set()
+    coalescer = BoundedTextDeltaCoalescer(emit, delay_s=60,
+        flush_deadline=lambda: deadline[0])
+    try:
+        coalescer.add(content='leading')
+        assert emitted == [('leading', '')]
+        coalescer.add(content='中文')
+        deadline[0] = time.monotonic()
+        coalescer.add(thinking='reasoning')
+        assert flushed.wait(1), 'Committed projection deadline did not wake the pending text'
+        assert emitted == [('leading', ''), ('中文', 'reasoning')]
+    finally:
+        coalescer.close()
+    assert coalescer.stats['worker_alive'] == 0
+
+
+def test_projection_deadline_never_extends_the_existing_text_window():
+    import time
+    flushed = threading.Event()
+    emitted = []
+    def emit(content, thinking):
+        emitted.append(content)
+        if len(emitted) > 1:
+            flushed.set()
+    coalescer = BoundedTextDeltaCoalescer(emit, delay_s=.01,
+        flush_deadline=lambda: time.monotonic()+60)
+    try:
+        coalescer.add(content='first')
+        coalescer.add(content='tail')
+        assert flushed.wait(1), 'An external deadline extended the normal window'
+        assert emitted == ['first', 'tail']
+    finally:
+        coalescer.close()
+
+
+@pytest.mark.parametrize('frame_chars,expected_events', [(2, 2), (8, 1)])
+def test_durable_text_uses_existing_frame_budget_and_keeps_explicit_override(
+        monkeypatch, frame_chars, expected_events):
+    from types import SimpleNamespace
+    monkeypatch.setattr('lib.storage.storage_event_policy.resolve_storage_event_budget',
+        lambda: SimpleNamespace(event_max_bytes=frame_chars*6))
+    monkeypatch.setattr('lib.turn_lifecycle.next_progress_projection_deadline', lambda _: None)
+    for override, expected in ((None, expected_events), (2, 2)):
+        emitted = []
+        task = _stream_task()
+        coalescer = TaskTextDeltaCoalescer(task, lambda _, event: emitted.append(event),
+            on_first_delta=lambda: None, on_after_delta=lambda: None,
+            delay_s=60, max_chars=override)
+        try:
+            for content in ('A', 'B', 'C'):
+                coalescer.on_content(content)
+            assert len(emitted) == expected
+            assert task['content'] == 'ABC'
+        finally:
+            coalescer.close()
+        assert ''.join(row.get('content', '') for row in emitted) == 'ABC'
+        assert coalescer.stats['pending_chars'] == coalescer.stats['worker_alive'] == 0
+
+
+def test_transient_text_keeps_its_portable_policy_without_storage_composition(monkeypatch):
+    def unexpected():
+        raise AssertionError('Transient text must not resolve durable storage policy')
+    monkeypatch.setattr('lib.storage.storage_event_policy.resolve_storage_event_budget', unexpected)
+    task = _stream_task()
+    del task['_attemptId']
+    emitted = []
+    coalescer = TaskTextDeltaCoalescer(task, lambda _, event: emitted.append(event),
+        on_first_delta=lambda: None, on_after_delta=lambda: None, delay_s=60)
+    try:
+        coalescer.on_content('leading')
+        coalescer.on_content('x'*256)
+        assert [row['content'] for row in emitted] == ['leading', 'x'*256]
+    finally:
+        coalescer.close()

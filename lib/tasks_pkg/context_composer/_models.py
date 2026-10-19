@@ -115,6 +115,11 @@ class ComposeResult:
     messages: list[dict[str, Any]]
     manifest: list[dict[str, Any]]
     plan: ContextPlanV2 | None = None
+    # The render pass's content-addressed map of already-present managed
+    # blocks, returned so the composition boundary can hand it to the round's
+    # dependency preparation instead of regex-scanning the history again.
+    # Purely derived from the same scan render_context already performed.
+    managed_block_hashes: dict[str, str] | None = None
 
 
 __all__ = [

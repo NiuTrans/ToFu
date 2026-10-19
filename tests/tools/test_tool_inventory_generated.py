@@ -32,6 +32,7 @@ up the list can't silently re-open the hole.
 """
 
 import subprocess
+import json
 import sys
 
 import pytest
@@ -115,6 +116,17 @@ class TestInventoryNotStale:
             f'{sorted(declared - rows)}'
         )
 
+    def test_bundled_plugins_and_lifecycles_are_derived_from_the_live_owner(self):
+        from scripts.gen_tool_inventory import collect
+        from lib.tools.registry import all_specs
+        inv = collect()
+        assert {r['tool'] for r in inv['bundled']} == {
+            name for spec in all_specs() if spec.host_owned for name in spec.provides}
+        by_name = {r['tool']: r for r in inv['builtin']}
+        assert by_name['await_agents']['state'] == 'compatibility'
+        assert by_name['store_artifact']['state'] == 'contextual'
+        assert by_name['publish_response_file']['approval_preview'] == 'generic'
+
     def test_plugin_tools_are_not_in_the_pinned_table(self):
         """Plugin rows stay in the diagnostic section.
 
@@ -127,6 +139,15 @@ class TestInventoryNotStale:
         builtin = {r['tool'] for r in inv['builtin']}
         for r in inv['plugin']:
             assert r['tool'] not in builtin
+
+    def test_committed_markdown_does_not_depend_on_private_host_plugins(self):
+        from scripts.gen_tool_inventory import collect, render
+        inv = collect()
+        changed = {**inv, 'plugin': [*inv['plugin'], {
+            'tool': 'private_deployment_tool', 'plugin': 'private',
+            'host_owned': False, 'dispatch': 'EXACT', 'write': True,
+        }]}
+        assert render(changed) == render(inv)
 
 
 class TestConfusableDetectorHasControls:
@@ -211,19 +232,16 @@ class TestConfusableDetectorHasControls:
 
 
 class TestApprovalEnricherRatchet:
-    def test_every_write_tool_has_an_approval_enricher(self):
-        from lib.tasks_pkg.tool_dispatch._approval import _APPROVAL_META_ENRICHERS
-
-        missing = _model_visible_write_tools() - set(_APPROVAL_META_ENRICHERS)
-        new = missing - GRANDFATHERED_NO_ENRICHER
-        assert not new, (
-            f'{len(new)} write tool(s) reach the approval dialog with no '
-            f'enricher: {sorted(new)}. The dialog would render a bare tool '
-            f'name (base meta is only path+description), so the user approves '
-            f'without seeing what runs. Add an enricher in '
-            f'lib/tasks_pkg/tool_dispatch/_approval.py that surfaces the '
-            f'risk-bearing argument.'
+    def test_every_write_tool_has_an_approval_preview(self):
+        from lib.tasks_pkg.tool_dispatch._approval import (
+            _APPROVAL_META_ENRICHERS, enrich_approval_metadata,
         )
+        # Specialized previews have shipped-renderer tests. Every remaining
+        # write must disclose exact arguments through the generic owner.
+        for name in _model_visible_write_tools() - set(_APPROVAL_META_ENRICHERS):
+            meta = {}
+            enrich_approval_metadata(meta, name, {'audit_argument': 'EXACT_REVIEW_VALUE'})
+            assert 'EXACT_REVIEW_VALUE' in json.dumps(meta.get('riskFields')), name
 
     def test_grandfather_list_has_no_dead_entries(self):
         """A fixed tool must leave the exemption list.

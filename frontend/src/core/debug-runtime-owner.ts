@@ -1,3 +1,4 @@
+import { entityRecordValues } from './entity-record';
 /**
  * Responsibility: own eager, bounded client diagnostics and debug snapshots.
  * Entry point: createDebugRuntimeOwner. Dependencies: injected shell, report,
@@ -261,7 +262,7 @@ export function createDebugRuntimeOwner(
       const turnsById = asRecord(state?.turnsById) ?? {};
       const turn = turnId ? asRecord(turnsById[turnId]) : null;
       if (!turn || turn.actor === 'virtual_user') return '';
-      const candidates = Object.values(attemptsById)
+      const candidates = entityRecordValues(attemptsById)
         .map(asRecord)
         .filter((attempt): attempt is Record<string, unknown> => (
           attempt !== null && attempt.turnId === turnId && Boolean(attempt.taskId)

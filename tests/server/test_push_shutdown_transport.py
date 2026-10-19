@@ -24,8 +24,8 @@ pytestmark = [pytest.mark.api, pytest.mark.timeout(15)]
 def test_connected_push_socket_drains_before_lifespan_shutdown(monkeypatch):
     from lib.agent_core.push import PushHub
     from lib.api_keys import AuthContext
-    from lib.app_factory import create_base_app
-    from lib.server_shutdown import wait_for_shutdown_trigger
+    from lib.app.app_factory import create_base_app
+    from lib.server.server_shutdown import wait_for_shutdown_trigger
     import routes.push as push
 
     hub = PushHub()

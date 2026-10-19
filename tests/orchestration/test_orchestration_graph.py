@@ -1,7 +1,5 @@
 """Contracts for the orchestration engine's pure graph-navigation boundary."""
 
-from pathlib import Path
-
 import pytest
 
 from lib.orchestration.engine import FlowExecutionError as EngineFlowError
@@ -135,13 +133,22 @@ def test_reachability_avoidance_and_distance_contracts():
     assert navigator.distance('a', 'd') == 1 << 30
 
 
-def test_engine_delegates_topology_without_reintroducing_implementation():
-    root = Path(__file__).resolve().parents[2]
-    engine = (root / 'lib' / 'orchestration' / 'engine.py').read_text()
-    graph = (root / 'lib' / 'orchestration' / 'graph.py').read_text()
-
-    assert 'from lib.orchestration.graph import' in engine
-    assert 'class GraphNavigator' not in engine
-    assert 'self._nav = GraphNavigator.from_edges(' in engine
-    assert 'class GraphNavigator' in graph
-    assert engine.count('\n') < 1700
+def test_engine_delegates_topology_without_reintroducing_implementation(monkeypatch):
+    from lib.orchestration.engine import FlowExecutor
+    from tests.orchestration.test_orchestration_execution_recovery import graph, role
+    built, visited, dispatched = [], [], []
+    original_build, original_next = GraphNavigator.from_edges, GraphNavigator.single_next
+    def build(cls, nodes, edges):
+        navigator = original_build(nodes, edges)
+        built.append(navigator)
+        return navigator
+    def next_node(navigator, node_id):
+        assert navigator in built
+        visited.append(node_id)
+        return original_next(navigator, node_id)
+    monkeypatch.setattr(GraphNavigator, 'from_edges', classmethod(build))
+    monkeypatch.setattr(GraphNavigator, 'single_next', next_node)
+    result = FlowExecutor(graph(role('a')), agent_runner=lambda node, *_:
+        dispatched.append(node['id']) or {'output': 'verified'}).run(initial_context='seed')
+    assert result['ok'] and dispatched == ['a']
+    assert len(built) == 1 and {'start', 'a'}.issubset(visited)

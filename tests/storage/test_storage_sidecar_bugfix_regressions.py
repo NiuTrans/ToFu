@@ -26,8 +26,8 @@ pytestmark = pytest.mark.unit
 @pytest.fixture
 def session(tmp_path):
     """A real SQLiteSession over an initialized temp authority (no process)."""
-    from lib.storage_sidecar.adapters.sqlite import SQLiteSession
-    from lib.storage_sidecar.schema import initialize_schema
+    from lib.storage_authority_sql.adapters.sqlite import SQLiteSession
+    from lib.storage_authority_sql.schema import initialize_schema
 
     connection = sqlite3.connect(
         str(tmp_path / 'sidecar.db'), isolation_level=None)
@@ -68,8 +68,8 @@ def test_pre_turn_transcript_survives_delete_and_restore(session):
     to turn that into the literal ``"b'[...]'"`` string, destroying the
     transcript on a recoverable delete/restore round-trip.
     """
-    from lib.storage_sidecar.operations_pkg._common import _dump, _load
-    from lib.storage_sidecar.operations_pkg._conversations import (
+    from lib.storage_authority_sql.operations_pkg._common import _dump, _load
+    from lib.storage_authority_sql.operations_pkg._conversations import (
         _conversation_delete,
         _conversation_get,
         _conversation_list,
@@ -130,13 +130,13 @@ def test_compacted_pre_turn_transcript_survives_delete_and_restore(session):
     """Private archive references stay lossless across trash lifecycle."""
     import orjson
 
-    from lib.storage_sidecar.operations_pkg._common import _dump
-    from lib.storage_sidecar.operations_pkg._conversations import (
+    from lib.storage_authority_sql.operations_pkg._common import _dump
+    from lib.storage_authority_sql.operations_pkg._conversations import (
         _conversation_delete,
         _conversation_get,
         _conversation_restore,
     )
-    from lib.storage_sidecar.projection_codec import (
+    from lib.storage_authority_sql.projection_codec import (
         STORAGE_PROJECTION_CODEC_KEY,
         encode_projection_sequence_for_storage,
     )
@@ -200,7 +200,7 @@ def test_compacted_pre_turn_transcript_survives_delete_and_restore(session):
 
 def test_worker_job_now_rejects_far_future_clock():
     """A caller clock far ahead of the authority must not strand a job."""
-    from lib.storage_sidecar.operations_pkg._worker_jobs import (
+    from lib.storage_authority_sql.operations_pkg._worker_jobs import (
         _MAX_CLOCK_MS,
         _MAX_CLOCK_SKEW_MS,
         _job_now,
@@ -218,7 +218,7 @@ def test_worker_job_now_rejects_far_future_clock():
 
 def test_worker_job_enqueue_clock_validation(session):
     """``worker_job.enqueue`` accepts a sane clock and rejects an absurd one."""
-    from lib.storage_sidecar.operations_pkg._worker_jobs import (
+    from lib.storage_authority_sql.operations_pkg._worker_jobs import (
         _worker_job_enqueue,
     )
 
@@ -241,10 +241,10 @@ def test_worker_job_enqueue_clock_validation(session):
 
 def test_record_cas_acquires_per_key_lock_before_version_read():
     """Record and guarded task CAS acquire their authority locks before reads."""
-    from lib.task_result_checkpoint_contract import (
+    from lib.task_replay.task_result_checkpoint_contract import (
         TASK_RESULT_CHECKPOINT_GUARD_CONTRACT,
     )
-    from lib.storage_sidecar.operations_pkg._records import (
+    from lib.storage_authority_sql.operations_pkg._records import (
         _record_put,
         _task_results_checkpoint,
     )

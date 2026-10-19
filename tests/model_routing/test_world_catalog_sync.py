@@ -77,7 +77,7 @@ def test_incomplete_provider_catalog_facts_do_not_register_hunyuan_models():
 @pytest.mark.parametrize('model_id', ['grok-4.7', 'grok-4.20-multi-agent'])
 def test_xai_feed_prefix_stays_only_on_provider_wire(monkeypatch, model_id):
     from lib.model_routing.model_defaults import official_model_directory
-    from lib.provider_template_recipes import (
+    from lib.provider.provider_template_recipes import (
         compile_provider_template_bundle, load_provider_templates,
     )
     templates = load_provider_templates()
@@ -90,7 +90,7 @@ def test_xai_feed_prefix_stays_only_on_provider_wire(monkeypatch, model_id):
         'pricing': {'input': 2, 'output': 6,
                     'currency': 'USD', 'unit': 'per_million_tokens'},
     }]
-    monkeypatch.setattr('lib.provider_template_recipes.load_provider_templates',
+    monkeypatch.setattr('lib.provider.provider_template_recipes.load_provider_templates',
                         lambda: templates)
     bundle = compile_provider_template_bundle(
         'openrouter', official_directory=directory, _templates=templates)
@@ -230,7 +230,7 @@ def test_no_template_authors_a_retired_identity():
     guard stays only as defence for deployment-local overrides.
     """
     from lib.model_catalog._creator_identity import canonical_key
-    from lib.provider_template_recipes import load_provider_templates
+    from lib.provider.provider_template_recipes import load_provider_templates
 
     templates = load_provider_templates()
     retired = set()

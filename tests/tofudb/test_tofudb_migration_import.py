@@ -15,18 +15,18 @@ from uuid import uuid4
 
 import pytest
 
-import lib.storage_sidecar.tofudb_migration_import as importer
-from lib.storage_sidecar.schema import SCHEMA_VERSION
-from lib.storage_sidecar.tofudb_migration_checkpoint import MigrationCheckpoint
-from lib.storage_sidecar.tofudb_migration_import import (
+import lib.storage_authority_sql.migration.tofudb_migration_import as importer
+from lib.storage_authority_sql.schema import SCHEMA_VERSION
+from lib.storage_authority_sql.migration.tofudb_migration_checkpoint import MigrationCheckpoint
+from lib.storage_authority_sql.migration.tofudb_migration_import import (
     MigrationImportError,
     certify_rollback,
     import_sqlite_authority,
     main,
 )
 from tofu_db.wire import StorageV2Error
-from lib.storage_sidecar.tofudb_migration_target import OfflineMigrationSession
-from lib.storage_sidecar.tofudb_migration_target import MigrationTargetError
+from lib.storage_authority_sql.migration.tofudb_migration_target import OfflineMigrationSession
+from lib.storage_authority_sql.migration.tofudb_migration_target import MigrationTargetError
 
 
 pytestmark = pytest.mark.unit
@@ -3865,7 +3865,7 @@ def test_supplied_binding_cannot_bypass_changed_source(tmp_path):
 
 @pytest.mark.parametrize('field,value', [('low_balance_alert_micro', 99), ('updated_at', 30)])
 def test_wallet_snapshot_preserves_metadata_beyond_last_ledger_entry(tmp_path, field, value):
-    from lib.storage_sidecar.tofudb_migration_checkpoint import MigrationCheckpoint
+    from lib.storage_authority_sql.migration.tofudb_migration_checkpoint import MigrationCheckpoint
     source = tmp_path / 'source.db'
     wallets, ledger = _sample_billing()
     wallets[0][field] = value
@@ -5802,7 +5802,7 @@ def test_import_final_batch_resume_rejects_changed_progress(tmp_path):
 
 
 def _seed_compaction_archive(source, *, scope='', owner=_OWNER_ID):
-    from lib.storage_sidecar.archived_message_codec import encode_archived_message_sequence_with_metrics
+    from lib.storage_authority_sql.archived_message_codec import encode_archived_message_sequence_with_metrics
     messages = [{'role': 'user', 'content': '保留历史正文' * 8192}]
     post = [{'role': 'assistant', 'content': '恢复摘要'}]
     encoded = encode_archived_message_sequence_with_metrics(messages)
@@ -5874,7 +5874,7 @@ def test_native_compaction_archive_import_preserves_compressed_history_and_resum
 
 
 def test_compaction_archive_converter_refuses_unknown_scope_and_decode_growth(tmp_path):
-    from lib.storage_sidecar.archived_message_codec import encode_archived_message_sequence_with_metrics
+    from lib.storage_authority_sql.archived_message_codec import encode_archived_message_sequence_with_metrics
     source = tmp_path / 'source.db'
     _seed_source(source)
     row, _, _ = _seed_compaction_archive(source, scope='child-invocation')
@@ -6229,7 +6229,7 @@ def test_raw_archive_source_conversion_and_aggregates_fail_closed(tmp_path):
 
 
 def test_native_frozen_transcript_import_preserves_pages_and_resume(tmp_path):
-    from lib.storage_sidecar.tofudb_migration_transcript import frozen_snapshot
+    from lib.storage_authority_sql.migration.tofudb_migration_transcript import frozen_snapshot
     binary = _resolve_tofudb_binary()
     source = tmp_path / 'source.db'
     conversations = _sample_conversations()
@@ -6312,7 +6312,7 @@ def _seed_trash(source, *, conversation_id='retired', frozen=None, turns=()):
 
 @pytest.mark.parametrize('frozen_only', [False, True])
 def test_native_trash_import_resumes_pending_capsule_before_active_domains(tmp_path, frozen_only):
-    from lib.storage_sidecar import tofudb_migration_trash as trash
+    from lib.storage_authority_sql.migration import tofudb_migration_trash as trash
     binary = _resolve_tofudb_binary()
     source = tmp_path / 'source.db'
     _seed_source(source, conversations=_sample_conversations())
@@ -6373,7 +6373,7 @@ def test_trash_completion_rejects_a_stage_absent_from_source(tmp_path):
 
 
 def test_trash_projection_codec_failure_is_a_migration_error(tmp_path):
-    from lib.storage_sidecar import tofudb_migration_trash as trash
+    from lib.storage_authority_sql.migration import tofudb_migration_trash as trash
     source = tmp_path / 'source.db'
     _seed_source(source, conversations=[])
     _seed_trash(source, turns=['retained'])
@@ -6426,7 +6426,7 @@ def test_native_tombstones_preserve_deletion_times_and_resume_catalog_pages(tmp_
 
 @pytest.mark.parametrize('native', [False, True])
 def test_turn_import_hydrates_private_storage_references(tmp_path, native):
-    from lib.storage_sidecar.projection_codec import encode_projection_for_storage, STORAGE_PROJECTION_CODEC_KEY
+    from lib.storage_authority_sql.projection_codec import encode_projection_for_storage, STORAGE_PROJECTION_CODEC_KEY
 
     public = {'content': 'done', 'segments': [{
         'type': 'tool_use', 'id': 'call', 'input': '{"path":"a.py"}',
@@ -6586,7 +6586,7 @@ def _seed_retired_error_rows(path):
 
 
 def test_retired_rows_resume_preserve_types_and_refuse_missing_verified_prefix(tmp_path):
-    from lib.storage_sidecar import tofudb_migration_retired as retired
+    from lib.storage_authority_sql.migration import tofudb_migration_retired as retired
     source = tmp_path / 'source.db'
     _seed_retired_error_rows(source)
     session = FakeSession()
@@ -6625,7 +6625,7 @@ def test_retired_rows_extra_columns_fail_before_target_mutation(tmp_path):
 
 
 def test_native_retired_rows_reopen_without_reactivating_tasks(tmp_path):
-    from lib.storage_sidecar import tofudb_migration_retired as retired
+    from lib.storage_authority_sql.migration import tofudb_migration_retired as retired
     binary = _resolve_tofudb_binary()
     source = tmp_path / 'source.db'
     _seed_retired_error_rows(source)
@@ -7006,7 +7006,7 @@ def test_import_command_receipts_v2_blob_keys_stream_through_digest_path(tmp_pat
     WITHOUT ROWID receipt tables hold raw SHA-256 BLOB keys. The domain driver
     routes them through digest_key_rows and exposes lowercase-hex identities.
     """
-    from lib.storage_sidecar.receipt_codec import (
+    from lib.storage_authority_sql.receipt_codec import (
         command_receipt_identity_v2, encode_receipt_response)
 
     source = tmp_path / 'source.db'
@@ -7120,7 +7120,7 @@ def test_import_worker_wake_observation_preserves_nonzero_and_legacy_default(tmp
 
 @pytest.mark.parametrize('pending', [False, True])
 def test_orchestration_migration_preserves_election_instead_of_inferring_from_error(pending):
-    from lib.storage_sidecar.tofudb_migration_import import _orchestration_run_document
+    from lib.storage_authority_sql.migration.tofudb_migration_import import _orchestration_run_document
     from lib.orchestration.events import CONTINUITY_RESTART_ERROR
     import json
     _, runs, _ = _sample_orchestration()

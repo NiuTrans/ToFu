@@ -500,12 +500,12 @@ def relieve_memory(reason: str) -> dict:
         except Exception as e:
             logger.warning(
                 '[cgroup] work-tab clear during relief failed: %s', e)
-    # MCP indexes and sticky selections are reconstructed from the bridge's
-    # authoritative catalog and conversation history on the next turn.
+    # Catalog indexes are reconstructible. Task history and frozen provider
+    # declarations are execution state and survive pressure reclamation.
     tool_search_module = sys.modules.get('lib.mcp.tool_search')
     if tool_search_module is not None:
         try:
-            dropped += tool_search_module.clear_tool_search_caches()
+            dropped += tool_search_module.reclaim_tool_search_indexes()
         except Exception as e:
             logger.warning(
                 '[cgroup] tool-search clear during relief failed: %s', e)
@@ -807,8 +807,8 @@ def write_pressure_journal(snap: dict) -> bool:
             os.makedirs(parent, exist_ok=True)
         line = _json.dumps(rec, separators=(',', ':')) + '\n'
         from lib.json_store import locked_path, write_bytes_atomic
-        from lib.log_policy import LOG_FILE_MODE
-        from lib.log_retention import append_bytes_locked
+        from lib.logging_pkg.log_policy import LOG_FILE_MODE
+        from lib.logging_pkg.log_retention import append_bytes_locked
         # Trimming and appending are one transaction.  Without the stable
         # sidecar lock, two server processes can each replace the journal with
         # an older tail and silently discard the other's newest record.

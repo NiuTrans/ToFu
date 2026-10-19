@@ -292,7 +292,7 @@ def delete_directory(path_str):
         Refuses forbidden system paths, registered workspace roots, and any
         path that is not an existing directory.
     """
-    from lib.agent_artifacts import TRASH_DIR
+    from lib.agent_loop.agent_artifacts import TRASH_DIR
     from lib.project_mod.config import get_roots
     from lib.project_mod.write_tools import _is_forbidden_create_path
 
@@ -472,9 +472,18 @@ def _exec_read_files(fn_args, base_path, conv_id, task_id, kwargs):
             f'Invalid entries: {details}. Retry with correct schema.'
         )
     # If SOME specs were invalid, prepend a warning but still read the valid ones
+    capture = kwargs.get('file_source_capture')
+    from lib.project_mod.config import get_conv_roots
+    source_roots = tuple(os.path.abspath(state['path']) for state in
+                         get_conv_roots(conv_id).values()) if conv_id else ()
     result = tool_read_files(
         base_path, resolved, result_items=result_projection_items,
-        task=kwargs.get('task'))
+        task=kwargs.get('task'), source_capture=capture, source_roots=source_roots,
+        read_observations=kwargs.get('read_observations'))
+    if fn_args.get('bind_sources') is True and isinstance(result, str):
+        result += ('\n[Source binding coverage: only reads carrying a File source descriptor '
+                   'are bound. Attachments, converters, binary files, unverified roots and '
+                   'reads without a durable task cannot issue file sources.]')
     if invalid_specs:
         details = '; '.join(f'index {i}: {t} {v!r}' for i, t, v in invalid_specs[:5])
         warn = (
@@ -696,7 +705,8 @@ def _exec_edit_file(fn_args, base_path, conv_id, task_id, kwargs):
             'edit_file', edits, '{path, operation, anchor, content}')
     return tool_edit_file(
         base_path, edits, conv_id=conv_id, task_id=task_id,
-        allow_outside=bool(fn_args.get('allow_outside_workspace')))
+        allow_outside=bool(fn_args.get('allow_outside_workspace')),
+        atomic=fn_args.get('atomic', True))
 
 
 def _exec_insert_content(fn_args, base_path, conv_id, task_id, kwargs):
@@ -1011,7 +1021,13 @@ def _exec_run_command(fn_args, base_path, conv_id, task_id, kwargs):
         return 'Error: frozen_input_paths must be an explicit scope-field/path map; command was not started.'
 
     from lib.tasks_pkg.workspace_delivery import command_workspace_refusal
-    refusal = command_workspace_refusal(kwargs.get('task') or {}, command_str, cwd)
+    from lib.project_mod.tool_admission import recorded_command_source
+    # Only the exact server-generated durable wrapper can borrow its original
+    # admission source. Its stream/sentinel writes are runtime bookkeeping,
+    # not model write targets; unbound or modified wrappers get no exemption.
+    original = recorded_command_source(command_str)
+    admission_str = command_str if original is None else original
+    refusal = command_workspace_refusal(kwargs.get('task') or {}, admission_str, cwd)
     if refusal:
         return refusal
     directory_listing = (
@@ -1047,7 +1063,7 @@ def _exec_run_command(fn_args, base_path, conv_id, task_id, kwargs):
             return _fast_path_command_result(command_str, _find_outcome)
         # Exact-total modes (wc -l / sort) exhausted the walk budget: fall
         # through to the native find segment with its own timeout budget.
-    destructive = _is_destructive_command(command_str)
+    destructive = _is_destructive_command(admission_str)
 
     # Read-only root guard: refuse a destructive command whose working
     #   directory lives inside a root marked read-only. Read-only commands
@@ -1262,8 +1278,261 @@ _EXEC_HANDLERS = {
 }
 
 
+def _scoped_publish(scope, path, data, original, fingerprint, conv_id, task_id):
+    """Retain prepare/journal ordering without running ungranted recovery I/O.
+
+    Pending intents require the trusted recovery owner, not a file-only worker.
+    The new intent is derived from the pinned stage descriptor; no path-based
+    preimage, realpath target rewrite or generic post-edit subprocess is used.
+    """
+    import base64
+    import uuid
+    from lib.project_mod import modifications as mods
+    from lib.project_mod.session_lock import locked_session
+    from lib.project_mod.write_intents import locked_intents, _validate, _digest, IntentError
+    from lib.project_mod.write_recovery import post_image
+    from lib.project_mod.write_tools._ops import _record_modification_checked, _AppliedWriteFailure, _UndoRecordingFailed
+    from lib.project_mod.tool_admission import journal_conv_id
+    session = mods._get_session_dir(scope.root)
+    with locked_session(session) as state, locked_intents(session) as store:
+        if state.get('writing') or state.get('recovering'):
+            raise IntentError('Nested scoped journal write is not allowed')
+        if store.read():
+            raise IntentError('Pending write recovery requires the trusted recovery owner; no scoped write ran')
+        state['preparedJournal'] = list(mods._cache_get(session))
+        state['writing'] = True
+        record = None
+        published = False
+
+        def prepare(parent, stage):
+            nonlocal record
+            metadata = os.stat(stage, dir_fd=parent, follow_symlinks=False)
+            os.fsync(parent)
+            record = _validate({
+                'version': 1, 'state': 'prepared', 'changeId': uuid.uuid4().hex,
+                'basePath': scope.root, 'rootPath': scope.root,
+                'path': path, 'stageName': stage, 'rootIdentity': list(scope.root_identity),
+                'stagedIdentity': [metadata.st_dev, metadata.st_ino],
+                'original': None if original is None else base64.b64encode(original).decode('ascii'),
+                'postBytes': len(data), 'postDigest': _digest(data),
+                'convId': journal_conv_id(conv_id), 'taskId': task_id,
+            })
+            mods._atomic_json_write(os.path.join(store.directory, record['changeId'] + '.json'), record)
+
+        def applied():
+            nonlocal published
+            published = True
+
+        try:
+            scope.publish(path, data, fingerprint, preimage=original, before_replace=prepare, after_replace=applied)
+            _record_modification_checked(scope.root, 'write_file', path,
+                original_content=original, conv_id=journal_conv_id(conv_id), task_id=task_id,
+                change_id=record['changeId'], post_image=post_image(record))
+            try:
+                store.acknowledge(record)
+            except OSError:
+                logger.warning('Scoped write committed; prepared intent cleanup remains pending', exc_info=True)
+        except Exception as error:
+            if not published and record is not None:
+                # Stage cleanup is already anchored in publish(). Do not call
+                # generic recovery, which could open a newly substituted root.
+                try:
+                    store.acknowledge(record)
+                except OSError:
+                    logger.warning('Unpublished scoped intent retained for trusted recovery', exc_info=True)
+            if published and not isinstance(error, _AppliedWriteFailure):
+                raise _UndoRecordingFailed() from error
+            raise
+        finally:
+            state.pop('writing', None)
+            state.pop('preparedJournal', None)
+
+
+def _scoped_freshness(scope, path, data, conv_id, *, require_read=False, record=False):
+    """Use bytes already read through the fence, never a path-based re-read."""
+    from lib import write_freshness as freshness
+    if not conv_id or not freshness._gate_enabled():
+        return
+    target = os.path.join(scope.root, path)
+    if record:
+        freshness.record_written(conv_id, target, data)
+        return
+    with freshness._lock:
+        previous = freshness._tokens.get((conv_id, target))
+    if require_read and previous is None:
+        raise ValueError('Read this scoped file before editing it')
+    if data is not None and previous is not None:
+        current = freshness.fingerprint_for_written_bytes(target, data, previous[0])
+        if (current != previous[0]
+                or (previous[0][0] == 's' and previous[0][3:6] != (scope.root, *scope.root_identity))):
+            raise ValueError('Scoped file changed since your read; re-read and recompute the edit')
+
+
+def _execute_scoped_files(scope, fn_name, fn_args, conv_id, task_id, source_capture=None):
+    """Actual first-party file-only handler; no generic path/converter fallbacks."""
+    from contextlib import ExitStack
+    from lib.project_mod.post_commit import defer_publication
+    from lib.project_mod import workspace_lease as leases
+    from lib.project_mod.tool_admission import admission_timeout, cancellation
+    from lib.project_mod.write_tools._ops import (
+        _compute_diff, _compute_insert, _fail_tag, _AppliedWriteFailure)
+    if fn_name == 'read_files':
+        import hashlib
+        import json
+        from lib import write_freshness as freshness
+        outputs = []
+        observations = []
+        for read in fn_args.get('reads', [fn_args]):
+            path = read['path']
+            data, _ = scope.read(path)
+            text = data.decode('utf-8')
+            if '\x00' in text:
+                raise ValueError('Scoped reads support UTF-8 text only, not opaque converters')
+
+            observation = freshness.ReadObservation(os.path.join(scope.root, path), (
+                's', len(data), hashlib.sha256(data).hexdigest(), scope.root, *scope.root_identity))
+            lines = text.splitlines(keepends=True)
+            start = read.get('start_line', 1)
+            end = min(read.get('end_line', len(lines)), len(lines))
+
+            has_range = ('start_line' in read or 'end_line' in read)
+            if has_range and not lines[start - 1:end]:
+                raise ValueError(f'Requested line range for {path} is beyond EOF')
+            rendered = f'File: {path} (lines {start}-{end} of {len(lines)})\n' + ''.join(lines[start - 1:end])
+            if source_capture is not None:
+                from lib.artifacts.file_snapshot import read_project_snapshot
+                def check_source():
+                    source_capture.check()
+                    scope.check(path)
+                snapshot = read_project_snapshot(path, [scope.root], check=check_source,
+                    expected_root_identity=scope.root_identity)
+                import hashlib
+                if snapshot.sha256 != hashlib.sha256(data).hexdigest():
+                    raise ValueError('Scoped file changed before source binding')
+                source = source_capture.bind(snapshot, roots=[scope.root])
+                rendered += '\n[File source: ' + json.dumps(source, ensure_ascii=False) + ']'
+            outputs.append(rendered)
+            observations.append(observation)
+        # A later item/source-binding failure returns no batch content. Do not
+        # certify earlier, undisplayed items before the whole scoped read succeeds.
+        for observation in observations:
+            freshness.record_observation(conv_id, observation)
+        return '\n\n'.join(outputs)
+    paths = list(dict.fromkeys(scope.paths))
+    with defer_publication(), ExitStack() as stack:
+        # Discover trusted checkout metadata only from the owned root, never
+        # from realpath(model_target). The lower lease primitive accepts that
+        # fixed identity and does not re-resolve a raced leaf/ancestor alias.
+        from lib.project_mod.snapshot_content import anchored_directory
+        scope.check(paths[0], write=True)
+        with anchored_directory(scope.root, '.', scope.root_identity):
+            identity = leases._checkout_identity(scope.root)
+        if identity is not None:
+            root, common = identity
+            if root != scope.root:
+                raise ValueError('Scoped checkout lease resolved a different owned root')
+            stack.enter_context(leases._lease(root, leases._FILE_BARRIER,
+                admission_timeout(), cancellation(), _identity=identity))
+            for path in sorted(paths):
+                target = os.path.join(scope.root, path)
+                stack.enter_context(leases._lease(target, leases._WRITE,
+                    admission_timeout(), cancellation(), _identity=(target, common)))
+        if fn_name == 'write_file':
+            path = paths[0]
+            original, fingerprint = scope.read(path, missing=True, write=True)
+            _scoped_freshness(scope, path, original, conv_id)
+            data = fn_args['content'].encode('utf-8')
+            if fn_args.get('append') and original is not None:
+                data = original + data
+            _scoped_publish(scope, path, data, original, fingerprint, conv_id, task_id)
+
+            _scoped_freshness(scope, path, data, conv_id, record=True)
+            return (f"File {'created' if original is None else 'updated'}: {path} "
+                    f"({len(data.splitlines())} lines, {_fmt_size(len(data))})")
+        # File grants share one root/journal. Hold its existing reentrant
+        # admission over the complete plan and publication, not once per file.
+        # Scoped workers never replay pending intents on ungranted paths.
+        from lib.project_mod import modifications as mods
+        from lib.project_mod.session_lock import locked_session
+        from lib.project_mod.write_intents import locked_intents, IntentError
+        session = mods._get_session_dir(scope.root)
+        state = stack.enter_context(locked_session(session))
+        store = stack.enter_context(locked_intents(session))
+        if state.get('writing') or state.get('recovering'):
+            raise IntentError('Nested scoped journal write is not allowed')
+        if store.read():
+            raise IntentError('Pending write recovery requires the trusted recovery owner; no scoped write ran')
+        mods._cache_get(session)
+        strings = {}
+        plans = []
+        for path in paths:
+            ops = [(i, edit) for i, edit in enumerate(fn_args['edits'], 1) if edit['path'] == path]
+            try:
+                original, fingerprint = scope.read(path, write=True)
+                _scoped_freshness(scope, path, original, conv_id, require_read=True)
+                current = original.decode('utf-8')
+                successes = []
+                for i, edit in ops:
+                    operation = edit['operation']
+                    if operation == 'replace':
+                        comp = _compute_diff(current, path, edit['anchor'], edit['content'],
+                                             replace_all=edit.get('replace_all', False))
+                    else:
+                        comp = _compute_insert(current, path, edit['anchor'], edit['content'],
+                            position='after' if operation == 'insert_after' else 'before', syntax_guard=False)
+                    if comp['ok']:
+                        current = comp['new_content']
+                        successes.append(i)
+                    else:
+                        strings[i] = f"[{i}] FAIL {path} [{operation}]{_fail_tag(comp)}: {comp['error']}"
+                if successes:
+                    plans.append((path, original, fingerprint, current.encode('utf-8'), successes))
+            except (OSError, ValueError) as error:
+                for i, _ in ops:
+                    strings[i] = f'[{i}] FAIL {path}: {error}'
+
+        rejected = fn_args.get('atomic', True) and bool(strings)
+        ok = skipped = 0
+        for path, original, fingerprint, data, successes in plans:
+            if rejected:
+                for i in successes:
+                    strings[i] = (f'[{i}] SKIP {path}: '
+                                  'Not applied because atomic preflight failed.')
+                    skipped += 1
+                continue
+            try:
+                _scoped_publish(scope, path, data, original, fingerprint, conv_id, task_id)
+                _scoped_freshness(scope, path, data, conv_id, record=True)
+                for i in successes:
+                    strings[i] = f'[{i}] OK {path}'
+                    ok += 1
+            except _AppliedWriteFailure:
+                # A mutation with uncertain durability must never masquerade
+                # as a preflight refusal that is safe to retry.
+                raise
+            except (OSError, ValueError) as error:
+                for i in successes:
+                    strings[i] = f'[{i}] FAIL {path}: {error}'
+        total = len(fn_args['edits'])
+        header = f'Applied {ok}/{total} edits ({total - ok - skipped} failed)'
+        if rejected:
+            header += f'; atomic preflight failed; no files written; {skipped} skipped'
+        return header + '\n' + '\n'.join(strings[i] for i in sorted(strings))
+
+
 def execute_tool(fn_name, fn_args, base_path, conv_id=None, task_id=None, **kwargs):
     """Dispatch a project tool call to its handler (see _EXEC_HANDLERS)."""
+
+    # Scope admission precedes root rebinding and every generic I/O adapter.
+    from lib.project_dispatch.scope import tool_scope
+    with tool_scope(kwargs.get('task'), fn_name, fn_args, base_path) as scope:
+        if scope is not None:
+            from lib.project_mod.tool_admission import tool_admission_scope, cancellation
+            control = cancellation()
+            runtime = kwargs.get('runtime_context') or (control.runtime_context if control is not None else None)
+            with tool_admission_scope(scope.task, runtime, tool_name=fn_name):
+                return _execute_scoped_files(scope, fn_name, fn_args, conv_id, task_id,
+                                             kwargs.get('file_source_capture'))
     handler = _EXEC_HANDLERS.get(fn_name)
     if handler is None:
         return f'Unknown project tool: {fn_name}'

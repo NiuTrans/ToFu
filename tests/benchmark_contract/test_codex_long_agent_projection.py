@@ -205,3 +205,20 @@ def test_projection_rejects_transport_failure_as_invalid_trial(tmp_path):
 
     with pytest.raises(CodexProjectionError, match="invalidate"):
         project_codex_trial(raw_trajectory=raw, proxy_metrics=metrics)
+
+
+def test_record_builder_prices_raw_responses_retries_like_success(tmp_path):
+    raw, metrics = _evidence(tmp_path)
+    projection = project_codex_trial(raw_trajectory=raw, proxy_metrics=metrics)
+    arguments = dict(
+        manifest=_manifest(), task_id='pilot:codex-1', projection=projection,
+        oracle={'passed': True, 'type': 'exact'}, artifacts=[],
+        task_started_at_unix_ns=1_000_000_000, oracle_ready_ms=200)
+    baseline = build_codex_release_task_record(**arguments)
+    retry = {'retryIndex': 1, 'failureClass': 'infrastructure', 'paidToolCostUsd': 0,
+             'modelUsages': [{'input_tokens': 1000, 'output_tokens': 100,
+                             'input_tokens_details': {'cached_tokens': 600},
+                             'output_tokens_details': {'reasoning_tokens': 20}}]}
+    recovered = build_codex_release_task_record(**arguments, retries=[retry])
+    assert recovered['cost']['modelCostUsd'] - baseline['cost']['modelCostUsd'] == \
+        pytest.approx(0.0026506)

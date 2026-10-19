@@ -913,6 +913,20 @@ impl PayloadSegmentStore {
             .protected_ids())
     }
 
+    /// Deterministic test clock: move existing parks into the past without
+    /// relaxing production retirement grace or changing any durable bytes.
+    #[cfg(test)]
+    pub(crate) fn age_deferred_retirements_for_test(
+        &self, age: std::time::Duration,
+    ) -> io::Result<usize> {
+        let parked_at = std::time::Instant::now().checked_sub(age)
+            .ok_or_else(|| invalid_data("test retirement age exceeds clock range"))?;
+        let mut registry = self.deferred_retirement.lock()
+            .map_err(|_| io::Error::other("deferred retirement lock was poisoned"))?;
+        for entry in registry.entries.values_mut() { entry.parked_at = parked_at; }
+        Ok(registry.entries.len())
+    }
+
     /// Unlinks every parked segment whose retirement predates the current
     /// manifest install and whose time floor expired. A file that vanished
     /// out of band is simply dropped from the set (its payloads live in the

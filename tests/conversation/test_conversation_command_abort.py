@@ -57,7 +57,7 @@ def conversation_command_authority(flask_client):
     try:
         yield
     finally:
-        from lib.runtime_state_store import reset_for_test
+        from lib.runtime.runtime_state_store import reset_for_test
         delete_conversation(CONV, user_id=1)
         reset_for_test()
 

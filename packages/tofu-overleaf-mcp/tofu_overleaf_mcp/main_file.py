@@ -1,14 +1,18 @@
-"""Recover the compiler's root input from its own bounded immutable TeX log."""
+"""Recover the compiler's root input from its own complete immutable TeX log."""
 from __future__ import annotations
 
 from pathlib import PurePosixPath
 import re
+import io
 
 from .contract import ExportError, schema
 
 
-def compiled_main_file(log: bytes) -> str:
-    match = re.search(r'^\*\*(.+)$', log[:8192].decode('utf-8', 'replace'), re.MULTILINE)
+def compiled_main_file(log) -> str:
+    stream = io.BytesIO(log) if isinstance(log, bytes) else log
+    lines = iter(stream.readline, b'')
+    match = next((found for line in lines
+                  if (found := re.match(r'^\*\*(.+)$', line.decode('utf-8', 'replace').rstrip('\r\n')))), None)
     if match is None:
         raise ExportError('overleaf_main_file_unavailable')
     value = match[1].strip().strip('"')

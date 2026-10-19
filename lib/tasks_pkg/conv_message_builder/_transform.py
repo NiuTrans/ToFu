@@ -308,10 +308,8 @@ def _append_video_blocks(content_blocks: list, videos: list, *, model: str,
                 'text': f'[Video {vi} frame at {_fmt_video_ts(fr.get("t") or 0)}]',
             })
             added += 1
-        # Storyboard only rides when the raw frames were suppressed by the
-        # vision gate — a vision-capable chat model gets the frames directly
-        # and the storyboard would be redundant noise.
-        if storyboard and frames and not kept:
+        # Complete narration carries evidence omitted by partial frame selection.
+        if storyboard and frames and len(kept) < len(frames):
             content_blocks.append({
                 'type': 'text',
                 'text': (f'[Video {vi} visual storyboard]\n{storyboard}'),

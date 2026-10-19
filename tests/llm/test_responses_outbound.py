@@ -36,7 +36,7 @@ from lib.llm.responses_outbound import (
     responses_response_to_openai,
     responses_url,
 )
-from lib.llm_errors import RateLimitError, RetryableAPIError
+from lib.llm.llm_errors import RateLimitError, RetryableAPIError
 
 pytestmark = pytest.mark.unit
 
@@ -312,7 +312,7 @@ class TestRequestConversion:
         out, _rev = openai_body_to_responses(body, profile='default')
         assert out['tools'] == [{'type': 'function', 'name': 'grep_search',
                                  'description': 'search',
-                                 'parameters': {'type': 'object'}}]
+                                 'parameters': {'type': 'object'}, 'strict': False}]
         assert out['tool_choice'] == {'type': 'function', 'name': 'grep_search'}
 
     def test_image_block_to_input_image(self):

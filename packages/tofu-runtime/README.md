@@ -144,7 +144,7 @@ native/Python aggregate wall ratios 0.121/0.341/0.291 for short arguments,
 1,000-integer arrays and long Unicode. The rejected per-array-element hashing
 version regressed the array profile to 1.401; streaming array hashing removes
 that repeated hash startup and child-vector allocation. Raw aggregates and source
-identity are retained in `docs/evidence/rust_tool_policy_20261009.json`. This
+identity are retained in `rust_tool_policy_20261009.json`. This
 excludes CPU, tails, RSS and provider/task integration performance admission.
 
 `tool_assembly.rs` now owns upstream-index aliases, unindexed continuation,
@@ -197,7 +197,7 @@ decoding still require the shared native JSON boundary.
 Three alternating fresh-process pairs of 5,000 validations measured native/Python
 aggregate wall ratios 0.057/0.076/0.073 for small arguments, nested arrays and
 wide objects. Native input cloning is included; schema compilation is excluded.
-Source identity/raw aggregates live in `docs/evidence/rust_tool_contract_20261009.json`.
+Source identity/raw aggregates live in `rust_tool_contract_20261009.json`.
 This is not CPU/tail/RSS or application performance admission.
 
 `tool_execution.rs` now wraps every registry dispatch in one tool occurrence
@@ -388,5 +388,87 @@ explicit for both crates; the core's many thread-pool tests run serially to avoi
 unrelated test-pool resource pressure. Existing engine workspaces stay separate.
 `examples/tool_parallel_measure.rs` accepts an optional wait/empty/cpu profile;
 paired source/binary-identical fixtures and separate RSS observations are retained
-in `docs/evidence/rust_tool_idle_policy_20261009.json`. These costs cover synthetic
+in `rust_tool_idle_policy_20261009.json`. These costs cover synthetic
 native scheduling only, with whole-application migration/admission still pending.
+
+## Experimental request-local token counting
+
+The unadmitted candidate shares short-piece BPE storage across text fields of one
+Counter.count call, alongside its existing regex scratch. Only byte offsets and
+ranks are retained, never input text or token results. Every unmerged short piece
+clears the prior boundaries before reuse; whole-token matches allocate nothing.
+Exact capacity growth stays within the 1 KiB crossover; long pieces retain their
+independent heap scratch. Success and every error drop all request-local storage.
+No encoder cache, worker, cross-request buffer or admission default is added.
+Problem: repeated short-piece allocation can erase native computation gains.
+Decision: measure reuse of one request-owned vector without changing merge order.
+Alternatives: a process-wide scratch pool complicates concurrent ownership and
+retains peak requests; always using the heap increases short-piece overhead.
+Verify the full-encoder/heterogeneous-field oracle in tests/token_ingress.rs and
+the paired examples/token_scratch_measure.rs via benchmarks/token_scratch.py.
+Separate allocator diagnostics remain in examples/token_ingress_measure.rs.
+The candidate is retained as benchmarks/token_scratch_candidate.patch; production
+keeps the original algorithm. Materialize both frozen source snapshots with
+benchmarks/token_scratch_prepare.py --reference-commit e9a8d5d52 --output /tmp/tofu-token-scratch-sources.
+Build each with its own CARGO_TARGET_DIR and run benchmarks/token_scratch.py with
+both binaries and --reference-root/--candidate-root. Never share a Cargo output
+directory between variants: a cached example can silently reference the other
+source tree. Identical binary hashes refuse the comparison before measurement.
+The `rust_token_scratch_20261011.json` preserves
+failed tails, A/A calibration and the rejected large cohort. Cold diagnostics
+and kernel gains cannot supply full-app performance admission.
+The global [admission contract](../../benchmarks/system_performance_contract.json)
+also requires cold first-operation clocks from distinct fresh processes; missing
+activation evidence cannot be replaced with warm component measurements.
+
+## Native BPE data layout
+
+Problem: the initial two-byte rank search repeatedly hashes keys and follows
+vocabulary pointers; short unmerged pieces also allocate boundary vectors.
+Decision: derive one encoder-owned 65,536-cell u32 index from the admitted
+vocabulary, keep longer rank lookup canonical, and store boundaries for pieces
+below 32 bytes inline. Single-byte coverage is verified at admission; a two-byte
+piece has exactly one possible merge. The linear merger uses one algorithm over
+inline and ordinary Vec storage; larger pieces retain the indexed heap.
+Alternatives: request-wide reuse failed prior tails; a manual slice-length rewrite
+slowed medium pieces despite identical counts; a second vocabulary changes rank
+authority. The added 256 KiB index has the encoder's existing lazy/drop lifetime,
+never holds input text and does not alter owner/byte/token admission.
+The fixed-size array expresses the complete u16 key space to the compiler.
+The measured dynamic-slice variant failed code-piece tails; fixed storage passes.
+Merge adaptation retains MIT upstream notices under licenses/tiktoken-rs-0.11.0/.
+The `rust_pair_ranks_20261011.json` covers
+14 cases, three alternating pairs and 5,000 operations per case/arm. All warm
+P50/P95/P99/CPU/RSS guards pass; dense o200k pieces improve at least 10% in
+every pair. Separate allocation diagnostics show +4.71%/+2.34% encoder residency.
+benchmarks/token_cold_start.py runs identical token_ingress_measure examples
+with --cold-only --encoding in 100 fresh workers per encoding/arm, including
+first-operation CPU and wall clocks. Both encodings pass the 5% cold guard.
+To rebuild the original comparison, archive e9a8d5d52 as reference, copy the
+current token_ingress_measure.rs into that snapshot, and build each variant
+with its own CARGO_TARGET_DIR. Pass source roots and binaries to both runners.
+The two benchmarks/token_pair_*_rejected.patch files reconstruct the rejected
+slice and dynamic-index variants from this implementation; their source digests
+and failed measurements remain in the evidence. These component checks do not
+grant application-default or whole-agent migration admission.
+
+Provider completion rechecks session/client Stop and deadline after the required
+text consumer joins. A consumer can publish Stop during the transfer's winning
+poll; no response success may escape that publication boundary. Existing
+transport/provider failures retain precedence. Verify the deterministic
+session/client/deadline/failing-consumer cases in tests/stream_progress.rs.
+`html_projection::project` and `project_bounded` now implement the canonical
+knowledge HTML text projection entirely in Rust. The iterative tokenizer/arena
+preserve entity, whitespace, hidden subtree, heading, table and malformed-input
+behavior of the explicitly recorded Python 3.12.13 owner. A subtree text index
+avoids repeated walks of deeply nested empty cells. Generated Unicode casing
+and context predicates preserve that owner across Rust Unicode upgrades.
+`project_bounded` refuses text-workspace expansion without partial output; its
+budget is distinct from input/arena memory and process RSS. Verify the generated
+oracle and `tests/html_projection.rs`, then the compiled-source differential
+driver `benchmarks/knowledge_html/native_check.py`. The optional `html-projection-abi` feature exports synchronous complete-result
+sinks, with generated ABI status and lifetime contracts. Explicit Python bindings
+seal pinned release bytes and join accepted calls before unloading. Application
+default selection and durable-ingest admission remain separate.
+
+> Evidence note: the the former evidence/ artifact snapshots cited here were retired from the tree. The cited JSON artifacts remain recoverable from git history.

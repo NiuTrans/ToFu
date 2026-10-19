@@ -11,10 +11,10 @@ import orjson
 import pytest
 
 from lib.storage.errors import StorageError
-from lib.storage_sidecar.adapters.sqlite import SQLiteSession
-from lib.storage_sidecar.config import SidecarConfig
-from lib.storage_sidecar.schema import initialize_schema
-from lib.storage_sidecar.turn_search_projection import (
+from lib.storage_authority_sql.adapters.sqlite import SQLiteSession
+from lib.storage_authority_sql.config import SidecarConfig
+from lib.storage_authority_sql.schema import initialize_schema
+from lib.storage_authority_sql.turn_search_projection import (
     LOCAL_DATABASE_NAME,
     LocalSQLiteTurnSearchTarget,
     PROJECTION_NAME,
@@ -71,7 +71,7 @@ def _snapshot(*, user_id=1, conversation_id='conv-1', turn_id='turn-1',
 
 
 def test_local_projection_is_disposable_private_and_searchable(tmp_path):
-    from lib.storage_sidecar.operations_pkg._conversations import (
+    from lib.storage_authority_sql.operations_pkg._conversations import (
         _conversation_search_op,
     )
 
@@ -392,7 +392,7 @@ def test_projection_close_waits_for_borrowers_and_connection_preparation(tmp_pat
 
 
 def test_projection_failed_rollback_retires_handle_and_keeps_original_error(tmp_path):
-    from lib.storage_sidecar.adapters.sqlite_read_pool import SQLiteReadSlot
+    from lib.storage_authority_sql.adapters.sqlite_read_pool import SQLiteReadSlot
     target = LocalSQLiteTurnSearchTarget(tmp_path / 'projection', 1)
     target.start()
     class Connection:
@@ -434,7 +434,7 @@ def test_local_projection_budget_is_retired_from_launch_policy(monkeypatch):
 
 
 def test_shared_reader_owner_rejects_foreign_lease_before_touching_connection(tmp_path):
-    from lib.storage_sidecar.adapters.sqlite_read_pool import DemandSQLiteReadPool
+    from lib.storage_authority_sql.adapters.sqlite_read_pool import DemandSQLiteReadPool
     target = LocalSQLiteTurnSearchTarget(tmp_path / 'projection', 1)
     target.start()
     foreign = DemandSQLiteReadPool(lambda: pytest.fail('foreign owner opened'), idle_reuse_hint=1)

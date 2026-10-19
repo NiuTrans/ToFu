@@ -32,7 +32,7 @@ from urllib.parse import urlsplit
 
 import requests
 
-from lib.http_client import http_get
+from lib.http_transport.client import http_get
 from lib.identity import require_user_id
 from lib.log import get_logger
 from lib.skills.installer import InstallerError, install_skill_package

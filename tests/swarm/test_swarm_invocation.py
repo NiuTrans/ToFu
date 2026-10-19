@@ -74,7 +74,6 @@ def scripted_provider(monkeypatch, runtime, responses):
 
 
 def test_one_round_owner_retry_budget_and_lazy_log(runtime, monkeypatch, tmp_path):
-    from lib.swarm.agent import SWARM_MAX_429_ATTEMPTS
     calls = scripted_provider(monkeypatch, runtime, [reply('verified final answer')])
     agent = agent_for(runtime)
     path = tmp_path / 'lazy' / 'worker.log'
@@ -83,7 +82,7 @@ def test_one_round_owner_retry_budget_and_lazy_log(runtime, monkeypatch, tmp_pat
     result = agent.run()
     assert (result.status, result.rounds_used, result.tool_calls_made) == ('completed', 1, 0)
     assert calls[0]['owner_user_id'] == 771
-    assert 1 <= calls[0]['max_429_attempts'] <= SWARM_MAX_429_ATTEMPTS
+    assert calls[0]['max_429_attempts'] is None  # Same selected-route policy as root.
     assert path.read_text() == 'verified final answer'
     assert not agent._log_buffer
 
@@ -153,7 +152,10 @@ def test_blocked_tool_uses_child_cancellation_and_keeps_parent_isolated(runtime,
 
 @pytest.mark.parametrize('finish', ['aborted', 'exception', 'failure', 'malformed', 'premature'])
 def test_provider_terminal_outcomes_never_fabricate_success(runtime, monkeypatch, finish):
-    from lib.llm_errors import AbortedError
+
+    # Isolate stream verdicts from the now-shared whole-invocation retry policy.
+    runtime.parent['config']['disableAutoTurnRetry'] = True
+    from lib.llm.llm_errors import AbortedError
     from lib.llm.stream_result import ProviderStreamResult, ProviderStreamState
     value = reply('Partial evidence', finish='aborted')
     if finish == 'exception':
@@ -326,7 +328,7 @@ def test_child_gateway_executes_only_scoped_catalog_and_disables_redelegation(ru
     # mode); it fails closed through the policy/backend chain.
     assert runtime.calls[0]['_multi_agent_mode'] == 'disabled'
     child = runtime.children[0]
-    assert set(child['_tool_gateway_names']) == {'execute_tools', 'execute_program'}
+    assert set(child['_tool_gateway_names']) == {'search_tools', 'execute_tools', 'execute_program'}
     assert [tool['function']['name'] for tool in child['_executable_tool_catalog']] == [TOOL['function']['name']]
     assert 'execute_tools' in child['_toolContractDocumentsByName']
 
@@ -571,7 +573,7 @@ def test_token_only_requests_snapshot_cost_once_through_repeated_resume(runtime,
 @pytest.mark.parametrize('exception', [False, True])
 def test_silent_provider_internal_stall_fails_and_keeps_receipts(runtime, monkeypatch, exception):
     import lib.tasks_pkg.manager._stream as stream
-    from lib.llm_errors import AbortedError
+    from lib.llm.llm_errors import AbortedError
     from lib.swarm.liveness import ProgressBeacon
     from lib.turn_verdict import derive_task_verdict
     import time
@@ -631,7 +633,7 @@ def test_exception_after_guard_preserves_authority(runtime, monkeypatch, reason)
     import lib.tasks_pkg.child_invocation as owner
     from lib.tasks_pkg.invocation import invocation_abort_requested
     from lib.swarm.liveness import ProgressBeacon
-    from lib.llm_errors import AbortedError
+    from lib.llm.llm_errors import AbortedError
     import time
 
     def interrupted(child):
@@ -769,3 +771,39 @@ def test_internal_stop_envelope_survives_canonical_error_serialization(reason):
     verdict = derive_task_verdict(cold)
     assert verdict.status.value == 'failed' and verdict.cause == 'invocation_' + reason
     assert cold['error']['detail'] == task['error']['detail']
+
+
+def test_parent_stop_checkpoint_continue_does_not_repeat_committed_tool(runtime, monkeypatch):
+    from lib.swarm.master import MasterOrchestrator
+    import lib.tasks_pkg.manager._stream as stream
+
+    spec = SubTaskSpec(id='recover-child', role='general', objective='Verify evidence')
+    agent = agent_for(runtime, spec=spec)
+    master = MasterOrchestrator(task_id=runtime.parent['id'], conv_id='', user_id=771, specs=[spec])
+    master._agents[spec.id] = agent
+    requests = []
+    def dispatch(body, **kwargs):
+        requests.append(deepcopy(body))
+        if len(requests) == 1:
+            return reply('Investigating', [tool_call()])
+        master.abort()
+        return reply('Partial progress', finish='aborted')
+    monkeypatch.setattr(stream, 'dispatch_stream', dispatch)
+    checkpoint = {}
+    def save(**kwargs):
+        checkpoint.update(messages=deepcopy(agent.messages), result=agent.result.to_dict())
+    monkeypatch.setattr(agent, '_checkpoint', save)
+    result = agent.run()
+    assert result.status == 'cancelled'
+    assert result.recovery_reason == 'parent_stop'
+    assert len(runtime.tool_calls) == 1
+    assert any(msg.get('role') == 'tool' for msg in checkpoint['messages'])
+
+    resumed = agent_for(runtime, spec=spec)
+    resumed.restore_checkpoint(checkpoint['messages'], result.rounds_used, checkpoint['result'])
+    scripted_provider(monkeypatch, runtime, [reply('Finished from prior evidence')])
+    completed = resumed.run()
+    assert completed.status == 'completed'
+    assert len(runtime.tool_calls) == 1
+    assert completed.total_tokens > result.total_tokens
+    assert completed.rounds_used > result.rounds_used

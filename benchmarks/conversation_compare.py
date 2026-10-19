@@ -9,23 +9,33 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import re
 from pathlib import Path
 import subprocess
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from benchmarks.conversation_acceptance import POLICY, assess
+from benchmarks.conversation_provenance import capture_sources
 from scripts.tofudb_bench import _mount_type
 
 
-def compare(legs: list[dict], repeats: int, filesystem: str) -> dict:
+def compare(legs: list[dict], repeats: int, filesystem: str, *, current_sources: dict | None = None) -> dict:
+    if current_sources is None:
+        try:
+            current_sources = capture_sources()
+        except (OSError, RuntimeError, ValueError) as exc:
+            current_sources = {'capture_error': str(exc)}
     gaps = []
     comparisons = []
     if repeats < POLICY['minimum_repeats']:
         gaps.append('fewer than required paired repeats')
     for repeat in range(repeats):
         selected = [row for row in legs if row['repeat'] == repeat]
-        pair = {row['backend']: row.get('report', {}) for row in selected}
+        pair = {row['backend']: row['report'] if isinstance(row.get('report'), dict) else {}
+                for row in selected}
+        authorities = {backend: report['authority'] if isinstance(report.get('authority'), dict) else {}
+                       for backend, report in pair.items()}
         if len(selected) != len(POLICY['required_backends']):
             gaps.append(f'repeat {repeat}: missing or duplicated leg')
         if any(row.get('error') or row.get('exit_code', 0) != 0 for row in selected):
@@ -33,25 +43,53 @@ def compare(legs: list[dict], repeats: int, filesystem: str) -> dict:
         if set(pair) != set(POLICY['required_backends']):
             gaps.append(f'repeat {repeat}: missing backend')
             continue
-        evaluations = {backend: assess(report) for backend, report in pair.items()}
+        evaluations = {backend: assess(report, current_sources=current_sources)
+                       for backend, report in pair.items()}
+        labels_match = all(backend == report.get('backend') for backend, report in pair.items())
+        if not labels_match:
+            gaps.append(f'repeat {repeat}: leg backend differs from measured authority')
         for backend, report in pair.items():
             if not evaluations[backend]['passed']:
                 gaps.append(f'repeat {repeat}: {backend} did not pass workload acceptance')
-            if report.get('authority', {}).get('filesystem') != filesystem:
+            if authorities[backend].get('filesystem') != filesystem:
                 gaps.append(f'repeat {repeat}: {backend} authority volume not verified')
         shape = ('conversations', 'rounds', 'chunk_bytes', 'stream_interval_ms', 'stream_event_kind', 'carry_stream_events', 'terminal_barrier',
                  'restart_while_running', 'durability', 'benchmark_source_sha256', 'rpc_deadline_seconds')
-        same_shape = all(pair['tofudb'].get(key) == pair['sqlite'].get(key) for key in shape)
-        same_volume = all(item.get('authority', {}).get('filesystem') == filesystem for item in pair.values())
+        same_sources = all(item['current_source_qualified'] for item in evaluations.values())
+        def pipeline_shape(report):
+            if 'delivery_pipeline' not in report:
+                return None
+            pipeline = report['delivery_pipeline']
+            if not isinstance(pipeline, dict):
+                return ('invalid-pipeline',)
+            return tuple(pipeline.get(key) for key in (
+                'contract', 'submission_mode', 'source_manifest_sha256'))
+
+        same_shape = (labels_match and same_sources
+                      and pipeline_shape(pair['tofudb']) == pipeline_shape(pair['sqlite'])
+                      and all(pair['tofudb'].get(key) == pair['sqlite'].get(key) for key in shape))
+        source_known = all(isinstance(item.get('benchmark_source_sha256'), str)
+                           and re.fullmatch(r'[0-9a-f]{64}', item['benchmark_source_sha256'])
+                           for item in pair.values())
+        if not source_known:
+            gaps.append(f'repeat {repeat}: benchmark source identity missing or invalid')
+        devices = [item.get('volume_device') for item in authorities.values()]
+        same_volume = (all(item.get('filesystem') == filesystem for item in authorities.values())
+                       and all(isinstance(device, int) and not isinstance(device, bool) and device >= 0
+                               for device in devices) and len(set(devices)) == 1)
+        if not same_volume:
+            gaps.append(f'repeat {repeat}: common authority device not verified')
         if not same_shape:
             gaps.append(f'repeat {repeat}: workload, durability or harness identity differs')
         for metric in POLICY['p99_budget_ms']:
             native = pair['tofudb'].get('latency_ms', {}).get(metric, {}).get('p99')
             sqlite = pair['sqlite'].get('latency_ms', {}).get(metric, {}).get('p99')
             complete = all(item['correctness_passed'] and item['coverage_passed']
+                           and item['current_source_qualified']
+                           and item['latency_comparison_eligible']
                            and item['metrics'][metric]['samples'] == item['metrics'][metric]['expected_samples']
                            for item in evaluations.values())
-            valid = (complete and same_shape and same_volume
+            valid = (complete and same_shape and source_known and same_volume
                      and isinstance(native, (float, int)) and isinstance(sqlite, (float, int))
                      and math.isfinite(native) and math.isfinite(sqlite) and native >= 0 and sqlite > 0)
             wins = valid and native <= sqlite

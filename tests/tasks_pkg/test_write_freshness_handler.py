@@ -29,6 +29,8 @@ import os
 import pytest
 
 
+pytestmark = pytest.mark.unit
+
 @pytest.fixture(autouse=True)
 def _isolate(monkeypatch):
     """Fresh token store + finalize recorder for every test."""
@@ -40,7 +42,7 @@ def _isolate(monkeypatch):
 
     def _recorder(task, rn, round_entry, results, **kwargs):
         round_entry['results'] = results
-        round_entry['status'] = 'done'
+        round_entry['status'] = kwargs.get('status', 'done')
         finalized.append({'task': task.get('id'), 'rn': rn,
                           'results': results, 'round_entry': round_entry})
 
@@ -60,6 +62,7 @@ def workspace(tmp_path):
 
 def _task(conv_id):
     return {'id': f'task-{conv_id}', 'convId': conv_id,
+            '_invocationStorageFree': True,
             'messages': [], 'toolRounds': []}
 
 
@@ -73,14 +76,17 @@ def _drive(fn_name, fn_args, task, project_path):
     """
     import json as _json
     from lib.tasks_pkg.handlers.project import _handle_project_tool
+    round_entry = {'query': fn_name, 'toolCallId': f'tc-{fn_name}-1'}
     out = _handle_project_tool(
         task, {}, fn_name, f'tc-{fn_name}-1', fn_args, 1,
-        {'query': fn_name, 'toolCallId': f'tc-{fn_name}-1'},
-        None, project_path, True)
+        round_entry, None, project_path, True)
     task['toolRounds'].append({
+        **round_entry,
         'toolName': fn_name,
         'toolArgs': _json.dumps(fn_args),
-        'status': 'done',
+
+        'result': out[1],
+        'status': round_entry.get('status', 'done'),
         'roundNum': 1,
     })
     return out
@@ -300,5 +306,192 @@ def test_handler_neutered_locked_preimage_check_still_preserves_other_writer(
     _tc_id, content, _ = _drive(
         'write_file', {'path': 'a.py', 'content': 'def foo():\n    return 3  # A\n'},
         a, workspace)
-    assert 'File changed while waiting for write admission' in content
+    assert content.startswith('Write failed:'), content
+    assert 'observed content version differs' in content
+    assert 're-read and reconcile' in content
     assert _read(workspace, 'a.py') == 'def foo():\n    return 2  # B\n'
+
+
+@pytest.mark.unit
+def test_refusal_then_retry_cannot_manufacture_read_first(workspace, _isolate):
+    actor = _task('retry-actor')
+    args = {'edits': [{'path': 'a.py', 'operation': 'replace',
+                       'anchor': 'return 1', 'content': 'return 9'}]}
+    for _ in range(2):
+        _tc, content, _ = _drive('edit_file', args, actor, workspace)
+        assert 'must read each target file first' in content
+        assert 'return 1' in _read(workspace, 'a.py')
+    from lib import write_freshness
+    from lib.tasks_pkg.handlers._write_freshness_gate import _conv_key
+    assert not write_freshness.has_token(_conv_key(actor), os.path.join(workspace, 'a.py'))
+
+
+@pytest.mark.unit
+def test_failed_edit_is_not_a_read_when_gate_reenabled(workspace, _isolate, monkeypatch):
+    actor = _task('failed-actor')
+    monkeypatch.setenv('TOFU_APPLY_DIFF_READ_GATE', '0')
+    args = {'edits': [{'path': 'a.py', 'operation': 'replace',
+                       'anchor': 'not in this file', 'content': 'guess'}]}
+    _tc, content, _ = _drive('edit_file', args, actor, workspace)
+    assert '[1] FAIL' in content
+    monkeypatch.delenv('TOFU_APPLY_DIFF_READ_GATE')
+    args['edits'][0]['anchor'] = 'return 1'
+    _tc, content, _ = _drive('edit_file', args, actor, workspace)
+    assert 'must read each target file first' in content
+    assert 'return 1' in _read(workspace, 'a.py')
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize('failure', ['binary', 'legacy_encoding', 'range'])
+def test_mixed_read_failure_never_certifies_failed_item(workspace, _isolate, failure):
+    actor = _task('mixed-actor')
+    bad_spec = {'path': 'b.py'}
+    if failure == 'range':
+        bad_spec.update(start_line=999, end_line=1000)
+    else:
+        with open(os.path.join(workspace, 'b.py'), 'wb') as stream:
+            stream.write(b'\x00unread' if failure == 'binary' else b'\xffunread')
+    _drive('read_files', {'reads': [{'path': 'a.py'}, bad_spec]}, actor, workspace)
+    from lib import write_freshness
+    from lib.tasks_pkg.handlers._write_freshness_gate import _conv_key
+    assert write_freshness.has_token(_conv_key(actor), os.path.join(workspace, 'a.py'))
+    assert not write_freshness.has_token(_conv_key(actor), os.path.join(workspace, 'b.py'))
+    _tc, content, _ = _drive('edit_file', {'edits': [{'path': 'b.py', 'operation': 'replace',
+        'anchor': 'unread', 'content': 'guess'}]}, actor, workspace)
+    assert 'must read each target file first' in content
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize('streaming', [False, True])
+def test_mutation_after_read_before_stamp_stays_stale(workspace, _isolate, monkeypatch, streaming):
+    from lib.tasks_pkg.handlers import project, _write_freshness_gate
+    from lib.tasks_pkg.streaming_tool_executor import StreamingToolAccumulator
+    actor = _task('snapshot-race')
+    seam = _write_freshness_gate if streaming else project
+    real_record = seam.record_read_paths
+    def mutate_then_record(*args, **kwargs):
+        with open(os.path.join(workspace, 'a.py'), 'w') as target:
+            target.write('unobserved sibling bytes\n')
+        return real_record(*args, **kwargs)
+    monkeypatch.setattr(seam, 'record_read_paths', mutate_then_record)
+    if streaming:
+        accumulator = StreamingToolAccumulator(actor, workspace, project_enabled=True)
+        try:
+            content = accumulator._execute_one('read_files', {'path': 'a.py'})
+        finally:
+            accumulator._pool.shutdown(wait=True)
+    else:
+        _tc, content, _ = _drive('read_files', {'path': 'a.py'}, actor, workspace)
+    assert 'def foo()' in content and 'unobserved' not in content
+    _tc, refusal, _ = _drive('write_file', {'path': 'a.py', 'content': 'overwrite'}, actor, workspace)
+    assert 'changed on disk' in refusal
+    assert _read(workspace, 'a.py') == 'unobserved sibling bytes\n'
+
+
+@pytest.mark.unit
+def test_preexecuted_read_does_not_restamp_a_later_disk_version(workspace, _isolate):
+    from lib import write_freshness
+    from lib.tasks_pkg.handlers._write_freshness_gate import record_read_paths
+    from lib.tasks_pkg.streaming_tool_executor import StreamingToolAccumulator
+    actor = _task('preexecuted')
+    accumulator = StreamingToolAccumulator(actor, workspace, project_enabled=True)
+    try:
+        observed = accumulator._execute_one('read_files', {'path': 'a.py'})
+    finally:
+        accumulator._pool.shutdown(wait=True)
+    with open(os.path.join(workspace, 'a.py'), 'w') as target:
+        target.write('unseen revision\n')
+    # Replayed display text has no new observation carrier. In particular it
+    # must not reinterpret the current path as the already-prefetched version.
+    assert record_read_paths(actor, {'path': 'a.py'}, workspace, observed) == 0
+    assert 'def foo()' in observed
+    from lib.tasks_pkg.handlers._write_freshness_gate import _conv_key
+    assert write_freshness.is_stale(_conv_key(actor), os.path.join(workspace, 'a.py'))
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize('tool,atomic', [('edit_file', None), ('edit_file', True), ('apply_diffs', True)])
+@pytest.mark.parametrize('blocked', ['unread', 'stale'])
+def test_atomic_handler_refuses_original_whole_batch(workspace, _isolate, tool, atomic, blocked):
+    import copy
+    actor = _task('whole-batch')
+    paths = ['a.py'] if blocked == 'unread' else ['a.py', 'b.py']
+    _drive('read_files', {'reads': [{'path': path} for path in paths]}, actor, workspace)
+    if blocked == 'stale':
+        with open(os.path.join(workspace, 'b.py'), 'w') as target:
+            target.write('sibling owns this revision\n')
+    edits = [{'path': 'a.py', 'search': 'return 1', 'replace': 'return 10'},
+             {'path': 'b.py', 'search': 'return 2', 'replace': 'return 20'}]
+    if tool == 'edit_file':
+        edits = [{'path': item['path'], 'operation': 'replace', 'anchor': item['search'],
+                  'content': item['replace']} for item in edits]
+    args = {'edits': edits}
+    if atomic is not None:
+        args['atomic'] = atomic
+    original = copy.deepcopy(args)
+    before = [_read(workspace, path) for path in ('a.py', 'b.py')]
+    _tc, refusal, _ = _drive(tool, args, actor, workspace)
+    assert 'refused' in refusal
+    assert [_read(workspace, path) for path in ('a.py', 'b.py')] == before
+    assert args == original
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize('execution_fails', [False, True])
+def test_nonatomic_keeps_original_indexes_args_and_honest_status(workspace, _isolate, execution_fails):
+    import copy
+    actor = _task('partial-batch')
+    _drive('read_files', {'path': 'a.py'}, actor, workspace)
+    args = {'atomic': False, 'edits': [
+        {'path': 'b.py', 'operation': 'replace', 'anchor': 'return 2', 'content': 'return 20'},
+        {'path': 'a.py', 'operation': 'replace',
+         'anchor': 'missing' if execution_fails else 'return 1', 'content': 'return 10'}]}
+    original = copy.deepcopy(args)
+    _tc, content, _ = _drive('edit_file', args, actor, workspace)
+    assert args == original
+    assert '[1] SKIP b.py' in content
+    assert f'[2] {"FAIL" if execution_fails else "OK"}' in content
+    assert f'Applied {0 if execution_fails else 1}/2 edits' in content
+    assert 'were applied' not in content
+    assert _read(workspace, 'b.py') == 'def bar():\n    return 2\n'
+
+
+@pytest.mark.parametrize('gate', ['partition_batch_edits', 'partition_stale_edits'])
+@pytest.mark.parametrize('tool,atomic', [('edit_file', None), ('edit_file', True),
+                                        ('apply_diffs', True)])
+def test_atomic_batch_refuses_when_gate_check_raises(tmp_path, monkeypatch, gate, tool, atomic):
+    import copy
+    import lib.project_mod as project_tools
+    import lib.tasks_pkg.handlers.project as handler
+
+    root = str(tmp_path)
+    path = tmp_path / 'file.txt'
+    path.write_text('before\n')
+    task = _task(f'atomic-check-{gate}-{tool}-{atomic}')
+    _drive('read_files', {'path': 'file.txt'}, task, root)
+    edit = ({'path': 'file.txt', 'operation': 'replace', 'anchor': 'before', 'content': 'after'}
+            if tool == 'edit_file' else
+            {'path': 'file.txt', 'search': 'before', 'replace': 'after'})
+    args = {'edits': [edit]}
+    if atomic is not None:
+        args['atomic'] = atomic
+    original_args = copy.deepcopy(args)
+    invoked = []
+    original_execute = project_tools.execute_tool
+
+    def unavailable(*_args, **_kwargs):
+        raise RuntimeError('injected gate failure')
+
+    def execute(*call_args, **call_kwargs):
+        invoked.append(call_args)
+        return original_execute(*call_args, **call_kwargs)
+
+    monkeypatch.setattr(handler, gate, unavailable)
+    monkeypatch.setattr(project_tools, 'execute_tool', execute)
+    entry = {}
+    _, result, failed = handler._handle_project_tool(task, {}, tool, 'blocked-check', args,
+                                                    2, entry, None, root, True)
+    assert failed and entry['status'] == 'error'
+    assert 'safety check unavailable' in result
+    assert not invoked and path.read_text() == 'before\n'
+    assert args == original_args

@@ -111,8 +111,8 @@ OUTPUT_PATH = os.path.join(REPO_ROOT, 'docs', 'contracts', 'TOOL_INVENTORY.md')
 
 #: Facet columns, in report order.
 COLUMNS = [
-    'tool', 'category', 'spec', 'dispatch', 'write', 'idempotent',
-    'label', 'approval_enricher', 'serial', 'read_gate', 'fresh_gate',
+    'tool', 'category', 'spec', 'state', 'dispatch', 'write', 'idempotent',
+    'label', 'approval_enricher', 'approval_preview', 'serial', 'read_gate', 'fresh_gate',
     'streamable', 'arg_repair', 'describes_ok',
 ]
 
@@ -356,7 +356,12 @@ def collect() -> dict:
             row = {
                 'tool': name,
                 'category': spec.category or '',
+                'host_owned': spec.host_owned,
                 'spec': spec.key,
+                'state': ('compatibility' if name in spec.compatibility_tools
+                          else 'contextual' if name in spec.contextual_tools else 'current'),
+                'approval_preview': ('specialized' if name in (t.get('enricher') or set())
+                                     else 'generic' if name in write_set else ''),
                 'dispatch': _dispatch_path(registry, name),
                 'write': name in write_set,
                 'idempotent': name in idem_set,
@@ -386,14 +391,15 @@ def collect() -> dict:
 
     builtin_rows.sort(key=lambda r: (r['category'], r['tool']))
     plugin_rows.sort(key=lambda r: (r.get('plugin', ''), r['tool']))
-    confusable = _confusable_pairs(schemas, builtin_rows)
+    bundled_rows = [r for r in plugin_rows if r['host_owned']]
+    confusable = _confusable_pairs(schemas, builtin_rows + bundled_rows)
     _confused = {p[1] for p in confusable} | {p[2] for p in confusable}
-    for r in builtin_rows:
+    for r in builtin_rows + bundled_rows:
         if r['tool'] in _confused:
             r['describes_ok'] = False
             r.setdefault('_describe_reasons', []).append(
                 'first sentence near-duplicates a same-category sibling')
-    return {'builtin': builtin_rows, 'plugin': plugin_rows,
+    return {'builtin': builtin_rows, 'bundled': bundled_rows, 'plugin': plugin_rows,
             'confusable': confusable}
 
 
@@ -407,19 +413,15 @@ def render(inv: dict) -> str:
     out: list[str] = []
     out.append('# Tool inventory (GENERATED — do not edit)')
     out.append('')
-    out.append('Regenerate with `python3 scripts/gen_tool_inventory.py`; CI pins it')
-    out.append('via `tests/tools/test_tool_inventory_generated.py --check`.')
+    out.append('Generate: `python3 scripts/gen_tool_inventory.py`; guard: `tests/tools/test_tool_inventory_generated.py --check`.')
     out.append('')
-    out.append('One row per BUILT-IN tool. Every column is derived from the live')
-    out.append('registry + the per-facet tables — nothing here is hand-maintained.')
-    out.append('Third-party plugin tools vary per deployment and are listed in the')
-    out.append('diagnostic section at the end, which `--check` ignores.')
-    out.append('')
-    out.append(f'Built-in tools: **{len(b)}**')
+    out.append('Rows derive from the live registry and per-facet tables; host-specific third-party diagnostics are available with `--json`.')
+    out.append(f'Registered built-in tools: **{len(b)}**; compatibility-only: **{sum(r["state"] == "compatibility" for r in b)}**.')
+    out[-1] += ' Current means a supported declaration, not that every request enables it.'
     out.append('')
 
     gap_write_no_enricher = [r['tool'] for r in b
-                             if r['write'] and not r['approval_enricher']]
+                             if r['write'] and not r['approval_preview']]
     gap_no_label = [r['tool'] for r in b if not r['label']]
     gap_no_handler = [r['tool'] for r in b if r['dispatch'] == 'NONE']
 
@@ -427,10 +429,7 @@ def render(inv: dict) -> str:
     out.append('')
     out.append('| gap | count | meaning |')
     out.append('|---|---|---|')
-    out.append(f'| write tool with no approval enricher | {len(gap_write_no_enricher)} | '
-               'the approval dialog renders a bare tool name — the user approves '
-               'blind, which the approval module itself calls "worse than not '
-               'prompting at all" |')
+    out.append(f'| write tool with no approval preview | {len(gap_write_no_enricher)} | specialized or generic argument disclosure must be available |')
     out.append(f'| no UI label | {len(gap_no_label)} | the raw tool name is shown '
                'in the activity line |')
     out.append(f'| no reachable handler | {len(gap_no_handler)} | schema advertised '
@@ -462,34 +461,28 @@ def render(inv: dict) -> str:
             out.append(f'- [{cat}] `{a}` vs `{bb}` — overlap {score}, '
                        f'shared: {", ".join(shared)}')
         out.append('')
-    out.append('')
     if gap_write_no_enricher:
-        out.append('Write tools lacking an approval enricher:')
+        out.append('Write tools lacking an approval preview:')
         out.append('')
         for name in gap_write_no_enricher:
             out.append(f'- `{name}`')
         out.append('')
 
-    out.append('## Built-in tools')
-    out.append('')
-    out.append('| ' + ' | '.join(COLUMNS) + ' |')
-    out.append('|' + '---|' * len(COLUMNS))
-    for r in b:
-        cells = [r['tool'], r['category'], r['spec'], r['dispatch']] + \
-                [_mark(r[c]) for c in COLUMNS[4:]]
-        out.append('| ' + ' | '.join(cells) + ' |')
-    out.append('')
+    for title, rows in (('Built-in tools', b), ('Bundled optional plugins', inv['bundled'])):
+        out.append('## ' + title)
+        out.append('')
+        out.append('| ' + ' | '.join(COLUMNS) + ' |')
+        out.append('|' + '---|' * len(COLUMNS))
+        for r in rows:
+            out.append('| ' + ' | '.join(_mark(r[c]) for c in COLUMNS) + ' |')
+        out.append('')
 
     out.append('## Plugin tools (diagnostic — NOT pinned by --check)')
     out.append('')
-    if inv['plugin']:
-        out.append('| tool | plugin | dispatch | write |')
-        out.append('|---|---|---|---|')
-        for r in inv['plugin']:
-            out.append(f"| {r['tool']} | {r.get('plugin', '')} | {r['dispatch']} "
-                       f"| {_mark(r['write'])} |")
-    else:
-        out.append('_No third-party plugin tools loaded in this environment._')
+    # The committed document must not grow or disclose private plugin names
+    # merely because its generator ran on a differently configured machine.
+    # collect()/--json retain complete host diagnostics for local inspection.
+    out.append('Inspect host-specific third-party tool rows with `python3 scripts/gen_tool_inventory.py --json`.')
     out.append('')
     return '\n'.join(out)
 

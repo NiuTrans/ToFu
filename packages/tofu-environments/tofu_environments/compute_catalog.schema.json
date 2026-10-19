@@ -1,0 +1,102 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "provider",
+    "queues",
+    "provider_options_schema",
+    "provider_options_defaults",
+    "availability_is_admission_guarantee"
+  ],
+  "properties": {
+    "version": {
+      "const": 1
+    },
+    "provider": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64
+    },
+    "queues": {
+      "type": "array",
+      "maxItems": 256,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "resources"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "resources": {
+            "type": "array",
+            "maxItems": 64,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "kind",
+                "name",
+                "unit",
+                "total",
+                "allocated",
+                "available"
+              ],
+              "properties": {
+                "kind": {
+                  "enum": [
+                    "gpu",
+                    "cpu",
+                    "memory"
+                  ]
+                },
+                "name": {
+                  "type": "string",
+                  "maxLength": 128
+                },
+                "unit": {
+                  "enum": [
+                    "count",
+                    "MiB"
+                  ]
+                },
+                "total": {
+                  "type": "number",
+                  "minimum": 0
+                },
+                "allocated": {
+                  "type": "number",
+                  "minimum": 0
+                },
+                "available": {
+                  "type": "number",
+                  "minimum": 0
+                },
+                "pending": {
+                  "type": "number",
+                  "minimum": 0
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "provider_options_schema": {
+      "type": "object"
+    },
+    "provider_options_defaults": {
+      "type": "object"
+    },
+    "availability_is_admission_guarantee": {
+      "const": false
+    }
+  }
+}

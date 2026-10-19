@@ -416,6 +416,11 @@ impl Drop for Engine {
     /// replays the WAL, so the result is intentionally ignored; an ambiguous
     /// earlier publication (restart_required) is never retried here.
     fn drop(&mut self) {
+        if self.wal.buffered_writes_enabled()
+            && !self.restart_required.load(std::sync::atomic::Ordering::Relaxed)
+            && self.wal.sync_pending().is_err() {
+            self.restart_required.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
         self.wal.detach_barrier();
         if let Some(driver) = self.wal_barrier_driver.take() {
             let _ = driver.stop_and_join();
@@ -613,6 +618,8 @@ impl Engine {
     }
 
     pub fn open_with_vfs(data_dir: &Path, vfs: Arc<dyn Vfs>) -> io::Result<Self> {
+        use crate::recovery_profile::{Phase, Work};
+        let mut profile = crate::recovery_profile::RecoveryProfile::from_environment();
         if vfs.metadata(data_dir)? != FileKind::Directory {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -650,11 +657,18 @@ impl Engine {
         // Validate the entire acknowledged WAL prefix before opening payload
         // catalogs. Delay even unconfirmed-tail truncation until replay admits
         // all durable references, preserving evidence on any failed open.
+        profile.advance(Phase::WalScan);
         let selected = crate::wal::scan_selected_generation_chain(
             data_dir, &state, &mut wal, Arc::clone(&vfs),
         )?;
         let predecessor_record_count = selected.predecessor_record_count;
         let mut recovery = selected.recovery;
+        profile.set_work(Work::WalRecords, recovery.records.len() as u64);
+        profile.set_work(Work::SealedWalRecords, predecessor_record_count as u64);
+        if profile.enabled() {
+            profile.set_work(Work::WalPayloadBytes, recovery.records.iter().map(|record| record.payload.len() as u64).sum());
+        }
+        profile.advance(Phase::BlockCatalog);
         let blocks = Arc::new(BlockStore::open_with_vfs(data_dir, Arc::clone(&vfs))?);
         let payload_manifest = match state.payload_manifest_block_id {
             Some(manifest_block_id) => {
@@ -667,6 +681,8 @@ impl Engine {
         // Decode one bounded WAL record at a time; retain only IDs, not a
         // second copy of carried payloads. Overflow keeps the conservative
         // per-block recovery path, never drops a WAL reference.
+        profile.set_work(Work::PayloadSegments, payload_manifest.as_ref().map_or(0, |manifest| manifest.segments.len() as u64));
+        profile.advance(Phase::RecoveryIds);
         let mut recovery_ids = BTreeSet::new();
         recovery_ids.extend(state.history_manifest_block_id);
         recovery_ids.extend(state.authority_state_root.flatten());
@@ -683,6 +699,8 @@ impl Engine {
                 if let Some(Some(root)) = envelope.authority_state_update { recovery_ids.insert(root); }
             }
         }
+        profile.set_work(Work::SelectedRecoveryIds, recovery_ids.len() as u64);
+        profile.advance(Phase::PackedLookup);
         let mut carried_recovery = if recovery.records.is_empty() {
             // A checkpointed authority has no WAL payloads to classify. Load
             // its roots by verified point reads; catalog size must not tax open.
@@ -690,6 +708,7 @@ impl Engine {
         } else {
             blocks.prepare_carried_recovery(recovery_ids)?
         };
+        profile.advance(Phase::HistoryCatalog);
         let history_manifest = match state.history_manifest_block_id {
             Some(manifest_block_id) => {
                 let manifest = HistoryManifest::decode(&blocks.get_for_recovery(manifest_block_id, &carried_recovery)?)?;
@@ -712,6 +731,7 @@ impl Engine {
             blocks.install_history_payload_catalog(manifest, routing)?;
         }
 
+        profile.advance(Phase::PayloadReplay);
         let mut keep_records = recovery.records.len();
         let mut committed = Vec::with_capacity(recovery.records.len());
         for (index, record) in recovery.records.iter().enumerate() {
@@ -814,6 +834,8 @@ impl Engine {
             });
         }
         drop(carried_recovery);
+        profile.set_work(Work::ReplayedTransactions, committed.len() as u64);
+        profile.advance(Phase::WitnessPublish);
         if keep_records != recovery.records.len() || recovery.truncated_bytes > 0 {
             if keep_records < predecessor_record_count {
                 return Err(io::Error::new(io::ErrorKind::InvalidData, "sealed WAL replay lost its durable prefix"));
@@ -893,6 +915,7 @@ impl Engine {
             control.publish(&next)?;
             state = next;
         }
+        profile.advance(Phase::RuntimeInit);
         let control = Arc::new(Mutex::new(control));
         let mut engine = Self {
             data_dir: data_dir.to_owned(),
@@ -940,6 +963,7 @@ impl Engine {
         // Successor transactions remain active and are never checkpointed or
         // retired as a side effect of finishing their predecessor.
         if let Some(sealed) = engine.state.sealed_log.clone() {
+            profile.advance(Phase::SealedPrepare);
             let split = engine.committed.partition_point(|transaction| transaction.sequence <= sealed.terminal_sequence);
             let successor = engine.committed.split_off(split);
             engine.unstaged_history_bytes = engine.committed.iter().map(transaction_history_bytes).sum();
@@ -950,9 +974,13 @@ impl Engine {
             };
             engine.committed = successor;
             engine.unstaged_history_bytes = engine.committed.iter().map(transaction_history_bytes).sum();
+            profile.advance(Phase::SealedEncode);
             let outcome = encode_rotation_segments(&snapshot);
+            profile.advance(Phase::SealedPublish);
             engine.finish_rotation_checkpoint(snapshot, outcome)?;
         }
+        profile.advance(Phase::Finish);
+        profile.complete();
         Ok(engine)
     }
 
@@ -1748,15 +1776,9 @@ impl Engine {
             generation,
             ..manifest_next.clone()
         };
-        // Normal durability defers the WAL barrier: this publication must not
-        // reference an unsynced prefix, so the publish phase fdatasyncs the
-        // log through an independent descriptor (Strict is covered by the
-        // per-commit barrier invariant and needs no cover).
-        let wal_cover = if self.wal_durability == WalDurability::Normal {
-            Some((self.wal.path().to_path_buf(), Arc::clone(&self.vfs)))
-        } else {
-            None
-        };
+        // Strict worker handoff can also own unwritten frames. Cover the
+        // captured logical prefix before any off-authority CONTROL chain.
+        let wal_cover = self.wal.publication_cover(Arc::clone(&self.vfs))?;
         Ok(PackAdoptionPreparation::Ready(Box::new(
             PreparedPackAdoption {
                 segment_id,
@@ -4352,7 +4374,7 @@ pub(crate) struct PreparedPackAdoption {
     stabilize_next: ControlState,
     blocks: Arc<BlockStore>,
     control: Arc<Mutex<ControlFile>>,
-    wal_cover: Option<(PathBuf, Arc<dyn Vfs>)>,
+    wal_cover: Option<crate::wal::PublicationWalCover>,
 }
 
 /// Phase 2, the whole fsync chain of a catalog adoption, driven WITHOUT the
@@ -4407,16 +4429,7 @@ pub(crate) fn publish_prepared_pack_adoption(
         prepared.manifest_next.payload_manifest_block_id = Some(prepared.manifest_block_id);
         prepared.stabilize_next.payload_manifest_block_id = Some(prepared.manifest_block_id);
     }
-    if let Some((path, vfs)) = &prepared.wal_cover {
-        let mut file = vfs.open(
-            path,
-            OpenRequest {
-                write: true,
-                ..OpenRequest::default()
-            },
-        )?;
-        file.sync_data()?;
-    }
+    if let Some(cover) = &prepared.wal_cover { cover.sync()?; }
     let mut control = prepared
         .control
         .lock()
@@ -4453,3 +4466,7 @@ pub(crate) fn publish_prepared_pack_adoption(
 mod tests {
     include!("engine_tests.rs");
 }
+
+#[cfg(test)]
+#[path = "engine_write_staging_tests.rs"]
+mod write_staging_tests;

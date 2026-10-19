@@ -222,7 +222,7 @@ def _rank(task, query, chunks):
     abort_check = make_provider_abort_check(task)
     model_budget_admission(task, cancelled=abort_check)
     if abort_check():
-        from lib.llm_errors import AbortedError
+        from lib.llm.llm_errors import AbortedError
         raise AbortedError('Owner cancelled semantic ranking before dispatch')
     chunks = deepcopy(chunks)
     delivery = {'events': 0}
@@ -242,7 +242,7 @@ def _rank(task, query, chunks):
     run_child_invocation(child)
     if child.get('_executionLimitReason'):
         task['_executionLimitReason'] = child['_executionLimitReason']
-        from lib.llm_errors import AbortedError
+        from lib.llm.llm_errors import AbortedError
         raise AbortedError(child['_executionLimitReason'])
     if derive_task_verdict(child).status is not TurnStatus.COMPLETED:
         raise EvolutionStateError('semantic ranking did not produce a verified terminal delivery')

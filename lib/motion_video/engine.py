@@ -790,7 +790,7 @@ def _revise_storyboard_with_feedback(task: dict, scenes: list, span,
                     '(%d scenes)', len(revised))
         return revised
     except Exception as exc:
-        from lib.llm_errors import AbortedError
+        from lib.llm.llm_errors import AbortedError
         if isinstance(exc, AbortedError):
             raise
         logger.warning('[MotionVideo] storyboard revision failed (%s) — '

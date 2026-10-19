@@ -96,7 +96,7 @@ def default_spool_root(cache_root: Path) -> Path:
 
 
 class LocalBuildCache:
-    """One cache volume with finite global bytes/records, explicit caller identity."""
+    """One cache volume with idle reclamation targets, explicit caller identity."""
 
     def __init__(self, root: Path, budget: BuildBudget | None = None,
                  spool_root: Path | None = None):
@@ -227,9 +227,6 @@ class LocalBuildCache:
         """
         receipt = validate(build.receipt)
         final = self._build(receipt['owner_user_id'], receipt['document_id'], receipt['build_id'])
-        declared_bytes = sum(row['size_bytes'] for row in receipt['artifacts'])
-        if declared_bytes > self.budget.cache_bytes:
-            raise BuildError('cache_limit', 'Build artifacts exceed the cache byte budget')
         temp = final.with_name(receipt['build_id'] + '.publish')
         with self._guard():
             self._reclaim_orphans_locked()
@@ -398,10 +395,7 @@ class LocalBuildCache:
 
     def _prune_locked(self, *, reserve_bytes: int = 0, reserve_records: int = 0):
         self._reclaim_orphans_locked()
-        try:
-            removals = self._eviction_plan(reserve_bytes, reserve_records, set())
-        except BuildError:
-            return  # live leases can delay reclamation after a budget reduction
+        removals = self._eviction_plan(reserve_bytes, reserve_records, set())
         self._delete_records(removals)
 
     def _eviction_plan(self, reserve_bytes: int, reserve_records: int, protected: set) -> list[Path]:
@@ -426,8 +420,8 @@ class LocalBuildCache:
             removals.append(path)
             total -= size
             count -= 1
-        if total + reserve_bytes > self.budget.cache_bytes or count + reserve_records > self.budget.cache_records:
-            raise BuildError('cache_limit', 'Paper cache is in use; close an inactive preview and retry')
+        # Live readers and the incoming result may exceed idle reuse targets.
+        # Reclaim only eligible records; cache pressure never rejects publication.
         return removals
 
     def _delete_records(self, records: list[Path]) -> None:

@@ -27,6 +27,14 @@ pytest_plugins = ('tests._artifact_sidecar',)
 pytestmark = pytest.mark.unit
 
 
+
+@pytest.fixture
+def flask_app(artifact_storage):
+    """Bind the HTTP app to this module's disposable artifact authority."""
+    import server
+    server.app.config.update(TESTING=True)
+    return server.app
+
 # ─── Helpers ──────────────────────────────────────────────────────────
 
 @pytest.fixture()
@@ -140,14 +148,12 @@ class TestCreateAndDedupe:
         assert a['id'] != b['id']
         assert a['content_sha256'] == b['content_sha256']
 
-    def test_size_cap_enforced(self, flask_app):
-        from lib.artifacts import ArtifactSizeError, create_artifact
-        from lib.artifacts.core import _HARD_MAX_BYTES
-        big = 'a' * (_HARD_MAX_BYTES + 1)
+    def test_large_artifact_retains_complete_content(self, flask_app):
+        from lib.artifacts import create_artifact, get_artifact
+        body = '<!doctype html><!--' + 'a' * (9 * 1024 * 1024) + '--><p>late</p>'
         with flask_app.app_context():
-            with pytest.raises(ArtifactSizeError):
-                create_artifact(conv_id='conv-big', content=big,
-                                format='html', source='write_file')
+            row = create_artifact(conv_id='conv-large', content=body, format='html', source='write_file')
+            assert get_artifact(row['id'])['content'] == body
 
     def test_invalid_format_rejected(self, flask_app):
         from lib.artifacts import create_artifact
@@ -303,6 +309,15 @@ class TestSseEvent:
 # ─── Routes ───────────────────────────────────────────────────────────
 
 class TestRoutes:
+
+    @pytest.fixture(autouse=True)
+    def owned_route_conversations(self, monkeypatch):
+        from lib import response_assets
+        conversations = {'conv-pdf-error', 'conv-route', 'conv-cjk', 'conv-view-katex',
+                         'conv-view-md-reject', 'conv-view-fulldoc', 'conv-csp'}
+        monkeypatch.setattr(response_assets, 'get_conversation', lambda conv, user_id, **kw:
+                            {'id': conv} if conv in conversations and user_id == 1 else None)
+
     def test_get_meta_404(self, flask_client):
         resp = flask_client.get('/api/v4/artifacts/does-not-exist')
         assert resp.status_code == 404
@@ -441,16 +456,24 @@ class TestRoutes:
         assert 'E = mc^2' in page
         assert 'href="#anchor"' in page
 
-    def test_view_rejects_markdown(self, flask_app, flask_client):
-        """/view is only meaningful for html/svg; markdown returns 400."""
+    def test_view_renders_markdown_without_executing_source_html(self, flask_app, flask_client):
+        """Review previews show Markdown content under the existing view CSP."""
         from lib.artifacts import create_artifact
         with flask_app.app_context():
             meta = create_artifact(
-                conv_id='conv-view-md-reject', content='# title',
+                conv_id='conv-view-md-reject',
+                content='# title\n10 km\n<script>alert(1)</script>\n[unsafe](javascript:alert(1))',
                 format='markdown', source='write_file',
             )
         r = flask_client.get(f'/api/artifacts/{meta["id"]}/view')
-        assert r.status_code == 400
+        assert r.status_code == 200
+        page = r.data.decode()
+        assert '<h1>title</h1>' in page and '10 km' in page
+        assert '&lt;script&gt;alert(1)&lt;/script&gt;' in page
+        assert '<script>alert(1)</script>' not in page
+        assert 'href="javascript:' not in page
+        assert "sandbox allow-scripts" in r.headers['Content-Security-Policy']
+        assert r.headers['X-Content-Type-Options'] == 'nosniff'
 
     def test_view_404_on_missing(self, flask_client):
         r = flask_client.get('/api/artifacts/nonexistent-view-xyz/view')

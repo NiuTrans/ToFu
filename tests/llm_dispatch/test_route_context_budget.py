@@ -65,7 +65,7 @@ def test_candidate_metadata_carries_declared_offering_window():
 def test_selected_slot_window_reaches_clamp_and_transport_recount(monkeypatch):
     from lib.llm_dispatch._api_stream_state import _adapt_stream_body_for_slot
     from lib.llm.body._admission import enforce_body_input_limit
-    from lib.llm_errors import PromptTooLongError
+    from lib.llm.llm_errors import PromptTooLongError
     from lib.token_counter.evidence import ADMITTED_INPUT_TOKENS_KEY as count_key
     pool(monkeypatch, [])
     monkeypatch.setattr('lib.token_counter.count_tokens', lambda *a, **k: {'tokens': 200_000})

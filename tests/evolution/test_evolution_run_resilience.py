@@ -159,3 +159,122 @@ def test_sweep_is_fail_soft_per_run(store, monkeypatch):
     transitions = runs.sweep_stale_runs(user_id=USER)
     assert transitions == [
         {'run_id': 'run-b', 'from': 'executing', 'to': 'needs_attention'}]
+
+
+def test_sweep_reaches_stale_runs_after_full_history_pages_and_isolates_owner(store, monkeypatch):
+    from lib.evolution import runs, records
+    for index in range(573):
+        _seed_run(store, f'run-history-{index:04d}', status='completed', updated_at=1)
+    for index in range(7):
+        _seed_run(store, f'run-z-stale-{index}', status='executing', updated_at=1)
+    _seed_run(store, 'run-z-fresh', status='executing', updated_at=10000)
+    own = _seed_run(store, 'run-z-foreign', status='executing', updated_at=1)
+    records.put_record(records.NAMESPACE_RUNS, f'{USER+1}:run-z-foreign', own, kind='run')
+    store.rows.pop((records.NAMESPACE_RUNS, f'{USER}:run-z-foreign'))
+    reads = []
+    query = store.query
+    def read(operation, payload):
+        if operation == 'record.list': reads.append(dict(payload))
+        return query(operation, payload)
+    monkeypatch.setattr(store, 'query', read)
+    seen = []
+    def advance(run_id, *, user_id):
+        assert user_id == USER
+        seen.append(run_id)
+        return {'status': 'needs_attention'}
+    monkeypatch.setattr(runs, 'advance_run', advance)
+    transitions = runs.sweep_stale_runs(user_id=USER, now=10000)
+    assert sorted(seen) == [f'run-z-stale-{index}' for index in range(7)]
+    assert [item['run_id'] for item in transitions] == sorted(seen)
+    assert len(reads) == 4 and all(read['limit'] == records.MAX_LIST_LIMIT for read in reads)
+    assert reads[0]['after_key'] == '' and all(read['prefix'] == f'{USER}:' for read in reads)
+
+
+def test_short_storage_pages_do_not_end_sweep_early(store, monkeypatch):
+    from lib.evolution import runs
+    for index in range(9):
+        _seed_run(store, f'run-{index}', status='executing', updated_at=1)
+    query = store.query
+    monkeypatch.setattr(store, 'query', lambda operation, payload:
+                        query(operation, {**payload, 'limit': 2}) if operation == 'record.list'
+                        else query(operation, payload))
+    monkeypatch.setattr(runs, 'advance_run', lambda *args, **kwargs: {'status': 'needs_attention'})
+    assert len(runs.sweep_stale_runs(user_id=USER, now=10000)) == 9
+
+
+def test_sweep_stale_runs_start_independently_and_join_owned_workers(store, monkeypatch):
+    import threading
+    import time
+    from lib.evolution import runs
+    count = 64
+    for index in range(count):
+        _seed_run(store, f'run-{index:03d}', status='executing', updated_at=1)
+    barrier = threading.Barrier(count)
+    def advance(run_id, *, user_id):
+        assert user_id == USER
+        barrier.wait(timeout=10)
+        return {'status': 'needs_attention'}
+    monkeypatch.setattr(runs, 'advance_run', advance)
+    started = time.perf_counter()
+    transitions = runs.sweep_stale_runs(user_id=USER, now=10000)
+    elapsed = time.perf_counter()-started
+    assert len(transitions) == count
+    assert not any(thread.name.startswith('tofu-evolution-run') for thread in threading.enumerate())
+    print(f'run_sweep_rendezvous={count} seconds={elapsed:.4f} workers_after=0')
+
+
+def test_cancelled_episode_lookup_failure_does_not_suppress_other_runs(store, monkeypatch):
+    from lib.evolution import runs, records
+    cancelled = _seed_run(store, 'run-a-cancelled', status='cancelled', updated_at=1)
+    cancelled['episode_id'] = 'episode-unavailable'
+    records.put_record(records.NAMESPACE_RUNS, f'{USER}:run-a-cancelled', cancelled, kind='run')
+    _seed_run(store, 'run-z-stale', status='executing', updated_at=1)
+    monkeypatch.setattr(runs, 'get_episode', lambda *args, **kwargs: (_ for _ in ()).throw(_stall()))
+    monkeypatch.setattr(runs, 'advance_run', lambda *args, **kwargs: {'status': 'needs_attention'})
+    transitions = runs.sweep_stale_runs(user_id=USER, now=10000)
+    assert transitions == [{'run_id': 'run-z-stale', 'from': 'executing', 'to': 'needs_attention'}]
+
+
+def test_failed_sweep_worker_start_does_not_enter_run_or_suppress_sibling(store, monkeypatch):
+    import threading
+    from lib.evolution import runs
+    for label in ('a', 'b'):
+        _seed_run(store, f'run-{label}', status='executing', updated_at=1)
+    original = threading.Thread.start
+    failed = []
+    def start(thread):
+        if thread.name.startswith('tofu-evolution-run') and not failed:
+            failed.append(thread.name)
+            raise RuntimeError('synthetic worker start failure')
+        return original(thread)
+    monkeypatch.setattr(threading.Thread, 'start', start)
+    seen = []
+    monkeypatch.setattr(runs, 'advance_run', lambda run_id, **kwargs:
+                        seen.append(run_id) or {'status': 'needs_attention'})
+    assert runs.sweep_stale_runs(user_id=USER, now=10000) == [
+        {'run_id': 'run-b', 'from': 'executing', 'to': 'needs_attention'}]
+    assert seen == ['run-b']
+    assert runs.get_run('run-a', user_id=USER)['status'] == 'executing'
+    assert not any(thread.name.startswith('tofu-evolution-run') for thread in threading.enumerate())
+
+
+def test_failed_storage_page_joins_accepted_workers_before_propagating(store, monkeypatch):
+    import threading
+    from lib.evolution import runs
+    for index in range(3):
+        _seed_run(store, f'run-{index}', status='executing', updated_at=1)
+    query = store.query
+    seen = []
+    def read(operation, payload):
+        if operation == 'record.list':
+            if payload['after_key']:
+                raise StorageError('database_integrity', 'synthetic invalid later page')
+            return query(operation, {**payload, 'limit': 2})
+        return query(operation, payload)
+    monkeypatch.setattr(store, 'query', read)
+    monkeypatch.setattr(runs, 'advance_run', lambda run_id, **kwargs:
+                        seen.append(run_id) or {'status': 'needs_attention'})
+    with pytest.raises(StorageError, match='invalid later page'):
+        runs.sweep_stale_runs(user_id=USER, now=10000)
+    assert sorted(seen) == ['run-0', 'run-1']
+    assert not any(thread.name.startswith('tofu-evolution-run') for thread in threading.enumerate())

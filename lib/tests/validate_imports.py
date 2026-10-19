@@ -43,8 +43,7 @@ _TOP_LEVEL_MODULES = [
     'lib.pdf_parser',
     'lib.pricing',
     'lib.protocols',
-    'lib.rate_limiter',
-    'lib.search_bridge',
+    'lib.search.search_bridge',
     'tofu_search.search',
     'lib.memory',
 ]

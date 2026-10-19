@@ -27,7 +27,7 @@ import os
 import re
 from typing import Any
 
-from lib.http_client import async_http_get
+from lib.http_transport.client import async_http_get
 from lib.log import get_logger
 from lib.ttl_cache import TTLCache
 

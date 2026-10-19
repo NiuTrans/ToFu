@@ -10,7 +10,7 @@ import time
 import pytest
 
 from lib.observability import InstrumentedThreadPoolExecutor
-from lib.server_loop_runtime import (
+from lib.server.server_loop_runtime import (
     ServingLoopRuntime,
     _agent_stuck_replacements,
     _executor_idle_seconds,
@@ -22,7 +22,7 @@ pytestmark = pytest.mark.unit
 
 
 def test_worker_pool_sizes_are_bounded(monkeypatch, caplog):
-    monkeypatch.setattr('lib.server_loop_runtime.os.cpu_count', lambda: 256)
+    monkeypatch.setattr('lib.server.server_loop_runtime.os.cpu_count', lambda: 256)
     logger = logging.getLogger('test.server-loop-runtime')
 
     assert _worker_count('POOL', {}, logger) == 16
@@ -34,7 +34,7 @@ def test_worker_pool_sizes_are_bounded(monkeypatch, caplog):
 def test_executor_idle_budget_is_bounded_and_zero_disables(monkeypatch):
     logger = logging.getLogger('test.server-loop-runtime')
     monkeypatch.setattr(
-        'lib.server_loop_runtime.deployment_resource_default',
+        'lib.server.server_loop_runtime.deployment_resource_default',
         lambda key, _environment: 600)
 
     assert _executor_idle_seconds({}, logger) == 600

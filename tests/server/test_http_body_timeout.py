@@ -10,7 +10,7 @@ pytestmark = pytest.mark.unit
 @pytest.fixture(scope='module')
 def policy_module():
     """Load the native owner without importing the whole application."""
-    import lib.http_body_policy as module
+    import lib.http_transport.body_policy as module
     return module
 
 
@@ -19,7 +19,7 @@ def _server_source():
 
 
 def _policy_source():
-    return (Path(__file__).parents[2] / 'lib/http_body_policy.py').read_text()
+    return (Path(__file__).parents[2] / 'lib/http_transport/body_policy.py').read_text()
 
 
 def test_body_timeout_is_finite_but_response_timeout_stays_unbounded():
@@ -29,7 +29,7 @@ def test_body_timeout_is_finite_but_response_timeout_stays_unbounded():
     assert "app.config['BODY_TIMEOUT'] = None" not in source
     server_source = _server_source()
     assembly_source = (
-        Path(__file__).parents[2] / 'lib/app_assembly.py').read_text()
+        Path(__file__).parents[2] / 'lib/app/app_assembly.py').read_text()
     assert 'body_policy=_HTTP_BODY_POLICY' in server_source
     assert 'register_http_body_policy(app, policy)' in assembly_source
 

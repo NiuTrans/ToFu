@@ -11,6 +11,7 @@ pub(crate) struct SnapshotPinRegistry {
     retained: AtomicUsize,
 }
 impl SnapshotPinRegistry {
+    pub(super) fn is_poisoned(&self) -> bool { self.topology.is_poisoned() }
     pub(super) fn lock(&self) -> LockResult<MutexGuard<'_, SnapshotPinState>> {
         let _wait =
             crate::fsync_stats::StageTimer::diagnostic(crate::fsync_stats::STAGE_PIN_REGISTRY_WAIT);

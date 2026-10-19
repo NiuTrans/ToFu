@@ -77,7 +77,7 @@ would bypass encryption and deterministic faults. The read-only capability
 preserves those seams while removing avoidable plaintext source serialization.
 
 Source identities, raw measurements and alternatives are retained in
-[read-path evidence](evidence/tofudb_block_read_path_20261001.json).
+`tofudb_block_read_path_20261001.json`.
 
 
 ## Verification and defeated controls
@@ -161,3 +161,5 @@ Invalidate isolated input/build-script timestamps after preserving old mtimes;
 require the actual debug CLI digest and fresh test presence as well as the
 release CLI and loaded FFI digest. A checkout fingerprint computed after a
 suite alone cannot attest the executable that ran it.
+
+<!-- Evidence note: former docs/evidence/ artifact snapshots cited here were retired from the tree; cited JSON artifacts remain recoverable from git history. -->

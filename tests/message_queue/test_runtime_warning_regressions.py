@@ -143,7 +143,7 @@ def test_subscription_probe_failure_is_debug_but_request_failure_warns(caplog):
 
 
 def test_log_aggregate_row_is_projected_to_storage_bounds():
-    from lib.log_aggregates import _sanitize_storage_row
+    from lib.logging_pkg.log_aggregates import _sanitize_storage_row
 
     row = _sanitize_storage_row({
         'fingerprint': 'f' * 100,

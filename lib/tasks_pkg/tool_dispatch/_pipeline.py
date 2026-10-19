@@ -36,7 +36,7 @@ from lib.tasks_pkg.compaction.api import (
 from lib.tasks_pkg.executor import _execute_tool_one, _finalize_tool_round
 from lib.tasks_pkg.manager import append_event
 from lib.tasks_pkg.tool_hooks import run_post_hooks, run_pre_hooks
-from lib.tool_rejection import (
+from lib.tool_results.tool_rejection import (
     stamp_tool_rejection,
     tool_rejection_descriptor,
 )
@@ -50,6 +50,7 @@ from lib.tasks_pkg.tool_dispatch._approval import _handle_approval
 from lib.tasks_pkg.tool_dispatch._flags import (
     _cache_entry_producer_metadata,
     _cache_entry_projection_items,
+    _project_cache_entry_is_current,
     _build_cache_hit_meta,
     _call_id_signature,
     _ensure_tool_call_id_receipts,
@@ -477,7 +478,7 @@ def _register_spilled_artifact_origin(task, round_entry, tool_name, content):
         return
     if not artifact_ref:
         return
-    from lib.tool_result_artifacts import register_artifact_provenance
+    from lib.tool_results.tool_result_artifacts import register_artifact_provenance
     register_artifact_provenance(
         task, artifact_ref, tool_name=tool_name,
         display=round_entry.get('query', ''),
@@ -508,9 +509,10 @@ def _project_spilled_artifact_alias(task, round_entry, tool_name,
     try:
         from lib.tasks_pkg.manager import task_user_id
         owner = task_user_id(task)
-    except Exception:
+    except Exception as diagnostic_error:
+        logger.debug('_project_spilled_artifact_alias failure handled: %s', type(diagnostic_error).__name__)
         owner = None
-    from lib.tool_result_artifacts import mint_artifact_alias
+    from lib.tool_results.tool_result_artifacts import mint_artifact_alias
     alias = mint_artifact_alias(
         task, artifact_ref, tool_name=tool_name,
         display=(round_entry.get('query', '')
@@ -600,7 +602,8 @@ def _settle_tool_result(
 
     # Post-tool hooks: modify/enrich result after execution.
     _uses_v2_result_contract = False
-    if isinstance(tool_content, str):
+    from lib.project_dispatch.admission import is_dispatch_task
+    if isinstance(tool_content, str) and not is_dispatch_task(task):
         _projection_source = tool_content
         from lib.tools.result_value import posthook_result
         tool_content = posthook_result(tool_content,
@@ -787,7 +790,8 @@ def _settle_tool_result(
                         or _cached_producer_metadata is not None):
                     _cache_tail = _cache_tail[:6]
                 _store_tool_result_cache_entry(
-                    task, _sync_key, (tool_content, *_cache_tail))
+                    task, _sync_key, (tool_content, *_cache_tail),
+                    generation=getattr(_cached_entry, 'generation', None))
 
     _program_input = None
     _program_latch = task.get('_ptc_local')
@@ -840,6 +844,15 @@ def _settle_tool_result(
         round_entry['compactionLayer'] = 'L0'
         round_entry['compactedFromChars'] = _l0_pre_chars
         round_entry['compactedToChars'] = len(tool_content)
+
+    # Successful settlement is terminal even when the display adapter emits
+    # no result cards. Otherwise the task-end sweep mislabels a returned tool
+    # as aborted. Explicit refusal/failure/interruption verdicts stay intact.
+    if round_entry is not None:
+        if terminal_status:
+            round_entry['status'] = terminal_status
+        elif round_entry.get('status') in ('searching', 'executing'):
+            round_entry['status'] = 'done'
 
     # Emit tool_complete AFTER budgeting so that toolContent
     #   reflects the ACTUAL content given to the model (budgeted/
@@ -962,6 +975,12 @@ def _settle_tool_result(
         logger.warning(
             '[Task %s] tool_complete event error for tool=%s at round %d (non-fatal): %s',
             tid, fn_name, round_num, e, exc_info=True)
+
+    from lib.tasks_pkg.working_tool_sources import settle_tool_source
+    try:
+        settle_tool_source(task, fn_name, tc_id, round_entry, captured_result)
+    except (ValueError, PermissionError):
+        logger.debug('[WorkingSource] Unavailable scope or invalid canonical text; no source issued', exc_info=True)
 
     _settled[tc_id] = tool_content
     _store_tool_call_id_receipt(task, tc_id, {
@@ -1327,6 +1346,7 @@ def _approval_stops_tool_call(
     tid: str,
     internal_result_sink: Any = None,
     settled_results: dict[str, Any] | None = None,
+    receipt_required: bool = False,
 ) -> bool:
     """Apply confirmation/manual-write policy; return true when rejected.
 
@@ -1343,7 +1363,36 @@ def _approval_stops_tool_call(
         if effective_arguments is not fn_args:
             fn_args.clear()
             fn_args.update(effective_arguments)
+    from lib.tasks_pkg.executor._file_recovery import check_file_recovery, recovery_receipt
+    file_recovery = check_file_recovery(task, fn_name, fn_args, round_entry or {}, project_path)
+    recovery_refusal = file_recovery.refusal
+    if file_recovery.unknown and not recovery_refusal:
+        if recovery_receipt(task, fn_name, tc_id, fn_args, file_recovery):
+            return False
+        if attended:
+            approved, recovery_refusal = _handle_approval(
+                task, fn_name, fn_args, rn, round_entry, project_path, round_num, model,
+                cfg=cfg, mint_receipt=True, file_recovery=file_recovery)
+            if task.get('aborted') or approved:
+                return False
+        else:
+            from lib.tools.result_envelope import typed_tool_error
+            recovery_refusal = typed_tool_error('tool_effect_takeover_required', retryable=False,
+                message='An earlier write to this file remains unknown. A new write requires an attended human decision.',
+                next_action='Report this unresolved operation to the owner; independent work may continue.').to_model_text()
+    if recovery_refusal:
+        stamp_tool_rejection(round_entry, {'kind': 'effect_recovery_required', 'tool': fn_name},
+                             reason=recovery_refusal, retryable=False)
+        tool_results[tc_id] = (recovery_refusal, False)
+        _settle_tool_result(task, fn_name, tc_id, fn_args, rn, round_entry, recovery_refusal,
+            idempotent_tools=idempotent_tools, cache=cache, tid=tid, round_num=round_num,
+            terminal_status='rejected', internal_result_sink=internal_result_sink,
+            settled_results=settled_results)
+        return True
+
     # ── Git workspace guard (docs/runbooks/GIT_WORKSPACE_GUARD.md) ──
+
+    git_approval_diagnostics = None
     # A git-carrying run_command is decided by the EXECUTING agent, not the
     # human: safe writes and solo tree-destroyers run with an automatic
     # receipt; a tree-destroyer with active sibling conversations is refused
@@ -1356,6 +1405,14 @@ def _approval_stops_tool_call(
         _gg_refusal = None
         try:
             _gg_class = _git_guard.classify(fn_args.get('command', ''))
+
+            if _gg_class is None and _git_guard.enabled():
+                diagnostic = _git_guard.command_diagnostics(fn_args.get('command', ''))
+                if diagnostic['segments']:
+                    git_approval_diagnostics = {
+                        **diagnostic, 'execution': 'not_started',
+                        'evidenceLevel': 'syntax_unresolved',
+                    }
             if _gg_class == 'safe_write':
                 _gg_authority = 'git_safe_write'
             elif _gg_class == 'tree_destroying':
@@ -1363,6 +1420,8 @@ def _approval_stops_tool_call(
                 _gg_conv = str(task.get('convId') or '')
                 _gg_roots = _git_guard_presence_roots(
                     _gg_command, project_path, fn_args, _gg_conv)
+                if not _gg_roots:
+                    raise ValueError('Destructive Git target could not be resolved')
                 _gg_root = _gg_roots[0]
                 _ack = _git_guard.extract_ack(_gg_command)
                 if _git_guard.force_delete_targets_merged(
@@ -1408,6 +1467,9 @@ def _approval_stops_tool_call(
                 {
                     'kind': 'git_guard', 'tool': fn_name,
                     'condition': 'active_project_presence_settled',
+
+                    'gitDiagnostics': _git_guard.refusal_diagnostics(
+                        fn_args.get('command', '')),
                     'retryPolicy': {
                         'mode': 'after_condition_change',
                         'automatic': False,
@@ -1469,15 +1531,27 @@ def _approval_stops_tool_call(
         if allowed and mint_approval_receipt(
                 task, fn_name, tc_id, fn_args, authority='auto_write_mode'):
             return False
+    def git_approval_hint(content):
+        if not git_approval_diagnostics:
+            return content
+        return (str(content or '') + '\n[git-guard] Syntax or external execution could not '
+                'be proven ordinary; this is not evidence of a file conflict or '
+                'active writer. Inspect exact Git options and target/index state. '
+                'Unknown/signing forms require the existing approval; do not '
+                'disable protections, force an overwrite or retry unchanged.')
+
     requires_confirmation = (
         fn_name in confirmation_tools and not task['aborted'])
     if requires_confirmation and not attended:
         reject_content = (
             f'{fn_name} requires attended human confirmation and was not '
             'executed in this unattended task.')
+
+        reject_content = git_approval_hint(reject_content)
         stamp_tool_rejection(
             round_entry,
-            {'kind': 'confirmation_required', 'tool': fn_name},
+            {'kind': 'confirmation_required', 'tool': fn_name,
+             **({'gitDiagnostics': git_approval_diagnostics} if git_approval_diagnostics else {})},
             reason=reject_content, retryable=False,
         )
         tool_results[tc_id] = (reject_content, False)
@@ -1519,6 +1593,10 @@ def _approval_stops_tool_call(
                 needs_approval = True
 
     if not needs_approval:
+        if receipt_required:
+            from lib.tasks_pkg.tool_dispatch._approval import mint_approval_receipt
+            if not mint_approval_receipt(task, fn_name, tc_id, fn_args, authority='auto_write_mode'):
+                raise ValueError('Automatic tool policy could not bind its receipt')
         return False
 
     # Approval delegation: an agent-registered policy (set_approval_delegate)
@@ -1585,14 +1663,16 @@ def _approval_stops_tool_call(
 
     approved, reject_content = _handle_approval(
         task, fn_name, fn_args, rn, round_entry, project_path,
-        round_num, model, cfg=cfg, mint_receipt=requires_confirmation)
+        round_num, model, cfg=cfg, mint_receipt=requires_confirmation or receipt_required)
     if task.get('aborted') or approved:
         # Fall through to the existing post-approval abort settlement.
         return False
 
+    reject_content = git_approval_hint(reject_content)
     stamp_tool_rejection(
         round_entry,
-        {'kind': 'approval_denied', 'tool': fn_name},
+        {'kind': 'approval_denied', 'tool': fn_name,
+         **({'gitDiagnostics': git_approval_diagnostics} if git_approval_diagnostics else {})},
         reason=reject_content or 'User rejected the tool call.',
         retryable=True,
     )
@@ -1754,6 +1834,160 @@ def _append_settled_mcp_image_message(
     appended_tool_msgs.append(tool_msg)
 
 
+def _append_ordered_tool_replay(
+    _appended_tool_msgs, _cache,
+    _idempotent_tools, _program_messages_to_settle, _round_results_for_budget, _settle_current,
+    all_search_results_text, messages, model, parsed_tcs,
+    round_num, task, tid, tool_results,
+    tool_verdicts,
+):
+    """Publish settled results in original call order, retaining image and program receipts."""
+    for tc, fn_name, tc_id, fn_args, rn, round_entry, _pe in parsed_tcs:
+        if tc_id in tool_results:
+            tool_content, is_search = tool_results[tc_id]
+        else:
+            # SHOULD-NOT-HAPPEN: every dispatch branch above is expected to
+            # populate tool_results[tc_id]. If a tc_id reaches here unfilled,
+            # a dispatch branch silently skipped writing its result — the model
+            # would get a misleading "Unknown tool" with no trace of the real
+            # cause. Log it so the silent-skip is diagnosable (§2 zero-silent-failure).
+            logger.warning(
+                '[Task %s] conv=%s tool result missing for tool=%s tc_id=%s '
+                'round=%d — no dispatch branch populated it; returning '
+                'Unknown-tool fallback to LLM (should not happen)',
+                tid, task.get('convId', '') if task else '',
+                fn_name, tc_id, round_num)
+            tool_content, is_search = (f'Unknown tool: {fn_name}', False)
+            tool_verdicts[tc_id] = 'error'
+        if is_search:
+            _append_search_result_text(all_search_results_text, tool_content)
+
+        # Convert screenshot dict → image_url content block for vision models.
+        # The MESSAGE append is what genuinely belongs here ():
+        #   the role:'tool' message must enter the list in the model's ORIGINAL
+        #   tool-call order. The tool_complete EVENT was already emitted at the
+        #   tool's own completion instant by the dispatch lane; the settle below
+        #   is idempotent, so it returns the cached content without re-emitting
+        #   (and still does the work for a screenshot that never reached a
+        #   dispatch lane at all).
+        if isinstance(tool_content, dict) and tool_content.get('__screenshot__'):
+            _prepare_screenshot_replay(task, round_entry, tool_content, model, fn_name, tc_id)
+            # ``model`` (the PARAMETER) is authoritative: the orchestrator passes
+            # the round's resolved model and only MIRRORS it onto task['model']
+            # afterwards, so reading the mirror risks a stale value on a
+            # mid-turn model fallback — and the dispatch-time settle must reach
+            # the same verdict as this post-phase message append, or the UI text
+            # and the model's own tool message would disagree.
+            _shot_txt, _no_vision = _screenshot_display_content(
+                model, tool_content)
+            if _no_vision:
+                _tool_msg = {'role': 'tool', 'tool_call_id': tc_id,
+                             'content': _shot_txt}
+                if isinstance(tc.get('caller'), dict):
+                    _tool_msg['caller'] = dict(tc['caller'])
+                messages.append(_tool_msg)
+                _appended_tool_msgs.append(_tool_msg)
+                logger.info(
+                    '[Task %s] conv=%s text-only model %s — image tool result '
+                    'for tc=%s replaced with no-vision placeholder',
+                    tid, task.get('convId', '') if task else '', model, tc_id)
+            else:
+                _append_screenshot_message(messages, tc_id, tool_content)
+                if isinstance(tc.get('caller'), dict):
+                    messages[-1]['caller'] = dict(tc['caller'])
+                _appended_tool_msgs.append(messages[-1])
+            _settle_current(
+                task, fn_name, tc_id, fn_args, rn, round_entry, _shot_txt,
+                idempotent_tools=_idempotent_tools, cache=_cache, tid=tid,
+                round_num=round_num,
+                canonical_content=_canonical_settle_source(tool_content))
+        elif _mcp_result_image_payloads(tool_content) and model_supports_vision(model):
+            # MCP ImageContent (reader-routed fetch_url, direct MCP tools):
+            # same multimodal protocol as screenshots — persisted media refs
+            # in toolModelContent, blocks appended in tool-call order. The
+            # no-vision case falls through to the plain-text else branch.
+            _append_settled_mcp_image_message(
+                task, round_entry, tool_content, model, fn_name, tc_id, tc,
+                messages, _appended_tool_msgs, _settle_current, fn_args, rn,
+                dict(idempotent_tools=_idempotent_tools, cache=_cache, tid=tid,
+                     round_num=round_num, terminal_status=tool_verdicts.get(tc_id)))
+        else:
+            # Settle this tool (idempotent). Tools dispatched through the
+            #   parallel pool / serial lanes already settled at their OWN
+            #   completion instant — this call returns their cached content
+            #   without re-emitting. Only tools that never went through a
+            #   dispatch lane (dedup cache hits, approval rejections,
+            #   pre-hook blocks, abort short-circuits, the missing-result
+            #   fallback) actually do work here.
+            #
+            #   The LOOP itself must stay: it walks ``parsed_tcs``, so the
+            #   ``role:'tool'`` messages enter the message list in the model's
+            #   ORIGINAL tool-call order regardless of completion order. An
+            #   out-of-order tool_call/tool_result pairing is a hard API error
+            #   on Anthropic — that ordering is the reason this phase exists,
+            #   and it is NOT what was making the UI wait.
+            if not (round_entry or {}).get('_idempotentReplay'):
+                tool_content = _settle_current(
+                    task, fn_name, tc_id, fn_args, rn, round_entry, tool_content,
+                    idempotent_tools=_idempotent_tools, cache=_cache, tid=tid,
+                    round_num=round_num,
+                    terminal_status=tool_verdicts.get(tc_id))
+
+            # Collect for aggregate budget check
+            _round_results_for_budget.append((tc_id, tool_content, fn_name))
+
+            # Multimodal gateway/composed results: a composed canonical tree
+            # (execute_tools children, JavaScript childResults) can retain
+            # ``tofu-media:`` refs even though its model text is a JSON
+            # receipt. A vision model must receive those images as real
+            # content blocks — the bare JSON string alone blinds it exactly
+            # like the old inline-base64 spill did. build_body's owner-scoped
+            # validation resolves the refs to inline pixels for the live
+            # request, and ``toolModelContent`` freezes the same blocks for
+            # replay (the MCP image path's established contract).
+            _gw_media_refs = []
+            if model and model_supports_vision(model):
+                if isinstance(round_entry, dict):
+                    _gw_media_refs = list(
+                        round_entry.get('_retainedMediaRefs') or ())
+                if not _gw_media_refs:
+                    from lib.tools.result_value import TrustedResultText as _TRT
+                    _gw_canonical = (getattr(tool_content, 'canonical', None)
+                                     if isinstance(tool_content, _TRT) else None)
+                    if _gw_canonical is not None:
+                        _gw_media_refs = _gw_canonical.media_references()
+            if _gw_media_refs:
+                import copy as _copy
+                _gw_blocks = [
+                    {'type': 'image_url', 'image_url': {'url': _ref}}
+                    for _ref in _gw_media_refs]
+                _gw_blocks.append(
+                    {'type': 'text', 'text': str(tool_content)})
+                _tool_msg = {'role': 'tool', 'tool_call_id': tc_id,
+                             'content': _gw_blocks,
+                             '_modelImageSources': list(_gw_media_refs)}
+                if (isinstance(round_entry, dict)
+                        and round_entry.get('toolModelContent') is None):
+                    round_entry['toolModelContent'] = _copy.deepcopy(_gw_blocks)
+            else:
+                _tool_msg = {'role': 'tool', 'tool_call_id': tc_id,
+                             'content': tool_content}
+            if isinstance(tc.get('caller'), dict):
+                _tool_msg['caller'] = dict(tc['caller'])
+            messages.append(_tool_msg)
+            _appended_tool_msgs.append(_tool_msg)
+
+        caller = tc.get('caller')
+        if isinstance(caller, dict) and caller.get('type') == 'program':
+            _program_messages_to_settle.append((
+                tc,
+                tool_verdicts.get(tc_id)
+                or (round_entry or {}).get('status')
+                or 'done',
+                messages[-1],
+            ))
+
+
 def execute_tool_pipeline(
     task: dict[str, Any],
     parsed_tcs: list[tuple],
@@ -1848,6 +2082,10 @@ def execute_tool_pipeline(
     if auto_apply is None:
         auto_apply = True
     tool_results = {}  # tc_id → (tool_content, is_search)
+
+    # Carry the read-start fence in existing future metadata, never a task
+    # registry or a reference to the parent's cache for detached writers.
+    from lib.write_freshness import project_read_cache_generation
     # Failure VERDICTS (2026-08-06 'silent timeout' incident, conv
     #   msh9fzvo6gmuvh). A lane that failed the tool records ONLY an error
     #   string in tool_results — the tuple's second slot is is_search, NOT a
@@ -1894,6 +2132,12 @@ def execute_tool_pipeline(
     # O(1) after one O(history) index build instead of re-scanning the complete
     # long-task transcript for each recycled positional id.
     _used_call_ids = set(_historical_used_call_ids)
+
+    from lib.project_dispatch.admission import is_dispatch_task
+    if is_dispatch_task(task) and parsed_tcs:
+        from lib.project_dispatch.scope import admit_tool
+        for item in parsed_tcs:
+            admit_tool(task, item[1], item[3], project_path=project_path)
 
     parallel_items = []
     claimed_model_call_ids: set[str] = set()
@@ -1999,6 +2243,19 @@ def execute_tool_pipeline(
                            'agent=%s tool=%s', tid, _agent_name, fn_name)
             continue
 
+        from lib.tasks_pkg.coordinator_policy import coordinator_call_rejection
+        coordinator_denial = coordinator_call_rejection(task, fn_name, fn_args, project_path)
+        if coordinator_denial:
+            stamp_tool_rejection(round_entry,
+                {'kind': 'coordinator_dispatch_only', 'tool': fn_name},
+                reason=coordinator_denial, retryable=False)
+            tool_results[tc_id] = (coordinator_denial, False)
+            tool_verdicts[tc_id] = 'rejected'
+            _settle_current(task, fn_name, tc_id, fn_args, rn, round_entry, coordinator_denial,
+                idempotent_tools=_idempotent_tools, cache=_cache, tid=tid,
+                round_num=round_num, terminal_status='rejected')
+            continue
+
         # ── Plan Mode read-only guard ──
         # The assembly-time wire filter keeps mutating schemas away from the
         # model, but a call can still reach dispatch (Tool Search resurfacing,
@@ -2029,6 +2286,11 @@ def execute_tool_pipeline(
         if fn_name in _idempotent_tools:
             cache_key = _make_cache_key(fn_name, fn_args)
             cached = _cache.get(cache_key)
+
+            if (cached is not None
+                    and not _project_cache_entry_is_current(fn_name, cached)):
+                _cache.pop(cache_key, None)
+                cached = None
             # ── FreshGate: never serve a STALE cached read ──
             # The streaming pre-exec/dedup cache bypasses the project-tool
             # handler, so a cached read_files/inspect_image result can be
@@ -2239,7 +2501,7 @@ def execute_tool_pipeline(
             continue
 
         # ── Pre-tool hooks: validate/block/modify before execution ──
-        _hook_result = run_pre_hooks(fn_name, fn_args, task)
+        _hook_result = None if is_dispatch_task(task) else run_pre_hooks(fn_name, fn_args, task)
         if _hook_result and _hook_result.action == 'block':
             logger.info('[Task %s] Pre-hook BLOCKED tool %s: %s',
                         tid, fn_name, _hook_result.message)
@@ -2416,6 +2678,7 @@ def execute_tool_pipeline(
         _futures = {}
         for tc, fn_name, tc_id, fn_args, rn, round_entry, _pe in parallel_items:
             try:
+                _start_generation = project_read_cache_generation()
                 future = _pool.submit(_execute_tool_one_in_pool, task,
                     tc, fn_name, tc_id, fn_args, rn, round_entry,
                     cfg, project_path, project_enabled, all_tools=tool_list)
@@ -2424,7 +2687,7 @@ def execute_tool_pipeline(
                 # original error in the ordinary exactly-once settlement lane.
                 future = Future()
                 future.set_exception(error)
-            _futures[future] = (tc_id, fn_name)
+            _futures[future] = (tc_id, fn_name, _start_generation)
         # Measure the parallel timeout from SUBMISSION so the serial lane's
         # wall time cannot extend a hung read past TOOL_PARALLEL_TIMEOUT.
         _tool_deadline = time.monotonic() + _bounded_tool_env_int(
@@ -2504,13 +2767,13 @@ def execute_tool_pipeline(
                     # ── Abort check during parallel execution: cancel remaining futures ──
                     if fut is None:
                         logger.info('[Task %s] Abort detected during parallel tool execution — cancelling remaining', tid)
-                        for pending_fut, (pending_id, pending_fn) in _futures.items():
+                        for pending_fut, (pending_id, pending_fn, _generation) in _futures.items():
                             pending_fut.cancel()
                             if pending_id not in tool_results:
                                 tool_results[pending_id] = ('Task aborted by user.', False)
                                 tool_verdicts[pending_id] = 'aborted'
                         break
-                    fut_tc_id, fut_fn_name = _futures[fut]
+                    fut_tc_id, fut_fn_name, _start_generation = _futures[fut]
                     try:
                         ret_tc_id, tool_content, is_search = fut.result()
                         tool_results[ret_tc_id] = (tool_content, is_search)
@@ -2572,7 +2835,8 @@ def execute_tool_pipeline(
                                 if _pi_projection is not None:
                                     _pi_cache_entry += (_pi_projection,)
                                 _store_tool_result_cache_entry(
-                                    task, _pi_cache_key, _pi_cache_entry)
+                                    task, _pi_cache_key, _pi_cache_entry,
+                                    generation=_start_generation)
                         # ── Invalidate project cache after write/exec ops ──
                         elif fut_fn_name in ('write_file', 'edit_file', 'apply_diff', 'apply_diffs',
                                              'insert_content', 'insert_contents',
@@ -2647,7 +2911,7 @@ def execute_tool_pipeline(
                 # yielded by as_completed before the TimeoutError was raised.
                 # Without this, completed-but-unyielded results are silently
                 # lost and fall through to 'Unknown tool' in the post-phase.
-                for fut, (fut_tc_id, fut_fn_name) in _futures.items():
+                for fut, (fut_tc_id, fut_fn_name, _generation) in _futures.items():
                     if fut.done():
                         if fut_tc_id not in tool_results:
                             try:
@@ -2694,150 +2958,13 @@ def execute_tool_pipeline(
     # bug: a duplicate id in history (positional-id recycle) makes the OLD
     # already-cached tool_result get overwritten with the NEW round's content.
     _appended_tool_msgs: list[dict[str, Any]] = []
-    for tc, fn_name, tc_id, fn_args, rn, round_entry, _pe in parsed_tcs:
-        if tc_id in tool_results:
-            tool_content, is_search = tool_results[tc_id]
-        else:
-            # SHOULD-NOT-HAPPEN: every dispatch branch above is expected to
-            # populate tool_results[tc_id]. If a tc_id reaches here unfilled,
-            # a dispatch branch silently skipped writing its result — the model
-            # would get a misleading "Unknown tool" with no trace of the real
-            # cause. Log it so the silent-skip is diagnosable (§2 zero-silent-failure).
-            logger.warning(
-                '[Task %s] conv=%s tool result missing for tool=%s tc_id=%s '
-                'round=%d — no dispatch branch populated it; returning '
-                'Unknown-tool fallback to LLM (should not happen)',
-                tid, task.get('convId', '') if task else '',
-                fn_name, tc_id, round_num)
-            tool_content, is_search = (f'Unknown tool: {fn_name}', False)
-            tool_verdicts[tc_id] = 'error'
-        if is_search:
-            _append_search_result_text(all_search_results_text, tool_content)
-
-        # Convert screenshot dict → image_url content block for vision models.
-        # The MESSAGE append is what genuinely belongs here ():
-        #   the role:'tool' message must enter the list in the model's ORIGINAL
-        #   tool-call order. The tool_complete EVENT was already emitted at the
-        #   tool's own completion instant by the dispatch lane; the settle below
-        #   is idempotent, so it returns the cached content without re-emitting
-        #   (and still does the work for a screenshot that never reached a
-        #   dispatch lane at all).
-        if isinstance(tool_content, dict) and tool_content.get('__screenshot__'):
-            _prepare_screenshot_replay(task, round_entry, tool_content, model, fn_name, tc_id)
-            # ``model`` (the PARAMETER) is authoritative: the orchestrator passes
-            # the round's resolved model and only MIRRORS it onto task['model']
-            # afterwards, so reading the mirror risks a stale value on a
-            # mid-turn model fallback — and the dispatch-time settle must reach
-            # the same verdict as this post-phase message append, or the UI text
-            # and the model's own tool message would disagree.
-            _shot_txt, _no_vision = _screenshot_display_content(
-                model, tool_content)
-            if _no_vision:
-                _tool_msg = {'role': 'tool', 'tool_call_id': tc_id,
-                             'content': _shot_txt}
-                if isinstance(tc.get('caller'), dict):
-                    _tool_msg['caller'] = dict(tc['caller'])
-                messages.append(_tool_msg)
-                _appended_tool_msgs.append(_tool_msg)
-                logger.info(
-                    '[Task %s] conv=%s text-only model %s — image tool result '
-                    'for tc=%s replaced with no-vision placeholder',
-                    tid, task.get('convId', '') if task else '', model, tc_id)
-            else:
-                _append_screenshot_message(messages, tc_id, tool_content)
-                if isinstance(tc.get('caller'), dict):
-                    messages[-1]['caller'] = dict(tc['caller'])
-                _appended_tool_msgs.append(messages[-1])
-            _settle_current(
-                task, fn_name, tc_id, fn_args, rn, round_entry, _shot_txt,
-                idempotent_tools=_idempotent_tools, cache=_cache, tid=tid,
-                round_num=round_num,
-                canonical_content=_canonical_settle_source(tool_content))
-        elif _mcp_result_image_payloads(tool_content) and model_supports_vision(model):
-            # MCP ImageContent (reader-routed fetch_url, direct MCP tools):
-            # same multimodal protocol as screenshots — persisted media refs
-            # in toolModelContent, blocks appended in tool-call order. The
-            # no-vision case falls through to the plain-text else branch.
-            _append_settled_mcp_image_message(
-                task, round_entry, tool_content, model, fn_name, tc_id, tc,
-                messages, _appended_tool_msgs, _settle_current, fn_args, rn,
-                dict(idempotent_tools=_idempotent_tools, cache=_cache, tid=tid,
-                     round_num=round_num, terminal_status=tool_verdicts.get(tc_id)))
-        else:
-            # Settle this tool (idempotent). Tools dispatched through the
-            #   parallel pool / serial lanes already settled at their OWN
-            #   completion instant — this call returns their cached content
-            #   without re-emitting. Only tools that never went through a
-            #   dispatch lane (dedup cache hits, approval rejections,
-            #   pre-hook blocks, abort short-circuits, the missing-result
-            #   fallback) actually do work here.
-            #
-            #   The LOOP itself must stay: it walks ``parsed_tcs``, so the
-            #   ``role:'tool'`` messages enter the message list in the model's
-            #   ORIGINAL tool-call order regardless of completion order. An
-            #   out-of-order tool_call/tool_result pairing is a hard API error
-            #   on Anthropic — that ordering is the reason this phase exists,
-            #   and it is NOT what was making the UI wait.
-            if not (round_entry or {}).get('_idempotentReplay'):
-                tool_content = _settle_current(
-                    task, fn_name, tc_id, fn_args, rn, round_entry, tool_content,
-                    idempotent_tools=_idempotent_tools, cache=_cache, tid=tid,
-                    round_num=round_num,
-                    terminal_status=tool_verdicts.get(tc_id))
-
-            # Collect for aggregate budget check
-            _round_results_for_budget.append((tc_id, tool_content, fn_name))
-
-            # Multimodal gateway/composed results: a composed canonical tree
-            # (execute_tools children, JavaScript childResults) can retain
-            # ``tofu-media:`` refs even though its model text is a JSON
-            # receipt. A vision model must receive those images as real
-            # content blocks — the bare JSON string alone blinds it exactly
-            # like the old inline-base64 spill did. build_body's owner-scoped
-            # validation resolves the refs to inline pixels for the live
-            # request, and ``toolModelContent`` freezes the same blocks for
-            # replay (the MCP image path's established contract).
-            _gw_media_refs = []
-            if model and model_supports_vision(model):
-                if isinstance(round_entry, dict):
-                    _gw_media_refs = list(
-                        round_entry.get('_retainedMediaRefs') or ())
-                if not _gw_media_refs:
-                    from lib.tools.result_value import TrustedResultText as _TRT
-                    _gw_canonical = (getattr(tool_content, 'canonical', None)
-                                     if isinstance(tool_content, _TRT) else None)
-                    if _gw_canonical is not None:
-                        _gw_media_refs = _gw_canonical.media_references()
-            if _gw_media_refs:
-                import copy as _copy
-                _gw_blocks = [
-                    {'type': 'image_url', 'image_url': {'url': _ref}}
-                    for _ref in _gw_media_refs]
-                _gw_blocks.append(
-                    {'type': 'text', 'text': str(tool_content)})
-                _tool_msg = {'role': 'tool', 'tool_call_id': tc_id,
-                             'content': _gw_blocks,
-                             '_modelImageSources': list(_gw_media_refs)}
-                if (isinstance(round_entry, dict)
-                        and round_entry.get('toolModelContent') is None):
-                    round_entry['toolModelContent'] = _copy.deepcopy(_gw_blocks)
-            else:
-                _tool_msg = {'role': 'tool', 'tool_call_id': tc_id,
-                             'content': tool_content}
-            if isinstance(tc.get('caller'), dict):
-                _tool_msg['caller'] = dict(tc['caller'])
-            messages.append(_tool_msg)
-            _appended_tool_msgs.append(_tool_msg)
-
-        caller = tc.get('caller')
-        if isinstance(caller, dict) and caller.get('type') == 'program':
-            _program_messages_to_settle.append((
-                tc,
-                tool_verdicts.get(tc_id)
-                or (round_entry or {}).get('status')
-                or 'done',
-                messages[-1],
-            ))
+    _append_ordered_tool_replay(
+        _appended_tool_msgs, _cache,
+        _idempotent_tools, _program_messages_to_settle, _round_results_for_budget, _settle_current,
+        all_search_results_text, messages, model, parsed_tcs,
+        round_num, task, tid, tool_results,
+        tool_verdicts,
+    )
 
     _apply_round_aggregate_budget(
         task,
@@ -2867,6 +2994,24 @@ def execute_tool_pipeline(
     # opts back in.
     if not _post_tool_snapshot_enabled(task):
         return _pipeline_timed_out
+    # Reduced-scope FINDING C: the post-tool snapshot re-copies the WHOLE
+    # message history each round (O(history) → quadratic storage). The
+    # pre-request snapshot for the same round already ran the same sanitize +
+    # strip. When no message was appended or edited since that snapshot (same
+    # length and same tail identity) the post-tool frame would be byte-equal —
+    # a pure duplicate. Skip the re-snapshot and reuse the round's existing
+    # evidence; the Inspector keys by (taskId, roundNum) and already holds the
+    # identical request payload for this round.
+    try:
+        from lib.tasks_pkg.round_evidence import snapshot_unchanged_since_request
+        if snapshot_unchanged_since_request(task, messages):
+            logger.debug(
+                '[Task %s] messages_snapshot post-tool skipped at round %d — '
+                'unchanged since the request snapshot', tid, round_num + 1)
+            return _pipeline_timed_out
+    except Exception:
+        logger.debug('[Task %s] post-tool unchanged check failed (non-fatal)',
+                     tid, exc_info=True)
     try:
         from lib.tasks_pkg.round_evidence import build_round_evidence
         from lib.tasks_pkg.round_evidence import begin_round_evidence

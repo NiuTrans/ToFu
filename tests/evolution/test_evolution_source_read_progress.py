@@ -74,7 +74,7 @@ def read_all(task, run, source):
 def test_pending_failed_and_compressed_pages_do_not_advance_feedback(runtime):
     from lib.evolution.source_tools import execute
     run, task = start_review(runtime)
-    writes = runtime[1].writes
+    rows = deepcopy(runtime[1].rows)
     assert progress(task)['sources'][0]['next_unread_offset'] == 0
     produced = execute(task, args(run))
     assert produced['review_read_progress']['sources'][0]['delivered_chars'] == 0
@@ -90,7 +90,10 @@ def test_pending_failed_and_compressed_pages_do_not_advance_feedback(runtime):
     send(task, entry)
     assert progress(task)['sources'][0]['delivered_chars'] == 6000
     assert progress(task)['sources'][0]['next_unread_offset'] == 6000
-    assert runtime[1].writes == writes
+    # Model dispatch/terminal receipts are durable; source access cannot mutate
+    # the run, episode, archived source or any other authority.
+    assert {key: value for key, value in runtime[1].rows.items()
+            if key[0] != 'evolution.model_attempts.v1'} == rows
 
 
 def test_overlap_and_tail_leave_the_first_gap_and_rereads_remain_available(runtime):
@@ -173,7 +176,7 @@ def test_progress_is_reconstructed_from_sealed_receipts_without_a_new_task(runti
     from lib.evolution.stage_outcomes import capture, recover
     run, task = start_review(runtime)
     read_all(task, run, run['result_source'])
-    expected = progress(task)
+    expected = deepcopy(task['_evolutionSourceCoverage'])
     count = len(runtime[2])
     task.update(status='done', finishReason='stop', content=review('unknown'),
                 usage={'input_tokens': 10, 'output_tokens': 5},
@@ -181,7 +184,9 @@ def test_progress_is_reconstructed_from_sealed_receipts_without_a_new_task(runti
     capture(run, task, user_id=OWNER, review_prompt_factory=lambda _: None)
     task['_evolutionSourceCoverage']['ranges'] = []
     _, restored = recover(run, user_id=OWNER)
-    assert progress(restored) == expected
+    assert restored['_evolutionSourceCoverage'] == expected
+    with pytest.raises(RuntimeError, match='terminal goal task'):
+        progress(restored)
     assert len(runtime[2]) == count
     settled = runtime[0].advance_run(run['run_id'], user_id=OWNER, terminal_task=restored)
     assert settled['status'] == 'needs_attention'

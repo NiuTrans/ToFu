@@ -67,7 +67,8 @@ def test_memory_pressure_compacts_then_recovers_on_same_model(monkeypatch):
 
     calls = []
     compact_calls = []
-    callback = object()
+    delivered = []
+    callback = lambda *args, **kwargs: delivered.append((args, kwargs))
 
     def _stream(_task, body, tag='', on_tool_call_ready=None, **kwargs):
         calls.append((body['model'], tag, on_tool_call_ready, kwargs))
@@ -103,7 +104,8 @@ def test_memory_pressure_compacts_then_recovers_on_same_model(monkeypatch):
         ('primary-model', 'R1'),
         ('primary-model', 'R1-REACTIVE'),
     ]
-    assert calls[1][2] is callback
+    calls[1][2]('call-a', tool_name='read_files')
+    assert delivered == [(('call-a',), {'tool_name': 'read_files'})]
     assert compact_calls[0]['byte_target'] == 1_150_000
     assert '_fallback_model' not in task
     assert any(event.get('detailKey') == 'stream.phase.compactingWindow'

@@ -1,22 +1,6 @@
-"""Sidebar incomplete/error dots on metadata-only catalog shells.
+"""Production sidebar bridge delegates catalog fallback to the typed activity owner.
 
-WHY
----
-The sidebar catalog intentionally has no Turn bodies. ``_convStatusFlags``
-normally derives status from the latest normalized assistant Turn, which is
-unavailable before hydration. The backend therefore stamps
-RAW settled-turn facts into ``settings`` (surfaced onto the conv as
-``lastFinishReason`` / ``lastMsgError`` / ``lastMsgHasOutput``), and
-``_convStatusFlags`` runs the same ``_FINISH_ERR`` / ``_FINISH_NORMAL``
-classifier when TurnStore has no hydrated assistant Turn.
-
-This harness slices the REAL shipped ``_convStatusFlags`` out of
-``static/js/ui/conversation_list.js`` and evals it (bites the actual logic),
-supplying the module globals it closes over.
-
-NEUTER: delete the fallback ``else if`` branch → the interrupted shell must go
-``incomplete===false`` (the bug), proving the branch is load-bearing; restored
-byte-identical after.
+The negative control removes the catalog port, not a retired classifier branch.
 """
 
 from __future__ import annotations
@@ -26,8 +10,13 @@ import re
 import shutil
 import subprocess
 
+import tempfile
 import pytest
-from tests._runtime_sections import orchestration_legacy_test_root as _legacy_test_root
+from pathlib import Path
+from tests._runtime_sections import (
+    ROOT as SOURCE_ROOT, native_module_path,
+    orchestration_legacy_test_root as _legacy_test_root,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -67,9 +56,6 @@ global.ConversationTurnRead = {
   ordered() { return []; },
   state() { return { turnsById: {} }; },
 };
-global._FINISH_NORMAL = new Set(['stop', 'end_turn', 'stop_sequence', 'tool_use', 'tool_calls']);
-global._FINISH_ERR = new Set(['error', 'server_offline']);
-global._autopilotRunConcluded = function () { return false; };
 global.convIsBusy = function (conv) {
   if (!conv) return false;
   return activeStreams.has(conv.id) || !!conv.activeTaskId;
@@ -140,26 +126,21 @@ console.log(out.join('\n'));
 
 
 def _run(flags_js_text: str) -> str:
-    flags_js = os.path.join(HERE, '_conv_flags_fn.js')
-    harness = os.path.join(HERE, '_conv_flags_harness.js')
-    with open(flags_js, 'w', encoding='utf-8') as f:
-        f.write(flags_js_text)
-    with open(harness, 'w', encoding='utf-8') as f:
-        f.write(_HARNESS)
-    try:
+    owner = Path(native_module_path(
+        '.native/sidebar-activity.js',
+        SOURCE_ROOT / 'frontend/src/conversation/presentation/conversation-activity.ts',
+    )).read_text()
+    with tempfile.TemporaryDirectory(prefix='sidebar-activity-') as directory:
+        flags_js = Path(directory) / 'flags.js'
+        harness = Path(directory) / 'harness.js'
+        flags_js.write_text(owner + '\n' + flags_js_text)
+        harness.write_text(_HARNESS)
         proc = subprocess.run(
-            ['node', harness, flags_js],
+            ['node', str(harness), str(flags_js)],
             capture_output=True, text=True, timeout=60,
         )
-    finally:
-        for p in (flags_js, harness):
-            try:
-                os.remove(p)
-            except OSError:
-                pass
     assert proc.returncode == 0, f'node failed: {proc.stderr}\n{proc.stdout}'
     return proc.stdout.strip()
-
 
 @pytest.mark.skipif(not _node_available(), reason='node not installed')
 def test_settled_facts_classify_stripped_shell():
@@ -180,11 +161,7 @@ def test_fallback_branch_is_load_bearing_neuter():
 
     # NC: remove the metadata fallback used when there is no hydrated Turn.
     #     fallback block that classifies a stripped shell.
-    nc = re.sub(
-        r" else if \(!streaming && !latestAssistant && c\.lastMsgRole === 'assistant'\) \{.*?\n  \}",
-        "\n",
-        real, flags=re.DOTALL,
-    )
+    nc = real.replace('catalog: c,', '')
     assert nc != real, 'NC did not modify the source (branch not found)'
     out_nc = _run(nc)
     assert 'FAIL interrupted_shell_incomplete' in out_nc, (

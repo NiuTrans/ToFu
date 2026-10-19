@@ -266,7 +266,7 @@ def finalize_chat_task_aborted(
     persist_task_result_fn: Callable[[dict], Any] | None = None,
     notify_terminal_fn: Callable[[dict], Any] | None = None,
 ) -> dict | None:
-    """Settle a user-cancelled task that never acquired a worker thread."""
+    """Settle cooperative cancellation before the task runner enters."""
     if append_event_fn is None:
         from lib.tasks_pkg.manager._events import append_event
         append_event_fn = append_event

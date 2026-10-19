@@ -28,7 +28,7 @@ from runtime_guards import (
 
 # The executable guard belongs to this entry point. Manager handoff stays
 # stdlib-only in bootstrap_pkg; worker environment preparation lives in
-# lib/server_boot_env.py and runs after that handoff.
+# lib/server/server_boot_env.py and runs after that handoff.
 def _delegate_executable_to_manager():
     if __name__ != '__main__':
         return
@@ -44,25 +44,25 @@ def _load_early_resource_environment() -> None:
 
 
 def _install_numeric_thread_defaults() -> int:
-    from lib.server_boot_env import (
+    from lib.server.server_boot_env import (
         _install_numeric_thread_defaults as _impl)
     return _impl()
 
 
 def _tofu_export_env_native_paths(env_prefix, backend):
-    from lib.server_boot_env import (
+    from lib.server.server_boot_env import (
         _tofu_export_env_native_paths as _impl)
     _impl(env_prefix, backend)
 
 
 def _tofu_maybe_reexec_into_env():
-    from lib.server_boot_env import (
+    from lib.server.server_boot_env import (
         _tofu_maybe_reexec_into_env as _impl)
     _impl()
 
 
 def _load_dotenv():
-    from lib.server_boot_env import _load_dotenv as _impl
+    from lib.server.server_boot_env import _load_dotenv as _impl
     _impl()
 
 
@@ -141,7 +141,7 @@ _FAULT_SHM_PATH = '/dev/shm/tofu_faulthandler_%d.log' % os.getpid()
 
 
 if __name__ == '__main__':
-    from lib.server_fault_watchdog import arm_faulthandler_sinks as _arm_impl
+    from lib.server.server_fault_watchdog import arm_faulthandler_sinks as _arm_impl
     _FAULT_SINKS = _arm_impl(pid=os.getpid(), default_log_dir=_FAULT_LOG_DIR)
     _fault_log = _FAULT_SINKS.durable_log
     _fault_shm_log = _FAULT_SINKS.shm_log
@@ -171,9 +171,9 @@ from lib.server_boot.lock import (  # noqa: F401
 
 
 # ── Faulthandler-sink hygiene + event-loop stall detection (pure helpers) ──
-# The pure helpers live in lib/server_fault_watchdog.py and are re-exported
+# The pure helpers live in lib/server/server_fault_watchdog.py and are re-exported
 # here so ``server.<name>`` / ``from server import <name>`` keep working.
-from lib.server_fault_watchdog import (  # noqa: F401
+from lib.server.server_fault_watchdog import (  # noqa: F401
     _extract_loop_top_frame,
     _fault_dump_limits,
     _loop_stall_decide,
@@ -185,7 +185,7 @@ from lib.server_fault_watchdog import (  # noqa: F401
     _trim_fault_sink_if_oversize,
 )
 
-from lib.server_fault_watchdog import (  # noqa: F401
+from lib.server.server_fault_watchdog import (  # noqa: F401
     _listener_death_decide,
     _port_bound,
 )
@@ -222,11 +222,11 @@ if _fault_log is not None:
         pass
 
 # ── Pin mapped pages into RAM (FUSE SIGBUS mitigation) ──
-# The FUSE/cgroup headroom gate lives in lib/server_mlock.py; this module
+# The FUSE/cgroup headroom gate lives in lib/server/server_mlock.py; this module
 # keeps the import-time decision + mlockall exec. Production default is
 # OFF (TOFU_MLOCK=1 forces it on, =auto enables the legacy headroom-gated
 # mode).
-from lib.server_mlock import (  # noqa: F401
+from lib.server.server_mlock import (  # noqa: F401
     _tofu_cgroup_mem_limit_bytes,
     _tofu_cgroup_mem_usage_bytes,
     _tofu_path_is_fuse,
@@ -273,10 +273,10 @@ except OSError:
 
 
 # ── Native-linkage forensics: which libstdc++ owns the soname? ──
-# The capture body lives in lib/server_linkage_forensics.py; the
+# The capture body lives in lib/server/server_linkage_forensics.py; the
 # diagnostic line and exception guard stay here (source pin in
 # tests/startup/test_startup_stdcxx_forensics.py).
-from lib.server_linkage_forensics import capture_linkage_forensics
+from lib.server.server_linkage_forensics import capture_linkage_forensics
 
 try:
     _TOFU_LINKAGE_FORENSICS = capture_linkage_forensics()
@@ -357,8 +357,8 @@ BASE_DIR = _PROJ_DIR
 # ── Logging setup (identical to server.py) ──
 # LOG_DIR must be WRITABLE. In a frozen desktop build BASE_DIR is the read-only
 # bundle root, so route logs to the writable root (see lib/runtime_paths).
-from lib.runtime_paths import data_root as _tofu_data_root, logs_root as _tofu_logs_root
-from lib.log_retention import (
+from lib.runtime.runtime_paths import data_root as _tofu_data_root, logs_root as _tofu_logs_root
+from lib.logging_pkg.log_retention import (
     ensure_private_log_directory as _ensure_private_log_directory,
     register_external_log as _register_external_log,
     start_log_maintenance as _start_log_maintenance,
@@ -400,8 +400,8 @@ if __name__ == '__main__':
 
 # ── Non-blocking, memory-bounded logging ──
 # Filter/handler/queue classes and the one-shot construction live in
-# lib/server_logging.py; server.py keeps the lifecycle control functions.
-from lib.server_logging import (  # noqa: F401
+# lib/server/server_logging.py; server.py keeps the lifecycle control functions.
+from lib.server.server_logging import (  # noqa: F401
     _BoundedQueueHandler,
     _BoundedQueueListener,
     _QuietPollFilter,
@@ -412,7 +412,7 @@ from lib.server_logging import (  # noqa: F401
 
 # Imported AFTER the instance lock above (the source-order pin in
 # tests/server_boot/test_instance_lock_wedge_reclaim.py).
-from lib.log_aggregates import (
+from lib.logging_pkg.log_aggregates import (
     enabled as _log_agg_enabled,
     get_default_store as _log_agg_store,
     start_flusher as _log_agg_start_flusher,
@@ -660,7 +660,7 @@ DEPLOYMENT_CONFIGURATION = enforce_deployment_configuration()
 #  stall there wedges the whole server (the proven root cause of the outage).
 #  Our own executor-offloaded /static route below replaces it (see
 #  _static_route). BASE_DIR/static lives on FUSE here.
-from lib.app_factory import create_base_app
+from lib.app.app_factory import create_base_app
 
 app = create_base_app(__name__)
 STATIC_DIR = os.path.join(BASE_DIR, 'static')
@@ -671,23 +671,24 @@ STATIC_DIR = os.path.join(BASE_DIR, 'static')
 
 async def _shutdown_logging_runtime():
     try:
-        from lib.server_shutdown import _shutdown_timing_to_stderr
+        from lib.server.server_shutdown import _shutdown_timing_to_stderr
         _shutdown_timing_to_stderr('logging runtime shutdown begin')
     except Exception:
         pass
     _t0 = time.monotonic()
     await asyncio.to_thread(_stop_logging_runtime)
     try:
-        from lib.server_shutdown import _shutdown_timing_to_stderr
+        from lib.server.server_shutdown import _shutdown_timing_to_stderr
         _shutdown_timing_to_stderr(
             'logging runtime shutdown took %.1fs' % (time.monotonic() - _t0))
     except Exception:
         pass
 
 
-def create_app(config: dict | None = None):
+def create_app(config: dict | None = None, *, native_image=None, native_root=None,
+               native_token_count=False, native_html_factory=None):
     """Create a fully assembled, independent Quart ASGI application."""
-    from lib.app_assembly import create_application
+    from lib.app.app_assembly import create_application
 
     return create_application(
         __name__,
@@ -695,6 +696,10 @@ def create_app(config: dict | None = None):
         logger=_lifecycle_log,
         secret_key=_load_or_create_flask_secret_key(),
         config=config,
+        native_image=native_image,
+        native_root=native_root,
+        native_token_count=native_token_count,
+        native_html_factory=native_html_factory,
         body_policy=_HTTP_BODY_POLICY,
         static_timeout=lambda: _STATIC_SEND_TIMEOUT,
         static_offload=lambda loop, filename: _static_offload(loop, filename),
@@ -711,15 +716,25 @@ def create_app(config: dict | None = None):
     )
 
 
-def create_production_app(config: dict | None = None):
+def create_production_app(config: dict | None = None, *, native_image=None,
+                          native_root=None, native_token_count=False,
+                          native_html_factory=None):
     """Create an ASGI app with the process-wide production lifespan attached."""
-    production_app = create_app(config)
+    if (native_image is None and native_root is None
+            and native_token_count is False and native_html_factory is None):
+        production_app = create_app(config)
+    else:
+        production_app = create_app(
+            config, native_image=native_image, native_root=native_root,
+            native_token_count=native_token_count,
+            native_html_factory=native_html_factory,
+        )
     register_server_runtime_lifecycle(production_app)
     return production_app
 
 
 # ── Flask secret key (reuse server.py logic) ──
-from lib.server_assembly import _load_or_create_flask_secret_key
+from lib.server.server_assembly import _load_or_create_flask_secret_key
 
 
 # MAX_CONTENT_LENGTH is APP-GLOBAL, so it must fit the LARGEST legitimate
@@ -731,7 +746,7 @@ from lib.server_assembly import _load_or_create_flask_secret_key
 # ── Long-lived response timeout + bounded request-body policy ──
 # Policy, parsing and the Quart before-request hook are owned by the native
 # assembly boundary; this module retains only the configured policy value.
-from lib.http_body_policy import build_http_body_policy
+from lib.http_transport.body_policy import build_http_body_policy
 
 _HTTP_BODY_POLICY = build_http_body_policy()
 _HTTP_BODY_TIMEOUT_S = _HTTP_BODY_POLICY.body_timeout
@@ -743,7 +758,7 @@ from lib.log import get_logger
 _lifecycle_log = get_logger('server.lifecycle')
 
 
-# tofu-search is an optional, heavyweight capability. ``lib.search_runtime``
+# tofu-search is an optional, heavyweight capability. ``lib.search.search_runtime``
 # installs its configuration/browser/auth seams at the first valid search or
 # fetch call; ordinary boot and non-search requests never import it.
 
@@ -881,7 +896,7 @@ def _load_saved_proxy_config():
         _lifecycle_log.warning('Failed to load proxy config: %s', exc)
 
 
-from lib.app_assembly import configure_application
+from lib.app.app_assembly import configure_application
 
 configure_application(
     app,
@@ -912,16 +927,16 @@ configure_application(
 
 _server_log = logging.getLogger('server')
 
-from lib.server_assembly import (
+from lib.server.server_assembly import (
     _check_frontend_artifact,
     _init_database,
     _run_boot_recovery_step,  # noqa: F401
     _run_post_ready_deferred,
-    _start_storage_sidecar,
+    _start_storage_authority_sql,
     _validate_imports,
     _validate_storage_cutover_boundary,
 )
-from lib import server_assembly as _server_assembly
+from lib.server import server_assembly as _server_assembly
 
 _server_assembly.inject_runtime(
     boot=_boot,
@@ -940,7 +955,7 @@ _server_assembly.inject_runtime(
 
 def _start_background_workers(target_app=None):
     """Start the extracted lifecycle-owned background services."""
-    from lib.server_background_services import start_background_services
+    from lib.server.server_background_services import start_background_services
 
     return start_background_services(
         target_app or app,
@@ -953,7 +968,7 @@ def _start_background_workers(target_app=None):
 
 def _start_deferred_background_workers(target_app=None):
     """Run the best-effort sweeps/probes after the readiness gate opens."""
-    from lib.server_background_services import start_deferred_background_services
+    from lib.server.server_background_services import start_deferred_background_services
 
     return start_deferred_background_services(
         target_app or app,
@@ -962,17 +977,17 @@ def _start_deferred_background_workers(target_app=None):
     )
 
 
-from lib.server_network import (
+from lib.server.server_network import (
     detect_reverse_proxy as _detect_reverse_proxy,
     find_free_port as _find_free_port,
     listener_configuration_error as _listener_configuration_error,
     resolve_tls_policy as _resolve_tls_policy,
     wait_port_free as _wait_port_free,
 )
-from lib.server_tls import ensure_tls_certificates as _ensure_tls_certs
+from lib.server.server_tls import ensure_tls_certificates as _ensure_tls_certs
 
 
-from lib.server_shutdown import (
+from lib.server.server_shutdown import (
     graceful_shutdown_signals,
     http_keep_alive_timeout_seconds,
     request_graceful_shutdown as _request_graceful_shutdown,
@@ -984,7 +999,7 @@ from lib.server_shutdown import (
 
 def _cleanup_abandoned_tool_output_spools():
     """Reclaim reconstructible run-command spools left by crashed workers."""
-    from lib.tool_result_artifact_writer import cleanup_abandoned_spools
+    from lib.tool_results.tool_result_artifact_writer import cleanup_abandoned_spools
 
     removed = cleanup_abandoned_spools()
     if removed:
@@ -994,8 +1009,7 @@ def _cleanup_abandoned_tool_output_spools():
 
 
 def _prepare_startup_artifacts():
-    """Reclaim transient spools before validating the frontend artifact."""
-    _cleanup_abandoned_tool_output_spools()
+    """Publish the frontend before any reconstructible spool maintenance."""
     _prepare_frontend_runtime_assets()
 
 def _run_orchestration_boot_continuity():
@@ -1007,7 +1021,7 @@ def _run_orchestration_boot_continuity():
     continuity must never gate or crash the ready process.
     """
     try:
-        from lib.server_assembly import (
+        from lib.server.server_assembly import (
             pop_boot_orchestration_continuity_candidates,
         )
         candidates = pop_boot_orchestration_continuity_candidates()
@@ -1022,6 +1036,7 @@ def _run_orchestration_boot_continuity():
             auto_created_by=frozenset({GOAL_RUN_CREATED_BY}),
             runtime=orchestration_run_runtime,
             resume_for_created_by={GOAL_RUN_CREATED_BY: resume_chat_goal},
+            source_cursor_bound_created_by={GOAL_RUN_CREATED_BY},
         )
         if any(summary.get(key) for key in ('resumed', 'refused', 'exhausted')):
             _server_log.warning(
@@ -1051,6 +1066,10 @@ def _run_translation_boot_sweep():
 
 
 def _run_post_ready_deferred_with_continuity():
+    try:
+        _cleanup_abandoned_tool_output_spools()
+    except Exception as exc:
+        _server_log.warning('Deferred tool-output cleanup failed: %s', exc)
     _run_post_ready_deferred()
     _start_deferred_background_workers()
     _run_orchestration_boot_continuity()
@@ -1085,7 +1104,7 @@ def register_server_production_lifecycle(
             build_assets=_prepare_startup_artifacts,
             validate_storage_boundary=_validate_storage_cutover_boundary,
             init_database=_init_database,
-            start_storage=_start_storage_sidecar,
+            start_storage=_start_storage_authority_sql,
             bootstrap_model_routing=bootstrap_personal_model_routing,
             validate_imports=_validate_imports,
             start_workers=_start_background_workers,
@@ -1104,7 +1123,7 @@ def register_server_runtime_lifecycle(
         target_app, *, shutdown_requested=None, announce_ready=None,
         host=None, port=None):
     """Attach serving-loop owners before the fail-fast production bootstrap."""
-    from lib.server_runtime_lifecycle import register_runtime_lifecycle
+    from lib.server.server_runtime_lifecycle import register_runtime_lifecycle
 
     return register_runtime_lifecycle(
         target_app,
@@ -1238,7 +1257,7 @@ if __name__ == '__main__':
     # Hypercorn's shutdown trigger so Quart releases every declared runtime
     # owner (especially the Storage Sidecar) before the main thread replaces
     # this process image.
-    from lib.server_reexec import install_server_reexec_shutdown_requester
+    from lib.server.server_reexec import install_server_reexec_shutdown_requester
 
     def _request_reexec_shutdown(_reason):
         _request_graceful_shutdown(
@@ -1354,7 +1373,7 @@ if __name__ == '__main__':
     _has_tls = bool(_tls_cert and _tls_key)
 
     def _announce_ready(mcp_config, feishu_ok):
-        from lib.server_boot_report import announce_server_ready
+        from lib.server.server_boot_report import announce_server_ready
         return announce_server_ready(
             host=host,
             port=port,
@@ -1402,7 +1421,7 @@ if __name__ == '__main__':
         # interval bounds how long a requested restart/shutdown idles before
         # the drain even begins.
         async def _shutdown_trigger():
-            from lib.server_shutdown import wait_for_shutdown_trigger
+            from lib.server.server_shutdown import wait_for_shutdown_trigger
             await wait_for_shutdown_trigger(
                 _shutdown_requested, logger=_server_log)
 
@@ -1417,7 +1436,7 @@ if __name__ == '__main__':
     # For an in-place restart, reaching this line proves Hypercorn stopped and
     # Quart's production shutdown stack completed; only now may exec preserve
     # the worker PID without preserving any child authority or live socket.
-    from lib.server_reexec import execute_pending_server_reexec
+    from lib.server.server_reexec import execute_pending_server_reexec
     try:
         _reexec_attempted = execute_pending_server_reexec(
             lifecycle_stopped=True,

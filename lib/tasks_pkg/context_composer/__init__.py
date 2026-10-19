@@ -16,7 +16,8 @@ from lib.tasks_pkg.context_composer._models import (
     ContextPlanV2,
 )
 from lib.tasks_pkg.context_composer._providers import collect_context_blocks
-from lib.tasks_pkg.context_composer._render import render_context
+from lib.tasks_pkg.context_composer._render import render_context, verified_block_hash
+from lib.tasks_pkg.context_composer._snapshot_compaction import compact_context_snapshots
 from lib.tasks_pkg.context_composer.injections import (
     append_injection, can_append_injection, record_injection_diagnostic,
     record_manifest_rows,
@@ -99,11 +100,47 @@ def compose_task_context(
     return compose_context(messages, request)
 
 
+# Ambient owner/context providers a delegated child invocation never needs.
+# The child has its own scoped worker contract (worker_policy), objective and
+# tool allowlist; the parent's skills index, credential vault index, user
+# profile, swarm guidance and UI-nav directory are root-assembly overhead that
+# costs tokens on every sub-agent turn without informing its bounded objective.
+_CHILD_DISABLED_PROVIDERS = frozenset({
+    'skills_index',     # provider 'skills' (index + selection follow-on)
+    'selected_skills',
+    'credential_vault', # provider 'vault'
+    'user_context',     # provider 'profile'
+    'parallel_execution',  # provider 'swarm'
+    'ui_nav_directory',
+})
+
+
+def _child_disabled_blocks(request: ComposeRequest) -> frozenset[str]:
+    """Role-derived narrowing for child invocations (design principle 4).
+
+    Extends the existing disabled_blocks ablation seam rather than a parallel
+    provider gate. Only optional ambient providers are narrowed; project rules
+    and tool-relevant blocks (mcp_tools_delta, disclosed_tools, environment)
+    are preserved so the child keeps its routing/capability contract.
+    """
+    task = request.task if isinstance(request.task, dict) else None
+    if task is None:
+        return frozenset()
+    try:
+        from lib.tasks_pkg.invocation import is_child_invocation
+        if not is_child_invocation(task):
+            return frozenset()
+    except Exception:
+        return frozenset()
+    return _CHILD_DISABLED_PROVIDERS
+
+
 def _with_context_policy(request: ComposeRequest) -> ComposeRequest:
     """All entrypoints inherit task-owned ablations without changing the input."""
     from dataclasses import replace
-    disabled = request.disabled_blocks | disabled_context_blocks(
-        (request.task or {}).get('config'))
+    disabled = (request.disabled_blocks
+                | disabled_context_blocks((request.task or {}).get('config'))
+                | _child_disabled_blocks(request))
     return (replace(request, disabled_blocks=disabled)
             if disabled != request.disabled_blocks else request)
 
@@ -263,7 +300,7 @@ __all__ = [
     'ComposeRequest', 'ComposeResult', 'ContextBlock', 'ContextPlanEntryV2',
     'ContextPlanV2', 'TaskStateSnapshotV1', 'compose_context',
     'compose_task_context', 'disabled_context_blocks',
-    'append_context_blocks',
+    'append_context_blocks', 'compact_context_snapshots',
     'refresh_programmatic_inputs',
     'INJECTION_REGISTRY', 'InjectionSpec', 'context_block', 'injection_spec',
     'append_injection', 'can_append_injection', 'record_injection_diagnostic',

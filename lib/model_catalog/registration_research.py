@@ -29,7 +29,7 @@ _FACT_FIELDS = {'release_date', 'list_pricing', 'inference_profile', 'capabiliti
 
 def _official_domains(document, model):
     from lib.model_catalog._creator_identity import brand_family
-    from lib.provider_template_recipes import load_provider_templates
+    from lib.provider.provider_template_recipes import load_provider_templates
     urls = [row.get('website', '') for row in document['creators'] if row['creator_id'] == model['creator_id']]
     for template in load_provider_templates():
         if template.get('category') == 'official' and brand_family(template.get('brand') or template['key']) == model['creator_id']:

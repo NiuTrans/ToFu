@@ -17,22 +17,34 @@ import hashlib
 import time
 
 from .contracts import validate_anti_pattern, validate_strategy
-from .episodes import list_episodes, episode_goals
+from .episodes import episode_goals
 from .goals import get_plan
 from .indexers import _terms
+from .planner import reusable_stages
 from .records import (
     MAX_LIST_LIMIT,
     NAMESPACE_ANTI_PATTERNS,
     NAMESPACE_STRATEGIES,
     entity_key,
-    list_records,
+    list_record_page,
+    NAMESPACE_EPISODES,
     put_record,
 )
 
-MAX_TEMPLATES = 64
-MAX_ANTI_PATTERNS = 64
-MAX_APPLICABILITY_TERMS = 32
 _OUTCOME_WEIGHT = {'success': 1.0, 'partial': 0.5}
+
+
+def _iter_owner_records(namespace: str, user_id, *, kind: str):
+    """Traverse every owner record through bounded physical storage pages."""
+    cursor = ''
+    while True:
+        page = list_record_page(namespace, user_id, kind=kind,
+                                limit=MAX_LIST_LIMIT, after_key=cursor)
+        if not page:
+            return
+        for row in page:
+            yield row['value']
+        cursor = page[-1]['key']
 
 
 def _selected_stages(episode: dict, *, user_id) -> list[dict] | None:
@@ -46,7 +58,7 @@ def _selected_stages(episode: dict, *, user_id) -> list[dict] | None:
 def _signature(stages: list[dict] | None) -> str:
     if not stages:
         return 'unknown'
-    return '>'.join(str(s.get('kind') or 'execute') for s in stages)[:200]
+    return '>'.join(str(s.get('kind') or 'execute') for s in stages)
 
 
 def distill_strategies(*, user_id, now: int | None = None, episode_reader=None, goal_reader=None) -> dict:
@@ -55,7 +67,9 @@ def distill_strategies(*, user_id, now: int | None = None, episode_reader=None, 
     successes: dict[tuple, list] = {}
     failures: dict[tuple, list] = {}
     observations: dict[tuple, list] = {}
-    episodes = sorted((episode_reader or list_episodes)(user_id=user_id, limit=200),
+    source = (episode_reader(user_id=user_id, limit=MAX_LIST_LIMIT) if episode_reader
+              else _iter_owner_records(NAMESPACE_EPISODES, user_id, kind='episode'))
+    episodes = sorted(source,
                       key=lambda e: (-int(e.get('settled_at') or 0), e['episode_id']))
     goals = episode_goals(episodes, user_id=user_id, goal_reader=goal_reader)
     for episode in episodes:
@@ -83,7 +97,7 @@ def distill_strategies(*, user_id, now: int | None = None, episode_reader=None, 
                            and str(r.get('stage') or '').strip()), None)
             if failed is None:
                 continue  # A failed verdict does not identify a failed stage.
-            key = (domain, f"failed:{str(failed['stage'])[:80]}")
+            key = (domain, f"failed:{str(failed['stage'])}")
             failures.setdefault(key, []).append(episode)
 
     def _digest(text: str) -> str:
@@ -91,20 +105,20 @@ def distill_strategies(*, user_id, now: int | None = None, episode_reader=None, 
 
     templates = []
     for (domain, signature), rows in sorted(successes.items()):
-        # One bounded, reconstructible denominator: failures count too.
-        observed = observations[(domain, signature)][:64]
+        # The denominator and lineage cover the same complete observations.
+        observed = observations[(domain, signature)]
         lineage = [episode['episode_id'] for episode in observed]
         terms = sorted(set().union(
             *[_terms(str(goal.get('statement') or '')) for _, goal, _ in rows])
-        )[:MAX_APPLICABILITY_TERMS]
+        )
         rate = sum(_OUTCOME_WEIGHT.get(e['status'], 0.0) for e in observed) / len(observed)
         templates.append(validate_strategy({
             'schema_version': 1,
             'template_id': f"tmpl-{domain}-{_digest(signature)}",
             'domain': domain,
-            'stages': [{'kind': str(s.get('kind') or 'execute')[:80],
-                        'detail': str(s.get('detail') or '')[:1000]}
-                       for s in rows[0][2][:16]],
+            'stages': [{'kind': str(s.get('kind') or 'execute'),
+                        'detail': str(s.get('detail') or '')}
+                       for s in reusable_stages(rows[0][2])],
             'applicability_terms': terms,
             'lineage': lineage,
             'samples': len(observed),
@@ -115,7 +129,6 @@ def distill_strategies(*, user_id, now: int | None = None, episode_reader=None, 
 
     anti_patterns = []
     for (domain, signature), episodes in sorted(failures.items()):
-        episodes = episodes[:64]
         if len(episodes) < 2:
             continue
         anti_patterns.append(validate_anti_pattern({
@@ -126,22 +139,22 @@ def distill_strategies(*, user_id, now: int | None = None, episode_reader=None, 
             'signature': signature,
             'advice': (f"avoid paths that break at {signature.removeprefix('failed:')} "
                        f"in {domain}; failed {len(episodes)} times"),
-            'lineage': [e['episode_id'] for e in episodes][:64],
+            'lineage': [e['episode_id'] for e in episodes],
             'samples': len(episodes),
             'created_at': ts,
             'updated_at': ts,
         }))
 
-    for record in templates[:MAX_TEMPLATES]:
+    for record in templates:
         put_record(NAMESPACE_STRATEGIES,
                    entity_key(record['template_id'], user_id, kind='strategy'),
                    record, kind='strategy')
-    for record in anti_patterns[:MAX_ANTI_PATTERNS]:
+    for record in anti_patterns:
         put_record(NAMESPACE_ANTI_PATTERNS,
                    entity_key(record['pattern_id'], user_id, kind='anti-pattern'),
                    record, kind='anti-pattern')
-    return {'templates': templates[:MAX_TEMPLATES],
-            'anti_patterns': anti_patterns[:MAX_ANTI_PATTERNS]}
+    return {'templates': templates,
+            'anti_patterns': anti_patterns}
 
 
 def retrieve_strategies(query: str, *, user_id, domain: str | None = None,
@@ -151,8 +164,7 @@ def retrieve_strategies(query: str, *, user_id, domain: str | None = None,
     if not query_terms:
         return []
     scored = []
-    for template in list_records(NAMESPACE_STRATEGIES, user_id, kind='strategy',
-                                 limit=MAX_TEMPLATES):
+    for template in _iter_owner_records(NAMESPACE_STRATEGIES, user_id, kind='strategy'):
         if domain and template.get('domain') != domain:
             continue
         overlap = query_terms & set(template.get('applicability_terms') or [])
@@ -162,22 +174,20 @@ def retrieve_strategies(query: str, *, user_id, domain: str | None = None,
         scored.append((coverage * float(template.get('success_rate') or 0),
                        template))
     scored.sort(key=lambda item: (-item[0], item[1]['template_id']))
-    return [template for _, template in scored[:max(1, min(int(limit or 4), 16))]]
+    return [template for _, template in scored[:max(1, int(limit or 4))]]
 
 
 def list_strategies(*, user_id, domain: str | None = None) -> list[dict]:
-    templates = list_records(NAMESPACE_STRATEGIES, user_id, kind='strategy',
-                             limit=MAX_TEMPLATES)
+    templates = list(_iter_owner_records(NAMESPACE_STRATEGIES, user_id, kind='strategy'))
     if domain:
         templates = [t for t in templates if t.get('domain') == domain]
     return templates
 
 
 def list_anti_patterns(*, user_id, domain: str | None = None) -> list[dict]:
-    patterns = list_records(NAMESPACE_ANTI_PATTERNS, user_id,
-                            kind='anti-pattern', limit=MAX_LIST_LIMIT)
+    patterns = _iter_owner_records(NAMESPACE_ANTI_PATTERNS, user_id, kind='anti-pattern')
     patterns = [p for p in patterns if type(p.get('failure_evidence_version')) is int
                 and p['failure_evidence_version'] == 1]
     if domain:
         patterns = [p for p in patterns if p.get('domain') == domain]
-    return patterns[:MAX_ANTI_PATTERNS]
+    return patterns

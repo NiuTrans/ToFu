@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 
-from lib.tool_round_identity import execution_identity, tool_round_batches
+from lib.tool_results.tool_round_identity import execution_identity, tool_round_batches
 
 
 def continuation_round_counters(rounds: Sequence[Mapping]) -> tuple[int, int]:

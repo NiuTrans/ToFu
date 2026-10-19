@@ -87,7 +87,7 @@ def test_macos_agent_smoke_is_required_before_packaging():
                  if step.get('env', {}).get('TOFU_AGENT_SMOKE') == '1')
     assert not smoke.get('continue-on-error')
     assert not smoke.get('if')
-    assert './dist/TofuAgent.app/Contents/MacOS/TofuAgent' in smoke['run']
+    assert './dist/TofuRemote.app/Contents/MacOS/TofuRemote' in smoke['run']
     assert 'TOFU_AGENT_SMOKE_OK' in smoke['run']
     assert 'exit 1' in smoke['run']
 

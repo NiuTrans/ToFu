@@ -6,7 +6,7 @@ import inspect
 
 import pytest
 
-from lib.storage_sidecar.schema import TASK_EVENT_RETENTION_SPECS
+from lib.storage_authority_sql.schema import TASK_EVENT_RETENTION_SPECS
 
 pytestmark = pytest.mark.unit
 

@@ -6,15 +6,23 @@
 /* User turns are compact notes; they deliberately do not grow an execution spine. */
 
 .conversation-surface .message.user-msg .message-content {
-  padding: var(--space-3) var(--space-4);
-  border: 1px solid var(--turn-rule);
-  border-radius: var(--radius-sm);
-  background: color-mix(in srgb, var(--user-bubble) 50%, var(--bg-primary));
+  justify-self: end;
+  box-sizing: border-box;
+  width: fit-content;
+  max-width: 90%;
+  padding: var(--space-4) var(--space-5);
+  border: var(--control-edge-inset) solid var(--turn-rule);
+  border-radius: var(--conversation-process-radius);
+  background: color-mix(in srgb, var(--user-bubble) 70%, var(--bg-primary));
   box-shadow: none;
 }
 
+.conversation-surface .message.user-msg .message-avatar {
+  visibility: hidden;
+}
+
 .conversation-surface .message.user-msg .message-header {
-  margin-bottom: var(--space-1);
+  margin-block: 0 var(--space-2);
 }
 
 .conversation-surface .message.user-msg .conversation-turn-blocks > .conversation-block {
@@ -32,6 +40,9 @@
 }
 
 @media (max-width: 720px) {
+  .conversation-surface {
+    --conversation-process-row-height: var(--control-h-lg);
+  }
   .conversation-surface .conversation-turn.message {
     grid-template-columns: minmax(0, 1fr);
     margin-bottom: var(--space-6);
@@ -46,6 +57,13 @@
     margin-bottom: var(--space-2);
   }
 
+  .conversation-surface .conversation-block--text[data-deliverable="true"] > .md-content > :is(h1, h2, h3):first-child {
+    font-size: var(--conversation-font-size-heading-2);
+  }
+  .conversation-surface .conversation-history-process__body {
+    padding: var(--space-2);
+  }
+
   .conversation-surface .message-time {
     font-size: var(--conversation-font-size-caption);
   }
@@ -54,17 +72,8 @@
     flex-wrap: wrap;
   }
 
-  .conversation-surface .thinking-header {
-    min-height: 36px;
-  }
-
   .conversation-surface .bilingual-header {
     min-height: 44px;
-  }
-
-  .conversation-surface .thinking-text {
-    padding: var(--space-1) 0 var(--space-2) var(--space-3);
-    font-size: var(--conversation-font-size-content);
   }
 
   .conversation-surface .conversation-turn-actions.message-actions {
@@ -76,6 +85,29 @@
   }
   .conversation-surface .conversation-block-copy {
     opacity: .6;
+  }
+  /* Touch keeps copy discoverable without painting over the last words. */
+  .conversation-surface .conversation-block--text:has(> .conversation-block-copy) > .md-content {
+    box-sizing: border-box;
+    padding-inline-end: var(--space-6);
+  }
+
+  .conversation-surface .sw-inbox-row > .sw-inbox-row-header,
+  .conversation-surface .ptool-result-header:has(.ptool-artifact-header) {
+    flex-wrap: wrap;
+    row-gap: var(--space-1);
+  }
+  .conversation-surface .sw-inbox-row-header > .ptool-text,
+  .conversation-surface .ptool-result-header:has(.ptool-artifact-header) > .ptool-text {
+    flex-basis: calc(100% - var(--conversation-process-marker) - var(--conversation-process-gap) - var(--space-8));
+  }
+  .conversation-surface .sw-inbox-row-header > :not(.ptool-icon, .ptool-text),
+  .conversation-surface .ptool-result-header:has(.ptool-artifact-header) > :not(.ptool-icon, .ptool-text) {
+    order: 2;
+  }
+  .conversation-surface .sw-inbox-row-header > .ptool-text + :not(.ptool-row-ctl),
+  .conversation-surface .ptool-result-header:has(.ptool-artifact-header) > .ptool-text + :not(.ptool-row-ctl) {
+    margin-inline-start: calc(var(--conversation-process-marker) + var(--conversation-process-gap));
   }
 
   .conversation-surface .conversation-turn-actions::-webkit-scrollbar {
@@ -95,9 +127,15 @@
   }
 
   .conversation-surface .message.user-msg .message-content {
-    padding: var(--space-2) var(--space-3) var(--space-2);
-    border-radius: var(--radius-sm);
+    max-width: 100%;
+    padding: var(--space-3) var(--space-4);
+    border-radius: var(--conversation-process-radius);
   }
+}
+
+@media (pointer: coarse) {
+  .conversation-surface { --conversation-process-row-height: var(--control-h-lg); }
+  .conversation-surface .ptool-cmd-fold { min-height: var(--control-h-lg); }
 }
 
 @media (prefers-reduced-motion: reduce) {

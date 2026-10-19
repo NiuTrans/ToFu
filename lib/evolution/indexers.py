@@ -103,7 +103,7 @@ def _github_fetch(url: str, params: dict) -> dict:
     """
     import json as _json
 
-    from lib.http_client import http_get
+    from lib.http_transport.client import http_get
     if url != _GITHUB_SEARCH_URL:
         raise ValueError('unsupported project-index endpoint')
     with http_get(url, params=params,

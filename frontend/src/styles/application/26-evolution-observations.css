@@ -1,0 +1,20 @@
+/* Quantified observations reuse native charts. This owner supplies composition,
+   disclosure and theme-token surfaces, never chart coordinates or raw colors. */
+.exp-observations{padding:var(--space-6);margin-block:var(--space-6);border:1px solid var(--border);border-radius:var(--radius);background:var(--bg-secondary);gap:var(--space-4);min-width:0;}
+.exp-detail .exp-observations h2,.exp-observations>p{margin:0;}
+.exp-chart-stats{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:var(--space-4);margin:0;padding-block:var(--space-4);border-block:1px solid var(--border);}
+.exp-chart-stats dt{font-size:var(--font-size-sm);color:var(--text-secondary);margin-bottom:var(--space-2);}
+.exp-chart-stats dd{margin:0;font-size:var(--font-size-3xl);font-variant-numeric:tabular-nums;font-weight:var(--weight-semibold);}
+.exp-chart-plot{min-width:0;}
+.exp-observations .rich-data-chart-plot{min-width:0;width:100%;max-height:calc(var(--space-16)*5);}
+.exp-observations .rich-data-chart-scroll{overflow:hidden;}
+.exp-chart-data summary,.evo-evidence-charts summary{font-size:var(--font-size-sm);cursor:pointer;color:var(--text-secondary);}
+.evo-evidence-charts{display:grid;gap:var(--space-5);min-width:0;}
+.evo-evidence-charts figure{margin:0;padding:var(--space-4);background:var(--bg-secondary);border:1px solid var(--border);border-radius:var(--radius);min-width:0;}
+.evo-evidence-charts figcaption{font-size:var(--font-size-lg);font-weight:var(--weight-semibold);margin-bottom:var(--space-3);}
+.evo-chart-note{margin:var(--space-3) 0;font-size:var(--font-size-sm);line-height:var(--leading-body);color:var(--text-secondary);}
+@media(max-width:550px){
+ .exp-observations{padding:var(--space-4);}
+ .exp-chart-stats{gap:var(--space-2);}.exp-chart-stats dd{font-size:var(--font-size-xl);}
+ .exp-observations .rich-data-chart-scroll{overflow:auto;}.exp-observations .rich-data-chart-plot{min-width:calc(var(--space-16)*7);}
+}

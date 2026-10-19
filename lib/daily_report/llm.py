@@ -9,7 +9,7 @@
 
 import json
 
-from lib.llm_json import extract_json
+from lib.llm.llm_json import extract_json
 from lib.log import get_logger
 
 from .prompts import _ANALYSIS_SYSTEM
@@ -23,7 +23,7 @@ def _extract_json_result(text):
     Handles both new format ``{streams: [...], tomorrow: [...]}``
     and legacy format ``[...]``. Fence stripping, first-balanced-block
     extraction, and truncated-output repair are delegated to the shared
-    ``lib.llm_json.extract_json`` helper; this function only unpacks the
+    ``lib.llm.llm_json.extract_json`` helper; this function only unpacks the
     parsed shape into the tuple the caller expects.
 
     Returns (streams_list, tomorrow_list, yesterday_done_list) tuple.
@@ -47,7 +47,7 @@ def _extract_json_result(text):
     return [], [], []
 
 
-def _run_llm_analysis(user_prompt, conv_count):
+def _run_llm_analysis(user_prompt, conv_count, *, owner_user_id: int):
     """Call the LLM via smart_chat.
 
     Returns ``(streams_list, tomorrow_list, yesterday_done_list, error_msg|None)``.
@@ -68,6 +68,7 @@ def _run_llm_analysis(user_prompt, conv_count):
                 max_tokens=128000,
                 temperature=0.3,
                 capability='text',
+                owner_user_id=owner_user_id,
                 log_prefix='[DailyReport]',
                 max_retries=3,
                 max_429_attempts=optional_llm_max_429_attempts(),

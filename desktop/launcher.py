@@ -93,7 +93,7 @@ def _log(msg: str) -> None:
     global _log_fh
     if _log_fh is None:
         try:
-            from lib.log_retention import register_external_log
+            from lib.logging_pkg.log_retention import register_external_log
             register_external_log(_LOG_PATH, 'desktop_console')
             _log_fh = open(_LOG_PATH, 'a', encoding='utf-8', buffering=1)
         except OSError:
@@ -106,7 +106,7 @@ def _log(msg: str) -> None:
             except OSError:
                 _log_fh = False
     try:
-        from lib.log_record_values import text_value
+        from lib.logging_pkg.log_record_values import text_value
         line = text_value(line, max_chars=4096)
     except Exception:
         pass
@@ -204,7 +204,7 @@ def _spawn_server(port: int) -> subprocess.Popen:
     # dead handle in windowed mode, so give it a real file).
     try:
         try:
-            from lib.log_retention import register_external_log
+            from lib.logging_pkg.log_retention import register_external_log
             register_external_log(_LOG_PATH, 'desktop_console')
         except Exception:
             pass

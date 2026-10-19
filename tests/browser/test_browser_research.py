@@ -198,7 +198,7 @@ def test_research_handler_routes_one_owner_device_and_clamps_limits(
     assert out.startswith('Browser research report')
     assert calls == [(
         'research_url', {
-            'url': FRIDAY_URL, 'maxChars': 60_000,
+            'url': FRIDAY_URL, 'maxChars': 80_000,
             'maxScrolls': 8, 'maxPages': 5,
             'pagination': 'auto', 'timeoutMs': 65_000,
         }, 80, {'client_id': 'friday-browser', 'owner_user_id': '41'},
@@ -265,7 +265,7 @@ def test_extension_research_capture_is_pre_navigation_bounded_and_dynamic():
     assert result['network']['priorityReserveChars'] == 256 * 1024
     assert probe['limits']['hintReserveChars'] == 256 * 1024
     assert probe['limits']['websocketFrames'] == 40
-    assert probe['limits']['active'] == 32
+    assert probe['limits']['activeCaptures'] == 0  # capture ownership ends with the request
     assert {'deep_collect', 'research_hints'} <= set(probe['limits']['capabilities'])
 
 

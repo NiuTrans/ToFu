@@ -1,5 +1,42 @@
 # Canonical Attempt events and conversation replay
 
+## Deleted conversation event lifetime
+
+**Problem:** native soft deletion walked all Turn bodies to discover Attempt
+events. Conversations exceeding 2000 identities or 64 nonempty event ranges
+could fail deletion despite range-based trash snapshots.
+**Decision:** `turn/event_retirement.rs` atomically pins the committed identity
+sources and stores an owner-scoped, execution-generation cursor while the
+existing delete transaction detaches public and executable state. Restore
+remains immediate and inert. The existing `turn.events.prune` maintenance path
+reclaims event sequences in bounded transactions, round-robins queued generations
+and releases each pin only with its completed cursor. Cursor-only work commits
+even when no payload rows exist. Identity claims remain reserved while cleanup
+is pending; purge reclaims pending generations before releasing those claims.
+Random-key legacy Attempts remain inaccessible after restoration.
+**Alternatives considered:** raising row/range limits preserves the foreground
+scan and eventual failure; omitting reclamation leaks event data; a new worker
+duplicates existing maintenance ownership.
+
+Bounds reuse the generated event-prune attempt, row and materialization budgets.
+Each generation holds one cursor and four immutable source ranges; it does not
+copy Turn payloads or add a worker. Pins retain source pages until maintenance
+finishes, so prolonged maintenance failure retains reconstructible bytes.
+The two-generation native fixture measured 218 serialized cursor bytes and two
+private pins, then verified zero remaining cursors/pins after bounded draining
+and reopen. This excludes index/page and allocator overhead and establishes no
+latency/RSS improvement. Fault injection covers both partial progress and final
+pin release. Soft deletion/restore is covered at 4096 Turns and 97 event-bearing
+Attempts; permanent purge and clone retain their existing identity/range bounds.
+Verification: `turn::event_retirement::tests`, `conversation_delete_` tests and
+maintenance's `idle_round_commits_event_retirement_without_payload_rows`.
+The retained measurements
+also record foreground blob collection/decoding: 65,953 / 6,398,259 bytes for
+old one/97-Turn fixtures, zero in both candidates. Payloads are approximately
+64 KiB per Turn; deferred background work is excluded from this dispatch scope.
+
+## Canonical payload references
+
 Problem: each Attempt event was persisted twice in the same transaction: once
 as the canonical event and once inside its conversation-sync envelope. Growing
 projection and terminal payloads therefore doubled serialization, blob and WAL
@@ -57,7 +94,7 @@ varied. Full 200-event conversation replay after crash remained about 43–45 ms
 Physical endpoint sizes varied; this does not certify steady-state growth or
 half-sized storage. Delta coalescing was explicitly disabled. Exact bodies and
 replay survived every leg. Artifact pins, all legs and limits live in
-[structured evidence](evidence/tofudb_canonical_event_replay_20261001.json).
+`tofudb_canonical_event_replay_20261001.json`.
 
 ## Task-event source guards
 
@@ -67,7 +104,7 @@ payloads, so they cannot fence a paginated diagnostic read.
 
 Decision: `event.bounds` accepts the optional boolean `include_read_guard`.
 The additive `read_guard` has the exact `EVENT_READ_GUARD_CONTRACT` from
-`lib/task_event_contract.py` (exported in the generated storage catalog) and an
+`lib/task_replay/task_event_contract.py` (exported in the generated storage catalog) and an
 opaque 64-character hexadecimal `stamp`. Default bounds retain their old shape.
 A stamp binds one task to the selected authority's open lease. Repeat reads and
 identical event replay retain it; changed task events or retention invalidate
@@ -160,3 +197,5 @@ Verification: native
 `event_list_materialized_page_overflow_is_payload_size_not_availability` and
 `tests/diagnostics/test_request_inspector_page_size.py` exercise complete exact
 paging, sparse cursors, bounded retries, one-row failure and unrelated errors.
+
+<!-- Evidence note: former docs/evidence/ artifact snapshots cited here were retired from the tree; cited JSON artifacts remain recoverable from git history. -->

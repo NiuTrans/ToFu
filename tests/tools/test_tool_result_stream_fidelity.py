@@ -5,7 +5,7 @@ import hashlib
 
 import pytest
 
-from lib.tool_result_artifact_writer import ToolResultArtifactWriter
+from lib.tool_results.tool_result_artifact_writer import ToolResultArtifactWriter
 
 pytestmark = pytest.mark.unit
 

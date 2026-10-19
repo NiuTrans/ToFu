@@ -123,7 +123,7 @@ def test_dispatch_error_emits_envelope_and_done():
 
 
 @pytest.mark.parametrize(('knobs', 'mode', 'wire_effort'), [
-    ({}, 'default', None),
+    ({}, 'default', 'low'),
     ({'thinking_depth': 'max'}, 'preset', 'max'),
     ({'config': {'thinkingEnabled': True, 'thinkingDepth': 'low'},
       'thinking_depth': 'max'}, 'preset', 'low'),
@@ -160,7 +160,7 @@ def test_direct_ingress_compiles_depth_against_selected_route(knobs, mode, wire_
 
 
 def test_preparation_error_exposes_bounded_contract_reason_only():
-    from lib.llm_errors import LocalRequestPreparationError
+    from lib.llm.llm_errors import LocalRequestPreparationError
     from lib.llm.reasoning import ReasoningContractError
 
     async def dispatch(*a, **kw):
@@ -264,7 +264,7 @@ def test_attempt_restart_after_visible_delta_is_typed_failure_not_success():
     )
 
 
-def test_bounded_relay_overflow_fails_instead_of_dropping_and_stopping():
+def test_relay_spills_burst_without_dropping_or_stopping():
     async def _dispatch(messages, *, on_content=None, **kwargs):
         on_content('A')
         on_content('B')
@@ -279,7 +279,9 @@ def test_bounded_relay_overflow_fails_instead_of_dropping_and_stopping():
         queue_maxsize=1,
     )
     objs = _frames_to_objs(_run(_drain(stream)))
-    assert objs[-2]['error']['code'] == 'relay_queue_overflow'
+    assert ''.join(obj['choices'][0]['delta'].get('content', '')
+                   for obj in objs if isinstance(obj, dict) and obj.get('choices')) == 'ABC'
+    assert objs[-2]['choices'][0]['finish_reason'] == 'stop'
     assert objs[-1] == '[DONE]'
 
 
@@ -448,3 +450,219 @@ def test_client_disconnect_does_not_cancel_started_provider_dispatch():
 
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])
+
+
+def test_spooled_relay_preserves_large_ordered_burst_and_closes_files(monkeypatch):
+    from tofu_workers import json_frames
+    import weakref
+    files = []
+    original = json_frames.tempfile.TemporaryFile
+    def track(*args, **kwargs):
+        file = original(*args, **kwargs)
+        files.append((weakref.ref(file), file.fileno()))
+        return file
+    monkeypatch.setattr(json_frames.tempfile, 'TemporaryFile', track)
+    expected = [f'{n:05d}:完整证据;' for n in range(2049)]
+    async def dispatch(messages, *, on_content=None, **kwargs):
+        for value in expected:
+            on_content(value)
+        return ({'content': ''.join(expected)}, 'stop', {})
+    from routes.api_v1.chat_direct import run_direct_stream
+    stream = run_direct_stream([], model='test', cfg={}, completion_id='burst',
+                               dispatch_fn=dispatch, queue_maxsize=1)
+    objs = _frames_to_objs(_run(_drain(stream)))
+    received = [obj['choices'][0]['delta']['content'] for obj in objs
+                if isinstance(obj, dict) and obj.get('choices')
+                and 'content' in obj['choices'][0]['delta']]
+    assert received == expected
+    assert objs[-2]['choices'][0]['finish_reason'] == 'stop'
+    assert files
+    for reference, fd in files:
+        assert reference() is None or reference().closed
+        with pytest.raises(OSError):
+            os.fstat(fd)
+
+
+def test_spool_write_failure_is_typed_and_never_false_success(monkeypatch):
+    from tofu_workers.json_frames import JsonFrameStore
+    def fail(self, frame):
+        raise OSError('private disk failure')
+    monkeypatch.setattr(JsonFrameStore, '_encode', fail)
+    async def dispatch(messages, *, on_content=None, **kwargs):
+        on_content('A')
+        on_content('B')
+        return ({'content': 'AB'}, 'stop', {})
+    from routes.api_v1.chat_direct import run_direct_stream
+    stream = run_direct_stream([], model='test', cfg={}, completion_id='failed-spool',
+                               dispatch_fn=dispatch, queue_maxsize=1)
+    objs = _frames_to_objs(_run(_drain(stream)))
+    assert objs[-2]['error']['code'] == 'relay_spool_io_failed'
+    assert 'private disk failure' not in str(objs)
+    assert objs[-1] == '[DONE]'
+
+
+def test_relay_disconnect_joins_running_spool_worker(monkeypatch):
+    import threading
+    from tofu_workers.json_frames import JsonFrameStore
+    from routes.api_v1.chat_direct import run_direct_stream
+    entered, finish = threading.Event(), threading.Event()
+    gate = []
+    original = JsonFrameStore._encode
+    def blocked(self, frame):
+        entered.set()
+        assert finish.wait(5)
+        return original(self, frame)
+    monkeypatch.setattr(JsonFrameStore, '_encode', blocked)
+    async def dispatch(messages, *, on_content=None, **kwargs):
+        on_content('A')
+        on_content('B')
+        await gate[0].wait()
+        assert not kwargs['abort_check']()
+        return ({'content': 'AB'}, 'stop', {})
+    async def exercise():
+        from lib.agent_core.direct_stream import _DETACHED_DIRECT_DISPATCHES
+        prior = set(_DETACHED_DIRECT_DISPATCHES)
+        gate.append(asyncio.Event())
+        stream = run_direct_stream([], model='test', cfg={}, completion_id='cancel-spool',
+                                   dispatch_fn=dispatch, queue_maxsize=1)
+        await anext(stream)
+        await anext(stream)
+        pending = asyncio.create_task(anext(stream))
+        assert await asyncio.to_thread(entered.wait, 2)
+        try:
+            pending.cancel()
+            await asyncio.sleep(0.02)
+            assert not pending.done()
+            pending.cancel()
+            await asyncio.sleep(0.02)
+            assert not pending.done()
+        finally:
+            finish.set()
+        with pytest.raises(asyncio.CancelledError):
+            await pending
+        await stream.aclose()
+        detached = set(_DETACHED_DIRECT_DISPATCHES) - prior
+        assert len(detached) == 1 and not next(iter(detached)).done()
+        gate[0].set()
+        await asyncio.gather(*detached)
+        await asyncio.sleep(0)
+        assert not (set(_DETACHED_DIRECT_DISPATCHES) - prior)
+    _run(exercise())
+
+
+def test_spooled_unobserved_attempt_restart_discards_only_old_output():
+    from routes.api_v1.chat_direct import run_direct_stream
+    async def dispatch(messages, *, on_content=None, on_attempt_restart=None, **kwargs):
+        for text in ('old-A', 'old-B', 'old-C'):
+            on_content(text)
+        on_attempt_restart(reason='transparent retry')
+        on_content('new-A')
+        on_content('new-B')
+        return ({'content': 'new-Anew-B'}, 'stop', {})
+    stream = run_direct_stream([], model='test', cfg={}, completion_id='restart-spool',
+                               dispatch_fn=dispatch, queue_maxsize=1)
+    objs = _frames_to_objs(_run(_drain(stream)))
+    assert ''.join(obj['choices'][0]['delta'].get('content', '')
+                   for obj in objs if isinstance(obj, dict) and obj.get('choices')) == 'new-Anew-B'
+    assert objs[-2]['choices'][0]['finish_reason'] == 'stop'
+
+
+def test_spool_read_failure_does_not_publish_false_success(monkeypatch):
+    from tofu_workers.json_frames import StoredJsonFrame
+    from routes.api_v1.chat_direct import run_direct_stream
+    def fail(self):
+        raise OSError('private read failure')
+    monkeypatch.setattr(StoredJsonFrame, 'decode', fail)
+    async def dispatch(messages, *, on_content=None, **kwargs):
+        on_content('A')
+        on_content('B')
+        return ({'content': 'AB'}, 'stop', {})
+    objs = _frames_to_objs(_run(_drain(run_direct_stream([], model='test', cfg={},
+        completion_id='read-fault', dispatch_fn=dispatch, queue_maxsize=1))))
+    assert objs[-2]['error']['code'] == 'relay_spool_io_failed'
+    assert 'private read failure' not in str(objs)
+    assert objs[-1] == '[DONE]'
+
+
+@pytest.mark.parametrize('failure', ['malformed_stream', 'premature_close', 'settlement'])
+def test_client_calls_not_released_without_verified_provider_and_settlement(failure):
+    from lib.agent_core.direct_stream import run_direct_stream
+    from lib.agent_core.execution_session import ExecutionSession, ExecutionPhase
+    from lib.llm.stream_result import ProviderStreamResult, ProviderStreamState
+
+    tool = {'type': 'function', 'function': {'name': 'write_file'}}
+    call = {'id': 'must-not-escape', 'type': 'function',
+            'function': {'name': 'write_file', 'arguments': '{"content":"partial"}'}}
+    terminal = {}
+    session = ExecutionSession(execution_id='client-tool-failure', kind='chat_direct',
+                               owner_user_id=1, deadline_seconds=60)
+    async def dispatch(messages, **kwargs):
+        assert kwargs['tools'] == [tool]
+        if failure == 'settlement':
+            return ProviderStreamResult.from_legacy(
+                {'tool_calls': [call]}, 'tool_calls', {'completion_tokens': 7})
+        return ProviderStreamResult(message={'tool_calls': [call]},
+            compatibility_finish_reason='tool_calls', usage={'completion_tokens': 7},
+            state=ProviderStreamState(failure),
+            malformed_frame_count=1 if failure == 'malformed_stream' else 0)
+
+    def settle():
+        terminal['execution_receipt'] = session.settle(
+            ExecutionPhase.FAILED, cause='settlement_failed')
+
+    output = _frames_to_objs(_run(_drain(run_direct_stream(
+        [{'role': 'user', 'content': 'hi'}], model='test-model', cfg={'maxTokens': 128},
+        completion_id='failed-call', dispatch_fn=dispatch,
+        client_tools=[tool], execution_session=session, dispatch_terminal=terminal,
+        on_dispatch_settled=settle))))
+    assert output[-2]['error']['code']
+    assert 'must-not-escape' not in json.dumps(output)
+    assert not any(isinstance(o, dict) and o.get('choices') for o in output)
+    assert terminal['result'].usage['completion_tokens'] == 7
+
+
+def test_cancelled_admission_joins_wallet_worker_before_terminal():
+    import threading
+    from lib.agent_core.direct_stream import run_direct_stream
+    async def exercise():
+        started, release, finished = threading.Event(), threading.Event(), threading.Event()
+        entered = asyncio.Event()
+        drive = []
+        settled = []
+        def wallet_barrier():
+            started.set()
+            assert release.wait(5)
+            finished.set()
+        async def before():
+            # The required callback is a shielded child of the dispatch owner.
+            entered.set()
+            await asyncio.to_thread(wallet_barrier)
+        async def dispatch(*args, **kwargs):
+            pytest.fail('cancelled admission entered provider')
+        async def on_settled():
+            assert finished.is_set()
+            settled.append(True)
+        terminal = {}
+        stream = run_direct_stream([], model='synthetic', cfg={}, completion_id='cancel-admission',
+            dispatch_fn=dispatch, before_dispatch=before, on_dispatch_settled=on_settled,
+            dispatch_terminal=terminal)
+        consumer = asyncio.create_task(_drain(stream))
+        await asyncio.wait_for(entered.wait(), 2)
+        for task in asyncio.all_tasks():
+            if getattr(task.get_coro(), '__qualname__', '').endswith('run_direct_stream.<locals>._drive'):
+                drive.append(task)
+        assert len(drive) == 1
+        assert await asyncio.to_thread(started.wait, 2)
+        drive[0].cancel()
+        await asyncio.sleep(0)
+        drive[0].cancel()
+        await asyncio.sleep(0)
+        assert not settled and not drive[0].done()
+        release.set()
+        try:
+            await asyncio.wait_for(consumer, 5)
+        except asyncio.CancelledError:
+            pass
+        assert settled == [True]
+        assert isinstance(terminal['exception'], asyncio.CancelledError)
+    _run(exercise())

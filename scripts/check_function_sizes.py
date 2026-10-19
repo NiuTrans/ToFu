@@ -18,17 +18,17 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 # budgets make both growth and unclaimed shrinkage visible.
 FUNCTION_LINE_BUDGETS = {
     ('lib/tasks_pkg/tool_dispatch/_pipeline.py',
-     'execute_tool_pipeline'): 1076,
+     'execute_tool_pipeline'): 1008,
     ('lib/tasks_pkg/cache_tracking/_detect.py',
-     'detect_cache_break'): 976,
+     'detect_cache_break'): 969,
     ('lib/tasks_pkg/orchestrator/_finalize.py',
-     '_finalize_and_emit_done'): 655,
+     '_finalize_and_emit_done'): 626,
     ('lib/tasks_pkg/stream_handler/_analyse.py',
      'analyse_stream_result'): 712,
     ('lib/llm_dispatch/_api_stream.py',
-     'dispatch_stream'): 689,
+     'dispatch_stream'): 670,
     ('lib/translate/engine/_engine.py',
-     '_translate_one_chunk'): 676,
+     '_translate_one_chunk'): 672,
 }
 
 

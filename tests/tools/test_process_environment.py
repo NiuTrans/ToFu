@@ -302,3 +302,15 @@ def test_mcp_install_job_recognizes_existing_tool_without_warming_again(tmp_path
 
     monkeypatch.setattr(facade, 'prewarm_vendored_launcher', unexpected_warm)
     assert facade.start_install_job('reusable-mcp')['state'] == 'ready'
+
+
+def test_mcp_preserves_installed_runtime_before_interpreter_siblings(tmp_path, monkeypatch):
+    local_bin = tmp_path / 'home/.local/bin'
+    interpreter_bin = tmp_path / 'python/bin'
+    local_node = executable(local_bin / 'node')
+    executable(interpreter_bin / 'node')
+    monkeypatch.setenv('HOME', str(tmp_path / 'home'))
+    monkeypatch.setenv('PATH', str(local_bin) + os.pathsep + str(interpreter_bin))
+    monkeypatch.setattr(sys, 'executable', str(interpreter_bin / 'python'))
+    environment = build_stdio_environment({}, prepare_directories=False)
+    assert resolve_executable('node', environment) == str(local_node)

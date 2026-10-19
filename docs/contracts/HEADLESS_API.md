@@ -15,7 +15,30 @@ There are now two headless deployment boundaries:
 For `pip install tofu-agent`, the agent-only OCI image, provider ownership,
 authentication, and exact lightweight route list, read
 [DEVELOPER_RUNTIME.md](../DEVELOPER_RUNTIME.md). Both compositions use the same
-production agent orchestrator.
+production agent orchestrator. The SDK can opt into Rust through trusted `NativeAgentConfiguration`; request JSON cannot select hosts or executors. Use async operations on its serving loop and join `close_async()` before closing borrowed resources; capabilities report `execution.backend`. CLI run/serve/doctor selects it through `--engine rust --native-archive ARCHIVE --native-profile PROFILE.json`; the CLI owns and joins those resources, while model routing/authentication stay with the same existing boundaries.
+
+SDK results retain their owners until worker cleanup and transient project history
+completion join. `close()` / `close_async()` reject new work and raise
+`AgentTimeoutError` if teardown exceeds their deadline, on either execution backend.
+Keep borrowed resources and retry close after outstanding work finishes.
+
+The Python SDK also accepts trusted `native_repository=NativeRepositoryConfiguration(...)`
+in `AgentRuntime` or `.local()`. It configures an external grammar directory,
+explicit stream byte limits and timeout. `NativeRepositoryConfiguration.from_launch_policy`
+accepts `grammar_directory`, an already-issued `launch_policy`, and optional
+`timeout`. Path-list, request and per-file output ceilings follow the issued
+`frame_maximum`; source reads retain the canonical source/reference admission
+bound. Invalid or insufficient capacity refuses configuration. This factory
+does no hardware probe or memory reservation and preserves explicit constructor
+overrides. The installed `tofu-repo-kernel` stream
+is loaded on first repository use. `capabilities.repository_extraction` reports
+`selection` (`native` or `reference`), `authority` (`trusted runtime composition`)
+and `default` (`reference`). This is a configuration projection, not a readiness
+or performance verdict. Model arguments, request JSON and CLI cannot select it.
+Native admission failure remains a tool error. Task cancellation joins its scan;
+SDK close waits for terminal cleanup before image disposal, raising
+`AgentTimeoutError` on an unjoined task and allowing close to be retried. See
+[Python composition](../DEVELOPER_RUNTIME.md#python-composition) for the example.
 
 If you only want to drop Tofu into an OpenAI- or Anthropic-SDK app,
 skip to the [Compatibility adapters](#compatibility-adapters) section
@@ -311,6 +334,20 @@ remain memory-local, so clients must always advance to the returned
 only compact status/clock metadata; the cumulative `content` / `thinking` is
 loaded and emitted once on the caught-up terminal page. The list endpoint is a
 bounded recent/live registry view, not a durable task-history listing.
+
+Task state and cursor replay also accept `view=durable`. This explicitly reads
+the owner-scoped committed chat task and event log even while a live task exists;
+an absent committed row returns 404 and never falls back to memory. The default
+`view=current` retains live-first behavior. State responses expose
+`readSource: live | durable`; repeated or unknown `view` values return 400.
+This changes the read projection, never the configured storage backend.
+The committed result retains `streamState` alongside `finishReason`, so cold
+readers preserve native stream-failure verdicts even when transport is done.
+
+Problem: a live terminal response alone cannot certify persistent settlement.
+Decision: expose the existing durable query with explicit read provenance and
+unchanged ownership checks. Alternatives rejected: evicting a live task to test
+persistence, restarting a shared application, or reading its database directly.
 
 Terminal task-result metadata exposes
 `toolOrchestrationDecisions[]` as a bounded, provider-neutral trace. Each row
@@ -895,10 +932,30 @@ print(resp.choices[0].message.content)
   identity shown in §3.1.
 * Streaming returns standard `chat.completion.chunk` SSE frames.
 * `reasoning_effort=low|medium|high` maps to Tofu's thinking-depth ladder.
-* When `tools` is supplied, Tofu's auto-injected tools (web_search,
-  memory, etc.) are turned off so the model only sees what you sent.
-* Every response includes a non-standard `task_id` field for follow-up
-  polling/abort via `/api/v4/tasks/`. SDK clients ignore it safely.
+* Explicit `tools` (including `[]`) selects one provider completion. The client
+  owns execution: declarations never authorize Tofu tools, even when names
+  match. Calls return unchanged after provider verification and resource
+  settlement; SSE delivers the complete call batch before `finish_reason`.
+  Send the resulting assistant/tool messages on the next client request.
+* This mode preserves routing, reasoning policy, usage/billing, idempotency and
+  disconnect draining. It injects no agent prompt or tool catalog. `n` must be 1.
+  `X-Tofu-Request-Id` identifies the request; there is no durable Task to poll.
+  Paid holds are protected before provider entry. Complete physical-attempt
+  invoices survive restart; unknown usage keeps the hold. A verified response
+  may carry `billing_status: "pending_usage"` or `"pending_settlement"` instead
+  of `billing`. These states authorize neither a refund nor a provider replay.
+* Migration: explicit-tool callers previously received `task_id` while the
+  server attempted to execute their tools. Use native `/api/v4/chat/completions`
+  for server execution and durable replay/abort. Omitting `tools` retains the
+  existing task-backed compatibility path and its Task handle.
+
+Problem: OpenAI tool declarations entered the server agent loop, causing unknown
+client tools to fail and same-named tools to run under the wrong executor.
+Decision: reuse `lib.agent_core.direct_stream` through the shared HTTP resource
+adapter for explicit client catalogs. Alternatives rejected: allowing unknown
+server handlers does not transfer execution authority; adding a second model
+loop duplicates routing, retry and settlement ownership. Verification lives in
+`test_compat_client_tools.py` and `test_chat_stream_direct.py`.
 
 ### 4.2 Anthropic SDK
 
@@ -1153,3 +1210,40 @@ Goal studio role overrides use the same Chat model references: optional
 `POST /api/v4/evolution/runs/{id}/role-model` with `{role, model}`. Roles are
 `executor`, `reviewer`, `coordinator`; null restores inheritance. Changes apply
 to future tasks. Existing tasks keep their pinned model.
+
+### Direct request settlement
+
+Direct relays with a positive paid hold use `request_settlement.py` after the
+same preflight reservation. Problem: absent usage previously normalized to zero,
+and a cold sweeper could refund dispatched work with no Task record. Decision:
+the shared wallet barrier acknowledges `request_admission` before provider entry;
+the existing transport budget port observes every physical attempt, including
+retries and abandoned unsent plans. Pricing uses its sealed logical model and
+provider identity. Complete counters, valid cache fields and a verified provider
+outcome are required; default estimated prices cannot fund an invoice.
+
+`request_invoice` freezes the complete cost/usage evidence before wallet
+settlement. Its closed schema and 4,000-character storage limit come from the
+billing section of `contracts/tofudb_ir_v1.json`. The existing janitor consumes
+that invoice idempotently without repricing. Unknown spend, missing invoices,
+overflow and lost acknowledgements retain the original hold. Explicit zero
+usage and proven unsent attempts remain distinct from unknown usage. Verified
+HTTP responses expose `billing_status=pending_usage` or `pending_settlement`
+when billing is deferred; no charge or refund is invented. Disabling billing
+after this paid admission does not erase its debt.
+
+Alternatives rejected: inferring zero from absent counters loses provider spend;
+using only the last retry undercounts earlier attempts; telemetry callbacks
+cannot authorize money; a fake native invoice or replayable Task misstates
+ownership. This adds two immutable zero-value ledger entries per completed paid
+direct request, bounded invoice evidence and no new background worker. No-hold
+requests add no ledger entries. In 20 private SQLite requests, invoice notes
+were at most 648 characters and the two new ledger documents serialized to
+at most 1,270 JSON bytes (not a WAL/index disk-growth measurement). Median
+admission/settlement time was 1.74/2.86 ms; settlement peaked at 132.21 ms.
+These controlled-provider measurements include concurrent build/test load,
+not a paired performance claim. The existing wallet remains the financial
+authority across SQLite, PostgreSQL and TofuDB. Tests cover public JSON/SSE,
+wallet races, lost ACKs and real native SIGKILL/reopen. An admitted request with
+no invoice still needs provider/operator evidence to resolve; this marker does
+not implement external reconciliation, grant replay, or prove a two-hour run.

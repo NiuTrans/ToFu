@@ -2,11 +2,11 @@
 
 The model-agnostic completion of video upload (owner ruling 2026-08-04:
 「一定要用 gemini 吗?用户有什么模型用什么模型不可以么?」 — NO vendor-specific
-native-video path). ONE batched vision call at PIPELINE time narrates the
+native-video path). Complete batches of vision calls at PIPELINE time narrate the
 sampled frame strip into a compact text storyboard, stored on the video
 payload. At send time the transform picks:
 
-  * chat model HAS vision  → raw frames ride the request (storyboard unused);
+  * chat model HAS vision  → selected raw frames ride the request; complete narration covers omitted frames;
   * chat model is text-only → storyboard + transcript carry the video,
     so a text-only chat model still gets the visual channel whenever ANY
     vision-capable route exists for the attachment owner.
@@ -33,7 +33,7 @@ from pathlib import Path
 
 from lib.log import get_logger
 from lib.model_info import video_frame_budget
-from lib.video_analysis._frames import _fmt_video_ts, _thin_frames
+from lib.video_analysis._frames import _fmt_video_ts
 
 logger = get_logger(__name__)
 
@@ -130,52 +130,50 @@ def storyboard_for_frames(frames: list[dict], *, name: str = 'video',
     avg_bytes = int(sum(frame_bytes(f) for f in frames)
                     / max(len(frames), 1))
     budget = video_frame_budget(models[0], avg_frame_bytes=avg_bytes)
-    kept = _thin_frames(frames, budget)
-
-    blocks: list[dict] = []
-    for fr in kept:
-        image_url = str(fr.get('url') or '')
-        if not image_url and fr.get('path'):
-            try:
-                encoded = base64.b64encode(
-                    Path(str(fr['path'])).read_bytes()).decode('ascii')
-                image_url = f'data:image/jpeg;base64,{encoded}'
-            except OSError as exc:
-                logger.warning('[VideoStoryboard] frame read failed: %s', exc)
-                continue
-        if not image_url:
-            continue
-        blocks.append({'type': 'image_url', 'image_url': {'url': image_url}})
-        blocks.append({'type': 'text',
-                       'text': f'[frame at {_fmt_video_ts(fr.get("t") or 0)}]'})
-    dur_txt = f'{duration_s:.0f}s' if duration_s else 'unknown-length'
-    blocks.append({'type': 'text', 'text': (
-        f'You are given {len(kept)} frames sampled from a {dur_txt} video '
-        f'"{name}", each labeled with its timestamp. Write a compact visual '
-        'storyboard of the video: for EVERY frame, in timestamp order, output '
-        'one line `- [MM:SS] <what is visible — key objects, people, actions, '
-        'scene changes, and any legible on-screen text transcribed verbatim>`. '
-        'After the last frame, output one line `Overall: <one-sentence arc of '
-        'the video>`. Be strictly factual — describe only what is visible; '
-        'never invent content.')})
-
+    if budget <= 0:
+        return {'text': '', 'status': 'no_vision_slot', 'model': ''}
+    # The output window sizes each physical call, never the overall evidence.
+    output_tokens = 4096
+    estimated_tokens_per_frame = 256
+    budget = min(budget, max(1, (output_tokens - 256) // estimated_tokens_per_frame))
+    texts: list[str] = []
+    model = ''
     try:
         from lib.llm_dispatch import dispatch_chat
-        content, usage = dispatch_chat(
-            [{'role': 'user', 'content': blocks}],
-            capability='vision', temperature=0, max_tokens=4096,
-            log_prefix='[VideoStoryboard]')
-    except Exception as e:
-        logger.warning('[VideoStoryboard] vision call failed: %s', e)
+        for offset in range(0, len(frames), budget):
+            batch = frames[offset:offset + budget]
+            blocks: list[dict] = []
+            for frame in batch:
+                image_url = str(frame.get('url') or '')
+                if not image_url and frame.get('path'):
+                    encoded = base64.b64encode(Path(str(frame['path'])).read_bytes()).decode('ascii')
+                    image_url = f'data:image/jpeg;base64,{encoded}'
+                if not image_url:
+                    raise ValueError('Storyboard frame has no readable image source')
+                blocks.append({'type': 'image_url', 'image_url': {'url': image_url}})
+                blocks.append({'type': 'text', 'text': f'[frame at {_fmt_video_ts(frame.get("t") or 0)}]'})
+            dur_txt = f'{duration_s:.0f}s' if duration_s else 'unknown-length'
+            blocks.append({'type': 'text', 'text': (
+                f'You are given {len(batch)} consecutive sampled frames from a {dur_txt} '
+                f'video "{name}", each labeled with its timestamp. Write a compact visual '
+                'storyboard of this portion: for EVERY frame in timestamp order output '
+                'one line `- [MM:SS] <visible objects, people, actions, scene changes '
+                'and legible on-screen text>`. After the last frame output one '
+                'line `Overall: <one-sentence arc of this portion>`. Be strictly '
+                'factual; never invent content.')})
+            content, usage = dispatch_chat(
+                [{'role': 'user', 'content': blocks}], capability='vision',
+                temperature=0, max_tokens=output_tokens, log_prefix='[VideoStoryboard]')
+            text = (content or '').strip()
+            if not text:
+                raise ValueError('Empty storyboard batch result')
+            texts.append(text)
+            if isinstance(usage, dict):
+                model = (usage.get('_dispatch') or {}).get('model') or usage.get('model') or model
+    except Exception as error:
+        logger.warning('[VideoStoryboard] complete narration failed: %s', error)
         return {'text': '', 'status': 'failed', 'model': ''}
-
-    text = (content or '').strip()
-    if not text:
-        logger.warning('[VideoStoryboard] empty storyboard from vision call')
-        return {'text': '', 'status': 'failed', 'model': ''}
-    model = ''
-    if isinstance(usage, dict):
-        model = (usage.get('_dispatch') or {}).get('model') or usage.get('model') or ''
-    logger.info('[VideoStoryboard] %d/%d frames → %d chars via %s',
-                len(kept), len(frames), len(text), model or '?')
+    text = '\n\n'.join(texts)
+    logger.info('[VideoStoryboard] %d frames in %d batches → %d chars via %s',
+                len(frames), len(texts), len(text), model or '?')
     return {'text': text, 'status': 'ok', 'model': model}

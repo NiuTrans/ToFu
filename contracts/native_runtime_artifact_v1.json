@@ -26,5 +26,30 @@
     "application": "VERSION",
     "runtime": "packages/tofu-runtime/Cargo.toml"
   },
-  "boundary": "Transient native runtime archive; no automatic production cutover, upload or deployment; integrity checking does not authenticate a publisher."
+  "boundary": "Transient native runtime archive; no automatic production cutover, upload or deployment; integrity checking does not authenticate a publisher.",
+  "maximum_metadata_bytes": 1048576,
+  "optional_token_count": {
+    "member": "lib/libtofu_runtime.so",
+    "contract_member": "contracts/native_token_count_abi_v1.json",
+    "feature": "token-count-abi",
+    "abi_version": 1
+  },
+  "optional_flow": {
+    "member": "lib/libtofu_runtime.so",
+    "contract_member": "contracts/native_flow_abi_v1.json",
+    "feature": "flow-abi",
+    "abi_version": 1
+  },
+  "optional_html_projection": {
+    "member": "lib/libtofu_runtime.so",
+    "contract_member": "contracts/native_html_projection_abi_v1.json",
+    "feature": "html-projection-abi",
+    "abi_version": 1
+  },
+  "optional_checkpoint_storage": {
+    "member": "lib/libtofu_runtime.so",
+    "contract_member": "contracts/native_checkpoint_storage_abi_v1.json",
+    "feature": "checkpoint-storage-abi",
+    "abi_version": 3
+  }
 }

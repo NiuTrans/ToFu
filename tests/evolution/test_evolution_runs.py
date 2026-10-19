@@ -600,13 +600,42 @@ def test_generic_plan_is_actionable_but_not_claimed_evidence(runtime):
     assert 'observable verification' in prompt
 
 
-def test_explicit_research_limits_reject_before_creating_any_run(runtime):
+@pytest.mark.parametrize('budget', [{'max_tokens':100}, {'max_wall_clock_seconds':30},
+                                   {'max_tokens':100,'max_wall_clock_seconds':30}])
+def test_explicit_research_model_limits_reach_pipeline(runtime, monkeypatch, budget):
     runs, _, tasks = runtime
-    with pytest.raises(runs.EvolutionContractError, match='research pipeline'):
-        runs.submit_run({'objective': 'Research a question', 'domain': 'research',
-                         'budget': {'max_tokens': 100}}, user_id=OWNER)
-    assert not tasks
-    assert not runs.list_runs(user_id=OWNER)
+    observed = []
+    def produce(objective, **kwargs):
+        observed.append((objective,kwargs))
+        return {'task_id':'research-budget-task'}
+    monkeypatch.setattr('lib.research.api.produce_research',produce)
+    started=time.time()
+    run=runs.submit_run({'objective':'Research a question','domain':'research',
+                         'budget':budget},user_id=OWNER)
+    finished=time.time()
+    assert run['status']=='executing' and run['task_id']=='research-budget-task'
+    assert len(observed)==1
+    objective, kwargs=observed[0]
+    assert objective=='Research a question' and kwargs['user_id']==OWNER
+    assert kwargs['evolution']['run_id']==run['run_id']
+    limits=kwargs['execution_limits']
+    assert limits['max_tokens']==budget.get('max_tokens')
+    assert limits['max_tool_calls'] is None
+    if budget.get('max_wall_clock_seconds'):
+        assert started+29 <= limits['deadline'] <= finished+30
+    else:
+        assert limits['deadline'] is None
+    assert not tasks  # The research adapter owns its task, not the generic spawn seam.
+
+
+def test_unsupported_research_tool_limits_refuse_before_any_run(runtime, monkeypatch):
+    runs, _, tasks = runtime
+    monkeypatch.setattr('lib.research.api.produce_research',
+                        lambda *args,**kwargs:pytest.fail('unsupported policy reached pipeline'))
+    with pytest.raises(runs.EvolutionContractError,match='tool-call'):
+        runs.submit_run({'objective':'Research a question','domain':'research',
+                         'budget':{'max_tool_calls':1}},user_id=OWNER)
+    assert not tasks and not runs.list_runs(user_id=OWNER)
 
 
 def test_explicit_wall_deadline_prevents_review_and_settles_execution(runtime):
@@ -626,16 +655,32 @@ def test_explicit_wall_deadline_prevents_review_and_settles_execution(runtime):
     assert len(tasks) == 1
 
 
-def test_explicit_tool_limit_blocks_next_repair_after_review(runtime):
+@pytest.mark.parametrize('interrupted', [False, True])
+def test_explicit_tool_limit_blocks_next_repair_after_review(runtime, monkeypatch, interrupted):
     runs, _, tasks = runtime
     run = runs.submit_run({'objective': 'Task', 'budget': {'max_tool_calls': 1}}, user_id=OWNER)
     tasks[0]['toolRounds'] = [{'tool_calls': [{'name': 'read_files'}]}]
     finish(runtime, tasks[0], 'Incomplete implementation')
-    current = finish(runtime, tasks[1], review('fail'))
+    if interrupted:
+        original = runs._finish
+        def pause(current, version, user_id):
+            if current['error'] == 'execution_budget_exhausted':
+                raise RuntimeError('interrupted before closing unstarted repair')
+            return original(current, version, user_id)
+        monkeypatch.setattr(runs, '_finish', pause)
+        with pytest.raises(RuntimeError, match='unstarted repair'):
+            finish(runtime, tasks[1], review('fail'))
+        assert runs.get_run(run['run_id'], user_id=OWNER)['status'] == 'settling'
+        monkeypatch.setattr(runs, '_finish', original)
+        current = runs.advance_run(run['run_id'], user_id=OWNER)
+    else:
+        current = finish(runtime, tasks[1], review('fail'))
     assert current['status'] == 'needs_attention'
     assert current['error'] == 'execution_budget_exhausted'
     assert current['actuals']['tool_calls'] == 1
     assert len(tasks) == 2
+    from lib.evolution import get_episode
+    assert get_episode(current['episode_id'], user_id=OWNER)['status'] == 'failure'
     assert runs.advance_run(run['run_id'], user_id=OWNER) == current
 
 
@@ -726,7 +771,7 @@ def test_pending_repair_error_cannot_journal_stale_review_or_start_followup(runt
 
 
 @pytest.mark.parametrize('stage', ['executing', 'reviewing'])
-def test_run_capacity_stops_before_task_allocation_and_keeps_history(runtime, monkeypatch, stage):
+def test_run_launch_uses_actual_storage_without_terminal_headroom_refusal(runtime, monkeypatch, stage):
     from lib.evolution import records, get_episode
     runs, store, tasks = runtime
     run = runs.submit_run({'objective': 'Task'}, user_id=OWNER)
@@ -738,19 +783,18 @@ def test_run_capacity_stops_before_task_allocation_and_keeps_history(runtime, mo
         task = tasks[0]
         content = 'Ready for independent review'
     durable, version = runs._read(run['run_id'], OWNER)
-    # Bound the headroom just above the existing record, as would happen after
-    # many repair receipts. The terminal receipt itself still fits.
+    # The actual write policy accommodates terminal and next-stage state.
+    # The old projected reserve would nevertheless have refused launch.
     size = len(json.dumps(durable, ensure_ascii=False).encode())
     monkeypatch.setattr(records, 'MAX_RECORD_BYTES', size + 8192)
     before_tasks = len(tasks)
     prior = list(durable['receipts'])
     settled = finish(runtime, task, content)
-    assert settled['status'] == 'needs_attention'
-    assert settled['error'] == 'run_record_capacity_exhausted; start a follow-up goal'
+    assert settled['status'] == stage
+    assert settled['error'] != 'run_record_capacity_exhausted; start a follow-up goal'
     assert settled['receipts'][:len(prior)] == prior
     assert settled['receipts'][-1]['task_id'] == task['id']
-    assert len(tasks) == before_tasks
-    assert get_episode(run['episode_id'], user_id=OWNER)['status'] != 'running'
+    assert len(tasks) == before_tasks + 1
     assert runs.advance_run(run['run_id'], user_id=OWNER) == settled
     for (namespace, _), row in store.rows.items():
         if namespace == records.NAMESPACE_RUNS:
@@ -806,3 +850,69 @@ def test_independent_review_receives_exact_frozen_history_without_extra_authorit
     assert 'report unknown' in prompt
     assert tasks[-1]['config']['projectEnabled'] is False
     assert tasks[-1]['config']['codeExecEnabled'] is False
+
+
+def test_stage_execution_instruction_is_preserved_in_executor_and_frozen_review(runtime):
+    runs, _, tasks = runtime
+    procedure = 'python3 inspect_frozen_experiment.py --owner 123'
+    run = runs.submit_run({'objective': 'Audit the original fixed experiment.',
+        'execution_instruction': procedure, 'max_attempts': 1}, user_id=OWNER)
+    assert run['objective'] == 'Audit the original fixed experiment.'
+    assert run['execution_instruction'] == procedure
+    assert procedure in runs._execution_prompt(run, OWNER)
+    executor = tasks[-1]
+    reviewed = finish(runtime, executor, 'The actual original checks are reported.')
+    assert reviewed['execution_instruction'] == procedure
+    assert procedure in runs._review_prompt(reviewed, executor)
+    assert procedure in tasks[-1]['messages'][0]['content']
+
+
+def test_stage_execution_instruction_refuses_unsupported_research_pipeline(runtime):
+    runs, store, _ = runtime
+    before = store.writes
+    from lib.evolution.contracts import EvolutionContractError
+    with pytest.raises(EvolutionContractError, match='execution_instruction'):
+        runs.submit_run({'objective': 'Discover evidence.', 'domain': 'research',
+                         'execution_instruction': 'Run the fixed command.'}, user_id=OWNER)
+    assert store.writes == before
+
+
+def test_executor_plugins_persist_and_do_not_reach_reviewer(runtime):
+    runs, _, tasks = runtime
+    run = runs.submit_run({'objective': 'Inspect installed compute queues.',
+                          'executor_plugins': ['environments']},
+                         user_id=OWNER, idempotency_key='executor-plugins')
+    assert run['executor_plugins'] == ['environments']
+    assert tasks[0]['config']['plugins'] == ['environments']
+    reviewed = finish(runtime, tasks[0], 'Queue inspection complete.')
+    assert reviewed['executor_plugins'] == ['environments']
+    assert tasks[1]['config']['plugins'] == []
+    with pytest.raises(runs.EvolutionStateError):
+        runs.submit_run({'objective': run['objective'], 'executor_plugins': []},
+                        user_id=OWNER, idempotency_key='executor-plugins')
+
+
+def test_executor_plugins_empty_and_omitted_have_distinct_configuration(runtime):
+    runs, _, tasks = runtime
+    runs.submit_run({'objective': 'Use deployment plugin policy.'}, user_id=OWNER)
+    assert 'plugins' not in tasks[-1]['config']
+    runs.submit_run({'objective': 'Disable executor plugins.', 'executor_plugins': []}, user_id=OWNER)
+    assert tasks[-1]['config']['plugins'] == []
+
+
+def test_executor_plugins_refuse_unsupported_research_before_write(runtime):
+    runs, store, tasks = runtime
+    from lib.evolution.contracts import EvolutionContractError
+    with pytest.raises(EvolutionContractError, match='executor_plugins'):
+        runs.submit_run({'objective': 'Discover literature.', 'domain': 'research',
+                         'executor_plugins': ['environments']}, user_id=OWNER)
+    assert tasks == []
+
+
+@pytest.mark.parametrize('plugins', [['*'], ['all'], ['all', 'all'], ['bad/name'], ['environments', 'environments']])
+def test_executor_plugins_reject_invalid_selection_before_launch(runtime, plugins):
+    runs, _, tasks = runtime
+    from lib.evolution.contracts import EvolutionContractError
+    with pytest.raises(EvolutionContractError):
+        runs.submit_run({'objective': 'Inspect compute.', 'executor_plugins': plugins}, user_id=OWNER)
+    assert tasks == []

@@ -14,6 +14,7 @@ from lib.orchestration.loop_policy import (
     MAX_EXECUTOR_MAX_ITERATIONS,
     bounded_executor_iterations,
 )
+from lib.agent_core.account_frontier_contract import FORMAT as GOAL_ACCOUNT_FRONTIER_FORMAT
 
 
 GOAL_RUN_FORMAT: Final = 'tofu.goal-run/v1'
@@ -47,6 +48,18 @@ def goal_execution_launch_contract() -> dict:
                      'worker_state', 'invocation_policy'],
         'properties': {
             'format': {'const': GOAL_EXECUTION_LAUNCH_FORMAT},
+            'account_frontier_format': {'const': GOAL_ACCOUNT_FRONTIER_FORMAT},
+            'account_seed': {'type': 'object'},
+            'fee_account': {'oneOf': [
+                {'type': 'object', 'additionalProperties': False, 'required': ['mode'],
+                 'properties': {'mode': {'const': 'cost'}}},
+                {'type': 'object', 'additionalProperties': False,
+                 'required': ['mode', 'wallet_user_id', 'reserved_micro'],
+                 'properties': {'mode': {'const': 'wallet'},
+                                'wallet_user_id': {'type': 'string', 'minLength': 1},
+                                'reserved_micro': {'type': 'integer', 'minimum': 0,
+                                                   'maximum': 9223372036854775807}}},
+            ]},
             **{name: {'type': 'string', 'minLength': 1} for name in (
                 'launch_id', 'run_id', 'task_id', 'conversation_id', 'objective')},
             **{name: {'type': 'string'} for name in (

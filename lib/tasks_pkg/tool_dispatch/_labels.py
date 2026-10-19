@@ -35,6 +35,10 @@ _TOOL_EXEC_LABELS = {
     'grep_search':  'Searching code',
     'find_files':   'Finding files',
     'write_file':   'Writing files',
+
+    'publish_response_asset': 'Publishing image',
+    'publish_response_file': 'Publishing document or attachment',
+    'publish_rich_response': 'Publishing rich response',
     'edit_file':    'Editing files',
     'apply_diff':   'Patching files',
     'apply_diffs':  'Patching files',
@@ -49,6 +53,13 @@ _TOOL_EXEC_LABELS = {
     'read_skill_resource': 'Reading skill resource',
     'request_skill_install': 'Installing skill',
     'ask_human': 'Asking for your input',
+    'report_to_user': 'Sending a Coordinator update',
+    'get_project_workers': 'Read project Workers',
+    'cancel_project_work': 'Cancel project work',
+    'finish_project_request': 'Finish project request',
+    'delegate_project_work': 'Starting an independent Worker',
+    'await_project_workers': 'Waiting for Worker results',
+    'review_project_work': 'Reviewing Worker evidence',
     'evolution_review': 'Submitting independent review',
 }
 

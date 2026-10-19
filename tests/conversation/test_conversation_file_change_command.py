@@ -87,6 +87,10 @@ def _service(monkeypatch, *, mutate):
     {'files': [{'path': 'main.tex', 'action': 'written', 'rootPath': 'remote:device:paper'}]},
     {'files': [{'path': 'main.tex', 'action': 'written', 'source': 'overleaf'}]},
     {'truncated': True}, {'undoAvailable': False},
+
+    {'files': [{'path': 'main.tex', 'source': 'local', 'undoAvailable': False}]},
+    {'files': [{'path': 'canonical.tex'},
+               {'path': 'worktree.tex', 'source': 'local', 'undoAvailable': False}]},
 ])
 def test_external_or_incomplete_file_changes_refuse_before_any_mutation(monkeypatch, change):
     effects = []

@@ -35,7 +35,7 @@ def bridge(monkeypatch, snapshot=None, *, connected=True):
     return value
 
 
-@pytest.mark.parametrize('cold', ['clear', 'lru', 'ttl'])
+@pytest.mark.parametrize('cold', ['clear', 'churn', 'ttl', 'pressure'])
 def test_full_ordered_wire_survives_cold_state(cold, monkeypatch):
     ctx = context()
     bridge(monkeypatch)
@@ -43,9 +43,11 @@ def test_full_ordered_wire_survives_cold_state(cold, monkeypatch):
     initial_bytes = json.dumps(initial)
     if cold == 'clear':
         tool_search.clear_tool_search_caches()
-    elif cold == 'lru':
-        monkeypatch.setattr(tool_search, '_selection_state_capacity', lambda: 1)
-        tool_search.record_mcp_tool_used('unrelated-task', 'mcp__other__read')
+    elif cold == 'churn':
+        for index in range(4097):
+            tool_search.record_mcp_tool_used(f'unrelated-task-{index}', 'mcp__other__read')
+    elif cold == 'pressure':
+        tool_search.reclaim_tool_search_indexes()
     else:
         tool_search._prune_states(tool_search.time.monotonic() + tool_search._STATE_TTL_SECONDS + 1)
     bridge(monkeypatch, [_large_snapshot()[0]])
@@ -145,19 +147,18 @@ def test_assembly_propagates_declaration_errors_and_never_grants_old_wire(monkey
         _spec.assemble_tool_list(registry_context({}))
 
 
-def test_bounded_resident_and_durable_footprint(monkeypatch, declaration_authority):
+def test_complete_resident_observations_and_durable_wire_footprint(monkeypatch, declaration_authority):
     from lib.storage.mcp_declarations import MAX_DECLARATION_BYTES, SETTING_KEY
-    monkeypatch.setattr(tool_search, '_selection_state_capacity', lambda: 2)
     rows = _large_snapshot()
     for index in range(100):
         scope = tool_search.mcp_selection_scope_id(task_id='', conv_id=f'footprint-{index}', owner_user_id=7)
         tool_search.select_active_mcp_tools(rows, task_id='', selection_scope_id=scope, query='hope', limit=4)
-    assert len(tool_search._SELECTION_STATE) == 2
+    assert len(tool_search._SELECTION_STATE) == 100
     assert all('wire' not in state for state in tool_search._SELECTION_STATE.values())
     sizes = [len(settings[SETTING_KEY]['wireJson'].encode('utf-8'))
              for settings in declaration_authority.settings.values()]
     assert len(sizes) == 100 and max(sizes) <= MAX_DECLARATION_BYTES
-    print(f'footprint conversations=100 resident_states=2 resident_wires=0 '
+    print(f'footprint conversations=100 resident_states=100 resident_wires=0 '
           f'wire_bytes_each={max(sizes)} total_wire_bytes={sum(sizes)}')
 
 
@@ -275,3 +276,159 @@ def test_catalog_exception_retains_wire_without_execution_grants(
     assert ctx.cfg['_mcpToolSearchTextByName'] == {}
     assert ctx.cfg['_mcpActiveToolNames'] == []
     assert MCPDeclarationStore().get(user_id=7, conversation_id=ctx.conv_id) is None
+
+
+@pytest.mark.parametrize('loss', ['disconnect', 'revoke', 'outage'])
+def test_declared_mcp_loss_is_unavailable_not_hallucinated_and_recovers(monkeypatch, loss):
+    import threading
+    from lib.tools.registry import _spec
+    from lib.tasks_pkg.tool_dispatch.api import parse_tool_calls
+    from lib.tasks_pkg.tool_dispatch._labels import _known_tool_names
+
+    name = 'mcp__llm__experiment_eval_result'
+    schema = _definition('llm', 'experiment_eval_result')
+    schema['function']['parameters'] = {
+        'type': 'object', 'properties': {'experiment_id_or_name_or_url': {'type': 'string'}},
+        'required': ['experiment_id_or_name_or_url'], 'additionalProperties': False}
+    rows = [{'openai_def': schema, 'namespaced_name': name, 'meta': {}}]
+    monkeypatch.setattr(_spec, '_TOOL_SPECS', [
+        _spec.ToolSpec('mcp', _build._build_mcp, phase='base')])
+    cfg = {'mcpToolExposure': 'auto'}
+    def assemble():
+        ctx = registry_context(cfg)
+        ctx.owner_user_id, ctx.conv_id = 7, 'unavailable-regression'
+        wire, _ = _spec.assemble_tool_list(ctx)
+        return wire, ctx
+
+    bridge(monkeypatch, rows)
+    initial, _ = assemble()
+    assert initial == [schema]
+    live = bridge(monkeypatch, [], connected=loss != 'disconnect')
+    if loss == 'outage':
+        def fail():
+            raise OSError('discovery unavailable')
+        live.get_openai_tool_defs = fail
+    wire, ctx = assemble()
+    assert wire == initial
+    task = {'id': 'unavailable-test', 'convId': 'unavailable-regression',
+            'model': 'test', 'events': [], 'events_lock': threading.Lock(),
+            'toolRounds': [], 'aborted': False, 'config': {'autopilotEnabled': True},
+            '_tool_schema': wire, '_executable_tool_catalog': ctx.executable_tool_catalog,
+            '_toolContractDocumentsByName': ctx.tool_contract_documents_by_name}
+    assert name not in _known_tool_names(task)
+    def parse(called=name):
+        return parse_tool_calls({'content': '', 'tool_calls': [{
+            'id': 'mcp-call', 'type': 'function', 'function': {
+                'name': called, 'arguments': '{"experiment_id_or_name_or_url":"331785"}'}}]},
+            task, round_num=6, tool_round_num=len(task['toolRounds']), project_enabled=False)[0][0]
+
+    for _ in range(5):
+        parsed = parse()
+        assert parsed[5]['status'] == 'rejected'
+        assert parsed[5]['_rejected']['kind'] == 'tool_unavailable'
+        assert parsed[5]['_rejected']['executable'] is False
+        assert 'not a real tool' not in str(parsed[5])
+        assert not task['aborted']
+    assert name not in _known_tool_names(task)
+    invented = parse('mcp__llm__invented')
+    assert invented[5]['_rejected']['kind'] == 'hallucinated'
+
+    bridge(monkeypatch, rows)
+    restored, ctx = assemble()
+    task.update(_tool_schema=restored, _executable_tool_catalog=ctx.executable_tool_catalog,
+                _toolContractDocumentsByName=ctx.tool_contract_documents_by_name)
+    assert restored == initial and name in _known_tool_names(task)
+    accepted = parse()
+    assert accepted[1] == name
+    assert accepted[5].get('status') != 'rejected'
+
+
+def test_root_request_refresh_recovers_startup_mcp_without_widening(monkeypatch):
+    from lib.tasks_pkg.orchestrator._tool_assembly_prep import (
+        assemble_round_tools, refresh_root_mcp_authority)
+    from lib.tasks_pkg.tool_dispatch._labels import _known_tool_names
+
+    rows = _large_snapshot()[:2]
+    bridge(monkeypatch, rows)
+    ctx = context()
+    initial = _build._build_mcp(ctx)
+    name = initial[0]['function']['name']
+    bridge(monkeypatch, [], connected=False)
+    cfg = {'userId': 7, 'model': 'test', 'mcpToolExposure': 'auto',
+           'memoryEnabled': False, 'schedulerEnabled': False,
+           'preferencesEnabled': False, 'plugins': []}
+    task = {'id': 'root-startup', 'convId': ctx.conv_id, '_userId': 7,
+            'messages': [], 'config': cfg}
+    mcfg = dict(project_path='', project_enabled=False, search_mode='off',
+                search_enabled=False, fetch_enabled=False, code_exec_enabled=False,
+                browser_enabled=False, desktop_enabled=False, image_gen_enabled=False)
+    wire, _ = assemble_round_tools(cfg, task, mcfg)
+
+    admitted_wire = list(task['_tool_schema'])
+
+    from lib.tools.gateway import local_wire_tools
+    task['_toolDiscoveryPolicyByName'][name] = 'searchable'
+    task['_toolSearchCatalogSize'] = 100
+    task['_toolSearchableCount'] = 1
+    def provider_wire():
+        return local_wire_tools(task['_tool_schema'],
+            discovery_policy_by_name=task['_toolDiscoveryPolicyByName'],
+            discovery_catalog_size=task['_toolSearchCatalogSize'],
+            searchable_count=task['_toolSearchableCount'], apply_schema_budget=False)
+    frozen_provider_wire = provider_wire()
+    assert name not in _known_tool_names(task)
+    before = [tool for tool in task['_executable_tool_catalog']
+              if not tool['function']['name'].startswith('mcp__')]
+    bridge(monkeypatch, rows + _large_snapshot()[2:4])
+    from lib.tasks_pkg.orchestrator import _round_request_prep as request_prep
+    monkeypatch.setattr(request_prep.orchestrator_ports, 'build_request_body',
+                        lambda model, messages, **kw: {'messages': messages, 'tools': kw['tools']})
+    monkeypatch.setattr(request_prep, 'emit_messages_snapshot_event', lambda *a, **kw: None)
+    _, body = request_prep.build_round_request(
+        task, SimpleNamespace(model='test', preset=None, thinking_enabled=False), [], wire,
+        round_num=6, tid=task['id'], thinking_depth=None, temperature=None,
+        max_tokens=100, response_format=None)
+    assert name in {tool['function']['name'] for tool in body['_executable_tool_catalog']}
+    assert name in _known_tool_names(task)
+    assert name in task['_toolContractDocumentsByName']
+    assert [tool for tool in task['_executable_tool_catalog']
+            if not tool['function']['name'].startswith('mcp__')] == before
+    assert task['_tool_schema'] == admitted_wire
+    new_names = {row['namespaced_name'] for row in _large_snapshot()[2:4]}
+    assert not new_names.intersection(_known_tool_names(task))
+    bridge(monkeypatch, [], connected=True)
+    refresh_root_mcp_authority(task)
+    assert name not in _known_tool_names(task)
+    assert name not in task['_toolContractDocumentsByName']
+
+    assert provider_wire() == frozen_provider_wire
+    bridge(monkeypatch, rows)
+    refresh_root_mcp_authority(task)
+    assert name in _known_tool_names(task)
+    cfg['mcpEnabled'] = False
+    refresh_root_mcp_authority(task)
+    assert name not in _known_tool_names(task)
+
+
+def test_root_mcp_refresh_never_reassembles_child_authority(monkeypatch):
+    from lib.tasks_pkg.orchestrator import _tool_assembly_prep as prep
+    from lib.tasks_pkg.invocation import InvocationPolicy
+    task = {'_invocationPolicy': InvocationPolicy.child(parent_task_id='parent'),
+            '_rootToolAssemblyConfig': {}, '_rootMcpToolNames': ['mcp__llm__read'],
+            '_tool_schema': [_definition('llm', 'read')], '_executable_tool_catalog': []}
+    def forbidden(*args, **kwargs):
+        pytest.fail('child must never reassemble root inventory')
+    monkeypatch.setattr(prep, 'assemble_round_tools', forbidden)
+    prep.refresh_root_mcp_authority(task)
+    assert task['_executable_tool_catalog'] == []
+
+
+def test_text_only_turn_clears_root_mcp_recovery(monkeypatch):
+    from lib.tasks_pkg.orchestrator import _tool_assembly_prep as prep
+    task = {'_rootToolAssemblyConfig': {}, '_rootMcpToolNames': ['mcp__llm__read']}
+    prep._disable_tools_for_turn(task)
+    def forbidden(*args, **kwargs):
+        pytest.fail('text-only turn must not rebuild tool authority')
+    monkeypatch.setattr(prep, 'assemble_round_tools', forbidden)
+    prep.refresh_root_mcp_authority(task)
+    assert task['_executable_tool_catalog'] == []

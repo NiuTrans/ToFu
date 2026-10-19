@@ -1,6 +1,6 @@
 """tests/provider_probe/test_probe_persistence.py — Background cell-probe persistence.
 
-Covers the server-owned probe task in ``lib.provider_probe``:
+Covers the server-owned probe task in ``lib.provider.provider_probe``:
 
 * ``run_cell_probe_task`` fans out cells, fills the task, marks it done.
 * The task is persisted to disk (``probe_cache_path``) as a secret-free
@@ -26,10 +26,10 @@ class ProbePersistenceTest(unittest.TestCase):
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
-        # The cell-probe engine moved to lib/provider_probe.py (2026-06);
+        # The cell-probe engine moved to lib/provider/provider_probe.py (2026-06);
         # run_cell_probe_task resolves probe_one_cell / probe_cache_path
         # through that module, so patch/redirect there.
-        import lib.provider_probe as pp
+        import lib.provider.provider_probe as pp
         self.cfg = pp
         # Redirect the probe-cache path into the temp dir.
         self._orig_cache_path = pp.probe_cache_path

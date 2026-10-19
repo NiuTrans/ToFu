@@ -3,7 +3,7 @@
 import threading
 from collections.abc import Callable, Hashable
 
-from lib.llm_errors import AbortedError
+from lib.llm.llm_errors import AbortedError
 from lib.log import get_logger
 from lib.swarm.execution_gate import (
     SwarmExecutionAccounting,

@@ -175,8 +175,8 @@ def test_idle_hint_one_keeps_32_way_rendezvous_without_active_cap():
     pool=kernel('startup-rendezvous');rendezvous=threading.Barrier(33)
     try:
         jobs=[pool.submit(lambda:rendezvous.wait(5)) for _ in range(32)]
-        rendezvous.wait(5)
-        for job in jobs:job.result(1)
+        main_index = rendezvous.wait(5)
+        assert sorted([main_index, *(job.result(1) for job in jobs)]) == list(range(33))
     finally:pool.shutdown(wait=True)
 
 

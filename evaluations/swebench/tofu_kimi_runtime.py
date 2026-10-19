@@ -37,13 +37,15 @@ TOFU_KIMI_TOOL_SURFACES = ("exclusive", "production")
 TOFU_BENCHMARK_MODELS: dict[str, dict[str, Any]] = {
     "kimi-k3": {
         "creator_id": "moonshot",
+        "model_id": "kimi-k3",
         "creator_name": "Moonshot AI",
         "display_name": "Kimi K3",
         "context_window": 262_144,
         "wire_model_id": "kimi-k3",
     },
     "glm-5.3-m17": {
-        "creator_id": "zai",
+        "creator_id": "zhipu",
+        "model_id": "glm-5.3",
         "creator_name": "Z.ai",
         "display_name": "GLM-5.3",
         "context_window": 200_000,
@@ -113,7 +115,7 @@ _TOFU_KIMI_CUSTOM_TOOLS = [
                 "additionalProperties": False,
             },
         },
-        "execution": {"mode": "client", "timeout_s": 1830},
+        "execution": {"mode": "client", "timeout_s": 1830, "shell_command_argument": "command"},
         "write": True,
     },
     {
@@ -209,7 +211,7 @@ _TOFU_KIMI_PRODUCTION_CUSTOM_TOOLS = [
                 "additionalProperties": False,
             },
         },
-        "execution": {"mode": "client", "timeout_s": 1830},
+        "execution": {"mode": "client", "timeout_s": 1830, "shell_command_argument": "command"},
         "write": True,
     },
     _TOFU_KIMI_CUSTOM_TOOLS[1],
@@ -543,6 +545,7 @@ class TofuKimiCandidateSettings:
 
     def manifest_record(self) -> dict[str, Any]:
         self.validate()
+        from lib.tasks_pkg.model_config import resolve_max_output_tokens
         production = str(self.tool_surface) == "production"
         search_enabled = tofu_kimi_search_enabled(self.runtime_config)
         tool_schema_digest = (
@@ -565,6 +568,8 @@ class TofuKimiCandidateSettings:
             "toolSurface": str(self.tool_surface),
             "runtimeConfig": dict(self.runtime_config),
             "runtimeConfigSha256": self.runtime_config_sha256,
+            "requestedMaxOutputTokens": resolve_max_output_tokens(self.runtime_config),
+            "outputBudgetSource": "explicit" if "maxTokens" in self.runtime_config else "production_default",
             "toolSchemaSha256": tool_schema_digest,
             "toolExecutionSha256": tool_execution_digest,
             "contextWindowTokens": int(TOFU_BENCHMARK_MODELS[str(self.model)]['context_window']),

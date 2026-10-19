@@ -6,7 +6,7 @@ import pytest
 
 from lib.llm._sse_framer import SSEFramer
 from lib.llm.stream_result import ProviderStreamState
-from lib.llm_errors import (
+from lib.llm.llm_errors import (
     BadRequestError, ContentFilterError, PermissionError_, PromptTooLongError,
     ProviderStreamError, RateLimitError, RequestScopedError, RetryableAPIError,
 )

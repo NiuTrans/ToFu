@@ -69,7 +69,7 @@ STAT_WARN_THRESHOLD_S = 5.0
 STAT_TIMEOUT_S = 30.0
 
 # Paths to stat — resolved lazily at start_fs_keepalive() time from the
-# ACTUAL writable data/logs roots (lib.runtime_paths), NOT the code tree. A
+# ACTUAL writable data/logs roots (lib.runtime.runtime_paths), NOT the code tree. A
 # source checkout can now place its data root on a DIFFERENT mount than the
 # repo (fresh-clone XDG default, or an explicit TOFU_DATA_DIR), so probing the
 # code tree would keep the wrong mount warm and let the live-DB mount stale —
@@ -321,14 +321,14 @@ def _keepalive_loop(runtime: _ProbeRuntime):
 def _resolve_data_root() -> str:
     """Return the ACTUAL writable data root (where the live DB lives).
 
-    Delegates to ``lib.runtime_paths.data_root()`` — the single source of truth
+    Delegates to ``lib.runtime.runtime_paths.data_root()`` — the single source of truth
     that honours ``$TOFU_DATA_DIR`` / ``TOFU_DATA_LAYOUT`` / frozen builds — so
     the keepalive follows the DB wherever it actually resides, not the code
     tree. The resolver is memoized, so calling it here is cheap. Falls back to
     the in-tree ``data/`` only if the import fails (should never happen).
     """
     try:
-        from lib.runtime_paths import data_root
+        from lib.runtime.runtime_paths import data_root
         return data_root()
     except Exception as e:  # pragma: no cover — defensive
         logger.warning('[FS-Keepalive] runtime_paths.data_root() unavailable, '
@@ -339,7 +339,7 @@ def _resolve_data_root() -> str:
 def _resolve_probe_paths() -> list:
     """The paths to stat — the resolved data + logs roots (where state lives)."""
     try:
-        from lib.runtime_paths import data_root, logs_root
+        from lib.runtime.runtime_paths import data_root, logs_root
         return [data_root(), logs_root()]
     except Exception as e:  # pragma: no cover — defensive
         logger.warning('[FS-Keepalive] runtime_paths unavailable, probing '

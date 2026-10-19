@@ -27,7 +27,7 @@ pytestmark = pytest.mark.unit
 
 
 def _fresh():
-    import lib.runtime_state_store as m
+    import lib.runtime.runtime_state_store as m
     m.reset_for_test()
     return m
 
@@ -36,7 +36,7 @@ def _fresh():
 #  Criterion 2 — inproc TTL lease semantics
 # ══════════════════════════════════════════════════════════════════════
 def test_inproc_lease_expires_after_ttl():
-    from lib.runtime_state_store import InProcRuntimeStateStore
+    from lib.runtime.runtime_state_store import InProcRuntimeStateStore
     s = InProcRuntimeStateStore()
     s.acquire_lease('admit', 't1', ttl=0.15)
     assert s.count('admit') == 1          # live immediately after acquire
@@ -45,7 +45,7 @@ def test_inproc_lease_expires_after_ttl():
 
 
 def test_inproc_release_is_eager():
-    from lib.runtime_state_store import InProcRuntimeStateStore
+    from lib.runtime.runtime_state_store import InProcRuntimeStateStore
     s = InProcRuntimeStateStore()
     s.acquire_lease('sse', 'p1', ttl=100)
     assert s.count('sse') == 1
@@ -54,7 +54,7 @@ def test_inproc_release_is_eager():
 
 
 def test_inproc_count_prefix_and_kind_isolation():
-    from lib.runtime_state_store import InProcRuntimeStateStore
+    from lib.runtime.runtime_state_store import InProcRuntimeStateStore
     s = InProcRuntimeStateStore()
     s.acquire_lease('sse', 'ip:1.1.1.1:rA:s1', ttl=100)
     s.acquire_lease('sse', 'ip:1.1.1.1:rA:s2', ttl=100)
@@ -68,7 +68,7 @@ def test_inproc_count_prefix_and_kind_isolation():
 
 
 def test_inproc_live_keys_enumerates_unexpired():
-    from lib.runtime_state_store import InProcRuntimeStateStore
+    from lib.runtime.runtime_state_store import InProcRuntimeStateStore
     s = InProcRuntimeStateStore()
     s.acquire_lease('sub', 'chat:t1:rA', ttl=100)
     s.acquire_lease('sub', 'chat:t1:rB', ttl=0.1)
@@ -85,7 +85,7 @@ def test_heartbeat_keeps_living_lease_alive_past_ttl():
     every ttl/3 NEVER expires while the owner is alive — so a long task is
     safe. Here ttl=0.15s, heartbeat every 0.05s, run for 0.3s (2× ttl): the
     lease must still be live at the end BECAUSE we kept refreshing it."""
-    from lib.runtime_state_store import InProcRuntimeStateStore
+    from lib.runtime.runtime_state_store import InProcRuntimeStateStore
     s = InProcRuntimeStateStore()
     ttl = 0.15
     s.acquire_lease('admit', 'living', ttl=ttl)
@@ -100,7 +100,7 @@ def test_lease_ttl_benchmark_hook_post_crash_reclaim_within_ttl():
     """Benchmark hook ruling 2 requires: after heartbeats STOP (crash), the
     lease is reclaimed within ~ttl. Acquire, then STOP heartbeating (simulated
     crash) and assert reclaim happens by ttl + slack, not before ~ttl."""
-    from lib.runtime_state_store import InProcRuntimeStateStore
+    from lib.runtime.runtime_state_store import InProcRuntimeStateStore
     s = InProcRuntimeStateStore()
     ttl = 0.2
     s.acquire_lease('admit', 'crashed', ttl=ttl)
@@ -119,7 +119,7 @@ def test_NC_never_expiring_lease_leaks_capacity():
     We simulate the bug with an infinite ttl and prove the slot is still held
     long after a real ttl would have reclaimed it — the exact failure mode the
     lease-TTL primitive exists to prevent."""
-    from lib.runtime_state_store import InProcRuntimeStateStore
+    from lib.runtime.runtime_state_store import InProcRuntimeStateStore
     good = InProcRuntimeStateStore()
     good.acquire_lease('admit', 'x', ttl=0.1)
     time.sleep(0.15)
@@ -135,7 +135,7 @@ def test_NC_never_expiring_lease_leaks_capacity():
 #  ATOMIC bounded acquire — never overshoots `limit`, even under a race
 # ══════════════════════════════════════════════════════════════════════
 def test_acquire_slot_bounds_count():
-    from lib.runtime_state_store import InProcRuntimeStateStore
+    from lib.runtime.runtime_state_store import InProcRuntimeStateStore
     s = InProcRuntimeStateStore()
     # limit=3 under the principal prefix 'ip:5:'
     ok = [s.acquire_slot('sse', f'ip:5:rA:s{i}', limit=3, ttl=100,
@@ -148,7 +148,7 @@ def test_acquire_slot_bounds_count():
 
 
 def test_acquire_slot_reacquire_is_refresh_not_new_admit():
-    from lib.runtime_state_store import InProcRuntimeStateStore
+    from lib.runtime.runtime_state_store import InProcRuntimeStateStore
     s = InProcRuntimeStateStore()
     assert s.acquire_slot('admit', 't1', limit=1, ttl=100, count_prefix='') is True
     # Re-acquiring the SAME slot must not be blocked by the limit (it's held).
@@ -159,7 +159,7 @@ def test_acquire_slot_reacquire_is_refresh_not_new_admit():
 
 
 def test_acquire_slot_limit_zero_unbounded():
-    from lib.runtime_state_store import InProcRuntimeStateStore
+    from lib.runtime.runtime_state_store import InProcRuntimeStateStore
     s = InProcRuntimeStateStore()
     for i in range(1000):
         assert s.acquire_slot('admit', f't{i}', limit=0, ttl=100,
@@ -172,7 +172,7 @@ def test_acquire_slot_concurrent_never_overshoots():
     This is what a count-then-acquire (check-then-act) cannot guarantee and
     the atomic primitive must."""
     import threading
-    from lib.runtime_state_store import InProcRuntimeStateStore
+    from lib.runtime.runtime_state_store import InProcRuntimeStateStore
     s = InProcRuntimeStateStore()
     limit = 10
     n_threads = 100
@@ -206,7 +206,7 @@ def test_NC_check_then_act_overshoots_under_concurrency():
     primitive prevents. We build that racy shape explicitly and show it
     overshoots; the atomic acquire_slot above does not."""
     import threading
-    from lib.runtime_state_store import InProcRuntimeStateStore
+    from lib.runtime.runtime_state_store import InProcRuntimeStateStore
     s = InProcRuntimeStateStore()
     limit = 10
     n_threads = 100
@@ -313,7 +313,7 @@ def test_redis_unreachable_fails_open(monkeypatch):
     """Criterion 3: when the redis backend can't connect, acquire returns True
     (fail-open, cap stops enforcing rather than crashing) and count returns 0.
     We force _redis() to report unavailable — no live server involved."""
-    from lib.runtime_state_store import RedisRuntimeStateStore
+    from lib.runtime.runtime_state_store import RedisRuntimeStateStore
     s = RedisRuntimeStateStore()
     # Simulate connect failure by monkeypatching the lazy connector.
     monkeypatch.setattr(s, '_redis', lambda: None)
@@ -326,7 +326,7 @@ def test_redis_unreachable_fails_open(monkeypatch):
 
 def test_distributed_redis_outage_refuses_new_admission(monkeypatch):
     """Accepted work may continue, but new slots fail closed for 503 callers."""
-    from lib.runtime_state_store import RedisRuntimeStateStore
+    from lib.runtime.runtime_state_store import RedisRuntimeStateStore
 
     store = RedisRuntimeStateStore(fail_open=False)
     monkeypatch.setattr(store, '_redis', lambda: None)
@@ -339,7 +339,7 @@ def test_distributed_redis_outage_refuses_new_admission(monkeypatch):
 
 def test_redis_retries_after_initial_connect_failure(monkeypatch):
     """A Redis restart must heal without restarting the application process."""
-    from lib.runtime_state_store import RedisRuntimeStateStore
+    from lib.runtime.runtime_state_store import RedisRuntimeStateStore
 
     class _RecoveredClient:
         def __init__(self):
@@ -373,7 +373,7 @@ def test_redis_retries_after_initial_connect_failure(monkeypatch):
 
 def test_refresh_slots_reconstructs_living_work_after_store_recovery():
     """Lease expiry/recovery changes accounting only; it never kills long work."""
-    from lib.runtime_state_store import InProcRuntimeStateStore
+    from lib.runtime.runtime_state_store import InProcRuntimeStateStore
     s = InProcRuntimeStateStore()
     assert s.acquire_slot('admit', 'task-a', limit=1, ttl=0.05,
                           count_prefix='') is True
@@ -394,7 +394,7 @@ def test_redis_backend_functional_with_real_fakeredis():
     cleanly when fakeredis is not installed (dev/test extra)."""
     fakeredis = pytest.importorskip('fakeredis')
     pytest.importorskip('redis')
-    from lib.runtime_state_store import RedisRuntimeStateStore
+    from lib.runtime.runtime_state_store import RedisRuntimeStateStore
     s = RedisRuntimeStateStore()
     s._client = fakeredis.FakeStrictRedis(decode_responses=True)
     s._available = True

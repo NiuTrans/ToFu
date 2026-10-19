@@ -248,6 +248,37 @@ class RoundHostTests(unittest.IsolatedAsyncioTestCase):
             evidence={"kind": "returned", "usage": None},
         )
 
+    async def test_late_tools_and_history_are_certified_together_before_reservation(self):
+        from lib.agent_core.native_process import RoundPreparation
+        messages=[{'role':'user','content':'prepared'}]
+        for tools in ([{'type':'function','function':{'name':'read','parameters':{}}}],
+                      [{'large':'x'*(budget().frame_bytes+1)}]):
+            seen=[];replies=[]
+            class Policy:
+                async def prepare(self,request):return RoundPreparation(messages,tools)
+                async def reserve(self,request):seen.append(request.messages);return True
+            control=self.control(Policy());control.prepare_history=True;control.prepare_tools=True
+            async def send(process,kind,identity,**values):replies.append(values)
+            control.send=send;frame=self.frame();frame['messages']=[{'role':'user','content':'original'}]
+            await control.handle(frame,None)
+            if 'large' in tools[0]:
+                self.assertEqual(seen,[]);self.assertIsNotNone(control.preparation_failure)
+                self.assertEqual(replies,[{'approved':False,'preparation_failed':True}])
+            else:
+                self.assertEqual(seen,[messages]);self.assertEqual(replies,[{'approved':True,'messages':messages,'wire_tools':tools}])
+
+    async def test_tool_preparation_never_accepts_legacy_history_without_projection(self):
+        class Policy:
+            async def prepare(self,request):return [{'role':'user','content':'prepared'}]
+            async def reserve(self,request):self_test.fail('missing tools reserved a model round')
+        self_test=self;control=self.control(Policy());control.prepare_history=True;control.prepare_tools=True
+        replies=[]
+        async def send(process,kind,identity,**values):replies.append(values)
+        control.send=send;frame=self.frame();frame['messages']=[{'role':'user','content':'original'}]
+        await control.handle(frame,None)
+        self.assertIsNotNone(control.preparation_failure)
+        self.assertEqual(replies,[{'approved':False,'preparation_failed':True}])
+
     async def test_prepare_precedes_reserve_and_invalid_history_never_reserves(self):
         for output in [[{'role': 'user', 'content': 'prepared'}], [7], 'invalid', [{'content': 'x' * (budget().frame_bytes + 1)}]]:
             seen, replies = [], []
@@ -485,6 +516,92 @@ class TerminalHostTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(process.stdin.frames[0]["retry"])
         self.assertTrue(process.stdin.frames[1]["accepted"])
 
+    async def test_selected_summary_is_required_and_frozen_across_retry(self):
+        from types import SimpleNamespace
+        import json
+        seen=[]
+        async def persist(request):
+            seen.append(request)
+            return 'retry'
+        control=self.control(SimpleNamespace(persist=persist));control.usage_summary=True
+        process=self.process()
+        with self.assertRaises(NativePersistenceError):await control.handle(self.frame(),process)
+        invalid=self.frame();invalid['usage_summary']={'profile':'wrong','counts':{}}
+        with self.assertRaises(NativePersistenceError):await control.handle(invalid,process)
+
+        value=self.frame();value['usage_summary']={'profile':'tofu.additive-usage/u64-f64-v1','counts':{'x':3}}
+        await control.handle(value,process)
+        self.assertEqual(json.loads(seen[0].usage_summary_json),value['usage_summary'])
+        changed=self.frame(2);changed['usage_summary']={'profile':'tofu.additive-usage/u64-f64-v1','counts':{'x':4}}
+        with self.assertRaises(NativePersistenceError):await control.handle(changed,process)
+        self.assertEqual(len(seen),1)
+        unsolicited=self.control(SimpleNamespace(persist=persist))
+        with self.assertRaises(NativePersistenceError):await unsolicited.handle(value,process)
+
+    async def test_terminal_reference_requires_selected_accepted_exact_candidate(self):
+        from types import SimpleNamespace
+        async def persist(request):return 'retry' if request.attempt==1 else 'accepted'
+        control=self.control(SimpleNamespace(persist=persist))
+        control.completion_reference=True
+        control.client.protocol_version='tofu.native-agent-stdio/v1'
+        frame=self.frame();frame['version']=control.client.protocol_version
+        reference=dict(version=control.client.protocol_version,type='terminal_committed',
+            owner_user_id=7,task_id='task',request_id='commit',attempt=2,status='done')
+        with self.assertRaises(NativePersistenceError):control.resolve_reference(reference)
+        process=self.process();await control.handle(frame,process)
+        with self.assertRaises(NativePersistenceError):control.resolve_reference(reference)
+        frame['attempt']=2;await control.handle(frame,process)
+        self.assertEqual(control.resolve_reference(reference),frame['event'])
+        for key,value in [('owner_user_id',8),('task_id','other'),('request_id','other'),
+                          ('attempt',1),('attempt',True),('status','aborted'),('version','other'),('extra',1)]:
+            changed=dict(reference);changed[key]=value
+            with self.assertRaises(NativePersistenceError):control.resolve_reference(changed)
+        control.resolve_reference(reference)['result']['text']='mutated caller view'
+        self.assertEqual(control.resolve_reference(reference),frame['event'])
+        control.completion_reference=False
+        with self.assertRaises(NativePersistenceError):control.resolve_reference(reference)
+
+    async def test_retry_reference_requires_prior_retry_ack_and_exact_frozen_bytes(self):
+        from types import SimpleNamespace
+        seen=[]
+        async def persist(request):
+            seen.append(request)
+            return 'retry' if request.attempt==1 else 'accepted'
+        control=self.control(SimpleNamespace(persist=persist));control.retry_reference=True
+        control.client.protocol_version='tofu.native-agent-stdio/v1'
+        first=self.frame();first['version']=control.client.protocol_version
+        reference=dict(version=control.client.protocol_version,type='terminal_retry',request_id='commit',
+            owner_user_id=7,task_id='task',attempt=2,status='done')
+        process=self.process()
+        with self.assertRaises(NativePersistenceError):await control.handle(reference,process)
+        await control.handle(first,process)
+        for key,value in [('owner_user_id',8),('task_id','other'),('request_id','other'),
+            ('attempt',1),('attempt',3),('attempt',True),('status','aborted'),('extra',1)]:
+            changed=dict(reference);changed[key]=value
+            with self.assertRaises(NativePersistenceError):await control.handle(changed,process)
+        full=dict(first,attempt=2)
+        with self.assertRaises(NativePersistenceError):await control.handle(full,process)
+        await control.handle(reference,process)
+        self.assertIs(seen[0].event_json,seen[1].event_json)
+        self.assertIs(seen[0].receipt_json,seen[1].receipt_json)
+        self.assertEqual([r.attempt for r in seen],[1,2])
+        with self.assertRaises(NativePersistenceError):await control.handle(dict(reference,attempt=3),process)
+        control.retry_reference=False;control.accepted=False;control.ordinal=1
+        with self.assertRaises(NativePersistenceError):await control.handle(reference,process)
+
+    async def test_retry_reference_cannot_bypass_changed_checkpoint_disposition(self):
+        from types import SimpleNamespace
+        control=self.control(SimpleNamespace())
+        control.client.protocol_version='tofu.native-agent-stdio/v1'
+        control.retry_reference=True;control.retry_ready=True;control.ordinal=1
+        control.frozen_status='aborted';control.frozen=(b'{"type":"aborted","status":"aborted"}',b'{}',True,None)
+        control.checkpoint=SimpleNamespace(suspended=False)
+        frame=dict(version=control.client.protocol_version,type='terminal_retry',request_id='commit',
+            owner_user_id=7,task_id='task',attempt=2,status='aborted')
+        with self.assertRaisesRegex(NativePersistenceError,'checkpoint terminal disposition'):
+            await control.handle(frame,self.process())
+        self.assertEqual(control.ordinal,1)
+
     async def test_changed_retry_and_wrong_owner_fail_before_persistence(self):
         calls = []
 
@@ -543,8 +660,11 @@ class TerminalHostTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(control.accepted)
 
 
-if __name__ == "__main__":
-    unittest.main()
+if __name__ == '__main__':
+    # Use the shared pytest storage and lifecycle isolation for direct runs.
+    import sys as _runner_sys
+    import pytest
+    raise SystemExit(pytest.main([__file__, *_runner_sys.argv[1:]]))
 
 
 class ProgressHostTests(unittest.IsolatedAsyncioTestCase):
@@ -654,6 +774,83 @@ class CheckpointHostTests(unittest.IsolatedAsyncioTestCase):
     def state(self, number=2):
         return dict(format='tofu.native-agent-checkpoint/v1', owner_user_id=7,
                     task_id='task', epoch='epoch', binding='bound', next_round=number)
+
+    async def test_pending_restore_reconciles_before_progress_or_next_model_round(self):
+        test=self;seen=[];replies=[]
+        saved=dict(self.state(1),tools_pending=True,
+                   messages=[dict(role='assistant',tool_calls=[dict(id='call')])])
+        class Policy:
+            binding='bound'
+            supports_pending_tools=True
+            async def load(self, request): seen.append('load');return dict(saved)
+            async def reconcile(self, request):
+                test.assertEqual(request.round,0);test.assertEqual(request.state,saved)
+                seen.append('reconcile');return [dict(call_id='call',content='proved previous publication')]
+            async def complete(self, request):seen.append('complete');return 'continue'
+            async def begin(self, request):seen.append(('begin',request.round))
+        control=self.control(Policy())
+        async def send(*args,**kwargs):replies.append(kwargs)
+        control.send=send
+        await control.handle(self.frame('load'),None)
+        with self.assertRaises(NativeProcessError):
+            await control.handle(self.frame('complete',0,self.state(1)),None)
+        with self.assertRaises(NativeProcessError):
+            await control.handle(self.frame('begin',1),None)
+        with self.assertRaises(NativeProcessError):
+            await control.handle(self.frame('reconcile',0,dict(saved,next_round=2)),None)
+        await control.handle(self.frame('reconcile',0,saved),None)
+        self.assertEqual(replies[-1]['tool_observations'],[dict(call_id='call',content='proved previous publication')])
+        self.assertTrue(control.settled_progress_ready)
+        await control.handle(self.frame('complete',0,self.state(1)),None)
+        await control.handle(self.frame('begin',1),None)
+        self.assertEqual(seen,['load','reconcile','complete',('begin',1)])
+
+    async def test_pending_capture_requires_paid_round_and_precedes_completion(self):
+        test=self;seen=[]
+        class Policy:
+            binding='bound'
+            supports_pending_tools=True
+            async def load(self, request):return None
+            async def begin(self, request):pass
+            async def pending(self, request):
+                test.assertTrue(request.state['tools_pending']);seen.append('pending')
+            async def complete(self, request):seen.append('complete');return 'continue'
+        control=self.control(Policy())
+        async def send(*args,**kwargs):pass
+        control.send=send
+        await control.handle(self.frame('load'),None)
+        await control.handle(self.frame('begin'),None)
+        pending=dict(self.state(1),tools_pending=True)
+        with self.assertRaises(NativeProcessError):await control.handle(self.frame('pending',0,pending),None)
+        control.next_round=1;control.settled_round=0;control.settled_progress_ready=True
+        with self.assertRaises(NativeProcessError):await control.handle(self.frame('complete',0,self.state(1)),None)
+        await control.handle(self.frame('pending',0,pending),None)
+        with self.assertRaises(NativeProcessError):await control.handle(self.frame('pending',0,pending),None)
+        await control.handle(self.frame('complete',0,self.state(1)),None)
+        self.assertEqual(seen,['pending','complete'])
+
+    async def test_bad_reconciliation_sticks_before_progress_completion_or_more_model_work(self):
+        for result in ([], [dict(call_id='other',content='wrong')],
+                       [dict(call_id='call',content=float('nan'))]):
+            with self.subTest(result=result):
+                saved=dict(self.state(1),tools_pending=True,
+                           messages=[dict(role='assistant',tool_calls=[dict(id='call')])])
+                class Policy:
+                    binding='bound'
+                    supports_pending_tools=True
+                    async def load(self, request):return saved
+                    async def reconcile(self, request):return result
+                control=self.control(Policy());replies=[]
+                async def send(*args,**kwargs):replies.append(kwargs)
+                control.send=send
+                await control.handle(self.frame('load'),None)
+                await control.handle(self.frame('reconcile',0,saved),None)
+                self.assertFalse(replies[-1]['accepted'])
+                self.assertNotIn('tool_observations',replies[-1])
+                self.assertFalse(control.settled_progress_ready)
+                for frame in (self.frame('begin',1),self.frame('complete',0,self.state(1))):
+                    with self.assertRaisesRegex(NativeProcessError,'previously failed'):
+                        await control.handle(frame,None)
 
     async def test_resume_rounds_and_complete_require_owned_settlement(self):
         test=self;seen=[];replies=[]
@@ -867,3 +1064,20 @@ class CheckpointTerminalHostTests(unittest.IsolatedAsyncioTestCase):
             acquire.assert_not_called()
         self.assertEqual(client.active_runs, 0)
         await client.close()
+
+
+class PricedDeliveryAdmissionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_pricing_without_an_explicit_consumer_refuses_before_image_acquisition(self):
+        from types import SimpleNamespace
+        async def callback(*args): return None
+        client=NativeProcessClient(binary=Path('/does-not-exist'),sha256='0'*64,
+            protocol_version='tofu.native-agent-stdio/v1',principal=principal(),budget=budget())
+        policy=SimpleNamespace(reserve=callback,dispatch=callback,settle=callback)
+        configuration=dict(version=client.protocol_version,type='configure',owner_user_id=7,
+            task_id='task',tools={},model_control={'ack_ms':100,'pricing':True},model_counter={})
+        try:
+            with self.assertRaisesRegex(NativeConfigurationError,'round settlement delivery'):
+                await client.run(configuration,callbacks={},working_directory=Path('/tmp'),model_policy=policy)
+            self.assertIsNone(client._image)
+            self.assertEqual(client.active_runs,0)
+        finally: await client.close()

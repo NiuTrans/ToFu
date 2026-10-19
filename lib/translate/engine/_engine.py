@@ -19,6 +19,9 @@ from lib import translate_cache
 from lib import translate_refusal
 from lib.log import get_logger
 
+from lib.llm.diagnostic_timing import current_timing, timed_call, timed_stage
+from ..observability import observed_engine
+
 from ..dedup import _dedup_repetition_loop
 from ..errors import (
     TranslationContentRefused,
@@ -135,6 +138,7 @@ def _translate_freetext(text, system_prompt, chunk_label='',
         **({'model_budget_admit': model_budget_admit} if model_budget_admit is not None else {}))
 
 
+@timed_stage('engine_attempt')
 def _dispatch_translation_candidate(
         messages, *, chunk_label, max_tokens, timeout, max_retries,
         excluded_models, progress_cb, deadline_exceeded,
@@ -242,9 +246,9 @@ def _try_translation_fast_paths(
     notify,
 ):
     """Return a cache/identity/MT result, or ``None`` for LLM fallback."""
-    from lib.llm_errors import AbortedError
+    from lib.llm.llm_errors import AbortedError
 
-    cached = translate_cache.get(chunk, source, target) if use_cache else None
+    cached = timed_call('cache_lookup', translate_cache.get, chunk, source, target) if use_cache else None
     if cached and cached.get('translated'):
         cached_text = cached['translated']
         cached_model = cached.get('model', '') or 'cache'
@@ -259,7 +263,7 @@ def _try_translation_fast_paths(
                 out_chars=len(cached_text), verdict='cache', target=target),
         }
 
-    invariant, invariant_reason = _is_identity_invariant(
+    invariant, invariant_reason = timed_call('identity_check', _is_identity_invariant,
         chunk.strip(), target)
     if invariant:
         passthrough = chunk.strip()
@@ -268,7 +272,7 @@ def _try_translation_fast_paths(
             '(%d chars, reason=%s) — skipping translation',
             chunk_label, len(passthrough), invariant_reason)
         if use_cache:
-            translate_cache.put(
+            timed_call('cache_store', translate_cache.put,
                 chunk, source, target, passthrough, model='identity')
         return passthrough, {
             'model': 'identity',
@@ -287,13 +291,14 @@ def _try_translation_fast_paths(
 
         started_at = time.time()
         with translation_model_slot(abort_check=abort_requested):
-            result = mt_translate_chunked(chunk, source=source, target=target)
+            result = timed_call('machine_translation', mt_translate_chunked,
+                chunk, source=source, target=target)
         if abort_requested():
             raise AbortedError('Translation aborted during MT request')
         elapsed = time.time() - started_at
         logger.info('[Translate%s] MT provider: %d→%d chars in %.1fs',
                     chunk_label, len(chunk), len(result), elapsed)
-        translate_cache.put(
+        timed_call('cache_store', translate_cache.put,
             chunk, source, target, result, model='mt:niutrans')
         return result, {
             'model': 'mt:niutrans',
@@ -330,8 +335,9 @@ class _TranslationDeadline:
     def remaining(self):
         return max(0.0, self.deadline_at - time.monotonic())
 
+    @timed_stage('engine_backoff')
     def sleep(self, seconds):
-        from lib.llm_errors import AbortedError
+        from lib.llm.llm_errors import AbortedError
 
         until = min(
             self.deadline_at,
@@ -361,6 +367,37 @@ def _raise_cached_translation_refusal(chunk, source, target, *,
     )
 
 
+def _translation_status_notifier(status_cb, chunk_label):
+    def _notify(kind, attempt, elapsed, detail=''):
+        """Safely invoke status_cb — never let caller's callback break us."""
+        if status_cb is None:
+            return
+        try:
+            timed_call('status_delivery', status_cb, {
+                'kind': kind,
+                'attempt': attempt,
+                'elapsed': elapsed,
+                'detail': detail,
+            })
+        except Exception as e:
+            logger.debug('[Translate%s] status_cb failed: %s', chunk_label, e)
+
+    return _notify
+
+
+def _translation_chunk_attempt_limits(clen):
+    # Bigger per-attempt budget + more dispatch retries per attempt.
+    if clen > 6000:
+        _mt, _timeout, _retries = 16000, 180, 12
+    elif clen > 3000:
+        _mt, _timeout, _retries = 12000, 120, 10
+    else:
+        _mt, _timeout, _retries = 8000, 60, 8
+
+    return _mt, _timeout, _retries
+
+
+@observed_engine
 def _translate_one_chunk(chunk, system_prompt, chunk_label='',
                          source='', target='', status_cb=None,
                          progress_cb=None, overall_deadline=None,
@@ -377,24 +414,12 @@ def _translate_one_chunk(chunk, system_prompt, chunk_label='',
     published; reconstructible previews may additionally bound 429 attempts or
     yield to active shared contention.
     """
-    def _notify(kind, attempt, elapsed, detail=''):
-        """Safely invoke status_cb — never let caller's callback break us."""
-        if status_cb is None:
-            return
-        try:
-            status_cb({
-                'kind': kind,
-                'attempt': attempt,
-                'elapsed': elapsed,
-                'detail': detail,
-            })
-        except Exception as e:
-            logger.debug('[Translate%s] status_cb failed: %s', chunk_label, e)
+    _notify = _translation_status_notifier(status_cb, chunk_label)
 
     from lib.agent_core.execution_budget import ModelBudgetAdmissionDenied
     if model_budget_admit is not None and not callable(model_budget_admit):
         raise ValueError('model_budget_admit must be callable')
-    from lib.llm_errors import AbortedError
+    from lib.llm.llm_errors import AbortedError
 
     def _abort_requested():
         return bool(abort_check and abort_check())
@@ -426,13 +451,7 @@ def _translate_one_chunk(chunk, system_prompt, chunk_label='',
     clen = len(chunk)
     _target_is_chinese = ((target or '').lower().startswith('chinese')
                           or 'zh' in (target or '').lower())
-    # Bigger per-attempt budget + more dispatch retries per attempt.
-    if clen > 6000:
-        _mt, _timeout, _retries = 16000, 180, 12
-    elif clen > 3000:
-        _mt, _timeout, _retries = 12000, 120, 10
-    else:
-        _mt, _timeout, _retries = 8000, 60, 8
+    _mt, _timeout, _retries = _translation_chunk_attempt_limits(clen)
 
     # ── Aggressive retry policy ──
     # Rationale: auto-translate is a background task.  A user waiting for
@@ -471,7 +490,7 @@ def _translate_one_chunk(chunk, system_prompt, chunk_label='',
     # picker keeps choosing the same low-latency cheap model (e.g. MiniMax-M2.5)
     # and burns the whole _MAX_CONTENT_RETRIES budget on identical failures.
     _excluded_models: set[str] = set()
-    _dispatcher = get_dispatcher()
+    _dispatcher = timed_call('route_resolution', get_dispatcher)
 
     if use_cache:
         _raise_cached_translation_refusal(
@@ -484,7 +503,11 @@ def _translate_one_chunk(chunk, system_prompt, chunk_label='',
     # at a static "Translating…" with no indication anything is happening.
     _notify('started', 1, 0, f'starting translation ({len(chunk)} chars)')
 
+    quality_phase = None
     while True:
+        if quality_phase is not None:
+            quality_phase.finish()
+            quality_phase = None
         _attempt += 1
         _elapsed = time.monotonic() - _start_mono
         if _deadline_exceeded():
@@ -646,6 +669,9 @@ def _translate_one_chunk(chunk, system_prompt, chunk_label='',
                     f'{type(se).__name__}: {str(se)[:120]}')
             _sleep_backoff(min(_sleep, _remaining_deadline_seconds()))
             continue
+
+        if current_timing() is not None:
+            quality_phase = current_timing().start('quality_validation').activate()
 
         # Coerce structured Anthropic-style content (list of blocks
         #   like [{"type": "text", "text": "..."}, ...]) and stray dicts
@@ -982,6 +1008,9 @@ def _translate_one_chunk(chunk, system_prompt, chunk_label='',
             continue
         break  # success
 
+    if quality_phase is not None:
+        quality_phase.finish()
+
     # If every attempt produced an empty result, raise a clear error so the
     # caller can decide how to handle it (e.g. mark the task as failed).
     if not c or not c.strip():
@@ -995,7 +1024,7 @@ def _translate_one_chunk(chunk, system_prompt, chunk_label='',
         )
 
     # ── Post-processing: detect and truncate repetition loops ──
-    c, was_truncated = _dedup_repetition_loop(c)
+    c, was_truncated = timed_call('postprocess', _dedup_repetition_loop, c)
     if was_truncated:
         logger.info('[Translate%s] Repetition loop cleaned: %d chars after dedup',
                     chunk_label, len(c))
@@ -1010,7 +1039,7 @@ def _translate_one_chunk(chunk, system_prompt, chunk_label='',
     # text — the reported "displayed incompletely" bug). A fresh request then
     # re-translates and a healthier model can produce a complete result.
     if _terminal_verdict != 'truncated':
-        translate_cache.put(chunk, source, target, final, model=_model_for_cache)
+        timed_call('cache_store', translate_cache.put,chunk, source, target, final, model=_model_for_cache)
     else:
         logger.warning('[Translate%s] NOT caching truncated result '
                        '(%d/%d chars) so a later request can re-translate',

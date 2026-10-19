@@ -1,10 +1,13 @@
 {
   "agentId": "s",
+  "attempt": 1,
   "attemptId": "s",
   "autopilotRunId": "s",
   "completed_agents": 1,
   "content": "s",
   "conversationId": "s",
+  "detailArgs": {},
+  "detailKey": "s",
   "duration_s": 1.5,
   "emits": "s",
   "executionAtMs": 1,

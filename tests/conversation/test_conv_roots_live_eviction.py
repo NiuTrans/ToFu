@@ -315,7 +315,7 @@ def _nc1_live_conv_misroutes_when_pin_disabled():
         with _mgr._conv_latest_task_lock:
             _mgr._conv_latest_task.pop('convA', None)
         try:
-            from lib.runtime_state_store import get_store
+            from lib.runtime.runtime_state_store import get_store
             get_store().set_value('latest', 'convA', None, 1)
         except Exception:
             pass

@@ -9,43 +9,6 @@
    exports / imports needed.
    ═══════════════════════════════════════════════════════════════════ */
 
-/* ── Finish-reason tiers (mirror finish_info.js) — decide the settled
- *   sidebar state of a turn that carries a finishReason.
- *   NORMAL: clean completion, no flag.
- *   ERR:    hard failure → red error state (same bucket as msg.error).
- *   Everything else that is neither NORMAL nor ERR is treated as an
- *   INCOMPLETE (interrupted / truncated / stopped) turn → amber state. */
-const _FINISH_NORMAL = new Set(['stop', 'end_turn', 'stop_sequence', 'tool_use', 'tool_calls']);
-const _FINISH_ERR = new Set(['error', 'server_offline']);
-
-/* Is the assistant Turn part of an autopilot run that has
- * already CONCLUDED (produced a debrief report / carries a concluded record)?
- * The run id is stamped on the run's virtual-user (role:'user') turns, not on
- * assistant Turn, so we scan backwards from its stable Turn identity for the
- * nearest run stamp, then consult the conv's `autopilotSummaries`
- * sidecar — the backend-authoritative "run concluded" signal selected into
- * the typed Turn view (record.status==='concluded' OR content present). A conv with no
- * autopilot state returns false immediately (cheap). */
-function _autopilotRunConcluded(c, turnId) {
-  const summaries = c && c.autopilotSummaries;
-  if (!summaries || typeof summaries !== 'object') return false;
-  const turns = runtimeScope.ConversationTurnRead?.ordered?.(c) || [];
-  const turnIndex = turns.findIndex((turn) => turn.turnId === turnId);
-  if (turnIndex < 0) return false;
-  let runId = null;
-  for (let index = turnIndex; index >= 0; index -= 1) {
-    const turn = turns[index];
-    if (turn.projection?._autopilotRunId) {
-      runId = turn.projection._autopilotRunId;
-      break;
-    }
-    if (turn.actor === 'human' && index !== turnIndex) break;
-  }
-  if (!runId) return false;
-  const rec = summaries[runId];
-  return !!(rec && typeof rec === 'object' && (rec.status === 'concluded' || rec.content));
-}
-
 function formatConvTime(ts) {
   const labels = conversationTimestampLabels(
     ts, Date.now(), document.documentElement.lang,
@@ -365,7 +328,7 @@ function _renderFolderTabsInner(tabsEl, folders, activeFolderId, allConvs) {
   // Split hash: content hash (folders/counts/names) vs active-tab hash
   // When only the active tab changes, skip full DOM rebuild and just swap .active class
   const streamKey = [...streamingFolderIds].sort().join(',');
-  const structHash = `U${uncategorizedCount}|${safeFolders.map(f=>`${f.id}|${f.name}|${f.color||''}|${lastActiveMap[f.id]||0}|${countMap[f.id]||0}`).join(',')}`;
+  const structHash = `U${uncategorizedCount}|${safeFolders.map(f=>`${f.id}|${f.name}|${f.color||''}|${JSON.stringify(f.projectPaths || f.projectPath || [])}|${JSON.stringify(f.readOnlyPaths || [])}|${lastActiveMap[f.id]||0}|${countMap[f.id]||0}`).join(',')}`;
   const contentHash = `${structHash}|S${streamKey}`;
   const fullHash = `${activeFolderId||''}|${contentHash}`;
   if (fullHash === _lastFolderTabsHash) return;
@@ -423,15 +386,20 @@ function _renderFolderTabsInner(tabsEl, folders, activeFolderId, allConvs) {
   for (const f of sortedFolders) {
     const fcolor = escapeHtml(_folderColor(f));
     const fname = escapeHtml(f.name);
+
+    const roots = folderDefaultProjectPaths(f.id);
+    const summary = roots.length ? t('folder.settings.rootCount', { n: roots.length }) : t('folder.settings.noRoots');
+    const folderTip = escapeHtml([f.name, summary, ...roots].join('\n'));
     const isActive = activeFolderId === f.id;
     const cnt = countMap[f.id] || 0;
     const badge = cnt > 0 ? `<span class="folder-tab-count">${cnt}</span>` : '';
     const dotStreaming = streamingFolderIds.has(f.id) ? ' streaming' : '';
     const mono = _folderMonogram(f.name);
-    html += `<button class="folder-tab${isActive ? ' active' : ''}" data-folder-id="${escapeHtml(f.id)}" title="${fname}">`;
+    html += '<div class="folder-tab-row">';
+    html += `<button class="folder-tab${isActive ? ' active' : ''}" data-folder-id="${escapeHtml(f.id)}" title="${folderTip}" aria-label="${escapeHtml(f.name + ': ' + summary)}">`;
     html += `<span class="folder-tab-dot${dotStreaming}" style="background:${fcolor}" data-initial="${escapeHtml(mono)}" data-mono-len="${mono.length}"></span>`;
-    html += `<span class="folder-tab-name">${fname}</span>${badge}`;
-    html += `</button>`;
+    html += `<span class="folder-tab-copy"><span class="folder-tab-name">${fname}</span><span class="folder-tab-summary">${escapeHtml(summary)}</span></span>${badge}`;
+    html += `</button></div>`;
   }
   html += '</div>';
   // Footer "+ New project" row — always visible at the rail bottom.
@@ -440,6 +408,8 @@ function _renderFolderTabsInner(tabsEl, folders, activeFolderId, allConvs) {
   html += `<span class="folder-tab-name">${escapeHtml(t('sidebar.newFolder'))}</span>`;
   html += `</button>`;
   tabsEl.innerHTML = html;
+
+  mountFolderConfigControls(tabsEl, t('folder.settings.title'));
 }
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -701,6 +671,8 @@ async function loadMoreGlobalConvs() {
 }
 
 function renderConversationList() {
+
+  runtimeScope.presenceRefresh?.();
   const listEl = document.getElementById("convList"),
     statsEl = document.getElementById("sidebarSearchStats");
   if (!sidebarSearchQuery) {
@@ -747,6 +719,9 @@ function renderConversationList() {
     }
     // else: folders loaded and empty — show everything (no folders exist)
 
+    const coordinatorId = document.querySelector('#projectCoordinatorEntry [data-coordinator-id]')?.dataset.coordinatorId;
+    if (coordinatorId) filtered = filtered.filter(c => c.id !== coordinatorId);
+
     /* ── Split hash: struct (row identity/order/title/date/folder) vs status
      *    (active / streaming / translating / memory-prefetch / awaiting-human).
      *    When only status changed we patch each row's .active class + dot +
@@ -761,7 +736,7 @@ function renderConversationList() {
       filtered.map(c => `${c.id}|${c.title}|${c.updatedAt||""}|${c.folderId||""}|${(c.projectSummary && c.projectSummary.text) ? "S" : ""}`).join("\n");
     const _statusHash = filtered.map(c => {
       const f = _convStatusFlags(c);
-      return `${c.id===activeConvId?1:0}${f.streaming?1:0}${f.translating?1:0}${f.memoryPrefetching?1:0}${f.awaitingHuman?1:0}${f.waiting?1:0}${f.errored?1:0}${f.incomplete?1:0}${f.unconfirmed?1:0}${f.rateLimited?1:0}|${f.background?.signature || ''}`;
+      return `${c.id===activeConvId?1:0}${f.streaming?1:0}${f.translating?1:0}${f.memoryPrefetching?1:0}${f.awaitingHuman?1:0}${f.waiting?1:0}${f.errored?1:0}${f.incomplete?1:0}${f.unconfirmed?1:0}${f.rateLimited?1:0}${f.needsReview?1:0}|${f.background?.signature || ''}`;
     }).join(",");
     const _fullHash = `${_structHash}|||${_statusHash}`;
     if (_fullHash === _lastConvListHash) return;
@@ -837,6 +812,9 @@ function renderConversationList() {
     // streaming presentation frames do not issue requests.
     const fingerprint = conversations.map(c => `${c.id}:${c.title}:${c._serverRev || 0}`).join('|');
     _sidebarSearchController.setQuery(query, local, fingerprint);
+    refreshBackgroundConversationStatuses(
+      _sidebarSearchController.snapshot().items.map(item => item.id),
+    );
   }
 }
 
@@ -927,87 +905,23 @@ function convIsBusy(conv) {
     turn && (turn.status === 'pending' || turn.status === 'running'));
 }
 
-/** Read the current phase from TurnStore; never cache or mirror it. */
-function convRateLimitPhase(conversationOrId) {
-  const phase = runtimeScope.ConversationTurnRead
-    ?.state?.(conversationOrId)?.livePhase;
-  return presentConversationRateLimit(phase);
-}
-
 function _convStatusFlags(c) {
   const background = typeof backgroundConversationActivity === 'undefined' ? null
     : sidebarBackgroundActivity(backgroundConversationActivity.get(c.id), (key, _fallback, vars) => t(key, vars));
-  const translating = !!c._translating;
-  const memoryPrefetching = !!c._memoryPrefetching;
-  const streaming = convIsBusy(c);
-  /* The sidebar derives the same typed phase as the active Surface. */
-  const rateLimited = !!(streaming && convRateLimitPhase(c));
-  const turns = runtimeScope.ConversationTurnRead?.ordered?.(c) || [];
-  const latestAssistant = [...turns].reverse().find((turn) =>
-    turn.actor === 'assistant' || turn.actor === 'planner');
-  /* A leftover awaiting_human round on a settled turn is unanswerable
-   * (server restarts leave it persisted forever) — the amber dot must reflect
-   * a LIVE wait only, which requires the turn (hence the conv) to be busy. */
-  const awaitingHuman = streaming && Boolean(latestAssistant?.projection?.toolRounds?.some(
-    (round) => round?.status === 'awaiting_human',
-  ));
-
-  // Only the latest assistant/planner Turn defines the settled sidebar state.
-  let errored = false;
-  let incomplete = false;
-  let waiting = false;
-  if (!streaming && latestAssistant) {
-    const projection = latestAssistant.projection || {};
-    const finishReason = projection.finishReason;
-    waiting = Boolean(projection.waitingOn) && !Boolean(latestAssistant.settlement?.error) && !Boolean(projection.error);
-    /* The Turn authority (status + settlement) is the single derivation
-     * source — the main panel renders from the same verdict, so the sidebar
-     * dot can never disagree with the transcript it previews. The
-     * finishReason heuristics below remain ONLY for legacy Turns that carry
-     * no settled status. */
-    const settledStatus = latestAssistant.status;
-    const hardError = settledStatus === 'failed'
-      || Boolean(latestAssistant.settlement?.error) || Boolean(projection.error);
-    if (hardError) {
-      errored = true;
-    } else if (settledStatus === 'interrupted' || settledStatus === 'truncated') {
-      incomplete = true;
-    } else if (settledStatus === 'completed') {
-      // Authoritative settled success needs no heuristic re-derivation.
-    } else if (_FINISH_ERR.has(finishReason)) {
-      errored = true;
-    } else if (finishReason) {
-      incomplete = !_FINISH_NORMAL.has(finishReason);
-    } else {
-      const hasOutput = Boolean(
-        projection.content || projection.thinking
-        || projection.toolRounds?.length || projection.imageGeneration?.results?.length
-        || projection.segments?.length,
-      );
-      incomplete = !hasOutput;
-    }
-    if ((incomplete || errored) && !hardError
-        && _autopilotRunConcluded(c, latestAssistant.turnId)) {
-      incomplete = false;
-      errored = false;
-    }
-  } else if (!streaming && !latestAssistant && c.lastMsgRole === 'assistant') {
-    const finishReason = c.lastFinishReason;
-    if (c.lastMsgError || _FINISH_ERR.has(finishReason)) errored = true;
-    else if (finishReason) incomplete = !_FINISH_NORMAL.has(finishReason);
-    else incomplete = !c.lastMsgHasOutput;
-  }
-  /* Freshness of the busy verdict (). NOT a second
-   * busy-ness source: `streaming` above is unchanged and still authoritative.
-   * This only records whether the authoritative channel is currently
-   * DELIVERING, so a busy dot inherited from a frame that arrived before the
-   * socket went dark is rendered as "unconfirmed" rather than as settled fact.
-   * Only meaningful while `streaming` — an idle conv has no claim to soften. */
-  const healthState = c._conversationSyncHealth?.state;
-  const unconfirmed = Boolean(streaming
-    && ['recovering', 'degraded', 'offline'].includes(healthState));
-  if (waiting) incomplete = false;
-  return { background, streaming, translating, memoryPrefetching, awaitingHuman, waiting, errored, incomplete, unconfirmed, rateLimited };
+  return {
+    ...presentConversationActivity({
+      turns: runtimeScope.ConversationTurnRead?.ordered?.(c) || [],
+      streaming: convIsBusy(c),
+      livePhase: runtimeScope.ConversationTurnRead?.state?.(c)?.livePhase,
+      syncHealth: c._conversationSyncHealth?.state,
+      autopilotSummaries: c.autopilotSummaries,
+      catalog: c,
+    }),
+    background, translating: !!c._translating, memoryPrefetching: !!c._memoryPrefetching,
+    needsReview: typeof conversationReview !== 'undefined' && conversationReview.observe(
+      c.id, runtimeScope.ConversationTurnRead?.ordered?.(c) || [],
+    ),
+  };
 }
 
 /**
@@ -1037,6 +951,8 @@ function _convStatusHtml(f) {
     dotHtml = `<div class="conv-waiting-dot" title="${t('sidebar.waitingState')}"></div>`;
   } else if (f.incomplete) {
     dotHtml = `<div class="conv-incomplete-dot" title="${t('sidebar.incompleteState')}"></div>`;
+  } else if (f.needsReview) {
+    dotHtml = `<div class="conv-review-dot" title="${t('sidebar.reviewState')}"></div>`;
   }
   let statusTag = '';
   if (f.translating) {
@@ -1055,6 +971,8 @@ function _convStatusHtml(f) {
     statusTag = `<span class="conv-status-tag conv-status-waiting" title="${t('sidebar.waitingState')}">${t('sidebar.waitingTag')}</span>`;
   } else if (f.incomplete && !f.background) {
     statusTag = `<span class="conv-status-tag conv-status-incomplete" title="${t('sidebar.incompleteState')}">${t('sidebar.incompleteTag')}</span>`;
+  } else if (f.needsReview && !f.background && !f.awaitingHuman) {
+    statusTag = `<span class="conv-status-tag conv-status-review" title="${t('sidebar.reviewState')}">${t('sidebar.reviewTag')}</span>`;
   }
   if (f.background && !f.translating && !f.memoryPrefetching && !f.streaming) {
     statusTag += `<span class="conv-status-tag conv-status-background ${f.background.queuedOnly ? 'conv-status-waiting' : 'conv-status-streaming'}" title="${escapeHtml(f.background.title)}">${escapeHtml(f.background.label)}</span>`;
@@ -1075,7 +993,7 @@ function _applyConvItemStatus(row, c) {
 
   /* Leading dot: it's the first child of .conv-item when present (before
    * .conv-text). Reconcile by comparing the current dot markup. */
-  const curDot = row.querySelector(':scope > .conv-translating-dot, :scope > .conv-memprefetch-dot, :scope > .conv-streaming-dot, :scope > .conv-awaiting-human-dot, :scope > .conv-error-dot, :scope > .conv-waiting-dot, :scope > .conv-incomplete-dot');
+  const curDot = row.querySelector(':scope > .conv-translating-dot, :scope > .conv-memprefetch-dot, :scope > .conv-streaming-dot, :scope > .conv-awaiting-human-dot, :scope > .conv-error-dot, :scope > .conv-waiting-dot, :scope > .conv-incomplete-dot, :scope > .conv-review-dot');
   const curDotHtml = curDot ? curDot.outerHTML : '';
   if (curDotHtml !== dotHtml) {
     if (curDot) curDot.remove();

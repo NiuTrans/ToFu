@@ -9,7 +9,7 @@ from pprint import pformat
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / 'contracts/tool_result_query_v1.json'
-OUTPUT = ROOT / 'lib/tool_result_query_generated.py'
+OUTPUT = ROOT / 'lib/tool_results/tool_result_query_generated.py'
 
 
 def render():

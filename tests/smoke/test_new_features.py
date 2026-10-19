@@ -112,18 +112,23 @@ class TestAttachments:
     def test_historical_todo_call_does_not_replace_authoritative_snapshot(self):
         from lib.tasks_pkg.attachments import compute_turn_attachments
         todos = self._todos()
+        stale_todos = [{'id': 'obsolete', 'content': 'Obsolete historical step',
+                        'status': 'pending'}]
         messages = [
             {'role': 'user', 'content': 'fix it'},
             {'role': 'assistant', 'content': None, 'tool_calls': [{
                 'function': {'name': 'todo_write',
-                             'arguments': json.dumps({'todos': todos})},
+                             'arguments': json.dumps({'todos': stale_todos})},
             }]},
             {'role': 'tool', 'content': 'Checklist updated'},
         ]
         result = compute_turn_attachments(
             messages, task={'_todos': todos}, round_num=3, conv_id='todo-live')
         assert len(result) == 1
-        assert 'latest accepted todo progress snapshot' in result[0]
+        assert '- [x] Inspect the failure' in result[0]
+        assert '- [ ] Implement the fix ⏳' in result[0]
+        assert '- [ ] Verify end to end' in result[0]
+        assert 'Obsolete historical step' not in result[0]
 
     def test_todo_state_is_restored_after_tool_history_compaction(self):
         from lib.tasks_pkg.attachments import compute_turn_attachments
@@ -145,7 +150,7 @@ class TestAttachments:
         assert '## Active Task Checklist' in result[0]
         assert '- [x] Inspect the failure' in result[0]
         assert '- [ ] Implement the fix ⏳' in result[0]
-        assert 'Use this snapshot rather than an older list' in result[0]
+        assert '- [ ] Verify end to end' in result[0]
         assert 'id=' not in result[0] and 'sync' not in result[0]
 
     def test_todo_restore_deduplicates_and_refreshes_stale_state(self):

@@ -1,18 +1,19 @@
-"""Non-stream dispatch cannot lose a budget on slot or direct fallback."""
+"""Non-stream dispatch preserves the budget and terminal failure."""
 import pytest
 from lib.agent_core.execution_budget import model_budget_admission,ModelBudgetAdmissionDenied
 from tests.llm_dispatch.test_async_dispatch_stream import _make_slot,_FakeDispatcher
 pytestmark=pytest.mark.unit
 
-def test_smart_fallback_preserves_same_port(monkeypatch):
+def test_smart_exhaustion_preserves_same_port(monkeypatch):
     from lib.llm_dispatch import _api_multi as multi
     port=lambda **counts:None;seen=[]
     def fail(*a,model_budget_admit,**k):seen.append(model_budget_admit);raise RuntimeError('synthetic unavailable')
     def direct(**kwargs):seen.append(kwargs['model_budget_admit']);return 'ok',{}
     monkeypatch.setattr(multi,'dispatch_chat',fail)
     monkeypatch.setattr('lib.llm.chat',direct)
-    assert multi.smart_chat([],model_budget_admit=port)==('ok',{})
-    assert seen==[port,port]
+    with pytest.raises(RuntimeError, match='synthetic unavailable'):
+        multi.smart_chat([],model_budget_admit=port)
+    assert seen==[port]
 
 @pytest.mark.parametrize('smart',[False,True])
 def test_budget_denial_releases_slot_without_health_damage(monkeypatch,smart):

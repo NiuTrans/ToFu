@@ -372,7 +372,7 @@ async function researchProbe() {
   })`, context);
   const limits = vm.runInContext(`({
     websocketFrames: NETWORK_CAPTURE_MAX_WEBSOCKET_FRAMES,
-    active: 0,
+    activeCaptures: _networkCaptures.size,
     hintReserveChars: NETWORK_CAPTURE_HINT_RESERVE_CHARS,
     capabilities: [...BROWSER_CAPABILITIES],
   })`, context);
@@ -728,6 +728,30 @@ function customControlsProbe() {
 // v5.7.0 interaction layer: drive the real MAIN-world functions the bridge
 // commands inject (_setChecked / _selectOptionAsync / _actionablePoint) and
 // pin their behaviour + TARGET_* taxonomy on MTD-like hidden-input markup.
+async function isolatedInteractionProbe() {
+  currentUrl = "https://example.com/list";
+  const dom = installDom('<label id="box"><input type="checkbox"></label><select id="choice"><option value="one">One</option></select><textarea id="notes"></textarea><input id="name">');
+  context.document.elementFromPoint = () => context.document.querySelector('#box');
+  const page = vm.createContext({document: context.document, window: dom.window,
+    CSS: {escape: String}, Event: dom.window.Event, MouseEvent: dom.window.MouseEvent,
+    KeyboardEvent: dom.window.KeyboardEvent,
+    setTimeout, clearTimeout});
+  chrome.scripting.executeScript = async (details) => {
+    page.__args = details.args;
+    const result = await vm.runInContext('(' + details.func.toString() + ')(...__args)', page);
+    return [{result}];
+  };
+  const checked = await vm.runInContext("cmdSetChecked({tabId:7, selector:'#box', checked:true})", context);
+  const located = await vm.runInContext("_cdpLocate(7, '#box', false, '#box input')", context);
+  const missing = await vm.runInContext("cmdSetChecked({tabId:7, selector:'#missing', checked:true})", context);
+  const selected = await vm.runInContext("cmdSelectOption({tabId:7, selector:'#choice', option:'One'})", context);
+  // The synthetic fallback is also serialized independently of the worker.
+  const clicked = await vm.runInContext("cmdClickElement({tabId:7, selector:'#missing'})", context);
+  const textarea = await vm.runInContext("cmdTypeText({tabId:7, selector:'#notes', text:'New notes'})", context);
+  const input = await vm.runInContext("cmdTypeText({tabId:7, selector:'#name', text:'New name'})", context);
+  return {checked, located, missing, selected, clicked, textarea, input};
+}
+
 function customControlInteractProbe() {
   installDom(`
     <div class="mtd-modal-content-wrapper">
@@ -769,30 +793,30 @@ function customControlInteractProbe() {
     const result = {};
 
     // ── _setChecked on a hidden radio wrapper (idempotent set) ──
-    result.checkRadio = _setChecked('#rA', null, true, true);
+    result.checkRadio = _pageInteraction('_setChecked', ['#rA', null, true, true]);
     result.radioAChecked = document.querySelector('#rA input').checked;
     result.radioBChecked = document.querySelector('#rB input').checked;
     // ── _setChecked idempotency: setting an already-true state is a no-op ──
-    _setChecked('#cA', null, true, true);   // ensure cA is checked first
-    result.checkAlreadySet = _setChecked('#cA', null, true, true);
+    _pageInteraction('_setChecked', ['#cA', null, true, true]);   // ensure cA is checked first
+    result.checkAlreadySet = _pageInteraction('_setChecked', ['#cA', null, true, true]);
     // ── _setChecked checkbox on then off ──
-    result.checkBox = _setChecked('#cA', null, true, true);
+    result.checkBox = _pageInteraction('_setChecked', ['#cA', null, true, true]);
     result.boxCheckedAfterOn = document.querySelector('#cA input').checked;
-    result.uncheckBox = _setChecked('#cA input', null, false, true);
+    result.uncheckBox = _pageInteraction('_setChecked', ['#cA input', null, false, true]);
     result.boxCheckedAfterOff = document.querySelector('#cA input').checked;
     // ── _setChecked on a non-checkable → TARGET_NOT_CHECKABLE ──
-    result.notCheckable = _setChecked('#selA', null, true, true);
+    result.notCheckable = _pageInteraction('_setChecked', ['#selA', null, true, true]);
     // ── _setChecked missing target → TARGET_NOT_FOUND ──
-    result.notFound = _setChecked('#doesNotExist', null, true, true);
+    result.notFound = _pageInteraction('_setChecked', ['#doesNotExist', null, true, true]);
 
     // ── _actionablePoint on hidden radio wrapper forwards to input ──
-    result.pointForward = _actionablePoint('#rA', true, '#rA input');
+    result.pointForward = _pageInteraction('_actionablePoint', ['#rA', true, '#rA input']);
     // ── _actionablePoint obscured → TARGET_OBSCURED (overlay on top) ──
     const overlay = document.createElement('div');
     overlay.style.cssText = 'position:fixed;inset:0;z-index:9999';
     document.body.appendChild(overlay);
     document.__overlayEl = overlay;
-    result.pointObscured = _actionablePoint('#rA', false, null);
+    result.pointObscured = _pageInteraction('_actionablePoint', ['#rA', false, null]);
     document.__overlayEl = null;
     overlay.remove();
 
@@ -808,11 +832,11 @@ function customControlInteractProbe() {
     document.querySelector('#selA').addEventListener('click', () => {
       for (const it of items) it.getBoundingClientRect = realRects.get(it);
     });
-    result.selectCustom = await _selectOptionAsync('#selA', null, 'cpu_job', true, 1500);
+    result.selectCustom = await _pageInteraction('_selectOptionAsync', ['#selA', null, 'cpu_job', true, 1500]);
     // ── native <select> fast path ──
-    result.selectNative = await _selectOptionAsync('#nativeSel', null, '北京', true, 1000);
+    result.selectNative = await _pageInteraction('_selectOptionAsync', ['#nativeSel', null, '北京', true, 1000]);
     // ── no matching option → error + options list ──
-    result.selectMissing = await _selectOptionAsync('#selA', null, 'nonexistent_queue', true, 800);
+    result.selectMissing = await _pageInteraction('_selectOptionAsync', ['#selA', null, 'nonexistent_queue', true, 800]);
     return result;
   })()`, context);
   // runInContext returns the IIFE's Promise (async functions resolve across
@@ -1196,6 +1220,7 @@ async function selfUpdateProbe() {
 const probes = {
   customControls: customControlsProbe,
   customControlInteract: customControlInteractProbe,
+  isolatedInteraction: isolatedInteractionProbe,
   selfUpdate: selfUpdateProbe,
   fileProbeFailure: fileProbeFailureProbe,
   temporaryTabCapacity: temporaryTabCapacityProbe,

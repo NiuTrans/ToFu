@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "tofu:response-file:v1",
+  "title": "Owned durable existing-file publication receipt",
+  "description": "Problem: generated existing files need durable owner-safe delivery without exposing workspace paths. Decision: immutable artifact text codec; UTF-8 documents retain their format, binary attachments use a canonical base64 envelope physically stored as markdown and presented as file. Alternatives rejected: caller-controlled path serving, public static hosting, DB format migration. Only explicit publication with verified task roots and an owned existing conversation is authorized. Images remain separate.",
+  "x-policy": {
+    "binaryEnvelope": {"version": 1, "kind": "response_file", "encoding": "base64"},
+    "extensions": {
+      ".html": ["html", "text/html"], ".htm": ["html", "text/html"],
+      ".md": ["markdown", "text/markdown"], ".markdown": ["markdown", "text/markdown"],
+      ".svg": ["svg", "image/svg+xml"], ".txt": ["markdown", "text/plain"],
+      ".pdf": ["file", "application/pdf"], ".zip": ["file", "application/zip"],
+      ".doc": ["file", "application/msword"], ".xls": ["file", "application/vnd.ms-excel"],
+      ".ppt": ["file", "application/vnd.ms-powerpoint"],
+      ".docx": ["file", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"],
+      ".xlsx": ["file", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"],
+      ".pptx": ["file", "application/vnd.openxmlformats-officedocument.presentationml.presentation"],
+      ".odt": ["file", "application/vnd.oasis.opendocument.text"],
+      ".ods": ["file", "application/vnd.oasis.opendocument.spreadsheet"],
+      ".odp": ["file", "application/vnd.oasis.opendocument.presentation"]
+    },
+    "zipMetadata": {"admission": "complete-classic-directory-without-entry-or-byte-quota", "zip64": false, "multiDisk": false, "extractMembers": false},
+    "cancellation": "Optional host cancelled callable checked before open, per read chunk, after snapshot validation and immediately before artifact.create; raises InterruptedError with no publication event. Once artifact.create commits, caller must settle its existing task lifecycle rather than erase durable bytes.",
+    "fileRead": "Absolute verified roots only; no-follow every root/path component; reject traversal, symlink, special file, changed inode/size/mtime/ctime or renamed path; complete cancellable read. Documents strict UTF-8, no replacement decoding. No external resource fetching or bundling.",
+    "dedupe": "Same conversation/content reuses only compatible source, owner, format, MIME, digest and envelope provenance; collision refuses without modifying existing evidence. First published filename/title remains stable.",
+    "delivery": "All HTTP artifact reads and lifecycle access require authenticated conversation owner, including legacy sources; missing/deleted conversations deny. No path-serving endpoint. Raw/view and metadata-content never expose binary envelopes. Downloads attachment, nosniff, private no-store. HTML/SVG default download retains bytes but uses inert text/plain and .txt suffix; interactive=1 is explicit original download with warning. Raw sandbox disallows scripts; existing panel script opt-in remains separate. Response-file HTML/SVG PDF export is refused until the legacy browser renderer has a complete inert execution boundary; Markdown export remains available.",
+    "events": "Caller emits existing artifact lifecycle event using receipt.artifact, task_id and artifact UUID. No second persistence or event system."
+  },
+  "type": "object",
+  "required": ["id", "artifactId", "format", "filename", "mime", "sizeBytes", "sha256", "url", "downloadUrl", "meta", "artifact"],
+  "additionalProperties": false,
+  "properties": {
+    "id": {"type": "string", "pattern": "^[A-Za-z0-9_-]{1,64}$"},
+    "artifactId": {"type": "string", "pattern": "^[A-Za-z0-9_-]{1,64}$"},
+    "format": {"enum": ["html", "markdown", "svg", "file"]},
+    "filename": {"type": "string", "minLength": 1, "maxLength": 200},
+    "mime": {"type": "string"},
+    "sizeBytes": {"type": "integer", "minimum": 1},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "url": {"type": "string", "pattern": "^/api/artifacts/[A-Za-z0-9_-]+/(raw|download)$"},
+    "rawUrl": {"type": "string", "pattern": "^/api/artifacts/[A-Za-z0-9_-]+/raw$"},
+    "downloadUrl": {"type": "string", "pattern": "^/api/artifacts/[A-Za-z0-9_-]+/download$"},
+    "interactiveDownloadUrl": {"type": "string", "pattern": "^/api/artifacts/[A-Za-z0-9_-]+/download\\?interactive=1$"},
+    "warning": {"type": "string"},
+    "meta": {"type": "object", "required": ["responseFile"], "additionalProperties": false, "properties": {"responseFile": {"$ref": "#/$defs/publicFile"}}},
+    "artifact": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "conv_id", "source", "format", "meta"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^[A-Za-z0-9_-]{1,64}$"},
+        "conv_id": {"type": "string", "pattern": "^[A-Za-z0-9_-]{1,64}$"},
+        "task_id": {"type": "string"}, "msg_id": {"type": "string"},
+        "source": {"const": "response_file"},
+        "source_ref": {"type": "object", "additionalProperties": false},
+        "format": {"enum": ["html", "markdown", "svg", "file"]},
+        "title": {"type": "string", "maxLength": 300},
+        "content_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "size_bytes": {"type": "integer", "minimum": 1},
+        "version": {"type": "integer", "minimum": 1},
+        "parent_id": {"type": "string"}, "pinned": {"type": "boolean"},
+        "created_at": {"type": "integer"},
+        "meta": {"type": "object", "additionalProperties": false, "required": ["responseFile"],
+                 "properties": {"responseFile": {"$ref": "#/$defs/publicFile"}}}
+      }
+    }
+  },
+  "$defs": {
+    "publicFile": {
+      "type": "object", "additionalProperties": false,
+      "required": ["version", "kind", "filename", "mime", "sizeBytes", "sha256", "scriptRisk"],
+      "properties": {
+        "version": {"const": 1}, "kind": {"enum": ["document", "attachment"]},
+        "filename": {"type": "string", "minLength": 1, "maxLength": 200},
+        "mime": {"type": "string"}, "sizeBytes": {"type": "integer", "minimum": 1},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "scriptRisk": {"type": "boolean"}
+      }
+    }
+  }
+}

@@ -12,7 +12,7 @@ import pytest
 from lib.llm.request import ModelRequestBudgetScope, dispatch_model_request
 from lib.llm._sse_core import prepare_request
 from lib.llm.stream_result import ProviderStreamResult
-from lib.llm_errors import AbortedError, RateLimitError
+from lib.llm.llm_errors import AbortedError, RateLimitError
 from lib.tasks_pkg import message_input_receipts as receipts
 
 pytestmark = pytest.mark.unit

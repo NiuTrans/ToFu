@@ -92,7 +92,9 @@ export function sameBlock(
   if (!previous || previous.kind !== current.kind
       || previous.blockId !== current.blockId) return false;
   if (previous.kind === 'text' && current.kind === 'text') {
-    return previous.markdown === current.markdown
+    return previous.translationModel === current.translationModel
+      && previous.inputTranslationCompleted === current.inputTranslationCompleted
+      && previous.markdown === current.markdown
       && previous.translatedMarkdown === current.translatedMarkdown
       && previous.displayMarkdown === current.displayMarkdown
       && previous.displayMode === current.displayMode
@@ -120,14 +122,16 @@ export function sameBlock(
       && previous.translationStreaming === current.translationStreaming;
   }
   if (previous.kind === 'tool' && current.kind === 'tool') {
-    return previous.toolCallId === current.toolCallId
+    return previous.effectNotice === current.effectNotice
+      && previous.toolCallId === current.toolCallId
       && previous.name === current.name
       && samePresentationValue(previous.input, current.input)
       && samePresentationValue(previous.result, current.result)
       && samePresentationValue(previous.round, current.round);
   }
   if (previous.kind === 'program' && current.kind === 'program') {
-    return previous.programCallId === current.programCallId
+    return previous.effectNotice === current.effectNotice
+      && previous.programCallId === current.programCallId
       && samePresentationValue(previous.round, current.round);
   }
   if (previous.kind === 'attachments' && current.kind === 'attachments') {

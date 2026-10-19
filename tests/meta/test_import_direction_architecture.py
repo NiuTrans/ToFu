@@ -28,7 +28,7 @@ def _write(path: Path, source: str) -> Path:
 
 
 def test_sidecar_cannot_import_execution_or_delivery(tmp_path):
-    sidecar = tmp_path / "lib" / "storage_sidecar"
+    sidecar = tmp_path / "lib" / "storage_authority_sql"
     bad = _write(
         sidecar / "ops.py",
         "def f():\n"
@@ -46,11 +46,11 @@ def test_sidecar_cannot_import_execution_or_delivery(tmp_path):
 
 
 def test_sidecar_may_import_shared_contract_modules(tmp_path):
-    sidecar = tmp_path / "lib" / "storage_sidecar"
+    sidecar = tmp_path / "lib" / "storage_authority_sql"
     good = _write(
         sidecar / "ops.py",
         "from lib.orchestration.run_status import is_run_status\n"
-        "from lib.storage_sidecar import schema\n",
+        "from lib.storage_authority_sql import schema\n",
     )
     assert architecture.import_direction_violations(
         [good], lib_root=tmp_path / "lib", routes_root=tmp_path / "routes",
@@ -69,7 +69,7 @@ def test_shared_module_closure_cannot_grow_heavy(tmp_path):
     )
     assert architecture.import_direction_violations(
         [shared], lib_root=lib, routes_root=tmp_path / "routes",
-        sidecar_root=lib / "storage_sidecar", composition_roots=frozenset(),
+        sidecar_root=lib / "storage_authority_sql", composition_roots=frozenset(),
         lib_routes_debt=frozenset(),
         shared_modules=frozenset({"lib.orchestration.run_status"}),
         shared_paths=frozenset({shared.resolve()}),
@@ -80,7 +80,7 @@ def test_shared_module_closure_cannot_grow_heavy(tmp_path):
     )
     assert architecture.import_direction_violations(
         [ok], lib_root=lib, routes_root=tmp_path / "routes",
-        sidecar_root=lib / "storage_sidecar", composition_roots=frozenset(),
+        sidecar_root=lib / "storage_authority_sql", composition_roots=frozenset(),
         lib_routes_debt=frozenset(),
         shared_modules=frozenset({"lib.orchestration.wire_formats"}),
         shared_paths=frozenset({ok.resolve()}),
@@ -93,7 +93,7 @@ def test_lib_cannot_import_routes_outside_composition_root(tmp_path):
     root = _write(lib / "app_assembly.py", "from routes import register_all\n")
     violations = architecture.import_direction_violations(
         [bad, root], lib_root=lib, routes_root=tmp_path / "routes",
-        sidecar_root=lib / "storage_sidecar",
+        sidecar_root=lib / "storage_authority_sql",
         composition_roots=frozenset({root.resolve()}),
         lib_routes_debt=frozenset(), shared_modules=frozenset(),
         shared_paths=frozenset(),
@@ -106,11 +106,11 @@ def test_routes_cannot_import_sidecar_internals(tmp_path):
     routes = tmp_path / "routes"
     bad = _write(
         routes / "api.py",
-        "from lib.storage_sidecar.schema import SCHEMA_VERSION\n",
+        "from lib.storage_authority_sql.schema import SCHEMA_VERSION\n",
     )
     violations = architecture.import_direction_violations(
         [bad], lib_root=tmp_path / "lib", routes_root=routes,
-        sidecar_root=tmp_path / "lib" / "storage_sidecar",
+        sidecar_root=tmp_path / "lib" / "storage_authority_sql",
         composition_roots=frozenset(), lib_routes_debt=frozenset(),
         shared_modules=frozenset(), shared_paths=frozenset(),
     )
@@ -161,7 +161,7 @@ def test_real_tree_has_no_import_direction_violations():
     """Anti-collapse tripwire: the gates must see the real tree and pass."""
     sources = architecture.authored_sources()
     assert any(
-        path.is_relative_to(ROOT / "lib" / "storage_sidecar")
+        path.is_relative_to(ROOT / "lib" / "storage_authority_sql")
         for path in sources
     ), "gate is not reaching the sidecar tree"
     assert architecture.import_direction_violations(sources) == []

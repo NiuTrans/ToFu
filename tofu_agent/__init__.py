@@ -18,6 +18,8 @@ from tofu_agent.models import (
     ModelRoutingConfig,
 )
 from tofu_agent.runtime import AgentExecution, AgentRuntime
+from tofu_agent.native_runtime import NativeAgentConfiguration
+from tofu_agent.native_repository import NativeRepositoryConfiguration
 from tofu_agent.provider_store import ModelRoutingSettingsStore
 
 try:
@@ -40,6 +42,8 @@ __all__ = [
     'CUSTOM_TOOLS_MODES',
     'PERSONAL_USER_ID',
     'PrincipalContext',
+    'NativeAgentConfiguration',
+    'NativeRepositoryConfiguration',
     'ModelRoutingConfig',
     'ModelRoutingSettingsStore',
     '__api_version__',

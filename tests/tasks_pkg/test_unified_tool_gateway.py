@@ -85,17 +85,18 @@ def test_gateway_schema_teaches_search_execute_and_javascript_precisely():
     assert search_properties['cursor']['maxLength'] == 128
     assert set(execute['parameters']['properties']) == {'calls', 'execution'}
     assert execute['parameters']['properties']['calls']['maxItems'] == 16
-    assert 'search_tools is optional' in execute['description']
+    assert 'direct tools for single actions' in execute['description']
+    assert 'inspect prior results before dependent calls' in execute['description']
     from lib.tools.gateway import execute_program_schema
     code = execute_program_schema()['function']
     assert set(code['parameters']['properties']) == {'code'}
     assert code['parameters']['required'] == ['code']
     assert code['parameters']['additionalProperties'] is False
-    assert 'tools.EXACT_NAME(args)' in code['description']
+    assert 'tools.invoke(name,args)' in code['description']
     assert 'Promise.all' in code['description']
     assert 'permissions' in code['description'].lower()
     assert 'approvals' in code['description'].lower()
-    assert 'no imports, timers, filesystem, process or direct network' in code['description']
+    assert 'No imports/timers/files/processes/network' in code['description']
 
 
 def test_search_result_names_the_stable_execution_gateway():
@@ -242,6 +243,111 @@ def test_gateway_repairs_aliases_defaults_enums_arrays_and_top_level_call():
         'mode': 'dry_run', 'items': ['one'], 'enabled': True}
     assert {repair['kind'] for repair in call['_normalization_repairs']} >= {
         'casefold_enum', 'scalar_to_array', 'schema_default'}
+
+
+def _batch_search_tool():
+    item_properties = {
+        'artifact_ref': {'type': 'string'},
+        'query': {'type': 'string'},
+        'limit': {'type': 'integer', 'default': 8},
+    }
+    return _tool(
+        'search_tool_artifact',
+        properties={
+            'artifact_ref': {'type': 'string'},
+            'query': {'type': 'string'},
+            'searches': {
+                'type': 'array',
+                'items': {
+                    'type': 'object',
+                    'properties': item_properties,
+                    'required': ['artifact_ref', 'query'],
+                },
+            },
+        })
+
+
+def test_gateway_promotes_top_level_singular_into_batch_entries():
+    result = normalize_execute_request(
+        {'calls': {'name': 'search_tool_artifact', 'arguments': {
+            'artifact_ref': 'tool-result:abc',
+            'searches': [{'query': 'alpha'}, {'query': 'beta'}]}}},
+        catalog=[_batch_search_tool()], namespace_by_name={},
+        gateway_call_id='promote-1')
+
+    assert result['errors'] == []
+    call = result['calls'][0]
+    searches = call['_normalized_arguments']['searches']
+    assert [entry['artifact_ref'] for entry in searches] == [
+        'tool-result:abc', 'tool-result:abc']
+    assert [row['kind'] for row in call['_normalization_repairs']].count(
+        'batch_item_promote') == 2
+
+
+def test_gateway_drops_invalid_batch_entries_and_keeps_valid_ones():
+    result = normalize_execute_request(
+        {'calls': {'name': 'search_tool_artifact', 'arguments': {
+            'searches': [
+                {'query': 'alpha'},
+                {'artifact_ref': 'tool-result:abc', 'query': 'beta'},
+            ]}}},
+        catalog=[_batch_search_tool()], namespace_by_name={},
+        gateway_call_id='drop-1')
+
+    assert result['errors'] == []
+    call = result['calls'][0]
+    searches = call['_normalized_arguments']['searches']
+    assert searches == [{
+        'artifact_ref': 'tool-result:abc', 'query': 'beta', 'limit': 8}]
+    drops = [row for row in call['_normalization_repairs']
+             if row['kind'] == 'drop_invalid_batch_item']
+    assert len(drops) == 1
+    assert drops[0]['path'] == '$.arguments.searches[0]'
+
+
+def test_gateway_errors_when_every_batch_entry_is_invalid():
+    result = normalize_execute_request(
+        {'calls': {'name': 'search_tool_artifact', 'arguments': {
+            'searches': [{'query': 'alpha'}, {'query': 'beta'}]}}},
+        catalog=[_batch_search_tool()], namespace_by_name={},
+        gateway_call_id='drop-all-1')
+
+    assert len(result['errors']) == 1
+    error = result['errors'][0]
+    assert error['code'] == 'missing_required_arguments'
+    assert 'artifact_ref' in json.dumps(error)
+
+
+def test_gateway_batch_repair_requires_plural_singular_relationship():
+    catalog = [_tool(
+        'write_items',
+        properties={
+            'count': {'type': 'integer'},
+            'items': {
+                'type': 'array',
+                'items': {
+                    'type': 'object',
+                    'properties': {
+                        'count': {'type': 'integer'},
+                        'body': {'type': 'string'},
+                    },
+                    'required': ['count', 'body'],
+                },
+            },
+        })]
+    result = normalize_execute_request(
+        {'calls': {'name': 'write_items', 'arguments': {
+            'count': 3,
+            'items': [{'body': 'one'}, {'count': 1, 'body': 'two'}]}}},
+        catalog=catalog, namespace_by_name={}, gateway_call_id='promote-neg-1')
+
+    assert result['errors'] == []
+    call = result['calls'][0]
+    assert call['_normalized_arguments']['items'] == [
+        {'count': 1, 'body': 'two'}]
+    kinds = [row['kind'] for row in call['_normalization_repairs']]
+    assert 'batch_item_promote' not in kinds
+    assert 'drop_invalid_batch_item' in kinds
 
     alias_catalog = [_tool(
         'apply_diff', properties={
@@ -680,7 +786,8 @@ def test_local_search_ranks_non_obvious_builtin_capabilities_from_user_language(
     )
     for query, expected in cases:
         ctx = ToolContext(
-            cfg={'memoryEnabled': True, 'mcpEnabled': False},
+            cfg={'memoryEnabled': True, 'mcpEnabled': False, 'plugins': {'production': True}},
+            enabled_plugins=frozenset({'production', 'image_generation'}),
             task_id='capability-search', project_path='/project',
             project_enabled=True, search_mode='single', search_enabled=True,
             fetch_enabled=True, code_exec_enabled=True,
@@ -891,7 +998,7 @@ def test_round_assembly_admits_hidden_execute_without_exposing_schema(
     prep.assemble_round_tools({}, task, mcfg)
 
     assert set(task['_tool_gateway_names']) == {
-        EXECUTE_TOOLS_NAME, SEARCH_TOOLS_NAME, 'execute_program'}
+        EXECUTE_TOOLS_NAME, SEARCH_TOOLS_NAME}
 
 
 def test_execute_gateway_has_quiet_display(caplog):
@@ -1114,7 +1221,7 @@ def test_execute_program_can_search_then_call_without_wire_promotion(monkeypatch
             'program': (
                 'let found=catalog.search("scale"); '
                 'return tools.call(found.items[0].name,{count:"3"});')},
-        1, {'llmRound': 0}, {}, None, False)
+        1, {'llmRound': 0}, {'tools': {'programmaticCalling': 'on'}}, None, False)
 
     payload = json.loads(content)
     assert aborted is False
@@ -1147,7 +1254,7 @@ def test_execute_program_does_not_truthiness_repair_invalid_arguments(monkeypatc
     _, content, aborted = handler.handle_execute_tools(
         task, {}, EXECUTE_TOOLS_NAME, 'program-wrapper-invalid-args', {
             'program': 'return tools.call("scale",[]);'},
-        1, {'llmRound': 0}, {}, None, False)
+        1, {'llmRound': 0}, {'tools': {'programmaticCalling': 'on'}}, None, False)
 
     payload = json.loads(content)
     assert aborted is False
@@ -2007,7 +2114,7 @@ def test_shared_pipeline_keeps_rejected_diagnostics_independent(monkeypatch):
     """Each malformed call occurrence retains its own typed diagnostic."""
     from lib.tasks_pkg.tool_dispatch.api import execute_tool_pipeline
     from lib.tasks_pkg.tool_display import _build_tool_round_entry
-    from lib.tool_rejection import stamp_tool_rejection
+    from lib.tool_results.tool_rejection import stamp_tool_rejection
     import lib.tasks_pkg.tool_dispatch._heartbeat as _heartbeat
     import lib.tasks_pkg.tool_dispatch._pipeline as _pipeline
 

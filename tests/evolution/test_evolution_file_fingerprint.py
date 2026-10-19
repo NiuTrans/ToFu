@@ -19,8 +19,9 @@ def test_fingerprint_streams_binary_file_larger_than_snapshot_limit(runtime, tmp
     assert result['sha256'] == hashlib.sha256(data).hexdigest() and result['bytes'] == len(data)
     assert result['algorithm'] == 'sha256' and result['run_id'] == run['run_id']
     assert runtime[1].writes > writes
-    with pytest.raises(EvolutionStateError, match='byte bound'):
-        artifacts.declare(task, {'path':'data.bin'})
+    # Complete snapshots have no former fixed size cutoff.
+    saved = artifacts.declare(task, {'path':'data.bin'})
+    assert saved['bytes'] == len(data)
 
 
 @pytest.mark.parametrize('path', ['../outside', '/absolute', '.env', 'secrets.json', 'directory', 'link', 'fifo'])

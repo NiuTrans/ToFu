@@ -121,7 +121,7 @@ def _prefetch_user_urls(
     if 'http://' not in last_text and 'https://' not in last_text:
         return []
 
-    from lib.search_runtime import ensure_search_runtime
+    from lib.search.search_runtime import ensure_search_runtime
     search_runtime = ensure_search_runtime()
     extract_urls_from_text = search_runtime.extract_urls_from_text
     fetch_urls = search_runtime.fetch_urls

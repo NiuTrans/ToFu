@@ -44,7 +44,7 @@ _CYCLE = (
         f"{h['hypothesis_id']}:{h['status']}"
         for h in validate_hypotheses(user_id=uid, episode_reader=episode_reader, goal_reader=episode_reader.read_goal)]),
     ('strategies', lambda uid, episode_reader=None: {
-        k: len(v) for k, v in distill_strategies(user_id=uid, episode_reader=episode_reader, goal_reader=episode_reader.read_goal).items()}),
+        k: len(v) for k, v in distill_strategies(user_id=uid).items()}),
     ('capability_gaps', lambda uid, episode_reader=None: len(
         collect_capability_gaps(user_id=uid, episode_reader=episode_reader))),
     ('friction', lambda uid, episode_reader=None: len(mine_friction(user_id=uid, episode_reader=episode_reader))),

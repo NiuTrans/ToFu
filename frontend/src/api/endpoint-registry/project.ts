@@ -2,11 +2,20 @@
 import type { EndpointPorts, EndpointOptions, JsonObject } from './contracts';
 import { createProjectPathWrite } from './project-path-singleflight';
 
-import type { CoordinationBinding, ProjectMessagePage } from '../project-coordination.generated';
+import { buildProjectContinuityEndpoints } from './project-continuity';
+
+import type { CoordinatorReportState, CoordinatorReportReadRequest, CoordinationBinding, ProjectMessagePage } from '../project-coordination.generated';
+
+import type { ProjectDispatchRequest, ProjectDispatchRetry, ProjectDispatchRevoke,
+  ProjectDispatchReviewRequest, ProjectDispatchPublishRequest, ProjectDispatchView,
+  ProjectDispatchPage, ProjectDispatchListQuery,
+  CoordinatorBudgetState, CoordinatorBudgetUpdate } from '../project-dispatch.generated';
 export function createProjectEndpoints(ports: EndpointPorts) {
   const { request, get, post, patch, _idempotentResponseWrite } = ports;
   const setPaths = createProjectPathWrite(request);
   const project = {
+
+    ...buildProjectContinuityEndpoints(ports),
     status:        (convId: string)   => get('/api/v4/project/status'
                                      + (convId ? ('?conv_id=' + encodeURIComponent(convId)) : ''),
                                      { onError: 'null', coalesce: true }),
@@ -81,12 +90,39 @@ export function createProjectEndpoints(ports: EndpointPorts) {
       get('/api/v4/project/board', { query: { path }, onError: 'null' }),
     coordination: (path: string) =>
       get<CoordinationBinding>('/api/v4/project/coordination', { query: { path }, onError: 'throw' }),
+    coordinatorReports: (path: string) =>
+      get<CoordinatorReportState>('/api/v4/project/coordination/reports', { query: { path }, onError: 'throw' }),
+    coordinatorBudget: (path: string) =>
+      get<CoordinatorBudgetState>('/api/v4/project/coordination/budget', { query: { path }, onError: 'throw' }),
+    updateCoordinatorBudget: (body: CoordinatorBudgetUpdate) =>
+      post<CoordinatorBudgetState>('/api/v4/project/coordination/budget', body, { onError: 'throw' }),
+    markCoordinatorReportRead: (body: CoordinatorReportReadRequest) =>
+      post<CoordinatorReportState>('/api/v4/project/coordination/reports/read', body, { onError: 'throw' }),
     coordinationMessages: (path: string, conversationId: string, beforeId = '') =>
       get<ProjectMessagePage>('/api/v4/project/coordination/messages',
         { query: { path, conversation_id: conversationId, before_id: beforeId }, onError: 'throw' }),
     bindCoordinator: (path: string, conversationId: string, expectedRevision: number) =>
       post<CoordinationBinding>('/api/v4/project/coordination/bind', { path, conversationId, expectedRevision },
            { headers: { 'Idempotency-Key': ports.newIdempotencyKey() } }),
+    createCoordinator: (path: string, folderId: string, expectedRevision: number) =>
+      post<CoordinationBinding>('/api/v4/project/coordination/create', { path, folderId, expectedRevision },
+        { headers: { 'Idempotency-Key': ports.newIdempotencyKey() }, onError: 'throw' }),
+    newAssignmentCommandId: () => ports.newIdempotencyKey(),
+    coordinationAssignments: (path: string, commandId?: string, options?: Pick<ProjectDispatchListQuery, 'cursor' | 'assignmentId'>) =>
+      get<ProjectDispatchPage>('/api/v4/project/coordination/assignments',
+        { query: { path, ...(commandId ? { commandId } : {}), ...options }, onError: 'throw' }),
+    grantAssignment: (body: ProjectDispatchRequest, commandId: string) =>
+      post<ProjectDispatchView>('/api/v4/project/coordination/assignments', body,
+        { headers: { 'Idempotency-Key': commandId }, onError: 'throw' }),
+    dispatchAssignment: (body: ProjectDispatchRetry) =>
+      post<ProjectDispatchView>('/api/v4/project/coordination/assignments/dispatch', body, { onError: 'throw' }),
+    revokeAssignment: (body: ProjectDispatchRevoke) =>
+      post<ProjectDispatchView>('/api/v4/project/coordination/assignments/revoke', body, { onError: 'throw' }),
+    reviewAssignment: (body: ProjectDispatchReviewRequest) =>
+      post<ProjectDispatchView>('/api/v4/project/coordination/assignments/review', body, { onError: 'throw' }),
+
+    publishAssignment: (body: ProjectDispatchPublishRequest) =>
+      post<ProjectDispatchView>('/api/v4/project/coordination/assignments/publish', body, { onError: 'throw' }),
     brainSummary:  (path: string) =>
       get('/api/v4/project/brain/summary',
           { query: { path }, onError: 'null' }),

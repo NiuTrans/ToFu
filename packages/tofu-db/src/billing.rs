@@ -3,6 +3,8 @@
 pub(crate) mod migration;
 
 use crate::generated_tofudb_ir::{
+    BILLING_LEDGER_KINDS, BILLING_NATIVE_ADMISSION_KIND,
+    BILLING_REQUEST_ADMISSION_KIND, BILLING_REQUEST_INVOICE_KIND,
     BILLING_IDEMPOTENCY_NAMESPACE, BILLING_LEDGER_ID_CLAIM_NAMESPACE, BILLING_LEDGER_NAMESPACE,
     BILLING_PAYMENT_COUNT_NAMESPACE, BILLING_PAYMENT_CREATED_INDEX_NAMESPACE,
     BILLING_PAYMENT_DOCUMENT_NAMESPACE, BILLING_PAYMENT_ID_CLAIM_NAMESPACE,
@@ -34,17 +36,7 @@ use std::{
     io,
 };
 
-const KINDS: [&str; 9] = [
-    "adjust_credit",
-    "adjust_debit",
-    "bonus",
-    "debit",
-    "redeem",
-    "refund",
-    "reserve",
-    "reserve_release",
-    "topup",
-];
+const KINDS: &[&str] = BILLING_LEDGER_KINDS;
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct LedgerEntry {
     pub id: String,
@@ -410,6 +402,8 @@ fn valid_entry(e: &LedgerEntry) -> bool {
         && text(&e.ref_type, 100, false)
         && text(&e.ref_id, 300, false)
         && text(&e.note, MAX_BILLING_NOTE_CHARACTERS, false)
+        && (![BILLING_NATIVE_ADMISSION_KIND, BILLING_REQUEST_ADMISSION_KIND, BILLING_REQUEST_INVOICE_KIND].contains(&e.kind.as_str())
+            || (e.amount_micro == 0 && e.ref_type == "reserve" && !e.ref_id.is_empty()))
 }
 fn encode(v: &Value) -> io::Result<Vec<u8>> {
     let raw = serde_json::to_vec(v).map_err(|_| {
@@ -659,6 +653,7 @@ pub(crate) fn ledger_append(
     t: &mut AuthorityTransaction,
     e: &LedgerEntry,
 ) -> io::Result<Vec<u8>> {
+    guard_native_reservation(db, t, e, false)?;
     let (e, _) = append(db, t, e)?;
     encode(&entry_value(&e))
 }
@@ -793,6 +788,35 @@ pub(crate) fn wallet_get(
     }
     encode(&wallet_value(&read_wallet(db, t, user)?))
 }
+// Admission and release share the same authority transaction/ledger claims.
+// Terminal wallet_settle deliberately uses append directly with its exact debt.
+fn guard_native_reservation(db: &AuthorityDatabase, t: &mut AuthorityTransaction,
+    entry: &LedgerEntry, admission: bool) -> io::Result<()> {
+    let lookup = |kind: &str| LedgerEntry {
+        kind: kind.into(), ref_type: if kind == "debit" { "task" } else { "reserve" }.into(),
+        ..entry.clone()
+    };
+    if [BILLING_NATIVE_ADMISSION_KIND, BILLING_REQUEST_ADMISSION_KIND, BILLING_REQUEST_INVOICE_KIND].contains(&entry.kind.as_str()) {
+        if !admission || entry.amount_micro != 0 || entry.ref_type != "reserve" || entry.ref_id.is_empty() {
+            return Err(err(io::ErrorKind::InvalidInput, "native admission requires its wallet barrier"));
+        }
+        if existing(db, t, &lookup("reserve"))?.is_none_or(|row| row.amount_micro >= 0)
+            || existing(db, t, &lookup("reserve_release"))?.is_some()
+            || existing(db, t, &lookup("debit"))?.is_some() {
+            return Err(err(io::ErrorKind::AlreadyExists, "native admission requires an unreleased reservation"));
+        }
+        if entry.kind == BILLING_REQUEST_INVOICE_KIND
+            && existing(db, t, &lookup(BILLING_REQUEST_ADMISSION_KIND))?.is_none() {
+            return Err(err(io::ErrorKind::AlreadyExists, "request invoice requires acknowledged admission"));
+        }
+    } else if entry.kind == "reserve_release" && entry.ref_type == "reserve" && !entry.ref_id.is_empty()
+        && (existing(db, t, &lookup(BILLING_NATIVE_ADMISSION_KIND))?.is_some()
+            || existing(db, t, &lookup(BILLING_REQUEST_ADMISSION_KIND))?.is_some()) {
+        return Err(err(io::ErrorKind::AlreadyExists, "native reservation requires exact terminal settlement"));
+    }
+    Ok(())
+}
+
 pub(crate) fn wallet_apply(
     db: &AuthorityDatabase,
     t: &mut AuthorityTransaction,
@@ -815,6 +839,7 @@ pub(crate) fn wallet_apply(
             "invalid billing wallet apply",
         ));
     }
+    guard_native_reservation(db, t, &e, true)?;
     if let Some(old) = existing(db, t, &e)? {
         let w = read_wallet(db, t, &q.user_id)?;
         return encode(

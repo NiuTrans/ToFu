@@ -107,3 +107,32 @@ fn event_batch_composition_selected_groups_avoid_real_loose_spill_without_admiss
         }
     }
 }
+
+#[test]
+fn event_batch_demand_exceeds_former_stream_quota_and_reopens_exactly() {
+    let directory = tempfile::tempdir().unwrap();
+    let batch = request("event.append_batch", 11, json!({"events":
+        (0..513).map(|ordinal| json!({"task_id":format!("demand-stream-{ordinal}"),
+            "sequence":1,"event":{"type":"created","ordinal":ordinal}})).collect::<Vec<_>>()
+    }), Some("demand-streams-command"));
+    {
+        let mut database = AuthorityDatabase::initialize(directory.path()).unwrap();
+        let result = execute(&mut database, &batch, 1000).unwrap();
+        assert_eq!(result["inserted"], 513);
+        assert_eq!(result["results"].as_array().unwrap().len(), 513);
+        let replay = execute(&mut database, &batch, 1000).unwrap();
+        assert_eq!(replay["inserted"], 0);
+        assert_eq!(replay["deduplicated"], 513);
+    }
+    let mut database = AuthorityDatabase::open(directory.path()).unwrap();
+    assert_eq!(execute(&mut database, &batch, 1000).unwrap()["deduplicated"], 513);
+    for ordinal in 0..513 {
+        let rows = execute(&mut database, &request("event.list", 11,
+            json!({"task_id":format!("demand-stream-{ordinal}"),"after_sequence":0,"limit":2}),None),1000).unwrap();
+        assert_eq!(rows.as_array().unwrap().len(), 1);
+        assert_eq!(rows[0]["event"]["ordinal"], ordinal);
+    }
+    let foreign = execute(&mut database, &request("event.list", 12,
+        json!({"task_id":"demand-stream-0","after_sequence":0,"limit":2}),None),1000).unwrap();
+    assert!(foreign.as_array().unwrap().is_empty());
+}

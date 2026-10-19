@@ -199,7 +199,7 @@ class BrowserRelay:
         relay = self
 
         class Handler(BaseHTTPRequestHandler):
-            server_version = 'TofuAgentRelay/1'
+            server_version = 'TofuRemoteRelay/1'
 
             def log_message(self, _format, *_args):
                 return  # never leak bridge-token-bearing request details

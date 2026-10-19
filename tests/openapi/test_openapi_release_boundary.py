@@ -9,8 +9,8 @@ from quart import Blueprint, jsonify
 from jsonschema import Draft202012Validator
 
 from lib.api_v4 import attach_v4_envelope, NativeContractBlueprint
-from lib.api_v4_generated import OPENAPI_DOCUMENT
-from lib.app_factory import create_base_app
+from lib.generated_api_v4 import OPENAPI_DOCUMENT
+from lib.app.app_factory import create_base_app
 from lib.openapi import api_meta, build_spec
 
 pytestmark = pytest.mark.unit
@@ -130,7 +130,7 @@ def test_nested_domain_resource_validates_after_success_envelope_projection():
 
 
 def test_spec_construction_failure_is_not_a_successful_empty_catalog(monkeypatch):
-    from lib.http_error_handlers import register_http_error_handlers
+    from lib.http_transport.error_handlers import register_http_error_handlers
     from routes import api_docs
 
     app = create_base_app('openapi-failure', {'TESTING': True})

@@ -2,10 +2,16 @@
 Desktop Agent — local command execution handler.
 
 Contains ``_SHELL_META_RE`` and ``cmd_run_local`` (run a shell command on
-the local machine, avoiding ``shell=True`` when possible).
+the local machine, avoiding ``shell=True`` when possible). Both synchronous and
+streamed execution use the existing independent command supervisor; it owns
+descendant retirement after caller death. The caller owns live stream projection
+and exact explicit timeouts.
 """
 
 import os
+import math
+import tempfile
+from pathlib import Path
 import re
 import shlex
 import subprocess
@@ -43,44 +49,56 @@ def _build_args(command):
     return shlex.split(command, posix=not IS_WINDOWS)
 
 
+def command_timeout(value):
+    """None is completion-owned; explicit finite nonnegative seconds are exact."""
+    if value is None:
+        return None
+    try:
+        timeout = float(value)
+    except (ValueError, TypeError, OverflowError) as error:
+        raise ValueError('Command timeout must be nonnegative and finite or None') from error
+    if not math.isfinite(timeout) or timeout < 0 or isinstance(value, bool):
+        raise ValueError('Command timeout must be nonnegative and finite or None')
+    return timeout
+
+
+def start_local_run(cmd_id, params, on_chunk, on_exit, *, cancel=None):
+    """Stream an exec-authorized desktop command with its owner's cancellation."""
+    command = params.get('command', '')
+    if not isinstance(command, str) or not command.strip():
+        return 'Empty or invalid command'
+    try:
+        timeout = command_timeout(params.get('timeout'))
+    except ValueError as error:
+        return str(error)
+    cwd = params.get('cwd')
+    start_streamed_command(command, os.path.expanduser(cwd) if cwd else None,
+                           timeout, on_chunk, on_exit, cancel=cancel)
+    return None
+
+
 def cmd_run_local(params):
     """Run a shell command on the local machine."""
     command = params.get('command', '')
     if not isinstance(command, str) or not command.strip():
         return {'error': 'Empty or invalid command'}
     cwd = params.get('cwd')
-    timeout = params.get('timeout', 30)
+    try:
+        timeout = command_timeout(params.get('timeout'))
+    except ValueError as error:
+        return {'error': str(error)}
 
     resolved_cwd = os.path.expanduser(cwd) if cwd else None
 
-    try:
-        args = _build_args(command)
-        result = subprocess.run(
-            args, shell=False,
-            capture_output=True, text=True,
-            timeout=timeout,
-            cwd=resolved_cwd,
-        )
-        stdout, stderr = result.stdout, result.stderr
-        outcome = {
-            'stdout': stdout[:100_000],
-            'stderr': stderr[:20_000],
-            'exit_code': result.returncode,
-        }
-        # Report the pre-cap lengths so the bridge can render an explicit
-        # truncation marker — a silently clipped stream reads as complete
-        # output and the model cannot tell data is missing.
-        if len(stdout) > 100_000:
-            outcome['stdout_truncated'] = len(stdout)
-        if len(stderr) > 20_000:
-            outcome['stderr_truncated'] = len(stderr)
-        return outcome
-    except subprocess.TimeoutExpired:
-        logger.warning('cmd_run_local timed out: cmd=%s timeout=%ds', command[:120], timeout, exc_info=True)
-        return {'error': f'Command timed out after {timeout}s'}
-    except Exception as e:
-        logger.warning('cmd_run_local failed for cmd=%s: %s', command[:120], e, exc_info=True)
-        return {'error': str(e)}
+    settled = threading.Event()
+    outcomes = []
+    start_streamed_command(command, resolved_cwd, timeout, lambda *_: None,
+                           lambda outcome: (outcomes.append(outcome), settled.set()))
+    settled.wait()
+    outcome = outcomes[0]
+    if outcome.get('timed_out'):
+        outcome['error'] = f'Command timed out after {timeout}s'
+    return outcome
 
 
 # ══════════════════════════════════════════════════════════
@@ -146,15 +164,15 @@ def _kill_tree(proc):
 class _StreamedProcess:
     """Run a command with live output chunks + process-tree kill on timeout.
 
-    Readers use ``os.read`` on the raw pipe fds (returns whatever is
-    available, so chunks flow BEFORE the pipe fills or the process exits).
+    Readers tail private stdout/stderr files from the independent supervisor,
+    so chunks flow before command completion and work in frozen GUI builds.
     Everything runs on daemon threads; ``start`` never blocks.
     """
 
     def __init__(self, command, cwd, timeout, on_chunk, on_exit, *, cancel=None):
         self._command = command
         self._cwd = cwd
-        self._timeout = timeout
+        self._timeout = command_timeout(timeout)
         self._on_chunk = on_chunk
         self._on_exit = on_exit
         self._cancel = cancel
@@ -164,37 +182,74 @@ class _StreamedProcess:
         self._lock = threading.Lock()
         self._readers = []
         self._proc = None
+        self._temporary = None
+        self._job = None
+        self._handles = []
+        self._output_wait = threading.Event()
+
+    def _close_execution(self):
+        failures = []
+        for handle in self._handles:
+            try:
+                handle.close()
+            except OSError as error:
+                failures.append(str(error))
+        if self._job is not None:
+            try:
+                self._job.close()
+            except OSError as error:
+                failures.append(str(error))
+            self._job = None
+        if self._temporary is not None:
+            try:
+                self._temporary.cleanup()
+            except OSError as error:
+                failures.append(str(error))
+            self._temporary = None
+        return '; '.join(failures)
 
     def start(self):
         try:
+            from lib.paper.builds.process_worker import desktop_worker_command
+            import psutil
             args = _build_args(self._command)
-            self._proc = subprocess.Popen(
-                args, shell=False,
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                cwd=self._cwd,
-            )
-        except Exception as e:
-            logger.warning('[Exec] streamed start failed for cmd=%s: %s',
-                           self._command[:120], e)
-            self._on_exit({'error': str(e)})
-            return
-        try:
-            for stream, fh in (('stdout', self._proc.stdout),
-                               ('stderr', self._proc.stderr)):
-                thread = threading.Thread(target=self._reader, args=(stream, fh), daemon=True)
+            self._temporary = tempfile.TemporaryDirectory(prefix='tofu-desktop-command-')
+            directory = Path(self._temporary.name)
+            self._ready = directory / 'ready'
+            self._status = directory / 'status.json'
+            self._stop = directory / 'stop'
+            output_paths = [directory / name for name in ('stdout', 'stderr')]
+            for path in output_paths:
+                path.touch()
+            worker = desktop_worker_command(args, cwd=self._cwd or Path.cwd(),
+                ready=self._ready, stdout=output_paths[0], stderr=output_paths[1],
+                status=self._status, parent_pid=os.getpid(),
+                parent_birth=psutil.Process().create_time())
+            self._proc = subprocess.Popen(worker, stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                cwd=Path(__file__).resolve().parents[2], start_new_session=os.name != 'nt')
+            if os.name == 'nt':
+                from lib.paper.builds.windows_job import WindowsJob
+                self._job = WindowsJob(self._proc)
+            # Admission follows OS lifetime binding; the worker cannot start early.
+            self._ready.write_bytes(b'1')
+            for stream, path in zip(('stdout', 'stderr'), output_paths):
+                handle = path.open('rb', buffering=0)
+                self._handles.append(handle)
+                thread = threading.Thread(target=self._reader, args=(stream, handle), daemon=True)
                 thread.start()
                 self._readers.append(thread)
             threading.Thread(target=self._waiter, daemon=True).start()
-        except BaseException as exc:
-            _kill_tree(self._proc)
-            self._proc.wait()
+        except BaseException as error:
+            if self._proc is not None:
+                _kill_tree(self._proc)
+                self._proc.wait()
             for thread in self._readers:
                 thread.join()
-            for stream in (self._proc.stdout, self._proc.stderr):
-                stream.close()
-            if not isinstance(exc, Exception):
+            self._close_execution()
+            if not isinstance(error, Exception):
                 raise
-            self._on_exit({'error': str(exc)})
+            self._on_exit({'error': str(error)})
 
     def _reader(self, stream, fh):
         fd = fh.fileno()
@@ -206,7 +261,10 @@ class _StreamedProcess:
                     logger.debug('reader: unreadable (%s)', _e)
                     break
                 if not data:
-                    break
+                    if self._proc.poll() is not None:
+                        break
+                    self._output_wait.wait(.01)
+                    continue
                 text = data.decode('utf-8', errors='replace')
                 with self._lock:
                     room = _MAX_STREAM_CHARS - self._total[stream]
@@ -231,31 +289,44 @@ class _StreamedProcess:
 
     def _waiter(self):
         timed_out = cancelled = killed_tree = False
-        deadline = time.monotonic() + self._timeout
+        deadline = (None if self._timeout is None
+                    else time.monotonic() + self._timeout)
         while self._proc.poll() is None:
             cancelled = self._cancel is not None and self._cancel.is_set()
-            timed_out = time.monotonic() >= deadline
+            timed_out = deadline is not None and time.monotonic() >= deadline
             if cancelled or timed_out:
-                killed_tree = _kill_tree(self._proc)
+                self._stop.write_bytes(b'1')
                 self._proc.wait()
+                killed_tree = True
                 break
             try:
-                self._proc.wait(timeout=min(.2, max(.001, deadline - time.monotonic())))
+                self._proc.wait(timeout=(.2 if deadline is None else
+                    min(.2, max(.001, deadline - time.monotonic()))))
             except subprocess.TimeoutExpired:
                 pass
         for thread in self._readers:
             thread.join()
+        status = {}
+        try:
+            from lib.paper.builds.process_worker import load_desktop_status
+            status = load_desktop_status(self._status)
+        except (OSError, ValueError):
+            status = {'error': 'Desktop command supervisor retired without a final status'}
         with self._lock:
             outcome = {
                 'stdout': ''.join(self._acc['stdout']),
                 'stderr': ''.join(self._acc['stderr']),
-                'exit_code': (self._proc.returncode
-                              if self._proc.returncode is not None else -9),
+                'exit_code': status.get('returncode', self._proc.returncode),
                 'timed_out': timed_out,
                 'cancelled': cancelled,
                 'killed_tree': killed_tree,
                 'truncated': self._truncated,
             }
+        if status.get('error'):
+            outcome['error'] = status['error']
+        cleanup_error = self._close_execution()
+        if cleanup_error:
+            outcome['error'] = 'Desktop command cleanup failed: ' + cleanup_error
         self._on_exit(outcome)
 
 
@@ -267,4 +338,9 @@ def start_streamed_command(command, cwd, timeout, on_chunk, on_exit, *, cancel=N
     (``exit_code`` / ``timed_out`` / ``cancelled`` / ``killed_tree`` / ``truncated``) or
     ``{'error': ...}`` when the process could not be started.
     """
-    _StreamedProcess(command, cwd, timeout, on_chunk, on_exit, cancel=cancel).start()
+    try:
+        process = _StreamedProcess(command, cwd, timeout, on_chunk, on_exit, cancel=cancel)
+    except ValueError as error:
+        on_exit({'error': str(error)})
+        return
+    process.start()

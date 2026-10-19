@@ -92,7 +92,7 @@ def _call_podcast_poll(app, task_id, cursor=0):
 
 @pytest.fixture
 def app():
-    from lib.app_factory import create_base_app
+    from lib.app.app_factory import create_base_app
     return create_base_app(__name__)
 
 
@@ -223,7 +223,7 @@ def test_video_lookup_running_branch_carries_clock():
     Drives the real handler against a real motion task so the assertion is on
     the response the tab receives, not on the source text.
     """
-    from lib.app_factory import create_base_app
+    from lib.app.app_factory import create_base_app
     from lib.motion_video.runtime import _motion_runtime
     from routes.paper_pkg._podcast import lookup_video_abstract
 

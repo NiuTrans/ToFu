@@ -11,15 +11,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "contracts" / "tofudb_ir_v1.json"
 OUTPUT = ROOT / "packages" / "tofu-db" / "src" / "generated_tofudb_ir.rs"
-MIGRATION_OUTPUT = ROOT / "lib" / "storage_sidecar" / "generated_tofudb_migration.py"
+MIGRATION_OUTPUT = ROOT / "lib" / "storage_authority_sql" / "migration" / "generated_tofudb_migration.py"
 SEARCH_SOURCE = ROOT / "contracts" / "conversation_search_v2.json"
 SEARCH_OUTPUT = ROOT / "packages" / "tofu-db" / "src" / "generated_conversation_search.rs"
 
 
 RECEIPT_NAMES = {
     'RECEIPT_COMPRESSION_THRESHOLD_BYTES': 'compressionThresholdBytes',
-    'MAX_STORED_RECEIPT_BYTES': 'maximumStoredBytes',
-    'MAX_DECODED_RECEIPT_BYTES': 'maximumDecodedBytes',
     'MAX_INLINE_RECEIPT_BYTES': 'maximumInlineBytes',
 }
 
@@ -76,8 +74,8 @@ def _load() -> dict:
     if any(type(receipts[key]) is not int or receipts[key] <= 0 for key in RECEIPT_NAMES.values()):
         raise ValueError('invalid command receipt byte budget')
     if not (receipts['maximumInlineBytes'] < receipts['compressionThresholdBytes']
-            < receipts['maximumStoredBytes'] == receipts['maximumDecodedBytes'] <= 4 * 1024 * 1024):
-        raise ValueError('inconsistent command receipt budgets')
+            and receipts.get('payloadAdmission') == 'complete-receipt-without-private-stored-or-decoded-byte-quota'):
+        raise ValueError('inconsistent command receipt admission')
     expected_migration = {
         "checkpointFormat": "tofu-db.migration-checkpoint.v1",
         "maximumCheckpointBytes": 65536,
@@ -165,7 +163,7 @@ def _load() -> dict:
      'trashOperations': ['migration.trash.begin', 'migration.trash.finish', 'migration.trash.get', 'migration.trash.scan', 'migration.trash.turn.get', 'migration.trash.turn.scan'],
      'trashSnapshot': 'one-owner-scoped-staging-capsule;header-turns-frozen-pages-verified-before-seal;committed-seal-before-range-pin;resume-before-active-domain-verification;pending-stage-refuses-serving;catalog-exposes-pending-source;completion-requires-no-stage',
      'conversationSnapshot': 'header-identity-title-settings-timestamps-revision;insert-or-match;turn-import-preserves-header-clock;independent-catalog-page',
-     'turnOperations': ['migration.turn.restore',
+     'turnOperations': ['migration.turn.round_heads.upgrade', 'migration.turn.restore',
                         'migration.turn.get',
                         'migration.turn.scan', 'migration.turn.tombstone.restore',
                         'migration.turn.tombstone.get', 'migration.turn.tombstone.scan', 'migration.turn.transfer.begin', 'migration.turn.transfer.append', 'migration.turn.transfer.finish', 'migration.turn.transfer.abort', 'migration.turn.transfer.read.begin', 'migration.turn.transfer.read.chunk', 'migration.turn.transfer.read.abort'],
@@ -361,7 +359,7 @@ def _load() -> dict:
         raise ValueError("turn snapshot contract differs")
     if document.get("frozenTranscripts") != {'manifestNamespace': 'frozen_transcript_manifests', 'pageNamespace': 'frozen_transcript_pages', 'maximumPages': 1024, 'maximumMessages': 65536, 'targetPageBytes': 4194304, 'maximumPageBytes': 67043328, 'maximumDecodedBytes': 1073741824, 'lifecycle': 'owner-scoped-immutable-pages;complete-manifest-before-read;turns-take-precedence;recoverable-range-pins;blob-sharing-clone', 'responseBudget': 'message-bearing-conversation-list-shares-page-byte-ceiling;metadata-only-lists-keep-ordinary-8MiB-budget'}:
         raise ValueError('frozen transcript contract drifted')
-    if document.get("transcriptArchives") != {'manifestNamespace': 'transcript_archive_manifests', 'pageNamespace': 'transcript_archive_pages', 'maximumPages': 4096, 'maximumMessages': 262144, 'tailTargetBytes': 262144, 'maximumDecodedBytes': 1073741824, 'lifecycle': 'owner-scoped-live-tail;append-maintained;other-mutations-invalidate;lane-count-fence;exact-read-fallback', 'responseBudget': 'message-bearing-conversation-list-shares-page-byte-ceiling;metadata-only-lists-keep-ordinary-8MiB-budget'}:
+    if document.get("transcriptArchives") != {'format': 'tofu.transcript-archive.v2', 'retiredFormat': 'tofu.transcript-archive.v1', 'manifestNamespace': 'transcript_archive_manifests', 'pageNamespace': 'transcript_archive_pages', 'maximumPages': 4096, 'maximumMessages': 262144, 'tailTargetBytes': 262144, 'maximumDecodedBytes': 1073741824, 'lifecycle': 'owner-scoped-live-tail;append-maintained;other-mutations-invalidate;lane-count-fence;exact-read-fallback', 'responseBudget': 'message-bearing-conversation-list-shares-page-byte-ceiling;metadata-only-lists-keep-ordinary-8MiB-budget'}:
         raise ValueError("frozen transcript contract differs")
     if document.get("migrationStores") != {
         "browserObservationOwnerTouchNamespace": "browser_site_observation_owner_touches",
@@ -382,9 +380,10 @@ def _load() -> dict:
     }:
         raise ValueError("attempt execution config authority differs")
     expected_bounds = {
-        "maximumSteps": 128,
-        "maximumSlots": 64,
-        "maximumLiteralBytes": 8 * 1024 * 1024,
+        "stepAdmission": "complete-ordered-transaction-without-step-count-quota",
+        "slotAdmission": "sparse-usize-identifiers-without-slot-count-quota",
+        "literalAdmission": "checked-size-without-aggregate-byte-quota",
+        "maximumLegacyDocumentBytes": 8 * 1024 * 1024,
         "maximumExecutableOperations": len(catalog_names),
     }
     if bounds != expected_bounds:
@@ -393,7 +392,9 @@ def _load() -> dict:
         "maximumEntityKeyBytes": 3072,
         "maximumEntityInlineValueBytes": 8 * 1024,
         "maximumEntityRangeRows": 1000,
-        "maximumEntityTransactionWrites": 14336,
+        "entityOverlayDeltaCountEncoding": "u32-little-endian",
+        "versionedDocumentAdmission": "blob-backed-without-private-byte-quota",
+        "indexedEventPayloadAdmission": "blob-backed-complete-replay-without-private-byte-quota",
         "maximumEntityReachabilityPages": 20_000_000,
         "maximumEntityReachabilityFrontier": 8192,
         "maximumEntityRetiredRanges": 64,
@@ -401,11 +402,11 @@ def _load() -> dict:
         "maximumEntityMountConsolidationRows": 999,
         "maximumEntityMountConsolidationBytes": 8 * 1024 * 1024,
         "maximumStreamEventBytes": 256 * 1024,
-        "maximumStreamAppendEvents": 4096,
-        "maximumStreamAppendBytes": 8 * 1024 * 1024,
+        "streamAppendEventCountEncoding": "u32-little-endian",
+        "streamAppendAdmission": "complete-atomic-segmented-append-without-byte-quota",
         "maximumStreamReadEvents": 1000,
         "maximumStreamReadBytes": 8 * 1024 * 1024,
-        "maximumTransactionStreamAppends": 500,
+        "transactionStreamAdmission": "complete-batch-without-stream-count-quota",
     }
     if document.get("physicalBounds") != expected_physical_bounds:
         raise ValueError("Tofu-DB physical bounds differ from the certified v1 bounds")
@@ -467,12 +468,24 @@ def _load() -> dict:
         "targetBytes": 4096,
         "maximumBytes": 16384,
         "minimumChildrenPerSplitPage": 2,
-        "encodingAllocation": "exact-page-length;transfer-to-existing-pending-store;retain-no-spare-capacity",
+        "encodingAllocation": "exact-page-length;prefix-key-frames;expanded-size-bounded;transfer-to-existing-pending-store",
         "modifiedLeafRuns": "repack-adjacent-written-leaves-with-one-page-buffer;retain-tombstones-and-untouched-references",
         "tailRebalance": "redistribute-or-merge-within-maximum-page-bytes",
     }
     if document.get("entityPagePacking") != expected_page_packing:
         raise ValueError("Tofu-DB entity page packing bounds differ")
+    expected_page_codec = {
+        "writeVersion": 2,
+        "readVersions": [1, 2],
+        "keyEncoding": "previous-key-u16-prefix-u16-suffix;first-prefix-zero;strictly-increasing-reconstructed-keys",
+        "maximumExpandedBytes": 16384,
+        "packingPolicy": "encoded-target-with-independent-expanded-ceiling",
+        "decodedCacheAccounting": "max-legacy-encoded-charge-and-owned-decoded-allocations",
+        "upgradePolicy": "lazy-copy-on-write;read-legacy-pages;old-readers-reject-version-two;no-startup-rewrite",
+        "authority": "content-addressed-pages;existing-wal-control-publication-gc-and-backup",
+    }
+    if document.get("entityPageCodec") != expected_page_codec:
+        raise ValueError("Tofu-DB entity page codec contract differs")
     expected_maintenance_scheduler = {
         "maximumWorkers": 1,
         "maximumScopes": 64,
@@ -821,8 +834,9 @@ def _load() -> dict:
         or integration.get("eventNamespace") != "integration_event_documents"
         or integration.get("eventSequenceNamespace") != "integration_event_sequence"
         or integration.get("eventCountNamespace") != "integration_event_counts"
-        or integration.get("maximumWorkspacesPerOwner") != 10_000
-        or integration.get("maximumActiveWorkspacesPerAuthority") != 1000
+        or integration.get("workspaceAdmission") != "demand-without-count-quota"
+        or "maximumActiveWorkspacesPerAuthority" in integration
+        or "maximumWorkspacesPerOwner" in integration
         or integration.get("maximumStatusRows") != 1000
         or integration.get("maximumEventsPerProject") != 300
         or integration.get("maximumStatusEvents") != 30
@@ -848,12 +862,27 @@ def _load() -> dict:
         or queue.get("autopilotMarkerNamespace") != "queue_autopilot_markers"
         or queue.get("tenantGlobalAutopilotIndexNamespace")
         != "queue_autopilot_by_owner_conversation"
-        or queue.get("maximumItemsPerConversation") != 512
-        or queue.get("maximumItemCoreBytes") != 1024 * 1024
-        or queue.get("maximumGlobalConversationRows") != 1000
-        or queue.get("maximumAutopilotMarkers") != 1000
+        or queue.get("appendMetadata") != {
+            "namespaceField": "stateNamespace",
+            "keyOwner": "authenticated_owner_user_id",
+            "key": "conversation_id",
+            "itemStateKeyOwner": "tenant_global_owner_zero",
+            "format": "tofu.queue-append/v1",
+            "lifecycle": "same-transaction-maintenance;missing-legacy-entry-full-scan;delete-with-conversation",
+            "realAppend": "point-read-count-and-kind-oldest-times;full-scan-when-goal-continuation-present",
+        }
+        or queue.get("itemAdmission") != "demand-without-count-quota"
+        or "maximumItemsPerConversation" in queue
+        or queue.get("coreAdmission") != "existing-owner-bound-blob-without-byte-quota"
+        or queue.get("requestMeasurement") != "streamed-json-byte-count-without-debug-copy"
+        or "maximumItemCoreBytes" in queue
+        or queue.get("catalogAdmission") != "demand-without-count-quota"
+        or "maximumGlobalConversationRows" in queue
+        or "maximumAutopilotMarkers" in queue
         or queue.get("maximumReapItems") != 128
-        or queue.get("maximumResponseBytes") != 8 * 1024 * 1024
+        or queue.get("defaultPageBytes") != 8 * 1024 * 1024
+        or queue.get("responseAdmission") != "encoded-complete-result-without-private-byte-quota"
+        or "maximumResponseBytes" in queue
         or queue.get("maximumIdCharacters") != 256
         or queue.get("maximumConversationIdCharacters") != 256
     ):
@@ -865,6 +894,7 @@ def _load() -> dict:
         or scheduler.get("physicalNamespace") != "scheduled_task_documents"
         or scheduler.get("tenantGlobalIdClaimNamespace") != "scheduled_task_id_claims"
         or scheduler.get("systemKeyClaimNamespace") != "scheduled_task_system_key_claims"
+        or scheduler.get("executionIndexNamespace") != "scheduled_tasks_by_execution"
         or scheduler.get("createdIndexNamespace") != "scheduled_tasks_by_created_desc"
         or scheduler.get("enabledCreatedIndexNamespace")
         != "scheduled_tasks_enabled_by_created_desc"
@@ -916,6 +946,10 @@ def _load() -> dict:
         not isinstance(billing, dict)
         or billing.get("ownerKey") != "billing_subject_user_id"
         or billing.get("physicalFamily") != "entity+blob"
+        or billing.get("ledgerKinds") != sorted(set(billing.get("ledgerKinds", [])))
+        or billing.get("nativeAdmission", {}).get("ledgerKind") not in billing.get("ledgerKinds", [])
+        or billing.get("nativeAdmission", {}).get("refType") != "reserve"
+        or billing.get("nativeAdmission", {}).get("amountMicro") != 0
         or billing.get("walletNamespace") != "billing_wallets"
         or billing.get("ledgerNamespace") != "billing_ledger_entries"
         or billing.get("ledgerIdClaimNamespace") != "billing_ledger_id_claims"
@@ -1041,18 +1075,10 @@ def _load() -> dict:
         or project_brain.get("updatedIndexNamespace") != "project_brain_by_updated_desc"
         or project_brain.get("streamDomain") != "project_brain"
         or project_brain.get("maximumProjectKeyCharacters") != 4096
-        or project_brain.get("maximumDocumentBytes") != 8 * 1024 * 1024
-        or project_brain.get("maximumActiveWorkItems") != 100
-        or project_brain.get("maximumWorkHistoryItems") != 100
-        or project_brain.get("maximumChangedPathsPerWork") != 200
-        or project_brain.get("maximumArtifactsPerWork") != 100
-        or project_brain.get("maximumNarratives") != 500
+        or project_brain.get("collectionAdmission") != "complete-owner-scoped-project-history-without-count-quota"
+        or project_brain.get("documentAdmission") != "blob-backed-without-private-byte-quota"
         or project_brain.get("maximumNarrativeTextBytes") != 720
-        or project_brain.get("maximumWatchItems") != 100
-        or project_brain.get("maximumCheckerVersions") != 128
-        or project_brain.get("maximumCharterDecisions") != 256
-        or project_brain.get("maximumCursors") != 1000
-        or project_brain.get("maximumEventBytes") != 8 * 1024 * 1024 - 4096
+        or project_brain.get("eventAdmission") != "complete-chunked-event-with-u32-format-length-and-paged-read"
         or project_brain.get("eventChunkBytes") != 256 * 1024 - 60
         or project_brain.get("eventCheckpointThreshold") != 1200
         or project_brain.get("eventCheckpointTail") != 600
@@ -1064,20 +1090,19 @@ def _load() -> dict:
         or daily_costs.get("physicalFamily") != "entity+blob"
         or daily_costs.get("physicalNamespace") != "daily_cost_documents"
         or daily_costs.get("countNamespace") != "daily_cost_counts"
-        or daily_costs.get("maximumDocumentBytes") != 8 * 1024 * 1024
-        or daily_costs.get("maximumMonthRows") != 100
-        or daily_costs.get("maximumPersistedDateProbes") != 366
-        or daily_costs.get("maximumResponseBytes") != 8 * 1024 * 1024
+        or daily_costs.get("documentAdmission") != "blob-backed-without-private-byte-quota"
+        or daily_costs.get("queryAdmission") != "complete-owner-scoped-month-and-date-probes-without-private-quota"
     ):
-        raise ValueError("Tofu-DB daily costs must be bounded and owner scoped")
+        raise ValueError("Tofu-DB daily costs must preserve complete owner-scoped admission")
     if (
         not isinstance(recent_projects, dict)
         or recent_projects.get("ownerKey") != "authenticated_owner_user_id"
         or recent_projects.get("physicalFamily") != "entity+blob"
         or recent_projects.get("physicalNamespace") != "recent_project_documents"
         or recent_projects.get("countNamespace") != "recent_project_counts"
-        or recent_projects.get("maximumProjectsPerOwner") != 1000
-        or recent_projects.get("maximumTouchBatch") != 32
+        or recent_projects.get("admission") != "demand-without-owner-or-batch-count-quota"
+        or "maximumProjectsPerOwner" in recent_projects
+        or "maximumTouchBatch" in recent_projects
         or recent_projects.get("maximumPathCharacters") != 4096
     ):
         raise ValueError("Tofu-DB recent projects must be bounded and owner scoped")
@@ -1180,7 +1205,6 @@ def _load() -> dict:
         or knowledge_documents.get("maximumAssetMetadataCharacters") != 20_000
         or knowledge_documents.get("maximumJsonArrayCharacters") != 200_000
         or knowledge_documents.get("maximumTermCharacters") != 128
-        or knowledge_documents.get("maximumTermsPerChunk") != 4_096
         or knowledge_documents.get("maximumSearchTokens") != 32
         or knowledge_documents.get("maximumPageRows") != 200
         or knowledge_documents.get("maximumCatalogPageSize") != 100
@@ -1292,9 +1316,9 @@ def _load() -> dict:
         or research_workspaces.get("ownerKey") != "authenticated_tenant_and_owner"
         or research_workspaces.get("physicalFamily") != "entity+blob"
         or research_workspaces.get("physicalNamespace") != "research_workspace_documents"
-        or research_workspaces.get("maximumDocumentBytes") != 8 * 1024 * 1024
+        or "maximumDocumentBytes" in research_workspaces
     ):
-        raise ValueError("Tofu-DB research workspaces must be bounded and owner scoped")
+        raise ValueError("Tofu-DB research workspaces must retain complete owner-scoped documents")
     if (
         not isinstance(optimizer_proposals, dict)
         or optimizer_proposals.get("ownerKey") != "authenticated_tenant_and_owner"
@@ -1304,12 +1328,12 @@ def _load() -> dict:
         or optimizer_proposals.get("statusCreatedIndexNamespace") != "optimizer_proposals_by_status_created_desc"
         or optimizer_proposals.get("statusNamespace") != "optimizer_proposal_status"
         or optimizer_proposals.get("countNamespace") != "optimizer_proposal_counts"
-        or optimizer_proposals.get("maximumRowsPerOwner") != 4096
-        or optimizer_proposals.get("maximumListRows") != 500
-        or optimizer_proposals.get("maximumDocumentBytes") != 4 * 1024 * 1024
-        or optimizer_proposals.get("maximumResponseBytes") != 8 * 1024 * 1024
+        or optimizer_proposals.get("rowAdmission") != "owner-scoped-demand-without-count-quota"
+        or optimizer_proposals.get("defaultListRows") != 50
+        or optimizer_proposals.get("documentAdmission") != "blob-backed-without-private-byte-quota"
+        or optimizer_proposals.get("responseAdmission") != "complete-requested-rows-without-private-byte-quota"
     ):
-        raise ValueError("Tofu-DB optimizer proposals must be bounded and owner scoped")
+        raise ValueError("Tofu-DB optimizer proposals must preserve owner-scoped demand admission")
     if (
         not isinstance(optimizer_actions, dict)
         or optimizer_actions.get("ownerKey") != "authenticated_tenant_and_owner"
@@ -1320,12 +1344,12 @@ def _load() -> dict:
         or optimizer_actions.get("proposalIndexNamespace") != "optimizer_actions_by_proposal_applied_desc"
         or optimizer_actions.get("expiryIndexNamespace") != "optimizer_actions_by_expiry"
         or optimizer_actions.get("countNamespace") != "optimizer_action_counts"
-        or optimizer_actions.get("maximumRowsPerOwner") != 2048
-        or optimizer_actions.get("maximumListRows") != 500
-        or optimizer_actions.get("maximumDocumentBytes") != 4 * 1024 * 1024
-        or optimizer_actions.get("maximumResponseBytes") != 8 * 1024 * 1024
+        or optimizer_actions.get("rowAdmission") != "owner-scoped-demand-without-count-quota"
+        or optimizer_actions.get("defaultListRows") != 50
+        or optimizer_actions.get("documentAdmission") != "blob-backed-without-private-byte-quota"
+        or optimizer_actions.get("responseAdmission") != "complete-requested-rows-without-private-byte-quota"
     ):
-        raise ValueError("Tofu-DB optimizer actions must be bounded and owner scoped")
+        raise ValueError("Tofu-DB optimizer actions must preserve owner-scoped demand admission")
     if (
         not isinstance(rate_limits, dict)
         or rate_limits.get("ownerKey") != "authenticated_tenant_and_owner"
@@ -1360,8 +1384,10 @@ def _load() -> dict:
     if (
         not isinstance(artifacts, dict)
         or artifacts.get("ownerKey") != "authenticated_owner_user_id"
-        or artifacts.get("maximumContentBytes") != 8 * 1024 * 1024
-        or artifacts.get("maximumRowsPerConversation") != 1000
+        or artifacts.get("contentPolicy") != "complete-content-without-byte-quota"
+        or "maximumContentBytes" in artifacts
+        or artifacts.get("countPolicy") != "complete-conversation-count-without-admission-quota"
+        or "maximumRowsPerConversation" in artifacts
         or not isinstance(tool_result_artifacts, dict)
         or tool_result_artifacts.get("ownerKey") != "user_id"
         or tool_result_artifacts.get("maximumContentBytes") != 16 * 1024 * 1024
@@ -1387,7 +1413,8 @@ def _load() -> dict:
         != "model_routing_secrets_by_reference"
         or model_routing.get("secretUpdatedIndexNamespace")
         != "model_routing_secrets_by_updated"
-        or model_routing.get("maximumDocumentBytes") != 8 * 1024 * 1024
+        or model_routing.get("maximumMigrationCiphertextBytes") != 8 * 1024 * 1024
+        or model_routing.get("documentsHaveNoAdmissionByteQuota") is not True
         or model_routing.get("maximumSecretReferenceCharacters") != 256
         or model_routing.get("maximumCiphertextCharacters") != 32768
         or model_routing.get("maximumKeyHintCharacters") != 64
@@ -1456,7 +1483,8 @@ def _load() -> dict:
         != "conversation_recency_directory_state"
         or conversations.get("maximumRecencyDirectoryEntries") != 128
         or conversations.get("maximumRecencyDirectoryBackfillRowsPerTransaction") != 64
-        or conversations.get("maximumProjectRelinkConversationCandidates") != 10_000
+        or conversations.get("projectRelinkAdmission") != "complete-owner-scoped-active-and-trash-without-count-quota"
+        or "maximumProjectRelinkConversationCandidates" in conversations
     ):
         raise ValueError("Tofu-DB conversations table must preserve scoped ownership and ID claims")
     if (
@@ -1614,9 +1642,7 @@ def _render() -> str:
         f"{search_projection['maximumBytesPerOwner']};",
         "pub const SEARCH_PROJECTION_VOLUME_FREE_PERCENT: u64 = "
         f"{search_projection['observedVolumeFreePercent']};",
-        f"pub const MAX_TRANSACTION_IR_STEPS: usize = {bounds['maximumSteps']};",
-        f"pub const MAX_TRANSACTION_IR_SLOTS: usize = {bounds['maximumSlots']};",
-        f"pub const MAX_TRANSACTION_IR_LITERAL_BYTES: usize = {bounds['maximumLiteralBytes']};",
+        f"pub const MAX_LEGACY_DOCUMENT_BYTES: usize = {bounds['maximumLegacyDocumentBytes']};",
         "pub const MAX_TASK_RESULT_DOCUMENT_BYTES: usize = "
         f"{records['taskResultMaximumBytes']};",
         "pub const TASK_RESULT_DOCUMENT_NAMESPACE: &str = "
@@ -1669,6 +1695,10 @@ def _render() -> str:
         f"{page_packing['targetBytes']};",
         "pub const MAX_ENTITY_PAGE_BYTES: usize = "
         f"{page_packing['maximumBytes']};",
+        "pub const ENTITY_PAGE_WRITE_VERSION: u32 = "
+        f"{document['entityPageCodec']['writeVersion']};",
+        "pub const MAX_ENTITY_PAGE_EXPANDED_BYTES: usize = "
+        f"{document['entityPageCodec']['maximumExpandedBytes']};",
         "pub const MIN_ENTITY_INTERNAL_SPLIT_CHILDREN: usize = "
         f"{page_packing['minimumChildrenPerSplitPage']};",
         "pub const MAX_ENTITY_KEY_BYTES: usize = "
@@ -1677,8 +1707,6 @@ def _render() -> str:
         f"{physical_bounds['maximumEntityInlineValueBytes']};",
         "pub const MAX_ENTITY_RANGE_ROWS: usize = "
         f"{physical_bounds['maximumEntityRangeRows']};",
-        "pub const MAX_ENTITY_TRANSACTION_WRITES: usize = "
-        f"{physical_bounds['maximumEntityTransactionWrites']};",
         "pub const MAX_ENTITY_REACHABILITY_PAGES: usize = "
         f"{physical_bounds['maximumEntityReachabilityPages']};",
         "pub const MAX_ENTITY_REACHABILITY_FRONTIER: usize = "
@@ -1693,16 +1721,10 @@ def _render() -> str:
         f"{physical_bounds['maximumEntityMountConsolidationBytes']};",
         "pub const MAX_STREAM_EVENT_BYTES: usize = "
         f"{physical_bounds['maximumStreamEventBytes']};",
-        "pub const MAX_STREAM_APPEND_EVENTS: usize = "
-        f"{physical_bounds['maximumStreamAppendEvents']};",
-        "pub const MAX_STREAM_APPEND_BYTES: usize = "
-        f"{physical_bounds['maximumStreamAppendBytes']};",
         "pub const MAX_STREAM_READ_EVENTS: usize = "
         f"{physical_bounds['maximumStreamReadEvents']};",
         "pub const MAX_STREAM_READ_BYTES: usize = "
         f"{physical_bounds['maximumStreamReadBytes']};",
-        "pub const MAX_TRANSACTION_STREAM_APPENDS: usize = "
-        f"{physical_bounds['maximumTransactionStreamAppends']};",
         "pub const PERSISTENT_ENTITY_ROOT_PIN_NAMESPACE: &str = "
         f'"{persistent_snapshots["rootPinNamespace"]}";',
         "pub const PERSISTENT_ENTITY_ROOT_PIN_CATALOG_NAMESPACE: &str = "
@@ -1832,6 +1854,10 @@ def _render() -> str:
         "pub const MIN_AUTHORITY_GC_PAYLOAD_COMPACTION_BLOCKS: usize = "
         f"{authority_gc['minimumPayloadCompactionBlocks']};",
         f'pub const DESKTOP_PREFERENCE_NAMESPACE: &str = "{table["physicalNamespace"]}";',
+        'pub const BILLING_LEDGER_KINDS: &[&str] = &[' + ', '.join(json.dumps(kind) for kind in billing['ledgerKinds']) + '];',
+        f'pub const BILLING_NATIVE_ADMISSION_KIND: &str = "{billing["nativeAdmission"]["ledgerKind"]}";',
+        f'pub const BILLING_REQUEST_ADMISSION_KIND: &str = "{billing["requestSettlement"]["admissionKind"]}";',
+        f'pub const BILLING_REQUEST_INVOICE_KIND: &str = "{billing["requestSettlement"]["invoiceKind"]}";',
         f'pub const BILLING_WALLET_NAMESPACE: &str = "{billing["walletNamespace"]}";',
         f'pub const BILLING_LEDGER_NAMESPACE: &str = "{billing["ledgerNamespace"]}";',
         f'pub const BILLING_LEDGER_ID_CLAIM_NAMESPACE: &str = "{billing["ledgerIdClaimNamespace"]}";',
@@ -1921,11 +1947,6 @@ def _render() -> str:
         f'pub const RATE_LIMIT_COUNT_NAMESPACE: &str = "{rate_limits["countNamespace"]}";',
         f'pub const DAILY_COST_DOCUMENT_NAMESPACE: &str = "{daily_costs["physicalNamespace"]}";',
         f'pub const DAILY_COST_COUNT_NAMESPACE: &str = "{daily_costs["countNamespace"]}";',
-        "pub const MAX_DAILY_COST_DOCUMENT_BYTES: usize = "
-        f"{daily_costs['maximumDocumentBytes']};",
-        f"pub const MAX_DAILY_COST_MONTH_ROWS: usize = {daily_costs['maximumMonthRows']};",
-        "pub const MAX_DAILY_COST_PERSISTED_DATES: usize = "
-        f"{daily_costs['maximumPersistedDateProbes']};",
         f'pub const ORCHESTRATION_DEFINITION_DOCUMENT_NAMESPACE: &str = "{orchestration_definitions["documentNamespace"]}";',
         f'pub const ORCHESTRATION_DEFINITION_ID_CLAIM_NAMESPACE: &str = "{orchestration_definitions["tenantGlobalIdClaimNamespace"]}";',
         "pub const ORCHESTRATION_DEFINITION_UPDATED_INDEX_NAMESPACE: &str =\n"
@@ -1995,8 +2016,6 @@ def _render() -> str:
         f'pub const INTEGRATION_EVENT_NAMESPACE: &str = "{integration["eventNamespace"]}";',
         f'pub const INTEGRATION_EVENT_SEQUENCE_NAMESPACE: &str = "{integration["eventSequenceNamespace"]}";',
         f'pub const INTEGRATION_EVENT_COUNT_NAMESPACE: &str = "{integration["eventCountNamespace"]}";',
-        f"pub const MAX_INTEGRATION_WORKSPACES_PER_OWNER: usize = {integration['maximumWorkspacesPerOwner']};",
-        f"pub const MAX_INTEGRATION_ACTIVE_WORKSPACES: usize = {integration['maximumActiveWorkspacesPerAuthority']};",
         f"pub const MAX_INTEGRATION_STATUS_ROWS: usize = {integration['maximumStatusRows']};",
         f"pub const MAX_INTEGRATION_EVENTS_PER_PROJECT: usize = {integration['maximumEventsPerProject']};",
         f"pub const MAX_INTEGRATION_STATUS_EVENTS: usize = {integration['maximumStatusEvents']};",
@@ -2011,30 +2030,8 @@ def _render() -> str:
         f'pub const PROJECT_BRAIN_UPDATED_INDEX_NAMESPACE: &str = "{project_brain["updatedIndexNamespace"]}";',
         "pub const MAX_PROJECT_BRAIN_PROJECT_KEY_CHARACTERS: usize = "
         f"{project_brain['maximumProjectKeyCharacters']};",
-        "pub const MAX_PROJECT_BRAIN_DOCUMENT_BYTES: usize = "
-        f"{project_brain['maximumDocumentBytes']};",
-        "pub const MAX_PROJECT_BRAIN_ACTIVE_WORK: usize = "
-        f"{project_brain['maximumActiveWorkItems']};",
-        "pub const MAX_PROJECT_BRAIN_WORK_HISTORY: usize = "
-        f"{project_brain['maximumWorkHistoryItems']};",
-        "pub const MAX_PROJECT_BRAIN_CHANGED_PATHS: usize = "
-        f"{project_brain['maximumChangedPathsPerWork']};",
-        "pub const MAX_PROJECT_BRAIN_ARTIFACTS_PER_WORK: usize = "
-        f"{project_brain['maximumArtifactsPerWork']};",
-        "pub const MAX_PROJECT_BRAIN_NARRATIVES: usize = "
-        f"{project_brain['maximumNarratives']};",
         "pub const MAX_PROJECT_BRAIN_NARRATIVE_TEXT_BYTES: usize = "
         f"{project_brain['maximumNarrativeTextBytes']};",
-        "pub const MAX_PROJECT_BRAIN_WATCH_ITEMS: usize = "
-        f"{project_brain['maximumWatchItems']};",
-        "pub const MAX_PROJECT_BRAIN_CHECKER_VERSIONS: usize = "
-        f"{project_brain['maximumCheckerVersions']};",
-        "pub const MAX_PROJECT_BRAIN_CHARTER_DECISIONS: usize = "
-        f"{project_brain['maximumCharterDecisions']};",
-        "pub const MAX_PROJECT_BRAIN_CURSORS: usize = "
-        f"{project_brain['maximumCursors']};",
-        "pub const MAX_PROJECT_BRAIN_EVENT_BYTES: usize = "
-        f"{project_brain['maximumEventBytes']};",
         "pub const PROJECT_BRAIN_EVENT_CHECKPOINT_THRESHOLD: u64 = "
         f"{project_brain['eventCheckpointThreshold']};",
         "pub const PROJECT_BRAIN_EVENT_CHECKPOINT_TAIL: u64 = "
@@ -2042,6 +2039,7 @@ def _render() -> str:
         f'pub const SCHEDULER_TASK_DOCUMENT_NAMESPACE: &str = "{scheduler["physicalNamespace"]}";',
         f'pub const SCHEDULER_TASK_ID_CLAIM_NAMESPACE: &str = "{scheduler["tenantGlobalIdClaimNamespace"]}";',
         f'pub const SCHEDULER_TASK_SYSTEM_KEY_CLAIM_NAMESPACE: &str = "{scheduler["systemKeyClaimNamespace"]}";',
+        f'pub const SCHEDULER_TASK_EXECUTION_INDEX_NAMESPACE: &str = "{scheduler["executionIndexNamespace"]}";',
         f'pub const SCHEDULER_TASK_CREATED_INDEX_NAMESPACE: &str = "{scheduler["createdIndexNamespace"]}";',
         "pub const SCHEDULER_TASK_ENABLED_CREATED_INDEX_NAMESPACE: &str =\n"
         f'    "{scheduler["enabledCreatedIndexNamespace"]}";',
@@ -2071,12 +2069,8 @@ def _render() -> str:
         f'pub const QUEUE_GLOBAL_LEASE_INDEX_NAMESPACE: &str = "{queue["tenantGlobalLeaseIndexNamespace"]}";',
         f'pub const QUEUE_AUTOPILOT_MARKER_NAMESPACE: &str = "{queue["autopilotMarkerNamespace"]}";',
         f'pub const QUEUE_GLOBAL_AUTOPILOT_INDEX_NAMESPACE: &str = "{queue["tenantGlobalAutopilotIndexNamespace"]}";',
-        f"pub const MAX_QUEUE_ITEMS_PER_CONVERSATION: usize = {queue['maximumItemsPerConversation']};",
-        f"pub const MAX_QUEUE_ITEM_CORE_BYTES: usize = {queue['maximumItemCoreBytes']};",
-        f"pub const MAX_QUEUE_GLOBAL_CONVERSATION_ROWS: usize = {queue['maximumGlobalConversationRows']};",
-        f"pub const MAX_QUEUE_AUTOPILOT_MARKERS: usize = {queue['maximumAutopilotMarkers']};",
         f"pub const MAX_QUEUE_REAP_ITEMS: usize = {queue['maximumReapItems']};",
-        f"pub const MAX_QUEUE_RESPONSE_BYTES: usize = {queue['maximumResponseBytes']};",
+        f"pub const DEFAULT_QUEUE_PAGE_BYTES: usize = {queue['defaultPageBytes']};",
         f"pub const MAX_QUEUE_ID_CHARACTERS: usize = {queue['maximumIdCharacters']};",
         f"pub const MAX_QUEUE_CONVERSATION_ID_CHARACTERS: usize = {queue['maximumConversationIdCharacters']};",
         f'pub const TIMER_DOCUMENT_NAMESPACE: &str = "{timers["physicalNamespace"]}";',
@@ -2113,10 +2107,6 @@ def _render() -> str:
         f"{rate_limits['maximumWindowCounterReads']};",
         f'pub const RECENT_PROJECT_DOCUMENT_NAMESPACE: &str = "{recent_projects["physicalNamespace"]}";',
         f'pub const RECENT_PROJECT_COUNT_NAMESPACE: &str = "{recent_projects["countNamespace"]}";',
-        "pub const MAX_RECENT_PROJECTS_PER_OWNER: usize = "
-        f"{recent_projects['maximumProjectsPerOwner']};",
-        "pub const MAX_RECENT_PROJECT_TOUCH_BATCH: usize = "
-        f"{recent_projects['maximumTouchBatch']};",
         "pub const MAX_RECENT_PROJECT_PATH_CHARACTERS: usize = "
         f"{recent_projects['maximumPathCharacters']};",
         f'pub const PROVIDER_DOCUMENT_NAMESPACE: &str = "{providers["physicalNamespace"]}";',
@@ -2129,10 +2119,9 @@ def _render() -> str:
         f'pub const ARTIFACT_DEDUPE_NAMESPACE: &str = "{artifacts["dedupeNamespace"]}";',
         f'pub const ARTIFACT_PATH_HEAD_NAMESPACE: &str = "{artifacts["pathHeadNamespace"]}";',
         f'pub const ARTIFACT_PARENT_INDEX_NAMESPACE: &str = "{artifacts["parentIndexNamespace"]}";',
-        f'pub const MAX_ARTIFACT_BYTES: usize = {artifacts["maximumContentBytes"]};',
-        f'pub const MAX_ARTIFACT_ROWS_PER_CONVERSATION: usize = {artifacts["maximumRowsPerConversation"]};',
         f'pub const TOOL_RESULT_ARTIFACT_NAMESPACE: &str = "{tool_result_artifacts["physicalNamespace"]}";',
         f'pub const TOOL_RESULT_EXPIRY_INDEX_NAMESPACE: &str = "{tool_result_artifacts["expiryIndexNamespace"]}";',
+        f'pub const TOOL_RESULT_CURSOR_KEY_NAMESPACE: &str = "{tool_result_artifacts["cursorKeyNamespace"]}";',
         f'pub const MAX_TOOL_RESULT_ARTIFACT_BYTES: usize = {tool_result_artifacts["maximumContentBytes"]};',
         f'pub const MAX_TOOL_RESULT_RANGE_BYTES: usize = {tool_result_artifacts["maximumRangeBytes"]};',
         f'pub const MAX_TOOL_RESULT_TTL_MILLISECONDS: u64 = {tool_result_artifacts["maximumTtlMilliseconds"]};',
@@ -2233,8 +2222,6 @@ def _render() -> str:
         f"{knowledge_documents['maximumJsonArrayCharacters']};",
         "pub const MAX_KNOWLEDGE_TERM_CHARACTERS: usize = "
         f"{knowledge_documents['maximumTermCharacters']};",
-        "pub const MAX_KNOWLEDGE_TERMS_PER_CHUNK: usize = "
-        f"{knowledge_documents['maximumTermsPerChunk']};",
         "pub const MAX_KNOWLEDGE_SEARCH_TOKENS: usize = "
         f"{knowledge_documents['maximumSearchTokens']};",
         "pub const MAX_KNOWLEDGE_PAGE_ROWS: usize = "
@@ -2334,7 +2321,6 @@ def _render() -> str:
         f'pub const MAX_RESEARCH_ARTIFACT_DOCUMENT_BYTES: usize = {research_artifacts["maximumDocumentBytes"]};',
         f'pub const MAX_RESEARCH_RESPONSE_BYTES: usize = {research_artifacts["maximumResponseBytes"]};',
         f'pub const RESEARCH_WORKSPACE_DOCUMENT_NAMESPACE: &str = "{research_workspaces["physicalNamespace"]}";',
-        f'pub const MAX_RESEARCH_WORKSPACE_BYTES: usize = {research_workspaces["maximumDocumentBytes"]};',
         f'pub const OPTIMIZER_PROPOSAL_DOCUMENT_NAMESPACE: &str = "{optimizer_proposals["physicalNamespace"]}";',
         f'pub const OPTIMIZER_PROPOSAL_CREATED_INDEX_NAMESPACE: &str = "{optimizer_proposals["createdIndexNamespace"]}";',
         "pub const OPTIMIZER_PROPOSAL_STATUS_INDEX_NAMESPACE: &str =\n"
@@ -2349,11 +2335,7 @@ def _render() -> str:
         f'    "{optimizer_actions["proposalIndexNamespace"]}";',
         f'pub const OPTIMIZER_ACTION_EXPIRY_INDEX_NAMESPACE: &str = "{optimizer_actions["expiryIndexNamespace"]}";',
         f'pub const OPTIMIZER_ACTION_COUNT_NAMESPACE: &str = "{optimizer_actions["countNamespace"]}";',
-        f'pub const MAX_OPTIMIZER_PROPOSALS_PER_OWNER: usize = {optimizer_proposals["maximumRowsPerOwner"]};',
-        f'pub const MAX_OPTIMIZER_ACTIONS_PER_OWNER: usize = {optimizer_actions["maximumRowsPerOwner"]};',
-        f'pub const MAX_OPTIMIZER_LIST_ROWS: usize = {optimizer_proposals["maximumListRows"]};',
-        f'pub const MAX_OPTIMIZER_DOCUMENT_BYTES: usize = {optimizer_proposals["maximumDocumentBytes"]};',
-        f'pub const MAX_OPTIMIZER_RESPONSE_BYTES: usize = {optimizer_proposals["maximumResponseBytes"]};',
+        f'pub const DEFAULT_OPTIMIZER_LIST_ROWS: usize = {optimizer_proposals["defaultListRows"]};',
         "pub const MAX_PROVIDER_TENANT_LABEL_CHARACTERS: usize = "
         f"{providers['maximumTenantLabelCharacters']};",
         f'pub const MODEL_ROUTING_AUTHORITY_NAMESPACE: &str = "{model_routing["authorityNamespace"]}";',
@@ -2368,8 +2350,8 @@ def _render() -> str:
         f'    "{model_routing["secretReferenceIndexNamespace"]}";',
         "pub const MODEL_ROUTING_SECRET_UPDATED_INDEX_NAMESPACE: &str = "
         f'"{model_routing["secretUpdatedIndexNamespace"]}";',
-        "pub const MAX_MODEL_ROUTING_DOCUMENT_BYTES: usize = "
-        f"{model_routing['maximumDocumentBytes']};",
+        "pub const MAX_MODEL_ROUTING_MIGRATION_CIPHERTEXT_BYTES: usize = "
+        f"{model_routing['maximumMigrationCiphertextBytes']};",
         "pub const MAX_MODEL_ROUTING_SECRET_REFERENCE_CHARACTERS: usize = "
         f"{model_routing['maximumSecretReferenceCharacters']};",
         "pub const MAX_MODEL_ROUTING_CIPHERTEXT_CHARACTERS: usize = "
@@ -2472,8 +2454,6 @@ def _render() -> str:
         f'{conversations["maximumRecencyDirectoryEntries"]};',
         "pub const MAX_RECENCY_DIRECTORY_BACKFILL_ROWS_PER_TRANSACTION: usize = "
         f'{conversations["maximumRecencyDirectoryBackfillRowsPerTransaction"]};',
-        "pub const MAX_PROJECT_RELINK_CONVERSATION_CANDIDATES: usize = "
-        f"{conversations['maximumProjectRelinkConversationCandidates']};",
         f'pub const TURN_DOCUMENT_NAMESPACE: &str = "{turns["physicalNamespace"]}";',
         f'pub const TURN_LANE_INDEX_NAMESPACE: &str = "{turns["laneIndexNamespace"]}";',
         f'pub const TURN_ACTIVITY_INDEX_NAMESPACE: &str = "{turns["activityIndexNamespace"]}";',
@@ -2501,6 +2481,12 @@ def _render() -> str:
         f'{turns["maximumDispatchableAttemptsPerQuery"]};',
         "pub const TURN_LANE_COMPACTION_INDEX_NAMESPACE: &str = "
         f'"{turns["laneCompactionIndexNamespace"]}";',
+        "pub const MAX_HUMAN_GUIDANCE_RESPONSE_CHARACTERS: usize = "
+        f'{turns["humanGuidanceAnswer"]["maximumResponseCharacters"]};',
+        "pub const MAX_HUMAN_GUIDANCE_IDENTITY_CHARACTERS: usize = "
+        f'{turns["humanGuidanceAnswer"]["maximumIdentityCharacters"]};',
+        "pub const MAX_HUMAN_GUIDANCE_PAYLOAD_BYTES: usize = "
+        f'{turns["humanGuidanceAnswer"]["maximumPayloadBytes"]};',
         "pub const MAX_TURN_COMPACTION_METADATA_ROWS: usize = "
         f'{turns["maximumCompactionMetadataRows"]};',
         "pub const MAX_TURN_COMPACTION_PROJECTION_UPDATES: usize = "
@@ -2570,6 +2556,8 @@ def _render() -> str:
         f'pub const MAX_ATTEMPT_EVENT_PAGE_BYTES: usize = {turns["maximumAttemptEventPageBytes"]};',
         "pub const ATTEMPT_EVENT_RETENTION_INDEX_NAMESPACE: &str = "
         f'"{turns["attemptEventRetentionIndexNamespace"]}";',
+        "pub const CONVERSATION_EVENT_RETIREMENT_NAMESPACE: &str = "
+        f'"{turns["conversationEventRetirementNamespace"]}";',
         "pub const MAX_ATTEMPT_EVENT_PRUNE_ATTEMPTS_PER_TRANSACTION: usize = "
         f'{turns["maximumAttemptEventPruneAttemptsPerTransaction"]};',
         "pub const MAX_ATTEMPT_EVENT_PRUNE_ROWS_PER_TRANSACTION: usize = "
@@ -2632,7 +2620,9 @@ def _render() -> str:
                         ("FROZEN_TRANSCRIPT_PAGE_NAMESPACE", "pageNamespace")]:
         lines.append(f'pub const {name}: &str = "{frozen[field]}";')
     archive = document["transcriptArchives"]
-    for name, field in [("TRANSCRIPT_ARCHIVE_MANIFEST_NAMESPACE", "manifestNamespace"),
+    for name, field in [("TRANSCRIPT_ARCHIVE_FORMAT", "format"),
+                        ("TRANSCRIPT_ARCHIVE_RETIRED_FORMAT", "retiredFormat"),
+                        ("TRANSCRIPT_ARCHIVE_MANIFEST_NAMESPACE", "manifestNamespace"),
                         ("TRANSCRIPT_ARCHIVE_PAGE_NAMESPACE", "pageNamespace")]:
         lines.append(f'pub const {name}: &str = "{archive[field]}";')
     for name, field in [("MAX_TRANSCRIPT_ARCHIVE_PAGES", "maximumPages"),
@@ -2775,9 +2765,8 @@ def _render_paper_build() -> str:
     certified = {"retained_chunk_bytes": 262144, "retained_receipt_bytes": 262144,
                  "retained_upload_seconds": 300, "retained_gc_chunks": 32,
                  "retained_gc_scan_rows": 128,
-                 "build_output_bytes": 134217728, "artifact_bytes": 67108864,
                  "viewer_lease_seconds": 240,
-                 "document_request_seconds": 3600, "discovery_candidates": 64,
+                 "document_request_seconds": 3600,
                  "reading_state_bytes": 1024}
     if any(limits[key] != value for key, value in certified.items()):
         raise ValueError("native retained artifact resource bounds changed")
@@ -2856,7 +2845,7 @@ def main() -> int:
     native = search['nativeProjection']
     if type(native['headerScanBatch']) is not int or not 1 <= native['headerScanBatch'] <= search['limits']['candidateScanPage']:
         raise ValueError('invalid native search header batch')
-    if native['formatVersion'] != 2 or native['invalidationTokenBytes'] != 16 or native['legacyInvalidationTokenBytes'] != 8:
+    if native['formatVersion'] != 4 or native['invalidationTokenBytes'] != 16 or native['legacyInvalidationTokenBytes'] != 8:
         raise ValueError('native search projection encoding differs')
     search_lines.extend([
         f"pub const PROJECTION_FORMAT_VERSION: u8 = {native['formatVersion']};",
@@ -2864,6 +2853,25 @@ def main() -> int:
         f"pub const DIRTY_TOKEN_BYTES: usize = {native['invalidationTokenBytes']};",
         f"pub const LEGACY_DIRTY_TOKEN_BYTES: usize = {native['legacyInvalidationTokenBytes']};",
     ])
+    # Existing search-volume owners consume only explicitly declared geometry.
+    # Retain those contract constants when regenerating unrelated IR operations.
+    volume_guard = native.get('volumeGuard')
+    if volume_guard is not None:
+        volume_names = {
+            'SEARCH_VOLUME_BYTES_RESERVE_DIVISOR': 'bytesReserveDivisor',
+            'SEARCH_VOLUME_MINIMUM_BYTES_RESERVE': 'minimumBytesReserve',
+            'SEARCH_VOLUME_MAXIMUM_BYTES_RESERVE': 'maximumBytesReserve',
+            'SEARCH_VOLUME_INODES_RESERVE_DIVISOR': 'inodesReserveDivisor',
+            'SEARCH_VOLUME_MINIMUM_INODES_RESERVE': 'minimumInodesReserve',
+            'SEARCH_VOLUME_MAXIMUM_INODES_RESERVE': 'maximumInodesReserve',
+            'SEARCH_VOLUME_MAXIMUM_RESERVE_FRACTION_DIVISOR': 'maximumReserveFractionDivisor',
+        }
+        for name, key in volume_names.items():
+            value = volume_guard[key]
+            if type(value) is not int or value <= 0:
+                raise ValueError(f'invalid conversation search volume geometry: {key}')
+            search_lines.append(f'pub const {name}: u64 = {value};')
+    python_lines.append(f'NATIVE_SEARCH_VOLUME_GUARD = {volume_guard!r}')
     for name, key in search_names.items():
         value = search['limits'][key]
         if type(value) is not int or value <= 0:
@@ -2903,12 +2911,12 @@ def main() -> int:
         'WorkerJobStatus = Literal[' + ', '.join(repr(s) for s in worker['states']) + ']',
         'WorkerTerminalStatus = Literal[' + ', '.join(repr(s) for s in worker['terminalStates']) + ']',
     ]
-    outputs = {ROOT / 'lib/storage_sidecar/generated_storage_receipts.py': '\n'.join(receipt_lines) + '\n',
+    outputs = {ROOT / 'lib/storage_authority_sql/generated_storage_receipts.py': '\n'.join(receipt_lines) + '\n',
                ROOT / "packages/tofu-db/src/generated_paper_build.rs": _render_paper_build(),
                OUTPUT: _render(), MIGRATION_OUTPUT: "\n".join(python_lines) + "\n",
                SEARCH_OUTPUT: "\n".join(search_lines) + "\n"}
     outputs[ROOT / 'lib/storage/generated_worker_job_contract.py'] = '\n'.join(worker_lines) + '\n'
-    outputs[ROOT / 'lib/storage_sidecar/native_worker_clock/generated_clock_contract.h'] = (
+    outputs[ROOT / 'lib/storage_authority_sql/native_worker_clock/generated_clock_contract.h'] = (
         '/* Generated by scripts/gen_tofudb_ir_contract.py; do not edit. */\n'
         '#ifndef TOFU_WORKER_CLOCK_CONTRACT_H\n#define TOFU_WORKER_CLOCK_CONTRACT_H\n'
         f'#define TOFU_WORKER_CLOCK_FORMAT {json.dumps(server_clock["format"])}\n'
@@ -2917,6 +2925,16 @@ def main() -> int:
         f'#define TOFU_WORKER_CLOCK_MAX_MS UINT64CONST({maximum_now})\n'
         f'#define TOFU_WORKER_CLOCK_EPOCH_BYTES {lease["epochCharacters"] // 2}\n'
         '#endif\n')
+    billing = next(table for table in contract['logicalTables'] if table['name'] == 'billing_wallets_and_ledger')
+    outputs[ROOT / 'lib/storage_authority_sql/generated_billing_contract.py'] = (
+        '# Generated by scripts/gen_tofudb_ir_contract.py; do not edit.\n'
+        '# Source: contracts/tofudb_ir_v1.json billing_wallets_and_ledger.\n'
+        f'LEDGER_KINDS = frozenset({billing["ledgerKinds"]!r})\n'
+        f'NATIVE_ADMISSION_KIND = {billing["nativeAdmission"]["ledgerKind"]!r}\n'
+        f'REQUEST_ADMISSION_KIND = {billing["requestSettlement"]["admissionKind"]!r}\n'
+        f'REQUEST_INVOICE_KIND = {billing["requestSettlement"]["invoiceKind"]!r}\n'
+        f'MAX_REQUEST_INVOICE_CHARACTERS = {billing["requestSettlement"]["maximumInvoiceCharacters"]!r}\n'
+        f'REQUEST_INVOICE_SCHEMA = {billing["requestSettlement"]["invoiceSchema"]!r}\n')
     stale = False
     for path, rendered in outputs.items():
         if args.check:

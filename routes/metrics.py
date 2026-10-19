@@ -605,21 +605,15 @@ def _collect_infra_metrics(out: list) -> None:
     except Exception as e:
         logger.debug('[Metrics] idempotency block failed: %s', e)
     try:
-        from lib import rate_limit_api
+        from lib.rate_limit import rate_limit_api
         s = rate_limit_api.api_rate_limit_stats()
         _emit_gauge(out, 'tofu_rate_limit_buckets',
-                     'In-memory API-key rate-limit entries',
+                     'Process-local credential spending states',
                      [({}, s.get('entries', 0))])
-        _emit_gauge(out, 'tofu_rate_limit_bucket_capacity',
-                     'Maximum resident API-key rate-limit entries',
-                     [({}, s.get('capacity', 0))])
-        _emit_counter(out, 'tofu_rate_limit_bucket_evictions_total',
-                      'API-key rate-limit entries evicted at capacity',
-                      [({}, s.get('capacity_evictions', 0))])
     except Exception as e:
         logger.debug('[Metrics] rate-limit block failed: %s', e)
     try:
-        from lib.rate_limit_store import rate_limit_store_stats
+        from lib.rate_limit.rate_limit_store import rate_limit_store_stats
         s = rate_limit_store_stats()
         if s.get('backend') == 'memory':
             _emit_gauge(out, 'tofu_rate_limit_memory_buckets',
@@ -731,10 +725,12 @@ def _collect_infra_metrics(out: list) -> None:
             _emit_gauge(out, f'tofu_task_event_delivery_{name}',
                         f'Task event delivery {name.replace("_", " ")}',
                         [({}, delivery.get(name, 0))])
+        from lib.tasks_pkg.event_delivery_profile_metrics import emit_delivery_profile
+        emit_delivery_profile(out, delivery.get('performance_profile', {}), _emit_counter, _emit_gauge)
     except Exception as e:
         logger.debug('[Metrics] task event delivery block failed: %s', e)
     try:
-        from lib.runtime_state_store import get_store
+        from lib.runtime.runtime_state_store import get_store
         store = get_store()
         health_fn = getattr(store, 'health', None)
         if callable(health_fn):
@@ -753,7 +749,7 @@ def _collect_infra_metrics(out: list) -> None:
     except Exception as e:
         logger.debug('[Metrics] runtime-state block failed: %s', e)
     try:
-        from lib.http_client import http_pool_stats
+        from lib.http_transport.client import http_pool_stats
         pool = http_pool_stats()
         _emit_gauge(out, 'tofu_http_sync_sessions',
                     'Thread-local pooled requests sessions',

@@ -96,7 +96,7 @@ def test_download_is_bounded(tmp_path, monkeypatch, budget):
     def stream(*args, **kwargs):
         yield Response()
 
-    monkeypatch.setattr('lib.http_client.http_stream', stream)
+    monkeypatch.setattr('lib.http_transport.client.http_stream', stream)
     if budget == 'bytes':
         monkeypatch.setattr(mirror, '_DOWNLOAD_MAX_BYTES', 6)
     else:

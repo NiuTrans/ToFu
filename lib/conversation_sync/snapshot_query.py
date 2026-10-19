@@ -51,6 +51,7 @@ class _SnapshotQueryKey:
     turn_limit: int | None
     include_artifact_hint: bool
 
+    max_projection_bytes: int = 0
 
 @dataclass(slots=True)
 class _SharedSnapshotView:
@@ -150,6 +151,8 @@ class ConversationSnapshotQuery:
         project_representation_kwargs: Mapping[str, Any] | None = None,
         turn_limit: int | None = None,
         include_artifact_hint: bool = False,
+
+        max_projection_bytes: int = 0,
     ) -> dict[str, Any]:
         """Return a request-local envelope with a flight-shared nested view."""
         key = _SnapshotQueryKey(
@@ -157,8 +160,17 @@ class ConversationSnapshotQuery:
             conversation_id=conversation_id,
             turn_limit=turn_limit,
             include_artifact_hint=bool(include_artifact_hint),
+
+            max_projection_bytes=max_projection_bytes,
         )
         def load() -> dict[str, Any]:
+
+            if max_projection_bytes:
+                return self._loader(
+                    conversation_id, user_id, turn_limit,
+                    include_artifact_hint=include_artifact_hint,
+                    max_projection_bytes=max_projection_bytes,
+                )
             if include_artifact_hint:
                 return self._loader(
                     conversation_id,

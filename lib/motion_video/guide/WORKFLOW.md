@@ -7,6 +7,21 @@
 > For the composition HTML contract read `COMPOSITION_CONTRACT.md` next;
 > copy `skeleton.html` as the starting point of every scene.
 
+## Choose the right film structure first
+
+- **Continuous motion film / product launch / one-take:** use
+  [CONTINUOUS_FILM.md](CONTINUOUS_FILM.md). Author one persistent composition,
+  explicitly carry objects/camera between editorial beats, inspect boundary
+  contact sheets, then render once. Do not split it into clips and hope that
+  crossfades create continuity. The runnable original starter lives in
+  `guide/continuous/` (`index.html` + `continuity.json`).
+- **Narrated explainer / source-heavy multi-scene film:** use the existing
+  storyboard, scene rendering and assembly pipeline below. `produce_video`
+  still uses this scene-based engine; it does not automatically select the
+  continuous-film path. Neither path substitutes a heuristic for watching the
+  result. These tools belong to the optional `production` capability plugin
+  and low-level tools require a project; do not silently change that policy.
+
 ## Pipeline
 
 1. **Get the transcript** — an SRT the user pasted (write it to a file) or

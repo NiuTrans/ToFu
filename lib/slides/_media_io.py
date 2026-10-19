@@ -123,7 +123,7 @@ def _stream_http(
     if abort_check is not None and abort_check():
         raise InterruptedError('slide media download aborted')
 
-    from lib.http_client import http_stream
+    from lib.http_transport.client import http_stream
     total = 0
     digest = hashlib.sha256()
     with http_stream('GET', url, timeout=timeout) as response:

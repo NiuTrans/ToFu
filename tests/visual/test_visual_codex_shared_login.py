@@ -175,18 +175,23 @@ def test_reuse_expired_reason_is_actionable(page, http_status):
 
 @pytest.mark.parametrize('proxy_status', [404, 405])
 def test_reuse_through_post_rejecting_proxy(page, proxy_status):
-    page.route(re.compile(r'.*/api/(?:v4/)?oauth/status(?:\?.*)?$'),
-               lambda route: route.fulfill(json={'codex': {'authenticated': False,
-                   'shared_login_reuse_supported': True}}))
+    connected = False
+    def status(route):
+        route.fulfill(json={'codex': {'authenticated': connected,
+            'credential_source': 'local_codex' if connected else '',
+            'shared_login_reuse_supported': True}})
+    page.route(re.compile(r'.*/api/(?:v4/)?oauth/status(?:\?.*)?$'), status)
     calls = []
 
     def login(route):
+        nonlocal connected
         request = route.request
         calls.append(request.method)
         if request.method == 'POST':
             assert request.post_data_json == {'provider': 'codex', 'reuse_only': True}
             route.fulfill(status=proxy_status, json={'error': 'Proxy rejected POST'})
         else:
+            connected = True
             from urllib.parse import parse_qs, urlparse
             assert parse_qs(urlparse(request.url).query) == {
                 'provider': ['codex'], 'reuse_only': ['true']}
@@ -203,3 +208,38 @@ def test_reuse_through_post_rejecting_proxy(page, proxy_status):
     expect(page.locator('#oauthCodexSharedLogin')).to_have_attribute('data-state', 'connected')
     assert calls == ['POST', 'GET']
     assert len(page.context.pages) == before
+
+
+@pytest.mark.parametrize('width', [390, 1280])
+def test_storage_full_shows_actionable_feedback_and_can_retry(page, screenshot_dir, width):
+    page.set_viewport_size({'width': width, 'height': 900})
+    connected = False
+    def status(route):
+        route.fulfill(json={'codex': {
+            'authenticated': connected, 'shared_login_reuse_supported': True,
+            'credential_source': 'local_codex' if connected else '',
+            'provider_ready': connected}})
+    page.route(re.compile(r'.*/api/(?:v4/)?oauth/status(?:\?.*)?$'), status)
+    attempts = []
+    def login(route):
+        nonlocal connected
+        attempts.append(route.request.url)
+        if len(attempts) == 1:
+            route.fulfill(json={'provider': 'codex', 'status': 'unavailable',
+                                'auth_issue': 'codex_home_storage_full'})
+        else:
+            connected = True
+            route.fulfill(json={'provider': 'codex', 'status': 'success', 'authenticated': True,
+                                'provider_ready': True, 'credential_source': 'local_codex'})
+    page.route(re.compile(r'.*/api/(?:v4/)?oauth/login(?:\?.*)?$'), login)
+    _wait_ready(page)
+    page.add_locator_handler(page.locator('#obCloseX'), lambda locator: locator.click())
+    _invoke_action(page, 'openSettings')
+    _invoke_action(page, 'switchSettingsTab', 'oauth')
+    page.locator('#oauthCodexReuseBtn').click()
+    expect(page.locator('#oauthCodexSharedFeedback')).to_contain_text('inode')
+    expect(page.locator('#oauthCodexReuseBtn')).to_be_enabled()
+    page.screenshot(path=str(Path(screenshot_dir) / f'codex-storage-full-{width}.png'))
+    page.locator('#oauthCodexReuseBtn').click()
+    expect(page.locator('#oauthCodexSharedLogin')).to_have_attribute('data-state', 'connected')
+    assert len(attempts) == 2

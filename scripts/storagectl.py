@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Thin command shim; driver/path authority remains in storage_sidecar."""
+"""Thin command shim; driver/path authority remains in storage_authority_sql."""
 
 from pathlib import Path
 import sys
@@ -13,7 +13,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from lib.storage_sidecar.cli import main
+from lib.storage_authority_sql.cli import main
 
 
 if __name__ == '__main__':

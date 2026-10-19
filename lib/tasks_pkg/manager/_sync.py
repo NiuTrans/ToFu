@@ -54,30 +54,11 @@ def _update_proactive_execution_status(task: dict) -> None:
 
         owner_user_id = int(task_user_id(task))
         scheduler = get_scheduler()
-        scheduled_tasks = scheduler.list_tasks(
-            user_id=owner_user_id, include_disabled=True
-        )
-        matching = [
-            item
-            for item in scheduled_tasks
-            if item.get("task_type") == "agent"
-            and item.get("last_execution_task_id") == task_id
-        ]
-        if not matching:
-            return
         execution_status = (
-            "ok"
-            if task.get("status") == "done" and not task.get("error")
-            else "error"
+            "ok" if task.get("status") == "done" and not task.get("error") else "error"
         )
-        now = datetime.now().isoformat()
-        for scheduled_task in matching:
-            scheduler.update_task(
-                scheduled_task["id"],
-                user_id=owner_user_id,
-                last_execution_status=execution_status,
-                updated_at=now,
-            )
+        scheduler.settle_execution(task_id, user_id=owner_user_id,
+                                   status=execution_status, now=datetime.now().isoformat())
     except Exception:
         logger.warning(
             "[Scheduler] Failed to settle execution task=%s",

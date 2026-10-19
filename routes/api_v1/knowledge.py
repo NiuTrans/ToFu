@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import io
 
-from quart import Blueprint, request
+from quart import Blueprint, current_app, request
 
 from lib.api_v4 import raw_success_response
-from lib.quart_sync import request_files, send_file
+from lib.quart_sync import owned_sync_command, request_files, send_file
 
 from lib.api_response import (
     api_bad_request,
@@ -24,9 +24,6 @@ logger = get_logger(__name__)
 
 api_v1_knowledge_bp = Blueprint('api_v1_knowledge', __name__)
 
-_MAX_FILE_BYTES = 50 * 1024 * 1024
-_MAX_BATCH_BYTES = 200 * 1024 * 1024
-_MAX_BATCH_FILES = 20
 _DOCUMENT_CATEGORIES = {
     'all', 'pdf', 'document', 'spreadsheet', 'presentation', 'image',
     'email', 'ebook', 'text', 'other',
@@ -46,11 +43,6 @@ def _status_payload(
         category=category, sort=sort)
     return {
         **status,
-        'limits': {
-            'max_file_bytes': _MAX_FILE_BYTES,
-            'max_batch_bytes': _MAX_BATCH_BYTES,
-            'max_batch_files': _MAX_BATCH_FILES,
-        },
         'supported_extensions': list(SUPPORTED_EXTENSIONS),
         'privacy': (
             'local_with_opt_in_visual_provider'
@@ -217,40 +209,29 @@ def _uploaded_files() -> list:
 @require_auth
 @api_meta(
     summary='Upload and index local knowledge documents',
-    description='Multipart fields ``files`` or ``file``; up to 20 documents.',
+    description='Multipart fields ``files`` or ``file``; complete owner-scoped document batches.',
     tags=['knowledge'],
 )
+@owned_sync_command
 def knowledge_upload_v1():
     owner_user_id = int(request_user_id())
     uploads = _uploaded_files()
     if not uploads:
         return api_bad_request('No files provided', field='files')
-    if len(uploads) > _MAX_BATCH_FILES:
-        return api_bad_request(f'Too many files (max {_MAX_BATCH_FILES})', field='files')
-    if request.content_length and request.content_length > _MAX_BATCH_BYTES:
-        return api_bad_request(
-            f'Upload batch too large (max {_MAX_BATCH_BYTES // 1048576} MB)',
-            field='files')
-
     from lib.knowledge import add_document
     from lib.knowledge.ingest import KnowledgeIngestError
+    from lib.knowledge.html_application import application_html_projector
+
+    html_projector = application_html_projector(current_app)
 
     indexed = []
     errors = []
-    total = 0
     for upload in uploads:
         name = str(upload.filename or 'document')
-        raw = upload.stream.read(_MAX_FILE_BYTES + 1)
-        total += len(raw)
-        if len(raw) > _MAX_FILE_BYTES:
-            errors.append({'name': name, 'error': 'File too large (max 50 MB)'})
-            continue
-        if total > _MAX_BATCH_BYTES:
-            errors.append({'name': name, 'error': 'Upload batch exceeded 200 MB'})
-            continue
         try:
+            raw = upload.stream.read()
             indexed.append(add_document(
-                raw, name, user_id=owner_user_id))
+                raw, name, user_id=owner_user_id, html_projector=html_projector))
         except KnowledgeIngestError as exc:
             errors.append({'name': name, 'error': str(exc)})
         except Exception as exc:
@@ -293,12 +274,16 @@ def knowledge_content_v1(document_id: str):
     '/api/v1/knowledge/documents/<document_id>/reindex', methods=['POST'])
 @require_auth
 @api_meta(summary='Re-parse and reindex one local document', tags=['knowledge'])
+@owned_sync_command
 def knowledge_reindex_v1(document_id: str):
     owner_user_id = int(request_user_id())
     from lib.knowledge import reindex_document
     from lib.knowledge.ingest import KnowledgeIngestError
+    from lib.knowledge.html_application import application_html_projector
     try:
-        document = reindex_document(document_id, user_id=owner_user_id)
+        document = reindex_document(
+            document_id, user_id=owner_user_id,
+            html_projector=application_html_projector(current_app))
     except KnowledgeIngestError as exc:
         return api_bad_request(str(exc))
     if document is None:

@@ -17,7 +17,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-import lib.search_extract as sx
+import lib.search.search_extract as sx
 
 
 def _patch_dispatch(monkeypatch, reply='The answer is 42.'):

@@ -9,13 +9,13 @@ positions. It is advisory: a scan failure never changes the build verdict,
 and keys the engine log already reported are not repeated.
 """
 from __future__ import annotations
+from .contract import limit as limit
 
 import re
 from pathlib import Path
 
 from lib.paper.bib import parse_entries
 
-from .contract import limit
 from .errors import BuildError
 from .sources import read_source
 
@@ -68,8 +68,7 @@ def audit_citations(snapshot_root: Path, files: tuple[dict, ...] | list[dict],
         if budget['bytes'] > _AUDIT_BUDGET_BYTES:
             raise BuildError('audit_limit', 'Citation audit byte budget reached')
         data = read_source(snapshot_root, snapshot_root / path,
-                           limit=min(limit('source_file_bytes'),
-                                     _AUDIT_BUDGET_BYTES - budget['bytes'] + 1))
+                           limit=_AUDIT_BUDGET_BYTES - budget['bytes'] + 1)
         budget['bytes'] += len(data)
         return data.decode('utf-8', errors='replace')
 

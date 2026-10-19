@@ -155,7 +155,7 @@ def trial(loop, protocol, case, samples, concurrency, directory, memory=False):
     port = listener.getsockname()[1]
     certfile = keyfile = ''
     if protocol == 'h2':
-        from lib.server_tls import ensure_tls_certificates
+        from lib.server.server_tls import ensure_tls_certificates
         certfile, keyfile = ensure_tls_certificates(data_root=str(directory), bind_host='127.0.0.1', environ={})
     origin = f'{"https" if protocol == "h2" else "http"}://127.0.0.1:{port}'
     verify = certfile if certfile else True

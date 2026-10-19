@@ -1,0 +1,846 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "tofu.artifact-review/v1",
+  "title": "Version-bound artifact owner review",
+  "$defs": {
+    "ArtifactCriterion": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{1,80}$"
+        },
+        "text": {
+          "type": "string",
+          "maxLength": 4000,
+          "minLength": 1
+        },
+        "kind": {
+          "enum": [
+            "requirement",
+            "constraint"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "text",
+        "kind"
+      ]
+    },
+    "ArtifactRequirementsCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "const": "requirements"
+        },
+        "requirementsRevision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "objective": {
+          "type": "string",
+          "maxLength": 4000
+        },
+        "criteria": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ArtifactCriterion"
+          },
+          "maxItems": 256
+        }
+      },
+      "required": [
+        "action",
+        "requirementsRevision",
+        "objective",
+        "criteria"
+      ]
+    },
+    "ArtifactDecisionCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "const": "decision"
+        },
+        "requirementsRevision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "decisionsRevision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "criterionId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{1,80}$"
+        },
+        "criterionDigest": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "artifactDigest": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "verdict": {
+          "enum": [
+            "pass",
+            "fail"
+          ]
+        },
+        "note": {
+          "type": "string",
+          "maxLength": 8000,
+          "minLength": 1
+        },
+        "factBindings": {
+          "type": "array",
+          "maxItems": 8,
+          "items": {
+            "$ref": "#/$defs/ArtifactFactBinding"
+          }
+        }
+      },
+      "required": [
+        "action",
+        "requirementsRevision",
+        "decisionsRevision",
+        "criterionId",
+        "criterionDigest",
+        "artifactDigest",
+        "verdict",
+        "note"
+      ]
+    },
+    "ArtifactReviewCommand": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ArtifactRequirementsCommand"
+        },
+        {
+          "$ref": "#/$defs/ArtifactDecisionCommand"
+        }
+      ]
+    },
+    "ArtifactReviewEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "artifactId": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "artifactDigest": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "criterionDigest": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "verdict": {
+          "enum": [
+            "pass",
+            "fail"
+          ]
+        },
+        "note": {
+          "type": "string",
+          "maxLength": 8000
+        },
+        "reviewer": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "reviewedAt": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "factBindings": {
+          "type": "array",
+          "maxItems": 8,
+          "items": {
+            "$ref": "#/$defs/ArtifactFactEvidence"
+          }
+        }
+      },
+      "required": [
+        "artifactId",
+        "artifactDigest",
+        "criterionDigest",
+        "verdict",
+        "note",
+        "reviewer",
+        "reviewedAt"
+      ]
+    },
+    "ArtifactCriterionView": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{1,80}$"
+        },
+        "text": {
+          "type": "string",
+          "maxLength": 4000
+        },
+        "kind": {
+          "enum": [
+            "requirement",
+            "constraint"
+          ]
+        },
+        "digest": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "state": {
+          "enum": [
+            "unreviewed",
+            "stale",
+            "pass",
+            "fail"
+          ]
+        },
+        "evidence": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ArtifactReviewEvidence"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "factDependencies": {
+          "type": "array",
+          "maxItems": 8,
+          "items": {
+            "$ref": "#/$defs/ArtifactFactDependency"
+          }
+        }
+      },
+      "required": [
+        "id",
+        "text",
+        "kind",
+        "digest",
+        "state",
+        "evidence"
+      ]
+    },
+    "ArtifactReviewView": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schemaVersion": {
+          "const": 1
+        },
+        "artifactId": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "artifactDigest": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "lineageId": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "requirementsRevision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "decisionsRevision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "objective": {
+          "type": "string",
+          "maxLength": 4000
+        },
+        "criteria": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ArtifactCriterionView"
+          },
+          "maxItems": 256
+        },
+        "status": {
+          "enum": [
+            "unconfigured",
+            "pending",
+            "changes_requested",
+            "accepted"
+          ]
+        },
+        "basis": {
+          "const": "owner_attestation"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "artifactId",
+        "artifactDigest",
+        "lineageId",
+        "requirementsRevision",
+        "decisionsRevision",
+        "objective",
+        "criteria",
+        "status",
+        "basis"
+      ]
+    },
+    "ArtifactFactBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "required": [
+        "id",
+        "revision"
+      ]
+    },
+    "ArtifactFactEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "text": {
+          "type": "string",
+          "maxLength": 2000
+        },
+        "statusAtReview": {
+          "enum": [
+            "observed",
+            "owner_asserted"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "revision",
+        "text",
+        "statusAtReview"
+      ]
+    },
+    "ArtifactFactDependency": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "boundRevision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "currentRevision": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "status": {
+          "enum": [
+            "current",
+            "changed",
+            "unavailable",
+            "needs_review"
+          ]
+        },
+        "reasons": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "source_unavailable",
+              "fact_revision_changed",
+              "source_dependency_changed",
+              "source_needs_review"
+            ]
+          },
+          "maxItems": 4
+        }
+      },
+      "required": [
+        "id",
+        "boundRevision",
+        "currentRevision",
+        "status",
+        "reasons"
+      ]
+    },
+    "TurnOutputSlot": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{1,80}$"
+        },
+        "label": {
+          "type": "string",
+          "maxLength": 256,
+          "minLength": 1
+        },
+        "artifactId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      },
+      "required": [
+        "id",
+        "label",
+        "artifactId"
+      ]
+    },
+    "TurnOutputBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{1,80}$"
+        },
+        "version": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      },
+      "required": [
+        "id",
+        "version"
+      ]
+    },
+    "TurnOutputView": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{1,80}$"
+        },
+        "label": {
+          "type": "string",
+          "maxLength": 256,
+          "minLength": 1
+        },
+        "kind": {
+          "enum": [
+            "answer",
+            "artifact"
+          ]
+        },
+        "artifactId": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "version": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "available": {
+          "type": "boolean"
+        },
+        "covered": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "id",
+        "label",
+        "kind",
+        "artifactId",
+        "version",
+        "available",
+        "covered"
+      ]
+    },
+    "TurnRequirementsCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "const": "requirements"
+        },
+        "requirementsRevision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "objective": {
+          "type": "string",
+          "maxLength": 4000
+        },
+        "criteria": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ArtifactCriterion"
+          },
+          "maxItems": 256
+        },
+        "outputs": {
+          "type": "array",
+          "maxItems": 256,
+          "items": {
+            "$ref": "#/$defs/TurnOutputSlot"
+          }
+        }
+      },
+      "required": [
+        "action",
+        "requirementsRevision",
+        "objective",
+        "criteria",
+        "outputs"
+      ]
+    },
+    "TurnDecisionCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "const": "decision"
+        },
+        "requirementsRevision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "decisionsRevision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "criterionId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{1,80}$"
+        },
+        "criterionDigest": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "verdict": {
+          "enum": [
+            "pass",
+            "fail"
+          ]
+        },
+        "note": {
+          "type": "string",
+          "maxLength": 8000,
+          "minLength": 1
+        },
+        "factBindings": {
+          "type": "array",
+          "maxItems": 8,
+          "items": {
+            "$ref": "#/$defs/ArtifactFactBinding"
+          }
+        },
+        "outputBindings": {
+          "type": "array",
+          "maxItems": 257,
+          "items": {
+            "$ref": "#/$defs/TurnOutputBinding"
+          },
+          "minItems": 1
+        }
+      },
+      "required": [
+        "action",
+        "requirementsRevision",
+        "decisionsRevision",
+        "criterionId",
+        "criterionDigest",
+        "verdict",
+        "note",
+        "outputBindings"
+      ]
+    },
+    "TurnReviewCommand": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/TurnRequirementsCommand"
+        },
+        {
+          "$ref": "#/$defs/TurnDecisionCommand"
+        }
+      ]
+    },
+    "TurnReviewEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "criterionDigest": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "verdict": {
+          "enum": [
+            "pass",
+            "fail"
+          ]
+        },
+        "note": {
+          "type": "string",
+          "maxLength": 8000
+        },
+        "reviewer": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "reviewedAt": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "factBindings": {
+          "type": "array",
+          "maxItems": 8,
+          "items": {
+            "$ref": "#/$defs/ArtifactFactEvidence"
+          }
+        },
+        "outputBindings": {
+          "type": "array",
+          "maxItems": 257,
+          "items": {
+            "$ref": "#/$defs/TurnOutputEvidence"
+          },
+          "minItems": 1
+        }
+      },
+      "required": [
+        "criterionDigest",
+        "verdict",
+        "note",
+        "reviewer",
+        "reviewedAt",
+        "outputBindings"
+      ]
+    },
+    "TurnCriterionView": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{1,80}$"
+        },
+        "text": {
+          "type": "string",
+          "maxLength": 4000
+        },
+        "kind": {
+          "enum": [
+            "requirement",
+            "constraint"
+          ]
+        },
+        "digest": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "state": {
+          "enum": [
+            "unreviewed",
+            "stale",
+            "pass",
+            "fail"
+          ]
+        },
+        "evidence": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TurnReviewEvidence"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "factDependencies": {
+          "type": "array",
+          "maxItems": 8,
+          "items": {
+            "$ref": "#/$defs/ArtifactFactDependency"
+          }
+        }
+      },
+      "required": [
+        "id",
+        "text",
+        "kind",
+        "digest",
+        "state",
+        "evidence"
+      ]
+    },
+    "TurnReviewView": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schemaVersion": {
+          "const": 1
+        },
+        "requirementsRevision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "decisionsRevision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "objective": {
+          "type": "string",
+          "maxLength": 4000
+        },
+        "criteria": {
+          "type": "array",
+          "maxItems": 256,
+          "items": {
+            "$ref": "#/$defs/TurnCriterionView"
+          }
+        },
+        "status": {
+          "enum": [
+            "unconfigured",
+            "pending",
+            "changes_requested",
+            "accepted"
+          ]
+        },
+        "basis": {
+          "const": "owner_attestation"
+        },
+        "conversationId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "turnId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "executionStatus": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "outputs": {
+          "type": "array",
+          "maxItems": 257,
+          "items": {
+            "$ref": "#/$defs/TurnOutputView"
+          }
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "requirementsRevision",
+        "decisionsRevision",
+        "objective",
+        "criteria",
+        "status",
+        "basis",
+        "conversationId",
+        "turnId",
+        "executionStatus",
+        "outputs"
+      ]
+    },
+    "TurnOutputEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{1,80}$"
+        },
+        "version": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "label": {
+          "type": "string",
+          "maxLength": 256,
+          "minLength": 1
+        },
+        "kind": {
+          "enum": [
+            "answer",
+            "artifact"
+          ]
+        },
+        "artifactId": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "version",
+        "label",
+        "kind",
+        "artifactId"
+      ]
+    }
+  },
+  "$ref": "#/$defs/ArtifactReviewView",
+  "x-limits": {
+    "maxRequestBytes": 1048576,
+    "maxRecordBytes": 8388608
+  }
+}

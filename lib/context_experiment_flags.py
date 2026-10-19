@@ -16,10 +16,9 @@ DEFAULT_CONTEXT_EXPERIMENT_FLAGS = {
     'cache': {'gpt56BreakpointMode': 'explicit'},
     'tools': {
         'nativeExposure': 'routed',
-        # ``on`` (shipped default) exposes the tier-shaped programmatic
-        # surface on every round that has a reviewed read-only tool;
-        # ``auto`` keeps the legacy bounded-reduction text/fan-out gate.
-        'programmaticCalling': 'on',
+        # Auto uses native tools/JSON batches locally. JavaScript requires
+        # explicit ``on``; verified provider-native PTC remains available.
+        'programmaticCalling': 'auto',
         # Keep direct tools visible while adding the local gateway.  The
         # ``serial_gateway`` one-request trial remains available for explicit
         # experiments, but live long-task calibration increased cost and is
@@ -117,7 +116,7 @@ def normalize_context_experiment_flags(
     native_exposure = tools.get(
         'nativeExposure', cfg.get('tools.nativeExposure', 'routed'))
     programmatic = tools.get(
-        'programmaticCalling', cfg.get('tools.programmaticCalling', 'on'))
+        'programmaticCalling', cfg.get('tools.programmaticCalling', 'auto'))
     programmatic_exposure = tools.get(
         'programmaticExposure',
         cfg.get('tools.programmaticExposure', 'additive'))
@@ -165,7 +164,7 @@ def normalize_context_experiment_flags(
         ('tools.nativeExposure', native_exposure,
          _VALID_NATIVE_EXPOSURE, 'routed'),
         ('tools.programmaticCalling', programmatic,
-         _VALID_PROGRAMMATIC_CALLING, 'on'),
+         _VALID_PROGRAMMATIC_CALLING, 'auto'),
         ('tools.programmaticExposure', programmatic_exposure,
          _VALID_PROGRAMMATIC_EXPOSURE, 'additive'),
         ('tools.toolSearch', tool_search, _VALID_TOOL_SEARCH, 'auto'),

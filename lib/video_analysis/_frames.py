@@ -3,8 +3,8 @@
 Strategy (research-backed, 2026-08-04 survey): a UNIFORM base layer gives
 guaranteed temporal coverage, and a SCENE-CUT layer (ffmpeg ``select=gt(scene,…)``)
 adds the moments uniform sampling misses — quick cuts, slide changes. The two
-are merged, deduped (±1s), sorted by time and capped at the duration-tier target
-(≤60s→16 / ≤600s→32 / else 64).
+are merged, deduped (±1s) and sorted by time. Uniform sampling grows with
+duration; nonredundant scene cuts have no count ceiling.
 
 Frames are scaled to ≤1568px long side and JPEG-encoded AT EXTRACTION (the
 ``_CLAUDE_IMAGE_MAX_PX`` rationale: born cache-stable, never re-encoded later),
@@ -17,6 +17,7 @@ multi-turn exactly like a user-uploaded image.
 from __future__ import annotations
 
 import os
+from bisect import bisect_left
 import re
 import subprocess
 import time
@@ -90,7 +91,8 @@ def _extract_uniform(ffmpeg: str, video_path: str, duration_s: float,
         '-vf', f'fps={fps:.6f},{_SCALE_FILTER}',
         '-q:v', str(FRAME_JPEG_Q), '-vsync', 'vfr', pattern,
     ], timeout=max(180.0, duration_s * 2), what='uniform extraction')
-    files = sorted(f for f in os.listdir(out_dir) if f.startswith('u_'))
+    files = sorted((name for name in os.listdir(out_dir) if name.startswith('u_')),
+                   key=lambda name: int(name[2:].split('.', 1)[0]))
     n = len(files)
     frames = []
     for i, fname in enumerate(files):
@@ -135,38 +137,24 @@ def _thin_frames(frames: list, n: int) -> list:
     return [frames[i] for i in idx]
 
 
-def _merge_scene_extras(uniform_ts: list[float], cut_times: list[float],
-                        budget: int) -> list[float]:
-    """Pick scene-cut times that ADD information over the uniform layer.
-
-    A cut within ±1s of an already-sampled time is redundant; cuts dedupe
-    against each other the same way. Note the consequence: when the uniform
-    spacing is under ~2s (short clips), EVERY cut is within 1s of a uniform
-    frame and the scene layer is intentionally empty — it only earns its
-    keep on longer videos where uniform spacing leaves gaps.
-    """
+def _merge_scene_extras(uniform_ts: list[float], cut_times: list[float]) -> list[float]:
+    """Retain every chronological scene cut not within 1s of prior evidence."""
+    uniform = sorted(uniform_ts)
     picked: list[float] = []
-    for t in cut_times:
-        if len(picked) >= budget:
-            break
-        if any(abs(t - u) < 1.0 for u in uniform_ts):
+    for timestamp in sorted(cut_times):
+        index = bisect_left(uniform, timestamp)
+        neighbors = uniform[max(0, index - 1):index + 1]
+        if any(abs(timestamp - value) < 1.0 for value in neighbors):
             continue
-        if any(abs(t - p) < 1.0 for p in picked):
+        if picked and timestamp - picked[-1] < 1.0:
             continue
-        picked.append(t)
+        picked.append(timestamp)
     return picked
 
 
 def extract_frames(video_path: str, duration_s: float, scratch_dir: str) -> list[dict]:
-    """Extract merged uniform+scene frames → ``[{path, t}]`` sorted by time.
-
-    Layout of the target budget: 2/3 uniform base + up to 1/3 scene-cut extras
-    (deduped ±1s against the uniform layer). Total never exceeds the
-    duration-tier target, which never exceeds ``FRAME_CEILING``.
-    """
-    target = frame_target_for_duration(duration_s)
-    uniform_count = max(4, target - target // 3)
-    scene_budget = target - uniform_count
+    """Extract duration-scaled uniform and all nonredundant scene frames."""
+    uniform_count = frame_target_for_duration(duration_s)
 
     ffmpeg = _ffmpeg()
     if not ffmpeg:
@@ -176,20 +164,20 @@ def extract_frames(video_path: str, duration_s: float, scratch_dir: str) -> list
     logger.info('[VideoFrames] uniform layer: %d/%d frames (duration=%.1fs)',
                 len(frames), uniform_count, duration_s)
 
-    if scene_budget > 0:
+    if scene_score_threshold() > 0:
         picked = _merge_scene_extras(
             [f['t'] for f in frames],
-            _scene_cut_times(ffmpeg, video_path, duration_s),
-            scene_budget)
+            _scene_cut_times(ffmpeg, video_path, duration_s))
         for i, t in enumerate(picked):
             one = _extract_single(ffmpeg, video_path, t, scratch_dir, f'{i:03d}')
-            if one:
-                frames.append(one)
+            if one is None:
+                raise RuntimeError(f'Scene evidence extraction failed at {t:.2f}s')
+            frames.append(one)
         if picked:
             logger.info('[VideoFrames] scene layer: +%d frame(s)', len(picked))
 
     frames.sort(key=lambda f: f['t'])
-    return frames[:target]
+    return frames
 
 
 def persist_frames(frames: list[dict], images_dir: str) -> list[dict]:

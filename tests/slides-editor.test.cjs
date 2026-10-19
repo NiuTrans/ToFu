@@ -168,3 +168,12 @@ test('closing removes canvas listeners rather than leaving guarded callbacks on 
   const after = new f.dom.window.MouseEvent('click', { bubbles: true, cancelable: true }); title.dispatchEvent(after);
   assert.equal(after.defaultPrevented, false); assert.equal(content.querySelector('style'), null);
 });
+
+
+test('the whole-page AI action remains available without selecting an element', async t => {
+  const f = fixture(t, { pageElements: async () => ({ elements: [] }) });
+  f.editor.open('deck-without-selection', 2, 3); await settle();
+  f.click('[data-sled-ask]');
+  assert.deepEqual(f.messages, ['编辑这个 PPT（任务 deck-without-selection）第 2 页：']);
+  assert.equal(document.querySelector('.sled-overlay'), null);
+});

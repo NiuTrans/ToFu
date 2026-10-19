@@ -23,16 +23,24 @@ def world(monkeypatch):
             '_ptc_local':{'tier':'program'}}
     def execute(owner, batch, execution, **kwargs):
         calls.extend(batch)
-        return [CanonicalReceipt({'call_id':c['id'], 'name':c['function']['name'], 'status':'done',
+        results = [CanonicalReceipt({'call_id':c['id'], 'name':c['function']['name'], 'status':'done',
                  'output':'[{"amount":3},{"amount":8}]', 'output_truncated':False},
                  canonical=capture_result('[{"amount":3},{"amount":8}]'))
                 for c in batch]
+        # Match the real pipeline's post-execution retention boundary.
+        from lib.tools.program_results import retain_program_result
+        for call, result in zip(batch, results):
+            retain_program_result(owner, result['name'],
+                json.loads(call['function']['arguments']), result['call_id'],
+                result.canonical, user_id=owner.get('_userId', 0))
+        return results
     monkeypatch.setattr(tool_gateway, '_execute_normalized', execute)
     monkeypatch.setattr(tool_gateway, '_finalize', lambda *a, **kw: settled.append(a))
     def run(arguments, cfg=None):
         _, content, aborted = tool_gateway.handle_execute_program(
             task, {}, EXECUTE_PROGRAM_NAME, 'owned-code-call', arguments, 0,
-            {'llmRound':0}, cfg or {}, None, False)
+            {'llmRound':0}, cfg if cfg is not None else
+            {'tools': {'programmaticCalling': 'on'}}, None, False)
         assert aborted is False
         return json.loads(content)
     return task, calls, settled, run
@@ -69,6 +77,8 @@ def test_named_call_does_not_grant_unknown_tool_authority(world):
 
 @pytest.mark.parametrize('tier, config, reason', [
     ('batch', {}, 'batch_tier'),
+    ('program', {}, 'batch_tier'),
+    ('program', {'tools':{'programmaticCalling':'auto'}}, 'batch_tier'),
     ('program', {'tools':{'programmaticCalling':'off'}}, 'mode_off'),
 ])
 def test_operator_disabled_program_never_reaches_guest(world, monkeypatch, tier, config, reason):
@@ -77,8 +87,33 @@ def test_operator_disabled_program_never_reaches_guest(world, monkeypatch, tier,
     monkeypatch.setattr(tool_gateway, '_execute_program', lambda *a, **kw: pytest.fail('disabled program executed'))
     result = run({'code':'return await tools.read_rows({});'}, config)
     assert result['error']['code'] == 'program_disabled'
-    assert result['error']['reason'] == reason
+    assert result['items'][0]['detail']['reason'] == reason
     assert not calls
+
+
+@pytest.mark.parametrize('mode', [None, 'auto', 'off'])
+def test_legacy_program_cannot_bypass_policy_and_json_batch_still_executes_once(world, monkeypatch, mode):
+    task, calls, _, _ = world
+    task.pop('_ptc_local')
+    cfg = {} if mode is None else {'tools': {'programmaticCalling': mode}}
+    monkeypatch.setattr(tool_gateway, '_execute_program',
+                        lambda *a, **kw: pytest.fail('disabled program reached VM'))
+
+    def invoke(call_id, arguments):
+        _, content, aborted = tool_gateway.handle_execute_tools(
+            task, {}, 'execute_tools', call_id, arguments, 0,
+            {'llmRound': 0}, cfg, None, False)
+        assert not aborted
+        return json.loads(content)
+
+    failure = invoke('legacy-code', {'program': 'return await tools.read_rows({});'})
+    assert failure['program']['error']['code'] == 'program_disabled'
+    assert not calls and not task.get('programRuns')
+    batch = {'calls': [{'name': 'read_rows', 'arguments': {}}], 'execution': 'parallel'}
+    first = invoke('json-batch', batch)
+    assert first['status'] == 'ok'
+    assert invoke('json-batch', batch) == first
+    assert len(calls) == 1
 
 
 def test_code_schema_and_normalizer_require_one_unambiguous_lane():
@@ -109,20 +144,105 @@ def test_failed_code_reports_actual_array_structure_without_child_body(world):
     result = run({'code':'const rows=await tools.read_rows({}); return rows.items.length;'})
     assert result['status'] == 'error'
     assert result['error']['code'] == 'javascript_error'
-    assert result['inputs'][0]['shape'] == {
+    inputs = result['items'][0]['inputs']
+    assert inputs[0]['shape'] == {
         'type':'array', 'length':2,
         'firstItem':{'type':'object','keys':['amount'],'omittedKeys':0,'shortenedKeys':False}}
-    assert result['inputs'][0]['executionStatus'] == 'ok'
+    assert inputs[0]['executionStatus'] == 'ok'
     assert len(calls) == 1
     content = settled[-1][4]
     assert '"amount":3' not in str(content)
     assert json.loads(content.canonical.children[0].canonical.parts[0].text) == [{'amount':3},{'amount':8}]
-    assert json.loads(content.canonical.parts[0].text) == result
+    canonical = json.loads(content.canonical.parts[0].text)
+    assert canonical['inputs'] == inputs
+    assert canonical['error']['code'] == result['error']['code']
+    assert canonical['error']['retry_hint'] == result['error']['next_action']
     assert task['programRuns'][0]['status'] == 'error'
     stats=task['programRuns'][0]['stats']
     assert stats['outcome']=='error'
     assert stats['tool_calls']==stats['successful_tool_calls']==1
     assert stats['result_reads']==0
+
+
+@pytest.mark.parametrize('with_completed_child', [False, True])
+def test_missing_input_diagnostics_reach_model_and_canonical_error(world, with_completed_child):
+    task, calls, settled, run = world
+    task['_userId'] = 7
+    prefix = 'await tools.read_rows({}); ' if with_completed_child else ''
+    result = run({'code': prefix + "const page=tools.inputs({name:'absent'}); "
+                  "return page.inputs[page.inputs.length-1].ref;"})
+    assert result['status'] == 'error'
+    assert result['error']['code'] == 'javascript_error'
+    lookup = result['items'][0]['detail']['lastInputLookup']
+    assert lookup == {'queryIndex': 1, 'name': 'absent',
+                      'returned': 0, 'total': 0, 'nextOffset': None}
+    hint = result['error']['next_action']
+    assert 'check length before indexing' in hint
+    assert 'Never replay effects' in hint
+    assert 'read_tool_artifact for artifactRef' in hint
+    assert len(hint) <= 300
+    canonical = json.loads(settled[-1][4].canonical.parts[0].text)
+    assert canonical['error']['lastInputLookup'] == lookup
+    assert task['programRuns'][0]['error']['lastInputLookup'] == lookup
+    assert len(calls) == int(with_completed_child)
+
+
+@pytest.mark.parametrize('entry', ['program', 'tools'])
+def test_late_authoring_error_keeps_effect_guidance_before_specific_retry(world, entry):
+    task, calls, _, run = world
+    code = 'await tools.read_rows({}); return catalog.search({query:"rows",limit:false});'
+    if entry == 'program':
+        result = run({'code': code})
+        error = result['error']
+        hint = error['next_action']
+    else:
+        _, content, aborted = tool_gateway.handle_execute_tools(
+            task, {}, 'execute_tools', 'gateway-error', {'program': code}, 0,
+            {'llmRound': 0}, {'tools': {'programmaticCalling': 'on'}}, None, False)
+        assert aborted is False
+        error = json.loads(content)['program']['error']
+        hint = error['retry_hint']
+    assert error['code'] == 'invalid_search_arguments'
+    assert hint.startswith('Do not repeat completed child operations;')
+    assert 'inspect uncertain outcomes' in hint
+    assert 'tools.inputs' in hint and 'tools.result' in hint
+    assert 'catalog.search' in hint and len(hint) <= 300
+    assert len(calls) == 1
+    assert task['programRuns'][0]['error']['retry_hint'] == hint
+
+
+def test_program_failure_can_reuse_completed_child_without_redispatch(world):
+    task, calls, _, run = world
+    task['_userId'] = 7
+    error = run({'code': 'const rows=await tools.read_rows({}); return rows.items.length;'})
+    assert error['status'] == 'error'
+    assert 'Do not repeat completed child operations' in error['error']['next_action']
+    value = run({'code': 'return tools.result("read_rows",{}).reduce((s,r)=>s+r.amount,0);'})
+    assert value == 11
+    assert len(calls) == 1
+    assert task['programRuns'][-1]['stats']['result_reads'] == 1
+
+
+@pytest.mark.parametrize('code,expected', [
+    ('runtime_unavailable', 'Repair the reported runtime problem'),
+    ('runtime_integrity', 'Repair the reported runtime problem'),
+    ('cancelled', 'Respect cancellation'),
+])
+def test_program_environment_and_cancellation_errors_do_not_advise_code_repair(
+        world, monkeypatch, code, expected):
+    from lib.tools.program_contract import ProgramExecutionError
+
+    def fail(*args, **kwargs):
+        raise ProgramExecutionError(code, 'specific failure')
+
+    monkeypatch.setattr('lib.tools.javascript.execute_javascript_program', fail)
+    _, calls, _, run = world
+    error = run({'code': 'return 1;'})['error']
+    assert error['code'] == code and error['message'] == 'specific failure'
+    assert error['retryable'] is False
+    assert expected in error['next_action']
+    assert 'Correct' not in error['next_action']
+    assert not calls
 
 
 @pytest.mark.parametrize('code,success', [
@@ -148,10 +268,11 @@ def test_reused_inputs_preserve_shapes_without_inventing_child_execution(world, 
         assert stats['result_delivery']['rawBytes']==len(source.text().encode())
         assert stats['result_bytes']==len(json.dumps(task['programRuns'][0]['error'],ensure_ascii=False,separators=(',',':')).encode())
         assert 'stats' not in result
-        assert result['inputs'][0]['callId'] == 'previous-read'
-        assert result['inputs'][0]['shape']['type'] == 'array'
-        assert result['inputs'][0]['shape']['length'] == 2
-        assert result['inputs'][0]['shape']['firstItem']['keys'] == ['amount']
+        inputs = result['items'][0]['inputs']
+        assert inputs[0]['callId'] == 'previous-read'
+        assert inputs[0]['shape']['type'] == 'array'
+        assert inputs[0]['shape']['length'] == 2
+        assert inputs[0]['shape']['firstItem']['keys'] == ['amount']
         assert '"amount":3' not in str(settled[-1][4])
     assert not settled[-1][4].canonical.children
 

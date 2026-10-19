@@ -154,6 +154,9 @@ DEFAULT_SLOT_CONFIGS = {
     'gemini-3.7-flash':              {'caps': {'text', 'vision', 'thinking', 'cheap'}, 'rpm': 20,  'latency': 2000, 'cost': 0.005},
     # Sep 2026 marketplace addition — marketplace default quota 20 RPM.
     'gemini-3.8-flash':              {'caps': {'text', 'vision', 'thinking', 'cheap'}, 'rpm': 20,  'latency': 2000, 'cost': 0.005},
+    # Gemini 4 Argon (GA flagship, 2026-10) — live-probed 2026-10-17: gateway
+    # RPM cap 5 (429 "每分钟请求次数超过限制" = served, key not rate-limited).
+    'gemini-4-argon':                {'caps': {'text', 'vision', 'thinking', 'cheap'}, 'rpm': 5,   'latency': 4000, 'cost': 0.006},
     'gemini-3.5-flash-lite':         {'caps': {'text', 'vision', 'thinking', 'cheap'}, 'rpm': 20,  'latency': 1500, 'cost': 0.001},
 
     # ── Qwen (DashScope) ──

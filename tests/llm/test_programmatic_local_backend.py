@@ -115,12 +115,13 @@ def test_tier_env_override(monkeypatch):
     assert programmatic_tier('unknown-tiny-model') == 'program'
 
 
-def test_tier_defaults_to_program_for_every_model():
-    # No model-size split: large, small, and unknown models all get the full
-    # JavaScript surface; only TOFU_PTC_TIER=batch strips the program param.
-    assert programmatic_tier('gpt-5.5') == 'program'
-    assert programmatic_tier('unknown-tiny-model') == 'program'
-    assert programmatic_tier('definitely-unknown-model-xyz') == 'program'
+@pytest.mark.parametrize('model', ['gpt-5.5', 'unknown-tiny-model',
+                                   'definitely-unknown-model-xyz'])
+def test_local_tier_requires_explicit_program_opt_in(model, monkeypatch):
+    monkeypatch.delenv('TOFU_PTC_TIER', raising=False)
+    assert programmatic_tier(model) == 'batch'
+    assert programmatic_tier(model, requested='auto') == 'batch'
+    assert programmatic_tier(model, requested='on') == 'program'
 
 
 def test_tier_ignores_context_window(monkeypatch):
@@ -130,7 +131,7 @@ def test_tier_ignores_context_window(monkeypatch):
         raise AssertionError('context window must not be consulted')
 
     monkeypatch.setattr(ctx_mod, 'context_profile', _boom)
-    assert programmatic_tier('whatever') == 'program'
+    assert programmatic_tier('whatever') == 'batch'
 
 
 # ── guidance text ───────────────────────────────────────────────────
@@ -306,7 +307,7 @@ def test_intent_resolution_attaches_tier():
                    'content': '请批量对比所有文件并去重汇总'}],
         tools=tools, round_num=1, model='gpt-5.5')
     assert decision['programmaticCalling'] == 'auto'
-    assert decision['programmaticTier'] == 'program'
+    assert decision['programmaticTier'] == 'batch'
     assert decision['programmaticEligibleTools'] == ['read_files']
 
     small = resolve_tool_orchestration(
@@ -314,7 +315,7 @@ def test_intent_resolution_attaches_tier():
         messages=[{'role': 'user',
                    'content': '请批量对比所有文件并去重汇总'}],
         tools=tools, round_num=1, model='definitely-unknown-model-xyz')
-    assert small['programmaticTier'] == 'program'
+    assert small['programmaticTier'] == 'batch'
 
     off = resolve_tool_orchestration(
         requested_programmatic='auto', requested_multi_agent='off',
@@ -363,7 +364,7 @@ def _run_program(task, source):
           'function': {'name': 'execute_tools', 'arguments': '{}'}}
     _, content, _ = gw_handler.handle_execute_tools(
         task, tc, 'execute_tools', 'g1', {'program': source},
-        11, {'calls': []}, {}, None, True)
+        11, {'calls': []}, {'tools': {'programmaticCalling': 'on'}}, None, True)
     return json.loads(content)
 
 
@@ -454,7 +455,8 @@ def test_repeated_zero_child_authoring_failures_stick_to_batch_fallback():
               'function': {'name': 'execute_tools', 'arguments': '{}'}}
         _, content, _ = gw_handler.handle_execute_tools(
             task, tc, 'execute_tools', call_id, {'program': program},
-            11, {'calls': [], 'llmRound': 11}, {}, None, True)
+            11, {'calls': [], 'llmRound': 11},
+            {'tools': {'programmaticCalling': 'on'}}, None, True)
         return json.loads(content)
 
     first = invoke('bad-program-1', "const = ;")
@@ -516,7 +518,7 @@ def test_observed_parallel_read_fanout_activates_ptc():
         messages=history, tools=tools, round_num=2, model='gpt-5.5')
     assert decision['programmaticCalling'] == 'auto'
     assert decision['programmaticReason'] == 'observed_read_fanout'
-    assert decision['programmaticTier'] == 'program'
+    assert decision['programmaticTier'] == 'batch'
 
 
 def test_observed_serialized_read_fanout_activates_ptc():
@@ -536,9 +538,8 @@ def test_observed_serialized_read_fanout_activates_ptc():
         model='definitely-unknown-model-xyz')
     assert decision['programmaticCalling'] == 'auto'
     assert decision['programmaticReason'] == 'observed_read_fanout'
-    # Serialized fan-out from a small/unknown model activates the same full
-    # JavaScript surface — no batch demotion.
-    assert decision['programmaticTier'] == 'program'
+    # Observed reads prove batching opportunity, not JavaScript proficiency.
+    assert decision['programmaticTier'] == 'batch'
 
 
 def test_write_fanout_and_single_read_do_not_activate_ptc():
@@ -644,7 +645,7 @@ def test_wire_boundary_off_mode_leaves_wire_untouched():
     assert _wire_names(plan.body.get('tools')) == ['read_files']
 
 
-def test_wire_boundary_absent_tier_defaults_to_program_surface():
+def test_wire_boundary_absent_tier_defaults_to_batch_surface():
     from lib.llm._sse_core import prepare_request
     body = _ptc_body('deepseek-v4-pro')
     del body['_programmatic_tier']
@@ -653,8 +654,9 @@ def test_wire_boundary_absent_tier_defaults_to_program_surface():
         base_url='https://api.deepseek.com/v1', api_protocol='openai')
     execute = [t for t in plan.body['tools']
                if (t.get('function') or {}).get('name')
-               == 'execute_program'][0]
-    assert 'code' in execute['function']['parameters']['properties']
+               == 'execute_tools'][0]
+    assert set(execute['function']['parameters']['properties']) == {'calls', 'execution'}
+    assert 'execute_program' not in _wire_names(plan.body['tools'])
 
 
 # ── resident (on) mode: universal programmatic exposure ─────────────
@@ -715,21 +717,21 @@ def test_on_mode_composes_with_multi_agent():
         'multi_agent_with_programmatic_workers')
 
 
-def test_flags_ship_on_default_and_validate_on():
+def test_flags_ship_auto_default_and_preserve_explicit_on():
     from lib.context_experiment_flags import (
         normalize_context_experiment_flags)
     assert normalize_context_experiment_flags(
-        {})['tools']['programmaticCalling'] == 'on'
+        {})['tools']['programmaticCalling'] == 'auto'
     assert normalize_context_experiment_flags(
         {'tools': {'programmaticCalling': 'on'}}
     )['tools']['programmaticCalling'] == 'on'
     assert normalize_context_experiment_flags(
         {'tools': {'programmaticCalling': 'auto'}}
     )['tools']['programmaticCalling'] == 'auto'
-    # Invalid values fall back to the shipped resident default.
+    # Invalid values cannot opt the caller into JavaScript.
     assert normalize_context_experiment_flags(
         {'tools': {'programmaticCalling': 'guess'}}
-    )['tools']['programmaticCalling'] == 'on'
+    )['tools']['programmaticCalling'] == 'auto'
     with pytest.raises(ValueError, match='programmaticCalling'):
         normalize_context_experiment_flags(
             {'tools': {'programmaticCalling': 'guess'}}, strict=True)
@@ -1130,8 +1132,11 @@ def test_kimi_has_no_implicit_budget_but_applies_mfjs_preflight():
     body['_request_activity_sink'] = diagnostics.append
     expected = _wire_names(body['tools'])
     canonical_schemas = json.loads(json.dumps(body['tools']))
+    from lib.tools.background_guidance import project_background_tool_guidance
     expected_schemas = gw.sanitize_wire_tools(
-        body['tools'], model='kimi-k3')
+        project_background_tool_guidance(
+            body['tools'], authority_catalog=body['_executable_tool_catalog']),
+        model='kimi-k3')
     expected_tokens = gw.tool_schema_tokens(
         expected_schemas, model='kimi-k3')
     assert expected_tokens > 0
@@ -1406,7 +1411,8 @@ def test_recycled_gateway_id_creates_distinct_program_and_child_occurrences(monk
     def invoke(round_num):
         return gw_handler.handle_execute_tools(
             task, {}, 'execute_tools', 'recycled-id', args,
-            round_num, {'llmRound':round_num}, {}, None, True)
+            round_num, {'llmRound':round_num},
+            {'tools': {'programmaticCalling': 'on'}}, None, True)
     first = invoke(1)
     assert invoke(1)[1] == first[1]
     second = invoke(2)

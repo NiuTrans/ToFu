@@ -23,8 +23,10 @@ def format_search_for_tool_response(
 
     Args:
         results: List of search result dicts (irrelevant pages already removed).
-        search_diag: Optional diagnostic dict from perform_web_search when
-            0 results were found.  Contains 'reason' and 'reason_detail'.
+        search_diag: Optional coverage/rejection diagnostics from perform_web_search.
+        max_chars_per_result: Optional hard cap on each body or snippet payload.
+        max_total_content_chars: Optional shared cap on all body/snippet payloads;
+            source identity and provenance metadata are never truncated.
     """
     search_diag = search_diag or getattr(results, '_search_diag', None)
     quality_lines = []
@@ -39,11 +41,25 @@ def format_search_for_tool_response(
                 f"failed={','.join(failed) or 'none'}; unavailable={','.join(unavailable) or 'none'}; empty={','.join(empty) or 'none'}. "
                 "Coverage is not exhaustive.")
         if search_diag.get('constraint_rejected'):
-            quality_lines.append(f"Excluded {search_diag['constraint_rejected']} candidates violating site constraints.")
+            quality_lines.append(
+                f"Excluded {search_diag['constraint_rejected']} candidates violating site constraints; "
+                "this is not evidence of absence.")
+        if search_diag.get('weak_match_count'):
+            quality_lines.append(
+                f"Weak-match candidates: {search_diag['weak_match_count']} "
+                "(query relevance uncertain; not established evidence).")
+        if search_diag.get('fallback_attempts'):
+            quality_lines.append(
+                f"Recovery attempted: {', '.join(search_diag['fallback_attempts'])}; "
+                "coverage remains non-exhaustive.")
         if search_diag.get('unverified_count'):
             quality_lines.append(f"Unverified candidates: {search_diag['unverified_count']} (not evidence of relevance or absence).")
             for candidate in search_diag.get('unverified_candidates') or []:
                 quality_lines.append(f"  Candidate for follow-up: {candidate['url']}")
+                if candidate.get('title'):
+                    quality_lines.append(f"    Title: {candidate['title']}")
+        if search_diag.get('reason_detail'):
+            quality_lines.append(f"Search diagnostic: {search_diag['reason_detail']}")
     quality = ('\n'.join(quality_lines) + '\n\n') if quality_lines else ''
     if not results:
         if search_diag:
@@ -70,7 +86,8 @@ def format_search_for_tool_response(
 
     parts = []
     remaining = max_total_content_chars
-    content_left = sum(1 for r in results if r.get('full_content'))
+    content_left = sum(1 for r in results if r.get('full_content') or r.get('snippet'))
+    bounded = max_total_content_chars is not None or max_chars_per_result is not None
     for i, r in enumerate(results, 1):
         entry = (f"[{i}] {r['title']}\n"
                  f"    URL: {r['url']}\n"
@@ -80,26 +97,48 @@ def format_search_for_tool_response(
         if _auth:
             entry += f"\n    Authority: {_auth}"
 
+        if r.get('source_rank') is not None:
+            entry += f"\n    Source rank: {r['source_rank']} (original listing; not relevance confidence)."
+        # Optional provider/host metadata: never infer dates from URLs, stamp
+        # the current time, or pretend a missing body proves a failed fetch.
+        for key, label in (('published_date', 'Published'), ('publish_date', 'Published'),
+                           ('modified_date', 'Modified'), ('retrieved_at', 'Retrieved at'),
+                           ('fetch_status', 'Fetch status')):
+            if r.get(key):
+                entry += f"\n    {label}: {r[key]}"
+
         if r.get('relevance'):
             entry += f"\n    Relevance: {r['relevance']} (not a factual verification)."
+            if r['relevance'] in ('weak_match', 'unverified'):
+                entry += ' Query relevance is uncertain; do not treat this as established evidence.'
+            evidence = r.get('relevance_evidence') or {}
+            if 'matched_terms' in evidence and 'query_terms' in evidence:
+                entry += (f" Lexical overlap: {len(evidence['matched_terms'])}/"
+                          f"{len(evidence['query_terms'])} query terms.")
 
-        sources = r.get('sources') or []
+        sources = list(dict.fromkeys(r.get('sources') or []))
         if len(sources) > 1:
-            entry += (f"\n    Engine consensus: {', '.join(sources)} "
-                      f"({len(sources)} independent listings)")
-        upstream = r.get('upstream_engines') or []
-        if len(upstream) > 1:
-            entry += (f"\n    SearXNG upstream consensus: {', '.join(upstream)} "
-                      f"({len(upstream)} engines)")
+            entry += f"\n    Provider listings: {', '.join(sources)} (may share underlying engines)."
+        upstream = list(dict.fromkeys(r.get('upstream_engines') or []))
+        if upstream:
+            entry += f"\n    SearXNG upstream listings: {', '.join(upstream)}"
+        duplicates = list(dict.fromkeys(r.get('duplicate_urls') or []))
+        if duplicates:
+            entry += f"\n    Duplicate/mirror URLs: {', '.join(duplicates)} (not additional corroboration)."
+
+        raw = r.get('full_content') or r.get('snippet') or ''
+        budget = len(raw)
+        if remaining is not None:
+            budget = min(budget, max(0, remaining // max(1, content_left)))
+        if max_chars_per_result is not None:
+            budget = min(budget, max(0, max_chars_per_result))
+        shown = select_relevant_passages(raw, query, budget) if bounded else raw
+        if remaining is not None:
+            remaining = max(0, remaining - len(shown))
+        if raw:
+            content_left -= 1
 
         if r.get('full_content'):
-            raw = r['full_content']
-            budget = len(raw)
-            if remaining is not None:
-                budget = min(budget, max(0, remaining // max(1, content_left)))
-            if max_chars_per_result is not None:
-                budget = min(budget, max_chars_per_result)
-            shown = select_relevant_passages(raw, query, budget)
             excerpted = len(shown) < len(raw)
             label = 'Query-Focused Excerpts' if excerpted else 'Full Page Content'
             if excerpted:
@@ -110,14 +149,11 @@ def format_search_for_tool_response(
                 # Unexcerpted: "N of N chars" is pure noise — one number.
                 entry += (f"\n\n    ──── {label} "
                           f"({len(shown):,} chars) ────\n{shown}")
-            if remaining is not None:
-                remaining = max(0, remaining - len(shown))
-            content_left -= 1
         else:
-            # Fetch failed — the entry's own URL line is three rows up, so
-            # restating it here would be a second copy per unfetched result.
-            entry += (f"\n    Summary: {r['snippet']}"
-                      f'\n    (Full content not available — call {fetch_tool_name}'
+            entry += f"\n    Summary: {shown}"
+            if len(shown) < len(raw):
+                entry += '\n    [... remaining summary omitted to preserve tool context budget ...]'
+            entry += (f'\n    (Snippet-only; full content not available — call {fetch_tool_name}'
                       ' with the URL above to read this page.)')
 
         parts.append(entry)

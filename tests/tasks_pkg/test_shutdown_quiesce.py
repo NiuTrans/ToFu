@@ -28,6 +28,10 @@ Tests (drive the REAL manager against the runtime store; no LLM, no PG stop):
 import os
 import sys
 
+import pytest
+
+pytestmark = pytest.mark.unit
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 import quart as _quart  # noqa: E402
@@ -86,6 +90,18 @@ def test_quiesce_leaves_terminal_tasks_untouched():
     _ok('quiesce leaves already-terminal tasks untouched (no double-abort)')
 
 
+def test_quiesce_preserves_prior_user_stop():
+    from lib.tasks_pkg.manager import quiesce_running_tasks
+    task = _mk_running('cv-q-user-stop')
+    task.update(aborted=True, _abort_reason='user_abort', _abort_timestamp=123.0)
+    try:
+        quiesce_running_tasks(reason='server_shutdown')
+        assert task['_abort_reason'] == 'user_abort'
+        assert task['_abort_timestamp'] == 123.0
+    finally:
+        _cleanup(task['id'])
+
+
 def test_NC_neutered_quiesce_leaves_task_running():
     """NC: if quiesce is a no-op, a running task stays un-aborted → the atexit
     PG-stop would race its DB writes (the cascade). Proves quiesce is
@@ -116,6 +132,7 @@ def main():
     tests = [
         test_quiesce_aborts_all_running,
         test_quiesce_leaves_terminal_tasks_untouched,
+        test_quiesce_preserves_prior_user_stop,
         test_NC_neutered_quiesce_leaves_task_running,
     ]
     for fn in tests:

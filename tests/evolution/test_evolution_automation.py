@@ -135,34 +135,36 @@ def test_install_registers_once_on_the_engine_settlement_path(store):
         automation._installed = False
 
 
-def test_terminal_queue_bounds_receipts_and_never_retains_task_history(monkeypatch):
+def test_terminal_receipts_follow_demand_without_retaining_task_history(monkeypatch):
     import gc
     import threading
     import weakref
     from lib.evolution import automation
     assert automation.stop_terminal_checks(timeout=1)
     automation.start_terminal_checks()
-    monkeypatch.setattr(automation, '_queue_capacity', 2)
+    monkeypatch.setattr('runtime_guards.resolve_resource_budget', lambda *a, **kw: 1)
     entered = threading.Event()
     seen = []
+    seen_lock = threading.Lock()
     def blocked(task, *, actuals, cancel_event):
-        seen.append((task, actuals))
-        entered.set()
-        cancel_event.wait(2)
+        with seen_lock:
+            seen.append((task, actuals))
+            if len(seen) == 64:
+                entered.set()
+        cancel_event.wait(5)
     monkeypatch.setattr(automation, 'on_task_terminal', blocked)
     class Task(dict):
         pass
     try:
         task = Task(_task('done', content='private history' * 100_000))
         source = weakref.ref(task)
-        assert automation.enqueue_task_terminal(task)
-        assert entered.wait(1)
-        assert automation.enqueue_task_terminal(task)
-        assert automation.enqueue_task_terminal(task)
-        assert not automation.enqueue_task_terminal(task)
-        assert len(automation._pending) == 2
-        assert len(repr(automation._pending)) < 4096
-        assert 'private history' not in repr(automation._pending)
+        for i in range(64):
+            task['id'] = f'terminal-{i}'
+            assert automation.enqueue_task_terminal(task)
+        assert entered.wait(3)
+        assert len(seen) == 64
+        assert {receipt['id'] for receipt, _ in seen} == {f'terminal-{i}' for i in range(64)}
+        assert all('private history' not in repr(receipt) for receipt, _ in seen)
         del task
         gc.collect()
         assert source() is None
@@ -217,3 +219,75 @@ def test_unsettled_physical_request_marks_terminal_consumption_incomplete(store,
     assert settled['actuals']['tokens'] == 8
     lease.settle({'input_tokens': 20, 'output_tokens': 5})
     assert get_episode(bound['episode_id'], user_id=USER)['actuals_complete'] is False
+
+
+def test_active_check_does_not_block_later_receipt_after_idle_deadline(monkeypatch):
+    import threading
+    from lib.evolution import automation
+    assert automation.stop_terminal_checks(timeout=1)
+    automation.start_terminal_checks()
+    monkeypatch.setattr(automation, '_IDLE_SECONDS', 0.01)
+    held, entered, later = threading.Event(), threading.Event(), threading.Event()
+    def check(task, **kwargs):
+        if task['id'] == 'held':
+            entered.set()
+            held.wait(3)
+        else:
+            later.set()
+    monkeypatch.setattr(automation, 'on_task_terminal', check)
+    try:
+        assert automation.enqueue_task_terminal(_task('done', id='held'))
+        assert entered.wait(1)
+        assert not later.wait(0.05)
+        assert automation.enqueue_task_terminal(_task('done', id='later'))
+        assert later.wait(1)
+    finally:
+        held.set()
+        assert automation.stop_terminal_checks(timeout=1)
+        automation.start_terminal_checks()
+
+
+def test_stop_timeout_retains_physical_owner_until_join(monkeypatch):
+    import threading
+    from lib.evolution import automation
+    assert automation.stop_terminal_checks(timeout=1)
+    automation.start_terminal_checks()
+    entered, finish = threading.Event(), threading.Event()
+    def check(*args, **kwargs):
+        entered.set()
+        finish.wait(3)
+    monkeypatch.setattr(automation, 'on_task_terminal', check)
+    try:
+        assert automation.enqueue_task_terminal(_task('done'))
+        assert entered.wait(1)
+        owner = automation._worker
+        assert not automation.stop_terminal_checks(timeout=0.01)
+        assert automation._worker is owner and owner.is_alive()
+        automation.start_terminal_checks()
+        assert not automation.enqueue_task_terminal(_task('done', id='late'))
+    finally:
+        finish.set()
+        assert automation.stop_terminal_checks(timeout=1)
+        automation.start_terminal_checks()
+    assert automation._worker is None
+
+
+def test_legacy_terminal_binding_is_found_after_old_scan_limit(store, bound):
+    from copy import deepcopy
+    from lib.evolution import automation, get_episode
+    from lib.evolution.records import NAMESPACE_EPISODES, entity_key
+    original_key = entity_key(bound['episode_id'], USER, kind='episode')
+    store.rows.pop((NAMESPACE_EPISODES, original_key))
+    for i in range(205):
+        episode = deepcopy(bound)
+        episode.update(episode_id=f'ep-{i:04d}', task_id=f'unrelated-{i}')
+        store.rows[(NAMESPACE_EPISODES, entity_key(episode['episode_id'], USER, kind='episode'))] = episode
+    target = deepcopy(bound)
+    target['episode_id'] = 'ep-zz-target'
+    store.rows[(NAMESPACE_EPISODES, entity_key(target['episode_id'], USER, kind='episode'))] = target
+    for key in store.rows:
+        if key[0] == NAMESPACE_EPISODES:
+            store.versions[key] = 1
+    automation.on_task_terminal(_task('error'))
+    assert get_episode(target['episode_id'], user_id=USER)['status'] == 'aborted'
+    assert all(get_episode(f'ep-{i:04d}', user_id=USER)['status'] == 'running' for i in range(205))

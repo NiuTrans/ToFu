@@ -36,7 +36,7 @@ def _request(adapter):
 @pytest.fixture
 def chassis_delegation(monkeypatch):
     import lib.tasks_pkg.orchestrator._root_agent_loop as adapter
-    from lib.agent_loop import LoopOutcome
+    from lib.agent_loop.agent_loop import LoopOutcome
 
     request, state = _request(adapter)
     captured = []

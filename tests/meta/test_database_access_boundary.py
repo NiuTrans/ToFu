@@ -20,29 +20,29 @@ _DATA_ACCESS_ROOTS = ('lib', 'routes', 'scripts', 'debug', 'server.py')
 # Every SQLite authority belongs to the Sidecar or an explicitly offline
 # migration tool. Application modules never own connections.
 _SQLITE_CONNECT_ALLOWLIST = {
-    'lib/storage_sidecar/adapters/sqlite.py',
-    'lib/storage_sidecar/cli.py',
-    'lib/storage_sidecar/cutover.py',
+    'lib/storage_authority_sql/adapters/sqlite.py',
+    'lib/storage_authority_sql/cli.py',
+    'lib/storage_authority_sql/cutover.py',
     # The fastpath front's file-level machinery: WAL-shipper online backup
     # (sqlite3 backup API needs raw handles), the candidate-dir scratch WAL
     # probe, and the restored-front verification open.  None can ride the
     # pooled data layer — they operate on the raw front/shadow files.
-    'lib/storage_sidecar/shipper.py',
-    'lib/storage_sidecar/fastpath.py',
+    'lib/storage_authority_sql/shipper.py',
+    'lib/storage_authority_sql/fastpath.py',
     # The bounded turn-search materialization is a disposable, replayable
     # database with its own writer/read pool.  It must not borrow the durable
     # authority adapter because that would couple cache latency and failure to
     # authoritative transactions.
-    'lib/storage_sidecar/turn_search_projection.py',
+    'lib/storage_authority_sql/turn_search_projection.py',
     # Launch-time capability discovery opens only a UUID-named scratch
     # database, verifies WAL recovery, then removes every artifact before
     # backend selection.  Keeping the probe stdlib-only is intentional.
-    'lib/storage_sidecar/storage_capabilities.py',
+    'lib/storage_authority_sql/storage_capabilities.py',
     # Reviewed offline data-layer owners.  The reader hard-enforces mode=ro
     # plus query_only.  Maintenance writes require a live ProjectLease, and
     # candidate opens first prove they are not the canonical authority.
-    'lib/storage_sidecar/offline.py',
-    'lib/storage_sidecar/offline_maintenance.py',
+    'lib/storage_authority_sql/offline.py',
+    'lib/storage_authority_sql/offline_maintenance.py',
     # Offline authority migrations run only under a stopped-project lease.
     'scripts/migrate_pg_to_sqlite.py',
     'scripts/migrate_sqlite_to_postgres.py',
@@ -137,7 +137,7 @@ def _relative(path: Path) -> str:
 
 def _is_data_owner(rel: str) -> bool:
     """Only the Sidecar implementation owns live database capabilities."""
-    return rel.startswith('lib/storage_sidecar/')
+    return rel.startswith('lib/storage_authority_sql/')
 
 
 # Receiver names that plausibly mean "a database connection/cursor", the only

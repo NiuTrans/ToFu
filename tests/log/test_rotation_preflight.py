@@ -2,7 +2,7 @@
 import os
 from pathlib import Path
 import pytest
-from lib import log_retention
+from lib.logging_pkg import log_retention
 
 pytestmark = pytest.mark.unit
 

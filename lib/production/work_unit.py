@@ -50,6 +50,7 @@ _STAGE_TERMINAL = ('done', 'skipped')
 #: answers 426), so projected download hrefs must use the v4 prefix.
 _DOWNLOAD_PATHS = {
     'slides-deck': ('/api/v4/slides/{id}/file', 'pptx'),
+    'motion-video': ('/api/v4/motion/videos/{id}/file', 'mp4'),
 }
 
 #: Per-kind public page-preview URL templates (``{n}`` is the 1-based page
@@ -293,7 +294,12 @@ def project_work_unit(task: dict, *, events: Optional[list] = None,
     }
     artifacts: list[dict] = []
     download = _DOWNLOAD_PATHS.get(kind)
-    if download and status in ('done', 'degraded'):
+    # Successful motion sub-jobs may have no final film. Match the file
+    # serving owner's confirmed result path before advertising a download.
+    result = task.get('result')
+    published = (kind != 'motion-video' or (
+        isinstance(result, dict) and bool(result.get('final_path'))))
+    if download and status in ('done', 'degraded') and published:
         path, label = download
         result = task.get('result')
         artifact: dict[str, Any] = {

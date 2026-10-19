@@ -72,15 +72,148 @@ def analyze(document: dict) -> dict:
             "operations": rows, "slow_samples": profile["slowSamples"]}
 
 
+def _integer(value):
+    if type(value) is not int or value < 0:
+        raise ValueError("matched window counters and samples must be nonnegative integers")
+    return value
+
+
+def _delta(left, right):
+    value = _integer(right) - _integer(left)
+    if value < 0:
+        raise ValueError("matched window counter decreased; reset or different process")
+    return value
+
+
+def _indexed(rows, key):
+    result = {row[key]: row for row in rows}
+    if len(result) != len(rows):
+        raise ValueError("matched window contains duplicate labels")
+    return result
+
+
+def _profile_interval(before, after):
+    """One subtraction owner for exact single- and multi-operation windows."""
+    for profile in (before, after):
+        analyze(profile)
+        if type(profile["sampleEvery"]) is not int or profile["sampleEvery"] != 1:
+            raise ValueError("matched window requires every request to be sampled")
+        completed = sum(_integer(row["requests"]) for row in profile["operations"])
+        if _integer(profile["selected"]) != completed + _integer(profile["dropped"]):
+            raise ValueError("matched window endpoint has unsettled or inconsistent selected requests")
+    if _delta(before["dropped"], after["dropped"]):
+        raise ValueError("matched window has dropped request profiles")
+    count = _delta(before["selected"], after["selected"])
+    if not count or _delta(before["seen"], after["seen"]) != count:
+        raise ValueError("profile population does not match completed window")
+    old = _indexed(before["operations"], "operation")
+    new = _indexed(after["operations"], "operation")
+    rows = []
+    for operation in sorted(old.keys() | new.keys()):
+        left, right = old.get(operation, {}), new.get(operation, {})
+        requests = _delta(left.get("requests", 0), right.get("requests", 0))
+        row = {"operation": operation}
+        for key in ("requests", "errors", "dispatchNanos", "embeddedQueueNanos",
+                    "embeddedQueueSamples", "unattributedNanos", "invalidSpans"):
+            before_value, after_value = left.get(key, 0), right.get(key, 0)
+            if key == "embeddedQueueNanos":
+                before_value = 0 if before_value is None else before_value
+                after_value = 0 if after_value is None else after_value
+            row[key] = _delta(before_value, after_value)
+        previous_histogram = left.get("dispatchLog2NanosHistogram", [0] * len(right["dispatchLog2NanosHistogram"]))
+        if len(previous_histogram) != len(right["dispatchLog2NanosHistogram"]):
+            raise ValueError("matched window histogram layouts differ")
+        row["dispatchLog2NanosHistogram"] = [_delta(a, b) for a, b in zip(previous_histogram, right["dispatchLog2NanosHistogram"])]
+        old_stages = _indexed(left.get("stages", []), "stage")
+        new_stages = _indexed(right["stages"], "stage")
+        row["stages"] = [{"stage": name, **{key: _delta(old_stages.get(name, {}).get(key, 0), new_stages.get(name, {}).get(key, 0))
+            for key in ("calls", "inclusiveNanos", "exclusiveNanos")}} for name in sorted(old_stages.keys() | new_stages.keys())]
+        old_work, new_work = left.get("work", {}), right["work"]
+        row["work"] = {name: _delta(old_work.get(name, 0), new_work.get(name, 0)) for name in old_work.keys() | new_work.keys()}
+        if not requests:
+            changed = (any(row[key] for key in ("errors", "dispatchNanos", "embeddedQueueNanos",
+                "embeddedQueueSamples", "unattributedNanos", "invalidSpans"))
+                or any(row["dispatchLog2NanosHistogram"])
+                or any(stage[key] for stage in row["stages"]
+                       for key in ("calls", "inclusiveNanos", "exclusiveNanos"))
+                or any(row["work"].values()))
+            if changed:
+                raise ValueError("profile counters changed without a completed request")
+            continue
+        rows.append(row)
+    if sum(row["requests"] for row in rows) != count:
+        raise ValueError("profile population does not match completed window")
+    interval = {**after, "selected": count, "dropped": 0, "operations": rows, "slowSamples": []}
+    analyze(interval)  # The differences must reconcile independently too.
+    return interval
+
+
+def analyze_window(document: dict) -> dict:
+    """Attribute the caller-owned, quiescent single-operation population."""
+    operation = document["operation"]
+    samples = document["samples_ns"]
+    if not isinstance(operation, str) or not operation or not isinstance(samples, list) or not samples:
+        raise ValueError("matched window requires an operation and nonempty caller samples")
+    count = len(samples)
+    if _integer(document["count"]) != count:
+        raise ValueError("caller sample count does not match the declared window")
+    outer = sum(_integer(value) for value in samples)
+    interval = _profile_interval(document["metrics_before"]["requestProfile"], document["metrics_after"]["requestProfile"])
+    if interval["selected"] != count or len(interval["operations"]) != 1 or interval["operations"][0]["operation"] != operation:
+        raise ValueError("operation population does not match caller samples")
+    row = interval["operations"][0]
+    if row["embeddedQueueSamples"] != count or row["errors"]:
+        raise ValueError("matched window requires complete embedded queue coverage and successful requests")
+    result = analyze(interval)
+    outside = outer - row["embeddedQueueNanos"] - row["dispatchNanos"]
+    if outside < 0:
+        raise ValueError("native time exceeds caller time; boundaries or populations do not match")
+    result["matched_window"] = {"requests": count, "mean_caller_ns": outer / count,
+        "mean_outside_queue_and_dispatch_ns": outside / count,
+        "scope": "same completed profile-on request population; wall time, not CPU; outside includes caller conversion, delivery, scheduling and profiling overhead; global stages and lifetime maxima are excluded"}
+    return result
+
+
+def analyze_pipeline_window(document: dict) -> dict:
+    """Refuse cross-restart, in-flight or lossy pipeline attribution."""
+    import math
+
+    keys = ("productive_start_storage_metrics", "storage_metrics")
+    expected = ("recovered-before-provider-release", "completed-before-terminal-restart")
+    stamps = []
+    provenance = document["storage_metrics_provenance"]
+    for key, boundary in zip(keys, expected):
+        item = provenance[key]
+        pid, birth, incarnation = item["process_id"], item["process_started_unix_seconds"], item["authority_incarnation"]
+        if (type(pid) is not int or pid <= 0 or type(birth) not in (int, float)
+                or not math.isfinite(birth) or birth <= 0 or type(incarnation) is not int or incarnation < 0):
+            raise ValueError("pipeline window lacks valid process and authority identity")
+        if item["boundary"] != boundary or item["benchmark_calls_quiescent"] is not True:
+            raise ValueError("pipeline window boundaries are not quiescent event-work fences")
+        stamps.append((pid, birth, incarnation))
+    if stamps[0] != stamps[1]:
+        raise ValueError("pipeline window crosses a process or authority incarnation")
+    interval = _profile_interval(*(document[key]["requestProfile"] for key in keys))
+    result = analyze(interval)
+    result["pipeline_window"] = {"metrics_keys": list(keys), "process_id": stamps[0][0],
+        "process_started_unix_seconds": stamps[0][1], "authority_incarnation": stamps[0][2],
+        "scope": "same authority/process and completed sampled operations, including retries/errors; summed elapsed spans are not CPU or critical-path time; instrumentation does not prove equivalence to default dispatch scheduling"}
+    return result
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("report", type=Path)
     parser.add_argument("--json", action="store_true")
+    windows = parser.add_mutually_exclusive_group()
+    windows.add_argument("--window", action="store_true", help="validate and subtract a matched caller window")
+    windows.add_argument("--pipeline-window", action="store_true", help="require quiescent same-incarnation event-work snapshots")
     args = parser.parse_args()
     if args.report.stat().st_size > 64 * 1024 * 1024:
         parser.error("profile input exceeds 64 MiB")
     try:
-        result = analyze(json.loads(args.report.read_text()))
+        reader = analyze_pipeline_window if args.pipeline_window else analyze_window if args.window else analyze
+        result = reader(json.loads(args.report.read_text()))
     except (ValueError, KeyError, TypeError) as error:
         parser.error(str(error))
     if args.json:
@@ -100,6 +233,16 @@ def main() -> None:
               f"{row['wait_percent']:>7.1f} {row['authority_hold_ms']/row['requests']:>13.3f}")
     print("dispatch/queue/native columns are means; native = embedded queue + dispatch, not end-to-end latency")
     print(result["scope"])
+    if "matched_window" in result:
+        window = result["matched_window"]
+        print(f"matched caller mean {window['mean_caller_ns'] / 1000:.3f} us; "
+              f"outside queue/dispatch {window['mean_outside_queue_and_dispatch_ns'] / 1000:.3f} us")
+        print(window["scope"])
+    if "pipeline_window" in result:
+        window = result["pipeline_window"]
+        print(f"pipeline process {window['process_id']}; authority incarnation {window['authority_incarnation']}; "
+              f"metrics: {' -> '.join(window['metrics_keys'])}")
+        print(window["scope"])
 
 
 if __name__ == "__main__":

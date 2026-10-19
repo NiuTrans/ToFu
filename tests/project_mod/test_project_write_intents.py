@@ -100,34 +100,53 @@ def test_prepare_requires_durable_record_before_caller_can_publish(tmp_path, mon
 
 
 @pytest.mark.parametrize('field', ['original', 'post_content'])
-def test_byte_budget_refuses_before_persistence(tmp_path, field):
-    base, target, staged, request = stage(tmp_path)
-    request[field] = b'x' * (intents._limit('originalBytes') + 1)
-    with intents.locked_intents(str(tmp_path / 'session')) as store:
-        with pytest.raises(intents.IntentError, match='byte budget'):
-            store.prepare(**request)
-        assert store.read() == []
+def test_complete_byte_evidence_is_persisted_and_classified(tmp_path, field):
+    base,target,staged,request=stage(tmp_path)
+    request[field]=b'x'*(8*1024*1024)
+    if field=='original':target.write_bytes(request[field])
+    else:staged.write_bytes(request[field])
+    with intents.locked_intents(str(tmp_path/'session')) as store:
+        record=store.prepare(**request)
+        assert store.read()==[record]
+        assert intents.classify(record)=='unpublished'
 
 
-def test_pending_budget_never_evicts_recovery_evidence(tmp_path, monkeypatch):
-    base, target, staged, request = stage(tmp_path)
-    real_limit = intents._limit
-    monkeypatch.setattr(intents, '_limit', lambda key: 1 if key == 'pendingIntents' else real_limit(key))
-    with intents.locked_intents(str(tmp_path / 'session')) as store:
-        record = store.prepare(**request)
-        with pytest.raises(intents.IntentError, match='budget exhausted'):
-            store.prepare(**request)
-        assert store.read() == [record]
+def test_complete_pending_set_survives_both_retired_count_limits(tmp_path):
+    base=tmp_path/'project';base.mkdir()
+    session=str(tmp_path/'session')
+    with intents.locked_intents(session) as store:
+        for number in range(180):
+            (Path(store.directory)/f'aux-{number}').write_text('owned auxiliary data')
+        records=[]
+        for number in range(137):
+            original=b'old';updated=f'new-{number}'.encode()
+            target=base/f'file-{number}.txt';target.write_bytes(original)
+            staged=base/('.tofu_atomic_'+uuid.uuid4().hex)
+            with staged.open('wb') as output:
+                output.write(updated);output.flush();os.fsync(output.fileno())
+            records.append(store.prepare(base_path=str(base),path=target.name,
+                original=original,post_content=updated,stage_name=staged.name))
+        assert {row['changeId'] for row in store.read()}=={row['changeId'] for row in records}
+    for number,record in enumerate(records):
+        if number%2==0:os.replace(base/record['stageName'],base/record['path'])
+    (base/records[-1]['path']).write_bytes(b'later user edit')
+    with intents.locked_intents(session) as store:
+        reopened=store.read()
+        assert len(reopened)==137
+        for record in reopened:
+            number=int(record['path'].removeprefix('file-').removesuffix('.txt'))
+            expected='conflict' if number==136 else 'applied' if number%2==0 else 'unpublished'
+            assert intents.classify(record)==expected
 
 
-@pytest.mark.parametrize('malformed', ['oversized', 'symlink', 'invalid-path', 'identity-mismatch'])
+@pytest.mark.parametrize('malformed', ['invalid-json', 'symlink', 'invalid-path', 'identity-mismatch'])
 def test_corrupt_pending_evidence_fails_closed(tmp_path, malformed):
     base, target, staged, request = stage(tmp_path)
     with intents.locked_intents(str(tmp_path / 'session')) as store:
         record = store.prepare(**request)
         path = Path(store.directory) / (record['changeId'] + '.json')
-        if malformed == 'oversized':
-            path.write_bytes(b'x' * (intents._limit('recordBytes') + 1))
+        if malformed == 'invalid-json':
+            path.write_bytes(b'x' * (8 * 1024 * 1024))
         elif malformed == 'symlink':
             outside = tmp_path / 'outside.json'
             path.rename(outside)
@@ -162,15 +181,11 @@ def test_lock_contention_is_bounded_and_releases_after_failure(tmp_path, monkeyp
         assert store.read() == []
 
 
-def test_directory_scan_has_a_total_entry_budget(tmp_path, monkeypatch):
-    real_limit = intents._limit
-    monkeypatch.setattr(intents, '_limit', lambda key: 2 if key == 'directoryEntries' else real_limit(key))
-    with intents.locked_intents(str(tmp_path / 'session')) as store:
-        for index in range(3):
-            (Path(store.directory) / f'abandoned-{index}.tmp').write_bytes(b'')
-        with pytest.raises(intents.IntentError, match='entry budget'):
-            store.read()
-        assert len(list(Path(store.directory).iterdir())) == 3
+def test_directory_scan_does_not_apply_an_auxiliary_entry_quota(tmp_path):
+    with intents.locked_intents(str(tmp_path/'session')) as store:
+        for number in range(160):
+            (Path(store.directory)/f'aux-{number}').write_bytes(b'auxiliary')
+        assert store.read()==[]
 
 
 @pytest.mark.parametrize('publish', [False, True])
@@ -218,14 +233,12 @@ def test_aborted_cleanup_can_resume_after_stage_removed_before_ack(tmp_path, mon
     assert target.read_bytes() == request['original']
 
 
-def test_admission_reserves_space_for_new_intent_entry(tmp_path, monkeypatch):
-    base, target, staged, request = stage(tmp_path)
-    real_limit = intents._limit
-    monkeypatch.setattr(intents, '_limit', lambda key: 1 if key == 'directoryEntries' else real_limit(key))
-    with intents.locked_intents(str(tmp_path / 'session')) as store:
-        (Path(store.directory) / 'abandoned.tmp').write_bytes(b'')
-        assert store.read() == []
-        with pytest.raises(intents.IntentError, match='entry budget'):
-            store.prepare(**request)
-        assert len(list(Path(store.directory).iterdir())) == 1
-    assert target.read_bytes() == request['original']
+def test_auxiliary_entry_does_not_refuse_new_intent(tmp_path):
+    base,target,staged,request=stage(tmp_path)
+    with intents.locked_intents(str(tmp_path/'session')) as store:
+        (Path(store.directory)/'abandoned.tmp').write_bytes(b'')
+        assert store.read()==[]
+        record=store.prepare(**request)
+        assert store.read()==[record]
+        assert len(list(Path(store.directory).iterdir()))==2
+    assert target.read_bytes()==request['original']

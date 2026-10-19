@@ -12,17 +12,14 @@ Tool Search dual-backend precedent):
 * ``native_openai`` — the hosted V8 runtime on the public OpenAI Responses
   API (GPT-5.6 family only).  The model's program runs upstream and its
   child calls stream back with ``caller.type='program'``.
-* ``local`` — every other tool-capable model.  The model drives the
-  ``execute_tools`` JavaScript runtime instead; child calls stay
-  server-side and only the compact program result re-enters the context.
+* ``local`` — ordinary direct tools plus bounded JSON ``execute_tools.calls``
+  by default. Explicit ``programmaticCalling=on`` also exposes JavaScript via
+  ``execute_program``; child calls share the ordinary execution boundary.
 
-The local backend exposes the same async JavaScript surface to every model:
-small models are not demoted to a code-less form — a malformed program just
-earns a typed, retryable interpreter error, and the catalog/schema/approval
-checks plus hard call/byte ceilings bound execution.
-``TOFU_PTC_TIER=batch`` remains
-as an operator/benchmark override that strips the ``program`` parameter and
-advertises only the parallel ``calls[]`` form.
+Model names, sizes and context windows do not prove JavaScript proficiency.
+``auto`` therefore uses the batch surface locally, including after a hosted
+fallback. ``TOFU_PTC_TIER=program|batch`` is an explicit operator/benchmark
+override; ``off`` still disables program execution regardless of that override.
 """
 
 from __future__ import annotations
@@ -80,7 +77,7 @@ def resolve_programmatic_backend(
     ``native_openai``
     requires the full public-OpenAI chain (Responses protocol + GPT-5.6
     family + ``openai`` feature profile); every other tool-capable wire
-    falls back to the local JavaScript channel.
+    falls back to the local tier selected by ``programmatic_tier``.
     """
     if str(requested or '').strip().lower() not in ACTIVE_PROGRAMMATIC_MODES:
         return 'off'
@@ -88,6 +85,8 @@ def resolve_programmatic_backend(
         local_present = eligible_present
     if not eligible_present and not local_present:
         return 'off'
+    if str(os.environ.get('TOFU_PTC_TIER') or '').strip().lower() == 'batch':
+        return 'local' if local_present else 'off'
     if not eligible_present:
         return 'local'
 
@@ -132,20 +131,19 @@ def local_programmatic_tool_names(tools: Any) -> set[str]:
     return names
 
 
-def programmatic_tier(model: str, *, provider_id: str = '') -> str:
-    """Return the local-backend surface tier — ``program`` for every model.
+def programmatic_tier(model: str = '', *, provider_id: str = '',
+                      requested: str = 'auto') -> str:
+    """Select the local interface from explicit policy, never model-name guesses.
 
-    There is no model-size split: any tool-capable model may author bounded
-    JavaScript reductions; the runtime is isolated and answers malformed
-    programs with typed, retryable errors.  ``TOFU_PTC_TIER`` is an
-    operator/benchmark override (``batch`` strips the ``program`` parameter,
-    leaving only the parallel ``calls[]`` form).  The model/provider_id
-    arguments are kept for caller compatibility and are no longer consulted.
+    Unverified local routes default to JSON batches. ``on`` explicitly opts in
+    to JavaScript. The environment override supports controlled evaluations;
+    callers separately enforce inactive/off modes. Model/provider arguments
+    remain for compatibility and deliberately do not select proficiency.
     """
     override = str(os.environ.get('TOFU_PTC_TIER') or '').strip().lower()
     if override in _PROGRAMMATIC_TIERS:
         return override
-    return 'program'
+    return 'program' if requested == 'on' else 'batch'
 
 
 def local_ptc_guidance(tier: str, eligible: list[str] | tuple | set) -> str:

@@ -3,7 +3,7 @@ import json
 
 import pytest
 
-from lib.tool_result_artifacts import ToolResultArtifactRepository
+from lib.tool_results.tool_result_artifacts import ToolResultArtifactRepository
 from lib.tools.javascript import execute_javascript_program
 from lib.tools.program_contract import ProgramExecutionError
 from lib.tools.program_results import list_program_inputs, retain_program_result, read_program_result
@@ -229,6 +229,10 @@ def test_unavailable_reuse_hands_back_without_storage_or_source_execution(world,
     value, stats = run('const rows=tools.result("read_rows",'+args+'); await tools.write_file({}); return rows;', **kwargs)
     assert value['kind'] == 'observation'
     assert value['data']['error']['code'] == 'retained_result_unavailable'
+    error = value['data']['error']
+    assert error['retryable'] is False
+    assert 'Do not re-execute the source tool' in error['next_action']
+    assert ('smaller groups' if case == 'budget' else 'tools.inputs') in error['next_action']
     assert stats['outcome'] == 'needs_model'
     assert stats['result_reads'] == 0 and stats['tool_calls'] == 0
     assert not reads

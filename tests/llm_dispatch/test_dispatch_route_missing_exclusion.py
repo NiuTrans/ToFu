@@ -18,7 +18,7 @@ the same marker table.
 import pytest
 
 import lib.llm_dispatch.api as api
-from lib.llm_errors import (
+from lib.llm.llm_errors import (
     ROUTE_MISSING_MARKERS,
     BadRequestError,
     ModelRouteMissingError,
@@ -59,7 +59,7 @@ class TestRouteMissingClassifier:
         assert not isinstance(exc.value, ModelRouteMissingError)
 
     def test_probe_and_dispatch_share_one_marker_authority(self):
-        from lib import provider_probe
+        from lib.provider import provider_probe
         assert provider_probe._ROUTE_MISSING_MARKERS is ROUTE_MISSING_MARKERS
 
 

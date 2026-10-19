@@ -326,6 +326,36 @@ OPENAPI_SCHEMAS = {'AbortAttemptResponse': {'additionalProperties': True,
                                         'timestamp',
                                         'text'],
                            'type': 'object'},
+ 'ConversationRoundDirectory': {'additionalProperties': False,
+                                'properties': {'activeRound': {'minimum': 1, 'type': 'integer'},
+                                               'conversationId': {'type': 'string'},
+                                               'entries': {'items': {'$ref': '#/components/schemas/ConversationRoundEntry'},
+                                                           'maxItems': 100,
+                                                           'type': 'array'},
+                                               'laneId': {'type': 'string'},
+                                               'nextOffset': {'minimum': 0, 'type': 'integer'},
+                                               'offset': {'minimum': 0, 'type': 'integer'},
+                                               'ownerId': {'minimum': 1, 'type': 'integer'},
+                                               'stale': {'type': 'boolean'},
+                                               'syncSeq': {'minimum': 0, 'type': 'integer'},
+                                               'totalRounds': {'minimum': 0, 'type': 'integer'}},
+                                'required': ['ownerId',
+                                             'conversationId',
+                                             'laneId',
+                                             'syncSeq',
+                                             'stale',
+                                             'totalRounds',
+                                             'offset',
+                                             'entries'],
+                                'type': 'object'},
+ 'ConversationRoundEntry': {'additionalProperties': False,
+                            'properties': {'actor': {'enum': ['human', 'critic', 'virtual_user'],
+                                                     'type': 'string'},
+                                           'ordinal': {'minimum': 0, 'type': 'integer'},
+                                           'roundNumber': {'minimum': 1, 'type': 'integer'},
+                                           'turnId': {'type': 'string'}},
+                            'required': ['turnId', 'ordinal', 'actor', 'roundNumber'],
+                            'type': 'object'},
  'ConversationSyncEvent': {'oneOf': [{'$ref': '#/components/schemas/ConversationChange'},
                                      {'$ref': '#/components/schemas/SyncHeartbeat'},
                                      {'$ref': '#/components/schemas/SyncResetRequired'}]},
@@ -416,6 +446,24 @@ OPENAPI_SCHEMAS = {'AbortAttemptResponse': {'additionalProperties': True,
                                            'attempts',
                                            'queueItems'],
                               'type': 'object'},
+ 'ConversationToolEffectInspection': {'additionalProperties': False,
+                                      'properties': {'contract': {'const': 'tofu.conversation-sync.tool-effect-inspection/v1',
+                                                                  'type': 'string'},
+                                                     'conversationId': {'type': 'string'},
+                                                     'ok': {'const': True, 'type': 'boolean'},
+                                                     'operationId': {'pattern': '^[a-f0-9]{32}$',
+                                                                     'type': 'string'},
+                                                     'outcome': {'$ref': '#/components/schemas/ToolEffectInspectionOutcome'},
+                                                     'reason': {'$ref': '#/components/schemas/ToolEffectInspectionReason'},
+                                                     'turnId': {'type': 'string'}},
+                                      'required': ['ok',
+                                                   'contract',
+                                                   'conversationId',
+                                                   'turnId',
+                                                   'operationId',
+                                                   'outcome',
+                                                   'reason'],
+                                      'type': 'object'},
  'ConversationTurnPage': {'additionalProperties': False,
                           'properties': {'attempts': {'items': {'$ref': '#/components/schemas/AttemptRecord'},
                                                       'maxItems': 256,
@@ -471,6 +519,13 @@ OPENAPI_SCHEMAS = {'AbortAttemptResponse': {'additionalProperties': True,
                                                'ok': {'const': True, 'type': 'boolean'},
                                                'projectionRevision': {'minimum': 1,
                                                                       'type': 'integer'},
+                                               'results': {'items': {'anyOf': [{'$ref': '#/components/schemas/TurnToolDisplayMetadata'},
+                                                                               {'type': 'string'},
+                                                                               {'type': 'number'},
+                                                                               {'type': 'boolean'},
+                                                                               {'type': 'array'},
+                                                                               {'type': 'null'}]},
+                                                           'type': 'array'},
                                                'roundIndex': {'minimum': 0, 'type': 'integer'},
                                                'toolCallId': {'type': 'string'},
                                                'toolContent': {'type': 'string'},
@@ -494,6 +549,28 @@ OPENAPI_SCHEMAS = {'AbortAttemptResponse': {'additionalProperties': True,
                                            'totalTurns': {'minimum': 0, 'type': 'integer'}},
                             'required': ['laneId', 'nextBeforeOrdinal', 'hasMore', 'totalTurns'],
                             'type': 'object'},
+ 'ConversationUsageRecovery': {'additionalProperties': False,
+                               'properties': {'budget': {'$ref': '#/components/schemas/UsageRecoveryBudget'},
+                                              'conversationId': {'type': 'string'},
+                                              'ok': {'const': True},
+                                              'reason': {'enum': ['ready',
+                                                                  'not_applicable',
+                                                                  'operation_unconfirmed',
+                                                                  'configuration_unavailable'],
+                                                         'type': 'string'},
+                                              'sourceProjectionRevision': {'minimum': 0,
+                                                                           'type': 'integer'},
+                                              'sourceTurnId': {'type': 'string'},
+                                              'state': {'enum': ['ready', 'blocked'],
+                                                        'type': 'string'}},
+                               'required': ['ok',
+                                            'conversationId',
+                                            'sourceTurnId',
+                                            'sourceProjectionRevision',
+                                            'state',
+                                            'reason',
+                                            'budget'],
+                               'type': 'object'},
  'CreateAttemptRequest': {'additionalProperties': False,
                           'properties': {'commandId': {'maxLength': 256,
                                                        'minLength': 1,
@@ -503,6 +580,9 @@ OPENAPI_SCHEMAS = {'AbortAttemptResponse': {'additionalProperties': True,
                                                                              'type': 'integer'},
                                          'expectedProjectionRevision': {'minimum': 0,
                                                                         'type': 'integer'},
+                                         'guidanceId': {'maxLength': 256,
+                                                        'minLength': 1,
+                                                        'type': 'string'},
                                          'humanResponse': {'maxLength': 32768,
                                                            'minLength': 1,
                                                            'type': 'string'},
@@ -607,8 +687,67 @@ OPENAPI_SCHEMAS = {'AbortAttemptResponse': {'additionalProperties': True,
                                           'type': 'string'}},
                   'required': ['taskId', 'roundNum', 'turn'],
                   'type': 'object'},
+ 'InvocationToolEffectInspection': {'additionalProperties': False,
+                                    'properties': {'contract': {'const': 'tofu.invocation.tool-effect-inspection/v1',
+                                                                'type': 'string'},
+                                                   'conversationId': {'type': 'string'},
+                                                   'invocationId': {'type': 'string'},
+                                                   'ok': {'const': True, 'type': 'boolean'},
+                                                   'operationId': {'pattern': '^[a-f0-9]{32}$',
+                                                                   'type': 'string'},
+                                                   'outcome': {'$ref': '#/components/schemas/ToolEffectInspectionOutcome'},
+                                                   'reason': {'$ref': '#/components/schemas/ToolEffectInspectionReason'}},
+                                    'required': ['ok',
+                                                 'contract',
+                                                 'conversationId',
+                                                 'invocationId',
+                                                 'operationId',
+                                                 'outcome',
+                                                 'reason'],
+                                    'type': 'object'},
+ 'InvocationToolEffectInspectionReference': {'additionalProperties': False,
+                                             'properties': {'conversationId': {'maxLength': 256,
+                                                                               'minLength': 1,
+                                                                               'type': 'string'},
+                                                            'invocationId': {'maxLength': 512,
+                                                                             'minLength': 1,
+                                                                             'type': 'string'},
+                                                            'operationId': {'pattern': '^[a-f0-9]{32}$',
+                                                                            'type': 'string'},
+                                                            'ownerScope': {'pattern': '^[a-f0-9]{24}$',
+                                                                           'type': 'string'}},
+                                             'required': ['conversationId',
+                                                          'invocationId',
+                                                          'operationId',
+                                                          'ownerScope'],
+                                             'type': 'object'},
  'JsonObject': {'additionalProperties': True, 'type': 'object'},
  'PlanId': {'pattern': '^plan_[0-9a-f]{24}$', 'type': 'string'},
+ 'ProjectFileWriteReconciliation': {'additionalProperties': False,
+                                    'properties': {'basePath': {'minLength': 1, 'type': 'string'},
+                                                   'changeId': {'pattern': '^[a-f0-9]{32}$',
+                                                                'type': 'string'},
+                                                   'kind': {'const': 'project_file_write',
+                                                            'type': 'string'},
+                                                   'path': {'minLength': 1, 'type': 'string'},
+                                                   'postBytes': {'minimum': 0, 'type': 'integer'},
+                                                   'postDigest': {'pattern': '^[a-f0-9]{64}$',
+                                                                  'type': 'string'},
+                                                   'rootIdentity': {'items': {'minimum': 0,
+                                                                              'type': 'integer'},
+                                                                    'maxItems': 2,
+                                                                    'minItems': 2,
+                                                                    'type': 'array'},
+                                                   'taskId': {'minLength': 1, 'type': 'string'}},
+                                    'required': ['kind',
+                                                 'changeId',
+                                                 'basePath',
+                                                 'path',
+                                                 'taskId',
+                                                 'rootIdentity',
+                                                 'postDigest',
+                                                 'postBytes'],
+                                    'type': 'object'},
  'ProjectionPatch': {'additionalProperties': False,
                      'properties': {'baseRevision': {'minimum': 0, 'type': 'integer'},
                                     'operations': {'items': {'$ref': '#/components/schemas/ProjectionPatchOperation'},
@@ -747,6 +886,19 @@ OPENAPI_SCHEMAS = {'AbortAttemptResponse': {'additionalProperties': True,
                                                            'type': 'string'}},
                              'required': ['observationId', 'attemptId', 'kind', 'clientId'],
                              'type': 'object'},
+ 'RecoverUsageRequest': {'additionalProperties': False,
+                         'properties': {'budget': {'$ref': '#/components/schemas/UsageRecoveryBudget'},
+                                        'commandId': {'maxLength': 256,
+                                                      'minLength': 1,
+                                                      'type': 'string'},
+                                        'confirmed': {'const': True},
+                                        'expectedProjectionRevision': {'minimum': 0,
+                                                                       'type': 'integer'}},
+                         'required': ['commandId',
+                                      'expectedProjectionRevision',
+                                      'confirmed',
+                                      'budget'],
+                         'type': 'object'},
  'RouteModelRef': {'additionalProperties': False,
                    'properties': {'creator_id': {'maxLength': 256,
                                                  'minLength': 1,
@@ -857,6 +1009,12 @@ OPENAPI_SCHEMAS = {'AbortAttemptResponse': {'additionalProperties': True,
                                                 'conversationId': {'maxLength': 256,
                                                                    'minLength': 1,
                                                                    'type': 'string'},
+                                                'fields': {'items': {'enum': ['toolContent',
+                                                                              'results'],
+                                                                     'type': 'string'},
+                                                           'minItems': 1,
+                                                           'type': 'array',
+                                                           'uniqueItems': True},
                                                 'ownerScope': {'pattern': '^[0-9a-f]{24}$',
                                                                'type': 'string'},
                                                 'preview': {'maxLength': 240, 'type': 'string'},
@@ -919,6 +1077,66 @@ OPENAPI_SCHEMAS = {'AbortAttemptResponse': {'additionalProperties': True,
                                 'threadId': {'maxLength': 256, 'minLength': 1, 'type': 'string'}},
                  'required': ['kind', 'ownerId', 'threadId'],
                  'type': 'object'},
+ 'ToolEffectInspectionOutcome': {'enum': ['file_published', 'file_not_published', 'unknown'],
+                                 'type': 'string'},
+ 'ToolEffectInspectionReason': {'enum': ['undo_committed',
+                                         'prepared_file_applied',
+                                         'prepared_file_unpublished',
+                                         'checkpoint_batch_unentered',
+                                         'unsupported',
+                                         'missing_evidence',
+                                         'evidence_conflict',
+                                         'evidence_unavailable',
+                                         'writer_active'],
+                                'type': 'string'},
+ 'ToolEffectInspectionReference': {'additionalProperties': False,
+                                   'properties': {'conversationId': {'maxLength': 256,
+                                                                     'minLength': 1,
+                                                                     'type': 'string'},
+                                                  'operationId': {'pattern': '^[a-f0-9]{32}$',
+                                                                  'type': 'string'},
+                                                  'ownerScope': {'pattern': '^[a-f0-9]{24}$',
+                                                                 'type': 'string'},
+                                                  'turnId': {'maxLength': 128,
+                                                             'minLength': 1,
+                                                             'type': 'string'}},
+                                   'required': ['conversationId',
+                                                'turnId',
+                                                'operationId',
+                                                'ownerScope'],
+                                   'type': 'object'},
+ 'ToolExecutionEffect': {'additionalProperties': False,
+                         'properties': {'inspection': {'$ref': '#/components/schemas/ToolEffectInspectionReference'},
+                                        'invocationInspection': {'$ref': '#/components/schemas/InvocationToolEffectInspectionReference'},
+                                        'operationId': {'pattern': '^[a-f0-9]{32}$',
+                                                        'type': 'string'},
+                                        'reconciliation': {'$ref': '#/components/schemas/ProjectFileWriteReconciliation'},
+                                        'recovery': {'enum': ['read_only',
+                                                              'idempotent',
+                                                              'reconcile'],
+                                                     'type': 'string'},
+                                        'scope': {'description': 'Attempt records belong to the '
+                                                                 'durable Turn; invocation records '
+                                                                 'to a registered child task. '
+                                                                 'Non-read-only intents commit '
+                                                                 'before handler entry. '
+                                                                 'Process-only execution has no '
+                                                                 'restart durability promise.',
+                                                  'enum': ['attempt', 'invocation', 'process'],
+                                                  'type': 'string'},
+                                        'state': {'description': 'Entered is a write-ahead '
+                                                                 'possibility, not proof of '
+                                                                 'success; returned means a '
+                                                                 'handler response was captured, '
+                                                                 'not that a background operation '
+                                                                 'finished.',
+                                                  'enum': ['entered',
+                                                           'returned',
+                                                           'unknown',
+                                                           'not_started'],
+                                                  'type': 'string'}},
+                         'required': ['operationId', 'state', 'recovery', 'scope'],
+                         'type': 'object'},
  'ToolResultEvidence': {'additionalProperties': False,
                         'properties': {'artifactRef': {'maxLength': 256, 'type': 'string'},
                                        'contractVersion': {'enum': ['tofu.tool-result-evidence/v1'],
@@ -1010,6 +1228,10 @@ OPENAPI_SCHEMAS = {'AbortAttemptResponse': {'additionalProperties': True,
  'TurnActivityEntry': {'additionalProperties': False,
                        'properties': {'action': {'maxLength': 48, 'type': 'string'},
                                       'anchorBlockId': {'maxLength': 320, 'type': 'string'},
+                                      'anchorPosition': {'enum': ['before',
+                                                                  'after',
+                                                                  'producer-start'],
+                                                         'type': 'string'},
                                       'anchorToolRoundNum': {'maximum': 9007199254740991,
                                                              'minimum': 0,
                                                              'type': 'integer'},
@@ -1094,8 +1316,15 @@ OPENAPI_SCHEMAS = {'AbortAttemptResponse': {'additionalProperties': True,
                                                      'type': 'integer'},
                                       'summary': {'maxLength': 180, 'type': 'string'},
                                       'summaryArgs': {'$ref': '#/components/schemas/JsonObject'},
+                                      'summaryCalls': {'items': {'$ref': '#/components/schemas/JsonObject'},
+                                                       'maxItems': 16,
+                                                       'type': 'array'},
                                       'summaryKey': {'maxLength': 160, 'type': 'string'},
+                                      'summaryModel': {'maxLength': 160, 'type': 'string'},
+                                      'summaryProviderId': {'maxLength': 160, 'type': 'string'},
+                                      'summarySelectedModel': {'maxLength': 160, 'type': 'string'},
                                       'taskId': {'maxLength': 256, 'type': 'string'},
+                                      'taskModel': {'maxLength': 160, 'type': 'string'},
                                       'timingMode': {'maxLength': 24, 'type': 'string'},
                                       'toModel': {'maxLength': 160, 'type': 'string'},
                                       'tokenCountKind': {'maxLength': 24, 'type': 'string'},
@@ -1298,7 +1527,16 @@ OPENAPI_SCHEMAS = {'AbortAttemptResponse': {'additionalProperties': True,
                                    'rootPath': {'maxLength': 4096, 'type': 'string'},
                                    'source': {'enum': ['local', 'overleaf'], 'type': 'string'},
                                    'sourceHash': {'maxLength': 64, 'type': 'string'},
-                                   'sourceRevision': {'maxLength': 40, 'type': 'string'}},
+                                   'sourceRevision': {'maxLength': 40, 'type': 'string'},
+                                   'undoAvailable': {'description': 'An explicit false is a '
+                                                                    'capability denial, not a '
+                                                                    'failure to edit. Auxiliary '
+                                                                    'manually integrated worktree '
+                                                                    'facts do not authorize the '
+                                                                    'local single-root undo '
+                                                                    'gateway to mutate the '
+                                                                    'canonical checkout.',
+                                                     'type': 'boolean'}},
                     'required': ['path'],
                     'type': 'object'},
  'TurnFileChangesBlock': {'additionalProperties': False,
@@ -1475,6 +1713,10 @@ OPENAPI_SCHEMAS = {'AbortAttemptResponse': {'additionalProperties': True,
                        'properties': {'approved': {'type': 'boolean'},
                                       'flowNodeId': {'type': 'string'},
                                       'flowRunId': {'type': 'string'},
+                                      'goalRunId': {'description': 'Explicit durable Goal '
+                                                                   'identity; distinct from the '
+                                                                   'Turn execution attempt runId.',
+                                                    'type': 'string'},
                                       'iteration': {'oneOf': [{'minimum': 0, 'type': 'integer'},
                                                               {'type': 'string'}]},
                                       'modelRoute': {'$ref': '#/components/schemas/TurnModelRoute'},
@@ -1579,7 +1821,6 @@ OPENAPI_SCHEMAS = {'AbortAttemptResponse': {'additionalProperties': True,
                                    'apiRounds': {'items': {'$ref': '#/components/schemas/JsonObject'},
                                                  'type': 'array'},
                                    'attachments': {'items': {'$ref': '#/components/schemas/TurnMediaAttachment'},
-                                                   'maxItems': 20,
                                                    'type': 'array'},
                                    'backgroundCommand': {'$ref': '#/components/schemas/BackgroundCommandCompletion'},
                                    'boardTaskId': {'type': 'string'},
@@ -1597,7 +1838,6 @@ OPENAPI_SCHEMAS = {'AbortAttemptResponse': {'additionalProperties': True,
                                    'fileChanges': {'$ref': '#/components/schemas/TurnFileChangesBlock'},
                                    'imageGeneration': {'$ref': '#/components/schemas/TurnImageGeneration'},
                                    'images': {'items': {'$ref': '#/components/schemas/TurnImageAttachment'},
-                                              'maxItems': 20,
                                               'type': 'array'},
                                    'lastRoundUsage': {'$ref': '#/components/schemas/TurnLastRoundUsage'},
                                    'model': {'type': 'string'},
@@ -1634,6 +1874,20 @@ OPENAPI_SCHEMAS = {'AbortAttemptResponse': {'additionalProperties': True,
                                    'translatedContent': {'type': 'string'},
                                    'translation': {'$ref': '#/components/schemas/TurnTranslation'},
                                    'usage': {'$ref': '#/components/schemas/JsonObject'},
+                                   'usageComplete': {'type': 'boolean'},
+                                   'usageRecovery': {'additionalProperties': False,
+                                                     'description': 'Human-confirmed new-budget '
+                                                                    'receipt; never evidence that '
+                                                                    'earlier unknown usage was '
+                                                                    'settled.',
+                                                     'properties': {'budget': {'$ref': '#/components/schemas/UsageRecoveryBudget'},
+                                                                    'sourceProjectionRevision': {'minimum': 0,
+                                                                                                 'type': 'integer'},
+                                                                    'sourceTurnId': {'type': 'string'}},
+                                                     'required': ['sourceTurnId',
+                                                                  'sourceProjectionRevision',
+                                                                  'budget'],
+                                                     'type': 'object'},
                                    'videos': {'items': {'$ref': '#/components/schemas/TurnVideoAttachment'},
                                               'type': 'array'},
                                    'waitingOn': {'$ref': '#/components/schemas/JsonObject'}},
@@ -2163,6 +2417,7 @@ OPENAPI_SCHEMAS = {'AbortAttemptResponse': {'additionalProperties': True,
                                   'execElapsedMs': {'minimum': 0, 'type': 'number'},
                                   'execStartTs': {'type': 'number'},
                                   'execTimingAtMs': {'minimum': 0, 'type': 'number'},
+                                  'executionEffect': {'$ref': '#/components/schemas/ToolExecutionEffect'},
                                   'inspectorRef': {'$ref': '#/components/schemas/InspectorRef'},
                                   'llmRound': {'description': 'Zero-based logical model round. '
                                                               'Root continuation advances from the '
@@ -2290,7 +2545,22 @@ OPENAPI_SCHEMAS = {'AbortAttemptResponse': {'additionalProperties': True,
                                                                      'type': 'integer'},
                                       'projection': {'$ref': '#/components/schemas/TurnProjection'}},
                        'required': ['expectedProjectionRevision', 'projection'],
-                       'type': 'object'}}
+                       'type': 'object'},
+ 'UsageRecoveryBudget': {'additionalProperties': False,
+                         'properties': {'durationSeconds': {'default': 900,
+                                                            'maximum': 86400,
+                                                            'minimum': 1,
+                                                            'type': 'integer'},
+                                        'maxTokens': {'default': 100000,
+                                                      'maximum': 9007199254740991,
+                                                      'minimum': 1,
+                                                      'type': 'integer'},
+                                        'maxToolCalls': {'default': 100,
+                                                         'maximum': 9007199254740991,
+                                                         'minimum': 0,
+                                                         'type': 'integer'}},
+                         'required': ['maxTokens', 'maxToolCalls', 'durationSeconds'],
+                         'type': 'object'}}
 OPENAPI_PARAMETERS = {'AttemptId': {'in': 'path',
                'name': 'attemptId',
                'required': True,
@@ -2495,6 +2765,69 @@ OPENAPI_PATHS = {'/api/v4/attempts/{attemptId}/abort': {'post': {'operationId': 
                                                                                     'enum': ['full',
                                                                                              'tail-96'],
                                                                                     'type': 'string'}},
+                                                                        {'description': 'Viewport-selected '
+                                                                                        'initial '
+                                                                                        'Turn '
+                                                                                        'count, '
+                                                                                        'valid '
+                                                                                        'only with '
+                                                                                        'tail-96. '
+                                                                                        'Omission '
+                                                                                        'retains '
+                                                                                        'the '
+                                                                                        '96-Turn '
+                                                                                        'profile. '
+                                                                                        'The '
+                                                                                        'newest '
+                                                                                        'contiguous '
+                                                                                        'suffix '
+                                                                                        'and its '
+                                                                                        'continuation '
+                                                                                        'cursor '
+                                                                                        'are read '
+                                                                                        'in one '
+                                                                                        'owner-scoped '
+                                                                                        'transaction.',
+                                                                         'in': 'query',
+                                                                         'name': 'windowLimit',
+                                                                         'required': False,
+                                                                         'schema': {'maximum': 96,
+                                                                                    'minimum': 1,
+                                                                                    'type': 'integer'}},
+                                                                        {'description': 'Soft '
+                                                                                        'UTF-8 '
+                                                                                        'projection-byte '
+                                                                                        'budget '
+                                                                                        'for a '
+                                                                                        'bounded '
+                                                                                        'tail. At '
+                                                                                        'least one '
+                                                                                        'newest '
+                                                                                        'Turn is '
+                                                                                        'returned '
+                                                                                        'even when '
+                                                                                        'it alone '
+                                                                                        'exceeds '
+                                                                                        'the '
+                                                                                        'budget. '
+                                                                                        'Full and '
+                                                                                        'branched '
+                                                                                        'snapshots '
+                                                                                        'retain '
+                                                                                        'complete '
+                                                                                        'topology. '
+                                                                                        'Omission '
+                                                                                        'preserves '
+                                                                                        'the '
+                                                                                        'original '
+                                                                                        'count-only '
+                                                                                        'window.',
+                                                                         'in': 'query',
+                                                                         'name': 'windowBytes',
+                                                                         'required': False,
+                                                                         'schema': {'maximum': 16777216,
+                                                                                    'minimum': 65536,
+                                                                                    'type': 'integer'}},
                                                                         {'description': 'Add the '
                                                                                         'owner-scoped, '
                                                                                         'bounded '
@@ -2590,6 +2923,31 @@ OPENAPI_PATHS = {'/api/v4/attempts/{attemptId}/abort': {'post': {'operationId': 
                                                                                              'maximum': 256,
                                                                                              'minimum': 1,
                                                                                              'type': 'integer'}},
+                                                                                 {'description': 'Soft '
+                                                                                                 'UTF-8 '
+                                                                                                 'projection-byte '
+                                                                                                 'budget; '
+                                                                                                 'retains '
+                                                                                                 'at '
+                                                                                                 'least '
+                                                                                                 'one '
+                                                                                                 'Turn '
+                                                                                                 'and '
+                                                                                                 'an '
+                                                                                                 'exact '
+                                                                                                 'continuation '
+                                                                                                 'cursor '
+                                                                                                 'at '
+                                                                                                 'the '
+                                                                                                 'requested '
+                                                                                                 'replay '
+                                                                                                 'head.',
+                                                                                  'in': 'query',
+                                                                                  'name': 'windowBytes',
+                                                                                  'required': False,
+                                                                                  'schema': {'maximum': 16777216,
+                                                                                             'minimum': 65536,
+                                                                                             'type': 'integer'}},
                                                                                  {'description': 'lazy '
                                                                                                  'replaces '
                                                                                                  'large '
@@ -2645,6 +3003,49 @@ OPENAPI_PATHS = {'/api/v4/attempts/{attemptId}/abort': {'post': {'operationId': 
                                                                   'x-tofu-client-fixed-query': {'segmentPayload': 'refs',
                                                                                                 'toolPayload': 'lazy'},
                                                                   'x-tofu-contract': 'tofu.conversation-sync.turn-page/v1'}},
+ '/api/v4/conversations/{conversationId}/turns/rounds': {'get': {'operationId': 'conversationRoundDirectory',
+                                                                 'parameters': [{'$ref': '#/components/parameters/ConversationId'},
+                                                                                {'in': 'query',
+                                                                                 'name': 'laneId',
+                                                                                 'required': True,
+                                                                                 'schema': {'maxLength': 128,
+                                                                                            'minLength': 1,
+                                                                                            'type': 'string'}},
+                                                                                {'in': 'query',
+                                                                                 'name': 'syncSeq',
+                                                                                 'required': True,
+                                                                                 'schema': {'maximum': 9223372036854775807,
+                                                                                            'minimum': 0,
+                                                                                            'type': 'integer'}},
+                                                                                {'in': 'query',
+                                                                                 'name': 'offset',
+                                                                                 'schema': {'default': 0,
+                                                                                            'minimum': 0,
+                                                                                            'type': 'integer'}},
+                                                                                {'in': 'query',
+                                                                                 'name': 'limit',
+                                                                                 'schema': {'default': 50,
+                                                                                            'maximum': 100,
+                                                                                            'minimum': 1,
+                                                                                            'type': 'integer'}},
+                                                                                {'in': 'query',
+                                                                                 'name': 'anchorTurnId',
+                                                                                 'schema': {'maxLength': 128,
+                                                                                            'minLength': 1,
+                                                                                            'type': 'string'}}],
+                                                                 'responses': {'200': {'content': {'application/json': {'schema': {'$ref': '#/components/schemas/ConversationRoundDirectory'}}},
+                                                                                       'description': 'Exact '
+                                                                                                      'input-round '
+                                                                                                      'ranks '
+                                                                                                      'at '
+                                                                                                      'one '
+                                                                                                      'owner/lane '
+                                                                                                      'sync '
+                                                                                                      'head, '
+                                                                                                      'without '
+                                                                                                      'projections.'}},
+                                                                 'x-tofu-client': 'roundDirectory',
+                                                                 'x-tofu-contract': 'tofu.conversation-sync.round-directory/v1'}},
  '/api/v4/conversations/{conversationId}/turns/settled': {'post': {'operationId': 'conversationSettledTurnAppend',
                                                                    'parameters': [{'$ref': '#/components/parameters/ConversationId'}],
                                                                    'requestBody': {'content': {'application/json': {'schema': {'$ref': '#/components/schemas/AppendSettledTurnRequest'}}},
@@ -2888,6 +3289,34 @@ OPENAPI_PATHS = {'/api/v4/attempts/{attemptId}/abort': {'post': {'operationId': 
                                                                                  'x-tofu-client-timeout-ms': 0,
                                                                                  'x-tofu-contract': 'tofu.conversation-sync.command.execute-plan/v1',
                                                                                  'x-tofu-idempotent-retry': True}},
+ '/api/v4/conversations/{conversationId}/turns/{turnId}/tool-effects/{operationId}': {'get': {'operationId': 'conversationToolEffectInspection',
+                                                                                              'parameters': [{'$ref': '#/components/parameters/ConversationId'},
+                                                                                                             {'$ref': '#/components/parameters/TurnId'},
+                                                                                                             {'in': 'path',
+                                                                                                              'name': 'operationId',
+                                                                                                              'required': True,
+                                                                                                              'schema': {'pattern': '^[a-f0-9]{32}$',
+                                                                                                                         'type': 'string'}},
+                                                                                                             {'in': 'query',
+                                                                                                              'name': 'ownerScope',
+                                                                                                              'required': True,
+                                                                                                              'schema': {'pattern': '^[0-9a-f]{24}$',
+                                                                                                                         'type': 'string'}}],
+                                                                                              'responses': {'200': {'content': {'application/json': {'schema': {'$ref': '#/components/schemas/ConversationToolEffectInspection'}}},
+                                                                                                                    'description': 'Fresh '
+                                                                                                                                   'file-publication '
+                                                                                                                                   'evidence '
+                                                                                                                                   'only; '
+                                                                                                                                   'never '
+                                                                                                                                   'retries '
+                                                                                                                                   'a '
+                                                                                                                                   'write '
+                                                                                                                                   'or '
+                                                                                                                                   'accepts '
+                                                                                                                                   'a '
+                                                                                                                                   'task.'}},
+                                                                                              'x-tofu-client': 'inspectToolEffect',
+                                                                                              'x-tofu-contract': 'tofu.conversation-sync.tool-effect-inspection/v1'}},
  '/api/v4/conversations/{conversationId}/turns/{turnId}/tool-results/{roundIndex}': {'get': {'operationId': 'conversationTurnToolResult',
                                                                                              'parameters': [{'$ref': '#/components/parameters/ConversationId'},
                                                                                                             {'$ref': '#/components/parameters/TurnId'},
@@ -2927,7 +3356,49 @@ OPENAPI_PATHS = {'/api/v4/attempts/{attemptId}/abort': {'post': {'operationId': 
                                                                                                                                   'before '
                                                                                                                                   'retrying.'}},
                                                                                              'x-tofu-client': 'turnToolResult',
-                                                                                             'x-tofu-contract': 'tofu.conversation-sync.tool-result/v1'}}}
+                                                                                             'x-tofu-contract': 'tofu.conversation-sync.tool-result/v1'}},
+ '/api/v4/conversations/{conversationId}/turns/{turnId}/usage-recovery': {'get': {'operationId': 'conversationUsageRecovery',
+                                                                                  'parameters': [{'$ref': '#/components/parameters/ConversationId'},
+                                                                                                 {'$ref': '#/components/parameters/TurnId'}],
+                                                                                  'responses': {'200': {'content': {'application/json': {'schema': {'$ref': '#/components/schemas/ConversationUsageRecovery'}}},
+                                                                                                        'description': 'Read-only '
+                                                                                                                       'safety '
+                                                                                                                       'check; '
+                                                                                                                       'never '
+                                                                                                                       'calls '
+                                                                                                                       'a '
+                                                                                                                       'model '
+                                                                                                                       'or '
+                                                                                                                       'changes '
+                                                                                                                       'accounting.'}},
+                                                                                  'x-tofu-client': 'usageRecovery',
+                                                                                  'x-tofu-contract': 'tofu.conversation-sync.usage-recovery/v1'},
+                                                                          'post': {'operationId': 'conversationRecoverUsage',
+                                                                                   'parameters': [{'$ref': '#/components/parameters/ConversationId'},
+                                                                                                  {'$ref': '#/components/parameters/TurnId'}],
+                                                                                   'requestBody': {'content': {'application/json': {'schema': {'$ref': '#/components/schemas/RecoverUsageRequest'}}},
+                                                                                                   'required': True},
+                                                                                   'responses': {'200': {'content': {'application/json': {'schema': {'$ref': '#/components/schemas/TurnCommandResponse'}}},
+                                                                                                         'description': 'Explicit '
+                                                                                                                        'human '
+                                                                                                                        'authorization '
+                                                                                                                        'for '
+                                                                                                                        'one '
+                                                                                                                        'new '
+                                                                                                                        'bounded '
+                                                                                                                        'Turn, '
+                                                                                                                        'not '
+                                                                                                                        'settlement '
+                                                                                                                        'or '
+                                                                                                                        'replay '
+                                                                                                                        'of '
+                                                                                                                        'the '
+                                                                                                                        'source '
+                                                                                                                        'request.'}},
+                                                                                   'x-tofu-client': 'recoverUsage',
+                                                                                   'x-tofu-client-timeout-ms': 0,
+                                                                                   'x-tofu-contract': 'tofu.conversation-sync.command.usage-recovery/v1',
+                                                                                   'x-tofu-idempotent-retry': True}}}
 
 __all__ = ['COMMAND_RETRY_POLICY', 'CONTRACT_ID', 'OPENAPI_PARAMETERS',
            'OPENAPI_PATHS', 'OPENAPI_SCHEMAS', 'STREAM_POLICY']

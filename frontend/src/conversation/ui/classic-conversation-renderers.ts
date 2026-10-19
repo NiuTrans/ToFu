@@ -1,7 +1,13 @@
+import { disposeToolEffectNotice } from './renderers/tool-effect-notice';
+import { disposeGoalRecoveryNotice } from './renderers/goal-recovery-notice';
+
+import { disposeUsageRecoveryNotice } from './renderers/usage-recovery-notice';
 /**
  * Compose typed conversation block renderers for ConversationSurface. Owns
  * dispatch and block disposal only; content policy belongs to renderers/.
  */
+import { disposeRichMarkdown } from '../../rich-response/markdown';
+import { disposeRichResponse } from '../../rich-response/renderer';
 import type { ConversationSurfaceRenderers } from './surface-contracts';
 import { disposeLazyToolResult } from './lazy-tool-result';
 import type { ClassicConversationRendererPorts } from './renderers/ports';
@@ -70,6 +76,14 @@ export function createClassicConversationRenderers(
 > {
   return {
     disposeBlock(node) {
+
+      disposeUsageRecoveryNotice(node);
+      disposeGoalRecoveryNotice(node);
+      disposeToolEffectNotice(node);
+
+      const body = node.querySelector<HTMLElement>('.md-content');
+      if (body) disposeRichMarkdown(body);
+      node.querySelectorAll<HTMLElement>('[data-tool-rich-response]').forEach(disposeRichResponse);
       disposeLazyToolResult(node);
       disposeToolBody(node);
       disposeThinkingBody(node);
@@ -78,6 +92,12 @@ export function createClassicConversationRenderers(
       renderClassicTurnAvatar(node, turn, ports);
     },
     renderBlock(node, block, context) {
+
+      if (block.kind !== 'activity-event') disposeUsageRecoveryNotice(node);
+      if (block.kind !== 'autopilot-run-notice' || block.value.reason !== 'worker_lost') {
+        disposeGoalRecoveryNotice(node);
+      }
+      if (block.kind !== 'tool' && block.kind !== 'program') disposeToolEffectNotice(node);
       if (block.kind !== 'tool') {
         disposeLazyToolResult(node);
         disposeToolBody(node);

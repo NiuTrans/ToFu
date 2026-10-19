@@ -192,7 +192,7 @@ def test_stream_chat_adapter_rides_relay_stream():
 def test_stream_chat_adapter_relay_failure_is_unreachable():
     from lib.desktop.egress import EgressUnavailable
     from lib.llm.stream import stream_chat
-    from lib.llm_errors import EndpointUnreachableError
+    from lib.llm.llm_errors import EndpointUnreachableError
     with mock.patch('lib.desktop.adapter.relay_stream',
                     side_effect=EgressUnavailable('agent offline')), \
          mock.patch('lib.desktop.egress.route_request', _no_direct_route):
@@ -203,7 +203,7 @@ def test_stream_chat_adapter_relay_failure_is_unreachable():
 
 def test_stream_chat_adapter_error_body_via_read_all_text():
     from lib.llm.stream import stream_chat
-    from lib.llm_errors import RateLimitError
+    from lib.llm.llm_errors import RateLimitError
     reader = _FakeStreamReader([], status=429,
                                text='{"error":{"message":"quota"}}')
     with mock.patch('lib.desktop.adapter.relay_stream', return_value=reader), \
@@ -283,7 +283,7 @@ def test_chat_adapter_rides_relay_http():
 def test_chat_adapter_relay_failure_is_unreachable():
     from lib.desktop.egress import EgressUnavailable
     from lib.llm.chat import chat
-    from lib.llm_errors import EndpointUnreachableError
+    from lib.llm.llm_errors import EndpointUnreachableError
     with mock.patch('lib.desktop.adapter.relay_http',
                     side_effect=EgressUnavailable('agent offline')), \
          mock.patch('lib.desktop.egress.route_request', _no_direct_route):
@@ -298,7 +298,7 @@ def test_chat_adapter_relay_failure_is_unreachable():
 # ═══════════════════════════════════════════════════════════
 
 def test_probe_one_cell_adapter_uses_relay_and_classifies():
-    import lib.provider_probe as pp
+    import lib.provider.provider_probe as pp
     payload = {'choices': [{'message': {'content': 'OK'}}]}
     with mock.patch('lib.desktop.adapter.relay_http',
                     return_value=_FakeHTTPResponse(
@@ -316,7 +316,7 @@ def test_probe_one_cell_adapter_uses_relay_and_classifies():
 
 
 def test_probe_one_cell_adapter_unavailable_when_agent_down():
-    import lib.provider_probe as pp
+    import lib.provider.provider_probe as pp
     from lib.desktop.egress import EgressUnavailable
     with mock.patch('lib.desktop.adapter.relay_http',
                     side_effect=EgressUnavailable('no agent')):
@@ -327,7 +327,7 @@ def test_probe_one_cell_adapter_unavailable_when_agent_down():
 
 
 def test_probe_cell_multi_forwards_adapter():
-    import lib.provider_probe as pp
+    import lib.provider.provider_probe as pp
     seen = []
     orig = pp.probe_one_cell
 
@@ -348,7 +348,7 @@ def test_probe_cell_multi_forwards_adapter():
 
 
 def test_run_cell_probe_task_threads_marker_from_task_key():
-    import lib.provider_probe as pp
+    import lib.provider.provider_probe as pp
     seen = []
     orig = pp.probe_one_cell
     orig_persist = pp.persist_probe_task

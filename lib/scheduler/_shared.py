@@ -514,7 +514,7 @@ def parse_json_decision(content: str | None, key: str = 'ready') -> tuple[bool, 
         json.JSONDecodeError: If the content cannot be parsed as JSON.
         TypeError: If the content is not a string.
     """
-    from lib.llm_json import strip_code_fences
+    from lib.llm.llm_json import strip_code_fences
     text = strip_code_fences(content)
     decision = json.loads(text)
     if not isinstance(decision, dict) or not isinstance(decision.get(key), bool):

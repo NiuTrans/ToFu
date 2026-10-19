@@ -6,7 +6,7 @@ use std::io::{self, IoSlice, Read, Write};
 pub use crate::generated_storage_v2::{
     AUTH_TOKEN_BYTES, MAX_BLOB_CHUNK_BYTES, MAX_COMMAND_ID_BYTES, MAX_ERROR_CODE_BYTES,
     MAX_ERROR_MESSAGE_BYTES, MAX_FRAME_BODY_BYTES, MAX_OPERATION_BYTES, MAX_PAYLOAD_BYTES,
-    MAX_SCHEMA_IDS, MAX_STREAMED_REQUEST_PAYLOAD_BYTES, PROTOCOL_VERSION,
+    MAX_SCHEMA_IDS, PROTOCOL_VERSION,
 };
 use crate::generated_storage_v2::{
     FIELD_AUTH_TOKEN, FIELD_CHUNK_INDEX, FIELD_COMMAND_ID, FIELD_CORRELATION_ID,
@@ -246,7 +246,6 @@ impl Message {
                     || message.payload.is_empty()
                     || message.payload.len() > MAX_BLOB_CHUNK_BYTES
                     || message.total_payload_bytes == 0
-                    || message.total_payload_bytes > MAX_STREAMED_REQUEST_PAYLOAD_BYTES as u64
                     || message.payload.len() as u64 > message.total_payload_bytes
                 {
                     return Err(invalid_input("invalid storage.v2 blob chunk bound"));
@@ -1821,7 +1820,7 @@ mod tests {
                 stream_id: [2; 16],
                 chunk_index: 0,
                 final_chunk: false,
-                total_payload_bytes: MAX_STREAMED_REQUEST_PAYLOAD_BYTES as u64 + 1,
+                total_payload_bytes: 0,
             }),
             Message::Hello(Hello {
                 correlation_id: [1; 16],

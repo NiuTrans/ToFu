@@ -33,12 +33,17 @@ export function mountExecutionOptions(form: HTMLFormElement, copy: Copy) {
   });
   const reserveNames = ['program-review-tokens', 'program-review-tools', 'program-review-seconds'];
   const reserveLabels = ['reviewReserveTokens', 'reviewReserveTools', 'reviewReserveSeconds'];
+  const reserveHint = document.createElement('p');
+  reserveHint.id = 'exp-review-reserve-hint';
+  reserveHint.className = 'exp-muted'; reserveHint.textContent = copy('reviewReserveHint');
   const reserves = reserveNames.map((name, index) => {
     const input = document.createElement('input'); input.type = 'number'; input.name = name;
     input.className = 'ui-input'; input.min = '0'; input.step = '1'; input.max = String(Number.MAX_SAFE_INTEGER);
-    fields.append(createField({label: copy(reserveLabels[index]!), hint: copy('reviewReserveHint'),
+    fields.append(createField({label: copy(reserveLabels[index]!),
       control: input, controlId: 'exp-' + name}).el); return input;
   });
+  reserves.forEach(input => input.setAttribute('aria-describedby', reserveHint.id));
+  fields.append(reserveHint);
   let models: ModelOption[] = [], signature = '';
   const roles = ['executor', 'reviewer'] as const;
   const selectors = roles.map(role => {

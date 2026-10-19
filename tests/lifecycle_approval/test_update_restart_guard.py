@@ -368,23 +368,34 @@ class UpdateRestartGuardTest(unittest.TestCase):
         self.assertEqual(la.restart_cooldown_remaining(), 0)
 
     def test_actual_preparation_phase_is_readable_before_restart_acceptance(self):
+        import time
+        from types import SimpleNamespace
         from serverctl_pkg.native_engine import _report_stage
         token = self._approved_token()
         snapshots = []
+        clock = [100.0]
+        phases = ('compiling', 'retrying', 'checking', 'validating', 'frontend')
         def preflight():
-            for phase in ('compiling', 'validating', 'frontend'):
-                _report_stage(phase, 'synthetic preparation')
+            for phase in phases:
+                clock[0] += 10
+                _report_stage(phase, 'raw compiler output must not reach progress')
                 snapshots.append(la.get(token))
+                self.assertEqual(la.validate(token, 'restart'), (True, ''))
             return 'synthetic validation refusal'
         with patch('lib.tasks_pkg.manager.list_running_tasks', return_value=[]), \
              patch('routes.api_v1.update._deferred_reexec') as reexec, \
+             patch('routes.api_v1.update.time', SimpleNamespace(monotonic=lambda: clock[0], time=time.time)), \
              patch('routes.api_v1.update._prepare_server_reexec_frontend', side_effect=preflight):
             result = self._post({'approvalId': token}, path='/api/v4/update/restart')
         self.assertEqual(result.status_code, 409)
-        self.assertEqual([record['preparation']['phase'] for record in snapshots],
-                         ['compiling', 'validating', 'frontend'])
+        self.assertEqual([record['preparation']['phase'] for record in snapshots], list(phases))
+        self.assertEqual([record['preparation']['elapsedSeconds'] for record in snapshots],
+                         [10, 20, 30, 40, 50])
         self.assertTrue(all(record['status'] == 'approved' for record in snapshots))
+        self.assertTrue(all(set(record['preparation']) == {'phase', 'elapsedSeconds', 'updatedAt'}
+                            for record in snapshots))
         self.assertEqual(la.get(token)['preparation']['phase'], 'failed')
+        self.assertEqual(la.validate(token, 'restart'), (True, ''))
         reexec.assert_not_called()
 
     def test_v4_frontend_preflight_preserves_reason_and_approval(self):

@@ -5,17 +5,19 @@
 
 /* Intent-first execution rows. Each action owns one summary line: intent
  * description on the left, meta strip (context + fold chips + quiet verdict)
- * on the right; evidence folds open underneath. Owner call 2026-10-04: the
- * tofu theme hides the icon slot entirely, so the icon grid column collapses
- * to zero and never indents the description. */
+ * on the right; evidence folds open underneath. The marker and label columns
+ * use the same tokens as reasoning, generic tools and checklist disclosures. */
 
 .ptool-cmd-block > .ptool-cmd-header {
   display: grid;
-  grid-template-columns: 0 minmax(0, 1fr) max-content;
+  grid-template-columns: var(--conversation-process-marker) minmax(0, 1fr) max-content;
   align-items: center;
-  column-gap: var(--space-2);
+  column-gap: var(--conversation-process-gap);
   row-gap: var(--space-1);
-  padding: var(--space-3);
+  padding: var(--space-2) var(--conversation-process-inset);
+  min-height: var(--conversation-process-row-height);
+  box-sizing: border-box;
+  border: 0;
   font-family: var(--font-ui);
   background: transparent;
 }
@@ -24,7 +26,16 @@
   grid-column: 1;
   grid-row: 1;
   align-self: center;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--conversation-process-marker);
+  height: var(--conversation-process-marker);
+  color: var(--text-secondary);
 }
+
+.conversation-surface .ptool-cmd-header > .ptool-cmd-icon { display: flex; }
+.conversation-surface .ptool-cmd-icon::before { content: none; }
 
 .ptool-cmd-block .ptool-cmd-desc-inline {
   grid-column: 2;
@@ -33,11 +44,11 @@
   flex: none;
   min-width: 0;
   max-width: none;
-  color: var(--text-primary);
+  color: var(--text-secondary);
   font-family: var(--font-ui);
-  font-size: var(--conversation-font-size-content);
+  font-size: var(--conversation-process-font-size);
   font-weight: var(--weight-medium);
-  line-height: var(--leading-body);
+  line-height: var(--leading-title);
   white-space: pre-wrap;
   overflow: visible;
   overflow-wrap: anywhere;
@@ -88,8 +99,8 @@
 }
 
 .ptool-cmd-context {
-  color: var(--text-tertiary);
-  font-size: var(--conversation-font-size-caption);
+  color: var(--text-secondary);
+  font-size: var(--conversation-font-size-meta);
   font-weight: var(--weight-regular);
   line-height: var(--leading-tight);
   white-space: nowrap;
@@ -163,16 +174,11 @@
 
 .ptool-todo-header .ptool-text {
   font-family: var(--font-ui);
-  font-size: var(--conversation-font-size-content);
+  font-size: var(--conversation-process-font-size);
   font-weight: var(--weight-medium);
 }
 
 /* Flatten only proven self-contained cards, not generic batch/program shells. */
-
-.conversation-surface .conversation-block[data-tool-summary="self-contained"] {
-  margin-block: var(--space-2);
-  border-bottom: 1px solid var(--turn-rule);
-}
 
 .conversation-surface .conversation-block[data-tool-summary="self-contained"] .ptool-turn {
   margin: 0;
@@ -191,9 +197,33 @@
 }
 
 .conversation-surface .conversation-block[data-tool-summary="self-contained"] .ptool-todo-header {
-  padding: var(--space-3);
-  gap: var(--space-2);
+  padding: var(--space-2) var(--conversation-process-inset);
+  gap: var(--conversation-process-gap);
   border: 0;
+}
+
+.conversation-surface .ptool-cmd-ok .ptool-cmd-status {
+  background: transparent;
+  color: var(--text-secondary);
+  font-weight: var(--weight-regular);
+}
+
+.conversation-surface .ptool-cmd-block > :is(.ptool-cmd-code, .ptool-cmd-output-wrap, .ptool-cmd-js-code) {
+  margin-inline: var(--conversation-process-indent) var(--conversation-process-inset);
+}
+
+.conversation-surface .ptool-cmd-block :is(.ptool-cmd-code code, .ptool-cmd-output code) {
+  color: var(--text-secondary);
+  font-size: var(--conversation-font-size-content);
+  line-height: var(--leading-body);
+}
+
+.conversation-surface .ptool-cmd-block :is(.ptool-cmd-code, .ptool-cmd-output) {
+  padding: var(--space-3);
+  border: var(--control-edge-inset) solid var(--turn-rule);
+  border-radius: var(--radius-sm);
+  background: var(--turn-process-surface);
+  box-shadow: none;
 }
 
 .ptool-todo-body > .ptool-todo-revisions {
@@ -205,7 +235,7 @@
 
 @media (max-width: 600px) {
   .ptool-cmd-block > .ptool-cmd-header {
-    grid-template-columns: 0 minmax(0, 1fr);
+    grid-template-columns: var(--conversation-process-marker) minmax(0, 1fr);
   }
   .ptool-cmd-block .ptool-cmd-desc-inline {
     grid-column: 2;

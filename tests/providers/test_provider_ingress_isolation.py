@@ -310,12 +310,10 @@ def test_ingress_delivery_gives_up_after_bounded_attempts(monkeypatch):
     assert receipt['deliveredEvents'] == 0
     assert receipt['deliveryFailures'] == 1
 
-def test_ingress_delivery_drops_oldest_when_observers_lag(monkeypatch):
-    """A full queue must never block the drain thread: the oldest
-    undelivered event is dropped and accounted."""
+def test_ingress_delivery_retains_all_events_when_observers_lag():
+    """A blocked observer cannot truncate unique events or stall ingress."""
     import lib.tasks_pkg.manager._provider_ingress_guard as guard
 
-    monkeypatch.setattr(guard, '_DELIVERY_QUEUE_MAX', 4)
     task = {'id': 'provider-delivery-drop'}
     token = guard.begin_provider_ingress(task, span_id='model:drop:wire:1')
     delivered = []
@@ -331,17 +329,17 @@ def test_ingress_delivery_drops_oldest_when_observers_lag(monkeypatch):
         task, token=token, sequence=0, event_type=EventType.DELTA,
         deliver=_blocking_deliver)
     assert worker_busy.wait(timeout=5)
-    # Six more into a capacity-4 queue: two oldest get dropped.
-    for sequence in range(1, 7):
+    # Pass the former 256-event capacity while the sink remains blocked.
+    for sequence in range(1, 514):
         assert guard.enqueue_ingress_delivery(
             task, token=token, sequence=sequence, event_type=EventType.DELTA,
             deliver=lambda s=sequence: delivered.append(s))
     release_worker.set()
     receipt = guard.end_provider_ingress(task, token=token)
 
-    assert receipt['droppedEvents'] == 2
-    assert delivered == [0, 3, 4, 5, 6]
-    assert receipt['deliveredEvents'] == 5
+    assert receipt['droppedEvents'] == 0
+    assert delivered == list(range(514))
+    assert receipt['deliveredEvents'] == 514
 
 
 def test_ingress_delivery_stale_attempt_fence_drops_rest_quietly():
@@ -399,7 +397,6 @@ def test_provider_ingress_receipt_has_fixed_shape_and_bounded_types():
 def test_full_queue_stop_is_bounded_and_drains_after_release(monkeypatch, aborted):
     import lib.tasks_pkg.manager._provider_ingress_guard as guard
 
-    monkeypatch.setattr(guard, '_DELIVERY_QUEUE_MAX', 2)
     monkeypatch.setattr(guard, '_FLUSH_JOIN_TIMEOUT_SEC', 0.02)
     task = {'id': 'full-queue-stop', 'aborted': aborted}
     token = guard.begin_provider_ingress(task, span_id='full-stop')
@@ -449,7 +446,6 @@ def test_logical_completion_persists_queue_gaps_across_floor_dispatches(
     import lib.tasks_pkg.manager._stream as stream
     import lib.turn_lifecycle as lifecycle
 
-    monkeypatch.setattr(guard, '_DELIVERY_QUEUE_MAX', 2)
     monkeypatch.setattr(guard, '_FLUSH_JOIN_TIMEOUT_SEC', 0.02 if incomplete else 1)
     # The bounded redelivery posture (2026-09-24) retries a failed closure
     # inline with back-off before accounting it. This test's permanently
@@ -520,10 +516,13 @@ def test_logical_completion_persists_queue_gaps_across_floor_dispatches(
         receipt = completed['observerIsolation']
         assert receipt['providerDispatches'] == 2
         assert receipt['deferredEvents'] == 12
-        assert receipt['droppedEvents'] == 4
+        assert receipt['droppedEvents'] == 0
         assert receipt['deliveryFailures'] == 2
         assert receipt['flushIncomplete'] is incomplete
-        assert not any(e.get('spanId') in ('child:1:0', 'child:2:0') for e in durable)
+        if not incomplete:
+            for dispatch in (1, 2):
+                assert all(any(e.get('spanId') == f'child:{dispatch}:{index}'
+                               for e in durable) for index in range(4))
         assert '_providerIngressIsolation' not in task
     finally:
         for release in releases:

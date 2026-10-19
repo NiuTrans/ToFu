@@ -16,7 +16,7 @@ def _validator():
     from jsonschema import Draft202012Validator
     # Generated from the canonical schema and shipped with the Python package;
     # runtime validation must not depend on a source checkout's contracts path.
-    from lib.api_v1_model_routing_generated import EXTERNAL_DEFS
+    from lib.generated_api_v1_model_routing import EXTERNAL_DEFS
     return Draft202012Validator({'$ref': '#/$defs/inferenceProfile', '$defs': EXTERNAL_DEFS})
 
 

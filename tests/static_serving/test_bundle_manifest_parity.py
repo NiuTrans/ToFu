@@ -61,7 +61,7 @@ def test_main_routes_every_declared_domain_to_an_explicit_esm_owner():
         'myday', 'misc', 'orchestration', 'infrastructure', 'background',
         'diagnostics', 'knowledge', 'utility-panels', 'project',
         'local-control', 'diagnostics-presenters', 'compaction-viewer',
-        'paper-preview', 'evolution',
+        'paper-preview', 'evolution', 'slides',
     }
     assert domains == expected
     for domain in domains:

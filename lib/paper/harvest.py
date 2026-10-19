@@ -136,14 +136,8 @@ class HarvestResult:
         }
 
 
-class HarvestPDFTooLargeError(ValueError):
-    """A deterministic PDF byte-budget rejection that must not be retried."""
-
-
-def _harvest_pdf_byte_limit() -> int:
-    """Request-loaded parser byte ceiling; patchable in focused tests."""
-    from lib.pdf_parser._common import MAX_PDF_BYTES
-    return MAX_PDF_BYTES
+class HarvestInvalidPDFError(ValueError):
+    """A verified malformed PDF must not be retried."""
 
 
 # ── Seams (monkeypatchable, same pattern as the recipe modules) ───────────
@@ -171,7 +165,7 @@ def parse_pdf(pdf_bytes: bytes, **kw) -> dict:
 
 def http_get(*args, **kwargs):
     """Request-loaded HTTP seam for bounded harvest transport tests."""
-    from lib.http_client import http_get as _http_get
+    from lib.http_transport.client import http_get as _http_get
     return _http_get(*args, **kwargs)
 
 
@@ -187,42 +181,20 @@ def _download_pdf_bytes(arxiv_id: str, *, timeout: int = 60) -> bytes:
     response = http_get(
         pdf_url, timeout=timeout, stream=True,
         headers={'User-Agent': 'Mozilla/5.0 (compatible; TofuBot/1.0)'})
-    limit = _harvest_pdf_byte_limit()
     try:
         response.raise_for_status()
-        try:
-            declared = int(
-                (getattr(response, 'headers', {}) or {}).get(
-                    'Content-Length') or 0)
-        except (TypeError, ValueError) as error:
-            logger.debug(
-                '[Paper:Harvest] invalid PDF Content-Length ignored: %s',
-                error)
-            declared = 0
-        if declared > limit:
-            raise HarvestPDFTooLargeError(
-                f'PDF exceeds the {limit // 1048576} MiB limit')
-
-        total = 0
         with tempfile.SpooledTemporaryFile(
                 max_size=_HARVEST_PDF_SPOOL_MEMORY_BYTES,
                 mode='w+b') as spool:
             for chunk in response.iter_content(chunk_size=64 * 1024):
                 if not chunk:
                     continue
-                total += len(chunk)
-                if total > limit:
-                    raise HarvestPDFTooLargeError(
-                        f'PDF exceeds the {limit // 1048576} MiB limit')
                 spool.write(chunk)
             spool.seek(0)
-            data = spool.read(limit + 1)
-        if len(data) > limit:
-            raise HarvestPDFTooLargeError(
-                f'PDF exceeds the {limit // 1048576} MiB limit')
+            data = spool.read()
         ok, _pages, verr = validate_pdf_bytes(data)
         if not ok:
-            raise ValueError(f'downloaded file is not a readable PDF: {verr}')
+            raise HarvestInvalidPDFError(f'downloaded file is not a readable PDF: {verr}')
         return data
     finally:
         close = getattr(response, 'close', None)
@@ -415,7 +387,7 @@ def harvest_arxiv_id(arxiv_id: str, *, folder_id: str = '', user_id: int,
         try:
             pdf_bytes = _self._download_pdf_bytes(arxiv_id)
             break
-        except HarvestPDFTooLargeError as e:
+        except HarvestInvalidPDFError as e:
             last_err = e
             logger.warning(
                 '[Paper:Harvest] permanent download rejection for %s: %s',

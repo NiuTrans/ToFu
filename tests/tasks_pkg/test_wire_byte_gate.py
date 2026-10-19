@@ -275,10 +275,9 @@ def test_detector_NEUTER_without_byte_gate_launders_to_eviction():
     # laundered into the generic byte-identical non-culprit verdict (the
     # current honest wording names an "upstream cache miss" possibility rather
     # than a confident eviction), and the <bytes> culprit is never named.
-    assert 'upstream cache miss' in str(out), (
-        'NEUTER expectation: without _wire_bytes the reasoning_details rebuild '
-        f'is invisible → laundered into the byte-identical verdict — got: {out}')
-    assert '<bytes>' not in str(out)
+    assert out['server_side']
+    assert any(row['code'] == 'cache_read_drop' for row in out['reasons'])
+    assert all(row['code'] != 'wire_bytes_changed' for row in out['reasons'])
 
 
 # ═══════════════════════════════════════════════════════════════════════════

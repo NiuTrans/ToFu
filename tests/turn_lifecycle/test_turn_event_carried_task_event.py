@@ -79,6 +79,20 @@ def _task_event(task_id, seq, wire):
     return {'task_id': task_id, 'sequence': seq, 'event': wire}
 
 
+def test_completed_round_persists_checklist_before_terminal_and_detaches_later_mutation(
+        turn_service,storage):
+    created,task=_running_task(turn_service,storage,'checklist-crash','checklist-task')
+    task['_todoState']={'version':3,'todos':[{'content':'Completed effect','status':'completed'}],
+                        'update_count':1,'explanation':''}
+    event={'type':'round_end','roundNum':1,'reason':'tool_calls'}
+    assert turn_service.record_task_event(task,event)
+    before=turn_service.get_turn('checklist-crash',created['turn']['turnId'],user_id=1)
+    assert before['status']=='running'
+    assert before['projection']['todoState']['update_count']==1
+    task['_todoState']['todos'][0]['content']='later mutation'
+    assert turn_service.get_turn('checklist-crash',created['turn']['turnId'],user_id=1)['projection']['todoState']['todos'][0]['content']=='Completed effect'
+
+
 def _stored_event(storage, task_id, seq):
     events = storage.client.query('event.list', {
         'task_id': task_id, 'after_sequence': seq - 1, 'limit': 1,

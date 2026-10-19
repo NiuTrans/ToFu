@@ -447,7 +447,7 @@ def _run_outline(ctx: dict) -> dict:
         except StageAborted:
             raise
         except Exception as exc:
-            from lib.llm_errors import AbortedError
+            from lib.llm.llm_errors import AbortedError
             if isinstance(exc, AbortedError):
                 raise StageAborted(str(exc)) from exc
             if mode == 'standard':
@@ -475,7 +475,7 @@ def _run_outline(ctx: dict) -> dict:
         except StageAborted:
             raise
         except Exception as exc:
-            from lib.llm_errors import AbortedError
+            from lib.llm.llm_errors import AbortedError
             if isinstance(exc, AbortedError):
                 raise StageAborted(str(exc)) from exc
             logger.warning('[Slides:outline] critic failed; using score: %s', exc)
@@ -577,7 +577,7 @@ def _revise_outline_with_feedback(ctx: dict, outline: dict,
         revised['human_revised'] = True
         return revised
     except Exception as exc:
-        from lib.llm_errors import AbortedError
+        from lib.llm.llm_errors import AbortedError
         if isinstance(exc, AbortedError):
             raise StageAborted(str(exc)) from exc
         logger.warning('[Slides:outline-gate] revision pass failed (%s) — '

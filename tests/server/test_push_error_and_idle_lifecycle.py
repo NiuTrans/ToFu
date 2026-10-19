@@ -8,8 +8,8 @@ from quart.testing import WebsocketResponseError
 
 from lib.agent_core.push import PushHub
 from lib.api_keys import AuthContext
-from lib.app_factory import create_base_app
-from lib.http_error_handlers import register_http_error_handlers
+from lib.app.app_factory import create_base_app
+from lib.http_transport.error_handlers import register_http_error_handlers
 
 
 pytestmark = pytest.mark.api

@@ -217,7 +217,7 @@ async def create_stripe_checkout(
     if cancel_url:
         form['cancel_url'] = cancel_url
 
-    from lib.http_client import async_http_post
+    from lib.http_transport.client import async_http_post
     try:
         resp = await async_http_post(
             f'{_STRIPE_API_BASE}/checkout/sessions',

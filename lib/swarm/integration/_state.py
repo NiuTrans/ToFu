@@ -683,8 +683,16 @@ def list_active_swarms(*, user_id: int) -> list[dict]:
                 {'id': sid, **info}
                 for sid, info in session.get_status().items()
             ]
+            # The dock consumes this same poll for run messages. A session key
+            # is reusable; only the original task ID identifies its mailbox.
+            from lib.swarm.message_receipts import snapshot_receipts
+            with session._lock:
+                specs = list(session.specs)
+            messages = snapshot_receipts(session, agents, specs)
             out.append({
                 'swarm_key':  key,
+                'swarm_id':   session.task_id,
+                **messages,
                 'conv_id':    session.conv_id,
                 **_agent_status_counts(agents),
                 'agent_count': len(agents),

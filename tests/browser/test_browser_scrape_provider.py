@@ -32,7 +32,7 @@ CARDS = [{'title': 'note 0', 'url': 'https://www.xiaohongshu.com/explore/a'},
 
 
 def _make_provider():
-    from lib.search_bridge import _ChatuiBrowserProvider
+    from lib.search.search_bridge import _ChatuiBrowserProvider
     # Registered providers are inert templates. tofu-search binds one request's
     # user/browser before entering worker threads; exercise that production
     # shape here so a test can never normalize a global-client fallback.
@@ -85,7 +85,7 @@ def test_happy_path_command_sequence(monkeypatch):
         'close_tab': {'closed': [77]},
     })
     # No real sleeping during the test.
-    monkeypatch.setattr('lib.search_bridge.time.sleep', lambda s: None)
+    monkeypatch.setattr('lib.search.search_bridge.time.sleep', lambda s: None)
 
     out = _make_provider().scrape(
         'https://www.xiaohongshu.com/search_result?keyword=x',

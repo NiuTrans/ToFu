@@ -367,7 +367,7 @@ def do_start(project_path, python_exe=None):
         # Optional in standalone recovery copies; the canonical checkout owns
         # the shared bounded policy and a periodic copy-truncate worker.
         try:
-            from lib.log_retention import register_external_log
+            from lib.logging_pkg.log_retention import register_external_log
             register_external_log(log_path, 'supervisor_server_console')
         except Exception:
             pass

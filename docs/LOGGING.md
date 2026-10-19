@@ -1,7 +1,7 @@
 # Logging and incident diagnostics contract
 
 This document is the operating contract for Tofu diagnostics. The policy
-registry in `lib/log_policy.py`, the incident record schema in
+registry in `lib/logging_pkg/log_policy.py`, the incident record schema in
 `contracts/log_incident_v1.schema.json`, and the OpenAPI metadata on
 `GET /api/v4/logs/diagnostics` are the machine-readable authorities.
 
@@ -10,7 +10,7 @@ registry in `lib/log_policy.py`, the incident record schema in
 1. A request thread never performs durable application-log I/O. It stamps
    context, applies flood control, and uses a bounded non-blocking queue.
 2. Every core durable stream has a per-file ceiling, backup count, family
-   budget, retention age, and priority in `lib/log_policy.py`. A direct child
+   budget, retention age, and priority in `lib/logging_pkg/log_policy.py`. A direct child
    stdout file outside `logs/` must call `register_external_log`; an
    unregistered append-only log is a defect. On POSIX, managed files are `0600`
    and the direct log directory is `0700`; maintenance migrates older permissive
@@ -75,7 +75,32 @@ Paired owned fixtures measured normal-write completion CPU 36–42% lower and
 async completion CPU 33–39% lower. Three 1,000-operation rotation pairs measured
 CPU 7–9% lower and passed unchanged tail/RSS guards; earlier 100-operation tail
 failures remain recorded. This is component evidence, not HTTP or system speed.
-See [admission evidence](evidence/system_audit_rotation_preflight_admission_20261009.json).
+See `system_audit_rotation_preflight_admission_20261009.json`.
+
+## Task startup timing anchors
+
+`measure_task_startup` retains the existing closed-cardinality histogram and
+adds paired `[TaskStartupTiming]` JSON records when its caller supplies explicit
+identity. Conversation dispatch records cleanup, context construction,
+registration, preparation, binding and submission; the physical worker records
+worker entry and its nested workspace binding. Each start/complete contains only
+bounded conversation/Turn/Attempt/task/owner identifiers, a fixed stage, wall-clock
+`observedAtMs`, and completion outcome/monotonic `durationMs`. Identity never
+becomes metric labels. No config, prompt, file list, error text, polling loop or
+new durable store is introduced. Existing model/tool/compaction execution clocks
+and browser perception receipts cover the subsequent boundaries.
+
+Problem: create-to-run timing conflated dispatch preparation, worker scheduling
+and workspace isolation, leaving a bare waiting placeholder during filesystem
+work. Decision: publish the committed physical-worker phase before workspace
+binding, retaining the binding-before-tools fence and failure settlement; pair
+stage starts with completions so a blocked stage leaves an entry witness.
+Alternatives rejected: a synthetic heartbeat cannot prove progress, a longer
+timeout hides the gap, and logging task dictionaries copies private content.
+Nested durations are inclusive, not additive. Missing completion does not alone
+prove a hang (log retention/loss still applies); existing `queue_wait` means
+create-to-run, not pure executor residence. Specs:
+`tests/tasks_pkg/test_startup_timing_anchors.py` and `test_spawn_serving_loop.py`.
 
 ## Repeated tool-call evidence
 
@@ -121,6 +146,16 @@ when raw-frame verification is needed. Terminal fatal paths also run the normal
 tool-round sweep before DONE/persistence, so unadopted announcements stop showing
 as running; retries and external/flow-owned lifecycle retain their owners.
 
+## 搜索诊断与统计
+
+**Problem:** 零候选在工具执行统计中仍是成功，无法统一区分目录缺失、可见性过滤和检索故障。**Decision:** 本地 `search_tools` 与程序内 `catalog.search` 每次实际检索向现有有界异步 `logs/audit.log` 写一条 `tool_search_outcome`（schema_version=1），成功也记录以提供分母。`outcome` 区分 matched / empty / error；`reason` 记录精确名称缺失、已可见、歧义、namespace 缺失/过滤精确名、翻页耗尽、空目录、全部已披露、无匹配、能力不可用的既有 reason_code、参数错误或 retrieval_exception。fail-open 即使给出恢复目录仍计为检索错误。
+
+记录保留至多 512 字符查询（超限显式标记）、128 字符 namespace/身份、模型、owner、会话/task/attempt、call_id、llm_round、目录名称指纹、可见/已披露/隐藏数量、返回数量和耗时，额外保留搜索器返回的 resolved_name 与 repeated_query。可见/已披露集合按搜索器的大小写无关规则投影且互斥，目录中的单词名称也识别为精确名查询。名称形状和当前目录成员事实仅作证据；不得由此直接认定上下文污染或幻觉。使用 task/attempt/round 回查既有 Request Inspector 请求，再核对上下文来源；不复制提示词、schema、工具结果或异常消息。审计失败不改变工具结果、异常传播、审批或 fail-open 行为，不新增缓存、数据库或保留周期。**Alternatives:** 只记精确 miss 漏掉自然语言和程序入口；把零结果全当污染则混淆正常过滤，均不采用。
+
+`python3 scripts/report_tool_search_outcomes.py logs/audit.log [旧日志...] --query steer_agent_run` 汇总保留记录的 matched/empty/error、按模型/入口/原因分组、每模型命中/空结果/检索错误比例、高频非命中查询和最近 20 条非命中记录。already_visible / all_tools_disclosed / page_exhausted 单列为 redundant_lookups，不等同检索故障；repeated_searches 只计有搜索器重复证据的调用。最近记录按日志时间排序，重复文件参数及同文件 symlink 不重复计数；无有效时间的行按读取顺序排在有效时间之前。脚本流式读取，单行 32 Ki 字符；原因、模型、查询各保留至多 1,024 身份加 overflow，超限由 aggregation_overflow 声明，总样本计数仍完整。原因/模型输出前 50 组，查询前 20 组；异常/过深 JSON 行单独计数。统计范围仅为本地入口、现存日志和成功入队的记录，不包含 hosted provider 搜索、不保证完整历史。既有异步审计队列与轮转限制仍生效。
+
+256 个合成目录名称、1,000 次诊断构造（含 JSON 编码）本机测量：中位 0.129 ms、p95 0.168 ms；单条 645 bytes（不含 sink 时间/请求字段），Python 临时分配峰值 40,834 bytes。测量不含检索与磁盘写入；队列、文件和日志家族仍使用既有资源上限。 互斥计数以单次目录遍历替代多份临时集合；同机 256 名称/1,000 次 JSON 编码对比，优化前/后中位均为 0.074 ms，p95 为 0.080/0.079 ms，单次 Python 临时分配峰值为 40,378/18,083 bytes。新增汇总状态只存在于离线命令，随命令退出释放。
+
 ## Data flow
 
 The browser console relay accepts the declared `{session, url, entries}`
@@ -138,28 +173,44 @@ and requests an urgent flush, into `logs/frontend.log`. Urgent diagnostics
 bypass the inferred push-health gate while respecting browser offline status
 and existing single-flight/queue bounds; no retry loop is introduced. A relay request in
 flight no longer discards unrelated console output; the existing ring bounds
-and endpoint recursion guard still apply. Each entry type emits at most once
-per five seconds; a subsequent checkpoint includes suppressed count/maximum.
-There are at most two observers and two counters, zero polling timers, no new
-requests during idle, and no transcript/argument/result copies. A local Node
-20.19 probe processing 10,000 synthetic same-window stalls emitted one record
-in 4.75 ms wall / 7.96 ms process CPU; this measures the diagnostic callback,
-not browser rendering or overall application latency. Visibility
-hides disconnect observers; resume reinstalls them without historical buffered
-entries. Composition disposal releases observers and the listener.
+and endpoint recursion guard still apply. Urgent flushes arriving during a flight
+coalesce into one immediate follow-up after settlement, without waiting for the
+normal 15/60-second relay clock or introducing retries. Each observer batch selects its longest
+entry before limiting. Each type emits one record per five-second window, plus
+one immediate promotion if it first crosses one second. Suppressed entries retain
+their longest complete evidence (including its original context), drained by one
+demand-only timeout at the window deadline even if no further stalls occur.
+`suppressed` counts entries folded since the prior report, including the retained
+representative when it is drained. Hiding, pagehide and composition disposal first
+take completed observer records and drain pending evidence, then disconnect and
+cancel the timeout. Resume/pageshow reinstalls observers without historical entries.
+At most two observers/checkpoints, one timeout and one semantic interaction are
+retained; idle creates no timeout or request and copies no transcript/payload.
+Resource measurement and verification live below; no polling heartbeat is added.
 
 Evidence includes page-monotonic start/duration/delivery delay, current canonical
 main-lane conversation/turn/attempt/task and latest tool-call identifiers,
 transport status, and, where the browser supports it, the slowest long-frame
-script path/function, script duration, blocking time and forced layout time.
-Script URLs omit query/fragment; script attribution and then transport/status
-are omitted if needed to keep the structured record inside the existing
-800-character relay budget. Identifier labels are capped at 64 characters.
+script path/function/character position/invoker type, script duration, blocking
+time and forced layout time. Character position identifies the script entry,
+not necessarily its slowest nested function (Chrome's
+[LoAF attribution contract](https://developer.chrome.com/docs/web-platform/long-animation-frames)).
+Script URLs omit query/fragment. Optional tool/attempt context is omitted before
+script attribution to preserve intact JSON within the 800-character relay budget.
+Identifier labels are capped at 64 characters. A capturing click/activation-key
+listener retains only a semantic interaction label (conversation-switch, link,
+disclosure or control), monotonic time and optional destination conversation ID.
+Interactions preceding entry start within 30 seconds, or captured inside the
+measured frame/task interval, are attached. `interactionAgeMs` is signed relative
+to entry start; a negative value means the frame began before the interaction.
+Activations delivered after entry end, raw key values, element text, link URLs
+and DOM references are never retained.
 Context is sampled **after** the stall, can
 already have advanced or settled, and does not establish that the latest tool
 caused it. The browser reports `startAtMs` from its performance time origin plus entry
 start, so a delayed batch still identifies when blocking began; browser/server
-clock skew remains possible. Session and server ingestion time link the batch.
+clock skew/suspension remains possible. `observedAtMs` separately records wall time
+at observer delivery; session and server ingestion time link the batch.
 Monotonic `startMs` alone is not a server timestamp.
 Unsupported APIs degrade silently. A permanently hung/killed renderer cannot
 run its observer or send logs; missing records do not prove responsiveness.
@@ -171,6 +222,19 @@ programmatic tools. Decision: passive browser timing with bounded canonical
 identifier context, reusing the relay. Alternatives: unconditional heartbeat
 polling adds idle work and confuses hidden-tab throttling with stalls; copying
 tool payloads adds overhead/private content and does not identify blocking code.
+
+Problem: first-entry limiting hid a later serious stall, and visibility changes
+discarded suppressed maxima. Decision: select each batch maximum, allow one severity
+promotion and drain retained evidence on a demand deadline and lifecycle edges.
+Alternatives rejected: waiting for another stall can lose the final hang; unbounded
+severity bypass can amplify a stalled page's logging; polling adds idle work.
+A Node 20.19 synthetic 10,000-callback probe measured 24.97 ms wall / 56.96 ms CPU,
+one immediate record, one demand timer and one final drain record. This measures
+diagnostic callbacks, not application latency or browser rendering. The timeout
+is reused without rescheduling for same-deadline bursts. Focused tests cover batch
+maxima, promotion, deadline/visibility/disposal drains, stale deliveries, bounded
+attribution and content-free interactions; the visual gate exercises real Chrome
+observer recovery and successful relay delivery through an isolated local app.
 
 The separate `/api/client-error` beacon sends only its declared `message`,
 `url`, `conversationCount`, and optional `extra` fields. Its producer omits
@@ -241,10 +305,37 @@ pipeline.
 Start every broad investigation with the bounded report:
 
 ```bash
-python3 -m lib.log_diagnostics --pretty
-python3 -m lib.log_diagnostics --conversation-id <id> --max-bytes 16384
-python3 -m lib.log_diagnostics --task-id <id> --window-hours 2
+python3 -m lib.logging_pkg.log_diagnostics --pretty
+python3 -m lib.logging_pkg.log_diagnostics --conversation-id <id> --max-bytes 16384
+python3 -m lib.logging_pkg.log_diagnostics --task-id <id> --window-hours 2
 ```
+
+Problem: traversing current then rotated files retained the last 200 scanned
+checkpoints, hiding newer failures; a byte-limited scan also looked like a complete
+requested time window. Decision: retain the newest 200 timestamps in a bounded
+heap and expose `summary.scan_truncated`, `scan_read_errors`, and scoped
+`correlation_occurrences`. Alternatives: sorting every checkpoint retains
+unbounded timeline state; increasing the default scan hides the coverage limit.
+`scan_truncated` means retained source bytes were omitted, not that producers lost
+events. `truncated` still describes the output JSON ceiling. Read failures remain
+visible even when legacy error-log fallback succeeds. Correlation counts use
+admitted occurrence deltas after all owner/selector filters; legacy text reports
+null because it cannot prove structured attribution. No field's absence alone
+establishes a defect: a process-wide engine event can have no request identity.
+For a larger offline evidence window, use `--scan-bytes 67108864` (64 MiB maximum);
+retention and scan limits still prevent certifying an arbitrary historical window.
+Conversation storage failures record the operation, declared route conversation,
+storage code/operation ID, private diagnostic and original exception tuple in the
+existing incident pipeline; HTTP 500 disclosure stays at the stable public code.
+HTTP 500 cause records from `api_internal_error` and the shared conversation
+storage/contract adapter use the existing `tofu_no_coalesce` bypass, so equal
+failures on different requests retain individual correlation. Aggregate counts
+alone were rejected because they retain only a representative request ID.
+The bounded queue, record ceiling and rotating retention remain authoritative.
+Root invocation retires both its copied execution context and outer worker
+correlation, including rejected admission and failed kickoff; child invocation
+restores its parent's context. Clearing only inside `copy_context` was rejected
+because it leaves stale caller fields available to the next pooled task.
 
 The HTTP equivalent is admin-only:
 
@@ -275,8 +366,8 @@ turn-trace contract (`GET /api/v4/tasks/<task_id>/trace`; see
 Inspect retention without mutation, then apply it explicitly if needed:
 
 ```bash
-python3 -m lib.log_diagnostics --maintenance dry-run --pretty
-python3 -m lib.log_diagnostics --maintenance apply --pretty
+python3 -m lib.logging_pkg.log_diagnostics --maintenance dry-run --pretty
+python3 -m lib.logging_pkg.log_diagnostics --maintenance apply --pretty
 ```
 
 The server and lifecycle manager also run the same policy at startup and every
@@ -310,7 +401,7 @@ file.
 Problem: a GIL-independent faulthandler timer traverses interpreter frames
 while other threads execute, return, and destroy generators; the diagnostic
 itself can fault while reading stale code metadata. Decision: recoverable
-stalls use `lib/server_fault_watchdog.py`, retaining Python frame objects
+stalls use `lib/server/server_fault_watchdog.py`, retaining Python frame objects
 with `sys._current_frames()` and formatting only filename/function/line
 metadata. No locals or source files are read. The loop thread is prioritized;
 all other threads fit the existing per-process byte budget, with explicit
@@ -393,7 +484,7 @@ does not prove that an existing browser tab has adopted it.
 - Message-wire repair warnings follow the same rule: retain role/index and
   content shape or length, never a user/assistant text preview.
 - If a subprocess must retain an append-only stdout file, add its stream to
-  `lib/log_policy.py` and register the exact path with
+  `lib/logging_pkg/log_policy.py` and register the exact path with
   `register_external_log` before opening/spawning it.
 - Add tests for original-value preservation, size/count retention, correlation, storage-outage
   behavior, and the model output byte ceiling.
@@ -474,7 +565,7 @@ Problem: per-RPC metric recording recreated default histogram containers and nor
 
 Measured against frozen native source 5c69659aa11c0f56437decde0c4b40fa10626079f6a7e8193300934ed99622fd: four single-caller runs each checked 610,000 exact reads including the separately profiled sample. Default SDK caller CPU decreases about 12% and mean latency 9–11%; default constructor pool capacity is four, with one caller. The direct-runtime point corpus omits the application client, so its latency must not be described as full SDK latency. Eight original 1000-conversation harness legs preserve exact stream/replay/content and integrity. Stream P99 improves in both transports but remains above one second. One reverse embedded completion P99 regresses about 4.3%; no universal no-regression or SQLite superiority claim follows.
 
-There are no added workers, queues, per-request caches or persistent records. The compiled pattern object measures 160 Python bytes, excluding interpreter regexp-cache bookkeeping and RSS; histogram state has its original structure. Both native/client RSS in embedded observations overlap and must not be summed. Full results and limitations: [metric hot path evidence](evidence/tofudb_metrics_hotpath_admission_20261008.json).
+There are no added workers, queues, per-request caches or persistent records. The compiled pattern object measures 160 Python bytes, excluding interpreter regexp-cache bookkeeping and RSS; histogram state has its original structure. Both native/client RSS in embedded observations overlap and must not be summed. Full results and limitations: `tofudb_metrics_hotpath_admission_20261008.json`.
 
 Explicit provider-payload capture
 ---------------------------------
@@ -496,3 +587,91 @@ payload bytes stay within `max_bytes`, and event/stream metadata each stay withi
 probe with 1,000 inputs, 16 KiB/32-event bounds retained exactly 16 KiB/32 events
 and peaked at 22,888 traced bytes including a detached snapshot. This measures
 that probe, not process RSS or default transport overhead.
+
+## Correlated translation phase timing
+
+**Problem:** one `Translate:trace elapsed` and its outer attempt count could not
+separate local routing, backpressure, nested HTTP retries, provider response wait,
+body transfer, content validation, or storage contention. **Decision:**
+`lib/llm/diagnostic_timing.py` owns monotonic, inclusive phase evidence;
+`lib/translate/observability.py` admits scopes and explicitly transfers only this
+diagnostic context to translation workers. `lib/http_transport/client.py` and LLM dispatch
+consume the generic observer and never import translation policy. No model,
+retry, admission, request format, cancellation, timeout, or durable DTO changes.
+**Alternatives rejected:** timing the whole POST as inference hides storage;
+switching to streaming changes provider behavior; estimating DNS/TLS or first
+content from response completion manufactures measurements.
+
+The normal `app.log` receives JSON records prefixed `[Translation:timing]`:
+`phase_start`, `phase_observation`, `phase_complete`, and one `summary`. A
+`timing_id` links the root command, worker and physical request records; safe
+`conversation_id`, `task_id`/`job_id` and actual `M-TraceId` provide additional
+correlation. The engine's private `_translate_trace.timing` snapshot carries the
+same ID. No new database, endpoint, logger file, background thread or timer is
+introduced. These are diagnostic facts, never task/Turn settlement authority.
+
+| Phase / field | Actual observation |
+|---|---|
+| `turn_command_total`, `input_translation`, `language_detection` | command application, send translation gate/work, and language cascade |
+| `lane_queue`, `lane_worker` | submission → worker entry, and worker entry → return |
+| `route_resolution`, `route_selection`, `dispatcher_wait` | dispatcher preparation, slot selection, and actual backpressure sleep |
+| `cache_lookup`, `identity_check`, `machine_translation`, `cache_store` | explicit fast paths and cache writes |
+| `engine_attempt`, `engine_backoff`, `quality_validation`, `postprocess` | outer translation attempt, actual backoff, guards/status publication, dedup |
+| `status_delivery` | status callback publication; nested in validation when appropriate |
+| `request_build`, `input_admission`, `request_seal` | canonical body building, input accounting and final sealing |
+| `egress_route`, `network_route`, `http_pool_acquire` | desktop/proxy path resolution and thread-local session acquisition |
+| `provider_call`, `chat_total`, `provider_send` | selected-slot invocation, nonstream chat lifecycle, and send/budget boundary |
+| `http_request.response_headers_ms` | request start → last actual response-header hook; includes connect/upload/upstream wait |
+| `http_request.response_body_ms` | last response-header hook → nonstream request return; includes caller hooks and body transfer, not pure generation |
+| `response_parse`, `response_normalize`, `response_usage` | JSON parsing, wire normalization and content/token count disclosure |
+| `transport_backoff` | actual physical transport retry sleep |
+| `provider_stream.first_content_ms` | stream attempt start → first actual nonempty text delta; reasoning/heartbeat is not content |
+| `provider_stream.after_first_content_ms` | first content → attempt end, including remaining events/usage; errors retain failed outcome |
+| `stream_headers_wait` | direct/relay stream-header wait, with physical trace and transport label |
+| `storage_commit`, `storage_attempt`, `storage_backoff` | translated Turn overlay CAS lifecycle, storage attempts and actual retry sleeps |
+| `turn_persist`, `executor_start`, `acknowledgement_read` | accepted send command persistence, executor start and final receipt reads |
+
+Spans are **inclusive**, not additive: `parent_span_id` names nesting, and worker
+execution overlaps the synchronous caller wait. Sum neither `provider_call` and
+`http_request` nor `engine_total` and its children. The Request lifecycle's HTTP
+log remains the full route wall clock; `turn_command_total` starts at command
+service entry. A send fallback reports `translation_outcome` separately from a
+successfully accepted command. Translation-enabled create commands keep one
+scope through persistence; unrelated commands do not enable these diagnostics.
+
+Requests hooks observe headers *before* automatic nonstream body consumption.
+Caller/session hooks and replacement responses preserve their original authority;
+the metric status code retains the real header observation, not a replacement.
+Redirect header observations retain first/last offsets and an exact count.
+`stream=True` return and failed/aborted reads never claim `body_complete`.
+Connection failures retain no invented header time. Adapter/desktop nonstream
+calls have outer send coverage but no fabricated Requests header/body split.
+DNS, TCP/TLS and provider-internal queueing are explicitly unobserved; nonstream
+first-token timing is unobserved, never the old completion upper bound.
+
+Per scope, constants bound 48 stage aggregates, 48 span samples/active records,
+and 96 phase events plus one compact summary. Aggregated stage counts/durations,
+real HTTP response-header/429 counts and HTTP-boundary errors continue beyond
+sample clipping; `coverage`, `events_suppressed` and uncounted-stage occurrences
+report gaps. Metadata uses fixed scalar fields and 128-character labels; phase
+names cap at 64. Snapshots are detached. A caller timeout freezes its summary
+with outstanding spans; worker records arriving afterward are explicitly
+`late_phase_*` and cannot change its verdict. Background summaries say
+`worker_completed`, not durable translation success. Deferred storage retries
+have separate worker timing IDs and correlate by their existing task/job ID;
+scheduled delay is not claimed as active worker or model time.
+
+Observation faults cannot replace output or exceptions. New evidence contains
+no prompts, response/reasoning bodies, URLs/query strings, header maps, key names,
+key values or exception text. Exact local tests:
+`test_diagnostic_timing.py`, `test_http_translation_timing.py`, and
+`test_translation_phase_metrics.py`, plus existing deadline/budget/HTTP suites.
+A Python 3.12 component probe measured 20,000 trivial calls at 0.043 µs baseline
+versus 0.120 µs through an inactive observer; 1,000 active phase scopes with
+tracemalloc and a no-op sink took 19.615 ms, retaining 48 samples and all 1,000
+aggregate occurrences in a 5,659-byte snapshot. This excludes logger delivery,
+network, storage and inference and is not an application-speed claim. Existing
+log rotation, queue and family-retention limits remain the only durable-log
+resource policy.
+
+<!-- Evidence note: former docs/evidence/ artifact snapshots cited here were retired from the tree; cited JSON artifacts remain recoverable from git history. -->

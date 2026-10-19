@@ -5,7 +5,7 @@ from pathlib import Path
 import hashlib
 import pytest
 
-from lib.storage_sidecar import native_launch
+from lib.storage_authority_sql import native_launch
 
 pytestmark = pytest.mark.unit
 

@@ -11,6 +11,9 @@ No content owner imports the facade or reads runtime globals. The retained
 until core dispatch migrates. Do not add transport, timers or listener owners.
 Never infer success or a durable WorkUnit handle from a payload task id; preserve
 failure/rollback errors and the explicit acceptance metadata.
+Accepted jobs delegate their visible shell to `../work-unit/shell.ts`; the
+WorkUnit owner handles mounted progress, reviews, previews and revision intents.
+Ordinary multimedia receipts retain their existing disclosures.
 
 Verify `node --test tests/motion-card.test.cjs`, neighboring rich-tool harnesses,
 the visual multimedia receipt fixture, then `npm run check:frontend`.

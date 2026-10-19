@@ -5,9 +5,9 @@ import tracemalloc
 
 import pytest
 
-from lib.storage_sidecar import tofudb_migration_transcript as transcript
-from lib.storage_sidecar.archived_message_codec import encode_archived_message_sequence_with_metrics
-from lib.storage_sidecar.tofudb_migration_source import MigrationSourceError, SQLiteMigrationSource
+from lib.storage_authority_sql.migration import tofudb_migration_transcript as transcript
+from lib.storage_authority_sql.archived_message_codec import encode_archived_message_sequence_with_metrics
+from lib.storage_authority_sql.migration.tofudb_migration_source import MigrationSourceError, SQLiteMigrationSource
 
 pytestmark = pytest.mark.unit
 
@@ -103,7 +103,7 @@ def test_one_large_unicode_message_has_a_bounded_decode_peak():
 
 def test_frozen_page_packing_keeps_whole_messages_and_exact_descriptors(tmp_path, monkeypatch):
     import hashlib
-    from lib.storage_sidecar.generated_tofudb_migration import FROZEN_TRANSCRIPTS
+    from lib.storage_authority_sql.migration.generated_tofudb_migration import FROZEN_TRANSCRIPTS
     path = tmp_path / 'source.db'
     messages = [{'content': 'a' * 20}, {'content': 'b' * 200}, {'content': 'c' * 20}]
     with sqlite3.connect(path) as db:

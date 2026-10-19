@@ -7,14 +7,14 @@ import pytest
 pytestmark = pytest.mark.unit
 
 
-def test_oversized_upload_leaves_no_final_or_partial(monkeypatch, tmp_path):
+def test_receive_failure_leaves_no_final_or_partial(monkeypatch, tmp_path):
     import routes.paper_pkg._common as paper
-
-    monkeypatch.setattr(paper, '_paper_pdf_limit', lambda: 8)
+    class FailedSource:
+        def read(self, size):
+            raise OSError('actual source failure')
     final = tmp_path / 'paper.pdf'
-    with pytest.raises(paper._PaperDownloadTooLarge):
-        paper._store_uploaded_pdf_atomic(io.BytesIO(b'123456789'), str(final))
-
+    with pytest.raises(OSError, match='actual source failure'):
+        paper._store_uploaded_pdf_atomic(FailedSource(), str(final))
     assert not final.exists()
     assert list(tmp_path.iterdir()) == []
 
@@ -23,7 +23,6 @@ def test_invalid_upload_cannot_replace_existing_file(monkeypatch, tmp_path):
     import lib.pdf_parser.text as pdf_text
     import routes.paper_pkg._common as paper
 
-    monkeypatch.setattr(paper, '_paper_pdf_limit', lambda: 1024)
     monkeypatch.setattr(
         pdf_text, 'validate_pdf_bytes',
         lambda _body: (False, 0, 'test rejection'),
@@ -43,7 +42,6 @@ def test_valid_upload_is_atomically_published(monkeypatch, tmp_path):
     import routes.paper_pkg._common as paper
 
     body = b'%PDF-valid-test-body'
-    monkeypatch.setattr(paper, '_paper_pdf_limit', lambda: 1024)
     monkeypatch.setattr(
         pdf_text, 'validate_pdf_bytes',
         lambda candidate: (candidate == body, 1, ''),

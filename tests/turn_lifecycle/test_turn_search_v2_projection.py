@@ -1,9 +1,9 @@
 """Disposable-storage correctness and resource regressions for search v2 projection."""
 import orjson
-from lib.storage_sidecar.turn_search_chunks import chunks
-from lib.storage_sidecar.turn_search_projection import LocalSQLiteTurnSearchTarget, TurnSearchProjectionRuntime
-from lib.storage_sidecar.turn_search_sources import turn_snapshot
-from lib.storage_sidecar.adapters.sqlite import SQLiteSession
+from lib.storage_authority_sql.turn_search_chunks import chunks
+from lib.storage_authority_sql.turn_search_projection import LocalSQLiteTurnSearchTarget, TurnSearchProjectionRuntime
+from lib.storage_authority_sql.turn_search_sources import turn_snapshot
+from lib.storage_authority_sql.adapters.sqlite import SQLiteSession
 from tests.turn_lifecycle.test_turn_search_projection import _authority, _insert_authority_turn, _snapshot, _Backend
 
 
@@ -60,8 +60,8 @@ def test_history_titles_and_fts_replace_delete(tmp_path):
 
 import pytest
 import tracemalloc
-from lib.storage_sidecar.turn_search_sources import history_page, MAX_BYTES
-from lib.storage_sidecar.archived_message_codec import encode_archived_message_sequence_with_metrics
+from lib.storage_authority_sql.turn_search_sources import history_page, MAX_BYTES
+from lib.storage_authority_sql.archived_message_codec import encode_archived_message_sequence_with_metrics
 
 pytestmark = pytest.mark.unit
 
@@ -243,7 +243,7 @@ def test_private_codec_corruption_cannot_be_ready_text():
 
 
 def test_background_rounds_bound_pages_headers_and_exact_ack(tmp_path):
-    from lib.storage_sidecar.turn_search_projection import PROJECTION_NAME
+    from lib.storage_authority_sql.turn_search_projection import PROJECTION_NAME
     connection = _authority()
     target = LocalSQLiteTurnSearchTarget(tmp_path / 'bounded', 20_000_000)
     target.start()
@@ -284,9 +284,9 @@ def test_background_rounds_bound_pages_headers_and_exact_ack(tmp_path):
         connection.close()
 
 
-def test_disk_budget_rolls_back_replacement_and_recovers(tmp_path):
+def test_disk_full_rolls_back_replacement_and_recovers(tmp_path):
     import time
-    from lib.storage.errors import StorageError
+    import sqlite3
     target = LocalSQLiteTurnSearchTarget(tmp_path / 'capacity', 20_000_000)
     target.start()
     identity = {'user_id': 1, 'entity_key': 'turn-1'}
@@ -294,15 +294,14 @@ def test_disk_budget_rolls_back_replacement_and_recovers(tmp_path):
         target.apply_turn(identity, _snapshot(content='original needle'), 'old')
         target.set_backfill_state('checkpoint', True)
         target._writer.execute('PRAGMA wal_checkpoint(TRUNCATE)')
-        logical = target._writer.execute('PRAGMA page_count').fetchone()[0] * 4096
-        target.max_bytes = max(target._database_bytes() + 4096, logical * 3)
-        with pytest.raises(StorageError, match='resource budget'):
+        pages = target._writer.execute('PRAGMA page_count').fetchone()[0]
+        target._writer.execute(f'PRAGMA max_page_count={pages}')
+        with pytest.raises(sqlite3.OperationalError, match='full'):
             target.apply_turn(identity, _snapshot(content='replacement ' * 15000), 'new')
         assert not target._writer.in_transaction
         assert target._writer.execute('SELECT generation_token FROM storage_search_turns').fetchone()[0] == 'old'
         assert target.backfill_state() == ('checkpoint', True)
-        assert target.status()['state'] == 'capacity_exceeded'
-        target.max_bytes = 20_000_000
+        target._writer.execute('PRAGMA max_page_count=2147483646')
         target.apply_turn(identity, _snapshot(content='recovered needle'), 'new')
         assert target.status()['state'] == 'ready'
         assert target.query(lambda s: s.fetch_one('SELECT generation_token FROM storage_search_turns'),
@@ -313,7 +312,7 @@ def test_disk_budget_rolls_back_replacement_and_recovers(tmp_path):
 
 @pytest.mark.parametrize('shared', [False, True])
 def test_source_skips_persist_restart_and_reset(tmp_path, shared):
-    from lib.storage_sidecar.turn_search_projection import AuthorityTurnSearchTarget
+    from lib.storage_authority_sql.turn_search_projection import AuthorityTurnSearchTarget
     connection = _authority()
     def make_target():
         return (AuthorityTurnSearchTarget(_Backend(connection)) if shared else
@@ -338,7 +337,7 @@ def test_source_skips_persist_restart_and_reset(tmp_path, shared):
 
 def test_source_generation_change_retries_without_ack(tmp_path, monkeypatch):
     from lib.storage.errors import StorageError
-    from lib.storage_sidecar import turn_search_sources
+    from lib.storage_authority_sql import turn_search_sources
     connection = _authority()
     target = LocalSQLiteTurnSearchTarget(tmp_path / 'race', 20_000_000)
     target.start()

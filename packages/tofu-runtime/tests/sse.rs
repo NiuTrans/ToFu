@@ -99,3 +99,124 @@ fn consumer_unwind_retires_framer_and_preserves_prior_faults() {
     f.finalize();
     assert_eq!(f.drain_issues().count, 0);
 }
+
+#[test]
+fn multiline_payload_preserves_empty_values_and_owned_delivery_at_every_split() {
+    let wire = "data\r\ndata:  中文\ndata:\rid: one\n: comment\nevent: delta\ndata: tail\n\ndata: next\n\n";
+    for split in 0..=wire.len() {
+        let mut framer = Framer::new(256).unwrap();
+        let mut events = Vec::new();
+        for chunk in [&wire.as_bytes()[..split], &wire.as_bytes()[split..]] {
+            framer
+                .feed_until(chunk, |event, issues| {
+                    assert_eq!(issues.count, 0);
+                    events.push(event);
+                    false
+                })
+                .unwrap();
+        }
+        framer.finalize();
+        assert_eq!(framer.drain_issues().count, 0, "split {split}");
+        assert_eq!(events.len(), 2, "split {split}");
+        assert_eq!(events[0].data, "\n 中文\n\ntail", "split {split}");
+        assert_eq!(events[0].event, "delta");
+        assert_eq!(events[0].event_id, "one");
+        assert_eq!(events[1].data, "next");
+        assert_eq!(events[1].event, "");
+        assert_eq!(events[1].event_id, "");
+    }
+}
+
+#[test]
+fn multiline_budget_counts_wire_bytes_and_discards_only_the_rejected_event() {
+    // Each nonempty wire line includes one normalized newline in the budget.
+    let wire = b"data: a\ndata: b\n\ndata: ok\n\n";
+    for budget in [15, 16] {
+        for chunk_size in 1..=wire.len() {
+            let mut framer = Framer::new(budget).unwrap();
+            let mut events = Vec::new();
+            let mut issues = Vec::new();
+            for chunk in wire.chunks(chunk_size) {
+                framer
+                    .feed_until(chunk, |event, pending| {
+                        events.push(event.data);
+                        issues.extend(pending.diagnostics);
+                        false
+                    })
+                    .unwrap();
+            }
+            framer.finalize();
+            assert_eq!(framer.drain_issues().count, 0);
+            if budget == 15 {
+                assert_eq!(events, ["ok"]);
+                assert_eq!(issues, [Issue::EventTooLarge]);
+            } else {
+                assert_eq!(events, ["a\nb", "ok"]);
+                assert!(issues.is_empty());
+            }
+        }
+    }
+}
+
+#[test]
+fn delivered_payload_does_not_retain_line_growth_capacity() {
+    for bytes in [0, 1, 8, 1024, 65536] {
+        let data = "x".repeat(bytes);
+        let wire = format!("data: {data}\n\n");
+        let mut framer = Framer::new(wire.len()).unwrap();
+        let mut delivered = None;
+        framer
+            .feed_until(wire.as_bytes(), |event, issues| {
+                assert_eq!(issues.count, 0);
+                delivered = Some(event);
+                false
+            })
+            .unwrap();
+        framer.close();
+        let delivered = delivered.unwrap();
+        assert_eq!(delivered.data, data);
+        assert_eq!(delivered.data.capacity(), delivered.data.len());
+    }
+}
+
+#[test]
+fn malformed_and_oversized_streams_are_invariant_under_chunking() {
+    use tofu_runtime::sse::{Event, Issues};
+    fn observe(wire: &[u8], budget: usize, chunk: usize) -> (Vec<(Event, Issues)>, Issues) {
+        let mut framer = Framer::new(budget).unwrap();
+        let mut events = Vec::new();
+        for bytes in wire.chunks(chunk) {
+            framer
+                .feed_until(bytes, |event, issues| {
+                    events.push((event, issues));
+                    false
+                })
+                .unwrap();
+        }
+        framer.finalize();
+        (events, framer.drain_issues())
+    }
+    let mut seed = 0x5eeda11u32;
+    let alphabet = b"data: id event retry 01234\n\r\0\xef\xbb\xbf\xe0\xed\xf0\xf4\x80\x9f\xff";
+    for case in 0..512 {
+        let mut wire = "\u{feff}data: initial ASCII line with 中文\r\n"
+            .as_bytes()
+            .to_vec();
+        for _ in 0..case % 193 {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            wire.push(alphabet[seed as usize % alphabet.len()]);
+        }
+        wire.extend_from_slice(b"\r\n\r\ndata: resynchronized ASCII event\n\ndata: unfinished");
+        let budget = [1, 16, 32, 128, 512][case % 5];
+        let expected = observe(&wire, budget, 1);
+        for chunk in [2, 7, 15, 16, 17, 31, 64, wire.len()] {
+            assert_eq!(
+                observe(&wire, budget, chunk),
+                expected,
+                "case {case}, chunk {chunk}"
+            );
+        }
+    }
+}

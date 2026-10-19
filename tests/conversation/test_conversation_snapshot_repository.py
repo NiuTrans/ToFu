@@ -279,8 +279,17 @@ def test_bounded_scan_lists_metadata_then_hydrates_small_ordered_batches():
     assert all(payload['settings_keys'] == ['model'] for payload in body_payloads)
 
 
-def test_bounded_scan_splits_only_oversize_transcript_frames():
+@pytest.mark.parametrize('code', ['database_protocol_error', 'database_unavailable'])
+def test_bounded_scan_splits_rejected_transcript_batches(code):
     client = _ScanClient(['c0', 'c1', 'c2', 'c3'], max_full_batch=1)
+    original_query = client.query
+    def query(operation, payload):
+        try:
+            return original_query(operation, payload)
+        except StorageError as exc:
+            raise StorageError(code, "database_resource_exhausted"
+                               if code == "database_unavailable" else exc.message) from exc
+    client.query = query
     total, iterator = _repository(client).scan_bounded(
         user_id=7, batch_size=4)
 
@@ -290,6 +299,22 @@ def test_bounded_scan_splits_only_oversize_transcript_frames():
         len(payload['ids']) for _, payload in client.calls if 'ids' in payload
     ]
     assert requested_sizes == [4, 2, 1, 1, 2, 1, 1]
+
+
+@pytest.mark.parametrize('code', ['database_unavailable', 'database_integrity'])
+def test_bounded_scan_preserves_unavailable_single_transcript(code):
+    client = _ScanClient(['c0'])
+    original_query = client.query
+    failure = StorageError(code, 'synthetic unavailable')
+    def query(operation, payload):
+        if payload.get('ids') is not None:
+            raise failure
+        return original_query(operation, payload)
+    client.query = query
+    _, iterator = _repository(client).scan_bounded(user_id=7)
+    with pytest.raises(StorageError) as caught:
+        list(iterator)
+    assert caught.value is failure
 
 
 def test_activity_counts_use_owner_scoped_timestamp_only_operation():

@@ -71,3 +71,38 @@ def test_irreducible_floor_refuses_before_summary_and_keeps_source(monkeypatch):
         _dispatch_prompt_measure=complete_count, _result_meta=meta)
     assert messages == source
     assert meta['summaryFailureReason'] == 'irreducible_prompt_floor'
+
+
+@pytest.mark.parametrize('oversized_summary', [False, True])
+def test_summary_allowance_uses_remaining_room_after_required_floor(monkeypatch, oversized_summary):
+    messages = messages_with_long_execution()
+    messages[0]['content'] = 'policy ' * 2000
+    source = deepcopy(messages)
+    calls = []
+
+    def summarize(cold, *args, **kwargs):
+        calls.append((deepcopy(cold), kwargs))
+        return ('summary ' * 10000 if oversized_summary else
+                '### Objective\nComplete the recovery work\n### Progress\nVerified earlier evidence.')
+
+    monkeypatch.setattr(compact, '_generate_query_aware_summary', summarize)
+    monkeypatch.setattr(compact, '_archive_transcript', lambda *a, **k: None)
+    meta = {}
+    adopted = compact.force_compact_if_needed(
+        messages, task=task(), force=True, preserve_budget_tokens=15269,
+        _compaction_trigger='dispatch_guard', _dispatch_prompt_target=80640,
+        _dispatch_prompt_measure=complete_count, _result_meta=meta)
+
+    # The fixed quarter-window reserve would call this floor irreducible,
+    # although a complete summary still has several thousand tokens of room.
+    assert len(calls) == 1
+    assert 2200 <= calls[0][1]['output_budget_tokens'] < 80640 // 4
+    assert meta['plannedPromptTokens'] <= 80640
+    assert adopted is not oversized_summary
+    if oversized_summary:
+        assert messages == source  # Never slice completed text or discard evidence.
+    else:
+        assert complete_count(messages) <= 80640
+        assert messages[0] == source[0]
+        assert source[-1] in messages
+        assert any(m.get('content') == source[2]['content'] for m in calls[0][0])

@@ -7,7 +7,7 @@ XDG default, or an explicit $TOFU_DATA_DIR). The keepalive daemon exists to keep
 the mount holding the live DB awake; if it kept probing the in-tree ``data/`` it
 would poke the wrong mount and let the real DB mount stale — the exact FUSE
 freeze it was written to prevent. So its probe paths AND its activation gate
-must key on ``lib.runtime_paths.data_root()`` / ``logs_root()``.
+must key on ``lib.runtime.runtime_paths.data_root()`` / ``logs_root()``.
 
 Ground-truth (subprocess so a fresh import picks up env cleanly):
   * probe paths follow $TOFU_DATA_DIR to a location distinct from the repo;

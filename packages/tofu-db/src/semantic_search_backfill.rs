@@ -177,11 +177,14 @@ pub(crate) fn advance(
 pub(crate) const SOURCE_PAGE_ROWS: usize =
     crate::generated_tofudb_ir::SEARCH_PROJECTION_BACKFILL_PAGE_ROWS;
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct PageProgress {
     pub enqueued: usize,
     pub source_bytes: usize,
     pub complete: bool,
+    /// Exact state read or successfully committed by this call. Reusable only
+    /// while the caller retains the same authority hold without another write.
+    pub checkpoint: Option<Checkpoint>,
 }
 
 /// Consume one page for a scope supplied by the maintenance ownership boundary.
@@ -202,6 +205,7 @@ pub(crate) fn consume_page(
     if state.complete {
         return Ok(PageProgress {
             complete: true,
+            checkpoint: Some(state),
             ..PageProgress::default()
         });
     }
@@ -240,7 +244,7 @@ pub(crate) fn consume_page(
         progress.source_bytes += value.len();
         cursor = key.key_bytes().to_vec();
     }
-    advance(
+    let checkpoint = advance(
         database,
         &mut transaction,
         &state,
@@ -248,6 +252,7 @@ pub(crate) fn consume_page(
         progress.complete,
     )?;
     database.commit(transaction)?;
+    progress.checkpoint = Some(checkpoint);
     Ok(progress)
 }
 
@@ -384,8 +389,9 @@ mod tests {
             }
             database.commit(transaction).unwrap();
         }
-        assert_eq!(consume_page(&mut database, 7, 12).unwrap().enqueued, 0);
+        assert_eq!(consume_page(&mut database, 7, 12).unwrap(), PageProgress::default());
         let first = consume_page(&mut database, 7, 11).unwrap();
+        assert_eq!(first.checkpoint, read(&database, 11));
         assert_eq!(first.enqueued, SOURCE_PAGE_ROWS);
         assert_eq!(
             first.source_bytes,
@@ -422,7 +428,10 @@ mod tests {
         let last = consume_page(&mut database, 7, 11).unwrap();
         assert_eq!(last.enqueued, 3);
         assert!(last.complete);
-        assert_eq!(consume_page(&mut database, 7, 11).unwrap().enqueued, 0);
+        assert_eq!(last.checkpoint, read(&database, 11));
+        let completed = consume_page(&mut database, 7, 11).unwrap();
+        assert_eq!(completed.enqueued, 0);
+        assert_eq!(completed.checkpoint, last.checkpoint);
         assert!(search_dirty::list(&database, 7, 12).unwrap().is_empty());
         assert_eq!(read(&database, 12), None);
         assert!(search_dirty::list(&database, 8, 11).unwrap().is_empty());
@@ -430,6 +439,72 @@ mod tests {
             read(&database, 11).unwrap().cursor,
             format!("c{:02}", SOURCE_PAGE_ROWS * 2 + 2).as_bytes()
         );
+    }
+
+    #[test]
+    fn empty_page_returns_committed_checkpoint_not_the_pre_advance_state() {
+        let vfs = Arc::new(DeterministicVfs::new(None));
+        let (mut database, initial) = setup(vfs);
+        let progress = consume_page(&mut database, 7, 11).unwrap();
+        assert_eq!(progress.enqueued, 0);
+        assert_eq!(progress.source_bytes, 0);
+        assert!(progress.complete);
+        assert_eq!(progress.checkpoint, read(&database, 11));
+        assert_eq!(progress.checkpoint, Some(Checkpoint { complete: true, ..initial }));
+        assert_eq!(consume_page(&mut database, 7, 11).unwrap(), progress);
+    }
+
+    #[test]
+    fn consume_page_rejects_corrupt_checkpoint_before_enqueuing() {
+        let vfs = Arc::new(DeterministicVfs::new(None));
+        let (mut database, _) = setup(vfs);
+        let mut transaction = database.begin(7, 11).unwrap();
+        let stored_key = key(&transaction).unwrap();
+        database.entity_put(&mut transaction, stored_key, vec![0; 17]).unwrap();
+        database.commit(transaction).unwrap();
+        let before = database.query_snapshot();
+        assert_eq!(consume_page(&mut database, 7, 11).unwrap_err().kind(), io::ErrorKind::InvalidData);
+        assert_eq!(database.query_snapshot(), before);
+        assert!(search_dirty::list(&database, 7, 11).unwrap().is_empty());
+    }
+
+    #[test]
+    fn consume_page_commit_fault_returns_no_checkpoint_and_recovers_exact_work() {
+        for (operation, action, expected_kind) in [
+            (Operation::Write, FaultAction::ErrorBefore(io::ErrorKind::Other), io::ErrorKind::Other),
+            (Operation::Write, FaultAction::ShortWrite(7), io::ErrorKind::WriteZero),
+            (Operation::SyncData, FaultAction::ErrorBefore(io::ErrorKind::Other), io::ErrorKind::Other),
+        ] {
+            let vfs = Arc::new(DeterministicVfs::new(None));
+            let (mut database, initial) = setup(vfs.clone());
+            let mut transaction = database.begin(7, 11).unwrap();
+            let source_key = EntityKey::new(7, 11,
+                crate::generated_tofudb_ir::CONVERSATION_DOCUMENT_NAMESPACE, b"conversation").unwrap();
+            database.entity_put(&mut transaction, source_key, b"{}".to_vec()).unwrap();
+            database.commit(transaction).unwrap();
+            vfs.arm_operation_fault(operation, 1, action).unwrap();
+            let error = consume_page(&mut database, 7, 11).unwrap_err();
+            assert!(vfs.operation_fault_fired().unwrap(), "{operation:?}");
+            assert_eq!(error.kind(), expected_kind, "{operation:?}");
+            // An uncertain append must not hand out coverage or permit more
+            // reads. Dropping a poisoned engine cannot publish its CONTROL.
+            assert!(database.begin(7, 11).is_err(), "{operation:?}");
+            drop(database);
+            vfs.arm_fault(None).unwrap();
+            vfs.crash().unwrap();
+            let mut database = AuthorityDatabase::open_with_vfs(Path::new("/data"), vfs).unwrap();
+            assert_eq!(read(&database, 11), Some(initial));
+            assert!(search_dirty::list(&database, 7, 11).unwrap().is_empty());
+            let retry = consume_page(&mut database, 7, 11).unwrap();
+            assert!(retry.complete);
+            assert_eq!(retry.enqueued, 1);
+            assert_eq!(retry.checkpoint, read(&database, 11));
+            let checkpoint = retry.checkpoint.unwrap();
+            assert_eq!(checkpoint.cursor, b"conversation");
+            assert!(checkpoint.complete);
+            assert_eq!(search_dirty::list(&database, 7, 11).unwrap().len(), 1);
+            assert!(search_dirty::list(&database, 7, 12).unwrap().is_empty());
+        }
     }
 
     #[test]

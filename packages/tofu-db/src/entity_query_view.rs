@@ -132,6 +132,18 @@ impl PublishedEntityReads {
     }
     // None preserves original authority acquisition on optional mirror failure
     // or its tiny publish window. Pin/source failures remain actual errors.
+    /// Own cached bytes need no physical root pin. The same publication lock
+    /// proves their generation; all health checks are nonblocking. A miss or
+    /// uncertain state returns to ordinary pinned reads behind the watchdog.
+    pub(crate) fn with_healthy_current_snapshot<T>(&self, use_snapshot: impl FnOnce(EntitySnapshot) -> T) -> Option<T> {
+        if self.disabled.load(Ordering::Acquire) { return None; }
+        let state = self.state.try_read().ok()?;
+        let template = state.as_ref()?;
+        if template.core.blocks.check_live().is_err() || template.pins.is_poisoned()
+            || template.wal_barrier.as_ref().is_some_and(|barrier| !barrier.try_healthy()) { return None; }
+        Some(use_snapshot(template.core.captured))
+    }
+
     pub(crate) fn try_build(&self) -> Option<io::Result<EntityDatabase>> {
         self.try_build_after(|| {})
     }
@@ -272,3 +284,7 @@ impl PublishedEntityReads {
         });
     }
 }
+
+#[cfg(test)]
+#[path = "entity_query_cache_health_tests.rs"]
+mod entity_query_cache_health_tests;

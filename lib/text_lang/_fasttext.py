@@ -55,7 +55,7 @@ _SCRIPT_FASTPATH_RATIO = 0.50
 # ══════════════════════════════════════════════════════════════════════
 #  Tier-1: fastText lid.176 — guarded-optional backend.
 #
-#  Mirrors lib/rate_limit_store.py's pluggable-backend contract: a memoized
+#  Mirrors lib/rate_limit/rate_limit_store.py's pluggable-backend contract: a memoized
 #  loader built lazily on first use, env-gated, fail-open (a vanilla box
 #  without the package degrades to the script + heuristic path and is
 #  byte-identical). DEFAULT OFF: the loader is only consulted when

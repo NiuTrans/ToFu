@@ -8,6 +8,7 @@ traffic occurs without ``--live``.
 from __future__ import annotations
 
 import argparse
+from copy import deepcopy
 import hashlib
 import json
 import os
@@ -100,7 +101,7 @@ class ProbeTimeoutFailure(ProbeFailure, TimeoutError):
 def observe_run(request, *, objective: str, key: str, poll_seconds: float,
                 timeout_seconds: float, rss_pid: int = 0,
                 model: dict | None = None, max_tokens: int | None = None,
-                now=time.monotonic, sleep=time.sleep) -> dict:
+                launch_policy: dict | None = None, now=time.monotonic, sleep=time.sleep) -> dict:
     """Observe one owned run; failures retain lower bounds and explicit cleanup."""
     started = now()
     run_id = None
@@ -141,7 +142,8 @@ def observe_run(request, *, objective: str, key: str, poll_seconds: float,
     try:
         return _observe_run(observed_request, objective=objective, key=key,
             poll_seconds=poll_seconds, timeout_seconds=timeout_seconds,
-            rss_pid=rss_pid, model=model, max_tokens=max_tokens, now=now, sleep=sleep)
+            rss_pid=rss_pid, model=model, max_tokens=max_tokens,
+            launch_policy=launch_policy, now=now, sleep=sleep)
     except (RuntimeError, TimeoutError, ValueError, KeyError, TypeError, AttributeError, OverflowError,
             urllib.error.URLError) as exc:
         if run_id is None:
@@ -176,7 +178,7 @@ def observe_run(request, *, objective: str, key: str, poll_seconds: float,
 def _observe_run(request, *, objective: str, key: str, poll_seconds: float,
                 timeout_seconds: float, rss_pid: int = 0,
                 model: dict | None = None, max_tokens: int | None = None,
-                now=time.monotonic, sleep=time.sleep) -> dict:
+                launch_policy: dict | None = None, now=time.monotonic, sleep=time.sleep) -> dict:
     """Exercise create → idempotent retry → stage handoff → durable result."""
     if max_tokens is not None and (type(max_tokens) is not int or max_tokens <= 0):
         raise ValueError('probe token allowance must be a positive integer')
@@ -208,8 +210,22 @@ def _observe_run(request, *, objective: str, key: str, poll_seconds: float,
                     raise TimeoutError(f'probe timed out while {method} {path} was unavailable') from exc
                 sleep(min(poll_seconds, remaining))
 
-    payload = {'objective': objective, **({'model': model} if model else {}),
-               **({'budget': {'max_tokens': max_tokens}} if max_tokens is not None else {})}
+    # The production intake remains the validator for these launch fields.
+    # Freeze caller-owned policy once so admission retries cannot change it.
+    policy = deepcopy(launch_policy) if launch_policy is not None else {}
+    allowed = {'project_path', 'executor_plugins', 'executor_schema_budget_tokens', 'budget', 'review_reserve',
+               'max_attempts', 'max_review_format_retries', 'acceptance_requirements',
+               'require_requirement_originals', 'require_command_execution'}
+    if not isinstance(policy, dict) or set(policy) - allowed:
+        raise ValueError('unsupported probe launch policy')
+    budget = policy.get('budget', {})
+    if not isinstance(budget, dict):
+        raise ValueError('probe launch budget must be an object')
+    if 'max_tokens' in budget and budget['max_tokens'] != max_tokens:
+        raise ValueError('launch policy cannot override probe token allowance')
+    if max_tokens is not None:
+        policy['budget'] = {**budget, 'max_tokens': max_tokens}
+    payload = {**policy, 'objective': objective, **({'model': model} if model else {})}
     created = call('POST', '/api/v4/evolution/runs', payload, key)
     run = created['run']
     run_id = run['run_id']

@@ -280,3 +280,134 @@ class TestAgentSide:
         assert first['agent_id']
         assert first['agent_id'] == second['agent_id']
         assert first['capabilities']['write'] is True
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize('timeout', [None, 5000])
+def test_wait_retains_command_past_old_default_until_owned_result(monkeypatch, timeout):
+    from types import SimpleNamespace
+    clock = [100.0]
+    monkeypatch.setattr(db, 'time', SimpleNamespace(
+        time=time.time, monotonic=lambda: clock[0]))
+    _register('agent-A')
+    cancelled = threading.Event()
+    outcome = {}
+    def producer():
+        options = {} if timeout is None else {'timeout': timeout}
+        outcome['value'] = db.send_desktop_command(
+            'desktop_list_files', {}, target_agent_id='agent-A', user_id=OWNER,
+            cancellation=cancelled, **options)
+    thread = threading.Thread(target=producer, daemon=True)
+    thread.start()
+    try:
+        commands = _drain('agent-A', timeout=1)
+        assert len(commands) == 1
+        clock[0] += 4000  # Beyond the former implicit wait and one hour.
+        thread.join(timeout=.35)
+        assert thread.is_alive()
+        result = [{'id': commands[0]['id'], 'result': {'late': True}}]
+        assert db.resolve_results(result, agent_id='foreign', user_id=OWNER) == 0
+        assert db.pending_commands_count() == 1
+        assert db.resolve_results(result, agent_id='agent-A', user_id=OWNER) == 1
+        thread.join(timeout=2)
+        assert not thread.is_alive()
+        assert outcome['value'] == ({'late': True}, None)
+        assert db.pending_commands_count() == 0
+    finally:
+        cancelled.set()
+        thread.join(timeout=2)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize('timeout', [0, .01])
+def test_explicit_wait_timeout_still_returns_and_removes_queue(timeout):
+    _register('agent-A')
+    result, error = db.send_desktop_command(
+        'desktop_list_files', {}, timeout=timeout,
+        target_agent_id='agent-A', user_id=OWNER)
+    assert result is None and 'timeout' in error
+    assert db.pending_commands_count() == 0
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize('timeout', [-1, float('inf'), float('nan'), True, '30'])
+def test_invalid_wait_bound_refuses_before_enqueue(timeout):
+    _register('agent-A')
+    with pytest.raises(ValueError):
+        db.send_desktop_command('desktop_list_files', {}, timeout=timeout, user_id=OWNER)
+    assert db.pending_commands_count() == 0
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize('before_dispatch', [True, False])
+def test_default_wait_observes_cancellation_without_claiming_remote_stop(before_dispatch):
+    _register('agent-A')
+    cancelled = threading.Event()
+    outcome = {}
+    if before_dispatch:
+        cancelled.set()
+    thread = threading.Thread(target=lambda: outcome.setdefault('value',
+        db.send_desktop_command('desktop_list_files', {}, user_id=OWNER,
+                                cancellation=cancelled)), daemon=True)
+    thread.start()
+    try:
+        if not before_dispatch:
+            command = _drain('agent-A', timeout=1)[0]
+            cancelled.set()
+        thread.join(timeout=2)
+        assert not thread.is_alive()
+        result, error = outcome['value']
+        assert result is None and 'cancelled' in error
+        assert ('before dispatch' if before_dispatch else 'unconfirmed') in error
+        if not before_dispatch:
+            assert db.pending_commands_count() == 1
+            result = [{'id': command['id'], 'result': {'completed': True}}]
+            assert db.resolve_results(result, agent_id='foreign', user_id=OWNER) == 0
+            assert db.pending_commands_count() == 1
+            assert db.resolve_results(result, agent_id='agent-A', user_id=OWNER) == 1
+        assert db.pending_commands_count() == 0
+    finally:
+        cancelled.set()
+        thread.join(timeout=2)
+
+
+@pytest.mark.unit
+def test_explicit_timeout_keeps_claimed_command_until_late_owned_settlement(monkeypatch):
+    from types import SimpleNamespace
+    clock = [100.0]
+    monkeypatch.setattr(db, 'time', SimpleNamespace(time=time.time, monotonic=lambda: clock[0]))
+    _register('agent-A')
+    cancelled = threading.Event()
+    outcome = {}
+    thread = threading.Thread(target=lambda: outcome.setdefault('value',
+        db.send_desktop_command('desktop_list_files', {}, timeout=5,
+                                user_id=OWNER, cancellation=cancelled)), daemon=True)
+    thread.start()
+    try:
+        command = _drain('agent-A', timeout=1)[0]
+        clock[0] += 6
+        thread.join(timeout=2)
+        assert not thread.is_alive()
+        assert outcome['value'][0] is None and 'timeout' in outcome['value'][1]
+        assert db.pending_commands_count() == 1
+        result = [{'id': command['id'], 'result': {'late': True}}]
+        assert db.resolve_results(result, agent_id='agent-A', user_id='other') == 0
+        assert db.resolve_results(result, agent_id='agent-A', user_id=OWNER) == 1
+        assert db.pending_commands_count() == 0
+        assert db.resolve_results(result, agent_id='agent-A', user_id=OWNER) == 0
+    finally:
+        cancelled.set()
+        thread.join(timeout=2)
+
+
+@pytest.mark.unit
+def test_repeated_owned_result_cannot_replace_first_settlement():
+    _register('agent-A')
+    command = _plant(target='agent-A')
+    assert len(_drain('agent-A')) == 1
+    first = [{'id': command['id'], 'result': {'version': 'first'}}]
+    repeat = [{'id': command['id'], 'result': {'version': 'repeat'}, 'error': 'late'}]
+    assert db.resolve_results(first, agent_id='agent-A', user_id=OWNER) == 1
+    assert db.resolve_results(repeat, agent_id='agent-A', user_id=OWNER) == 0
+    assert command['result'] == {'version': 'first'}
+    assert command['error'] is None

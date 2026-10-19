@@ -408,7 +408,7 @@ jobs:
           python - <<'PY'
           from pathlib import Path
           from tempfile import TemporaryDirectory
-          from lib.log_retention import (
+          from lib.logging_pkg.log_retention import (
               ensure_private_log_directory, ensure_private_log_file,
               append_bytes_locked, copytruncate_if_oversize,
           )
@@ -651,11 +651,11 @@ jobs:
       - name: Verify agent PyInstaller output
         shell: bash
         run: |
-          test -f "dist/TofuAgent/TofuAgent.exe" || {
-            echo "::error::PyInstaller did not produce dist/TofuAgent/TofuAgent.exe."
+          test -f "dist/TofuRemote/TofuRemote.exe" || {
+            echo "::error::PyInstaller did not produce dist/TofuRemote/TofuRemote.exe."
             exit 1
           }
-          echo "Built: $(ls -l dist/TofuAgent/TofuAgent.exe)"
+          echo "Built: $(ls -l dist/TofuRemote/TofuRemote.exe)"
 
       # Same verdict discipline as the full smoke above: exit code + no
       # traceback + the marker — never liveness (console=False lingers by
@@ -669,19 +669,19 @@ jobs:
         run: |
           set -uo pipefail
           rc=0
-          ./dist/TofuAgent/TofuAgent.exe > /tmp/agent_smoke.out 2> /tmp/agent_smoke.err || rc=$?
+          ./dist/TofuRemote/TofuRemote.exe > /tmp/agent_smoke.out 2> /tmp/agent_smoke.err || rc=$?
           echo "── stdout ──"; cat /tmp/agent_smoke.out || true
           echo "── stderr ──"; cat /tmp/agent_smoke.err || true
           if [ "$rc" -ne 0 ]; then
-            echo "::error::The built TofuAgent.exe failed to start (exit $rc)."
+            echo "::error::The built TofuRemote.exe failed to start (exit $rc)."
             exit 1
           fi
           if grep -qE 'Traceback \(most recent call last\)|ModuleNotFoundError|ImportError' /tmp/agent_smoke.err; then
-            echo "::error::TofuAgent.exe exited 0 but its stderr carries a traceback."
+            echo "::error::TofuRemote.exe exited 0 but its stderr carries a traceback."
             exit 1
           fi
           grep -q 'TOFU_AGENT_SMOKE_OK' /tmp/agent_smoke.out || {
-            echo "::error::TofuAgent.exe exited 0 without emitting TOFU_AGENT_SMOKE_OK — the smoke branch did not run, so this proved nothing."
+            echo "::error::TofuRemote.exe exited 0 without emitting TOFU_AGENT_SMOKE_OK — the smoke branch did not run, so this proved nothing."
             exit 1
           }
 
@@ -702,16 +702,17 @@ jobs:
           # the tray toggle and the reconcile logic all write ONE key.
           cat > agent_installer.iss << INNO_EOF
           [Setup]
-          AppName=Tofu Agent
+          AppName=Tofu Remote
+          AppId=Tofu Agent
           AppVersion=${APP_VERSION}
           AppPublisher=Tofu Project
           AppPublisherURL=https://github.com/rangehow/ToFu
           DefaultDirName={localappdata}\\Programs\\TofuAgent
-          DefaultGroupName=Tofu Agent
+          DefaultGroupName=Tofu Remote
           DisableProgramGroupPage=yes
-          UninstallDisplayIcon={app}\\TofuAgent.exe
+          UninstallDisplayIcon={app}\\TofuRemote.exe
           OutputDir=agent_installer_output
-          OutputBaseFilename=TofuAgent-Setup-${APP_VERSION}-win64
+          OutputBaseFilename=TofuRemote-Setup-${APP_VERSION}-win64
           Compression=lzma2/ultra64
           SolidCompression=yes
           ArchitecturesAllowed=x64compatible
@@ -727,21 +728,25 @@ jobs:
           WizardSmallImageFile=static\\icons\\installer\\wizard-small.bmp
 
           [Files]
-          Source: "dist\\TofuAgent\\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs
+          Source: "dist\\TofuRemote\\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs
 
           [Tasks]
           Name: desktopicon; Description: "Create a desktop shortcut"; GroupDescription: "Additional shortcuts:"
-          Name: autostart; Description: "Start Tofu Agent with Windows"; GroupDescription: "Additional shortcuts:"
+          Name: autostart; Description: "Start Tofu Remote with Windows"; GroupDescription: "Additional shortcuts:"
+
+          [InstallDelete]
+          Type: files; Name: "{autoprograms}\\Tofu Agent.lnk"
+          Type: files; Name: "{autodesktop}\\Tofu Agent.lnk"
 
           [Icons]
-          Name: "{autoprograms}\\Tofu Agent"; Filename: "{app}\\TofuAgent.exe"
-          Name: "{autodesktop}\\Tofu Agent"; Filename: "{app}\\TofuAgent.exe"; Tasks: desktopicon
+          Name: "{autoprograms}\\Tofu Remote"; Filename: "{app}\\TofuRemote.exe"
+          Name: "{autodesktop}\\Tofu Remote"; Filename: "{app}\\TofuRemote.exe"; Tasks: desktopicon
 
           [Registry]
-          Root: HKCU; Subkey: "Software\\Microsoft\\Windows\\CurrentVersion\\Run"; ValueType: string; ValueName: "TofuAgent"; ValueData: """{app}\\TofuAgent.exe"""; Flags: uninsdeletevalue; Tasks: autostart
+          Root: HKCU; Subkey: "Software\\Microsoft\\Windows\\CurrentVersion\\Run"; ValueType: string; ValueName: "TofuAgent"; ValueData: """{app}\\TofuRemote.exe"""; Flags: uninsdeletevalue; Tasks: autostart
 
           [Run]
-          Filename: "{app}\\TofuAgent.exe"; Description: "Launch Tofu Agent"; Flags: nowait postinstall skipifsilent
+          Filename: "{app}\\TofuRemote.exe"; Description: "Launch Tofu Remote"; Flags: nowait postinstall skipifsilent
           INNO_EOF
 
           echo "── Generated agent_installer.iss ──"
@@ -997,7 +1002,7 @@ jobs:
         run: |
           set -uo pipefail
           rc=0
-          ./dist/TofuAgent.app/Contents/MacOS/TofuAgent > /tmp/agent_smoke.out 2> /tmp/agent_smoke.err || rc=$?
+          ./dist/TofuRemote.app/Contents/MacOS/TofuRemote > /tmp/agent_smoke.out 2> /tmp/agent_smoke.err || rc=$?
           cat /tmp/agent_smoke.out /tmp/agent_smoke.err
           if [ "$rc" -ne 0 ]; then
             echo "::error::The built macOS agent failed to start (exit $rc)."
@@ -1021,26 +1026,26 @@ jobs:
           # Same no-set-e rationale and zip fallback as the full DMG step.
           brew install create-dmg || true
           create-dmg \
-            --volname "Tofu Agent" \
+            --volname "Tofu Remote" \
             --volicon "static/icons/tofu.icns" \
             --background "static/icons/installer/dmg-background.png" \
             --window-pos 200 120 \
             --window-size 600 400 \
             --icon-size 100 \
-            --icon "TofuAgent.app" 150 190 \
+            --icon "TofuRemote.app" 150 190 \
             --app-drop-link 450 190 \
-            --hide-extension "TofuAgent.app" \
-            "TofuAgent-${APP_VERSION}-macos-${ARCH}.dmg" \
-            "dist/TofuAgent.app/" \
+            --hide-extension "TofuRemote.app" \
+            "TofuRemote-${APP_VERSION}-macos-${ARCH}.dmg" \
+            "dist/TofuRemote.app/" \
           || {
-            cd dist && zip -r "../TofuAgent-${APP_VERSION}-macos-${ARCH}.zip" TofuAgent.app/
+            cd dist && zip -r "../TofuRemote-${APP_VERSION}-macos-${ARCH}.zip" TofuRemote.app/
           }
 
       - name: Upload macOS agent DMG
         uses: actions/upload-artifact@v4
         with:
           name: macos-agent-dmg-${{ matrix.arch }}
-          path: TofuAgent-*.dmg
+          path: TofuRemote-*.dmg
           if-no-files-found: warn
           retention-days: 30
 
@@ -1049,14 +1054,22 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: macos-agent-zip-${{ matrix.arch }}
-          path: TofuAgent-*.zip
+          path: TofuRemote-*.zip
           if-no-files-found: ignore
           retention-days: 30
 
   # ── Linux ────────────────────────────────────────────────────
   build-linux:
-    name: Linux Archive
-    runs-on: ubuntu-latest
+    name: Linux Archive (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            arch: x86_64
+          - runner: ubuntu-22.04-arm
+            arch: aarch64
     needs: [version, frontend-dist]
     if: needs.version.outputs.should_release == 'true'
     timeout-minutes: 30
@@ -1076,6 +1089,7 @@ jobs:
       - name: Install the frontend graph
         env:
           VER: ${{ needs.version.outputs.version }}
+        shell: bash
         run: |
           set -euo pipefail
           (cd frontend-artifact && sha256sum -c "frontend-dist-${VER}.tar.gz.sha256")
@@ -1083,7 +1097,9 @@ jobs:
           python3 scripts/verify_frontend_dist.py
 
       - name: Install dependencies
+        shell: bash
         run: |
+          set -euo pipefail
           # tofu-search FIRST from the bundled wheel: the requirements floor
           # (>=0.5.3) is on no public index (PyPI tops at 0.5.1), so the
           # export bundles the verified wheel under vendor/. Installing it
@@ -1101,6 +1117,7 @@ jobs:
 
       # ── Build the tofu-db storage engine (see the Windows leg) ──
       - name: Build the tofu-db storage engine
+        shell: bash
         run: |
           set -euo pipefail
           rustup default stable
@@ -1141,6 +1158,7 @@ jobs:
           }
 
       - name: Add Linux desktop integration
+        shell: bash
         # The tarball is the WHOLE Linux install UX (no .deb/.AppImage yet —
         # tracked separately), so it must carry the pieces that register the
         # app with the desktop environment: install.sh (per-user, no sudo)
@@ -1157,9 +1175,11 @@ jobs:
       - name: Create archive
         env:
           APP_VERSION: ${{ needs.version.outputs.version }}
+        shell: bash
         run: |
+          set -euo pipefail
           cd dist
-          tar czf "../Tofu-${APP_VERSION}-linux-x86_64.tar.gz" Tofu/
+          tar czf "../Tofu-${APP_VERSION}-linux-${{ matrix.arch }}.tar.gz" Tofu/
 
       - name: Build .deb package
         env:
@@ -1172,7 +1192,7 @@ jobs:
       - name: Upload Linux archive
         uses: actions/upload-artifact@v4
         with:
-          name: linux-archive
+          name: linux-archive-${{ matrix.arch }}
           path: |
             Tofu-*.tar.gz
             Tofu-*.deb
@@ -1198,41 +1218,118 @@ jobs:
         run: |
           set -uo pipefail
           rc=0
-          ./dist/TofuAgent/TofuAgent > /tmp/agent_smoke.out 2> /tmp/agent_smoke.err || rc=$?
+          ./dist/TofuRemote/TofuRemote > /tmp/agent_smoke.out 2> /tmp/agent_smoke.err || rc=$?
           echo "── stdout ──"; cat /tmp/agent_smoke.out || true
           echo "── stderr ──"; cat /tmp/agent_smoke.err || true
           if [ "$rc" -ne 0 ]; then
-            echo "::error::The built TofuAgent binary failed to start (exit $rc)."
+            echo "::error::The built TofuRemote binary failed to start (exit $rc)."
             exit 1
           fi
           if grep -qE 'Traceback \(most recent call last\)|ModuleNotFoundError|ImportError' /tmp/agent_smoke.err; then
-            echo "::error::TofuAgent exited 0 but its stderr carries a traceback."
+            echo "::error::TofuRemote exited 0 but its stderr carries a traceback."
             exit 1
           fi
           grep -q 'TOFU_AGENT_SMOKE_OK' /tmp/agent_smoke.out || {
-            echo "::error::TofuAgent exited 0 without emitting TOFU_AGENT_SMOKE_OK."
+            echo "::error::TofuRemote exited 0 without emitting TOFU_AGENT_SMOKE_OK."
             exit 1
           }
 
       - name: Create agent archive
         env:
           APP_VERSION: ${{ needs.version.outputs.version }}
+        shell: bash
         run: |
+          set -euo pipefail
           cd dist
-          tar czf "../TofuAgent-${APP_VERSION}-linux-x86_64.tar.gz" TofuAgent/
+          tar czf "../TofuRemote-${APP_VERSION}-linux-${{ matrix.arch }}.tar.gz" TofuRemote/
 
       - name: Upload Linux agent archive
         uses: actions/upload-artifact@v4
         with:
-          name: linux-agent-archive
-          path: TofuAgent-*.tar.gz
+          name: linux-remote-archive-${{ matrix.arch }}
+          path: TofuRemote-*.tar.gz
           retention-days: 30
+
+  tofudb-prebuilt:
+    name: Prebuilt TofuDB (${{ matrix.target }})
+    needs: version
+    if: needs.version.outputs.should_release == 'true'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            target: x86_64-unknown-linux-musl
+          - runner: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-musl
+          - runner: macos-15
+            target: aarch64-apple-darwin
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+    env:
+      CC: gcc
+      CXX: g++
+      RUSTUP_TOOLCHAIN: '1.96.0'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Prepare locked native build toolchain
+        run: rustup toolchain install 1.96.0 --profile minimal --target ${{ matrix.target }}
+      - name: Install native musl compiler
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: Build and smoke the native release engine
+        run: >-
+          python scripts/build_tofudb_prebuilt.py --target ${{ matrix.target }}
+          --out-dir tofudb-artifacts
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tofudb-prebuilt-${{ matrix.target }}
+          path: tofudb-artifacts/*
+          if-no-files-found: error
+          retention-days: 7
+
+  python-wheels:
+    name: Python wheels (${{ matrix.runner }})
+    needs: version
+    if: needs.version.outputs.should_release == 'true'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-22.04, ubuntu-22.04-arm, macos-15, macos-15-intel, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: '0.12.5'
+          enable-cache: true
+      - name: Prepare complete hashed offline Python artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/build_python_wheels.py --output python-artifacts
+      - uses: actions/upload-artifact@v4
+        with:
+          name: python-wheels-${{ matrix.runner }}
+          path: python-artifacts/*
+          if-no-files-found: error
+          retention-days: 7
 
   # ── Release ──────────────────────────────────────────────────
   release:
     name: Create Release
     runs-on: ubuntu-latest
-    needs: [version, frontend-dist, build-windows, build-macos, build-linux]
+    needs: [version, frontend-dist, build-windows, build-macos, build-linux, python-wheels, tofudb-prebuilt]
     if: needs.version.outputs.should_release == 'true'
     steps:
       - uses: actions/checkout@v4
@@ -1507,18 +1604,18 @@ jobs:
             | Windows (x64) | `Tofu-Setup-${{ needs.version.outputs.version }}-win64.exe` | Recommended |
             | macOS (Apple Silicon) | `Tofu-${{ needs.version.outputs.version }}-macos-arm64.dmg` | |
             | macOS (Intel) | `Tofu-${{ needs.version.outputs.version }}-macos-x86_64.dmg` | |
-            | Linux (x64) | `Tofu-${{ needs.version.outputs.version }}-linux-x86_64.tar.gz` | Portable archive; run `install.sh` inside for desktop integration |
+            | Linux (x64 / ARM64) | `Tofu-${{ needs.version.outputs.version }}-linux-{x86_64,aarch64}.tar.gz` | Portable archive; run `install.sh` inside for desktop integration |
 
-            ## Tofu Remote Endpoint (Agent)
+            ## Tofu Remote — Controlled Computer
 
-            For IT/ops headless machines — this is the relay agent, **not** the full Tofu app.
+            Install this component on the computer you want Tofu to control. It connects to your Tofu server.
 
             | OS | File |
             | --- | --- |
-            | Windows (x64) | `TofuAgent-Setup-${{ needs.version.outputs.version }}-win64.exe` |
-            | macOS (Apple Silicon) | `TofuAgent-${{ needs.version.outputs.version }}-macos-arm64.dmg` |
-            | macOS (Intel) | `TofuAgent-${{ needs.version.outputs.version }}-macos-x86_64.dmg` |
-            | Linux (x64) | `TofuAgent-${{ needs.version.outputs.version }}-linux-x86_64.tar.gz` |
+            | Windows (x64) | `TofuRemote-Setup-${{ needs.version.outputs.version }}-win64.exe` |
+            | macOS (Apple Silicon) | `TofuRemote-${{ needs.version.outputs.version }}-macos-arm64.dmg` |
+            | macOS (Intel) | `TofuRemote-${{ needs.version.outputs.version }}-macos-x86_64.dmg` |
+            | Linux (x64 / ARM64) | `TofuRemote-${{ needs.version.outputs.version }}-linux-{x86_64,aarch64}.tar.gz` |
 
             ## First-run notes — binaries are unsigned
 

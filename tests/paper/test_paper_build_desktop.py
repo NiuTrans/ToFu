@@ -179,7 +179,20 @@ def test_detaching_the_last_viewer_cancels_device_process_and_releases_transport
             break
         time.sleep(.02)
     else:
-        raise AssertionError('Device compiler survived preview cancellation')
+        import psutil
+        raise AssertionError(f'Device compiler survived preview cancellation: status={psutil.Process(pid).status()}, commands={[row["type"] for row in device.commands]}')
     assert any(command['type'] == 'paper_build_cancel' for command in device.commands)
     assert not bridge._streams
     assert not scheduler.cache.latest(7, accepted['document_id'])
+
+
+def test_desktop_compilation_lifetime_is_connection_and_cancel_owned(monkeypatch):
+    from lib.desktop_agent import _paper
+    stopped=__import__('threading').Event();connected=[True]
+    cancel=_paper._Cancellation(stopped,lambda:connected[0])
+    monkeypatch.setattr(time, 'monotonic', lambda: 10**12)
+    assert not cancel.is_set()
+    connected[0]=False
+    assert cancel.is_set()
+    connected[0]=True;cancel.local.set()
+    assert cancel.is_set()

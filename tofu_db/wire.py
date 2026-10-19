@@ -72,8 +72,6 @@ FIELD_TOTAL_PAYLOAD_BYTES = 21
 MAX_FRAME_BODY_BYTES = 8 * 1024 * 1024
 MAX_PAYLOAD_BYTES = 8_384_512
 MAX_BLOB_CHUNK_BYTES = 1024 * 1024
-MAX_STREAMED_PAYLOAD_BYTES = 64 * 1024 * 1024
-MAX_STREAMED_CHUNKS = 64
 AUTH_TOKEN_BYTES = 32
 
 # packages/tofu-db/src/daemon.rs AUTH_TOKEN_DOMAIN
@@ -733,14 +731,12 @@ class StorageV2Session:
         correlation = self._next_correlation()
         payload_bytes = _payload_bytes(payload if payload is not None else {})
         if len(payload_bytes) > MAX_PAYLOAD_BYTES:
-            if len(payload_bytes) > MAX_STREAMED_PAYLOAD_BYTES:
-                raise ValueError("storage.v2 request payload exceeds its operation bound")
             stream_id = correlation
             chunk_count = (
                 len(payload_bytes) + MAX_BLOB_CHUNK_BYTES - 1
             ) // MAX_BLOB_CHUNK_BYTES
-            if chunk_count > MAX_STREAMED_CHUNKS:
-                raise ValueError("storage.v2 request requires too many chunks")
+            if chunk_count > (1 << 32):
+                raise ValueError("storage.v2 chunk index exceeds its u32 representation")
             for index, offset in enumerate(
                 range(0, len(payload_bytes), MAX_BLOB_CHUNK_BYTES)
             ):
@@ -847,8 +843,6 @@ class StorageV2Session:
                         or len(stream_id) != 16
                         or not any(stream_id)
                         or int(message.get(FIELD_CHUNK_INDEX, -1)) != response_chunks
-                        or response_chunks >= MAX_STREAMED_CHUNKS
-                        or len(response_payload) + len(chunk) > MAX_STREAMED_PAYLOAD_BYTES
                     ):
                         raise StorageV2ProtocolError("invalid storage.v2 response chunk sequence")
                     if response_stream_id is None:

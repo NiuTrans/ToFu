@@ -4,7 +4,7 @@ const source=path.resolve(__dirname,'..');
 const locale=JSON.parse(fs.readFileSync(path.resolve(source,'../../i18n/locales/en.json'),'utf8'));
 const copy=key=>locale['evolution.studio.'+key]||key;
 function load(file,cache=new Map()){
- const full=path.resolve(source,file+'.ts');if(cache.has(full))return cache.get(full);
+ let full=path.resolve(source,file+'.ts');if(!fs.existsSync(full))full=path.join(full.slice(0,-3),'index.ts');if(cache.has(full))return cache.get(full);
  const exports={};cache.set(full,exports);
  const js=ts.transpileModule(fs.readFileSync(full,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText;
  new Function('require','exports',js)(name=>name.endsWith('/i18n')?{t:key=>locale[key]||key}:load(path.relative(source,path.resolve(path.dirname(full),name)),cache),exports);return exports;
@@ -73,7 +73,7 @@ test('mission panel is factual, safe, and exposes shared controls with explicit 
  assert.match(details.querySelector('details').textContent,/budget_exceeded/);
  assert.match(details.querySelector('[data-task-id]').textContent,/Failed/);
  inspector.update({...state,run:run({status:'completed',result:'Delivered',review:{outcome:'success',criterion_results:[{criterion_id:'test',outcome:'pass',evidence_ref:'12 tests passed'}]}})});
- assert.match(details.textContent,/Regression suite passes/);assert.match(details.textContent,/12 tests passed/);assert.equal(details.querySelector('details'),null);
+ assert.match(details.textContent,/Regression suite passes/);assert.match(details.textContent,/12 tests passed/);assert.equal(details.querySelector('.evo-mission-diagnosis'),null);
  d.window.close();
 });
 

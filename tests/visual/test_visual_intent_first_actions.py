@@ -122,12 +122,14 @@ def test_actions_have_one_summary_full_intent_and_independent_evidence(
         && n.scrollWidth<=n.clientWidth+1 && n.scrollHeight<=n.clientHeight+1;
     })""")
     browser = frame.locator('.ptool-cmd-js')
-    assert browser.locator('.ptool-cmd-context').inner_text() == locale['toolBrowserExecution.context']
+    # The shared command chrome already uses the icon and observed page title;
+    # it intentionally omits the redundant Terminal/Browser text label.
+    assert browser.locator('.ptool-cmd-context').count() == 0
     assert browser.locator('.ptool-cmd-tab').inner_text() == 'Tofu'
     assert browser.locator('.ptool-cmd-label').count() == 0
     assert '333777' not in browser.inner_text()
     assert frame.locator('.ptool-cmd-finish').count() == 0
-    assert frame.locator('.ptool-cmd-err .ptool-cmd-status').inner_text().endswith('2')
+    assert frame.locator('.ptool-cmd-err .ptool-cmd-status').inner_text() == locale['toolCommandExecution.failed']
     assert frame.locator('.ptool-cmd-background .ptool-cmd-status').inner_text() == locale['bgCommand.moved']
 
     command = frame.locator('[data-block-id="command"] .ptool-cmd-block')

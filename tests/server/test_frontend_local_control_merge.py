@@ -170,7 +170,7 @@ _SHIPPED_SYMBOLS = (
     # both attach branches. Pairing/connect-line helpers intentionally do
     # not exist on the user-facing surface.
     "_lcAwaitingAgentHtml", "_lcAgentInstallerBlockHtml",
-    "_lcAgentInstallerUrl", "_lcInstallerWaitHtml", "_lcPageBase",
+    "_lcAgentInstallerUrl", "_lcInstallerUnavailableHtml", "_lcPageBase",
     "_lcBindWarnHtml", "_lcRelayHintText", "_lcRelayHintHtml",
     # The diagnostics inbox (2026-08-06): the renderers call
     # _lcDiagInboxHtml/_lcWireDiag in both attach branches, and the wire
@@ -291,8 +291,9 @@ HARNESS = textwrap.dedent("""
     for (const st of desktopStates) {{
       document.getElementById('lcDesktopSetup').innerHTML = '';
       _lcRenderDesktop({{ connected: st === 'connected', setup_state: st,
-                         visitor_os: 'windows',
-                         download_url: DL, server_url: SRV, downloads: DLS }});
+                         visitor_os: {desktop_os},
+                         download_url: DL, server_url: SRV, downloads: DLS,
+                         agent_downloads: {agent_downloads} }});
       const el = document.getElementById('lcDesktopSetup');
       const dlA = el.querySelector('a[href]');
       const pageA = el.querySelector('a#lcDesktopDownload');
@@ -336,8 +337,8 @@ HARNESS = textwrap.dedent("""
     // states above.
     const AGENT_DLS = [{{ os: 'windows', arch: 'x86_64',
                          label: 'Windows agent installer',
-                         filename: 'TofuAgent-Setup-0.15.2-win64.exe',
-                         url: SRV + '/api/v4/desktop/download/TofuAgent-Setup-0.15.2-win64.exe',
+                         filename: 'TofuRemote-Setup-0.15.2-win64.exe',
+                         url: SRV + '/api/v4/desktop/download/TofuRemote-Setup-0.15.2-win64.exe',
                          hosted: 'server', size: 53000000,
                          kind: 'agent' }}];
     const desktopInstaller = {{}};
@@ -429,21 +430,25 @@ HARNESS = textwrap.dedent("""
 """)
 
 
-def _run(shipped: str) -> dict:
+def _run(shipped: str, *, hosted_agent: bool = False) -> dict:
     script = HARNESS.format(shipped=shipped,
-                            html=MODAL_HTML.replace("`", "\\`"))
+                            html=MODAL_HTML.replace("`", "\\`"),
+                            desktop_os=json.dumps('linux' if hosted_agent else 'windows'),
+                            agent_downloads="DLS.map(row => ({...row, os: 'linux', kind: 'agent'}))" if hosted_agent else '[]')
     proc = subprocess.run([_node(), "-e", script], cwd=ROOT,
                           capture_output=True, text=True)
     assert proc.returncode == 0, f"node failed: {proc.stderr}"
     return json.loads(proc.stdout.strip().splitlines()[-1])
 
 
-def _run_proxied(shipped: str) -> dict:
+def _run_proxied(shipped: str, *, hosted_agent: bool = False) -> dict:
     """``_run`` with a live base path: ``apiUrl()`` rebases onto
     ``/proxy/15000``, simulating a path-prefixed cloud-IDE proxy deployment
     (``BASE_PATH`` = the page's own prefix, exactly what core.js computes)."""
     script = HARNESS.format(shipped=shipped,
-                            html=MODAL_HTML.replace("`", "\\`"))
+                            html=MODAL_HTML.replace("`", "\\`"),
+                            desktop_os=json.dumps('linux' if hosted_agent else 'windows'),
+                            agent_downloads="DLS.map(row => ({...row, os: 'linux', kind: 'agent'}))" if hosted_agent else '[]')
     anchor = "global.window = dom.window;"
     assert script.count(anchor) == 1, "harness window-anchor drifted"
     script = script.replace(
@@ -786,7 +791,7 @@ def test_a_server_hosted_entry_shows_where_the_file_comes_from():
     would hide the one fact that explains why it is fast and reliable —
     and a 115 MB installer with no size shown is its own bad surprise.
     """
-    out = _run(_shipped())["desktop"]
+    out = _run(_shipped(), hosted_agent=True)["desktop"]
     assert out["remote"]["directCount"] >= 1, (
         "a downloads payload must render per-platform direct links")
     assert out["remote"]["hostedText"], (
@@ -805,13 +810,11 @@ def test_the_direct_link_is_rebased_onto_the_live_proxy_prefix():
     access.log). With a live base path the rendered href must carry it; the
     releases-page escape hatch (no /api/ marker) must pass through
     untouched."""
-    out = _run_proxied(_shipped())["desktop"]
+    out = _run_proxied(_shipped(), hosted_agent=True)["desktop"]
     href = out["remote"]["downloadHref"]
-    assert href == ('/proxy/15000/api/v1/desktop/download/'
+    assert href == ('/proxy/15000/api/v4/desktop/download/'
                     'Tofu-Setup-0.15.2-win64.exe'), href
-    assert out["remote"]["pageHref"] == (
-        'https://github.com/rangehow/ToFu/releases/latest'), (
-        'the escape hatch is external — rebasing it would break it')
+    assert not out["remote"]["pageHref"], 'direct agent installation has no duplicate release-page link'
 
 
 @pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
@@ -1307,16 +1310,13 @@ def test_the_modal_polls_while_open():
 # on its own (headless) machine, and the spawn must be a list-form argv —
 # no shell for a future argument to travel through.
 
-_ROUTE_TOKEN = '_lc_route_test_token__'
-
-
 def _post_open_extensions(flask_client, monkeypatch, client_addr, *,
                           chrome='/fake/chrome'):
     """Drive ONE real POST through the full stack with a chosen socket peer.
 
     ``scope_base={'client': ...}`` sets the ASGI peer the way Hypercorn
     would (the mechanism tests/server/test_proxy_trust.py established), so the REAL
-    ``_remote_is_loopback`` runs against it. The tunnel-token header gives a
+    ``_remote_is_loopback`` runs against it. A disposable API key gives a
     remote peer a valid credential: open mode refuses its synthetic admin
     grant to non-loopback peers, so without one the request would die at the
     auth gate (401) before ever reaching the route under test.
@@ -1325,6 +1325,10 @@ def _post_open_extensions(flask_client, monkeypatch, client_addr, *,
 
     from routes.api_v1 import browser as browser_routes
 
+    from lib.storage import start_storage
+    from lib.api_keys import create_key, revoke_key
+    start_storage()
+    credential, token = create_key(name='open-extensions regression', scopes=[], owner_user_id=1, admin=True)
     calls = []
 
     def _fake_popen(argv, **kwargs):
@@ -1340,12 +1344,14 @@ def _post_open_extensions(flask_client, monkeypatch, client_addr, *,
         browser_routes, '_detect_local_browser',
         lambda: ({'binary': chrome, 'family': 'chrome', 'name': 'Chrome',
                   'extensionsUrl': 'chrome://extensions'} if chrome else None))
-    monkeypatch.setenv('TUNNEL_TOKEN', _ROUTE_TOKEN)
-    resp = flask_client.post(
-        '/api/v4/browser/open-extensions',
-        headers={'X-Tunnel-Token': _ROUTE_TOKEN},
-        scope_base={'client': client_addr})
-    return resp.status_code, (resp.get_json(silent=True) or {}), calls
+    try:
+        resp = flask_client.post(
+            '/api/v4/browser/open-extensions',
+            headers={'Authorization': 'Bearer ' + token},
+            scope_base={'client': client_addr})
+        return resp.status_code, (resp.get_json(silent=True) or {}), calls
+    finally:
+        revoke_key(credential['id'], owner_user_id=1)
 
 
 def test_open_extensions_refuses_a_remote_peer(flask_client, monkeypatch):
@@ -1357,7 +1363,7 @@ def test_open_extensions_refuses_a_remote_peer(flask_client, monkeypatch):
     """
     status, body, calls = _post_open_extensions(
         flask_client, monkeypatch, ('203.0.113.7', 5555))
-    assert status in {401, 403}, (
+    assert status == 403, (
         f"a non-loopback peer must be refused — got {status} with {body}")
     assert calls == [], (
         f"the route spawned a browser for a REMOTE peer: {calls}")

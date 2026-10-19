@@ -12,7 +12,7 @@ from types import SimpleNamespace
 import pytest
 from quart import Quart
 
-from lib import provider_probe
+from lib.provider import provider_probe
 from lib.model_routing import OwnerBoundary, normalize_document
 from lib.model_routing.repository import StoredAuthority
 from tests.model_routing.test_manual_probe_plan import manual_document, target

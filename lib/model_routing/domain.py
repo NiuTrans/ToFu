@@ -21,22 +21,16 @@ from lib.model_catalog._creator_identity import (
 )
 from lib.model_info import release_date as _release_date
 from lib.pricing import pricing_for_model as _pricing_for_model
-from lib.provider_headers import sanitise_extra_headers
+from lib.provider.provider_headers import sanitise_extra_headers
 
 
 CONTRACT_VERSION = "tofu.model-routing/v2"
-MAX_DOCUMENT_BYTES = 8 * 1024 * 1024
 MAX_ROUTE_SNAPSHOT_BYTES = 16 * 1024
-MAX_COUNTS = {
-    "creators": 1024,
-    "models": 4096,
-    "providers": 256,
-    "provider_accesses": 256,
-    "connections": 512,
-    "credentials": 1024,
-    "offerings": 4096,
-    "deployments": 8192,
-}
+ENTITY_COLLECTIONS = (
+    "creators", "models", "providers", "provider_accesses",
+    "connections", "credentials", "offerings", "deployments",
+)
+
 _FORBIDDEN_LEGACY_FIELDS = frozenset({"aliases", "request_ids", "routes"})
 _FORBIDDEN_SECRET_FIELDS = frozenset({
     "api_key", "api_keys", "secret", "ciphertext", "password", "token",
@@ -121,10 +115,6 @@ def _rows(document: Mapping[str, Any], name: str) -> list[dict[str, Any]]:
     value = document.get(name)
     if not isinstance(value, list):
         raise ModelRoutingError(f"{name} must be an array", field=name)
-    maximum = MAX_COUNTS[name]
-    if len(value) > maximum:
-        raise ModelRoutingError(
-            f"{name} exceeds the {maximum} item resource budget", field=name)
     rows: list[dict[str, Any]] = []
     for index, item in enumerate(value):
         if not isinstance(item, Mapping):
@@ -148,10 +138,10 @@ def _unique_index(
     return result
 
 
-def _string_set(value: Any, field: str, *, maximum: int = 512) -> list[str]:
-    if not isinstance(value, list) or len(value) > maximum:
+def _string_set(value: Any, field: str, *, maximum: int | None = None) -> list[str]:
+    if not isinstance(value, list) or (maximum is not None and len(value) > maximum):
         raise ModelRoutingError(
-            f"{field} must be an array with at most {maximum} items", field=field)
+            f"{field} must be an array" if maximum is None else f"{field} must be an array with at most {maximum} items", field=field)
     result: list[str] = []
     seen: set[str] = set()
     for index, item in enumerate(value):
@@ -188,7 +178,7 @@ def empty_document(*, revision: int = 0) -> dict[str, Any]:
     return {
         "contract_version": CONTRACT_VERSION,
         "revision": revision,
-        **{name: [] for name in MAX_COUNTS},
+        **{name: [] for name in ENTITY_COLLECTIONS},
     }
 
 
@@ -361,7 +351,7 @@ def normalize_document(
     """Return a canonical, deeply copied v2 aggregate or fail closed."""
     if not isinstance(raw, Mapping):
         raise ModelRoutingError("model routing document must be an object")
-    allowed = {"contract_version", "revision", "migration", *MAX_COUNTS}
+    allowed = {"contract_version", "revision", "migration", *ENTITY_COLLECTIONS}
     unknown = set(raw) - allowed
     if unknown:
         raise ModelRoutingError(
@@ -627,9 +617,9 @@ def normalize_document(
                 )
         authorized_models: list[dict[str, Any]] = []
         raw_models = authorization.get("models")
-        if not isinstance(raw_models, list) or len(raw_models) > MAX_COUNTS["models"]:
+        if not isinstance(raw_models, list):
             raise ModelRoutingError(
-                f"credentials[{index}].authorization.models must be a bounded array",
+                f"credentials[{index}].authorization.models must be an array",
                 field=f"credentials[{index}].authorization.models",
             )
         seen_sources: set[ModelRef] = set()
@@ -666,7 +656,6 @@ def normalize_document(
             excluded = _string_set(
                 raw_grant.get("excluded_wire_model_ids") or [],
                 f"credentials[{index}].authorization.models[{model_index}].excluded_wire_model_ids",
-                maximum=4096,
             )
             existing = seen_models.get(ref)
             if existing is not None:
@@ -960,8 +949,7 @@ def public_projection(document: Mapping[str, Any]) -> dict[str, Any]:
 
 __all__ = [
     "CONTRACT_VERSION",
-    "MAX_COUNTS",
-    "MAX_DOCUMENT_BYTES",
+    "ENTITY_COLLECTIONS",
     "MAX_ROUTE_SNAPSHOT_BYTES",
     "ModelRef",
     "ModelRoutingError",

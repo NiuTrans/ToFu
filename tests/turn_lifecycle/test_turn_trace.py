@@ -953,7 +953,7 @@ def test_projection_normalizer_retains_timing_trace():
 
 
 def test_perception_storage_lane_avoids_receipt_and_sync_write_amplification():
-    from lib.storage_sidecar.operation_domains.turns import OPERATIONS
+    from lib.storage_authority_sql.operation_domains.turns import OPERATIONS
 
     operation = OPERATIONS['turn.perception.record']
     assert operation.kind == 'command'

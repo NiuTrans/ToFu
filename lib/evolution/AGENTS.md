@@ -58,7 +58,7 @@ Design authority: `docs/EVOLUTION_DESIGN.md`; wire authority:
   terminal reply port. Frozen launches authorize submission; ordinary run
   adjudication owns coverage and verdicts. Scientific review also matches the
   sealed executor protocol; drift blocks submission and automatic replay. Preparation never authorizes replay.
-- `artifact_evidence.py` owns explicit project-file capture and bounded generation reservations.
+- `artifact_evidence.py` owns explicit project-file capture and complete source capture and CAS generation reservations.
   Only current project executors declare; terminal closure retains unavailable captures.
   Streaming fingerprint_path reads share the private-file boundary and retain no
   contents or execution proof (`test_evolution_file_fingerprint.py`). Read receipts
@@ -90,11 +90,15 @@ Design authority: `docs/EVOLUTION_DESIGN.md`; wire authority:
 - `run_receipts.py` archives immutable stage history before the run CAS; reads restore the complete legacy projection. Verify `test_evolution_run_receipt_archive.py`; missing archives refuse recovery. `receipt_validation.py` retains bounded schema-success hashes only; every read still verifies original bytes/identity/prefix. Verify `test_evolution_receipt_validation.py`.
 - `records.py` owns owner-prefixed keys, size bounds, and acknowledged writes
   with bounded retry on the Sidecar `record.*` operations; no domain policy.
+- `compute_wait.py` owns actor/project-bound dependency pointers; the existing run reaper polls them, parks model work and CAS-resumes one continuation in the same episode without resubmission. Verify `test_evolution_compute_wait.py`.
 - `goals.py` is intake: goals are admitted under verifiable criteria (or
   explicitly exploratory), plans persist only against an admitted goal.
 - `episodes.py` is settlement: opens only against confirmed plans, requires
   verdict/status agreement, restricts exploratory learning rights, and leaves
   a failed settle running instead of faking settlement.
+  Run recovery opts into exact settlement reconciliation; it never rewrites a
+  terminal episode. Verify `test_evolution_terminal_races.py` and real-store
+  `test_evolution_episode_settlement.py`; see `docs/STAGE_OUTCOMES.md`.
 - `bridge.py` projects terminal task-engine runs into receipt actuals
   (`lib.cost.observed_usage_totals` owns cache conventions and usage completeness); it never infers a
   verdict from task status.

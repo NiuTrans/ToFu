@@ -7,6 +7,9 @@ of its outputs. No subprocess result is inferred from a pre-existing PDF.
 from __future__ import annotations
 
 import hashlib
+import io
+from collections import deque
+from collections.abc import Iterable
 import json
 import os
 import re
@@ -31,16 +34,13 @@ class CompiledBuild:
 
 
 def _output_bytes(directory: Path) -> int:
-    size = count = 0
+    size = 0
     pending = [directory]
     while pending:
         current = pending.pop()
         try:
             with os.scandir(current) as entries:
                 for entry in entries:
-                    count += 1
-                    if count > limit('scan_entries'):
-                        raise BuildError('output_limit', 'Paper build produced too many output files')
                     try:
                         info = entry.stat(follow_symlinks=False)
                     except FileNotFoundError:
@@ -51,8 +51,6 @@ def _output_bytes(directory: Path) -> int:
                         size += info.st_size
                     else:
                         raise BuildError('output_path', 'Paper build output must be a regular file or directory')
-                    if size > limit('build_output_bytes'):
-                        raise BuildError('output_limit', 'Paper build exceeds the output byte limit')
         except FileNotFoundError:
             continue
     return size
@@ -96,13 +94,20 @@ def _diagnostic_code(severity: str, message: str) -> str:
     return 'tex_error'
 
 
-def _diagnostics(text: str, *, source_root: Path | None = None,
+def _diagnostics(text: str | Iterable[str], *, source_root: Path | None = None,
                  base_dir: Path | None = None) -> list[dict]:
     rows = []
     seen = set()
     current_file = ''
-    lines = text.splitlines()
-    for index, raw in enumerate(lines):
+    lines = iter(io.StringIO(text) if isinstance(text, str) else text)
+    pending = deque()
+    while True:
+        while len(pending) < 8:
+            following = next(lines, None)
+            if following is None:break
+            pending.append(following)
+        if not pending:break
+        raw = pending.popleft()
         line = raw.strip()
         located = _FILE_LINE.match(line)
         if located:
@@ -117,7 +122,7 @@ def _diagnostics(text: str, *, source_root: Path | None = None,
                    'line': int(located.group('line'))}
         elif line.startswith('!') or 'LaTeX Error:' in line or 'Undefined control sequence' in line:
             message = line[:2000]
-            line_no = next((int(match.group(1)) for follow in lines[index + 1:index + 8]
+            line_no = next((int(match.group(1)) for follow in pending
                             if (match := _LOG_LINE.match(follow.strip()))), None)
             row = {'severity': 'error', 'code': _diagnostic_code('error', message),
                    'message': message, 'file': current_file, 'line': line_no}
@@ -132,10 +137,15 @@ def _diagnostics(text: str, *, source_root: Path | None = None,
         key = (row['severity'], row['file'], row['line'], row['message'][:200])
         if key in seen:
             continue  # latexmk transcripts repeat identical records across passes
-        seen.add(key)
-        rows.append(row)
-        if len(rows) >= limit('diagnostics'):
-            break
+        if len(rows) < limit('diagnostics'):
+            rows.append(row);seen.add(key)
+        elif row['severity'] == 'error':
+            # Scan every source line; late errors outrank display-only warnings.
+            replaced = next((i for i, old in enumerate(rows) if old['severity'] == 'warning'), None)
+            if replaced is not None:
+                old = rows[replaced]
+                seen.discard((old['severity'], old['file'], old['line'], old['message'][:200]))
+                rows[replaced] = row;seen.add(key)
     return rows
 
 
@@ -143,13 +153,14 @@ def _tree_bytes(path: Path) -> int:
     try:
         return _output_bytes(path)
     except (BuildError, OSError):
-        return limit('build_output_bytes') + 1
+        return limit('warm_state_bytes') + 1
 
 
 def artifact_metadata(path: Path) -> dict:
-    size = path.stat().st_size
-    if not 0 < size <= limit('artifact_bytes') or path.is_symlink():
-        raise BuildError('output_limit', 'Paper artifact exceeds its byte limit')
+    info = path.lstat()
+    size = info.st_size
+    if not stat.S_ISREG(info.st_mode) or size <= 0:
+        raise BuildError('output_path', 'Paper artifact must be a nonempty regular file')
     sha = hashlib.sha256()
     with path.open('rb') as stream:
         while chunk := stream.read(1024 * 1024):
@@ -219,8 +230,8 @@ def compile_snapshot(snapshot: SourceSnapshot, directory: Path, *, owner_user_id
                 if using_warm:
                     _output_bytes(out)
             return run_command(cmd, cwd=main_path.parent, environment=env,
-                log=logfile, timeout=timeout if timeout is not None else limit('compile_timeout_seconds'),
-                log_bytes=limit('log_bytes'), cancel=cancel, inspect_output=inspect)
+                log=logfile, timeout=timeout,
+                log_bytes=None, cancel=cancel, inspect_output=inspect)
 
         seeded = using_warm and any(out.iterdir())
         execution = attempt()
@@ -239,10 +250,9 @@ def compile_snapshot(snapshot: SourceSnapshot, directory: Path, *, owner_user_id
         # the final TeX log describes the PDF we actually publish.
         final_log = out / (stem + '.log')
         diagnostic_log = final_log if returncode == 0 and final_log.is_file() else logfile
-        with diagnostic_log.open('rb') as stream:
-            text = stream.read(limit('log_bytes')).decode('utf-8', errors='replace')
-        diagnostics = _diagnostics(text, source_root=snapshot.root,
-                                   base_dir=main_path.parent)
+        with diagnostic_log.open('r', encoding='utf-8', errors='replace') as stream:
+            diagnostics = _diagnostics(stream, source_root=snapshot.root,
+                                       base_dir=main_path.parent)
         try:
             from .citation_audit import audit_citations
             diagnostics = (diagnostics + audit_citations(
@@ -286,10 +296,6 @@ def compile_snapshot(snapshot: SourceSnapshot, directory: Path, *, owner_user_id
         receipt['diagnostics'] = [{'severity': 'error', 'code': 'compile_io',
                                    'message': 'Cannot execute or store the paper build',
                                    'file': '', 'line': None}]
-    finally:
-        if logfile.exists() and logfile.stat().st_size > limit('log_bytes'):
-            with logfile.open('r+b') as stream:
-                stream.truncate(limit('log_bytes'))
     names = ['build.log']
     if receipt['status'] == 'success':
         names += ['document.pdf', 'document.synctex.gz', 'sources.json']

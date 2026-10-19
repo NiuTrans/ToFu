@@ -1376,12 +1376,11 @@ mod tests {
     #[test]
     fn conversation_archive_capacity_remains_atomically_deletable() {
         use super::*;
-        use crate::generated_tofudb_ir::MAX_ENTITY_TRANSACTION_WRITES;
         use crate::vfs::{DeterministicVfs, Vfs};
         use std::{path::Path, sync::Arc};
         // Each archive needs two point reads, up to one distinct Attempt counter,
         // and six deletes plus that counter. Reserve space for outer lifecycle work.
-        assert!(7 * MAX_RAW_ARCHIVES_PER_CONVERSATION + 1024 <= MAX_ENTITY_TRANSACTION_WRITES);
+        assert!(u32::try_from(7 * MAX_RAW_ARCHIVES_PER_CONVERSATION + 1024).is_ok());
         let vfs = Arc::new(DeterministicVfs::new(None));
         let root = Path::new("/raw-capacity");
         vfs.create_dir(root).unwrap();

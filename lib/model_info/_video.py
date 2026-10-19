@@ -1,8 +1,8 @@
 # HOT_PATH — functions in this module are called per-request.
 """lib/model_info/_video.py — per-model VIDEO FRAME budget (send-time clamp).
 
-The video-ingest pipeline (lib/video_analysis) extracts up to 64 durable
-frames per video at UPLOAD time, model-agnostically. How many of those frames
+The video-ingest pipeline (lib/video_analysis) extracts duration-scaled durable
+frames and nonredundant scene evidence per video at UPLOAD time, model-agnostically. How many of those frames
 a given request may carry is decided HERE, per target model, at message-build
 time — the same conversation re-sent to a bigger-window model expands to more
 frames, a smaller window thins to fewer, uniformly (temporal coverage kept).
@@ -35,11 +35,6 @@ from lib.model_info._family import is_claude
 
 logger = get_logger(__name__)
 
-#: Mirrors lib.video_analysis.FRAME_CEILING — duplicated BY VALUE to keep the
-#: import direction one-way (video_analysis → model_info, never the reverse).
-#: tests/video_analysis/test_video_analysis.py pins the two literals equal.
-_EXTRACTION_CEILING = 64
-
 #: Per-frame token estimate (worst-case Claude 1568px tokenizer ≈ 1.15MP).
 _TOKENS_PER_FRAME = 1500
 
@@ -71,7 +66,7 @@ def video_frame_budget(model: str, *, avg_frame_bytes: int = 0) -> int:
         logger.info('[ModelInfo] video_frame_budget(%s)=0 — no vision cap', model)
         return 0
 
-    cap = _CLAUDE_PER_VIDEO_CAP if is_claude(model) else _EXTRACTION_CEILING
+    cap = _CLAUDE_PER_VIDEO_CAP if is_claude(model) else None
 
     # Context-share clamp
     ctx = _DEFAULT_CONTEXT_TOKENS
@@ -83,14 +78,14 @@ def video_frame_budget(model: str, *, avg_frame_bytes: int = 0) -> int:
     except Exception as e:
         logger.debug('[ModelInfo] learned context lookup failed for %s: %s', model, e)
     ctx_frames = max(_FLOOR, int(ctx * _CONTEXT_SHARE // _TOKENS_PER_FRAME))
-    cap = min(cap, ctx_frames)
+    cap = min(cap, ctx_frames) if cap is not None else ctx_frames
 
     # Wire-bytes clamp (only when extraction stats are available)
     if avg_frame_bytes > 0:
         wire_frames = max(_FLOOR, _WIRE_BYTES_CAP // avg_frame_bytes)
         cap = min(cap, wire_frames)
 
-    budget = max(_FLOOR, min(cap, _EXTRACTION_CEILING))
+    budget = max(_FLOOR, cap)
     logger.debug('[ModelInfo] video_frame_budget(%s)=%d (ctx=%d, avg_bytes=%d)',
                  model, budget, ctx, avg_frame_bytes)
     return budget

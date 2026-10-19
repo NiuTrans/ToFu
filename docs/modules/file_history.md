@@ -14,6 +14,7 @@ state and are never rewritten by log compaction.
 | Backup blobs, indexes, JSONL durability, compaction | `lib/file_history/store.py` |
 | Pure full-anchor/delta representation | `lib/file_history/snapshot_codec.py` |
 | Authorized project paths and undo/redo routing | `lib/project_mod/modifications.py` |
+| Descriptor-anchored restoration, deletion, editor notification and metadata | `lib/project_mod/undo_filesystem.py` |
 | Atomic task-end snapshot and attribution window | `lib/tasks_pkg/commit_round/_commit.py` |
 
 The store always receives `base_path` explicitly. It holds no process-global
@@ -73,6 +74,18 @@ the next eligible maintenance rewrite converts retained rows in place.
 
 ## Failure semantics
 
+- Problem: path-based snapshot restore could follow a replaced parent symlink
+  outside the selected project. Decision: rewind/redo validate persisted relative
+  keys and reuse the descriptor-anchored undo filesystem for regular-file
+  restoration/deletion, timestamp notifications and post-restore metadata.
+  Symlink components, traversal and unavailable platform primitives fail visibly.
+  Alternatives rejected: lexical containment and realpath prechecks alone leave
+  a check/use race; a second restore implementation duplicates the authority.
+- Restore is per-file, not a multi-file transaction. Rejected files retain their
+  tracked evidence. Successful files can remain changed on partial failure, but
+  the result is `ok: false` with applied paths and failure reasons; no successful
+  `redoOf` snapshot is appended when any selected file fails. Public task redo
+  propagates these failures rather than converting them into a success receipt.
 - Malformed JSON is skipped. A wrong-base or malformed delta and all dependent
   deltas fail closed until the next full anchor.
 - A torn final append is separated before the next row, so it cannot poison all
@@ -113,6 +126,7 @@ size, not API traffic or physical-device block reclamation.
 
 ```bash
 pytest -q tests/file_history/test_file_history_snapshot_log.py
+pytest -q tests/project_mod/test_project_undo_path_boundary.py
 pytest -q tests/file_history/test_file_history_compaction.py tests/file_history/test_file_history_external_edit_guards.py
 pytest -q tests/tasks_pkg/test_commit_round_daemon.py tests/project_mod/test_project_undo_redo_concurrent_resolution.py
 ```

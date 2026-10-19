@@ -21,8 +21,7 @@ use std::io;
 use crate::authority::{AuthorityDatabase, AuthorityTransaction};
 use crate::entity::EntityKey;
 use crate::generated_tofudb_ir::{
-    MAX_OPTIMIZER_ACTIONS_PER_OWNER, MAX_OPTIMIZER_DOCUMENT_BYTES,
-    MAX_OPTIMIZER_PROPOSALS_PER_OWNER, MIGRATION_SESSION_MAX_PAGE_ROWS,
+    MIGRATION_SESSION_MAX_PAGE_ROWS,
     OPTIMIZER_ACTION_ACTIVE_APPLIED_INDEX_NAMESPACE, OPTIMIZER_ACTION_APPLIED_INDEX_NAMESPACE,
     OPTIMIZER_ACTION_COUNT_NAMESPACE, OPTIMIZER_ACTION_DOCUMENT_NAMESPACE,
     OPTIMIZER_ACTION_EXPIRY_INDEX_NAMESPACE, OPTIMIZER_ACTION_PROPOSAL_INDEX_NAMESPACE,
@@ -174,16 +173,13 @@ impl ProposalSnapshot {
     fn valid(&self) -> bool {
         valid_text(&self.id, 128, true)
             && valid_text(&self.created_at, 64, true)
-            && valid_text(&self.title, 500, false)
-            && valid_text(&self.rationale, 4000, false)
             && valid_text(&self.action_type, 256, true)
-            && valid_text(&self.action_args, 2_000_000, true)
+            && !self.action_args.is_empty()
             && valid_text(&self.severity, 64, false)
             && self.confidence.is_finite()
             && (0.0..=1.0).contains(&self.confidence)
-            && valid_text(&self.evidence, 2_000_000, true)
+            && !self.evidence.is_empty()
             && valid_text(&self.status, 64, false)
-            && valid_text(&self.status_reason, 500, false)
     }
 }
 
@@ -207,11 +203,9 @@ impl ActionSnapshot {
             && valid_text(&self.proposal_id, 128, true)
             && valid_text(&self.applied_at, 64, true)
             && valid_text(&self.expires_at, 64, true)
-            && valid_text(&self.pre_metric, 2_000_000, true)
-            && valid_text(&self.outcome_metric, 2_000_000, false)
+            && !self.pre_metric.is_empty()
             && valid_text(&self.outcome_recorded_at, 64, false)
             && valid_text(&self.reverted_at, 64, false)
-            && valid_text(&self.revert_reason, 500, false)
     }
 }
 
@@ -258,7 +252,7 @@ fn read_proposal(
         PROPOSAL_LOGICAL_NAMESPACE,
         id,
         transaction.owner_user_id(),
-        MAX_OPTIMIZER_DOCUMENT_BYTES,
+        usize::MAX,
     )?
     else {
         return Ok(None);
@@ -294,7 +288,7 @@ fn read_action(
         ACTION_LOGICAL_NAMESPACE,
         id,
         transaction.owner_user_id(),
-        MAX_OPTIMIZER_DOCUMENT_BYTES,
+        usize::MAX,
     )?
     else {
         return Ok(None);
@@ -339,7 +333,7 @@ fn put_document(
             updated_at_ms: updated_at_ms.max(1),
         },
         transaction.owner_user_id(),
-        MAX_OPTIMIZER_DOCUMENT_BYTES,
+        usize::MAX,
     )
     .map(|_| ())
 }
@@ -365,9 +359,7 @@ fn restore_proposal(
         };
     }
     let count = read_count(database, transaction, OPTIMIZER_PROPOSAL_COUNT_NAMESPACE)?;
-    if count >= MAX_OPTIMIZER_PROPOSALS_PER_OWNER as u64 {
-        return Err(invalid_input("optimizer owner row bound is exhausted"));
-    }
+    let next_count = count.checked_add(1).ok_or_else(|| invalid_data("optimizer owner count overflow"))?;
     let mut stored = serde_json::to_value(&proposal).unwrap();
     stored
         .as_object_mut()
@@ -380,7 +372,7 @@ fn restore_proposal(
         database,
         transaction,
         OPTIMIZER_PROPOSAL_COUNT_NAMESPACE,
-        count + 1,
+        next_count,
     )?;
     put_document(
         database,
@@ -446,9 +438,7 @@ fn restore_action(
         return Err(invalid_input("Optimizer proposal does not exist"));
     }
     let count = read_count(database, transaction, OPTIMIZER_ACTION_COUNT_NAMESPACE)?;
-    if count >= MAX_OPTIMIZER_ACTIONS_PER_OWNER as u64 {
-        return Err(invalid_input("optimizer owner row bound is exhausted"));
-    }
+    let next_count = count.checked_add(1).ok_or_else(|| invalid_data("optimizer owner count overflow"))?;
     let mut stored = serde_json::to_value(&action).unwrap();
     stored
         .as_object_mut()
@@ -461,7 +451,7 @@ fn restore_action(
         database,
         transaction,
         OPTIMIZER_ACTION_COUNT_NAMESPACE,
-        count + 1,
+        next_count,
     )?;
     put_document(
         database,

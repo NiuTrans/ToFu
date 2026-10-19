@@ -88,7 +88,7 @@ def test_handle_fetch_url_reattaches_reader_images(monkeypatch):
         _handlers, '_load_search_backend',
         lambda: (SimpleNamespace(_fetch_url_one=lambda *a, **k: item), None))
     monkeypatch.setattr(
-        'lib.search_bridge.bind_search_browser',
+        'lib.search.search_bridge.bind_search_browser',
         lambda **k: contextlib.nullcontext())
     monkeypatch.setattr(_handlers, '_finalize_tool_round', lambda *a, **k: None)
 
@@ -117,7 +117,7 @@ def test_handle_fetch_url_batch_concatenates_reader_images(monkeypatch):
         lambda: (SimpleNamespace(
             _fetch_url_one=lambda url, *a, **k: items[url]), None))
     monkeypatch.setattr(
-        'lib.search_bridge.bind_search_browser',
+        'lib.search.search_bridge.bind_search_browser',
         lambda **k: contextlib.nullcontext())
     monkeypatch.setattr(_handlers, '_finalize_tool_round', lambda *a, **k: None)
 

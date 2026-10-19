@@ -321,20 +321,6 @@ def test_load_instruction_only_and_missing_resource_are_recoverable(isolated):
     assert os.path.abspath(pkg) not in missing
 
 
-@pytest.mark.unit
-@pytest.mark.parametrize('name', [
-    'tofu-debugging', 'tofu-frontend', 'tofu-browser-testing',
-])
-def test_repo_dev_guides_name_workspace_files(name):
-    root = os.path.join(
-        os.path.dirname(__file__), '..', '..', '.agents', 'skills', name, 'SKILL.md')
-    with open(root, encoding='utf-8') as handle:
-        text = handle.read()
-    assert 'ordinary file tools' in text
-    assert 'instruction-only' in text
-    assert 'not\nread_skill_resource' in text or 'not read_skill_resource' in text
-
-
 # ── compose_task_context splice seam ──────────────────────────────
 
 def _run_inject(messages, *, has_real_tools=True, memory_enabled=False,
@@ -348,6 +334,7 @@ def _run_inject(messages, *, has_real_tools=True, memory_enabled=False,
         memory_enabled=memory_enabled,
         search_enabled=False,
         has_real_tools=has_real_tools,
+        tool_names={'load_skill'} if has_real_tools else set(),
         conv_id='', task={'config': {}}, model='claude-opus-4',
     )
 

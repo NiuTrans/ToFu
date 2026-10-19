@@ -123,13 +123,17 @@ def settle_episode(episode_id: str, *, user_id, status: str, actuals: dict,
                    stage_receipts: list | None = None,
                    verdict: dict | None = None,
                    learning: dict | None = None,
-                   now: int | None = None, actuals_complete: bool = True) -> dict:
+                   now: int | None = None, actuals_complete: bool = True,
+                   reconcile: bool = False) -> dict:
+    """Commit once; opted-in recovery confirms only the exact existing settlement."""
     if type(actuals_complete) is not bool:
         raise EvolutionStateError('actuals completeness must be an explicit boolean')
+    if type(reconcile) is not bool:
+        raise EvolutionStateError('settlement reconciliation must be an explicit boolean')
     episode, version = get_versioned_record(NAMESPACE_EPISODES, _episode_key(episode_id, user_id))
     if episode is None:
         raise EvolutionStateError('unknown episode for this owner')
-    if episode.get('status') != _RUNNING:
+    if episode.get('status') != _RUNNING and not reconcile:
         raise EvolutionStateError(
             f"episode is already terminal ({episode.get('status')}); settlement is final")
     if status not in _TERMINAL:
@@ -150,12 +154,38 @@ def settle_episode(episode_id: str, *, user_id, status: str, actuals: dict,
         if (settled['learning'].get('cost_actual_vs_estimate') is not None
                 or settled['learning'].get('resource_weight_deltas')):
             raise EvolutionStateError('incomplete actuals cannot authorize cost or efficiency learning')
+    else:
+        settled.pop('actuals_complete', None)
     validate_episode(settled)
     _check_verdict_consistency(settled)
     _check_exploratory_rights(settled)
-    put_record(NAMESPACE_EPISODES, _episode_key(episode_id, user_id),
-               settled, kind='episode', expected_version=version)
+    if episode.get('status') != _RUNNING:
+        return _confirm_settlement(episode, settled)
+    try:
+        put_record(NAMESPACE_EPISODES, _episode_key(episode_id, user_id),
+                   settled, kind='episode', expected_version=version)
+    except StorageError as exc:
+        if not reconcile or exc.code != 'database_conflict':
+            raise
+        current = get_episode(episode_id, user_id=user_id)
+        if current is None or current.get('status') not in _TERMINAL:
+            raise
+        return _confirm_settlement(current, settled)
     return settled
+
+
+def _confirm_settlement(current: dict, proposed: dict) -> dict:
+    # Observation time is not settlement identity. Every other field, including
+    # owner-bound episode/task/plan identity and usage completeness, must agree.
+    def identity(value):
+        result = {key: item for key, item in value.items()
+                  if key not in ('updated_at', 'settled_at', 'actuals_complete')}
+        result['actuals_complete'] = value.get('actuals_complete', True)
+        return result
+
+    if current.get('status') not in _TERMINAL or identity(current) != identity(proposed):
+        raise EvolutionStateError('episode settlement conflicts with the committed result')
+    return current
 
 
 def get_episode(episode_id: str, *, user_id) -> dict | None:
@@ -164,6 +194,35 @@ def get_episode(episode_id: str, *, user_id) -> dict | None:
 
 def list_episodes(*, user_id, limit: int = 50) -> list[dict]:
     return list_records(NAMESPACE_EPISODES, user_id, kind='episode', limit=limit)
+
+
+def find_running_episode_for_task(*, task_id: str, user_id) -> dict | None:
+    """Find an exact legacy task binding through complete owner-scoped pages."""
+    owner = require_user_id(user_id, context='evolution terminal episode owner')
+    cursor = ''
+    page_size = MAX_LIST_LIMIT
+    while True:
+        try:
+            page = list_record_page(NAMESPACE_EPISODES, owner, kind='episode',
+                                    limit=page_size, after_key=cursor)
+        except StorageError as exc:
+            if not is_record_page_resource_refusal(exc) or page_size == 1:
+                raise
+            page_size = max(1, page_size // 2)
+            continue
+        for row in page:
+            episode = row['value']
+            try:
+                validate_episode(episode)
+                if _episode_key(episode['episode_id'], owner) != row['key']:
+                    raise ValueError('episode identity differs from its key')
+            except ValueError as exc:
+                raise StorageError('database_integrity', 'Invalid terminal episode binding') from exc
+            if episode.get('task_id') == task_id and episode.get('status') == _RUNNING:
+                return episode
+        if not page:
+            return None
+        cursor = page[-1]['key']
 
 
 def recent_settled_episodes(*, user_id, limit=MAX_LIST_LIMIT):

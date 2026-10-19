@@ -63,25 +63,25 @@ _PROBE = f'/tmp/tofu_guard_probe_{os.getpid()}'
 class TestScopedDeleteRunsEndToEnd:
     """The exact incident shapes must reach the shell (not the block list)."""
 
-    def test_two_segment_tmp_delete_allowed(self, monkeypatch):
+    def test_two_segment_tmp_delete_allowed(self, monkeypatch, tmp_path):
         # Trash shim disabled: the guard verdict is what is under test, and
         # this keeps the test hermetic (no .tofu_trash litter in /tmp).
         monkeypatch.setattr('lib.project_mod.run_command._RM_TRASH_ENABLED', False)
-        result = tool_run_command('/tmp', f'{_RM} -rf {_PROBE} 2>/dev/null')
+        result = tool_run_command(str(tmp_path), f'{_RM} -rf {_PROBE} 2>/dev/null')
         assert 'blocked for safety' not in result
         assert '[exit code: 0]' in result
 
-    def test_incident_command_chain_allowed(self, monkeypatch):
+    def test_incident_command_chain_allowed(self, monkeypatch, tmp_path):
         """The screenshot's full chain shape: cd && rm -rf /tmp/<wt> 2>/dev/null
         && a follow-up command — every segment must pass."""
         monkeypatch.setattr('lib.project_mod.run_command._RM_TRASH_ENABLED', False)
-        cmd = (f'cd /tmp && {_RM} -rf {_PROBE} 2>/dev/null && echo cleaned')
-        result = tool_run_command('/tmp', cmd)
+        cmd = (f'cd {tmp_path} && {_RM} -rf {_PROBE} 2>/dev/null && echo cleaned')
+        result = tool_run_command(str(tmp_path), cmd)
         assert 'blocked for safety' not in result
         assert 'cleaned' in result
         assert '[exit code: 0]' in result
 
-    def test_root_delete_refused_before_any_spawn(self, monkeypatch):
+    def test_root_delete_refused_before_any_spawn(self, monkeypatch, tmp_path):
         """``rm -rf /`` must be refused by the guard chain BEFORE a subprocess
         exists. The Popen tripwire proves the refusal is the guard's verdict,
         not the OS's — and makes this test safe even if the guard regresses.
@@ -89,16 +89,17 @@ class TestScopedDeleteRunsEndToEnd:
         def _tripwire(*_a, **_kw):
             raise RuntimeError('subprocess spawned for a refused command')
         monkeypatch.setattr('subprocess.Popen', _tripwire)
-        result = tool_run_command('/tmp', f'{_RM} -rf /')
-        assert 'blocked for safety' in result
-        assert "top-level path '/'" in result
+        result = tool_run_command(str(tmp_path), f'{_RM} -rf /')
+        assert 'Internal workspace lease namespace cannot be mutated: /' in result
+        assert 'Command was not started' in result
 
-    def test_sudo_root_delete_refused_before_any_spawn(self, monkeypatch):
+    def test_sudo_root_delete_refused_before_any_spawn(self, monkeypatch, tmp_path):
         def _tripwire(*_a, **_kw):
             raise RuntimeError('subprocess spawned for a refused command')
         monkeypatch.setattr('subprocess.Popen', _tripwire)
-        result = tool_run_command('/tmp', f'sudo {_RM} -rf /')
-        assert 'blocked for safety' in result
+        result = tool_run_command(str(tmp_path), f'sudo {_RM} -rf /')
+        assert 'Internal workspace lease namespace cannot be mutated: /' in result
+        assert 'Command was not started' in result
 
 
 # ═══════════════════════════════════════════════════════════════════════════

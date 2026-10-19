@@ -13,6 +13,12 @@ import { mountCurrentExperiment } from './current-experiment';
 import { programLimitHint } from './limits';
 import { mountExecutionOptions, executionPolicyText } from './execution-options';
 import { mountHypothesisComparison } from './hypothesis-comparison';
+import { mountExperimentCharts } from './experiment-charts';
+import { mountResourceLauncher } from '../../../rich-response/resource-launcher';
+import { richChartText } from '../evidence-charts';
+import { evidenceCharts } from '../evidence-charts';
+import '../../../styles/application/26-evolution-observations.css';
+import '../../../styles/application/03-data-chart.css';
 
 const copy = (key: string) => t(`evolution.program.${key}` as Extract<I18nKey, `evolution.program.${string}`>);
 function node<K extends keyof HTMLElementTagNameMap>(tag: K, className = '', text?: string): HTMLElementTagNameMap[K] {
@@ -188,7 +194,7 @@ export function mountProgramWorkbench(root: HTMLElement, ports: {
   }
 
   const creator = node('section', 'exp-creator');
-  creator.append(node('h2', '', copy('empty')), blank(copy('emptyNote')));
+  creator.append(node('h2', '', copy('empty')));
   const form = node('form', 'exp-create-form');
   const objective = field(form, 'objective', copy('objective'), '', 5); objective.required = true;
   objective.placeholder = copy('objectivePlaceholder');
@@ -227,7 +233,7 @@ export function mountProgramWorkbench(root: HTMLElement, ports: {
   const pacingStatus = node('p'); pacingStatus.dataset.pacingStatus = 'true';
   const changePacing = createButton({label: copy('pacingCheckpoint'), size: 'sm', onClick: () => void setPacing()});
   changePacing.dataset.programPacing = 'true';
-  controlRoom.append(node('h2', '', copy('controlRoom')), nextAction, pacingStatus, changePacing, blank(copy('durabilityNote')));
+  controlRoom.append(node('h2', '', copy('controlRoom')), nextAction, pacingStatus, changePacing);
   const attention = node('section', 'exp-attention'); attention.hidden = true;
   const attentionNote = blank(copy('attentionNote'));
   attentionNote.setAttribute('role', 'status');
@@ -298,7 +304,10 @@ export function mountProgramWorkbench(root: HTMLElement, ports: {
   const expansionControls = [expandTitle, instruction, experimentChecks];
   const saveExpansionDraft = () => {if (selectedId) saveDraft(['expand', selectedId], expansionControls, expansionRequests.get(selectedId));};
   expandForm.addEventListener('input', saveExpansionDraft); expandForm.addEventListener('change', saveExpansionDraft);
-  detail.append(controlRoom, attention, comparisonHost, layout, human, output, sourceHost, expandHost, telemetry); main.append(detail);
+  const observations=document.createElement('section');const charts=mountExperimentCharts(observations);
+  const resourceHost=node('section','exp-resources');
+  const resources=mountResourceLauncher(resourceHost,richChartText);
+  detail.append(controlRoom, resourceHost, attention, observations, comparisonHost, layout, human, output, sourceHost, expandHost, telemetry); main.append(detail);
   root.append(sidebar, main);
 
   const controller = createProgramController(ports.api, {
@@ -427,6 +436,7 @@ export function mountProgramWorkbench(root: HTMLElement, ports: {
       if (!row.open || row.childElementCount > 1) return;
       const body = node('div', 'exp-receipt-body'); body.append(node('h3', '', copy('result')),
         node('pre', 'exp-result', receipt.result || copy('resultEmpty')));
+      const visual=evidenceCharts(root.ownerDocument,receipt.result);if(visual)body.insertBefore(visual,body.children[1]!);
       const sourceActions = sources.controls(receipt);if (sourceActions) body.append(sourceActions);
       const hypothesis = hypothesisDetails(receipt.step); if (hypothesis) body.append(hypothesis);
       if (receipt.replan) body.append(replanDetails(receipt.replan));
@@ -561,6 +571,7 @@ export function mountProgramWorkbench(root: HTMLElement, ports: {
       button.title = copy(blocked ? limit! : action === 'start' ? 'resume' : action + 'Note');
     });
     currentExperiment.update(program, state.run, state.runError);
+    resources.update(state.run?.run_id?{runId:state.run.run_id}:undefined);
     if (!program) return;
     comparison.update(program, state.history?.experiments || []);
     const awaitingHuman = state.questions.length > 0;
@@ -618,6 +629,7 @@ export function mountProgramWorkbench(root: HTMLElement, ports: {
     navigationState(newer, state.historyPending || state.history?.next_cursor == null);
     navigationState(latest, state.historyPending);
     const receipts = state.history?.experiments || [];
+    charts.update(program, receipts);
     const sequences = new Set(receipts.map(receipt => receipt.sequence));
     receiptRows.forEach((_row, sequence) => { if (!sequences.has(sequence)) receiptRows.delete(sequence); });
     if (receipts.length) reconcile(ledger, receipts.map(receipt => {
@@ -671,6 +683,7 @@ export function mountProgramWorkbench(root: HTMLElement, ports: {
       outputSignature = nextOutputSignature;
       output.replaceChildren(node('h2', '', copy(program.status === 'completed' ? 'delivery' : 'latestWork')),
         result ? node('pre', 'exp-result', result) : blank(copy('noOutput')), deliveryWarning);
+      const visual=evidenceCharts(root.ownerDocument,result);if(visual)output.insertBefore(visual,output.children[1]!);
       const sourceActions = resultRecord && sources.controls(resultRecord);if (sourceActions) output.append(sourceActions);
     }
     // Read status changes leave the confirmed content island and selection intact.
@@ -716,7 +729,7 @@ export function mountProgramWorkbench(root: HTMLElement, ports: {
   updateRoute(path); void controller.refresh();
   return {updateRoute, refresh: controller.refresh, dispose() {
     preserveDrafts(); window.removeEventListener('pagehide', preserveDrafts);
-    disposed = true; epoch += 1; controller.dispose();sources.dispose();currentExperiment.dispose();comparison.dispose(); document.removeEventListener('visibilitychange', visible);
+    disposed = true; epoch += 1; controller.dispose();resources.dispose();sources.dispose();currentExperiment.dispose();comparison.dispose(); document.removeEventListener('visibilitychange', visible);
     expansionDrafts.clear(); expansionRequests.clear(); questionForms.clear(); questionDraftSavers.clear(); receiptRows.clear(); memoryRows.clear(); programButtons.clear();
     root.replaceChildren(); root.classList.remove('evo-programs');
   }};

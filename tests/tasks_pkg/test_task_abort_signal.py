@@ -18,7 +18,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 from lib.agent_core import task_abort_signal  # noqa: E402
 from lib.agent_core.task_runtime import TaskRuntime  # noqa: E402
-from lib.runtime_state_store import get_store, reset_for_test  # noqa: E402
+from lib.runtime.runtime_state_store import get_store, reset_for_test  # noqa: E402
 
 
 pytestmark = pytest.mark.unit

@@ -14,7 +14,7 @@ import sys
 def main(argv: list[str] | None = None) -> int:
     values = list(sys.argv[1:] if argv is None else argv)
     parser = argparse.ArgumentParser(prog="python -m evaluations")
-    parser.add_argument("adapter", choices=("catalog", "harbor"))
+    parser.add_argument("adapter", choices=("catalog", "harbor", "platform"))
     # Only parse the adapter here; --help after it belongs to that adapter.
     args = parser.parse_args(values[:1])
     remainder = values[1:]
@@ -27,9 +27,13 @@ def main(argv: list[str] | None = None) -> int:
             "schema_version": 1,
             "benchmarks": [definition.to_dict() for definition in BENCHMARKS.values()],
             "execution_adapters": ["harbor"],
+            "job_launchers": ["platform"],
             "harnesses": [profile.to_dict() for profile in harness_profiles()],
         }, indent=2))
         return 0
+    if args.adapter == "platform":
+        from evaluations.platform_jobs.cli import main as platform_main
+        return platform_main(remainder)
     from evaluations.swebench.cli import main as harbor_main
     return harbor_main(remainder)
 

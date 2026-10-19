@@ -3,7 +3,7 @@
 Owner: `packages/tofu-db/src/{embed_job_queue,embed_ffi,fsync_stats}.rs`.
 Authority: [TofuDB storage](STORAGE_TOFUDB.md) and
 [response ownership](TOFUDB_EMBEDDED_RESPONSE.md).
-Measurements and failures: [delivery evidence](evidence/tofudb_worker_delivery_20261002.json).
+Measurements and failures: `tofudb_worker_delivery_20261002.json`.
 
 ## Problem
 
@@ -39,9 +39,9 @@ nonblocking completion tail before reply delivery, preserving sequential reuse.
 The short deque contains only jobs handed to ready carriers, not a count-limited
 backlog. Closed/poisoned delivery remains fail-closed.
 
-Request deadlines, semantic admission, byte reservations, ownership, receipt
-replay, strict WAL barriers, panic containment and the watchdog remain. Workers
-own requests and response channels; no caller buffer enters a worker. Panic or
+[Certified cache hits](TOFUDB_QUERY_RESULT_CACHE.md) reuse owned results without engine execution.
+Misses retain deadlines, admission, byte ownership, strict WAL barriers and watchdogs.
+Workers own requests/channels; no caller buffer enters a worker. Panic or
 timeout still poisons and disarms the handle; late replies remain owned and
 disposable. Request byte pressure is a separate boundary still requiring audit.
 
@@ -72,10 +72,46 @@ The aggregate operations row's legacy `outcome: unwound` is a default
 aggregate placeholder, not evidence of a panic; `errors` and individual slow
 samples carry actual outcomes. Default-off comparisons establish performance.
 
+## Matched caller windows and observer calibration
+
+Problem: lifetime stage means include setup and warmup, while caller samples
+often cover only timed reads. Their subtraction invents a residual. Build
+features also matter: a System-allocator control does not describe the Linux
+preparation profile, which enables `embedded-mimalloc`.
+
+Decision: `benchmarks/tofudb_point_boundary_measure.py` owns a fresh local
+authority, checks every logical value and captures metrics around only its
+timed requests. Its default 20,000 reads use 128 warm records. Run separate
+processes with `TOFU_DB_REQUEST_PROFILE_EVERY` set to 0/1/1/0 and retain all
+raw clocks. `--edges` adds delegating Python conversion/FFI wrappers; calibrate
+that observer separately. Raw SQLite returns logical values through direct SQL;
+native additionally performs semantic admission and returns record metadata.
+Neither this fixture nor a profile qualifies cold, concurrent or write paths.
+
+`scripts/tofudb_profile_report.py REPORT --window` requires matching caller,
+seen, selected, operation and queue populations, no drops/errors, monotonic
+counters and reconciled exclusive ledgers. It excludes lifetime maxima, slow
+samples and global edge counters. The producer must exclude concurrent traffic
+and preserve process identity; matching counts alone cannot prove provenance.
+The remaining wall time includes caller conversion, reply delivery, scheduling
+and profiler overhead. It is not CPU or an unprofiled cost estimate.
+
+Alternatives: subtract unrelated means, treat profile-on latency as admission,
+or optimize only a nested stage. The retained production-profile control uses
+Thin LTO, 63 launch-probed codegen units, incremental compilation and mimalloc.
+Point medians remain about 20 us versus raw SQLite 5–8 us. Full sampling adds
+roughly 7–9 us in paired controls; matching sampled queue/dispatch means are
+about 4.6–5.5/7.3–8.2 us. A private bounded idle-spin prototype reduces means
+to 17.2 us while increasing process CPU to 30–31 us/read from 24–25 us/read;
+it is rejected. Adverse legs, build controls, exact clocks and source recovery
+are retained in `tofudb_matched_point_20261014.json`.
+No scheduling change, persistent allocation or performance-completion claim
+is admitted by this diagnostic improvement.
+
 ## Experiments and defeated alternatives
 
 - Direct caller execution remains rejected: bounded overlay source ownership alone proves neither watchdog nor semantic/reader admission.
-  Seven private tests expose a reader-exhaustion counterexample; ordinary reads return `WouldBlock` while capture succeeds. No runtime change or speedup credit: [source proof and defeated alternatives](evidence/tofudb_bounded_overlay_20261004.json).
+  Seven private tests expose a reader-exhaustion counterexample; ordinary reads return `WouldBlock` while capture succeeds. No runtime change or speedup credit: source proof and defeated alternatives.
 - A pure echo-job microbenchmark initially rejected this queue: 32 workers and
   8/32 callers lost roughly half/two-thirds of throughput, although the single
   32-worker single-caller case improved. The actual database includes execution and allocation that
@@ -112,7 +148,7 @@ Maintained three-engine controls also showed variable header/point latency.
 Raw SQLite point means remained 0.006–0.008 ms and header-open 0.018–0.019;
 sidecar SQLite point means were 0.230–0.239. Universal SQLite dominance remains
 unachieved. All means, per-leg tails, RSS and controls are retained in the
-[original delivery evidence](evidence/tofudb_worker_delivery_20261002.json).
+`tofudb_worker_delivery_20261002.json`.
 
 ## Verification and tooling failures
 
@@ -168,7 +204,7 @@ gains. Fixed counters grow by 256 bytes; each sampled request/sample/operation
 aggregate grows by 64 bytes. The scoped receiver has the original receiver's
 size; queued jobs and the handle retain their original layouts. There is no
 added resident cache or persisted state. Final measurements and observer costs:
-[reply evidence](evidence/tofudb_reply_reuse_20261003.json).
+`tofudb_reply_reuse_20261003.json`.
 
 Three defeated alternatives remain as private commits and complete paired
 reports, rather than silently replacing unfavorable results:
@@ -204,40 +240,9 @@ They expose an important limit of short shared-host comparisons; all raw,
 long/short, CPU, tail and observer results remain. Prototype regressions are
 conservative rejection evidence, not proof that one Arc alone caused them.
 
-
-The integrated-context rerun preserves seven concurrently changed native inputs
-and the maintained operation contracts before rebuilding both matched roles.
-Its source digest is `63d4a20928a40147ed161db53bfce131b12b40dc01dd5243d26a6a9db389845c`;
-the baseline is `a911ec51be6b1576e74eb39955e539588d7b2a5a0c62d17d237b71a3c61d5808`.
-The final full suite passes 1,572 tests with two existing ignores. Debug CLI,
-release CLI and embedded library identities match the frozen candidate. All
-eight measurement drivers pass, including concurrent publication/read-after-ACK
-validation; timing measurements run after builds and tests have terminated.
-
-In this context, allocation/receiver-retirement means are 0.425/0.644
-microseconds. Sampled dispatch/queue means are 13.045/55.980 microseconds;
-7,762 sampled requests each record one creation and zero reuse. Global edge
-populations differ from sampled worker requests. Active/retained collector
-bytes are 6,744/176,800. This establishes observability, not a disjoint CPU
-budget or a proven end-to-end speedup. Long scalar overlay/tree mean changes
-are +5.04%/-1.26%; long array overlay/tree changes are -2.92%/+1.58% (positive
-means lower latency). Short array overlay at eight callers regresses 6.40%.
-SDK single/parallel-eight changes are +2.70%/+1.60%, while escaped text
-regresses 2.42%. Every adverse leg, CPU cost, per-leg p99, observer run and
-original-context comparison remains in the evidence; no control percentage
-is credited as an algorithmic optimization.
-
-Two verification failures also remain explicit. The first integration attempt
-stopped before shared-tree mutation because unowned native inputs changed;
-those inputs were copied to both roles and independently verified. A reused
-Cargo debug cache then reported the old source digest despite a successful
-test exit. That result received no success credit. Only the temporary package
-build cache was removed, after which the full suite and identity check passed.
-The initial evidence serialization lacked a copied private-commit receipt;
-restoring that exact retained input repaired serialization without rerunning
-measurements. Matched baseline/candidate documentation and architecture gates
-have identical existing failures; this change adds no gate finding.
-
+Prior-context and integrated-context identities, failed cache/source checks,
+full gates and all adverse controls remain in the reply evidence. A successful
+test exit without the expected source identity receives no certification.
 
 ## Admission anchors and six rejected wake experiments
 
@@ -301,40 +306,12 @@ aggregates outside sampled dispatch; populations differ and inclusive waits
 overlap. Four slots add 512 fixed counter bytes and 96 bytes per sampled
 request/sample/operation aggregate. Jobs and handles retain their original
 layouts; worker count and persistent state remain unchanged. Observer costs,
-every CPU/tail leg and rejection are in [admission evidence](evidence/tofudb_admission_lock_20261003.json).
+every CPU/tail leg and rejection are in `tofudb_admission_lock_20261003.json`.
 
-CPU-stack sampling is retained without attribution credit: the host's perf
-frequency and fixed-period captures have insufficient worker coverage and
-unresolved symbols. No host sysctl or backend was changed. A missing canonical
-large-result fixture aborted one baseline diagnostic before timing; the exact
-fixture was restored and only incomplete measurement drivers were resumed.
-Two test-only missing mutable bindings also failed compilation before any
-assigned-slot test ran, and the corrected retry is kept. Parallel native
-inputs are copied to both roles before the final combined-source verification.
-
-The first final full-native attempt failed two unchanged listener tests before
-Hello acknowledgement (1536 library passes, two failures, two existing ignores;
-integration tests did not run). The matched baseline focused suite failed
-three Hello setups, and disabling client Nagle still failed two. A syscall
-trace records all Hello fragments sent before the server body read timed out;
-it does not establish which host networking mechanism delayed delivery.
-The test helper now encodes Hello in a Vec and sends the complete setup frame
-in one write, in both roles. Both focused suites pass all 14 listener tests.
-Production framing, authentication, 100 ms partial-frame bounds, idle budgets,
-sleeps and failure/clean-EOF assertions remain unchanged. Fragmented-frame
-parser tests and the ordinary fragmented loopback test remain in the full gate.
-Failed full/focused runs, the defeated Nagle attempt and traces are retained;
-none receives passing-suite or performance credit. Release identities are
-rebuilt because test source participates in the native source fingerprint.
-
-A later retry reused baseline dev artifacts after the paired focused tests.
-Its library count lacked the four new candidate tests, and the debug CLI
-reported the baseline source digest. The owned verification process group
-was terminated after this identity mismatch, with its partial log and process
-receipt retained; no candidate full-suite credit is given. Cleaning only the
-temporary dev package cache forces the candidate rebuild. The final gate
-requires all four new test names to pass as well as the expected CLI digest;
-Release artifacts for that rejected candidate were independently rebuilt and correctly pinned.
+CPU-stack captures with insufficient worker coverage or unresolved symbols
+receive no attribution credit. Missing fixtures, listener setup failures,
+partial verification and stale build identities remain in the admission
+artifact; no failed or superseded-context run receives success credit.
 
 Rejected sixth-candidate matched-context results (positive percentages mean reductions):
 
@@ -367,35 +344,15 @@ regress 1.06%/1.90%, and short array 32-caller CPU rises 10.94%/19.02%.
 The preliminary selection is revoked. Preserve the six experiments, but ship
 only admission/wake diagnostic anchors with the original scheduling policy.
 
-A second integration guard stopped before shared mutation when concurrent
-streamed-checkpoint admission changed six native inputs (including the FFI
-submission owner) and the canonical protocol contract. The previous anchor-only
-context passed 1572 tests, but is retained as a prior-context gate, not the final
-combined identity. Both roles preserve the current checkpoint limits, generated
-operation allowlist and its three tests; only the four anchors differ. The
-shared FFI hash was refreshed after reviewing its admission changes. Final
-combined build, full-test and control receipts are in the same evidence.
-
-The prior-context profiling-on mixed-corpus queue mean is 79.454 us versus
-50.321 us baseline; submit is 79.414 us versus 50.935 us. This is observer
-perturbation, not production latency credit. All four anchors have nonzero
-calls, and active sampled-request bytes measure 6744 -> 6840 (+96). Default-off
-control includes short scalar 32-caller CPU increases 2.48%/2.82%; every adverse
-control, SDK rounding and tail remains explicit. No zero-overhead claim is made.
-
-A third guard preserved a concurrent vectored frame writer and its directory
-map. The earlier coalesced Hello setup is removed from the final delivery:
-both roles restore the original listener helper and exercise the maintained
-production writer with the original 100 ms partial-frame bound. Its borrowed
-slices, short-write/interruption progression, zero-progress/overrun/error
-behavior and secret cleanup remain unchanged by the anchors. Only caller-edge
-instrumentation differs between the final roles; no test fixture is shipped.
-Prior-context 1575-test/control receipts and its private commit remain distinct
-from the final combined source/build identities.
+Final integration preserves concurrent streamed-checkpoint admission and the
+maintained vectored frame writer, including its original partial-frame bound
+and failure/secret-cleanup behavior. Earlier fixture modifications are not
+shipped. The admission evidence separates prior-context and final combined
+builds, observer perturbation, allocation growth and adverse default-off legs.
 
 Prior caller-anchor-only controls passed 1,577 tests with two existing ignores.
 Their full short/long scalar/array and SDK table remains in the
-[caller-anchor evidence](evidence/tofudb_admission_lock_20261003.json).
+`tofudb_admission_lock_20261003.json`.
 Long-array overlay latency/CPU regressed 10.39%/9.46%, and materialized scalar
 single-caller latency regressed 27.00%. They establish instrumentation controls,
 not algorithmic speedup; all other positive/adverse legs stay in the evidence.
@@ -446,11 +403,10 @@ final-build memory/profile controls are separately identified in the evidence.
 
 All failed and positive legs, observer off/16/16/off, exact native/SDK values,
 strict disposable authorities, source-tagged gates and final integration:
-[handoff evidence](evidence/tofudb_handoff_20261004.json).
+`tofudb_handoff_20261004.json`.
 The 1,581-pass full gate belongs to the rejected prototype; final diagnostics
 preserve later concurrent automation changes with a separate build/check identity.
-Atomic one-shot replies also regress arrays: [evidence](evidence/tofudb_atomic_reply_20261004.json). Finite measurements do not prove the universal SQLite objective.
-
+Atomic one-shot replies also regress arrays: `tofudb_atomic_reply_20261004.json`. Finite measurements do not prove the universal SQLite objective.
 
 ## Independent embedded parser admission budget
 
@@ -482,7 +438,7 @@ Two original-workload ABBA/BAAB groups show no observed material regression.
 Both original and larger workloads still miss latency acceptance. Real SIGKILL
 after all 1000 acknowledged completions restores exact content and event replay;
 this does not cover kill during unacknowledged writes. Detailed sources, gates
-and limitations: `docs/evidence/tofudb_rebase_attribution_20261006.json`.
+and limitations: `tofudb_rebase_attribution_20261006.json`.
 The one-shot budget adds no worker, idle allocation or persistent state.
 
 The actual FFI burst test rendezvous holds 64 calls inside native dispatch with
@@ -491,3 +447,4 @@ local/FUSE shutdown; this proves acceptance and ownership, not universal query
 latency. The one-worker-ready handoff and surplus-carrier tests separately
 verify close wakeups and cache-only retirement. Input bytes retain their lease
 through actual worker release, including failed publication and watchdog exits.
+<!-- Evidence note: former docs/evidence/ artifact snapshots cited here were retired from the tree; cited JSON artifacts remain recoverable from git history. -->

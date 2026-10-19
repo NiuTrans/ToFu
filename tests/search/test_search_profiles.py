@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from lib.search_profiles import resolve_search_profile
+from lib.search.search_profiles import resolve_search_profile
 
 pytestmark = pytest.mark.unit
 

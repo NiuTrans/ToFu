@@ -10,7 +10,7 @@ import uuid
 
 import pytest
 
-from lib.task_replay import project_bounded_replay_payload
+from lib.task_replay.task_replay import project_bounded_replay_payload
 from tests.support.envelope import v1_get_json
 from lib.tasks_pkg.durable_chat_replay import (
     load_durable_chat_replay,
@@ -31,6 +31,7 @@ def _seed_task(
     thinking: str = 'durable reasoning',
     error=None,
     event_sequences=(3, 9, 12),
+    metadata_overrides=None,
 ):
     from lib.storage import get_storage_client
 
@@ -47,6 +48,7 @@ def _seed_task(
         'turnId': 'private-turn',
         'affinityKey': 'private-affinity',
     }
+    metadata.update(metadata_overrides or {})
     value = {
         'task_id': task_id,
         'conv_id': 'conv-cold',
@@ -217,6 +219,56 @@ def test_swarm_child_access_reuses_positive_parent_owner(chat_sidecar):
         f'{task_id}#agent:research', user_id=11)
     assert not persisted_chat_task_owner_matches(
         f'{task_id}#agent:research', user_id=12)
+
+
+def test_explicit_durable_view_bypasses_hot_state_without_evicting_it(chat_sidecar, monkeypatch):
+    import routes.api_v1.tasks as tasks_mod
+    task_id, _ = _seed_task(user_id=1, event_sequences=(0, 7, 19))
+    app = _tasks_app(monkeypatch)
+    hot = {'id': task_id, 'kind': 'chat', 'status': 'running', 'content': 'not committed'}
+    monkeypatch.setattr(tasks_mod, '_find_task', lambda key, user_id:
+        (None, hot, False) if user_id == 1 else (None, None, True))
+
+    async def exercise():
+        client = app.test_client()
+        live = await v1_get_json(await client.get(f'/api/v4/tasks/{task_id}'))
+        durable = await v1_get_json(await client.get(f'/api/v4/tasks/{task_id}?view=durable'))
+        events = await v1_get_json(await client.get(f'/api/v4/tasks/{task_id}/events?view=durable&cursor=0'))
+        denied = await client.get(f'/api/v4/tasks/{task_id}?view=durable', headers={'X-Test-User': '2'})
+        return live, durable, events, denied.status_code
+
+    live, durable, events, denied = asyncio.run(exercise())
+    assert live['readSource'] == 'live' and live['content'] == 'not committed'
+    assert durable['readSource'] == 'durable' and durable['content'] == 'durable answer'
+    assert durable['status'] == 'done'
+    assert events['next_cursor'] == 20
+    assert [event['seq'] for event in events['events']] == [0, 7, 19]
+    assert denied == 404
+    assert hot['content'] == 'not committed' and hot['status'] == 'running'
+
+
+@pytest.mark.parametrize('suffix', ['', '/events'])
+def test_durable_view_does_not_fall_back_to_uncommitted_live_task(chat_sidecar, monkeypatch, suffix):
+    import routes.api_v1.tasks as tasks_mod
+    app = _tasks_app(monkeypatch)
+    hot = {'id': 'uncommitted-task', 'kind': 'chat', 'status': 'done', 'content': 'live only'}
+    monkeypatch.setattr(tasks_mod, '_find_task', lambda key, user_id: (None, hot, False))
+
+    async def exercise():
+        return await app.test_client().get('/api/v4/tasks/uncommitted-task' + suffix + '?view=durable')
+
+    assert asyncio.run(exercise()).status_code == 404
+
+
+@pytest.mark.parametrize('query', ['view=unknown', 'view=durable&view=current'])
+@pytest.mark.parametrize('suffix', ['', '/events'])
+def test_task_view_is_a_single_closed_query_value(monkeypatch, query, suffix):
+    app = _tasks_app(monkeypatch)
+
+    async def exercise():
+        return await app.test_client().get('/api/v4/tasks/test-task' + suffix + '?' + query)
+
+    assert asyncio.run(exercise()).status_code == 400
 
 
 def test_generic_task_api_replays_after_hot_registry_eviction(

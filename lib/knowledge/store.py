@@ -16,12 +16,14 @@ from pathlib import Path
 
 from lib.identity import require_user_id
 from lib.log import get_logger
-from lib.runtime_paths import data_root
+from lib.runtime.runtime_paths import data_root
 
 from .asset_spool import close_extracted_assets
 from .assets import proxy_text
 from .chunking import chunk_document
-from .ingest import KnowledgeIngestError, detect_kind, extract
+from .file_durability import prepare_directory, sync_publication_directories
+from .ingest import HtmlProjector, KnowledgeIngestError, detect_kind, extract
+from .publication import KnowledgePublicationAttempt
 
 logger = get_logger(__name__)
 
@@ -30,16 +32,31 @@ _SOURCE_ROOT_OVERRIDE: str | None = None  # tests only
 _ASSET_ROOT_OVERRIDE: str | None = None  # tests only
 
 
-def _source_root(user_id: int) -> Path:
-    base = (Path(_SOURCE_ROOT_OVERRIDE) if _SOURCE_ROOT_OVERRIDE
+def _source_base() -> Path:
+    return (Path(_SOURCE_ROOT_OVERRIDE) if _SOURCE_ROOT_OVERRIDE
             else Path(data_root()) / 'knowledge-files')
-    return base / str(require_user_id(user_id, context='knowledge source owner')) / 'sources'
+
+
+def _asset_base() -> Path:
+    return (Path(_ASSET_ROOT_OVERRIDE) if _ASSET_ROOT_OVERRIDE
+            else Path(data_root()) / 'knowledge-files')
+
+
+def _source_root(user_id: int) -> Path:
+    return _source_base() / str(require_user_id(user_id, context='knowledge source owner')) / 'sources'
 
 
 def _asset_root(user_id: int) -> Path:
-    base = (Path(_ASSET_ROOT_OVERRIDE) if _ASSET_ROOT_OVERRIDE
-            else Path(data_root()) / 'knowledge-files')
-    return base / str(require_user_id(user_id, context='knowledge asset owner')) / 'assets'
+    return _asset_base() / str(require_user_id(user_id, context='knowledge asset owner')) / 'assets'
+
+
+def _sync_publication_directories(*, user_id: int, source: bool, assets: bool) -> None:
+    roots = []
+    if source:
+        roots.append((_source_root(user_id), _source_base().parent))
+    if assets:
+        roots.append((_asset_root(user_id), _asset_base().parent))
+    sync_publication_directories(roots)
 
 
 def _repository(user_id: int):
@@ -79,25 +96,11 @@ def _public_document(document: dict) -> dict:
 # skip them instead of failing the whole ingest.
 _MAX_TERM_CHARS = 128
 
-# Mirrors the tofu-db authority contract (contracts/tofudb_ir_v1.json
-# maximumEntityTransactionWrites; generated MAX_ENTITY_TRANSACTION_WRITES).
-# One knowledge.document.create/replace executes as ONE authority transaction:
-# document/digest/owner/settings rows, one record plus one ordinal-index write
-# per asset (+1 per enrichment-queue insert), one record per chunk, two writes
-# per chunk asset reference, and one write per derived search term. A document
-# whose aggregate footprint would exceed that per-transaction budget is trimmed
-# to fit (see _trim_index_write_footprint) instead of failing the whole ingest
-# with an opaque database_protocol_error.
-_MAX_INDEX_TRANSACTION_WRITES = 14_336
-# Headroom above the exactly-computed per-document overhead so minor contract
-# drift never reopens the rejection boundary.
-_INDEX_WRITE_RESERVE = 64
-
 _CJK_RE = re.compile(r'[\u3400-\u4dbf\u4e00-\u9fff]+')
 _WORD_RE = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.+/#-]*')
 
 
-def search_tokens(text: str, *, cap: int = 256) -> list[str]:
+def search_tokens(text: str, *, cap: int | None = None) -> list[str]:
     """Language-agnostic FTS tokens, including CJK bi/tri-grams."""
     tokens: list[str] = []
     seen: set[str] = set()
@@ -105,7 +108,7 @@ def search_tokens(text: str, *, cap: int = 256) -> list[str]:
     def add(value: str) -> None:
         value = value.strip().lower()
         if (value and len(value) <= _MAX_TERM_CHARS
-                and value not in seen and len(tokens) < cap):
+                and value not in seen and (cap is None or len(tokens) < cap)):
             seen.add(value)
             tokens.append(value)
 
@@ -127,7 +130,7 @@ def search_tokens(text: str, *, cap: int = 256) -> list[str]:
 
 
 def _index_text(
-    name: str, section: str, content: str, *, cap: int = 256
+    name: str, section: str, content: str, *, cap: int | None = None
 ) -> str:
     # Repeat high-signal metadata once. The search body is tokenized rather
     # than indexed verbatim so retrieval is deterministic across backends.
@@ -285,34 +288,31 @@ def _safe_source_name(digest: str, kind: str, document_id: str) -> str:
 
 def _write_source(raw: bytes, stored_name: str, *, user_id: int) -> Path:
     source_root = _source_root(user_id)
-    source_root.mkdir(parents=True, exist_ok=True)
-    final_path = source_root / stored_name
-    temp_path = source_root / f'.{stored_name}.{uuid.uuid4().hex}.tmp'
-    try:
-        with open(temp_path, 'wb') as handle:
-            handle.write(raw)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temp_path, final_path)
-        return final_path
-    finally:
-        temp_path.unlink(missing_ok=True)
+    prepare_directory(source_root, anchor=_source_base().parent)
+    return _write_candidate_file(raw, source_root / stored_name)
 
 
 def _write_asset(raw: bytes, stored_name: str, *, user_id: int) -> Path:
     asset_root = _asset_root(user_id)
-    asset_root.mkdir(parents=True, exist_ok=True)
-    final_path = asset_root / stored_name
-    temp_path = asset_root / f'.{stored_name}.{uuid.uuid4().hex}.tmp'
+    prepare_directory(asset_root, anchor=_asset_base().parent)
+    return _write_candidate_file(raw, asset_root / stored_name)
+
+
+def _write_candidate_file(raw: bytes, final_path: Path) -> Path:
+    """Own a temporary file until rename transfers its bytes to the final path."""
+    temp_path = final_path.with_name(f'.{final_path.name}.{uuid.uuid4().hex}.tmp')
     try:
         with open(temp_path, 'wb') as handle:
             handle.write(raw)
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temp_path, final_path)
-        return final_path
-    finally:
-        temp_path.unlink(missing_ok=True)
+    except BaseException as failure:
+        _cleanup_candidate_files([temp_path], reason='temporary write rollback', failure=failure)
+        raise
+    # Successful rename consumed the temporary name; no cleanup can fail
+    # between that transfer and returning ownership to the caller.
+    return final_path
 
 
 def _unlink_files(paths: list[Path], *, reason: str) -> None:
@@ -324,6 +324,32 @@ def _unlink_files(paths: list[Path], *, reason: str) -> None:
                            reason, path.name, exc)
 
 
+def _rollback_publication_files(paths: list[Path], publication: KnowledgePublicationAttempt,
+                                *, reason: str, failure: BaseException) -> None:
+    if not publication.rollback_safe:
+        failure.add_note('Knowledge candidate files retained: storage publication outcome is unconfirmed')
+        logger.warning('[Knowledge] %s outcome unconfirmed; retaining %d candidate files',
+                       reason, len(paths))
+        return
+    _cleanup_candidate_files(paths, reason=reason, failure=failure)
+
+
+def _cleanup_candidate_files(paths: list[Path], *, reason: str, failure: BaseException) -> None:
+    """Attempt every unpublished file without replacing its owner's failure."""
+    for path in paths:
+        try:
+            _unlink_files([path], reason=reason)
+        except BaseException as cleanup:
+            failure.add_note('Knowledge candidate cleanup also failed: ' + type(cleanup).__name__)
+
+
+def _close_extracted_assets_after_failure(parsed: dict, failure: BaseException) -> None:
+    try:
+        close_extracted_assets(parsed)
+    except BaseException as cleanup:
+        failure.add_note('Knowledge extracted asset cleanup also failed: ' + type(cleanup).__name__)
+
+
 def _indexed_chunks(display_name: str, chunks: list[dict]) -> list[dict]:
     return [
         {
@@ -333,77 +359,11 @@ def _indexed_chunks(display_name: str, chunks: list[dict]) -> list[dict]:
             'content': chunk['content'],
             'search_text': _index_text(
                 display_name, chunk.get('section', ''), chunk['content'],
-                cap=int(chunk.get('search_cap') or 256)),
+                cap=None),
             'assets': list(chunk.get('assets') or []),
         }
         for chunk in chunks
     ]
-
-
-def _index_write_overhead(indexed_chunks: list[dict], assets: list[dict]) -> int:
-    """Exact non-term entity writes of one document insert transaction."""
-    queued = sum(
-        1 for asset in assets
-        if str(asset.get('enrichment_status') or '') in ('pending', 'running'))
-    references = sum(
-        len(chunk.get('assets') or []) for chunk in indexed_chunks)
-    # document + digest + owner-index + settings rows; asset record + ordinal
-    # index (+ queue insert when queued); chunk record; link + reverse per ref.
-    return 4 + 2 * len(assets) + queued + len(indexed_chunks) + 2 * references
-
-
-def _trim_index_write_footprint(
-    indexed_chunks: list[dict], assets: list[dict],
-) -> int:
-    """Bound one document's term postings to the authority write budget.
-
-    Returns the number of search terms dropped (0 when the document already
-    fits). Trimming scales every chunk's token list proportionally and never
-    empties a chunk's search_text (the authority requires non-empty text).
-    """
-    tokens_per_chunk = [
-        str(chunk.get('search_text') or '').split()
-        for chunk in indexed_chunks
-    ]
-    budget = (_MAX_INDEX_TRANSACTION_WRITES - _INDEX_WRITE_RESERVE
-              - _index_write_overhead(indexed_chunks, assets))
-    if budget < len(tokens_per_chunk):
-        raise KnowledgeIngestError(
-            'The document is too large to index within one storage transaction')
-    total = sum(len(tokens) for tokens in tokens_per_chunk)
-    if total <= budget:
-        return 0
-    scale = budget / total
-    keep = [max(1, int(len(tokens) * scale)) for tokens in tokens_per_chunk]
-    overflow = sum(keep) - budget
-    while overflow > 0:
-        widest = max(range(len(keep)), key=lambda index: keep[index])
-        if keep[widest] <= 1:
-            break  # unreachable while budget >= len(keep); defensive
-        reduction = min(overflow, keep[widest] - 1)
-        keep[widest] -= reduction
-        overflow -= reduction
-    for chunk, tokens, count in zip(indexed_chunks, tokens_per_chunk, keep):
-        if count < len(tokens):
-            chunk['search_text'] = ' '.join(tokens[:count])
-    return total - sum(keep)
-
-
-def _trimmed_index_chunks(
-    display_name: str, chunks: list[dict], assets: list[dict],
-    warnings: list,
-) -> list[dict]:
-    """Index chunks and fit the storage write budget in one step."""
-    indexed_chunks = _indexed_chunks(display_name, chunks)
-    trimmed_terms = _trim_index_write_footprint(indexed_chunks, assets)
-    if trimmed_terms:
-        warnings.append(
-            f'Index trimmed by {trimmed_terms} search terms to fit the '
-            'storage write budget')
-        logger.info(
-            '[Knowledge] trimmed %d search terms from %s to fit the '
-            'authority write budget', trimmed_terms, display_name)
-    return indexed_chunks
 
 
 def _prepare_visual_index(
@@ -419,10 +379,10 @@ def _prepare_visual_index(
     """Write immutable assets and add one primary searchable proxy per asset."""
     rows: list[dict] = []
     paths: list[Path] = []
-    enrich_visuals = (
-        scope in {'library', 'shared'}
-        and visual_enrichment_enabled(user_id=user_id))
     try:
+        enrich_visuals = (
+            scope in {'library', 'shared'}
+            and visual_enrichment_enabled(user_id=user_id))
         for ordinal, extracted in enumerate(parsed.get('assets') or []):
             raw = extracted.get('raw')
             if not isinstance(raw, (bytes, bytearray)) or not raw:
@@ -469,15 +429,19 @@ def _prepare_visual_index(
                 # Visual proxies can contain a full page of OCR/context. Keep
                 # enough CJK bigrams to make terms throughout a normal page
                 # retrievable rather than indexing only its first paragraph.
-                'search_cap': 4096,
                 'assets': [{'id': asset_id, 'relation': 'primary'}],
             })
-    except BaseException:
-        _unlink_files(paths, reason='visual index rollback')
+        result = chunks, rows, paths
+    except BaseException as failure:
+        _cleanup_candidate_files(paths, reason='visual index rollback', failure=failure)
+        _close_extracted_assets_after_failure(parsed, failure)
         raise
-    finally:
+    try:
         close_extracted_assets(parsed)
-    return chunks, rows, paths
+    except BaseException as failure:
+        _cleanup_candidate_files(paths, reason='visual close rollback', failure=failure)
+        raise
+    return result
 
 
 def _reserve_pdf_pipeline(raw: bytes, display_name: str):
@@ -503,77 +467,66 @@ def _index_new_document(
     scope: str,
     repository,
     pdf_already_admitted: bool,
+    html_projector: HtmlProjector | None = None,
 ) -> dict:
     """Parse and atomically persist one digest-miss under caller admission."""
     document_id = uuid.uuid4().hex
+    publication = KnowledgePublicationAttempt()
+    final_path = None
+    options = {'html_projector': html_projector} if html_projector is not None else {}
     if pdf_already_admitted:
-        parsed = extract(
-            raw, display_name, _pdf_already_admitted=True)
-    else:
-        parsed = extract(raw, display_name)
+        options['_pdf_already_admitted'] = True
+    parsed = extract(raw, display_name, **options)
     try:
         chunks = chunk_document(parsed['text']) if parsed['text'].strip() else []
         now = time.time()
-        chunks, assets, asset_paths = _prepare_visual_index(
-            display_name, parsed, document_id, now, chunks,
-            user_id=user_id, scope=scope)
-    except BaseException:
-        close_extracted_assets(parsed)
+    except BaseException as failure:
+        _close_extracted_assets_after_failure(parsed, failure)
         raise
-    if not chunks:
-        raise KnowledgeIngestError('The document produced no searchable evidence')
-
-    warnings = list(parsed.get('warnings') or [])
+    chunks, assets, asset_paths = _prepare_visual_index(
+        display_name, parsed, document_id, now, chunks,
+        user_id=user_id, scope=scope)
     try:
-        indexed_chunks = _trimmed_index_chunks(display_name, chunks, assets, warnings)
-    except BaseException:
-        _unlink_files(asset_paths, reason='index budget rollback')
-        raise
-    stored_name = _safe_source_name(digest, parsed['kind'], document_id)
-    try:
+        if not chunks:
+            raise KnowledgeIngestError('The document produced no searchable evidence')
+        warnings = list(parsed.get('warnings') or [])
+        indexed_chunks = _indexed_chunks(display_name, chunks)
+        stored_name = _safe_source_name(digest, parsed['kind'], document_id)
         final_path = _write_source(raw, stored_name, user_id=user_id)
-    except BaseException:
-        _unlink_files(asset_paths, reason='source write rollback')
-        raise
-    document = {
-        'id': document_id,
-        'sha256': digest,
-        'name': display_name,
-        'stored_name': stored_name,
-        'kind': parsed['kind'],
-        'size_bytes': len(raw),
-        'method': parsed['method'],
-        'warnings_json': json.dumps(warnings, ensure_ascii=False),
-        'text_chars': len(parsed['text']),
-        'chunk_count': len(chunks),
-        'pages': int(parsed.get('pages') or 0),
-        'scope': scope,
-        'media_metadata_json': json.dumps({
-            'media_kind': 'document',
-            'status': 'ready',
-        }, separators=(',', ':')),
-        'created_at': now,
-        'updated_at': now,
-    }
-
-    try:
-        document = {**document, 'chunks': indexed_chunks, 'assets': assets}
+        document = {
+            'id': document_id,
+            'sha256': digest,
+            'name': display_name,
+            'stored_name': stored_name,
+            'kind': parsed['kind'],
+            'size_bytes': len(raw),
+            'method': parsed['method'],
+            'warnings_json': json.dumps(warnings, ensure_ascii=False),
+            'text_chars': len(parsed['text']),
+            'chunk_count': len(chunks),
+            'pages': int(parsed.get('pages') or 0),
+            'scope': scope,
+            'media_metadata_json': json.dumps({
+                'media_kind': 'document',
+                'status': 'ready',
+            }, separators=(',', ':')),
+            'created_at': now,
+            'updated_at': now,
+            'chunks': indexed_chunks,
+            'assets': assets,
+        }
+        _sync_publication_directories(user_id=user_id, source=True, assets=bool(asset_paths))
         row, inserted = repository.create_document(
             document,
             command_id=_mutation_command_id(
                 'knowledge.document.create', user_id=user_id,
                 command_id=command_id),
+            publication=publication,
         )
-    except BaseException:
-        # Every candidate owns a unique source path, so its rollback cleanup
-        # can never unlink another process's successfully indexed document.
-        try:
-            final_path.unlink(missing_ok=True)
-        except OSError as cleanup_exc:
-            logger.warning(
-                '[Knowledge] failed to clean source after index error: %s',
-                cleanup_exc)
-        _unlink_files(asset_paths, reason='failed index')
+    except BaseException as failure:
+        candidates = [final_path, *asset_paths] if final_path is not None else asset_paths
+        _rollback_publication_files(candidates, publication,
+                                    reason='failed index', failure=failure)
         raise
 
     if not inserted:
@@ -618,6 +571,7 @@ def add_document(
     raw: bytes, filename: str, *, user_id: int,
     command_id: str | None = None,
     scope: str = 'library',
+    html_projector: HtmlProjector | None = None,
 ) -> dict:
     """Parse, chunk, persist and atomically index one uploaded document."""
     if not raw:
@@ -663,6 +617,7 @@ def add_document(
             scope=scope,
             repository=repository,
             pdf_already_admitted=pdf_lease is not None,
+            html_projector=html_projector,
         )
     finally:
         if pdf_lease is not None:
@@ -692,54 +647,52 @@ def _replace_document_index(
     command_id: str | None,
     repository,
     pdf_already_admitted: bool,
+    html_projector: HtmlProjector | None = None,
 ) -> dict | None:
     """Build and atomically publish one replacement parser projection."""
+    publication = KnowledgePublicationAttempt()
+    options = {'html_projector': html_projector} if html_projector is not None else {}
     if pdf_already_admitted:
-        parsed = extract(
-            raw, display_name, _pdf_already_admitted=True)
-    else:
-        parsed = extract(raw, display_name)
+        options['_pdf_already_admitted'] = True
+    parsed = extract(raw, display_name, **options)
     try:
         chunks = chunk_document(parsed['text']) if parsed['text'].strip() else []
         now = time.time()
-        chunks, assets, asset_paths = _prepare_visual_index(
-            display_name, parsed, document_id, now, chunks,
-            user_id=user_id, scope=str(row.get('scope') or 'library'))
-    except BaseException:
-        close_extracted_assets(parsed)
+        scope = str(row.get('scope') or 'library')
+    except BaseException as failure:
+        _close_extracted_assets_after_failure(parsed, failure)
         raise
-    if not chunks:
-        raise KnowledgeIngestError('The document produced no searchable evidence')
-    warnings = list(parsed.get('warnings') or [])
+    chunks, assets, asset_paths = _prepare_visual_index(
+        display_name, parsed, document_id, now, chunks,
+        user_id=user_id, scope=scope)
     try:
-        indexed_chunks = _trimmed_index_chunks(display_name, chunks, assets, warnings)
-    except BaseException:
-        _unlink_files(asset_paths, reason='index budget rollback')
-        raise
-    metadata = {
-        'kind': parsed['kind'],
-        'method': parsed['method'],
-        'warnings_json': json.dumps(warnings, ensure_ascii=False),
-        'text_chars': len(parsed['text']),
-        'chunk_count': len(chunks),
-        'pages': int(parsed.get('pages') or 0),
-        'updated_at': now,
-    }
-    try:
+        if not chunks:
+            raise KnowledgeIngestError('The document produced no searchable evidence')
+        warnings = list(parsed.get('warnings') or [])
+        indexed_chunks = _indexed_chunks(display_name, chunks)
         replacement = {
             **row,
-            **metadata,
+            'kind': parsed['kind'],
+            'method': parsed['method'],
+            'warnings_json': json.dumps(warnings, ensure_ascii=False),
+            'text_chars': len(parsed['text']),
+            'chunk_count': len(chunks),
+            'pages': int(parsed.get('pages') or 0),
+            'updated_at': now,
             'chunks': indexed_chunks,
             'assets': assets,
         }
+        _sync_publication_directories(user_id=user_id, source=False, assets=bool(asset_paths))
         updated = repository.replace_document(
             replacement,
             command_id=_mutation_command_id(
                 'knowledge.document.replace', user_id=user_id,
                 command_id=command_id),
+            publication=publication,
         )
-    except BaseException:
-        _unlink_files(asset_paths, reason='reindex rollback')
+    except BaseException as failure:
+        _rollback_publication_files(asset_paths, publication,
+                                    reason='reindex rollback', failure=failure)
         raise
     if updated is None:
         _unlink_files(asset_paths, reason='vanished reindex candidate')
@@ -766,6 +719,7 @@ def _replace_document_index(
 
 def reindex_document(
     document_id: str, *, user_id: int, command_id: str | None = None,
+    html_projector: HtmlProjector | None = None,
 ) -> dict | None:
     """Re-run the current parser over an immutable stored source.
 
@@ -800,6 +754,7 @@ def reindex_document(
             command_id=command_id,
             repository=repository,
             pdf_already_admitted=pdf_lease is not None,
+            html_projector=html_projector,
         )
     finally:
         if pdf_lease is not None:
@@ -926,11 +881,12 @@ def create_media_source(
 
     owner_user_id = require_user_id(user_id, context='media source owner')
     target_root = _source_root(owner_user_id)
-    target_root.mkdir(parents=True, exist_ok=True)
+    prepare_directory(target_root, anchor=_source_base().parent)
     document_id = uuid.uuid4().hex
     temporary = target_root / f'.{document_id}.{uuid.uuid4().hex}.tmp'
     digest_builder = hashlib.sha256()
     size_bytes = 0
+    operation_failure: BaseException | None = None
     try:
         with open(source, 'rb') as input_handle, open(temporary, 'wb') as output_handle:
             while True:
@@ -964,39 +920,44 @@ def create_media_source(
 
         stored_name = _safe_source_name(digest, kind, document_id)
         final_path = target_root / stored_name
-        os.replace(temporary, final_path)
-        now = time.time()
-        metadata = dict(media_metadata or {})
-        metadata.setdefault('status', 'processing')
-        document = {
-            'id': document_id,
-            'sha256': digest,
-            'name': display_name,
-            'stored_name': stored_name,
-            'kind': kind,
-            'size_bytes': size_bytes,
-            'method': 'media_pipeline',
-            'warnings_json': '[]',
-            'text_chars': 0,
-            'chunk_count': 0,
-            'pages': 0,
-            'scope': scope,
-            'media_metadata_json': json.dumps(
-                metadata, ensure_ascii=False, separators=(',', ':')),
-            'created_at': now,
-            'updated_at': now,
-            'chunks': [],
-            'assets': [],
-        }
+        publication = KnowledgePublicationAttempt()
         try:
+            os.replace(temporary, final_path)
+            temporary = None
+            now = time.time()
+            metadata = dict(media_metadata or {})
+            metadata.setdefault('status', 'processing')
+            document = {
+                'id': document_id,
+                'sha256': digest,
+                'name': display_name,
+                'stored_name': stored_name,
+                'kind': kind,
+                'size_bytes': size_bytes,
+                'method': 'media_pipeline',
+                'warnings_json': '[]',
+                'text_chars': 0,
+                'chunk_count': 0,
+                'pages': 0,
+                'scope': scope,
+                'media_metadata_json': json.dumps(
+                    metadata, ensure_ascii=False, separators=(',', ':')),
+                'created_at': now,
+                'updated_at': now,
+                'chunks': [],
+                'assets': [],
+            }
+            _sync_publication_directories(user_id=owner_user_id, source=True, assets=False)
             row, inserted = repository.create_document(
                 document,
                 command_id=_mutation_command_id(
                     'knowledge.document.media.create', user_id=owner_user_id,
                     command_id=command_id),
+                publication=publication,
             )
-        except BaseException:
-            final_path.unlink(missing_ok=True)
+        except BaseException as failure:
+            _rollback_publication_files([final_path], publication,
+                                        reason='media source rollback', failure=failure)
             raise
         if not inserted:
             final_path.unlink(missing_ok=True)
@@ -1013,8 +974,16 @@ def create_media_source(
         result = _row_to_document(row)
         result['duplicate'] = not inserted
         return result
+    except BaseException as failure:
+        operation_failure = failure
+        raise
     finally:
-        temporary.unlink(missing_ok=True)
+        if temporary is not None:
+            if operation_failure is None:
+                temporary.unlink(missing_ok=True)
+            else:
+                _cleanup_candidate_files([temporary], reason='media temporary rollback',
+                                         failure=operation_failure)
 
 
 def replace_media_evidence(
@@ -1022,8 +991,6 @@ def replace_media_evidence(
     media_metadata: dict, user_id: int, command_id: str | None = None,
 ) -> dict | None:
     """Atomically replace derived evidence while preserving the original."""
-    if len(assets) > 200:
-        raise ValueError('media evidence is limited to 200 assets')
     repository = _repository(user_id)
     current = repository.document(str(document_id or ''))
     if current is None:
@@ -1034,6 +1001,7 @@ def replace_media_evidence(
     now = time.time()
     rows: list[dict] = []
     written_paths: list[Path] = []
+    publication = KnowledgePublicationAttempt()
     try:
         for ordinal, candidate in enumerate(assets):
             raw = candidate.get('raw')
@@ -1089,12 +1057,10 @@ def replace_media_evidence(
                 'location': str(candidate.get('location') or ''),
                 'content': str(candidate.get('content') or ''),
                 'assets': refs,
-                'search_cap': int(candidate.get('search_cap') or 4096),
             })
         warnings = list(media_metadata.get('warnings') or [])
-        indexed_chunks = _trimmed_index_chunks(
-            str(current.get('name') or 'media'), normalized_chunks, rows,
-            warnings)
+        indexed_chunks = _indexed_chunks(
+            str(current.get('name') or 'media'), normalized_chunks)
         final_media_metadata = dict(media_metadata or {})
         if rows:
             final_media_metadata.setdefault('poster_asset_id', rows[0]['id'])
@@ -1111,14 +1077,17 @@ def replace_media_evidence(
             'chunks': indexed_chunks,
             'assets': rows,
         }
+        _sync_publication_directories(user_id=user_id, source=False, assets=bool(written_paths))
         updated = repository.replace_document(
             replacement,
             command_id=_mutation_command_id(
                 'knowledge.document.media.replace', user_id=user_id,
                 command_id=command_id),
+            publication=publication,
         )
-    except BaseException:
-        _unlink_files(written_paths, reason='media evidence rollback')
+    except BaseException as failure:
+        _rollback_publication_files(written_paths, publication,
+                                    reason='media evidence rollback', failure=failure)
         raise
     if updated is None:
         _unlink_files(written_paths, reason='vanished media evidence')

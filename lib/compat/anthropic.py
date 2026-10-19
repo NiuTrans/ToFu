@@ -172,7 +172,7 @@ async def stream_anthropic_chunks(task, model: str
     thinking_block_open = False
     block_index = 0
     task_id = task.get('id') or ''
-    from lib.task_replay import task_memory_replay_page
+    from lib.task_replay.task_replay import task_memory_replay_page
 
     def _evt(name: str, data: dict) -> str:
         return f'event: {name}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n'

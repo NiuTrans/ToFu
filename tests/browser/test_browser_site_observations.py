@@ -236,8 +236,8 @@ def test_adapter_promotion_requires_stability_and_measured_hint_reuse():
 
 
 def test_schema_58_migration_is_restart_safe(tmp_path: Path):
-    from lib.storage_sidecar.adapters.sqlite import SQLiteSession
-    from lib.storage_sidecar.schema import SCHEMA_VERSION, initialize_schema
+    from lib.storage_authority_sql.adapters.sqlite import SQLiteSession
+    from lib.storage_authority_sql.schema import SCHEMA_VERSION, initialize_schema
 
     connection = sqlite3.connect(tmp_path / "schema-v57.db")
     connection.row_factory = sqlite3.Row

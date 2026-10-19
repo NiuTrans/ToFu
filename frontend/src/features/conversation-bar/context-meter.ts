@@ -1,5 +1,7 @@
 /** Context usage presentation only; accounting and compaction commands stay in the runtime adapter. */
 import { createAnchoredDisclosure, positionDisclosure } from './disclosure';
+import { createAlert, createButton } from '../../ui';
+import type { WorkingFactsPorts } from '../working-facts/ports';
 
 export interface ContextMeterSnapshot {
   used: number;
@@ -23,6 +25,7 @@ export interface ContextMeterOptions {
   read: () => ContextMeterSnapshot;
   onCompact: (convId: string) => void;
   onHistory: (convId: string) => void;
+  workingFacts?: WorkingFactsPorts;
 }
 
 export function createContextMeter(options: ContextMeterOptions) {
@@ -75,11 +78,32 @@ export function createContextMeter(options: ContextMeterOptions) {
     return node;
   };
   const compact = button('ctx-pop-compact');
+  const facts = createButton({ label: tt('workingFacts.title', 'Current basis'), variant: 'ghost', size: 'sm',
+    onClick: () => void openFacts() }, doc);
+  facts.dataset.openWorkingFacts = ''; panel.append(facts);
+  const factsError = doc.createElement('div'); panel.append(factsError);
   const history = button('ctx-pop-history');
   const close = button('ctx-pop-close');
   const disclosure = createAnchoredDisclosure({ anchor: el, panel, onClose: () => el.setAttribute('aria-expanded', 'false') });
   let current: ContextMeterSnapshot;
   let disposed = false;
+  let factsGeneration = 0, closeFacts: (() => void) | null = null;
+  function retireFacts() { factsGeneration++; closeFacts?.(); closeFacts = null; factsError.replaceChildren(); }
+  async function openFacts() {
+    const id = options.read().convId, ports = options.workingFacts;
+    if (!id || !ports || disposed) return;
+    retireFacts(); const generation = factsGeneration; facts.disabled = true;
+    try {
+      const feature = await import('../working-facts/dialog');
+      if (disposed || generation !== factsGeneration || options.read().convId !== id) return;
+      disclosure.close(true); closeFacts = feature.openWorkingFacts(id, ports, tt);
+    } catch (cause) {
+      if (!disposed && generation === factsGeneration) factsError.replaceChildren(createAlert({ variant: 'error',
+        title: tt('workingFacts.loadError', 'Facts could not be loaded'), body: String(cause) }).el);
+    } finally {
+      if (!disposed && generation === factsGeneration) facts.disabled = !options.read().convId;
+    }
+  }
   let live: { el: HTMLElement; body: HTMLElement; text: string; convId: string } | null = null;
   const text = (node: HTMLElement, value: string) => { if (node.textContent !== value) node.textContent = value; };
   const format = (n: number) => n >= 1_000_000 ? (n / 1_000_000).toFixed(n >= 10_000_000 ? 0 : 1) + 'M'
@@ -89,8 +113,10 @@ export function createContextMeter(options: ContextMeterOptions) {
     if (disposed) return;
     const compacting = Boolean(snapshot.compacting);
     if (compacting) el.dataset.compacting = '1'; else delete el.dataset.compacting;
-    if (current && current.convId !== snapshot.convId) { disclosure.close(false); closeLiveSummary(); }
+    if (current && current.convId !== snapshot.convId) { disclosure.close(false); closeLiveSummary(); retireFacts(); }
     current = snapshot;
+    facts.textContent = tt('workingFacts.title', 'Current basis');
+    facts.hidden = !options.workingFacts; facts.disabled = !snapshot.convId;
     const context = tt('conversationBar.context', 'Context');
     const unknown = tt('conversationBar.unknown', 'Unknown');
     const estimated = tt('conversationBar.estimated', 'Estimated');
@@ -168,6 +194,6 @@ export function createContextMeter(options: ContextMeterOptions) {
       live.body.scrollTop = live.body.scrollHeight;
     },
     closeLiveSummary,
-    destroy() { disposed = true; disclosure.destroy(); closeLiveSummary(); el.removeEventListener('click', toggle); el.remove(); },
+    destroy() { disposed = true; retireFacts(); disclosure.destroy(); closeLiveSummary(); el.removeEventListener('click', toggle); el.remove(); },
   };
 }

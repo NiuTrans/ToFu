@@ -8,7 +8,7 @@
   "catalog_mode": "curated",
   "catalog_source": {"url": "https://docs.mistral.ai/models", "checked_at": "2026-10-08"},
   "offering_recipes": [
-    {"model_id": "mistral-large-4-0", "capabilities": ["text", "vision", "thinking"], "context_window": 1000000, "rpm": 30},
+    {"model_id": "mistral-large-4-0", "capabilities": ["text", "vision", "thinking", "cheap"], "context_window": 1000000, "rpm": 30},
     {"model_id": "mistral-large-latest", "capabilities": ["text", "vision", "cheap"], "rpm": 60},
     {"model_id": "mistral-small-latest", "capabilities": ["text", "vision", "thinking", "cheap"], "rpm": 120},
     {"model_id": "mistral-medium-latest", "capabilities": ["text", "vision"], "rpm": 60},

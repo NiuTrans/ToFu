@@ -89,6 +89,4 @@ def admitted_queue(program, proposal, *, failed_index=None):
         if failed_index is not None:
             successor['failed_candidate_index'] = deepcopy(failed_index)
         queue[0] = successor
-    if len(queue) + len(proposal['steps']) > 32:
-        raise EvolutionStateError('replan_frontier_full; settle or reduce follow-ups')
     return deepcopy(proposal['steps']) + queue

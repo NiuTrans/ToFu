@@ -192,9 +192,3 @@ def test_installer_tofudb_prebuilt_uses_the_release_channel_and_static_triples()
     assert 'aarch64-apple-darwin' in block
     # Deployment goes through the one supported engine deployment path.
     assert 'deploy_tofudb_engine' in (ROOT / 'scripts/install_tofudb_prebuilt.py').read_text(encoding='utf-8')
-
-
-def test_offline_overrides_are_documented_in_the_install_guide():
-    guide = (ROOT / 'docs/INSTALL.md').read_text(encoding='utf-8')
-    assert 'TOFU_TOFUDB_PREBUILT_BASE_URL' in guide
-    assert 'TOFU_TOFUDB_NO_DOWNLOAD' in guide

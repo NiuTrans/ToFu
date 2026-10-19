@@ -152,7 +152,7 @@ def test_exact_catalog_facts_activate_stored_draft_without_search(monkeypatch):
 
 def test_openai_documentation_hosts_and_sol_reference_price_are_exact():
     assert 'developers.openai.com' in research._official_domains(empty_document(), {'creator_id': 'openai'})
-    from lib.provider_template_recipes import compile_provider_template_bundle
+    from lib.provider.provider_template_recipes import compile_provider_template_bundle
     bundle = compile_provider_template_bundle('openai', selected_model_ids=['gpt-6.1-sol'])
     doc = empty_document()
     doc['creators'] = bundle['creators']

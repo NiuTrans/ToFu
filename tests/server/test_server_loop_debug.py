@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from lib.server_loop_debug import LoopDebugGuard, SlowCallbackRateLimit
+from lib.server.server_loop_debug import LoopDebugGuard, SlowCallbackRateLimit
 
 
 pytestmark = pytest.mark.unit

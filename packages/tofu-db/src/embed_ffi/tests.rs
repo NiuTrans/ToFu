@@ -1,9 +1,11 @@
 //! FFI hardening tests: panic containment, handle poisoning, the execute
-//! watchdog, and the request envelope cap. The worker-side faults come from
+//! watchdog, and borrowed request slice representation. The worker-side faults come from
 //! `embed::test_fault` and fire by operation name, so the rest of the test
 //! process (including a concurrently running embedded test) never cross-fires.
 
 use super::*;
+
+include!("../embed_query_cache_ffi_tests.rs");
 
 #[test]
 fn timed_reply_preserves_owned_outcomes_after_timeout_retirement() {
@@ -265,32 +267,56 @@ fn normal_operation_within_budget_succeeds() {
 }
 
 #[test]
-fn request_envelope_cap_is_enforced_before_dispatch() {
+fn closing_one_authority_preserves_live_values_other_authority_and_reopen() {
+    struct HandleGuard(*mut EmbedHandle);
+    impl Drop for HandleGuard {
+        fn drop(&mut self) { unsafe { tofudb_embed_close(self.0); } }
+    }
+    let seeds = [seed_authority(), seed_authority()];
+    let first = HandleGuard(open_handle(&seeds[0]));
+    let second = HandleGuard(open_handle(&seeds[1]));
+    let mut live = vec![0_u8; 2 * 1024 * 1024];
+    for (index, byte) in live.iter_mut().enumerate() { *byte = (index % 251) as u8; }
+    let live_digest = blake3::hash(&live);
+    let put = |index| serde_json::json!({
+        "operation": "record.put", "command_id": "close-owner-proof",
+        "deadline_unix_ms": deadline(30_000),
+        "payload": {"namespace": "close-owner", "key": "same-key",
+                    "value": {"index": index}, "user_id": 11},
+    });
+    let original = execute(first.0, &put(0));
+    let survivor = execute(second.0, &put(1));
+    assert_eq!(original["status"], 0);
+    assert_eq!(survivor["status"], 0);
+    drop(first);
+    assert_eq!(blake3::hash(&live), live_digest);
+    let replay = execute(second.0, &put(1));
+    assert_eq!(replay["status"], 0);
+    assert_eq!(replay["payload"], survivor["payload"]);
+    let reopened = HandleGuard(open_handle(&seeds[0]));
+    let read = execute(reopened.0, &serde_json::json!({
+        "operation": "record.get", "deadline_unix_ms": deadline(30_000),
+        "payload": {"namespace": "close-owner", "key": "same-key", "user_id": 11},
+    }));
+    assert_eq!(read["status"], 0);
+    assert_eq!(read["payload"]["value"], serde_json::json!({"index": 0}));
+    assert_eq!(read["payload"]["version"], 1);
+    drop(second);
+    assert_eq!(blake3::hash(&live), live_digest);
+}
+
+#[test]
+fn unaddressable_request_slice_is_rejected_before_dispatch() {
     let seed = seed_authority();
     let handle = open_handle(&seed);
-    let cap = crate::generated_storage_v2::MAX_STREAMED_REQUEST_PAYLOAD_BYTES + MAX_EMBEDDED_ENVELOPE_BYTES;
-    let prefix = br#"{"operation":"record.get","payload":{"pad":""#.as_slice();
-    let suffix = br#""},"deadline_unix_ms":9999999999999}"#.as_slice();
-    let mut request = Vec::with_capacity(cap + 1);
-    request.extend_from_slice(prefix);
-    request.extend(std::iter::repeat(b'x').take(cap + 1 - prefix.len() - suffix.len()));
-    request.extend_from_slice(suffix);
-    assert!(request.len() > cap);
+    let request = [b'x'];
     let mut out = vec![0_u8; OUT_CAP];
-    let written = unsafe {
-        tofudb_embed_execute(handle, request.as_ptr(), request.len(), out.as_mut_ptr(), out.len())
-    };
+    let written = unsafe { tofudb_embed_execute(handle, request.as_ptr(), usize::MAX, out.as_mut_ptr(), out.len()) };
     assert!(written > 0);
     out.truncate(written as usize);
-    let envelope: serde_json::Value = serde_json::from_slice(&out).unwrap();
-    assert_eq!(envelope["error_code"], "embedded_transport_error");
-    assert!(
-        envelope["error_message"]
-            .as_str()
-            .unwrap()
-            .contains("envelope bound"),
-        "unexpected envelope: {envelope}"
-    );
+    let envelope:serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(envelope["error_code"],"embedded_transport_error");
+    assert!(envelope["error_message"].as_str().unwrap().contains("addressable"));
     unsafe { tofudb_embed_close(handle) };
 }
 
@@ -367,14 +393,13 @@ fn raw_json_payload_preserves_canonical_receipt_replay_and_invalid_envelopes() {
 }
 
 #[test]
-fn raw_payload_cap_is_enforced_inside_the_envelope_headroom() {
+fn large_payload_reaches_semantic_shape_validation_without_poisoning_handle() {
     let seed = seed_authority();
     let handle = open_handle(&seed);
     let request = serde_json::json!({"operation":"record.put", "command_id":"oversized-raw",
-        "deadline_unix_ms":deadline(30_000), "payload":"x".repeat(crate::generated_storage_v2::MAX_STREAMED_REQUEST_PAYLOAD_BYTES)});
+        "deadline_unix_ms":deadline(30_000), "payload":"x".repeat(70 * 1024 * 1024)});
     let response = execute(handle, &request);
-    assert_eq!(response["error_code"], "embedded_transport_error");
-    assert!(response["error_message"].as_str().unwrap().contains("payload bound"));
+    assert_eq!(response["error_code"], "database_protocol_error");
     let healthy = execute(handle, &serde_json::json!({"operation":"system.health",
         "deadline_unix_ms":deadline(30_000), "payload":{}}));
     assert_eq!(healthy["status"], 0, "oversize input must not poison a healthy handle");
@@ -575,4 +600,48 @@ fn allocator_collection_preserves_two_live_authorities_receipts_and_reopen() {
         assert_eq!(read["payload"]["version"], 1);
         unsafe { tofudb_embed_close(handle); }
     }
+}
+
+
+#[test]
+fn registered_ffi_commands_wait_without_carriers_and_release_input_on_completion_or_poison() {
+    struct HandleGuard(*mut EmbedHandle);
+    impl Drop for HandleGuard {fn drop(&mut self){unsafe{tofudb_embed_close(self.0);}}}
+    for cancel in [false,true] {
+        let seed=seed_authority();let owned=HandleGuard(open_handle(&seed));
+        let address=owned.0 as usize;
+        let handle=unsafe{&*owned.0};let gate=handle.runtime.command_admission();
+        std::thread::scope(|threads| {
+            let crate::authority_admission::Admission::Entered(first)=gate.acquire(std::time::Instant::now()+Duration::from_secs(10),&mut ||true).unwrap() else {panic!("empty FIFO")};
+            let calls:Vec<_>=(0..64).map(|index|threads.spawn(move||execute(address as *mut EmbedHandle,&serde_json::json!({
+                "operation":"record.put","command_id":format!("queued-{index}"),"deadline_unix_ms":deadline(30_000),
+                "payload":{"namespace":"ffi-queued","key":index.to_string(),"value":index}
+            })))).collect();
+            let end=std::time::Instant::now()+Duration::from_secs(10);
+            while handle.phase_registry.active_count()!=64 && std::time::Instant::now()<end {std::thread::sleep(Duration::from_millis(1));}
+            assert_eq!(handle.phase_registry.active_count(),64,"all commands must enter real phase registry");
+            assert!(handle.input_memory.bytes.load(Ordering::Acquire)>0);
+            if cancel {poison(handle);}drop(first);
+            for call in calls {
+                let response=call.join().unwrap();
+                if cancel {assert_ne!(response["status"],0);} else {assert_eq!(response["status"],0,"{response}");}
+            }
+        });
+        let end=std::time::Instant::now()+Duration::from_secs(5);
+        while (handle.phase_registry.active_count()!=0 || handle.input_memory.bytes.load(Ordering::Acquire)!=0) && std::time::Instant::now()<end {std::thread::sleep(Duration::from_millis(1));}
+        assert_eq!(handle.phase_registry.active_count(),0);assert_eq!(handle.input_memory.bytes.load(Ordering::Acquire),0);
+        assert_eq!(gate.waiting_count(),0);
+    }
+}
+
+#[test]
+fn large_embedded_query_payload_has_no_private_byte_quota() {
+    let seed = seed_authority();
+    let handle = open_handle(&seed);
+    let response = execute(handle, &serde_json::json!({"operation":"record.get",
+        "deadline_unix_ms":deadline(30_000), "payload":{"namespace":"ffi",
+        "key":"absent-large","padding":"x".repeat(70 * 1024 * 1024)}}));
+    assert_eq!(response["status"],0);
+    assert!(response["payload"].is_null());
+    unsafe { tofudb_embed_close(handle) };
 }

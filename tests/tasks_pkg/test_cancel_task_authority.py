@@ -179,7 +179,9 @@ def test_v3_registry_miss_preserves_owner_tombstone_and_projection(monkeypatch, 
 
     row = {'attemptId': 'attempt', 'taskId': task_id, 'status': 'running',
            'conversationId': 'conv', 'turnId': 'turn'}
-    tombstones, events = [], []
+    tombstones, events, revoked = [], [], []
+    monkeypatch.setattr('lib.project_dispatch.recovery.revoke_conversation_dispatch',
+                        lambda cid, **kwargs: revoked.append((cid, kwargs)))
     monkeypatch.setattr(lifecycle, '_turn_client', lambda: SimpleNamespace(
         query=lambda operation, payload: row))
     monkeypatch.setattr(lifecycle, 'get_turn', lambda *a, **kw: {
@@ -192,6 +194,7 @@ def test_v3_registry_miss_preserves_owner_tombstone_and_projection(monkeypatch, 
     assert lifecycle.abort_attempt('attempt', user_id=7)['status'] == 'abort_signaled'
     assert tombstones == ([(task_id, {'source': 'turn_attempt_abort', 'user_id': 7})]
                           if task_id else [])
+    assert revoked == [('conv', {'user_id': 7})]
     assert events[0][0]['_userId'] == 7
     assert events[0][0]['content'] == 'partial'
 

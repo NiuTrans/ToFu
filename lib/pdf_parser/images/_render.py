@@ -87,7 +87,7 @@ def render_pdf_pages(
         with PYMUPDF_LOCK:
             def check_abort():
                 if abort_check is not None and abort_check():
-                    from lib.llm_errors import AbortedError
+                    from lib.llm.llm_errors import AbortedError
                     raise AbortedError('VLM PDF rendering aborted')
             render_document(pymupdf, pdf_bytes, dpi=dpi, max_pages=max_pages,
                             sink=pages, abort_check=check_abort)
@@ -173,7 +173,7 @@ def render_pdf_pages_isolated(pdf_bytes: bytes, *, dpi=150, max_pages=None,
             source.write(pdf_bytes)
             source.seek(0)
             if abort_check is not None and abort_check():
-                from lib.llm_errors import AbortedError
+                from lib.llm.llm_errors import AbortedError
                 raise AbortedError('VLM PDF rendering aborted')
             # Native PDF parsing needs loader/temp/locale paths, never account
             # credentials or application lifecycle authority.
@@ -185,7 +185,7 @@ def render_pdf_pages_isolated(pdf_bytes: bytes, *, dpi=150, max_pages=None,
             try:
                 while True:
                     if abort_check is not None and abort_check():
-                        from lib.llm_errors import AbortedError
+                        from lib.llm.llm_errors import AbortedError
                         raise AbortedError('VLM PDF rendering aborted')
                     try:
                         returncode = process.wait(timeout=0.05)

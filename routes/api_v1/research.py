@@ -450,7 +450,8 @@ class _VerifiedObservationBody(ResponseBody):
                     await asyncio.shield(task)
                 except asyncio.CancelledError:
                     cancelled = True
-                except Exception:
+                except Exception as diagnostic_error:
+                    logger.debug('settle failure handled: %s', type(diagnostic_error).__name__)
                     break
         if self.pending is not None:
             await settle(self.pending)

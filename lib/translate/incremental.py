@@ -131,7 +131,7 @@ def _model_batch_segment_key(
     task: dict[str, Any], segment_type: str, round_num: int,
 ) -> str:
     """Match the exact block id final segment assembly will persist."""
-    from lib.tool_round_identity import model_batch_segment_block_id
+    from lib.tool_results.tool_round_identity import model_batch_segment_block_id
 
     return model_batch_segment_block_id(
         segment_type,
@@ -555,7 +555,8 @@ def _submit_keyed(task, key: int | str, text) -> bool:
                         if queue_owner is not None and queue_owner.snapshot()['depth'] and not _shutdown_started:
                             try:
                                 accumulator.start()
-                            except Exception:
+                            except Exception as diagnostic_error:
+                                logger.debug('_submit_keyed failure handled: %s', type(diagnostic_error).__name__)
                                 keep_owner = False
                         else:
                             keep_owner = False

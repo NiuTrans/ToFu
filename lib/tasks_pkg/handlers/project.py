@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import os
 import threading
-import time
 
 from lib.log import get_logger
 from lib.tasks_pkg.executor import (
@@ -133,6 +132,8 @@ def _execute_remote_run_command(task, tc_id, fn_args, rn, round_entry,
     )
     import posixpath
 
+    from lib.project_mod.tool_admission import Cancellation
+
     working_dir = str(fn_args.get('working_dir') or '').strip()
 
     def _within_working_dir(path):
@@ -156,9 +157,10 @@ def _execute_remote_run_command(task, tc_id, fn_args, rn, round_entry,
             '[Remote] run_command routed plain ls → project_list_dir @%s:%s',
             remote['agent_id'][:8], remote['root'])
         result, error = send_desktop_command(
-            'project_list_dir', params, timeout=60,
+            'project_list_dir', params, timeout=None,
             target_agent_id=remote['agent_id'],
-            user_id=task.get('_userId', '') or '')
+            user_id=task.get('_userId', '') or '',
+            cancellation=Cancellation(task))
         if error:
             return _finish(
                 f'Error: remote worktree {remote["root"]}: {error}',
@@ -198,9 +200,10 @@ def _execute_remote_run_command(task, tc_id, fn_args, rn, round_entry,
             '[Remote] run_command routed bounded find → project_find_files '
             '@%s:%s', remote['agent_id'][:8], remote['root'])
         result, error = send_desktop_command(
-            'project_find_files', params, timeout=60,
+            'project_find_files', params, timeout=None,
             target_agent_id=remote['agent_id'],
-            user_id=task.get('_userId', '') or '')
+            user_id=task.get('_userId', '') or '',
+            cancellation=Cancellation(task))
         if error:
             return _finish(
                 f'Error: remote worktree {remote["root"]}: {error}',
@@ -221,28 +224,9 @@ def _execute_remote_run_command(task, tc_id, fn_args, rn, round_entry,
                 badge='files')
 
     cmd_id = _uuid.uuid4().hex
-    try:
-        bridge_timeout = min(
-            max(float(fn_args.get('timeout_s',
-                                  fn_args.get('timeout', 300))) + 30.0, 60.0),
-            3660.0)
-    except (TypeError, ValueError) as _e:
-        logger.debug('execute remote run command: unexpected type/unparseable (%s)', _e)
-        bridge_timeout = 330.0
-
-    # No `deadlineTs` on the REMOTE path — deliberately ( follow-up).
-    #   ``bridge_timeout`` bounds how long THIS server waits for a result
-    #   (send_desktop_command's event.wait); the subprocess itself runs on the
-    #   user's machine and the server has NO kill handle on it — timing out the
-    #   wait abandons the result, it does not stop the process. Publishing a
-    #   deadline here would render a countdown to an event that never happens.
-    #   The countdown contract is "the backend will SIGKILL at this instant",
-    #   which only holds where _safe_on_spawn actually fires.
-    #
-    #   The honest display for a remote command is the elapsed COUNT-UP, and it
-    #   needs no code: the timer chip anchors on execStartTs and falls back to
-    #   tStart (the round-announce clock, already on the wire), so a remote
-    #   run_command renders "how long has this been going" out of the box.
+    # Worker execution owns an explicit timeout; bridge transport waits for its
+    # observed outcome rather than inventing a second execution deadline.
+    bridge_timeout = None
 
     progress_cb = _make_run_command_progress_cb(task, rn, round_entry, command)
     seen = {'stdout': 0, 'stderr': 0}
@@ -260,27 +244,31 @@ def _execute_remote_run_command(task, tc_id, fn_args, rn, round_entry,
         return bool(stream.get('done'))
 
     def _watch():
-        deadline = time.time() + bridge_timeout + 30
-        while not stop.is_set() and time.time() < deadline:
+        while not stop.is_set():
             if _drain_once():
                 return
             stop.wait(0.25)  # 与 tool_progress 200ms 合并节奏同量级
 
     params = {k: v for k, v in fn_args.items()
               if k not in ('content_ref', 'timeout_s', 'timeout')}
-    # Model-facing timeout removed: the desktop bridge uses its own default.
+    explicit_timeout = fn_args.get('timeout_s', fn_args.get('timeout'))
+    if explicit_timeout is not None:
+        params['timeout'] = explicit_timeout
     params['root'] = remote['root']
     logger.info('[Remote] run_command streaming @%s:%s cmd=%s (task=%s)',
                 remote['agent_id'][:8], remote['root'], cmd_id[:8],
                 task.get('id', '?')[:8])
     watcher = threading.Thread(target=_watch, daemon=True)
     watcher.start()
-    result, error = send_desktop_command(
-        'project_run_command', params, timeout=bridge_timeout,
-        target_agent_id=remote['agent_id'],
-        user_id=task.get('_userId', '') or '', cmd_id=cmd_id)
-    stop.set()
-    watcher.join(timeout=5)
+    try:
+        result, error = send_desktop_command(
+            'project_run_command', params, timeout=bridge_timeout,
+            target_agent_id=remote['agent_id'],
+            user_id=task.get('_userId', '') or '', cmd_id=cmd_id,
+            cancellation=Cancellation(task))
+    finally:
+        stop.set()
+        watcher.join()
     _drain_once()          # 尾帧:wait 返回后可能还有最后一批
     progress_cb.flush()
 
@@ -313,6 +301,7 @@ def _execute_remote_project_tool(task, fn_name, tc_id, fn_args, rn,
     工具名不变(拍板 3A),串行写分区 + Manual 批准门原样继承。
     """
     from lib.desktop import format_desktop_result, send_desktop_command
+    from lib.project_mod.tool_admission import Cancellation
 
     def _finish(text, badge=''):
         meta = build_project_tool_meta(fn_name, fn_args, text)
@@ -351,23 +340,13 @@ def _execute_remote_project_tool(task, fn_name, tc_id, fn_args, rn,
     params['root'] = remote['root']
     if fn_name in {'write_file', 'apply_diff', 'edit_file'}:
         params['file_receipts_version'] = 1
-    if fn_name == 'run_command':
-        try:
-            bridge_timeout = min(
-                max(float(fn_args.get('timeout_s',
-                                        fn_args.get('timeout', 300))) + 30.0,
-                    60.0), 3660.0)
-        except (TypeError, ValueError) as _e:
-            logger.debug('execute remote project tool: unexpected type/unparseable (%s)', _e)
-            bridge_timeout = 330.0
-    else:
-        bridge_timeout = 60
+    bridge_timeout = None
     logger.info('[Remote] routing %s → %s @%s:%s (task=%s)', fn_name, cmd_type,
                 remote['agent_id'][:8], remote['root'], task.get('id', '?')[:8])
     result, error = send_desktop_command(
         cmd_type, params, timeout=bridge_timeout,
         target_agent_id=remote['agent_id'],
-        user_id=task.get('_userId', '') or '')
+        user_id=task.get('_userId', '') or '', cancellation=Cancellation(task))
     if error:
         return _finish(f'Error: remote worktree {remote["root"]}: {error}',
                        badge='remote error')
@@ -383,11 +362,6 @@ def _execute_remote_project_tool(task, fn_name, tc_id, fn_args, rn,
             logger.warning('[Remote] invalid committed-file receipts for task %s', task.get('id', '')[:8])
     return _finish(format_desktop_result(cmd_type, result))
 
-
-# ── Per-feature size cap for write_file artifacts ─────────────────────
-# Smaller than the lib.artifacts hard cap (8 MiB) so write_file specifically
-# rejects giant blobs early, before reading the file back from disk.
-_WRITE_ARTIFACT_MAX_BYTES = 1 * 1024 * 1024  # 1 MiB
 
 
 def _screenshot_to_descriptor(img, filename=''):
@@ -470,23 +444,16 @@ def _maybe_promote_write_to_artifact(task, fn_name, fn_args, project_path, meta)
         return
 
     try:
-        size = os.path.getsize(target)
-    except OSError as e:
-        logger.debug('[Artifacts] stat after write failed for %s: %s', rel_path, e)
-        return
-
-    if size > _WRITE_ARTIFACT_MAX_BYTES:
-        logger.info(
-            '[Artifacts] skip oversize write_file artifact path=%s size=%d cap=%d',
-            rel_path, size, _WRITE_ARTIFACT_MAX_BYTES,
-        )
-        return
-
-    try:
-        with open(target, 'r', encoding='utf-8', errors='replace') as f:
-            content = f.read()
-    except OSError as e:
-        logger.warning('[Artifacts] read-back failed for %s: %s', rel_path, e)
+        from lib.artifacts.response_files import read_project_file
+        from lib.project_mod.tool_admission import Cancellation
+        # The write-path authority already validated this exact target. Reuse
+        # the no-follow snapshot reader; its parent is a derived verified root.
+        raw = read_project_file(target, [os.path.dirname(target)],
+                                cancelled=Cancellation(task).is_set)
+        content = raw.decode('utf-8', errors='replace')
+        size = len(raw)
+    except (OSError, ValueError, RuntimeError) as error:
+        logger.warning('[Artifacts] read-back failed: %s', error)
         return
 
     conv_id = task.get('convId') or ''
@@ -547,6 +514,37 @@ def _maybe_promote_write_to_artifact(task, fn_name, fn_args, project_path, meta)
 def _handle_project_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, project_path, project_enabled, all_tools=None,
                          *, repository_scanner=None):
 
+    file_source_capture = None
+    if fn_name == 'read_files' and fn_args.get('bind_sources') is True:
+        from lib.tasks_pkg.working_file_sources import FileReadCapture
+        try:
+            file_source_capture = FileReadCapture(task, tc_id)
+        except (ValueError, PermissionError):
+            pass  # Ordinary reads still work; the result declares missing coverage.
+
+    # A file grant never reaches content refs, remote adapters, root rebinding,
+    # the generic preimage/read gate, or custom handlers. Its descriptor-backed
+    # backend revalidates durable ownership again at actual I/O/publication.
+    from lib.project_dispatch.scope import tool_scope
+    with tool_scope(task, fn_name, fn_args, project_path) as scope:
+        if scope is not None:
+            from lib.project_mod import execute_tool
+            if remote_worktree_binding(cfg):
+                raise ValueError('Scoped file tools cannot use a remote transport')
+            tool_content = execute_tool(fn_name, fn_args, scope.root,
+                conv_id=task.get('convId'), task_id=task['id'], task=task,
+                file_source_capture=file_source_capture)
+            meta = build_project_tool_meta(fn_name, fn_args, tool_content)
+            _record_producer_result_metadata(fn_name, tool_content, round_entry)
+            _finalize_tool_round(task, rn, round_entry, [meta],
+                status='error' if meta.get('writeOk') is False else 'done')
+            if file_source_capture is not None:
+                try:
+                    file_source_capture.publish(round_entry)
+                except (TimeoutError, PermissionError):
+                    pass  # Cancelled, expired or changed-scope reads publish no witness.
+            return tc_id, tool_content, False
+
     from lib.tasks_pkg.workspace_delivery import (
         ensure_execution_roots, execution_root_key, route_project_tool_args)
     ensure_execution_roots(task)
@@ -580,6 +578,11 @@ def _handle_project_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
     _result_projection_items = [] if fn_name == 'read_files' else None
     _remote = remote_worktree_binding(cfg)
     if _remote:
+        if fn_name == 'read_files' and fn_args.get('bind_sources') is True:
+            tool_content = 'Error: file source binding is unavailable for remote worktrees; read without bind_sources.'
+            meta = build_project_tool_meta(fn_name, fn_args, tool_content)
+            _finalize_tool_round(task, rn, round_entry, [meta], status='error')
+            return tc_id, tool_content, False
         if fn_name == 'run_command' and fn_args.get('background'):
             tool_content = ('Error: explicit background commands are not supported '
                             'by the remote-worktree transport; no command ran.')
@@ -589,6 +592,17 @@ def _handle_project_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
             return tc_id, tool_content, False
         return _execute_remote_project_tool(
             task, fn_name, tc_id, fn_args, rn, round_entry, _remote)
+
+
+    from lib.tasks_pkg.project_guidance import check_project_guidance, freeze_project_command_cwd
+    if fn_name == 'run_command':
+        fn_args = freeze_project_command_cwd(task, fn_args)
+    guidance_refusal = check_project_guidance(task, fn_name, fn_args)
+    if guidance_refusal:
+        meta = build_project_tool_meta(fn_name, fn_args, guidance_refusal)
+        meta.update(notRun=True, badge='review project guidance')
+        _finalize_tool_round(task, rn, round_entry, [meta], status='error')
+        return tc_id, guidance_refusal, False
 
     # Resumed history and user instructions can still contain canonical
     # absolute paths. Binding must also cover these structured tool inputs,
@@ -629,9 +643,8 @@ def _handle_project_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
             return tc_id, redirected.tool_content, False
 
     # ── repo_map: structural outline, read-only ──
-    # Runs entirely in-process (no subprocess); the only I/O is reading
-    # project source files. Bounded by max_tokens; per-run is cheap because
-    # grep-ast caches imported grammars across calls in this process.
+    # Public scan/rank/render retains output policy. An explicitly composed
+    # native runtime supplies the owned scanner; omission uses the reference.
     if fn_name == 'repo_map':
         _rm_error = None
         _rm_stats: dict = {}
@@ -639,11 +652,13 @@ def _handle_project_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
             if not project_path:
                 raise ValueError('repo_map requires an attached project root')
             from lib.repo_map.api import generate_repo_map
+            if repository_scanner is None and task.get('_repository_runtime') is not None:
+                from lib.repo_map.native_runtime import scanner_for_task
+                repository_scanner = scanner_for_task(task, project_path)
             _rm_text, _rm_stats = generate_repo_map(
                 project_path,
                 path=str(fn_args.get('path') or ''),
                 focus=str(fn_args.get('focus') or ''),
-                max_tokens=int(fn_args.get('max_tokens') or 2048),
                 **({'scanner': repository_scanner} if repository_scanner is not None else {}),
             )
             tool_content = _rm_text
@@ -669,10 +684,13 @@ def _handle_project_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
     # lib/tasks_pkg/handlers/_read_gate.py for the policy.
     #
     # Single-edit tools (apply_diff / insert_content) are refused wholesale.
-    # Batch tools (apply_diffs / insert_contents) are gated per-path: only the
-    # edits whose target file is unread are skipped, the rest run, and the
-    # result names the skipped file(s).
+    # Atomic batches refuse the complete request before effects. Only explicit
+    # partial mode partitions execution, preserving original arguments/indexes.
     _gate_skip_note = None
+    _batch_skips = {}
+    _execution_args = fn_args
+    _atomic_batch = ((fn_name == 'edit_file' and fn_args.get('atomic') is not False)
+                     or (fn_name == 'apply_diffs' and fn_args.get('atomic') is True))
     if fn_name in ('apply_diff', 'insert_content') and project_path:
         try:
             _gate_err = check_read_before_edit(task, fn_name, fn_args, project_path)
@@ -691,14 +709,21 @@ def _handle_project_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
         try:
             _skip_idx, _unread_raw = partition_batch_edits(task, fn_name, fn_args, project_path)
         except Exception as _ge:
-            logger.warning('[ReadGate] partition failed for %s (allowing through): %s',
-                           fn_name, _ge, exc_info=True)
+            logger.warning('[ReadGate] partition failed for %s (atomic=%s): %s',
+                           fn_name, _atomic_batch, _ge, exc_info=True)
+            if _atomic_batch:
+                _gate_err = ('Error: read-before-edit safety check unavailable. '
+                             'No edits were executed; retry when the check is available.')
+                meta = build_project_tool_meta(fn_name, fn_args, _gate_err)
+                meta['badge'] = 'read check unavailable'
+                _finalize_tool_round(task, rn, round_entry, [meta], status='error')
+                return tc_id, _gate_err, True
             _skip_idx, _unread_raw = [], []
         if _skip_idx:
             edits = fn_args.get('edits') or []
             _skip_set = set(_skip_idx)
             # All edits target unread files → full refusal (nothing to run).
-            if len(_skip_set) >= len(edits):
+            if _atomic_batch or len(_skip_set) >= len(edits):
                 from lib.tasks_pkg.handlers._read_gate import _format_refusal
                 _gate_err = _format_refusal(fn_name, _unread_raw)
                 meta = build_project_tool_meta(fn_name, fn_args, _gate_err)
@@ -708,12 +733,13 @@ def _handle_project_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
                 logger.info('[ReadGate] Refused all %d edit(s) of %s for unread file(s) %s (task=%s)',
                             len(edits), fn_name, ', '.join(_unread_raw), task.get('id', '?')[:8])
                 return tc_id, _gate_err, False
-            # Partial: drop the unread-target edits, keep the rest.
-            fn_args['edits'] = [e for i, e in enumerate(edits) if i not in _skip_set]
+            # Keep the original call/round arguments. Partition only the
+            # execution copy after BOTH gates have checked the original set.
+            _batch_skips.update({i: 'read first' for i in _skip_set})
             _gate_skip_note = (
                 f'Read-before-edit gate: skipped {len(_skip_set)} edit(s) targeting '
-                f'unread file(s): {", ".join(_unread_raw)}. The remaining '
-                f'{len(fn_args["edits"])} edit(s) were applied. read_files those '
+                f'unread file(s): {", ".join(_unread_raw)}. '
+                f'See indexed execution results below. read_files those '
                 f'path(s) this turn, then re-issue the skipped edit(s) NEXT turn '
                 f'(a sibling read_files in the same parallel batch does not count).'
             )
@@ -747,14 +773,21 @@ def _handle_project_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
         try:
             _stale_idx, _stale_raw = partition_stale_edits(task, fn_args, project_path)
         except Exception as _fe:
-            logger.warning('[FreshGate] partition failed for %s (allowing through): %s',
-                           fn_name, _fe, exc_info=True)
+            logger.warning('[FreshGate] partition failed for %s (atomic=%s): %s',
+                           fn_name, _atomic_batch, _fe, exc_info=True)
+            if _atomic_batch:
+                _fresh_err = ('Error: write-freshness safety check unavailable. '
+                              'No writes were executed; retry when the check is available.')
+                meta = build_project_tool_meta(fn_name, fn_args, _fresh_err)
+                meta['badge'] = 'freshness check unavailable'
+                _finalize_tool_round(task, rn, round_entry, [meta], status='error')
+                return tc_id, _fresh_err, True
             _stale_idx, _stale_raw = [], []
         if _stale_idx:
             edits = fn_args.get('edits') or []
             _stale_set = set(_stale_idx)
             # All edits target stale files → full refusal (nothing to run).
-            if len(_stale_set) >= len(edits):
+            if _atomic_batch or len(_stale_set | set(_batch_skips)) >= len(edits):
                 from lib.tasks_pkg.handlers._write_freshness_gate import (
                     _format_stale_refusal,
                 )
@@ -766,19 +799,26 @@ def _handle_project_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
                 logger.info('[FreshGate] Refused all %d edit(s) of %s for stale file(s) %s (task=%s)',
                             len(edits), fn_name, ', '.join(_stale_raw), task.get('id', '?')[:8])
                 return tc_id, _fresh_err, False
-            # Partial: drop the stale-target edits, keep the rest.
-            fn_args['edits'] = [e for i, e in enumerate(edits) if i not in _stale_set]
+            _batch_skips.update({i: 'stale; re-read first' for i in _stale_set})
             _fresh_skip_note = (
                 f'Write-freshness guard: skipped {len(_stale_set)} edit(s) targeting '
                 f'file(s) changed on disk since this conversation last read/wrote '
-                f'them: {", ".join(_stale_raw)}. The remaining '
-                f'{len(fn_args["edits"])} edit(s) were applied. read_files the '
+                f'them: {", ".join(_stale_raw)}. '
+                f'See indexed execution results below. read_files the '
                 f'skipped path(s), reconcile against the current content, then '
                 f're-issue the skipped edit(s).'
             )
             logger.info('[FreshGate] Partial %s: skipped %d/%d stale-target edit(s) %s (task=%s)',
                         fn_name, len(_stale_set), len(edits), ', '.join(_stale_raw),
                         task.get('id', '?')[:8])
+
+    _admitted_indices = []
+    if _batch_skips:
+        import copy
+        _execution_args = copy.deepcopy(fn_args)
+        _admitted_indices = [i for i in range(len(fn_args['edits'])) if i not in _batch_skips]
+        _execution_args['edits'] = [_execution_args['edits'][i] for i in _admitted_indices]
+    _read_observations = []
 
     from lib.project_mod import execute_tool
     from lib.project_mod.abs_path_guard import (
@@ -814,14 +854,24 @@ def _handle_project_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
                            if fn_name in ('read_files', 'inspect_image') else {})
             if fn_name == 'read_files':
                 _no_proj_kw['result_projection_items'] = _result_projection_items
-            tool_content = execute_tool(fn_name, fn_args, '.', conv_id=_root_conv_id,
+                _no_proj_kw['file_source_capture'] = file_source_capture
+
+                _no_proj_kw['read_observations'] = _read_observations
+            tool_content = execute_tool(fn_name, fn_args, '', conv_id=_root_conv_id,
                                         task_id=task['id'], **_no_proj_kw)
         else:
             _progress_cb = None
             _spawn_cb = None
             _extra_kw = {'task': task}
+            if fn_name == 'write_file':
+                from lib.tasks_pkg.tool_runtime import active_context_for_call
+                _extra_kw['runtime_context'] = active_context_for_call(
+                    task, round_num=rn, tool_call_id=tc_id, round_entry=round_entry)
             if fn_name == 'read_files':
                 _extra_kw['result_projection_items'] = _result_projection_items
+                _extra_kw['file_source_capture'] = file_source_capture
+
+                _extra_kw['read_observations'] = _read_observations
             if fn_name in ('read_files', 'inspect_image'):
                 _extra_kw['task'] = task
             if fn_name == 'run_command' and fn_args.get('background') and project_path:
@@ -839,7 +889,8 @@ def _handle_project_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
                 background_policy = deepcopy(ensure_execution_roots(task))
 
                 background_roots = {key: deepcopy((task.get('config') or {}).get(key))
-                    for key in ('projectPath', 'projectPaths', 'readOnlyPaths')}
+                    for key in ('projectPath', 'projectPaths', 'readOnlyPaths',
+                                'workspaceRuntimeRoots')}
                 background_execution = {
                     'repositories': deepcopy(execution_repositories(task))}
                 def _execute_explicit_background(command_task, exec_ctx):
@@ -927,6 +978,8 @@ def _handle_project_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
 
                     'runtime_context': _runtime_context,
                 }
+            tool_content = ''
+            command_failed = True
             try:
                 if fn_name == 'run_command' and project_path:
                     from lib.tasks_pkg.handlers._background_command import (
@@ -961,11 +1014,12 @@ def _handle_project_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
                 else:
                     tool_content = (
                         execute_tool(
-                            fn_name, fn_args, project_path,
+                            fn_name, _execution_args, project_path,
                             conv_id=_root_conv_id, task_id=task['id'],
                             **_extra_kw,
                         ) if project_path else 'Error: No project path.'
                     )
+                command_failed = False
             finally:
                 if _spawn_cb is not None:
                     _spawn_cb.finish()
@@ -982,7 +1036,7 @@ def _handle_project_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
                         from lib.tasks_pkg.handlers._background_command import (
                             is_background_command_result,
                         )
-                        _incomplete = (
+                        _incomplete = command_failed or (
                             _runtime_context is not None
                             and _runtime_context.cancellation_requested
                         ) or '[Command timed out]' in tool_content or (
@@ -1010,6 +1064,11 @@ def _handle_project_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
     finally:
         reset_restricted(_abs_token)
 
+
+    if _batch_skips:
+        from lib.tasks_pkg.handlers._read_gate import restore_batch_result_indexes
+        tool_content = restore_batch_result_indexes(
+            tool_content, fn_args['edits'], _admitted_indices, _batch_skips)
     # ── Drain SVG inline-render signals (same thread as the read) ──
     # An SVG file is read as text (its markup enters the model stream), but
     # read_tools ALSO signals its source so the frontend can render it inline
@@ -1028,9 +1087,17 @@ def _handle_project_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
     # later write by us is refused if someone else touches the file first.
     if fn_name in ('read_files', 'inspect_image'):
         try:
-            record_read_paths(task, fn_args, project_path, tool_content)
+            record_read_paths(task, fn_args, project_path, tool_content,
+                              observations=_read_observations)
+
+            # Host-owned per-item evidence for the read-first history scan.
+            # Raw tool output cannot distinguish file contents from headers.
+            round_entry['_readObservedPaths'] = [item.abs_path for item in _read_observations]
         except Exception as _fe:
             logger.debug('[FreshGate] read-token record failed (non-fatal): %s', _fe)
+
+    from lib.tools.rich_response import image_posthook
+    _response_assets = image_posthook(task, fn_name, fn_args, project_path, tool_content)
 
     # read_files with absolute image paths returns a batch dict with __batch_images__
     _img_descriptors = None  # frontend-render image list (all images in a batch)
@@ -1081,6 +1148,9 @@ def _handle_project_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
             'imageDataUris': ([d for d in _img_descriptors if d.get('uri')]
                               + [s for s in _svg_renders if s.get('uri')]),
         }
+        if _response_assets:
+            meta['responseAssets'] = _response_assets
+            tool_content['responseAssets'] = _response_assets
         # ── inspect_image: surface the transform + source/view dimensions ──
         if fn_name == 'inspect_image':
             _ops = tool_content.get('inspectOps', '') or ''
@@ -1120,6 +1190,12 @@ def _handle_project_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
                 'snippet': f'$ {str(fn_args.get("command") or "")[:120]}',
             })
 
+    if _response_assets:
+        meta['responseAssets'] = _response_assets
+        if isinstance(tool_content, str):
+            import json as _response_json
+            tool_content += '\nResponse assets: ' + _response_json.dumps(_response_assets, ensure_ascii=False)
+
     if fn_name == 'run_command' and round_entry.get('backgroundCommandId'):
         meta['backgroundCommandId'] = round_entry['backgroundCommandId']
 
@@ -1141,13 +1217,13 @@ def _handle_project_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
         meta['refusal'] = {'kind': 'partial_read_first',
                            'paths': list(_unread_raw),
                            'skipped': len(_skip_set),
-                           'proceeded': len(fn_args.get('edits') or [])}
+                           'proceeded': len(_admitted_indices)}
     if _fresh_skip_note:
         meta['badge'] = 'partial: stale'
         meta['refusal'] = {'kind': 'partial_stale',
                            'paths': list(_stale_raw),
                            'skipped': len(_stale_set),
-                           'proceeded': len(fn_args.get('edits') or [])}
+                           'proceeded': len(_admitted_indices)}
 
     # ── Attach SVG inline-render descriptors (text read path) ──
     # SVG source rides the model stream as text; these data URIs let the
@@ -1236,10 +1312,21 @@ def _handle_project_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
     if _gate_skip_note and isinstance(tool_content, str):
         tool_content = f'{_gate_skip_note}\n\n{tool_content}'
 
+    if fn_name == 'write_file' and meta.get('writeOk') is False:
+        from lib.tasks_pkg.executor._effects import effect_inspection_action
+        inspection_action = effect_inspection_action(round_entry.get('executionEffect'))
+        if inspection_action:
+            tool_content = f'{tool_content}\n\n{inspection_action}'
+
     _record_producer_result_metadata(fn_name, tool_content, round_entry)
     _finalize_tool_round(
         task, rn, round_entry, [meta],
         status='error' if meta.get('writeOk') is False else 'done')
+    if file_source_capture is not None:
+        try:
+            file_source_capture.publish(round_entry)
+        except (TimeoutError, PermissionError):
+            pass  # No witness crosses a cancellation/scope fence.
     if (fn_name == 'read_files' and isinstance(tool_content, str)
             and _result_projection_items and isinstance(round_entry, dict)):
         # Ephemeral producer metadata: settlement pops this immediately after

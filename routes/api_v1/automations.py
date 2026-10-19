@@ -10,7 +10,7 @@ from lib.api_response import api_error, api_ok
 from lib.automations.errors import AutomationConflict, AutomationError
 from lib.automations.management import AutomationManagement
 from lib.automations.management_contract import fragment, limits
-from lib.http_body_policy import HttpBodyPolicy, enforce_http_body_policy
+from lib.http_transport.body_policy import HttpBodyPolicy, enforce_http_body_policy
 from lib.openapi import api_meta
 from lib.request_parser import async_parse_body
 from lib.storage.errors import StorageError, http_status_for_storage_error

@@ -4,7 +4,7 @@ import threading
 
 import pytest
 
-from lib.agent_loop import AbortSignal, run_agent_loop
+from lib.agent_loop.agent_loop import AbortSignal, run_agent_loop
 from lib.conversation_sync.command_service import _resume_executor_config
 from lib.tasks_pkg.continuation_rounds import continuation_round_counters
 from lib.tasks_pkg.orchestrator._resume_state import apply_resume_state, prepare_resume_state

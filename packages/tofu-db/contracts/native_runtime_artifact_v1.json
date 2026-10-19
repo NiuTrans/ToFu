@@ -1,0 +1,43 @@
+{
+  "contract_version": "tofu.native-runtime-artifact/v1",
+  "archive_format": "tofu.native-runtime-archive/v1",
+  "build_format": "tofu.native-runtime-build/v1",
+  "maximum_unpacked_bytes": 134217728,
+  "maximum_members": 1024,
+  "supported_targets": [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu"
+  ],
+  "required_members": [
+    "bin/tofu-native",
+    "LICENSE",
+    "Cargo.lock",
+    "contracts/native_agent_stdio_v1.schema.json",
+    "contracts/native_runtime_artifact_v1.json",
+    "README.txt"
+  ],
+  "identity_commands": [
+    "build-info",
+    "check-session",
+    "check-tool-gateway"
+  ],
+  "hash_algorithm": "sha256",
+  "version_sources": {
+    "application": "VERSION",
+    "runtime": "packages/tofu-runtime/Cargo.toml"
+  },
+  "boundary": "Transient native runtime archive; no automatic production cutover, upload or deployment; integrity checking does not authenticate a publisher.",
+  "maximum_metadata_bytes": 1048576,
+  "optional_token_count": {
+    "member": "lib/libtofu_runtime.so",
+    "contract_member": "contracts/native_token_count_abi_v1.json",
+    "feature": "token-count-abi",
+    "abi_version": 1
+  },
+  "optional_flow": {
+    "member": "lib/libtofu_runtime.so",
+    "contract_member": "contracts/native_flow_abi_v1.json",
+    "feature": "flow-abi",
+    "abi_version": 1
+  }
+}

@@ -88,6 +88,7 @@ def _tail_transition_scope(request: ComposeRequest) -> str:
             task_id=str(task.get("id") or ""),
             conv_id=str(request.conv_id or task.get("convId") or ""),
             owner_user_id=int(request.user_id or 0),
+            storage_free=task.get("_transientRuntime") is True,
         )
     except Exception as exc:
         logger.debug(
@@ -134,12 +135,17 @@ def _project_rules(request: ComposeRequest) -> str:
     try:
         from lib.project_mod import get_context_for_prompt
 
-        return (
-            get_context_for_prompt(
-                request.project_path, conv_id=request.conv_id or None
-            )
-            or ""
-        )
+        from lib.tasks_pkg.workspace_delivery import ensure_execution_roots, execution_root_key
+        from lib.project_mod.config import execution_root_scope
+        task = request.task
+        policy = ensure_execution_roots(task) if task else None
+        if policy is not None:
+            key = execution_root_key(task)
+            with execution_root_scope(key, policy):
+                return get_context_for_prompt(request.project_path, conv_id=key,
+                    include_guidance=not task.get('_projectGuidanceOwnsRoot')) or ''
+        return get_context_for_prompt(request.project_path, conv_id=request.conv_id or None,
+            include_guidance=not (task or {}).get('_projectGuidanceOwnsRoot')) or ''
     except Exception as exc:
         logger.warning("[ContextComposer] project rules unavailable: %s", exc)
         # The optional-provider boundary records unavailable, not an
@@ -159,18 +165,19 @@ def _profile_block(request: ComposeRequest) -> str:
     try:
         from lib.memory.user_profile import (
             context_items_for_event,
-            context_char_count,
+            context_markdown,
             load_context,
             render_profile_block,
         )
 
         scope = (request.task or {}).get("_profileScope") or ""
         context = load_context(scope)
-        block = render_profile_block(None, scope)
+        body = context_markdown(context["items"])
+        block = render_profile_block(body, scope)
         if context["items"] and request.task is not None:
-            items = context_items_for_event(None, scope)
+            items = context_items_for_event(context_items=context["items"])
             request.task["_appliedPreferences"] = {
-                "chars": context_char_count(context["items"]),
+                "chars": len(body),
                 "items": items,
             }
         return block or ""
@@ -328,7 +335,8 @@ def _programmatic_guidance(request: ComposeRequest) -> str:
         mode = normalize_context_experiment_flags(
             (request.task or {}).get("config") or {}
         )["tools"]["programmaticCalling"]
-        if mode == "off":
+        from lib.tools.programmatic import programmatic_tier
+        if mode == "off" or programmatic_tier(requested=mode) != 'program':
             return ""
     except Exception as exc:
         logger.debug("[ContextComposer] programmatic mode unavailable: %s", exc)
@@ -424,9 +432,20 @@ def _project_blocks(request: ComposeRequest, query: str) -> list[ContextBlock]:
             # Project pages are optional evidence. Failure adds no update or
             # withdrawal; admission clears any uncommitted delivery receipt.
             reason = 'provider_unavailable'
-    return [
-        _block('project_context', context, reason=reason)
-    ]
+    role = ''
+    role_reason = 'inactive'
+    if (request.project_enabled and request.project_path
+            and 'project_coordinator' not in request.disabled_blocks):
+        try:
+            from lib.conversations.project_coordination import prepare_coordinator_role
+            role = prepare_coordinator_role(request.project_path, request.conv_id or '',
+                                            user_id=request.user_id, task=request.task)
+            role_reason = '' if role else 'inactive'
+        except Exception as exc:
+            logger.debug('Coordinator role unavailable: %s', type(exc).__name__)
+            role_reason = 'provider_unavailable'
+    return [_block('project_context', context, reason=reason),
+            _block('project_coordinator', role, reason=role_reason)]
 
 
 def _plan_mode_block(request: ComposeRequest) -> str:
@@ -1092,6 +1111,7 @@ def _mcp_tools_delta(request: ComposeRequest) -> tuple[str, str, dict]:
             task_id=str(task.get("id") or ""),
             conv_id=str(request.conv_id or task.get("convId") or ""),
             owner_user_id=int(request.user_id or 0),
+            storage_free=task.get("_transientRuntime") is True,
         )
         wire_names, frozen = frozen_wire_tool_names(scope)
     except Exception as exc:

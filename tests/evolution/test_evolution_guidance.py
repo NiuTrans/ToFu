@@ -105,16 +105,22 @@ def test_composer_registers_and_acquires_the_block(store):
 
 
 def test_active_prompt_guidance_is_applied_and_rollback_removes_it(store):
-    from lib.evolution import records
+    from lib import evolution
     from lib.evolution.guidance import render_guidance
+    from tests.evolution.test_evolution_gate import _settled_episode
     _seed(store)
-    mutation={'mutation_id':'prompt-1','kind':'prompt_variant','status':'active',
-              'payload':{'text':'Reproduce the failing case before changing implementation.'}}
-    records.put_record(records.NAMESPACE_MUTATIONS,f'{USER}:prompt-1',mutation,kind='mutation')
+    episode_id = _settled_episode(store)
+    mutation = evolution.propose_mutation('prompt_variant', {
+        'text': 'Reproduce the failing case before changing implementation.'},
+        [episode_id], user_id=USER)
+    evolution.confirm_mutation(mutation['mutation_id'], user_id=USER)
+    evolution.run_regression(mutation, user_id=USER)
+    evolution.activate_mutation(mutation['mutation_id'], user_id=USER,
+                                allow_unmeasurable=True)
     content=render_guidance(_task(),user_id=USER)
     assert mutation['payload']['text'] in content
     assert 'index: d' in content and 'execute: d' in content
-    records.put_record(records.NAMESPACE_MUTATIONS,f'{USER}:prompt-1',dict(mutation,status='rolled_back'),kind='mutation')
+    evolution.rollback_mutation(mutation['mutation_id'], user_id=USER)
     assert mutation['payload']['text'] not in render_guidance(_task(),user_id=USER)
     assert render_guidance(_task(binding=False),user_id=USER)==''
 
@@ -140,3 +146,34 @@ def test_legacy_failure_advice_is_absent_from_actual_executor_guidance(store):
     content = render_guidance(_task(), user_id=USER)
     assert 'Adapt the reference repo' in content
     assert 'never train without seeded data' not in content
+
+
+def test_legacy_strategy_guidance_does_not_reinject_prior_goal(store):
+    from copy import deepcopy
+    from lib.evolution import records
+    from lib.evolution.guidance import render_guidance
+    from lib.evolution.planner import baseline_stages
+    _seed(store)
+    template = store.rows[records.NAMESPACE_STRATEGIES, f'{USER}:tmpl-1']
+    stages = baseline_stages()
+    stages[0]['detail'] = ('Inspect the current context and constraints for this objective: '
+                           'train an unrelated GPU model at /private/prior-target')
+    template['stages'] = stages
+    original = deepcopy(template)
+    text = render_guidance(_task(), user_id=USER)
+    assert 'Strategies observed' in text
+    assert '/private/prior-target' not in text and 'unrelated GPU model' not in text
+    assert 'current objective' in text
+    assert store.rows[records.NAMESPACE_STRATEGIES, f'{USER}:tmpl-1'] == original
+
+
+def test_reusable_scaffold_preserves_custom_procedures():
+    from copy import deepcopy
+    from lib.evolution.planner import baseline_stages, reusable_stages
+    custom = baseline_stages()
+    custom[0]['detail'] = 'Inspect the current context and constraints for this objective: specific target'
+    custom[3]['detail'] = 'Use the frozen held-out rubric and compare both seeds.'
+    original = deepcopy(custom)
+    assert reusable_stages(custom) == original
+    assert custom == original
+    assert reusable_stages([]) == []

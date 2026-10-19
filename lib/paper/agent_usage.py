@@ -21,7 +21,7 @@ import math
 import threading
 from typing import Any, Optional
 
-from lib.agent_loop import LoopDirective
+from lib.agent_loop.agent_loop import LoopDirective
 from lib.cost import compute_cost, normalize_usage, split_input_tokens
 from lib.log import get_logger
 

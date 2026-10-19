@@ -40,7 +40,7 @@ stream-scheduled P99 is 313/370 ms before and 282/324 ms after. At 1,000 it is
 the one-second P99 budget still fails. RSS ranges overlap; no memory victory or
 all-scenario latency/capacity claim follows. Real-provider/browser latency and
 sustained soak remain uncovered. Exact identities, bounds and samples live in
-[publication evidence](evidence/tofudb_rotation_publication_latency_20261009.json).
+`tofudb_rotation_publication_latency_20261009.json`.
 
 Verification: 1,654 native tests pass (four explicitly ignored), including the
 new publication I/O error/short-write/lost-sync matrices and real blocked-fsync
@@ -79,7 +79,7 @@ regression tests also reject corruption in either selected generation.
 
 ## Paired foreground preparation experiments
 
-The [parallel experiment evidence](evidence/tofudb_parallel_latency_20261009.json)
+The `tofudb_parallel_latency_20261009.json`
 retains all ten Strict 1,000-conversation legs, exact recovery counts, identities,
 original failures and independent-copy verification. Private preparation from
 published roots removes a FIFO entry but is rejected: stream P99 ranges overlap
@@ -116,6 +116,73 @@ measured private stream-payload preparation boundary. Fresh source validation,
 OCC, lease budgets, hard WAL ceilings and durable-before-visible remain gates.
 
 
+
+## Batched OCC cache borrowing
+
+Problem: sorted version probes share tree paths but still reacquire the decoded
+page-cache read lock and record its wait for each node. Decision: a warm batch
+borrows one read lock. Its first missing node releases the borrow before source
+I/O or cache insertion; the rest of that batch uses the original per-node path.
+Empty probes, depth limits, tombstones, mount masks, poison and source failures
+retain their existing results. No persistent state, resident cache, capacity,
+worker or durability policy is added. Alternatives rejected: retaining the lock
+through a miss deadlocks cache insertion; suppressing source verification or OCC
+changes correctness; treating a smaller sampled wait as application speedup
+ignores source/merge mix and observer cost.
+
+Three ABBA rounds per concurrency over the same release executable and fixed
+hot pages verify 216,000 exact 32-key queries. Median calling-thread CPU per query
+changes 13.51 to 11.46 us with one caller and 43.55 to 28.30 us with eight callers.
+The latter sums worker CPU, not wall time. Every arm charges 5,074,296 cache bytes.
+This component control compares borrowed traversal with its per-node fallback;
+it excludes cold I/O, background merge and application delivery.
+
+Actual Strict/FUSE 1,000-conversation ABBA stream P99s are 4.314/3.313/3.954/4.939 s
+for delta and 5.515/3.626/3.736/3.626 s for phase. Delta improves in this cohort;
+phase and settlement overlap. All one-second stream/five-second terminal gates
+still fail. All fourteen pipeline legs, including four diagnostic legs, retain
+exact content/replay through two SIGKILLs each. Four paired operation controls
+show no stable point-read or large-append regression, while raw SQLite remains
+faster at their medians. Full native tests pass: 1,892 library and 38 process
+checks, with eight existing ignores. The `tofudb_occ_cache_borrow_20261014.json`
+retains every report, failed control setup, frozen source delta, harness and CPU
+samples; profiling diagnostics are excluded from latency admission.
+
+
+
+## Optional entity read timers
+
+Problem: even with request profiling disabled, each entity page read recorded
+clocks and four global/component atomic updates per stage. Decision: the six
+node/read-lock/source/decode/write-lock timing sites use the existing launch-time
+`TOFU_DB_REQUEST_PROFILE_EVERY` opt-in. The five stage names remain unchanged.
+An absent stage means no recorded observations, not zero work. WAL/commit
+counters and background pacing remain always available. No read, cache,
+verification, ownership, durability, worker or resource-budget policy changes.
+Alternatives rejected: retaining all hot read probes burdens normal execution;
+removing them prevents diagnosis; disabling scheduling feedback changes behavior.
+
+One release executable, launched off/on/on/off, executes 864,000 exact warm
+32-key version queries with no dispatch samples. With cache borrowing, median
+summed worker CPU/query changes 11.52 to 8.90 us for one caller and 28.35 to
+14.69 us for eight. All arms charge the same 5,074,296 cache bytes. Enabled arms
+record 7,494,960 node probes; disabled arms record none. Page-store counts remain
+308 in every process. This isolates timer cost, not application latency. With
+probes disabled, borrowing itself changes eight-caller CPU 31.86 to 14.69 us;
+the single-caller difference is small (8.97 to 8.90 us).
+
+Strict daemon/wire 1,000-conversation phase ABBA stream P99s are
+5.247/3.064/3.494/5.320 s, settlement 9.088/7.634/8.264/9.404 s. Delta results
+overlap, all SLO gates still fail, and embedded point reads remain about 21 us
+against raw SQLite's 6 us. Ten pipeline legs retain exact recovery through both
+SIGKILLs; actual metrics verify disabled/enabled read stages, retained WAL/commit
+counters and reconciled sampled spans. Embedded mutation profiling currently
+uses blocking dispatch rather than phase continuations; this wire pipeline and
+embedded query controls do not change execution paths with that setting.
+Full native verification and all adverse legs, identities, source deltas and
+CPU samples are retained in `tofudb_optional_read_probes_20261014.json`.
+
+
 ## Phase workload correction and source I/O controls
 
 The frozen concurrency harness defaults to `phase`: each round grows the task
@@ -146,7 +213,7 @@ then SIGKILL the child and require exact readback without Drop. P95 changes
 1,666 native tests; six ignored entries include the explicitly run measurement
 and child entry. Normal phase stream P99 is 5,682/6,533 ms against adjacent
 6,048/5,477 ms references, so no stable end-to-end win or new default follows.
-The [experiment evidence](evidence/tofudb_parallel_latency_20261009.json) now
+The `tofudb_parallel_latency_20261009.json` now
 retains 37 workload legs, source identities, guards corrected without rerunning
 completed workloads, and independent-copy verification with original-source
 CONTROL/WAL fences. Offline verifier recovery may mutate its disposable copy.
@@ -387,3 +454,267 @@ The live native process still uses old efa9 and Python still uses kernel8b66feb
 at this evidence boundary. A UI-approved application restart is pending;
 validated source and artifact identity do not prove live activation or a
 1000-session stream P99 below1 s result.
+
+
+## Full-catalog history promotion and write-delivery anchors
+
+Problem: history pruning at the payload catalog ceiling fell back to a durable
+loose file per carried block even when existing segments had packing room.
+The unlocked work still reserved the CONTROL publication lane, so the active
+WAL could fill before rotation was allowed to publish. Processing the entire
+history backlog in one reservation magnified this failure mode.
+
+Decision: history promotion replaces the smallest compatible payload segment
+through its verified exact handle when no new catalog slot is available.
+Incoming authenticated history bytes win duplicate IDs; the existing block,
+segment and catalog format bounds remain authoritative. Sources remain for old
+readers and CONTROL fallback until ordinary GC proves reclamation is safe.
+Automatic pruning retires at most the launch-derived checkpoint materialization
+budget divided by the history segment byte ceiling per publication (minimum one
+source); pending overlay replay can retain more. Operator compaction keeps its
+complete suffix semantics. No extra worker, journal, storage authority or mode
+is introduced. Truly indivisible full segments retain the durable loose fallback.
+
+The additive content-free `system.metrics.historyPromotion` counters distinguish
+prepared packs, full-catalog replacements, source bytes and attempted loose
+writes. Four process-lifetime atomic counters retain 32 bytes and reset at exit;
+preparation counters are not proof that CONTROL publication committed.
+
+`benchmarks/storage_write_pipeline.py` drives the production event FIFO before
+real semantic writes, checks push only after ACK, and delegates running/final
+SIGKILL, exact content/event replay and offline integrity to the retained
+conversation harness. Anchors separately measure FIFO delay, storage ACK,
+ACK-to-push and accepted-event-to-push/barrier. Client pool/wire/native profiles
+remain separate nested observations; do not sum them as independent costs.
+Client stages default off; `--profile-client`, `--native-profile-every N` and
+`--delivery-profile-every N` opt into diagnostics and disqualify latency admission.
+Earlier pipeline runs forced client stage sampling on even when native/delivery
+sampling was zero. Reports containing `client_stages_ms` are diagnostic and
+cannot support an unprofiled latency verdict; preserve their correctness and
+raw observations. The qualification audit
+records the affected retained comparisons and the corrected default-off rerun.
+The operation microbenchmark also retains unsorted collector-input latency
+samples outside timed calls and six-decimal millisecond summaries. Its former
+one-microsecond rounding obscured changes near the six-microsecond SQLite floor.
+Sequential samples identify operation-start order; concurrent collectors do not
+claim one global timeline. Window summaries avoid duplicating the raw series.
+Higher numeric precision does not change sample-count requirements for P99.
+The provider is a barrier fixture and push is an observer; real provider and
+browser/network rendering latency remain uncovered. Initial fresh authorities
+also do not reproduce a production-sized full catalog or sustained soak.
+
+Run `python3
+benchmarks/storage_write_pipeline.py --binary /path/to/tofu-db --directory
+/path/to/disposable-volume --conversations 1000 --submission-mode queued --output /tmp/pipeline.json`.
+The exit status requires correctness, latency and coverage; `acceptance` retains
+each result independently. Failures remain evidence and never become a speedup
+denominator. The native ignored `history_promotion_full_catalog_paired_measurement`
+uses alternating real-filesystem preparation pairs; set
+`TOFUDB_PROMOTION_BENCH_PARENT` to the measured volume. Ordinary native tests cover
+full-slot replacement, exact source reads, old readers, crash before publication,
+format refusal, slice convergence and existing publication fault matrices.
+
+Alternatives rejected: larger catalog ceilings change protocol/replay bounds;
+more retries leave slow representation work in place; deleting source files
+when packing finishes breaks old readers and fallback CONTROL; one hardcoded
+worker/item limit prevents throughput from scaling with launch resources.
+
+
+Controlled promotion evidence is retained in
+the storage-stall measurement.
+Four alternating DolphinFS pairs prepare 128 distinct 8-KiB blocks. With a
+small replacement source, loose/packed medians are 1,112/24 ms; with a 16-MiB
+source containing 2,049 blocks they are 1,050/166 ms (about 6.3x). Every sealed
+replacement and old reader returns exact bytes. The larger-source case writes
+about 17 MiB of merged payload instead of 1 MiB of loose input: speed reduces
+filesystem operations while increasing bytes copied. Existing GC owns old
+source reclamation; this is not an end-to-end speedup or a storage-size win.
+
+The final source-matched mimalloc pair completes 1,000 running conversations,
+5,000 ordered push observations, both SIGKILL cycles, exact content/event
+readback and offline integrity. Its offered-load stream P99 is 5,399 ms and
+settlement P99 is 7,472 ms; the 1,000/5,000-ms budgets remain unmet. A fresh
+catalog performs no full-catalog replacements, so that cohort cannot measure
+this incident branch's improvement. Browser renderer and native-backed
+navigation/draft recovery cover their declared components; they do not measure
+real-provider or continuous network/SSE-to-visible latency. Whole-system
+performance acceptance remains incomplete.
+
+
+## Full-chain anchors and waiter isolation
+
+Problem: durability barriers shared the worker condition, so every unrelated
+commit woke all blocked tasks. Decision: keep one state lock but give each
+live lane a coordinator-owned weak condition; completion, failure and
+revocation target that lane. Poll only when an explicit cancellation callback
+requires it. Alternatives rejected: larger pools leave quadratic wakeups;
+displaying pending bytes before commit weakens durable replay.
+
+The controlled 256-lane ABBA sink measured 44,894/46,329 wait returns before
+and exactly 256 after; drain time was 727/738 versus 226/227 ms. This measures
+scheduler amplification, not native throughput. Native 1,000-conversation
+comparisons remain noisy and miss the 1-second stream/5-second settlement
+budgets. Private stream preparation and cross-task batch prototypes were
+therefore rejected for default activation. Wire size alone did not bound
+materialized WAL carry: an unbounded prototype reached 172–187-second P99;
+precise pre-WAL refusal and frozen child splits removed that regression but
+did not establish a stable latency win. These prototypes are not deployed.
+
+The retained pipeline now supports both per-frame barriers and queued
+progress, retains every prefix frame, and records scheduled-to-committed-push
+latency independently of producer submission time. Correctness alone cannot
+pass its performance gate. The queued 16-conversation/32-round burst recovered
+all 528 frames and exact content after abrupt daemon loss, with stream
+accept-to-push P99 166 ms. The 1,000-conversation/4-round case recovered all
+5,000 frames but still failed latency acceptance. Browser evidence uses actual
+named SSE receive timestamps: held commits never paint early, all eight
+markers have native ACK/receive/DOM anchors, and reload renders each once.
+Maximum observed ACK-to-SSE was 214 ms; SSE-to-DOM was 19 ms. Providers are
+synthetic; sustained soak and paid-provider capacity remain uncovered.
+
+Reproduction: `benchmarks/task_delivery_waiters.py --reference <frozen-source>`;
+`benchmarks/storage_write_pipeline.py --submission-mode queued
+--stream-interval-ms 0`; native-backed visual test
+`tests/e2e/test_e2e_storage_stream_pipeline.py`. Exact source identities,
+measurements, rejected controls and declared coverage live in
+`tofudb_storage_pipeline_deep_20261011.json`.
+
+## Complete-payload writer staging revisited
+
+Problem: fresh event segments used the generic block publisher, searching history and loose paths while holding authority. Complete Blob publication also searched cold history for optional deduplication. These paths can make a writer wait for source I/O even though it already owns the exact bytes required for recovery. Earlier WAL-only stream experiments had mixed/brownout timing; this revisits the combined path after authority-owned parallel codecs, not a new stream format or an assumed improvement.
+
+Decision: after the unchanged scope, sequence, event and segment-byte checks, new segments use the existing owned fresh-page staging port. Complete Blob publication retains verified warm-cache/read-hint and packed reuse; a cold history copy is optional and is carried again instead of querying it under authority. Generic block/reference validation keeps its original history lookup and error behavior. User reads, source membership, framing/hash checks, alternative copies, conflict checks, oversized spill/materialization and Strict durable-before-visible remain mandatory. Materialization still validates existing copies before retiring WAL-owned bytes. No worker, cache, backend or durable format is added. Duplicate cold payloads can increase WAL bandwidth and pending residency; paired measurements must include those costs.
+
+Alternatives: deleting the generic source probe hides real errors; trusting a bloom hit can reference absent content; a new negative-proof cache adds lifecycle and completeness machinery; larger caches do not eliminate first-time miss I/O. Existing complete-payload staging already provides the needed recovery witness.
+
+`stream_segment_encode` and `stream_segment_fresh_publish` distinguish encoding from memory staging. Fixed work counters report published segment count/encoded bytes and omitted optional cold-history-dedup attempts. The latter can increment when no history catalog is installed; it is not a physical-read savings count. Two span slots plus three work slots add 72 bytes per sampled request/aggregate; reported active/retained sizes derive from their structures. Sampling remains off by default.
+
+`authority_stream_staging_tests.rs` proves new-segment commit avoids old-source Read/Metadata operations, survives simulated power loss exactly, and refuses further writes after an ambiguous WAL error. `engine_write_staging_tests.rs` stages cold duplicate Blob bytes through direct/private publication without reader I/O, preserves PermissionDenied for generic source validation, and verifies exact restaged bytes after power loss. Full native snapshot: 1,837 pass, eight existing ignores. Natural workload measurements and adverse costs are recorded in `tofudb_writer_staging_20261013.json`.
+
+Matched client-profiled ABBA stream P99 is 5,977/4,114/5,010/6,389 ms (~26.2% lower candidate mean), but all fail 1,000 ms. Settle P99 is 9,752/9,468/9,997/9,743 ms; B2 settle and peak RSS are adverse. Every leg preserves 1,000 exact content/replay records, 5,000 ordered frames and zero errors after both SIGKILLs. The full-sampling candidate reports 16,238 omitted optional dedup attempts and 28.44 MB of fresh stream bytes against 170.33 MB of WAL writes in sampled event-record requests; counts/coalescing differ from other diagnostics. Remaining write and source-I/O costs need separate measurements; this step does not establish completed optimization.
+
+## Rejected current-WAL carried-payload prefix witnesses
+
+Problem: pending blocks were carried again even when an earlier record in the current file already contained their bytes. A generation-bound Engine-owned positive ID set was tested without changing the envelope or ACK protocol. The prototype cleared on generation changes/close, restored original slots when checkpoint changed the file after selection, and started empty after reopen. Four targeted power-loss/ambiguity cases and the full 1,841-test native snapshot passed (eight existing ignores).
+
+Decision: reject runtime selection. Client-profiled ABBA stream P99 4,218/6,297/4,068/5,053 ms regresses in candidate mean (~11.8%), while B1 peak RSS is adverse. The full-sampling event requests omitted only 0.438 MB against 129.754 MB of WAL writes (<0.4%), with 34.666 MB inline and 93.857 MB carried. Saving a small residual copy does not justify a new resident index or claim a broad win. The isolated experiment commit `7ef41cf8b` and its revert retain the tested implementation; `tofudb_current_wal_payloads_20261013.json` retains all original reports. The default runtime continues complete carrying and original durability/source validation. Alternatives still excluded: pending-memory presence as durability, cross-generation/cold inherited coverage, and hiding adverse cohorts.
+
+## Physical WAL writes on the existing barrier worker
+
+Problem: per-record physical WAL writes still occur while holding the foreground writer, even though Strict callers already wait outside it for the existing shared barrier. Small requests amplify the number of FUSE write operations. Moving the write must preserve the actual byte-prefix witness rather than acknowledge queued memory.
+
+Decision: the existing barrier worker owns framed copies, combines only contiguous offsets, physically writes them and syncs before advancing its captured prefix. Later enqueues do not enlarge that captured ACK. The actual authority VFS must opt in to independent handles; encryption and custom stateful wrappers keep original physical appends. Normal durability is unchanged. CONTROL publication, rotation, recovery reads, truncation and close drain the original generation first; failed write/sync stays latched and prevents an inline retry. Close refuses new enqueues, drains and joins before reclaiming frame copies. Poisoned/unknown buffer state keeps the failed barrier and refuses detach, source recovery reads, truncation and inline physical retry; it is never treated as a disabled buffer. Driver close still joins before returning an unknown-drain error.
+
+The canonical `walWriteBuffer` contract in `contracts/storage_v2.json` derives reuse bytes from the existing startup memory-headroom probe. Unknown probe falls back lean; zero available budget disables copying; budget or allocation exhaustion uses the original write path and never rejects an otherwise legal request. Retained/peak bytes include queued and inflight frames through deallocation, excluding allocator/queue metadata. Metrics separate logical accepted WAL traffic from successful physical worker writes and write-time attempts; neither gives durability credit. Request-local VFS write totals exclude the worker and must be read with its separate counters. No additional worker, authority, persistent format or durability mode is introduced.
+
+Alternatives: enlarging queues hides waiting and raises residency; a new append thread duplicates the barrier lifecycle; skipping synchronization weakens durability; counting moved I/O as eliminated misstates the mechanism. A paired runtime gate must establish the gain and report memory and settlement costs.
+
+Matched client-profiled ABBA compares physical writes against complete-payload staging: stream P99 is 4,281/3,744/3,105/4,948 ms; scheduled-to-push P99 is 4,380/3,826/3,201/5,018 ms. Candidate stream mean improves 25.8%; settle mean improves 4.3%. Candidate peak RSS is 1.98/1.91 GB versus 1.96/1.95 GB; B1 memory is slightly adverse and remains reported. Full sampling is excluded from these means: its 4,252 queued frames become 2,680 successful physical batches, carrying 476.43 MB with 3.56 MB peak frame residency and zero final retained bytes at the captured snapshot. Logical request WAL bytes and total-lifetime physical bytes cover different cohorts and must not be subtracted as saved traffic.
+
+A separate combined ABBA compares both changes with the previous parallel-codec runtime: scheduled-to-push P99 is 8,256/3,469/3,465/6,850 ms, reducing candidate mean by 54.1%; settle P99 is 11,940/8,398/8,242/8,967 ms, reducing mean by 20.4%. All nine new legs retain 1,000 exact content/replay results, 5,000 ordered committed push observations and zero errors through two abrupt process losses. Diagnostic clock anchors pass; profiling-off legs declare that check inapplicable. Every 1,000-ms stream/5,000-ms settle gate still fails. Remaining FIFO, source-read, rotation and barrier waiting remain measured. `tofudb_wal_write_buffer_20261013.json` retains all formal and diagnostic legs in its companion gzip. Native library verification passes 1,845 tests (eight existing ignores), eight buffer boundaries, two large-restart fixtures, 22 Python neighbors and all-targets compilation. Documentation and architecture baseline blockers remain failed checks.
+
+## Captured buffered WAL coverage for physical publication
+
+Problem: an independent file fsync cannot cover bytes still owned by the WAL worker. Rotation and history pruning formerly covered only the file; pack adoption also assumed Strict had no pending bytes. This assumption stopped holding once Strict appends handed physical frames to the existing worker.
+
+Decision: `wal_publication.rs` captures the current logical length and generation-bound worker witness while the publisher owns authority. The existing physical publication lane retains that source. Outside authority, all three publishers wait for that exact prefix, perform the shared double-sync loss barrier and only then publish CONTROL. Later queued frames do not enlarge the captured witness. A failed write/sync or poisoned source refuses publication and retains restart-required recovery. No new worker, admission, durable format or source-proof cache is added. Alternatives rejected: syncing the empty descriptor, treating queued memory as durable, and blocking the foreground authority while waiting for the worker.
+
+## Rejected soft-trigger handover reuse
+
+Problem: an Engine-level soft trigger appeared to reject a writable successor and could amplify a task's FIFO. The isolated candidate admitted only an empty, unfenced successor after durable handover, keeping the hard path unchanged. Its cold and post-publication power-loss cases and per-I/O fault matrix passed; the native snapshot passed 1,855 tests (eight existing ignores). Earlier unsafe descriptor-only WAL cover was fixed before building either arm.
+
+Decision: reject this runtime candidate. Client-profiled ABBA scheduled-to-push P99 is 3,164/3,207/3,536/3,518 ms: candidate mean regresses 0.93%; settle improvement is only 0.52%, and B1 RSS rises to 2.30 GB against baseline 1.98/1.96 GB. The full-sampling run records zero soft-trigger reuse decisions across sampled operations, so this experiment did not expose the expected mechanism on the default business path. Fewer diagnostic rotation parks alone cannot establish a gain across different coalescing cohorts. Every leg still recovers 1,000 exact contents/replays and 5,000 ordered frames with zero errors; all latency gates fail. `tofudb_soft_rotation_20261014.json` retains the original reports in its companion gzip. Candidate `15ca839ae` and its revert preserve the implementation; no counter or admission behavior is enabled by default. The retained hard-ceiling test now sets the threshold to the actual format ceiling, rather than counting the earlier soft refusal as a hard-cap test. Alternatives excluded: declaring a small or inactive-path change a broad win, ignoring B1 memory, or comparing against the unsafe publication baseline.
+
+## Rejected original-snapshot OCC preparation (2026-10-19)
+
+Problem: one current-source diagnostic attributed 0.251 seconds of 5,000 IR
+commits to resolving original blind-write versions under authority, alongside
+1.093 seconds of fresh-head version reads. These inclusive wall stages identify
+placement opportunities, not removable CPU. The experiment captured only the
+original immutable snapshot versions on the preparation replica and retained
+them as ordinary, accounted point witnesses. Fresh-head reads, owner checks,
+conflicts, durable publication, receipt ordering and recovery remained unchanged.
+The transaction lease reserved the retained keys before allocation and released
+them on errors or cancellation. No cache, worker, pool or queue limit changed.
+
+Decision: reject the production change. In the same-source release ABBA below,
+one candidate improves and the other regresses. The average of the two per-run
+settlement P99s increases from 6,730.5 to 7,308.9 ms (8.6%); every thousand-
+conversation arm still fails both the one-second stream and five-second
+settlement budgets. Lower average total CPU and stream P99 do not establish a
+stable improvement in completed work. The production source is unchanged;
+the full candidate patch and binaries remain with the evidence.
+
+| 1,000 conversations, order | Stream scheduled P99 ms | Settle P99 ms | Event wall ms | Whole process-tree CPU s | Daemon peak MiB |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Baseline A1 | 4,912.3 | 8,006.9 | 13,775.4 | 66.705 | 3,257.2 |
+| Candidate B1 | 2,593.9 | 6,044.1 | 10,001.7 | 52.228 | 2,611.9 |
+| Candidate B2 | 5,661.3 | 8,573.6 | 14,479.8 | 68.362 | 3,254.8 |
+| Baseline A2 | 5,882.8 | 5,454.1 | 13,846.7 | 66.610 | 3,495.1 |
+
+The mean of per-run stream P99s falls from 5,397.6 to 4,127.6 ms; mean complete
+process-tree CPU falls from 66.658 to 60.295 seconds. Both gains coexist with
+the settlement regression and the second candidate's longer event wall. These
+are finite paired samples, not pooled percentiles or a confidence guarantee.
+
+Single-user and 16-conversation neighbors use the same four 8-KiB phase updates,
+one-second arrivals and two real SIGKILL/reopen boundaries. Their small sample
+counts do not establish stable tail latency. Means and total CPU retain the
+default-user tradeoff instead of hiding it behind the high-concurrency result:
+
+| Conversations / ABBA order | Stream scheduled mean ms | Settle mean ms | Whole process-tree CPU s |
+| --- | ---: | ---: | ---: |
+| 1 / A1 | 11.21 | 6.72 | 2.249 |
+| 1 / B1 | 11.10 | 6.34 | 2.151 |
+| 1 / B2 | 10.91 | 9.42 | 2.154 |
+| 1 / A2 | 11.66 | 5.41 | 2.187 |
+| 16 / A1 | 20.13 | 28.62 | 2.675 |
+| 16 / B1 | 22.36 | 28.17 | 2.675 |
+| 16 / B2 | 19.71 | 27.95 | 2.663 |
+| 16 / A2 | 20.22 | 29.14 | 2.707 |
+
+Each leg records N accept, bind, start and settle operations plus 4N stream
+operations; correlated submit/scheduled measurements are not additional work.
+All 12 legs preserve exact content and replay, running and completed recovery,
+and independent integrity: 4,068 conversations and 16,272 stream events in total.
+Low-concurrency legs satisfy their latency budgets but remain below the unchanged
+1,000-conversation coverage gate. The candidate separately passes 63 focused
+tests: preparation I/O/receipt/outbox rollback, OCC update/delete/ABA conflicts
+across overlay merge, foreign-authority rejection, retained-byte release after
+capture I/O failure, and existing optimistic/server neighbors. No full-native
+candidate pass is claimed for this rejected experiment.
+
+The same external observer samples resources every 100 ms, distinguishes daemon
+from offline verifier and guards PID reuse with process birth. Thousand-session
+daemon peaks are 969–1,013 threads and 1,067–1,112 FDs. Terminal metrics return
+to 257 active connections (the existing 256-idle pool plus observation); all
+observed authority processes exit. These samples do not prove sustained idle
+memory or kernel-memory bounds. CPU is the `RUSAGE_CHILDREN` delta after waiting
+for the complete benchmark process tree, including startup, client, daemon,
+recovery and verifier; it excludes the external observer. It is not hot-path
+CPU or wall time. The large native RSS remains an unresolved cost.
+
+Alternatives rejected: replacing fresh source reads with an internal epoch
+proof would miss external corruption; bypassing OCC or durability changes the
+contract; reporting only the faster candidate leg hides the counterexample.
+Unconditional capture can also add original reads when snapshot equals head,
+where existing validation returns immediately. This is why the low-concurrency
+neighbors are retained even though they do not provide precise micro-costs.
+
+Evidence lives under the ignored local directory
+`data/benchmarks/tofudb-parallel-20261019/stream-occ/`: all twelve reports and
+resource series, runner, summary, test/build logs, source patch and frozen
+artifacts. Both arms use the ac1df5394 Python client/fixture (benchmark SHA-256
+`2d96fe8c83d53e19ddf270b82821b5592fa16e0c408f0bec5065ccb4aa4e424a`),
+Strict durability on local XFS, profile off and the same release/mimalloc profile.
+Baseline native source is
+`7d2a42adee860fa774f2815c17f00e7310889072f689458bb5a589f62df494f1`;
+candidate is
+`f0cf2a29e168f35885c93bb580283ad7266df3e8d57cc57004c146f654f4c1fb`.
+The candidate excludes the separately rejected listener experiment. Timed
+windows exclude other agents' builds, tests and archive/worktree I/O. This
+experiment compares two native versions; the current-schema SQLite controls
+and their retained readiness failures belong to the separate listener cohort,
+not to a claimed OCC-versus-SQLite victory.
+
+<!-- Evidence note: former docs/evidence/ artifact snapshots cited here were retired from the tree; cited JSON artifacts remain recoverable from git history. -->

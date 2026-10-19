@@ -48,7 +48,8 @@ def _settle_mcp_round_display(round_entry, meta, underlying, args,
 
     try:
         from lib.tasks_pkg.tool_display import compose_mcp_display
-        fresh_display, _ = compose_mcp_display(underlying, args, user_id=user_id)
+        fresh_display, _ = compose_mcp_display(
+            underlying, args, tool_content=tool_content, user_id=user_id)
         if fresh_display:
             if fresh_display != round_entry.get('query'):
                 round_entry['query'] = fresh_display
@@ -59,9 +60,12 @@ def _settle_mcp_round_display(round_entry, meta, underlying, args,
 
     try:
         from lib.tasks_pkg.tool_display._mcp import _mcp_links
-        links = _mcp_links(args, user_id=user_id)
+        links = _mcp_links(args, fn_name=underlying,
+                           tool_content=tool_content, user_id=user_id)
         if links:
             round_entry['_mcpLinks'] = links
+        else:
+            round_entry.pop('_mcpLinks', None)
     except Exception as e:
         logger.debug('[MCP] settle link refresh failed for %s: %s',
                      underlying, e)

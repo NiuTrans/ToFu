@@ -41,6 +41,19 @@ def _request_owner(task, owner_user_id):
     return task_user_id(task)
 
 
+def _durable_guidance_response(task, guidance_id: str, owner: int) -> str | None:
+    if not task or not task.get('convId') or not task.get('_turnId'):
+        return None
+    from lib.turn_lifecycle import get_turn
+    turn = get_turn(task['convId'], task['_turnId'], user_id=owner)
+    for question in (turn.get('projection') or {}).get('toolRounds', []):
+        if (isinstance(question, dict) and question.get('guidanceId') == guidance_id
+                and question.get('guidanceAnswerCommandId')
+                and isinstance(question.get('guidanceResponse'), str)):
+            return question['guidanceResponse']
+    return None
+
+
 def request_human_guidance(
     guidance_id: str,
     task=None,
@@ -63,16 +76,28 @@ def request_human_guidance(
         GATE_GUIDANCE,
         guidance_id,
         owner_user_id=owner,
+        durable_scope=(task['convId'], task['_turnId']) if task
+        and task.get('convId') and task.get('_turnId') else None,
     )
+
     if entry is None:
         logger.error('[HumanGuidance] duplicate or capacity-exhausted request '
                      'guidance_id=%s; refusing registration', guidance_id)
         return None
 
+    durable_response = None
     try:
         if on_registered is not None:
             on_registered()
         while True:
+            try:
+                durable_response = _durable_guidance_response(task, guidance_id, owner)
+            except Exception:
+                # Storage authority outages delay consumption, never downgrade
+                # the accepted answer into a volatile response.
+                logger.warning('Guidance receipt read failed', exc_info=True)
+            if durable_response is not None:
+                break
             if abort_check is not None and abort_check():
                 break
             if task is not None:
@@ -83,18 +108,23 @@ def request_human_guidance(
                     task['_dispatch_heartbeat'] = time.time()
                 except (TypeError, AttributeError):
                     pass
-            if entry.event.wait(timeout=_ABORT_POLL_INTERVAL):
-                break
-            if human_gate_registry.poll_store_resolution(
-                GATE_GUIDANCE, guidance_id, entry,
-            ):
-                break
+            notified = entry.event.wait(timeout=_ABORT_POLL_INTERVAL)
+            if not notified:
+                notified = human_gate_registry.poll_store_resolution(GATE_GUIDANCE, guidance_id, entry)
+            if notified:
+                if entry.durable_scope is None:
+                    break
+                # A distributed flag or legacy local callback is only a wakeup.
+                # Scoped consumers must re-read the authoritative receipt; never
+                # return volatile text or spin on a permanently set event.
+                entry.event.clear()
     finally:
         # Atomic take preserves a response that won the cancellation race;
         # exceptions also release the exact entry rather than leaking capacity.
         resolution = human_gate_registry.take(
             GATE_GUIDANCE, guidance_id, entry)
-    response = resolution.response if resolution.resolved else None
+    response = durable_response if durable_response is not None else (
+        resolution.response if entry.durable_scope is None and resolution.resolved else None)
     logger.info('[HumanGuidance] Resolved %s → response_len=%d',
                 guidance_id, len(response) if isinstance(response, str) else 0)
     return response if isinstance(response, str) else None
@@ -122,8 +152,9 @@ def resolve_human_guidance(
     response_text: str,
     *,
     owner_user_id: int,
+    durably_accepted: bool = False,
 ) -> bool:
-    """Resolve this owner's pending human-guidance request."""
+    """Commit scoped legacy answers too; unscoped non-chat gates keep compatibility."""
     if not isinstance(response_text, str):
         raise ValueError('human guidance response must be a string')
     if not response_text.strip():
@@ -132,6 +163,14 @@ def resolve_human_guidance(
         raise ValueError(
             'human guidance response exceeds '
             f'{MAX_HUMAN_GATE_RESPONSE_LENGTH} characters')
+    scope = human_gate_registry.owned_durable_scope(
+        GATE_GUIDANCE, guidance_id, owner_user_id=owner_user_id)
+    if scope is not None and not durably_accepted:
+        from lib.turn_lifecycle import accept_live_guidance_answer
+        accept_live_guidance_answer(
+            scope[0], scope[1], guidance_id=guidance_id, response=response_text,
+            command_id='legacy-guidance:' + guidance_id[:240],
+            expected_projection_revision=0, user_id=owner_user_id)
     resolved = human_gate_registry.resolve(
         GATE_GUIDANCE,
         guidance_id,

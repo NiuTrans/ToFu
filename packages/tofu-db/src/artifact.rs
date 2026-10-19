@@ -4,6 +4,9 @@
 //! owner-bound blobs. Every secondary key retains the exact logical identity so
 //! digest collisions fail closed instead of aliasing user data.
 
+#[path = "artifact_query.rs"]
+pub(crate) mod query;
+
 use std::io::{self, Cursor};
 
 use serde::{Deserialize, Serialize};
@@ -16,7 +19,7 @@ use crate::entity::EntityKey;
 use crate::generated_tofudb_ir::{
     ARTIFACT_CONVERSATION_INDEX_NAMESPACE, ARTIFACT_DEDUPE_NAMESPACE, ARTIFACT_DOCUMENT_NAMESPACE,
     ARTIFACT_LIBRARY_INDEX_NAMESPACE, ARTIFACT_PARENT_INDEX_NAMESPACE,
-    ARTIFACT_PATH_HEAD_NAMESPACE, MAX_ARTIFACT_BYTES, MAX_ARTIFACT_ROWS_PER_CONVERSATION,
+    ARTIFACT_PATH_HEAD_NAMESPACE, MAX_ENTITY_RANGE_ROWS,
     MAX_TOOL_RESULT_ARTIFACT_BYTES, MAX_TOOL_RESULT_PRUNE_ROWS, MAX_TOOL_RESULT_RANGE_BYTES,
     MAX_TOOL_RESULT_TTL_MILLISECONDS, TOOL_RESULT_ARTIFACT_NAMESPACE,
     TOOL_RESULT_EXPIRY_INDEX_NAMESPACE,
@@ -68,7 +71,7 @@ const TOOL_RESULT_MANIFEST_MEDIA_TYPE: &str = "application/vnd.tofu.tool-result+
 /// still carries the real `resultId`; only the digest input drops it.
 ///
 /// MUST match ``_tool_result_content_digest`` in
-/// ``lib/storage_sidecar/operations_pkg/_artifacts.py`` byte-for-byte so the
+/// ``lib/storage_authority_sql/operations_pkg/_artifacts.py`` byte-for-byte so the
 /// TofuDB authority and the SQLite sidecar mint the same CAS address for the
 /// same logical result. serde_json's map preserves sorted keys and the default
 /// serializer is compact, matching Python's
@@ -168,7 +171,9 @@ fn materialize_blob(
         transaction.owner_user_id(),
         reference.into(),
     )?;
-    let mut output = Vec::with_capacity(reference.logical_bytes as usize);
+    let mut output = Vec::new();
+    output.try_reserve_exact(reference.logical_bytes as usize)
+        .map_err(|error| io::Error::new(io::ErrorKind::OutOfMemory, error))?;
     while let Some(chunk) = reader.next_chunk()? {
         if output.len().saturating_add(chunk.len()) > maximum {
             return Err(invalid_data(
@@ -215,7 +220,6 @@ impl ArtifactDocument {
             || self.msg_id.chars().count() > 512
             || self.parent_id.chars().count() > 256
             || self.version == 0
-            || self.size_bytes > MAX_ARTIFACT_BYTES as u64
             || self.content.logical_bytes != self.size_bytes
             || !self.source_ref.is_object()
             || !self.meta.is_object()
@@ -343,6 +347,17 @@ fn read_count(
     })
 }
 
+/// Certify only an empty conversation without scanning or hydrating artifacts.
+/// The existing count includes tombstones, so a positive count cannot prove
+/// live presence. Omitting that hint lets the owned artifact list resolve it.
+pub(crate) fn conversation_empty_hint(
+    database: &AuthorityDatabase,
+    transaction: &mut AuthorityTransaction,
+    conv_id: &str,
+) -> io::Result<Option<bool>> {
+    Ok((read_count(database, transaction, conv_id)? == 0).then_some(false))
+}
+
 fn write_count(
     database: &AuthorityDatabase,
     transaction: &mut AuthorityTransaction,
@@ -404,7 +419,6 @@ pub(crate) fn create(
         || !matches!(request.format.as_str(), "markdown" | "html" | "svg")
         || request.title.chars().count() > 300
         || request.parent_id.chars().count() > 256
-        || encoded.len() > MAX_ARTIFACT_BYTES
         || !request.source_ref.is_object()
         || !request.meta.is_object()
     {
@@ -431,9 +445,8 @@ pub(crate) fn create(
         }
     }
     let count = read_count(database, transaction, &request.conv_id)?;
-    if count >= MAX_ARTIFACT_ROWS_PER_CONVERSATION as u64 {
-        return Err(conflict("artifact conversation quota reached"));
-    }
+    let next_count = count.checked_add(1)
+        .ok_or_else(|| invalid_data("artifact conversation count overflow"))?;
     let mut parent_id = request.parent_id;
     let mut version = 1;
     if parent_id.is_empty() {
@@ -525,7 +538,7 @@ pub(crate) fn create(
             identity,
         )?;
     }
-    write_count(database, transaction, &document.conv_id, count + 1)?;
+    write_count(database, transaction, &document.conv_id, next_count)?;
     serde_json::to_vec(&json!({"created": true, "artifact": document.projection(None)}))
         .map_err(|_| invalid_data("artifact response cannot be encoded"))
 }
@@ -548,7 +561,7 @@ pub(crate) fn get(
                 database,
                 transaction,
                 document.content,
-                MAX_ARTIFACT_BYTES,
+                usize::MAX,
             )?)
             .map_err(|_| invalid_data("artifact content is not UTF-8"))?,
         )
@@ -567,20 +580,27 @@ fn scan_index(
     prefix: &[u8],
     limit: usize,
 ) -> io::Result<Vec<ArtifactDocument>> {
-    let (start, end) = EntityKey::prefix_range(
+    let (mut start, end) = EntityKey::prefix_range(
         transaction.tenant_id(),
         transaction.owner_user_id(),
         namespace,
         prefix,
     )?;
-    let rows = database.entity_scan(transaction, &start, &end, limit)?;
-    let mut documents = Vec::with_capacity(rows.len());
-    for (_, raw) in rows {
-        let id = decode_identity(&raw, None)?;
-        documents.push(
-            read_document(database, transaction, &id)?
-                .ok_or_else(|| invalid_data("artifact index target is missing"))?,
-        );
+    let mut documents = Vec::new();
+    while documents.len() < limit {
+        let page_size = (limit - documents.len()).min(MAX_ENTITY_RANGE_ROWS);
+        let rows = database.entity_scan(transaction, &start, &end, page_size)?;
+        let Some((last, _)) = rows.last() else { break };
+        let mut next_raw = last.key_bytes().to_vec();
+        next_raw.push(0);
+        let exhausted = rows.len() < page_size;
+        for (_, raw) in rows {
+            let id = decode_identity(&raw, None)?;
+            documents.push(read_document(database, transaction, &id)?
+                .ok_or_else(|| invalid_data("artifact index target is missing"))?);
+        }
+        if exhausted { break; }
+        start = EntityKey::new(transaction.tenant_id(), transaction.owner_user_id(), namespace, &next_raw)?;
     }
     Ok(documents)
 }
@@ -591,7 +611,8 @@ pub(crate) fn list(
     conv_id: &str,
     include_deleted: bool,
 ) -> io::Result<Vec<u8>> {
-    let count = read_count(database, transaction, conv_id)? as usize;
+    let count = usize::try_from(read_count(database, transaction, conv_id)?)
+        .map_err(|_| invalid_data("artifact count exceeds platform addressability"))?;
     let documents = scan_index(
         database,
         transaction,
@@ -622,7 +643,9 @@ pub(crate) fn versions(
         return Ok(b"[]".to_vec());
     }
     let mut ancestors = Vec::new();
-    for _ in 0..MAX_ARTIFACT_ROWS_PER_CONVERSATION {
+    let mut seen_up = std::collections::HashSet::new();
+    loop {
+        seen_up.insert(current.id.clone());
         ancestors.push(current.clone());
         if current.parent_id.is_empty() {
             break;
@@ -630,14 +653,16 @@ pub(crate) fn versions(
         let Some(parent) = read_document(database, transaction, &current.parent_id)? else {
             break;
         };
-        if parent.deleted_at != 0 || ancestors.iter().any(|row| row.id == parent.id) {
+        if parent.deleted_at != 0 || seen_up.contains(&parent.id) {
             break;
         }
         current = parent;
     }
     ancestors.reverse();
     let mut chain = ancestors;
-    while chain.len() < MAX_ARTIFACT_ROWS_PER_CONVERSATION {
+    let mut seen_forward: std::collections::HashSet<_> =
+        chain.iter().map(|row| row.id.clone()).collect();
+    loop {
         let current = chain.last().expect("artifact version chain has a root");
         let prefix = digest(&[current.id.as_bytes()]);
         let children = scan_index(
@@ -650,7 +675,7 @@ pub(crate) fn versions(
         let Some(child) = children.into_iter().next() else {
             break;
         };
-        if child.deleted_at != 0 || chain.iter().any(|row| row.id == child.id) {
+        if child.deleted_at != 0 || !seen_forward.insert(child.id.clone()) {
             break;
         }
         chain.push(child);
@@ -874,6 +899,10 @@ pub(crate) fn tool_put(
     } else {
         media_type
     };
+    if requested_media_type == TOOL_RESULT_MANIFEST_MEDIA_TYPE {
+        query::validate_manifest(content)?;
+    }
+    query::ensure_key(database, transaction)?;
     let digest_hex = canonical_tool_result_digest(content, requested_media_type);
     let effective_expiry;
     if let Some(mut current) = read_tool(database, transaction, &digest_hex)? {
@@ -929,180 +958,17 @@ pub(crate) fn tool_put(
 }
 
 pub(crate) fn tool_read(
-    database: &AuthorityDatabase,
-    transaction: &mut AuthorityTransaction,
-    artifact_ref: &str,
-    now_ms: u64,
-    offset: usize,
-    limit: usize,
+    database: &AuthorityDatabase, transaction: &mut AuthorityTransaction,
+    artifact_ref: &str, now_ms: u64, offset: &Value, limit: usize, selector: &str,
 ) -> io::Result<Option<Vec<u8>>> {
-    if now_ms == 0 || limit == 0 || limit > MAX_TOOL_RESULT_RANGE_BYTES {
-        return Err(invalid_input("invalid tool-result range"));
-    }
-    let digest_hex = parse_artifact_ref(artifact_ref)?;
-    let Some(document) = read_tool(database, transaction, digest_hex)? else {
-        return Ok(None);
-    };
-    if document.expires_at_ms <= now_ms {
-        return Ok(None);
-    }
-    let encoded = materialize_blob(
-        database,
-        transaction,
-        document.content,
-        MAX_TOOL_RESULT_ARTIFACT_BYTES,
-    )?;
-    let mut start = offset.min(encoded.len());
-    while start < encoded.len() && encoded[start] & 0xc0 == 0x80 {
-        start += 1;
-    }
-    let mut end = encoded.len().min(start.saturating_add(limit));
-    while end < encoded.len() && end > start && encoded[end] & 0xc0 == 0x80 {
-        end -= 1;
-    }
-    if end == start && end < encoded.len() {
-        end += 1;
-        while end < encoded.len() && encoded[end] & 0xc0 == 0x80 {
-            end += 1;
-        }
-    }
-    let visible = std::str::from_utf8(&encoded[start..end])
-        .map_err(|_| invalid_data("tool-result content is not UTF-8"))?;
-    // storage.v1 single-text-node envelope (the only manifest-free route the
-    // differential tests exercise): a read cursor consumes pre-page bytes
-    // (`skip`), the returned `offset` is the initial page cursor `o` (0 for a
-    // fresh read), provenance spans are artifact-absolute, and `sizeBytes`
-    // only appears on the terminal page (the finished total bytes consumed).
-    let skipped = offset.min(start);
-    let truncated = end < encoded.len();
-    let mut response = json!({
-        "artifactRef": format!("tool-result:{digest_hex}"),
-        "content": visible,
-        "coverage": if truncated { "incomplete" } else { "complete" },
-        "media": Vec::<String>::new(),
-        "nextCursor": if truncated { Some(end.to_string()) } else { None },
-        "offset": 0,
-        "provenance": if end > start {
-            vec![json!({
-                "artifactRef": format!("tool-result:{digest_hex}"),
-                "path": Vec::<String>::new(),
-                "start": skipped,
-                "end": skipped + (end - start),
-            })]
-        } else {
-            Vec::new()
-        },
-        "resumeCursor": skipped.to_string(),
-        "scope": "text_and_media_descriptors",
-        "truncated": truncated,
-        "unavailable": Vec::<String>::new(),
-    });
-    if !truncated {
-        response["sizeBytes"] = json!(skipped + (end - start));
-    }
-    serde_json::to_vec(&response)
-        .map(Some)
-        .map_err(|_| invalid_data("tool-result response cannot be encoded"))
+    query::run(database, transaction, artifact_ref, now_ms, offset, limit, selector, None)
 }
 
 pub(crate) fn tool_search(
-    database: &AuthorityDatabase,
-    transaction: &mut AuthorityTransaction,
-    artifact_ref: &str,
-    query: &str,
-    now_ms: u64,
-    cursor: usize,
-    limit: usize,
+    database: &AuthorityDatabase, transaction: &mut AuthorityTransaction,
+    artifact_ref: &str, query: &str, now_ms: u64, cursor: &Value, limit: usize, selector: &str,
 ) -> io::Result<Option<Vec<u8>>> {
-    if query.is_empty() || query.chars().count() > 200 || now_ms == 0 || limit == 0 || limit > 20 {
-        return Err(invalid_input("invalid tool-result search"));
-    }
-    // storage.v1 search cursors are opaque trq1 tokens; a bare integer offset is
-    // only valid as zero (contracts/tool_result_query_v1.json: numericCursor
-    // "zero only"). Any other numeric cursor is a protocol error, matching the
-    // legacy authority.
-    if cursor != 0 {
-        return Err(invalid_input(
-            "tool-result search cursor must be an opaque continuation token",
-        ));
-    }
-    let digest_hex = parse_artifact_ref(artifact_ref)?;
-    let Some(document) = read_tool(database, transaction, digest_hex)? else {
-        return Ok(None);
-    };
-    if document.expires_at_ms <= now_ms {
-        return Ok(None);
-    }
-    let content = String::from_utf8(materialize_blob(
-        database,
-        transaction,
-        document.content,
-        MAX_TOOL_RESULT_ARTIFACT_BYTES,
-    )?)
-    .map_err(|_| invalid_data("tool-result content is not UTF-8"))?;
-    // storage.v1 defines offsets over Python Unicode scalar positions. Build a
-    // bounded character view once; 16 MiB is already the admitted blob ceiling.
-    let characters: Vec<char> = content.chars().collect();
-    let needle: Vec<char> = python_casefold(query).chars().collect();
-    // Match the legacy authority's folded-stream scan: offsets are Python
-    // Unicode scalar (source codepoint) positions, and each source char may
-    // expand to several folded chars (e.g. U+FB00 -> "ff"). A match offset is
-    // the source index of the first folded char of the needle; the scan walks
-    // source chars one at a time (never skipping past a match), deduping only
-    // consecutive matches that share a source offset.
-    let start = cursor.min(characters.len());
-    let mut items: Vec<serde_json::Value> = Vec::new();
-    let mut window: Vec<char> = Vec::with_capacity(needle.len());
-    let mut origins: Vec<usize> = Vec::with_capacity(needle.len());
-    let mut finished = true;
-    for index in start..characters.len() {
-        for folded in python_casefold(&characters[index].to_string()).chars() {
-            window.push(folded);
-            if window.len() > needle.len() {
-                window.remove(0);
-            }
-            origins.push(index);
-            if origins.len() > needle.len() {
-                origins.remove(0);
-            }
-            if window == needle {
-                let found = origins[0];
-                if items.last().map_or(true, |last: &serde_json::Value| {
-                    last["offset"].as_u64() != Some(found as u64)
-                }) {
-                    let before = found.saturating_sub(160);
-                    let after = characters.len().min(index + 321);
-                    items.push(json!({
-                        "artifactRef": format!("tool-result:{digest_hex}"),
-                        "offset": found,
-                        "path": Vec::<String>::new(),
-                        "text": characters[before..after].iter().collect::<String>(),
-                    }));
-                    if items.len() >= limit {
-                        finished = false;
-                        break;
-                    }
-                }
-            }
-        }
-        if !finished {
-            break;
-        }
-    }
-    let has_more = !finished;
-    serde_json::to_vec(&json!({
-        "artifactRef": format!("tool-result:{digest_hex}"),
-        "coverage": if has_more { "incomplete" } else { "complete" },
-        "items": items,
-        "nextCursor": if has_more { Some(start.to_string()) } else { None },
-        "query": query,
-        "resumeCursor": cursor.to_string(),
-        "scope": "text_only",
-        "truncated": has_more,
-        "unavailable": Vec::<String>::new(),
-    }))
-    .map(Some)
-    .map_err(|_| invalid_data("tool-result search response cannot be encoded"))
+    query::run(database, transaction, artifact_ref, now_ms, cursor, limit, selector, Some(query))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1122,6 +988,7 @@ pub(crate) fn tool_prune(
     if now_ms == 0 || limit == 0 || limit > MAX_TOOL_RESULT_PRUNE_ROWS {
         return Err(invalid_input("invalid tool-result prune bound"));
     }
+    query::ensure_key(database, transaction)?;
     let (start, namespace_end) = EntityKey::prefix_range(
         transaction.tenant_id(),
         transaction.owner_user_id(),
@@ -1210,6 +1077,84 @@ mod tests {
     }
 
     #[test]
+    fn empty_hint_never_hides_live_or_tombstoned_artifact_metadata() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut database = AuthorityDatabase::initialize(directory.path()).unwrap();
+        let mut transaction = database.begin_with_identity_claim_scopes(7, 11).unwrap();
+        assert_eq!(conversation_empty_hint(&database, &mut transaction, "conversation").unwrap(), Some(false));
+        create(&database, &mut transaction, request("a", "report", 1)).unwrap();
+        assert_eq!(conversation_empty_hint(&database, &mut transaction, "conversation").unwrap(), None);
+        database.commit(transaction).unwrap();
+        let mut foreign = database.begin_with_identity_claim_scopes(7, 12).unwrap();
+        assert_eq!(conversation_empty_hint(&database, &mut foreign, "conversation").unwrap(), Some(false));
+        drop(foreign);
+        let mut transaction = database.begin_with_identity_claim_scopes(7, 11).unwrap();
+        delete(&database, &mut transaction, "a", 2).unwrap();
+        assert_eq!(conversation_empty_hint(&database, &mut transaction, "conversation").unwrap(), None);
+        assert_eq!(list(&database, &mut transaction, "conversation", false).unwrap(), b"[]");
+        database.commit(transaction).unwrap();
+    }
+
+    #[test]
+    fn conversation_admits_and_reads_complete_version_chain_beyond_old_quota() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut database = AuthorityDatabase::initialize(directory.path()).unwrap();
+        let mut transaction = database.begin(7, 11).unwrap();
+        for index in 0..1005 {
+            create(&database, &mut transaction,
+                   request(&format!("v{index}"), &format!("version {index}"), index + 1)).unwrap();
+        }
+        assert_eq!(read_count(&database, &mut transaction, "conversation").unwrap(), 1005);
+        database.commit(transaction).unwrap();
+        drop(database);
+        let database = AuthorityDatabase::open(directory.path()).unwrap();
+        let mut transaction = database.begin(7, 11).unwrap();
+        let all: Value = serde_json::from_slice(&list(&database, &mut transaction, "conversation", false).unwrap()).unwrap();
+        assert_eq!(all.as_array().unwrap().len(), 1005);
+        for anchor in ["v0", "v1004"] {
+            let chain: Value = serde_json::from_slice(&versions(&database, &mut transaction, anchor).unwrap()).unwrap();
+            assert_eq!(chain.as_array().unwrap().len(), 1005);
+            assert_eq!(chain[0]["id"], "v0");
+            assert_eq!(chain[1004]["id"], "v1004");
+            assert_eq!(chain[1004]["version"], 1005);
+        }
+        let mut foreign = database.begin(7, 12).unwrap();
+        assert_eq!(versions(&database, &mut foreign, "v1004").unwrap(), b"[]");
+    }
+
+    #[test]
+    fn unlimited_version_walk_still_stops_at_a_corrupt_cycle() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = AuthorityDatabase::initialize(directory.path()).unwrap();
+        let mut transaction = database.begin(7, 11).unwrap();
+        create(&database, &mut transaction, request("first", "one", 1)).unwrap();
+        create(&database, &mut transaction, request("last", "two", 2)).unwrap();
+        let mut first = read_document(&database, &mut transaction, "first").unwrap().unwrap();
+        first.parent_id = "last".to_owned();
+        put_document(&database, &mut transaction, &first).unwrap();
+        let chain: Value = serde_json::from_slice(&versions(&database, &mut transaction, "last").unwrap()).unwrap();
+        assert_eq!(chain.as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn complete_artifact_above_old_byte_quota_survives_commit_and_reopen() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut database = AuthorityDatabase::initialize(directory.path()).unwrap();
+        let content = format!("<html><!--{}--><p>late evidence</p></html>", "x".repeat(9 * 1024 * 1024));
+        let mut transaction = database.begin(7, 11).unwrap();
+        create(&database, &mut transaction, request("large", &content, 100)).unwrap();
+        database.commit(transaction).unwrap();
+        drop(database);
+        let database = AuthorityDatabase::open(directory.path()).unwrap();
+        let mut transaction = database.begin(7, 11).unwrap();
+        let saved: Value = serde_json::from_slice(&get(&database, &mut transaction, "large", true).unwrap().unwrap()).unwrap();
+        assert_eq!(saved["content"], content);
+        assert_eq!(saved["size_bytes"], content.len() as u64);
+        let mut foreign = database.begin(7, 12).unwrap();
+        assert!(get(&database, &mut foreign, "large", true).unwrap().is_none());
+    }
+
+    #[test]
     fn artifact_and_tool_result_blobs_round_trip_with_owner_isolation_and_reopen() {
         let directory = tempfile::tempdir().unwrap();
         let mut database = AuthorityDatabase::initialize(directory.path()).unwrap();
@@ -1263,7 +1208,7 @@ mod tests {
                 .unwrap();
         assert_eq!(full["content"], "# second\n");
         let range: Value = serde_json::from_slice(
-            &tool_read(&database, &mut read, &tool_ref, 1_500, 1, 8)
+            &tool_read(&database, &mut read, &tool_ref, 1_500, &json!(1), 8, "")
                 .unwrap()
                 .unwrap(),
         )
@@ -1273,13 +1218,13 @@ mod tests {
         assert_eq!(range["coverage"], "incomplete");
         assert_eq!(range["scope"], "text_and_media_descriptors");
         assert_eq!(range["media"], json!([]));
-        assert_eq!(range["provenance"][0]["start"], 1);
-        assert_eq!(range["provenance"][0]["end"], 9);
+        assert_eq!(range["provenance"][0]["start"], 2);
+        assert_eq!(range["provenance"][0]["end"], 10);
         // sizeBytes only appears on the terminal (finished) page.
         assert_eq!(range["sizeBytes"], Value::Null);
         let mut foreign = database.begin(7, 12).unwrap();
         assert!(get(&database, &mut foreign, "v2", true).unwrap().is_none());
-        assert!(tool_read(&database, &mut foreign, &tool_ref, 1_500, 0, 8)
+        assert!(tool_read(&database, &mut foreign, &tool_ref, 1_500, &json!(0), 8, "")
             .unwrap()
             .is_none());
     }
@@ -1450,7 +1395,7 @@ mod tests {
         vfs.arm_fault(None).unwrap();
         let mut database = AuthorityDatabase::open_with_vfs(Path::new("/data"), vfs).unwrap();
         let mut read = database.begin(7, 11).unwrap();
-        let document_present = tool_read(&database, &mut read, artifact_ref, 150, 0, 64)
+        let document_present = tool_read(&database, &mut read, artifact_ref, 150, &json!(0), 64, "")
             .unwrap()
             .is_some();
         drop(read);
@@ -1616,15 +1561,14 @@ mod tests {
         // The stored manifest keeps its own resultId (provenance intact); the
         // first writer's bytes win on a dedup hit.
         let mut read = database.begin(7, 11).unwrap();
-        let page = tool_read(&database, &mut read, &artifact_ref, 1_200, 0, 65536)
+        let page = tool_read(&database, &mut read, &artifact_ref, 1_200, &json!(0), 65536, "")
             .unwrap()
             .expect("stored manifest must be readable");
         let envelope: Value = serde_json::from_slice(&page).unwrap();
-        let stored: Value =
-            serde_json::from_str(envelope["content"].as_str().unwrap()).unwrap();
-        assert_eq!(
-            stored["resultId"],
-            "11111111-1111-4111-8111-111111111111"
-        );
+        assert_eq!(envelope["content"], "shared evidence body");
+        assert_eq!(envelope["resultId"], "11111111-1111-4111-8111-111111111111");
+        let document = read_tool(&database, &mut read, parse_artifact_ref(&artifact_ref).unwrap()).unwrap().unwrap();
+        let stored = materialize_blob(&database, &read, document.content, MAX_TOOL_RESULT_ARTIFACT_BYTES).unwrap();
+        assert_eq!(stored, first.as_bytes());
     }
 }

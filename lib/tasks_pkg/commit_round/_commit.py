@@ -1,8 +1,9 @@
-"""Per-round file-history SNAPSHOT daemon.
+"""Per-round file-history snapshot, owned by a worker or durable observer.
 
   - ``_spawn_async_commit_round`` / ``_run_commit_round_async`` — run
     ``file_history.make_snapshot`` in a daemon thread so the snapshot persist
-    can't block ``persist_task_result`` → ``_dispatch_queued_message``; emit a
+    can't block ``persist_task_result`` → ``_dispatch_queued_message``. Transient
+    SDK tasks finish the same operation on their existing joined worker. Emit a
     ``round_committed`` SSE event + enrich ``modifiedFileList`` with
     opaque-writer (code_exec / MCP) side-effects the journal misses.
   - ``_patch_turn_projection_with_file_list`` — fold the derived file list
@@ -76,7 +77,7 @@ def _task_round_has_opaque_writer(task: dict) -> bool:
 def _spawn_async_commit_round(task: dict, project_enabled: bool,
                               project_path: str | None,
                               project_paths: list[str] | None = None) -> None:
-    """Run ``file_history.make_snapshot`` in a daemon thread.
+    """Run history inline for transient tasks, deferred for durable tasks.
 
     Decoupled from ``_finalize_and_emit_done`` so the snapshot persist
     cannot block ``persist_task_result`` → ``_dispatch_queued_message``.
@@ -94,6 +95,13 @@ def _spawn_async_commit_round(task: dict, project_enabled: bool,
         )
         workspace_evidence = capture_workspace_evidence(task, project_path, project_paths)
         if not persist_terminal_workspace_intent(task):
+            return
+        if task.get('_transientRuntime'):
+            # An embedded caller can retire its project immediately after the
+            # joined SDK result. Complete this observer on the existing worker;
+            # a detached daemon would outlive that explicit resource boundary.
+            _run_commit_round_async(task, project_path, project_paths,
+                                    round_has_opaque_writer, workspace_evidence)
             return
         threading.Thread(
             target=_run_commit_round_async,

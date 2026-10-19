@@ -32,7 +32,7 @@ from lib.llm_dispatch.config._pricing import (
     reevaluate_pricing_tags,
 )
 from lib.model_info.capability_taxonomy import DISPATCHER_NON_CHAT_CAPS
-from lib.provider_template_recipes import load_provider_templates
+from lib.provider.provider_template_recipes import load_provider_templates
 
 pytestmark = pytest.mark.unit
 
@@ -164,7 +164,7 @@ def test_strip_unpriced_false_preserves_authored_tags():
 def test_template_onboarding_bundle_keeps_unpriced_authored_tag():
     """The compile seam re-evaluates tags but must not strip hand-authored
     labels from models the pricing tables do not cover yet (allowlist)."""
-    from lib.provider_template_recipes import compile_provider_template_bundle
+    from lib.provider.provider_template_recipes import compile_provider_template_bundle
 
     bundle = compile_provider_template_bundle(
         "stepfun", selected_model_ids=["step-3.5-flash"]

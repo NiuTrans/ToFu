@@ -168,7 +168,6 @@ export class PdfReader {
         await attempt.task?.destroy();
         const bytes = await source.loadBytes(attempt.controller.signal);
         if (stale()) throw new DOMException('PDF load cancelled', 'AbortError');
-        if (bytes.byteLength > limits.artifact_bytes) throw new Error('PDF exceeds the reader byte limit');
         attempt.task = library.getDocument({ data: bytes, ...renderLimits });
         return attempt.task.promise;
       };
@@ -184,8 +183,8 @@ export class PdfReader {
         }
       }
       if (stale()) { await document.destroy(); return false; }
-      if (document.numPages < 1 || document.numPages > limits.reader_pages) {
-        throw new Error('PDF exceeds the reader page limit');
+      if (!Number.isSafeInteger(document.numPages) || document.numPages < 1) {
+        throw new Error('PDF has an invalid page count');
       }
       const first = await document.getPage(1);
       if (stale()) return false;
@@ -523,8 +522,7 @@ export class PdfReader {
       await surface.render.promise;
       if (stale()) return;
       const content = await page.getTextContent();
-      const characters = content.items.reduce((count, item) => count + ('str' in item ? item.str.length : 0), 0);
-      if (characters <= limits.reader_page_text_characters) {
+      {
         const text = document.createElement('div');
         text.className = 'paper-reader-text textLayer';
         text.style.setProperty('--scale-factor', String(scale));

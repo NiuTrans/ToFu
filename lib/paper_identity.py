@@ -16,7 +16,7 @@ logger = get_logger(__name__)
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 try:
-    from lib.runtime_paths import uploads_root as _uploads_root
+    from lib.runtime.runtime_paths import uploads_root as _uploads_root
     PAPER_DIR = os.path.join(_uploads_root(), 'papers')
 except Exception as e:  # pragma: no cover - defensive startup fallback
     logger.debug('[Paper:Identity] uploads_root unavailable, using tree: %s', e)

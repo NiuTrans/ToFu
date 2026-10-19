@@ -4,7 +4,7 @@ Holds the static schema library used by :mod:`lib.openapi._spec`:
 
   * ``_default_responses`` — the shared status-code → response map.
   * ``_tofu_config_schema`` — lazily derived from
-    ``lib.agent_options.TofuOptions`` (kept behind a function so we
+    ``lib.agent_loop.agent_options.TofuOptions`` (kept behind a function so we
     don't import that module at import time).
   * ``_components`` — the full ``components`` object (security schemes +
     schemas), stitching ``_tofu_config_schema`` in as ``TofuConfig``.
@@ -79,17 +79,17 @@ def media_responses(*media_types: str, conditional: bool = False) -> dict:
 def _tofu_config_schema() -> dict:
     """Generate the TofuConfig OpenAPI schema from the typed dataclass.
 
-    Lives behind a function so we don't import lib.agent_options at module
+    Lives behind a function so we don't import lib.agent_loop.agent_options at module
     import time (lib.log + dataclasses keep this cheap, but we follow the
     project's lazy-import convention for cross-package edges).
     """
-    from lib.agent_options import TofuOptions
+    from lib.agent_loop.agent_options import TofuOptions
     return TofuOptions.openapi_schema()
 
 
 def _components() -> dict:
     from copy import deepcopy
-    from lib.api_v4_generated import OPENAPI_DOCUMENT
+    from lib.generated_api_v4 import OPENAPI_DOCUMENT
 
     result = {
         'securitySchemes': {
@@ -262,7 +262,7 @@ def _components() -> dict:
                                                 'follow-up polling/abort.'},
                 },
             },
-            # TofuConfig is generated from lib.agent_options.TofuOptions —
+            # TofuConfig is generated from lib.agent_loop.agent_options.TofuOptions —
             # the canonical typed schema for an agent run.  Adding a field
             # there auto-propagates here.
             'TofuConfig': _tofu_config_schema(),
@@ -271,6 +271,10 @@ def _components() -> dict:
                 'properties': {
                     'id': {'type': 'string'},
                     'kind': {'type': 'string'},
+                    'readSource': {'type': 'string', 'enum': ['live', 'durable'],
+                                   'description': 'Authority used for this state read; durable is a committed owner-scoped row.'},
+                    'streamState': {'type': 'string',
+                                    'description': 'Native provider stream termination evidence, retained in committed task results.'},
                     'status': {'type': 'string',
                                 'enum': ['pending', 'running',
                                          'done', 'error', 'aborted',

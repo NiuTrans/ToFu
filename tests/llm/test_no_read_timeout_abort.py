@@ -77,7 +77,7 @@ class TestNoSocketReadTimeoutsRemain:
         assert not hasattr(tp, 'FirstByteWatchdog')
 
     def test_first_byte_timeout_error_is_gone(self):
-        import lib.llm_errors as le
+        import lib.llm.llm_errors as le
         assert not hasattr(le, 'FirstByteTimeoutError')
         import lib.llm as llm
         assert not hasattr(llm, 'FirstByteTimeoutError')
@@ -293,7 +293,7 @@ class TestSyncAbortDuringSilence:
     def test_stop_during_zero_byte_hang_returns_within_a_second(self, monkeypatch):
         """THE headline behaviour. Pre-fix (measured): Stop at t=1.0s, the
         request kept hanging 6.2s. Post-fix it must unblock ~immediately."""
-        from lib.llm_errors import AbortedError
+        from lib.llm.llm_errors import AbortedError
         monkeypatch.setattr('lib.llm.stream.get_sync_session',
                             lambda: _FakeSession(_WedgedResp()))
         monkeypatch.setattr('lib.llm._transport.ABORT_POLL_INTERVAL', 0.05)
@@ -404,7 +404,7 @@ class _FakeAsyncClient:
 @pytest.mark.unit
 class TestAsyncAbortDuringSilence:
     def test_stop_during_zero_byte_hang_returns_fast(self, monkeypatch):
-        from lib.llm_errors import AbortedError
+        from lib.llm.llm_errors import AbortedError
 
         async def _main():
             resp = _AsyncWedgedResp()

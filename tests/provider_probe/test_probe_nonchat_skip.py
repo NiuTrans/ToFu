@@ -55,7 +55,7 @@ import pytest
 
 pytestmark = pytest.mark.unit
 
-import lib.provider_probe as pp  # noqa: E402
+import lib.provider.provider_probe as pp  # noqa: E402
 
 _NONCHAT_CAPS = (['image_gen'], ['embedding'], ['transcription'], ['tts'])
 
@@ -249,7 +249,7 @@ class ModalityProbeTest(unittest.TestCase):
             capture.update(kw)
             capture['url'] = url
             return resp
-        return mock.patch('lib.http_client.http_post', side_effect=fake)
+        return mock.patch('lib.http_transport.client.http_post', side_effect=fake)
 
     def test_embedding_probe_shape(self):
         cap = {}

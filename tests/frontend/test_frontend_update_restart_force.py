@@ -56,7 +56,8 @@ import shutil
 import subprocess
 
 import pytest
-from tests._runtime_sections import orchestration_legacy_test_root as _legacy_test_root
+from pathlib import Path
+from tests._runtime_sections import native_module_path, orchestration_legacy_test_root as _legacy_test_root
 
 pytestmark = pytest.mark.unit
 
@@ -95,6 +96,9 @@ function domElement(id) {
     const classes = new Set();
     const attributes = new Map();
     domElements[id] = {
+      ownerDocument: global.document,
+      append: () => {}, appendChild: () => {}, remove: () => {},
+      addEventListener: () => {}, closest: () => null,
       classList: {
         add(c){ classes.add(c); },
         remove(...names){ names.forEach((name) => classes.delete(name)); },
@@ -116,7 +120,10 @@ function domElement(id) {
   }
   return domElements[id];
 }
+let syntheticNode = 0;
 global.document = {
+  body: {appendChild: () => {}},
+  createElement: () => domElement('node-' + (++syntheticNode)),
   getElementById: (id) => domElement(id),
   querySelector: () => null,
   addEventListener: () => {},
@@ -219,6 +226,7 @@ global.showConfirm = async (msg) => { confirmCalls.push(msg); return confirmRetu
 global.pushSubscribe = () => {};
 global.pushUnsubscribe = () => {};
 
+(0, eval)(fs.readFileSync(process.argv[3], 'utf8'));
 const SRC = fs.readFileSync(process.argv[2], 'utf8');
 function loadModule(src) { (0, eval)(src); }
 // The first health probe after acceptance must fire promptly (restart UX):
@@ -407,7 +415,7 @@ const flush = () => new Promise((r) => setImmediate(r));
     await flush(); await flush();
     const body = domElement('updateModalBody');
     const card = domElement('updRestartCard');
-    check('s10_modal_open_immediately', domElement('updateModal').classList.contains('open'));
+    check('s10_modal_does_not_block_shell', !domElement('updateModal').classList.contains('open'));
     check('s10_preparing_card_immediately', body.innerHTML.indexOf('is-preparing') >= 0 && body.innerHTML.indexOf('update.restartPreparingTitle') >= 0);
     check('s10_controls_disabled', domElement('updateRestartNowBtn').disabled && domElement('updateShutdownBtn').disabled);
     check('s10_generic_alarm_suppressed', monitorCalls.begin === 1 && monitorCalls.end.length === 0);
@@ -471,6 +479,42 @@ const flush = () => new Promise((r) => setImmediate(r));
     check('s13_alarm_rechecks_backend', monitorCalls.end.length === 1 && monitorCalls.end[0] === false);
   }
 
+  // Slow valid boots retain ownership, keep observing, then reload on ready.
+  {
+    reset({firstThrows409:false});
+    await restartServer();
+    _restartPreBootId = 'old';
+    _restartAcceptedAt = Date.now() - 270000;
+    Api.health.info = async () => ({ok:true,bootId:'new',boot:{status:'running',phaseTotal:9,currentPhase:{index:3,key:'storage_authority_sql'}}});
+    await _restartCheckHealth();
+    await _restartCheckHealth();
+    _restartAnimate();
+    check('slow_boot_keeps_observation', !_restartDone && _restartActive);
+    check('slow_boot_keeps_controls_disabled', domElement('updateRestartNowBtn').disabled);
+    check('slow_boot_warns_once', toastCalls.filter(x => x[1] === 'update.restartTimeout').length === 1);
+    check('slow_boot_shows_actual_phase', domElement('updRestartPhase').textContent.includes('storage_authority_sql'));
+    const posts = restartCalls.length;
+    await restartServer();
+    check('slow_boot_does_not_duplicate_restart', restartCalls.length === posts);
+    Api.health.info = async () => ({ok:true,bootId:'new',boot:{status:'ready'}});
+    await _restartCheckHealth();
+    check('slow_boot_eventually_completes', _restartDone && domElement('updRestartPct').textContent === '100%');
+  }
+  {
+    reset({firstThrows409:false});
+    Api.health.info = async () => ({ok:true,bootId:'running',boot:{status:'running',phaseTotal:9,currentPhase:{index:3,key:'storage_authority_sql'}}});
+    await restartServer();
+    check('adopt_running_boot_no_post', restartCalls.length === 0);
+    check('adopt_running_boot_observes', _restartActive && !_restartDone);
+    Api.health.info = async () => ({ok:true,bootId:'running',boot:{status:'failed',failedPhase:{index:3,key:'storage_authority_sql'},error:'injected storage failure'}});
+    await _restartCheckHealth();
+    check('failed_boot_shows_cause', domElement('updRestartCard').innerHTML.includes('injected storage failure'));
+    check('failed_boot_stops_observation', _restartDone && !_restartActive);
+    let retries = 0;
+    Api.health.retryBoot = async () => { retries++; Api.health.info = async () => ({ok:true,bootId:'running',boot:{status:'running'}}); };
+    await restartServer();
+    check('failed_boot_retries_phase_only', retries === 1 && restartCalls.length === 0);
+  }
   console.log(out.join('\n'));
   process.exit(0);
 })();
@@ -484,7 +528,9 @@ def test_update_restart_force_confirm_flow():
         f.write(_HARNESS)
     try:
         proc = subprocess.run(
-            ['node', harness, os.path.join(JS_DIR, 'update.js')],
+            ['node', harness, os.path.join(JS_DIR, 'update.js'), native_module_path(
+                '.native/restart-observation.js', Path(__file__).resolve().parents[2] /
+                'frontend/src/features/settings/restart-observation.ts')],
             capture_output=True, text=True, timeout=60,
         )
     finally:

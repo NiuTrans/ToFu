@@ -23,7 +23,7 @@ def test_task_functions_need_no_hosted_review(name, mode):
         tools=[tool(name)], round_num=1)
     assert decision['programmaticCalling'] == mode
     assert decision['programmaticEligibleTools'] == []
-    assert decision['programmaticTier'] == 'program'
+    assert decision['programmaticTier'] == ('program' if mode == 'on' else 'batch')
 
 
 @pytest.mark.parametrize('catalog', [[], [tool('execute_tools'), tool('execute_program'), tool('search_tools')],

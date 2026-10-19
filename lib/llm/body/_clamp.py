@@ -43,7 +43,9 @@ def _clamp_completion_to_context_window(
     Never raises: on any failure it returns ``max_tokens`` unchanged so a
     clamp helper can never block a request.
     """
-    if not messages or not max_tokens or max_tokens <= 0:
+    admitted_input_tokens = validated_admitted_input_tokens(
+        precomputed_input_tokens)
+    if (not messages and admitted_input_tokens is None) or not max_tokens or max_tokens <= 0:
         return max_tokens
     try:
         from lib.tasks_pkg.compaction._tokens import resolve_model_context_limit
@@ -54,8 +56,6 @@ def _clamp_completion_to_context_window(
         window = context_window or resolve_model_context_limit(model, provider_id)
         if not window or window <= 0:
             return max_tokens
-        admitted_input_tokens = validated_admitted_input_tokens(
-            precomputed_input_tokens)
         if admitted_input_tokens is not None:
             input_tokens = admitted_input_tokens
         else:

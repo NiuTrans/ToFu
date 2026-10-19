@@ -17,7 +17,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from lib.runtime_state_store import reset_for_test  # noqa: E402
+from lib.runtime.runtime_state_store import reset_for_test  # noqa: E402
 from lib.tasks_pkg.manager import (  # noqa: E402
     dismiss_pending_resume,
     read_pending_resume,

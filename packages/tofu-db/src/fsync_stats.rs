@@ -101,8 +101,9 @@ pub(crate) fn note_history_decoded_transactions(count: usize) {
     crate::request_profile::work(crate::request_profile::Work::HistoryDecodedTransactions, count as u64);
 }
 
-/// Bytes accepted by WAL pwrite, before its durability barrier. This is engine
-/// traffic, not physical device writes and not an acknowledged-durability count.
+/// Framed bytes accepted by inline WAL writes or the owned worker handoff,
+/// before its durability barrier. This is logical engine traffic, not physical
+/// device writes or acknowledged durability. Worker write counters are separate.
 pub(crate) fn note_wal_encoded_bytes(bytes: u64) {
     crate::request_profile::work(crate::request_profile::Work::WalBytes, bytes);
     WAL_ENCODED_BYTES.fetch_add(bytes, Ordering::Relaxed);
@@ -370,7 +371,15 @@ pub const STAGE_PROTOCOL_FRAME_DECODE: usize = 201;
 pub const STAGE_PREPARED_BLOB_PUBLISH: usize = 202;
 pub const STAGE_RECEIPT_ENCODE: usize = 203;
 pub const STAGE_RECEIPT_COMPRESS: usize = 204;
-const STAGE_COUNT: usize = 205;
+pub const STAGE_AUTHORITY_COMMIT_VALIDATE_REBASE: usize = 205;
+pub const STAGE_AUTHORITY_COMMIT_PRIVATE_BLOB_PUBLISH: usize = 206;
+pub const STAGE_AUTHORITY_COMMIT_INDEXES: usize = 207;
+pub const STAGE_AUTHORITY_COMMIT_OUTBOX_CAPTURE: usize = 208;
+pub const STAGE_AUTHORITY_COMMIT_STREAM_PREPARE: usize = 209;
+pub const STAGE_OVERLAY_VALIDATE_HEAD_VERSIONS: usize = 210;
+pub const STAGE_OVERLAY_VALIDATE_ORIGINAL_BLIND_VERSIONS: usize = 211;
+pub const STAGE_OVERLAY_VALIDATE_RANGE_WITNESSES: usize = 212;
+const STAGE_COUNT: usize = 213;
 pub const STAGE_NAMES: [&str; STAGE_COUNT] = [
     "semantic",
     "prepare",
@@ -577,6 +586,14 @@ pub const STAGE_NAMES: [&str; STAGE_COUNT] = [
     "prepared_blob_publish",
     "receipt_encode",
     "receipt_compress",
+    "authority_commit_validate_rebase",
+    "authority_commit_private_blob_publish",
+    "authority_commit_indexes",
+    "authority_commit_outbox_capture",
+    "authority_commit_stream_prepare",
+    "overlay_validate_head_versions",
+    "overlay_validate_original_blind_versions",
+    "overlay_validate_range_witnesses",
 ];
 
 #[derive(Clone, Copy)]
@@ -980,3 +997,28 @@ mod foreground_sampler_tests {
 #[path = "resource_exhaustion.rs"]
 mod resource_exhaustion;
 pub(crate) use resource_exhaustion::{note_resource_exhaustion, resource_exhaustion_snapshot};
+
+// History promotion owns these preparation counters; they are attempts/work,
+// never proof that the later CONTROL publication completed.
+static HISTORY_PROMOTION_PACKS: AtomicU64 = AtomicU64::new(0);
+static HISTORY_PROMOTION_REPLACEMENTS: AtomicU64 = AtomicU64::new(0);
+static HISTORY_PROMOTION_PACKED_BYTES: AtomicU64 = AtomicU64::new(0);
+static HISTORY_PROMOTION_LOOSE_BLOCKS: AtomicU64 = AtomicU64::new(0);
+
+pub(crate) fn note_history_promotion_pack(bytes: u64, replacement: bool) {
+    HISTORY_PROMOTION_PACKS.fetch_add(1, Ordering::Relaxed);
+    HISTORY_PROMOTION_PACKED_BYTES.fetch_add(bytes, Ordering::Relaxed);
+    if replacement { HISTORY_PROMOTION_REPLACEMENTS.fetch_add(1, Ordering::Relaxed); }
+}
+pub(crate) fn note_history_promotion_loose_block() {
+    HISTORY_PROMOTION_LOOSE_BLOCKS.fetch_add(1, Ordering::Relaxed);
+}
+pub(crate) fn history_promotion_snapshot() -> serde_json::Value {
+    serde_json::json!({"contract": "tofudb.history-promotion/v1",
+        "preparedPacks": HISTORY_PROMOTION_PACKS.load(Ordering::Relaxed),
+        "catalogReplacements": HISTORY_PROMOTION_REPLACEMENTS.load(Ordering::Relaxed),
+        "packedSourceBytes": HISTORY_PROMOTION_PACKED_BYTES.load(Ordering::Relaxed),
+        "attemptedLooseBlocks": HISTORY_PROMOTION_LOOSE_BLOCKS.load(Ordering::Relaxed),
+        "fixedCounterBytes": 4 * std::mem::size_of::<AtomicU64>(),
+        "scope": "process lifetime preparation work; not committed publication or physical device I/O"})
+}

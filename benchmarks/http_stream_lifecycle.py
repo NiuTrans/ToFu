@@ -245,7 +245,7 @@ def trial(loop,protocol,directory,samples=1,memory=False,diagnose=False,transpor
     listener=socket.socket();listener.bind(('127.0.0.1',0));port=listener.getsockname()[1]
     certfile=keyfile=''
     if protocol=='h2':
-        from lib.server_tls import ensure_tls_certificates
+        from lib.server.server_tls import ensure_tls_certificates
         certfile,keyfile=ensure_tls_certificates(data_root=str(directory),bind_host='127.0.0.1',environ={})
     origin=f'{"https" if protocol=="h2" else "http"}://127.0.0.1:{port}'
     verify=certfile or True

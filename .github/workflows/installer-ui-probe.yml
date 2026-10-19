@@ -19,7 +19,7 @@ on:
   workflow_dispatch:
     inputs:
       target:
-        description: 'NSI target to probe (agent = TofuAgent wizard)'
+        description: 'NSI target to probe (agent = TofuRemote wizard)'
         required: true
         default: 'agent'
         type: choice

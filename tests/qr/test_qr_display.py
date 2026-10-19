@@ -483,7 +483,7 @@ class TestAskHumanSeam:
         """Base64 in the question would be shipped to the translation API as
         prose when autoTranslate is on (stream_lifecycle.js) and come back
         mangled. A short sentence + path URL survives that round trip."""
-        monkeypatch.setattr('lib.runtime_paths.uploads_root', lambda: str(tmp_path))
+        monkeypatch.setattr('lib.runtime.runtime_paths.uploads_root', lambda: str(tmp_path))
         from lib.qr import qr_login_question
         q = qr_login_question(PAYLOAD, prompt='Scan to log in')
         assert 'base64' not in q
@@ -492,7 +492,7 @@ class TestAskHumanSeam:
 
     def test_the_referenced_file_exists_and_scans(self, tmp_path, monkeypatch):
         """The prompt must not reference a code that isn't there."""
-        monkeypatch.setattr('lib.runtime_paths.uploads_root', lambda: str(tmp_path))
+        monkeypatch.setattr('lib.runtime.runtime_paths.uploads_root', lambda: str(tmp_path))
         from lib.qr import qr_login_question
         q = qr_login_question(PAYLOAD)
         name = q.split('](/api/images/')[1].split(')')[0]

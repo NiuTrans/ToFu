@@ -149,7 +149,7 @@ class TestStreamShell:
 
     def test_persistent_404_surfaces_request_scoped_after_budget(self):
         from lib.llm._sse_core import SUBSCRIPTION_404_MAX_RETRIES
-        from lib.llm_errors import RequestScopedError
+        from lib.llm.llm_errors import RequestScopedError
         server, base = _start_server()
         _FlappingHandler.reset(fail_first=99)
         try:
@@ -163,7 +163,7 @@ class TestStreamShell:
             server.shutdown()
 
     def test_keyed_gateway_404_surfaces_immediately(self):
-        from lib.llm_errors import RequestScopedError
+        from lib.llm.llm_errors import RequestScopedError
         server, base = _start_server()
         _FlappingHandler.reset(fail_first=99)
         try:

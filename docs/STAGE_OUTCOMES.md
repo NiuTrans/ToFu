@@ -22,6 +22,23 @@ and immutable stage-launch identity. Ordinary completion requires the shared
 terminal verdict; bare `done`, truncation, and failed streams cannot authorize
 review. Research continues to use its native durable pipeline authority.
 
+Problem: terminal callbacks and run polling can both observe a running episode;
+one settles before the other's read or CAS, while run progression is still pending.
+Decision: run-owned settlement explicitly reconciles through `episodes.py`.
+Only an identical owner-bound settlement, including usage completeness, verdict,
+receipts and learning, confirms the immutable winner without another write.
+Commit timestamps remain the winner's; conflicting contents and unavailable
+authority still refuse. Ordinary settlement remains strict by default. Recovery
+after an episode commit checks the same evidence before completing the run.
+A frozen unstarted repair names its predecessor through `stage_launch`; refusal
+to admit that successor preserves the predecessor's already settled episode.
+Alternatives: ignoring terminal errors can accept contradictory evidence;
+process-local locks cannot protect other processes or recover lost acknowledgments.
+No worker, cache, journal or retry loop is added. Deterministic callback/poll and
+interrupted-repair tests plus concurrent SQLite/TofuDB CAS tests cover this boundary.
+The settlement receipt
+records the reproducer, verification scope and remaining whole-goal limits.
+
 Managed durable stages prepare complete immutable output/tool parts through the
 existing required terminal-delivery port. Parts alone authorize no progression.
 
@@ -58,10 +75,11 @@ result produced 27 existing-size parts (786,654 archive characters); streaming
 descriptor/preview calculation took 6.99 ms and 481,516 traced peak bytes beyond
 the already supplied text. This measures archive preparation, not experiment
 execution or scientific validity.
-The ordinary owned task-result CAS commits a bounded `terminalContext` capsule:
+The ordinary owned task-result CAS commits the complete `terminalContext` capsule:
 exact terminal facts, consumption/completeness, review input, content epoch and
 submission marker including prepared-input identity. No transcript or runtime
-config is duplicated in this capsule; its serialized bound is 1 MiB. Preparation
+config is duplicated in this capsule; its complete frozen review input has no
+application byte/character admission quota. Preparation
 failure retains ordinary retry debt and heavy evidence without a terminal write.
 A stale writer rejected by the result CAS cannot materialize an outcome.
 
@@ -161,7 +179,7 @@ Alternatives: driver-written summaries and automatic completion at budget cutoff
 
 For exact file-body delivery, the sole call may instead contain only
 `delivery_source`, an already sealed current-executor artifact ID and byte digest.
-The complete UTF-8 body, within the existing file byte bound, becomes the final
+The complete UTF-8 body, without a private file byte quota, becomes the final
 reply without model recopy, formatting or a live-file reread. Binary, blank,
 foreign, incomplete or corrupt sources refuse. All previously declared generations
 must remain complete. The intent stores only the immutable reference; full bytes
@@ -206,9 +224,10 @@ exactly; binary bytes use base64 without implying semantic interpretability.
 
 Capture opens every directory/file component without following symlinks and
 refuses hardlinks, nonregular files, traversal, configured runtime storage and
-named credential paths. Limits
-are 2 MiB/file, 8 MiB selected original bytes, 16 generations and 16 MiB serialized
-bundle. Selection reserves capacity before part writes. Interrupted reservations
+named credential paths. File bodies, selected bytes, generation count and serialized
+bundles have no application admission quota. Capture reads through EOF in 64 KiB
+chunks; the before/after descriptor identity and size must still match. Selection
+reserves the generation through the manifest CAS before immutable part writes. Interrupted reservations
 remain visible; terminal closure records unavailable content explicitly rather
 than losing known consumption or implying a complete snapshot. Storage outages
 retain the existing terminal-persistence retry debt. Nothing scans the project
@@ -848,3 +867,35 @@ in the immutable protocol and protocol digest; mismatched or missing report
 identities block review admission. Original objective and numeric target remain
 unchanged. Trusting names or silently promoting old protocols into version-bound
 validation was rejected. This is consistency evidence, not benchmark authenticity.
+
+Complete terminal context — Problem: a fixed 1 MiB checkpoint guard and
+200,000-character frozen-prompt schema could block owned result persistence and
+subsequent review restoration. Decision: retain the complete schema-valid
+terminal capsule and frozen launch prompt through ordinary task-result CAS.
+Exact owner/task/dispatch/content-epoch/status/verdict and source digests remain
+required before materialization. Preparation still acknowledges immutable parts
+before result commit; uncommitted parts grant no outcome authority. Real
+serialization/storage failures retain retry debt and cannot fake settlement.
+Alternatives: larger quotas retain refusal; clipping frozen input changes the
+review; dropping binding/digest checks grants stale writers authority. Tests
+commit a large Unicode capsule, simulate a lost post-commit callback, remove
+the transient carrier and restore the original prompt without executor replay
+or input regeneration. Whole-capsule storage remains atomic and scales with
+its actual complete metadata; transcript/tool originals retain their archives.
+The shared terminal-delivery preparer likewise has no opaque-payload byte
+quota. It still requires an object, serializable finite JSON, the committed
+task/owner identity and an unchanged terminal content epoch/digest. Prepared
+values are frozen once and returned as isolated copies; preparation failure
+remains retryable without granting delivery acknowledgement.
+Measurement: a complete 1,741,325-byte UTF-8 terminal capsule committed and
+restored its original large review input after a simulated lost callback in
+2.7233 s under tracing, with 29,926,180 peak traced bytes. This includes owned
+task-result persistence/recovery with controlled model submission; it does not
+measure real provider work or an actual process crash.
+The large terminal capsule commits and restores on both isolated SQLite and
+TofuDB authorities. Native task ownership remains enforced: the fixture starts
+its authority with the same explicit user subject as the tasks. Artifact identity
+and copied external compile inputs are verified; live server configuration is
+unchanged. Size relaxation grants no foreign-owner or stale-writer authority.
+
+<!-- Evidence note: former docs/evidence/ artifact snapshots cited here were retired from the tree; cited JSON artifacts remain recoverable from git history. -->

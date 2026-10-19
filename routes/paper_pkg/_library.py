@@ -38,7 +38,6 @@ from routes.api_v1.auth import request_user_id
 logger = get_logger(__name__)
 
 from routes.paper_pkg._common import (
-    _PaperDownloadTooLarge,
     _PaperInvalidPDF,
     _store_uploaded_pdf_atomic,
     api_v1_paper_bp,
@@ -348,7 +347,7 @@ def upload_paper():
     try:
         # NOTE: Quart's FileStorage.save is an async coroutine. This is a SYNC
         # handler (see docstring), so consume its sync-safe stream explicitly.
-        # The helper bounds the stream and publishes only after PDF validation.
+        # The helper stages the complete source and publishes after PDF validation.
         file.stream.seek(0)
         pdf_bytes = _store_uploaded_pdf_atomic(file.stream, filepath)
         file_size = len(pdf_bytes)
@@ -358,9 +357,6 @@ def upload_paper():
             file_size,
             original_name,
         )
-    except _PaperDownloadTooLarge as e:
-        logger.warning("[Paper:Upload] Rejected oversized %s: %s", original_name, e)
-        return api_error(str(e), status=413)
     except _PaperInvalidPDF as e:
         logger.warning("[Paper:Upload] Rejected invalid PDF %s: %s", original_name, e)
         return api_bad_request(

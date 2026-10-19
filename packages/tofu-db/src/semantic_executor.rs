@@ -5,6 +5,7 @@
 //! response projection, receipts, and logical replay capture happen above the
 //! physical authority; all database effects flow through `TransactionIr`.
 
+use crate::generated_tofudb_ir::MAX_LEGACY_DOCUMENT_BYTES;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::io;
@@ -22,10 +23,10 @@ use crate::generated_storage_operations::{STORAGE_REGISTRY_VERSION, STORAGE_SCHE
 use crate::generated_tofudb_ir::{
     DESKTOP_PREFERENCE_NAMESPACE, EVENT_FORMAT_VERSION, EXECUTABLE_STORAGE_OPERATIONS,
     MAX_DESKTOP_AGENT_ID_CHARACTERS, MAX_MODEL_ROUTING_CIPHERTEXT_CHARACTERS,
-    MAX_MODEL_ROUTING_DOCUMENT_BYTES, MAX_MODEL_ROUTING_KEY_HINT_CHARACTERS,
+    MAX_MODEL_ROUTING_KEY_HINT_CHARACTERS,
     MAX_MODEL_ROUTING_SECRET_REFERENCE_CHARACTERS,
     MAX_MODEL_ROUTING_TIMESTAMP_SECONDS, MAX_RECENT_PROJECT_PATH_CHARACTERS,
-    MAX_RECENT_PROJECT_TOUCH_BATCH, MAX_TASK_RESULT_CACHE_FACT,
+    MAX_TASK_RESULT_CACHE_FACT,
     MAX_TASK_RESULT_COST_EXPERIMENT_ROWS, MAX_TASK_RESULT_COST_EXPERIMENT_SCAN_ROWS,
     MAX_TASK_RESULT_DOCUMENT_BYTES, MAX_TASK_RESULT_RECOVERY_ROWS,
     MAX_TASK_RESULT_RECOVERY_SCAN_ROWS, MAX_TASK_RESULT_SUMMARY_ROWS,
@@ -39,7 +40,6 @@ use crate::semantic::AdmittedRequest;
 use crate::transaction_ir::{
     EntityWriteCondition, IndexedStreamAppendItem, IndexedStreamRetentionClass, TransactionIr,
     TransactionIrCommandEffects, TransactionIrResult, TransactionIrStep,
-    MAX_TRANSACTION_IR_LITERAL_BYTES,
 };
 use crate::turn_search_projection::{ConversationSearchRequest, TurnSearchProjection};
 
@@ -48,6 +48,9 @@ pub(crate) mod search_backfill;
 
 #[path = "semantic_search_backfill_global.rs"]
 pub(crate) mod search_backfill_global;
+
+#[path = "semantic_project_dispatch.rs"]
+mod project_dispatch;
 
 const DESKTOP_PREFERENCE_KEY: &[u8] = b"preference";
 
@@ -800,11 +803,8 @@ fn compile_artifact(
             let content = artifact_optional_text(
                 &payload,
                 "content",
-                crate::generated_tofudb_ir::MAX_ARTIFACT_BYTES,
+                usize::MAX,
             )?;
-            if content.len() > crate::generated_tofudb_ir::MAX_ARTIFACT_BYTES {
-                return Err(SemanticExecutionError::ResourceExhausted);
-            }
             (
                 vec![TransactionIrStep::ArtifactCreate {
                     request: crate::artifact::CreateRequest {
@@ -956,9 +956,13 @@ fn compile_artifact(
             }
             let artifact_ref = required_text(&payload, "artifact_ref", 96)?.to_owned();
             let now_ms = positive_identity(&payload, "now_ms")?;
+            let selector = match payload.get("selector") {
+                None | Some(Value::Null) => String::new(),
+                Some(Value::String(value)) => value.clone(),
+                _ => return Err(SemanticExecutionError::InvalidPayload),
+            };
             if admitted.operation.name.ends_with(".read") {
-                let offset = usize::try_from(optional_nonnegative_integer(&payload, "offset", 0)?)
-                    .map_err(|_| SemanticExecutionError::InvalidPayload)?;
+                let offset = payload.get("cursor").or_else(|| payload.get("offset")).cloned().unwrap_or(json!(0));
                 let limit = usize::try_from(optional_nonnegative_integer(&payload, "limit", 8192)?)
                     .ok()
                     .filter(|limit| (1..=64 * 1024).contains(limit))
@@ -968,6 +972,7 @@ fn compile_artifact(
                         artifact_ref,
                         now_ms,
                         offset,
+                        selector,
                         limit,
                         slot: 0,
                     }],
@@ -977,8 +982,7 @@ fn compile_artifact(
                     },
                 )
             } else {
-                let cursor = usize::try_from(optional_nonnegative_integer(&payload, "cursor", 0)?)
-                    .map_err(|_| SemanticExecutionError::InvalidPayload)?;
+                let cursor = payload.get("cursor").cloned().unwrap_or(json!(0));
                 let limit = usize::try_from(optional_nonnegative_integer(&payload, "limit", 8)?)
                     .ok()
                     .filter(|limit| (1..=20).contains(limit))
@@ -989,6 +993,7 @@ fn compile_artifact(
                         query: required_text(&payload, "query", 200)?.to_owned(),
                         now_ms,
                         cursor,
+                        selector,
                         limit,
                         slot: 0,
                     }],
@@ -1916,10 +1921,10 @@ fn compile_turn(
         if serde_json::to_vec(&config)
             .map_err(|_| SemanticExecutionError::InvalidPayload)?
             .len()
-            > MAX_TRANSACTION_IR_LITERAL_BYTES
+            > MAX_LEGACY_DOCUMENT_BYTES
             || input_update.as_ref().is_some_and(|update| {
                 serde_json::to_vec(update)
-                    .map(|encoded| encoded.len() > MAX_TRANSACTION_IR_LITERAL_BYTES)
+                    .map(|encoded| encoded.len() > MAX_LEGACY_DOCUMENT_BYTES)
                     .unwrap_or(true)
             })
         {
@@ -2272,6 +2277,12 @@ fn compile_turn(
                         require_parent_is_lane_tail: payload
                             .get("require_parent_is_lane_tail")
                             .is_some_and(|value| !is_python_falsy_json(value)),
+                        expected_parent_projection_revision: payload
+                            .get("expected_parent_projection_revision")
+                            .filter(|value| !value.is_null())
+                            .map(|value| value.as_u64().ok_or_else(||
+                                SemanticExecutionError::InvalidPayload))
+                            .transpose()?,
                         require_parent_not_stopped: payload
                             .get("require_parent_not_stopped")
                             .is_some_and(|value| !is_python_falsy_json(value)),
@@ -2638,6 +2649,10 @@ fn compile_turn(
             )
         }
         "turn.sync.snapshot" => {
+            let max_projection_bytes = optional_nonnegative_integer(&payload, "max_projection_bytes", 0)?;
+            if max_projection_bytes != 0 && !(65536..=16777216).contains(&max_projection_bytes) {
+                return Err(SemanticExecutionError::InvalidPayload);
+            }
             let turn_limit = optional_nonnegative_integer(&payload, "turn_limit", 0)?;
             if turn_limit > 256 {
                 return Err(SemanticExecutionError::InvalidPayload);
@@ -2651,6 +2666,7 @@ fn compile_turn(
                 vec![TransactionIrStep::TurnSyncSnapshot {
                     conversation_id,
                     turn_limit: turn_limit as usize,
+                    max_projection_bytes: max_projection_bytes as usize,
                     include_artifact_hint,
                     slot: 0,
                 }],
@@ -2661,7 +2677,27 @@ fn compile_turn(
                 None,
             )
         }
+        "turn.sync.round_directory" => {
+            let lane_id = required_text(&payload, "lane_id", 128)?.to_owned();
+            let offset = optional_nonnegative_integer(&payload, "offset", 0)?;
+            let limit = optional_nonnegative_integer(&payload, "limit", 50)?;
+            let sync_sequence = payload.get("sync_sequence").and_then(Value::as_u64)
+                .ok_or(SemanticExecutionError::InvalidPayload)?;
+            let anchor_turn_id = match payload.get("anchor_turn_id") {
+                None => String::new(),
+                Some(Value::String(s)) if s.chars().count() <= 128 => s.clone(),
+                _ => return Err(SemanticExecutionError::InvalidPayload),
+            };
+            if !(1..=100).contains(&limit) { return Err(SemanticExecutionError::InvalidPayload); }
+            (vec![TransactionIrStep::TurnSyncRoundDirectory { conversation_id, lane_id, offset,
+                limit: limit as usize, sync_sequence, anchor_turn_id, slot: 0 }],
+                TransactionIrResult::SlotOrLiteral { slot: 0, missing: b"null".to_vec() }, None)
+        }
         "turn.sync.page" => {
+            let max_projection_bytes = optional_nonnegative_integer(&payload, "max_projection_bytes", 0)?;
+            if max_projection_bytes != 0 && !(65536..=16777216).contains(&max_projection_bytes) {
+                return Err(SemanticExecutionError::InvalidPayload);
+            }
             let lane_id = required_text(&payload, "lane_id", 128)?.to_owned();
             let before_ordinal =
                 optional_nonnegative_integer(&payload, "before_ordinal", i64::MAX as u64)?;
@@ -2683,6 +2719,7 @@ fn compile_turn(
                     before_ordinal,
                     limit: limit as usize,
                     sync_sequence,
+                    max_projection_bytes: max_projection_bytes as usize,
                     slot: 0,
                 }],
                 TransactionIrResult::SlotOrLiteral {
@@ -2823,6 +2860,12 @@ fn compile_turn(
             };
             (
                 vec![TransactionIrStep::TurnProjectionUpdate {
+
+                    human_guidance_answer_json: match payload.get("human_guidance_answer") {
+                        None => None,
+                        Some(Value::Object(answer)) => Some(canonical_json(&Value::Object(answer.clone()))?),
+                        _ => return Err(SemanticExecutionError::InvalidPayload),
+                    },
                     preserve_activity: match payload.get("preserve_activity") {
                         None => false,
                         Some(Value::Bool(value)) => *value,
@@ -3061,6 +3104,12 @@ fn compile_record(
     let payload = payload_object(&admitted.request.payload)?;
     let namespace = required_text(&payload, "namespace", 128)?.to_owned();
     let namespace_for_guard = namespace.clone();
+    if matches!(namespace.as_str(), crate::generated_project_dispatch_storage::HEADS | crate::generated_project_dispatch_storage::DOCUMENTS) {
+        return Err(SemanticExecutionError::InvalidPayload);
+    }
+    if namespace == "tool_result_private" {
+        return Err(SemanticExecutionError::InvalidPayload);
+    }
     if matches!(namespace.as_str(), crate::native_checkpoint_store::HEADERS | crate::native_checkpoint_store::SNAPSHOTS | crate::native_checkpoint_store::REPLAY) {
         return Err(SemanticExecutionError::InvalidPayload);
     }
@@ -3100,6 +3149,12 @@ fn compile_record(
             )
         }
         "record.list" => {
+
+            let include_value = match payload.get("include_value") {
+                None => true,
+                Some(Value::Bool(value)) => *value,
+                _ => return Err(SemanticExecutionError::InvalidPayload),
+            };
             let prefix = match payload.get("prefix") {
                 None => "",
                 Some(Value::String(prefix)) if prefix.chars().count() <= 512 => prefix,
@@ -3142,6 +3197,8 @@ fn compile_record(
             }
             (
                 vec![TransactionIrStep::VersionedDocumentList {
+
+                    include_value,
                     start,
                     end,
                     namespace,
@@ -3263,9 +3320,10 @@ fn compile_recent_project(
             let values = payload
                 .get("project_paths")
                 .and_then(Value::as_array)
-                .filter(|paths| !paths.is_empty() && paths.len() <= MAX_RECENT_PROJECT_TOUCH_BATCH)
+                .filter(|paths| !paths.is_empty())
                 .ok_or(SemanticExecutionError::InvalidPayload)?;
             let mut paths = Vec::with_capacity(values.len());
+            let mut seen = std::collections::BTreeSet::new();
             for value in values {
                 let path = value
                     .as_str()
@@ -3274,7 +3332,7 @@ fn compile_recent_project(
                             && path.chars().count() <= MAX_RECENT_PROJECT_PATH_CHARACTERS
                     })
                     .ok_or(SemanticExecutionError::InvalidPayload)?;
-                if !paths.iter().any(|existing| existing == path) {
+                if seen.insert(path) {
                     paths.push(path.to_owned());
                 }
             }
@@ -3675,26 +3733,26 @@ fn compile_optimizer(
                 user_id: owner_user_id,
                 id: required_text(&payload, "proposal_id", 128)?.to_owned(),
                 created_at: required_text(&payload, "created_at", 64)?.to_owned(),
-                title: optional("title", 500)?,
-                rationale: optional("rationale", 4000)?,
+                title: optional("title", usize::MAX)?,
+                rationale: optional("rationale", usize::MAX)?,
                 action_type: required_text(&payload, "action_type", 256)?.to_owned(),
-                action_args: required_text(&payload, "action_args", 2_000_000)?.to_owned(),
+                action_args: required_text(&payload, "action_args", usize::MAX)?.to_owned(),
                 severity: log_aggregate_optional_text(&payload, "severity", "low", 64)?,
                 confidence: payload
                     .get("confidence")
                     .and_then(Value::as_f64)
                     .filter(|value| value.is_finite() && (0.0..=1.0).contains(value))
                     .ok_or(SemanticExecutionError::InvalidPayload)?,
-                evidence: required_text(&payload, "evidence", 2_000_000)?.to_owned(),
+                evidence: required_text(&payload, "evidence", usize::MAX)?.to_owned(),
                 status: log_aggregate_optional_text(&payload, "status", "pending_review", 64)?,
-                status_reason: optional("status_reason", 500)?,
+                status_reason: optional("status_reason", usize::MAX)?,
             },
             updated_at_ms: now_unix_ms,
         },
         "optimizer.proposal.update" => crate::optimizer::Request::ProposalUpdate {
             id: required_text(&payload, "proposal_id", 128)?.to_owned(),
             status: required_text(&payload, "status", 64)?.to_owned(),
-            reason: optional("reason", 500)?,
+            reason: optional("reason", usize::MAX)?,
             updated_at_ms: now_unix_ms,
         },
         "optimizer.proposal.get" => crate::optimizer::Request::ProposalGet {
@@ -3702,7 +3760,7 @@ fn compile_optimizer(
         },
         "optimizer.proposal.list" => crate::optimizer::Request::ProposalList {
             status: optional("status", 64)?,
-            limit: limit("limit", 50, 500)?,
+            limit: limit("limit", crate::generated_tofudb_ir::DEFAULT_OPTIMIZER_LIST_ROWS, usize::MAX)?,
         },
         "optimizer.action.record" => crate::optimizer::Request::ActionRecord {
             action: crate::optimizer::Action {
@@ -3711,7 +3769,7 @@ fn compile_optimizer(
                 proposal_id: required_text(&payload, "proposal_id", 128)?.to_owned(),
                 applied_at: required_text(&payload, "applied_at", 64)?.to_owned(),
                 expires_at: required_text(&payload, "expires_at", 64)?.to_owned(),
-                pre_metric: required_text(&payload, "pre_metric", 2_000_000)?.to_owned(),
+                pre_metric: required_text(&payload, "pre_metric", usize::MAX)?.to_owned(),
                 outcome_metric: String::new(),
                 outcome_recorded_at: String::new(),
                 reverted_at: String::new(),
@@ -3721,19 +3779,19 @@ fn compile_optimizer(
         },
         "optimizer.action.outcome" => crate::optimizer::Request::ActionOutcome {
             id: required_text(&payload, "log_id", 128)?.to_owned(),
-            metric: required_text(&payload, "outcome_metric", 2_000_000)?.to_owned(),
+            metric: required_text(&payload, "outcome_metric", usize::MAX)?.to_owned(),
             recorded_at: required_text(&payload, "recorded_at", 64)?.to_owned(),
             updated_at_ms: now_unix_ms,
         },
         "optimizer.action.revert" => crate::optimizer::Request::ActionRevert {
             id: required_text(&payload, "log_id", 128)?.to_owned(),
             reverted_at: required_text(&payload, "reverted_at", 64)?.to_owned(),
-            reason: optional("reason", 500)?,
+            reason: optional("reason", usize::MAX)?,
             updated_at_ms: now_unix_ms,
         },
         "optimizer.action.list" => crate::optimizer::Request::ActionList {
             include_reverted: boolean("include_reverted", false)?,
-            limit: limit("limit", 50, 500)?,
+            limit: limit("limit", crate::generated_tofudb_ir::DEFAULT_OPTIMIZER_LIST_ROWS, usize::MAX)?,
         },
         "optimizer.action.expired" => crate::optimizer::Request::ActionExpired {
             now_iso: required_text(&payload, "now_iso", 64)?.to_owned(),
@@ -3824,7 +3882,7 @@ fn compile_paper_build_artifact(
             if let Some(value) = payload.get(field) {
                 let (digest, bytes) = crate::paper_build_receipt::digest_bounded(
                     value,
-                    MAX_TRANSACTION_IR_LITERAL_BYTES,
+                    MAX_LEGACY_DOCUMENT_BYTES,
                 )
                 .map_err(map_storage_error)?;
                 replay_payload.insert(
@@ -5109,15 +5167,15 @@ fn compile_daily_cost(
             let values = payload
                 .get("dates")
                 .and_then(Value::as_array)
-                .filter(|values| values.len() <= 366)
                 .ok_or(SemanticExecutionError::InvalidPayload)?;
             let mut dates = Vec::with_capacity(values.len());
+            let mut seen_dates = std::collections::HashSet::with_capacity(values.len());
             for value in values {
                 let date = value
                     .as_str()
                     .filter(|date| crate::daily_cost::valid_date(date))
                     .ok_or(SemanticExecutionError::InvalidPayload)?;
-                if !dates.iter().any(|existing| existing == date) {
+                if seen_dates.insert(date) {
                     dates.push(date.to_owned());
                 }
             }
@@ -5511,6 +5569,15 @@ fn compile_scheduler(
         "scheduler.task.update" => crate::scheduler::Request::Update {
             task_id: scheduler_task_id(&payload)?,
             updates: scheduler_updates(&payload)?,
+            updated_at_ms: now_unix_ms.max(1),
+        },
+        "scheduler.task.execution_lookup" => crate::scheduler::Request::ExecutionLookup {
+            execution_id: required_text(&payload, "execution_task_id", 128)?.to_owned(),
+        },
+        "scheduler.task.settle_execution" => crate::scheduler::Request::SettleExecution {
+            execution_id: required_text(&payload, "execution_task_id", 128)?.to_owned(),
+            status: required_text(&payload, "status", 16)?.to_owned(),
+            now: required_text(&payload, "now", 64)?.to_owned(),
             updated_at_ms: now_unix_ms.max(1),
         },
         "scheduler.task.record_result" => crate::scheduler::Request::RecordResult {
@@ -5994,13 +6061,15 @@ fn compile_queue(
             },
             page_size: match payload.get("page_size") {
                 None => 32,
-                Some(value) => value.as_u64().filter(|value| (1..=32).contains(value))
-                    .ok_or(SemanticExecutionError::InvalidPayload)? as usize,
+                Some(value) => value.as_u64().filter(|value| *value > 0)
+                    .and_then(|value| usize::try_from(value).ok())
+                    .ok_or(SemanticExecutionError::InvalidPayload)?,
             },
             max_bytes: match payload.get("max_bytes") {
-                None => crate::generated_tofudb_ir::MAX_QUEUE_RESPONSE_BYTES,
-                Some(value) => value.as_u64().filter(|value| (1024..=crate::generated_tofudb_ir::MAX_QUEUE_RESPONSE_BYTES as u64).contains(value))
-                    .ok_or(SemanticExecutionError::InvalidPayload)? as usize,
+                None => crate::generated_tofudb_ir::DEFAULT_QUEUE_PAGE_BYTES,
+                Some(value) => value.as_u64().filter(|value| *value > 0)
+                    .and_then(|value| usize::try_from(value).ok())
+                    .ok_or(SemanticExecutionError::InvalidPayload)?,
             },
             cursor: match payload.get("cursor") {
                 None | Some(Value::Null) => None,
@@ -6018,7 +6087,7 @@ fn compile_queue(
         },
         "queue.injection.ack" => {
             let mut queue_ids = match payload.get("queue_ids") {
-                Some(Value::Array(values)) if values.len() <= 256 => values
+                Some(Value::Array(values)) => values
                     .iter()
                     .map(|value| match value {
                         Value::String(text) if !text.is_empty() && text.chars().count() <= 256 => {
@@ -6666,9 +6735,6 @@ fn compile_event_item(
         }
     };
     let payload_json = canonical_json(&event)?;
-    if payload_json.len() > MAX_TRANSACTION_IR_LITERAL_BYTES {
-        return Err(SemanticExecutionError::ResourceExhausted);
-    }
     let require_attempts_live = match payload.get("require_attempts_live") {
         None | Some(Value::Null) => Vec::new(),
         Some(Value::Array(values)) if !values.is_empty() && values.len() <= 2 => values
@@ -6736,10 +6802,7 @@ fn compile_event(
             let values = payload
                 .get("events")
                 .and_then(Value::as_array)
-                .filter(|events| {
-                    !events.is_empty()
-                        && events.len() <= crate::authority::MAX_STREAM_APPENDS_PER_TRANSACTION
-                })
+                .filter(|events| !events.is_empty())
                 .ok_or(SemanticExecutionError::InvalidPayload)?;
             let items = values
                 .iter()
@@ -6799,7 +6862,7 @@ fn compile_event(
             let raw_task_ids = payload
                 .get("task_ids")
                 .and_then(Value::as_array)
-                .filter(|task_ids| !task_ids.is_empty() && task_ids.len() <= 100)
+                .filter(|task_ids| !task_ids.is_empty())
                 .ok_or(SemanticExecutionError::InvalidPayload)?;
             let root_task_ids = raw_task_ids
                 .iter()
@@ -7963,9 +8026,6 @@ fn compile_model_routing(
             .and_then(Value::as_object)
             .ok_or(SemanticExecutionError::InvalidPayload)?;
         let encoded = canonical_json(&Value::Object(object.clone()))?;
-        if encoded.len() > MAX_MODEL_ROUTING_DOCUMENT_BYTES {
-            return Err(SemanticExecutionError::ResourceExhausted);
-        }
         Ok(encoded)
     };
     let (steps, result) = match admitted.operation.name {
@@ -7989,9 +8049,6 @@ fn compile_model_routing(
                 None | Some(Value::Null) => None,
                 Some(Value::Object(value)) => {
                     let encoded = canonical_json(&Value::Object(value.clone()))?;
-                    if encoded.len() > MAX_MODEL_ROUTING_DOCUMENT_BYTES {
-                        return Err(SemanticExecutionError::ResourceExhausted);
-                    }
                     Some(encoded)
                 }
                 _ => return Err(SemanticExecutionError::InvalidPayload),
@@ -8029,9 +8086,6 @@ fn compile_model_routing(
                     None | Some(Value::Null) => None,
                     Some(Value::Object(document)) => {
                         let encoded = canonical_json(&Value::Object(document.clone()))?;
-                        if encoded.len() > MAX_MODEL_ROUTING_DOCUMENT_BYTES {
-                            return Err(SemanticExecutionError::ResourceExhausted);
-                        }
                         Some(encoded)
                     }
                     Some(_) => return Err(SemanticExecutionError::InvalidPayload),
@@ -10166,7 +10220,7 @@ fn execute_admitted_request_inner(
         .map_err(crate::turn::diagnostic::map_error).map(crate::transaction_ir::IrResponse::unverified);
     }
     let ir = compile_admitted_transaction(admitted, now_unix_ms)?;
-    let response = crate::transaction_ir::execute_transaction_ir_with_json_proof(
+    let mut response = crate::transaction_ir::execute_transaction_ir_with_json_proof(
         database,
         &ir,
         notices,
@@ -10184,6 +10238,7 @@ fn execute_admitted_request_inner(
         crate::response_json::validate(&response)
             .map_err(|_| integrity_failure("transaction response is not valid JSON"))?;
     }
+    response.certify_snapshot_stable(&ir);
     Ok(response)
 }
 
@@ -10225,6 +10280,8 @@ fn compile_admitted_transaction(
         compile_model_routing(admitted, now_unix_ms)?
     } else if admitted.operation.name.starts_with("provider.") {
         compile_provider(admitted, now_unix_ms)?
+    } else if admitted.operation.name.starts_with("project.dispatch.") {
+        project_dispatch::compile(admitted, now_unix_ms)?
     } else if admitted.operation.name.starts_with("record.") {
         compile_record(admitted, now_unix_ms)?
     } else if admitted.operation.name.starts_with("orchestration.")

@@ -81,6 +81,7 @@ export function createClientLogFlushScheduler(
 ): ClientLogFlushScheduler {
   let destroyed = false;
   let flushRunning = false;
+  let immediateAfterFlush = false;
   let timerScheduled = false;
   let timerHandle: unknown = null;
   let visibilitySubscribed = false;
@@ -181,6 +182,11 @@ export function createClientLogFlushScheduler(
   const finishFlush = (): void => {
     if (destroyed) return;
     flushRunning = false;
+    if (immediateAfterFlush) {
+      immediateAfterFlush = false;
+      runFlush();
+      return;
+    }
     demand();
   };
 
@@ -252,6 +258,8 @@ export function createClientLogFlushScheduler(
   };
 
   const flushNow = (): void => {
+    if (destroyed) return;
+    if (flushRunning) { immediateAfterFlush = true; return; }
     runFlush();
   };
 
@@ -259,6 +267,7 @@ export function createClientLogFlushScheduler(
     if (destroyed) return;
     destroyed = true;
     flushRunning = false;
+    immediateAfterFlush = false;
     releaseDemandResources();
   };
 

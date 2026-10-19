@@ -15,7 +15,7 @@ from lib.log import get_logger
 from lib.paper.builds.errors import BuildError
 from lib.paper.checks import format_report, run_pdf_checks, run_source_checks
 from lib.paper.review_dossier import build_review_dossier, build_scaffold
-from lib.storage.errors import StorageError
+from lib.agent_core.storage_errors import StorageError
 from lib.tasks_pkg.executor import _build_simple_meta, _finalize_tool_round
 from lib.tasks_pkg.executor import tool_registry
 from lib.tasks_pkg.handlers.paper_build import (_conv_id, _latest_receipt,

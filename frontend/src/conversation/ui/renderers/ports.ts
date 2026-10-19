@@ -11,7 +11,11 @@ import {
   type ConversationTurnActionViewModel,
   type ConversationTurnViewModel,
 } from '../../presentation/conversation-view-model';
+import type { ToolEffectInspectionReference, ConversationToolEffectInspection,
+  ConversationUsageRecovery, RecoverUsageRequest, TurnCommandResponse } from '../../../api/conversation-sync.generated';
 import type { LazyToolResultLoader } from '../lazy-tool-result';
+
+import type { ChoicePorts } from '../../../rich-response/choices';
 
 export interface ClassicConversationMarkdownOptions {
   /** Human-authored input is plain text: neutralize raw '<tag>' HTML so it
@@ -22,8 +26,22 @@ export interface ClassicConversationMarkdownOptions {
   streaming?: boolean;
 }
 
+export interface UsageRecoveryPorts {
+  inspect(conversationId: string, turnId: string, signal: AbortSignal): Promise<ConversationUsageRecovery>;
+  recover(conversationId: string, turnId: string, body: RecoverUsageRequest): Promise<TurnCommandResponse>;
+  createCommandId(): string;
+  /** Optional presentation observer; composition handles refresh failures. */
+  onAccepted?(conversationId: string): void;
+}
+
 export interface ClassicConversationRendererPorts {
+
+  /** Exact terminal receipt only; never a global resume/Goal action. */
+  usageRecovery?: UsageRecoveryPorts;
+  /** Scoped from the mounted server turn, never from model rich JSON. */
+  choiceInteractions?(conversationId: string, turnId: string): ChoicePorts;
   loadToolResult?: LazyToolResultLoader;
+  inspectToolEffect?(reference: ToolEffectInspectionReference, signal: AbortSignal): Promise<ConversationToolEffectInspection>;
   renderSafeMarkdownHtml(
     markdown: string,
     options?: ClassicConversationMarkdownOptions,
@@ -75,4 +93,7 @@ export interface ClassicConversationRendererPorts {
   fetchAutopilotRunReport?(
     runId: string,
   ): Promise<{ report?: string } | null>;
+  resumeGoalRun?(runId: string): Promise<{
+    ok: boolean; status: number; runId?: string; error?: string;
+  }>;
 }

@@ -65,14 +65,15 @@ def is_carrier_task(task: dict) -> bool:
 def create_task(conv_id, messages, config, *, user_id=None, principal=None,
                 supersede=True, transient=False, execution_clock=None,
                 require_durable_cancellation=False, birth_checkpoint_budget_seconds=None,
-                automation_chain=(), automation_project_id=None):
+                automation_chain=(), automation_project_id=None, model_routing_repository=None):
     """Register an ordinary chat task, applying prompt hooks exactly once."""
     return _create_chat_task(conv_id, messages, config, user_id=user_id,
                             principal=principal, supersede=supersede,
                             transient=transient, execution_clock=execution_clock,
                             require_durable_cancellation=require_durable_cancellation,
                             birth_checkpoint_budget_seconds=birth_checkpoint_budget_seconds,
-                            automation_chain=automation_chain, automation_project_id=automation_project_id)
+                            automation_chain=automation_chain, automation_project_id=automation_project_id,
+                            model_routing_repository=model_routing_repository)
 
 
 def _create_chat_task(
@@ -90,6 +91,7 @@ def _create_chat_task(
     birth_checkpoint_budget_seconds=None,
     automation_chain=(),
     automation_project_id=None,
+    model_routing_repository=None,
 ):
     """Create (and register) a chat task.
 
@@ -160,7 +162,8 @@ def _create_chat_task(
     # can rewrite the latest user message (PII redaction, safety filters,
     # prompt augmentation).  Only the rewritten text is propagated; the
     # message structure (role, attachments, tool_call_id) is preserved.
-    if prepared_task_id is None and last_user_idx >= 0 and isinstance(messages[last_user_idx].get('content'), str):
+    if (prepared_task_id is None and '_projectDispatchAdmission' not in config
+            and last_user_idx >= 0 and isinstance(messages[last_user_idx].get('content'), str)):
         try:
             from lib.tasks_pkg.tool_hooks import run_user_prompt_hooks
             _orig = messages[last_user_idx]['content']
@@ -303,7 +306,7 @@ def _create_chat_task(
                 return float(_value)
 
             _route_group = mint_routed_slot_group(
-                ModelRoutingRepository(),
+                model_routing_repository if model_routing_repository is not None else ModelRoutingRepository(),
                 OwnerBoundary.create(owner_user_id, principal.tenant_id),
                 _selection,
                 policy=RoutePolicy(
@@ -319,6 +322,7 @@ def _create_chat_task(
             )
             task['_pinned_provider_id'] = _route_group.pin_id
             task['_model_routing_group'] = _route_group
+            task['_model_routing_selection'] = _selection
             task['_requestedModelRef'] = dict(_model_ref)
             _offering = (_route_group.candidates[0].offering
                          if _selection.model is None else {})
@@ -336,6 +340,8 @@ def _create_chat_task(
             def _dispose_model_routing_group() -> None:
                 from lib.model_routing import dispose_routed_slot_group
                 dispose_routed_slot_group(_route_group)
+                if task.get('_model_routing_selection') is _selection:
+                    task.pop('_model_routing_selection',None)
 
             # bind_model_route owns both registration and rollback. Mark the
             # handoff before calling so its failure path cannot be disposed a
@@ -392,7 +398,7 @@ def _create_chat_task(
                          task_id[:8], e)
     if not transient:
         try:
-            from lib.runtime_state_store import get_store
+            from lib.runtime.runtime_state_store import get_store
             _affinity_store = get_store()
             if not _affinity_key and conv_id:
                 _affinity_key = (
@@ -514,6 +520,7 @@ def discard_task(task_id: str, conv_id: str | None = None) -> None:
         # be resurrected as a phantom 'running' row by a trailing event.
         _popped['_discarded_at'] = time.time()
         _route_group = _popped.pop('_model_routing_group', None)
+        _popped.pop('_model_routing_selection', None)
         if (_route_group is not None
                 and not isinstance(
                     _popped.get('_executionSession'), ExecutionSession)):

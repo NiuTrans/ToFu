@@ -413,7 +413,7 @@ def test_remote_tool_routes_real_write_receipt_into_task(stub_runtime, monkeypat
     stub_runtime([task])
     settled = []
     monkeypatch.setattr(handler, '_finalize_tool_round', lambda *args: settled.append(args))
-    def send(command, params, *, target_agent_id, user_id, timeout):
+    def send(command, params, *, target_agent_id, user_id, timeout, cancellation=None):
         assert command == 'project_write_file'
         assert target_agent_id == 'device' and user_id == '41'
         return project.cmd_project_write_file(params), None
@@ -681,3 +681,125 @@ def test_failed_journal_write_never_emits_a_committed_change(monkeypatch, tmp_pa
 
 if __name__ == '__main__':
     sys.exit(pytest.main([__file__, '-v']))
+
+
+@pytest.mark.parametrize('remove_checkout', [False, True])
+def test_runtime_worktree_changes_survive_settlement_and_cleanup(
+        tmp_path, journal, monkeypatch, remove_checkout):
+    from lib.project_mod import config
+    from lib.turn_lifecycle import _task_projection
+    primary = tmp_path / 'primary'
+    worktree = tmp_path / 'worktree'
+    primary.mkdir()
+    worktree.mkdir()
+    task = _task(modifiedFileList=[{
+        'path': 'src/a.py', 'action': 'written', 'changeId': 'a' * 32,
+        'source': 'local', 'rootPath': str(worktree),
+    }])
+    # A removed checkout disappears from the runtime registry, but its
+    # committed journal address survives on the task's live receipt.
+    monkeypatch.setattr(config, 'get_conv_roots', lambda conv_id: {} if remove_checkout else {
+        'worktree': {'path': str(worktree)},
+    })
+    if remove_checkout:
+        worktree.rmdir()
+    journal[str(worktree)] = [
+        _mod('src/a.py', basePath=str(worktree), changeId='b' * 32),
+        _mod('foreign.py', task_id=OTHER_TASK, basePath=str(worktree)),
+    ]
+    files, count, fallback = derive_round_modified_files(task, str(primary), [str(primary)])
+    assert count == 1 and not fallback
+    assert files[0]['path'] == 'src/a.py'
+    assert files[0]['changeId'] == 'b' * 32  # journal, not stale live fact
+    assert files[0]['rootPath'] == str(worktree)
+    task.update(modifiedFileList=files, modifiedFiles=count)
+    assert _task_projection(task, {})['fileChanges']['files'] == files
+
+
+def test_runtime_root_can_be_discovered_without_live_stamp(journal, monkeypatch):
+    from lib.project_mod import config
+    monkeypatch.setattr(config, 'get_conv_roots', lambda key: {
+        'worktree': {'path': '/removed-runtime-worktree'},
+    } if key == TASK_ID else {})
+    journal['/removed-runtime-worktree'] = [
+        _mod('mine.py', basePath='/removed-runtime-worktree', changeId='a' * 32),
+    ]
+    files, count, fallback = derive_round_modified_files(_task(), '/primary', ['/primary'])
+    assert count == 1 and not fallback and _paths(files) == ['mine.py']
+
+
+def test_dynamic_roots_never_use_timestamp_fallback(journal, monkeypatch):
+    from lib.project_mod import config
+    monkeypatch.setattr(config, 'get_conv_roots', lambda conv_id: {
+        'worktree': {'path': '/runtime-worktree'},
+    })
+    journal['/runtime-worktree'] = [
+        _mod('foreign.py', task_id=OTHER_TASK),
+        _mod('unattributed.py', task_id=None),
+    ]
+    assert derive_round_modified_files(_task(), '/primary', ['/primary']) == ([], 0, False)
+
+
+def test_live_hint_without_journal_evidence_cannot_claim_a_file(journal, monkeypatch):
+    from lib.project_mod import config
+    monkeypatch.setattr(config, 'get_conv_roots', lambda conv_id: {})
+    task = _task(modifiedFileList=[{
+        'path': 'invented.py', 'changeId': 'a' * 32,
+        'source': 'local', 'rootPath': '/runtime-worktree',
+    }])
+    assert derive_round_modified_files(task, '/primary', ['/primary']) == ([], 0, False)
+
+
+def test_configured_root_fallback_excludes_explicit_foreign_task(journal):
+    journal['/primary'] = [_mod('foreign.py', task_id=OTHER_TASK)]
+    assert derive_round_modified_files(_task(), '/primary', ['/primary']) == ([], 0, False)
+
+
+@pytest.mark.parametrize('action', ['created', 'deleted', 'modified'])
+def test_removed_worktree_retains_command_action_and_undo_denial(
+        tmp_path, journal, monkeypatch, action):
+    from lib.project_mod import config
+    from lib.turn_lifecycle import _task_projection
+    root = str(tmp_path / 'removed-worktree')
+    monkeypatch.setattr(config, 'get_conv_roots', lambda conv_id: {})
+    entry = {'path': 'src/a.py', 'changeId': 'a' * 32,
+             'source': 'local', 'rootPath': root, 'undoAvailable': False}
+    task = _task(modifiedFileList=[entry])
+    journal[root] = [_mod('src/a.py', mtype='run_command', action=action,
+                         originalContent='before', basePath=root,
+                         changeId='a' * 32, undoAvailable=False)]
+    files, count, fallback = derive_round_modified_files(task, '/primary', ['/primary'])
+    assert count == 1 and not fallback
+    assert files[0]['action'] == action and files[0]['undoAvailable'] is False
+    task.update(modifiedFileList=files, modifiedFiles=count)
+    projection = _task_projection(task, {})
+    assert projection['fileChanges']['undoAvailable'] is False
+    assert _task_projection(task, projection)['fileChanges']['undoAvailable'] is False
+
+
+def test_missing_task_start_cannot_adopt_unstamped_records(journal):
+    journal['/primary'] = [_mod('legacy.py', task_id=None)]
+    assert derive_round_modified_files(_task(created_at=0), '/primary', ['/primary']) == ([], 0, False)
+
+
+def test_orphan_restart_recovers_prior_attempts_without_live_projection(journal):
+    from lib.conversation_sync.command_service import _journal_resume_file_fields
+    journal['/primary'] = [
+        _mod('before-restart.py', task_id='prior-attempt-task',
+             basePath='/primary', changeId='a' * 32),
+        _mod('too-old.py', task_id='older-turn-task', timestamp=500),
+    ]
+    # Ordinary settlement must not borrow the prior attempt's identity.
+    assert derive_round_modified_files(_task(), '/primary', ['/primary']) == ([], 0, False)
+    recovered = _journal_resume_file_fields(
+        {'createdAt': 1000, 'conversationId': 'conv-1'},
+        {'projectPath': '/primary', 'projectPaths': ['/primary']})
+    assert recovered['checkpointModifiedFiles'] == 1
+    assert recovered['checkpointModifiedFileList'][0]['path'] == 'before-restart.py'
+    assert recovered['checkpointModifiedFileList'][0]['changeId'] == 'a' * 32
+
+
+def test_recovery_mode_cannot_borrow_tasks_when_executor_id_is_present(journal):
+    journal['/primary'] = [_mod('foreign.py', task_id=OTHER_TASK)]
+    assert derive_round_modified_files(_task(), '/primary', ['/primary'],
+        recover_conversation_journal=True) == ([], 0, False)

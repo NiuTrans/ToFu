@@ -85,7 +85,7 @@ _VARIABLE_FETCH_RE = re.compile(r"\bfetch\(\s*(?![)'\"`])")
 _ALLOWED_VARIABLE_FETCHES = {
     # Cross-origin OAuth provider token endpoint (Anthropic/OpenAI), not /api/*.
     'settings/oauth.js': 1,
-    # Browser-assisted desktop transport talks to the TofuAgent's
+    # Browser-assisted desktop transport talks to the TofuRemote's
     # loopback-only broker (127.0.0.1:15180..15189), not a Tofu /api route.
     # It intentionally needs cross-origin/PNA RequestInit fields that do not
     # belong in the authenticated backend API client. The actual same-origin

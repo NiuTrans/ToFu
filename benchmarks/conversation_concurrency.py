@@ -26,6 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from scripts.tofudb_perf_compare import _OWNER_ID
 from benchmarks.conversation_authority import ConversationAuthority
 from benchmarks.conversation_acceptance import POLICY, assess
+from benchmarks.conversation_provenance import FORMAT as PROVENANCE_FORMAT, capture_sources
 from scripts.tofudb_bench import _mount_type
 
 
@@ -120,16 +121,43 @@ def profile_client_stages(enabled, report):
                 report[label] = summary
 
 
+def capture_storage_metrics(engine, *, incarnation, boundary, quiescent):
+    """Bind one metrics snapshot to its live process and authority incarnation.
+
+    Quiescence describes the benchmark's foreground callers; background work
+    remains observable. A metrics RPC must not silently cross a process restart.
+    """
+    import psutil
+
+    pid = engine.pid
+    process_started = psutil.Process(pid).create_time()
+    observed_start = time.monotonic()
+    metrics = engine._client.metrics(deadline=2.0)
+    observed_finish = time.monotonic()
+    if engine.pid != pid or psutil.Process(pid).create_time() != process_started:
+        raise RuntimeError('storage metrics crossed an authority process restart')
+    return metrics, {
+        'authority_incarnation': incarnation,
+        'process_id': pid,
+        'process_started_unix_seconds': process_started,
+        'boundary': boundary,
+        'benchmark_calls_quiescent': quiescent,
+        'observed_monotonic_seconds': [observed_start, observed_finish],
+    }
+
+
 def measure(binary: Path | None, directory: Path, conversations: int, rounds: int,
             timeout: float = 300, chunk_bytes: int = 0,
             restart_while_running: bool = False, recover_interrupted: bool = False,
             profile_client: bool = False, backend: str = 'tofudb',
             stream_interval_ms: float = 1000, native_client: str = "application",
-            stream_event_kind: str = "phase", carry_stream_events: bool = False, terminal_barrier: bool = False) -> dict:
+            stream_event_kind: str = "phase", carry_stream_events: bool = False, terminal_barrier: bool = False,
+            on_stream_scheduled=None) -> dict:
     import psutil
     from lib.agent_core.worker_executor import RecoverableAgentExecutor
     from lib import turn_lifecycle as turns
 
+    sources_before = capture_sources()
     engine = ConversationAuthority(backend, binary, directory, native_client)
     release = threading.Event()
     stop_work = threading.Event()
@@ -141,14 +169,25 @@ def measure(binary: Path | None, directory: Path, conversations: int, rounds: in
     submitted_at = {}
     released_at = 0.0
     client_stages = {}
+    authority_incarnation = 0
     errors: list[str] = []
     attempts = []
     sampling_stop = threading.Event()
     restarting = threading.Event()
     health = {'probes': 0, 'unhealthy_probes': 0, 'max_consecutive_unhealthy': 0,
               'max_contended_milliseconds': 0, 'failure_examples': []}
+    def observe_metrics(key, boundary, *, quiescent):
+        metrics, provenance = capture_storage_metrics(
+            engine, incarnation=authority_incarnation,
+            boundary=boundary, quiescent=quiescent)
+        result[key] = metrics
+        result.setdefault('storage_metrics_provenance', {})[key] = provenance
+
     def observe_terminal_boundary():
-        result['terminal_boundary_storage_metrics'] = engine._client.metrics(deadline=2.0)
+        # Queued stream callbacks may still be running. This is submission's
+        # boundary before settlement, not a quiescent completed-stream window.
+        observe_metrics('terminal_boundary_storage_metrics',
+                        'stream-submission-before-settlement', quiescent=False)
     terminal_gate = (threading.Barrier(conversations, action=observe_terminal_boundary, timeout=timeout)
                      if terminal_barrier else None)
     started = time.monotonic()
@@ -158,17 +197,23 @@ def measure(binary: Path | None, directory: Path, conversations: int, rounds: in
         # Requested launch input; system.metrics reports the effective setting.
         'requested_native_profile_every': os.environ.get('TOFU_DB_REQUEST_PROFILE_EVERY', '0')
             if backend == 'tofudb' else None,
+        'requested_client_profile': profile_client,
         'stream_interval_ms': stream_interval_ms,
         'stream_event_kind': stream_event_kind, 'carry_stream_events': carry_stream_events, 'terminal_barrier': terminal_barrier,
         'rpc_deadline_seconds': POLICY['rpc_deadline_seconds'],
         'arrival_model': 'fixed-schedule-per-conversation; queue delay included even when prior events are late',
-        'benchmark_source_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+        'benchmark_source_sha256': sources_before['files']['benchmarks/conversation_concurrency.py'],
         'scope': 'production-executor-and-durable-turns-with-barrier-provider',
         'conversations': conversations, 'rounds': rounds,
         'chunk_bytes': chunk_bytes, 'recover_interrupted': recover_interrupted,
         'filesystem': _mount_type(directory), 'durability': 'strict',
-        'binary_sha256': hashlib.sha256(binary.read_bytes()).hexdigest() if binary else None,
+        'binary_sha256': None,
+        'provenance': {'format': PROVENANCE_FORMAT, 'sources_before': sources_before},
         'phase_ms': {},
+        'phase_ms_scope': {
+            'productive': 'setup, admission, running recovery and completed event work',
+            'events': 'provider release through joined stream and settlement callers; excludes endpoint metrics, includes terminal submission barrier metrics',
+        },
         'resource_observation_scope': 'productive workload and recovery readback; excludes offline verification and cleanup',
     }
 
@@ -192,6 +237,7 @@ def measure(binary: Path | None, directory: Path, conversations: int, rounds: in
                 observe(label + '_scheduled', scheduled_at)
 
     def crash_cycle():
+        nonlocal authority_incarnation
         # No worker uses the client at either barrier. Close its idle sessions
         # before replacing it, without asking the daemon to flush or stop.
         restarting.set()
@@ -199,7 +245,9 @@ def measure(binary: Path | None, directory: Path, conversations: int, rounds: in
             closer = getattr(engine._client, 'close', None)
             if closer:
                 closer()
-            return engine.crash_cycle()
+            elapsed = engine.crash_cycle()
+            authority_incarnation += 1
+            return elapsed
         finally:
             restarting.clear()
 
@@ -246,6 +294,8 @@ def measure(binary: Path | None, directory: Path, conversations: int, rounds: in
                          if stream_event_kind == 'delta' else {'type': 'phase', 'phase': 'text'})
                 carrier = ({'task_id': task_id, 'sequence': sequence + 1, 'event': event}
                            if carry_stream_events else None)
+                if on_stream_scheduled is not None:
+                    on_stream_scheduled(task_id, sequence + 1, due)
                 outcome = timed('stream', turns.record_task_event, task,
                                 event, task_event=carrier, scheduled_at=due)
                 if carry_stream_events and outcome != 'carried':
@@ -275,6 +325,10 @@ def measure(binary: Path | None, directory: Path, conversations: int, rounds: in
     try:
         engine.start()
         result['authority'] = engine.describe()
+        result['provenance'].update(declared_artifact=engine.declared_artifact,
+                                    artifact_before=engine.artifact_before)
+        if engine.declared_artifact is not None:
+            result['binary_sha256'] = engine.declared_artifact['binary_sha256']
         initial_health = engine._client.health(deadline=.5)
     except BaseException:
         engine.stop()
@@ -330,7 +384,8 @@ def measure(binary: Path | None, directory: Path, conversations: int, rounds: in
                     result['engine_rss_bytes_at_barrier'] = psutil.Process(engine.pid).memory_info().rss
                 # Retain the complete content-free metrics envelope: packer pacing,
                 # maintenance and rotation diagnostics are part of latency evidence.
-                result['admission_storage_metrics'] = engine._client.metrics(deadline=2.0)
+                observe_metrics('admission_storage_metrics',
+                                'admission-before-running-restart', quiescent=True)
                 if restart_while_running and peak_active == conversations:
                     result['running_restart_ms'] = crash_cycle()
                     result['engine_logs'].append(engine.log_path)
@@ -349,6 +404,8 @@ def measure(binary: Path | None, directory: Path, conversations: int, rounds: in
                         stop_work.set()
                 if recover_interrupted:
                     stop_work.set()
+                observe_metrics('productive_start_storage_metrics',
+                                'recovered-before-provider-release', quiescent=True)
                 released_at = time.monotonic()
                 release.set()
                 for future in futures:
@@ -361,7 +418,14 @@ def measure(binary: Path | None, directory: Path, conversations: int, rounds: in
                     result['settled_interrupted'] = timed('recover_interrupted',
                         turns.recover_running_attempts)
                 result['phase_ms']['productive'] = (time.monotonic() - started) * 1000
-                result['storage_metrics'] = engine._client.metrics(deadline=2.0)
+                events_completed_at = time.monotonic()
+                result['phase_ms']['events'] = (events_completed_at - released_at) * 1000
+                result['event_window_monotonic_seconds'] = {
+                    'start': released_at, 'finish': events_completed_at,
+                    'clock': 'CLOCK_MONOTONIC',
+                }
+                observe_metrics('storage_metrics',
+                                'completed-before-terminal-restart', quiescent=True)
                 if not errors:
                     result['restart_ms'] = crash_cycle()
                     result['engine_logs'].append(engine.log_path)
@@ -441,6 +505,7 @@ def measure(binary: Path | None, directory: Path, conversations: int, rounds: in
         cleanup_started = time.monotonic()
         engine.stop()
         result['phase_ms']['cleanup'] = (time.monotonic() - cleanup_started) * 1000
+        result['provenance']['artifact_after'] = engine.artifact_after
     result['errors'] = errors[:20]
     result['stage_failures'] = stage_failures
     result['expected_stream_events'] = conversations * rounds
@@ -453,7 +518,11 @@ def measure(binary: Path | None, directory: Path, conversations: int, rounds: in
     result['correctness_passed'] = (not errors and peak_active == conversations
                         and result.get('recovered_interrupted' if recover_interrupted else 'recovered_completed') == conversations
                         and (not restart_while_running or result.get('recovered_running') == conversations))
-    result['acceptance'] = assess(result)
+    try:
+        result['provenance']['sources_after'] = capture_sources()
+    except (OSError, RuntimeError, ValueError) as exc:
+        result['provenance']['sources_after'] = {'capture_error': str(exc)}
+    result['acceptance'] = assess(result, current_sources=result['provenance']['sources_after'])
     result['passed'] = result['acceptance']['passed']
     return result
 

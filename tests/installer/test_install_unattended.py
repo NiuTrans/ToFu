@@ -6,6 +6,9 @@ control run as shipped. Never run an installer against the developer checkout.
 """
 from __future__ import annotations
 
+# Synthetic repository/package fixtures, never shipped-source anchors.
+_AUDIT_SYNTHETIC_REPO_PATHS = ('lib/storage.py',)
+
 import json
 import os
 from pathlib import Path
@@ -119,7 +122,7 @@ def _run(project, env, *args, cwd=None):
     # install.sh does real work (env probe, download-cache reuse, receipt
     # writes); 25 s only fit an idle tmpfs host — a loaded FUSE checkout
     # needs an order of magnitude more while still catching a true wedge.
-    return subprocess.run(['bash', str(project / 'install.sh'), '--skip-playwright',
+    return subprocess.run(['bash', str(project / 'install.sh'),
                            *args], cwd=cwd or project, env=env, text=True,
                           capture_output=True, timeout=90)
 
@@ -296,3 +299,15 @@ def test_late_storage_failure_preserves_live_pointer_and_configuration(installer
     assert (project / '.tofu_env.json').read_text() == old_marker
     assert (project / '.env').read_bytes() == previous_configuration
     assert (project / '.venv/bin/python').is_file()
+
+
+def test_default_install_defers_chromium_and_uses_candidate_python(installer):
+    project, env = installer
+    result = _run(project, env, '--no-update', '--non-interactive', '--no-launch')
+    assert result.returncode == 0, result.stdout + result.stderr
+    calls = Path(env['CALLS_FILE']).read_text()
+    assert 'playwright install' not in calls
+    assert 'uv:venv' in calls
+    binding = json.loads((project / '.tofu_env.json').read_text())
+    assert binding['backend'] == 'uv'
+    assert '.tofu-envs' in binding['python']

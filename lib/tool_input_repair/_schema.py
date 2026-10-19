@@ -54,6 +54,7 @@ def _schema_owner_modules():
     import lib.tools.poll as poll_tools
     import lib.tools.produce as produce
     import lib.tools.project as project
+    import lib.tools.retained_agents as retained_agents
     import lib.tools.search as search
     import lib.tools.todo as todo
     import lib.tools.tool_result_artifacts as tool_result_artifacts
@@ -75,6 +76,7 @@ def _schema_owner_modules():
         poll_tools,
         produce,
         project,
+        retained_agents,
         scheduler_tool_defs,
         skills_tools,
         search,
@@ -96,7 +98,10 @@ def _build_schema_index() -> dict[str, dict[str, Any]]:
     """
     index: dict[str, dict[str, Any]] = {}
     try:
-        candidates: list[Any] = []
+        # Gateway schemas are factories, not module-level tool lists. Index
+        # their canonical batch contract without constructing a tool catalog.
+        from lib.tools.gateway import gateway_tool_schemas
+        candidates: list[Any] = list(gateway_tool_schemas())
         for owner_module in _schema_owner_modules():
             for attr in dir(owner_module):
                 obj = getattr(owner_module, attr, None)

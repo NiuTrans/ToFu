@@ -54,10 +54,9 @@ class ExportStore:
         # refusal. Real anonymous-file errors remain ordinary export failures.
         if cache_bytes is not None and (type(cache_bytes) is not int or cache_bytes < 0):
             raise ExportError('export_configuration')
-        self.build_bytes = limit('build_output_bytes')
-        self.compile_seconds = (limit('compile_timeout_seconds') if compile_seconds is None
-                                else compile_seconds)
-        if not 0 < self.compile_seconds <= limit('compile_timeout_seconds'):
+        self.compile_seconds = compile_seconds
+        if compile_seconds is not None and (type(compile_seconds) not in (int, float)
+                or not math.isfinite(compile_seconds) or compile_seconds <= 0):
             raise ExportError('export_configuration')
         self.entries: dict[tuple, _Entry] = {}
         self.closed = False
@@ -137,7 +136,6 @@ class ExportStore:
                 raise ExportError('export_closed')
             if name not in ('document.pdf', 'document.synctex.gz', 'build.log') or name in entry.files:
                 raise ExportError('export_artifact')
-            maximum = limit('log_bytes') if name == 'build.log' else limit('artifact_bytes')
             stream = self.file_factory(mode='w+b')
             entry.files[name] = stream
             digest = hashlib.sha256()
@@ -145,8 +143,7 @@ class ExportStore:
             async for chunk in chunks:
                 if self.closed:
                     raise ExportError('export_closed')
-                if (not isinstance(chunk, bytes) or len(chunk) > limit('transfer_chunk_bytes')
-                        or size + len(chunk) > maximum or entry.size + len(chunk) > self.build_bytes):
+                if not isinstance(chunk, bytes) or len(chunk) > limit('transfer_chunk_bytes'):
                     raise ExportError('export_artifact_limit')
                 stream.write(chunk)
                 digest.update(chunk)
@@ -171,7 +168,7 @@ class ExportStore:
                 log = entry.files.get('build.log')
                 if log is not None:
                     log.seek(0)
-                    main_file = compiled_main_file(log.read(8192))
+                    main_file = compiled_main_file(log)
             except ExportError:
                 if status == 'success':
                     raise

@@ -6,8 +6,8 @@ import sqlite3
 
 import pytest
 
-from lib.storage_sidecar.operations_pkg._common import _dump, _load
-from lib.storage_sidecar.operations_pkg._project_brain import (
+from lib.storage_authority_sql.operations_pkg._common import _dump, _load
+from lib.storage_authority_sql.operations_pkg._project_brain import (
     _empty_projection,
     _fold_event,
     _project_brain_checker_register,
@@ -238,7 +238,7 @@ def test_cutover_failure_rolls_back_without_half_authority():
 
 def test_checkpoint_reclaims_only_rebuildable_prefix_and_keeps_long_lived_state(
         monkeypatch):
-    import lib.storage_sidecar.operations_pkg._project_brain as brain_storage
+    import lib.storage_authority_sql.operations_pkg._project_brain as brain_storage
 
     connection = _legacy_database()
     session = _Session(connection)

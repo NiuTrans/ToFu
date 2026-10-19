@@ -421,3 +421,104 @@ def test_logout_signals_device_worker_before_removing_flow():
     assert cancel_event.is_set()
     with _flows_lock:
         assert 'codex' not in _active_flows
+
+
+@pytest.mark.parametrize('after, expected', [(100.5, 'old-access'), (101, None), (102, None)])
+def test_codex_failed_refresh_rechecks_current_expiry(private_store, monkeypatch, after, expected):
+    import lib.oauth.codex as codex
+
+    clock = [100.0]
+    monkeypatch.setattr(codex.time, 'time', lambda: clock[0])
+    assert token_store.save_token('codex', {
+        'access_token': 'old-access', 'refresh_token': 'refresh', 'expire': 101,
+    })
+
+    def failed_refresh(*args, **kwargs):
+        clock[0] = after
+        return None
+
+    monkeypatch.setattr(codex, 'codex_refresh_token', failed_refresh)
+    assert codex.codex_get_valid_token() == expected
+
+
+@pytest.mark.parametrize('replacement', [None, {'access_token': 'new-access', 'expire': 1000}])
+def test_codex_failed_refresh_does_not_return_replaced_credential(
+        private_store, monkeypatch, replacement):
+    import lib.oauth.codex as codex
+
+    monkeypatch.setattr(codex.time, 'time', lambda: 100.0)
+    assert token_store.save_token('codex', {
+        'access_token': 'old-access', 'refresh_token': 'refresh', 'expire': 101,
+    })
+
+    def failed_refresh(*args, **kwargs):
+        if replacement is None:
+            assert token_store.delete_token('codex')
+        else:
+            assert token_store.save_token('codex', replacement)
+        return None
+
+    monkeypatch.setattr(codex, 'codex_refresh_token', failed_refresh)
+    expected = None if replacement is None else 'new-access'
+    assert codex.codex_get_valid_token() == expected
+
+
+@pytest.mark.parametrize('login_kind', ['browser', 'code'])
+@pytest.mark.parametrize('new_account', ['old-account', 'new-account'])
+@pytest.mark.parametrize('refresh_has_identity', [False, True])
+def test_codex_new_login_wins_inflight_refresh(
+        private_store, monkeypatch, login_kind, new_account, refresh_has_identity):
+    import lib.oauth.codex as codex
+
+    started, release, login_entered, login_finished = (threading.Event() for _ in range(4))
+    monkeypatch.setattr(codex, '_parse_jwt_claims', lambda identity: ('email', identity, 'plus'))
+    monkeypatch.setattr('lib.oauth.outbound.provision_oauth_provider', mock.Mock())
+    monkeypatch.setattr('lib.oauth.codex_catalog.trigger_codex_catalog_refresh', mock.Mock())
+    assert token_store.save_token('codex', {
+        'access_token': 'old-access', 'refresh_token': 'old-refresh',
+        'account_id': 'old-account', 'plan_type': 'plus', 'expire': 0,
+    })
+    login_data = {'access_token': 'login-access', 'refresh_token': 'login-refresh',
+                  'id_token': new_account, 'expires_in': 3600}
+
+    def post(url, payload, **kwargs):
+        if payload['grant_type'] == 'authorization_code':
+            data = login_data
+        else:
+            started.set()
+            assert release.wait(5)
+            data = {'access_token': 'refreshed-old-access',
+                    'refresh_token': 'refreshed-old-refresh', 'expires_in': 3600}
+            if refresh_has_identity:
+                data['id_token'] = 'old-account'
+        return mock.Mock(status_code=200, json=lambda: data)
+
+    monkeypatch.setattr(codex, '_oauth_http_post', post)
+
+    def login():
+        login_entered.set()
+        try:
+            if login_kind == 'browser':
+                return codex.codex_store_token(login_data)
+            return codex.codex_exchange_code('code', 'verifier')
+        finally:
+            login_finished.set()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        refresh = pool.submit(codex.codex_refresh_token)
+        try:
+            assert started.wait(5)
+            signing_in = pool.submit(login)
+            assert login_entered.wait(5)
+            # The login commit shares refresh/logout's existing transaction
+            # boundary, so an older refresh cannot overwrite it afterward.
+            assert not login_finished.wait(0.05)
+        finally:
+            release.set()
+        refresh.result(timeout=5)
+        assert signing_in.result(timeout=5)['access_token'] == 'login-access'
+
+    stored = token_store.load_token('codex')
+    assert stored['access_token'] == 'login-access'
+    assert stored['refresh_token'] == 'login-refresh'
+    assert stored['account_id'] == new_account

@@ -13,6 +13,7 @@ from lib.llm.conversion import (
     checked_conversion, conversion_report, object_arguments, stop_sequences, validate_request,
 )
 from lib.llm.conversion import ProtocolConversionError
+from lib.llm_sanitize.text_blocks import normalize_text_blocks
 from lib.log import get_logger
 
 logger = get_logger(__name__)
@@ -125,27 +126,23 @@ def _convert_content_blocks(content) -> list:
     NEVER emits an empty/whitespace-only text block: Anthropic (and every
     strict Anthropic-shape validator — Moonshot's "text content is empty",
     the 2026-07-31 kimi-k3 incident class) hard-400s the whole request on
-    one. A phantom block carries zero information, so dropping it AT THE
-    EMISSION SEAM keeps this boundary self-consistent regardless of which
-    caller fed it — this is the Anthropic-side counterpart of
-    ``lib.llm_sanitize._strip_empty_text_blocks`` (which guards the OpenAI
-    wire inside build_body; callers that bypass build_body get the same
-    guarantee here).
+    one. The pure ``lib.llm_sanitize.text_blocks`` authority folds meaningful
+    whitespace into compatible adjacent text before removing invalid blocks,
+    matching the common sanitizer even when a caller bypasses build_body.
+    Metadata and multimodal boundaries are never merged.
     """
     if isinstance(content, str):
         return [{'type': 'text', 'text': content}] if content.strip() else []
     if not isinstance(content, list):
         return []
     out = []
-    for block in content:
+    for block in normalize_text_blocks(content):
         if not isinstance(block, dict):
             continue
         btype = block.get('type')
         cc = block.get('cache_control')
         if btype == 'text':
             text = block.get('text') or ''
-            if not text.strip():
-                continue  # phantom empty text block — hard-400 upstream
             nb = {'type': 'text', 'text': text}
             if cc:
                 nb['cache_control'] = cc

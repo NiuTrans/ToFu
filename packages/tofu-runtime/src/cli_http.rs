@@ -23,6 +23,12 @@ pub(crate) fn size(v: &Value, key: &str) -> Result<usize, Box<dyn std::error::Er
 pub(crate) fn duration(v: &Value, key: &str) -> Result<Duration, Box<dyn std::error::Error>> {
     Ok(Duration::from_millis(number(v, key)?))
 }
+pub(crate) fn nullable_duration(v: &Value, key: &str) -> Result<Option<Duration>, Box<dyn std::error::Error>> {
+    match v.get(key) {
+        Some(Value::Null) => Ok(None),
+        _ => Ok(Some(duration(v, key)?)),
+    }
+}
 pub(crate) struct Output(pub(crate) Mutex<Option<Value>>);
 impl TerminalPublisher for Output {
     fn publish_once(&self, _: &TerminalCandidate, event: &Value) -> Result<(), PortError> {
@@ -44,7 +50,14 @@ pub(crate) fn policy(input: &Value) -> Result<Policy, Box<dyn std::error::Error>
         idle_connections: size(p, "idle_connections")?,
         keepalive: duration(p, "keepalive_ms")?,
         connect: duration(p, "connect_ms")?,
-        request_headers: duration(p, "request_headers_ms")?,
+        request_headers: match p.get("request_headers_ms") {
+            Some(Value::Null) => None,
+            _ => Some(duration(p, "request_headers_ms")?),
+        },
+        write: match p.get("write_ms") {
+            None | Some(Value::Null) => None,
+            _ => Some(duration(p, "write_ms")?),
+        },
         pool_wait: duration(p, "pool_wait_ms")?,
         stream_idle: if p["stream_idle_ms"].is_null() {
             None
@@ -127,10 +140,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     if policy.connections == 0 {
         return Err("invalid connection capacity".into());
     }
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .max_blocking_threads(policy.connections)
-        .enable_all()
-        .build()?;
+    let runtime = tofu_runtime::reactor::build()?;
     let transport = {
         let _entered = runtime.enter();
         Transport::new(endpoint, proxy, policy)

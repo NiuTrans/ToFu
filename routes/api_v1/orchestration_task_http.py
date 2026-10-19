@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from lib.api_response import api_not_found, api_ok
 from lib.orchestration.application_result_ports import DurableReplayResultPort
-from lib.task_replay import missing_replay_page
+from lib.task_replay.task_replay import missing_replay_page
 from routes.task_http import (
     task_replay_cursor,
     task_replay_parameters,

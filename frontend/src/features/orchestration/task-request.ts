@@ -1,3 +1,4 @@
+import './durable-read';
 import { orchestrationRegistry } from './registry';
 import {
   createOrchestrationEndpointRequestClient,
@@ -17,6 +18,7 @@ export function createOrchestrationTaskRequestClient(
   const list = (status?: unknown, orchestrationId?: unknown, limit?: unknown) =>
     requests.request('task-list', [status, orchestrationId, limit]);
   const get = (runId: unknown) => requests.request('task-read', [runId]);
+  const resume = (runId: unknown) => requests.request('task-resume', [runId]);
   const create = (
     definition: unknown,
     input: unknown,
@@ -40,6 +42,7 @@ export function createOrchestrationTaskRequestClient(
     canReadEvents: () => requests.available('task-events'),
     list,
     get,
+    resume,
     create,
     events,
   };

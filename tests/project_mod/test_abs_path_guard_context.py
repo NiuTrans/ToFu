@@ -102,7 +102,7 @@ def test_execute_tools_gateway_uses_same_scoped_guard(workspace):
         'id': 'scope-a', 'convId': '', '_userId': 1,
         '_via_agent_run': True, '_transient': True,
         'status': 'running', 'aborted': False, 'model': 'test', 'events': [],
-        'config': {'tools': {'resultEnvelope': 'legacy'}},
+        'config': {'projectPath': str(root), 'tools': {'resultEnvelope': 'legacy'}},
         'events_lock': threading.Lock(), '_attended': True,
         '_dispatch_heartbeat': 0.0, '_t_last_event': 0.0, 'toolRounds': [],
         '_executable_tool_catalog': catalog,
@@ -116,7 +116,8 @@ def test_execute_tools_gateway_uses_same_scoped_guard(workspace):
         project_enabled=True, model='test', llm_round=0)
     assert len(results) == len(paths)
     for i, receipt in enumerate(results):
-        rendered = json.dumps(receipt)
+        assert receipt.canonical is not None
+        rendered = receipt.canonical.text()
         if i < 2:
             assert 'scoped-project-content' in rendered
         else:

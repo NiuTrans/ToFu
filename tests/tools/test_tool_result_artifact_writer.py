@@ -10,7 +10,7 @@ import time
 
 import pytest
 
-from lib.tool_result_artifact_writer import (
+from lib.tool_results.tool_result_artifact_writer import (
     TaskArtifactBudget,
     ToolResultArtifactWriter,
     cleanup_abandoned_spools,
@@ -184,7 +184,7 @@ def test_shared_task_budget_is_aggregate(tmp_path):
 
 
 def test_disk_failure_degrades_to_preview(tmp_path, monkeypatch):
-    import lib.tool_result_artifact_writer as module
+    import lib.tool_results.tool_result_artifact_writer as module
 
     def _boom(*_args, **_kwargs):
         raise OSError("disk full")
@@ -453,7 +453,7 @@ def test_spilled_preview_projection_preserves_terminal_and_provenance():
         _project_output_artifact,
         _register_output_artifact_origin,
     )
-    from lib.tool_result_artifacts import artifact_provenance
+    from lib.tool_results.tool_result_artifacts import artifact_provenance
 
     artifact = _writer(
         threshold=10,

@@ -38,7 +38,7 @@ def _trusted_media_url(value) -> str:
 
 
 def _download(url: str, *, maximum: int, expected_prefix: str) -> tuple[bytes, str]:
-    from lib.http_client import http_stream
+    from lib.http_transport.client import http_stream
 
     chunks: list[bytes] = []
     total = 0
@@ -100,7 +100,7 @@ def resolve_stock_media(request: dict, *, orientation: str = 'portrait') -> dict
                 'reason': 'webpage capture requires a browser-capture adapter'}
     search_kind = 'video' if kind in ('video', 'gif') else 'image'
     try:
-        from lib.http_client import http_get
+        from lib.http_transport.client import http_get
         endpoint = (_PEXELS_VIDEO_SEARCH if search_kind == 'video'
                     else _PEXELS_PHOTO_SEARCH)
         response = http_get(

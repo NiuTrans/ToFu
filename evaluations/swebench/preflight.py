@@ -87,6 +87,10 @@ def _backend_check(
 ) -> Check:
     if backend not in ISOLATED_BACKENDS:
         return Check("isolation_backend", "fail", f"unsupported or non-isolating backend: {backend}")
+    try:
+        BENCHMARKS[benchmark].validate_backend(backend)
+    except (KeyError, ValueError) as exc:
+        return Check("benchmark_backend_capabilities", "fail", str(exc))
     if backend == "rootless-qemu":
         if rootless_qemu is None:
             return Check(
@@ -337,6 +341,12 @@ def harbor_checks(
         else:
             checks.append(Check("harbor", "pass", rendered))
     checks.append(_benchmark_check(benchmark))
+    try:
+        from .capabilities import require_harbor_capabilities
+        require_harbor_capabilities(BENCHMARKS[benchmark])
+        checks.append(Check("task_schema_capabilities", "pass", "required fields retained"))
+    except (ImportError, KeyError, ValueError, AttributeError, TypeError) as exc:
+        checks.append(Check("task_schema_capabilities", "fail", type(exc).__name__))
     checks.append(
         _backend_check(
             backend,

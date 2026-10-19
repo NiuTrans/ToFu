@@ -5,7 +5,7 @@ import time
 
 import pytest
 
-from lib.server_loop_watchdog import LoopWatchdog
+from lib.server.server_loop_watchdog import LoopWatchdog
 from tests.server.test_server_loop_watchdog_lifecycle import _Hooks
 
 pytestmark = pytest.mark.unit

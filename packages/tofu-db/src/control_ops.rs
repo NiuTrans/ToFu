@@ -35,10 +35,12 @@ pub const SYSTEM_BACKUP_CONTRACT: &str = "tofu-db.system-backup.v1";
 /// touches the authority mutex.
 #[derive(Clone, Default)]
 pub struct ControlObservers {
+    pub wal_write_buffer: Option<crate::wal::WalBarrier>,
     pub listener: Option<LoopbackListenerObserver>,
     pub maintenance: Option<MaintenanceObserver>,
     pub packer: Option<BackgroundPackerObserver>,
     pub online_gc: Option<OnlineGarbageCollectionObserver>,
+    pub search_gc: Option<OnlineGarbageCollectionObserver>,
     pub online_backup: Option<OnlineBackupObserver>,
     pub authority_watch: Option<AuthorityContentionObserver>,
     pub wal_durability: Option<&'static str>,
@@ -47,6 +49,7 @@ pub struct ControlObservers {
     pub canonical_json_cache: Option<crate::authority::CanonicalProofCacheObserver>,
     pub published_queries: Option<crate::authority::PublishedQueryObserver>,
     pub decoded_chunk_cache: Option<crate::authority::DecodedChunkCacheObserver>,
+    pub blob_codec_pool: Option<crate::blob::BlobCodecPoolObserver>,
 }
 
 pub fn is_control_operation(name: &str) -> bool {
@@ -232,8 +235,9 @@ fn health_payload(observers: &ControlObservers) -> Value {
 }
 
 /// Nonzero commit-stage totals, same source as the TOFU_DB_FSYNC_STATS
-/// shutdown dump. Stages with no calls are omitted; their names are fixed in
-/// `fsync_stats::STAGE_NAMES`, so absence unambiguously means zero calls.
+/// shutdown dump. Stages with no recorded observations are omitted. Fine-grained
+/// read stages require request profiling; their absence does not mean no reads
+/// occurred. Names are fixed in `fsync_stats::STAGE_NAMES`.
 fn commit_stage_snapshot() -> Value {
     let stages = (0..fsync_stats::STAGE_NAMES.len())
         .map(|stage| {
@@ -266,9 +270,12 @@ fn metrics_payload(observers: &ControlObservers) -> Value {
         "protocol": PROTOCOL_VERSION,
         "durability": fsync_stats::counters(),
         "commitStages": commit_stage_snapshot(),
+        "historyPromotion": fsync_stats::history_promotion_snapshot(),
         "requestProfile": crate::request_profile::snapshot(),
         "resourceExhaustionReasons": fsync_stats::resource_exhaustion_snapshot(),
     });
+    if let Some(observer) = &observers.wal_write_buffer { payload[crate::generated_storage_v2::WAL_WRITE_BUFFER_METRICS_FIELD] = observer.write_buffer_metrics(); }
+    if let Some(observer) = &observers.blob_codec_pool { payload["blobCodecPool"] = observer.metrics(); }
     if let Some(observer) = &observers.published_queries { payload["publishedReadView"] = observer.metrics(); }
     if let Some(observer) = &observers.decoded_chunk_cache {
         payload["decodedBlobChunkCache"] = serde_json::to_value(observer.metrics())
@@ -313,6 +320,10 @@ fn metrics_payload(observers: &ControlObservers) -> Value {
     if let Some(observer) = &observers.online_gc {
         payload["onlineGarbageCollector"] = serde_json::to_value(observer.metrics())
             .unwrap_or_else(|_| json!({"error": "online GC metrics encode failed"}));
+    }
+    if let Some(observer) = &observers.search_gc {
+        payload["searchGarbageCollector"] = serde_json::to_value(observer.metrics())
+            .unwrap_or_else(|_| json!({"error": "search GC metrics encode failed"}));
     }
     if let Some(observer) = &observers.online_backup {
         payload["onlineBackup"] = serde_json::to_value(observer.metrics())
@@ -373,6 +384,8 @@ mod tests {
         let payload: Value = serde_json::from_slice(&response.payload).unwrap();
         assert_eq!(payload["contract"], json!(SYSTEM_METRICS_CONTRACT));
         assert!(payload["durability"].is_object());
+        assert_eq!(payload["historyPromotion"]["contract"], json!("tofudb.history-promotion/v1"));
+        assert_eq!(payload["historyPromotion"]["fixedCounterBytes"], json!(32));
         assert!(payload["commitStages"].is_array());
         assert_eq!(payload["resourceExhaustionReasons"]["contract"],
             json!(crate::generated_storage_v2::NATIVE_RESOURCE_EXHAUSTION_CONTRACT));

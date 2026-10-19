@@ -36,7 +36,7 @@ def server_module():
         import hypercorn  # noqa: F401
     except ImportError as e:
         pytest.skip(f'quart/hypercorn not installed: {e}')
-    import lib.server_mlock as server_module
+    import lib.server.server_mlock as server_module
     return server_module
 
 

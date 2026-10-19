@@ -349,7 +349,7 @@ pub(crate) fn execute(
             let row = read(database, &mut tx, &id.attempt_id, id.sequence, memo)?;
             if row
                 .as_ref()
-                .is_some_and(|row| row.event_json.len() > MAX_TRANSACTION_IR_LITERAL_BYTES)
+                .is_some_and(|row| row.event_json.len() > MAX_LEGACY_DOCUMENT_BYTES)
             {
                 return Err(invalid_input("oversized event requires chunk reads"));
             }

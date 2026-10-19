@@ -40,6 +40,7 @@ from lib.swarm.integration._state import (
     add_session_alias,
 )
 from lib.swarm.master import MasterOrchestrator
+from lib.swarm.planner import AgentDependencyCycleError
 from lib.swarm.protocol import SubTaskSpec
 from lib.swarm.resource_policy import (
     swarm_max_parallel,
@@ -97,9 +98,25 @@ def _swarm_tool_error(code: str, *, retryable: bool, message: str = '',
     }
     if err.message:
         payload['message'] = err.message
+        payload['summary'] = err.message
     for key, value in context.items():
         payload[key] = value
     return json.dumps(payload, ensure_ascii=False)
+
+
+def _uncertain_launch_error(error: Exception, session: MasterOrchestrator,
+                           specs: list[SubTaskSpec]) -> str:
+    """Preserve lookup handles when an admission/start response is ambiguous."""
+    logger.error('[Swarm:%s] launch outcome unconfirmed', session.task_id, exc_info=True)
+    detail = f'{type(error).__name__}: {error}'
+    return _swarm_tool_error('swarm_launch_unknown', retryable=False, message=detail,
+        exception_type=type(error).__name__, submission_state='unknown', phase='dispatch',
+        swarm_key=session.inbox_key, swarm_run_id=session.task_id,
+        requested_agent_ids=[spec.id for spec in specs],
+        next_action=(
+            'Inspect get_agent_result using these original requested_agent_ids. '
+            'The launch receipt is unconfirmed and children may already be running. '
+            'Do not issue a replacement spawn or assume rollback.'))
 
 
 # ═══════════════════════════════════════════════════════════
@@ -195,27 +212,28 @@ def execute_swarm_tool(fn_name: str, fn_args: dict, task: dict | None = None,
     ``spawn_agents`` / ``await_agents`` / ``get_agent_result``) or a plain
     text body (for the artifact tools).
     """
-    with _sessions_lock:
-        _cleanup_stale_sessions()
-
     task = task or {}
     all_tools = all_tools or []
     task_id = task.get('id', 'unknown')
-    cfg = dict(cfg or {})
-    if model:
-        cfg['model'] = model
-    from lib.tasks_pkg.child_invocation import inherit_child_config
-    cfg.update(inherit_child_config(task.get('config') or {}, cfg))
-    if thinking_enabled is not None:
-        cfg['thinkingEnabled'] = thinking_enabled
-    if search_mode:
-        cfg['search_mode'] = search_mode
-    model = cfg.get('model', '')
-    thinking_enabled = cfg.get('thinkingEnabled')
-
-    logger.info('[Swarm:%s] tool=%s args_keys=%s', task_id, fn_name, list(fn_args.keys()))
-
+    phase = 'preparation'
     try:
+        with _sessions_lock:
+            _cleanup_stale_sessions()
+        cfg = dict(cfg or {})
+        if model:
+            cfg['model'] = model
+        from lib.tasks_pkg.child_invocation import inherit_child_config
+        cfg.update(inherit_child_config(task.get('config') or {}, cfg))
+        if thinking_enabled is not None:
+            cfg['thinkingEnabled'] = thinking_enabled
+        if search_mode:
+            cfg['search_mode'] = search_mode
+        model = cfg.get('model', '')
+        thinking_enabled = cfg.get('thinkingEnabled')
+
+        logger.info('[Swarm:%s] tool=%s args_keys=%s', task_id, fn_name, list(fn_args.keys()))
+
+        phase = 'dispatch'
         if fn_name == 'spawn_agents':
             return _handle_spawn_agents(
                 fn_args, task_id=task_id, task=task, cfg=cfg,
@@ -231,18 +249,64 @@ def execute_swarm_tool(fn_name: str, fn_args: dict, task: dict | None = None,
             from lib.swarm.run_messages import RunMessageError
             from lib.storage.errors import StorageError
             try:
-                if fn_name == 'send_agent_message':
-                    session = _get_session(swarm_key_for(task))
-                    result = message_service.send(task, fn_args, session)
+                if 'retained_agent_id' in fn_args:
+                    from lib.swarm import retained_messages
+                    if fn_name == 'send_agent_message':
+                        result = retained_messages.send(task, fn_args, cfg=cfg,
+                            all_tools=all_tools, project_path=project_path,
+                            on_event=on_event, abort_check=abort_check)
+                    else:
+                        result = retained_messages.read(task, fn_args, project_path=project_path)
+                elif fn_name == 'send_agent_message':
+                    from lib.swarm.team_messages import worker_binding
+                    worker = worker_binding(task)
+                    session = _get_session(worker['swarmKey'] if worker else swarm_key_for(task))
+                    result = message_service.send(task, fn_args, session, abort_check=abort_check)
                 else:
                     result = message_service.read(task, fn_args)
                 return json.dumps(result, ensure_ascii=False)
             except RunMessageError as error:
+                next_action = (
+                    'Inspect get_agent_messages with the original target/key. '
+                    'A new message to a retained identity may start a new turn; '
+                    'exact-run steering never redirects.')
+                if error.code in {'message_invalid_arguments', 'message_invalid_identity'}:
+                    next_action = (
+                        'Correct the arguments before retrying; this call was rejected. '
+                        'For a temporary spawn_agents child, keep agent_id and '
+                        'swarm_run_id from its original launch handle; remove '
+                        'retained_agent_id, scope and intent. For a persistent '
+                        'colleague, keep retained_agent_id from manage_agents/list_agents '
+                        'and remove agent_id and swarm_run_id. Never infer or redirect '
+                        'a target. ')
+                    if fn_name == 'get_agent_messages':
+                        next_action += (
+                            'Stable reads require the original idempotency_key and '
+                            'omit message_id; exact-run reads omit idempotency_key '
+                            'and may use message_id.')
+                    else:
+                        next_action += 'Preserve the authored content, kind and idempotency_key.'
+                elif error.code in {'message_run_not_found', 'message_not_found'}:
+                    next_action = (
+                        'This lookup or submission has no matching original run, recipient or message. '
+                        'Verify the exact handles from the original launch; do not repeat an '
+                        'unchanged lookup, infer a replacement, or start work to repair history. '
+                        'A rejected send has no new receipt. Optional messaging does not block '
+                        'assigned work; final results use ordinary delivery.')
+                elif error.code == 'message_forbidden' and error.submission_state == 'rejected':
+                    next_action = (
+                        'This call was rejected before submission; there is no new receipt to inspect. '
+                        'Workers may use only agent_id and swarm_run_id for their original team; '
+                        'remove retained_agent_id, scope and intent. Do not invent identities or '
+                        'retry outside your permissions. If this was an optional progress message, '
+                        'continue your assigned work and include the finding in your final result.')
                 return _swarm_tool_error(error.code, retryable=False, message=str(error),
-                    next_action='Query the exact run receipt; correct scope/identity or start a separately authorized assignment.')
+                    submission_state=error.submission_state,
+                    next_action=next_action)
             except StorageError as error:
                 return _swarm_tool_error(error.code, retryable=error.retryable, message=str(error),
-                    next_action='Query get_agent_messages; retry only with the same idempotency_key and content.')
+                    submission_state='unknown',
+                    next_action='Query get_agent_messages; retry only with the same target, idempotency_key, content, kind and intent.')
 
         if fn_name == 'await_agents':
             return _handle_await_agents(
@@ -259,7 +323,16 @@ def execute_swarm_tool(fn_name: str, fn_args: dict, task: dict | None = None,
 
     except Exception as e:
         logger.error('[Swarm:%s] Tool %s error: %s', task_id, fn_name, e, exc_info=True)
-        return f'Swarm tool error: {type(e).__name__}: {e}'
+        detail = f'{type(e).__name__}: {e}'
+        return _swarm_tool_error('swarm_tool_failed', retryable=False,
+            message=detail, summary=detail, tool=fn_name,
+            exception_type=type(e).__name__, phase=phase,
+            submission_state='rejected' if phase == 'preparation' else 'unknown',
+            next_action=('Fix the reported configuration problem; no tool was invoked.'
+                         if phase == 'preparation' else (
+                'The call failed without a confirmed receipt. Inspect the current '
+                'swarm status/results before any new spawn; do not blindly repeat '
+                'the call or assume that already-running work was rolled back.')))
 
 
 # ═══════════════════════════════════════════════════════════
@@ -293,6 +366,8 @@ def _handle_spawn_agents(fn_args: dict, *,
             next_action='Pass agents as an array of agent objects.')
     parallel_ceiling = swarm_max_parallel()
     retry_ceiling = swarm_max_retries()
+
+    legacy_retry_override = cfg.get('max_retries')
     try:
         configured_parallel = int(
             cfg.get('max_parallel') or parallel_ceiling)
@@ -328,13 +403,11 @@ def _handle_spawn_agents(fn_args: dict, *,
             return _swarm_tool_error('invalid_agent', retryable=True,
                 message='required_for_completion must be boolean.',
                 next_action='Use true for required delivery or false for optional exploration.')
+        requested_retries = agent_def.get('max_retries', legacy_retry_override)
         try:
-            requested_retries = int(
-                agent_def.get('max_retries')
-                if agent_def.get('max_retries') is not None
-                else cfg['max_retries'])
+            requested_retries = (None if requested_retries is None else int(requested_retries))
         except (TypeError, ValueError, OverflowError):
-            requested_retries = cfg['max_retries']
+            requested_retries = None
         explicit_tools = [
             str(t).strip()
             for t in (agent_def.get('tools') or [])
@@ -355,7 +428,8 @@ def _handle_spawn_agents(fn_args: dict, *,
             # produced a result — the "no result" card, from a second root
             # cause independent of the parallel-tool one.
             id=agent_def.get('id') or str(uuid.uuid4())[:8],
-            max_retries=max(0, min(requested_retries, retry_ceiling)),
+            max_retries=(None if requested_retries is None else
+                         max(0, min(requested_retries, retry_ceiling))),
             model_override=(agent_def.get('model_override')
                             or agent_def.get('model') or ''),
             tools=explicit_tools,
@@ -443,6 +517,35 @@ def _handle_spawn_agents(fn_args: dict, *,
             # auto-routing decision.
             read_only_orchestration = True
             orchestration = existing_contract
+    # Prepare the complete wave before session registration or scheduling.
+    # Initial, follow-up and retained launches use the same authority boundary.
+    from lib.swarm.master import bind_assignment_contexts
+    from lib.swarm.planner import resolve_execution_order
+    try:
+        resolve_execution_order(specs)
+    except AgentDependencyCycleError as error:
+        return _swarm_tool_error('agent_dependency_cycle', retryable=False,
+            message=str(error), submission_state='rejected', phase='validation',
+            next_action='Remove circular depends_on entries before submitting a new wave.')
+    try:
+        assignment_templates = bind_assignment_contexts(specs, parent_task=task,
+                parent_config=cfg, all_tools=all_tools, model=model,
+                project_path=project_path, thinking_enabled=thinking_enabled,
+                abort_check=lambda: bool(task.get('aborted')) or (
+                    task.get('status') not in ('done', 'completed', 'failed', 'error', 'cancelled')
+                    and bool(abort_check and abort_check())),
+                on_agent_usage=_child_usage_rollup(task),
+                validate_only=retained_binding is None and session is None)
+    except Exception as error:
+        logger.error('[Swarm:%s] assignment preparation failed', task_id, exc_info=True)
+        detail = f'{type(error).__name__}: {error}'
+        return _swarm_tool_error('swarm_context_preparation_failed', retryable=False,
+            message=detail, summary=detail, exception_type=type(error).__name__,
+            submission_state='rejected', phase='preparation',
+            next_action=(
+                'No child in this wave was submitted. Fix the reported execution '
+                'configuration or authority problem before starting a new wave; '
+                'existing swarm work is unchanged.'))
     # A fresh wave must be able to enqueue <swarm-update>s even if a prior
     # wave on this key was explicitly aborted (which tombstoned the inbox).
     agent_inbox.untombstone(swarm_key)
@@ -503,14 +606,15 @@ def _handle_spawn_agents(fn_args: dict, *,
     deduped_dropped: list[SubTaskSpec] = []
     if session is None:
         conv_id = task.get('convId', cfg.get('convId', '')) or ''
-        from lib.tasks_pkg.child_invocation import (
-            inherit_child_config, snapshot_conversation_child_policy,
-        )
-        parent_cfg = inherit_child_config(task.get('config') or {}, cfg)
-        child_policy = snapshot_conversation_child_policy(
-            task, model=model, tools=all_tools, project_path=project_path,
-            thinking_enabled=thinking_enabled)
-        parent_cfg.update(child_policy['conversation_tool_policy'])
+        # Consume the already validated session grant; do not compile/copy a
+        # broader parent catalog again after preparation succeeded.
+        template = assignment_templates.get(model)
+        if template is None:
+            # A retained initial run may override the root model. Its individual
+            # grant remains authoritative; the session holds coordination only.
+            template = assignment_templates[specs[0].model_override or model]
+        parent_cfg = copy.deepcopy(template['config'])
+        parent_cfg['_executableToolCatalog'] = copy.deepcopy(template['tools'])
         parent_cfg['_swarmContinuationSource'] = continuation_source
 
         # Bind recovery to the spawning Turn/Attempt, not model-chosen ids or
@@ -607,7 +711,7 @@ def _handle_spawn_agents(fn_args: dict, *,
 
         try:
             session.run_in_background()
-        except ValueError as e:
+        except AgentDependencyCycleError as e:
             # Cycle detection raised by add_specs
             logger.warning('[Swarm:%s] spawn_agents rejected: %s',
                            swarm_key, e)
@@ -621,6 +725,8 @@ def _handle_spawn_agents(fn_args: dict, *,
                 next_action=(
                     'Re-issue spawn_agents without circular depends_on '
                     'entries.'))
+        except Exception as error:
+            return _uncertain_launch_error(error, session, specs)
         # On a fresh session, run_in_background's add_specs accepted everything
         # (no prior state to dedup against). ``specs`` is already correct.
     else:
@@ -630,7 +736,7 @@ def _handle_spawn_agents(fn_args: dict, *,
         add_session_alias(task_id, swarm_key)
         try:
             accepted_specs = session._scheduler.add_specs(specs)  # type: ignore[union-attr]
-        except ValueError as e:
+        except AgentDependencyCycleError as e:
             logger.warning('[Swarm:%s] follow-up spawn rejected: %s',
                            swarm_key, e)
             return _swarm_tool_error(
@@ -641,6 +747,8 @@ def _handle_spawn_agents(fn_args: dict, *,
                 next_action=(
                     'Re-issue spawn_agents without circular depends_on '
                     'entries.'))
+        except Exception as error:
+            return _uncertain_launch_error(error, session, specs)
         if accepted_specs:
             # Track followup specs in MasterOrchestrator so ``get_status``
             # (and the /api/v1/swarm/status route) sees the full agent list.

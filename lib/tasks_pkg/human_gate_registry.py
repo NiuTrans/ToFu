@@ -77,6 +77,8 @@ def _default_capacity() -> int:
 @dataclass
 class HumanGateEntry(Generic[ResponseT]):
     owner_user_id: int
+    # Process-local routing hint, never answer authority or a second store.
+    durable_scope: tuple[str, str] | None = None
     event: threading.Event = field(default_factory=threading.Event)
     resolved: bool = False
     response: ResponseT | None = None
@@ -113,11 +115,13 @@ class OwnedHumanGateRegistry:
         request_id: object,
         *,
         owner_user_id: object,
+        durable_scope: tuple[str, str] | None = None,
     ) -> HumanGateEntry[object] | None:
         key = self._key(kind, request_id)
         owner = require_user_id(
             owner_user_id, context=f'{kind} request owner')
-        entry: HumanGateEntry[object] = HumanGateEntry(owner_user_id=owner)
+        entry: HumanGateEntry[object] = HumanGateEntry(
+            owner_user_id=owner, durable_scope=durable_scope)
         with self._lock:
             if key in self._entries or len(self._entries) >= self._capacity:
                 return None
@@ -127,12 +131,37 @@ class OwnedHumanGateRegistry:
         # registration after a replica crash re-arms the same flag.
         if _distributed_mode():
             try:
-                from lib.runtime_state_store import get_store
+                from lib.runtime.runtime_state_store import get_store
                 get_store().set_value(
-                    _REQ_FLAG_KIND, _flag_key(*key), str(owner), _FLAG_TTL_S)
+                    _REQ_FLAG_KIND, _flag_key(*key),
+                    json.dumps({'owner': owner, 'conversationId': durable_scope[0], 'turnId': durable_scope[1]})
+                    if durable_scope else str(owner), _FLAG_TTL_S)
             except Exception as e:
                 logger.debug('[HumanGate] request-flag plant failed: %s', e)
         return entry
+
+    def owned_durable_scope(self, kind: str, request_id: object, *, owner_user_id: object):
+        key = self._key(kind, request_id)
+        owner = require_user_id(owner_user_id, context='human gate scope owner')
+        with self._lock:
+            entry = self._entries.get(key)
+            if entry is not None:
+                return entry.durable_scope if entry.owner_user_id == owner else None
+        if _distributed_mode():
+            try:
+                from lib.runtime.runtime_state_store import get_store
+                value = get_store().get_value(_REQ_FLAG_KIND, _flag_key(*key))
+                marker = json.loads(value) if isinstance(value, str) else None
+                if isinstance(marker, dict) and marker.get('owner') == owner:
+                    conv, turn = marker.get('conversationId'), marker.get('turnId')
+                    if isinstance(conv, str) and conv and isinstance(turn, str) and turn:
+                        return conv, turn
+            except (ValueError, TypeError):
+                pass  # Legacy unscoped owner marker has no durable route.
+            except Exception as error:
+                logger.warning('[HumanGate] durable scope lookup failed: %s', error)
+                raise
+        return None
 
     def resolve(
         self,
@@ -181,11 +210,16 @@ class OwnedHumanGateRegistry:
             return False
         flag_key = _flag_key(*key)
         try:
-            from lib.runtime_state_store import get_store
+            from lib.runtime.runtime_state_store import get_store
             store = get_store()
             pending_owner = store.get_value(_REQ_FLAG_KIND, flag_key)
             if pending_owner is not None and pending_owner != str(owner):
-                return False
+                try:
+                    marker = json.loads(pending_owner)
+                except (TypeError, ValueError):
+                    return False
+                if not isinstance(marker, dict) or marker.get('owner') != owner:
+                    return False
             payload = json.dumps(
                 {'owner': owner, 'response': response}, ensure_ascii=False)
             if len(payload.encode('utf-8')) > _MAX_ANSWER_BYTES:
@@ -223,7 +257,7 @@ class OwnedHumanGateRegistry:
         key = self._key(kind, request_id)
         flag_key = _flag_key(*key)
         try:
-            from lib.runtime_state_store import get_store
+            from lib.runtime.runtime_state_store import get_store
             store = get_store()
             raw = store.get_value(_ANS_FLAG_KIND, flag_key)
         except Exception as e:
@@ -260,7 +294,7 @@ class OwnedHumanGateRegistry:
         if not _distributed_mode():
             return
         try:
-            from lib.runtime_state_store import get_store
+            from lib.runtime.runtime_state_store import get_store
             get_store().delete_value(_REQ_FLAG_KIND, _flag_key(*key))
         except Exception as e:
             logger.debug('[HumanGate] request-flag cleanup failed: %s', e)
@@ -318,13 +352,19 @@ class OwnedHumanGateRegistry:
         if not _distributed_mode():
             return False
         try:
-            from lib.runtime_state_store import get_store
+            from lib.runtime.runtime_state_store import get_store
             pending_owner = get_store().get_value(
                 _REQ_FLAG_KIND, _flag_key(*key))
         except Exception as e:
             logger.debug('[HumanGate] pending probe failed: %s', e)
             return False
-        return pending_owner == str(owner)
+        if pending_owner == str(owner):
+            return True
+        try:
+            marker = json.loads(pending_owner) if isinstance(pending_owner, str) else None
+            return isinstance(marker, dict) and marker.get('owner') == owner
+        except (TypeError, ValueError):
+            return False
 
     def __len__(self) -> int:
         with self._lock:

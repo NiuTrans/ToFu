@@ -1,6 +1,6 @@
 """lib/self_update/_status.py — working-tree status and update check.
 
-``_is_runtime_state`` (delegates to lib.runtime_layout), ``working_tree_status``
+``_is_runtime_state`` (delegates to lib.runtime.runtime_layout), ``working_tree_status``
 (blocking vs. tolerated churn) and ``check_for_update`` (the full UI payload).
 """
 
@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import subprocess
 
-from lib.runtime_layout import is_runtime_state as _rl_is_runtime_state
+from lib.runtime.runtime_layout import is_runtime_state as _rl_is_runtime_state
 from lib.self_update._config import UPDATE_REPO
 from lib.self_update._git import _run_git, git_available
 from lib.self_update._version import (

@@ -11,7 +11,7 @@ import pytest
 
 from lib.agent_core.fair_work_lane import OwnerFairWorkLane
 from lib.error_envelope import is_envelope
-from lib.llm_errors import AbortedError
+from lib.llm.llm_errors import AbortedError
 
 
 pytestmark = pytest.mark.unit

@@ -1,15 +1,25 @@
 # tofu-environments
 
-Optional provider-neutral image/workspace SDK and Tofu tool plugin. Install from
+Optional provider-neutral environment/batch SDK with a separate MCP service. Install from
 this source directory with `python -m pip install .`. No provider is contacted at
 import, and the SDK works without importing Tofu host modules.
 
 The schema in `tofu_environments/spec.schema.json` is the API-v1 authority.
 `contracts.Provider` is the extension interface; `docker.DockerProvider` is the
-reference implementation. The host entry point enables ten native tools, while
-`tofu.environment_providers` discovers independently installed platform adapters.
+reference implementation. Native compatibility adapters opt in separately as
+`environments` and `compute`; installing a provider does not enable either.
+`schemas.py` defines shared tool arguments, and `tofu.environment_providers` /
+`tofu.compute_providers` discover independently installed platform adapters.
 See the checkout's `docs/ENVIRONMENT_PROVIDERS.md` for host enablement, ownership,
 capacity and design decisions.
+
+For platform tools, install `python -m pip install '.[mcp]'` and connect
+`tofu-environments-mcp --factory deployment.environments:binding` as a stdio MCP.
+The trusted factory returns `mcp_adapter.MCPBinding` with an explicit actor,
+existing SDK services, a one-use exact-write authorizer and owned cleanup.
+Absent services contribute no tools; absent authorization refuses external
+writes. `compute_wait` stays with the host goal runtime. Connections do not
+implicitly choose credentials, storage or resource allocations.
 
 An embedding can compose the SDK with its own identity, authorization, storage
 and transport. Example using a transient repository (no restart recovery):

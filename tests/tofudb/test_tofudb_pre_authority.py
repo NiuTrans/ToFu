@@ -10,9 +10,9 @@ import sys
 
 import pytest
 
-from lib.storage_sidecar.operation_domains import REGISTRY_VERSION
-from lib.storage_sidecar.operation_registry import build_registry
-from lib.storage_sidecar.schema import SCHEMA_VERSION
+from lib.storage_authority_sql.operation_domains import REGISTRY_VERSION
+from lib.storage_authority_sql.operation_registry import build_registry
+from lib.storage_authority_sql.schema import SCHEMA_VERSION
 from tofu_db.wire import STORAGE_SCHEMA_VERSION as CLIENT_SCHEMA_VERSION
 
 
@@ -120,14 +120,16 @@ def test_storage_v2_machine_contract_has_fixed_complete_bounded_fields():
         "activeFrameCountAdmission": "none",
         "defaultFrameMemoryBytes": 128 * 1024 * 1024,
         "aggregateBufferPolicy": "ram-threshold-then-private-anonymous-file",
+        "memoryHintAdmission": "all-usize-targets-including-zero-file-only",
         "readAdmission": "reserve-declared-body-before-allocation",
         "writeAdmission": "reserve-exact-encoded-body-before-allocation",
         "canonicalFieldOrder": "strictly-increasing-numeric-id",
         "unknownFieldPolicy": "reject",
     }
     assert document["streamedRequests"] == {
-        "maximumPayloadBytes": 64 * 1024 * 1024,
-        "maximumChunks": 64,
+        "payloadByteCountEncoding": "u64",
+        "chunkIndexEncoding": "u32",
+        "aggregateAdmission": "complete-stream-without-private-byte-or-chunk-count-quota",
         "eligibility": "all-semantic-requests-larger-than-one-frame",
         "ordering": "one-incomplete-stream-per-connection-strict-zero-based-chunk-index",
         "identity": "every-chunk-exactly-matches-correlation-deadline-owner-tenant-command-schema-stream-and-declared-total; terminator-matches-request-identity",
@@ -135,8 +137,9 @@ def test_storage_v2_machine_contract_has_fixed_complete_bounded_fields():
         "memoryAdmission": "first-chunk-declared-total-is-validated-and-reserved-once-before-exact-capacity-allocation; one decoded chunk is the only additional transport buffer",
     }
     assert document["streamedResponses"] == {
-        "maximumPayloadBytes": 64 * 1024 * 1024,
-        "maximumChunks": 64,
+        "payloadByteCountEncoding": "u64",
+        "chunkIndexEncoding": "u32",
+        "aggregateAdmission": "complete-stream-without-private-byte-or-chunk-count-quota",
         "chunkPayloadBytes": 1024 * 1024,
         "eligibility": "successful-response-payload-larger-than-one-chunk",
         "ordering": "strict-zero-based-chunk-index-with-final-on-last-chunk",
@@ -247,18 +250,43 @@ def test_tofudb_ir_contract_is_generated_bounded_and_default_deny():
     assert completed.returncode == 0, completed.stdout + completed.stderr
     document = json.loads(TOFUDB_IR.read_text(encoding="utf-8"))
     assert document["format"] == "tofu.database-ir.v1"
+    conversation_table = next(table for table in document["logicalTables"] if table["name"] == "conversations")
+    assert "maximumProjectRelinkConversationCandidates" not in conversation_table
+    assert conversation_table["projectRelinkAdmission"] == "complete-owner-scoped-active-and-trash-without-count-quota"
+    integration = next(table for table in document["logicalTables"] if table["name"] == 'integration_workspaces')
+    assert integration["workspaceAdmission"] == "demand-without-count-quota"
+    queue = next(table for table in document["logicalTables"] if table["name"] == "conversation_queue")
+    assert queue["itemAdmission"] == "demand-without-count-quota"
+    assert "maximumResponseBytes" not in queue
+    assert queue["defaultPageBytes"] == 8 * 1024 * 1024
+    assert queue["responseAdmission"] == "encoded-complete-result-without-private-byte-quota"
+    assert "maximumItemCoreBytes" not in queue
+    assert queue["coreAdmission"] == "existing-owner-bound-blob-without-byte-quota"
+    assert queue["requestMeasurement"] == "streamed-json-byte-count-without-debug-copy"
+    assert queue["appendMetadata"]["namespaceField"] == "stateNamespace"
+    assert queue["appendMetadata"]["keyOwner"] == "authenticated_owner_user_id"
+    assert queue["appendMetadata"]["itemStateKeyOwner"] == "tenant_global_owner_zero"
+    assert queue["catalogAdmission"] == "demand-without-count-quota"
+    assert "maximumGlobalConversationRows" not in queue
+    assert "maximumAutopilotMarkers" not in queue
+    assert "maximumItemsPerConversation" not in queue
+    assert "maximumActiveWorkspacesPerAuthority" not in integration
+    assert "maximumWorkspacesPerOwner" not in integration
     assert document["schemaIrVersion"] == document["transactionIrVersion"] == 1
     assert document["bounds"] == {
-        "maximumSteps": 128,
-        "maximumSlots": 64,
-        "maximumLiteralBytes": 8 * 1024 * 1024,
+        "stepAdmission": "complete-ordered-transaction-without-step-count-quota",
+        "slotAdmission": "sparse-usize-identifiers-without-slot-count-quota",
+        "literalAdmission": "checked-size-without-aggregate-byte-quota",
+        "maximumLegacyDocumentBytes": 8 * 1024 * 1024,
         "maximumExecutableOperations": len(build_registry()),
     }
     assert document["physicalBounds"] == {
         "maximumEntityKeyBytes": 3072,
         "maximumEntityInlineValueBytes": 8 * 1024,
         "maximumEntityRangeRows": 1000,
-        "maximumEntityTransactionWrites": 14336,
+        "entityOverlayDeltaCountEncoding": "u32-little-endian",
+        "versionedDocumentAdmission": "blob-backed-without-private-byte-quota",
+        "indexedEventPayloadAdmission": "blob-backed-complete-replay-without-private-byte-quota",
         "maximumEntityReachabilityPages": 20_000_000,
         "maximumEntityReachabilityFrontier": 8192,
         "maximumEntityRetiredRanges": 64,
@@ -266,12 +294,19 @@ def test_tofudb_ir_contract_is_generated_bounded_and_default_deny():
         "maximumEntityMountConsolidationRows": 999,
         "maximumEntityMountConsolidationBytes": 8 * 1024 * 1024,
         "maximumStreamEventBytes": 256 * 1024,
-        "maximumStreamAppendEvents": 4096,
-        "maximumStreamAppendBytes": 8 * 1024 * 1024,
+        "streamAppendEventCountEncoding": "u32-little-endian",
+        "streamAppendAdmission": "complete-atomic-segmented-append-without-byte-quota",
         "maximumStreamReadEvents": 1000,
         "maximumStreamReadBytes": 8 * 1024 * 1024,
-        "maximumTransactionStreamAppends": 500,
+        "transactionStreamAdmission": "complete-batch-without-stream-count-quota",
     }
+    for table in document["logicalTables"]:
+        if table["name"] in {"optimizer_proposals", "optimizer_actions"}:
+            assert table["rowAdmission"] == "owner-scoped-demand-without-count-quota"
+            assert "maximumRowsPerOwner" not in table
+            assert table["defaultListRows"] == 50
+            assert table["documentAdmission"] == "blob-backed-without-private-byte-quota"
+            assert table["responseAdmission"] == "complete-requested-rows-without-private-byte-quota"
     assert document["physicalFamilies"] == ["entity", "stream", "blob"]
     assert document["persistentSnapshots"] == {
         "rootPinNamespace": "entity_root_pins",
@@ -305,10 +340,13 @@ def test_tofudb_ir_contract_is_generated_bounded_and_default_deny():
         "targetBytes": 4096,
         "maximumBytes": 16384,
         "minimumChildrenPerSplitPage": 2,
-        "encodingAllocation": "exact-page-length;transfer-to-existing-pending-store;retain-no-spare-capacity",
+        "encodingAllocation": "exact-page-length;prefix-key-frames;expanded-size-bounded;transfer-to-existing-pending-store",
         "modifiedLeafRuns": "repack-adjacent-written-leaves-with-one-page-buffer;retain-tombstones-and-untouched-references",
         "tailRebalance": "redistribute-or-merge-within-maximum-page-bytes",
     }
+    assert document["entityPageCodec"]["readVersions"] == [1, 2]
+    assert document["entityPageCodec"]["writeVersion"] == 2
+    assert document["entityPageCodec"]["maximumExpandedBytes"] == document["entityPagePacking"]["maximumBytes"]
     assert document["maintenanceScheduler"] == {
         "maximumWorkers": 1,
         "maximumScopes": 64,
@@ -498,8 +536,8 @@ def test_tofudb_ir_contract_is_generated_bounded_and_default_deny():
             "created and status indexes provide bounded descending list order without scanning profile payloads",
         ],
     }
-    assert tables["chat_artifacts"]["maximumContentBytes"] == 8 * 1024 * 1024
-    assert tables["chat_artifacts"]["maximumRowsPerConversation"] == 1000
+    assert "maximumContentBytes" not in tables["chat_artifacts"]
+    assert "maximumRowsPerConversation" not in tables["chat_artifacts"]
     assert tables["tool_result_artifacts"]["maximumContentBytes"] == 16 * 1024 * 1024
     assert tables["tool_result_artifacts"]["maximumRangeBytes"] == 64 * 1024
     assert tables["storage_records"]["taskResultMaximumBytes"] == 64 * 1024 * 1024
@@ -542,10 +580,8 @@ def test_tofudb_ir_contract_is_generated_bounded_and_default_deny():
     assert tables["rate_limit_events"]["maximumWindowCounterReads"] == 2_040
     assert tables["daily_cost_cache"]["ownerKey"] == "authenticated_owner_user_id"
     assert tables["daily_cost_cache"]["physicalFamily"] == "entity+blob"
-    assert tables["daily_cost_cache"]["maximumDocumentBytes"] == 8 * 1024 * 1024
-    assert tables["daily_cost_cache"]["maximumMonthRows"] == 100
-    assert tables["daily_cost_cache"]["maximumPersistedDateProbes"] == 366
-    assert tables["daily_cost_cache"]["maximumResponseBytes"] == 8 * 1024 * 1024
+    assert tables["daily_cost_cache"]["documentAdmission"] == "blob-backed-without-private-byte-quota"
+    assert tables["daily_cost_cache"]["queryAdmission"] == "complete-owner-scoped-month-and-date-probes-without-private-quota"
     assert tables["log_aggregates"]["ownerKey"] == "authenticated_tenant_and_owner"
     assert tables["log_aggregates"]["physicalFamily"] == "entity+blob"
     assert tables["log_aggregates"]["maximumFlushBatch"] == 500
@@ -553,22 +589,18 @@ def test_tofudb_ir_contract_is_generated_bounded_and_default_deny():
     assert tables["log_aggregates"]["maximumSweepBatch"] == 500
     assert tables["project_brain_projects"]["ownerKey"] == "authenticated_owner_user_id"
     assert tables["project_brain_projects"]["physicalFamily"] == "entity+stream+blob"
-    assert tables["project_brain_projects"]["maximumDocumentBytes"] == 8 * 1024 * 1024
-    assert tables["project_brain_projects"]["maximumActiveWorkItems"] == 100
-    assert tables["project_brain_projects"]["maximumWorkHistoryItems"] == 100
-    assert tables["project_brain_projects"]["maximumNarratives"] == 500
+    assert tables["project_brain_projects"]["collectionAdmission"] == "complete-owner-scoped-project-history-without-count-quota"
+    assert tables["project_brain_projects"]["documentAdmission"] == "blob-backed-without-private-byte-quota"
+    assert tables["project_brain_projects"]["eventAdmission"] == "complete-chunked-event-with-u32-format-length-and-paged-read"
     assert tables["project_brain_projects"]["maximumNarrativeTextBytes"] == 720
-    assert tables["project_brain_projects"]["maximumWatchItems"] == 100
-    assert tables["project_brain_projects"]["maximumCheckerVersions"] == 128
-    assert tables["project_brain_projects"]["maximumCharterDecisions"] == 256
-    assert tables["project_brain_projects"]["maximumCursors"] == 1000
     assert tables["model_routing"]["physicalFamily"] == "entity+blob"
     assert (
         tables["model_routing"]["authorityMetadataNamespace"]
         == "model_routing_authority_metadata"
     )
-    assert tables["model_routing"]["maximumDocumentBytes"] == 8 * 1024 * 1024
-    assert tables["model_routing"]["maximumSecretsPerOwnerBoundary"] == 1024
+    assert "maximumDocumentBytes" not in tables["model_routing"]
+    assert tables["model_routing"]["maximumMigrationCiphertextBytes"] == 8 * 1024 * 1024
+    assert "maximumSecretsPerOwnerBoundary" not in tables["model_routing"]
     assert tables["model_routing"]["maximumPrunedPerCommand"] == 256
     assert tables["storage_worker_jobs"]["maximumClaimTaskKinds"] == 32
     assert tables["storage_worker_jobs"]["maximumPriority"] == 1000
@@ -587,14 +619,13 @@ def test_tofudb_ir_contract_is_generated_bounded_and_default_deny():
         "physicalFamily": "entity+blob",
         "physicalNamespace": "recent_project_documents",
         "countNamespace": "recent_project_counts",
-        "maximumProjectsPerOwner": 1000,
-        "maximumTouchBatch": 32,
+        "admission": "demand-without-owner-or-batch-count-quota",
         "maximumPathCharacters": 4096,
         "lifecycle": "durable-user-state",
         "constraints": [
             "physical keys are domain-separated SHA-256 path digests while every document retains and verifies the exact path",
-            "an OCC-protected exact count bounds list materialization and rejects creation beyond 1000 owner-scoped projects",
-            "touch_many deduplicates at most 32 paths in request order and updates the complete batch plus receipt and outbox atomically",
+            "an OCC-protected exact count witnesses complete owner-scoped list materialization without a project-count admission quota",
+            "touch_many deduplicates every supplied path in request order and updates the complete batch plus receipt and outbox atomically",
             "clear retires the complete owner-scoped document range and resets its exact count without walking project rows",
             "project relink folds the old digest document into the destination, summing use counts and taking the latest timestamp, then retires the old document while the exact owner count tracks the net document delta",
             "list verifies count-to-document agreement then preserves storage.v1 last_used descending order with path order as the stable tie break",

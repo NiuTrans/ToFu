@@ -1,5 +1,4 @@
-/** Bounded PDF content features. No retained document, text index or DOM cache. */
-import { PAPER_BUILD_LIMITS as limits } from '../../api/paper-build.generated';
+/** Complete PDF content features. No retained document, text index or DOM cache. */
 import type { PdfDocument, PdfPage } from './pdf-reader';
 
 export interface OutlineItem { title: string; destination: string | unknown[]; depth: number }
@@ -7,18 +6,16 @@ export interface SearchMatch { page: number; excerpt: string }
 export interface SearchResult { matches: SearchMatch[]; truncated: boolean }
 
 /** Horizontal text extent on the requested half of a page. This is a zoom
- * target, not inferred reading order or PDF reflow. Scans bounded page text only.
+ * target, not inferred reading order or PDF reflow. Scans complete page text.
  */
 export async function columnTextBounds(page: PdfPage, side: 'left' | 'right'): Promise<{ left: number; right: number }> {
   const viewport = page.getViewport({ scale: 1 });
   const half = viewport.width / 2;
   const fallback = side === 'left' ? { left: 0, right: half } : { left: half, right: viewport.width };
   const content = await page.getTextContent();
-  let left = Infinity, right = -Infinity, characters = 0, count = 0;
+  let left = Infinity, right = -Infinity, count = 0;
   for (const item of content.items) {
     if (!('str' in item)) continue;
-    characters += item.str.length + 1;
-    if (characters > limits.reader_page_text_characters) return fallback;
     if (!item.str.trim() || Math.abs(item.transform[1]) > 0.01 || Math.abs(item.transform[2]) > 0.01) continue;
     const start = viewport.convertToViewportPoint(item.transform[4], item.transform[5]);
     const end = viewport.convertToViewportPoint(item.transform[4] + item.width, item.transform[5]);
@@ -36,18 +33,18 @@ export async function columnTextBounds(page: PdfPage, side: 'left' | 'right'): P
 export async function readOutline(document: PdfDocument): Promise<OutlineItem[]> {
   const outline = await document.getOutline();
   const result: OutlineItem[] = [];
-  const queue = (outline ?? []).slice(0, limits.reader_outline_items)
+  const queue = [...(outline ?? [])]
     .reverse().map((item) => ({ item, depth: 0 }));
-  while (queue.length && result.length < limits.reader_outline_items) {
+  const seen = new WeakSet<object>();
+  while (queue.length) {
     const { item, depth } = queue.pop()!;
+    if (seen.has(item)) continue;
+    seen.add(item);
     if (typeof item.dest === 'string' || Array.isArray(item.dest)) {
-      result.push({ title: String(item.title ?? '').slice(0, 512), destination: item.dest, depth });
+      result.push({ title: String(item.title ?? ''), destination: item.dest, depth });
     }
-    if (depth < 8) {
-      const room = limits.reader_outline_items - result.length - queue.length;
-      for (const child of (item.items ?? []).slice(0, Math.max(0, room)).reverse()) {
-        queue.push({ item: child, depth: depth + 1 });
-      }
+    for (const child of [...(item.items ?? [])].reverse()) {
+      queue.push({ item: child, depth: depth + 1 });
     }
   }
   return result;
@@ -56,33 +53,29 @@ export async function readOutline(document: PdfDocument): Promise<OutlineItem[]>
 export async function searchDocument(
   document: PdfDocument, query: string, cancelled: () => boolean,
 ): Promise<SearchResult> {
-  const needle = query.trim().slice(0, 256).normalize('NFKC').replace(/\s+/gu, ' ').toLocaleLowerCase();
+  const needle = query.trim().normalize('NFKC').replace(/\s+/gu, ' ').toLocaleLowerCase();
   const matches: SearchMatch[] = [];
   if (!needle) return { matches, truncated: false };
-  let remaining: number = limits.reader_search_characters;
-  for (let number = 1; number <= Math.min(document.numPages, limits.reader_pages); number++) {
+  for (let number = 1; number <= document.numPages; number++) {
     if (cancelled()) return { matches: [], truncated: false };
     const page = await document.getPage(number);
     const content = await page.getTextContent();
     if (cancelled()) return { matches: [], truncated: false };
     const parts: string[] = [];
-    let length = 0;
     for (const item of content.items) {
       if (!('str' in item)) continue;
-      length += item.str.length + 1;
-      if (length > Math.min(remaining, limits.reader_page_text_characters)) {
-        return { matches, truncated: true };
-      }
+      if (cancelled()) return { matches: [], truncated: false };
       parts.push(item.str);
+      if (parts.length % 1024 === 0) await new Promise<void>((resolve) => setTimeout(resolve, 0));
     }
-    remaining -= length;
     const text = parts.join(' ').normalize('NFKC').replace(/\s+/gu, ' ');
     const folded = text.toLocaleLowerCase();
     let offset = 0;
     while ((offset = folded.indexOf(needle, offset)) >= 0) {
       matches.push({ page: number, excerpt: text.slice(Math.max(0, offset - 36), offset + needle.length + 72) });
-      if (matches.length >= limits.reader_search_matches) return { matches, truncated: true };
+      if (cancelled()) return { matches: [], truncated: false };
       offset += needle.length;
+      if (matches.length % 1024 === 0) await new Promise<void>((resolve) => setTimeout(resolve, 0));
     }
     // Yield to scrolling/cancellation. PDF.js owns page objects; do not clean
     // a page here while another consumer may be rendering its operator list.
@@ -98,7 +91,7 @@ export async function addPageLinks(
   const annotations = await page.getAnnotations({ intent: 'display' });
   const layer = document.createElement('div');
   layer.className = 'paper-reader-links';
-  for (const annotation of annotations.slice(0, limits.reader_page_links)) {
+  for (const annotation of annotations) {
     if (annotation.subtype !== 'Link' || !Array.isArray(annotation.rect)
       || annotation.rect.length !== 4 || !annotation.rect.every(Number.isFinite)) continue;
     const link = document.createElement('a');

@@ -20,7 +20,9 @@ Failure classes are derived from tb21 v11 evidence:
   flushing when the short settle window expired.
 - ``opencode_cli_nonzero_exit``: the guest CLI crashed; no verifier ran.
 - ``tofu_runtime_no_successful_terminal``: the production runtime ended
-  without a successful terminal state (provider stream network_error).
+  without a successful terminal state, with a structured, retryable native
+  network/rate_limit/server_error receipt. Context/compaction errors and legacy
+  trials without this receipt are never inferred to be transient.
 
 A trial carrying any numeric verifier reward is an agent outcome and is
 never retried here.
@@ -35,6 +37,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .artifacts import atomic_write_json
+from evaluations.native_failure import is_transient_provider_failure
 
 ENVIRONMENT_START_TIMEOUT = "environment_start_timeout"
 OPENCODE_EVIDENCE_RECONCILIATION = "opencode_evidence_reconciliation"
@@ -79,6 +82,11 @@ class InfrastructureFailure:
 
 def classify_infrastructure_failure(result: dict[str, Any]) -> str | None:
     """Classify one trial result; ``None`` means not infrastructure-retryable."""
+    verifier = result.get("verifier_result")
+    if isinstance(verifier, dict) and verifier.get("rewards"):
+        # Structured metrics are outcomes too. Malformed nonempty rewards need
+        # evidence repair, never automatic replacement with a fresh attempt.
+        return None
     exception = result.get("exception_info")
     if not isinstance(exception, dict):
         return None
@@ -86,8 +94,18 @@ def classify_infrastructure_failure(result: dict[str, Any]) -> str | None:
     message = str(exception.get("exception_message") or "")
     if exception_type == "EnvironmentStartTimeoutError":
         return ENVIRONMENT_START_TIMEOUT
+    if exception_type != "RuntimeError":
+        return None
     for marker, failure_class in _MESSAGE_MARKERS:
         if marker in message:
+            if failure_class == TOFU_RUNTIME_NO_SUCCESSFUL_TERMINAL:
+                agent = result.get("agent_result")
+                metadata = agent.get("metadata") if isinstance(agent, dict) else None
+                native = metadata.get("tofuKimiEvidence") if isinstance(metadata, dict) else None
+                if not isinstance(native, dict):
+                    return None
+                if not is_transient_provider_failure(native.get("runtimeFailure")):
+                    return None
             return failure_class
     return None
 
@@ -189,6 +207,12 @@ def infrastructure_retry_cycle(
             f"preregistered allowance {max_infrastructure_retries}")
     manifest_path = run_dir / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if (run_dir / 'comparison-registration.json').exists():
+        from .comparison import validate_registration
+        config = json.loads((run_dir / 'job-config.json').read_text())
+        protocol = validate_registration(run_dir, manifest, config)
+        if protocol is None or max_infrastructure_retries != protocol.get('maxInfrastructureRetries', 0):
+            raise ValueError('infrastructure retry allowance differs from frozen protocol')
     run_id = str(manifest["run_id"])
     job_dir = run_dir / "jobs" / run_id
     failures = scan_infrastructure_failures(job_dir)

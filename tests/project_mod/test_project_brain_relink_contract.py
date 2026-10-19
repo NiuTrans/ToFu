@@ -19,22 +19,22 @@ pytestmark = pytest.mark.unit
 ))])
 @pytest.mark.parametrize('checkpoint', ['valid', 'foreign_owner', 'foreign_path', 'invalid'])
 def test_checkpoint_and_relink_preserve_owner_event_state(tmp_path, monkeypatch, backend, checkpoint):
-    from lib.storage_sidecar.operations_pkg._common import _dump, _load
-    from lib.storage_sidecar.operations_pkg import _project_brain as brain
-    from lib.storage_sidecar.schema import initialize_schema
+    from lib.storage_authority_sql.operations_pkg._common import _dump, _load
+    from lib.storage_authority_sql.operations_pkg import _project_brain as brain
+    from lib.storage_authority_sql.schema import initialize_schema
 
     with ExitStack() as resources:
         if backend == 'postgres':
             import psycopg
             from psycopg.rows import dict_row
-            from lib.storage_sidecar.adapters.postgres import PostgresSession, _PgPool
+            from lib.storage_authority_sql.adapters.postgres import PostgresSession, _PgPool
             source = Path(os.environ['TOFU_STORAGE_TEST_POSTGRES_DSN_FILE'])
             dsn_file = resources.enter_context(isolated_postgres_dsn(source, tmp_path))
             connection = resources.enter_context(psycopg.connect(dsn_file.read_text(), row_factory=dict_row))
             _PgPool._configure(connection)
             session = PostgresSession(connection)
         else:
-            from lib.storage_sidecar.adapters.sqlite import SQLiteSession
+            from lib.storage_authority_sql.adapters.sqlite import SQLiteSession
             connection = sqlite3.connect(':memory:')
             resources.callback(connection.close)
             connection.row_factory = sqlite3.Row

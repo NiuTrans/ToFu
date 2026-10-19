@@ -34,7 +34,7 @@ from runtime_guards import resolve_resource_budget
 
 logger = get_logger(__name__)
 
-from lib.runtime_paths import data_root
+from lib.runtime.runtime_paths import data_root
 _CACHE_DIR = os.path.join(data_root(), 'translate_cache')
 
 _ENABLED = os.environ.get('TOFU_TRANSLATE_CACHE', '1') != '0'

@@ -178,7 +178,7 @@ def test_preparation_without_terminal_commit_never_cold_completes(runtime, monke
 @pytest.mark.parametrize('terminal_fault', ['none', 'lost_receiver_ack'])
 def test_registered_root_commits_exact_review_and_cold_settles_once(persisted_runtime, monkeypatch,
         coverage, outcome, terminal_fault):
-    from lib.agent_loop import AbortSignal, run_agent_loop
+    from lib.agent_loop.agent_loop import AbortSignal, run_agent_loop
     from lib.tasks_pkg.orchestrator._root_agent_loop import RootLoopRequest, _RootLoopHooks
     from lib.tasks_pkg.orchestrator._round_state import RoundState
     from lib.tasks_pkg.orchestrator._post_loop import finalize_after_loop
@@ -279,7 +279,7 @@ def test_provider_schema_is_self_contained_and_admits_future_assessment():
     Draft202012Validator(schema).validate({'review': value})
 
 
-def test_serialized_output_bound_refuses_before_binding(runtime):
+def test_complete_serialized_review_binds_without_total_length_refusal(runtime):
     _, task, args, message = request(runtime, hypothesis=candidate()['hypothesis'])
     for row in args['review']['criterion_results']: row['evidence_ref'] = '原' * 500
     for axis in ('problem', 'feasibility', 'novelty', 'net_value'):
@@ -288,9 +288,10 @@ def test_serialized_output_bound_refuses_before_binding(runtime):
         'criterion_id': 'objective', 'classification': 'unverified',
         'claim': '原' * 300, 'evidence_ref': '原' * 500} for _ in range(8)]
     message['tool_calls'][0]['function']['arguments'] = json.dumps(args, ensure_ascii=False)
-    with pytest.raises(EvolutionContractError, match='output bound'):
-        delivery.prepare(task, args, call_id='review-call', round_num=0)
-    assert '_explicitToolDeliveryRequest' not in task
+    prepared = delivery.prepare(task, args, call_id='review-call', round_num=0)
+    assert prepared and '_explicitToolDeliveryRequest' in task
+    assert acknowledge(task, message, prepared)
+    assert json.loads(task['content']) == args['review']
 
 
 @pytest.mark.parametrize('stage', ['executing', 'inline_review'])
@@ -597,18 +598,22 @@ def test_full_requirement_evidence_manifest_fits_native_review_delivery(runtime,
     assert all(row['original_sources'] == sources for row in completed['review']['requirement_results'])
 
 
-@pytest.mark.parametrize('content_shape', ['valid', 'malformed'])
-def test_unlinked_review_keeps_text_bound_even_when_source_capacity_is_reserved(runtime, content_shape):
+def test_large_valid_review_whitespace_does_not_create_retry_or_refusal(runtime):
     run, task, args, _message = request(runtime, requirements=True)
     content = json.dumps(args['review'])
-    content = content.replace('{', '{' + ' '*(24001-len(content)), 1)
-    if content_shape == 'malformed': content = 'x'*24001
-    assert len(content) == 24001
-    completed = finish(runtime,task,content)
-    assert completed['status'] == 'failed'
-    assert completed['error'] == 'review exceeds output bound'
-    assert completed['review'] is None
-    assert len(runtime[2]) == 2  # No format retry or executor replay for oversized unlinked input.
+    content = content.replace('{', '{' + ' ' * (2 << 20), 1)
+    completed = finish(runtime, task, content)
+    assert completed['status'] == 'completed'
+    assert {key: completed['review'][key] for key in args['review']} == args['review']
+    assert len(runtime[2]) == 2
+
+
+def test_large_malformed_review_uses_syntax_recovery_without_executor_replay(runtime):
+    run, task, args, _message = request(runtime, requirements=True)
+    resumed = finish(runtime, task, 'x' * 24001)
+    assert resumed['status'] == 'reviewing' and len(runtime[2]) == 3
+    assert resumed['receipts'][-1]['review_format_retry']
+    assert resumed['attempt'] == run['attempt']
 
 
 @pytest.mark.parametrize('retry_budget', [0, 1])

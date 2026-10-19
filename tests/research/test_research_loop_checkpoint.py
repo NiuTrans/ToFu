@@ -3,7 +3,7 @@ from copy import deepcopy
 
 import pytest
 
-from lib.agent_loop import AbortSignal, run_agent_loop
+from lib.agent_loop.agent_loop import AbortSignal, run_agent_loop
 from lib.research.loop_checkpoint import LoopCheckpoints, NAMESPACE
 from lib.research.request_context import PART_NAMESPACE
 from lib.storage.errors import StorageError
@@ -205,7 +205,7 @@ def test_live_unpaid_frontier_recovers_without_replaying_effects_or_resetting_bu
     from lib.research.request_context import NAMESPACE as REQUEST_NAMESPACE
     from lib.research.execution_owner import NAMESPACE as OWNER_NAMESPACE
     from lib.research.workspace import empty_workspace
-    from lib.llm_errors import AbortedError
+    from lib.llm.llm_errors import AbortedError
     client = MemoryRecords(); dispatched = []; effects = []; failures = []; events = []
     task = {'user_id':1, 'task_id':'live-frontier-retry', 'action':'experiment',
         'direction':'Scope', 'model':'controlled-model', 'abort_event':threading.Event(),

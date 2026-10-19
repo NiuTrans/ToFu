@@ -32,8 +32,12 @@ def encode_event(event):
            'payload_ref': {'sha256': digest, 'chunks': count, 'byte_length': len(body)}}
 
 
-def decode_events(events):
-    """Hydrate committed packets, refusing missing/reordered/foreign chunks."""
+def decode_events(events, *, include_positions=False):
+    """Hydrate packets, optionally retaining each final physical reference.
+
+    The optional pair is (stored sequence, logical event). Decoded payloads do
+    not supply their own position; only the enclosing stored packet does.
+    """
     chunks = {}
     for event in events:
         if event.get('type') == CHUNK_EVENT:
@@ -53,7 +57,7 @@ def decode_events(events):
             parts.append(part)
             continue
         if 'payload_ref' not in event:
-            yield event
+            yield (event.get('seq'), event) if include_positions else event
             continue
         reference = event['payload_ref']
         if (event.get('goal_execution_archive') not in GOAL_EXECUTION_LAUNCH_FORMATS
@@ -76,6 +80,6 @@ def decode_events(events):
             raise RecoveryRefused('Goal archive JSON is invalid') from exc
         if not isinstance(decoded, dict) or decoded.get('type') != event.get('type'):
             raise RecoveryRefused('Goal archive event identity changed')
-        yield decoded
+        yield (event.get('seq'), decoded) if include_positions else decoded
     # Unreferenced tail chunks are an interrupted write, never an event. The
     # preceding effect admission remains pending and ordinary replay refuses.

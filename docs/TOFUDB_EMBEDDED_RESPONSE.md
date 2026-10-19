@@ -3,7 +3,7 @@
 Owner: `packages/tofu-db/src/{embed,embed_ffi,fsync_stats}.rs`,
 `server.rs` and its private `dispatch_response.rs` child.
 Semantic and durability authority: [TofuDB storage](STORAGE_TOFUDB.md).
-Measurements: [response evidence](evidence/tofudb_encoded_response_20261002.json). Python client buffer decoding and ownership measurements: [client response evidence](evidence/tofudb_client_response_view_20261005.json).
+Measurements: `tofudb_encoded_response_20261002.json`. Python client buffer decoding and ownership measurements: `tofudb_client_response_view_20261005.json`.
 
 ## Problem
 
@@ -24,8 +24,8 @@ residual or identify all of the gap to raw SQLite.
 The C ABI dispatches through the same runtime, scope, stores, admission and
 semantic compiler, then sends an owned encoded response through the existing
 worker channel. The Rust `Value` API retains its original response renderer.
-The worker owns response validation/encoding within `catch_unwind` and the
-existing watchdog. A late completion owns only its channel/vector; it cannot
+Cache misses retain worker validation/encoding, `catch_unwind` and the
+watchdog; [certified result reuse](TOFUDB_QUERY_RESULT_CACHE.md) performs bounded in-memory delivery on the caller. A late worker completion owns only its channel/vector; it cannot
 write into a caller buffer. Panic/timeout still poisons and disarms the handle.
 Queue/memory saturation, deadlines, payload caps and classified errors remain.
 
@@ -195,7 +195,7 @@ drain, independent window staging and exact pre/post-crash payload recovery.
 No production Busy/retirement code or retry policy changed. Failed gate/source
 and build remain retained without final correctness or timing credit.
 
-**Measured final result.** [Machine-readable evidence](evidence/tofudb_wire_policy_20261003.json)
+**Measured final result.** `tofudb_wire_policy_20261003.json`
 retains baseline `43cd6870`, anchors-only `caccb920`, final `17bf999d`, pinned
 CLI/loaded DSO identities and all cohorts. The final full gate passes 1,545
 checks with two existing ignores; 25 profile-report checks pass. The failed
@@ -286,21 +286,10 @@ not a cache; serde escape scratch remains transient. There are no new workers,
 queues, persistent files, resident caches or process-wide allocator settings.
 Source identity, correctness, all favorable/adverse controls and the failed
 first direct-ABI comparison live in
-[envelope evidence](evidence/tofudb_envelope_20261004.json).
+`tofudb_envelope_20261004.json`.
 
 
-Frozen native baseline `29add8937ed34ebc825e53e1de7202bc64bc3e481eac0caa141c7eb1b3f88b0e`;
-candidate `f1c1f4e6a7903085d2133ce736e08e6bc806247127e68ad3488ab5f3f6a870bb`.
-Debug CLI and release CLI/DSO identities match their roles. Full verification
-passes 1,580 checks with two existing ignores. Two new parser tests compare
-raw fields, input borrowing, exact acceptance/errors, duplicates/escaped names,
-invalid roots/UTF-8/nested input and byte mutations against the old map parser.
-Untimed real C ABI parity covers 96 requests with equal return lengths and
-errors. Each full document equals its own seeded reference. The first ABI
-comparison failed because independently seeded writes have different timestamps:
-all 11 differences were `updated_at_ms`. The raw failure is retained; the
-corrected comparison verifies each full reference before comparing that one
-known independent-clock field. No other response differences are removed.
+Frozen native baseline `29add8937ed34ebc825e53e1de7202bc64bc3e481eac0caa141c7eb1b3f88b0e`; candidate `f1c1f4e6a7903085d2133ce736e08e6bc806247127e68ad3488ab5f3f6a870bb`. Debug CLI and release CLI/DSO identities match their roles. Full verification passes 1,580 checks with two existing ignores. Two new parser tests compare raw fields, input borrowing, exact acceptance/errors, duplicates/escaped names, invalid roots/UTF-8/nested input and byte mutations against the old map parser. Untimed real C ABI parity covers 96 requests with equal return lengths and errors. Each full document equals its own seeded reference. The first ABI comparison failed because independently seeded writes have different timestamps: all 11 differences were `updated_at_ms`. The raw failure is retained; the corrected comparison verifies each full reference before comparing that one known independent-clock field. No other response differences are removed.
 
 Standalone System-allocation probe uses the actual frozen helper and locked
 serde versions/features. It measures envelope collection only, excluding field
@@ -389,86 +378,73 @@ checked, and their nonzero exits are not reported as passing full-repository gat
 
 ## Caller allocation changes require native transport validation
 
-Problem: decoding catalog operation names and discarding non-string command IDs
-adds caller allocations before worker admission. Decision: retain owned envelope
-decoding. A catalog `Cow` prototype saved roughly four observed successful
-allocations per read, but regressed fresh-overlay native latency by 13–37%
-across 1/8/32 callers; long SDK cold arrays also regressed. Alternatives considered:
-static catalog-name ownership and skipping discarded ID decode errors. Their
-SDK gains did not satisfy the native transport gate. Static names still required
-worker-side owned conversion for shared dispatch; no caller buffer was retained.
-The source-bound, eight-leg comparisons and allocation observer are archived in
-[evidence](evidence/tofudb_operation_locality_20261004.json). Allocation counts
-exclude aligned/internal libc families and receive no timing credit. Worker
-locality is a hypothesis, not an established cause. Production keeps existing
-detached workers, reservations, watchdogs, poison behavior and ownership checks.
+Problem: decoding catalog operation names and discarding non-string command IDs adds caller allocations before worker admission. Decision: retain owned envelope decoding. A catalog `Cow` prototype saved roughly four observed successful allocations per read, but regressed fresh-overlay native latency by 13–37% across 1/8/32 callers; long SDK cold arrays also regressed. Alternatives considered: static catalog-name ownership and skipping discarded ID decode errors. Their SDK gains did not satisfy the native transport gate. Static names still required worker-side owned conversion for shared dispatch; no caller buffer was retained. The source-bound, eight-leg comparisons and allocation observer are archived in `tofudb_operation_locality_20261004.json`. Allocation counts exclude aligned/internal libc families and receive no timing credit. Worker locality is a hypothesis, not an established cause. Production keeps existing detached workers, reservations, watchdogs, poison behavior and ownership checks.
 
 ## Completion readiness is not a proven replacement for response delivery
 
-Problem: caller wake can precede the worker's next idle registration. Decision:
-retain response delivery followed by normal queue receive. A nonblocking
-completion-ready hint improved native 8/32-caller latency by 12–17%, but SDK
-arrays lost 3–5% latency and 2–5% CPU in normal and extended comparisons;
-escaped strings also regressed. Alternatives considered: blocking registration
-(rejected before measurement because it can delay a completed response) and
-a best-effort `try_lock` hint (rejected by mixed performance). Both remain
-private. Ten queue tests and twelve FFI tests passed for the latter, without
-claiming full production certification. Eight balanced legs per cohort and
-8,308,800 exact timed reads are archived in
-[evidence](evidence/tofudb_completion_ready_20261004.json). Initial 9–12% cold
-SDK losses did not reproduce at that magnitude; worker migration remains an
-unproven explanation. No production scheduling or profiler layout was changed.
+Problem: caller wake can precede the worker's next idle registration. Decision: retain response delivery followed by normal queue receive. A nonblocking completion-ready hint improved native 8/32-caller latency by 12–17%, but SDK arrays lost 3–5% latency and 2–5% CPU in normal and extended comparisons; escaped strings also regressed. Alternatives considered: blocking registration (rejected before measurement because it can delay a completed response) and a best-effort `try_lock` hint (rejected by mixed performance). Both remain private. Ten queue tests and twelve FFI tests passed for the latter, without claiming full production certification. Eight balanced legs per cohort and 8,308,800 exact timed reads are archived in `tofudb_completion_ready_20261004.json`. Initial 9–12% cold SDK losses did not reproduce at that magnitude; worker migration remains an unproven explanation. No production scheduling or profiler layout was changed.
 
 ## Point-read string transfer needs response-shape coverage
 
-Problem: generic record compilation clones already owned namespace/key strings
-into IR and copies namespace for a boolean guard. Decision: retain current
-compilation until a replacement passes scalar and array transport comparisons.
-Alternatives considered: transfer strings by removing local map fields, or take
-their buffers while retaining map structure. Both preserve the parser, text
-validation, owner/tenant fences, task-result delegation, write digests and IR.
-Pointer tests prove ownership transfer; observers show approximately 34 → 31
-successful allocations per read, with caller allocations unchanged. Scalar and
-SDK gains coexist with array regressions: the retained-map variant loses native
-array latency/CPU by up to 5.22/4.59%; removal also loses extended cold reads.
-Neither is deployed. Each passed six focused/neighbor tests; no full production
-certification is claimed for rejected variants.
-[evidence](evidence/tofudb_record_payload_transfer_20261004.json) retains
-18,921,600 exact timed reads, two private source commits and all adverse cohorts.
-Allocation observation is separate from performance credit. Deletion alone does
-not explain the retained-map regression; allocator locality, code layout and
-worker scheduling remain hypotheses. Existing performance anchors and runtime
-resource budgets are unchanged.
+Problem: generic record compilation clones already owned namespace/key strings into IR and copies namespace for a boolean guard. Decision: retain current compilation until a replacement passes scalar and array transport comparisons. Alternatives considered: transfer strings by removing local map fields, or take their buffers while retaining map structure. Both preserve the parser, text validation, owner/tenant fences, task-result delegation, write digests and IR. Pointer tests prove ownership transfer; observers show approximately 34 → 31 successful allocations per read, with caller allocations unchanged. Scalar and SDK gains coexist with array regressions: the retained-map variant loses native array latency/CPU by up to 5.22/4.59%; removal also loses extended cold reads. Neither is deployed. Each passed six focused/neighbor tests; no full production certification is claimed for rejected variants. `tofudb_record_payload_transfer_20261004.json` retains 18,921,600 exact timed reads, two private source commits and all adverse cohorts. Allocation observation is separate from performance credit. Deletion alone does not explain the retained-map regression; allocator locality, code layout and worker scheduling remain hypotheses. Existing performance anchors and runtime resource budgets are unchanged.
 
 ## Rust allocation and completion handoff
 
 Problem: embedded Rust used System allocation, while the CLI used mimalloc; workers woke replies before idle registration. Decision: Linux preparation opts into `embedded-mimalloc` with dynamic TLS and a nonblocking completion-ready hint; busy locks skip it. FIFO, poison, watchdogs, ownership, reservations, admission/IR and integrity checks remain intact. Default Rust consumers retain their allocator unless opting in. Actual `tofudb_embed_allocator_kind` (0 System, 1 mimalloc) and CLI `embedded_allocator` metadata attest feature selection before publication. Linux feature-enabled libraries link NODELETE, retaining callbacks and detached worker code until process exit; activation follows the existing lifecycle.
-Alternatives: System-only, process-wide preload, allocator alone, hints alone. Preload changes caller allocations; standalone variants have mixed costs. Final combination: 1,558 native tests pass (two existing ignores), 47 preparation tests pass; consumer compatibility and close/dlclose checks pass. Eight-leg final comparisons improve concurrent scalar latency 11–15%, array latency 7–19%, extended SDK arrays 11%. [Evidence](evidence/tofudb_embedded_allocator_20261005.json) retains all variants/adverse rows: 31,228,800 exact timed reads, 9,460,800 on final source. These allocator measurements used the earlier fixed pool; current demand delivery is defined in [worker delivery](TOFUDB_WORKER_DELIVERY.md), with durable authority unchanged. Array RSS grows roughly 1–2 MiB initially; SDK may grow a few MiB; roughly 1 GiB extra virtual reservation is not resident RAM. Worker-register/queue-lock anchors include best-effort hints, so counts include extra calls; no counter layout change. Scalar timing has no RSS columns. Full SQLite dominance and exclusive worker-migration attribution remain unproved.
+Alternatives: System-only, process-wide preload, allocator alone, hints alone. Preload changes caller allocations; standalone variants have mixed costs. Final combination: 1,558 native tests pass (two existing ignores), 47 preparation tests pass; consumer compatibility and close/dlclose checks pass. Eight-leg final comparisons improve concurrent scalar latency 11–15%, array latency 7–19%, extended SDK arrays 11%. `tofudb_embedded_allocator_20261005.json` retains all variants/adverse rows: 31,228,800 exact timed reads, 9,460,800 on final source. These allocator measurements used the earlier fixed pool; current demand delivery is defined in [worker delivery](TOFUDB_WORKER_DELIVERY.md), with durable authority unchanged. Array RSS grows roughly 1–2 MiB initially; SDK may grow a few MiB; roughly 1 GiB extra virtual reservation is not resident RAM. Worker-register/queue-lock anchors include best-effort hints, so counts include extra calls; no counter layout change. Scalar timing has no RSS columns. Full SQLite dominance and exclusive worker-migration attribution remain unproved.
 
 ## Field submission and compiler boundaries
 
-Problem: repeated outer-envelope parsing may inflate the raw SQLite point gap. Decision: reject both private field-submission ABIs; production keeps its original interface. Alternatives: common out-of-line submission, explicit inlining, and the same candidate forced through the old ABI. First arrays regress 3–14%; forced-old array CPU also regresses 8–13% at one/eight callers, defeating SDK-only attribution. Inlining recovers array gains of 1–4%, but SDK concurrency still regresses 1–4% and native scalar 32-caller latency 4%. [Evidence](evidence/tofudb_field_submission_20261005.json) retains 15,270,400 exact timed reads, 16/4 focused native and 14/15 SDK passes, source pins, adverse tails/memory and the 3,000-read profiling observer. Envelope decode averages 1.14 us; queue/handoff roughly 4–5 us. Overlapping wall spans are not CPU savings. Compiler boundaries remain a supported hypothesis; safe handoff/shared reads remain the root target. No complete-suite, deployment or SQLite victory credit is claimed.
+Problem: repeated outer-envelope parsing may inflate the raw SQLite point gap. Decision: reject both private field-submission ABIs; production keeps its original interface. Alternatives: common out-of-line submission, explicit inlining, and the same candidate forced through the old ABI. First arrays regress 3–14%; forced-old array CPU also regresses 8–13% at one/eight callers, defeating SDK-only attribution. Inlining recovers array gains of 1–4%, but SDK concurrency still regresses 1–4% and native scalar 32-caller latency 4%. `tofudb_field_submission_20261005.json` retains 15,270,400 exact timed reads, 16/4 focused native and 14/15 SDK passes, source pins, adverse tails/memory and the 3,000-read profiling observer. Envelope decode averages 1.14 us; queue/handoff roughly 4–5 us. Overlapping wall spans are not CPU savings. Compiler boundaries remain a supported hypothesis; safe handoff/shared reads remain the root target. No complete-suite, deployment or SQLite victory credit is claimed.
 
 ## Optional allocator attribution ABI
 
-Problem: process-wide allocator environment overrides can change host/Python
-and Native allocation behavior together, hiding the source of resident memory.
-Decision: only an explicit `allocator-diagnostics` build exports
-`tofudb_embed_collect_allocator(force)`. It invokes the library-linked mimalloc
-collection (0 ordinary, 1 aggressive), returning 1 after invocation, 0 after a
-caught panic, or -1 for invalid input. It changes no options and owns no database
-handle. Normal builds have no export or automatic collection path. Free pages
-may be reclaimed across Native heaps; live allocations remain owned. Tests keep
-two authorities, exact receipts and a live buffer valid through both modes and
-verify close/reopen. This is attribution tooling, not a production memory policy.
-Alternatives: global environment tuning conflates allocator instances; invoking
-unexported symbol addresses bypasses a supported ABI; automatic hot-path purge
-adds an unmeasured latency cost. Full-harness evidence must precede any policy.
+Problem: process-wide allocator environment overrides can change host/Python and Native allocation behavior together, hiding the source of resident memory. Decision: only an explicit `allocator-diagnostics` build exports `tofudb_embed_collect_allocator(force)`. It invokes the library-linked mimalloc collection (0 ordinary, 1 aggressive), returning 1 after invocation, 0 after a caught panic, or -1 for invalid input. It changes no options and owns no database handle. Normal builds omit these diagnostic exports. Free pages may be reclaimed across Native heaps; live allocations remain owned. Tests keep two authorities, exact receipts and a live buffer valid through both modes and verify close/reopen. These exports are attribution tooling; ordinary close owns the separate policy below. Alternatives: global environment tuning conflates allocator instances; invoking unexported symbol addresses bypasses a supported ABI; automatic hot-path purge adds an unmeasured latency cost. Full-harness evidence must precede any policy.
 
-The same feature exposes `tofudb_embed_allocator_live_bytes`, `peak_bytes` and
-`version` (each with the `tofudb_embed_allocator_` prefix). A nonallocating
-wrapper counts successful Rust Layout bytes until deallocation, including
-successful realloc deltas; failures keep the old charge. Counters aggregate
-all Native authorities sharing this library, not individual owners. They exclude
-arena overhead, fragmentation, C allocations and other allocator instances.
-Atomic observer cost means diagnostic builds cannot certify production latency.
+The same feature exposes `tofudb_embed_allocator_live_bytes`, `peak_bytes` and `version` (each with the `tofudb_embed_allocator_` prefix). A nonallocating wrapper counts successful Rust Layout bytes until deallocation, including successful realloc deltas; failures keep the old charge. Counters aggregate all Native authorities sharing this library, not individual owners. They exclude arena overhead, fragmentation, C allocations and other allocator instances. Atomic observer cost means diagnostic builds cannot certify production latency.
+
+
+## Reclaiming free pages after healthy embedded close
+
+Problem: authority retirement freed Rust objects while the linked allocator retained hundreds of MiB of free resident pages. Decision: `embedded-mimalloc` requests aggressive collection after successful graceful stop and handle destruction. System-allocator builds, null/poisoned handles, failed stops and ungraceful abandonment keep their previous behavior. Other live allocations remain owned; collection never joins detached workers or changes durability, allocator options or caches. No worker, timer, counter or persistent state is added.
+
+Alternatives: immediate ordinary collection did not reclaim the observed pages; delaying close adds idle time; global overrides affect host allocators. The closing caller pays the collection CPU cost. Three normal-image paired 100-upload cohorts reduce large-import post-close RSS to 16.1–16.3% and retained growth to 7.4–7.7% of baseline. Close duration increases 9.6–13.0%; the complete upload/close/reopen segment changes by −0.2% to +1.0% wall time and −3.3% to +2.8% CPU. `system_native_close_reclaim_20261015.json` retains HTML and adverse rows. These scoped observations do not qualify cold starts or whole-system migration.
+
+## Complete snapshot Value evidence
+
+Problem: the borrowed snapshot encoder avoids copying private trees, but its complete result loses producer evidence. Semantic response validation and the embedded envelope then parse the serialized strings again. Decision: move the private trees into one complete `Value`, inspect only its container depth, map ordering and reserved Serde markers, and encode that same frozen value into `EncodedResponse`. Only this encoder can mint its evidence; arbitrary bytes cannot. The selected IR slot propagates the evidence, while mutation, overwrite, extraction, replay and notice re-encoding retain their existing invalidation boundaries. Missing values remain unverified. Deep or reserved-marker trees keep the original parser path. Attempt normalization, source/owner/deadline checks and the complete response byte ceiling remain. Alternatives: accepting an arbitrary byte/depth pair weakens integrity; caching parsed snapshots adds invalidation and residency; a separate specialized transport duplicates authority. The complete Value adds a small outer map but moves its existing child trees, and adds no resident cache, queue or worker.
+
+`tofudb_snapshot_value_proof_20261014.json` retains 32 complete
+reports, the frozen native source delta, build identities, diagnostic runs and
+all adverse legs. Native verification passes 1,891 library checks (eight existing
+ignores) and 38 process checks; benchmark contracts pass 142. Four fresh corpus
+legs check 32,000 timed responses exactly, with matching complete cross-build
+hashes. The combined parallel-development source passes the library checks again
+and 8,000 additional exact readbacks; it carries no comparative timing claim.
+No durable format, concurrency, cache capacity or production backend changes.
+
+Unprofiled embedded window P50 is 0.359/0.205/0.219/0.242 ms locally and
+0.246/0.205/0.208/0.352 ms on FUSE (A/B/B/A). Escaped/Unicode corpus P50 is
+9.710/5.263/5.228/9.746 ms; plain large text is essentially unchanged.
+Production-adapter history P50 is 0.629/0.618/0.634/0.634 ms: no stable material
+application gain. Raw SQLite still leads point/history reads. A separate sampled
+snapshot diagnostic observes the old semantic validation span at 21.865 us per
+request; the candidate selects producer evidence instead. These are wall spans,
+not CPU measurements or admission timings.
+
+The initial large-append cohorts are adverse by about 5%; 1,000-write-per-leg
+controls retain all samples and do not reproduce a stable median regression
+(A/B/B/A 1.742384/1.742975/1.727659/1.738696 ms). Tail variability remains.
+Four corrected client/native/delivery-profile-off 1,000-conversation cohorts
+recover all exact contents/replays and 5,000 ordered pushes through both SIGKILLs.
+Candidate scheduled-stream P99 is 3.315/3.344 s and settle P99 7.813/8.004 s;
+every leg still fails the 1/5 s targets. This is component progress, not broad
+raw-SQLite superiority, stable capacity, provider/browser or soak certification.
+
+## SDK bookkeeping after native read reuse
+
+Problem: after native snapshot reuse, sampled window FFI takes about 3 us but JSON decode 28–29 us; a separate 15,022-byte complete-response decode costs about 30 us. Neither isolated nor actual-window controls collect GC cycles. Raw SQLite's smaller direct-row response remains a floor, not equivalent complete-response work.
+
+Decision: retain each thread's buffer/capacity as one immutable pair, publishing after allocation; notify teardown when the last admitted storage/checkpoint call exits. Close/abandon preserve locked admission, refusal, drain, native stop and final notification for concurrent stoppers. Trees remain owned; growth, retention and worker counts are unchanged. Alternatives: repeated tuple/attribute work, unconditional notifications, global GC tuning, shared mutable trees or dropping public fields.
+
+`tofudb_sdk_read_boundary_20261015.json` preserves exact artifacts, frozen sources, observer calibration and all adverse arms. Warm-point mean improves 3.16%, first-key reads 3.78%. Window mean is initially 1.12% adverse (P99 24.27%); separate counter controls improve mean 1.40% but retain 2.79% adverse P99. Extended composed default-cache points remain 9.28% adverse, large writes 3.18%; independent first-key controls do not erase them. SDK/adapter checks pass 187 cases; an installed wheel verifies 8,230 exact reads, 32 callers, 2 MiB values, mutable ownership and reopen. Native artifacts retain their prior qualification. No window-tail, whole-application, 1,000-conversation SLO or broad SQLite victory is claimed. <!-- Evidence note: former docs/evidence/ artifact snapshots cited here were retired from the tree; cited JSON artifacts remain recoverable from git history. -->

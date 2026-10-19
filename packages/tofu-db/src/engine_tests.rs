@@ -3570,9 +3570,10 @@
         let vfs = prepared_simulated_vfs();
         let mut engine = Engine::initialize_with_vfs(Path::new("/data"), vfs.clone()).unwrap();
         engine.attach_rotation_driver();
-        // Drive the active WAL toward the hard ceiling with unique 4 MiB
-        // blocks (content-addressing dedups identical payloads, so each
-        // commit carries fresh bytes); the first commit that would exceed
+        // Test the actual hard boundary independently of soft-trigger refusal.
+        engine.set_rotation_threshold_bytes_for_test(ACTIVE_LOG_MAX_BYTES);
+        // Drive the active WAL toward the hard ceiling with unique inline
+        // payloads; the first commit that would exceed
         // ACTIVE_LOG_MAX must reject with classified retryable backpressure,
         // carrying no mutation.
         let mut committed = 0_u64;
@@ -4516,6 +4517,8 @@
         {
             let mut seed = Engine::initialize_with_vfs(Path::new("/data"), seed_vfs.clone())
                 .unwrap();
+            seed.set_checkpoint_segment_ids_for_test((0..64).map(|index|
+                uuid::Uuid::from_u128(0x62c0806c_f346_442c_889f_724ab2d4c581 + index)).collect());
             seed.commit_transaction(b"seed", &[b"checkpointed-payload"])
                 .unwrap();
             seed.checkpoint().unwrap();
@@ -4528,6 +4531,10 @@
             engine
                 .commit_transaction(b"window", &[b"window-payload"])
                 .unwrap();
+            // Identical segment IDs make catalog bytes/hash-shard paths and
+            // the entire checkpoint trace repeatable across every fault replay.
+            engine.set_checkpoint_segment_ids_for_test((0..64).map(|index|
+                uuid::Uuid::from_u128(0x72c0806c_f346_442c_889f_724ab2d4c581 + index)).collect());
             vfs.arm_fault(None).unwrap();
             (vfs, engine)
         };
@@ -4539,6 +4546,11 @@
             trace.len() > 8,
             "a checkpoint trace must exercise real filesystem operations, got {trace:?}"
         );
+        for _ in 0..8 {
+            let (vfs, mut engine) = prepared();
+            engine.checkpoint().unwrap();
+            assert_eq!(vfs.trace().unwrap(), trace, "fixed-ID shutdown checkpoint trace changed");
+        }
         let mut cases = 0_u32;
         for (index, operation) in trace.iter().enumerate() {
             let mut actions = vec![FaultAction::ErrorBefore(io::ErrorKind::Other)];
@@ -4550,23 +4562,16 @@
             }
             for action in actions {
                 let occurrence = trace[..=index].iter().filter(|op| *op == operation).count();
-                let mut exercised = None;
-                for _ in 0..16 {
-                    let (vfs, mut engine) = prepared();
-                    vfs.arm_operation_fault(*operation, occurrence, action)
-                        .unwrap();
-                    // Same swallow-the-failure contract as the daemon's
-                    // shutdown tail: the error only means the next open
-                    // replays the WAL.
-                    let _ = engine.checkpoint();
-                    if vfs.operation_fault_fired().unwrap() {
-                        exercised = Some((vfs, engine));
-                        break;
-                    }
-                }
-                let (vfs, engine) = exercised.unwrap_or_else(|| {
-                    panic!("unexercised {operation:?} occurrence={occurrence} action={action:?}")
-                });
+                let (vfs, mut engine) = prepared();
+                vfs.arm_operation_fault(*operation, occurrence, action).unwrap();
+                // Keep the shutdown swallow-and-recover contract; every armed
+                // target must fire, with the same pre-fault trace as the probe.
+                let _ = engine.checkpoint();
+                assert!(vfs.operation_fault_fired().unwrap(),
+                    "unexercised {operation:?} occurrence={occurrence} action={action:?}");
+                let actual_trace = vfs.trace().unwrap();
+                assert_eq!(actual_trace.get(..=index), Some(&trace[..=index]),
+                    "shutdown checkpoint trace diverged before fault {index}");
                 vfs.arm_fault(None).unwrap();
                 drop(engine);
                 vfs.crash().unwrap();

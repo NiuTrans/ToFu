@@ -13,11 +13,11 @@ import threading
 import time
 
 from lib.log import LOG_DIR, get_logger
-from lib.log_policy import stream_backup_count, stream_max_bytes
-from lib.log_record_values import (
+from lib.logging_pkg.log_policy import stream_backup_count, stream_max_bytes
+from lib.logging_pkg.log_record_values import (
     text_value, sanitize_value,
 )
-from lib.log_retention import append_bytes_locked, copytruncate_if_oversize
+from lib.logging_pkg.log_retention import append_bytes_locked, copytruncate_if_oversize
 
 logger = get_logger(__name__)
 

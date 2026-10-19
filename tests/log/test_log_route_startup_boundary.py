@@ -27,7 +27,7 @@ def test_log_route_import_keeps_projection_policies_dormant():
         'print("LOG-ROUTE", callable(route.detect_log_noise), '
         'callable(route.extract_file_changes_dicts), '
         '"lib.log_clean" in sys.modules, '
-        '"lib.tool_changes" in sys.modules)'
+        '"lib.tool_results.tool_changes" in sys.modules)'
     )
     assert proc.returncode == 0, proc.stderr[-1200:]
     assert 'LOG-ROUTE True True False False' in proc.stdout
@@ -41,7 +41,7 @@ def test_server_boot_keeps_log_projection_policies_dormant():
         '"routes.api_v1.logs" in sys.modules, '
         '"lib.log_clean" in sys.modules, '
         '"lib.log_clean._detect" in sys.modules, '
-        '"lib.tool_changes" in sys.modules)'
+        '"lib.tool_results.tool_changes" in sys.modules)'
     )
     assert proc.returncode == 0, proc.stderr[-1200:]
     assert 'SERVER-LOG-ROUTE True False False False' in proc.stdout

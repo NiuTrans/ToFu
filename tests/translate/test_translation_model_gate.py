@@ -262,7 +262,7 @@ def test_independent_provider_burst_enters_without_count_permits():
 
 
 def test_abort_and_body_failure_leave_no_live_provider_accounting():
-    from lib.llm_errors import AbortedError
+    from lib.llm.llm_errors import AbortedError
     gate = _gate(1)
     with pytest.raises(AbortedError):
         with gate.slot(abort_check=lambda: True):

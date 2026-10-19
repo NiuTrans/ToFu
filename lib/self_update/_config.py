@@ -10,7 +10,7 @@ from __future__ import annotations
 import os
 
 from lib.log import get_logger
-from lib.runtime_layout import install_root
+from lib.runtime.runtime_layout import install_root
 
 logger = get_logger(__name__)
 
@@ -29,7 +29,7 @@ _REQUIREMENTS = 'requirements.txt'
 
 # ── Tracked paths that legitimately mutate at runtime. Changes confined
 #    to these do NOT count as a blocking dirty tree (see module docstring).
-#    The classification now lives in lib/runtime_layout.py (the single source
+#    The classification now lives in lib/runtime/runtime_layout.py (the single source
 #    of truth shared with export.py + .gitignore generation) so the update
 #    skip-list can never drift from the ignore/export sets; the names are
 #    re-exported here (byte-identical to the historical literals) for the few

@@ -8,7 +8,7 @@ pytestmark = pytest.mark.unit
 
 
 def test_source_descriptor_reads_complete_original_on_selected_store(storage, monkeypatch):
-    import lib.tool_result_artifacts as artifacts
+    import lib.tool_results.tool_result_artifacts as artifacts
     from lib.tasks_pkg.handlers.tool_result_artifacts import _execute_one
     supervisor, _ = storage
     monkeypatch.setattr(artifacts, 'get_storage_client', lambda **kwargs: supervisor.client)
@@ -52,7 +52,7 @@ def test_source_descriptor_reads_complete_original_on_selected_store(storage, mo
 @pytest.mark.parametrize('changed', [False, True])
 def test_expired_source_restores_exact_original_or_refuses_drift(storage, monkeypatch, changed):
     import time
-    import lib.tool_result_artifacts as artifacts
+    import lib.tool_results.tool_result_artifacts as artifacts
     supervisor, _ = storage
     monkeypatch.setattr(artifacts, 'get_storage_client', lambda **kwargs: supervisor.client)
     monkeypatch.setattr(context, 'action_window', lambda model: 32000)
@@ -103,7 +103,7 @@ def test_expired_source_restores_exact_original_or_refuses_drift(storage, monkey
 
 
 def test_unrelated_reference_cannot_trigger_origin_reads_or_cache_writes(monkeypatch):
-    import lib.tool_result_artifacts as artifacts
+    import lib.tool_results.tool_result_artifacts as artifacts
     monkeypatch.setattr(artifacts.ToolResultArtifactRepository, 'read_range', lambda *a, **k:
         pytest.fail('unrelated reference probed'))
     messages = [{'role':'system','content':'system'}, {'role':'user','content':json.dumps(

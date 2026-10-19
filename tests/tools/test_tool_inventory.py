@@ -339,3 +339,18 @@ def test_tools_route_serves_payload_via_test_client():
         assert data['groups'] and data['totals']['tools'] > 0
         assert data['scope'] == 'global_registry'
         assert resp.headers['Cache-Control'] == 'private, no-store'
+
+
+def test_inventory_accepts_existing_specs_before_optional_presentation_metadata(monkeypatch):
+    from types import SimpleNamespace
+    import lib.tools.registry._introspect as inventory
+    spec = inventory.all_specs()[0]
+    legacy = SimpleNamespace(**vars(spec))
+    del legacy.compatibility_tools
+    del legacy.contextual_tools
+    monkeypatch.setattr(inventory, 'all_specs', lambda: [legacy])
+    report = inventory.build_tool_inventory(owner_user_id=7)
+    family = _families(report)[(spec.category, spec.key)]
+    assert family['compatibility_tools'] == []
+    assert family['contextual_tools'] == []
+    assert family['declared'] == sorted(spec.provides)

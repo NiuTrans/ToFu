@@ -42,8 +42,7 @@ def _trim_rows(rows: Iterable[Sequence[object]]) -> list[list[str]]:
             cleaned.append(values)
     if not cleaned:
         return []
-    width = max(len(row) for row in cleaned)
-    return [row + [''] * (width - len(row)) for row in cleaned]
+    return cleaned
 
 
 def infer_header_row(rows: Sequence[Sequence[object]]) -> int:
@@ -118,6 +117,18 @@ def render_markdown_table(
     if not cleaned:
         return ''
     width = max(len(row) for row in cleaned)
+    values_cost = sum(len(value) for row in cleaned for value in row if value)
+    dense_cost = values_cost + 3 * width * len(cleaned)
+    sparse_cost = sum(len(value) + len(str(row_index + 1)) + len(str(column_index + 1)) + 12
+                      for row_index, row in enumerate(cleaned)
+                      for column_index, value in enumerate(row) if value)
+    if sparse_cost < dense_cost:
+        parts = ['| Table row | Column | Value |', '| --- | --- | --- |']
+        parts.extend(f'| {row_index + 1} | {column_index + 1} | {value} |'
+                     for row_index, row in enumerate(cleaned)
+                     for column_index, value in enumerate(row) if value)
+        return '\n'.join(parts)
+    cleaned = [row + [''] * (width - len(row)) for row in cleaned]
     header_index = infer_header_row(cleaned)
     headers = _unique_headers(cleaned[header_index], width)
     parts: list[str] = []

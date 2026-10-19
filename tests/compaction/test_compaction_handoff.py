@@ -12,7 +12,7 @@ from lib.tasks_pkg.compaction._history import is_human_message
 from lib.tasks_pkg.compaction._layer2 import _compact as l2
 from lib.tasks_pkg.compaction._layer2._prompt import _extract_prior_receipt
 from lib.tasks_pkg.context_composer import ComposeRequest, context_block, render_context
-from lib.tool_history_pairing import adjacent_tool_call_result_pairs
+from lib.tool_results.tool_history_pairing import adjacent_tool_call_result_pairs
 from tests.compaction.test_compaction_history_wire import compact, tool_round, user
 from tests.compaction.test_compaction_history_providers import _wire, _text, PROVIDERS
 
@@ -453,7 +453,7 @@ def test_handoff_and_runtime_context_cannot_make_active_structural_turn_evictabl
 
 def test_url_prefetch_cannot_treat_handoff_evidence_as_a_new_human_url(monkeypatch):
     from lib.tasks_pkg.executor._summary import _prefetch_user_urls
-    import lib.search_runtime as search_runtime
+    import lib.search.search_runtime as search_runtime
 
     def forbidden_search_runtime():
         pytest.fail('runtime evidence must not activate URL prefetch')
@@ -488,7 +488,7 @@ def test_final_admission_counts_restored_state_and_preserves_phase(compact, monk
 @pytest.mark.parametrize('memory_pressure', [False, True])
 def test_reactive_retry_keeps_required_policy_and_handoff_boundary(compact, monkeypatch, memory_pressure):  # noqa: F811
     from lib.cgroup_guard import MemoryPressureError
-    from lib.llm_errors import PromptTooLongError
+    from lib.llm.llm_errors import PromptTooLongError
     from lib.tasks_pkg.compaction import _reactive as reactive
     from lib.tasks_pkg.context_composer import _providers
     from lib.tasks_pkg.llm_fallback import _call as fallback

@@ -31,7 +31,7 @@ from tests._runtime_sections import runtime_section_path
 pytestmark = pytest.mark.unit
 HERE = Path(__file__).resolve().parent
 TOOL_ROUNDS = Path(runtime_section_path('ui/tool_rounds.js'))
-HARNESS = HERE / '_tool_rounds_wire_parity_harness.js'
+HARNESS = HERE.parent / '_tool_rounds_wire_parity_harness.js'
 
 
 def _render(rounds: list[dict], tmp_path: Path) -> list[str]:

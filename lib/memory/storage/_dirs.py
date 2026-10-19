@@ -78,7 +78,7 @@ def _server_data_dir():
     """Return the server data directory — the SAME writable root the DB and
     logs use.
 
-    Delegates to ``lib.runtime_paths.data_root()`` so the global memory store
+    Delegates to ``lib.runtime.runtime_paths.data_root()`` so the global memory store
     always co-locates with ``data/tofu.db`` under one resolved base. This
     matters once a source checkout defaults its data root OUT of the code tree
     (``TOFU_DATA_LAYOUT``): recomputing ``<project_root>/data`` here would split
@@ -87,7 +87,7 @@ def _server_data_dir():
     import fails (should never happen; runtime_paths is dependency-free).
     """
     try:
-        from lib.runtime_paths import data_root
+        from lib.runtime.runtime_paths import data_root
         return data_root()
     except Exception as e:  # pragma: no cover — defensive
         logger.warning('[Memory] runtime_paths.data_root() unavailable, '

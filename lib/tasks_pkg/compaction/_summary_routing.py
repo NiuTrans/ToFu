@@ -1,15 +1,12 @@
-"""Select an auxiliary summary route without granting new routing authority.
+"""Secret-free auxiliary planning through existing owner routing authority.
 
-Entry point: select_summary_route(task, input_tokens, output_tokens). The default
-'aa-cheapest' policy selects the highest exact AA Intelligence Index among the
-minimum-cost eligible routes in the SAME execution/provider access scope.
-'qualified-cheapest' is an alias; explicit 'main' disables substitution. AA is a
-quality proxy, not proof of summary fidelity or speed. Profiles describe supply,
-initialized dispatch slots prove access.
-No slots, credentials, registrations, network probes or task state are created.
-
-The caller must use strict_model=True and the returned execution provider pin.
-Completion verification/adoption belongs to _layer2._summary, not this policy.
+Native candidates need compiler authorization and are privately minted only at
+summary dispatch. Parent provider/family and optional AA/profile coverage never
+restrict eligibility; resource/cost/AA proxies rank routes, never free cash cost.
+Legacy API callers without native authority retain same-pin selection. Explicit
+main/disable fallback prohibit auxiliary compiler work. No secrets, registrations,
+network probes or main model mutations occur here. Dispatch owns complete output,
+provider scope restoration, credential teardown and durable adoption.
 """
 from __future__ import annotations
 
@@ -155,7 +152,8 @@ def _project_cost(profile, input_tokens, output_tokens):
     }
 
 
-def _authorized_buckets(dispatcher, profiles, *, owner, tenant, pin, provider):
+def _authorized_buckets(dispatcher, profiles, *, owner, tenant, pin, provider,
+                        allow_mixed_scope=False):
     """Every slot reachable by the returned model+pin must pass the join.
 
     The picker cannot pin one offering inside an execution group. Reject an
@@ -207,14 +205,17 @@ def _authorized_buckets(dispatcher, profiles, *, owner, tenant, pin, provider):
             access = profile['provenance'].get('providerAccessId')
             if not access:
                 break
-            # Never move between subscription and paid API, even when both
-            # were minted into one fallback group by ordinary task routing.
+            # Legacy same-pin alternatives need one homogeneous billing scope.
+            # Native mixed parents require separate full-witness validation.
             billing = str(getattr(slot, 'oauth', '') or 'token_api')
             scopes.add((actual_provider, access, billing))
             joined.append((slot, profile))
         else:
             if len(scopes) == 1:
                 result[key] = {'members': joined, 'scope': next(iter(scopes))}
+            elif allow_mixed_scope:
+                result[key] = {'members': joined, 'scope': ('', '', 'token_api'),
+                               'nativeOnly': True}
     return result
 
 
@@ -239,13 +240,34 @@ def _bucket_prices(bucket, input_tokens, output_tokens):
     return prices if prices and all(price is not None for price in prices) else []
 
 
+def _parent_route_identities(bucket):
+    """Complete native parent witnesses only; legacy slots cannot assert billing."""
+    identities = []
+    for slot, profile in bucket['members']:
+        provenance = profile['provenance']
+        identity = {'revision': provenance.get('revision'),
+                    'providerId': profile['providerId'],
+                    'providerAccessId': provenance.get('providerAccessId')}
+        for key, field in (('offeringId', 'route_offering_id'),
+                           ('deploymentId', 'route_deployment_id'),
+                           ('connectionId', 'route_connection_id'),
+                           ('credentialId', 'route_credential_id')):
+            identity[key] = getattr(slot, field, '')
+        if identity['revision'] is None or any(not value for key, value in identity.items()
+                                               if key != 'revision'):
+            return ()
+        identities.append(identity)
+    return tuple(identities)
+
+
 def select_summary_route(task, input_tokens, output_tokens, *,
                          capacity_output_tokens=None):
     """Return route, projected cost and optional AA selection evidence.
 
-    providerId is the enforceable execution pin, not the billing-provider ID.
+    Legacy providerId is an execution pin. requestOwned routes carry stable
+    billing providerId plus routeIdentity for a private group minted at dispatch.
     Unknown prices stay None. Disabled/invalid policy or incomplete evidence
-    retains the main route; this function never supplies a foreign fallback.
+    retains the main route; selection never widens transport failure fallback.
     output_tokens is the priced projection; capacity_output_tokens is the
     transport allowance, which must fit without inflating projected spend.
     """
@@ -299,6 +321,10 @@ def select_summary_route(task, input_tokens, output_tokens, *,
         if task.get('_tenant_id') is not None and task['_tenant_id'] != tenant:
             result['reason'] = 'conflicting_tenant_identity'
             return result
+        from lib.llm_dispatch.native_context_scope import native_compaction_route_ready
+        if not native_compaction_route_ready(task):
+            result['reason'] = 'native_parent_route_unready'
+            return result
         from lib.llm_dispatch import get_dispatcher
         from lib.model_profiles import configured_model_profiles
         profiles = configured_model_profiles(owner_user_id=owner, tenant_id=tenant)
@@ -306,6 +332,13 @@ def select_summary_route(task, input_tokens, output_tokens, *,
             get_dispatcher(), profiles, owner=owner, tenant=tenant,
             pin=pin, provider=provider)
         main_keys = sorted(key for key in buckets if key[1] == model)
+        if len(main_keys) != 1 and not disabled and policy != _MAIN:
+            expanded = _authorized_buckets(
+                get_dispatcher(), profiles, owner=owner, tenant=tenant,
+                pin=pin, provider=provider, allow_mixed_scope=True)
+            expanded_keys = sorted(key for key in expanded if key[1] == model)
+            if len(expanded_keys) == 1 and _parent_route_identities(expanded[expanded_keys[0]]):
+                buckets, main_keys = expanded, expanded_keys
         if len(main_keys) != 1:
             result['reason'] = 'main_route_unresolved'
             return result
@@ -315,18 +348,35 @@ def select_summary_route(task, input_tokens, output_tokens, *,
 
         restrictions = (task.get('provider_id'), config.get('providerId'),
                         config.get('provider_id'))
-        if any(value and value not in (main_key[0], main['scope'][0])
-               for value in restrictions):
+        allowed_parent_providers = {main_key[0], *(profile['providerId']
+                                                  for _, profile in main['members'])}
+        if any(value and value not in allowed_parent_providers for value in restrictions):
             result['reason'] = 'conflicting_provider_pins'
             return result
         if main['scope'][2] != 'token_api':
-            # A rate card does not establish marginal subscription cost.
             result.update(reason='subscription_route_preserved',
                           costBasis={'source': 'subscription_unpriced'})
-            return result
-        if not _fits(main, input_tokens, capacity_output_tokens):
-            result['reason'] = 'main_capacity_unqualified'
-            return result
+            if disabled:
+                result.update(policy=_MAIN, reason='disable_model_fallback')
+                return result
+            if policy == _MAIN:
+                return result
+            from lib.tasks_pkg.compaction._auxiliary_route import select_auxiliary_route
+            try:
+                return select_auxiliary_route(
+                    result, profiles, owner=owner, tenant=tenant,
+                    input_tokens=input_tokens, output_tokens=output_tokens,
+                    capacity_output_tokens=capacity_output_tokens,
+                    parent_offering_ids={profile['provenance']['offeringId']
+                                         for _, profile in main['members']},
+
+                    parent_route_identities=_parent_route_identities(main),
+                    paid_ceiling=_number(_mapping(config.get('compaction')).get(
+                        'summaryMaxCostUsd', 0.05)))
+            except Exception as exc:
+                logger.debug('[SummaryRoute] Auxiliary authority unavailable: %s',
+                             type(exc).__name__)
+                return result
         main_prices = _bucket_prices(main, input_tokens, output_tokens)
         if main_prices:
             cost, basis = max(main_prices, key=lambda price: price[0])
@@ -335,6 +385,34 @@ def select_summary_route(task, input_tokens, output_tokens, *,
             result.update(policy=_MAIN, reason='disable_model_fallback')
             return result
         if policy == _MAIN:
+            return result
+        # Native owner authority expands supply beyond the parent group's pin.
+        # The parent need not fit or have API pricing to use an authorized resource.
+        # Legacy/direct callers without that authority retain the AA API policy.
+        try:
+            from lib.tasks_pkg.compaction._auxiliary_route import select_auxiliary_route
+            native = select_auxiliary_route(
+                dict(result), profiles, owner=owner, tenant=tenant,
+                input_tokens=input_tokens, output_tokens=output_tokens,
+                capacity_output_tokens=capacity_output_tokens,
+                paid_ceiling=_number(_mapping(config.get('compaction')).get(
+                    'summaryMaxCostUsd', 0.05)),
+                subscription_main=False,
+
+                parent_route_identities=_parent_route_identities(main),
+                parent_offering_ids={profile['provenance']['offeringId']
+                                     for _, profile in main['members']},
+                main_cost=min(price[0] for price in main_prices) if main_prices else None)
+            if native.get('requestOwned'):
+                return native
+        except Exception as exc:
+            logger.debug('[SummaryRoute] Native auxiliary authority unavailable: %s',
+                         type(exc).__name__)
+        if main.get('nativeOnly'):
+            result['reason'] = 'main_route_unresolved'
+            return result
+        if not _fits(main, input_tokens, capacity_output_tokens):
+            result['reason'] = 'main_capacity_unqualified'
             return result
         if not main_prices:
             result['reason'] = 'main_price_unknown'
@@ -355,6 +433,12 @@ def select_summary_route(task, input_tokens, output_tokens, *,
             # Compare worst reachable candidate cost against best reachable
             # main cost, since a provider pin cannot select one credential.
             cost, basis = max(prices, key=lambda price: price[0])
+
+            if 'summaryMaxCostUsd' in compaction:
+                ceiling = _number(compaction['summaryMaxCostUsd'])
+                maximum_prices = _bucket_prices(bucket, input_tokens, capacity_output_tokens)
+                if ceiling is None or not maximum_prices or max(price[0] for price in maximum_prices) > ceiling:
+                    continue
             if cost < min(price[0] for price in main_prices):
                 candidates.append((cost, aa[0], key, basis, aa[1]))
         if not candidates:

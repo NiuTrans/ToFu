@@ -90,12 +90,20 @@ def start_prefetches(
     _prefetch_project_future = None
 
     if project_enabled and project_path:
-        _prefetch_conv_id = task.get('convId') or task.get('id') or ''
+        from lib.tasks_pkg.workspace_delivery import ensure_execution_roots, execution_root_key
+        from lib.project_mod.config import execution_root_scope
+        root_policy = ensure_execution_roots(task)
+        _prefetch_conv_id = execution_root_key(task)
 
         def _prefetch_project():
             from lib.project_mod import get_context_for_prompt
+            if root_policy is not None:
+                with execution_root_scope(_prefetch_conv_id, root_policy):
+                    return get_context_for_prompt(project_path, conv_id=_prefetch_conv_id,
+                        include_guidance=bool((task.get('config') or {}).get('project_remote')))
             return get_context_for_prompt(
-                project_path, conv_id=_prefetch_conv_id or None)
+                project_path, conv_id=_prefetch_conv_id or None,
+                include_guidance=bool((task.get('config') or {}).get('project_remote')))
 
         _prefetch_project_future = _prefetch_executor.submit(_prefetch_project)
 

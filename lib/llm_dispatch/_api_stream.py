@@ -4,7 +4,7 @@ from lib.llm.stream_result import (
     ProviderStreamResult,
     ensure_provider_stream_result,
 )
-from lib.llm_errors import (
+from lib.llm.llm_errors import (
     is_subscription_quota_error,
     parse_subscription_retry_after,
 )
@@ -14,6 +14,8 @@ import time
 
 from ._attempt_timing import AttemptObserver
 from lib.log import get_logger
+
+from lib.llm.diagnostic_timing import timed_call, timed_call_with_fields, timed_stage
 from lib.llm_dispatch._api_budget import _UNREACHABLE_COOLDOWN, _force_oauth_token_refresh, _gateway_outage_budget_secs, _raise_dispatch_exhausted, _raise_if_429_attempt_budget_exhausted, _record_route_missing_model, _saturation_budget_secs, _saturation_escalate, _validate_429_attempt_budget
 from lib.llm_dispatch._api_contention import _admit_or_defer_shared_contention, _admit_or_defer_shared_contention_async, _shared_contention_retry_delay
 from lib.llm_dispatch._api_errors import DispatchSharedContentionDeferred
@@ -42,6 +44,21 @@ def _notify_retry(
         provider_id=(slot.routing_provider_id or slot.provider_id),
         strict_model=bool(strict_model),
     )
+
+
+def _dominant_cooldown_cause(dispatcher, capability, state) -> str:
+    """Best-effort dominant cooldown cause for the wait HUD ('' on failure).
+
+    Reads the dispatcher's slot-health view; must never break the wait loop.
+    """
+    try:
+        return dispatcher.dominant_cooldown_cause(
+            capability,
+            exclude_models=state.eff_exclude_models(),
+            exclude_keys=state.eff_exclude_keys(),
+            exclude_pairs=state.eff_exclude_pairs())
+    except Exception:
+        return ''
 
 
 def _notify_attempt_restart(callback, reason, *, log_prefix):
@@ -110,14 +127,21 @@ def _provider_reported_network_failure(stream_result, msg, finish) -> bool:
     return True
 
 
-def _stream_wait_notifier(on_waiting, slot, tag):
+def _stream_wait_notifier(on_waiting, slot, tag, on_retry=None, strict_model=True):
     """Bounded on_waiting wrapper: a raising listener must never kill the stream."""
-    if not on_waiting:
+    if not on_waiting and not on_retry:
         return None
 
     def _notify(status, _slot=slot):
         try:
-            on_waiting(status=status, slot=_slot)
+            if status.kind == 'network_recovered' and on_retry:
+                _notify_retry(on_retry, _slot, strict_model=strict_model,
+                    attempt=0, reason='Network recovered', status_code=0)
+            elif status.kind == 'network_recovery' and on_retry:
+                _notify_retry(on_retry, _slot, strict_model=strict_model,
+                    attempt=0, reason='Waiting for network recovery', status_code=0)
+            elif on_waiting:
+                on_waiting(status=status, slot=_slot)
         except Exception as exc:
             logger.debug('%s on_waiting raised: %s', tag, exc)
 
@@ -149,12 +173,46 @@ def _rotate_slot_for_provider_network_failure(state, slot, log_prefix,
     fire_attempt_restart('provider network_error — rotating slot')
 
 
+@timed_stage('dispatch_total')
+def _check_stream_outage_policy(state, log_prefix, prefer_model):
+    # Gateway-outage cap — DISABLED by default (budget 0, owner
+    #   directive 2026-08-20: a whole-upstream 5xx storm is WAITABLE —
+    #   keep rotating until the gateway recovers or the user cancels;
+    #   abort_check runs every cycle, so stopping is always the user's
+    #   call, never ours). When TOFU_GATEWAY_OUTAGE_BUDGET_S > 0, an
+    #   unbroken gateway-5xx streak past the budget raises so the worker
+    #   thread is freed (legacy thread-pool-starvation guard). A real
+    #   per-key 429 or a success clears the streak, so genuine
+    #   contention is never capped.
+    _gw_budget = _gateway_outage_budget_secs()
+    if state.gateway_outage_exceeded(_gw_budget):
+        logger.error(
+            '%s dispatch_stream: gateway 5xx outage exceeded %.0fs budget '
+            '(only gateway errors from every slot) — giving up so the '
+            'worker thread is freed. Last error: %s',
+            log_prefix, _gw_budget, str(state.last_err)[:200])
+        raise state.last_err or RuntimeError(
+            'Gateway outage: no slot reachable for %.0fs'
+            % _gw_budget)
+
+    # 429-saturation escalation is opt-in. By default every-slot
+    # saturation remains waitable until recovery or user cancellation.
+    _sat_budget = _saturation_budget_secs()
+    if state.saturation_exceeded(_sat_budget):
+        _saturation_escalate(
+            log_prefix, 'dispatch_stream',
+            elapsed_s=time.monotonic() - state._saturation_start,
+            budget_s=_sat_budget, cycles=state.capacity_wait_cycles,
+            model=prefer_model)
+
+
+
 def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
                     on_tool_call_ready=None, on_before_tool_call_ready=None,
                     abort_check=None, max_tokens=4096, temperature=0,
                     thinking_enabled=None, preset='low', effort=None,
                     thinking_depth=None,
-                    capability='text', prefer_model=None, tools=None,
+                    capability='text', prefer_model=None, tools=None, tool_choice=None, generation_options=None,
                     max_retries=3, log_prefix='', strict_model=False,
                     on_retry=None, avoid_pairs=None,
                     exclude_models=None, on_attempt_restart=None, on_provider_attempt=None,
@@ -185,7 +243,7 @@ def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
         RateLimitError,
         stream_chat,
     )
-    from lib.llm_errors import EndpointUnreachableError, ModelRouteMissingError, RequestScopedError
+    from lib.llm.llm_errors import EndpointUnreachableError, ModelRouteMissingError, RequestScopedError
 
     def _fire_attempt_restart(reason: str) -> None:
         _notify_attempt_restart(
@@ -193,7 +251,7 @@ def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
 
     attempt_observer = AttemptObserver(on_provider_attempt)
     max_429_attempts = _validate_429_attempt_budget(max_429_attempts)
-    dispatcher = get_dispatcher()
+    dispatcher = timed_call('route_resolution', get_dispatcher)
     state = _StreamRetryState(exclude_models=exclude_models, avoid_pairs=avoid_pairs)
     # Fruit 2 (E2): at most ONE forced OAuth token refresh-retry per
     # request (see dispatch_chat).
@@ -216,35 +274,7 @@ def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
             from lib.llm import AbortedError as _AE
             raise _AE('Aborted during dispatch retry')
 
-        # Gateway-outage cap — DISABLED by default (budget 0, owner
-        #   directive 2026-08-20: a whole-upstream 5xx storm is WAITABLE —
-        #   keep rotating until the gateway recovers or the user cancels;
-        #   abort_check runs every cycle, so stopping is always the user's
-        #   call, never ours). When TOFU_GATEWAY_OUTAGE_BUDGET_S > 0, an
-        #   unbroken gateway-5xx streak past the budget raises so the worker
-        #   thread is freed (legacy thread-pool-starvation guard). A real
-        #   per-key 429 or a success clears the streak, so genuine
-        #   contention is never capped.
-        _gw_budget = _gateway_outage_budget_secs()
-        if state.gateway_outage_exceeded(_gw_budget):
-            logger.error(
-                '%s dispatch_stream: gateway 5xx outage exceeded %.0fs budget '
-                '(only gateway errors from every slot) — giving up so the '
-                'worker thread is freed. Last error: %s',
-                log_prefix, _gw_budget, str(state.last_err)[:200])
-            raise state.last_err or RuntimeError(
-                'Gateway outage: no slot reachable for %.0fs'
-                % _gw_budget)
-
-        # 429-saturation escalation is opt-in. By default every-slot
-        # saturation remains waitable until recovery or user cancellation.
-        _sat_budget = _saturation_budget_secs()
-        if state.saturation_exceeded(_sat_budget):
-            _saturation_escalate(
-                log_prefix, 'dispatch_stream',
-                elapsed_s=time.monotonic() - state._saturation_start,
-                budget_s=_sat_budget, cycles=state.capacity_wait_cycles,
-                model=prefer_model)
+        _check_stream_outage_policy(state, log_prefix, prefer_model)
 
         # Log available slots at start of each attempt for debugging
         logger.debug(
@@ -328,7 +358,7 @@ def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
                 logger.debug('%s warm-key hold unavailable: %s',
                              log_prefix, _imp_err)
 
-        slot = dispatcher.pick_and_reserve(
+        slot = timed_call('route_selection', dispatcher.pick_and_reserve,
             capability=capability,
             prefer_model=prefer_model,
             exclude_models=state.eff_exclude_models(),
@@ -389,7 +419,11 @@ def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
                         state._cooldown_cycles == 1
                         or state._cooldown_cycles % 20 == 0):
                     try:
-                        on_waiting(status=state.wait_status(), slot=None)
+                        on_waiting(
+                            status=state.wait_status(
+                                cooldown_cause=_dominant_cooldown_cause(
+                                    dispatcher, capability, state)),
+                            slot=None)
                     except Exception as _ore:
                         logger.debug('%s on_waiting (cooldown) raised: %s',
                                      log_prefix, _ore)
@@ -420,13 +454,15 @@ def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
         try:
             body = _adapt_stream_body_for_slot(
                 slot, body_or_messages, is_body,
-                tools=tools, max_tokens=max_tokens, temperature=temperature,
+                tools=tools, tool_choice=tool_choice,
+                generation_options=generation_options,
+                max_tokens=max_tokens, temperature=temperature,
                 thinking_enabled=thinking_enabled, preset=preset,
                 effort=effort, thinking_depth=thinking_depth,
                 model_budget_admit=model_budget_admit)
         except Exception as error:
             slot.release()
-            from lib.llm_errors import LocalRequestPreparationError
+            from lib.llm.llm_errors import LocalRequestPreparationError
             raise LocalRequestPreparationError(
                 f'local request preparation failed: {error}',
                 stage='slot_body_adaptation',
@@ -492,9 +528,14 @@ def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
             # attempt's typed progress while it awaits headers/model output
             # or while a started stream is semantically stalled. The slot
             # is only current-attempt identity; stale errors are never UI.
-            _on_stream_wait = _stream_wait_notifier(on_waiting, slot, tag)
+            _on_stream_wait = _stream_wait_notifier(
+                on_waiting, slot, tag, on_retry, strict_model)
             stream_result = msg, finish, usage = \
-                ensure_provider_stream_result(attempt_observer.call(stream_chat, slot,
+                ensure_provider_stream_result(timed_call_with_fields('provider_call', {
+                    'model': slot.model,
+                    'provider_id': getattr(slot, 'routing_provider_id', '') or slot.provider_id,
+                    'protocol': slot.protocol or 'openai',
+                }, attempt_observer.call, stream_chat, slot,
                     body, api_key=slot.api_key,
                     base_url=slot.base_url or None,
                     extra_headers=slot.extra_headers or None,
@@ -551,6 +592,7 @@ def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
             _is_quota = bool(getattr(e, 'is_quota', False))
             _is_gateway = bool(getattr(e, 'is_gateway', False))
             _is_contention = bool(getattr(e, 'is_shared_contention', False))
+            _is_subscription = bool(getattr(e, 'is_subscription_quota', False))
             # HTTP 402 (account credit dead) → key-wide stop; 429-quota →
             # per-model (see Slot.record_error is_account_quota).
             _is_account_quota = bool(
@@ -623,7 +665,15 @@ def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
                 logger.debug(
                     '%s 429 rate-limited on %s:%s (cycle #%d)',
                     log_prefix, slot.key_name, slot.model, state._429_count)
-            if _is_gateway:
+            if _is_subscription:
+                # OAuth-subscription quota window (resets at a known time,
+                #   often hours/days) — NOT a transient per-key 429. Tag it
+                #   so the HUD shows a quota banner, not 'queued retry'.
+                _notify_retry(
+                    on_retry, slot, strict_model=strict_model,
+                    attempt=state._429_count,
+                    reason='Subscription quota reached', status_code=429)
+            elif _is_gateway:
                 # Upstream-outage class (gateway 5xx / vendor transient
                 # wrapped in 4xx) — NOT 限流; the cause is a sick upstream,
                 # not per-key contention.
@@ -661,7 +711,7 @@ def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
                 logger.warning('%s Auth rejected on OAuth slot %s:%s (%s) — '
                                'forced refresh failed; normal failover',
                                log_prefix, slot.key_name, slot.model, slot.oauth)
-            slot.record_error(is_rate_limit=False)
+            slot.record_error(is_rate_limit=False, error=e)
             state.last_err = e
             if slot.oauth and getattr(e, 'status_code', 0) == 401:
                 state.note_permission_key(slot)
@@ -850,7 +900,7 @@ async def async_dispatch_stream(body_or_messages, *, on_thinking=None,
                                 abort_check=None, max_tokens=4096, temperature=0,
                                 thinking_enabled=None, preset='low', effort=None,
                                 thinking_depth=None,
-                                capability='text', prefer_model=None, tools=None,
+                                capability='text', prefer_model=None, tools=None, tool_choice=None, generation_options=None,
                                 max_retries=3, log_prefix='', strict_model=False,
                                 on_retry=None, avoid_pairs=None,
                                 exclude_models=None,
@@ -893,7 +943,7 @@ async def async_dispatch_stream(body_or_messages, *, on_thinking=None,
 
     async def _observed_transport(*args, **kwargs):
         return ensure_provider_stream_result(await async_stream_chat(*args, **kwargs))
-    from lib.llm_errors import EndpointUnreachableError, ModelRouteMissingError, RequestScopedError
+    from lib.llm.llm_errors import EndpointUnreachableError, ModelRouteMissingError, RequestScopedError
 
     def _fire_attempt_restart(reason: str) -> None:
         _notify_attempt_restart(
@@ -901,7 +951,7 @@ async def async_dispatch_stream(body_or_messages, *, on_thinking=None,
 
     attempt_observer = AttemptObserver(on_provider_attempt)
     max_429_attempts = _validate_429_attempt_budget(max_429_attempts)
-    dispatcher = get_dispatcher()
+    dispatcher = timed_call('route_resolution', get_dispatcher)
     state = _StreamRetryState(exclude_models=exclude_models, avoid_pairs=avoid_pairs)
     # Fruit 2 (E2): at most ONE forced OAuth token refresh-retry per
     # request (see dispatch_chat).
@@ -1027,7 +1077,11 @@ async def async_dispatch_stream(body_or_messages, *, on_thinking=None,
                         state._cooldown_cycles == 1
                         or state._cooldown_cycles % 20 == 0):
                     try:
-                        on_waiting(status=state.wait_status(), slot=None)
+                        on_waiting(
+                            status=state.wait_status(
+                                cooldown_cause=_dominant_cooldown_cause(
+                                    dispatcher, capability, state)),
+                            slot=None)
                     except Exception as _owe:
                         logger.debug(
                             '%s async on_waiting (cooldown) raised: %s',
@@ -1047,13 +1101,15 @@ async def async_dispatch_stream(body_or_messages, *, on_thinking=None,
         try:
             body = _adapt_stream_body_for_slot(
                 slot, body_or_messages, is_body,
-                tools=tools, max_tokens=max_tokens, temperature=temperature,
+                tools=tools, tool_choice=tool_choice,
+                generation_options=generation_options,
+                max_tokens=max_tokens, temperature=temperature,
                 thinking_enabled=thinking_enabled, preset=preset,
                 effort=effort, thinking_depth=thinking_depth,
                 model_budget_admit=model_budget_admit)
         except Exception as error:
             slot.release()
-            from lib.llm_errors import LocalRequestPreparationError
+            from lib.llm.llm_errors import LocalRequestPreparationError
             raise LocalRequestPreparationError(
                 f'local request preparation failed: {error}',
                 stage='slot_body_adaptation',
@@ -1097,13 +1153,8 @@ async def async_dispatch_stream(body_or_messages, *, on_thinking=None,
                 t0, on_thinking, on_content, on_tool_call_ready)
 
             # Waiting-heartbeat seam — see the sync dispatch_stream branch.
-            _on_stream_wait = None
-            if on_waiting:
-                def _on_stream_wait(status, _slot=slot):
-                    try:
-                        on_waiting(status=status, slot=_slot)
-                    except Exception as _owe:
-                        logger.debug('%s on_waiting raised: %s', tag, _owe)
+            _on_stream_wait = _stream_wait_notifier(
+                on_waiting, slot, tag, on_retry, strict_model)
             stream_result = msg, finish, usage = ensure_provider_stream_result(
                 await attempt_observer.acall(_observed_transport, slot,
                 body, api_key=slot.api_key,
@@ -1165,6 +1216,7 @@ async def async_dispatch_stream(body_or_messages, *, on_thinking=None,
             _is_quota = bool(getattr(e, 'is_quota', False))
             _is_gateway = bool(getattr(e, 'is_gateway', False))
             _is_contention = bool(getattr(e, 'is_shared_contention', False))
+            _is_subscription = bool(getattr(e, 'is_subscription_quota', False))
             # HTTP 402 (account credit dead) → key-wide stop; 429-quota →
             # per-model (see Slot.record_error is_account_quota).
             _is_account_quota = bool(
@@ -1207,7 +1259,15 @@ async def async_dispatch_stream(body_or_messages, *, on_thinking=None,
                     getattr(e, 'credential_delivery_anomaly_attempts', 0),
                     slot.model)
                 raise
-            if _is_gateway:
+            if _is_subscription:
+                # OAuth-subscription quota window (resets at a known time,
+                #   often hours/days) — NOT a transient per-key 429. Tag it
+                #   so the HUD shows a quota banner, not 'queued retry'.
+                _notify_retry(
+                    on_retry, slot, strict_model=strict_model,
+                    attempt=state._429_count,
+                    reason='Subscription quota reached', status_code=429)
+            elif _is_gateway:
                 _notify_retry(
                     on_retry, slot, strict_model=strict_model,
                     attempt=state._429_count, reason='Upstream error',
@@ -1242,7 +1302,7 @@ async def async_dispatch_stream(body_or_messages, *, on_thinking=None,
                 logger.warning('%s Auth rejected on OAuth slot %s:%s (%s) — '
                                'forced refresh failed; normal failover',
                                log_prefix, slot.key_name, slot.model, slot.oauth)
-            slot.record_error(is_rate_limit=False)
+            slot.record_error(is_rate_limit=False, error=e)
             state.last_err = e
             if slot.oauth and getattr(e, 'status_code', 0) == 401:
                 state.note_permission_key(slot)

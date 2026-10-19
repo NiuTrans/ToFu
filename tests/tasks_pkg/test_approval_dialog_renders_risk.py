@@ -72,6 +72,20 @@ def _write_partition_tools() -> list[str]:
 #: The probe value is deliberately alarming: if the dialog cannot show
 #: ``rm -rf ~/Documents``, it cannot show anything that matters.
 CASES: dict[str, tuple[dict, str]] = {
+    'browser_check': ({'tab_id': '7', 'selector': '#subscribe', 'checked': False}, '#subscribe'),
+    'browser_select_option': ({'tab_id': '7', 'selector': '#region', 'option': 'Europe'}, 'Europe'),
+    'consider_project_message': ({'message_id': 'message-7', 'decision': 'accepted', 'note': 'Run scoped parser check', 'expected_revision': 1}, 'Run scoped parser check'),
+    'evolution_explore': ({'action': 'read', 'program_id': 'program-7'}, 'program-7'),
+    'manage_agents': ({'action': 'create', 'name': 'Parser reviewer', 'objective': 'Inspect parser changes'}, 'Inspect parser changes'),
+    'publish_response_file': ({'path': 'reports/audit.pdf', 'title': 'Audit'}, 'reports/audit.pdf'),
+    'publish_response_asset': ({'path': 'charts/chart.png', 'alt': 'Quarterly revenue'}, 'charts/chart.png'),
+    'publish_rich_response': ({'payload': {'version': 1, 'blocks': [{'type': 'markdown', 'text': 'Revenue report'}]}}, 'Revenue report'),
+    'send_agent_message': ({'agent_id': 'agent-7', 'content': 'Inspect parser changes', 'idempotency_key': 'test-msg-7'}, 'Inspect parser changes'),
+    'send_project_message': ({'conversation_id': 'conversation-7', 'content': 'Inspect parser changes', 'idempotency_key': 'test-project-msg-7'}, 'Inspect parser changes'),
+
+    'record_working_fact': ({'revision': 3, 'text': 'The payment was accepted',
+                            'kind': 'derived', 'sources': [{'kind': 'fact', 'id': 'wf_source', 'version': 1}]},
+                           'The payment was accepted'),
     'run_command': ({'command': 'rm -rf /tmp/victim'}, 'rm -rf /tmp/victim'),
     'request_skill_install': ({
         'catalog_id': 'skill-creator',
@@ -203,7 +217,8 @@ def _live_schema_properties() -> dict[str, set[str]]:
     ctx = ToolContext(
         cfg={'projectEnabled': True, 'evolution': {
             'stage': 'executing', 'run_id': 'run-schema', 'project_path': '/tmp/p'}},
-        task_id='t-schema', project_path='/tmp/p', project_enabled=True,
+        task_id='t-schema', conv_id='conv-schema', owner_user_id=7,
+        project_path='/tmp/p', project_enabled=True,
         search_mode='multi', search_enabled=True, fetch_enabled=True,
         code_exec_enabled=False, browser_enabled=True, desktop_enabled=True,
         image_gen_enabled=True,
@@ -224,10 +239,14 @@ def _live_schema_properties() -> dict[str, set[str]]:
     # browser / desktop families are gated on a live extension/agent being
     # connected, so they may be absent from the assembled list in CI. Pull
     # their schemas directly — they are plain module constants.
+    from lib.tools.working_facts import WORKING_FACT_CONTRACTS
+    for contract in WORKING_FACT_CONTRACTS:
+        out[contract.name] = set(contract.parameters.get('properties', {}))
     for mod, attr in (('lib.tools.browser', 'BROWSER_TOOLS'),
                       ('lib.browser.advanced', 'ADVANCED_BROWSER_TOOLS'),
                       ('lib.desktop_tools', 'DESKTOP_TOOLS'),
                       ('lib.tools.project', 'PROJECT_TOOLS_LEGACY'),
+                      ('lib.tools.project', 'PROJECT_TOOL_KILL_BACKGROUND'),
                       ('lib.tools.project', 'PROJECT_TOOLS_UNIFIED'),
                       ('lib.tools.motion_video', 'MOTION_VIDEO_TOOLS'),
                       ('lib.tools.paper_build', 'PAPER_ARXIV_IMPORT_TOOL'),
@@ -265,12 +284,13 @@ def _live_schema_properties() -> dict[str, set[str]]:
         from lib.evolution import library as _evo_library
         from lib.evolution.refetch import REINDEX_TOOL_DEFINITION
         from lib.evolution.teach import TEACH_TOOL_DEFINITION
+        from lib.evolution.exploration_tools import tool_definition as exploration_definition
         for definition in (
                 *_artifact_build(ctx),
                 _evo_coordination.tool_definition(),
                 _evo_library.material_tool_definition(),
                 REINDEX_TOOL_DEFINITION,
-                TEACH_TOOL_DEFINITION):
+                TEACH_TOOL_DEFINITION, exploration_definition()):
             fn = (definition or {}).get('function') or {}
             name = fn.get('name')
             if name and name not in out:
@@ -283,7 +303,7 @@ def _live_schema_properties() -> dict[str, set[str]]:
 
 def _build_meta(tool: str, args: dict) -> dict:
     """Run the REAL enricher over the REAL base meta shape."""
-    from lib.tasks_pkg.tool_dispatch._approval import _APPROVAL_META_ENRICHERS
+    from lib.tasks_pkg.tool_dispatch._approval import enrich_approval_metadata
 
     meta = {
         'approvalId': 'appr-1',
@@ -291,9 +311,7 @@ def _build_meta(tool: str, args: dict) -> dict:
         'path': args.get('path', ''),
         'description': args.get('description', ''),
     }
-    fn = _APPROVAL_META_ENRICHERS.get(tool)
-    if fn is not None:
-        fn(meta, args)
+    enrich_approval_metadata(meta, tool, args)
     return meta
 
 

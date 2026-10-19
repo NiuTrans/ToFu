@@ -29,7 +29,7 @@ import pytest
 from lib.model_routing import OwnerBoundary, empty_document
 from lib.model_routing.repository import InMemoryModelRoutingRepository
 from lib.model_routing.template_supply import sync_template_supply
-from lib.provider_template_recipes import (
+from lib.provider.provider_template_recipes import (
     ProviderTemplateRecipeError,
     compile_provider_template_bundle,
 )
@@ -105,10 +105,10 @@ def test_missing_served_recipes_converge():
     assert 'gemini-3.8-flash' in ids
     assert 'glm-5.3-flash' in ids
     assert 'kimi-0902-preview' in ids
-    # 121 recipes − the seeded one − gpt-4o-2024-{08-06,11-20}: dated
+    # 122 recipes − the seeded one − gpt-4o-2024-{08-06,11-20}: dated
     # snapshots merge-key to the gpt-4o-2024-05-13 recipe already added
     # this pass, and one identity may never grow a second offering.
-    assert stats['added_offerings'] == 118
+    assert stats['added_offerings'] == 119
     from lib.model_catalog._creator_identity import merge_keys
     gpt4o = merge_keys('gpt-4o')
     assert len([row for row in _offerings(document, access_id)
@@ -349,7 +349,7 @@ def test_recipe_respelling_a_registered_model_converges():
     stats = sync_template_supply(
         boundary=boundary, repository=repository, prober=_prober_ok)
 
-    assert stats['added_offerings'] == 118
+    assert stats['added_offerings'] == 119
     document = repository.get(boundary).document
     o3 = [row for row in _offerings(document, access_id)
           if (row.get('model') or {}).get('creator_id') == 'openai'
@@ -382,7 +382,7 @@ def test_recipe_respelling_a_registered_model_converges():
 def test_template_probe_cells_start_without_window_and_preserve_evidence(monkeypatch, fail_start):
     import threading
     import time
-    import lib.provider_probe as probes
+    import lib.provider.provider_probe as probes
     from lib.model_routing import template_supply
 
     count = 4 if fail_start else 32

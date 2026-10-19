@@ -6,7 +6,7 @@ import time
 import pytest
 
 from lib.cost import canonicalize_usage_cache_keys, observed_cache_read
-from lib.task_result_checkpoint_contract import (
+from lib.task_replay.task_result_checkpoint_contract import (
     TASK_CACHE_PREFIX_HWM_CANDIDATE_FIELD,
     TASK_LAST_TURN_CACHE_READ_CANDIDATE_FIELD,
     TASK_RESULT_LAST_TURN_CACHE_READ_FIELD,

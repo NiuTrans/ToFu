@@ -77,7 +77,10 @@ def test_startup_terminal_outcomes_preserve_owner_and_do_not_authorize_failed_re
             return {'projects': [{'ownerUserId': 7, 'projectKey': '/project',
                                   'workItems': [{'id': 'work', 'taskId': 'task', 'status': 'active'}]}],
                     'capped': False}
-        def query(self, operation, payload):
+        def query(self, operation, payload, **kwargs):
+            if operation == 'record.list':
+                assert kwargs['deadline'] > 0
+                return []
             assert payload['user_id'] == 7
             return dict(stored)
         def command(self, operation, payload, command_id):

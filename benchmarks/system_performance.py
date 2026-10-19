@@ -17,12 +17,50 @@ import statistics
 CONTRACT = json.loads(Path(__file__).with_name('system_performance_contract.json').read_text())
 
 
+def _cold_metrics(row, variant, case, issues):
+    """Validate first-use receipts; warm clocks cannot certify activation cost."""
+    cold = row.get(CONTRACT['comparison']['cold_start_field'])
+    context = {'variant': variant, 'case': list(case)}
+    if cold is None:
+        issues.append(dict(context, kind='incomplete', reason='missing cold-start evidence'))
+        return None
+    if not isinstance(cold, dict):
+        issues.append(dict(context, kind='invalid', reason='invalid cold-start evidence'))
+        return None
+    if cold.get('scope') != CONTRACT['comparison']['cold_start_scope']:
+        issues.append(dict(context, kind='incomplete', reason='cold-start fresh-process scope'))
+        return None
+    wall, cpu, identities = (cold.get(field) for field in
+                            ('wall_samples_ms', 'cpu_samples_ms', 'process_identities'))
+    if not all(isinstance(value, list) for value in (wall, cpu, identities)):
+        issues.append(dict(context, kind='invalid', reason='invalid cold-start sample arrays'))
+        return None
+    if len(wall) < CONTRACT['comparison']['minimum_cold_samples_per_variant']:
+        issues.append(dict(context, kind='incomplete', reason='too few cold-start samples'))
+        return None
+    if (len(cpu) != len(wall) or len(identities) != len(wall)
+            or not all(type(value) is str and value for value in identities)
+            or len(set(identities)) != len(identities)):
+        issues.append(dict(context, kind='invalid', reason='reused or missing cold-start process identity'))
+        return None
+    if (any(type(value) not in (int, float) or not math.isfinite(value) or value <= 0
+            for value in wall + cpu)
+            or cold.get('profiler_enabled') is not False
+            or cold.get('tracemalloc_enabled') is not False):
+        issues.append(dict(context, kind='invalid', reason='invalid or instrumented cold-start clock'))
+        return None
+    ordered = sorted(wall)
+    return {'p50_ms': statistics.median(wall), 'p95_ms': ordered[int((len(wall)-1)*.95)],
+            'p99_ms': ordered[int((len(wall)-1)*.99)], 'cpu_ms_per_operation': statistics.mean(cpu)}
+
+
 def compare(reference: dict, candidate: dict) -> dict:
     required = {(domain, case) for domain, cases in CONTRACT['scope'].items() for case in cases}
     issues: list[dict] = []
     improvements: list[dict] = []
     measured = set()
     reports = []
+    cold_processes = set()
     for name, report in [('reference', reference), ('candidate', candidate)]:
         by_case = {}
         if report.get('format') != 'tofu.system-performance/v1':
@@ -33,13 +71,29 @@ def compare(reference: dict, candidate: dict) -> dict:
                 issues.append({'kind': 'invalid', 'variant': name, 'case': list(key), 'reason': 'duplicate or undeclared case'})
             by_case[key] = row
         reports.append(by_case)
+    warm_processes = {measurement.get('process_identity')
+                      for report in reports for row in report.values()
+                      for measurement in row.get('measurements', [])
+                      if isinstance(measurement.get('process_identity'), str)}
     for key in sorted(required):
         rows = [report.get(key) for report in reports]
         if any(row is None for row in rows):
             issues.append({'kind': 'incomplete', 'case': list(key), 'reason': 'missing comparison'})
             continue
         valid = True
+        cold_metrics = []
         for name, row in zip(('reference', 'candidate'), rows):
+            cold = _cold_metrics(row, name, key, issues)
+            cold_metrics.append(cold)
+            if cold is None:
+                valid = False
+            else:
+                identities = set(row[CONTRACT['comparison']['cold_start_field']]['process_identities'])
+                if identities & (cold_processes | warm_processes):
+                    issues.append({'kind': 'invalid', 'variant': name, 'case': list(key),
+                                   'reason': 'cold-start process reused across workloads, variants or warm workers'})
+                    valid = False
+                cold_processes.update(identities)
             if row.get('scope') != 'domain_integration' or row.get('correctness_passed') is not True or row.get('failure_and_cleanup_passed') is not True:
                 issues.append({'kind': 'incomplete', 'variant': name, 'case': list(key), 'reason': 'integration/correctness/failure evidence'})
                 valid = False
@@ -105,8 +159,21 @@ def compare(reference: dict, candidate: dict) -> dict:
         if len(rows[0]['measurements']) != len(rows[1]['measurements']):
             issues.append({'kind': 'incomplete', 'case': list(key), 'reason': 'unmatched pair counts'})
             continue
+        field = CONTRACT['comparison']['cold_start_field']
+        cold_rows = [row[field] for row in rows]
+        if (len(cold_rows[0]['wall_samples_ms']) != len(cold_rows[1]['wall_samples_ms'])
+                or set(cold_rows[0]['process_identities']) & set(cold_rows[1]['process_identities'])):
+            issues.append({'kind': 'invalid', 'case': list(key), 'reason': 'unmatched or shared cold-start processes'})
+            continue
         measured.add(key)
         limits = CONTRACT['admission']
+        for metric in cold_metrics[0]:
+            ratio = cold_metrics[1][metric] / cold_metrics[0][metric]
+            maximum = limits['maximum_cpu_ratio'] if metric == 'cpu_ms_per_operation' else limits['maximum_latency_ratio']
+            if ratio > maximum:
+                issues.append({'kind': 'regression', 'case': list(key), 'metric': 'cold_' + metric, 'ratios': [ratio]})
+            if ratio <= 1 - limits['minimum_primary_improvement_fraction']:
+                improvements.append({'case': list(key), 'metric': 'cold_' + metric, 'ratios': [ratio]})
         for metric in CONTRACT['metrics']:
             ratios = []
             for before, after in zip(rows[0]['measurements'], rows[1]['measurements']):

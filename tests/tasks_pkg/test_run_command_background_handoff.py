@@ -640,3 +640,26 @@ def test_project_handler_hands_a_real_subprocess_to_background(
     task['aborted'] = True
     assert delivered.wait(5)
     assert '[Command aborted by user]' in queued[0]['result']
+
+
+def test_project_command_failure_keeps_original_error_and_partial_output(monkeypatch, tmp_path):
+    import lib.tasks_pkg.handlers.project as handler
+    import lib.tasks_pkg.handlers.code_exec as code_exec
+    from types import SimpleNamespace
+    complete = []
+    artifact = SimpleNamespace(spilled=False)
+    progress = SimpleNamespace(flush=lambda: None,
+        finalize_output=lambda **kwargs: (complete.append(kwargs['complete']), artifact)[1])
+    monkeypatch.setattr(handler, '_make_run_command_progress_cb', lambda *a, **k: progress)
+    monkeypatch.setattr(handler, '_make_run_command_spawn_cb', lambda *a, **k: None)
+    monkeypatch.setattr(code_exec, '_project_output_artifact', lambda content, result: content)
+    monkeypatch.setattr(code_exec, '_register_output_artifact_origin', lambda *a, **k: None)
+    failure = RuntimeError('synthetic execution failure')
+    def fail(**kwargs):
+        raise failure
+    monkeypatch.setattr(background, 'run_with_steer_handoff', fail)
+    with pytest.raises(RuntimeError) as caught:
+        handler._handle_project_tool(_task(), None, 'run_command', 'tc-fail',
+            {'command': 'fail'}, 1, {'status': 'searching'}, {}, str(tmp_path), True)
+    assert caught.value is failure
+    assert complete == [False]

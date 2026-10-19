@@ -21,17 +21,12 @@ const CARRIED_ABSENT: u32 = u32::MAX;
 const HEADER_BYTES: usize = 8 + 4 + 4 + 4 + 1 + 32;
 const FAMILY_HEADER_BYTES: usize = 8 + 4 + 2 + 2;
 const FAMILY_RECORD_HEADER_BYTES: usize = 1 + 3 + 4;
-pub const MAX_REFERENCED_BLOCKS: usize = 2_048;
 pub const MAX_INLINE_BYTES: usize = 256 * 1024;
 /// Total carried payload bytes embedded in one version 3 envelope. Above
 /// this bound the commit spills back to identifier-only references and
 /// fsyncs the loose blocks instead, preserving the 4 MiB history segment
 /// ceiling and bounded WAL replay memory.
 pub const MAX_CARRIED_PAYLOAD_BYTES: usize = 2 * 1024 * 1024;
-// A maximum-size event.append_batch may touch 500 distinct streams. Reserve
-// bounded room for the entity root, receipt, outbox, and future singleton
-// families without relaxing the independent 256 KiB inline byte ceiling.
-pub const MAX_FAMILY_RECORDS: usize = 512;
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 #[repr(u8)]
@@ -89,8 +84,8 @@ impl FamilyTransactionBuilder {
             if !self.block_ids.contains(&block_id) {
                 additional_block_ids.insert(block_id);
             }
-            if self.block_ids.len() + additional_block_ids.len() > MAX_REFERENCED_BLOCKS {
-                return Err(invalid_input("transaction references too many blocks"));
+            if self.block_ids.len().checked_add(additional_block_ids.len()).and_then(|count| u32::try_from(count).ok()).is_none() {
+                return Err(invalid_input("transaction block count exceeds its u32 representation"));
             }
         }
         Ok(additional_block_ids)
@@ -114,8 +109,8 @@ impl FamilyTransactionBuilder {
         if payload.is_empty() {
             return Err(invalid_input("transaction family record is empty"));
         }
-        if self.records.len() == MAX_FAMILY_RECORDS {
-            return Err(invalid_input("transaction has too many family records"));
+        if self.records.len() == usize::from(u16::MAX) {
+            return Err(invalid_input("transaction family count exceeds its u16 representation"));
         }
         if !kind.allows_multiple() && self.records.iter().any(|record| record.kind == kind) {
             return Err(invalid_input("transaction family record is duplicated"));
@@ -188,9 +183,9 @@ fn invalid_input(message: &str) -> io::Error {
 }
 
 pub fn encode_family_records(records: &[FamilyRecord<'_>]) -> io::Result<Vec<u8>> {
-    if records.is_empty() || records.len() > MAX_FAMILY_RECORDS {
+    if records.is_empty() || u16::try_from(records.len()).is_err() {
         return Err(invalid_input(
-            "transaction family record count is empty or unbounded",
+            "transaction family record count is empty or exceeds its u16 representation",
         ));
     }
     let mut previous: Option<FamilyRecord<'_>> = None;
@@ -247,8 +242,13 @@ pub fn decode_family_records(bytes: &[u8]) -> io::Result<Option<Vec<FamilyRecord
     let version = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
     let count = u16::from_le_bytes(bytes[12..14].try_into().unwrap()) as usize;
     let reserved = u16::from_le_bytes(bytes[14..16].try_into().unwrap());
-    if version != FAMILY_VERSION || count == 0 || count > MAX_FAMILY_RECORDS || reserved != 0 {
+    if version != FAMILY_VERSION || count == 0 || reserved != 0 {
         return Err(invalid_data("invalid transaction family header"));
+    }
+    // Each record requires a header and a nonempty payload. Check the
+    // encoded evidence before reserving space for the claimed count.
+    if count > (bytes.len() - FAMILY_HEADER_BYTES) / (FAMILY_RECORD_HEADER_BYTES + 1) {
+        return Err(invalid_data("transaction family count exceeds encoded records"));
     }
     let mut records = Vec::with_capacity(count);
     let mut offset = FAMILY_HEADER_BYTES;
@@ -300,10 +300,10 @@ pub fn decode_family_records(bytes: &[u8]) -> io::Result<Option<Vec<FamilyRecord
 
 impl TransactionEnvelope {
     pub fn encode(&self) -> io::Result<Vec<u8>> {
-        if self.block_ids.len() > MAX_REFERENCED_BLOCKS {
+        if u32::try_from(self.block_ids.len()).is_err() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "transaction references too many blocks",
+                "transaction block count exceeds its u32 representation",
             ));
         }
         if self.inline_payload.len() > MAX_INLINE_BYTES {
@@ -346,8 +346,8 @@ impl TransactionEnvelope {
         carried: &[Option<&[u8]>],
         authority_state_carried: Option<&[u8]>,
     ) -> io::Result<Vec<u8>> {
-        if self.block_ids.len() > MAX_REFERENCED_BLOCKS {
-            return Err(invalid_input("transaction references too many blocks"));
+        if u32::try_from(self.block_ids.len()).is_err() {
+            return Err(invalid_input("transaction block count exceeds its u32 representation"));
         }
         if self.inline_payload.len() > MAX_INLINE_BYTES {
             return Err(invalid_input("transaction inline payload exceeds 256 KiB"));
@@ -437,7 +437,6 @@ impl TransactionEnvelope {
             _ => return Err(invalid_data("invalid transaction authority state update")),
         };
         if version != ENVELOPE_VERSION
-            || block_count > MAX_REFERENCED_BLOCKS
             || inline_len > MAX_INLINE_BYTES
         {
             return Err(invalid_data(
@@ -515,7 +514,7 @@ impl TransactionEnvelope {
         }
         let block_count = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
         let inline_len = u32::from_le_bytes(bytes[16..20].try_into().unwrap()) as usize;
-        if block_count > MAX_REFERENCED_BLOCKS || inline_len > MAX_INLINE_BYTES {
+        if inline_len > MAX_INLINE_BYTES {
             return Err(invalid_data(
                 "unsupported or unbounded transaction envelope",
             ));
@@ -636,6 +635,39 @@ impl TransactionEnvelope {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn block_reference_demand_exceeds_former_quota_and_reopens_every_payload() {
+        let directory = tempfile::tempdir().unwrap();
+        let payloads = (0..2101_u64).map(|ordinal| ordinal.to_be_bytes().to_vec()).collect::<Vec<_>>();
+        let ids;
+        {
+            let mut engine = crate::engine::Engine::initialize(directory.path()).unwrap();
+            let borrowed = payloads.iter().map(Vec::as_slice).collect::<Vec<_>>();
+            let committed = engine.commit_transaction(b"block-demand", &borrowed).unwrap();
+            assert_eq!(committed.sequence, 1);
+            assert_eq!(committed.block_ids.len(), 2101);
+            ids = committed.block_ids;
+            let mut builder = FamilyTransactionBuilder::default();
+            builder.add_record(FamilyRecordKind::EntityRoot, b"root".to_vec(), ids.iter().copied()).unwrap();
+            builder.add_block_references(ids.iter().copied()).unwrap();
+            assert_eq!(builder.prepare().unwrap().block_ids.len(), 2101);
+            let persisted = engine.transaction_at(1).unwrap().unwrap();
+            let mut corrupt = persisted.encoded_envelope.clone();
+            corrupt[12..16].copy_from_slice(&u32::MAX.to_le_bytes());
+            assert!(TransactionEnvelope::decode(&corrupt).is_err());
+        }
+        let engine = crate::engine::Engine::open(directory.path()).unwrap();
+        let restored = engine.transaction_at(1).unwrap().unwrap();
+        assert_eq!(restored.envelope.block_ids.len(), 2101);
+        assert_eq!(restored.envelope.inline_payload, b"block-demand");
+        for (id, payload) in ids.iter().zip(payloads.iter()) {
+            assert_eq!(&engine.read_block(*id).unwrap(), payload);
+        }
+        let ordinary = TransactionEnvelope { block_ids: ids,
+            inline_payload: b"ordinary".to_vec(), authority_state_update: None };
+        assert_eq!(TransactionEnvelope::decode(&ordinary.encode().unwrap()).unwrap(), ordinary);
+    }
 
     #[test]
     fn envelope_round_trips_without_implicit_fields() {
@@ -771,33 +803,36 @@ mod tests {
     }
 
     #[test]
-    fn family_record_count_covers_five_hundred_streams_but_remains_bounded() {
-        let payloads = (0..MAX_FAMILY_RECORDS as u64)
-            .map(u64::to_be_bytes)
-            .collect::<Vec<_>>();
-        let records = payloads
-            .iter()
-            .map(|payload| FamilyRecord {
-                kind: FamilyRecordKind::StreamCommit,
-                payload,
-            })
-            .collect::<Vec<_>>();
-        let encoded = encode_family_records(&records).unwrap();
-        assert_eq!(
-            decode_family_records(&encoded).unwrap().unwrap().len(),
-            MAX_FAMILY_RECORDS
-        );
-
-        let extra_payload = (MAX_FAMILY_RECORDS as u64).to_be_bytes();
-        let mut excessive = records;
-        excessive.push(FamilyRecord {
-            kind: FamilyRecordKind::StreamCommit,
-            payload: &extra_payload,
-        });
-        assert_eq!(
-            encode_family_records(&excessive).unwrap_err().kind(),
-            io::ErrorKind::InvalidInput
-        );
+    fn family_records_follow_demand_beyond_former_count_quota() {
+        let mut builder = FamilyTransactionBuilder::default();
+        for ordinal in (0..1101_u64).rev() {
+            builder.add_record(FamilyRecordKind::StreamCommit,
+                ordinal.to_be_bytes().to_vec(), std::iter::empty()).unwrap();
+        }
+        let envelope = builder.prepare().unwrap();
+        let encoded = envelope.encode().unwrap();
+        let recovered = TransactionEnvelope::decode(&encoded).unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        {
+            let mut engine = crate::engine::Engine::initialize(directory.path()).unwrap();
+            assert_eq!(engine.commit(&recovered.inline_payload).unwrap(), 1);
+        }
+        let engine = crate::engine::Engine::open(directory.path()).unwrap();
+        let persisted = engine.transaction_at(1).unwrap().unwrap();
+        assert_eq!(persisted.envelope.inline_payload, recovered.inline_payload);
+        let records = decode_family_records(&persisted.envelope.inline_payload).unwrap().unwrap();
+        assert_eq!(records.len(), 1101);
+        for (ordinal, record) in records.iter().enumerate() {
+            assert_eq!(record.kind, FamilyRecordKind::StreamCommit);
+            assert_eq!(record.payload, (ordinal as u64).to_be_bytes());
+        }
+        // A corrupt count cannot reserve memory unsupported by payload bytes.
+        let mut corrupt = recovered.inline_payload.clone();
+        corrupt[12..14].copy_from_slice(&u16::MAX.to_le_bytes());
+        assert_eq!(decode_family_records(&corrupt).unwrap_err().kind(), io::ErrorKind::InvalidData);
+        // Representation overflow remains explicit before the narrowing cast.
+        let excessive = vec![records[0]; usize::from(u16::MAX) + 1];
+        assert_eq!(encode_family_records(&excessive).unwrap_err().kind(), io::ErrorKind::InvalidInput);
     }
 
     #[test]

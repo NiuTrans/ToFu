@@ -20,20 +20,8 @@ function _warnModelCapsMissing() {
 }
 if (typeof window !== 'undefined') runtimeScope._warnModelCapsMissing = _warnModelCapsMissing;
 
-// ══════════════════════════════════════════════════════
-// Two-tier capability dial (Chat / Studio)
-//   SINGLE source of truth mirrored from the backend
-//   (lib/tasks_pkg/chat_mode.chat_mode_defaults). The parity test
-//   tests/chat/test_chat_mode_parity.py asserts this table is byte-equal to the
-//   Python one — keep them in lock-step.
-//
-//   Only the atomic flags a tier PINS are listed. Extras (browser/desktop/
-//   imageGen/humanGuidance/autoTranslate) are orthogonal — a tier switch
-//   never clobbers them.
-//
-//   (The old lean 'air' tier was merged into 'chat'; legacy air/pro persisted
-//   in old convs normalise forward to 'chat' — see chat_mode.normalize.)
-// ══════════════════════════════════════════════════════
+// Everyday chat capabilities; aliases air/pro/studio normalize to chat.
+// Keep this wire-default table in parity with lib/tasks_pkg/chat_mode.py.
 const _CHAT_MODE_DEFAULTS = {
   chat: {
     searchMode: 'multi',
@@ -41,162 +29,53 @@ const _CHAT_MODE_DEFAULTS = {
     codeExecEnabled: true,
     memoryEnabled: true,
   },
-  studio: {
-    searchMode: 'multi',
-    fetchEnabled: true,
-    memoryEnabled: true,
-  },
 };
 if (typeof window !== 'undefined') runtimeScope._CHAT_MODE_DEFAULTS = _CHAT_MODE_DEFAULTS;
 
-/* Paint the segmented control's active state + reflect the derived flags into
- * the atomic-flag setters. Does NOT persist or open modals — that's the
- * caller's job (setChatMode). Safe to call on restore. */
 function _applyChatModeUI(mode) {
-  // Normalise legacy tier codes (air/pro) forward to the merged 'chat' tier.
-  mode = (mode === 'studio') ? 'studio' : 'chat';
-  chatMode = mode;
-  const d = _CHAT_MODE_DEFAULTS[mode] || {};
-  if (typeof _applySearchModeUI === 'function') _applySearchModeUI(d.searchMode || 'multi');
-  if (typeof _applyFetchEnabledUI === 'function') _applyFetchEnabledUI(d.fetchEnabled !== false);
-  // codeExec: studio leaves it alone (run_command supersedes it in project
-  // mode); chat pins it on explicitly.
-  if (d.codeExecEnabled !== undefined && typeof _applyCodeExecUI === 'function') {
-    _applyCodeExecUI(!!d.codeExecEnabled);
-  }
-  if (d.memoryEnabled !== undefined && typeof _applyMemoryUI === 'function') {
-    _applyMemoryUI(!!d.memoryEnabled);
-  }
-  // ── Paint the popover trigger (icon + label) and the menu's selected row.
-  //    The trigger mirrors the active tier's glyph so the collapsed control
-  //    still communicates the current mode at a glance. ──
-  const _MODE_LABEL = { chat: 'Chat', studio: 'Studio' };
-  const _MODE_ICON = {
-    chat: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>',
-    studio: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>',
-  };
-  const lbl = document.getElementById('chatModeLabel');
-  if (lbl) lbl.textContent = _MODE_LABEL[mode] || 'Chat';
-  const ic = document.getElementById('chatModeIcon');
-  if (ic) ic.innerHTML = _MODE_ICON[mode] || _MODE_ICON.chat;
-  const trig = document.getElementById('chatModeToggle');
-  if (trig) trig.dataset.mode = mode;
-  document.querySelectorAll('#chatModeMenu .chat-mode-item').forEach(el => {
-    el.classList.toggle('selected', el.dataset.mode === mode);
-  });
+  chatMode = 'chat';
+  const d = _CHAT_MODE_DEFAULTS.chat;
+  if (typeof _applySearchModeUI === 'function') _applySearchModeUI(d.searchMode);
+  if (typeof _applyFetchEnabledUI === 'function') _applyFetchEnabledUI(d.fetchEnabled);
+  if (typeof _applyCodeExecUI === 'function') _applyCodeExecUI(d.codeExecEnabled);
+  if (typeof _applyMemoryUI === 'function') _applyMemoryUI(d.memoryEnabled);
+  paintOptionalProjectAttachment(document, t);
   if (typeof updateSubmenuCounts === 'function') updateSubmenuCounts();
 }
 if (typeof window !== 'undefined') runtimeScope._applyChatModeUI = _applyChatModeUI;
 
-/* Open/close the mode popover (upward). Only one mode popover stays open;
- * the outside-click handler below closes it. */
+// Compatibility action names only: remove when the shell template binds its
+// optional project action directly. No capability selection or project gating.
 function toggleChatModeMenu(e) {
   if (e) e.stopPropagation();
-  const menu = document.getElementById('chatModeMenu');
-  if (!menu) return;
-  const willOpen = !menu.classList.contains('open');
-  // Close the sibling flow menu so only one popover shows at once.
-  _closeFlowMenu();
-  menu.classList.toggle('open', willOpen);
+  runtimeScope.openProjectModal();
 }
 if (typeof window !== 'undefined') runtimeScope.toggleChatModeMenu = toggleChatModeMenu;
-
 function closeChatModeMenu() {
-  const menu = document.getElementById('chatModeMenu');
-  if (menu) menu.classList.remove('open');
+  document.getElementById('chatModeMenu')?.classList.remove('open');
 }
 if (typeof window !== 'undefined') runtimeScope.closeChatModeMenu = closeChatModeMenu;
-
-// Close the mode menu on outside click (mirrors the flow menu handler).
-if (typeof document !== 'undefined') {
-  document.addEventListener('click', (e) => {
-    if (!e.target.closest('#modeMenuWrapper')) {
-      const menu = document.getElementById('chatModeMenu');
-      if (menu) menu.classList.remove('open');
-    }
-  });
-}
-
-/* User clicked a tier. Studio is special: it REQUIRES a project, so clicking
- * it opens the project panel directly; the tier only becomes 'studio' once a
- * project is actually attached (mpApplyFolders → onProjectAttached). Clicking
- * Studio while a project is already attached just re-selects it. */
 function setChatMode(mode) {
-  if (mode === 'studio') {
-    const hasProject = (typeof projectState !== 'undefined')
-      && projectState && projectState.active && projectState.path;
-    // The Studio segment IS the project affordance now (the standalone project
-    // button is gone), so it must ALWAYS open the project panel — otherwise a
-    // conv that is already in Studio has no way left to change its project
-    // path (clicking Studio again would be a silent no-op).
-    //
-    // Open the panel FIRST and unconditionally: the panel opening must not
-    // depend on the dial/state bookkeeping below succeeding. Previously the
-    // has-project branch ran _applyChatModeUI + captureActiveConversationSettings BEFORE
-    // opening — if either threw synchronously the panel never opened, so an
-    // already-attached conv could never change its path (while attaching a
-    // fresh one, which skips that bookkeeping, worked). The dial bookkeeping is
-    // now best-effort and cannot block the affordance.
-    runtimeScope.openProjectModal();
-    if (hasProject) {
-      try {
-        _applyChatModeUI('studio');
-        captureActiveConversationSettings();
-        debugLog('Mode: Studio (project attached)', 'success');
-      } catch (err) {
-        console.warn('[setChatMode] studio dial bookkeeping failed:', err);
-      }
-    }
-    return;
-  }
-  // chat. Switching AWAY from studio while a project is attached would be
-  // contradictory (studio ⟺ project); clearing the project is an explicit act
-  // via the project panel, so here we only change the dial + flags. If a
-  // project is attached and the user picks chat, we still detach-in-spirit by
-  // clearing the project so the derived state stays truthful.
-  if (mode !== 'studio'
-      && typeof projectState !== 'undefined' && projectState
-      && projectState.active && projectState.path
-      && typeof clearProject === 'function') {
-    clearProject();  // clears projectPath; async server reconcile is fire-and-forget
-  }
-  _applyChatModeUI(mode);
+  if (mode === 'studio') runtimeScope.openProjectModal();
+  _applyChatModeUI('chat');
   captureActiveConversationSettings();
-  debugLog('Mode: Chat', 'success');
 }
 if (typeof window !== 'undefined') runtimeScope.setChatMode = setChatMode;
-
-/* Called by mpApplyFolders after a project is successfully attached — promote
- * the dial to Studio (the tier IS "a project is attached"). Kept separate from
- * setChatMode so the project path owns the promotion. The promotion is
- * persisted immediately — without it conv.chatMode keeps the stale tier until
- * the next unrelated toggle, and a reload in between restores the wrong dial. */
 function onProjectAttached() {
-  if (chatMode !== 'studio') {
-    _applyChatModeUI('studio');
-    if (typeof captureActiveConversationSettings === 'function') captureActiveConversationSettings();
-  }
+  paintOptionalProjectAttachment(document, t);
 }
 if (typeof window !== 'undefined') runtimeScope.onProjectAttached = onProjectAttached;
-
-/* Called by clearProject — a project-less chat is never Studio; fall back to
- * the everyday Chat tier AND persist the fallback. Without the persist,
- * conv.chatMode kept 'studio' with an empty projectPath, and the restore path
- * trusting that stored tier resurrected Studio on the next reload/conv-switch
- * even though no project was attached. */
 function onProjectCleared() {
-  if (chatMode === 'studio') {
-    _applyChatModeUI('chat');
-    if (typeof captureActiveConversationSettings === 'function') captureActiveConversationSettings();
-  }
+  paintOptionalProjectAttachment(document, t);
 }
 if (typeof window !== 'undefined') runtimeScope.onProjectCleared = onProjectCleared;
+
 
 // ══════════════════════════════════════════════════════
 // Agent interaction mode — Standard / Plan / Autopilot
 //
 // One radio surface projects the established planMode / autopilotEnabled
-// wire flags. Chat/Studio remains an orthogonal capability dial.
+// wire flags. Optional project attachment is a separate workspace action.
 // ══════════════════════════════════════════════════════
 
 const _AGENT_MODE_LABEL_KEYS = Object.freeze({
@@ -326,11 +205,8 @@ function togglePlanMode() {
 }
 if (typeof window !== 'undefined') runtimeScope.togglePlanMode = togglePlanMode;
 
-/* Derive the correct tier from the current atomic flags — used on restore of
- * an OLD conversation that has no stored chatMode (pre-feature convs). With
- * the air/pro merge there are only two tiers: a project ⇒ studio, else chat. */
+/* Cached integrations may still ask for a mode; attachments do not select it. */
 function _deriveChatModeFromFlags(conv) {
-  if (conv && conv.projectPath) return 'studio';
   return 'chat';
 }
 if (typeof window !== 'undefined') runtimeScope._deriveChatModeFromFlags = _deriveChatModeFromFlags;
@@ -1069,10 +945,6 @@ function handleAgentModeMenuTriggerKey(event) {
 }
 
 let _flowMenuRenderGeneration = 0;
-
-function _closeFlowMenu() {
-  return _closeAgentModeMenu();
-}
 
 function openOrchestrationFromAgentMode() {
   _closeAgentModeMenu();

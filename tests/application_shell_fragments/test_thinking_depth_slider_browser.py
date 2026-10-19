@@ -160,12 +160,16 @@ class ThinkingDepthBrowser(unittest.TestCase):
               depthOwner.sync('ultra',options);
             }''', row)
             self.assertEqual(page.evaluate('depthCommits'), [])
-            self.assertEqual(page.locator(selector).get_attribute('max'), '2')
-            self.assertEqual(page.locator(selector).input_value(), '2')
+            # The server table maps 'ultra' onto 'high' (intersection's
+            # richest rung below it, native index 1 in ['low','high']): the
+            # ladder is NOT inflated, the thumb parks on 'high' and the label
+            # keeps the saved intent, flagged.
+            self.assertEqual(page.locator(selector).get_attribute('max'), '1')
+            self.assertEqual(page.locator(selector).input_value(), '1')
             self.assertIn('Unavailable', page.locator(selector).get_attribute('aria-valuetext'))
             page.locator(selector).focus()
             page.keyboard.press('ArrowLeft')
-            self.assertEqual(page.evaluate('depthCommits'), ['high'])
+            self.assertEqual(page.evaluate('depthCommits'), ['low'])
             page.locator(selector).locator('xpath=../..').screenshot(path=str(self.artifacts/f'{width}-server-restoration.png'))
             page.context.close()
 

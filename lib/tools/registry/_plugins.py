@@ -60,6 +60,8 @@ def discover_plugin_specs() -> int:
     Returns:
         The number of entry points successfully loaded.
     """
+    from lib.tools.optional_plugins import register_bundled_plugins
+    register_bundled_plugins(register_tool_spec)
     loaded = 0
     try:
         from importlib.metadata import entry_points
@@ -101,7 +103,7 @@ def discover_plugin_specs() -> int:
                         f'v{spec.plugin_api_version}, host supports '
                         f'v{plugin_api_version_host}; upgrade Tofu'
                     )
-                stamped = replace(spec, source='plugin', plugin_name=_pname)
+                stamped = replace(spec, source='plugin', plugin_name=_pname, host_owned=False)
                 register_tool_spec(stamped, replace=do_replace)
             register_fn(_stamping_register)
             loaded += 1
@@ -187,6 +189,12 @@ def resolve_enabled_plugins(cfg: dict[str, Any]) -> set[str] | None:
     if 'plugins' in cfg:
         return _parse_plugin_spec(cfg.get('plugins'))
     env = os.environ.get(_DEFAULT_PLUGINS_ENV)
-    if env is not None:
-        return _parse_plugin_spec(env)
-    return set()
+    selected = _parse_plugin_spec(env) if env is not None else set()
+    if selected is not None:
+        for flag, plugin in {'imageGenEnabled': 'image_generation',
+                             'paperEnabled': 'papers',
+                             'productionEnabled': 'production',
+                             'localServeEnabled': 'local_models'}.items():
+            if cfg.get(flag) is True:
+                selected.add(plugin)
+    return selected

@@ -5,12 +5,12 @@ from __future__ import annotations
 import pytest
 
 from lib.storage.errors import StorageError
-from lib.storage_sidecar.operations_pkg._conversations import (
+from lib.storage_authority_sql.operations_pkg._conversations import (
     _conversation_count,
     _conversation_identity,
     _conversation_list,
 )
-from lib.storage_sidecar.operations_pkg._records import (
+from lib.storage_authority_sql.operations_pkg._records import (
     _task_results_cost_experiment_scan,
 )
 

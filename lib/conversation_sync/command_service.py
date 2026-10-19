@@ -31,8 +31,11 @@ from lib.conversation_sync.dispatch_contract import (
     RESUME_MODEL_SWITCH_FROM_CONFIG_KEY,
 )
 from lib.log import get_logger
+
+from lib.llm.diagnostic_timing import timed_call
+from lib.translate.observability import observed_turn_command
 from lib.plan_contract import plan_execution_document
-from lib.tool_round_replay import (
+from lib.tool_results.tool_round_replay import (
     checkpoint_retention_positions,
     scan_replayable_tool_round_prefix,
 )
@@ -223,6 +226,7 @@ class ConversationTurnCommandService:
         self._mutate_file_changes = mutate_file_changes
         self._retain_attachments = retain_attachments
 
+    @observed_turn_command
     def create_turn(
         self,
         conversation_id: str,
@@ -235,6 +239,9 @@ class ConversationTurnCommandService:
         trusted_goal_objective: str | None = None,
         trusted_goal_recovery_source: str | None = None,
         trusted_goal_recovery_abort_after: float | None = None,
+        trusted_review_source: tuple[str, str, str] | None = None,
+        trusted_usage_recovery_revision: int | None = None,
+        trusted_dispatch=None,
     ) -> CommandOutcome:
         data = dict(body)
         command_id = str(data.get("commandId") or "")
@@ -248,8 +255,17 @@ class ConversationTurnCommandService:
             normalize_interaction_mode_runtime_config,
             plan_mode_enabled,
         )
-        config = _capture_task_principal_tenant(
-            normalize_interaction_mode_runtime_config(config),user_id,principal)
+        config = normalize_interaction_mode_runtime_config(config)
+        if trusted_dispatch is not None:
+            from lib.project_dispatch.admission import TrustedDispatch
+            if not isinstance(trusted_dispatch, TrustedDispatch):
+                raise PermissionError('Project dispatch requires internal validated admission')
+            config = trusted_dispatch.capture(config, user_id, principal, conversation_id)
+        else:
+            config = _capture_task_principal_tenant(config, user_id, principal)
+
+        from lib.conversation_sync.workspace import resolve_workspace_config
+        config = resolve_workspace_config(config, conversation_id, user_id)
         config.pop(
             ATTEMPT_DISPATCH_REQUEST_STARTED_AT_MS_CONFIG_KEY, None,
         )
@@ -273,6 +289,9 @@ class ConversationTurnCommandService:
             input_projection = data.get("input", raw_message or "")
         if isinstance(input_projection, Mapping):
             input_projection = _without_client_plan_authority(input_projection)
+
+            if trusted_usage_recovery_revision is None:
+                input_projection.pop('usageRecovery', None)
             if trusted_goal_objective is None:
                 # Queue classification is server authority. Public callers
                 # cannot disguise an ordinary human message as a cancellable
@@ -290,6 +309,14 @@ class ConversationTurnCommandService:
             config['_goalRecoverySourceRunId'] = str(trusted_goal_recovery_source)
             if trusted_goal_recovery_abort_after is not None:
                 config['_goalRecoveryAbortAfterTs'] = float(trusted_goal_recovery_abort_after)
+
+        if trusted_review_source is not None:
+            if not trusted_goal_recovery_source:
+                raise ValueError('Review continuity requires an accepted recovery source')
+            from lib.acceptance.continuity import capture_review_source
+            from lib.conversation_sync.execution_identity import REVIEW_SOURCE_CONFIG_KEY
+            config[REVIEW_SOURCE_CONFIG_KEY] = capture_review_source(
+                conversation_id, *trusted_review_source, principal=principal)
 
         if config.get('autopilot') is True:
             from lib.goal_runs.objective import (
@@ -313,6 +340,10 @@ class ConversationTurnCommandService:
 
         cancellation_started_at = min(
             request_started_at, float(config.get('_goalRecoveryAbortAfterTs') or request_started_at))
+
+        if trusted_dispatch is not None:
+            cancellation_started_at = min(cancellation_started_at,
+                trusted_dispatch.checked()['grant']['createdAt'])
         if self._was_aborted_after(
             conversation_id, user_id, cancellation_started_at
         ):
@@ -379,7 +410,7 @@ class ConversationTurnCommandService:
                 interaction_mode_generated_turn_identity(config)
             )
         try:
-            result = create_turn_pair(
+            result = timed_call('turn_persist', create_turn_pair,
                 conversation_id,
                 command_id=command_id,
                 input_projection=input_projection,
@@ -395,7 +426,7 @@ class ConversationTurnCommandService:
                 require_parent_is_lane_tail=bool(
                     data.get("requireParentIsLaneTail", False)
                 ),
-
+                expected_parent_projection_revision=trusted_usage_recovery_revision,
                 require_parent_not_stopped=bool(
                     data.get("requireParentNotStopped", False)
                 ),
@@ -404,15 +435,18 @@ class ConversationTurnCommandService:
                 # must therefore honor the same single-live-lane fence as a
                 # human input. Only the trusted internal objective boundary
                 # can enable this authority.
-                require_lane_idle=trusted_goal_continuation,
-                reject_if_human_queued=trusted_goal_continuation,
+                require_lane_idle=(trusted_goal_continuation or trusted_dispatch is not None
+                                   or trusted_usage_recovery_revision is not None),
+                reject_if_human_queued=(trusted_goal_continuation or trusted_dispatch is not None
+                                        or trusted_usage_recovery_revision is not None),
                 conversation_defaults=conversation_defaults,
                 dispatch_mode=CONVERSATION_EXECUTOR_DISPATCH_MODE,
                 input_presentation_id=f"{command_id}:input",
                 output_presentation_id=f"{command_id}:output",
             )
         except LifecycleConflict as exc:
-            if exc.code != "lane_busy":
+            if (exc.code != "lane_busy" or trusted_dispatch is not None
+                    or trusted_usage_recovery_revision is not None):
                 raise
             delivered = self._deliver_while_running(
                 conversation_id,
@@ -433,8 +467,14 @@ class ConversationTurnCommandService:
             self._retain_accepted_attachments(input_projection, user_id)
             return CommandOutcome(delivered)
 
+        if trusted_dispatch is not None:
+            try:
+                trusted_dispatch.bind_execution(result['turn']['turnId'], result['attempt']['attemptId'])
+            except Exception as error:
+                self._fail_attempt_start(result['attempt'], user_id, attempt_start_error_envelope(error))
+                raise
         self._retain_accepted_attachments(input_projection, user_id)
-        self._start_accepted_attempt(
+        timed_call('executor_start', self._start_accepted_attempt,
             result,
             user_id,
             config,
@@ -442,17 +482,35 @@ class ConversationTurnCommandService:
             abort_after_ts=cancellation_started_at,
             execution_clock=execution_clock,
         )
-        result["turn"] = get_turn(
+        result["turn"] = timed_call('acknowledgement_read', get_turn,
             conversation_id, result["turn"]["turnId"], user_id=user_id
         )
-        result["attempt"] = get_attempt(
+        result["attempt"] = timed_call('acknowledgement_read', get_attempt,
             result["attempt"]["attemptId"], user_id=user_id
         )
-        result["conversationRevision"] = get_conversation_revision(
+        result["conversationRevision"] = timed_call('acknowledgement_read', get_conversation_revision,
             conversation_id, user_id=user_id
         )
         result["conversationId"] = conversation_id
         return CommandOutcome(_public_result(result))
+
+    def usage_recovery(self, conversation_id: str, turn_id: str, user_id: Any) -> CommandOutcome:
+        from .usage_recovery import prepare_usage_recovery
+        return CommandOutcome(prepare_usage_recovery(conversation_id, turn_id, user_id).preview,
+                              notify_legacy_clients=False)
+
+    def recover_usage(self, conversation_id: str, turn_id: str, user_id: Any,
+                      body: Mapping[str, Any], *, request_started_at: float,
+                      execution_clock: ExecutionClock | None = None, principal=None) -> CommandOutcome:
+        from .usage_recovery import prepare_usage_recovery, confirmed_recovery
+        plan = prepare_usage_recovery(conversation_id, turn_id, user_id)
+        config, projection = confirmed_recovery(plan, body, now=request_started_at)
+        return self.create_turn(conversation_id, user_id, {
+            'commandId': body['commandId'], 'config': config, 'inputTurn': projection,
+            'laneId': plan.source['laneId'], 'parentTurnId': turn_id,
+            'requireParentIsLaneTail': True,
+        }, request_started_at=request_started_at, execution_clock=execution_clock,
+            principal=principal, trusted_usage_recovery_revision=plan.source['projectionRevision'])
 
     def _retain_accepted_attachments(
         self, projection: Any, user_id: Any,
@@ -644,7 +702,35 @@ class ConversationTurnCommandService:
             raise ValueError("commandId required")
         if expected is None:
             raise ValueError("expectedProjectionRevision required")
+        guidance_id = data.get('guidanceId')
+        if guidance_id is not None:
+            if operation != 'answer_guidance':
+                raise ValueError('guidanceId is only valid for answer_guidance')
+            from lib.human_gate_contract import require_human_gate_request_id, MAX_HUMAN_GATE_RESPONSE_LENGTH
+            guidance_id = require_human_gate_request_id(guidance_id, field='guidanceId')
+            response = data.get('humanResponse')
+            if (not isinstance(response, str) or not response.strip()
+                    or len(response) > MAX_HUMAN_GATE_RESPONSE_LENGTH):
+                raise ValueError('Invalid live humanResponse')
+            from lib.turn_lifecycle import accept_live_guidance_answer
+            result = accept_live_guidance_answer(
+                conversation_id, turn_id, guidance_id=guidance_id,
+                response=response, command_id=command_id,
+                expected_projection_revision=int(expected), user_id=user_id)
+            # A wake is an optimization only. Reload/poll consumes the receipt
+            # even when this process has no waiter or its ACK is lost.
+            try:
+                from lib.tasks_pkg.human_guidance import resolve_human_guidance
+                resolve_human_guidance(guidance_id, response, owner_user_id=user_id, durably_accepted=True)
+            except Exception:
+                logger.warning('Durable guidance accepted; waiter wake failed', exc_info=True)
+            result['attempt'] = get_attempt(result['turn']['currentAttemptId'], user_id=user_id)
+            result['conversationId'] = conversation_id
+            result.setdefault('idempotentReplay', False)
+            result['streamCursor'] = int(result['attempt'].get('lastEventSeq') or 0)
+            return CommandOutcome(_public_result(result))
         config = data.get("config") or {}
+
         if not isinstance(config, Mapping):
             raise ValueError("config object required")
         config = dict(config)
@@ -653,6 +739,9 @@ class ConversationTurnCommandService:
         from lib.tasks_pkg.plan_mode import normalize_interaction_mode_runtime_config
         config = _capture_task_principal_tenant(
             normalize_interaction_mode_runtime_config(config),user_id,principal)
+
+        from lib.conversation_sync.workspace import resolve_workspace_config
+        config = resolve_workspace_config(config, conversation_id, user_id)
         config.pop(
             ATTEMPT_DISPATCH_REQUEST_STARTED_AT_MS_CONFIG_KEY, None,
         )
@@ -674,11 +763,36 @@ class ConversationTurnCommandService:
             if len(human_response) > 32768:
                 raise ValueError(
                     "humanResponse exceeds the 32768-character limit")
-            answer_anchor = _answer_guidance_anchor(
-                get_turn(conversation_id, turn_id, user_id=user_id))
-            if answer_anchor is None:
+            answer_turn = get_turn(conversation_id, turn_id, user_id=user_id)
+            answer_anchor = _answer_guidance_anchor(answer_turn)
+            # The durable command may have committed while its HTTP ACK was
+            # lost. Its settlement is already gone; recover only the accepted
+            # owner-scoped command, never an arbitrary request-carried anchor.
+            accepted_answer = None
+            current_attempt_id = answer_turn.get("currentAttemptId")
+            if current_attempt_id:
+                current_attempt = get_attempt(
+                    str(current_attempt_id), user_id=user_id,
+                    include_execution_config=True)
+                if (current_attempt.get("commandId") == command_id
+                        and current_attempt.get("operation") == "answer_guidance"):
+                    accepted_answer = (current_attempt.get("config")
+                                       or {}).get("_humanGuidanceAnswer")
+            if isinstance(accepted_answer, Mapping):
+                if accepted_answer.get("response") != human_response:
+                    raise ValueError("answer_guidance command already accepted a different response")
+                answer_anchor = accepted_answer
+            elif answer_anchor is None:
                 raise ValueError(
                     "answer_guidance is not available for the current settlement")
+            else:
+                from lib.human_gate_contract import require_declared_choice_response
+                rounds = (answer_turn.get("projection") or {}).get("toolRounds") or []
+                for question_round in rounds:
+                    if (isinstance(question_round, Mapping)
+                            and question_round.get("guidanceId") == answer_anchor["guidanceId"]):
+                        require_declared_choice_response(question_round, human_response)
+                        break
             # Identity comes from the durable settlement, never from the
             # request; the response is stored with the attempt so a crashed
             # dispatch recovers with the same completed question round.
@@ -689,6 +803,16 @@ class ConversationTurnCommandService:
             }
         elif human_response is not None:
             raise ValueError("humanResponse is only valid for answer_guidance")
+        # A new attempt retains only the server-accepted review scope. Public
+        # config was stripped above and cannot select another task's review.
+        from lib.acceptance.continuity import review_source
+        from lib.conversation_sync.execution_identity import REVIEW_SOURCE_CONFIG_KEY
+        from lib.identity import PrincipalContext
+        review_principal = principal or PrincipalContext.user(
+            subject_id=f'user:{user_id}', owner_user_id=user_id)
+        source = review_source(get_turn(conversation_id, turn_id, user_id=user_id), review_principal)
+        if source is not None:
+            config[REVIEW_SOURCE_CONFIG_KEY] = source
         result = create_attempt(
             conversation_id,
             turn_id,
@@ -1075,6 +1199,13 @@ class ConversationTurnCommandService:
     def abort_attempt(self, attempt_id: str, user_id: Any) -> CommandOutcome:
         return CommandOutcome(
             dict(abort_attempt(attempt_id, user_id=user_id) or {}),
+            notify_legacy_clients=False,
+        )
+
+    def abort_project_attempt(self, attempt_id: str, user_id: Any) -> CommandOutcome:
+        """Internal exact-grant cancel, not a human conversation-wide Stop."""
+        return CommandOutcome(
+            dict(abort_attempt(attempt_id, user_id=user_id, withdraw_dispatch=False) or {}),
             notify_legacy_clients=False,
         )
 
@@ -1541,6 +1672,8 @@ def _answer_guidance_executor_config(
             or gap_round.get("status") != "awaiting_human"
             or str(gap_round.get("guidanceId") or "") != guidance_id):
         raise ValueError("the interrupted question no longer matches this answer")
+    from lib.human_gate_contract import require_declared_choice_response
+    require_declared_choice_response(gap_round, response)
     _, retained = checkpoint_retention_positions(rounds, prefix)
     question = str(gap_round.get("guidanceQuestion") or "")
     tool_content = f"Human response: {response}"
@@ -1656,6 +1789,7 @@ def _journal_resume_file_fields(
         },
         project_path,
         project_paths,
+        recover_conversation_journal=True,
     )
     if not files:
         return {}
@@ -1679,6 +1813,7 @@ def _resume_checkpoint_progress_fields(
         for source, target in (
             ('todoState', 'checkpointTodoState'),
             ('usage', 'checkpointUsage'),
+            ('usageComplete', 'checkpointUsageComplete'),
             ('apiRounds', 'checkpointApiRounds'),
         )
         if source in projection and projection[source] is not None

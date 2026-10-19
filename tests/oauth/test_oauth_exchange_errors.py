@@ -255,7 +255,7 @@ class TestCallbackRouteManualFlag(unittest.TestCase):
 
     def test_mutations_reject_bad_bodies_before_oauth_operations(self):
         """Shared parsing errors stay 400s and never reach OAuth services."""
-        from lib.http_error_handlers import register_http_error_handlers
+        from lib.http_transport.error_handlers import register_http_error_handlers
 
         app = self._app()
         register_http_error_handlers(app)

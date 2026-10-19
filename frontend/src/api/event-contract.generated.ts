@@ -682,6 +682,45 @@ export interface DeltaResetEvent {
   autopilotRunId?: string;
 }
 
+/** Write-ahead tool effect identity; commit before handler entry. */
+export interface ToolEffectEvent {
+  type: 'tool_effect';
+  /** Producing tool occurrence ordinal */
+  roundNum: number;
+  /** Correlation ID, never a retry authority */
+  toolCallId: string;
+  /** Exact admitted tool name */
+  toolName: string;
+  /** Canonical ToolExecutionEffect from Conversation Sync */
+  executionEffect: Record<string, unknown>;
+  /** Server monotonic execution timestamp anchored at acceptance; captured before observers. */
+  executionAtMs?: number;
+  /** Epoch anchor for the producing task execution clock. */
+  executionOriginAtMs?: number;
+  /** Identity of the producing task monotonic clock; never a client clock. */
+  executionClockId?: string;
+  /** Owning executor task id, stamped by delivery. */
+  taskId?: string;
+  /** Owning conversation identity, stamped by task delivery and preserved by push mirrors. */
+  conversationId?: string;
+  /** Producing execution attempt identity; preserves scope through tool dispatch and replay. */
+  attemptId?: string;
+  /** Optional request correlation id, stamped by delivery. */
+  requestId?: string;
+  /** Task-local event sequence, assigned by the runtime. */
+  seq?: number;
+  /** Optional scheduler presentation policy; not execution authority. */
+  flowProjection?: string;
+  /** Optional role of the invocation producing this visible Turn. */
+  turnRole?: string;
+  /** Optional declared presentation side of the invocation. */
+  emits?: string;
+  /** Optional virtual-user presentation identity. */
+  vuMsgId?: string;
+  /** Optional owning Goal run identity. */
+  autopilotRunId?: string;
+}
+
 /** A tool call began executing. */
 export interface ToolStartEvent {
   type: 'tool_start';
@@ -901,8 +940,10 @@ export interface ToolResultEvent {
   verticals?: unknown[];
   /** (optional) structured vertical of a cache-hit search (academic/finance/…) */
   vertical?: string;
-  /** (optional) search-diagnostics dict carried through a cache hit */
+  /** (optional) search-diagnostics dict carried through a cache hit; on a zero-result batch web_search it carries the PRIMARY failing per-query diag so the zero-result renderer stays honest */
   searchDiag?: Record<string, unknown>;
+  /** (optional) per-query search-diagnostics list on a batch web_search (one entry per failed/empty query) */
+  searchDiags?: unknown[];
   /** (optional) search_tools total catalogue hits */
   toolSearchTotal?: number;
   /** (optional) search_tools pagination cursor (null = end) */
@@ -1525,7 +1566,7 @@ export interface CompactionEvent {
   convId: string;
   /** working_set|window|force|reactive|manual */
   trigger: string;
-  /** task round number */
+  /** zero-based producer round number */
   roundNum: number;
   /** estimated pre-compaction input tokens */
   tokensBefore: number;
@@ -1543,6 +1584,10 @@ export interface CompactionEvent {
   reason: string;
   /** pre_compaction_transcript */
   snapshotKind: string;
+  /** explicit parent task model id */
+  taskModel?: string;
+  /** bounded recorded summary route/cost evidence */
+  receipt?: Record<string, unknown>;
   /** epoch seconds */
   ts: number;
   /** Server monotonic execution timestamp anchored at acceptance; captured before observers. */
@@ -1594,10 +1639,18 @@ export interface CompactionDoneEvent {
   msgsAfter: number;
   /** estimated percentage token reduction */
   reductionPct: number;
-  /** task round number */
+  /** zero-based producer round number */
   roundNum: number;
   /** bounded tofu.compaction-receipt/v1 result */
   receipt: Record<string, unknown>;
+  /** at most 16 observed _dispatch model/provider identities; absent means unknown */
+  summaryDispatchCalls?: unknown[];
+  /** explicit parent task model id */
+  taskModel?: string;
+  /** producer-scoped occurrence witnessed before compaction preflight */
+  anchorBlockId?: string;
+  /** before|after|producer-start; explicit witness when no running phase was emitted */
+  anchorPosition?: string;
   /** Server monotonic execution timestamp anchored at acceptance; captured before observers. */
   executionAtMs?: number;
   /** Epoch anchor for the producing task execution clock. */
@@ -2339,6 +2392,12 @@ export interface SwarmAgentPhaseEvent {
   phase?: string;
   /** human-readable phase detail */
   content: string;
+  /** (optional) localized phase message key */
+  detailKey?: string;
+  /** (optional) phase interpolation arguments */
+  detailArgs?: Record<string, unknown>;
+  /** (optional) actual retry ordinal; absent for recovery waits */
+  attempt?: number;
   /** (optional) sub-agent role */
   role?: string;
   /** (optional) sub-agent objective */
@@ -2359,6 +2418,65 @@ export interface SwarmAgentPhaseEvent {
   total_agents?: number;
   /** (optional) settled count */
   completed_agents?: number;
+  /** Server monotonic execution timestamp anchored at acceptance; captured before observers. */
+  executionAtMs?: number;
+  /** Epoch anchor for the producing task execution clock. */
+  executionOriginAtMs?: number;
+  /** Identity of the producing task monotonic clock; never a client clock. */
+  executionClockId?: string;
+  /** Owning executor task id, stamped by delivery. */
+  taskId?: string;
+  /** Owning conversation identity, stamped by task delivery and preserved by push mirrors. */
+  conversationId?: string;
+  /** Producing execution attempt identity; preserves scope through tool dispatch and replay. */
+  attemptId?: string;
+  /** Optional request correlation id, stamped by delivery. */
+  requestId?: string;
+  /** Task-local event sequence, assigned by the runtime. */
+  seq?: number;
+  /** Optional scheduler presentation policy; not execution authority. */
+  flowProjection?: string;
+  /** Optional role of the invocation producing this visible Turn. */
+  turnRole?: string;
+  /** Optional declared presentation side of the invocation. */
+  emits?: string;
+  /** Optional virtual-user presentation identity. */
+  vuMsgId?: string;
+  /** Optional owning Goal run identity. */
+  autopilotRunId?: string;
+}
+
+/** Committed exact-run message evidence; insertion is not consumption. */
+export interface SwarmMessageReceiptEvent {
+  type: 'swarm_message_receipt';
+  /** exact swarm run id */
+  swarmRunId: string;
+  /** exact recipient id */
+  agentId: string;
+  /** immutable message id */
+  messageId: string;
+  /** original bounded message body */
+  content?: string;
+  /** message kind */
+  kind?: string;
+  /** one-based mailbox sequence */
+  messageSequence?: number;
+  /** durable receipt state */
+  state: string;
+  /** sender task id */
+  senderTaskId: string;
+  /** submission time in milliseconds */
+  submittedAt: number;
+  /** input insertion time */
+  inputInjectedAt?: number;
+  /** insertion round */
+  inputInjectedRound?: number;
+  /** consumer task id */
+  inputTaskId?: string;
+  /** confirmed input round */
+  inputRound?: number;
+  /** confirmed input time */
+  inputConfirmedAt?: number;
   /** Server monotonic execution timestamp anchored at acceptance; captured before observers. */
   executionAtMs?: number;
   /** Epoch anchor for the producing task execution clock. */
@@ -3112,6 +3230,7 @@ export type ContractedWireEvent =
   ModelFallbackEvent |
   DeltaEvent |
   DeltaResetEvent |
+  ToolEffectEvent |
   ToolStartEvent |
   ToolProgressEvent |
   ToolResultEvent |
@@ -3147,6 +3266,7 @@ export type ContractedWireEvent =
   SwarmPhaseEvent |
   SwarmInboxInjectEvent |
   SwarmAgentPhaseEvent |
+  SwarmMessageReceiptEvent |
   SwarmAgentProgressEvent |
   SwarmAgentCompleteEvent |
   SwarmAgentErrorEvent |

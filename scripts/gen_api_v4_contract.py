@@ -17,8 +17,8 @@ ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), '..'))
 SOURCE = os.path.join(ROOT, 'contracts', 'api_v4.yaml')
 OUTPUTS = {
     'server_constants': os.path.join(
-        ROOT, 'lib', 'api_v4_constants_generated.py'),
-    'server': os.path.join(ROOT, 'lib', 'api_v4_generated.py'),
+        ROOT, 'lib', 'generated_api_v4_constants.py'),
+    'server': os.path.join(ROOT, 'lib', 'generated_api_v4.py'),
     'python': os.path.join(
         ROOT, 'clients', 'python', 'tofu_sdk', 'api_v4_generated.py'),
     'typescript': os.path.join(

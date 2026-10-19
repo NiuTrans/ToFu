@@ -102,7 +102,7 @@ def test_progress_ledger_resets_when_operation_scoped_signature_changes():
 
 
 def test_chassis_halts_three_varying_calls_with_same_terminal_result():
-    from lib.agent_loop import AbortSignal, run_agent_loop
+    from lib.agent_loop.agent_loop import AbortSignal, run_agent_loop
 
     dispatches = {'count': 0}
 
@@ -129,7 +129,7 @@ def test_chassis_halts_three_varying_calls_with_same_terminal_result():
 
 
 def test_clean_or_unknown_result_resets_terminal_failure_streak():
-    from lib.agent_loop import AbortSignal, run_agent_loop
+    from lib.agent_loop.agent_loop import AbortSignal, run_agent_loop
 
     notes = iter([
         {'nonretryable_failure_signatures': ['permission_required']},

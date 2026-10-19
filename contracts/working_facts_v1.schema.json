@@ -1,0 +1,720 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "tofu.working-facts/v1",
+  "$defs": {
+    "WorkingFactSource": {
+      "anyOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "artifact"
+            },
+            "id": {
+              "type": "string",
+              "maxLength": 128,
+              "minLength": 1
+            },
+            "version": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "quote": {
+              "type": "string",
+              "maxLength": 4000,
+              "minLength": 1
+            }
+          },
+          "required": [
+            "kind",
+            "id",
+            "version",
+            "quote"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "criterion"
+            },
+            "targetKind": {
+              "type": "string",
+              "enum": [
+                "artifact",
+                "turn"
+              ],
+              "description": "Owner of the criterion identified by id. Omitted means artifact; turn selects an ordinary assistant Turn in this conversation."
+            },
+            "id": {
+              "type": "string",
+              "maxLength": 128,
+              "minLength": 1
+            },
+            "criterionId": {
+              "type": "string",
+              "maxLength": 80,
+              "minLength": 1
+            },
+            "version": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "quote": {
+              "type": "string",
+              "maxLength": 4000,
+              "minLength": 1
+            }
+          },
+          "required": [
+            "kind",
+            "id",
+            "criterionId",
+            "version",
+            "quote"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "fact"
+            },
+            "id": {
+              "type": "string",
+              "maxLength": 128,
+              "minLength": 1
+            },
+            "version": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          "required": [
+            "kind",
+            "id",
+            "version"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "file"
+            },
+            "id": {
+              "type": "string",
+              "maxLength": 128,
+              "minLength": 1
+            },
+            "version": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "quote": {
+              "type": "string",
+              "maxLength": 4000,
+              "minLength": 1
+            },
+            "path": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            }
+          },
+          "required": [
+            "kind",
+            "id",
+            "version",
+            "quote",
+            "path"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "tool_result"
+            },
+            "id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "version": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "toolName": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            "toolCallId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            "observedAt": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "sourceCoverage": {
+              "enum": [
+                "complete",
+                "partial",
+                "unknown",
+                "unavailable"
+              ]
+            },
+            "temporality": {
+              "const": "historical_execution"
+            },
+            "quote": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4000
+            }
+          },
+          "required": [
+            "kind",
+            "id",
+            "version",
+            "toolName",
+            "toolCallId",
+            "observedAt",
+            "sourceCoverage",
+            "temporality",
+            "quote"
+          ]
+        }
+      ]
+    },
+    "WorkingFactRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "const": "record"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Current conversation aggregate revision from read_working_facts or the preceding successful record response; not an individual fact revision."
+        },
+        "id": {
+          "type": "string",
+          "maxLength": 128,
+          "minLength": 1,
+          "description": "Update only: an existing fact ID returned by read_working_facts. Omit id to create a new fact; the server assigns its ID. Never invent an ID."
+        },
+        "text": {
+          "type": "string",
+          "maxLength": 2000,
+          "minLength": 1,
+          "description": "For observation, copy the exact source quote as text, without a filename prefix, attribution or paraphrase. Use kind=derived for a summary or inference."
+        },
+        "kind": {
+          "enum": [
+            "observation",
+            "derived"
+          ]
+        },
+        "sources": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "items": {
+            "$ref": "#/$defs/WorkingFactSource"
+          }
+        }
+      },
+      "required": [
+        "action",
+        "revision",
+        "text",
+        "kind",
+        "sources"
+      ]
+    },
+    "WorkingFactOwnerDecision": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "enum": [
+            "correct",
+            "confirm",
+            "retract"
+          ]
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "id": {
+          "type": "string",
+          "maxLength": 128,
+          "minLength": 1
+        },
+        "text": {
+          "type": "string",
+          "maxLength": 2000,
+          "minLength": 1
+        },
+        "note": {
+          "type": "string",
+          "maxLength": 2000,
+          "minLength": 1
+        }
+      },
+      "required": [
+        "action",
+        "revision",
+        "id",
+        "note"
+      ]
+    },
+    "WorkingFactQuery": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "ids": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1
+          }
+        },
+        "include_tool_sources": {
+          "type": "boolean"
+        },
+        "tool_source_cursor": {
+          "type": "string",
+          "maxLength": 128
+        }
+      },
+      "required": []
+    },
+    "WorkingFactCommand": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/WorkingFactRecord"
+        },
+        {
+          "$ref": "#/$defs/WorkingFactOwnerDecision"
+        }
+      ]
+    },
+    "WorkingFactEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "text": {
+          "type": "string",
+          "maxLength": 2000
+        },
+        "kind": {
+          "enum": [
+            "observation",
+            "derived",
+            "reviewed",
+            "owner_assertion"
+          ]
+        },
+        "sources": {
+          "type": "array",
+          "maxItems": 8,
+          "items": {
+            "$ref": "#/$defs/WorkingFactSource"
+          }
+        },
+        "active": {
+          "type": "boolean"
+        },
+        "actor": {
+          "enum": [
+            "agent",
+            "owner"
+          ]
+        },
+        "subject": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "producerTaskId": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "note": {
+          "type": "string",
+          "maxLength": 2000
+        },
+        "createdAt": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "updatedAt": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "status": {
+          "enum": [
+            "observed",
+            "needs_review",
+            "owner_asserted",
+            "stale",
+            "unavailable",
+            "withdrawn"
+          ]
+        },
+        "sourceStates": {
+          "type": "array",
+          "maxItems": 8,
+          "items": {
+            "enum": [
+              "observed",
+              "needs_review",
+              "owner_asserted",
+              "stale",
+              "unavailable",
+              "withdrawn"
+            ]
+          }
+        },
+        "reasons": {
+          "type": "array",
+          "maxItems": 8,
+          "items": {
+            "type": "string",
+            "maxLength": 128
+          }
+        }
+      },
+      "required": [
+        "id",
+        "revision",
+        "text",
+        "kind",
+        "sources",
+        "active",
+        "actor",
+        "subject",
+        "producerTaskId",
+        "note",
+        "createdAt",
+        "updatedAt",
+        "status",
+        "sourceStates",
+        "reasons"
+      ]
+    },
+    "WorkingFactsView": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schemaVersion": {
+          "const": 1
+        },
+        "conversationId": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "facts": {
+          "type": "array",
+          "maxItems": 256,
+          "items": {
+            "$ref": "#/$defs/WorkingFactEntry"
+          }
+        },
+        "semantics": {
+          "const": "source_binding_and_owner_assessment_not_automatic_truth"
+        },
+        "toolSources": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/WorkingToolSource"
+          },
+          "maxItems": 50
+        },
+        "toolSourcesNextCursor": {
+          "type": "string",
+          "maxLength": 128
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "conversationId",
+        "revision",
+        "facts",
+        "semantics"
+      ]
+    },
+    "WorkingFactConsumersQuery": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "cursor": {
+          "type": "string",
+          "pattern": "^([a-f0-9]{64})?$"
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 200
+        }
+      },
+      "required": []
+    },
+    "WorkingFactDependency": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "preparedFirstRevision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "preparedLastRevision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "confirmedFirstRevision": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "confirmedLastRevision": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "currentRevision": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "status": {
+          "enum": [
+            "current",
+            "changed",
+            "needs_review",
+            "unavailable",
+            "unconfirmed"
+          ]
+        },
+        "reasons": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 8
+        }
+      },
+      "required": [
+        "id",
+        "preparedFirstRevision",
+        "preparedLastRevision",
+        "confirmedFirstRevision",
+        "confirmedLastRevision",
+        "currentRevision",
+        "status",
+        "reasons"
+      ]
+    },
+    "WorkingFactConsumer": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "taskId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "turnId": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "attemptId": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "dependencies": {
+          "type": "array",
+          "maxItems": 256,
+          "items": {
+            "$ref": "#/$defs/WorkingFactDependency"
+          }
+        },
+        "requiresRevalidation": {
+          "type": "boolean"
+        },
+        "consumptionUncertain": {
+          "type": "boolean"
+        },
+        "updatedAt": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "taskId",
+        "turnId",
+        "attemptId",
+        "dependencies",
+        "requiresRevalidation",
+        "consumptionUncertain",
+        "updatedAt"
+      ]
+    },
+    "WorkingFactConsumersView": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schemaVersion": {
+          "const": 1
+        },
+        "conversationId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "factsRevision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "coverage": {
+          "const": "admitted_working_fact_context_since_enablement"
+        },
+        "consumers": {
+          "type": "array",
+          "maxItems": 200,
+          "items": {
+            "$ref": "#/$defs/WorkingFactConsumer"
+          }
+        },
+        "nextCursor": {
+          "type": "string",
+          "pattern": "^([a-f0-9]{64})?$"
+        },
+        "semantics": {
+          "const": "prepared_and_provider_confirmed_dependencies_not_task_acceptance"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "conversationId",
+        "factsRevision",
+        "coverage",
+        "consumers",
+        "nextCursor",
+        "semantics"
+      ]
+    },
+    "WorkingToolSource": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "tool_result"
+        },
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "version": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "toolName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "toolCallId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "observedAt": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "sourceCoverage": {
+          "enum": [
+            "complete",
+            "partial",
+            "unknown",
+            "unavailable"
+          ]
+        },
+        "temporality": {
+          "const": "historical_execution"
+        }
+      },
+      "required": [
+        "kind",
+        "id",
+        "version",
+        "toolName",
+        "toolCallId",
+        "observedAt",
+        "sourceCoverage",
+        "temporality"
+      ]
+    }
+  },
+  "$ref": "#/$defs/WorkingFactCommand",
+  "x-limits": {
+    "maxRequestBytes": 131072,
+    "maxRecordBytes": 8388608,
+    "maxFacts": 256,
+    "contextTokens": 4096,
+    "acquisitionSeconds": 15,
+    "consumerPageSize": 50,
+    "consumerPageMaximum": 200,
+    "toolSourcePageSize": 50
+  }
+}

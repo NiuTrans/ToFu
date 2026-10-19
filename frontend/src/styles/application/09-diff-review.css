@@ -1,0 +1,8 @@
+/* Revision action inside an expanded edit; shared UI controls own appearance. */
+.tool-diff-review {
+  display: flex;
+  justify-content: flex-end;
+  padding: var(--space-1) var(--space-3);
+  background: var(--bg-secondary);
+  border-top: 1px solid var(--border);
+}

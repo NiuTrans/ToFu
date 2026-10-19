@@ -327,7 +327,7 @@ class TestUserThreading:
         box = {}
 
         def fake_send(cmd_type, params=None, timeout=30,
-                      target_agent_id=None, user_id=''):
+                      target_agent_id=None, user_id='', cancellation=None):
             box['user_id'] = user_id
             return {'ok': True}, None
 
@@ -349,7 +349,7 @@ class TestUserThreading:
         box = {}
 
         def fake_send(cmd_type, params=None, timeout=30,
-                      target_agent_id=None, user_id=''):
+                      target_agent_id=None, user_id='', cancellation=None):
             box['user_id'] = user_id
             return {'content': 'x'}, None
 

@@ -2,7 +2,7 @@ const {test}=require('node:test');const assert=require('node:assert/strict');
 const fs=require('node:fs'),path=require('node:path'),ts=require('typescript');const {JSDOM}=require('jsdom');
 const source=path.resolve(__dirname,'..');
 function load(file,cache=new Map()){
- const full=path.resolve(source,file);if(cache.has(full))return cache.get(full);
+ let full=path.resolve(source,file);if(!fs.existsSync(full)&&full.endsWith('.ts'))full=path.join(full.slice(0,-3),'index.ts');if(cache.has(full))return cache.get(full);
  const exports={};cache.set(full,exports);const js=ts.transpileModule(fs.readFileSync(full,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText;
  new Function('require','exports',js)(name=>name.endsWith('/i18n')?{t:key=>key}:load(path.relative(source,path.resolve(path.dirname(full),name+'.ts')),cache),exports);return exports;
 }

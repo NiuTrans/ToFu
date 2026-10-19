@@ -1,0 +1,244 @@
+{
+  "version": 1,
+  "title": "知识注入实验 · 任务工作台",
+  "summary": "界面示例。示例数值仅用于验证布局和交互，不代表真实资源或实验结果。",
+  "layout": {
+    "mode": "tabs",
+    "groups": [
+      {
+        "id": "overview",
+        "title": "任务总览",
+        "blocks": [
+          "status",
+          "metrics",
+          "decision"
+        ]
+      },
+      {
+        "id": "resources",
+        "title": "资源与队列",
+        "blocks": [
+          "resources"
+        ]
+      },
+      {
+        "id": "experiments",
+        "title": "实验对比",
+        "blocks": [
+          "chart",
+          "evidence"
+        ]
+      }
+    ]
+  },
+  "blocks": [
+    {
+      "type": "workflow",
+      "id": "status",
+      "title": "当前在做什么",
+      "steps": [
+        {
+          "id": "question",
+          "label": "明确研究问题",
+          "state": "completed",
+          "detail": "已整理方法边界与可复现要求。"
+        },
+        {
+          "id": "resources",
+          "label": "确认实验资源",
+          "state": "running",
+          "detail": "检查队列容量、卡型与预算是否满足本轮实验。"
+        },
+        {
+          "id": "run",
+          "label": "运行对照实验",
+          "state": "pending",
+          "detail": "资源和配置确认后开始。"
+        },
+        {
+          "id": "review",
+          "label": "独立验证结果",
+          "state": "pending"
+        }
+      ],
+      "next": "下一步：在资源页比较队列，确认任务所需的卡型与卡数。"
+    },
+    {
+      "type": "metric_grid",
+      "id": "metrics",
+      "title": "本轮关心的指标",
+      "items": [
+        {
+          "id": "budget",
+          "label": "预算上限（示例）",
+          "value": 24,
+          "unit": "GPU·h",
+          "description": "预算不代表已经消耗。"
+        },
+        {
+          "id": "spent",
+          "label": "已消耗（示例）",
+          "value": 0,
+          "unit": "GPU·h",
+          "maximum": 24
+        },
+        {
+          "id": "quality",
+          "label": "实验效果",
+          "value": null,
+          "unit": "",
+          "description": "尚未形成可验证结果。"
+        },
+        {
+          "id": "progress",
+          "label": "已完成实验（示例）",
+          "value": 3,
+          "unit": "组",
+          "history": [
+            0,
+            1,
+            1,
+            2,
+            3
+          ],
+          "description": "可展开查看原始数值。"
+        }
+      ]
+    },
+    {
+      "type": "notice",
+      "id": "decision",
+      "title": "需要关注",
+      "tone": "warning",
+      "message": "当前仍处于资源准备阶段。",
+      "detail": "页面将分别显示已确认事实、等待条件和需要你决定的事项。"
+    },
+    {
+      "type": "resource_panel",
+      "id": "resources",
+      "title": "示例计算平台",
+      "provider": "demo",
+      "snapshot": {
+        "fetchedAt": "2026-10-15T01:00:00Z",
+        "note": "演示快照，非真实平台余量。",
+        "rows": [
+          {
+            "id": "train-gpu",
+            "queue": "research.training",
+            "kind": "gpu",
+            "name": "H200",
+            "unit": "count",
+            "total": 64,
+            "allocated": 56,
+            "available": 8,
+            "pending": 16
+          },
+          {
+            "id": "shared-gpu",
+            "queue": "research.shared",
+            "kind": "gpu",
+            "name": "A100",
+            "unit": "count",
+            "total": 32,
+            "allocated": 32,
+            "available": 0
+          },
+          {
+            "id": "trial-gpu",
+            "queue": "research.trial",
+            "kind": "gpu",
+            "name": "H800",
+            "unit": "count",
+            "total": null,
+            "allocated": null,
+            "available": null
+          },
+          {
+            "id": "memory",
+            "queue": "research.training",
+            "kind": "memory",
+            "name": "内存",
+            "unit": "MiB",
+            "total": 524288,
+            "allocated": 262144,
+            "available": 262144
+          }
+        ]
+      }
+    },
+    {
+      "type": "data_chart",
+      "id": "chart",
+      "title": "成本与效果（演示）",
+      "kind": "scatter",
+      "xLabel": "计算量",
+      "xUnit": "GPU·h",
+      "yLabel": "评测分数",
+      "series": [
+        {
+          "id": "baseline",
+          "label": "示例基线",
+          "points": [
+            {
+              "x": 1,
+              "value": 40
+            },
+            {
+              "x": 4,
+              "value": 48
+            },
+            {
+              "x": 12,
+              "value": 54
+            }
+          ]
+        },
+        {
+          "id": "method",
+          "label": "示例候选",
+          "points": [
+            {
+              "x": 1,
+              "value": 42
+            },
+            {
+              "x": 4,
+              "value": 52
+            },
+            {
+              "x": 12,
+              "value": 57
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "table",
+      "id": "evidence",
+      "title": "证据与下一步",
+      "columns": [
+        "项目",
+        "状态",
+        "下一步"
+      ],
+      "rows": [
+        [
+          "数据集",
+          "待冻结",
+          "确认版本和划分"
+        ],
+        [
+          "模型",
+          "待确认",
+          "固定模型版本"
+        ],
+        [
+          "实验结果",
+          "未知",
+          "完成真实实验后填写"
+        ]
+      ]
+    }
+  ]
+}

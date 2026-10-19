@@ -20,7 +20,7 @@ except ImportError:
         # Warning already logged by _common.py — silent here to avoid duplicate noise
 
 from lib.log import get_logger
-from lib.pdf_parser._common import HAS_PYMUPDF4LLM, MAX_PDF_BYTES, PYMUPDF_LOCK
+from lib.pdf_parser._common import HAS_PYMUPDF4LLM, PYMUPDF_LOCK
 from lib.pdf_parser.admission import CLASSIC_PDF_ADMISSION
 from lib.pdf_parser.math import postprocess_math_blocks
 from lib.pdf_parser.policy import (
@@ -299,8 +299,8 @@ def _extract_pdf_text_with_meta_without_admission(
 
     Args:
         pdf_bytes: Raw PDF file bytes.
-        max_chars: Soft output ceiling. Zero uses the launch-derived default;
-            positive values may lower but never raise that process budget.
+        max_chars: Explicit output ceiling. Zero traverses complete text;
+            positive values preserve the caller-requested cut.
         max_pages: Explicit caller page range; zero traverses every eligible page.
         url: Optional URL for log context.
         progress_callback: Optional ``Callable[[int, int], None]`` invoked with
@@ -324,12 +324,6 @@ def _extract_pdf_text_with_meta_without_admission(
     Returns Markdown string (rich/structured) or plain text (fast), or an
     error message string.
     """
-    if len(pdf_bytes) > MAX_PDF_BYTES:
-        logger.warning('[PDF] File too large (%s MB, limit %s MB) — %s',
-                       len(pdf_bytes) // (1024*1024), MAX_PDF_BYTES // (1024*1024),
-                       url[:80])
-        return f'[PDF too large: {len(pdf_bytes) // (1024*1024)} MB exceeds {MAX_PDF_BYTES // (1024*1024)} MB limit]', 'error'
-
     budget = resolve_classic_pdf_budget()
     limit = bounded_pdf_text_chars(max_chars, budget)
     page_limit = bounded_pdf_pages(max_pages, budget)

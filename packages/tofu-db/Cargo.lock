@@ -393,6 +393,7 @@ checksum = "9ed9a281f7bc9b7576e61468ba615a66a5c8cfdff42420a70aa82701a3b1e292"
 dependencies = [
  "block-buffer",
  "crypto-common",
+ "subtle",
 ]
 
 [[package]]
@@ -670,6 +671,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6ba4ff7128dee98c7dc9794b6a411377e1404dba1c97deb8d1a55297bd25d8af"
 dependencies = [
  "hashbrown 0.14.5",
+]
+
+[[package]]
+name = "hmac"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6c49c37c09c17a53d937dfbb742eb3a961d65a994e6bcdcf37e7399d0cc8ab5e"
+dependencies = [
+ "digest",
 ]
 
 [[package]]
@@ -1227,8 +1237,6 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 [[package]]
 name = "reqwest"
 version = "0.12.28"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eddd3ca559203180a307f12d114c268abf583f59b03cb906fd0b3ff8646c1147"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -1631,11 +1639,13 @@ dependencies = [
  "ed25519-dalek",
  "flate2",
  "fs2",
+ "hmac",
  "libc",
  "memchr",
  "memmap2",
  "mimalloc",
  "rand_core 0.6.4",
+ "regex",
  "rusqlite",
  "serde",
  "serde_json",
@@ -1663,8 +1673,12 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "bytes",
+ "fancy-regex",
  "libc",
+ "memchr",
  "reqwest",
+ "rustc-hash 1.1.0",
+ "serde",
  "serde_core",
  "serde_json",
  "sha2",

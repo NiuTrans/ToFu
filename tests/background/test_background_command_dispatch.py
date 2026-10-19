@@ -82,7 +82,9 @@ def test_missing_command_id_dispatch(dispatch, monkeypatch, name):
 
 
 def test_project_explicit_background_preserves_domain_execution(monkeypatch, tmp_path):
-    task = {'id': 'task-bg-project', 'convId': 'conv-bg-project', '_userId': 7}
+    runtime_roots = [str(tmp_path / 'runtime')]
+    task = {'id': 'task-bg-project', 'convId': 'conv-bg-project', '_userId': 7,
+            'config': {'workspaceRuntimeRoots': runtime_roots}}
     captured = {}
     finalized = Mock()
     def domain_run(*args, **kwargs):
@@ -107,13 +109,19 @@ def test_project_explicit_background_preserves_domain_execution(monkeypatch, tmp
         task, {}, 'run_command', 'tc', args, 1, entry, {}, str(tmp_path), True)
     assert 'bg-project' in result[1]
     domain.assert_not_called()
-    proxy = {'id': 'task-bg-project', '_userId': 7}
+    proxy = {'id': 'task-bg-project', 'convId': 'conv-bg-project', '_userId': 7}
+
+    runtime_roots.append(str(tmp_path / 'later-root'))
     exec_ctx = {'command_id': 'bg-project', 'wrapped_command': None,
                 'note_spawn': lambda *a: None,
                 'build_result': lambda aborted=False: 'record result'}
     assert captured['execute'](proxy, exec_ctx) == 'domain result'
     assert domain.call_args.kwargs['task'] is proxy
-    assert domain.call_args.kwargs['conv_id'] == 'conv-bg-project'
+
+    assert proxy['config']['workspaceRuntimeRoots'] == [str(tmp_path / 'runtime')]
+    assert proxy['config']['workspaceRuntimeRoots'] is not runtime_roots
+    # Runtime workspace authority is task-scoped, independent of conversation identity.
+    assert domain.call_args.kwargs['conv_id'] == 'task-bg-project'
     assert domain.call_args.kwargs['on_chunk'] is None
     assert domain.call_args.kwargs['runtime_context'] is None
     # POSIX durable wrapper replaces the executed command and the result is

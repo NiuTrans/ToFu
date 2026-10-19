@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="tofu">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Coordinator · 对话即协作 · Tofu 设计预览</title>
+<!-- Derived from designs/ui-gallery/scaffold.html: sidebar + toolbar + content.
+     Standalone mock only. Controls use the real UI factories; no application API. -->
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="../../frontend/src/styles/fonts.css">
+<link rel="stylesheet" href="../../static/styles.css">
+<link rel="stylesheet" href="./prototype.css">
+</head>
+<body>
+<div class="conversation-shell" id="shell">
+  <aside class="conversation-sidebar" id="sidebar" aria-label="对话列表">
+    <div class="sidebar-brand ui-row ui-row--between">
+      <div class="ui-row"><span class="tofu-mark" aria-hidden="true">T</span><strong>Tofu<span class="brand-period">.</span></strong></div>
+      <div id="sidebar-actions" class="ui-toolbar"></div>
+    </div>
+    <div class="project-context ui-row ui-row--between"><span><span class="context-dot"></span>产品研发</span><span class="scope-label">当前项目</span></div>
+    <div id="new-conversation" class="ui-stack ui-stack--tight"></div>
+    <div id="search-slot"></div>
+    <div class="section-label ui-row ui-row--between"><span>置顶</span><span aria-hidden="true">⌁</span></div>
+    <div id="coordinator-entry"></div>
+    <div class="section-label">今天</div>
+    <nav id="conversation-list" aria-label="工作者和普通对话" class="ui-stack ui-stack--tight"></nav>
+    <div class="sidebar-bottom ui-stack ui-stack--tight">
+      <div class="sidebar-note"><span class="quiet-orbit" aria-hidden="true">✳</span><span>目标在一起，工作各自展开。</span></div>
+      <div id="design-tools" class="ui-toolbar"></div>
+      <span class="prototype-label">交互原型 · 示例数据 · 不执行真实任务</span>
+    </div>
+  </aside>
+  <main class="conversation-main" id="main">
+    <header class="conversation-header ui-row ui-row--between">
+      <div class="ui-row header-identity"><div id="mobile-navigation"></div><span class="header-symbol" id="header-symbol" aria-hidden="true"></span><div><h1 id="conversation-title">Coordinator</h1><p id="conversation-subtitle">一个目标，一个对话。</p></div></div>
+      <div id="header-actions" class="ui-toolbar"></div>
+    </header>
+    <div class="thread-scroll" id="thread-scroll"><div class="thread" id="thread" aria-label="对话内容"></div></div>
+    <footer class="composer-region">
+      <div class="suggestions ui-toolbar ui-row--wrap" id="suggestions"></div>
+      <form class="composer ui-stack ui-stack--tight" id="composer-form">
+        <div id="composer-field"></div>
+        <div class="ui-row ui-row--between composer-actions"><span id="composer-context" class="composer-context">✳ 发给 Coordinator</span><div class="ui-toolbar" id="composer-actions"></div></div>
+      </form>
+      <div class="composer-foot ui-row ui-row--between"><span>对话即协作，不必切换工作台。</span><span>Enter 发送 · Shift + Enter 换行</span></div>
+    </footer>
+  </main>
+</div>
+<div id="announcements" class="screen-reader-only" role="status" aria-live="polite"></div>
+<script type="module" src="./prototype.js"></script>
+</body>
+</html>

@@ -190,7 +190,7 @@ def test_response_required_fields_derive_from_owned_openapi_schemas():
     from lib.orchestration.runtime_wire_contracts import (
         run_start_response_schema,
     )
-    from lib.task_replay import live_task_replay_response_schema
+    from lib.task_replay.task_replay import live_task_replay_response_schema
 
     mutation_schemas = [
         mutation_response_schema(

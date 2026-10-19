@@ -8,7 +8,9 @@ import hashlib
 import json
 import time
 import re
-from contextlib import nullcontext
+
+import sys
+from contextlib import ExitStack, nullcontext
 
 from lib.log import audit_log, get_logger
 
@@ -290,8 +292,13 @@ def _generate_query_aware_summary(messages: list, current_query: str,
     the receipt's Objective itself (see ``_ensure_summary_objective``), so
     the receipt can track goal replacement across a long conversation.
     """
+    if isinstance(task, dict):
+        from lib.project_dispatch.admission import is_dispatch_task
+        if is_dispatch_task(task):
+            from lib.llm.llm_errors import AbortedError
+            raise AbortedError('Project consultation cannot purchase auxiliary compaction summaries')
     from lib.llm_dispatch import dispatch_chat, dispatch_stream
-    from lib.llm_errors import AbortedError
+    from lib.llm.llm_errors import AbortedError, LocalRequestPreparationError
     dispatch_output_tokens = _SUMMARY_DISPATCH_MAX_TOKENS
     if output_budget_tokens is not None:
         if (not isinstance(output_budget_tokens, int)
@@ -312,7 +319,7 @@ def _generate_query_aware_summary(messages: list, current_query: str,
     # historical unabortable behavior.
     abort_check = None
     if isinstance(task, dict) and 'aborted' in task:
-        from lib.agent_loop import AbortSignal
+        from lib.agent_loop.agent_loop import AbortSignal
         abort_check = AbortSignal.from_task_flag(task).is_set
         if abort_check():
             logger.info('%s Summary skipped — task aborted before dispatch',
@@ -420,6 +427,9 @@ def _generate_query_aware_summary(messages: list, current_query: str,
             output_tokens=_SUMMARY_MAX_TOKENS,
             capacity_output_tokens=dispatch_output_tokens)
         model = summary_route.get('modelId') or model
+
+        if summary_route.get('requestOwned'):
+            dispatch_output_tokens = min(dispatch_output_tokens, summary_route['capacityOutputTokens'])
         if isinstance(usage_out, dict):
             usage_out['_summaryRoute'] = summary_route
         request_key = None
@@ -429,6 +439,10 @@ def _generate_query_aware_summary(messages: list, current_query: str,
             identity = [_summary_messages, owner_user_id, model,
                         get_pinned_provider() or summary_route.get('providerId') or codex_provider,
                         cfg.get('compaction') or {}]
+            if summary_route.get('requestOwned'):
+                identity.extend([summary_route.get('routeIdentity'),
+                                 summary_route.get('declaredPricing'),
+                                 summary_route.get('capacityOutputTokens')])
             digest = hashlib.sha256()
             for chunk in json.JSONEncoder(sort_keys=True).iterencode(identity):
                 digest.update(chunk.encode('utf-8'))
@@ -445,9 +459,22 @@ def _generate_query_aware_summary(messages: list, current_query: str,
             expected_cost = expected_route.get('projectedCostUsd')
             actual_cost = summary_route.get('projectedCostUsd')
             same_route = all(summary_route.get(key) == expected_route.get(key)
-                             for key in ('modelId', 'providerId', 'policy'))
-            if (not same_route or expected_cost is None or actual_cost is None
-                    or actual_cost > expected_cost):
+                             for key in ('modelId', 'providerId', 'policy', 'routeIdentity'))
+            subscription_quote = (
+                summary_route.get('requestOwned') and expected_cost is None
+                and actual_cost is None and summary_route.get('costBasis')
+                == expected_route.get('costBasis'))
+            if summary_route.get('requestOwned'):
+                expected_max = expected_route.get('maximumCostUsd')
+                actual_max = summary_route.get('maximumCostUsd')
+                if expected_max is not None and (actual_max is None or actual_max > expected_max):
+                    same_route = False
+                if (summary_route.get('capacityOutputTokens', 0)
+                        > expected_route.get('capacityOutputTokens', 0)):
+                    same_route = False
+            if (not same_route or (not subscription_quote and (
+                    expected_cost is None or actual_cost is None
+                    or actual_cost > expected_cost))):
                 if budget is not None:
                     budget.finish(
                         False, failure_reason='summary_route_revalidation_failed')
@@ -463,6 +490,18 @@ def _generate_query_aware_summary(messages: list, current_query: str,
                                     max_429_attempts=2, thinking_enabled=False)
 
     call_rows = []
+    transport_completed = False
+
+    def _dispatch_transport(call, *args, retry_allowed=None, **kwargs):
+        from lib.tasks_pkg.llm_fallback._credential_recovery import call_with_credential_recovery
+
+        def report_retry(attempt, cause):
+            logger.warning('%s Summary credential preparation retry attempt=%d source=%s issue=%s',
+                           tag, attempt, cause.credential_source, cause.reason)
+
+        return call_with_credential_recovery(
+            lambda: call(*args, **kwargs), abort_check=abort_check,
+            on_retry=report_retry, retry_allowed=retry_allowed)
 
     def _record_usage(usage):
         usage = dict(usage) if isinstance(usage, dict) else {}
@@ -473,7 +512,8 @@ def _generate_query_aware_summary(messages: list, current_query: str,
         provider_id = metadata.get('provider_id') or summary_route.get('providerId')
         call_rows.append({'model': model_id, 'provider_id': provider_id,
                           'usage': dict(usage), 'cost': price_summary_call(
-                              usage, model=model_id, provider_id=provider_id)})
+                              usage, model=model_id, provider_id=provider_id,
+                              declared_pricing=summary_route.get('declaredPricing'))})
         if isinstance(usage_out, dict):
             merged = merge_usage_totals(usage_out, usage)
             usage_out.clear()
@@ -494,6 +534,7 @@ def _generate_query_aware_summary(messages: list, current_query: str,
         The streaming branch adopts content only after the typed provider
         result proves completion; a half-stream can never become the durable
         compaction summary. Both branches then yield ``(content, usage)``."""
+        nonlocal transport_completed
         # Codex subscription slots are streaming-only.  A non-streaming
         # dispatch excludes them and may silently buy the summary from another
         # API provider.  Stream internally even when no UI delta callback was
@@ -515,19 +556,20 @@ def _generate_query_aware_summary(messages: list, current_query: str,
         from lib.llm_dispatch.conv_affinity import conv_affinity
         affinity_scope = conv_affinity(summary_affinity_id)
         from lib.llm_dispatch.provider_pin import get_pinned_provider, provider_pin
-        selected_provider = summary_route.get('providerId') or codex_provider
+        selected_provider = auxiliary_pin or summary_route.get('providerId') or codex_provider
         existing_pin = get_pinned_provider()
         if selected_provider and existing_pin and selected_provider != existing_pin:
             raise RuntimeError('summary_provider_pin_conflict')
         pin = provider_pin(selected_provider) if selected_provider else nullcontext()
         with affinity_scope, pin:
             if not use_stream:
-                chat_content, chat_usage = dispatch_chat(
+                chat_content, chat_usage = _dispatch_transport(dispatch_chat,
                     _summary_messages,
                     max_tokens=dispatch_output_tokens, temperature=0,
                     capability=capability, log_prefix=tag,
                     owner_user_id=owner_user_id, abort_check=abort_check,
                     **dispatch_options)
+                transport_completed = True
                 _record_usage(chat_usage)
 
                 finish = str((chat_usage or {}).get('finish_reason') or '').lower()
@@ -568,13 +610,16 @@ def _generate_query_aware_summary(messages: list, current_query: str,
                 from lib.llm.stream_result import (
                     ensure_provider_stream_result, require_verified_provider_stream_result,
                 )
-                stream_result = ensure_provider_stream_result(dispatch_stream(
+                raw_result = _dispatch_transport(dispatch_stream,
                     summary_body,
-                    on_content=_on_content if budget is not None or on_delta is not None else None,
+                    retry_allowed=lambda: first_text_ms is None,
+                    on_content=_on_content,
                     max_tokens=dispatch_output_tokens, temperature=0,
                     capability=capability, log_prefix=tag,
                     owner_user_id=owner_user_id, abort_check=abort_check,
-                    **dispatch_options))
+                    **dispatch_options)
+                transport_completed = True
+                stream_result = ensure_provider_stream_result(raw_result)
                 # Account observed usage even when completion cannot be adopted.
                 observed_usage = getattr(stream_result, 'usage', {})
                 _record_usage(observed_usage)
@@ -602,11 +647,30 @@ def _generate_query_aware_summary(messages: list, current_query: str,
             content = msg.get('content', '') if isinstance(msg, dict) else msg
             return content, usage
 
+    auxiliary_lifecycle = ExitStack()
+    auxiliary_pin = ''
     dispatch_succeeded = False
     failure_reason = 'summary_dispatch_failed'
     try:
+
+        if summary_route.get('requestOwned'):
+            if abort_check and abort_check():
+                return None
+            from lib.tasks_pkg.compaction._auxiliary_route import mint_auxiliary_route
+            principal = task.get('_principalContext') or {}
+            group = mint_auxiliary_route(
+                summary_route, owner=owner_user_id,
+                tenant=principal.get('tenant_id', task.get('_tenant_id')),
+                lifecycle=auxiliary_lifecycle)
+            auxiliary_pin = group.pin_id
+            # Transport selection follows the minted route, never parent OAuth.
+            codex_provider = group.pin_id if group.primary.slot.oauth == 'codex' else ''
         try:
             content, usage = _dispatch('text' if dispatch_options.get('strict_model') else 'cheap')
+        except LocalRequestPreparationError:
+            # Shared recovery has exhausted proven pre-ingress retries. A
+            # credential outage never authorizes an unqualified route change.
+            raise
         except AbortedError:
             # User Stop — do NOT burn the text-tier fallback; the turn is
             # already unwinding. Decline gracefully (messages stay intact).
@@ -618,7 +682,10 @@ def _generate_query_aware_summary(messages: list, current_query: str,
             # and charge the observed attempt; do not retry unqualified text.
             raise
         except Exception as _cheap_e:
-            if budget is not None or dispatch_options.get('strict_model'):
+            if (transport_completed or budget is not None
+                    or dispatch_options.get('strict_model')):
+                # Local validation/accounting failures after returned provider
+                # work never authorize purchasing a second summary.
                 raise  # A selected model never widens to an unqualified route.
             # Preferred cheap tier failed — retry once against ANY text slot
             # (a deploy may have no model tagged 'cheap' at all). The
@@ -659,8 +726,20 @@ def _generate_query_aware_summary(messages: list, current_query: str,
         return None
 
     finally:
-        if budget is not None:
-            budget.finish(dispatch_succeeded, failure_reason=failure_reason)
+        try:
+            if budget is not None:
+                budget.finish(dispatch_succeeded, failure_reason=failure_reason)
+        finally:
+            primary_error_active = sys.exc_info()[0] is not None
+            try:
+                auxiliary_lifecycle.close()
+            except BaseException as cleanup_error:
+                # Preserve an already-unwinding primary failure, but never
+                # adopt a summary after a new cleanup failure/cancellation.
+                logger.warning('%s Auxiliary route teardown failed: %s',
+                               tag, type(cleanup_error).__name__)
+                if not primary_error_active:
+                    raise
 
     if not isinstance(content, str) or not content.strip():
         logger.warning('%s Summary model returned empty or non-text content', tag)

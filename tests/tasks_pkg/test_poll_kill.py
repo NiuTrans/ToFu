@@ -404,7 +404,9 @@ class TestDurableRecords:
         settled = background_commands.recover_background_commands_on_startup()
         assert settled == 1
         assert len(delivered) == 1
-        assert 'died with the server' in delivered[0]['result']
+        assert 'no exit receipt is available' in delivered[0]['result']
+        assert 'effects are unconfirmed' in delivered[0]['result']
+        assert 'do not automatically replay writes' in delivered[0]['result']
         assert 'hi' in delivered[0]['result']  # partial output preserved
         assert not os.path.exists(paths['dir'])
 

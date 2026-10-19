@@ -152,7 +152,7 @@ class TestStreamingFetchUrlDelegation:
             bindings.append((user_id, client_id, tuple(required_capabilities)))
             yield (str(user_id), str(client_id), 'Default')
 
-        monkeypatch.setattr('lib.search_bridge.bind_search_browser', fake_binding)
+        monkeypatch.setattr('lib.search.search_bridge.bind_search_browser', fake_binding)
         url = 'https://example.com/page'
         acc = StreamingToolAccumulator(task, project_path='/tmp')
         with patch(

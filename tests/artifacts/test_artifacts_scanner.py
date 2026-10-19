@@ -320,3 +320,17 @@ class TestBackfillRoute:
         r = flask_client.post('/api/v4/artifacts/scan',
                               json={'conv_id': 'no-such-conv-xyz'})
         assert r.status_code == 404
+
+
+@pytest.mark.unit
+def test_scanner_promotes_complete_large_source_with_only_explicit_size_selection(monkeypatch):
+    from lib.artifacts import scanner
+    body = '<!doctype html><html><!--' + 'x' * (9 * 1024 * 1024) + '--><p>late</p></html>'
+    monkeypatch.setattr(scanner, '_MAX_BYTES', 0)
+    fenced = scanner._detect_fenced_blocks('```html\n' + body + '\n```')
+    assert len(fenced) == 1 and fenced[0]['content'].strip() == body
+    bare = scanner._detect_bare_html_docs(body)
+    assert len(bare) == 1 and bare[0]['content'] == body
+    monkeypatch.setattr(scanner, '_MAX_BYTES', 1024)
+    assert scanner._detect_fenced_blocks('```html\n' + body + '\n```') == []
+    assert scanner._detect_bare_html_docs(body) == []

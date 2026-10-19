@@ -8,7 +8,7 @@ import pytest
 from hypothesis import given, settings, strategies as st
 
 from lib.storage.errors import StorageError
-from lib.storage_sidecar.operations_pkg import _conversations as conversations
+from lib.storage_authority_sql.operations_pkg import _conversations as conversations
 
 
 pytestmark = pytest.mark.unit

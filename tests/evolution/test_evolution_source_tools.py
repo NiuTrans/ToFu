@@ -772,3 +772,43 @@ def test_v3_historical_requirement_link_needs_scoped_complete_delivery(runtime, 
         _outcome, restored = stage_outcomes.recover(current,user_id=OWNER)
         assert restored['_evolutionHistoricalSourceCoverage'] == metadata['historical_source_coverage']
         assert requirement_originals_match(restored,current,[source],checked_sources={},require_delivery=True) == accepted
+
+
+@pytest.mark.parametrize('protocol', ['openai', 'responses', 'anthropic', 'gemini'])
+@pytest.mark.parametrize('deliver_second', [True, False])
+def test_one_provider_input_confirms_only_delivered_batch_pages(runtime, protocol, deliver_second):
+    from types import SimpleNamespace
+    from lib.evolution.source_tools import handle
+    from lib.llm.request import ModelRequestBudgetScope, mark_model_request_dispatched, seal_request
+    from lib.agent_core.execution_budget import model_budget_admission
+    run, _, reviewer = large_review(runtime)
+    outputs = []
+    for index in range(2):
+        entry = handle(reviewer, None, 'evolution_source', 'batch-' + str(index),
+                       read_args(run, offset=index * 137, limit=137),
+                       index + 1, {}, reviewer['config'], '', False)[0]
+        outputs.append(entry['title'] + ': ' + entry['snippet'])
+    delivered = outputs if deliver_second else outputs[:1]
+    if protocol == 'openai':
+        body = {'messages': [{'role': 'tool', 'tool_call_id': 'batch-' + str(i),
+                              'content': text} for i, text in enumerate(delivered)]}
+    elif protocol == 'responses':
+        body = {'input': [{'type': 'function_call_output', 'call_id': 'batch-' + str(i),
+                           'output': text} for i, text in enumerate(delivered)]}
+    elif protocol == 'anthropic':
+        body = {'messages': [{'role': 'user', 'content': [
+            {'type': 'tool_result', 'tool_use_id': 'batch-' + str(i),
+             'content': [{'type': 'text', 'text': text}]}
+            for i, text in enumerate(delivered)]}]}
+    else:
+        body = {'contents': [{'role': 'function', 'parts': [
+            {'functionResponse': {'name': 'evolution_source', 'response': {'content': text}}}
+            for text in delivered]}]}
+    admitted = seal_request(body, model='test', protocol=protocol, input_tokens=1,
+                            semantic_id='batched-source-input')
+    with ModelRequestBudgetScope({'_model_budget_admit': model_budget_admission(reviewer)}) as scope:
+        lease = scope.body['_model_budget_admit'](input_tokens=1, max_output_tokens=1)
+        mark_model_request_dispatched(SimpleNamespace(model_budget_lease=lease, body=admitted))
+        assert not reviewer.get('_evolutionSourceCoverage')
+        scope.usage = {'input_tokens': 1, 'output_tokens': 1}
+    assert reviewer['_evolutionSourceCoverage']['ranges'] == [[0, 274 if deliver_second else 137]]

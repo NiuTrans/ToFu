@@ -39,8 +39,6 @@ _PLAIN_TEXT_EXTS = {
 
 _ALL_SUPPORTED = _DOCX_EXTS | _PPTX_EXTS | _XLSX_EXTS | _PLAIN_TEXT_EXTS
 
-# Max chars to extract
-_MAX_CHARS = 2_000_000
 
 
 def is_supported_document(filename: str) -> bool:
@@ -56,18 +54,16 @@ def extract_document_text(file_bytes: bytes, filename: str, max_chars: int = 0,
     Args:
         file_bytes: Raw file bytes.
         filename: Original filename (used to determine format).
-        max_chars: Max chars to extract (0 = the package default).
-        robust: Use the slower sparse-spreadsheet path. This scans across
-            long blank gaps and keeps multiple table blocks instead of
-            assuming a sheet is one dense table. Intended for persistent
-            knowledge ingestion; interactive attachment parsing keeps the
-            lower-latency default.
+        max_chars: Explicit output character budget (0 = complete extraction).
+        robust: Label defined Excel tables and separated blocks for persistent
+            ingestion. Both modes traverse complete worksheet content.
 
     Returns:
         Dict with text, textLength, totalPages, isScanned, method, warnings.
     """
     ext = os.path.splitext(filename)[1].lower()
-    limit = max_chars if max_chars > 0 else _MAX_CHARS
+    import sys
+    limit = max_chars if max_chars > 0 else sys.maxsize
 
     if ext == '.docx':
         return _extract_docx(file_bytes, limit)

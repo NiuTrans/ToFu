@@ -12,6 +12,7 @@ import pytest
 from tofu_search.search import orchestrator
 from tofu_search.search.orchestrator import perform_web_search
 
+pytestmark = pytest.mark.unit
 
 @pytest.fixture
 def stub_engines(monkeypatch):
@@ -38,9 +39,10 @@ def stub_engines(monkeypatch):
         monkeypatch.setattr(orchestrator, name, lambda q, n=6, freshness='': [])
     monkeypatch.setattr(orchestrator, "xhs_search_available", lambda: False)
 
-    # Every fetch succeeds with substantial content.
+    # Subject evidence comes from the fetched body, not the deliberately
+    # unrelated SERP fixture. A successful transport alone is not relevance.
     monkeypatch.setattr(orchestrator, "fetch_page_content",
-                        lambda url, **kw: "x" * 500)
+                        lambda url, **kw: f"Substantive test query evidence at {url}. " + "x" * 500)
     # Disable deepen.
     monkeypatch.setattr(orchestrator, "is_deepen_enabled", lambda: False)
     # Disable the pre-fetch relevance gate — this fixture's synthetic results
@@ -58,14 +60,14 @@ def stub_engines(monkeypatch):
 
 def test_pipeline_returns_content_results(stub_engines):
     out = perform_web_search("test query", max_results=5,
-                             filter_pages=False, rerank=False)
+                             filter_pages=False, rerank=False, engines=['DDG-HTML'])
     assert len(out) == 5
     assert all(r.get("full_content") for r in out)
 
 
 def test_pipeline_no_duplicate_urls(stub_engines):
     out = perform_web_search("test query", max_results=8,
-                             filter_pages=False, rerank=False)
+                             filter_pages=False, rerank=False, engines=['DDG-HTML'])
     urls = [r["url"] for r in out]
     assert len(urls) == len(set(urls))
 
@@ -78,7 +80,7 @@ def test_race_to_n_does_not_overcount_unkept(monkeypatch, stub_engines):
     every returned item has content.
     """
     out = perform_web_search("test query", max_results=3,
-                             filter_pages=False, rerank=False)
+                             filter_pages=False, rerank=False, engines=['DDG-HTML'])
     assert len(out) == 3
     assert all(r.get("full_content") for r in out)
 
@@ -87,7 +89,7 @@ def test_pipeline_handles_empty_fetch(monkeypatch, stub_engines):
     # All fetches fail; unknown snippets remain recoverable, not evidence.
     monkeypatch.setattr(orchestrator, "fetch_page_content", lambda url, **kw: None)
     out = perform_web_search("test query", max_results=5,
-                             filter_pages=False, rerank=False)
+                             filter_pages=False, rerank=False, engines=['DDG-HTML'])
     assert out == []
     assert len(out._unverified_candidates) >= 5
     assert out._search_diag['unverified_count'] == len(out._unverified_candidates)

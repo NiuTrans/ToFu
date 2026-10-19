@@ -2,6 +2,7 @@
  * and disclosure page are local presentation state. No observers or idle work. */
 import type { TurnState } from '../../conversation/domain/turn-store';
 import { createAnchoredDisclosure } from './disclosure';
+import { createExactTurnNavigation, type ExactNavigationPorts } from './round-directory-navigation';
 
 const PAGE_SIZE = 50;
 const isInput = (actor: string): boolean => ['human', 'critic', 'virtual_user'].includes(actor);
@@ -34,7 +35,7 @@ function entriesFrom(state: TurnState | null): Entry[] {
   return entries;
 }
 
-export function createTurnNavigation(ports: {
+export function createTurnNavigation(ports: ExactNavigationPorts & {
   host: HTMLElement;
   translate(key: string, params?: Record<string, string | number>): string;
   scrollToTurn(turnId: string): void;
@@ -45,6 +46,7 @@ export function createTurnNavigation(ports: {
   updateActive(container: HTMLElement, inner: HTMLElement): void;
   destroy(): void;
 } {
+  if (ports.directory) return createExactTurnNavigation(ports);
   const { host } = ports;
   const doc = host.ownerDocument;
   const t = ports.translate;

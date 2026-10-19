@@ -1,4 +1,7 @@
 """Borrowed public scan ports preserve output, isolation and caller lifecycle."""
+
+# Synthetic repository/package fixtures, never shipped-source anchors.
+_AUDIT_SYNTHETIC_REPO_PATHS = ('tests/test_module.py',)
 from concurrent.futures import ThreadPoolExecutor
 import os
 
@@ -28,7 +31,7 @@ def test_borrowed_scan_options_and_output_match_canonical(tmp_path):
     for rank in (False, True):
         for include_tests in (False, True):
             options = dict(path='source', focus='module', with_rank=rank,
-                           include_tests=include_tests, chat_rel_paths={'source/module.py'}, max_tokens=512)
+                           include_tests=include_tests, chat_rel_paths={'source/module.py'})
             assert generate_repo_map(tmp_path/'source'/'..', scanner=borrowed, **options) == generate_repo_map(tmp_path, **options)
             assert calls[-1] == (os.path.abspath(tmp_path), {'path':'source','focus':'module',
                                    'include_refs':rank,'include_tests':include_tests})

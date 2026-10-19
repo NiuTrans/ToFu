@@ -138,6 +138,10 @@ def _snapshot_version(snap) -> int:
     return -1
 
 
+_MESSAGE_SNAPSHOT_FIELDS = ('messageReceipts', 'messageReceiptsVersions',
+                            'messageReceiptsAvailable', 'messageParticipants')
+
+
 def filter_snapshot(snapshot: dict, keep_ids: set) -> dict:
     """Return a snapshot restricted to *keep_ids* (#4 multi-wave scoping).
 
@@ -166,6 +170,9 @@ def filter_snapshot(snapshot: dict, keep_ids: set) -> dict:
     settled = bool(snapshot.get('settled'))
     return {
         'agents':      agents,
+
+        # Messages describe the entire exact run, not this spawn wave.
+        **{key: snapshot[key] for key in _MESSAGE_SNAPSHOT_FIELDS if key in snapshot},
         **({'swarm_id': _run_id(snapshot)} if _run_id(snapshot) else {}),
         'settled':     settled,
         'totalTokens': total_tokens,
@@ -196,6 +203,40 @@ def stamp_round(round_entry: dict, snapshot: dict) -> bool:
     if (not incoming_run or incoming_run != receipt_run
             or (existing_run and existing_run != incoming_run)):
         return False
+    # Agent completion version and message mailbox revision are independent.
+    # A delayed equal-version snapshot (or failed mailbox read) must not erase
+    # newer committed receipt evidence already projected onto this spawn.
+    if isinstance(existing, dict):
+        old_agents = {a.get('id'): a for a in existing.get('agents', []) if isinstance(a, dict)}
+        merged_agents = []
+        for agent in snapshot.get('agents', []):
+            old = old_agents.get(agent.get('id'), {})
+            if old.get('messageReceiptsVersion', -1) > agent.get('messageReceiptsVersion', -1):
+                agent = {**agent, 'messageReceipts': old.get('messageReceipts', []),
+                         'messageReceiptsVersion': old['messageReceiptsVersion']}
+            merged_agents.append(agent)
+        snapshot = {**snapshot, 'agents': merged_agents}
+
+        if 'messageReceiptsVersions' in existing:
+            versions = dict(snapshot.get('messageReceiptsVersions') or {})
+            receipts = list(snapshot.get('messageReceipts') or [])
+            for recipient, revision in existing['messageReceiptsVersions'].items():
+                if revision > versions.get(recipient, -1):
+                    versions[recipient] = revision
+                    receipts = [row for row in receipts if row.get('agentId') != recipient]
+                    receipts.extend(row for row in existing.get('messageReceipts', [])
+                                    if row.get('agentId') == recipient)
+            referenced_tasks = {row.get(key) for row in receipts
+                                for key in ('senderTaskId', 'inputTaskId')}
+            participants = {(row['id'], row.get('taskId')): row
+                            for row in existing.get('messageParticipants', [])
+                            if row.get('taskId') in referenced_tasks}
+            participants.update({(row['id'], row.get('taskId')): row
+                                 for row in snapshot.get('messageParticipants', [])})
+            snapshot = {**snapshot, 'messageReceiptsVersions': versions,
+                        'messageReceipts': receipts,
+                        'messageParticipants': list(participants.values()),
+                        'messageReceiptsAvailable': snapshot.get('messageReceiptsAvailable', False)}
     if existing != snapshot:
         if _snapshot_version(snapshot) < _snapshot_version(existing):
             # Older/partial trying to overwrite newer/settled — reject the
@@ -203,6 +244,22 @@ def stamp_round(round_entry: dict, snapshot: dict) -> bool:
             logger.debug('[SwarmSnapshot] refusing to stamp older snapshot '
                          '(incoming v=%d < persisted v=%d)',
                          _snapshot_version(snapshot), _snapshot_version(existing))
+
+            # Mailbox revisions advance independently of child completion.
+            # Keep terminal agent evidence while accepting newer run messages.
+            merged = {**existing, **{key: snapshot[key] for key in _MESSAGE_SNAPSHOT_FIELDS
+                                    if key in snapshot}}
+
+            incoming_agents = {row['id']: row for row in snapshot.get('agents', [])}
+            merged['agents'] = [
+                {**row, 'messageReceipts': incoming_agents[row['id']]['messageReceipts'],
+                 'messageReceiptsVersion': incoming_agents[row['id']]['messageReceiptsVersion']}
+                if incoming_agents.get(row['id'], {}).get('messageReceiptsVersion', -1)
+                > row.get('messageReceiptsVersion', -1) else row
+                for row in existing.get('agents', [])]
+            if merged != existing:
+                round_entry['_swarmSnapshot'] = merged
+                changed = True
         else:
             round_entry['_swarmSnapshot'] = snapshot
             changed = True

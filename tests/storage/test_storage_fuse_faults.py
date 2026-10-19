@@ -13,7 +13,7 @@ import uuid
 import pytest
 
 from lib.storage import StorageError
-from lib.storage_sidecar import preflight
+from lib.storage_authority_sql import preflight
 
 
 pytestmark = pytest.mark.unit

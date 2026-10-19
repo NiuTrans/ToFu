@@ -135,3 +135,66 @@ test('older history remains reachable with no input loaded, and A-B-A rejects st
   assert.equal(doc.querySelector('.turn-jump-load').disabled, false);
   nav.destroy();
 });
+
+
+test('exact directory total, numeric/first/last jump hydrate only targets and keep compact DOM', async () => {
+  const {dom, host, calls, nav} = setup(); nav.destroy();
+  const {createTurnNavigation} = load('turn-navigation');
+  const requests = []; const hydrates = []; const scrolls = [];
+  const total = 501;
+  const exact = createTurnNavigation({host,
+    translate: (key, params) => params ? `${params.current} / ${params.total}` : key,
+    scrollToTurn: id => scrolls.push(id), directoryKey: () => 'head',
+    directory: async (id, offset, limit, anchor) => {
+      requests.push({id, offset, limit, anchor});
+      return {conversationId: id, laneId: 'main', syncSeq: 9, stale: false, offset,
+        totalRounds: total, activeRound: total,
+        entries: Array.from({length: Math.min(limit, total - offset)}, (_, i) => ({
+          turnId: `rank-${offset + i + 1}`, ordinal: (offset + i) * 3,
+          actor: 'human', roundNumber: offset + i + 1,
+        }))};
+    }, hydrateRound: async (id, entry) => hydrates.push(entry),
+  });
+  const partial = ({laneOrder: {main: ['loaded']}, turnsById: {loaded: {actor: 'human', projection: {content: 'loaded'}}}}); partial.historyByLane = {main: {hasMore: true, nextBeforeOrdinal: 1500, totalTurns: 1503}};
+  exact.update('a', partial); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(host.querySelector('.turn-nav-readout').textContent, '501 / 501');
+  assert.equal(host.querySelectorAll('button').length, 3);
+  host.querySelector('.turn-nav-position').click(); await new Promise(resolve => setImmediate(resolve));
+  const panel = dom.window.document.querySelector('.turn-jump-panel');
+  assert.ok(panel.querySelectorAll('.turn-jump-entry').length <= 50);
+  const input = panel.querySelector('input'); input.value = '270';
+  panel.querySelector('form').dispatchEvent(new dom.window.Event('submit', {bubbles: true, cancelable: true}));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(requests.at(-1).offset, 269); assert.equal(requests.at(-1).limit, 1);
+  assert.deepEqual(scrolls, ['rank-270']); assert.deepEqual(hydrates.map(e => e.turnId), ['rank-270']);
+  host.querySelector('.turn-nav-position').click(); await new Promise(resolve => setImmediate(resolve));
+  panel.querySelector('.turn-jump-first').click(); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(scrolls.at(-1), 'rank-1');
+  host.querySelector('.turn-nav-position').click(); await new Promise(resolve => setImmediate(resolve));
+  panel.querySelector('.turn-jump-last').click(); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(scrolls.at(-1), 'rank-501');
+  assert.equal(calls.length, 0); exact.destroy(); dom.window.close();
+});
+
+test('directory responses and hydrate completions cannot publish after A-B-A or topology invalidation', async () => {
+  const {dom, host, nav} = setup(); nav.destroy(); const {createTurnNavigation} = load('turn-navigation');
+  const pending = []; const scrolls = []; let version = 0;
+  const exact = createTurnNavigation({host, translate: key => key, scrollToTurn: id => scrolls.push(id),
+    directoryKey: () => String(version), directory: (id, offset) => new Promise(resolve => pending.push({id, offset, resolve})),
+    hydrateRound: async () => {},
+  });
+  exact.update('a', ({laneOrder: {main: ['loaded']}, turnsById: {loaded: {actor: 'human', projection: {content: 'loaded'}}}})); await Promise.resolve();
+  exact.update('b', ({laneOrder: {main: ['loaded']}, turnsById: {loaded: {actor: 'human', projection: {content: 'loaded'}}}})); await Promise.resolve();
+  exact.update('a', ({laneOrder: {main: ['loaded']}, turnsById: {loaded: {actor: 'human', projection: {content: 'loaded'}}}})); await Promise.resolve();
+  const result = (request, total) => ({conversationId: request.id, laneId: 'main', syncSeq: 1,
+    stale: false, totalRounds: total, offset: request.offset, entries: [], activeRound: total});
+  pending[0].resolve(result(pending[0], 900)); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(host.querySelector('.turn-nav-readout').textContent, '— / —');
+  pending[2].resolve(result(pending[2], 12)); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(host.querySelector('.turn-nav-readout').textContent, '12 / 12');
+  version++; exact.update('a', ({laneOrder: {main: ['loaded']}, turnsById: {loaded: {actor: 'human', projection: {content: 'loaded'}}}})); await Promise.resolve();
+  assert.equal(host.querySelector('.turn-nav-readout').textContent, '— / —');
+  pending[3].resolve(result(pending[3], 11)); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(host.querySelector('.turn-nav-readout').textContent, '11 / 11');
+  assert.deepEqual(scrolls, []); exact.destroy(); dom.window.close();
+});

@@ -128,7 +128,7 @@ pub(crate) fn execute(
         "ownerId":req.user_id,"tenantId":tenant,"root":req.root,"label":req.label,"active":req.active,
         "createdAt":created,"updatedAt":req.now_ms,
         "command":{"id":req.request_id,"digest":digest,"actorSubjectId":req.actor_subject_id}});
-    encode(&put(
+    let mut saved = put(
         db,
         tx,
         AUTOMATION_TARGET_NAMESPACE,
@@ -136,7 +136,11 @@ pub(crate) fn execute(
         &value,
         req.expected_version,
         req.now_ms,
-    )?)
+    )?;
+    // Record writes carry an internal key; public registration and its replay
+    // share the read envelope, as does the selected SQL authority.
+    saved.as_object_mut().unwrap().remove("key");
+    encode(&saved)
 }
 
 pub(crate) fn require_active(
@@ -169,4 +173,36 @@ pub(crate) fn require_active(
         return Err(integrity("stored project root identity differs"));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn registration_replay_preserves_public_envelope() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut db = AuthorityDatabase::initialize(directory.path()).unwrap();
+        let root = "/project/replay";
+        let mut req: Request = serde_json::from_value(json!({
+            "user_id": 11, "tenant_id": "owned", "project_key":
+                format!("{}project_{}", prefix(11, "owned"), digest(root.as_bytes())),
+            "expected_version": 0, "request_id": "register", "actor_subject_id": "owner",
+            "root": root, "label": "Replay", "active": true, "now_ms": 1000,
+        }))
+        .unwrap();
+        let mut tx = db.begin_with_identity_claim_scopes(7, 11).unwrap();
+        let first: Value = serde_json::from_slice(&execute(&db, &mut tx, &req).unwrap()).unwrap();
+        assert_eq!(first.as_object().unwrap().len(), 3);
+        assert_eq!(first["version"], 1);
+        assert!(first.get("key").is_none());
+        db.commit(tx).unwrap();
+        drop(db);
+        let db = AuthorityDatabase::open(directory.path()).unwrap();
+        let mut replay_tx = db.begin_with_identity_claim_scopes(7, 11).unwrap();
+        req.now_ms = 2000;
+        let replay: Value =
+            serde_json::from_slice(&execute(&db, &mut replay_tx, &req).unwrap()).unwrap();
+        assert_eq!(first, replay);
+    }
 }

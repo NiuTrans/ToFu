@@ -340,7 +340,7 @@ def test_secret_verification_blocks_openai_token_boundaries(tmp_path, prefix):
 def test_worker_clock_installation_source_ships_but_neighbor_dump_is_blocked(tmp_path):
     import export
 
-    source = tmp_path / 'lib/storage_sidecar/native_worker_clock/tofu_worker_clock--1.0.sql'
+    source = tmp_path / 'lib/storage_authority_sql/native_worker_clock/tofu_worker_clock--1.0.sql'
     source.parent.mkdir(parents=True)
     source.write_text(
         "CREATE FUNCTION tofu_worker_clock() RETURNS jsonb LANGUAGE C;\n",

@@ -7,7 +7,7 @@ switch: each backend keeps its own authority location, so switching back
 restores the previous state.
 
 SQLite→TofuDB with ``migrate=True`` runs the certified offline import
-(``lib.storage_sidecar.tofudb_migration_import``) against a verified online
+(``lib.storage_authority_sql.migration.tofudb_migration_import``) against a verified online
 backup artifact of the live SQLite authority, so the server keeps serving
 during migration.  TofuDB→SQLite has no export tool; the TofuDB authority
 is retained untouched and the SQLite side starts fresh.
@@ -26,7 +26,7 @@ import uuid
 from typing import Any
 
 from lib.log import get_logger
-from lib.runtime_paths import data_root
+from lib.runtime.runtime_paths import data_root
 
 logger = get_logger(__name__)
 
@@ -271,7 +271,7 @@ def _run_migration(job: dict[str, Any], binary: str) -> None:
         owner_id, tenant_id = _tofudb_scope_ids()
         command = [
             sys.executable, '-m',
-            'lib.storage_sidecar.tofudb_migration_import',
+            'lib.storage_authority_sql.migration.tofudb_migration_import',
             '--source', source,
             '--checkpoint', str(checkpoint),
             '--binary', binary,

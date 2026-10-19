@@ -1,4 +1,7 @@
 """Multi-dispatch operations (fastest/parallel) and capability-routed smart_chat."""
+from lib.llm_dispatch._api_errors import DispatchNoAdmissibleSlot as DispatchNoAdmissibleSlot
+from lib.llm_dispatch._api_errors import DispatchRateLimitBudgetExceeded as DispatchRateLimitBudgetExceeded
+from lib.llm_dispatch._api_errors import DispatchSharedContentionDeferred as DispatchSharedContentionDeferred
 
 from collections import defaultdict
 from .factory import get_dispatcher
@@ -7,7 +10,6 @@ import time
 from lib.log import get_logger
 from lib.llm_dispatch._api_chat import dispatch_chat
 from lib.llm_dispatch._api_contention import _note_shared_contention_recovered
-from lib.llm_dispatch._api_errors import DispatchNoAdmissibleSlot, DispatchRateLimitBudgetExceeded, DispatchSharedContentionDeferred
 
 logger = get_logger('lib.llm_dispatch.api')
 
@@ -99,11 +101,20 @@ def dispatch_fastest(messages, *, max_tokens=4096, temperature=0,
             _note_shared_contention_recovered(dispatcher, slot, tag)
             return (content, usage, slot)
         except Exception as e:
-            latency = (time.time() - t0) * 1000
-            err_str = str(e)
-            is_429 = '429' in err_str or 'rate' in err_str.lower()
+            from lib.llm.llm_errors import LocalRequestPreparationError, RateLimitError
             if not settled:
-                slot.record_error(is_rate_limit=is_429)
+                if isinstance(e, LocalRequestPreparationError):
+                    slot.release()
+                else:
+                    rate_limit = isinstance(e, RateLimitError)
+                    slot.record_error(
+                        error=e, is_rate_limit=rate_limit,
+                        is_quota_exhausted=rate_limit and e.is_quota,
+                        is_gateway=rate_limit and e.is_gateway,
+                        is_shared_contention=rate_limit and e.is_shared_contention,
+                        is_account_quota=rate_limit and e.status_code == 402,
+                        cooldown_s=e.retry_after_s if rate_limit else None,
+                    )
                 settled = True
             raise
         finally:
@@ -225,12 +236,14 @@ def dispatch_parallel(tasks, *, capability='text', max_workers=4, log_prefix='',
             except Exception as error:
                 # A failed submit is guaranteed unstarted; earlier requests
                 # remain owned and later authorized requests still start.
+                logger.debug('dispatch_parallel failure handled: %s', type(error).__name__)
                 results[index] = (None, {'error': str(error)})
         for future in as_completed(futures):
             index = futures[future]
             try:
                 _index, results[index] = future.result()
             except Exception as error:
+                logger.debug('dispatch_parallel failure handled: %s', type(error).__name__)
                 results[index] = (None, {'error': str(error)})
 
     return results
@@ -274,7 +287,8 @@ def smart_chat(messages, *, model=None, max_tokens=4096, temperature=0,
     """Drop-in replacement for ``lib.llm.chat()`` with auto dispatch.
 
     Uses the fastest available (key, model) slot across ALL keys.
-    Falls back to direct ``chat()`` if dispatch fails entirely.
+    The dispatcher owns every route, retry and credential selection.
+    Exhaustion propagates its original typed failure to the caller.
 
     Signature is intentionally close to ``chat()`` so call sites only
     need to change ``from lib.llm import chat`` →
@@ -285,81 +299,20 @@ def smart_chat(messages, *, model=None, max_tokens=4096, temperature=0,
     """
     if model_budget_admit is not None and not callable(model_budget_admit):
         raise ValueError('model_budget_admit must be callable')
-    try:
-        return dispatch_chat(
-            messages, max_tokens=max_tokens, temperature=temperature,
-            thinking_enabled=thinking_enabled, preset=preset,
-            effort=effort, capability=capability,
-            prefer_model=model, tools=tools, extra=extra,
-            max_retries=max_retries, log_prefix=log_prefix,
-            timeout=timeout,
-            exclude_models=exclude_models,
-            abort_check=abort_check,
-            max_429_attempts=max_429_attempts,
-            defer_on_shared_contention=defer_on_shared_contention,
-            owner_user_id=owner_user_id,
-            **({'model_budget_admit': model_budget_admit} if model_budget_admit is not None else {}),
-        )
-    except Exception as e:
-        from lib.llm import AbortedError
-        if isinstance(e, (
-                AbortedError,
-                DispatchNoAdmissibleSlot,
-                DispatchRateLimitBudgetExceeded,
-                DispatchSharedContentionDeferred,
-        )):
-            # Cancellation is terminal for this caller. Falling through to
-            # direct chat would resurrect a timed-out or budget-exhausted
-            # background request and keep consuming the shared model pool
-            # after its owner returned.
-            raise
-        from lib.key_stats import is_strict_billing_stop_admission
-        if is_strict_billing_stop_admission():
-            # Optional background work deliberately admitted only slots with
-            # no recorded billing stop. A direct lib.llm fallback chooses its
-            # own default key and would bypass that filter, repeating a known
-            # 402/quota failure outside the dispatcher's accounting boundary.
-            logger.info(
-                '%s[Dispatch] Strict billing-stop admission rejected direct '
-                'chat fallback after dispatch failure: %s', log_prefix, e)
-            raise
-        # Ultimate fallback — direct call with default key
-        logger.warning('%s[Dispatch] All slots exhausted (%s), '
-                    'falling back to direct chat()', log_prefix, e, exc_info=True)
-        from lib.llm import chat
-        _fb_timeout = timeout
-        # For 'cheap' tasks (translate etc.), fall back to a cheap model,
-        #   NOT the default LLM_MODEL (which is Opus — way too slow/expensive).
-        _fb_model = model
-        if not _fb_model and capability == 'cheap':
-            from lib import GEMINI_MODEL
-            _fb_model = GEMINI_MODEL   # gemini-2.5-flash — fast & cheap
-            logger.info('%s Fallback using cheap model: %s', log_prefix, _fb_model)
-        # dispatch_chat folds tool definitions into ``extra`` before calling
-        # the low-level transport. Preserve that exact request authority on
-        # the direct fallback; silently dropping tools here changes an
-        # agentic turn into an unrelated plain-chat request.
-        _fb_extra = dict(extra) if extra else {}
-        if tools:
-            _fb_extra['tools'] = tools
-        # ── Audit trail: record the model switch on exhaustion fallback ──
-        try:
-            from lib.log import audit_log as _audit
-            _audit('model_switch',
-                   old=(model or '(dispatch-auto)'),
-                   new=(_fb_model or '(lib.llm default)'),
-                   reason='dispatch_exhausted',
-                   capability=capability,
-                   error=str(e)[:200])
-        except Exception as _aerr:
-            logger.debug('%s audit_log model_switch failed: %s', log_prefix, _aerr)
-        return chat(messages=messages, model=_fb_model,
-                    max_tokens=max_tokens, temperature=temperature,
-                    thinking_enabled=thinking_enabled, effort=effort or preset,
-                    extra=_fb_extra or None,
-                    log_prefix=log_prefix, timeout=_fb_timeout,
-                    owner_user_id=owner_user_id,
-                    **({'model_budget_admit': model_budget_admit} if model_budget_admit is not None else {}))
+    return dispatch_chat(
+        messages, max_tokens=max_tokens, temperature=temperature,
+        thinking_enabled=thinking_enabled, preset=preset,
+        effort=effort, capability=capability,
+        prefer_model=model, tools=tools, extra=extra,
+        max_retries=max_retries, log_prefix=log_prefix,
+        timeout=timeout,
+        exclude_models=exclude_models,
+        abort_check=abort_check,
+        max_429_attempts=max_429_attempts,
+        defer_on_shared_contention=defer_on_shared_contention,
+        owner_user_id=owner_user_id,
+        **({'model_budget_admit': model_budget_admit} if model_budget_admit is not None else {}),
+    )
 
 
 def smart_chat_batch(prompts, *, max_tokens=4096, temperature=0,
@@ -408,12 +361,14 @@ def smart_chat_batch(prompts, *, max_tokens=4096, temperature=0,
             try:
                 futures[pool.submit(_worker, index, _to_messages(prompt))] = index
             except Exception as error:
+                logger.debug('smart_chat_batch failure handled: %s', type(error).__name__)
                 results[index] = (f'[Error] {error}', {})
         for future in concurrent.futures.as_completed(futures):
             index = futures[future]
             try:
                 _index, results[index] = future.result()
             except Exception as error:
+                logger.debug('smart_chat_batch failure handled: %s', type(error).__name__)
                 results[index] = (f'[Error] {error}', {})
 
     return results

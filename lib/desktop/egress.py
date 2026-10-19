@@ -94,6 +94,14 @@ class EgressUnavailable(RuntimeError):
     guidance (start an agent / pick one in Settings)."""
 
 
+class EgressRecoveryPending(EgressUnavailable):
+    """No eligible route yet; the shared route manager owns its retry deadline."""
+
+    def __init__(self, retry_after_s: float):
+        super().__init__('Waiting for the configured network route to recover')
+        self.retry_after_s = max(0.05, float(retry_after_s))
+
+
 class UnknownEgressAgent(ValueError):
     """The requested device is not currently eligible for owner egress."""
 
@@ -157,7 +165,7 @@ def _check_target(url: str, target: str, loopback_port: int) -> None:
             f'egress host not in whitelist: {urlparse(url).hostname or url!r}')
 
 
-def _probe_host(url: str) -> str:
+def _probe_host(url: str, *, cancelled=None) -> str:
     """Classify server reachability through the subscription route manager.
 
     Route health is owned per ``(host, concrete path)`` by
@@ -165,7 +173,8 @@ def _probe_host(url: str) -> str:
     for the non-blocking Settings status surface and never gate requests.
     """
     host = (urlparse(url).hostname or '').lower()
-    verdict = _probe_host_paths(url, host)
+    verdict = (_probe_host_paths(url, host, cancelled=cancelled)
+               if cancelled is not None else _probe_host_paths(url, host))
     if verdict == 'network_fail':
         _probe_cache.invalidate(host)
         _probe_network_fail_cache.set(host, verdict)
@@ -179,13 +188,14 @@ def _probe_host(url: str) -> str:
     return verdict
 
 
-def _probe_host_paths(url: str, host: str) -> str:
+def _probe_host_paths(url: str, host: str, *, cancelled=None) -> str:
     """Run (or reuse) the concurrent direct + all-proxy route race."""
     from lib.proxy import (
         subscription_route_candidates,
         subscription_route_verdict,
     )
-    routes = subscription_route_candidates(url)
+    routes = (subscription_route_candidates(url, cancelled=cancelled)
+              if cancelled is not None else subscription_route_candidates(url))
     if routes:
         logger.debug('[Egress] probe %s ok via %s', host, routes[0].label)
         return 'ok'
@@ -308,7 +318,7 @@ def _order_agents(agents: list, user_id: str) -> list:
                        -(a.get('last_seen') or 0.0)))
 
 
-def route_candidates(url: str, *, user_id: str = '') -> list:
+def route_candidates(url: str, *, user_id: str = '', cancelled=None) -> list:
     """Ordered egress candidate list for *url*.
 
     ``['direct']`` when the server's own egress reaches the provider;
@@ -323,12 +333,17 @@ def route_candidates(url: str, *, user_id: str = '') -> list:
     # these domains — everything else is direct, always, unprobed.
     if not host_allowed(url):
         return ['direct']
-    verdict = _probe_host(url)
+    verdict = (_probe_host(url, cancelled=cancelled)
+               if cancelled is not None else _probe_host(url))
     if verdict == 'ok':
         return ['direct']
     agents = _online_egress_agents(user_id)
     if not agents:
         if verdict == 'network_fail':
+            from lib.proxy import subscription_route_recovery_delay
+            delay = subscription_route_recovery_delay(url)
+            if delay is not None:
+                raise EgressRecoveryPending(delay)
             raise EgressUnavailable(
                 'subscription egress is temporarily unreachable through the '
                 'configured server proxy paths and no egress-capable desktop '
@@ -342,9 +357,9 @@ def route_candidates(url: str, *, user_id: str = '') -> list:
     return [a['agent_id'] for a in _order_agents(agents, user_id)]
 
 
-def route_request(url: str, *, user_id: str = '') -> str:
+def route_request(url: str, *, user_id: str = '', cancelled=None) -> str:
     """First (best) egress route for *url* — see :func:`route_candidates`."""
-    return route_candidates(url, user_id=user_id)[0]
+    return route_candidates(url, user_id=user_id, cancelled=cancelled)[0]
 
 
 # ══════════════════════════════════════════════════════════
@@ -444,7 +459,7 @@ class EgressStreamReader:
         deadline = time.monotonic() + timeout
         while self.status_code == 0:
             if abort_check and abort_check():
-                from lib.llm_errors import AbortedError
+                from lib.llm.llm_errors import AbortedError
                 self.close()
                 raise AbortedError('desktop response-header wait cancelled')
             self._poll_frames()
@@ -546,7 +561,7 @@ def open_stream(url: str, *, method: str = 'POST', headers: dict = None,
         if cand == 'direct':
             break  # caller handles the direct path; never stream-wrap it
         if abort_check and abort_check():
-            from lib.llm_errors import AbortedError
+            from lib.llm.llm_errors import AbortedError
             raise AbortedError('desktop stream cancelled before enqueue')
         cmd_id = uuid.uuid4().hex
         params = {

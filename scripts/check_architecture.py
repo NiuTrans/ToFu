@@ -96,7 +96,7 @@ _ROUTE_LLM_READ_ONLY_IMPORT_NAMES = frozenset({
 # The storage sidecar is a separate process: it may depend on schemas, backend
 # adapters and dependency-light contract modules, never on the task-execution
 # graph or the HTTP delivery layer.
-_SIDECAR_ROOT = (ROOT / "lib" / "storage_sidecar").resolve()
+_SIDECAR_ROOT = (ROOT / "lib" / "storage_authority_sql").resolve()
 _SIDECAR_FORBIDDEN_IMPORTS = (
     "lib.tasks_pkg",
     "lib.agent_core",
@@ -112,8 +112,11 @@ _SIDECAR_FORBIDDEN_IMPORTS = (
 _SIDECAR_SHARED_MODULES = frozenset({
     "lib.event_envelope",
     "lib.turn_trace_contract",
-    "lib.tool_round_identity",
+    "lib.tool_results.tool_round_identity",
     "lib.agent_core.output_settlement",
+    "lib.agent_core.storage_errors",
+    "lib.agent_core.generated_task_event_delivery_contract",
+    "lib.agent_core.generated_task_event_delivery_profile",
     "lib.orchestration.contract_schema",
     "lib.orchestration.definition_contract_registry",
     "lib.orchestration.definition_write_field_registry",
@@ -129,15 +132,15 @@ _SIDECAR_SHARED_PATHS = frozenset(
 
 # Composition roots wire routes into the app; they are the ONE place a lib
 # module may touch the delivery layer.
-_COMPOSITION_ROOTS = frozenset({(ROOT / "lib" / "app_assembly.py").resolve()})
+_COMPOSITION_ROOTS = frozenset({(ROOT / "lib" / "app" / "app_assembly.py").resolve()})
 
 # Grandfathered lib → routes imports. Dependency inversion (registration
 # callbacks or ports) is the fix; this set may only shrink.
 _LIB_ROUTES_IMPORT_DEBT = frozenset({
     (ROOT / "lib" / "auto_restart.py").resolve(),
-    (ROOT / "lib" / "search_bridge.py").resolve(),
-    (ROOT / "lib" / "server_background_services.py").resolve(),
-    (ROOT / "lib" / "server_shutdown.py").resolve(),
+    (ROOT / "lib" / "search" / "search_bridge.py").resolve(),
+    (ROOT / "lib" / "server" / "server_background_services.py").resolve(),
+    (ROOT / "lib" / "server" / "server_shutdown.py").resolve(),
 })
 
 # Replacing a module object's class defeats static symbol navigation and
@@ -160,7 +163,7 @@ _LIB_INIT_MAX_ENV_READS = 17
 # sanctioned exception class is the sidecar-shared contract set above:
 # lib/event_envelope.py joined it 2026-09-18 when the event-format stamp was
 # wired into the sidecar write authority.)
-_LIB_TOPLEVEL_MAX_FILES = 194
+_LIB_TOPLEVEL_MAX_FILES = 114
 
 
 def _under(path: Path, root: Path) -> bool:
@@ -258,7 +261,7 @@ def import_direction_violations(
                         f"import routes ({module}); invert the dependency "
                         "through a registration callback or port"
                     )
-            elif in_routes and _matches(module, "lib.storage_sidecar"):
+            elif in_routes and _matches(module, "lib.storage_authority_sql"):
                 violations.append(
                     f"{path.name}:{lineno}: HTTP routes reach storage "
                     f"through the client layer, not sidecar internals "

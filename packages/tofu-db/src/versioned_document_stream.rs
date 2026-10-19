@@ -36,7 +36,7 @@ impl<'a> Source<'a> {
         let (value, total_bytes) = match document.value {
             DocumentValue::Inline(bytes) => {
                 let count = bytes.len() as u64;
-                (SourceValue::Inline(Cursor::new(bytes)), count)
+                (SourceValue::Inline(Cursor::new(bytes.into_owned())), count)
             }
             DocumentValue::Blob(reference) => (
                 SourceValue::Blob {
@@ -52,7 +52,7 @@ impl<'a> Source<'a> {
         };
         Ok(Self {
             value,
-            logical_key: document.key,
+            logical_key: document.key.into_owned(),
             total_bytes,
         })
     }

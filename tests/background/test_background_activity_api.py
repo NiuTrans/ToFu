@@ -46,6 +46,9 @@ class _StubSession:
                  completed: int = 0):
         self.user_id = user_id
         self.conv_id = conv_id
+        self.task_id = 'run-' + conv_id
+        self._lock = threading.Lock()
+        self.specs = []
         self.is_terminated = terminated
         self._agents = agents or {}
         self.running_count = running
@@ -57,7 +60,12 @@ class _StubSession:
 
 
 @pytest.fixture(autouse=True)
-def _clean_registries():
+def _clean_registries(monkeypatch):
+    monkeypatch.setattr('lib.swarm.message_receipts.snapshot_receipts',
+                        lambda session, agents, specs: {
+                            'messageReceipts': [], 'messageReceiptsVersions': {},
+                            'messageReceiptsAvailable': True, 'messageParticipants': []})
+
     keys = []
     with _sessions_lock:
         keys = [k for k in _active_sessions if k.startswith('acttest-')]
@@ -96,6 +104,9 @@ class TestListActiveSwarms(unittest.TestCase):
         self.assertEqual(len(out), 1)
         item = out[0]
         self.assertEqual(item['swarm_key'], 'acttest-live')
+        self.assertEqual(item['swarm_id'], 'run-conv-1')
+        self.assertIs(item['messageReceiptsAvailable'], True)
+        self.assertEqual(item['messageReceipts'], [])
         self.assertEqual(item['conv_id'], 'conv-1')
         self.assertEqual(item['running'], 1)
         # Deliberately conflicting pool counters above cannot override rows.

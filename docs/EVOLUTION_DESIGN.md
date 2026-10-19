@@ -36,20 +36,7 @@ objective under that key is a conflict. Keys are hashed and owner-prefixed;
 without a key, each submission deliberately creates a new run.
 
 
-Optional cumulative `budget` dimensions are `max_tokens`, `max_wall_clock_seconds` and `max_tool_calls`;
-omitted/`null`/`0` means unlimited; positive integers limit consumption. Stored unlimited dimensions normalize to `0`.
-Optional `max_attempts` is inclusive: omitted/`null`/`0` is unlimited; `1` disables automatic repair.
-These fields and `review_reserve` are pinned by idempotency; retries cannot replace execution policy.
-Problem: an executor can spend the whole allowance before independent review. Decision: optional reserves
-(`tokens`, `tool_calls`, `wall_clock_seconds`) withhold amounts from each executing attempt inside the original budget.
-Positive reserves require strictly larger finite corresponding limits. Executors receive remaining minus reserve,
-including an earlier deadline; declaration and final delivery use that slice. Review receives actual remaining.
-Alternative: merely report the final balance; it cannot protect review capacity. Fixed default ratios lack measured costs.
-Provider overrun or inadequate allocation can still prevent review; cumulative/unknown-usage fences and original checks remain.
-Programs persist the reserve per experiment and refuse a new launch when remaining cannot fund it.
-`budget_source` is `default` or `explicit` for new runs. Legacy records retain stored limits and two-attempt policy;
-reads never infer provenance, migrate or resume failed work. An owner may explicitly submit a new run after inspecting partial work.
-The research adapter binds token/deadline limits to its durable model account before dispatch and folds physical attempt usage into terminal actuals; tool-call limits and review reserves still refuse. Problem: discovery ignored cumulative model authorization; decision: use the shared immutable account and original deadline, rejecting post-spawn attachment and per-stage resets. Typed model allowance/deadline stops retain `_executionLimitReason` and settle as needs_attention without replay; rejected: treating authorization exhaustion as a generic research failure. Verify research-domain and worker-budget tests. This does not authorize automatic discovery-to-experiment handoff.
+Optional cumulative `budget` dimensions are `max_tokens`, `max_wall_clock_seconds` and `max_tool_calls`; omitted/`null`/`0` means unlimited; positive integers limit consumption. Stored unlimited dimensions normalize to `0`. Optional `max_attempts` is inclusive: omitted/`null`/`0` is unlimited; `1` disables automatic repair. These fields and `review_reserve` are pinned by idempotency; retries cannot replace execution policy. Problem: an executor can spend the whole allowance before independent review. Decision: optional reserves (`tokens`, `tool_calls`, `wall_clock_seconds`) withhold amounts from each executing attempt inside the original budget. Positive reserves require strictly larger finite corresponding limits. Executors receive remaining minus reserve, including an earlier deadline; declaration and final delivery use that slice. Review receives actual remaining. Alternative: merely report the final balance; it cannot protect review capacity. Fixed default ratios lack measured costs. Provider overrun or inadequate allocation can still prevent review; cumulative/unknown-usage fences and original checks remain. Programs persist the reserve per experiment and refuse a new launch when remaining cannot fund it. `budget_source` is `default` or `explicit` for new runs. Legacy records retain stored limits and two-attempt policy; reads never infer provenance, migrate or resume failed work. An owner may explicitly submit a new run after inspecting partial work. The research adapter binds token/deadline limits to its durable model account before dispatch and folds physical attempt usage into terminal actuals; tool-call limits and review reserves still refuse. Problem: discovery ignored cumulative model authorization; decision: use the shared immutable account and original deadline, rejecting post-spawn attachment and per-stage resets. Typed model allowance/deadline stops retain `_executionLimitReason` and settle as needs_attention without replay; rejected: treating authorization exhaustion as a generic research failure. Verify research-domain and worker-budget tests. This does not authorize automatic discovery-to-experiment handoff.
 
 | Endpoint | Meaning |
 |---|---|
@@ -79,28 +66,13 @@ measured scientific benefit. No persistence schema, worker or budget is added.
 
 ## Failure-stage learning evidence
 
-Problem: unfinished receipts or the last successful stage could be attributed as
-the cause of a failed goal. Decision: repeated-failure advice requires at least
-two settled, nonexploratory episodes with a named stage explicitly reporting
-error/failed/failure/fail. Pending, unknown, aborted, successful and empty-stage
-receipts establish no stage failure. All failures still contribute to the path's
-observed success-rate denominator; omitting unsupported advice hides no verdict.
-New anti-patterns bind failure_evidence_version=1. Legacy advice remains stored
-but is not exposed to guidance, curriculum or awareness until ordinary maintenance
-rebuilds it from original receipts. Reads filter this evidence policy and domain
-before the 64-pattern result cap, within the existing 200-row owner record bound.
-Rejected: inferring a failure location from a goal verdict or treating unavailable
-stage evidence as a verified causal rule. Recorded stage failure is an observation,
-not proof of the root cause. The existing record serialization adds 31 UTF-8
-bytes per regenerated pattern for the version marker (a synthetic row increased
-from 246 to 277 bytes); this is serialized size, not RSS. No model call, timer
-or new persistent row is added.
+Problem: unfinished receipts or the last successful stage could be attributed as the cause of a failed goal. Decision: repeated-failure advice requires at least two settled, nonexploratory episodes with a named stage explicitly reporting error/failed/failure/fail. Pending, unknown, aborted, successful and empty-stage receipts establish no stage failure. All failures still contribute to the path's observed success-rate denominator; omitting unsupported advice hides no verdict. New anti-patterns bind failure_evidence_version=1. Legacy advice remains stored but is not exposed to guidance, curriculum or awareness until ordinary maintenance rebuilds it from original receipts. Reads filter this evidence policy and domain across every owner record page, without a total result-count ceiling. Rejected: inferring a failure location from a goal verdict or treating unavailable stage evidence as a verified causal rule. Recorded stage failure is an observation, not proof of the root cause. The existing record serialization adds 31 UTF-8 bytes per regenerated pattern for the version marker (a synthetic row increased from 246 to 277 bytes); this is serialized size, not RSS. No model call, timer or new persistent row is added.
 
 ## Maintenance episode read window
 
 Problem: learning passes repeatedly retrieve the same owner episode window after
 one terminal settlement. Decision: each maintenance cycle explicitly passes a
-lazy episode reader through cost, hypothesis, strategy, gap, friction, holdout,
+lazy episode reader through cost, hypothesis, gap, friction, holdout,
 crystallization, curriculum and monitoring passes. The first successful read
 pages the owner originals and retains the 200 most recent settled episodes,
 ranked by recorded settled_at then episode ID, descending. Running episodes do
@@ -116,32 +88,7 @@ references receive exact owner-scoped reads. At most 200 selected parent facts
 are cached per cycle. Missing parents supply no domain, criteria or learning
 facts; foreign identities refuse. Other record families remain live.
 
-The existing strict repository page boundary rejects malformed or foreign rows.
-Failed reads remain visible in the affected pass and are not cached as empty;
-later fail-soft passes can retry. Close releases the additional retained window
-on normal completion or exception. Owner identities are checked on each use;
-there is no global cache, worker, timer, persistent record or new learning grant.
-Rejected: a process-wide cache that serves stale or cross-owner evidence, and
-reordering independent passes, which would lose their learning dependencies.
-Ordinary lists retain their existing owner-key order; this temporal selection
-belongs to maintenance. Direct learning consumers now resolve exact referenced
-goals rather than silently losing parents behind a separate capped listing.
-Problem: prefix-capped episode and goal reads could permanently ignore later
-results. Decision: complete paged reconciliation plus bounded temporal selection
-and exact parent resolution. Rejected: reversing random IDs as a proxy for time,
-raising an arbitrary prefix cap, or assuming an unproved lookup index is complete.
-Original episodes and goals are retained without migration or deletion. A future
-index must preserve legacy completeness and exact original validation.
-A controlled 205-record case reads two episode pages and fetches five parents
-outside the initial goal prefix once across learning consumers. New failures
-enter cost calibration, self-model evidence and holdout samples. The small paired
-maintenance fixture still produces identical results with nine versus one
-shared episode-list RPC. A warm 200-episode/200-parent allocation probe retained
-108,760 episode JSON bytes and 69,180 parent JSON bytes, with 487,068 traced
-retained bytes and 956,951 peak bytes; close released both caches. These are
-fixture RPC and Python-allocation measurements, not wall-time, whole-process RSS
-or scientific-quality evidence. Source-query cost grows with history; memory
-holds one page, at most 200 selected episodes and their at most 200 parents.
+The existing strict repository page boundary rejects malformed or foreign rows. Failed reads remain visible in the affected pass and are not cached as empty; later fail-soft passes can retry. Close releases the additional retained window on normal completion or exception. Owner identities are checked on each use; there is no global cache, worker, timer, persistent record or new learning grant. Rejected: a process-wide cache that serves stale or cross-owner evidence, and reordering independent passes, which would lose their learning dependencies. Ordinary lists retain their existing owner-key order; this temporal selection belongs to maintenance. Direct learning consumers now resolve exact referenced goals rather than silently losing parents behind a separate capped listing. Problem: prefix-capped episode and goal reads could permanently ignore later results. Decision: complete paged reconciliation plus bounded temporal selection and exact parent resolution. Rejected: reversing random IDs as a proxy for time, raising an arbitrary prefix cap, or assuming an unproved lookup index is complete. Original episodes and goals are retained without migration or deletion. A future index must preserve legacy completeness and exact original validation. A controlled 205-record case reads two episode pages and fetches five parents outside the initial goal prefix once across learning consumers. New failures enter cost calibration, self-model evidence and holdout samples. The small paired maintenance fixture still produces identical results with nine versus one shared episode-list RPC. A warm 200-episode/200-parent allocation probe retained 108,760 episode JSON bytes and 69,180 parent JSON bytes, with 487,068 traced retained bytes and 956,951 peak bytes; close released both caches. These are fixture RPC and Python-allocation measurements, not wall-time, whole-process RSS or scientific-quality evidence. Source-query cost grows with history; memory holds one page, at most 200 selected episodes and their at most 200 parents.
 
 ## Original mutation evidence admission
 
@@ -232,30 +179,9 @@ listing maximum, and recycling gaps after unknown acknowledgements.
 
 ## Evidence-bound automatic rollback
 
-Problem: harder later tasks or changed assessment contexts can lower historical
-success rates without proving that an active mutation caused regression. Missing
-historical baseline was also imputed as 0.5. Decision: temporal history reports
-sample counts, nullable rates and an observed-decline alert, never rollback
-permission. Automatic rollback requires an owned post-activation paired receipt,
-created no later than the observation, bound to the exact active mutation and
-current independent holdout suite. New paired receipts also bind the exact
-immutable parent version and candidate controls; legacy absence grants no
-automatic rollback. The monitor recomputes comparisons and scores,
-requires complete distinct-case coverage and the existing monitor sample floor,
-and confirms item outcomes agree with the stored pairs before ordinary rollback.
+Problem: harder later tasks or changed assessment contexts can lower historical success rates without proving that an active mutation caused regression. Missing historical baseline was also imputed as 0.5. Decision: temporal history reports sample counts, nullable rates and an observed-decline alert, never rollback permission. Automatic rollback requires an owned post-activation paired receipt, created no later than the observation, bound to the exact active mutation and current independent holdout suite. New paired receipts also bind the exact immutable parent version and candidate controls; legacy absence grants no automatic rollback. The monitor recomputes comparisons and scores, requires complete distinct-case coverage and the existing monitor sample floor, and confirms item outcomes agree with the stored pairs before ordinary rollback.
 
-Historical, stale, future, foreign, partial or inconsistent receipts cannot
-trigger rollback. A complete fresh paired loss can trigger it even when temporal
-history looks healthy. Probes retain their trusted matched-execution contract;
-this consistency check cannot authenticate external measurements or infer science
-quality. Monitoring launches no paid probe, model or worker and persists no new
-record. Legacy temporal-only decline remains visible without changing policy.
-Rejected: causal interpretation of unrelated episode averages, invented missing
-baseline rates, or trusting a receipt's verdict without recomputation.
-A controlled three-case paired receipt grew by 98 serialized JSON bytes for the
-context fingerprint (1,306 bytes total). No additional record is persisted. This
-is fixture serialization size, not process RSS, experiment authenticity or a
-research-quality result.
+Historical, stale, future, foreign, partial or inconsistent receipts cannot trigger rollback. A complete fresh paired loss can trigger it even when temporal history looks healthy. Probes retain their trusted matched-execution contract; this consistency check cannot authenticate external measurements or infer science quality. Monitoring launches no paid probe, model or worker and persists no new record. Legacy temporal-only decline remains visible without changing policy. Rejected: causal interpretation of unrelated episode averages, invented missing baseline rates, or trusting a receipt's verdict without recomputation. A controlled three-case paired receipt grew by 98 serialized JSON bytes for the context fingerprint (1,306 bytes total). No additional record is persisted. This is fixture serialization size, not process RSS, experiment authenticity or a research-quality result.
 
 ## Shared paired regression admission
 
@@ -326,18 +252,7 @@ Rejection and stale waiver controls are absent during an admitted activation;
 failed enable attempts refresh original state before presenting retry. These are
 presentation controls; the server still owns every decision.
 
-The composite enable endpoint reads the exact owned mutation rather than the
-128-row list projection. An existing intent continues ordinary activation without
-reconfirmation, a new probe or a new waiver. Its response reports completion
-without inventing a fresh regression receipt. An already-active original returns
-its current state without writes, covering lost acknowledgments and maintenance
-completion between page refresh and continuation. Ordinary proposals retain their
-existing verification and separate explicit waiver journey. The office projection
-copies the schema-owned optional intent and exposes no policy payload. Rejected:
-keeping a misleading confirmed label, silently reproving an admitted operation,
-or treating a list window as original-record authority. No new transport, timer,
-cache or durable record is introduced; the eight-row proposal projection adds at
-most eight small intents (140 serialized bytes each for the measured timestamp).
+The composite enable endpoint reads the exact owned mutation rather than the 128-row list projection. An existing intent continues ordinary activation without reconfirmation, a new probe or a new waiver. Its response reports completion without inventing a fresh regression receipt. An already-active original returns its current state without writes, covering lost acknowledgments and maintenance completion between page refresh and continuation. Ordinary proposals retain their existing verification and separate explicit waiver journey. The office projection copies the schema-owned optional intent and exposes no policy payload. Rejected: keeping a misleading confirmed label, silently reproving an admitted operation, or treating a list window as original-record authority. No new transport, timer, cache or durable record is introduced; the eight-row proposal projection adds at most eight small intents (140 serialized bytes each for the measured timestamp).
 
 ## One execution chain
 
@@ -390,9 +305,9 @@ Required stages durably wait for admitted background commands; the existing reap
 See `STAGE_OUTCOMES.md` for ownership, complete-read coverage, cancellation, original deadlines and restart limitations.
 
 **Problem.** A goal run carries one deliverable/repair history; multi-day exploration needs separately receipted experiments, inherited memory, a mutable frontier, program-wide limits and a final audit of the unchanged objective. One lifetime run exhausts record/context bounds.
-**Decision.** `lib/evolution/programs.py` composes ordinary runs into a durable program; `contracts/evolution_program_v1.schema.json` owns its wire shapes.
+**Decision.** `lib/evolution/programs.py` composes ordinary runs into a durable program; `contracts/evolution_program_v1.schema.json` owns its wire shapes. Final stages preserve the original objective and freeze their owner-authorized procedure separately as `execution_instruction` in the run contract, executor prompt and review context. Archived context remains untrusted evidence. Dropping the procedure loses named commands; appending it to the original objective was rejected because it changes the audit target.
 Program creation stores the objective and original acceptance requirements and returns `ready`.
-Frozen continuation names the current stage; its frozen run payload owns the checks; discovery delivers evidence/protocol, later stages test alternatives, final audit retains every original requirement. Project executors declare complete file generations through `evolution_artifact`; independent reviewers receive bounded immutable `artifact_evidence` reads, and incomplete capture/coverage remains unknown (see `STAGE_OUTCOMES.md`). File citations need observed writes/reads; tool output can be cited directly. To prepare raw-file identities beyond snapshot limits, evolution_artifact accepts fingerprint_path alone: SHA-256 is computed from regular, non-symlink, project-owned bytes with cancellation, stability and final executor checks. Optional fingerprint_scope_field selects a digest from this run’s frozen measurement_scope; expected_sha256 comes from the frozen protocol and matches_precommit is computed by the server; the caller cannot replace the expected digest. A changed file reports its actual hash and mismatch without rewriting the protocol; changed protocol/authority during reading refuses delivery. Raw-file equality is not input-consumption proof. It retains no content and grants no execution/reproduction proof; declarations remain the content-retention path. Problem: message compaction could discard a live-file hash before independent review. Decision: append owner/run/task/project-bound immutable read receipts in evolution.artifact_fingerprints.v1 and CAS-publish head/count in the artifact manifest. Terminal artifact_evidence freezes and streams these receipts newest first, with sequence and observed time, without live-file rereads. Missing/corrupt/foreign chains and false ACKs refuse; identical lost ACKs and later writers preserve published receipts. Model-message-only hashes were rejected because compaction loses forensic evidence; matching hashes cannot prove input use. A 100-read probe retains about 68 KB of node JSON and a 342-byte manifest, excluding storage overhead. Receipt count has no fixed cap; snapshot content limits remain. Terminal parts and reviewer pages retain bounded transport and coverage. Lifecycle follows the owned stage manifest; unpublished nodes carry no source authority, and future reachability reclamation must preserve published roots. Reusing model-authored digest text or buffering a large file was rejected. One private 64 MiB read took 60.19 ms with 2,119,865 peak traced Python bytes after warmup (not process RSS or an end-to-end benchmark). This avoids overlapping stage mandates and invented receipt paths without weakening final acceptance. `resume` authorizes the queued experiments; `start` also
+Frozen continuation names the current stage; its frozen run payload owns the checks; discovery delivers evidence/protocol, later stages test alternatives, final audit retains every original requirement. Project executors declare complete file generations through `evolution_artifact`; independent reviewers receive bounded immutable `artifact_evidence` reads, and incomplete capture/coverage remains unknown (see `STAGE_OUTCOMES.md`). File citations need observed writes/reads; tool output can be cited directly. To prepare raw-file identities without retaining source content, evolution_artifact accepts fingerprint_path alone: SHA-256 is computed from regular, non-symlink, project-owned bytes with cancellation, stability and final executor checks. Optional fingerprint_scope_field selects a digest from this run’s frozen measurement_scope; expected_sha256 comes from the frozen protocol and matches_precommit is computed by the server; the caller cannot replace the expected digest. A changed file reports its actual hash and mismatch without rewriting the protocol; changed protocol/authority during reading refuses delivery. Raw-file equality is not input-consumption proof. It retains no content and grants no execution/reproduction proof; declarations remain the content-retention path. Problem: message compaction could discard a live-file hash before independent review. Decision: append owner/run/task/project-bound immutable read receipts in evolution.artifact_fingerprints.v1 and CAS-publish head/count in the artifact manifest. Terminal artifact_evidence freezes and streams these receipts newest first, with sequence and observed time, without live-file rereads. Missing/corrupt/foreign chains and false ACKs refuse; identical lost ACKs and later writers preserve published receipts. Model-message-only hashes were rejected because compaction loses forensic evidence; matching hashes cannot prove input use. A 100-read probe retains about 68 KB of node JSON and a 342-byte manifest, excluding storage overhead. Receipt count and declared snapshot content have no private admission caps. Terminal parts and reviewer pages retain bounded transport and coverage. Lifecycle follows the owned stage manifest; unpublished nodes carry no source authority, and future reachability reclamation must preserve published roots. Reusing model-authored digest text or buffering a large file was rejected. One private 64 MiB read took 60.19 ms with 2,119,865 peak traced Python bytes after warmup (not process RSS or an end-to-end benchmark). This avoids overlapping stage mandates and invented receipt paths without weakening final acceptance. `resume` authorizes the queued experiments; `start` also
 commits and submits the first launch immediately; see Preparation and experiment checkpoints for its activation fence.
 The default frontier is discovery, measured baseline, alternatives, integration/stress checks, fresh reproduction/held-out validation of the frozen integrated generation, then the final original-objective audit. Independent reviewers receive the exact frozen executor context as untrusted source material, including recent failure/repair previews and omitted-history indicators. Context links grant no extra authority. New review launches with a nonempty frozen program history expose only evolution_source/evolution_review even when the current submission is short and has no large-source descriptor. A history-only reviewer’s ordinary action=list returns an empty current-source list without a fabricated coverage/completion record; current-source read still refuses absent frozen sources. This distinguishes source absence from malformed requests, avoiding repeated failing discovery calls while preserving unknown historical validity. History-only reviewers can submit pass/fail/unknown through the same terminal review port without inventing a current large-source coverage record; ordinary adjudication still owns acceptance. Prepared submission includes frozen context, scientific protocol and required numerical outcome in its identity fence, so changed history, thresholds or targets invalidate delivery. Problem: scientific fields were omitted from the prepared submission identity although they define acceptance. Decision: bind the full protocol and target through the existing live verification port; accepting an older prepared judgment after criteria changed was rejected. Scientific review preparation also compares those fields with the sealed executor outcome named by the frozen review launch, detecting prior drift or removal. The scientific archive must also be an executing outcome from the current episode and attempt. Problem: the same protocol could otherwise match a different attempt or wrong-stage record. Decision: compare the archived execution identity alongside scientific fields; protocol equality alone was rejected. Read-only review recovery retains the same executor episode/attempt, and mismatch never authorizes automatic replay. Native adjudication applies the same check to direct JSON replies; drift remains unknown/needs_attention with scientific_review_binding_changed, without automatic executor replay. Problem: a new prepared binding could otherwise bless criteria already changed before preparation. Decision: anchor it to the archived experiment as well as live submission identity. Nonscientific legacy reviews retain their original scope; no new cache/worker is introduced. Problem: exposed review submission still refused short history-only tasks. Decision: reuse the source-tool availability predicate and distinguish absent current sources from unread required sources; bypassing coverage for existing sources was rejected. The same shared remaining tool budget and deadline apply; stored legacy launch limits are not increased. Prompt exposure is not authority: every history read still verifies current owner/program binding. Problem: descriptor-only tool exposure made short submissions unable to inspect earlier feedback. Decision: one source-tool availability predicate drives configuration, limits and prompt; silently adding write tools or treating history as current coverage was rejected. evolution_source admits historical originals only from the reviewer’s current owned program, at settled sequences no later than the executor context’s frozen settled_through. action=list with program_id and sequence resolves archived run/source identities without knowing old run IDs, preserving bounded receipt pagination and the frozen sequence boundary. Supplying a run ID still requires exact archived membership; ordinary current-run list remains unchanged. Sequence/run membership, sealed source digests and current program/task binding are checked before and after I/O. The review submission port includes background_evidence_source in the same current-source inspection list and delivery identity fence. Problem: native adjudication rejected unread background evidence only after an early tool submission had already ended review. Decision: keep positive/unknown submissions in the reviewer until original background pages are received, preserving the existing negative-counterexample rule; closing review and re-running experiments was rejected. Historical delivery never becomes current submission coverage or permits exploration writes; unavailable relevant history remains unknown rather than proving independence. Reads reuse bounded pages and existing storage, with no new worker or growing header. Selected program detail and catalog/model reads launch concurrently within the existing single controller flight: the initial batch grows from two to three concurrent requests, with unchanged total request count and no new timer, cache or worker. Shared abort/route epochs still fence all responses; synchronous detail adapter failures remain contained and preserve prior confirmed evidence. Problem: waiting for catalogs before starting independent detail reads added serial latency to every refresh. Decision: batch those reads, retaining dependent run/history reads after confirmed detail; a second refresh loop was rejected. Deterministic tests hold catalogs unresolved and confirm exactly one selected detail starts, including across a route change; this establishes request scheduling, not end-to-end latency under real load. The notebook current-experiment projection accepts status, usage warnings and task identity only from the exact current run ID; foreign or late prior-run snapshots project preparation/unavailable state. Problem: task links checked identity but status and usage did not. Decision: filter once before the signature and all projections; trusting receipt arrival order was rejected. Problem: executor-only history hid earlier selection feedback from review. Decision: carry the same immutable context into new review prompts; relying on the current submission alone was rejected. A validation-generation successor’s independent review also receives server-derived validation_feedback_reuse: the confirmed direct-parent numerical failure, old/new candidate digests, equality of declared dataset/split digests and archived parent source references. It reads one parent without scanning lifetime history and introduces no worker/cache. Problem: current-only numerical evidence could conceal feedback-driven repair on the same declared holdout. Decision: expose owned direct-parent facts before review; trusting executor prose or equating new seeds/digests with fresh data was rejected. Facts do not attest actual data use or statistical validity and grant no automatic verdict. Newly frozen evidence-review policy v2 additionally requires full direct-parent original delivery to successful final provider inputs before positive acceptance. Up to four source coverage records, each with at most 64 merged ranges, remain separate from current submission coverage and are retained/restored in terminal archives. Read-only retrieval, previews, clipped inputs and unsuccessful dispatch do not count; legacy v1 remains unchanged. The source port reports historical unread offsets and canonical review_next_action combining current and historical delivery scopes. Current-only completion no longer suggests overall readiness: advice distinguishes reading current, reading history, submitting an explicitly unknown objective for unavailable references, and independent submission after delivery. The submission guard reuses that pure action derivation while native adjudication retains all authority. Problem: a scope-local submit hint could conflict with required unread history and cause repeated rejected submissions. Decision: derive one combined advisory action; conflating the two coverage stores or granting acceptance from delivery was rejected. This adds no I/O, worker or retained state. Each historical progress query obtains one fresh lineage observation and uses it to distinguish absent history from unavailable required references; no cross-request authority cache is added. Instrumented absent/empty-history queries reduced lineage reads from two to one, while a later query observes changed server facts. Duplicate reads inside one query were rejected because they add cost and can describe different observations. The terminal submission port keeps unfinished positive inspections in the reviewer, while native adjudication projects unreceived parents to unknown. Problem: merely exposing old failure sources allowed positive review without receiving them. Decision: retain exact wire delivery receipts under a frozen policy; counting a tool read or trusting prose was rejected. Missing required parent references remain incomplete, never an empty-source pass. Once current originals are received, an explicitly unknown objective can close that unavailable-history review through the ordinary terminal port; positive submission remains refused. Native settlement records validation_parent_originals_unavailable and needs_attention even with unbounded repair attempts, without re-running the executor. Problem: impossible parent reads could cause model/read loops and automatic experimental replay. Decision: retain a concrete unknown terminal blocker; fabricated coverage and repeated execution to reconstruct immutable history were rejected. Legacy reviews and available-but-unread sources retain their frozen inspection rules. Complete fixture history coverage occupies less than 4 KiB JSON, excluding storage overhead; partial deliveries remain bounded by four sources and 64 ranges each. The actual terminal persistence callback also freezes scientific protocol/outcome and program context into its review factory; the ordinary owned result commit is tested, not only direct advancement. Delivery confirmation rechecks the live reviewer after source-validation I/O and before publishing any current/historical coverage. Problem: cancellation/replacement during that I/O could leave late access receipts. Decision: stage updates privately and revalidate the same authority before publication; relying only on the initial check was rejected. Fault injection covers cancellation, reviewer replacement and Stop. Coverage proves access, not understanding or statistical validity, and introduces no worker/cache or lifetime-history array. New default validation independently reviews validation-feedback exposure and adaptive selection across repairs. Fresh commands/seeds/candidate digests do not establish an untouched test set. Generalization claims need untouched independent confirmation or an inspected justified adaptive-validity procedure; unresolved exposure/selection bias stays unknown despite numerical consistency. New confirmation uses ordinary separate frontier admission without rewriting frozen controls. Saved frontiers retain their original checks. Problem: repeated repair on the same split can turn validation into selection. Decision: make exposure validity an explicit independent acceptance requirement; assuming preregistration or ordinary standard errors resolve adaptivity was rejected (https://arxiv.org/abs/1506.02629). New default validation steps require a frozen measurement scope: dataset/split digests, matched budget, and candidate/baseline generation digests. Pre-registration, prefilled intake, synthesis acceptance and validation launch enforce the same stamped policy. The executor-facing validation_context lists required_measurement_scope_fields derived from that policy and the retained protocol schema; refusal messages identify missing fields, avoiding trial-and-error model dispatch or a duplicate checklist. Optional identity fields were rejected for new defaults because different inputs or generations could otherwise be combined; saved steps without this policy retain their exact admission. These reported identities constrain consistency, not data authenticity or independent reproduction. New default validation also has an independently judged execution-provenance requirement linking measured commands to the actual candidate/control code, configuration, data and split used. Problem: raw-file hash equality and model-reported identities could be mistaken for input-use evidence. Decision: reviewer guidance separates snapshot content from file_fingerprint read receipts and keeps missing provenance unknown; unknown/fail blocks final audit even when numerical checks pass. Merely naming versions was rejected because it does not establish what execution consumed. This is an explicit review boundary, not an automated execution tracer; saved frontiers retain their original checks. An opt-in operator diagnostic now runs explicit command arguments under strace with selected project paths (python -m scripts.trace_experiment_reads --project ROOT --file DATA --timeout-seconds SECONDS -- COMMAND). It streams read/pread64 and readable mmap events without retaining contents or raw traces, checks initial hashes and generation metadata stability, and marks incomplete transport/timeout separately. The core file_read_probe.run_observed_process adapter now reuses the shared run_command_process lifecycle, preserves command_result and streaming separately from read facts, and forwards explicit task/runtime cancellation. The operator CLI suppresses that output from its JSON. A trusted process guard installs tracer cleanup on the allocated process; failure reports allocated ambiguity and releases ownership, while namespace supervisors keep their original cleanup. Preflight hashes observe Stop between bounded reads. One monotonic caller timeout covers hashing/admission and command execution; exhausted preparation refuses before allocation and the managed process receives only the remaining budget. Explicit wall-clock deadlines remain independent, and timeout=None introduces no new cap. Resetting the timeout after hashing was rejected because large inputs could monopolize a bounded call. Tracing alters execution timing: observed duration cannot stand in for uninstrumented performance. A real directory-swap probe demonstrates that an unchanged original file and a read at the same visible path can still load substitute bytes; initial hashes/path traces therefore cannot attest exact loaded bytes or namespace identity. The internal adapter now supports pin_inputs=True with whole @tofu-input:relative-path argv tokens: only referenced selected files are inherited as borrowed read-only descriptors, offsets reset after hashing, and lease descriptors remain preserved. A real directory-swap execution then reads original bytes instead of substitute paths. Reports separate initial descriptor metadata stability from final-path identity, retain logical/effective command hashes, and never infer consumption or immutable contents from delivery; in-place mutation remains possible and is reported. Invalid tokens/descriptor grants refuse before allocation. Optional expected_input_sha256 snapshots the caller-provided expected map, requires canonical SHA-256 for every selected path, and refuses digest mismatch before allocation. Open-file metadata is rechecked immediately before launch to catch changes after hashing; callers can use CLI --expected-sha256 PATH=HASH. Caller expectations alone are not application preregistration. input_binding.prepare_input_binding now derives an immutable read-only plan from the current owned executor, project and normalized frozen protocol, accepting only scope-field paths. It rejects absent scope, foreign/stale tasks and conflicting digests for one path. InputBinding.check_current revalidates owner/task/project/full-protocol identity at the shared observer admission_check before allocation; path/stat checks follow it. Preparation writes nothing and grants no command approval or replay; existing argv/environment admission must still wrap execution. The observed adapter now emits evidence_result, routing file_read_observations JSON through stderr while preserving raw stdout and the complete terminal status trailer. When supplied to the existing result-settlement pipeline, the owned immutable command-original capture retains read observations after hooks and before message budgets; compaction cannot erase them. Numerical audit ignores read-only originals as measurements, while still refusing malformed numerical evidence. Marker text only routes capture and grants no authenticity/semantic-use authority. Real command comparison-count evidence remains numerically valid/refuted after compaction and terminal archival, regardless of model win claims. The real task-loop/API fixture now also executes a binary candidate against a linear control, obtaining a supported numerical improvement before independent review. An unknown independent judgment retains needs_attention and blocks final program completion despite the executor claiming victory; positive/negative originals and frozen fingerprints survive both storage backends and restart. Controlled providers and this synthetic search workload validate acceptance boundaries, not autonomous discovery, novelty, statistical independence or competitive research quality. run_command now exposes optional frozen_input_paths (frozen digest field to project-relative raw-file path), derives expectations through the owned input plan, and returns archived read evidence through ordinary tool settlement. It retains command/write/network/environment/sandbox preparation and skips shortcut execution that could bypass observation. Observed mode closes stdin; tracing changes timing and visible path/namespace limits remain explicit, so use it for provenance probes rather than uninstrumented performance claims. This observes local raw-file identities, not aggregate/configuration hashes or remote-host file consumption; mismatch refuses rather than rewriting the protocol. Descriptor pinning remains internal structured-argv capability, not hidden rewriting of shell strings. Mutation during execution and semantic input use remain separate unresolved evidence. The CLI exposes --pin-inputs; structured descriptor binding remains internal. Immutable contents and semantic input use still require stronger execution/checker boundaries. This grants no scientific acceptance, complete dependency or semantic input-use proof; the observer is not same-UID tamper resistant. Missing tracer refuses before executing; timeout cleans tracer-linked descendants including detached processes. Trace drain exhaustion marks evidence incomplete, signals cooperative reader Stop and waits for actual thread exit before closing its descriptor or publishing rows. Problem: a second bounded join could return while parsing still mutated the report. Decision: await quiescence after the drain bound; abandoning a live reader and closing its potentially reusable descriptor was rejected. This may extend teardown beyond the execution timeout while bounded parsing finishes, without changing scientific success. Problem: application-reported digests cannot establish OS access. Decision: establish the kernel-observation port with real commands before attaching it to command receipts; treating a mapping as byte consumption or silently running without the tracer was rejected. See test_evolution_kernel_read_probe.py; strace path/descriptor filtering is documented at https://strace.io/. Problem: a confirmed negative frozen candidate could never pass again after repair because its old digest remained queued. Decision: an explicit refresh_validation_generation replan, approved by ordinary independent review, creates a server-linked validation successor and retains the immutable failed experiment. The diagnosis instruction names this route explicitly, separating retained failure evidence from successor validation; merely exposing the flag in the tool schema was insufficient guidance. Its final follow-up must be synthesis; before successor launch, preregistration may change only candidate_digest, preserving all checks, controls and required outcome. The reviewer receives the exact stored proposal and original validation. Successor admission also rejects candidate digests already failed anywhere in the same linked validation lineage, checking descending parent sequences and unchanged controls before registration. Problem: that scan made repeated admission linear in failed generations. Decision: after independent diagnosis review, prepare owner/program/control-bound immutable failed-candidate trie nodes; the successor root publishes only in the existing program CAS. Revalidate the direct parent against its complete terminal scientific evidence, then use bounded membership lookup for older failures. Present missing/corrupt indexes refuse instead of silently scanning; index-free legacy chains retain full descending/control checks and bootstrap once at the next reviewed renewal. Numeric-equivalent budget notation preserves control identity. Full ancestor scans and growing header arrays were rejected for repeated admission. Index membership grants no scientific pass or replay authority. Silent protocol rewrite and repeating the old candidate were rejected; unknown/incomplete scientific failures cannot authorize renewal. The three- and nine-generation contract tests follow reviewed renewals across archive pagination and verify every earlier failure/protocol stays unchanged while each validation retains its immediate parent and original acceptance. Instrumented preregistration reduced the previous 1–8 archive pages to one direct-parent page per renewal. A cold 1,200-candidate fixture reads 3–5 trie nodes per query (at most 65 by key depth); its 4,716 immutable prepared nodes retain 3,009,730 JSON bytes including older roots, excluding storage overhead. Each candidate insertion prepares at most 65 nodes, reuses content hashes on retry and publishes under CAS; orphan prepared nodes never authorize membership and future reachability reclamation must preserve published roots. Cache sizing inherits the shared launch-capacity probe, with no new worker or queue. Reviews/measurements are synthetic and do not prove research quality. A successor adds a parent sequence and constant-size root/count reference (158 UTF-8 bytes in the normalized synthetic fixture); bulky membership stays in evolution.validation_candidate_nodes.v1.
 These are runnable, independently reviewed experiments; their results are not inferred from a milestone label.
@@ -411,23 +326,10 @@ The gate proves command observation, not benchmark validity, specified-candidate
 Terminal preparation archives available completed background outputs, including failures, in the existing tool-evidence source (`STAGE_OUTCOMES.md`). This does not prove benchmark correctness: substantive review checks actual outputs and remains unknown when missing. Existing registry recovery/retention apply; evicted handles cannot be reconstructed from claims. Deduplicated reads perform no waits, model calls, subprocesses or registry mutations.
 Measurements: 1,024 unavailable-handle lookups took 3.69 ms/45,344 traced peak bytes; 1,024 command rows with unmatched replies took 0.289 ms/41,264 bytes. These measure lookup/correlation overhead, not experiment cost/accuracy. The six-stage queue is 9,640 UTF-8 bytes (2,371 above five): bounded planning data, not a lifetime-growing result store.
 
-The header stores at most 32 pending steps and one frozen launch intent. Owner expansions insert before the original final audit, never changing the objective or deleting completed experiments.
+The header stores the complete pending frontier and one frozen launch intent. Owner expansions insert before the original final audit, never changing the objective or deleting completed experiments.
 Each expansion requires an idempotency key; its header marker remains until the immutable command receipt is acknowledged, before a successor can replace it. Ambiguous POST retries are exactly once.
 
-Every experiment is an existing evolution run with independent execution/review and its own
-episodes/learning receipts. Exploration has no default overall attempt ceiling. New programs default
-to `auto_replan=true`: an omitted `max_attempts` uses three attempts per technique before diagnosis.
-Explicit `max_attempts=0/null` keeps unlimited repair; false disables automatic diagnosis and keeps
-the unlimited omitted default. Existing frozen intents remain exact; legacy program headers without
-`auto_replan` retain manual recovery.
-Fresh start/resume/retry checks the frozen review reserve against remaining finite token/tool/time caps before enrollment, through the existing run validator. Equal reserve leaves no execution slice; one extra unit permits admission, not affordable review or acceptance. The notebook projects confirmed usage/server timestamps. Existing committed intents retain their payload/deadline. Launch-only refusal permitted unusable enrollment; UI-only disabling misses direct API clients.
-Launch intent, remaining budget, absolute program deadline and context commit
-before submission. A stable program/sequence key binds exactly one run. Retries reuse the frozen request. Pause prevents new submissions but lets
-existing work settle; cancel fences progression and forwards cancellation to
-the current run. If cancellation races submission, the returned run is cancelled
-after submission. This race cannot promise zero side effects before cooperative task cancellation.
-Cancelled programs remain enrolled while their current run drains. Header CAS counts newly consumed stages once; a terminal receipt or proved owner loss seals the experiment.
-Unsettled/lost usage stays incomplete; cancellation and settlement submit no successor and preserve the original frontier. Studio keeps its five-second refresh while cancelled work drains, then returns to the ordinary thirty-second interval.
+Every experiment is an existing evolution run with independent execution/review and its own episodes/learning receipts. Exploration has no default overall attempt ceiling. New programs default to `auto_replan=true`: an omitted `max_attempts` uses three attempts per technique before diagnosis. Explicit `max_attempts=0/null` keeps unlimited repair; false disables automatic diagnosis and keeps the unlimited omitted default. Existing frozen intents remain exact; legacy program headers without `auto_replan` retain manual recovery. Fresh start/resume/retry checks the frozen review reserve against remaining finite token/tool/time caps before enrollment, through the existing run validator. Equal reserve leaves no execution slice; one extra unit permits admission, not affordable review or acceptance. The notebook projects confirmed usage/server timestamps. Existing committed intents retain their payload/deadline. Launch-only refusal permitted unusable enrollment; UI-only disabling misses direct API clients. Launch intent, remaining budget, absolute program deadline and context commit before submission. A stable program/sequence key binds exactly one run. Retries reuse the frozen request. Pause prevents new submissions but lets existing work settle; cancel fences progression and forwards cancellation to the current run. If cancellation races submission, the returned run is cancelled after submission. This race cannot promise zero side effects before cooperative task cancellation. Cancelled programs remain enrolled while their current run drains. Header CAS counts newly consumed stages once; a terminal receipt or proved owner loss seals the experiment. Unsettled/lost usage stays incomplete; cancellation and settlement submit no successor and preserve the original frontier. Studio keeps its five-second refresh while cancelled work drains, then returns to the ordinary thirty-second interval.
 
 An experiment receipt commits before header progression, so reconciliation counts usage once.
 It retains results, reviews, negative outcomes and usage; run/episode/task IDs locate execution evidence.
@@ -445,22 +347,11 @@ projects into the objective criterion and prevents a passing aggregate rubric
 from declaring success. This narrower audit is stored on the run and experiment;
 the episode keeps the canonical three-criterion verdict and learning boundary.
 
-Experiment history uses integer sequence cursors, up to 50 receipts per read.
-Continuation loads only the latest six receipts, with explicit 800-character
-previews and truncation/omission markers. Durable originals are never evicted.
-The 400-receipt growth test verifies six experiment reads for a new intent and
-that the first full receipt remains accessible. This is archive-backed bounded
-continuation memory. The current executor can use `evolution_explore` to recall
-older receipts by literal query with a 50-receipt scan window, eight hits and an
-explicit continuation cursor; `read` retrieves any settled receipt in 6,000
-character chunks, including negative results and independent review. Semantic recall can explicitly scan frozen deliverable/tool originals beyond previews, binding task/kind/digest/Unicode length and reporting missing references; scope and cursor remain explicit. No match
-in one window is not absence from the full archive. Context that exceeds the declared 24,000
-character launch bound reports `needs_attention`, rather than silently dropping
-requirements.
+Experiment history uses integer sequence cursors, up to 50 receipts per read. Continuation loads only the latest six receipts, with explicit 800-character previews and truncation/omission markers. Durable originals are never evicted. The 400-receipt growth test verifies six experiment reads for a new intent and that the first full receipt remains accessible. This is archive-backed bounded continuation memory. The current executor can use `evolution_explore` to recall older receipts by literal query with a 50-receipt scan window, eight hits and an explicit continuation cursor; `read` retrieves any settled receipt in 6,000 character chunks, including negative results and independent review. Semantic recall can explicitly scan frozen deliverable/tool originals beyond previews, binding task/kind/digest/Unicode length and reporting missing references; scope and cursor remain explicit. No match in one window is not absence from the full archive. The selected continuation window preserves its complete original objective, acceptance, current hypothesis and error text. Serialized size does not shorten these fields or refuse launch; full older receipts remain available through explicit archive cursors. Problem: a 24,000-character gate truncated error text and moved current mission fields behind an extra read, then refused continuation if metadata still exceeded that size. Decision: freeze the selected window without that gate, keeping history pagination and honest result-preview markers. Alternatives: larger magic limits only move the failure; embedding all lifetime history would discard the stable paged archive boundary. A synthetic selected window with complete mission, hypothesis and six errors serializes to 54,759 characters / 91,981 UTF-8 bytes; freezing took 0.33 ms with 115,122 bytes traced peak on the test host. The selected history window still bounds record reads, while requirements and error text remain exact. This measures serialization, not model context capacity.
 
-The existing serving-loop reaper calls `sweep_programs`; no new thread, ticker
-or agent loop is added. Its owner-scoped durable registry holds up to 4,096
-unfinished programs and rotates up to 32 visits per cadence. Each visit performs
+The existing serving-loop reaper calls `sweep_programs`; no new ticker or
+agent loop is added. Each pass owns and joins its demand workers. Its owner-scoped durable registry retains all
+unfinished programs and visits every enrolled ID per cadence. Each visit performs
 one launch-intent, submission or settlement operation. Idle does one registry
 read and no write; scans never enumerate archived programs. Deferred failures
 stay enrolled. The deployment adapter uses its existing configured owner; the
@@ -474,30 +365,7 @@ and explicit interruption diagnosis. It still does not automatically resume a
 task lost mid-experiment; restart-safe task continuation and durable semantic
 memory remain required before this fulfills the long-horizon product objective.
 
-**Problem discovery and invention.** Discovery checks the affected audience,
-observed incidents, workarounds and unmet needs; experiment work constructs
-competing technical mechanisms and emerging application scenarios, then tests
-them against a measured baseline. The executor may extend the frontier with
-`evolution_explore action=propose`. Every such step carries a structured
-`hypothesis`: problem, audience, evidence references, baseline, scenario,
-mechanism, expected value, unverified assumptions and a falsifier. These are
-research inputs, never established demand, learning rights or verdicts. The notebook compares two selected original hypotheses and their exact experiment reviews; paging retains only these snapshots, owner changes clear them, and original evidence reads remain explicit. No new transport, timer, model or persistent cache; absent hypotheses are never reconstructed from prose. Every executor proposal adds three mandatory independent-review checks for source
-support, baseline/falsifier measurements and the distinction between observed
-value and unresolved assumptions; model-authored checks cannot remove them.
-Problem evidence names user, trigger, failed workaround and consequence. Selection examines frequency/severity, alternative explanations, causes versus symptoms and low-effort nontechnical workarounds; it records a refuting observation and the cheapest discriminating protocol within the original objective.
-Baselines include adoption and operating effort. Enabling-change necessity compares the same user value against competent present alternatives at equal information, actions and cost; assuming a future prerequisite cannot prove availability or necessity.
-Emerging scenarios retain enabling conditions and untested prerequisites. Conditional protocol delivery may satisfy a stage's checks while all evidence axes remain unknown; absent demand evidence does not establish either demand or its absence.
-An executor may submit its exact final reply via the sole final `evolution_artifact` call with `delivery`; complete selected generations close under the owned manifest CAS, then the ordinary task terminal port freezes the reply and hands off independent review. A prepared intent alone cannot complete or replay a task; provider finish, successful tool receipt, current authority, cancellation and complete consumption remain required. A prototype cannot establish demand or net benefit. Unavailable-alternative claims require inspected comparisons; missing evidence stays unknown and future scenarios remain hypotheses.
-Problem: review of a submission alone can lose the original claim or falsifier.
-Decision: freeze the typed hypothesis on its run, include it and its digest in
-every original review, and require separate demand, feasibility, novelty and
-net-value judgments bound to that digest. Missing, foreign or incomplete reviews
-cannot pass; unread full originals downgrade positive axes to unknown. Acceptance
-still governs experiment verdicts; axis judgments confer no new learning rights.
-Alternatives rejected: rewritten submission claims or technical success as value.
-Bounded continuation memory retains all four reviewer states, never inferring value from completion.
-Receipts retain original hypotheses and all axes; comparison verifies identity
-and shows unresolved axes separately, including for legacy absent assessments.
+**Problem discovery and invention.** Discovery checks the affected audience, observed incidents, workarounds and unmet needs; experiment work constructs competing technical mechanisms and emerging application scenarios, then tests them against a measured baseline. The executor may extend the frontier with `evolution_explore action=propose`. Every such step carries a structured `hypothesis`: problem, audience, evidence references, baseline, scenario, mechanism, expected value, unverified assumptions and a falsifier. These are research inputs, never established demand, learning rights or verdicts. The notebook compares two selected original hypotheses and their exact experiment reviews; paging retains only these snapshots, owner changes clear them, and original evidence reads remain explicit. No new transport, timer, model or persistent cache; absent hypotheses are never reconstructed from prose. Every executor proposal adds three mandatory independent-review checks for source support, baseline/falsifier measurements and the distinction between observed value and unresolved assumptions; model-authored checks cannot remove them. Problem evidence names user, trigger, failed workaround and consequence. Selection examines frequency/severity, alternative explanations, causes versus symptoms and low-effort nontechnical workarounds; it records a refuting observation and the cheapest discriminating protocol within the original objective. Baselines include adoption and operating effort. Enabling-change necessity compares the same user value against competent present alternatives at equal information, actions and cost; assuming a future prerequisite cannot prove availability or necessity. Emerging scenarios retain enabling conditions and untested prerequisites. Conditional protocol delivery may satisfy a stage's checks while all evidence axes remain unknown; absent demand evidence does not establish either demand or its absence. An executor may submit its exact final reply via the sole final `evolution_artifact` call with `delivery`; complete selected generations close under the owned manifest CAS, then the ordinary task terminal port freezes the reply and hands off independent review. A prepared intent alone cannot complete or replay a task; provider finish, successful tool receipt, current authority, cancellation and complete consumption remain required. A prototype cannot establish demand or net benefit. Unavailable-alternative claims require inspected comparisons; missing evidence stays unknown and future scenarios remain hypotheses. Problem: review of a submission alone can lose the original claim or falsifier. Decision: freeze the typed hypothesis on its run, include it and its digest in every original review, and require separate demand, feasibility, novelty and net-value judgments bound to that digest. Missing, foreign or incomplete reviews cannot pass; unread full originals downgrade positive axes to unknown. Acceptance still governs experiment verdicts; axis judgments confer no new learning rights. Alternatives rejected: rewritten submission claims or technical success as value. Bounded continuation memory retains all four reviewer states, never inferring value from completion. Receipts retain original hypotheses and all axes; comparison verifies identity and shows unresolved axes separately, including for legacy absent assessments.
 
 The handler verifies owner, live executor task and current program/run binding;
 reviewers, coordinators, foreign and stale tasks cannot use it. Pause permits
@@ -514,25 +382,12 @@ source-bound quotes and the ordinary child budget; see [EXPLORATION_MEMORY.md](E
 **Failure diagnosis and replanning.** A settled negative review with at least one
 `fail`, no `unknown`, and no execution error permits a `replan` ahead of the unchanged failed step; `recovery_of` locates its immutable receipt.
 Ordinary runs execute diagnosis and independent review; no new model loop exists. Pause records the frontier without admitting execution.
-Missing tasks, malformed reviews, uncertain evidence, exhausted budgets and a full 32-step frontier require attention, preserving work.
+Missing tasks, malformed reviews, uncertain evidence and exhausted explicit budgets require attention, preserving work. Frontier size does not require attention.
 Problem: consistent negative measurements previously halted automatic exploration. Decision: a completed measurement missing its frozen required outcome also permits reviewed diagnosis, preserving the experiment and acceptance.
 Programs read the owner-bound immutable execution outcome or completed background join, require a valid numerical audit bound to the full frozen protocol digest, and verify the mismatch. Error labels, missing originals, unverified numbers and unresolved background work do not qualify.
 Alternatives: treat refutation as success or blindly repeat measurements; both bypass causal diagnosis. Eligible failures add bounded original/join metadata reads, no worker or persistent record type.
 
-During diagnosis, `evolution_explore action=replan` submits a reason and one to
-eight structured hypotheses. The current executor, active program and exact
-failed receipt/step are checked again at the proposal CAS. One proposal freezes
-per diagnosis run; retries preserve its identity and content. Renaming the same
-failed instruction/hypothesis is rejected as an unchanged technique. The queue does
-not change yet. Each follow-up has the mandatory hypothesis checks. The normal
-independent review must pass and a matching proposal must exist before the
-settlement CAS inserts follow-ups ahead of the original failed checks. Final
-audits remain last even when the failed experiment was itself the final audit.
-The proposal is included in the immutable diagnosis receipt before advancement;
-header/acknowledgement failure cannot duplicate experiments or usage. Failed
-diagnosis preserves the queued target and requires attention rather than
-recursively manufacturing further diagnoses. A later explicit retry gets a new
-run and must submit its own proposal. Candidate plans carry no learning rights.
+During diagnosis, `evolution_explore action=replan` submits a reason and one to eight structured hypotheses. The current executor, active program and exact failed receipt/step are checked again at the proposal CAS. One proposal freezes per diagnosis run; retries preserve its identity and content. Renaming the same failed instruction/hypothesis is rejected as an unchanged technique. The queue does not change yet. Each follow-up has the mandatory hypothesis checks. The normal independent review must pass and a matching proposal must exist before the settlement CAS inserts follow-ups ahead of the original failed checks. Final audits remain last even when the failed experiment was itself the final audit. The proposal is included in the immutable diagnosis receipt before advancement; header/acknowledgement failure cannot duplicate experiments or usage. Failed diagnosis preserves the queued target and requires attention rather than recursively manufacturing further diagnoses. A later explicit retry gets a new run and must submit its own proposal. Candidate plans carry no learning rights.
 
 The notebook offers automatic diagnosis or manual retry at creation, displays
 the recovery source and staged candidate plan, and retains submitted proposals
@@ -549,40 +404,11 @@ and paged `experiments`. Creation/expansion require `Idempotency-Key`; all route
 use the shared `tasks` scope and canonical errors. Reads never progress work.
 Typed browser transport lives in `frontend/src/api/evolution-programs.ts`.
 
-The primary `#/evolution` surface is `programs/page.ts`: a program notebook
-with original checks, current execution, queued experiments and a paged receipt
-ledger; bounded headings retain the full goal in a stable keyboard-readable disclosure. Existing execution rooms remain at `#/evolution/runs`; research and
-learning evidence keep their existing routes. The notebook submits a saved
-program before explicitly starting it. An ambiguous creation retry retains the
-body/key; once the program ID is known, a lost start response retries that ID.
-Ambiguous expansion keys survive visits to other programs within the bounded
-draft lifetime. A selected model that disappears from the catalog remains
-selected with an unavailable label; submitting it uses ordinary model admission,
-without silently changing the selection.
-Mobile sidebar children retain their intrinsic height within the finite
-navigation height; overflow scrolls the sidebar instead of compressing its
-new-exploration action or clipping the program catalogue. Default flex shrink
-compressed the action to about 18 px in a 390 px touch viewport.
-The form accepts an optional server-side project directory, resolved and pinned
-at admission and carried as string roots in each executor's ordinary project configuration.
-Reviewers retain their tool-free configuration and receive no writable project.
-An unavailable/non-directory path fails before creation or execution.
+The primary `#/evolution` surface is `programs/page.ts`: a program notebook with original checks, current execution, queued experiments and a paged receipt ledger; bounded headings retain the full goal in a stable keyboard-readable disclosure. Existing execution rooms remain at `#/evolution/runs`; research and learning evidence keep their existing routes. The notebook submits a saved program before explicitly starting it. An ambiguous creation retry retains the body/key; once the program ID is known, a lost start response retries that ID. Ambiguous expansion keys survive visits to other programs within the bounded draft lifetime. A selected model that disappears from the catalog remains selected with an unavailable label; submitting it uses ordinary model admission, without silently changing the selection. Mobile sidebar children retain their intrinsic height within the finite navigation height; overflow scrolls the sidebar instead of compressing its new-exploration action or clipping the program catalogue. Default flex shrink compressed the action to about 18 px in a 390 px touch viewport. The form accepts an optional server-side project directory, resolved and pinned at admission and carried as string roots in each executor's ordinary project configuration. Reviewers retain their tool-free configuration and receive no writable project. An unavailable/non-directory path fails before creation or execution.
 
 Problem: an original and its continuation can share the same clamped goal prefix; a status tooltip cannot distinguish them on touch screens. Decision: each catalogue entry visibly pairs its confirmed state with its immutable creation time, formatted in the current document language and local timezone. The full goal remains its label. Metadata updates preserve the button and focus. Alternatives: unclamping every full goal crowds navigation; hover-only status requires opening each candidate on touch screens. This projects existing owner summaries and adds no query, timer, durable state or authority.
 
-Catalog pages return at most 50 owner summaries in identifier order via `after`/`before`; the notebook keeps one 20-item page. Native pressure reduces page size at the same cursor.
-These are live views: first-page refresh reveals insertions behind a cursor. Problem: disabling read controls or hiding selected detail during polling loses keyboard focus.
-Decision: catalog/receipt navigation preserves selected evidence, focus and drafts until admission;
-focusable `aria-disabled` controls reject unavailable/repeated actions. Explicit paging supersedes
-background reads through the existing epoch and trailing-refresh fence, with visible read-busy state.
-Alternatives: disabling every poll interrupts input; parallel read loops admit stale pages.
-Receipts load 20 at a time; originals stay collapsed. Problem: a failed final-receipt read on older pages erased confirmed delivery. Decision: retain one confirmed final receipt only for the completed program and terminal sequence; either the selected page or one bounded dedicated read verifies matching page sequence, program, final kind and completed outcome. Transport failures keep its text/DOM/selection with a localized warning; successful absence/mismatch, owner or terminal-identity changes clear it. Recovery clears the warning. Notebook preview/receipt controls explicitly open the shared outcome reader: one 6,000-Unicode-character page, separate delivery/tool evidence, frozen task/digest/length/source-kind admission, provenance/consumption/verdict, retry and close-focus restoration. Program change, hidden state and disposal abort reads; paging/polling preserve the source island. Alternatives rejected: history-page absence is not delivery absence; trusting the first dedicated row can label unrelated/failed work as delivery; larger inline previews hide original coverage, a second source reader/poller or browser-persisted evidence creates another authority. Reading original output never grants review/learning rights or executes a model.
-One visible read flight polls at five/30 seconds for active/idle work, never hidden/disposed pages;
-creator/expansion inputs keep DOM identity; program, execution and receipt responses must match their requested owner before admission. Failed or mismatched run reads retain confirmed questions only for the same run, preserving answer drafts/focus with a visible read error. Question identity includes program, run and guidance; successful empty reads or owner changes clear old questions. The current experiment projection binds links to program/run/sequence, preserves inspection focus and same-experiment hypothesis expansion, and distinguishes unavailable reads from waiting for execution. Failed memory reads retain confirmed source rows and expansion/focus alongside the unavailable warning; successful reads replace them. This bounded presentation state grants no execution or learning authority.
-The shell treats the original hashless address as Chat, so returning there does
-not push a new entry and discard forward navigation into the notebook.
-Problem: leaving/reloading the notebook lost unsent inputs and ambiguous write identity. Successful creation retains chosen failure/execution settings for the next goal; acknowledged goal fields clear only if unchanged since submission. The creator exposes cumulative token/tool/time allowances, per-technique attempts and executor/reviewer model choices; empty values preserve server defaults, explicit zero remains unlimited. Saved five-field drafts extend with empty settings without changing an ambiguous original request/key. Role references match the Chat catalog by content independent of JSON key order, preserving the original serialized draft/request identity. Settings freeze on creation and the notebook shows their original limits, roles and known remaining allowances; incomplete consumption leaves remaining finite allowance unknown, and an unsettled current experiment marks it pending. The time allowance begins at first activation for new programs (creation for legacy records) and includes pauses. Decision: `programs/drafts.ts` saves creator, expansion and same-run/question answers in browser storage scoped by authenticated owner and application path; inputs and original creation/append keys restore without submitting. A known created ID retries its original start. The page retains 20 expansion drafts in memory; the browser envelope retains at most 64 forms/512 KiB, 32 fields/form and 10,000 characters/field. The store never reads/saves session tokens or caches server progress/evidence; browser input never grants execution authority.
-Successful ACKs clear only the exact submitted envelope; newer edits survive. Every write merges current storage so separate forms/tabs do not erase each other. Unknown/changed owners, unavailable storage, malformed envelopes and full capacity fail visibly without truncation or eviction; pagehide/disposal capture current inputs and remove listeners. Browser clearing can remove these drafts. Alternatives rejected: page memory cannot recover a reload; automatic submission/reconstructed keys can duplicate work; a second server transcript/draft authority is unnecessary for unsent browser-owned input.
+Catalog pages return at most 50 owner summaries in identifier order via `after`/`before`; the notebook keeps one 20-item page. Native pressure reduces page size at the same cursor. These are live views: first-page refresh reveals insertions behind a cursor. Problem: disabling read controls or hiding selected detail during polling loses keyboard focus. Decision: catalog/receipt navigation preserves selected evidence, focus and drafts until admission; focusable `aria-disabled` controls reject unavailable/repeated actions. Explicit paging supersedes background reads through the existing epoch and trailing-refresh fence, with visible read-busy state. Alternatives: disabling every poll interrupts input; parallel read loops admit stale pages. Receipts load 20 at a time; originals stay collapsed. Problem: a failed final-receipt read on older pages erased confirmed delivery. Decision: retain one confirmed final receipt only for the completed program and terminal sequence; either the selected page or one bounded dedicated read verifies matching page sequence, program, final kind and completed outcome. Transport failures keep its text/DOM/selection with a localized warning; successful absence/mismatch, owner or terminal-identity changes clear it. Recovery clears the warning. Notebook preview/receipt controls explicitly open the shared outcome reader: one 6,000-Unicode-character page, separate delivery/tool evidence, frozen task/digest/length/source-kind admission, provenance/consumption/verdict, retry and close-focus restoration. Program change, hidden state and disposal abort reads; paging/polling preserve the source island. Alternatives rejected: history-page absence is not delivery absence; trusting the first dedicated row can label unrelated/failed work as delivery; larger inline previews hide original coverage, a second source reader/poller or browser-persisted evidence creates another authority. Reading original output never grants review/learning rights or executes a model. One visible read flight polls at five/30 seconds for active/idle work, never hidden/disposed pages; creator/expansion inputs keep DOM identity; program, execution and receipt responses must match their requested owner before admission. Failed or mismatched run reads retain confirmed questions only for the same run, preserving answer drafts/focus with a visible read error. Question identity includes program, run and guidance; successful empty reads or owner changes clear old questions. The current experiment projection binds links to program/run/sequence, preserves inspection focus and same-experiment hypothesis expansion, and distinguishes unavailable reads from waiting for execution. Failed memory reads retain confirmed source rows and expansion/focus alongside the unavailable warning; successful reads replace them. This bounded presentation state grants no execution or learning authority. The shell treats the original hashless address as Chat, so returning there does not push a new entry and discard forward navigation into the notebook. Problem: leaving/reloading the notebook lost unsent inputs and ambiguous write identity. Successful creation retains chosen failure/execution settings for the next goal; acknowledged goal fields clear only if unchanged since submission. The creator exposes cumulative token/tool/time allowances, per-technique attempts and executor/reviewer model choices; empty values preserve server defaults, explicit zero remains unlimited. Saved five-field drafts extend with empty settings without changing an ambiguous original request/key. Role references match the Chat catalog by content independent of JSON key order, preserving the original serialized draft/request identity. Settings freeze on creation and the notebook shows their original limits, roles and known remaining allowances; incomplete consumption leaves remaining finite allowance unknown, and an unsettled current experiment marks it pending. The time allowance begins at first activation for new programs (creation for legacy records) and includes pauses. Decision: `programs/drafts.ts` saves creator, expansion and same-run/question answers in browser storage scoped by authenticated owner and application path; inputs and original creation/append keys restore without submitting. A known created ID retries its original start. The page retains 20 expansion drafts in memory; the browser envelope retains at most 64 forms/512 KiB, 32 fields/form and 10,000 characters/field. The store never reads/saves session tokens or caches server progress/evidence; browser input never grants execution authority. Successful ACKs clear only the exact submitted envelope; newer edits survive. Every write merges current storage so separate forms/tabs do not erase each other. Unknown/changed owners, unavailable storage, malformed envelopes and full capacity fail visibly without truncation or eviction; pagehide/disposal capture current inputs and remove listeners. Browser clearing can remove these drafts. Alternatives rejected: page memory cannot recover a reload; automatic submission/reconstructed keys can duplicate work; a second server transcript/draft authority is unnecessary for unsent browser-owned input.
 
 **Alternatives considered for the surface.** Synthetic milestones obscure real multi-experiment state; replacing the execution room discards its live task/material tools. The notebook instead composes the program API and links into that room, showing measured usage/reviewed receipts, never synthetic progress or previews as execution.
 Verification: `programs.test.cjs` covers input/write/route races. `test_evolution_program_browser.py` exercises the production bundle, actual HTTP/program/run/episode stores and model-task seam at 390/1440 pixels: preparation, pacing, pause/resume, six experiments and delivery after reload.
@@ -616,58 +442,11 @@ reconciliation can finish it without rerunning the work. Cancellation receipts
 can arrive after the cancellation response; they update actual usage and abort
 the episode while preserving `cancelled`.
 
-Generic stages use durable inline tasks with confirmed births and ordinary
-checkpoints/events. `stage_launch.py` freezes pre-hook prompt/config before a `preparing` CAS, with a run-witnessed config digest.
-Dispatch only tightens limits; explicit pre-allocation owner model changes link immutable successors. Legacy prompt-only intents retain their protocol.
-Problem: committed task binding can lose submission across process death.
-Decision: `stage_inputs.py` saves immutable owner-bound post-hook messages/config
-(canonical max 1 MiB minus 16 KiB; serialized max 1 MiB); `stage_dispatch.py` separates binding from submission.
-`pending_recovery.py` permits one cold restoration only after proven process loss
-and startup retirement of the unchanged pending birth, without abort/effect evidence.
-The shared factory skips hooks, rebinds resources, preserves episode/attempt/deadline;
-deterministic identity and two CAS fences contain concurrency and binding ACK loss.
-A `submission_voided` receipt counts observed waiting, zero tokens/tools, no verdict.
-Cancellation must persist before acknowledgment; admitted tasks never replay.
-Alternatives rejected: inferring no effects from status, repeating hooks or resetting
-budgets. Callback/loader consumed-task fences also preserve cancelled handoffs.
+Generic stages use durable inline tasks with confirmed births and ordinary checkpoints/events. `stage_launch.py` freezes pre-hook prompt/config before a `preparing` CAS, with a run-witnessed config digest. Dispatch only tightens limits; explicit pre-allocation owner model changes link immutable successors. Legacy prompt-only intents retain their protocol. Problem: committed task binding can lose submission across process death. Decision: `stage_inputs.py` saves immutable owner-bound post-hook messages/config (complete portable configuration, with multipart storage for large bodies); `stage_dispatch.py` separates binding from submission. `pending_recovery.py` permits one cold restoration only after proven process loss and startup retirement of the unchanged pending birth, without abort/effect evidence. The shared factory skips hooks, rebinds resources, preserves episode/attempt/deadline; deterministic identity and two CAS fences contain concurrency and binding ACK loss. A `submission_voided` receipt counts observed waiting, zero tokens/tools, no verdict. Cancellation must persist before acknowledgment; admitted tasks never replay. Alternatives rejected: inferring no effects from status, repeating hooks or resetting budgets. Callback/loader consumed-task fences also preserve cancelled handoffs.
 
-Stage requests stay outside the run header, are immutable and owner-scoped, and retain at most 200,000 characters per
-request. The growth test retains 400 independent requests while every live pointer stays below 100 JSON characters;
-current recovery uses bounded point reads without scanning history. Missing, foreign or source-mismatched archives
-refuse dispatch, close an open episode without a success verdict and expose `needs_attention`. Transient storage
-failures remain retryable observations. No background worker or timer is added; ordinary callback, program progression
-and run sweep drive the same transition. Initial task admission failure leaves a committed request preparing for retry;
-intake failures before a request remain terminal. Legacy preparing rows without a request retain the 60-second
-interruption diagnosis. Admission ACK loss, cancellation and remaining limits fence replay; legacy absence/process loss
-never authorize executor recreation. A paused program allows current review/repair but no successor.
-`review_recovery.py` re-admits only after the launch-stamped process is confirmed absent (or its PID reused) in the same
-host, kernel boot and PID namespace. A live/inaccessible owner, namespace or host change, or an unstamped legacy task
-requires attention. Executing stages remain unreplayed: their external effects cannot yet be resolved safely. Committed
-terminal outcomes can resume receipt progression with their original output, consumption, and frozen review evidence;
-missing or corrupt archives never authorize executor replay. See [STAGE_OUTCOMES.md](STAGE_OUTCOMES.md). The saved
-review must match the consumed execution receipt and running episode. A CAS-committed loss marker authorizes the next
-ordinary `preparing` admission; concurrent losers are rejected before dispatch. New runs allow two recoveries per
-episode (`max_review_recoveries`, 0 disables); programs inherit overrides. Lossless archived-review projection avoids
-another model call for formatting; unresolved JSON/text-limit failures retain a [finite format recovery
-allowance](RUN_CONTINUITY.md#d4c--terminal-review-format-recovery-running-contract). Cancellation and deadlines remain
-fences. Finite token or tool budgets refuse another review after process loss because consumption is unknown, never
-zero.
+Stage requests stay outside the run header, are immutable and owner-scoped, and retain at most 200,000 characters per request. The growth test retains 400 independent requests while every live pointer stays below 100 JSON characters; current recovery uses bounded point reads without scanning history. Missing, foreign or source-mismatched archives refuse dispatch, close an open episode without a success verdict and expose `needs_attention`. Transient storage failures remain retryable observations. No background worker or timer is added; ordinary callback, program progression and run sweep drive the same transition. Initial task admission failure leaves a committed request preparing for retry; intake failures before a request remain terminal. Legacy preparing rows without a request retain the 60-second interruption diagnosis. Admission ACK loss, cancellation and remaining limits fence replay; legacy absence/process loss never authorize executor recreation. A paused program allows current review/repair but no successor. `review_recovery.py` re-admits only after the launch-stamped process is confirmed absent (or its PID reused) in the same host, kernel boot and PID namespace. A live/inaccessible owner, namespace or host change, or an unstamped legacy task requires attention. Executing stages remain unreplayed: their external effects cannot yet be resolved safely. Committed terminal outcomes can resume receipt progression with their original output, consumption, and frozen review evidence; missing or corrupt archives never authorize executor replay. See [STAGE_OUTCOMES.md](STAGE_OUTCOMES.md). The saved review must match the consumed execution receipt and running episode. A CAS-committed loss marker authorizes the next ordinary `preparing` admission; concurrent losers are rejected before dispatch. New runs allow two recoveries per episode (`max_review_recoveries`, 0 disables); programs inherit overrides. Lossless archived-review projection avoids another model call for formatting; unresolved JSON/text-limit failures retain a [finite format recovery allowance](RUN_CONTINUITY.md#d4c--terminal-review-format-recovery-running-contract). Cancellation and deadlines remain fences. Finite token or tool budgets refuse another review after process loss because consumption is unknown, never zero.
 
-`actuals_complete=false` marks observed lower bounds on the run, episode and program receipt/header; the notebook, studio and report disclose them. The same
-mark persists on stage receipts when model requests lack usage; finite-token successors refuse dispatch. Program headers additionally retain cumulative
-`tool_calls_complete`: confirmed stage loss makes it false permanently; missing provider token usage alone does not invalidate observed tool counts. Finite-tool
-successors refuse when this witness is false, or absent on an incomplete legacy header. Receipts remain immutable and absolute deadlines never restart.
-**Decision.** Track tool completeness separately so known tools remain usable under unlimited tokens. Treating all missing token usage as unknown tools would
-unnecessarily block valid exploration; treating process loss as zero tools would refresh an unverified finite allowance.
-[RUN_CONTINUITY.md](RUN_CONTINUITY.md#d6--one-budget-continuity-rule-running-contract-phase-1) owns the shared request reservation and settlement boundary. Such
-episodes cannot authorize efficiency deltas and are excluded from measured cost priors, self-model calibration and trajectory-cost datasets. A later repair has
-its own episode completeness; its known receipts are never counted twice. Cancellation after confirmed process loss closes the episode without a verdict.
-Process ownership is a bounded launch stamp; each loss retains one small audit marker under the existing record-size bound, with no new worker or timer. An
-owned-process probe measured 0.086 ms median across 200 calls; a representative loss marker occupies 381 JSON bytes. The default admits at most two per episode.
-**Alternatives considered.** Replaying an executor risks duplicate writes;
-restarting an invisible but living reviewer spends twice; assigning zero to
-lost usage poisons cost learning. Frozen read-only review recovery preserves
-progress while leaving side-effect continuation and cross-host recovery open.
+`actuals_complete=false` marks observed lower bounds on the run, episode and program receipt/header; the notebook, studio and report disclose them. The same mark persists on stage receipts when model requests lack usage; finite-token successors refuse dispatch. Program headers additionally retain cumulative `tool_calls_complete`: confirmed stage loss makes it false permanently; missing provider token usage alone does not invalidate observed tool counts. Finite-tool successors refuse when this witness is false, or absent on an incomplete legacy header. Receipts remain immutable and absolute deadlines never restart. **Decision.** Track tool completeness separately so known tools remain usable under unlimited tokens. Treating all missing token usage as unknown tools would unnecessarily block valid exploration; treating process loss as zero tools would refresh an unverified finite allowance. [RUN_CONTINUITY.md](RUN_CONTINUITY.md#d6--one-budget-continuity-rule-running-contract-phase-1) owns the shared request reservation and settlement boundary. Such episodes cannot authorize efficiency deltas and are excluded from measured cost priors, self-model calibration and trajectory-cost datasets. A later repair has its own episode completeness; its known receipts are never counted twice. Cancellation after confirmed process loss closes the episode without a verdict. Process ownership is a bounded launch stamp; each loss retains one small audit marker under the existing record-size bound, with no new worker or timer. An owned-process probe measured 0.086 ms median across 200 calls; a representative loss marker occupies 381 JSON bytes. The default admits at most two per episode. **Alternatives considered.** Replaying an executor risks duplicate writes; restarting an invisible but living reviewer spends twice; assigning zero to lost usage poisons cost learning. Frozen read-only review recovery preserves progress while leaving side-effect continuation and cross-host recovery open.
 
 **Alternatives considered.** Reconstructing a review from a result alone drops
 observed tool evidence; keeping prompts in the run header multiplies polling
@@ -759,18 +538,7 @@ histories, and research outcomes never reached the learning loop.
    existing abort authority. Looking only in the chat registry falsely reports
    a running research task as missing and leaves its worker alive after Stop.
    Receipt folding stays on the generic path; no registry, loop or timer is added.
-3. Settlement consumes the pipeline's own evidence: the terminal research
-   run record maps to the review verdict (`verdict_from_research_record`) —
-   its independent evaluation supplies model-reviewed proposals, so no generic
-   judge task runs. New runs freeze `research_review_version=1`: `done` and
-   `degraded` leave the falsification criterion unknown and settle as partial,
-   with the run needing attention. The mapped goal is exploratory and retains
-   one falsification criterion as unverified intent, not an executable check: measured
-   costs remain available, but proposals cannot train winning strategies,
-   anti-patterns or capability mutations. Error/interruption remains failure.
-   A failed pipeline never silently re-mints an expensive harvest (the owner
-   resubmits an explicit new run). Legacy runs keep their frozen mapping and
-   original verdicts; reads and idempotent submissions never upgrade them.
+3. Settlement consumes the pipeline's own evidence: the terminal research run record maps to the review verdict (`verdict_from_research_record`) — its independent evaluation supplies model-reviewed proposals, so no generic judge task runs. New runs freeze `research_review_version=1`: `done` and `degraded` leave the falsification criterion unknown and settle as partial, with the run needing attention. The mapped goal is exploratory and retains one falsification criterion as unverified intent, not an executable check: measured costs remain available, but proposals cannot train winning strategies, anti-patterns or capability mutations. Error/interruption remains failure. A failed pipeline never silently re-mints an expensive harvest (the owner resubmits an explicit new run). Legacy runs keep their frozen mapping and original verdicts; reads and idempotent submissions never upgrade them.
 
 **Acceptance boundary.** Pipeline completion previously passed a scientific falsification criterion without an experiment. Accepted ideas, high rubric scores and model assertions cannot establish scientific validity or consumer value. Proposal delivery and measured cost are retained as evidence for a subsequent source-bound experiment; scientific acceptance needs independently verifiable criteria in that experiment. Merely changing `done` to `partial` while retaining ordinary learning rights was rejected: partial episodes also mint winning strategies. A second automatic judge or repeated harvest would add cost without providing the missing empirical evidence.
 
@@ -924,31 +692,22 @@ Nested agent/skill-authoring model tasks are excluded from this default lane.
 A run retains one task consumption receipt per stage and one episode per execution
 attempt, plus one plan and one goal. Removing the attempt ceiling means this
 durable ledger grows with actual authorized work; it is not a resident worker
-increase or a promise of infinite storage. The existing 1 MiB record safety
-boundary remains and can require an explicit new run for exceptionally long
-histories; receipts are not silently deleted. **Terminal-capacity decision:**
-before allocating any next execution/review task, the run reserves 256 KiB
-inside that record boundary for its delivery, review, usage receipt and
-maintenance metadata. If the headroom is unavailable it settles as
-`needs_attention` with `run_record_capacity_exhausted; start a follow-up goal`;
-the current episode is settled, existing receipts remain intact and duplicate
-terminal delivery does not allocate another task. The reserve is a physical
-storage guard, not a token, tool, wall-clock or attempt quota. Merely waiting for
-`put_record` to reject an oversized terminal record was rejected: the task has
-already executed by then and cannot reliably publish its terminal status.
+increase or a promise of infinite storage. Run heads and evidence capsules retain the existing 1 MiB write policy, applied
+to the compact stored representation. Immutable receipt pages carry complete
+history outside the head; expanded public history is never a launch-size signal.
+There is no 256 KiB terminal reservation or projected-size launch refusal.
+Acknowledged storage writes, archive hash/owner checks and explicit execution
+budgets still govern launch/settlement. Actual persistence failure cannot mint a
+successful terminal receipt. Historical `run_record_capacity_exhausted` terminal
+records remain diagnosable and are not silently replayed.
 
-Coordinator wake likewise checks both journal entry count and byte headroom
-before allocating a task. Replies cannot consume the last event slot or the
-48 KiB reserved for the terminal run-result notice. Legacy journals already
-at capacity retain their events and expose `run_result_capacity_exhausted` on
-the manager; the full run remains the result authority and coordinator
-reconciliation can still finish. Capacity can change during execution, so settlement
-checks the full workspace CAS row again. A reply that no longer fits leaves the
-manager in `needs_attention`, preserves its task reference and existing journal,
-and records observed consumption exactly once. The reply preview is retained
-when it fits; otherwise the previous preview is retained and the complete reply
-remains on the bound task. This avoids evicting durable history or replaying an
-already-finished coordinator merely to recover a reply slot.
+Coordinator launch and settlement have no journal-count or reserved-byte
+admission. Replies and terminal-result notices append to the same owner/run CAS
+record without evicting old events. Wake and terminal ownership remain fenced
+by task identity/status; duplicate settlement never charges twice. Workspace
+records cross the shared storage port without the generic evidence-capsule
+1 MiB ceiling, while other record families retain their declared contracts.
+Actual storage failures remain visible and cannot fabricate a committed notice.
 
 A synthetic in-memory measurement
 using the three-execution regression (2026-09-24; no provider calls or model refs)
@@ -956,12 +715,14 @@ produced six task receipts / 864 serialized receipt bytes; the run record grew
 from 732 to 2,695 bytes. This measures fixture metadata growth, not live RSS or
 production throughput.
 
-Inline delivery is capped at 24,000 characters, review input tool messages at 16,000 serialized characters, and review JSON at 8,000 characters.
-Every persisted evolution record is capped at 1 MiB. Command checkers retain a
+Inline delivery is capped at 24,000 characters, review input tool messages at 16,000 serialized characters, and review JSON retains its complete terminal body under schema and source validation.
+Stored evolution records follow their schemas and physical storage; there is
+no uniform application byte quota. Command checkers retain a
 bounded output tail while draining stdout, enforce a finite timeout and reap
 POSIX process groups. Durable user records are not silently deleted; automatic
-learning/index scans remain capped at 200 records and reports disclose their
-bounded scope. This is not an all-history statistical guarantee.
+learning/index consumers may use explicit bounded windows; strategy derivation
+and run reconciliation traverse complete owner ranges. Statistical views still
+disclose their selected evidence scope rather than claiming causal guarantees.
 
 ## Exploration loop: three-plane guardrails (2026-09-18)
 
@@ -1059,17 +820,7 @@ owner/run identity, count links and every prefix commitment. Changed bytes,
 missing originals, read failures and a new compiled contract cannot reuse proof.
 Rejected: caching original history or skipping authorization/digest validation.
 
-The lazy process LRU admits one small proof per MiB of minimum launch memory
-capacity/headroom from the existing probe; missing/zero probes fall back to one.
-Bookkeeping for 4,096 proofs sharing one compiled validator retained 611,056
-traced bytes (not whole-process RSS or validator compilation). No page/row is
-retained. Explicit clearing and LRU eviction reclaim reconstructible
-proofs; no durable row, worker or timer is added. Under the same profiled controlled
-64-attempt/three-crash workload, expansion time was 8.83 seconds with proofs and
-5,256 calls unchanged. The full profiled run changed 190.98 to 142.13 seconds.
-These include profiler overhead and synthetic execution, not real model/GPU speed.
-History expansion remains linear and storage reads are retained. The ordinary
-unprofiled run also retained all 128 receipts/64 originals across the three losses.
+The lazy process LRU admits one small proof per MiB of minimum launch memory capacity/headroom from the existing probe; missing/zero probes fall back to one. Bookkeeping for 4,096 proofs sharing one compiled validator retained 611,056 traced bytes (not whole-process RSS or validator compilation). No page/row is retained. Explicit clearing and LRU eviction reclaim reconstructible proofs; no durable row, worker or timer is added. Under the same profiled controlled 64-attempt/three-crash workload, expansion time was 8.83 seconds with proofs and 5,256 calls unchanged. The full profiled run changed 190.98 to 142.13 seconds. These include profiler overhead and synthetic execution, not real model/GPU speed. History expansion remains linear and storage reads are retained. The ordinary unprofiled run also retained all 128 receipts/64 originals across the three losses.
 
 ### Private native long-horizon measurement
 
@@ -1097,18 +848,7 @@ coverage with `test_evolution_long_horizon_benchmark.py` before running this pro
 
 **Decision.** Four layers carry distinct evidence. `test_evolution_headless_runtime.py` runs authenticated v4 intake, real execution and review tasks against isolated storage and a deterministic provider transport, then reads the durable run and episode after settlement on both SQLite and native TofuDB. It also proves that missing empirical measurements reject a frozen scientific goal before reviewer dispatch, with no successful strategy learned. Terminal working-context cleanup uses valid delete command identities and the integration test checks reclamation; immutable evidence remains available. `test_evolution_real_measurement.py` adds an actual project command: a deterministic linear-versus-binary search comparison over three paired seeds and held-out queries yields a valid negative outcome, despite a positive model claim; both backends retain its run and original measurements across storage restart. Its program path archives that confirmed negative result, queues diagnosis without replaying the experiment, and preserves the original objective and failed step across restart; a terminal single-run test alone was insufficient evidence of iterative progression. A foreground/background audit-version mismatch retains the immutable originals and merged counts but removes the validity marker; it settles as unverified rather than throwing during a background join. Protocol mismatch remains a typed refusal. Six recovery-order tests also vary three-part grouping: mixed-version invalidity is irreversible across subsequent joins, counts and evidence sums remain identical, and inputs stay immutable. Homogeneous current-version joins retain their ordinary validity. The command fixture now runs candidate and control seed loops in opposite orders and emits observation v2 identities; its protocol explicitly requires v2 and its program step carries the same admission policy. The positive/negative gates and exact frozen format survive native task dispatch, archival and both storage restarts without relying on array position. This toy experiment verifies the production evidence path, not scientific novelty. New default baseline steps require the existing command-execution receipt gate before reviewer dispatch; prose-only baseline claims cannot satisfy it. Refused execution retains the sealed terminal delivery and its exact source reference before command, preregistration or scientific-observation gates settle; long inline previews never replace the complete original during failure archival and diagnosis. Saved queues and custom baseline protocols remain frozen. Missing command-execution observations remain ambiguous rather than definitive experimental failures: enabling auto-replanning does not authorize diagnosis or executor replay for them. Short and long baseline refusal tests retain the original baseline and final audit through repeated reaper visits; recovery still needs evidence reconciliation or an explicit retry. This boundary is a current limit on unattended completion, not proof that every long-running objective can finish automatically. Archive admission rechecks any explicit deliverable reference against its sealed owned metadata and a bounded original-page read; a pointer alone cannot bypass missing-original refusal. The current launch remains intact when this check fails. If the immutable receipt already committed before a header failure, reconciliation requires exact receipt equality and reuses that admission instead of reading its original again. Changed references still refuse; the recovery test verifies zero original-page reads and one accounting settlement. Exit-status parsing accepts bounded native decimal statuses; oversized or malformed trailers remain unproved rather than throwing during terminal capture. A successful command receipt establishes execution, not measurement correctness, comparator competence or scientific validity; the frozen independent-validation protocol remains necessary. Transport-only or SQLite-only checks were rejected as insufficient evidence of the native execution/settlement chain; these deterministic tests do not establish real model quality or benchmark superiority. The v4 API tests cover owner scope, idempotency and failure envelopes. Studio browser tests cover the projection and interaction. For an installed model, `evaluations.evolution.soak` runs the actual v4 HTTP endpoint from a separate process with no browser, retries the same submission key, follows stage task IDs, checks monotone usage and unique receipts, requires every frozen acceptance requirement to have exactly one passing result (and original links when required), and writes one JSONL row per run. This transport-level consistency check does not independently adjudicate source identity or scientific validity. Each row carries a goal hash, probe identity, harness version and the resolved model and usage for each stage, so mixed executor/reviewer routes can be priced offline against the provider tariff used for that run. The probe retries temporary connection failures, socket read timeouts and 502/503/504 outages under the same idempotency key and counts outage time, including exhausted retries. Once a run identity is known, polling or retry-confirmation outages that exhaust the deadline reach its cancellation path; an observation failure alone cannot prove producer termination. Cancellation must return the bound run identity and cancelled status, followed by durable readback. Observation gaps keep provider usage unknown even if the last observed stage was settlement. Harness v7 shares its monotonic clock with each run observer and restricts that observer to the remaining overall duration or its per-run timeout, whichever is smaller; a known active run reaches explicit cancellation when that window expires. Blocking HTTP and cancellation/readback still have their separate transport timeouts, so this is not a strict process-wide wall-clock guarantee. The harness also propagates durable run/receipt incompleteness and stage-loss records even for completed goals. Such goals retain their completion outcome, but stop further soak submissions; their reported tokens are a lower bound and are excluded from completed-goal token percentiles. Aggregate tokens explicitly declare lower-bound status. Confirmed timeout cancellations are read back as incomplete receipts with their actual tokens and stage usage counted toward the aggregate cap; a failed or unconfirmed cancellation instead marks provider usage unknown. A confirmed cancellation during an active model stage also marks that stage's unreceipted provider usage unknown; settlement-only timeouts can report both stage receipts. If the server stays unreachable at timeout, cancellation cannot be confirmed. An orphaned task without a terminal receipt is marked `provider_usage_unknown`: zero reported tokens then means no durable accounting, not zero provider spend. It stops on an incomplete run or a declared token/run/time admission bound. Harness v7 submits the remaining aggregate token allowance through the shared run `budget.max_tokens` admission boundary, records `admitted_max_tokens`, and stops at zero allowance even with a zero reserve. This corrects the previous report-only aggregate cap; idempotent creation retries carry the same budget. Alternative rejected: relying only on post-run accounting leaves one admitted run with an unlimited token budget. `--reserve-tokens-per-run` conservatively withholds allowance before each new run; neither that reserve nor the run budget is a provider-enforced hard token cap, because an in-flight model response can overshoot. One admitted run can finish past the aggregate token/time threshold. Its p50/p95 measure whole-goal latency; token totals are a cost proxy, not a currency bill; optional `--server-pid` samples that process's RSS, peak and growth, not its worker tree. Throughput is completed runs per observed wall time, not model tokens per GPU second.
 
-Harness v7 also preserves the admitted run identity and the greatest valid
-observed cumulative counters when observation fails. **Problem:** a counter,
-receipt or readback error previously discarded known usage and could leave an
-active probe running. **Decision:** failure receipts retain those lower bounds,
-mark provider usage unknown, and stop further submissions. A nonterminal owned
-run receives one explicit cancellation attempt and exact identity/status
-readback; an earlier cancellation attempt is not repeated. Cleanup failure
-remains separately visible. Already terminal work is not cancelled. Foreign
-response identities never contribute usage or grant cancellation authority.
-Boolean, negative, fractional, null, nonfinite and missing cumulative counters
-refuse. Cleanup identity/status confirmation is independent of unknown cleanup
-usage; counter maxima never consume invalid values.
+Harness v7 also preserves the admitted run identity and the greatest valid observed cumulative counters when observation fails. **Problem:** a counter, receipt or readback error previously discarded known usage and could leave an active probe running. **Decision:** failure receipts retain those lower bounds, mark provider usage unknown, and stop further submissions. A nonterminal owned run receives one explicit cancellation attempt and exact identity/status readback; an earlier cancellation attempt is not repeated. Cleanup failure remains separately visible. Already terminal work is not cancelled. Foreign response identities never contribute usage or grant cancellation authority. Boolean, negative, fractional, null, nonfinite and missing cumulative counters refuse. Cleanup identity/status confirmation is independent of unknown cleanup usage; counter maxima never consume invalid values.
 
 Rejected: zero usage on exception, treating a cancellation response as durable
 termination without readback, or cancelling a foreign response identity. These
@@ -1131,6 +871,50 @@ python -m evaluations.evolution.soak --live --runs 1000 \
 
 Run a one-goal smoke first, then an unattended sample with limits chosen to cover the desired horizon. Use `--model-ref` with an owner-selectable structured model identity to keep the route fixed. Compare terminal completion, stage times, token use and RSS across identical conditions before changing concurrency or prompts. A process restart is a separate gate: transient evolution tasks still settle to `needs_attention`; the authorized re-admission design remains in `RUN_CONTINUITY.md`. Do not report the soak as restart-safe continuity or as proof that model quality improved.
 
+**Coding smoke.** `python -m evaluations.evolution.coding` prints an offline
+preflight; `--live --user-id <owner> --model-ref '<structured JSON>'` admits one
+bounded real coding task against a same-host application. The owner must match
+API authentication. `--runs`, `--max-total-tokens`, `--timeout-seconds`, and a
+fresh `--output-dir` bound repeat execution and retain its evidence. Each fresh
+project starts with a broken dependency-layer planner and requests implementation
+and testing Workers through the ordinary executor. The existing soak observer
+owns idempotent submission, accounting, polling and cancellation; its optional
+frozen launch policy cannot replace the objective, model or token allowance.
+
+Problem: model review and candidate-written tests can both miss broken code. Decision: an external checker snapshots only the bounded, regular `planner.py`, runs nine deterministic cases in a private POSIX subprocess, and checks returned values and input preservation in the parent. It has CPU, memory, output and wall-time bounds, an empty credential environment, and process-group cleanup; this local smoke is not a security sandbox. The named output file stays linked until readback for FUSE compatibility. The checker never runs candidate tests. Reports distinguish review completion, behavioral correctness, deployment drift and unknown costs. The manifest pins task/checker/harness hashes, objective, model, owner, deployment and limits; admission IDs persist before observation finishes. Metadata-only request diagnostics retain stage input/output/cache counts, tool-schema cost and learning settlement status, excluding child request breakdowns and all raw prompts. Stage accounting still includes child costs. Projects and compact receipts remain under the evaluation output root until its owner removes them; this runner retains no raw provider transcripts. Repeated runs may consume previously learned guidance and are not independent or paired learning experiments. Alternatives rejected: treating an LLM verdict, a passing agent-authored test suite, or one toy task as coding leadership or causal self-improvement evidence. Verify `test_evolution_coding_probe.py` plus the soak failure/cancellation tests; the deterministic runtime cycle remains separate.
+
+**Executor schema cost policy.** General runs and programs optionally freeze
+`executor_schema_budget_tokens` (0..128000). Omission keeps deployment policy;
+zero explicitly selects the uncapped control. The field reaches the common
+`tools.schemaBudgetTokens` projection, including ordinary Workers and linked
+follow-ups; a changed idempotent request refuses. It never changes reviewer
+policy or executable tool contracts. Research-discovery runs refuse the option
+before writing. The target is soft: coding, terminal-delivery and live-handle
+schemas retain their functional floor even above budget; other tools remain
+available through the existing discovery/execution gateway. The coding probe
+accepts `--executor-schema-budget-tokens 4000` and records it in preflight and
+launch evidence; use explicit `0` for an otherwise identical control.
+
+Problem: complete optional schemas repeatedly consume coding context. Decision:
+expose the existing shared projection as frozen run policy, preserving its
+single authority and rollback. Alternatives rejected: shrinking execution
+allowlists removes capabilities; new model loops or globally changing defaults
+would conflate cost with behavior. `python -m evaluations.evolution.schema_cost
+--owner-id <owner> --model <model>` compares both projections without provider
+calls, including exact schema/contract authority and discovery of every hidden
+tool. A synthetic GLM-5.3-Flash coding catalog without MCP measured 10,806 → 4,347
+estimated schema tokens (a 4,000-token target exceeded by required schemas).
+This is not the previous live catalog, billed usage, or a quality result. The
+policy adds one bounded integer per task, no workers, pools or retained catalogs.
+
+Problem: historical generic inspect steps embedded an old goal, then repeated
+its paths and instructions in new guidance and replay plans. Decision: new
+baseline procedures refer to the current objective. Only the recognized full
+legacy scaffold is generalized when copied into replay, distillation or rendered
+guidance; frozen historical plans and lineage remain intact. Custom procedures
+remain unchanged. Alternatives rejected: blindly replaying the old target can
+misdirect work; deleting all stage details would discard domain procedures.
+
 **Alternative considered.** A browser-only replay was rejected because it cannot observe the executor or storage handoff. A synthetic task-only soak was rejected because it would hide dispatch, tool and terminal failures.
 
 ## Goal rooms and material shelves
@@ -1148,9 +932,9 @@ are derived from returned records, never decorative. Native shortcuts support
 keyboard and narrow screens; shelf titles open original sources in a new tab.
 
 `library.py` owns a separate `evolution.libraries.v1` CAS record per owner/run,
-so material writes cannot conflict with execution-stage receipts. Each shelf has
-at most 64 links and 192 KiB UTF-8 JSON; full shelves refuse additions explicitly
-and never evict collected user state. Link identity deduplicates updates, and
+so material writes cannot conflict with execution-stage receipts. Materials and
+their coordination notices commit together without collection-count or aggregate
+byte quotas. Collected user state is never evicted to admit another reference. Link identity deduplicates updates, and
 CAS retries merge concurrent writes up to three times. Supported kinds are
 paper, repository, web, dataset and other. HTTP(S) source URLs only; no credentials,
 control characters, local-file reads, downloads or server-side fetch. These are
@@ -1172,6 +956,8 @@ round. Source metadata is untrusted reference data, never executable instruction
 
 ## Studio interaction and measured limits
 
+**Problem:** room navigation obscured the entry to durable experiments; the initial briefing lacked a concrete starting point, and quantitative results were plain text. **Decision:** `#/evolution` opens the studio; its persistent navigation and toolbar expose `#/evolution/programs`. Research and capability evidence remain distinct existing destinations. Example briefs fill only an empty draft and never launch work. Mission headings/actions use separate grid tracks; narrow entry puts the brief before the scene. Rooms, furniture and teammates retain the same runtime. The notebook's observation island uses the shared `rich-response/data-chart.ts` presenter for the current history page (at most 20 receipts), with explicit metric and bar/line controls and a lossless data table. Totals come from the program; page counts never imply full-history coverage. Missing/invalid measurements are omitted and incomplete usage is a labelled lower bound. Cost is not quality. Complete admitted `tofu-ui` data-chart blocks in deliveries and opened receipts render beside the unchanged original and independent review. At most eight charts are projected from a 200,000-character source; other content remains readable as original evidence. This projection adds no transport, timer or authorization. **Alternatives rejected:** fabricated progress/success curves misrepresent evidence; a new chart library or game loop duplicates existing owners; replacing the room art does not fix entry, alignment or the evidence workflow. Specifications: `experiment-charts.test.ts` and `test_evolution_experience_browser.py`.
+
 ### Live office projection (2026-09-23)
 
 **Problem.** A single status chip and a generic tool bubble concealed the
@@ -1180,22 +966,7 @@ nearly identical furniture, while their continuously animated Canvas redrew a
 static room at 30 FPS. Viewers could mistake decorative room books for collected
 sources.
 
-**Decision.** The office now carries a compact read-only work board sourced from
-the same run, workspace, coordination and swarm snapshots as the detail drawer.
-It displays the three roles, material and agent counts, accounted tokens and
-visible errors. Missing reads display an unknown mark. Live task SSE tool events
-drive short executor/reviewer routes for web research, coordinator contact and
-delegation; a tool completion returns the actor to its workstation. SSE remains
-decorative: the run poll owns stage truth, and a book appears only after a
-durable material record is read. Sub-agent room backgrounds vary by the rostered
-role, while each room's status and brief remain roster data. Room backgrounds
-are generated once, encoded as 133–166 KiB WebP files and requested only when
-the viewer enters a pod; scenery never stands for a saved source or passed test.
-A running pod repaints its working pose twice per second and has no animation timer when
-hidden, idle or reduced-motion. In the 1536-pixel browser check the selected
-running room painted 1–4 times in 1.2 seconds and zero times in 0.7 seconds
-after switching back to the main office; previously the active room repainted
-its entire Canvas at up to 30 FPS.
+**Decision.** The office now carries a compact read-only work board sourced from the same run, workspace, coordination and swarm snapshots as the detail drawer. It displays the three roles, material and agent counts, accounted tokens and visible errors. Missing reads display an unknown mark. Live task SSE tool events drive short executor/reviewer routes for web research, coordinator contact and delegation; a tool completion returns the actor to its workstation. SSE remains decorative: the run poll owns stage truth, and a book appears only after a durable material record is read. Sub-agent room backgrounds vary by the rostered role, while each room's status and brief remain roster data. Room backgrounds are generated once, encoded as 133–166 KiB WebP files and requested only when the viewer enters a pod; scenery never stands for a saved source or passed test. A running pod repaints its working pose twice per second and has no animation timer when hidden, idle or reduced-motion. In the 1536-pixel browser check the selected running room painted 1–4 times in 1.2 seconds and zero times in 0.7 seconds after switching back to the main office; previously the active room repainted its entire Canvas at up to 30 FPS.
 
 **Alternatives considered.** A new status polling endpoint would duplicate the
 run authority and increase idle cost. Creating books on `web_search` start would
@@ -1203,66 +974,9 @@ claim a saved source before `evolution_material` commits one. Replacing the
 existing sprite and prop atlases with more generated bitmaps would add download
 and decode cost without exposing more backend truth.
 
-`frontend/src/features/evolution/workspace.ts` composes the primary program notebook, the execution studio and
-existing evidence pages; `studio.ts` owns only its mounted DOM and requests.
-Problem: opening the notebook also imported the office renderer/vendor controls, and failed research imports left a blank page. Decision: each route loads its own graph through the shared document-lifetime module cache. `route-host.ts` retains the latest pending path, disposes the old page before admission and fences late success/failure. Closing before admission starts no import; closing during a flight permits no later mount or reload. The shell mount handle owns repeat-open identity and preserves unsent forms. There is one mounted page, at most four cached module flights, and no additional timer, observer or transport.
-CSS failures stay cached. Child routes use the shell's single bounded reload/replay authority, then show a localized failure with an explicit reload control. Rejected: static imports of hidden pages, per-route reload guards and retrying failed CSS imports that could mount unstyled UI.
-The measured production notebook's incremental graph (excluding already-loaded shell chunks) fell from approximately 136 to 21 KiB gzip; this measures transfer size, not whole-page latency. Browser tests assert emitted page requests/vendor registration and inject a failed studio CSS transaction.
-The studio uses cream paper, forest ink and sage surfaces around authored office assets; controls, text and state remain DOM.
-The office has reserved regions for the persistent room directory, mission HUD,
-scene and furniture tool shelf. The task heading opens details and human questions. No content panel opens by default. A uniformly scaled 4:3
-world fits inside the viewport; narrow screens start centered and keep all
-furniture reachable through the dock. Details, goal creation, Ask Human and
-navigation use secondary Web Awesome drawers with Escape, focus trapping and
-focus restoration. Object pins use Web Awesome tooltips; both keyboard labels
-and touch-accessible dock labels remain available. `ui-components.ts` registers
-only drawer, tooltip and button through `studio-entry.ts` on the studio route, scopes vendor root
-tokens to the studio, and uses bundled system icons with no CDN requests.
-Web Awesome is pinned to 3.13.0 (MIT); forms retain native browser semantics.
-The library does not replace the Canvas renderer or introduce a game engine.
-The office uses one fixed light frosted theme, independent of the chat theme.
-Keyboard focus and narrow layouts are supported. The preview has no state/theme
-toolbar; empty/error fixtures are selected only by test URL parameters.
-The studio uses tinted frosted surfaces: a 560px desktop drawer inset 24px
-from the viewport, a 760px delivery drawer, and 8px outer margins on phones.
-Headers, objective selection, navigation dock and material cards share the
-same theme-derived glass tokens. Native select pickers receive progressive
-`base-select` styling where supported; fallback remains native. Unsupported
-backdrop filtering and reduced-transparency preferences use opaque surfaces.
-The core office interaction adds no new font, dependency or animation loop;
-lazy room backgrounds and one bounded pod pose timer are described above.
-`office-scene.ts` renders three supervising human sprites with four-direction walk
-frames; `office-navigation.ts` bounds paths to a 48×36 grid with furniture
-clearance. Select a person, then click clear floor or use arrow keys to walk.
-Execution/review move to their respective desks; Ask Human moves the actor to
-the entrance and clicking it focuses the response form. Manual walking is
-presentation. Tool-triggered routes mirror live task events but do not claim a
-result or replace persisted evidence. Motion is never required to understand task state.
-Books are reconciled by durable material ID per selected goal, including after
-the run becomes terminal. A newly committed agent material takes the desk-to-shelf
-trip while execution is active; user-added and preexisting links appear on the
-shelf directly. A newly observed durable `assignment` journal entry sends the
-coordinator to the executor's desk once; a refresh never invents another
-conversation, and walking does not claim that the executor accepted the update.
-The original atlas is sampled using measured frame bounds, without raster edits.
+`frontend/src/features/evolution/workspace.ts` composes the primary studio, the durable program notebook and existing evidence pages; `studio.ts` owns only its mounted DOM and requests. Problem: opening the notebook also imported the office renderer/vendor controls, and failed research imports left a blank page. Decision: each route loads its own graph through the shared document-lifetime module cache. `route-host.ts` retains the latest pending path, disposes the old page before admission and fences late success/failure. Closing before admission starts no import; closing during a flight permits no later mount or reload. The shell mount handle owns repeat-open identity and preserves unsent forms. There is one mounted page, at most four cached module flights, and no additional timer, observer or transport. CSS failures stay cached. Child routes use the shell's single bounded reload/replay authority, then show a localized failure with an explicit reload control. Rejected: static imports of hidden pages, per-route reload guards and retrying failed CSS imports that could mount unstyled UI. The measured production notebook's incremental graph (excluding already-loaded shell chunks) fell from approximately 136 to 21 KiB gzip; this measures transfer size, not whole-page latency. Browser tests assert emitted page requests/vendor registration and inject a failed studio CSS transaction. The studio uses cream paper, forest ink and sage surfaces around authored office assets; controls, text and state remain DOM. The office has reserved regions for the persistent room directory, mission HUD, scene and furniture tool shelf. The task heading opens details and human questions. No content panel opens by default. A uniformly scaled 4:3 world fits inside the viewport; narrow screens start centered and keep all furniture reachable through the dock. Details, goal creation, Ask Human and navigation use secondary Web Awesome drawers with Escape, focus trapping and focus restoration. Object pins use Web Awesome tooltips; both keyboard labels and touch-accessible dock labels remain available. `ui-components.ts` registers only drawer, tooltip and button through `studio-entry.ts` on the studio route, scopes vendor root tokens to the studio, and uses bundled system icons with no CDN requests. Web Awesome is pinned to 3.13.0 (MIT); forms retain native browser semantics. The library does not replace the Canvas renderer or introduce a game engine. The office uses one fixed light frosted theme, independent of the chat theme. Keyboard focus and narrow layouts are supported. The preview has no state/theme toolbar; empty/error fixtures are selected only by test URL parameters. The studio uses tinted frosted surfaces: a 560px desktop drawer inset 24px from the viewport, a 760px delivery drawer, and 8px outer margins on phones. Headers, objective selection, navigation dock and material cards share the same theme-derived glass tokens. Native select pickers receive progressive `base-select` styling where supported; fallback remains native. Unsupported backdrop filtering and reduced-transparency preferences use opaque surfaces. The core office interaction adds no new font, dependency or animation loop; lazy room backgrounds and one bounded pod pose timer are described above. `office-scene.ts` renders three supervising human sprites with four-direction walk frames; `office-navigation.ts` bounds paths to a 48×36 grid with furniture clearance. Select a person, then click clear floor or use arrow keys to walk. Execution/review move to their respective desks; Ask Human moves the actor to the entrance and clicking it focuses the response form. Manual walking is presentation. Tool-triggered routes mirror live task events but do not claim a result or replace persisted evidence. Motion is never required to understand task state. Books are reconciled by durable material ID per selected goal, including after the run becomes terminal. A newly committed agent material takes the desk-to-shelf trip while execution is active; user-added and preexisting links appear on the shelf directly. A newly observed durable `assignment` journal entry sends the coordinator to the executor's desk once; a refresh never invents another conversation, and walking does not claim that the executor accepted the update. The original atlas is sampled using measured frame bounds, without raster edits.
 
-**Problem.** The first office looked like a status board: the scenery already
-contained chairs, while the Canvas drew another pair, and most characters only
-changed clothing color. A desk arrival therefore could not read as a physical
-action. **Decision.** The shipped chair-free WebP keeps the same 1448×1086
-composition; each desk owns one dark rolling chair with its own position and
-eased slide. The executor and reviewer approach from the side, pull the chair,
-sit, and roll under the desk. Leaving rolls back, stands, steps aside, and
-pushes the chair in. A task update interrupts the sequence by restoring the
-chair to its tucked position before starting the new route. Activating a chair
-target with pointer or keyboard runs the same presentation-only sequence. `office-character.ts`
-adds role-shaped silhouettes and equipment on top of the walking atlas in both
-the main office and agent rooms; visitor gear follows the live role string.
-**Alternatives considered.** Baking more chairs into scenery prevents motion;
-six additional full directional atlases would add decode memory and a second
-animation pipeline. The vector equipment shares the existing gait and incurs
-no separate texture decode. These animations do not claim a task completed or
-a source saved; the backend evidence and durable material list remain authority.
+**Problem.** The first office looked like a status board: the scenery already contained chairs, while the Canvas drew another pair, and most characters only changed clothing color. A desk arrival therefore could not read as a physical action. **Decision.** The shipped chair-free WebP keeps the same 1448×1086 composition; each desk owns one dark rolling chair with its own position and eased slide. The executor and reviewer approach from the side, pull the chair, sit, and roll under the desk. Leaving rolls back, stands, steps aside, and pushes the chair in. A task update interrupts the sequence by restoring the chair to its tucked position before starting the new route. Activating a chair target with pointer or keyboard runs the same presentation-only sequence. `office-character.ts` adds role-shaped silhouettes and equipment on top of the walking atlas in both the main office and agent rooms; visitor gear follows the live role string. **Alternatives considered.** Baking more chairs into scenery prevents motion; six additional full directional atlases would add decode memory and a second animation pipeline. The vector equipment shares the existing gait and incurs no separate texture decode. These animations do not claim a task completed or a source saved; the backend evidence and durable material list remain authority.
 
 ### Persistent room directory and reserved scene layout
 
@@ -1280,15 +994,24 @@ focus. Removing the selected member selects another current occupant, or leaves
 the room empty. A missing roster is explicitly unknown; an empty successful
 roster never displays a manufactured worker. Browsing rooms launches no task.
 
-Desktop uses a persistent illustrated room rail, a two-row mission header,
-a 4:3 contained scene and a dedicated bottom tool shelf. The header is actionable
-for task details and human questions. Secondary management actions remain in the
-menu; the room rail owns new-goal and coordinator-chat entrances. At 850px and
-below a labelled Rooms button opens the same directory in a focus-managed drawer.
-On phones the stage pans at readable scale; the member brief moves to the tool
-shelf so it remains visible after the directory closes. The scene and navigation
-have separate layout regions; neither the mission header nor the tool shelf
-covers interactive furniture. Escape closes drawers and restores their trigger.
+**Problem:** repeated objective headings, a scene-wide stage ribbon, blurred
+letterboxing and outlined navigation cards competed with current work.
+**Decision:** the page has one objective heading and a compact task panel; the
+receipt-backed four-stage route sits beside task actions and evidence, not above
+the room. The directory is a quiet selectable list, the scene uses a plain
+theme-derived letterbox, and the tool shelf has no enclosing card. The task
+panel has a bounded desktop reading width; mobile places the mission first. Scene focus never changes execution. Current
+work, failures and available results remain visible. Native disclosures retain
+expansion and keyboard focus across refresh, resetting when the goal changes.
+The full inspector keeps source paging. Shared controls/icons/tokens own design;
+examples only fill empty drafts, and dispatch remains explicit. At ≤850px the
+Rooms drawer shares the directory; the stage pans and member briefs use the shelf.
+Escape restores focus. Journal text is shown once in the task evidence, with an
+additional HUD notice only for human waiting; empty intake has no progress strip.
+The full original goal remains available through the page heading's detail action.
+No font, dependency, polling owner or animation is added.
+**Rejected:** another cosmetic override layer, replacing the office, duplicating
+execution controllers or hiding all results. Spec: `tests/evolution/test_evolution_studio_browser.py`.
 
 Six 160×120 thumbnail derivatives total **18,764 encoded bytes / 460,800 decoded
 RGBA bytes**. Full backgrounds still load only on entry. Only one pod renderer
@@ -1311,20 +1034,7 @@ status board obscured the right workstation. On phones, fitting the whole 4:3
 map left most of the viewport as empty blurred letterboxing. Private rooms
 also contained a baked chair beneath the animated actor.
 
-**Decision.** Eight independent role-specific 4×4 walking sheets replace the
-vector costumes; a transparent upholstered chair is the shared moving prop.
-The five private-room backgrounds have chair-free variants. Main-office
-chairs keep the pull/sit/roll-in and reverse sequence. A private room starts
-directly in the observed status pose; when the same rostered agent changes
-from pending to running or running to terminal while visible, one 2.1-second
-presentation sequence walks, pulls or restores the chair, and settles. These
-beats change no task state. Hidden or reduced-motion rooms settle immediately.
-The mission HUD retains the same backend facts and unknown marks; its layout
-and always-visible room directory are specified below. Phones keep the stage at playable
-scale and pan horizontally inside the office; the HUD stays fixed. The bottom
-dock scrolls horizontally at narrow widths so its controls keep legible text.
-Asset prompts, role briefs and crop authority are in
-[`EVOLUTION_GAME_ART.md`](EVOLUTION_GAME_ART.md).
+**Decision.** Eight independent role-specific 4×4 walking sheets replace the vector costumes; a transparent upholstered chair is the shared moving prop. The five private-room backgrounds have chair-free variants. Main-office chairs keep the pull/sit/roll-in and reverse sequence. A private room starts directly in the observed status pose; when the same rostered agent changes from pending to running or running to terminal while visible, one 2.1-second presentation sequence walks, pulls or restores the chair, and settles. These beats change no task state. Hidden or reduced-motion rooms settle immediately. The mission HUD retains the same backend facts and unknown marks; its layout and always-visible room directory are specified below. Phones keep the stage at playable scale and pan horizontally inside the office; the HUD stays fixed. The bottom dock wraps at narrow widths so its controls keep legible text. Asset prompts, role briefs and crop authority are in [`EVOLUTION_GAME_ART.md`](EVOLUTION_GAME_ART.md).
 
 The four primary first-view sprites (three leads and chair) total 1,011,686
 encoded bytes and 25,168,928 decoded RGBA bytes; the older walking atlas was
@@ -1353,21 +1063,7 @@ Ask Human preserves drafts across refresh, presents every batch field, never
 pre-submits suggested choices, and resumes through the existing owner-bound gate.
 Submission retries retain an idempotency key for the same objective/model.
 
-One visible-page read flight polls active work at 3s and idle/history at 15s;
-model options load once, at most 128. Unmount aborts reads and clears timers;
-hiding pauses polling. The list transports at most 50 short summaries, excluding
-large deliverables and learning blobs (budget test: <40 KiB for 50 CJK objectives).
-The shipped chair-free scenery plus human atlas total 2,545,403 bytes encoded
-and 26,321,088 bytes decoded (the asset test enforces <=5 MiB / <=27 MiB).
-The original 2,024,654-byte PNG is retained only as an art comparison and is
-not loaded by the studio. One canvas caps its backing store at
-1440×1080, keeping total raster memory under 19 MiB, independent of device DPR.
-Walking paints at most 30 FPS; standing actors have no RAF. Idle wandering wakes
-at 6.5 seconds, with at most one timer and one pending RAF. Hidden/offscreen scenes
-cancel both; unmount disconnects observers, handlers and zeros the backing store.
-Pause and prefers-reduced-motion stop animation; manual movement then places the
-actor at the valid destination instantly. No game-engine dependency is added.
-These are bounds and browser-observed frame counts, not cross-device CPU claims.
+One visible-page read flight polls active work at 3s and idle/history at 15s; model options load once, at most 128. Unmount aborts reads and clears timers; hiding pauses polling. The list transports at most 50 short summaries, excluding large deliverables and learning blobs (budget test: <40 KiB for 50 CJK objectives). The shipped chair-free scenery plus human atlas total 2,545,403 bytes encoded and 26,321,088 bytes decoded (the asset test enforces <=5 MiB / <=27 MiB). The original 2,024,654-byte PNG is retained only as an art comparison and is not loaded by the studio. One canvas caps its backing store at 1440×1080, keeping total raster memory under 19 MiB, independent of device DPR. Walking paints at most 30 FPS; standing actors have no RAF. Idle wandering wakes at 6.5 seconds, with at most one timer and one pending RAF. Hidden/offscreen scenes cancel both; unmount disconnects observers, handlers and zeros the backing store. Pause and prefers-reduced-motion stop animation; manual movement then places the actor at the valid destination instantly. No game-engine dependency is added. These are bounds and browser-observed frame counts, not cross-device CPU claims.
 
 Art research: [LimeZu Modern Interiors](https://limezu.itch.io/moderninteriors),
 [Belohlavek's CC0 walk sprite](https://lpc.opengameart.org/content/character-sprite-walk-animation),
@@ -1392,21 +1088,7 @@ Candidate and suite fingerprints bind activation to the measured inputs; old
 unbound receipts and changed inputs require reevaluation, even with a waiver.
 The default probe remains unmeasurable.
 
-`evaluations/evolution/python_delivery.py` separately checks completed JSON-wrapped Python deliveries by bounded compilation without executing them. The paired runner accepts `--checker python_delivery_compile_v1` with frozen case answers `{"compiles":true}`; invalid rubrics refuse before model calls. This compares compilation delivery only, retaining failures and their costs. Syntax failure and incomplete provider output cannot pass; compilation alone proves neither behavior nor scientific validity. This gives repair feedback without a second executor. The retained `evaluations/evolution/format_fidelity_cases.json` suite checks literal JSON string/escape/array preservation, including Python identifiers and evidence paths. It is a copy-fidelity compatibility test, not a held-out reasoning or research-quality benchmark; compare plain requests and `--json-object` separately with identical instructions, using fresh report paths. Failures do not mutate registered model capabilities. The opt-in `evaluations/evolution/paired.py` runner defaults to the running
-application Chat API with its existing owner model catalog and server-managed
-credentials. `--run ID --role reviewer` reuses that goal role's selection;
-`--model` accepts a structured reference. It uses fresh turns, one concurrent call, no tools, matching model/configuration,
-alternating arm order, a 600-second total admission budget, 60 seconds per
-call, and 2048 output / 8192 total tokens per arm. It accepts 3–16 frozen JSON
-delivery cases and checks exact canonical JSON (duplicate fields and decoder nesting exhaustion fail scoring while completed-call usage remains counted) against answers withheld from
-model messages. An explicitly selected `--checker json_numeric_equivalent_v1` treats finite JSON numbers such as 1 and 1.0 as equal while requiring the same keys, array order and all other values; booleans never equal numbers. Default strict scoring stays unchanged. Problem: numeric notation can obscure correct arithmetic. Decision: record the chosen checker in preflight and live reports. Alternative rejected: silently changing old scores or using tolerant/coercive equality. Neither checker proves physical execution. Observed provider/model drift invalidates the comparison. Missing reported model identity yields unknown route consistency and excludes the paired quality comparison; individual scoring and known costs remain reported. Structured model references compare by canonical identity, without relying on hashable Python objects. Matching reported identities still do not prove resolved provider identity.
-Chat evaluation pins `/api/health` boot identity before calls and rechecks afterward. A changed/unavailable identity refuses new dispatch; completed replies and costs survive a failed post-check, but their quality score is excluded. Reports retain the initial boot identity and advisory source fingerprint; missing fingerprints remain unknown. This prevents mixing process generations without claiming full code provenance. Chat completion responses expose the requested model, so provider fallback
-is not independently verified by this adapter; its report is not activation
-evidence. Timeout or
-missing usage remains unknown; malformed usage objects or any supplied noninteger/negative input/output alias also keep tokens unknown, without discarding a completed answer’s quality score. The shared usage normalizer remains the alias authority once those supplied counters are valid. The CLI exclusively creates a fresh output path before provider setup; existing evidence refuses a rerun without overwriting or calling the model. A new experiment requires a new output path; no resume/replay is inferred. Concurrent admissions have one winner. Before each call the same report records an `inflight` item/arm intent; an interrupted pending call has unknown provider outcome and cost, never a zero-cost receipt. Intent-write failure prevents dispatch. Finished-arm checkpoints clear the intent; no automatic resubmission is introduced. Each finished arm atomically checkpoints original output, score and known cost before another call. Partial reports carry `evaluation_state=running`, exclude aggregate comparison and remain ineligible for activation; a checkpoint failure stops further calls. Problem: process loss previously erased all completed arms. Decision: flush and replace a bounded report after each arm. Alternative rejected: automatic replay risks duplicate charges and changes the experiment. Final reports carry `evaluation_state=completed`. Reports retain exact answer text up to 64 KiB per arm alongside its hash and byte count, so failed deliveries remain auditable offline. Larger answers keep their hash, score and known costs with explicit non-retention; they are never silently truncated. At most 32 arms retain 2 MiB of answer text before JSON escaping. Problem: hashes alone require a still-live task API to inspect failure. Decision: bound original-answer retention in the evaluation artifact. Alternative rejected: keeping only digests loses independent offline inspection; unbounded text permits artifact growth. Reports contain hashes and bounded metadata,
-not raw provider errors or credentials. This narrow harness measures prompt
-variants on structured deliveries, not tool execution or general research
-quality; its files never automatically activate production mutations.
+`evaluations/evolution/python_delivery.py` separately checks completed JSON-wrapped Python deliveries by bounded compilation without executing them. The paired runner accepts `--checker python_delivery_compile_v1` with frozen case answers `{"compiles":true}`; invalid rubrics refuse before model calls. This compares compilation delivery only, retaining failures and their costs. Syntax failure and incomplete provider output cannot pass; compilation alone proves neither behavior nor scientific validity. This gives repair feedback without a second executor. The retained `evaluations/evolution/format_fidelity_cases.json` suite checks literal JSON string/escape/array preservation, including Python identifiers and evidence paths. It is a copy-fidelity compatibility test, not a held-out reasoning or research-quality benchmark; compare plain requests and `--json-object` separately with identical instructions, using fresh report paths. Failures do not mutate registered model capabilities. The opt-in `evaluations/evolution/paired.py` runner defaults to the running application Chat API with its existing owner model catalog and server-managed credentials. `--run ID --role reviewer` reuses that goal role's selection; `--model` accepts a structured reference. It uses fresh turns, one concurrent call, no tools, matching model/configuration, alternating arm order, a 600-second total admission budget, 60 seconds per call, and 2048 output / 8192 total tokens per arm. It accepts 3–16 frozen JSON delivery cases and checks exact canonical JSON (duplicate fields and decoder nesting exhaustion fail scoring while completed-call usage remains counted) against answers withheld from model messages. An explicitly selected `--checker json_numeric_equivalent_v1` treats finite JSON numbers such as 1 and 1.0 as equal while requiring the same keys, array order and all other values; booleans never equal numbers. Default strict scoring stays unchanged. Problem: numeric notation can obscure correct arithmetic. Decision: record the chosen checker in preflight and live reports. Alternative rejected: silently changing old scores or using tolerant/coercive equality. Neither checker proves physical execution. Observed provider/model drift invalidates the comparison. Missing reported model identity yields unknown route consistency and excludes the paired quality comparison; individual scoring and known costs remain reported. Structured model references compare by canonical identity, without relying on hashable Python objects. Matching reported identities still do not prove resolved provider identity. Chat evaluation pins `/api/health` boot identity before calls and rechecks afterward. A changed/unavailable identity refuses new dispatch; completed replies and costs survive a failed post-check, but their quality score is excluded. Reports retain the initial boot identity and advisory source fingerprint; missing fingerprints remain unknown. This prevents mixing process generations without claiming full code provenance. Chat completion responses expose the requested model, so provider fallback is not independently verified by this adapter; its report is not activation evidence. Timeout or missing usage remains unknown; malformed usage objects or any supplied noninteger/negative input/output alias also keep tokens unknown, without discarding a completed answer’s quality score. The shared usage normalizer remains the alias authority once those supplied counters are valid. The CLI exclusively creates a fresh output path before provider setup; existing evidence refuses a rerun without overwriting or calling the model. A new experiment requires a new output path; no resume/replay is inferred. Concurrent admissions have one winner. Before each call the same report records an `inflight` item/arm intent; an interrupted pending call has unknown provider outcome and cost, never a zero-cost receipt. Intent-write failure prevents dispatch. Finished-arm checkpoints clear the intent; no automatic resubmission is introduced. Each finished arm atomically checkpoints original output, score and known cost before another call. Partial reports carry `evaluation_state=running`, exclude aggregate comparison and remain ineligible for activation; a checkpoint failure stops further calls. Problem: process loss previously erased all completed arms. Decision: flush and replace a bounded report after each arm. Alternative rejected: automatic replay risks duplicate charges and changes the experiment. Final reports carry `evaluation_state=completed`. Reports retain exact answer text up to 64 KiB per arm alongside its hash and byte count, so failed deliveries remain auditable offline. Larger answers keep their hash, score and known costs with explicit non-retention; they are never silently truncated. At most 32 arms retain 2 MiB of answer text before JSON escaping. Problem: hashes alone require a still-live task API to inspect failure. Decision: bound original-answer retention in the evaluation artifact. Alternative rejected: keeping only digests loses independent offline inspection; unbounded text permits artifact growth. Reports contain hashes and bounded metadata, not raw provider errors or credentials. This narrow harness measures prompt variants on structured deliveries, not tool execution or general research quality; its files never automatically activate production mutations.
 
 ```bash
 python -m evaluations.evolution.paired --cases /path/cases.json \
@@ -1473,31 +1155,17 @@ manager task ID/status and does not double-charge usage. Lost tasks become
 are hints: a failed wake leaves committed data readable, and coordinator
 reconcile recovers pending wakes and missed terminal-result notices.
 
-Limits are explicit: 64 source links / 192 KiB of source data; 768 KiB for the
-combined goal workspace; 128 events, with external inputs capped at 96 to leave
-slots for final replies/results; 32 task acknowledgement records. External
-writes leave 128 KiB of byte headroom for receipts/replies; manager launch also reserves 96 KiB before admitting another reply. Full storage refuses
-new work without evicting user data. Coordinator consumption is telemetry, not
-an execution quota: no cumulative token/tool/turn ceiling or synthetic per-turn
-deadline is injected. **Problem:** a long-lived goal must not lose its coordinator
-after sixteen owner interactions. **Decision:** preserve single-flight claims,
-read-only role permissions, explicit cancellation and record-capacity admission;
-remove the fixed execution allowances. **Alternative rejected:** increasing the
-old constants only postpones the same interruption. The ordinary task engine
-owns admission and cancellation. At most one coordinator runs alongside its
+Workspace materials, updates, acknowledgements and replies have no cumulative
+count or aggregate-byte quota. Sequence/cursor fields no longer inherit the old
+million-entry ceiling. Every item still passes its schema, role/owner binding,
+URL safety, idempotency and cancellation checks; permission and evidence quality
+are unchanged. Spokesperson token/tool/turn usage is telemetry and cannot grant
+fresh execution budget. At most one coordinator runs alongside its
 execution/review task. It adds no pool or persistent polling loop. Source additions never mint a
 fresh execution budget. Ordinary goal cancellation disables automatic manager
 wakes and cancels its active task as well.
 
-A terminal goal can receive an **explicit** follow-up POST. It creates one linked
-run with the default unlimited execution policy, the parent's model, original objective,
-owner's new guidance, and a frozen context snapshot. The snapshot declares its
-source revision, material count and truncation, retains recent reports and the
-prior deliverable, and is at most 24,000 characters. The follow-up intent commits
-before run creation and uses a deterministic submission key; retries never
-create duplicate execution. The old result and its evidence remain intact.
-Further continuation belongs to the returned child goal. This interface does
-not automatically infer permission to rerun work from a library edit.
+A terminal goal accepts one **explicit** follow-up POST, creating a linked run with its model, project, plugin selection, acceptance checks, execution limits and review reserve, original objective and new owner guidance. Limits apply afresh; spent usage, task identity, absolute deadlines and scientific preregistration never transfer. The frozen context (≤24,000 characters) declares its revision, material count and truncation, recent reports and prior deliverable. Intent commits before submission; a deterministic key prevents duplicate execution. Old evidence remains intact. Further continuation belongs to the child; a library edit never authorizes reruns. Problem: follow-ups lost project scope and silently removed explicit limits. Decision: carry immutable scope and acceptance policy through normal admission. Alternative rejected: prose reconstruction cannot preserve machine-enforced checks. Verification: `test_evolution_followup_policy.py` and `test_evolution_coding_cycle.py` cover parallel Workers, real commands, frozen review, learning and the next input. Scripted provider transport proves wiring, not model quality or benchmark rank.
 
 ### Shared conversation/UI API
 
@@ -1524,20 +1192,7 @@ conversation drawer. The goal input and optional model choice stay in the creati
 drawer. Task questions, source shelves, review evidence and downloadable results
 retain their furniture entry points; exploration never creates execution.
 
-Natural messages use `kind=message`, target only the coordinator, and do not enter
-the executor's inbox as instructions. The coordinator distinguishes questions,
-evidence and requested changes. `assign` requires a presented owner `source_seq`;
-the conditional schema declares `source_seq` locally in its `then` branch so
-provider tool-schema preflight keeps `evolution_coordinate` visible. Problem:
-the valid cross-branch JSON Schema requirement was rejected by providers that
-require every `required` field to appear in the same branch's `properties`.
-Decision: add an unconstrained local declaration while the root property keeps
-the sole integer bound. Alternative considered: remove the conditional from the
-provider schema, which would let models omit the required assignment reference.
-receipt projections connect the original message to its assignment and executor
-acknowledgement. Labels mean saved, considered, assigned, accepted, not applicable
-or conflict. None means independently verified. Interpretation is model-mediated;
-material ambiguity is answered with a focused question, not keyword routing.
+Natural messages use `kind=message`, target only the coordinator, and do not enter the executor's inbox as instructions. The coordinator distinguishes questions, evidence and requested changes. `assign` requires a presented owner `source_seq`; the conditional schema declares `source_seq` locally in its `then` branch so provider tool-schema preflight keeps `evolution_coordinate` visible. Problem: the valid cross-branch JSON Schema requirement was rejected by providers that require every `required` field to appear in the same branch's `properties`. Decision: add an unconstrained local declaration while the root property keeps the sole integer bound. Alternative considered: remove the conditional from the provider schema, which would let models omit the required assignment reference. receipt projections connect the original message to its assignment and executor acknowledgement. Labels mean saved, considered, assigned, accepted, not applicable or conflict. None means independently verified. Interpretation is model-mediated; material ambiguity is answered with a focused question, not keyword routing.
 
 `GET coordination?view=recent` returns the newest bounded page; `before=<seq>`
 returns preceding updates. The server derives delivery labels from durable receipts,
@@ -1555,37 +1210,13 @@ follow-up button: its textarea becomes the new guidance and the returned child
 opens with inherited context. Sending a conversational question never calls it.
 Existing follow-up identity remains navigable from the parent.
 
-Runtime integration is part of this contract: the native blueprint is registered;
-the tool builder/routing/handler adapter is wired to ordinary tool settlement;
-terminal listeners run before transient evidence release (successful callbacks
-are deduplicated, failures remain reconcilable). Internal `toolSpecAllowlist` and
-`toolSpecDenylist` narrow both visible and executable catalogs. Coordinators allow
-only evolution coordination and source-library tools, reviewers allow no tool specs, and execution admits
-swarm only through aggregate child budgets: a spawn wave slices the run's remaining
-token/tool-call budget per child (enforced at each child's own admission
-boundaries), a spawn against an exhausted budget is rejected, and every
-completion folds the child's bill into the parent task's admission counters and
-episode actuals. Ordinary tasks without these fields
-retain their catalog. Atomic tool admission and per-round token/deadline admission
-use `execution_limits`; these limits do not imply a bound on an already-running
-provider's reported output beyond its configured response limit.
+Runtime integration is part of this contract: the native blueprint is registered; the tool builder/routing/handler adapter is wired to ordinary tool settlement; terminal listeners run before transient evidence release (successful callbacks are deduplicated, failures remain reconcilable). Internal `toolSpecAllowlist` and `toolSpecDenylist` narrow both visible and executable catalogs. Coordinators allow only evolution coordination and source-library tools, reviewers allow no tool specs, and execution admits swarm only through aggregate child budgets: a spawn wave slices the run's remaining token/tool-call budget per child (enforced at each child's own admission boundaries), a spawn against an exhausted budget is rejected, and every completion folds the child's bill into the parent task's admission counters and episode actuals. Ordinary tasks without these fields retain their catalog. Atomic tool admission and per-round token/deadline admission use `execution_limits`; these limits do not imply a bound on an already-running provider's reported output beyond its configured response limit.
 
 The coordinator can page through the actual deliverable with `action=delivery`
 (4,000 characters per call plus stored review), rather than treating the initial
 preview as the entire result. Its prompt declares whether that preview is truncated.
 
-Workspace transport lifecycle: entering Evolution suspends Chat display SSE
-before its lazy feature import. Existing and newly created conversation
-coordinators retain demand, projections and replay cursors; returning to Chat
-resumes from those cursors. In-flight snapshots cannot reopen suspended streams.
-Problem: six hidden Chat EventSources exhausted HTTP/1 browser connections;
-live studio sprite requests remained pending beyond 45 seconds although direct
-asset reads completed in roughly 30 ms. Decision: the shell injects visibility
-into the typed Turn runtime; suspension clears source/reconnect/silence handles
-and introduces no polling, backend cancellation, worker, or stored state.
-Alternatives: image priority cannot release occupied sockets; disposing stores
-would discard replay state. Preview-only tests cannot detect live catalog load;
-verify production navigation and sprite readiness as well as replay lifecycle.
+Workspace transport lifecycle: entering Evolution suspends Chat display SSE before its lazy feature import. Existing and newly created conversation coordinators retain demand, projections and replay cursors; returning to Chat resumes from those cursors. In-flight snapshots cannot reopen suspended streams. Problem: six hidden Chat EventSources exhausted HTTP/1 browser connections; live studio sprite requests remained pending beyond 45 seconds although direct asset reads completed in roughly 30 ms. Decision: the shell injects visibility into the typed Turn runtime; suspension clears source/reconnect/silence handles and introduces no polling, backend cancellation, worker, or stored state. Alternatives: image priority cannot release occupied sockets; disposing stores would discard replay state. Preview-only tests cannot detect live catalog load; verify production navigation and sprite readiness as well as replay lifecycle.
 
 ### Per-role model selection
 
@@ -1599,32 +1230,9 @@ Stage receipts retain the model reference actually used; original intake
 choices remain separate for idempotent retries. Follow-up runs inherit overrides.
 No additional credential/configuration store or resident worker is introduced.
 
-Executor explicit result delivery: Problem: a real bounded probe put its complete
-answer in progress reports and exhausted its budget before final delivery.
-Decision: `evolution_coordinate submit_result` uses the existing sole-call terminal
-reply port, bound to the current executor and frozen stage launch. The ordinary
-terminal archive and independent reviewer still decide acceptance; preparation
-writes no verdict and grants no command evidence or replay. Alternative rejected:
-interpreting every report as completion would terminate legitimate experiments.
-Submission also requires the current admitted dispatch to name both the live task
-and frozen launch; the terminal verifier retains the entire dispatch binding.
-A valid launch alone cannot authorize another or merely pending carrier.
-The existing bounded content schema applies to this optional tool path; ordinary
-assistant final replies remain available. No measured cost reduction is claimed.
+Executor explicit result delivery: Problem: a real bounded probe put its complete answer in progress reports and exhausted its budget before final delivery. Decision: `evolution_coordinate submit_result` uses the existing sole-call terminal reply port, bound to the current executor and frozen stage launch. The ordinary terminal archive and independent reviewer still decide acceptance; preparation writes no verdict and grants no command evidence or replay. Alternative rejected: interpreting every report as completion would terminate legitimate experiments. Submission also requires the current admitted dispatch to name both the live task and frozen launch; the terminal verifier retains the entire dispatch binding. A valid launch alone cannot authorize another or merely pending carrier. The existing bounded content schema applies to this optional tool path; ordinary assistant final replies remain available. No measured cost reduction is claimed.
 
-Contract lifetime: Problem: the 32-entry schema LRU could evict a loaded original,
-reload edited disk content and diverge from an older cached validator. Decision:
-on first use, capture the finite `.schema.json` catalogue as immutable strings;
-parse each only when requested and retain parsed schemas for the process. New
-names require a new process. Validator eviction rebuilds from the same captured
-originals. Alternative rejected: enlarging the arbitrary LRU postpones drift;
-stat-based reload intentionally mixes epochs. This pins contracts, not Python
-code: coordinated deployment/restart remains necessary for code/schema alignment.
-The current 39-file catalogue contains 423,020 characters. One fresh-process
-measurement after imports captured it in 1.8 ms with 447 KB traced retention;
-parsing all entries retained 1.91 MB (validator cache excluded, filesystem cache
-uncontrolled). Retention is bounded by the captured application catalogue and
-ends with the process; no worker, timer or durable cache is introduced.
+Contract lifetime: Problem: the 32-entry schema LRU could evict a loaded original, reload edited disk content and diverge from an older cached validator. Decision: on first use, capture the finite `.schema.json` catalogue as immutable strings; parse each only when requested and retain parsed schemas for the process. New names require a new process. Validator eviction rebuilds from the same captured originals. Alternative rejected: enlarging the arbitrary LRU postpones drift; stat-based reload intentionally mixes epochs. This pins contracts, not Python code: coordinated deployment/restart remains necessary for code/schema alignment. The current 39-file catalogue contains 423,020 characters. One fresh-process measurement after imports captured it in 1.8 ms with 447 KB traced retention; parsing all entries retained 1.91 MB (validator cache excluded, filesystem cache uncontrolled). Retention is bounded by the captured application catalogue and ends with the process; no worker, timer or durable cache is introduced.
 
 Programme header CAS publication requires exact value and expected next version
 readback from the selected authority, including after a lost ACK. Missing or
@@ -1635,12 +1243,24 @@ trusting ACK shape or replaying submission after uncertainty. This adds one
 bounded header read per normal save, without a worker, cache or new namespace.
 Verify programme fault-injection and progression tests.
 
-Command execution evidence recognizes project `run_command` and standalone
-`code_exec` producer identities through one maintained set. Completion still
-requires observed zero exit without timeout/interruption/refusal; stdout or model
-claims cannot override failed execution. Background handles retain owner/task
-checks, and scientific extraction uses the same producer set. Problem: actual
-standalone commands were archived but rejected as unobserved. Decision: recognize
-both shipped identities; rejected: trusting arbitrary tool names or display text.
-Headless tests cover HTTP → real command → archive → review on both stores,
-including paired search measurements and contradictory claims. Controlled review frames prove plumbing, not independent research quality.
+Command evidence recognizes maintained `run_command` / `code_exec` identities. Zero exit
+without timeout/interruption/refusal remains required; owner/task checks and the shared
+producer set govern archives and scientific extraction. Problem: standalone commands
+were rejected. Decision: recognize both; reject arbitrary tool names/display claims.
+Headless tests cover both stores and contradictory claims; controlled frames prove plumbing.
+
+Problem: optional compute tools were invisible when plugin defaults were off. Decision:
+runs/programs freeze `executor_plugins` for executors; omission inherits defaults, `[]`
+disables plugins; reviews always use `[]`. Credentials/approval remain separate. Research discovery rejects the field. Reject automatically enabling every plugin or relying on shell drivers.
+
+Strategy lineage completeness — Problem: 64 templates/patterns, 32 terms, 64 lineage samples and a first-200 episode read silently removed learning evidence. Decision: normal strategy maintenance pages all owner episodes and exact parent goals; derivation retains all observed lineage, terms and templates. The success denominator covers the same full lineage, including failed paths. Strategy/anti-pattern reads and retrieval traverse complete owner pages; an explicit retrieval result limit controls output only. The ordinary maintenance recent window remains for other consumers; it cannot shrink strategy evidence. Physical pages remain bounded, ownership/type/source checks remain, and one failure still cannot mint avoidance advice. Exploratory/missing-parent episodes retain their restricted learning rights. The shared record writer delegates size to physical storage rather than denying JSON above 1 MiB; existing input/header sizing hints are not write admission. Storage errors and CAS conflicts propagate. Alternatives: larger count caps still lose evidence; clipping a denominator changes its meaning; silently ignoring failed writes invents learned authority. Tests cross all former count limits, preserve long terms and complete >1 MiB lineage, and verify owner isolation. Full distillation remains linear in retained evidence; incremental derivation and transport paging remain further work. Measurement: 723 synthetic settled episodes across 241 domains produced all 241 templates and 241 patterns (315,951 JSON bytes) in 1.1936 s under tracing, with 3,368,146 traced peak bytes; fixture construction is excluded. A 9,000-id lineage occupied 1,251,237 UTF-8 JSON bytes and round-tripped through physical SQLite in 0.1904 s, retaining stale-CAS rejection. These are storage/derivation measurements, not scientific efficacy or model throughput. Both selected physical backends pass the 9,000-id strategy round-trip and stale-CAS guard: the current-workspace run measured 0.0176 s on SQLite and 0.1540 s on TofuDB for initial write/read. The matching verified CLI/library artifact was used only by isolated tests; live backend configuration is unchanged.
+
+Complete stage configuration — Problem: immutable input already framed large messages, but canonical configuration rejected bytes beyond a fixed 1 MiB threshold and prevented authorized stages from being archived or restored. Decision: canonical JSON validates types/nonfinite values without a size quota. The inline/multipart crossover sizes storage frames only; complete messages and configuration retain their canonical digest, exact owner/run/stage binding and write-before-dispatch authority. Existing immutable frame writes, manifest publication, missing/corrupt frame refusal and cold-restoration fences remain. Inline credential fields remain forbidden at every nested location. Alternatives: raising the quota still denies valid input; clipping configuration changes execution; bypassing the frozen digest or rerunning hooks loses authority. Tests restore multi-megabyte UTF-8 configuration and messages after proven process loss, with unchanged episode/attempt and no duplicate hook or dispatch. Multipart decoding accumulates one byte buffer and an incremental body hash, instead of retaining every decoded chunk plus a joined full-body copy. The same 4,881,054-byte synthetic input (large Unicode configuration and messages) archived/restored in 0.2444 s under tracing. Peak traced allocation fell from 51,658,049 to 47,070,486 bytes in the paired test; fixture/payload construction is excluded. This measures shared task birth/archive/recovery with controlled model submission, not a provider call or real process crash. Source digests and immutable writes remain authoritative; full JSON materialization still scales with complete input size.
+
+Program frontier admission — Problem: a 32-step queue rejected owner expansions and independently reviewed follow-ups; a full queue also blocked automatic diagnosis of definitive failure. The registry rejected a 4,097th unfinished program. Decision: contracts and runtime retain every authorized pending step and registered program. Diagnosis may prepend its reviewed recovery stage without a count gate. Dependency order, original failed checks, immutable objective, original final audit position, owner/run binding, idempotency and CAS remain authoritative; proposal creation alone still launches nothing. Alternatives: larger caps merely move refusal; dropping pending steps or failed checks weakens acceptance; launching dependencies in parallel changes meaning. The existing fair maintenance cadence remains independently owned; removing registration/frontier refusal does not yet remove its per-cadence visit budget. Registry measurement: admitting an owner start/resume after 4,096 synthetic registered IDs retained all 4,097 IDs (180,301 JSON bytes), taking 0.1140 s under tracing with 75,818 peak traced bytes. Existing-ID fixture construction is excluded; this measures registration bookkeeping, not simultaneous model work. Registry/frontier CAS still rewrites their full current value; incremental registry storage remains further optimization work. Physical frontier verification: 242 pending steps occupied 1,329,959 UTF-8 JSON bytes and round-tripped through isolated SQLite in 0.3909 s. An expansion retained all original steps and final audit; a stale program CAS was refused without changing the expanded frontier. This measures storage, not execution. Both selected physical backends pass complete frontier storage, expansion and stale-CAS rejection. The current-workspace 242-step initial write/read measured 0.2780 s on SQLite and 0.2215 s on matching verified TofuDB. Tests use isolated authorities and leave the running server's backend configuration unchanged.
+
+Program sweep demand — Problem: fixed-count rotation postponed admitted projects, while sequential visits let one blocked project suppress siblings. Decision: the existing reaper advances every enrolled owner program through the shared demand executor and joins all workers. The legacy batch parameter is an idle-reuse hint, with no visit/concurrency ceiling. Each program retains its launch/settlement/owner fences; genuine worker-start failure never enters that program and leaves it enrolled for retry. Results retain registry order. Terminal cleanup removes IDs in one CAS after joining; any concurrent registry change defers cleanup instead of deleting new enrollment or a resume whose active state has not yet published. Idle reads once and writes nothing. Alternatives: larger batches retain waits; serial visits retain head blocking; detached workers lose teardown ownership; per-ID concurrent registry rewrites create avoidable CAS contention. Experiment dependency order remains within its own program; a sweep grants no acceptance or replay authority. Measurement: 64 physical worker visits rendezvoused with idle hint 1 in 12.7 ms; joined teardown left zero owned workers. This is controlled progression work, not model execution. A blocked visit did not delay seven independent visits; 40 terminal IDs require one cleanup CAS rather than 40 registry rewrites. Concurrent enrollment/resume causes that cleanup CAS to defer, preserving all IDs. Scheduling memory and the result list grow with enrolled demand, while worker lifetime ends at the joined pass boundary.
+
+Complete run reconciliation sweep — Problem: the first 200 owner records could contain only terminal history, starving later unfinished runs; serial advances could also delay independent reconciliation. Decision: page the entire owner key range, submit each eligible identity/status to the shared demand executor and join accepted workers. Page sizes remain bounded and short pages continue until true EOF. Existing grace, live-task observation, owner/CAS fences and cancelled-episode accounting remain. One read/advance or worker-start failure does not suppress siblings; storage-page failures still propagate after joining accepted workers. Transition summaries retain owner-key order and grant no replay or acceptance authority. Alternatives: larger first-page limits still starve later rows; removing terminal history loses durable evidence; detached workers lose teardown; serial advances retain head blocking. Measurement: 64 physical reconciliation workers rendezvoused in 13.0 ms and joined teardown left zero owned workers. A fixture with 573 terminal history rows still found all seven later stale runs, while ignoring fresh and foreign rows; shortened two-row pages also preserved all nine eligible identities. Thread-start failure leaves its run available for another pass, and later-page failure joins accepted work before surfacing the storage error. This measures controlled reconciliation, not model execution. Full discovery remains linear in retained history; an authoritative active-record index remains further work.
+
+Complete review output — Problem: total-length checks rejected schema-valid judgments and prevented immutable archive projection of long evidence fields. Decision: explicit tool delivery, JSON parsing and archive projection impose no aggregate character/byte quota. JSON shape, duplicate/multiple-object guards, independent reviewer binding, immutable archive digest/offsets, original-source inspection and explicit model budgets remain. Long field text is retained in the source archive and represented by verified JSON-pointer references in the compact verdict; projection does not change the judgment. Large malformed JSON uses the existing finite syntax recovery allowance, never executor replay. Alternatives: larger caps retain refusal; truncation changes evidence; trusting unbound original pointers invents authority; reparsing without schema checks accepts invalid verdicts. Tests cover complete tool delivery, multi-megabyte valid JSON/archived evidence, unchanged source identity and no extra rejudge. Measurement: a 6,960,486-byte UTF-8 review with long original evidence fields archived and projected in 0.2344 s under tracing, with 48,080,581 peak traced bytes; input construction is excluded. The verdict retained original judgments and verified source pointers without a model rejudge. This measures controlled archive/parse/projection work, not provider throughput; full parsing remains linear in terminal output size.

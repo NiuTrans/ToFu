@@ -183,7 +183,7 @@ def qr_login_question(payload: str, *, prompt: str = '',
     Returns ``''`` when the QR could not be produced, so the caller can fall
     back to showing the raw URL rather than asking the user to scan nothing.
     """
-    from lib.runtime_paths import uploads_root
+    from lib.runtime.runtime_paths import uploads_root
 
     dest = os.path.join(uploads_root(), 'images')
     try:

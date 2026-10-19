@@ -517,3 +517,12 @@ def test_full_pending_working_basis_can_settle_existing_experiment(storage, monk
     page = load_history_page(DIRECTION, 'en', user_id=1)
     assert page['runs'][0]['scientific_outcome'] == 'inconclusive'
     assert len(page['runs'][0]['tool_receipts']) == 2
+
+
+def test_large_user_sources_do_not_archive_unrelated_observations():
+    from lib.research.history import compact_observations
+    program = draft_with_runs(3)
+    before = compact_observations(program)
+    program['source_files'] = [{'path': 'main.tex', 'content': 'x' * (9 * 1024 * 1024)}]
+    assert compact_observations(program) == before
+    assert before[1] == []

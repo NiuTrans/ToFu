@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from tests._runtime_sections import native_module_path
 import shutil
 import subprocess
 
@@ -50,6 +51,7 @@ var requiredApiTransport = {
   },
 };
 
+eval(fs.readFileSync(process.argv[2], 'utf8'));
 eval(fs.readFileSync(process.argv[1], 'utf8'));
 
 (async () => {
@@ -115,7 +117,8 @@ eval(fs.readFileSync(process.argv[1], 'utf8'));
 });
 """
     result = subprocess.run(
-        ["node", "-e", harness, str(API_SOURCE)],
+        ["node", "-e", harness, str(API_SOURCE), native_module_path(
+            ".native/endpoint-registry.js", ROOT / "frontend/src/api/endpoint-registry/index.ts")],
         cwd=ROOT,
         capture_output=True,
         text=True,

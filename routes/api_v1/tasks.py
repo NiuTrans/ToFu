@@ -39,7 +39,7 @@ from lib.production.work_unit import project_work_unit
 from lib.log import audit_log, get_logger
 from lib.openapi import api_meta
 from lib.request_parser import optional_bool, parse_body, require_str
-from lib.task_replay import (
+from lib.task_replay.task_replay import (
     TASK_REPLAY_TERMINAL_EVENT_TYPES,
     TASK_REPLAY_TERMINAL_STATUSES,
     project_bounded_replay_payload,
@@ -58,6 +58,18 @@ logger = get_logger(__name__)
 
 api_v1_tasks_bp = Blueprint('api_v1_tasks', __name__)
 _TASK_REPLAY_PARAMETERS = task_replay_parameters()
+_TASK_VIEW_PARAMETER = {
+    'name': 'view', 'in': 'query', 'required': False,
+    'description': 'current uses live state with cold fallback; durable reads only the owner-scoped committed chat task.',
+    'schema': {'type': 'string', 'enum': ['current', 'durable'], 'default': 'current'},
+}
+
+
+def _task_read_view():
+    values = request.args.getlist('view')
+    if len(values) > 1 or (values and values[0] not in {'current', 'durable'}):
+        return False, api_bad_request('view must be current or durable', field='view')
+    return values == ['durable'], None
 
 
 def _registries() -> dict:
@@ -474,15 +486,22 @@ def _inspector_task_path(raw_task_id: str) -> str:
 @api_v1_tasks_bp.route('/api/v1/tasks/<task_id>', methods=['GET'])
 @require_scope('tasks')
 @api_meta(summary='Get task state', tags=['tasks'], scope='tasks',
+          parameters=[_TASK_VIEW_PARAMETER],
           responses={
               '200': {'description': 'OK', 'content': {'application/json': {
                   'schema': {'$ref': '#/components/schemas/TaskState'}}}},
               '404': {'description': 'Not Found'},
           })
 def get_task(task_id):
+    durable_only, invalid_view = _task_read_view()
+    if invalid_view is not None:
+        return invalid_view
     owner_user_id = int(request_user_id())
     rt, task, foreign_present = _find_task(
         task_id, user_id=owner_user_id)
+    read_source = 'live'
+    if durable_only:
+        rt, task = None, None
     if task is None:
         if foreign_present:
             return api_not_found('Task not found')
@@ -493,7 +512,7 @@ def get_task(task_id):
             snapshot = load_durable_chat_task(task_id, user_id=owner_user_id)
             from lib.research.action_terminal import load_public_action_task
             retained_action = (load_public_action_task(task_id, user_id=owner_user_id)
-                               if snapshot is None else None)
+                               if snapshot is None and not durable_only else None)
         except Exception as e:
             logger.error(
                 '[api_v1.tasks] durable state failed task=%s: %s',
@@ -502,7 +521,9 @@ def get_task(task_id):
         if snapshot is None and retained_action is None:
             return api_not_found('Task not found')
         task = retained_action if retained_action is not None else snapshot.public_task()
+        read_source = 'durable'
     payload = _public_task(task)
+    payload['readSource'] = read_source
     if rt is not None and getattr(rt, 'kind', '') != 'chat':
         unit = project_work_unit(task)
         if unit is not None:
@@ -517,12 +538,17 @@ def get_task(task_id):
                       'next_cursor until caught_up=true; terminal result '
                       'fields are emitted only on the caught-up page.',
           tags=['tasks'], scope='tasks',
-          parameters=_TASK_REPLAY_PARAMETERS)
+          parameters=[*_TASK_REPLAY_PARAMETERS, _TASK_VIEW_PARAMETER])
 def task_events(task_id):
+    durable_only, invalid_view = _task_read_view()
+    if invalid_view is not None:
+        return invalid_view
     cursor = task_replay_cursor(request.args)
     owner_user_id = int(request_user_id())
     rt, task, foreign_present = _find_task(
         task_id, user_id=owner_user_id)
+    if durable_only:
+        rt, task = None, None
     if task is None:
         if foreign_present:
             return api_not_found('Task not found')
@@ -792,7 +818,7 @@ def task_stream(task_id):
 
     async def gen():
         nonlocal cursor, durable_snapshot
-        from lib.task_replay import task_memory_replay_page
+        from lib.task_replay.task_replay import task_memory_replay_page
         last_heartbeat = time.time()
         while True:
             if task is not None:

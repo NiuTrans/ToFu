@@ -29,14 +29,14 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 
 def _classify(status, body):
-    from lib.llm_errors import _classify_http_error
+    from lib.llm.llm_errors import _classify_http_error
     _classify_http_error(status, body, 'gpt-5-codex', '[t]')
 
 
 @pytest.mark.unit
 class TestSubscriptionQuotaClassification:
     def test_usage_limit_reached_with_resets_in_seconds(self):
-        from lib.llm_errors import RateLimitError
+        from lib.llm.llm_errors import RateLimitError
         body = ('{"error":{"type":"usage_limit_reached",'
                 '"message":"You have hit your usage limit",'
                 '"resets_in_seconds":300}}')
@@ -51,7 +51,7 @@ class TestSubscriptionQuotaClassification:
         assert e.status_code == 429
 
     def test_usage_limit_reached_with_resets_at_unix_ts(self):
-        from lib.llm_errors import RateLimitError
+        from lib.llm.llm_errors import RateLimitError
         future = int(time.time()) + 600
         body = ('{"error":{"type":"usage_limit_reached",'
                 '"message":"usage limit reached","resets_at":%d}}' % future)
@@ -63,7 +63,7 @@ class TestSubscriptionQuotaClassification:
     def test_usage_limit_reached_without_reset_falls_back(self):
         """No resets_* fields → still rate-limit class, but NO explicit
         duration (the dispatcher then uses the generic 429 policy)."""
-        from lib.llm_errors import RateLimitError
+        from lib.llm.llm_errors import RateLimitError
         body = '{"error":{"type":"usage_limit_reached","message":"limit"}}'
         with pytest.raises(RateLimitError) as ei:
             _classify(429, body)
@@ -71,7 +71,7 @@ class TestSubscriptionQuotaClassification:
         assert ei.value.retry_after_s is None
 
     def test_selected_model_at_capacity_is_rate_limit_class(self):
-        from lib.llm_errors import RateLimitError
+        from lib.llm.llm_errors import RateLimitError
         body = '{"error":{"message":"selected model is at capacity"}}'
         with pytest.raises(RateLimitError) as ei:
             _classify(429, body)
@@ -79,7 +79,7 @@ class TestSubscriptionQuotaClassification:
 
     def test_plain_429_not_subscription_quota(self):
         """Regression guard: a transient per-key 429 keeps the old shape."""
-        from lib.llm_errors import RateLimitError
+        from lib.llm.llm_errors import RateLimitError
         with pytest.raises(RateLimitError) as ei:
             _classify(429, '{"error":{"message":"Rate limit reached"}}')
         e = ei.value
@@ -89,7 +89,7 @@ class TestSubscriptionQuotaClassification:
 
     def test_billing_quota_429_not_subscription_quota(self):
         """insufficient_quota stays on the BILLING channel (is_quota)."""
-        from lib.llm_errors import RateLimitError
+        from lib.llm.llm_errors import RateLimitError
         body = '{"error":{"code":"insufficient_quota","message":"x"}}'
         with pytest.raises(RateLimitError) as ei:
             _classify(429, body)
@@ -100,7 +100,7 @@ class TestSubscriptionQuotaClassification:
         """SSE raise sites outside llm_errors only carry the raw body text in
         the message — the exception itself must still surface the parsed
         reset duration so the dispatcher can wire the timed cooldown."""
-        from lib.llm_errors import RateLimitError
+        from lib.llm.llm_errors import RateLimitError
         e = RateLimitError('SSE error: usage_limit_reached: slow down '
                            '"resets_in_seconds": 120')
         assert e.is_subscription_quota is True
@@ -148,7 +148,7 @@ class TestDispatchWiresRetryAfter:
 
     def test_dispatch_chat_cools_slot_for_reset_duration(self, monkeypatch):
         from lib.llm_dispatch import api
-        from lib.llm_errors import RateLimitError
+        from lib.llm.llm_errors import RateLimitError
 
         slot1 = self._slot('k1')
         slot2 = self._slot('k2')

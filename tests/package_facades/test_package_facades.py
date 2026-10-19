@@ -164,8 +164,7 @@ class TestPdfParserNamespace:
         assert callable(postprocess_math_blocks)
 
     def test_common(self):
-        from lib.pdf_parser._common import HAS_PYMUPDF4LLM, MAX_PDF_BYTES
-        assert isinstance(MAX_PDF_BYTES, int)
+        from lib.pdf_parser._common import HAS_PYMUPDF4LLM
         assert isinstance(HAS_PYMUPDF4LLM, bool)
 
     def test_root_does_not_reaggregate_concrete_owners(self):
@@ -359,7 +358,7 @@ class TestNoStaleFiles:
     def test_no_stale_monoliths(self):
         import os
         # lib/search + lib/fetch are gone: search/fetch were extracted into the
-        # standalone tofu_search package (consumed via lib/search_bridge.py).
+        # standalone tofu_search package (consumed via lib/search/search_bridge.py).
         # Neither the monolith files nor the old packages should remain — but a
         # leftover dir containing ONLY a __pycache__ (stale .pyc, never shipped)
         # doesn't count: the export strips __pycache__.

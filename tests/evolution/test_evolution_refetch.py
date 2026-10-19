@@ -105,7 +105,7 @@ def test_blank_queries_are_a_contract_error(env):
                                   actor='executor', indexers=[], now=NOW)
 
 
-def test_full_shelf_truncates_landing_but_keeps_receipt(env):
+def test_existing_shelf_retains_new_source_and_receipt(env):
     from lib import evolution
     from lib.evolution import library
     _store, runs = env
@@ -117,7 +117,7 @@ def test_full_shelf_truncates_landing_but_keeps_receipt(env):
     result = evolution.reindex_for_run(
         'r1', ['recovery'], user_id=USER, actor='miner',
         indexers=[_FakeIndexer(_refs())], now=NOW)
-    assert result['saved'] == 0 and result['skipped'] == 2
+    assert result['saved'] == 1 and result['skipped'] == 1
     assert len(evolution.list_observations(user_id=USER,
                                            kind='reindex_note')) == 1
 
@@ -190,11 +190,14 @@ def test_reindexed_episode_becomes_a_falsifiable_feature(env):
         {'exploratory': False})['reindexed'] is False
 
 
-def test_tool_handler_requires_a_bound_current_task(env):
+def test_tool_handler_requires_a_bound_current_task(env, monkeypatch):
     from lib import evolution
-    from lib.evolution import tool_handler
+    from lib.evolution import records, tool_handler
     _store, runs = env
     runs[(USER, 'r1')] = _run()
+    _store.rows[(records.NAMESPACE_RUNS, records.entity_key('r1', USER, kind='run'))] = _run()
+    monkeypatch.setattr('lib.evolution.refetch._default_indexers',
+                        lambda: (_FakeIndexer(_refs()),))
     task = {'id': 'task-a', '_userId': USER,
             'config': {'evolution': {'run_id': 'r1', 'stage': 'executing'}}}
 
@@ -204,10 +207,15 @@ def test_tool_handler_requires_a_bound_current_task(env):
             {'queries': ['recovery'], 'reason': 'need fresher sources'},
             1, {}, {}, '', False)
 
-    # The handler reaches the real reindex path (default indexers may be
-    # offline here; the receipt must still land or refuse honestly).
+    # Exercise the real material and observation boundary without network I/O.
     entry = invoke()[0]
     assert entry['toolName'] == 'evolution_reindex'
+    assert entry['fetched'] is True, entry
+    notes = evolution.list_observations(user_id=USER, kind='reindex_note')
+    assert len(notes) == 1
+    assert notes[0]['source'] == {'actor': 'executor', 'task_id': 'task-a'}
+    invoke()
+    assert len(evolution.list_observations(user_id=USER, kind='reindex_note')) == 1
     task['id'] = 'stale-task'
     assert invoke()[0]['fetched'] is False
     task['id'] = 'task-a'

@@ -53,7 +53,7 @@ from lib.turn_source_queue_contract import (
     KIND_PEER_MSG,
     KIND_REAL,
     KIND_WORKFLOW as KIND_WORKFLOW,
-    BACKGROUND_RECEIPT_BATCH_MAX,
+    DEFAULT_BACKGROUND_RECEIPT_PAGE_ROWS,
     QUEUE_REAP_PROBE_CONTRACT,
     QUEUE_REAP_PROBE_CONVERSATIONS_FIELD,
     QUEUE_REAP_PROBE_HAS_EXPIRED_FIELD,
@@ -828,7 +828,7 @@ def get_queue(conv_id: str, *, user_id: int) -> list[dict]:
     return [{k: row[k] for k in _QUEUE_PREVIEW_KEYS if k in row} for row in rows]
 
 
-def background_receipt_page(conv_id: str, *, user_id: int, page_size: int = BACKGROUND_RECEIPT_BATCH_MAX,
+def background_receipt_page(conv_id: str, *, user_id: int, page_size: int = DEFAULT_BACKGROUND_RECEIPT_PAGE_ROWS,
                             cursor: dict | None = None) -> dict:
     """Read complete receipts under the storage response byte budget."""
     return _queue_client().query('queue.list', {
@@ -837,12 +837,14 @@ def background_receipt_page(conv_id: str, *, user_id: int, page_size: int = BACK
     }) or {'items': [], 'nextCursor': None}
 
 
-def _background_receipts(conv_id: str, *, user_id: int, max_items: int) -> list[dict]:
+def _background_receipts(conv_id: str, *, user_id: int, max_items: int | None = None) -> list[dict]:
     result = []
     cursor = None
-    while len(result) < max_items:
+    page_rows = DEFAULT_BACKGROUND_RECEIPT_PAGE_ROWS
+    while max_items is None or len(result) < max_items:
+        requested_rows = page_rows if max_items is None else min(page_rows, max_items - len(result))
         page = background_receipt_page(conv_id, user_id=user_id,
-            page_size=min(BACKGROUND_RECEIPT_BATCH_MAX, max_items - len(result)), cursor=cursor)
+            page_size=requested_rows, cursor=cursor)
         result.extend(page['items'])
         next_cursor = page.get('nextCursor')
         if next_cursor is None:
@@ -850,14 +852,16 @@ def _background_receipts(conv_id: str, *, user_id: int, max_items: int) -> list[
         if next_cursor == cursor or not page['items']:
             raise StorageError('database_protocol_error', 'Background receipt page did not advance')
         cursor = next_cursor
+        if len(page['items']) == requested_rows:
+            page_rows *= 2  # Full windows grow; response bytes still split complete items.
     return sorted(result, key=lambda row: row.get('position', 0))
 
 
 def pending_background_command_injections(
     conv_id: str, *, user_id: int,
-    max_items: int = BACKGROUND_RECEIPT_BATCH_MAX,
+    max_items: int | None = None,
 ) -> list[dict]:
-    """Rebuild bounded inbox twins from durable receipts for a new turn.
+    """Rebuild complete inbox twins from durable receipts for a new turn.
 
     This is also the upgrade path for old workflow completion rows. A receipt
     stays in queue authority until the provider-consumption ACK removes it.
@@ -865,7 +869,7 @@ def pending_background_command_injections(
     rows = _background_receipts(conv_id, user_id=user_id, max_items=max_items)
     items = []
     for row in rows:
-        if len(items) >= max_items:
+        if max_items is not None and len(items) >= max_items:
             break
         if row.get('kind') not in (KIND_BACKGROUND_RECEIPT, KIND_WORKFLOW):
             continue
@@ -909,7 +913,7 @@ def dispatch_completed_background_batch(conv_id: str, *, user_id: int) -> str | 
                        and not task.get('aborted')
                        for task in chat_task_runtime.snapshot_owned(user_id=user_id))):
             return None
-        receipts = _background_receipts(conv_id, user_id=user_id, max_items=BACKGROUND_RECEIPT_BATCH_MAX)
+        receipts = _background_receipts(conv_id, user_id=user_id, max_items=None)
         if not receipts:
             return None
         if next_dispatchable_turn(conv_id, user_id=user_id) is None:
@@ -1042,17 +1046,10 @@ def dedup_inbox_durable_rows(
     Model consumption and this storage transaction are not atomic.
     Returns the number removed.
     """
-    from itertools import islice
-    from lib.turn_source_queue_contract import QUEUE_INJECTION_ACK_MAX_IDS
-
     if not conv_id:
         return 0
     try:
-        # Bound iteration too: malformed/unbounded callers cannot allocate an
-        # unbounded ID list or silently acknowledge only part of a drain.
-        batch = list(islice(queue_ids or [], QUEUE_INJECTION_ACK_MAX_IDS + 1))
-        if len(batch) > QUEUE_INJECTION_ACK_MAX_IDS:
-            raise ValueError("Injection acknowledgement exceeds inbox capacity")
+        batch = list(queue_ids or [])
         ids = sorted(set(q for q in batch if q))
         if not ids:
             return 0

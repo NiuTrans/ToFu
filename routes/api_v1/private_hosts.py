@@ -119,7 +119,7 @@ def _resync():
     user prepared an allowlist entry.
     """
     try:
-        from lib.search_runtime import sync_search_config_if_loaded
+        from lib.search.search_runtime import sync_search_config_if_loaded
         sync_search_config_if_loaded()
     except Exception as e:
         logger.warning('[PrivHosts] search-config resync failed: %s', e)

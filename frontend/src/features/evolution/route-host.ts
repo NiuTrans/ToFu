@@ -17,8 +17,8 @@ export interface EvolutionRouteHostPorts {
 export function evolutionPageKind(path: string): EvolutionPageKind {
   const segment = path.split('/')[1] || '';
   if (segment === 'research') return 'research';
-  if (!segment || segment === 'programs') return 'programs';
-  return ['runs', 'start'].includes(segment) ? 'studio' : 'detail';
+  if (segment === 'programs') return 'programs';
+  return !segment || ['runs', 'start'].includes(segment) ? 'studio' : 'detail';
 }
 
 export function createEvolutionRouteHost(ports: EvolutionRouteHostPorts, initialPath: string) {

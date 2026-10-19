@@ -13,6 +13,7 @@ const issueKeys: Readonly<Record<string, I18nKey>> = {
   codex_access_expired: 'settings.codexSharedExpired',
   codex_command_timeout: 'settings.codexSharedCommandFailed',
   codex_command_unavailable: 'settings.codexSharedCommandFailed',
+  codex_home_storage_full: 'settings.codexSharedStorageFull',
   codex_command_invalid_response: 'settings.codexSharedCommandFailed',
   codex_command_unsupported: 'settings.codexSharedCommandFailed',
   codex_credentials_unreadable: 'settings.codexSharedUnreadable',

@@ -239,7 +239,7 @@ class StripeCheckoutTest(_BillingPhase2Base):
             captured['kw'] = kw
             return fake_resp
 
-        with patch('lib.http_client.async_http_post',
+        with patch('lib.http_transport.client.async_http_post',
                     new=AsyncMock(side_effect=_fake_post)):
             session_id, url = asyncio.run(create_stripe_checkout(
                 user_id=u.id, amount_minor=1500, currency='usd',
@@ -289,7 +289,7 @@ class StripeCheckoutTest(_BillingPhase2Base):
         async def _fake_post(url, **kw):
             return fake_resp
 
-        with patch('lib.http_client.async_http_post',
+        with patch('lib.http_transport.client.async_http_post',
                     new=AsyncMock(side_effect=_fake_post)):
             with self.assertRaises(RuntimeError) as ctx:
                 asyncio.run(create_stripe_checkout(

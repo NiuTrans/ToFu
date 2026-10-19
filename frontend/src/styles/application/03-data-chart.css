@@ -1,0 +1,27 @@
+/* Data-chart owner: theme paints/type only; SVG geometry belongs to data-chart.ts. */
+.rich-data-chart { min-width: 0; font-family: var(--font-ui); }
+.rich-data-chart-scroll, .rich-data-chart-table { overflow: auto; max-width: 100%; }
+.rich-data-chart-plot { display: block; width: 100%; min-width: 36rem; font-size: var(--font-size-sm); }
+.rich-data-chart-grid { stroke: var(--border); stroke-width: var(--control-edge-inset); vector-effect: non-scaling-stroke; }
+.rich-data-chart-axis { stroke: var(--text-secondary); stroke-width: var(--control-edge-inset); vector-effect: non-scaling-stroke; }
+.rich-data-chart-tick { fill: var(--text-secondary); font-size: var(--font-size-xs); }
+.rich-data-chart-label { fill: var(--text-primary); font-size: var(--font-size-sm); }
+.rich-data-chart-slice-label { fill: var(--bg-primary); stroke: var(--text-primary); stroke-width: var(--control-edge-inset); paint-order: stroke; font-weight: var(--weight-semibold); }
+.rich-data-chart-mark { fill: currentColor; stroke: var(--bg-primary); stroke-width: var(--control-edge-inset); vector-effect: non-scaling-stroke; }
+.rich-data-chart-line { fill: none; stroke: currentColor; stroke-width: var(--space-0-5); vector-effect: non-scaling-stroke; }
+.rich-data-chart-paint-0 { color: var(--accent); }
+.rich-data-chart-paint-1 { color: var(--success-text); }
+.rich-data-chart-paint-2 { color: var(--warning-text); }
+.rich-data-chart-paint-3 { color: var(--info-text); }
+.rich-data-chart-paint-4 { color: var(--error-text); }
+.rich-data-chart-paint-5 { color: var(--text-secondary); }
+.rich-data-chart-paint-6 { color: var(--text-primary); }
+.rich-data-chart-paint-7 { color: var(--accent-hover); }
+.rich-data-chart-legend { display: flex; flex-wrap: wrap; column-gap: var(--space-8); row-gap: var(--space-2); margin: var(--space-3) 0; padding-inline-start: var(--space-6); color: var(--text-primary); font-size: var(--font-size-sm); }
+.rich-data-chart-legend li { overflow-wrap: anywhere; }
+.rich-data-chart-table table { border-collapse: collapse; width: 100%; min-width: 36rem; font-size: var(--font-size-sm); }
+.rich-data-chart-table th, .rich-data-chart-table td { text-align: start; padding: var(--space-2); border-bottom: var(--control-edge-inset) solid var(--border); overflow-wrap: anywhere; }
+.rich-data-chart-table th { font-weight: var(--weight-semibold); }
+.rich-data-chart-table caption { text-align: start; padding: var(--space-2); color: var(--text-secondary); }
+.rich-data-chart :focus-visible { outline: var(--space-1) solid var(--accent); outline-offset: var(--space-1); }
+.rich-data-chart-plot--pie { min-width: 0; max-height: 24rem; }

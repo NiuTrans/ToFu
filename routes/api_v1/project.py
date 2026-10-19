@@ -25,13 +25,8 @@ Routes (legacy snake_case path → new hyphen-case path):
   POST   /api/v1/project/upload            — save a dropped file into a folder (binary-safe)
   Signal-driven Project Brain routes live in routes/api_v1/project_brain.py.
 
-All require ``@require_auth``. Mutations that change ``data/config/`` or
-walk the filesystem keep a ``rate_limit`` circuit-breaker against runaway
-client retry loops.  It is sized at 120/min (sustained 2 rps): the file
-picker's own legitimate bursts — per-conversation restore on every conv
-switch, RO re-hydrate after a server restart — can exceed 10/min, so a
-tighter ceiling only ever bites the owner.  ``TOFU_RATE_LIMIT=off``
-disables the buckets entirely on single-user installs.
+All require ``@require_auth``. Authorized operations have no endpoint/IP
+request-frequency quota; domain services own execution and recovery.
 
 TODO(enterprise, I7): project selection, board, and charter state are
 instance-global behind bare ``@require_auth`` — any authenticated user can
@@ -67,7 +62,6 @@ from lib.project_recent_contract import (
     RECENT_PROJECT_PATH_MAX_CHARS,
     RECENT_PROJECT_TOUCH_BATCH_LIMIT,
 )
-from lib.rate_limiter import rate_limit
 from lib.human_gate_contract import MAX_HUMAN_GATE_REQUEST_ID_LENGTH
 from lib.request_parser import optional_bool, optional_str, parse_body
 
@@ -137,7 +131,6 @@ def _project_user_id() -> int:
 
 @api_v1_project_bp.route("/api/v1/project/set", methods=["POST"])
 @require_auth
-@rate_limit(limit=120, per=60)
 @api_meta(
     summary="Set the primary project root",
     description="Replaces any existing primary path; clears extras.",
@@ -171,7 +164,6 @@ def project_set():
 
 @api_v1_project_bp.route("/api/v1/project/paths", methods=["PUT"])
 @require_auth
-@rate_limit(limit=120, per=60)
 @api_meta(
     summary="Atomically set primary + extra project paths",
     description=(
@@ -183,7 +175,7 @@ def project_set():
     tags=["project"],
 )
 def project_paths():
-    data = parse_body()
+    data = parse_body(exact=("paths", "readOnlyPaths", "recentPaths"))
     paths = data.get("paths", [])
     if not paths or not isinstance(paths, list):
         return api_error(
@@ -222,7 +214,6 @@ def project_paths():
 
 @api_v1_project_bp.route("/api/v1/project/git-root-hint", methods=["POST"])
 @require_auth
-@rate_limit(limit=120, per=60)
 @api_meta(
     summary="Nearest enclosing git root for a directory",
     description=(
@@ -286,7 +277,7 @@ def project_clear():
     request_body={'content': {'application/json': {'schema': browse_request_schema()}}},
 )
 def project_browse():
-    data = parse_body(strict=True)
+    data = parse_body(strict=True, exact=tuple(browse_request_schema()["properties"]))
     try:
         path, show_hidden = normalize_browse_request(data)
     except ValueError as error:
@@ -301,7 +292,6 @@ def project_browse():
 
 @api_v1_project_bp.route("/api/v1/project/mkdir", methods=["POST"])
 @require_auth
-@rate_limit(limit=120, per=60)
 @api_meta(
     summary="Create a new folder",
     description=(
@@ -329,7 +319,6 @@ def project_mkdir():
 
 @api_v1_project_bp.route("/api/v1/project/rmdir", methods=["POST"])
 @require_auth
-@rate_limit(limit=120, per=60)
 @api_meta(
     summary="Delete a folder (moved to a recoverable trash bin)",
     description=(
@@ -435,7 +424,6 @@ def project_recent():
 @api_v1_project_bp.route(
     "/api/v1/project/recent/relink", methods=["POST"])
 @require_auth
-@rate_limit(limit=120, per=60)
 @api_meta(
     summary="Re-key a renamed/moved project to its new path",
     description=(
@@ -682,7 +670,6 @@ def project_gitignore_suggestions():
 
 @api_v1_project_bp.route("/api/v1/project/gitignore/accept", methods=["POST"])
 @require_auth
-@rate_limit(limit=10, per=60)
 @api_meta(
     summary="Append directories to the project .gitignore",
     description=(
@@ -747,7 +734,6 @@ def project_gitignore_dismiss():
 
 @api_v1_project_bp.route("/api/v1/project/write", methods=["POST"])
 @require_auth
-@rate_limit(limit=20, per=60)
 @api_meta(
     summary="Write content to a project file",
     description=(
@@ -797,7 +783,6 @@ def project_write():
 
 @api_v1_project_bp.route("/api/v1/project/upload", methods=["POST"])
 @require_auth
-@rate_limit(limit=20, per=60)
 @api_meta(
     summary="Save a dropped file into a project folder (binary-safe)",
     description=(
@@ -829,14 +814,13 @@ def project_upload():
     if not fname or fname in (".", ".."):
         return api_bad_request("No filename", field="file")
 
-    # Spool through a bounded temp file instead of one unbounded in-memory
-    # read: a 64 MiB cap turns the old 520 MiB global ceiling into an
-    # explicit, typed refusal before any memory is committed.
+    # Receive complete source bytes in an owned temp file before the existing
+    # project write boundary materializes its input.
     from lib.paper.archive import stream_to_temp
     from lib.paper.builds.errors import BuildError
     spooled = None
     try:
-        spooled = stream_to_temp(upload.stream, max_bytes=64 * 1024 * 1024)
+        spooled = stream_to_temp(upload.stream)
         data = spooled.read_bytes()
     except BuildError as e:
         return api_payload({'ok': False, 'error': str(e), 'kind': e.code}, 400)
@@ -889,17 +873,16 @@ def _attached_root_for(path: str) -> str:
 
 @api_v1_project_bp.route("/api/v1/project/upload-archive", methods=["POST"])
 @require_auth
-@rate_limit(limit=10, per=60)
 @api_meta(
     summary="Extract a dropped .zip/.tar.gz project archive into a folder",
     description=(
         "multipart/form-data: ``file`` (the archive) + ``dir`` (destination "
         "directory inside an already-attached workspace root, or empty for "
-        "the active project root). The archive is spooled to a bounded temp "
+        "the active project root). The archive is spooled to an owned temp "
         "file, extracted atomically into ``<dir>/<archive-stem>/`` (fresh "
         "auto-suffixed directory; existing files are never overwritten), "
-        "with zip-slip/link defense and the paper source budget (512 files / "
-        "64 MiB total / 32 MiB per file). The response lists the extracted "
+        "with zip-slip/link defense and complete regular-file reception. "
+        "The response lists the extracted "
         "tree plus TeX main-document candidates so the client can offer a "
         "paper preview immediately. Backs drag-and-drop of arXiv/Overleaf "
         "source exports onto the folder browser."
@@ -907,7 +890,7 @@ def _attached_root_for(path: str) -> str:
     tags=["project"],
 )
 def project_upload_archive():
-    from lib.paper.archive import MAX_ARCHIVE_BYTES, extract_archive, stream_to_temp
+    from lib.paper.archive import extract_archive, stream_to_temp
     from lib.paper.builds.errors import BuildError
 
     form = request_form()
@@ -938,7 +921,7 @@ def project_upload_archive():
 
     spooled = None
     try:
-        spooled = stream_to_temp(upload.stream, max_bytes=MAX_ARCHIVE_BYTES)
+        spooled = stream_to_temp(upload.stream)
         receipt = extract_archive(spooled, parent, name_hint=archive_name)
     except BuildError as e:
         kind = {'archive_limit': 'archive-too-large', 'archive_invalid': 'archive-invalid',

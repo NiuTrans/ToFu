@@ -52,14 +52,13 @@ def test_restart_continue_requires_exact_accepted_lineage(authority):
 
 
 @pytest.mark.parametrize('mutation', [
-    'user_stop', 'superseded', 'wrong_owner', 'wrong_turn', 'wrong_source',
+    'superseded', 'wrong_owner', 'wrong_turn', 'wrong_source',
     'wrong_source_task', 'new_turn', 'new_attempt', 'current_stop', 'terminated',
     'no_restart_provenance', 'already_aborted',
 ])
 def test_recovery_fails_closed_for_stop_and_foreign_authority(authority, mutation):
     row, task, source, latest = authority
-    if mutation == 'user_stop': source['settlement']['cause'] = 'user_abort'
-    elif mutation == 'superseded': source['status'] = 'cancelled'
+    if mutation == 'superseded': source['status'] = 'cancelled'
     elif mutation == 'wrong_owner': row['config']['user_id'] = 8
     elif mutation == 'wrong_turn': row['config']['parent_cfg']['_swarmParentTurnId'] = 'other'
     elif mutation == 'wrong_source': source['turnId'] = 'other'
@@ -112,7 +111,8 @@ def test_bound_restart_session_never_launches_from_newer_successful_turn(authori
     assert not _rehydrate._recovery_allowed(row, user_id=7)
 
 
-def test_continue_rebuilds_current_authority_and_keeps_run_id(authority, monkeypatch):
+@pytest.mark.parametrize('bound_assignment', [False, True])
+def test_continue_rebuilds_current_authority_and_keeps_run_id(authority, monkeypatch, bound_assignment):
     row, task, *_ = authority
     published = {}
     session = SimpleNamespace(rehydrate_in_background=Mock())
@@ -128,12 +128,35 @@ def test_continue_rebuilds_current_authority_and_keeps_run_id(authority, monkeyp
     monkeypatch.setattr('lib.agent_inbox.untombstone', Mock())
     tools = [{'type': 'function', 'function': {'name': 'allowed'}},
              {'type': 'function', 'function': {'name': 'new_privilege'}}]
+    if bound_assignment:
+        from lib.swarm.master import bind_assignment_context
+        from lib.tasks_pkg.manager import task_user_id
+        task_user_id(task)
+        old = deepcopy(task)
+        old['config']['browserClientId'] = 'old-device'
+        task['config']['browserClientId'] = 'current-device'
+        task['config']['executionLimits'] = {'max_tool_calls': 10}
+        spec = SubTaskSpec.from_dict(row['specs'][0])
+        later = {'type': 'function', 'function': {'name': 'later_grant'}}
+        revoked = {'type': 'function', 'function': {'name': 'revoked'}}
+        bind_assignment_context(spec, parent_task=old, parent_config=old['config'],
+            all_tools=[tools[0], later, revoked], model='old-model')
+        row['specs'] = [spec.to_dict()]
+        tools.append(later)
     assert _rehydrate._rehydrate_one(row, resume_task=task, tool_list=tools)
     cfg = factory.call_args.kwargs
     assert cfg['task_id'] == 'original-task'
     assert cfg['parent_task'] is task
     assert cfg['model'] == 'current-model'
     assert cfg['all_tools'] == tools[:1]
+    if bound_assignment:
+        restored = cfg['specs'][0]
+        context = restored.retained_execution_context
+        assert context['tools'] == [tools[0], tools[2]]
+        assert context['config']['browserClientId'] == 'current-device'
+        assert context['model'] == 'current-model'
+        assert restored.retained_assignment_parent is task
+        assert restored.retained_assignment_usage is not None
     assert cfg['parent_config']['_swarmParentAttemptId'] == 'resume'
     assert not _rehydrate._rehydrate_one(row, resume_task=task, tool_list=tools)
     factory.assert_called_once()
@@ -476,7 +499,8 @@ def test_continue_keeps_declared_selection_and_detached_execution_policy(authori
 
 
 @pytest.mark.parametrize('access', ['rw', 'ro', 'removed'])
-def test_continue_restores_original_checkout_not_new_parent_checkout(authority, monkeypatch, tmp_path, access):
+@pytest.mark.parametrize('bound_assignment', [False, True])
+def test_continue_restores_original_checkout_not_new_parent_checkout(authority, monkeypatch, tmp_path, access, bound_assignment):
     from lib.identity import PrincipalContext
     from lib.tasks_pkg import workspace_delivery
     row, task, *_ = authority
@@ -487,7 +511,8 @@ def test_continue_restores_original_checkout_not_new_parent_checkout(authority, 
         path.mkdir()
     (original / 'evidence.txt').write_text('unfinished child edits\n')
     (current / 'evidence.txt').write_text('new parent input\n')
-    principal = PrincipalContext.user(subject_id='continue-owner', owner_user_id=7).to_payload()
+    principal = PrincipalContext.user(subject_id='continue-owner', owner_user_id=7,
+        tenant_id='current-tenant').to_payload()
     old_policy = {'primaryPath': str(original), 'roots': {
         'acknowledged-work': {'path': str(original), 'access': 'rw'}}}
     row['config'].update(project_path=str(original), workspace_isolated=True,
@@ -506,6 +531,17 @@ def test_continue_restores_original_checkout_not_new_parent_checkout(authority, 
         task['_workspaceRootPolicy']['roots'] = {}
     monkeypatch.setattr(workspace_delivery, '_checkout',
                         lambda path: (str(original), str(canonical)) if str(path) == str(original) else None)
+    if bound_assignment:
+        from lib.swarm.master import bind_assignment_context
+        spec = SubTaskSpec.from_dict(row['specs'][0])
+        old = {'id': 'original-task', 'convId': task['convId'], '_userId': 7,
+            '_tenant_id': 'current-tenant', '_principalContext': principal,
+            'config': {'projectPath': str(original)},
+            '_workspaceRootPolicy': deepcopy(old_policy),
+            '_workspaceExecution': deepcopy(row['config']['workspace_execution_context']['_workspaceExecution'])}
+        bind_assignment_context(spec, parent_task=old, parent_config=old['config'],
+            all_tools=[], model='old-model', project_path=str(original))
+        row['specs'] = [spec.to_dict()]
     created = []
     def create(**kwargs):
         master = MasterOrchestrator(**kwargs)
@@ -537,6 +573,12 @@ def test_continue_restores_original_checkout_not_new_parent_checkout(authority, 
     assert '_workspaceDelivery' not in proxy
     assert saved.call_args.kwargs['config']['workspace_execution_context']['_workspaceRootPolicy'] == proxy['_workspaceRootPolicy']
     assert proxy['_executionBudget'] is task['_executionBudget']
+    if bound_assignment:
+        restored = created[0].specs[0]
+        assignment = restored.retained_execution_context
+        assert assignment['project_path'] == str(original)
+        assert assignment['execution_context']['_workspaceRootPolicy']['roots']['acknowledged-work']['access'] == access
+        assert restored.retained_assignment_parent['_executionBudget'] is task['_executionBudget']
 
 
 @pytest.mark.parametrize('fault', ['capacity', 'driver'])
@@ -562,7 +604,7 @@ def test_failed_activation_retains_exact_retry_receipt_and_drains_before_unpubli
         assert not created[-1]._scheduler or events[-1] == 'drain'
         published.pop(key, None)
         events.append('remove')
-    def start(master, agents):
+    def start(master, agents, **kwargs):
         master._scheduler = SimpleNamespace(cancel_pending=lambda: events.append('cancel'),
             shutdown=lambda **kwargs: events.append('drain') if kwargs['require_quiescence'] else None)
         master._agents['child'] = SimpleNamespace(_child={'aborted': False}, request_abort=Mock())
@@ -655,3 +697,108 @@ def test_recovery_capacity_reservation_is_unpublished_exclusive_and_released(mon
     assert _state._active_sessions['recovering'] is session
     assert 'other' in _state._active_sessions
     assert not _state._session_reservations
+
+
+@pytest.mark.parametrize('session_status', ['running', 'terminated'])
+def test_manual_stop_requires_exact_accepted_continue_not_cold_start(authority, session_status):
+    sess, task, stopped, _ = authority
+    sess['status'] = session_status
+    stopped['settlement']['cause'] = 'user_abort'
+    assert recovery.continue_recovery_allowed(sess, task, user_id=7)
+    receipt = {'attemptId': 'original', 'taskId': 'original-task',
+               'status': stopped['status'], 'cause': 'user_abort'}
+    assert recovery.restart_source_attempt(sess, user_id=7, receipt=receipt) is None
+    assert not recovery.continue_recovery_allowed(sess, task, user_id=8)
+    stopped['taskId'] = 'foreign-task'
+    assert not recovery.continue_recovery_allowed(sess, task, user_id=7)
+
+
+def test_parent_stop_restores_only_marked_unfinished_work_and_keeps_tool_fence(monkeypatch):
+    m = MasterOrchestrator(task_id='original', conv_id='conv', user_id=7,
+        specs=[SubTaskSpec(id=ident, objective='work',
+                           retained_agent_id='saved-colleague' if ident == 'retained' else '')
+               for ident in ['done', 'failed', 'stopped', 'individual', 'unsafe', 'retained', 'pending']])
+    scheduler = SimpleNamespace(_completed={}, add_specs=Mock())
+    monkeypatch.setattr(m, '_build_scheduler', lambda: scheduler)
+    monkeypatch.setattr(m, '_start_driver', Mock())
+    monkeypatch.setattr(m, '_reenqueue_swarm_update', Mock())
+    messages = [{'role': 'user', 'content': 'prior work'}]
+    saved = [{'agent_id': ident, 'status': status, 'messages': deepcopy(messages),
+              'rounds_used': 3, 'delivered': ident == 'done',
+              'result': {'status': status, 'checkpoint_phase': phase,
+                         'recovery_reason': reason, 'total_tokens': 71,
+                         'final_answer': 'prior evidence'}}
+             for ident, status, phase, reason in [
+                 ('done', 'completed', 'ready', ''),
+                 ('failed', 'failed', 'ready', ''),
+                 ('stopped', 'cancelled', 'ready', 'parent_stop'),
+                 ('individual', 'cancelled', 'ready', ''),
+                 ('unsafe', 'cancelled', 'tools_in_flight', 'parent_stop'),
+                 ('retained', 'cancelled', 'ready', 'parent_stop')]]
+    m.rehydrate_in_background(saved, resume_parent_stop=True)
+    assert [spec.id for spec in scheduler.add_specs.call_args.args[0]] == ['stopped', 'pending']
+    assert m._resume_messages['stopped'] == messages
+    assert m._resume_rounds['stopped'] == 3
+    assert m._resume_results['stopped']['total_tokens'] == 71
+    assert m._results_by_id['done'][1].status == 'completed'
+    assert 'done' in m._delivered_result_ids
+    assert m._results_by_id['individual'][1].status == 'cancelled'
+
+    assert m._results_by_id['retained'][1].status == 'cancelled'
+    assert 'restart_tool_outcome_unknown' in m._results_by_id['unsafe'][1].error_message
+
+
+def test_continue_drains_old_driver_then_reloads_without_deleting_evidence(authority, monkeypatch):
+    from lib.swarm.integration import _rehydrate as owner
+    from lib.swarm import persistence
+    from types import SimpleNamespace
+    durable, task, source, _ = authority
+    source['settlement']['cause'] = 'user_abort'
+    events = []
+    class Driver:
+        live = True
+        def is_alive(self):
+            return self.live
+        def join(self, timeout):
+            events.append('drain')
+            self.live = False
+    old = SimpleNamespace(_aborted=True, _driver_thread=Driver(),
+                          _scheduler=SimpleNamespace(running_count=0))
+    def load(*args, **kwargs):
+        events.append('load')
+        durable['status'] = 'terminated' if not old._driver_thread.live else 'running'
+        return deepcopy(durable)
+    monkeypatch.setattr(owner, '_get_session', lambda key: old)
+    monkeypatch.setattr(persistence, 'load_session', load)
+    monkeypatch.setattr(owner, '_remove_session', lambda key, **kw:
+                        events.append(('remove', kw['preserve_durable'])))
+    monkeypatch.setattr(owner, '_rehydrate_one', lambda sess, **kw:
+                        events.append(('activate', sess['status'])) or True)
+    assert owner.resume_swarm_for_continue(task, [])
+    assert events == ['load', 'drain', 'load', ('remove', True), ('activate', 'terminated')]
+
+    old._driver_thread.live = True
+    task['aborted'] = True
+    events.clear()
+    assert not owner.resume_swarm_for_continue(task, [])
+    assert events == ['load']
+    task['aborted'] = False
+    old._driver_thread.live = False
+    old._scheduler.running_count = 1
+    events.clear()
+    with pytest.raises(RuntimeError, match='live workers'):
+        owner.resume_swarm_for_continue(task, [])
+    assert events == ['load']
+
+
+def test_individual_kill_is_not_reopened_by_racing_parent_stop():
+    master = MasterOrchestrator(task_id='kill-stop', conv_id='conv', user_id=7,
+                               specs=[SubTaskSpec(id='one', objective='work')])
+    child = {'aborted': False}
+    agent = SimpleNamespace(_child=child, request_abort=Mock(return_value=True))
+    master._agents['one'] = agent
+    assert master.kill_agent('one')
+    master.abort()
+    assert agent._swarm_individually_stopped
+    assert not agent._swarm_parent_stopped
+    assert child['aborted']

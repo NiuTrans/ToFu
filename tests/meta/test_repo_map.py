@@ -163,7 +163,7 @@ def test_end_to_end_orders_by_references(tmp_path):
         def get_logger(): return logging.getLogger()
     ''')
 
-    text, stats = generate_repo_map(str(tmp_path), max_tokens=2048,
+    text, stats = generate_repo_map(str(tmp_path),
                                     include_tests=False)
     # engine.py must be listed before server.py / job.py (referenced by both)
     engine_idx = text.index('core/engine.py')
@@ -180,11 +180,11 @@ def test_include_tests_filters_test_files(tmp_path):
         def test_main(): main()
     ''')
     text_default, stats_default = generate_repo_map(
-        str(tmp_path), max_tokens=2048, include_tests=False)
+        str(tmp_path), include_tests=False)
     assert 'test_main.py' not in text_default
 
     text_with, stats_with = generate_repo_map(
-        str(tmp_path), max_tokens=2048, include_tests=True)
+        str(tmp_path), include_tests=True)
     assert 'test_main.py' in text_with
     assert stats_with['files_total'] > stats_default['files_total']
 
@@ -194,7 +194,7 @@ def test_focus_filters_files(tmp_path):
     _write(tmp_path, 'storage/cache.py', 'def get(): pass')
     _write(tmp_path, 'ui/button.py', 'def render(): pass')
     text, _ = generate_repo_map(str(tmp_path), focus='storage',
-                                max_tokens=2048, with_rank=False)
+                                with_rank=False)
     assert 'storage/lock.py' in text
     assert 'ui/button.py' not in text
 
@@ -203,7 +203,7 @@ def test_path_scopes_to_subdirectory(tmp_path):
     _write(tmp_path, 'core/a.py', 'def a(): pass')
     _write(tmp_path, 'ui/b.py', 'def b(): pass')
     text, _ = generate_repo_map(str(tmp_path), path='core',
-                                max_tokens=2048, with_rank=False)
+                                with_rank=False)
     assert 'core/a.py' in text
     assert 'ui/b.py' not in text
 
@@ -212,7 +212,7 @@ def test_untracked_files_are_mapped(tmp_path):
     """git ls-files --others must catch files created before `git add`."""
     subprocess.run(['git', 'init', '-q'], cwd=tmp_path, check=True)
     _write(tmp_path, 'new_file.py', 'def newly_created(): pass')
-    text, _ = generate_repo_map(str(tmp_path), max_tokens=1024)
+    text, _ = generate_repo_map(str(tmp_path))
     assert 'newly_created' in text
 
 
@@ -220,27 +220,28 @@ def test_generated_files_are_skipped(tmp_path):
     _write(tmp_path, 'app.generated.js',
            'function big() {' + 'x = 1; '.join([''] * 500) + '}')
     _write(tmp_path, 'src/main.py', 'def main(): pass')
-    text, _ = generate_repo_map(str(tmp_path), max_tokens=2048,
+    text, _ = generate_repo_map(str(tmp_path),
                                 with_rank=False)
     assert 'app.generated.js' not in text
     assert 'main.py' in text
 
 
-def test_max_tokens_bounds_output(tmp_path):
+def test_all_selected_files_reach_shared_l0(tmp_path):
     for i in range(30):
         _write(tmp_path, f'pkg/mod{i}.py',
                f'def func_{i}_a(): pass\ndef func_{i}_b(): pass\n'
                f'def func_{i}_c(): pass\ndef func_{i}_d(): pass\n')
-    text, stats = generate_repo_map(str(tmp_path), max_tokens=512,
+    text, stats = generate_repo_map(str(tmp_path),
                                     with_rank=False)
-    # 512 tokens ≈ 1536 chars; allow a small slack for the footer.
-    assert len(text) <= 3000
-    assert stats['omitted'] > 0
-    assert 'more files' in text or 'more file ' in text
+    assert stats['files_shown'] == stats['files_total'] == 30
+    assert stats['tags_shown'] == 120
+    assert stats['omitted'] == 0
+    for i in range(30):
+        assert f'func_{i}_d' in text
 
 
 def test_empty_repo_returns_clean_empty(tmp_path):
-    text, stats = generate_repo_map(str(tmp_path), max_tokens=1024)
+    text, stats = generate_repo_map(str(tmp_path))
     assert stats['files_total'] == 0
     assert 'no files' in text.lower() or text.strip() == ''
 

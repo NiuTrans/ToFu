@@ -1,0 +1,8 @@
+/* Completed reply awaiting a look: quiet accent, distinct from success/error. */
+.conv-review-dot {
+  width:var(--space-2);height:var(--space-2);border-radius:var(--radius-pill);
+  background:var(--accent);flex-shrink:0;
+}
+.conv-status-review {
+  color:var(--text-primary);background:var(--accent-subtle);animation:none;
+}

@@ -20,8 +20,7 @@ use crate::logical_outbox::{
 use crate::outbox_publisher::{
     DurableLogicalOutboxReceipt, LogicalOutboxOwnerScope, LogicalOutboxSink,
 };
-use crate::outbox_relay::MAX_OUTBOX_RELAY_OWNER_SCOPES;
-use crate::outbox_sink::{assess_capacity, preflight_real_capacity, MIN_FREE_RESERVE_BYTES};
+use crate::outbox_sink::preflight_real_capacity;
 use crate::vfs::Vfs;
 
 const NAMESPACE: &str = "logical_outbox_multi_sink";
@@ -74,21 +73,13 @@ fn invalid_data(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
 }
 
-fn storage_full(message: &str) -> io::Error {
-    io::Error::new(io::ErrorKind::StorageFull, message)
-}
-
 impl MultiplexedEngineLogicalOutboxSinkConfig {
     fn canonicalized(mut self) -> io::Result<Self> {
         LogicalOutboxOwnerScope::new(
             self.administrative_scope.tenant_id,
             self.administrative_scope.owner_user_id,
         )?;
-        if self.source_scopes.is_empty()
-            || self.source_scopes.len() > MAX_OUTBOX_RELAY_OWNER_SCOPES
-            || self.max_logical_bytes <= RECORD_ACCOUNTING_OVERHEAD
-            || self.max_logical_bytes > crate::outbox_sink::MAX_SINK_LOGICAL_BYTES
-        {
+        if self.source_scopes.is_empty() {
             return Err(invalid_input(
                 "invalid multiplexed logical outbox sink configuration",
             ));
@@ -142,11 +133,7 @@ impl MultiplexedEngineLogicalOutboxSinkConfig {
                     .ok_or_else(|| invalid_data("multiplexed sink scope size overflow"))?,
             )
             .ok_or_else(|| invalid_data("multiplexed sink config size overflow"))?;
-        if version != VERSION
-            || count == 0
-            || count > MAX_OUTBOX_RELAY_OWNER_SCOPES
-            || expected != encoded.len()
-        {
+        if version != VERSION || count == 0 || expected != encoded.len() {
             return Err(invalid_data(
                 "invalid multiplexed sink configuration header",
             ));
@@ -270,12 +257,6 @@ impl MultiplexedEngineLogicalOutboxSink {
             config,
             Some(data_dir.to_owned()),
         )?;
-        let remaining = sink
-            .config
-            .max_logical_bytes
-            .checked_sub(sink.total_logical_bytes)
-            .ok_or_else(|| invalid_data("multiplexed sink exceeds configured capacity"))?;
-        assess_capacity(remaining, fs2::available_space(data_dir)?)?;
         Ok(sink)
     }
 
@@ -344,7 +325,11 @@ impl MultiplexedEngineLogicalOutboxSink {
         let stored_config = database
             .entity_get(&mut transaction, &administrative_key(&config, CONFIG_KEY)?)?
             .ok_or_else(|| invalid_data("multiplexed sink configuration is missing"))?;
-        if MultiplexedEngineLogicalOutboxSinkConfig::decode(&stored_config)? != config {
+        let stored_configuration =
+            MultiplexedEngineLogicalOutboxSinkConfig::decode(&stored_config)?;
+        if stored_configuration.administrative_scope != config.administrative_scope
+            || stored_configuration.source_scopes != config.source_scopes
+        {
             return Err(invalid_data("multiplexed sink configuration differs"));
         }
         let total_logical_bytes = decode_counter(database.entity_get(
@@ -365,7 +350,7 @@ impl MultiplexedEngineLogicalOutboxSink {
                 .ok_or_else(|| invalid_data("multiplexed sink owner byte sum overflow"))?;
             owner_states.insert(*scope, state);
         }
-        if summed_bytes != total_logical_bytes || total_logical_bytes > config.max_logical_bytes {
+        if summed_bytes != total_logical_bytes {
             return Err(invalid_data(
                 "multiplexed sink aggregate byte witness differs",
             ));
@@ -499,19 +484,7 @@ impl LogicalOutboxSink for MultiplexedEngineLogicalOutboxSink {
         let next_total = self
             .total_logical_bytes
             .checked_add(charged_bytes)
-            .filter(|bytes| *bytes <= self.config.max_logical_bytes)
-            .ok_or_else(|| storage_full("multiplexed sink reached its byte ceiling"))?;
-        if let Some(path) = &self.real_capacity_path {
-            let required = charged_bytes
-                .checked_add(MIN_FREE_RESERVE_BYTES)
-                .ok_or_else(|| invalid_input("multiplexed sink capacity overflow"))?;
-            if fs2::available_space(path)? < required {
-                return Err(storage_full(
-                    "multiplexed sink volume lacks append and recovery headroom",
-                ));
-            }
-        }
-
+            .ok_or_else(|| invalid_data("multiplexed sink total byte counter overflow"))?;
         let mut transaction = self.begin_administrative()?;
         let witnessed_owner = self
             .database
@@ -677,7 +650,7 @@ mod tests {
     }
 
     #[test]
-    fn configuration_and_aggregate_capacity_fail_closed() {
+    fn durable_source_scopes_survive_capacity_hint_changes_and_growth() {
         let vfs = prepared_vfs();
         let first = record(11, 1, b"first");
         let exact_charge = first.encoded_len().unwrap() as u64 + RECORD_ACCOUNTING_OVERHEAD;
@@ -688,25 +661,23 @@ mod tests {
         )
         .unwrap();
         sink.append_durable(&first).unwrap();
-        assert_eq!(
-            sink.append_durable(&record(12, 1, b"second"))
-                .unwrap_err()
-                .kind(),
-            io::ErrorKind::StorageFull
-        );
+        sink.append_durable(&record(12, 1, b"second")).unwrap();
+        assert!(sink.status().logical_bytes > exact_charge);
         drop(sink);
         vfs.crash().unwrap();
         vfs.arm_fault(None).unwrap();
         let different = MultiplexedEngineLogicalOutboxSink::open_with_vfs(
             Path::new("/sink"),
-            vfs,
+            vfs.clone(),
             config(exact_charge + 1),
         );
-        let error = match different {
-            Ok(_) => panic!("multiplexed sink accepted a different durable configuration"),
-            Err(error) => error,
-        };
-        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        let reopened = different.unwrap();
+        assert!(reopened.status().logical_bytes > exact_charge);
+        drop(reopened);
+        let mut changed_scope = config(exact_charge + 1);
+        changed_scope.source_scopes.pop();
+        assert!(matches!(MultiplexedEngineLogicalOutboxSink::open_with_vfs(
+            Path::new("/sink"), vfs, changed_scope), Err(error) if error.kind() == io::ErrorKind::InvalidData));
     }
 
     #[test]
@@ -803,5 +774,55 @@ mod tests {
             assert_eq!(reopened.status().durable_records, 1);
             reopened.append_durable(&first).unwrap();
         }
+    }
+}
+
+#[cfg(test)]
+mod scope_demand_tests {
+    use super::*;
+    use crate::logical_outbox::{LogicalOutboxCipher, LogicalOutboxIdentity};
+    #[test]
+    fn all_frozen_scopes_survive_config_roundtrip_publish_and_reopen() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = MultiplexedEngineLogicalOutboxSinkConfig {
+            administrative_scope: LogicalOutboxOwnerScope::new(99, 101).unwrap(),
+            source_scopes: (1..=131)
+                .map(|owner| LogicalOutboxOwnerScope::new(7, owner).unwrap())
+                .collect(),
+            max_logical_bytes: 1,
+        };
+        let encoded = config.clone().canonicalized().unwrap().encode().unwrap();
+        assert_eq!(
+            MultiplexedEngineLogicalOutboxSinkConfig::decode(&encoded)
+                .unwrap()
+                .source_scopes,
+            config.source_scopes
+        );
+        let mut sink =
+            MultiplexedEngineLogicalOutboxSink::initialize(directory.path(), config.clone())
+                .unwrap();
+        let cipher = LogicalOutboxCipher::new(&[19; 32]);
+        for owner in 1..=131 {
+            let identity = LogicalOutboxIdentity {
+                sequence: 1,
+                tenant_id: 7,
+                owner_user_id: owner,
+                schema_version: 1,
+                registry_version: 1,
+                operation: "record.put".into(),
+                request_id: format!("owner-{owner}"),
+                request_digest: [1; 32],
+                command_id: Some(format!("owner-{owner}")),
+                committed_at_ms: 1,
+            };
+            let record = cipher.seal(identity, b"complete").unwrap();
+            assert_eq!(sink.append_durable(&record).unwrap().owner_user_id, owner);
+        }
+        assert_eq!(sink.status().active_owner_scopes, 131);
+        assert_eq!(sink.status().durable_records, 131);
+        drop(sink);
+        let reopened = MultiplexedEngineLogicalOutboxSink::open(directory.path(), config).unwrap();
+        assert_eq!(reopened.status().active_owner_scopes, 131);
+        assert_eq!(reopened.status().durable_records, 131);
     }
 }

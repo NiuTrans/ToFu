@@ -18,6 +18,8 @@
   --turn-spine: color-mix(in srgb, var(--text-tertiary) 24%, transparent);
   --turn-process-surface: color-mix(in srgb, var(--bg-secondary) 62%, transparent);
   --turn-process-hover: color-mix(in srgb, var(--bg-hover) 70%, transparent);
+  --turn-process-panel: color-mix(in srgb, var(--bg-secondary) 72%, var(--bg-primary));
+  --turn-process-line: color-mix(in srgb, var(--border) 74%, var(--bg-primary));
 }
 
 [data-theme="tofu"] .conversation-surface {
@@ -41,12 +43,15 @@
   overflow: visible;
 }
 
-.conversation-surface .conversation-turn-avatar.message-avatar {
+.conversation-surface .conversation-turn.message > .conversation-turn-avatar.message-avatar {
   width: 34px;
   height: 34px;
   margin-top: 0;
-  opacity: .9;
-  color: var(--text-secondary);
+  opacity: 1;
+  color: var(--accent);
+  border: var(--control-edge-inset) solid color-mix(in srgb, var(--accent) 18%, var(--border-light));
+  border-radius: var(--conversation-process-radius);
+  background: color-mix(in srgb, var(--accent) 6%, var(--bg-primary));
 }
 
 .conversation-surface .conversation-turn-avatar.message-avatar :is(img, svg) {
@@ -64,14 +69,14 @@
 .conversation-surface .conversation-turn-header.message-header {
   justify-content: flex-start;
   min-height: 20px;
-  margin: 0 0 var(--space-2);
+  margin: var(--space-1) 0 var(--space-4);
   gap: var(--space-2);
   line-height: 1.25;
 }
 
 .conversation-surface .message-role {
-  color: var(--text-secondary);
-  font-size: var(--conversation-font-size-content);
+  color: var(--text-primary);
+  font-size: var(--conversation-process-font-size);
   font-weight: var(--weight-bold);
   letter-spacing: .006em;
 }
@@ -99,37 +104,86 @@
 
 .conversation-surface .conversation-turn-blocks {
   overflow: visible;
+  gap: 0;
 }
 
 .conversation-surface .conversation-turn-blocks > .conversation-block {
-  margin: 0 0 var(--space-2);
+  margin: 0;
+}
+
+/* One spacing owner, including the demand-mounted historical process body.
+ * Adjacent process rows form a compact run. Prose gets a paragraph's breath
+ * on either side without moving, grouping or recreating any keyed leaf. */
+.conversation-surface :is(.conversation-turn-blocks, [data-history-process-blocks]) > .conversation-block + .conversation-block {
+  margin-block-start: var(--conversation-flow-gap);
+}
+
+.conversation-surface :is(.conversation-turn-blocks, [data-history-process-blocks]) > .conversation-block--text + .conversation-block,
+.conversation-surface :is(.conversation-turn-blocks, [data-history-process-blocks]) > .conversation-block + .conversation-block--text {
+  margin-block-start: var(--conversation-prose-gap);
 }
 
 .conversation-surface .conversation-turn-blocks > .conversation-block:last-child {
   margin-bottom: 0;
 }
 
-/* Round sections are semantic boundaries, not a decorative per-block spine.
- * Leaves remain direct keyed children so streaming never reparents live cards. */
+/* Adjacent process leaves make one continuous work surface. The derived edges
+ * describe the mounted order only: narration, deliverables and page boundaries
+ * break the surface. No extra wrapper, duplicate content or disclosure state. */
+.conversation-surface :is(.conversation-turn-blocks, [data-history-process-blocks]) > .conversation-block[data-process-edge] {
+  position: relative;
+  isolation: isolate;
+  margin-block-start: 0;
+  padding-inline: var(--conversation-process-shell-inset);
+  border-inline: var(--control-edge-inset) solid var(--turn-process-line);
+  background: var(--turn-process-panel);
+}
+
+.conversation-surface :is(.conversation-turn-blocks, [data-history-process-blocks]) > .conversation-block[data-process-edge]:is([data-process-edge="start"], [data-process-edge="single"]) {
+  margin-block-start: var(--space-4);
+  padding-block-start: var(--space-2);
+  border-block-start: var(--control-edge-inset) solid var(--turn-process-line);
+  border-start-start-radius: var(--conversation-process-radius);
+  border-start-end-radius: var(--conversation-process-radius);
+}
+
+.conversation-surface :is(.conversation-turn-blocks, [data-history-process-blocks]) > .conversation-block[data-process-edge]:is([data-process-edge="end"], [data-process-edge="single"]) {
+  padding-block-end: var(--space-2);
+  border-block-end: var(--control-edge-inset) solid var(--turn-process-line);
+  border-end-start-radius: var(--conversation-process-radius);
+  border-end-end-radius: var(--conversation-process-radius);
+}
+
+.conversation-surface .conversation-block[data-process-edge]::before {
+  content: '';
+  position: absolute;
+  z-index: -1;
+  inset-block: 0;
+  inset-inline-start: calc(var(--conversation-process-shell-inset) + var(--conversation-process-inset) + var(--conversation-process-marker) / 2);
+  width: var(--control-edge-inset);
+  background: var(--turn-spine);
+  pointer-events: none;
+}
+.conversation-surface .conversation-block[data-process-edge="start"]::before {
+  inset-block-start: calc(var(--conversation-process-row-height) / 2 + var(--space-2));
+}
+.conversation-surface .conversation-block[data-process-edge="end"]::before {
+  height: calc(var(--conversation-process-row-height) / 2);
+  inset-block-end: auto;
+}
+.conversation-surface .conversation-block[data-process-edge="single"]::before { display: none; }
+.conversation-surface .conversation-block[data-process-edge][data-action-state="active"] {
+  background: color-mix(in srgb, var(--accent) 5%, var(--turn-process-panel));
+}
+.conversation-surface .conversation-block[data-process-edge][data-action-state="attention"] {
+  border-inline-start-color: var(--error-text);
+}
+
+/* Leaves remain direct keyed children so streaming never reparents live cards. */
 
 .conversation-surface .conversation-turn-blocks {
   min-width: 0;
   padding-inline-start: 0;
-}
-
-.conversation-surface .conversation-round-toolbar {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: var(--space-2);
-  margin-block: var(--space-2) var(--space-3);
-}
-
-.conversation-surface .conversation-round-toolbar__label {
-  margin-inline-end: auto;
-  color: var(--text-secondary);
-  font-size: var(--conversation-font-size-meta);
-  font-weight: var(--weight-semibold);
 }
 
 .conversation-surface .conversation-round-header {
@@ -199,13 +253,12 @@
 
 /* Hidden disclosures must win over card display:flex/grid rules. */
 
-.conversation-surface .conversation-round-toolbar[hidden],
 .conversation-surface .conversation-block[hidden] {
   display: none;
 }
 
-.conversation-surface .conversation-block--text[data-deliverable="true"] {
-  margin-block-start: var(--space-6);
+.conversation-surface .conversation-block + .conversation-block--text[data-deliverable="true"] {
+  margin-block-start: var(--conversation-answer-gap);
 }
 
 .conversation-surface .conversation-block--text[data-deliverable="true"] > .md-content {

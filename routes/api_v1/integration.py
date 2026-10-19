@@ -7,7 +7,6 @@ from quart import Blueprint
 from lib.api_response import api_bad_request, api_internal_error, api_payload
 from lib.log import get_logger
 from lib.openapi import api_meta
-from lib.rate_limiter import rate_limit
 from lib.request_parser import decode_proxy_path_arg, parse_body
 
 from .auth import request_user_id, require_auth
@@ -56,7 +55,6 @@ def integration_status_route():
 
 @api_v1_integration_bp.route('/api/v1/project/integration/create', methods=['POST'])
 @require_auth
-@rate_limit(limit=30, per=60)
 @api_meta(summary='Create a managed writer worktree', tags=['project'])
 def integration_create_route():
     data = parse_body(exact=('path', 'title', 'workId',))
@@ -74,7 +72,6 @@ def integration_create_route():
 
 @api_v1_integration_bp.route('/api/v1/project/integration/register', methods=['POST'])
 @require_auth
-@rate_limit(limit=30, per=60)
 @api_meta(summary='Register an existing writer worktree', tags=['project'])
 def integration_register_route():
     data = parse_body(exact=('path', 'title', 'workId', 'workspacePath',))
@@ -107,7 +104,6 @@ def _task_action(function):
 
 @api_v1_integration_bp.route('/api/v1/project/integration/checkpoint', methods=['POST'])
 @require_auth
-@rate_limit(limit=60, per=60)
 @api_meta(summary='Capture a writer checkpoint without staging its index', tags=['project'])
 def integration_checkpoint_route():
     return _task_action(_integration_api('checkpoint_workspace'))
@@ -115,7 +111,6 @@ def integration_checkpoint_route():
 
 @api_v1_integration_bp.route('/api/v1/project/integration/submit', methods=['POST'])
 @require_auth
-@rate_limit(limit=60, per=60)
 @api_meta(summary='Checkpoint and enqueue a writer workspace', tags=['project'])
 def integration_submit_route():
     data = parse_body(exact=('path', 'workId',))
@@ -142,7 +137,6 @@ def integration_submit_route():
 
 @api_v1_integration_bp.route('/api/v1/project/integration/retry', methods=['POST'])
 @require_auth
-@rate_limit(limit=60, per=60)
 @api_meta(summary='Retry an existing quarantined checkpoint', tags=['project'])
 def integration_retry_route():
     data = parse_body(exact=('path', 'workId',))
@@ -169,7 +163,6 @@ def integration_retry_route():
 
 @api_v1_integration_bp.route('/api/v1/project/integration/discard', methods=['POST'])
 @require_auth
-@rate_limit(limit=30, per=60)
 @api_meta(summary='Discard an integration workspace without deleting its refs', tags=['project'])
 def integration_discard_route():
     return _task_action(_integration_api('discard_workspace'))
@@ -177,7 +170,6 @@ def integration_discard_route():
 
 @api_v1_integration_bp.route('/api/v1/project/integration/promote', methods=['POST'])
 @require_auth
-@rate_limit(limit=20, per=60)
 @api_meta(summary='Promote candidate to the known-good stable ref', tags=['project'])
 def integration_promote_route():
     data = parse_body(exact=('acknowledgeHeadDivergence', 'path',))
@@ -206,7 +198,6 @@ def integration_promote_route():
 @api_v1_integration_bp.route(
     '/api/v1/project/integration/reconcile-head', methods=['POST'])
 @require_auth
-@rate_limit(limit=10, per=60)
 @api_meta(summary='Reconcile committed canonical HEAD into candidate', tags=['project'])
 def integration_reconcile_head_route():
     data = parse_body(exact=('path',))
@@ -222,7 +213,6 @@ def integration_reconcile_head_route():
 
 @api_v1_integration_bp.route('/api/v1/project/integration/prune', methods=['POST'])
 @require_auth
-@rate_limit(limit=10, per=60)
 @api_meta(summary='Prune stale Git worktree metadata', tags=['project'])
 def integration_prune_route():
     data = parse_body(exact=('path',))

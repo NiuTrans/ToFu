@@ -8,7 +8,9 @@ pytestmark = pytest.mark.unit
 
 
 def _pdf_bytes(labels: list[str]) -> bytes:
-    import pymupdf
+    from lib.pdf_parser.text import pymupdf
+    if pymupdf is None:
+        pytest.skip('requires a working real PyMuPDF backend')
 
     doc = pymupdf.open()
     for label in labels:

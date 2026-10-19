@@ -127,7 +127,7 @@ def _ensure_craft_corpus(*, download: bool = True, timeout: int = 180) -> bool:
     import io
     import zipfile
 
-    from lib.http_client import http_get
+    from lib.http_transport.client import http_get
     try:
         resp = http_get(_HYPERFRAMES_ZIP, timeout=timeout)
         data = getattr(resp, 'content', b'') or b''

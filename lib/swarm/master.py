@@ -103,6 +103,241 @@ def _copy_execution_context(task: dict) -> dict:
     }
 
 
+_RETAINED_EXECUTION_SCHEMA_V1 = 'tofu.retained-assignment-execution/v1'
+_RETAINED_EXECUTION_SCHEMA = 'tofu.retained-assignment-execution/v2'
+
+
+def bind_retained_assignment_context(spec: SubTaskSpec, *, parent_task: dict,
+        parent_config: dict, all_tools: list, model: str, project_path: str = '',
+        thinking_enabled: bool | None = None, abort_check: Callable | None = None,
+        on_agent_usage: Callable | None = None) -> None:
+    """Validate retained identity before using the shared assignment boundary."""
+    if not spec.retained_agent_id or spec.id != spec.retained_run_id:
+        raise ValueError('Retained authority requires a bound assignment')
+    bind_assignment_context(spec, parent_task=parent_task, parent_config=parent_config,
+        all_tools=all_tools, model=model, project_path=project_path,
+        thinking_enabled=thinking_enabled, abort_check=abort_check,
+        on_agent_usage=on_agent_usage)
+
+
+def bind_assignment_context(spec: SubTaskSpec, *, parent_task: dict,
+        parent_config: dict, all_tools: list, model: str, project_path: str = '',
+        thinking_enabled: bool | None = None, abort_check: Callable | None = None,
+        on_agent_usage: Callable | None = None) -> None:
+    """Freeze one current-caller grant through the wave preparation boundary."""
+    bind_assignment_contexts([spec], parent_task=parent_task,
+        parent_config=parent_config, all_tools=all_tools, model=model,
+        project_path=project_path, thinking_enabled=thinking_enabled,
+        abort_check=abort_check, on_agent_usage=on_agent_usage)
+
+
+def bind_assignment_contexts(specs: list[SubTaskSpec], *, parent_task: dict,
+        parent_config: dict, all_tools: list, model: str, project_path: str = '',
+        thinking_enabled: bool | None = None, abort_check: Callable | None = None,
+        on_agent_usage: Callable | None = None, validate_only: bool = False) -> dict[str, dict]:
+    """Prepare the whole wave before publishing grants; no process-wide cache.
+
+    Same-model siblings share immutable JSON strings, never mutable containers.
+    A model override gets its own policy snapshot. Failure leaves every spec
+    untouched, so the caller can reject the wave before scheduler admission.
+    Fresh ordinary sessions already persist their shared grant once; they use
+    validation only and consume the returned base-model template, avoiding both
+    a second policy compilation and a durable grant per initial child.
+    """
+    ids = [spec.id for spec in specs]
+    if (any(not isinstance(spec.id, str) or not spec.id
+            or (spec.retained_agent_id and spec.id != spec.retained_run_id)
+            for spec in specs) or len(set(ids)) != len(ids)):
+        raise ValueError('Invalid assignment identity')
+    templates = {}
+    prepared = []
+    if validate_only:
+        templates[model] = _prepare_assignment_context(
+            parent_task=parent_task, parent_config=parent_config,
+            all_tools=all_tools, model=model, project_path=project_path,
+            thinking_enabled=thinking_enabled)
+    for spec in specs:
+        selected_model = spec.model_override or model
+        if selected_model not in templates:
+            templates[selected_model] = _prepare_assignment_context(
+                parent_task=parent_task, parent_config=parent_config,
+                all_tools=all_tools, model=selected_model, project_path=project_path,
+                thinking_enabled=thinking_enabled)
+        if not validate_only:
+            context = deepcopy(templates[selected_model])
+            context['assignment_id'] = spec.id
+            prepared.append(context)
+    for spec, context in zip(specs, prepared):
+        spec.retained_execution_context = context
+        spec.retained_assignment_parent = parent_task
+        spec.retained_assignment_abort_check = abort_check
+        spec.retained_assignment_usage = on_agent_usage
+    return templates
+
+
+def _prepare_assignment_context(*, parent_task: dict, parent_config: dict,
+        all_tools: list, model: str, project_path: str,
+        thinking_enabled: bool | None) -> dict:
+    """Snapshot declared authority once, excluding credentials/runtime handles."""
+    from lib.identity import PrincipalContext
+    from lib.tasks_pkg.child_invocation import (
+        inherit_child_config, snapshot_conversation_child_policy,
+    )
+    from lib.swarm.routing import tool_schema_name
+
+    principal = PrincipalContext.from_payload(parent_task['_principalContext'])
+    if principal.require_owner(context='retained assignment') != parent_task['_userId']:
+        raise PermissionError('Retained assignment owner mismatch')
+    source = dict(parent_task)
+    source['config'] = {**(parent_task.get('config') or {}), **parent_config}
+
+    tools = deepcopy(all_tools)
+    names = [tool_schema_name(tool) for tool in tools]
+    if any(not name for name in names) or len(set(names)) != len(names):
+        raise ValueError('Retained assignment requires named, unique selected tools')
+    selected_names = set(names)
+    # Compile only the caller-selected catalog, not a broader parent catalog.
+    source['config']['_executableToolCatalog'] = tools
+    for carrier in (source, source['config']):
+        for key, value in list(carrier.items()):
+            if key.endswith('ByName') and isinstance(value, dict):
+                carrier[key] = {name: entry for name, entry in value.items()
+                                if name in selected_names}
+    policy = snapshot_conversation_child_policy(source, model=model, tools=all_tools,
+        project_path=project_path, thinking_enabled=thinking_enabled)
+    config = deepcopy(policy['config'])
+    config.update(policy['conversation_tool_policy'])
+    # Search/discovery metadata is not a second, broader executable catalog.
+    # v2 has one canonical schema carrier. Rebuild config's runtime view only
+    # after recovery validates the known schema and the selected catalog.
+    config.pop('_executableToolCatalog', None)
+    config['_toolSearchCatalogSize'] = len(tools)
+    for key, value in list(config.items()):
+        if key.endswith('ByName') and isinstance(value, dict):
+            config[key] = {name: entry for name, entry in value.items() if name in selected_names}
+    workspace_source = dict(parent_task)
+    # Keep the caller's workspace inputs, excluding process-private caches and
+    # handles (e.g. immutable MCP search mappings cannot be deep-copied).
+    workspace_source['config'] = inherit_child_config(parent_task.get('config') or {})
+    execution_context = _copy_execution_context(workspace_source)
+    if '_workspaceRootPolicy' not in execution_context:
+        from lib.tasks_pkg.workspace_delivery import ensure_execution_roots
+        execution_context['_workspaceRootPolicy'] = deepcopy(
+            ensure_execution_roots(workspace_source) or {'primaryPath': '', 'roots': {}})
+    context = {
+        'schema': _RETAINED_EXECUTION_SCHEMA,
+        'config': config, 'tools': tools,
+        'model': model, 'project_path': project_path, 'thinking_enabled': thinking_enabled,
+        'principal': principal.to_payload(),
+        'tenant_id': parent_task.get('_tenant_id'),
+        'execution_context': execution_context,
+        'parent_task_id': str(parent_task['id']),
+        'parent_conversation_id': str(parent_task.get('convId') or ''),
+        'parent_turn_id': str(parent_task.get('_turnId') or ''),
+        'parent_attempt_id': str(parent_task.get('_attemptId') or ''),
+        'transient_runtime': bool(parent_task.get('_transientRuntime') or
+                                  parent_task.get('_invocationStorageFree')),
+    }
+    from lib.tasks_pkg.requirement_source import snapshot_requirement_source
+    context['requirement_source'] = snapshot_requirement_source(parent_task)
+    # Freeze complete authority, including large selected catalogs and prompts.
+    # Its encoded size is not an execution budget: transport/storage owners
+    # handle their own capacity. Strict JSON still rejects runtime handles and
+    # non-finite numbers; compact Unicode avoids needless escaping/copies.
+    serialized = json.dumps(context, allow_nan=False, ensure_ascii=False,
+                            separators=(',', ':'))
+    return json.loads(serialized)
+
+
+def _retained_assignment_proxy(spec: SubTaskSpec, session_parent: dict) -> tuple[dict, dict]:
+    """Reconstruct only known frozen authority; missing restart grants deny."""
+    from lib.identity import PrincipalContext
+    from lib.swarm.routing import tool_schema_name
+
+    context = spec.retained_execution_context
+    if (not isinstance(context, dict) or context.get('schema') not in {
+            _RETAINED_EXECUTION_SCHEMA_V1, _RETAINED_EXECUTION_SCHEMA}
+            or not isinstance(context.get('config'), dict)
+            or not isinstance(context.get('tools'), list)
+            or not isinstance(context.get('execution_context'), dict)
+            or not isinstance(context.get('model'), str)
+            or not isinstance(context.get('project_path'), str)
+            or not context.get('parent_task_id')
+            or type(context.get('transient_runtime')) is not bool
+            or (context.get('thinking_enabled') is not None
+                and type(context.get('thinking_enabled')) is not bool)):
+        raise ValueError('Missing or unknown retained assignment execution authority')
+
+    if (set(context['execution_context']) - {'_workspaceExecution', '_workspaceRootPolicy'}
+            or spec.id != context.get('assignment_id', spec.retained_run_id
+                if context['schema'] == _RETAINED_EXECUTION_SCHEMA_V1 else None)
+            or (spec.retained_agent_id and spec.id != spec.retained_run_id)
+            or context['config'].get('model') != context['model']
+            or context['config'].get('projectPath') != context['project_path']):
+        raise ValueError('Invalid retained assignment execution authority')
+    principal = PrincipalContext.from_payload(context.get('principal') or {})
+    owner = principal.require_owner(context='retained assignment recovery')
+    if (owner != session_parent['_userId']
+            or str(context.get('tenant_id') or '') != str(session_parent.get('_tenant_id') or '')
+            or principal.tenant_id != (context.get('tenant_id') or None)
+            or context.get('parent_conversation_id') != session_parent.get('convId', '')):
+        raise PermissionError('Retained assignment scope/owner mismatch')
+    names = [tool_schema_name(tool) for tool in context['tools'] if isinstance(tool, dict)]
+    if (len(names) != len(context['tools']) or any(not name for name in names)
+            or len(set(names)) != len(names)
+            or (context['schema'] == _RETAINED_EXECUTION_SCHEMA_V1
+                and context['config'].get('_executableToolCatalog') != context['tools'])
+            or (context['schema'] == _RETAINED_EXECUTION_SCHEMA
+                and '_executableToolCatalog' in context['config'])):
+        raise ValueError('Invalid retained selected tool authority')
+    parent = {
+        'id': context['parent_task_id'], 'convId': context['parent_conversation_id'],
+        '_userId': owner, '_tenant_id': context.get('tenant_id'),
+        '_principalContext': principal.to_payload(), 'model': context['model'],
+        'config': deepcopy(context['config']),
+        '_transientRuntime': context['transient_runtime'],
+        **deepcopy(context['execution_context']),
+    }
+    from lib.tasks_pkg.requirement_source import restore_requirement_source, snapshot_requirement_source
+    source = context.get('requirement_source')
+    if 'requirement_source' not in context:
+        # Older accepted snapshots already retained the exact root birth.
+        source = snapshot_requirement_source({**parent,
+            '_turnId': context.get('parent_turn_id'),
+            '_attemptId': context.get('parent_attempt_id')})
+    if source is not None:
+        restore_requirement_source(parent, source)
+    parent['config']['_executableToolCatalog'] = deepcopy(context['tools'])
+    decision = (session_parent.get('config') or {}).get('_toolOrchestration') or {}
+    if str(decision.get('multiAgent') or '').lower() == 'read_only':
+        parent['config']['_toolOrchestration'] = {**(parent['config'].get('_toolOrchestration') or {}),
+                                                'multiAgent': 'read_only'}
+    # Task-local contract ports also derive from this assignment's frozen
+    # selected-tool policy on restart, never from the original session.
+    documents = context['config'].get('_toolContractDocumentsByName')
+    if isinstance(documents, dict):
+        parent['_toolContractDocumentsByName'] = deepcopy(documents)
+    current = spec.retained_assignment_parent
+    if current is not None:
+        current_principal = PrincipalContext.from_payload(current['_principalContext'])
+        if (current_principal.to_payload() != principal.to_payload()
+                or current.get('_userId') != owner
+                or str(current.get('id')) != context['parent_task_id']
+                or str(current.get('_tenant_id') or '') != str(context.get('tenant_id') or '')):
+            raise PermissionError('Retained assignment current principal changed')
+        from lib.agent_core.execution_budget import share_execution_budget
+        share_execution_budget(current, parent)
+        from lib.tasks_pkg.native_parent import share_native_parent
+        share_native_parent(current, parent)
+        if '_tool_env' in current:
+            parent['_tool_env'] = current['_tool_env']
+        documents = current.get('_toolContractDocumentsByName')
+        if isinstance(documents, dict):
+            parent['_toolContractDocumentsByName'] = deepcopy(
+                {name: value for name, value in documents.items() if name in names})
+    return parent, context
+
+
 def _checkpoint_outcome(checkpoint: dict) -> str:
     """Project durable truth without inferring success from transcript text."""
     status = checkpoint.get('status') or 'unknown'
@@ -481,7 +716,7 @@ class MasterOrchestrator:
         # browser tools would silently fall back to the default pool and
         # ignore the parent's per-client routing.
         self._parent_task_proxy = {
-            'id':           task_id,
+            'id':           (parent_task or {}).get('id') or task_id,
             'convId':       conv_id,
             '_userId':      user_id,
             '_tenant_id':   (parent_task or {}).get('_tenant_id', (parent_config or {}).get('_tenant_id')),
@@ -505,6 +740,26 @@ class MasterOrchestrator:
         if parent_task is not None:
             from lib.agent_core.execution_budget import share_execution_budget
             share_execution_budget(parent_task, self._parent_task_proxy)
+            # A spawned swarm is fire-and-forget: sub-agents keep running (and
+            # dependency-blocked specs keep WAITING) long after the spawning
+            # chat task settles 'done'. Yet the shared execution-budget
+            # account's root is that short-lived chat task, and attach() /
+            # _validate_child_parent() / reserve_model() all refuse new work
+            # once the account root is terminal — so a spec admitted only
+            # after its dependency finished was killed with
+            # 'execution_owner_cancelled' the instant it started. Re-root the
+            # account onto THIS session-lifetime proxy, which stays 'running'
+            # until abort()/suspend_for_restart() marks it terminal, so queued
+            # agents admit whenever they unblock while explicit cancel fences.
+            budget = self._parent_task_proxy.get('_executionBudget')
+            if budget is not None:
+                self._promote_proxy_to_budget_root(budget, parent_task)
+            from lib.tasks_pkg.native_parent import share_native_parent
+            share_native_parent(parent_task, self._parent_task_proxy)
+            from lib.tasks_pkg.requirement_source import requirement_source
+            source = requirement_source(parent_task)
+            if source is not None:
+                self._parent_task_proxy['_turnRequirementSource'] = source.validate(self._parent_task_proxy)
 
         self._scheduler: StreamingScheduler | None = None
         self._driver_thread: threading.Thread | None = None
@@ -546,6 +801,61 @@ class MasterOrchestrator:
 
         self._resume_results: dict[str, dict] = {}
 
+    def _promote_proxy_to_budget_root(self, budget, parent_task) -> None:
+        """Re-root the shared execution-budget account onto this session proxy.
+
+        The account's root entry is the short-lived spawning chat task, which
+        goes terminal the moment the turn ends — wrongly fencing every
+        dependency-blocked sub-agent that has not started yet. Make the
+        session-lifetime proxy the admission owner instead: it stays
+        ``status='running'`` until ``abort()``/``suspend_for_restart()`` flips
+        it, so queued agents admit whenever they unblock while explicit cancel
+        still fences them. Two proxy-id cases share one outcome:
+
+        * distinct id (proxy.id != chat task id): swap the ``_active`` root
+          entry from the chat task to the proxy, carrying the recorded
+          consumption/ordinals over so tree totals stay intact;
+        * same id (``_parent_task_proxy['id'] == parent_task['id']`` — the
+          common case where ``swarm_key_for`` reuses the spawning task's id):
+          the ``_active`` root slot already holds the chat task. Rebind that
+          slot to the proxy (dropping the chat task's terminal status from the
+          admission path) and move its recorded consumption onto the proxy id.
+
+        In both cases the proxy becomes the control identity for its own local
+        slice, and token limits are copied verbatim (consumption accounting
+        reads ``_active`` usage, never the root identity).
+        """
+        proxy = self._parent_task_proxy
+        with budget._lock:
+            same_id = proxy['id'] == parent_task['id']
+            old_root = budget._active.get(budget.root_id)
+            proxy['status'] = 'running'
+            proxy['aborted'] = False
+            proxy['config']['executionLimits'] = dict(budget.limits)
+            # Move recorded consumption/ordinals off the old root identity onto
+            # the proxy id. When ids coincide these maps are already keyed by
+            # that id, so pop-with-default just reads the existing values.
+            from lib.agent_core.execution_budget import tokens as _budget_tokens
+            model_tokens = budget._model_tokens.pop(budget.root_id, _budget_tokens(parent_task.get('usage')))
+            control_calls = budget._control_tool_calls.pop(budget.root_id, 0)
+            model_ordinal = budget._actor_model_ordinals.pop(budget.root_id, 0)
+            tool_ordinal = budget._actor_tool_ordinals.pop(budget.root_id, 0)
+            if not same_id:
+                budget._active.pop(budget.root_id, None)
+            budget._model_tokens[proxy['id']] = model_tokens
+            budget._control_tool_calls[proxy['id']] = control_calls
+            budget._actor_model_ordinals[proxy['id']] = model_ordinal
+            budget._actor_tool_ordinals[proxy['id']] = tool_ordinal
+            budget._active[proxy['id']] = proxy
+            budget.root_id = proxy['id']
+            proxy['_executionBudgetControlTaskId'] = proxy['id']
+            # The old chat task must no longer be the admission authority for
+            # this tree. When it is a distinct object still carrying the
+            # account, detach its back-reference so a later turn of that task
+            # cannot admit against a root it no longer owns.
+            if not same_id and old_root is not None and old_root.get('_executionBudget') is budget:
+                old_root.pop('_executionBudget', None)
+
     # ── Model resolution (mirrors SubAgent._resolve_model) ──
 
     def _resolve_spec_model(self, spec: SubTaskSpec) -> str:
@@ -558,53 +868,86 @@ class MasterOrchestrator:
         agent = self._agents.get(spec.id)
         if agent is not None:
             return getattr(agent, 'model', '')
+
+        parent, model = self._parent_task_proxy, self.model
+        if spec.retained_agent_id or spec.retained_execution_context is not None:
+            parent, context = _retained_assignment_proxy(spec, self._parent_task_proxy)
+            model = context['model']
+            if spec.retained_agent_id:
+                return model
         if spec.model_override:
             return spec.model_override
         tier = get_role_model_hint(spec.role)
-        provider_id = self._parent_task_proxy['config'].get(
+        provider_id = parent['config'].get(
             '_pinned_provider_id', '')
         return resolve_model_for_tier(
             tier,
-            self.model,
+            model,
             role=spec.role,
             provider_id=provider_id,
             owner_user_id=self.user_id,
-            tenant_id=self._parent_task_proxy.get('_tenant_id'),
+            tenant_id=parent.get('_tenant_id'),
         )
 
     # ── Agent factory used by StreamingScheduler ──────
 
     def _make_agent(self, spec: SubTaskSpec) -> SubAgent:
+
+        parent, tools, model = self._parent_task_proxy, self.all_tools, self.model
+        project_path, thinking = self.project_path, self.thinking_enabled
+        abort = lambda: self._aborted or self.abort_check()
+        if spec.retained_agent_id or spec.retained_execution_context is not None:
+            parent, context = _retained_assignment_proxy(spec, self._parent_task_proxy)
+            tools, model = context['tools'], context['model']
+            project_path, thinking = context['project_path'], context['thinking_enabled']
+            # The original caller's normal finish must not cancel a later turn.
+            # Whole-session Stop still does; this assignment observes its caller.
+            def abort():
+                current = spec.retained_assignment_parent or {}
+                event = current.get('abort_event')
+                check = spec.retained_assignment_abort_check
+
+                if spec.retained_assignment_parent is None:
+                    # Restart's explicitly rebound caller port, never old
+                    # dialogue or a serialized cancellation handle.
+                    return bool(self._aborted or self.abort_check())
+                caller_stop = (check() if check else (
+                    current.get('status') not in {'done', 'completed', 'failed', 'error', 'cancelled'}
+                    and event and event.is_set()))
+                return bool(self._aborted or current.get('aborted') or caller_stop)
         out_path = ''
         if self.output_dir:
             out_path = os.path.join(self.output_dir, f'{spec.id}.log')
         agent = _build_sub_agent(
             spec,
-            parent_task=self._parent_task_proxy,
-            all_tools=self.all_tools,
-            model=self.model,
-            thinking_enabled=self.thinking_enabled,
+            parent_task=parent,
+            all_tools=tools,
+            model=model,
+            thinking_enabled=thinking,
             on_event=self.on_progress,
             # Owner Stop only. The child's shared beacon stamps silence before
             # aborting provider/tools; forwarding _stop_stalled races that stamp.
-            abort_check=lambda: self._aborted or self.abort_check(),
-            project_path=self.project_path,
+            abort_check=abort,
+            project_path=project_path,
             artifact_store=self.artifact_store,
             output_file=out_path,
             swarm_key=self.inbox_key,
         )
+
+        if ((spec.retained_agent_id or spec.retained_execution_context is not None)
+                and not context['transient_runtime']):
+            from lib.swarm.run_messages import binding_for
+            # Mailbox identity is the existing swarm run, not the current caller.
+            agent._assignment_message_binding = binding_for(
+                self._parent_task_proxy, spec, self.inbox_key)
         # ── Durable resume: seed the conversation from the checkpoint so the
         #    agent continues from its last completed round instead of starting
         #    over. The interrupted (uncheckpointed) round is naturally re-run.
         resume = self._resume_messages.get(spec.id)
         resume_rounds = max(0, int(self._resume_rounds.get(spec.id, 0) or 0))
-        if resume:
-            agent.restore_checkpoint(resume, resume_rounds,
-                self._resume_results.get(spec.id))
-        elif spec.retained_agent_id:
-            # A fresh assignment starts from the prior completed dialogue;
-            # a restarted in-flight assignment takes the branch above and
-            # must not append the same objective twice.
+        if spec.retained_agent_id:
+            # Validate the durable reservation even on restart. Dialogue and
+            # cached checkpoints cannot stand in for a current busy binding.
             from lib.swarm.retained_repository import RetainedAgentRepository
             repository = RetainedAgentRepository(
                 self.user_id,
@@ -613,7 +956,27 @@ class MasterOrchestrator:
             if (found is None or found[0].get('state') != 'busy'
                     or found[0].get('run_id') != spec.retained_run_id):
                 raise RuntimeError('Retained agent assignment was superseded')
-            prior = found[0].get('messages') or []
+
+            def bind_session(value):
+                if (value.get('state') != 'busy'
+                        or value.get('run_id') != spec.retained_run_id):
+                    raise RuntimeError('Retained agent assignment was superseded')
+                # Coordination identity is actual session authority, not the
+                # current delegating task id carried by execution provenance.
+                value['run_session_id'] = self.task_id
+                value['run_conversation_id'] = self.conv_id
+                return value
+            found_value = found[0]
+            if (found_value.get('run_session_id') != self.task_id
+                    or found_value.get('run_conversation_id') != self.conv_id):
+                found_value = repository.change(spec.retained_scope,
+                                               spec.retained_agent_id, bind_session)
+        if resume:
+            agent.restore_checkpoint(resume, resume_rounds,
+                self._resume_results.get(spec.id))
+        elif spec.retained_agent_id:
+            # Fresh assignment adds its objective once; restart does not.
+            prior = found_value.get('messages') or []
             if prior:
                 agent.restore_checkpoint(prior + [{
                     'role': 'user',
@@ -780,6 +1143,12 @@ class MasterOrchestrator:
                     'toolCallsOmitted': _live_omitted,
                 })
 
+        # Recovery uses the existing spawn snapshot, not a browser poller or
+        # a second mailbox. Authored content is bounded by the mailbox contract.
+        # Exact owner/run bindings are validated on every read.
+        from lib.swarm.message_receipts import snapshot_receipts
+        message_snapshot = snapshot_receipts(self, agents, specs)
+
         # ── Monotonic version key (#2) ──
         # A later snapshot must never be clobbered by an earlier one that
         # loses a CAS race and retries late. Order by (settled, terminal-agent
@@ -792,6 +1161,7 @@ class MasterOrchestrator:
         version = (1 if settled else 0) * 100000 + done_count
         return {
             'agents':       agents,
+            **message_snapshot,
             'settled':      settled,
             'swarm_id':     self.task_id,
             'totalTokens':  total_tokens,
@@ -799,6 +1169,10 @@ class MasterOrchestrator:
             'doneCount':    done_count,
             'version':      version,
         }
+
+    def persist_message_receipts(self) -> None:
+        """Project a committed receipt into the existing durable spawn snapshot."""
+        self._persist_agent_snapshot(force=True)
 
     def _persist_agent_snapshot(self, *, force: bool = False,
                                 cas: bool = True) -> None:
@@ -958,9 +1332,12 @@ class MasterOrchestrator:
         if self._restart_suspended and result.status in ('cancelled', 'interrupted'):
             self._completion_event.set()
             return
-        if self.on_agent_usage is not None:
+        usage_rollup = (spec.retained_assignment_usage
+                        if spec.retained_agent_id or spec.retained_execution_context is not None
+                        else self.on_agent_usage)
+        if usage_rollup is not None:
             try:
-                self.on_agent_usage({
+                usage_rollup({
                     'prompt_tokens': result.prompt_tokens,
                     'completion_tokens': result.completion_tokens,
                     'total_tokens': result.total_tokens,
@@ -983,6 +1360,12 @@ class MasterOrchestrator:
             logger.warning('[Master:%s] completion progress callback failed',
                            self.task_id, exc_info=True)
 
+        if spec.retained_agent_id or spec.retained_execution_context is not None:
+            # Completed scheduler specs are retained for coordination history,
+            # not as a registry of old caller tasks, locks and callbacks.
+            spec.retained_assignment_parent = None
+            spec.retained_assignment_abort_check = None
+            spec.retained_assignment_usage = None
     def _emit_agent_complete(self, spec: SubTaskSpec,
                             result: SubAgentResult, terminal_status: str) -> None:
         # 1) UI event (kept identical to legacy schema for the swarm panel)
@@ -1385,7 +1768,8 @@ class MasterOrchestrator:
 
     # ── Rehydration entry point (startup resume) ─────
 
-    def rehydrate_in_background(self, persisted_agents: list[dict]) -> None:
+    def rehydrate_in_background(self, persisted_agents: list[dict], *,
+                                resume_parent_stop: bool = False) -> None:
         """Resume a swarm from persisted per-agent checkpoints after a restart.
 
         ``persisted_agents`` is the ``agents`` list from
@@ -1423,6 +1807,11 @@ class MasterOrchestrator:
                 resume_specs.append(spec)
                 continue
             status = a.get('status') or 'unknown'
+
+            if (resume_parent_stop and status == 'cancelled'
+                    and (a.get('result') or {}).get('recovery_reason') == 'parent_stop'
+                    and not spec.retained_agent_id):
+                status = 'running'
             if status in ('pending', 'running', 'retrying'):
                 from lib.swarm.restart_recovery import checkpoint_recovery_error
                 blocker = checkpoint_recovery_error(a)
@@ -2337,6 +2726,9 @@ class MasterOrchestrator:
             self._restart_suspended = True
             parent['aborted'] = True
             parent['_abort_reason'] = 'server_shutdown'
+            # Mark the session budget root terminal so no new child attaches
+            # and in-flight admission is fenced after the restart suspend.
+            parent['status'] = 'aborted'
             for agent in self._agents.values():
                 child = getattr(agent, '_child', None)
                 if child is not None and not child.get('aborted'):
@@ -2356,11 +2748,18 @@ class MasterOrchestrator:
             self._aborted = True
             self._parent_task_proxy['aborted'] = True
             self._parent_task_proxy['_abort_reason'] = 'user_abort'
+            # Flip the session budget root terminal so the shared account
+            # refuses every further admission/attachment for this swarm.
+            self._parent_task_proxy['status'] = 'aborted'
             agents = list(self._agents.values())
-            for agent in agents:
+            for spec_id, agent in self._agents.items():
+                if (spec_id not in self._results_by_id
+                        and not getattr(agent, '_swarm_individually_stopped', False)):
+                    agent._swarm_parent_stopped = True
                 if getattr(agent, '_child', None) is not None:
                     agent._child['aborted'] = True
                     agent._child['_abort_reason'] = 'user_abort'
+
         for agent in agents:
             if getattr(agent, '_child', None) is not None:
                 agent.request_abort()
@@ -2378,6 +2777,9 @@ class MasterOrchestrator:
         """
         with self._lock:
             agent = self._agents.get(str(agent_id))
+            if agent is not None:
+                agent._swarm_individually_stopped = True
+                agent._swarm_parent_stopped = False
         if agent is None:
             return False
         return agent.request_abort()

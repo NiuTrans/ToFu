@@ -2,6 +2,7 @@
 
 import type { ConnectionHealth, ConnectionHealthState } from
   '../api/conversation-sync.generated';
+import { notifyObserver } from './observer';
 
 export interface AggregateConnectionHealth {
   degraded: boolean;
@@ -30,9 +31,10 @@ export class ConnectionHealthStore {
         && previous.reason === health.reason
         && previous.lastFrameAt === health.lastFrameAt
         && previous.retryCount === health.retryCount) return;
-    this.states.set(conversationId, Object.freeze({ ...health }));
-    for (const listener of this.listeners.get(conversationId) ?? []) {
-      listener(health);
+    const published = Object.freeze({ ...health });
+    this.states.set(conversationId, published);
+    for (const listener of [...this.listeners.get(conversationId) ?? []]) {
+      notifyObserver('connection-health', listener, published);
     }
     this.emitAggregate();
   }
@@ -70,7 +72,7 @@ export class ConnectionHealthStore {
     bucket.add(listener);
     this.listeners.set(conversationId, bucket);
     const current = this.states.get(conversationId);
-    if (current) listener(current);
+    if (current) notifyObserver('connection-health', listener, current);
     return () => {
       bucket.delete(listener);
       if (!bucket.size) this.listeners.delete(conversationId);
@@ -85,13 +87,15 @@ export class ConnectionHealthStore {
 
   subscribeAggregate(listener: AggregateListener): () => void {
     this.aggregateListeners.add(listener);
-    listener(this.aggregate());
+    notifyObserver('connection-health-aggregate', listener, this.aggregate());
     return () => this.aggregateListeners.delete(listener);
   }
 
   private emitAggregate(): void {
     const aggregate = this.aggregate();
-    for (const listener of this.aggregateListeners) listener(aggregate);
+    for (const listener of [...this.aggregateListeners]) {
+      notifyObserver('connection-health-aggregate', listener, aggregate);
+    }
   }
 }
 

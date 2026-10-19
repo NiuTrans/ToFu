@@ -31,8 +31,9 @@ paths the header-only corpora cannot see, a
 multi-agent concurrency shape), a ``turn_append_large`` phase (tool-result
 class 256 KiB turn payloads) matching production traffic, and a
 ``maintenance_reopen`` phase (graceful stop + reopen cycles). After all
-phases the report records each engine's physical footprint (durable data
-size and process write volume) as space/write-amplification evidence.
+phases the report records each engine's post-run local file footprint and
+process write volume. Native authority and search projection roots are counted
+separately; logical lengths are not physical allocation or steady-state size.
 
 Rust/SQLite create disposable authorities. PostgreSQL is a persistent server,
 so the caller must provision a disposable database: every run-scoped identity
@@ -66,6 +67,7 @@ import os
 
 import select
 import signal
+import stat
 import sqlite3
 from pathlib import Path
 import shutil
@@ -273,16 +275,208 @@ def _pid_write_bytes(pid: int | None) -> int | None:
     return None
 
 
-def _directory_bytes(path: Path) -> int:
-    """Total apparent file bytes beneath one disposable directory."""
-    total = 0
-    for root, _dirs, files in os.walk(path):
-        for name in files:
+_FOOTPRINT_MAX_ENTRIES = 100_000
+_FOOTPRINT_MAX_SECONDS = 5.0
+_FOOTPRINT_MAX_DEPTH = 64
+
+
+def _directory_footprints(roots: dict[str, Path | None], *,
+                          max_entries: int = _FOOTPRINT_MAX_ENTRIES,
+                          max_seconds: float = _FOOTPRINT_MAX_SECONDS,
+                          max_depth: int = _FOOTPRINT_MAX_DEPTH) -> dict:
+    """Read only declared disposable roots; never infer reachability from names.
+
+    Logical/allocated totals count regular-file inodes once across all roots,
+    in declaration order. Nested declared roots belong to the more specific
+    component. Equal roots cannot establish separate ownership and fail closed.
+    Legacy apparent bytes retain path multiplicity (including file symlinks),
+    exactly as the former os.walk/lstat sum, but are explicitly incomplete on
+    errors or budget exhaustion. Directory metadata and symlink targets are not
+    part of the new totals. This is a bounded observation, not an atomic snapshot
+    or a hard I/O deadline: a single filesystem call may outlast the time budget.
+    """
+    if max_entries < 1 or max_seconds <= 0 or max_depth < 1:
+        raise ValueError('footprint collection budgets must be positive')
+    started = time.monotonic()
+    paths = {name: Path(os.path.abspath(path)) if path is not None else None
+             for name, path in roots.items()}
+    components = {}
+    legacy = {}
+    seen_files: set[tuple[int, int]] = set()
+    seen_directories: set[tuple[int, int]] = set()
+    entries_visited = 0
+    exhausted = None
+
+    for name, path in paths.items():
+        component = {
+            'path': str(path) if path is not None else None,
+            'status': 'not_configured', 'complete': False,
+            'logical_bytes': None, 'allocated_bytes': None, 'file_count': None,
+            'observed': {'logical_bytes': 0, 'allocated_bytes': 0, 'file_count': 0},
+            'allocated_bytes_supported': None,
+            'symlink_count': 0, 'special_file_count': 0, 'duplicate_file_count': 0,
+            'excluded_nested_roots': [], 'error_count': 0, 'error_examples': [],
+        }
+        components[name] = component
+        legacy[name] = {'bytes': 0, 'complete': False}
+        if path is None:
+            continue
+
+        def problem(reason, error=None):
+            component['complete'] = False
+            component['error_count'] += 1
+            if len(component['error_examples']) < 8:
+                component['error_examples'].append({
+                    'reason': reason, 'errno': getattr(error, 'errno', None)})
+
+        prior = list(paths)[:list(paths).index(name)]
+        if any(paths[other] == path for other in prior):
+            component['status'] = 'overlapping_root'
+            problem('same_root_has_multiple_owners')
+            continue
+        nested = {other_path for other_path in paths.values()
+                  if other_path is not None and other_path != path
+                  and path in other_path.parents}
+        component['excluded_nested_roots'] = sorted(str(item) for item in nested)
+        try:
+            # Refuse a symlink root or ancestor, not just symlinks found inside
+            # it. No resolve() that could redirect a walk outside declared scope.
+            if any(stat.S_ISLNK(os.lstat(parent).st_mode)
+                   for parent in reversed((path, *path.parents))):
+                component['status'] = 'symlink'
+                continue
+            root_stat = os.lstat(path)
+        except FileNotFoundError:
+            component['status'] = 'absent'
+            continue
+        except OSError as exc:
+            component['status'] = 'inaccessible'
+            problem('root_stat_failed', exc)
+            continue
+        if not stat.S_ISDIR(root_stat.st_mode):
+            component['status'] = 'not_directory'
+            continue
+        component.update(status='complete', complete=True,
+                         allocated_bytes_supported=hasattr(root_stat, 'st_blocks'))
+
+        def visit(directory: Path, depth: int):
+            nonlocal entries_visited, exhausted
+            if exhausted is not None:
+                problem(exhausted)
+                return
+            if time.monotonic() - started >= max_seconds:
+                exhausted = 'time_limit'
+                problem(exhausted)
+                return
+            if depth > max_depth:
+                problem('depth_limit')
+                return
             try:
-                total += os.lstat(os.path.join(root, name)).st_size
-            except OSError:
-                pass
-    return total
+                current = os.lstat(directory)
+                if not stat.S_ISDIR(current.st_mode):
+                    problem('directory_changed_during_collection')
+                    return
+                identity = (current.st_dev, current.st_ino)
+                if identity in seen_directories:
+                    problem('directory_alias')
+                    return
+                seen_directories.add(identity)
+                with os.scandir(directory) as children:
+                    for child in children:
+                        if entries_visited >= max_entries:
+                            exhausted = 'entry_limit'
+                        elif time.monotonic() - started >= max_seconds:
+                            exhausted = 'time_limit'
+                        if exhausted is not None:
+                            problem(exhausted)
+                            return
+                        entries_visited += 1
+                        child_path = directory / child.name
+                        try:
+                            info = child.stat(follow_symlinks=False)
+                            if child_path in nested:
+                                continue
+                            if stat.S_ISDIR(info.st_mode):
+                                visit(child_path, depth + 1)
+                                continue
+                            if stat.S_ISLNK(info.st_mode):
+                                component['symlink_count'] += 1
+                                # os.walk formerly excluded directory symlinks
+                                # from its files list. Only this legacy scalar
+                                # consults target type; targets are never walked.
+                                if not child.is_dir(follow_symlinks=True):
+                                    legacy[name]['bytes'] += info.st_size
+                                continue
+                            legacy[name]['bytes'] += info.st_size
+                            if not stat.S_ISREG(info.st_mode):
+                                component['special_file_count'] += 1
+                                continue
+                            identity = (info.st_dev, info.st_ino)
+                            if not info.st_ino:
+                                problem('file_identity_unavailable')
+                            elif identity in seen_files:
+                                component['duplicate_file_count'] += 1
+                                continue
+                            seen_files.add(identity)
+                            observed = component['observed']
+                            observed['logical_bytes'] += info.st_size
+                            observed['file_count'] += 1
+                            blocks = getattr(info, 'st_blocks', None)
+                            if type(blocks) is int and blocks >= 0:
+                                observed['allocated_bytes'] += blocks * 512
+                            else:
+                                component['allocated_bytes_supported'] = False
+                        except OSError as exc:
+                            problem('entry_stat_failed', exc)
+            except OSError as exc:
+                problem('directory_read_failed', exc)
+
+        visit(path, 0)
+        if not component['allocated_bytes_supported']:
+            component['observed']['allocated_bytes'] = None
+        legacy[name]['complete'] = component['complete']
+        if component['complete']:
+            component.update(component['observed'])
+        else:
+            component['status'] = 'partial'
+
+    # Reconstruct the old root scope even when a separately declared projection
+    # is nested inside it. New component totals remain exclusive and additive.
+    own_legacy = {name: dict(value) for name, value in legacy.items()}
+    for name, path in paths.items():
+        if path is not None:
+            for other, other_path in paths.items():
+                if other_path is not None and path in other_path.parents:
+                    legacy[name]['bytes'] += own_legacy[other]['bytes']
+                    legacy[name]['complete'] &= own_legacy[other]['complete']
+    complete = all(item['complete'] for item in components.values())
+    observed = {field: sum(item['observed'][field] for item in components.values())
+                for field in ('logical_bytes', 'file_count')}
+    allocated = [item['observed']['allocated_bytes'] for item in components.values()]
+    observed['allocated_bytes'] = (sum(allocated)
+        if all(item is not None for item in allocated)
+        and all(item['allocated_bytes_supported'] is True for item in components.values())
+        else None)
+    return {
+        'components': components,
+        'total': {'complete': complete, 'observed': observed,
+                  **{key: value if complete else None for key, value in observed.items()}},
+        'collection': {
+            'max_entries': max_entries, 'max_seconds': max_seconds,
+            'max_depth': max_depth, 'entries_visited': entries_visited,
+            'elapsed_seconds': round(time.monotonic() - started, 6),
+            'budget_exhausted': exhausted,
+            'time_budget_scope': 'cooperative between filesystem calls, not an I/O timeout',
+            'symlink_policy': 'exclude links and never walk targets',
+            'deduplication': 'regular files by (st_dev, st_ino); first declared component owns shared inodes',
+        },
+        'legacy': legacy,
+    }
+
+
+def _directory_bytes(path: Path) -> int:
+    """Legacy apparent path bytes observed under one bounded disposable root."""
+    return _directory_footprints({'directory': path})['legacy']['directory']['bytes']
 
 
 class TofuDbEngine:
@@ -324,6 +518,7 @@ class TofuDbEngine:
         self._write_bytes_accumulated: int = 0
         self._write_bytes_observed = False
         self._write_bytes_incomplete = False
+        self._cache_environment_requested: dict[str, str] | None = None
 
     def _write_bytes_pid(self) -> int | None:
         return os.getpid() if self._client_mode == 'embedded' else getattr(self._process, 'pid', None)
@@ -400,6 +595,11 @@ class TofuDbEngine:
         self._launch_serve()
 
     def _launch_serve(self) -> None:
+        self._cache_environment_requested = {
+            name: os.environ[name]
+            for name in ('TOFU_DB_BLOCK_CACHE_MIB', 'TOFU_DB_PAGE_CACHE_MIB')
+            if name in os.environ
+        }
         if self._client_mode == 'embedded':
             self._launch_embedded()
             return
@@ -1298,8 +1498,8 @@ def _record_value(i: int) -> dict:
     }
 
 
-def _workloads(scale: dict[str, int], user: int):
-    ns = f'perf_{uuid.uuid4().hex[:8]}'
+def _workloads(scale: dict[str, int], user: int, *, namespace: str | None = None):
+    ns = namespace if namespace is not None else f'perf_{uuid.uuid4().hex[:8]}'
     conv_ts = _TS_BASE
 
     def conv_id(prefix: str, i: int) -> str:
@@ -1462,6 +1662,14 @@ def _workloads(scale: dict[str, int], user: int):
                 if len(hits) >= scale['search_docs'] \
                         and coverage.get('coverage') == 'ready' \
                         and coverage.get('coverage_reasons') == []:
+                    engine._search_readiness_observation = {
+                        'available': True, 'source': 'conversation.search',
+                        'phase': 'conversation_search_setup',
+                        'coverage': 'ready', 'coverage_reasons': [],
+                        'seed_documents_visible': len(hits),
+                        'seed_documents_expected': scale['search_docs'],
+                        'observed_at_unix_ms': int(time.time() * 1000),
+                    }
                     engine._search_stabilization_s = round(
                         time.monotonic() - started, 1)
                     return
@@ -2189,20 +2397,26 @@ def _percentile(sorted_samples: list[float], fraction: float) -> float:
     return sorted_samples[index]
 
 
-def _latency_summary(samples_ms: list[float]) -> dict:
+def _latency_summary(samples_ms: list[float], *, retain_samples: bool = True) -> dict:
     ordered = sorted(samples_ms)
     total_s = sum(ordered) / 1e3
-    return {
+    result = {
         'iterations': len(ordered),
         'p99_sample_count_sufficient': len(ordered) >= _MINIMUM_TAIL_SAMPLES,
-        'p50_ms': round(_percentile(ordered, 0.50), 3),
-        'p95_ms': round(_percentile(ordered, 0.95), 3),
-        'p99_ms': round(_percentile(ordered, 0.99), 3),
-        'mean_ms': round(statistics.fmean(ordered), 3),
-        'min_ms': round(ordered[0], 3),
-        'max_ms': round(ordered[-1], 3),
+        'p50_ms': round(_percentile(ordered, 0.50), 6),
+        'p95_ms': round(_percentile(ordered, 0.95), 6),
+        'p99_ms': round(_percentile(ordered, 0.99), 6),
+        'mean_ms': round(statistics.fmean(ordered), 6),
+        'min_ms': round(ordered[0], 6),
+        'max_ms': round(ordered[-1], 6),
         'ops_per_sec': round(len(ordered) / total_s, 1) if total_s else 0.0,
     }
+    if retain_samples:
+        # Keep the collector's order, outside timed calls. Concurrent collectors
+        # may concatenate per-worker series; this is not a global event timeline.
+        result['samples_ms'] = list(samples_ms)
+        result['sample_order'] = 'collector-input'
+    return result
 
 
 def _execute_workload_operation(engine, operation: str, payload: dict, command: bool):
@@ -2260,12 +2474,13 @@ def measure_workload(engine, setup, operation, iterations: int,
         _execute_workload_operation(engine, op, payload, command)
         samples_ms.append((time.perf_counter_ns() - start) / 1e6)
     result = _latency_summary(samples_ms)
+    result['sample_order'] = 'sequential-operation-start'
     # Preserve temporal order in at most ten windows: a global percentile
     # cannot distinguish history-dependent amplification from isolated stalls.
     window_size = max(1, (iterations + 9) // 10)
     result['windows'] = [
         {'start_iteration': warmup + start,
-         **_latency_summary(samples_ms[start:start + window_size])}
+         **_latency_summary(samples_ms[start:start + window_size], retain_samples=False)}
         for start in range(0, iterations, window_size)
     ]
     return result
@@ -2306,14 +2521,143 @@ def _resolve_tofudb_binary(explicit: Path | None = None) -> Path:
 
 
 # ── Report ───────────────────────────────────────────────────────────────
-def _engine_resource_report(engine) -> dict:
-    """Post-run physical footprint: durable bytes and OS-level write volume.
+def _footprint_report(engine, directory, workload_reports: dict | None) -> tuple[dict, dict]:
+    """Path ownership comes from the existing drivers, not filename heuristics."""
+    native = isinstance(engine, TofuDbEngine)
+    raw = isinstance(engine, RawSqliteEngine)
+    roots = ({'authority': directory, 'projection': engine._projection_dir} if native
+             else {'authority_and_projection' if raw else 'local_artifacts': directory})
+    started_at = int(time.time() * 1000)
+    footprint = _directory_footprints(roots)
+    legacy = footprint.pop('legacy')
+    original = legacy['authority' if native else next(iter(roots))]
+    components = footprint['components']
+    if native:
+        components['authority']['scope'] = 'native --data-dir; all regular files, without reachability classification'
+        components['projection']['scope'] = 'native --search-projection-dir; reconstructible index, not proof of safe immediate deletion'
+        scope = 'declared native authority and search projection roots only'
+    else:
+        # SQL indexes can share database files, and the legacy driver does not
+        # retain its separately placed SQLite projection path. Never fabricate
+        # a table-level or remote-server decomposition from local filenames.
+        for name in ('authority', 'projection'):
+            components[name] = {
+                'path': None, 'status': 'not_separable' if raw else 'not_collected',
+                'complete': False, 'logical_bytes': None,
+                'allocated_bytes': None, 'file_count': None,
+            }
+        scope = ('raw SQLite directory including database, WAL and colocated indexes'
+                 if raw else 'legacy project directory only; external projection/server storage not collected')
+        if isinstance(engine, LegacyEngine) and engine._backend == 'postgres':
+            components['authority']['status'] = 'not_local'
+            scope = 'PostgreSQL harness-local artifacts only; NOT PostgreSQL server data size'
+        if not raw:
+            footprint['total'].update(complete=False, logical_bytes=None,
+                                      allocated_bytes=None, file_count=None)
+    readiness = dict(getattr(engine, '_search_readiness_observation', None) or {
+        'available': False, 'reason': 'search setup readiness was not observed'})
+    readiness['post_run_readiness_proven'] = False
+    maintenance_run = (workload_reports or {}).get('maintenance_reopen')
+    footprint.update({
+        'schema_version': 1,
+        'scope': scope,
+        'timing': {'phase': 'post_workloads_before_shutdown',
+                   'started_at_unix_ms': started_at,
+                   'finished_at_unix_ms': int(time.time() * 1000),
+                   'steady_state': False, 'consistent_snapshot': False},
+        'accounting': {
+            'logical_bytes': 'sum of st_size for distinct regular-file inodes, not user payload bytes',
+            'allocated_bytes': 'sum of st_blocks * 512 when supported for every counted file; not exclusive device usage',
+            'file_count': 'distinct regular-file inodes; hardlink aliases counted once',
+            'excluded': ['directory metadata', 'symlink bytes and targets', 'special files',
+                         'files outside declared roots', 'deleted-open files'],
+            'liveness': 'not_assessed; no live/reclaimable byte classification',
+        },
+        'evidence': {
+            'readiness': readiness,
+            'maintenance': {'available': False, 'reason': 'native maintenance metrics not collected',
+                            'settled': 'not_assessed'},
+            'maintenance_reopen': {
+                'status': ('not_run' if maintenance_run is None else
+                           'error' if 'error' in maintenance_run else 'completed'),
+                'rounds': maintenance_run.get('rounds') if maintenance_run else None,
+                'source': f'workloads.maintenance_reopen.{engine.name}',
+                'settled': 'not_assessed',
+            },
+        },
+    })
+    return footprint, original
 
-    ``data_size_bytes`` answers "how much disk did the whole run leave
-    behind" (ClickBench's Data size dimension); ``engine_write_bytes``
-    answers "how much did the storage process physically write" (write
-    amplification evidence), accumulated across every process the engine
-    ran this run (phase restarts and crash cycles included).
+
+_GC_FOOTPRINT_FIELDS = (
+    'epochs_completed', 'marks_built', 'deferred_epochs', 'epoch_in_progress',
+    'last_epoch_duration_ms', 'last_epoch_reclaimed_bytes', 'total_reclaimed_bytes',
+    'total_reclaimed_blocks', 'total_temporary_files_removed',
+    'total_orphan_segments_removed', 'total_segments_rewritten', 'total_segments_retired',
+)
+_MAINTENANCE_FOOTPRINT_FIELDS = {
+    'maintenance': ('rounds', 'failedRounds', 'foregroundDeferrals', 'noWorkRounds',
+                    'historyCompactions', 'retainedHistorySegments', 'materializedRows',
+                    'materializedBytes', 'searchDirtyConversations',
+                    'searchRebuiltConversations', 'searchFailedRounds',
+                    'searchPageBudgetExhaustions'),
+    'backgroundPacker': ('packedSegments', 'packedBytes', 'failedRounds',
+                         'discardedSegments', 'discardedBytes', 'retiredWals'),
+    'onlineGarbageCollector': _GC_FOOTPRINT_FIELDS,
+    'searchGarbageCollector': _GC_FOOTPRINT_FIELDS,
+}
+
+
+def _native_resource_budget_observation(engine, *, maintenance: dict | None = None) -> dict:
+    """Observe effective policy after timing; environment values are requests."""
+    observation = {
+        'available': False,
+        'scope': 'after all workloads, before shutdown; latest runtime only',
+        'requested_cache_environment': getattr(engine, '_cache_environment_requested', None),
+    }
+    try:
+        engine.prepare_workload()  # Renew an idle direct-wire session outside timing.
+        metrics = engine.execute('system.metrics', {}, False)
+
+        if maintenance is not None:
+            selected = {}
+            for group, fields in _MAINTENANCE_FOOTPRINT_FIELDS.items():
+                values = metrics.get(group) if isinstance(metrics, dict) else None
+                if isinstance(values, dict):
+                    selected[group] = {key: values[key] for key in fields
+                        if type(values.get(key)) in (int, bool) and values[key] >= 0}
+                    if not selected[group]:
+                        del selected[group]
+            maintenance.update({
+                'available': bool(selected), 'source': 'system.metrics',
+                'scope': 'latest runtime only, after footprint scan; cumulative counters are not reclaimable bytes',
+                'observed_at_unix_ms': int(time.time() * 1000),
+                'metrics': selected,
+                'reason': None if selected else 'no supported maintenance counters returned',
+            })
+        budget = metrics.get('resourceBudget') if isinstance(metrics, dict) else None
+        if not isinstance(budget, dict) or any(
+                type(budget.get(name)) is not int or budget[name] < 0
+                for name in ('blockCacheBytes', 'entityPageCacheBytes')):
+            raise BenchError('native metrics lack valid effective cache budgets')
+        observation.update(available=True, effective=budget)
+    except Exception as exc:  # Missing telemetry must not erase measured workloads.
+        observation['error'] = f'{type(exc).__name__}: {exc}'
+
+        if maintenance is not None and not maintenance['available']:
+            maintenance['error'] = observation['error']
+    return observation
+
+
+def _engine_resource_report(engine, workload_reports: dict | None = None) -> dict:
+    """Post-run local file accounting and OS-level process write volume.
+
+    ``data_size_bytes`` retains the legacy apparent path-byte sum under the
+    original driver root only (native authority WITHOUT its external search
+    projection; legacy project directory, NOT PostgreSQL server storage).
+    It is not allocated bytes, user payload bytes or a steady-state claim.
+    ``engine_write_bytes`` accumulates the existing process serving windows.
+    The additive footprint records scope, gaps, allocation support and evidence.
     """
     if isinstance(engine, TofuDbEngine):
         directory = engine._data_dir
@@ -2339,12 +2683,26 @@ def _engine_resource_report(engine) -> dict:
         pid = os.getpid()
     else:
         return {'error': 'unsupported engine type'}
-    report: dict = {}
-    if directory is not None and Path(directory).exists():
-        report['data_size_bytes'] = _directory_bytes(Path(directory))
-        from scripts.tofudb_bench import _mount_type
-        report['authority_directory'] = str(Path(directory).resolve())
+    footprint, original_size = _footprint_report(engine, directory, workload_reports)
+    report: dict = {
+        'footprint': footprint,
+        'data_size_bytes_complete': original_size['complete'],
+        'data_size_bytes_scope': 'legacy apparent path bytes under original driver root only; excludes external native projection',
+    }
+    if original_size['complete']:
+        report['data_size_bytes'] = original_size['bytes']
+        report['authority_directory'] = str(Path(directory).absolute())
+    else:
+        report['data_size_bytes_observed'] = original_size['bytes']
+    from scripts.tofudb_bench import _mount_type
+    for component in footprint['components'].values():
+        if component['complete'] and component['path'] is not None:
+            component['filesystem'] = _mount_type(Path(component['path']))
+
+    if original_size['complete']:
         report['filesystem'] = _mount_type(Path(directory))
+
+        report['volume_device'] = Path(directory).stat().st_dev
     # Fold completed serving windows once; add only the current live window.
     # Native report scope names in-process attribution and excluded daemon tails.
     accumulated = getattr(engine, '_write_bytes_accumulated', 0)
@@ -2361,7 +2719,79 @@ def _engine_resource_report(engine) -> dict:
             'harness-process upper bound; serving windows include embedded open, close, abandon and reopen; authority-init subprocess excluded'
             if engine._client_mode == 'embedded' else
             'daemon-process serving windows; init/startup and shutdown tail excluded')
+        # Take this last: the observation must not enter latency/write-volume
+        # windows or turn an ignored/clamped override into an effective value.
+        report['native_resource_budget'] = _native_resource_budget_observation(
+            engine, maintenance=footprint['evidence']['maintenance'])
     return report
+
+
+def _operation_runtime_evidence(name, engine):
+    """Observe launch/runtime policy outside every timed workload; never read a live store."""
+    if name == 'tofudb':
+        engine.prepare_workload()
+        metrics = engine.execute('system.metrics', {}, False)
+        profile = metrics.get('requestProfile', {})
+        return {'wal_durability': metrics.get('walDurability'),
+                'profiling': profile.get('enabled'),
+                'profile_sample_every': profile.get('sampleEvery', 0)}
+    if name == 'rawsqlite':
+        return {'synchronous': engine._conn.execute('PRAGMA synchronous').fetchone()[0],
+                'journal_mode': engine._conn.execute('PRAGMA journal_mode').fetchone()[0]}
+    if name == 'sqlite':
+        fastpath = engine._client.metrics().get('fastpath', {})
+        # FULL is enforced by the source-pinned adapter's writer factory, not
+        # a PRAGMA from an unrelated observer connection (which proves nothing).
+        return {'synchronous': 2, 'synchronous_evidence': 'source-pinned writer factory',
+                'fastpath_active': fastpath.get('active')}
+    return {}
+
+
+def _finish_operation_evidence(report, engines, before_sources, declared, before_artifacts, runtime_before):
+    from benchmarks.conversation_provenance import FORMAT, capture_sources, capture_artifact
+
+    after_sources = capture_sources()
+    meta = report['measurement']
+    meta['provenance'], meta['authority'], meta['runtime_policy'] = {}, {}, {}
+    for name, engine in engines.items():
+        embedded = getattr(engine, '_embedded_build_identity', None)
+        artifact = capture_artifact(engine._binary, embedded_build_identity=embedded) if name == 'tofudb' else None
+        meta['provenance'][name] = {
+            'format': FORMAT, 'sources_before': before_sources, 'sources_after': after_sources,
+            'declared_artifact': declared.get(name), 'artifact_before': before_artifacts.get(name),
+            'artifact_after': artifact,
+        }
+        if name == 'tofudb':
+            build = engine._build_identity
+            meta['native_binary_sha256'] = before_artifacts[name]['binary_sha256']
+
+            meta['native_client'] = engine._client_mode
+            meta['authority'][name] = {
+                'backend': name, 'build_identity': build,
+                'checkout_source_sha256': before_sources['native_source_sha256'],
+                'source_matches_checkout': build.get('source_sha256') == before_sources['native_source_sha256'],
+                'client_mode': engine._client_mode,
+            }
+            if embedded is not None:
+                meta['authority'][name].update(embedded_build_identity=embedded,
+                    shared_library_sha256=before_artifacts[name]['shared_library_sha256'])
+        after_runtime = _operation_runtime_evidence(name, engine)
+        meta['runtime_policy'][name] = {'before': runtime_before[name], 'after': after_runtime}
+    native = meta['runtime_policy'].get('tofudb', {})
+    sqlite = meta['runtime_policy'].get('sqlite', {})
+    raw = meta['runtime_policy'].get('rawsqlite', {})
+    unprofiled = bool(native) and all(row.get('profiling') is False and row.get('profile_sample_every') == 0
+                                    for row in native.values())
+    meta['profiling_requested'] = False if unprofiled else None
+    meta['equivalent_durability'] = (
+        bool(native and sqlite and raw) and
+        all(row.get('wal_durability') == 'strict' for row in native.values()) and
+        all(row.get('synchronous') == 2 and row.get('fastpath_active') is False for row in sqlite.values()) and
+        all(row.get('synchronous') == 2 and str(row.get('journal_mode')).lower() == 'wal' for row in raw.values()))
+    report['env'] = {'native': {'profile': not unprofiled},
+                     'sqlite_synchronous': sqlite.get('before', {}).get('synchronous'),
+                     'sqlite_runtime': {'version': sqlite3.sqlite_version, 'python': sys.version.split()[0],
+                                        'policy': sqlite}}
 
 
 def _measurement_metadata(engines: dict, args=None) -> dict:
@@ -2425,6 +2855,10 @@ def _measurement_metadata(engines: dict, args=None) -> dict:
     return metadata
 
 
+def _format_latency(milliseconds: float) -> str:
+    return f'{milliseconds * 1000:.3f}us' if milliseconds < 1 else f'{milliseconds:.3f}ms'
+
+
 def _print_report(report: dict) -> None:
     engines = report['engines']
     workloads = report['workloads']
@@ -2440,9 +2874,9 @@ def _print_report(report: dict) -> None:
                 row.append(f"ERROR: {stats['error'][:40]}")
             else:
                 row.append(
-                    f"p50 {stats['p50_ms']:.2f}ms "
-                    f"p95 {stats['p95_ms']:.2f}ms "
-                    f"p99 {stats['p99_ms']:.2f}ms "
+                    f"p50 {_format_latency(stats['p50_ms'])} "
+                    f"p95 {_format_latency(stats['p95_ms'])} "
+                    f"p99 {_format_latency(stats['p99_ms'])} "
                     f"{stats['ops_per_sec']:.0f} op/s")
         rows.append(row)
     widths = [max(len(r[i]) for r in [header] + rows)
@@ -2516,8 +2950,7 @@ def _print_report(report: dict) -> None:
             for family, reason in unsupported.items():
                 print(f'  {name} [{engine_name}] cold-read family {family} '
                       f'unsupported: {reason}')
-    # Physical footprint: durable size plus OS write volume, the space/write
-    # amplification evidence no latency table can show.
+    # Post-run local footprint, not durable live bytes or a steady-state claim.
     resources = report.get('resources') or {}
     for engine_name in engines:
         entry = resources.get(engine_name) or {}
@@ -2529,7 +2962,16 @@ def _print_report(report: dict) -> None:
         parts = []
         if 'data_size_bytes' in entry:
             parts.append(
-                f"data size {entry['data_size_bytes'] / 2**20:.1f} MiB")
+                f"legacy apparent size {entry['data_size_bytes'] / 2**20:.1f} MiB")
+        for name, component in (entry.get('footprint') or {}).get('components', {}).items():
+            if component['complete']:
+                allocated = component['allocated_bytes']
+                allocation = (f'{allocated / 2**20:.1f} MiB allocated'
+                              if allocated is not None else 'allocation unavailable')
+                parts.append(f"{name} {component['logical_bytes'] / 2**20:.1f} MiB logical, "
+                             f"{allocation}, {component['file_count']} files")
+            else:
+                parts.append(f"{name} {component['status']}")
         if 'engine_write_bytes' in entry:
             parts.append(
                 f"process writes {entry['engine_write_bytes'] / 2**20:.1f} MiB")
@@ -2582,7 +3024,7 @@ def _reset_postgres_database(dsn: str) -> None:
                 sql.Identifier(dbname)))
         connection.execute(
             sql.SQL('CREATE DATABASE {}').format(sql.Identifier(dbname)))
-    from lib.storage_sidecar.migrate import migrate_external_postgres
+    from lib.storage_authority_sql.migrate import migrate_external_postgres
     migrate_external_postgres(dsn)
 
 
@@ -2593,6 +3035,9 @@ def main() -> int:
     parser.add_argument('--large-turn-writes', type=int)
     parser.add_argument('--large-turn-history', type=int, default=0)
     parser.add_argument('--observe-resources', action='store_true')
+
+    parser.add_argument('--capture-provenance', action='store_true',
+                        help='capture complete before/after source/artifact witnesses outside workload clocks for offline charter assessment')
     parser.add_argument('--binary', type=Path, help='explicit native executable; pinned for the whole run')
     parser.add_argument('--authority-dir-parent', type=Path, default=None,
                         help='parent directory for every disposable authority; point it at a network/FUSE mount to benchmark the degraded-filesystem case (the directory must already exist)')
@@ -2655,6 +3100,12 @@ def main() -> int:
                          '--postgres-dsn')
         _reset_postgres_database(args.postgres_dsn)
 
+    before_sources = None
+    declared, before_artifacts, runtime_before = {}, {}, {}
+    if args.capture_provenance:
+        from benchmarks.conversation_provenance import capture_sources, capture_declared_artifact, capture_artifact
+        before_sources = capture_sources()
+
     engines: dict[str, object] = {}
     skipped: dict[str, str] = {}
     for name in selected:
@@ -2674,14 +3125,28 @@ def main() -> int:
             else:
                 skipped[name] = 'unknown engine'
                 continue
+            if args.capture_provenance and name == 'tofudb':
+                declared[name] = capture_declared_artifact(engine._binary, embedded=args.native_client == 'embedded')
             engine.start()
         except (BenchError, Exception) as exc:  # noqa: BLE001
             skipped[name] = f'{type(exc).__name__}: {exc}'
             continue
         engines[name] = engine
 
+
+        if args.capture_provenance:
+            try:
+                before_artifacts[name] = capture_artifact(engine._binary,
+                    embedded_build_identity=getattr(engine, '_embedded_build_identity', None)) if name == 'tofudb' else None
+                runtime_before[name] = _operation_runtime_evidence(name, engine)
+            except Exception as exc:
+                # Preserve the workload error/report/teardown path; missing
+                # provenance cannot later qualify as current performance.
+                skipped[name + ':provenance'] = f'{type(exc).__name__}: {exc}'
     report = {
         'scale': args.scale,
+
+        'schema': 'tofu.perf_compare.v2', 'env': {},
         'large_turn_profile': {key: value for key, value in scale.items() if key.startswith('large_turn_')},
         'cpu_affinity': sorted(os.sched_getaffinity(0)) if hasattr(os, 'sched_getaffinity') else None,
         'engines': list(engines),
@@ -2690,6 +3155,12 @@ def main() -> int:
     }
     try:
         report['measurement'] = _measurement_metadata(engines, args)
+
+        import platform
+        report['measurement'].update(
+            collection_id=_cid(), work_spec=scale, workload_order=[row[0] for row in workloads],
+            host_identity={'id': hashlib.sha256(platform.node().encode()).hexdigest(),
+                           'platform': platform.platform(), 'affinity': report['cpu_affinity']})
         for entry in workloads:
             name, setup, operation, iterations = entry[:4]
             runner = entry[4] if len(entry) > 4 else measure_workload
@@ -2721,10 +3192,17 @@ def main() -> int:
         for engine_name, engine in engines.items():
             try:
                 report['resources'][engine_name] = _engine_resource_report(
-                    engine)
+                    engine, {name: per_engine[engine_name]
+                             for name, per_engine in report['workloads'].items()})
             except Exception as exc:  # noqa: BLE001
                 report['resources'][engine_name] = {
                     'error': f'{type(exc).__name__}: {exc}'}
+        if args.capture_provenance:
+            try:
+                _finish_operation_evidence(report, engines, before_sources, declared, before_artifacts, runtime_before)
+            except Exception as exc:
+                report['measurement']['provenance_error'] = f'{type(exc).__name__}: {exc}'
+                skipped['provenance'] = report['measurement']['provenance_error']
     finally:
         for engine in engines.values():
             engine.stop()

@@ -21,7 +21,7 @@ logger = get_logger(__name__)
 
 def http_get(*args, **kwargs):
     """Request-loaded HTTP seam retained for title-resolution tests."""
-    from lib.http_client import http_get as _http_get
+    from lib.http_transport.client import http_get as _http_get
 
     return _http_get(*args, **kwargs)
 
@@ -130,7 +130,7 @@ def fetch_eprint(url_or_id, destination, *, max_bytes: int = _ARXIV_EPRINT_MAX_B
     when the paper has no downloadable source or the fetch fails; byte and
     content-type ceilings fail as ``archive_limit``/``arxiv_source_unavailable``.
     """
-    from lib.http_client import http_stream
+    from lib.http_transport.client import http_stream
     from lib.paper.builds.errors import BuildError
 
     arxiv_id = _extract_arxiv_id(url_or_id)
@@ -391,7 +391,7 @@ def search_arxiv_explained(query, max_results=10):
     Raises:
         ArxivQuerySyntaxError: the query contains built arXiv field syntax.
     """
-    from lib.search_runtime import ensure_search_runtime
+    from lib.search.search_runtime import ensure_search_runtime
     ensure_search_runtime()
     from tofu_search.search.vertical import arxiv as ts_arxiv
 

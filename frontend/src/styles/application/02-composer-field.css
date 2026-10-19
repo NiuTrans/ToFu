@@ -5,7 +5,8 @@
   flex-direction: column;
   background: var(--bg-secondary);
   border: 1px solid var(--border);
-  border-radius: var(--radius);
+  border-radius: var(--conversation-process-radius);
+  box-shadow: 0 2px 12px color-mix(in srgb, var(--text-primary) 6%, transparent);
   margin-top: var(--space-3);
   transition: border-color var(--motion-base) ease, box-shadow var(--motion-base) ease;
   isolation: isolate;
@@ -28,7 +29,7 @@
   padding: var(--space-3) var(--space-4);
   resize: none;
   max-height: 200px;
-  min-height: var(--control-h-lg);
+  min-height: var(--space-16);
 }
 .input-area .input-box textarea::placeholder { color: var(--text-secondary); }
 .send-btn {
@@ -51,6 +52,23 @@
 .send-btn:active:not(:disabled) { opacity: .85; }
 .send-btn:disabled { opacity: .45; cursor: not-allowed; box-shadow: none; background: var(--border); }
 .send-btn.stop-btn { background: var(--error-text); box-shadow: none; }
+.send-btn.stop-btn:hover:not(:disabled) { background: color-mix(in srgb, var(--error-text) 85%, var(--text-primary)); }
 .send-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .composer-stop-btn[hidden] { display: none; }
 .input-actions-right.composer-dual-actions > .send-btn { margin-left: 0; }
+
+/* Translation receipts remain in flow, never in a conditional zero-width rail. */
+.composer-translation-status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-1) var(--space-2);
+  padding: var(--space-1) var(--space-4) var(--space-2);
+  color: var(--text-secondary);
+  font-size: var(--font-size-xs);
+  line-height: var(--leading-body);
+  overflow-wrap: anywhere;
+}
+.composer-translation-phase { color: var(--accent); }
+.composer-translation-status[data-state="failed"] .composer-translation-phase { color: var(--error-text); }
+.composer-translation-detail { min-width: 0; font-variant-numeric: tabular-nums; }

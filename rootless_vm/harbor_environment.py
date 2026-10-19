@@ -667,6 +667,7 @@ class RootlessQemuEnvironment(BaseEnvironment):
                 egress_max_bytes=self._egress_max_bytes,
                 egress_global_concurrency=self._egress_global_concurrency,
                 virtual_time_shift=self._virtual_time_shift,
+                disk_prepare_timeout_sec=self._boot_timeout_sec,
             )
         )
         self._session = session

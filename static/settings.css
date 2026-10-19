@@ -4262,66 +4262,175 @@ summary.stg-provider-head-v2:focus-visible{outline:3px solid var(--s-gold,#c9993
     outline-offset: 2px;
   }
 }
-/* Settings → 数据库 tab (panel: static/settings_panels/database.html).
-   Token-only feature styles: cards, engine options, benchmark bars and
-   progress, storage-path rows. Behavior controls (buttons, toggles,
-   fields) reuse the shared kit classes; these rules cover only the
-   novel visuals of this panel. */
+/* Database Settings: source markup is settings-panels/database.html.
+   Layout/evidence only; interactive controls remain owned by the UI kit.
+   One rule per role, theme tokens throughout, native disclosure/focus behavior. */
+
+#settingsTab_database {
+
+  --db-secondary: var(--s-ink-soft);
+  color: var(--s-ink);
+  font-size: var(--font-size-md);
+  line-height: var(--leading-body);
+}
+
+#settingsTab_database [hidden] {
+  display: none !important;
+}
+
+#settingsTab_database .db-page-heading {
+  margin-bottom: var(--space-5);
+}
+
+
+#settingsTab_database .settings-section-title {
+  margin: 0;
+  color: var(--s-ink);
+  font-size: var(--font-size-xl);
+  font-weight: var(--weight-semibold);
+  line-height: var(--leading-title);
+  letter-spacing: normal;
+}
+
+#settingsTab_database .db-save-note {
+  margin: var(--space-2) 0 0;
+  padding: 0;
+  color: var(--s-ink-soft);
+  font-size: var(--font-size-sm);
+  font-weight: var(--weight-regular);
+  line-height: var(--leading-body);
+}
 
 #settingsTab_database .db-card {
+  min-width: 0;
+  margin-bottom: var(--space-4);
+  padding: var(--space-4);
   border: var(--s-border);
   border-radius: var(--s-radius);
   background: var(--s-white);
-  box-shadow: var(--s-shadow-sm);
-  padding: var(--space-3) var(--space-4);
-  margin-bottom: var(--space-4);
 }
 
 #settingsTab_database .db-card-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: var(--space-2);
-  margin-bottom: var(--space-3);
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  margin-bottom: var(--space-4);
+  min-width: 0;
 }
 
 #settingsTab_database .db-card-title {
+  color: var(--s-ink);
   font-size: var(--font-size-md);
   font-weight: var(--weight-semibold);
-  color: var(--text-primary);
+  line-height: var(--leading-title);
 }
 
-#settingsTab_database .db-card-meta {
-  font-size: var(--font-size-xs);
-  color: var(--text-muted);
+#settingsTab_database .db-engine-identity {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+}
+
+#settingsTab_database #dbEngineName {
+  font-size: var(--font-size-lg);
+  font-weight: var(--weight-semibold);
+  line-height: var(--leading-title);
 }
 
 #settingsTab_database .db-state-pill {
-  font-size: var(--font-size-xs);
-  font-weight: var(--weight-medium);
   padding: var(--space-1) var(--space-2);
-  border-radius: 999px;
+  border: 1px solid var(--warning-border);
+  border-radius: var(--radius-pill);
   background: var(--warning-bg);
   color: var(--warning-text);
-  border: 1px solid var(--warning-border);
+  font-size: var(--font-size-sm);
+  font-weight: var(--weight-medium);
+  line-height: var(--leading-tight);
+  overflow-wrap: anywhere;
+}
+
+#settingsTab_database .db-state-pill:empty {
+  display: none;
 }
 
 #settingsTab_database .db-state-pill--ok {
+  border-color: var(--success-border);
   background: var(--success-bg);
   color: var(--success-text);
-  border-color: var(--success-border);
 }
 
 #settingsTab_database .db-state-pill--bad {
+  border-color: var(--error-border);
   background: var(--error-bg);
   color: var(--error-text);
-  border-color: var(--error-border);
 }
 
-/* ── Engine options ── */
+/* Native summaries have one full-row target and a trailing disclosure mark. */
+#settingsTab_database details {
+  min-width: 0;
+}
+
+#settingsTab_database summary {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-height: var(--control-h-md);
+  min-width: 0;
+  list-style: none;
+  cursor: pointer;
+  color: var(--db-secondary);
+  font-size: var(--font-size-sm);
+  font-weight: var(--weight-medium);
+}
+
+#settingsTab_database summary::-webkit-details-marker {
+  display: none;
+}
+
+#settingsTab_database summary::after {
+  content: '';
+  justify-self: end;
+  flex: 0 0 auto;
+  width: var(--space-2);
+  height: var(--space-2);
+  margin-inline-start: auto;
+  border-inline-end: 1px solid currentColor;
+  border-block-end: 1px solid currentColor;
+  transform: rotate(45deg);
+  transition: transform var(--motion-fast) var(--ease-standard);
+}
+
+#settingsTab_database details[open] > summary::after {
+  transform: rotate(225deg);
+}
+
+#settingsTab_database summary:hover {
+  color: var(--s-ink);
+}
+
+#settingsTab_database summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: var(--space-1);
+  border-radius: var(--radius-sm);
+}
+
+#settingsTab_database .db-disclosure {
+  border-top: 1px solid var(--s-line);
+  padding-top: var(--space-2);
+}
+
+#settingsTab_database .db-disclosure-body {
+  min-width: 0;
+  padding-top: var(--space-4);
+}
+
+/* Engine choices use shared button factories; feature classes own layout. */
 #settingsTab_database .db-engine-options {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: var(--space-3);
 }
 
@@ -4329,74 +4438,58 @@ summary.stg-provider-head-v2:focus-visible{outline:3px solid var(--s-gold,#c9993
   display: flex;
   flex-direction: column;
   align-items: flex-start;
-  gap: var(--space-1);
+  gap: var(--space-2);
+  height: auto;
+  padding: var(--space-4);
   text-align: left;
-  padding: var(--space-3);
-  border: var(--s-border);
-  border-radius: var(--s-radius);
-  background: var(--bg-primary);
-  cursor: pointer;
-  transition: border-color var(--motion-fast) var(--ease-standard),
-    box-shadow var(--motion-fast) var(--ease-standard);
+  white-space: normal;
 }
 
-#settingsTab_database .db-engine-option:hover {
-  border-color: var(--s-line-strong);
+#settingsTab_database .db-engine-option--current,
+#settingsTab_database .db-engine-option--selected {
+  border-color: var(--accent);
 }
 
 #settingsTab_database .db-engine-option--current {
-  border-color: var(--accent);
   box-shadow: 0 0 0 1px var(--accent);
-}
-
-#settingsTab_database .db-engine-option--selected:not(.db-engine-option--current) {
-  border-color: var(--s-gold);
-  box-shadow: 0 0 0 1px var(--s-gold);
 }
 
 #settingsTab_database .db-engine-option--unavailable {
   opacity: 0.55;
 }
 
-#settingsTab_database .db-engine-name {
-  font-size: var(--font-size-md);
-  font-weight: var(--weight-semibold);
-  color: var(--text-primary);
+#settingsTab_database .db-engine-option > span {
+  display: block;
+  color: var(--db-secondary);
+  font-size: var(--font-size-sm);
+  font-weight: var(--weight-regular);
+  white-space: normal;
+}
+
+#settingsTab_database .db-switch-row,
+#settingsTab_database .db-backup-actions {
   display: flex;
   align-items: center;
-  gap: var(--space-2);
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  margin-top: var(--space-4);
 }
 
-#settingsTab_database .db-rec-badge {
-  font-style: normal;
-  font-size: var(--font-size-xs);
-  font-weight: var(--weight-medium);
-  color: var(--text-on-accent);
-  background: var(--accent);
-  border-radius: 999px;
-  padding: var(--space-1) var(--space-2);
+#settingsTab_database .db-migration {
+  margin-top: var(--space-4);
 }
 
-#settingsTab_database .db-engine-sub {
-  font-size: var(--font-size-xs);
-  color: var(--text-secondary);
-}
-
-#settingsTab_database .db-engine-state {
-  font-size: var(--font-size-xs);
-  color: var(--text-muted);
-  min-height: 1em;
-}
-
-#settingsTab_database .db-engine-meta {
+/* Overview and exact launch evidence are separate from editable drafts. */
+#settingsTab_database .db-path-current {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-  gap: var(--space-2) var(--space-4);
-  margin-top: var(--space-3);
-  padding-top: var(--space-3);
-  border-top: var(--s-border-sm);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-4);
+  margin-bottom: var(--space-3);
+  padding: var(--space-3) 0;
+  border-top: 1px solid var(--s-line);
 }
 
+#settingsTab_database .db-overview-item,
 #settingsTab_database .db-meta-item {
   display: flex;
   flex-direction: column;
@@ -4404,161 +4497,215 @@ summary.stg-provider-head-v2:focus-visible{outline:3px solid var(--s-gold,#c9993
   min-width: 0;
 }
 
-#settingsTab_database .db-meta-label {
-  font-size: var(--font-size-xs);
-  color: var(--text-muted);
-}
-
-#settingsTab_database .db-meta-value {
+#settingsTab_database .db-meta-label,
+#settingsTab_database .db-index-detail > .settings-field-hint {
+  color: var(--db-secondary);
   font-size: var(--font-size-sm);
-  color: var(--text-primary);
-  font-family: var(--font-mono);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  font-weight: var(--weight-regular);
+  line-height: var(--leading-body);
 }
 
-#settingsTab_database .db-switch-row {
-  display: flex;
-  align-items: center;
-  gap: var(--space-3);
-  margin-top: var(--space-3);
-}
-
-/* ── Migration ── */
-#settingsTab_database .db-migration {
-  margin-top: var(--space-3);
-}
-
-/* ── Paths ── */
-
-#settingsTab_database [hidden] {
-  display: none !important;
-}
-
-#settingsTab_database .db-index-heading {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  margin-bottom: var(--space-1);
-}
-
-#settingsTab_database .db-index-required {
-  font-size: var(--font-size-xs);
+#settingsTab_database .db-overview-value {
+  color: var(--s-ink);
+  font-size: var(--font-size-lg);
   font-weight: var(--weight-medium);
-  color: var(--success-text);
-  background: var(--success-bg);
-  border: var(--s-border-sm);
-  border-radius: var(--radius-sm);
-  padding: var(--space-1) var(--space-2);
-}
-
-#settingsTab_database .db-index-status {
-  display: grid;
-  gap: var(--space-2);
-  margin-top: var(--space-3);
-}
-
-#settingsTab_database .db-index-detail {
-  min-width: 0;
-}
-
-#settingsTab_database .db-index-detail--pending .settings-field-hint {
-  color: var(--warning-text);
-}
-
-#settingsTab_database .db-index-actions {
-  margin-top: var(--space-2);
-}
-
-#settingsTab_database .db-path-error {
-  color: var(--error-text);
-  font-size: var(--font-size-sm);
-  margin-top: var(--space-3);
+  font-variant-numeric: tabular-nums;
   overflow-wrap: anywhere;
 }
 
-#settingsTab_database .db-path-current {
-  padding: var(--space-2) var(--space-3);
-  border: var(--s-border-sm);
-  border-radius: var(--radius-sm);
-  background: var(--bg-primary);
-  margin-bottom: var(--space-4);
+#settingsTab_database .db-engine-meta,
+#settingsTab_database .db-index-status {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-4);
 }
 
+#settingsTab_database .db-engine-meta > .db-index-detail {
+  grid-column: 1 / -1;
+}
+
+#settingsTab_database .db-index-detail {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: var(--space-1) var(--space-3);
+  min-width: 0;
+}
+
+#settingsTab_database .db-index-detail > .settings-field-hint,
+#settingsTab_database .db-index-detail > .db-path-value {
+  grid-column: 1;
+}
+
+#settingsTab_database .db-index-detail > button {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  align-self: center;
+}
+
+#settingsTab_database .db-meta-value,
 #settingsTab_database .db-path-value {
+  min-width: 0;
+  color: var(--s-ink);
   font-family: var(--font-mono);
   font-size: var(--font-size-sm);
-  color: var(--text-primary);
+  font-weight: var(--weight-regular);
+  line-height: var(--leading-body);
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+#settingsTab_database .db-index-detail--pending > .settings-field-hint {
+  color: var(--warning-text);
+}
+
+/* Flat settings rows share one divider rhythm, rather than nested cards. */
+#settingsTab_database .db-config-list {
+  display: grid;
+  gap: 0;
+  margin-top: var(--space-3);
+}
+
+#settingsTab_database .db-subgroup {
+  min-width: 0;
+  border-top: 1px solid var(--s-line);
+}
+
+#settingsTab_database .db-config-summary {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, auto) var(--space-2);
+  gap: var(--space-3);
+  padding: var(--space-4) 0;
+}
+
+#settingsTab_database .db-config-heading {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+#settingsTab_database .db-index-required {
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-sm);
+  background: var(--bg-tertiary);
+  color: var(--db-secondary);
+  font-size: var(--font-size-xs);
+  font-weight: var(--weight-medium);
+  line-height: var(--leading-tight);
+}
+
+#settingsTab_database .db-config-status {
+  max-width: 28ch;
+  min-width: 0;
+  color: var(--db-secondary);
+  font-size: var(--font-size-sm);
+  font-weight: var(--weight-regular);
+  line-height: var(--leading-title);
+  overflow-wrap: anywhere;
+}
+
+#settingsTab_database #dbBackupSummary {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-/* Compact toggle variant: same var-driven geometry as .stg-toggle, scaled
-   to the kit's compact size (matches .stg-dv-toggle / .stg-key-toggle) so the
-   database panel's switches read as peers of the rest of settings instead of
-   the oversized default capsule. */
-#settingsTab_database .db-toggle-compact {
-  --stg-toggle-width: 36px;
-  --stg-toggle-height: 21px;
-  --stg-toggle-thumb-size: 15px;
-  --stg-toggle-thumb-gap: 3px;
+#settingsTab_database .db-subgroup .db-disclosure-body {
+  margin: 0;
+  padding: 0 0 var(--space-4);
 }
 
-/* A subgroup pairs a toggle row with the body it reveals. The shared
-   .settings-toggle-row ships no vertical rhythm of its own (it relies on the
-   surrounding page), which collapsed the path box / accelerated-path /
-   dual-path-backup blocks together. The subgroup owns a consistent gap so the
-   three blocks are visually separated, and the revealed body is inset and
-   attached to its toggle. */
-#settingsTab_database .db-subgroup + .db-subgroup {
+#settingsTab_database .db-toggle-row {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-4);
   margin-top: var(--space-4);
 }
 
+#settingsTab_database .db-toggle-row .settings-toggle-desc,
 #settingsTab_database .db-toggle-text {
+  flex: 1;
   min-width: 0;
 }
 
-#settingsTab_database .db-subgroup-body {
-  margin: var(--space-3) 0 0 var(--space-2);
-  padding: var(--space-3);
-  border: var(--s-border-sm);
-  border-radius: var(--radius-sm);
-  background: var(--bg-primary);
+#settingsTab_database .db-toggle-row > :last-child {
+  flex-shrink: 0;
 }
 
-/* Candidate path cards: one-click, probe-backed options rendered as a
-   vertical list so the whole row is the click target. */
+#settingsTab_database .settings-toggle-desc {
+  color: var(--db-secondary);
+  font-size: var(--font-size-sm);
+  font-weight: var(--weight-regular);
+  line-height: var(--leading-body);
+  overflow-wrap: anywhere;
+}
+
+#settingsTab_database .db-subgroup-body {
+  min-width: 0;
+  margin-top: var(--space-3);
+}
+
+#settingsTab_database .db-subgroup-body .settings-field-hint {
+  display: block;
+  margin-top: var(--space-2);
+}
+
+#settingsTab_database .db-projection-controls {
+  display: flex;
+  align-items: flex-end;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-top: var(--space-4);
+}
+
+#settingsTab_database .db-projection-controls > .ui-field {
+  flex: 1 1 100%;
+  min-width: 0;
+}
+
+#settingsTab_database .db-projection-controls > button {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+#settingsTab_database .db-index-actions {
+  margin-top: var(--space-3);
+}
+
+#settingsTab_database .db-lock-note {
+  margin: 0 var(--space-4) var(--space-4);
+  padding: var(--space-3);
+  border-radius: var(--radius-sm);
+  background: var(--warning-bg);
+  color: var(--warning-text);
+  font-size: var(--font-size-sm);
+  font-weight: var(--weight-regular);
+  overflow-wrap: anywhere;
+}
+
+/* Probe-backed candidates remain one native shared-button target each. */
 #settingsTab_database .db-candidates {
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
 }
 
+#settingsTab_database #dbSearchProjectionCandidates {
+  margin-top: var(--space-4);
+}
+
 #settingsTab_database .db-candidate {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: var(--space-3);
   width: 100%;
   height: auto;
-  white-space: normal;
+  padding: var(--space-3);
   text-align: left;
-  padding: var(--space-2) var(--space-3);
-  border: var(--s-border);
-  border-radius: var(--radius-sm);
-  background: var(--s-white);
-  cursor: pointer;
-  transition: border-color var(--motion-fast) var(--ease-standard),
-    box-shadow var(--motion-fast) var(--ease-standard);
-}
-
-#settingsTab_database .db-candidate:hover:not(:disabled) {
-  border-color: var(--s-line-strong);
-}
-
-#settingsTab_database .db-candidate:disabled {
-  cursor: default;
+  white-space: normal;
 }
 
 #settingsTab_database .db-candidate--selected {
@@ -4570,218 +4717,99 @@ summary.stg-provider-head-v2:focus-visible{outline:3px solid var(--s-gold,#c9993
   display: flex;
   flex-direction: column;
   gap: var(--space-1);
+  flex: 1 1 160px;
   min-width: 0;
-  flex: 1 1 auto;
 }
 
 #settingsTab_database .db-candidate-path {
   font-family: var(--font-mono);
   font-size: var(--font-size-sm);
-  color: var(--text-primary);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 
-#settingsTab_database .db-candidate-meta {
-  font-size: var(--font-size-xs);
-  color: var(--text-muted);
+#settingsTab_database .db-candidate-meta,
+#settingsTab_database .db-candidates-empty {
+  color: var(--db-secondary);
+  font-size: var(--font-size-sm);
+  font-weight: var(--weight-regular);
+  overflow-wrap: anywhere;
 }
 
 #settingsTab_database .db-candidate-badge {
   flex-shrink: 0;
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-sm);
+  background: var(--info-bg);
+  color: var(--info-text);
   font-size: var(--font-size-xs);
   font-weight: var(--weight-medium);
-  color: var(--text-on-accent);
-  background: var(--accent);
-  border-radius: 999px;
-  padding: var(--space-1) var(--space-2);
 }
 
-#settingsTab_database .db-candidates-empty {
-  padding: var(--space-2) 0;
-  font-size: var(--font-size-sm);
-  color: var(--text-muted);
-}
-
-#settingsTab_database .db-custom-row {
+#settingsTab_database .db-path-footer {
   display: flex;
   align-items: center;
-  gap: var(--space-2);
-  margin-top: var(--space-3);
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  margin-top: var(--space-4);
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--s-line);
 }
 
-#settingsTab_database .db-custom-row > button {
-  flex-shrink: 0;
-  white-space: nowrap;
-}
-
-#settingsTab_database .db-custom-input {
-  flex: 1 1 auto;
-  min-width: 0;
-  font-family: var(--font-mono);
-  font-size: var(--font-size-sm);
-}
-
-#settingsTab_database .db-subgroup-body .settings-field-hint {
-  display: block;
-  margin-top: var(--space-2);
-}
-
-#settingsTab_database .db-backup-actions {
-  margin-top: var(--space-3);
-}
-
-#settingsTab_database .db-icon-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: var(--control-h-sm);
-  height: var(--control-h-sm);
-  border: var(--s-border);
-  border-radius: var(--radius-sm);
-  background: var(--s-white);
-  color: var(--text-secondary);
-  cursor: pointer;
-}
-
-#settingsTab_database .db-icon-btn:hover {
-  color: var(--text-primary);
-  border-color: var(--s-line-strong);
-}
-
-#settingsTab_database .db-icon-btn[disabled] {
-  opacity: 0.5;
-  cursor: default;
-}
-
-#settingsTab_database .db-dialog-check {
-  display: flex;
-  align-items: center;
-  gap: var(--space-1);
-  margin-top: var(--space-2);
-  font-size: var(--font-size-sm);
-  color: var(--text-primary);
-}
-
-/* Verified launch witnesses are distinct from editable next-launch settings. */
 #settingsTab_database .db-status-message {
   padding: var(--space-3);
-  margin-bottom: var(--space-3);
-  border: var(--s-border-sm);
+  margin-bottom: var(--space-4);
+  border: 1px solid var(--s-line);
   border-radius: var(--radius-sm);
-  background: var(--bg-primary);
-  color: var(--text-secondary);
+  background: var(--s-white);
+  color: var(--db-secondary);
   font-size: var(--font-size-sm);
 }
 
-#settingsTab_database #dbFastPathStatus {
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr));
+#settingsTab_database .db-path-error {
+  margin-top: var(--space-3);
   padding: var(--space-3);
-  border: var(--s-border-sm);
+  border: 1px solid var(--error-border);
   border-radius: var(--radius-sm);
-  background: var(--bg-primary);
-}
-
-#settingsTab_database .db-index-detail .db-path-value {
-  white-space: normal;
+  background: var(--error-bg);
+  color: var(--error-text);
+  font-size: var(--font-size-sm);
   overflow-wrap: anywhere;
 }
 
-#settingsTab_database .db-projection-controls {
-  display: flex;
-  align-items: flex-end;
-  flex-wrap: wrap;
-  gap: var(--space-2);
-  margin-top: var(--space-3);
-}
+@media (max-width: 640px) {
+  #settingsTab_database .db-card {
+    padding: var(--space-4);
+  }
 
-#settingsTab_database .db-projection-controls > :first-child {
-  flex: 1 1 220px;
-  min-width: 0;
-}
+  #settingsTab_database .db-config-summary {
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: var(--space-2) var(--space-3);
+    padding: var(--space-3) 0;
+  }
 
-#settingsTab_database .db-projection-controls > button {
-  flex-shrink: 0;
-  white-space: nowrap;
-}
+  #settingsTab_database .db-config-heading {
+    grid-column: 1;
+    grid-row: 1;
+  }
 
-#settingsTab_database #dbSearchProjection {
-  margin: 0 0 var(--space-4);
-}
+  #settingsTab_database .db-config-summary::after {
+    grid-column: 2;
+    grid-row: 1;
+  }
 
-#settingsTab_database #dbSearchProjectionCandidates {
-  margin-top: var(--space-3);
-}
+  #settingsTab_database .db-config-status {
+    grid-column: 1;
+    grid-row: 2;
+  }
 
-/* Summaries stay compact; evidence and drafts live in native disclosures. */
+  #settingsTab_database .db-engine-options,
+  #settingsTab_database .db-index-status,
+  #settingsTab_database .db-engine-meta {
+    grid-template-columns: minmax(0, 1fr);
+  }
 
-#settingsTab_database .db-index-detail > button {
-  justify-self: start;
-}
-#settingsTab_database details {
-  margin-top: var(--space-2);
-  min-width: 0;
-}
-#settingsTab_database summary {
-  cursor: pointer;
-  color: var(--text-secondary);
-  font-size: var(--font-size-sm);
-  padding-block: var(--space-1);
-}
-#settingsTab_database summary:focus-visible {
-  outline: var(--s-border-md);
-  outline-offset: var(--space-1);
-}
-#settingsTab_database details[open] > summary {
-  margin-bottom: var(--space-2);
-}
-#settingsTab_database .db-card-head,
-#settingsTab_database .db-index-heading {
-  flex-wrap: wrap;
-  min-width: 0;
-}
-#settingsTab_database #dbFastPathStatus {
-  display: block;
-  padding: 0;
-  border: none;
-  background: none;
-}
-#settingsTab_database #dbSearchProjectionSummary,
-#settingsTab_database #dbBackupSummary,
-#settingsTab_database #dbFastPathStatus,
-#settingsTab_database #dbFastPathLockSummary,
-#settingsTab_database .db-path-value {
-  overflow-wrap: anywhere;
-  white-space: normal;
-  min-width: 0;
-  font-size: var(--font-size-sm);
-}
-#settingsTab_database #dbScanControls {
-  margin-top: var(--space-3);
-}
-#settingsTab_database .db-projection-controls > .ui-field {
-  flex: 1 1 auto;
-  min-width: 0;
-}
-
-#settingsTab_database #dbPathCurrent > .db-path-value,
-#settingsTab_database #dbFastPathStatus,
-#settingsTab_database #dbSearchProjectionSummary,
-#settingsTab_database #dbBackupSummary {
-  display: block;
-  max-width: 100%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-#settingsTab_database #dbSearchProjectionSummary,
-#settingsTab_database #dbBackupSummary {
-  flex: 1 1 100%;
-}
-#settingsTab_database .db-engine-option > span {
-  display: block;
-  white-space: normal;
 }
 /* Subscription login reuse; typed owner: settings/codex-shared-login.ts. */
 .codex-shared-login {

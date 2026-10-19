@@ -70,7 +70,7 @@ def bind(body, profile=PROFILE):
 
 def test_same_model_reactive_rebuild_keeps_explicit_profile_and_budget():
     from lib.tasks_pkg.llm_fallback import _call
-    from lib.llm_errors import PromptTooLongError
+    from lib.llm.llm_errors import PromptTooLongError
     body = source_body()
     before = deepcopy(body)
     rebuilt = _call._prepare_reactive_retry_body(
@@ -90,7 +90,7 @@ def test_same_model_reactive_rebuild_keeps_explicit_profile_and_budget():
 @pytest.mark.parametrize('changed_model', [False, True])
 def test_reactive_pending_or_changed_destination_cannot_inherit_compilation(changed_model):
     from lib.tasks_pkg.llm_fallback import _call
-    from lib.llm_errors import PromptTooLongError
+    from lib.llm.llm_errors import PromptTooLongError
     body = source_body()
     if not changed_model:
         body = build_body(body['model'], body['messages'],

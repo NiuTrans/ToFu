@@ -9,7 +9,7 @@ import time as _time
 from collections.abc import Mapping
 from typing import Any
 
-from lib.app_lifecycle import add_shutdown_handler, add_startup_handler
+from lib.app.app_lifecycle import add_shutdown_handler, add_startup_handler
 
 
 _ATTEMPT_DISPATCH_RECOVERY_INTERVAL_SECONDS = 2.0
@@ -18,7 +18,7 @@ _ATTEMPT_DISPATCH_RECOVERY_BATCH = 8
 
 
 def _create_debug_guard(loop: asyncio.AbstractEventLoop, *, logger, environ):
-    from lib.server_loop_debug import LoopDebugGuard
+    from lib.server.server_loop_debug import LoopDebugGuard
 
     return LoopDebugGuard(loop, logger=logger, environ=environ).start()
 
@@ -30,7 +30,7 @@ def _create_loop_runtime(
     logger,
     environ,
 ):
-    from lib.server_loop_runtime import ServingLoopRuntime
+    from lib.server.server_loop_runtime import ServingLoopRuntime
 
     return ServingLoopRuntime(
         loop, shutdown_requested, logger=logger, environ=environ).start()
@@ -49,7 +49,7 @@ def _create_watchdog(
     ready_event: Any,
     environ,
 ):
-    from lib.server_loop_watchdog import LoopWatchdog
+    from lib.server.server_loop_watchdog import LoopWatchdog
 
     return LoopWatchdog(
         loop,

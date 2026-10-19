@@ -1,4 +1,4 @@
-"""Native TeX process-tree resource budgets and retirement, without a cloud service."""
+"""Native TeX demand, explicit overrides and joined process-tree retirement."""
 from __future__ import annotations
 
 import os
@@ -22,13 +22,15 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def environment():
-    return {**os.environ, 'TOFU_PAPER_BUILD_COMPILE_MAX_MIB': '256'}
+    values = dict(os.environ)
+    values.pop('TOFU_PAPER_BUILD_COMPILE_MAX_MIB', None)
+    return values
 
 
 def command(tmp_path, script, **kwargs):
     return run_command([sys.executable, '-c', script], cwd=tmp_path,
-        environment=environment(), log=tmp_path / 'command.log', timeout=kwargs.pop('timeout', 8),
-        log_bytes=kwargs.pop('log_bytes', limit('log_bytes')), **kwargs)
+        environment=kwargs.pop('environment', environment()), log=tmp_path / 'command.log', timeout=kwargs.pop('timeout', 8),
+        log_bytes=kwargs.pop('log_bytes', None), **kwargs)
 
 
 def assert_retired(pid):
@@ -43,13 +45,13 @@ def test_command_observes_tree_usage_and_allows_artifacts_larger_than_its_log(tm
     usage = command(tmp_path, "from pathlib import Path; Path('artifact.pdf').write_bytes(b'x' * 2097152)")
     assert usage.returncode == 0
     assert 0 < usage.peak_memory_bytes <= 256 * MIB
-    assert 1 <= usage.peak_processes <= limit('compile_processes')
+    assert usage.peak_processes >= 1
     assert (tmp_path / 'artifact.pdf').stat().st_size == 2 * MIB
     assert not list(tmp_path.glob('.paper-command-*'))
 
 
 @pytest.mark.skipif(os.name != 'posix', reason='POSIX aggregate RSS and native allocation fixture')
-def test_command_native_address_limit_refuses_allocation_before_rss_growth(tmp_path):
+def test_explicit_native_address_limit_refuses_allocation_before_rss_growth(tmp_path):
     usage = command(tmp_path, """
 import mmap
 try:
@@ -58,47 +60,61 @@ except OSError:
     print('allocation refused')
 else:
     raise AssertionError('native address-space limit missing')
-""")
+""", environment={**environment(), 'TOFU_PAPER_BUILD_COMPILE_MAX_MIB': '256'})
     assert usage.returncode == 0
     assert (tmp_path / 'command.log').read_text().strip() == 'allocation refused'
     assert usage.peak_memory_bytes < 256 * MIB
 
 
-def test_command_aggregate_memory_includes_compiler_children(tmp_path):
-    child = "import time; data=[bytearray(b'x'*4194304) for _ in range(40)]; time.sleep(30)"
+def test_default_command_accepts_large_virtual_mapping(tmp_path):
+    usage = command(tmp_path, "import mmap; value=mmap.mmap(-1, 1024*1024*1024); print(len(value)); value.close()")
+    assert usage.returncode == 0
+    assert (tmp_path / 'command.log').read_text().strip() == '1073741824'
+
+
+@pytest.mark.parametrize('explicit_memory', [None, '256'])
+def test_command_observes_aggregate_memory_and_honors_explicit_override(tmp_path, explicit_memory):
+    child = "import time; data=[bytearray(b'x'*4194304) for _ in range(40)]; time.sleep(.7)"
     script = f"""
-import subprocess, sys, time
+import subprocess, sys
 from pathlib import Path
+children=[]
 for number in range(2):
     child = subprocess.Popen([sys.executable, '-c', {child!r}])
+    children.append(child)
     Path('child-' + str(number)).write_text(str(child.pid))
-time.sleep(30)
+assert all(child.wait() == 0 for child in children)
 """
-    usage = CommandUsage()
-    with pytest.raises(BuildError) as failure:
-        command(tmp_path, script, usage=usage)
-    assert failure.value.code == 'compile_limit'
+    if explicit_memory is None:
+        usage = command(tmp_path, script)
+        assert usage.returncode == 0
+    else:
+        usage = CommandUsage()
+        with pytest.raises(BuildError) as failure:
+            command(tmp_path, script, usage=usage, environment={
+                **environment(), 'TOFU_PAPER_BUILD_COMPILE_MAX_MIB': explicit_memory})
+        assert failure.value.code == 'compile_limit'
     assert usage.peak_memory_bytes > 256 * MIB
     for marker in tmp_path.glob('child-*'):
         assert_retired(int(marker.read_text()))
     assert not list(tmp_path.glob('.paper-command-*'))
 
 
-@pytest.mark.skipif(os.name != 'posix', reason='POSIX shell-free sleep process fixture')
-def test_command_process_count_is_bounded_independently_of_memory(tmp_path):
+@pytest.mark.skipif(os.name != 'posix', reason='POSIX shell-free child fixture')
+def test_command_accepts_more_than_sixteen_processes(tmp_path):
     script = """
-import subprocess, time
+import subprocess
 from pathlib import Path
+children=[]
 for number in range(20):
-    child = subprocess.Popen(['/bin/sleep', '30'])
+    child = subprocess.Popen(['/bin/sleep', '.7'])
+    children.append(child)
     Path('child-' + str(number)).write_text(str(child.pid))
-time.sleep(30)
+assert all(child.wait() == 0 for child in children)
 """
-    usage = CommandUsage()
-    with pytest.raises(BuildError) as failure:
-        command(tmp_path, script, usage=usage)
-    assert failure.value.code == 'compile_limit'
-    assert usage.peak_processes > limit('compile_processes')
+    usage = command(tmp_path, script)
+    assert usage.returncode == 0
+    assert usage.peak_processes > 16
     for marker in tmp_path.glob('child-*'):
         assert_retired(int(marker.read_text()))
 
@@ -193,16 +209,21 @@ run_command([sys.executable, '-c', 'import os, time; from pathlib import Path; P
                 pass
 
 
-def test_compile_budget_cannot_be_disabled_or_exceed_its_contract_ceiling():
-    assert compile_memory_bytes({'TOFU_PAPER_BUILD_COMPILE_MAX_MIB': '999999'}) == limit('compile_memory_bytes')
-    assert compile_memory_bytes({'TOFU_PAPER_BUILD_COMPILE_MAX_MIB': '1'}) == 256 * MIB
+def test_compile_memory_override_is_explicit_and_unclamped():
+    assert compile_memory_bytes({}) == 0
+    assert compile_memory_bytes({'TOFU_PAPER_BUILD_COMPILE_MAX_MIB': '0'}) == 0
+    assert compile_memory_bytes({'TOFU_PAPER_BUILD_COMPILE_MAX_MIB': '999999'}) == 999999 * MIB
+    assert compile_memory_bytes({'TOFU_PAPER_BUILD_COMPILE_MAX_MIB': '1'}) == MIB
+    for value in ('-1', 'bad'):
+        with pytest.raises(ValueError, match='nonnegative integer'):
+            compile_memory_bytes({'TOFU_PAPER_BUILD_COMPILE_MAX_MIB': value})
 
 
 def test_refused_worker_arguments_cannot_reclaim_unadmitted_files(tmp_path):
     from lib.paper.builds.process_worker import main
     ready = tmp_path / 'ready'
     ready.write_text('Preserved caller data')
-    result = main(['0', '1', '4096', str(os.getpid()), str(ready),
+    result = main(['-1', '1', '4096', str(os.getpid()), str(ready),
                    str(tmp_path / 'log'), str(tmp_path), sys.executable])
     assert result == 125
     assert ready.read_text() == 'Preserved caller data'
@@ -258,3 +279,81 @@ runpy.run_path(root+'/'+launcher, run_name='__main__')
     assert (tmp_path / 'native.txt').read_text() == 'ran'
     assert not (tmp_path / 'data').exists()
     assert not ready.parent.exists()
+
+
+def test_native_compiler_retains_output_above_old_file_and_directory_quota(tmp_path):
+    import hashlib
+    from lib.paper.builds.compiler import _output_bytes
+    body="from pathlib import Path; p=Path('large.tmp'); f=p.open('wb'); block=b'x'*(1024*1024); "\
+         "[f.write(block) for _ in range(129)]; f.close()"
+    observed=[]
+    result=command(tmp_path,body,timeout=15,inspect_output=lambda:observed.append(_output_bytes(tmp_path)))
+    assert result.returncode==0
+    target=tmp_path/'large.tmp'
+    assert target.stat().st_size==129*MIB
+    assert _output_bytes(tmp_path)>=129*MIB and observed
+    expected=hashlib.sha256();actual=hashlib.sha256()
+    with target.open('rb') as stream:
+        for _ in range(129):
+            block=stream.read(MIB);assert block==b'x'*MIB
+            actual.update(block);expected.update(b'x'*MIB)
+        assert stream.read(1)==b''
+    assert actual.digest()==expected.digest()
+
+
+@pytest.mark.skipif(os.name!='posix',reason='POSIX native file limit')
+def test_explicit_compiler_file_limit_remains_exact_above_old_quota(tmp_path):
+    result=command(tmp_path,"import resource; print(resource.getrlimit(resource.RLIMIT_FSIZE)[0])",
+        file_bytes=257*MIB)
+    assert result.returncode==0
+    assert (tmp_path/'command.log').read_text().strip()==str(257*MIB)
+    with pytest.raises(BuildError) as caught:
+        command(tmp_path,"import os,signal; signal.signal(signal.SIGXFSZ,signal.SIG_DFL); "
+            "f=os.open('limited.tmp',os.O_CREAT|os.O_WRONLY,0o600); os.write(f,b'x'*(1024*1024)); os.write(f,b'x'*(1024*1024))",
+            file_bytes=MIB)
+    assert isinstance(caught.value,BuildError) and caught.value.code=='output_limit'
+    assert (tmp_path/'limited.tmp').stat().st_size<=MIB
+
+
+@pytest.mark.parametrize('value',[-1,True,'bad'])
+def test_invalid_explicit_file_limit_refuses_before_spawn(tmp_path,value):
+    with pytest.raises(BuildError,match='nonnegative integer'):
+        command(tmp_path,"raise AssertionError('must not run')",file_bytes=value)
+    assert not (tmp_path/'command.log').exists()
+
+
+@pytest.mark.skipif(os.name!='posix',reason='POSIX native CPU limits')
+def test_default_command_has_no_private_cpu_deadline(tmp_path):
+    result=command(tmp_path,"import resource,time;time.sleep(.1);print(resource.getrlimit(resource.RLIMIT_CPU)[0])",timeout=None)
+    assert result.returncode==0
+    assert (tmp_path/'command.log').read_text().strip()==str(__import__('resource').RLIM_INFINITY)
+
+
+@pytest.mark.skipif(os.name!='posix',reason='POSIX native CPU limits')
+def test_explicit_command_deadline_above_old_ceiling_is_exact(tmp_path):
+    result=command(tmp_path,"import resource;print(resource.getrlimit(resource.RLIMIT_CPU)[0])",timeout=420)
+    assert result.returncode==0
+    assert (tmp_path/'command.log').read_text().strip()=='420'
+
+
+@pytest.mark.parametrize('value',[0,-1,float('nan'),float('inf'),True])
+def test_invalid_explicit_command_deadline_refuses_before_spawn(tmp_path,value):
+    with pytest.raises(BuildError,match='positive finite'):
+        command(tmp_path,"raise AssertionError('must not run')",timeout=value)
+    assert not (tmp_path/'command.log').exists()
+
+
+def test_default_compiler_log_retains_complete_real_output(tmp_path):
+    import hashlib
+    result=command(tmp_path,"import os;[os.write(1,b'progress '+b'x'*(1024*1024)+b'\\n') for _ in range(5)];os.write(1,b'complete tail\\n')",timeout=None)
+    expected=(b'progress '+b'x'*(1024*1024)+b'\n')*5+b'complete tail\n'
+    assert result.returncode==0
+    log=(tmp_path/'command.log').read_bytes()
+    assert len(log)>5*1024*1024 and hashlib.sha256(log).digest()==hashlib.sha256(expected).digest()
+
+
+@pytest.mark.parametrize('value',[-1,True,'bad'])
+def test_invalid_explicit_log_limit_refuses_before_spawn(tmp_path,value):
+    with pytest.raises(BuildError,match='nonnegative integer'):
+        command(tmp_path,"raise AssertionError('must not run')",log_bytes=value)
+    assert not (tmp_path/'command.log').exists()

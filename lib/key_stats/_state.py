@@ -50,8 +50,9 @@ def _pkg():
 
 # ── Auto-disable thresholds ──
 # A key is auto-disabled for the rest of the day when BOTH:
-#   1. total attempts today >= MIN_ATTEMPTS  (avoid flapping on 1-2 failures)
-#   2. success rate today < MIN_SUCCESS_RATE
+#   1. successes + attributed credential failures today >= MIN_ATTEMPTS
+#   2. success rate within those credential-health outcomes < MIN_SUCCESS_RATE
+# Generic failures (including legacy history) are telemetry, never evidence.
 MIN_ATTEMPTS = 5
 MIN_SUCCESS_RATE = 0.5
 
@@ -230,8 +231,8 @@ def _fold_namespaces_unlocked(stats: dict | None = None,
             if dst_entry is None:
                 stats[dst_pk] = src_entry
             else:
-                for field in ('success', 'failure', 'rate_limited',
-                              'gateway_errors'):
+                for field in ('success', 'failure', 'credential_failures',
+                              'rate_limited', 'gateway_errors'):
                     dst_entry[field] = (int(dst_entry.get(field) or 0)
                                         + int(src_entry.get(field) or 0))
                 dst_entry['consecutive_429'] = max(
@@ -244,6 +245,9 @@ def _fold_namespaces_unlocked(stats: dict | None = None,
                 dst_entry['exhausted_models'] = merged_models
                 if not dst_entry.get('last_error'):
                     dst_entry['last_error'] = src_entry.get('last_error') or ''
+                if not dst_entry.get('last_credential_error'):
+                    dst_entry['last_credential_error'] = (
+                        src_entry.get('last_credential_error') or '')
             changed = True
         for pk in [k for k in overrides
                    if k.split('::', 1)[0] == src_ns]:
@@ -307,8 +311,8 @@ def _normalise_document(raw, today: str) -> dict:
     normalised_stats = {}
     for key, entry in stats.items():
         clean_entry = dict(entry)
-        for field in ('success', 'failure', 'rate_limited',
-                      'consecutive_429', 'gateway_errors'):
+        for field in ('success', 'failure', 'credential_failures',
+                      'rate_limited', 'consecutive_429', 'gateway_errors'):
             if field not in clean_entry:
                 continue
             try:
@@ -478,6 +482,8 @@ def _new_entry() -> dict:
     return {
         'success': 0,
         'failure': 0,
+        'credential_failures': 0,
+        'last_credential_error': '',
         'rate_limited': 0,       # count of 429s today (informational)
         'consecutive_429': 0,    # current streak of 429s with no success
         # Gateway-class failures (502/503/504, upstream-vendor transients,

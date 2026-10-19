@@ -9,8 +9,9 @@
 //! immutable, digest-witnessed page. Every other lane mutation —
 //! compact/delete/cleanup/projection updates — invalidates the archive
 //! (cheap tombstone), and readers always fence on the maintained lane
-//! count: any disagreement falls back to the exact per-document lane
-//! read, so an untracked mutation can never serve a wrong answer.
+//! count. Same-count mutations must invalidate through the shared Turn lane
+//! writer; a count alone cannot certify content freshness. Retired v1 pages
+//! are reconstructible caches and fall back to the exact lane until rebuilt.
 
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -32,7 +33,7 @@ use crate::generated_tofudb_ir::{
 /// target itself (oversized single messages still seal one per page).
 const MAX_TRANSCRIPT_ARCHIVE_PAGE_BYTES: usize = 64 * 1024 * 1024;
 
-const FORMAT: &str = "tofu.transcript-archive.v1";
+const FORMAT: &str = crate::generated_tofudb_ir::TRANSCRIPT_ARCHIVE_FORMAT;
 const TAIL_SUFFIX: &str = "\0tail";
 
 /// Read-path observability for tests and metrics.
@@ -125,9 +126,15 @@ struct ArchiveManifest {
     pages: Vec<ArchivePage>,
 }
 
-fn decode_manifest(raw: &[u8]) -> io::Result<ArchiveManifest> {
+fn decode_manifest(raw: &[u8]) -> io::Result<Option<ArchiveManifest>> {
     let value: Value = serde_json::from_slice(raw)
         .map_err(|_| invalid_data("transcript archive manifest is not valid JSON"))?;
+    // v1 pages may contain pre-transition content. Never certify those bytes
+    // merely because their digest/count is valid; the live lane is authority.
+    if value.get("format").and_then(Value::as_str)
+        == Some(crate::generated_tofudb_ir::TRANSCRIPT_ARCHIVE_RETIRED_FORMAT) {
+        return Ok(None);
+    }
     if value.get("format").and_then(Value::as_str) != Some(FORMAT) {
         return Err(invalid_data("transcript archive manifest format differs"));
     }
@@ -181,11 +188,11 @@ fn decode_manifest(raw: &[u8]) -> io::Result<ArchiveManifest> {
     if covered > sealed_messages {
         return Err(invalid_data("transcript archive totals differ"));
     }
-    Ok(ArchiveManifest {
+    Ok(Some(ArchiveManifest {
         sealed_messages,
         decoded_bytes,
         pages,
-    })
+    }))
 }
 
 fn encode_manifest(manifest: &ArchiveManifest) -> Vec<u8> {
@@ -221,7 +228,7 @@ fn load_manifest_for(
     else {
         return Ok(None);
     };
-    decode_manifest(&raw).map(Some)
+    decode_manifest(&raw)
 }
 
 fn vd_put(
@@ -588,6 +595,7 @@ impl ArchiveSealDriver {
             .map_err(|_| io::Error::other("archive seal driver lock poisoned"))?
             .take();
         if let Some(thread) = thread {
+            thread.thread().unpark();
             thread
                 .join()
                 .map_err(|_| io::Error::other("archive seal driver panicked"))?;
@@ -682,7 +690,7 @@ fn run_archive_seal_worker(
             }
         }
         if !did_work {
-            std::thread::sleep(SEAL_POLL_INTERVAL * 4);
+            std::thread::park_timeout(SEAL_POLL_INTERVAL * 4);
         }
         // Catch-up mode: a round that sealed anything starts the next pass
         // immediately so fresh bursts seal inside ~1 s.

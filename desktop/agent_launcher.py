@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tofu Agent Launcher — the controlled-machine component (TofuAgent.exe).
+"""Tofu Remote Launcher — the controlled-machine component (TofuRemote.exe).
 
 The agent-only packaged app: NO Quart server, NO browser auto-open, NO
 database, NO component manager, NO GitHub update check. The machine's only
@@ -64,11 +64,11 @@ _log_fh = None
 
 def _log(msg: str) -> None:
     """Write a diagnostic line without ever touching a None stream."""
-    line = '[TofuAgent] %s\n' % msg
+    line = '[TofuRemote] %s\n' % msg
     global _log_fh
     if _log_fh is None:
         try:
-            from lib.log_retention import register_external_log
+            from lib.logging_pkg.log_retention import register_external_log
             register_external_log(_LOG_PATH, 'desktop_agent_console')
             _log_fh = open(_LOG_PATH, 'a', encoding='utf-8', buffering=1)
         except OSError:
@@ -79,7 +79,7 @@ def _log(msg: str) -> None:
             except OSError:
                 _log_fh = False
     try:
-        from lib.log_record_values import text_value
+        from lib.logging_pkg.log_record_values import text_value
         line = text_value(line, max_chars=4096)
     except Exception:
         pass
@@ -305,7 +305,7 @@ def _diag_report(state: dict) -> str:
     the recent agent log tail. The secret is reported as presence+length
     only; the report is meant to be pasted into a chat.
     """
-    lines = ['Tofu Agent diagnostics — %s'
+    lines = ['Tofu Remote diagnostics — %s'
              % time.strftime('%Y-%m-%d %H:%M:%S')]
     lines.append('version: %s' % (_agent_version() or '?'))
     lines.append('platform: %s' % sys.platform)
@@ -526,7 +526,7 @@ def _run_tray(state: dict, perms: dict) -> None:
         MenuItem(_tt('desktop.tray.quit'), on_quit),
     )
 
-    icon = pystray.Icon('tofu-agent', _load_icon(), 'Tofu Agent', menu)
+    icon = pystray.Icon('tofu-agent', _load_icon(), 'Tofu Remote', menu)
 
     # Startup role declaration (owner directive 2026-08-03), now TRAY-FIRST
     # (owner report 2026-08-04: the window vanished with no tray anywhere):

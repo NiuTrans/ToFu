@@ -35,7 +35,7 @@ else:
 try:
     if BASE_DIR not in sys.path:
         sys.path.insert(0, BASE_DIR)
-    from lib.runtime_paths import data_root as _data_root
+    from lib.runtime.runtime_paths import data_root as _data_root
     DATA_DIR = _data_root()
 except Exception:
     DATA_DIR = os.path.join(os.path.dirname(sys.executable) if getattr(sys, 'frozen', False)

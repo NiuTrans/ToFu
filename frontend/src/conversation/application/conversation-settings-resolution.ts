@@ -9,6 +9,8 @@
  * no DOM, transcript state, owner identity, or copy of server merge policy.
  */
 
+import { captureConversationProject, type ProjectConversation } from './conversation-project';
+
 type UnknownRecord = Record<string, unknown>;
 
 export interface ConversationSettingsSource extends UnknownRecord {
@@ -98,7 +100,7 @@ function unwrapEnvelope(value: unknown): UnknownRecord {
 
 export function buildConversationSettingsSnapshot(
   source: ConversationSettingsSource,
-  projectPath: unknown,
+  _legacyProjectPath: unknown,
   uiLanguage: unknown,
 ): UnknownRecord {
   return {
@@ -123,15 +125,21 @@ export function buildConversationSettingsSnapshot(
     imageGenAspect: source.imageGenAspect,
     imageGenResolution: source.imageGenResolution,
     humanGuidanceEnabled: source.humanGuidanceEnabled,
-    chatMode: source.chatMode || 'chat',
+    chatMode: 'chat',
     planMode: Boolean(source.planMode),
-    projectPath,
-    projectPaths: source.projectPaths || [],
-    readOnlyPaths: source.readOnlyPaths || [],
+    ...captureConversationProject(source as ProjectConversation),
     autoTranslate: source.autoTranslate,
     uiLang: source.uiLang || uiLanguage,
     folderId: source.folderId,
     autoApply: source.autoApply,
+  };
+}
+
+function captureSubmissionBinding(source: UnknownRecord | null | undefined): UnknownRecord {
+  return {
+    ...captureConversationProject(source as ProjectConversation),
+    ...(source && Object.prototype.hasOwnProperty.call(source, 'folderId')
+      ? { folderId: source.folderId } : {}),
   };
 }
 
@@ -142,20 +150,26 @@ export function createConversationSettingsResolution(
 
   const resolveConfig = async (
     inputs: UnknownRecord,
-  ): Promise<UnknownRecord> => unwrapEnvelope(
-    await ports.resolveConfig(inputs),
-  );
+  ): Promise<UnknownRecord> => {
+    const source = record(inputs.conv_settings);
+    const workspace = source && captureSubmissionBinding(source);
+    const resolved = unwrapEnvelope(await ports.resolveConfig(inputs));
+    return workspace ? { ...resolved, ...workspace, chatMode: 'chat' } : resolved;
+  };
 
   const resolveSettings = async (
     inputs: ConversationSettingsInputs,
-  ): Promise<UnknownRecord> => unwrapEnvelope(
-    await ports.resolveSettings(inputs),
-  );
+  ): Promise<UnknownRecord> => {
+    const workspace = captureSubmissionBinding(inputs.conv_settings);
+    const resolved = unwrapEnvelope(await ports.resolveSettings(inputs));
+    return { ...resolved, ...workspace, chatMode: 'chat' };
+  };
 
   const resolveSubmission = async (
     configInputs: UnknownRecord,
     settingsInputs: ConversationSettingsInputs,
   ): Promise<ConversationSubmissionResolution> => {
+    const workspace = captureSubmissionBinding(configInputs.conv_settings as UnknownRecord);
     const config = await resolveConfig({
       ...configInputs,
       settings_conv_settings: settingsInputs.conv_settings,
@@ -163,9 +177,10 @@ export function createConversationSettingsResolution(
     });
     const fusedSettings = record(config.settings);
     delete config.settings;
+    // Resolver defaults must never fill explicit empty roots from ambient state.
     return {
-      config,
-      settings: fusedSettings || await resolveSettings(settingsInputs),
+      config: { ...config, ...workspace, chatMode: 'chat' },
+      settings: { ...(fusedSettings || await resolveSettings(settingsInputs)), ...workspace, chatMode: 'chat' },
     };
   };
 

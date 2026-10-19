@@ -65,6 +65,9 @@ _V0142_SIZES = {
     # headroom band for the floor ac1e598c added at 130 MB (73.9% — in
     # band), observed reality rather than an estimate.
     'Tofu-0.16.0-linux-x86_64.deb': 175_975_798,
+    # Synthetic complete ARM64 fixtures, not measurements of shipped artifacts.
+    'Tofu-0.16.0-linux-aarch64.deb': 175_000_000,
+    'Tofu-0.16.0-linux-aarch64.tar.gz': 193_000_000,
 }
 _HOLLOW_WINDOWS_BYTES = 48_960_018
 
@@ -73,16 +76,33 @@ _HOLLOW_WINDOWS_BYTES = 48_960_018
 # fixture must carry these too. Sizes are above the script's floors
 # (windows agent measured 53.2 MB on the first server-built leg).
 _AGENT_ASSET_SIZES = {
-    'TofuAgent-0.16.0-macos-arm64.dmg': 20_000_000,
-    'TofuAgent-0.16.0-macos-x86_64.dmg': 20_000_000,
-    'TofuAgent-Setup-0.16.0-win64.exe': 53_200_000,
-    'TofuAgent-0.16.0-linux-x86_64.tar.gz': 20_000_000,
+    'TofuRemote-0.16.0-macos-arm64.dmg': 20_000_000,
+    'TofuRemote-0.16.0-macos-x86_64.dmg': 20_000_000,
+    'TofuRemote-Setup-0.16.0-win64.exe': 53_200_000,
+    'TofuRemote-0.16.0-linux-x86_64.tar.gz': 20_000_000,
+    'TofuRemote-0.16.0-linux-aarch64.tar.gz': 20_000_000,
 }
 
 _FRONTEND_ASSET_SIZES = {
     'frontend-dist-0.16.0.tar.gz': 4_000_000,
     'frontend-dist-0.16.0.tar.gz.sha256': 96,
 }
+
+# Release dependencies are admitted alongside desktop artifacts.
+_FRONTEND_ASSET_SIZES.update({
+    f'python-wheels-0.16.0-cpython-312-{platform}-{machine}.tar.gz{suffix}':
+        96 if suffix else 10_000_000
+    for platform, machine in (('linux', 'x86_64'), ('linux', 'aarch64'),
+                              ('darwin', 'x86_64'), ('darwin', 'aarch64'), ('win32', 'x86_64'))
+    for suffix in ('', '.sha256')
+})
+
+_FRONTEND_ASSET_SIZES.update({
+    f'tofu-db-0.16.0-{target}.tar.gz{suffix}': 96 if suffix else 20_000_000
+    for target in ('x86_64-unknown-linux-musl', 'aarch64-unknown-linux-musl',
+                   'x86_64-apple-darwin', 'aarch64-apple-darwin')
+    for suffix in ('', '.sha256')
+})
 
 
 def _load():
@@ -192,10 +212,13 @@ def test_derived_label_glob_view_still_matches_the_table():
     platform_assets = tuple(
         (label, pattern) for _os, _arch, label, pattern, _min in (
             m.PLATFORM_ASSETS + m.AGENT_PLATFORM_ASSETS))
-    assert m.REQUIRED_PLATFORM_ASSETS == platform_assets + (
-        ('prebuilt frontend graph', 'frontend-dist-*.tar.gz'),
-        ('prebuilt frontend SHA-256', 'frontend-dist-*.tar.gz.sha256'),
-    )
+    assert m.REQUIRED_PLATFORM_ASSETS[:len(platform_assets)] == platform_assets
+    extras = m.REQUIRED_PLATFORM_ASSETS[len(platform_assets):]
+    assert ('prebuilt frontend graph', 'frontend-dist-*.tar.gz') in extras
+    assert ('prebuilt frontend SHA-256', 'frontend-dist-*.tar.gz.sha256') in extras
+    assert any(pattern.startswith('python-wheels-') for _label, pattern in extras)
+    assert any(pattern.startswith('tofu-db-') for _label, pattern in extras)
+
 
 
 def test_undetermined_contract_survives_a_non_release_body():

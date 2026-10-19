@@ -80,8 +80,8 @@ const FULL = { os: 'windows', arch: 'x86_64', label: 'Windows installer',
   hosted: 'server', size: 152000000, source: 'built', kind: 'full' };
 const AGENT = { os: 'windows', arch: 'x86_64',
   label: 'Windows agent installer',
-  filename: 'TofuAgent-Setup-0.16.0-win64.exe',
-  url: 'https://h/api/v1/desktop/download/TofuAgent-Setup-0.16.0-win64.exe',
+  filename: 'TofuRemote-Setup-0.16.0-win64.exe',
+  url: 'https://h/api/v1/desktop/download/TofuRemote-Setup-0.16.0-win64.exe',
   hosted: 'server', size: 53000000, source: 'built', kind: 'agent' };
 
 // ── 1. remote + ready artifact ⇒ one-file installer PRIMARY ──
@@ -120,7 +120,7 @@ _lcRenderDesktop({ connected: false, setup_state: 'remote',
   downloads: [FULL], agent_downloads: [AGENT] }, null);
 const html1b = document.getElementById('lcDesktopSetup').innerHTML;
 check('stale_rebuilding_note', html1b.includes('后台准备'));
-check('stale_no_bare_exe', !html1b.includes('TofuAgent-Setup-0.16.0-win64.exe'));
+check('stale_no_bare_exe', !html1b.includes('TofuRemote-Setup-0.16.0-win64.exe'));
 check('stale_no_installer_button', !html1b.includes('lcAgentInstallerBtn'));
 check('stale_no_manual_pairing', !html1b.includes('lcMintBtn'));
 

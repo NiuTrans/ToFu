@@ -15,7 +15,7 @@ from lib.orchestration.http_endpoint_model import OrchestrationHttpEndpoint
 from lib.orchestration.human_gate_request_contract import (
     human_gate_request_contract,
 )
-from lib.task_replay import task_replay_request_contract
+from lib.task_replay.task_replay import task_replay_request_contract
 
 
 _COMPOSE = compose_request_contract()

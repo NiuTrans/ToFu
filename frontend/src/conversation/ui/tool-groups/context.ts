@@ -2,8 +2,10 @@
 import { computeToolBatches, type ToolRoundBatch } from '../../presentation/tool-execution-groups';
 import { deriveSiblingTitleDiscriminators } from '../../presentation/tool-sibling-titles';
 import type { ToolGroupRound } from './contracts';
+
+import { programOwnsGateway } from '../../presentation/program-activity';
 export function createToolGroupContext(rounds: readonly ToolGroupRound[]) {
-  const groups = computeToolBatches(rounds);
+  const groups = computeToolBatches(rounds.filter(round => !programOwnsGateway(round, rounds)));
   const byObject = new Map<ToolGroupRound, number>();
   const byId = new Map<string, number>();
   groups.forEach((group, index) => {

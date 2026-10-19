@@ -163,8 +163,8 @@ def test_scheduler_signal_query_is_owner_scoped(monkeypatch):
 @pytest.mark.parametrize('published_version', [None, 36])
 def test_schema_v37_backfills_legacy_optimizer_rows_without_owner_default(
         tmp_path, published_version):
-    from lib.storage_sidecar import schema
-    from lib.storage_sidecar.adapters.sqlite import SQLiteSession
+    from lib.storage_authority_sql import schema
+    from lib.storage_authority_sql.adapters.sqlite import SQLiteSession
 
     connection = sqlite3.connect(tmp_path / f'optimizer-v{published_version}.db')
     connection.row_factory = sqlite3.Row
@@ -267,8 +267,8 @@ def test_schema_v37_migrates_postgres_foreign_keys_in_dependency_order():
     from psycopg import sql
     from psycopg.rows import dict_row
 
-    from lib.storage_sidecar import schema
-    from lib.storage_sidecar.adapters.postgres import PostgresSession
+    from lib.storage_authority_sql import schema
+    from lib.storage_authority_sql.adapters.postgres import PostgresSession
 
     dsn_file = Path(os.environ['TOFU_STORAGE_TEST_POSTGRES_DSN_FILE'])
     dsn = dsn_file.read_text(encoding='utf-8').strip()

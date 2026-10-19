@@ -44,7 +44,7 @@ pytestmark = pytest.mark.unit
 
 
 def _make_app():
-    from lib.app_factory import create_base_app
+    from lib.app.app_factory import create_base_app
     return create_base_app(__name__)
 
 

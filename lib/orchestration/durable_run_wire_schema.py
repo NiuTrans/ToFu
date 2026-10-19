@@ -98,7 +98,7 @@ def durable_run_read_response_schema() -> dict:
 
 def durable_replay_response_schema(*, missing: bool = False) -> dict:
     """Describe durable success and missing pages via the replay protocol."""
-    from lib.task_replay import task_replay_contract, task_replay_response_schema
+    from lib.task_replay.task_replay import task_replay_contract, task_replay_response_schema
 
     if missing:
         return task_replay_response_schema(

@@ -40,13 +40,13 @@ from __future__ import annotations
 from typing import Any
 
 from lib.log import get_logger
-from lib.tool_round_identity import (
+from lib.tool_results.tool_round_identity import (
     execution_batch_keys,
     execution_identity,
     execution_llm_round,
     model_batch_block_suffix,
 )
-from lib.tool_round_replay import (
+from lib.tool_results.tool_round_replay import (
     SUPERSEDED_PROVIDER_ATTEMPT_FIELD,
     is_superseded_provider_attempt_round,
 )

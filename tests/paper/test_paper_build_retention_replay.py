@@ -12,12 +12,12 @@ import pytest
 
 from lib.storage.client import StorageClient
 from lib.paper.builds.document_repository import PaperDocumentRepository
-from lib.storage_sidecar.adapters.sqlite import SQLiteBackend
-from lib.storage_sidecar.logical_outbox import LogicalOutboxPipeline, decode_logical_payload
-from lib.storage_sidecar.logical_replay import BackendReplayTarget, replay_records
-from lib.storage_sidecar.logical_shadow import LogicalCommitShadow
-from lib.storage_sidecar.operation_registry import build_registry
-from lib.storage_sidecar.server import create_server
+from lib.storage_authority_sql.adapters.sqlite import SQLiteBackend
+from lib.storage_authority_sql.logical_outbox import LogicalOutboxPipeline, decode_logical_payload
+from lib.storage_authority_sql.logical_replay import BackendReplayTarget, replay_records
+from lib.storage_authority_sql.logical_shadow import LogicalCommitShadow
+from lib.storage_authority_sql.operation_registry import build_registry
+from lib.storage_authority_sql.server import create_server
 from tests.storage import test_storage_logical_outbox as outbox_support
 from tests.paper.test_paper_build_cache import _build
 from tests.paper.test_paper_build_retention import _lease, _pin, _repository

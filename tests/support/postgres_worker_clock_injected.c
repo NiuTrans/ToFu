@@ -62,7 +62,7 @@ injected_clock_gettime(clockid_t kind, struct timespec *value)
 
 #define clock_gettime injected_clock_gettime
 #define tofu_worker_lease_clock_v1 test_actual_worker_clock
-#include "../../lib/storage_sidecar/native_worker_clock/worker_clock.c"
+#include "../../lib/storage_authority_sql/native_worker_clock/worker_clock.c"
 #undef tofu_worker_lease_clock_v1
 #undef clock_gettime
 

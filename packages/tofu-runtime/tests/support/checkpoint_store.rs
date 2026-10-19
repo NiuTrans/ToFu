@@ -12,8 +12,16 @@ pub struct MemoryStore {
     pub fail_after: AtomicBool,
     pub snapshot_reads: Mutex<usize>,
     pub snapshot_writes: Mutex<usize>,
+    pub writer: Mutex<Option<Value>>,
+    pub writer_dead: AtomicBool,
 }
 impl Store for MemoryStore {
+    fn writer_process(&self) -> Option<Value> {
+        self.writer.lock().unwrap().clone()
+    }
+    fn writer_quiescent(&self, _owner: u64, _task: &str, _identity: &Value) -> Result<bool, Error> {
+        Ok(self.writer_dead.load(Ordering::Acquire))
+    }
     fn header(&self, _owner: u64, _task: &str) -> Result<Option<Header>, Error> {
         Ok(self
             .record

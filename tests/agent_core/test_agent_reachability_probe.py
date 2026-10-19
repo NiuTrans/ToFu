@@ -139,7 +139,7 @@ def _run_one_iteration(monkeypatch, tmp_path, resp):
 
     monkeypatch.setenv('TOFU_DESKTOP_CONFIG',
                        str(tmp_path / 'agent_cfg.json'))
-    monkeypatch.setattr(_run.requests, 'post', lambda *a, **k: resp)
+    monkeypatch.setattr(_run.requests.Session, 'post', lambda *a, **k: resp)
 
     stop = threading.Event()
     seen = []
@@ -184,7 +184,7 @@ def test_run_agent_status_fires_on_transitions_not_per_poll(
 
     monkeypatch.setenv('TOFU_DESKTOP_CONFIG',
                        str(tmp_path / 'agent_cfg.json'))
-    monkeypatch.setattr(_run.requests, 'post',
+    monkeypatch.setattr(_run.requests.Session, 'post',
                         lambda *a, **k: _Resp(200, {'commands': []}))
 
     stop = threading.Event()
@@ -194,7 +194,7 @@ def test_run_agent_status_fires_on_transitions_not_per_poll(
     def on_status(st):
         seen.append(st)
 
-    real_post = _run.requests.post
+    real_post = _run.requests.Session.post
 
     def counting_post(*a, **k):
         polls['n'] += 1
@@ -202,7 +202,7 @@ def test_run_agent_status_fires_on_transitions_not_per_poll(
             stop.set()
         return real_post(*a, **k)
 
-    monkeypatch.setattr(_run.requests, 'post', counting_post)
+    monkeypatch.setattr(_run.requests.Session, 'post', counting_post)
     _run.run_agent('http://fake/', {}, poll_interval=0.001,
                    bridge_secret='s', stop_event=stop,
                    on_status=on_status)

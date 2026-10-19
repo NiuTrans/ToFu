@@ -22,7 +22,7 @@ from unittest import mock
 
 import pytest
 
-from lib.api_v1_model_routing_generated import OPERATIONS, decode_response
+from lib.generated_api_v1_model_routing import OPERATIONS, decode_response
 from tests.support.model_routing import (
     clear_test_model_routing,
     native_test_provider_bundle,
@@ -246,7 +246,7 @@ class LiveConformanceTest(unittest.TestCase):
         _new_loop_run(go())
 
     def test_pending_offering_manual_probe_is_read_only_through_api(self):
-        from lib import provider_probe
+        from lib.provider import provider_probe
         from lib.model_routing import ModelRoutingRepository, OwnerBoundary
         from tests.model_routing.test_probe_identity import fixture
         import routes.api_v1.providers as routes

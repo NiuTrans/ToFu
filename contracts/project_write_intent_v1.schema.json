@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "project_write_intent_v1.schema.json",
-  "title": "Bounded durable project file write intent",
+  "title": "Durable project file write intent",
   "x-admission": {
     "scope": "project-session",
     "busyErrorKind": "journal-busy",
@@ -13,12 +13,7 @@
   "type": "object",
   "additionalProperties": false,
   "x-resource-limits": {
-    "pendingIntents": 64,
-    "originalBytes": 1073741824,
-    "postImageBytes": 1073741824,
-    "recordBytes": 1431721304,
-    "lockWaitSeconds": 30,
-    "directoryEntries": 130
+    "lockWaitSeconds": 30
   },
   "properties": {
     "version": {
@@ -52,13 +47,11 @@
       "type": [
         "string",
         "null"
-      ],
-      "maxLength": 1431655768
+      ]
     },
     "postBytes": {
       "type": "integer",
-      "minimum": 0,
-      "maximum": 1073741824
+      "minimum": 0
     },
     "postDigest": {
       "type": "string",
@@ -123,11 +116,5 @@
     "taskId",
     "state",
     "rootPath"
-  ],
-  "x-resource-budget": {
-    "environment": "TOFU_PROJECT_WRITE_RECOVERY_MAX_MIB",
-    "maximumMiB": 1024,
-    "recordEnvelopeBytes": 65536,
-    "policy": "One launch-probed per-file byte budget for reads, preparation, recovery and undo. Durable evidence is never pruned on a smaller budget; access fails visibly."
-  }
+  ]
 }

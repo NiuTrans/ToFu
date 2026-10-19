@@ -9,6 +9,8 @@ export interface RestartPreparation {
   elapsedSeconds: number;
   updatedAt: number;
   remainingSeconds?: number;
+
+  recovering?: boolean;
 }
 
 export function watchRestartPreparation(

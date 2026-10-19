@@ -6,9 +6,9 @@ temp=0 (a judgement, not a creative act).
 
 """
 
-from lib.agent_loop import AbortSignal
+from lib.agent_loop.agent_loop import AbortSignal
 from lib.llm_dispatch.api import dispatch_stream
-from lib.llm_errors import AbortedError
+from lib.llm.llm_errors import AbortedError
 from lib.log import get_logger
 
 from ._config import _RUBRIC_MAX_TOKENS, _RUBRIC_TEMPERATURE

@@ -41,7 +41,7 @@ for _var in ('OMP_NUM_THREADS', 'ORT_NUM_THREADS',
 from runtime_guards import install_pymupdf_classic_policy
 install_pymupdf_classic_policy()
 
-__all__ = ['MAX_PDF_BYTES', 'HAS_PYMUPDF4LLM', 'HAS_PYMUPDF', 'HAS_DOCLING',
+__all__ = ['HAS_PYMUPDF4LLM', 'HAS_PYMUPDF', 'HAS_DOCLING',
            'PYMUPDF_LOCK', 'PYMUPDF4LLM_UNAVAILABLE_REASON',
            'current_parser_version', 'expected_parser_version']
 
@@ -51,7 +51,6 @@ __all__ = ['MAX_PDF_BYTES', 'HAS_PYMUPDF4LLM', 'HAS_PYMUPDF', 'HAS_DOCLING',
 # All pymupdf operations MUST be serialized behind this lock.
 PYMUPDF_LOCK = threading.Lock()
 
-MAX_PDF_BYTES = 200 * 1024 * 1024  # 200 MB safety limit
 
 # ─── PyMuPDF (core PDF engine) ───
 # PyMuPDF exposes its top-level package as ``pymupdf`` since 1.24.3; older

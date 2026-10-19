@@ -5,6 +5,7 @@ import uuid
 from pathlib import Path
 
 import pytest
+from playwright.sync_api import Error as PlaywrightError
 from tests.evolution.test_evolution_runs import runtime as _fixture_runtime
 
 task_runtime = _fixture_runtime
@@ -343,7 +344,7 @@ def test_catalog_refresh_keeps_keyboard_focus_and_navigation(browser, live_serve
         hold[0] = False
         for route, response in held:
             try: route.fulfill(response=response)
-            except Exception: pass
+            except PlaywrightError: pass
         if artifact.with_suffix('.json').exists():
             evidence = json.loads(artifact.with_suffix('.json').read_text())
             evidence.update(key_events=keys,read_requests=[{'method':request.method,'url':request.url}

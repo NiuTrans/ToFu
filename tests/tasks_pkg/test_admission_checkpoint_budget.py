@@ -1,9 +1,9 @@
-"""Dispatch prerequisites retry transient pressure within one finite budget."""
+"""Dispatch prerequisites retry transient pressure with finite RPC deadlines until completion or cancellation."""
 import time
 import pytest
 from lib.storage import StorageError
 from lib.tasks_pkg.manager._persist import _upsert_task_row
-from lib.task_result_checkpoint_contract import TASK_RESULT_CHECKPOINT_GUARD_CONTRACT
+from lib.task_replay.task_result_checkpoint_contract import TASK_RESULT_CHECKPOINT_GUARD_CONTRACT
 
 pytestmark=pytest.mark.unit
 
@@ -35,7 +35,7 @@ def test_slow_initial_witness_and_transient_retry_share_admission_budget(monkeyp
     monkeypatch.setattr('lib.storage.get_storage_client',lambda **_:Client())
     assert write({'id':'birth','convId':'','_userId':7})
     assert len(calls)==3
-    assert [value for _,value in calls]==pytest.approx([5,4.35,3.75])
+    assert [value for _,value in calls]==[5,5,5]
 
 
 def test_transient_write_retries_preserve_pending_identity_and_deadline(monkeypatch):
@@ -49,18 +49,21 @@ def test_transient_write_retries_preserve_pending_identity_and_deadline(monkeypa
     task={'id':'birth','convId':'','_userId':7,'_taskResultVersion':1,
         '_taskResultCheckpointGuard':TASK_RESULT_CHECKPOINT_GUARD_CONTRACT}
     assert write(task)
-    assert len(calls)==2 and calls[1][1]<calls[0][1]
+    assert len(calls)==2 and calls[1][1]==calls[0][1]==5
     assert calls[0][0]==calls[1][0]
 
 
-def test_expired_admission_budget_never_starts_a_late_write(monkeypatch):
+def test_slow_witness_preserves_admission_and_starts_bounded_write(monkeypatch):
     now=clock(monkeypatch);writes=[]
     class Client:
         def query(self,*args,**options):now[0]+=5.1;return None
-        def command(self,*args,**options):writes.append(args)
+        def command(self,*args,**options):
+            assert options['deadline']==5
+            writes.append(args)
+            return {'owned':True,'version':1,'guard_contract':TASK_RESULT_CHECKPOINT_GUARD_CONTRACT}
     monkeypatch.setattr('lib.storage.get_storage_client',lambda **_:Client())
-    with pytest.raises(StorageError,match='budget exhausted'):write({'id':'birth','convId':'','_userId':7})
-    assert not writes
+    assert write({'id':'birth','convId':'','_userId':7})
+    assert len(writes)==1
 
 
 @pytest.mark.parametrize('budget',[0,-1,float('inf'),float('nan'),True])

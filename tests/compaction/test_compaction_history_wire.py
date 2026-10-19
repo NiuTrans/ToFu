@@ -11,7 +11,7 @@ from lib.tasks_pkg.compaction._layer2._anchor import (
     _extract_current_query, _extract_objective_anchor_text, _plan_cross_turn_tail,
 )
 from lib.tasks_pkg.compaction._layer2._prompt import _format_messages_for_summary
-from lib.tool_history_pairing import adjacent_tool_call_result_pairs
+from lib.tool_results.tool_history_pairing import adjacent_tool_call_result_pairs
 
 pytestmark = pytest.mark.unit
 OPENING = 'Has tofu-db been launched yet? Is it easy for users to install?'

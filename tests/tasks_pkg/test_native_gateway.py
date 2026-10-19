@@ -10,12 +10,54 @@ import pytest
 
 from lib.agent_core.native_process import ApprovalRequest, ToolRequest
 from lib.identity import PrincipalContext
-from lib.tasks_pkg.native_gateway import NativeGateway
+from lib.tasks_pkg.native_gateway import NativeGateway, compile_native_tool_catalog
 from lib.tasks_pkg.tool_dispatch._approval import (
     approval_receipt_authority, consume_approval_receipt, mint_approval_receipt,
 )
 
 pytestmark = pytest.mark.unit
+
+
+def test_response_declaration_defers_rows_skips_native_denials_and_consumes_once():
+    from lib.agent_core.native_process import RoundRequest,RoundSettlement
+    owner=task()
+    definitions=[{'type':'function','function':{'name':'read_files','description':'Read',
+        'parameters':{'type':'object','properties':{'path':{'type':'string'}},'required':['path']}}}]
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        gateway=NativeGateway(principal=principal(),task=owner,executor=executor,configuration={},
+            tool_list=definitions,permissions={'read_files':'read'},project_path=None,project_enabled=False,
+            model='fixture',round_source=lambda:0,decision_policy=None,pending_calls=8,pending_bytes=8192)
+        request=RoundRequest(principal(),'native-gateway','round',0,0)
+        def call(name,args,identity):
+            return {'id':identity,'type':'function','function':{'name':name,'arguments':json.dumps(args)}}
+        calls=[call('read_files',{'path':'fixture.txt'},'valid'),call('read_files',{'path':3},'invalid'),call('foreign',{},'foreign')]
+        gateway.prepare_response(RoundSettlement(request,{'kind':'returned','model_calls':calls}))
+        assert not owner['toolRounds'] and 0<gateway.response_retained_bytes<=8192
+        occurrence=ToolRequest(principal(),owner['id'],'callback','read_files',{'path':'fixture.txt'},model_round=0)
+        parsed,assistant=gateway._parse_occurrence(occurrence,0)
+        assert parsed[0][2]=='valid' and assistant['tool_calls'][0]['id']=='valid'
+        assert len(owner['toolRounds'])==1 and gateway.response_retained_bytes==0
+        with pytest.raises(ValueError):gateway._parse_occurrence(occurrence,0)
+        gateway.close()
+        assert not gateway._response_prepared
+
+
+def test_response_declaration_stop_and_pressure_never_announce_unexecuted_calls():
+    from lib.agent_core.native_process import RoundRequest,RoundSettlement
+    owner=task()
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        gateway=NativeGateway(principal=principal(),task=owner,executor=executor,configuration={},
+            tool_list=catalog(),permissions={'write_file':'write'},project_path=None,project_enabled=True,
+            model='fixture',round_source=lambda:0,decision_policy=None,pending_calls=8,pending_bytes=1)
+        request=RoundRequest(principal(),owner['id'],'round',0,0)
+        result=RoundSettlement(request,{'kind':'returned','model_calls':[{'id':'write','type':'function',
+            'function':{'name':'write_file','arguments':json.dumps({'path':'file.txt','content':'data'})}}]})
+        with pytest.raises(ValueError,match='pending-byte'):gateway.prepare_response(result)
+        assert not owner['toolRounds'] and not gateway._response_prepared
+        owner['abort_event'].set()
+        gateway.prepare_response(result)
+        assert not owner['toolRounds']
+        gateway.close()
 
 
 def principal():
@@ -35,6 +77,29 @@ def catalog():
                       'required':['path','content']}}}]
 
 
+def test_gateway_passes_one_borrowed_search_accumulator_to_canonical_pipeline(monkeypatch):
+    owner=task();evidence=[]
+    definitions=[{'type':'function','function':{'name':'web_search','parameters':{'type':'object'}}}]
+    def pipeline(*args,**kwargs):
+        messages,search=args[6],args[7]
+        assert search is evidence
+        from lib.tasks_pkg.tool_dispatch._pipeline import _append_search_result_text
+        _append_search_result_text(search,'URL: https://example.test/retrieved')
+        messages.append({'role':'tool','tool_call_id':messages[0]['tool_calls'][0]['id'],
+                         'content':'URL: https://example.test/retrieved'})
+    monkeypatch.setattr('lib.tasks_pkg.tool_dispatch.api.execute_tool_pipeline',pipeline)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        gateway=NativeGateway(principal=principal(),task=owner,executor=executor,permissions={'web_search':'read'},
+            configuration=owner['config'],tool_list=definitions,project_path='',project_enabled=False,
+            model='fixture',round_source=lambda:0,decision_policy=None,pending_calls=8,pending_bytes=4096,
+            search_results=evidence)
+        try:
+            request=ToolRequest(principal(),owner['id'],'request','web_search',{},model_round=0)
+            assert gateway._execute(request,None)=='URL: https://example.test/retrieved'
+            assert evidence==['URL: https://example.test/retrieved']
+        finally:gateway.close()
+
+
 def test_receipt_inspection_is_exact_live_and_nonconsuming():
     owner={};args={'path':'file','content':'original'}
     assert mint_approval_receipt(owner,'write_file','call',args,authority='human')
@@ -42,6 +107,7 @@ def test_receipt_inspection_is_exact_live_and_nonconsuming():
     assert approval_receipt_authority(owner,'write_file','call',dict(args,content='changed')) is None
     assert consume_approval_receipt(owner,'write_file','call',args)
     assert approval_receipt_authority(owner,'write_file','call',args) is None
+
     assert mint_approval_receipt(owner,'write_file','call',args,authority='human')
     owner['_tool_approval_receipts']['call']['minted_at']-=1000
     assert approval_receipt_authority(owner,'write_file','call',args) is None
@@ -52,6 +118,27 @@ def test_receipt_inspection_is_exact_live_and_nonconsuming():
     assert approval_receipt_authority(owner,'write_file','call',args) is None
 
 
+def test_compiled_catalog_uses_task_safety_and_detaches_schema():
+    owner=task()
+    owner['_tool_env']=SimpleNamespace(write_names={'write_file'},idempotent_names=set(),confirmation_names={'write_file'})
+    definitions=catalog()
+    compiled=compile_native_tool_catalog(owner,definitions)
+    assert compiled['write_file']['permission']=='approval'
+    from lib.agent_core.native_content_contract import native_model_tools
+    assert native_model_tools(compiled)==definitions
+    compiled['write_file']['arguments_schema']['required'].append('new')
+    assert definitions[0]['function']['parameters']['required']==['path','content']
+
+
+def test_catalog_refuses_duplicates_unrepresented_controls_and_foreign_permissions():
+    import copy
+    definitions=catalog()
+    strict=copy.deepcopy(definitions);strict[0]['function']['strict']=True
+    for candidate,permissions in [(definitions*2,None),(strict,None),(definitions,{'foreign':'read'})]:
+        with pytest.raises(ValueError):
+            compile_native_tool_catalog(task(),candidate,permissions=permissions)
+
+
 def test_preapproved_identical_call_does_not_repeat_human_gate(monkeypatch):
     from lib.tasks_pkg.tool_dispatch import _approval
     owner=task();args={'path':'file','content':'original'};row={'toolCallId':'call'}
@@ -60,6 +147,133 @@ def test_preapproved_identical_call_does_not_repeat_human_gate(monkeypatch):
     monkeypatch.setattr(_approval,'request_write_approval',unexpected)
     assert _approval._handle_approval(owner,'write_file',args,0,row,None,0,'fixture')==(True,None)
     assert consume_approval_receipt(owner,'write_file','call',args)
+
+
+@pytest.mark.parametrize('auto,approved', [(True,True),(False,True),(False,False)])
+def test_default_application_policy_uses_one_prepared_occurrence(monkeypatch,tmp_path,auto,approved):
+    from lib.tasks_pkg.tool_dispatch import _approval
+    from lib.tasks_pkg.executor._finalize import _finalize_tool_round
+    from contextvars import ContextVar
+    marker = ContextVar('gateway-context-fixture', default='unbound')
+    owner=task();definitions=catalog();owner['_executable_tool_catalog']=definitions
+    target=tmp_path/'default-native-write.txt';calls=[];prompts=[]
+    def confirm(approval_id, **kwargs):
+        assert marker.get() == 'request'
+        prompts.append(approval_id)
+        assert kwargs['owner_user_id']==1
+        kwargs['on_registered']()
+        return approved
+    monkeypatch.setattr(_approval,'request_write_approval',confirm)
+    def handler(task,tc,name,call_id,args,rn,row,*rest):
+        assert marker.get() == 'request'
+        calls.append(call_id)
+        assert approval_receipt_authority(task,name,call_id,args)==('auto_write_mode' if auto else 'human')
+        target.write_text(args['content'])
+        consume_approval_receipt(task,name,call_id,args)
+        _finalize_tool_round(task,rn,row,[{'title':'write','content':'written','badge':'done'}])
+        return call_id,'written',False
+    owner['_tool_env']=SimpleNamespace(resolve=lambda name:handler if name=='write_file' else None,
+        write_names={'write_file'},idempotent_names=set(),confirmation_names=set())
+    async def run(executor):
+        marker.set('request')
+        gateway=NativeGateway(principal=principal(),task=owner,executor=executor,
+            configuration={'autoApply':auto},tool_list=definitions,permissions={'write_file':'write'},
+            project_path=str(tmp_path),project_enabled=True,model='fixture',round_source=lambda:0,
+            decision_policy=None,pending_calls=2,pending_bytes=16384)
+        args={'path':str(target),'content':'canonical default'}
+        request=ApprovalRequest(principal(),owner['id'],'approval','provider-call','write_file','epoch',
+            json.dumps(args).encode(),b'null',asyncio.Event(),2)
+        decision=await gateway.decide(request)
+        assert decision==('auto_write_mode' if auto else 'human' if approved else 'denied')
+        if auto or approved:
+            assert await gateway.execute(ToolRequest(principal(),owner['id'],'execute','write_file',args,'provider-call',model_round=0))=='written'
+            with pytest.raises(ValueError):
+                await gateway.execute(ToolRequest(principal(),owner['id'],'duplicate','write_file',args,'provider-call',model_round=0))
+        assert gateway._bytes==0 and not gateway._pending
+        gateway.close()
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        asyncio.run(run(executor))
+        assert executor.submit(marker.get).result() == 'unbound'
+    assert marker.get() == 'unbound'
+    assert len(owner['toolRounds'])==1
+    assert len(prompts)==(0 if auto else 1)
+    assert len(calls)==int(auto or approved)
+    assert target.exists()==(auto or approved)
+
+
+def test_default_approval_budget_fault_settles_occurrence_before_effect(monkeypatch,tmp_path):
+    owner=task();owner['_executable_tool_catalog']=catalog()
+    async def run(executor):
+        gateway=NativeGateway(principal=principal(),task=owner,executor=executor,
+            configuration={'autoApply':True},tool_list=catalog(),permissions={'write_file':'write'},
+            project_path=str(tmp_path),project_enabled=True,model='fixture',round_source=lambda:0,
+            decision_policy=None,pending_calls=1,pending_bytes=512)
+        request=ApprovalRequest(principal(),owner['id'],'approval','call','write_file','epoch',
+            b'{"path":"unwritten","content":"data"}',b'null',asyncio.Event(),1)
+        with pytest.raises(ValueError,match='prepared approval budget'):
+            await gateway.decide(request)
+        assert gateway._bytes==0 and not gateway._pending
+    with ThreadPoolExecutor(max_workers=1) as executor:asyncio.run(run(executor))
+    assert len(owner['toolRounds'])==1 and owner['toolRounds'][0]['status']=='error'
+    assert not owner.get('_tool_approval_receipts')
+
+
+def test_default_manual_cancellation_joins_actual_gate_and_withdraws_receipt(monkeypatch,tmp_path):
+    from lib.tasks_pkg.tool_dispatch import _approval
+    from lib.tasks_pkg.approval import request_write_approval,resolve_write_approval
+    owner=task();owner['_executable_tool_catalog']=catalog();entered=threading.Event();published=[]
+    def confirm(approval_id, *, timeout, on_registered, **kwargs):
+        published.append(approval_id)
+        def registered():
+            on_registered();entered.set()
+        return request_write_approval(approval_id,timeout=3,on_registered=registered,**kwargs)
+    monkeypatch.setattr(_approval,'request_write_approval',confirm)
+    async def run(executor):
+        gateway=NativeGateway(principal=principal(),task=owner,executor=executor,
+            configuration={'autoApply':False},tool_list=catalog(),permissions={'write_file':'write'},
+            project_path=str(tmp_path),project_enabled=True,model='fixture',round_source=lambda:0,
+            decision_policy=None,pending_calls=1,pending_bytes=16384)
+        stopped=asyncio.Event()
+        request=ApprovalRequest(principal(),owner['id'],'approval','call','write_file','epoch',
+            b'{"path":"unwritten","content":"data"}',b'null',stopped,3)
+        work=asyncio.create_task(gateway.decide(request))
+        try:
+            assert await asyncio.to_thread(entered.wait,2)
+            with pytest.raises(ValueError,match='have not joined'):
+                gateway.finish_approvals()
+            stopped.set()
+            assert await asyncio.wait_for(work,4)=='denied'
+        finally:
+            stopped.set()
+            if not work.done():
+                owner['abort_event'].set()
+                await work
+        assert gateway._bytes==0 and not gateway._pending
+        assert owner['aborted'] and owner['abort_event'].is_set()
+        assert not resolve_write_approval(published[0],True,owner_user_id=1)
+    with ThreadPoolExecutor(max_workers=1) as executor:asyncio.run(run(executor))
+    assert owner['toolRounds'][0]['status']=='aborted'
+    assert not owner.get('_tool_approval_receipts')
+
+
+def test_unused_default_grant_is_withdrawn_before_terminal_projection(tmp_path):
+    owner=task();owner['_executable_tool_catalog']=catalog()
+    async def run(executor):
+        gateway=NativeGateway(principal=principal(),task=owner,executor=executor,
+            configuration={'autoApply':True},tool_list=catalog(),permissions={'write_file':'write'},
+            project_path=str(tmp_path),project_enabled=True,model='fixture',round_source=lambda:0,
+            decision_policy=None,pending_calls=1,pending_bytes=16384)
+        request=ApprovalRequest(principal(),owner['id'],'approval','call','write_file','epoch',
+            b'{"path":"unwritten","content":"data"}',b'null',asyncio.Event(),2)
+        assert await gateway.decide(request)=='auto_write_mode'
+        gateway.finish_approvals()
+        count=len(owner['events'])
+        gateway.finish_approvals()
+        assert len(owner['events'])==count
+        assert gateway._bytes==0 and not gateway._pending
+    with ThreadPoolExecutor(max_workers=1) as executor:asyncio.run(run(executor))
+    assert owner['toolRounds'][0]['status']=='aborted'
+    assert not owner.get('_tool_approval_receipts')
 
 
 def test_actual_pipeline_executes_one_admitted_handler_and_keeps_tool_round(monkeypatch,tmp_path):
@@ -258,3 +472,21 @@ def test_declared_model_content_uses_packaged_schema_and_rejects_extra_fields(mo
                     [{'type':'text','text':'ok','extra':True}],
                     [{'type':'image_url','image_url':{'url':'uri','detail':'original'}}]]:
         with pytest.raises(TypeError):validate_model_content(content)
+
+
+def test_native_catalog_projects_inputs_and_retains_host_result_metadata():
+    import copy
+    definitions=catalog()
+    definitions[0]['decoded_result_schema']={'type':'object','properties':{'written':{'type':'boolean'}}}
+    before=copy.deepcopy(definitions)
+    compiled=compile_native_tool_catalog(task(),definitions)
+    assert compiled['write_file']['arguments_schema']==definitions[0]['function']['parameters']
+    assert 'decoded_result_schema' not in compiled['write_file']
+    from lib.tools.gateway import sanitize_wire_tools
+    assert compiled['write_file']['description']==sanitize_wire_tools(definitions)[0]['function']['description']
+    assert 'coverage/freshness unknown' in compiled['write_file']['description']
+    assert definitions==before
+    for value in (None,[],{'type':float('nan')}):
+        invalid=copy.deepcopy(definitions)
+        invalid[0]['decoded_result_schema']=value
+        with pytest.raises(ValueError):compile_native_tool_catalog(task(),invalid)

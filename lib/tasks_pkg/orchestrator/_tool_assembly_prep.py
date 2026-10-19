@@ -1,22 +1,9 @@
-"""Section 2 tool assembly ( slice 29).
+"""Shared task tool preparation for chat, coordinators and child invocations.
 
-Extracted 2026-07-31 from ``lib/tasks_pkg/orchestrator/_run.py``
-run_task's pre-stream prep, where the block ran inline once per
-invocation after config resolution (Section 1) and prefetch kick.
-Byte-identical behaviour.
-
-Three steps:
-
-1. ``_assemble_tool_list`` — builds the per-turn tool schema from cfg
-   + the mcfg feature flags. All flags are read from the ``mcfg``
-   dict exactly as the inline original did (subscript for guaranteed
-   keys, ``.get(..., False)`` for human_guidance / scheduler).
-2. ``task['_tool_schema'] = tool_list`` stash — the compaction
-   token-gate accounts for the tool-schema cost (the schema JSON
-   ships in every request and the gateway tokenizes all of it, but
-   the proactive gate only saw `messages`).
-
-Returns ``(tool_list, has_real_tools)``.
+Role adapters supply capability/discovery policy. assemble_round_tools binds
+execution contracts and prepares the startup admission schema through the same
+gateway projector for every role. Returned candidates remain available to the
+final provider projection; discovery never changes execution authority.
 """
 
 from __future__ import annotations
@@ -30,8 +17,12 @@ logger = get_logger(__name__)
 
 def _disable_tools_for_turn(task) -> None:
     """Clear every tool authority/projection field for a text-only turn."""
+
+    task.pop('_rootToolAssemblyConfig', None)
+    task.pop('_rootMcpToolNames', None)
     task['_tool_gateway_names'] = []
     task['_tool_schema'] = []
+    task['_toolInitialVisibleNames'] = []
     task['_executable_tool_catalog'] = []
     task['_requiredDirectToolNames'] = []
     task['_toolExecutionScope'] = 'available'
@@ -48,7 +39,7 @@ def _disable_tools_for_turn(task) -> None:
     task.pop('_toolExposureTelemetry', None)
 
 
-def _attach_gateway_contract_documents(task, search_mode: str) -> bool:
+def attach_gateway_contract_documents(task, search_mode: str) -> bool:
     """Add contracts for the stable local gateway tools added after config.
 
     Registry-backed documents are assembled in model config. The local
@@ -63,10 +54,18 @@ def _attach_gateway_contract_documents(task, search_mode: str) -> bool:
         gateway_tool_schemas,
     )
 
-    from lib.tools.programmatic import ACTIVE_PROGRAMMATIC_MODES
-    config = task.get('config') or {}
-    settings = config.get('tools') or {}
-    include_program = str(settings.get('programmaticCalling', 'on')).lower() in ACTIVE_PROGRAMMATIC_MODES
+    from lib.tools.programmatic import ACTIVE_PROGRAMMATIC_MODES, programmatic_tier
+    from lib.context_experiment_flags import normalize_context_experiment_flags
+    # Compatibility clients use config.tools for schema lists. The common
+    # normalizer separates those declarations from request policy settings.
+    settings = normalize_context_experiment_flags(task.get('config'))['tools']
+    mode = settings['programmaticCalling']
+    include_program = (mode in ACTIVE_PROGRAMMATIC_MODES
+                       and programmatic_tier(requested=mode) == 'program')
+
+    from lib.tasks_pkg.coordinator_policy import coordinator_scope
+    if coordinator_scope(task):
+        include_program = False
     schemas = gateway_tool_schemas(
         include_search=search_mode != 'off', include_execute=True,
         include_program_action=include_program)
@@ -89,7 +88,7 @@ def _attach_gateway_contract_documents(task, search_mode: str) -> bool:
             'tools for this turn and continuing text-only: %s',
             error, exc_info=True)
         return False
-    task['_toolContractDocumentsByName'].update(gateway_documents)
+    task.setdefault('_toolContractDocumentsByName', {}).update(gateway_documents)
     return True
 
 
@@ -98,9 +97,46 @@ def assemble_round_tools(cfg, task, mcfg):
 
     ``cfg`` / ``task`` / ``mcfg`` are positional carriers (mcfg is the
     resolved model-config dict from Section 1). Returns the 2-tuple
-    ``(tool_list, has_real_tools)``. Tool availability remains stable for the
-    entire turn and is not tied to a round counter.
+    ``(tool_list, has_real_tools)``. Wire visibility remains stable for the
+    entire turn. Root MCP authority refreshes before each request within the
+    initial capability ceiling, independently of the frozen declarations.
     """
+    from lib.project_dispatch.admission import is_dispatch_task, validate_task, repository_for, profile_for
+    if is_dispatch_task(task):
+        binding = validate_task(task)
+        profile = profile_for(repository_for(binding).read(binding['assignmentId']))
+        if profile['mode'] not in ('project', 'coordinator'):
+            _disable_tools_for_turn(task)
+            if profile['mode'] == 'consult':
+                return [], False
+            from lib.tools.registry import project_dispatch_tool_schemas
+            from lib.tools.contracts import compile_execution_contract_documents
+            schemas = project_dispatch_tool_schemas(profile['tools'])
+            allowed_fields = {'read_files': {'path', 'start_line', 'end_line', 'reads'},
+                              'write_file': {'path', 'content', 'description', 'append'},
+                              'edit_file': {'description', 'edits'}}
+            for tool in schemas:
+                name = tool['function']['name']
+                parameters = tool['function']['parameters']
+                parameters['properties'] = {key: value for key, value in parameters['properties'].items()
+                                            if key in allowed_fields[name]}
+                parameters['additionalProperties'] = False
+                for key in ('oneOf', 'anyOf', 'allOf'):
+                    parameters.pop(key, None)
+                parameters['required'] = (['path', 'content'] if name == 'write_file' else
+                                          ['edits'] if name == 'edit_file' else [])
+                if name == 'read_files':
+                    parameters['oneOf'] = [{'required': ['path']}, {'required': ['reads']}]
+                tool['function']['description'] += (' Only explicit project-relative text files are authorized; '
+                    'no aliases, converters, external roots or content refs. Read prefixes: '
+                    + ', '.join(profile['readPaths']) + '; write prefixes: ' + ', '.join(profile['writePaths']))
+            documents = compile_execution_contract_documents(schemas, namespace='project')
+            task['_tool_schema'] = schemas
+            task['_executable_tool_catalog'] = schemas
+            task['_requiredDirectToolNames'] = [tool['function']['name'] for tool in schemas]
+            task['_toolContractDocumentsByName'] = documents
+            task['_executableToolNamespaceByName'] = {name: 'project' for name in profile['tools']}
+            return schemas, bool(schemas)
     from lib.tasks_pkg.invocation import is_child_invocation
     if is_child_invocation(task):
         # The scheduler already intersected role and parent capabilities.
@@ -117,14 +153,16 @@ def assemble_round_tools(cfg, task, mcfg):
         contracts = compile_execution_contract_documents(
             tools, authoritative_documents_by_name=task.get('_invocationToolContracts'),
             namespace='invocation')
-        return _apply_assembled_tool_policy({**cfg,
+        discovery = task.get('_invocationToolDiscoveryPolicy') or {}
+        return _apply_assembled_tool_policy({**cfg, **discovery,
             '_executableToolCatalog': tools,
             '_toolContractDocumentsByName': contracts,
-            '_toolSearchMode': 'off',
             '_toolScriptSafeByName': task.get('_invocationToolScriptSafeByName') or {},
         }, task, tools, bool(tools))
 
     try:
+        from lib.tasks_pkg.coordinator_policy import coordinator_scope
+        coordinator = coordinator_scope(task, mcfg['project_path'])
         tool_list, has_real_tools = _assemble_tool_list(
             cfg, mcfg['project_path'], mcfg['project_enabled'], task['id'],
             mcfg['search_mode'], mcfg['search_enabled'],
@@ -141,6 +179,25 @@ def assemble_round_tools(cfg, task, mcfg):
             conv_id=('' if task.get('_inline_messages') or task.get('_transientRuntime')
                      else task.get('convId', '')),
         )
+        if coordinator:
+            from lib.project_dispatch.delegation import capture_worker_policy
+            capture_worker_policy(task, cfg, cfg.get('_executableToolCatalog') or tool_list, mcfg['model'])
+            from lib.tasks_pkg.coordinator_policy import filter_coordinator_tools
+            from lib.context_experiment_flags import normalize_context_experiment_flags
+            cfg['tools'] = {**normalize_context_experiment_flags(cfg)['tools'],
+                            'programmaticCalling': 'off'}
+            tool_list = filter_coordinator_tools(task, tool_list)
+            cfg['_executableToolCatalog'] = filter_coordinator_tools(
+                task, cfg.get('_executableToolCatalog') or [])
+            allowed = {tool['function']['name'] for tool in cfg['_executableToolCatalog']}
+            for key in ('_toolContractDocumentsByName', '_toolNamespaceByName',
+                        '_executableToolNamespaceByName', '_toolDiscoveryPolicyByName',
+                        '_toolScriptSafeByName', '_executableToolSearchTextByName'):
+                cfg[key] = {name: value for name, value in (cfg.get(key) or {}).items()
+                            if name in allowed}
+            cfg['_requiredDirectToolNames'] = [name for name in cfg.get('_requiredDirectToolNames', [])
+                                               if name in allowed]
+            has_real_tools = bool(tool_list)
     except Exception as error:
         from lib.agent_core.tool_errors import MCPDeclarationError
         from lib.tools.registry import ToolSpecSelectionError
@@ -161,20 +218,77 @@ def assemble_round_tools(cfg, task, mcfg):
         _disable_tools_for_turn(task)
         return [], False
 
-    return _apply_assembled_tool_policy(cfg, task, tool_list, has_real_tools)
+    if is_dispatch_task(task):
+        allowed = set(profile['tools'])
+        tool_list = [item for item in tool_list if item['function']['name'] in allowed]
+        cfg['_executableToolCatalog'] = [item for item in cfg.get('_executableToolCatalog', [])
+                                         if item['function']['name'] in allowed]
+        for key in ('_toolContractDocumentsByName', '_toolNamespaceByName',
+                    '_executableToolNamespaceByName', '_toolDiscoveryPolicyByName',
+                    '_toolScriptSafeByName', '_executableToolSearchTextByName'):
+            cfg[key] = {name: value for name, value in (cfg.get(key) or {}).items() if name in allowed}
+        cfg['_requiredDirectToolNames'] = [name for name in cfg.get('_requiredDirectToolNames', []) if name in allowed]
+        has_real_tools = bool(tool_list)
+    result = _apply_assembled_tool_policy(cfg, task, tool_list, has_real_tools)
+
+    if not result[1]:
+        task.pop('_rootToolAssemblyConfig', None)
+        task.pop('_rootMcpToolNames', None)
+        return result
+    task['_rootToolAssemblyConfig'] = dict(mcfg)
+
+    task['_rootMcpToolNames'] = sorted({
+        str((tool.get('function') or {}).get('name') or '')
+        for tool in [*(tool_list or []),
+                     *(task.get('_executable_tool_catalog') or [])]
+        if str((tool.get('function') or {}).get('name') or '').startswith('mcp__')})
+    return result
+
+
+def refresh_root_mcp_authority(task):
+    """Refresh live grants for the root's existing MCP surface, never its wire.
+
+    Startup can precede asynchronous MCP connection. Reuse ordinary assembly
+    on detached carriers so plan/selection/owner policy still decides grants.
+    Child authority is an immutable parent intersection, not a root inventory.
+    """
+    from lib.tasks_pkg.invocation import is_child_invocation
+    from lib.project_dispatch.admission import is_dispatch_task
+    mcfg = task.get('_rootToolAssemblyConfig')
+    if not isinstance(mcfg, dict) or is_child_invocation(task) or is_dispatch_task(task):
+        return
+
+    def name(tool):
+        return str((tool.get('function') or {}).get('name') or '')
+
+    original = task.get('_executable_tool_catalog') or []
+    eligible = set(task.get('_rootMcpToolNames') or [])
+    if not eligible:
+        return
+    cfg = dict(task.get('config') or {})
+    shadow = dict(task, config=cfg)
+    assemble_round_tools(cfg, shadow, mcfg)
+    refreshed = [tool for tool in shadow.get('_executable_tool_catalog', [])
+                 if name(tool) in eligible]
+    live_names = {name(tool) for tool in refreshed}
+    # Publish the complete catalog + associated policy projection before any
+    # request/streaming ingestion begins. Nothing below adds wire declarations.
+    updates = {'_executable_tool_catalog': [
+        tool for tool in original if not name(tool).startswith('mcp__')] + refreshed}
+    for key in ('_toolContractDocumentsByName', '_executableToolNamespaceByName',
+                '_executableToolSearchTextByName', '_toolScriptSafeByName'):
+        updates[key] = {key_name: value for key_name, value in (task.get(key) or {}).items()
+                        if not key_name.startswith('mcp__')}
+        updates[key].update({key_name: value for key_name, value in (shadow.get(key) or {}).items()
+                             if key_name in live_names})
+    # Discovery policies/counts belong to the frozen provider surface. Removing
+    # an unavailable tool's searchable policy would default it to eager on wire.
+    # Search/execution still intersect these hints with the live catalog.
+    task.update(updates)
 
 
 def _apply_assembled_tool_policy(cfg, task, tool_list, has_real_tools):
     """Prepare one ordinary authority/gateway projection from assembled facts."""
-    # Stash the assembled tool schema on the task so the compaction
-    # token-gate can account for its cost. The tool-schema JSON ships
-    # in every request and the gateway tokenizes all of it, but the
-    # proactive gate (_count_tokens_authoritative) only saw `messages`
-    # — under-counting by the full tool-schema size. Stashing here
-    # (rather than threading through run_compaction_pipeline →
-    # force_compact_if_needed → _should_force_compact) keeps the
-    # pipeline signatures untouched.
-    task['_tool_schema'] = tool_list
     _executable_catalog = cfg.get('_executableToolCatalog')
     task['_executable_tool_catalog'] = list(
         tool_list or []
@@ -213,7 +327,7 @@ def _apply_assembled_tool_policy(cfg, task, tool_list, has_real_tools):
     # advertise a gateway that rejects every call, but it also must not abort
     # an otherwise valid text turn. Disable all tools for this turn: closed for
     # side effects, soft for the main orchestration flow.
-    if not _attach_gateway_contract_documents(task, _search_mode):
+    if not attach_gateway_contract_documents(task, _search_mode):
         _disable_tools_for_turn(task)
         return [], False
     if isinstance(cfg.get('_toolExposureTelemetry'), dict):
@@ -222,5 +336,51 @@ def _apply_assembled_tool_policy(cfg, task, tool_list, has_real_tools):
         cfg.get('_frontendSelectedToolNames') or [])
     task['_toolNamespaceByName'] = dict(
         cfg.get('_toolNamespaceByName') or {})
-
+    tool_list = _prepare_initial_tool_surface(cfg, task, tool_list, _search_mode)
     return tool_list, has_real_tools
+
+
+def _prepare_initial_tool_surface(cfg, task, tool_list, search_mode):
+    """Keep provider candidates separate from the pre-route admission estimate.
+
+    Auto discovery can compact locally before a provider has been selected.
+    Retaining the candidates lets the final shared wire boundary choose native
+    discovery instead, where admission checks the actual routed request again.
+    """
+    from lib.context_experiment_flags import normalize_context_experiment_flags
+    from lib.llm.tool_wire import provider_tool_name
+    from lib.tools.gateway import local_wire_tools
+
+    authority = task['_executable_tool_catalog']
+    authority_names = {provider_tool_name(tool) for tool in authority}
+    required = set(task['_requiredDirectToolNames']) & authority_names
+    pins = set(task['_frontendSelectedToolNames']) & authority_names
+    initial = cfg.get('_toolInitialVisibleNames')
+    if initial is not None:
+        allowed = set(initial) | required | pins
+        tool_list = [tool for tool in (tool_list or []) if provider_tool_name(tool) in allowed]
+    visible_names = {provider_tool_name(tool) for tool in (tool_list or [])}
+    missing = (required | pins) - visible_names
+    if missing:
+        tool_list = list(tool_list or []) + [tool for tool in authority if provider_tool_name(tool) in missing]
+        visible_names |= missing
+    task['_toolInitialVisibleNames'] = sorted(visible_names)
+    policies = {**task['_toolDiscoveryPolicyByName'],
+                **{name: 'eager' for name in required | pins}}
+    # Bind the same effective policy for admission and final wire projection;
+    # otherwise a selected searchable tool can disappear on the second pass.
+    task['_toolDiscoveryPolicyByName'] = policies
+    task['_toolSearchableCount'] = max(task['_toolSearchableCount'], sum(
+        policies.get(provider_tool_name(tool)) == 'searchable'
+        or provider_tool_name(tool) not in visible_names for tool in authority))
+    task['_toolSearchMode'] = search_mode
+    task['_tool_schema'] = tool_list
+    if authority and search_mode in ('auto', 'local'):
+        flags = normalize_context_experiment_flags(cfg)['tools']
+        task['_tool_schema'] = local_wire_tools(
+            tool_list, discovery_catalog_size=len(authority),
+            searchable_count=task['_toolSearchableCount'],
+            discovery_policy_by_name=policies,
+            schema_budget_tokens=flags['schemaBudgetTokens'], model=cfg.get('model') or '',
+            priority_names=pins, required_names=required)
+    return tool_list

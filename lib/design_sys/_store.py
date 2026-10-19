@@ -38,7 +38,7 @@ class AssetStoreError(Exception):
 
 
 def store_root() -> str:
-    from lib.runtime_paths import data_root
+    from lib.runtime.runtime_paths import data_root
     path = os.path.join(data_root(), 'design_sys')
     os.makedirs(path, exist_ok=True)
     return path

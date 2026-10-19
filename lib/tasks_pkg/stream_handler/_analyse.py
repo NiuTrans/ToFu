@@ -1290,27 +1290,33 @@ def analyse_stream_result(
     # parse. Executing those would run tools on corrupt arguments (or on the
     # sanitizer's '{}' substitution). Validate BEFORE proceeding: unparseable
     # → retry the round transparently (classic-bucket budget), never execute.
-    # A cut that left every arguments string parseable lost only the terminal
-    # frames (JSON is self-delimiting) — proceeding is then safe. A malformed
-    # frame is different: it may have contained another tool call or arguments,
-    # so even apparently parseable calls must never execute from that attempt.
+    # Parseable arguments prove only a complete prefix, never a complete
+    # provider response. The public adapter derives _stream_anomaly from the
+    # typed stream authority; even a salvage hint cannot override that verdict.
+    # An observed provider finish without [DONE] remains executable.
     _malformed_tool_stream = bool((usage or {}).get('_malformed_stream'))
-    if (usage or {}).get('_missing_done') or _malformed_tool_stream:
-        from lib.agent_loop import unparseable_tool_calls
+    _incomplete_tool_stream = bool((usage or {}).get('_stream_anomaly'))
+    if (usage or {}).get('_missing_done') or _incomplete_tool_stream:
+        from lib.agent_loop.agent_loop import unparseable_tool_calls
         _bad_tcs = unparseable_tool_calls(assistant_msg)
-        if _bad_tcs or _malformed_tool_stream:
+        if _bad_tcs or _incomplete_tool_stream:
             _trace_id = (usage or {}).get('trace_id', 'N/A')
             _bad_names = [(tc.get('function') or {}).get('name', '?')
                           for tc in _bad_tcs]
-            if _malformed_tool_stream and not _bad_names:
+            if not _bad_names:
                 _bad_names = [
                     (tc.get('function') or {}).get('name', '?')
                     for tc in assistant_msg.get('tool_calls') or []
                 ]
             _tool_stream_issue = (
                 'malformed provider frame' if _malformed_tool_stream
-                else 'truncated tool arguments'
+                else 'truncated tool arguments' if _bad_tcs
+                else 'missing provider completion'
             )
+            _tool_stream_bucket = (
+                'malformed_tool_stream' if _malformed_tool_stream
+                else 'truncated_tool_args' if _bad_tcs
+                else 'incomplete_tool_stream')
             if _premature_retry_count < _PREMATURE_RETRY_MAX_CLASSIC:
                 _premature_retry_count += 1
                 result['premature_retry_count'] = _premature_retry_count
@@ -1357,10 +1363,7 @@ def analyse_stream_result(
                 emit_phase(task, Phase.RETRYING,
                            attempt=_premature_retry_count,
                            max=_PREMATURE_RETRY_MAX_CLASSIC,
-                           bucket=(
-                               'malformed_tool_stream'
-                               if _malformed_tool_stream
-                               else 'truncated_tool_args'),
+                           bucket=_tool_stream_bucket,
                            backoff_s=round(_backoff_s, 2),
                            detail=(
                                f'⚠️ 上游工具数据流不完整（{len(_bad_names)} 个调用），'

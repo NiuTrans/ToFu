@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import logging
+
+from quart import has_request_context, request
+
 from lib.api_response import (
     api_conflict,
     api_error,
@@ -9,12 +13,20 @@ from lib.api_response import (
 )
 from lib.conversation_sync.validation import ContractViolation
 from lib.error_envelope import make_envelope
-from lib.log import get_logger
+from lib.log import get_logger, log_event
 from lib.storage.errors import StorageError, http_status_for_storage_error
 from lib.turn_lifecycle import LifecycleConflict
 
 
 logger = get_logger(__name__)
+
+
+def _conversation_log_fields() -> dict:
+    """Tag the declared route resource, without interpreting paths or ownership."""
+    if not has_request_context():
+        return {}
+    conversation_id = (request.view_args or {}).get('conversation_id')
+    return {'conversation_id': conversation_id} if conversation_id else {}
 
 
 def lifecycle_conflict_response(exc: LifecycleConflict):
@@ -49,10 +61,15 @@ def storage_failure_response(exc: StorageError, *, operation: str):
                 "operationId": exc.operation_id,
             },
         )
-        logger.warning(
+        log_event(
+            logger, logging.WARNING, 'conversation.storage_unavailable',
             "Conversation storage temporarily unavailable op=%s code=%s",
             operation,
             exc.code,
+            storage_operation=operation, storage_code=exc.code,
+            storage_operation_id=exc.operation_id, retryable=bool(exc.retryable),
+            diagnostic=exc.message,
+            **_conversation_log_fields(),
         )
         return api_service_unavailable(
             envelope,
@@ -84,7 +101,16 @@ def storage_failure_response(exc: StorageError, *, operation: str):
             "operationId": exc.operation_id,
         },
     )
-    logger.error("Conversation storage failure op=%s code=%s", operation, exc.code)
+    log_event(
+        logger, logging.ERROR, 'conversation.storage_failure',
+        "Conversation storage failure op=%s code=%s operation_id=%s diagnostic=%s",
+        operation, exc.code, exc.operation_id, exc.message,
+        storage_operation=operation, storage_code=exc.code,
+        storage_operation_id=exc.operation_id, retryable=bool(exc.retryable),
+        exc_info=(type(exc), exc, exc.__traceback__),
+        no_coalesce=True,
+        **_conversation_log_fields(),
+    )
     return api_error(
         envelope, status=status, public_500_detail=exc.code, **extras,
     )
@@ -116,9 +142,14 @@ def contract_violation_response(exc: ContractViolation, *, operation: str):
             "contractViolations": violations,
         },
     )
-    logger.error(
+    log_event(
+        logger, logging.ERROR, 'conversation.contract_violation',
         "Conversation contract violation op=%s schema=%s: %s",
-        operation, exc.schema_name, summary)
+        operation, exc.schema_name, summary,
+        contract_schema=exc.schema_name, storage_operation=operation,
+        exc_info=(type(exc), exc, exc.__traceback__), no_coalesce=True,
+        **_conversation_log_fields(),
+    )
     return api_error(
         envelope, status=500,
         public_500_detail=f"{exc.schema_name}: {summary}",

@@ -1,11 +1,87 @@
 # Frontend architecture
-
 Responsibility: source ownership, generated delivery boundaries, state
-lifecycles, and the rules for extending the browser application. Boot splash text is selectable. `boot-splash.ts` preserves unchanged text nodes and phase rows during polling; rebuilding unchanged content was rejected because the 800 ms poll erased native selection.
+lifecycles, and the rules for extending the browser application. Boot status uses a non-modal dock with expandable, selectable phase diagnostics. `boot-splash.ts` preserves unchanged text nodes and phase rows during polling; rebuilding unchanged content was rejected because the 800 ms poll erased native selection. `boot-readiness.ts` combines the existing boot and restart owners at composer admission (button and Enter), without blocking drafts or reading. The restart observer retains identity/approval ownership; its dock offers explicit reload after readiness to preserve drafts.
 
 Task-time reads follow visible demand and explicit invalidation: forced paints amplified unchanged reads; paint force now preserves settled reads while server wake hints refresh them. A throttle was rejected because it still amplifies requests and delays updates. The machine-readable ownership and shrinking-debt authority is
 `contracts/frontend_conversation_architecture_v1.json`. The one-hop map for
-conversation browser work is `frontend/src/conversation/README.md`.
+conversation browser work is `frontend/src/conversation/README.md`. Update status cards use component-scoped `--space-4` sibling spacing in `02-update-shell.css`: the local-code restart notice and release verdict remain separate without global badge margins; `tests/visual/test_visual_update_spacing.py` verifies all themes and narrow layouts.
+## Background agent dock
+
+**Problem:** composer popovers obscured agent execution evidence.
+**Decision:** `agent-sidebar-dock.ts` renders conversation-level background activity inside
+the current main human Turn's existing information column, below model/tools/workspace.
+A stable context-content slot prevents fact repaint from destroying agent disclosures.
+Narrow panes use that Turn's existing context fold region, not a floating panel. Names,
+localized status, execution rounds and counts remain readable after foreground settlement;
+only execution details collapse. The latest authoritative main input selects the host;
+unmounted or foreign Turns are never replaced by an older history guess.
+Keyed native disclosures reveal canonical bounded swarm execution cards through
+`agent-sidebar-dock-projection.ts`; omission/truncation remains explicit. Activity enriches
+an exactly run-bound or uniquely unsettled session owner without mutating Turns or
+reopening evidenced terminal states. Ambiguous reused identities remain separate.
+
+The detail renderer receives the same merged roster and exact-run messages; updating only headers would leave open details stale.
+Open rows remain mounted on completion until the reader closes them.
+Communication lives in each exact-run agent card, collapsed independently from tool
+execution; all-run communication is a collapsed footer rather than a second chat feed.
+Participant filters and receipt IDs/timestamps are opt-in; consumed input never implies task acceptance or completion.
+Native message disclosures show a collapsed preview or the expanded body once, with a Collapse summary; receipt diagnostics fold independently.
+ Reused agent IDs cannot mix run messages.
+Finished history folds success and cancellation without equating their verdicts;
+errors, interruptions, stalls and unknown states remain attention rows. Snapshot
+disappearance never proves success. Explicit child IDs enable conversation navigation.
+The existing activity controller is the sole poll owner: no additional reads,
+clocks, globals or durable state. Lazy serial rendering fences conversation changes
+and disposal; rich-card reconciliation preserves reader folds/focus. History mounts
+on demand in twenty-row increments. Background commands remain in the composer.
+**Rejected:** a separate dock column, avatar cards and added chat margins fragment the
+existing turn information rail. Automatically opening tool details taxes history rendering.
+Another poller, fabricated full transcripts and per-message activity chrome duplicate owners.
+Surface commits and the existing rail follower remount from the same snapshot without reads.
+Specs: `agent-sidebar-dock.test.ts`, `agent-sidebar-dock-projection.test.ts` and
+`tests/visual/test_visual_agent_sidebar_dock.py`.
+
+## Folder configuration and workspace defaults
+
+Problem: the create editor used generic chrome and centered full-path buttons,
+producing an oversized single-column path wall unlike Project CO-PILOT.
+Decision: use the native kit's `appearance: 'project'` shell; desktop identity
+sits above workspace/recent panels, narrow layouts stack them. Recent cards
+show the basename and one truncated secondary path, retaining the exact path
+in their accessible name and tooltip. Selected roots retain full selectable
+paths and ordering/read-only controls. Field content scrolls independently
+from the save/cancel row. Empty Add errors clear on editing or valid name-only
+save. Disclosure still gates recent reads; no startup request is added.
+Rejected: copying legacy modal DOM would lose native focus/lifecycle ownership;
+truncating stored paths would lose directory identity.
+
+Browser specification: `tests/visual/test_visual_folder_settings.py` covers
+three themes, Chinese/English, long paths, 390px layout, native focus/Escape,
+name-only creation and directory selection using the existing local HTTP fixture.
+API/store journeys remain in `tests/e2e/test_folder_settings.py`.
+
+
+**Problem:** repeated outlined project cards overwhelmed navigation, and only
+projects reserved a settings column, misaligning their counts with Inbox.
+**Decision:** `31-folder-settings.css` owns borderless project navigation across
+all themes. Selected rows use a subtle fill and existing location indicator;
+counts are muted tabular text, not unread badges. Inbox and projects share a
+fixed trailing slot: hover/keyboard focus replaces the count with settings
+without layout movement. Coarse pointers retain separate aligned count/menu
+slots; compact rails retain icon-only navigation and context access. Zero
+counts remain omitted by the existing renderer. **Rejected:** badge pills imply
+unread urgency; permanently separate desktop menu columns waste name space;
+hiding touch menus excludes discoverable configuration access.
+Spec: `tests/visual/test_visual_project_rail_list.py`.
+
+Rail colors consume theme surfaces and primary/secondary text tokens, never the
+legacy beige gradient or brown/amber text overrides. Selection uses weight,
+subtle fill and an accent location mark rather than accent-colored small text.
+Visible navigation names and counts must reach 4.5:1 against their composited
+browser background in idle, selected, hover and focus states across all themes;
+secondary information is quieter by size/weight, not illegible contrast.
+
+Problem: replacing the create tile with a design-system control dropped the delegated `.folder-tab` identity, so the visible plus did nothing. Compact configuration buttons also consumed a second row per folder and the create tile lost the common footprint. Decision: keep creation in the existing delegated selection contract; inbox, project and create tiles share one footprint. Configuration stays in the same project row, with double-click, context-menu/long-press and keyboard access to the existing settings dialog. Compact mode uses double-click and keyboard/context access rather than an overlapping settings button; streaming changes opacity only so tile dimensions stay fixed. Selection, folder membership, zero-folder creation and drag/drop keep their existing owners. Rejected: removing compact mode hides the layout defect; using double-click alone excludes touch and keyboard users; another dialog or event registry duplicates authority. Regression specs cover nested create targets, settings access and browser geometry in expanded/compact/drawer layouts. Problem: the rename dialog hid roots, discarded unadded path text and closed on failed saves. Decision: the separate keyboard/touch settings action opens the native design-system `conversation/ui/folder-settings.ts` dialog: labelled identity, full ordered roots, primary/read-only choices, name-only creation, inline retry and revision-conflict review. Save includes pending path text; deletion removes grouping, not conversations/files. Independent read-only directory browsing supports parent, home, location and hidden entries; selection requires a current successful response. Requests abort/fence on disposal; recent projects load on expansion with explicit errors. `application/folder-presets.ts` serializes mutations and installs only ACKed presets; stale list reads cannot erase ACKs. Defaults apply only to new conversations; custom or explicit private drafts cannot re-inherit on first send. Existing chats and moves keep roots/access. Saving presets grants no filesystem permission or project guidance. Rejected: another Studio/global project context, nested buttons and optimistic roots. Owners: `folder-settings.ts`, `folder-config-control.ts`, `folder-presets.ts`, `conversation-project.ts`; remove retained bridges when the sidebar migrates. Specs cover confirmed mutations, stale reads, explicit intent and browser interaction.
 
 ## Program execution disclosure
 
@@ -51,6 +127,20 @@ not another authority for this browser preference. Specs: `tests/model_picker.te
 and `tests/model_routing/test_recent_models_browser.py`; full-app integration
 also lives in `test_model_picker_startup_browser.py`.
 
+## Shared agent machine-token sanitation
+
+Problem: historical virtual-user settlement comparison copied the Python token
+regex grammar into the browser. Decision: `scripts/gen_agent_machine_tokens.py`
+reads the registry in `lib/agent_verdict/_handoff.py` through selected AST
+declarations (no application import), generating the TypeScript sanitizer and
+native Rust pattern constants. Unicode digit, whitespace and case-fold semantics
+are translated mechanically; unchanged text retains its exact outer whitespace.
+`npm run generate:agent-machine-tokens` regenerates both outputs;
+`npm run check:agent-machine-tokens` is part of the frontend drift gate.
+`tests/agent_verdict/test_generated_machine_tokens.py` compares the real Python
+strip function with bundled generated TypeScript. Hand-maintained browser/native
+regex copies were rejected because protocol additions would silently drift.
+
 ## Source and delivery graph
 
 ```text
@@ -88,6 +178,8 @@ index.html + frontend/src/application-shell/fragments
 
 Edit sources, never generated outputs. Normal repository search ignores the
 large artifacts so discovery lands on the semantic owner. Runtime and stylesheet manifests declare ordered sources and feature CSS residency. Database Settings markup lives in `frontend/src/settings-panels/database.html`; `compose_settings_panels.mjs` derives its server-injected static fragment during `build:frontend`, with `check:settings-panels` byte parity and authoring-digest coverage. Other legacy panels remain at their existing owner until explicitly migrated.
+
+Database Settings uses the shared Settings `--s-*` palette, border and radius: compact engine/storage groups, unboxed storage facts and divider-separated native disclosure rows. Repeated edit captions and nested configuration cards are omitted; full-row summaries, status, required-index badges, immediate-save notice and existing apply/cancel safeguards remain. This avoids importing Project workbench chrome into Settings without changing storage authority or eager discovery behavior.
 Problem: optional CSS blocked chat paint. Decision: defer owned sheets to explicit feature intent; reject eager/lazy duplication, manual import lists and blanket idle module loading. Measured on 2026-10-03: base/settings head CSS fell 1,662,481 → 1,334,924 bytes (353,588 → 287,713 gzip).
 
 **Conversation decomposition:** Problem: mixed projection, content and lifecycle. Decision: [projection owners](../frontend/src/conversation/README.md#view-model-ownership), [renderer owners](../frontend/src/conversation/README.md#renderer-ownership) and `markdown/` form checked acyclic typed graphs; temporary program-placement indices preserve chronology in linear work. Markdown source normalization, HTML/math policy, code DOM, exact LRU identity and reader deferral have separate owners with explicit runtime ports; retained `core/markdown.js` is 75 lines. See `RENDER_CONTRACT.md` for measured cache/lifecycle decisions.
@@ -153,28 +245,7 @@ Rejected: arbitrary splits retaining ambient dependencies; repeated suffix scans
   It resolves the live Turn hydrator, reports presentation failure through a
   port, and rethrows the authoritative error; it owns no retry state or
   `runtimeScope`/`window` API.
-- Swarm push subscription, lifecycle, transient-Turn overlay, authoritative
-  rebase, and terminal hydration live in
-  `frontend/src/conversation/application/swarm-presentation-overlay.ts`.
-  Retained reducers are injected presentation ports; they neither subscribe
-  independently nor copy session telemetry into durable Turn state.
-  `conversation/presentation/swarm-agent-presentation.ts` owns shared launch
-  receipt/roster selection and immutable bounded agent-evidence merging.
-  Retained rendering and status recovery consume this same owner, so partial
-  live cards cannot suppress newer snapshot model, clock or tool evidence.
-  A settled durable swarm snapshot outranks stale live agent rows. Header,
-  progress counts, result bodies, and timers must derive from the same resolved
-  execution state; a completion header must not coexist with unresolved rows
-  from an older overlay. Separate launches remain separate panels, while wait
-  and result retrieval are not new executions. Late telemetry must not cross
-  execution boundaries or reopen a terminal historical panel.
-  Failed agent cards use a typed presenter for compact, expandable, escaped
-  technical detail and contextual recovery. A structured `route_unavailable`
-  code (or explicit legacy “No slot available” message) means that dispatch
-  sent no upstream request, not that the provider is down or that earlier
-  rounds did no work. Generic failures do not inherit that claim. Recovery
-  never switches models or retries automatically; file-edit caution depends
-  on recorded edit evidence, and partial output remains visible separately.
+- Swarm push subscription, lifecycle, transient-Turn overlay, authoritative rebase, and terminal hydration live in `frontend/src/conversation/application/swarm-presentation-overlay.ts`. Retained reducers are injected presentation ports; they neither subscribe independently nor copy session telemetry into durable Turn state. `conversation/presentation/swarm-agent-presentation.ts` owns shared launch receipt/roster selection and immutable bounded agent-evidence merging. Retained rendering and status recovery consume this same owner, so partial live cards cannot suppress newer snapshot model, clock or tool evidence. A settled durable swarm snapshot outranks stale live agent rows. Header, progress counts, result bodies, and timers must derive from the same resolved execution state; a completion header must not coexist with unresolved rows from an older overlay. Separate launches remain separate panels, while wait and result retrieval are not new executions. Late telemetry must not cross execution boundaries or reopen a terminal historical panel. Failed agent cards use a typed presenter for compact, expandable, escaped technical detail and contextual recovery. A structured `route_unavailable` code (or explicit legacy “No slot available” message) means that dispatch sent no upstream request, not that the provider is down or that earlier rounds did no work. Generic failures do not inherit that claim. Recovery never switches models or retries automatically; file-edit caution depends on recorded edit evidence, and partial output remains visible separately.
 - Swarm stuck-panel recovery timing lives in the DOM-free
   `frontend/src/conversation/application/swarm-reconciliation-scheduler.ts`.
   The retained panel injects backend reconciliation, browser clock/visibility,
@@ -204,6 +275,15 @@ Rejected: arbitrary splits retaining ambient dependencies; repeated suffix scans
   remains observable to callers, and cannot trigger pinned-folder migration.
   Reading-library folders use the same required-list decoder and never turn an
   outage into authoritative empty data.
+
+  Reload selection keeps the exact session/last-active ID even when the first
+  metadata catalog omits a newly durable conversation. The retained boot adapter
+  delegates that ID to ordinary `loadConversation` and its generation-fenced
+  `project-conversation-navigation.ts` resolver. A deleted/denied target or a
+  transient lookup failure remains an observable open failure, never permission
+  to substitute another chat; recency is only a no-saved-ID fallback. A second
+  restore store or waiting for catalog freshness would duplicate identity ownership.
+- A folder can bind DEFAULT project roots (`folder.projectPaths[]`, each ≤512 chars, ≤32 roots, schema-validated by `routes/api_v1/folders.py` create/update; the legacy scalar `projectPath` is kept mirroring the primary root for back-compat). The create and rename dialogs use a multi-root picker (`_buildFolderPathsPicker` in `main_folders_mobile.js`): a removable-chip list (first = primary) fed by the server-persisted recent-projects list plus a manual add-row — no forced absolute-path typing. The retained `folderDefaultProjectPaths(folderId)` resolver in `core/folders.js` returns the ordered, de-duplicated roots. A brand-new conversation created inside a folder inherits every root (first = primary, rest = extra roots): `newChat` pre-attaches them to the empty draft via `_conversationProjectController.chooseDraft` (so the project bar shows them immediately and the user can still change or clear them), and the send pipeline in `main_send_pipeline.js` stamps them onto the new conversation's empty workspace before the first submission binds roots. An explicit composer/project-modal attachment always wins — the folder default only fills an empty workspace, and existing conversations already in the folder keep their current binding. Clearing all roots removes the binding. Specs: `tests/frontend/test_frontend_folder_project_path.py` (resolver) and `tests/frontend/test_frontend_folder_paths_picker.py` (picker interactions); round-trip covered by `test_api_v1_integration.py::test_folders_crud_full_lifecycle`.
 - Composer Option+Enter (macOS) and Alt+Enter (Windows/Linux) insert a newline
   at the caret, replacing selected text and emitting the normal input event,
   in both Enter-send and Ctrl+Enter-send modes. IME candidate confirmation takes
@@ -364,46 +444,7 @@ Rejected: arbitrary splits retaining ambient dependencies; repeated suffix scans
   owners remain focused modules but ship as one unconditional lazy chunk;
   adding another always-loaded per-owner dynamic import is architecture debt.
 
-  The standalone Research surface is a full workbench, not a Paper-reader
-  sub-panel. `research-runtime.ts` owns the one live task stream, bounded event
-  replay, poll/push teardown, durable artifact hydration and terminal-quality
-  projection. `research-view.ts` is presentation-only: it renders the five
-  visible stages (harvest, survey, ideate, evaluate, package), ranked experiment
-  briefs, independent review decision, rejection audit, and the reproducibility
-  ledger. A researcher can inspect the running trajectory in the **Live evidence
-  trail** (tool-round projection); after completion the same page retains the
-  corpus, full survey/gap map, usage ledger and review revision queue. Starting
-  a new direction detaches browser polling/push through the runtime disposer but
-  does not cancel the checkpointed server job; explicit **Stop run** is the only
-  cancellation action. Recent directions come from the durable research list,
-  so refresh/reopen never depends on the in-memory task registry. While a
-  job is still in flight, entering Research mode re-attaches to it through
-  `GET /api/v4/tasks?kind=research` (owner-scoped list → snapshot → poll/push
-  re-attach) instead of stranding the researcher on the landing page; a job
-  that finished in the meantime projects its terminal state and hydrates the
-  durable archive.
-  The retained Paper presentation islands are also demand-loaded: report and
-  reader markup live only in the manifest-owned `paper-reader-presenters`
-  runtime, while podcast and video markup live in `paper-media-presenters`.
-  `frontend/src/features/paper.ts` installs both before the typed panel owners.
-  The typed report runtime owns start/regenerate, provisional Stop handoff,
-  polling, and reopen policy. Per-kind generations fence stale success and
-  failure continuations even for two starts on the same paper; cache-hit starts
-  reuse the canonical metadata-only apply path. One explicit cache-resolving
-  lookup preserves live-task precedence and selects the preferred/fallback
-  report server-side. The backend projects that hit from one bounded
-  owner-scoped Sidecar aggregate; only the selected language's additive
-  artifacts cross the process boundary. Rebuttal drafts retain at most 32
-  papers and 40,000 characters per paper, matching the request/backend limit.
-  A known paper starts by hash only; the server reads at most its 120,000-char
-  prompt source only after live/cache misses. The browser retries with bounded
-  text solely for the explicit pre-dispatch `paper_source_required` 400, after
-  rechecking the same generation fence; ambiguous failures are never replayed.
-  Late owner ports and markup action receivers use the private
-  `featureRegistry`. Mutable retained values use its explicit
-  `readLiveRuntimeBinding` / `writeLiveRuntimeBinding` state port, because the
-  owner override cache must not hide a later paper switch. A raw
-  lexical-global dependency is not a compatibility seam.
+  The standalone Research surface is a full workbench, not a Paper-reader sub-panel. `research-runtime.ts` owns the one live task stream, bounded event replay, poll/push teardown, durable artifact hydration and terminal-quality projection. `research-view.ts` is presentation-only: it renders the five visible stages (harvest, survey, ideate, evaluate, package), ranked experiment briefs, independent review decision, rejection audit, and the reproducibility ledger. A researcher can inspect the running trajectory in the **Live evidence trail** (tool-round projection); after completion the same page retains the corpus, full survey/gap map, usage ledger and review revision queue. Starting a new direction detaches browser polling/push through the runtime disposer but does not cancel the checkpointed server job; explicit **Stop run** is the only cancellation action. Recent directions come from the durable research list, so refresh/reopen never depends on the in-memory task registry. While a job is still in flight, entering Research mode re-attaches to it through `GET /api/v4/tasks?kind=research` (owner-scoped list → snapshot → poll/push re-attach) instead of stranding the researcher on the landing page; a job that finished in the meantime projects its terminal state and hydrates the durable archive. The retained Paper presentation islands are also demand-loaded: report and reader markup live only in the manifest-owned `paper-reader-presenters` runtime, while podcast and video markup live in `paper-media-presenters`. `frontend/src/features/paper.ts` installs both before the typed panel owners. The typed report runtime owns start/regenerate, provisional Stop handoff, polling, and reopen policy. Per-kind generations fence stale success and failure continuations even for two starts on the same paper; cache-hit starts reuse the canonical metadata-only apply path. One explicit cache-resolving lookup preserves live-task precedence and selects the preferred/fallback report server-side. The backend projects that hit from one bounded owner-scoped Sidecar aggregate; only the selected language's additive artifacts cross the process boundary. Rebuttal drafts retain at most 32 papers and 40,000 characters per paper, matching the request/backend limit. A known paper starts by hash only; the server reads at most its 120,000-char prompt source only after live/cache misses. The browser retries with bounded text solely for the explicit pre-dispatch `paper_source_required` 400, after rechecking the same generation fence; ambiguous failures are never replayed. Late owner ports and markup action receivers use the private `featureRegistry`. Mutable retained values use its explicit `readLiveRuntimeBinding` / `writeLiveRuntimeBinding` state port, because the owner override cache must not hide a later paper switch. A raw lexical-global dependency is not a compatibility seam.
 - Paper PDF rendering is owned by the instantiated
   `frontend/src/features/paper/pdf-reader.ts`; `pdf-viewer.ts` adapts existing
   Paper actions and library metadata. The shared lazy PDF.js loader supplies
@@ -420,55 +461,8 @@ Rejected: arbitrary splits retaining ambient dependencies; repeated suffix scans
   conversation/mode changes release the panel and its PDF resources. Search,
   outline and logs open on demand; verified build locations can follow edits.
   See [Paper builds](PAPER_BUILDS.md#chat-preview) for bounds and verification.
-- Settings retained presenters are demand-loaded as the manifest-owned
-  `settings-presenters` runtime. `frontend/src/features/settings.ts` evaluates
-  the typed Settings owners before that retained island, so every declared
-  typed service is present when the generated runtime closes its dependency
-  boundary. The shell routes `openSettings`, `closeSettings`, `saveSettings`,
-  `switchSettingsTab`, and onboarding's immediate `_oauthLogin` through the
-  feature bridge. Saving keeps its busy latch until feature-toggle writes are
-  acknowledged; a rejected, missing, or failed acknowledgement reaches the
-  footer error and leaves Settings open for retry. Routing-authority reads are
-  coalesced and retried before dependent speech/routing persistence.
-  Reassignable shell state and Settings working copies cross
-  the private registry through live accessors; a captured array, set, boolean,
-  or cache reference is not an acceptable lazy-runtime dependency. Optional
-  panel presentation follows the same residency boundary: the Devices tab
-  imports `frontend/src/features/settings/devices.css`, the Tools inventory
-  owns its complete base/comfort rules in `tools-inventory.css`, and shared
-  modal-only refinements live in `settings-comfort.css`. A manifest-generated
-  CSS entry imports ordered base sections before those refinements; Vite waits
-  for CSS before invocation. The project-folder remote-device picker stays eager
-  because it can render without opening Settings.
-- The composer has one compact **conversation bar**, owned by
-  `features/conversation-bar/{project-context,context-meter,turn-navigation}.ts`
-  and `25-conversation-bar.css`. Project location is the left segment of a
-  content-sized project cluster: Auto stays beside the names. Idle width lives
-  in the strip between Auto and the meter, not inside a stretched trigger.
-  Names that fit that leftover (strip minus Auto/meter/turns/chrome) join with
-  a middle dot; `+N` only counts names that do not. Labels are measured at
-  `max-content` so ellipsis stretch cannot collapse a fit to `+N`. A
-  ResizeObserver on the strip/bar (and sibling mutations) refits the list and
-  is disconnected on destroy. A literal context meter and fixed previous/count/next follow it.
-  There is no pet, scene, pocket, separate project card or ornamental sphere.
-  Native buttons open shared nonmodal `disclosure.ts` panels for full paths and
-  permissions, context counts/compaction actions, and a TurnStore jump list.
-  Named container queries compact labels by actual pane width, not only screen
-  width. Narrow panes move Auto/Manual into project details; the bar never wraps.
-  Panels become fixed before anchor measurement so body flex cannot shift the UI.
-  Escape returns focus; native outside click/focus wins, and resize/scroll/
-  hidden-page dismissal releases the panel's temporary listeners.
-  Retained project/context/turn adapters inject existing command and accounting
-  ports, not another store. Explicit jumps reveal stable IDs through the
-  Surface-owned 80-turn window and suspend follow; jump lists mount at most
-  50 rows, with explicit paging/loading for earlier server history. A `+`
-  marks incomplete loaded-history counts. Late history responses are fenced
-  by view generation; project permission/clear completion shares the project
-  controller's navigation generation. Manual compaction is single-flight per
-  page and its progress is visible only in the originating conversation.
-  UI previews cap text at 24,000 characters; durable summaries stay server-owned.
-  Specs: `node --test tests/context_meter.test.cjs tests/turn_navigation.test.cjs tests/project_location.test.cjs`,
-  `tests/conversation/test_conversation_bar_browser.py` and Surface window/reveal tests.
+- Settings retained presenters are demand-loaded as the manifest-owned `settings-presenters` runtime. `frontend/src/features/settings.ts` evaluates the typed Settings owners before that retained island, so every declared typed service is present when the generated runtime closes its dependency boundary. The shell routes `openSettings`, `closeSettings`, `saveSettings`, `switchSettingsTab`, and onboarding's immediate `_oauthLogin` through the feature bridge. Saving keeps its busy latch until feature-toggle writes are acknowledged; a rejected, missing, or failed acknowledgement reaches the footer error and leaves Settings open for retry. Routing-authority reads are coalesced and retried before dependent speech/routing persistence. Reassignable shell state and Settings working copies cross the private registry through live accessors; a captured array, set, boolean, or cache reference is not an acceptable lazy-runtime dependency. Optional panel presentation follows the same residency boundary: the Devices tab imports `frontend/src/features/settings/devices.css`, the Tools inventory owns its complete base/comfort rules in `tools-inventory.css`, and shared modal-only refinements live in `settings-comfort.css`. A manifest-generated CSS entry imports ordered base sections before those refinements; Vite waits for CSS before invocation. The project-folder remote-device picker stays eager because it can render without opening Settings.
+- The composer has one compact **conversation bar**, owned by `features/conversation-bar/{project-context,context-meter,turn-navigation}.ts` and `25-conversation-bar.css`. Project location is the left segment of a content-sized project cluster: Auto stays beside the names. Idle width lives in the strip between Auto and the meter, not inside a stretched trigger. Names that fit that leftover (strip minus Auto/meter/turns/chrome) join with a middle dot; `+N` only counts names that do not. Labels are measured at `max-content` so ellipsis stretch cannot collapse a fit to `+N`. A ResizeObserver on the strip/bar (and sibling mutations) refits the list and is disconnected on destroy. A literal context meter and fixed previous/count/next follow it. There is no pet, scene, pocket, separate project card or ornamental sphere. Native buttons open shared nonmodal `disclosure.ts` panels for full paths and permissions, context counts/compaction actions, and a TurnStore jump list. Named container queries compact labels by actual pane width, not only screen width. Narrow panes move Auto/Manual into project details; the bar never wraps. Panels become fixed before anchor measurement so body flex cannot shift the UI. Escape returns focus; native outside click/focus wins, and resize/scroll/ hidden-page dismissal releases the panel's temporary listeners. Retained project/context/turn adapters inject existing command and accounting ports, not another store. Explicit jumps reveal stable IDs through the Surface-owned 80-turn window and suspend follow; jump lists mount at most 50 rows, with explicit paging/loading for earlier server history. A `+` marks incomplete loaded-history counts. Late history responses are fenced by view generation; project permission/clear completion shares the project controller's navigation generation. Manual compaction is single-flight per page and its progress is visible only in the originating conversation. UI previews cap text at 24,000 characters; durable summaries stay server-owned. Specs: `node --test tests/context_meter.test.cjs tests/turn_navigation.test.cjs tests/project_location.test.cjs`, `tests/conversation/test_conversation_bar_browser.py` and Surface window/reveal tests.
 - Timer creation settles an immutable `timerReceipt` through ordinary tool-result metadata; typed cards describe the background handoff after reload without a waiting-task spinner or browser timer. Live panel rows distinguish code predicates, ready dispatch, fired, failed and expired states; desktop/mobile evidence lives in `tests/visual/test_visual_timer_panel.py`. Update, Timer, and Optimizer retained presenters are one demand-loaded
   `utility-panels` runtime behind `frontend/src/features/utility-panels.ts`.
   Their five pre-land entries have one feature domain, and the shell prepares
@@ -505,24 +499,7 @@ Rejected: arbitrary splits retaining ambient dependencies; repeated suffix scans
   reads `_tofuKnowledgeModalOpen` live from `runtimeScope`, while the lazy
   presenter is the sole writer, preserving drop arbitration without a browser
   global or captured state.
-- The Project folder workbench is the manifest-owned, demand-loaded
-  `project-presenters` runtime behind `frontend/src/features/project.ts`.
-  Core project state, bar rendering, restore/SSE reconciliation, and background
-  rescan remain retained because they run without the modal. A conversation
-  restore carries its primary recent-path intent inside the same `setPaths`
-  request; an explicit workbench apply carries a primary-first prefix of at
-  most 32 selected roots without truncating the authoritative project list. The
-  browser owns no second recent-path write, and background/status reconciliation
-  omits the optional intent. Write approvals, subprocess stdin, and apply-code confirmation
-  remain in the small retained `execution-interactions.js` section, so coding
-  actions neither wait for nor retain the folder browser. The generated
-  presenter imports its typed browse coordinator and static icon owner only on
-  demand. Mutable conversation/project authority crosses one frozen
-  `ProjectPresentationShellState` live accessor object; individual values
-  must not be captured through `featureRegistry`. The retained clear path
-  probes the optional `ProjectModalPresentation` cleanup owner and never
-  invokes the open/close feature stub, preventing an idle clear from fetching
-  the workspace.
+- The Project folder workbench is the manifest-owned, demand-loaded `project-presenters` runtime behind `frontend/src/features/project.ts`. Core project state, bar rendering, restore/SSE reconciliation, and background rescan remain retained because they run without the modal. A conversation restore carries its primary recent-path intent inside the same `setPaths` request; an explicit workbench apply carries a primary-first prefix of at most 32 selected roots without truncating the authoritative project list. The browser owns no second recent-path write, and background/status reconciliation omits the optional intent. Write approvals, subprocess stdin, and apply-code confirmation remain in the small retained `execution-interactions.js` section, so coding actions neither wait for nor retain the folder browser. The generated presenter imports its typed browse coordinator and static icon owner only on demand. Mutable conversation/project authority crosses one frozen `ProjectPresentationShellState` live accessor object; individual values must not be captured through `featureRegistry`. The retained clear path probes the optional `ProjectModalPresentation` cleanup owner and never invokes the open/close feature stub, preventing an idle clear from fetching the workspace.
 - Local Control's modal, capability status probes, download/diagnostic
   presentation, three-second open-modal poll, and browser-assisted desktop
   relay are the manifest-owned, demand-loaded `local-control-presenters`
@@ -718,31 +695,7 @@ Rejected: arbitrary splits retaining ambient dependencies; repeated suffix scans
   conversation-title lookup are injected capabilities. Retained code owns
   timeline chronology and the peer-jump event lifecycle only; it carries no
   XML, sender-deduplication, escaping, localization, or resource policy.
-- Human Guidance cards and compact outcome rows live in the DOM-free
-  `frontend/src/conversation/presentation/tool-human-guidance-presentation.ts`
-  owner. Its single immutable port closes the awaiting → skipped → submitted
-  state order. Settled unanswered questions are read-only unless the exact
-  Turn settlement offers `answer_guidance`; that late-answer projection keeps
-  the original choice UI interactive after Stop. It admits at most 16 options,
-  parses legacy option JSON only below 65,536 code units, bounds identifiers at
-  512, questions at 32,768, labels at 1,024, descriptions at 8,192, and each
-  option-owned note at 4,096 units, and makes every elision or unavailable
-  response visible. Guidance IDs, ordered option indexes, and original choice
-  labels remain escaped `data-*` values consumed by static restricted actions;
-  none can enter executable action text. Translation and sanitized Markdown are
-  injected capabilities. Delegated response behavior lives separately in the
-  lifecycle-scoped `frontend/src/conversation/ui/human-guidance-actions.ts`
-  owner. It reads only card-scoped static selectors, requires
-  card/group/button/note datasets and ordered indexes to agree, rejects more
-  than 16 option groups, and submits only the chosen label and that option's
-  draft. It caps free-text replies at 32,768 code units before translation or
-  transport and permits one in-flight submission per conversation/guidance
-  identity. Choice rollback is exact; translation failure falls back to the
-  bounded original; backend 404 triggers an expired repaint while transport
-  failure keeps its distinct error. Composition owns the presentation store
-  through an immutable lexical port. Retained code keeps only EN-to-CN arrival
-  translation and two forwarding action entries; it publishes no Human
-  Guidance state through `runtimeScope`.
+- Human Guidance cards and compact outcome rows live in the DOM-free `frontend/src/conversation/presentation/tool-human-guidance-presentation.ts` owner. Its single immutable port closes the awaiting → skipped → submitted state order. Settled unanswered questions are read-only unless the exact Turn settlement offers `answer_guidance`; that late-answer projection keeps the original choice UI interactive after Stop. It admits at most 16 options, parses legacy option JSON only below 65,536 code units, bounds identifiers at 512, questions at 32,768, labels at 1,024, descriptions at 8,192, and each option-owned note at 4,096 units, and makes every elision or unavailable response visible. Guidance IDs, ordered option indexes, and original choice labels remain escaped `data-*` values consumed by static restricted actions; none can enter executable action text. Translation and sanitized Markdown are injected capabilities. Delegated response behavior lives separately in the lifecycle-scoped `frontend/src/conversation/ui/human-guidance-actions.ts` owner. It reads only card-scoped static selectors, requires card/group/button/note datasets and ordered indexes to agree, rejects more than 16 option groups, and submits only the chosen label and that option's draft. It caps free-text replies at 32,768 code units before translation or transport and permits one in-flight submission per conversation/guidance identity. Choice rollback is exact; translation failure falls back to the bounded original; backend 404 triggers an expired repaint while transport failure keeps its distinct error. Composition owns the presentation store through an immutable lexical port. Retained code keeps only EN-to-CN arrival translation and two forwarding action entries; it publishes no Human Guidance state through `runtimeScope`.
 - The chat-picker capability taxonomy lives in the pure, stateful
   `frontend/src/core/model-capability-taxonomy.ts` controller. It starts from
   the backend-parity fallback, validates and atomically replaces that set from
@@ -1006,46 +959,7 @@ uncertain/stale case still revalidate the authoritative catalog. The ordered
 conversation stream or an authoritative reset snapshot is the only Turn
 projection writer.
 
-Diagnostics are a read-only projection of `ConversationTurnRead`, connection
-metadata, and the active Surface dataset. Collecting diagnostics never issues a
-conversation request, parses a message array, or creates a recovery state path.
-Its collector is retained and bounded, while Debug/Request Inspector
-presentation is demand-loaded; a closed owner performs no task, trace, payload,
-or reconstructed-message read. Request Inspector keeps its pre-request
-message/schema snapshot for exact
-historical reconstruction and joins the matching bounded
-`tool_wire_projection` event for provider-bound truth. The round list is
-requests only (state mirrors are served per round through the payload
-endpoint, never listed), and each round row names the tools that round
-INVOKED — folded server-side from the next snapshot's new-message tail,
-the same glanceability contract as the chat timeline's turn blocks.
-A delegating run (Goal mode) merges its swarm children's rounds into the
-same list: each child event log is folded independently (attempt/wire/tool
-joins stay scoped to that log's own `(turn, roundNum)` space), merged rows
-carry `sourceTaskId` plus the agent badge, and the drawer's per-round
-payload, previous-round diff base, and raw-archive reads all address
-`sourceTaskId` instead of the selected parent. At most 32 child streams are
-merged into one fold; overflow reports `coverageReason:child-limit` so the
-bounded diagnostic never claims full coverage. Sub-agent snapshots reuse the
-finalized request body's canonical messages, model, tools, and wire parameters
-rather than reconstructing a second approximation.
-Round detail exposes final wire names, schema-token estimate, exact fingerprint,
-discovery backend, budget and omissions; assembly snapshots never stand for input.
-At the existing 10,000-structural/200,000-scanned boundary, one-row lookahead proves
-whether more rows exist. Source-bound `eventReadBounds` share the byte-bounded
-cache and mark overflow partial; exact-boundary exhaustion stays complete.
-Truncated histories cannot establish latest snapshots or missing rounds: detail
-fails retryably, wire gaps stay unexpired, and prior evidence carries a window notice.
-Storage-only snapshot delta v2 shares one chronological `(task, turn)` baseline
-across request/state kinds; the server rebuilds full kind-specific payloads,
-while unversioned v1 histories retain their original interpretation.
-The per-round endpoint decodes one proxy-added escape layer only for minted
-`<phase>:<32-hex-token>` turn addresses and minted `parent#agent:child`
-stream IDs. A direct address stays exact; an arbitrary percent-escaped caller
-value is never widened. A failed event-store
-read returns 503, distinct from a confirmed missing/expired round (404). The
-inline Round panel shows a retry control for transport or storage failure and
-uses the request snapshot when the optional post-tool mirror was not captured.
+Diagnostics are a read-only projection of `ConversationTurnRead`, connection metadata, and the active Surface dataset. Collecting diagnostics never issues a conversation request, parses a message array, or creates a recovery state path. Its collector is retained and bounded, while Debug/Request Inspector presentation is demand-loaded; a closed owner performs no task, trace, payload, or reconstructed-message read. Request Inspector keeps its pre-request message/schema snapshot for exact historical reconstruction and joins the matching bounded `tool_wire_projection` event for provider-bound truth. The round list is requests only (state mirrors are served per round through the payload endpoint, never listed), and each round row names the tools that round INVOKED — folded server-side from the next snapshot's new-message tail, the same glanceability contract as the chat timeline's turn blocks. A delegating run (Goal mode) merges its swarm children's rounds into the same list: each child event log is folded independently (attempt/wire/tool joins stay scoped to that log's own `(turn, roundNum)` space), merged rows carry `sourceTaskId` plus the agent badge, and the drawer's per-round payload, previous-round diff base, and raw-archive reads all address `sourceTaskId` instead of the selected parent. At most 32 child streams are merged into one fold; overflow reports `coverageReason:child-limit` so the bounded diagnostic never claims full coverage. Sub-agent snapshots reuse the finalized request body's canonical messages, model, tools, and wire parameters rather than reconstructing a second approximation. Round detail exposes final wire names, schema-token estimate, exact fingerprint, discovery backend, budget and omissions; assembly snapshots never stand for input. At the existing 10,000-structural/200,000-scanned boundary, one-row lookahead proves whether more rows exist. Source-bound `eventReadBounds` share the byte-bounded cache and mark overflow partial; exact-boundary exhaustion stays complete. Truncated histories cannot establish latest snapshots or missing rounds: detail fails retryably, wire gaps stay unexpired, and prior evidence carries a window notice. Storage-only snapshot delta v2 shares one chronological `(task, turn)` baseline across request/state kinds; the server rebuilds full kind-specific payloads, while unversioned v1 histories retain their original interpretation. The per-round endpoint decodes one proxy-added escape layer only for minted `<phase>:<32-hex-token>` turn addresses and minted `parent#agent:child` stream IDs. A direct address stays exact; an arbitrary percent-escaped caller value is never widened. A failed event-store read returns 503, distinct from a confirmed missing/expired round (404). The inline Round panel shows a retry control for transport or storage failure and uses the request snapshot when the optional post-tool mirror was not captured.
 
 **Problem.** A web proxy changed the encoded colon in an Inspector turn from
 `%3A` to `%253A`; the server compared the resulting literal `%3A` with the
@@ -1115,6 +1029,19 @@ separate lifecycles and cannot gate or overwrite one another.
 
 ## Rendering and identity
 
+Problem: retained chat helpers and mobile keyboard code duplicated the typed
+viewport's follow latch, while the latest button only reached the mounted
+window's bottom. Decision: all callers use the existing Surface presentation
+port's explicit-latest, conditional-follow and near-latest semantics. Only the
+viewport writes scroll geometry; Surface owns logical windows. One controller
+commit path merges graph/presentation invalidation, retains forced paints and
+fences cancelled callbacks by frame identity. Mounted Turn identities come from
+keyed commits, replacing subtree observation and repeated DOM scans. Mobile
+visual-viewport events share the existing scoped height owner. Alternatives
+rejected: coordinating two latches, inferring latest from physical position,
+and adding another observer/scheduler. Verification and measurements live in
+`RENDER_CONTRACT.md` and `RESOURCE_CONTROL.md`.
+
 - `turnId` is the only identity of a rendered Turn; `blockId` is the only
   identity below it. Array indexes and special streaming nodes are forbidden.
 - Running and terminal revisions reconcile into the same keyed DOM nodes.
@@ -1181,8 +1108,8 @@ toggles:
 
 Selecting any row atomically clears the other loop owner, a selected
 orchestration workflow, and direct image-creation mode. Plan also enables Human
-Guidance; explicitly disabling Human Guidance exits Plan. Chat/Studio remains
-an orthogonal capability dial.
+Guidance; explicitly disabling Human Guidance exits Plan. Project attachment is
+optional context, not a Chat/Studio capability dial.
 
 The Agent selector is also the Debug-only saved-workflow selector. The
 Autopilot graph remains a Studio template but does not appear again as a
@@ -1227,29 +1154,7 @@ npm run check:frontend
 python3 scripts/frontend_budget.py
 ```
 
-`check:frontend` verifies generated runtime, styles, conversation and i18n
-contracts, all literal i18n calls/attributes, actions, TypeScript, and the
-production build. Retained runtime composition also rejects import-time use of
-a later top-level lexical declaration; infrastructure registries such as
-`runtimeScope` are declared before eager composition and cannot depend on
-manifest concatenation order. Before any new asset enters the live directory,
-the unpublished minified graph is loaded in one bounded, headless Chromium
-canary with in-memory API fixtures. Publication requires `tofu:app-ready`, the
-conversation and folder bootstrap requests, and no unhandled page or fatal boot
-error. A failed canary leaves the existing manifest and all served assets
-untouched. The canary defaults `PLAYWRIGHT_NODEJS_PATH` to the build process's
-`process.execPath`, while preserving an explicit operator value. Problem:
-Playwright's bundled Node can require a newer glibc than the host even when
-Vite builds successfully. Decision: reuse the Node already executing the
-build. Alternative rejected: skipping the browser canary would publish an
-unverified graph. The Vite manifest carries the locale-source digest; the
-deployment controller and packaging gates refuse a graph whose language chunks
-predate the locale source. The ASGI lifespan validates only the complete
-published graph, which is also the atomic request-serving commit: authoring
-source edits cannot withdraw the last validated graph during process recovery,
-and requests adopt new bytes only after a complete manifest publish.
-Composition tests prove the manifests recreate the checked-in delivery bytes;
-size budgets apply to authoring sections as well as shipped resources.
+`check:frontend` verifies generated runtime, styles, conversation and i18n contracts, all literal i18n calls/attributes, actions, TypeScript, and the production build. Retained runtime composition also rejects import-time use of a later top-level lexical declaration; infrastructure registries such as `runtimeScope` are declared before eager composition and cannot depend on manifest concatenation order. Before any new asset enters the live directory, the unpublished minified graph is loaded in one bounded, headless Chromium canary with in-memory API fixtures. Publication requires `tofu:app-ready`, the conversation and folder bootstrap requests, and no unhandled page or fatal boot error. A failed canary leaves the existing manifest and all served assets untouched. The canary defaults `PLAYWRIGHT_NODEJS_PATH` to the build process's `process.execPath`, while preserving an explicit operator value. Problem: Playwright's bundled Node can require a newer glibc than the host even when Vite builds successfully. Decision: reuse the Node already executing the build. Alternative rejected: skipping the browser canary would publish an unverified graph. The Vite manifest carries the locale-source digest; the deployment controller and packaging gates refuse a graph whose language chunks predate the locale source. The ASGI lifespan validates only the complete published graph, which is also the atomic request-serving commit: authoring source edits cannot withdraw the last validated graph during process recovery, and requests adopt new bytes only after a complete manifest publish. Composition tests prove the manifests recreate the checked-in delivery bytes; size budgets apply to authoring sections as well as shipped resources.
 
 ## Extension checklist
 
@@ -1290,21 +1195,27 @@ still uses the existing private feature registry compatibility ports; extracting
 all workspace HTML into smaller components and complete action reattachment after
 navigation are remaining follow-ups, not a second store or transport migration.
 
-### Conversation project restoration
+### Conversation workspace projection
 
-`conversation/application/conversation-project.ts` owns navigation restoration,
-including boot and cold snapshot continuations. The retained `project_state.js`
-adapter supplies draft, selection, transport and presentation ports until typed migration.
+**Problem:** navigation-driven server project restoration and draft preservation
+coupled an execution target to disposable composer state. **Decision:**
+`conversation/application/conversation-project.ts` projects saved roots locally,
+with no server `setPaths` call and no draft gate. Send captures that conversation's
+complete binding, including explicitly empty roots, before asynchronous resolution.
+New-chat attachments belong only to that draft. Late picker/hydration responses
+cannot overwrite a newer explicit choice; global status enriches only matching
+roots and never selects a project or changes access modes. **Alternative rejected:**
+more synchronization guards around a shared current-project authority.
+Status-only repaints preserve the navigation generation so pending authoritative
+hydration can still update the view; only navigation or an explicit choice
+invalidates that response. A cold-open integration test covers the overlap.
 
-An empty composer restores the target conversation's primary, extra roots and
-read-only subset via the pruning multi-path endpoint. Text, image/PDF/video
-attachments or pending cleaned-log input preserve the composer project instead.
-Generation, selection identity and live draft checks fence late hydration and
-restore responses (including A→B→A). Navigation and general settings capture
-never copy the global project into conversation metadata. Restore failure leaves
-the durable binding intact for retry and does not persist a mode demotion.
-Explicit project selection/clear and send are context commit boundaries; send
-copies the armed composer project's complete roots and read-only policy.
+Everyday chat has one capability mode. Legacy Air/Pro/Studio selections normalize
+to `chat`; `ui/optional-project-attachment.ts` paints the optional attachment action
+without changing model, Plan, Goal or Flow controls. Automatic private output
+roots are server-owned accepted-attempt configuration, never saved user attachments.
+Specs: `conversation-project.test.ts`, `test_conversation_project_restore.py`,
+`tests/conversation/test_automatic_workspace.py` and the workspace browser journey.
 
 `conversation/application/conversation-model.ts` applies the same draft rule to models/presets, provider references and thinking depth. Only explicit model/depth choices and send commit selection; navigation/settings capture never do. Cold hydration checks selection identity and navigation generation. Catalog refresh never substitutes unavailable models; legacy preset aliases resolve at paint.
 
@@ -1315,3 +1226,42 @@ Its authored stylesheet is imported by the lazy feature entry, not added to the
 base chat stylesheet. Conversation details share the backend goal journal.
 
 Authoring source demand — Problem: preflight read only a CPU/memory-sized thread window and held completed small-file bodies in Futures. Decision: the shared demand executor starts every independent source read; the launch probe sizes idle reuse only. Fixed-size read chunks enter one caller-owned anonymous spool, and Futures carry segment offsets/lengths. Canonical path ordering and SHA-256 framing remain identical; source read errors still invalidate preflight. Real thread publication failure reads once on the caller. Optional spool creation/write/read failure joins readers and uses the existing direct streaming hash path. Any failed hash cancels unstarted work, stops active read loops and joins before file close. Alternatives: larger windows still delay sources; retaining every response body inflates RAM; duplicated/unowned readers lose cleanup and freshness. Rendezvous, exact framing and physical I/O-fault tests verify the boundary. Measurement: a controlled 32-file / 2,097,152-byte rendezvous with idle hint 1 completed in 14.76 ms, matching the sequential digest and retaining zero threads or spool descriptors after return. Transient spool contents live only until the hash/fallback completes.
+
+## Composer translation wait receipt
+
+**Problem:** send translation was represented only by an assistant placeholder, conflating provider execution with command acceptance and storage waits. **Decision:** `conversation/application/composer-translation-status.ts` projects a compact, wrapping receipt inside the composer for send and manual Turn translations. The existing demand-scoped presentation ticker owns its one visible-demand timer and visibility listener; settlement, navigation away, and composition teardown release scheduling. Only pending operations and one terminal receipt are retained, never history. Elapsed seconds mean browser waiting (queueing/translation/saving/poll delivery), not provider execution duration. Actual returned model labels are shown on success; missing labels remain explicitly unknown. Cancellation and failure are distinct, terminal duplicate deliveries are idempotent, and task IDs fence stale terminal pushes. No transport or durable Turn write is added. **Alternatives rejected:** showing the cheap-pool candidate as the actual model is misleading; calling the whole HTTP round-trip model execution time hides storage contention. Provider execution duration for historical turns is unavailable and is not fabricated. Specs: `composer-translation-status.test.ts` and `tests/visual/test_visual_composer_translation_status.py`.
+
+### Active Goal/flow progress context
+
+**Problem:** visible phase rows can keep the original orchestration root running
+while a later worker iteration owns conversation `livePhase`. A generic waiting
+placeholder on the earlier root hides ongoing work from readers remaining there.
+
+**Decision:** `presentation/view-model/live-turns.ts` derives read-only iteration
+context from the newest active durable main-lane phase. An earlier running root
+receives a summary only when both nonempty `runId` and current attempts' physical
+`taskId` agree. Completed virtual users and settled phases never participate.
+The newest worker retains live-phase ownership; root context delegates to
+`presentation/live-phase.ts` for the same localized labels, tools and model route
+as normal chat, without assigning the child phase to the root attempt. Copy says
+“Run ongoing”; ordinary single-turn waiting and storage-warning priority remain.
+`conversation-activity.ts` is the sole sidebar verdict selector for all modes.
+`goal-run-affiliation.ts` joins both sidebar conclusions and run notices, fenced
+by real human input; virtual users never acquire human authorization.
+
+Existing launch/snapshot/card normalization enriches this summary; nested swarm
+producer IDs are not physical Goal execution IDs. Skip settled launches and
+collect at most eight active/pending summaries. Names, admission wait and latest
+tool receipt stay separate evidence, never inferred blockers. Use escaped plain
+text and EN/ZH ports; storage warnings win. No polling, Turn writes or new state.
+
+**Alternatives rejected:** transferring phase authority to an older root;
+separate Goal labels/status caches; cross-run iteration joins; silence verdicts.
+Terminal segments and rich rounds stay independent. Historical VU duplicates
+use `terminal-segment-presentation.ts`: only a superseded `text:terminal` with
+exact machine-token sanitizer equivalence to a canonical completion is hidden.
+
+Executable evidence: `conversation-activity.test.ts`, `live-phase.test.ts`,
+`view-model/{goal-progress,terminal-segment-presentation}.test.ts` and Chromium
+`tests/visual/test_visual_goal_progress.py`: run/actor fences, phase parity,
+rich-round retention, narrow EN/ZH context, sidebar rate limits and settled cleanup.

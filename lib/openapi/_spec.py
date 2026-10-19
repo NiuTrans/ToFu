@@ -153,7 +153,7 @@ def build_spec(app, *, title: str = 'Tofu API',
     }
     # Bootstrap DTOs are already complete HTTP schemas, not handler payloads.
     # Merge only registered operations: disabled/absent surfaces stay absent.
-    from lib.api_v4_generated import OPENAPI_DOCUMENT
+    from lib.generated_api_v4 import OPENAPI_DOCUMENT
     for path, item in OPENAPI_DOCUMENT['paths'].items():
         if path in paths:
             for method, operation in item.items():

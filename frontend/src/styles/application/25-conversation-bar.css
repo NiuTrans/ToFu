@@ -158,3 +158,7 @@
   .ctx-meter-fill {background:Highlight}
   .conversation-bar-panel,.ctx-bar-popover,.turn-jump-panel {border-color:CanvasText}
 }
+
+.turn-jump-direct {display:flex;align-items:center;gap:var(--space-1);padding:var(--space-1)}
+.turn-jump-direct input {width:8ch;min-width:0;background:var(--bg-primary);color:var(--text-primary);border:1px solid var(--border);border-radius:var(--radius-sm);padding:var(--space-1);font:inherit}
+.turn-jump-direct input:focus-visible {outline:2px solid var(--accent);outline-offset:1px}

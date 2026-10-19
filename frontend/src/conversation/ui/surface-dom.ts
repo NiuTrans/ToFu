@@ -30,6 +30,8 @@ export type ManagedBlocksContainerElement = HTMLElement & {
   _tofuOutlineStatus?: ConversationTurnViewModel['status'];
   _tofuBlocksSource?: ReadonlyArray<ConversationBlockViewModel>;
   _tofuBlocksStart?: number;
+
+  _tofuBlocksEnd?: number;
   _tofuBlocksRenderer?: ConversationSurfaceRenderers['renderBlock'];
 };
 
@@ -71,6 +73,8 @@ export type ManagedPlanDecisionElement = HTMLElement & {
 export type ManagedTurnElement = HTMLElement & {
   _tofuTurnVm?: ConversationTurnViewModel;
   _tofuTurnBlockStart?: number;
+
+  _tofuTurnBlockEnd?: number;
   _tofuTurnPlanDecision?: PlanDecisionViewModel | null;
   _tofuTurnSurfaceOptions?: unknown;
 };
@@ -97,18 +101,22 @@ export function ensurePart(
   part: string,
   tagName = 'div',
 ): HTMLElement {
-  const existing = directPart(parent, part);
-  if (existing) {
-    /* A part is a singleton slot. If an earlier transition left a duplicate,
-     * drop the extras so the managed node is the only one that renders. */
-    let kept = false;
-    for (const node of Array.from(parent.children) as HTMLElement[]) {
-      if (node.dataset.conversationPart !== part) continue;
-      if (!kept && node === existing) { kept = true; continue; }
-      node.remove();
+  /* A part is a singleton slot. Find the surviving node and drop any stale
+   * duplicate in ONE sibling walk: directPart's early exit can't prune, and a
+   * second Array.from(parent.children) pass re-walks the live HTMLCollection
+   * (quadratic per commit). Capture nextElementSibling before removal detaches
+   * the cursor, like directKeyedChildren. */
+  let existing: HTMLElement | null = null;
+  for (let child = parent.firstElementChild; child;) {
+    const next = child.nextElementSibling;
+    const element = child as HTMLElement;
+    if (element.dataset.conversationPart === part) {
+      if (!existing) existing = element;
+      else child.remove();
     }
-    return existing;
+    child = next;
   }
+  if (existing) return existing;
   const node = parent.ownerDocument.createElement(tagName);
   node.dataset.conversationPart = part;
   node.className = `conversation-${part}`;

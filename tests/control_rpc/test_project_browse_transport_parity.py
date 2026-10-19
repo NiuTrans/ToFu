@@ -17,8 +17,8 @@ pytestmark = pytest.mark.unit
 def browse_app(monkeypatch):
     from lib.api_keys import AuthContext
     from lib.api_v4 import attach_v4_envelope
-    from lib.app_factory import create_base_app
-    from lib.http_error_handlers import register_http_error_handlers
+    from lib.app.app_factory import create_base_app
+    from lib.http_transport.error_handlers import register_http_error_handlers
     from routes.api_v1.project import project_browse
 
     context = AuthContext(

@@ -14,21 +14,24 @@ use crate::authority::{AuthorityDatabase, AuthorityTransaction};
 use crate::conversation_header::TENANT_GLOBAL_OWNER_ID;
 use crate::entity::EntityKey;
 use crate::generated_tofudb_ir::{
-    MAX_ENTITY_RANGE_ROWS, MAX_QUEUE_AUTOPILOT_MARKERS, MAX_QUEUE_GLOBAL_CONVERSATION_ROWS,
-    MAX_QUEUE_ITEMS_PER_CONVERSATION, MAX_QUEUE_ITEM_CORE_BYTES, MAX_QUEUE_REAP_ITEMS,
-    MAX_QUEUE_RESPONSE_BYTES, QUEUE_AUTOPILOT_MARKER_NAMESPACE,
+    MAX_ENTITY_RANGE_ROWS,
+    MAX_QUEUE_REAP_ITEMS,
+    QUEUE_AUTOPILOT_MARKER_NAMESPACE,
     QUEUE_CONVERSATION_ORDER_INDEX_NAMESPACE, QUEUE_GLOBAL_AUTOPILOT_INDEX_NAMESPACE,
     QUEUE_GLOBAL_CONVERSATION_INDEX_NAMESPACE, QUEUE_GLOBAL_LEASE_INDEX_NAMESPACE,
     QUEUE_ITEM_CORE_NAMESPACE, QUEUE_ITEM_ID_CLAIM_NAMESPACE, QUEUE_ITEM_STATE_NAMESPACE,
 };
 use crate::versioned_document::{self, PutRequest};
 
+#[path = "queue_append_metadata.rs"]
+mod append_metadata;
+
+#[cfg(test)]
+std::thread_local! {
+    static ORDER_ROWS_READ: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 const CORE_LOGICAL_NAMESPACE: &str = "conversation_queue";
-/// Mirrors legacy `QUEUE_INJECTION_ACK_MAX_IDS`
-/// (lib/turn_source_queue_contract.py): one inbox drain acknowledges at most
-/// this many queue identities per command.
-const MAX_INJECTION_ACK_IDS: usize = 256;
-const MAX_BACKGROUND_PENDING_ROWS: usize = 32;
 const REAP_PROBE_CONTRACT: &str = "tofu.queue.reap-probe/v1";
 const KINDS: [&str; 6] = [
     "real",
@@ -234,12 +237,12 @@ fn read_core(
         CORE_LOGICAL_NAMESPACE,
         &identity.id,
         TENANT_GLOBAL_OWNER_ID,
-        MAX_QUEUE_ITEM_CORE_BYTES,
+        usize::MAX,
     )?
     .ok_or_else(|| invalid_data("queue core is missing"))?;
     let core = serde_json::from_slice::<Value>(&raw)
         .ok()
-        .and_then(|v| v.as_object().cloned())
+        .and_then(|v| match v { Value::Object(object) => Some(object), _ => None })
         .ok_or_else(|| invalid_data("queue core is malformed"))?;
     if core_owner(&core)? != identity.owner
         || text(&core, "id")? != identity.id
@@ -269,10 +272,9 @@ fn rows(
     conv: &str,
 ) -> io::Result<Vec<IndexIdentity>> {
     let (start, end) = order_range(tx, conv)?;
-    let found = database.entity_scan(tx, &start, &end, MAX_QUEUE_ITEMS_PER_CONVERSATION + 1)?;
-    if found.len() > MAX_QUEUE_ITEMS_PER_CONVERSATION {
-        return Err(invalid_data("queue conversation exceeds its bound"));
-    }
+    let found = scan_paged(database, tx, start, &end, usize::MAX)?;
+    #[cfg(test)]
+    ORDER_ROWS_READ.with(|count| count.set(count.get().saturating_add(found.len())));
     found
         .into_iter()
         .map(|(_, raw)| {
@@ -417,12 +419,8 @@ fn is_legacy_completion(
         .and_then(Value::as_str)
         .is_some_and(|command_id| !command_id.is_empty()))
 }
-fn bounded_response(value: &Value) -> io::Result<Option<Vec<u8>>> {
-    let raw = encode(value, "queue response")?;
-    if raw.len() > MAX_QUEUE_RESPONSE_BYTES {
-        return Err(exhausted("queue response exceeds 8 MiB"));
-    }
-    Ok(Some(raw))
+fn encode_response(value: &Value) -> io::Result<Option<Vec<u8>>> {
+    Ok(Some(encode(value, "queue response")?))
 }
 
 fn scan_paged(
@@ -432,17 +430,17 @@ fn scan_paged(
     end: &EntityKey,
     limit: usize,
 ) -> io::Result<Vec<(EntityKey, Vec<u8>)>> {
-    let mut rows = Vec::with_capacity(limit);
+    let mut rows = Vec::with_capacity(limit.min(MAX_ENTITY_RANGE_ROWS));
     while rows.len() < limit {
         let page_limit = (limit - rows.len()).min(MAX_ENTITY_RANGE_ROWS);
         let page = database.entity_scan(tx, &start, end, page_limit)?;
-        let full = page.len() == page_limit;
+        if page.is_empty() { break; }
         let next = page
             .last()
             .map(|(key, _)| key.clone().exact_range())
             .transpose()?;
         rows.extend(page);
-        if !full || rows.len() == limit {
+        if rows.len() == limit {
             break;
         }
         start = next
@@ -457,6 +455,9 @@ fn delete_summaries(
     tx: &mut AuthorityTransaction,
     items: &[IndexIdentity],
 ) -> io::Result<()> {
+    if let Some(first) = items.first() {
+        append_metadata::remove(database, tx, &first.conversation_id)?;
+    }
     for (kind, oldest) in summary_oldest(items) {
         database.entity_delete(
             tx,
@@ -495,7 +496,7 @@ fn write_summaries(
             )?,
         )?;
     }
-    Ok(())
+    append_metadata::rebuild(database, tx, items)
 }
 fn summary_oldest(items: &[IndexIdentity]) -> BTreeMap<Option<String>, u64> {
     let mut out: BTreeMap<Option<String>, u64> = BTreeMap::new();
@@ -606,7 +607,11 @@ pub(crate) fn enqueue_item(
     {
         return Err(conflict("queue item already exists"));
     }
-    let mut items = rows(database, tx, &request.conversation_id)?;
+    let append = if request.kind == "real" {
+        append_metadata::eligible(database, tx, &request.conversation_id)?
+    } else { None };
+    let mut items = if append.is_some() { Vec::new() }
+        else { rows(database, tx, &request.conversation_id)? };
     delete_summaries(database, tx, &items)?;
     if request.kind == "real" {
         let removed = items
@@ -636,10 +641,10 @@ pub(crate) fn enqueue_item(
             return Ok(value);
         }
     }
-    if items.len() >= MAX_QUEUE_ITEMS_PER_CONVERSATION {
-        return Err(conflict("queue conversation capacity reached"));
-    }
-    let position = items.len() as u64 + 1;
+    let position = append.as_ref().map(|metadata| metadata.item_count)
+        .or_else(|| u64::try_from(items.len()).ok())
+        .and_then(|count| count.checked_add(1))
+        .ok_or_else(|| invalid_data("queue position overflow"))?;
     let core = json!({
         "id": request.queue_id,
         "user_id": tx.owner_user_id(),
@@ -665,7 +670,7 @@ pub(crate) fn enqueue_item(
             expected_version: Some(0),
         },
         TENANT_GLOBAL_OWNER_ID,
-        MAX_QUEUE_ITEM_CORE_BYTES,
+        usize::MAX,
     )?;
     let state = State {
         position,
@@ -699,9 +704,13 @@ pub(crate) fn enqueue_item(
         order_key(tx, &identity)?,
         encode(&identity, "queue order index")?,
     )?;
-    items.push(identity.clone());
-    items.sort_by_key(|item| (item.priority, item.position, item.id.clone()));
-    write_summaries(database, tx, &items)?;
+    if let Some(metadata) = append {
+        append_metadata::append(database, tx, metadata, &identity)?;
+    } else {
+        items.push(identity.clone());
+        items.sort_by_key(|item| (item.priority, item.position, item.id.clone()));
+        write_summaries(database, tx, &items)?;
+    }
     let mut value = public_item(database, tx, &identity, request.include_documents)?;
     value
         .as_object_mut()
@@ -795,7 +804,6 @@ pub(crate) fn acknowledge_background_receipts(
         .filter(|value| !value.is_empty() && value.chars().count() <= 256)
         .ok_or_else(|| invalid_input("invalid background receipt block"))?;
     let deliveries = ack.get("deliveries").and_then(Value::as_array)
-        .filter(|values| values.len() <= MAX_INJECTION_ACK_IDS)
         .ok_or_else(|| invalid_input("invalid background delivery batch"))?;
     let mut expected = BTreeMap::<String, String>::new();
     for delivery in deliveries {
@@ -819,7 +827,6 @@ pub(crate) fn acknowledge_background_receipts(
         return Err(invalid_input("duplicate background receipt block"));
     }
     let previews = receipt.get("previews").and_then(Value::as_array)
-        .filter(|values| values.len() <= MAX_INJECTION_ACK_IDS)
         .ok_or_else(|| invalid_input("invalid background receipt previews"))?;
     let mut observed = BTreeMap::<String, String>::new();
     for preview in previews {
@@ -920,7 +927,7 @@ pub(crate) fn remove_turn_item(
     }))
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize)]
 pub enum Request {
     AutopilotArm {
         conversation_id: String,
@@ -1054,7 +1061,6 @@ impl Request {
                 ..
             } => {
                 valid_text(conversation_id, 256)
-                    && queue_ids.len() <= MAX_INJECTION_ACK_IDS
                     && queue_ids.iter().all(|id| valid_text(id, 256))
             }
             Self::Dequeue {
@@ -1084,11 +1090,24 @@ impl Request {
             }
             Self::AutopilotListAll | Self::Reap { .. } => true,
         };
-        let raw = format!("{self:?}");
-        if !valid || raw.len() > MAX_QUEUE_ITEM_CORE_BYTES {
-            return Err(invalid_input("queue request exceeds its bound"));
+        if !valid {
+            return Err(invalid_input("invalid queue request"));
         }
-        Ok(raw.len())
+        // Charge the encoded owned request without allocating another complete
+        // message/config buffer. Transaction IR keeps its independent format bound.
+        struct ByteCounter(usize);
+        impl io::Write for ByteCounter {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                self.0 = self.0.checked_add(bytes.len())
+                    .ok_or_else(|| invalid_input("queue encoded length overflow"))?;
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> io::Result<()> { Ok(()) }
+        }
+        let mut counter = ByteCounter(0);
+        serde_json::to_writer(&mut counter, self)
+            .map_err(|_| invalid_input("queue request cannot be encoded"))?;
+        Ok(counter.0)
     }
 }
 
@@ -1106,7 +1125,7 @@ pub(crate) fn execute(
             let visible = value.filter(|marker| {
                 marker.get("userId").and_then(Value::as_u64) == Some(tx.owner_user_id())
             });
-            bounded_response(&visible.unwrap_or(Value::Null))
+            encode_response(&visible.unwrap_or(Value::Null))
         }
         Request::AutopilotListAll => {
             let (start, end) = EntityKey::prefix_range(
@@ -1115,11 +1134,8 @@ pub(crate) fn execute(
                 QUEUE_GLOBAL_AUTOPILOT_INDEX_NAMESPACE,
                 b"",
             )?;
-            let rows = scan_paged(database, tx, start, &end, MAX_QUEUE_AUTOPILOT_MARKERS + 1)?;
-            if rows.len() > MAX_QUEUE_AUTOPILOT_MARKERS {
-                return Err(exhausted("autopilot marker feed exceeds its bound"));
-            }
-            bounded_response(&Value::Array(
+            let rows = scan_paged(database, tx, start, &end, usize::MAX)?;
+            encode_response(&Value::Array(
                 rows.into_iter()
                     .map(|(_, v)| decode(&v, "autopilot index"))
                     .collect::<io::Result<_>>()?,
@@ -1146,20 +1162,7 @@ pub(crate) fn execute(
                     .as_object_mut()
                     .unwrap()
                     .insert("armed".into(), json!(false));
-                return bounded_response(&value);
-            }
-            let (start, end) = EntityKey::prefix_range(
-                tx.tenant_id(),
-                TENANT_GLOBAL_OWNER_ID,
-                QUEUE_GLOBAL_AUTOPILOT_INDEX_NAMESPACE,
-                b"",
-            )?;
-            if database
-                .entity_scan(tx, &start, &end, MAX_QUEUE_AUTOPILOT_MARKERS)?
-                .len()
-                >= MAX_QUEUE_AUTOPILOT_MARKERS
-            {
-                return Err(conflict("autopilot marker capacity reached"));
+                return encode_response(&value);
             }
             let stored = json!({"queueId":queue_id,"userId":tx.owner_user_id(),"config":config,"createdAt":created_at_ms});
             database.entity_put(
@@ -1173,25 +1176,25 @@ pub(crate) fn execute(
                 marker_index_key(tx, tx.owner_user_id(), conversation_id)?,
                 encode(&indexed, "autopilot index")?,
             )?;
-            bounded_response(
+            encode_response(
                 &json!({"armed":true,"queueId":queue_id,"config":config,"createdAt":created_at_ms}),
             )
         }
         Request::AutopilotClear { conversation_id } => {
             let key = marker_key(tx, conversation_id)?;
             let Some(raw) = database.entity_get(tx, &key)? else {
-                return bounded_response(&json!({"cleared":false}));
+                return encode_response(&json!({"cleared":false}));
             };
             let marker: Value = decode(&raw, "autopilot marker")?;
             if marker["userId"].as_u64() != Some(tx.owner_user_id()) {
-                return bounded_response(&json!({"cleared":false}));
+                return encode_response(&json!({"cleared":false}));
             }
             database.entity_delete(tx, key)?;
             database.entity_delete(
                 tx,
                 marker_index_key(tx, tx.owner_user_id(), conversation_id)?,
             )?;
-            bounded_response(&json!({"cleared":true}))
+            encode_response(&json!({"cleared":true}))
         }
         Request::List { conversation_id, mode, page_size, max_bytes, cursor } => {
             if !matches!(mode.as_str(), "full" | "preview" | "dispatchable" | "background_pending" | "background_page") {
@@ -1228,8 +1231,7 @@ pub(crate) fn execute(
                     let row_bytes = encode(&value, "queue page item")?.len() + usize::from(!values.is_empty());
                     let next_cursor = json!({"priority":item.priority,"createdAt":item.created_at_ms,"queueId":item.id});
                     let overhead = encode(&json!({"items":[], "nextCursor":next_cursor}), "queue page cursor")?.len();
-                    if values.len() >= *page_size || bytes.saturating_add(row_bytes).saturating_add(overhead) > *max_bytes {
-                        if values.is_empty() { return Err(exhausted("queue page byte budget cannot hold one complete item")); }
+                    if !values.is_empty() && (values.len() >= *page_size || bytes.saturating_add(row_bytes).saturating_add(overhead) > *max_bytes) {
                         more = true;
                         break;
                     }
@@ -1237,19 +1239,16 @@ pub(crate) fn execute(
                     last = Some(next_cursor);
                 }
                 values.push(value);
-                if mode == "background_pending" && values.len() >= MAX_BACKGROUND_PENDING_ROWS {
-                    break;
-                }
             }
-            if paged { bounded_response(&json!({"items":values,"nextCursor":if more { last } else { None }})) }
-            else { bounded_response(&Value::Array(values)) }
+            if paged { encode_response(&json!({"items":values,"nextCursor":if more { last } else { None }})) }
+            else { encode_response(&Value::Array(values)) }
         }
         Request::Depth { conversation_id } => {
             let count = rows(database, tx, conversation_id)?
                 .iter()
                 .filter(|v| v.kind != "autopilot" && v.kind != "background_receipt")
                 .count();
-            bounded_response(&json!({"depth":count}))
+            encode_response(&json!({"depth":count}))
         }
         Request::Enqueue {
             conversation_id,
@@ -1259,7 +1258,7 @@ pub(crate) fn execute(
             message,
             config,
             created_at_ms,
-        } => bounded_response(&enqueue_item(
+        } => encode_response(&enqueue_item(
             database,
             tx,
             &EnqueueItemRequest {
@@ -1299,7 +1298,7 @@ pub(crate) fn execute(
             } else {
                 "removed"
             };
-            bounded_response(&json!({key:found.is_some()}))
+            encode_response(&json!({key:found.is_some()}))
         }
         Request::InjectionAck {
             conversation_id,
@@ -1351,7 +1350,7 @@ pub(crate) fn execute(
                 }
             }
             if matched.is_empty() {
-                return bounded_response(&json!({"removed":0,"removedQueueIds":[]}));
+                return encode_response(&json!({"removed":0,"removedQueueIds":[]}));
             }
             // Legacy reports removals in (position, id) order; every
             // mutation renumbers positions in priority order, so this sort
@@ -1376,7 +1375,7 @@ pub(crate) fn execute(
                 &removed_ids,
                 *occurred_at_ms,
             )?;
-            bounded_response(&json!({"removed":removed_ids.len(),"removedQueueIds":removed_ids}))
+            encode_response(&json!({"removed":removed_ids.len(),"removedQueueIds":removed_ids}))
         }
         Request::Clear { conversation_id }
         | Request::KindClear {
@@ -1403,7 +1402,7 @@ pub(crate) fn execute(
                 renumber(database, tx, &mut items)?;
             }
             write_summaries(database, tx, &items)?;
-            bounded_response(&json!({"cleared":removed.len()}))
+            encode_response(&json!({"cleared":removed.len()}))
         }
         Request::Dequeue {
             conversation_id,
@@ -1426,7 +1425,7 @@ pub(crate) fn execute(
                 }
             }
             let Some((identity, mut state)) = selected else {
-                return bounded_response(&Value::Null);
+                return encode_response(&Value::Null);
             };
             let value = public_item(database, tx, &identity, true)?;
             if let Some(old) = state.leased_until_ms {
@@ -1447,7 +1446,7 @@ pub(crate) fn execute(
                 lease_key(tx, expiry, identity.owner, &identity.id)?,
                 encode(&identity, "queue lease index")?,
             )?;
-            bounded_response(&value)
+            encode_response(&value)
         }
         Request::LeaseBind {
             queue_id,
@@ -1480,11 +1479,8 @@ pub(crate) fn execute(
                 tx,
                 start,
                 &end,
-                MAX_QUEUE_GLOBAL_CONVERSATION_ROWS + 1,
+                usize::MAX,
             )?;
-            if found.len() > MAX_QUEUE_GLOBAL_CONVERSATION_ROWS {
-                return Err(exhausted("queue conversation feed exceeds its bound"));
-            }
             let conversations = found
                 .into_iter()
                 .map(|(_, v)| decode::<Value>(&v, "queue conversation index"))
@@ -1492,11 +1488,11 @@ pub(crate) fn execute(
             if *reap_probe {
                 let now = now_ms.ok_or_else(|| invalid_input("queue reap probe requires time"))?;
                 let expired = !expired_leases(database, tx, now, false, 1)?.is_empty();
-                bounded_response(
+                encode_response(
                     &json!({"reapProbeContract":REAP_PROBE_CONTRACT,"conversations":conversations,"hasExpiredLeases":expired}),
                 )
             } else {
-                bounded_response(&Value::Array(conversations))
+                encode_response(&Value::Array(conversations))
             }
         }
         Request::Reap { now_ms, force } => {
@@ -1525,7 +1521,7 @@ pub(crate) fn execute(
                 }
             }
             let values = conversations.into_values().collect::<Vec<_>>();
-            bounded_response(&json!({"ok":!values.is_empty(),"conversations":values}))
+            encode_response(&json!({"ok":!values.is_empty(),"conversations":values}))
         }
     }
 }
@@ -1538,7 +1534,7 @@ fn lease_change(
     result_key: &str,
 ) -> io::Result<Option<Vec<u8>>> {
     let Some(identity) = read_identity(database, tx, id, tx.owner_user_id())? else {
-        return bounded_response(&json!({result_key:false}));
+        return encode_response(&json!({result_key:false}));
     };
     let mut state = read_state(database, tx, &identity)?;
     if let Some(old) = state.leased_until_ms {
@@ -1562,7 +1558,7 @@ fn lease_change(
         }
     }
     database.entity_put(tx, state_key(tx, id)?, encode(&state, "queue state")?)?;
-    bounded_response(&json!({result_key:true}))
+    encode_response(&json!({result_key:true}))
 }
 fn expired_leases(
     database: &AuthorityDatabase,
@@ -1599,6 +1595,13 @@ fn expired_leases(
     Ok(out)
 }
 
+/// Offline queue import bypasses normal summary maintenance; invalidate the
+/// same-owner derived header in its restoring transaction before adding rows.
+pub(crate) fn invalidate_append_metadata(database: &AuthorityDatabase,
+    tx: &mut AuthorityTransaction, conversation_id: &str) -> io::Result<()> {
+    append_metadata::remove(database, tx, conversation_id)
+}
+
 pub(crate) fn delete_conversation(
     database: &AuthorityDatabase,
     tx: &mut AuthorityTransaction,
@@ -1609,6 +1612,7 @@ pub(crate) fn delete_conversation(
     for item in &items {
         remove_item(database, tx, item)?;
     }
+    append_metadata::remove(database, tx, conversation_id)?;
     let marker = marker_key(tx, conversation_id)?;
     if let Some(raw) = database.entity_get(tx, &marker)? {
         let value: Value = decode(&raw, "autopilot marker")?;
@@ -1687,4 +1691,300 @@ mod completion_outcome_tests {
             assert_eq!(public["backgroundCommand"], *completion);
         }
     }
+
+    #[test]
+    fn admitted_queue_demand_beyond_former_quota_preserves_messages_dedupe_leases_and_reopen() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut database = AuthorityDatabase::initialize(directory.path()).unwrap();
+        execute(&mut database, "conversation.create",
+            json!({"conv_id":"demand-conv","user_id":11}), Some("demand-create"));
+        ORDER_ROWS_READ.with(|count| count.set(0));
+        let started = std::time::Instant::now();
+        for ordinal in 0..1100 {
+            execute(&mut database, "queue.enqueue", json!({
+                "conv_id":"demand-conv", "user_id":11, "queue_id":format!("demand-{ordinal:04}"),
+                "kind":"real", "priority":100, "message":{"text":format!("完整消息-{ordinal}")},
+                "config":{}, "created_at_ms":ordinal+1,
+            }), Some(&format!("enqueue-{ordinal}")));
+        }
+        let enqueue_us = started.elapsed().as_micros();
+        ORDER_ROWS_READ.with(|count| assert_eq!(count.get(), 0, "ordinary append must not read earlier order rows"));
+        let listed = execute(&mut database, "queue.list", json!({"conv_id":"demand-conv","user_id":11}), None);
+        assert_eq!(listed.as_array().unwrap().len(), 1100);
+        for (ordinal, item) in listed.as_array().unwrap().iter().enumerate() {
+            assert_eq!(item["queueId"], format!("demand-{ordinal:04}"));
+            assert_eq!(item["payload"]["text"], format!("完整消息-{ordinal}"));
+        }
+        let lease = json!({"conv_id":"demand-conv","user_id":11,"now_ms":2000,"lease_ms":10000});
+        assert_eq!(execute(&mut database, "queue.dequeue", lease.clone(), Some("lease-first"))["queueId"], "demand-0000");
+        assert_eq!(execute(&mut database, "queue.dequeue", lease.clone(), Some("lease-second"))["queueId"], "demand-0001");
+        execute(&mut database, "queue.lease.release", json!({"queue_id":"demand-0000","user_id":11}), Some("release-first"));
+        assert_eq!(execute(&mut database, "queue.dequeue", lease, Some("lease-again"))["queueId"], "demand-0000");
+        execute(&mut database, "queue.finalize", json!({"conv_id":"demand-conv","queue_id":"demand-0000","user_id":11}), Some("finalize-first"));
+        for ordinal in 1..=2 {
+            let result = execute(&mut database, "queue.enqueue", json!({
+                "conv_id":"demand-conv", "user_id":11, "queue_id":format!("continuation-{ordinal}"),
+                "kind":"goal_continuation", "priority":100, "message":{"text":"continue"},
+                "config":{}, "created_at_ms":2000,
+            }), Some(&format!("continuation-command-{ordinal}")));
+            assert_eq!(result["queueId"], "continuation-1");
+            assert_eq!(result["deduped"], ordinal == 2);
+        }
+        execute(&mut database, "queue.enqueue", json!({"conv_id":"demand-conv","user_id":11,
+            "queue_id":"after", "kind":"real","priority":100,"message":{"text":"最后消息"},"config":{},"created_at_ms":3000}), Some("enqueue-after"));
+        drop(database);
+        let mut reopened = AuthorityDatabase::open(directory.path()).unwrap();
+        let listed = execute(&mut reopened, "queue.list", json!({"conv_id":"demand-conv","user_id":11}), None);
+        let items = listed.as_array().unwrap();
+        assert_eq!(items.len(), 1100);
+        assert_eq!(items[0]["queueId"], "demand-0001");
+        assert_eq!(items[0]["position"], 1);
+        assert_eq!(items.last().unwrap()["queueId"], "after");
+        assert!(items.iter().all(|item| item["kind"] == "real"));
+        let mut other = reopened.begin_with_identity_claim_scopes(7, 12).unwrap();
+        assert!(super::rows(&reopened, &mut other, "demand-conv").unwrap().is_empty());
+        assert!(super::item_by_id(&reopened, &mut other, "demand-0001").unwrap().is_none());
+        eprintln!("queue_demand messages=1100 leased=true deduped=true superseded=true reopened=true enqueue_us={} elapsed_ms={}", enqueue_us, started.elapsed().as_millis());
+    }
+
+
+    #[test]
+    fn admitted_queue_catalogs_and_autopilot_markers_beyond_former_quota_survive_clear_and_reopen() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut database = AuthorityDatabase::initialize(directory.path()).unwrap();
+        for ordinal in 0..1101 {
+            let conv = format!("catalog-{ordinal:04}");
+            execute(&mut database, "conversation.create", json!({"conv_id":conv,"user_id":11}), Some(&format!("create-{ordinal}")));
+            execute(&mut database, "queue.enqueue", json!({"conv_id":conv,"user_id":11,
+                "queue_id":format!("message-{ordinal}"),"kind":"real","priority":100,
+                "message":{"text":format!("保留消息-{ordinal}")},"config":{},"created_at_ms":ordinal+1}), Some(&format!("message-command-{ordinal}")));
+            execute(&mut database, "queue.autopilot.arm", json!({"conv_id":conv,"user_id":11,
+                "queue_id":format!("autopilot-{ordinal}"),"config":{},"created_at_ms":ordinal+1}), Some(&format!("arm-{ordinal}")));
+        }
+        let markers = execute(&mut database, "queue.autopilot.list_all", json!({}), None);
+        assert_eq!(markers.as_array().unwrap().len(), 1101);
+        let conversations = execute(&mut database, "queue.conversations.list_all", json!({}), None);
+        assert_eq!(conversations.as_array().unwrap().len(), 1101);
+        for ordinal in 0..1101 {
+            let conv = format!("catalog-{ordinal:04}");
+            assert!(markers.as_array().unwrap().iter().any(|item| item["convId"] == conv && item["userId"] == 11));
+            assert!(conversations.as_array().unwrap().iter().any(|item| item["convId"] == conv && item["userId"] == 11));
+        }
+        execute(&mut database, "queue.autopilot.clear", json!({"conv_id":"catalog-1100","user_id":11}), Some("clear-marker"));
+        execute(&mut database, "queue.clear", json!({"conv_id":"catalog-1100","user_id":11}), Some("clear-queue"));
+        drop(database);
+        let mut reopened = AuthorityDatabase::open(directory.path()).unwrap();
+        for operation in ["queue.autopilot.list_all", "queue.conversations.list_all"] {
+            let result = execute(&mut reopened, operation, json!({}), None);
+            assert_eq!(result.as_array().unwrap().len(), 1100);
+            assert!(result.as_array().unwrap().iter().all(|item| item["convId"] != "catalog-1100"));
+        }
+    }
+
+
+    #[test]
+    fn append_metadata_bootstraps_legacy_queue_tracks_oldest_and_survives_rollback() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut database = AuthorityDatabase::initialize(directory.path()).unwrap();
+        execute(&mut database, "conversation.create", json!({"conv_id":"metadata-conv","user_id":11}), Some("metadata-create"));
+        for (id, time) in [("first", 100), ("second", 200)] {
+            execute(&mut database, "queue.enqueue", json!({"conv_id":"metadata-conv","user_id":11,
+                "queue_id":id,"kind":"real","priority":100,"message":{"text":id},"config":{},"created_at_ms":time}), Some(id));
+        }
+        let mut tx = database.begin_with_identity_claim_scopes(7, 11).unwrap();
+        append_metadata::remove(&database, &mut tx, "metadata-conv").unwrap();
+        database.commit(tx).unwrap();
+        ORDER_ROWS_READ.with(|count| count.set(0));
+        execute(&mut database, "queue.enqueue", json!({"conv_id":"metadata-conv","user_id":11,
+            "queue_id":"backdated","kind":"real","priority":50,"message":{"text":"backdated"},"config":{},"created_at_ms":50}), Some("backdated"));
+        ORDER_ROWS_READ.with(|count| assert_eq!(count.get(), 2, "legacy bootstrap must read the complete existing index"));
+        let mut tx = database.begin_with_identity_claim_scopes(7, 11).unwrap();
+        let header = append_metadata::eligible(&database, &mut tx, "metadata-conv").unwrap().unwrap();
+        assert_eq!(header.item_count, 3);
+        assert_eq!(summary_oldest(&rows(&database, &mut tx, "metadata-conv").unwrap())[&None], 50);
+        let item = EnqueueItemRequest { conversation_id: "metadata-conv".into(), queue_id: "rolled-back".into(),
+            kind: "real".into(), priority:100, message:serde_json::from_value(json!({"text":"rollback"})).unwrap(),
+            config:Map::new(), created_at_ms:1, input_turn_id:String::new(), output_turn_id:String::new(),
+            attempt_id:String::new(), dedupe_by_kind:true, include_documents:true };
+        enqueue_item(&database, &mut tx, &item).unwrap();
+        drop(tx); // staged message and metadata disappear together
+        drop(database);
+        let mut reopened = AuthorityDatabase::open(directory.path()).unwrap();
+        let mut tx = reopened.begin_with_identity_claim_scopes(7, 11).unwrap();
+        assert_eq!(append_metadata::eligible(&reopened, &mut tx, "metadata-conv").unwrap().unwrap().item_count, 3);
+        assert!(item_by_id(&reopened, &mut tx, "rolled-back").unwrap().is_none());
+        drop(tx);
+        ORDER_ROWS_READ.with(|count| count.set(0));
+        execute(&mut reopened, "queue.enqueue", json!({"conv_id":"metadata-conv","user_id":11,
+            "queue_id":"new-earliest","kind":"real","priority":100,"message":{"text":"new"},"config":{},"created_at_ms":25}), Some("new-earliest"));
+        ORDER_ROWS_READ.with(|count| assert_eq!(count.get(), 0));
+        let summaries = execute(&mut reopened, "queue.conversations.list_all", json!({}), None);
+        assert_eq!(summaries.as_array().unwrap().len(), 1, "backdated fast append must replace the prior summary key");
+        execute(&mut reopened, "queue.clear", json!({"conv_id":"metadata-conv","user_id":11}), Some("metadata-clear"));
+        let mut tx = reopened.begin_with_identity_claim_scopes(7, 11).unwrap();
+        assert!(append_metadata::eligible(&reopened, &mut tx, "metadata-conv").unwrap().is_none());
+    }
+
+
+    #[test]
+    fn concurrent_append_metadata_cannot_publish_duplicate_position_or_stale_count() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut database = AuthorityDatabase::initialize(directory.path()).unwrap();
+        execute(&mut database, "conversation.create", json!({"conv_id":"cas-conv","user_id":11}), Some("cas-create"));
+        execute(&mut database, "queue.enqueue", json!({"conv_id":"cas-conv","user_id":11,
+            "queue_id":"base","kind":"real","priority":100,"message":{"text":"base"},"config":{},"created_at_ms":10}), Some("cas-base"));
+        let request = |id: &str| EnqueueItemRequest { conversation_id:"cas-conv".into(), queue_id:id.into(),
+            kind:"real".into(), priority:100, message:serde_json::from_value(json!({"text":id})).unwrap(),
+            config:Map::new(), created_at_ms:20, input_turn_id:String::new(), output_turn_id:String::new(),
+            attempt_id:String::new(), dedupe_by_kind:true, include_documents:true };
+        let mut first = database.begin_with_identity_claim_scopes(7, 11).unwrap();
+        let mut second = database.begin_with_identity_claim_scopes(7, 11).unwrap();
+        enqueue_item(&database, &mut first, &request("first")).unwrap();
+        enqueue_item(&database, &mut second, &request("second")).unwrap();
+        database.commit(first).unwrap();
+        assert!(database.commit(second).is_err());
+        let mut tx = database.begin_with_identity_claim_scopes(7, 11).unwrap();
+        assert_eq!(append_metadata::eligible(&database, &mut tx, "cas-conv").unwrap().unwrap().item_count, 2);
+        assert!(item_by_id(&database, &mut tx, "second").unwrap().is_none());
+        assert_eq!(item_by_id(&database, &mut tx, "first").unwrap().unwrap()["position"], 2);
+        let mut foreign = database.begin_with_identity_claim_scopes(7, 12).unwrap();
+        assert!(append_metadata::eligible(&database, &mut foreign, "cas-conv").unwrap().is_none());
+    }
+
+
+    #[test]
+    fn admitted_large_queue_core_preserves_escaped_message_config_and_blob_reopen() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut database = AuthorityDatabase::initialize(directory.path()).unwrap();
+        execute(&mut database, "conversation.create", json!({"conv_id":"large-core","user_id":11}), Some("large-create"));
+        let text = "一\n".repeat(350_000);
+        let setting = "\\\"".repeat(250_000);
+        let message = json!({"text":text,"_msgId":"source-large"});
+        let config = json!({"retainedSetting":setting});
+        let request = super::Request::Enqueue { conversation_id:"large-core".into(), queue_id:"large-intent".into(),
+            kind:"real".into(), priority:100, message:message.as_object().unwrap().clone(),
+            config:config.as_object().unwrap().clone(), created_at_ms:1 };
+        let measured = request.validate().unwrap();
+        assert!(measured > 1024 * 1024);
+        assert_eq!(measured, serde_json::to_vec(&request).unwrap().len());
+        let started = std::time::Instant::now();
+        execute(&mut database, "queue.enqueue", json!({"conv_id":"large-core","user_id":11,
+            "queue_id":"large-intent","kind":"real","priority":100,"message":message,"config":config,"created_at_ms":1}), Some("large-enqueue"));
+        drop(database);
+        let mut reopened = AuthorityDatabase::open(directory.path()).unwrap();
+        let listed = execute(&mut reopened, "queue.list", json!({"conv_id":"large-core","user_id":11}), None);
+        let item = &listed.as_array().unwrap()[0];
+        assert_eq!(item["payload"], message);
+        assert_eq!(item["config"], config);
+        assert_eq!(item["sourceMessageId"], "source-large");
+        let mut tx = reopened.begin_with_identity_claim_scopes(7, 11).unwrap();
+        let identity = read_identity(&reopened, &mut tx, "large-intent", 11).unwrap().unwrap();
+        let key = core_key(&tx, &identity.id).unwrap();
+        let row = versioned_document::get_value_with_blob_owner_bounded(&reopened, &mut tx, &key,
+            CORE_LOGICAL_NAMESPACE, &identity.id, TENANT_GLOBAL_OWNER_ID, usize::MAX).unwrap().unwrap();
+        assert!(row.len() > 1024 * 1024);
+        assert!(reopened.entity_get(&mut tx, &key).unwrap().unwrap().len() < row.len());
+        let mut foreign = reopened.begin_with_identity_claim_scopes(7, 12).unwrap();
+        assert!(super::item_by_id(&reopened, &mut foreign, "large-intent").unwrap().is_none());
+        drop(tx);
+        drop(foreign);
+        let snapshot = json!({"id":"restored-large","conv_id":"large-core", "payload":message,"config":config,
+            "position":2,"kind":"real","priority":100,"created_at_ms":2,"leased_until_ms":Value::Null,
+            "lease_task_id":"","input_turn_id":"","output_turn_id":"","attempt_id":""});
+        let restored = crate::queue_migration::execute(&mut reopened, 7, 11, "migration.queue.item.restore", snapshot.clone()).unwrap();
+        assert_eq!(restored["inserted"], true);
+        let mut tx = reopened.begin_with_identity_claim_scopes(7, 11).unwrap();
+        assert!(append_metadata::eligible(&reopened, &mut tx, "large-core").unwrap().is_none());
+        drop(tx);
+        ORDER_ROWS_READ.with(|count| count.set(0));
+        let appended = execute(&mut reopened, "queue.enqueue", json!({"conv_id":"large-core","user_id":11,
+            "queue_id":"after-import","kind":"real","priority":100,"message":{"text":"after"},"config":{},"created_at_ms":3}), Some("after-import"));
+        assert_eq!(appended["position"], 3);
+        ORDER_ROWS_READ.with(|count| assert_eq!(count.get(), 2));
+        let got = crate::queue_migration::execute(&mut reopened, 7, 11, "migration.queue.item.get", json!({"id":"restored-large"})).unwrap();
+        assert_eq!(got["payload"], message);
+        assert_eq!(got["config"], config);
+        let replay = crate::queue_migration::execute(&mut reopened, 7, 11, "migration.queue.item.restore", snapshot).unwrap();
+        assert_eq!(replay["inserted"], false);
+        eprintln!("large_queue_core measured_request_bytes={} retained_core_bytes={} reopened=true elapsed_ms={}", measured, row.len(), started.elapsed().as_millis());
+    }
+
+
+    #[test]
+    fn admitted_large_injection_ack_keeps_protected_intent_and_exact_replay() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut database = AuthorityDatabase::initialize(directory.path()).unwrap();
+        execute(&mut database, "conversation.create", json!({"conv_id":"large-ack","user_id":11}), Some("ack-create"));
+        let ids = (0..1025).map(|ordinal| format!("peer-{ordinal:04}")).collect::<Vec<_>>();
+        for id in &ids {
+            execute(&mut database, "queue.enqueue", json!({"conv_id":"large-ack","user_id":11,
+                "queue_id":id,"kind":"peer_msg","priority":40,"message":{"text":id,"_peerMessage":true},
+                "config":{},"created_at_ms":1}), Some(&format!("enqueue-{id}")));
+        }
+        execute(&mut database, "queue.enqueue", json!({"conv_id":"large-ack","user_id":11,
+            "queue_id":"protected","kind":"real","priority":10,"message":{"text":"keep"},"config":{},"created_at_ms":2}), Some("enqueue-protected"));
+        let mut wanted = ids.clone();
+        wanted.push("protected".into());
+        let payload = json!({"conv_id":"large-ack","user_id":11,"queue_ids":wanted});
+        let acknowledged = execute(&mut database, "queue.injection.ack", payload.clone(), Some("large-ack-command"));
+        assert_eq!(acknowledged["removed"], 1025);
+        assert_eq!(acknowledged["removedQueueIds"], json!(ids));
+        assert_eq!(execute(&mut database, "queue.injection.ack", payload.clone(), Some("large-ack-command")), acknowledged);
+        drop(database);
+        let mut reopened = AuthorityDatabase::open(directory.path()).unwrap();
+        assert_eq!(execute(&mut reopened, "queue.injection.ack", payload, Some("ack-after-reopen"))["removed"], 0);
+        let listed = execute(&mut reopened, "queue.list", json!({"conv_id":"large-ack","user_id":11}), None);
+        assert_eq!(listed.as_array().unwrap().len(), 1);
+        assert_eq!(listed[0]["queueId"], "protected");
+    }
+
+
+    #[test]
+    fn background_pending_and_explicit_page_beyond_former_count_gate_remain_complete() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut database = AuthorityDatabase::initialize(directory.path()).unwrap();
+        execute(&mut database, "conversation.create", json!({"conv_id":"pending-all","user_id":11}), Some("pending-create"));
+        for ordinal in 0..113 {
+            execute(&mut database,"queue.enqueue",json!({"conv_id":"pending-all","user_id":11,
+                "queue_id":format!("bg-{ordinal:03}"),"kind":"background_receipt","priority":80,
+                "message":{"text":"complete","_backgroundCommand":format!("cmd-{ordinal}")},
+                "config":{},"created_at_ms":ordinal+1}),Some(&format!("pending-{ordinal}")));
+        }
+        let pending = execute(&mut database,"queue.list",json!({"conv_id":"pending-all","user_id":11,"mode":"background_pending"}),None);
+        assert_eq!(pending.as_array().unwrap().len(),113);
+        let first = execute(&mut database,"queue.list",json!({"conv_id":"pending-all","user_id":11,"mode":"background_page","page_size":100}),None);
+        assert_eq!(first["items"].as_array().unwrap().len(),100);
+        let second = execute(&mut database,"queue.list",json!({"conv_id":"pending-all","user_id":11,"mode":"background_page","page_size":100,"cursor":first["nextCursor"]}),None);
+        assert_eq!(second["items"].as_array().unwrap().len(),13);
+        assert_eq!(second["nextCursor"],Value::Null);
+        assert_eq!(second["items"][12]["queueId"],"bg-112");
+    }
+
+
+    #[test]
+    fn oversized_complete_receipt_pages_progress_and_full_result_exceeds_former_response_quota() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut database = AuthorityDatabase::initialize(directory.path()).unwrap();
+        execute(&mut database,"conversation.create",json!({"conv_id":"response-demand","user_id":11}),Some("response-create"));
+        let text = "x".repeat(4 * 1024 * 1024 + 512 * 1024);
+        for ordinal in 0..2 {
+            execute(&mut database,"queue.enqueue",json!({"conv_id":"response-demand","user_id":11,
+                "queue_id":format!("response-{ordinal}"),"kind":"background_receipt","priority":80,
+                "message":{"text":text,"_backgroundCommand":format!("cmd-{ordinal}")},
+                "config":{},"created_at_ms":ordinal+1}),Some(&format!("response-enqueue-{ordinal}")));
+        }
+        let first = execute(&mut database,"queue.list",json!({"conv_id":"response-demand","user_id":11,"mode":"background_page","max_bytes":1}),None);
+        assert_eq!(first["items"].as_array().unwrap().len(),1);
+        assert_eq!(first["items"][0]["payload"]["text"].as_str().unwrap(),text);
+        assert!(!first["nextCursor"].is_null());
+        let second = execute(&mut database,"queue.list",json!({"conv_id":"response-demand","user_id":11,"mode":"background_page","max_bytes":1,"cursor":first["nextCursor"]}),None);
+        assert_eq!(second["items"].as_array().unwrap().len(),1);
+        assert_eq!(second["items"][0]["queueId"],"response-1");
+        assert_eq!(second["nextCursor"],Value::Null);
+        let complete = execute(&mut database,"queue.list",json!({"conv_id":"response-demand","user_id":11}),None);
+        assert_eq!(complete.as_array().unwrap().len(),2);
+        assert!(serde_json::to_vec(&complete).unwrap().len()>8*1024*1024);
+        for item in complete.as_array().unwrap() { assert_eq!(item["payload"]["text"].as_str().unwrap(),text); }
+    }
+
 }

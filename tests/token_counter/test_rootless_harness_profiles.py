@@ -84,6 +84,7 @@ def test_harness_registry_exposes_security_boundary_and_stable_choices():
         "codex",
         "codex-kimi",
         "deepseek-minimal",
+        "mini-swe-agent",
         "opencode",
         "tofu",
         "tofu-kimi",
@@ -322,7 +323,10 @@ def test_collected_trajectory_removes_reasoning_and_credentials():
 
     assert "reasoning_content" not in sanitized["steps"][2]
     assert "private reasoning" not in json.dumps(sanitized)
-    assert "abcdefghijklmnop" not in json.dumps(sanitized)
+    # Literal assignments in agent prose can be benchmark answers. The
+    # maintained boundary preserves them while removing known credential
+    # shapes and structured secret fields.
+    assert "API_KEY=abcdefghijklmnop" in sanitized["steps"][2]["message"]
     assert "bearer-secret-value" not in json.dumps(sanitized)
     assert "sk-example0123456789" not in json.dumps(sanitized)
     assert "b" * 48 not in json.dumps(sanitized)
@@ -349,7 +353,7 @@ def test_collect_trajectories_writes_sanitized_atif_and_attribution(host_tmp_pat
     agent_dir.mkdir(parents=True)
     trajectory = _host_trajectory()
     trajectory["steps"][2]["reasoning_content"] = "do not retain this reasoning"
-    trajectory["steps"][2]["message"] = "TOKEN=abcdefghijklmnop"
+    trajectory["steps"][2]["message"] = "Authorization: Bearer abcdefghijklmnop"
     trajectory["steps"][2]["metrics"]["prompt_tokens"] = 0
     trajectory["steps"][2]["metrics"]["completion_tokens"] = 0
     trajectory["final_metrics"]["total_prompt_tokens"] = 0

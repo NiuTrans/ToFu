@@ -87,7 +87,7 @@ def test_unverified_stream_prefix_never_becomes_durable_summary(monkeypatch):
     )
 
     assert result is None
-    assert len(calls) == 2  # cheap tier, then the existing text-tier fallback
+    assert len(calls) == 1  # Unverified completion must not buy an unqualified retry.
 
 
 def test_summary_no_on_delta_uses_nonstreaming(monkeypatch):
@@ -100,7 +100,7 @@ def test_summary_no_on_delta_uses_nonstreaming(monkeypatch):
 
     def fake_chat(messages, **kw):
         called['chat'] += 1
-        return ('NONSTREAM SUMMARY', {'prompt_tokens': 5, 'completion_tokens': 2})
+        return ('NONSTREAM SUMMARY', {'prompt_tokens': 5, 'completion_tokens': 2, 'finish_reason': 'stop'})
 
     def fake_stream(*a, **k):
         called['stream'] += 1
@@ -127,7 +127,7 @@ def test_summary_output_preserves_model_authored_current_goal(monkeypatch):
         return (
             '### Objective\nAnswer the login error.\n\n'
             '### Pending / Next Steps\nInvestigate SSO.',
-            {'prompt_tokens': 5, 'completion_tokens': 2},
+            {'prompt_tokens': 5, 'completion_tokens': 2, 'finish_reason': 'stop'},
         )
 
     monkeypatch.setattr(ld, 'dispatch_chat', fake_chat)
@@ -152,7 +152,7 @@ def test_summary_output_does_not_fill_missing_objective_from_anchor(monkeypatch)
     def fake_chat(_messages, **_kwargs):
         return (
             '### Pending / Next Steps\nInvestigate SSO.',
-            {'prompt_tokens': 5, 'completion_tokens': 2},
+            {'prompt_tokens': 5, 'completion_tokens': 2, 'finish_reason': 'stop'},
         )
 
     monkeypatch.setattr(ld, 'dispatch_chat', fake_chat)
@@ -176,7 +176,7 @@ def test_summary_postprocess_failure_preserves_generated_content(monkeypatch):
     generated = '### Pending / Next Steps\nInvestigate SSO.'
 
     def fake_chat(_messages, **_kwargs):
-        return generated, {'prompt_tokens': 5, 'completion_tokens': 2}
+        return generated, {'prompt_tokens': 5, 'completion_tokens': 2, 'finish_reason': 'stop'}
 
     def fail_objective_injection(*_args, **_kwargs):
         raise re.error(r'bad escape \u')
@@ -232,9 +232,8 @@ def test_codex_subscription_auto_summary_streams_and_pins(monkeypatch):
         clear_pinned_provider()
 
     assert result == 'CODEX SUMMARY'
-    assert seen == {
-        'chat': 0, 'stream': 1, 'pin': 'oauth_codex', 'on_content': None,
-    }
+    assert callable(seen.pop('on_content'))
+    assert seen == {'chat': 0, 'stream': 1, 'pin': 'oauth_codex'}
 
 
 def test_summary_uses_owner_scoped_affinity_and_restores_parent(monkeypatch):
@@ -304,7 +303,7 @@ def test_non_codex_provider_pin_is_never_overridden(monkeypatch):
 
     def fake_chat(messages, **kwargs):
         seen['pin'] = get_pinned_provider()
-        return 'LOCAL SUMMARY', {'prompt_tokens': 3, 'completion_tokens': 1}
+        return 'LOCAL SUMMARY', {'prompt_tokens': 3, 'completion_tokens': 1, 'finish_reason': 'stop'}
 
     monkeypatch.setattr(ld, 'dispatch_chat', fake_chat)
     set_pinned_provider('ephemeral:user-owned')
@@ -520,7 +519,7 @@ def test_aborted_summary_never_falls_back_to_text_tier(monkeypatch):
     turn is already unwinding, so a second paid call is pure abort latency."""
     import lib.llm_dispatch as ld
     import lib.tasks_pkg.compaction._layer2._summary as summ
-    from lib.llm_errors import AbortedError
+    from lib.llm.llm_errors import AbortedError
 
     calls = []
 
@@ -580,7 +579,8 @@ def test_synthetic_task_dict_keeps_nonstreaming_path(monkeypatch):
         called['chat'] += 1
         assert kw.get('abort_check') is None
         return ('NONSTREAM SUMMARY', {'prompt_tokens': 5,
-                                      'completion_tokens': 2})
+                                      'completion_tokens': 2,
+                                      'finish_reason': 'stop'})
 
     def fake_stream(*_a, **_kw):
         called['stream'] += 1

@@ -13,7 +13,7 @@ use crate::authority::{AuthorityDatabase, AuthorityTransaction};
 use crate::conversation_header::TENANT_GLOBAL_OWNER_ID;
 use crate::entity::EntityKey;
 use crate::generated_paper_build as limits;
-use crate::generated_tofudb_ir::MAX_TRANSACTION_IR_LITERAL_BYTES;
+use crate::generated_tofudb_ir::MAX_LEGACY_DOCUMENT_BYTES;
 use crate::paper_build_artifact::{self as retained, UploadWitness};
 use crate::paper_build_receipt::{encode_bounded, equal, invalid, lower_hex, validate_definition};
 use crate::versioned_document::{self, PutRequest};
@@ -107,7 +107,7 @@ impl Request {
     }
     pub fn validate(&self) -> io::Result<usize> {
         let p = &self.payload;
-        let bytes = encode_bounded(p, MAX_TRANSACTION_IR_LITERAL_BYTES - 8)?.len() + 8;
+        let bytes = encode_bounded(p, MAX_LEGACY_DOCUMENT_BYTES - 8)?.len() + 8;
         integer(p, "user_id", 1)?;
         if self.now_unix_ms == 0
             || self
@@ -126,8 +126,7 @@ impl Request {
                 let sources = p
                     .get("sources")
                     .and_then(Value::as_array)
-                    .filter(|a| a.len() <= limits::DISCOVERY_CANDIDATES)
-                    .ok_or_else(|| invalid("paper source lookup exceeds its bound"))?;
+                    .ok_or_else(|| invalid("paper source lookup requires an array"))?;
                 for source in sources {
                     validate_definition(source, "PaperDocumentV1")?;
                 }
@@ -579,7 +578,7 @@ pub fn execute(
     };
     Ok(Some(encode_bounded(
         &value,
-        MAX_TRANSACTION_IR_LITERAL_BYTES,
+        MAX_LEGACY_DOCUMENT_BYTES,
     )?))
 }
 fn research_source(
@@ -633,7 +632,7 @@ fn finish(
     }
     let digest = format!(
         "{:x}",
-        Sha256::digest(python_json(receipt, MAX_TRANSACTION_IR_LITERAL_BYTES)?)
+        Sha256::digest(python_json(receipt, MAX_LEGACY_DOCUMENT_BYTES)?)
     );
     if let Some(completed) = &row.completed_build_id {
         if receipt["build_id"] != *completed {

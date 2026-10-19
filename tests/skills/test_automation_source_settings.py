@@ -86,10 +86,12 @@ def test_rejected_cas_reclaims_only_its_new_stage(semantic_authority):
     assert sources.credential()[1].token == TOKEN
 
 
-def test_identical_replay_succeeds_with_full_vault(semantic_authority, monkeypatch):
+def test_identical_replay_succeeds_without_another_vault_write(semantic_authority, monkeypatch):
     sources = service(semantic_authority)
     first = sources.update(body())
-    monkeypatch.setattr(vault, '_MAX_ENTRIES', 1)
+    def reject_new_write(*args, **kwargs):
+        raise AssertionError('identical replay must reuse the sealed credential')
+    monkeypatch.setattr(vault, 'create_entry', reject_new_write)
     assert sources.update(body()) == first
     assert len(vault.list_entries()) == 1
 

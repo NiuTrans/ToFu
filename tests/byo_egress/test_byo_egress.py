@@ -1,6 +1,6 @@
 """tests/byo_egress/test_byo_egress.py — SSRF egress guard for BYO provider base URLs.
 
-Covers lib.byo_egress: cloud-metadata / link-local / reserved are always
+Covers lib.byo.byo_egress: cloud-metadata / link-local / reserved are always
 denied; loopback + private are allowed by default (self-hosted LLM case)
 but lockable via env flags; scheme + allow-list handling.
 """
@@ -9,7 +9,7 @@ import os
 import unittest
 from unittest.mock import patch
 
-from lib.byo_egress import EgressDenied, is_egress_allowed, validate_egress_url
+from lib.byo.byo_egress import EgressDenied, is_egress_allowed, validate_egress_url
 
 
 class EgressGuardTest(unittest.TestCase):

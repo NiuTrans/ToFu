@@ -16,7 +16,6 @@ from lib.log import get_logger
 
 from ._crud import (
     _get_timer_row,
-    _resume_max_age_seconds,
     _timer_client,
 )
 from ._lease import (
@@ -28,7 +27,6 @@ from ._lease import (
 from ._poll import (
     _increment_poll_count,
     _mark_exhausted,
-    _mark_expired,
     _record_poll,
     poll_timer,
 )
@@ -149,7 +147,7 @@ def _execute_continuation(timer: dict[str, Any]) -> str | None:
         # Mark timer as triggered in DB
         try:
             now_iso = datetime.now().isoformat()
-            _timer_client(write=True).command(
+            receipt = _timer_client(write=True).command(
                 'timer.update', {'timer_id': timer_id,
                                  'user_id': int(timer['user_id']),
                                  'status': 'triggered',
@@ -158,11 +156,20 @@ def _execute_continuation(timer: dict[str, Any]) -> str | None:
                                  'updated_at': now_iso,
                                  'expected_status': 'active'},
                 f'timer.triggered:{timer_id}:{agentic_task_id}')
+            if not receipt.get('changed'):
+                # Cancellation/another owner won the status predicate. Never
+                # advertise a transition the storage authority did not accept.
+                return None
             from ._notify import notify_timer_changed
             notify_timer_changed('triggered', user_id=int(timer['user_id']))
         except Exception as e:
             logger.error('%s Failed to mark timer as triggered: %s',
                          log_prefix, e, exc_info=True)
+            # Keep the committed ready obligation live. The next pass replays
+            # timer:<id> through the Turn command owner, which returns the same
+            # attempt without launching another executor. If the write committed
+            # but its ACK was lost, the next row read observes terminal status.
+            return None
 
     if agentic_task_id:
         remove_live_watcher(timer_id)
@@ -412,39 +419,10 @@ def resume_active_timers() -> int:
         rows = _timer_client().query(
             'timer.active.list_all', {'limit': 0})
 
-        now = datetime.now()
-
-        # ── Pass 1: age-sweep — expire zombies that outlived their budget ──
-        survivors: list[dict] = []
-        expired = 0
-        for timer in rows:
-            created_raw = timer.get('created_at') or ''
-            age = None
-            try:
-                if created_raw:
-                    age = (now - datetime.fromisoformat(created_raw)).total_seconds()
-            except (TypeError, ValueError) as _pe:
-                logger.debug('[Timer:%s] Unparseable created_at=%r: %s',
-                             timer.get('id'), created_raw, _pe)
-            if (timer.get('last_poll_decision') != 'ready'
-                    and age is not None and age > _resume_max_age_seconds(timer)):
-                if _mark_expired(
-                        timer['id'], user_id=int(timer['user_id'])):
-                    expired += 1
-                    logger.warning(
-                        '[Timer:%s] Auto-expired on resume — age %.0fh exceeds '
-                        'budget (poll_count=%s/%s)', timer['id'], age / 3600.0,
-                        timer.get('poll_count'), timer.get('max_polls'))
-                    continue
-            survivors.append(timer)
-
-        if expired:
-            logger.warning('[Timer] Auto-expired %d over-age zombie timer(s) on startup',
-                           expired)
-
-        # ── Pass 2: re-spawn every eligible survivor ─────────────────────────────
+        # Durable active status and actual poll evidence own recovery.
+        # Offline wall-clock time neither spends poll budget nor cancels work.
         count = 0
-        for timer in survivors:
+        for timer in rows:
             timer_id = timer['id']
             # NB: must NOT hold _timers_lock across start_timer_loop() — that
             # function re-acquires the (non-reentrant) _timers_lock to register

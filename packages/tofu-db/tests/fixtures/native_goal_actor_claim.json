@@ -1,0 +1,407 @@
+{
+  "states": {
+    "pending-a": {
+      "owner_user_id": 7,
+      "task_id": "pending-a",
+      "next_round": 1,
+      "usage": [
+        {
+          "cache_read_tokens": 9000,
+          "completion_tokens": 200,
+          "prompt_tokens": 10000
+        }
+      ],
+      "shared_model_account": {
+        "format": "tofu.native-shared-account/v1",
+        "owner_user_id": 7,
+        "root_task_id": "source-root",
+        "actor_task_id": "pending-a",
+        "tokens": 10200,
+        "tool_calls": 0,
+        "control_tool_calls": 0,
+        "model_ordinal": 1,
+        "tool_ordinal": 0,
+        "complete": true,
+        "limits": {
+          "max_tokens": null,
+          "max_tool_calls": null,
+          "deadline": null
+        },
+        "counter_policy": {
+          "encoding": "cl100k_base",
+          "output_field": "max_tokens",
+          "wire_model": "alpha-wire"
+        }
+      },
+      "host_fee_projection": {
+        "format": "tofu.native-fee-checkpoint/v1",
+        "owner_user_id": 7,
+        "tenant_id": "3",
+        "task_id": "pending-a",
+        "logical_model": "alpha",
+        "provider_id": "provider-a",
+        "wallet_user_id": "",
+        "reserved_micro": 0,
+        "rounds": [
+          {
+            "round": 1,
+            "task_id": "pending-a",
+            "cost": {
+              "amounts": {
+                "inputTokens": 1000,
+                "outputTokens": 200,
+                "totalInputTokens": 10000,
+                "cacheWriteTokens": 0,
+                "cacheReadTokens": 9000,
+                "thinkingTokens": 0,
+                "costUsd": 0.0068,
+                "costCny": 0.0489,
+                "inputCostUsd": 0.0025,
+                "outputCostUsd": 0.002,
+                "cacheWriteCostUsd": 0.0,
+                "cacheReadCostUsd": 0.00225,
+                "inputCostCny": 0.0181,
+                "outputCostCny": 0.01448,
+                "cacheWriteCostCny": 0.0,
+                "cacheReadCostCny": 0.01629,
+                "cacheSavingsUsd": 0.02025,
+                "cacheSavingsCny": 0.14661
+              },
+              "price": {
+                "cache_read_multiplier": 0.1,
+                "cache_write_multiplier": 1.25,
+                "currency": "USD",
+                "input": 2.5,
+                "margin": 0.125,
+                "output": 10.0,
+                "prompt_tokens": 10000,
+                "usd_to_cny": 7.24
+              },
+              "credits": {
+                "base": 6750,
+                "cache_read": 2250,
+                "cache_write": 0,
+                "input": 2500,
+                "margin": 843,
+                "output": 2000,
+                "total": 7593
+              }
+            },
+            "billable_task_id": "source-root"
+          }
+        ]
+      },
+      "format": "tofu.native-agent-checkpoint/v1",
+      "epoch": "epoch",
+      "binding": "binding",
+      "tool_calls": 1,
+      "messages": [
+        {
+          "role": "user",
+          "content": "Preserve work"
+        },
+        {
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "id": "write-1",
+              "type": "function",
+              "function": {
+                "name": "write_file",
+                "arguments": "{}"
+              }
+            }
+          ]
+        }
+      ],
+      "round_limit": 3,
+      "tool_limit": 3,
+      "no_progress_limit": 0,
+      "failure_limit": 0,
+      "tools_pending": true,
+      "progress": {
+        "codec": "sha256-token-sequence/v1",
+        "last_calls": null,
+        "last_world": "",
+        "last_evidence": null,
+        "last_failure": null,
+        "no_progress_streak": 0,
+        "failure_streak": 0
+      }
+    },
+    "pending-b": {
+      "owner_user_id": 7,
+      "task_id": "pending-b",
+      "next_round": 1,
+      "usage": [
+        {
+          "cache_read_tokens": 9000,
+          "completion_tokens": 200,
+          "prompt_tokens": 10000
+        }
+      ],
+      "shared_model_account": {
+        "format": "tofu.native-shared-account/v1",
+        "owner_user_id": 7,
+        "root_task_id": "source-root",
+        "actor_task_id": "pending-b",
+        "tokens": 10200,
+        "tool_calls": 0,
+        "control_tool_calls": 0,
+        "model_ordinal": 2,
+        "tool_ordinal": 0,
+        "complete": true,
+        "limits": {
+          "max_tokens": null,
+          "max_tool_calls": null,
+          "deadline": null
+        },
+        "counter_policy": {
+          "encoding": "cl100k_base",
+          "output_field": "max_tokens",
+          "wire_model": "alpha-wire"
+        }
+      },
+      "host_fee_projection": {
+        "format": "tofu.native-fee-checkpoint/v1",
+        "owner_user_id": 7,
+        "tenant_id": "3",
+        "task_id": "pending-b",
+        "logical_model": "alpha",
+        "provider_id": "provider-a",
+        "wallet_user_id": "",
+        "reserved_micro": 0,
+        "rounds": [
+          {
+            "round": 1,
+            "task_id": "pending-b",
+            "cost": {
+              "amounts": {
+                "inputTokens": 1000,
+                "outputTokens": 200,
+                "totalInputTokens": 10000,
+                "cacheWriteTokens": 0,
+                "cacheReadTokens": 9000,
+                "thinkingTokens": 0,
+                "costUsd": 0.0068,
+                "costCny": 0.0489,
+                "inputCostUsd": 0.0025,
+                "outputCostUsd": 0.002,
+                "cacheWriteCostUsd": 0.0,
+                "cacheReadCostUsd": 0.00225,
+                "inputCostCny": 0.0181,
+                "outputCostCny": 0.01448,
+                "cacheWriteCostCny": 0.0,
+                "cacheReadCostCny": 0.01629,
+                "cacheSavingsUsd": 0.02025,
+                "cacheSavingsCny": 0.14661
+              },
+              "price": {
+                "cache_read_multiplier": 0.1,
+                "cache_write_multiplier": 1.25,
+                "currency": "USD",
+                "input": 2.5,
+                "margin": 0.125,
+                "output": 10.0,
+                "prompt_tokens": 10000,
+                "usd_to_cny": 7.24
+              },
+              "credits": {
+                "base": 6750,
+                "cache_read": 2250,
+                "cache_write": 0,
+                "input": 2500,
+                "margin": 843,
+                "output": 2000,
+                "total": 7593
+              }
+            },
+            "billable_task_id": "source-root"
+          }
+        ]
+      },
+      "format": "tofu.native-agent-checkpoint/v1",
+      "epoch": "epoch",
+      "binding": "binding",
+      "tool_calls": 1,
+      "messages": [
+        {
+          "role": "user",
+          "content": "Preserve work"
+        },
+        {
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "id": "write-1",
+              "type": "function",
+              "function": {
+                "name": "write_file",
+                "arguments": "{}"
+              }
+            }
+          ]
+        }
+      ],
+      "round_limit": 3,
+      "tool_limit": 3,
+      "no_progress_limit": 0,
+      "failure_limit": 0,
+      "tools_pending": true,
+      "progress": {
+        "codec": "sha256-token-sequence/v1",
+        "last_calls": null,
+        "last_world": "",
+        "last_evidence": null,
+        "last_failure": null,
+        "no_progress_streak": 0,
+        "failure_streak": 0
+      }
+    }
+  },
+  "completed_fees": {
+    "format": "tofu.native-actor-fees/v1",
+    "owner_user_id": 7,
+    "root_task_id": "source-root",
+    "actor_task_id": "finished-c",
+    "tokens": 10200,
+    "rounds": [
+      {
+        "round": 1,
+        "producer_task_id": "finished-c",
+        "payer_task_id": "source-root",
+        "logical_model": "alpha",
+        "provider_id": "provider-a",
+        "quote": {
+          "amounts": {
+            "inputTokens": 1000,
+            "outputTokens": 200,
+            "totalInputTokens": 10000,
+            "cacheWriteTokens": 0,
+            "cacheReadTokens": 9000,
+            "thinkingTokens": 0,
+            "costUsd": 0.0068,
+            "costCny": 0.0489,
+            "inputCostUsd": 0.0025,
+            "outputCostUsd": 0.002,
+            "cacheWriteCostUsd": 0.0,
+            "cacheReadCostUsd": 0.00225,
+            "inputCostCny": 0.0181,
+            "outputCostCny": 0.01448,
+            "cacheWriteCostCny": 0.0,
+            "cacheReadCostCny": 0.01629,
+            "cacheSavingsUsd": 0.02025,
+            "cacheSavingsCny": 0.14661
+          },
+          "price": {
+            "cache_read_multiplier": 0.1,
+            "cache_write_multiplier": 1.25,
+            "currency": "USD",
+            "input": 2.5,
+            "margin": 0.125,
+            "output": 10.0,
+            "prompt_tokens": 10000,
+            "usd_to_cny": 7.24
+          },
+          "credits": {
+            "base": 6750,
+            "cache_read": 2250,
+            "cache_write": 0,
+            "input": 2500,
+            "margin": 843,
+            "output": 2000,
+            "total": 7593
+          }
+        }
+      }
+    ]
+  },
+  "cut": {
+    "format": "tofu.execution-account-frontier/v1",
+    "version": 11,
+    "reason": "detached",
+    "snapshot": {
+      "format": "tofu.execution-budget-snapshot/v1",
+      "owner_user_id": 7,
+      "root_task_id": "source-root",
+      "tokens": 30600,
+      "root_tokens": 0,
+      "tool_calls": 0,
+      "model_ordinal": 3,
+      "tool_ordinal": 0,
+      "complete": false,
+      "settled": true,
+      "usage_known": true,
+      "limits": {
+        "max_tokens": null,
+        "max_tool_calls": null,
+        "deadline": null
+      }
+    },
+    "actors": {
+      "source-root": {
+        "parent_task_id": "",
+        "tokens": 0,
+        "tool_calls": 0,
+        "model_ordinal": 0,
+        "tool_ordinal": 0
+      },
+      "pending-a": {
+        "parent_task_id": "source-root",
+        "tokens": 10200,
+        "tool_calls": 0,
+        "model_ordinal": 1,
+        "tool_ordinal": 0
+      },
+      "pending-b": {
+        "parent_task_id": "source-root",
+        "tokens": 10200,
+        "tool_calls": 0,
+        "model_ordinal": 2,
+        "tool_ordinal": 0
+      }
+    },
+    "child_ordinal": 3,
+    "closed_tokens": 10200,
+    "closed_tool_calls": 0,
+    "model_requests": []
+  },
+  "invoice": {
+    "format": "tofu.native-billing/v1",
+    "task_id": "source-root",
+    "owner_user_id": 7,
+    "wallet_user_id": "wallet-7",
+    "model": "alpha",
+    "reserved_micro": 100000,
+    "componentsMicro": {
+      "input": 7500,
+      "output": 6000,
+      "cache_read": 6750,
+      "cache_write": 0,
+      "baseMicro": 20250,
+      "marginMicro": 2529,
+      "totalMicro": 22779
+    },
+    "roundCount": 3
+  },
+  "goal_policy": {
+    "solutionHorizon": "long_term",
+    "rootCauseRequired": true,
+    "verificationEvidenceRequired": true,
+    "temporaryPatchPolicy": "reject_when_robust_solution_is_in_scope",
+    "objectiveFidelity": "never_shrink_original_scope",
+    "iterationBudget": {
+      "windowDefault": 40,
+      "windowHardCeiling": 64,
+      "policy": "checkpoint_extend",
+      "stallBreaker": "zero_state_changes_and_zero_verified_progress_in_window"
+    },
+    "workerContext": {
+      "policy": "conversation",
+      "history": "model_messages_with_tool_results",
+      "compaction": "ordinary_chat",
+      "reviewer": "isolated_latest_work"
+    },
+    "directive": "Pursue the stated objective for durable long-term benefit. Diagnose and fix root causes, require concrete verification evidence, and do not substitute a temporary patch when a robust maintainable solution is within the delegated scope. Never shrink, narrow, or redefine the objective to fit what is easy to finish now: work is aligned only when it makes the full requested end state more true, and a smaller, safer, or easier-to-verify substitute that preserves a different end state is misaligned. Completion means the complete original scope is true and verified, not the largest subset that fits the moment."
+  }
+}

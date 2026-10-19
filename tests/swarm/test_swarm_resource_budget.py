@@ -8,7 +8,7 @@ import time
 
 import pytest
 
-from lib.llm_errors import AbortedError
+from lib.llm.llm_errors import AbortedError
 from lib.swarm.execution_gate import (
     SwarmExecutionAccounting,
 )

@@ -143,6 +143,7 @@ class _Program:
         self.result_read_attempts = self.result_reads = 0
         self.input_lister = input_lister
         self.input_queries = 0
+        self.last_input_lookup = None
         self.value_keeper = value_keeper
         self.child_settled = child_settled
         self.value_keeps = self.value_keep_attempts = 0
@@ -257,7 +258,17 @@ class _Program:
             return ProgramExecutionError('memory_limit', message,
                                          limit_bytes=self.limits.heap_bytes)
         code = 'syntax_error' if syntax and message.startswith('SyntaxError:') else 'javascript_error'
-        return ProgramExecutionError(code, message)
+        detail = {}
+        if code == 'javascript_error' and self.last_input_lookup is not None:
+            # Record observed availability, not an inferred cause of arbitrary
+            # guest code. Never retain input handles, arguments or source bodies.
+            detail['lastInputLookup'] = self.last_input_lookup
+            if self.last_input_lookup['returned'] == 0:
+                detail['retry_hint'] = (
+                    'Last input page is empty; check length before indexing. '
+                    'Never replay effects. Use tools.result(name,args) or '
+                    'read_tool_artifact for artifactRef.')
+        return ProgramExecutionError(code, message, **detail)
 
     def check_exception(self, result):
         if self.fn('qjs_is_exception', result):
@@ -451,6 +462,13 @@ class _Program:
             query = validate_program_input_query(args[0])
             value = (self.input_lister(query) if self.input_lister is not None
                      else {'inputs': [], 'total': 0, 'nextOffset': None})
+            self.last_input_lookup = {
+                'queryIndex': self.input_queries,
+                'returned': len(value['inputs']),
+                'total': value['total'],
+                'nextOffset': value['nextOffset'],
+                **({'name': query['name']} if 'name' in query else {}),
+            }
         elif op == 'keep':
             if len(args) != 1:
                 raise ProgramExecutionError('type_error', 'tools.keep expects one JSON value')

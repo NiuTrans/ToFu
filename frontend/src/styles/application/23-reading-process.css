@@ -3,19 +3,167 @@
  * Delivery: ordered application manifest; neighboring content owners are independent.
  */
 
-/*
- * Reasoning is inspectable process evidence, not a competing answer card —
- * and per-round reasoning is rarely opened, so a stack of full bordered
- * cards reads as visual noise (the same "too huge" verdict the retained
- * timeline's .seg-thinking already settled). Render it as a slim muted
- * one-liner disclosure: no card chrome, secondary label, full opacity only
- * while the reasoning is actually streaming. (2026-08-27 owner readability
- * recalibration: the previous .58-opacity header + 11.5px tertiary label
- * crossed from "quiet" into "hard to read".)
- */
+/* A shared disclosure grammar for reasoning, tool results, context notes,
+ * checklists, programs and the fallback renderer. Existing native disclosures
+ * retain their lifecycle; only the label/marker/evidence columns are shared. */
+.conversation-surface :is(
+  .thinking-header, .ptool-line, .ptc-head, .conversation-tool-card__summary
+) {
+  box-sizing: border-box;
+  min-height: var(--conversation-process-row-height);
+  padding: var(--space-2) var(--conversation-process-inset);
+  gap: var(--conversation-process-gap);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-secondary);
+  font-family: var(--font-ui);
+  font-size: var(--conversation-process-font-size);
+  line-height: var(--leading-title);
+}
+
+.conversation-surface :is(
+  .thinking-header, .ptool-line, .ptc-head, .conversation-tool-card__summary
+):hover {
+  background: var(--turn-process-hover);
+}
+
+.conversation-surface :is(
+  .thinking-label, .ptool-text, .ptc-title, .conversation-tool-card__title
+) {
+  min-width: 0;
+  color: var(--text-secondary);
+  font-family: var(--font-ui);
+  font-size: var(--conversation-process-font-size);
+  font-weight: var(--weight-medium);
+  line-height: var(--leading-title);
+  white-space: normal;
+  overflow-wrap: anywhere;
+  letter-spacing: normal;
+}
+
+/* Tool identity stays in the leading slot; a single trailing caret is the
+ * consistent disclosure affordance. Native summaries still own interaction. */
+.conversation-surface :is(.ptool-result-header, .ptool-results-header, .sw-inbox-row-header, .ptool-todo-header, .conversation-tool-card__summary)::after {
+  content: '';
+  box-sizing: border-box;
+  flex: 0 0 var(--space-2);
+  width: var(--space-2);
+  height: var(--space-2);
+  margin-inline: var(--space-1);
+  border-inline-end: var(--control-edge-inset) solid currentColor;
+  border-block-end: var(--control-edge-inset) solid currentColor;
+  transform: rotate(-45deg);
+  color: var(--text-secondary);
+}
+.conversation-surface details[open] > :is(.ptool-result-header, .sw-inbox-row-header, .ptool-todo-header, .conversation-tool-card__summary)::after,
+.conversation-surface .ptool-results-header[aria-expanded="true"]::after {
+  transform: rotate(45deg);
+}
+.conversation-surface :is(.ptool-result-header, .ptool-results-header, .sw-inbox-row-header, .ptool-todo-header) > .ptool-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 var(--conversation-process-marker);
+  width: var(--conversation-process-marker);
+  height: var(--conversation-process-marker);
+  color: var(--text-secondary);
+}
+.conversation-surface .ptool-results-header > .ptool-results-toggle,
+.conversation-surface :is(.ptool-result-header, .sw-inbox-row-header, .ptool-todo-header) .ptool-text::after {
+  display: none;
+}
+.conversation-surface .ptc-head::before,
+.conversation-surface .conversation-tool-card__summary::before {
+  content: '{}';
+  order: -1;
+  width: var(--conversation-process-marker);
+  flex: 0 0 var(--conversation-process-marker);
+  text-align: center;
+  color: var(--text-secondary);
+  font: var(--weight-medium) var(--conversation-font-size-meta) var(--font-mono);
+}
+.conversation-surface .ptc-chevron { order: 2; }
+.conversation-surface .conversation-block[data-process-edge] :is(.ptool-icon, .ptool-cmd-icon, .thinking-state-dot),
+.conversation-surface .conversation-block[data-process-edge] .ptc-head::before {
+  position: relative;
+  z-index: 1;
+  background-color: var(--turn-process-panel);
+  box-shadow: 0 0 0 var(--space-1) var(--turn-process-panel);
+}
+
+.conversation-surface :is(.ptc-chevron, .conversation-disclosure-chevron) {
+  flex: 0 0 var(--conversation-process-marker);
+  width: var(--conversation-process-marker);
+  height: var(--conversation-process-marker);
+}
+
+.conversation-surface .ptc-meta {
+  order: 3;
+  padding-inline-start: calc(var(--conversation-process-marker) + var(--conversation-process-gap));
+  font-size: var(--conversation-font-size-meta);
+}
+
+.conversation-surface :is(.ptool-result-header, .ptool-results-header, .sw-inbox-row-header, .ptool-todo-header) > .ptool-text {
+  flex: 1 1 auto;
+}
+.conversation-surface :is(.ptool-result-header, .ptool-results-header, .sw-inbox-row-header, .ptool-todo-header)::after {
+  margin-inline-start: auto;
+}
+.conversation-surface .ptc-preview {
+  margin-block: var(--space-2);
+  color: var(--text-secondary);
+  font-size: var(--conversation-font-size-content);
+  line-height: var(--leading-body);
+  overflow-wrap: anywhere;
+}
+
+.conversation-surface :is(.ptool-result-body, .ptc-body, .ptool-todo-body, .sw-inbox-row-body, .conversation-tool-card__body),
+.conversation-surface .ptool-results-block.expanded > .ptool-results-content {
+  margin: var(--space-1) var(--conversation-process-inset) var(--space-3) var(--space-4);
+  padding: var(--space-1) 0 var(--space-1) calc(var(--space-4) - var(--control-edge-inset));
+  border: 0;
+  border-inline-start: var(--control-edge-inset) solid var(--turn-spine);
+  border-radius: 0;
+  background: transparent;
+}
+
+.conversation-surface .ptool-results-block,
+.conversation-surface .ptool-results-block.expanded {
+  margin: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  box-shadow: none;
+}
+
+.conversation-surface .ptool-results-content .search-result-item {
+  padding: var(--space-2) 0;
+  border-color: var(--turn-rule);
+}
+
+.conversation-surface :is(.ptool-result-pre, .conversation-tool-card__pre, .ptc-detail pre) {
+  border-color: var(--turn-rule);
+  border-radius: var(--radius-sm);
+  background: var(--turn-process-surface);
+  box-shadow: none;
+}
+
+.conversation-surface :is(.ptool-result-pre > code, .conversation-tool-card__pre > code) {
+  padding: var(--space-3);
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: var(--conversation-font-size-content);
+  line-height: var(--leading-body);
+}
+
+.conversation-surface :is(.thinking-header, .ptool-result-header, .ptool-todo-header, .sw-inbox-row-header, .ptc-head, .conversation-tool-card__summary):focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: var(--control-edge-inset);
+}
 
 .conversation-surface .thinking-block {
-  margin: var(--space-1) 0 var(--space-2);
+  margin: 0;
   border: 0;
   border-radius: 0;
   background: transparent;
@@ -24,23 +172,21 @@
 }
 
 .conversation-surface .thinking-header {
-  min-height: var(--control-h-md);
-  padding: var(--space-1) 0;
-  gap: var(--space-1);
-  background: transparent;
-  box-sizing: border-box;
   opacity: 1;
-  font-size: var(--conversation-font-size-content);
-  transition: opacity var(--motion-fast) ease;
+  transition: background var(--motion-fast) var(--ease-standard);
 }
 
 .conversation-surface .thinking-header:hover {
-  background: transparent;
+  background: var(--turn-process-hover);
   opacity: 1;
 }
 
 .conversation-surface .thinking-block[data-state="active"] .thinking-header {
   opacity: 1;
+}
+
+.conversation-surface .thinking-block[data-state="active"] .thinking-label {
+  color: var(--text-primary);
 }
 
 .conversation-surface .thinking-header:focus-visible,
@@ -51,17 +197,17 @@
 }
 
 .conversation-surface .thinking-state-dot {
-  width: 6px;
-  height: 6px;
-  flex: 0 0 auto;
-  border: 1px solid color-mix(in srgb, var(--text-tertiary) 70%, transparent);
+  box-sizing: border-box;
+  width: var(--conversation-process-marker);
+  height: var(--conversation-process-marker);
+  flex: 0 0 var(--conversation-process-marker);
+  border: var(--control-edge-inset) dashed var(--text-secondary);
   border-radius: 50%;
   background: transparent;
 }
 
 .conversation-surface .thinking-block[data-state="complete"] .thinking-state-dot {
-  border-color: color-mix(in srgb, var(--accent) 72%, var(--border));
-  background: color-mix(in srgb, var(--accent) 72%, var(--bg-primary));
+  display: block;
 }
 
 .conversation-surface .thinking-block[data-state="active"] .thinking-state-dot {
@@ -76,11 +222,19 @@
 }
 
 .conversation-surface .thinking-label {
+  flex: 1;
+}
+
+.conversation-surface .thinking-state-dot { order: -1; }
+.conversation-surface .thinking-toggle.conversation-disclosure-chevron {
+  order: 2;
+  margin: 0;
+  opacity: 1;
   color: var(--text-secondary);
-  font-family: var(--font-ui);
-  font-size: var(--conversation-font-size-content);
-  font-weight: var(--weight-medium);
-  letter-spacing: .006em;
+  transform: rotate(-90deg);
+}
+.conversation-surface .thinking-block[open] > summary .thinking-toggle.conversation-disclosure-chevron {
+  transform: none;
 }
 
 .conversation-surface .conversation-disclosure-chevron {
@@ -112,15 +266,15 @@
 }
 
 .conversation-surface .thinking-text {
-  padding: var(--space-1) 0 var(--space-2) var(--space-3);
-  margin-left: var(--space-1);
+  padding: var(--space-1) 0 var(--space-2) calc(var(--space-4) - var(--control-edge-inset));
+  margin: var(--space-1) var(--conversation-process-inset) var(--space-3) var(--space-4);
   border-top: 0;
   border-left: 1px solid var(--turn-spine);
-  color: color-mix(in srgb, var(--text-primary) 42%, var(--text-secondary));
+  color: var(--text-secondary);
   font-family: var(--font-ui);
-  font-size: var(--conversation-font-size-content);
+  font-size: var(--conversation-process-font-size);
   font-weight: var(--weight-regular);
-  line-height: 1.66;
+  line-height: var(--leading-body);
 }
 
 .conversation-surface .thinking-text > :first-child {
@@ -194,16 +348,16 @@
 }
 
 .conversation-surface .conversation-block--tool .ptool-turn {
-  margin: var(--space-1) 0;
-  border: 1px solid var(--turn-rule);
-  border-radius: 8px;
-  background: var(--turn-process-surface);
+  margin: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
   box-shadow: none;
 }
 
 [data-theme="tofu"] .conversation-surface .conversation-block--tool .ptool-turn {
-  border-color: var(--turn-rule);
-  background: var(--turn-process-surface);
+  border: 0;
+  background: transparent;
   box-shadow: none;
 }
 
@@ -212,11 +366,11 @@
 }
 
 .conversation-surface .conversation-block--tool .ptool-line {
-  min-height: 34px;
-  padding: var(--space-1) var(--space-2);
-  gap: var(--space-2);
-  border-bottom-color: var(--turn-rule);
-  font-size: var(--conversation-font-size-meta);
+  min-height: var(--conversation-process-row-height);
+  padding: var(--space-2) var(--conversation-process-inset);
+  gap: var(--conversation-process-gap);
+  border: 0;
+  font-size: var(--conversation-process-font-size);
 }
 
 .conversation-surface .conversation-block--tool .ptool-line:hover {
@@ -237,15 +391,31 @@
 }
 
 .conversation-surface .conversation-block--tool :is(.ptool-text, .ptool-cmd-label) {
-  font-size: var(--conversation-font-size-meta);
-  line-height: 1.5;
+  font-size: var(--conversation-process-font-size);
+  line-height: var(--leading-title);
 }
 
 .conversation-surface .conversation-tool-card {
-  border-color: var(--turn-rule);
-  border-radius: 8px;
-  background: var(--turn-process-surface);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
 }
+
+/* Keep exceptional outcomes colored, make routine metadata readable and quiet. */
+.conversation-surface :is(.ptc-status, .conversation-tool-card__chip--ok, .ptool-line-status--ok, .ptool-badge-info, .ptool-badge-ok) {
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: var(--conversation-font-size-meta);
+  box-shadow: none;
+  animation: none;
+}
+.conversation-surface .ptc-status.ptc-status-error {
+  color: var(--error-text);
+  background: var(--error-bg);
+}
+.conversation-surface .ptc-running .ptc-status { color: var(--accent); }
 
 .conversation-surface button.ptool-results-header,
 .conversation-surface button.eb-toggle,
@@ -294,4 +464,89 @@
 
 .conversation-surface .eb-section.eb-expanded .eb-arrow {
   transform: rotate(90deg);
+}
+
+/* Historical process is a quiet turn-leading disclosure. Closing unmounts
+ * evidence; inner paging and scroll remain owned by HistoricalProcess. */
+.conversation-history-process {
+  margin-block: 0 var(--space-6);
+  color: var(--text-secondary);
+  font-family: var(--font-ui);
+  font-size: var(--conversation-font-size-content);
+}
+
+.conversation-history-process > summary {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  box-sizing: border-box;
+  width: fit-content;
+  max-width: 100%;
+  min-height: var(--control-h-lg);
+  padding: var(--space-2) var(--space-3);
+  border: var(--control-edge-inset) solid var(--turn-process-line);
+  border-radius: var(--conversation-process-radius);
+  background: var(--turn-process-panel);
+  list-style: none;
+  cursor: pointer;
+  line-height: var(--leading-title);
+  overflow-wrap: anywhere;
+  transition: color var(--motion-fast) ease, background var(--motion-fast) ease;
+}
+
+.conversation-history-process > summary::-webkit-details-marker { display: none; }
+.conversation-history-process > summary::before {
+  content: '';
+  flex: 0 0 auto;
+  width: var(--space-1);
+  height: var(--space-1);
+  border-inline-end: 1px solid currentColor;
+  border-block-end: 1px solid currentColor;
+  transform: rotate(-45deg);
+  transition: transform var(--motion-fast) ease;
+}
+.conversation-history-process[open] > summary::before { transform: rotate(45deg); }
+.conversation-history-process > summary:hover {
+  color: var(--text-primary);
+  background: var(--bg-secondary);
+}
+.conversation-history-process > summary:focus-visible {
+  outline: 0;
+  box-shadow: var(--focus-ring);
+}
+
+.conversation-history-process__body {
+  max-height: min(65vh, var(--conversation-reading-measure));
+  margin-block-start: var(--space-3);
+  margin-inline-start: 0;
+  padding: var(--space-3);
+  border: var(--control-edge-inset) solid var(--turn-process-line);
+  border-radius: var(--conversation-process-radius);
+  background: var(--bg-primary);
+  scrollbar-width: thin;
+  overflow: auto;
+  overscroll-behavior: contain;
+  overflow-anchor: none;
+}
+.conversation-history-process__controls {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding-block: var(--space-1) var(--space-2);
+  background: var(--bg-primary);
+  font-size: var(--conversation-font-size-meta);
+}
+.conversation-history-process__controls > span {
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
+}
+.conversation-history-process__controls[hidden] { display: none; }
+.conversation-history-notice {
+  font-size: var(--conversation-font-size-content);
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
 }

@@ -161,7 +161,7 @@ def test_document_pipeline_holds_pdf_lease_through_repository_commit(
         def document_by_digest(self, _digest):
             return None
 
-        def create_document(self, _document, *, command_id):
+        def create_document(self, _document, *, command_id, publication=None):
             assert command_id
             assert_admitted('repository')
             raise RuntimeError('commit boundary sentinel')
@@ -198,13 +198,15 @@ def test_document_pipeline_holds_pdf_lease_through_repository_commit(
         return source_path
 
     monkeypatch.setattr(store, '_write_source', fake_write)
+    monkeypatch.setattr(store, '_sync_publication_directories',
+                        lambda **kwargs: assert_admitted('directory-persist'))
 
     with pytest.raises(RuntimeError, match='commit boundary sentinel'):
         store.add_document(
             b'%PDF-full-lifecycle-test', 'lifecycle.pdf', user_id=1)
 
     assert observed == [
-        'parse', 'visual-persist', 'source-persist', 'repository']
+        'parse', 'visual-persist', 'source-persist', 'directory-persist', 'repository']
     assert admission.snapshot()['unfinished'] == 0
     assert not source_path.exists()
 

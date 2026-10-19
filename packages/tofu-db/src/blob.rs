@@ -132,27 +132,10 @@ pub(crate) fn encode_chunk(raw: &[u8]) -> io::Result<Vec<u8>> {
     encode_compressed_chunk(raw, &compressed)
 }
 
-/// One lazily initialized codec per authority, not per connection/thread.
-/// The existing 1 MiB chunk bound caps its workspace; Engine drop owns it.
-#[derive(Default)]
-pub(crate) struct ChunkEncoder(std::sync::Mutex<Option<zstd::bulk::Compressor<'static>>>);
+pub use crate::blob_codec::BlobCodecPoolObserver;
+pub(crate) use crate::blob_codec::ChunkEncoder;
 
-impl ChunkEncoder {
-    pub(crate) fn encode(&self, raw: &[u8]) -> io::Result<Vec<u8>> {
-        let _timer = crate::fsync_stats::StageTimer::new(crate::fsync_stats::STAGE_BLOB_ENCODE);
-        if raw.is_empty() || raw.len() > BLOB_CHUNK_BYTES {
-            return Err(invalid_input("blob chunk is empty or exceeds 1 MiB"));
-        }
-        let mut codec = self.0.lock().map_err(|_| io::Error::other("blob codec is poisoned"))?;
-        if codec.is_none() {
-            *codec = Some(zstd::bulk::Compressor::new(3)?);
-        }
-        let compressed = codec.as_mut().unwrap().compress(raw)?;
-        encode_compressed_chunk(raw, &compressed)
-    }
-}
-
-fn encode_compressed_chunk(raw: &[u8], compressed: &[u8]) -> io::Result<Vec<u8>> {
+pub(crate) fn encode_compressed_chunk(raw: &[u8], compressed: &[u8]) -> io::Result<Vec<u8>> {
     let (codec, payload) = if compressed.len() + COMPRESSION_MINIMUM_SAVING_BYTES < raw.len() {
         (CODEC_ZSTD, compressed)
     } else {

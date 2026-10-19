@@ -138,9 +138,36 @@ export function createToolHeaderPresentation(
     const name = text(round.toolName);
     const batch = Boolean(batchPrefix(name));
     const write = batch || SINGLE_WRITE_NAMES.has(name);
-    // Refusal facts outrank cosmetic suppression, even if an older producer
-    // omitted a badge or left a counted badge alongside structured refusal.
     const refusal = writeGateRefusal.resolveRefusal(round, meta);
+    if (batch) {
+      // Counts are presentation facts, never inferred from token telemetry or
+      // requested edits alone. Refusal/error evidence still prevents green.
+      const failed = Boolean(refusal) || meta.writeOk === false || meta.type === 'error'
+        || ['error', 'failed', 'rejected', 'aborted', 'unanswerable'].includes(text(round.status));
+      const summaries = Array.isArray(meta.editSummaries) ? meta.editSummaries : [];
+      if (summaries.length > 0 && summaries.length <= TOOL_HEADER_PRESENTATION_LIMITS.edits) {
+        const completed = summaries.filter((summary) => record(summary).status === 'ok').length;
+        return badgeHtml(`${completed}/${summaries.length}`,
+          !failed && completed === summaries.length ? 'ptool-badge-ok' : 'ptool-badge-err');
+      }
+      const label = text(meta.badge);
+      const counted = label.length <= TOOL_HEADER_PRESENTATION_LIMITS.badgeUnits
+        ? COUNT_BADGE.exec(label) : null;
+      if (counted) {
+        const completed = Number(counted[1]);
+        const total = Number(counted[2] ?? counted[1]);
+        if (Number.isSafeInteger(completed) && Number.isSafeInteger(total)
+          && total > 0 && completed <= total) {
+          return badgeHtml(`${completed}/${total}`,
+            !failed && completed === total ? 'ptool-badge-ok' : 'ptool-badge-err');
+        }
+      }
+      const edits = historicalEdits(round);
+      if (failed && edits) return badgeHtml(`0/${edits.length}`, 'ptool-badge-err');
+      // Sparse history cannot invent a denominator or claim completion.
+      return failed ? badgeHtml(translate('tool.failed'), 'ptool-badge-err') : '';
+    }
+    // Non-batch refusal badges preserve their established semantic copy.
     if (refusal) return writeGateRefusal.renderBadgeHtml(refusal);
 
     if (round.status === 'error'
@@ -150,30 +177,12 @@ export function createToolHeaderPresentation(
     }
 
     const label = text(meta.badge);
-    const counted = batch && label.length <= TOOL_HEADER_PRESENTATION_LIMITS.badgeUnits
-      ? COUNT_BADGE.exec(label) : null;
-    if (label && !counted) {
+    if (label) {
       const className = meta.awaitTimedOut ? 'ptool-badge-warn'
         : write ? (meta.writeOk === false ? 'ptool-badge-err' : 'ptool-badge-ok')
           : meta.memoryOk === true ? 'ptool-badge-ok' : 'ptool-badge-info';
       return badgeHtml(label, className);
     }
-    if (batch) {
-      const summaries = Array.isArray(meta.editSummaries) ? meta.editSummaries : [];
-      const failures = summaries.slice(0, TOOL_HEADER_PRESENTATION_LIMITS.edits)
-        .filter((summary) => record(summary).status === 'fail');
-      const failed = meta.writeOk === false || meta.type === 'error'
-        || failures.length > 0
-        || Boolean(counted?.[2] && Number(counted[1]) < Number(counted[2]));
-      // The result presenter puts a detailed failure in the collapsed header
-      // only for a rendered batch card. Sparse history still needs a verdict.
-      const hasInlineFailure = (name === 'edit_file' || summaries.length > 1)
-        && failures.some((summary) => text(record(summary).detail)
-          .slice(0, TOOL_HEADER_PRESENTATION_LIMITS.normalizationUnits).trim());
-      return failed && !hasInlineFailure
-        ? badgeHtml(translate('tool.failed'), 'ptool-badge-err') : '';
-    }
-
     // Only batch edits suppress fallback telemetry. Single writes and every
     // other tool keep the established explicit -> tokens -> chars precedence.
     const tokens = positiveNumber(round.toolTokens);

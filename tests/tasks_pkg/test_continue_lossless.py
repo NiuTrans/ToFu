@@ -1308,7 +1308,7 @@ class TestSegmentReconstructionParity:
         assert from_seg is not None
 
     def test_projection_stops_at_invalid_arguments_without_inventing_them(self):
-        from lib.tool_history_projection import build_tool_history_round
+        from lib.tool_results.tool_history_projection import build_tool_history_round
 
         projected = build_tool_history_round([
             None,

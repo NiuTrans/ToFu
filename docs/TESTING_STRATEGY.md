@@ -35,6 +35,71 @@ they are deliberately few and high value.
 `make test-affected` is a transparent selection hint for the inner loop. It
 does not replace domain or release gates. Do not rerun an unchanged suite.
 
+## Development and delivery loop
+
+**Problem:** written policies and numerous tests do not prove the changed user
+journey works. Directory migrations can silently break test discovery; local
+and CI lists can diverge; results from a changing shared checkout do not certify
+an integrated candidate.
+
+**Decision:** use the existing owners in a short, evidence-producing loop:
+
+1. State the user-visible acceptance case, owning contract and smallest
+   reproducer before a substantial change. For a bug, demonstrate the reproducer
+   failing for the intended reason; environment/bootstrap errors are not that proof.
+2. Develop one coherent change in an isolated worktree. Preserve unrelated edits.
+   Keep runtime data and test processes isolated as required below.
+3. Run the iteration ladder. For orchestration/tool/streaming changes, exercise
+   the real loop via the existing record/replay seam; for UI changes, verify the
+   browser journey. A mock-only unit result does not certify either boundary.
+4. Review the diff and integrate the verified worktree immediately. Run the
+   relevant gate against the integrated candidate, recording the revision,
+   command, result and remaining coverage gaps. A dirty shared tree result must
+   be labelled as such; do not reuse it as clean release evidence.
+5. Deliver the change with that evidence. A reproduced product failure becomes
+   an owning regression case (or extends an existing one), not another permanent
+   incident-specific rule in the root agent instructions.
+
+**Alternatives considered:** adding instructions alone leaves enforcement gaps;
+more mocks cannot prove the real application boundaries; running the entire suite
+on every edit slows feedback without making the tested revision stable. Retain
+fast local feedback and separate candidate/release validation instead.
+
+The affected-test selector enumerates tracked and non-ignored untracked Python
+suites through Git recursively, resolves mandatory guards to their current paths,
+and refuses missing guards or failed/empty discovery. Removed tests cannot remain
+selected from cache. NUL-delimited Git output preserves names and both endpoints
+of renames; nested fixtures select their subtree. Cache replacement is atomic and
+advisory. The execution tier consistently selects offline unit/API cases and
+excludes visual, slow and live-model markers, even when selection is broadened.
+Static imports/literal references are incomplete for dynamic and transitive
+behavior: the selector remains an inner-loop hint, never a publication gate.
+Use maintained domain/release commands in project gate configuration; the
+[configuration example](../.env.example) names the repository entrypoints.
+
+The browser CI lane invokes `make test-e2e`, so local and CI share the journey
+list. `make ci` alone is the backend/architecture subset; frontend, browser,
+native/platform and supply-chain gates still belong to their CI lanes.
+
+The primary workflow's terminal `CI required` job depends on every lane and runs
+with `always()`. Only explicit success passes; malformed/empty results,
+cancellation, failure and unexpected skips fail. Nightly lanes may be skipped
+only on non-scheduled events. PR jobs retain the default synthetic merge-candidate
+checkout. `tests/meta/test_ci_results.py` validates dependency coverage and
+executes the workflow gate with injected failure/skip outcomes.
+
+Repository branch protection must require `CI required` for this to block remote
+merges; committing the workflow does not configure or prove that hosted setting.
+Separate native/release workflows keep their own required checks and admission
+contracts; this primary-workflow summary does not certify those workflows.
+
+These practices adapt public Codex guidance on
+[isolated, repeatable worktree environments](https://learn.chatgpt.com/docs/environments/local-environment),
+[explicit completion checks and feedback](https://developers.openai.com/blog/run-long-horizon-tasks-with-codex),
+and [trace-to-evaluation improvement](https://developers.openai.com/cookbook/examples/agents_sdk/agent_improvement_loop).
+They explain the adopted mechanisms, not a measured claim about relative defect
+rates or OpenAI's private release process.
+
 ## What a durable test asserts
 
 - user-visible outcome or stable domain invariant;
@@ -53,6 +118,12 @@ removed.
 The AST census must fail when Git cannot enumerate tracked files; an empty
 result from a failed subprocess is never a clean audit. Event vocabulary scans
 read retained sources directly, without compiling browser test adapters.
+The syntax smoke census includes tracked and non-ignored untracked Python
+files through NUL-delimited Git enumeration, preserving its scratch-directory
+exclusions and skipping deleted paths. It compiles source bytes in memory:
+recursive scratch traversal and per-file bytecode writes can exhaust the
+five-minute guard on FUSE without finding a syntax defect. Git failure and
+unreadable source fail the check; neither becomes an empty successful scan.
 Minimal Quart test apps install the production HTTP error handlers so parser
 failures exercise the same structured 400 boundary as the running app.
 
@@ -207,3 +278,22 @@ web recall, model entailment accuracy or end-user research completion. Live
 quality evaluation must separately measure supported discoveries, false negative
 claims, omitted discoveries, dependency integration, latency and cost per verified
 result, with a fixed query/source set and explicit partial coverage.
+
+## Rust-primary performance admission
+
+Rust-primary migration applies to the complete application execution path.
+Native implementation alone grants no production promotion: preparation,
+provider routing, accounting, tools, final hooks, durable recovery and delivery
+must keep their existing domain authorities and failure behavior. Performance
+priority follows measured CPU/latency hotspots, including allocation, copying,
+serialization and cross-language calls; external waits need separate attribution.
+The [system gate](../benchmarks/system_performance.py) requires all 30 declared
+integration cases, raw independent-process comparisons and per-metric guards.
+Each case also supplies cold_start first-operation wall/CPU clocks from at least
+100 fresh processes per variant, with distinct process identities across cases
+and variants. Missing cold evidence is incomplete; warmed clocks cannot certify
+activation, and a cold P50/P95/P99 or CPU regression fails the same 5% guards.
+Runtime parity comes first, then storage/index, context/events/HTTP and optional
+ingest. Browser code and plugin adapters retain their deployment boundaries until
+an equivalent replacement has its own integration evidence. Component wins or
+language choice never certify complete migration or universal optimality.

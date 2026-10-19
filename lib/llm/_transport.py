@@ -16,7 +16,7 @@ import requests
 
 import lib as _lib
 from lib.llm.stream_result import ProviderStreamEvidence
-from lib.llm_errors import AbortedError
+from lib.llm.llm_errors import AbortedError
 from lib.log import get_logger
 
 logger = get_logger(__name__)
@@ -68,6 +68,58 @@ LLM_KEEPALIVE_EXPIRY_S = _bounded_env_int(
 POST_TERMINAL_DRAIN_TIMEOUT_S = 0.1
 POST_TERMINAL_DRAIN_MAX_BYTES = 64 << 10
 POST_TERMINAL_DRAIN_MAX_CHUNKS = 32
+
+
+def drain_completed_sync_stream(chunks, *, response, watchdog,
+                                abort_check=None, on_chunk=None) -> bool:
+    """Reach HTTP EOF after SSE completion under the existing watcher.
+
+    A chunked response still owns its connection until the zero chunk/trailers
+    are read. Reuse the async cleanup bounds and this attempt's watcher; never
+    parse tail bytes or turn a cleanup I/O failure into a billed retry.
+    """
+    from lib.desktop.egress import EgressUnavailable
+
+    deadline = time.monotonic() + POST_TERMINAL_DRAIN_TIMEOUT_S
+    drained_bytes = 0
+
+    def check_abort():
+        if watchdog.aborted or (abort_check is not None and abort_check()):
+            raise AbortedError('User aborted during stream cleanup')
+
+    watchdog.arm_read_deadline(
+        POST_TERMINAL_DRAIN_TIMEOUT_S,
+        lambda: interrupt_response_read(response))
+    try:
+        for _ in range(POST_TERMINAL_DRAIN_MAX_CHUNKS):
+            check_abort()
+            if time.monotonic() >= deadline or watchdog.read_deadline_expired:
+                return False
+            try:
+                chunk = next(chunks)
+            except StopIteration:
+                check_abort()
+                return not watchdog.read_deadline_expired
+            except AbortedError:
+                raise
+            except (requests.RequestException, OSError, EgressUnavailable) as error:
+                check_abort()
+                logger.debug('[Transport] post-terminal cleanup read failed: %s',
+                             type(error).__name__)
+                return False
+            check_abort()
+            drained_bytes += len(chunk)
+            if drained_bytes > POST_TERMINAL_DRAIN_MAX_BYTES:
+                return False
+            if on_chunk is not None:
+                on_chunk(chunk)
+            if drained_bytes >= POST_TERMINAL_DRAIN_MAX_BYTES:
+                return False
+        return False
+    finally:
+        # Terminal parsing is already complete. Retire the cleanup deadline
+        # before result callbacks; response close remains reader-owned.
+        watchdog.cancel()
 
 
 async def drain_completed_stream(chunks, *, abort_check=None, on_chunk=None) -> bool:
@@ -149,11 +201,13 @@ def classify_request_transport_error(exc, *, base_url='', write_timeout=None,
     A requests ConnectionError can wrap a TLS write timeout after connect.
     Only explicit connect evidence establishes endpoint unreachability.
     """
-    from lib.llm_errors import (
+    from lib.llm.llm_errors import (
         EndpointUnreachableError, RequestTransportError,
         RequestUploadTimeoutError, ResponseReadTimeoutError,
+        SubscriptionConnectionError,
     )
-    from urllib3.exceptions import NewConnectionError, ReadTimeoutError
+    from lib.http_transport.client import SubscriptionRoutesExhausted
+    from urllib3.exceptions import ConnectTimeoutError, ReadTimeoutError
 
     pending, chain, seen = [exc], [], set()
     while pending and len(chain) < 16:
@@ -180,17 +234,23 @@ def classify_request_transport_error(exc, *, base_url='', write_timeout=None,
     cause_type = type(chain[-1]).__name__
     if isinstance(exc, RequestTransportError):
         return exc
-    if any(isinstance(e, httpx.WriteTimeout) or
-           (isinstance(e, TimeoutError) and 'write operation timed out' in str(e).lower())
-           for e in chain):
-        return RequestUploadTimeoutError(
-            base_url=base_url, timeout_seconds=write_timeout,
-            request_bytes=request_bytes, cause_type=cause_type)
-    if any(isinstance(e, (requests.exceptions.ConnectTimeout, NewConnectionError,
-                         httpx.ConnectTimeout)) for e in chain):
+    if isinstance(exc, SubscriptionRoutesExhausted):
+        return SubscriptionConnectionError(base_url=base_url)
+    typed_upload_timeout = any(isinstance(e, httpx.WriteTimeout) for e in chain)
+    # CONNECT can time out writing to a TLS proxy. Typed phase evidence wins
+    # over raw socket wording, while a typed upload failure keeps its phase.
+    if not typed_upload_timeout and any(isinstance(e, (
+            requests.exceptions.ConnectTimeout, ConnectTimeoutError,
+            httpx.ConnectTimeout)) for e in chain):
         return EndpointUnreachableError(
             'Endpoint unreachable during TCP/TLS connection setup '
             f'({cause_type})', base_url=base_url)
+    if typed_upload_timeout or any(
+            isinstance(e, TimeoutError) and 'write operation timed out' in str(e).lower()
+            for e in chain):
+        return RequestUploadTimeoutError(
+            base_url=base_url, timeout_seconds=write_timeout,
+            request_bytes=request_bytes, cause_type=cause_type)
     if any(isinstance(e, requests.exceptions.SSLError) or
            'certificate' in type(e).__name__.lower() for e in chain):
         return RequestTransportError(failure_stage='tls', reason='tls_error',
@@ -741,7 +801,7 @@ class StreamIdleWatchdog:
         return self._read_deadline_expired
 
     def arm_read_deadline(self, seconds, on_timeout):
-        """Bound known-error diagnostics using the attempt's single watcher.
+        """Bound diagnostics/terminal cleanup using the attempt's single watcher.
 
         Unlike transport idle, this deadline cannot be renewed by trickled
         bytes. Arming also starts a previously unnecessary watcher.
@@ -1008,7 +1068,10 @@ def prepare_retryable_wait(attempt, err, abort_check, log_prefix=''):
         if abort_check and abort_check():
             logger.debug('%s ✋ Abort detected before retry sleep, stopping.', log_prefix)
             raise AbortedError('User aborted before retry')
-        wait = retry_wait(attempt)
+        from lib.llm.llm_errors import SubscriptionConnectionError
+        # Route admission already owns backoff and observes sibling recovery.
+        # An independent transport delay would hide that recovery again.
+        wait = 0.0 if isinstance(err, SubscriptionConnectionError) else retry_wait(attempt)
         # §2.2 retry-loop row: each attempt = WARNING *without* exc_info —
         # error.log captures WARNING+, so a traceback here spams the error
         # log with self-healing noise (the next attempt usually succeeds).

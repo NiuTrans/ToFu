@@ -216,33 +216,37 @@ def _build_apply_diff(meta, fn_name, fn_args, tool_content, path):
         # header — gate refusal / hard error — earns a badge.
         if not m:
             meta['badge'] = 'failed'
-        meta['writeOk'] = ok_n == total_n
-        # Per-edit summaries for collapsible frontend display.
-        # When the output is NOT a real batch result (no "Applied X/Y"
-        # header — e.g. a read-gate refusal or a hard error), there are no
-        # per-edit result lines; every edit must default to 'fail' rather
-        # than 'ok' so the frontend doesn't render green checks for edits
-        # that never ran.
-        edit_lines = [l for l in tool_content.split('\n') if l.startswith('[')]
-        default_status = 'ok' if m else 'fail'
+        # A summary count is not evidence that a particular edit ran. Match
+        # explicit receipts by their original index; diagnostic lines must not
+        # shift receipts onto a different edit. Duplicate indexes are ambiguous
+        # and fail closed, as do missing/unknown receipts and gate refusals.
+        receipts = {}
+        duplicate_indexes = set()
+        for receipt in re.finditer(
+                r'^\[(\d+)\] (OK|FAIL|SKIP)(?:[ \t]+(.*))?$',
+                tool_content, re.MULTILINE):
+            index = int(receipt.group(1))
+            if index in receipts:
+                duplicate_indexes.add(index)
+            receipts[index] = (receipt.group(2), receipt.group(3) or '')
         summaries = []
         outside_flags = []
         for i, edit in enumerate(edits):
             if not isinstance(edit, dict):
                 continue
-            # An edit with no corresponding result line did not succeed.
-            status = default_status if i < len(edit_lines) else 'fail'
+            status = 'fail'
             detail = ''
             outside = False
-            if i < len(edit_lines):
-                line = edit_lines[i]
-                if '] FAIL' in line:
-                    status = 'fail'
-                    detail = line.split('FAIL', 1)[-1].strip().lstrip(': ')
-                    outside = _OUTSIDE_WORKSPACE_MARKER in line
-                elif '] OK' in line:
-                    status = 'ok'
-                    detail = line.split('OK', 1)[-1].strip().lstrip(': ')
+            skipped = False
+            receipt = receipts.get(i + 1) if m else None
+            if i + 1 in duplicate_indexes:
+                detail = 'Conflicting edit receipts; application status is unknown.'
+            elif receipt is not None:
+                kind, detail = receipt
+                detail = detail.strip().lstrip(': ')
+                status = 'ok' if kind == 'OK' else 'fail'
+                outside = kind == 'FAIL' and _OUTSIDE_WORKSPACE_MARKER in detail
+                skipped = kind == 'SKIP'
             summary = {
                 'path': edit.get('path', '?'),
                 'description': edit.get('description', ''),
@@ -251,8 +255,16 @@ def _build_apply_diff(meta, fn_name, fn_args, tool_content, path):
             }
             if outside:
                 summary['outsideWorkspace'] = True
+            if skipped:
+                # Existing fail/ok vocabulary: skips get no applied diff.
+                summary['skipped'] = True
             summaries.append(summary)
             outside_flags.append(outside)
+        meta['writeOk'] = bool(
+            m and ok_n == total_n == str(len(edits))
+            and len(summaries) == len(edits)
+            and all(item['status'] == 'ok' for item in summaries)
+        )
         meta['editSummaries'] = summaries
         _stamp_outside_workspace(meta, summaries, outside_flags)
     else:

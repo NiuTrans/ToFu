@@ -49,6 +49,17 @@ function buildTurnNav(conv) {
       host: nav,
       translate: (key, params) => t(key, params),
       scrollToTurn,
+      directoryKey: (id) => runtimeScope.ConversationTurnStore.roundDirectoryKey(id),
+      directory: async (id, offset, limit, anchor) => {
+        const active = typeof getActiveConv === 'function' ? getActiveConv() : null;
+        if (!active || active.id !== id) throw new Error('Conversation changed');
+        return runtimeScope.ConversationTurnStore.loadConversationRoundDirectory(active, 'main', offset, limit, anchor);
+      },
+      hydrateRound: async (id, entry) => {
+        const active = typeof getActiveConv === 'function' ? getActiveConv() : null;
+        if (!active || active.id !== id) throw new Error('Conversation changed');
+        await runtimeScope.ConversationTurnStore.hydrateConversationRound(active, 'main', entry);
+      },
 
       loadEarlier: async (conversationId, beforeOrdinal) => {
         const conv = typeof getActiveConv === 'function' ? getActiveConv() : null;
@@ -57,10 +68,11 @@ function buildTurnNav(conv) {
       },
     }) : null;
   }
-  const state = conv?.id
-    ? runtimeScope.ConversationTurnStore?.ensureRuntimeStore?.(conv.id)?.getState?.()
+  const conversationId = conv?._localOnly ? '' : conv?.id || '';
+  const state = conversationId
+    ? runtimeScope.ConversationTurnStore?.ensureRuntimeStore?.(conversationId)?.getState?.()
     : null;
-  _turnNavigation?.update(conv?.id || '', state || null);
+  _turnNavigation?.update(conversationId, state || null);
 }
 
 function updateActiveTurn() {

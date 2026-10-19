@@ -21,6 +21,18 @@ import pytest
 pytest_plugins = ('tests._artifact_sidecar',)
 
 
+@pytest.fixture
+def owned_artifact_conversations(monkeypatch):
+    from lib import response_assets
+    from lib.identity import PERSONAL_USER_ID
+    owner = PERSONAL_USER_ID
+    owners = {}
+    monkeypatch.setattr(response_assets, 'get_conversation',
+        lambda conv_id, user_id, **kwargs: {'id': conv_id}
+        if owners.get(conv_id) == user_id else None)
+    return owners, owner
+
+
 # ─── Versioning ───────────────────────────────────────────────────────
 
 class TestVersioning:
@@ -92,9 +104,11 @@ class TestVersioning:
         assert a['parent_id'] == ''
         assert b['parent_id'] == ''
 
-    def test_versions_route(self, flask_app, flask_client):
+    def test_versions_route(self, flask_app, flask_client, owned_artifact_conversations):
         from lib.artifacts import create_artifact
         cid = 'conv-ver-route-' + uuid.uuid4().hex[:8]
+        owners, owner = owned_artifact_conversations
+        owners[cid] = owner
         with flask_app.app_context():
             v1 = create_artifact(
                 conv_id=cid, content='one\n', format='markdown',
@@ -119,10 +133,12 @@ class TestVersioning:
 # ─── Library listing ─────────────────────────────────────────────────
 
 class TestLibrary:
-    def test_pinned_first_then_recent(self, flask_app, flask_client):
+    def test_pinned_first_then_recent(self, flask_app, flask_client, owned_artifact_conversations):
         from lib.artifacts import create_artifact, set_pinned
         # Make sure we have at least one pinned + one unpinned in the DB.
         cid = 'conv-lib-' + uuid.uuid4().hex[:8]
+        owners, owner = owned_artifact_conversations
+        owners[cid] = owner
         with flask_app.app_context():
             a = create_artifact(conv_id=cid, content='unpinned\n',
                                 format='markdown', source='write_file',
@@ -168,7 +184,7 @@ class TestPdfExportRoute:
     reason='playwright not installed',
 )
 class TestPdfRenderSmoke:
-    def test_real_pdf_header(self, flask_app, flask_client):
+    def test_real_pdf_header(self, flask_app, flask_client, owned_artifact_conversations):
         # Quick probe: try to launch Chromium briefly.  If that fails
         # (binary missing on this host), skip.
         try:
@@ -181,6 +197,8 @@ class TestPdfRenderSmoke:
 
         from lib.artifacts import create_artifact
         cid = 'conv-pdf-smoke-' + uuid.uuid4().hex[:8]
+        owners, owner = owned_artifact_conversations
+        owners[cid] = owner
         with flask_app.app_context():
             meta = create_artifact(
                 conv_id=cid,
@@ -195,3 +213,18 @@ class TestPdfRenderSmoke:
         assert r.headers['Content-Type'].startswith('application/pdf')
         body = r.get_data()
         assert body[:5] == b'%PDF-'
+
+
+def test_foreign_owned_conversation_is_hidden_from_versions_and_library(flask_app, flask_client, owned_artifact_conversations):
+    from lib.artifacts import create_artifact, set_pinned
+    owners, owner = owned_artifact_conversations
+    cid = 'foreign-artifacts-' + uuid.uuid4().hex[:8]
+    owners[cid] = owner + 1
+    with flask_app.app_context():
+        artifact = create_artifact(conv_id=cid, content='foreign content', format='markdown',
+                                   source='write_file', source_ref={'path': 'foreign.md'})
+        set_pinned(artifact['id'], True)
+    assert flask_client.get(f'/api/v4/artifacts/{artifact["id"]}/versions').status_code == 404
+    response = flask_client.get('/api/v4/artifacts?limit=80')
+    assert response.status_code == 200
+    assert artifact['id'] not in [row['id'] for row in response.get_json()['artifacts']]

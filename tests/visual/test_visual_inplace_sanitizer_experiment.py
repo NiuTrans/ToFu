@@ -95,4 +95,13 @@ def test_inplace_document_full_measurement(browser, frontend_visual_origin):
     if not destination:
         pytest.skip('set TOFU_INPLACE_SANITIZER_PERF_OUTPUT for complete browser pairs')
     from benchmarks.markdown_worker.inplace_measure import measure
-    measure(browser, frontend_visual_origin, destination)
+    report = measure(browser, frontend_visual_origin, destination)
+    assert len(report['cases']) == 5
+    for case in report['cases']:
+        assert len(case['pairs']) == 3
+        for pair in case['pairs']:
+            for value in pair.values():
+                assert value['latency_oracle_frames'] == 100
+                assert len(value['wall_samples_ms']) == 100
+                assert value['rss_samples'] > 0
+                assert value['browser_pid'] != value['memory_browser_pid']

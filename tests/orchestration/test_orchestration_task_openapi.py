@@ -9,7 +9,7 @@ from lib.orchestration.durable_run_field_registry import (
     project_durable_run_snapshot,
 )
 from lib.orchestration.run_status import run_status_contract
-from lib.task_replay import task_replay_contract
+from lib.task_replay.task_replay import task_replay_contract
 from routes.api_v1.orchestration_task_openapi import (
     durable_replay_response_schema,
     durable_run_list_response_schema,

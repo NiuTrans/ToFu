@@ -6,7 +6,7 @@ import pytest
 
 from lib.agent_core.task_runtime import TaskRuntime
 from lib.orchestration.events import runtime_event_contract
-from lib.task_replay import task_replay_contract
+from lib.task_replay.task_replay import task_replay_contract
 from routes.api_v1.orchestration_replay_openapi import (
     orchestration_live_replay_response_schema,
     orchestration_live_replay_responses,
@@ -20,7 +20,7 @@ pytestmark = pytest.mark.unit
 
 
 def test_shared_replay_schema_uses_protocol_field_and_status_registries():
-    import lib.task_replay as replay_module
+    import lib.task_replay.task_replay as replay_module
     import routes.api_v1.orchestration_replay_openapi as openapi_module
 
     contract = task_replay_contract()
@@ -52,7 +52,7 @@ def test_shared_replay_schema_uses_protocol_field_and_status_registries():
 
 
 def test_replay_event_schema_combines_owned_registries_without_closing_type():
-    import lib.task_replay as replay_module
+    import lib.task_replay.task_replay as replay_module
     import routes.api_v1.orchestration_replay_openapi as openapi_module
 
     schema = orchestration_replay_event_schema()
@@ -77,7 +77,7 @@ def test_replay_event_schema_combines_owned_registries_without_closing_type():
 
 
 def test_live_replay_schema_covers_task_runtime_clocks_and_terminal_extras():
-    import lib.task_replay as replay_module
+    import lib.task_replay.task_replay as replay_module
     import routes.api_v1.orchestration_replay_openapi as openapi_module
 
     runtime = TaskRuntime('openapi-sample')

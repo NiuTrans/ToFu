@@ -15,7 +15,18 @@ def store(monkeypatch):
 
 
 def _success_episode(episode_id, task_id):
+    from lib import evolution
     from lib.evolution import records
+    if evolution.get_goal('g', user_id=USER) is None:
+        evolution.admit_goal({
+            'schema_version': 1, 'goal_id': 'g', 'statement': 'goal',
+            'domain': 'code', 'exploratory': False,
+            'criteria': [{'criterion_id': 'c', 'kind': 'test_command',
+                          'params': {'command': 'true'}}],
+            'budget_envelope': {'max_tokens': 10,
+                                'max_wall_clock_seconds': 10,
+                                'max_tool_calls': 10},
+            'status': 'draft', 'created_at': 1}, user_id=USER)
     records.put_record(records.NAMESPACE_EPISODES, f'{USER}:{episode_id}', {
         'schema_version': 1, 'episode_id': episode_id, 'goal_id': 'g',
         'plan_id': 'p', 'selected_path_id': 'a', 'exploratory': False,

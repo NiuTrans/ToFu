@@ -11,19 +11,17 @@ from html.parser import HTMLParser
 from itertools import islice
 from urllib.parse import parse_qsl, unquote, urljoin, urlsplit
 
-from .content_contract import ReadTarget, content_budget
+from .content_contract import ReadTarget
 from . import network_evidence as net
 
 _PRIVATE = re.compile(r'account|chat|conversation|notification|history|board|session|profile|currentuser|userinfo|recommend', re.I)
 
 
 class EvidenceReceipt(dict):
-    """A content receipt plus its pre-clip canonical snapshot.
+    """A secured content receipt plus its schema-clean canonical snapshot.
 
-    The mapping itself stays schema-clean (no extra keys); the snapshot rides
-    the instance attribute so ``json.dumps(receipt)`` and the receipt schema see
-    only the bounded model projection, while the handler can retain the full
-    secured evidence for artifact recovery.
+    Acceptance is resource-bounded; presentation length belongs to common L0.
+    The snapshot attribute keeps artifact evidence out of the receipt schema.
     """
 
     __slots__ = ('evidence_json', 'source_omitted')
@@ -215,7 +213,6 @@ def project_records(body, *, target, page, owner, dom, endpoint_relevant, work):
 def collect_content(payload: dict, *, owner_user_id, target=None, max_chars=30000,
                     representation='auto') -> dict:
     target = ReadTarget.from_value(target)
-    limit = content_budget(max_chars)
     work = WorkBudget()
     payload = payload if isinstance(payload, dict) else {}
     page = payload.get('finalUrl') or payload.get('url') or ''
@@ -334,42 +331,9 @@ def collect_content(payload: dict, *, owner_user_id, target=None, max_chars=3000
         receipt['status'] = 'empty'
         coverage['stop_reason'] = 'explicit_empty'
     coverage['truncated'] = work.truncated or parser.nodes > 12000 or bool(payload.get('truncated') or snapshot.get('truncated'))
-    # Snapshot the secured projection BEFORE the serialized budget below pops
-    # records and slices content to fit. That budget bounds the model view; it
-    # must not destroy accepted evidence the shared artifact layer could retain.
-    # The copy is post-redaction/post-selection, so retaining it adds no
-    # authority the receipt did not already grant. It rides the instance
-    # attribute (not a dict key) so the receipt stays schema-clean.
-    full_receipt = json.loads(json.dumps(receipt, ensure_ascii=False))
-    source_omitted = False
-    # Bound the entire serialized receipt, not separate per-source allowances.
-    while len(json.dumps(receipt, ensure_ascii=False)) > limit:
-        source_omitted = True
-        coverage['truncated'] = True
-        if receipt['records']:
-            receipt['records'].pop()
-        elif receipt['content']:
-            excess = len(json.dumps(receipt, ensure_ascii=False)) - limit
-            receipt['content'] = receipt['content'][:max(0, len(receipt['content']) - excess - 32)]
-        elif receipt['evidence']:
-            receipt['evidence'].pop()
-        elif receipt['title']:
-            receipt['title'] = ''
-        elif receipt['url']:
-            receipt['url'] = ''
-        elif coverage['missing_fields']:
-            coverage['missing_fields'].pop()
-        else:
-            break
-    coverage['missing_fields'] = [field for field in target.fields if not receipt['records'] or any(not field_present(r, field) for r in receipt['records'])]
-    # The first-pass clip already settled status/stop_reason; mirror the
-    # recomputed missing_fields onto the retained snapshot so the canonical
-    # copy is not staler than the model view.
-    full_receipt['coverage']['missing_fields'] = list(coverage['missing_fields'])
-    if usable and not (receipt['content'] or receipt['records']):
-        receipt['status'] = 'unavailable'
-        coverage['scope'] = 'none'
-        usable = False
+    # Accepted, secured evidence is passed intact to the common L0 boundary.
+    # max_chars remains an ignored compatibility keyword for internal callers;
+    # WorkBudget and transport ceilings still bound collection/processing.
     if usable and (not receipt['url'] or any(not r['url'] for r in receipt['records'])):
         if 'url' not in coverage['missing_fields'] and len(coverage['missing_fields']) < 12:
             coverage['missing_fields'].append('url')
@@ -381,31 +345,10 @@ def collect_content(payload: dict, *, owner_user_id, target=None, max_chars=3000
         receipt['status'] = 'partial'
     if coverage['truncated']:
         coverage['stop_reason'] = 'budget_exhausted'
-    # Final status and missing-field updates also consume the shared budget.
-    while len(json.dumps(receipt, ensure_ascii=False)) > limit:
-        source_omitted = True
-        coverage['truncated'] = True
-        coverage['stop_reason'] = 'budget_exhausted'
-        if receipt['content']:
-            receipt['content'] = receipt['content'][:-128]
-        elif receipt['records']:
-            receipt['records'].pop()
-        elif receipt['evidence']:
-            receipt['evidence'].pop()
-        elif coverage['missing_fields']:
-            coverage['missing_fields'].pop()
-        else:
-            break
-        receipt['status'] = 'partial' if receipt['content'] or receipt['records'] else 'unavailable'
     if not receipt['content'] and not receipt['records']:
         coverage['scope'] = 'none'
-    # Second clip is only reachable when the final-status updates themselves
-    # overflow; keep the retained snapshot consistent with the final verdict.
-    full_receipt['status'] = receipt['status']
-    full_receipt['coverage']['missing_fields'] = list(coverage['missing_fields'])
     out = EvidenceReceipt(receipt)
-    out.source_omitted = source_omitted
-    out.evidence_json = json.dumps(full_receipt, ensure_ascii=False)
+    out.evidence_json = json.dumps(receipt, ensure_ascii=False)
     return out
 
 
@@ -415,8 +358,7 @@ def field_present(record, field):
 
 
 def render_content(receipt, *, max_chars=30000) -> str:
-    """Render a receipt as bounded data, never page-provided instructions."""
-    limit = content_budget(max_chars)
+    """Render accepted data intact for L0; max_chars is compatibility-only."""
     coverage = receipt.get('coverage', {})
     header = 'Browser content: ' + str(receipt.get('status', 'unavailable'))
     if any(e.get('strategy') == 'captured_api' for e in receipt.get('evidence', [])):
@@ -425,16 +367,7 @@ def render_content(receipt, *, max_chars=30000) -> str:
     parts.extend(json.dumps(row, ensure_ascii=False) for row in receipt.get('records', [])[:100])
     parts.extend('Evidence: ' + json.dumps(row, ensure_ascii=False).replace('%5Bredacted%5D', '[redacted]') for row in receipt.get('evidence', [])[:12])
     rendered = '\n'.join(part for part in parts if part)
-    if isinstance(receipt, EvidenceReceipt) and (len(rendered) > limit or
-            len(receipt.get('records', [])) > 100 or len(receipt.get('evidence', [])) > 12):
-        receipt.source_omitted = True
-    if len(rendered) > limit and not coverage.get('truncated'):
-        coverage['truncated'] = True
-        coverage['stop_reason'] = 'budget_exhausted'
-        if receipt.get('status') == 'ok':
-            receipt['status'] = 'partial'
-        return render_content(receipt, max_chars=limit)
-    return rendered[:limit]
+    return rendered
 
 
 __all__ = ['EvidenceReceipt', 'collect_content', 'render_content']

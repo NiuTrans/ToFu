@@ -68,7 +68,7 @@ def maybe_redirect_authenticated_download(
             ok=False,
         )
 
-    from lib.search_bridge import bind_search_browser
+    from lib.search.search_bridge import bind_search_browser
     from lib.tasks_pkg.handlers.search import _core as search_core
 
     with bind_search_browser(

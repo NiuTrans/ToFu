@@ -62,12 +62,12 @@ def test_unrelated_lib_import_does_not_load_pricing_or_http_stack(tmp_path):
         "import sys\n"
         "import lib.server_boot.lock\n"
         "assert 'lib.pricing' not in sys.modules\n"
-        "assert 'lib.http_client' not in sys.modules\n"
+        "assert 'lib.http_transport.client' not in sys.modules\n"
         "import lib.pricing\n"
-        "assert 'lib.http_client' not in sys.modules\n"
+        "assert 'lib.http_transport.client' not in sys.modules\n"
         "from lib.pricing import get_pricing_data\n"
         "get_pricing_data()\n"
-        "assert 'lib.http_client' not in sys.modules\n"
+        "assert 'lib.http_transport.client' not in sys.modules\n"
     )
 
     completed = subprocess.run(

@@ -197,6 +197,7 @@ class RootlessQemuSettings:
         runtime_probe: bool,
         required_tasks: tuple[str, ...] = (),
     ) -> dict[str, Any]:
+        definition.validate_backend("rootless-qemu")
         base_disk = _checked_file(self.base_disk, "rootless base disk")
         store, index = load_image_store_index(
             self.image_store,

@@ -2,12 +2,15 @@
 //! An Arc retains the caller's exact Store; only lease metadata survives calls.
 //! Each call reconstructs a borrowed Lease with its original volatile flags.
 //! No public attachment, takeover, history cache, worker or automatic release.
-use super::{Error, Journal, Lease, LeaseState, Policy, Recovery, Scope, Store, journal_error};
+use super::{journal_error, Error, Journal, Lease, LeaseState, Policy, Recovery, Scope, Store};
 use crate::agent_checkpoint::{Disposition, Identity, Port, View};
 use crate::task::TerminalPersistence;
 use serde_json::Value;
 use std::borrow::Cow;
-use std::sync::{Arc, atomic::AtomicBool};
+use std::sync::{atomic::AtomicBool, Arc};
+#[path = "checkpoint_actor_handoff.rs"]
+mod actor_handoff;
+pub use actor_handoff::{ActorHandoff, ActorHandoffSpec};
 
 /// Owns one acquired lease without borrowing a stack-local Journal.
 /// Calls retain the same flags; durable CAS remains the concurrency authority.
@@ -20,6 +23,13 @@ pub struct OwnedLease {
     state: Arc<LeaseState>,
 }
 impl OwnedLease {
+    pub fn handoff(scope: Scope, store: Arc<dyn Store>, snapshot_bytes: usize,
+        identity_bytes: usize, token: &str, lineage: &super::ResumeLineage) -> Result<Self, Error> {
+        let journal = Journal::new(scope, store.as_ref(), snapshot_bytes, identity_bytes)?;
+        let state = journal.handoff(token, lineage)?.state.clone();
+        let scope = journal.scope.into_owned();
+        Ok(Self { scope, store, snapshot_bytes, identity_bytes, state })
+    }
     pub fn acquire(
         scope: Scope,
         store: Arc<dyn Store>,
@@ -27,8 +37,33 @@ impl OwnedLease {
         identity_bytes: usize,
         token: &str,
     ) -> Result<Self, Error> {
+        Self::acquire_with_recovery(scope, store, snapshot_bytes, identity_bytes, token, false)
+    }
+    pub fn recover(
+        scope: Scope,
+        store: Arc<dyn Store>,
+        snapshot_bytes: usize,
+        identity_bytes: usize,
+        token: &str,
+    ) -> Result<Self, Error> {
+        Self::acquire_with_recovery(scope, store, snapshot_bytes, identity_bytes, token, true)
+    }
+    fn acquire_with_recovery(
+        scope: Scope,
+        store: Arc<dyn Store>,
+        snapshot_bytes: usize,
+        identity_bytes: usize,
+        token: &str,
+        recover: bool,
+    ) -> Result<Self, Error> {
         let journal = Journal::new(scope, store.as_ref(), snapshot_bytes, identity_bytes)?;
-        let state = journal.acquire(token)?.state.clone();
+        let state = if recover {
+            journal.recover(token)?
+        } else {
+            journal.acquire(token)?
+        }
+        .state
+        .clone();
         let scope = journal.scope.into_owned();
         Ok(Self {
             scope,
@@ -60,6 +95,9 @@ impl OwnedLease {
     }
     pub fn complete(&self, state: &Value) -> Result<(), Error> {
         self.with_lease(|lease| lease.complete(state))?
+    }
+    pub fn pending(&self, state: &Value) -> Result<(), Error> {
+        self.with_lease(|lease| lease.pending(state))?
     }
     /// The caller freezes disposition before terminal debt retries. Only a
     /// committed Suspend plus Aborted may preserve the completed frontier.
@@ -145,5 +183,12 @@ impl Port for OwnedPolicy {
     fn complete(&self, state: View<'_>) -> Result<Disposition, Value> {
         self.with_policy(|policy| policy.complete(state))
             .map_err(journal_error)?
+    }
+    fn pending(&self, state: View<'_>) -> Result<(), Value> {
+        self.with_policy(|policy| policy.pending(state)).map_err(journal_error)?
+    }
+    fn reconcile(&self, identity: Identity<'_>, state: &Value)
+        -> Result<Vec<crate::agent_checkpoint::ReconciledTool>, Value> {
+        self.with_policy(|policy| policy.reconcile(identity, state)).map_err(journal_error)?
     }
 }

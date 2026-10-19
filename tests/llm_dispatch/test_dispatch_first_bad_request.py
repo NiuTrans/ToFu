@@ -14,7 +14,7 @@ from lib.llm_dispatch._api_budget import (
     _remember_route_missing_error,
 )
 from lib.llm_dispatch._api_stream_state import _StreamRetryState
-from lib.llm_errors import (
+from lib.llm.llm_errors import (
     BadRequestError,
     ModelRouteMissingError,
     PermissionError_,

@@ -102,16 +102,6 @@
         "distributed": 32
       }
     },
-    "TOFU_EVOLUTION_TERMINAL_QUEUE_CAPACITY": {
-      "unit": "count",
-      "scope": "process",
-      "update_mode": "restart",
-      "policy_owner": "runtime_guards",
-      "defaults": {
-        "personal": 4,
-        "distributed": 16
-      }
-    },
     "TOFU_EXECUTOR_IDLE_SECONDS": {
       "unit": "seconds",
       "scope": "process",
@@ -302,16 +292,6 @@
         "distributed": 128
       }
     },
-    "TOFU_PAPER_BUILD_COMPILE_MAX_MIB": {
-      "unit": "MiB",
-      "scope": "process",
-      "update_mode": "restart",
-      "policy_owner": "runtime_guards",
-      "defaults": {
-        "personal": 256,
-        "distributed": 1024
-      }
-    },
     "TOFU_PAPER_BUILD_QUEUE_CAPACITY": {
       "unit": "count",
       "scope": "process",
@@ -320,16 +300,6 @@
       "defaults": {
         "personal": 4,
         "distributed": 16
-      }
-    },
-    "TOFU_PAPER_BUILD_VALIDATION_MAX_MIB": {
-      "unit": "MiB",
-      "scope": "process",
-      "update_mode": "restart",
-      "policy_owner": "runtime_guards",
-      "defaults": {
-        "personal": 128,
-        "distributed": 512
       }
     },
     "TOFU_PAPER_BUILD_WORKERS": {
@@ -360,26 +330,6 @@
       "defaults": {
         "personal": 256,
         "distributed": 2048
-      }
-    },
-    "TOFU_PDF_MAX_TEXT_MIB": {
-      "unit": "MiB",
-      "scope": "process",
-      "update_mode": "restart",
-      "policy_owner": "runtime_guards",
-      "defaults": {
-        "personal": 2,
-        "distributed": 16
-      }
-    },
-    "TOFU_PDF_PARSE_TIMEOUT": {
-      "unit": "seconds",
-      "scope": "process",
-      "update_mode": "restart",
-      "policy_owner": "runtime_guards",
-      "defaults": {
-        "personal": 300,
-        "distributed": 3600
       }
     },
     "TOFU_PDF_PROCESSES": {
@@ -910,16 +860,6 @@
       "defaults": {
         "personal": 32,
         "distributed": 256
-      }
-    },
-    "TOFU_PROJECT_WRITE_RECOVERY_MAX_MIB": {
-      "unit": "MiB",
-      "scope": "process",
-      "update_mode": "restart",
-      "policy_owner": "runtime_guards",
-      "defaults": {
-        "personal": 4,
-        "distributed": 16
       }
     }
   },

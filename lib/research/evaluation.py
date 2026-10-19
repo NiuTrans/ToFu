@@ -265,7 +265,7 @@ def _clean_judgement(raw, *, model: str = '') -> Optional[dict]:
 def _call_judge(messages: list[dict], *, model: str, abort,
                 max_429_attempts: int, model_budget_admit=None) \
         -> tuple[Optional[dict], str, Optional[dict]]:
-    from lib.llm_json import extract_json
+    from lib.llm.llm_json import extract_json
     from lib.paper.agent_loop_policy import PAPER_AGENT_ROUTE_MAX_RETRIES
 
     buf = {'content': ''}

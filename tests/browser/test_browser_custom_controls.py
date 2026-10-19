@@ -126,3 +126,21 @@ def test_select_option_two_step_custom_dropdown():
     assert probe['selectMissing']['selected'] is False
     assert probe['selectMissing']['targetCode'] == 'TARGET_NOT_SELECTABLE'
     assert 'cpu_job' in probe['selectMissing']['options']
+
+
+def test_interaction_scripts_run_in_an_independent_page_realm():
+    probe = run_extension_probe('isolatedInteraction')
+    assert probe['checked']['applied'] is True
+    assert probe['checked']['checked'] is True
+    assert probe['located']['forwarded'] is True
+    assert probe['selected']['selected'] is True
+    assert probe['missing']['targetCode'] == 'TARGET_NOT_FOUND'
+    assert probe['clicked']['targetCode'] == 'TARGET_NOT_FOUND'
+
+
+def test_typing_uses_the_native_setter_for_each_control_class():
+    probe = run_extension_probe('isolatedInteraction')
+    assert probe['textarea']['success'] is True
+    assert probe['textarea']['newValue'] == 'New notes'
+    assert probe['input']['success'] is True
+    assert probe['input']['newValue'] == 'New name'

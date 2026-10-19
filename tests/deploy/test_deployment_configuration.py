@@ -168,7 +168,7 @@ def test_personal_process_allocator_default_is_small_and_child_visible():
     assert environment['TOFU_TRANSLATE_WORKERS'] == environment['TOFU_AGENT_WORKERS']
     assert environment['TOFU_TRANSLATE_WORKER_IDLE_SECONDS'] == '60'
     assert environment['TOFU_OPTIONAL_LLM_MAX_429_ATTEMPTS'] == '2'
-    assert environment['TOFU_PRODUCTION_LLM_FANOUT'] == '2'
+    assert 'TOFU_PRODUCTION_LLM_FANOUT' not in environment
     assert environment['TOFU_PRODUCTION_LLM_MAX_429_ATTEMPTS'] == '8'
     assert environment['TOFU_PRODUCTION_IMAGE_FANOUT'] == '2'
     assert environment['TOFU_PRODUCTION_IMAGE_MAX_429_ATTEMPTS'] == '8'
@@ -196,14 +196,14 @@ def test_paper_build_budget_reserves_desktop_resources_from_the_launch_probe():
     assert defaults['TOFU_PAPER_BUILD_QUEUE_CAPACITY'] == 4
     assert defaults['TOFU_PAPER_BUILD_CACHE_MAX_MIB'] == 512
     assert defaults['TOFU_PAPER_BUILD_CACHE_RECORDS'] == 16
-    assert defaults['TOFU_PAPER_BUILD_VALIDATION_MAX_MIB'] == 256
-    assert defaults['TOFU_PAPER_BUILD_COMPILE_MAX_MIB'] == 512
+    assert 'TOFU_PAPER_BUILD_VALIDATION_MAX_MIB' not in defaults
+    assert 'TOFU_PAPER_BUILD_COMPILE_MAX_MIB' not in defaults
     constrained = resource_budget_manifest({}, snapshot=_resource_snapshot(
         cpus=2, capacity_mb=4096, available_mb=1024, disk_free_mb=10 * 1024))['defaults']
     assert constrained['TOFU_PAPER_BUILD_WORKERS'] == 1
     assert constrained['TOFU_PAPER_BUILD_CACHE_MAX_MIB'] == 64
-    assert constrained['TOFU_PAPER_BUILD_VALIDATION_MAX_MIB'] == 128
-    assert constrained['TOFU_PAPER_BUILD_COMPILE_MAX_MIB'] == 256
+    assert 'TOFU_PAPER_BUILD_VALIDATION_MAX_MIB' not in constrained
+    assert 'TOFU_PAPER_BUILD_COMPILE_MAX_MIB' not in constrained
 
 
 def test_runtime_snapshot_materializes_defaults_without_overwriting_operator():
@@ -320,15 +320,12 @@ def test_resource_profiles_keep_personal_small_without_hardcoding_core_logic():
     assert deployment_resource_default(
         'TOFU_PROJECT_UNDO_CACHE_CAPACITY', personal,
         snapshot=snapshot) == 128
-    assert deployment_resource_default(
-        'TOFU_INCREMENTAL_TRANSLATE_ACTIVE', personal,
-        snapshot=snapshot) == 8
-    assert deployment_resource_default(
-        'TOFU_INCREMENTAL_TRANSLATE_QUEUE_CAPACITY', personal,
-        snapshot=snapshot) == 16
-    assert deployment_resource_default(
-        'TOFU_INCREMENTAL_TRANSLATE_PREVIEW_SEGMENTS', personal,
-        snapshot=snapshot) == 32
+    with pytest.raises(KeyError):
+        deployment_resource_default('TOFU_INCREMENTAL_TRANSLATE_ACTIVE', personal, snapshot=snapshot)
+    with pytest.raises(KeyError):
+        deployment_resource_default('TOFU_INCREMENTAL_TRANSLATE_QUEUE_CAPACITY', personal, snapshot=snapshot)
+    with pytest.raises(KeyError):
+        deployment_resource_default('TOFU_INCREMENTAL_TRANSLATE_PREVIEW_SEGMENTS', personal, snapshot=snapshot)
     assert deployment_resource_default(
         'TOFU_INCREMENTAL_TRANSLATE_PREVIEW_DEADLINE_SECONDS', personal,
         snapshot=snapshot) == 30
@@ -405,8 +402,8 @@ def test_resource_profiles_keep_personal_small_without_hardcoding_core_logic():
     assert deployment_resource_default(
         'TOFU_TRANSLATE_WORKER_IDLE_SECONDS', personal,
         snapshot=snapshot) == 60
-    assert deployment_resource_default(
-        'TOFU_PRODUCTION_LLM_FANOUT', personal, snapshot=snapshot) == 2
+    with pytest.raises(KeyError):
+        deployment_resource_default('TOFU_PRODUCTION_LLM_FANOUT', personal, snapshot=snapshot)
     assert deployment_resource_default(
         'TOFU_PRODUCTION_LLM_MAX_429_ATTEMPTS', personal,
         snapshot=snapshot) == 8
@@ -417,10 +414,11 @@ def test_resource_profiles_keep_personal_small_without_hardcoding_core_logic():
         snapshot=snapshot) == 8
     assert deployment_resource_default(
         'TOFU_PRODUCTION_TTS_FANOUT', personal, snapshot=snapshot) == 2
-    assert resolve_resource_budget(
-        'TOFU_PRODUCTION_LLM_FANOUT',
-        {'TOFU_PRODUCTION_LLM_FANOUT': '99'}, maximum=8,
-        snapshot=snapshot) == 8
+    with pytest.raises(KeyError):
+        resolve_resource_budget(
+            'TOFU_PRODUCTION_LLM_FANOUT',
+            {'TOFU_PRODUCTION_LLM_FANOUT': '99'}, maximum=8,
+            snapshot=snapshot)
     assert resolve_resource_budget(
         'TOFU_PRODUCTION_LLM_MAX_429_ATTEMPTS',
         {'TOFU_PRODUCTION_LLM_MAX_429_ATTEMPTS': '999'}, maximum=64,
@@ -510,12 +508,12 @@ def test_resource_profiles_keep_personal_small_without_hardcoding_core_logic():
         'TOFU_PROJECT_REFRESH_IDLE_SECONDS', distributed) == 600
     assert deployment_resource_default(
         'TOFU_PROJECT_UNDO_CACHE_CAPACITY', distributed) == 512
-    assert deployment_resource_default(
-        'TOFU_INCREMENTAL_TRANSLATE_ACTIVE', distributed) == 32
-    assert deployment_resource_default(
-        'TOFU_INCREMENTAL_TRANSLATE_QUEUE_CAPACITY', distributed) == 64
-    assert deployment_resource_default(
-        'TOFU_INCREMENTAL_TRANSLATE_PREVIEW_SEGMENTS', distributed) == 256
+    with pytest.raises(KeyError):
+        deployment_resource_default('TOFU_INCREMENTAL_TRANSLATE_ACTIVE', distributed)
+    with pytest.raises(KeyError):
+        deployment_resource_default('TOFU_INCREMENTAL_TRANSLATE_QUEUE_CAPACITY', distributed)
+    with pytest.raises(KeyError):
+        deployment_resource_default('TOFU_INCREMENTAL_TRANSLATE_PREVIEW_SEGMENTS', distributed)
     assert deployment_resource_default(
         'TOFU_INCREMENTAL_TRANSLATE_PREVIEW_DEADLINE_SECONDS', distributed) == 60
     assert deployment_resource_default(
@@ -557,8 +555,8 @@ def test_resource_profiles_keep_personal_small_without_hardcoding_core_logic():
         'TOFU_TRANSLATE_WORKER_IDLE_SECONDS', distributed) == 600
     assert deployment_resource_default(
         'TOFU_OPTIONAL_LLM_MAX_429_ATTEMPTS', distributed) == 8
-    assert deployment_resource_default(
-        'TOFU_PRODUCTION_LLM_FANOUT', distributed) == 4
+    with pytest.raises(KeyError):
+        deployment_resource_default('TOFU_PRODUCTION_LLM_FANOUT', distributed)
     assert deployment_resource_default(
         'TOFU_PRODUCTION_LLM_MAX_429_ATTEMPTS', distributed) == 16
     assert deployment_resource_default(
@@ -684,102 +682,7 @@ def test_personal_resource_probe_scales_down_cpu_memory_and_disk_together():
 
     assert manifest['adaptive'] is True
     assert manifest['probe']['data_path']
-    assert manifest['defaults'] == {
-        'TOFU_MALLOC_ARENA_MAX': 1,
-        'TOFU_STORAGE_RPC_CAPACITY': 4,
-        'TOFU_STORAGE_RPC_INFLIGHT_MAX_MIB': 128,
-        'TOFU_STORAGE_SQLITE_READ_POOL': 4,
-        'TOFU_STORAGE_SQLITE_WRITER_QUEUE_CAPACITY': 8,
-        'TOFU_STORAGE_SQLITE_WRITER_CACHE_MIB': 32,
-        'TOFU_STORAGE_TURN_PROJECTION_CACHE_MIB': 16,
-        'TOFU_TASK_INSPECTOR_CACHE_MAX_MIB': 16,
-        'TOFU_MODEL_REPLAY_CACHE_MAX_MIB': 32,
-        'TOFU_BROWSER_STAGING_MAX_MIB': 64,
-        'TOFU_RAW_ARCHIVE_BUDGET_MIB': 30,
-        'TOFU_EVOLUTION_TERMINAL_QUEUE_CAPACITY': 8,
-        'TOFU_BROWSER_CLIENT_REGISTRY_CAPACITY': 64,
-        'TOFU_BROWSER_POLL_BODY_MAX_MIB': 16,
-        'TOFU_MAX_SSE_PER_PRINCIPAL': 8,
-        'TOFU_RUN_PYTHON_CACHE_MAX_MIB': 16,
-        'TOFU_SERVER_PYTHON_CACHE_MAX_MIB': 16,
-        'TOFU_TOKEN_COUNT_CACHE_CAPACITY': 128,
-        'TOFU_USAGE_CACHE_CAPACITY': 128,
-        'TOFU_RATE_LIMIT_MEMORY_BUCKET_CAPACITY': 512,
-        'TOFU_PROGRAM_HEAP_MAX_MIB': 32,
-        'TOFU_TOOL_SEARCH_TERM_CACHE_CAPACITY': 512,
-        'TOFU_TOOL_RESULT_CACHE_CAPACITY': 64,
-        'TOFU_CHAT_TASK_TERMINAL_TTL_SECONDS': 600,
-        'TOFU_TIMER_LIVE_CAP': 8,
-        'TOFU_MEMORY_METADATA_CACHE_CAPACITY': 1024,
-        'TOFU_MEMORY_METADATA_CACHE_MAX_MIB': 8,
-        'TOFU_PAPER_QA_SOURCE_CACHE_CAPACITY': 1,
-        'TOFU_PAPER_BUILD_WORKERS': 1,
-        'TOFU_PAPER_BUILD_QUEUE_CAPACITY': 4,
-        'TOFU_PAPER_BUILD_CACHE_MAX_MIB': 64,
-        'TOFU_PAPER_BUILD_CACHE_RECORDS': 16,
-        'TOFU_PAPER_BUILD_VALIDATION_MAX_MIB': 128,
-        'TOFU_PAPER_BUILD_COMPILE_MAX_MIB': 256,
-        'TOFU_TRANSLATE_CACHE_MAX_MIB': 32,
-        'TOFU_TRANSLATE_MAX_429_ATTEMPTS': 4,
-        'TOFU_TRANSLATE_WORKERS': 2,
-        'TOFU_TRANSLATE_WORKER_IDLE_SECONDS': 60,
-        'TOFU_OPTIONAL_LLM_MAX_429_ATTEMPTS': 2,
-        'TOFU_PRODUCTION_LLM_FANOUT': 2,
-        'TOFU_PRODUCTION_LLM_MAX_429_ATTEMPTS': 4,
-        'TOFU_PRODUCTION_IMAGE_FANOUT': 2,
-        'TOFU_PRODUCTION_IMAGE_MAX_429_ATTEMPTS': 4,
-        'TOFU_PRODUCTION_TTS_FANOUT': 2,
-        'TOFU_PDF_PROCESSES': 2,
-        'TOFU_PDF_MAX_PAGES': 256,
-        'TOFU_PDF_MAX_TEXT_MIB': 2,
-        'TOFU_PDF_PARSE_TIMEOUT': 512,
-        'TOFU_PDF_WORKER_IDLE_SECONDS': 60,
-        'TOFU_PDF_VLM_TASK_WORKERS': 1,
-        'TOFU_PDF_VLM_WORKER_IDLE_SECONDS': 60,
-        'TOFU_PDF_VLM_CALL_WORKERS': 1,
-        'TOFU_PDF_VLM_TASK_TIMEOUT_SECONDS': 1920,
-        'TOFU_PDF_VLM_MAX_429_ATTEMPTS': 4,
-        'TOFU_KNOWLEDGE_ENRICH_WORKERS': 1,
-        'TOFU_MCP_DISPLAY_CACHE_ENTRIES': 512,
-        'TOFU_KNOWLEDGE_ENRICH_WORKER_IDLE_SECONDS': 60,
-        'TOFU_SWARM_GLOBAL_WORKERS': 0,
-        'TOFU_SWARM_MAX_PARALLEL': 4,
-        'TOFU_SWARM_MAX_AGENTS_PER_WAVE': 8,
-        'TOFU_SWARM_MAX_AGENTS_PER_SESSION': 24,
-        'TOFU_SWARM_MAX_RETRIES': 1,
-        'TOFU_SWARM_SESSION_CAPACITY': 4,
-        'TOFU_CONTROL_RPC_WORKERS': 4,
-        'TOFU_PROJECT_REFRESH_QUEUE_CAPACITY': 32,
-        'TOFU_PROJECT_REFRESH_IDLE_SECONDS': 30,
-        'TOFU_PROJECT_UNDO_CACHE_CAPACITY': 64,
-        'TOFU_COMMAND_SNAPSHOT_MAX_ENTRIES': 10000,
-        'TOFU_COMMAND_SNAPSHOT_MAX_SECONDS': 4,
-        'TOFU_TREE_INDEX_WALK_JOBS': 4,
-        'TOFU_TREE_INDEX_MAX_ENTRIES': 204_800,
-        'TOFU_TREE_INDEX_MEM_ROOTS': 2,
-        'TOFU_INCREMENTAL_TRANSLATE_ACTIVE': 4,
-        'TOFU_INCREMENTAL_TRANSLATE_QUEUE_CAPACITY': 8,
-        'TOFU_INCREMENTAL_TRANSLATE_PREVIEW_SEGMENTS': 32,
-        'TOFU_INCREMENTAL_TRANSLATE_PREVIEW_DEADLINE_SECONDS': 30,
-        'TOFU_INCREMENTAL_TRANSLATE_PREVIEW_MIN_CHARS': 256,
-        'TOFU_INCREMENTAL_TRANSLATE_PREVIEW_MAX_429_ATTEMPTS': 1,
-        'TOFU_MAX_INFLIGHT_TASKS': 2,
-        'TOFU_TASK_RSS_RESERVE_MB': 512,
-        'TOFU_SYNC_WORKERS': 4,
-        'TOFU_AGENT_WORKERS': 2,
-        'TOOL_MAX_PARALLEL_WORKERS': 2,
-        'TOFU_NUMERIC_THREADS': 1,
-        'TOFU_MCP_STDIO_IDLE_SECONDS': 180,
-        'TOFU_EXECUTOR_IDLE_SECONDS': 300,
-        'TOFU_LOG_TOTAL_BUDGET_MB': 64,
-        'TOFU_STORAGE_MIN_FREE_BYTES': 2048 * 1024 * 1024,
-        'TOFU_STORAGE_RECOVERY_COPY_BUDGET_MIB': 250 * 1024,
-        'TOFU_STORAGE_SQLITE_BACKUP_TIMEOUT_SECONDS': 17_800,
-        'TOFU_STORAGE_FASTPATH_WAL_REBASE_MAX_MIB': 64,
-        'TOFU_ATTEMPT_EVENT_TTL_DAYS': 1,
-        'TOFU_PROCESS_RSS_RELIEF_MB': 1024,
-        'TOFU_PROCESS_RSS_RECYCLE_MB': 1536,
-    }
+    assert 'TOFU_INCREMENTAL_TRANSLATE_PREVIEW_SEGMENTS' not in manifest
 
 
 def test_personal_resource_probe_scales_large_hosts_with_bounded_parallelism():
@@ -819,7 +722,7 @@ def test_personal_resource_probe_scales_large_hosts_with_bounded_parallelism():
     assert defaults['TOFU_TRANSLATE_WORKERS'] == defaults['TOFU_AGENT_WORKERS']
     assert defaults['TOFU_TRANSLATE_WORKER_IDLE_SECONDS'] == 60
     assert defaults['TOFU_OPTIONAL_LLM_MAX_429_ATTEMPTS'] == 2
-    assert defaults['TOFU_PRODUCTION_LLM_FANOUT'] == 2
+    assert 'TOFU_PRODUCTION_LLM_FANOUT' not in defaults
     assert defaults['TOFU_PRODUCTION_LLM_MAX_429_ATTEMPTS'] == 8
     assert defaults['TOFU_PRODUCTION_IMAGE_FANOUT'] == 2
     assert defaults['TOFU_PRODUCTION_IMAGE_MAX_429_ATTEMPTS'] == 8
@@ -857,7 +760,7 @@ def test_personal_resource_probe_uses_the_full_very_large_host_envelope():
     assert defaults['TOFU_TOOL_RESULT_CACHE_CAPACITY'] == 256
     assert defaults['TOFU_CHAT_TASK_TERMINAL_TTL_SECONDS'] == 1800
     assert defaults['TOOL_MAX_PARALLEL_WORKERS'] == 4
-    assert defaults['TOFU_PRODUCTION_LLM_FANOUT'] == 2
+    assert 'TOFU_PRODUCTION_LLM_FANOUT' not in defaults
     assert defaults['TOFU_PRODUCTION_LLM_MAX_429_ATTEMPTS'] == 8
     assert defaults['TOFU_PRODUCTION_IMAGE_FANOUT'] == 2
     assert defaults['TOFU_PRODUCTION_IMAGE_MAX_429_ATTEMPTS'] == 8
@@ -873,7 +776,7 @@ def test_explicit_cgroup_limit_is_treated_as_the_application_memory_budget():
     assert defaults['TOFU_PROCESS_RSS_RELIEF_MB'] == 2048
     assert defaults['TOFU_PROCESS_RSS_RECYCLE_MB'] == 2867
     assert defaults['TOFU_MAX_INFLIGHT_TASKS'] == 2
-    assert defaults['TOFU_PRODUCTION_LLM_FANOUT'] == 2
+    assert 'TOFU_PRODUCTION_LLM_FANOUT' not in defaults
     assert defaults['TOFU_PRODUCTION_LLM_MAX_429_ATTEMPTS'] == 4
     assert defaults['TOFU_PRODUCTION_IMAGE_FANOUT'] == 2
     assert defaults['TOFU_PRODUCTION_IMAGE_MAX_429_ATTEMPTS'] == 4
@@ -1053,7 +956,7 @@ def test_probe_failure_degrades_to_one_cpu_and_bounded_memory_fallback(
     assert defaults['TOFU_TRANSLATE_MAX_429_ATTEMPTS'] == 4
     assert defaults['TOFU_TRANSLATE_WORKERS'] == 1
     assert defaults['TOFU_TRANSLATE_WORKER_IDLE_SECONDS'] == 60
-    assert defaults['TOFU_PRODUCTION_LLM_FANOUT'] == 1
+    assert 'TOFU_PRODUCTION_LLM_FANOUT' not in defaults
     assert defaults['TOFU_PRODUCTION_LLM_MAX_429_ATTEMPTS'] == 4
     assert defaults['TOFU_PRODUCTION_IMAGE_FANOUT'] == 1
     assert defaults['TOFU_PRODUCTION_IMAGE_MAX_429_ATTEMPTS'] == 4
@@ -1276,3 +1179,57 @@ def test_vlm_page_admission_is_retired_across_launch_profiles():
         assert retired not in environment
         assert int(environment['TOFU_PDF_VLM_TASK_TIMEOUT_SECONDS']) >= 1800
         assert int(environment['TOFU_PDF_VLM_CALL_WORKERS']) >= 1
+
+
+def test_evolution_terminal_queue_admission_setting_is_retired():
+    import json
+    from bootstrap_pkg.resource_policy_generated import RESOURCE_FALLBACKS
+    from runtime_guards import resource_budget_manifest
+    root = Path(__file__).resolve().parents[2]
+    retired = 'TOFU_EVOLUTION_TERMINAL_QUEUE_CAPACITY'
+    assert retired not in json.loads((root / 'contracts/resource_policy_v1.json').read_text())['launch_settings']
+    assert retired not in json.loads((root / 'contracts/config_knobs_v1.json').read_text())['knobs']
+    assert all(retired not in values for values in RESOURCE_FALLBACKS.values())
+    assert retired not in resource_budget_manifest({}, snapshot=_resource_snapshot())['defaults']
+
+
+def test_evolution_terminal_idle_reuse_uses_shared_machine_probe():
+    import sys
+    from runtime_guards import resource_budget_manifest, resolve_resource_budget
+    small = resource_budget_manifest({}, snapshot=_resource_snapshot(
+        cpus=2, capacity_mb=4096, available_mb=2048, disk_free_mb=3 * 1024))
+    large = resource_budget_manifest({}, snapshot=_resource_snapshot(
+        cpus=256, capacity_mb=512 * 1024, available_mb=400 * 1024,
+        disk_free_mb=1024 * 1024))
+    assert large['defaults']['TOFU_AGENT_WORKERS'] > small['defaults']['TOFU_AGENT_WORKERS']
+    assert resolve_resource_budget('TOFU_AGENT_WORKERS', {'TOFU_AGENT_WORKERS': '1'}, maximum=sys.maxsize) == 1
+
+
+def test_pdf_validator_memory_is_only_an_explicit_operator_override():
+    import json
+    from bootstrap_pkg.resource_policy_generated import RESOURCE_FALLBACKS
+    from lib.paper.builds.budget import validation_memory_bytes
+    name='TOFU_PAPER_BUILD_VALIDATION_MAX_MIB'
+    contract=json.loads((Path(__file__).resolve().parents[2]/'contracts/resource_policy_v1.json').read_text())
+    assert name not in contract['launch_settings']
+    assert all(name not in profile for profile in RESOURCE_FALLBACKS.values())
+    environment={}
+    install_process_resource_defaults(environment,snapshot=_resource_snapshot())
+    assert name not in environment and validation_memory_bytes(environment)==0
+    environment[name]='2048'
+    install_process_resource_defaults(environment,snapshot=_resource_snapshot())
+    assert validation_memory_bytes(environment)==2048*1024*1024
+
+
+def test_classic_pdf_parse_wait_is_not_injected_as_a_launch_quota():
+    import json
+    from bootstrap_pkg.resource_policy_generated import RESOURCE_FALLBACKS
+    from lib.pdf_parser.policy import resolve_classic_pdf_budget
+    name='TOFU_PDF_PARSE_TIMEOUT'
+    contract=json.loads((Path(__file__).resolve().parents[2]/'contracts/resource_policy_v1.json').read_text())
+    assert name not in contract['launch_settings']
+    assert all(name not in profile for profile in RESOURCE_FALLBACKS.values())
+    environment={};install_process_resource_defaults(environment,snapshot=_resource_snapshot())
+    assert name not in environment and resolve_classic_pdf_budget(environment).timeout_seconds==0
+    environment[name]='5000';install_process_resource_defaults(environment,snapshot=_resource_snapshot())
+    assert resolve_classic_pdf_budget(environment).timeout_seconds==5000

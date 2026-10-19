@@ -99,6 +99,9 @@ _NOT_SSE_EVENT_TYPES = frozenset({
     # ``[{'type': 'error', 'content': …}]`` (executor.py:714, search.py:449/610)
     # — nested inside a tool round's results, NOT a top-level SSE frame.
     'error',
+    # turn.event.record terminal transition; delivered as the canonical Turn
+    # projection, not appended as a raw registry-backed task SSE frame.
+    'aborted',
 })
 
 # Match ``'type': 'value'`` or ``'type':'value'`` (single or double quotes).
@@ -308,7 +311,7 @@ def test_reconstruction_whitelists_stay_registered():
     the registry (an unregistered whitelist entry is a silently dead filter;
     a registered-but-removed type still named there is a retention bug)."""
     from lib.agent_core.events import event_types
-    from lib.task_event_contract import STRUCTURAL_EVENT_TYPES
+    from lib.task_replay.task_event_contract import STRUCTURAL_EVENT_TYPES
     unregistered = sorted(set(STRUCTURAL_EVENT_TYPES) - event_types())
     assert not unregistered, (
         'STRUCTURAL_EVENT_TYPES names unregistered type(s): '

@@ -4,7 +4,7 @@ Site Knowledge Layer (docs/modules/browser_automation.md): entries are
 OVERRIDES on top of tofu-search's built-in engine constants. When a site's
 DOM drifts, the site-doctor (lib/site_doctor.py) verifies new selectors
 against the LIVE page and pins them here as DATA; tofu-search engines read
-them through the SiteKnowledgeProvider seam (wired in lib/search_bridge.py)
+them through the SiteKnowledgeProvider seam (wired in lib/search/search_bridge.py)
 and fall back to their built-ins when no entry exists. Re-pinning a site
 never needs a library release or a server restart.
 

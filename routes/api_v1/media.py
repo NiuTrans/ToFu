@@ -5,7 +5,7 @@ from __future__ import annotations
 import mimetypes
 import os
 
-from quart import Blueprint, request
+from quart import Blueprint, current_app, request
 
 from lib.api_v4 import raw_success_response
 from lib.api_response import (
@@ -15,13 +15,11 @@ from lib.api_response import (
     api_not_found,
     api_ok,
     api_payload,
-    api_payload_too_large,
 )
 from lib.file_serving import send_file_conditional
 from lib.log import get_logger
 from lib.openapi import media_responses, api_meta
-from lib.quart_sync import request_files
-from lib.rate_limiter import rate_limit
+from lib.quart_sync import owned_sync_command, request_files
 
 from .auth import request_user_id, require_auth
 
@@ -29,28 +27,27 @@ logger = get_logger(__name__)
 
 api_v1_media_bp = Blueprint('api_v1_media', __name__)
 
-_MAX_DOCUMENT_BYTES = 50 * 1024 * 1024
-
 
 @api_v1_media_bp.route('/api/v1/media/attachments', methods=['POST'])
 @require_auth
 @api_meta(
     summary='Upload and index one chat document attachment', tags=['media'])
+@owned_sync_command
 def upload_media_attachment_v1():
     files = request_files()
     upload = files.get('file')
     if upload is None or not getattr(upload, 'filename', ''):
         return api_bad_request('No file provided', field='file')
-    if request.content_length and request.content_length > _MAX_DOCUMENT_BYTES:
-        return api_payload_too_large(_MAX_DOCUMENT_BYTES)
-    raw = upload.stream.read(_MAX_DOCUMENT_BYTES + 1)
-    if len(raw) > _MAX_DOCUMENT_BYTES:
-        return api_payload_too_large(_MAX_DOCUMENT_BYTES)
     try:
         from lib.media_attachments import ingest_document
+        from lib.knowledge.html_application import application_html_projector
 
+        # The parser owns its full byte input; HTTP reception already spills
+        # into the request-owned file rather than a second receive buffer.
+        raw = upload.stream.read()
         attachment = ingest_document(
-            raw, str(upload.filename), user_id=int(request_user_id()))
+            raw, str(upload.filename), user_id=int(request_user_id()),
+            html_projector=application_html_projector(current_app))
     except Exception as exc:
         from lib.knowledge.ingest import KnowledgeIngestError
 
@@ -71,16 +68,15 @@ _ARCHIVE_ERROR_KIND = {
 
 @api_v1_media_bp.route('/api/v1/media/attachments/expand-archive', methods=['POST'])
 @require_auth
-@rate_limit(limit=10, per=60)
 @api_meta(
     summary='Extract a dropped chat archive into a managed workspace',
     description=(
         "multipart/form-data: ``file`` (a .zip/.tar/.tar.gz archive). Spooled "
-        "to a bounded temp file and extracted atomically into "
+        "to an owned temp file and extracted atomically into "
         "``uploads/workspaces/<stem>/`` (fresh auto-suffixed directory; "
         "existing files never overwritten) via lib.paper.archive — zip-slip/link "
-        "defense, 512 files / 64 MiB total / 32 MiB per file / 128 MiB "
-        "compressed. Unlike the project-browser archive drop, this needs no "
+        "defense and complete regular-file reception; "
+        "Unlike the project-browser archive drop, this needs no "
         "already-attached root, so a ChatGPT-style 'drop a zip on the input "
         "box' works with no project set. Returns the extraction receipt, the "
         "extracted path (for the client to mount as a project root via "
@@ -90,7 +86,6 @@ _ARCHIVE_ERROR_KIND = {
 def expand_archive_attachment_v1():
     from lib.chat_workspace import chat_workspaces_root
     from lib.paper.archive import (
-        MAX_ARCHIVE_BYTES,
         extract_archive,
         stream_to_temp,
     )
@@ -105,7 +100,7 @@ def expand_archive_attachment_v1():
 
     spooled = None
     try:
-        spooled = stream_to_temp(upload.stream, max_bytes=MAX_ARCHIVE_BYTES)
+        spooled = stream_to_temp(upload.stream)
         receipt = extract_archive(
             spooled, chat_workspaces_root(), name_hint=archive_name)
     except BuildError as exc:

@@ -200,7 +200,7 @@ def _normalise_base_url(url: str) -> str:
     # slot through here before any request, so this single check covers
     # the whole proxy surface — and runs at USE time, defeating a DNS
     # rebind that passed the registration-time check in byo_providers.
-    from lib.byo_egress import EgressDenied, validate_egress_url
+    from lib.byo.byo_egress import EgressDenied, validate_egress_url
     try:
         validate_egress_url(url)
     except EgressDenied as e:
@@ -358,12 +358,14 @@ def mint_ephemeral_slot(*, base_url: str, api_key: str, model_id: str,
     from .factory import get_dispatcher
 
     dispatcher = get_dispatcher()
-    dispatcher.initialize()
+    # Request authority is already supplied by the caller. Loading the unrelated
+    # configured pool here couples standalone/native routes to application storage.
+    # A later configured dispatch still initializes normally and retains these slots.
     handle = EphemeralSlotHandle(
         handle_id=handle_id, slot=slot, owner=str(owner or ''),
         minted_at=time.time(),
     )
-    # Probe/initialize outside the locks. Registration has no count ceiling.
+    # Probe outside the locks. Registration has no count ceiling.
     # Both owners publish together, with one lock order also used by disposal.
     with _lock, dispatcher._lock:
         try:

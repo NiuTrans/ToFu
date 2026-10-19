@@ -118,6 +118,10 @@ const tick = () => new Promise(resolve => setImmediate(resolve));
  ctx.renderConversationList=()=>{};
  ctx.createConversationSettingsResolution=()=>({});
  ctx.runtimeScope={};
+ const projectOwner={exports:{}};
+ vm.runInNewContext(ts.transpileModule(fs.readFileSync('frontend/src/conversation/application/conversation-project.ts','utf8'),
+ {compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText, {exports:projectOwner.exports});
+ ctx.protectHydratingProjectSettings=projectOwner.exports.protectHydratingProjectSettings;
  vm.runInNewContext(fs.readFileSync('frontend/src/runtime/sections/core/conv_apply_settings.js','utf8'),ctx);
  const catalogSource=fs.readFileSync('frontend/src/runtime/sections/core/conversation_catalog.js','utf8');
  vm.runInNewContext(catalogSource.slice(0,catalogSource.indexOf('/** Paint cached')),ctx);

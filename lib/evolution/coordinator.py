@@ -3,7 +3,7 @@
 One CAS-fenced manager task per goal, no daemon or second agent loop. Durable
 updates survive missed wakes. Explicit reconcile diagnoses lost runtime tasks
 without replaying their effects. Consumption is telemetry, not a lifetime quota.
-Role permissions and durable-record capacity remain independent safety boundaries.
+Role permissions, task binding and CAS ownership remain authoritative.
 """
 from __future__ import annotations
 import json
@@ -26,15 +26,6 @@ def wake(run_id, *, user_id, enable=False):
     pending=[e for e in state['updates'] if e['seq']>manager['through_seq']
              and e['kind'] not in ('reply','assignment') and (not e['task_id'] or e['task_id']!=manager['task_id'])]
     if not pending:return manager
-    from .library import _key
-    from . import records
-    row=records.get_record(records.NAMESPACE_LIBRARIES,_key(run_id,user_id)) or {}
-    if (len(state['updates']) >= journal.reply_capacity(row)[0]
-            or len(json.dumps(row,ensure_ascii=False).encode()) > journal.MAX_WORKSPACE_BYTES-96*1024):
-        def full(current):
-            if current['manager']['status']=='idle':current['manager'].update(status='needs_attention',error='coordinator_reply_capacity_exhausted')
-            return current['manager']
-        return journal.mutate(run_id,user_id,full)
     from .role_models import selected_model
     chosen=selected_model(run, "coordinator")
     config=build_chat_config(config={
@@ -57,8 +48,6 @@ def wake(run_id, *, user_id, enable=False):
         m=current['manager']
         if not m['enabled'] or m['status']!='idle' or m['turns']!=manager['turns']:
             raise EvolutionStateError('coordinator launch already claimed')
-        if len(current['updates']) >= journal.reply_capacity({'coordination':current})[0]:
-            raise EvolutionStateError('coordinator capacity changed before claim')
         m.update(task_id=task['id'],status='running',turns=m['turns']+1,error='')
         return m
     try:claimed=journal.mutate(run_id,user_id,claim)
@@ -85,14 +74,12 @@ def settle(task):
     binding=(task.get('config') or {}).get('evolution') or {}
     run_id=binding['run_id'];owner=task['_userId'];tid=task['id']
     actuals=derive_actuals(task)
-    from copy import deepcopy
     from .library import _mutate
 
     def finish(row):
         state=journal.state_in(row)
         manager=state['manager']
         if manager['task_id']!=tid or manager['status']!='running':return False
-        previous_response=manager['last_response']
         manager['tokens']+=actuals['tokens'];manager['tool_calls']+=actuals['tool_calls']
         success=task.get('status')=='done' and not task.get('error') and not task.get('_executionLimitReason')
         response=str(task.get('content') or '')
@@ -101,25 +88,8 @@ def settle(task):
                        error='' if success else 'coordinator_failed; inspect task',
                        through_seq=max(manager['through_seq'],int(task.get('_evolutionPresented',0))))
         if success:
-            # Capacity can change while the model runs. Test the complete CAS
-            # row, not just its coordination projection; never evict history or
-            # roll back terminal accounting because the reply journal is full.
-            candidate=deepcopy(row)
-            fits=len(state['updates']) < journal.reply_capacity(row)[0]
-            if fits:
-                try:
-                    journal.append_to_row(candidate,event_id='reply:'+tid,kind='reply',content=response,origin='agent',target='coordinator',task_id=tid)
-                except EvolutionStateError:
-                    fits=False
-            if (fits and len(json.dumps(candidate,ensure_ascii=False).encode()) <= journal.reply_capacity(row)[1]):
-                row.update(candidate)
-            else:
-                manager.update(status='needs_attention',error='coordinator_reply_capacity_exhausted; inspect task')
-        if len(json.dumps(row,ensure_ascii=False).encode()) > journal.MAX_WORKSPACE_BYTES:
-            # The full response is still on the bound task. Keep the previous
-            # preview rather than overflowing or deleting a durable event.
-            manager.update(status='needs_attention',last_response=previous_response,
-                           error='coordinator_reply_capacity_exhausted; inspect task')
+            journal.append_to_row(row,event_id='reply:'+tid,kind='reply',content=response,
+                                  origin='agent',target='coordinator',task_id=tid)
         return True
     changed=_mutate(run_id,owner,lambda items:None,row_change=finish)
     if changed:notify(run_id,user_id=owner)
@@ -180,7 +150,16 @@ def start_followup(run_id,payload, *, user_id,request_id):
     intent=journal.mutate(run_id,user_id,claim)
     objective=run['objective']+'\nFollow-up requested by owner: '+intent['content']
     if len(objective)>4000:raise EvolutionStateError('combined follow-up objective exceeds 4000 characters')
-    child=submit_run({'objective':objective,'role_models':run.get('role_models', {}),**({'model':run['model']} if run.get('model') else {})},
+    # A linked iteration continues the same workspace and acceptance contract.
+    # Carry immutable launch policy, not episode/task identities, spent usage,
+    # absolute deadlines or scientific-protocol authority from the prior run.
+    from copy import deepcopy
+    inherited = {key: deepcopy(run[key]) for key in (
+        'project_path', 'executor_plugins', 'executor_schema_budget_tokens', 'budget', 'review_reserve',
+        'max_attempts', 'max_review_format_retries', 'acceptance_requirements',
+        'require_requirement_originals', 'require_command_execution',
+    ) if key in run}
+    child=submit_run({**inherited,'objective':objective,'role_models':run.get('role_models', {}),**({'model':run['model']} if run.get('model') else {})},
                      user_id=user_id,idempotency_key='goal-followup:'+run_id,
                      context_seed=intent['context_seed'],parent_run_id=run_id)
     journal.mutate(run_id,user_id,lambda current:current['followup'].update(status='submitted',run_id=child['run_id']))

@@ -13,7 +13,7 @@ metadata. A bundle proves an execution trail exists, is consistent, and is
 untampered; deliverable correctness stays with its own reviewers and tests.
 
 Wire authority: [`contracts/deliverable_proof_v1.schema.json`](../../contracts/deliverable_proof_v1.schema.json).
-Design record: [`../PROOF_DELIVERABLES_DESIGN_PROPOSAL.md`](../PROOF_DELIVERABLES_DESIGN_PROPOSAL.md).
+Design record: the proof-deliverables design proposal (retired; recoverable from git history).
 
 Entry points: `assemble_task_proof`, `verify_proof_bundle`,
 `lib.proof.evidence.server_evidence_resolver`. HTTP:

@@ -26,8 +26,9 @@ exclusion). One record per managed deployment the user asked for:
 The ledger is DURABLE user state (what was deployed for them); the venvs,
 downloaded binaries and logs under ``data/local_serve/`` are
 reconstructible and may be reclaimed without touching this file. The file
-is capped at ``_MAX_INSTANCES`` records — stale stopped/failed rows are
-evicted first, running rows are never evicted.
+has no record-count quota. Running, stopped and failed deployment records stay
+until explicit removal. Mutation refuses unreadable/invalid existing ledgers
+instead of replacing durable ownership with an empty list.
 """
 
 from __future__ import annotations
@@ -35,7 +36,7 @@ from __future__ import annotations
 import time
 
 from lib.config_dir import config_path
-from lib.json_store import read_json, update_json_atomic
+from lib.json_store import JsonStoreReadError, read_json, update_json_atomic
 from lib.log import get_logger
 
 logger = get_logger(__name__)
@@ -45,7 +46,6 @@ __all__ = ['LEDGER_PATH', 'get_instance', 'list_instances', 'remove_instance',
 
 LEDGER_PATH = config_path('local_serve.json')
 
-_MAX_INSTANCES = 32
 
 
 def _empty() -> dict:
@@ -67,19 +67,14 @@ def get_instance(instance_id: str) -> dict | None:
     return None
 
 
-def _evict(rows: list) -> list:
-    if len(rows) <= _MAX_INSTANCES:
-        return rows
-    terminal = [r for r in rows if r.get('status') in ('stopped', 'failed')]
-    keep = [r for r in rows if r.get('status') not in ('stopped', 'failed')]
-    terminal.sort(key=lambda r: r.get('updated_at') or 0)
-    room = _MAX_INSTANCES - len(keep)
-    if room < 0:
-        # All running — shed the oldest terminal-free tail anyway; the cap is
-        # a hard bound, not a suggestion.
-        keep.sort(key=lambda r: r.get('updated_at') or 0)
-        return keep[-_MAX_INSTANCES:]
-    return keep + terminal[-room:]
+def _validated_ledger(st):
+    """Require intact ownership records before an atomic ledger mutation."""
+    if not isinstance(st, dict) or not isinstance(st.get('instances'), list):
+        raise JsonStoreReadError('Managed deployment ledger has an invalid collection')
+    if any(not isinstance(row, dict) or not isinstance(row.get('id'), str)
+           or not row['id'] for row in st['instances']):
+        raise JsonStoreReadError('Managed deployment ledger has an invalid identity record')
+    return st
 
 
 def upsert_instance(record: dict) -> dict:
@@ -90,42 +85,45 @@ def upsert_instance(record: dict) -> dict:
     record['updated_at'] = now
 
     def _mutate(st):
-        if not isinstance(st, dict):
-            st = _empty()
-        rows = st.get('instances')
-        if not isinstance(rows, list):
-            rows = []
-            st['instances'] = rows
+        st = _validated_ledger(st)
+        rows = st['instances']
         for i, r in enumerate(rows):
             if isinstance(r, dict) and r.get('id') == record['id']:
                 record['created_at'] = r.get('created_at', record['created_at'])
                 rows[i] = record
-                st['instances'] = _evict(rows)
+                st['instances'] = rows
                 return st
         rows.append(record)
-        st['instances'] = _evict(rows)
+        st['instances'] = rows
         return st
 
-    update_json_atomic(LEDGER_PATH, _mutate, default=_empty())
+    update_json_atomic(LEDGER_PATH, _mutate, default=_empty(), strict=True)
     return record
 
 
 def update_fields(instance_id: str, **fields) -> dict | None:
     """Patch selected fields of one record; None when the id is unknown."""
-    row = get_instance(instance_id)
-    if row is None:
-        return None
-    row.update(fields)
-    return upsert_instance(row)
+    stored = {'row': None}
+    def _mutate(st):
+        st = _validated_ledger(st)
+        for index, row in enumerate(st['instances']):
+            if row['id'] == instance_id:
+                changed = {**row, **fields, 'created_at': row.get('created_at', time.time()),
+                           'updated_at': time.time()}
+                st['instances'][index] = changed
+                stored['row'] = changed
+                break
+        return st
+    update_json_atomic(LEDGER_PATH, _mutate, default=_empty(), strict=True)
+    return stored['row']
 
 
 def remove_instance(instance_id: str) -> bool:
     removed = {'ok': False}
 
     def _mutate(st):
-        if not isinstance(st, dict):
-            st = _empty()
-        rows = st.get('instances')
+        st = _validated_ledger(st)
+        rows = st['instances']
         if isinstance(rows, list):
             before = len(rows)
             st['instances'] = [r for r in rows
@@ -134,5 +132,5 @@ def remove_instance(instance_id: str) -> bool:
             removed['ok'] = len(st['instances']) < before
         return st
 
-    update_json_atomic(LEDGER_PATH, _mutate, default=_empty())
+    update_json_atomic(LEDGER_PATH, _mutate, default=_empty(), strict=True)
     return removed['ok']

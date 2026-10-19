@@ -77,7 +77,7 @@ def _no_real_sleep(monkeypatch):
 class TestDispatchStreamSuccess:
     def test_local_body_adaptation_failure_is_neutral(self, monkeypatch):
         from lib.llm_dispatch import api
-        from lib.llm_errors import LocalRequestPreparationError
+        from lib.llm.llm_errors import LocalRequestPreparationError
 
         slot = _make_slot(model='kimi-k3')
         dispatcher = _FakeDispatcher([slot])
@@ -273,7 +273,7 @@ class TestFirstOutputCallbacks:
 class TestDispatchStreamRetry:
     def test_429_then_success_is_free(self, monkeypatch):
         from lib.llm_dispatch import api
-        from lib.llm_errors import RateLimitError
+        from lib.llm.llm_errors import RateLimitError
 
         slot1 = _make_slot(key='k1')
         slot2 = _make_slot(key='k2')
@@ -308,7 +308,7 @@ class TestDispatchStreamRetry:
 
     def test_quota_429_excludes_key_and_counts_hard(self, monkeypatch):
         from lib.llm_dispatch import api
-        from lib.llm_errors import RateLimitError
+        from lib.llm.llm_errors import RateLimitError
 
         slot1 = _make_slot(key='k1')
         slot2 = _make_slot(key='k2')
@@ -343,7 +343,7 @@ class TestDispatchStreamRetry:
         """Contradictory missing-key 401s rotate briefly, never enter the
         durable permission exclusion path, and cannot wait forever."""
         from lib.llm_dispatch import api
-        from lib.llm_errors import RateLimitError
+        from lib.llm.llm_errors import RateLimitError
 
         slot = _make_slot(model='kimi-k3', key='kA')
         dispatcher = _FakeDispatcher([slot, slot, slot, slot], all_slots=[slot])
@@ -384,7 +384,7 @@ class TestDispatchStreamRetry:
     def test_nonstream_credential_delivery_anomaly_uses_same_cap(
             self, monkeypatch):
         from lib.llm_dispatch import api
-        from lib.llm_errors import RateLimitError
+        from lib.llm.llm_errors import RateLimitError
 
         slot = _make_slot(model='kimi-k3', key='kA')
         dispatcher = _FakeDispatcher([slot, slot, slot, slot], all_slots=[slot])
@@ -455,7 +455,7 @@ class TestDispatchStreamPermissionPairExclusion:
 class TestDispatchStreamUnreachableFailover:
     def test_upload_timeout_releases_slot_without_health_penalty_or_fallback(self, monkeypatch):
         from lib.llm_dispatch import api
-        from lib.llm_errors import RequestUploadTimeoutError
+        from lib.llm.llm_errors import RequestUploadTimeoutError
 
         slot = _make_slot(model='kimi-k3')
         dispatcher = _FakeDispatcher([slot, _make_slot(model='kimi-k3', key='k1')])
@@ -477,7 +477,7 @@ class TestDispatchStreamUnreachableFailover:
 
     def test_unreachable_cools_slot_and_fails_over(self, monkeypatch):
         from lib.llm_dispatch import api
-        from lib.llm_errors import EndpointUnreachableError
+        from lib.llm.llm_errors import EndpointUnreachableError
 
         dead = _make_slot(key='dead')
         live = _make_slot(key='live')
@@ -511,7 +511,7 @@ class TestDispatchStreamUnreachableFailover:
 class TestDispatchStreamAllUnreachable:
     def test_all_unreachable_raises_friendly_error(self, monkeypatch):
         from lib.llm_dispatch import api
-        from lib.llm_errors import EndpointUnreachableError
+        from lib.llm.llm_errors import EndpointUnreachableError
 
         dead = _make_slot(model='glm5.1-FP8', key='dead')
         disp = _FakeDispatcher([dead])
@@ -789,7 +789,7 @@ class TestDispatchStreamQuotaScope:
 
     def _run_quota_dispatch(self, monkeypatch, status_code):
         from lib.llm_dispatch import api
-        from lib.llm_errors import RateLimitError
+        from lib.llm.llm_errors import RateLimitError
 
         slot1 = _make_slot(key='k1')
         slot2 = _make_slot(key='k2')

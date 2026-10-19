@@ -5,14 +5,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 import secrets
 from typing import Mapping
+from types import MappingProxyType
 
 from lib.llm_dispatch.ephemeral import (
     EphemeralSlotHandle,
     dispose_ephemeral_slot,
     mint_ephemeral_slot,
 )
-from lib.provider_headers import sanitise_extra_headers
-from lib.llm_dispatch.ephemeral_policy import MAX_REQUEST_ROUTE_SLOTS
+from lib.provider.provider_headers import sanitise_extra_headers
 
 from .credential_envelope import decode_credential_envelope
 from .domain import ModelRoutingError, NativeModelSelection
@@ -66,10 +66,36 @@ class RoutedSlotGroup:
     handles: list[EphemeralSlotHandle]
     candidates: list[RouteCandidate]
     disposed: bool = False
+    route_identity: Mapping | None = None
 
     @property
     def primary(self) -> EphemeralSlotHandle:
         return self.handles[0]
+
+
+def candidate_route_identity(candidate: RouteCandidate, revision: int) -> dict:
+    """Stable secret-free witness shared by planner and request materializer."""
+    return {
+        'revision': revision, 'providerId': candidate.provider_id,
+        'providerAccessId': candidate.provider_access['provider_access_id'],
+        'offeringId': candidate.offering['offering_id'],
+        'deploymentId': candidate.deployment['deployment_id'],
+        'connectionId': candidate.connection['connection_id'],
+        'credentialId': candidate.credential['credential_id'],
+    }
+
+
+def issued_route_identity(candidate: RouteCandidate, boundary: OwnerBoundary, revision: int) -> dict:
+    """Secret-free snapshot binding a native transition to an admitted route."""
+    return {
+        **boundary.payload(), "revision": revision,
+        "providerId": candidate.provider_id,
+        "providerAccessId": candidate.provider_access["provider_access_id"],
+        "offeringId": candidate.offering["offering_id"],
+        "deploymentId": candidate.deployment["deployment_id"],
+        "connectionId": candidate.connection["connection_id"],
+        "credentialId": candidate.credential["credential_id"],
+    }
 
 
 def mint_routed_slot_group(
@@ -80,13 +106,14 @@ def mint_routed_slot_group(
     policy: RoutePolicy | None = None,
     health: RouteHealthRegistry | None = None,
     owner_tag: str = "",
-    max_candidates: int = MAX_REQUEST_ROUTE_SLOTS,
+    max_candidates: int | None = None,
+
+    expected_route_identity: Mapping | None = None,
 ) -> RoutedSlotGroup:
-    if (isinstance(max_candidates, bool)
-            or not isinstance(max_candidates, int)
-            or not 1 <= max_candidates <= MAX_REQUEST_ROUTE_SLOTS):
+    if max_candidates is not None and (isinstance(max_candidates, bool)
+            or not isinstance(max_candidates, int) or max_candidates < 1):
         raise ModelRoutingError(
-            f"max_candidates must be an integer in 1..{MAX_REQUEST_ROUTE_SLOTS}",
+            "max_candidates must be a positive integer or None",
             kind="model_route_resource_budget_invalid",
             field="max_candidates",
         )
@@ -94,7 +121,13 @@ def mint_routed_slot_group(
     rejections: dict[str, int] = {}
     primary_candidates = compile_candidates(
         authority.document, selection, policy=policy, health=health,
-        rejections=rejections, max_candidates=max_candidates)
+        rejections=rejections, max_candidates=(None
+            if expected_route_identity is not None else max_candidates))
+    if expected_route_identity is not None:
+        primary_candidates = [candidate for candidate in primary_candidates
+            if candidate_route_identity(candidate, authority.revision) == dict(expected_route_identity)]
+        if not primary_candidates:
+            raise ModelRoutingError('planned route changed', kind='model_route_changed')
     if not primary_candidates and (rejections.get('model_registration_incomplete') or rejections.get('model_identity_pending')):
         raise ModelRoutingError(
             '模型资料待补全或待验证，请在模型设置中查看缺项 / Model registration is incomplete; inspect missing metadata in Model settings',
@@ -111,7 +144,8 @@ def mint_routed_slot_group(
     # Provider-scoped pending identities cannot cross their service boundary.
     # Official models may degrade only after every candidate for the requested
     # identity, preserving the compiler's preferred-provider stability first.
-    if selection.model is not None and len(candidates) < max_candidates:
+    if (expected_route_identity is None and selection.model is not None
+            and (max_candidates is None or len(candidates) < max_candidates)):
         fallbacks = compile_model_fallback_candidates(
             authority.document,
             selection,
@@ -119,7 +153,7 @@ def mint_routed_slot_group(
             health=health,
             original_provider_id=(selection.preferred_provider_id
                                   or primary_candidates[0].provider_id),
-            max_candidates=max_candidates - len(candidates),
+            max_candidates=(None if max_candidates is None else max_candidates - len(candidates)),
         )
         emitted = {
             (candidate.deployment["deployment_id"],
@@ -135,7 +169,15 @@ def mint_routed_slot_group(
                 continue
             emitted.add(identity)
             candidates.append(candidate)
-    candidates = candidates[:max_candidates]
+    if max_candidates is not None:
+        candidates = candidates[:max_candidates]
+
+    if expected_route_identity is not None:
+        # Summary preflight is secret-free. Reject changed/revoked witnesses
+        # before resolving plaintext, rather than silently minting another route.
+        if (len(candidates) != 1 or candidate_route_identity(candidates[0], authority.revision)
+                != dict(expected_route_identity)):
+            raise ModelRoutingError('planned route changed', kind='model_route_changed')
     pin_id = f"model-route:{boundary.owner_user_id}:{secrets.token_hex(8)}"
     handles: list[EphemeralSlotHandle] = []
     runnable_candidates: list[RouteCandidate] = []
@@ -248,7 +290,9 @@ def mint_routed_slot_group(
                 float(pricing.get("input") or 0.0)
                 + float(pricing.get("output") or 0.0)
             ) / 2000.0
-        return RoutedSlotGroup(pin_id, handles, runnable_candidates)
+        witness = MappingProxyType(issued_route_identity(
+            runnable_candidates[0], boundary, authority.revision))
+        return RoutedSlotGroup(pin_id, handles, runnable_candidates, route_identity=witness)
     except BaseException as creation_error:
         try:
             dispose_routed_slot_group(
@@ -272,6 +316,13 @@ def dispose_routed_slot_group(group: RoutedSlotGroup | None) -> bool:
             # Attempt every sibling release, and leave the group retryable.
             if first_error is None:
                 first_error = exc
+
+        finally:
+            # Request-scoped plaintext must not survive in a retained handle.
+            # Remove pool membership first; neutralize references even if one
+            # sibling's disposal/audit failed, then attempt all other siblings.
+            handle.slot.api_key = ''
+            handle.slot.extra_headers = {}
     if first_error is not None:
         raise first_error
     group.disposed = True
@@ -279,7 +330,6 @@ def dispose_routed_slot_group(group: RoutedSlotGroup | None) -> bool:
 
 
 __all__ = [
-    "MAX_REQUEST_ROUTE_SLOTS",
     "RoutedSlotGroup",
     "decode_credential_secret",
     "dispose_routed_slot_group",

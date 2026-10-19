@@ -1,8 +1,8 @@
 # HOT_PATH
-"""update_search_settings tool handler — thin wrapper over lib.search_settings.
+"""update_search_settings tool handler — thin wrapper over lib.search.search_settings.
 
 The validation/clamping/persistence/hot-reload logic lives in
-``lib.search_settings.apply_updates`` (single source of truth, shared with
+``lib.search.search_settings.apply_updates`` (single source of truth, shared with
 the Settings UI status projection). This handler only translates between the
 tool-round protocol and that function.
 """
@@ -38,9 +38,25 @@ def _format_effective(eff: dict) -> str:
 @tool_registry.handler('update_search_settings', category='search',
                        description='Read or adjust server-wide search/fetch settings')
 def _handle_update_search_settings(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, project_path, project_enabled, all_tools=None):
-    from lib import search_settings as ss
+    from lib.search import search_settings as ss
 
-    res = ss.apply_updates(fn_args or {})
+    args = fn_args or {}
+    retired = {'max_chars_search', 'max_chars_direct', 'max_chars_pdf'}
+    rejected = sorted(retired.intersection(args))
+    overrides = args.get('overrides')
+    if isinstance(overrides, dict):
+        rejected.extend(f'overrides.{key}' for key in sorted(retired.intersection(overrides)))
+    if rejected:
+        # Reject the entire call before the shared settings owner can persist
+        # any sibling values. UI/operator settings remain a separate authority.
+        res = {
+            'ok': False, 'applied': {}, 'notes': [],
+            'errors': {key: 'Output-budget parameters are not accepted by this tool; '
+                            'no settings were changed.' for key in rejected},
+            'effective': ss.read_effective(),
+        }
+    else:
+        res = ss.apply_updates(args)
 
     parts: list[str] = []
     changed = bool(res.get('applied'))

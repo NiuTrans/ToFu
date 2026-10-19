@@ -149,11 +149,25 @@ class OrchestrationRuntimeStartService:
         source = runs.get_execution_snapshot(source_run_id)
         if source is None:
             raise RunRecoveryError('Run not found', not_found=True)
+        from lib.goal_runs.contract import GOAL_RUN_CREATED_BY
+        if source.get('created_by') == GOAL_RUN_CREATED_BY:
+            from lib.goal_runs.recovery import resume_chat_goal
+            from lib.orchestration.execution_journal import RecoveryDeferred, RecoveryRefused
+            try:
+                return resume_chat_goal(
+                    runs, source_run_id, owner_user_id=owner_user_id,
+                    tenant_id=str(source.get('tenant_id') or ''),
+                )
+            except (RecoveryDeferred, RecoveryRefused) as error:
+                # The Goal owner enforces Stop, lane-tail, receipt and claim
+                # fences. Never fall back to a generic Studio executor.
+                raise RunRecoveryError(str(error)) from error
         run_id = recovery_run_id(source_run_id)
         if runs.get(run_id) is not None:
             return run_id
         try:
-            source, records = load_recovery_records(runs, source_run_id)
+            source, records = load_recovery_records(runs, source_run_id,
+                                                    owner_user_id=owner_user_id)
         except RunRecoveryError:
             # Another request may have won creation while this request read
             # the immutable source and its newly appended launch claim.

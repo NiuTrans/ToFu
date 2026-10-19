@@ -1,3 +1,8 @@
+/** Canonical immutable conversation reduction and subscription lifecycle.
+ * Entry points: createTurnState, reduceTurnState, createTurnStore.
+ * Dependencies: generated Conversation Sync contract and projection-patch.
+ * Copy-on-write drafts live for one reduction and retain no prior-state log.
+ */
 import type {
   ActiveAttemptPhase,
   AttemptEvent as ContractAttemptEvent,
@@ -9,6 +14,7 @@ import type {
 } from '../api/conversation-sync.generated';
 import type { LiveRoundUsage, ProjectionTurn } from './turn-projection';
 import { applyProjectionPatch } from './projection-patch';
+import { editEntityRecord, entityRecordEntries, type EntityRecordDraft } from './entity-record';
 
 type UnknownRecord = Record<string, unknown>;
 
@@ -38,6 +44,8 @@ export interface TurnSnapshotInput extends UnknownRecord {
   nextBeforeOrdinal?: number | null;
   hasMore?: boolean;
   totalTurns?: number;
+  historyMode?: 'continuous' | 'detached';
+  beforeOrdinal?: number;
   /* Server-stamped delivery-wedge signal (sync snapshot authority). Delta
    * snapshots never carry it; the fold below only applies a present key. */
   pushWithheld?: boolean;
@@ -99,7 +107,15 @@ export type TurnAction =
   | { type: 'push_withheld'; pushWithheld: boolean }
   | { type: 'transport'; status: string };
 
+/** Content-free changes from one accepted canonical reduction. No replay log. */
+export interface TurnStateChanges {
+  readonly turnIds: ReadonlyArray<string>;
+  readonly attemptIds: ReadonlyArray<string>;
+  readonly reset: boolean;
+}
+
 export interface ReduceTurnStateOptions {
+  onChanges?(changes: TurnStateChanges): void;
   onUnknownTurn?(turnId: string): void;
   onProjectionGap?(turnId: string): void;
 }
@@ -113,6 +129,7 @@ export interface TurnStoreOptions {
 export interface TurnStateUpdate {
   previousState: TurnState;
   action: TurnAction;
+  changes?: TurnStateChanges;
 }
 
 export interface TurnStore {
@@ -140,48 +157,132 @@ export function createTurnState(conversationId: string): TurnState {
   };
 }
 
-function copyState(state: TurnState): TurnState {
-  return {
-    ...state,
-    turnsById: { ...state.turnsById },
-    laneOrder: Object.fromEntries(Object.entries(state.laneOrder)
-      .map(([lane, ids]) => [lane, (ids ?? []).slice()])),
-    historyByLane: Object.fromEntries(Object.entries(state.historyByLane ?? {})
-      .map(([lane, history]) => [lane, history ? { ...history } : undefined])),
-    attemptsById: { ...state.attemptsById },
-    queueItems: state.queueItems.map((item) => ({ ...item })),
-    pendingEventsByTurn: Object.fromEntries(
-      Object.entries(state.pendingEventsByTurn)
-        .map(([turnId, events]) => [turnId, (events ?? []).slice()]),
-    ),
-    commandPending: { ...state.commandPending },
-    liveRoundUsageByTurn: { ...state.liveRoundUsageByTurn },
-  };
+/** A reducer-owned copy-on-write draft. Only changed indexes and changed
+ * lane/event arrays are copied; unchanged collections keep immutable identity.
+ * Entity indexes share untouched hash paths; there is no event history or alternate authority. */
+type TurnStateRecordKey = 'turnsById' | 'attemptsById' | 'laneOrder'
+  | 'historyByLane' | 'pendingEventsByTurn' | 'commandPending' | 'liveRoundUsageByTurn';
+
+class TurnStateDraft {
+  readonly state: TurnState;
+
+  private readonly laneMembership = new Map<string, { ids: string[]; members: Set<string> }>();
+  private readonly entityDrafts = new Map<string, EntityRecordDraft<unknown>>();
+  private readonly changedTurns = new Set<string>();
+  private readonly changedAttempts = new Set<string>();
+  reset = false;
+
+  constructor(private readonly original: TurnState,
+    private readonly onChanges?: ReduceTurnStateOptions['onChanges']) {
+    this.state = { ...original };
+  }
+
+  turnChanged(turnId: string): void { this.changedTurns.add(turnId); }
+  attemptChanged(attemptId: string): void { this.changedAttempts.add(attemptId); }
+
+  record<K extends TurnStateRecordKey>(key: K): TurnState[K] {
+    if (key === 'turnsById' || key === 'attemptsById') {
+      if (!this.entityDrafts.has(key)) {
+        const draft = editEntityRecord<unknown>(this.state[key]);
+        this.entityDrafts.set(key, draft);
+        this.state[key] = draft.record as TurnState[K];
+      }
+      return this.state[key];
+    }
+    if (this.state[key] === this.original[key]) {
+      this.state[key] = { ...this.original[key] };
+    }
+    return this.state[key];
+  }
+
+  lane(laneId: string): string[] {
+    const lanes = this.record('laneOrder');
+    if (!lanes[laneId] || lanes[laneId] === this.original.laneOrder[laneId]) {
+      lanes[laneId] = [...(lanes[laneId] ?? [])];
+    }
+    return lanes[laneId]!;
+  }
+
+  /** Ordered insertion preserves stable-sort ties without re-sorting history.
+   * Membership belongs only to this draft; sorted canonical lane order is the
+   * input invariant. Append-heavy initial snapshots therefore do linear work. */
+  placeTurn(laneId: string, turnId: string): void {
+    const ids = this.lane(laneId);
+    let membership = this.laneMembership.get(laneId);
+    if (!membership || membership.ids !== ids) {
+      membership = { ids, members: new Set(ids) };
+      this.laneMembership.set(laneId, membership);
+    }
+    const oldIndex = membership.members.has(turnId) ? ids.indexOf(turnId) : -1;
+    if (oldIndex >= 0) ids.splice(oldIndex, 1);
+    const ordinal = Number(this.state.turnsById[turnId]?.ordinal || 0);
+    const before = (index: number): boolean => {
+      const candidate = Number(this.state.turnsById[ids[index]]?.ordinal || 0);
+      if (candidate !== ordinal) return candidate < ordinal;
+      // Stable Array.sort used the position before this Turn's ordinal changed.
+      return oldIndex < 0 || (index < oldIndex ? index : index + 1) < oldIndex;
+    };
+    let low = 0, high = ids.length;
+    if (high && before(high - 1)) low = high;
+    else while (low < high) {
+      const middle = (low + high) >>> 1;
+      if (before(middle)) low = middle + 1;
+      else high = middle;
+    }
+    ids.splice(low, 0, turnId);
+    membership.members.add(turnId);
+  }
+
+  history(laneId: string): TurnHistoryLaneState | undefined {
+    const current = this.state.historyByLane[laneId];
+    if (!current) return undefined;
+    const histories = this.record('historyByLane');
+    if (current === this.original.historyByLane[laneId]) {
+      histories[laneId] = { ...current };
+    }
+    return histories[laneId];
+  }
+
+  events(turnId: string): TurnEvent[] {
+    const events = this.record('pendingEventsByTurn');
+    if (!events[turnId] || events[turnId] === this.original.pendingEventsByTurn[turnId]) {
+      events[turnId] = [...(events[turnId] ?? [])];
+    }
+    return events[turnId]!;
+  }
+
+  finish(): TurnState {
+    for (const draft of this.entityDrafts.values()) draft.finish();
+    this.onChanges?.({ turnIds: [...this.changedTurns],
+      attemptIds: [...this.changedAttempts], reset: this.reset });
+    return (Object.keys(this.state) as Array<keyof TurnState>)
+      .every(key => this.state[key] === this.original[key]) ? this.original : this.state;
+  }
 }
 
-function putTurn(next: TurnState, turn: ProjectionTurn | null | undefined): void {
+function putTurn(draft: TurnStateDraft, turn: ProjectionTurn | null | undefined, countNew = true): void {
   if (!turn?.turnId) return;
+  const next = draft.state;
   const previous = next.turnsById[turn.turnId];
   if (previous && Number(turn.projectionRevision || 0)
       < Number(previous.projectionRevision || 0)) return;
   const merged = { ...previous, ...turn };
-  next.turnsById[turn.turnId] = merged;
+  draft.record('turnsById')[turn.turnId] = merged;
+  draft.turnChanged(turn.turnId);
   const liveUsage = next.liveRoundUsageByTurn[turn.turnId];
   if (liveUsage && (liveUsage.attemptId !== merged.currentAttemptId
       || ['completed', 'interrupted', 'truncated', 'failed']
         .includes(merged.status || ''))) {
-    delete next.liveRoundUsageByTurn[turn.turnId];
+    delete draft.record('liveRoundUsageByTurn')[turn.turnId];
   }
   const lane = turn.laneId || 'main';
-  const ids = next.laneOrder[lane] ?? (next.laneOrder[lane] = []);
-  if (!ids.includes(turn.turnId)) ids.push(turn.turnId);
-  ids.sort((leftId, rightId) => (
-    Number(next.turnsById[leftId]?.ordinal || 0)
-      - Number(next.turnsById[rightId]?.ordinal || 0)
-  ));
-  const history = next.historyByLane[lane];
-  if (!previous && history) {
-    history.totalTurns = Math.max(ids.length, history.totalTurns + 1);
+  if (!previous || (previous.laneId || 'main') !== lane
+      || previous.ordinal !== merged.ordinal) {
+    draft.placeTurn(lane, turn.turnId);
+  }
+  if (!previous && next.historyByLane[lane] && countNew) {
+    const history = draft.history(lane)!;
+    history.totalTurns = Math.max(next.laneOrder[lane]?.length ?? 0, history.totalTurns + 1);
   }
 }
 
@@ -205,15 +306,17 @@ function turnStatus(value: unknown, fallback: TurnStatus): TurnStatus {
     : fallback;
 }
 
-function putAttempt(next: TurnState, attempt: AttemptRecord | null | undefined): void {
+function putAttempt(draft: TurnStateDraft, attempt: AttemptRecord | null | undefined): void {
   if (!attempt?.attemptId) return;
+  const next = draft.state;
   const previous = next.attemptsById[attempt.attemptId] ?? { attemptId: attempt.attemptId };
   const previousRank = attemptStatusRank[previous.status || ''] ?? 0;
   const incomingRank = attemptStatusRank[attempt.status || ''] ?? 0;
   const incoming = incomingRank < previousRank
     ? { ...attempt, status: previous.status }
     : attempt;
-  next.attemptsById[attempt.attemptId] = { ...previous, ...incoming };
+  draft.record('attemptsById')[attempt.attemptId] = { ...previous, ...incoming };
+  draft.attemptChanged(attempt.attemptId);
 }
 
 // Recovery is authoritative; unknown-turn transport data is only a bounded
@@ -231,16 +334,16 @@ function hasDeferredTerminalProjection(turn: ProjectionTurn): boolean {
 }
 
 function reduceEvent(
-  next: TurnState,
+  draft: TurnStateDraft,
   event: TurnEvent | null | undefined,
   onUnknownTurn?: (turnId: string) => void,
   onProjectionGap?: (turnId: string) => void,
 ): void {
   if (!event?.turnId || !event.attemptId) return;
+  const next = draft.state;
   const turn = next.turnsById[event.turnId];
   if (!turn) {
-    const queue = next.pendingEventsByTurn[event.turnId]
-      ?? (next.pendingEventsByTurn[event.turnId] = []);
+    const queue = next.pendingEventsByTurn[event.turnId] ?? [];
     if (!queue.some((item) => item.attemptId === event.attemptId
         && Number(item.seq) === Number(event.seq))) {
       const pending = Object.values(next.pendingEventsByTurn).flatMap(
@@ -248,7 +351,7 @@ function reduceEvent(
       );
       if (pending.length < MAX_PENDING_EVENTS
           && JSON.stringify([...pending, event]).length <= MAX_PENDING_EVENT_BYTES / 2) {
-        queue.push(event);
+        draft.events(event.turnId).push(event);
       } else {
         // Drop reconstructible transport data, not durable Turn state. The
         // existing recovery callback below supplies the missing authority.
@@ -277,7 +380,16 @@ function reduceEvent(
   if (Number(event.seq || 0) <= Number(previousAttempt.lastSeq || 0)) return;
   const incomingRevision = Number(event.projectionRevision || 0);
   if (incomingRevision <= Number(turn.projectionRevision || 0)) {
-    next.attemptsById[event.attemptId] = {
+
+    // A command ACK can install this exact projection before its stream frame.
+    // Its attempt sequence has not been consumed: retain the carried phase,
+    // including explicit null, without replaying an already installed patch.
+    // Older revisions must never roll presentation back after a newer snapshot.
+    if (incomingRevision === Number(turn.projectionRevision || 0) && 'phase' in payload) {
+      next.livePhase = payload.phase ?? null;
+    }
+    draft.attemptChanged(event.attemptId);
+    draft.record('attemptsById')[event.attemptId] = {
       ...previousAttempt,
       lastSeq: Number(event.seq || 0),
     };
@@ -335,8 +447,8 @@ function reduceEvent(
   }
   // Related authorities are part of the accepted event, not a bypass around
   // duplicate, stale-attempt or patch-base validation.
-  for (const relatedTurn of payload.turns ?? []) putTurn(next, relatedTurn);
-  for (const relatedAttempt of payload.attempts ?? []) putAttempt(next, relatedAttempt);
+  for (const relatedTurn of payload.turns ?? []) putTurn(draft, relatedTurn);
+  for (const relatedAttempt of payload.attempts ?? []) putAttempt(draft, relatedAttempt);
   // The receipt and queue acknowledgement are one server commit. Apply
   // removals only after the same attempt/revision/patch guards as the block;
   // never infer delivery from visible DOM, command text, or stale events.
@@ -351,8 +463,10 @@ function reduceEvent(
         || (left.queueId < right.queueId ? -1 : left.queueId > right.queueId ? 1 : 0))
       .map((item, index) => ({ ...item, position: index + 1 }));
   }
-  next.turnsById[event.turnId] = updated;
-  next.attemptsById[event.attemptId] = {
+  draft.record('turnsById')[event.turnId] = updated;
+  draft.turnChanged(event.turnId);
+  draft.attemptChanged(event.attemptId);
+  draft.record('attemptsById')[event.attemptId] = {
     ...previousAttempt,
     attemptId: event.attemptId,
     turnId: event.turnId,
@@ -372,42 +486,50 @@ function reduceEvent(
     next.livePhase = event.type === 'terminal_settlement' ? null
       : (payload as UnknownRecord).phase ?? null;
   }
-  delete next.commandPending[event.turnId];
+  if (event.turnId in next.commandPending) delete draft.record('commandPending')[event.turnId];
 }
 
 function removeTurns(
-  next: TurnState,
+  draft: TurnStateDraft,
   turnIds: ReadonlyArray<string> | undefined,
 ): void {
+  const next = draft.state;
   for (const turnId of turnIds ?? []) {
     const removed = next.turnsById[turnId];
-    delete next.turnsById[turnId];
-    delete next.pendingEventsByTurn[turnId];
-    delete next.commandPending[turnId];
-    delete next.liveRoundUsageByTurn[turnId];
-    for (const [attemptId, attempt] of Object.entries(next.attemptsById)) {
-      if (attempt?.turnId === turnId) delete next.attemptsById[attemptId];
+    if (turnId in next.turnsById) {
+      delete draft.record('turnsById')[turnId];
+      draft.turnChanged(turnId);
+    }
+    if (turnId in next.pendingEventsByTurn) delete draft.record('pendingEventsByTurn')[turnId];
+    if (turnId in next.commandPending) delete draft.record('commandPending')[turnId];
+    if (turnId in next.liveRoundUsageByTurn) delete draft.record('liveRoundUsageByTurn')[turnId];
+    for (const [attemptId, attempt] of entityRecordEntries(next.attemptsById)) {
+      if (attempt?.turnId === turnId) {
+        delete draft.record('attemptsById')[attemptId];
+        draft.attemptChanged(attemptId);
+      }
     }
     for (const lane of Object.keys(next.laneOrder)) {
       const ids = next.laneOrder[lane];
       if (!ids) continue;
       const index = ids.indexOf(turnId);
-      if (index >= 0) ids.splice(index, 1);
+      if (index >= 0) draft.lane(lane).splice(index, 1);
       if (index >= 0 && removed && next.historyByLane[lane]) {
-        const history = next.historyByLane[lane];
-        history.totalTurns = Math.max(ids.length, history.totalTurns - 1);
+        const history = draft.history(lane)!;
+        history.totalTurns = Math.max(next.laneOrder[lane]!.length, history.totalTurns - 1);
       }
-      if (!ids.length) delete next.laneOrder[lane];
+      if (!next.laneOrder[lane]?.length) delete draft.record('laneOrder')[lane];
     }
   }
 }
 
 function applyTurnProjectionChanges(
-  next: TurnState,
+  draft: TurnStateDraft,
   values: ReadonlyArray<TurnProjectionChange> | undefined,
   onUnknownTurn?: (turnId: string) => void,
   onProjectionGap?: (turnId: string) => void,
 ): void {
+  const next = draft.state;
   for (const change of values ?? []) {
     const turnId = change.turnId;
     const turn = next.turnsById[turnId];
@@ -445,7 +567,8 @@ function applyTurnProjectionChanges(
       onProjectionGap?.(turnId);
       continue;
     }
-    next.turnsById[turnId] = {
+    draft.turnChanged(turnId);
+    draft.record('turnsById')[turnId] = {
       ...turn,
       projection,
       projectionRevision: targetRevision,
@@ -460,14 +583,16 @@ export function reduceTurnState(
   action: TurnAction | null | undefined,
   options: ReduceTurnStateOptions = {},
 ): TurnState {
-  const next = copyState(state);
-  if (!action?.type) return next;
+  if (!action?.type) return state;
+  const draft = new TurnStateDraft(state, options.onChanges);
+  const next = draft.state;
   if (action.type === 'snapshot') {
     const snapshot = action.snapshot ?? {};
     if (Number(snapshot.conversationRevision || 0)
-        < Number(next.conversationRevision || 0)) return next;
+        < Number(next.conversationRevision || 0)) return state;
     next.conversationRevision = Number(snapshot.conversationRevision || 0);
     if (snapshot.authoritativeFull) {
+      draft.reset = true;
 
       next.livePhase = null;
       next.liveRoundUsageByTurn = Object.create(null) as Record<string, LiveRoundUsage>;
@@ -482,15 +607,16 @@ export function reduceTurnState(
     /* Delta-sync tombstones: a non-authoritative (incremental) snapshot
      * cannot sweep absent ids, so deletions arrive explicitly.  Removal is
      * idempotent and also drops any queued pending events for the turn. */
-    removeTurns(next, snapshot.deletedTurnIds);
+    removeTurns(draft, snapshot.deletedTurnIds);
     applyTurnProjectionChanges(
-      next,
+      draft,
       snapshot.turnPatches,
       options.onUnknownTurn,
       options.onProjectionGap,
     );
-    for (const turn of snapshot.turns ?? []) putTurn(next, turn);
-    for (const attempt of snapshot.attempts ?? []) putAttempt(next, attempt);
+    for (const turn of snapshot.turns ?? []) putTurn(draft, turn,
+      !(snapshot.laneId && 'hasMore' in snapshot && 'totalTurns' in snapshot));
+    for (const attempt of snapshot.attempts ?? []) putAttempt(draft, attempt);
     if (snapshot.authoritativeFull && snapshot.activeAttemptPhase) {
       const active = snapshot.activeAttemptPhase;
       const turn = next.turnsById[active.turnId];
@@ -504,14 +630,16 @@ export function reduceTurnState(
     }
     const pageWindow = snapshot.turnWindow;
     if (pageWindow) {
-      next.historyByLane[pageWindow.laneId] = {
+      draft.record('historyByLane')[pageWindow.laneId] = {
         nextBeforeOrdinal: pageWindow.nextBeforeOrdinal,
         hasMore: pageWindow.hasMore,
         totalTurns: pageWindow.totalTurns,
       };
     } else if (snapshot.laneId && 'hasMore' in snapshot
-        && 'totalTurns' in snapshot) {
-      next.historyByLane[snapshot.laneId] = {
+        && 'totalTurns' in snapshot && snapshot.historyMode !== 'detached'
+        && (!next.historyByLane[snapshot.laneId]
+          || snapshot.beforeOrdinal === next.historyByLane[snapshot.laneId]?.nextBeforeOrdinal)) {
+      draft.record('historyByLane')[snapshot.laneId] = {
         nextBeforeOrdinal: snapshot.nextBeforeOrdinal ?? null,
         hasMore: Boolean(snapshot.hasMore),
         totalTurns: Math.max(
@@ -521,7 +649,7 @@ export function reduceTurnState(
       };
     } else if (snapshot.authoritativeFull) {
       for (const [laneId, ids] of Object.entries(next.laneOrder)) {
-        next.historyByLane[laneId] = {
+        draft.record('historyByLane')[laneId] = {
           nextBeforeOrdinal: null,
           hasMore: false,
           totalTurns: ids?.length ?? 0,
@@ -553,11 +681,11 @@ export function reduceTurnState(
     }
     for (const [turnId, events] of Object.entries(next.pendingEventsByTurn)) {
       if (!next.turnsById[turnId] || !events) continue;
-      delete next.pendingEventsByTurn[turnId];
-      events.sort((left, right) => Number(left.seq || 0) - Number(right.seq || 0));
-      for (const event of events) {
+      if (turnId in next.pendingEventsByTurn) delete draft.record('pendingEventsByTurn')[turnId];
+      const orderedEvents = [...events].sort((left, right) => Number(left.seq || 0) - Number(right.seq || 0));
+      for (const event of orderedEvents) {
         reduceEvent(
-          next, event, options.onUnknownTurn, options.onProjectionGap,
+          draft, event, options.onUnknownTurn, options.onProjectionGap,
         );
       }
     }
@@ -570,12 +698,12 @@ export function reduceTurnState(
     const responseRevision = Number(
       response.conversationRevision ?? next.conversationRevision,
     );
-    if (responseRevision < Number(next.conversationRevision || 0)) return next;
-    putTurn(next, response.submittedTurn);
-    putTurn(next, response.turn);
-    for (const turn of response.turns ?? []) putTurn(next, turn);
-    putAttempt(next, response.attempt);
-    for (const attempt of response.attempts ?? []) putAttempt(next, attempt);
+    if (responseRevision < Number(next.conversationRevision || 0)) return state;
+    putTurn(draft, response.submittedTurn);
+    putTurn(draft, response.turn);
+    for (const turn of response.turns ?? []) putTurn(draft, turn);
+    putAttempt(draft, response.attempt);
+    for (const attempt of response.attempts ?? []) putAttempt(draft, attempt);
     const queueItem = response.queueItem;
     if (queueItem?.queueId) {
       next.queueItems = [
@@ -588,27 +716,36 @@ export function reduceTurnState(
         (item) => item.queueId !== response.queueId,
       );
     }
-    removeTurns(next, response.deletedTurnIds);
+    removeTurns(draft, response.deletedTurnIds);
     next.conversationRevision = Math.max(
       next.conversationRevision,
       Number(response.conversationRevision || 0),
     );
     const responseTurn = response.turn;
-    if (responseTurn?.turnId) delete next.commandPending[responseTurn.turnId];
+    if (responseTurn?.turnId && responseTurn.turnId in next.commandPending) {
+      delete draft.record('commandPending')[responseTurn.turnId];
+      draft.turnChanged(responseTurn.turnId);
+    }
   } else if (action.type === 'event') {
     reduceEvent(
-      next, action.event, options.onUnknownTurn, options.onProjectionGap,
+      draft, action.event, options.onUnknownTurn, options.onProjectionGap,
     );
   } else if (action.type === 'command_pending' && action.turnId && action.operation) {
-    next.commandPending[action.turnId] = action.operation;
+    if (next.commandPending[action.turnId] !== action.operation) {
+      draft.record('commandPending')[action.turnId] = action.operation;
+      draft.turnChanged(action.turnId);
+    }
   } else if (action.type === 'command_failed' && action.turnId) {
-    delete next.commandPending[action.turnId];
+    if (action.turnId in next.commandPending) {
+      delete draft.record('commandPending')[action.turnId];
+      draft.turnChanged(action.turnId);
+    }
   } else if (action.type === 'push_withheld') {
     next.pushWithheld = Boolean(action.pushWithheld);
   } else if (action.type === 'transport' && action.status) {
     next.transport = action.status;
   }
-  return next;
+  return draft.finish();
 }
 
 /** Own subscriptions and one snapshot-recovery request per unknown turn. */
@@ -635,12 +772,14 @@ export function createTurnStore(
 
   const dispatch = (action: TurnAction): TurnState => {
     const previousState = state;
+    let changes: TurnStateChanges = { turnIds: [], attemptIds: [], reset: false };
     state = reduceTurnState(state, action, {
+      onChanges: (value) => { changes = value; },
       onUnknownTurn: requestResync,
       onProjectionGap: requestResync,
     });
     const appliedState = state;
-    const update = { previousState, action };
+    const update = { previousState, action, changes };
     for (const listener of listeners) listener(appliedState, update);
     return state;
   };

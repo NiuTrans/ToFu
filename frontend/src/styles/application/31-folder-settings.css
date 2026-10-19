@@ -1,0 +1,80 @@
+/* Sidebar defaults editor. Project chrome/controls belong to the UI kit;
+   this owner only supplies workbench layout and evidence hierarchy. */
+.folder-settings{display:flex;flex:1;flex-direction:column;gap:var(--space-4);min-width:0;min-height:0}
+.folder-settings-content{display:flex;flex-direction:column;gap:var(--space-4);min-height:0;overflow:auto}
+.folder-settings-fields{display:flex;flex-direction:column;gap:var(--space-5);border:0;padding:0;margin:0;min-width:0}
+.folder-settings-identity{display:grid;grid-template-columns:minmax(0,2fr) minmax(0,1fr);gap:var(--space-4)}
+.folder-settings-workbench{display:grid;grid-template-columns:minmax(0,1.35fr) minmax(0,1fr);gap:var(--space-4);align-items:start;min-width:0}
+.folder-settings-workspace,.folder-settings-recents{padding:var(--space-4);border:var(--project-panel-width) solid var(--text-primary);border-radius:var(--radius);background:var(--bg-primary);min-width:0}
+.folder-settings-workspace{display:flex;flex-direction:column;gap:var(--space-3)}
+.folder-settings-section-heading{display:flex;align-items:center;justify-content:space-between;gap:var(--space-2)}
+.folder-settings-count{display:inline-flex;align-items:center;justify-content:center;min-width:var(--space-6);height:var(--space-6);border-radius:var(--radius-pill);background:var(--bg-tertiary);color:var(--text-primary);font-size:var(--font-size-sm);font-weight:var(--weight-semibold)}
+.folder-settings-heading{margin:0;font-size:var(--font-size-lg);font-weight:var(--weight-bold);color:var(--text-primary)}
+.folder-settings-hint{margin:0;font-size:var(--font-size-md);line-height:var(--leading-body);color:var(--text-secondary);overflow-wrap:anywhere}
+.folder-settings-roots{display:flex;flex-direction:column;gap:var(--space-2);list-style:none;padding:0;margin:0;min-width:0;max-height:calc(var(--control-h-lg) * 7);overflow:auto}
+.folder-settings-root{display:flex;flex-direction:column;gap:var(--space-2);padding:var(--space-3);background:var(--bg-secondary);border:var(--control-edge-inset) solid var(--border);border-radius:var(--radius-sm);min-width:0}
+.folder-settings-root[data-primary="true"]{border-color:var(--accent);background:var(--bg-tertiary)}
+.folder-settings-root-name{font-size:var(--font-size-lg);font-weight:var(--weight-semibold);color:var(--text-primary);overflow-wrap:anywhere}
+.folder-settings-full-path{font-family:var(--font-mono);font-size:var(--font-size-sm);line-height:var(--leading-body);overflow-wrap:anywhere;color:var(--text-secondary);user-select:text}
+.folder-settings-root-actions,.folder-settings-actions{display:flex;align-items:center;flex-wrap:wrap;gap:var(--space-2)}
+.folder-settings-footer{display:flex;align-items:center;justify-content:flex-end;flex-wrap:wrap;flex-shrink:0;gap:var(--space-2);padding-top:var(--space-4);border-top:var(--control-edge-inset) solid var(--border)}
+.folder-settings-empty{padding:var(--space-2) 0;font-size:var(--font-size-md);color:var(--text-secondary);line-height:var(--leading-body)}
+.folder-settings-status{margin:0;color:var(--text-secondary);font-size:var(--font-size-sm);overflow-wrap:anywhere}
+.folder-settings-status:empty,.folder-settings-hint:empty{display:none}
+
+/* Exact paths remain announced without duplicating each selected-root card. */
+.folder-settings-announcement{position:absolute;width:var(--control-edge-inset);height:var(--control-edge-inset);overflow:hidden;clip-path:inset(50%)}
+.folder-settings-error{padding:var(--space-3);margin:0;border:var(--control-edge-inset) solid var(--error-border);border-radius:var(--radius-sm);background:var(--error-bg);color:var(--error-text);font-size:var(--font-size-md);line-height:var(--leading-body);overflow-wrap:anywhere}
+.folder-settings-browser{display:flex;flex-direction:column;gap:var(--space-3);padding-top:var(--space-3);border-top:var(--control-edge-inset) solid var(--border);min-width:0}
+.folder-settings-browser[hidden],.folder-settings-error[hidden]{display:none}
+.folder-settings-directories,.folder-settings-recent-list{display:flex;flex-direction:column;align-items:stretch;gap:var(--space-2);max-height:calc(var(--control-h-lg) * 7);overflow:auto;min-width:0}
+.folder-settings-directory-name{width:100%;text-align:start;overflow-wrap:anywhere}
+
+.folder-settings-directories>button,.folder-settings-recent-list>button{flex-shrink:0}
+.folder-settings-recents>summary{cursor:pointer;color:var(--text-primary);font-size:var(--font-size-lg);font-weight:var(--weight-bold);min-height:var(--control-h-sm);line-height:var(--leading-body)}
+.folder-settings-recents[open]>summary{margin-bottom:var(--space-3)}
+.folder-settings-recents>summary:focus-visible{outline:none;box-shadow:var(--focus-ring);border-radius:var(--radius-sm)}
+.folder-settings-recent-copy{display:flex;flex-direction:column;gap:var(--space-1);width:100%;min-width:0;text-align:start;padding:var(--space-2);border:var(--control-edge-inset) solid var(--border);border-radius:var(--radius-sm);background:var(--bg-secondary)}
+.folder-settings-recent-name{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:var(--font-size-lg);font-weight:var(--weight-semibold);color:var(--text-primary)}
+.folder-settings-recent-path{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:var(--font-mono);font-size:var(--font-size-sm);font-weight:var(--weight-regular);color:var(--text-secondary);line-height:var(--leading-body)}
+.folder-settings-delete-name{margin:0;color:var(--text-primary);font-weight:var(--weight-semibold);overflow-wrap:anywhere}
+.folder-tab-copy{display:flex;flex:1;min-width:0;text-align:start}
+/* Root details remain in the tooltip/settings, not a second row per tile. */
+.folder-tab-summary{display:none}
+/* Navigation is not a card/button surface. Scope above generic theme button
+   chrome; keep the shared controls inside the settings dialog unchanged. */
+#folderTabs.project-rail{background:var(--bg-secondary);border-inline-end:var(--control-edge-inset) solid var(--border)}
+#folderTabs .project-rail-title,#folderTabs .project-rail-collapse{color:var(--text-secondary)}
+#folderTabs .folder-tab-inbox-dot,#folderTabs .folder-tab-add-dot{color:var(--text-secondary)}
+#folderTabs .folder-tab.active::before{background:var(--accent)}
+#folderTabs .folder-tab{border:0;box-shadow:none;background:transparent;color:var(--text-primary);font-family:var(--font-ui);min-height:var(--control-h-lg);font-weight:var(--weight-medium);padding-inline-end:calc(var(--control-h-sm) + var(--space-2));transform:none}
+#folderTabs .folder-tab:hover{background:var(--bg-hover);color:var(--text-primary)}
+#folderTabs .folder-tab.active{background:var(--accent-subtle);color:var(--text-primary);font-weight:var(--weight-semibold)}
+#folderTabs .folder-tab-uncat{margin-block-end:var(--space-2)}
+#folderTabs .folder-tab-count{position:absolute;inset-inline-end:var(--space-2);width:var(--control-h-sm);min-width:0;height:auto;line-height:inherit;padding:0;border-radius:0;background:transparent;color:var(--text-secondary);font-size:var(--font-size-xs);font-weight:var(--weight-regular);font-variant-numeric:tabular-nums;text-align:end}
+#folderTabs .folder-tab-settings{position:absolute;inset-inline-end:var(--space-2);opacity:0;pointer-events:none;background:transparent;color:var(--text-secondary);border:0;box-shadow:none;transform:none}
+#folderTabs .folder-tab-row:hover .folder-tab-settings,#folderTabs .folder-tab-row:focus-within .folder-tab-settings{opacity:1;pointer-events:auto}
+#folderTabs .folder-tab-row:hover .folder-tab-count,#folderTabs .folder-tab-row:focus-within .folder-tab-count{visibility:hidden}
+#folderTabs .folder-tab.folder-tab-drop{background:var(--accent-subtle);box-shadow:inset 0 0 0 var(--control-edge-inset) var(--accent)}
+#folderTabs .folder-tab:focus-visible,#folderTabs .folder-tab-settings:focus-visible{box-shadow:var(--focus-ring)}
+.sidebar.rail-collapsed .folder-tab-copy{display:none}
+.sidebar.rail-collapsed #folderTabs .folder-tab{padding-inline-end:0}
+.sidebar.rail-collapsed #folderTabs .folder-tab.active{background:transparent}
+.sidebar.rail-collapsed #folderTabs .folder-tab-uncat{margin-block-end:0}
+.sidebar.rail-collapsed #folderTabs .folder-tab-settings{display:none;inset-inline-end:0;inset-block-start:0}
+.folder-tab:focus-visible,.project-rail-collapse:focus-visible,.folder-tab-menu-item:focus-visible{outline:none;box-shadow:var(--focus-ring)}
+/* Touch keeps the menu visible beside the count; inbox reserves the same
+   two slots so its count still aligns with every project. */
+@media(pointer:coarse){
+  #folderTabs .folder-tab{padding-inline-end:calc(var(--control-h-sm) * 2 + var(--space-2))}
+  #folderTabs .folder-tab-count{inset-inline-end:calc(var(--control-h-sm) + var(--space-2))}
+  #folderTabs .folder-tab-settings{opacity:1;pointer-events:auto}
+  #folderTabs .folder-tab-row:hover .folder-tab-count,#folderTabs .folder-tab-row:focus-within .folder-tab-count{visibility:visible}
+}
+@media(max-width:700px){.folder-settings-workbench{grid-template-columns:minmax(0,1fr)}}
+@media(max-width:480px){
+  .folder-settings-workspace,.folder-settings-recents{padding:var(--space-3)}
+  .folder-settings-identity{grid-template-columns:minmax(0,1fr)}
+  .folder-settings-root-actions{gap:var(--space-3)}
+  .folder-settings-footer{gap:var(--space-3)}
+}

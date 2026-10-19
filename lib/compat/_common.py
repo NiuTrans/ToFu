@@ -72,7 +72,7 @@ def apply_common_cfg(cfg: dict, body: dict) -> None:
 # ── Inbound effort / thinking semantics (adaptive generation) ─────────
 #
 # The five effort rungs Claude Opus 4.7+ exposes. Each one is ALSO a legal
-# Tofu ``thinkingDepth`` (lib/agent_options.py ``_FIELDS``), so the inbound
+# Tofu ``thinkingDepth`` (lib/agent_loop/agent_options.py ``_FIELDS``), so the inbound
 # mapping is IDENTITY — an explicit rung needs no approximation. Anything
 # outside this set is dropped rather than forwarded: ``thinkingDepth`` is a
 # closed enum downstream, and an unknown value would only fail validation far

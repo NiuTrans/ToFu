@@ -13,7 +13,7 @@ import time
 from copy import deepcopy
 from lib.log import get_logger
 from lib.tasks_pkg.compaction._summary_budget import summary_failure_reason
-from lib.tasks_pkg.compaction._archive import _archive_transcript
+from lib.tasks_pkg.compaction._archive import _archive_transcript, summary_dispatch_calls
 from lib.tasks_pkg.compaction._constants import (
     _cooldown_lock,
     _MAX_PRESERVE_TURNS,
@@ -87,14 +87,21 @@ def _retained_projection(old_messages, recent_messages, anchor_msg, retained_ent
                 {'kind': kind, 'content': message.get('content', '')}]))
         else:
             result.append(message)
-    return coalesce_history_carriers(result)
+    from lib.tasks_pkg.context_composer import compact_context_snapshots
+    return compact_context_snapshots(coalesce_history_carriers(result))
 
 
 def _with_restoration_reserve(candidate, source):
     """Account existing managed carriers that recomposition would restore."""
+    from lib.tasks_pkg.context_composer import compact_context_snapshots
     kept = {id(m) for m in candidate}
-    return candidate + [m for m in source
-                        if m.get('_contextComposer') and id(m) not in kept]
+    # Recomposition restores current snapshots, never every historical version.
+    # Partial mixed carriers are copies; retire duplicate sections again after
+    # joining so those siblings consume their budget exactly once. A freshly
+    # carried checklist in the candidate supersedes the source's older state.
+    return compact_context_snapshots([
+        m for m in compact_context_snapshots(source)
+        if m.get('_contextComposer') and id(m) not in kept] + candidate)
 
 
 def _task_owner(task):
@@ -512,6 +519,85 @@ def _persist_compaction_candidate(messages, task, meta):
     return receipt
 
 
+def _settle_failed_compaction_attempt(task, result_meta, messages, *, conv_id: str,
+                                      tokens_before: int, msgs_before: int,
+                                      summary_usage: dict,
+                                      summary_duration_ms: int,
+                                      trigger: str, round_num: int,
+                                      outcome_reason: str,
+                                      implementation: str = 'summary_dispatch') -> None:
+    """Give a non-adopting summary attempt an authentic terminal UI fact.
+
+    ``force_compact_if_needed`` (working_set/window) emits a durable
+    ``COMPACTION`` archive row before the summary dispatch, but when the
+    summary then fails the attempt returned False without any settlement —
+    the row stayed ``running`` forever (the muu1klptjtwd3t symptom). The
+    admission (dispatch_guard) pass emits no archive at all, leaving the
+    transient ``Phase.COMPACTING`` beats as the only durable fact.
+    This helper:
+      1. settles the same-attempt ``Phase.COMPACTING`` row via the
+         ``reactive archive`` bridge the fold layer already watches
+         (``task['_reactiveCompactions']`` — the done event re-uses its
+         ``archiveId``), and
+      2. emits a terminal ``COMPACTION_DONE`` whose receipt carries the real
+         failure.  A pending archive row is updated + settled through it;
+         an admission attempt with no archive emits the archive-less
+         failed-DONE the fold layer already accepts (span ``failed:{seq}``).
+    Best effort only: observability never aborts a compaction return path.
+    """
+    if task is None:
+        return
+    meta = result_meta if isinstance(result_meta, dict) else {}
+    try:
+        from lib.agent_core.events import EventType, build_event
+        from lib.tasks_pkg.compaction._receipt import build_compaction_receipt
+        from lib.tasks_pkg.compaction._ownership import compaction_owner_key
+        from lib.tasks_pkg.manager import append_event
+        from lib.tasks_pkg.manager import task_user_id
+        tokens_after = _estimate_total_tokens(messages) or int(tokens_before)
+        receipt = build_compaction_receipt(
+            trigger=trigger or 'force', status='failed',
+            strategy='unchanged', implementation=implementation,
+            continuation_format='none',
+            summary_usage=summary_usage, summary_duration_ms=summary_duration_ms,
+            outcome_reason=outcome_reason or 'summary_failed')
+        archive_id = meta.get('archive_id')
+        if archive_id is not None:
+            try:
+                from lib.agent_core.store import get_conversation_store
+                get_conversation_store().update_archive_summary(
+                    archive_id, '', int(tokens_after), int(msgs_before),
+                    user_id=task_user_id(task),
+                    archive_scope=task.get('_archiveScope', ''),
+                    receipt=receipt, post_messages=None)
+            except Exception as exc:
+                logger.debug('[Compact] failed-attempt archive update failed: %s', exc)
+        # Bridge the live phase row: the fold layer swaps a pending
+        # reactive-archive placeholder into the Phase.COMPACTING row, and
+        # this done event settles through that same archiveId — one authentic
+        # failed compaction row instead of a stuck "compressing" ghost.
+        bridge_id = f'summary-failed:{(task.get("id") or "")[:8]}:{int(round_num or 0)}'
+        reactive = task.get('_reactiveCompactions')
+        if not isinstance(reactive, dict):
+            reactive = {}
+            task['_reactiveCompactions'] = reactive
+        reactive[bridge_id] = {
+            'trigger': trigger or 'force', 'roundNum': int(round_num or 0),
+            'tokensBefore': int(tokens_before), 'msgsBefore': int(msgs_before),
+        }
+        reduction = 1 - (tokens_after / max(1, tokens_before))
+        append_event(task, build_event(
+            EventType.COMPACTION_DONE, archiveId=bridge_id,
+            convId=compaction_owner_key(task, conv_id), trigger=trigger or 'force',
+            tokensBefore=int(tokens_before), tokensAfter=int(tokens_after),
+            tokenCountKind='estimated', msgsBefore=int(msgs_before),
+            msgsAfter=int(msgs_before), reductionPct=round(reduction * 100, 1),
+            roundNum=int(round_num or 0), receipt=receipt,
+            summaryDispatchCalls=summary_dispatch_calls(summary_usage),
+            **(meta.get('activityBoundary') or {})))
+    except Exception as exc:
+        logger.debug('[Compact] failed-attempt settlement failed: %s', exc)
+
 def execute_compact_tool(messages: list, task: dict | None = None, **kwargs) -> str:
     """Build and adopt one local continuation projection at a closed boundary.
 
@@ -698,11 +784,23 @@ def execute_compact_tool(messages: list, task: dict | None = None, **kwargs) -> 
                 + _recent_files_block + ('\n\n' + _diff_block if _diff_block else ''),
                 phase=_handoff_phase))
             carry_checklist_through_compaction(preview, task)
-            reserved_tokens = dispatch_measure(
-                _with_restoration_reserve(preview, messages)) + summary_output_budget
+            retained_tokens = dispatch_measure(
+                _with_restoration_reserve(preview, messages))
+            reserved_tokens = retained_tokens + summary_output_budget
             if reserved_tokens <= dispatch_target:
                 break
             if budget_tokens <= 1:
+                # Preferred transport allowance is not required state. At the
+                # smallest whole-unit tail, use the remaining room when the
+                # nominal summary target fits. Complete-output validation and
+                # final candidate admission still reject truncated/overfull
+                # summaries without changing the source.
+                available_summary_tokens = dispatch_target - retained_tokens
+                if available_summary_tokens >= _SUMMARY_MAX_TOKENS:
+                    summary_output_budget = min(
+                        summary_output_budget, available_summary_tokens)
+                    reserved_tokens = retained_tokens + summary_output_budget
+                    break
                 if isinstance(_result_meta, dict):
                     _result_meta.update(compacted=False,
                         summaryFailureReason='irreducible_prompt_floor',
@@ -749,6 +847,22 @@ def execute_compact_tool(messages: list, task: dict | None = None, **kwargs) -> 
     # _result_meta.compacted stays False so the reactive head-truncate net
     # still engages.
     if not any(m.get('role') != 'system' for m in summary_input):
+        # The dispatch-guard admission pass MUST leave the prompt under its
+        # ceiling.  When the whole conversation is one giant in-progress
+        # turn (every message sits inside the preserved hot tail), a summary
+        # has nothing to fold — but refusing here surfaces a fatal
+        # ContextCompactionError for a turn the user is still watching.
+        # Fall through so force_compact_if_needed's over-window deterministic
+        # head-truncate can bound the context instead.
+        from lib.tasks_pkg.compaction._summary_budget import (
+            bounded_summary_task as _bst_gate)
+        if (kwargs.get('_compaction_trigger') == 'dispatch_guard'
+                and kwargs.get('_allow_head_truncate_fallback')
+                and not _bst_gate(task)):
+            logger.info('%s [Compact] dispatch_guard: nothing foldable — '
+                        'deferring to the over-window deterministic head '
+                        'truncate (context must be bounded)', pfx)
+            return ''
         logger.info('%s [Compact] Nothing foldable — no old region and preserved '
                     'turn has <= hot-tail tool rounds; skipping', pfx)
         if isinstance(_result_meta, dict):
@@ -931,6 +1045,9 @@ def execute_compact_tool(messages: list, task: dict | None = None, **kwargs) -> 
 
     if not summary_text:
         logger.warning('%s [Compact] Summary generation failed — keeping messages intact', pfx)
+        _failure_reason = (
+            summary_failure_reason(task)
+            or _summary_pipeline_failure_reason or 'summary_failed')
         if isinstance(_result_meta, dict):
             _result_meta.update({
                 'compacted': False,
@@ -940,9 +1057,7 @@ def execute_compact_tool(messages: list, task: dict | None = None, **kwargs) -> 
                 'reason': kwargs.get('_compaction_reason') or '',
                 'summary_usage': dict(_summary_usage),
                 'summary_duration_ms': int(_summary_duration_ms),
-                'summaryFailureReason': (
-                    summary_failure_reason(task)
-                    or _summary_pipeline_failure_reason or 'summary_failed'),
+                'summaryFailureReason': _failure_reason,
             })
         return ('Context compaction attempted but summary generation failed. '
                 'Messages preserved as-is.')
@@ -1473,6 +1588,8 @@ def force_compact_if_needed(messages: list, task: dict | None = None,
                          if isinstance(kwargs, dict) else False)
     _external_meta = kwargs.get('_result_meta')
     _meta: dict = _external_meta if isinstance(_external_meta, dict) else {}
+    from lib.turn_activity_timeline import capture_compaction_boundary
+    _meta['activityBoundary'] = capture_compaction_boundary({}, task or {})
     execute_compact_tool(
         messages, task=task,
         keep_recent_pairs=keep_recent_pairs,
@@ -1541,6 +1658,30 @@ def force_compact_if_needed(messages: list, task: dict | None = None,
         from lib.tasks_pkg.compaction._summary_budget import bounded_summary_task
         if bounded_summary_task(task):
             _allow_ht = False
+        # The dispatch-guard admission pass is the LAST local boundary; when
+        # it fails the turn dies with ContextCompactionError even though the
+        # conversation is undispatched.  Reaching it already proves the prompt
+        # is over the admission ceiling, so when its summary cannot run
+        # (credential outage / model unavailable) the bounded deterministic
+        # head-truncate is the honest last resort — strictly better than a
+        # fatal turn, and the reactive path already trusts the same net.  The
+        # proactive working_set pass keeps the summary-only path: it has
+        # round headroom and its own `_allow_head_truncate_fallback` opt-in.
+        # The dispatch-guard admission pass is the LAST local boundary; when
+        # it fails the turn dies with ContextCompactionError even though the
+        # conversation is undispatched.  Reaching it already proves the prompt
+        # is over the admission ceiling, so when its summary cannot run
+        # (credential outage / model unavailable) the bounded deterministic
+        # head-truncate is the honest last resort — strictly better than a
+        # fatal turn, and the reactive path already trusts the same net.  The
+        # proactive working_set pass keeps the summary-only path: it has
+        # round headroom and its own `_allow_head_truncate_fallback` opt-in.
+        # Live/transient bounded tasks keep their no-lossy-recovery
+        # discipline (their source must survive a failed summary intact).
+        if (_trigger == 'dispatch_guard'
+                and kwargs.get('_allow_head_truncate_fallback')
+                and not bounded_summary_task(task)):
+            _allow_ht = True
         if _allow_ht:
             _est_tokens = int(
                 (_measurement_out or {}).get('gate_tokens') or 0)
@@ -1664,6 +1805,8 @@ def force_compact_if_needed(messages: list, task: dict | None = None,
                                     roundNum=int(
                                         kwargs.get('_compaction_round') or 0),
                                     receipt=_fallback_receipt,
+                                    summaryDispatchCalls=summary_dispatch_calls(
+                                        _meta.get('summary_usage')),
                                 ))
                             except Exception as _ev_e:
                                 logger.debug('%s [ForceCompact] fallback done '
@@ -1721,6 +1864,8 @@ def force_compact_if_needed(messages: list, task: dict | None = None,
                                 roundNum=int(
                                     kwargs.get('_compaction_round') or 0),
                                 receipt=_failed_receipt,
+                                summaryDispatchCalls=summary_dispatch_calls(
+                                    _meta.get('summary_usage')),
                             ))
                         except Exception as _ev_e:
                             logger.debug('%s [ForceCompact] failed fallback done '
@@ -1735,6 +1880,31 @@ def force_compact_if_needed(messages: list, task: dict | None = None,
             logger.warning('%s [ForceCompact] Compaction did not mutate messages '
                            '(summary empty or refused) — reporting failure so the '
                            'caller can fall back', pfx)
+            # Settle the attempt as a terminal, authentic UI fact — scoped to
+            # the passes that leave a stuck ghost otherwise: the
+            # working_set/window pass emits a durable COMPACTION archive row
+            # before the summary dispatch (stays `running` forever without
+            # settlement — the muu1klptjtwd3t ghost), and the dispatch_guard
+            # admission pass emits no archive at all.  Reactive/backfill/heal
+            # and deterministic-recovery paths keep their own terminal
+            # accounting and are untouched.  `_meta` carries `archive_id`
+            # only when this attempt archived; helper is best-effort.
+            if _trigger in {'working_set', 'window', 'dispatch_guard'}:
+                _failure_reason = str(
+                    _meta.get('summaryFailureReason')
+                    or _meta.get('summaryRejectionReason')
+                    or _meta.get('reason')
+                    or 'summary_failed')
+                _settle_failed_compaction_attempt(
+                    task, _meta, messages, conv_id=conv_id,
+                    tokens_before=int(_meta.get('tokens_before') or 0),
+                    msgs_before=int(_meta.get('msgs_before') or 0),
+                    summary_usage=dict(_meta.get('summary_usage') or {}),
+                    summary_duration_ms=int(
+                        _meta.get('summary_duration_ms') or 0),
+                    trigger=str(_trigger),
+                    round_num=int(kwargs.get('_compaction_round') or 0),
+                    outcome_reason=_failure_reason)
         return False
 
     tokens_before = int(_meta.get('tokens_before', 0))
@@ -1794,6 +1964,8 @@ def force_compact_if_needed(messages: list, task: dict | None = None,
                     reductionPct=round(reduction_pct, 1),
                     roundNum=int(_meta.get('round_num') or 0),
                     receipt=receipt,
+
+                    summaryDispatchCalls=summary_dispatch_calls(_meta.get('summary_usage')),
                 ))
             except Exception as _ev_e:
                 logger.debug('[Compact] compaction_done emit failed: %s', _ev_e)

@@ -27,8 +27,8 @@ from lib.tasks_pkg.segments import (
     tool_use_segment_from_round,
 )
 from lib.swarm.presentation_budget import swarm_snapshot_for_browser
-from lib.storage_projection import trim_tool_round_for_persist
-from lib.tool_round_identity import execution_identity, execution_llm_round
+from lib.storage.storage_projection import trim_tool_round_for_persist
+from lib.tool_results.tool_round_identity import execution_identity, execution_llm_round
 from lib.turn_image_transport import (
     MAX_TURN_IMAGES,
     MIN_LAZY_TURN_IMAGE_ENCODED_CHARS,
@@ -1121,19 +1121,22 @@ def _turns_with_referenced_projection_fields(
 
         content = projection.get("content")
         if isinstance(content, str):
-            try:
-                encoded_content_size = len(orjson.dumps(content))
-            except TypeError:
-                encoded_content_size = 0
             content_block_id = segment_references.get(("text", content))
-            if (
-                encoded_content_size >= _SNAPSHOT_CONTENT_MIN_BYTES
-                and content_block_id is not None
-                and _snapshot_reference_saves_bytes(
-                    {"content": content},
-                    {turn_id: {"content": content_block_id}},
-                )
-            ):
+            content_reference_saves_bytes = False
+            if content_block_id is not None:
+                try:
+                    encoded_content_size = len(orjson.dumps(content))
+                    # The compact object's only extra bytes are its key/braces;
+                    # reuse the exact string size, including UTF-8 and escapes.
+                    content_reference_saves_bytes = (
+                        encoded_content_size >= _SNAPSHOT_CONTENT_MIN_BYTES
+                        and encoded_content_size + len(b'{"content":}')
+                        - len(orjson.dumps({turn_id: {"content": content_block_id}}))
+                        >= _SNAPSHOT_REFERENCE_MIN_SAVINGS
+                    )
+                except TypeError:
+                    pass
+            if content_reference_saves_bytes:
                 projected_projection = dict(projection)
                 projected_projection.pop("content", None)
                 turn_references["content"] = content_block_id

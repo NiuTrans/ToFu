@@ -5,7 +5,7 @@ import pytest
 
 from lib.llm.provider_error_body import (ERROR_BODY_MAX_BYTES, aread_error_body,
                                          read_error_body)
-from lib.llm_errors import AbortedError
+from lib.llm.llm_errors import AbortedError
 
 pytestmark = pytest.mark.unit
 
@@ -82,7 +82,7 @@ def test_transport_error_status_and_archive_prefix(monkeypatch, asynchronous, ov
     """Exercise both real transport shells, not only the capture helper."""
     import importlib
     from tests.sse.test_sse_core_parity import _run_async, _run_sync
-    from lib.llm_errors import RateLimitError
+    from lib.llm.llm_errors import RateLimitError
     module = importlib.import_module('lib.llm.astream' if asynchronous else 'lib.llm.stream')
     captured = bytearray()
     receipts = []

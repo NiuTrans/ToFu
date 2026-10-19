@@ -116,12 +116,11 @@ def test_cancelled_before_start_never_launches_compiler(tmp_path, monkeypatch):
 
 
 @pytest.mark.skipif(os.name != 'posix', reason='POSIX process-group fixture')
-@pytest.mark.parametrize('failure', ['timeout', 'cancel', 'log_limit'])
-def test_running_compiler_is_stopped_on_deadline_cancel_and_output_pressure(tmp_path, monkeypatch, failure):
+@pytest.mark.parametrize('failure', ['timeout', 'cancel'])
+def test_running_compiler_is_stopped_on_explicit_deadline_and_cancel(tmp_path, monkeypatch, failure):
     snapshot = _snapshot(tmp_path)
     fake = tmp_path / 'fake-latexmk'
-    fake.write_text('#!/bin/sh\n' + ('head -c 1100000 /dev/zero\n' if failure == 'log_limit' else '')
-                    + 'sleep 60\n')
+    fake.write_text('#!/bin/sh\nsleep 60\n')
     fake.chmod(0o700)
     monkeypatch.setattr(compiler, 'prepare_toolchain',
                         lambda *a, **kw: (str(fake), 'pdflatex', 'test-engine', dict(os.environ)))
@@ -136,7 +135,36 @@ def test_running_compiler_is_stopped_on_deadline_cancel_and_output_pressure(tmp_
         if timer:
             timer.cancel()
             timer.join()
-    code = {'timeout': 'compile_timeout', 'cancel': 'cancelled', 'log_limit': 'output_limit'}[failure]
+    code = {'timeout': 'compile_timeout', 'cancel': 'cancelled'}[failure]
     assert result.receipt['diagnostics'][-1]['code'] == code
     assert result.receipt['status'] == ('cancelled' if failure == 'cancel' else 'failed')
     assert (tmp_path / 'build/build.log').stat().st_size <= 1048576
+
+
+@pytest.mark.skipif(os.name!='posix',reason='POSIX executable compiler fixture')
+@pytest.mark.parametrize('late_error',[False,True])
+def test_complete_compiler_log_is_retained_and_late_error_prevents_publication(tmp_path,monkeypatch,late_error):
+    import hashlib
+    import sys
+    from tests.support.paper_pdf import paper_pdf
+    reference=tmp_path/'reference.pdf';reference.write_bytes(paper_pdf())
+    executable=tmp_path/'log-compiler'
+    code=("import os,sys,shutil;from pathlib import Path\n"
+          "out=Path(next(arg.split('=',1)[1] for arg in sys.argv if arg.startswith('-outdir=')))\n"
+          "os.write(1,b'progress\\n'*240000)\n"
+          "[os.write(1,f'LaTeX Warning: warning {i}\\n'.encode()) for i in range(80)]\n"
+          +( "os.write(1,b'./main.tex:999: LaTeX Error: late failure\\n')\n" if late_error else "os.write(1,b'complete log tail\\n')\n")
+          +f"shutil.copyfile({str(reference)!r},out/'main.pdf')\n")
+    executable.write_text('#!'+sys.executable+'\n'+code);executable.chmod(0o700)
+    monkeypatch.setattr(compiler,'prepare_toolchain',lambda *a,**kw:(str(executable),'pdflatex','test-engine',dict(os.environ)))
+    snapshot=_snapshot(tmp_path);result=_compile(snapshot,tmp_path/'build')
+    raw=(result.directory/'build.log').read_bytes()
+    assert len(raw)>2*1024*1024
+    row=next(item for item in result.receipt['artifacts'] if item['name']=='build.log')
+    assert row['sha256']==hashlib.sha256(raw).hexdigest() and row['size_bytes']==len(raw)
+    if late_error:
+        assert result.receipt['status']=='failed'
+        assert any(item['line']==999 and item['severity']=='error' for item in result.receipt['diagnostics'])
+        assert not any(item['name']=='document.pdf' for item in result.receipt['artifacts'])
+    else:
+        assert result.receipt['status']=='success' and raw.endswith(b'complete log tail\n')

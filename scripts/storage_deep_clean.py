@@ -84,58 +84,58 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from lib.storage_sidecar.durability import fsync_directory, fsync_file
-from lib.storage_sidecar import offline_maintenance as _SQLITE_TOOLING
-from lib.storage_sidecar.archived_message_codec import (
+from lib.storage_authority_sql.durability import fsync_directory, fsync_file
+from lib.storage_authority_sql import offline_maintenance as _SQLITE_TOOLING
+from lib.storage_authority_sql.archived_message_codec import (
     ARCHIVED_MESSAGE_CODEC_KEY,
     decode_archived_message_sequence_from_storage,
     encode_archived_message_sequence_with_metrics,
 )
-from lib.storage_sidecar.offline_compaction_archive_maintenance import (
+from lib.storage_authority_sql.offline_compaction_archive_maintenance import (
     maintain_compaction_archive_storage,
 )
-from lib.storage_sidecar.offline_task_result_maintenance import (
+from lib.storage_authority_sql.offline_task_result_maintenance import (
     maintain_task_result_storage,
 )
-from lib.storage_sidecar.backup_policy import (
+from lib.storage_authority_sql.backup_policy import (
     prune_retained_rollbacks,
     resolve_rollback_artifact,
     rollback_artifact_inventory,
     verified_backup_inventory,
 )
-from lib.storage_sidecar.preflight import ProjectLease
-from lib.storage_sidecar.projection_codec import (
+from lib.storage_authority_sql.preflight import ProjectLease
+from lib.storage_authority_sql.projection_codec import (
     ProjectionCodecError,
     STORAGE_PROJECTION_CODEC_KEY,
     decode_projection_from_storage,
     encode_projection_for_storage,
 )
-from lib.storage_sidecar.reclaim_policy import (
+from lib.storage_authority_sql.reclaim_policy import (
     copy_capacity_requirement,
     requires_offline_compaction,
 )
-from lib.storage_sidecar.schema import (
+from lib.storage_authority_sql.schema import (
     LEGACY_TASK_EVENT_RETENTION_INDEX_NAME,
     LEGACY_TASK_EVENT_RETENTION_TYPE_LIMIT,
     OBSOLETE_DEFERRED_INDEX_NAMES,
     TASK_EVENT_RETENTION_INDEX_NAMES,
     deferred_index_statements,
 )
-from lib.storage_sidecar.task_event_codec import (
+from lib.storage_authority_sql.task_event_codec import (
     COMPRESSED_TASK_EVENT_MAGIC,
     TASK_EVENT_COMPRESSION_MIN_BYTES,
     decode_task_event_payload,
     encode_task_event_payload,
 )
-from lib.storage_sidecar.task_result_field_codec import (
+from lib.storage_authority_sql.task_result_field_codec import (
     TASK_RESULT_FIELD_COMPRESSION_MIN_BYTES,
 )
-from lib.task_event_contract import (
+from lib.task_replay.task_event_contract import (
     STRUCTURAL_EVENT_TYPES,
     TASK_EVENT_STREAMING_RETENTION_MS,
     TASK_EVENT_STRUCTURAL_RETENTION_MS,
 )
-from lib.storage_projection import project_event_usage_for_storage
+from lib.storage.storage_projection import project_event_usage_for_storage
 
 # Tables whose row counts must match between the old and the compacted
 # authority.  These are the user-visible authorities; transport tables

@@ -44,7 +44,7 @@ usage() {
   cat <<'EOF'
 usage: desktop/build-deb.sh BUNDLE_DIR VERSION [OUT_DIR]
 
-Build the Linux amd64 .deb from an existing PyInstaller Tofu bundle.
+Build a native Linux amd64/arm64 .deb from an existing PyInstaller Tofu bundle.
 
   BUNDLE_DIR  directory containing Tofu and _internal/
   VERSION     Debian-compatible release version, for example 0.16.0
@@ -86,6 +86,12 @@ command -v dpkg-deb >/dev/null 2>&1 || fail "dpkg-deb not found (Debian/Ubuntu t
 [ -d "$OUT_DIR" ] || fail "$OUT_DIR is not an existing output directory"
 [ -w "$OUT_DIR" ] || fail "$OUT_DIR is not writable"
 
+case "$(uname -m)" in
+  x86_64|amd64) PACKAGE_ARCH=amd64; ARTIFACT_ARCH=x86_64 ;;
+  aarch64|arm64) PACKAGE_ARCH=arm64; ARTIFACT_ARCH=aarch64 ;;
+  *) fail "Unsupported Debian bundle architecture: $(uname -m)" ;;
+esac
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 WORKDIR="$(mktemp -d)"
@@ -119,7 +125,7 @@ Package: tofu
 Version: $VERSION
 Section: utils
 Priority: optional
-Architecture: amd64
+Architecture: $PACKAGE_ARCH
 Installed-Size: $SIZE_KB
 Maintainer: Tofu Project <https://github.com/rangehow/ToFu>
 Description: Self-hosted AI assistant (desktop)
@@ -146,7 +152,7 @@ exit 0
 EOF
 chmod 755 "$ROOTFS/DEBIAN/postinst"
 
-OUT="$OUT_DIR/Tofu-${VERSION}-linux-x86_64.deb"
+OUT="$OUT_DIR/Tofu-${VERSION}-linux-${ARTIFACT_ARCH}.deb"
 # --root-owner-group: CI runs as a non-root user, but package payloads must
 # be root-owned or apt warns/behaves oddly on some distros. The flag needs
 # dpkg >= 1.19 (ubuntu-latest has 1.21+; older hosts like the CentOS 7 dev

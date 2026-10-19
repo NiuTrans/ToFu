@@ -7,16 +7,19 @@
     "comment": "Durable task-event payload format version, stamped into every persisted storage_events/storage_attempt_events row at the single write authority (compile_event_item). Readers refuse a payload whose envelope version is newer than the binary understands AND is not marked ignorable; an ignorable newer payload is skipped, never silently resumed. Bump only on semantic unreadability."
   },
   "bounds": {
-    "maximumSteps": 128,
-    "maximumSlots": 64,
-    "maximumLiteralBytes": 8388608,
-    "maximumExecutableOperations": 367
+    "stepAdmission": "complete-ordered-transaction-without-step-count-quota",
+    "slotAdmission": "sparse-usize-identifiers-without-slot-count-quota",
+    "literalAdmission": "checked-size-without-aggregate-byte-quota",
+    "maximumLegacyDocumentBytes": 8388608,
+    "maximumExecutableOperations": 374
   },
   "physicalBounds": {
     "maximumEntityKeyBytes": 3072,
     "maximumEntityInlineValueBytes": 8192,
     "maximumEntityRangeRows": 1000,
-    "maximumEntityTransactionWrites": 14336,
+    "entityOverlayDeltaCountEncoding": "u32-little-endian",
+    "versionedDocumentAdmission": "blob-backed-without-private-byte-quota",
+    "indexedEventPayloadAdmission": "blob-backed-complete-replay-without-private-byte-quota",
     "maximumEntityReachabilityPages": 20000000,
     "maximumEntityReachabilityFrontier": 8192,
     "maximumEntityRetiredRanges": 64,
@@ -24,11 +27,11 @@
     "maximumEntityMountConsolidationRows": 999,
     "maximumEntityMountConsolidationBytes": 8388608,
     "maximumStreamEventBytes": 262144,
-    "maximumStreamAppendEvents": 4096,
-    "maximumStreamAppendBytes": 8388608,
+    "streamAppendEventCountEncoding": "u32-little-endian",
+    "streamAppendAdmission": "complete-atomic-segmented-append-without-byte-quota",
     "maximumStreamReadEvents": 1000,
     "maximumStreamReadBytes": 8388608,
-    "maximumTransactionStreamAppends": 500
+    "transactionStreamAdmission": "complete-batch-without-stream-count-quota"
   },
   "physicalFamilies": [
     "entity",
@@ -138,6 +141,7 @@
       ],
       "conversationSnapshot": "header-identity-title-settings-timestamps-revision;insert-or-match;turn-import-preserves-header-clock;independent-catalog-page",
       "turnOperations": [
+        "migration.turn.round_heads.upgrade",
         "migration.turn.restore",
         "migration.turn.get",
         "migration.turn.scan",
@@ -506,7 +510,7 @@
     "targetBytes": 4096,
     "maximumBytes": 16384,
     "minimumChildrenPerSplitPage": 2,
-    "encodingAllocation": "exact-page-length;transfer-to-existing-pending-store;retain-no-spare-capacity",
+    "encodingAllocation": "exact-page-length;prefix-key-frames;expanded-size-bounded;transfer-to-existing-pending-store",
     "modifiedLeafRuns": "repack-adjacent-written-leaves-with-one-page-buffer;retain-tombstones-and-untouched-references",
     "tailRebalance": "redistribute-or-merge-within-maximum-page-bytes"
   },
@@ -910,7 +914,122 @@
         "redeem consumption stores compact state in an independent 4096-way blob-capable directory without rewriting its batch and publishes wallet ledger state receipt and outbox atomically",
         "stale reserve reads consume the transactionally maintained age projection rather than scanning immutable ledger history",
         "list work and responses fail closed at explicit row scan and byte ceilings"
-      ]
+      ],
+      "ledgerKinds": [
+        "adjust_credit",
+        "adjust_debit",
+        "bonus",
+        "debit",
+        "native_admission",
+        "redeem",
+        "refund",
+        "request_admission",
+        "request_invoice",
+        "reserve",
+        "reserve_release",
+        "topup"
+      ],
+      "nativeAdmission": {
+        "ledgerKind": "native_admission",
+        "refType": "reserve",
+        "amountMicro": 0,
+        "requires": "owned-positive-unreleased-reservation",
+        "releasePolicy": "standalone-release-refused-after-admission;exact-terminal-settlement-only",
+        "durability": "immutable-ledger;survives-task-result-or-conversation-deletion"
+      },
+      "requestSettlement": {
+        "admissionKind": "request_admission",
+        "invoiceKind": "request_invoice",
+        "refType": "reserve",
+        "amountMicro": 0,
+        "maximumInvoiceCharacters": 4000,
+        "requires": "owned-positive-unreleased-reservation",
+        "releasePolicy": "standalone-release-refused-after-admission;complete-frozen-invoice-only",
+        "durability": "immutable-ledger;independent-of-http-observer-and-task-results",
+        "invoiceSchema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "version",
+            "request_id",
+            "owner_user_id",
+            "wallet_user_id",
+            "reserved_micro",
+            "prepared_attempt_count",
+            "quotes",
+            "cost_micro"
+          ],
+          "properties": {
+            "version": {
+              "const": 1,
+              "type": "integer"
+            },
+            "request_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "owner_user_id": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "wallet_user_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "reserved_micro": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9223372036854775807
+            },
+            "prepared_attempt_count": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 4000
+            },
+            "quotes": {
+              "type": "array",
+              "maxItems": 4000,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "model",
+                  "provider_id",
+                  "usage",
+                  "cost_micro",
+                  "snapshot"
+                ],
+                "properties": {
+                  "model": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "provider_id": {
+                    "type": "string"
+                  },
+                  "usage": {
+                    "type": "object"
+                  },
+                  "cost_micro": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9223372036854775807
+                  },
+                  "snapshot": {
+                    "type": "object"
+                  }
+                }
+              }
+            },
+            "cost_micro": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9223372036854775807
+            }
+          }
+        }
+      }
     },
     {
       "name": "tenant_users",
@@ -1101,7 +1220,7 @@
       "recencyDirectoryStateNamespace": "conversation_recency_directory_state",
       "maximumRecencyDirectoryEntries": 128,
       "maximumRecencyDirectoryBackfillRowsPerTransaction": 64,
-      "maximumProjectRelinkConversationCandidates": 10000,
+      "projectRelinkAdmission": "complete-owner-scoped-active-and-trash-without-count-quota",
       "lifecycle": "durable-user-state",
       "constraints": [
         "conversation IDs are unique across active and trashed owners within a tenant",
@@ -1112,7 +1231,7 @@
         "delete pins only conversation-clustered recoverable ranges, retires active and executable ranges in the same commit, emits a search-dirty epoch outside those retired ranges, and retains global conversation, Turn, and attempt identity claims",
         "restore mounts the pinned ranges, advances the conversation revision and execution epoch, overlays the normalized header, removes trash metadata and its pin, and never restores attempts or sync replay",
         "purge removes an active or trashed graph, its capsule, age indexes, and verified global conversation, Turn, and attempt claims in one transaction bounded to 2000 Turn identities",
-        "project relink rewrites exact project-path settings on at most 10000 owner-scoped active-then-trash candidates in identity order and conflicts beyond that bound; trashed rewrites land in a semantic settings overlay that restore applies and purge retires, keeping pinned capsules immutable",
+        "project relink rewrites exact project-path settings on every owner-scoped active-then-trash candidate in identity order using paged discovery and one atomic update; trashed rewrites land in a semantic settings overlay that restore applies and purge retires, keeping pinned capsules immutable",
         "trash prune selects at most 64 owner-scoped conversations strictly before a timestamp in deleted-time and identity order, then applies the same purge invariant atomically",
         "Turn documents inherit the current conversation execution epoch; reads project older epochs as inert by clearing attempt/run latches, interrupting live status, and terminalizing runtime presentation",
         "titles are truncated to 500 Unicode scalar values on create",
@@ -1173,16 +1292,12 @@
       "physicalFamily": "entity+blob",
       "physicalNamespace": "daily_cost_documents",
       "countNamespace": "daily_cost_counts",
-      "maximumDocumentBytes": 8388608,
-      "maximumMonthRows": 100,
-      "maximumPersistedDateProbes": 366,
-      "maximumResponseBytes": 8388608,
       "lifecycle": "reconstructible-user-cache",
       "constraints": [
         "date identity is exactly ten Unicode characters with CPython-15 isdigit values and separators at YYYY-MM-DD positions, matching storage.v1 syntax rather than calendar validation",
-        "date keys preserve chronological B+Tree order so month scans read at most 100 syntactically possible rows and latest reads one reverse row",
+        "date keys preserve chronological B+Tree order so month scans page to actual EOF over every matching date and latest reads one reverse row",
         "an exact owner count makes whole-cache deletion one range retirement without materializing documents",
-        "month response construction fails as bounded resource exhaustion before exceeding 8 MiB",
+        "month responses preserve complete requested documents without a private byte quota",
         "document count receipt and outbox changes commit in one owner-scoped transaction"
       ],
       "fields": [
@@ -1210,7 +1325,9 @@
           "type": "u64",
           "nullable": false
         }
-      ]
+      ],
+      "documentAdmission": "blob-backed-without-private-byte-quota",
+      "queryAdmission": "complete-owner-scoped-month-and-date-probes-without-private-quota"
     },
     {
       "name": "desktop_egress_preferences",
@@ -1502,8 +1619,7 @@
       "eventNamespace": "integration_event_documents",
       "eventSequenceNamespace": "integration_event_sequence",
       "eventCountNamespace": "integration_event_counts",
-      "maximumWorkspacesPerOwner": 10000,
-      "maximumActiveWorkspacesPerAuthority": 1000,
+      "workspaceAdmission": "demand-without-count-quota",
       "maximumStatusRows": 1000,
       "maximumEventsPerProject": 300,
       "maximumStatusEvents": 30,
@@ -1562,31 +1678,21 @@
       "updatedIndexNamespace": "project_brain_by_updated_desc",
       "streamDomain": "project_brain",
       "maximumProjectKeyCharacters": 4096,
-      "maximumDocumentBytes": 8388608,
-      "maximumActiveWorkItems": 100,
-      "maximumWorkHistoryItems": 100,
-      "maximumChangedPathsPerWork": 200,
-      "maximumArtifactsPerWork": 100,
-      "maximumNarratives": 500,
       "maximumNarrativeTextBytes": 720,
-      "maximumWatchItems": 100,
-      "maximumCheckerVersions": 128,
-      "maximumCharterDecisions": 256,
-      "maximumCursors": 1000,
-      "maximumEventBytes": 8384512,
       "eventChunkBytes": 262084,
       "eventCheckpointThreshold": 1200,
       "eventCheckpointTail": 600,
       "lifecycle": "durable-user-state-with-reconstructible-event-prefix",
       "constraints": [
         "project identity is normalized once and exact-verified behind a domain-separated digest key while the owner-local updated index provides bounded active-project ordering",
-        "the bounded current projection and one chunked immutable semantic event publish in the same authority transaction",
+        "the complete current projection and one chunked immutable semantic event publish in the same authority transaction",
         "events larger than one 256 KiB stream record are split into bounded digest-bound physical chunks",
         "public work projections never expose internal title-priority or refinement fields",
-        "active and terminal work sets retain at most 100 rows each, narratives retain at most 500 rows of 720 UTF-8 bytes, and watch checker decision and cursor state have explicit hard limits",
+        "active and terminal work, narrative entries, paths, artifacts, watch, checker, decision and cursor collections retain complete owner-scoped history without count quotas; narrative text retains its existing separate byte boundary",
         "after 1200 logical events beyond the checkpoint one digest-bound snapshot is installed and position rows strictly before the retained 600-event tail are retired",
         "each checkpoint and each subsequent mutating command retires at most 128 complete obsolete stream segments so reclamation debt converges without unbounded foreground work",
-        "project relink re-keys the complete event and projection authority to the destination digest, or folds both bounded projections into one digest-bound checkpoint when stale clients split identity, merging durable work, narratives, Charter, and Watch with immutable-identity conflict refusal while reconstructible cursors reset"
+        "project relink re-keys the complete event and projection authority to the destination digest, or folds both complete projections into one digest-bound checkpoint when stale clients split identity, merging durable work, narratives, Charter, and Watch with immutable-identity conflict refusal while reconstructible cursors reset",
+        "logical event reads continue across physical stream page byte/count windows; u32 chunk totals and ordinals remain the encoded format boundary, and output grows only from validated source chunks"
       ],
       "fields": [
         {
@@ -1611,7 +1717,10 @@
           "type": "u64",
           "nullable": false
         }
-      ]
+      ],
+      "collectionAdmission": "complete-owner-scoped-project-history-without-count-quota",
+      "documentAdmission": "blob-backed-without-private-byte-quota",
+      "eventAdmission": "complete-chunked-event-with-u32-format-length-and-paged-read"
     },
     {
       "name": "rate_limit_events",
@@ -1698,7 +1807,8 @@
         "due claims witness the task document and atomically advance exactly one run or poll lane timestamp",
         "poll IDs come from one tenant-global monotonic sequence while immutable task-partitioned documents and descending time indexes publish in the same transaction",
         "task deletion range-retires its poll documents and indexes without a history-sized scan",
-        "task lists use bounded index traversal windows; zero limit reads every matching task while positive limits select projections; malformed documents fail closed and poll projections retain declared limits"
+        "task lists use bounded index traversal windows; zero limit reads every matching task while positive limits select projections; malformed documents fail closed and poll projections retain declared limits",
+        "owner-scoped execution indexes update atomically with scheduler documents; legacy owner indexes backfill once inside settlement and exact documents fence stale execution settlement"
       ],
       "fields": [
         {
@@ -1726,7 +1836,8 @@
           "nullable": true
         }
       ],
-      "listLimitZeroReadsAll": true
+      "listLimitZeroReadsAll": true,
+      "executionIndexNamespace": "scheduled_tasks_by_execution"
     },
     {
       "name": "conversation_queue",
@@ -1740,23 +1851,34 @@
       "tenantGlobalLeaseIndexNamespace": "queue_leases_by_expiry",
       "autopilotMarkerNamespace": "queue_autopilot_markers",
       "tenantGlobalAutopilotIndexNamespace": "queue_autopilot_by_owner_conversation",
-      "maximumItemsPerConversation": 512,
-      "maximumItemCoreBytes": 1048576,
-      "maximumGlobalConversationRows": 1000,
-      "maximumAutopilotMarkers": 1000,
+      "appendMetadata": {
+        "namespaceField": "stateNamespace",
+        "keyOwner": "authenticated_owner_user_id",
+        "key": "conversation_id",
+        "itemStateKeyOwner": "tenant_global_owner_zero",
+        "format": "tofu.queue-append/v1",
+        "lifecycle": "same-transaction-maintenance;missing-legacy-entry-full-scan;delete-with-conversation",
+        "realAppend": "point-read-count-and-kind-oldest-times;full-scan-when-goal-continuation-present"
+      },
+      "itemAdmission": "demand-without-count-quota",
+      "catalogAdmission": "demand-without-count-quota",
+      "coreAdmission": "existing-owner-bound-blob-without-byte-quota",
+      "requestMeasurement": "streamed-json-byte-count-without-debug-copy",
       "maximumReapItems": 128,
-      "maximumResponseBytes": 8388608,
+      "defaultPageBytes": 8388608,
+      "responseAdmission": "encoded-complete-result-without-private-byte-quota",
       "maximumIdCharacters": 256,
       "maximumConversationIdCharacters": 256,
       "lifecycle": "durable-turn-intent-with-explicit-lease-and-conversation-cascade",
       "constraints": [
         "queue IDs are tenant-global exact owner-bearing claims while ordinary order indexes remain owner scoped",
         "payload and config live in immutable blob-capable cores while position lease and turn bindings use compact mutable state",
-        "each conversation admits at most 512 items and every list rejects a response above 8 MiB",
+        "conversation item admission has no count quota; complete encoded results have no queue-private response byte quota",
+        "background pending reads include every eligible receipt; background pages accept any positive representable row hint with exact continuation and byte hints split only between complete items and always admit the first item",
         "priority and position order plus synthetic-kind dedupe and real-message supersession publish in one transaction",
-        "global recovery summaries expose at most 1000 oldest conversations and verify embedded owner identities",
+        "global recovery summaries visit every physical index window until actual EOF and verify embedded owner identities without a catalog count quota",
         "lease expiry is a narrow tenant-global index and one reap command releases at most 128 items or fails before mutation",
-        "autopilot markers are separate from dispatchable queue items and their global recovery feed is capped at 1000",
+        "autopilot markers are separate from dispatchable queue items; point-scoped arm and complete paged recovery feeds have no marker count quota",
         "conversation deletion atomically retires every item core state identity index lease summary and marker"
       ],
       "fields": [
@@ -1952,8 +2074,8 @@
       "dedupeNamespace": "artifact_content_dedupe",
       "pathHeadNamespace": "artifact_path_heads",
       "parentIndexNamespace": "artifact_children_by_version",
-      "maximumContentBytes": 8388608,
-      "maximumRowsPerConversation": 1000,
+      "contentPolicy": "complete-content-without-byte-quota",
+      "countPolicy": "complete-conversation-count-without-admission-quota",
       "lifecycle": "durable-user-state",
       "constraints": [
         "artifact IDs, conversation membership, content dedupe, path heads, version children, and library ordering are owner scoped",
@@ -2017,7 +2139,7 @@
       "constraints": [
         "content is addressed by its exact SHA-256 digest within an authenticated owner scope and stored as an immutable owner-bound blob",
         "duplicate put extends expiry and last access monotonically while retaining the original content metadata",
-        "range cursors are byte offsets adjusted forward to UTF-8 boundaries and each response emits at most 65536 visible bytes",
+        "reads and searches follow tool_result_query_v1.json; owner-bound HMAC route cursors retain immutable segment positions; raw blob windows do not replay prior body prefixes",
         "expiry maintenance is owner scoped and deletes at most 5000 documents plus matching indexes in one transaction"
       ],
       "fields": [
@@ -2048,7 +2170,8 @@
           "type": "u64-positive",
           "nullable": false
         }
-      ]
+      ],
+      "cursorKeyNamespace": "tool_result_query_keys"
     },
     {
       "name": "log_aggregates",
@@ -2582,12 +2705,11 @@
       "ownerKey": "authenticated_tenant_and_owner",
       "physicalFamily": "entity+blob",
       "physicalNamespace": "research_workspace_documents",
-      "maximumDocumentBytes": 8388608,
       "lifecycle": "durable-user-state",
       "constraints": [
         "workspace identity is the exact owner paper hash and language tuple",
         "put uses optimistic revision compare-and-swap and advances the revision exactly once",
-        "workspace JSON spills to an immutable owner-bound blob and is never scanned by catalog reads",
+        "complete workspace JSON has no private byte quota, spills to an immutable owner-bound blob and is never scanned by catalog reads",
         "zero legacy timestamps are retained in the logical document while the physical commit has a nonzero durability timestamp"
       ],
       "fields": [
@@ -2631,17 +2753,13 @@
       "proposalIndexNamespace": "optimizer_actions_by_proposal_applied_desc",
       "expiryIndexNamespace": "optimizer_actions_by_expiry",
       "countNamespace": "optimizer_action_counts",
-      "maximumRowsPerOwner": 2048,
-      "maximumListRows": 500,
-      "maximumDocumentBytes": 4194304,
-      "maximumResponseBytes": 8388608,
       "lifecycle": "durable-user-state",
       "constraints": [
         "action identities and proposal references are scoped to the authenticated tenant and owner",
         "record verifies the owner-scoped proposal and atomically publishes the document plus applied proposal and expiry indexes",
-        "list and latest-per-proposal use covering order indexes and return at most 500 rows without scanning document blobs",
-        "expiry inspection is exact over at most 4096 owner rows and never returns reverted or non-applied actions",
-        "outcome and revert replace one bounded document while preserving immutable application identity and metrics"
+        "list and latest-per-proposal use covering order indexes and honor the requested positive row count without scanning unrelated document blobs",
+        "expiry inspection is exact over complete owner history and never returns reverted or non-applied actions",
+        "outcome and revert replace one blob-backed document while preserving immutable application identity and metrics"
       ],
       "fields": [
         {
@@ -2671,13 +2789,11 @@
         {
           "name": "pre_metric",
           "type": "utf8",
-          "maximumCharacters": 2000000,
           "nullable": false
         },
         {
           "name": "outcome_metric",
           "type": "utf8",
-          "maximumCharacters": 2000000,
           "nullable": false
         },
         {
@@ -2695,10 +2811,13 @@
         {
           "name": "revert_reason",
           "type": "utf8",
-          "maximumCharacters": 500,
           "nullable": false
         }
-      ]
+      ],
+      "rowAdmission": "owner-scoped-demand-without-count-quota",
+      "defaultListRows": 50,
+      "documentAdmission": "blob-backed-without-private-byte-quota",
+      "responseAdmission": "complete-requested-rows-without-private-byte-quota"
     },
     {
       "name": "optimizer_proposals",
@@ -2709,10 +2828,6 @@
       "statusCreatedIndexNamespace": "optimizer_proposals_by_status_created_desc",
       "statusNamespace": "optimizer_proposal_status",
       "countNamespace": "optimizer_proposal_counts",
-      "maximumRowsPerOwner": 4096,
-      "maximumListRows": 500,
-      "maximumDocumentBytes": 4194304,
-      "maximumResponseBytes": 8388608,
       "lifecycle": "durable-user-state",
       "constraints": [
         "proposal identities are scoped to the authenticated tenant and owner and duplicate creation conflicts",
@@ -2737,13 +2852,11 @@
         {
           "name": "title",
           "type": "utf8",
-          "maximumCharacters": 500,
           "nullable": false
         },
         {
           "name": "rationale",
           "type": "utf8",
-          "maximumCharacters": 4000,
           "nullable": false
         },
         {
@@ -2755,7 +2868,6 @@
         {
           "name": "action_args",
           "type": "utf8",
-          "maximumCharacters": 2000000,
           "nullable": false
         },
         {
@@ -2772,7 +2884,6 @@
         {
           "name": "evidence",
           "type": "utf8",
-          "maximumCharacters": 2000000,
           "nullable": false
         },
         {
@@ -2784,10 +2895,13 @@
         {
           "name": "status_reason",
           "type": "utf8",
-          "maximumCharacters": 500,
           "nullable": false
         }
-      ]
+      ],
+      "rowAdmission": "owner-scoped-demand-without-count-quota",
+      "defaultListRows": 50,
+      "documentAdmission": "blob-backed-without-private-byte-quota",
+      "responseAdmission": "complete-requested-rows-without-private-byte-quota"
     },
     {
       "name": "model_routing",
@@ -2801,7 +2915,6 @@
       "secretCountNamespace": "model_routing_secret_counts",
       "secretReferenceIndexNamespace": "model_routing_secrets_by_reference",
       "secretUpdatedIndexNamespace": "model_routing_secrets_by_updated",
-      "maximumDocumentBytes": 8388608,
       "maximumSecretReferenceCharacters": 256,
       "maximumCiphertextCharacters": 32768,
       "maximumKeyHintCharacters": 64,
@@ -2812,7 +2925,7 @@
         "every aggregate and secret is scoped by authenticated owner plus the exact tenant label retained behind a domain-separated digest key",
         "authority commit uses revision compare-and-swap and atomically publishes the next document, optional prior-document backup, migration receipt, command receipt, and outbox",
         "failed or rejected migration receipts update no route authority; an existing boundary accepts a receipt without duplicating its document, while first creation requires and preserves an empty revision-zero authority document",
-        "authority metadata is a separate small record and authority, backup, and migration receipt are separate blob-capable records so each retains its independent 8 MiB storage.v1 bound",
+        "authority metadata is a separate small record and authority, backup, and migration receipt are separate blob-capable records without a document byte-admission quota; only the physical codec determines inline or blob storage",
         "secret ciphertext is already envelope-encrypted before this boundary; plaintext is never accepted or returned by list",
         "secret get returns only secret_reference, ciphertext, key_hint, created_at, and updated_at; authenticated owner and tenant scope remain storage-boundary inputs and are never echoed as document fields",
         "an exact checked count tracks each owner and tenant-label boundary without a count-admission quota or an aggregate scan",
@@ -2833,19 +2946,16 @@
         {
           "name": "document",
           "type": "json-object",
-          "maximumBytes": 8388608,
           "nullable": false
         },
         {
           "name": "backup",
           "type": "json-object",
-          "maximumBytes": 8388608,
           "nullable": true
         },
         {
           "name": "migration_receipt",
           "type": "json-object",
-          "maximumBytes": 8388608,
           "nullable": true
         },
         {
@@ -2876,7 +2986,9 @@
           "type": "f64-nonnegative",
           "nullable": false
         }
-      ]
+      ],
+      "maximumMigrationCiphertextBytes": 8388608,
+      "documentsHaveNoAdmissionByteQuota": true
     },
     {
       "name": "recent_projects",
@@ -2884,14 +2996,13 @@
       "physicalFamily": "entity+blob",
       "physicalNamespace": "recent_project_documents",
       "countNamespace": "recent_project_counts",
-      "maximumProjectsPerOwner": 1000,
-      "maximumTouchBatch": 32,
+      "admission": "demand-without-owner-or-batch-count-quota",
       "maximumPathCharacters": 4096,
       "lifecycle": "durable-user-state",
       "constraints": [
         "physical keys are domain-separated SHA-256 path digests while every document retains and verifies the exact path",
-        "an OCC-protected exact count bounds list materialization and rejects creation beyond 1000 owner-scoped projects",
-        "touch_many deduplicates at most 32 paths in request order and updates the complete batch plus receipt and outbox atomically",
+        "an OCC-protected exact count witnesses complete owner-scoped list materialization without a project-count admission quota",
+        "touch_many deduplicates every supplied path in request order and updates the complete batch plus receipt and outbox atomically",
         "clear retires the complete owner-scoped document range and resets its exact count without walking project rows",
         "project relink folds the old digest document into the destination, summing use counts and taking the latest timestamp, then retires the old document while the exact owner count tracks the net document delta",
         "list verifies count-to-document agreement then preserves storage.v1 last_used descending order with path order as the stable tie break"
@@ -2926,8 +3037,9 @@
         "stream cursor and immutable segment references are transactionally persisted in the current entity state root; bounded predecessor lookup and forward traversal read event blocks on demand from the same MVCC snapshot without historical catalog rebuild",
         "natural-key replay with identical payload is a no-op; different payload conflicts",
         "one atomic batch accepts at most 500 items spanning at most 500 distinct physical streams",
-        "event.list exact types and literal type prefixes use OR semantics over a transactionally maintained type index; at most 64 exact types and 16 prefixes are admitted, while prefix catalog expansion is capped below 1000 matching distinct types",
-        "event.inspector_summary folds exact structural counts and first timestamps from type metadata for at most 100 root tasks and their bounded owner-scoped #agent children without reading event bodies",
+        "event.list exact types and literal type prefixes use OR semantics over a transactionally maintained type index; at most 64 exact types and 16 prefixes are admitted",
+        "event.inspector_summary folds exact structural counts and first timestamps from type metadata for every requested root task and all owner-scoped #agent children through metadata scan windows without reading event bodies",
+        "event prefix filters enumerate complete owner-scoped type catalogs through 512-row metadata windows and merge sparse per-type cursors by application sequence without a type-count admission ceiling",
         "event.prune uses an owner-scoped age-leading retention index, classifies blank event types as structural, atomically removes every logical and physical-position index, and advances a persistent owner-scoped retirement queue by at most 128 complete immutable stream segments per transaction; authority GC can reclaim unreferenced blocks in its separate bounded rounds",
         "private _wire_ graphs and payloads above 262144 bytes remain default-denied until their exact projection paths exist"
       ],
@@ -3066,6 +3178,29 @@
       "ownerKey": "user_id",
       "physicalFamily": "entity+blob",
       "physicalNamespace": "conversation_turns",
+      "humanGuidanceAnswer": {
+        "operation": "turn.projection.update",
+        "payloadField": "human_guidance_answer",
+        "requiredFields": [
+          "guidanceId",
+          "response",
+          "commandId"
+        ],
+        "maximumResponseCharacters": 8000,
+        "maximumIdentityCharacters": 256,
+        "maximumPayloadBytes": 65536,
+        "receiptFields": [
+          "guidanceResponse",
+          "guidanceAnswerCommandId"
+        ],
+        "firstAnswerWins": true,
+        "equalAnswerRetry": "return-existing-receipt",
+        "streamRevisionFence": "persisted-question-identity-and-options",
+        "durableProjection": "completed-ask_human-toolContent",
+        "producerWrites": "preserve-accepted-receipt",
+        "recovery": "reuse-existing-owned-attempt-index-and-checkpoint",
+        "createsAttempt": false
+      },
       "laneIndexNamespace": "turns_by_lane_ordinal",
       "laneCompactionIndexNamespace": "turns_by_lane_compaction",
       "maximumCompactionMetadataRows": 100000,
@@ -3119,6 +3254,14 @@
       "attemptEventHeadNamespace": "attempt_event_heads",
       "attemptEventNamespace": "attempt_events",
       "attemptEventRetentionIndexNamespace": "attempt_events_by_settled",
+      "conversationEventRetirementNamespace": "conversation_event_retirements",
+      "conversationEventRetirement": {
+        "admission": "Delete atomically pins immutable Turn identities and detaches executable ranges without reading transcript payloads.",
+        "owner": "Existing turn.events.prune and its maintenance transaction; no additional worker or authority.",
+        "bounds": "Reuse Attempt-event prune row, attempt and materialization bounds; one durable job per deleted execution epoch and an owner-scoped round-robin cursor.",
+        "identityFence": "Tombstone claims remain reserved while cleanup is pending; purge reclaims the complete retained identity set before removing pending jobs and releasing claims.",
+        "lifetime": "The job and its private snapshot pin are released atomically after all event ranges are reclaimed. Restore does not reactivate old epochs or discard cleanup progress."
+      },
       "maximumAttemptEventPruneAttemptsPerTransaction": 64,
       "maximumAttemptEventPruneRowsPerTransaction": 200000,
       "maximumAttemptEventPruneMaterializedBytes": 67108864,
@@ -3428,7 +3571,6 @@
       "maximumAssetMetadataCharacters": 20000,
       "maximumJsonArrayCharacters": 200000,
       "maximumTermCharacters": 128,
-      "maximumTermsPerChunk": 4096,
       "maximumSearchTokens": 32,
       "maximumPageRows": 200,
       "maximumCatalogPageSize": 100,
@@ -4776,6 +4918,30 @@
       "receiptRequired": true
     },
     {
+      "name": "project.dispatch.commit",
+      "kind": "command",
+      "table": "storage_records",
+      "receiptRequired": true
+    },
+    {
+      "name": "project.dispatch.get",
+      "kind": "query",
+      "table": "storage_records",
+      "receiptRequired": false
+    },
+    {
+      "name": "project.dispatch.list",
+      "kind": "query",
+      "table": "storage_records",
+      "receiptRequired": false
+    },
+    {
+      "name": "project.dispatch.projects",
+      "kind": "query",
+      "table": "storage_records",
+      "receiptRequired": false
+    },
+    {
       "name": "project.recent.clear",
       "kind": "command",
       "table": "recent_projects",
@@ -5172,6 +5338,12 @@
       "receiptRequired": true
     },
     {
+      "name": "scheduler.task.execution_lookup",
+      "kind": "query",
+      "table": "scheduled_tasks",
+      "receiptRequired": false
+    },
+    {
       "name": "scheduler.task.get",
       "kind": "query",
       "table": "scheduled_tasks",
@@ -5191,6 +5363,12 @@
     },
     {
       "name": "scheduler.task.record_result",
+      "kind": "command",
+      "table": "scheduled_tasks",
+      "receiptRequired": true
+    },
+    {
+      "name": "scheduler.task.settle_execution",
       "kind": "command",
       "table": "scheduled_tasks",
       "receiptRequired": true
@@ -5664,6 +5842,12 @@
       "receiptRequired": false
     },
     {
+      "name": "turn.sync.round_directory",
+      "kind": "query",
+      "table": "conversation_turns",
+      "receiptRequired": false
+    },
+    {
       "name": "turn.sync.snapshot",
       "kind": "query",
       "table": "conversation_turns",
@@ -5784,15 +5968,16 @@
   },
   "commandReceipts": {
     "compressionThresholdBytes": 65536,
-    "maximumStoredBytes": 4194304,
-    "maximumDecodedBytes": 4194304,
     "maximumInlineBytes": 7168,
-    "encoding": "legacy-json-or-zlib-v1;compress-above-threshold;retain-smaller-representation",
+    "encoding": "legacy-json-or-zlib-v1;compress-above-threshold-when-u32-length-representable;retain-smaller-representation",
     "publication": "receipt-and-domain-effects-atomic;native-overflow-uses-owner-scoped-immutable-blobs",
     "retention": "existing-command-receipt-retention;no-payload-dependent-expiry",
-    "compatibility": "reads-all-prior-receipts;older-readers-refuse-receipts-above-64KiB;binary-downgrade-requires-compatible-reader"
+    "compatibility": "reads-all-prior-receipts;older-readers-refuse-receipts-above-64KiB;binary-downgrade-requires-compatible-reader",
+    "payloadAdmission": "complete-receipt-without-private-stored-or-decoded-byte-quota"
   },
   "transcriptArchives": {
+    "format": "tofu.transcript-archive.v2",
+    "retiredFormat": "tofu.transcript-archive.v1",
     "manifestNamespace": "transcript_archive_manifests",
     "pageNamespace": "transcript_archive_pages",
     "maximumPages": 4096,
@@ -5858,5 +6043,18 @@
     "default": false,
     "authorization": "existing owner locator/live parent/turn proof applies before private config is returned",
     "delivery": "internal lifecycle port only; public endpoints do not forward the flag"
+  },
+  "entityPageCodec": {
+    "writeVersion": 2,
+    "readVersions": [
+      1,
+      2
+    ],
+    "keyEncoding": "previous-key-u16-prefix-u16-suffix;first-prefix-zero;strictly-increasing-reconstructed-keys",
+    "maximumExpandedBytes": 16384,
+    "packingPolicy": "encoded-target-with-independent-expanded-ceiling",
+    "decodedCacheAccounting": "max-legacy-encoded-charge-and-owned-decoded-allocations",
+    "upgradePolicy": "lazy-copy-on-write;read-legacy-pages;old-readers-reject-version-two;no-startup-rewrite",
+    "authority": "content-addressed-pages;existing-wal-control-publication-gc-and-backup"
   }
 }

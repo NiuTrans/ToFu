@@ -18,6 +18,7 @@ from evaluations.codex_kimi_proxy.codex_contract import validate_proxy_metrics
 from lib.benchmark_contract import (
     BenchmarkContractError,
     build_task_record_v2,
+    canonical_benchmark_usage,
     public_price_cost_from_usage,
     validate_record,
 )
@@ -81,36 +82,10 @@ def _sha256(value: Any) -> str:
 
 
 def _round_usage(raw: dict[str, Any], round_index: int) -> dict[str, int]:
-    if "input_tokens" not in raw or "output_tokens" not in raw:
-        raise CodexProjectionError(
-            f"proxy round {round_index} is missing provider usage"
-        )
-    details = raw.get("input_tokens_details") or {}
-    output_details = raw.get("output_tokens_details") or {}
-    if not isinstance(details, dict) or not isinstance(output_details, dict):
-        raise CodexProjectionError(
-            f"proxy round {round_index} usage details are invalid"
-        )
-    prompt = _non_negative_integer(raw.get("input_tokens"), "input_tokens")
-    cached = _non_negative_integer(
-        details.get("cached_tokens", 0), "cached_input_tokens"
-    )
-    output = _non_negative_integer(raw.get("output_tokens"), "output_tokens")
-    reasoning = _non_negative_integer(
-        output_details.get("reasoning_tokens", 0), "reasoning_output_tokens"
-    )
-    if cached > prompt or reasoning > output:
-        raise CodexProjectionError(
-            f"proxy round {round_index} usage subsets exceed their totals"
-        )
-    return {
-        "prompt_tokens": prompt,
-        "completion_tokens": output,
-        "cache_read_tokens": cached,
-        "cache_write_tokens": 0,
-        "reasoning_tokens": reasoning,
-        "total_tokens": prompt + output,
-    }
+    try:
+        return canonical_benchmark_usage(raw, usage_format="responses")
+    except BenchmarkContractError as exc:
+        raise CodexProjectionError(f"proxy round {round_index}: {exc}") from exc
 
 
 def _aggregate_usage(rows: list[dict[str, Any]]) -> dict[str, int]:
@@ -405,7 +380,8 @@ def build_codex_release_task_record(
     )
     retry_rows = list(retries or [])
     retry_model_cost = sum(
-        public_price_cost_from_usage(usage, manifest["priceCard"])["costUsd"]
+        public_price_cost_from_usage(
+            usage, manifest["priceCard"], usage_format="responses")["costUsd"]
         for retry in retry_rows
         for usage in retry.get("modelUsages") or []
     )

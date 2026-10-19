@@ -1,5 +1,13 @@
 {
   "format": "tofu.conversation-search.v2",
+  "referenceTool": {
+    "automaticPages": 4,
+    "pageResults": 200,
+    "scope": "auto selects project when available; explicit project without context fails; all is owner scoped and excludes current conversation",
+    "coverage": "preserve paged coverage and continuation; never equate incomplete or unknown coverage with proven absence",
+    "receipt": "conversationSearch: keyword, effective scope, projectPath, returnedCount, limit, coverage, incomplete, coverageReasons, items(id,title); same-query metadata, not parsed prose",
+    "fields": "titles and indexed public text; tool arguments/results are not indexed"
+  },
   "http": {
     "path": "/api/v1/conversations/search",
     "method": "GET",
@@ -77,7 +85,7 @@
     "refresh": "reconcile local metadata without requery floods; bounded refresh on relevant invalidation and explicit retry; teardown aborts work"
   },
   "nativeProjection": {
-    "formatVersion": 2,
+    "formatVersion": 4,
     "headerScanBatch": 16,
     "invalidationTokenBytes": 16,
     "legacyInvalidationTokenBytes": 8,
@@ -88,6 +96,20 @@
     "budgetAccounting": "chunks-and-reserved-active-build-headers-and-titles",
     "emptyGeneration": "exact-generation-bytes-equal-header-reservation;skip-chunk-range-without-changing-format",
     "continuation": "projection-source-owner-query-bound;keys-and-word-mask;restart-pending-on-generation-change",
-    "invalidation": "fresh-random-token-per-mutation;exact-byte-acknowledgement-including-delete-recreate-cycles"
+    "invalidation": "fresh-random-token-per-mutation;exact-byte-acknowledgement-including-delete-recreate-cycles",
+    "physicalReclamation": "same-two-mark-online-collector-as-authority;projection-local-root-and-relink-fences;stop-before-checkpoint",
+    "volumeGuard": {
+      "bytesReserveDivisor": 1000,
+      "minimumBytesReserve": 67108864,
+      "maximumBytesReserve": 2147483648,
+      "inodesReserveDivisor": 1000,
+      "minimumInodesReserve": 4096,
+      "maximumInodesReserve": 100000,
+      "maximumReserveFractionDivisor": 10,
+      "accounting": "independent-known-dimensions;unknown-dimensions-do-not-prove-full",
+      "check": "before-each-projection-write;pause-with-storage-full;retry-with-dirty-token-intact",
+      "startup": "defer-only-storage-full;authority-ready;maintenance-reopens-automatically",
+      "gcScratchPolicy": "each-epoch-temporary-budget-at-most-one-percent-of-current-projection-volume-free-bytes"
+    }
   }
 }

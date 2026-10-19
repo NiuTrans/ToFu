@@ -11,6 +11,9 @@ const markdownRenderer = createMarkdownRenderer({
     highlighter: typeof hljs === 'undefined' ? null : hljs,
     mathRenderer: typeof katex === 'undefined' ? null : katex,
     basePath: typeof BASE_PATH === 'undefined' ? '' : BASE_PATH,
+
+    language: _i18nLang,
+    text: t,
     projectActive: typeof projectState !== 'undefined' && Boolean(projectState && projectState.active),
   }),
   ensureMath: () => typeof _ensureKatex === 'function' ? _ensureKatex() : undefined,

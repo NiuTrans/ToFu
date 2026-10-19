@@ -1,5 +1,40 @@
 # Evolution office game art
 
+## Scene-first command center
+
+**Problem.** Entering the studio through a notebook intake form hid the room
+and made live execution look like a disconnected second application.
+**Decision.** `#/evolution` opens the interactive studio directly. The durable
+program notebook remains at `#/evolution/programs`, accessible from the menu.
+The persistent conversational briefing shares the scene's mission desk, with
+optional model settings collapsed and an explicit dispatch action. Retry
+prepares that same input island; it never launches work automatically. A
+receipt-backed stage route in the task panel and one bounded journal excerpt
+connect the world to the existing goal API. Recorded stages are not labelled successful without a
+verdict. Room/library/delivery actions retain their goal-scoped owners.
+**Alternatives rejected.** A compulsory setup modal still delays entering the
+world; simulated progress, decorative agent counts and a second polling loop
+would separate presentation from backend authority. A new game runtime is
+unnecessary for this layout change: the existing collision-aware Canvas2D
+scene retains its visible-time lifecycle and on-demand room loading.
+
+The command-center stylesheet is studio-only and uses shared design tokens.
+Scene focus hides the mission desk, never pauses or cancels backend work.
+Briefing focus follows the drawer's deferred native trigger restoration through
+one cancellable, zero-delay handoff; disposal or another drawer clears it.
+On narrow screens the mission precedes the world; drawers preserve focus
+return and room navigation. The HUD owns four fixed stage nodes and a human-wait
+notice, while the task inspector owns the single bounded journal excerpt. The
+scene has a plain theme-derived frame rather than a blurred artwork echo. There
+is no new timer, transport or retained history.
+Verify with `testing/studio.test.cjs`, `testing/route-host.test.cjs`, the studio
+browser journey, and the deterministic office render-cost measurement.
+On this host, its 3-role/8-visitor, 16-second virtual workload records 964
+callbacks at 0.20 ms p95 CPU submission time (not display FPS), with one
+maximum pending frame, zero idle/hidden callbacks and zero canvas backing
+pixels after disposal. These are regression measurements, not hardware-independent
+frame-rate guarantees; the new HUD adds no scheduler or transport.
+
 The retained production art is in `frontend/src/features/evolution/assets/`.
 The eight `game-<role>.webp` files are independent 4×4 walking sheets; rows
 are front, left, right, back, and columns are walk, stand, walk, stand.

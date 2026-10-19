@@ -7,8 +7,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from lib import log_retention as retention
-from lib import log_windows_paths as windows
+from lib.logging_pkg import log_retention as retention
+from lib.logging_pkg import log_windows_paths as windows
 
 pytestmark = pytest.mark.unit
 

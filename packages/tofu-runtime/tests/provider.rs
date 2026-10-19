@@ -49,6 +49,107 @@ fn actual_python_stream_results_match_native_chunking() {
         }
     }
 }
+
+#[test]
+fn gateway_notice_gate_counts_scalars_and_preserves_finish_tool_and_abort_precedence() {
+    use tofu_runtime::execution_contract::GATEWAY_LIMIT_MAX_CHARS;
+    let phrase = "RATE LIMIT EXCEEDED";
+    for scalar in ["a", "中", "😀", "İ"] {
+        for extra in [0, 1, 1024] {
+            let content = format!("  {phrase}{}  ",
+                scalar.repeat(GATEWAY_LIMIT_MAX_CHARS - phrase.chars().count() + extra));
+            for finish in ["stop", "length"] {
+                for with_tool in [false, true] {
+                    for aborted in [false, true] {
+                        let mut delta = json!({"content":content});
+                        if with_tool {
+                            delta["tool_calls"] = json!([{"index":0,"id":"call-1","type":"function",
+                                "function":{"name":"status","arguments":"{}"}}]);
+                        }
+                        let event = json!({"choices":[{"delta":delta,"finish_reason":finish}]});
+                        let wire = format!("data: {event}\n\ndata: [DONE]\n\n");
+                        let expected = if aborted {
+                            ProviderStreamState::ClientAborted
+                        } else if finish == "stop" && !with_tool && extra == 0 {
+                            ProviderStreamState::GatewayLimitResponse
+                        } else {
+                            ProviderStreamState::ProviderFinished
+                        };
+                        for chunk in [1, 7, 4096] {
+                            let mut stream = ChatStream::new(budget()).unwrap();
+                            for bytes in wire.as_bytes().chunks(chunk) {
+                                if stream.feed(bytes).unwrap() { break; }
+                            }
+                            let result = stream.finish(aborted).unwrap();
+                            assert_eq!(result.state, expected,
+                                "scalar={scalar} extra={extra} finish={finish} tool={with_tool} aborted={aborted} chunk={chunk}");
+                            assert_eq!(result.message["content"], content);
+                            assert_eq!(result.done_seen, true);
+                            assert_eq!(result.malformed_frames, 0);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn completed_tool_fields_preserve_large_arguments_empty_defaults_and_extra_content() {
+    let arguments = format!("  {{\"text\":\"{}\"}}  ", "中文😀".repeat(4096));
+    let extra = json!({"google":{"thought_signature":"signature"}});
+    let event = json!({"choices":[{"finish_reason":"tool_calls","delta":{
+        "reasoning_content":"plan","thinking_signature":"reasoning-signature",
+        "tool_calls":[
+            {"index":0,"id":"large","function":{"name":"status","arguments":arguments},"extra_content":extra},
+            {"index":1,"id":"empty","function":{"name":"empty","arguments":"  "}}
+        ]}}]});
+    let wire = format!("data: {event}\n\ndata: [DONE]\n\n");
+    for chunk in [7, 4096] {
+        let mut stream = ChatStream::new(budget()).unwrap();
+        for bytes in wire.as_bytes().chunks(chunk) {
+            if stream.feed(bytes).unwrap() { break; }
+        }
+        let result = stream.finish(false).unwrap();
+        assert_eq!(result.state, ProviderStreamState::ProviderFinished);
+        assert_eq!(result.message, json!({"role":"assistant",
+            "reasoning_content":"plan","thinking_signature":"reasoning-signature",
+            "tool_calls":[
+                {"id":"large","type":"function","function":{"name":"status","arguments":arguments},"extra_content":extra},
+                {"id":"empty","type":"function","function":{"name":"empty","arguments":"{}"}}
+            ]}));
+        assert!(result.message.get("content").is_none());
+        assert_eq!(result.message["tool_calls"][0]["function"]["arguments"], arguments);
+    }
+}
+
+#[test]
+fn completed_text_and_tool_arguments_release_fragment_growth_slack() {
+    let mut stream = ChatStream::new(budget()).unwrap();
+    let mut expected = String::new();
+    for index in 0..65 {
+        let part = if index == 64 { "!".to_owned() } else { format!("{index:04}{}", "X".repeat(1020)) };
+        expected.push_str(&part);
+        let event = json!({"choices":[{"delta":{"content":part,"tool_calls":[
+            {"index":0,"id":"call-1","function":{"name":"status","arguments":part}}
+        ]}}]});
+        assert!(!stream.feed(format!("data: {event}\n\n").as_bytes()).unwrap());
+    }
+    assert!(stream.feed(b"data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n").unwrap());
+    let result = stream.finish(false).unwrap();
+    assert_eq!(result.state, ProviderStreamState::ProviderFinished);
+    assert_eq!(result.message["content"], expected);
+    assert_eq!(result.message["tool_calls"][0]["function"]["arguments"], expected);
+    for value in [
+        &result.message["content"],
+        &result.message["tool_calls"][0]["id"],
+        &result.message["tool_calls"][0]["function"]["name"],
+        &result.message["tool_calls"][0]["function"]["arguments"],
+    ] {
+        let Value::String(text) = value else { panic!("missing completed string") };
+        assert_eq!(text.capacity(), text.len(), "completed strings must release growth slack");
+    }
+}
 #[test]
 fn finish_without_done_is_evidence_but_done_alone_is_not() {
     assert_eq!(

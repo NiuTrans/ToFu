@@ -77,14 +77,14 @@ function openImagePreview(src) {
   close.type = "button";
   close.className = "preview-close-btn";
   close.dataset.tofuAction = "closePreview()";
-  close.setAttribute("aria-label", "Close");
+  close.setAttribute("aria-label", typeof t === 'function' ? t('common.close') : 'Close');
   close.textContent = "✕";
   const image = document.createElement("img");
   image.src = String(src);
   image.alt = "Preview";
   image.className = "preview-image";
   body.replaceChildren(close, image);
-  modal.classList.add("open");
+  showAttachmentPreview(document, typeof t === 'function' ? t('markdown.previewTitle') : 'Attachment preview');
 }
 function openTextPreview(title, meta, text) {
   // Last-line-of-defence: an empty / whitespace-only body would render an
@@ -98,13 +98,10 @@ function openTextPreview(title, meta, text) {
     : `<span class="preview-text-empty">${escapeHtml(_t("tool.noContent", "No content returned."))}</span>`;
   document.getElementById("previewBody").innerHTML =
     `<button class="preview-close-btn" data-tofu-action="closePreview()" aria-label="Close">✕</button><div class="preview-text-panel"><div class="preview-text-header"><span class="preview-text-title">${escapeHtml(title)}</span><span class="preview-text-meta">${escapeHtml(meta)}</span></div><pre class="preview-text-body">${body}</pre></div>`;
-  document.getElementById("previewModal").classList.add("open");
+  showAttachmentPreview(document, typeof t === 'function' ? t('markdown.previewTitle') : 'Attachment preview');
 }
 function closePreview() {
-  document.getElementById("previewModal").classList.remove("open");
-  setTimeout(() => {
-    document.getElementById("previewBody").innerHTML = "";
-  }, 300);
+  closeAttachmentPreview(document);
 }
 
 // Event delegation for ptool-truncated "show all" bars (static render path)

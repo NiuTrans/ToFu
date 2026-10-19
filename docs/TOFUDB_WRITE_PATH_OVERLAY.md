@@ -82,7 +82,7 @@ reuse the allocation at publication. Alternatives: ordinary prepared-blob
 staging changes fresh-page deduplication semantics; removing identity checks
 would weaken the private-page boundary. Neither is used.
 
-The [source-pinned measurement](evidence/tofudb_overlay_shared_publication_20261006.json)
+The source-pinned measurement
 separates private observer-on attribution from default-off active-stream runs.
 Page publication fell from 2.599 to 0.417 ms per call in the diagnostic pair;
 final combined 1,000-active stream P99 remained 1.036/1.242 s, above its 1 s
@@ -218,6 +218,41 @@ Alternatives considered: strict LRU requires writing global recency state on
 every hit; sharding that LRU still serializes all readers of a hot root page.
 An unbounded decoded-page map would hide contention by violating memory bounds.
 
+### Decoded-page admission and benchmark budgets
+
+Problem: freshly encoded immutable nodes can be read and decoded again later,
+but eagerly copying every written node into the shared cache adds hashing,
+allocation and exclusive-lock work, including for pages never read again.
+Decision: retain verified read-miss admission. Eager fresh-page admission is
+not enabled without reproducible application gains and bounded-memory evidence.
+The rejected alternative checked the returned content ID, skipped contended or
+oversized entries and used the existing byte-accounted CLOCK cache; these
+correctness properties alone did not establish a performance benefit.
+
+`tofudb_fresh_page_admission_20261015.json` retains
+the prototype, exact production builds, all arms and failed fixture attempts.
+Under strict durability, the 1,000-conversation A/B/B/A phase cohort averaged
+12.0% lower scheduled-stream P99 and 7.2% lower settlement P99. The delta cohort
+was 0.4% lower, 5.0% higher and 13.6% higher for scheduled-stream P99, settlement
+P99 and productive wall time respectively. All eight arms preserved correctness
+and failed latency gates. These are means of per-run statistics, not pooled
+percentiles or a universal SQLite comparison. Neighboring default and 16 MiB
+page-budget workloads also retain regressions. Sampled profiles suggest fewer
+read/decode calls, but dropped profiles and different completed populations
+prevent exact causal attribution; profile-on latency is never admission evidence.
+
+The comparison harness reports `resources.tofudb.native_resource_budget` after
+all workloads and before shutdown. `requested_cache_environment` contains only
+the two explicit cache environment values captured at launch; `effective` comes from the latest
+native runtime's `system.metrics.resourceBudget`. Missing or invalid observations
+set `available=false` with an error, preserving measured workloads and physical
+write counters; they cannot certify a cache-budget comparison. The observation
+runs outside latency and write-volume windows and does not describe prior
+runtime generations. In particular, `TOFU_DB_PAGE_CACHE_MIB=0` is ignored by
+the positive-only override parser and falls back to the launch probe. It is not
+a cache-disable switch. Historical zero-override arms are labelled accordingly;
+only the native zero-capacity API tests establish disabled-cache behavior.
+
 JSON decoding and compact-head buffer ownership follow the
 [materialization contract](TOFUDB_JSON_MATERIALIZATION.md). Byte and decoded
 reads share scoped authentication and bounds; patch errors never publish a
@@ -260,6 +295,14 @@ transaction and tombstone lifecycle without those changes.
 - A mutable latest-value hash map alone cannot preserve old reader versions or
   ordered range predicates. Copying its contents per snapshot restores linear work.
 - Ignoring WAL records before any root change is invalid for partial merges.
+
+## Physical page representation
+
+Materialization emits the [versioned entity-page codec](TOFUDB_ENTITY_PAGES.md).
+Prefix-coded key sizes determine physical packing; an independent expanded-byte
+ceiling bounds decoded ownership. Capture, private preparation, exact-root fences,
+original versions and WAL replay cursors remain unchanged. Existing legacy pages
+are rewritten only on modified paths; old reader roots retain their original IDs.
 
 ## Verification
 
@@ -357,4 +400,41 @@ Four-window medians show normalized decoder time about 31% lower and same-proces
 peak RSS about 3–4% lower; these are inclusive workload observations, not exclusive
 CPU or allocator measurements. Settlement and admission have mixed paired results,
 including one 4.87 s embedded settlement P99; all 1 s stream gates remain unmet.
-[Source, tests and full tradeoffs](evidence/tofudb_borrowed_history_admission_20261009.json).
+Source, tests and full tradeoffs.
+
+
+## Published preparation admission
+
+Problem: an eligible command waits in the writer FIFO to capture its snapshot,
+then waits again to commit. A tested prototype reused the existing published
+root and its pin-registration guard for private preparation, with the writer's
+single live rotation-install fence. OCC, private-byte ownership, FIFO commit,
+strict WAL acknowledgement and error boundaries remained authoritative.
+
+Decision: retain writer admission for preparation. Passing the blocked-writer,
+private-byte, exact-conflict and full I/O-fault tests proved feasibility; it did
+not establish a latency benefit. The full native suite passed 2,001 cases
+(9 ignored), but production-release A/B/B/A measurements rejected this change.
+For 1,000 queued conversations, candidate changes in run-median stream P99 /
+settlement P99 / productive time were:
+
+| Connection / events | Stream P99 | Settlement P99 | Productive time |
+|---|---:|---:|---:|
+| application / phase | +64.33% | +0.44% | -1.40% |
+| application / delta | +3.16% | +4.76% | +1.95% |
+| embedded / phase | +36.58% | +12.28% | +4.61% |
+| embedded / delta | +14.79% | +3.37% | +1.74% |
+
+All 16 pipeline arms passed content/recovery checks and missed the full SLO.
+The shared pipeline now accepts `--native-client application|embedded`; its
+application default, workload, coordinator and correctness gates remain.
+Embedded in-process abandonment is not application SIGKILL evidence. Actual
+`authority.client_mode`, build identity and recovery scope must match a claim.
+Alternatives considered: keeping a universally enabled fast path on the strength
+of a lock test ignores observed regressions; inventing another adaptive queue
+before isolating the cost adds an unqualified scheduling owner. Neither ships.
+All arms, SQLite neighbors, memory costs, source and tests
+retain this rejected prototype. Its successful-capture counter is diagnostic
+prototype evidence, not a newly shipped runtime metric.
+
+<!-- Evidence note: former docs/evidence/ artifact snapshots cited here were retired from the tree; cited JSON artifacts remain recoverable from git history. -->

@@ -85,6 +85,7 @@ _RUNNER_EOL: dict[str, _dt.date | None] = {
     'ubuntu-latest':   None,
     'ubuntu-24.04':    None,
     'ubuntu-22.04':    None,
+    'ubuntu-22.04-arm': None,
     'windows-latest':  None,
     'windows-2025':    None,
     'windows-2022':    None,
@@ -129,6 +130,8 @@ def _runner_labels(wf: dict) -> dict[str, list[str]]:
             include = (job.get('strategy') or {}).get('matrix', {}).get('include') or []
             if key:
                 labels = [e[key.group(1)] for e in include if key.group(1) in e]
+                if not include:
+                    labels = (job.get('strategy') or {}).get('matrix', {}).get(key.group(1), [])
         elif isinstance(runs_on, str):
             labels = [runs_on]
         elif isinstance(runs_on, list):
@@ -472,7 +475,7 @@ def test_agent_legs_build_all_three_platforms():
     # The upload artifact names the release job merges.
     for artifact in ('windows-agent-installer',
                      'macos-agent-dmg-${{ matrix.arch }}',
-                     'linux-agent-archive'):
+                     'linux-remote-archive-${{ matrix.arch }}'):
         assert artifact in wf_text, f'agent artifact {artifact} not uploaded'
     # Smoke on the two platforms where the full leg smokes (macOS smokes
     # neither component — same discipline as the full DMG leg).
@@ -484,8 +487,8 @@ def test_agent_windows_inno_carries_the_autostart_contract():
     """Owner amendment ①, CI side: offered, default ON, HKCU (UAC-free),
     removed at uninstall — and the SAME value name the tray writes."""
     wf_text = _WORKFLOW.read_text(encoding='utf-8')
-    assert 'AppName=Tofu Agent' in wf_text
-    assert ('OutputBaseFilename=TofuAgent-Setup-${APP_VERSION}-win64'
+    assert 'AppName=Tofu Remote' in wf_text
+    assert ('OutputBaseFilename=TofuRemote-Setup-${APP_VERSION}-win64'
             in wf_text)
     assert r'{localappdata}\\Programs\\TofuAgent' in wf_text
     assert r'Software\\Microsoft\\Windows\\CurrentVersion\\Run' in wf_text
@@ -494,7 +497,7 @@ def test_agent_windows_inno_carries_the_autostart_contract():
     assert 'uninsdeletevalue' in wf_text, (
         'a removed agent must not leave a dead autorun behind')
     # Default-ON: the task exists and is never flagged unchecked.
-    assert 'Name: autostart; Description: "Start Tofu Agent with Windows"' \
+    assert 'Name: autostart; Description: "Start Tofu Remote with Windows"' \
         in wf_text
     import re as _re
     assert not _re.search(r'autostart[^\n]*unchecked', wf_text, _re.I), (
@@ -507,9 +510,9 @@ def test_required_assets_cover_both_components():
     missing an agent asset is as INCOMPLETE as one missing a platform."""
     mod = _asset_mod()
     total = len(mod.PLATFORM_ASSETS) + len(mod.AGENT_PLATFORM_ASSETS)
-    assert len(mod.REQUIRED_PLATFORM_ASSETS) == total + 2
+    assert len(mod.REQUIRED_PLATFORM_ASSETS) == total + 2 + 2 * len(mod.PYTHON_BUNDLE_TARGETS) + 8
     labels = [l for l, _p in mod.REQUIRED_PLATFORM_ASSETS]
-    assert any('agent' in l.lower() for l in labels), (
+    assert any('remote' in l.lower() for l in labels), (
         'the agent component is not in the release gates')
 
 
@@ -1993,3 +1996,48 @@ def test_build_deb_end_to_end(tmp_path):
     assert 'Exec=/opt/Tofu/Tofu' in fsys.stdout, (
         f'__INSTALL_DIR__ not rendered to /opt/Tofu:\n{fsys.stdout}'
     )
+
+
+def test_linux_native_release_matrix_covers_both_architectures():
+    workflow = _workflow()
+    job = workflow['jobs']['build-linux']
+    matrix = job['strategy']['matrix']['include']
+    assert {(row['runner'], row['arch']) for row in matrix} == {
+        ('ubuntu-22.04', 'x86_64'), ('ubuntu-22.04-arm', 'aarch64')}
+    assert job['strategy']['fail-fast'] is False
+    assets = _asset_mod()
+    for kind in ('PLATFORM_ASSETS', 'AGENT_PLATFORM_ASSETS'):
+        rows = getattr(assets, kind)
+        assert {'x86_64', 'arm64'} <= {row[1] for row in rows if row[0] == 'linux'}
+
+
+def test_release_requires_certified_python_bundle_job_and_assets():
+    workflow = _workflow()
+    assert 'python-wheels' in workflow['jobs']['release']['needs']
+    steps = workflow['jobs']['python-wheels']['steps']
+    command = next(step['run'] for step in steps
+                   if step.get('name') == 'Prepare complete hashed offline Python artifacts')
+    assert 'scripts/build_python_wheels.py' in command
+    upload = next(step for step in steps if 'actions/upload-artifact@' in step.get('uses', ''))
+    assert upload['with']['if-no-files-found'] == 'error'
+    names = _complete_names()
+    assert not _asset_mod().missing_assets(names, require_checksums=True)
+    missing = [name for name in names if name.startswith('python-wheels-')]
+    assert missing
+    for name in missing:
+        incomplete = [item for item in names if item != name]
+        assert _asset_mod().missing_assets(incomplete, require_checksums=True)
+
+
+def test_prebuilt_engine_assets_are_produced_before_release():
+    workflow = _workflow()
+    assert 'tofudb-prebuilt' in workflow['jobs']['release']['needs']
+    job = workflow['jobs']['tofudb-prebuilt']
+    assert job['strategy']['fail-fast'] is False
+    targets = {row['target'] for row in job['strategy']['matrix']['include']}
+    assert targets == {'x86_64-unknown-linux-musl', 'aarch64-unknown-linux-musl',
+                       'x86_64-apple-darwin', 'aarch64-apple-darwin'}
+    build = next(step for step in job['steps']
+                 if step.get('name') == 'Build and smoke the native release engine')
+    assert 'scripts/build_tofudb_prebuilt.py' in build['run']
+    assert '--no-smoke' not in build['run']

@@ -3,9 +3,9 @@ import sqlite3
 
 import pytest
 
-from lib.storage_sidecar.receipt_codec import command_receipt_key_v2, encode_receipt_response
-from lib.storage_sidecar.tofudb_migration_receipt_source import audit_receipt_source
-from lib.storage_sidecar.tofudb_migration_source import SQLiteMigrationSource, MigrationSourceError
+from lib.storage_authority_sql.receipt_codec import command_receipt_key_v2, encode_receipt_response
+from lib.storage_authority_sql.migration.tofudb_migration_receipt_source import audit_receipt_source
+from lib.storage_authority_sql.migration.tofudb_migration_source import SQLiteMigrationSource, MigrationSourceError
 
 pytestmark = pytest.mark.unit
 
@@ -55,7 +55,7 @@ def test_invalid_source_metadata_fails_closed(tmp_path, column, value):
 
 
 def test_deadline_exhaustion_closes_iterator_without_a_partial_report(tmp_path, monkeypatch):
-    import lib.storage_sidecar.tofudb_migration_receipt_source as audit_module
+    import lib.storage_authority_sql.migration.tofudb_migration_receipt_source as audit_module
     path = tmp_path/'source.db'; seed(path)
     with SQLiteMigrationSource(path) as source:
         ticks = iter([0.0, 61.0])

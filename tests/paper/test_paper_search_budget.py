@@ -9,7 +9,7 @@ from lib.agent_core.execution_budget import model_budget_admission,ModelBudgetAd
 pytestmark=pytest.mark.unit
 
 def test_real_filter_denial_survives_tool_batch_fallback(monkeypatch):
-    from lib import search_bridge
+    from lib.search import search_bridge
     from lib.llm_dispatch import api
     from lib.paper.tools import execute_paper_tool
     from tofu_search.fetch import content_filter

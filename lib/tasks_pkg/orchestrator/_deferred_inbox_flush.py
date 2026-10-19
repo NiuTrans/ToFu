@@ -94,6 +94,8 @@ def flush_deferred_peer_and_steer(task: dict[str, Any], *,
     tid
         8-char task-id prefix used for structured log context.
     """
+    from lib.tasks_pkg.context_dependencies import confirm
+    confirm(task)
     if task.get('_projectMessageAttempt'):
         from lib.agent_core.store import get_conversation_store
         get_conversation_store().confirm_project_messages(task, round_num)
@@ -207,8 +209,7 @@ def flush_deferred_peer_and_steer(task: dict[str, Any], *,
     # survives for the next genuine turn; crash uncertainty may replay.
     _bgcmd_inject = task.get('_bgcmd_inject_pending')
     if _bgcmd_inject:
-        from lib.turn_source_queue_contract import QUEUE_INJECTION_ACK_MAX_IDS
-        _bgcmd_batch = _bgcmd_inject[:QUEUE_INJECTION_ACK_MAX_IDS]
+        _bgcmd_batch = list(_bgcmd_inject)
         _bgcmd_previews = [{
             **({'queueId': _bit['queueId']} if _bit.get('queueId') else {}),
             'commandId': str(_bit.get('commandId') or ''),

@@ -100,7 +100,7 @@ fn actual_stdio_agent_tools_continue_and_protocol_failure_never_restarts_provide
                 assert_eq!(
                     next["messages"].as_array().unwrap().last().unwrap()["content"],
                     if mode == "empty" {
-                        ""
+                        "[empty tool result]"
                     } else {
                         "client evidence"
                     }
@@ -220,6 +220,15 @@ fn protocol_schemas_enforce_version_fields_and_allow_empty_text() {
     let valid =
         json!({"version":contract["$id"],"type":"tool_result","request_id":"one","content":""});
     assert!(catalog.validate(7, "tool_result", valid.clone()).is_ok());
+    let mut configuration = config("http://127.0.0.1:1/chat".to_owned());
+    for preserve in [json!(true), json!(false)] {
+        configuration["chat_preserve_text_parts"] = preserve;
+        assert!(catalog.validate_protocol(7,"configure",configuration.clone()).is_ok());
+    }
+    for invalid in [json!("false"), json!(0), Value::Null] {
+        configuration["chat_preserve_text_parts"] = invalid;
+        assert!(catalog.validate_protocol(7,"configure",configuration.clone()).is_err());
+    }
     for bad in [
         json!({"version":"wrong"}),
         json!({"type":"cancel"}),
@@ -623,12 +632,15 @@ fn control_cancel_during_cold_token_ingress_is_joined_before_any_http() {
 
 #[test]
 fn terminal_commit_ack_precedes_visibility_and_retry_never_reexecutes_model() {
-    for mode in ["ok", "retry", "reject", "wrong_id", "timeout", "large"] {
+    for mode in ["ok", "retry", "retry_reference", "reference", "reject", "wrong_id", "timeout", "large"] {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let mut c = config(format!("http://{}/chat", listener.local_addr().unwrap()));
         c["tools"] = json!({});
         c["terminal_persistence"] = json!({"operation_id":format!("commit-{mode}"),"ack_ms":if mode=="timeout"{100}else{1500},"attempts":2,"frame_bytes":65536});
+        c["terminal_persistence"]["usage_summary"] = json!(mode == "retry");
+        if mode=="reference" {c["terminal_persistence"]["completion_reference"]=json!(true);}
+        if mode=="retry_reference" {c["terminal_persistence"]["retry_reference"]=json!(true);}
         let server = listener.try_clone().unwrap();
         let worker = std::thread::spawn(move || {
             let until = Instant::now() + Duration::from_secs(3);
@@ -668,27 +680,43 @@ fn terminal_commit_ack_precedes_visibility_and_retry_never_reexecutes_model() {
         let first: Value = serde_json::from_str(&line).unwrap();
         assert_eq!(first["type"], "terminal_request");
         assert_eq!(first["event"]["status"], "done");
+        if mode == "retry" {
+            assert_eq!(first["usage_summary"]["profile"], "tofu.additive-usage/u64-f64-v1");
+            let counts = tofu_runtime::usage_aggregate::aggregate(first["event"]["result"]["usage"].as_array().unwrap()).unwrap();
+            assert_eq!(first["usage_summary"]["counts"], Value::Object(counts));
+        } else { assert!(first.get("usage_summary").is_none()); }
         assert_eq!(first["receipt"]["invariants_satisfied"], true);
         assert!(first["receipt"]["resource_count"].as_u64().unwrap() > 0);
         if mode != "timeout" {
-            writeln!(p.0.stdin.as_mut().unwrap(),"{}",json!({"version":c["version"],"type":"terminal_ack","request_id":if mode=="wrong_id"{json!("foreign")}else{first["request_id"].clone()},"attempt":1,"accepted":matches!(mode,"ok"|"large"),"retry":mode=="retry"})).unwrap();
-            if mode == "retry" {
+            writeln!(p.0.stdin.as_mut().unwrap(),"{}",json!({"version":c["version"],"type":"terminal_ack","request_id":if mode=="wrong_id"{json!("foreign")}else{first["request_id"].clone()},"attempt":1,"accepted":matches!(mode,"ok"|"large"),"retry":matches!(mode,"retry"|"retry_reference"|"reference")})).unwrap();
+            if matches!(mode,"retry"|"retry_reference"|"reference") {
                 line.clear();
                 output.read_line(&mut line).unwrap();
                 let second: Value = serde_json::from_str(&line).unwrap();
-                assert_eq!(second["type"], "terminal_request");
                 assert_eq!(second["attempt"], 2);
-                assert_eq!(second["event"], first["event"]);
-                assert_eq!(second["receipt"], first["receipt"]);
+                if mode=="retry_reference" {
+                    assert_eq!(second,json!({"version":c["version"],"type":"terminal_retry",
+                        "request_id":first["request_id"],"owner_user_id":7,"task_id":"stdio-task",
+                        "attempt":2,"status":"done"}));
+                } else {
+                    assert_eq!(second["type"],"terminal_request");
+                    assert_eq!(second["event"],first["event"]);
+                    assert_eq!(second["receipt"],first["receipt"]);
+                    assert_eq!(second["usage_summary"],first["usage_summary"]);
+                }
                 writeln!(p.0.stdin.as_mut().unwrap(),"{}",json!({"version":c["version"],"type":"terminal_ack","request_id":second["request_id"],"attempt":2,"accepted":true,"retry":false})).unwrap();
             }
         }
         line.clear();
         let n = output.read_line(&mut line).unwrap();
-        let successful = matches!(mode, "ok" | "retry" | "large");
+        let successful = matches!(mode, "ok" | "retry" | "retry_reference" | "reference" | "large");
         if successful {
             let terminal: Value = serde_json::from_str(&line).unwrap();
-            assert_eq!(terminal, first["event"]);
+            if mode=="reference" {
+                assert_eq!(terminal,json!({"version":c["version"],"type":"terminal_committed",
+                    "request_id":first["request_id"],"owner_user_id":7,"task_id":"stdio-task",
+                    "attempt":2,"status":"done"}));
+            } else {assert_eq!(terminal, first["event"]);}
         } else {
             assert_eq!(n, 0, "{mode}: {line}");
         }
@@ -756,6 +784,41 @@ fn preparation_request_byte_refusal_never_exposes_history_or_opens_network() {
     let mut output=BufReader::new(process.0.stdout.take().unwrap());let mut line=String::new();output.read_line(&mut line).unwrap();
     assert!(!line.contains("private_marker"));let terminal:Value=serde_json::from_str(&line).unwrap();assert_eq!(terminal["status"],"error");assert!(!process.0.wait().unwrap().success());
     assert!(matches!(listener.accept(),Err(e) if e.kind()==std::io::ErrorKind::WouldBlock));
+}
+
+#[test]
+fn late_tool_visibility_and_prepared_context_reach_each_physical_request() {
+    let listener=TcpListener::bind("127.0.0.1:0").unwrap();let address=listener.local_addr().unwrap();
+    let server=std::thread::spawn(move||{
+        let(mut socket,_)=listener.accept().unwrap();socket.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        let first=request(&mut socket);assert_eq!(first["tools"][0]["function"]["description"],"after context 0");
+        assert_eq!(first["messages"].as_array().unwrap().last().unwrap()["content"],"hello\n\nprepared context 0");
+        response(&mut socket,json!({"tool_calls":[{"index":0,"id":"call","type":"function","function":{"name":"lookup","arguments":"{}"}}]}),"tool_calls");
+        let second=request(&mut socket);assert_eq!(second["tools"],json!([]));
+        assert_eq!(second["messages"].as_array().unwrap().last().unwrap()["content"],"prepared context 1");
+        response(&mut socket,json!({"content":"done"}),"stop");
+    });
+    let mut c=config(format!("http://{address}/chat"));c["round_control"]=json!(true);c["round_preparation"]=json!(true);
+    c["round_preparation_bytes"]=json!(65536);c["wire_tool_preparation"]=json!(true);
+    let mut process=Process(Command::new(env!("CARGO_BIN_EXE_tofu-native")).args(["run-http-agent","65536"]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().unwrap());
+    let mut input=process.0.stdin.take().unwrap();writeln!(input,"{c}").unwrap();input.flush().unwrap();
+    let mut output=BufReader::new(process.0.stdout.take().unwrap());let mut rounds=0;
+    loop {
+        let mut line=String::new();assert!(output.read_line(&mut line).unwrap()>0);let event:Value=serde_json::from_str(&line).unwrap();
+        let reply=match event["type"].as_str().unwrap() {
+            "round_request"=>{
+                let round=event["round"].as_u64().unwrap();rounds+=1;
+                let mut messages=event["messages"].as_array().unwrap().clone();messages.push(json!({"role":"user","content":format!("prepared context {round}")}));
+                let tools=if round==0 {json!([{"type":"function","function":{"name":"lookup","description":"after context 0","parameters":{"type":"object"}}}])} else {json!([])};
+                json!({"version":c["version"],"type":"round_decision","request_id":event["request_id"],"approved":true,"messages":messages,"wire_tools":tools})
+            },
+            "round_settled"=>json!({"version":c["version"],"type":"round_ack","request_id":event["request_id"],"accepted":true}),
+            "tool_request"=>json!({"version":c["version"],"type":"tool_result","request_id":event["request_id"],"content":"evidence"}),
+            "done"=>{assert_eq!(event["status"],"done");assert_eq!(rounds,2);break;},other=>panic!("{other}"),
+        };
+        writeln!(input,"{reply}").unwrap();input.flush().unwrap();
+    }
+    assert!(process.0.wait().unwrap().success());server.join().unwrap();
 }
 
 #[test]
@@ -1095,4 +1158,190 @@ fn dispatch_headers_replace_configured_credentials_and_invalid_headers_never_rea
         });
         assert_eq!(listener.accept().unwrap_err().kind(),std::io::ErrorKind::WouldBlock);
     }
+}
+
+#[test]
+fn initial_stop_preserves_future_deadline_and_aborts_before_http() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let mut c = config(format!("http://{}/chat", listener.local_addr().unwrap()));
+    c["deadline_unix_ms"] = json!(u64::MAX);
+    c["cancel_requested"] = json!(true);
+    let mut process = Process(Command::new(env!("CARGO_BIN_EXE_tofu-native"))
+        .args(["run-http-agent", "65536"]).stdin(Stdio::piped())
+        .stdout(Stdio::piped()).stderr(Stdio::null()).spawn().unwrap());
+    writeln!(process.0.stdin.as_mut().unwrap(), "{c}").unwrap();
+    let mut reader = BufReader::new(process.0.stdout.take().unwrap());
+    let mut line = String::new();
+    assert!(reader.read_line(&mut line).unwrap() > 0);
+    let terminal: Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(terminal["status"], "aborted", "{terminal}");
+    assert_eq!(listener.accept().unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
+    assert!(process.0.wait().unwrap().success());
+}
+
+#[test]
+fn pricing_without_round_delivery_refuses_before_model_reservation() {
+    let listener=TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let mut c=config(format!("http://{}/chat",listener.local_addr().unwrap()));
+    c["tools"]=json!({});
+    c["model_control"]=json!({"ack_ms":100,"pricing":true});
+    c["model_counter"]=json!({"encoding":"cl100k_base","output_field":"max_tokens","input_bytes":65536,"text_bytes":65536,"tool_json_bytes":65536,"depth":128,"worker_stack_bytes":1048576});
+    let mut process=Process(Command::new(env!("CARGO_BIN_EXE_tofu-native"))
+        .args(["run-http-agent","65536"]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().unwrap());
+    writeln!(process.0.stdin.as_mut().unwrap(),"{c}").unwrap();
+    assert!(!process.0.wait().unwrap().success());
+    let mut output=String::new();process.0.stdout.take().unwrap().read_to_string(&mut output).unwrap();
+    assert!(output.is_empty(),"No model reservation may precede delivery admission: {output}");
+    assert_eq!(listener.accept().unwrap_err().kind(),std::io::ErrorKind::WouldBlock);
+}
+
+#[test]
+fn persistent_worker_reuses_encoder_and_keeps_task_account_and_terminal_scope_independent() {
+    persistent_worker_scenario(false);
+}
+#[test]
+fn persistent_worker_refuses_previous_invocation_terminal_ack_and_never_advertises_readiness() {
+    persistent_worker_scenario(true);
+}
+fn persistent_worker_scenario(stale_ack: bool) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = format!("http://{}/chat", listener.local_addr().unwrap());
+    let mut c = config(endpoint);
+    c["tools"] = json!({}); c["template"]["max_tokens"] = json!(32);
+    let counter = tofu_runtime::token_ingress::Counter::new(7,"stdio-task".into(),"fixture".into(),
+        tofu_runtime::token_ingress::Encoder::new(tofu_runtime::token_ingress::Encoding::Cl100k),
+        tofu_runtime::token_ingress::Bounds {input_bytes:65536,text_bytes:65536,tool_json_bytes:65536,depth:128}).unwrap();
+    let input = counter.count(7,"stdio-task",c["messages"].as_array().unwrap(),c["template"].as_object().unwrap()).unwrap();
+    c["token_admission"] = json!({"encoding":"cl100k_base","output_field":"max_tokens","total_tokens":input+2,
+        "input_bytes":65536,"text_bytes":65536,"tool_json_bytes":65536,"depth":128,
+        "actor_records":1,"attempt_records":1,"identity_bytes":128,"worker_stack_bytes":1048576});
+    c["terminal_persistence"] = json!({"operation_id":"same-operation","frame_bytes":65536,"ack_ms":2000,"attempts":2});
+    let server = std::thread::spawn(move || {
+        for ordinal in 1..=2 {
+            let (mut socket,_) = listener.accept().unwrap();
+            socket.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            let (body,headers) = request_with_headers(&mut socket);
+            assert_eq!(body["max_tokens"],2);
+            assert!(headers.to_lowercase().contains(&format!("x-run: {ordinal}")));
+            let event = json!({"choices":[{"delta":{"content":"reply"},"finish_reason":"stop"}],
+                "usage":{"prompt_tokens":input,"completion_tokens":1,"total_tokens":input+1}});
+            let wire=format!("data: {event}\n\ndata: [DONE]\n\n");
+            write!(socket,"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\n\r\n{}",wire.len(),wire).unwrap();
+            socket.flush().unwrap();
+        }
+    });
+    let mut process=Process(Command::new(env!("CARGO_BIN_EXE_tofu-native"))
+        .args(["run-http-agent-worker","131072","7"]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().unwrap());
+    let mut stdout=BufReader::new(process.0.stdout.take().unwrap());
+    let read=|reader:&mut BufReader<std::process::ChildStdout>| {
+        let mut line=String::new();assert!(reader.read_line(&mut line).unwrap()>0);serde_json::from_str::<Value>(&line).unwrap()
+    };
+    let ready=read(&mut stdout);assert_eq!(ready["type"],"worker_ready");assert_eq!(ready["cached_encodings"],0);
+    for sequence in 1..=2 {
+        c["headers"]=json!({"X-Run":sequence.to_string()});
+        writeln!(process.0.stdin.as_mut().unwrap(),"{}",json!({"version":"tofu.native-agent-worker/v1","type":"worker_run",
+            "owner_user_id":7,"sequence":sequence,"configuration":c})).unwrap();
+        let request=read(&mut stdout);assert_eq!(request["type"],"worker_event");assert_eq!(request["sequence"],sequence);
+        assert_eq!(request["frame"]["type"],"terminal_request");
+        writeln!(process.0.stdin.as_mut().unwrap(),"{}",json!({"version":"tofu.native-agent-worker/v1","type":"worker_control",
+            "owner_user_id":7,"sequence":if stale_ack && sequence==2 {1}else{sequence},"frame":{"version":"tofu.native-agent-stdio/v1","type":"terminal_ack",
+                "request_id":"same-operation","attempt":1,"accepted":true,"retry":false}})).unwrap();
+        if stale_ack && sequence==2 {
+            let mut line=String::new();assert_eq!(stdout.read_line(&mut line).unwrap(),0);
+            assert!(!process.0.wait().unwrap().success());server.join().unwrap();return;
+        }
+        let terminal=read(&mut stdout);assert_eq!(terminal["type"],"worker_event");assert_eq!(terminal["frame"]["type"],"done");
+        let ready=read(&mut stdout);assert_eq!(ready["type"],"worker_ready");assert_eq!(ready["sequence"],sequence);assert_eq!(ready["cached_encodings"],1);
+    }
+    writeln!(process.0.stdin.as_mut().unwrap(),"{}",json!({"version":"tofu.native-agent-worker/v1","type":"worker_shutdown","owner_user_id":7,"sequence":3})).unwrap();
+    assert_eq!(read(&mut stdout)["type"],"worker_closed");assert!(process.0.wait().unwrap().success());server.join().unwrap();
+}
+
+#[test]
+fn persistent_worker_refuses_foreign_principals_sequences_and_bare_commands_before_http() {
+    for mode in ["owner","configuration_owner","sequence","extra","bare"] {
+        let listener=TcpListener::bind("127.0.0.1:0").unwrap();listener.set_nonblocking(true).unwrap();
+        let c=config(format!("http://{}/chat",listener.local_addr().unwrap()));
+        let mut command=json!({"version":"tofu.native-agent-worker/v1","type":"worker_run","owner_user_id":7,"sequence":1,"configuration":c});
+        match mode {
+            "owner"=>command["owner_user_id"]=json!(8),
+            "configuration_owner"=>command["configuration"]["owner_user_id"]=json!(8),
+            "sequence"=>command["sequence"]=json!(0),
+            "extra"=>command["foreign"]=json!(true),
+            "bare"=>command=command["configuration"].clone(),
+            _=>unreachable!(),
+        }
+        let mut process=Process(Command::new(env!("CARGO_BIN_EXE_tofu-native"))
+            .args(["run-http-agent-worker","131072","7"]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().unwrap());
+        let mut stdout=BufReader::new(process.0.stdout.take().unwrap());let mut line=String::new();
+        stdout.read_line(&mut line).unwrap();assert_eq!(serde_json::from_str::<Value>(&line).unwrap()["type"],"worker_ready");
+        writeln!(process.0.stdin.as_mut().unwrap(),"{command}").unwrap();line.clear();
+        assert_eq!(stdout.read_line(&mut line).unwrap(),0);assert!(!process.0.wait().unwrap().success());
+        assert!(matches!(listener.accept(),Err(error) if error.kind()==std::io::ErrorKind::WouldBlock));
+    }
+}
+
+
+#[test]
+fn selected_terminal_reference_commits_abort_without_http() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let mut c = config(format!("http://{}/chat",listener.local_addr().unwrap()));
+    c["cancel_requested"] = json!(true);
+    c["terminal_persistence"] = json!({"operation_id":"abort-commit","ack_ms":1500,
+        "attempts":2,"frame_bytes":65536,"completion_reference":true});
+    let mut p = Process(Command::new(env!("CARGO_BIN_EXE_tofu-native"))
+        .args(["run-http-agent","65536"]).stdin(Stdio::piped())
+        .stdout(Stdio::piped()).stderr(Stdio::null()).spawn().unwrap());
+    writeln!(p.0.stdin.as_mut().unwrap(),"{c}").unwrap();
+    let mut reader=BufReader::new(p.0.stdout.take().unwrap());
+    let mut line=String::new();reader.read_line(&mut line).unwrap();
+    let request:Value=serde_json::from_str(&line).unwrap();
+    assert_eq!(request["type"],"terminal_request");
+    assert_eq!(request["event"]["status"],"aborted");
+    writeln!(p.0.stdin.as_mut().unwrap(),"{}",json!({"version":c["version"],"type":"terminal_ack",
+        "request_id":"abort-commit","attempt":1,"accepted":true,"retry":false})).unwrap();
+    line.clear();reader.read_line(&mut line).unwrap();
+    let reference:Value=serde_json::from_str(&line).unwrap();
+    assert_eq!(reference,json!({"version":c["version"],"type":"terminal_committed",
+        "request_id":"abort-commit","owner_user_id":7,"task_id":"stdio-task","attempt":1,"status":"aborted"}));
+    assert!(p.0.wait().unwrap().success());
+    assert_eq!(listener.accept().unwrap_err().kind(),std::io::ErrorKind::WouldBlock);
+}
+
+#[test]
+fn selected_retry_reference_commits_abort_without_http() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let mut c = config(format!("http://{}/chat",listener.local_addr().unwrap()));
+    c["cancel_requested"] = json!(true);
+    c["terminal_persistence"] = json!({"operation_id":"abort-commit","ack_ms":1500,
+        "attempts":2,"frame_bytes":65536,"completion_reference":true,"retry_reference":true});
+    let mut p = Process(Command::new(env!("CARGO_BIN_EXE_tofu-native"))
+        .args(["run-http-agent","65536"]).stdin(Stdio::piped())
+        .stdout(Stdio::piped()).stderr(Stdio::null()).spawn().unwrap());
+    writeln!(p.0.stdin.as_mut().unwrap(),"{c}").unwrap();
+    let mut reader=BufReader::new(p.0.stdout.take().unwrap());
+    let mut line=String::new();reader.read_line(&mut line).unwrap();
+    let request:Value=serde_json::from_str(&line).unwrap();
+    assert_eq!(request["type"],"terminal_request");
+    assert_eq!(request["event"]["status"],"aborted");
+    writeln!(p.0.stdin.as_mut().unwrap(),"{}",json!({"version":c["version"],"type":"terminal_ack",
+        "request_id":"abort-commit","attempt":1,"accepted":false,"retry":true})).unwrap();
+    line.clear();reader.read_line(&mut line).unwrap();
+    let retry:Value=serde_json::from_str(&line).unwrap();
+    assert_eq!(retry["type"],"terminal_retry");
+    assert_eq!(retry["status"],"aborted");
+    assert_eq!(retry["attempt"],2);
+    assert!(retry.get("event").is_none());
+    writeln!(p.0.stdin.as_mut().unwrap(),"{}",json!({"version":c["version"],"type":"terminal_ack",
+        "request_id":"abort-commit","attempt":2,"accepted":true,"retry":false})).unwrap();
+    line.clear();reader.read_line(&mut line).unwrap();
+    let reference:Value=serde_json::from_str(&line).unwrap();
+    assert_eq!(reference,json!({"version":c["version"],"type":"terminal_committed",
+        "request_id":"abort-commit","owner_user_id":7,"task_id":"stdio-task","attempt":2,"status":"aborted"}));
+    assert!(p.0.wait().unwrap().success());
+    assert_eq!(listener.accept().unwrap_err().kind(),std::io::ErrorKind::WouldBlock);
 }

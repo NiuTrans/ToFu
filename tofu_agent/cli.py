@@ -69,6 +69,11 @@ def _add_runtime_arguments(parser: argparse.ArgumentParser) -> None:
             'TOFU_AGENT_MODEL_ROUTING_FILE', ''),
         help='Read a complete v2 access envelope from this file.',
     )
+    parser.add_argument('--engine',choices=('python','rust'),default='python',
+                        help='Execution engine; Rust requires a verified archive and trusted resource profile.')
+    parser.add_argument('--native-archive',default='',help='Local Rust runtime release archive.')
+    parser.add_argument('--native-profile',default='',help='Trusted unpriced native SDK resource profile JSON file.')
+    parser.add_argument('--native-shutdown-timeout',type=float,default=5.0,help='Native joined-close grace in seconds.')
     parser.add_argument('--max-inflight', type=int, default=None,
                         help='Concurrent runs; omitted or 0 uses the hardware budget. '
                              'TOFU_AGENT_MAX_INFLIGHT overrides the automatic default.')
@@ -227,7 +232,7 @@ def _self_heal_no_proxy(access) -> None:
         file=sys.stderr)
 
 def _runtime_and_setup(
-    args,
+    args, *, native_execution=None,
 ) -> tuple[AgentRuntime, ModelRoutingSetupService]:
     store = ModelRoutingSettingsStore()
     access = _model_routing_from_args(args)
@@ -253,6 +258,7 @@ def _runtime_and_setup(
         max_inflight=args.max_inflight,
 
         harness_profile=getattr(args, 'harness_profile', 'auto'),
+        **({'native_execution':native_execution} if native_execution is not None else {}),
     )
     setup = ModelRoutingSetupService(
         runtime,
@@ -271,6 +277,36 @@ def _runtime(args) -> AgentRuntime:
 
 
 def _run_task(args) -> int:
+    if getattr(args,'engine','python')=='rust':
+        return asyncio.run(_run_native_task(args))
+    task_text,config=_prepare_run(args)
+
+    runtime = _runtime(args)
+    try:
+        result = runtime.run(
+            [{'role': 'user', 'content': task_text}],
+            config=config,
+            trajectory=args.trajectory or None,
+            timeout_s=args.timeout_s,
+        )
+    except AgentTimeoutError:
+        runtime.close(abort=True)
+        _emit({
+            'ok': False,
+            'status': 'timeout',
+            'error': {'kind': 'timeout',
+                      'message': f'run exceeded {args.timeout_s}s'},
+        }, args.output)
+        print(f'run failed: kind=timeout message=run exceeded '
+              f'{args.timeout_s}s', file=sys.stderr)
+        return 3
+    finally:
+        runtime.close(abort=False)
+
+    return _project_run_result(result,args)
+
+
+def _prepare_run(args):
     task_text = ''
     if args.task_file:
         task_text = Path(args.task_file).read_text(encoding='utf-8')
@@ -296,28 +332,10 @@ def _run_task(args) -> int:
         os.environ.get('TOFU_AGENT_RUN_NATIVE_EXPOSURE', 'full').strip()
         or 'full')
 
-    runtime = _runtime(args)
-    try:
-        result = runtime.run(
-            [{'role': 'user', 'content': task_text}],
-            config=config,
-            trajectory=args.trajectory or None,
-            timeout_s=args.timeout_s,
-        )
-    except AgentTimeoutError:
-        runtime.close(abort=True)
-        _emit({
-            'ok': False,
-            'status': 'timeout',
-            'error': {'kind': 'timeout',
-                      'message': f'run exceeded {args.timeout_s}s'},
-        }, args.output)
-        print(f'run failed: kind=timeout message=run exceeded '
-              f'{args.timeout_s}s', file=sys.stderr)
-        return 3
-    finally:
-        runtime.close(abort=False)
+    return task_text,config
 
+
+def _project_run_result(result,args):
     document = {
         'ok': result.ok,
         'id': result.id,
@@ -355,6 +373,37 @@ def _run_task(args) -> int:
     return 4
 
 
+async def _run_native_task(args) -> int:
+    from tofu_agent.native_runtime import owned_native_agent_configuration
+    task_text,config=_prepare_run(args)
+    profile=_native_profile(args)
+    async with owned_native_agent_configuration(archive=args.native_archive,configuration=profile,
+            working_directory=config['project'],environ=dict(os.environ),shutdown_seconds=args.native_shutdown_timeout) as native:
+        runtime,_setup=_runtime_and_setup(args,native_execution=native)
+        try:
+            result=await runtime.run_async([{'role':'user','content':task_text}],config=config,
+                trajectory=args.trajectory or None,timeout_s=args.timeout_s)
+        except AgentTimeoutError:
+            await runtime.close_async(abort=True)
+            _emit({'ok':False,'status':'timeout','error':{'kind':'timeout',
+                'message':f'run exceeded {args.timeout_s}s'}},args.output)
+            print(f'run failed: kind=timeout message=run exceeded {args.timeout_s}s',file=sys.stderr)
+            return 3
+        finally:
+            await runtime.close_async(abort=True)
+        return _project_run_result(result,args)
+
+
+def _native_profile(args):
+    if not args.native_archive or not args.native_profile:
+        raise AgentConfigurationError('Rust execution requires --native-archive and --native-profile')
+    try:profile=json.loads(Path(args.native_profile).read_text(encoding='utf-8'))
+    except (OSError,ValueError) as exc:
+        raise AgentConfigurationError('Cannot read native SDK resource profile') from exc
+    if not isinstance(profile,dict):raise AgentConfigurationError('Native SDK resource profile must be an object')
+    return profile
+
+
 def _report_failure(result) -> None:
     error = result.error if isinstance(result.error, Mapping) else {}
     parts = [f'status={result.status}', f'finish_reason={result.finish_reason}']
@@ -373,13 +422,53 @@ def _emit(document: dict, output: str) -> None:
         print(payload)
 
 
+def _doctor_output(runtime,model_routing_setup):
+    print(json.dumps({
+        'ok': True,
+        'ready': bool(runtime.default_model),
+        'model': runtime.default_model,
+        'model_routing': (runtime.model_routing.public_dict()
+                          if runtime.model_routing else None),
+        'capacity': runtime.capacity,
+        'database': False,
+        'frontend': False,
+        'model_routing_setup_ui': True,
+        'execution': {'backend':'rust' if getattr(runtime,'_native_execution',None) is not None else 'python'},
+        'model_routing_setup': {
+            'url_path': '/setup',
+            'source': model_routing_setup.source,
+            'editable': model_routing_setup.editable,
+            'load_error': model_routing_setup.load_error,
+        },
+    }, ensure_ascii=False, indent=2))
+
+
+async def _doctor_native(args):
+    from tofu_agent.native_runtime import owned_native_agent_configuration
+    async with owned_native_agent_configuration(archive=args.native_archive,configuration=_native_profile(args),
+            working_directory=os.getcwd(),environ=dict(os.environ),shutdown_seconds=args.native_shutdown_timeout) as native:
+        runtime,setup=_runtime_and_setup(args,native_execution=native)
+        try:_doctor_output(runtime,setup)
+        finally:await runtime.close_async(abort=False)
+    return 0
+
+
 async def _serve(args) -> None:
     if (not _is_loopback_host(args.host) and not args.token
             and not args.allow_unauthenticated):
         raise AgentConfigurationError(
             'refusing a non-loopback bind without authentication; set '
             'TOFU_AGENT_TOKEN or explicitly pass --allow-unauthenticated')
-    runtime, model_routing_setup = _runtime_and_setup(args)
+    if getattr(args,'engine','python')=='rust':
+        from tofu_agent.native_runtime import owned_native_agent_configuration
+        async with owned_native_agent_configuration(archive=args.native_archive,configuration=_native_profile(args),
+                working_directory=os.getcwd(),environ=dict(os.environ),shutdown_seconds=args.native_shutdown_timeout) as native:
+            return await _serve_runtime(args,native_execution=native)
+    return await _serve_runtime(args)
+
+
+async def _serve_runtime(args,*,native_execution=None) -> None:
+    runtime, model_routing_setup = _runtime_and_setup(args,native_execution=native_execution)
     # The server stack (quart/hypercorn) is only needed on the serve path;
     # importing it lazily keeps `run`'s dependency closure minimal so the
     # headless subcommand still starts in stripped-down eval containers.
@@ -423,25 +512,10 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         if args.command == 'doctor':
+            if args.engine=='rust':return asyncio.run(_doctor_native(args))
             runtime, model_routing_setup = _runtime_and_setup(args)
             try:
-                print(json.dumps({
-                    'ok': True,
-                    'ready': bool(runtime.default_model),
-                    'model': runtime.default_model,
-                    'model_routing': (runtime.model_routing.public_dict()
-                                      if runtime.model_routing else None),
-                    'capacity': runtime.capacity,
-                    'database': False,
-                    'frontend': False,
-                    'model_routing_setup_ui': True,
-                    'model_routing_setup': {
-                        'url_path': '/setup',
-                        'source': model_routing_setup.source,
-                        'editable': model_routing_setup.editable,
-                        'load_error': model_routing_setup.load_error,
-                    },
-                }, ensure_ascii=False, indent=2))
+                _doctor_output(runtime,model_routing_setup)
             finally:
                 runtime.close(abort=False)
             return 0

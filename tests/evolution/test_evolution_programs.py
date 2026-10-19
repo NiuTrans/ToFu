@@ -240,7 +240,7 @@ def read_context(task, program, **args):
                    call_id='context-test')
 
 
-def test_complex_original_requirements_and_future_hypothesis_remain_readable_when_seed_overflows(runtime):
+def test_complex_original_requirements_and_future_hypothesis_remain_complete_beyond_former_seed_limit(runtime):
     proposed = step()
     hypothesis = {};proposed['hypothesis'] = hypothesis
     for key in ('problem', 'audience', 'baseline', 'scenario', 'mechanism', 'expected_value', 'falsifier'):
@@ -252,9 +252,13 @@ def test_complex_original_requirements_and_future_hypothesis_remain_readable_whe
     program = launch(runtime, create(runtime, objective=objective, acceptance=acceptance,
         steps=[proposed, step('final')]))
     seed = json.loads(program['current']['context_seed'])
-    assert len(program['current']['context_seed']) <= 24000
-    ref = seed['current_context_source']
+    assert len(program['current']['context_seed']) > 24000
+    assert seed['original_objective'] == objective
+    assert seed['original_acceptance'] == acceptance
+    assert seed['current_hypothesis'] == hypothesis
+    assert 'current_context_source' not in seed
     task = context_executor(runtime, program)
+    ref = read_context(task, program, offset=0)
     pages = []; offset = 0; writes = runtime[1].writes
     while True:
         page = read_context(task, program, offset=offset, source_digest=ref['source_digest'])
@@ -285,10 +289,10 @@ def test_escaped_large_history_cannot_block_next_stage_or_erase_negative_receipt
     header['settled_through'] = 6;programs._save(header, version, OWNER)
     intent = programs.advance_program(program['program_id'], user_id=OWNER)['current']
     seed = json.loads(intent['context_seed'])
-    assert len(intent['context_seed']) <= 24000 and seed['original_objective'] == header['objective']
+    assert len(intent['context_seed']) > 24000 and seed['original_objective'] == header['objective']
     assert seed['original_acceptance'] == header['acceptance']
     assert [row['sequence'] for row in seed['recent_experiments']] == list(range(1, 7))
-    assert all(row['outcome'] == 'failed' and row['preview_truncated'] and row['error_truncated']
+    assert all(row['outcome'] == 'failed' and row['preview_truncated'] and row['error'] == '错误' + '\n'*998
         for row in seed['recent_experiments'])
     assert len(programs.experiment_page(program['program_id'], user_id=OWNER)['experiments'][0]['result']) == 24000
 
@@ -506,14 +510,14 @@ def test_program_limits_apply_across_experiments(runtime):
     assert len(runtime[2]) == 1
 
 
-def test_scheduler_uses_durable_round_robin_queue_and_keeps_archive_out(runtime):
+def test_scheduler_visits_all_enrolled_programs_and_keeps_archive_out(runtime):
     programs, _, launched = runtime
     first = create(runtime, 'first')
     second = create(runtime, 'second')
     command(runtime, first, 'resume')
     command(runtime, second, 'resume')
     for _ in range(4):
-        assert len(programs.sweep_programs(user_id=OWNER, batch_size=1)) == 1
+        assert len(programs.sweep_programs(user_id=OWNER, batch_size=1)) == 2
     assert len(launched) == 2
     command(runtime, first, 'cancel')
     command(runtime, second, 'cancel')
@@ -818,7 +822,6 @@ def test_long_history_has_constant_read_cost_and_no_durable_receipt_eviction(run
     monkeypatch.setattr(store, 'query', measured)
     intent = programs.advance_program(program['program_id'], user_id=OWNER)['current']
     assert len([row for row in reads if row[1] == programs.EXPERIMENTS]) == programs.MEMORY_WINDOW
-    assert len(intent['context_seed']) <= 24000
     memory = json.loads(intent['context_seed'])
     assert memory['older_experiments_omitted'] == 394
     assert all(item['preview_truncated'] for item in memory['recent_experiments'])
@@ -1490,3 +1493,189 @@ def test_confirmed_programme_intent_survives_selected_authority_restart(storage,
     assert restored == committed
     assert restored['current']['payload']['budget']['max_tokens'] == 10000
     assert restored['objective'] == 'Preserve this mission and its budget'
+
+
+def test_complete_frontier_and_expansion_cross_old_thirty_two_step_ceiling(runtime):
+    programs, _, launched = runtime
+    original_steps = [step(title=f'original-{index}') for index in range(65)] + [step('final')]
+    program = launch(runtime, create(runtime, 'complete-frontier', steps=original_steps))
+    additions = [step(title=f'addition-{index}') for index in range(65)]
+    expanded = programs.append_steps(program['program_id'], {'steps': additions},
+                                     user_id=OWNER, idempotency_key='large-expansion')
+    assert expanded['queue'] == original_steps[:-1] + additions + original_steps[-1:]
+    assert expanded['current'] == program['current']
+    assert expanded['objective'] == program['objective'] and expanded['acceptance'] == program['acceptance']
+    assert len(launched) == 1
+    repeated = programs.append_steps(program['program_id'], {'steps': additions},
+                                     user_id=OWNER, idempotency_key='large-expansion')
+    assert repeated == expanded
+    with pytest.raises(programs.EvolutionStateError):
+        programs.append_steps(program['program_id'], {'steps': additions},
+                              user_id=OWNER + 1, idempotency_key='foreign')
+
+
+def test_registry_enrolls_beyond_old_program_count_without_losing_prior_ids(runtime):
+    programs, store, launched = runtime
+    key = programs.records.entity_key('programs', OWNER, kind='program registry')
+    ids = [f'program-{index:032x}' for index in range(4096)]
+    programs.records.put_record(programs.REGISTRY, key, {'program_ids': ids, 'cursor': 4095},
+                                 kind='program registry', expected_version=0)
+    import time
+    import tracemalloc
+    tracemalloc.start(); started = time.perf_counter()
+    program = create(runtime, 'program-after-4096')
+    program = command(runtime, program, 'resume')
+    elapsed = time.perf_counter() - started
+    _, peak = tracemalloc.get_traced_memory(); tracemalloc.stop()
+    registry = programs.records.get_record(programs.REGISTRY, key)
+    assert registry['program_ids'] == ids + [program['program_id']]
+    assert registry['cursor'] == 4095 and not launched
+    assert programs.records.get_record(programs.REGISTRY,
+        programs.records.entity_key('programs', OWNER + 1, kind='program registry')) is None
+    print(f'program_registry_ids={len(registry["program_ids"])} '
+          f'json_bytes={len(json.dumps(registry).encode())} enroll_seconds={elapsed:.4f} traced_peak_bytes={peak}')
+
+
+def _registered_sweep_fixture(runtime, count):
+    programs, store, _ = runtime
+    ids = [f'program-{index:032x}' for index in range(count)]
+    key = programs.records.entity_key('programs', OWNER, kind='program registry')
+    programs.records.put_record(programs.REGISTRY, key, {'program_ids': ids, 'cursor': 0},
+                                 kind='program registry', expected_version=0)
+    return ids, key
+
+
+def test_sweep_starts_all_independent_programs_with_idle_hint_one_and_joins(runtime, monkeypatch):
+    import threading
+    import time
+    programs, store, _ = runtime
+    ids, _ = _registered_sweep_fixture(runtime, 64)
+    barrier = threading.Barrier(len(ids))
+    seen = []
+    def advance(program_id, *, user_id):
+        assert user_id == OWNER
+        seen.append(program_id)
+        barrier.wait(timeout=10)
+        return {'status': 'active', 'current': {'run_id': program_id}}
+    monkeypatch.setattr(programs, 'advance_program', advance)
+    writes = store.writes
+    started = time.perf_counter()
+    outcomes = programs.sweep_programs(user_id=OWNER, batch_size=1)
+    elapsed = time.perf_counter() - started
+    assert sorted(seen) == ids
+    assert [row['program_id'] for row in outcomes] == ids
+    assert all(row['status'] == 'active' for row in outcomes)
+    assert store.writes == writes
+    assert not any(thread.name.startswith('tofu-evolution-program') for thread in threading.enumerate())
+    print(f'program_sweep_rendezvous={len(ids)} idle_hint=1 seconds={elapsed:.4f} workers_after=0')
+
+
+def test_failed_worker_start_does_not_enter_program_or_suppress_sibling(runtime, monkeypatch):
+    import threading
+    programs, _, _ = runtime
+    ids, key = _registered_sweep_fixture(runtime, 2)
+    original = threading.Thread.start
+    failed = []
+    def start(thread):
+        if thread.name.startswith('tofu-evolution-program') and not failed:
+            failed.append(thread.name)
+            raise RuntimeError('synthetic worker start failure')
+        return original(thread)
+    monkeypatch.setattr(threading.Thread, 'start', start)
+    seen = []
+    monkeypatch.setattr(programs, 'advance_program', lambda program_id, **kwargs:
+        seen.append(program_id) or {'status': 'active', 'current': {'run_id': program_id}})
+    outcomes = programs.sweep_programs(user_id=OWNER, batch_size=1)
+    assert outcomes[0]['status'] == 'deferred' and outcomes[1]['status'] == 'active'
+    assert seen == ids[1:]
+    assert programs.records.get_record(programs.REGISTRY, key)['program_ids'] == ids
+    assert not any(thread.name.startswith('tofu-evolution-program') for thread in threading.enumerate())
+
+
+@pytest.mark.parametrize('concurrent_change', ['new_enrollment', 'resume'])
+def test_sweep_cleanup_batches_terminal_ids_and_preserves_concurrent_enrollment(runtime, monkeypatch, concurrent_change):
+    programs, store, _ = runtime
+    ids, key = _registered_sweep_fixture(runtime, 40)
+    monkeypatch.setattr(programs, 'advance_program', lambda *args, **kwargs:
+                        {'status': 'completed', 'current': None})
+    before = store.writes
+    assert len(programs.sweep_programs(user_id=OWNER)) == 40
+    assert programs.records.get_record(programs.REGISTRY, key)['program_ids'] == []
+    assert store.writes == before + 1
+    programs.records.put_record(programs.REGISTRY, key, {'program_ids': ids, 'cursor': 0},
+                                 kind='program registry')
+    original = programs.records.put_record
+    def interleave(namespace, entity, value, **kwargs):
+        if namespace == programs.REGISTRY and not value['program_ids']:
+            current, version = programs.records.get_versioned_record(namespace, entity)
+            if concurrent_change == 'new_enrollment':
+                current['program_ids'].append('program-new')
+            original(namespace, entity, current, kind='program registry', expected_version=version)
+        return original(namespace, entity, value, **kwargs)
+    monkeypatch.setattr(programs.records, 'put_record', interleave)
+    programs.sweep_programs(user_id=OWNER)
+    assert programs.records.get_record(programs.REGISTRY, key)['program_ids'] == ids + (['program-new'] if concurrent_change == 'new_enrollment' else [])
+
+
+def test_blocked_program_does_not_hold_independent_visits(runtime, monkeypatch):
+    import threading
+    programs, _, _ = runtime
+    ids, _ = _registered_sweep_fixture(runtime, 8)
+    release = threading.Event()
+    healthy = threading.Event()
+    seen = []
+    def advance(program_id, **kwargs):
+        if program_id == ids[0]:
+            assert release.wait(timeout=10)
+        else:
+            seen.append(program_id)
+            if len(seen) == len(ids) - 1:
+                healthy.set()
+        return {'status': 'active', 'current': {'run_id': program_id}}
+    monkeypatch.setattr(programs, 'advance_program', advance)
+    completed = []
+    caller = threading.Thread(target=lambda: completed.append(
+        programs.sweep_programs(user_id=OWNER, batch_size=1)), name='program-sweep-test-caller')
+    caller.start()
+    try:
+        assert healthy.wait(timeout=5)
+        assert not completed and caller.is_alive()
+    finally:
+        release.set()
+        caller.join(timeout=10)
+    assert not caller.is_alive() and len(completed[0]) == len(ids)
+    assert not any(thread.name.startswith('tofu-evolution-program') for thread in threading.enumerate())
+
+def test_final_stage_freezes_its_procedure_without_rewriting_the_original_goal(runtime):
+    programs, _, launched = runtime
+    original = 'z' * 4000
+    procedure = 'python3 inspect_frozen_experiment.py --owner 512'
+    final = dict(step('final', 'Audit exact originals'), instruction=procedure)
+    program = create(runtime, objective=original, steps=[final])
+    program = launch(runtime, program)
+    payload = launched[-1]['payload']
+    assert payload['objective'] == original
+    assert payload['execution_instruction'] == procedure
+    assert payload['acceptance_requirements'] == program['acceptance'] + final['checks']
+    frozen = deepcopy(program['current']['payload'])
+    program = command(runtime, program, 'advance')
+    assert program['current']['payload'] == frozen
+
+
+@pytest.mark.parametrize('schema_budget', [0, 4000])
+def test_executor_plugins_and_schema_policy_survive_program_launch_and_final_stage(runtime, schema_budget):
+    program = create(runtime, executor_plugins=['environments'], executor_schema_budget_tokens=schema_budget)
+    assert program['execution_options']['executor_plugins'] == ['environments']
+    program = launch(runtime, program)
+    assert runtime[2][0]['payload']['executor_plugins'] == ['environments']
+    assert runtime[2][0]['payload']['executor_schema_budget_tokens'] == schema_budget
+    program = finish(runtime, program)
+    for _ in range(3):
+        program = command(runtime, program, 'advance')
+        if len(runtime[2]) == 2:
+            break
+    assert len(runtime[2]) == 2
+    assert runtime[2][1]['payload']['executor_plugins'] == ['environments']
+    assert runtime[2][1]['payload']['executor_schema_budget_tokens'] == schema_budget
+    with pytest.raises(runtime[0].EvolutionStateError):
+        create(runtime, executor_plugins=[])

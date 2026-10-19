@@ -53,9 +53,11 @@
 ;   ASSET_DIR            repo static/icons dir (the tofu.ico app icon)
 ;   ART_DIR              wrap-time rendered wizard pages (welcome.bmp,
 ;                        directory.bmp, progress.bmp, finish.bmp)
-;   APP_NAME             display name (Tofu / Tofu Agent)
-;   APP_EXE              payload exe (Tofu.exe / TofuAgent.exe)
-;   INSTALL_DIR_NAME     dir under $LOCALAPPDATA\Programs (Tofu / TofuAgent)
+;   APP_NAME             display name (Tofu / Tofu Remote)
+;   APP_REGISTRY_NAME    stable uninstall/upgrade key
+;   APP_LEGACY_EXE       previous executable guarded during upgrades
+;   APP_EXE              payload exe (Tofu.exe / TofuRemote.exe)
+;   INSTALL_DIR_NAME     dir under $LOCALAPPDATA\Programs (Tofu / TofuRemote)
 ;   AUTOSTART_DECL       'Var ChkAutoStart' or empty
 ;   AUTOSTART_PAGE       checkbox creation block on the directory page
 ;                        (agent only) or empty
@@ -64,6 +66,8 @@
 ; ─────────────────────────────────────────────────────────────────────────
 
 !define APP_NAME      "@APP_NAME@"
+!define APP_REGISTRY_NAME "@APP_REGISTRY_NAME@"
+!define APP_LEGACY_EXE "@APP_LEGACY_EXE@"
 !define APP_VERSION   "@APP_VERSION@"
 !define PUBLISHER     "Tofu Project"
 !define APP_EXE       "@APP_EXE@"
@@ -168,22 +172,22 @@ Var FontBody
 ; retarget another existing install), and un.onInit (uninstall-while-
 ; running would leave a half-deleted dir). Labels stay function-scoped,
 ; so the three insertions never collide.
-!macro TOFU_CLOSE_RUNNING_APP
-  ${If} ${FileExists} "$INSTDIR\${APP_EXE}"
+!macro TOFU_CLOSE_NAMED_APP APP_IMAGE LABEL_SUFFIX
+  ${If} ${FileExists} "$INSTDIR\${APP_IMAGE}"
     ${Do}
       ClearErrors
-      FileOpen $0 "$INSTDIR\${APP_EXE}" a
+      FileOpen $0 "$INSTDIR\${APP_IMAGE}" a
       ${If} ${Errors}
         MessageBox MB_ICONQUESTION|MB_YESNO|MB_DEFBUTTON1 \
           "$(TOFU_RUNNING_PROMPT)" /SD IDYES \
-          IDYES tofu_close_app IDNO tofu_abort_setup
-        tofu_abort_setup:
+          IDYES tofu_close_app_${LABEL_SUFFIX} IDNO tofu_abort_setup_${LABEL_SUFFIX}
+        tofu_abort_setup_${LABEL_SUFFIX}:
           Abort
-        tofu_close_app:
+        tofu_close_app_${LABEL_SUFFIX}:
           ; nsExec hides the taskkill console (no black flash); /T takes
           ; the whole tree so the agent's ssh tunnels die with it, /F
           ; forces — a tray agent owns no unsaved document.
-          nsExec::Exec 'taskkill /IM ${APP_EXE} /T /F'
+          nsExec::Exec 'taskkill /IM ${APP_IMAGE} /T /F'
           Pop $1
           Sleep 1200
       ${Else}
@@ -192,6 +196,13 @@ Var FontBody
       ${EndIf}
     ${Loop}
   ${EndIf}
+!macroend
+
+!macro TOFU_CLOSE_RUNNING_APP
+  !insertmacro TOFU_CLOSE_NAMED_APP "${APP_EXE}" current
+  !if "${APP_LEGACY_EXE}" != ""
+    !insertmacro TOFU_CLOSE_NAMED_APP "${APP_LEGACY_EXE}" legacy
+  !endif
 !macroend
 
 ; ── DPI-scaled modern fonts for our labels ──
@@ -449,6 +460,12 @@ Function DoInstall
     ${NSD_SetText} $StatusCtl "$(TOFU_PROG_SHORTCUTS)"
   ${EndIf}
   ; Shortcuts — same two the Inno authoring creates.
+  ; Remove only the old product's exact shortcuts during a rename.
+  !if "${APP_REGISTRY_NAME}" != "${APP_NAME}"
+    Delete "$SMPROGRAMS\${APP_REGISTRY_NAME}\${APP_REGISTRY_NAME}.lnk"
+    RMDir "$SMPROGRAMS\${APP_REGISTRY_NAME}"
+    Delete "$DESKTOP\${APP_REGISTRY_NAME}.lnk"
+  !endif
   CreateDirectory "$SMPROGRAMS\${APP_NAME}"
   CreateShortcut  "$SMPROGRAMS\${APP_NAME}\${APP_NAME}.lnk" "$INSTDIR\${APP_EXE}"
   CreateShortcut  "$DESKTOP\${APP_NAME}.lnk"                 "$INSTDIR\${APP_EXE}"
@@ -459,21 +476,21 @@ Function DoInstall
   WriteUninstaller "$INSTDIR\Uninstall.exe"
   ; Add/Remove Programs registration (the Inno authoring gets this for
   ; free; NSIS must write it by hand — parity pinned in the tests).
-  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}" \
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_REGISTRY_NAME}" \
     "DisplayName" "${APP_NAME}"
-  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}" \
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_REGISTRY_NAME}" \
     "DisplayVersion" "${APP_VERSION}"
-  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}" \
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_REGISTRY_NAME}" \
     "Publisher" "${PUBLISHER}"
-  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}" \
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_REGISTRY_NAME}" \
     "DisplayIcon" '"$INSTDIR\${APP_EXE},0"'
-  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}" \
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_REGISTRY_NAME}" \
     "InstallLocation" '"$INSTDIR"'
-  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}" \
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_REGISTRY_NAME}" \
     "UninstallString" '"$INSTDIR\Uninstall.exe"'
-  WriteRegDWORD HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}" \
+  WriteRegDWORD HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_REGISTRY_NAME}" \
     "NoModify" 1
-  WriteRegDWORD HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}" \
+  WriteRegDWORD HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_REGISTRY_NAME}" \
     "NoRepair" 1
 @AUTOSTART_INSTALL@
 
@@ -664,7 +681,7 @@ Function un.DoUninstall
   RMDir  "$SMPROGRAMS\${APP_NAME}"
   Delete "$DESKTOP\${APP_NAME}.lnk"
   DeleteRegKey HKCU \
-    "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}"
+    "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_REGISTRY_NAME}"
 @AUTOSTART_UNINSTALL@
   ; User data is NOT touched: it lives in ~/.local/share/Tofu per the
   ; runtime_paths read-only-exe-dir contract — same rule as the Inno

@@ -6,7 +6,7 @@ import requests
 
 from lib.llm import stream
 from lib.llm import _transport
-from lib.llm_errors import AbortedError
+from lib.llm.llm_errors import AbortedError
 from tests.sse.test_sse_http_delivery import _server
 
 pytestmark = pytest.mark.unit
@@ -69,7 +69,7 @@ def test_stop_interrupts_blocked_requests_read(monkeypatch, framing, legacy, mod
 @pytest.mark.parametrize('legacy', [False, True])
 def test_error_diagnostics_expire_with_idle_timeout_disabled(monkeypatch, framing, legacy):
     from lib.llm import provider_error_body
-    from lib.llm_errors import RateLimitError
+    from lib.llm.llm_errors import RateLimitError
     if legacy:
         from urllib3.response import HTTPResponse
         monkeypatch.setattr(HTTPResponse, 'shutdown', None, raising=False)

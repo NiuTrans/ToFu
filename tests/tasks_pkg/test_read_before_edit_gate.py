@@ -54,6 +54,7 @@ def test_gate_allows_after_prior_done_read_in_rounds(workspace):
         'toolName': 'read_files',
         'toolArgs': json.dumps({'reads': [{'path': workspace['target_rel']}]}),
         'status': 'done',
+        'result': 'File: a.py\n  1: def foo():\n  2:     return 1\n',
     }]
     task = _make_task(tool_rounds=rounds)
     err = check_read_before_edit(
@@ -164,6 +165,7 @@ def test_gate_blocks_batch_when_any_path_unread(workspace):
         'toolName': 'read_files',
         'toolArgs': json.dumps({'reads': [{'path': workspace['target_rel']}]}),
         'status': 'done',
+        'result': 'File: a.py\n  1: def foo():\n  2:     return 1\n',
     }]
     task = _make_task(tool_rounds=rounds)
     err = check_read_before_edit(
@@ -191,6 +193,7 @@ def test_gate_allows_after_write_file(workspace):
         'toolName': 'write_file',
         'toolArgs': json.dumps({'path': workspace['target_rel'], 'content': 'x'}),
         'status': 'done',
+        'result': 'File updated: a.py',
     }]
     task = _make_task(tool_rounds=rounds)
     err = check_read_before_edit(
@@ -258,6 +261,7 @@ def test_partition_skips_only_unread_edit(workspace):
         'toolName': 'read_files',
         'toolArgs': json.dumps({'reads': [{'path': workspace['target_rel']}]}),
         'status': 'done',
+        'result': 'File: a.py\n  1: def foo():\n  2:     return 1\n',
     }]
     task = _make_task(tool_rounds=rounds)
     skip_idx, unread = partition_batch_edits(
@@ -282,6 +286,10 @@ def test_partition_empty_when_all_read(workspace):
         'toolArgs': json.dumps({'reads': [
             {'path': workspace['target_rel']}, {'path': b_rel}]}),
         'status': 'done',
+        'result': 'File: a.py\n  1: def foo():\n\nFile: b.py\n  1: def bar():\n',
+
+        '_readObservedPaths': [workspace['target_abs'],
+                               os.path.join(workspace['project_path'], b_rel)],
     }]
     task = _make_task(tool_rounds=rounds)
     skip_idx, unread = partition_batch_edits(
@@ -404,3 +412,41 @@ def test_meta_insert_content_refusal_marks_all_fail():
         refusal,
     )
     assert all(s['status'] == 'fail' for s in meta['editSummaries'])
+
+
+@pytest.mark.parametrize('history', ['round', 'messages', 'observed_round'])
+def test_file_body_headers_cannot_certify_failed_batch_item(tmp_path, history):
+    from lib.project_mod.read_tools import tool_read_files
+    from lib.tasks_pkg.handlers._read_gate import check_read_before_edit
+
+    root = tmp_path / 'project'
+    root.mkdir()
+    known = root / 'known.txt'
+    known.write_text('File: harmless log header\n')
+    unread = tmp_path / 'never-read.txt'
+    unread.write_text('not observed\n')
+    args = {'reads': [{'path': 'known.txt'}, {'path': '../never-read.txt'}]}
+    observations = []
+    result = tool_read_files(str(root), args['reads'], read_observations=observations)
+    assert result.count('File: ') == 2
+    assert 'Path traversal blocked' in result
+    assert [observation.abs_path for observation in observations] == [str(known)]
+    round_entry = {'toolName': 'read_files', 'toolArgs': json.dumps(args),
+                   'status': 'done', 'result': result}
+    messages = []
+    if history == 'messages':
+        messages = [
+            {'role': 'assistant', 'tool_calls': [{'id': 'read-1', 'function': {
+                'name': 'read_files', 'arguments': json.dumps(args)}}]},
+            {'role': 'tool', 'tool_call_id': 'read-1', 'content': result}]
+    elif history == 'observed_round':
+        round_entry['_readObservedPaths'] = [item.abs_path for item in observations]
+    task = _make_task(messages=messages,
+                      tool_rounds=[] if history == 'messages' else [round_entry],
+                      conv_id=str(root))
+    refusal = check_read_before_edit(task, 'apply_diff', {'path': '../never-read.txt'}, str(root))
+    assert refusal is not None and 'must read each target file first' in refusal
+    known_result = check_read_before_edit(task, 'apply_diff', {'path': 'known.txt'}, str(root))
+    # Only host-owned per-item evidence can preserve the successful item. An
+    # ambiguous legacy multi-read must be repeated, not parsed as authority.
+    assert (known_result is None) == (history == 'observed_round')

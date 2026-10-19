@@ -65,7 +65,7 @@ def test_background_sidebar_remains_active_after_parent_settles(page, tmp_path, 
     assert badge.text_content() == locale['sidebar.backgroundRunningTag'].replace('{count}', '2')
     assert frame.locator('.conv-item[data-conv-id="command"] .conv-status-background').is_visible()
     assert frame.locator('.conv-item[data-conv-id="idle"] .conv-status-tag').count() == 0
-    assert frame.locator('#bgActivityChip').inner_text() == locale['bgActivity.chip.agentMany'].replace('{count}', '2')
+    assert not frame.locator('#bgActivityChip').is_visible(), 'agent activity no longer belongs in the composer'
     assert frame.evaluate('convIsBusy(conversations[0])') is False
     frame.evaluate('window.originalSidebarRow=document.querySelector(".conv-item[data-conv-id=parent]")')
     screenshot = tmp_path / f'background-sidebar-{language}-{width}.png'

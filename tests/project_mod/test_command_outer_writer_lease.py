@@ -35,13 +35,13 @@ def repo(tmp_path, monkeypatch):
 
 
 @contextmanager
-def _other_writer(root):
+def _other_writer(root, *, factory=workspace_write_lease):
     ready, release = threading.Event(), threading.Event()
     errors = []
 
     def hold():
         try:
-            with workspace_write_lease(root):
+            with factory(root):
                 ready.set()
                 if not release.wait(10):
                     raise AssertionError('writer release was not signalled')
@@ -121,7 +121,7 @@ def test_same_lease_covers_preimage_execution_postimage_and_journal(
 
     def assert_held(phase):
         fds = workspace_lease_fds()
-        assert len(fds) == 2  # shared checkout barrier + exclusive target
+        assert fds  # checkout/file and tree-lifecycle intention descriptors
         if not initial_fds:
             initial_fds.extend(fds)
         assert fds == tuple(initial_fds)
@@ -576,7 +576,7 @@ def test_literal_leading_cd_writer_leases_only_actual_worktree(
     observed = []
 
     def process_boundary(*_args, **_kwargs):
-        assert len(workspace_lease_fds()) == 2  # FILE in the actual worktree
+        assert workspace_lease_fds()  # actual target owns inheritable admission
         observed.append((_contender_result(repo), _contender_result(sibling)))
         return '$ worktree\n[exit code: 0]'
 
@@ -750,13 +750,13 @@ def test_tool_admission_timeout_default_and_bounds(monkeypatch):
     from lib.project_mod.tool_admission import admission_timeout
 
     monkeypatch.delenv('TOFU_WORKSPACE_TOOL_WAIT_SECONDS', raising=False)
-    assert admission_timeout() == 5
-    for value in ['0', '600']:
+    assert admission_timeout() is None
+    for value in ['0', '600', '5000']:
         monkeypatch.setenv('TOFU_WORKSPACE_TOOL_WAIT_SECONDS', value)
         assert admission_timeout() == float(value)
-    for value in ['-1', '601', 'inf', 'nan', 'invalid']:
+    for value in ['-1', 'inf', 'nan', 'invalid']:
         monkeypatch.setenv('TOFU_WORKSPACE_TOOL_WAIT_SECONDS', value)
-        with pytest.raises(ValueError, match=r'\[0, 600\]'):
+        with pytest.raises(ValueError, match='nonnegative and finite'):
             admission_timeout()
 
 
@@ -783,9 +783,11 @@ def test_popen_inherits_writer_descriptor_until_child_exit(repo, monkeypatch, in
     assert (repo / 'target').read_text() == 'new contents\n'
     assert inherited
     assert workspace_lease_fds() == ()
-    for fd in inherited:
-        with pytest.raises(OSError):
-            os.fstat(fd)
+    # Descriptor integers can already be recycled by asynchronous stdin/proc
+    # observations. Ownership and a fresh exclusive admission prove release;
+    # fstat(number) cannot identify the original open-file description.
+    from lib.project_mod import workspace_lease as leases
+    assert not leases._registry and not leases._active_descriptors
     assert _contender_result(repo) == 'acquired'
 
 
@@ -875,6 +877,7 @@ def test_r54_unit_test_chain_and_python_stdin_read_runs_under_root_writer(
     npm.write_text('#!/bin/sh\nprintf "unit runner: %s\\n" "$*"\n')
     npm.chmod(0o700)
     monkeypatch.setenv('PATH', f'{binary_dir}:{os.environ["PATH"]}')
+    monkeypatch.setenv('UV_TOOL_BIN_DIR', str(binary_dir))
     command = ("npm run test:unit -- --run src/example.test.ts && python3 - <<'PY'\n"
                "from pathlib import Path\n"
                "print('stdin read:', Path('target').read_text().strip(), 3 & 1)\n"
@@ -1053,12 +1056,15 @@ def test_git_c_isolated_mutation_does_not_lease_parent(repo, tmp_path, route):
     subprocess.run(['git', '-C', str(donor), '-c', 'user.name=Test', '-c',
                     'user.email=test@example.invalid', 'commit', '-qm', 'donor change'], check=True)
     revision = subprocess.check_output(['git', '-C', str(donor), 'rev-parse', 'HEAD']).decode().strip()
-    child = repo / '.worktrees' / 'isolated'
+    from lib.project_mod.workspace_lease import workspace_file_write_lease
+    # Parent source edits are independent. A whole Git writer would correctly
+    # conflict with shared common-directory metadata, not the child source tree.
+    child = tmp_path / 'isolated'
     command = ('/usr/bin/git worktree add -b isolated ' + shlex.quote(str(child))
                + ' HEAD && /usr/bin/git -C ' + shlex.quote(str(child))
                + ' -c user.name=Test -c user.email=test@example.invalid cherry-pick ' + revision)
     before = subprocess.check_output(['git', '-C', str(repo), 'rev-parse', 'HEAD'])
-    with _other_writer(repo):
+    with _other_writer(repo / 'source', factory=workspace_file_write_lease):
         result = (commands.tool_run_command(str(repo), command) if route == 'runner'
                   else tools.execute_tool('run_command', {'command': command}, str(repo)))
     assert '[exit code: 0]' in result
@@ -1066,8 +1072,8 @@ def test_git_c_isolated_mutation_does_not_lease_parent(repo, tmp_path, route):
     assert subprocess.check_output(['git', '-C', str(child), 'rev-parse', 'HEAD']) != before
     assert (child / 'picked').read_text() == 'isolated change\n'
     assert not (repo / 'picked').exists()
-    # Existing isolated checkouts also target only their own lease.
-    with _other_writer(repo):
+    # Existing isolated checkouts do not claim the parent's working files.
+    with _other_writer(repo / 'source', factory=workspace_file_write_lease):
         result = commands.tool_run_command(str(repo), '/usr/bin/git -C '
                                            + shlex.quote(str(child)) + ' reset --hard HEAD')
     assert '[exit code: 0]' in result
@@ -1084,7 +1090,11 @@ def test_git_c_isolated_mutation_does_not_lease_parent(repo, tmp_path, route):
 ])
 def test_read_chain_cannot_hide_mutation(repo, suffix):
     from lib.project_mod.run_command import command_write_lease_claims
-    assert command_write_lease_claims(str(repo), INSPECTION_CHAIN + suffix)
+    if suffix == '; git worktree remove peer':
+        with pytest.raises(ValueError, match='lifecycle source'):
+            command_write_lease_claims(str(repo), INSPECTION_CHAIN + suffix)
+    else:
+        assert command_write_lease_claims(str(repo), INSPECTION_CHAIN + suffix)
 
 
 @pytest.mark.parametrize('route', ['runner', 'dispatch'])
@@ -1179,3 +1189,47 @@ def test_git_alias_changed_during_admission_refuses_before_body(repo, tmp_path, 
     assert '[workspace-target-changed]' in result
     assert 'command was not started' in result.lower()
     assert not (other / '.git' / 'index').exists()
+
+
+@pytest.mark.parametrize('operation', ['command', 'append'])
+def test_default_tool_wait_survives_real_six_second_writer_then_executes(repo, monkeypatch, operation):
+    from lib.project_mod import tool_admission
+    from lib.project_mod.write_tools import _ops
+    monkeypatch.delenv('TOFU_WORKSPACE_TOOL_WAIT_SECONDS', raising=False)
+    waiting = threading.Event()
+    task = {'aborted': False}
+    outcomes, errors = [], []
+    original = tool_admission.Cancellation.is_set
+    def observed(cancel):
+        waiting.set()
+        return original(cancel)
+    monkeypatch.setattr(tool_admission.Cancellation, 'is_set', observed)
+    def execute():
+        try:
+            if operation == 'command':
+                outcomes.append(tools.execute_tool(
+                    'run_command', {'command': 'cp source target'}, str(repo), task=task))
+            else:
+                with tool_admission.tool_admission_scope(task):
+                    outcomes.append(_ops.tool_write_file(
+                        str(repo), 'target', 'added\n', append=True))
+        except BaseException as error:
+            errors.append(error)
+    worker = threading.Thread(target=execute, daemon=True)
+    with _other_writer(repo):
+        worker.start()
+        try:
+            assert waiting.wait(2)
+            worker.join(timeout=6.1)
+            assert worker.is_alive(), (outcomes, errors)
+            assert (repo / 'target').read_text() == 'old\n'
+        except BaseException:
+            task['aborted'] = True
+            worker.join(timeout=2)
+            raise
+    worker.join(timeout=5)
+    assert not worker.is_alive() and not errors
+    assert len(outcomes) == 1 and 'workspace-busy' not in outcomes[0]
+    expected = 'new contents\n' if operation == 'command' else 'old\nadded\n'
+    assert (repo / 'target').read_text() == expected
+    assert workspace_lease_fds() == ()

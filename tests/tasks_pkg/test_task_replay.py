@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from lib.task_replay import (
+from lib.task_replay.task_replay import (
     TASK_REPLAY_FORMAT,
     TASK_REPLAY_TERMINAL_EVENT_TYPES,
     TASK_REPLAY_TERMINAL_STATUSES,
@@ -91,7 +91,7 @@ def test_memory_page_frames_keep_absolute_sequences_after_head_eviction():
 
 def test_task_memory_page_owns_tail_container_after_source_eviction():
     import threading
-    from lib.task_replay import task_memory_replay_page
+    from lib.task_replay.task_replay import task_memory_replay_page
     source = [{'type': 'delta', 'seq': seq} for seq in range(40, 44)]
     task = {'events': source, 'events_lock': threading.Lock(), 'status': 'running'}
     page = task_memory_replay_page(task, 42)
@@ -106,7 +106,7 @@ def test_task_memory_page_owns_tail_container_after_source_eviction():
 @pytest.mark.parametrize('cursor', [-1, 39, 40, 42, 44, 100, 'bad'])
 def test_locked_task_window_matches_public_replay_oracle(cursor):
     import threading
-    from lib.task_replay import task_memory_replay_page
+    from lib.task_replay.task_replay import task_memory_replay_page
     events = [{'type': 'delta', 'seq': seq} for seq in range(40, 44)]
     task = {'events': events, 'events_lock': threading.Lock(), 'status': 'done'}
     assert task_memory_replay_page(task, cursor).payload() == memory_replay_page(

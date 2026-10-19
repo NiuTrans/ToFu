@@ -59,14 +59,24 @@ impl<T> Drop for JobReceiver<T> {
     }
 }
 
-impl<T> JobSender<T> {
-    /// Claim a ready worker or return the owned job for a new worker.
-    /// No job is published when no worker is ready, so thread-creation failure
-    /// can drop that owned job without ambiguous dispatch or duplicate work.
-    pub(crate) fn try_handoff(&self, job: T) -> Result<Option<T>, T> {
+pub(crate) struct WeakDelivery<T> { shared: std::sync::Weak<Shared<T>> }
+impl<T> WeakDelivery<T> {
+    pub(crate) fn try_handoff(&self,job:T)->Result<Option<T>,T> {
+        match self.shared.upgrade() {Some(shared)=>handoff(&shared,job),None=>Err(job)}
+    }
+    pub(crate) fn receiver(&self)->Option<JobReceiver<T>> {
+        let shared=self.shared.upgrade()?;
+        {let mut state=shared.state.lock().ok()?;if state.closed{return None;}state.receivers+=1;}
+        Some(JobReceiver{shared})
+    }
+}
+impl<T> JobReceiver<T> {
+    pub(crate) fn weak_delivery(&self)->WeakDelivery<T> {WeakDelivery{shared:Arc::downgrade(&self.shared)}}
+}
+fn handoff<T>(shared:&Arc<Shared<T>>,job:T)->Result<Option<T>,T> {
         let wake = {
             let lock = crate::fsync_stats::StageTimer::diagnostic(crate::fsync_stats::STAGE_EMBEDDED_QUEUE_LOCK);
-            let Ok(mut state) = self.shared.state.lock() else { return Err(job); };
+            let Ok(mut state) = shared.state.lock() else { return Err(job); };
             drop(lock);
             let _admit = crate::fsync_stats::StageTimer::diagnostic(crate::fsync_stats::STAGE_EMBEDDED_QUEUE_ADMIT);
             if state.closed { return Err(job); }
@@ -78,6 +88,15 @@ impl<T> JobSender<T> {
         wake.unpark();
         Ok(None)
     }
+
+impl<T> JobSender<T> {
+    pub(crate) fn try_healthy(&self) -> bool {
+        self.shared.state.try_lock().is_ok_and(|state| !state.closed && state.receivers != 0)
+    }
+    /// Claim a ready worker or return the owned job for a new worker.
+    /// No job is published when no worker is ready, so thread-creation failure
+    /// can drop that owned job without ambiguous dispatch or duplicate work.
+    pub(crate) fn try_handoff(&self, job:T)->Result<Option<T>,T> {handoff(&self.shared,job)}
 
     #[cfg(test)]
     pub(crate) fn try_send(&self, job: T) -> Result<(), TrySendError<T>> {

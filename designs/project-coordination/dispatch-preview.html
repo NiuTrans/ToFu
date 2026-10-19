@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="tofu">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Project dispatch UI fixture — static mocks, no backend/native or paid models</title>
+<link rel="stylesheet" href="../../frontend/src/styles/fonts.css">
+<link rel="stylesheet" href="../../static/styles.css">
+<style>body{display:block;height:auto;overflow:auto;background:var(--bg-primary);font-family:var(--font-ui);padding:var(--space-6)}h1{font-size:var(--font-size-xl)}p{margin:0}</style>
+</head>
+<body>
+<h1>Static UI fixture — no backend/native or paid models</h1>
+<p>Real TypeScript drawer with deterministic mock receipts; NOT backend/native acceptance.</p>
+<main id="launch"></main>
+<script type="module">
+import {createButton} from '../../frontend/src/ui/index.ts';
+import {ready} from '../../frontend/src/i18n/index.ts';
+import {openProjectCoordination} from '../../frontend/src/features/project-coordination.ts';
+await ready();
+window.mockCalls=[];
+let records=[{assignmentId:'mock-completed',request:{projectPath:'/mock/project',coordinatorId:'mock-coord',recipientId:'mock-worker',authorizationSource:{conversationId:'mock-coord',turnId:'mock-human-turn',projectionRevision:7},brief:'核验范围内文件任务；未授权正式发布',model:'mock.not-callable',budget:{maxTokens:300,maxModelRequests:1,deadline:2000000000}},grantRevision:2,revoked:false,execution:{turnId:'mock-result',attemptId:'mock-attempt',taskId:'mock-task',status:'completed',resultRevision:11,result:{content:'Mock consultation advice'}},review:null,canonicalDelivery:false}];
+const receipts=new Map();
+
+const profile={mode:'files',tools:['read_files','edit_file'],readPaths:['src'],writePaths:['src'],maxToolCalls:8};
+records[0].request.profile=structuredClone(profile);
+records[0].delivery={taskId:'mock-task',status:'blocked',reason:'project_publication_authority_missing',checkpointSha:'mock-checkpoint',targetSha:''};
+records.push({...structuredClone(records[0]),assignmentId:'mock-rework',request:{...structuredClone(records[0].request),brief:'返工文件任务'},review:null});
+
+records.push({...structuredClone(records[0]),assignmentId:'mock-upstream-files',request:{...structuredClone(records[0].request),brief:'静态文件依赖 · 等待交付'},delivery:{...structuredClone(records[0].delivery),checkpointSha:'0123456789abcdef0123456789abcdef01234567'}});
+records.push({...structuredClone(records[0]),assignmentId:'mock-upstream-consult',request:{...structuredClone(records[0].request),profile:undefined,brief:'静态咨询依赖 · 等待审阅'},delivery:null});
+// Static evidence transition only: not backend scheduling, validation or canonical delivery.
+window.mockAdvanceDependencies=()=>{
+  const upstream=records.find(row=>row.assignmentId==='mock-upstream-files');
+  upstream.grantRevision++;upstream.execution.resultRevision++;upstream.delivery.checkpointSha='abcdef0123456789abcdef0123456789abcdef0123';
+  for(const row of records){if(row.request.dependencies?.length)row.dependencyStates=row.request.dependencies.map(reference=>({reference:structuredClone(reference),status:'invalid',reason:reference.checkpointSha?'checkpoint_changed':'result_changed'}));}
+  records=records.filter(row=>row.assignmentId!=='mock-upstream-consult');
+};
+let commandSequence=0;
+window.mockLoseNextGrant=false;
+const action=(name,body)=>{
+  window.mockCalls.push({name,body});
+  const value=records.find(row=>row.assignmentId===body.assignmentId);
+  if(!value)throw new Error('Unknown fixture assignment');
+  if(name==='revoke'&&!value.revoked){value.revoked=true;value.grantRevision++;}
+  if(name==='review'){value.review={decision:body.decision,note:body.note,resultRevision:body.resultRevision};}
+
+  if(name==='publish'){value.publication={subject:'mock-owner',requestedAt:1,grantRevision:body.expectedRevision,resultRevision:body.resultRevision,checkpointSha:body.expectedCheckpointSha};
+    value.delivery.reason='mock_gate_held'; /* NOT a canonical delivery receipt */}
+  return structuredClone(value);
+};
+const open=()=>openProjectCoordination({
+  path:'/mock/project',currentConversationId:'mock-coord',currentPath:()=>'/mock/project',currentConversation:()=> 'mock-coord',
+  binding:async()=>({projectPath:'/mock/project',conversationId:'mock-coord',revision:3,availability:'available',capabilities:{assign:false,sendMessage:false,steerSubagent:false}}),
+  board:async()=>({active:[],recentOutcomes:[]}),bind:async()=>{throw new Error('Fixture only');},
+  navigate:id=>window.mockCalls.push({name:'navigate',body:id}),openEvidence:()=>{},
+  dispatch:{
+    recipients:()=>[{id:'mock-worker',title:'同项目 · 咨询对话'}],
+    humanTurns:()=>[{actor:'human',turnId:'mock-human-turn',projectionRevision:7,promptPreview:'请核验 src/task.ts 的范围与预算'}],commandId:()=> `mock-command-${++commandSequence}`,
+    list:async(_path,key)=>({assignments:structuredClone(key?(receipts.has(key)?[receipts.get(key)]:[]):records)}),
+    grant:async(request,key)=>{
+      window.mockCalls.push({name:'grant',body:request,key});
+      if(window.mockLoseNextGrant){window.mockLoseNextGrant=false;throw new Error('Mock lost response; no backend/native request');}
+      if(receipts.has(key))return structuredClone(receipts.get(key));
+      const value={assignmentId:`mock-new-${key}`,grantRevision:1,revoked:false,request,execution:null,review:null,canonicalDelivery:false,
+        dependencyStates:request.dependencies?.map(reference=>({reference:structuredClone(reference),status:reference.checkpointSha?'waiting_delivery':'waiting_review',reason:reference.checkpointSha?'delivery_required':'review_required'}))};
+      records=[value,...records];receipts.set(key,value);return structuredClone(value);
+    },
+    dispatch:async body=>action('dispatch',body),revoke:async body=>action('revoke',body),review:async body=>action('review',body),
+    publish:async body=>action('publish',body),
+  },
+});
+document.getElementById('launch').append(createButton({label:'打开当前协调抽屉',variant:'primary',onClick:open}));
+window.previewReady=true;
+</script>
+</body></html>

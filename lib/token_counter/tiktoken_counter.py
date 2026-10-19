@@ -80,6 +80,10 @@ _text_count_cache_metrics = {
 
 def _get_encoder(name: str):
     """Return a cached tiktoken encoder, or None if tiktoken isn't installed."""
+    from .native import scoped_native_encoder
+    native=scoped_native_encoder(name)
+    if native is not None:
+        return native
     global _available
     if _available is False:
         return None
@@ -221,7 +225,9 @@ def count_text(text: str, model: str = '', *, reusable: bool = False) -> int:
     if enc is None:
         return 0  # caller should fall back to heuristic
     try:
-        result = len(enc.encode(text, disallowed_special=()))
+        from .native import NativeTextEncoder
+        result = (enc.count_text(text) if isinstance(enc,NativeTextEncoder)
+                  else len(enc.encode(text, disallowed_special=())))
     except Exception as e:
         logger.debug('[TokenCounter] tiktoken encode failed: %s', e)
         return 0
@@ -348,10 +354,11 @@ def _count_request_texts_with_cache(
     ]
     if not batch_texts:
         return total
-    encoded = encoder.encode_batch(batch_texts, disallowed_special=())
+    from .native import NativeTextEncoder
+    counts = (encoder.count_batch(batch_texts) if isinstance(encoder,NativeTextEncoder)
+              else [len(tokens) for tokens in encoder.encode_batch(batch_texts, disallowed_special=())])
     short_count = len(short_texts)
-    for text, token_ids in zip(short_texts, encoded[:short_count]):
-        count = len(token_ids)
+    for text, count in zip(short_texts, counts[:short_count]):
         total += count
         text_identity = id(text)
         if (selected_text_token_counts is not None
@@ -359,11 +366,10 @@ def _count_request_texts_with_cache(
             selected_text_token_counts[text_identity] = count
 
     pending_counts: list[tuple[_TextCountCacheKey, int]] = []
-    for (cache_key, (_text, occurrences, selected_identities)), token_ids in zip(
+    for (cache_key, (_text, occurrences, selected_identities)), count in zip(
         pending.items(),
-        encoded[short_count:],
+        counts[short_count:],
     ):
-        count = len(token_ids)
         total += count * occurrences
         if selected_text_token_counts is not None:
             for text_identity in selected_identities:

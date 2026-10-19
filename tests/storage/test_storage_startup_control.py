@@ -16,7 +16,7 @@ from lib.storage.startup_control import (
     parse_startup_progress,
 )
 from lib.storage.supervisor import StorageSupervisor, _StartupDeadline
-from lib.storage_sidecar import fastpath
+from lib.storage_authority_sql import fastpath
 
 
 pytestmark = pytest.mark.unit

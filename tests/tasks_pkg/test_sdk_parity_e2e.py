@@ -2,7 +2,7 @@
 for the SDK-parity additions made in this round:
 
   1. ``TofuConfig`` OpenAPI schema is auto-generated from
-     ``lib.agent_options.TofuOptions`` and exposes the new fields.
+     ``lib.agent_loop.agent_options.TofuOptions`` and exposes the new fields.
   2. UserPromptSubmit hooks fire when a chat task is created via the
      real route handler (no in-memory shortcuts).
   3. PreCompact hooks fire when the compaction pipeline runs against a
@@ -114,13 +114,8 @@ def _hdr(token):
 # ── Stub spawn_task so chat doesn't hit a real LLM ──
 
 
-_STUB_INSTALLED = False
-
-
 def _install_chat_stub():
-    global _STUB_INSTALLED
-    if _STUB_INSTALLED:
-        return
+    from unittest.mock import patch
     import lib.tasks_pkg.spawn as pkg
     from lib.tasks_pkg.manager import append_event
 
@@ -144,8 +139,9 @@ def _install_chat_stub():
         append_event(task, {'type': 'done', 'finishReason': 'stop',
                               'usage': task['usage']})
 
-    pkg.spawn_task = _fake_spawn
-    _STUB_INSTALLED = True
+    replacement = patch.object(pkg, 'spawn_task', _fake_spawn)
+    replacement.start()
+    return replacement.stop
 
 
 # ── Tests ───────────────────────────────────────────────────────────
@@ -156,7 +152,7 @@ class SDKParityE2ETest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         _setup_once()
-        _install_chat_stub()
+        cls.addClassCleanup(_install_chat_stub())
         cls.app = _STATE['app']
         cls.user = _STATE['user']
         # Save the hook registries so we can clean up after each test.

@@ -44,13 +44,10 @@ def test_case_and_directory_aliases_are_refused():
             SourceRecords.from_text([{'path': p, 'content': ''} for p in paths])
 
 
-def test_multibyte_budget_is_bytes_and_cancel_does_not_create_a_stage(tmp_path, monkeypatch):
-    from lib.paper.builds import records as module
-    prior = module.limit
-    monkeypatch.setattr(module, 'limit', lambda key: 4 if key == 'source_file_bytes' else prior(key))
-    with pytest.raises(BuildError) as caught:
-        SourceRecords.from_text([{'path': 'main.tex', 'content': '论文字'}])
-    assert caught.value.code == 'source_limit'
+def test_multibyte_records_are_complete_and_cancel_owns_stage_cleanup(tmp_path):
+    text = '论文字' * 12_000_000
+    records = SourceRecords.from_text([{'path': 'main.tex', 'content': text}])
+    assert records.files[0][1] == text.encode('utf-8')
     records = SourceRecords.from_text([{'path': 'main.tex', 'content': 'ok'}])
     cancelled = threading.Event()
     cancelled.set()
@@ -58,3 +55,12 @@ def test_multibyte_budget_is_bytes_and_cancel_does_not_create_a_stage(tmp_path, 
         records.freeze(tmp_path / 'cancelled', cancel=cancelled)
     assert caught.value.code == 'cancelled'
     assert not (tmp_path / 'cancelled').exists()
+
+
+def test_explicit_records_keep_files_beyond_old_count_limit(tmp_path):
+    files = [{'path': 'main.tex', 'content': 'main'}] + [
+        {'path': f'part-{index}.tex', 'content': str(index)} for index in range(1101)]
+    records = SourceRecords.from_text(files)
+    frozen = records.freeze(tmp_path / 'snapshot')
+    assert len(frozen.files) == 1102
+    assert (frozen.root / 'part-1100.tex').read_text() == '1100'

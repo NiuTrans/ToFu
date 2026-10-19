@@ -214,8 +214,82 @@ class _SuccessPredicateCompiler:
 
         return validate_recursive_reference
 
+    def _object_variant(self, schema: Any) -> Mapping[str, Any] | None:
+        """Resolve only acyclic object variants for a proven tag dispatch."""
+        seen: set[int] = set()
+        while isinstance(schema, Mapping):
+            if id(schema) in seen:
+                return None
+            seen.add(id(schema))
+            reference = schema.get("$ref")
+            if isinstance(reference, str):
+                if not reference.startswith(_SCHEMA_REFERENCE_PREFIX):
+                    return None
+                schema = self._schemas.get(reference[len(_SCHEMA_REFERENCE_PREFIX):])
+                continue
+            if "oneOf" in schema or "anyOf" in schema:
+                return None
+            if schema.get("type") == "object" or (
+                schema.get("type") is None and "properties" in schema
+            ):
+                return schema
+            return None
+        return None
+
+    def _compile_tagged_one_of(
+        self, variants: list[Any], checks: tuple[SuccessPredicate, ...],
+    ) -> SuccessPredicate | None:
+        """Dispatch only when required string constants prove disjointness.
+
+        Selected values still pass the entire branch predicate. Optional tags,
+        duplicate constants and unsupported variants retain exactly-one checks;
+        string-only keys avoid JSON boolean/number equality coercion.
+        """
+        objects = [self._object_variant(item) for item in variants]
+        if not objects or any(item is None for item in objects):
+            return None
+        first = objects[0]
+        assert first is not None
+        for field in first.get("required") or []:
+            if not isinstance(field, str):
+                continue
+            dispatch: dict[str, SuccessPredicate] = {}
+            for schema, check in zip(objects, checks, strict=True):
+                assert schema is not None
+                properties = schema.get("properties")
+                tag_schema = properties.get(field) if isinstance(properties, Mapping) else None
+                tag = tag_schema.get("const") if isinstance(tag_schema, Mapping) else None
+                # A sibling union/ref would take precedence over const in the
+                # supported validator, so it cannot prove this branch's tag.
+                if (
+                    field not in (schema.get("required") or [])
+                    or not isinstance(tag, str)
+                    or any(key in tag_schema for key in ("$ref", "oneOf", "anyOf"))
+                    or tag in dispatch
+                ):
+                    break
+                dispatch[tag] = check
+            else:
+                def validate_tagged_object(
+                    value: Any, *, tag_field: str = field,
+                    branches: dict[str, SuccessPredicate] = dispatch,
+                ) -> bool:
+                    if not isinstance(value, Mapping):
+                        return False
+                    tag_value = value.get(tag_field)
+                    if not isinstance(tag_value, str):
+                        return False
+                    selected = branches.get(tag_value)
+                    return selected is not None and selected(value)
+
+                return validate_tagged_object
+        return None
+
     def _compile_one_of(self, variants: list[Any]) -> SuccessPredicate:
         checks = tuple(self._compile_node(item) for item in variants)
+        tagged = self._compile_tagged_one_of(variants, checks)
+        if tagged is not None:
+            return tagged
 
         def validate_one_of(
             value: Any,

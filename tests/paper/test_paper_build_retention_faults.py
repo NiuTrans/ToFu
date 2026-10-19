@@ -15,9 +15,9 @@ import pytest
 from lib.paper.builds.compiler import artifact_metadata
 from lib.paper.builds.contract import limit
 from lib.storage.errors import StorageError
-from lib.storage_sidecar.adapters.sqlite import SQLiteSession
+from lib.storage_authority_sql.adapters.sqlite import SQLiteSession
 from tests.support.paper_storage import TransactionClient
-from lib.storage_sidecar.operations_pkg import _paper_artifacts as artifacts
+from lib.storage_authority_sql.operations_pkg import _paper_artifacts as artifacts
 from tests.paper.test_paper_build_cache import _build, _cache
 from tests.paper.test_paper_build_retention import _call, _lease, _pin, _repository
 
@@ -134,7 +134,7 @@ def test_restore_memory_is_chunk_bounded_and_encoding_growth_is_measured(storage
 
 
 def test_cancellation_during_retention_remains_an_abort_without_a_reference(storage, tmp_path, monkeypatch):
-    from lib.llm_errors import AbortedError
+    from lib.llm.llm_errors import AbortedError
     from lib.research.compilation import CompilationResult
     build = _build(tmp_path)
     active, cancel = threading.Event(), threading.Event()
@@ -153,3 +153,31 @@ def test_cancellation_during_retention_remains_an_abort_without_a_reference(stor
             pytest.fail('cancelled upload must not yield a commit witness')
     assert repository.latest(build.receipt['document_id']) is None
     assert _call(storage, 'prune', {})['progress']
+
+
+def test_complete_artifact_above_old_file_and_bundle_limits_survives_backup(storage,tmp_path):
+    import hashlib
+    from lib.paper.builds.bundle import BundleReceiver,iter_bundle
+    build=_build(tmp_path);pdf=build.directory/'document.pdf'
+    from tests.support.paper_pdf import pdf_from_objects,paper_objects
+    data=pdf_from_objects(paper_objects(),padding=129*1024*1024)
+    digest=hashlib.sha256(data);expected_bytes=len(data)
+    pdf.write_bytes(data);del data
+    build.receipt['artifacts']=[artifact_metadata(pdf)]
+    receiver=BundleReceiver(tmp_path/'received',owner_user_id=7,document_id=build.receipt['document_id'],
+        build_id=build.receipt['build_id'],target=build.receipt['target'])
+    for frame in iter_bundle(build):receiver.accept(*frame)
+    transferred,_=receiver.finish()
+    assert artifact_metadata(transferred.directory/'document.pdf')==build.receipt['artifacts'][0]
+    repository=_repository(storage)
+    with repository.prepare(build) as proof:_pin(storage,build,proof)
+    backup_path=tmp_path/'large-backup.sqlite'
+    with sqlite3.connect(backup_path) as target:storage.client.connection.backup(target)
+    backup=TransactionClient(backup_path)
+    try:
+        repository=_repository(SimpleNamespace(client=backup))
+        with repository.open_artifact(_cache(tmp_path),proof['document_id'],proof['build_id'],'document.pdf') as (stream,metadata):
+            recovered=hashlib.sha256();count=0
+            while chunk:=stream.read(1024*1024):recovered.update(chunk);count+=len(chunk)
+        assert count==expected_bytes and recovered.digest()==digest.digest()
+    finally:backup.connection.close()

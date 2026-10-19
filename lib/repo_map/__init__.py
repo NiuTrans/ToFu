@@ -2,7 +2,7 @@
 
 Generates an aider-style *repo map*: for the most important source files in
 a project, list only the definition lines (functions / classes / methods),
-omit all bodies, and fit the whole outline into a strict token budget. The
+omit all bodies, and return every accepted definition in the selected scope. The
 goal is to let a model orient "what lives where" in one cheap call instead of
 a dozen ``ls``/``rg`` rounds.
 
@@ -13,8 +13,8 @@ Pipeline (pure, no I/O besides the caller's filesystem):
                           tree-sitter (grep_ast) with a Python-ast fast path
     rank_files()        → PageRank over the reference graph (networkx)
                           using the sumbd filter (aider)
-    render_map()        → aider-style indented table, truncated to a
-                          token budget by dropping lowest-ranked files
+    render_map()        → complete aider-style indented table;
+                          shared L0 owns model-context overflow
 
 Everything degrades gently:
   - unknown extensions are skipped silently

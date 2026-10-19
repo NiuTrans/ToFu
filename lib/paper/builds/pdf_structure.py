@@ -1,17 +1,17 @@
 """Strict PDF structure audit, executed only inside the bounded PDF worker.
 
 Entry point: inspect_pdf. pypdf owns PDF syntax/decoding; this module checks
-complete object references, page-tree consistency, geometry and finite decoded
-content budgets. It neither repairs malformed input nor renders/rasterizes it.
+complete object references, page-tree consistency, geometry and complete decoded
+content syntax. It neither repairs malformed input nor renders/rasterizes it.
 """
 from __future__ import annotations
 
 import logging
 import math
+import sys
 import zlib
 from pathlib import Path
 
-from .contract import limit
 
 
 class PdfValidationFailure(RuntimeError):
@@ -27,21 +27,25 @@ class _RejectRepair(logging.Handler):
 
 
 def inspect_pdf(path: Path) -> dict[str, int]:
-    from pypdf import PdfReader, filters
+    from pypdf import PdfReader, filters, get_configuration, overwrite_configuration
     from pypdf.generic import (ArrayObject, DictionaryObject, IndirectObject,
                                StreamObject, NumberObject)
 
     # These are worker-local library limits, never process-global app policy.
-    filters.ZLIB_MAX_OUTPUT_LENGTH = limit('pdf_validation_stream_bytes')
-    filters.LZW_MAX_OUTPUT_LENGTH = limit('pdf_validation_stream_bytes')
+    original_configuration = get_configuration()
+    overwrite_configuration(original_configuration,
+        maximum_declared_stream_length=sys.maxsize,
+        array_based_stream_maximum_output_length=sys.maxsize,
+        zlib_maximum_output_length=sys.maxsize,
+        lzw_maximum_output_length=sys.maxsize,
+        run_length_maximum_output_length=sys.maxsize,
+        jbig2_maximum_output_length=sys.maxsize)
     original_decompress = filters.decompress
     def strict_decompress(data):
         # PdfReader.strict does not disable the filter's partial-zlib repair.
-        # A compiled artifact must contain a complete, bounded compressed stream.
+        # A compiled artifact must contain a complete compressed stream.
         decoder = zlib.decompressobj()
-        decoded = decoder.decompress(data, limit('pdf_validation_stream_bytes') + 1)
-        if len(decoded) > limit('pdf_validation_stream_bytes') or decoder.unconsumed_tail:
-            raise PdfValidationFailure('pdf_limit')
+        decoded = decoder.decompress(data)
         if not decoder.eof or decoder.unused_data:
             raise PdfValidationFailure()
         return decoded
@@ -60,9 +64,6 @@ def inspect_pdf(path: Path) -> dict[str, int]:
             reader = PdfReader(source, strict=True, root_object_recovery_limit=0)
             if reader.is_encrypted:
                 raise PdfValidationFailure()
-            references = sum(len(rows) for rows in reader.xref.values()) + len(reader.xref_objStm)
-            if references > limit('pdf_validation_objects'):
-                raise PdfValidationFailure('pdf_limit')
             size = reader.trailer.get('/Size')
             highest = max((number for rows in reader.xref.values() for number in rows), default=0)
             highest = max(highest, max(reader.xref_objStm, default=0))
@@ -85,28 +86,18 @@ def inspect_pdf(path: Path) -> dict[str, int]:
                             continue
                         seen_references.add(key)
                         metrics['objects'] += 1
-                        if metrics['objects'] > limit('pdf_validation_objects'):
-                            raise PdfValidationFailure('pdf_limit')
                         current = current.get_object()
                     if isinstance(current, (DictionaryObject, ArrayObject)):
                         if id(current) in seen_containers:
                             continue
                         seen_containers.add(id(current))
-                        if len(seen_containers) > limit('pdf_validation_objects'):
-                            raise PdfValidationFailure('pdf_limit')
                     if isinstance(current, StreamObject):
                         decoded = current.get_data()
-                        if len(decoded) > limit('pdf_validation_stream_bytes'):
-                            raise PdfValidationFailure('pdf_limit')
                         metrics['decoded_bytes'] += len(decoded)
-                        if metrics['decoded_bytes'] > limit('pdf_validation_decoded_bytes'):
-                            raise PdfValidationFailure('pdf_limit')
                     if isinstance(current, DictionaryObject):
                         pending.extend(current.values())
                     elif isinstance(current, ArrayObject):
                         pending.extend(current)
-                    if len(pending) > limit('pdf_validation_objects'):
-                        raise PdfValidationFailure('pdf_limit')
 
             audit(reader.trailer)
             # Check every live xref entry, including objects not reached by a page.
@@ -148,38 +139,31 @@ def inspect_pdf(path: Path) -> dict[str, int]:
                 if parent is not None and resolve(node.get('/Parent')) is not parent:
                     raise PdfValidationFailure()
                 tree_seen.add(identity)
-                if len(tree_seen) > limit('pdf_validation_objects'):
-                    raise PdfValidationFailure('pdf_limit')
                 if node.get('/Type') == '/Page':
                     metrics['pages'] += 1
-                    if metrics['pages'] > limit('reader_pages'):
-                        raise PdfValidationFailure('pdf_limit')
                     subtree_counts[identity] = 1
                 elif node.get('/Type') == '/Pages':
                     count, kids = resolve(node.get('/Count')), resolve(node.get('/Kids'))
                     if not isinstance(count, NumberObject) or count < 0 or not isinstance(kids, ArrayObject):
                         raise PdfValidationFailure()
-                    if count > limit('reader_pages') or len(kids) > limit('pdf_validation_objects'):
-                        raise PdfValidationFailure('pdf_limit')
                     pending.append((node, parent, True))
                     pending.extend((child, node, False) for child in kids)
                 else:
                     raise PdfValidationFailure()
             if metrics['pages'] < 1:
                 raise PdfValidationFailure()
-            operations = 0
             for page in reader.pages:
                 box = [float(value) for value in page.mediabox]
                 if len(box) != 4 or not all(math.isfinite(value) for value in box) or box[2] <= box[0] or box[3] <= box[1]:
                     raise PdfValidationFailure()
                 content = page.get_contents()
                 if content is not None:
-                    operations += len(content.operations)
-                    if operations > limit('pdf_validation_operations'):
-                        raise PdfValidationFailure('pdf_limit')
+                    # Force complete operator parsing; malformed syntax still refuses.
+                    _ = content.operations
             return metrics
     finally:
         filters.decompress = original_decompress
+        overwrite_configuration(original_configuration)
         pypdf_logger.setLevel(original_level)
         pypdf_logger.propagate = original_propagation
         pypdf_logger.removeHandler(reject)

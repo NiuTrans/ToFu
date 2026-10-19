@@ -106,3 +106,26 @@ def test_headless_root_reaches_the_provider_and_terminal_delivery_with_mcp_enabl
     assert len(requests) == 1 and not accesses
     assert parent['config']['_mcpSelectionScopeId'] == 'task:' + parent['id']
     assert parent['usage']['prompt_tokens'] == 20
+
+
+def test_transient_wire_validation_never_imports_storage(monkeypatch):
+    import builtins
+    original = builtins.__import__
+    def imported(name, *args, **kwargs):
+        if name == 'lib.storage' or name.startswith('lib.storage.'):
+            raise AssertionError('transient declaration validation imported storage')
+        return original(name, *args, **kwargs)
+    tool_search.clear_tool_search_caches()
+    monkeypatch.setattr(builtins, '__import__', imported)
+    try:
+        assert tool_search.freeze_wire_definitions('task:empty-wire', []) == []
+        value = [{'type': 'function', 'function': {'name': 'mcp__sample__read'}}]
+        frozen = tool_search.freeze_wire_definitions('task:nonempty-wire', value)
+        value[0]['function']['name'] = 'changed'
+        assert frozen[0]['function']['name'] == 'mcp__sample__read'
+        with pytest.raises(MCPDeclarationError, match='Malformed'):
+            tool_search.freeze_wire_definitions('task:malformed-wire', value)
+        with pytest.raises(MCPDeclarationError, match='Malformed MCP conversation scope'):
+            tool_search.frozen_wire_definitions('conversation:invalid')
+    finally:
+        tool_search.clear_tool_search_caches()

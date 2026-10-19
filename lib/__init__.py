@@ -235,7 +235,7 @@ _load_plugin_flags()
 
 # ── Fetch / search settings ──
 # Priority: ENV VAR > server_config.json search section > hardcoded default
-from lib.search_profiles import resolve_search_profile as _resolve_search_profile
+from lib.search.search_profiles import resolve_search_profile as _resolve_search_profile
 
 _search_cfg_raw = _SAVED_CONFIG.get('search', {})
 _search_cfg = _resolve_search_profile(
@@ -380,7 +380,7 @@ def reload_config():
     # model/provider-only update must not cold-import the optional search graph;
     # first later activation reads these newest module values.
     try:
-        from lib.search_runtime import sync_search_config_if_loaded
+        from lib.search.search_runtime import sync_search_config_if_loaded
         sync_search_config_if_loaded()
     except Exception as _be:
         import logging as _logging

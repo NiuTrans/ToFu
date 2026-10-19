@@ -225,7 +225,7 @@ def run_chat_stream(
 
     deadline = time.time() + timeout_s
     cursor = 0
-    from lib.task_replay import task_memory_replay_page
+    from lib.task_replay.task_replay import task_memory_replay_page
     while True:
         page = task_memory_replay_page(task, cursor)
         new_events = page.events

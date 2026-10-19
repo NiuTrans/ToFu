@@ -834,3 +834,30 @@ def test_approval_card_is_answerable_during_publication(rec, slow_tools, monkeyp
     assert len(published) == 1
     assert row[5]['status'] == 'done'
     assert len(registry) == 0
+
+
+@pytest.mark.parametrize('verdict', [None, 'error', 'aborted', 'rejected'])
+def test_settled_generic_tool_without_cards_survives_terminal_sweep(monkeypatch, verdict):
+    from lib.tasks_pkg.tool_dispatch import _pipeline
+    from lib.tasks_pkg.orchestrator import _finalize
+    task = _mk_task(_transientRuntime=True)
+    parsed = _mk_tc('generic-no-cards', 'environment_providers', 1)
+    row = parsed[5]
+    task['toolRounds'] = [row]
+    events = []
+    monkeypatch.setattr(_pipeline, 'append_event', lambda task, event: events.append(event))
+    _pipeline._settle_tool_result(
+        task, 'environment_providers', 'generic-no-cards', {}, row['roundNum'],
+        row, '{"ok":true,"providers":["hope"]}', idempotent_tools=frozenset(),
+        cache={}, tid=task['id'], round_num=1, settled_results={},
+        terminal_status=verdict)
+    assert not row.get('results')
+    assert row['status'] == (verdict or 'done')
+    monkeypatch.setattr(_finalize, '_finalize_tool_round',
+                        lambda *args, **kwargs: pytest.fail('Settled tool swept as dangling'))
+    assert _finalize._finalize_dangling_tool_rounds(task) == 0
+    complete = next(event for event in events if event['type'] == 'tool_complete')
+    if verdict:
+        assert complete['status'] == verdict
+    else:
+        assert 'status' not in complete

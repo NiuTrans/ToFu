@@ -43,13 +43,13 @@ def test_multimedia_receipts_remain_readable_selectable_and_collapsible(frontend
       document.querySelector('#receipts').innerHTML=rounds.map((round,i)=>renderMotionCard(
         {...round,roundNum:i,toolContent:JSON.stringify(round.payload)},'<svg viewBox="0 0 16 16" aria-hidden="true"></svg>','',ports)).join('');
     }""", locale)
-    cards = frame.locator('details.ptool-motion-block')
+    cards = frame.locator('#receipts > details.ptool-motion-block, #receipts > article.ptool-work-card')
     expect(cards).to_have_count(4)
     assert frame.evaluate('workUnitDemands') == 1
     assert cards.nth(1).locator('.ptool-convmeta-src').inner_text() == 'Report'
     for i in range(4):
         expect(cards.nth(i)).not_to_have_attribute('open', '')
-        cards.nth(i).locator('summary').click()
+        cards.nth(i).locator('summary').first.click()
         expect(cards.nth(i).locator('.ptool-motion-body')).to_be_visible()
     expect(cards.nth(0)).to_contain_text('Title overlaps chart')
     expect(cards.nth(2)).to_contain_text('deck rolled back')
@@ -75,7 +75,7 @@ def test_multimedia_receipts_remain_readable_selectable_and_collapsible(frontend
     }""")
     assert min(contrasts) >= 4.5, (theme, contrasts)
     page.locator('#receipt-fixture').screenshot(path=str(tmp_path / f'receipts-{theme}-{width}.png'))
-    cards.nth(2).locator('summary').click()
+    cards.nth(2).locator('summary').first.click()
     expect(cards.nth(2).locator('.ptool-motion-body')).not_to_be_visible()
     # The same token migration owns project receipts: exercise the actual board projection.
     frame.add_script_tag(path=native_module_path('.native/visual-receipt-board.js', ROOT / 'frontend/src/conversation/ui/project-receipt/board.ts'))

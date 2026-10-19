@@ -776,3 +776,37 @@ def test_legacy_hook_receipt_does_not_invent_zero_errors(runtime,monkeypatch):
     for (namespace,key),value in runtime[1].rows.items():
         if namespace==stage_inputs.TOOL_ATTEMPTS_NAMESPACE:value.pop('hook_errors',None)
     assert 'hook_errors' not in stage_inputs.read_tool_attempt_event(run,1,'terminal',user_id=OWNER)
+
+
+def test_timed_out_tool_checkpoint_keeps_its_round_then_next_model_can_progress(runtime, monkeypatch):
+    from lib.evolution import stage_inputs
+    from lib.tasks_pkg.orchestrator import _root_agent_loop
+    run, task = launch(runtime)
+    messages = [*task['messages'],
+        {'role': 'assistant', 'tool_calls': [{'id': 'wait', 'type': 'function',
+            'function': {'name': 'mcp__hope__wait_for_job', 'arguments': '{}'}}]},
+        {'role': 'tool', 'tool_call_id': 'wait', 'content': 'Tool execution timed out; job outcome unknown.'}]
+    save(task, 'tools_in_flight', 11, messages)
+    monkeypatch.setattr(_root_agent_loop, 'run_round_checkpoint_and_close', lambda *a, **k: None)
+    hooks = _root_agent_loop._RootLoopHooks(SimpleNamespace(task=task, messages=messages, state=SimpleNamespace(), tid='checkpoint-test'))
+    hooks.close_round(11)
+    pending = stage_inputs.read_working_checkpoint(run, user_id=OWNER)
+    # The local model may reconcile the existing operation in its next round;
+    # a process restart must still see the unresolved original tool boundary.
+    save(task, 'model_in_flight', 12, messages)
+    assert pending['checkpoint']['round'] == 11
+    assert pending['checkpoint']['phase'] == 'tools_in_flight'
+    assert pending['context']['messages'] == messages
+    assert stage_inputs.read_working_checkpoint(run, user_id=OWNER)['checkpoint']['round'] == 12
+
+
+def test_settled_tool_checkpoint_advances_ready_round(runtime, monkeypatch):
+    from lib.evolution import stage_inputs
+    from lib.tasks_pkg.orchestrator import _root_agent_loop
+    run, task = launch(runtime)
+    save(task, 'ready', 11)
+    monkeypatch.setattr(_root_agent_loop, 'run_round_checkpoint_and_close', lambda *a, **k: None)
+    hooks = _root_agent_loop._RootLoopHooks(SimpleNamespace(task=task, messages=task['messages'], state=SimpleNamespace(), tid='checkpoint-test'))
+    hooks.close_round(11)
+    checkpoint = stage_inputs.read_working_checkpoint(run, user_id=OWNER)['checkpoint']
+    assert checkpoint['round'] == 12 and checkpoint['phase'] == 'ready'

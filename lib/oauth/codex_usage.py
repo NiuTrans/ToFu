@@ -19,8 +19,10 @@ Public entry points
 ``clear_codex_usage_reset_cache``
     Lifecycle cleanup for logout/account replacement.
 
-The cache is reconstructible, private (0600), owner+account scoped, bounded to
-16 entries, and contains no token or raw account identifier.  A failed or
+The private (0600), owner/account-scoped store retains complete observations
+and pending idempotency evidence without a row count quota. Expired unprotected
+observations reclaim on writes; pending records survive until explicit resolution
+or scoped lifecycle cleanup. No token or raw account identifier is stored.  A failed or
 shape-drifted request is always ``unknown``; it is never converted to zero.
 Ordinary quota-window ``resets_at`` timestamps are deliberately ignored because
 they describe scheduled rolling-window rollover, not an earned reset credit.
@@ -38,8 +40,9 @@ import uuid
 from typing import Any
 
 from lib.config_dir import config_path
-from lib.json_store import locked_path, read_json, write_json_atomic
+from lib.json_store import JsonStoreReadError, locked_path, read_json, write_json_atomic
 from lib.log import get_logger
+from lib.oauth.identity_flight import identity_flight
 
 logger = get_logger(__name__)
 
@@ -58,16 +61,14 @@ CODEX_USAGE_RESET_PUSH_TASK_ID = "codex-reset"
 CODEX_USAGE_RESET_PUSH_EVENT_TYPE = "codex.reset_offer.updated"
 
 _CACHE_SCHEMA_VERSION = 1
-_MAX_CACHE_ENTRIES = 16
-_MAX_CONCURRENT_REFRESHES = 2
-_REFRESH_LOCK_STRIPES = 16
-_CAPACITY_RETRY_S = 5
+_STATUS_RECONCILE_RETRY_S = 5
 _MAX_AVAILABLE_COUNT = 100
 _MAX_DETAILS = 16
 _MAX_RESPONSE_BYTES = 1024 * 1024
 _MAX_TITLE_CHARS = 160
 _MAX_DESCRIPTION_CHARS = 400
 _PENDING_REDEEM_TTL_S = 24 * 60 * 60
+_OBSERVATION_RETENTION_S = 24 * 60 * 60
 _PENDING_REQUEST_ID_CHARS = 64
 # A 200 with one of these codes is a definitive no-spend outcome; any other
 # 2xx shape is ambiguous and the persisted idempotency record is retained.
@@ -215,16 +216,26 @@ def _normalise_entry(raw: Any) -> dict[str, Any] | None:
     return entry
 
 
-def _read_entries() -> dict[str, dict[str, Any]]:
-    raw = read_json(_cache_path(), default={}) or {}
+def _read_entries(*, strict: bool = False) -> dict[str, dict[str, Any]]:
+    import os
+    path = _cache_path()
+    raw = read_json(path, default={}, strict=strict) or {}
     if not isinstance(raw, dict) or raw.get("schema_version") != _CACHE_SCHEMA_VERSION:
+        if strict and os.path.exists(path):
+            raise JsonStoreReadError('Existing account evidence has an unsupported schema')
         return {}
     rows = raw.get("entries")
     if not isinstance(rows, list):
+        if strict:
+            raise JsonStoreReadError('Existing account evidence is missing its row collection')
         return {}
     entries: dict[str, dict[str, Any]] = {}
-    for row in rows[-(_MAX_CACHE_ENTRIES * 2) :]:
+    for row in rows:
         entry = _normalise_entry(row)
+        if strict and (entry is None or (
+                isinstance(row, dict) and row.get('pending_redeem') is not None
+                and 'pending_redeem' not in entry)):
+            raise JsonStoreReadError('Existing account evidence contains an invalid identity or pending record')
         if entry is not None:
             entries[entry["cache_key"]] = entry
     return entries
@@ -237,13 +248,26 @@ def _entry_recency(entry: dict[str, Any]) -> int:
     )
 
 
-def _write_entries(entries: dict[str, dict[str, Any]]) -> None:
-    rows = sorted(entries.values(), key=_entry_recency)[-_MAX_CACHE_ENTRIES:]
-    write_json_atomic(
-        _cache_path(),
-        {"schema_version": _CACHE_SCHEMA_VERSION, "entries": rows},
-        mode=0o600,
-    )
+def _retain_entry(entry: dict[str, Any], now: int) -> bool:
+    # A pending spend is user-command evidence, never disposable observation
+    # data. Its request-id reuse window is evaluated by redemption separately.
+    if entry.get('pending_redeem'):
+        return True
+    if entry.get('state') == 'available':
+        expiry = int(entry.get('expires_at') or 0)
+        return not expiry or expiry > now
+    return now - _entry_recency(entry) <= _OBSERVATION_RETENTION_S
+
+
+def _write_entries(entries: dict[str, dict[str, Any]], *, now: int | None = None) -> None:
+    # Only a refresh/command with an explicit observation clock reclaims stale
+    # reconstructible rows. Scoped logout performs only its requested removal.
+    rows = [entry for entry in entries.values()
+            if now is None or _retain_entry(entry, now)]
+    rows.sort(key=_entry_recency)
+    write_json_atomic(_cache_path(),
+                      {'schema_version': _CACHE_SCHEMA_VERSION, 'entries': rows},
+                      mode=0o600)
 
 
 def _parse_usage_available_count(payload: Any) -> int | None:
@@ -338,7 +362,7 @@ def _authenticated_get(
 
     route = desktop_egress.route_request(url, user_id=user_id)
     if route == "direct":
-        from lib.http_client import http_get
+        from lib.http_transport.client import http_get
 
         response = http_get(url, headers=headers, timeout=timeout)
     else:
@@ -352,17 +376,6 @@ def _authenticated_get(
         )
     return _response_json(response, label="usage" if url.endswith("/usage") else "reset-credit details")
 
-
-def _refresh_lock_path(cache_key: str) -> str:
-    """Return one of finitely many cross-process refresh lock sidecars.
-
-    A sidecar per historical account can never be safely deleted while another
-    process may hold it. Hash striping therefore keeps both lock files and
-    ``json_store``'s process-local lock registry bounded while preserving
-    same-identity singleflight across processes.
-    """
-    stripe = int(cache_key[:8], 16) % _REFRESH_LOCK_STRIPES
-    return f"{_cache_path()}.refresh.{stripe:02x}"
 
 
 def _codex_usage_url() -> str:
@@ -556,8 +569,7 @@ def refresh_codex_usage_reset(
     # Merge the same owner/account across serving processes, but never hold a
     # global cache lock over network I/O. Different owners may refresh in
     # parallel; the short read-modify-write section below preserves both rows.
-    refresh_lock_path = _refresh_lock_path(identity["cache_key"])
-    with locked_path(refresh_lock_path):
+    with identity_flight(_cache_path(), identity["cache_key"]):
         previous = _read_entries().get(identity["cache_key"])
         if not force and not _needs_refresh(previous, current_time):
             return _project(previous, now=current_time, refreshing=False)
@@ -641,9 +653,14 @@ def refresh_codex_usage_reset(
                     retry_at=current_time + CODEX_USAGE_RESET_FAILURE_RETRY_S,
                 )
         with locked_path(_cache_path() + ".write"):
-            latest_entries = _read_entries()
+            latest_entries = _read_entries(strict=True)
+            pending = (latest_entries.get(identity["cache_key"]) or {}).get('pending_redeem')
+            if isinstance(pending, dict):
+                # Refresh is observation, not resolution of an ambiguous spend.
+                # Re-read under the write lock so concurrent evidence survives.
+                entry['pending_redeem'] = dict(pending)
             latest_entries[identity["cache_key"]] = entry
-            _write_entries(latest_entries)
+            _write_entries(latest_entries, now=current_time)
         return _project(entry, now=current_time, refreshing=False)
 
 
@@ -681,7 +698,7 @@ def _authenticated_post(
 
     route = desktop_egress.route_request(url, user_id=user_id)
     if route == "direct":
-        from lib.http_client import http_post
+        from lib.http_transport.client import http_post
 
         return http_post(url, headers=headers, data=body, timeout=timeout)
     return desktop_egress.egress_http(
@@ -731,7 +748,7 @@ def _write_pending_redeem(
     identity: dict[str, str], pending: dict[str, Any] | None, *, now: int
 ) -> None:
     with locked_path(_cache_path() + ".write"):
-        entries = _read_entries()
+        entries = _read_entries(strict=True)
         entry = entries.get(identity["cache_key"])
         if entry is None:
             if pending is None:
@@ -750,7 +767,7 @@ def _write_pending_redeem(
         else:
             entry["pending_redeem"] = dict(pending)
         entries[identity["cache_key"]] = entry
-        _write_entries(entries)
+        _write_entries(entries, now=now)
 
 
 def _consume_under_lock(
@@ -858,8 +875,7 @@ def consume_codex_usage_reset(
     if identity is None:
         return {"ok": False, "error": "account_identity_unavailable"}
 
-    refresh_lock_path = _refresh_lock_path(identity["cache_key"])
-    with locked_path(refresh_lock_path):
+    with identity_flight(_cache_path(), identity["cache_key"]):
         if _identity(load_token("codex") or {}, user_id) != identity:
             outcome = {"ok": False, "error": "account_changed"}
         else:
@@ -930,16 +946,16 @@ def trigger_codex_usage_reset_refresh(
     with _state_lock:
         if cache_key in _refreshing_keys:
             return False
-        if len(_refreshing_keys) >= _MAX_CONCURRENT_REFRESHES:
-            logger.debug(
-                '[CodexUsageReset] refresh capacity reached; deferring %s',
-                cache_key[:8])
-            return False
         _refreshing_keys.add(cache_key)
+
+    ready, cancelled = threading.Event(), threading.Event()
 
     def _run() -> None:
         reset_offer: dict[str, Any] | None = None
         try:
+            ready.wait()
+            if cancelled.is_set():
+                return
             try:
                 reset_offer = refresh_codex_usage_reset(
                     user_id=user_id, force=force
@@ -949,10 +965,9 @@ def trigger_codex_usage_reset_refresh(
                     "[CodexUsageReset] daemon refresh failed before projection: %s",
                     error,
                 )
-            # Keep publication inside the bounded daemon lifecycle. This makes
-            # ``refreshing=False`` a true completion barrier for callers and
-            # prevents the next owner/account refresh from borrowing capacity
-            # while this one is still publishing its receipt.
+            # The identity claim remains live through completion publication;
+            # another request for this identity cannot duplicate the query
+            # while its receipt is still being published.
             if reset_offer is not None:
                 _publish_codex_usage_reset_update(
                     user_id=user_id,
@@ -962,11 +977,18 @@ def trigger_codex_usage_reset_refresh(
             with _state_lock:
                 _refreshing_keys.discard(cache_key)
 
-    threading.Thread(
-        target=_run,
-        daemon=True,
-        name=f"codex-usage-reset-{cache_key[:8]}",
-    ).start()
+    worker = threading.Thread(target=_run, daemon=True,
+                              name=f"codex-usage-reset-{cache_key[:8]}")
+    try:
+        worker.start()
+    except BaseException:
+        cancelled.set()
+        if not worker.is_alive():
+            with _state_lock:
+                _refreshing_keys.discard(cache_key)
+        raise
+    finally:
+        ready.set()
     return True
 
 
@@ -1026,7 +1048,8 @@ def codex_usage_reset_status(
     )
     if (refresh_needed and not projected["refreshing"]
             and "retry_after_seconds" not in projected):
-        projected["retry_after_seconds"] = _CAPACITY_RETRY_S
+        # Covers an already-finished/changed projection, never admission pressure.
+        projected["retry_after_seconds"] = _STATUS_RECONCILE_RETRY_S
     return projected
 
 
@@ -1048,7 +1071,7 @@ def clear_codex_usage_reset_cache(
         else ""
     )
     with locked_path(_cache_path() + ".write"):
-        entries = _read_entries()
+        entries = _read_entries(strict=True)
         kept: dict[str, dict[str, Any]] = {}
         removed = 0
         for key, entry in entries.items():

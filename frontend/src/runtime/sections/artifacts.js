@@ -1,5 +1,5 @@
 /* ===== migrated source: artifacts.js ===== */
-/* artifacts.js — Right-side panel for renderable chat artifacts (md/html/svg).
+/* artifacts.js — Retained right-side panel bridge for published artifacts.
  *
  * Backend: lib/artifacts/* persists each artifact to the chat_artifacts
  * table.  Producers (write_file post-hook + inline scanner) call
@@ -13,7 +13,8 @@
  *   3. Fetches /api/artifacts/<id>/raw lazily on open and renders it:
  *        markdown → renderMarkdown() (DOMPurify-cleaned, see core.js)
  *        html     → <iframe sandbox srcdoc>  (NO scripts by default)
- *        svg      → <iframe sandbox srcdoc>  (forced when <script> present)
+ *        svg      → script-blocked document iframe
+ *        file     → typed inert metadata + server-authorized download controls
  *
  * Security invariants — see lib/artifacts/__init__.py and routes/artifacts.py.
  *   • NEVER innerHTML model HTML into the main document.
@@ -22,24 +23,35 @@
  *   • The /raw endpoint already ships a strict CSP — this is defense in depth.
  */
 
+// Temporary lexical presenters; remove with the retained artifact-panel migration.
+import { renderPublishedFile, renderScriptWarning } from '../rich-response/artifact-delivery';
+import { mountArtifactReview } from '../rich-response/artifact-review';
+
 (function () {
   "use strict";
 
   // ── Module state ────────────────────────────────────────────────────
-  // Conv-scoped cache of metadata + content.  Keyed by artifact id.
-  // Content fetched lazily on first open; subsequent opens are instant.
+  // Presentation metadata is conv-scoped, never an authorization receipt.
+  // Only the active body is retained; close/switch releases multi-MiB source.
   const _metaCache = new Map();    // id → meta dict
-  const _contentCache = new Map(); // id → raw string
+  const _contentCache = new Map(); // at most one active id → raw string
   // A newer snapshot hint must win over an older metadata request that settles
   // late. Weak keys keep the fence tied to the catalog shell lifecycle.
   const _hydrateEpoch = new WeakMap();
+  // Background snapshots may arrive before a Surface exists. Retain only
+  // their optional hint; the existing mount lifecycle triggers the owned read.
+  const _artifactHints = new WeakMap();
 
   // The currently open artifact (if any), so SSE updates can refresh.
   let _activeId = null;
+  let _disposeReview = null;
+  let _openEpoch = 0;
 
   // Per-session script-allow consent (NOT persisted).
   // Set<id>  — present means user clicked "Run scripts".
   const _scriptsAllowed = new Set();
+
+  let _disposeDeliveryWarning = null; // typed confirmation lifecycle; remove when panel migrates
 
   // What the panel is currently showing: 'doc' | 'library'.
   let _panelMode = "doc";
@@ -132,6 +144,7 @@
         '</div>' +
       '</header>' +
       '<div class="artifact-panel-banner" data-art-banner hidden></div>' +
+      '<div data-art-review-host hidden></div>' +
       '<div class="artifact-panel-body" data-art-body></div>';
     document.body.appendChild(panel);
 
@@ -195,6 +208,8 @@
       _togglePinById(id);
       return;
     }
+    const richArtifact = e.target.closest('[data-conversation-action="open-artifact"]');
+    if (richArtifact?.dataset.operation) { open(richArtifact.dataset.operation); return; }
     const btn = e.target.closest("[data-art-action]");
     if (!btn) return;
     const action = btn.getAttribute("data-art-action");
@@ -244,7 +259,14 @@
   async function open(id) {
     if (!id) return;
     const panel = _ensurePanel();
+    const openEpoch = ++_openEpoch;
     _activeId = id;
+    _disposeReview?.(); _disposeReview = null;
+    const reviewHost = panel.querySelector('[data-art-review-host]');
+    if (reviewHost) reviewHost.hidden = true;
+
+    _contentCache.clear();
+    _scriptsAllowed.clear(); // consent belongs to this explicit preview session
     _panelMode = "doc";
     panel.dataset.mode = "doc";
 
@@ -257,6 +279,10 @@
     const fmtEl   = panel.querySelector("[data-art-format]");
     const subEl   = panel.querySelector("[data-art-subtitle]");
     const bodyEl  = panel.querySelector("[data-art-body]");
+
+    if (bodyEl) disposeRichResponse(bodyEl);
+
+    _disposeDeliveryWarning?.(); _disposeDeliveryWarning = null;
     if (titleEl) titleEl.textContent = "Loading…";
     if (fmtEl) { fmtEl.textContent = ""; fmtEl.dataset.format = ""; }
     if (subEl) { subEl.hidden = true; subEl.textContent = ""; }
@@ -264,14 +290,25 @@
 
     try {
       const meta = await _ensureMeta(id);
-      if (_activeId !== id) return;  // user opened something else
+      if (_activeId !== id || _openEpoch !== openEpoch) return;
       _renderHeader(panel, meta);
+      if (reviewHost) {
+        reviewHost.hidden = false;
+        _disposeReview = mountArtifactReview(reviewHost, {
+          load: signal => Api.artifacts.review(id, signal),
+          save: (command, signal) => Api.artifacts.saveReview(id, command, signal),
+          loadFacts: signal => Api.conversations.workingFacts(meta.conv_id, signal),
+          text: (key, fallback) => typeof t === 'function' ? t(key) || fallback : fallback,
+        });
+      }
 
-      const content = await _ensureContent(id);
-      if (_activeId !== id) return;
+      const content = meta.format === "file" ? "" : await _ensureContent(id);
+      if (_activeId !== id || _openEpoch !== openEpoch) return;
       _renderBody(panel, meta, content, /*sourceView=*/ false);
     } catch (err) {
       console.warn("[Artifacts] open failed:", err);
+
+      if (_activeId !== id || _openEpoch !== openEpoch) return;
       if (bodyEl) {
         bodyEl.innerHTML =
           '<div class="artifact-error">' + ICON.warn +
@@ -286,9 +323,17 @@
   function closePanel() {
     const panel = document.getElementById("artifact-panel");
     if (!panel) return;
+    ++_openEpoch;
+    _disposeReview?.(); _disposeReview = null;
+
+    _disposeDeliveryWarning?.(); _disposeDeliveryWarning = null;
+    const richBody = panel.querySelector('[data-art-body]');
+    if (richBody) { disposeRichResponse(richBody); richBody.replaceChildren(); }
     panel.classList.add("artifact-panel-hidden");
     panel.setAttribute("aria-hidden", "true");
     document.body.classList.remove("artifact-panel-open");
+    _contentCache.clear();
+    _scriptsAllowed.clear();
     _activeId = null;
     _panelMode = "doc";
   }
@@ -296,7 +341,7 @@
   // ── Fetch helpers ───────────────────────────────────────────────────
 
   async function _ensureMeta(id) {
-    if (_metaCache.has(id)) return _metaCache.get(id);
+    // Visibility/cache is never authorization, including for legacy artifacts.
     const meta = await Api.artifacts.meta(id);
     if (!meta) throw new Error("artifact meta not found");
     _metaCache.set(id, meta);
@@ -306,7 +351,10 @@
   async function _ensureContent(id) {
     if (_contentCache.has(id)) return _contentCache.get(id);
     const text = await Api.artifacts.contentText(id);
-    _contentCache.set(id, text);
+    if (_activeId === id) {
+      _contentCache.clear(); // one active body, including multi-MiB prototypes
+      _contentCache.set(id, text);
+    }
     return text;
   }
 
@@ -315,6 +363,12 @@
   function _setMode(panel, mode) {
     panel.dataset.mode = mode;
     _panelMode = mode;
+    if (mode === 'library') {
+      ++_openEpoch;
+      _disposeReview?.(); _disposeReview = null;
+      const reviewHost = panel.querySelector('[data-art-review-host]');
+      if (reviewHost) reviewHost.hidden = true;
+    }
     // Toggle the leading icon (library button vs back-to-doc).
     panel.querySelectorAll('[data-art-mode-icon]').forEach(function (el) {
       const want = el.getAttribute("data-art-mode-icon");
@@ -362,6 +416,10 @@
         subEl.textContent = "";
       }
     }
+    for (const action of ["toggle-source", "copy", "print", "export-pdf"]) {
+      const control = panel.querySelector('[data-art-action="' + action + '"]');
+      if (control) control.hidden = meta.format === "file";
+    }
     const pinBtn = panel.querySelector('[data-art-action="pin"]');
     if (pinBtn) {
       pinBtn.innerHTML = meta.pinned ? ICON.pinOn : ICON.pinOff;
@@ -376,13 +434,10 @@
   async function _populateVersionSelect(panel, meta) {
     const sel = panel.querySelector("[data-art-version]");
     if (!sel) return;
-    if (!meta.parent_id && (meta.version || 1) <= 1) {
-      sel.hidden = true;
-      sel.innerHTML = "";
-      return;
-    }
+    const openEpoch = _openEpoch;
     try {
       const payload = await Api.artifacts.versions(meta.id);
+      if (_activeId !== meta.id || _openEpoch !== openEpoch) return;
       if (!payload) throw new Error("versions fetch failed");
       const chain = (payload && payload.versions) || [];
       if (chain.length <= 1) {
@@ -405,11 +460,16 @@
   }
 
   function _renderBody(panel, meta, content, sourceView) {
+
+    _disposeDeliveryWarning?.(); _disposeDeliveryWarning = null;
     const bodyEl = panel.querySelector("[data-art-body]");
     const banner = panel.querySelector("[data-art-banner]");
     if (!bodyEl) return;
 
+    disposeRichResponse(bodyEl);
+    bodyEl.classList.remove('rich-response');
     // Reset state from previous artifact
+
     if (banner) {
       banner.hidden = true;
       banner.innerHTML = "";
@@ -426,7 +486,14 @@
     }
 
     const fmt = meta.format;
-    if (fmt === "markdown") {
+    if (fmt === "file") {
+      renderPublishedFile(bodyEl, meta.meta?.responseFile, {
+        text: (key, fallback) => t(key) || fallback,
+        download: _download,
+      });
+    } else if (fmt === "rich") {
+      renderRichResponse(bodyEl, meta.contentJSON || content, { conversationId: meta.conv_id, text: (key, fallback) => t(key) || fallback });
+    } else if (fmt === "markdown") {
       _renderMarkdown(bodyEl, content);
     } else if (fmt === "html") {
       _renderHtml(panel, banner, bodyEl, meta, content);
@@ -462,22 +529,22 @@
 
   function _renderHtml(panel, banner, bodyEl, meta, content) {
     const allowScripts = _scriptsAllowed.has(meta.id);
-    const hasScripts = /<script[\s>]/i.test(content);
+    const hasScripts = ["html", "svg"].includes(meta.format) || meta.meta?.responseFile?.scriptRisk || /<script[\s>]|\son\w+\s*=|javascript:/i.test(content);
 
-    if (hasScripts && !allowScripts && banner) {
+    if (hasScripts && banner) {
       banner.hidden = false;
-      banner.innerHTML =
-        '<div class="artifact-banner-icon">' + ICON.warn + '</div>' +
-        '<div class="artifact-banner-text">' +
-          '<strong>Document scripts blocked.</strong> ' +
-          'Math (KaTeX) and table-of-contents links work without enabling scripts. ' +
-          'Click the button only if the document needs interactive JavaScript.' +
-        '</div>' +
-        '<button class="artifact-banner-action" data-art-action="allow-scripts">Run document scripts</button>';
+      _disposeDeliveryWarning = renderScriptWarning(banner,
+        () => { if (_activeId === meta.id) _allowScripts(); },
+        (key, fallback) => t(key) || fallback, {
+        scriptsAllowed: allowScripts,
+        interactiveDownload: () => _download(true, meta.id),
+      });
     }
 
     const iframe = document.createElement("iframe");
     iframe.className = "artifact-iframe";
+
+    iframe.title = meta.title || "Artifact preview";
     iframe.setAttribute("referrerpolicy", "no-referrer");
     iframe.setAttribute("loading", "lazy");
     // ── /view (default) vs /raw + srcdoc (opt-in) ──────────────────
@@ -514,7 +581,7 @@
   }
 
   function _renderSvg(panel, banner, bodyEl, meta, content) {
-    const hasScripts = /<script[\s>]/i.test(content);
+    const hasScripts = ["html", "svg"].includes(meta.format) || meta.meta?.responseFile?.scriptRisk || /<script[\s>]|\son\w+\s*=|javascript:/i.test(content);
     if (hasScripts) {
       // Reuse the HTML iframe path so the script-block consent flow
       // (and the trusted-KaTeX wrapper) handle the dynamic case.
@@ -546,31 +613,17 @@
     }
   }
 
-  async function _download() {
-    if (!_activeId) return;
+  async function _download(interactive = false, id = _activeId) {
+    if (!id || id !== _activeId) return;
     try {
-      const meta = await _ensureMeta(_activeId);
-      const text = await _ensureContent(_activeId);
-      const ext = meta.format === "html" ? "html"
-                : meta.format === "svg" ? "svg"
-                : "md";
-      const fname = (meta.title && /\.\w+$/.test(meta.title))
-        ? meta.title
-        : (meta.title || "artifact-" + meta.id.slice(0, 8)) + "." + ext;
-      const mime = meta.format === "html" ? "text/html"
-                 : meta.format === "svg" ? "image/svg+xml"
-                 : "text/markdown";
-      const blob = new Blob([text], { type: mime + ";charset=utf-8" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = fname;
-      a.style.display = "none";
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      // Revoke after a short delay so the download has time to start.
-      setTimeout(function () { URL.revokeObjectURL(url); }, 5000);
+      const meta = await _ensureMeta(id);
+      if (_activeId !== id) return; // a switched/closed panel cannot reuse consent
+      const link = document.createElement("a");
+      link.href = Api.artifacts.downloadUrl(id) + (interactive === true ? "?interactive=1" : "");
+      link.rel = "noopener noreferrer";
+      // Every source follows the server's live owner/deleted checks and safe
+      // attachment MIME/filename policy; never download a warm cached Blob.
+      document.body.append(link); link.click(); link.remove();
     } catch (e) {
       console.warn("[Artifacts] download failed:", e);
     }
@@ -675,6 +728,10 @@
 
   async function _showLibrary() {
     const panel = _ensurePanel();
+
+    _disposeDeliveryWarning?.(); _disposeDeliveryWarning = null;
+    _contentCache.clear(); _scriptsAllowed.clear();
+    _activeId = null;
     panel.classList.remove("artifact-panel-hidden");
     panel.setAttribute("aria-hidden", "false");
     document.body.classList.add("artifact-panel-open");
@@ -788,9 +845,19 @@
     }
   }
 
-  function _allowScripts() {
-    if (!_activeId) return;
-    _scriptsAllowed.add(_activeId);
+  async function _allowScripts() {
+    const id = _activeId;
+    if (!id) return;
+    try {
+      const meta = await _ensureMeta(id);
+      const content = await _ensureContent(id);
+      if (_activeId !== id) return;
+      _scriptsAllowed.add(id);
+      _renderBody(_ensurePanel(), meta, content, false);
+    } catch (error) {
+      console.warn("[Artifacts] consent failed:", error);
+      return;
+    }
     // Audit: best-effort, fire and forget.
     try {
       Api.clientError.report({
@@ -801,8 +868,7 @@
     } catch (e) {
       console.debug("[Artifacts] consent log build failed:", e);
     }
-    // Re-render the body, this time with allow-scripts.
-    open(_activeId);
+
   }
 
   // ── Formatting helpers ─────────────────────────────────────────────
@@ -880,6 +946,8 @@
     if (!conv || !conv.id) return;
     const epoch = (_hydrateEpoch.get(conv) || 0) + 1;
     _hydrateEpoch.set(conv, epoch);
+    _artifactHints.set(conv, hasArtifacts);
+    if (!runtimeScope.ConversationSurfacePresentation?.ownsConversation?.(conv.id)) return;
     if (hasArtifacts === false) {
       runtimeScope.ConversationSurfacePresentation?.setArtifacts?.(
         conv.id, new Map(),
@@ -914,6 +982,8 @@
 
   // ── Keyboard: Esc closes the panel; Ctrl/Cmd+P prints when panel open
   document.addEventListener("keydown", function (e) {
+
+    if (document.querySelector('dialog[open]')) return; // native modal owns Escape/focus
     if (e.key === "Escape" && _activeId) {
       closePanel();
       return;
@@ -923,7 +993,7 @@
       const panel = document.getElementById("artifact-panel");
       if (panel && !panel.classList.contains("artifact-panel-hidden")) {
         const tag = (e.target && e.target.tagName) || "";
-        if (tag !== "INPUT" && tag !== "TEXTAREA") {
+        if (tag !== "INPUT" && tag !== "TEXTAREA" && _metaCache.get(_activeId)?.format !== "file") {
           e.preventDefault();
           _print();
         }
@@ -937,6 +1007,9 @@
     closePanel: closePanel,
     showLibrary: _showLibrary,
     hydrateConversation: hydrateConversation,
+    activateConversation: conv => {
+      if (_artifactHints.has(conv)) void hydrateConversation(conv, _artifactHints.get(conv));
+    },
     // Exposed for tests / debug
     _meta: _metaCache,
     _content: _contentCache,

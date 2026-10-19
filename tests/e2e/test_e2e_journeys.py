@@ -183,10 +183,10 @@ def test_paper_and_orchestration_domains_boot(page, assert_no_js_errors):
     def _force_debug_flags(route):
         response = route.fetch()
         body = response.json()
-        body['feature_flags'] = {'debug_mode': True, 'optimizer_enabled': True}
+        body.get('data', body)['feature_flags'] = {'debug_mode': True, 'optimizer_enabled': True}
         route.fulfill(response=response, json=body)
 
-    page.route('**/api/v1/server-config**', _force_debug_flags)
+    page.route('**/api/v*/server-config**', _force_debug_flags)
     page.reload()
     _wait_app_ready(page)
     page.locator('#paperModeBtn').click()
@@ -296,7 +296,7 @@ def test_paper_landing_pastes_direct_pdf_link_to_fetch_stream(page):
                       json={'ok': True, 'results': []})
 
     page.route('**/api/paper/fetch-arxiv-stream**', _capture_fetch_stream)
-    page.route('**/api/v1/paper/search-arxiv**', _capture_search_api)
+    page.route('**/api/v*/paper/search-arxiv**', _capture_search_api)
 
     from tests.conftest import _dismiss_onboarding_modals
     _wait_app_ready(page)

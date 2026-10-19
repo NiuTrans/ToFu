@@ -24,7 +24,7 @@ from lib.llm.stream_result import (
     ProviderStreamResult as ProviderStreamResult,
     ensure_provider_stream_result as ensure_provider_stream_result,
 )
-from lib.llm_errors import (
+from lib.llm.llm_errors import (
     RateLimitError as RateLimitError,
     is_subscription_quota_error as is_subscription_quota_error,
     parse_subscription_retry_after as parse_subscription_retry_after,

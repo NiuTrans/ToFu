@@ -264,6 +264,12 @@ def _perform_web_search_impl(query, max_results=None, user_question='', freshnes
     constraint_scopes = site_scopes(query)
     constraint_rejected = 0
 
+    fallback_attempts = []
+
+    def _has_useful_candidates():
+        # A nonempty SERP is not success when it only matches a generic word.
+        return any(r.get('relevance') == 'lexical_match' for r in unique_results)
+
     fetch_pool = ThreadPoolExecutor(max_workers=16)
     first_fetch_submitted_at = None
     fetch_candidate_budget = max(12, max_results * 3)
@@ -304,6 +310,10 @@ def _perform_web_search_impl(query, max_results=None, user_question='', freshnes
         admitted_batch = []
         with _lock:
             for rank, r in enumerate(batch, 1):
+
+                # Providers may reuse cached dictionaries across callers. Our
+                # evidence annotations and content belong to this invocation.
+                r = dict(r)
                 if not matches_site_constraints(r.get('url') or '', constraint_scopes):
                     constraint_rejected += 1
                     continue
@@ -338,6 +348,8 @@ def _perform_web_search_impl(query, max_results=None, user_question='', freshnes
                         kept['snippet'] = r.get('snippet') or ''
                     if len(r.get('title') or '') > len(kept.get('title') or ''):
                         kept['title'] = r.get('title') or ''
+
+                    annotate_relevance(kept, query)
             all_results.extend(admitted_batch)
 
         if not new_results or not fetch_pages:
@@ -356,6 +368,13 @@ def _perform_web_search_impl(query, max_results=None, user_question='', freshnes
                 min_query_terms=gate_min_terms,
                 min_fetch=gate_min_fetch,
             )
+
+            # Keep the recall floor for sparse/translated snippets, but do not
+            # fetch every generic partial match from a degraded engine.
+            floor_keys = {_url_dedup_key(r['url']) for r in new_results[:gate_min_fetch]}
+            to_fetch = [r for r in to_fetch if r.get('relevance') != 'weak_match'
+                        or _url_dedup_key(r['url']) in floor_keys]
+            to_fetch.sort(key=lambda r: r.get('relevance') != 'lexical_match')
         else:
             to_fetch = new_results
 
@@ -445,11 +464,12 @@ def _perform_web_search_impl(query, max_results=None, user_question='', freshnes
     # normal network timeout instead of starting it with only milliseconds left
     # and quietly violating the advertised whole-search deadline.
     _left = _budget_left()
-    if allow_generic_fallback and not all_results and not _deadline_hit and (_left is None or _left > 11):
-        logger.info('[Search] 0 results on first attempt, retrying DDG+Brave after 0.8s for query=%r', query[:80])
+    if allow_generic_fallback and not _has_useful_candidates() and not _deadline_hit and (_left is None or _left > 11):
+        logger.info('[Search] No useful first-wave evidence, retrying original query after 0.8s: %r', query[:80])
+        fallback_attempts.append('DDG-HTML')
         time.sleep(0.8)
         try:
-            retry = search_ddg_html(query, max_results)
+            retry = search_ddg_html(query, max_results, freshness)
         except Exception as e:
             # A raising engine is a network failure, not "no matches" — the
             # diag classifier reads engine_errors, so record it there.
@@ -457,24 +477,31 @@ def _perform_web_search_impl(query, max_results=None, user_question='', freshnes
             engine_errors['DDG-HTML'] = str(e)[:200]
             retry = None
         if retry:
+            engine_counts['DDG-HTML'] = engine_counts.get('DDG-HTML', 0) + len(retry)
             _submit_fetches_for_batch(retry, 'DDG-HTML')
-        else:
+        if not _has_useful_candidates():
             _left = _budget_left()
             if _left is None or _left > 11:
                 try:
-                    retry_brave = search_brave(query, max_results)
+                    fallback_attempts.append('Brave')
+                    retry_brave = search_brave(query, max_results, freshness)
                 except Exception as e:
                     logger.warning('[Search] Brave retry failed: %s', e)
                     engine_errors['Brave'] = str(e)[:200]
                     retry_brave = None
                 if retry_brave:
+
+                    engine_counts['Brave'] = engine_counts.get('Brave', 0) + len(retry_brave)
                     _submit_fetches_for_batch(retry_brave, 'Brave')
 
     # ── Browser fallback: server network may be down but user browser works ──
     # The provider contract permits a 25s browser fetch, so do not start one
     # unless that much search budget remains.
     _left = _budget_left()
-    if allow_generic_fallback and not all_results and not _deadline_hit and (_left is None or _left > 25):
+    if allow_generic_fallback and not _has_useful_candidates() and not _deadline_hit and (_left is None or _left > 25) and not freshness:
+        # The legacy browser provider cannot enforce a freshness parameter.
+        # Never silently discard it while recovering from poor evidence.
+        fallback_attempts.append('Browser')
         browser_results = search_via_browser(query, max_results)
         if browser_results:
             logger.info('[Search] Browser fallback produced %d results for query=%r',
@@ -607,6 +634,11 @@ def _perform_web_search_impl(query, max_results=None, user_question='', freshnes
     full_content_dedup_count = fetched_raw_count - fetch_count
     step_timings['step4c_full_content_dedup'] = time.time() - step4c_t0
 
+    # Reassess article evidence before any link expansion. Fetch success by
+    # itself must not let weak SERPs amplify their navigation/footer links.
+    for result in unique_results:
+        annotate_relevance(result, query)
+
     # ── Step 4b: One-hop link-following (depth) — opt-in ──
     _do_deepen = (bool(getattr(config, 'deepen_enabled', False))
                   or is_deepen_enabled()) if deepen is None else deepen
@@ -616,12 +648,21 @@ def _perform_web_search_impl(query, max_results=None, user_question='', freshnes
     if _do_deepen and fetch_pages and fetch_count:
         step4b_t0 = time.time()
         try:
+            left = _budget_left()
             deeper = deepen_results(query, unique_results,
-                                    max_chars=max_chars, pdf_max_chars=pdf_max_chars)
+                                    max_chars=max_chars, pdf_max_chars=pdf_max_chars,
+                                    deadline_ts=None if left is None else time.monotonic() + max(0, left))
+            if _budget_left() is not None and _budget_left() <= 0:
+                _deadline_hit = True
         except Exception as e:
             logger.error('[Search] deepen stage failed: %s', e, exc_info=True)
             deeper = []
         for dr in deeper:
+
+            if not matches_site_constraints(dr.get('url') or '', constraint_scopes):
+                constraint_rejected += 1
+                continue
+            annotate_relevance(dr, query)
             key = _url_dedup_key(dr['url'])
             if key not in seen_urls:
                 seen_urls.add(key)
@@ -661,9 +702,14 @@ def _perform_web_search_impl(query, max_results=None, user_question='', freshnes
             # (default 3000) lets short pages skip the LLM entirely. The old
             # zero-min_chars override here forced EVERY page through the
             # filter and was a major step-5 latency source.
+            left = _budget_left()
+            filter_timeout = config.filter_timeout if left is None else max(0.001, min(config.filter_timeout, left))
             filtered = filter_web_contents_batch(to_filter, query=query,
                                                  user_question=user_question,
+                                                 timeout=filter_timeout,
                                                  config=config)
+            if _budget_left() is not None and _budget_left() <= 0:
+                _deadline_hit = True
             for r in unique_results:
                 if r['url'] in filtered:
                     val = filtered[r['url']]
@@ -682,8 +728,12 @@ def _perform_web_search_impl(query, max_results=None, user_question='', freshnes
     relevant = [r for r in unique_results if r['url'] not in irrelevant_urls]
     # Preserve uncertain candidates without presenting them as useful evidence.
     # Fetched content may establish relevance even when SERP words do not.
+    for result in relevant:
+        annotate_relevance(result, query)
     unverified = [r for r in relevant
-                  if r.get('relevance') == 'unverified' and not r.get('full_content')]
+                  if r.get('relevance') in ('weak_match', 'unverified')
+                  and not (r.get('full_content') and
+                           r.get('relevance_evidence', {}).get('cross_language'))]
     unverified_urls = {r['url'] for r in unverified}
     relevant = [r for r in relevant if r['url'] not in unverified_urls]
 
@@ -797,6 +847,9 @@ def _perform_web_search_impl(query, max_results=None, user_question='', freshnes
         'deadline_hit': _deadline_hit,
         'site_constraints': [scope for _, scope in constraint_scopes],
         'constraint_rejected': constraint_rejected,
+
+        'fallback_attempts': fallback_attempts,
+        'weak_match_count': sum(r.get('relevance') == 'weak_match' for r in unverified),
         'unverified_count': len(unverified),
         'unverified_candidates': [
             {'url': r['url'], 'title': str(r.get('title') or '')[:160]}

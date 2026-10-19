@@ -31,6 +31,52 @@ class ScheduledTurnDispatch:
     task_id: str = ""
 
 
+def _build_swarm_continuation_config(
+    settings: dict[str, Any],
+    tools_config: dict[str, Any],
+    overrides: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Share chat defaults, not attended authority or scheduler overrides.
+
+    The swarm caller carries no accepted parent attempt/config. Conversation
+    settings cannot reconstruct global prompt/tool policy, so nondefault parent
+    policy must still fail replay validation rather than be guessed here.
+    """
+    from lib.conv_config import resolve_conv_config
+    from lib.tasks_pkg.chat_mode import apply_chat_mode
+
+    controls = {'_swarmAutoContinue': True, 'schedulerEnabled': False}
+    if tools_config or any(
+        key not in controls or value is not controls[key]
+        for key, value in overrides.items()
+    ):
+        raise ValueError('Swarm continuation accepts only its fixed control overrides')
+
+    # The old scheduler builder never inherited these attended capabilities or
+    # selected a Flow. Canonical defaults must not silently grant them now.
+    config = resolve_conv_config(conv_settings={
+        **settings,
+        'activeFlow': '',
+        'autopilotEnabled': False,
+        'desktopEnabled': False,
+        'humanGuidanceEnabled': False,
+        'schedulerEnabled': False,
+    }, is_active=False)
+    if config['planMode']:
+        # Plan normalization at task start enables human guidance again. Keep
+        # its read-only restriction by deferring, not by dropping Plan or
+        # pretending a guidance=False clamp would survive that boundary.
+        return None
+
+    # Chat mode can expand atomic flags later in model_config. Preserve the
+    # legacy swarm's narrower tool choices instead of granting tools for parity.
+    if any(config.get(key) != value
+           for key, value in apply_chat_mode(config).items() if key != 'chatMode'):
+        config.pop('chatMode', None)
+    config.update(controls)
+    return config
+
+
 def dispatch_scheduled_turn(
     conversation_id: str,
     user_message: dict[str, Any],
@@ -88,8 +134,16 @@ def dispatch_scheduled_turn(
         kind = "scheduled_reply"
     if turn_kind:
         kind = turn_kind
-    task_config = build_task_config(parsed_tools, settings)
-    task_config.update(dict(config_overrides or {}))
+    if kind == 'swarm_autocontinue_reply':
+        task_config = _build_swarm_continuation_config(
+            settings, parsed_tools, dict(config_overrides or {}))
+        if task_config is None:
+            logger.info('%s Swarm continuation deferred: Plan requires human guidance',
+                        log_prefix)
+            return ScheduledTurnDispatch('start_failed')
+    else:
+        task_config = build_task_config(parsed_tools, settings)
+        task_config.update(dict(config_overrides or {}))
     if '_ctx' not in projection and 'contextSnapshot' not in projection:
         ctx_snapshot = build_turn_ctx_snapshot(task_config)
         if ctx_snapshot is not None:

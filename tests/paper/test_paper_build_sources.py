@@ -87,12 +87,29 @@ def test_snapshot_copies_binary_and_bibliography_and_digest_tracks_them(tmp_path
     assert json.dumps(first.files)  # binary contents never ride the wire manifest
 
 
-def test_source_byte_and_file_limits_fail_explicitly(tmp_path):
+def test_complete_snapshot_exceeds_old_file_and_byte_quotas(tmp_path):
+    import hashlib
     root, main, _ = paper(tmp_path)
-    with pytest.raises(BuildError, match='byte limit'):
-        snapshot_sources(root, main, tmp_path / 'bytes', max_bytes=8)
-    with pytest.raises(BuildError, match='file limit'):
-        snapshot_sources(root, main, tmp_path / 'files', max_files=1)
+    for index in range(1101):
+        (root / f'part-{index}.bib').write_text(f'reference {index}')
+    large = root / 'figure.png'
+    with large.open('wb') as output:
+        for _ in range(65):
+            output.write(b'x' * (1024 * 1024))
+    frozen = snapshot_sources(root, main, tmp_path / 'complete')
+    assert len(frozen.files) == 1104
+    assert frozen.size_bytes > 64 * 1024 * 1024
+    assert (frozen.root / 'figure.png').stat().st_size == 65 * 1024 * 1024
+    digest = hashlib.sha256()
+    with (frozen.root / 'figure.png').open('rb') as source:
+        while chunk := source.read(1024 * 1024):
+            digest.update(chunk)
+    expected = hashlib.sha256()
+    for _ in range(65):
+        expected.update(b'x' * (1024 * 1024))
+    assert digest.digest() == expected.digest()
+    assert not (frozen.root / 'figure.png').stat().st_mode & 0o222
+    print(f'paper_source_demand: {len(frozen.files)} files, {frozen.size_bytes} frozen bytes')
 
 
 def test_snapshot_retries_content_change_and_returns_the_settled_revision(tmp_path, monkeypatch):
@@ -169,32 +186,13 @@ def test_snapshot_repeated_mutation_exhausts_its_finite_retry_budget(tmp_path, m
     assert reads <= sources.limit('source_snapshot_attempts') * 4
 
 
-def test_snapshot_scan_stops_before_materializing_an_unbounded_directory(tmp_path, monkeypatch):
-    from lib.paper.builds import sources
+def test_snapshot_scan_keeps_evidence_beyond_old_entry_limit(tmp_path):
     root, main, _ = paper(tmp_path)
-    original = sources.os.scandir
-    seen = 0
-    maximum = sources.MAX_SCAN_ENTRIES
-
-    class Directory:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *args):
-            pass
-
-        def __iter__(self):
-            nonlocal seen
-            from types import SimpleNamespace
-            for _ in range(maximum + 2):
-                seen += 1
-                yield SimpleNamespace(name='.ignored')
-
-    monkeypatch.setattr(sources.os, 'scandir', lambda path: Directory() if Path(path) == root else original(path))
-    with pytest.raises(BuildError) as failure:
-        snapshot_sources(root, main, tmp_path / 'snapshot')
-    assert failure.value.code == 'source_limit'
-    assert seen == maximum + 1
+    for index in range(4101):
+        (root / f'ignored-{index}.aux').write_bytes(b'')
+    (root / 'late.bib').write_text('late bibliography')
+    frozen = snapshot_sources(root, main, tmp_path / 'snapshot')
+    assert 'late.bib' in {row['path'] for row in frozen.files}
 
 
 def test_snapshot_scan_error_is_not_silently_an_empty_directory(tmp_path, monkeypatch):

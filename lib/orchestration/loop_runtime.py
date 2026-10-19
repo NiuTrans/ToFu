@@ -177,6 +177,72 @@ class OrchestrationLoopRuntime:
         self._budget_policy = budget_policy
 
     def run(self, loop_id: str, context: str) -> tuple[str, str | None]:
+        native=getattr(self._navigator,'supports_native_loop',None)
+        if callable(native) and native():
+            return self._run_native(loop_id,context)
+        return self._run_python(loop_id,context)
+
+    def _run_native(self,loop_id,context):
+        from lib.agent_verdict import autopilot_progress_window, replan_enabled, emit_native_verdict_result
+        import sys
+        config=dict(max_iterations=self._max_iterations,
+            configured_cap=int(resolve_node_runtime_param(self._nodes[loop_id],'max_iterations')),
+            budget_policy=self._budget_policy)
+        with self._navigator.native_loop(loop_id,config) as loop:
+            self._emit(dict(type='loop_start',node_id=loop_id,max_iterations=loop.window,planner=loop.planner))
+            self._feedback.reset_loop()
+            verifier_output = ''
+            result=loop.advance(dict(operation='start',iteration=0))
+            while True:
+                if result['append_feedback']:
+                    self._feedback.append_verifier_feedback(verifier_output)
+                    emit_native_verdict_result(result['classification'])
+                if result['progress'] is not None:
+                    entry=result['progress']
+                    for key in ('resolved_delta','cum_resolved'):
+                        entry[key]=None if entry[key] is None else int(entry[key])
+                    self._feedback.append_native_progress(entry)
+                for effect in result['effects']:
+                    if effect['kind']=='directive':self._feedback.set_directive(effect['text'])
+                    else:
+                        event=effect['event']
+                        for key in ('remaining','resolved_delta'):
+                            if key+'_decimal' in event:
+                                raw=event.pop(key+'_decimal');event[key]=None if raw is None else int(raw)
+                        if event['type']=='loop_iteration':
+                            if self._abort_check():raise OrchestrationLoopAborted()
+                            self._on_iteration_change(event['iteration'])
+                        self._emit(event)
+                        if event['type']=='loop_iteration':self._progress.reset_iteration()
+                action=result['action']
+                if action=='halt':
+                    self._outcomes.record_loop_exit(node_id=loop_id,reason=result['exit_reason'],iterations=result['iteration'])
+                    self._on_iteration_change(0)
+                    return context,loop.exit
+                if action=='replan':
+                    context=self._run_replan(loop.planner,context,result['defect'],result['replan'])
+                    result=loop.advance(dict(operation='replan_done',iteration=result['iteration']))
+                    continue
+                context=self._walk(loop.body,context,stop_at=loop_id)
+                producer=self._progress.aggregate_iteration() or {}
+                verifier_output=self._transcript.last_verifier_output(VERIFIER_ROLES)
+                verifier_role=self._transcript.last_verifier_role(VERIFIER_ROLES)
+                ledger=self._feedback.vu_progress_snapshot()
+                previous=next((entry['cum_resolved'] for entry in reversed(ledger) if entry.get('cum_resolved') is not None),None)
+                window=min(autopilot_progress_window(),len(ledger)+2) if verifier_role=='virtual_user' else 0
+                tail=ledger[-(window-1):] if window>=2 else []
+                tail=[{'resolved_delta':None if entry['resolved_delta'] is None else str(entry['resolved_delta']),'targets':entry['targets']} for entry in tail]
+                result=loop.advance(dict(operation='body_done',iteration=result['iteration'],
+                    producer_count=int(producer.get('sc_count') or 0),producer_reported=bool(producer.get('reported')),
+                    producer_names=sorted({str(name) for name in producer.get('names',[]) if name}),
+                    verifier_output=verifier_output or '',verifier_role=verifier_role or '',
+                    previous_resolved=None if previous is None else str(previous),
+                    verifier_tool_rounds=self._feedback.verifier_tool_rounds(),
+                    justification_chars=None if loop.native_justification else len(_strip_machine_tokens(verifier_output or '').strip()) if verifier_role=='virtual_user' else 0,
+                    history_tail=self._feedback.history_snapshot()[-2:],progress_tail=tail,progress_window=window,
+                    replan_enabled=replan_enabled(),digit_limit=getattr(sys,'get_int_max_str_digits',lambda:0)()))
+
+    def _run_python(self, loop_id: str, context: str) -> tuple[str, str | None]:
         """Run a loop body until convergence or a canonical bounded exit."""
         body_entry, exit_node = self._navigator.loop_parts(loop_id)
         planner_id = self._navigator.find_loop_planner(loop_id, body_entry)

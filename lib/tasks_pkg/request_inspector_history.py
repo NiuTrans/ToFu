@@ -10,7 +10,7 @@ from __future__ import annotations
 import threading
 import time
 
-from lib.task_event_contract import EVENT_READ_GUARD_SCOPED_CONTRACT
+from lib.task_replay.task_event_contract import EVENT_READ_GUARD_SCOPED_CONTRACT
 from lib.tasks_pkg.snapshot_delta import SnapshotReplayState
 
 SNAPSHOT_HISTORY_TYPES = ("messages_snapshot", "tool_wire_projection")

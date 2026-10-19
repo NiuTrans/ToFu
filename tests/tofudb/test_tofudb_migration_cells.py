@@ -4,7 +4,7 @@ import tracemalloc
 
 import pytest
 
-from lib.storage_sidecar.tofudb_migration_source import SQLiteMigrationSource, MigrationSourceError
+from lib.storage_authority_sql.migration.tofudb_migration_source import SQLiteMigrationSource, MigrationSourceError
 
 pytestmark = pytest.mark.unit
 

@@ -252,25 +252,46 @@ def add_cache_breakpoints(body, log_prefix='', *, api_protocol='anthropic'):
 
     messages = body.get('messages', [])
 
-    # Phase 0: Strip ALL existing cache_control
-    for i, msg in enumerate(messages):
+    # Phase 0: Strip ALL existing cache_control. A marker-carrying message
+    # needs the rebuild; a clean history skips the per-block dict copies.
+    _any_marker = False
+    for msg in messages:
         content = msg.get('content')
         if isinstance(content, list):
-            for j, block in enumerate(content):
+            for block in content:
                 if isinstance(block, dict) and 'cache_control' in block:
-                    content[j] = {k: v for k, v in block.items() if k != 'cache_control'}
-    tools = body.get('tools')
-    if tools:
-        for t_idx, tool in enumerate(tools):
-            # Non-dict entries are dropped at the prepare_request wire
-            # boundary (sanitize_wire_tools); this guard keeps the marker
-            # pass total even when a caller reaches us directly.
-            if not isinstance(tool, dict):
-                continue
-            fn = tool.get('function')
-            if fn and 'cache_control' in fn:
-                tools[t_idx] = {**tool,
-                                'function': {k: v for k, v in fn.items() if k != 'cache_control'}}
+                    _any_marker = True
+                    break
+            if _any_marker:
+                break
+    if not _any_marker:
+        tools = body.get('tools')
+        if tools:
+            for tool in tools:
+                if (isinstance(tool, dict)
+                        and isinstance(tool.get('function'), dict)
+                        and 'cache_control' in tool['function']):
+                    _any_marker = True
+                    break
+    if _any_marker:
+        for i, msg in enumerate(messages):
+            content = msg.get('content')
+            if isinstance(content, list):
+                for j, block in enumerate(content):
+                    if isinstance(block, dict) and 'cache_control' in block:
+                        content[j] = {k: v for k, v in block.items() if k != 'cache_control'}
+        tools = body.get('tools')
+        if tools:
+            for t_idx, tool in enumerate(tools):
+                # Non-dict entries are dropped at the prepare_request wire
+                # boundary (sanitize_wire_tools); this guard keeps the marker
+                # pass total even when a caller reaches us directly.
+                if not isinstance(tool, dict):
+                    continue
+                fn = tool.get('function')
+                if fn and 'cache_control' in fn:
+                    tools[t_idx] = {**tool,
+                                    'function': {k: v for k, v in fn.items() if k != 'cache_control'}}
 
     # Phase 0.5: Representation invariance — decouple a message's byte
     # representation from WHETHER it is anchored this round.
@@ -293,56 +314,77 @@ def add_cache_breakpoints(body, log_prefix='', *, api_protocol='anthropic'):
     # byte-identical in the anchored and un-anchored states, and so is the
     # Anthropic translation. Assistant messages are left alone (their tool_calls
     # take a dedicated block path); system content is handled by its own phase.
-    for i, msg in enumerate(messages):
+    #
+    # Skip the whole pass when nothing needs a wrap or an omit: a steady-state
+    # round whose str contents were already wrapped by an earlier build (or
+    # that carries only block content) pays one cheap scan instead of
+    # rebuilding every carrier dict.
+    _needs_normalize = False
+    for msg in messages:
         role = msg.get('role')
-        if role in ('tool', 'user'):
+        if role in ('tool', 'user', 'assistant'):
             content = msg.get('content')
             if isinstance(content, str) and content:
-                messages[i] = {**msg, 'content': [{'type': 'text', 'text': content}]}
-        elif role == 'assistant':
-            # An assistant turn is frequently the conversation TAIL (the model's
-            # prose before its tool_calls, or a prefill-resume round), so the
-            # rolling tail marker wraps→unwraps its str content the same way —
-            # the flip is asymmetric if we only normalize tool/user. Normalize
-            # it too whenever it carries NON-EMPTY ``str`` content — INCLUDING
-            # an assistant turn that also carries ``tool_calls`` (the
-            # prose-before-run_command shape).
-            #
-            # THE {content} FLOOR-MISS FIX. An ``assistant/tool_call`` turn
-            #   with prose was PREVIOUSLY carved out (``and not tool_calls``).
-            #   That left its ``str`` content un-normalized, so the tail phase
-            #   wrapped it into a block the round it was the tail, and it
-            #   reverted to a bare ``str`` the round it became buried prefix —
-            #   a canonical-INVISIBLE ``str``↔block flip on ``content`` that
-            #   re-billed the cached prefix EVERY round (the dominant residual
-            #   miss the field-level tracer proved as ``…(run_command){content}``).
-            #   Normalizing non-empty content up front makes anchoring only
-            #   toggle a ``cache_control`` key on an already-list block, so the
-            #   turn's ``content`` bytes are identical whether or not it is the
-            #   tail. The tool_use blocks still drive ``_assistant_blocks``'
-            #   last-block marker hoist (it moves a content-level marker onto the
-            #   last emitted block regardless), so the marker logic is undisturbed.
-            #
-            #   EMPTY content is still not wrapped: a fabricated ``[{text:''}]``
-            #   block would be a new empty text block the model never wrote (and
-            #   the old carve-out's real concern), so non-empty wrap stays
-            #   ``isinstance(content, str) and content``.
-            #
-            #   But empty MUST NOT stay as a present key either. ``content: ''``
-            #   vs omitted is canonical-invisible and byte-divergent — the other
-            #   ``{content}`` floor-miss the field tracer logged on
-            #   ``assistant/tool_call(custom__run_command)``. Harbor's
-            #   ``content or ""`` and JSON-null / ``[]`` replay all become the
-            #   builder's omit-key shape here, last-chance after build_body.
-            content = msg.get('content')
-            if (msg.get('tool_calls') and 'content' in msg and (
-                    content is None
-                    or (isinstance(content, str) and not content.strip())
-                    or (isinstance(content, list) and not content))):
-                msg.pop('content', None)
-                content = None
-            if isinstance(content, str) and content:
-                messages[i] = {**msg, 'content': [{'type': 'text', 'text': content}]}
+                _needs_normalize = True
+                break
+            if (role == 'assistant' and msg.get('tool_calls')
+                    and 'content' in msg and (
+                        content is None
+                        or (isinstance(content, str) and not content.strip())
+                        or (isinstance(content, list) and not content))):
+                _needs_normalize = True
+                break
+    if _needs_normalize:
+        for i, msg in enumerate(messages):
+            role = msg.get('role')
+            if role in ('tool', 'user'):
+                content = msg.get('content')
+                if isinstance(content, str) and content:
+                    messages[i] = {**msg, 'content': [{'type': 'text', 'text': content}]}
+            elif role == 'assistant':
+                # An assistant turn is frequently the conversation TAIL (the model's
+                # prose before its tool_calls, or a prefill-resume round), so the
+                # rolling tail marker wraps→unwraps its str content the same way —
+                # the flip is asymmetric if we only normalize tool/user. Normalize
+                # it too whenever it carries NON-EMPTY ``str`` content — INCLUDING
+                # an assistant turn that also carries ``tool_calls`` (the
+                # prose-before-run_command shape).
+                #
+                # THE {content} FLOOR-MISS FIX. An ``assistant/tool_call`` turn
+                #   with prose was PREVIOUSLY carved out (``and not tool_calls``).
+                #   That left its ``str`` content un-normalized, so the tail phase
+                #   wrapped it into a block the round it was the tail, and it
+                #   reverted to a bare ``str`` the round it became buried prefix —
+                #   a canonical-INVISIBLE ``str``↔block flip on ``content`` that
+                #   re-billed the cached prefix EVERY round (the dominant residual
+                #   miss the field-level tracer proved as ``…(run_command){content}``).
+                #   Normalizing non-empty content up front makes anchoring only
+                #   toggle a ``cache_control`` key on an already-list block, so the
+                #   turn's ``content`` bytes are identical whether or not it is the
+                #   tail. The tool_use blocks still drive ``_assistant_blocks``'
+                #   last-block marker hoist (it moves a content-level marker onto the
+                #   last emitted block regardless), so the marker logic is undisturbed.
+                #
+                #   EMPTY content is still not wrapped: a fabricated ``[{text:''}]``
+                #   block would be a new empty text block the model never wrote (and
+                #   the old carve-out's real concern), so non-empty wrap stays
+                #   ``isinstance(content, str) and content``.
+                #
+                #   But empty MUST NOT stay as a present key either. ``content: ''``
+                #   vs omitted is canonical-invisible and byte-divergent — the other
+                #   ``{content}`` floor-miss the field tracer logged on
+                #   ``assistant/tool_call(custom__run_command)``. Harbor's
+                #   ``content or ""`` and JSON-null / ``[]`` replay all become the
+                #   builder's omit-key shape here, last-chance after build_body.
+                content = msg.get('content')
+                if (msg.get('tool_calls') and 'content' in msg and (
+                        content is None
+                        or (isinstance(content, str) and not content.strip())
+                        or (isinstance(content, list) and not content))):
+                    msg.pop('content', None)
+                    content = None
+                if isinstance(content, str) and content:
+                    messages[i] = {**msg, 'content': [{'type': 'text', 'text': content}]}
 
     bp = 0
 

@@ -10,7 +10,8 @@ The native stdio contract owns tool projection for both Rust requests and Python
 counting. Semantic L2 needs an existing authorized pin whose matching slots have
 the compiled owner/provider/offering/deployment/connection/credential identity;
 without that port, native pressure refuses rather than selecting a global route.
-Ordinary slot-based admission retains its existing window and output behavior.
+Ordinary slot-based admission retains its route window; its configured output
+cap is resolved against current input before being used as a reservation.
 
 **Problem.** Model-routing v2 declared Model/Offering context windows were not
 carried into runtime Slots. Compaction consulted the separate legacy registry
@@ -48,7 +49,10 @@ planner measures the attributed retained projection with tools, history
 wrappers, summary decorations and managed restoration. It selects a fitting
 whole-unit suffix and reserves the actual summary transport allowance, derived
 from one quarter of the prompt ceiling and capped at the existing 65,536-token
-allowance. Incomplete provider output is still rejected without text slicing.
+allowance. If that preferred allowance does not fit the smallest protected
+suffix, the summary transport cap uses the measured remaining room, provided
+the existing nominal summary target fits. The preferred allowance alone is
+never an irreducible floor. Incomplete provider output is still rejected without text slicing.
 An impossible required floor refuses before summary spending; an overfull
 completed candidate is rejected before archive/adoption. Deterministic suffix
 planning performs no model calls or durable writes. Suffix trials are bounded
@@ -59,32 +63,149 @@ post-summary head deletion loses evidence; raising admission ceilings conceals
 incorrect accounting. Specs: `test_dispatch_compaction_plan.py` and
 `test_compaction_history_wire.py`.
 
-## AA-cheapest compression-first routing
-**Problem.** Requiring a cheaper summarizer to match the main model's ordinal
-quality tier prevents the owner's requested cheap, high-AA compression route;
-AA-first ranking could instead pay more than the cheapest eligible option.
-**Decision.** Task-owned summaries default to `aa-cheapest`. Selection is
-lexicographic: **lowest projected USD cost, then highest exact AA Intelligence
-Index, then deterministic execution-pin/model ordering**. “Cheapest options”
-means exact minimum-cost ties, not an undocumented near-cheapest price band.
-`qualified-cheapest` is a compatibility alias; explicit `main` opts out.
+**Problem.** Append-only project-rule updates and consumed agent inboxes can
+accumulate inside a single Turn. Keeping every snapshot and notification in
+the protected shell produces a false `irreducible_prompt_floor` even after
+several successful summaries.
+**Decision.** At pressure-L1 and L2 planning/adoption, the composer retires superseded managed
+tail sections only when their canonical hashes and a later replacement are
+verified. Current sections, mixed-carrier siblings, system policy and authored
+text survive; malformed replacements cannot withdraw earlier policy. Restoration
+reserves count the same current sections once. Ordinary appends keep their cache
+prefix unchanged; rejected/cancelled candidates leave source messages untouched.
+The shared pressure pass can admit a snapshot-only reduction without tools or
+a paid summary; insufficient or cache-negative candidates remain speculative.
+Consumed non-human inbox deliveries join the following assistant/tool execution
+unit and reach the summarizer in source order. Unread deliveries and human
+steering remain protected. All child invocations, including those without a
+conversation ID or durable storage, retain source on summary failure through the
+same live-task policy used by L2 and reactive recovery.
+**Alternatives rejected.** Keeping all superseded snapshots makes the floor grow
+without bound; rewriting every round breaks cache reuse; treating agent evidence
+as human instruction creates false authority. Specs:
+`test_compaction_accumulated_context.py`, `test_context_snapshot_compaction.py`.
 
-Eligible candidates remain inside the same initialized execution-provider,
-billing-provider, provider-access, owner and tenant scope. No slots/credentials
-are created; no network probe or fallback expansion occurs. Every reachable
-offering needs confirmed identity, text capability, known input/output pricing
-for the prompt tier, context/output headroom and a fresh exact-model AA score.
+## Output cap versus bound reservation
+
+**Problem.** Ordinary `config.maxTokens` is an output cap subject to later body
+clamping, not an already-bound allocation. Subtracting a 128,000-token default
+from a 128,000-token route before counting its prompt collapsed the local
+ceiling to one token, even for 15,197 message + 13,833 schema = 29,030 input
+tokens. The 80,640-token window-safety ceiling was not the defect.
+
+**Decision.** `_admission_budget.resolve_admission_budget` accepts a current
+full rendered `input_tokens` count. Ordinary caps use the existing family,
+learned model and authorized route output clamps, followed by the canonical
+completion-window clamp (10% input margin, 512-token overhead and existing
+1,024-token floor). The prompt ceiling is still the smaller of window safety
+and window minus resolved completion; economics never raises it. The clamp can
+consume validated full-input evidence without message rescanning. Missing or
+invalid evidence plans at the safety boundary, never from a stale task receipt;
+body construction and final selected-slot recount remain authoritative. No
+configuration, registry, dispatch or accounting allocation is written.
+
+For an ordinary 128K cap allowing the full output range, 29,030 current input
+resolves to 95,555 completion and a 32,445 prompt ceiling: the input fits with
+headroom. Without current evidence, safety-boundary planning retains the
+80,640 ceiling. A smaller explicit cap is never raised. Included schemas count
+once, in the complete input; they are not a second output reservation.
+
+Native `output_tokens` from the matching owned scope is strict and already
+bound: Python never reclamps it to admit a prompt. A native 127,999 reservation
+in a 128,000 window therefore correctly leaves a one-token ceiling and refuses
+the incident-sized prompt. Native ownership and learned window shrink remain
+unchanged. Over-safety input still requires compaction and fail-closed refusal
+when the complete required projection cannot fit.
+
+Current-input callers refresh resolution after every changed measured
+projection (L1, retention, summary and recomposition), not only at entry. A
+failed-summary physical-fit check must use the same resolved output/window
+and must not bypass mandatory safety pressure. Receipts distinguish the output
+policy, requested and capped output, resolved output, resolution input and their
+sources; the archive preserves those fields, including an absent explicit cap
+as null. Aggregate reserved headroom includes safety and must not be labelled
+as output alone. Dispatch details explain the message/schema split, route
+window and headroom; snapshot message estimates remain a separate scope.
+These content-free diagnostics never authorize reuse of a historical count.
+
+**Alternatives rejected.** Increasing the ceiling hides accounting defects;
+a universal fixed completion cap wastes larger-model capability; treating
+ordinary caps as strict native reservations creates false refusals; reclamping
+native reservations violates their issued accounting ownership. Reimplementing
+the completion margin in compaction would create drifting budget authorities.
+
+Verification: `tests/compaction/test_admission_output_policy.py` exercises real
+admission/body construction with controlled complete counter results, initial
+and later rounds, changing input, output floors, route/learned caps, native
+isolation and strict reservation refusal, and mandatory compaction failure.
+These are offline boundary specifications, not live provider acceptance claims.
+
+## AA-cheapest compression-first routing
+**Problem.** Parent-provider/family restrictions and mandatory benchmark/profile
+coverage exclude usable owner-authorized summarizers, including cross-family
+subscription endpoints. AA-first ranking could instead pay more than a usable
+cheaper route.
+**Decision.** Task-owned summaries default to `aa-cheapest` (`qualified-cheapest`
+is a compatibility alias). All compiler-authorized enabled text routes compete,
+independently of main provider/family and optional AA/profile coverage. Explicit
+`main` opts out; the main task model and configuration never change.
+
+Native candidates come from all enabled authorized chat Offerings in the
+same owner/tenant repository, compiled by the existing `RouteCandidateCompiler`.
+Discovery is secret-free and never mutates the main model/group. Candidate
+discovery uses the shared compiler's demand-sized default, not a retired
+request-slot cap; only the chosen witness is minted at dispatch. Dispatch mints
+one separately owned candidate (no automatic model fallback), binds stable
+provider/access/offering/deployment/connection/credential identity and revision
+before resolving plaintext, nests/restores the provider pin, and disposes and
+neutralizes credential references after accounting even on cancellation or
+`BaseException`. The parent native binding must pass its existing readiness
+check before discovery. Full parent witnesses are recompiled against the same
+repository revision; their credential kind determines resource policy, not OAuth
+transport. An independently authorized mixed-parent group may plan privately only
+with complete witnesses; an incompatible issued native binding still refuses.
+Legacy callers without usable native authority retain the existing same-pin
+API-only AA cost-first policy. Native API mains also admit subscription/resource
+alternatives, even if parent pricing/capacity is unknown. Paid-to-paid alternatives
+need known Offering prices and strictly lower projected spend than main. Every candidate needs confirmed identity, text
+capability and context/output headroom from shared declared/family/learned clamps.
+Missing Deployment output limits use the same model/route clamp as transport,
+not an invented limit or an unconditional rejection.
+
+The auxiliary transport allowance is bounded by the existing shared output
+clamp and remaining learned context, but never below the priced summary target;
+complete-output validation still refuses truncation. Early source planning may
+reserve the larger allowance conservatively. Legacy API compatibility preserves
+its historical default behavior but honors an explicitly configured paid ceiling.
 The existing `cached_routing_scores` authority excludes stale, ambiguous and
-unmatched variants without fetching inline. Missing AA is unknown, not zero;
+unmatched score evidence, not otherwise usable routes, without fetching inline.
+Missing AA is unknown, not zero;
 zero is a valid known score. Ordinal quality/roles/auto-selectability are not
 summary-specific AA thresholds. This compression policy does not change their
 meaning for other model-selection consumers.
 
-Compare the worst reachable candidate cost with the best reachable main cost;
-require strict savings. Use the lowest reachable AA score for a candidate, not
-its strongest offering. Main needs confirmed identity, price and capacity, not
-an AA score. Invalid/missing evidence, equal main cost, subscription pricing and
-`disableModelFallback` retain main. Dispatch still revalidates route/cost before
+For native routes, evaluate every deployment/credential witness before ranking;
+a first unusable or expensive witness must not hide a later valid one. Already-
+authorized subscription/local resources rank before known-cost affordable APIs.
+Within each class prefer maintained resource-reference cost or paid cost, then
+known exact AA descending, declared lightness and stable full route identity.
+Missing resource proxies/scores do not block eligibility and are never zero.
+Paid-to-paid selection needs strict savings against the best reachable main cost.
+Legacy groups still use worst reachable candidate cost and weakest exact AA.
+Credential kinds `oauth`, `subscription`, and `local_identity` express resource
+access; explicit `subscription` can use an API-key envelope. A plain API key or
+provider brand does not prove subscription billing; unpriced API-key routes remain
+unqualified until authoritative billing/rate-card metadata exists. No gateway
+MSRP fallback establishes actual price. Subscription reference pricing is a
+resource proxy, never zero or known marginal cash cost. Confirmed text admission
+without optional quality evidence records `routing_admission` with a null score;
+complete-output adoption checks still reject partial or unusable summaries.
+`compaction.summaryMaxCostUsd` defaults to 0.05; finite nonnegative overrides
+bound each paid attempt's estimated maximum quote separately from the shorter
+output projection used for ranking/payback; retries retain their existing limits,
+so this is not a cumulative bill ceiling. Unknown gateway pricing cannot borrow creator MSRP.
+Explicit `main` and `disableModelFallback` prohibit auxiliary compiler/mint work.
+Dispatch still revalidates stable identity, quote and resource policy before
 optional spending; route drift or a higher quote refuses and keeps source.
 Receipts optionally record bounded `summary.route.selectionBasis` (score,
 exact-match source, timestamp, ranking and eligible-route count) separately
@@ -96,8 +217,13 @@ proxy, not a measured summary-fidelity or latency guarantee; thinking remains
 disabled on the summary call, and complete-candidate validation still controls
 adoption. Reject a hidden price band, AA-first higher spending, ordinal-tier
 blocking despite exact AA, variant score inheritance, stale-score ranking and
-silent subscription-to-paid fallback. No live paid-model speed/fidelity result
-is implied. Specs: `tests/compaction/test_summary_routing.py`,
+silent unqualified fallback after the chosen route fails. Authorized paid
+subscription alternatives are an explicit policy, not a transport escape hatch.
+No live paid-model speed/fidelity result is implied. Specs:
+`tests/compaction/test_auxiliary_summary_integration.py`,
+`tests/compaction/test_global_auxiliary_candidates.py`,
+`tests/compaction/test_auxiliary_offering_cost.py`,
+`tests/compaction/test_summary_routing.py`,
 `tests/compaction/test_summary_completion_policy.py`,
 `tests/compaction/test_compaction_receipt_contract.py`.
 

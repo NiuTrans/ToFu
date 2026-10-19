@@ -3,10 +3,10 @@ import json
 import sqlite3
 from uuid import uuid4
 import pytest
-from lib.storage_sidecar.operations_pkg._artifacts import (
+from lib.storage_authority_sql.operations_pkg._artifacts import (
     _tool_result_artifact_put as put, _tool_result_artifact_read as read,
     _tool_result_artifact_search as search)
-from lib.storage_sidecar.operations_pkg._tool_result_query import MEDIA_TYPE
+from lib.storage_authority_sql.operations_pkg._tool_result_query import MEDIA_TYPE
 
 pytestmark = pytest.mark.unit
 
@@ -80,7 +80,9 @@ def test_transparent_children_owner_checks_and_forged_markers(store):
 def test_manifest_identity_selector_and_expiry(store):
     parts=[{'kind':'json','text':'{ "a/b": {"~": [1,2]} }'}]
     first=manifest(store,parts); second=manifest(store,parts)
-    assert first!=second
+    # Capture metadata differs, while the canonical content identity is shared.
+    assert first == second
+    assert manifest(store, [{"kind": "text", "text": "different"}]) != first
     assert read(store,args(first,selector='/a~1b/~0/1'))['content']=='2'
     assert read(store,args(first))['content']==parts[0]['text']
     assert read(store,{**args(first),'now_ms':1000}) is None
@@ -102,7 +104,7 @@ def test_expired_child_is_not_exhaustive_zero(store):
 
 
 def test_forced_scan_budget_keeps_later_routes_reachable(store, monkeypatch):
-    import lib.storage_sidecar.operations_pkg._tool_result_query as q
+    import lib.storage_authority_sql.operations_pkg._tool_result_query as q
     children = [dict(name='leaf',callId=str(i),artifactRef=save(store,'needle'+str(i))) for i in range(10)]
     root = manifest(store, [], children)
     root_size = store.fetch_one('SELECT size_bytes FROM tool_result_artifacts WHERE content_sha256=?', (root.split(':')[1],))['size_bytes']
@@ -138,7 +140,7 @@ def test_seek_does_not_load_completed_sibling_bodies(store, monkeypatch):
 
 
 def test_depth_and_no_progress_deadline_are_explicit(store, monkeypatch):
-    import lib.storage_sidecar.operations_pkg._tool_result_query as q
+    import lib.storage_authority_sql.operations_pkg._tool_result_query as q
     root = save(store,'needle')
     for _ in range(10):
         root = manifest(store,[],[dict(name='n'*200,callId='c'*200,artifactRef=root)])
@@ -168,7 +170,7 @@ def test_manifest_validation_never_publishes_partial_success(store, change):
 
 @pytest.mark.parametrize('query, tail', [('needle', 'needle' + 'x' * 3), ('sss', 'ssss')])
 def test_window_overlap_neither_duplicates_nor_drops_matches(store, query, tail):
-    from lib.storage_sidecar.operations_pkg._tool_result_query import WINDOW
+    from lib.storage_authority_sql.operations_pkg._tool_result_query import WINDOW
     text = 'x' * (WINDOW - len(tail)) + tail + 'needle' + 'ssss'
     ref = save(store, text)
     expected = [i for i in range(len(text)) if text.startswith(query, i)]
@@ -183,3 +185,17 @@ def test_window_overlap_neither_duplicates_nor_drops_matches(store, query, tail)
         else:
             pytest.fail('window boundary search did not finish')
         assert found == expected
+
+
+def test_utf8_page_yields_instead_of_rescanning_a_codepoint_that_does_not_fit(store, monkeypatch):
+    ref = save(store, 'ß中🙂é\n' * 100)
+    reads = []
+    original = store.fetch_one
+    def tracked(sql, parameters=()):
+        if 'substr(content' in sql:
+            reads.append(parameters)
+        return original(sql, parameters)
+    monkeypatch.setattr(store, 'fetch_one', tracked)
+    page = read(store, args(ref, limit=37))
+    assert page['content'] == 'ß中🙂é\n' * 3
+    assert page['nextCursor'] and len(reads) <= 2

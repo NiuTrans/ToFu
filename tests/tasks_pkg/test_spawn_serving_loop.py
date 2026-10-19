@@ -111,9 +111,21 @@ def test_hop_to_serving_loop_from_loop_less_thread(monkeypatch, clean_spawn_stat
     finally:
         tp.set_serving_loop(None)
         tp.set_agent_executor(None)
-        loop.call_soon_threadsafe(loop.stop)
-        loop_thread.join(timeout=5)
-        pool.shutdown(wait=True)
+        async def drain_owned_loop():
+            pending = [task for task in asyncio.all_tasks()
+                       if task is not asyncio.current_task()]
+            if pending:
+                await asyncio.wait_for(asyncio.gather(*pending), timeout=5)
+        try:
+            # Runner entry precedes completion of its async wrapper. Join
+            # both before stopping this test's loop, or GC logs the orphan
+            # during an unrelated later test.
+            asyncio.run_coroutine_threadsafe(drain_owned_loop(), loop).result(timeout=6)
+        finally:
+            loop.call_soon_threadsafe(loop.stop)
+            loop_thread.join(timeout=5)
+            pool.shutdown(wait=True)
+            loop.close()
 
 
 def test_daemon_fallback_kept_without_serving_loop(monkeypatch, clean_spawn_state):
@@ -158,12 +170,25 @@ def test_task_stays_pending_until_a_physical_agent_worker_is_acquired(
     release_first = threading.Event()
     first_started = threading.Event()
     second_started = threading.Event()
-    pool = RecoverableAgentExecutor(
-        max_workers=1,
-        queue_capacity=2,
-        max_abandoned_workers=1,
-        thread_name_prefix='semantic-agent',
-    )
+    from concurrent.futures import ThreadPoolExecutor
+    class ControlledHandoff(ThreadPoolExecutor):
+        """Test-only physical handoff delay through the public executor port."""
+        def __init__(self):
+            super().__init__(max_workers=1,thread_name_prefix='semantic-agent')
+            self.jobs={}
+        def submit(self,fn,*args,**kwargs):
+            future=super().submit(fn,*args,**kwargs)
+            self.jobs[fn._tofu_task_id]=(future,time.monotonic())
+            return future
+        def scheduling_snapshot(self,task_id=None):
+            if task_id not in self.jobs:return {'taskState':'unknown'}
+            queued=[key for key,(future,at) in self.jobs.items() if not future.running() and not future.done()]
+            active=sum(future.running() for future,at in self.jobs.values())
+            future,at=self.jobs[task_id]
+            return dict(taskState='queued' if task_id in queued else 'running' if future.running() else 'done',
+                queuePosition=queued.index(task_id)+1 if task_id in queued else 0,
+                queuedForSeconds=time.monotonic()-at,queued=len(queued),active=active,capacity=2)
+    pool=ControlledHandoff()
     tp.set_agent_executor(pool)
     phases = []
     monkeypatch.setattr(
@@ -193,7 +218,6 @@ def test_task_stays_pending_until_a_physical_agent_worker_is_acquired(
         assert first_started.is_set()
         assert first['status'] == 'running'
 
-        monkeypatch.setattr(pool, '_ensure_workers_locked', lambda: None)
         tp.spawn_task(second, runner=_runner)
         for _ in range(200):
             if pool.scheduling_snapshot(second['id'])['taskState'] == 'queued':
@@ -274,3 +298,68 @@ def test_actual_thread_start_failure_retains_terminal_error(monkeypatch):
     assert len(calls) == 1
     assert calls[0][1]['kind'] == 'task_start_failed'
     assert calls[0][2]['flow_reason'] == 'executor_start_failed'
+
+
+@pytest.mark.parametrize('route', ['serving-loop', 'owned-executor'])
+def test_stop_before_worker_admission_settles_once_without_start_error(monkeypatch, caplog, route):
+    from concurrent.futures import ThreadPoolExecutor
+    from unittest.mock import Mock
+    task = {'id': 'cancelled-before-entry', 'status': 'pending',
+            'abort_event': threading.Event()}
+    task['abort_event'].set()
+    stopped, failed, runner, preserved = Mock(), Mock(), Mock(), Mock()
+    monkeypatch.setattr('lib.tasks_pkg.manager.finalize_chat_task_aborted', stopped)
+    monkeypatch.setattr('lib.tasks_pkg.manager.finalize_chat_task_error', failed)
+    monkeypatch.setattr(tp, '_settle_unscheduled_workspace', preserved)
+    if route == 'serving-loop':
+        async def drive():
+            await tp._executor_runner(asyncio.get_running_loop(), runner, task)()
+        asyncio.run(drive())
+    else:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            tp.spawn_task(task, runner=runner, executor=executor).result(timeout=5)
+    stopped.assert_called_once_with(task)
+    preserved.assert_called_once_with(task)
+    runner.assert_not_called()
+    failed.assert_not_called()
+    assert not [record for record in caplog.records if record.levelname == 'ERROR']
+
+
+@pytest.mark.parametrize('internal_fence', [False, True])
+def test_admission_authority_rejection_is_not_user_cancellation(monkeypatch, internal_fence):
+    from lib.llm.llm_errors import AbortedError
+    from unittest.mock import Mock
+    task = {'id': 'rejected-authority', 'status': 'pending'}
+    if internal_fence:
+        task.update(aborted=True, _abort_reason='storage_authority_integrity')
+    failure = AbortedError('authority rejected admission')
+    monkeypatch.setattr(tp, '_mark_worker_started', Mock(side_effect=failure))
+    stopped = Mock()
+    monkeypatch.setattr('lib.tasks_pkg.manager.finalize_chat_task_aborted', stopped)
+    with pytest.raises(AbortedError) as caught:
+        tp._owned_task_callable(Mock(), task, threading.Event(), threading.Lock())()
+    assert caught.value is failure
+    stopped.assert_not_called()
+
+
+@pytest.mark.parametrize('native,pending',[(True,False),(True,True),(False,False)])
+def test_worker_preserves_acknowledged_native_stop_without_terminal_rewrite(monkeypatch,native,pending):
+    from lib.tasks_pkg import spawn
+    from unittest.mock import Mock
+    task={'id':'stopped','status':'aborted','_terminalPersistencePending':pending}
+    if native:task['_nativePreparedInvocation']=object()
+    monkeypatch.setattr(spawn,'_mark_worker_started',lambda *args:True)
+    preserve=Mock();failed=Mock()
+    monkeypatch.setattr(spawn,'_settle_unscheduled_workspace',preserve)
+    monkeypatch.setattr('lib.tasks_pkg.manager.finalize_chat_task_error',failed)
+    failure=asyncio.CancelledError()
+    def run(task):
+        # Durable terminal release may remove application ports before Stop
+        # propagates back through the worker's existing failure boundary.
+        task['_nativePreparedInvocation']=None
+        raise failure
+    owned=spawn._owned_task_callable(run,task,threading.Event(),threading.Lock())
+    with pytest.raises(asyncio.CancelledError) as caught:owned()
+    assert caught.value is failure
+    assert failed.call_count==(0 if native and not pending else 1)
+    preserve.assert_called_once_with(task)

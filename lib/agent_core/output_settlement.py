@@ -16,7 +16,7 @@ from collections.abc import Mapping
 from copy import deepcopy
 from typing import Any
 
-from lib.tool_round_identity import execution_identity, execution_llm_round
+from lib.tool_results.tool_round_identity import execution_identity, execution_llm_round
 
 _OUTPUT_FIELDS = frozenset({'content', 'thinking', 'toolRounds', 'segments'})
 

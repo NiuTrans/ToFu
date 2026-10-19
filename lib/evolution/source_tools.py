@@ -48,6 +48,7 @@ def tool_definition():
             'source_kind=artifact_evidence selects complete declared project snapshots (JSONL, UTF-8 or base64, not live files); '
             'source_kind=tool_evidence selects the saved tool-message JSONL; otherwise '
             'read the deliverable. Reviewers may also read settled originals in their bound program up to the frozen context history boundary; historical reads never satisfy current submission coverage. '
+            'For a source with known total_chars, batch independent page reads in the same model turn when they fit the current input budget: keep one exact source identity and request disjoint offsets in multiple evolution_source calls. Each page still has its own limit and must be delivered exactly. If transport compressed a page, use its returned next_offset and review_read_progress to fill gaps; never infer coverage from requested offsets or mere tool completion. Do not mix the final evolution_review into a read batch. '
             'Read pages using next_offset. review_next_action considers current and '
             'required historical coverage together; nested progress is scope-specific and '
             'does not establish acceptance. action=list refreshes review_read_progress '

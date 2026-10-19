@@ -215,7 +215,8 @@ def test_method_names_and_descriptions_cannot_break_declaration_lines():
 def test_batch_tier_retains_direct_recovery_surface():
     wire, proof = project([tool('read_rows')], tier='batch')
     assert names(wire) == ['read_rows', 'execute_tools']
-    assert 'programmaticCodeApi' not in proof
+    assert proof['programmaticCodeApi'] == {'reason': 'code_api_requires_program_tier'}
+    assert proof['programmaticExposure'] == 'additive'
 
 
 def test_code_api_experiment_is_opt_in():

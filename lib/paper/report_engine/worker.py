@@ -13,9 +13,9 @@ import time
 import uuid
 
 import lib as _lib
-from lib.agent_loop import AbortSignal
+from lib.agent_loop.agent_loop import AbortSignal
 from lib.llm_dispatch.api import dispatch_stream
-from lib.llm_errors import AbortedError
+from lib.llm.llm_errors import AbortedError
 from lib.log import get_logger
 from lib.tasks_pkg.tool_display import tool_round_label as display_query_for
 from lib.tool_input_repair import parse_and_repair_tool_args

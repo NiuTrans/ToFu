@@ -9,6 +9,8 @@
 
 function _applySettingsToConv(conv, settings) {
   if (!settings) return;
+
+  settings = protectHydratingProjectSettings(conv, settings);
   if (settings.model || settings.effort || settings.preset)
     conv.model = settings.model || settings.preset || settings.effort;
   if (settings.modelRef !== undefined)

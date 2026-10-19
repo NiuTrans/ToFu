@@ -49,9 +49,18 @@ def workspace(tmp_path):
 
 def _task(conv_id):
     return {'id': f'task-{conv_id}', 'convId': conv_id,
-            '_userId': 1,
+            '_userId': 1, '_invocationStorageFree': True,
             'messages': [], 'toolRounds': [],
             'events_lock': threading.Lock(), 'events': []}
+
+
+def _observe(task, args, project_path):
+    from lib.project_mod.read_tools import tool_read_files
+    from lib.tasks_pkg.handlers._write_freshness_gate import record_read_paths
+    observations = []
+    result = tool_read_files(project_path, args.get('reads', [args]),
+                             read_observations=observations)
+    return record_read_paths(task, args, project_path, result, observations=observations)
 
 
 def _write_gate(task, project_path, rel):
@@ -71,13 +80,13 @@ def test_cached_read_is_stale_helper(workspace, _isolate):
     a = _task('convA')
     # No token at all → fail-open False.
     assert cached_read_is_stale(a, {'path': 'a.py'}, workspace) is False
-    record_read_paths(a, {'path': 'a.py'}, workspace, 'v1')
+    _observe(a, {'path': 'a.py'}, workspace)
     assert cached_read_is_stale(a, {'path': 'a.py'}, workspace) is False
     with open(os.path.join(workspace, 'a.py'), 'w', encoding='utf-8') as f:
         f.write('def foo():\n    return 2  # B\n')
     assert cached_read_is_stale(a, {'path': 'a.py'}, workspace) is True
     # Batch shape: re-record clears it again.
-    record_read_paths(a, {'reads': [{'path': 'a.py'}]}, workspace, 'v2')
+    _observe(a, {'reads': [{'path': 'a.py'}]}, workspace)
     assert cached_read_is_stale(
         a, {'reads': [{'path': 'a.py'}]}, workspace) is False
 
@@ -123,7 +132,7 @@ def test_pipeline_drops_stale_cached_read(workspace, _isolate):
     the recovery loop the production refusal message instructs."""
     from lib.tasks_pkg.handlers._write_freshness_gate import record_read_paths
     a = _task('convA')
-    record_read_paths(a, {'path': 'a.py'}, workspace, 'v1')
+    _observe(a, {'path': 'a.py'}, workspace)
     _plant_cache(a, {'path': 'a.py'}, 'STALE-CACHED-v1')
     with open(os.path.join(workspace, 'a.py'), 'w', encoding='utf-8') as f:
         f.write('def foo():\n    return 2  # B\n')
@@ -139,7 +148,7 @@ def test_pipeline_serves_fresh_cached_read(workspace, _isolate):
     read IS served (no re-execution)."""
     from lib.tasks_pkg.handlers._write_freshness_gate import record_read_paths
     a = _task('convA')
-    record_read_paths(a, {'path': 'a.py'}, workspace, 'current')
+    _observe(a, {'path': 'a.py'}, workspace)
     _plant_cache(a, {'path': 'a.py'}, 'CACHED-OK-fresh')
     served = _drive_pipeline(a, workspace, {'path': 'a.py'})
     assert served and any('CACHED-OK-fresh' in c for c in served), served
@@ -154,7 +163,7 @@ def test_neuter_stale_check_serves_stale(workspace, _isolate, monkeypatch):
     from lib.tasks_pkg.handlers._write_freshness_gate import record_read_paths
     monkeypatch.setattr(gate, 'cached_read_is_stale', lambda *a, **k: False)
     a = _task('convA')
-    record_read_paths(a, {'path': 'a.py'}, workspace, 'v1')
+    _observe(a, {'path': 'a.py'}, workspace)
     _plant_cache(a, {'path': 'a.py'}, 'STALE-CACHED-v1')
     with open(os.path.join(workspace, 'a.py'), 'w', encoding='utf-8') as f:
         f.write('def foo():\n    return 2  # B\n')

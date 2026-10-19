@@ -1,13 +1,21 @@
 <!-- Source: frontend/src/settings-panels/database.html. Static delivery is generated; edit this source only. -->
 <div class="settings-tab-panel" id="settingsTab_database">
-  <div class="settings-section-title" data-i18n="settings.dbTitle">数据库</div>
-  <p class="settings-field-hint" data-i18n="settings.dbImmediateSave">此处应用后立即保存；底部保存/取消仅作用于其他设置。</p>
+  <div class="db-page-heading">
+    <div class="settings-section-title" data-i18n="settings.dbTitle">数据库</div>
+    <p class="settings-field-hint db-save-note" data-i18n="settings.dbImmediateSave">此处应用后立即保存；底部保存/取消仅作用于其他设置。</p>
+  </div>
   <div id="dbStatusMessage" class="db-status-message" role="status" data-i18n="settings.dbStatusLoading">正在读取数据库状态…</div>
   <div class="db-card" id="dbEngineCard">
-    <div class="db-card-head"><span class="db-card-title" data-i18n="settings.dbEngine">引擎</span><strong id="dbEngineName">—</strong><span class="db-state-pill" id="dbEngineState"></span></div>
-    <details id="dbEngineDisclosure"><summary data-i18n="settings.dbChangeEngine">更换引擎</summary>
-      <div class="db-engine-options" id="dbEngineOptions"></div>
-      <div class="db-switch-row" id="dbSwitchRow" hidden><div id="dbSwitchControls"></div><span class="settings-field-hint" id="dbSwitchHint"></span></div>
+    <div class="db-card-head">
+      <div class="db-engine-identity"><span class="db-card-title" data-i18n="settings.dbEngine">引擎</span><strong id="dbEngineName">—</strong></div>
+      <span class="db-state-pill" id="dbEngineState"></span>
+    </div>
+    <details class="db-disclosure" id="dbEngineDisclosure">
+      <summary data-i18n="settings.dbChangeEngine">更换引擎</summary>
+      <div class="db-disclosure-body">
+        <div class="db-engine-options" id="dbEngineOptions"></div>
+        <div class="db-switch-row" id="dbSwitchRow" hidden><div id="dbSwitchControls"></div><span class="settings-field-hint" id="dbSwitchHint"></span></div>
+      </div>
     </details>
     <div class="db-migration" id="dbMigration" hidden><div class="db-progress-track"><div class="db-progress-fill" id="dbMigrationFill"></div></div><span class="settings-field-hint" id="dbMigrationLabel"></span></div>
   </div>
@@ -15,37 +23,58 @@
     <div class="db-card-head"><span class="db-card-title" data-i18n="settings.dbLocation">存储位置</span><div id="dbRefreshControls"></div></div>
     <div id="dbPathContent">
       <div class="db-path-current" id="dbPathCurrent"></div>
-      <details id="dbStorageDisclosure"><summary data-i18n="settings.dbPathDetails">路径详情</summary><div class="db-engine-meta" id="dbEngineMeta"></div></details>
-      <div class="db-subgroup">
-        <div class="db-index-heading"><span class="settings-toggle-label" data-i18n="settings.dbFastPath">整库加速（Fast Path）</span><span id="dbFastPathSummary"></span></div>
-        <div id="dbFastPathStatus" class="db-index-status" aria-live="polite"></div>
-
-        <div id="dbFastPathLockSummary" class="settings-field-hint" hidden></div>
-        <details id="dbFastPathDisclosure"><summary data-i18n="settings.dbModifyLocation">修改位置</summary>
-
-          <div id="dbFastPathDetail" class="db-index-status"></div>
-          <div class="settings-toggle-row db-toggle-row" id="dbFastPathRow"><div class="db-toggle-text"><div class="settings-toggle-desc" data-i18n="settings.dbFastPathDesc"></div></div><div id="dbFastPathSwitch"></div></div>
-          <div class="db-subgroup-body" id="dbFastPathField" hidden><div class="db-candidates" id="dbFastPathCandidates"></div><span class="settings-field-hint" id="dbFastPathHint"></span></div>
-          <div class="db-projection-controls" id="dbFastPathControls"></div>
-        </details>
-      </div>
-      <div id="dbSearchProjection" class="db-subgroup" hidden>
-        <div class="db-index-heading"><span class="settings-toggle-label" data-i18n="settings.dbIndexTitle">会话搜索索引</span><span class="db-index-required" data-i18n="settings.dbIndexRequired">必需</span><span id="dbSearchProjectionSummary"></span></div>
-        <details id="dbSearchProjectionDisclosure"><summary data-i18n="settings.dbModifyLocation">修改位置</summary>
-          <div class="settings-toggle-desc" data-i18n="settings.dbIndexDesc"></div>
-          <div id="dbSearchProjectionStatus" class="db-index-status" aria-live="polite"></div><div class="db-candidates" id="dbSearchProjectionCandidates"></div><div class="db-projection-controls" id="dbSearchProjectionControls"></div><div id="dbSearchProjectionActions" class="db-index-actions" hidden></div>
-        </details>
-      </div>
-      <div class="db-subgroup">
-        <div class="db-index-heading"><span class="settings-toggle-label" data-i18n="settings.dbDualBackup">双路径备份</span><span id="dbBackupSummary"></span></div>
-        <details id="dbBackupDisclosure"><summary data-i18n="settings.dbModifyLocation">修改位置</summary>
-          <div class="settings-toggle-row db-toggle-row"><div class="settings-toggle-desc" id="dbBackupDesc"></div><div id="dbBackupSwitch"></div></div>
-          <div class="db-subgroup-body" id="dbBackupField" hidden><div class="db-candidates" id="dbBackupCandidates"></div></div>
-          <div class="db-projection-controls" id="dbBackupControls"></div><div class="db-row-between db-backup-actions"><span class="settings-field-hint" id="dbBackupMeta"></span><div id="dbBackupNowControls"></div></div>
-        </details>
+      <details class="db-disclosure" id="dbStorageDisclosure">
+        <summary data-i18n="settings.dbPathDetails">路径详情</summary>
+        <div class="db-engine-meta db-disclosure-body" id="dbEngineMeta"></div>
+      </details>
+      <div class="db-config-list">
+        <div class="db-subgroup">
+          <details id="dbFastPathDisclosure">
+            <summary class="db-config-summary">
+              <span class="db-config-heading"><span class="db-card-title" data-i18n="settings.dbFastPath">整库加速（Fast Path）</span></span>
+              <span id="dbFastPathStatus" class="db-config-status" aria-live="polite"></span>
+            </summary>
+            <div class="db-disclosure-body">
+              <div id="dbFastPathDetail" class="db-index-status"></div>
+              <div class="settings-toggle-row db-toggle-row" id="dbFastPathRow"><div class="db-toggle-text"><div class="settings-toggle-desc" data-i18n="settings.dbFastPathDesc"></div></div><div id="dbFastPathSwitch"></div></div>
+              <div class="db-subgroup-body" id="dbFastPathField" hidden><div class="db-candidates" id="dbFastPathCandidates"></div><span class="settings-field-hint" id="dbFastPathHint"></span></div>
+              <div class="db-projection-controls" id="dbFastPathControls"></div>
+            </div>
+          </details>
+          <div id="dbFastPathLockSummary" class="settings-field-hint db-lock-note" hidden></div>
+        </div>
+        <div id="dbSearchProjection" class="db-subgroup" hidden>
+          <details id="dbSearchProjectionDisclosure">
+            <summary class="db-config-summary">
+              <span class="db-config-heading"><span class="db-card-title" data-i18n="settings.dbIndexTitle">会话搜索索引</span><span class="db-index-required" data-i18n="settings.dbIndexRequired">必需</span></span>
+              <span id="dbSearchProjectionSummary" class="db-config-status"></span>
+            </summary>
+            <div class="db-disclosure-body">
+              <div class="settings-toggle-desc" data-i18n="settings.dbIndexDesc"></div>
+              <div id="dbSearchProjectionStatus" class="db-index-status" aria-live="polite"></div>
+              <div class="db-candidates" id="dbSearchProjectionCandidates"></div>
+              <div class="db-projection-controls" id="dbSearchProjectionControls"></div>
+              <div id="dbSearchProjectionActions" class="db-index-actions" hidden></div>
+            </div>
+          </details>
+        </div>
+        <div class="db-subgroup">
+          <details id="dbBackupDisclosure">
+            <summary class="db-config-summary">
+              <span class="db-config-heading"><span class="db-card-title" data-i18n="settings.dbDualBackup">双路径备份</span></span>
+              <span id="dbBackupSummary" class="db-config-status"></span>
+            </summary>
+            <div class="db-disclosure-body">
+              <div class="settings-toggle-row db-toggle-row"><div class="settings-toggle-desc" id="dbBackupDesc"></div><div id="dbBackupSwitch"></div></div>
+              <div class="db-subgroup-body" id="dbBackupField" hidden><div class="db-candidates" id="dbBackupCandidates"></div></div>
+              <div class="db-projection-controls" id="dbBackupControls"></div>
+              <div class="db-row-between db-backup-actions"><span class="settings-field-hint" id="dbBackupMeta"></span><div id="dbBackupNowControls"></div></div>
+            </div>
+          </details>
+        </div>
       </div>
     </div>
-    <div id="dbCandidatesMessage" class="settings-field-hint" role="status" hidden></div><div id="dbScanControls"></div>
+    <div class="db-path-footer"><div id="dbCandidatesMessage" class="settings-field-hint" role="status" hidden></div><div id="dbScanControls"></div></div>
     <div id="dbPathError" class="db-path-error" role="alert" hidden></div>
   </div>
 </div>

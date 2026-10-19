@@ -53,7 +53,8 @@ def _build_event(artifact_meta: dict) -> dict:
         parent_id=artifact_meta.get('parent_id', ''),
         pinned=bool(artifact_meta.get('pinned', False)),
         created_at=int(artifact_meta.get('created_at', 0)),
-        url=f'/api/artifacts/{aid}/raw' if aid else '',
+        url=(f'/api/artifacts/{aid}/download' if artifact_meta.get('format') == 'file'
+             else f'/api/artifacts/{aid}/raw') if aid else '',
     )
 
 

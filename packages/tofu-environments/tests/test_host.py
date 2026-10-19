@@ -11,11 +11,17 @@ from test_service import FakeProvider
 SPEC={'profile':'project_development','project':'example','image':{'base':'base:1','name':'example','instructions':'RUN true'},'workspace':{'name':'dev','cpu':2,'memory_gib':4}}
 
 def test_plugin_declaration_and_no_owner_visibility():
-    specs=[];host.register(specs.append);spec=specs[0]
-    assert spec.write_tools==spec.confirmation_tools==spec.auto_approval_tools==frozenset({'environment_apply', 'compute_submit', 'compute_cancel'})
-    assert host._schemas(SimpleNamespace(owner_user_id=0))==[]
-    assert len(host._schemas(SimpleNamespace(owner_user_id=1)))==10
-    assert spec.discovery_policy=='searchable'
+    specs=[];host.register(specs.append);host.register_compute(specs.append)
+    env, compute = specs
+    assert env.write_tools == env.confirmation_tools == env.auto_approval_tools == frozenset({'environment_apply'})
+    assert compute.write_tools == compute.confirmation_tools == compute.auto_approval_tools == frozenset({'compute_submit', 'compute_cancel'})
+    assert not env.provides & compute.provides
+    assert host._schemas(SimpleNamespace(owner_user_id=0)) == []
+    assert {r['function']['name'] for r in host._schemas(SimpleNamespace(owner_user_id=1))} == {'environment_providers'}
+    from tofu_environments.schemas import tool_schemas
+    assert {r['function']['name'] for r in tool_schemas()} == env.provides | compute.provides
+    assert env.discovery_policy == compute.discovery_policy == 'searchable'
+
 
 def test_handler_uses_exact_one_use_gateway_receipt_and_discloses_preview():
     from lib.tasks_pkg.tool_dispatch._approval import mint_approval_receipt, enrich_approval_metadata
@@ -165,8 +171,9 @@ def test_compute_collect_tool_delivers_owned_results_and_cleans_failure(context,
         assert invoke(enabled=False)['code']=='project_required';assert set(tmp_path.iterdir())==before
         provider.read_job_output=lambda *args:iter([b'changed'])
         assert invoke()['code']=='output_changed';assert set(tmp_path.iterdir())==before
-        specs=[];host.register(specs.append);assert 'compute_collect' in specs[0].provides
-        schema=next(x['function'] for x in host._schemas(SimpleNamespace(owner_user_id=11)) if x['function']['name']=='compute_collect')
+        specs=[];host.register_compute(specs.append);assert 'compute_collect' in specs[0].provides
+        from tofu_environments.schemas import tool_schemas
+        schema=next(x['function'] for x in tool_schemas() if x['function']['name']=='compute_collect')
         assert set(schema['parameters']['properties'])=={'operation_id'}
     finally:host.configure_jobs(None)
 

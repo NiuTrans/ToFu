@@ -22,6 +22,10 @@ Server protocol and policy live in `lib/browser/` and `routes/browser.py`.
 - Do not commit packaged ZIPs as source; build them with
   `scripts/package_extension.sh`.
 
+`_pageInteraction` owns the serialized interaction body and its page-local
+dependencies. Verify injection in an independent page realm; worker-scope
+execution alone cannot prove Chrome serialization behavior.
+
 ## Verification
 
 Run the focused `test_browser_*`, `test_bridge_auth.py`, and extension/store

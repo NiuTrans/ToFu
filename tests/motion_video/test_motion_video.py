@@ -430,7 +430,7 @@ def test_concat_missing_input_rejected(tmp_path):
 def _ctx(project_enabled: bool):
     from lib.tools.registry import ToolContext
     return ToolContext(
-        cfg={}, task_id='t', project_path='/tmp/x' if project_enabled else '',
+        cfg={'plugins': ['production']}, enabled_plugins={'production'}, task_id='t', project_path='/tmp/x' if project_enabled else '',
         project_enabled=project_enabled, search_mode='off', search_enabled=False,
         fetch_enabled=False, code_exec_enabled=False, browser_enabled=False,
         desktop_enabled=False)

@@ -60,7 +60,7 @@ def _shutdown_test_storage():
 
 
 @pytest.fixture(scope='module', autouse=True)
-def _storage_sidecar():
+def _storage_authority_sql():
     # Deployment/storage authority is explicit at test execution time.  Never
     # leak a retired backend selector while pytest is still collecting other
     # modules that import the fail-closed application composition root.

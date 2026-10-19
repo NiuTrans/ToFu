@@ -26,7 +26,7 @@ import json
 import re
 import unicodedata
 
-from lib.llm_json import extract_json
+from lib.llm.llm_json import extract_json
 from lib.log import audit_log, get_logger
 
 logger = get_logger(__name__)

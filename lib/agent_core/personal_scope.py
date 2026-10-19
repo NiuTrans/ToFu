@@ -29,7 +29,7 @@ default unless it remembered to override it — and the *preference profile* rod
 accumulating agent ALSO got the operator's personal ``USER.md`` spliced in.
 Each new personal feature added one more thing every headless surface had to
 remember to turn off — the same "add it in 5 places, forget one, leak it"
-failure mode the ``lib/agent_artifacts.py`` registry was created to kill.
+failure mode the ``lib/agent_loop/agent_artifacts.py`` registry was created to kill.
 
 The mechanism
 -------------

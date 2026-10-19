@@ -34,6 +34,8 @@ def _load() -> dict:
         raise ValueError("storage.v2 must not admit frames by count")
     if document["frame"].get("aggregateBufferPolicy") != "ram-threshold-then-private-anonymous-file":
         raise ValueError("native frame buffers must overflow without an aggregate byte quota")
+    if document["frame"].get("memoryHintAdmission") != "all-usize-targets-including-zero-file-only":
+        raise ValueError("frame memory hints must not impose a minimum admission quota")
     expected_worker_delivery = {
         "activeWorkerCountAdmission": "none",
         "pendingJobCountAdmission": "none",
@@ -144,8 +146,9 @@ def _render(document: dict | None = None) -> str:
     frame = document["frame"]
     streamed_requests = document.get("streamedRequests")
     if streamed_requests != {
-        "maximumPayloadBytes": 64 * 1024 * 1024,
-        "maximumChunks": 64,
+        "payloadByteCountEncoding": "u64",
+        "chunkIndexEncoding": "u32",
+        "aggregateAdmission": "complete-stream-without-private-byte-or-chunk-count-quota",
         "eligibility": "all-semantic-requests-larger-than-one-frame",
         "ordering": "one-incomplete-stream-per-connection-strict-zero-based-chunk-index",
         "identity": "every-chunk-exactly-matches-correlation-deadline-owner-tenant-command-schema-stream-and-declared-total; terminator-matches-request-identity",
@@ -155,8 +158,9 @@ def _render(document: dict | None = None) -> str:
         raise ValueError("storage.v2 streamed request bounds are incomplete")
     streamed_responses = document.get("streamedResponses")
     if streamed_responses != {
-        "maximumPayloadBytes": 64 * 1024 * 1024,
-        "maximumChunks": 64,
+        "payloadByteCountEncoding": "u64",
+        "chunkIndexEncoding": "u32",
+        "aggregateAdmission": "complete-stream-without-private-byte-or-chunk-count-quota",
         "chunkPayloadBytes": 1024 * 1024,
         "eligibility": "successful-response-payload-larger-than-one-chunk",
         "ordering": "strict-zero-based-chunk-index-with-final-on-last-chunk",
@@ -174,14 +178,6 @@ def _render(document: dict | None = None) -> str:
         f"pub const MAX_BLOB_CHUNK_BYTES: usize = {frame['maximumBlobChunkBytes']};",
         "pub const DEFAULT_FRAME_MEMORY_BYTES: usize = "
         f"{frame['defaultFrameMemoryBytes']};",
-        "pub const MAX_STREAMED_REQUEST_PAYLOAD_BYTES: usize = "
-        f"{streamed_requests['maximumPayloadBytes']};",
-        "pub const MAX_STREAMED_REQUEST_CHUNKS: u32 = "
-        f"{streamed_requests['maximumChunks']};",
-        "pub const MAX_STREAMED_RESPONSE_PAYLOAD_BYTES: usize = "
-        f"{streamed_responses['maximumPayloadBytes']};",
-        "pub const MAX_STREAMED_RESPONSE_CHUNKS: u32 = "
-        f"{streamed_responses['maximumChunks']};",
         "pub const STREAMED_RESPONSE_CHUNK_BYTES: usize = "
         f"{streamed_responses['chunkPayloadBytes']};",
     ]
@@ -276,6 +272,15 @@ def _render(document: dict | None = None) -> str:
         "pub const MIN_WRITABLE_VOLUME_FREE_BYTES: u64 = "
         f"{resource_probe['minimumWritableVolumeFreeBytes']};"
     )
+    buffer = document["walWriteBuffer"]
+    if (buffer["worker"] != "existing-wal-barrier-worker"
+            or buffer["overflow"] != "synchronous-original-write-path-no-admission"
+            or buffer["headroomDivisor"] <= 0 or buffer["fallbackCapacityBytes"] <= 0):
+        raise ValueError("WAL buffer must reuse the barrier worker without admission")
+    lines.append(f'pub const WAL_WRITE_BUFFER_CONTRACT: &str = "{buffer["contract"]}";')
+    lines.append(f'pub const WAL_WRITE_BUFFER_METRICS_FIELD: &str = "{buffer["metricsField"]}";')
+    lines.append(f'pub const WAL_WRITE_BUFFER_HEADROOM_DIVISOR: u64 = {buffer["headroomDivisor"]};')
+    lines.append(f'pub const WAL_WRITE_BUFFER_FALLBACK_BYTES: u64 = {buffer["fallbackCapacityBytes"]};')
     reasons = document["nativeResourceExhaustionDiagnostics"]
     lines.append(f'pub const NATIVE_RESOURCE_EXHAUSTION_CONTRACT: &str = "{reasons["contract"]}";')
     names = ", ".join(f'"{name}"' for name in reasons["reasonNames"])

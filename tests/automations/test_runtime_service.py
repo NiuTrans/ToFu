@@ -64,7 +64,7 @@ def test_application_installs_once_and_keeps_its_shutdown_owner(monkeypatch):
 @pytest.mark.parametrize('role,expected', [('all', True), ('worker', True), ('api', False), ('scheduler', False)])
 def test_process_role_limits_worker_startup(monkeypatch, role, expected):
     from lib.automations import runtime
-    from lib.server_background_services import start_background_services
+    from lib.server.server_background_services import start_background_services
     import lib.integration_control as integration
     import routes
     calls = []

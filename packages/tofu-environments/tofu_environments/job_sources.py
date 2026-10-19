@@ -32,7 +32,10 @@ def extract_job_source(actor, source, destination, *, byte_limit, file_limit, re
         raise EnvironmentError('staging_invalid','Caller must supply an empty private staging directory')
     forbidden=set(reserved);written=[]
     try:
-        with path.open('rb') as original, tempfile.TemporaryFile(dir=target) as stream:
+        # Keep a named private snapshot until close: some FUSE volumes accept
+        # O_TMPFILE/open-then-unlink but lose subsequent writes or flushes.
+        # One pinned snapshot still prevents source mutation after hashing.
+        with path.open('rb') as original, tempfile.NamedTemporaryFile(dir=target, prefix='.source-snapshot-') as stream:
             if os.fstat(original.fileno()).st_size>byte_limit:
                 raise EnvironmentError('source_limit','Archive exceeds source byte bound')
             digest=hashlib.sha256()

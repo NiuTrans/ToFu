@@ -135,7 +135,9 @@ def mobile_client_report_post_v1():
     if declared is not None and declared > _MAX_BODY_BYTES:
         return api_payload_too_large(_MAX_BODY_BYTES)
     try:
-        body = parse_body(strict=True)
+        body = parse_body(strict=True, exact=(
+            'schema', 'reportId', 'createdAt', 'note', 'app', 'device',
+            'profile', 'events', 'web'))
     except BadRequest as error:
         return api_bad_request(str(error))
     if not body:

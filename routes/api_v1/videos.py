@@ -6,18 +6,19 @@ and polls ``GET /api/v1/videos/<video_id>`` until ``status == 'ready'``.
 Conversation turns keep only the returned bounded attachment reference; the
 original, frames and transcript live in the unified media/knowledge authority.
 
-Limits (owner ruling 2026-08-04): 512 MiB / 15 min. The app-global
-MAX_CONTENT_LENGTH is raised to fit the 512 MiB cap, so a central
-before_request guard in server.py keeps every OTHER route at the legacy
-50 MiB ceiling — only this upload path accepts big bodies.
+Video source bytes have no private size quota. The HTTP request body spills to
+an anonymous local file, multipart parsing consumes bounded transport chunks,
+and source handoff uses the existing processing owner. Format, owner identity,
+actual I/O failure and separate analysis policy remain explicit boundaries.
 """
 
 from __future__ import annotations
+from quart import request as request
 
 import os
 import tempfile
 
-from quart import Blueprint, request
+from quart import Blueprint
 
 from lib.api_v4 import raw_success_response
 from lib.openapi import media_responses, api_meta
@@ -28,7 +29,6 @@ from lib.api_response import (
     api_error,
     api_not_found,
     api_ok,
-    api_payload_too_large,
 )
 from lib.file_serving import send_file_conditional
 from lib.log import get_logger
@@ -73,13 +73,6 @@ def upload_video():
     if not va.video_analysis_enabled():
         return api_error('Video analysis is disabled on this server', status=503)
 
-    cap = va.video_max_bytes()
-    # Honor an honest Content-Length up front; still enforce while streaming.
-    cl = request.content_length
-    if cl and cl > cap:
-        logger.warning('[videos] rejected by Content-Length %d > %d', cl, cap)
-        return api_payload_too_large(cap)
-
     reservation = va.reserve_processing_slot()
     try:
         # Multipart scratch and processing share one explicit ownership
@@ -97,7 +90,7 @@ def upload_video():
                 f'Unsupported video type {ext!r}. Allowed: '
                 + ', '.join(sorted(va.VIDEO_EXTS)))
         return _receive_reserved_video(
-            va, file, ext=ext, cap=cap, owner_user_id=owner_user_id,
+            va, file, ext=ext, owner_user_id=owner_user_id,
             reservation=reservation)
     finally:
         # No-op after start_processing transfers ownership to the worker.
@@ -105,29 +98,25 @@ def upload_video():
 
 
 def _receive_reserved_video(
-    va, file, *, ext: str, cap: int, owner_user_id: int, reservation,
+    va, file, *, ext: str, owner_user_id: int, reservation,
 ):
-    """Receive one upload while holding its bounded analysis reservation."""
+    """Receive complete source bytes under the existing processing owner."""
 
-    # Stream to LOCAL-disk scratch with a hard byte cap — never decode or
+    # Stream to LOCAL-disk scratch — never decode or
     # buffer a multi-hundred-MB upload in memory, never on the FUSE mount.
     scratch_dir = tempfile.mkdtemp(prefix='job_', dir=va.scratch_root())
     tmp_path = os.path.join(scratch_dir, 'upload' + ext)
     total = 0
     try:
+        from lib.video_analysis._config import mark_scratch_owner
+        mark_scratch_owner(scratch_dir)
         with open(tmp_path, 'wb') as out:
             while True:
                 chunk = file.stream.read(_CHUNK)
                 if not chunk:
                     break
                 total += len(chunk)
-                if total > cap:
-                    raise _TooLarge()
                 out.write(chunk)
-    except _TooLarge:
-        _cleanup(scratch_dir)
-        logger.warning('[videos] rejected while streaming: >%d bytes', cap)
-        return api_payload_too_large(cap)
     except Exception as e:
         _cleanup(scratch_dir)
         logger.error('[videos] upload stream failed: %s', e, exc_info=True)
@@ -230,10 +219,6 @@ def _receive_reserved_video(
     })
 
 
-class _TooLarge(Exception):
-    pass
-
-
 def _cleanup(path: str) -> None:
     import shutil
     shutil.rmtree(path, ignore_errors=True)
@@ -270,7 +255,9 @@ def video_status(video_id: str):
         if attachment.get('status') in {'ready', 'failed'}:
             rec['status'] = attachment['status']
             rec.update(attachment)
-    return api_ok(rec)
+    public_record = {key: value for key, value in rec.items()
+                     if key != 'process_owner'}
+    return api_ok(public_record)
 
 
 @api_v1_videos_bp.route('/api/videos/<filename>')

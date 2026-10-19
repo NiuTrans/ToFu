@@ -13,12 +13,13 @@ from __future__ import annotations
 from typing import Any
 
 from lib.context_telemetry import validated_tool_schema_token_count
-from lib.llm_errors import ContextCompactionError, PromptTooLongError
+from lib.llm.llm_errors import ContextCompactionError, PromptTooLongError
 from lib.log import audit_log, get_logger
 from lib.tasks_pkg.compaction._layer2 import force_compact_if_needed
 from lib.tasks_pkg.compaction._pipeline import recompose_context_after_compaction
 
 from lib.tasks_pkg.context_composer.checklist import restore_checklist_context
+from lib.tasks_pkg.context_composer.turn_requirements import refresh_turn_requirements
 from lib.tasks_pkg.compaction._tokens import (
     _count_tokens_authoritative,
 )
@@ -58,7 +59,8 @@ def _tool_schema_tokens(tools: Any, *, model: str) -> int:
             return 0
 
 
-def _resolved_ceiling(task: dict[str, Any], *, round_num: int) -> tuple[int, int]:
+def _resolved_ceiling(task: dict[str, Any], *, round_num: int,
+                      input_tokens: int | None = None) -> tuple[int, int]:
     """Return ``(hard_ceiling, proactive_target)`` for this dispatch.
 
     The economic working set is advisory here: the proactive pipeline owns
@@ -67,7 +69,8 @@ def _resolved_ceiling(task: dict[str, Any], *, round_num: int) -> tuple[int, int
     pricing-tier boundary reduces physical model capacity.
     """
     from lib.tasks_pkg.compaction._admission_budget import resolve_admission_budget
-    return resolve_admission_budget(task, round_num=round_num)
+    return resolve_admission_budget(
+        task, round_num=round_num, input_tokens=input_tokens)
 
 
 def _measure(
@@ -183,8 +186,8 @@ def enforce_dispatch_prompt_limit(
     """
     # Required execution state must be present even at round zero/Continue.
     # Optional per-round attachments run earlier and can be skipped or folded.
+    refresh_turn_requirements(messages, task=task, model=model)
     restore_checklist_context(messages, task=task, model=model)
-    hard_ceiling, target = _resolved_ceiling(task, round_num=round_num)
     before = _measure(
         messages,
         tools,
@@ -192,6 +195,8 @@ def enforce_dispatch_prompt_limit(
         model=model,
         precomputed_tool_schema_tokens=precomputed_tool_schema_tokens,
     )
+    hard_ceiling, target = _resolved_ceiling(
+        task, round_num=round_num, input_tokens=before['totalTokens'])
     if before['totalTokens'] <= target:
         _record(
             task,
@@ -218,7 +223,13 @@ def enforce_dispatch_prompt_limit(
         raise PromptTooLongError(
             'Provider prompt refused before dispatch: the selected tool schemas '
             f'need {before["toolSchemaTokens"]:,} tokens, exceeding the '
-            f'{hard_ceiling:,}-token prompt ceiling.'
+            f'{hard_ceiling:,}-token prompt ceiling.',
+            origin='local', reason='tool_schema_floor',
+            tool_schema_tokens=before['toolSchemaTokens'],
+            prompt_budget_tokens=hard_ceiling,
+            total_tokens=before['totalTokens'],
+            context_window_tokens=(task.get('_contextBudgetDecision') or {}).get(
+                'contextWindowTokens'),
         )
 
     from lib.tasks_pkg.compaction._pressure import try_pressure_l1
@@ -232,6 +243,10 @@ def enforce_dispatch_prompt_limit(
                 precomputed_tool_schema_tokens=before['toolSchemaTokens'])['totalTokens']):
         after_l1 = _measure(messages, tools, task, model=model,
                             precomputed_tool_schema_tokens=before['toolSchemaTokens'])
+        hard_ceiling, target = _resolved_ceiling(
+            task, round_num=round_num, input_tokens=after_l1['totalTokens'])
+
+        before = after_l1
         if after_l1['totalTokens'] <= target:
             _record(task, round_num=round_num, stage='after_l1',
                     hard_ceiling=hard_ceiling, target=target,
@@ -248,11 +263,17 @@ def enforce_dispatch_prompt_limit(
         after_retention = _measure(
             messages, tools, task, model=model,
             precomputed_tool_schema_tokens=before['toolSchemaTokens'])
-        _record(task, round_num=round_num, stage='after_tool_retention',
-                hard_ceiling=hard_ceiling, target=target,
-                measurement=after_retention, action='retain_tools_then_admit')
-        return after_retention
+        hard_ceiling, target = _resolved_ceiling(
+            task, round_num=round_num, input_tokens=after_retention['totalTokens'])
 
+        before = after_retention
+        if after_retention['totalTokens'] <= target:
+            _record(task, round_num=round_num, stage='after_tool_retention',
+                    hard_ceiling=hard_ceiling, target=target,
+                    measurement=after_retention, action='retain_tools_then_admit')
+            return after_retention
+
+    message_target = target - int(before['toolSchemaTokens'])
     _record(task, round_num=round_num, stage='before_summary',
             hard_ceiling=hard_ceiling, target=target, measurement=before,
             action='summary_required')
@@ -265,19 +286,41 @@ def enforce_dispatch_prompt_limit(
         _record(task, round_num=round_num, stage='before_summary',
                 hard_ceiling=hard_ceiling, target=target, measurement=before,
                 action='refuse_summary_route')
-        raise PromptTooLongError('Native prompt requires an existing owned summary route; dispatch refused.')
+        raise PromptTooLongError(
+            'Native prompt requires an existing owned summary route; dispatch refused.',
+            origin='local', reason='summary_route_unavailable',
+            tool_schema_tokens=before['toolSchemaTokens'],
+            prompt_budget_tokens=hard_ceiling,
+            total_tokens=before['totalTokens'],
+            context_window_tokens=(task.get('_contextBudgetDecision') or {}).get(
+                'contextWindowTokens'),
+        )
     compaction_meta: dict[str, Any] = {}
+    reason = (
+        f'final rendered prompt {before["totalTokens"]:,} tokens exceeds '
+        f'{target:,}-token admission target '
+        f'(messages {before["messageTokens"]:,} + tool schemas {before["toolSchemaTokens"]:,})')
+    window = (task.get('_contextBudgetDecision') or {}).get('contextWindowTokens')
+    if type(window) is int and window > 0:
+        reason += (f'; route window {window:,}, '
+                   f'output/safety headroom {max(0, window - target):,}')
+    reason += ('; local pre-dispatch safeguard. '
+               'Snapshot totals are message estimates excluding tool schemas.')
     compacted = force_compact_if_needed(
         messages,
         task=task,
         preserve_budget_tokens=preserve_budget,
         force=True,
         _compaction_trigger='dispatch_guard',
-        _compaction_reason=(
-            f'final rendered prompt {before["totalTokens"]:,} tokens exceeds '
-            f'{target:,}-token admission target'),
+        _compaction_reason=reason,
         _compaction_round=round_num,
         _allow_deterministic_summary_fallback=True,
+        # This is the final boundary: when the summary route is unavailable
+        # (credential outage / no capable model), bound the context with the
+        # same deterministic head-truncate the proactive path trusts instead
+        # of surfacing a fatal ContextCompactionError.  Scoped to this pass —
+        # proactive economic compaction keeps its summary-only discipline.
+        _allow_head_truncate_fallback=True,
         _dispatch_prompt_target=target,
         _dispatch_prompt_measure=lambda candidate: _measure(
             candidate, tools, task, model=model,
@@ -290,6 +333,7 @@ def enforce_dispatch_prompt_limit(
 
     # Inspect the actual resulting projection, not the compactor's boolean:
     # partial/fallback transformations may remove a carrier even on False.
+    refresh_turn_requirements(messages, task=task, model=model)
     restore_checklist_context(messages, task=task, model=model)
     after_summary = _measure(
         messages,
@@ -298,6 +342,8 @@ def enforce_dispatch_prompt_limit(
         model=model,
         precomputed_tool_schema_tokens=before['toolSchemaTokens'],
     )
+    hard_ceiling, target = _resolved_ceiling(
+        task, round_num=round_num, input_tokens=after_summary['totalTokens'])
     if after_summary['totalTokens'] <= target:
         _record(
             task,
@@ -332,15 +378,16 @@ def enforce_dispatch_prompt_limit(
         # trials died at 128K of a 200K window on a summary transport_error)
         # forfeits otherwise-healthy work for a retryable failure. The fatal
         # path below stays for prompts that genuinely cannot fit.
-        from lib.tasks_pkg.compaction._tokens import _get_context_limit
-        _context_limit = _get_context_limit(task)
-        _round_max_tokens = int(
-            (task.get('config') or {}).get('maxTokens') or 0)
+        decision = task.get('_contextBudgetDecision') or {}
+        _context_limit = decision.get('contextWindowTokens', 0)
+        _round_max_tokens = decision.get('resolvedOutputTokens', 0)
+        _safety = decision.get('windowSafetyTokens', 0)
         _fits = (
-            _context_limit > 0
-            and _round_max_tokens > 0
-            and after_summary['totalTokens'] + _round_max_tokens
-            < _context_limit
+            type(_context_limit) is int and _context_limit > 0
+            and type(_round_max_tokens) is int and _round_max_tokens > 0
+            and type(_safety) is int
+            and after_summary['totalTokens'] <= min(hard_ceiling, _safety)
+            and after_summary['totalTokens'] + _round_max_tokens <= _context_limit
         )
         if _fits:
             logger.warning(

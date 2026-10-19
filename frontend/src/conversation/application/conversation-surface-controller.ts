@@ -5,9 +5,10 @@ import type { AutomationManagementPresentationPage } from '../../api/automation.
  * Responsibility: scheduling, presentation-local state, scroll preservation,
  * and typed intent forwarding. It never reads or adopts legacy message HTML.
  */
-import type { TurnState } from '../domain/turn-store';
+import type { TurnState, TurnStateUpdate } from '../domain/turn-store';
 import {
   selectConversationViewModel,
+  createConversationViewModelSelector,
   type ConversationArtifactViewModel,
   type ConversationPresentationState,
   type TranslationActivity,
@@ -37,15 +38,10 @@ export interface ConversationSurfaceHost {
   isActive(conversationId: string): boolean;
   getContainer(): HTMLElement | null;
   schedule(render: () => void): () => void;
-  nativeRenderers?: Pick<
-    ConversationSurfaceRenderers,
-    'renderBlock' | 'renderTurnHeader' | 'renderTurnActions'
-      | 'renderTurnFooter' | 'renderPlanDecision'
-      | 'renderLaneHeader' | 'renderQueueItem'
-  >;
+  nativeRenderers?: ConversationSurfaceRenderers;
   loadTaskTimePresentations?(conversationId: string, attemptId: string, signal: AbortSignal): Promise<AutomationManagementPresentationPage>;
   taskTimePresentationError?(error: unknown): void;
-  onIntent?(intent: ConversationIntent): void;
+  onIntent?(intent: ConversationIntent): void | Promise<unknown>;
   requestInspectorEnabled?(): boolean;
   /** Synchronous client cost-cache signature per settled turn lacking an
    *  authoritative projection cost. The async batch fill mutates no Turn
@@ -64,11 +60,13 @@ export interface ConversationSurfaceHost {
   captureScroll?(): unknown;
   restoreScroll?(snapshot: unknown): void;
   followLatest?(): void;
+  onConversationMounted?(conversation: ConversationDocument): void;
   afterConversationCommit?(
     conversation: ConversationDocument,
     state: TurnState,
     force: boolean,
     viewModel: ReturnType<typeof selectConversationViewModel>,
+    mountedTurnIds: ReadonlyArray<string>,
   ): void;
 }
 
@@ -78,7 +76,7 @@ export interface ConversationSurfaceController {
   render(
     conversation: ConversationDocument,
     state: TurnState,
-    context?: { force?: boolean },
+    context?: { force?: boolean; update?: TurnStateUpdate },
   ): boolean;
   setTranslationActivity(
     conversationId: string,
@@ -93,7 +91,8 @@ export interface ConversationSurfaceController {
       ReadonlyArray<ConversationArtifactViewModel>
     >,
   ): void;
-  followLatest(): void;
+  isNearLatest(threshold?: number): boolean;
+  followLatest(options?: { force?: boolean }): void;
 
   revealTurn(conversationId: string, turnId: string): boolean;
   disposeConversation(conversationId: string): void;
@@ -104,6 +103,7 @@ export interface ConversationSurfaceController {
 export function createConversationSurfaceController(
   host: ConversationSurfaceHost,
 ): ConversationSurfaceController {
+  const selector = createConversationViewModelSelector();
   let surface: ConversationSurface | null = null;
   let surfaceConversationId = '';
   let currentConversation: ConversationDocument | null = null;
@@ -120,7 +120,7 @@ export function createConversationSurfaceController(
     state: TurnState;
     force: boolean;
   } | null = null;
-  let cancelScheduled: (() => void) | null = null;
+  let scheduled: { cancel?: () => void } | null = null;
   let disposed = false;
   let surfaceOwnsScroll = false;
 
@@ -129,12 +129,12 @@ export function createConversationSurfaceController(
     changed: () => repaintPresentation(),
     failed: host.taskTimePresentationError,
   }) : null;
-  let taskTimeObserver: MutationObserver | null = null;
-  const refreshTaskTimes = (force = false): void => {
-    if (!taskTimes || !surface || !currentConversation || !currentState) return;
+  const refreshTaskTimes = (force = false, turnIds = surface?.mountedTurnIds ?? []): void => {
+    if (!taskTimes || !currentConversation || !currentState
+      || disposed || !host.isActive(currentConversation.id)) return;
     const targets: string[] = [];
-    for (const node of surface.root.querySelectorAll<HTMLElement>('[data-turn-id]')) {
-      const turn = currentState.turnsById[node.dataset.turnId ?? ''];
+    for (const turnId of turnIds) {
+      const turn = currentState.turnsById[turnId];
       const attempt = turn?.currentAttemptId ? currentState.attemptsById[turn.currentAttemptId] : null;
       if (attempt?.startedAt && turn?.actor !== 'human') targets.push(attempt.attemptId);
     }
@@ -142,7 +142,7 @@ export function createConversationSurfaceController(
   };
 
   const disposeSurface = (): void => {
-    taskTimeObserver?.disconnect(); taskTimeObserver = null;
+    selector.dispose();
     taskTimes?.dispose();
     surface?.dispose();
     surface = null;
@@ -184,24 +184,45 @@ export function createConversationSurfaceController(
     ));
   };
 
-  const repaintPresentation = (): void => {
-    if (!surface || !currentConversation || !currentState) return;
-    const scroll = surfaceOwnsScroll ? undefined : host.captureScroll?.();
-    const viewModel = selectConversationViewModel(
-      currentState, {}, presentationState(),
-    );
-    surface.render(viewModel);
-    if (!surfaceOwnsScroll) host.restoreScroll?.(scroll);
-    host.afterConversationCommit?.(
-      currentConversation, currentState, true, viewModel,
-    );
+  const cancelPaint = (): void => {
+    const previous = scheduled;
+    scheduled = null;
+    try { previous?.cancel?.(); }
+    catch (error) { console.warn('[ConversationSurface] render cancellation failed', error); }
+  };
+  const schedulePaint = (): void => {
+    if (scheduled || disposed) return;
+    const frame: { cancel?: () => void } = {};
+    scheduled = frame;
+    try {
+      frame.cancel = host.schedule(() => {
+        // Cancellation can race delivery; the identity also fences a later
+        // conversation's pending paint. Synchronous clocks are supported.
+        if (disposed || scheduled !== frame) return;
+        scheduled = null;
+        flush();
+      });
+    } catch (error) {
+      if (scheduled === frame) scheduled = null;
+      throw error;
+    }
+  };
+  const repaintPresentation = (immediate = false): void => {
+    if (!surface || !currentConversation || !currentState
+      || disposed || !host.isActive(currentConversation.id)) return;
+    pending ??= { conversation: currentConversation, state: currentState, force: true };
+    pending.force = true;
+    // Explicit disclosure/display intents commit before the next action can
+    // read their DOM. Async presentation receipts still coalesce with the graph.
+    if (immediate) flush();
+    else schedulePaint();
   };
 
   const ensureSurface = (
     container: HTMLElement,
     conversation: ConversationDocument,
   ): ConversationSurface => {
-    if (surface && surface.root.isConnected
+    if (surface && surface.root.parentElement === container
         && surfaceConversationId === conversation.id) return surface;
     disposeSurface();
     currentConversation = conversation;
@@ -221,6 +242,7 @@ export function createConversationSurfaceController(
       ...(host.transportNoticeLabel
         ? { transportNoticeLabel: host.transportNoticeLabel }
         : {}),
+      onCommit(turnIds) { refreshTaskTimes(false, turnIds); },
       onIntent(intent) {
         if (intent.type === 'toggle-branch' && intent.laneId) {
           const opening = expandedBranchLaneId !== intent.laneId;
@@ -229,7 +251,7 @@ export function createConversationSurfaceController(
             ...intent,
             operation: opening ? 'open' : 'close',
           });
-          repaintPresentation();
+          repaintPresentation(true);
           return;
         }
         if (intent.type === 'delete-branch'
@@ -246,7 +268,7 @@ export function createConversationSurfaceController(
               : (intent.operation === 'show-translated' ? 'translated'
                 : (mode === 'translated' ? 'original' : 'translated'));
             translationModeByTurn.set(intent.turnId, nextMode);
-            repaintPresentation();
+            repaintPresentation(true);
             return;
           }
           if (intent.type === 'copy' || intent.type === 'copy-block') {
@@ -254,7 +276,7 @@ export function createConversationSurfaceController(
             return;
           }
         }
-        host.onIntent?.(intent);
+        return host.onIntent?.(intent);
       },
       /* Injection-lane thumbnails carry their image source directly; relay it
        * as a preview-image intent so the retained host opens the lightbox
@@ -267,20 +289,17 @@ export function createConversationSurfaceController(
         });
       },
     });
-    if (taskTimes && typeof MutationObserver !== 'undefined') {
-      taskTimeObserver = new MutationObserver(() => refreshTaskTimes());
-      taskTimeObserver.observe(surface.root, { childList: true, subtree: true });
-    }
     return surface;
   };
 
   const flush = (): void => {
-    cancelScheduled = null;
+    cancelPaint();
     const frame = pending;
     pending = null;
     if (!frame || disposed || !host.isActive(frame.conversation.id)) return;
     const container = host.getContainer();
     if (!container) return;
+    const previousSurface = surface;
     const activeSurface = ensureSurface(container, frame.conversation);
     const useLegacyScroll = !surfaceOwnsScroll;
     const scroll = useLegacyScroll ? host.captureScroll?.() : undefined;
@@ -294,16 +313,16 @@ export function createConversationSurfaceController(
     for (const child of Array.from(container.children)) {
       if (child !== activeSurface.root) child.remove();
     }
-    const viewModel = selectConversationViewModel(
+    const viewModel = selector.select(
       frame.state, {}, presentationState(),
     );
     activeSurface.render(viewModel);
     // A forced paint is not evidence that accepted automation output changed.
     // Only the explicit invalidation port requests a reread.
-    refreshTaskTimes();
     if (useLegacyScroll) host.restoreScroll?.(scroll);
+    if (previousSurface !== activeSurface) host.onConversationMounted?.(frame.conversation);
     host.afterConversationCommit?.(
-      frame.conversation, frame.state, frame.force, viewModel,
+      frame.conversation, frame.state, frame.force, viewModel, activeSurface.mountedTurnIds,
     );
   };
 
@@ -312,39 +331,40 @@ export function createConversationSurfaceController(
       if (!disposed && conversationId === surfaceConversationId) refreshTaskTimes(true);
     },
     ownsConversation(conversationId) {
-      return !disposed && surfaceConversationId === conversationId;
+      return !disposed && host.isActive(conversationId) && surfaceConversationId === conversationId;
     },
     render(conversation, state, context = {}) {
-      if (disposed || !host.isActive(conversation.id) || !host.getContainer()) {
+      if (disposed || conversation.id !== state.conversationId
+        || !host.isActive(conversation.id) || !host.getContainer()) {
         return false;
       }
-      pending = { conversation, state, force: Boolean(context.force) };
-      if (!cancelScheduled) cancelScheduled = host.schedule(flush);
+      selector.observe(state, context.update);
+      pending = { conversation, state, force: Boolean(context.force)
+        || (pending?.conversation.id === conversation.id && pending.force) };
+      schedulePaint();
       return true;
     },
     setTranslationActivity(conversationId, turnId, activity) {
-      if (!turnId || conversationId !== surfaceConversationId) return;
+      if (disposed || !host.isActive(conversationId)
+        || !turnId || conversationId !== surfaceConversationId) return;
       if (activity) {
         const previous = translationActivityByTurn.get(turnId);
         const next = mergeTranslationActivity(previous, activity);
         translationActivityByTurn.set(turnId, next);
       }
       else translationActivityByTurn.delete(turnId);
-      if (!surface || !currentConversation || !currentState) return;
       // Use the existing graph paint scheduler. A burst merges every key but
       // derives/renders the combined preview only for the scheduled frame.
-      pending ??= { conversation: currentConversation, state: currentState, force: true };
-      pending.force = true;
-      if (!cancelScheduled) cancelScheduled = host.schedule(flush);
+      repaintPresentation();
     },
     setExpandedBranchLane(conversationId, laneId) {
-      if (conversationId !== surfaceConversationId
+      if (disposed || !host.isActive(conversationId) || conversationId !== surfaceConversationId
           || expandedBranchLaneId === laneId) return;
       expandedBranchLaneId = laneId;
       repaintPresentation();
     },
     setArtifacts(conversationId, nextArtifactsByTurn) {
-      if (conversationId !== surfaceConversationId) return;
+      if (disposed || !host.isActive(conversationId) || conversationId !== surfaceConversationId) return;
       artifactsByTurn.clear();
       for (const [turnId, artifacts] of nextArtifactsByTurn) {
         if (turnId && artifacts.length) artifactsByTurn.set(turnId, artifacts);
@@ -354,25 +374,29 @@ export function createConversationSurfaceController(
     revealTurn(conversationId, turnId) {
       if (disposed || !host.isActive(conversationId)) return false;
       if (pending?.conversation.id === conversationId) {
-        cancelScheduled?.();
         flush();
       }
       return surfaceConversationId === conversationId && Boolean(surface?.revealTurn(turnId));
     },
-    followLatest() {
-      if (surface && surfaceOwnsScroll) surface.followLatest();
-      else host.followLatest?.();
+    isNearLatest(threshold) {
+      return !surface || !host.isActive(surfaceConversationId) || surface.isNearLatest(threshold);
+    },
+    followLatest(intent) {
+      if (disposed) return;
+      if (intent?.force !== false && pending && host.isActive(pending.conversation.id)) flush();
+      if (!surface || !host.isActive(surfaceConversationId)) return;
+      if (surfaceOwnsScroll) surface.followLatest(intent);
+      else if (intent?.force !== false) host.followLatest?.();
     },
     disposeConversation(conversationId) {
-      if (pending?.conversation.id === conversationId) pending = null;
+      if (pending?.conversation.id === conversationId) { pending = null; cancelPaint(); }
       if (surfaceConversationId === conversationId) disposeSurface();
     },
     dispose() {
       if (disposed) return;
       disposed = true;
       pending = null;
-      cancelScheduled?.();
-      cancelScheduled = null;
+      cancelPaint();
       disposeSurface();
     },
   };

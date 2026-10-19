@@ -61,7 +61,6 @@ EXT_DIR = ROOT / 'browser_extension'
 STORE_DIR = ROOT / 'docs' / 'chrome-web-store'
 DEV_MANIFEST = EXT_DIR / 'manifest.json'
 STORE_MANIFEST = STORE_DIR / 'manifest.store.json'
-JUSTIFICATION = STORE_DIR / 'PERMISSIONS_JUSTIFICATION.md'
 PACKAGE_SH = ROOT / 'scripts' / 'package_extension.sh'
 
 
@@ -255,157 +254,6 @@ def test_the_two_manifests_agree_on_everything_except_permissions():
             f"may be trimmed.")
 
 
-# ══════════════════════════════════════════════════════════
-#  4. The submission paperwork must match the manifest
-# ══════════════════════════════════════════════════════════
-
-def _justification_blocks() -> set[str]:
-    """Permission names that have a `## \\`name\\`` justification heading."""
-    txt = JUSTIFICATION.read_text(encoding='utf-8')
-    return set(re.findall(r'^## `([A-Za-z]+)`\s*$', txt, re.M))
-
-
-def test_every_declared_permission_has_a_justification_block():
-    """The dashboard shows one mandatory text box per declared permission.
-    A missing block means submitting with an empty justification, which is a
-    documented rejection cause."""
-    declared = set(_json(STORE_MANIFEST).get('permissions', []))
-    missing = sorted(declared - _justification_blocks())
-    assert not missing, (
-        f"declared in the store manifest but with no justification block in "
-        f"PERMISSIONS_JUSTIFICATION.md: {missing}. The reviewer sees an empty "
-        f"box.")
-
-
-def test_no_justification_block_for_a_permission_we_do_not_ask_for():
-    """The reverse drift: a block for a permission we dropped tells whoever
-    submits to paste a justification for something not in the manifest, which
-    is how a dropped permission gets re-added by accident."""
-    declared = set(_json(STORE_MANIFEST).get('permissions', []))
-    orphans = sorted(_justification_blocks() - declared)
-    assert not orphans, (
-        f"PERMISSIONS_JUSTIFICATION.md still has justification blocks for "
-        f"{orphans}, which the store manifest no longer declares. Delete them "
-        f"or they invite re-adding the permission.")
-
-
-def test_the_removed_permissions_table_matches_reality():
-    """The doc's "REMOVED for the store build" table is what a human reads
-    before submitting. It said 6; the real trim is larger. A stale count
-    there is how the activeTab decision silently got lost."""
-    txt = JUSTIFICATION.read_text(encoding='utf-8')
-    dev = set(_json(DEV_MANIFEST).get('permissions', []))
-    store = set(_json(STORE_MANIFEST).get('permissions', []))
-    actually_removed = sorted(dev - store)
-    listed = set(re.findall(r'^\| `([A-Za-z]+)` \|', txt, re.M))
-    missing = sorted(set(actually_removed) - listed)
-    assert not missing, (
-        f"these permissions are trimmed from the store build but the "
-        f"REMOVED table never explains why: {missing}. Whoever submits has "
-        f"no record of the decision.")
-    stale = sorted(listed - set(actually_removed))
-    assert not stale, (
-        f"the REMOVED table lists {stale}, which are NOT actually removed "
-        f"from the store manifest — the table and the manifest disagree.")
-
-
-def test_no_document_states_a_hardcoded_removed_count():
-    """A prose count ("removes 6 permissions") goes stale the moment the trim
-    changes, and it already did. The table above is the single source of
-    truth; the prose must not restate a number that can drift from it.
-
-    BOTH word orders are matched. The first version of this guard only caught
-    verb-first phrasing ("removes the 6 permissions") and stayed green while
-    the kit README said "(6 unused permissions removed)" — a guard that
-    passes while the defect it names is still on the page.
-    """
-    verb_first = re.compile(
-        r'(?:removes?|removed|dropp?e?d?|trims?|trimmed)\s+(?:the\s+)?'
-        r'(\d+)\s+(?:unused\s+)?permissions?', re.I)
-    count_first = re.compile(
-        r'(\d+)\s+(?:unused\s+)?permissions?\s+'
-        r'(?:removed|dropped|trimmed|are\s+removed)', re.I)
-    offenders = {}
-    for p in list(STORE_DIR.glob('*.md')) + [PACKAGE_SH]:
-        if not p.exists():
-            continue
-        txt = p.read_text(encoding='utf-8')
-        hits = verb_first.findall(txt) + count_first.findall(txt)
-        if hits:
-            offenders[p.name] = hits
-    assert not offenders, (
-        f"these files hardcode a permission-removal COUNT: {offenders}. The "
-        f"count drifts whenever the trim changes (it already read 6 while the "
-        f"real trim was 7). Say 'the permissions listed below' and let the "
-        f"table be the source of truth.")
-
-
-def test_the_kit_documents_the_edge_addons_route():
-    """Edge Add-ons must be a first-class target, not an afterthought.
-
-    The backend drives Edge and the READMEs tell users it works, but a store
-    listing is the only path that gives a NON-developer one-click install —
-    and Edge is the one that costs nothing, accepts individual accounts, and
-    takes the exact same zip. A kit that documents only Chrome silently makes
-    the cheapest real route invisible.
-    """
-    edge = STORE_DIR / 'EDGE_ADDONS.md'
-    assert edge.exists(), (
-        'docs/chrome-web-store/EDGE_ADDONS.md is missing — the Edge Add-ons '
-        'submission route is undocumented, so the zero-fee path to one-click '
-        'install exists only in someone\'s head')
-    txt = edge.read_text(encoding='utf-8')
-    for needle, why in (
-            ('partner.microsoft.com', 'the Partner Center registration URL'),
-            ('Individual', 'that individual (non-company) accounts are supported'),
-            ('remote code', "Edge's stricter MV3 remote-code rule"),
-    ):
-        assert needle in txt, f'EDGE_ADDONS.md never states {why}'
-
-
-def test_the_edge_route_is_discoverable_from_the_kit_entry_points():
-    """A doc nobody is pointed at is a doc nobody reads. The kit README and
-    the Chrome checklist must both hand the reader the Edge route."""
-    for name in ('README.md', 'SUBMISSION_CHECKLIST.md'):
-        txt = (STORE_DIR / name).read_text(encoding='utf-8')
-        assert 'EDGE_ADDONS.md' in txt, (
-            f'{name} never links EDGE_ADDONS.md, so the Edge route is only '
-            f'findable by listing the directory')
-
-
-def test_the_fallback_ladder_puts_edge_before_firefox():
-    """Ordering is the whole point of the ladder.
-
-    Firefox needs a real code port (no `chrome.debugger`) AND a signing
-    pipeline, because it has no persistent unpacked install (charter #20).
-    Edge needs neither — same package, no fee. A ladder that names Firefox as
-    the next stop after Chrome sends the reader down the most expensive path
-    first, which is what this file used to do.
-    """
-    txt = (STORE_DIR / 'REVIEW_RISKS.md').read_text(encoding='utf-8')
-    ladder = txt[txt.index('## Realistic outcome ladder'):]
-    edge_at = ladder.find('Edge Add-ons')
-    ff_at = ladder.find('Firefox')
-    assert edge_at != -1, 'the outcome ladder never mentions Edge Add-ons'
-    assert ff_at != -1, 'the outcome ladder no longer mentions Firefox'
-    assert edge_at < ff_at, (
-        'the outcome ladder reaches Firefox before Edge Add-ons. Edge is the '
-        'same package with no fee; Firefox is a code port plus an AMO signing '
-        'pipeline. Order them by real cost.')
-
-
-def test_the_kit_does_not_sell_edge_as_a_free_pass_on_remote_code():
-    """Honesty guard, and the reason it is worth a test: it would be easy to
-    present Edge as "same package, zero cost, done". Microsoft's MV3 rule on
-    remotely hosted code is worded MORE absolutely than Chrome's, and this
-    extension runs server-sent JS. If the kit ever drops that caveat, whoever
-    submits will be blindsided by the same rejection twice."""
-    txt = (STORE_DIR / 'EDGE_ADDONS.md').read_text(encoding='utf-8')
-    assert 'not permitted' in txt or 'stricter' in txt.lower() or 'STRICTER' in txt, (
-        'EDGE_ADDONS.md no longer warns that Edge is stricter than Chrome on '
-        'remote code under MV3 — the kit now oversells the Edge route')
-
-
 def test_the_popup_version_badge_is_derived_not_remembered():
     """The popup badge sat at ``v4.3`` while the manifest moved on — a
     hardcoded twin nobody bumped (user-reported 2026-08-02: the extension
@@ -431,26 +279,6 @@ def test_the_popup_version_badge_is_derived_not_remembered():
         'exists to prevent')
 
 
-def test_no_document_pins_a_stale_extension_version():
-    """SUBMISSION_CHECKLIST told the submitter to look for a
-    ``4.3.0-store.zip`` that ``package_extension.sh`` would never produce
-    once the version moved — a checklist step that can only fail."""
-    dev_v = _json(DEV_MANIFEST).get('version')
-    offenders = {}
-    for p in STORE_DIR.glob('*.md'):
-        txt = p.read_text(encoding='utf-8')
-        stale = sorted({v for v in re.findall(r'\b(\d+\.\d+\.\d+)-store\b', txt)
-                        if v != dev_v}
-                       | {v for v in re.findall(r'tofu-browser-bridge-(\d+\.\d+\.\d+)', txt)
-                          if v != dev_v})
-        if stale:
-            offenders[p.name] = stale
-    assert not offenders, (
-        f"store docs pin extension versions that no longer exist (shipped is "
-        f"{dev_v}): {offenders}. The build produces a different filename, so "
-        f"the checklist step cannot be completed as written.")
-
-
 # ══════════════════════════════════════════════════════════
 #  5. The packaging script must ship what we audited
 # ══════════════════════════════════════════════════════════
@@ -474,11 +302,6 @@ def test_the_store_build_tool_survives_git_and_export():
     export-stripped → absent from the public tree that carries the checklist.
     """
     rel = 'scripts/package_extension.sh'
-    checklist = (STORE_DIR / 'SUBMISSION_CHECKLIST.md').read_text(encoding='utf-8')
-    assert 'package_extension.sh' in checklist, (
-        'the checklist no longer references the packaging script — re-point '
-        'this guard at whatever the build step is now, do not delete it')
-
     tracked = subprocess.run(
         ['git', 'ls-files', '--error-unmatch', rel],
         cwd=ROOT, capture_output=True, text=True, timeout=60).returncode == 0
@@ -535,108 +358,3 @@ def test_the_store_manifest_is_tracked_by_git():
         f"{STORE_MANIFEST.relative_to(ROOT)} is not tracked by git, so these "
         f"guards would pass vacuously on a clean checkout and the store build "
         f"would have no manifest to swap in.")
-
-
-# ══════════════════════════════════════════════════════════
-#  6. The PAUSED decision must stay recorded
-# ══════════════════════════════════════════════════════════
-#
-# 2026-07-31 the owner decided NOT to submit: stay on "load unpacked". The
-# blocker was never the paperwork — every mechanical precondition in this file
-# is green — it was the trade-off in REVIEW_RISKS.md ("Decision to make NOW"):
-# the only realistic route to acceptance is a REDUCED build with
-# browser_execute_js and debugger removed, which narrows what the extension can
-# do.
-#
-# A kit that reads "here is how to submit" with no record of a decision NOT to
-# is an open invitation to redo the whole investigation. The guards below keep
-# the decision attached to the artifact it governs — the same reason the
-# activeTab reasoning is pinned above rather than left in a commit message.
-
-
-def test_the_kit_entry_point_records_the_do_not_submit_decision():
-    """The reader must meet the decision before the instructions.
-
-    Placement is asserted, not just presence: a note further down the page is
-    reached only by someone already following the checklist.
-    """
-    txt = (STORE_DIR / 'README.md').read_text(encoding='utf-8')
-    head = txt[:2500]
-    assert re.search(r'NOT SUBMITTING|不上架|do not submit', head, re.I), (
-        'docs/chrome-web-store/README.md no longer states up front that the '
-        'owner decided against submitting. Without it the kit reads as an '
-        'open task and the next reader re-runs a closed investigation. If the '
-        'decision was REVERSED, delete this guard in the same commit that '
-        'starts the submission — do not quietly soften the note.')
-    assert '2026-07-31' in head, (
-        'the do-not-submit note carries no date, so a reader cannot tell '
-        'whether it predates their own information.')
-
-
-def test_the_paused_decision_names_the_tradeoff_that_caused_it():
-    """"We decided no" without the WHY decays into folklore.
-
-    The reason is specific and load-bearing: acceptance realistically requires
-    dropping browser_execute_js + debugger. Anyone revisiting this needs that
-    to be the first thing they see, because it is a CODE change, not a
-    paperwork one.
-
-    Scoped to the NOTE BLOCK, not the whole file. A first version searched the
-    entire README and stayed green after the note was deleted outright,
-    because `browser_execute_js` and `debugger` both appear in the honest
-    expectation-setting paragraph further down — a guard that passes while the
-    thing it guards is gone.
-    """
-    txt = (STORE_DIR / 'README.md').read_text(encoding='utf-8')
-    if 'NOT SUBMITTING' not in txt:
-        pytest.fail(
-            'no do-not-submit note to check — see the sibling guard, which '
-            'owns that failure')
-    start = txt.index('NOT SUBMITTING')
-    note = txt[start:txt.index('Everything needed to publish', start)]
-    for needle, why in (
-            ('browser_execute_js', 'the remote-code capability at stake'),
-            ('debugger', 'the second permission a reduced build would drop'),
-            ('REVIEW_RISKS.md', 'where the full trade-off is written up'),
-    ):
-        assert needle in note, (
-            f'the do-not-submit note never mentions {needle} — {why}. Without '
-            f'it the decision looks arbitrary and will be re-litigated from '
-            f'scratch.')
-
-
-def test_the_paused_kit_still_claims_only_what_is_measurably_true():
-    """The readiness facts in the note must match the actual artifacts.
-
-    A parked kit is exactly where stale claims survive unnoticed, because
-    nobody exercises it. These are re-derived from the manifests rather than
-    trusted as prose, so the note cannot drift into telling a future submitter
-    something false about the state they are inheriting.
-    """
-    txt = (STORE_DIR / 'README.md').read_text(encoding='utf-8')
-    if 'Kit readiness' not in txt:
-        pytest.skip('the note no longer makes readiness claims')
-    store = _json(STORE_MANIFEST)
-    n = len(store.get('permissions', []))
-    assert f'{n} permissions' in txt, (
-        f'the readiness note does not state the real permission count '
-        f'({n}). A parked kit with a wrong count is how the next submitter '
-        f'starts from a false premise.')
-    assert store.get('version') in txt, (
-        f"the readiness note does not name the current store-manifest version "
-        f"({store.get('version')!r}), so it cannot be trusted as a snapshot.")
-
-
-def test_the_note_does_not_contradict_the_closed_install_routes():
-    """The 'one exe installs the extension' idea stays closed on FACTS.
-
-    Those facts are what make the manual three-step install non-negotiable, so
-    the note must carry them: if they are lost, someone re-proposes an
-    installer-driven extension install and burns the same investigation again.
-    """
-    txt = (STORE_DIR / 'README.md').read_text(encoding='utf-8')
-    for needle in ('update_url', 'force_installed', '--load-extension'):
-        assert needle in txt, (
-            f'the note omits {needle!r}, one of the three measured reasons an '
-            f'installer cannot place the extension. All three belong together '
-            f'— each alone leaves an apparent loophole.')

@@ -58,8 +58,8 @@ fn posting_query_digests(value: &str) -> Vec<(u8, [u8; 32])> {
 /// superset of the conversations any term can appear in (a conversation whose
 /// title, id, or a chunk contains a term emitted every one of the term's
 /// grams), or None when the read budget forces the caller back to the
-/// unfiltered walk. Fingerprints are the first eight digest bytes: collisions
-/// can only add false candidates, which the exact verification rejects.
+/// unfiltered walk. Stable IDs resolve complete generation digests in an
+/// owner-scoped dictionary. Exact verification rejects gram false candidates.
 fn gram_candidate_set(
     database: &AuthorityDatabase,
     transaction: &mut AuthorityTransaction,
@@ -93,10 +93,7 @@ fn gram_candidate_set(
             return Ok(None);
         }
         *budget -= entries.len();
-        let gram_set: HashSet<u64> = entries
-            .iter()
-            .map(|entry| u64::from_be_bytes(entry[..8].try_into().unwrap()))
-            .collect();
+        let gram_set: HashSet<u64> = entries.into_iter().collect();
         set = Some(match set {
             None => gram_set,
             Some(mut current) => {
@@ -251,7 +248,7 @@ fn rank(meta: &TurnMeta, phrase: bool) -> (bool, bool, bool, u64, &str, u32) {
     )
 }
 
-impl TurnSearchProjection {
+impl OpenTurnSearchProjection {
     pub fn search(
         &self,
         request: &ConversationSearchRequest,
@@ -452,8 +449,12 @@ impl TurnSearchProjection {
                                 .try_into()
                                 .unwrap(),
                         );
+                        let generation_id = generation_dictionary::lookup(
+                            &self.database, &mut transaction,
+                            &generation_digest(&header.conversation_id, &header.generation),
+                        )?.ok_or_else(|| invalid_data("published search generation has no stable ID"))?;
                         !gram_excluded.contains(&fingerprint)
-                            && !candidates.contains(&fingerprint)
+                            && !candidates.contains(&generation_id)
                     };
                     if skip {
                         state.pending = None;
@@ -669,7 +670,7 @@ mod tests {
     }
 
     fn replace(
-        projection: &mut TurnSearchProjection,
+        projection: &mut OpenTurnSearchProjection,
         id: &str,
         generation: &str,
         time: u64,
@@ -704,7 +705,7 @@ mod tests {
     }
 
     fn collect_pages(
-        projection: &TurnSearchProjection,
+        projection: &OpenTurnSearchProjection,
         query: &str,
         limit: usize,
     ) -> Vec<(Vec<ConversationSearchHit>, Option<String>, bool)> {
@@ -725,7 +726,7 @@ mod tests {
         pages
     }
 
-    fn publish_gram_index(projection: &mut TurnSearchProjection) {
+    fn publish_gram_index(projection: &mut OpenTurnSearchProjection) {
         let mut transaction = projection.database.begin(7, 11).unwrap();
         let stored_key = gram_state_key(&transaction).unwrap();
         projection
@@ -738,7 +739,7 @@ mod tests {
     #[test]
     fn gram_index_matches_the_walk_byte_for_byte_across_a_query_battery() {
         let dir = tempfile::tempdir().unwrap();
-        let mut projection = TurnSearchProjection::initialize(dir.path(), 64 * 1024 * 1024).unwrap();
+        let mut projection = OpenTurnSearchProjection::initialize(dir.path(), 64 * 1024 * 1024).unwrap();
         replace(
             &mut projection,
             "alpha",
@@ -812,7 +813,7 @@ mod tests {
     #[test]
     fn gram_index_paginates_identically_past_the_header_page_budget() {
         let dir = tempfile::tempdir().unwrap();
-        let mut projection = TurnSearchProjection::initialize(dir.path(), 64 * 1024 * 1024).unwrap();
+        let mut projection = OpenTurnSearchProjection::initialize(dir.path(), 64 * 1024 * 1024).unwrap();
         for index in 0..(CANDIDATE_SCAN_PAGE + 44) {
             replace(
                 &mut projection,
@@ -852,7 +853,7 @@ mod tests {
         // stay identical: the candidate filter only removes conversations
         // that cannot match.
         let dir = tempfile::tempdir().unwrap();
-        let mut projection = TurnSearchProjection::initialize(dir.path(), 64 * 1024 * 1024).unwrap();
+        let mut projection = OpenTurnSearchProjection::initialize(dir.path(), 64 * 1024 * 1024).unwrap();
         for index in 0..(CANDIDATE_SCAN_PAGE + 44) {
             let documents: Vec<TurnSearchDocument> = (0..3)
                 .map(|chunk| {
@@ -874,7 +875,7 @@ mod tests {
         }
         let mut request = request("needle");
         request.limit = 200;
-        let collect_items = |projection: &TurnSearchProjection| {
+        let collect_items = |projection: &OpenTurnSearchProjection| {
             let mut items = Vec::new();
             let mut cursor = None;
             for _ in 0..64 {
@@ -922,7 +923,7 @@ mod tests {
     fn empty_generation_keeps_title_terms_and_replacement_text_exact() {
         let dir = tempfile::tempdir().unwrap();
         let mut projection =
-            TurnSearchProjection::initialize(dir.path(), 64 * 1024 * 1024).unwrap();
+            OpenTurnSearchProjection::initialize(dir.path(), 64 * 1024 * 1024).unwrap();
         replace(
             &mut projection,
             "conversation",
@@ -963,7 +964,7 @@ mod tests {
     fn batched_headers_preserve_empty_page_boundary_and_exhaustion() {
         let dir = tempfile::tempdir().unwrap();
         let mut projection =
-            TurnSearchProjection::initialize(dir.path(), 64 * 1024 * 1024).unwrap();
+            OpenTurnSearchProjection::initialize(dir.path(), 64 * 1024 * 1024).unwrap();
         for i in 0..CANDIDATE_SCAN_PAGE + HEADER_SCAN_BATCH + 1 {
             replace(
                 &mut projection,
@@ -1026,7 +1027,7 @@ mod tests {
     fn pages_preserve_phase_order_title_and_cross_chunk_terms_without_duplicates() {
         let dir = tempfile::tempdir().unwrap();
         let mut projection =
-            TurnSearchProjection::initialize(dir.path(), 64 * 1024 * 1024).unwrap();
+            OpenTurnSearchProjection::initialize(dir.path(), 64 * 1024 * 1024).unwrap();
         replace(
             &mut projection,
             "cross",
@@ -1072,7 +1073,7 @@ mod tests {
     fn huge_conversation_continues_inside_chunks_and_restarts_changed_generation() {
         let dir = tempfile::tempdir().unwrap();
         let mut projection =
-            TurnSearchProjection::initialize(dir.path(), 64 * 1024 * 1024).unwrap();
+            OpenTurnSearchProjection::initialize(dir.path(), 64 * 1024 * 1024).unwrap();
         let mut documents: Vec<_> = (0..600)
             .map(|i| {
                 let mut row = document(i, &format!("alpha{}", "界".repeat(4091)));
@@ -1144,7 +1145,7 @@ mod tests {
         );
         let dir = tempfile::tempdir().unwrap();
         let mut projection =
-            TurnSearchProjection::initialize(dir.path(), 64 * 1024 * 1024).unwrap();
+            OpenTurnSearchProjection::initialize(dir.path(), 64 * 1024 * 1024).unwrap();
         let mut documents = vec![
             document(0, "assistant phrase"),
             document(1, "original phrase"),

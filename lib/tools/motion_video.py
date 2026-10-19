@@ -30,7 +30,9 @@ _GUIDE_HINT = (
     'Before authoring your first scene, read the vendored guides '
     'lib/motion_video/guide/WORKFLOW.md and COMPOSITION_CONTRACT.md '
     '(absolute paths under the tofu install) and start each scene from '
-    'lib/motion_video/guide/skeleton.html.'
+    'lib/motion_video/guide/skeleton.html. For one-take films with objects/camera '
+    'carried between beats, read CONTINUOUS_FILM.md and start from '
+    'guide/continuous/ (one index.html + continuity.json, no clip concat).'
 )
 
 MOTION_VIDEO_TOOLS = [
@@ -95,7 +97,10 @@ MOTION_VIDEO_TOOLS = [
             "name": "motion_video_check",
             "description": (
                 "Run the HyperFrames static gates (lint + headless-Chrome validate + layout "
-                "inspect) on one scene project dir. MANDATORY before rendering each scene. "
+                "inspect) on one scene or whole-film project dir. MANDATORY before rendering. "
+                "If continuity.json is present, also sample each declared handoff in a real "
+                "browser: persistent DOM identity, visibility, geometry and reverse-seek "
+                "pixel repeatability. Returns boundary contact-sheet paths for visual review. "
                 "On failure returns categorized errors with upstream fix hints — repair the "
                 "composition in place and re-check (max 2 repair rounds)."
             ),
@@ -117,7 +122,10 @@ MOTION_VIDEO_TOOLS = [
         "function": {
             "name": "motion_video_render",
             "description": (
-                "Render one scene project to MP4 via HyperFrames (headless Chrome, deterministic). "
+                "Render one scene OR one continuous whole-film composition to MP4 via "
+                "HyperFrames. Opted-in continuity.json handoffs must pass browser checks; "
+                "render refuses failed/unavailable evidence. No concat is needed for a "
+                "continuous film. "
                 "Cost is ~3.5x realtime on this host (a 10s scene ≈ 35s). Use quality 'draft' "
                 "while iterating, 'standard' for delivery, 'high' for final takes. After "
                 "rendering, verify with motion_video_probe (resolution/fps/duration/silence)."

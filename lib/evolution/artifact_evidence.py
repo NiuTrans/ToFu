@@ -25,10 +25,6 @@ from .tool_evidence import PART_CHARS
 MANIFESTS = 'evolution.artifact_manifests.v1'
 PARTS = 'evolution.artifact_parts.v1'
 FINGERPRINTS = 'evolution.artifact_fingerprints.v1'
-MAX_FILE_BYTES = 2 * 1024 * 1024
-MAX_TOTAL_BYTES = 8 * 1024 * 1024
-MAX_BUNDLE_BYTES = 16 * 1024 * 1024
-MAX_FILES = 16
 SCOPE = 'declared_project_artifact_snapshots'
 
 
@@ -121,15 +117,13 @@ def _stable_file(before, after, count):
 
 def _read_file(project, path):
     with _open_project_file(project, path) as (handle, before):
-        if before.st_size > MAX_FILE_BYTES:
-            raise EvolutionStateError('artifact must be a regular file within its byte bound')
-        chunks = [];remaining = MAX_FILE_BYTES + 1
-        while remaining:
-            block = os.read(handle, min(65536, remaining))
+        chunks = []
+        while True:
+            block = os.read(handle, 65536)
             if not block:break
-            chunks.append(block);remaining -= len(block)
+            chunks.append(block)
         raw = b''.join(chunks)
-        if len(raw) > MAX_FILE_BYTES or not _stable_file(before, os.fstat(handle), len(raw)):
+        if not _stable_file(before, os.fstat(handle), len(raw)):
             raise EvolutionStateError('artifact changed during capture; declare a stable generation')
         return raw
 
@@ -269,7 +263,7 @@ def _declare_path(task, path):
         'content_chars':len(content), 'content_parts':(len(content)+PART_CHARS-1)//PART_CHARS,
         'entry_bytes':0, 'state':'collecting'}
     snapshot['entry_bytes'] = len(_entry(snapshot, content).encode()) + 64;_validate(snapshot, 'artifact_snapshot')
-    # Reserve the bounded selection before writing any potentially orphaned parts.
+    # Reserve the owned generation before writing any potentially orphaned parts.
     for _ in range(4):
         _assert_capture_active(task)
         current, role, _ = authorize_task(task)
@@ -285,9 +279,6 @@ def _declare_path(task, path):
                 _content(old, task['_userId']);return old
             break
         snapshots = manifest['snapshots'] + [snapshot]
-        if (len(snapshots) > MAX_FILES or sum(s['bytes'] for s in snapshots) > MAX_TOTAL_BYTES
-                or sum(s['entry_bytes'] for s in snapshots) > MAX_BUNDLE_BYTES):
-            raise EvolutionStateError('artifact selection exceeds the complete snapshot bound')
         updated = {**manifest, 'snapshots': snapshots};_validate(updated, 'artifact_manifest')
         try:
             records.put_record(MANIFESTS, _key(task['id'], task['_userId']), updated,
@@ -499,7 +490,7 @@ def build(ctx):
     parameters.pop('oneOf', None)
     return [{'type':'function','function':{'name':'evolution_artifact',
         'description':'Freeze explicitly selected project-relative generated files before independent review. '
-            'Use path for one file or paths for up to16 unique files in one call. Batch entries capture independently, not atomically; '
+            'Use path for one file or paths for all selected unique files in one call. Batch entries capture independently, not atomically; '
             'check every entry and complete=false failures. Successful snapshots persist despite sibling failures. '
             'A stable useful draft may be captured without delivery; unfinished checks stay explicit. '
             'A later edit needs another declaration; old generations remain. Bytes are complete, correctness and binary interpretation unverified. '
@@ -507,10 +498,10 @@ def build(ctx):
             'For an exact file-body reply, first declare its final generation, then '
             'call with delivery_source={artifact_id,content_sha256} only, using the '
             'saved snapshot identity. Its sealed UTF-8 body is delivered unchanged '
-            'without model recopy, up to the existing file byte bound; binary or '
+            'without model recopy, from the complete captured file; binary or '
             'blank replies refuse. Do not include path, paths or delivery with delivery_source. '
             'This closes declarations and requests ordinary task completion without another model round; independent review still decides acceptance. '
-            'Use fingerprint_path alone to compute SHA-256 of a stable selected file with bounded memory, including files beyond snapshot size limits; read receipts survive message compaction, no contents are retained and this proves neither execution nor reproduction. Optional fingerprint_scope_field compares the raw-file hash against that field of the frozen measurement_scope of this run; you cannot replace its expected value. A mismatch is an observed difference, not a failed process or authority to replay. Snapshots: 2MiB/file,8MiB total,16 generations; runtime/secret paths and symlinks refused. No external write.',
+            'Use fingerprint_path alone to compute SHA-256 of a stable selected file with bounded memory, without retaining source content; read receipts survive message compaction, no contents are retained and this proves neither execution nor reproduction. Optional fingerprint_scope_field compares the raw-file hash against that field of the frozen measurement_scope of this run; you cannot replace its expected value. A mismatch is an observed difference, not a failed process or authority to replay. Snapshots retain complete selected files and generations; runtime/secret paths and symlinks refused. No external write.',
         'parameters':parameters}}]
 
 

@@ -153,10 +153,15 @@ async function _settleTranslationTask(conv, turnId, taskId, result) {
   if (current?.taskId && current.taskId !== taskId) return false;
   _translationTasksByTurn.delete(key);
   if (result?.status === 'done' || result?.noop === true) {
+
+    if (current?.translationWait) composerTranslationStatus.finish(
+      current.translationWait, 'completed', result?.model);
     _setTranslationActivity(conv.id, turnId, null);
     await _hydrateTranslatedTurn(conv);
     return true;
   }
+  if (current?.translationWait) composerTranslationStatus.finish(
+    current.translationWait, result?.status === 'aborted' ? 'cancelled' : 'failed');
   const error = _translationErrorText(result);
   _setTranslationActivity(conv.id, turnId, {
     status: 'failed', message: error, error,
@@ -261,6 +266,9 @@ async function _runTranslationPipeline(conv, turnId, options) {
   if (!options?.existingTaskId
       && !TRANSLATION_CLAIMS.claim(conv.id, turnId)) return;
 
+
+  const translationWait = composerTranslationStatus.begin(conv.id, 'turn');
+
   try {
     const taskId = options?.existingTaskId || await _startTranslateTask(
       sourceText,
@@ -273,6 +281,7 @@ async function _runTranslationPipeline(conv, turnId, options) {
     );
     _translationTasksByTurn.set(key, {
       taskId, field, sourceLang: sourceLanguage, targetLang: targetLanguage,
+      translationWait,
     });
     _setTranslationActivity(conv.id, turnId, {
       status: 'pending', message: 'Translating…',
@@ -281,6 +290,7 @@ async function _runTranslationPipeline(conv, turnId, options) {
       conv, turnId, taskId, field,
       sourceLang: sourceLanguage, targetLang: targetLanguage,
     });
+
   } catch (error) {
     _translationTasksByTurn.delete(key);
     const messageText = error?.message || 'Translation failed';
@@ -290,6 +300,8 @@ async function _runTranslationPipeline(conv, turnId, options) {
     if (typeof showToast === 'function') showToast(messageText, 'error');
   } finally {
     TRANSLATION_CLAIMS.release(conv.id, turnId);
+
+    composerTranslationStatus.finish(translationWait, 'failed');
   }
 }
 
@@ -335,13 +347,20 @@ async function _resumePendingTranslations(convId) {
       const conv = conversations.find((item) => item?.id === frame.convId);
       if (!conv) return;
       if (frame.status === 'running' || frame.type === 'running') {
+
         _setTranslationActivity(
           frame.convId, frame.turnId, _translationPendingActivity(frame),
         );
         return;
       }
+      const currentTask = _translationTasksByTurn.get(
+        _translationTaskKey(frame.convId, frame.turnId));
+      if (currentTask?.taskId && frame.taskId && currentTask.taskId !== frame.taskId) return;
       if (frame.status === 'done' || frame.type === 'done'
           || frame.noop === true) {
+
+        if (currentTask?.translationWait) composerTranslationStatus.finish(
+          currentTask.translationWait, 'completed', frame.model);
         _setTranslationActivity(frame.convId, frame.turnId, null);
         _translationTasksByTurn.delete(
           _translationTaskKey(frame.convId, frame.turnId),
@@ -350,6 +369,9 @@ async function _resumePendingTranslations(convId) {
         return;
       }
       if (frame.status === 'error' || frame.type === 'error') {
+
+        if (currentTask?.translationWait) composerTranslationStatus.finish(
+          currentTask.translationWait, 'failed');
         _translationTasksByTurn.delete(
           _translationTaskKey(frame.convId, frame.turnId),
         );
@@ -360,6 +382,9 @@ async function _resumePendingTranslations(convId) {
         return;
       }
       if (frame.status === 'aborted' || frame.type === 'aborted') {
+
+        if (currentTask?.translationWait) composerTranslationStatus.finish(
+          currentTask.translationWait, 'cancelled');
         _translationTasksByTurn.delete(
           _translationTaskKey(frame.convId, frame.turnId),
         );

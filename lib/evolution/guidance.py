@@ -18,6 +18,7 @@ from lib.log import get_logger
 from .automation import episode_binding
 from .goals import get_goal, get_plan
 from .strategies import list_anti_patterns, retrieve_strategies
+from .planner import reusable_stages
 
 logger = get_logger(__name__)
 
@@ -64,7 +65,7 @@ def render_guidance(task: dict, *, user_id) -> str:
         if strategies:
             lines = '; '.join(
                 f"[{t['success_rate']:.0%} over {t['samples']}] "
-                + ' → '.join(f"{s.get('kind', '')}: {str(s.get('detail') or '')[:350]}" for s in t.get('stages', []))
+                + ' → '.join(f"{s.get('kind', '')}: {str(s.get('detail') or '')[:350]}" for s in reusable_stages(t.get('stages', [])))
                 for t in strategies)
             sections.append(f"Strategies observed on similar goals (not causal proof): {lines[:1200]}")
         from .self_model import predict_success

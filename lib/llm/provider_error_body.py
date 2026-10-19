@@ -44,7 +44,7 @@ class ErrorBody:
     complete: bool
 
     def text(self, response=None):
-        from lib.llm_errors import decode_error_body
+        from lib.llm.llm_errors import decode_error_body
         return decode_error_body(_BufferedResponse(self.data, response))
 
 
@@ -79,7 +79,7 @@ class _Prefix:
 
 def _check_abort(abort_check):
     if abort_check is not None and abort_check():
-        from lib.llm_errors import AbortedError
+        from lib.llm.llm_errors import AbortedError
         raise AbortedError('Provider error body read aborted')
 
 

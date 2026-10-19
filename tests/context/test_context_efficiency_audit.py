@@ -26,14 +26,14 @@ def _tool(name: str) -> dict:
     }
 
 
-def test_context_flags_ship_resident_ptc_default_and_remain_strict():
+def test_context_flags_ship_auto_ptc_default_and_remain_strict():
     from lib.context_experiment_flags import (
         context_experiment_arm, normalize_context_experiment_flags)
 
     assert normalize_context_experiment_flags({}) == {
         'cache': {'gpt56BreakpointMode': 'explicit'},
         'tools': {
-            'nativeExposure': 'routed', 'programmaticCalling': 'on',
+            'nativeExposure': 'routed', 'programmaticCalling': 'auto',
             'programmaticExposure': 'additive',
             'toolSearch': 'auto', 'executionScope': 'available',
             'schemaBudgetTokens': 0, 'resultEnvelope': 'v2',
@@ -287,11 +287,11 @@ def test_core_read_search_schemas_stay_semantic_and_bounded():
         # in both invocation shapes so truncation recovery stays
         # discoverable when the next round is batched.
         (PROJECT_TOOL_GREP, 485, (
-            'persistent file index', 'FUSE', 'Rust/ripgrep', 'max 20 entries',
+            'persistent file index', 'FUSE', 'Rust/ripgrep', 'every operation runs',
             'context_lines', 'count_only mode',
         )),
         (READ_FILES_TOOL, 450, (
-            'Read WIDE', '200+ lines', '512 KB', '24k tokens', 'max 20',
+            'Read WIDE', '200+ lines', '24k tokens', 'every requested read executes',
             'authoritative and never widened', 'Images', 'PDFs', 'Office',
         )),
     )
@@ -551,7 +551,7 @@ def test_l2_summary_always_sees_bounded_tool_working_state(monkeypatch):
 
 
 def test_extended_outcome_and_report_use_oracle_not_health_as_quality():
-    from lib.cost_experiments import (
+    from lib.cost_experiments.cost_experiments import (
         aggregate_cost_experiment_rows, build_cost_experiment_outcome)
 
     assignment = {
@@ -602,7 +602,7 @@ def test_extended_outcome_and_report_use_oracle_not_health_as_quality():
 
 
 def test_benchmark_task_persists_outcome_without_production_ab_assignment():
-    from lib.cost_experiments import build_task_cost_experiment_outcome
+    from lib.cost_experiments.cost_experiments import build_task_cost_experiment_outcome
 
     outcome = build_task_cost_experiment_outcome({
         'id': 'task-no-ab', 'created_at': 1,

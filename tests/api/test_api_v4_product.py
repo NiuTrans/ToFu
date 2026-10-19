@@ -123,8 +123,8 @@ def _attachable_bp() -> Blueprint:
 
 
 def _run_probe(path):
-    from lib.app_factory import create_base_app
-    from lib.http_error_handlers import register_http_error_handlers
+    from lib.app.app_factory import create_base_app
+    from lib.http_transport.error_handlers import register_http_error_handlers
     app = create_base_app('v4-boundary', {'TESTING': True})
     app.register_blueprint(attach_v4_envelope(_attachable_bp()))
     register_http_error_handlers(app)
@@ -232,8 +232,8 @@ def test_multi_rule_view_projects_unique_v4_endpoints():
     projected = attach_v4_envelope(
         copy_blueprint_to_v4(bp, name='v4_decollision_v4'))
 
-    from lib.app_factory import create_base_app
-    from lib.http_error_handlers import register_http_error_handlers
+    from lib.app.app_factory import create_base_app
+    from lib.http_transport.error_handlers import register_http_error_handlers
     app = create_base_app('v4-decollide', {'TESTING': True})
     app.register_blueprint(projected)
     register_http_error_handlers(app)

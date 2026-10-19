@@ -4,7 +4,7 @@
 
 The suite is grouped into **domain subdirectories that mirror `lib/`**: the
 tests for `lib/paper/` live in `tests/paper/`, the tests for
-`lib/storage_sidecar/` live in `tests/storage_sidecar/`, and so on. A directory
+`lib/storage_authority_sql/` live in `tests/storage_authority_sql/`, and so on. A directory
 listing of `tests/` is the domain map — find the module you are changing, then
 open the same-named directory here.
 
@@ -19,7 +19,7 @@ tests/
 ├── paper/                 — tests for lib/paper/
 ├── tasks_pkg/             — tests for lib/tasks_pkg/ (agent loop, finalize, tool pipeline)
 ├── frontend/              — jsdom/vite surface tests (no lib import; named test_frontend_*)
-├── storage_sidecar/       — tests for lib/storage_sidecar/
+├── storage_authority_sql/ — tests for lib/storage_authority_sql/
 ├── tofudb/                — native TofuDB engine/differential/migration suites
 ├── meta/                  — the suite auditing itself (ratchets, architecture/import guards)
 ├── api/                   — HTTP wire-contract parity suites (test_api_*)

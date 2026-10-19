@@ -70,16 +70,14 @@ def test_config_boundary_uses_sidecar_when_legacy_mode_is_requested(
     ]
 
 
-def test_batch_rejects_unbounded_or_invalid_paths_before_storage():
+def test_batch_rejects_empty_or_invalid_paths_before_storage():
     client = _Client()
     repo = RecentProjectRepository(
         19, client_factory=lambda *, write=False: client
     )
 
-    with pytest.raises(ValueError, match="bounded non-empty"):
+    with pytest.raises(ValueError, match="non-empty"):
         repo.touch_many([])
-    with pytest.raises(ValueError, match="bounded non-empty"):
-        repo.touch_many([f"/workspace/{index}" for index in range(33)])
     with pytest.raises(ValueError, match="required and bounded"):
         repo.touch_many(["x" * 4097])
     assert client.calls == []
@@ -89,3 +87,11 @@ def test_batch_rejects_unbounded_or_invalid_paths_before_storage():
 def test_repository_rejects_missing_or_invalid_owner(owner_user_id):
     with pytest.raises(ValueError, match="recent project owner"):
         RecentProjectRepository(owner_user_id)
+
+
+def test_repository_accepts_large_batch_and_deduplicates_in_request_order():
+    client = _Client()
+    repo = RecentProjectRepository(19,client_factory=lambda *, write=False:client)
+    paths = [f'/workspace/{i}' for i in range(1101)]
+    assert repo.touch_many(paths + paths[:100]) == 1101
+    assert client.calls[0][2]['project_paths'] == paths

@@ -52,7 +52,7 @@ import time
 
 from lib.identity import require_user_id
 from lib.log import get_logger
-from lib.llm_errors import AbortedError
+from lib.llm.llm_errors import AbortedError
 from lib.paper.contracts import PAPER_TITLE_HINT_MAX_CHARS
 from lib.production.stages import Stage, StageAborted, run_stages
 from lib.research.contracts import (
@@ -196,7 +196,7 @@ def _search_arxiv_via_web(query, *, max_results, abort_check=None):
     direction in its own language and surface arXiv links whose URLs
     normalize to bare ids for harvesting.
     """
-    from lib.search_bridge import install_search_bridge
+    from lib.search.search_bridge import install_search_bridge
     install_search_bridge()
     from tofu_search.search.orchestrator import perform_web_search
     rows = perform_web_search(
@@ -419,7 +419,7 @@ def _run_harvest(ctx: dict) -> dict:
             seed = _top_up_seed_via_web(seed, query or direction, n=n, ctx=ctx)
     abort_check = ctx.get('abort_check')
     if abort_check and abort_check():
-        from lib.llm_errors import AbortedError
+        from lib.llm.llm_errors import AbortedError
         raise AbortedError('research discovery aborted')
     from lib.research.records import literature_projection, merge_paper
     literature = literature_projection(discovery)

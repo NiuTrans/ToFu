@@ -69,8 +69,12 @@ def reserve_reclaim_enabled() -> bool:
 def _is_task_still_running(ref_id: str, *, user_id) -> bool:
     """Best-effort personal-process guard for unusually long requests."""
     try:
+        from lib.billing.users import get_user
         from lib.tasks_pkg.manager.runtime import chat_task_runtime
-        task = chat_task_runtime.get_owned(ref_id, user_id=int(user_id))
+        user = get_user(user_id)
+        if user is None:
+            return False
+        task = chat_task_runtime.get_owned(ref_id, user_id=user.owner_user_id)
         return bool(task and task.get('status') in ('pending', 'running'))
     except Exception as exc:
         logger.debug('[Billing] running-task check failed for %s: %s',
@@ -119,7 +123,7 @@ def sweep_stale_reserves(ttl_seconds=None) -> dict:
     summary = {
         'ok': True, 'reclaimed': 0, 'reclaimed_micro': 0,
         'candidates': 0, 'skipped_running': 0,
-        'errors': 0, 'ttl_seconds': ttl,
+        'errors': 0, 'settled_native': 0, 'settled_requests': 0, 'ttl_seconds': ttl,
     }
 
     with log_context('billing_reserve_sweep', logger=logger):
@@ -145,6 +149,14 @@ def sweep_stale_reserves(ttl_seconds=None) -> dict:
                 summary['skipped_running'] += 1
                 continue
             try:
+                from lib.billing.request_settlement import recover as recover_request
+                if recover_request(wallet_user_id=user_id, task_id=ref_id, held_micro=held_micro):
+                    summary['settled_requests'] += 1
+                    continue
+                from lib.billing.native_settlement import recover
+                if recover(wallet_user_id=user_id, task_id=ref_id, held_micro=held_micro):
+                    summary['settled_native'] += 1
+                    continue
                 _wallet.reserve_release(
                     user_id, held_micro, ref_id=ref_id,
                     note=f'janitor: stale reserve reclaimed after {ttl}s')

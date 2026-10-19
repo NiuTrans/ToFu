@@ -299,6 +299,8 @@ global.window = globalThis;
 global.addEventListener = () => {};
 global.requiredApiTransport = { pageRequestId() { return 'page-test'; } };
 global.conversationSyncApi = {};
+global.renderContextProvenanceHtml = () => '';
+global.createAutomationManagementClient = () => ({});
 global.conversations = [];
 global.createBranchComposerSession = () => ({
   current() { return null; },

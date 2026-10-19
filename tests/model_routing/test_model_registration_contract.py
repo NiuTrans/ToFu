@@ -188,7 +188,7 @@ def test_capabilities_auto_marker_dropped_by_explicit_toggle_edit():
 
 
 def test_glm53_uses_the_complete_registration_shape():
-    from lib.provider_template_recipes import offering_recipes
+    from lib.provider.provider_template_recipes import offering_recipes
 
     for path in (
         ROOT / 'static' / 'provider_templates' / 'glm.json',

@@ -44,7 +44,7 @@ class _Deadline:
         self.deadline, self.cancel, self.stopped = deadline, cancel, stopped
 
     def is_set(self):
-        return (time.monotonic() >= self.deadline or (self.cancel is not None and self.cancel.is_set())
+        return ((self.deadline is not None and time.monotonic() >= self.deadline) or (self.cancel is not None and self.cancel.is_set())
                 or (self.stopped is not None and self.stopped.is_set()))
 
 
@@ -76,9 +76,9 @@ def _authorized(document, bridge):
 def _call(bridge, tool, payload, deadline):
     if deadline.is_set():
         raise CancelledError()
-    remaining = max(1, math.ceil(deadline.deadline - time.monotonic()))
+    remaining = None if deadline.deadline is None else max(1, math.ceil(deadline.deadline - time.monotonic()))
     try:
-        return bridge.call_tool_document(tool, payload, timeout=min(300, remaining), cancel=deadline)
+        return bridge.call_tool_document(tool, payload, timeout=remaining, cancel=deadline)
     except CancelledError:
         raise
     except TimeoutError as exc:
@@ -175,7 +175,7 @@ def overleaf_execution(document, payload, scheduler, *, bridge=None):
             with scheduler.cache.stage(document.owner_user_id, document.document_id, build_id) as stage:
                 try:
                     received = _call(client, capabilities['build']['name'], body, _Deadline(
-                        deadline=time.monotonic() + limit('compile_timeout_seconds'), cancel=cancel))
+                        deadline=None, cancel=cancel))
                 except CancelledError as exc:
                     check_cancelled(cancel)
                     raise BuildError('overleaf_timeout', 'Overleaf compilation timed out') from exc

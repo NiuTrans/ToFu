@@ -400,7 +400,7 @@ def test_build_scenes_from_topic_end_to_end(monkeypatch, tmp_path):
 def _ctx(*, project, search):
     from lib.tools.registry import ToolContext
     return ToolContext(
-        cfg={}, task_id='t', project_path='/tmp/x' if project else '',
+        cfg={'plugins': ['production']}, enabled_plugins={'production'}, task_id='t', project_path='/tmp/x' if project else '',
         project_enabled=project, search_mode='multi' if search else 'off',
         search_enabled=search, fetch_enabled=False, code_exec_enabled=False,
         browser_enabled=False, desktop_enabled=False)
@@ -417,11 +417,11 @@ def test_produce_video_not_project_gated():
     assert not any(n.startswith('motion_video') for n in names)
 
 
-def test_produce_video_search_gated():
+def test_explicit_production_plugin_keeps_video_with_search_off():
     from lib.tools.registry import assemble_tool_list
     tools, _ = assemble_tool_list(_ctx(project=False, search=False))
     names = {t['function']['name'] for t in tools}
-    assert 'produce_video' not in names  # no research → no grounded facts
+    assert 'produce_video' in names  # Explicit plugin selection owns exposure.
 
 
 # ══════════════════════════════════════════════════════════
@@ -449,7 +449,7 @@ def test_produce_research_reachable_and_search_gated():
                 'produce_slides'])
     off_ctx = _ctx(project=False, search=False)
     off, _ = assemble_tool_list(off_ctx)
-    assert 'produce_research' not in {t['function']['name'] for t in off}
+    assert 'produce_research' in {t['function']['name'] for t in off}
     assert 'produce_research' in {
         t['function']['name'] for t in off_ctx.executable_tool_catalog
     }
@@ -487,7 +487,7 @@ def test_produce_research_crash_resume_wired():
     seconds after readiness loses nothing, and the sweep no longer holds the
     readiness gate while the storage authority is starved."""
     import inspect
-    from lib.server_background_services import start_deferred_background_services
+    from lib.server.server_background_services import start_deferred_background_services
     src = inspect.getsource(start_deferred_background_services)
     assert 'resume_interrupted_research' in src
 

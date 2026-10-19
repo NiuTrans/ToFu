@@ -19,6 +19,8 @@ _CONTRACT = json.loads((Path(__file__).resolve().parents[2] / 'contracts' /
                         'conversation_execution_identity_v1.json').read_text())
 EXECUTION_IDENTITY_CONFIG_KEY = _CONTRACT['configKey']
 RESERVED_EXECUTION_FIELDS = frozenset(_CONTRACT['reservedConfigFields'])
+REVIEW_SOURCE_CONFIG_KEY = _CONTRACT['reviewSource']['configKey']
+REVIEW_SOURCE_SCHEMA = _CONTRACT['reviewSource']['schema']
 _ENVELOPE_FIELDS = frozenset(_CONTRACT['fields'])
 _PRINCIPAL_FIELDS = frozenset(_CONTRACT['principalFields'])
 _SUPPORTED_KINDS = frozenset(_CONTRACT['supportedPrincipalKinds'])
@@ -68,6 +70,10 @@ def restore_execution_identity(config: Mapping[str, Any]) -> tuple[PrincipalCont
     path. Live and recovered executors use the same validation port.
     """
     owner = require_user_id(config.get('_turnOwnerUserId'), context='conversation executor')
+
+    if '_projectDispatchAdmission' in config:
+        from lib.project_dispatch.admission import restore_dispatch_identity
+        return restore_dispatch_identity(config)
     if EXECUTION_IDENTITY_CONFIG_KEY not in config:
         if (config.get('_turnPrincipalKind', 'user') != 'user'
                 or config.get('_attended', True) is not True

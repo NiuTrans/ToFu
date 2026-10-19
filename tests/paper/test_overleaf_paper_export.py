@@ -33,6 +33,27 @@ def exports(monkeypatch):
     return contract, export, server, transport
 
 
+def test_unknown_tool_is_an_error_without_upstream_dispatch(exports):
+    from types import SimpleNamespace
+    from mcp.types import CallToolRequestParams, ListToolsResult
+    _, _, server, _ = exports
+
+    async def list_tools(ctx, params):
+        return ListToolsResult(tools=[])
+
+    async def call_tool(ctx, params):
+        pytest.fail('An unknown tool must not reach upstream dispatch')
+
+    service = server.create_server(None, SimpleNamespace(
+        handle_list_tools=list_tools, handle_call_tool=call_tool),
+        writes=SimpleNamespace())
+    handler = service.get_request_handler('tools/call')
+    result = asyncio.run(handler.handler(None, CallToolRequestParams(
+        name='unknown_tool', arguments={})))
+    assert result.is_error is True
+    assert 'Unknown tool: unknown_tool' in result.content[0].text
+
+
 class Body(httpx.AsyncByteStream):
     def __init__(self, value):
         self.value = value
@@ -357,7 +378,7 @@ def test_cancellation_timeout_and_shutdown_retire_network_and_partial_files(expo
     asyncio.run(run())
 
 
-def test_oversized_artifact_fails_and_closes_partial_export(exports, monkeypatch):
+def test_oversized_chunk_fails_and_closes_partial_export(exports, monkeypatch):
     contract, module, _, transport = exports
     cloud = Cloud()
     files = []
@@ -368,7 +389,7 @@ def test_oversized_artifact_fails_and_closes_partial_export(exports, monkeypatch
         return file
 
     original_limit = module.limit
-    monkeypatch.setattr(module, 'limit', lambda name: 100 if name == 'artifact_bytes' else original_limit(name))
+    monkeypatch.setattr(module, 'limit', lambda name: 100 if name == 'transfer_chunk_bytes' else original_limit(name))
 
     async def run():
         async with module.ExportStore(cloud.transport(transport),
@@ -450,7 +471,7 @@ def test_unknown_main_cannot_publish_a_success_but_preserves_failed_compile_logs
 
 @pytest.mark.api
 @pytest.mark.parametrize('launcher', ['installed', 'catalog'])
-def test_packaged_upstream_server_exports_through_real_mcp_stdio(tmp_path, monkeypatch, launcher):
+def test_packaged_upstream_server_exports_through_real_mcp_stdio(tmp_path, monkeypatch, launcher, flask_app):
     """Opt-in interpreter has the independently installed extension + pinned upstream.
 
     Tofu's real MCP bridge talks to another process and publishes to its shared
@@ -524,8 +545,11 @@ def test_packaged_upstream_server_exports_through_real_mcp_stdio(tmp_path, monke
 
     monkeypatch.setattr(service, 'owned_settings', owned_settings)
     monkeypatch.setattr(settings_store, 'update_conversation_settings', update_settings)
-    monkeypatch.setattr(overleaf_capabilities, '_bridge', lambda: bridge)
-    monkeypatch.setattr(overleaf, '_bridge', lambda: bridge)
+    def owned_bridge(owner_user_id):
+        assert owner_user_id == REQUEST['owner_user_id']
+        return bridge
+    monkeypatch.setattr(overleaf_capabilities, '_bridge', owned_bridge)
+    monkeypatch.setattr(overleaf, '_bridge', owned_bridge)
     from lib.paper.builds import documents
     monkeypatch.setattr(documents, 'owned_settings', owned_settings)
     temporary = tmp_path / 'producer-temp'
@@ -715,4 +739,27 @@ def test_real_file_creation_failure_cleans_only_its_export(exports):
                 await store.build({**REQUEST, 'request_id': 'c' * 32})
             assert len(store.entries) == 1
             assert read_all(store, first, 'document.pdf') == PDF
+    asyncio.run(run())
+
+
+def test_export_execution_accepts_default_and_long_explicit_deadlines(exports):
+    _,module,_,transport=exports
+    async def run():
+        for seconds in (None,420):
+            cloud=Cloud()
+            async with module.ExportStore(cloud.transport(transport),compile_seconds=seconds) as store:
+                assert store.compile_seconds==seconds
+                manifest=await store.build(REQUEST)
+                assert read_all(store,manifest,'document.pdf')==PDF
+    asyncio.run(run())
+
+
+def test_complete_cloud_build_log_above_old_quota_is_exported(exports):
+    _,module,_,transport=exports
+    cloud=Cloud();body=b'cloud progress\n'*100000+b'**main.tex\ncomplete log tail\n'
+    assert len(body)>1024*1024;cloud.artifacts['output.log']=body
+    async def run():
+        async with module.ExportStore(cloud.transport(transport)) as store:
+            manifest=await store.build(REQUEST)
+            assert read_all(store,manifest,'build.log')==body
     asyncio.run(run())

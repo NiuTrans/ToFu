@@ -1,130 +1,121 @@
-"""Project-rail selection-ring + default-folder inbox-tile drift guard.
+"""Real Chromium rail geometry, quiet inbox and durable streaming selection.
 
-Two symptoms this guards against (fixed 2026-07-08):
-
-1. RING VANISHES WHILE GENERATING. In the collapsed (icon-only) rail the
-   "selected folder" indicator is a ring on `.folder-tab.active .folder-tab-dot`.
-   It was drawn with `box-shadow`. But a folder whose conversation is generating
-   gets `.streaming`, and the tofu-theme streaming animation (`tofuBreathing`)
-   ANIMATES `box-shadow` — an active animation overrides the static rule, so the
-   selection ring was entirely replaced by the pulse glow and DISAPPEARED
-   (reported: "selecting a folder that has a generating conversation shows no
-   circle"). Fix: draw the ring with `outline` (no keyframe touches outline), so
-   it survives streaming on every theme.
-
-   INVARIANT: the two `rail-collapsed .folder-tab.active .folder-tab-dot` ring
-   rules must use `outline`, NOT `box-shadow` (which any *Breathing keyframe can
-   clobber).
-
-2. DEFAULT (未分类) TILE CLASHED + is now enlarged & blinks. Its inner glyph was
-   only 12px in a 20px tile while project tiles are bold colored monograms. Fix:
-   the inbox svg is enlarged and given a periodic `folderInboxBlink` animation.
-
-   INVARIANT: `.folder-tab-inbox-dot svg` carries the `folderInboxBlink`
-   animation AND the keyframe is defined.
-
-Env-independent: parses static/styles.css directly. NEUTERs included.
+Local synthetic rail serves compiled interaction owner and composed production
+CSS; no native storage or full-app boot. Full integration lives in e2e tests.
 """
-
-from __future__ import annotations
-
-import os
-import re
+from functools import partial
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+import json
+from pathlib import Path
+import subprocess
+import threading
 
 import pytest
 
-pytestmark = pytest.mark.unit
-
-HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.normpath(os.path.join(HERE, '..', '..'))
-CSS = os.path.join(ROOT, 'static', 'styles.css')
+pytestmark = pytest.mark.visual
+ROOT = Path(__file__).resolve().parents[2]
 
 
-def _read(path: str) -> str:
-    with open(path, encoding='utf-8') as f:
-        return f.read()
+@pytest.fixture(scope='module')
+def rail_server(tmp_path_factory):
+    root = tmp_path_factory.mktemp('rail-css-browser')
+    owner = ROOT / 'frontend/src/conversation/ui/folder-config-control.ts'
+    entry = root / 'entry.ts'
+    entry.write_text(f'''import {{mountFolderConfigControls,installFolderConfigInteractions,makeFolderContextMenuAccessible}} from {json.dumps(str(owner))};
+const rail=document.querySelector('#folderTabs');
+mountFolderConfigControls(rail,'Settings');
+const open=id=>{{document.querySelector('dialog input').value=id;document.querySelector('dialog').showModal();}};
+installFolderConfigInteractions(rail,{{settings:open,context:(id)=>{{
+const menu=document.createElement('div');menu.innerHTML='<div class="folder-tab-menu-item">Settings</div>';
+document.body.append(menu);makeFolderContextMenuAccessible(menu);
+menu.addEventListener('click',()=>{{menu.remove();open(id);}});
+}}}});
+window.ownerReady=true;''')
+    result = subprocess.run(['node', '-e', 'require("esbuild").buildSync({entryPoints:[process.argv[1]],bundle:true,format:"esm",outfile:process.argv[2]})', str(entry), str(root / 'owner.js')], cwd=ROOT, capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stderr
+    source = ROOT / 'frontend/src/styles/application'
+    manifest = json.loads((source / 'manifest.json').read_text())
+    (root / 'styles.css').write_text('\n'.join((source / row['path']).read_text() for row in manifest['sections']))
+    tiles = [('folder-tab-uncat', '', 'folder-tab-inbox-dot', 'Inbox'), ('active', 'a', 'streaming', 'Agent tools'), ('', 'b', '', 'Long folder')] + [('', f'f{i}', '', name) for i, name in enumerate(['Renderer', 'Workspace', 'Projects', 'Research', 'Scripts', 'Browser tests', 'Storage', 'Mobile rail', 'Documentation', 'QA checks'])]
+    rows = []
+    for kind, folder, dot, name in tiles:
+        if not folder:
+            rows.append('<button class="folder-tab folder-tab-uncat" data-folder-id="" title="Inbox"><span class="folder-tab-dot folder-tab-inbox-dot"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11L2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></svg></span><span class="folder-tab-name">Inbox</span></button>')
+            continue
+        mono = ''.join(word[0] for word in name.split())[:2].upper() if ' ' in name else name[:2].upper()
+        color = f'hsl({(len(rows) * 137) % 360},60%,48%)'
+        rows.append(f'<div class="folder-tab-row"><button class="folder-tab {kind}" data-folder-id="{folder}" title="{name}"><span class="folder-tab-dot {dot}" style="background:{color}" data-initial="{mono}" data-mono-len="{len(mono)}"></span><span class="folder-tab-copy"><span class="folder-tab-name">{name}</span><span class="folder-tab-summary">No default directories</span></span></button></div>')
+    (root / 'index.html').write_text('''<!doctype html><html data-theme="dark"><head><link rel="stylesheet" href="styles.css"></head><body>
+<aside id="sidebar" class="sidebar has-rail rail-collapsed"><div class="sidebar-body"><nav id="folderTabs" class="project-rail"><div class="project-rail-list">'''+''.join(rows)+'''</div>
+<button class="folder-tab folder-tab-add"><span class="folder-tab-dot folder-tab-add-dot"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></span><span class="folder-tab-name">New folder</span></button></nav></div></aside>
+<dialog><input></dialog><script type="module" src="owner.js"></script></body></html>''')
+    class QuietHandler(SimpleHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+    server = ThreadingHTTPServer(('127.0.0.1', 0), partial(QuietHandler, directory=str(root)))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f'http://127.0.0.1:{server.server_port}'
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=3)
 
 
-def _ring_decls(css: str) -> list[str]:
-    """Declaration bodies of every `rail-collapsed .folder-tab.active
-    .folder-tab-dot{…}` rule (there are two: desktop base + drawer block)."""
-    compact = re.sub(r'\s+', '', css)
-    pat = r'rail-collapsed\.folder-tab\.active\.folder-tab-dot\{([^{}]*)\}'
-    return re.findall(pat, compact)
+@pytest.fixture()
+def rail_browser_page(browser, rail_server):
+    context = browser.new_context(viewport={'width': 1280, 'height': 900})
+    page = context.new_page()
+    page.goto(rail_server)
+    page.wait_for_function('window.ownerReady === true')
+    try:
+        yield page
+    finally:
+        context.close()
 
 
-def _ring_uses_boxshadow(css: str) -> list[str]:
-    return [d for d in _ring_decls(css) if 'box-shadow' in d]
+@pytest.mark.parametrize('theme', ['dark', 'light', 'tofu'])
+def test_compact_uniform_tiles_quiet_inbox_and_streaming_ring(rail_browser_page, theme):
+    page = rail_browser_page
+    page.evaluate('(theme)=>document.documentElement.dataset.theme=theme', theme)
+    out = ROOT / 'output/playwright/folder-rail-owner'
+    out.mkdir(parents=True, exist_ok=True)
+    page.locator('#folderTabs').screenshot(path=str(out / f'{theme}-compact.png'))
+    measurements = page.locator('.folder-tab').evaluate_all('''tabs=>tabs.map(tab=>{
+const tile=tab.querySelector('.folder-tab-dot');const r=tile.getBoundingClientRect();const row=tab.getBoundingClientRect();const s=getComputedStyle(tile);
+return {x:r.x,width:r.width,height:r.height,rowWidth:row.width,rowHeight:row.height,outlineWidth:parseFloat(s.outlineWidth),outlineStyle:s.outlineStyle};})''')
+    assert len(measurements) == 14
+    for key in ('x', 'width', 'height', 'rowWidth', 'rowHeight'):
+        values = [row[key] for row in measurements]
+        assert max(values) > 0 and max(values) - min(values) <= 1, (key, measurements)
+    assert measurements[1]['outlineWidth'] > 0 and measurements[1]['outlineStyle'] != 'none', measurements
+    assert page.locator('.folder-tab-inbox-dot svg').evaluate('(el)=>getComputedStyle(el).animationName') == 'none'
+    assert page.locator('.folder-tab-add svg').count() == 1
+    controls = page.locator('.folder-tab-settings').evaluate_all('''buttons=>buttons.map(button=>{
+const s=getComputedStyle(button);return {display:s.display,opacity:Number(s.opacity),position:s.position};})''')
+    assert all(c['display'] == 'none' or (c['opacity'] == 0 and c['position'] == 'absolute') for c in controls), controls
+    out = ROOT / 'output/playwright/folder-rail-owner'
+    out.mkdir(parents=True, exist_ok=True)
+    page.locator('#folderTabs').screenshot(path=str(out / f'{theme}-compact.png'))
 
 
-def test_collapsed_ring_uses_outline_not_boxshadow():
-    """The collapsed-rail selection ring must not be a box-shadow — a streaming
-    folder's box-shadow-animating keyframe would clobber it, hiding the ring."""
-    css = _read(CSS)
-    decls = _ring_decls(css)
-    assert decls, 'collapsed-rail active ring rule not found (structure changed?)'
-    offenders = _ring_uses_boxshadow(css)
-    assert not offenders, (
-        'the collapsed-rail selection ring is drawn with box-shadow — a '
-        'streaming folder animates box-shadow and clobbers it, so the ring '
-        'vanishes. Use `outline`:\n' + '\n'.join(offenders))
-    for d in decls:
-        assert 'outline' in d, f'ring rule missing outline: {d}'
-
-
-def test_inbox_glyph_blinks_and_keyframe_defined():
-    """The default (未分类) tile glyph must carry the folderInboxBlink animation
-    and the keyframe must exist."""
-    css = _read(CSS)
-    compact = re.sub(r'\s+', '', css)
-    m = re.search(r'\.folder-tab-inbox-dotsvg\{([^{}]*)\}', compact)
-    assert m, '.folder-tab-inbox-dot svg rule not found'
-    assert 'folderInboxBlink' in m.group(1), (
-        'the inbox glyph lost its folderInboxBlink animation')
-    assert '@keyframesfolderInboxBlink{' in compact, (
-        'folderInboxBlink keyframe is not defined')
-
-
-def test_inbox_glyph_is_enlarged():
-    """The base inbox glyph must be larger than the 12px system-chip default."""
-    css = _read(CSS)
-    compact = re.sub(r'\s+', '', css)
-    m = re.search(r'\.folder-tab-inbox-dotsvg\{([^{}]*)\}', compact)
-    assert m, '.folder-tab-inbox-dot svg rule not found'
-    w = re.search(r'width:(\d+)px', m.group(1))
-    assert w and int(w.group(1)) > 12, (
-        f'inbox glyph not enlarged past 12px (got {m.group(1)})')
-
-
-# ── NEUTERs: prove each guard is load-bearing ──
-
-def test_nc_boxshadow_ring_is_flagged():
-    css = _read(CSS)
-    assert not _ring_uses_boxshadow(css), 'real CSS not clean; fix before NC'
-    poisoned = css.replace(
-        '.sidebar.rail-collapsed .folder-tab.active .folder-tab-dot{outline:2px solid var(--accent);outline-offset:2px}',
-        '.sidebar.rail-collapsed .folder-tab.active .folder-tab-dot{box-shadow:0 0 0 4px var(--accent)}',
-        1)
-    assert poisoned != css, 'NC anchor not found — desktop ring rule text drifted'
-    assert _ring_uses_boxshadow(poisoned), (
-        'the guard did NOT catch a box-shadow-drawn ring — not detecting the '
-        'regression class.')
-
-
-def test_nc_missing_blink_is_flagged():
-    css = _read(CSS)
-    poisoned = css.replace(
-        '.folder-tab-inbox-dot svg{width:15px;height:15px;animation:folderInboxBlink 4.8s ease-in-out infinite}',
-        '.folder-tab-inbox-dot svg{width:12px;height:12px}',
-        1)
-    assert poisoned != css, 'NC anchor not found — inbox svg rule text drifted'
-    compact = re.sub(r'\s+', '', poisoned)
-    m = re.search(r'\.folder-tab-inbox-dotsvg\{([^{}]*)\}', compact)
-    # After neuter the first-matched rule loses the blink → guard would fail.
-    assert m and 'folderInboxBlink' not in m.group(1), (
-        'neuter did not remove the blink from the primary inbox svg rule')
-
-
-if __name__ == '__main__':
-    import sys
-    sys.exit(pytest.main([__file__, '-v']))
+@pytest.mark.parametrize('access', ['dblclick', 'Shift+F10', 'ContextMenu'])
+def test_settings_owner_pointer_keyboard_and_focus(rail_browser_page, access):
+    page = rail_browser_page
+    tab = page.locator('.folder-tab[data-folder-id="b"]')
+    tab.locator('.folder-tab-dot').click()
+    assert page.locator('dialog:modal').count() == 0
+    if access == 'dblclick':
+        tab.locator('.folder-tab-dot').dblclick(timeout=5000)
+    else:
+        tab.focus()
+        tab.press(access)
+        item = page.get_by_role('menuitem')
+        assert item.evaluate('(el)=>el===document.activeElement')
+        item.press('Escape')
+        assert page.get_by_role('menu').count() == 0
+        assert tab.evaluate('(el)=>el===document.activeElement')
+        tab.press(access)
+        page.get_by_role('menuitem').press('Enter')
+    assert page.locator('dialog:modal input').input_value() == 'b'

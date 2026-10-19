@@ -15,11 +15,9 @@ pub use crate::generated_tofudb_ir::{MAX_SEARCH_PROJECTION_BYTES, MIN_SEARCH_PRO
 use crate::generated_tofudb_ir::{
     MAX_CHECKPOINT_MATERIALIZE_BATCH_BYTES, PAYLOAD_SEGMENT_CACHE_BYTES,
 };
-use crate::protocol::MAX_FRAME_BODY_BYTES;
 
 const MIB: u64 = 1024 * 1024;
 const MAX_SYSTEM_FILE_BYTES: u64 = 16 * 1024;
-const MIN_FRAME_BUDGET_BYTES: usize = MAX_FRAME_BODY_BYTES;
 const LEAN_CONNECTIONS: usize = 4;
 
 // Hot-data residency budgets. The historical fixed defaults (32 MiB block
@@ -125,14 +123,13 @@ impl DaemonResourceBudget {
             .max(1);
         // Legacy readiness maximumConnections now sizes initial transport
         // reservations and idle reuse. It never rejects active socket callers.
-        // Embedded queues still consume this hint pending their own audit.
+        // Embedded delivery also observes this reuse target without capping active jobs.
         let maximum_connections = logical_cpus
             .saturating_mul(16)
             .min(memory_connections)
             .clamp(1, MAX_CONNECTION_REUSE_TARGET);
         let maximum_frame_bytes = usize::try_from(memory_headroom_bytes / FRAME_MEMORY_HEADROOM_DIVISOR as u64)
-            .unwrap_or(usize::MAX)
-            .max(MIN_FRAME_BUDGET_BYTES);
+            .unwrap_or(usize::MAX);
         Self {
             maximum_connections,
             maximum_frame_bytes,
@@ -810,7 +807,7 @@ nas/share /data/nested nfs4 rw,relatime 0 0
         assert_eq!(large.maximum_frame_bytes, 4096 * MIB as usize);
         let lean = DaemonResourceBudget::from_snapshot(LaunchResourceSnapshot::default());
         assert_eq!(lean.embedded_request_memory_bytes(), lean.maximum_frame_bytes);
-        assert_eq!(budget(1).embedded_request_memory_bytes(), MAX_FRAME_BODY_BYTES);
+        assert_eq!(budget(1).embedded_request_memory_bytes(), 0);
         assert!(budget(u64::MAX).embedded_request_memory_bytes() >= DEFAULT_FRAME_MEMORY_BYTES);
     }
 
@@ -834,7 +831,7 @@ nas/share /data/nested nfs4 rw,relatime 0 0
         });
         assert!(!pressured.used_lean_fallback);
         assert_eq!(pressured.maximum_connections, 1);
-        assert_eq!(pressured.maximum_frame_bytes, MAX_FRAME_BODY_BYTES);
+        assert_eq!(pressured.maximum_frame_bytes, 0);
 
         let huge = DaemonResourceBudget::from_snapshot(LaunchResourceSnapshot {
             logical_cpus: Some(usize::MAX),

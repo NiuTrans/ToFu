@@ -108,7 +108,7 @@ def _domain_schema(schema: dict | bool, components: dict) -> dict | bool:
 
 def project_v4_responses(responses: dict, components: dict, *, success_envelope: bool) -> dict:
     """JSON product successes wrap data; generic HTTP failures are problems."""
-    from lib.api_v4_generated import OPENAPI_DOCUMENT
+    from lib.generated_api_v4 import OPENAPI_DOCUMENT
     from lib.api_v4 import success_envelope as envelope
 
     result = deepcopy(responses)

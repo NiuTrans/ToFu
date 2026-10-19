@@ -46,7 +46,7 @@ import hashlib
 from typing import Callable, Optional
 
 from lib.identity import require_user_id
-from lib.llm_errors import AbortedError
+from lib.llm.llm_errors import AbortedError
 from lib.log import get_logger
 from lib.paper.contracts import (
     PAPER_FANIN_MAX_PAPERS,
@@ -701,7 +701,7 @@ def _synthesize_survey(paper_inputs, direction, lang, *, user_id, model=None,
     emit the markdown survey followed by a fenced ```json``` block carrying the
     open_gaps map; we split on the last JSON object.
     """
-    from lib.agent_loop import AbortSignal
+    from lib.agent_loop.agent_loop import AbortSignal
     from lib.paper.agent_loop_policy import (
         PAPER_AGENT_ROUTE_MAX_RETRIES,
         run_guarded_paper_agent_loop,

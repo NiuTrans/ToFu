@@ -11,6 +11,8 @@ export interface ProjectReceiptPorts {
 export interface ProjectReceiptRound {
   toolName?: string; query?: string; roundNum?: number | string;
   toolContent?: unknown; results?: ProjectReceiptMeta[];
+
+  toolArgs?: unknown;
 }
 export interface ProjectReceiptMeta {
   source?: string; snippet?: unknown;
@@ -18,6 +20,15 @@ export interface ProjectReceiptMeta {
   peerStatus?: PeerStatus; feedActivity?: FeedActivity;
   peerDelivery?: PeerDelivery; charterProposal?: CharterProposal;
   commitResult?: CommitResult;
+
+  conversationSearch?: ConversationSearch;
+}
+export interface ConversationSearch {
+  keyword: string; scope: 'project' | 'all'; projectPath?: string | null;
+  returnedCount: number; limit: number; coverage: string;
+
+  incomplete?: boolean; coverageReasons?: string[];
+  items: { id: string; title: string }[];
 }
 export interface BoardEpic { owner?: string; dispatched?: unknown; title?: string; id?: string }
 export interface BoardSnapshot {

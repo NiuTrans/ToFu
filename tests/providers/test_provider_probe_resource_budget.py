@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from lib.provider_probe import build_probe_work
-from lib.provider_probe_policy import (
+from lib.provider.provider_probe import build_probe_work
+from lib.provider.provider_probe_policy import (
     resolve_provider_probe_budget,
 )
 
@@ -58,7 +58,7 @@ def test_explicit_connection_work_honors_cell_budget():
 
 @pytest.mark.parametrize('cancelled', [False, True])
 def test_failed_or_cancelled_probe_never_publishes_success(monkeypatch, cancelled):
-    from lib import provider_probe as probe
+    from lib.provider import provider_probe as probe
     completed = []
     persisted = []
     task = dict(provider_id='unit-fault', status='running', started_at=0,
@@ -84,7 +84,7 @@ def test_failed_or_cancelled_probe_never_publishes_success(monkeypatch, cancelle
 def test_cell_calls_start_beyond_idle_target_and_settle_without_live_threads(monkeypatch):
     import threading
     from dataclasses import replace
-    from lib import provider_probe as probe
+    from lib.provider import provider_probe as probe
     count = 24
     barrier = threading.Barrier(count)
     started = []
@@ -110,7 +110,7 @@ def test_cell_calls_start_beyond_idle_target_and_settle_without_live_threads(mon
 
 def test_unsaved_public_results_are_not_evicted_by_new_terminal_results(monkeypatch):
     from collections import OrderedDict
-    from lib import provider_probe as probe
+    from lib.provider import provider_probe as probe
     registry = OrderedDict()
     monkeypatch.setattr(probe, 'CELL_PROBE_TASKS', registry)
     for i in range(40):

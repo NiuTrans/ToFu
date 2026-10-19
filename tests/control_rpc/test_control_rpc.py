@@ -176,7 +176,7 @@ def test_burst_starts_without_socket_rate_global_or_default_pool_limits():
 
 def test_push_websocket_routes_control_rpc_end_to_end(monkeypatch, tmp_path):
     from lib.api_keys import AuthContext
-    from lib.app_factory import create_base_app
+    from lib.app.app_factory import create_base_app
     from routes.push import push_bp
 
     context = AuthContext(
@@ -216,8 +216,8 @@ def test_push_websocket_exits_before_lifespan_shutdown_when_drain_starts(
         monkeypatch):
     from lib.agent_core.push import PushHub
     from lib.api_keys import AuthContext
-    from lib.app_factory import create_base_app
-    from lib.server_shutdown import wait_for_shutdown_trigger
+    from lib.app.app_factory import create_base_app
+    from lib.server.server_shutdown import wait_for_shutdown_trigger
     from routes.push import push_bp
 
     context = AuthContext(

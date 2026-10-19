@@ -137,7 +137,9 @@ struct WalBarrierState {
     requested_len: u64,
     synced_len: u64,
     stop: bool,
+    closing: bool,
     error: Option<FlushError>,
+    writes: write_buffer::WriteBuffer,
 }
 
 /// Shared observation point between the append path, durability waiters, and
@@ -178,6 +180,37 @@ pub struct WalWitness {
 }
 
 impl WalBarrierShared {
+    #[cfg(test)]
+    pub(crate) fn buffered_for_test(capacity: usize) -> WalBarrier {
+        let barrier = WalBarrier::default();
+        barrier.state.lock().unwrap().writes.capacity = capacity;
+        barrier
+    }
+
+    fn queue_write(&self, path: &Path, offset: u64, next_len: u64, parts: &[&[u8]]) -> io::Result<bool> {
+        let mut state = self.state.lock().map_err(|_| io::Error::other("WAL barrier state poisoned"))?;
+        if state.path != path { return Err(io::Error::other("WAL write buffer belongs to another generation")); }
+        if state.stop || state.closing { return Err(io::Error::other("WAL barrier is closed")); }
+        if let Some(error) = &state.error { return Err(io::Error::new(error.kind, error.message.clone())); }
+        if !state.writes.queue(offset, parts)? { return Ok(false); }
+        state.requested_len = state.requested_len.max(next_len);
+        drop(state);
+        self.wake.notify_all();
+        Ok(true)
+    }
+
+    pub fn write_buffer_metrics(&self) -> serde_json::Value {
+        let Ok(state) = self.state.lock() else { return serde_json::json!({"available":false}); };
+        let writes = &state.writes;
+        serde_json::json!({"available":true,"contract":crate::generated_storage_v2::WAL_WRITE_BUFFER_CONTRACT,
+            "enabled":writes.capacity != 0,"failed":state.error.is_some(),"closing":state.closing,"capacityBytes":writes.capacity,
+            "retainedFrameBytes":writes.retained_bytes,"peakFrameBytes":writes.peak_bytes,
+            "queuedFrames":writes.queued_frames,"writtenFrames":writes.written_frames,
+            "writtenBatches":writes.written_batches,"writtenBytes":writes.written_bytes,
+            "writeNanos":writes.write_nanos,"synchronousFallbacks":writes.synchronous_fallbacks,
+            "scope":"one barrier lifetime; queued/inflight exact frame bytes exclude queue/allocator metadata; writes do not credit durability; byte budget controls reuse not admission"})
+    }
+
     /// Witness posted by the append path after each write: the barrier must
     /// cover at least this length. Wakes the worker immediately so a strict
     /// commit's barrier starts without waiting for the idle backstop.
@@ -205,20 +238,26 @@ impl WalBarrierShared {
     /// background thread, then publish the same witness as `run_wal_barrier`.
     #[cfg(test)]
     pub(crate) fn sync_for_test(&self, vfs: &dyn Vfs) -> io::Result<()> {
-        let (path, len) = {
-            let state = self.state.lock().unwrap();
-            (state.path.clone(), state.requested_len)
+        let (path, len, frames) = {
+            let mut state = self.state.lock().unwrap();
+            (state.path.clone(), state.requested_len, state.writes.take())
         };
-        let mut file = vfs.open(
-            &path,
-            OpenRequest {
-                write: true,
-                ..OpenRequest::default()
-            },
-        )?;
-        file.sync_data()?;
-        self.note_synced(&path, len);
-        Ok(())
+        let count = frames.len();
+        let bytes = frames.iter().map(|f| f.bytes.len()).sum::<usize>();
+        let mut wrote = false;
+        let mut batches = 0;
+        let result = (|| {
+            let mut file = vfs.open(&path, OpenRequest { write: true, ..Default::default() })?;
+            batches = write_buffer::write_frames(file.as_mut(), &frames)?;
+            wrote = true;
+            file.sync_data()
+        })();
+        drop(frames);
+        self.state.lock().unwrap().writes.release_counts(bytes, count, wrote, batches, 0);
+        match result {
+            Ok(()) => { self.note_synced(&path, len); Ok(()) }
+            Err(error) => { let returned = io::Error::new(error.kind(), error.to_string()); self.note_flush_error(&path, error); Err(returned) }
+        }
     }
 
     fn note_flush_error(&self, path: &Path, error: io::Error) {
@@ -253,6 +292,13 @@ impl WalBarrierShared {
     fn note_rotated(&self, path: PathBuf) {
         if let Ok(mut state) = self.state.lock() {
             if state.path != path {
+                if state.writes.retained_bytes != 0 {
+                    state.error = Some(FlushError { kind: io::ErrorKind::InvalidData,
+                        message: "WAL source changed before queued writes completed".into() });
+                    drop(state);
+                    self.synced.notify_all();
+                    return;
+                }
                 state.path = path;
                 state.requested_len = 0;
                 state.synced_len = 0;
@@ -271,6 +317,12 @@ impl WalBarrierShared {
     pub(crate) fn inject_background_error_for_test(&self, error: io::Error) {
         let path = self.state.lock().unwrap().path.clone();
         self.note_flush_error(&path, error);
+    }
+
+    /// A cached owned reply performs no I/O and must never wait for a driver.
+    /// Contention/poison/error means no health proof; ordinary dispatch remains.
+    pub(crate) fn try_healthy(&self) -> bool {
+        self.state.try_lock().is_ok_and(|state| state.error.is_none())
     }
 
     pub fn barrier_error(&self) -> Option<io::Error> {
@@ -333,6 +385,17 @@ impl WalBarrierDriver {
         path: PathBuf,
         interval: Duration,
     ) -> io::Result<(WalBarrier, Self)> {
+        Self::start_with_write_buffer(vfs, path, interval, 0)
+    }
+
+    /// Reuses the same launch-time resource observation as transport/cache sizing.
+    pub fn capacity_for_headroom(headroom_bytes: Option<u64>) -> usize {
+        use crate::generated_storage_v2::{WAL_WRITE_BUFFER_HEADROOM_DIVISOR, WAL_WRITE_BUFFER_FALLBACK_BYTES};
+        usize::try_from(headroom_bytes.map(|bytes| bytes / WAL_WRITE_BUFFER_HEADROOM_DIVISOR)
+            .unwrap_or(WAL_WRITE_BUFFER_FALLBACK_BYTES)).unwrap_or(usize::MAX)
+    }
+
+    pub fn start_with_write_buffer(vfs: Arc<dyn Vfs>, path: PathBuf, interval: Duration, capacity_bytes: usize) -> io::Result<(WalBarrier, Self)> {
         if !(MIN_WAL_FLUSH_INTERVAL..=MAX_WAL_FLUSH_INTERVAL).contains(&interval) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -341,6 +404,9 @@ impl WalBarrierDriver {
         }
         let barrier = WalBarrier::default();
         barrier.note_rotated(path);
+        if vfs.supports_buffered_wal_writes() {
+            barrier.state.lock().map_err(|_| io::Error::other("WAL barrier state poisoned"))?.writes.capacity = capacity_bytes;
+        }
         let worker_barrier = barrier.clone();
         let worker = thread::Builder::new()
             .name("tofu-db-wal-barrier".to_owned())
@@ -355,6 +421,17 @@ impl WalBarrierDriver {
     }
 
     pub fn stop_and_join(&self) -> io::Result<()> {
+        let drain = match self.barrier.state.lock() {
+            Ok(mut state) => {
+                state.closing = true;
+                Ok((state.writes.capacity != 0 && state.requested_len > state.synced_len)
+                    .then_some(state.requested_len))
+            }
+            Err(_) => Err(io::Error::other("WAL barrier state poisoned during close")),
+        };
+        // Join even on poison; unknown ownership cannot report a drained close.
+        let drained = drain.and_then(|target| target.map(|len| self.barrier.wait_synced(len,
+            std::time::Instant::now() + MAX_BARRIER_WAIT)).transpose());
         if let Ok(mut state) = self.barrier.state.lock() {
             state.stop = true;
         }
@@ -369,7 +446,11 @@ impl WalBarrierDriver {
                 .join()
                 .map_err(|_| io::Error::other("WAL barrier worker panicked"))?;
         }
-        Ok(())
+        if let Ok(mut state) = self.barrier.state.lock() {
+            state.writes.pending.clear();
+            state.writes.retained_bytes = 0;
+        }
+        drained.map(|_| ())
     }
 }
 
@@ -392,52 +473,43 @@ fn run_wal_barrier_with_sync_hook(
     crate::fsync_stats::set_current_component(crate::fsync_stats::COMPONENT_WAL_BARRIER);
     let mut handle: Option<(PathBuf, Box<dyn VfsFile>)> = None;
     loop {
-        let (path, requested_len, synced_len, stop) = match barrier.state.lock() {
-            Ok(state) => (
-                state.path.clone(),
-                state.requested_len,
-                state.synced_len,
-                state.stop,
-            ),
+        let (path, requested_len, synced_len, stop, failed, frames) = match barrier.state.lock() {
+            Ok(mut state) => {
+                let failed = state.error.is_some();
+                let frames = if failed { Default::default() } else { state.writes.take() };
+                (state.path.clone(), state.requested_len, state.synced_len, state.stop, failed, frames)
+            },
             Err(_) => return,
         };
-        if stop {
-            return;
-        }
-        if requested_len > synced_len {
-            let ready = match handle.as_mut() {
-                Some((handle_path, _)) if *handle_path == path => true,
-                _ => match vfs.open(
-                    &path,
-                    OpenRequest {
-                        write: true,
-                        ..OpenRequest::default()
-                    },
-                ) {
-                    Ok(file) => {
-                        handle = Some((path.clone(), file));
-                        true
-                    }
-                    Err(error) => {
-                        barrier.note_flush_error(&path, error);
-                        false
-                    }
-                },
-            };
-            if ready {
-                let result = match handle.as_mut() {
-                    Some((_, file)) => {
-                        let _sync = crate::fsync_stats::StageTimer::new(crate::fsync_stats::STAGE_WAL_BARRIER_SYNC);
-                        file.sync_data()
-                    },
-                    None => Ok(()),
-                };
-                match result {
-                    Ok(()) => barrier.note_synced(&path, requested_len),
-                    Err(error) => {
-                        barrier.note_flush_error(&path, error);
-                    }
+        if stop { return; }
+        if !failed && requested_len > synced_len {
+            let frame_count = frames.len();
+            let frame_bytes = frames.iter().map(|f| f.bytes.len()).sum::<usize>();
+            let mut batches_written = 0;
+            let mut write_nanos = 0;
+            let mut wrote = false;
+            let result = (|| -> io::Result<()> {
+                if handle.as_ref().is_none_or(|(handle_path, _)| *handle_path != path) {
+                    handle = Some((path.clone(), vfs.open(&path, OpenRequest { write: true, ..Default::default() })?));
                 }
+                let file = &mut handle.as_mut().expect("opened WAL worker handle").1;
+                let started = std::time::Instant::now();
+                let written = write_buffer::write_frames(file.as_mut(), &frames);
+                write_nanos = started.elapsed().as_nanos() as u64;
+                batches_written = written?;
+                wrote = true;
+                let _sync = crate::fsync_stats::StageTimer::new(crate::fsync_stats::STAGE_WAL_BARRIER_SYNC);
+                file.sync_data()
+            })();
+            // Budget credit follows actual frame deallocation, including the
+            // complete write+sync interval; inflight frames cannot hide RAM.
+            drop(frames);
+            if let Ok(mut state) = barrier.state.lock() {
+                state.writes.release_counts(frame_bytes, frame_count, wrote, batches_written, write_nanos);
+            }
+            match result {
+                Ok(()) => barrier.note_synced(&path, requested_len),
+                Err(error) => barrier.note_flush_error(&path, error),
             }
         }
         after_sync();
@@ -701,7 +773,15 @@ impl ActiveLog {
         self.barrier = Some(barrier.clone());
     }
 
+    pub(crate) fn buffered_writes_enabled(&self) -> bool {
+        // Unknown state may own unwritten frames. Preserve the failed barrier
+        // rather than detaching it and trusting an inline fsync on empty bytes.
+        self.barrier.as_ref().is_some_and(|b| b.state.lock().map_or(true, |s| s.writes.capacity != 0))
+    }
+
     pub fn detach_barrier(&mut self) {
+        let must_drain = self.buffered_writes_enabled();
+        if must_drain && self.sync_pending().is_err() { return; }
         if let Some(barrier) = self.barrier.take() {
             // Preserve the worker's observed barrier progress so the engine
             // side counter stays honest after detachment.
@@ -745,6 +825,15 @@ impl ActiveLog {
                 io::ErrorKind::ResourceBusy,
                 "active WAL rotation required",
             ));
+        }
+        if self.durability == WalDurability::Strict {
+            if let Some(barrier) = &self.barrier {
+                if barrier.queue_write(&self.path, current_len, next_len, &[&leading, payload, &trailing])? {
+                    crate::fsync_stats::note_wal_encoded_bytes(next_len - current_len);
+                    self.len = next_len;
+                    return Ok(hash);
+                }
+            }
         }
         self.file.write_all_vectored_at(current_len, &mut [
             io::IoSlice::new(&leading), io::IoSlice::new(payload), io::IoSlice::new(&trailing),
@@ -876,6 +965,7 @@ impl ActiveLog {
                 "WAL checkpoint sequence exceeds durable sequence",
             ));
         }
+        if self.buffered_writes_enabled() { self.sync_pending()?; }
         let file_len = self.file.len()?;
         if file_len > ACTIVE_LOG_MAX_BYTES {
             return Err(invalid_data("active WAL exceeds the 64 MiB recovery bound"));
@@ -1037,6 +1127,7 @@ impl ActiveLog {
                 "WAL truncation offset exceeds file length",
             ));
         }
+        if self.buffered_writes_enabled() { self.sync_pending()?; }
         self.file.set_len(end_offset)?;
         sync_all_barrier(self.file.as_mut())?;
         self.len = end_offset;
@@ -1410,3 +1501,18 @@ mod tests {
         assert_eq!(recovery.records[0].record_hash, record_hash);
     }
 }
+
+#[path = "wal_write_buffer.rs"]
+mod write_buffer;
+
+#[cfg(test)]
+#[path = "wal_buffer_tests.rs"]
+mod buffer_tests;
+
+#[path = "wal_publication.rs"]
+mod publication;
+pub(crate) use publication::PublicationWalCover;
+
+#[cfg(test)]
+#[path = "wal_query_cache_health_tests.rs"]
+mod wal_query_cache_health_tests;

@@ -52,6 +52,8 @@ def _cleanup():
     with pm_config._lock:
         pm_config._roots.clear()
         pm_config._state['path'] = ''
+        pm_config._conv_roots.clear()
+        pm_config._conv_primary.clear()
 
 
 def _latest_mod(root_abs, conv_id):
@@ -65,6 +67,7 @@ def test_abs_write_file_attributed_to_extra_root():
         try:
             _register_primary('chatui', primary)
             _register_extra('overleaf-mcp', extra)
+            pm_config.set_conv_roots('conv-1', primary, [extra])
 
             rel = 'src/overleaf_mcp/config.py'
             abs_path = os.path.join(extra, rel)
@@ -78,7 +81,7 @@ def test_abs_write_file_attributed_to_extra_root():
             # tagged with the extra root's name and a clean relative path.
             mod = _latest_mod(extra, 'conv-1')
             assert mod is not None, 'mod not recorded under extra root session'
-            assert mod['root'] == 'overleaf-mcp', mod
+            assert mod['root'] == os.path.basename(extra), mod
             assert mod['path'] == rel, mod
             assert not os.path.isabs(mod['path']), mod
             assert os.path.abspath(mod['basePath']) == os.path.abspath(extra), mod
@@ -96,6 +99,7 @@ def test_abs_apply_diff_attributed_to_extra_root():
         try:
             _register_primary('chatui', primary)
             _register_extra('overleaf-mcp', extra)
+            pm_config.set_conv_roots('conv-2', primary, [extra])
 
             rel = 'src/overleaf_mcp/git_client.py'
             abs_path = os.path.join(extra, rel)
@@ -109,7 +113,7 @@ def test_abs_apply_diff_attributed_to_extra_root():
 
             mod = _latest_mod(extra, 'conv-2')
             assert mod is not None, 'mod not recorded under extra root session'
-            assert mod['root'] == 'overleaf-mcp', mod
+            assert mod['root'] == os.path.basename(extra), mod
             assert mod['path'] == rel, mod
             assert _latest_mod(primary, 'conv-2') is None
         finally:
@@ -122,6 +126,7 @@ def test_abs_insert_content_attributed_to_extra_root():
         try:
             _register_primary('chatui', primary)
             _register_extra('overleaf-mcp', extra)
+            pm_config.set_conv_roots('conv-3', primary, [extra])
 
             rel = 'server.py'
             abs_path = os.path.join(extra, rel)
@@ -134,7 +139,7 @@ def test_abs_insert_content_attributed_to_extra_root():
 
             mod = _latest_mod(extra, 'conv-3')
             assert mod is not None
-            assert mod['root'] == 'overleaf-mcp', mod
+            assert mod['root'] == os.path.basename(extra), mod
             assert mod['path'] == rel, mod
         finally:
             _cleanup()
@@ -145,12 +150,13 @@ def test_relative_path_attribution_unchanged():
     with tempfile.TemporaryDirectory() as primary:
         try:
             _register_primary('chatui', primary)
+            pm_config.set_conv_roots('conv-4', primary)
             res = tool_write_file(primary, 'notes.txt', 'hi\n',
                                   conv_id='conv-4', task_id='task-4')
             assert res['ok'], res
             mod = _latest_mod(primary, 'conv-4')
             assert mod is not None
-            assert mod['root'] == 'chatui', mod
+            assert mod['root'] == os.path.basename(primary), mod
             assert mod['path'] == 'notes.txt', mod
         finally:
             _cleanup()

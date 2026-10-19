@@ -69,7 +69,7 @@ _mount_decisions: OrderedDict[tuple[str, str], bool] = OrderedDict()
 
 def describe_mount(path):
     """Lazy mount probe so non-Python run commands load no storage stack."""
-    from lib.storage_sidecar.storage_capabilities import describe_mount as probe
+    from lib.storage_authority_sql.storage_capabilities import describe_mount as probe
     return probe(path)
 
 

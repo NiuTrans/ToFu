@@ -42,17 +42,20 @@ class BoundedTextDeltaCoalescer:
         accumulate: Callable[[str, str], None] | None = None,
         delay_s: float = TEXT_DELTA_COALESCE_S,
         max_chars: int = TEXT_DELTA_MAX_CHARS,
+        flush_deadline: Callable[[], float | None] | None = None,
     ) -> None:
         self._emit = emit
         self._accumulate = accumulate
         self._delay_s = max(0.001, float(delay_s))
         self._max_chars = max(1, int(max_chars))
+        self._deadline_observation = flush_deadline
         self._condition = threading.Condition()
         self._flush_deadline: float | None = None
         self._worker: threading.Thread | None = None
         self._pending_content: list[str] = []
         self._pending_thinking: list[str] = []
         self._pending_chars = 0
+        self._peak_pending_chars = 0
         self._first_emitted = False
         self._closed = False
         self._raw_chunks = 0
@@ -82,6 +85,7 @@ class BoundedTextDeltaCoalescer:
             if thinking:
                 self._pending_thinking.append(thinking)
             self._pending_chars += chunk_chars
+            self._peak_pending_chars = max(self._peak_pending_chars, self._pending_chars)
             if not self._first_emitted:
                 # Use the same retained buffer as every later flush. If the
                 # synchronous leading-edge emit fails, close/error handling
@@ -94,10 +98,18 @@ class BoundedTextDeltaCoalescer:
                 self._flush_deadline = None
                 self._flush_locked()
                 self._condition.notify_all()
-            elif self._flush_deadline is None:
-                self._flush_deadline = time.monotonic() + self._delay_s
-                self._ensure_worker_locked()
-                self._condition.notify_all()
+            else:
+                deadline = self._flush_deadline
+                if deadline is None:
+                    deadline = time.monotonic() + self._delay_s
+                if self._deadline_observation is not None:
+                    observed = self._deadline_observation()
+                    if observed is not None:
+                        deadline = min(deadline, observed)
+                if deadline != self._flush_deadline:
+                    self._flush_deadline = deadline
+                    self._ensure_worker_locked()
+                    self._condition.notify_all()
 
     def flush(self) -> bool:
         """Synchronously emit pending text before a structural boundary."""
@@ -143,6 +155,7 @@ class BoundedTextDeltaCoalescer:
                 'emitted_events': self._emitted_events,
                 'failed_emits': self._failed_emits,
                 'pending_chars': self._pending_chars,
+                'peak_pending_chars': self._peak_pending_chars,
                 'worker_started': int(self._worker is not None),
                 'worker_alive': int(
                     self._worker is not None and self._worker.is_alive()),
@@ -210,18 +223,37 @@ class TaskTextDeltaCoalescer:
         on_after_delta: Callable[[], None],
         log_prefix: str = '',
         delay_s: float = TEXT_DELTA_COALESCE_S,
-        max_chars: int = TEXT_DELTA_MAX_CHARS,
+        max_chars: int | None = None,
     ) -> None:
         self._task = task
         self._append_event = append_event_fn
         self._on_first_delta = on_first_delta
         self._on_after_delta = on_after_delta
         self._log_prefix = log_prefix
+        deadline = None
+        attempt_id = task.get('_attemptId') or task.get('attemptId')
+        if attempt_id:
+            from lib.turn_lifecycle import next_progress_projection_deadline
+            deadline = lambda: next_progress_projection_deadline(attempt_id)
+            if max_chars is None:
+                from lib.storage.storage_event_policy import (
+                    resolve_storage_event_budget, STORAGE_EVENT_FRAME_HEADROOM_BYTES,
+                )
+                from lib.agent_core.generated_task_event_delivery_contract import PROGRESS_BATCH_MAX_WIRE_BYTES
+                # Reuse both existing frame envelopes and metadata headroom.
+                # JSON control characters need six bytes; the short deadline,
+                # not a tiny character cap, sets ordinary streaming cadence.
+                frame_bytes = min(resolve_storage_event_budget().event_max_bytes,
+                    max(1, PROGRESS_BATCH_MAX_WIRE_BYTES - STORAGE_EVENT_FRAME_HEADROOM_BYTES))
+                max_chars = max(1, frame_bytes // 6)
+        if max_chars is None:
+            max_chars = TEXT_DELTA_MAX_CHARS
         self._coalescer = BoundedTextDeltaCoalescer(
             self._emit,
             accumulate=self._accumulate,
             delay_s=delay_s,
             max_chars=max_chars,
+            flush_deadline=deadline,
         )
 
     def on_thinking(self, value: str) -> None:

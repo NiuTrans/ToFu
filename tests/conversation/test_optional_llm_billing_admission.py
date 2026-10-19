@@ -68,7 +68,7 @@ def test_daily_report_dispatch_uses_strict_billing_admission(monkeypatch):
 
     monkeypatch.setattr('lib.llm_dispatch.smart_chat', dispatch)
     streams, tomorrow, yesterday_done, error = llm._run_llm_analysis(
-        'Summarize today.', 1)
+        'Summarize today.', 1, owner_user_id=41)
 
     assert streams == [{'title': 'Parser repair'}]
     assert tomorrow == []
@@ -131,7 +131,7 @@ def test_title_terminal_dispatch_failure_does_not_double_attempt_budget(
         DispatchRateLimitBudgetExceeded,
         DispatchSharedContentionDeferred,
     )
-    from lib.llm_errors import RateLimitError
+    from lib.llm.llm_errors import RateLimitError
 
     calls = 0
 

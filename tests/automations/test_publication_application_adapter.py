@@ -6,6 +6,7 @@ from lib.automations.transitions import ExecutionFence
 from lib.identity import PrincipalContext
 from lib.storage import get_storage_client
 from tests.storage.test_storage_application_contract import application_storage as application_storage
+from tests.storage.test_storage_application_contract import application_storage_owner_id as application_storage_owner_id
 from tests.support.automation_fixtures import clock_definition,trigger
 
 pytestmark = pytest.mark.api

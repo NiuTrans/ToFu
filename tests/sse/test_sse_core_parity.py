@@ -31,7 +31,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from lib.llm_errors import RateLimitError  # noqa: E402
+from lib.llm.llm_errors import RateLimitError  # noqa: E402
 from lib.llm._sse_core import SSEAccumulator  # noqa: E402
 from lib.llm._sse_framer import SSEEvent  # noqa: E402
 from lib.llm.anthropic_outbound import AnthropicSSETranslator  # noqa: E402
@@ -776,3 +776,17 @@ def test_sse_error_429_raises_ratelimit_sync():
 def test_sse_error_429_raises_ratelimit_async():
     with pytest.raises(RateLimitError):
         _run_async(SSE_ERROR_429)
+
+
+def test_final_usage_retains_only_safe_wire_request_parameters():
+    acc = _mk_openai_acc()
+    acc.body.update(max_tokens=1234, temperature=0.7, reasoning_effort='high',
+                    thinking={'type': 'enabled'}, secret='never-retain')
+    for line in NORMAL:
+        if line.startswith('data: '):
+            acc.feed_event(SSEEvent(data=line[6:]))
+    receipt = acc.finalize().usage['_request_parameters']
+    assert receipt['max_tokens'] == 1234
+    assert receipt['reasoning_effort'] == 'high'
+    assert receipt['thinking_type'] == 'enabled'
+    assert 'never-retain' not in json.dumps(receipt)

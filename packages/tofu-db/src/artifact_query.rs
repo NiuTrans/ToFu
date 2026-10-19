@@ -1,0 +1,889 @@
+//! Canonical tool-result queries over the existing owner-bound artifact/blob store.
+//!
+//! Shared policy: contracts/tool_result_query_v1.json. Routes seek only ancestors;
+//! raw segments use verified blob ranges. Persistent private HMAC keys bind opaque
+//! continuations to owner/root/operation/query/selector and observed expiry.
+use super::*;
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use hmac::{Hmac, Mac};
+use rand_core::{OsRng, RngCore};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::{Arc, LazyLock};
+use std::time::{Duration, Instant};
+
+static CONTRACT: LazyLock<Value> = LazyLock::new(|| {
+    serde_json::from_str(include_str!("../../../contracts/tool_result_query_v1.json"))
+        .expect("checked tool-result query contract")
+});
+fn bound(name: &str) -> usize {
+    CONTRACT["limits"][name].as_u64().expect("query limit") as usize
+}
+fn cursor_max() -> usize {
+    CONTRACT["cursor"]["maxLength"]
+        .as_u64()
+        .expect("cursor limit") as usize
+}
+fn encode<T: Serialize>(value: &T) -> io::Result<Vec<u8>> {
+    serde_json::to_vec(value).map_err(|_| invalid_data("tool-result query encoding failed"))
+}
+fn private_key(transaction: &AuthorityTransaction) -> io::Result<EntityKey> {
+    key(
+        transaction,
+        crate::generated_tofudb_ir::TOOL_RESULT_CURSOR_KEY_NAMESPACE,
+        b"cursor-key-v1",
+    )
+}
+pub(crate) fn ensure_key(
+    database: &AuthorityDatabase,
+    transaction: &mut AuthorityTransaction,
+) -> io::Result<()> {
+    let key = private_key(transaction)?;
+    if database.entity_get(transaction, &key)?.is_none() {
+        let mut bytes = [0u8; 32];
+        OsRng
+            .try_fill_bytes(&mut bytes)
+            .map_err(|_| invalid_data("cursor key randomness unavailable"))?;
+        database.entity_put(transaction, key, bytes.to_vec())?;
+    }
+    Ok(())
+}
+fn signing_key(
+    database: &AuthorityDatabase,
+    transaction: &mut AuthorityTransaction,
+) -> io::Result<Vec<u8>> {
+    database
+        .entity_get(transaction, &private_key(transaction)?)?
+        .filter(|bytes| bytes.len() == 32)
+        .ok_or_else(|| {
+            invalid_input("Continuation key unavailable; publish an artifact before querying")
+        })
+}
+
+pub(crate) fn validate_input(cursor: &Value, selector: &str) -> io::Result<()> {
+    if cursor.as_u64().is_none()
+        && !cursor.as_str().is_some_and(|s| {
+            s.len() <= cursor_max()
+                && (s.is_empty() || s.bytes().all(|b| b.is_ascii_digit()) || s.starts_with("trq1."))
+        })
+    {
+        return Err(invalid_input("Invalid continuation cursor"));
+    }
+    if !selector.is_empty() {
+        if !selector.starts_with('/')
+            || selector.chars().count() > 1024
+            || selector[1..].split('/').count() > bound("pointerDepth")
+        {
+            return Err(invalid_input("Invalid JSON pointer"));
+        }
+        let mut chars = selector.chars();
+        while let Some(ch) = chars.next() {
+            if ch == '~' && !matches!(chars.next(), Some('0' | '1')) {
+                return Err(invalid_input("Invalid JSON pointer escape"));
+            }
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_manifest(text: &str) -> io::Result<Value> {
+    let fail = || invalid_input("Invalid result manifest");
+    if text.len() > bound("manifestBytes") {
+        return Err(fail());
+    }
+    let v: Value = serde_json::from_str(text).map_err(|_| fail())?;
+    let object = v.as_object().ok_or_else(fail)?;
+    let fields = CONTRACT["manifestRequired"]
+        .as_array()
+        .expect("required manifest fields");
+    if object.len() != fields.len()
+        || fields
+            .iter()
+            .any(|key| !object.contains_key(key.as_str().unwrap()))
+    {
+        return Err(fail());
+    }
+    let id = v["resultId"].as_str().ok_or_else(fail)?;
+    if uuid::Uuid::parse_str(id).map_err(|_| fail())?.to_string() != id {
+        return Err(fail());
+    }
+    if !CONTRACT["executionStatuses"]
+        .as_array()
+        .unwrap()
+        .contains(&v["executionStatus"])
+    {
+        return Err(fail());
+    }
+    for field in ["sourceCoverage", "retentionCoverage"] {
+        if !matches!(
+            v[field].as_str(),
+            Some("complete" | "full" | "partial" | "incomplete" | "unavailable" | "unknown")
+        ) {
+            return Err(fail());
+        }
+    }
+    let parts = v["parts"].as_array().ok_or_else(fail)?;
+    let children = v["children"].as_array().ok_or_else(fail)?;
+    if parts.len() + children.len() > bound("scanNodes") {
+        return Err(fail());
+    }
+    for part in parts {
+        let part = part.as_object().ok_or_else(fail)?;
+        let required: &[&str] = match part.get("kind").and_then(Value::as_str) {
+            Some("text" | "json") => &["kind", "text"],
+            Some("artifact") => &["kind", "artifactRef"],
+            Some("media") => &["kind", "reference", "mimeType"],
+            _ => return Err(fail()),
+        };
+        if required
+            .iter()
+            .any(|k| !part.get(*k).is_some_and(Value::is_string))
+        {
+            return Err(fail());
+        }
+        for (k, value) in part {
+            if required.contains(&k.as_str()) {
+                continue;
+            }
+            if !CONTRACT["manifestOptionalPartFields"]
+                .as_array()
+                .unwrap()
+                .contains(&json!(k))
+            {
+                return Err(fail());
+            }
+            if matches!(k.as_str(), "sourceOrdinal" | "byteSize" | "omittedCount") {
+                if value.as_u64().is_none() {
+                    return Err(fail());
+                }
+            } else if !value.as_str().is_some_and(|s| s.chars().count() <= 2048) {
+                return Err(fail());
+            }
+            if k == "sha256"
+                && !value.as_str().is_some_and(|s| {
+                    s.len() == 64
+                        && s.bytes()
+                            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                })
+            {
+                return Err(fail());
+            }
+        }
+        match part["kind"].as_str().unwrap() {
+            "json" => {
+                serde_json::from_str::<Value>(part["text"].as_str().unwrap())
+                    .map_err(|_| fail())?;
+            }
+            "artifact" => {
+                parse_artifact_ref(part["artifactRef"].as_str().unwrap())?;
+            }
+            "media" => {
+                let reference = part["reference"].as_str().unwrap();
+                if (reference.is_empty()
+                    && part.get("status").and_then(Value::as_str) != Some("unavailable"))
+                    || reference.chars().count() > 2048
+                    || part["mimeType"].as_str().unwrap().chars().count() > 128
+                {
+                    return Err(fail());
+                }
+            }
+            _ => {}
+        }
+    }
+    for child in children {
+        let child = child.as_object().ok_or_else(fail)?;
+        if child.len() != 3
+            || ["name", "callId", "artifactRef"]
+                .iter()
+                .any(|k| !child.get(*k).is_some_and(Value::is_string))
+        {
+            return Err(fail());
+        }
+        if child["name"].as_str().unwrap().chars().count() > 200
+            || child["callId"].as_str().unwrap().chars().count() > 200
+        {
+            return Err(fail());
+        }
+        parse_artifact_ref(child["artifactRef"].as_str().unwrap())?;
+    }
+    Ok(v)
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Position {
+    r: Vec<usize>,
+    p: usize,
+    b: usize,
+    o: usize,
+    skip: usize,
+    expiry: u64,
+    partial: bool,
+}
+fn sign(key: &[u8], binding: &Value, position: &Position) -> io::Result<String> {
+    let bytes = encode(&(binding, position))?;
+    let mut mac =
+        Hmac::<Sha256>::new_from_slice(key).map_err(|_| invalid_data("Invalid cursor key"))?;
+    mac.update(&bytes);
+    let signature: String = mac
+        .finalize()
+        .into_bytes()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let token = format!("trq1.{}.{signature}", URL_SAFE_NO_PAD.encode(bytes));
+    if token.len() > cursor_max() {
+        return Err(invalid_input("Continuation metadata too large"));
+    }
+    Ok(token)
+}
+fn decode(
+    key: &[u8],
+    binding: &Value,
+    raw: &Value,
+    search: bool,
+    now: u64,
+) -> io::Result<Position> {
+    let fail = || invalid_input("Invalid continuation cursor");
+    let string = raw
+        .as_str()
+        .map(str::to_owned)
+        .unwrap_or_else(|| raw.to_string());
+    if string.is_empty() || string.bytes().all(|c| c.is_ascii_digit()) {
+        let skip: usize = if string.is_empty() {
+            0
+        } else {
+            string.parse().map_err(|_| fail())?
+        };
+        if search && skip != 0 {
+            return Err(fail());
+        }
+        return Ok(Position {
+            skip,
+            ..Position::default()
+        });
+    }
+    let mut split = string.split('.');
+    if split.next() != Some("trq1") {
+        return Err(fail());
+    }
+    let bytes = URL_SAFE_NO_PAD
+        .decode(split.next().ok_or_else(fail)?)
+        .map_err(|_| fail())?;
+    let signature = split.next().ok_or_else(fail)?;
+    if split.next().is_some()
+        || signature.len() != 64
+        || !signature.bytes().all(|b| b.is_ascii_hexdigit())
+    {
+        return Err(fail());
+    }
+    let signature: Vec<u8> = (0..64)
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&signature[i..i + 2], 16).map_err(|_| fail()))
+        .collect::<io::Result<_>>()?;
+    let mut mac = Hmac::<Sha256>::new_from_slice(key).map_err(|_| fail())?;
+    mac.update(&bytes);
+    mac.verify_slice(&signature).map_err(|_| fail())?;
+    let (scope, position): (Value, Position) =
+        serde_json::from_slice(&bytes).map_err(|_| fail())?;
+    if scope != *binding
+        || position.r.len() > bound("depth") + 1
+        || position.r.iter().any(|i| *i >= bound("scanNodes"))
+    {
+        return Err(fail());
+    }
+    if position.expiry != 0 && position.expiry <= now {
+        return Err(invalid_input(
+            "Continuation evidence expired; start a new query",
+        ));
+    }
+    Ok(position)
+}
+
+#[derive(Clone)]
+struct Node {
+    document: ToolResultDocument,
+    manifest: Option<Arc<Value>>,
+}
+enum Segment {
+    Raw(ToolResultDocument),
+    Part(Arc<Value>, usize),
+    Issue(&'static str),
+    End,
+}
+struct Resolved {
+    segment: Segment,
+    reference: String,
+    path: Vec<Value>,
+    frames: Vec<usize>,
+}
+struct Walker<'a> {
+    database: &'a AuthorityDatabase,
+    transaction: &'a mut AuthorityTransaction,
+    now: u64,
+    root: &'a str,
+    state: Position,
+    cache: HashMap<String, Option<Node>>,
+    scanned: usize,
+    nodes: usize,
+    issues: Vec<Value>,
+    deadline: Instant,
+}
+impl Walker<'_> {
+    fn issue(&mut self, path: &[Value], reason: &str) {
+        if self.issues.len() < bound("scanNodes") {
+            self.issues.push(json!({"path":path,"reason":reason}));
+        }
+        self.state.partial = true;
+    }
+    fn load(&mut self, reference: &str) -> io::Result<Option<Node>> {
+        if let Some(node) = self.cache.get(reference) {
+            return Ok(node.clone());
+        }
+        let digest = parse_artifact_ref(reference)?;
+        self.nodes += 1;
+        let Some(document) = read_tool(self.database, self.transaction, digest)?
+            .filter(|doc| doc.expires_at_ms > self.now)
+        else {
+            self.cache.insert(reference.to_owned(), None);
+            return Ok(None);
+        };
+        self.state.expiry = if self.state.expiry == 0 {
+            document.expires_at_ms
+        } else {
+            self.state.expiry.min(document.expires_at_ms)
+        };
+        let manifest = if document.media_type == TOOL_RESULT_MANIFEST_MEDIA_TYPE {
+            let bytes = materialize_blob(
+                self.database,
+                self.transaction,
+                document.content,
+                bound("manifestBytes"),
+            )?;
+            self.scanned += bytes.len();
+            Some(Arc::new(validate_manifest(
+                std::str::from_utf8(&bytes).map_err(|_| invalid_data("Invalid manifest UTF-8"))?,
+            )?))
+        } else {
+            None
+        };
+        let node = Node { document, manifest };
+        self.cache.insert(reference.to_owned(), Some(node.clone()));
+        Ok(Some(node))
+    }
+    fn resolve(&mut self) -> io::Result<Resolved> {
+        let mut reference = self.root.to_owned();
+        let mut path: Vec<Value> = Vec::new();
+        let mut frames = Vec::new();
+        let mut seen = HashSet::new();
+        let mut depth = 0;
+        loop {
+            let issue = if !seen.insert(reference.clone()) {
+                Some("cycle")
+            } else if depth > bound("depth") {
+                Some("depth_budget")
+            } else {
+                None
+            };
+            if let Some(reason) = issue {
+                return Ok(Resolved {
+                    segment: Segment::Issue(reason),
+                    reference,
+                    path,
+                    frames,
+                });
+            }
+            let Some(node) = self.load(&reference)? else {
+                return Ok(Resolved {
+                    segment: Segment::Issue("unavailable"),
+                    reference,
+                    path,
+                    frames,
+                });
+            };
+            let Some(manifest) = node.manifest else {
+                if self.state.r.len() != depth {
+                    return Err(invalid_input("Continuation route unavailable"));
+                }
+                return Ok(Resolved {
+                    segment: Segment::Raw(node.document),
+                    reference,
+                    path,
+                    frames,
+                });
+            };
+            if let Some(Value::Object(last)) = path.last_mut() {
+                last.insert("resultId".into(), manifest["resultId"].clone());
+                last.insert(
+                    "executionStatus".into(),
+                    manifest["executionStatus"].clone(),
+                );
+            }
+            for key in ["sourceCoverage", "retentionCoverage"] {
+                if !matches!(manifest[key].as_str(), Some("complete" | "full")) {
+                    self.issue(&path, key);
+                }
+            }
+            let parts = manifest["parts"].as_array().unwrap();
+            let children = manifest["children"].as_array().unwrap();
+            if self.state.r.len() <= depth {
+                self.state.r.push(0);
+            }
+            let index = self.state.r[depth];
+            if index >= parts.len() + children.len() {
+                return Ok(Resolved {
+                    segment: Segment::End,
+                    reference,
+                    path,
+                    frames,
+                });
+            }
+            frames.push(parts.len() + children.len());
+            if index < parts.len() {
+                path.push(json!(format!("/parts/{index}")));
+                if parts[index]["kind"] != "artifact" {
+                    if self.state.r.len() != depth + 1 {
+                        return Err(invalid_input("Continuation route unavailable"));
+                    }
+                    return Ok(Resolved {
+                        segment: Segment::Part(manifest, index),
+                        reference,
+                        path,
+                        frames,
+                    });
+                }
+                reference = parts[index]["artifactRef"].as_str().unwrap().to_owned();
+            } else {
+                let child = &children[index - parts.len()];
+                path.push(json!({"name":child["name"], "callId":child["callId"]}));
+                reference = child["artifactRef"].as_str().unwrap().to_owned();
+            }
+            depth += 1;
+        }
+    }
+    fn advance(&mut self, mut frames: Vec<usize>) -> bool {
+        self.state.p = 0;
+        self.state.b = 0;
+        while let Some(size) = frames.pop() {
+            self.state.r.truncate(frames.len() + 1);
+            let last = self.state.r.last_mut().unwrap();
+            *last += 1;
+            if *last < size {
+                return false;
+            }
+        }
+        self.state.r.clear();
+        true
+    }
+    fn raw_window(&self, document: &ToolResultDocument) -> io::Result<(String, bool)> {
+        let offset = self.state.b as u64;
+        if offset > document.size_bytes {
+            return Err(invalid_input("Continuation segment unavailable"));
+        }
+        let reader = self.database.blob_reader(
+            self.transaction.tenant_id(),
+            self.transaction.owner_user_id(),
+            document.content.into(),
+        )?;
+        let bytes =
+            reader.read_range(offset, (document.size_bytes - offset).min(65536) as usize)?;
+        let length = match std::str::from_utf8(&bytes) {
+            Ok(_) => bytes.len(),
+            Err(error)
+                if error.error_len().is_none()
+                    && offset + (bytes.len() as u64) < document.size_bytes =>
+            {
+                error.valid_up_to()
+            }
+            Err(_) => return Err(invalid_data("Tool-result content is not UTF-8")),
+        };
+        Ok((
+            std::str::from_utf8(&bytes[..length]).unwrap().to_owned(),
+            offset + length as u64 == document.size_bytes,
+        ))
+    }
+    fn budget_exhausted(&self) -> bool {
+        self.nodes >= bound("scanNodes")
+            || self.scanned >= bound("scanBytes")
+            || Instant::now() >= self.deadline
+    }
+}
+fn selected(text: &str, selector: &str) -> Option<String> {
+    if selector.is_empty() {
+        return Some(text.to_owned());
+    }
+    let value: Value = serde_json::from_str(text).ok()?;
+    serde_json::to_string(value.pointer(selector)?).ok()
+}
+fn text_window(text: &str, position: usize) -> (String, bool) {
+    let mut chars = text.chars().skip(position);
+    let piece: String = chars.by_ref().take(65536).collect();
+    (piece, chars.next().is_none())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run(
+    database: &AuthorityDatabase,
+    transaction: &mut AuthorityTransaction,
+    root: &str,
+    now: u64,
+    raw: &Value,
+    limit: usize,
+    selector: &str,
+    query: Option<&str>,
+) -> io::Result<Option<Vec<u8>>> {
+    validate_input(raw, selector)?;
+    parse_artifact_ref(root)?;
+    if now == 0
+        || limit == 0
+        || limit
+            > if query.is_some() {
+                20
+            } else {
+                MAX_TOOL_RESULT_RANGE_BYTES
+            }
+        || query.is_some_and(|s| s.is_empty() || s.chars().count() > 200)
+    {
+        return Err(invalid_input("Invalid tool-result query"));
+    }
+    // Invalid numeric search cursors refuse even when the root is unavailable.
+    if query.is_some()
+        && raw
+            .as_u64()
+            .or_else(|| raw.as_str().and_then(|s| s.parse().ok()))
+            .is_some_and(|n| n != 0)
+    {
+        return Err(invalid_input("Invalid continuation cursor"));
+    }
+    let operation = if query.is_some() { "search" } else { "read" };
+    let binding = json!([
+        transaction.owner_user_id(),
+        root,
+        operation,
+        query.unwrap_or(""),
+        selector
+    ]);
+    // Missing roots remain unavailable without requiring a key from a newer put.
+    if read_tool(database, transaction, parse_artifact_ref(root)?)?
+        .filter(|doc| doc.expires_at_ms > now)
+        .is_none()
+    {
+        if raw.as_str().is_some_and(|s| s.starts_with("trq1.")) {
+            return Err(invalid_input("Continuation root unavailable"));
+        }
+        return Ok(None);
+    }
+    let key = signing_key(database, transaction)?;
+    let initial = decode(&key, &binding, raw, query.is_some(), now)?;
+    let mut walker = Walker {
+        database,
+        transaction,
+        now,
+        root,
+        state: initial.clone(),
+        cache: HashMap::new(),
+        scanned: 0,
+        nodes: 0,
+        issues: Vec::new(),
+        deadline: Instant::now() + Duration::from_secs(bound("scanSeconds") as u64),
+    };
+    let first = walker.load(root)?.unwrap();
+    let mut result = json!({"artifactRef":root});
+    if let Some(manifest) = first.manifest {
+        for key in [
+            "resultId",
+            "executionStatus",
+            "sourceCoverage",
+            "retentionCoverage",
+        ] {
+            result[key] = manifest[key].clone();
+        }
+    }
+    let mut finished = false;
+    let mut content = String::new();
+    let mut matches: Vec<Value> = Vec::new();
+    let mut provenance = Vec::new();
+    let mut media = Vec::new();
+    let needle: Vec<char> = python_casefold(query.unwrap_or("")).chars().collect();
+    while !finished && !walker.budget_exhausted() {
+        let resolved = walker.resolve()?;
+        let (piece, eof) = match resolved.segment {
+            Segment::Issue(reason) => {
+                if reason == "unavailable" && initial.expiry != 0 {
+                    return Err(invalid_input(
+                        "Continuation child unavailable; start a new query",
+                    ));
+                }
+                walker.issue(&resolved.path, reason);
+                finished = walker.advance(resolved.frames);
+                continue;
+            }
+            Segment::End => {
+                finished = walker.advance(resolved.frames);
+                continue;
+            }
+            Segment::Raw(document) => {
+                if selector.is_empty() {
+                    walker.raw_window(&document)?
+                } else {
+                    let bytes = materialize_blob(
+                        database,
+                        walker.transaction,
+                        document.content,
+                        bound("artifactBytes"),
+                    )?;
+                    walker.scanned += bytes.len();
+                    let text = std::str::from_utf8(&bytes)
+                        .map_err(|_| invalid_data("Invalid result UTF-8"))?;
+                    let Some(text) = selected(text, selector) else {
+                        walker.issue(&resolved.path, "selector_unavailable");
+                        finished = walker.advance(resolved.frames);
+                        continue;
+                    };
+                    text_window(&text, walker.state.p)
+                }
+            }
+            Segment::Part(manifest, index) => {
+                let part = &manifest["parts"][index];
+                let kind = part["kind"].as_str().unwrap();
+                if kind == "media" {
+                    if query.is_none() {
+                        let mut descriptor = part.clone();
+                        descriptor["artifactRef"] = json!(resolved.reference);
+                        descriptor["path"] = json!(resolved.path);
+                        media.push(descriptor);
+                    }
+                    walker.issue(&resolved.path, "non_text_media");
+                    finished = walker.advance(resolved.frames);
+                    continue;
+                }
+                if !selector.is_empty() && kind != "json" {
+                    finished = walker.advance(resolved.frames);
+                    continue;
+                }
+                let Some(text) = selected(part["text"].as_str().unwrap(), selector) else {
+                    walker.issue(&resolved.path, "selector_unavailable");
+                    finished = walker.advance(resolved.frames);
+                    continue;
+                };
+                text_window(&text, walker.state.p)
+            }
+        };
+        if piece.is_empty() {
+            finished = walker.advance(resolved.frames);
+            continue;
+        }
+        walker.scanned += piece.len();
+        if query.is_none() {
+            let mut skip = walker.state.skip.min(piece.len());
+            while !piece.is_char_boundary(skip) {
+                skip += 1;
+            }
+            walker.state.skip = walker.state.skip.saturating_sub(skip);
+            let mut end = (skip + limit.saturating_sub(content.len())).min(piece.len());
+            while !piece.is_char_boundary(end) {
+                end -= 1;
+            }
+            if end == skip && skip < piece.len() && content.is_empty() {
+                end += piece[skip..].chars().next().unwrap().len_utf8();
+            }
+            // A partially filled page may have less than one codepoint left.
+            // Yield immediately; rescanning that segment wastes the scan budget.
+            if end == 0 && !content.is_empty() {
+                break;
+            }
+            if end > skip {
+                content.push_str(&piece[skip..end]);
+                provenance.push(json!({"artifactRef":resolved.reference,"path":resolved.path,"segment":walker.state.r,"start":walker.state.o+skip,"end":walker.state.o+end}));
+            }
+            walker.state.p += piece[..end].chars().count();
+            walker.state.b += end;
+            walker.state.o += end;
+            if end == piece.len() && eof {
+                finished = walker.advance(resolved.frames);
+            }
+            if content.len() >= limit {
+                break;
+            }
+        } else {
+            let characters: Vec<char> = piece.chars().collect();
+            let mut window = VecDeque::with_capacity(needle.len());
+            let mut origins = VecDeque::with_capacity(needle.len());
+            let mut consumed = 0;
+            let mut last_match_start = None;
+            for (index, ch) in characters.iter().enumerate() {
+                if index != 0 && index % 4096 == 0 && Instant::now() >= walker.deadline {
+                    break;
+                }
+                for folded in python_casefold(&ch.to_string()).chars() {
+                    if window.len() == needle.len() {
+                        window.pop_front();
+                        origins.pop_front();
+                    }
+                    window.push_back(folded);
+                    origins.push_back(index);
+                    if window.iter().eq(needle.iter()) {
+                        let origin = origins[0];
+                        let found = walker.state.o + origin;
+                        if matches
+                            .last()
+                            .is_none_or(|m| m["offset"].as_u64() != Some(found as u64))
+                        {
+                            matches.push(json!({"offset":found,"text":characters[origin.saturating_sub(160)..(index+321).min(characters.len())].iter().collect::<String>(),"artifactRef":resolved.reference,"path":resolved.path}));
+                            last_match_start = Some(origin);
+                            if matches.len() >= limit {
+                                consumed = origin + 1;
+                                break;
+                            }
+                        }
+                    }
+                }
+                if matches.len() >= limit {
+                    break;
+                }
+                consumed = index + 1;
+            }
+            if matches.len() < limit && (!eof || consumed < characters.len()) {
+                consumed = consumed
+                    .saturating_sub(needle.len())
+                    .max(1)
+                    .max(last_match_start.map_or(0, |p| p + 1));
+            }
+            walker.state.p += consumed;
+            walker.state.o += consumed;
+            walker.state.b += characters[..consumed]
+                .iter()
+                .map(|c| c.len_utf8())
+                .sum::<usize>();
+            if consumed == characters.len() && eof {
+                finished = walker.advance(resolved.frames);
+            }
+            if matches.len() >= limit {
+                break;
+            }
+        }
+    }
+    if !finished
+        && walker.state.r == initial.r
+        && walker.state.p == initial.p
+        && walker.state.o == initial.o
+        && walker.state.skip == initial.skip
+    {
+        return Err(invalid_input("Query budget too small to make progress"));
+    }
+    if !finished && walker.issues.iter().any(|v| v["reason"] == "unavailable") {
+        return Err(invalid_input(
+            "Continuation child unavailable; start a new query",
+        ));
+    }
+    result["scope"] = json!(if query.is_some() {
+        "text_only"
+    } else {
+        "text_and_media_descriptors"
+    });
+    result["coverage"] = json!(if walker.state.partial || !finished {
+        "incomplete"
+    } else {
+        "complete"
+    });
+    result["unavailable"] = json!(walker.issues);
+    result["truncated"] = json!(!finished);
+    result["nextCursor"] = if finished {
+        Value::Null
+    } else {
+        json!(sign(&key, &binding, &walker.state)?)
+    };
+    result["resumeCursor"] = json!(sign(&key, &binding, &initial)?);
+    if let Some(query) = query {
+        result["query"] = json!(query);
+        result["items"] = json!(matches);
+    } else {
+        result["content"] = json!(content);
+        result["offset"] = json!(initial.o);
+        result["provenance"] = json!(provenance);
+        result["media"] = json!(media);
+        if finished {
+            result["sizeBytes"] = json!(walker.state.o);
+        }
+    }
+    encode(&result).map(Some)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn put(database: &mut AuthorityDatabase, text: &str, media: &str) -> String {
+        let mut transaction = database.begin(7, 11).unwrap();
+        let result: Value = serde_json::from_slice(
+            &tool_put(database, &mut transaction, text, media, 100, 10100).unwrap(),
+        )
+        .unwrap();
+        database.commit(transaction).unwrap();
+        result["artifactRef"].as_str().unwrap().to_owned()
+    }
+    fn manifest(database: &mut AuthorityDatabase, parts: Value, children: Value) -> String {
+        put(database, &json!({"resultId":uuid::Uuid::new_v4().to_string(),"executionStatus":"ok","sourceCoverage":"complete","retentionCoverage":"complete","parts":parts,"children":children}).to_string(), TOOL_RESULT_MANIFEST_MEDIA_TYPE)
+    }
+    #[test]
+    fn nested_unicode_route_cursor_covers_each_repeated_child() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut database = AuthorityDatabase::initialize(directory.path()).unwrap();
+        let text = "ß中🙂é\n".repeat(100);
+        let leaf = put(&mut database, &text, "text/plain");
+        let child = manifest(
+            &mut database,
+            json!([{"kind":"artifact","artifactRef":leaf}]),
+            json!([]),
+        );
+        let root = manifest(
+            &mut database,
+            json!([{"kind":"text","text":"header"}]),
+            json!([{"name":"same","callId":"same","artifactRef":child},{"name":"same","callId":"same","artifactRef":child}]),
+        );
+        let mut cursor = json!(0);
+        let mut content = String::new();
+        for page in 0..1000 {
+            let mut transaction = database.begin(7, 11).unwrap();
+            let result = tool_read(&database, &mut transaction, &root, 101, &cursor, 37, "")
+                .unwrap_or_else(|error| panic!("page {page}: {error}; cursor={cursor}"));
+            let result: Value = serde_json::from_slice(&result.unwrap()).unwrap();
+            content.push_str(result["content"].as_str().unwrap());
+            cursor = result["nextCursor"].clone();
+            if cursor.is_null() {
+                break;
+            }
+        }
+        assert_eq!(content, format!("header{text}{text}"));
+        assert!(cursor.is_null());
+    }
+    #[test]
+    fn large_graph_continuation_reaches_each_leaf() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut database = AuthorityDatabase::initialize(directory.path()).unwrap();
+        let children: Vec<_> = (0..18).map(|i| json!({"name":"large","callId":i.to_string(),"artifactRef":put(&mut database, &format!("{} needle-{i}", "x".repeat(1024*1024)), "text/plain")})).collect();
+        let root = manifest(&mut database, json!([]), json!(children));
+        let mut cursor = json!(0);
+        let mut items = Vec::new();
+        for page in 0..100 {
+            let mut transaction = database.begin(7, 11).unwrap();
+            let result = tool_search(
+                &database,
+                &mut transaction,
+                &root,
+                "needle-",
+                101,
+                &cursor,
+                20,
+                "",
+            )
+            .unwrap_or_else(|error| panic!("page {page}: {error}; cursor={cursor}"));
+            let result: Value = serde_json::from_slice(&result.unwrap()).unwrap();
+            items.extend(result["items"].as_array().unwrap().clone());
+            cursor = result["nextCursor"].clone();
+            if cursor.is_null() {
+                break;
+            }
+        }
+        assert_eq!(items.len(), 18);
+        assert!(cursor.is_null());
+    }
+}

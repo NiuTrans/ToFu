@@ -76,7 +76,7 @@ LEGACY_CLAUDE_MODELS = ('aws.claude-opus-4.6', 'claude-3-5-sonnet-20241022')
 NON_CLAUDE_MODELS = ('glm-5.1', 'qwen3.5-plus', 'kimi-k3')
 
 # The five documented Opus 5 effort rungs. All are legal Tofu thinkingDepth
-# values (lib/agent_options.py _FIELDS), so the mapping is identity.
+# values (lib/agent_loop/agent_options.py _FIELDS), so the mapping is identity.
 EFFORT_RUNGS = ('low', 'medium', 'high', 'xhigh', 'max')
 
 

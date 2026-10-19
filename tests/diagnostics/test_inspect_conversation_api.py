@@ -379,7 +379,7 @@ def test_final_header_revision_change_is_not_reported_as_consistent():
         status, body = pages(request, total=1)
         if 'kind=header' in request.path:
             headers += 1
-            if headers == 2:
+            if headers % 2 == 0:
                 body['revision'] = body['document']['metadata']['rev'] = 8
         return status, body
     with api_server(serve) as url:
@@ -604,3 +604,117 @@ def test_result_surfaces_observer_never_promotes_frontend_metadata_to_delivery()
     output = '\n'.join(lines)
     assert 'model: missing' in output and 'missing_model_result' in output
     assert 'User-visible caption' in output
+
+
+@pytest.mark.parametrize('conflict_at', ['turn', 'chunk', 'witness'])
+def test_diagnostic_conflict_restarts_whole_read_without_mixing_sources(conflict_at):
+    headers = 0
+    conflicted = False
+    seen = []
+    def serve(request):
+        nonlocal headers, conflicted
+        seen.append(request.path)
+        args = parse_qs(urlsplit(request.path).query)
+        kind = args.get('kind', [''])[0]
+        if kind == 'header':
+            headers += 1
+        trigger = ((kind == conflict_at and args.get('index') == ['1'])
+                   or (conflict_at == 'witness' and kind == 'header' and headers == 2))
+        old = not conflicted
+        if trigger and not conflicted:
+            conflicted = True
+            if kind != 'header':
+                return 409, {'status': 409, 'code': 'conflict', 'detail': 'database_conflict'}
+        status, body = pages(request, total=2, projection={'content': 'old' if old else 'new'})
+        if trigger and kind == 'header':
+            body['revision'] = body['document']['metadata']['rev'] = 8
+        return status, body
+    with api_server(serve) as url:
+        api = inspector._DiagnosticAPI(url, None)
+        deadline = api.deadline
+        document, _ = inspector._load_api_document(api, 'conversation', full=True)
+    assert conflicted
+    assert [message['content'] for message in document['messages']] == ['new', 'new']
+    assert document['diagnostic_message_indices'] == [0, 1]
+    assert api.requests == len(seen)
+    assert api.deadline == deadline
+    assert api.reserved_bytes == api.reserved_requests == 0
+    assert sum('kind=turn' in path and 'index=0' in path for path in seen) == 2
+
+
+@pytest.mark.parametrize('status,problem', [
+    (409, {'status': 409, 'code': 'conflict', 'detail': 'unrelated'}),
+    (409, {'status': 409, 'code': 'other', 'detail': 'database_conflict'}),
+    (409, {'error': 'database_conflict'}),
+    (401, {'status': 409, 'code': 'conflict', 'detail': 'database_conflict'}),
+    (403, {'status': 409, 'code': 'conflict', 'detail': 'database_conflict'}),
+    (500, {'status': 409, 'code': 'conflict', 'detail': 'database_conflict'}),
+])
+def test_only_typed_diagnostic_conflicts_restart(status, problem):
+    seen = []
+    def serve(request):
+        seen.append(request.path)
+        if 'kind=turn' in request.path:
+            return status, problem
+        return pages(request, total=1)
+    with api_server(serve) as url:
+        with pytest.raises(inspector.DiagnosticAPIError, match=f'HTTP {status}'):
+            inspector._load_api_document(inspector._DiagnosticAPI(url, None), 'conversation', full=True)
+    assert len(seen) == 2
+
+
+def test_persistent_diagnostic_conflict_exhausts_without_partial_output(capsys):
+    headers = 0
+    def serve(request):
+        nonlocal headers
+        if 'kind=header' in request.path:
+            headers += 1
+        if 'kind=turn' in request.path and 'index=1' in request.path:
+            return 409, {'status': 409, 'code': 'conflict', 'detail': 'database_conflict'}
+        return pages(request, total=2)
+    with api_server(serve) as url:
+        assert inspector.main(['conversation', '--api-url', url, '--no-logs']) == 1
+    output = capsys.readouterr()
+    assert headers == 3
+    assert 'no consistent snapshot after 3 attempts' in output.err
+    assert 'writes settle' in output.err
+    assert not output.out
+
+
+@pytest.mark.parametrize('bound', ['bytes', 'requests', 'deadline'])
+def test_diagnostic_retry_keeps_cumulative_budgets(bound):
+    seen = []
+    api = None
+    wire_bytes = 0
+    def serve(request):
+        nonlocal wire_bytes
+        seen.append(request.path)
+        if 'kind=turn' in request.path:
+            status, body = 409, {'status': 409, 'code': 'conflict', 'detail': 'database_conflict'}
+        else:
+            status, body = pages(request, total=1)
+        wire_bytes += len(json.dumps({'data': body, 'meta': {}} if status == 200 else body).encode())
+        return status, body
+    with api_server(serve) as url:
+        api = inspector._DiagnosticAPI(url, None)
+        deadline = api.deadline
+        original_get = api.get
+        def get(*args, **kwargs):
+            try:
+                return original_get(*args, **kwargs)
+            except inspector.DiagnosticSnapshotConflict:
+                # Exhaust the shared remaining allowance precisely at retry.
+                if bound == 'bytes':
+                    api.MAX_TOTAL_BYTES = api.bytes_read
+                elif bound == 'requests':
+                    api.MAX_REQUESTS = api.requests
+                else:
+                    api.deadline = 0
+                raise
+        api.get = get
+        with pytest.raises(inspector.DiagnosticBudgetError, match='budget'):
+            inspector._load_api_document(api, 'conversation', full=True)
+    assert len(seen) == api.requests == 2
+    assert api.bytes_read == wire_bytes  # includes the discarded 409 body
+    assert api.reserved_bytes == api.reserved_requests == 0
+    assert api.deadline == (0 if bound == 'deadline' else deadline)

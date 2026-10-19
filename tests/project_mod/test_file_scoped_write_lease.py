@@ -88,15 +88,16 @@ def _process_holder(path, api='workspace_file_write_lease'):
 def test_different_files_overlap_but_same_file_and_whole_checkout_do_not(repo):
     with _file_lease(repo / 'a.txt'):
         first = leases.workspace_lease_fds()
-        assert len(first) == 2
+        assert len(first) >= 2
         with _file_lease(repo / 'a.txt'):
             assert leases.workspace_lease_fds() == first
 
         def contender():
             with _file_lease(repo / 'b.txt'):
                 other = leases.workspace_lease_fds()
-                assert len(other) == 2
-                assert len(set(first) & set(other)) == 1  # shared checkout barrier
+                assert len(other) >= 2
+                assert set(first) & set(other)  # shared checkout and lifecycle barriers
+                assert set(first) - set(other)  # distinct exclusive file descriptor
                 with pytest.raises(leases.WorkspaceBusyError):
                     with _file_lease(repo / 'a.txt'):
                         pytest.fail('same target overlapped')
@@ -119,7 +120,7 @@ def test_cross_process_different_files_and_canonical_aliases(repo, tmp_path):
     symlink.symlink_to(repo / 'a.txt')
     with _process_holder(repo / 'a.txt'):
         with _file_lease(repo / 'b.txt'):
-            assert len(leases.workspace_lease_fds()) == 2
+            assert len(leases.workspace_lease_fds()) >= 2
         for target in (repo / 'a.txt', alias / 'a.txt', symlink):
             with pytest.raises(leases.WorkspaceBusyError, match='holder type unknown'):
                 with _file_lease(target):
@@ -145,10 +146,10 @@ def test_whole_writer_reentry_retains_strong_lock(repo):
     with leases.workspace_write_lease(repo):
         fds = leases.workspace_lease_fds()
         with _file_lease(repo / 'a.txt'):
-            assert leases.workspace_lease_fds() == fds
+            assert set(fds).issubset(leases.workspace_lease_fds())
             with leases.workspace_read_lease(repo):
                 with _file_lease(repo / 'b.txt'):
-                    assert leases.workspace_lease_fds() == fds
+                    assert set(fds).issubset(leases.workspace_lease_fds())
         code = (
             'import sys; from lib.project_mod.workspace_lease import '
             'WorkspaceBusyError,workspace_file_write_lease; '
@@ -187,7 +188,7 @@ def test_unknown_or_directory_target_falls_back_to_whole_checkout(repo, kind):
     else:
         os.mkfifo(target)
     with _file_lease(target):
-        assert len(leases.workspace_lease_fds()) == 1
+        assert leases.workspace_lease_fds()
 
         def contender():
             with pytest.raises(leases.WorkspaceBusyError):
@@ -199,19 +200,21 @@ def test_unknown_or_directory_target_falls_back_to_whole_checkout(repo, kind):
     _clean()
 
 
-def test_new_targets_and_non_git_noop(repo, tmp_path):
+def test_new_targets_and_non_git_file_transactions(repo, tmp_path):
     with _file_lease(repo / 'new' / 'a.txt'):
-        assert len(leases.workspace_lease_fds()) == 2
+        assert len(leases.workspace_lease_fds()) >= 2
         with _file_lease(repo / 'new' / 'b.txt'):
-            assert len(leases.workspace_lease_fds()) == 3
+            assert len(leases.workspace_lease_fds()) >= 3
     with _file_lease(tmp_path / 'outside.txt'):
-        assert leases.workspace_lease_fds() == ()
+        assert leases.workspace_lease_fds()
+        with _file_lease(tmp_path / 'different.txt'):
+            assert leases.workspace_lease_fds()
     _clean()
 
 
-@pytest.mark.parametrize('timeout', [-1, 601, float('inf'), float('nan')])
+@pytest.mark.parametrize('timeout', [-1, float('inf'), float('nan')])
 def test_invalid_timeout_rejected_before_admission(repo, timeout):
-    with pytest.raises(ValueError, match=r'\[0, 600\]'):
+    with pytest.raises(ValueError, match='nonnegative and finite'):
         with _file_lease(repo / 'a.txt', timeout=timeout):
             pytest.fail('invalid timeout entered')
     _clean()
@@ -269,7 +272,7 @@ def test_wait_release_and_cancellation_close_partial_fds(repo, monkeypatch, canc
         assert acquired.is_set() is not cancel_wait
         _clean()
     with leases.workspace_write_lease(repo):
-        assert len(leases.workspace_lease_fds()) == 1
+        assert leases.workspace_lease_fds()
     _clean()
 
 
@@ -278,7 +281,7 @@ def test_inherited_both_descriptors_fence_until_child_exits(repo):
     try:
         with _file_lease(repo / 'a.txt'):
             fds = leases.workspace_lease_fds()
-            assert len(fds) == 2
+            assert len(fds) >= 2
             child = subprocess.Popen(
                 [sys.executable, '-c', 'import sys; print("ready",flush=True); sys.stdin.read()'],
                 pass_fds=fds, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
@@ -286,7 +289,7 @@ def test_inherited_both_descriptors_fence_until_child_exits(repo):
         _closed(fds)
         _clean()
         with _file_lease(repo / 'b.txt'):
-            assert len(leases.workspace_lease_fds()) == 2
+            assert len(leases.workspace_lease_fds()) >= 2
         for api, target in ((_file_lease, repo / 'a.txt'),
                             (leases.workspace_write_lease, repo),
                             (leases.workspace_read_lease, repo)):
@@ -320,7 +323,7 @@ def test_fork_drops_file_ownership_and_does_not_close_reused_fds(repo):
                         with _file_lease(repo / 'a.txt'):
                             raise AssertionError('fork inherited ownership')
                     with _file_lease(repo / 'b.txt'):
-                        assert len(leases.workspace_lease_fds()) == 2
+                        assert len(leases.workspace_lease_fds()) >= 2
                     reused = os.open(os.devnull, os.O_RDONLY)
                     if reused != fds[0]:
                         os.dup2(reused, fds[0])
@@ -378,9 +381,9 @@ def test_unsafe_target_lock_metadata_releases_barrier(repo, tmp_path):
 def test_registry_and_descriptor_growth_only_tracks_active_holders(repo):
     for index in range(40):
         with _file_lease(repo / f'new-{index}.txt'):
-            assert len(leases.workspace_lease_fds()) == 2
-            assert len(leases._registry) == 2
-            assert len(leases._active_descriptors) == 2
+            assert len(leases.workspace_lease_fds()) >= 2
+            assert len(leases._registry) == len(leases.workspace_lease_fds())
+            assert leases._active_descriptors == set(leases.workspace_lease_fds())
             fds = leases.workspace_lease_fds()
         _closed(fds)
         _clean()
@@ -393,7 +396,7 @@ def test_file_tools_overlap_different_target_and_hold_both_fds_through_publish(r
     observed = []
 
     def publish(target, data, **kwargs):
-        assert len(leases.workspace_lease_fds()) == 2
+        assert len(leases.workspace_lease_fds()) >= 2
         observed.append(os.path.realpath(target))
         return original(target, data, **kwargs)
 
@@ -462,7 +465,7 @@ def test_write_tool_uses_file_admission_without_checkout_holder(repo, monkeypatc
     original = _ops._atomic_write_bytes
 
     def publish(target, data, **kwargs):
-        assert len(leases.workspace_lease_fds()) == 2
+        assert len(leases.workspace_lease_fds()) >= 2
         return original(target, data, **kwargs)
 
     monkeypatch.setattr(_ops, '_atomic_write_bytes', publish)
@@ -491,7 +494,8 @@ def test_alias_retarget_during_admission_applies_nothing(repo, monkeypatch, rout
                 pytest.fail('retargeted alias admitted')
     else:
         result = _ops.tool_write_file(str(repo), 'link.txt', 'changed\n')
-        assert result['error_kind'] == 'workspace-busy'
+        assert result['error_kind'] == 'workspace-target-changed'
+        assert result['mutationApplied'] is False
     assert (repo / 'a.txt').read_text() == 'a\n'
     assert (repo / 'b.txt').read_text() == 'b\n'
     _clean()
@@ -518,7 +522,7 @@ def test_target_type_changed_during_admission_refuses_file_scope(repo, monkeypat
                 pytest.fail('directory/unknown type admitted as a regular file')
     _clean()
     with _file_lease(target):
-        assert len(leases.workspace_lease_fds()) == 1
+        assert leases.workspace_lease_fds()
     _clean()
 
 
@@ -566,8 +570,9 @@ def test_second_file_holder_keeps_live_barrier_after_first_exits(repo):
             first = leases.workspace_lease_fds()
             worker, errors = _thread(second)
             assert ready.wait(5)
-            assert len(inherited[0]) == 2
-            assert len(set(first) & set(inherited[0])) == 1
+            assert len(inherited[0]) >= 2
+            assert set(first) & set(inherited[0])
+            assert set(first) - set(inherited[0])
     finally:
         first_released.set()
         _join(worker, errors)
@@ -582,13 +587,15 @@ def test_file_admission_retains_freshness_refusal_before_preimage(repo, monkeypa
 
     def stale(conv_id, target):
         observed.append((conv_id, target))
-        assert len(leases.workspace_lease_fds()) == 2
+        assert len(leases.workspace_lease_fds()) >= 2
         return True
 
     monkeypatch.setattr(write_freshness, 'is_stale', stale)
     result = _ops.tool_write_file(str(repo), 'b.txt', 'changed\n', conv_id='lease-test')
-    assert result['error_kind'] == 'workspace-busy'
+    assert result['error_kind'] == 'write-freshness-stale'
+    assert result['mutationApplied'] is False
     assert 're-read and reconcile' in result['error']
+    assert 'waiting alone will not refresh' in result['error']
     assert observed == [('lease-test', str(repo / 'b.txt'))]
     assert (repo / 'b.txt').read_text() == 'b\n'
     _clean()
@@ -602,17 +609,20 @@ def test_barrier_and_target_share_one_timeout_budget(repo, monkeypatch):
     observed = []
 
     @contextmanager
-    def timed(path, mode, timeout, cancel_event, _identity=None):
+    def timed(path, mode, timeout, cancel_event, _identity=None, **binding):
         observed.append((path, timeout))
-        with original_lease(path, mode, timeout, cancel_event, _identity):
+        with original_lease(path, mode, timeout, cancel_event, _identity, **binding):
             if path == str(repo):
                 clock.now += 2.0
             yield
 
     monkeypatch.setattr(leases, '_lease', timed)
     with _file_lease(repo / 'a.txt', timeout=5):
-        assert len(leases.workspace_lease_fds()) == 2
-    assert observed == [(str(repo), 5.0), (str(repo / 'a.txt'), 3.0)]
+        assert len(leases.workspace_lease_fds()) >= 2
+    assert [(path, budget) for path, budget in observed
+            if path in {str(repo), str(repo / 'a.txt')}] == [
+        (str(repo), 5.0), (str(repo / 'a.txt'), 3.0)]
+    assert all(0.0 <= budget <= 5.0 for _, budget in observed)
     _clean()
 
 
@@ -866,4 +876,74 @@ def test_committed_notification_flushes_unlocked_after_tool_exception(tracked_re
     assert not post_commit._lanes
     assert mods.undo_task_modifications(str(repo), 'committed-before-error')['undone'] == 1
     assert (repo / 'a.txt').read_text() == 'a\n'
+    _clean()
+
+
+@pytest.mark.parametrize('batch', [False, True])
+def test_stale_read_without_holder_requires_reread_not_lock_wait(repo, monkeypatch, batch):
+    from lib import write_freshness
+    monkeypatch.setattr(_ops, '_should_record_modification', lambda *a, **kw: False)
+    conversation = 'freshness-' + str(repo)
+    target = str(repo / 'b.txt')
+    write_freshness.record(conversation, target)
+    (repo / 'b.txt').write_text('peer\n')
+
+    def edit():
+        if batch:
+            return _ops.tool_apply_diffs(str(repo), [
+                {'path': 'a.txt', 'search': 'a', 'replace': 'changed'},
+                {'path': 'b.txt', 'search': 'peer', 'replace': 'reconciled'},
+            ], conv_id=conversation)
+        return _ops.tool_write_file(str(repo), 'b.txt', 'reconciled\n', conv_id=conversation)
+
+    _clean()
+    result = edit()
+    if batch:
+        assert '[write-freshness-stale]' in result
+        assert 'No edits applied' in result
+        assert 'retry after the writer finishes' not in result
+    else:
+        assert result['error_kind'] == 'write-freshness-stale'
+        assert result['mutationApplied'] is False
+    assert (repo / 'a.txt').read_text() == 'a\n'
+    assert (repo / 'b.txt').read_text() == 'peer\n'
+    _clean()
+    write_freshness.record(conversation, target)
+    result = edit()
+    assert ('2/2' in result) if batch else result['ok']
+    assert (repo / 'b.txt').read_text() == 'reconciled\n'
+    _clean()
+
+
+def test_changed_target_is_not_reported_as_an_active_writer(repo, monkeypatch):
+    from lib.project_mod import workspace_lease as admission
+    original = admission.workspace_file_write_lease
+    observed = []
+
+    @contextmanager
+    def retarget(path, **kwargs):
+        observed.append(path)
+        with original(path, **kwargs):
+            (repo / 'b.txt').unlink()
+            (repo / 'b.txt').symlink_to(repo / 'a.txt')
+            yield
+
+    monkeypatch.setattr(admission, 'workspace_file_write_lease', retarget)
+    @_ops._with_workspace_writer
+    def mutation(base, rel_path):
+        pytest.fail('changed target reached mutation body')
+
+    result = mutation(str(repo), 'b.txt')
+    assert observed == [str(repo / 'b.txt')], result
+    assert result.get('error_kind') == 'workspace-target-changed', result
+    assert result['mutationApplied'] is False
+    assert 're-resolve and re-read' in result['error']
+    assert (repo / 'a.txt').read_text() == 'a\n'
+    _clean()
+
+
+@pytest.mark.parametrize('timeout', [None, 5000])
+def test_file_admission_accepts_unlimited_or_exact_long_wait(repo, timeout):
+    with _file_lease(repo / 'a.txt', timeout=timeout):
+        assert leases.workspace_lease_fds()
     _clean()

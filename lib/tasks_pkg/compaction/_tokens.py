@@ -218,10 +218,9 @@ def _count_tokens_authoritative(
     context_limit = _get_context_limit(task)
     from lib.tasks_pkg.compaction._ownership import compaction_owner_key
     conv_id = compaction_owner_key(task)
-    # The orchestrator stashes the live tool schema here (see
-    # orchestrator.py `_assemble_tool_list`). It ships in every request and
-    # the gateway tokenizes it, so the gate must include it or it
-    # under-counts by the whole tool-schema size on tool-heavy configs.
+    # Shared assembly stashes the initial admission projection here, separate
+    # from provider discovery candidates and execution authority. Include its
+    # schema cost at startup; routed admission checks the final provider body.
     tools = (
         (task or {}).get('_tool_schema') or None
         if tool_schema is _TASK_TOOL_SCHEMA

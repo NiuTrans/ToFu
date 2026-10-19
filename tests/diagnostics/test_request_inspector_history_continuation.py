@@ -5,7 +5,7 @@ import hashlib
 import threading
 from concurrent.futures import ThreadPoolExecutor
 import pytest
-from lib.task_event_contract import EVENT_READ_GUARD_CONTRACT, EVENT_READ_GUARD_SCOPED_CONTRACT
+from lib.task_replay.task_event_contract import EVENT_READ_GUARD_CONTRACT, EVENT_READ_GUARD_SCOPED_CONTRACT
 from lib.tasks_pkg import request_inspector as ri
 from lib.tasks_pkg.snapshot_delta import SnapshotProjector, content_hash
 

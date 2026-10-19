@@ -36,8 +36,7 @@
       "capabilities": [
         "text",
         "vision",
-        "thinking"
-      ]
+        "thinking", "cheap"]
     },
     {
       "model_id": "claude-fable-5-1",

@@ -10,12 +10,12 @@ import hashlib
 
 from lib.identity import PrincipalContext
 from lib.turn_initiation import INITIATOR_HUMAN, INITIATOR_UNKNOWN, resolve_initiator
-from .contract import LIMITS, storage_input_validator, storage_schema
+from .contract import LIMITS, storage_input_validator, storage_schema, task_started_context_is_valid
 from .errors import AutomationError
 
 
 def validate_start_context(value: dict) -> None:
-    if next(storage_input_validator('taskStartedContext').iter_errors(value), None):
+    if not task_started_context_is_valid(value):
         raise AutomationError('invalid_task_start_context', 'Invalid task-start automation context')
 
 

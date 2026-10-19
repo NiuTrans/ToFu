@@ -20,7 +20,7 @@ from urllib.parse import urlsplit, urlunsplit
 from lib.llm._sse_core import SSEAccumulator
 from lib.llm._transport import StreamProgress
 from lib.llm.stream_result import ProviderStreamState
-from lib.llm_errors import (
+from lib.llm.llm_errors import (
     AbortedError,
     EndpointUnreachableError,
     PROVIDER_RESPONSE_ERRORS,

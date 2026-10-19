@@ -4,7 +4,7 @@ import tracemalloc
 
 import pytest
 
-from lib.storage_sidecar.tofudb_migration_source import MigrationSourceError, SQLiteMigrationSource
+from lib.storage_authority_sql.migration.tofudb_migration_source import MigrationSourceError, SQLiteMigrationSource
 
 pytestmark = pytest.mark.unit
 COLUMNS = ('command_key', 'response_json')

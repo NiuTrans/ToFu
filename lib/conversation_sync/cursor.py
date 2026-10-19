@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from functools import lru_cache
 from typing import Any
 
 
@@ -15,6 +16,20 @@ class ConversationCursorError(ValueError):
 
 
 def _scope_fingerprint(conversation_id: str, user_id: Any) -> str:
+    """Return the stable scope fingerprint, memoized per (user, conversation).
+
+    The SSE events loop encodes one cursor per replayed event (up to the page
+    limit), and every invalidation publish re-derives the same fingerprint.
+    The derivation is pure over a small, bounded key, so a per-process LRU
+    removes a sha256 from each of those hot paths without changing the wire
+    value. The cache holds only a deterministic digest (reconstructible), not
+    durable state, so eviction is always safe.
+    """
+    return _scope_fingerprint_cached(str(user_id), conversation_id)
+
+
+@lru_cache(maxsize=1024)
+def _scope_fingerprint_cached(user_id: str, conversation_id: str) -> str:
     scope = f"{user_id}:{conversation_id}".encode("utf-8")
     return hashlib.sha256(scope).hexdigest()[:16]
 

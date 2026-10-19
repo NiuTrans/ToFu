@@ -702,7 +702,7 @@ def _register_output_artifact_origin(task, round_entry, artifact, *,
     """Register owner-local provenance for continuation-tool presentation."""
     if artifact is None or not artifact.artifact_ref:
         return
-    from lib.tool_result_artifacts import register_artifact_provenance
+    from lib.tool_results.tool_result_artifacts import register_artifact_provenance
 
     register_artifact_provenance(
         task,

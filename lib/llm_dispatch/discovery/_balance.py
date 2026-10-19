@@ -4,7 +4,7 @@ from urllib.parse import urlparse
 
 import requests
 
-from lib.http_client import http_get
+from lib.http_transport.client import http_get
 from lib.log import get_logger
 
 logger = get_logger(__name__)
@@ -42,7 +42,7 @@ def _probe_balance_url(base_url: str, api_key: str) -> str:
     parsed = urlparse(base_url.rstrip('/'))
     origin = '%s://%s' % (parsed.scheme, parsed.netloc)
     # Use-time SSRF egress guard — the origin is what we'll actually hit.
-    from lib.byo_egress import EgressDenied, validate_egress_url
+    from lib.byo.byo_egress import EgressDenied, validate_egress_url
     try:
         validate_egress_url(origin)
     except EgressDenied as e:

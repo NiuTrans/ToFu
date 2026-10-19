@@ -435,7 +435,7 @@ def main(argv=None) -> int:
         print(f'[win-ci-shot] built {exe}')
     if args.build_only:
         return 0
-    title = args.title or ('Tofu Agent' if args.target == 'agent'
+    title = args.title or ('Tofu Remote' if args.target == 'agent'
                            else 'Tofu')
     summary = drive(exe, args.out, title=title, settle=args.settle,
                     timeout=args.timeout)

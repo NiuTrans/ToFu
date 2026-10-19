@@ -726,7 +726,7 @@ def test_overlay_never_shrinks_below_backing_disk(host_tmp_path):
         session.delete()
 
 
-def test_confined_backing_chain_is_private_and_jail_local(host_tmp_path):
+def test_confined_backing_chain_is_private_and_jail_local(host_tmp_path, monkeypatch):
     top = host_tmp_path / "top.qcow2"
     parent = host_tmp_path / "parent.qcow2"
     top.write_bytes(b"top-layer")
@@ -754,12 +754,23 @@ def test_confined_backing_chain_is_private_and_jail_local(host_tmp_path):
     session = object.__new__(SandboxSession)
     session.spec = SimpleNamespace(
         base_disk=top,
+        disk_prepare_timeout_sec=120,
         runtime=SimpleNamespace(qemu_img=qemu_img),
     )
     inputs = host_tmp_path / "inputs"
     inputs.mkdir()
 
+    original_run = subprocess.run
+    observed_timeouts = []
+
+    def record_run(command, **kwargs):
+        if 'rebase' in command:
+            observed_timeouts.append(kwargs['timeout'])
+        return original_run(command, **kwargs)
+
+    monkeypatch.setattr(subprocess, 'run', record_run)
     session._prepare_disk_chain(inputs)
+    assert observed_timeouts == [120]
 
     assert (inputs / "base.qcow2").read_bytes() == b"top-layer"
     assert (inputs / "backing-1.img").read_bytes() == b"parent-layer"

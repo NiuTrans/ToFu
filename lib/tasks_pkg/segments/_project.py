@@ -15,9 +15,9 @@ from collections.abc import Mapping
 from typing import Any
 
 from lib.log import get_logger
-from lib.tool_history_projection import build_tool_history_round
-from lib.tool_round_identity import tool_round_batches
-from lib.tool_round_replay import scan_replayable_tool_round_prefix
+from lib.tool_results.tool_history_projection import build_tool_history_round
+from lib.tool_results.tool_round_identity import tool_round_batches
+from lib.tool_results.tool_round_replay import scan_replayable_tool_round_prefix
 
 from lib.tasks_pkg.segments._types import SEG_TEXT, RESUMABLE_FINISH_REASONS
 from lib.tasks_pkg.segments._derive import _rounds_view_from_segments

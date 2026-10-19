@@ -1,8 +1,13 @@
 /** artifacts endpoint facade. Owns wire paths and projections; transport/retry policy arrives through explicit ports. */
 import type { EndpointPorts } from './contracts';
+import type { ArtifactReviewCommand, ArtifactReviewView } from '../artifact-review.generated';
 export function createArtifactsEndpoints(ports: EndpointPorts) {
   const { request, get, post, del, _resolve } = ports;
   const artifacts = {
+    review: (id: string, signal?: AbortSignal) => get<ArtifactReviewView>(
+      `/api/v4/artifacts/${encodeURIComponent(id)}/review`, { signal }),
+    saveReview: (id: string, command: ArtifactReviewCommand, signal?: AbortSignal) => post<ArtifactReviewView>(
+      `/api/v4/artifacts/${encodeURIComponent(id)}/review`, command, { signal }),
     meta:        (id: string)               => get(`/api/v4/artifacts/${encodeURIComponent(id)}`,
                                             { onError: 'null' }),
     versions:    (id: string)               => get(`/api/v4/artifacts/${encodeURIComponent(id)}/versions`,
@@ -13,8 +18,8 @@ export function createArtifactsEndpoints(ports: EndpointPorts) {
                                             { parse: 'response', onError: 'null' }),
     library:     (limit: number)            => get('/api/v4/artifacts',
                                             { query: { limit: limit || 120 }, onError: 'null' }),
-    forConv:     (convId: string)           => get('/api/v4/artifacts',
-                                            { query: { conv: convId }, onError: 'null' }),
+    forConv:     (convId: string, signal?: AbortSignal)           => get('/api/v4/artifacts',
+                                            { query: { conv: convId }, onError: 'null', signal }),
     scan:        (convId: string)           => post('/api/v4/artifacts/scan',
                                              { conv_id: convId }, { onError: 'null' }),
     // Fetch raw bytes as text (markdown / html / svg). Returns a string
@@ -30,6 +35,7 @@ export function createArtifactsEndpoints(ports: EndpointPorts) {
     // with custom Content-Disposition + CSP headers; not v1 envelope).
     rawUrl:       (id: string) => _resolve(`/api/artifacts/${encodeURIComponent(id)}/raw`),
     viewUrl:      (id: string) => _resolve(`/api/artifacts/${encodeURIComponent(id)}/view`),
+    downloadUrl:  (id: string) => _resolve(`/api/artifacts/${encodeURIComponent(id)}/download`),
     exportPdfUrl: (id: string) => _resolve(`/api/artifacts/${encodeURIComponent(id)}/export?format=pdf`),
   };
   return artifacts;

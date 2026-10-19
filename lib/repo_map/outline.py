@@ -240,7 +240,13 @@ def _code_extensions() -> frozenset[str]:
 
 def _is_code_path(rel_path: str) -> bool:
     _, ext = os.path.splitext(rel_path)
-    return ext.lower() in _code_extensions()
+    ext = ext.lower()
+    # Built-in Python and explicit exclusions need no optional grammar pack.
+    if ext == '.py':
+        return True
+    if not ext or ext in SKIP_EXTENSIONS:
+        return False
+    return ext in _code_extensions()
 
 
 def _read_code_source(root: str, rel_path: str) -> tuple[str, bool] | None:
@@ -272,7 +278,11 @@ def extract_identifiers(source: str) -> set[str]:
     return set(_WORD_RE.findall(source))
 
 
-def list_files(root: str, limit: int = 100_000) -> list[str]:
+_FILE_DISCOVERY_LIMIT = 100_000
+_WALK_DEPTH_LIMIT = 8
+
+
+def list_files(root: str, limit: int = _FILE_DISCOVERY_LIMIT) -> list[str]:
     """Project files, fastest available source, FUSE-safe.
 
     Preference order: ``git ls-files`` (tracked + others, so brand-new files
@@ -293,8 +303,9 @@ def list_files(root: str, limit: int = 100_000) -> list[str]:
                 if path and path not in seen:
                     seen.add(path)
                     files.append(path)
-            if files:
-                return sorted(files)
+            # Successful Git output is authoritative even when every file is
+            # excluded. Falling through would expose ignored files via walk.
+            return sorted(files)
     except (OSError, subprocess.TimeoutExpired):
         pass
 
@@ -303,11 +314,11 @@ def list_files(root: str, limit: int = 100_000) -> list[str]:
             ['rg', '--files', '-0', '--no-messages'],
             cwd=root, capture_output=True, timeout=60, check=False,
         )
-        if out.returncode == 0 and out.stdout:
+        # rg exits 1 for an authoritative empty match set, 2 for errors.
+        if out.returncode in (0, 1):
             files = [p.decode('utf8', 'replace')
                      for p in out.stdout.split(b'\x00') if p]
-            if files:
-                return sorted(files)
+            return sorted(files)
     except (OSError, subprocess.TimeoutExpired):
         pass
 
@@ -322,7 +333,7 @@ def _walk_files(root: str, limit: int) -> list[str]:
     for dirpath, dirnames, filenames in os.walk(root):
         rel_dir = os.path.relpath(dirpath, root)
         depth = 0 if rel_dir == '.' else rel_dir.count(os.sep) + 1
-        if depth > 8:
+        if depth > _WALK_DEPTH_LIMIT:
             dirnames[:] = []
             continue
         dirnames[:] = [d for d in dirnames

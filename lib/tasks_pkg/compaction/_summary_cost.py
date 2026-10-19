@@ -10,6 +10,10 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping
 
+from lib.log import get_logger
+
+logger = get_logger(__name__)
+
 _COST_BASIS = 'metered_api_equivalent'
 _ESTIMATED_SOURCES = {'default_estimate', 'qwen_default_estimate'}
 _COMPONENTS = ('inputCostUsd', 'outputCostUsd',
@@ -161,7 +165,7 @@ def _complete_usage(usage):
     return split_input_tokens(usage)[1] >= counts['cache_read'] + counts['cache_write']
 
 
-def price_summary_call(usage, *, model, provider_id=None):
+def price_summary_call(usage, *, model, provider_id=None, declared_pricing=None):
     """Price one actual summary attempt at its own route and full prompt tier."""
     from lib.cost import compute_cost, normalize_usage, split_input_tokens
     from lib.pricing import get_pricing_data
@@ -174,10 +178,36 @@ def price_summary_call(usage, *, model, provider_id=None):
     raw = dict(usage)
     try:
         prompt_tokens = split_input_tokens(raw)[1]
-        pricing = _lookup_verified_pricing(model, provider_id, prompt_tokens=prompt_tokens)
+        if declared_pricing is None:
+            pricing = _lookup_verified_pricing(model, provider_id, prompt_tokens=prompt_tokens)
+        else:
+            from lib.tasks_pkg.compaction._summary_routing import _project_cost
+            from lib.pricing._provider import normalize_pricing, _choose_context_tier
+            if _project_cost({'providerId': provider_id, 'declaredPricing': declared_pricing},
+                             prompt_tokens, 0) is None:
+                raise ValueError('offering_pricing_unavailable')
+            pricing = normalize_pricing('', declared_pricing)
+            selected = _choose_context_tier(pricing.get('contextTiers'), prompt_tokens)
+            if selected:
+                pricing.update(selected)
+                pricing['selectedTier'] = selected
+            # Absolute Offering cache prices must match the cost engine's
+            # multiplier vocabulary; zero-input/nonzero-cache stays unknown.
+            rate_row = declared_pricing
+            if declared_pricing.get('contextTiers'):
+                rate_row = next(row for row in sorted(declared_pricing['contextTiers'],
+                    key=lambda row: row['maxPromptTokens']) if prompt_tokens <= row['maxPromptTokens'])
+            for absolute, multiplier in (('cache_read', 'cacheReadMul'), ('cache_write', 'cacheWriteMul')):
+                rate = rate_row.get(absolute, declared_pricing.get(absolute))
+                if rate is not None:
+                    if not pricing['input'] and rate:
+                        raise ValueError('unresolved_cache_rate')
+                    pricing[multiplier] = rate / pricing['input'] if pricing['input'] else 0
+            pricing['_pricingSource'] = 'admitted_offering_price'
         rates = _verified_rates(
             pricing, usd_to_cny=get_pricing_data().get('usdToCny'))
-        cost = compute_cost(raw, model_id=model, provider_id=provider_id)
+        cost = compute_cost(raw, model_id=model, provider_id=provider_id,
+                            **({'pricing_override': pricing} if declared_pricing is not None else {}))
         if cost is None and not any(normalize_usage(raw).values()):
             # Explicit, complete zero counters are different from absent usage.
             tier = pricing.get('selectedTier') or {}
@@ -216,8 +246,9 @@ def price_summary_call(usage, *, model, provider_id=None):
         return {'costUsd': round(amount, 9), 'known': True,
                 'pricingSource': cost.get('pricingSource'),
                 'pricingSnapshot': snapshot, 'costBasis': _COST_BASIS}
-    except Exception:
+    except Exception as diagnostic_error:
         # Auxiliary accounting must never fail compaction or invent free usage.
+        logger.debug('price_summary_call failure handled: %s', type(diagnostic_error).__name__)
         return _unknown('pricing_unavailable')
 
 
@@ -231,7 +262,7 @@ def _recorded_cost(cost, *, model, provider, usage):
     snapshot = cost.get('pricingSnapshot')
     if (amount is None or cost.get('known') is False
             or cost.get('costBasis') != _COST_BASIS
-            or cost.get('pricingSource') != 'provider_override'
+            or cost.get('pricingSource') not in ('provider_override', 'admitted_offering_price')
             or not isinstance(provider, str) or not provider
             or not isinstance(snapshot, Mapping)
             or snapshot.get('source') != cost.get('pricingSource')

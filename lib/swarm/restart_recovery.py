@@ -15,33 +15,59 @@ _RECOVERY_LOCKS = tuple(threading.RLock() for _ in range(64))
 
 
 def read_recovery_turns(conv_id: str, *, user_id: int, lane_id: str = 'main',
-                        after_ordinal: int | None = None, limit: int = 2000) -> dict:
+                        after_ordinal: int | None = None, limit: int | None = None) -> dict:
     """Read only the required suffix at one authority-owned sync sequence.
 
     The first stale page returns the current head without hydrating history.
     Every subsequent page uses that head; a changed head restarts the read.
     Only identity/status headers survive each page, never tool transcripts.
     """
+    return _read_authority_turns(conv_id, user_id=user_id, lane_id=lane_id,
+                                 after_ordinal=after_ordinal, limit=limit)
+
+
+def read_continuation_turns(conv_id: str, *, user_id: int) -> dict:
+    """Read the complete current human chain, retaining only wake policy evidence."""
+    return _read_authority_turns(conv_id, user_id=user_id, continuation=True)
+
+
+def _continuation_header(row: dict) -> dict:
+    from lib.tasks_pkg.stream_handler._intent_stall import known_external_blocker
+    projection = row.get('projection') or {}
+    result = {key: row[key] for key in (
+        'turnId', 'laneId', 'ordinal', 'status', 'actor', 'kind', 'parentTurnId',
+        'settlement') if key in row}
+    result['projection'] = {key: projection[key] for key in (
+        '_initiator', '_swarmAutoContinueCommandId', '_swarmFailureRecovery', 'error')
+        if key in projection}
+    result['_externalBlocker'] = known_external_blocker(projection)
+    return result
+
+
+def _read_authority_turns(conv_id: str, *, user_id: int, lane_id: str = 'main',
+                          after_ordinal: int | None = None, limit: int | None = None,
+                          continuation: bool = False) -> dict:
     from lib.conversation_sync.repository import SidecarConversationSyncRepository
     from lib.identity import require_user_id
     from lib.storage import get_storage_client
     from lib.storage.errors import StorageError
 
     user_id = require_user_id(user_id, context='swarm recovery authority')
-    if type(limit) is not int or not 1 <= limit <= 2000:
-        raise ValueError('Swarm recovery limit must be between 1 and 2000')
+    if limit is not None and (type(limit) is not int or limit < 1):
+        raise ValueError('Swarm recovery limit must be a positive integer or None')
     if after_ordinal is not None and (type(after_ordinal) is not int or after_ordinal < 0):
         raise ValueError('Swarm recovery ordinal must be a nonnegative integer')
     repository = SidecarConversationSyncRepository(client_factory=get_storage_client)
     sequence = 0
-    page_limit = min(64, limit)
+    page_limit = 64 if limit is None else min(64, limit)
     before = None
     turns = []
     changes = 0
     while True:
+        request_limit = page_limit if limit is None else min(page_limit, limit - len(turns))
         page = repository.turn_page(conv_id, user_id, lane_id=lane_id,
             expected_sync_sequence=sequence, before_ordinal=before,
-            limit=min(page_limit, limit - len(turns)))
+            limit=request_limit)
         if page is None:
             raise StorageError('database_not_found', 'Swarm recovery conversation is unavailable')
         if page.get('stale'):
@@ -53,7 +79,7 @@ def read_recovery_turns(conv_id: str, *, user_id: int, lane_id: str = 'main',
             changes += 1
             continue
         rows = page.get('turns')
-        if (not isinstance(rows, list) or len(rows) > min(page_limit, limit - len(turns))
+        if (not isinstance(rows, list) or len(rows) > request_limit
                 or type(page.get('syncSequence')) is not int
                 or type(page.get('hasMore')) is not bool
                 or page['syncSequence'] != sequence):
@@ -68,10 +94,16 @@ def read_recovery_turns(conv_id: str, *, user_id: int, lane_id: str = 'main',
                 raise StorageError('database_protocol_error', 'Invalid swarm recovery Turn order')
             if after_ordinal is not None and ordinal <= after_ordinal:
                 return {'turns': list(reversed(turns))}
-            turns.append({key: row[key] for key in (
-                'turnId', 'laneId', 'ordinal', 'status', 'currentAttemptId', 'settlement')
-                if key in row})
-        if len(turns) >= limit or not page.get('hasMore'):
+            if continuation:
+                header = _continuation_header(row)
+                turns.append(header)
+                if header.get('actor') == 'human' and not header['projection'].get('_initiator'):
+                    return {'turns': list(reversed(turns))}
+            else:
+                turns.append({key: row[key] for key in (
+                    'turnId', 'laneId', 'ordinal', 'status', 'currentAttemptId', 'settlement')
+                    if key in row})
+        if (limit is not None and len(turns) >= limit) or not page.get('hasMore'):
             return {'turns': list(reversed(turns))}
         cursor = page.get('nextBeforeOrdinal')
         if not rows or type(cursor) is not int or cursor != rows[0]['ordinal']:
@@ -85,7 +117,8 @@ def recovery_lock(key: str):
     return _RECOVERY_LOCKS[hash(key) % len(_RECOVERY_LOCKS)]
 
 
-def restart_source_attempt(sess: dict, *, user_id: int, receipt: dict | None = None) -> dict | None:
+def restart_source_attempt(sess: dict, *, user_id: int, receipt: dict | None = None,
+                           allow_manual_stop: bool = False) -> dict | None:
     """Require exact attempt state and authority-written predecessor evidence.
 
     Attempt queries intentionally do not expose the mutable Turn settlement.
@@ -95,7 +128,8 @@ def restart_source_attempt(sess: dict, *, user_id: int, receipt: dict | None = N
     from lib.turn_lifecycle import get_attempt, get_turn
     config = sess.get('config') or {}
     parent = config.get('parent_cfg') or {}
-    if (config.get('user_id') != user_id or sess.get('status') != 'running'
+    statuses = ('running', 'terminated') if allow_manual_stop else ('running',)
+    if (config.get('user_id') != user_id or sess.get('status') not in statuses
             or not parent.get('_swarmParentTurnId')
             or not parent.get('_swarmParentAttemptId')):
         return None
@@ -115,6 +149,12 @@ def restart_source_attempt(sess: dict, *, user_id: int, receipt: dict | None = N
             or receipt.get('attemptId') != parent['_swarmParentAttemptId']
             or receipt.get('taskId') != task_id
             or receipt.get('status') != source.get('status')):
+        return None
+    if (allow_manual_stop and not parent.get('_swarmRecoveryFailedAttempt')
+            and receipt.get('cause') == 'user_abort'
+            and source.get('status') in ('interrupted', 'cancelled')):
+        return source
+    if sess.get('status') != 'running':
         return None
     if source.get('status') == 'interrupted' and receipt.get('cause') in _RESTART_REASONS:
         return source
@@ -158,9 +198,9 @@ def detached_recovery_allowed(sess: dict, *, user_id: int) -> bool:
             or not isinstance(ordinal, int) or isinstance(ordinal, bool)):
         return False
     page = read_recovery_turns(conv_id, user_id=user_id, lane_id='main',
-                      after_ordinal=ordinal, limit=2000)
+                      after_ordinal=ordinal)
     turns = page.get('turns')
-    return (isinstance(turns, list) and len(turns) < 2000
+    return (isinstance(turns, list)
             and all(isinstance(item, dict)
                     and item.get('status') in ('pending', 'running', 'completed')
                     for item in turns))
@@ -175,7 +215,8 @@ def continue_recovery_allowed(sess: dict, task: dict, *, user_id: int,
     persisted = sess.get('config') or {}
     parent = persisted.get('parent_cfg') or {}
     if (task.get('aborted') or cfg.get('_turnOperation') not in ('continue', 'checkpoint_resume')
-            or persisted.get('user_id') != user_id or sess.get('status') != 'running'
+            or persisted.get('user_id') != user_id
+            or sess.get('status') not in ('running', 'terminated')
             or not task.get('convId') or sess.get('conv_id') != task['convId']
             or not cfg.get('_turnId') or parent.get('_swarmParentTurnId') != cfg['_turnId']
             or not cfg.get('_attemptId') or not parent.get('_swarmParentAttemptId')):
@@ -190,7 +231,8 @@ def continue_recovery_allowed(sess: dict, task: dict, *, user_id: int,
             or accepted.get('status') not in statuses):
         return False
     receipt = (accepted.get('config') or {}).get('_resumeSource')
-    if receipt is None or restart_source_attempt(sess, user_id=user_id, receipt=receipt) is None:
+    if receipt is None or restart_source_attempt(
+            sess, user_id=user_id, receipt=receipt, allow_manual_stop=True) is None:
         return False
     current = get_turn(task['convId'], cfg['_turnId'], user_id=user_id)
     if (current.get('turnId') != cfg['_turnId']

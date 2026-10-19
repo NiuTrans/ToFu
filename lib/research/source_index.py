@@ -17,6 +17,10 @@ from pathlib import Path
 from lib.identity import require_user_id
 from lib.storage.errors import StorageError
 
+from lib.log import get_logger
+
+logger = get_logger(__name__)
+
 NAMESPACE = 'research.receipt_source_nodes.v1'
 HEX = re.compile(r'^[0-9a-f]{64}$')
 DIGITS = '0123456789abcdef'
@@ -79,8 +83,9 @@ class ReceiptSourceIndex:
                 cpu = probe.effective_cpu_count
                 if type(memory) is int and memory >= 0 and type(cpu) is int and cpu > 0:
                     cache_entries = max(65, memory * 256 // cpu // 64)
-            except Exception:
+            except Exception as diagnostic_error:
                 # Optional capacity discovery must not prevent durable source publication.
+                logger.debug('__init__ failure handled: %s', type(diagnostic_error).__name__)
                 pass
         if type(cache_entries) is not int or cache_entries < 1:
             raise ValueError('Invalid Research source index cache capacity')

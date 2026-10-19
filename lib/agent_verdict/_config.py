@@ -73,7 +73,7 @@ def autopilot_max_turns() -> int:
     FAIL-OPEN: an unset var uses the default 40, an explicit ``0`` disables the
     cap, and a garbage/non-int var falls back to the default rather than
     accidentally wedging the loop.  Mirrors the env-gated, fail-open rollout
-    convention (lib/rate_limit_store.py).
+    convention (lib/rate_limit/rate_limit_store.py).
 
     Returns
     -------

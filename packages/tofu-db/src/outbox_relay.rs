@@ -22,7 +22,6 @@ pub const MIN_OUTBOX_RELAY_POLL_INTERVAL: Duration = Duration::from_millis(5);
 pub const MAX_OUTBOX_RELAY_POLL_INTERVAL: Duration = Duration::from_secs(1);
 pub const MIN_OUTBOX_RELAY_OPERATION_TIMEOUT: Duration = Duration::from_millis(10);
 pub const MAX_OUTBOX_RELAY_OPERATION_TIMEOUT: Duration = Duration::from_secs(60);
-pub const MAX_OUTBOX_RELAY_OWNER_SCOPES: usize = 64;
 const DROP_DRAIN_WAIT: Duration = Duration::from_millis(100);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -114,9 +113,9 @@ fn invalid_input(message: &str) -> io::Error {
 }
 
 fn validate_scopes(scopes: &[LogicalOutboxOwnerScope]) -> io::Result<()> {
-    if scopes.is_empty() || scopes.len() > MAX_OUTBOX_RELAY_OWNER_SCOPES {
+    if scopes.is_empty() {
         return Err(invalid_input(
-            "logical outbox relay must have between 1 and 64 owner scopes",
+            "logical outbox relay requires at least one explicit owner scope",
         ));
     }
     let mut unique_scopes = BTreeSet::new();
@@ -591,8 +590,6 @@ mod tests {
         let worker = LogicalOutboxWorker::start(
             sink,
             LogicalOutboxWorkerConfig {
-                queue_batches: 1,
-                queue_bytes: 16 * 1024 * 1024,
                 publish_budget: LogicalOutboxPublishBudget::new(16, 8 * 1024 * 1024).unwrap(),
             },
         )
@@ -708,8 +705,6 @@ mod tests {
         let worker = LogicalOutboxWorker::start(
             sink,
             LogicalOutboxWorkerConfig {
-                queue_batches: 1,
-                queue_bytes: 16 * 1024 * 1024,
                 publish_budget: LogicalOutboxPublishBudget::new(1, 8 * 1024 * 1024).unwrap(),
             },
         )
@@ -776,8 +771,6 @@ mod tests {
         let worker = LogicalOutboxWorker::start(
             sink,
             LogicalOutboxWorkerConfig {
-                queue_batches: 1,
-                queue_bytes: 16 * 1024 * 1024,
                 publish_budget: LogicalOutboxPublishBudget::new(1, 8 * 1024 * 1024).unwrap(),
             },
         )
@@ -827,13 +820,13 @@ mod tests {
     }
 
     #[test]
-    fn aggregate_owner_scope_admission_is_bounded_unique_and_nonzero() {
+    fn aggregate_owner_scopes_remain_unique_nonzero_without_a_count_quota() {
         assert!(validate_scopes(&[]).is_err());
         assert!(validate_scopes(
             &[LogicalOutboxOwnerScope {
                 tenant_id: 7,
                 owner_user_id: 11,
-            }; MAX_OUTBOX_RELAY_OWNER_SCOPES + 1]
+            }; 131]
         )
         .is_err());
         assert!(validate_scopes(&[
@@ -843,13 +836,13 @@ mod tests {
         .is_err());
         assert!(LogicalOutboxOwnerScope::new(0, 11).is_err());
         assert!(LogicalOutboxOwnerScope::new(7, 0).is_err());
-        let maximum = (1..=MAX_OUTBOX_RELAY_OWNER_SCOPES)
+        let many_scopes = (1..=131)
             .map(|owner_user_id| LogicalOutboxOwnerScope {
                 tenant_id: 7,
                 owner_user_id: owner_user_id as u64,
             })
             .collect::<Vec<_>>();
-        validate_scopes(&maximum).unwrap();
+        validate_scopes(&many_scopes).unwrap();
     }
 
     #[test]
@@ -955,6 +948,68 @@ mod tests {
         );
         let reopened_sink = EngineLogicalOutboxSink::open(&sink_path, 7, 11, 1024 * 1024).unwrap();
         assert_eq!(reopened_sink.status().durable_sequence, 2);
+    }
+
+    #[test]
+    fn relay_drains_all_scopes_beyond_former_quota_and_joins_its_workers() {
+        let directory = tempfile::tempdir().unwrap();
+        let authority_path = directory.path().join("authority");
+        let sink_path = directory.path().join("sink");
+        let scopes = (1..=131)
+            .map(|owner| LogicalOutboxOwnerScope::new(7, owner).unwrap())
+            .collect::<Vec<_>>();
+        let sink_config = MultiplexedEngineLogicalOutboxSinkConfig {
+            administrative_scope: LogicalOutboxOwnerScope::new(99, 101).unwrap(),
+            source_scopes: scopes.clone(),
+            max_logical_bytes: 1,
+        };
+        let mut database = AuthorityDatabase::initialize(&authority_path).unwrap();
+        database.configure_logical_outbox(&[47; 32], 1, 1).unwrap();
+        for scope in &scopes {
+            commit_outbox_scope(&mut database, scope.tenant_id, scope.owner_user_id, 1);
+        }
+        let authority = Arc::new(Mutex::new(database));
+        let sink = MultiplexedEngineLogicalOutboxSink::initialize(&sink_path, sink_config.clone())
+            .unwrap();
+        let worker =
+            LogicalOutboxWorker::start(sink, LogicalOutboxWorkerConfig::default()).unwrap();
+        let started = Instant::now();
+        let relay = LogicalOutboxRelay::start_scopes(
+            Arc::clone(&authority),
+            worker,
+            scopes.clone(),
+            LogicalOutboxRelayConfig {
+                poll_interval: Duration::from_millis(5),
+                operation_timeout: Duration::from_secs(5),
+            },
+        )
+        .unwrap();
+        wait_for_acknowledgements(&relay, 131);
+        let (sink, _, worker_metrics, relay_metrics) = relay
+            .shutdown_until(Instant::now() + Duration::from_secs(5))
+            .unwrap();
+        assert_eq!(sink.status().durable_records, 131);
+        assert_eq!(relay_metrics.acknowledged_records, 131);
+        assert_eq!(worker_metrics.resident_bytes, 0);
+        for scope in scopes {
+            assert_eq!(
+                authority
+                    .lock()
+                    .unwrap()
+                    .logical_outbox_status(scope.tenant_id, scope.owner_user_id)
+                    .unwrap()
+                    .pending_bytes,
+                0
+            );
+        }
+        eprintln!(
+            "relay_scope_demand scopes=131 elapsed_us={} resident_bytes=0 joined=true",
+            started.elapsed().as_micros()
+        );
+        drop(sink);
+        let reopened = MultiplexedEngineLogicalOutboxSink::open(&sink_path, sink_config).unwrap();
+        assert_eq!(reopened.status().active_owner_scopes, 131);
+        assert_eq!(reopened.status().durable_records, 131);
     }
 
     #[test]

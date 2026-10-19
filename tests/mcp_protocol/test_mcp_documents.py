@@ -179,8 +179,15 @@ def test_outer_deadline_cancels_the_underlying_coroutine(connection):
     assert retired.wait(2)
 
 
-@pytest.mark.parametrize('timeout', [None, True, 0, 301])
-def test_application_documents_require_a_finite_deadline(connection, timeout):
+@pytest.mark.parametrize('timeout', [True, 0, -1])
+def test_application_documents_validate_explicit_deadlines(connection, timeout):
     bridge, _, name = connection
-    with pytest.raises(ValueError, match='1..300'):
+    with pytest.raises(ValueError, match='positive integer'):
         bridge.call_tool_document(name, {}, timeout=timeout)
+
+
+@pytest.mark.parametrize('timeout',[None,420])
+def test_application_document_accepts_default_and_long_explicit_deadline(connection,timeout):
+    bridge,handle,name=connection
+    payload={'ok':True};handle.session=Session(result(payload))
+    assert bridge.call_tool_document(name,{},timeout=timeout)==payload

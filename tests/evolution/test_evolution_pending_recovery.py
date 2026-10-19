@@ -478,13 +478,57 @@ def test_unbound_replacement_rejects_a_conflicting_archived_input(runtime,create
     assert 'archive differs' in attention['error']
 
 
-def test_large_messages_do_not_relax_configuration_or_credentials(runtime, created, monkeypatch):
+def test_large_configuration_and_messages_survive_cold_restore(runtime, created, monkeypatch):
     from lib.tasks_pkg import tool_hooks
     from lib.evolution import stage_inputs
+    calls = []
+    setting = '完整配置 🧪' * 160000
+    prompt = '🧪' * 270000
+    def hook(original_prompt, task):
+        calls.append(task['id'])
+        task['config']['completeHookSetting'] = setting
+        return prompt
+    monkeypatch.setattr(tool_hooks, 'run_user_prompt_hooks', hook)
+    import time
+    import tracemalloc
+    tracemalloc.start()
+    started = time.perf_counter()
+    original, first = retire(runtime, created, monkeypatch)
+    archive = stage_inputs.read_input(original, user_id=OWNER)
+    assert archive['config']['completeHookSetting'] == setting
+    assert archive['messages'] == first['messages']
+    assert len(stage_inputs.canonical(archive['config'])) > 1 << 20
+    restored = runtime[0].advance_run(original['run_id'], user_id=OWNER)
+    task = runtime[2][0]
+    elapsed = time.perf_counter() - started
+    _, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+    body_bytes = len(stage_inputs.canonical(archive))
+    print(f'complete_stage_input_bytes={body_bytes} archive_restore_seconds={elapsed:.4f} '
+          f'traced_peak_bytes={peak}')
+    assert calls == [first['id']]
+    assert task['config'] == first['config'] and task['messages'] == first['messages']
+    assert restored['attempt'] == 1 and restored['episode_id'] == original['episode_id']
+    runtime[0].advance_run(original['run_id'], user_id=OWNER)
+    assert runtime[2] == [task]
+
+
+@pytest.mark.parametrize('secret_key', ['apiKey', 'access_token', 'authorization', 'provider_key', 'clientSecret'])
+def test_large_configuration_still_refuses_inline_credentials(runtime, created, monkeypatch, secret_key):
+    from lib.tasks_pkg import tool_hooks
     def hook(prompt, task):
-        task['config']['oversizedHookSetting'] = 'x' * (stage_inputs.MAX_INPUT_BYTES + 1)
+        task['config']['completeHookSetting'] = 'x' * (2 << 20)
+        task['config']['nested'] = [{secret_key: 'synthetic-secret'}]
         return '🧪' * 270000
     monkeypatch.setattr(tool_hooks, 'run_user_prompt_hooks', hook)
-    with pytest.raises(runtime[0].EvolutionStateError):
-        runtime[0].submit_run({'objective': 'Preserve configuration admission limits.'}, user_id=OWNER)
+    with pytest.raises(runtime[0].EvolutionStateError, match='inline credentials'):
+        runtime[0].submit_run({'objective': 'Keep secrets outside portable configuration.'}, user_id=OWNER)
     assert not runtime[2]
+
+
+@pytest.mark.parametrize('invalid', [float('nan'), float('inf'), object()])
+def test_configuration_json_validation_remains_strict(invalid):
+    from lib.evolution.stage_inputs import canonical_configuration
+    from lib.evolution.contracts import EvolutionStateError
+    with pytest.raises(EvolutionStateError, match='portable JSON'):
+        canonical_configuration({'value': invalid})

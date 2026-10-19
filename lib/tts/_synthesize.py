@@ -14,7 +14,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Iterator
 
-from lib.http_client import http_post
+from lib.http_transport.client import http_post
 from lib.log import audit_log, get_logger
 
 from lib.tts._config import TTS_CAP

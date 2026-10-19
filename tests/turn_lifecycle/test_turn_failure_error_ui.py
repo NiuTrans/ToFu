@@ -231,7 +231,7 @@ def test_failed_finish_chip_and_visible_card_use_real_error_kind(tmp_path):
         '}'
     )
     fn_end = finish_owner.index(fn_end_marker, fn_start) + len(fn_end_marker)
-    source = finish_owner[fn_start:fn_end]
+    source = Path(native_module_path('finish-token-usage.js', ROOT / 'frontend/src/token-usage.ts')).read_text(encoding='utf-8') + Path(native_module_path('finish-timing-owner.js', ROOT / 'frontend/src/conversation/presentation/turn-finish.ts')).read_text(encoding='utf-8') + finish_owner[fn_start:fn_end]
     source_path = tmp_path / 'failure-render.js'
     source_path.write_text(source, encoding='utf-8')
 
@@ -347,8 +347,7 @@ def test_finish_bar_shows_task_completion_timing(tmp_path):
     """Terminal assistant Turns render settle clock time + wall-clock duration.
 
     The finish bar owns the tag; the turn store passes the authoritative
-    TurnRecord lifecycle (createdAt/updatedAt, epoch ms) through as
-    ``_turnCreatedAt``/``_turnUpdatedAt``.
+    TurnRecord settlement clock and complete server-monotonic timing trace.
     """
     finish_owner = runtime_section('ui/finish_info.js')
     fn_start = finish_owner.index('function _formatTurnDuration(ms) {')
@@ -359,7 +358,7 @@ def test_finish_bar_shows_task_completion_timing(tmp_path):
     )
     fn_end = finish_owner.index(fn_end_marker, fn_start) + len(fn_end_marker)
     source_path = tmp_path / 'finish-timing.js'
-    source_path.write_text(finish_owner[fn_start:fn_end], encoding='utf-8')
+    source_path.write_text(Path(native_module_path('finish-token-usage.js', ROOT / 'frontend/src/token-usage.ts')).read_text(encoding='utf-8') + Path(native_module_path('finish-timing-owner.js', ROOT / 'frontend/src/conversation/presentation/turn-finish.ts')).read_text(encoding='utf-8') + finish_owner[fn_start:fn_end], encoding='utf-8')
 
     harness = tmp_path / 'finish-timing-harness.js'
     harness.write_text(r"""
@@ -389,17 +388,18 @@ global.ConversationTurnStore = { finishPresentation: () => null };
 
 eval(fs.readFileSync(process.argv[2], 'utf8'));
 const base = {
-  _turnStatus: 'completed', _turnSettlement: {}, model: 'kimi-k3',
+  _turnStatus: 'completed', _turnSettlement: {}, model: 'kimi-k3', _taskId: 'task',
   usage: { prompt_tokens: 10, completion_tokens: 5 },
 };
+const timingTrace = (totalMs) => ({taskId: 'task', running: false, tEnd: 1000 + totalMs, totalMs, clockSource: 'server-monotonic', coverage: 'full'});
 const timed = renderFinishInfo({
-  ...base, _turnCreatedAt: 1000, _turnUpdatedAt: 1000 + 65000,
+  ...base, _turnCreatedAt: 1000, _turnUpdatedAt: 1000 + 65000, timingTrace: timingTrace(65000),
 }, false);
 const subSecond = renderFinishInfo({
-  ...base, _turnCreatedAt: 1000, _turnUpdatedAt: 1000 + 8400,
+  ...base, _turnCreatedAt: 1000, _turnUpdatedAt: 1000 + 8400, timingTrace: timingTrace(8400),
 }, false);
 const hours = renderFinishInfo({
-  ...base, _turnCreatedAt: 1000, _turnUpdatedAt: 1000 + 75 * 60000,
+  ...base, _turnCreatedAt: 1000, _turnUpdatedAt: 1000 + 75 * 60000, timingTrace: timingTrace(75 * 60000),
 }, false);
 const noDuration = renderFinishInfo({ ...base, _turnUpdatedAt: 66000 }, false);
 const noClock = renderFinishInfo({ ...base }, false);

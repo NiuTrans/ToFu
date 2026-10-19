@@ -19,7 +19,7 @@ __all__ = ['run_longform_task', 'longform_root', 'resume_interrupted_reports']
 
 def longform_root() -> str:
     """Writable root for long-form report state (job workdirs)."""
-    from lib.runtime_paths import data_root
+    from lib.runtime.runtime_paths import data_root
     path = os.path.join(data_root(), 'longform')
     os.makedirs(path, exist_ok=True)
     return path

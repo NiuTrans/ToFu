@@ -1,5 +1,12 @@
 // @ts-check
 
+// Temporary selection/composer port; remove with retained popup composition.
+import { createSelectionPopup, renderReplyQuotePreviews } from '../selection-popup';
+import { createSelectionBranch } from '../selection-branch';
+
+
+import { renderRichResponse, disposeRichResponse } from '../rich-response/renderer';
+
 // Temporary toolbar seam; delete with retained model action composition.
 import { createModelPicker, projectModelPickerCatalog } from '../application-shell/model-picker';
 
@@ -14,6 +21,9 @@ import { refreshTimerCountdowns, toggleTimerWatcher, toggleTimerInstruction, tog
 // Temporary multimedia receipt port; remove with retained tool dispatch.
 import { renderProjectReceipt } from '../conversation/ui/project-receipt';
 import { renderMotionCard } from '../conversation/ui/motion-card';
+import { createWorkUnitTracker } from '../conversation/ui/work-unit/tracker';
+import { prefillWorkUnitComposer } from '../conversation/ui/work-unit/composer';
+import { resolvePath as resolveWorkUnitResourceUrl } from '../api/transport';
 
 import { inspectorReference } from '../features/inspector-evidence';
 
@@ -32,6 +42,12 @@ import { createComposerOptionsSheet } from '../composer-options-sheet';
 
 // Temporary lexical bridge; remove when the sidebar presentation migrates to TypeScript.
 import { createBackgroundActivityController } from '../background-activity-controller';
+
+import { createAgentSidebarDock, backgroundAgentContextHost } from '../agent-sidebar-dock';
+
+import { agentDockProjection } from '../agent-sidebar-dock-projection';
+
+import { swarmMessagesProjection } from '../conversation/presentation/swarm-messages-projection';
 import { createBackgroundActivityEvidenceObserver } from '../conversation/presentation/background-command-completion';
 import { createSidebarSearchController } from '../sidebar-search-controller';
 import { createBackendAvailabilityMonitor } from '../backend-availability-monitor';
@@ -39,6 +55,8 @@ import { createAvailabilityHealthProbeCoordinator } from '../availability-health
 import { createFeatureFlagsLoader } from '../core/feature-flags-loader';
 import { createModelPickerStartup } from '../features/model-catalog/model-picker-startup';
 import { createImageViewerActionsController } from '../image-viewer-actions';
+
+import { showAttachmentPreview, closeAttachmentPreview } from '../attachment-preview-lifecycle';
 import { installMarkdownPolicy } from '../markdown-policy';
 import { createMarkdownRenderer } from '../markdown';
 import { createStorageAvailabilityMonitor } from '../storage-availability-monitor';
@@ -101,6 +119,7 @@ import {
 } from '../core/native-bridge';
 import { clientLogFlushBaseDelayMs, createClientLogFlushScheduler } from '../core/client-log-flush-scheduler';
 import { responsivenessContext, startBrowserResponsivenessMonitor } from '../core/browser-responsiveness-monitor';
+import { createBrowserInteractionContext } from '../core/browser-interaction-context';
 import { createDebugRuntimeOwner } from '../core/debug-runtime-owner';
 import { TRANSLATION_CLAIMS } from '../core/translation-claim-registry';
 import {
@@ -113,10 +132,14 @@ import { createTurnMountTracker } from '../conversation/application/turn-mount-t
 import { createConversationRefresh } from '../conversation/application/conversation-refresh';
 import { createConversationWakeRecovery } from '../conversation/application/conversation-wake-recovery';
 import { createSendPreparationOverlayController } from '../conversation/application/send-preparation-overlay';
-import { createPreferenceActionsController } from '../features/memory/preference-actions';
-import { createPresenceSummaryController } from '../features/presence-summary-controller';
 
-import { createButton as createProjectCoordinationButton } from '../ui';
+import { createComposerTranslationStatus } from '../conversation/application/composer-translation-status';
+import { createPreferenceActionsController } from '../features/memory/preference-actions';
+import { createProjectCoordinationSurface } from '../features/project-coordination-surface';
+
+import { createProjectConversationNavigation } from '../features/project-conversation-navigation';
+
+
 // Temporary presence adapter: remove with the retained presence projection.
 const openProjectCoordinationWorkspace = (ports) => import('../features/project-coordination')
   .then(module => module.openProjectCoordination(ports));
@@ -136,15 +159,25 @@ import {
   createConversationSettingsResolution,
 } from '../conversation/application/conversation-settings-resolution';
 import { createConversationCatalogRevisionGate } from '../conversation/application/conversation-catalog-revision-gate';
+
+import { createFolderPresetMutations, folderPresetWorkspace } from '../conversation/application/folder-presets';
+
+import { openFolderSettings, openFolderDeleteConfirmation } from '../conversation/ui/folder-settings';
 import { createAutomationManagementClient } from '../api/automations';
 import { renderComposerModelNotice } from '../conversation/ui/composer-model-notice';
+
+// Temporary shell badge port; remove with the retained new-chat presentation.
+import { paintNewChatFolderBadges } from '../conversation/ui/new-chat-folder-badges';
+import { paintOptionalProjectAttachment } from '../conversation/ui/optional-project-attachment';
+import { createTurnReviewPresentation } from '../features/turn-review/presentation';
 import { createConversationSurfaceController } from '../conversation/application/conversation-surface-controller';
+import { entityRecordValues, entityRecordKeys } from '../core/entity-record';
 import { createConversationStartup } from '../conversation/application/conversation-startup';
 import {
   createPendingResumePrompter,
   pickPendingResumeTurn,
 } from '../conversation/application/pending-resume';
-import { createConversationProjectController } from '../conversation/application/conversation-project';
+import { createConversationProjectController, captureConversationProject, captureProjectStatus, projectStatusMatchesWorkspace, noteConversationProjectChoice, protectHydratingProjectSettings, withProjectHydration } from '../conversation/application/conversation-project';
 import { createThinkingDepthSlider, projectReasoningControl, THINKING_DEPTH_LABELS } from '../features/thinking-depth-slider';
 
 import { createProjectContext } from '../features/conversation-bar/project-context';
@@ -168,6 +201,7 @@ import {
 import { createTransientTurnOverlay } from '../conversation/application/transient-turn-overlay';
 import { createSwarmPushRuntime } from '../conversation/application/swarm-presentation-overlay';
 
+import { projectAgentTimeline } from '../conversation/presentation/agent-message-receipts';
 import { swarmOutcomeStatus, swarmFailureReason, swarmAgentFailureCard } from '../conversation/presentation/swarm-failure-presentation';
 import {
   backgroundActivityByConversation, backgroundActivityLabel, backgroundActivitySummary,
@@ -193,18 +227,25 @@ import {
   withOptimisticAssistantPreparation,
 } from '../conversation/application/optimistic-user-turn';
 import { createHumanGuidancePresentationStore } from '../conversation/application/human-guidance-presentation';
+
+import { createAuthenticatedChoiceInteractionPorts } from '../conversation/application/choice-interaction';
+
+import { createTurnCommandId } from '../core/turn-command';
 import {
   createClassicConversationRenderers,
 } from '../conversation/ui/classic-conversation-renderers';
 import {
   createHumanGuidanceActions,
 } from '../conversation/ui/human-guidance-actions';
+import { isBootSendBlocked, setBootSendBlocked, subscribeBootReadiness } from '../boot-readiness';
 import { updateComposerSendControls } from '../conversation/ui/composer-send-controls';
 import {
   openTurnInlineEditor,
   reconcileTurnInlineEditors,
 } from '../conversation/ui/turn-inline-editor';
-import { presentConversationRateLimit } from '../conversation/presentation/live-phase';
+
+import { presentConversationActivity } from '../conversation/presentation/conversation-activity';
+import { createConversationReviewTracker } from '../conversation-review';
 import {
   computeExecutionBatches,
   computeToolBatches,
@@ -259,6 +300,8 @@ import {
   presentTurnReasoningMapping,
 } from '../conversation/presentation/turn-serving-route';
 import { presentTurnExecutionTiming } from '../conversation/presentation/turn-finish';
+
+import { renderMcpResourceLinks } from '../conversation/presentation/mcp-resource-links';
 import {
   createToolHeaderPresentation,
 } from '../conversation/presentation/tool-header-presentation';
@@ -298,6 +341,7 @@ import {
   conversationTimestampLabels,
   stripNoTranslateTags,
 } from '../conversation/presentation/shell-localization';
+import { mountFolderConfigControls, installFolderConfigInteractions, makeFolderContextMenuAccessible } from '../conversation/ui/folder-config-control';
 import { createPlanDecisionBar } from '../conversation/ui/plan-decision-bar';
 import { createSendStartupLease, createComposerSubmissionGate, awaitSendPreparation } from '../core/send-startup';
 import { sendFailureToastDetail } from '../conversation/presentation/send-failure-message';
@@ -504,6 +548,12 @@ function submitBatchAnswers(element) {
 
 const imageViewerActions = createImageViewerActionsController({ document });
 const retainedCompositionLifecycle = createLifecycleScope();
+
+const composerTranslationStatus = createComposerTranslationStatus({
+  document, activeConversationId: () => activeConvId,
+  now: () => performance.now(), label: key => t(key),
+});
+retainedCompositionLifecycle.add(() => composerTranslationStatus.destroy());
 const composerOptionsSheet = createComposerOptionsSheet({
   document, refresh: () => updateMobileSheet(), label: () => t('toolbar.moreOptionsTooltip'),
 });
@@ -665,11 +715,16 @@ const backendAvailabilityMonitor = createBackendAvailabilityMonitor({
 // narrow lifecycle bridge instead of letting that chunk reach across module
 // scope to the typed monitor or duplicate its liveness state.
 const backendAvailabilityRestartScope = Object.freeze({
-  begin: () => backendAvailabilityMonitor.beginPlannedInterruption(),
-  end: (backendReachable) => (
-    backendAvailabilityMonitor.endPlannedInterruption(backendReachable)
-  ),
+  begin: () => {
+    setBootSendBlocked('restart', true);
+    backendAvailabilityMonitor.beginPlannedInterruption();
+  },
+  end: (backendReachable) => {
+    setBootSendBlocked('restart', false);
+    backendAvailabilityMonitor.endPlannedInterruption(backendReachable);
+  },
 });
+retainedCompositionLifecycle.add(subscribeBootReadiness(() => updateSendButton()));
 const storageAvailabilityMonitor = createStorageAvailabilityMonitor({
   document,
   schedule: backendAvailabilitySchedule,
@@ -1096,12 +1151,33 @@ runtimeScope.pushRecentModel = recentModelsController.pushRecentModel;
 runtimeScope._currentUserId = null;
 const currentUserIdentity = createCurrentUserIdentityController({
   loadCurrentUser: () => Api.users.me(),
-  onOwnerChanged: (ownerId) => { runtimeScope._currentUserId = ownerId; },
+  onOwnerChanged: (ownerId) => {
+    runtimeScope._currentUserId = ownerId;
+    if (document.querySelector('.ptool-work-card')) _wuScanSoon();
+  },
   log: (message, level) => {
     if (typeof debugLog === 'function') debugLog(message, level);
   },
 });
 const initCurrentUserId = () => currentUserIdentity.resolve();
+// Review receipts are UI preferences, never execution or settlement authority.
+// Remove this bridge when the sidebar and Surface composition move to TypeScript.
+const conversationReview = createConversationReviewTracker({
+  ownerId: () => runtimeScope._currentUserId,
+  storage: () => resolveBrowserLocalStorage(),
+  canView: () => !_effectiveHidden() && document.hasFocus(),
+});
+retainedCompositionLifecycle.add(() => conversationReview.destroy());
+retainedCompositionLifecycle.listen(window, 'storage', (event) => {
+  if (conversationReview.storageChanged(event.key)) renderConversationList();
+});
+const refreshConversationReview = () => {
+  if (!_effectiveHidden() && document.hasFocus() && typeof activeConvId !== 'undefined' && activeConvId) {
+    runtimeScope.requestAuthoritativeConversationRender?.(activeConvId);
+  }
+};
+retainedCompositionLifecycle.listen(document, 'visibilitychange', refreshConversationReview);
+retainedCompositionLifecycle.listen(window, 'focus', refreshConversationReview);
 const resetCurrentUserIdForTests = () => currentUserIdentity.reset();
 runtimeScope.initCurrentUserId = initCurrentUserId;
 runtimeScope.resetCurrentUserIdForTests = resetCurrentUserIdForTests;
@@ -1388,141 +1464,24 @@ runtimeScope.getConvById = getConvById;
 function getActiveConv() {
   return getConvById(activeConvId);
 }
-/* Perf: cache chatContainer ref — avoids getElementById on every scroll check */
-let _chatContainerEl = null;
+/* Compatibility entry points forward semantic intent to the mounted Surface.
+ * Scroll position, follow suspension and history windows have one typed owner. */
 function _getChatContainer() {
-  if (!_chatContainerEl || !_chatContainerEl.isConnected) {
-    _chatContainerEl = document.getElementById("chatContainer");
-  }
-  return _chatContainerEl;
+  return document.getElementById("chatContainer");
 }
 function isNearBottom(threshold) {
-  const c = _getChatContainer();
-  if (!c) return true;
-  return c.scrollHeight - c.scrollTop - c.clientHeight < (threshold || 150);
+  return runtimeScope.ConversationSurfacePresentation?.isNearLatest?.(threshold) ?? true;
 }
-/* ── Instant-scroll seam ───────────────────────────────────────────────
- * Run `fn` with `scroll-behavior` forced to `auto` on `el`, then restore the
- * previous value. If any stylesheet sets `scroll-behavior:smooth` on a scroll
- * container, a `scrollTop` write becomes an ANIMATION: during streaming it
- * perpetually chases a growing scrollHeight (reader drifts off the bottom then
- * snaps back), and at turn-finalize it visibly slides instead of re-pinning.
- *
- * Every programmatic scroll write that must land IMMEDIATELY goes through
- * here, so the restore is never forgotten and callers cannot half-implement
- * it. Restores in a `finally` so a throwing `fn` cannot leave the container
- * stuck on `auto`. */
-function _withInstantScroll(el, fn) {
-  if (!el) { fn(); return; }
-  const _prev = el.style.scrollBehavior;
-  el.style.scrollBehavior = 'auto';
-  try { fn(); }
-  finally { el.style.scrollBehavior = _prev; }
-}
-if (typeof window !== 'undefined') runtimeScope._withInstantScroll = _withInstantScroll;
-
-/* ── Bottom-follow suspension latch ────────────────────────────────────
- * The streaming auto-follow gates are POSITIONAL only (isNearBottom(80/200)).
- * While a rapidly-updating tail grows at up to 30fps, a reader who starts
- * scrolling up is yanked back to the bottom on every update until their
- * gesture crosses the threshold — and each yank resets their progress, so
- * the gesture and the programmatic pin fight every frame: the reported
- * "scrolling up during streaming makes the page shake/tremble".
- * The reader's UPWARD INTENT (wheel up, touch drag down, scrollbar drag /
- * PageUp moving away from the bottom) suspends the follow outright; landing
- * back at the bottom — or an explicit pin (scrollChatToBottom button,
- * `_forceScrollToBottom` turn transitions) — resumes it. */
-let _followSuspended = false;
-let _followListenersArmed = false;
-function _armFollowSuspensionListeners() {
-  if (_followListenersArmed) return;
-  const c = _getChatContainer();
-  if (!c) return;  // container not in DOM yet — retried by the next boot hook
-  _followListenersArmed = true;
-  c.addEventListener("wheel", (e) => {
-    if (e.deltaY < 0) _followSuspended = true;  // wheel up = leave the bottom
-  }, { passive: true });
-  let _touchY = null;
-  c.addEventListener("touchstart", (e) => {
-    _touchY = e.touches.length ? e.touches[0].clientY : null;
-  }, { passive: true });
-  c.addEventListener("touchmove", (e) => {
-    if (_touchY != null && e.touches.length
-        && e.touches[0].clientY > _touchY + 4) {
-      _followSuspended = true;  // drag down = scroll content up = leave the bottom
-    }
-  }, { passive: true });
-  let _lastTop = null;
-  c.addEventListener("scroll", () => {
-    /* Scrollbar drags and PageUp/Home produce no wheel/touch event: any
-     * user-driven move AWAY from the bottom suspends follow; landing back
-     * at the bottom resumes it. Programmatic pins land here too — an
-     * explicit pin IS a follow by definition. */
-    const st = c.scrollTop;
-    if (_lastTop != null && st < _lastTop - 4 && !isNearBottom(40)) {
-      _followSuspended = true;
-    } else if (isNearBottom(40)) {
-      _followSuspended = false;
-    }
-    _lastTop = st;
-  }, { passive: true });
-}
-if (typeof window !== 'undefined') runtimeScope._armFollowSuspensionListeners = _armFollowSuspensionListeners;
-
-let _scrollRafId = null;
 function scrollToBottom(force) {
-  const c = _getChatContainer();
-  if (!c) return;
-  if (!force && (_followSuspended || !isNearBottom(200))) {
-    /* Reader is scrolled up while content grows (e.g. live streaming) — no
-     * scroll event fires, so refresh the scroll-to-bottom affordance here. */
-    _updateScrollToBottomBtn();
-    return;
-  }
-  /* PERF: Coalesce scroll updates and use single rAF (not double).
-   * During streaming, the authoritative projection has already updated the
-   * DOM. A single rAF is sufficient to scroll after layout; double-rAF added
-   * 33ms of lag per frame. */
-  if (_scrollRafId) return; // already scheduled
-  _scrollRafId = requestAnimationFrame(() => {
-    _scrollRafId = null;
-    /* Re-check the suspension latch at WRITE time: the reader may have
-     * scrolled up between the schedule call and this frame — writing anyway
-     * is exactly the yank-down fight the latch exists to stop. */
-    if (_followSuspended) return;
-    /* SCROLL-JITTER FIX: during streaming this fires once per rAF while
-     * scrollHeight is still growing. If any stylesheet sets
-     * `scroll-behavior:smooth` on the chat container (some themes did),
-     * the write becomes an animation that perpetually chases a moving
-     * target — the reader visibly drifts off the bottom then snaps back.
-     * Force instant scroll for the duration of the write. The tofu theme
-     * no longer sets smooth; this is belt-and-suspenders for future
-     * themes / user stylesheets. */
-    _withInstantScroll(c, () => { c.scrollTop = c.scrollHeight; });
-  });
+  runtimeScope.ConversationSurfacePresentation?.followLatest?.({ force: Boolean(force) });
+  _updateScrollToBottomBtn();
 }
-/* ── Scroll-to-bottom button ──────────────────────────────────────────
- * A simple, always-available fallback affordance: when the reader scrolls
- * up away from the latest message, a floating pill appears; clicking it jumps
- * to the bottom via the real-height force-scroll path. */
 function scrollChatToBottom() {
-  /* ConversationSurface captures near-bottom state before every commit, so a
-   * direct jump is sufficient to keep following later Turn revisions. */
-  _followSuspended = false;
-  const c = _getChatContainer();
-  if (c) _withInstantScroll(c, () => { c.scrollTop = c.scrollHeight; });
+  runtimeScope.ConversationSurfacePresentation?.followLatest?.();
   _updateScrollToBottomBtn();
 }
 function _updateScrollToBottomBtn() {
-  const btn = document.getElementById("scrollToBottomBtn");
-  if (!btn) return;
-  const c = _getChatContainer();
-  /* Show only when there's real overflow AND the reader is scrolled up. The
-   * 120px threshold keeps the button hidden while effectively at the bottom
-   * (matches the near-bottom slack the streaming auto-scroll uses). */
-  const hasOverflow = !!c && c.scrollHeight - c.clientHeight > 40;
-  const show = hasOverflow && !isNearBottom(120);
-  btn.classList.toggle("visible", show);
+  document.getElementById("scrollToBottomBtn")?.classList.toggle("visible", !isNearBottom(120));
 }
 if (typeof window !== "undefined") {
   runtimeScope.scrollChatToBottom = scrollChatToBottom;
@@ -1893,14 +1852,21 @@ function _clearFolderLoadRetry() {
   _folderLoadRetryAttempt = 0;
 }
 
+const _folderPresetMutations = createFolderPresetMutations({
+  list: () => _folders,
+  replace: rows => { _folders = rows; },
+  create: (...args) => Api.folders.create(...args),
+  update: (id, fields) => Api.folders.update(id, fields),
+
+  remove: id => Api.folders.remove(id),
+});
+
 async function _loadFoldersOnce() {
+
   try {
-    // Api.folders.list preserves the distinction between a valid [] and a
-    // failed response. One request is therefore sufficient even when the user
-    // genuinely has no folders; failure keeps the last good projection.
-    const list = await Api.folders.list();
-    if (!Array.isArray(list)) throw new Error('invalid folder list');
-    _folders = list;
+    // Stale deliveries trigger a fresh read inside this same single flight.
+    // Only a complete, current list may mark the catalog loaded.
+    await _folderPresetMutations.loadConfirmed(() => Api.folders.list());
   } catch (e) {
     console.warn('[loadFolders] fetch failed — keeping current folders:', e.message);
     if (!_foldersLoaded) {
@@ -1931,81 +1897,61 @@ function loadFolders() {
   return flight;
 }
 
-async function createFolder(name, color) {
-  const folder = await Api.folders.create(name, color);
-  if (folder) _folders.push(folder);
+function invalidateFolderProjection() {
+  _folderPresetMutations.invalidate();
+}
+
+async function createFolder(name, color, projectPaths = [], readOnlyPaths = []) {
+  const folder = await _folderPresetMutations.create(name, color, projectPaths, readOnlyPaths);
+  // A create ACK confirms one record, not the complete initial catalog.
+  if (!_foldersLoaded) {
+    void loadFolders().catch(e => console.warn('[Folders] post-create refresh:', e.message));
+  }
+  renderConversationList();
   return folder;
 }
 
+/* Resolve the default project roots a folder contributes to a brand-new
+ * conversation created inside it. A conversation created while a folder tab
+ * is active inherits every bound root (the first is the primary project, the
+ * rest become extra roots) so the user does not re-enter them per chat; an
+ * empty list means the conversation starts unbound. Reads `projectPaths[]`
+ * first and falls back to the legacy scalar `projectPath` for folders written
+ * before the multi-root model. */
+function folderDefaultProjectPaths(folderId) {
+  const f = folderId ? getFolderById(folderId) : null;
+  if (!f) return [];
+  return folderPresetWorkspace(f).projectPaths;
+}
+
+
+function folderDefaultWorkspace(folderId) {
+  return folderPresetWorkspace(folderId ? getFolderById(folderId) : null);
+}
+
 async function updateFolder(folderId, updates) {
-  /* INSTANT-UI (owner directive 2026-07-31, ): apply the
-   *   rename/color change locally on the CLICK — the old code awaited the
-   *   PATCH first, so the dialog stayed open and the tab kept its old name
-   *   for a whole RTT. The PATCH then runs in the background; on failure the
-   *   previous fields are restored and an error toast surfaces. */
-  const idx = _folders.findIndex(f => f.id === folderId);
-  if (idx < 0) return null;
-  const prev = { ..._folders[idx] };
-  Object.assign(_folders[idx], updates);
-  if (typeof renderConversationList === 'function') renderConversationList();
-  Api.folders.update(folderId, updates)
-    .then(updated => {
-      if (!updated) throw new Error('no response');
-      const i = _folders.findIndex(f => f.id === folderId);
-      if (i >= 0) Object.assign(_folders[i], updated);
-      if (typeof renderConversationList === 'function') renderConversationList();
-    })
-    .catch(e => {
-      console.warn('[updateFolder] PATCH failed — rolling back:', e && e.message);
-      const i = _folders.findIndex(f => f.id === folderId);
-      if (i >= 0) Object.assign(_folders[i], prev);
-      if (typeof renderConversationList === 'function') renderConversationList();
-      if (typeof showToast === 'function') showToast(t('folder.renameFailed'), 'error');
-    });
-  return _folders[idx];
+  // The editor paints its local draft immediately. Only confirmed presets may
+  // be inherited; failures must reach that editor, not disappear behind a toast.
+  const updated = await _folderPresetMutations.update(folderId, updates);
+  renderConversationList();
+  return updated;
 }
 
 async function deleteFolder(folderId) {
-  /* INSTANT-UI (owner directive 2026-07-31, ): remove the
-   *   folder tab AND unassign its conversations locally on the CLICK — the old
-   *   code awaited the DELETE first, so the tab sat there for a whole RTT. The
-   *   DELETE then runs in the background; the per-conversation server syncs
-   *   only fire on success, and on failure the folder + every assignment is
-   *   restored and an error toast surfaces. */
-  const idx = _folders.findIndex(f => f.id === folderId);
-  if (idx < 0) return false;
-  const removed = _folders[idx];
-  const unassigned = [];
-  _folders = _folders.filter(f => f.id !== folderId);
-  // Unassign conversations from the deleted folder — locally, NOW.
+  if (!getFolderById(folderId)) return false;
+  // Keep the grouping and assignments intact while confirmation is pending.
+  // A rejection reaches the dialog with no whole-record rollback race.
+  await _folderPresetMutations.remove(folderId);
   for (const c of conversations) {
-    if (c.folderId === folderId) {
-      c.folderId = null;
-      unassigned.push(c);
-      // Also write-through to IDB so a refresh doesn't replay the stale folderId
-      ConvCache.put(c);
-    }
+    if (c.folderId !== folderId) continue;
+    c.folderId = null;
+    ConvCache.put(c);
+    Api.conversations.patchSettings(c.id, { folderId: null })
+      .catch(e => console.warn('[deleteFolder] assignment sync failed:', e.message));
   }
-  if (typeof renderConversationList === 'function') renderConversationList();
-  Api.folders.remove(folderId)
-    .then(ok => {
-      if (!ok) throw new Error('delete rejected');
-      for (const c of unassigned) persistConversationSettings(c).catch(() => {});
-    })
-    .catch(e => {
-      console.warn('[deleteFolder] DELETE failed — rolling back:', e && e.message);
-      /* Restore the folder at its original index (clamped) and every
-       * conversation's assignment, so the sidebar returns to its pre-click
-       * shape instead of silently losing the folder the server still has. */
-      const at = Math.min(idx, _folders.length);
-      _folders = [..._folders.slice(0, at), removed, ..._folders.slice(at)];
-      for (const c of unassigned) {
-        c.folderId = folderId;
-        ConvCache.put(c);
-      }
-      if (typeof renderConversationList === 'function') renderConversationList();
-      if (typeof showToast === 'function') showToast(t('folder.deleteFailed'), 'error');
-    });
+  if (_activeFolderId === folderId) _activeFolderId = null;
+  reconcileConversationCatalogMetadata(null);
+  renderConversationList();
   return true;
 }
 
@@ -2425,8 +2371,14 @@ const DebugShellState = _debugRuntimeOwner.shellState;
 runtimeScope.__tofuDiagRing = _debugRuntimeOwner.diagnosticRing;
 
 // Passive diagnostics use the canonical read service and the existing relay.
+const _responsivenessInteractions = createBrowserInteractionContext(document, () => performance.now());
+retainedCompositionLifecycle.add(() => _responsivenessInteractions.dispose());
 const _responsivenessMonitor = startBrowserResponsivenessMonitor({
   now: () => performance.now(),
+  wallNow: () => Date.now(),
+  schedule: window,
+  lifecycle: window,
+  interactionContext: (startMs, endMs) => _responsivenessInteractions.context(startMs, endMs),
   timeOriginMs: performance.timeOrigin,
   visibility: document,
   observe: (type, receive) => {
@@ -2434,7 +2386,7 @@ const _responsivenessMonitor = startBrowserResponsivenessMonitor({
         || !PerformanceObserver.supportedEntryTypes.includes(type)) return null;
     const observer = new PerformanceObserver((list) => receive(list.getEntries()));
     observer.observe({ type, buffered: false });
-    return () => observer.disconnect();
+    return { disconnect: () => observer.disconnect(), takeRecords: () => observer.takeRecords() };
   },
   context: () => responsivenessContext(activeConvId,
     runtimeScope.ConversationTurnRead?.state?.(activeConvId)),
@@ -2525,6 +2477,8 @@ const brandLogoImgAttrs = runtimeScope.brandLogoImgAttrs;
 
 function _applySettingsToConv(conv, settings) {
   if (!settings) return;
+
+  settings = protectHydratingProjectSettings(conv, settings);
   if (settings.model || settings.effort || settings.preset)
     conv.model = settings.model || settings.preset || settings.effort;
   if (settings.modelRef !== undefined)
@@ -2893,7 +2847,7 @@ async function hydrateConversationRuntime(convId) {
   if (!turnStore?.hydrateConversation) {
     throw new Error('Conversation turn runtime is unavailable.');
   }
-  await turnStore.hydrateConversation(conv);
+  await withProjectHydration(conv, () => turnStore.hydrateConversation(conv));
   conv._turnSnapshotRequired = false;
   conv._serverTurnCount = runtimeScope.ConversationTurnRead?.ordered?.(conv)?.length || 0;
   if (typeof runtimeScope.loadCompactionHistory === 'function') {
@@ -2919,6 +2873,9 @@ const markdownRenderer = createMarkdownRenderer({
     highlighter: typeof hljs === 'undefined' ? null : hljs,
     mathRenderer: typeof katex === 'undefined' ? null : katex,
     basePath: typeof BASE_PATH === 'undefined' ? '' : BASE_PATH,
+
+    language: _i18nLang,
+    text: t,
     projectActive: typeof projectState !== 'undefined' && Boolean(projectState && projectState.active),
   }),
   ensureMath: () => typeof _ensureKatex === 'function' ? _ensureKatex() : undefined,
@@ -4587,7 +4544,7 @@ const ExportImages = (() => {
   return { exportMessage, exportMessageWithPreview };
 })();
 /* ===== migrated source: artifacts.js ===== */
-/* artifacts.js — Right-side panel for renderable chat artifacts (md/html/svg).
+/* artifacts.js — Retained right-side panel bridge for published artifacts.
  *
  * Backend: lib/artifacts/* persists each artifact to the chat_artifacts
  * table.  Producers (write_file post-hook + inline scanner) call
@@ -4601,7 +4558,8 @@ const ExportImages = (() => {
  *   3. Fetches /api/artifacts/<id>/raw lazily on open and renders it:
  *        markdown → renderMarkdown() (DOMPurify-cleaned, see core.js)
  *        html     → <iframe sandbox srcdoc>  (NO scripts by default)
- *        svg      → <iframe sandbox srcdoc>  (forced when <script> present)
+ *        svg      → script-blocked document iframe
+ *        file     → typed inert metadata + server-authorized download controls
  *
  * Security invariants — see lib/artifacts/__init__.py and routes/artifacts.py.
  *   • NEVER innerHTML model HTML into the main document.
@@ -4610,24 +4568,35 @@ const ExportImages = (() => {
  *   • The /raw endpoint already ships a strict CSP — this is defense in depth.
  */
 
+// Temporary lexical presenters; remove with the retained artifact-panel migration.
+import { renderPublishedFile, renderScriptWarning } from '../rich-response/artifact-delivery';
+import { mountArtifactReview } from '../rich-response/artifact-review';
+
 (function () {
   "use strict";
 
   // ── Module state ────────────────────────────────────────────────────
-  // Conv-scoped cache of metadata + content.  Keyed by artifact id.
-  // Content fetched lazily on first open; subsequent opens are instant.
+  // Presentation metadata is conv-scoped, never an authorization receipt.
+  // Only the active body is retained; close/switch releases multi-MiB source.
   const _metaCache = new Map();    // id → meta dict
-  const _contentCache = new Map(); // id → raw string
+  const _contentCache = new Map(); // at most one active id → raw string
   // A newer snapshot hint must win over an older metadata request that settles
   // late. Weak keys keep the fence tied to the catalog shell lifecycle.
   const _hydrateEpoch = new WeakMap();
+  // Background snapshots may arrive before a Surface exists. Retain only
+  // their optional hint; the existing mount lifecycle triggers the owned read.
+  const _artifactHints = new WeakMap();
 
   // The currently open artifact (if any), so SSE updates can refresh.
   let _activeId = null;
+  let _disposeReview = null;
+  let _openEpoch = 0;
 
   // Per-session script-allow consent (NOT persisted).
   // Set<id>  — present means user clicked "Run scripts".
   const _scriptsAllowed = new Set();
+
+  let _disposeDeliveryWarning = null; // typed confirmation lifecycle; remove when panel migrates
 
   // What the panel is currently showing: 'doc' | 'library'.
   let _panelMode = "doc";
@@ -4720,6 +4689,7 @@ const ExportImages = (() => {
         '</div>' +
       '</header>' +
       '<div class="artifact-panel-banner" data-art-banner hidden></div>' +
+      '<div data-art-review-host hidden></div>' +
       '<div class="artifact-panel-body" data-art-body></div>';
     document.body.appendChild(panel);
 
@@ -4783,6 +4753,8 @@ const ExportImages = (() => {
       _togglePinById(id);
       return;
     }
+    const richArtifact = e.target.closest('[data-conversation-action="open-artifact"]');
+    if (richArtifact?.dataset.operation) { open(richArtifact.dataset.operation); return; }
     const btn = e.target.closest("[data-art-action]");
     if (!btn) return;
     const action = btn.getAttribute("data-art-action");
@@ -4832,7 +4804,14 @@ const ExportImages = (() => {
   async function open(id) {
     if (!id) return;
     const panel = _ensurePanel();
+    const openEpoch = ++_openEpoch;
     _activeId = id;
+    _disposeReview?.(); _disposeReview = null;
+    const reviewHost = panel.querySelector('[data-art-review-host]');
+    if (reviewHost) reviewHost.hidden = true;
+
+    _contentCache.clear();
+    _scriptsAllowed.clear(); // consent belongs to this explicit preview session
     _panelMode = "doc";
     panel.dataset.mode = "doc";
 
@@ -4845,6 +4824,10 @@ const ExportImages = (() => {
     const fmtEl   = panel.querySelector("[data-art-format]");
     const subEl   = panel.querySelector("[data-art-subtitle]");
     const bodyEl  = panel.querySelector("[data-art-body]");
+
+    if (bodyEl) disposeRichResponse(bodyEl);
+
+    _disposeDeliveryWarning?.(); _disposeDeliveryWarning = null;
     if (titleEl) titleEl.textContent = "Loading…";
     if (fmtEl) { fmtEl.textContent = ""; fmtEl.dataset.format = ""; }
     if (subEl) { subEl.hidden = true; subEl.textContent = ""; }
@@ -4852,14 +4835,25 @@ const ExportImages = (() => {
 
     try {
       const meta = await _ensureMeta(id);
-      if (_activeId !== id) return;  // user opened something else
+      if (_activeId !== id || _openEpoch !== openEpoch) return;
       _renderHeader(panel, meta);
+      if (reviewHost) {
+        reviewHost.hidden = false;
+        _disposeReview = mountArtifactReview(reviewHost, {
+          load: signal => Api.artifacts.review(id, signal),
+          save: (command, signal) => Api.artifacts.saveReview(id, command, signal),
+          loadFacts: signal => Api.conversations.workingFacts(meta.conv_id, signal),
+          text: (key, fallback) => typeof t === 'function' ? t(key) || fallback : fallback,
+        });
+      }
 
-      const content = await _ensureContent(id);
-      if (_activeId !== id) return;
+      const content = meta.format === "file" ? "" : await _ensureContent(id);
+      if (_activeId !== id || _openEpoch !== openEpoch) return;
       _renderBody(panel, meta, content, /*sourceView=*/ false);
     } catch (err) {
       console.warn("[Artifacts] open failed:", err);
+
+      if (_activeId !== id || _openEpoch !== openEpoch) return;
       if (bodyEl) {
         bodyEl.innerHTML =
           '<div class="artifact-error">' + ICON.warn +
@@ -4874,9 +4868,17 @@ const ExportImages = (() => {
   function closePanel() {
     const panel = document.getElementById("artifact-panel");
     if (!panel) return;
+    ++_openEpoch;
+    _disposeReview?.(); _disposeReview = null;
+
+    _disposeDeliveryWarning?.(); _disposeDeliveryWarning = null;
+    const richBody = panel.querySelector('[data-art-body]');
+    if (richBody) { disposeRichResponse(richBody); richBody.replaceChildren(); }
     panel.classList.add("artifact-panel-hidden");
     panel.setAttribute("aria-hidden", "true");
     document.body.classList.remove("artifact-panel-open");
+    _contentCache.clear();
+    _scriptsAllowed.clear();
     _activeId = null;
     _panelMode = "doc";
   }
@@ -4884,7 +4886,7 @@ const ExportImages = (() => {
   // ── Fetch helpers ───────────────────────────────────────────────────
 
   async function _ensureMeta(id) {
-    if (_metaCache.has(id)) return _metaCache.get(id);
+    // Visibility/cache is never authorization, including for legacy artifacts.
     const meta = await Api.artifacts.meta(id);
     if (!meta) throw new Error("artifact meta not found");
     _metaCache.set(id, meta);
@@ -4894,7 +4896,10 @@ const ExportImages = (() => {
   async function _ensureContent(id) {
     if (_contentCache.has(id)) return _contentCache.get(id);
     const text = await Api.artifacts.contentText(id);
-    _contentCache.set(id, text);
+    if (_activeId === id) {
+      _contentCache.clear(); // one active body, including multi-MiB prototypes
+      _contentCache.set(id, text);
+    }
     return text;
   }
 
@@ -4903,6 +4908,12 @@ const ExportImages = (() => {
   function _setMode(panel, mode) {
     panel.dataset.mode = mode;
     _panelMode = mode;
+    if (mode === 'library') {
+      ++_openEpoch;
+      _disposeReview?.(); _disposeReview = null;
+      const reviewHost = panel.querySelector('[data-art-review-host]');
+      if (reviewHost) reviewHost.hidden = true;
+    }
     // Toggle the leading icon (library button vs back-to-doc).
     panel.querySelectorAll('[data-art-mode-icon]').forEach(function (el) {
       const want = el.getAttribute("data-art-mode-icon");
@@ -4950,6 +4961,10 @@ const ExportImages = (() => {
         subEl.textContent = "";
       }
     }
+    for (const action of ["toggle-source", "copy", "print", "export-pdf"]) {
+      const control = panel.querySelector('[data-art-action="' + action + '"]');
+      if (control) control.hidden = meta.format === "file";
+    }
     const pinBtn = panel.querySelector('[data-art-action="pin"]');
     if (pinBtn) {
       pinBtn.innerHTML = meta.pinned ? ICON.pinOn : ICON.pinOff;
@@ -4964,13 +4979,10 @@ const ExportImages = (() => {
   async function _populateVersionSelect(panel, meta) {
     const sel = panel.querySelector("[data-art-version]");
     if (!sel) return;
-    if (!meta.parent_id && (meta.version || 1) <= 1) {
-      sel.hidden = true;
-      sel.innerHTML = "";
-      return;
-    }
+    const openEpoch = _openEpoch;
     try {
       const payload = await Api.artifacts.versions(meta.id);
+      if (_activeId !== meta.id || _openEpoch !== openEpoch) return;
       if (!payload) throw new Error("versions fetch failed");
       const chain = (payload && payload.versions) || [];
       if (chain.length <= 1) {
@@ -4993,11 +5005,16 @@ const ExportImages = (() => {
   }
 
   function _renderBody(panel, meta, content, sourceView) {
+
+    _disposeDeliveryWarning?.(); _disposeDeliveryWarning = null;
     const bodyEl = panel.querySelector("[data-art-body]");
     const banner = panel.querySelector("[data-art-banner]");
     if (!bodyEl) return;
 
+    disposeRichResponse(bodyEl);
+    bodyEl.classList.remove('rich-response');
     // Reset state from previous artifact
+
     if (banner) {
       banner.hidden = true;
       banner.innerHTML = "";
@@ -5014,7 +5031,14 @@ const ExportImages = (() => {
     }
 
     const fmt = meta.format;
-    if (fmt === "markdown") {
+    if (fmt === "file") {
+      renderPublishedFile(bodyEl, meta.meta?.responseFile, {
+        text: (key, fallback) => t(key) || fallback,
+        download: _download,
+      });
+    } else if (fmt === "rich") {
+      renderRichResponse(bodyEl, meta.contentJSON || content, { conversationId: meta.conv_id, text: (key, fallback) => t(key) || fallback });
+    } else if (fmt === "markdown") {
       _renderMarkdown(bodyEl, content);
     } else if (fmt === "html") {
       _renderHtml(panel, banner, bodyEl, meta, content);
@@ -5050,22 +5074,22 @@ const ExportImages = (() => {
 
   function _renderHtml(panel, banner, bodyEl, meta, content) {
     const allowScripts = _scriptsAllowed.has(meta.id);
-    const hasScripts = /<script[\s>]/i.test(content);
+    const hasScripts = ["html", "svg"].includes(meta.format) || meta.meta?.responseFile?.scriptRisk || /<script[\s>]|\son\w+\s*=|javascript:/i.test(content);
 
-    if (hasScripts && !allowScripts && banner) {
+    if (hasScripts && banner) {
       banner.hidden = false;
-      banner.innerHTML =
-        '<div class="artifact-banner-icon">' + ICON.warn + '</div>' +
-        '<div class="artifact-banner-text">' +
-          '<strong>Document scripts blocked.</strong> ' +
-          'Math (KaTeX) and table-of-contents links work without enabling scripts. ' +
-          'Click the button only if the document needs interactive JavaScript.' +
-        '</div>' +
-        '<button class="artifact-banner-action" data-art-action="allow-scripts">Run document scripts</button>';
+      _disposeDeliveryWarning = renderScriptWarning(banner,
+        () => { if (_activeId === meta.id) _allowScripts(); },
+        (key, fallback) => t(key) || fallback, {
+        scriptsAllowed: allowScripts,
+        interactiveDownload: () => _download(true, meta.id),
+      });
     }
 
     const iframe = document.createElement("iframe");
     iframe.className = "artifact-iframe";
+
+    iframe.title = meta.title || "Artifact preview";
     iframe.setAttribute("referrerpolicy", "no-referrer");
     iframe.setAttribute("loading", "lazy");
     // ── /view (default) vs /raw + srcdoc (opt-in) ──────────────────
@@ -5102,7 +5126,7 @@ const ExportImages = (() => {
   }
 
   function _renderSvg(panel, banner, bodyEl, meta, content) {
-    const hasScripts = /<script[\s>]/i.test(content);
+    const hasScripts = ["html", "svg"].includes(meta.format) || meta.meta?.responseFile?.scriptRisk || /<script[\s>]|\son\w+\s*=|javascript:/i.test(content);
     if (hasScripts) {
       // Reuse the HTML iframe path so the script-block consent flow
       // (and the trusted-KaTeX wrapper) handle the dynamic case.
@@ -5134,31 +5158,17 @@ const ExportImages = (() => {
     }
   }
 
-  async function _download() {
-    if (!_activeId) return;
+  async function _download(interactive = false, id = _activeId) {
+    if (!id || id !== _activeId) return;
     try {
-      const meta = await _ensureMeta(_activeId);
-      const text = await _ensureContent(_activeId);
-      const ext = meta.format === "html" ? "html"
-                : meta.format === "svg" ? "svg"
-                : "md";
-      const fname = (meta.title && /\.\w+$/.test(meta.title))
-        ? meta.title
-        : (meta.title || "artifact-" + meta.id.slice(0, 8)) + "." + ext;
-      const mime = meta.format === "html" ? "text/html"
-                 : meta.format === "svg" ? "image/svg+xml"
-                 : "text/markdown";
-      const blob = new Blob([text], { type: mime + ";charset=utf-8" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = fname;
-      a.style.display = "none";
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      // Revoke after a short delay so the download has time to start.
-      setTimeout(function () { URL.revokeObjectURL(url); }, 5000);
+      const meta = await _ensureMeta(id);
+      if (_activeId !== id) return; // a switched/closed panel cannot reuse consent
+      const link = document.createElement("a");
+      link.href = Api.artifacts.downloadUrl(id) + (interactive === true ? "?interactive=1" : "");
+      link.rel = "noopener noreferrer";
+      // Every source follows the server's live owner/deleted checks and safe
+      // attachment MIME/filename policy; never download a warm cached Blob.
+      document.body.append(link); link.click(); link.remove();
     } catch (e) {
       console.warn("[Artifacts] download failed:", e);
     }
@@ -5263,6 +5273,10 @@ const ExportImages = (() => {
 
   async function _showLibrary() {
     const panel = _ensurePanel();
+
+    _disposeDeliveryWarning?.(); _disposeDeliveryWarning = null;
+    _contentCache.clear(); _scriptsAllowed.clear();
+    _activeId = null;
     panel.classList.remove("artifact-panel-hidden");
     panel.setAttribute("aria-hidden", "false");
     document.body.classList.add("artifact-panel-open");
@@ -5376,9 +5390,19 @@ const ExportImages = (() => {
     }
   }
 
-  function _allowScripts() {
-    if (!_activeId) return;
-    _scriptsAllowed.add(_activeId);
+  async function _allowScripts() {
+    const id = _activeId;
+    if (!id) return;
+    try {
+      const meta = await _ensureMeta(id);
+      const content = await _ensureContent(id);
+      if (_activeId !== id) return;
+      _scriptsAllowed.add(id);
+      _renderBody(_ensurePanel(), meta, content, false);
+    } catch (error) {
+      console.warn("[Artifacts] consent failed:", error);
+      return;
+    }
     // Audit: best-effort, fire and forget.
     try {
       Api.clientError.report({
@@ -5389,8 +5413,7 @@ const ExportImages = (() => {
     } catch (e) {
       console.debug("[Artifacts] consent log build failed:", e);
     }
-    // Re-render the body, this time with allow-scripts.
-    open(_activeId);
+
   }
 
   // ── Formatting helpers ─────────────────────────────────────────────
@@ -5468,6 +5491,8 @@ const ExportImages = (() => {
     if (!conv || !conv.id) return;
     const epoch = (_hydrateEpoch.get(conv) || 0) + 1;
     _hydrateEpoch.set(conv, epoch);
+    _artifactHints.set(conv, hasArtifacts);
+    if (!runtimeScope.ConversationSurfacePresentation?.ownsConversation?.(conv.id)) return;
     if (hasArtifacts === false) {
       runtimeScope.ConversationSurfacePresentation?.setArtifacts?.(
         conv.id, new Map(),
@@ -5502,6 +5527,8 @@ const ExportImages = (() => {
 
   // ── Keyboard: Esc closes the panel; Ctrl/Cmd+P prints when panel open
   document.addEventListener("keydown", function (e) {
+
+    if (document.querySelector('dialog[open]')) return; // native modal owns Escape/focus
     if (e.key === "Escape" && _activeId) {
       closePanel();
       return;
@@ -5511,7 +5538,7 @@ const ExportImages = (() => {
       const panel = document.getElementById("artifact-panel");
       if (panel && !panel.classList.contains("artifact-panel-hidden")) {
         const tag = (e.target && e.target.tagName) || "";
-        if (tag !== "INPUT" && tag !== "TEXTAREA") {
+        if (tag !== "INPUT" && tag !== "TEXTAREA" && _metaCache.get(_activeId)?.format !== "file") {
           e.preventDefault();
           _print();
         }
@@ -5525,6 +5552,9 @@ const ExportImages = (() => {
     closePanel: closePanel,
     showLibrary: _showLibrary,
     hydrateConversation: hydrateConversation,
+    activateConversation: conv => {
+      if (_artifactHints.has(conv)) void hydrateConversation(conv, _artifactHints.get(conv));
+    },
     // Exposed for tests / debug
     _meta: _metaCache,
     _content: _contentCache,
@@ -5541,43 +5571,6 @@ const ExportImages = (() => {
    the same window scope as every other frontend/src/runtime/*.js file. No
    exports / imports needed.
    ═══════════════════════════════════════════════════════════════════ */
-
-/* ── Finish-reason tiers (mirror finish_info.js) — decide the settled
- *   sidebar state of a turn that carries a finishReason.
- *   NORMAL: clean completion, no flag.
- *   ERR:    hard failure → red error state (same bucket as msg.error).
- *   Everything else that is neither NORMAL nor ERR is treated as an
- *   INCOMPLETE (interrupted / truncated / stopped) turn → amber state. */
-const _FINISH_NORMAL = new Set(['stop', 'end_turn', 'stop_sequence', 'tool_use', 'tool_calls']);
-const _FINISH_ERR = new Set(['error', 'server_offline']);
-
-/* Is the assistant Turn part of an autopilot run that has
- * already CONCLUDED (produced a debrief report / carries a concluded record)?
- * The run id is stamped on the run's virtual-user (role:'user') turns, not on
- * assistant Turn, so we scan backwards from its stable Turn identity for the
- * nearest run stamp, then consult the conv's `autopilotSummaries`
- * sidecar — the backend-authoritative "run concluded" signal selected into
- * the typed Turn view (record.status==='concluded' OR content present). A conv with no
- * autopilot state returns false immediately (cheap). */
-function _autopilotRunConcluded(c, turnId) {
-  const summaries = c && c.autopilotSummaries;
-  if (!summaries || typeof summaries !== 'object') return false;
-  const turns = runtimeScope.ConversationTurnRead?.ordered?.(c) || [];
-  const turnIndex = turns.findIndex((turn) => turn.turnId === turnId);
-  if (turnIndex < 0) return false;
-  let runId = null;
-  for (let index = turnIndex; index >= 0; index -= 1) {
-    const turn = turns[index];
-    if (turn.projection?._autopilotRunId) {
-      runId = turn.projection._autopilotRunId;
-      break;
-    }
-    if (turn.actor === 'human' && index !== turnIndex) break;
-  }
-  if (!runId) return false;
-  const rec = summaries[runId];
-  return !!(rec && typeof rec === 'object' && (rec.status === 'concluded' || rec.content));
-}
 
 function formatConvTime(ts) {
   const labels = conversationTimestampLabels(
@@ -5898,7 +5891,7 @@ function _renderFolderTabsInner(tabsEl, folders, activeFolderId, allConvs) {
   // Split hash: content hash (folders/counts/names) vs active-tab hash
   // When only the active tab changes, skip full DOM rebuild and just swap .active class
   const streamKey = [...streamingFolderIds].sort().join(',');
-  const structHash = `U${uncategorizedCount}|${safeFolders.map(f=>`${f.id}|${f.name}|${f.color||''}|${lastActiveMap[f.id]||0}|${countMap[f.id]||0}`).join(',')}`;
+  const structHash = `U${uncategorizedCount}|${safeFolders.map(f=>`${f.id}|${f.name}|${f.color||''}|${JSON.stringify(f.projectPaths || f.projectPath || [])}|${JSON.stringify(f.readOnlyPaths || [])}|${lastActiveMap[f.id]||0}|${countMap[f.id]||0}`).join(',')}`;
   const contentHash = `${structHash}|S${streamKey}`;
   const fullHash = `${activeFolderId||''}|${contentHash}`;
   if (fullHash === _lastFolderTabsHash) return;
@@ -5956,15 +5949,20 @@ function _renderFolderTabsInner(tabsEl, folders, activeFolderId, allConvs) {
   for (const f of sortedFolders) {
     const fcolor = escapeHtml(_folderColor(f));
     const fname = escapeHtml(f.name);
+
+    const roots = folderDefaultProjectPaths(f.id);
+    const summary = roots.length ? t('folder.settings.rootCount', { n: roots.length }) : t('folder.settings.noRoots');
+    const folderTip = escapeHtml([f.name, summary, ...roots].join('\n'));
     const isActive = activeFolderId === f.id;
     const cnt = countMap[f.id] || 0;
     const badge = cnt > 0 ? `<span class="folder-tab-count">${cnt}</span>` : '';
     const dotStreaming = streamingFolderIds.has(f.id) ? ' streaming' : '';
     const mono = _folderMonogram(f.name);
-    html += `<button class="folder-tab${isActive ? ' active' : ''}" data-folder-id="${escapeHtml(f.id)}" title="${fname}">`;
+    html += '<div class="folder-tab-row">';
+    html += `<button class="folder-tab${isActive ? ' active' : ''}" data-folder-id="${escapeHtml(f.id)}" title="${folderTip}" aria-label="${escapeHtml(f.name + ': ' + summary)}">`;
     html += `<span class="folder-tab-dot${dotStreaming}" style="background:${fcolor}" data-initial="${escapeHtml(mono)}" data-mono-len="${mono.length}"></span>`;
-    html += `<span class="folder-tab-name">${fname}</span>${badge}`;
-    html += `</button>`;
+    html += `<span class="folder-tab-copy"><span class="folder-tab-name">${fname}</span><span class="folder-tab-summary">${escapeHtml(summary)}</span></span>${badge}`;
+    html += `</button></div>`;
   }
   html += '</div>';
   // Footer "+ New project" row — always visible at the rail bottom.
@@ -5973,6 +5971,8 @@ function _renderFolderTabsInner(tabsEl, folders, activeFolderId, allConvs) {
   html += `<span class="folder-tab-name">${escapeHtml(t('sidebar.newFolder'))}</span>`;
   html += `</button>`;
   tabsEl.innerHTML = html;
+
+  mountFolderConfigControls(tabsEl, t('folder.settings.title'));
 }
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -6234,6 +6234,8 @@ async function loadMoreGlobalConvs() {
 }
 
 function renderConversationList() {
+
+  runtimeScope.presenceRefresh?.();
   const listEl = document.getElementById("convList"),
     statsEl = document.getElementById("sidebarSearchStats");
   if (!sidebarSearchQuery) {
@@ -6280,6 +6282,9 @@ function renderConversationList() {
     }
     // else: folders loaded and empty — show everything (no folders exist)
 
+    const coordinatorId = document.querySelector('#projectCoordinatorEntry [data-coordinator-id]')?.dataset.coordinatorId;
+    if (coordinatorId) filtered = filtered.filter(c => c.id !== coordinatorId);
+
     /* ── Split hash: struct (row identity/order/title/date/folder) vs status
      *    (active / streaming / translating / memory-prefetch / awaiting-human).
      *    When only status changed we patch each row's .active class + dot +
@@ -6294,7 +6299,7 @@ function renderConversationList() {
       filtered.map(c => `${c.id}|${c.title}|${c.updatedAt||""}|${c.folderId||""}|${(c.projectSummary && c.projectSummary.text) ? "S" : ""}`).join("\n");
     const _statusHash = filtered.map(c => {
       const f = _convStatusFlags(c);
-      return `${c.id===activeConvId?1:0}${f.streaming?1:0}${f.translating?1:0}${f.memoryPrefetching?1:0}${f.awaitingHuman?1:0}${f.waiting?1:0}${f.errored?1:0}${f.incomplete?1:0}${f.unconfirmed?1:0}${f.rateLimited?1:0}|${f.background?.signature || ''}`;
+      return `${c.id===activeConvId?1:0}${f.streaming?1:0}${f.translating?1:0}${f.memoryPrefetching?1:0}${f.awaitingHuman?1:0}${f.waiting?1:0}${f.errored?1:0}${f.incomplete?1:0}${f.unconfirmed?1:0}${f.rateLimited?1:0}${f.needsReview?1:0}|${f.background?.signature || ''}`;
     }).join(",");
     const _fullHash = `${_structHash}|||${_statusHash}`;
     if (_fullHash === _lastConvListHash) return;
@@ -6370,6 +6375,9 @@ function renderConversationList() {
     // streaming presentation frames do not issue requests.
     const fingerprint = conversations.map(c => `${c.id}:${c.title}:${c._serverRev || 0}`).join('|');
     _sidebarSearchController.setQuery(query, local, fingerprint);
+    refreshBackgroundConversationStatuses(
+      _sidebarSearchController.snapshot().items.map(item => item.id),
+    );
   }
 }
 
@@ -6460,87 +6468,23 @@ function convIsBusy(conv) {
     turn && (turn.status === 'pending' || turn.status === 'running'));
 }
 
-/** Read the current phase from TurnStore; never cache or mirror it. */
-function convRateLimitPhase(conversationOrId) {
-  const phase = runtimeScope.ConversationTurnRead
-    ?.state?.(conversationOrId)?.livePhase;
-  return presentConversationRateLimit(phase);
-}
-
 function _convStatusFlags(c) {
   const background = typeof backgroundConversationActivity === 'undefined' ? null
     : sidebarBackgroundActivity(backgroundConversationActivity.get(c.id), (key, _fallback, vars) => t(key, vars));
-  const translating = !!c._translating;
-  const memoryPrefetching = !!c._memoryPrefetching;
-  const streaming = convIsBusy(c);
-  /* The sidebar derives the same typed phase as the active Surface. */
-  const rateLimited = !!(streaming && convRateLimitPhase(c));
-  const turns = runtimeScope.ConversationTurnRead?.ordered?.(c) || [];
-  const latestAssistant = [...turns].reverse().find((turn) =>
-    turn.actor === 'assistant' || turn.actor === 'planner');
-  /* A leftover awaiting_human round on a settled turn is unanswerable
-   * (server restarts leave it persisted forever) — the amber dot must reflect
-   * a LIVE wait only, which requires the turn (hence the conv) to be busy. */
-  const awaitingHuman = streaming && Boolean(latestAssistant?.projection?.toolRounds?.some(
-    (round) => round?.status === 'awaiting_human',
-  ));
-
-  // Only the latest assistant/planner Turn defines the settled sidebar state.
-  let errored = false;
-  let incomplete = false;
-  let waiting = false;
-  if (!streaming && latestAssistant) {
-    const projection = latestAssistant.projection || {};
-    const finishReason = projection.finishReason;
-    waiting = Boolean(projection.waitingOn) && !Boolean(latestAssistant.settlement?.error) && !Boolean(projection.error);
-    /* The Turn authority (status + settlement) is the single derivation
-     * source — the main panel renders from the same verdict, so the sidebar
-     * dot can never disagree with the transcript it previews. The
-     * finishReason heuristics below remain ONLY for legacy Turns that carry
-     * no settled status. */
-    const settledStatus = latestAssistant.status;
-    const hardError = settledStatus === 'failed'
-      || Boolean(latestAssistant.settlement?.error) || Boolean(projection.error);
-    if (hardError) {
-      errored = true;
-    } else if (settledStatus === 'interrupted' || settledStatus === 'truncated') {
-      incomplete = true;
-    } else if (settledStatus === 'completed') {
-      // Authoritative settled success needs no heuristic re-derivation.
-    } else if (_FINISH_ERR.has(finishReason)) {
-      errored = true;
-    } else if (finishReason) {
-      incomplete = !_FINISH_NORMAL.has(finishReason);
-    } else {
-      const hasOutput = Boolean(
-        projection.content || projection.thinking
-        || projection.toolRounds?.length || projection.imageGeneration?.results?.length
-        || projection.segments?.length,
-      );
-      incomplete = !hasOutput;
-    }
-    if ((incomplete || errored) && !hardError
-        && _autopilotRunConcluded(c, latestAssistant.turnId)) {
-      incomplete = false;
-      errored = false;
-    }
-  } else if (!streaming && !latestAssistant && c.lastMsgRole === 'assistant') {
-    const finishReason = c.lastFinishReason;
-    if (c.lastMsgError || _FINISH_ERR.has(finishReason)) errored = true;
-    else if (finishReason) incomplete = !_FINISH_NORMAL.has(finishReason);
-    else incomplete = !c.lastMsgHasOutput;
-  }
-  /* Freshness of the busy verdict (). NOT a second
-   * busy-ness source: `streaming` above is unchanged and still authoritative.
-   * This only records whether the authoritative channel is currently
-   * DELIVERING, so a busy dot inherited from a frame that arrived before the
-   * socket went dark is rendered as "unconfirmed" rather than as settled fact.
-   * Only meaningful while `streaming` — an idle conv has no claim to soften. */
-  const healthState = c._conversationSyncHealth?.state;
-  const unconfirmed = Boolean(streaming
-    && ['recovering', 'degraded', 'offline'].includes(healthState));
-  if (waiting) incomplete = false;
-  return { background, streaming, translating, memoryPrefetching, awaitingHuman, waiting, errored, incomplete, unconfirmed, rateLimited };
+  return {
+    ...presentConversationActivity({
+      turns: runtimeScope.ConversationTurnRead?.ordered?.(c) || [],
+      streaming: convIsBusy(c),
+      livePhase: runtimeScope.ConversationTurnRead?.state?.(c)?.livePhase,
+      syncHealth: c._conversationSyncHealth?.state,
+      autopilotSummaries: c.autopilotSummaries,
+      catalog: c,
+    }),
+    background, translating: !!c._translating, memoryPrefetching: !!c._memoryPrefetching,
+    needsReview: typeof conversationReview !== 'undefined' && conversationReview.observe(
+      c.id, runtimeScope.ConversationTurnRead?.ordered?.(c) || [],
+    ),
+  };
 }
 
 /**
@@ -6570,6 +6514,8 @@ function _convStatusHtml(f) {
     dotHtml = `<div class="conv-waiting-dot" title="${t('sidebar.waitingState')}"></div>`;
   } else if (f.incomplete) {
     dotHtml = `<div class="conv-incomplete-dot" title="${t('sidebar.incompleteState')}"></div>`;
+  } else if (f.needsReview) {
+    dotHtml = `<div class="conv-review-dot" title="${t('sidebar.reviewState')}"></div>`;
   }
   let statusTag = '';
   if (f.translating) {
@@ -6588,6 +6534,8 @@ function _convStatusHtml(f) {
     statusTag = `<span class="conv-status-tag conv-status-waiting" title="${t('sidebar.waitingState')}">${t('sidebar.waitingTag')}</span>`;
   } else if (f.incomplete && !f.background) {
     statusTag = `<span class="conv-status-tag conv-status-incomplete" title="${t('sidebar.incompleteState')}">${t('sidebar.incompleteTag')}</span>`;
+  } else if (f.needsReview && !f.background && !f.awaitingHuman) {
+    statusTag = `<span class="conv-status-tag conv-status-review" title="${t('sidebar.reviewState')}">${t('sidebar.reviewTag')}</span>`;
   }
   if (f.background && !f.translating && !f.memoryPrefetching && !f.streaming) {
     statusTag += `<span class="conv-status-tag conv-status-background ${f.background.queuedOnly ? 'conv-status-waiting' : 'conv-status-streaming'}" title="${escapeHtml(f.background.title)}">${escapeHtml(f.background.label)}</span>`;
@@ -6608,7 +6556,7 @@ function _applyConvItemStatus(row, c) {
 
   /* Leading dot: it's the first child of .conv-item when present (before
    * .conv-text). Reconcile by comparing the current dot markup. */
-  const curDot = row.querySelector(':scope > .conv-translating-dot, :scope > .conv-memprefetch-dot, :scope > .conv-streaming-dot, :scope > .conv-awaiting-human-dot, :scope > .conv-error-dot, :scope > .conv-waiting-dot, :scope > .conv-incomplete-dot');
+  const curDot = row.querySelector(':scope > .conv-translating-dot, :scope > .conv-memprefetch-dot, :scope > .conv-streaming-dot, :scope > .conv-awaiting-human-dot, :scope > .conv-error-dot, :scope > .conv-waiting-dot, :scope > .conv-incomplete-dot, :scope > .conv-review-dot');
   const curDotHtml = curDot ? curDot.outerHTML : '';
   if (curDotHtml !== dotHtml) {
     if (curDot) curDot.remove();
@@ -6889,106 +6837,52 @@ function _applyDisarmResponse(convId, resp) {
    exports / imports needed.
    ═══════════════════════════════════════════════════════════════════ */
 
+// Temporary composition bridge; delete when composer orchestration migrates.
 let _selectionPopup = null;
 let _pendingReplyQuotes = [];
 
 function _initSelectionPopup() {
-  _selectionPopup = document.createElement("div");
-  _selectionPopup.className = "selection-popup";
-  _selectionPopup.style.display = "none";
-  _selectionPopup.innerHTML = `
-    <button class="selection-popup-btn" data-action="branch">${t('conv.branch')}</button>
-    <button class="selection-popup-btn" data-action="reply">${t('conv.reply')}</button>`;
-  document.body.appendChild(_selectionPopup);
-
-  _selectionPopup.addEventListener("click", (e) => {
-    const btn = e.target.closest("[data-action]");
-    if (!btn) return;
-    const action = btn.dataset.action;
-    const sel = window.getSelection();
-    const text = sel.toString().trim();
-    if (!text) { _hideSelectionPopup(); return; }
-
-    const msgEl = sel.anchorNode?.parentElement
-      ?.closest?.('.message[data-turn-id]');
-    const turnId = msgEl?.dataset?.turnId || '';
-
-    if (action === "branch" && turnId) {
-      const title = text.slice(0, 40) + (text.length > 40 ? "…" : "");
-      promptNewBranch(turnId, title, text);
-    } else if (action === "reply") {
+  _selectionPopup?.destroy();
+  _selectionPopup = createSelectionPopup({
+    t,
+    conversationId: () => getActiveConv()?.id || null,
+    quote: ({ text }) => {
       _addReplyQuote(text);
-    }
-    sel.removeAllRanges();
-    _hideSelectionPopup();
+      document.getElementById('userInput')?.focus();
+    },
+    branch: ({ conversationId, turnId, text }) => {
+      if (getActiveConv()?.id !== conversationId) return Promise.resolve(false);
+      const title = Array.from(text.replace(/\s+/g, ' ')).slice(0, 40).join('');
+      return promptNewBranch(turnId, title, text);
+    },
   });
-
-  // Show popup on selection in chat area
-  let _selMouseUpRaf = 0;
-  document.addEventListener("mouseup", (e) => {
-    if (_selectionPopup.contains(e.target)) return;
-    cancelAnimationFrame(_selMouseUpRaf);
-    _selMouseUpRaf = requestAnimationFrame(() => {
-      const sel = window.getSelection();
-      if (!sel || sel.isCollapsed || sel.toString().trim().length < 5) {
-        _hideSelectionPopup();
-        return;
-      }
-      const msgEl = sel.anchorNode?.parentElement
-        ?.closest?.('.message[data-turn-id]');
-      if (!msgEl) { _hideSelectionPopup(); return; }
-
-      const range = sel.getRangeAt(0);
-      const rect = range.getBoundingClientRect();
-      _selectionPopup.style.left = `${rect.left + rect.width / 2 - 60}px`;
-      _selectionPopup.style.top = `${rect.top - 40 + window.scrollY}px`;
-      _selectionPopup.style.display = "flex";
-    });
-  });
-
-  document.addEventListener("mousedown", (e) => {
-    if (!_selectionPopup.contains(e.target)) _hideSelectionPopup();
-  });
+  if (typeof retainedCompositionLifecycle !== 'undefined') {
+    retainedCompositionLifecycle.add(_selectionPopup.destroy);
+  }
 }
 
-function _hideSelectionPopup() {
-  if (_selectionPopup) _selectionPopup.style.display = "none";
-}
-
-// ── Reply quotes (multi-quote support) ──
+// ── Reply quotes: existing send/ACK/rollback owner retains the state. ──
 function _addReplyQuote(text) {
+  if (!text?.trim() || _pendingReplyQuotes.includes(text)) return;
   _pendingReplyQuotes.push(text);
   _renderReplyQuoteChips();
 }
 
 function _renderReplyQuoteChips() {
-  let container = document.getElementById("reply-quote-container");
+  let container = document.getElementById('reply-quote-container');
   if (!container) {
-    container = document.createElement("div");
-    container.id = "reply-quote-container";
-    container.className = "reply-quote-container";
-    const inputActions = document.querySelector(".input-box .input-actions");
-    if (inputActions) inputActions.parentElement.insertBefore(container, inputActions);
+    if (!_pendingReplyQuotes.length) return;
+    const inputActions = document.querySelector('.input-box .input-actions');
+    if (!inputActions) return;
+    container = document.createElement('div');
+    container.id = 'reply-quote-container';
+    container.className = 'reply-quote-container';
+    inputActions.parentElement.insertBefore(container, inputActions);
   }
-  if (!_pendingReplyQuotes.length) {
-    container.style.display = "none";
-    return;
-  }
-  container.style.display = "flex";
-  container.innerHTML = _pendingReplyQuotes.map((q, i) => {
-    const preview = q.replace(/\s+/g, " ").slice(0, 50);
-    const chars = q.length;
-    const lines = q.split("\n").length;
-    return `<div class="reply-quote-chip">
-
-      <span class="reply-quote-chip-body">
-        <span class="reply-quote-chip-label">${escapeHtml(preview)}${chars > 50 ? "…" : ""}</span>
-        <span class="reply-quote-chip-meta">${chars} chars · ${lines} line${lines > 1 ? "s" : ""}</span>
-      </span>
-      <button class="reply-quote-chip-close" data-tofu-action="_removeReplyQuote(${i})" title="Remove">✕</button>
-    </div>`;
-  }).join("");
+  renderReplyQuotePreviews(container, _pendingReplyQuotes, t, _removeReplyQuote);
 }
+
+window.addEventListener('tofu:language-change', _renderReplyQuoteChips);
 
 function _removeReplyQuote(idx) {
   _pendingReplyQuotes.splice(idx, 1);
@@ -7619,7 +7513,11 @@ function _formatTurnDuration(ms) {
 
 
 
-const _waitingBlockPolls = new Map();
+/* WeakMap keyed on the details node: a node removed while closed is collected
+ * instead of pinning its poll entry forever. The toggle handler is the only
+ * writer, and _stopWaitingBlockPoll still runs on toggle/terminal/disconnect,
+ * so no poll outlives an open, mounted block. */
+const _waitingBlockPolls = new WeakMap();
 function _waitText(key, fallback, values) {
   const value = typeof t === 'function' ? t(key, values) : '';
   return value && value !== key ? value : fallback;
@@ -7652,6 +7550,9 @@ async function _pollWaitingBlock(details) {
     _stopWaitingBlockPoll(details);
     return;
   }
+  /* Visibility-gated like the Swarm reconciliation scheduler: a hidden tab
+   * does not poll, and the interval self-prunes on the next tick. */
+  if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
   if (typeof Api === 'undefined' || !Api.swarm?.status) return;
   try {
     const status = await Api.swarm.status(details.getAttribute('data-wait-swarm-key'));
@@ -8097,7 +7998,7 @@ function _renderToolRepairedBadge(round) {
     (rep.detail ? ":\n" + rep.detail : ".")
   );
   const cls = stillFailed ? "ptool-badge-warn" : "ptool-badge-repaired";
-  return `<span class="ptool-badge ${cls}" title="${tip}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;vertical-align:-2px"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.106-3.105c.32-.322.863-.22.983.218a6 6 0 0 1-8.259 7.057l-7.91 7.91a1 1 0 0 1-2.999-3l7.91-7.91a6 6 0 0 1 7.057-8.259c.438.12.54.662.219.984z"/></svg> ${label}</span>`;
+  return `<span class="ptool-badge ${cls}" title="${tip}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;vertical-align:-2px"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.106-3.105c.32-.322.863-.22.983.218a6 6 0 0 1-8.259 7.057l-7.91 7.91a1 1 0 0 1-2.999-3l7.91-7.91a6 6 0 0 1 7.057-8.259c.438.12.54.662.219.984z"/></svg> ${label}</span>${toolResultPresentation.renderRepairKindsHtml(round)}`;
 }
 
 function _toolRejectionDescriptor(round) {
@@ -8220,21 +8121,7 @@ function _projectTodoRoundsForDisplay(rounds) {
  * the first occurrence and skip if the label is empty or already inside
  * an anchor (defensive). */
 function _linkifyMcpLabels(text, round) {
-  const links = round && round._mcpLinks;
-  if (!links || typeof links !== "object" || !text) return text;
-  let out = text;
-  for (const label of Object.keys(links)) {
-    const href = links[label];
-    if (!label || !href) continue;
-    // Only allow http(s) hrefs — never inject javascript:/data: URLs.
-    if (!/^https?:\/\//i.test(href)) continue;
-    const escLabel = escapeHtml(label);
-    const idx = out.indexOf(escLabel);
-    if (idx === -1) continue;
-    const anchor = `<a class="ptool-mcp-link" href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer" title="${escapeHtml(href)}">${escLabel}</a>`;
-    out = out.slice(0, idx) + anchor + out.slice(idx + escLabel.length);
-  }
-  return out;
+  return renderMcpResourceLinks(text, round);
 }
 
 /* Recovery-rebuilt rounds can carry NO `query` at all: boot crash recovery
@@ -8643,8 +8530,6 @@ function _renderErrorRow(round, ctx) {
     outputExpanded: Boolean(round.toolCallId && _cmdOutputExpanded.has(_cmdInteractionKey(round))),
   });
   if (browserHtml) return browserHtml;
-  const _t = (typeof t === "function") ? t : (k, d) => d;
-
   // Artifact errors keep the same sole disclosure and visible failure verdict.
   if (renderToolArtifactHeaderHtml(round)) {
     const artifactHtml = renderGenericToolResultHtml(round, meta, {
@@ -8669,18 +8554,24 @@ function _renderErrorRow(round, ctx) {
     });
     if (writeCardHtml) return writeCardHtml;
   }
-  /* The clipped tail is exactly the part that explains the failure — render
-   * the content whole, line breaks included, mirroring the rejected lane. */
-  const reason = (typeof round.toolContent === "string" ? round.toolContent : "").trim();
-  const full = escapeHtml(reason).replace(/\n/g, "<br>");
-  const tip = escapeHtml(reason.split("\n")[0] || _t("tool.failedTip", "The tool failed — it did not complete successfully."));
-  return `<div class="ptool-line ptool-error" data-rn="${round.roundNum}" title="${tip}">
-         <span class="ptool-icon">${svg}</span>
-         ${rootPill}
-         <span class="ptool-text">${cmdText}</span>
-         ${renderToolHeaderBadgeHtml(round, meta)}
-         ${full ? `<span class="ptool-error-reason">${full}</span>` : ""}
-       </div>`;
+  // Compatibility bridge only: typed result presentation owns send-message
+  // content/errors. Delete with this legacy error-row dispatcher migration.
+  if (round.toolName === "send_agent_message") {
+    const sentMessageHtml = renderGenericToolResultHtml(round, meta, {
+      iconHtml: svg, queryHtml: q, rootPillHtml: rootPill, badgeHtml: "",
+      repairedBadgeHtml: ctx.repairedBadge,
+      rightControlsHtml: _rowRightControls(round),
+    });
+    if (sentMessageHtml) return sentMessageHtml;
+  }
+  // One authoritative/deferred disclosure, with bounded safe header copy.
+  // Delete this bridge with the classic dispatcher; never replay the tool.
+  return renderGenericToolResultHtml(round, meta, {
+    iconHtml: svg, queryHtml: cmdText, rootPillHtml: rootPill,
+    badgeHtml: renderToolHeaderBadgeHtml(round, meta),
+    repairedBadgeHtml: ctx.repairedBadge, rightControlsHtml: _rowRightControls(round),
+    toolDisplayLabel: td && td.label,
+  });
 }
 
 /* Command timing is the latest backend progress sample. Reconnect restores
@@ -9473,594 +9364,34 @@ function _renderMotionVideoBlock(round, svg, q, badgeHtml) {
   return renderMotionCard(round, svg, badgeHtml, _motionCardPorts);
 }
 /* ===== migrated source: ui/workunit_tracker.js ===== */
-/* ui/workunit_tracker.js — WorkUnit live hydration for produce_* cards.
- *
- * docs/contracts/API_CONTRACT.md §2.18: the server projects every production task into
- * ONE workUnit block; this tracker is its only client-side consumer. A
- * produce_* tool round's ACCEPTANCE (badge queued|running + meta.workUnitRef)
- * is all the card knows at render time — the model's turn has ended by
- * design, so everything after acceptance (stage progress, retries, degraded
- * quality, the download link) arrives HERE, never via another LLM message.
- *
- * Rendering semantics: the card's HTML string carries only the re-attach
- * handle (data-wu-task / data-wu-kind) and an empty .ptool-wu-live region;
- * this tracker hydrates that region in place, mirroring the fingerprint-gate
- * in-place updates of _tickTimerCountdowns. A conversation re-render simply
- * re-arms the scan (the handle is durable in the persisted round meta), and
- * the next poll re-hydrates from the server-projected snapshot — the client
- * NEVER derives lifecycle state itself.
- *
- * Residency: demand-scoped. Cards call _wuScanSoon() while their HTML string
- * is being built; a debounced scan registers [data-wu-task] elements and
- * starts ONE shared poll loop (chained setTimeout, never setInterval): 2s
- * cadence backing off towards 5s while nothing changes, ticks skipped while
- * the tab is hidden, loop stops when the registry empties. No boot listener,
- * no SSE channel — terminal truth is the task snapshot, never an event.
- */
-
-const _WU_TERMINAL = { done: 1, degraded: 1, failed: 1, aborted: 1 };
-const _WU_DELAY_MIN = 2000;
-const _WU_DELAY_MAX = 5000;
-
-/* taskId → { kind, fp, seen, scenes } — `fp` fingerprints the last applied
- * snapshot so unchanged polls skip DOM writes and drive the backoff; `scenes`
- * caches the one-shot motion scene-grid fetch after a terminal unit. */
-const _wuRegistry = new Map();
-let _wuScanTimer = null;
-let _wuPollTimer = null;
-let _wuDelay = _WU_DELAY_MIN;
-
-function _wuT(k, d) {
-  return (typeof t === 'function') ? t(k, d) : (d || k);
-}
-
-/* Debounced scan entry — called by _renderMotionVideoBlock while the card
- * string is being built (before it reaches the DOM). */
-/* Registry probes — the registry itself stays a module-local const (eval
- * scopes it away from tests); these function declarations are the readable
- * surface for the jsdom harness and console debugging. */
-function _wuTrackedCount() { return _wuRegistry.size; }
-function _wuTracked(taskId) { return _wuRegistry.has(taskId); }
-
+/* Explicit composition ports only. Delete with retained multimedia dispatch;
+ * conversation/ui/work-unit owns rendering, requests and mounted lifecycles. */
+let _workUnitCards = null;
 function _wuScanSoon() {
-  if (_wuScanTimer) return;
-  _wuScanTimer = setTimeout(function () {
-    _wuScanTimer = null;
-    _wuScanNow();
-  }, 50);
-}
-
-function _wuScanNow() {
-  if (typeof document === 'undefined' || !document.querySelectorAll) return;
-  _wuArmChipListener();
-  const els = document.querySelectorAll('[data-wu-task]');
-  for (const el of els) {
-    const id = el.getAttribute('data-wu-task');
-    if (!id || _wuTracked(id)) continue;
-    _wuRegistry.set(id, {
-      kind: el.getAttribute('data-wu-kind') || '',
-      fp: '',
+  if (!_workUnitCards) {
+    _workUnitCards = createWorkUnitTracker({
+      document,
+      text: (key, fallback) => t(key, fallback),
+      ownerId: () => runtimeScope._currentUserId,
+      getSnapshot: id => Api.tasks.get(id),
+      humanResponse: (id, response) => Api.chat.humanResponse(id, response),
+      abort: id => Api.tasks.abort(id),
+      scenes: id => Api.motion.scenes(id),
+      regenerate: (id, scene) => Api.motion.regenScene(id, scene),
+      resolveUrl: path => resolveWorkUnitResourceUrl(path),
+      sceneFileUrl: (id, scene) => Api.motion.sceneFileUrl(id, scene),
+      openSlides: (id, page, total) => openSlidesEditor(id, page, total),
+      prefill: message => _wuFillComposer(message),
+      notify: (title, body) => { if (typeof showToast === 'function') showToast('', title, body, 2600); },
     });
+    retainedCompositionLifecycle.add(() => _workUnitCards?.dispose());
   }
-  if (_wuTrackedCount()) _wuEnsureLoop();
+  _workUnitCards.demand();
 }
-
-function _wuTasksApi() {
-  return (typeof Api !== 'undefined' && Api && Api.tasks &&
-    typeof Api.tasks.get === 'function') ? Api.tasks : null;
+function _wuFillComposer(message) {
+  prefillWorkUnitComposer(document, message, () => updateSendButton());
 }
-
-function _wuEnsureLoop() {
-  if (_wuPollTimer) return;
-  _wuPollTimer = setTimeout(_wuTick, _wuDelay);
-}
-
-/* One tick polls every registered (non-terminal) unit, applies changed
- * snapshots, and reschedules. The loop self-terminates when the registry
- * empties (all units terminal or their cards gone). */
-function _wuTick() {
-  _wuPollTimer = null;
-  if (!_wuTrackedCount()) return;
-  if (typeof document !== 'undefined' && document.hidden) {
-    _wuEnsureLoop();
-    return;
-  }
-  const api = _wuTasksApi();
-  if (!api) { _wuEnsureLoop(); return; }
-  /* Cards whose element left the DOM (conversation deleted, fingerprint
-   * re-render in flight) are NOT dropped here — a re-render re-arms the scan
-   * and the same taskId re-registers; a truly gone card's unit still reaches
-   * terminal state and is then forgotten. */
-  const ids = Array.from(_wuRegistry.keys());
-  let changed = false;
-  let pending = ids.length;
-  const settle = function () {
-    pending -= 1;
-    if (pending > 0) return;
-    _wuDelay = changed ? _WU_DELAY_MIN
-      : Math.min(_WU_DELAY_MAX, _wuDelay + 1500);
-    if (_wuTrackedCount()) _wuEnsureLoop();
-  };
-  for (const id of ids) {
-    Promise.resolve(api.get(id)).then(function (snap) {
-      if (snap && snap.workUnit) {
-        if (_wuApply(id, snap.workUnit)) changed = true;
-      }
-      /* null (onError:'null' / 404 after TTL sweep): keep the registration;
-       * a restarted server re-serves the unit by id via the durable path. */
-    }).catch(function () { /* transient — next tick retries */ })
-      .then(settle);
-  }
-}
-
-/* Apply one server-projected workUnit to every card carrying the handle.
- * Returns true when the snapshot differed from the last applied one. */
-function _wuApply(taskId, unit) {
-  const entry = _wuRegistry.get(taskId);
-  if (!entry || !unit || typeof unit !== 'object') return false;
-  const stages = Array.isArray(unit.stages) ? unit.stages : [];
-  const pages = (unit.pages && typeof unit.pages === 'object')
-    ? unit.pages : null;
-  const fp = JSON.stringify([
-    unit.status, unit.stageTotal || 0,
-    stages.map(function (s) {
-      return [s.name, s.state, s.attempt, s.elapsedS,
-        (s.lastErrors || []).length];
-    }),
-    unit.quality || null, unit.failure || null,
-    (Array.isArray(unit.artifacts) ? unit.artifacts : []).length,
-    pages ? [pages.total || 0,
-      (Array.isArray(pages.rendered) ? pages.rendered : []).length,
-      pages.rev || null] : null,
-    (unit.pendingGate && unit.pendingGate.guidanceId) || null,
-  ]);
-  if (fp === entry.fp) return false;
-  entry.fp = fp;
-  if (_WU_TERMINAL[unit.status] && unit.kind === 'motion-video') {
-    _wuFetchScenesOnce(taskId, entry);
-  }
-  const html = _wuLiveHtml(unit, entry);
-  const cards = document.querySelectorAll('[data-wu-task="' + taskId + '"]');
-  for (const card of cards) {
-    const live = card.querySelector('.ptool-wu-live');
-    if (live) live.innerHTML = html;
-    const badge = card.querySelector('.ptool-convmeta-header .ptool-badge');
-    if (badge) {
-      badge.textContent = _wuStatusLabel(unit.status);
-      badge.className = 'ptool-badge ptool-wu-badge-' +
-        (_WU_TERMINAL[unit.status] || unit.status === 'running' ||
-         unit.status === 'queued' || unit.status === 'retrying'
-          ? unit.status : 'failed');
-    }
-  }
-  if (_WU_TERMINAL[unit.status]) {
-    _wuRegistry.delete(taskId);
-    _wuAnnounce(unit);
-  }
-  return true;
-}
-
-function _wuStatusLabel(status) {
-  return _wuT('wu.status.' + status, status || '');
-}
-
-function _wuEsc(s) {
-  return (typeof escapeHtml === 'function')
-    ? escapeHtml(String(s == null ? '' : s)) : String(s == null ? '' : s);
-}
-
-function _wuIcon(name, size) {
-  return (typeof Icon === 'function') ? Icon(name, size || 12) : '';
-}
-
-/* Streaming per-page gallery: the server projects {total, rendered, rev,
- * href} from page_rendered events (docs/contracts/EVENTS.md production extras); the
- * client substitutes {n} in href and appends ?v=<rev> so a QA re-render of
- * the same page number still refreshes the thumbnail. Pending slots render
- * only while the unit is live — after a terminal failure the gallery shows
- * exactly what exists, never a promise of pages that will not arrive. */
-function taskIdOf(hrefTemplate) {
-  const m = String(hrefTemplate || '').match(/\/slides\/([^/]+)\/pages/);
-  return m ? m[1] : '';
-}
-
-function _wuGalleryHtml(unit) {
-  const pages = (unit && unit.pages && typeof unit.pages === 'object')
-    ? unit.pages : null;
-  if (!pages) return '';
-  const href = String(pages.href || '');
-  if (href.indexOf('{n}') < 0) return '';
-  const rendered = Array.isArray(pages.rendered) ? pages.rendered : [];
-  if (!rendered.length) return '';
-  const rev = (pages.rev && typeof pages.rev === 'object') ? pages.rev : {};
-  const total = Math.min(99, Number(pages.total || 0));
-  const live = !_WU_TERMINAL[unit.status];
-  const seen = {};
-  let html = '<div class="ptool-wu-gallery">';
-  for (const raw of rendered) {
-    const n = Number(raw);
-    if (!(n >= 1 && n <= 99) || seen[n]) continue;
-    seen[n] = true;
-    const url = href.replace('{n}', String(n)) +
-      '?v=' + (Number(rev[String(n)]) || 1);
-    const label = _wuT('wu.pageN', 'Page {n}').replace('{n}', n);
-    html += '<button type="button" class="ptool-wu-thumb" ' +
-      'data-wu-edit-task="' + _wuEsc(taskIdOf(href)) +
-      '" data-wu-edit-page="' + n + '" data-wu-edit-total="' +
-      _wuEsc(total || n) + '" title="' + _wuEsc(label) + '">' +
-      '<img loading="lazy" src="' + _wuEsc(url) + '" alt="' +
-      _wuEsc(label) + '">' +
-      '<span class="ptool-wu-thumb-n">' + n + '</span></button>';
-  }
-  if (live && total > 0) {
-    for (let n = 1; n <= total; n++) {
-      if (seen[n]) continue;
-      html += '<span class="ptool-wu-thumb ptool-wu-thumb-pending">' +
-        '<span class="ptool-wu-thumb-n">' + n + '</span></span>';
-    }
-  }
-  return html + '</div>';
-}
-
-/* Quick-action chips on terminal cards (C2): each chip either SENDS a
- * complete pre-built instruction or PREFILLS the composer for the pieces
- * only the user knows (which scene, what change). Messages carry the task
- * id so the model resolves the right revision tool (edit_slides /
- * restyle_slides / edit_video / revert_*) without guessing. */
-const _WU_CHIP_DEFS = {
-  'slides-deck': [
-    { key: 'wu.chipRestyle', send: true,
-      msg: '把这个 PPT（任务 {id}）整体换一种视觉风格（restyle_slides）' },
-    { key: 'wu.chipSimplify', send: true,
-      msg: '把这个 PPT（任务 {id}）的文字精简一下，突出每页核心信息' },
-    { key: 'wu.chipTranslate', send: true,
-      msg: '把这个 PPT（任务 {id}）全部翻译成英文，保持版式不变' },
-    { key: 'wu.chipEditPage', send: false,
-      msg: '编辑这个 PPT（任务 {id}）：把第　页改成——' },
-  ],
-  'motion-video': [
-    { key: 'wu.chipEditScene', send: false,
-      msg: '编辑视频任务 {id}：把第　个镜头改成——' },
-    { key: 'wu.chipNarration', send: false,
-      msg: '替换视频任务 {id} 第　个镜头的口播文案为：' },
-  ],
-};
-
-function _wuChipsHtml(unit) {
-  if (!_WU_TERMINAL[unit.status] || unit.status === 'failed' ||
-      unit.status === 'aborted') return '';
-  const defs = _WU_CHIP_DEFS[unit.kind];
-  if (!defs || !defs.length) return '';
-  const taskId = _wuUnitTaskId(unit);
-  if (!taskId) return '';
-  let html = '<div class="ptool-wu-chips">';
-  for (const def of defs) {
-    const message = def.msg.split('{id}').join(taskId);
-    html += '<button type="button" class="ptool-wu-chip" data-wu-chip="' +
-      _wuEsc(def.send ? 'send' : 'prefill') + '" data-wu-message="' +
-      _wuEsc(message) + '">' + _wuEsc(_wuT(def.key, def.key)) + '</button>';
-  }
-  return html + '</div>';
-}
-
-/* The workUnit projection intentionally omits the raw task id (the card's
- * data-wu-task handle owns it); chips re-derive it from the links block,
- * whose events URL is contract-stable. */
-function _wuUnitTaskId(unit) {
-  const events = unit && unit.links && unit.links.events
-    ? String(unit.links.events) : '';
-  const m = events.match(/\/api\/v\d+\/tasks\/([^/]+)\/events/);
-  return m ? m[1] : '';
-}
-
-function _wuFillComposer(message, send) {
-  const input = document.getElementById('userInput');
-  if (!input) return;
-  input.value = message;
-  /* The synthetic input event must come from the element's OWN window —
-   * a cross-realm Event (e.g. the outer global in a jsdom/iframe world)
-   * is rejected by dispatchEvent. */
-  const view = input.ownerDocument && input.ownerDocument.defaultView;
-  const EventCtor = (view && view.Event) || Event;
-  input.dispatchEvent(new EventCtor('input', { bubbles: true }));
-  if (typeof updateSendButton === 'function') updateSendButton();
-  input.focus();
-  if (send && typeof _doSendOrGenerate === 'function') {
-    _doSendOrGenerate();
-  }
-}
-
-/* Interactive outline gate (A6): a chat-initiated deck parks before the
- * authoring fan-out and the card becomes the review surface — outline
- * pages, an answer box, approve-as-is / send-changes buttons. Answers post
- * to the SHARED human-response endpoint (same owner-bound registry as
- * ask_human); the next poll's projection clears the gate. */
-function _wuGateHtml(unit) {
-  const gate = (unit && unit.pendingGate &&
-    typeof unit.pendingGate === 'object') ? unit.pendingGate : null;
-  if (!gate || !gate.guidanceId) return '';
-  const pages = Array.isArray(gate.pages) ? gate.pages : [];
-  let rows = '';
-  for (const p of pages) {
-    rows += '<div class="ptool-wu-gate-page">' +
-      '<span class="ptool-wu-gate-page-n">' + _wuEsc(p.page || '') + '</span>' +
-      '<span class="ptool-wu-gate-page-type">' + _wuEsc(p.pageType || '') +
-      '</span>' +
-      '<span class="ptool-wu-gate-page-msg">' + _wuEsc(p.key_message || '') +
-      '</span></div>';
-  }
-  return '<div class="ptool-wu-gate" data-wu-gate="' +
-    _wuEsc(gate.guidanceId) + '">' +
-    '<div class="ptool-wu-gate-title">' +
-    _wuIcon('clock', 12) +
-    '<span>' + _wuEsc(_wuT('wu.gateTitle', '确认大纲后开始生成（可提出修改意见）')) +
-    '</span></div>' +
-    (gate.title ? '<div class="ptool-wu-gate-deck">' + _wuEsc(gate.title) +
-      '</div>' : '') +
-    '<div class="ptool-wu-gate-pages">' + rows + '</div>' +
-    '<textarea class="ptool-wu-gate-input" rows="2" placeholder="' +
-    _wuEsc(_wuT('wu.gatePlaceholder',
-                '留空=直接生成；或写修改意见，如「删掉第 3 页，结尾加一页行动建议」')) +
-    '"></textarea>' +
-    '<div class="ptool-wu-gate-actions">' +
-    '<button type="button" class="ptool-wu-chip" data-wu-gate-send="approve">' +
-    _wuEsc(_wuT('wu.gateApprove', '直接生成')) + '</button>' +
-    '<button type="button" class="ptool-wu-chip" data-wu-gate-send="feedback">' +
-    _wuEsc(_wuT('wu.gateSubmit', '提交修改意见')) + '</button>' +
-    '</div></div>';
-}
-
-function _wuSubmitGate(gateEl, mode) {
-  const guidanceId = gateEl.getAttribute('data-wu-gate') || '';
-  if (!guidanceId) return;
-  const input = gateEl.querySelector('.ptool-wu-gate-input');
-  const text = mode === 'approve'
-    ? '继续'
-    : String((input && input.value) || '').trim();
-  if (!text) {
-    if (input) input.focus();
-    return;
-  }
-  const api = (typeof Api !== 'undefined' && Api && Api.chat &&
-    typeof Api.chat.humanResponse === 'function') ? Api.chat : null;
-  if (!api) return;
-  const buttons = gateEl.querySelectorAll('button');
-  for (const btn of buttons) btn.disabled = true;
-  Promise.resolve(api.humanResponse(guidanceId, text)).then(function (res) {
-    if (res && res.ok !== false) {
-      gateEl.classList.add('ptool-wu-gate-done');
-      if (input) input.disabled = true;
-    } else {
-      for (const btn of buttons) btn.disabled = false;
-    }
-  }).catch(function () {
-    for (const btn of buttons) btn.disabled = false;
-  });
-}
-
-/* Cross-feature composer channel: the slides editor's 「问 AI 改这页」 button
- * prefills through this port instead of re-deriving the composer plumbing. */
-if (typeof runtimeScope !== 'undefined') {
-  runtimeScope.TofuComposerPrefill = _wuFillComposer;
-}
-
-let _wuChipListenerArmed = false;
-function _wuArmChipListener() {
-  if (_wuChipListenerArmed || typeof document === 'undefined') return;
-  _wuChipListenerArmed = true;
-  document.addEventListener('click', function (event) {
-    const thumb = event.target && event.target.closest
-      ? event.target.closest('.ptool-wu-thumb[data-wu-edit-task]') : null;
-    if (thumb) {
-      const editTask = thumb.getAttribute('data-wu-edit-task') || '';
-      const editPage = Number(thumb.getAttribute('data-wu-edit-page')) || 1;
-      const editTotal = Number(thumb.getAttribute('data-wu-edit-total')) ||
-        editPage;
-      if (editTask && typeof openSlidesEditor === 'function') {
-        openSlidesEditor(editTask, editPage, editTotal);
-      }
-      return;
-    }
-    const gateBtn = event.target && event.target.closest
-      ? event.target.closest('[data-wu-gate-send]') : null;
-    if (gateBtn) {
-      const gateEl = gateBtn.closest('.ptool-wu-gate');
-      if (gateEl) _wuSubmitGate(gateEl,
-        gateBtn.getAttribute('data-wu-gate-send'));
-      return;
-    }
-    const chip = event.target && event.target.closest
-      ? event.target.closest('.ptool-wu-chip') : null;
-    if (chip) {
-      const message = chip.getAttribute('data-wu-message') || '';
-      if (message) _wuFillComposer(message,
-        chip.getAttribute('data-wu-chip') === 'send');
-      return;
-    }
-    const sceneBtn = event.target && event.target.closest
-      ? event.target.closest('.ptool-wu-scene-btn') : null;
-    if (sceneBtn) {
-      const action = sceneBtn.getAttribute('data-wu-scene-action');
-      const taskId = sceneBtn.getAttribute('data-wu-task-id') || '';
-      const sceneId = sceneBtn.getAttribute('data-wu-scene-id') || '';
-      if (!taskId || !sceneId) return;
-      if (action === 'regen') {
-        const api = (typeof Api !== 'undefined' && Api && Api.motion)
-          ? Api.motion : null;
-        if (api && typeof api.regenScene === 'function') {
-          sceneBtn.disabled = true;
-          Promise.resolve(api.regenScene(taskId, sceneId)).then(function (res) {
-            if (typeof showToast === 'function') {
-              try {
-                showToast('', _wuT('wu.sceneRegenStarted', 'Re-rendering'),
-                  sceneId, 2200);
-              } catch (e) { /* cosmetic only */ }
-            }
-            sceneBtn.disabled = !(res && res.ok);
-          });
-        }
-      } else if (action === 'edit') {
-        _wuFillComposer(
-          _wuT('wu.sceneEditPrefill', '编辑视频任务 {id}：把第 {n} 个镜头改成——')
-            .replace('{id}', taskId).replace('{n}', sceneId), false);
-      }
-    }
-  });
-}
-
-/* B4: scene grid for a terminal motion-video card — one compact row per
- * scene (id + duration + status), each with a deterministic 重渲 button
- * (regen API) and an 编辑 button that prefills the composer. Fetched ONCE
- * per unit; scene mp4 playback stays in the video panel, not the chat. */
-function _wuScenesHtml(unit, entry) {
-  if (unit.kind !== 'motion-video' || !_WU_TERMINAL[unit.status] ||
-      unit.status === 'failed' || unit.status === 'aborted') return '';
-  const scenes = entry && Array.isArray(entry.scenes) ? entry.scenes : null;
-  if (!scenes || !scenes.length) return '';
-  const taskId = _wuUnitTaskId(unit);
-  let html = '<div class="ptool-wu-scenes">';
-  for (const sc of scenes.slice(0, 24)) {
-    const sid = _wuEsc(sc.scene_id || '');
-    const dur = (sc.content_duration_s != null)
-      ? _wuEsc(Number(sc.content_duration_s).toFixed(1) + 's') : '';
-    const state = sc.has_video ? '' : ' ptool-wu-scene-missing';
-    html += '<div class="ptool-wu-scene' + state + '">' +
-      '<span class="ptool-wu-scene-id">' + sid + '</span>' +
-      '<span class="ptool-wu-scene-dur">' + dur + '</span>' +
-      '<button type="button" class="ptool-wu-scene-btn" ' +
-        'data-wu-scene-action="regen" data-wu-task-id="' + _wuEsc(taskId) +
-        '" data-wu-scene-id="' + sid + '">' +
-        _wuEsc(_wuT('wu.sceneRegen', '重新渲染')) + '</button>' +
-      '<button type="button" class="ptool-wu-scene-btn" ' +
-        'data-wu-scene-action="edit" data-wu-task-id="' + _wuEsc(taskId) +
-        '" data-wu-scene-id="' + sid + '">' +
-        _wuEsc(_wuT('wu.sceneEdit', '编辑')) + '</button>' +
-      '</div>';
-  }
-  return html + '</div>';
-}
-
-function _wuFetchScenesOnce(taskId, entry) {
-  if (entry.scenes !== undefined || entry.scenesFailed) return;
-  const api = (typeof Api !== 'undefined' && Api && Api.motion &&
-    typeof Api.motion.scenes === 'function') ? Api.motion : null;
-  if (!api) { entry.scenesFailed = true; return; }
-  Promise.resolve(api.scenes(taskId)).then(function (res) {
-    if (res && Array.isArray(res.scenes)) {
-      entry.scenes = res.scenes;
-      entry.fp = '';   // force one re-render with the grid hydrated
-    } else {
-      entry.scenesFailed = true;
-    }
-  }).catch(function () { entry.scenesFailed = true; });
-}
-
-/* The .ptool-wu-live region: a stage stepper (observed stages + the
- * not-yet-started remainder implied by stageTotal) plus, for terminal units,
- * ONE honest outcome line — download links for done/degraded, the failure
- * envelope (message + hint) for failed, muted for aborted. */
-function _wuLiveHtml(unit, entry) {
-  const stages = Array.isArray(unit.stages) ? unit.stages : [];
-  const total = Number(unit.stageTotal || 0);
-  let html = '<div class="ptool-wu-stages">';
-  for (const s of stages) {
-    if (!s || typeof s !== 'object') continue;
-    const state = (s.state === 'done' || s.state === 'active' ||
-      s.state === 'skipped' || s.state === 'failed') ? s.state : 'pending';
-    const icon = state === 'done' ? _wuIcon('check')
-      : state === 'active' ? '<span class="ptool-spinner"></span>'
-      : state === 'skipped' ? _wuIcon('chevronDown')
-      : state === 'failed' ? _wuIcon('x')
-      : _wuIcon('clock');
-    const attempt = (Number(s.attempt || 0) > 1)
-      ? '<span class="ptool-wu-attempt">' + _wuEsc(
-        _wuT('wu.attempt', 'attempt {n}').replace('{n}', Number(s.attempt))) +
-        '</span>'
-      : '';
-    const elapsed = (s.elapsedS != null && state !== 'pending')
-      ? '<span class="ptool-wu-elapsed">' + _wuEsc(Number(s.elapsedS)) + 's</span>'
-      : '';
-    const lastErr = (Array.isArray(s.lastErrors) && s.lastErrors.length &&
-      (state === 'failed' || Number(s.attempt || 0) > 1))
-      ? '<span class="ptool-wu-stage-err">' + _wuEsc(
-        String(s.lastErrors[s.lastErrors.length - 1]).slice(0, 120)) + '</span>'
-      : '';
-    html += '<div class="ptool-wu-stage ptool-wu-stage-' + state + '">' +
-      '<span class="ptool-wu-stage-icon">' + icon + '</span>' +
-      '<span class="ptool-wu-stage-name">' + _wuEsc(s.name || '') + '</span>' +
-      attempt + elapsed + lastErr + '</div>';
-  }
-  for (let i = stages.length; i < total; i++) {
-    html += '<div class="ptool-wu-stage ptool-wu-stage-pending">' +
-      '<span class="ptool-wu-stage-icon">' + _wuIcon('clock') + '</span>' +
-      '<span class="ptool-wu-stage-name">' + _wuEsc(
-        _wuT('wu.stagePending', 'stage {n}').replace('{n}', i + 1)) +
-      '</span></div>';
-  }
-  html += '</div>';
-  html += _wuGateHtml(unit);
-  html += _wuGalleryHtml(unit);
-
-  const artifacts = Array.isArray(unit.artifacts) ? unit.artifacts : [];
-  const links = artifacts.map(function (a) {
-    if (!a || !a.href) return '';
-    const bits = [a.label || 'file'];
-    if (a.pages != null) bits.push(_wuT('wu.pages', '{n} pages')
-      .replace('{n}', a.pages));
-    if (a.bytes) bits.push(_wuFmtBytes(a.bytes));
-    return '<a class="ptool-wu-download" href="' + _wuEsc(a.href) +
-      '" download>' + _wuIcon('save', 12) + '<span>' + _wuEsc(
-        _wuT('wu.download', 'Download {label}')
-          .replace('{label}', bits.join(' · '))) + '</span></a>';
-  }).join('');
-
-  if (unit.status === 'done' || unit.status === 'degraded') {
-    const degraded = unit.status === 'degraded';
-    const reason = degraded && unit.quality && unit.quality.reason
-      ? '<span class="ptool-wu-line-note">' + _wuEsc(unit.quality.reason) +
-        '</span>' : '';
-    html += '<div class="ptool-wu-line ' +
-      (degraded ? 'ptool-wu-line-warn' : 'ptool-wu-line-ok') + '">' +
-      _wuIcon(degraded ? 'alertTriangle' : 'check', 13) +
-      '<span>' + _wuEsc(degraded
-        ? _wuT('wu.degradedLine', 'Finished with reduced quality')
-        : _wuT('wu.doneLine', 'Finished')) + '</span>' + reason +
-      links + '</div>';
-  } else if (unit.status === 'failed') {
-    const f = unit.failure || {};
-    const msg = f.message ? '<span class="ptool-wu-line-note">' +
-      _wuEsc(String(f.message).slice(0, 200)) + '</span>' : '';
-    const hint = f.hint ? '<div class="ptool-wu-hint">' +
-      _wuEsc(String(f.hint).slice(0, 300)) + '</div>' : '';
-    html += '<div class="ptool-wu-line ptool-wu-line-err">' +
-      _wuIcon('x', 13) +
-      '<span>' + _wuEsc(_wuT('wu.failedLine', 'Job failed')) + '</span>' +
-      msg + '</div>' + hint;
-  } else if (unit.status === 'aborted') {
-    html += '<div class="ptool-wu-line ptool-wu-line-muted">' +
-      _wuIcon('ban', 13) +
-      '<span>' + _wuEsc(_wuT('wu.abortedLine', 'Stopped')) + '</span></div>';
-  }
-  html += _wuScenesHtml(unit, entry);
-  html += _wuChipsHtml(unit);
-  return html;
-}
-
-function _wuFmtBytes(n) {
-  const v = Number(n) || 0;
-  if (v >= 1048576) return (v / 1048576).toFixed(1) + ' MB';
-  if (v >= 1024) return Math.round(v / 1024) + ' KB';
-  return v + ' B';
-}
-
-/* Ephemeral completion notice — the durable record is the card itself; the
- * toast only catches a user reading further down the transcript. */
-function _wuAnnounce(unit) {
-  if (typeof showToast !== 'function') return;
-  const title = _wuStatusLabel(unit.status);
-  const body = unit.title || '';
-  try { showToast('', title, body, 2600); } catch (e) { /* cosmetic only */ }
-}
+runtimeScope.TofuComposerPrefill = _wuFillComposer;
 /* ===== migrated source: ui/turn_nav.js ===== */
 /* TurnStore/Surface bridge only; compact UI is owned by turn-navigation.ts. */
 let _turnNavigation = null;
@@ -10112,6 +9443,17 @@ function buildTurnNav(conv) {
       host: nav,
       translate: (key, params) => t(key, params),
       scrollToTurn,
+      directoryKey: (id) => runtimeScope.ConversationTurnStore.roundDirectoryKey(id),
+      directory: async (id, offset, limit, anchor) => {
+        const active = typeof getActiveConv === 'function' ? getActiveConv() : null;
+        if (!active || active.id !== id) throw new Error('Conversation changed');
+        return runtimeScope.ConversationTurnStore.loadConversationRoundDirectory(active, 'main', offset, limit, anchor);
+      },
+      hydrateRound: async (id, entry) => {
+        const active = typeof getActiveConv === 'function' ? getActiveConv() : null;
+        if (!active || active.id !== id) throw new Error('Conversation changed');
+        await runtimeScope.ConversationTurnStore.hydrateConversationRound(active, 'main', entry);
+      },
 
       loadEarlier: async (conversationId, beforeOrdinal) => {
         const conv = typeof getActiveConv === 'function' ? getActiveConv() : null;
@@ -10120,10 +9462,11 @@ function buildTurnNav(conv) {
       },
     }) : null;
   }
-  const state = conv?.id
-    ? runtimeScope.ConversationTurnStore?.ensureRuntimeStore?.(conv.id)?.getState?.()
+  const conversationId = conv?._localOnly ? '' : conv?.id || '';
+  const state = conversationId
+    ? runtimeScope.ConversationTurnStore?.ensureRuntimeStore?.(conversationId)?.getState?.()
     : null;
-  _turnNavigation?.update(conv?.id || '', state || null);
+  _turnNavigation?.update(conversationId, state || null);
 }
 
 function updateActiveTurn() {
@@ -10225,7 +9568,10 @@ function _handleSwarmPhase(ev, c) {
             status: "searching",
             toolName: "spawn_agents",
 
-            taskId: swarmFrameExecutionTaskId(ev) || ev.swarmId || ev.swarm_id || undefined,
+            // A legacy mirror may carry only conversation routing and a run ID.
+            // Leave its producer unknown until the durable launch supplies it;
+            // inventing taskId=runId prevents scoped reconciliation to that row.
+            taskId: swarmFrameExecutionTaskId(ev) || undefined,
             attemptId: ev.attemptId || undefined,
             _swarmRunId: ev.swarmId || ev.swarm_id || undefined,
             _swarm: true,
@@ -10672,6 +10018,8 @@ function updateSendButton() {
   };
   const state = updateComposerSendControls({
     document,
+    sendBlocked: isBootSendBlocked(),
+    blockedLabel: t('boot.sendPaused'),
     translating,
     startupConnecting,
     turnBusy,
@@ -11231,10 +10579,15 @@ async function _settleTranslationTask(conv, turnId, taskId, result) {
   if (current?.taskId && current.taskId !== taskId) return false;
   _translationTasksByTurn.delete(key);
   if (result?.status === 'done' || result?.noop === true) {
+
+    if (current?.translationWait) composerTranslationStatus.finish(
+      current.translationWait, 'completed', result?.model);
     _setTranslationActivity(conv.id, turnId, null);
     await _hydrateTranslatedTurn(conv);
     return true;
   }
+  if (current?.translationWait) composerTranslationStatus.finish(
+    current.translationWait, result?.status === 'aborted' ? 'cancelled' : 'failed');
   const error = _translationErrorText(result);
   _setTranslationActivity(conv.id, turnId, {
     status: 'failed', message: error, error,
@@ -11339,6 +10692,9 @@ async function _runTranslationPipeline(conv, turnId, options) {
   if (!options?.existingTaskId
       && !TRANSLATION_CLAIMS.claim(conv.id, turnId)) return;
 
+
+  const translationWait = composerTranslationStatus.begin(conv.id, 'turn');
+
   try {
     const taskId = options?.existingTaskId || await _startTranslateTask(
       sourceText,
@@ -11351,6 +10707,7 @@ async function _runTranslationPipeline(conv, turnId, options) {
     );
     _translationTasksByTurn.set(key, {
       taskId, field, sourceLang: sourceLanguage, targetLang: targetLanguage,
+      translationWait,
     });
     _setTranslationActivity(conv.id, turnId, {
       status: 'pending', message: 'Translating…',
@@ -11359,6 +10716,7 @@ async function _runTranslationPipeline(conv, turnId, options) {
       conv, turnId, taskId, field,
       sourceLang: sourceLanguage, targetLang: targetLanguage,
     });
+
   } catch (error) {
     _translationTasksByTurn.delete(key);
     const messageText = error?.message || 'Translation failed';
@@ -11368,6 +10726,8 @@ async function _runTranslationPipeline(conv, turnId, options) {
     if (typeof showToast === 'function') showToast(messageText, 'error');
   } finally {
     TRANSLATION_CLAIMS.release(conv.id, turnId);
+
+    composerTranslationStatus.finish(translationWait, 'failed');
   }
 }
 
@@ -11413,13 +10773,20 @@ async function _resumePendingTranslations(convId) {
       const conv = conversations.find((item) => item?.id === frame.convId);
       if (!conv) return;
       if (frame.status === 'running' || frame.type === 'running') {
+
         _setTranslationActivity(
           frame.convId, frame.turnId, _translationPendingActivity(frame),
         );
         return;
       }
+      const currentTask = _translationTasksByTurn.get(
+        _translationTaskKey(frame.convId, frame.turnId));
+      if (currentTask?.taskId && frame.taskId && currentTask.taskId !== frame.taskId) return;
       if (frame.status === 'done' || frame.type === 'done'
           || frame.noop === true) {
+
+        if (currentTask?.translationWait) composerTranslationStatus.finish(
+          currentTask.translationWait, 'completed', frame.model);
         _setTranslationActivity(frame.convId, frame.turnId, null);
         _translationTasksByTurn.delete(
           _translationTaskKey(frame.convId, frame.turnId),
@@ -11428,6 +10795,9 @@ async function _resumePendingTranslations(convId) {
         return;
       }
       if (frame.status === 'error' || frame.type === 'error') {
+
+        if (currentTask?.translationWait) composerTranslationStatus.finish(
+          currentTask.translationWait, 'failed');
         _translationTasksByTurn.delete(
           _translationTaskKey(frame.convId, frame.turnId),
         );
@@ -11438,6 +10808,9 @@ async function _resumePendingTranslations(convId) {
         return;
       }
       if (frame.status === 'aborted' || frame.type === 'aborted') {
+
+        if (currentTask?.translationWait) composerTranslationStatus.finish(
+          currentTask.translationWait, 'cancelled');
         _translationTasksByTurn.delete(
           _translationTaskKey(frame.convId, frame.turnId),
         );
@@ -12054,7 +11427,6 @@ async function _waitForImageProcessing() {
 // upload to establish that ref, never for frame/transcript analysis; turns stay
 // small and later model requests resolve the latest server-side evidence.
 var _VIDEO_EXTS = new Set(['.mp4', '.m4v', '.mov', '.webm', '.mkv', '.avi']);
-var _VIDEO_MAX_BYTES = 512 * 1024 * 1024;  // mirrors TOFU_VIDEO_MAX_BYTES default
 
 function _looksLikeVideo(f) {
   const mt = (f.type || '').toLowerCase();
@@ -12171,10 +11543,6 @@ function _applyVideoAttachment(vObj, attachment) {
 }
 
 async function _handleVideoDrop(f) {
-  if (f.size > _VIDEO_MAX_BYTES) {
-    debugLog(t('upload.videoTooLarge') + ' — ' + (f.name || ''), 'error');
-    return;
-  }
   const vObj = { name: f.name || 'video', sizeKB: Math.round((f.size || 0) / 1024), _status: 'uploading' };
   pendingVideos.push(vObj);
   renderImagePreviews();
@@ -12199,11 +11567,12 @@ async function _handleVideoDrop(f) {
 }
 
 async function _pollVideoReady(vObj) {
-  for (let i = 0; i < 180; i++) {  // 180 × 4s = 12min ceiling (15-min video + transcript)
+  while (true) {  // Retain the attachment owner until actual completion or removal.
     await new Promise(r => setTimeout(r, 4000));
     if (!pendingVideos.includes(vObj)) throw new Error('removed');
     let rec = null;
     try { rec = await Api.videos.status(vObj.video_id); } catch (_e) { rec = null; }
+    if (!pendingVideos.includes(vObj)) throw new Error('removed');
     if (!rec) continue;  // transient network — keep polling
     if (rec.status === 'ready') {
       _applyVideoAttachment(vObj, rec.attachment || rec);
@@ -12219,7 +11588,6 @@ async function _pollVideoReady(vObj) {
       renderImagePreviews();
     }
   }
-  throw new Error('timeout');
 }
 
 function removeVideo(i) {
@@ -12753,14 +12121,14 @@ function openImagePreview(src) {
   close.type = "button";
   close.className = "preview-close-btn";
   close.dataset.tofuAction = "closePreview()";
-  close.setAttribute("aria-label", "Close");
+  close.setAttribute("aria-label", typeof t === 'function' ? t('common.close') : 'Close');
   close.textContent = "✕";
   const image = document.createElement("img");
   image.src = String(src);
   image.alt = "Preview";
   image.className = "preview-image";
   body.replaceChildren(close, image);
-  modal.classList.add("open");
+  showAttachmentPreview(document, typeof t === 'function' ? t('markdown.previewTitle') : 'Attachment preview');
 }
 function openTextPreview(title, meta, text) {
   // Last-line-of-defence: an empty / whitespace-only body would render an
@@ -12774,13 +12142,10 @@ function openTextPreview(title, meta, text) {
     : `<span class="preview-text-empty">${escapeHtml(_t("tool.noContent", "No content returned."))}</span>`;
   document.getElementById("previewBody").innerHTML =
     `<button class="preview-close-btn" data-tofu-action="closePreview()" aria-label="Close">✕</button><div class="preview-text-panel"><div class="preview-text-header"><span class="preview-text-title">${escapeHtml(title)}</span><span class="preview-text-meta">${escapeHtml(meta)}</span></div><pre class="preview-text-body">${body}</pre></div>`;
-  document.getElementById("previewModal").classList.add("open");
+  showAttachmentPreview(document, typeof t === 'function' ? t('markdown.previewTitle') : 'Attachment preview');
 }
 function closePreview() {
-  document.getElementById("previewModal").classList.remove("open");
-  setTimeout(() => {
-    document.getElementById("previewBody").innerHTML = "";
-  }, 300);
+  closeAttachmentPreview(document);
 }
 
 // Event delegation for ptool-truncated "show all" bars (static render path)
@@ -13275,8 +12640,8 @@ document.addEventListener('click', function(e) {
  * Stays in core because these are called from boot / first-paint / SSE paths:
  * main.js:1354-1355 (loadProjectStatus + _updateAutoApplyUI at boot, BARE),
  * sse_handlers_tool.js:177 + sse_handlers_misc.js:389 (_applyProjectData on
- * project SSE events, BARE), main_conv_lifecycle.js (_restoreConvProject /
- * _clearProjectStateLocal on conv switch), main.js:588 + presence.js +
+ * project SSE events, BARE), main_conv_lifecycle.js (_restoreConvProject on
+ * conversation switch), main.js:588 + presence.js +
  * project-brain*.js (_saveConvProjectPath / _getConvProjectPath), and the
  * always-visible project-bar render+interact cluster (_updateProjectUI /
  * toggleProjectBarReadOnly / toggleAutoApply / clearProject).
@@ -13324,6 +12689,14 @@ function _updateAutoApplyUI() {
 function _saveConvProjectPath(path, extraPaths, readOnlyPaths) {
   _conversationProjectController.begin();
   const conv = getActiveConv();
+
+  if (!conv) {
+    _conversationProjectController.chooseDraft({
+      projectPath: path || '', projectPaths: path ? [path, ...(extraPaths || [])] : [],
+      readOnlyPaths: readOnlyPaths || [],
+    });
+    return;
+  }
   if (conv) {
     conv.projectPath = path || "";
     // Persist ALL project paths (primary + extras) so they survive conversation switches
@@ -13341,9 +12714,11 @@ function _saveConvProjectPath(path, extraPaths, readOnlyPaths) {
     } else {
       conv.readOnlyPaths = [];
     }
+    noteConversationProjectChoice(conv);
     reconcileConversationCatalogMetadata(conv.id);
     persistConversationSettings(conv);
   }
+  _restoreConvProject(conv);
 }
 
 function _getConvProjectPath(conv) {
@@ -13366,47 +12741,7 @@ async function rescanProject() {
   }
 }
 
-/* 伪路径会话的项目栏合成态:不调 setPaths(服务器无法扫描),
-   只渲染 active bar + 徽章,身份仍保留完整伪路径。 */
-function _applyRemoteProjectState(conv, pseudo) {
-  projectState = {
-    active: true,
-    path: pseudo,
-    fileCount: 0,
-    dirCount: 0,
-    totalSize: 0,
-    languages: {},
-    scanning: false,
-    scanProgress: "",
-    scanDetail: "",
-    scannedAt: Date.now(),
-    readOnly: (conv.readOnlyPaths || []).includes(pseudo),
-    extraRoots: (conv.projectPaths || []).filter(path => path !== pseudo).map(path => ({
-      path, readOnly: (conv.readOnlyPaths || []).includes(path),
-    })),
-  };
-  debugLog("Remote worktree active for conversation: " + pseudo, "info");
-  _updateProjectUI();
-}
 
-function _clearProjectStateLocal() {
-  // Reset local projectState without touching server when the next
-  // conversation has no project. Project exploration no longer owns a poll.
-  projectState = {
-    active: false,
-    path: "",
-    fileCount: 0,
-    dirCount: 0,
-    totalSize: 0,
-    languages: {},
-    scanning: false,
-    scanProgress: "",
-    scanDetail: "",
-    scannedAt: 0,
-    extraRoots: [],
-  };
-  _updateProjectUI();
-}
 
 // Temporary retained adapter; delete when project presentation moves to TypeScript.
 function _hasProjectComposerDraft() {
@@ -13420,13 +12755,7 @@ function _hasProjectComposerDraft() {
 const _conversationProjectController = createConversationProjectController({
   activeId: () => activeConvId,
   exists: id => conversations.some(conv => conv && conv.id === id),
-  hasDraft: _hasProjectComposerDraft,
-  selection: () => projectState,
-  clear: _clearProjectStateLocal,
-  remote: _applyRemoteProjectState,
-  apply: _applyProjectData,
-  setPaths: (paths, readOnly, recent) => Api.project.setPaths(paths, readOnly, recent),
-  warn: message => debugLog(message, 'warn'),
+  apply: data => { projectState = data; _updateProjectUI(); },
 });
 function _restoreConvProject(conv, eligible) {
   return _conversationProjectController.restore(conv, eligible);
@@ -13438,9 +12767,7 @@ let _projectBarFolders = [];
 let _projectContextView = null;
 
 async function clearProject() {
-  const current = _conversationProjectController.beginMutation();
-  await Api.project.clear().catch(e => debugLog(`[clearProject] ${e.message}`, 'warn'));
-  if (!current()) return;
+  // Detach this conversation locally; do not clear another worker's registry.
   _saveConvProjectPath("");
   projectState = {
     active: false, path: "", fileCount: 0, dirCount: 0, totalSize: 0,
@@ -13453,13 +12780,14 @@ async function clearProject() {
       && typeof projectModalPresentation.resetAfterProjectClear === 'function') {
     projectModalPresentation.resetAfterProjectClear();
   }
-  /* A project-less chat is never Studio — fall back to Pro (unless the user
-   * is deliberately in Air). Keeps the dial truthful. */
+  // Repaint the optional attachment action; all chat capabilities remain available.
   if (typeof onProjectCleared === 'function') onProjectCleared();
   debugLog("Project cleared", "success");
 }
 
 function _applyProjectData(data) {
+  // Unscoped server/SSE status is enrichment only, not workspace authority.
+  if (!projectStatusMatchesWorkspace(data, projectState)) return;
   projectState = {
     ...projectState,
     active: true,
@@ -13475,12 +12803,12 @@ function _applyProjectData(data) {
   };
   // Merge in extra roots — backend always sends extraRoots[] in get_state()
   if (Array.isArray(data.extraRoots)) {
-    projectState.extraRoots = data.extraRoots;
+    projectState.extraRoots = projectState.extraRoots.map((root, index) => ({
+      ...data.extraRoots[index], ...root,
+    }));
   }
   // Primary root read-only flag (backend sends `readOnly` in get_state()).
-  if (data.readOnly !== undefined) {
-    projectState.readOnly = !!data.readOnly;
-  }
+  // Read-only policy also belongs to conversation settings, not global status.
   // Cross-DC indicator from backend
   if (data.crossDC) {
     projectState.crossDC = data.crossDC;
@@ -13602,15 +12930,8 @@ async function toggleProjectBarReadOnly(index, event) {
 
   const _prevProjectState = { ...projectState, extraRoots: (projectState.extraRoots || []).slice() };
 
-  // Optimistic LOCAL repaint only (instant feedback). We do NOT sync the
-  // conversation here — the backend round-trip below owns persistence, so we
-  // never write a guessed state that could race the authoritative response.
-  _applyProjectData({
-    path: folders[0],
-    readOnly: readOnly.has(folders[0]),
-    extraRoots: folders.slice(1).map((p) => ({ path: p, readOnly: readOnly.has(p) })),
-    crossDC: projectState.crossDC || null,
-  });
+  // Explicit user policy is conversation-owned even while validation is pending.
+  _saveConvProjectPath(folders[0], folders.slice(1), roList);
   debugLog(`${entry.path} → ${readOnly.has(entry.path) ? 'read-only' : 'writable'}`, "success");
 
   const current = _conversationProjectController.beginMutation();
@@ -13621,13 +12942,13 @@ async function toggleProjectBarReadOnly(index, event) {
     if (!resp || !resp.ok) throw new Error(data.error || "Failed");
     if (!current()) return; // navigation, restore or a newer selection owns the bar
     // Single source of truth: render + persist EXACTLY what the backend returned.
-    _applyProjectData(data);
     const { allPaths, roList: srvRo } = _deriveConvPathsFromState(data);
     _saveConvProjectPath(allPaths[0] || '', allPaths.slice(1), srvRo);
+    _applyProjectData(data);
   } catch (e) {
     if (!current()) return; // never restore the previous conversation's roots
-    projectState = _prevProjectState;
-    _updateProjectUI();
+    const previous = _deriveConvPathsFromState(_prevProjectState);
+    _saveConvProjectPath(previous.allPaths[0] || '', previous.allPaths.slice(1), previous.roList);
     debugLog(`Read-only toggle failed: ${e.message}`, "error");
   }
 }
@@ -13636,10 +12957,10 @@ async function toggleProjectBarReadOnly(index, event) {
 async function loadProjectStatus() {
 
   _updateProjectUI();
-  // Cold shells restore only after authoritative settings hydration.
+  // A status repaint is not a newer project choice: preserve the generation
+  // that lets the pending authoritative hydration update this same view.
   const conv = getActiveConv();
-  if (conv?._turnSnapshotRequired) return;
-  return _restoreConvProject(conv);
+  return _restoreConvProject(conv, () => getActiveConv() === conv);
 }
 /* ===== migrated source: main/conversation_turn_store.js ===== */
 let _roleAvatarIcons = null;
@@ -13734,7 +13055,7 @@ function _nativeResumeCtxOptions(resolved, operation) {
 async function _operateNativeTurn(conv, turnId, operation, inputEdit) {
   const resolved = _nativeTurnState(conv, turnId);
   if (!resolved || typeof runtimeScope.ConversationTurnStore === 'undefined') return false;
-  if (Object.values(resolved.state.turnsById || {}).some(turn =>
+  if (entityRecordValues(resolved.state.turnsById || {}).some(turn =>
     turn && (turn.status === 'pending' || turn.status === 'running'))) {
     if (typeof showToast === 'function') {
       showToast('Stop the current attempt before starting another operation.', 'info');
@@ -13794,7 +13115,7 @@ async function _answerHumanGuidanceLate(conv, turnId, responseText) {
   if (!resolved || typeof runtimeScope.ConversationTurnStore === 'undefined') {
     throw new Error('Unknown turn; refresh the authoritative snapshot.');
   }
-  if (Object.values(resolved.state.turnsById || {}).some(turn =>
+  if (entityRecordValues(resolved.state.turnsById || {}).some(turn =>
     turn && (turn.status === 'pending' || turn.status === 'running'))) {
     throw new Error('Stop the current attempt before answering.');
   }
@@ -14098,23 +13419,27 @@ async function _createNativeBranchFromSelection(
   conv, parentTurnId, title, selectedText,
 ) {
   if (!conv || !parentTurnId || !title?.trim()
-      || typeof runtimeScope.ConversationTurnStore === 'undefined') return;
-  try {
-    await runtimeScope.ConversationTurnStore.createBranchLane(
-      conv,
-      parentTurnId,
-      {
-        title: title.trim(),
-        kind: 'branch',
+      || typeof runtimeScope.ConversationTurnStore === 'undefined') return false;
+  return createSelectionBranch({
+    create: () => runtimeScope.ConversationTurnStore.createBranchLane(
+      conv, parentTurnId, {
+        title: title.trim(), kind: 'branch',
         anchorText: String(selectedText || '').slice(0, 200),
         parentSelection: String(selectedText || ''),
       },
-    );
-  } catch (error) {
-    if (typeof showToast === 'function') {
-      showToast(error?.message || 'Branch creation failed', 'error');
-    }
-  }
+    ),
+    isCurrent: () => getActiveConv()?.id === conv.id,
+    open: laneId => {
+      runtimeScope.ConversationSurfacePresentation?.setExpandedBranchLane?.(conv.id, laneId);
+      _openNativeBranchComposer(conv, parentTurnId, laneId);
+      document.getElementById('userInput')?.focus();
+    },
+    error: error => {
+      if (typeof showToast === 'function') {
+        showToast(error?.message || t('selection.failed'), 'error');
+      }
+    },
+  });
 }
 
 const _nativeBranchComposer = createBranchComposerSession();
@@ -14250,8 +13575,8 @@ async function sendBranchMessage(text, images) {
 
 function promptNewBranch(parentTurnId, preTitle, selectedText) {
   const conv = typeof getActiveConv === 'function' ? getActiveConv() : null;
-  if (!conv || !parentTurnId) return;
-  void _createNativeBranchFromSelection(
+  if (!conv || !parentTurnId) return Promise.resolve(false);
+  return _createNativeBranchFromSelection(
     conv, parentTurnId, preTitle || String(selectedText || '').slice(0, 40), selectedText,
   );
 }
@@ -14373,6 +13698,34 @@ async function _mutateNativeTurnFiles(conv, turnId, operation) {
 }
 
 const _nativeTurnRenderers = createClassicConversationRenderers({
+
+  usageRecovery: {
+    inspect(conversationId, turnId, signal) {
+      return conversationSyncApi.usageRecovery(conversationId, turnId, { signal, timeout: 30_000 });
+    },
+    recover(conversationId, turnId, body) {
+      return conversationSyncApi.recoverUsage(conversationId, turnId, body);
+    },
+    createCommandId: createTurnCommandId,
+    onAccepted(conversationId) {
+      const conv = conversations.find(item => item?.id === conversationId) || { id: conversationId };
+      void runtimeScope.ConversationTurnStore.hydrateConversation(conv)
+        .catch(error => console.warn('[UsageRecovery] authoritative refresh failed', error));
+    },
+  },
+  choiceInteractions(conversationId, turnId) {
+    return createAuthenticatedChoiceInteractionPorts({
+      conversationId, turnId,
+      commandId: createTurnCommandId,
+      text: (key, fallback) => { const value = typeof t === 'function' ? t(key) : ''; return value && value !== key ? value : fallback; },
+    });
+  },
+  inspectToolEffect(reference, signal) {
+    return conversationSyncApi.inspectToolEffect(
+      reference.conversationId, reference.turnId, reference.operationId, reference.ownerScope,
+      { signal, timeout: 30_000 },
+    );
+  },
   loadToolResult(reference, signal) {
     return conversationSyncApi.turnToolResult(
       reference.conversationId, reference.turnId, reference.roundIndex,
@@ -14579,6 +13932,14 @@ const _nativeTurnRenderers = createClassicConversationRenderers({
         ? { report: result.report } : null))
       .catch(() => null);
   },
+  async resumeGoalRun(runId) {
+    const { createOrchestrationTaskRequestClient } = await import('../features/orchestration/task-request');
+    const result = await createOrchestrationTaskRequestClient({
+      api: resolveOrchestrationApiClient(Api),
+    }).resume(runId);
+    return { ok: result.ok === true, status: Number(result.status || 0),
+      runId: String(result.runId || ''), error: String(result.error || '') };
+  },
   roleLabel(turn) {
     const initiator = turn?.metadata?.origin?.initiator;
     const originLabels = {
@@ -14605,14 +13966,14 @@ const _nativeTurnRenderers = createClassicConversationRenderers({
   },
   actionLabel(action, turn, actionView) {
     const keys = {
-      copy: 'msgAction.copy', inspect: 'msgAction.inspect',
+      copy: 'msgAction.copy', inspect: 'msgAction.inspect', review: 'turnReview.title',
       edit: 'msgAction.edit', regenerate: 'msgAction.regen',
       resume: 'msgAction.continue', translate: 'msgAction.translate',
       export: 'msgAction.export', 'promote-decision': 'msgAction.promoteDecision',
       branch: 'branch.add', delete: 'msgAction.delete',
     };
     const fallbacks = {
-      copy: 'Copy', inspect: 'Inspect', edit: 'Edit', regenerate: 'Regen',
+      copy: 'Copy', inspect: 'Inspect', review: 'Task acceptance', edit: 'Edit', regenerate: 'Regen',
       resume: 'Continue',
       translate: 'Translate', export: 'Export',
       'promote-decision': 'Promote as decision', branch: 'Branch', delete: 'Delete',
@@ -14725,6 +14086,26 @@ runtimeScope.PlanDecisionPresentation = Object.freeze({
 });
 
 const _automationTimeClient = createAutomationManagementClient();
+// Temporary retained bridge: remove with the shell migration; the typed owner
+// holds the only dialog lifetime and borrows existing conversation lifecycle.
+const _turnReviewPresentation = createTurnReviewPresentation({
+  activeConversationId: () => typeof getActiveConv === 'function' ? getActiveConv()?.id || null : null,
+  load: (convId, turnId, signal) => Api.conversations.turnReview(convId, turnId, signal),
+  save: (convId, turnId, command, signal) => Api.conversations.saveTurnReview(convId, turnId, command, signal),
+  facts: (convId, signal) => Api.conversations.workingFacts(convId, signal),
+  outputs: async (convId, signal) => {
+    const value = await Api.artifacts.forConv(convId, signal);
+    if (!Array.isArray(value?.artifacts)) throw new Error(t('turnReview.outputsError'));
+    return value.artifacts.map(item => ({ id: String(item.id), title: String(item.title || '') }));
+  },
+  openOutput: id => window.open(Api.artifacts.viewUrl(id), '_blank', 'noopener'),
+  text: (key, fallback) => { const value = t(key); return value && value !== key ? value : fallback; },
+  reportError: message => { if (typeof showToast === 'function') showToast(message, 'error'); },
+});
+if (typeof retainedCompositionLifecycle !== 'undefined') {
+  retainedCompositionLifecycle.add(() => _turnReviewPresentation.destroy());
+}
+
 const _conversationSurfaceController = createConversationSurfaceController({
   loadTaskTimePresentations(conversationId, attemptId, signal) {
     return _automationTimeClient.presentations(conversationId, attemptId, { signal });
@@ -14771,7 +14152,7 @@ const _conversationSurfaceController = createConversationSurfaceController({
     const signatures = new Map();
     if (typeof calcCostCny !== 'function') return signatures;
     const turnsById = state?.turnsById || {};
-    for (const turnId of Object.keys(turnsById)) {
+    for (const turnId of entityRecordKeys(turnsById)) {
       const turn = turnsById[turnId];
       if (!turn || turn.actor !== 'assistant') continue;
       if (!['completed', 'interrupted', 'truncated', 'failed']
@@ -14802,6 +14183,12 @@ const _conversationSurfaceController = createConversationSurfaceController({
     blockLabel(count) {
       return t('chat.loadEarlierBlocks', { n: count });
     },
+
+    historyStatusLabel(state) {
+      return t(state === 'loading' ? 'chat.historyLoading' : 'chat.historyFailed');
+    },
+
+    historyRetryLabel() { return t('chat.historyRetry'); },
   },
   roundOutlineLabel(key, n) {
     return t(key, { n });
@@ -14814,24 +14201,13 @@ const _conversationSurfaceController = createConversationSurfaceController({
     };
     return t(keys[state] || 'sync.transportRecovering');
   },
-  followLatest() {
-    if (typeof scrollToBottom === 'function') scrollToBottom(true);
-  },
   onIntent(intent) {
     const conv = typeof getActiveConv === 'function' ? getActiveConv() : null;
     if (!conv || conv.id !== intent.conversationId) return;
     if (intent.type === 'load-earlier-turns' && intent.laneId) {
-      void runtimeScope.ConversationTurnStore?.loadConversationTurnPage?.(
-        conv,
-        intent.laneId,
-        intent.beforeOrdinal,
-        intent.limit,
-      ).catch((error) => {
-        if (typeof showToast === 'function') {
-          showToast(error?.message || 'Unable to load earlier turns', 'error');
-        }
-      });
-      return;
+      return runtimeScope.ConversationTurnStore?.loadConversationTurnPage?.(
+        conv, intent.laneId, intent.beforeOrdinal, intent.limit,
+      );
     }
     if (intent.type === 'remove-queue' && intent.queueId) {
       void _removeNativeQueueItem(conv, intent.queueId);
@@ -14897,6 +14273,9 @@ const _conversationSurfaceController = createConversationSurfaceController({
       conv.id, intent.turnId,
     );
     if (!resolved && !transientTurn) return;
+    if (intent.type === 'review' && resolved?.turn?.actor === 'assistant' && resolved.turn.laneId === 'main') {
+      void _turnReviewPresentation.open(conv.id, intent.turnId); return;
+    }
     const projection = resolved?.turn?.projection || transientTurn?.projection || {};
     const attachmentIndex = Number.parseInt(intent.operation || '', 10);
     if (intent.type === 'toggle-branch' && intent.laneId) {
@@ -15025,7 +14404,15 @@ const _conversationSurfaceController = createConversationSurfaceController({
     else if (intent.type === 'branch') void _createNativeBranch(conv, intent.turnId);
     else if (intent.type === 'delete') void _deleteNativeTurn(conv, intent.turnId);
   },
-  afterConversationCommit(conv, state, _force, viewModel) {
+  onConversationMounted(conv) {
+    _turnReviewPresentation.activate(conv.id);
+    runtimeScope.Artifacts?.activateConversation?.(conv);
+  },
+  afterConversationCommit(conv, state, _force, viewModel, mountedTurnIds) {
+    if (conversationReview.viewed(conv.id,
+      runtimeScope.ConversationTurnRead.ordered(conv),
+      mountedTurnIds)) renderConversationList();
+    runtimeScope.renderBackgroundAgents?.();
     renderComposerModelNotice(document.getElementById('composerModelNotice'), viewModel, {
       localizedText: (key, fallback, values) => {
         const label = t(key, values);
@@ -15035,12 +14422,11 @@ const _conversationSurfaceController = createConversationSurfaceController({
 
     runtimeScope.ConversationTurnStore?.notifyRenderedState?.(
       conv.id, state,
-      Array.from(document.getElementById('chatInner')?.querySelectorAll(
-        '[data-turn-id]',
-      ) || [], node => node.dataset.turnId).filter(Boolean),
+      mountedTurnIds,
     );
     /* Running and terminal revisions reconcile into the same data-turn-id
      * node; this adapter never creates an alternate message identity. */
+    _updateScrollToBottomBtn();
     if (typeof buildTurnNav === 'function') buildTurnNav(conv);
     if (typeof _cvRefreshContextGauge === 'function') _cvRefreshContextGauge();
     if (typeof reconcileTurnInlineEditors === 'function') {
@@ -15052,12 +14438,20 @@ const _conversationSurfaceController = createConversationSurfaceController({
 const _conversationTransientTurnOverlay = createTransientTurnOverlay();
 
 runtimeScope.ConversationSurfacePresentation = Object.freeze({
-
+  activateConversation(conversationId) {
+    _turnReviewPresentation.activate(conversationId || null);
+  },
+  ownsConversation(conversationId) {
+    return _conversationSurfaceController.ownsConversation(conversationId);
+  },
   revealTurn(conversationId, turnId) {
     return _conversationSurfaceController.revealTurn(conversationId, turnId);
   },
-  followLatest() {
-    _conversationSurfaceController.followLatest();
+  isNearLatest(threshold) {
+    return _conversationSurfaceController.isNearLatest(threshold);
+  },
+  followLatest(intent) {
+    _conversationSurfaceController.followLatest(intent);
   },
   setTranslationActivity(conversationId, turnId, activity) {
     _conversationSurfaceController.setTranslationActivity(
@@ -15164,7 +14558,7 @@ runtimeScope.renderAuthoritativeConversationSurface = function (conversationId, 
   const store = service.ensureRuntimeStore(conversationId);
   const state = store?.getState?.();
   if (!state || (!store._snapshotLoaded
-      && Object.keys(state.turnsById || {}).length === 0)) return false;
+      && entityRecordKeys(state.turnsById || {}).length === 0)) return false;
   return _renderConversationSurfaceState(conv, state, repaint);
 };
 
@@ -15202,6 +14596,14 @@ runtimeScope.requestAuthoritativeConversationRender = function (
   runtimeScope.ConversationTurnStore = createConversationTurnRuntime({
     api: conversationSyncApi,
     streamClientId: requiredApiTransport.pageRequestId(),
+
+    snapshotViewport() {
+      const pane = document.getElementById('chatContainer');
+      return {
+        width: pane?.clientWidth || window.innerWidth,
+        height: pane?.clientHeight || window.innerHeight,
+      };
+    },
     findConversation(conversationId) {
       if (typeof conversations === 'undefined' || !Array.isArray(conversations)) return null;
       return conversations.find(item => item?.id === conversationId) || null;
@@ -15211,6 +14613,9 @@ runtimeScope.requestAuthoritativeConversationRender = function (
       _conversationSurfaceController.invalidateTaskTimePresentations(conversationId);
     },
     onStateApplied(conv, state, update) {
+      _turnReviewPresentation.observe(conv.id, state.turnsById);
+      conversationReview.observe(conv.id,
+        (state.laneOrder.main || []).map(id => state.turnsById[id]).filter(Boolean));
       if (activeConvId === conv.id) runtimeScope.PaperPreviewPresentation.activateConversation(conv.id);
       runtimeScope.PaperPreviewPresentation.observe(conv.id, state, update);
     },
@@ -15277,13 +14682,14 @@ runtimeScope.requestAuthoritativeConversationRender = function (
       );
     },
     disposeRenderedState(conversationId) {
+      _turnReviewPresentation.disposeConversation(conversationId);
       const modelNotice = document.getElementById('composerModelNotice');
       if (modelNotice?.dataset.conversationId === conversationId) {
         renderComposerModelNotice(modelNotice, null);
       }
       const state = runtimeScope.ConversationTurnRead?.state?.(conversationId);
       if (typeof clearFinishInfoPresentation === 'function') {
-        clearFinishInfoPresentation(Object.keys(state?.turnsById || {}));
+        clearFinishInfoPresentation(entityRecordKeys(state?.turnsById || {}));
       }
       humanGuidancePresentation.clearConversation(conversationId);
       _conversationSurfaceController.disposeConversation(conversationId);
@@ -15294,6 +14700,7 @@ runtimeScope.requestAuthoritativeConversationRender = function (
           global.requestAnimationFrame(() => release()))
       : undefined,
     buildNavigation(conv) {
+      _updateScrollToBottomBtn();
       if (typeof buildTurnNav === 'function') buildTurnNav(conv);
     },
     renderConversationList: typeof renderConversationList === 'function'
@@ -15361,7 +14768,12 @@ function _conversationLoadFailureText(error) {
     ? `${withDetail}\nRequest ID: ${requestId}` : withDetail;
 }
 
+// Fence authoritative link resolution against subsequent navigation (including drafts).
+const _projectConversationNavigation = createProjectConversationNavigation();
+
 function newChat() {
+
+  _projectConversationNavigation.invalidate();
   _conversationModelController.begin();
   _purgeEmptyConvs();
   const prevConv = getActiveConv();
@@ -15390,6 +14802,9 @@ function newChat() {
   const hasInput = _hasProjectComposerDraft();
   _conversationProjectController.begin();
   activeConvId = null;
+  runtimeScope.ConversationSurfacePresentation?.activateConversation?.(null);
+
+  composerTranslationStatus.refresh();
   renderComposerModelNotice(document.getElementById('composerModelNotice'), null);
   runtimeScope.updateBackgroundActivity?.();
   sessionStorage.removeItem('tofu_activeConvId');
@@ -15400,40 +14815,49 @@ function newChat() {
   runtimeScope.PaperPreviewPresentation?.activateConversation(null);
   runtimeScope.activateTurnCtxConversation?.(null);
   /* Show folder context in topbar when creating a new chat from folder view */
-  const _newChatFolderId = typeof getActiveFolderId === 'function' ? getActiveFolderId() : null;
+  const selectedFolderId = typeof getActiveFolderId === 'function' ? getActiveFolderId() : null;
+  // New draft identity owns confirmed folder defaults once, even with text.
+  // Carrying an explicit target/private draft preserves its original identity.
+  _conversationProjectController.startDraft({
+    folderId: selectedFolderId,
+    defaults: typeof folderDefaultWorkspace === 'function'
+      ? folderDefaultWorkspace(selectedFolderId) : null,
+    preserveExplicit: !prevConv && hasInput,
+  });
+  const _newChatFolderId = _conversationProjectController.captureDraftIdentity().folderId;
   const _newChatFolder = _newChatFolderId && typeof getFolderById === 'function' ? getFolderById(_newChatFolderId) : null;
   const topbarEl = document.getElementById("topbarTitle");
   const _newChatLabel = _conversationDisplayTitle(
     'New Chat', t('chat.newConversation'));
   topbarEl.removeAttribute('data-i18n');
   topbarEl.removeAttribute('data-i18n-once');
-  if (_newChatFolder) {
-    topbarEl.innerHTML = `${escapeHtml(_newChatLabel)} <span class="topbar-folder-badge" style="color:${_newChatFolder.color || 'var(--text-tertiary)'}">● ${escapeHtml(_newChatFolder.name)}</span>`;
-  } else {
-    topbarEl.textContent = _newChatLabel;
-  }
+  topbarEl.textContent = _newChatLabel;
   renderConversationList();
   runtimeScope.DebugPresentationState?.clear();
   /* Welcome screen: show folder indicator when new chat will be assigned to a folder */
-  const _folderBadgeHtml = _newChatFolder
-    ? `<div class="welcome-folder-badge"><span class="welcome-folder-dot" style="color:${_newChatFolder.color || '#888'}">●</span> ${escapeHtml(_newChatFolder.name)}</div>`
-    : '';
   document.getElementById("chatInner").innerHTML =
-    `<div class="welcome" id="welcome"><div class="welcome-icon"><img ${brandLogoImgAttrs(64)}></div><h2 class="tofu-brand"><span class="tofu-brand-t">T</span><span class="tofu-brand-o1">o</span><span class="tofu-brand-f">f</span><span class="tofu-brand-u">u</span><small>豆腐</small></h2>${_folderBadgeHtml}<div class="feature-pills">${_welcomePillsHtml()}</div></div>`;
+    `<div class="welcome" id="welcome"><div class="welcome-icon"><img ${brandLogoImgAttrs(64)}></div><h2 class="tofu-brand"><span class="tofu-brand-t">T</span><span class="tofu-brand-o1">o</span><span class="tofu-brand-f">f</span><span class="tofu-brand-u">u</span><small>豆腐</small></h2><div class="feature-pills">${_welcomePillsHtml()}</div></div>`;
+  paintNewChatFolderBadges(document, _newChatFolder || null);
   buildTurnNav(null);
   renderPendingQueueUI(null);
   // A brand-new conversation has no latch — hide any lingering banner.
   updateSendButton();
-  if (!hasInput) {
-    _clearProjectStateLocal();
-    _resetToolsToDefaults();
-  }
-  /* The Project-Brain surfaces re-resolve via the _updateProjectUI funnel
-   *   (project.js) — !hasInput reaches it through _clearProjectStateLocal,
-   *   and with pending input the project legitimately stays armed. */
+  if (!hasInput) _resetToolsToDefaults();
+  // Project-Brain surfaces re-resolve through the local _updateProjectUI funnel.
   if (typeof runtimeScope.updateContextBar === 'function') runtimeScope.updateContextBar();
 }
 function loadConversation(id) {
+
+  // Delete this bridge with retained navigation; the typed owner resolves links
+  // outside the loaded catalog without bypassing TurnStore transcript hydration.
+  const missing = _projectConversationNavigation.resolveMissing(id, {
+    contains: (key) => conversations.some((conversation) => conversation.id === key),
+    fetch: (key) => Api.conversations.get(key, { onError: 'throw' }),
+    merge: (row) => mergeConversationCatalogRows([row]),
+    navigate: loadConversation,
+    error: (error) => { if (typeof showToast === 'function') showToast(_conversationLoadFailureText(error), 'error'); },
+  });
+  if (missing) return missing;
   let projectRestoreEligible = _conversationProjectController.begin();
   const modelRestoreEligible = _conversationModelController.begin();
   _purgeEmptyConvs();
@@ -15451,33 +14875,43 @@ function loadConversation(id) {
      *   provisional default paint onto it. This is the exact path that turned
      *   a mispainted composer into persisted corruption. */
     // Navigation does not commit a draft's model to the outgoing conversation.
-    prevConv.searchMode = searchMode || "multi";
-    prevConv.fetchEnabled = !!fetchEnabled;
-    prevConv.codeExecEnabled = !!codeExecEnabled;
-    prevConv.browserEnabled = !!browserEnabled;
-    prevConv.desktopEnabled = !!desktopEnabled;
-    prevConv.memoryEnabled = !!memoryEnabled;
-    prevConv.schedulerEnabled = !!schedulerEnabled;
-    prevConv.autopilotEnabled = !!autopilotEnabled;
-    prevConv.activeFlow = activeFlow || '';
-    prevConv.imageGenEnabled = !!imageGenEnabled;
-    prevConv.imageGenMode = !!imageGenMode;
-    prevConv.humanGuidanceEnabled = !!humanGuidanceEnabled;
+    const outgoingSettings = {
+      searchMode: searchMode || "multi",
+      fetchEnabled: !!fetchEnabled,
+      codeExecEnabled: !!codeExecEnabled,
+      browserEnabled: !!browserEnabled,
+      desktopEnabled: !!desktopEnabled,
+      memoryEnabled: !!memoryEnabled,
+      schedulerEnabled: !!schedulerEnabled,
+      autopilotEnabled: !!autopilotEnabled,
+      activeFlow: activeFlow || '',
+      imageGenEnabled: !!imageGenEnabled,
+      imageGenMode: !!imageGenMode,
+      humanGuidanceEnabled: !!humanGuidanceEnabled,
+    };
     if (imageGenMode) {
-      prevConv.imageGenModel = _igSelectedModel || 'gemini-3.1-flash-image-preview';
-      prevConv.imageGenProviderId = _igSelectedProviderId || '';
-      prevConv.imageGenCount = _igSelectedCount || 1;
-      prevConv.imageGenAspect = _igSelectedAspect || '1:1';
-      prevConv.imageGenResolution = _igSelectedResolution || '1K';
+      outgoingSettings.imageGenModel = _igSelectedModel || 'gemini-3.1-flash-image-preview';
+      outgoingSettings.imageGenProviderId = _igSelectedProviderId || '';
+      outgoingSettings.imageGenCount = _igSelectedCount || 1;
+      outgoingSettings.imageGenAspect = _igSelectedAspect || '1:1';
+      outgoingSettings.imageGenResolution = _igSelectedResolution || '1K';
     }
     const _prevTaskActive = typeof convIsBusy === 'function' && convIsBusy(prevConv);
     if (!_prevTaskActive) {
-      prevConv.autoTranslate = !!autoTranslate;
+      outgoingSettings.autoTranslate = !!autoTranslate;
     }
-    /* Project bindings change only through explicit selection or send. */
-    _needsDeferredSave = true;
+    /* Project bindings change only through explicit selection or send.
+     * Compare only the captured fields, before mutating the shell: viewing an
+     * unchanged conversation needs neither metadata reconciliation nor a PATCH. */
+    _needsDeferredSave = Object.entries(outgoingSettings).some(
+      ([key, value]) => prevConv[key] !== value,
+    );
+    Object.assign(prevConv, outgoingSettings);
   }
   activeConvId = id;
+  runtimeScope.ConversationSurfacePresentation?.activateConversation?.(id);
+
+  composerTranslationStatus.refresh();
   renderComposerModelNotice(document.getElementById('composerModelNotice'), null);
   const draftOwner = getActiveConv();
   if (draftOwner?._unsentComposerDraft) {
@@ -15503,6 +14937,9 @@ function loadConversation(id) {
   if (typeof closeBranchPanel === "function") closeBranchPanel();
   const c = conversations.find((x) => x.id === id);
   if (!c) return;
+
+  _restoreConvProject(c);
+  projectRestoreEligible = _conversationProjectController.begin();
   document.getElementById("topbarTitle").textContent =
     _conversationDisplayTitle(c.title, t('chat.newConversation'));
   /* PERF: Use fast-path O(1) active-class swap instead of O(N) full sidebar rebuild.
@@ -15518,10 +14955,7 @@ function loadConversation(id) {
    * preserves its own scroll anchor while Turn data converges. */
   if (c._turnSnapshotRequired) {
     runtimeScope.requestAuthoritativeConversationRender(c.id);
-    if (projectRestoreEligible()) {
-      _clearProjectStateLocal();
-      projectRestoreEligible = _conversationProjectController.begin();
-    }
+
     void (async () => {
       if (typeof hydrateConversationRuntime !== 'function') {
         console.error('[loadConversation] conversation turn runtime is unavailable');
@@ -16030,13 +15464,15 @@ async function _buildConvSettings(conv) {
   );
 }
 
-async function _buildConvSubmission(conv) {
-  const configInputs = _buildConvConfigInputs(conv);
+async function _buildConvSubmission(conv, workspace = captureConversationProject(conv)) {
+  // Freeze roots for this command, not a later project choice during parsing.
+  const submissionConv = { ...conv, ...workspace };
+  const configInputs = _buildConvConfigInputs(submissionConv);
   configInputs.overrides.model = conv.model || configInputs.overrides.model;
   configInputs.overrides.thinkingDepth = conv.thinkingDepth;
   return _conversationSettingsResolution.resolveSubmission(
     configInputs,
-    _buildConvSettingsInputs(conv, configInputs.overrides),
+    _buildConvSettingsInputs(submissionConv, configInputs.overrides),
   );
 }
 /* ===== migrated source: main/main_send_pipeline.js ===== */
@@ -16332,6 +15768,10 @@ function _sendAbortError() {
 }
 
 async function sendMessage() {
+  if (isBootSendBlocked()) {
+    showToast(t('boot.sendPaused'), 'info');
+    return;
+  }
   /* A stale restore can carry both flags. Plan wins so direct artifact
    * generation cannot bypass the backend's read-only authority. */
   if (imageGenMode && !planMode) {
@@ -16436,17 +15876,14 @@ async function _submitComposerDraft() {
 
   let conv = getActiveConv();
   if (conv?._genStartCtrl) return;
-  const projectAtSend = projectState;
   const modelAtSend = captureComposerModel(config);
-  const commitProjectAtSend = !!(projectAtSend.active && projectAtSend.path)
-    || _conversationProjectController.preservesDraft();
   const selectedConvId = activeConvId;
   if (conv?._turnSnapshotRequired) {
     if (!runtimeScope.ConversationTurnStore) {
       throw new Error('Conversation turn runtime is unavailable.');
     }
     try {
-      await runtimeScope.ConversationTurnStore.hydrateConversation(conv);
+      await withProjectHydration(conv, () => runtimeScope.ConversationTurnStore.hydrateConversation(conv));
     } catch (hydrateError) {
       /* Snapshot reads are bounded, so a stalled server rejects here instead
        * of latching the composer lock until reload. Keep the draft and
@@ -16470,18 +15907,9 @@ async function _submitComposerDraft() {
       updatedAt: now,
       _localOnly: true,
     };
-    if (projectState.active && projectState.path) {
-      conv.projectPath = projectState.path;
-      const projectPaths = [projectState.path];
-      for (const root of projectState.extraRoots || []) {
-        const path = typeof root === 'string' ? root : root.path;
-        if (path && !projectPaths.includes(path)) projectPaths.push(path);
-      }
-      conv.projectPaths = projectPaths;
-    }
-    const folderId = typeof getActiveFolderId === 'function'
-      ? getActiveFolderId() : null;
-    if (folderId) conv.folderId = folderId;
+    // Includes explicit empty roots. Never re-inherit from the sidebar filter
+    // or mutable folder defaults at first send.
+    Object.assign(conv, _conversationProjectController.captureDraftIdentity());
     conversations.unshift(conv);
     activeConvId = conv.id;
     sessionStorage.setItem('tofu_activeConvId', conv.id);
@@ -16489,14 +15917,10 @@ async function _submitComposerDraft() {
     renderConversationList();
   }
 
-  // Sending is an explicit context commit, unlike navigation/settings capture.
-  // Preserve a saved binding when a failed restore left the local bar empty.
-  if (commitProjectAtSend) {
-    const binding = _deriveConvPathsFromState(projectAtSend);
-    conv.projectPath = binding.allPaths[0] || '';
-    conv.projectPaths = binding.allPaths;
-    conv.readOnlyPaths = binding.roList;
-  }
+  // Capture after cold settings hydration, before further asynchronous work.
+  // A draft or ambient project bar can never rebind this conversation.
+  const projectAtSend = captureConversationProject(conv);
+  const folderAtSend = conv.folderId;
   commitComposerModel(conv, modelAtSend);
   const convId = conv.id;
   const capturedReplyQuotes = typeof getPendingReplyQuotes === 'function'
@@ -16564,9 +15988,7 @@ async function _submitComposerDraft() {
   }
   if (draft.replyQuotes.length > 0) msgPayload.replyQuotes = draft.replyQuotes;
   if (draft.convRefs.length > 0) msgPayload.convRefs = draft.convRefs;
-  const folderId = typeof getActiveFolderId === 'function'
-    ? getActiveFolderId() : null;
-  if (folderId) msgPayload.folderId = folderId;
+  if (folderAtSend) msgPayload.folderId = folderAtSend;
 
   const draftProjection = {
     role: 'user',
@@ -16584,6 +16006,8 @@ async function _submitComposerDraft() {
 
   const sendStart = createSendStartupLease(conv, { timeoutMs: 90000 });
   let willTranslate = false;
+
+  let translationWait = null;
   let accepted = false;
   let userStopped = false;
   /* Optimistic pair: an ordinary/queued command paints the user input and
@@ -16638,7 +16062,9 @@ async function _submitComposerDraft() {
     const {
       config: sendConfig,
       settings: sendSettings,
-    } = await awaitSendPreparation(_buildConvSubmission(conv),
+    } = await awaitSendPreparation(_buildConvSubmission(conv, {
+      ...projectAtSend, folderId: folderAtSend,
+    }),
       t('send.preparationTimeout'), sendStart.signal);
     draft.submittedModelId = sendConfig.model;
     sendConfig.assistantMsgId = (typeof _newClientMsgId === 'function')
@@ -16650,6 +16076,8 @@ async function _submitComposerDraft() {
     );
     if (willTranslate) {
       conv._translating = true;
+
+      translationWait = composerTranslationStatus.begin(convId, 'send');
       conv._translateAborted = false;
       conv._translateAbortCtrl = sendStart.controller;
       showSendPreparation('translating', t('sidebar.translating'));
@@ -16716,6 +16144,14 @@ async function _submitComposerDraft() {
       throw new Error('The server returned an invalid turn acknowledgement.');
     }
 
+    if (translationWait) {
+      const projection = acknowledgement.submittedTurn?.projection;
+      composerTranslationStatus.finish(translationWait,
+        projection?.translation?.sendFailure || projection?._translateFailed
+          ? 'failed' : 'completed',
+        projection?.translation?.model || projection?._translateModel);
+    }
+
     clearOptimisticEcho();
     _consumeAcceptedComposerDraft(draft);
     _applyAcceptedConversationTitle(conv, draft);
@@ -16751,7 +16187,7 @@ async function _submitComposerDraft() {
     clearOptimisticEcho();
     let committed = false;
     try {
-      await runtimeScope.ConversationTurnStore?.hydrateConversation(conv);
+      await withProjectHydration(conv, () => runtimeScope.ConversationTurnStore?.hydrateConversation(conv));
       committed = _commandIsVisibleInAuthority(conv, draft.commandId);
       if (committed) {
         accepted = true;
@@ -16799,6 +16235,9 @@ async function _submitComposerDraft() {
     }
   } finally {
     clearOptimisticEcho();
+
+    if (translationWait) composerTranslationStatus.finish(translationWait,
+      userStopped || sendStart.signal.aborted ? 'cancelled' : 'failed');
     sendStart.finish();
     if (willTranslate) {
       conv._translating = false;
@@ -17029,7 +16468,7 @@ async function _refreshServerQueue(convId) {
   const conv = conversations.find((item) => item && item.id === convId);
   if (!conv) return;
   try {
-    await runtimeScope.ConversationTurnStore.hydrateConversation(conv);
+    await withProjectHydration(conv, () => runtimeScope.ConversationTurnStore.hydrateConversation(conv));
     renderPendingQueueUI(convId);
     updateSendButton();
   } catch (err) {
@@ -17058,20 +16497,8 @@ function _warnModelCapsMissing() {
 }
 if (typeof window !== 'undefined') runtimeScope._warnModelCapsMissing = _warnModelCapsMissing;
 
-// ══════════════════════════════════════════════════════
-// Two-tier capability dial (Chat / Studio)
-//   SINGLE source of truth mirrored from the backend
-//   (lib/tasks_pkg/chat_mode.chat_mode_defaults). The parity test
-//   tests/chat/test_chat_mode_parity.py asserts this table is byte-equal to the
-//   Python one — keep them in lock-step.
-//
-//   Only the atomic flags a tier PINS are listed. Extras (browser/desktop/
-//   imageGen/humanGuidance/autoTranslate) are orthogonal — a tier switch
-//   never clobbers them.
-//
-//   (The old lean 'air' tier was merged into 'chat'; legacy air/pro persisted
-//   in old convs normalise forward to 'chat' — see chat_mode.normalize.)
-// ══════════════════════════════════════════════════════
+// Everyday chat capabilities; aliases air/pro/studio normalize to chat.
+// Keep this wire-default table in parity with lib/tasks_pkg/chat_mode.py.
 const _CHAT_MODE_DEFAULTS = {
   chat: {
     searchMode: 'multi',
@@ -17079,162 +16506,53 @@ const _CHAT_MODE_DEFAULTS = {
     codeExecEnabled: true,
     memoryEnabled: true,
   },
-  studio: {
-    searchMode: 'multi',
-    fetchEnabled: true,
-    memoryEnabled: true,
-  },
 };
 if (typeof window !== 'undefined') runtimeScope._CHAT_MODE_DEFAULTS = _CHAT_MODE_DEFAULTS;
 
-/* Paint the segmented control's active state + reflect the derived flags into
- * the atomic-flag setters. Does NOT persist or open modals — that's the
- * caller's job (setChatMode). Safe to call on restore. */
 function _applyChatModeUI(mode) {
-  // Normalise legacy tier codes (air/pro) forward to the merged 'chat' tier.
-  mode = (mode === 'studio') ? 'studio' : 'chat';
-  chatMode = mode;
-  const d = _CHAT_MODE_DEFAULTS[mode] || {};
-  if (typeof _applySearchModeUI === 'function') _applySearchModeUI(d.searchMode || 'multi');
-  if (typeof _applyFetchEnabledUI === 'function') _applyFetchEnabledUI(d.fetchEnabled !== false);
-  // codeExec: studio leaves it alone (run_command supersedes it in project
-  // mode); chat pins it on explicitly.
-  if (d.codeExecEnabled !== undefined && typeof _applyCodeExecUI === 'function') {
-    _applyCodeExecUI(!!d.codeExecEnabled);
-  }
-  if (d.memoryEnabled !== undefined && typeof _applyMemoryUI === 'function') {
-    _applyMemoryUI(!!d.memoryEnabled);
-  }
-  // ── Paint the popover trigger (icon + label) and the menu's selected row.
-  //    The trigger mirrors the active tier's glyph so the collapsed control
-  //    still communicates the current mode at a glance. ──
-  const _MODE_LABEL = { chat: 'Chat', studio: 'Studio' };
-  const _MODE_ICON = {
-    chat: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>',
-    studio: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>',
-  };
-  const lbl = document.getElementById('chatModeLabel');
-  if (lbl) lbl.textContent = _MODE_LABEL[mode] || 'Chat';
-  const ic = document.getElementById('chatModeIcon');
-  if (ic) ic.innerHTML = _MODE_ICON[mode] || _MODE_ICON.chat;
-  const trig = document.getElementById('chatModeToggle');
-  if (trig) trig.dataset.mode = mode;
-  document.querySelectorAll('#chatModeMenu .chat-mode-item').forEach(el => {
-    el.classList.toggle('selected', el.dataset.mode === mode);
-  });
+  chatMode = 'chat';
+  const d = _CHAT_MODE_DEFAULTS.chat;
+  if (typeof _applySearchModeUI === 'function') _applySearchModeUI(d.searchMode);
+  if (typeof _applyFetchEnabledUI === 'function') _applyFetchEnabledUI(d.fetchEnabled);
+  if (typeof _applyCodeExecUI === 'function') _applyCodeExecUI(d.codeExecEnabled);
+  if (typeof _applyMemoryUI === 'function') _applyMemoryUI(d.memoryEnabled);
+  paintOptionalProjectAttachment(document, t);
   if (typeof updateSubmenuCounts === 'function') updateSubmenuCounts();
 }
 if (typeof window !== 'undefined') runtimeScope._applyChatModeUI = _applyChatModeUI;
 
-/* Open/close the mode popover (upward). Only one mode popover stays open;
- * the outside-click handler below closes it. */
+// Compatibility action names only: remove when the shell template binds its
+// optional project action directly. No capability selection or project gating.
 function toggleChatModeMenu(e) {
   if (e) e.stopPropagation();
-  const menu = document.getElementById('chatModeMenu');
-  if (!menu) return;
-  const willOpen = !menu.classList.contains('open');
-  // Close the sibling flow menu so only one popover shows at once.
-  _closeFlowMenu();
-  menu.classList.toggle('open', willOpen);
+  runtimeScope.openProjectModal();
 }
 if (typeof window !== 'undefined') runtimeScope.toggleChatModeMenu = toggleChatModeMenu;
-
 function closeChatModeMenu() {
-  const menu = document.getElementById('chatModeMenu');
-  if (menu) menu.classList.remove('open');
+  document.getElementById('chatModeMenu')?.classList.remove('open');
 }
 if (typeof window !== 'undefined') runtimeScope.closeChatModeMenu = closeChatModeMenu;
-
-// Close the mode menu on outside click (mirrors the flow menu handler).
-if (typeof document !== 'undefined') {
-  document.addEventListener('click', (e) => {
-    if (!e.target.closest('#modeMenuWrapper')) {
-      const menu = document.getElementById('chatModeMenu');
-      if (menu) menu.classList.remove('open');
-    }
-  });
-}
-
-/* User clicked a tier. Studio is special: it REQUIRES a project, so clicking
- * it opens the project panel directly; the tier only becomes 'studio' once a
- * project is actually attached (mpApplyFolders → onProjectAttached). Clicking
- * Studio while a project is already attached just re-selects it. */
 function setChatMode(mode) {
-  if (mode === 'studio') {
-    const hasProject = (typeof projectState !== 'undefined')
-      && projectState && projectState.active && projectState.path;
-    // The Studio segment IS the project affordance now (the standalone project
-    // button is gone), so it must ALWAYS open the project panel — otherwise a
-    // conv that is already in Studio has no way left to change its project
-    // path (clicking Studio again would be a silent no-op).
-    //
-    // Open the panel FIRST and unconditionally: the panel opening must not
-    // depend on the dial/state bookkeeping below succeeding. Previously the
-    // has-project branch ran _applyChatModeUI + captureActiveConversationSettings BEFORE
-    // opening — if either threw synchronously the panel never opened, so an
-    // already-attached conv could never change its path (while attaching a
-    // fresh one, which skips that bookkeeping, worked). The dial bookkeeping is
-    // now best-effort and cannot block the affordance.
-    runtimeScope.openProjectModal();
-    if (hasProject) {
-      try {
-        _applyChatModeUI('studio');
-        captureActiveConversationSettings();
-        debugLog('Mode: Studio (project attached)', 'success');
-      } catch (err) {
-        console.warn('[setChatMode] studio dial bookkeeping failed:', err);
-      }
-    }
-    return;
-  }
-  // chat. Switching AWAY from studio while a project is attached would be
-  // contradictory (studio ⟺ project); clearing the project is an explicit act
-  // via the project panel, so here we only change the dial + flags. If a
-  // project is attached and the user picks chat, we still detach-in-spirit by
-  // clearing the project so the derived state stays truthful.
-  if (mode !== 'studio'
-      && typeof projectState !== 'undefined' && projectState
-      && projectState.active && projectState.path
-      && typeof clearProject === 'function') {
-    clearProject();  // clears projectPath; async server reconcile is fire-and-forget
-  }
-  _applyChatModeUI(mode);
+  if (mode === 'studio') runtimeScope.openProjectModal();
+  _applyChatModeUI('chat');
   captureActiveConversationSettings();
-  debugLog('Mode: Chat', 'success');
 }
 if (typeof window !== 'undefined') runtimeScope.setChatMode = setChatMode;
-
-/* Called by mpApplyFolders after a project is successfully attached — promote
- * the dial to Studio (the tier IS "a project is attached"). Kept separate from
- * setChatMode so the project path owns the promotion. The promotion is
- * persisted immediately — without it conv.chatMode keeps the stale tier until
- * the next unrelated toggle, and a reload in between restores the wrong dial. */
 function onProjectAttached() {
-  if (chatMode !== 'studio') {
-    _applyChatModeUI('studio');
-    if (typeof captureActiveConversationSettings === 'function') captureActiveConversationSettings();
-  }
+  paintOptionalProjectAttachment(document, t);
 }
 if (typeof window !== 'undefined') runtimeScope.onProjectAttached = onProjectAttached;
-
-/* Called by clearProject — a project-less chat is never Studio; fall back to
- * the everyday Chat tier AND persist the fallback. Without the persist,
- * conv.chatMode kept 'studio' with an empty projectPath, and the restore path
- * trusting that stored tier resurrected Studio on the next reload/conv-switch
- * even though no project was attached. */
 function onProjectCleared() {
-  if (chatMode === 'studio') {
-    _applyChatModeUI('chat');
-    if (typeof captureActiveConversationSettings === 'function') captureActiveConversationSettings();
-  }
+  paintOptionalProjectAttachment(document, t);
 }
 if (typeof window !== 'undefined') runtimeScope.onProjectCleared = onProjectCleared;
+
 
 // ══════════════════════════════════════════════════════
 // Agent interaction mode — Standard / Plan / Autopilot
 //
 // One radio surface projects the established planMode / autopilotEnabled
-// wire flags. Chat/Studio remains an orthogonal capability dial.
+// wire flags. Optional project attachment is a separate workspace action.
 // ══════════════════════════════════════════════════════
 
 const _AGENT_MODE_LABEL_KEYS = Object.freeze({
@@ -17364,11 +16682,8 @@ function togglePlanMode() {
 }
 if (typeof window !== 'undefined') runtimeScope.togglePlanMode = togglePlanMode;
 
-/* Derive the correct tier from the current atomic flags — used on restore of
- * an OLD conversation that has no stored chatMode (pre-feature convs). With
- * the air/pro merge there are only two tiers: a project ⇒ studio, else chat. */
+/* Cached integrations may still ask for a mode; attachments do not select it. */
 function _deriveChatModeFromFlags(conv) {
-  if (conv && conv.projectPath) return 'studio';
   return 'chat';
 }
 if (typeof window !== 'undefined') runtimeScope._deriveChatModeFromFlags = _deriveChatModeFromFlags;
@@ -18108,10 +17423,6 @@ function handleAgentModeMenuTriggerKey(event) {
 
 let _flowMenuRenderGeneration = 0;
 
-function _closeFlowMenu() {
-  return _closeAgentModeMenu();
-}
-
 function openOrchestrationFromAgentMode() {
   _closeAgentModeMenu();
   if (typeof closeMobileSheet === 'function') closeMobileSheet();
@@ -18283,203 +17594,67 @@ function _closeFolderPicker() {
   if (p) p.remove();
 }
 
-/** Show inline dialog to create a new folder, optionally assigning a conv to it */
-function _promptCreateFolder(assignConvId) {
-  // Remove any existing dialog
-  const existing = document.getElementById('_folderCreateDialog');
-  if (existing) existing.remove();
+/* Temporary folder-dialog ports: all editor/browser behavior lives in the typed
+ * owner. Remove this seam when the retained sidebar composition migrates. */
+let _folderSettingsDialog = null;
 
-  const colors = ['#6e56cf', '#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#ec4899', '#8b5cf6', '#14b8a6'];
-  let selectedColor = colors[Math.floor(Math.random() * colors.length)];
-
-  const overlay = document.createElement('div');
-  overlay.id = '_folderCreateDialog';
-  overlay.className = 'folder-dialog-overlay';
-  overlay.innerHTML = `
-    <div class="folder-dialog">
-      <div class="folder-dialog-title">${t('folder.createTitle')}</div>
-      <input type="text" class="folder-dialog-input" id="_folderNameInput"
-             placeholder="${t('folder.namePh')}" maxlength="50" autocomplete="off" spellcheck="false">
-      <div class="folder-dialog-colors" id="_folderColorPicker">
-        ${colors.map(c => `<span class="folder-color-dot${c === selectedColor ? ' selected' : ''}" data-color="${c}" style="background:${c}"></span>`).join('')}
-      </div>
-      <div class="folder-dialog-actions">
-        <button class="folder-dialog-cancel" id="_folderDialogCancel">${t('folder.cancel')}</button>
-        <button class="folder-dialog-ok" id="_folderDialogOk">${t('folder.create')}</button>
-      </div>
-    </div>
-  `;
-  document.body.appendChild(overlay);
-
-  const nameInput = document.getElementById('_folderNameInput');
-  const colorPicker = document.getElementById('_folderColorPicker');
-  const okBtn = document.getElementById('_folderDialogOk');
-  const cancelBtn = document.getElementById('_folderDialogCancel');
-
-  // Focus input
-  setTimeout(() => nameInput.focus(), 50);
-
-  // Color selection
-  colorPicker.addEventListener('click', (e) => {
-    const dot = e.target.closest('.folder-color-dot');
-    if (!dot) return;
-    colorPicker.querySelectorAll('.folder-color-dot').forEach(d => d.classList.remove('selected'));
-    dot.classList.add('selected');
-    selectedColor = dot.dataset.color;
-  });
-
-  function _closeDialog() { overlay.remove(); }
-
-  async function _submit() {
-    const name = nameInput.value.trim();
-    if (!name) { nameInput.focus(); return; }
-    okBtn.disabled = true;
-    okBtn.textContent = t('folder.creating');
-    const folder = await createFolder(name, selectedColor);
-    _closeDialog();
-    if (!folder) {
-      if (typeof showToast === 'function') showToast('', t('folder.createFailed'), t('folder.cannotCreate'), 3000);
-      return;
-    }
-    if (assignConvId) {
-      setConversationFolder(assignConvId, folder.id);
-    }
-    renderConversationList();
-    if (typeof showToast === 'function') showToast('', t('folder.created'), folder.name, 2000);
-  }
-
-  okBtn.addEventListener('click', _submit);
-  cancelBtn.addEventListener('click', _closeDialog);
-  overlay.addEventListener('click', (e) => { if (e.target === overlay) _closeDialog(); });
-  nameInput.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') { e.preventDefault(); _submit(); }
-    if (e.key === 'Escape') _closeDialog();
-  });
+function _folderSettingsPorts(assignConvId) {
+  return {
+    t,
+    create: async values => {
+      const folder = await createFolder(values.name, values.color, values.projectPaths, values.readOnlyPaths);
+      if (!folder) throw new Error(t('folder.createFailed'));
+      return folder;
+    },
+    onSaved: folder => {
+      if (assignConvId) setConversationFolder(assignConvId, folder.id);
+      renderConversationList();
+    },
+    update: async (id, values) => {
+      const folder = await updateFolder(id, values);
+      if (!folder) throw new Error(t('folder.settings.saveFailed'));
+      renderConversationList();
+      return folder;
+    },
+    reload: async id => {
+      await loadFolders();
+      const folder = getFolderById(id);
+      if (!folder) throw new Error(t('folder.settings.reloadFailed'));
+      return folder;
+    },
+    browse: (path, showHidden, signal) => Api.project.browse(path, showHidden, { onError: 'throw', signal }),
+    recent: () => Api.project.recentList(),
+    remove: async id => {
+      const result = await deleteFolder(id);
+      if (!result) throw new Error(t('folder.deleteFailed'));
+      if (getActiveFolderId() === id) setActiveFolderId(null);
+      renderConversationList();
+      return result;
+    },
+  };
 }
 
+/** Create with a name alone, optionally assigning the captured conversation. */
+function _promptCreateFolder(assignConvId) {
+  if (_folderSettingsDialog) _folderSettingsDialog.dispose();
+  const ports = _folderSettingsPorts(assignConvId);
+  if (!assignConvId) ports.onSaved = folder => { setActiveFolderId(folder.id); renderConversationList(); };
+  _folderSettingsDialog = openFolderSettings(ports);
+}
+
+/** Kept action name for registry compatibility; this is Project settings. */
 function _promptRenameFolder(folderId) {
-  const f = getFolderById(folderId);
-  if (!f) return;
-
-  // Remove any existing dialog
-  const existing = document.getElementById('_folderCreateDialog');
-  if (existing) existing.remove();
-
-  const colors = ['#6e56cf', '#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#ec4899', '#8b5cf6', '#14b8a6'];
-  let selectedColor = f.color || '';
-
-  const overlay = document.createElement('div');
-  overlay.id = '_folderCreateDialog';
-  overlay.className = 'folder-dialog-overlay';
-  overlay.innerHTML = `
-    <div class="folder-dialog">
-      <div class="folder-dialog-title">${t('folder.renameTitle')}</div>
-      <input type="text" class="folder-dialog-input" id="_folderNameInput"
-             placeholder="${t('folder.namePh')}" maxlength="50" autocomplete="off" spellcheck="false">
-      <div class="folder-dialog-colors" id="_folderColorPicker">
-        ${colors.map(c => `<span class="folder-color-dot${c === selectedColor ? ' selected' : ''}" data-color="${c}" style="background:${c}"></span>`).join('')}
-      </div>
-      <div class="folder-dialog-actions">
-        <button class="folder-dialog-cancel" id="_folderDialogCancel">${t('folder.cancel')}</button>
-        <button class="folder-dialog-ok" id="_folderDialogOk">${t('folder.ok')}</button>
-      </div>
-    </div>
-  `;
-  document.body.appendChild(overlay);
-
-  const nameInput = document.getElementById('_folderNameInput');
-  const colorPicker = document.getElementById('_folderColorPicker');
-  nameInput.value = f.name;
-  setTimeout(() => { nameInput.focus(); nameInput.select(); }, 50);
-
-  // Color selection — a second tap on the selected dot clears the color.
-  colorPicker.addEventListener('click', (e) => {
-    const dot = e.target.closest('.folder-color-dot');
-    if (!dot) return;
-    const wasSelected = dot.classList.contains('selected');
-    colorPicker.querySelectorAll('.folder-color-dot').forEach(d => d.classList.remove('selected'));
-    if (wasSelected) {
-      selectedColor = '';
-    } else {
-      dot.classList.add('selected');
-      selectedColor = dot.dataset.color;
-    }
-  });
-
-  function _closeDialog() { overlay.remove(); }
-
-  async function _submit() {
-    const name = nameInput.value.trim();
-    const colorChanged = selectedColor !== (f.color || '');
-    if ((!name || name === f.name) && !colorChanged) { _closeDialog(); return; }
-    const updates = {};
-    if (name && name !== f.name) updates.name = name;
-    if (colorChanged) updates.color = selectedColor;
-    await updateFolder(folderId, updates);
-    _closeDialog();
-    renderConversationList();
-  }
-
-  document.getElementById('_folderDialogOk').addEventListener('click', _submit);
-  document.getElementById('_folderDialogCancel').addEventListener('click', _closeDialog);
-  overlay.addEventListener('click', (e) => { if (e.target === overlay) _closeDialog(); });
-  nameInput.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') { e.preventDefault(); _submit(); }
-    if (e.key === 'Escape') _closeDialog();
-  });
+  const folder = getFolderById(folderId);
+  if (!folder) return;
+  if (_folderSettingsDialog) _folderSettingsDialog.dispose();
+  _folderSettingsDialog = openFolderSettings(_folderSettingsPorts(), folder);
 }
 
 function _confirmDeleteFolder(folderId) {
-  const f = getFolderById(folderId);
-  if (!f) return;
-
-  const existing = document.getElementById('_folderCreateDialog');
-  if (existing) existing.remove();
-
-  const overlay = document.createElement('div');
-  overlay.id = '_folderCreateDialog';
-  overlay.className = 'folder-dialog-overlay';
-  overlay.innerHTML = `
-    <div class="folder-dialog">
-      <div class="folder-dialog-title">${t('folder.deleteTitle')}</div>
-      <div style="font-size:13px;color:var(--text-secondary);margin-bottom:16px;line-height:1.5">
-        ${t('folder.deleteConfirm')} <b style="color:var(--text-primary)">${f.name}</b>？<br>
-        ${t('folder.deleteHint')}
-      </div>
-      <div class="folder-dialog-actions">
-        <button class="folder-dialog-cancel" id="_folderDialogCancel">${t('folder.cancel')}</button>
-        <button class="folder-dialog-ok" id="_folderDialogOk" style="background:#ef4444">${t('common.delete')}</button>
-      </div>
-    </div>
-  `;
-  document.body.appendChild(overlay);
-
-  /* This is a DESTRUCTIVE modal with no text input, so (unlike the
-   * create/rename dialogs which hang Escape off their <input>) we bind a
-   * document-level keydown and clean it up on close. Escape dismisses it —
-   * matching the create/rename dialogs — and we focus Cancel by default so
-   * an accidental long-press → delete isn't one stray tap from destruction. */
-  function _closeDialog() {
-    document.removeEventListener('keydown', _onKey);
-    overlay.remove();
-  }
-  function _onKey(e) { if (e.key === 'Escape') { e.preventDefault(); _closeDialog(); } }
-  document.addEventListener('keydown', _onKey);
-
-  document.getElementById('_folderDialogOk').addEventListener('click', async () => {
-    _closeDialog();
-    // If we're viewing this folder, exit folder view first
-    if (typeof getActiveFolderId === 'function' && getActiveFolderId() === folderId) {
-      setActiveFolderId(null);
-    }
-    await deleteFolder(folderId);
-    renderConversationList();
-    if (typeof showToast === 'function') showToast('', t('folder.deleted'), f.name, 2000);
-  });
-  const _cancelBtn = document.getElementById('_folderDialogCancel');
-  _cancelBtn.addEventListener('click', _closeDialog);
-  setTimeout(() => _cancelBtn.focus(), 50);
-  overlay.addEventListener('click', (e) => { if (e.target === overlay) _closeDialog(); });
+  const folder = getFolderById(folderId);
+  if (!folder) return;
+  if (_folderSettingsDialog) _folderSettingsDialog.dispose();
+  _folderSettingsDialog = openFolderDeleteConfirmation(t, folder, _folderSettingsPorts().remove);
 }
 
 /** Toggle the vertical project rail between labeled and icon-only, persisting
@@ -18523,10 +17698,24 @@ function _initFolderTabs() {
   }
 
   // Click: rail collapse toggle, new-folder footer, or switch project.
+
+  const disposeConfigInteractions = installFolderConfigInteractions(tabsEl, {
+    settings: _promptRenameFolder,
+    context: _showFolderTabMenu,
+  });
+  window.addEventListener('pagehide', event => {
+    if (!event.persisted) disposeConfigInteractions();
+  });
   tabsEl.addEventListener('click', (e) => {
     const collapseBtn = e.target.closest('.project-rail-collapse');
     if (collapseBtn) { e.stopPropagation(); _toggleProjectRail(); return; }
-    const tab = e.target.closest('.folder-tab');
+    const settingsBtn = e.target.closest('.folder-tab-settings');
+    if (settingsBtn) {
+      e.stopPropagation();
+      _promptRenameFolder(settingsBtn.dataset.folderConfigId);
+      return;
+    }
+    const tab = e.target.closest('.folder-tab, .folder-tab-add');
     if (!tab) return;
     e.stopPropagation();
     if (tab.classList.contains('folder-tab-add')) {
@@ -18628,7 +17817,7 @@ function _showFolderTabMenu(folderId, x, y) {
   menu.innerHTML = `
     <div class="folder-tab-menu-item" data-action="rename">
       <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/></svg>
-      ${t('folder.rename')}
+      ${t('folder.settings.title')}
     </div>
     <div class="folder-tab-menu-item folder-tab-menu-delete" data-action="delete">
       <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
@@ -18641,6 +17830,8 @@ function _showFolderTabMenu(folderId, x, y) {
   const mw = menu.offsetWidth, mh = menu.offsetHeight;
   menu.style.left = Math.min(x, window.innerWidth - mw - 8) + 'px';
   menu.style.top = Math.min(y, window.innerHeight - mh - 8) + 'px';
+
+  makeFolderContextMenuAccessible(menu);
 
   menu.addEventListener('click', (e) => {
     const item = e.target.closest('.folder-tab-menu-item');
@@ -18733,12 +17924,7 @@ function closeMobileSheet() {
 }
 
 function updateMobileSheet() {
-  /* Capability-mode rows (Chat/Studio) mirror the segmented dial — a
-   * radio-style highlight, NOT a toggle. Reflect the live chatMode global. */
-  const _mode = (typeof chatMode !== 'undefined' ? chatMode : 'chat');
-  document.querySelectorAll('.mobile-mode-item').forEach(el => {
-    el.classList.toggle('active', el.dataset.mode === _mode);
-  });
+  paintOptionalProjectAttachment(document, t);
 
   const agentMode = resolveAgentMode(planMode, autopilotEnabled);
   document.querySelectorAll('.mobile-agent-mode-item').forEach((item) => {
@@ -18988,64 +18174,6 @@ window.addEventListener('resize', (function() {
         }
       }, 150);
     }
-  });
-})();
-
-/* ── Mobile: handle virtual keyboard resize via visualViewport API ── */
-(function initMobileKeyboardHandler() {
-  if (!window.visualViewport) return;
-  /* On mobile, when the virtual keyboard opens the visual viewport shrinks.
-   * We adjust body height to match, keeping the input area visible. */
-  let lastHeight = 0;
-  /* Track whether user was near bottom BEFORE keyboard starts closing.
-   * We sample this on every resize so we know the state at keyboard-open time. */
-  let _wasNearBottom = true;
-  function onViewportResize() {
-    if (!isMobileViewport()) return;
-    const vv = window.visualViewport;
-    const newH = vv.height;
-    if (Math.abs(newH - lastHeight) < 1) return;
-    const growing = newH > lastHeight;
-    lastHeight = newH;
-    /* Set explicit height on body to match the visual viewport */
-    document.body.style.height = newH + 'px';
-    if (!growing) {
-      /* Keyboard opening (viewport shrinking) — record scroll state and
-       * scroll textarea into view */
-      _wasNearBottom = isNearBottom(200);
-      const ta = document.getElementById('userInput');
-      if (ta && document.activeElement === ta) {
-        requestAnimationFrame(function() {
-          ta.scrollIntoView({ block: 'end', behavior: 'smooth' });
-        });
-      }
-    } else {
-      /* Keyboard closing (viewport growing) — the viewport height increases
-       * but scrollTop stays the same, so chat appears to "jump to the middle".
-       * Re-scroll to bottom if the user was near bottom before, or if there's
-       * an active stream (user just sent a message and is watching the reply).
-       * Force sync reflow first (void scrollHeight) so the layout reflects
-       * the new body height, then scroll immediately + schedule a safety rAF. */
-      if (_wasNearBottom || (typeof getActiveConv === 'function'
-          && typeof convIsBusy === 'function' && convIsBusy(getActiveConv()))) {
-        var cc = document.getElementById('chatContainer');
-        if (cc) {
-          void cc.scrollHeight; // force reflow after body height change
-          cc.scrollTop = cc.scrollHeight;
-        }
-        /* Safety: keyboard dismiss can fire multiple resize events as it
-         * animates closed — schedule another scroll after layout settles. */
-        requestAnimationFrame(function() {
-          scrollToBottom(true);
-        });
-      }
-    }
-  }
-  window.visualViewport.addEventListener('resize', onViewportResize);
-  /* Reset on blur / keyboard dismiss */
-  window.visualViewport.addEventListener('scroll', function() {
-    if (!isMobileViewport()) return;
-    document.body.style.height = window.visualViewport.height + 'px';
   });
 })();
 
@@ -20240,28 +19368,8 @@ function restoreConversationSettingsToComposer(conv, modelEligible) {
   /* Per-conv write-mode override; absent means the global default (Auto). */
   autoApplyWrites = conv.autoApply !== undefined ? !!conv.autoApply : true;
   _updateAutoApplyUI();
-  /* Three-tier dial: use the stored tier, or derive it from the atomic
-   * flags for a pre-feature conversation. Paint-only (no persist / no modal)
-   * so restoring never clobbers the just-restored flags — _applyChatModeUI is
-   * idempotent with the setters above. */
-  if (typeof _applyChatModeUI === 'function') {
-    const _storedMode = conv.chatMode
-      || (typeof _deriveChatModeFromFlags === 'function' ? _deriveChatModeFromFlags(conv) : 'chat');
-    /* Studio ⟺ a project is attached — the clamp is BIDIRECTIONAL.
-     * (a) A stored 'studio' tier with NO projectPath is poisoned (e.g.
-     * persisted before the project was cleared — the clear path once
-     * repainted without saving) — never restore it.
-     * (b) The mirror poison: a stored NON-studio tier WITH a projectPath
-     * (stamped by the one-way projectState→conv sync while another conv's
-     * project was globally active; the dial can never produce this on
-     * purpose — picking Chat detaches the project). A project attached IS
-     * Studio, so restore heals it upward. Both heals are paint-only, like
-     * the original one-way clamp. */
-    const _mode = (_storedMode === 'studio' && !conv.projectPath) ? 'chat'
-      : (_storedMode !== 'studio' && conv.projectPath) ? 'studio'
-      : _storedMode;
-    _applyChatModeUI(_mode);
-  }
+  // Project attachment is independent from everyday capabilities and Flow.
+  if (typeof _applyChatModeUI === 'function') _applyChatModeUI('chat');
   /* Restore the image gen model + batch count + aspect + resolution from conv settings */
   if (conv.imageGenModel) _igSelectedModel = conv.imageGenModel;
   _igSelectedProviderId = conv.imageGenProviderId || '';
@@ -20373,7 +19481,10 @@ function _resetToolsToDefaults() {
 
 /** WebView layout ownership is native; retained boot keeps only its ordered seam. */
 function _installViewportHeightGuard() {
-  retainedCompositionLifecycle.add(installViewportHeightGuard(window, document));
+  retainedCompositionLifecycle.add(installViewportHeightGuard(window, document, {
+    isMobileViewport,
+    maintainConversationFollow: () => scrollToBottom(),
+  }));
 }
 
 /* Build watch — the long-lived-tab handshake. A tab keeps running the
@@ -20475,6 +19586,12 @@ function _startBuildWatch() {
   };
   retainedCompositionLifecycle.add(installApplicationInteractions({
     window, document,
+    diffReview: {
+      contextIdentity: () => activeConvId,
+      text: (key, fallback) => t(key) || fallback,
+      addQuote: quote => { if (!(getPendingReplyQuotes() || []).includes(quote)) _addReplyQuote(quote); },
+      reportFailure: reportInteractionFailure,
+    },
     initializeFolders: () => { _initFolderDragDrop(); _initFolderTabs(); },
     sidebar: {
       activate: loadConversation, copy: _safeClipboardWrite,
@@ -20492,7 +19609,7 @@ function _startBuildWatch() {
     files: {
       enabled: !('ontouchstart' in window),
       modalOwnsFiles: () => !!(runtimeScope._tofuProjectModalOpen || runtimeScope._tofuKnowledgeModalOpen),
-      paperMode: () => !!paperMode,
+      paperMode: () => !!runtimeScope.paperMode,
       isArchive: file => typeof _isArchiveFile === 'function' && _isArchiveFile(file),
       isDocument: file => _DOC_EXTS.has(_getFileExt(file.name)),
       handlePaper: file => runtimeScope._handlePaperFileDrop?.(file),
@@ -20521,9 +19638,8 @@ function _startBuildWatch() {
    *   server responds.  This eliminates all localStorage desync bugs.
    *   On failure we fall back to the IndexedDB cache + a backoff retry
    *   (see _bootReconnectWithBackoff below). */
-  /* Restore last active conversation from sessionStorage (if any).
-   *   If the conv exists on the server, we'll navigate to it after loading.
-   *   Otherwise, fall back to the most recent conversation. */
+  /* Restore the exact saved identity through ordinary conversation navigation.
+   *   Without a saved identity, fall back to the most recent conversation. */
   /* sessionStorage is PER-TAB and dies on a browser close/reopen — it only
    *   survives an in-tab reload. Fall back to the localStorage mirror (written
    *   on every leave via _persistLastActiveConv below) so a genuine COLD open
@@ -20649,11 +19765,6 @@ function _startBuildWatch() {
     if (typeof _startBuildWatch === 'function') _startBuildWatch();
   });
 
-  /* Bottom-follow suspension latch (core.js): arm the reader's
-   * scroll-up-intent listeners as soon as the chat container exists, so a
-   * wheel-up / touch-drag / scrollbar move away from the bottom detaches the
-   * streaming auto-follow from the first gesture — no fighting, no tremble. */
-  if (typeof _armFollowSuspensionListeners === 'function') _armFollowSuspensionListeners();
 
   initActiveTasks().then(() => {
     /* Decide reconnect by OBSERVABLE OUTCOME, not by a thrown error.
@@ -20751,8 +19862,8 @@ function _startBuildWatch() {
    *   they're still on the welcome screen (activeConvId still null). */
   function _bootRestoreActiveConv(restoredId) {
     if (activeConvId) return;  // user already navigated during the load — leave them be
-    const restoredConv = restoredId && conversations.find(c => c.id === restoredId);
-    if (restoredConv) {
+    // Catalog omission is not deletion; navigation resolves and fences the exact ID.
+    if (restoredId) {
       loadConversation(restoredId);
       return;
     }
@@ -21159,6 +20270,11 @@ function loadCompactionHistory(conversationId) {
       read: _meterSnapshot,
       onCompact: _runManualCompaction,
       onHistory: (convId) => runtimeScope.openCompactionViewer?.(convId),
+      workingFacts: {
+        load: (id, signal) => Api.conversations.workingFacts(id, signal),
+        save: (id, command, signal) => Api.conversations.saveWorkingFact(id, command, signal),
+        consumers: (id, cursor, signal) => Api.conversations.workingFactConsumers(id, cursor, signal),
+      },
     });
     return _state;
   }
@@ -21389,6 +20505,37 @@ let backgroundConversationActivity = new Map();
   /* _state: cached chip nodes (see context-bar.js for the pattern). */
   let _state = null;
 
+  let _dock = null;
+
+  function _mountDock() {
+    if (_disposed) return;
+    const convId = typeof activeConvId !== 'undefined' ? activeConvId : '';
+    const input = runtimeScope.ConversationTurnRead?.latest?.(convId, turn => turn.actor === 'human', 'main');
+    const host = backgroundAgentContextHost(document.getElementById('chatInner'), convId, input?.turnId);
+    if (!_dock && host) _dock = createAgentSidebarDock({ host, translate: _tt });
+    _dock?.mount(host);
+  }
+
+  function _updateDock() {
+    if (_disposed) return;
+    _mountDock();
+    if (!_dock) return;
+    const convId = typeof activeConvId !== 'undefined' ? activeConvId : '';
+    const conv = getConvById(convId);
+    // Temporary retained rendering ports; remove when swarm cards migrate.
+    const messageTurns = conv ? runtimeScope.ConversationSwarmPresentation?.candidates(conv) || [] : [];
+    const messageSwarms = summarizeBackgroundActivity(_last, convId).swarms;
+    _dock.update(convId || '', agentDockProjection({
+      turns: conv ? runtimeScope.ConversationSwarmPresentation?.candidates(conv) || [] : [],
+      swarms: summarizeBackgroundActivity(_last, convId).swarms,
+      recover: (...args) => _recoverSwarmAgents(...args),
+      renderPanel: (...args) => _buildSwarmPanelHTML(...args),
+      renderActivity: agent => renderBackgroundActivityAgent(document, agent, _tt),
+      openConversation: loadConversation,
+      translate: _tt,
+    }), swarmMessagesProjection(messageTurns, messageSwarms));
+  }
+
   let _disposed = false;
   /* Last applied snapshot + its repaint signature. */
   let _last = { swarms: [], backgroundCommands: [] };
@@ -21446,7 +20593,9 @@ let backgroundConversationActivity = new Map();
 
   function _summarize(data) {
     const convId = typeof activeConvId !== 'undefined' ? activeConvId : null;
-    return summarizeBackgroundActivity(data, convId);
+    // Agents live in the right dock; the composer retains command visibility.
+    const summary = summarizeBackgroundActivity(data, convId);
+    return { ...summary, swarms: [], agentsActive: 0, agentsRunning: 0, agentsQueued: 0 };
   }
 
   function _chipLabel(sum) {
@@ -21455,9 +20604,6 @@ let backgroundConversationActivity = new Map();
 
   function _chipTitle(sum) {
     const lines = [_tt('bgActivity.title', 'Background activity')];
-    for (const s of sum.swarms) {
-      lines.push('· ' + backgroundActivitySummary(s, _tt));
-    }
     for (const c of sum.commands) {
       lines.push('· $ ' + (c.command || ''));
     }
@@ -21465,6 +20611,8 @@ let backgroundConversationActivity = new Map();
   }
 
   function _apply(sum) {
+
+    _updateDock();
     const s = _ensureChip();
     if (!s) return;
     const active = sum.agentsActive > 0 || sum.commandsActive > 0;
@@ -21500,29 +20648,10 @@ let backgroundConversationActivity = new Map();
     return Math.floor(m / 60) + 'h ' + String(m % 60).padStart(2, '0') + 'm';
   }
 
-  function _swarmElapsed(swarm) {
-    const created = Number(swarm.created_at) || 0;
-    if (!created) return '';
-    return _fmtElapsed(Date.now() / 1000 - created);
-  }
-
-  function _convLabel(convId) {
-    if (!convId) return '';
-    if (typeof getConvById === 'function') {
-      const conv = getConvById(convId);
-      const title = conv && (conv.title || conv.summary);
-      if (title) return title;
-    }
-    return convId;
-  }
-
   function _sigOf(sum) {
     /* Only fields that affect the popover body — chip text follows the
      * same signature cheaply via label/title guards. */
     return JSON.stringify([
-      sum.swarms.map(s => [s.swarm_key, s.conv_id, _convLabel(s.conv_id),
-        s.created_at, s.running, s.pending, s.completed,
-        (s.agents || []).map(a => [a.id, a.role, a.objective, a.status, a.phase, a.round, a.waitReason, a.dependsOn])]),
       sum.commands.map(c => [c.command_id, c.command, c.status]),
     ]);
   }
@@ -21573,7 +20702,7 @@ let backgroundConversationActivity = new Map();
     el.style.left = Math.round(r.left) + 'px';
     /* Opens UPWARD — the strip sits directly above the composer. */
     el.style.bottom = Math.round(window.innerHeight - r.top + 6) + 'px';
-    _popover = { el, bodyNode: body, sig: '', swarmClocks: [], commandClocks: [] };
+    _popover = { el, bodyNode: body, sig: '', commandClocks: [] };
 
     s.el.setAttribute('aria-expanded', 'true');
     _renderPopoverBody(_summarize(_last), true);
@@ -21585,34 +20714,17 @@ let backgroundConversationActivity = new Map();
     const sig = _sigOf(sum);
     if (!force && sig === _popover.sig) {
       // Update only clock leaves: preserve open rows, selection and scroll.
-      _popover.swarmClocks.forEach(({ node, index }) => {
-        const text = _swarmElapsed(sum.swarms[index]);
-        if (node.textContent !== text) node.textContent = text;
-      });
       _popover.commandClocks.forEach((node, index) => {
         const text = _fmtElapsed(sum.commands[index].elapsed_s);
         if (node.textContent !== text) node.textContent = text;
       });
       return;
     }
-    _popover.swarmClocks = [];
     _popover.commandClocks = [];
     _popover.sig = sig;
     const body = _popover.bodyNode;
     body.textContent = '';
 
-    if (sum.swarms.length) {
-      const secTitle = document.createElement('div');
-      secTitle.className = 'bg-act-pop-section';
-      secTitle.textContent = _tt('bgActivity.sectionAgents', 'Sub-agents');
-      body.appendChild(secTitle);
-      sum.swarms.forEach((swarm, index) => {
-        const row = _swarmRow(swarm);
-        const node = row.querySelector('.bg-act-elapsed');
-        if (node) _popover.swarmClocks.push({ node, index });
-        body.appendChild(row);
-      });
-    }
     if (sum.commands.length) {
       const secTitle = document.createElement('div');
       secTitle.className = 'bg-act-pop-section';
@@ -21624,47 +20736,6 @@ let backgroundConversationActivity = new Map();
         body.appendChild(row);
       }
     }
-  }
-
-  function _swarmRow(swarm) {
-    const row = document.createElement('div');
-    row.className = 'bg-act-swarm';
-    const head = document.createElement('div');
-    head.className = 'bg-act-swarm-head';
-    const label = document.createElement('span');
-    label.className = 'bg-act-swarm-conv';
-    label.textContent = _convLabel(swarm.conv_id) || swarm.swarm_key || '';
-    head.appendChild(label);
-    const summary = document.createElement('span');
-    summary.className = 'bg-act-swarm-summary';
-    summary.textContent = backgroundActivitySummary(swarm, _tt);
-    head.appendChild(summary);
-    const elapsed = _swarmElapsed(swarm);
-    if (elapsed) {
-      const el = document.createElement('span');
-      el.className = 'bg-act-elapsed';
-      el.textContent = elapsed;
-      head.appendChild(el);
-    }
-    row.appendChild(head);
-    for (const agent of (swarm.agents || [])) {
-      row.appendChild(_agentRow(agent));
-    }
-    /* Deep-link: the swarm outlives its spawning turn, but its
-     * conversation is where the auto-dispatched results will land. */
-    if (swarm.conv_id && typeof loadConversation === 'function') {
-      row.classList.add('is-clickable');
-      row.addEventListener('click', (e) => {
-        e.stopPropagation();
-        _closePopover();
-        loadConversation(swarm.conv_id);
-      });
-    }
-    return row;
-  }
-
-  function _agentRow(agent) {
-    return renderBackgroundActivityAgent(document, agent, _tt);
   }
 
   function _commandRow(cmd) {
@@ -21696,6 +20767,8 @@ let backgroundConversationActivity = new Map();
           refreshBackgroundConversationStatuses(changedIds);
         }
         const sum = _summarize(data);
+
+        _updateDock();
         const sig = _sigOf(sum);
         const active = sum.agentsActive > 0 || sum.commandsActive > 0;
         if (sig !== _lastSig) {
@@ -21740,6 +20813,10 @@ let backgroundConversationActivity = new Map();
 
   runtimeScope.updateBackgroundActivity = updateBackgroundActivity;
 
+  // Render/mount only: commits and the existing rail follower never start reads.
+  runtimeScope.renderBackgroundAgents = _updateDock;
+  runtimeScope.mountBackgroundAgents = _mountDock;
+
   function _onVisibilityChange() {
     controller.visibilityChanged();
   }
@@ -21750,6 +20827,9 @@ let backgroundConversationActivity = new Map();
     if (_disposed) return;
     _disposed = true;
     controller.dispose();
+
+    _dock?.dispose();
+    _dock = null;
 
     _unsubscribeReconnect?.();
     _unsubscribeNativeVisibility?.();
@@ -21784,20 +20864,11 @@ let backgroundConversationActivity = new Map();
   }
 })();
 /* ===== migrated source: presence.js ===== */
-/* Project collaboration bar derived only from the Project Brain projection.
- * Presence/peer state is intentionally absent: work ownership never transfers,
- * overlap advice is execution-local, and the bar is a projection shortcut.
- */
+/* Narrow retained adapter for the typed conversation-first project surface.
+ * Delete with retained project/catalog navigation; no presentation state here. */
 (function wireProjectProjectionBar() {
-  'use strict';
-  if (typeof pushSubscribe !== 'function') return;
-  if (typeof createPresenceSummaryController !== 'function') return;
   if (runtimeScope.__presenceWired) return;
   runtimeScope.__presenceWired = true;
-
-  var lastFingerprint = '';
-  var refetchTimer = null;
-
   function norm(value) { return String(value || '').replace(/[/\\]+$/, ''); }
   function projectPath() {
     try {
@@ -21812,109 +20883,141 @@ let backgroundConversationActivity = new Map();
       return norm(path);
     } catch (_error) { return ''; }
   }
-  function text(key, params, fallback) {
-    try {
-      var value = typeof t === 'function' ? t(key, params) : '';
-      return value && value !== key ? value : fallback;
-    } catch (_error) { return fallback; }
+
+  function sidebarPath() {
+    var folder = typeof getFolders === 'function' && typeof getActiveFolderId === 'function'
+      ? getFolders().find(function (item) { return item.id === getActiveFolderId(); }) : null;
+    return folder ? norm(folder.projectPaths?.[0] || folder.projectPath || '') : projectPath();
   }
+  function scope(sidebarOnly) {
+    var resolvePath = sidebarOnly ? sidebarPath : projectPath;
+    var root = resolvePath();
+    var conv = typeof getActiveConv === 'function' ? getActiveConv() : null;
+    if (root !== projectPath()) conv = null;
+    var api = typeof Api !== 'undefined' ? Api.project : null;
+    if (!root || !api) return null;
+    return {
+          path: root, currentConversationId: conv?.id || '', currentPath: resolvePath,
 
-  var controller = createPresenceSummaryController({
-    currentScope: function () {
-      var root = projectPath();
-      return root ? { root: root, selfConversationId: '' } : null;
-    },
-    fetchSummary: function (root) {
-      var api = typeof Api !== 'undefined' ? Api.project : null;
-      return api && typeof api.brainSummary === 'function'
-        ? api.brainSummary(root) : null;
-    },
-    onSummaryChanged: render,
-    onError: function () { /* bar degrades to hidden */ },
-  });
-
-  function segments(summary) {
-    var status = summary?.status || {};
-    var active = Number(status.activeCount || 0);
-    var recent = Number(status.recentOutcomeCount || 0);
-    var values = [];
-    if (active > 0) values.push({
-      className: 'collab-seg-progress',
-      label: text('projectBrain.activeWork', null, 'Active') + ': ' + active,
-    });
-    if (recent > 0) values.push({
-      className: 'collab-seg-outcomes',
-      label: text('projectBrain.recentOutcomes', null, 'Recent outcomes') + ': ' + recent,
-    });
-    return values;
-  }
-
-  function render() {
-    var host = document.getElementById('presenceStrip');
-    if (!host) return;
-    var root = projectPath();
-    if (!root) {
-      host.hidden = true;
-      host.innerHTML = '';
-      lastFingerprint = '';
-      return;
-    }
-    var summary = controller.summaryFor(root, '');
-    var rows = segments(summary);
-    var label = [text('projectCoordination.title', null, 'Project workspace')]
-      .concat(rows.map(function (row) { return row.label; })).join(' · ');
-    var fingerprint = root + '|' + label;
-    if (fingerprint === lastFingerprint) return;
-    lastFingerprint = fingerprint;
-    host.replaceChildren();
-    host.hidden = false;
-
-    var coordination = createProjectCoordinationButton({
-      label: label,
-      size: 'sm', variant: 'ghost',
-      onClick: function () {
-        var conv = typeof getActiveConv === 'function' ? getActiveConv() : null;
-        var api = typeof Api !== 'undefined' ? Api.project : null;
-        if (!api || !root) return;
-        openProjectCoordinationWorkspace({
-          path: root, currentConversationId: conv?.id || '', currentPath: projectPath,
-
-          currentConversation: function () { return getActiveConv()?.id || ''; },
+          currentConversation: function () { return root === projectPath() ? (getActiveConv()?.id || '') : ''; },
+          conversations: function () {
+            return conversations.filter(function (item) {
+              return !item._localOnly && !item.archived && !item.readOnly
+                && norm(typeof _getConvProjectPath === 'function' ? _getConvProjectPath(item) : item.projectPath) === root;
+            }).map(function (item) { return { id: item.id, title: item.title || item.id }; });
+          },
+          subscribe: function (refresh) {
+            pushSubscribe('project', '*', refresh);
+            return function () { pushUnsubscribe('project', '*', refresh); };
+          },
           binding: function (path) { return api.coordination(path); },
 
+          dispatch: {
+            recipients: function () {
+              return conversations.filter(function (item) {
+                return !item._localOnly && !item.archived && !item.readOnly && item.id !== conv?.id
+                  && norm(typeof _getConvProjectPath === 'function' ? _getConvProjectPath(item) : item.projectPath) === root;
+              }).map(function (item) { return { id: item.id, title: item.title || item.id }; });
+            },
+            humanTurns: function () {
+              var state = runtimeScope.ConversationTurnStore?.ensureRuntimeStore?.(conv?.id)?.getState?.();
+              return Object.values(state?.turnsById || {}).filter(function (turn) {
+                return turn?.actor === 'human' && turn.projectionRevision > 0;
+              }).map(function (turn) {
+                return { actor: 'human', turnId: turn.turnId, projectionRevision: turn.projectionRevision,
+                  promptPreview: typeof turn.projection?.content === 'string' ? turn.projection.content.slice(0, 120) : '' };
+              });
+            },
+            commandId: function () { return api.newAssignmentCommandId(); },
+            list: function (path, commandId, options) { return api.coordinationAssignments(path, commandId, options); },
+            grant: function (request, commandId) { return api.grantAssignment(request, commandId); },
+            dispatch: function (request) { return api.dispatchAssignment(request); },
+            revoke: function (request) { return api.revokeAssignment(request); },
+            review: function (request) { return api.reviewAssignment(request); },
+
+            publish: function (request) { return api.publishAssignment(request); },
+          },
+
+          scopeChanges: {
+            list: async function (path) { return (await api.coordinationScopeChanges(path)).scopeChanges; },
+            apply: function (body, key) { return api.applyScopeChange(body, key); },
+            retry: function (body, key) { return api.retryScopeChange(body, key); },
+          },
+          responsibilities: {
+            list: async function (path) { return (await api.coordinationResponsibilities(path)).responsibilities; },
+            create: function (body, key) { return api.createResponsibility(body, key); },
+            pause: function (body, key) { return api.pauseResponsibility(body, key); },
+            cancel: function (body, key) { return api.cancelResponsibility(body, key); },
+            reconcile: function (body, key) { return api.reconcileResponsibility(body, key); },
+          },
+          sharedFiles: {
+            list: function (path, cursor) { return api.coordinationSharedFiles(path, cursor); },
+            read: function (_path, body) { return api.readSharedFile(body, api.newAssignmentCommandId()); },
+
+            register: function (body, key) { return api.registerSharedFile(body, key); },
+            refresh: function (body, key) { return api.refreshSharedFile(body, key); },
+          },
+
+          reports: {
+            read: function (path) { return api.coordinatorReports(path); },
+            markRead: function (body) { return api.markCoordinatorReportRead(body); },
+          },
+          budget: {
+            read: function (path) { return api.coordinatorBudget(path); },
+            update: function (body) { return api.updateCoordinatorBudget(body); },
+          },
           messages: function (path, id, beforeId) { return api.coordinationMessages(path, id, beforeId); },
           board: function (path) { return api.board(path); },
           bind: function (path, id, revision) { return api.bindCoordinator(path, id, revision); },
+
+          create: function (path, revision) {
+            var folderId = typeof getActiveFolderId === 'function' ? getActiveFolderId() : '';
+            return api.createCoordinator(path, folderId, revision);
+          },
           navigate: function (id) { if (typeof loadConversation === 'function') loadConversation(id); },
           openEvidence: function () { runtimeScope.openProjectBrain?.({ tab: 'integration' }); },
-        }).catch(function (error) {
-          if (typeof showToast === 'function') showToast(error.message || String(error), 'error');
-        });
-      },
-    });
-    coordination.setAttribute('data-testid', 'collab-bar');
-    host.appendChild(coordination);
-  }
 
-  function scheduleRefresh() {
-    if (refetchTimer) clearTimeout(refetchTimer);
-    refetchTimer = setTimeout(function () {
-      refetchTimer = null;
-      controller.refresh();
-    }, 300);
+    };
   }
+  var host = document.getElementById('presenceStrip');
+  var list = document.getElementById('convList');
+  if (!host || !list) return;
+  var sidebar = document.createElement('div');
+  sidebar.id = 'projectCoordinatorEntry';
+  var column = document.createElement('div');
+  column.className = 'coordination-conversation-column';
+  list.before(column);
+  column.append(sidebar, list);
+  host.hidden = false;
+  function createSurface(sidebarOnly) {
+    return createProjectCoordinationSurface({
+    sidebar: sidebarOnly ? sidebar : document.createElement('div'),
+    canvas: sidebarOnly ? document.createElement('div') : host,
+    mode: sidebarOnly ? 'sidebar' : 'canvas',
+    scope: function () { return scope(sidebarOnly); }, sidebarPath: sidebarPath,
 
-  pushSubscribe('project', '*', scheduleRefresh);
-  runtimeScope.presenceRefresh = function () {
-    if (projectPath()) controller.refresh();
-    render();
-  };
-  runtimeScope.CollabBar = {
-    _render: render,
-    _setSummary: function (root, summary) {
-      controller.adoptSummary(root, '', summary);
+    changed: function () { if (typeof renderConversationList === 'function') renderConversationList(); },
+    canCreate: function () { return typeof getActiveFolderId === 'function' && !!getActiveFolderId(); },
+    create: async function (ports, binding) {
+      var folderId = typeof getActiveFolderId === 'function' ? getActiveFolderId() : '';
+
+      var navigationCurrent = _projectConversationNavigation.checkpoint();
+      var created = await Api.project.createCoordinator(ports.path, folderId || '', binding.revision);
+      if (!navigationCurrent() || folderId !== getActiveFolderId()
+          || norm(ports.currentPath()) !== norm(ports.path)) return;
+      if (created.availability === 'available') ports.navigate(created.conversationId);
     },
-  };
+    details: function (ports) {
+      openProjectCoordinationWorkspace(ports).then(function () { surface.refresh(true); sidebarSurface.refresh(true); }).catch(function (error) {
+        if (typeof showToast === 'function') showToast(error.message || String(error), 'error');
+      });
+    },
+  });
+  }
+  var surface = createSurface(false);
+  var sidebarSurface = createSurface(true);
+  runtimeScope.presenceRefresh = function () { surface.refresh(); sidebarSurface.refresh(); };
+  window.addEventListener('pagehide', function (event) { if (!event.persisted) { surface.destroy(); sidebarSurface.destroy(); } });
   runtimeScope.presenceRefresh();
 })();
 /* ===== migrated source: info-rail.js ===== */
@@ -22526,6 +21629,8 @@ let backgroundConversationActivity = new Map();
     if (typeof document === 'undefined'
         || typeof document.querySelectorAll !== 'function') return;
     const containers = document.querySelectorAll('.chat-container');
+
+    runtimeScope.mountBackgroundAgents?.();
     for (const cont of containers) {
       const rails = cont.querySelectorAll('.turn-ctx');
       if (!rails.length) continue;
@@ -22636,7 +21741,7 @@ let backgroundConversationActivity = new Map();
       else _railFollowMO = new MutationObserver(_scheduleRailFollow);
       nodes.filter((n) => n.classList.contains('chat-container')).forEach((n) => {
         _railFollowMO.observe(n, { childList: true, subtree: true,
-          attributes: true, attributeFilter: ['hidden'] });
+          attributes: true, attributeFilter: ['hidden', 'open'] });
       });
     }
   }
@@ -22886,6 +21991,7 @@ let backgroundConversationActivity = new Map();
       const rails = document.querySelectorAll('.chat-container .user-msg[data-turn-id] > .turn-ctx');
       const rail = rails.length ? rails[rails.length - 1] : null;
       if (rail) {
+        const facts = rail.querySelector('[data-conversation-part="turn-context-content"]') || rail;
         /* Branch row: rebuild (or remove) in place. Prefer the live branch
          * (it moves on a mid-turn `git checkout`); fall back to the branch
          * derivable from projectState so a gap in the live state never
@@ -22895,14 +22001,14 @@ let backgroundConversationActivity = new Map();
         const gitHtml = _renderGitRowHtml(gitForRow);
         if (gitHtml) {
           if (gitRow) gitRow.outerHTML = gitHtml;
-          else rail.insertAdjacentHTML('beforeend', gitHtml);
+          else facts.insertAdjacentHTML('beforeend', gitHtml);
         } else if (gitRow) gitRow.remove();
         /* Checklist row: rebuild (or remove) in place. */
         const todoRow = rail.querySelector('[data-tctx-todo]');
         const todoHtml = _renderTodoRowHtml(live.todos);
         if (todoHtml) {
           if (todoRow) todoRow.outerHTML = todoHtml;
-          else rail.insertAdjacentHTML('beforeend', todoHtml);
+          else facts.insertAdjacentHTML('beforeend', todoHtml);
         } else if (todoRow) todoRow.remove();
       }
       /* Reconcile the in-flight turn's persisted snapshot so the authoritative
@@ -23921,6 +23027,10 @@ function _onFoldersChangedPush(rawFrame) {
   if (!frame) return;
   if (!_frameIsOurs(frame.userId)) return;
   const deletedFolderId = frame.deletedFolderId;
+
+  // Push is an invalidation, including when its debounce joins an older read.
+  // The catalog owner refetches after that older delivery rather than admitting it.
+  if (typeof invalidateFolderProjection === 'function') invalidateFolderProjection();
   if (deletedFolderId) {
     for (const conversation of conversations) {
       if (conversation?.folderId === deletedFolderId) conversation.folderId = null;
@@ -24251,7 +23361,12 @@ function _recoverSwarmAgents(round, allRounds) {
          master._snapshot_tool_timeline). Without this the reloaded card
          showed no tools/timeline even though the agent used them live. */
       const tools = Array.isArray(a.tools) ? a.tools : [];
-      const toolCalls = Array.isArray(a.toolCalls) ? a.toolCalls : [];
+      /* The dock sends normalized snapshot agents back through this adapter;
+         their wire aliases have already become `_toolCalls`/`_toolCallsOmitted`. */
+      const toolCalls = Array.isArray(a.toolCalls) ? a.toolCalls
+        : (Array.isArray(a._toolCalls) ? a._toolCalls : []);
+      const toolCallsOmitted = typeof a.toolCallsOmitted === "number"
+        ? a.toolCallsOmitted : a._toolCallsOmitted;
       /* Restore the live stopwatch's anchor (backend `startedAt`, epoch ms
          — see master._build_agent_snapshot). The per-agent timer renders only
          while the agent is running AND has a `_startedAt`; that field used to
@@ -24281,6 +23396,8 @@ function _recoverSwarmAgents(round, allRounds) {
       }
       return {
         id: a.id || "",
+        executionTaskId: a.executionTaskId,
+        conversationId: a.conversationId,
         role: a.role || "agent",
         model: a.model || "",
         objective: a.objective || "",
@@ -24294,10 +23411,13 @@ function _recoverSwarmAgents(round, allRounds) {
         modifiedFiles: typeof a.modifiedFiles === "number" ? a.modifiedFiles : 0,
         error: swarmFailureReason(a.error),
         failure: a.failure || a.error,
+
+        messageReceipts: a.messageReceipts,
+        messageReceiptsVersion: a.messageReceiptsVersion,
         tools,
         _toolCalls: toolCalls,
-        _toolCallsOmitted: (typeof a.toolCallsOmitted === "number" && a.toolCallsOmitted > 0)
-          ? a.toolCallsOmitted : 0,
+        _toolCallsOmitted: (typeof toolCallsOmitted === "number" && toolCallsOmitted > 0)
+          ? toolCallsOmitted : 0,
         _startedAt: startedAt || undefined,
         /* Stall evidence persisted by the backend (master._build_agent_snapshot)
            — without carrying it here a reloaded stalled card loses its
@@ -24682,11 +23802,14 @@ function _buildSwarmPanelHTML(round, allRounds) {
       // Per-tool-call execution timeline — same look as ptool-panel rows.
       // Each row has a status dot, tool name, args brief, and elapsed.
       // Click a row to expand its preview/error.
-      const timelineCalls = Array.isArray(a._toolCalls) ? a._toolCalls : [];
+      const projectedCalls = projectAgentTimeline(a, t);
+      const timelineCalls = projectedCalls.filter(call => call.entryKind !== 'message_receipt');
+      const messageCalls = projectedCalls.filter(call => call.entryKind === 'message_receipt');
       const omittedToolCalls = Number(a._toolCallsOmitted || 0);
-      if (timelineCalls.length > 0 || omittedToolCalls > 0) {
-        const rowsHTML = timelineCalls.map((c, index) => {
-          const dot = c.status === "running" ? '<span class="sw-tl-dot sw-tl-running"></span>'
+      if (timelineCalls.length > 0 || messageCalls.length > 0 || omittedToolCalls > 0) {
+        const renderCall = (c, index) => {
+          const dot = c.entryKind === 'message_receipt' ? '<span class="sw-tl-dot"></span>'
+                    : c.status === "running" ? '<span class="sw-tl-dot sw-tl-running"></span>'
                     : c.status === "failed"  ? `<span class="sw-tl-dot sw-tl-failed">${_SW_STATUS_SVG.failed}</span>`
                     :                          `<span class="sw-tl-dot sw-tl-done">${_SW_STATUS_SVG.done}</span>`;
           const td = _TOOL_DISPLAY[c.toolName];
@@ -24704,11 +23827,11 @@ function _buildSwarmPanelHTML(round, allRounds) {
             ? `<div class="sw-tl-truncated">${escapeHtml(t("swarm.toolPreviewTruncated", { count: omittedChars.toLocaleString() }))}</div>`
             : "";
           const expandable = !!detail || detailTruncated;
-          const latest = index === timelineCalls.length - 1;
-          const toggle = expandable && !latest;
+          const latest = c.entryKind !== 'message_receipt' && index === timelineCalls.length - 1;
+          const toggle = expandable && (!latest || c.entryKind === 'message_receipt');
           const rowTag = toggle ? 'details' : 'div';
           const lineTag = toggle ? 'summary' : 'div';
-          const row = `<${rowTag} class="sw-tl-row sw-tl-${escapeHtml(c.status || 'unknown')}${toggle ? ' sw-tl-expandable' : ''}" data-call-id="${escapeHtml(c.callId || '')}">` +
+          const row = `<${rowTag} class="sw-tl-row sw-tl-${escapeHtml(c.entryKind === 'message_receipt' ? 'receipt' : c.status || 'unknown')}${toggle ? ' sw-tl-expandable' : ''}" data-call-id="${escapeHtml(c.callId || '')}">` +
               `<${lineTag} class="sw-tl-line">` +
                 dot +
                 `<span class="sw-tl-icon">${icon}</span>` +
@@ -24721,15 +23844,18 @@ function _buildSwarmPanelHTML(round, allRounds) {
                 ? `<div class="sw-tl-detail${detailIsError ? ' sw-tl-detail-error' : ''}">${escapeHtml(detail)}${truncationNote}</div>`
                 : "") +
             `</${rowTag}>`;
-          return latest ? `<div class="sw-a-latest"><div class="sw-a-activity-label">${escapeHtml(t('swarm.latestTool'))}</div>${row}</div>` : row;
-        });
+          return latest ? `<div class="sw-a-latest"><div class="sw-a-activity-label">${escapeHtml(c.entryKind === 'message_receipt' ? t('tool.agentMessageReceived') : t('swarm.latestTool'))}</div>${row}</div>` : row;
+        };
+        const rowsHTML = timelineCalls.map(renderCall);
+        const messageHTML = messageCalls.length
+          ? `<details class="sw-a-messages"><summary>${escapeHtml(t('swarm.messagesTitle'))} · ${messageCalls.length}</summary>${messageCalls.map(renderCall).join('')}</details>` : '';
         const omittedHTML = omittedToolCalls > 0
           ? `<div class="sw-tl-omitted">${escapeHtml(t("swarm.toolCallsOmitted", { count: omittedToolCalls.toLocaleString() }))}</div>`
           : "";
         const latestHTML = rowsHTML.pop() || '';
         const historyHTML = rowsHTML.length || omittedToolCalls > 0
           ? `<details class="sw-a-tool-history"><summary>${escapeHtml(t('swarm.recentTools', { count: rowsHTML.length }))}</summary>${omittedHTML}${rowsHTML.join('')}</details>` : '';
-        bodyContent += `<div class="sw-a-timeline">${latestHTML}${historyHTML}</div>`;
+        bodyContent += `<div class="sw-a-timeline">${latestHTML}${historyHTML}${messageHTML}</div>`;
       } else if (aRunning) {
         bodyContent += `<div class="sw-a-activity-empty">${escapeHtml(t('swarm.awaitingTools'))}</div>`;
       }
@@ -25982,7 +25108,6 @@ const runtimeActions = Object.freeze({
   _openExternalAsset,
   _openImageFullscreen,
   _recoverOfflineConversations,
-  _removeReplyQuote,
   _safeClipboardWrite,
   _swarmCopyAgentId,
   _swarmToggleClass,
@@ -26088,6 +25213,9 @@ const ImageGenerationComposerState = Object.freeze({
 // avoids feature-registry override snapshots while keeping mutation funnels in
 // the retained state owner.
 const ProjectPresentationShellState = Object.freeze({
+
+  beginProjectMutation() { return _conversationProjectController.beginMutation(); },
+  captureProjectStatus,
   get activeConversationId() { return activeConvId; },
   set activeConversationId(value) {
     activeConvId = value == null ? null : String(value);

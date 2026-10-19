@@ -3,7 +3,7 @@
  * glyphs and receipt markup have explicit dependencies.
  * Entry points: renderActivityEventBlock.
  * Dependencies: conversation-sync.generated, conversation-view-model, ports,
- * compaction-block, icons, localized-copy, failure-receipt.
+ * compaction-block, icons, localized-copy, failure-receipt, error-presentation.
  */
 import type { TurnActivityEntry } from '../../../api/conversation-sync.generated';
 import {
@@ -21,6 +21,10 @@ import {
 } from './icons';
 import { textFor } from './localized-copy';
 import { buildFailureReceipt } from './failure-receipt';
+import { createErrorEnvelopePresentation } from '../../../error-presentation';
+import type { Translator } from '../../../i18n';
+
+import { renderUsageRecoveryNotice } from './usage-recovery-notice';
 
 function activityInterpolationArgs(
   value: Readonly<Record<string, unknown>> | undefined,
@@ -88,6 +92,28 @@ function activityMarkerIcon(
   ]);
 }
 
+function compactionTriggerLabel(
+  trigger: string | undefined,
+  ports: ClassicConversationRendererPorts,
+): string {
+  if (trigger === 'working_set') {
+    return textFor(ports, 'activity.compaction.trigger.workingSet', 'Long context');
+  }
+  if (trigger === 'window') {
+    return textFor(ports, 'activity.compaction.trigger.window', 'Context budget threshold reached');
+  }
+  if (trigger === 'dispatch_guard') {
+    return textFor(ports, 'activity.compaction.trigger.dispatchGuard', 'Request too large before sending');
+  }
+  if (trigger === 'context_overflow') {
+    return textFor(ports, 'activity.compaction.trigger.contextOverflow', 'Provider context overflow');
+  }
+  if (trigger === 'manual') {
+    return textFor(ports, 'activity.compaction.trigger.manual', 'Manual compression');
+  }
+  return ''; // Unknown historical triggers remain inspectable, not guessed.
+}
+
 function buildActivityEventRow(
   document: Document,
   entry: TurnActivityEntry,
@@ -97,6 +123,7 @@ function buildActivityEventRow(
   }>['terminalError'],
   previousOpen?: boolean,
   turn?: ConversationTurnViewModel,
+  previousCompactionOpen?: boolean,
 ): HTMLElement {
   const isCompaction = ['context_compaction', 'compacting'].includes(entry.reasonCode ?? '');
   const row = document.createElement(terminalError ? 'details' : 'div');
@@ -117,6 +144,17 @@ function buildActivityEventRow(
 
   const body = document.createElement('div');
   body.className = 'activity-event__body';
+
+  const diagnostics = isCompaction ? document.createElement('details') : null;
+  if (diagnostics) {
+    diagnostics.className = 'activity-event__compaction-details';
+    diagnostics.open = previousCompactionOpen ?? false;
+    const disclosure = document.createElement('summary');
+    disclosure.textContent = textFor(ports, 'activity.compaction.details', 'Details');
+    diagnostics.appendChild(disclosure);
+  }
+  const quietCompaction = isCompaction && entry.status === 'succeeded'
+    && entry.severity === 'info';
   const line = document.createElement('div');
   line.className = 'activity-event__line';
   const occurredAtDate = new Date(entry.occurredAt);
@@ -160,7 +198,7 @@ function buildActivityEventRow(
     inspect.dataset.conversationAction = 'open-compaction';
     inspect.dataset.operation = entry.archiveId;
     inspect.textContent = textFor(
-      ports, 'compactCard.viewSnapshot', 'View pre-compaction snapshot',
+      ports, 'activity.compaction.snapshot', 'View snapshot',
     );
     chips.appendChild(inspect);
   }
@@ -204,7 +242,7 @@ function buildActivityEventRow(
         ports, entry.detailKey, entry.detail,
         activityInterpolationArgs(resolvedArgs),
       ) : entry.detail;
-    body.appendChild(detail);
+    (quietCompaction && diagnostics ? diagnostics : body).appendChild(detail);
   }
   const summaryReasonKey = typeof entry.summaryArgs?.reasonKey === 'string'
     ? entry.summaryArgs.reasonKey : '';
@@ -213,11 +251,23 @@ function buildActivityEventRow(
     : entry.reasonCode?.startsWith('stream.retryReason.')
       ? textFor(ports, entry.reasonCode, entry.reasonCode)
       : entry.reasonCode;
-  const triggerFact = isCompaction && entry.trigger
-    ? entry.trigger.replaceAll('_', ' ') : '';
+  const triggerFact = isCompaction ? compactionTriggerLabel(entry.trigger, ports) : '';
+  const summaryModel = entry.summaryModel;
+  const recordedModels = [...new Set((entry.summaryCalls ?? []).flatMap(call =>
+    typeof call.model === 'string' && call.model ? [call.model] : []))];
+  const summaryModels = summaryModel ? [summaryModel] : recordedModels;
+  const summaryUnknown = !summaryModels.length || (!summaryModel
+    && entry.summaryCalls?.some(call => typeof call.model !== 'string' || !call.model));
+  const taskModel = entry.taskModel || entry.model; // Legacy model was the task.
+  const modelFacts = isCompaction ? [
+    ...summaryModels.map(model => textFor(ports, 'activity.compaction.summaryModel',
+      'Summary model: {model}', { model })),
+    summaryUnknown ? textFor(ports, 'activity.compaction.summaryModelUnknown', 'Summary model not recorded') : '',
+    entry.summarySelectedModel && !summaryModels.includes(entry.summarySelectedModel)
+      ? textFor(ports, 'activity.compaction.summarySelectedModel', 'Selected summary model: {model}', { model: entry.summarySelectedModel }) : '',
+  ] : [entry.model, entry.providerId, entry.keyHint];
   const facts = [
-    entry.model, entry.providerId, entry.keyHint, entry.statusCode
-      ? `HTTP ${entry.statusCode}` : '', triggerFact, reasonFact,
+    ...modelFacts, entry.statusCode ? `HTTP ${entry.statusCode}` : '', triggerFact, reasonFact,
   ].filter(Boolean);
   const appendFacts = (parent: HTMLElement): void => {
     if (!facts.length) return;
@@ -226,6 +276,19 @@ function buildActivityEventRow(
     factsNode.textContent = facts.join(' · ');
     parent.appendChild(factsNode);
   };
+  if (diagnostics) {
+    const routeFacts = [
+      taskModel ? textFor(ports, 'activity.compaction.taskModel', 'Main model: {model}', { model: taskModel }) : '',
+      entry.summaryProviderId,
+      entry.trigger,
+    ].filter(Boolean);
+    if (routeFacts.length) {
+      const route = document.createElement('div');
+      route.className = 'activity-event__facts';
+      route.textContent = routeFacts.join(' · ');
+      diagnostics.appendChild(route);
+    }
+  }
   if (terminalError) {
     const summary = document.createElement('summary');
     summary.className = 'activity-event__terminal-summary';
@@ -234,6 +297,20 @@ function buildActivityEventRow(
     content.className = 'activity-event__terminal-content';
     content.appendChild(
       buildFailureReceipt(document, terminalError, turn, ports));
+    const presentation = createErrorEnvelopePresentation({
+      ownerDocument: document,
+      translate: ((key: string, values?: Readonly<Record<string, unknown>>) =>
+        textFor(ports, key, key, activityInterpolationArgs(values))) as Translator,
+    });
+    const message = document.createElement('div');
+    // The common presentation owner escapes every envelope field.
+    message.innerHTML = presentation.renderErrorEnvelope(terminalError);
+    content.appendChild(message);
+    const evidence = document.createElement('details');
+    evidence.className = 'activity-event__error-diagnostics';
+    const evidenceSummary = document.createElement('summary');
+    evidenceSummary.textContent = textFor(ports, 'err.details', 'Technical details');
+    evidence.appendChild(evidenceSummary);
     const error = document.createElement('pre');
     error.className = 'activity-event__terminal-envelope';
     try {
@@ -241,11 +318,16 @@ function buildActivityEventRow(
     } catch {
       error.textContent = terminalError.message;
     }
-    content.appendChild(error);
+    evidence.appendChild(error);
+    content.appendChild(evidence);
     appendFacts(content);
+
+    if (diagnostics && diagnostics.childNodes.length > 1) content.appendChild(diagnostics);
     row.append(summary, content);
   } else {
     appendFacts(body);
+
+    if (diagnostics && diagnostics.childNodes.length > 1) body.appendChild(diagnostics);
     row.append(marker, body);
   }
   return row;
@@ -257,9 +339,21 @@ export function renderActivityEventBlock(
   ports: ClassicConversationRendererPorts,
   turn?: ConversationTurnViewModel,
 ): void {
+  const recoveryFocus = node.querySelector('[data-usage-recovery]')?.contains(node.ownerDocument.activeElement)
+    ? node.ownerDocument.activeElement as HTMLElement : null;
   const previousDetails = node.querySelector<HTMLDetailsElement>(
     ':scope > details.activity-event--terminal-error',
   );
+  const previousCompactionDetails = node.querySelector<HTMLDetailsElement>(
+    '.activity-event__compaction-details',
+  );
+  const previousEvidence = node.querySelector<HTMLDetailsElement>(
+    '.activity-event__error-diagnostics',
+  );
+  const evidenceHadFocus = previousEvidence?.querySelector('summary')
+    === node.ownerDocument.activeElement;
+  const detailsHadFocus = previousCompactionDetails?.querySelector('summary')
+    === node.ownerDocument.activeElement;
   node.className = 'conversation-block conversation-block--activity-event';
   node.replaceChildren(
     buildActivityEventRow(
@@ -269,6 +363,26 @@ export function renderActivityEventBlock(
       block.terminalError,
       previousDetails?.open,
       turn,
+      previousCompactionDetails?.open,
     ),
   );
+
+  const canCheckUsage = block.terminalError?.kind === 'execution_token_usage_unknown'
+    && turn && ['completed', 'failed', 'interrupted', 'truncated', 'cancelled', 'superseded'].includes(turn.status)
+    && turn.source.conversationId && turn.turnId
+    && Number.isSafeInteger(turn.projectionRevision) && turn.projectionRevision >= 0;
+  renderUsageRecoveryNotice(node,
+    node.querySelector<HTMLElement>('.activity-event__terminal-content'),
+    canCheckUsage ? { conversationId: turn.source.conversationId, turnId: turn.turnId,
+      projectionRevision: turn.projectionRevision } : undefined, ports);
+  if (recoveryFocus?.isConnected) recoveryFocus.focus();
+
+  const evidence = node.querySelector<HTMLDetailsElement>('.activity-event__error-diagnostics');
+  if (evidence) {
+    evidence.open = previousEvidence?.open ?? false;
+    if (evidenceHadFocus) evidence.querySelector('summary')?.focus();
+  }
+  if (detailsHadFocus) {
+    node.querySelector<HTMLElement>('.activity-event__compaction-details > summary')?.focus();
+  }
 }

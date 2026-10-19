@@ -797,12 +797,23 @@ function renderPaths(): void {
   const current = el('dbPathCurrent');
   if (current) {
     const fs = _status.engine.filesystem || {};
-    current.innerHTML = '';
-    const subEl = document.createElement('div');
-    subEl.className = 'settings-field-hint';
-    subEl.textContent = `${fsClassLabel(fs.class)} · ${t('settings.dbFreeSpace')}: ${
-      fmtBytes(fs.freeBytes)}`;
-    current.append(subEl);
+    current.replaceChildren();
+    for (const [key, value] of [
+      ['settings.dbFsType', fsClassLabel(fs.class)],
+      ['settings.dbFreeSpace', fmtBytes(fs.freeBytes)],
+    ]) {
+      const item = document.createElement('div');
+      item.className = 'db-overview-item';
+      const label = document.createElement('span');
+      label.className = 'db-meta-label';
+      label.dataset.i18n = key;
+      label.textContent = t(key);
+      const detail = document.createElement('span');
+      detail.className = 'db-overview-value';
+      detail.textContent = value;
+      item.append(label, detail);
+      current.append(item);
+    }
   }
 
   const projection = searchProjection();

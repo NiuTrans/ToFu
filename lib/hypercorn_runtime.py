@@ -551,7 +551,7 @@ async def worker_serve(
             )
         )
         bind = repr_socket_addr(sock.family, sock.getsockname())
-        await config.log.info(f"Running on https://{bind} (CTRL + C to quit)")
+        await config.log.info("Running on https://%s (CTRL + C to quit)", bind)
 
     for sock in sockets.insecure_sockets:
         if config.workers > 1 and platform.system() == "Windows":
@@ -561,7 +561,7 @@ async def worker_serve(
             await asyncio.start_server(_server_callback, backlog=config.backlog, sock=sock)
         )
         bind = repr_socket_addr(sock.family, sock.getsockname())
-        await config.log.info(f"Running on http://{bind} (CTRL + C to quit)")
+        await config.log.info("Running on http://%s (CTRL + C to quit)", bind)
 
     for sock in sockets.quic_sockets:
         if config.workers > 1 and platform.system() == "Windows":
@@ -574,7 +574,7 @@ async def worker_serve(
         server_tasks.add(task)
         task.add_done_callback(server_tasks.discard)
         bind = repr_socket_addr(sock.family, sock.getsockname())
-        await config.log.info(f"Running on https://{bind} (QUIC) (CTRL + C to quit)")
+        await config.log.info("Running on https://%s (QUIC) (CTRL + C to quit)", bind)
 
     try:
         async with TaskGroup() as task_group:

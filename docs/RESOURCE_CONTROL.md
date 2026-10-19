@@ -1,837 +1,251 @@
 # Automatic resource control
 
+## Sidebar review receipts
+
+`frontend/src/conversation-review.ts` keeps one browser-local receipt per encountered conversation and authenticated owner, overwriting it on the next completion/view. It retains only turn/attempt identity, ordering and a viewed bit; no transcript, polling, request, worker or timer is added. Receipts persist as user interface history; the in-memory read cache clears on owner change/disposal. The focused 1,000-completion test retains exactly one record for its conversation. Its final key plus value measured 117 UTF-16 code units (234 bytes before browser storage overhead), independent of completion count; IDs affect record size. Unavailable/quota-exhausted storage degrades to the current tab's memory receipt.
+
+## Restart status presentation
+
+The shell-first boot keeps the existing single background runner and one 800 ms browser probe; moving the storage boundary adds no worker or polling owner. Cold-start diagnostics retain only the current nine phase rows. The in-app dock retains at most 32 distinct records of 2,000 characters and one log node, with no file writes or independent timer. A 300-transition DOM test retained 32 records, less than 65,000 displayed characters, and one log element; identical projections preserve the text node. Existing request timeouts bound in-flight teardown; ready/destroy clear polling and release admission. This is a retention-bound measurement, not a production restart-time claim. The slow-boundary test holds storage acquisition behind an event while shell/progress respond within 1s.
+
+## Assignment authority size
+
+Swarm's server-authored assignment grants retain complete selected tool schemas, contracts and inherited prompts, without a private 1 MiB admission ceiling. Compact Unicode v2 JSON keeps one catalog carrier; v1 remains readable with its original equality checks. Runtime config is reconstructed only after validation. Each wave prepares once per effective model, then copies mutable containers for siblings while sharing immutable strings. Only selected tool metadata is copied or compiled. Templates live for that request only; no cache, worker or storage owner is added. Initial ordinary waves reuse the validated template for their one session grant, without adding per-child durable grants. Later waves retain their current-caller grants through the existing assignment/checkpoint lifecycle. Problem: repeated serialization scaled payload allocations and work by every sibling. Decision: share preparation and remove the duplicate catalog. Rejected: raising thresholds, truncating grants, globally caching authority or sharing mutable sibling state. See [RETAINED_AGENTS.md](RETAINED_AGENTS.md).
+
+For eight same-model follow-up children with a 400,013-byte Unicode description, seven warmed equivalent-work runs measured median preparation 59.03 -> 5.15 ms. A separate tracemalloc run measured peak Python allocations 21,685,206 -> 3,624,080 bytes and retained allocations 19,278,208 -> 1,838,700 bytes. Complete compact durable grants totalled 12,811,696 -> 9,610,440 bytes. These are synthetic local preparation/allocation measurements, not process RSS or inference speed. `test_launch_preparation.py` covers sibling isolation, per-model preparation, whole-wave rejection, legacy recovery, no initial per-child grant growth and unconfirmed launch handles; `test_assignment_context_capacity.py` covers exact large content, permissions and the common model/tool loop.
+
+## Native archive acquisition resources
+
+One lazy image owner uses the existing host acquisition worker and joined close. A private compressed snapshot is capped by the artifact contract's 128 MiB bound; no install tree or persistent archive copy is created. Executable memfd bytes are charged to the caller's binary budget and reused until joined close. Digests stream in 64 KiB chunks; member and extended-header metadata share explicit 1 MiB bounds. Only records and bounded JSON metadata are retained, not all license/binary bodies. Self-check output and time use the declared host frame/shutdown budget; each child is killed/joined on failure. No pool, queue, cache service or durable growth is added.
+
+A 2026-10-10 single-process tracemalloc diagnostic on a 6,281,787-byte archive, with imports excluded and GC before retained sampling, observed inspection peak Python allocations 44,605,061 -> 2,251,927 bytes and retained 218,655 -> 217,608. Both inspectors returned identical manifests. This excludes kernel image/page cache, subprocesses, cold imports, latency and whole application; it is not RSS or performance admission. Earlier import-contaminated observations are invalid for this comparison. Actual loader fixtures prove one sealed image survives source removal across two model requests and is closed afterward, plus pre-effect rejection.
+
 ## Native model control resources
 
-One explicit counter and host-account port reuse the one-slot reader, existing
-counter worker and caller executor. Host state retains one request, cancellation
-signal, lease and at most one frame-bounded frozen usage candidate. No history
-mirror, account copy, extra pool, queue, timer service or durable record is added.
-Each control action uses declared ACK bytes/time; reserve/dispatch are additionally
-clamped by the original execution deadline. Settlement and cleanup join their
-physical calls. The debug wire probe caps a proposed 100-token output to 7 and
-returns actual 3+2 token usage; the installed SDK uses one actual shared parent
-account, and the application probe settles two requests once. These are quota,
-representation and lifecycle checks, not RSS/throughput or system admission.
+One explicit counter and host-account port reuse the one-slot reader, existing counter worker and caller executor. Host state retains one request, cancellation signal, lease and at most one frame-bounded frozen usage candidate. No history mirror, account copy, extra pool, queue, timer service or durable record is added. Each control action uses declared ACK bytes/time; reserve/dispatch are additionally clamped by the original execution deadline. Settlement and cleanup join their physical calls. The debug wire probe caps a proposed 100-token output to 7 and returns actual 3+2 token usage; the installed SDK uses one actual shared parent account, and the application probe settles two requests once. These are quota, representation and lifecycle checks, not RSS/throughput or system admission.
+
+## Native OAuth route binding resources
+
+One issued route retains one optional resolver reference until consume/close; API-key routes allocate no credential scope and add no metadata fields. OAuth bindings own one encoded extra-header set and one 36-character canonical cache key during joined execution, never an access/refresh-token cache. Each attempt creates a metadata request for the supplied executor and releases it after ACK. A 2026-10-10 Python layout probe measured Route 48 -> 56 bytes and the credential request at 144 bytes, excluding referred strings/callback/principal objects. The standalone prompt_cache_key wrapper encoded to 59 JSON bytes; actual request and control-frame budgets remain authoritative. Native serializes the key by borrow, bounded by generated MODEL_CACHE_AFFINITY_KEY_BYTES. No worker, pool, queue, timer, vault, ledger or durable record is added. Source ownership, revocation and destination checks remain with the explicit resolver; cleanup joins before dropping its binding. The four installed local cases verify scoped rotation, missing/malformed authorization refusal, opaque replay and cache body/header agreement, not production refresh, RSS or throughput admission.
+
+## Native production credential resources
+
+One per-invocation resolver retains repository/principal/boundary and one frozen nonsecret source identity. It owns no tokens, refresh history, worker, queue, timer or durable state. Grant/source reads and existing refresh run in the supplied joined executor. A 2026-10-10 layout probe measured credential requests at 144 bytes and the resolver at 48 bytes, excluding referenced objects. The 64-character route digest excludes only aggregate revision. A 1,000-operation metadata-only diagnostic took 0.00969 s; it excludes repository, source, refresh, HTTP and inference and is not a performance-admission result. Revalidation compiles the current aggregate twice per successful refresh, deliberately preserving live grants. Full app CPU, latency and storage cost remain to be measured before default promotion. Reference hashing retains no raw source data and ordinary scope disposal releases its binding.
 
 ## Native dispatch credential resources
 
-The existing dispatch ACK carries at most its declared frame byte budget of
-trusted per-attempt headers. Rust moves the parsed HeaderMap into Request; no
-header field, allocation or credential cache is added to Held. Configured headers
-are cloned only when no replacement is supplied. Python keeps one frozen header
-carrier during the joined callback/ACK, then releases it. A 2026-10-10 Python 3.12
-layout probe measured both baseline/candidate policy dictionaries at 296 bytes;
-prepare_headers and dispatch_entered are the two added attributes. The one-token
-fixture encoded to 37 bytes. These are object/encoding measurements, not RSS or
-throughput evidence, and exclude callback/vault memory. No pool, worker, queue,
-timer, ledger or durable growth is added. Refresh callbacks share existing
-cancellation/joining; only proven pre-intent failures become unsent. Verify actual
-rotation, empty replacement, invalid headers, timeout and unknown intent tests.
+The existing dispatch ACK carries at most its declared frame byte budget of trusted per-attempt headers. Rust moves the parsed HeaderMap into Request; no header field, allocation or credential cache is added to Held. Configured headers are cloned only when no replacement is supplied. Python keeps one frozen header carrier during the joined callback/ACK, then releases it. A 2026-10-10 Python 3.12 layout probe measured both baseline/candidate policy dictionaries at 296 bytes; prepare_headers and dispatch_entered are the two added attributes. The one-token fixture encoded to 37 bytes. These are object/encoding measurements, not RSS or throughput evidence, and exclude callback/vault memory. No pool, worker, queue, timer, ledger or durable growth is added. Refresh callbacks share existing cancellation/joining; only proven pre-intent failures become unsent. Verify actual rotation, empty replacement, invalid headers, timeout and unknown intent tests.
 
 ## Native shared-account checkpoint resources
 
-Explicit shared recovery adds one scalar account object to the existing bounded
-snapshot, not another history, ledger, worker, queue or journal. Capture and
-restore use the existing account lock and supplied executor, and join before ACK.
-A 2026-10-10 encoded fixture with owner 7, root "root", limits 1000 tokens/3 tools,
-fractional UTC deadline and cl100k_base/max_tokens/fixture policy adds 376 JSON
-bytes including the shared_model_account wrapper. This is encoded metadata cost,
-not RSS or throughput evidence; identity/model lengths still consume the existing
-snapshot/frame bounds. Existing model settlement and root membership must be
-quiescent; pending attempts and active children refuse export. Restored unknown
-usage remains fenced. Verify the shared-account core and actual archive/TofuDB
-pause/close/reopen tests; default production and active-tree recovery are pending.
+Explicit shared recovery adds one scalar account object to the existing bounded snapshot, not another history, ledger, worker, queue or journal. Capture and restore use the existing account lock and supplied executor, and join before ACK. A 2026-10-10 encoded fixture with owner 7, root "root", limits 1000 tokens/3 tools, fractional UTC deadline and cl100k_base/max_tokens/fixture policy adds 376 JSON bytes including the shared_model_account wrapper. This is encoded metadata cost, not RSS or throughput evidence; identity/model lengths still consume the existing snapshot/frame bounds. Existing model settlement and root membership must be quiescent; pending attempts and active children refuse export. Restored unknown usage remains fenced. Verify the shared-account core and actual archive/TofuDB pause/close/reopen tests; default production and active-tree recovery are pending.
 
 ## Native selected model authority resources
 
-with_model_admission chooses one supplied authority and does not create an account
-mirror, worker, queue, history cache or durable record. The native variant keeps
-its lease inline, without an adapter Box. A 2026-10-10 debug metadata probe measured
-SelectedAdmission 16 bytes versus its prior Account Arc 8, and SelectedLease/native
-Lease both 32 bytes. These sizes exclude the authority and external adapter heap.
-One frozen scalar cap survives validation through serialization. External leases
-live for one joined counted request; unsent failures settle, while unknown intent
-stays fenced at their authority. This is representation/lifecycle evidence, not
-RSS, throughput or whole-system admission. Run model_admission_cost with nocapture.
+with_model_admission chooses one supplied authority and does not create an account mirror, worker, queue, history cache or durable record. The native variant keeps its lease inline, without an adapter Box. A 2026-10-10 debug metadata probe measured SelectedAdmission 16 bytes versus its prior Account Arc 8, and SelectedLease/native Lease both 32 bytes. These sizes exclude the authority and external adapter heap. One frozen scalar cap survives validation through serialization. External leases live for one joined counted request; unsent failures settle, while unknown intent stays fenced at their authority. This is representation/lifecycle evidence, not RSS, throughput or whole-system admission. Run model_admission_cost with nocapture.
 
 ## Native absolute deadline resources
 
-One optional u64 UTC expiry is carried by the existing round owner and borrowed
-checkpoint view. It adds at most 40 encoded JSON bytes per retained snapshot
-(measured with u64::MAX); ordinary frame/snapshot budgets still apply. No history
-copy, timer service, background worker, receipt log or new durable record is added.
-Session observation metadata is call-local, and existing cancellation/reader joining
-owns shutdown. Wall time is sampled once per explicit absolute-deadline run, then
-an inherited monotonic deadline covers every round. This is a representation and
-lifecycle measurement, not a throughput, RSS or whole-system admission claim.
+One optional u64 UTC expiry is carried by the existing round owner and borrowed checkpoint view. It adds at most 40 encoded JSON bytes per retained snapshot (measured with u64::MAX); ordinary frame/snapshot budgets still apply. No history copy, timer service, background worker, receipt log or new durable record is added. Session observation metadata is call-local, and existing cancellation/reader joining owns shutdown. Wall time is sampled once per explicit absolute-deadline run, then an inherited monotonic deadline covers every round. This is a representation and lifecycle measurement, not a throughput, RSS or whole-system admission claim.
 
 ## Native canonical context policy resources
 
-One run freezes route/output/tool JSON and an optional fixed deadline; close joins.
-Scopes reset after preparation; the caller owns the executor and eight receipts.
-One call-local deadline timer retires after joined work; queued work can cancel.
-Shared root preparation adds no workers/pools/history mirrors; one joined settlement
-signal fences inbox confirmation. Deadline: zero effects; no RSS/speed claim.
+One run freezes route/output/tool JSON and an optional fixed deadline; close joins. Scopes reset after preparation; the caller owns the executor and eight receipts. One call-local deadline timer retires after joined work; queued work can cancel. Shared root preparation adds no workers/pools/history mirrors; one joined settlement signal fences inbox confirmation. Deadline: zero effects; no RSS/speed claim.
 
 ## Native context preparation resources
 
-Preparation is explicit and uses the existing single control slot. Configured
-round_preparation_bytes bounds each encoded request/reply; the reader uses the
-maximum of that admitted bound and the tool-frame bound. The host rejects an
-oversized prepared reply before reservation, and Rust validates logical retained
-history under retained_bytes before dispatch. Disabled preparation transfers no
-history and owns no replacement. Enabled history/reply carriers live only through
-the owning callback, reservation and model round; no worker, pool, queue, timer
-service or persistent history mirror is added. Callback cancellation joins before
-reservation; invalid admitted history settles NotDispatched exactly once.
-The application fixture measures JSON history 16,033 -> 102 bytes at round zero,
-and 709 -> 709 bytes at round one while retaining tool/reasoning evidence. Native
-stdio verifies 16,000-character history transfer and ordinary Stop during partial
-200,000-character publication: a complete frame precedes aborted, with zero HTTP.
-These encoded-size/lifecycle measurements prove neither peak RSS nor performance
-admission. A hard deadline or broken pipe may fail an incomplete publication;
-ordinary Stop finishes the owned frame under the original task deadline.
+Preparation is explicit and uses the existing single control slot. Configured round_preparation_bytes bounds each encoded request/reply; the reader uses the maximum of that admitted bound and the tool-frame bound. The host rejects an oversized prepared reply before reservation, and Rust validates logical retained history under retained_bytes before dispatch. Disabled preparation transfers no history and owns no replacement. Enabled history/reply carriers live only through the owning callback, reservation and model round; no worker, pool, queue, timer service or persistent history mirror is added. Callback cancellation joins before reservation; invalid admitted history settles NotDispatched exactly once. The application fixture measures JSON history 16,033 -> 102 bytes at round zero, and 709 -> 709 bytes at round one while retaining tool/reasoning evidence. Native stdio verifies 16,000-character history transfer and ordinary Stop during partial 200,000-character publication: a complete frame precedes aborted, with zero HTTP. These encoded-size/lifecycle measurements prove neither peak RSS nor performance admission. A hard deadline or broken pipe may fail an incomplete publication; ordinary Stop finishes the owned frame under the original task deadline.
 
 ## Native round permit resources
 
-One per-run ledger retains two atomics; the ordered provider lane owns at most
-one attached Permit at a time. Ordinary history/result evidence is borrowed; explicit preparation may own one
-replacement history. Permit consumption or Drop invokes its settlement callback exactly once;
-Drop reports Abandoned, not zero usage. Callback errors/panics fail the required
-ModelRoute resource and prevent success certification. Admission construction
-owns rollback before returning its Permit. Policy waits can observe parent
-cancellation/deadline through Context without receiving settlement authority.
-A denied HTTP round opens no connection; native tests also verify second-round
-refusal, stopped/failed/panicked providers, NotDispatched on deadline, late usage
-settlement despite cancellation and settlement-fault refusal. No new worker,
-queue, timer service or retained round ledger list is created. Application policy
-still owns finite-credit treatment, aggregate capacity and durable records.
-These count/lifecycle observations do not certify application speed or RSS.
+One per-run ledger retains two atomics; the ordered provider lane owns at most one attached Permit at a time. Ordinary history/result evidence is borrowed; explicit preparation may own one replacement history. Permit consumption or Drop invokes its settlement callback exactly once; Drop reports Abandoned, not zero usage. Callback errors/panics fail the required ModelRoute resource and prevent success certification. Admission construction owns rollback before returning its Permit. Policy waits can observe parent cancellation/deadline through Context without receiving settlement authority. A denied HTTP round opens no connection; native tests also verify second-round refusal, stopped/failed/panicked providers, NotDispatched on deadline, late usage settlement despite cancellation and settlement-fault refusal. No new worker, queue, timer service or retained round ledger list is created. Application policy still owns finite-credit treatment, aggregate capacity and durable records. These count/lifecycle observations do not certify application speed or RSS.
 
 ## Native terminal persistence resources
 
-The live reader joins and transfers at most its existing bounded unread buffer;
-it creates no second live input pump. Optional persistence retains one frozen
-candidate in Task, one attempt counter/retry flag and one exclusive AsyncFd
-carrier. Each serialized request obeys its explicit frame budget. Exclusive
-post-settlement writes support frames above PIPE_BUF without a concurrent writer;
-stdout flags restore before ACK waiting and stdin restores before publication.
-No thread, pool, unbounded receipt list or model retry is introduced. Native
-ACK grace and maximum host-requested attempts bound the persistence exchange.
-Python retains one frozen event/receipt pair per invocation and joins its owned
-callback and ACK task even after repeated cancellation. Policy callbacks must
-quiesce; ACK transport alone has the host shutdown bound. The caller owns durable
-idempotency/writer fencing, including uncertain timeout reconciliation.
-The verified standalone fixture is 14,358,304 bytes, 34,912 above its predecessor.
-Thirteen host unit tests and fourteen archive scenarios observe cleanup and
-commit attempts; the retry scenario keeps two model requests/one tool callback
-while commit attempts increase from one to two. These count/lifecycle witnesses
-are not peak memory, durable database correctness or application performance
-admission. The existing host frame/drain/admission budgets remain authoritative.
+The live reader joins and transfers at most its existing bounded unread buffer; it creates no second live input pump. Optional persistence retains one frozen candidate in Task, one attempt counter/retry flag and one exclusive AsyncFd carrier. Each serialized request obeys its explicit frame budget. Exclusive post-settlement writes support frames above PIPE_BUF without a concurrent writer; stdout flags restore before ACK waiting and stdin restores before publication. No thread, pool, unbounded receipt list or model retry is introduced. Native ACK grace and maximum host-requested attempts bound the persistence exchange. Python retains one frozen event/receipt pair per invocation and joins its owned callback and ACK task even after repeated cancellation. Policy callbacks must quiesce; ACK transport alone has the host shutdown bound. The caller owns durable idempotency/writer fencing, including uncertain timeout reconciliation. The verified standalone fixture is 14,358,304 bytes, 34,912 above its predecessor. Thirteen host unit tests and fourteen archive scenarios observe cleanup and commit attempts; the retry scenario keeps two model requests/one tool callback while commit attempts increase from one to two. These count/lifecycle witnesses are not peak memory, durable database correctness or application performance admission. The existing host frame/drain/admission budgets remain authoritative.
 
 ## Native Responses dialect resources
 
-One explicit Profile enum accompanies the existing provider budget/replay state;
-no history copy, pool, queue, timer, account or credential store is added.
-The 2026-10-10 debug x86_64 layout probe measured Profile at 1 byte and both
-previous (Budget,bool) and new (Budget,bool,Profile) tuples at 24 bytes.
-Generated dialect literals have process-lifetime static storage. Existing request
-byte limits bound borrowed serialization and host model settlement remains joined.
-Codex omits the server output limit by canonical protocol policy: local admission
-and actual/unknown usage settlement remain required and cannot imply a hard
-provider token cap. Run dialect_validation_keeps_local_output_admission with
-nocapture and actual counted stdio tests. These are layout/lifecycle measurements,
-not CPU/RSS/latency or default-production admission.
+One explicit Profile enum accompanies the existing provider budget/replay state; no history copy, pool, queue, timer, account or credential store is added. The 2026-10-10 debug x86_64 layout probe measured Profile at 1 byte and both previous (Budget,bool) and new (Budget,bool,Profile) tuples at 24 bytes. Generated dialect literals have process-lifetime static storage. Existing request byte limits bound borrowed serialization and host model settlement remains joined. Codex omits the server output limit by canonical protocol policy: local admission and actual/unknown usage settlement remain required and cannot imply a hard provider token cap. Run dialect_validation_keeps_local_output_admission with nocapture and actual counted stdio tests. These are layout/lifecycle measurements, not CPU/RSS/latency or default-production admission.
 
 ## Native Responses stream resources
 
-A caller supplies item and conservative retained-byte bounds. Function positions,
-item-ID aliases/ambiguities, hidden message positions and replay entries have
-bounded owners. UTF-8 identity bytes are charged before copying aliases; text,
-arguments, protocol identities and snapshots contribute to byte admission.
-Conservative charges include replacements over the response lifetime and metadata;
-they are not exact allocator RSS. Unknown event telemetry is a single saturating
-counter, never an unbounded set of provider labels. No worker, queue, timer, cache,
-transport connection or persistent store is introduced by this parser.
+A caller supplies item and conservative retained-byte bounds. Function positions, item-ID aliases/ambiguities, hidden message positions and replay entries have bounded owners. UTF-8 identity bytes are charged before copying aliases; text, arguments, protocol identities and snapshots contribute to byte admission. Conservative charges include replacements over the response lifetime and metadata; they are not exact allocator RSS. Unknown event telemetry is a single saturating counter, never an unbounded set of provider labels. No worker, queue, timer, cache, transport connection or persistent store is introduced by this parser.
 
-Visible prefix proof uses one character counter and fixed SHA-256 state without a
-second retained response-text buffer. Terminal text slices borrow response fields;
-only a proven missing suffix is projected. Thirty-five Python-derived scenarios
-exercise replay, slot routing, duplicate/recycled IDs, errors, usage and phases.
-Chunk widths 1/3/7/64/65536 preserve exact Unicode text, tool JSON, replay and ignored
-malformed trailers. A 512-character UTF-8 ID fits a 2,500-byte event but its retained
-aliases exceed that admission and refuse before a slot is stored. Detached nested
-replay snapshots cannot mutate the owner. These state/count/bound observations are
-not application speedup or Responses production-route evidence.
+Visible prefix proof uses one character counter and fixed SHA-256 state without a second retained response-text buffer. Terminal text slices borrow response fields; only a proven missing suffix is projected. Thirty-five Python-derived scenarios exercise replay, slot routing, duplicate/recycled IDs, errors, usage and phases. Chunk widths 1/3/7/64/65536 preserve exact Unicode text, tool JSON, replay and ignored malformed trailers. A 512-character UTF-8 ID fits a 2,500-byte event but its retained aliases exceed that admission and refuse before a slot is stored. Detached nested replay snapshots cannot mutate the owner. These state/count/bound observations are not application speedup or Responses production-route evidence.
 
 ## Native structured-output request resources
 
-Schema conversion uses the existing per-round output_config projection and bounded
-request writer. It introduces no worker, timer, cache, queue or persisted schema
-registry. The canonical descriptor/schema remains caller-owned; the native format
-projection belongs to the current request and is released after serialization.
-Whole-history borrowing and existing native process/request/retained-byte bounds
-remain unchanged. This is not a new model-token or billing policy.
+Schema conversion uses the existing per-round output_config projection and bounded request writer. It introduces no worker, timer, cache, queue or persisted schema registry. The canonical descriptor/schema remains caller-owned; the native format projection belongs to the current request and is released after serialization. Whole-history borrowing and existing native process/request/retained-byte bounds remain unchanged. This is not a new model-token or billing policy.
 
-Measurement: three invalid format/configuration cases complete with zero observed
-TCP connections and all transport slots available. The real application fixture
-sends two model requests with the same schema and effort, executes one registered
-file write and persists the returned JSON text in its terminal Turn. Sixteen
-Python-derived request fixtures verify supported conversion, including preserved
-format and effort. These count/lifecycle checks do not claim application speedup
-or that client-side response validation has been implemented.
+Measurement: three invalid format/configuration cases complete with zero observed TCP connections and all transport slots available. The real application fixture sends two model requests with the same schema and effort, executes one registered file write and persists the returned JSON text in its terminal Turn. Sixteen Python-derived request fixtures verify supported conversion, including preserved format and effort. These count/lifecycle checks do not claim application speedup or that client-side response validation has been implemented.
 
 ## Native multimodal feedback resources
 
-Explicit multimodal mode adds no worker, timer, queue or media store. The
-application's existing image pipeline owns decode/resize, immutable media and
-vision policy; the native host carries already admitted canonical blocks.
-Encoded array bytes count toward feedback_bytes, frame_bytes/tool_frame_bytes
-and retained_bytes; text retains its previous byte semantics. Exceeding feedback
-admission stops before the follow-up model request. Block validation borrows
-Rust values; Python lazily caches only two static schema validators. Schemas
-ship as generated Python code, not runtime repository-file dependencies.
+Explicit multimodal mode adds no worker, timer, queue or media store. The application's existing image pipeline owns decode/resize, immutable media and vision policy; the native host carries already admitted canonical blocks. Encoded array bytes count toward feedback_bytes, frame_bytes/tool_frame_bytes and retained_bytes; text retains its previous byte semantics. Exceeding feedback admission stops before the follow-up model request. Block validation borrows Rust values; Python lazily caches only two static schema validators. Schemas ship as generated Python code, not runtime repository-file dependencies.
 
-Anthropic MIME reconciliation decodes at most 1,364 base64 prefix characters
-(at most 1,023 decoded bytes), then drops the sample. This is bounded temporary
-scratch, not a full image decode or an allocator RSS measurement. Image URL
-references are forwarded without local fetching. Native ingress retains its
-existing generated per-image token fee; no billing/permission policy is inferred.
-Measurements: real registered image inspection completes two model requests and
-one settled tool round; undeclared mode and a 16-byte feedback ceiling each
-complete one model request, one read/tool round and a durable error outcome.
-Tool model-content validation returns the original borrowed blocks without
-mutation. These lifecycle/count observations are not application speedup claims.
+Anthropic MIME reconciliation decodes at most 1,364 base64 prefix characters (at most 1,023 decoded bytes), then drops the sample. This is bounded temporary scratch, not a full image decode or an allocator RSS measurement. Image URL references are forwarded without local fetching. Native ingress retains its existing generated per-image token fee; no billing/permission policy is inferred. Measurements: real registered image inspection completes two model requests and one settled tool round; undeclared mode and a 16-byte feedback ceiling each complete one model request, one read/tool round and a durable error outcome. Tool model-content validation returns the original borrowed blocks without mutation. These lifecycle/count observations are not application speedup claims.
 
 ## Native Anthropic HTTP/request resources
 
-Anthropic execution shares the existing HTTP connection/pool admission, request
-byte writer, required text-consumer joining and terminal drain. It introduces no
-thread, pool, watcher, timer or retained history cache. Request serialization
-borrows canonical history and creates only current message/tool-result-group
-projections rather than a full converted history vector. The final request
-buffer remains bounded by request_bytes; existing agent retained-byte admission
-bounds canonical inputs. The explicit CLI derives protocol byte admission from
-its existing output_bytes profile and uses the generated block-index ceiling.
-Protocol and canonical accumulation have separate bounded charges; neither is
-an allocator RSS claim. Header/route bytes retain the existing bounded,
-single-use principal-owned credential carrier.
+Anthropic execution shares the existing HTTP connection/pool admission, request byte writer, required text-consumer joining and terminal drain. It introduces no thread, pool, watcher, timer or retained history cache. Request serialization borrows canonical history and creates only current message/tool-result-group projections rather than a full converted history vector. The final request buffer remains bounded by request_bytes; existing agent retained-byte admission bounds canonical inputs. The explicit CLI derives protocol byte admission from its existing output_bytes profile and uses the generated block-index ceiling. Protocol and canonical accumulation have separate bounded charges; neither is an allocator RSS claim. Header/route bytes retain the existing bounded, single-use principal-owned credential carrier.
 
-Measurement: the real TCP model/tool/model test records two requests over one
-keep-alive connection, one executed client tool, preserved hosted/signed replay
-and all pool slots released. The stdio/application test records two model calls,
-one registered file write and one canonical settled tool round before terminal
-ACK. Unsupported-request tests reject media/policy without transport effects.
-These count/lifecycle checks do not claim HTTP/application speedup; the isolated
-stream translation measurements below retain their narrower scope.
+Measurement: the real TCP model/tool/model test records two requests over one keep-alive connection, one executed client tool, preserved hosted/signed replay and all pool slots released. The stdio/application test records two model calls, one registered file write and one canonical settled tool round before terminal ACK. Unsupported-request tests reject media/policy without transport effects. These count/lifecycle checks do not claim HTTP/application speedup; the isolated stream translation measurements below retain their narrower scope.
 
 ## Native Anthropic stream resources
 
-Each stream owns one bounded protocol map, usage accumulator and existing SSE /
-Chat owners. Block count and conservative byte charges are explicit composition
-inputs; protocol index/name ceilings derive from the retained authority. Event
-encoded size is checked before field copies with a counting writer. Initial
-block/replay identities, reverse-name metadata and input/text growth are charged;
-usage replacement conservatively remains charged over the response lifetime.
-This is serialized-payload admission plus bounded metadata, not exact allocator
-RSS. Detached snapshots become caller-owned output. No worker, timer, queue,
-cache or persistent state is introduced. Native host/HTTP enablement remains
-separate from this stream parser.
+Each stream owns one bounded protocol map, usage accumulator and existing SSE / Chat owners. Block count and conservative byte charges are explicit composition inputs; protocol index/name ceilings derive from the retained authority. Event encoded size is checked before field copies with a counting writer. Initial block/replay identities, reverse-name metadata and input/text growth are charged; usage replacement conservatively remains charged over the response lifetime. This is serialized-payload admission plus bounded metadata, not exact allocator RSS. Detached snapshots become caller-owned output. No worker, timer, queue, cache or persistent state is introduced. Native host/HTTP enablement remains separate from this stream parser.
 
-Measurement: `benchmarks/anthropic_stream_measure.py` and the release example
-compare both actual translators on 10,000 one-character server-tool JSON input
-fragments, including event JSON parse and final verified replay snapshot. Two
-seven-sample runs measured Python medians 118.586 / 160.673 ms and native
-7.991 / 8.001 ms. Conservative native protocol charge was 40,495 bytes; this is
-not RSS. Raw samples and source/binary hashes accompany each local result.
-Python reparses growing input on each delta; native parses at closure/snapshot.
-These isolated kernel observations exclude SSE framing, transport, model time,
-application queues and billing; they are not whole-application speedup evidence.
+Measurement: `benchmarks/anthropic_stream_measure.py` and the release example compare both actual translators on 10,000 one-character server-tool JSON input fragments, including event JSON parse and final verified replay snapshot. Two seven-sample runs measured Python medians 118.586 / 160.673 ms and native 7.991 / 8.001 ms. Conservative native protocol charge was 40,495 bytes; this is not RSS. Raw samples and source/binary hashes accompany each local result. Python reparses growing input on each delta; native parses at closure/snapshot. These isolated kernel observations exclude SSE framing, transport, model time, application queues and billing; they are not whole-application speedup evidence.
 
 ## Native tool model-round metadata
 
-The native invocation context adds one optional machine-word round identity;
-the host ToolRequest adds one optional integer slot. The scheduler's existing
-batch owns the number; no counter, queue, worker, timer or persistent store is
-introduced. Wire metadata grows by one scalar `model_round` property per tool
-request (16 JSON bytes at round zero). Existing whole-frame admission applies.
-A focused scheduler test carries rounds 0/1/9 through ordered and parallel lanes,
-while standalone dispatch carries None. The real multi-round fixture verifies
-two pipeline writes and final durability after three model requests. This is
-metadata/ownership evidence, not an application speedup measurement.
+The native invocation context adds one optional machine-word round identity; the host ToolRequest adds one optional integer slot. The scheduler's existing batch owns the number; no counter, queue, worker, timer or persistent store is introduced. Wire metadata grows by one scalar `model_round` property per tool request (16 JSON bytes at round zero). Existing whole-frame admission applies. A focused scheduler test carries rounds 0/1/9 through ordered and parallel lanes, while standalone dispatch carries None. The real multi-round fixture verifies two pipeline writes and final durability after three model requests. This is metadata/ownership evidence, not an application speedup measurement.
 
 ## Native application gateway resources
 
-The optional NativeGateway borrows the application's declared executor and owns
-one serialization lock plus count/byte-bounded pending decision proofs. Bounds
-are supplied by the composition, not fixed host assumptions. A proof contains
-canonical tool name, arguments and caller bytes; capacity is reserved before
-policy await and released on denial, failure, execution or close. The existing
-application receipt count/TTL remain unchanged, and original decision timestamps
-are retained. Cancellation adds at most one scoped watcher per active callback;
-it is joined at callback exit and physical pipeline work is always joined.
+The optional NativeGateway borrows the application's declared executor and owns one serialization lock plus count/byte-bounded pending decision proofs. Bounds are supplied by the composition, not fixed host assumptions. A proof contains canonical tool name, arguments and caller bytes; capacity is reserved before policy await and released on denial, failure, execution or close. The existing application receipt count/TTL remain unchanged, and original decision timestamps are retained. Cancellation adds at most one scoped watcher per active callback; it is joined at callback exit and physical pipeline work is always joined.
 
-Measurement: the focused pending-policy test admits one outstanding decision
-with a declared one-call/4096-byte budget, rejects the second while policy is
-blocked, then closes with zero retained proofs/bytes and rejects the late grant.
-The real native/application test performs one registered file write, one settled
-tool round and two model requests through the existing event and terminal owners.
-These are ownership/count measurements, not RSS or end-to-end speed comparisons.
+Measurement: the focused pending-policy test admits one outstanding decision with a declared one-call/4096-byte budget, rejects the second while policy is blocked, then closes with zero retained proofs/bytes and rejects the late grant. The real native/application test performs one registered file write, one settled tool round and two model requests through the existing event and terminal owners. These are ownership/count measurements, not RSS or end-to-end speed comparisons.
 
 ## Native host approval resources
 
-Optional approval control borrows the existing native reader/control slot and
-application callback executor; no pool, process or resident polling loop is added.
-The existing native approval Store retains only its configured receipt count and
-identity byte quota, TTL and weak parent binding. Host proofs retain detached
-canonical name/argument/caller bytes under explicit payload and receipt-count
-bounds until exact consumption or invocation disposal; Python container overhead
-is additional bounded per-entry work, not charged as allocator/RSS evidence.
-Each request carries the native remaining deadline rounded upward to milliseconds.
-One scoped host timeout signals the request stop event and joins its callback;
-late decisions become denial. Repeated explicit cancellation writes Stop before
-joining callback/result delivery. Published write calls wait for result/EOF;
-client admission remains charged until host work and native close both quiesce.
-The real archive/TCP probe observes one write callback/scratch mutation after one
-approval, zero mutations after denial/policy failure/approval Stop, and no second
-model request after required policy/tool failure or Stop. A cancelled already
-started write may have committed: its one observed effect remains evidence, not
-rolled back or silently replayed. All cases observe zero active native runs after
-joined return. These are lifecycle/effect counts, not application CPU/RSS or
-throughput admission. Old standalone read-only stdio callers retain their declared
-cancel/deadline semantics; matching native host clients opt into result joining.
+Optional approval control borrows the existing native reader/control slot and application callback executor; no pool, process or resident polling loop is added. The existing native approval Store retains only its configured receipt count and identity byte quota, TTL and weak parent binding. Host proofs retain detached canonical name/argument/caller bytes under explicit payload and receipt-count bounds until exact consumption or invocation disposal; Python container overhead is additional bounded per-entry work, not charged as allocator/RSS evidence. Each request carries the native remaining deadline rounded upward to milliseconds. One scoped host timeout signals the request stop event and joins its callback; late decisions become denial. Repeated explicit cancellation writes Stop before joining callback/result delivery. Published write calls wait for result/EOF; client admission remains charged until host work and native close both quiesce. The real archive/TCP probe observes one write callback/scratch mutation after one approval, zero mutations after denial/policy failure/approval Stop, and no second model request after required policy/tool failure or Stop. A cancelled already started write may have committed: its one observed effect remains evidence, not rolled back or silently replayed. All cases observe zero active native runs after joined return. These are lifecycle/effect counts, not application CPU/RSS or throughput admission. Old standalone read-only stdio callers retain their declared cancel/deadline semantics; matching native host clients opt into result joining.
 
 ## Native incremental text resources
 
-The optional text path adds no pool, process, timer or second stdin reader.
-Each network chunk retains only accepted offset metadata over the existing
-bounded text accumulator; adjacent same-channel appends merge without copying
-text, while channel changes retain provider order. Each nonempty span charges
-at least one admitted output byte; Vec capacity/metadata scale with that bound.
-A native fixture with 512 one-byte appends measures 12,288 bytes of unmerged
-span storage versus at most 128 capacity bytes after merging to one span.
-These are metadata byte counts, not allocator arenas/RSS or application speed.
-CLI text uses one existing control slot, UTF-8-safe atomic pipe frames and one
-pending host ACK. Native Stop/deadline cancels network reads but waits for an
-issued consumer; EOF/fault closes the joined reader. Host projection borrows the
-application executor, serializes frames, and joins callback/ACK before releasing
-process admission. Incoming text bytes are bounded by declared per-round output
-bytes times maximum rounds; every frame remains independently bounded. Close
-accounts for bounded text frame metadata and still uses its declared time grace.
-Raw execution with no observer retains its allocation-free parser observation
-path. Required-consumer failure remains unknown usage when raw provider evidence
-cannot establish it; this path grants no refund or automatic retry. Full CPU,
-RSS, input-to-paint and application throughput admission remain unmeasured.
+The optional text path adds no pool, process, timer or second stdin reader. Each network chunk retains only accepted offset metadata over the existing bounded text accumulator; adjacent same-channel appends merge without copying text, while channel changes retain provider order. Each nonempty span charges at least one admitted output byte; Vec capacity/metadata scale with that bound. A native fixture with 512 one-byte appends measures 12,288 bytes of unmerged span storage versus at most 128 capacity bytes after merging to one span. These are metadata byte counts, not allocator arenas/RSS or application speed. CLI text uses one existing control slot, UTF-8-safe atomic pipe frames and one pending host ACK. Native Stop/deadline cancels network reads but waits for an issued consumer; EOF/fault closes the joined reader. Host projection borrows the application executor, serializes frames, and joins callback/ACK before releasing process admission. Incoming text bytes are bounded by declared per-round output bytes times maximum rounds; every frame remains independently bounded. Close accounts for bounded text frame metadata and still uses its declared time grace. Raw execution with no observer retains its allocation-free parser observation path. Required-consumer failure remains unknown usage when raw provider evidence cannot establish it; this path grants no refund or automatic retry. Full CPU, RSS, input-to-paint and application throughput admission remain unmeasured.
 
 ## Native application terminal resources
 
-The application native terminal policy creates no pool, process, timer or
-registry. It borrows an explicitly supplied lifecycle-owned executor, serializes
-one task's terminal callbacks with an owned async lock, and retains two fixed-size
-SHA-256 identities plus the existing task reference. Incoming event/receipt bytes
-are bounded by the supplied terminal frame budget before decoding. Projection
-runs once; commit retries create one physical executor future at a time. Native
-cancellation and repeated host cancellation join that future before serialization
-or process admission can be released. Projection failure retains bounded candidate
-exception context until the policy is disposed; task output remains governed by
-existing task budgets and is retained until publication/recovery delivery settles.
-The adapter does not charge a second worker pool or retain a full native history
-cache. Disposal and heavy-state reclamation remain application composition duties.
-Real archive/loopback/application-store tests observe two physical model requests,
-one host tool callback and one terminal projection, then zero active native runs.
-Those are lifecycle witnesses, not application CPU/RSS/P99 or throughput admission.
+Explicit transient terminal composition adds one host-only lifetime flag and reuses the existing delivery/executor; wire bytes, workers and durable records added are zero. A Python 3.12 shallow probe measured both policies at 48 bytes and dictionaries at 296 bytes (14 -> 15 fields); this excludes RSS/throughput.
+
+The application native terminal policy creates no pool, process, timer or registry. It borrows an explicitly supplied lifecycle-owned executor, serializes one task's terminal callbacks with an owned async lock, and retains two fixed-size SHA-256 identities plus the existing task reference. Incoming event/receipt bytes are bounded by the supplied terminal frame budget before decoding. Projection runs once; commit retries create one physical executor future at a time. Native cancellation and repeated host cancellation join that future before serialization or process admission can be released. Projection failure retains bounded candidate exception context until the policy is disposed; task output remains governed by existing task budgets and is retained until publication/recovery delivery settles. The adapter does not charge a second worker pool or retain a full native history cache. Disposal and heavy-state reclamation remain application composition duties. Real archive/loopback/application-store tests observe two physical model requests, one host tool callback and one terminal projection, then zero active native runs. Those are lifecycle witnesses, not application CPU/RSS/P99 or throughput admission.
 
 ## Native route host resources
 
-The v2 native host port retains one chosen route's public metadata/private
-headers in bounded JSON bytes. Its default ceiling derives from the existing
-model-routing document bound; callers may provide a smaller owned invocation
-limit. The existing semantic repository and candidate compiler retain their
-current bounds. One credential is resolved once per carrier; no plaintext cache,
-Slot registry entry, health record, task, pool or network probe is added.
-Consumption atomically detaches the private carrier; native execution uses the
-existing client admission/process budget and joined close. The host clears the
-owned headers on every exit. Prepared body/inference work and proxy resolution
-remain explicit policy ports, not new parallel authorities. An actual archive
-probe observes two physical model requests, one read callback, one secret
-resolution and zero active native invocations after exit. These are count and
-lifecycle witnesses, not allocator/RSS/latency improvement claims. Durable route
-accounting and production default selection remain pending.
+The v2 native host port retains one chosen route's public metadata/private headers in bounded JSON bytes. Its default ceiling derives from the existing model-routing document bound; callers may provide a smaller owned invocation limit. The existing semantic repository and candidate compiler retain their current bounds. One credential is resolved once per carrier; no plaintext cache, Slot registry entry, health record, task, pool or network probe is added. Consumption atomically detaches the private carrier; native execution uses the existing client admission/process budget and joined close. The host clears the owned headers on every exit. Prepared body/inference work and proxy resolution remain explicit policy ports, not new parallel authorities. An actual archive probe observes two physical model requests, one read callback, one secret resolution and zero active native invocations after exit. These are count and lifecycle witnesses, not allocator/RSS/latency improvement claims. Durable route accounting and production default selection remain pending.
 
 ## Native local-token resources
 
-Encoder initialization is lazy and owned by an explicit Arc, with no permanent
-counter worker or prompt-count cache. Counters share an encoder only when their
-composition supplies that Arc; repeated native process launches do not share
-its dictionaries. Input/text/tool-JSON byte bounds and a maximum 128 JSON depth
-bound transient work. BPE token-vector scratch is proportional to bounded UTF-8
-text bytes; tool JSON is bounded before encoding. The CLI adds at most one scoped
-CPU worker per ordered invocation, with an explicitly supplied stack of at least
-256 KiB, and joins it while the existing reactor handles control. CPU/encoder/
-stack demand must enter launch admission before production use.
-Release diagnostics observe first-use cl100k/o200k wall time about 72/147 ms,
-retained requested bytes 14,316,652/28,078,894 and peaks 15,779,779/31,728,409.
-After encoder drop the diagnostic process retains 8/0 extra requested bytes;
-these measurements include library process bookkeeping, exclude worker stacks,
-allocator arenas and RSS, and do not prove application memory admission.
-Three alternating fresh-process pairs over each encoding's 1,200 request counts
-show CPU ratios 0.0845–0.1132 against the current Python local backend,
-including its digest cache and batch implementation. Imports and fixture JSON
-parsing are outside timing; native allocation instrumentation remains enabled.
-CLI worker startup, transport, route policy, tier selection and durability are
-excluded. Python tiktoken already has a Rust BPE core; these ratios measure
-request-count composition, not a general BPE speedup or full-system improvement.
-The standalone executable grows to 14,323,392 bytes because vocabulary is
-embedded; the host's sealed image is shared only within its declared client.
-These cold/footprint costs prevent an unmeasured default production promotion.
+Encoder initialization is lazy and owned by an explicit Arc, with no permanent counter worker or prompt-count cache. Counters share an encoder only when their composition supplies that Arc; repeated native process launches do not share its dictionaries. Input/text/tool-JSON byte bounds and a maximum 128 JSON depth bound transient work. BPE token-vector scratch is proportional to bounded UTF-8 text bytes; tool JSON is bounded before encoding. The CLI adds at most one scoped CPU worker per ordered invocation, with an explicitly supplied stack of at least 256 KiB, and joins it while the existing reactor handles control. CPU/encoder/ stack demand must enter launch admission before production use. Release diagnostics observe first-use cl100k/o200k wall time about 72/147 ms, retained requested bytes 14,316,652/28,078,894 and peaks 15,779,779/31,728,409. After encoder drop the diagnostic process retains 8/0 extra requested bytes; these measurements include library process bookkeeping, exclude worker stacks, allocator arenas and RSS, and do not prove application memory admission. Three alternating fresh-process pairs over each encoding's 1,200 request counts show CPU ratios 0.0845–0.1132 against the current Python local backend, including its digest cache and batch implementation. Imports and fixture JSON parsing are outside timing; native allocation instrumentation remains enabled. CLI worker startup, transport, route policy, tier selection and durability are excluded. Python tiktoken already has a Rust BPE core; these ratios measure request-count composition, not a general BPE speedup or full-system improvement. The standalone executable grows to 14,323,392 bytes because vocabulary is embedded; the host's sealed image is shared only within its declared client. These cold/footprint costs prevent an unmeasured default production promotion.
 
 ## Native model-account resources
 
-Bounds explicitly declare active actors, pending attempts and identity bytes;
-composition derives these from launch capacity and owned execution quotas. The
-account retains bounded actor/attempt maps and scalar consumed/unknown/ordinal
-state, never histories or a settled receipt list. Pending attempts retain their
-account through Lease until settlement/Drop. Revoke fences future dispatch;
-detach and close refuse pending work rather than discarding consumption. Callback
-ports must quiesce and use weak back-references when they retain the account.
-Observers run without account locks; pending observation prevents admission,
-complete snapshots and close. Without an observer, receipt strings are not
-constructed. Waiting uses the existing runtime/caller, adding no polling thread,
-worker or persistent timer. Cancelled waiting acquires no lease.
-A System-allocator diagnostic, including its external lease vector, measures
-1/8/64/512 simultaneous actors and attempts at 1,444/2,116/18,268/150,220 live
-requested bytes; peaks are 1,448/2,164/18,316/150,268 bytes. All four return to
-zero additional requested bytes after drop. These are allocator-requested bytes,
-not RSS or allocator arena footprint. Three alternating fresh-process pairs of
-20,000 reserve/dispatch/settle/snapshot operations show native CPU ratios
-0.0171–0.0178 and wall ratios 0.0171–0.0178 against unchanged canonical Python
-bodies. The native diagnostic retains allocation instrumentation. The workload
-uses one uncapped actor and excludes tokenizer, HTTP, observers, durable accounts
-and application scheduling; it is not production performance admission.
+Bounds explicitly declare active actors, pending attempts and identity bytes; composition derives these from launch capacity and owned execution quotas. The account retains bounded actor/attempt maps and scalar consumed/unknown/ordinal state, never histories or a settled receipt list. Pending attempts retain their account through Lease until settlement/Drop. Revoke fences future dispatch; detach and close refuse pending work rather than discarding consumption. Callback ports must quiesce and use weak back-references when they retain the account. Observers run without account locks; pending observation prevents admission, complete snapshots and close. Without an observer, receipt strings are not constructed. Waiting uses the existing runtime/caller, adding no polling thread, worker or persistent timer. Cancelled waiting acquires no lease. A System-allocator diagnostic, including its external lease vector, measures 1/8/64/512 simultaneous actors and attempts at 1,444/2,116/18,268/150,220 live requested bytes; peaks are 1,448/2,164/18,316/150,268 bytes. All four return to zero additional requested bytes after drop. These are allocator-requested bytes, not RSS or allocator arena footprint. Three alternating fresh-process pairs of 20,000 reserve/dispatch/settle/snapshot operations show native CPU ratios 0.0171–0.0178 and wall ratios 0.0171–0.0178 against unchanged canonical Python bodies. The native diagnostic retains allocation instrumentation. The workload uses one uncapped actor and excludes tokenizer, HTTP, observers, durable accounts and application scheduling; it is not production performance admission.
 
 ## Native usage observation resources
 
-Observation borrows the provider JSON and scans only generated fixed alias
-lists; it copies no usage map or nested payload and creates no retained counter
-ledger, thread, queue or cache. Wide-counter/unsupported numeric text errors
-retain raw usage and mark observed tokens unknown. The three-field stdio
-projection remains subject to the existing frame and FIFO atomicity bounds.
-The built fixture is 6,679,344 executable bytes. Three alternating
-fresh-process pairs each run 48,180 observations over the same 2,409 captured
-inputs after 20 warmup passes. Native wall-time ratios are 0.0773–0.0817 and CPU
-ratios 0.0772–0.0817 against unchanged canonical Python function bodies. Import
-and JSON parsing are outside timing. This diagnostic does not measure allocation
-peak/RSS, provider waiting, billing, account admission or end-to-end application
-performance, and does not authorize production cutover.
+Observation borrows the provider JSON and scans only generated fixed alias lists; it copies no usage map or nested payload and creates no retained counter ledger, thread, queue or cache. Wide-counter/unsupported numeric text errors retain raw usage and mark observed tokens unknown. The three-field stdio projection remains subject to the existing frame and FIFO atomicity bounds. The built fixture is 6,679,344 executable bytes. Three alternating fresh-process pairs each run 48,180 observations over the same 2,409 captured inputs after 20 warmup passes. Native wall-time ratios are 0.0773–0.0817 and CPU ratios 0.0772–0.0817 against unchanged canonical Python function bodies. Import and JSON parsing are outside timing. This diagnostic does not measure allocation peak/RSS, provider waiting, billing, account admission or end-to-end application performance, and does not authorize production cutover.
 
 ## Native round control transport resources
 
-Optional round control reuses the existing reactor reader, one pending reply
-slot and one host reservation record per active run. It adds no OS thread,
-worker pool or retained per-round list. Requests carry message count, not copied
-history or invented token counts; raw usage/error evidence uses the existing
-frame bound and fails closed when oversized. Ordinary FIFO publication retains PIPE_BUF atomicity; explicitly enabled history
-preparation uses exclusive bounded frames as described above. Cancellation/deadline bounds authorization waits; settlement may
-ignore cancellation to deliver evidence but retains the native deadline. Host
-ACK transport has its own declared shutdown grace. Owned policy callbacks must
-quiesce and are joined even after repeated cancellation; accounting failure is
-not retried or replaced by zero usage. After native exit, a reserved attempt
-without observed settlement receives one Abandoned callback.
-The built fixture is 6,670,312 executable bytes (50,680 above the preceding
-fixture); sealed image lifetime and active-run limits remain unchanged. Nine
-host unit tests and eight real archive/TCP scenarios verify callback joining,
-ACK timeout, second-round refusal, settlement failure and cancellation; every
-archive run releases admission. These are resource/lifecycle observations,
-not peak RSS or application performance admission.
+Optional round control reuses the existing reactor reader, one pending reply slot and one host reservation record per active run. It adds no OS thread, worker pool or retained per-round list. Requests carry message count, not copied history or invented token counts; raw usage/error evidence uses the existing frame bound and fails closed when oversized. Ordinary FIFO publication retains PIPE_BUF atomicity; explicitly enabled history preparation uses exclusive bounded frames as described above. Cancellation/deadline bounds authorization waits; settlement may ignore cancellation to deliver evidence but retains the native deadline. Host ACK transport has its own declared shutdown grace. Owned policy callbacks must quiesce and are joined even after repeated cancellation; accounting failure is not retried or replaced by zero usage. After native exit, a reserved attempt without observed settlement receives one Abandoned callback. The built fixture is 6,670,312 executable bytes (50,680 above the preceding fixture); sealed image lifetime and active-run limits remain unchanged. Nine host unit tests and eight real archive/TCP scenarios verify callback joining, ACK timeout, second-round refusal, settlement failure and cancellation; every archive run releases admission. These are resource/lifecycle observations, not peak RSS or application performance admission.
 
 ## Native host process resources
 
-The internal host client has explicit maximum in-flight runs, executable bytes,
-configuration/frame bytes and shutdown grace. It retains one lazily loaded,
-sealed executable image; the verified fixture is 6,619,632 bytes. The image is
-shared by native processes for that client and released on joined client close.
-Hash/copy work borrows the host executor once; no polling or permanent dedicated
-reader thread is added. Per-invocation processes own their stdio buffers. Frame
-structure/string checks precede serialization; stream-reader buffering is bounded
-by the declared frame limit. Graceful cancellation drains bounded output; expiry
-kills and awaits exit. Repeated cancellation cannot detach acquired work.
-Callbacks remain caller-owned and must quiesce when cancelled. Budget derivation
-and aggregation belong to the existing launch policy, not this transport port.
-Eight real archive/TCP scenarios verify native rounds, callback error attribution,
-overload, cancellation and concurrent close; all observe zero active runs after
-cleanup. These observations do not certify application CPU/RSS/latency gains.
+The internal host client has explicit maximum in-flight runs, executable bytes, configuration/frame bytes and shutdown grace. It retains one lazily loaded, sealed executable image; the verified fixture is 6,619,632 bytes. The image is shared by native processes for that client and released on joined client close. Hash/copy work borrows the host executor once; no polling or permanent dedicated reader thread is added. Per-invocation processes own their stdio buffers. Frame structure/string checks precede serialization; stream-reader buffering is bounded by the declared frame limit. Graceful cancellation drains bounded output; expiry kills and awaits exit. Repeated cancellation cannot detach acquired work. Callbacks remain caller-owned and must quiesce when cancelled. Budget derivation and aggregation belong to the existing launch policy, not this transport port. Eight real archive/TCP scenarios verify native rounds, callback error attribution, overload, cancellation and concurrent close; all observe zero active runs after cleanup. These observations do not certify application CPU/RSS/latency gains.
 
 ## Native continuous control resources
 
-The stdio invocation owns one Tokio input task on its already declared reactor,
-not an additional OS thread. Input and frame limits stay unchanged. Exactly one
-reply slot and one pending published-request identity are retained; duplicates,
-unissued IDs and invalid frames fail closed instead of buffering future replies.
-A fatal frame cancels transport and is projected as a protocol error; a valid
-cancel requests parent cancellation. A required Upstream session resource joins
-the input task before terminal publication and restores stdin flags. The task
-holds only a weak parent, preventing a resource/reader ownership cycle. Shutdown
-and rollback both join; an actor panic is cleanup failure. Live subprocess tests
-observe cancellation during silent HTTP, reject unissued/invalid/oversize frames,
-and verify original shared stdin flags are restored before the terminal line.
-No polling loop, background reader thread or unbounded mailbox is introduced.
-These are control/lifecycle checks, not application performance measurements.
+The stdio invocation owns one Tokio input task on its already declared reactor, not an additional OS thread. Input and frame limits stay unchanged. Exactly one reply slot and one pending published-request identity are retained; duplicates, unissued IDs and invalid frames fail closed instead of buffering future replies. A fatal frame cancels transport and is projected as a protocol error; a valid cancel requests parent cancellation. A required Upstream session resource joins the input task before terminal publication and restores stdin flags. The task holds only a weak parent, preventing a resource/reader ownership cycle. Shutdown and rollback both join; an actor panic is cleanup failure. Live subprocess tests observe cancellation during silent HTTP, reject unissued/invalid/oversize frames, and verify original shared stdin flags are restored before the terminal line. No polling loop, background reader thread or unbounded mailbox is introduced. These are control/lifecycle checks, not application performance measurements.
 
 ## Native stdio agent resources
 
-Configuration and tool frames have explicit byte limits. Stdin is exclusively
-owned, uses bounded incremental nonblocking reads, and is rebound from a lean
-configuration reactor to a runtime whose blocking capacity matches the declared
-HTTP connection budget. No detached stdin reader or per-tool worker is created.
-One tool is outstanding in the ordered lane; its parent-linked scope waits on
-a one-slot reply channel versus cancellation/deadline. Tool requests publish as atomic FIFO
-frames no larger than PIPE_BUF with cancellation-aware writable readiness;
-stdout flags are restored before waiting for the result. Failed protocol exchanges
-settle the task rather than continuing the model loop. Terminal delivery uses
-ordinary stdout backpressure after execution cleanup. Stdio cancel frames are
-observed during both provider and tool waits; the deadline remains independent.
-External host execution and its own cleanup remain host-owned. This native
-port does not certify external tool side effects, RSS or application throughput.
+Configuration and tool frames have explicit byte limits. Stdin is exclusively owned, uses bounded incremental nonblocking reads, and is rebound from a lean configuration reactor to a runtime whose blocking capacity matches the declared HTTP connection budget. No detached stdin reader or per-tool worker is created. One tool is outstanding in the ordered lane; its parent-linked scope waits on a one-slot reply channel versus cancellation/deadline. Tool requests publish as atomic FIFO frames no larger than PIPE_BUF with cancellation-aware writable readiness; stdout flags are restored before waiting for the result. Failed protocol exchanges settle the task rather than continuing the model loop. Terminal delivery uses ordinary stdout backpressure after execution cleanup. Stdio cancel frames are observed during both provider and tool waits; the deadline remains independent. External host execution and its own cleanup remain host-owned. This native port does not certify external tool side effects, RSS or application throughput.
 
 ## Native I/O occupancy resources
 
-Demand CPU weights range from 1 to 1000 units per worker; launch CPU capacity
-is effective CPUs times 1000. Aggregate leases charge workers times their
-occupancy, plus declared worker memory and in-flight job bytes. Derived worker
-counts are bounded by both remaining occupancy and memory; all arithmetic is
-checked. Unknown memory still admits one lean pool only. Weights are estimated
-and cannot enforce actual CPU use; production adapters must retain conservative
-weights until workload evidence justifies lower ones. CPU work remains 1000.
-A synthetic two-CPU/128-MiB fixture compares eight independent 20-ms waiting
-handlers at weights 1000 and 250, with three fresh alternating 100-sample pairs
-and 20 warmups. Source and raw samples are retained in the native I/O capacity
-evidence. Faster batch completion can require more resident worker memory and
-CPU overhead; this evidence is not whole-application performance admission.
-No production default or dynamic policy is changed by this explicit capability.
+Demand CPU weights range from 1 to 1000 units per worker; launch CPU capacity is effective CPUs times 1000. Aggregate leases charge workers times their occupancy, plus declared worker memory and in-flight job bytes. Derived worker counts are bounded by both remaining occupancy and memory; all arithmetic is checked. Unknown memory still admits one lean pool only. Weights are estimated and cannot enforce actual CPU use; production adapters must retain conservative weights until workload evidence justifies lower ones. CPU work remains 1000. A synthetic two-CPU/128-MiB fixture compares eight independent 20-ms waiting handlers at weights 1000 and 250, with three fresh alternating 100-sample pairs and 20 warmups. Source and raw samples are retained in the native I/O capacity evidence. Faster batch completion can require more resident worker memory and CPU overhead; this evidence is not whole-application performance admission. No production default or dynamic policy is changed by this explicit capability.
 
 ## Native aggregate pool allocation resources
 
-One composition-owned allocator caps aggregate declared CPU occupancy by the
-probe's effective CPU capacity and weighted bytes by its explicit share of launch
-memory headroom. Each demand can reserve a fraction of the remaining share;
-allocation charges declared worker weights plus maximum in-flight job bytes.
-Pool count is bounded by positive worker admission. Unknown memory admits only
-one lean worker/job pool. This is weighted admission, not RSS reservation or
-cgroup enforcement. Pool constructors roll back failed reservation; leases
-release only after active jobs, borrowed calls and workers have joined. Scheduler
-reentrant-close refusal retains its charge; concurrent successful close callers
-observe release after join. Allocator close stops new pool admission and does
-not detach or forcibly stop existing pools. No queue, timer or worker is added.
-Four focused tests include 16 simultaneous constructors, a mixed executor/tool
-allocation observing 6144 charged bytes and three workers, and a blocked job
-retaining charges through close. All joined closes observe zero charges.
-The native CLI also checks zero aggregate charges. These measurements certify
-resource lifecycle only, not end-to-end CPU/RSS/throughput or dynamic tuning.
+One composition-owned allocator caps aggregate declared CPU occupancy by the probe's effective CPU capacity and weighted bytes by its explicit share of launch memory headroom. Each demand can reserve a fraction of the remaining share; allocation charges declared worker weights plus maximum in-flight job bytes. Pool count is bounded by positive worker admission. Unknown memory admits only one lean worker/job pool. This is weighted admission, not RSS reservation or cgroup enforcement. Pool constructors roll back failed reservation; leases release only after active jobs, borrowed calls and workers have joined. Scheduler reentrant-close refusal retains its charge; concurrent successful close callers observe release after join. Allocator close stops new pool admission and does not detach or forcibly stop existing pools. No queue, timer or worker is added. Four focused tests include 16 simultaneous constructors, a mixed executor/tool allocation observing 6144 charged bytes and three workers, and a blocked job retaining charges through close. All joined closes observe zero charges. The native CLI also checks zero aggregate charges. These measurements certify resource lifecycle only, not end-to-end CPU/RSS/throughput or dynamic tuning.
 
 ## Native launch capacity resources
 
-`capacity.rs` reads at most 1 MiB per proc/cgroup input and uses no timer, worker
-or global cache. Launch composition owns the immutable snapshot and selected
-volume. Membership/mount roots use component-aware validation, escaped mount
-paths and visible ancestors. CPU uses the minimum online/affinity/quota count;
-unreadable/unresolved hierarchy falls back to one. Memory headroom uses the
-minimum host available and each finite ancestor limit minus current usage;
-missing usage under a finite limit grants no measured headroom. Volume space
-uses caller-available blocks. Unknown memory yields one worker/one job; known
-insufficient headroom refuses admission. Demand overflow and zero inputs fail
-closed. Explicit workload weights determine concurrency and in-flight bytes,
-with no fixed upper worker ceiling. Independent compositions must share an
-aggregate budget rather than each spending the full snapshot. Existing direct
-budgets remain explicit overrides. Live-host evidence records 63 effective
-CPUs, 63 configured workers, 15 observed resident workers and 126 completed
-synthetic jobs with joined close. These are resource/lifecycle observations,
-not CPU/RSS/throughput gains; resident counts depend on arrival timing.
+`capacity.rs` reads at most 1 MiB per proc/cgroup input and uses no timer, worker or global cache. Launch composition owns the immutable snapshot and selected volume. Membership/mount roots use component-aware validation, escaped mount paths and visible ancestors. CPU uses the minimum online/affinity/quota count; unreadable/unresolved hierarchy falls back to one. Memory headroom uses the minimum host available and each finite ancestor limit minus current usage; missing usage under a finite limit grants no measured headroom. Volume space uses caller-available blocks. Unknown memory yields lean worker/job hints; known low headroom also keeps at least one idle hint rather than refusing a composition. Invalid workload weights and arithmetic overflow fail closed. The probe computes idle-reuse and accounting hints, with no fixed upper worker ceiling. Independent compositions share aggregate observations through `capacity_allocation.rs`; observation leases track ownership and do not reserve hypothetical memory or CPU slots. Existing direct budgets remain explicit overrides. Live-host evidence records 63 effective CPUs, 63 configured workers, 15 observed resident workers and 126 completed synthetic jobs with joined close. These are resource/lifecycle observations, not CPU/RSS/throughput gains; resident counts depend on arrival timing.
 
 ## Native approval receipt resources
 
-Each task-scoped receipt store has explicit count and weighted identity-byte
-budgets, a weak parent session and no worker or timer. Expiry is lazy at mint,
-inspection and consumption; close clears retained receipts. FIFO eviction and
-same-ID replacement invalidate old capabilities. Weighted bytes count two call
-ID copies, entry metadata and ticket-index metadata; this is admission weight,
-not allocator RSS. Arguments are retained only as a fixed digest. A 10,000-mint
-regression observes at most two receipts and 4096 weighted bytes, then zero on
-close. Production composition must derive aggregate budgets from the launch
-probe and close stores at task settlement. This count measurement does not
-certify application CPU, RSS, throughput or performance admission.
-
-## Native tool idle-policy costs
-
-The composition-owned tool pool selects a four-round idle spin window from the
-private renamed Rayon-core snapshot. Other pools retain upstream 32-round
-defaults; no process-wide setting or environment override changes. Latch/event
-counters and scope joining remain the upstream protocol; partial wake resets
-to the selected pool threshold. Zero spin was rejected for a measured empty-job
-P99 regression. Pool capacity, batch call/byte admission, cancellation, cleanup
-priority and joined shutdown are unchanged. The retained path dependency embeds
-with the crate and can coexist with upstream Rayon; package/links are distinct.
-
-`evidence/rust_tool_idle_policy_20261009.json` compares identical four-handler
-fixtures in three alternating process pairs: waiting work (100 samples/variant),
-empty and hash work (1000), each with 20 warmups, plus separate cold RSS processes.
-Waiting CPU ratios are 0.70..0.75, empty 0.65..0.66 and hash 0.95..0.96; all measured
-latency ratios remain below 1.05 and RSS ratios 0.97..1.01. CPU includes startup
-and warmup; counts/zero post-close workers are checked separately. Instrumented
-syscall counts diagnose yield/futex behavior only, never substitute for timings.
-This is scoped synthetic scheduler cost, not production tool or whole-system
-performance admission. The dependency's 103 serial unit tests and runtime's
-133 tests cover retained wake/scope and lifecycle behavior.
-
+Each task-scoped receipt store has explicit count and weighted identity-byte budgets, a weak parent session and no worker or timer. Expiry is lazy at mint, inspection and consumption; close clears retained receipts. FIFO eviction and same-ID replacement invalidate old capabilities. Weighted bytes count two call ID copies, entry metadata and ticket-index metadata; this is admission weight, not allocator RSS. Arguments are retained only as a fixed digest. A 10,000-mint regression observes at most two receipts and 4096 weighted bytes, then zero on close. Production composition must derive aggregate budgets from the launch probe and close stores at task settlement. This count measurement does not certify application CPU, RSS, throughput or performance admission.
 
 ## Native scoped tool scheduler resources
 
-Composition declares private parallel worker capacity, aggregate in-flight call
-and weighted-byte budgets, and immutable independent-read names. Whole batches
-reserve both counters before publication; oversize/concurrent overload refuses
-without partial execution. Weights include serialized arguments/caller, identity
-bytes and fixed scope metadata, not allocator/stack RSS. Empty and ordered-only
-batches start no threads; the first parallel batch starts the declared pool,
-which persists until joined composition close. Ordered callbacks use the already
-admitted caller lane; total calls bound both lanes. Production must derive and
-aggregate these capacities from the launch probe, not duplicate an unconstrained
-pool for every request. No global Rayon pool, per-batch thread pool or durable
-queue is introduced. Caller/worker self-close is refused; concurrent close waits
-for active batch guards and thread join. Partial thread startup also joins.
-All borrowed jobs, scope disposal and original-position results settle before
-feedback; required cleanup failure stops peers and remains fatal despite Stop.
+`packages/tofu-runtime/src/tool_scheduler.rs` starts one joined scoped worker for each qualified independent read. Legacy worker/call/byte budget fields are compatibility hints, never admission quotas. Ordered operations remain on the caller lane; immutable independent-read names and permission proofs decide which calls may overlap. Empty and ordered-only batches start no workers.
 
-`evidence/rust_parallel_tools_20261009.json` records three 100-sample alternating
-process pairs (20 warmups) for four independent 20-ms synthetic I/O handlers,
-plus three separate memory pairs. Parallel elapsed time is approximately 0.25
-of ordered time, with higher CPU/RSS cost; this is no whole-system admission.
-Declared/actual worker counts and zero scopes/workers after close are checked.
-Production classification, approval/progress, programmatic reconciliation and
-full application gates remain pending.
+All required workers must start before effects are published. Partial startup withdraws publication and joins already-started workers, so a refused startup cannot execute later. Results retain original positions; scope disposal and required cleanup settle before feedback. Cleanup failure stops peers and stays fatal even during Stop. The scheduler tracks actual call/byte ownership with checked arithmetic; numeric overflow remains an error rather than corrupting accounting. Close waits for active guards and physical workers; self-close and recursive worker dispatch remain lifecycle errors.
 
+Problem: fixed pool and aggregate call/byte quotas delayed independent reads or rejected whole batches. Decision: demand-start scoped workers while keeping atomic startup, permission, ordered effects and joined teardown. Raising pool sizes or retaining an unbounded queue over a fixed pool would preserve waiting. Verify `packages/tofu-runtime/tests/tool_scheduler.rs` for overlap, failed startup without effects, ordering, cancellation and disposal.
 
 ## Native multi-round agent resources
 
-The transient native agent keeps one admitted working-message array and a raw
-usage ledger for its declared execution. Explicit caller budgets bound provider
-rounds, total tool occurrences, serialized retained messages/usage and each text
-feedback. Serialized size is counted through a writer without constructing a
-second JSON buffer; these are logical payload caps, not allocator/RSS admission.
-The HTTP adapter borrows messages/template while producing one bounded request
-byte buffer; its callable-name catalog is shared across rounds. There is no new
-worker pool, retry queue, durable store or retained cache. Tool effects currently
-use the ordered lane with existing parent-linked scopes; production parallel
-classification/admission remains required before replacing the Python pipeline.
+The transient native agent keeps one admitted working-message array and a raw usage ledger for its declared execution. Explicit caller budgets bound provider rounds, total tool occurrences, serialized retained messages/usage and each text feedback. Serialized size is counted through a writer without constructing a second JSON buffer; these are logical payload caps, not allocator/RSS admission. The HTTP adapter borrows messages/template while producing one bounded request byte buffer; its callable-name catalog is shared across rounds. There is no new worker pool, retry queue, durable store or retained cache. Tool effects currently use the ordered lane with existing parent-linked scopes; production parallel classification/admission remains required before replacing the Python pipeline.
 
-Provider responses and tool scopes reach quiescence before continuation. Parent
-Stop/deadline interrupts silent HTTP; live tool Stop waits for handler return
-and resource cleanup. Required cleanup failures fail the agent rather than feed
-a recoverable tool error. Native Task alone freezes and publishes the terminal.
-The synthetic 10,000-agent count fixture executes 20,000 provider rounds, releases
-10,000 tool resources, publishes 10,000 terminal events and leaves zero active
-scopes. Source identity and counts live in `evidence/rust_agent_loop_20261009.json`;
-real TCP/native-process and fault tests are separate. These are lifecycle counts,
-not CPU/RSS/tail/throughput or whole-system performance admission. Routing,
-compaction, usage pricing, approval/progress and durable round adapters remain
-production integration work.
+Provider responses and tool scopes reach quiescence before continuation. Parent Stop/deadline interrupts silent HTTP; live tool Stop waits for handler return and resource cleanup. Required cleanup failures fail the agent rather than feed a recoverable tool error. Native Task alone freezes and publishes the terminal. The synthetic 10,000-agent count fixture executes 20,000 provider rounds, releases 10,000 tool resources, publishes 10,000 terminal events and leaves zero active scopes. Source identity and counts live in `rust_agent_loop_20261009.json`; real TCP/native-process and fault tests are separate. These are lifecycle counts, not CPU/RSS/tail/throughput or whole-system performance admission. Routing, compaction, usage pricing, approval/progress and durable round adapters remain production integration work.
 
 
 ## Native child exec boundary resources
 
-Both native supervisor and tool exec seal all handles above stderr and disable
-core dumps/exec privilege gain in their forked children. The parent retains its
-original descriptor flags, resource limits and privilege policy. Descriptor
-closure uses Linux CLOSE_RANGE_CLOEXEC where available; the older-kernel path
-streams actual procfs entries with one 8-KiB stack buffer, skips redundant writes
-for already-CLOEXEC handles and never bounds safety by descriptor number. The
-std exec-error pipe stays open until exec so failed launches remain failures.
-Inventory/syscall failures refuse exec; no parent snapshot, cache, pool, reader
-thread or persistent artifact is added. Explicit positive finite ResourceLimits
-apply equal CPU/address-space/file-size/descriptor soft/hard ceilings only to
-the tool. None remains trusted primitive absence, never unattended admission.
-Limits are per process/file, not aggregate tree memory/disk/PIDs; no_new_privs
-does not drop existing capabilities or isolate filesystem/network access.
+Both native supervisor and tool exec seal all handles above stderr and disable core dumps/exec privilege gain in their forked children. The parent retains its original descriptor flags, resource limits and privilege policy. Descriptor closure uses Linux CLOSE_RANGE_CLOEXEC where available; the older-kernel path streams actual procfs entries with one 8-KiB stack buffer, skips redundant writes for already-CLOEXEC handles and never bounds safety by descriptor number. The std exec-error pipe stays open until exec so failed launches remain failures. Inventory/syscall failures refuse exec; no parent snapshot, cache, pool, reader thread or persistent artifact is added. Explicit positive finite ResourceLimits apply equal CPU/address-space/file-size/descriptor soft/hard ceilings only to the tool. None remains trusted primitive absence, never unattended admission. Limits are per process/file, not aggregate tree memory/disk/PIDs; no_new_privs does not drop existing capabilities or isolate filesystem/network access.
 
-The worker version is an argv preface before its numeric configuration bound;
-pre-version peers therefore refuse before reading/executing the tool request.
-Versioned request/result envelopes also reject skew. Actual non-root tests verify
-inheritable FD 4096 closes even above child NOFILE 32, parent flags remain intact,
-direct-worker tool exec still seals handles, and CPU/memory/file-size/descriptor
-ceilings actually stop growth. Forced proc inventory tests preserve exec errors.
-The source/binary-identified A/B/B/A cold-launch samples and separate VmHWM
-processes live in `evidence/rust_process_boundary_20261009.json`; the initial
-cost observations remain identified rather than discarded. Compared with a
-reference missing this boundary, final median launch cost is 7.8..8.8% higher and
-CPU cost 0.8..8.4% higher across three pairs. That reference is not an equivalent
-safe implementation, and these costs establish no performance or application
-admission. Raw CPU totals include startup and descendants; child RSS is a
-maximum, not aggregate simultaneous memory. Creating user/PID namespaces passes
-on this host, but both private-proc mount attempts are denied; namespace/chroot,
-aggregate cgroup limits, hard supervisor-death containment and production command
-policy adapters remain independently unverified.
+The worker version is an argv preface before its numeric configuration bound; pre-version peers therefore refuse before reading/executing the tool request. Versioned request/result envelopes also reject skew. Actual non-root tests verify inheritable FD 4096 closes even above child NOFILE 32, parent flags remain intact, direct-worker tool exec still seals handles, and CPU/memory/file-size/descriptor ceilings actually stop growth. Forced proc inventory tests preserve exec errors. The source/binary-identified A/B/B/A cold-launch samples and separate VmHWM processes live in `rust_process_boundary_20261009.json`; the initial cost observations remain identified rather than discarded. Compared with a reference missing this boundary, final median launch cost is 7.8..8.8% higher and CPU cost 0.8..8.4% higher across three pairs. That reference is not an equivalent safe implementation, and these costs establish no performance or application admission. Raw CPU totals include startup and descendants; child RSS is a maximum, not aggregate simultaneous memory. Creating user/PID namespaces passes on this host, but both private-proc mount attempts are denied; namespace/chroot, aggregate cgroup limits, hard supervisor-death containment and production command policy adapters remain independently unverified.
 
 
 ## Native process supervision resources
 
-One admitted native invocation creates one short-lived Linux supervisor process
-and its declared tool process tree. There are no capture reader threads, new
-worker pools, detached jobs or persistent caches; the caller's existing physical
-job admission must bound concurrent invocations. Configuration and stdout/stderr
-payload caps are explicit caller budgets. Configuration serialization is borrowed
-and byte-bounded before spawning; capture drains use fixed 16-KiB scratch buffers
-and at most 16 reads per observation. Poll descriptors are stack-owned; child PID
-parsing uses an 8-KiB streaming buffer rather than a process-count-sized list.
-Worker result transport contains a four-byte length, at most 4096 bytes of JSON
-metadata, then raw bounded stdout/stderr; it never expands bytes into JSON values.
-Parent/worker buffers can overlap, and caps do not include allocator overhead,
-process stacks or command memory. Linux child CPU/RSS/process-count, namespace,
-filesystem and egress budgets remain the external sandbox composition's job.
+One admitted native invocation creates one short-lived Linux supervisor process and its declared tool process tree. There are no capture reader threads, new worker pools, detached jobs or persistent caches; the caller's existing physical job admission must bound concurrent invocations. Configuration and stdout/stderr payload caps are explicit caller budgets. Configuration serialization is borrowed and byte-bounded before spawning; capture drains use fixed 16-KiB scratch buffers and at most 16 reads per observation. Poll descriptors are stack-owned; child PID parsing uses an 8-KiB streaming buffer rather than a process-count-sized list. Worker result transport contains a four-byte length, at most 4096 bytes of JSON metadata, then raw bounded stdout/stderr; it never expands bytes into JSON values. Parent/worker buffers can overlap, and caps do not include allocator overhead, process stacks or command memory. Linux child CPU/RSS/process-count, namespace, filesystem and egress budgets remain the external sandbox composition's job.
 
-pidfd readiness wakes process exit; an explicit request poll interval bounds
-cooperative Stop observation without a watcher thread. Timeout and termination
-grace remain independent. Leaders stay unreaped until group kill; adopted escaped
-descendants are reaped until ECHILD. Callback unwind requests supervisor Stop and
-joins its exit before releasing ownership. Cleanup OS errors retain ownership
-and retry; they never authorize success or abandonment. Parent-death SIGTERM is
-verified with an isolated caller killed by SIGKILL; supervisor SIGKILL/OOM needs
-external namespace/cgroup containment and is not yet certified. No production
-command adapter or application process is switched by this increment.
+pidfd readiness wakes process exit; an explicit request poll interval bounds cooperative Stop observation without a watcher thread. Timeout and termination grace remain independent. Leaders stay unreaped until group kill; adopted escaped descendants are reaped until ECHILD. Callback unwind requests supervisor Stop and joins its exit before releasing ownership. Cleanup OS errors retain ownership and retry; they never authorize success or abandonment. Parent-death SIGTERM is verified with an isolated caller killed by SIGKILL; supervisor SIGKILL/OOM needs external namespace/cgroup containment and is not yet certified. No production command adapter or application process is switched by this increment.
 
-Three fresh release measurement processes each supervise 100 `/bin/true` calls;
-P50 is 1.57..1.61 ms, P99 1.94..2.01 ms on this host. Three separate one-call
-processes record native VmHWM 3504..3712 KiB; child rusage peak is 3540..3644 KiB
-(maximum, not summed simultaneous memory). rusage self peak can retain pre-exec
-launcher high-water; native VmHWM is recorded separately. CPU counters include
-startup and child work. Raw samples, source/binary identity, capacity and parent
-loss receipts live in `evidence/rust_process_supervision_20261009.json`. This is
-supervision cost, not an equivalent-isolation baseline or whole-system admission.
+Three fresh release measurement processes each supervise 100 `/bin/true` calls; P50 is 1.57..1.61 ms, P99 1.94..2.01 ms on this host. Three separate one-call processes record native VmHWM 3504..3712 KiB; child rusage peak is 3540..3644 KiB (maximum, not summed simultaneous memory). rusage self peak can retain pre-exec launcher high-water; native VmHWM is recorded separately. CPU counters include startup and child work. Raw samples, source/binary identity, capacity and parent loss receipts live in `rust_process_supervision_20261009.json`. This is supervision cost, not an equivalent-isolation baseline or whole-system admission.
 
 
 ## Native parent tool stop observers
 
-A parent-linked tool scope owns cancellation/closing channel receivers and a
-clock/deadline observation, not a parent ExecutionSession reference or resource
-lease. One settlement-intent watch belongs to each session and wakes children
-before callbacks may join them. Awaited wake/timer futures introduce no new pool,
-watcher thread or detached job. The effective deadline is the earliest declared
-parent/child bound; stop facts freeze before child resource cleanup.
-A 10,000-child measurement retains the parent's original reference count and
-only its own registration, then zero registrations after settlement. Live parent
-Stop, deadline, closing/join and abandonment fixtures verify quiescence. These
-are lifetime/state counts, not CPU/RSS or throughput admission.
+A parent-linked tool scope owns cancellation/closing channel receivers and a clock/deadline observation, not a parent ExecutionSession reference or resource lease. One settlement-intent watch belongs to each session and wakes children before callbacks may join them. Awaited wake/timer futures introduce no new pool, watcher thread or detached job. The effective deadline is the earliest declared parent/child bound; stop facts freeze before child resource cleanup. A 10,000-child measurement retains the parent's original reference count and only its own registration, then zero registrations after settlement. Live parent Stop, deadline, closing/join and abandonment fixtures verify quiescence. These are lifetime/state counts, not CPU/RSS or throughput admission.
 
 
 ## Native tool execution scopes
 
-Every native handler invocation owns one resource scope registered by its
-request composition. Scope identities are local to that owner/registry; explicit
-scoped calls carry their configured deadline. Resource callbacks reuse the closed
-ExecutionSession labels and limits, and terminal cleanup retires the membership.
-There is no new worker pool, background timer or retained invocation cache.
-A 10,000-dispatch measurement observes 10,000 calls and releases with zero active
-scopes afterward. A joined live-Stop fixture proves resources remain held until
-the callback exits. These are lifecycle counts, not throughput, CPU or RSS
-admission; physical handler/process budgets remain the composition's owner.
+Every native handler invocation owns one resource scope registered by its request composition. Scope identities are local to that owner/registry; explicit scoped calls carry their configured deadline. Resource callbacks reuse the closed ExecutionSession labels and limits, and terminal cleanup retires the membership. There is no new worker pool, background timer or retained invocation cache. A 10,000-dispatch measurement observes 10,000 calls and releases with zero active scopes afterward. A joined live-Stop fixture proves resources remain held until the callback exits. These are lifecycle counts, not throughput, CPU or RSS admission; physical handler/process budgets remain the composition's owner.
 
 
 ## Native compiled tool contracts
 
-Native execution documents compile into an immutable request-owned catalog;
-validation consumes owned argument values and copies defaults only when applied.
-Schema property order is retained, and the registry remains frozen to owner/epoch.
-There is no per-call validation cache, global registry or worker pool; handler
-resource lifetimes belong to the execution service. Three paired processes per
-profile execute 5,000 validations for small/nested/wide arguments, with raw wall
-aggregates and source identity in `evidence/rust_tool_contract_20261009.json`.
-These measurements exclude compilation, cold start, CPU, tails and RSS.
-Caller-supplied document/argument admission remains the composition boundary.
+Native execution documents compile into an immutable request-owned catalog; validation consumes owned argument values and copies defaults only when applied. Schema property order is retained, and the registry remains frozen to owner/epoch. There is no per-call validation cache, global registry or worker pool; handler resource lifetimes belong to the execution service. Three paired processes per profile execute 5,000 validations for small/nested/wide arguments, with raw wall aggregates and source identity in `rust_tool_contract_20261009.json`. These measurements exclude compilation, cold start, CPU, tails and RSS. Caller-supplied document/argument admission remains the composition boundary.
 
 
 ## Native tool occurrence assembly resources
 
-The native occurrence table and its upstream-index aliases belong to one
-provider attempt and are bounded by the explicit tool-position capacity. Each
-alias is created only by an admitted split. Request callable names are immutable
-shared catalog data, extracted once from the canonical request rather than
-rebuilt for every delta. Opaque tool metadata counts against cumulative output
-admission. A 10,000-frame retransmission measurement retains eight occurrences
-and one alias; 160 Python fixtures verify assembly at five chunk sizes. These
-are state/lifecycle counts, not RSS or application throughput admission.
+The native occurrence table and its upstream-index aliases belong to one provider attempt and are bounded by the explicit tool-position capacity. Each alias is created only by an admitted split. Request callable names are immutable shared catalog data, extracted once from the canonical request rather than rebuilt for every delta. Opaque tool metadata counts against cumulative output admission. A 10,000-frame retransmission measurement retains eight occurrences and one alias; 160 Python fixtures verify assembly at five chunk sizes. These are state/lifecycle counts, not RSS or application throughput admission.
 
 
 ## Native tool-response admission resources
 
-Each native Chat attempt owns one flood guard bounded by its explicit tool
-position capacity, with fixed SHA-256 signatures in position/count maps.
-Parameter trees are not retained; transient key sorting is bounded by admitted
-output bytes, and arrays use streaming hashing. A 10,000-observation unchanged
-position retains one position, while 2,400 Python-oracle observations verify
-position retirement and matching order across revisions. Both maps retire with
-the attempt, including rejection. Default/range derive from the shared Python
-policy (32; 2..4096); explicit native request overrides remain. These are retained
-state counts, not RSS or end-to-end throughput certification.
+Each native Chat attempt owns one flood guard bounded by its explicit tool position capacity, with fixed SHA-256 signatures in position/count maps. Parameter trees are not retained; transient key sorting is bounded by admitted output bytes, and arrays use streaming hashing. A 10,000-observation unchanged position retains one position, while 2,400 Python-oracle observations verify position retirement and matching order across revisions. Both maps retire with the attempt, including rejection. Default/range derive from the shared Python policy (32; 2..4096); explicit native request overrides remain. These are retained state counts, not RSS or end-to-end throughput certification.
 
 
 ## Native provider HTTP resources
 
-The native runtime HTTP composition accepts explicit capacity-derived pool
-budgets; the standalone CLI requires all budgets rather than assuming host
-capacity. One endpoint/proxy composition owns one client and a semaphore limiting
-active attempts. Idle connections are bounded per that sole endpoint and expire;
-the permit spans header wait, streaming and terminal drain. One session-owned
-watch signal and a call-local receiver wake cancellation without polling threads.
-The caller owns the Tokio runtime; no per-request executor or client is created.
-Real TCP verification executes two attempts on one accepted connection and
-observes all permits returned after success, cancellation and timeout, including
-Stop during silent upstream input. These are lifecycle/resource counts, not
-provider throughput or RSS admission. Production probe/default wiring remains
-pending; operator-supplied values are explicit. See the native crate guide for
-transport gaps and `packages/tofu-runtime/tests/http.rs` for executable checks.
+The native runtime HTTP composition accepts explicit capacity-derived pool budgets; the standalone CLI requires all budgets rather than assuming host capacity. One endpoint/proxy composition owns one client and a semaphore limiting active attempts. Idle connections are bounded per that sole endpoint and expire; the permit spans header wait, streaming and terminal drain. One session-owned watch signal and a call-local receiver wake cancellation without polling threads. The caller owns the Tokio runtime; no per-request executor or client is created. Real TCP verification executes two attempts on one accepted connection and observes all permits returned after success, cancellation and timeout, including Stop during silent upstream input. These are lifecycle/resource counts, not provider throughput or RSS admission. Production probe/default wiring remains pending; operator-supplied values are explicit. See the native crate guide for transport gaps and `packages/tofu-runtime/tests/http.rs` for executable checks.
 
 
 ## Problem, decision, alternatives
 
-Users submit work and expect correct results quickly. An independent fixed
-resource limit can reject useful work even when the machine has room: a route
-pool counts candidate handles, whereas execution pools count running tasks.
-Increasing every constant hides leaks and can instead exhaust memory.
+Users submit work and expect correct results quickly. An independent fixed resource limit can reject useful work even when the machine has room: a route pool counts candidate handles, whereas execution pools count running tasks. Increasing every constant hides leaks and can instead exhaust memory.
 
-The resource catalog in `contracts/resource_policy_v1.json` owns the existing
-105 launch defaults and six live resource declarations. Its generated stdlib
-projection (`scripts/gen_resource_policy.py`) supplies `runtime_guards.py`;
-the cached launch probe and existing capacity formulas still derive defaults
-from CPU affinity/cgroups, memory capacity/headroom and volume space. Explicit
-operator settings retain their ceilings. No tuning control is added to the
-user task flow. Distributed deployments retain external admission policy.
+The resource catalog in `contracts/resource_policy_v1.json` owns launch defaults and live resource declarations; derive their inventory from the contract rather than a copied count. Its generated stdlib projection (`scripts/gen_resource_policy.py`) supplies `runtime_guards.py`; the cached launch probe and existing capacity formulas still derive defaults from CPU affinity/cgroups, memory capacity/headroom and volume space. Explicit operator settings retain their documented domain meaning. Demand execution owners interpret legacy worker/slot values as idle-reuse or accounting hints, so an override cannot restore a removed admission quota. No tuning control is added to the user task flow. Explicit financial authorization and genuine provider/daemon constraints stay with their respective authorities.
 
-One serving-loop controller adjusts local budgets using measured demand and
-pressure for bounded domains. [Scan/heartbeat isolation](DEFENSIVE_PATTERNS.md#background-fan-out-before-demand-submission) protects the serving loop. Root acceptance is demand-driven;
-native owners retain usage, fairness and teardown;
-there is no second execution registry or lease counter. Storage selection,
-provider credentials/quotas, model choice, task quality, context, cost limits,
-and durable user state remain under their existing authorities.
+One serving-loop controller adjusts local budgets using measured demand and pressure for bounded domains. [Scan/heartbeat isolation](DEFENSIVE_PATTERNS.md#background-fan-out-before-demand-submission) protects the serving loop. Root acceptance is demand-driven; native owners retain usage, fairness and teardown; there is no second execution registry or lease counter. Storage selection, provider credentials/quotas, model choice, task quality, context, cost limits, and durable user state remain under their existing authorities.
 
-Alternatives rejected: raising a single magic limit does not cover dependent
-pools; per-task hardware/configuration probes add latency; a second scheduler
-creates accounting divergence; automatic provider-quota or task-quality changes
-would violate the user's execution constraints.
+Alternatives rejected: raising a single magic limit does not cover dependent pools; per-task hardware/configuration probes add latency; a second scheduler creates accounting divergence; automatic provider-quota or task-quality changes would violate the user's execution constraints.
 
 ## Interface and authority
 
-`ResourceController` provides `catalog`, `snapshot`, `plan`, `apply`, `acquire`.
-Plans carry a controller identity and revision; stale/foreign plans are rejected.
-An owner port declares read/resize callbacks, minimum/maximum, optional native
-acquisition and memory cost. `ResourceOwner` requires user and task identity;
-a lease delegates release exactly once after successful native release, even
-if the controller has stopped. Domain execution paths continue to use their
-native leases. Adding a port never copies their accounting.
+`ResourceController` provides `catalog`, `snapshot`, `plan`, `apply`, `acquire`. Plans carry a controller identity and revision; stale/foreign plans are rejected. An owner port declares read/resize callbacks, minimum/maximum, optional native acquisition and memory cost. `ResourceOwner` requires user and task identity; a lease delegates release exactly once after successful native release, even if the controller has stopped. Domain execution paths continue to use their native leases. Adding a port never copies their accounting.
 
-Snapshots contain desired/effective capacity, used/waiting, completed/errors,
-blocked attempts, current authority ceiling, reason and status. Blocked attempts
-are cumulative, not a fabricated number of waiting tasks. A native sample
-failure is visible as unavailable. Apply orders dependencies before growing
-upstream work, and upstream before shrinking dependencies. Partial application
-is reported truthfully, blocks upstream growth and retries after a cooldown.
-Shutdown cancels the sampler; existing work retains its native release owner.
+Snapshots contain desired/effective capacity, used/waiting, completed/errors, blocked attempts, current authority ceiling, reason and status. Blocked attempts are cumulative, not a fabricated number of waiting tasks. A native sample failure is visible as unavailable. Apply orders dependencies before growing upstream work, and upstream before shrinking dependencies. Partial application is reported truthfully, blocks upstream growth and retries after a cooldown. Shutdown cancels the sampler; existing work retains its native release owner.
 
 | Resource | Native owner | Live behavior |
 | --- | --- | --- |
@@ -842,593 +256,150 @@ Shutdown cancels the sampler; existing work retains its native release owner.
 | `storage.rpc` | selected native v2 session pool | never exceed current daemon readiness budget; excess sessions close only when idle or released |
 | `storage.frames` | selected client's response frame admission | grow byte admission with headroom; preserve occupied bytes and response priority |
 
-These are process budgets, not per-user quotas. Shared owners retain identity
-and fairness. Optional owners attach lazily on first normal use. Restarting a
-native storage client replaces its port; controller sampling opens no storage
-or provider connections. Legacy/SQLite clients do not acquire native RPC ports.
+These are process budgets, not per-user quotas. Shared owners retain identity and fairness. Optional owners attach lazily on first normal use. Restarting a native storage client replaces its port; controller sampling opens no storage or provider connections. Legacy/SQLite clients do not acquire native RPC ports.
 
-Cataloged launch settings are explicitly `restart` settings, not falsely
-advertised as hot-swappable. The six ports above are the first live migration.
-Feature-specific controls outside the common launch policy remain with their
-current owners until given catalog declarations and safe resize ports. External
-daemon/provider ceilings are observed, not raised by the application controller.
+Cataloged launch settings are explicitly `restart` settings, not falsely advertised as hot-swappable. The six ports above are the first live migration. Feature-specific controls outside the common launch policy remain with their current owners until given catalog declarations and safe resize ports. External daemon/provider ceilings are observed, not raised by the application controller.
 
 ## Feedback and safety
 
-The serving loop schedules feedback every five seconds and awaits one serial
-sample in its existing asyncio worker pool. Kernel and owner reads never run on
-the HTTP loop; cancellation or shutdown cannot schedule another sample or apply
-a late adjustment. Only local counters and current process/cgroup/host memory
-are read. Launch-probe cache hits use layout inputs without filesystem access;
-layout resolution and remote directory scans occur only on a miss or refresh.
-The cache retains at most 16 layout observations. Problem: resolving auto layout
-before cache lookup stalled the HTTP loop on a network directory. Decision:
-cache by layout inputs and offload the whole feedback sample. Alternatives
-rejected: disabling pressure checks weakens admission; adding a timer/pool
-duplicates lifecycle ownership.
-Measurement on the deployment's FUSE volume: 500 warm lookups fell from
-570.071 ms / 500 layout resolutions to 1.353 ms / zero resolutions.
-With an injected 80 ms counter read, a 5 ms event-loop heartbeat's ten-sample
-median fell from 80.099 to 5.131 ms. This is loop-isolation evidence, not model
-throughput. The sampler retains one in-flight worker-pool job and a cancellation
-fence; repeated ticks cannot accumulate blocked probe jobs. Unknown headroom disables growth. Two
-healthy samples of queued or blocked work permit a 25% increase, within the
-launch envelope, memory reserve and owner ceiling. Shared provider contention,
-downstream waiting and new errors suppress growth. Concurrency is not itself
-success: failed completions are excluded from productive throughput.
+The serving loop schedules feedback every five seconds and awaits one serial sample in its existing asyncio worker pool. Kernel and owner reads never run on the HTTP loop; cancellation or shutdown cannot schedule another sample or apply a late adjustment. Only local counters and current process/cgroup/host memory are read. Launch-probe cache hits use layout inputs without filesystem access; layout resolution and remote directory scans occur only on a miss or refresh. The cache retains at most 16 layout observations. Problem: resolving auto layout before cache lookup stalled the HTTP loop on a network directory. Decision: cache by layout inputs and offload the whole feedback sample. Alternatives rejected: disabling pressure checks weakens admission; adding a timer/pool duplicates lifecycle ownership. Measurement on the deployment's FUSE volume: 500 warm lookups fell from 570.071 ms / 500 layout resolutions to 1.353 ms / zero resolutions. With an injected 80 ms counter read, a 5 ms event-loop heartbeat's ten-sample median fell from 80.099 to 5.131 ms. This is loop-isolation evidence, not model throughput. The sampler retains one in-flight worker-pool job and a cancellation fence; repeated ticks cannot accumulate blocked probe jobs. Unknown headroom disables growth. Two healthy samples of queued or blocked work permit a 25% increase, within the launch envelope, memory reserve and owner ceiling. Shared provider contention, downstream waiting and new errors suppress growth. Concurrency is not itself success: failed completions are excluded from productive throughput.
 
-A growth trial lasts at least 30 seconds; repeated growth cannot overwrite it.
-When sustained demand produces at least four completions but no throughput
-gain, the previous target is restored and growth backs off for 60 seconds.
-For remaining bounded execution domains, memory pressure reduces admission
-by 25% of the smaller of active
-usage and current capacity, at most once per 15-second
-cooldown. Running work drains normally. Occupied response buffers are not
-reclaimed to force a smaller budget. Buffer limits consume no idle memory.
+A growth trial lasts at least 30 seconds; repeated growth cannot overwrite it. When sustained demand produces at least four completions but no throughput gain, the previous target is restored and growth backs off for 60 seconds. For remaining bounded execution domains, memory pressure reduces admission by 25% of the smaller of active usage and current capacity, at most once per 15-second cooldown. Running work drains normally. Occupied response buffers are not reclaimed to force a smaller budget. Buffer limits consume no idle memory.
 
-Remaining bounded-domain admission pressure comes from current memory
-observations; a historical refusal
-is diagnostic evidence, never a persistent pressure latch. Refusals increment
-the blocked counter. After healthy demand samples, pressure-reduced capacity
-returns toward its last healthy ceiling, respecting current headroom,
-dependencies and operator limits. Recovery does not enter a speculative
-30-second throughput trial. Slow 25% growth from a temporary minimum was
-rejected because it needlessly strands useful work on large hosts.
+Remaining bounded-domain admission pressure comes from current memory observations; a historical refusal is diagnostic evidence, never a persistent pressure latch. Refusals increment the blocked counter. After healthy demand samples, pressure-reduced capacity returns toward its last healthy ceiling, respecting current headroom, dependencies and operator limits. Recovery does not enter a speculative 30-second throughput trial. Slow 25% growth from a temporary minimum was rejected because it needlessly strands useful work on large hosts.
 
-Route handles are execution-owned metadata, not a concurrency envelope.
-Registration/disposal carry exact ownership; launch sizing hints and controller
-plans cannot refuse registration or drop a handle to manufacture capacity.
+Route handles are execution-owned metadata, not a concurrency envelope. Registration/disposal carry exact ownership; launch sizing hints and controller plans cannot refuse registration or drop a handle to manufacture capacity.
 
 
 ## Demand-driven child execution
 
-Problem: session pools, local semaphores, a process permit queue, wave/result
-quotas and delivery-worker slots independently parked or rejected authorized
-children. Registry overflow cleanup could then abort old productive sessions.
+Problem: session pools, local semaphores, a process permit queue, wave/result quotas and delivery-worker slots independently parked or rejected authorized children. Registry overflow cleanup could then abort old productive sessions.
 
-Decision: dependency-ready children use the common demand-driven executor.
-There is no local execution semaphore, permit wait queue, wave-size ceiling or
-session/result-count admission limit. Owner-addressed accounting records entry
-and release; Stop is checked before entry and again after startup observers.
-Retry and inherited token/tool/deadline authority remain under their existing
-owners. The launch parallel value controls idle thread reuse, and the session
-value controls terminal-memory cache retention. Live sessions may exceed it;
-capacity cleanup cannot abort them or delete their durable result rows.
-Admission does no whole-registry sorting or retirement. Existing throttled
-maintenance selects terminal candidates once per sweep, preserving prompt
-acceptance when the live registry grows past the cache target.
-Recovery reservations exclude duplicate identities, without counting capacity.
+Decision: dependency-ready children use the common demand-driven executor. There is no local execution semaphore, permit wait queue, wave-size ceiling or session/result-count admission limit. Owner-addressed accounting records entry and release; Stop is checked before entry and again after startup observers. Retry and inherited token/tool/deadline authority remain under their existing owners. The launch parallel value controls idle thread reuse, and the session value controls terminal-memory cache retention. Live sessions may exceed it; capacity cleanup cannot abort them or delete their durable result rows. Admission does no whole-registry sorting or retirement. Existing throttled maintenance selects terminal candidates once per sweep, preserving prompt acceptance when the live registry grows past the cache target. Recovery reservations exclude duplicate identities, without counting capacity.
 
-Cancellation mirrors and child event delivery start lazily for actual work,
-without shared slots. Child events remain FIFO beyond the old queue allowance;
-real sink failures and flush deadlines remain visible. Closing a child revokes
-publication and detaches uncommitted closures; an entered callback retains its
-thread until actual return without denying another child. Worker-start failure
-still settles through ordinary invocation cleanup.
+Cancellation mirrors and child event delivery start lazily for actual work, without shared slots. Child events remain FIFO beyond the old queue allowance; real sink failures and flush deadlines remain visible. Closing a child revokes publication and detaches uncommitted closures; an entered callback retains its thread until actual return without denying another child. Worker-start failure still settles through ordinary invocation cleanup.
 
-Alternatives rejected: raising several unrelated constants retains hidden
-bottlenecks; unbounded work on a fixed pool still queues; retiring live sessions
-loses user work; dropping child evidence can falsely report successful results.
-The task/result carriers and callbacks are reclaimed by their existing owners,
-with no new background queue or scheduler. Provider-side constraints remain in
-model I/O and are not changed by this migration.
+Alternatives rejected: raising several unrelated constants retains hidden bottlenecks; unbounded work on a fixed pool still queues; retiring live sessions loses user work; dropping child evidence can falsely report successful results. The task/result carriers and callbacks are reclaimed by their existing owners, with no new background queue or scheduler. Provider-side constraints remain in model I/O and are not changed by this migration.
 
-Measurement on this host with 64 synthetic parked child runs: all entered in
-20.723 ms despite old pool/local/global/waiter/session values of one. Peak
-process RSS rose by 796 KiB, all 64 results settled, and active owner accounting
-returned to zero. This measures scheduling/accounting, not provider throughput.
-A registry-only measurement with maintenance ports isolated registered 2,000
-live sessions in 1.831 ms with a terminal-cache target of one; it includes no
-provider or storage work.
+Measurement on this host with 64 synthetic parked child runs: all entered in 20.723 ms despite old pool/local/global/waiter/session values of one. Peak process RSS rose by 796 KiB, all 64 results settled, and active owner accounting returned to zero. This measures scheduling/accounting, not provider throughput. A registry-only measurement with maintenance ports isolated registered 2,000 live sessions in 1.831 ms with a terminal-cache target of one; it includes no provider or storage work.
 
 ## Model requests, route ownership and SSE
 
-Problem: a local request count could hide a healthy authorized provider; a
-separate route registry could reject execution before dispatch; SSE quotas
-rejected connections or displaced unrelated live conversation streams.
+Problem: a local request count could hide a healthy authorized provider; a separate route registry could reject execution before dispatch; SSE quotas rejected connections or displaced unrelated live conversation streams.
 
-Decision: dispatch records every request reservation without a local capacity
-refusal or fan-out reduction. Request-owned route registration is atomic with
-no count ceiling; construction failure, cancellation and observer failure keep
-the existing rollback/disposal owner. Controllers observe demand but cannot
-restore these limits. RPM pressure remains a selection hint with a saturating
-score so a busy healthy target cannot overflow into ineligibility. Provider
-errors, cooldown, authorized fallback, billing and consumption policy remain
-with their existing authorities.
+Decision: dispatch records every request reservation without a local capacity refusal or fan-out reduction. Request-owned route registration is atomic with no count ceiling; construction failure, cancellation and observer failure keep the existing rollback/disposal owner. Controllers observe demand but cannot restore these limits. RPM pressure remains a selection hint with a saturating score so a busy healthy target cannot overflow into ineligibility. Provider errors, cooldown, authorized fallback, billing and consumption policy remain with their existing authorities.
 
-SSE tracks opaque connection tokens by explicit principal locally, releasing
-only the exact owned token. It has no shared lease store, count admission,
-expiry heartbeat or quota response. New conversations cannot evict other live
-streams. Same-client reconnect supersession and stale-generation fencing stay
-in the broker. Setup failure closes the subscription, and response/observer
-close never cancels accepted agent execution.
+SSE tracks opaque connection tokens by explicit principal locally, releasing only the exact owned token. It has no shared lease store, count admission, expiry heartbeat or quota response. New conversations cannot evict other live streams. Same-client reconnect supersession and stale-generation fencing stay in the broker. Setup failure closes the subscription, and response/observer close never cancels accepted agent execution.
 
-Alternatives rejected: raising count defaults leaves nested bottlenecks;
-unrelated subscription eviction interrupts legitimate work; pretending real
-provider failures succeeded would corrupt accounting; expiring live ownership
-can lose exact teardown. Reconstructible generation history remains bounded,
-and connection/request metadata is reclaimed at actual close/settlement.
+Alternatives rejected: raising count defaults leaves nested bottlenecks; unrelated subscription eviction interrupts legitimate work; pretending real provider failures succeeded would corrupt accounting; expiring live ownership can lose exact teardown. Reconstructible generation history remains bounded, and connection/request metadata is reclaimed at actual close/settlement.
 
-A metadata-only stress measurement registered 4,096 connection tokens under
-one principal in 46.714 ms despite an old cap of one; all tokens were unique
-and the active count returned to zero after concurrent release. Peak process
-RSS rose by 6,988 KiB, including the eight-worker test harness and Futures.
-This measures accounting rather than live socket or model throughput.
+A metadata-only stress measurement registered 4,096 connection tokens under one principal in 46.714 ms despite an old cap of one; all tokens were unique and the active count returned to zero after concurrent release. Peak process RSS rose by 6,988 KiB, including the eight-worker test harness and Futures. This measures accounting rather than live socket or model throughput.
 
 ## HTTP connection and control RPC demand
 
-Problem: the asynchronous model HTTP pool imposed a fixed active connection
-ceiling and pool wait deadline even after dispatch stopped limiting requests.
-Control RPC separately gated per-socket calls, recent request counts, process
-workers and reliable response backlog.
+Problem: the asynchronous model HTTP pool imposed a fixed active connection ceiling and pool wait deadline even after dispatch stopped limiting requests. Control RPC separately gated per-socket calls, recent request counts, process workers and reliable response backlog.
 
-Decision: active model HTTP connections have no local count limit or pool-wait
-timeout. Keepalive retention remains separate: its default follows the cached
-launch CPU/memory policy via sync-worker capacity, explicit idle overrides
-remain, and expiry/close owns reclamation. Connect, upload, TLS/proxy/egress,
-provider failures, model Stop and terminal stream drain retain their contracts.
+Decision: active model HTTP connections have no local count limit or pool-wait timeout. Keepalive retention remains separate: its default follows the cached launch CPU/memory policy via sync-worker capacity, explicit idle overrides remain, and expiry/close owns reclamation. Connect, upload, TLS/proxy/egress, provider failures, model Stop and terminal stream drain retain their contracts.
 
-Control RPC uses demand-driven physical workers with copied request context and
-explicit socket owner. Count and rate gates cannot deny requests or responses;
-only allowlisted, valid requests enter execution. Real deadlines/cancellation
-settle the waiter while native Future completion owns physical accounting.
-Close retires idle workers and stops new dispatch; already-running read calls
-finish without a late response. Correlated responses are FIFO until actual
-socket delivery/disconnect, which clears pending reconstructible frames.
+Control RPC uses demand-driven physical workers with copied request context and explicit socket owner. Count and rate gates cannot deny requests or responses; only allowlisted, valid requests enter execution. Real deadlines/cancellation settle the waiter while native Future completion owns physical accounting. Close retires idle workers and stops new dispatch; already-running read calls finish without a late response. Correlated responses are FIFO until actual socket delivery/disconnect, which clears pending reconstructible frames.
 
-Alternatives rejected: an unbounded backlog behind a fixed executor still
-queues; bigger connection counts preserve the ceiling; pretending timed-out
-threads exited hides residency; disconnecting on count backlog interrupts
-useful requests. Existing executor and socket lifecycles own reclamation with
-no second scheduler or durable state machine.
+Alternatives rejected: an unbounded backlog behind a fixed executor still queues; bigger connection counts preserve the ceiling; pretending timed-out threads exited hides residency; disconnecting on count backlog interrupts useful requests. Existing executor and socket lifecycles own reclamation with no second scheduler or durable state machine.
 
-On this host, 144 synthetic RPC handlers all entered in 37.230 ms, with a
-2,644 KiB increase in process peak RSS and 144 correlated responses. The
-measurement includes worker setup/accounting and parked reads, not filesystem
-throughput. A real loopback HTTP test holds 48 requests simultaneously above
-the former 32-connection limit, then verifies complete responses and cleanup.
+On this host, 144 synthetic RPC handlers all entered in 37.230 ms, with a 2,644 KiB increase in process peak RSS and 144 correlated responses. The measurement includes worker setup/accounting and parked reads, not filesystem throughput. A real loopback HTTP test holds 48 requests simultaneously above the former 32-connection limit, then verifies complete responses and cleanup.
 
 ## Operations and verification
 
 ### Demand-driven root acceptance and workers
 
-Problem: fixed root worker slots and a finite launch queue serialize accepted
-I/O work and can reject another task even when existing workers are parked on
-model or tool I/O.
+Problem: fixed root worker slots and a finite launch queue serialize accepted I/O work and can reject another task even when existing workers are parked on model or tool I/O.
 
-Decision: the root executor prepares a worker for every submitted job, reusing
-idle workers when available. The launch worker value and live resize control
-idle thread reuse; neither gates execution. The handoff deque supports pending
-cancellation and honest pre-worker status, but has no capacity rejection.
-Surplus threads retire after completing their work. A proven wedged thread
-keeps its quarantine accounting and retires when it returns. Shutdown,
-duplicate task IDs and actual OS thread-start failure retain typed ownership
-rollback; a failed submission cannot later execute.
+Decision: the root executor prepares a worker for every submitted job, reusing idle workers when available. The launch worker value and live resize control idle thread reuse; neither gates execution. The handoff deque supports pending cancellation and honest pre-worker status, but has no capacity rejection. Surplus threads retire after completing their work. A proven wedged thread keeps its quarantine accounting and retires when it returns. Shutdown, duplicate task IDs and actual OS thread-start failure retain typed ownership rollback; a failed submission cannot later execute.
 
-Alternatives rejected: increasing the queue only postpones rejection; waiting
-for the five-second controller sample keeps usable resources idle; running jobs
-on the HTTP loop breaks request responsiveness. Root entry uses local exact ownership tokens without capacity slots, memory
-refusal, shared-store leases or heartbeat threads. Old inflight settings and
-controller resizing cannot restore a root ceiling. Child execution also starts on demand. Model dispatch and SSE also use ownership accounting; other feature gates
-remain separate owners and require subsequent migration.
+Alternatives rejected: increasing the queue only postpones rejection; waiting for the five-second controller sample keeps usable resources idle; running jobs on the HTTP loop breaks request responsiveness. Root entry uses local exact ownership tokens without capacity slots, memory refusal, shared-store leases or heartbeat threads. Old inflight settings and controller resizing cannot restore a root ceiling. Child execution also starts on demand. Model dispatch and SSE also use ownership accounting; other feature gates remain separate owners and require subsequent migration.
 
 
-Measurement on this host with a synthetic parked-I/O barrier: 64 tasks all
-entered within 12.536 ms with an idle reuse target of one, zero queued jobs at
-the barrier and a 796 KiB increase in process peak RSS. All 64 completed and
-resident worker threads drained to one. This measures thread scheduling and
-cleanup only; real provider payloads and OS thread-start limits still matter.
+Measurement on this host with a synthetic parked-I/O barrier: 64 tasks all entered within 12.536 ms with an idle reuse target of one, zero queued jobs at the barrier and a 796 KiB increase in process peak RSS. All 64 completed and resident worker threads drained to one. This measures thread scheduling and cleanup only; real provider payloads and OS thread-start limits still matter.
 
-`benchmarks/conversation_concurrency.py` measures production executor and
-durable Turn operations on a disposable native authority, with a barrier
-provider to prove simultaneous running tasks, bounded output, SIGKILL/reopen,
-RSS and latency. It does not spend tokens or measure real-provider quotas.
-Use `--conversations 1000 --restart-while-running --rounds 4 --chunk-bytes 8192`
-on the target volume; `--recover-interrupted` instead checks application boot
-settlement of every interrupted attempt. Reports include the exact binary
-hash and filesystem, and retain failed authorities for diagnosis. Verify with
-`tests/resource_control/test_thousand_conversations.py` and the native run;
-capacity is conditional on the measured workload and current machine pressure.
+`benchmarks/conversation_concurrency.py` measures production executor and durable Turn operations on a disposable native authority, with a barrier provider to prove simultaneous running tasks, bounded output, SIGKILL/reopen, RSS and latency. It does not spend tokens or measure real-provider quotas. Use `--conversations 1000 --restart-while-running --rounds 4 --chunk-bytes 8192` on the target volume; `--recover-interrupted` instead checks application boot settlement of every interrupted attempt. Reports include the exact binary hash and filesystem, and retain failed authorities for diagnosis. Verify with `tests/resource_control/test_thousand_conversations.py` and the native run; capacity is conditional on the measured workload and current machine pressure.
 
-Native readiness distinguishes a stuck authority holder from sustained useful
-contention. Successful foreground mutex acquisitions advance one authority-local
-counter; the watchdog observes it without taking the mutex. Progress resets
-the contention window even when every sampled `try_lock` is busy. A held mutex
-with no progress still trips the existing ten-second threshold, and poisoning
-never clears on progress. A process-global counter was rejected because work
-in another authority could mask a real wedge. Raising the threshold would only
-delay recovery. Thousand-task verification must sample readiness as well as
-completion: correct readback alone does not prove the supervisor will keep a
-busy, healthy daemon alive.
+Native readiness distinguishes a stuck authority holder from sustained useful contention. Successful foreground mutex acquisitions advance one authority-local counter; the watchdog observes it without taking the mutex. Progress resets the contention window even when every sampled `try_lock` is busy. A held mutex with no progress still trips the existing ten-second threshold, and poisoning never clears on progress. A process-global counter was rejected because work in another authority could mask a real wedge. Raising the threshold would only delay recovery. Thousand-task verification must sample readiness as well as completion: correct readback alone does not prove the supervisor will keep a busy, healthy daemon alive.
 
-`lib.resource_control.resource_snapshot()` exposes credential-free diagnostics.
-The existing admin-scoped `/metrics` emits `tofu_resource_{desired,effective,
-used,waiting,maximum,blocked,errors,pressure}` with bounded resource/unit labels and
-`tofu_resource_policy_revision`. `[Resources]` logs record adjustments and
-failure reasons. Diagnostics and sampling contain no user/task IDs or content.
-`tofu_task_startup_stage_seconds` separates context construction, registration,
-preparation, binding, submission and physical worker entry. Compare it with the
-executor's actual queue-wait metric and storage RPC timings before attributing
-startup latency to exhausted slots.
-New code takes effect through the ordinary serving-runtime startup boundary;
-changing source alone does not replace an already running server.
+`lib.resource_control.resource_snapshot()` exposes credential-free diagnostics. The existing admin-scoped `/metrics` emits `tofu_resource_{desired,effective, used,waiting,maximum,blocked,errors,pressure}` with bounded resource/unit labels and `tofu_resource_policy_revision`. `[Resources]` logs record adjustments and failure reasons. Diagnostics and sampling contain no user/task IDs or content. `tofu_task_startup_stage_seconds` separates context construction, registration, preparation, binding, submission and physical worker entry. Compare it with the executor's actual queue-wait metric and storage RPC timings before attributing startup latency to exhausted slots. New code takes effect through the ordinary serving-runtime startup boundary; changing source alone does not replace an already running server.
 
-Storage warmup reads one metadata catalog page with no messages or settings.
-A generic conversation listing with a caller-side limit was rejected because
-it can still hydrate large documents and hit the response-frame bound.
+Storage warmup reads one metadata catalog page with no messages or settings. A generic conversation listing with a caller-side limit was rejected because it can still hydrate large documents and hit the response-frame bound.
 
-Run `python3 scripts/gen_resource_policy.py --check` and
-`pytest -q tests/resource_control` first, then the neighboring executor,
-server-loop, dispatch, Swarm, storage and deployment contracts. Tests cover
-real queued-work growth, in-flight shrink, failed/stale plans, retry/backoff,
-exact release, cancellation, lazy imports, native authority limits and sampler
-shutdown. Pool shrink must never lend a returned excess session while older
-borrowers still exceed the new budget. Racing dispatch transfers a singleton
-reservation before ordinary dispatch and releases cancelled/unsubmitted slots.
+Run `python3 scripts/gen_resource_policy.py --check` and `pytest -q tests/resource_control` first, then the neighboring executor, server-loop, dispatch, Swarm, storage and deployment contracts. Tests cover real queued-work growth, in-flight shrink, failed/stale plans, retry/backoff, exact release, cancellation, lazy imports, native authority limits and sampler shutdown. Pool shrink must never lend a returned excess session while older borrowers still exceed the new budget. Racing dispatch transfers a singleton reservation before ordinary dispatch and releases cancelled/unsubmitted slots.
 
-A local synthetic measurement (12 independent 40 ms waiting jobs, one initial
-worker, sufficient headroom, feedback samples advanced for the experiment)
-completed in 0.4821 s at fixed capacity and 0.2417 s after automatic growth to
-two workers. This measures queue parallelism, not provider latency. With six
-synthetic idle owners, 1,000 feedback ticks averaged 0.149 ms/tick under
-tracemalloc; retained traced allocation after collection was 1,664 bytes
-(peak 212,848 bytes). Startup/idle creates no resource-controller thread.
+A local synthetic measurement (12 independent 40 ms waiting jobs, one initial worker, sufficient headroom, feedback samples advanced for the experiment) completed in 0.4821 s at fixed capacity and 0.2417 s after automatic growth to two workers. This measures queue parallelism, not provider latency. With six synthetic idle owners, 1,000 feedback ticks averaged 0.149 ms/tick under tracemalloc; retained traced allocation after collection was 1,664 bytes (peak 212,848 bytes). Startup/idle creates no resource-controller thread.
 
-Completed native authority holds of at least one second emit an
-`authority_hold` diagnostic naming only the operation and elapsed time.
-Foreground commands, overlay merge, rotation prepare/install and pack install
-share this timer; no user content enters the record. The threshold bounds log
-frequency per serialized holder. Readiness measurements retain at most eight
-failure examples (component state or probe exception), so a failed load result
-can distinguish contention from an unavailable health transport.
+Completed native authority holds of at least one second emit an `authority_hold` diagnostic naming only the operation and elapsed time. Foreground commands, overlay merge, rotation prepare/install and pack install share this timer; no user content enters the record. The threshold bounds log frequency per serialized holder. Readiness measurements retain at most eight failure examples (component state or probe exception), so a failed load result can distinguish contention from an unavailable health transport.
 
-Overlay merges begin at 64 entries after every cold open, then measured hold
-latency grows or shrinks slices across 1..2,048 entries toward the existing
-25 ms target. A fast mount still reaches the full batch; starting at the full
-batch was rejected because cold DolphinFS merges held authority for 7.9 s.
-Slow failed merges also reduce the next slice, while empty or immediately
-rejected work cannot grow it. Rotation write admission is checked before page
-materialization, preventing repeated expensive merges that cannot publish.
-The per-key durable merge cursor and original commit versions are unchanged.
+Overlay merges begin at 64 entries after every cold open, then measured hold latency grows or shrinks slices across 1..2,048 entries toward the existing 25 ms target. A fast mount still reaches the full batch; starting at the full batch was rejected because cold DolphinFS merges held authority for 7.9 s. Slow failed merges also reduce the next slice, while empty or immediately rejected work cannot grow it. Rotation write admission is checked before page materialization, preventing repeated expensive merges that cannot publish. The per-key durable merge cursor and original commit versions are unchanged.
 
-Merge admission also counts the exact pending bytes of its produced pages,
-including the directory/root, against the existing 2 MiB WAL-carried payload
-limit. Oversized slices shrink before publication instead of synchronously
-fsyncing hundreds of loose files under authority. One indivisible entry keeps
-the certified spill fallback so progress is always possible. Underfilled slices
-do not justify growing the next target; growth uses the accepted slice size
-and actual materialized entries, preserving the host's measured throughput.
+Merge admission also counts the exact pending bytes of its produced pages, including the directory/root, against the existing 2 MiB WAL-carried payload limit. Oversized slices shrink before publication instead of synchronously fsyncing hundreds of loose files under authority. One indivisible entry keeps the certified spill fallback so progress is always possible. Underfilled slices do not justify growing the next target; growth uses the accepted slice size and actual materialized entries, preserving the host's measured throughput.
 
-On the 60-CPU / roughly 210 GiB DolphinFS host, byte-bounded merge admission
-passed 1000 simultaneous attempts with four 8 KiB updates each, two SIGKILL
-cycles, exact output comparison for all 1000, and offline verification with
-zero missing blocks. The strict-durability run took 171.00 s (35.83 s admission;
-stream P99 56.51 s including queueing), with 317 healthy probes, zero observed
-continuous authority contention and zero `flushDeferred` spill events.
-These are synthetic production-executor/storage measurements using a barrier
-provider; they do not certify remote provider quotas or 1000 paid responses.
+On the 60-CPU / roughly 210 GiB DolphinFS host, byte-bounded merge admission passed 1000 simultaneous attempts with four 8 KiB updates each, two SIGKILL cycles, exact output comparison for all 1000, and offline verification with zero missing blocks. The strict-durability run took 171.00 s (35.83 s admission; stream P99 56.51 s including queueing), with 317 healthy probes, zero observed continuous authority contention and zero `flushDeferred` spill events. These are synthetic production-executor/storage measurements using a barrier provider; they do not certify remote provider quotas or 1000 paid responses.
 
 ## Conversation presentation working set
 
-The browser's initial block window follows the actual chat viewport height; the
-policy and expansion semantics live in [RENDER_CONTRACT.md](RENDER_CONTRACT.md).
-Collapsed round bodies are constructed on disclosure. This bounds reconstructible
-DOM work without changing durable history, TurnStore authority, or worker
-concurrency. Before the change, sampled six heavy conversations constructed
-13,066–32,709 chat nodes and blocked the main thread for 519–864 ms on selection.
-Keep browser navigation measurements alongside verification when changing this
-working set; cold snapshot time and rendering time must be reported separately.
-After viewport sizing and lazy round rendering, the same six conversations
-mounted 1,338–2,550 nodes and their longest render tasks were 105–170 ms. Two
-repeated selections reached content in 129–135 ms with zero snapshot requests
-(previously 553–837 ms). Cold selections still took 1.1–1.8 s including the large
-snapshot read and transfer; host load makes these measurements a moving target.
+The Surface's keyed commit publishes its bounded mounted-Turn identities. Task-time demand and rendered-state notification reuse them, removing the subtree MutationObserver and two whole-transcript selector scans per graph commit. One viewport latch replaces the retained four-listener latch and its extra animation frame; keyboard geometry shares the scoped window-height owner. Synthetic executable measurements: 100 artifact updates plus one graph update produce one additional commit; 100 conditional-follow nudges produce zero extra commits; 30 keyboard resize signals use one pending frame. Native cancellation failure is injected to verify that retired callbacks stay inert. No polling timer, persistent cache or history truncation is introduced. These are work counts, not claims about network latency. Pins: the controller/Surface/viewport unit tests and `tests/visual/test_visual_conversation_scroll_history.py`.
+
+The browser's initial block window follows the actual chat viewport height; the policy and expansion semantics live in [RENDER_CONTRACT.md](RENDER_CONTRACT.md). Collapsed round bodies are constructed on disclosure. This bounds reconstructible DOM work without changing durable history, TurnStore authority, or worker concurrency. Before the change, sampled six heavy conversations constructed 13,066–32,709 chat nodes and blocked the main thread for 519–864 ms on selection. Keep browser navigation measurements alongside verification when changing this working set; cold snapshot time and rendering time must be reported separately. After viewport sizing and lazy round rendering, the same six conversations mounted 1,338–2,550 nodes and their longest render tasks were 105–170 ms. Two repeated selections reached content in 129–135 ms with zero snapshot requests (previously 553–837 ms). Cold selections still took 1.1–1.8 s including the large snapshot read and transfer; host load makes these measurements a moving target.
 
 
 ### Lazy read-tool transport working set
 
-A 2026-10-01 read-only measurement on the previous large sidebar sample used the
-same owner-scoped `refs`, tail-96 and artifact-hint snapshot. Initial decoded
-JSON was 16,999,694 bytes; adding lazy read-tool output reduced it to 7,735,525
-bytes (54.5% less), deferring 351 outputs containing 9,132,886 characters.
-This measures representation size, not end-to-end latency: the initial storage
-read still obtains authoritative projections and other tool families remain
-inline. No process-wide snapshot cache or prefetch pool is added. Detail request
-and cached output are owned by each mounted disclosure, expire with its block,
-and have a 30-second read timeout; collapse/navigation abort pending reads. Full
-result rendering retains the existing 120,000-character display bound.
+A 2026-10-01 read-only measurement on the previous large sidebar sample used the same owner-scoped `refs`, tail-96 and artifact-hint snapshot. Initial decoded JSON was 16,999,694 bytes; adding lazy read-tool output reduced it to 7,735,525 bytes (54.5% less), deferring 351 outputs containing 9,132,886 characters. This measures representation size, not end-to-end latency: the initial storage read still obtains authoritative projections and other tool families remain inline. No process-wide snapshot cache or prefetch pool is added. Detail request and cached output are owned by each mounted disclosure, expire with its block, and have a 30-second read timeout; collapse/navigation abort pending reads. Full result rendering retains the existing 120,000-character display bound.
 
-The same frozen full/lazy response pair was parsed in real Chromium: median
-JSON parse + generated-schema validation + reference materialization over five
-alternating samples fell from 60.2 ms to 30.6 ms (49.2% less). This isolates the
-browser decode path and does not claim a 49.2% reduction in navigation latency.
+The same frozen full/lazy response pair was parsed in real Chromium: median JSON parse + generated-schema validation + reference materialization over five alternating samples fell from 60.2 ms to 30.6 ms (49.2% less). This isolates the browser decode path and does not claim a 49.2% reduction in navigation latency.
 
 
 ### Collapsed reasoning working set
 
-Completed reasoning above 4,096 characters does not build its rich body until
-opened. Each mounted keyed block owns one toggle listener and its latest render
-callback; retiring the block removes both. Unchanged opened content is reused,
-and closed updates defer the latest translation/projection. There is no global
-content cache, prefetch queue, or worker. Streaming still renders immediately.
-On one frozen live snapshot, two alternating Chromium runs reduced initial
-closed-reasoning descendants from 909 to zero and total chat nodes from 1,432
-to 523. Click-to-render-frame fell from 302–311 ms to 109–115 ms; longest tasks
-fell from 220–230 ms to 63–64 ms. Snapshot requests were fulfilled with identical
-bytes to isolate browser work; these figures exclude network/storage waiting.
+Completed reasoning above 4,096 characters does not build its rich body until opened. Each mounted keyed block owns one toggle listener and its latest render callback; retiring the block removes both. Unchanged opened content is reused, and closed updates defer the latest translation/projection. There is no global content cache, prefetch queue, or worker. Streaming still renders immediately. On one frozen live snapshot, two alternating Chromium runs reduced initial closed-reasoning descendants from 909 to zero and total chat nodes from 1,432 to 523. Click-to-render-frame fell from 302–311 ms to 109–115 ms; longest tasks fell from 220–230 ms to 63–64 ms. Snapshot requests were fulfilled with identical bytes to isolate browser work; these figures exclude network/storage waiting.
 
 
 ### Large snapshot JSON decoding
 
-Problem: the optional accelerated decoder built a large tree, discovered
-unsupported floats, discarded it, and parsed the same response with stdlib.
-Decision: an 8 KiB probe at each response edge declines explicit float members
-before speculative parsing. The probe only selects the original parser;
-remaining accelerator shape/number checks and typed errors are unchanged.
-It owns at most 16 KiB of temporary slices and adds no cache, pool, or threads.
-Alternative rejected: admitting all floating-point values can change original
-number semantics, while a complete JSON pre-scan adds work to every large read.
-A frozen 30,482,608-byte native snapshot response decoded in 241–261 ms before
-and 196–203 ms with the rejection probe over three alternating samples. This
-is decoder time only; native history materialization and HTTP rendering remain
-separate costs. Exact huge integers, negative zero, quoted numeric source,
-Unicode and malformed response behavior are specified by the wire-client tests.
+Problem: the optional accelerated decoder built a large tree, discovered unsupported floats, discarded it, and parsed the same response with stdlib. Decision: an 8 KiB probe at each response edge declines explicit float members before speculative parsing. The probe only selects the original parser; remaining accelerator shape/number checks and typed errors are unchanged. It owns at most 16 KiB of temporary slices and adds no cache, pool, or threads. Alternative rejected: admitting all floating-point values can change original number semantics, while a complete JSON pre-scan adds work to every large read. A frozen 30,482,608-byte native snapshot response decoded in 241–261 ms before and 196–203 ms with the rejection probe over three alternating samples. This is decoder time only; native history materialization and HTTP rendering remain separate costs. Exact huge integers, negative zero, quoted numeric source, Unicode and malformed response behavior are specified by the wire-client tests.
 
 
 ## Request Inspector history working set
 
-Problem: reconstructing and retaining every round's complete message array
-made incremental durable histories consume quadratic read-cache space.
-Decision: `SnapshotReplayIndex` shares original tails and verified canonical
-prefix digests; the selected-round endpoint materializes only its newest
-matching snapshot and, for folding, the previous round. The flat wire feed
-materializes only the final snapshot. Public replay still returns complete
-payloads, with unchanged legacy fields, version scopes and corruption markers.
-Alternatives rejected: a larger cache only delays quadratic growth; clipping
-payloads loses evidence; a second persistence format adds recovery authority.
+Problem: reconstructing and retaining every round's complete message array made incremental durable histories consume quadratic read-cache space. Decision: `SnapshotReplayIndex` shares original tails and verified canonical prefix digests; the selected-round endpoint materializes only its newest matching snapshot and, for folding, the previous round. The flat wire feed materializes only the final snapshot. Public replay still returns complete payloads, with unchanged legacy fields, version scopes and corruption markers. Alternatives rejected: a larger cache only delays quadratic growth; clipping payloads loses evidence; a second persistence format adds recovery authority.
 
-The existing cache retains at most 16 entries and an aggregate conservative
-unique-object byte estimate. Shared objects across entries may be counted
-twice; digest carriers include a native-memory allowance. This estimate is
-not an exact process-RSS limit. Oversized histories remain fully readable
-without cache admission. Cold reads can still require a large temporary graph.
-Write invalidation drops raw, derived and pending-read witnesses, preventing
-old in-flight reads/index builds from repinning stale entries. Live/settled
-TTLs remain 3/300 seconds; no extra timer, worker or durable store is added.
+The existing cache retains at most 16 entries and an aggregate conservative unique-object byte estimate. Shared objects across entries may be counted twice; digest carriers include a native-memory allowance. This estimate is not an exact process-RSS limit. Oversized histories remain fully readable without cache admission. Cold reads can still require a large temporary graph. Write invalidation drops raw, derived and pending-read witnesses, preventing old in-flight reads/index builds from repinning stale entries. Live/settled TTLs remain 3/300 seconds; no extra timer, worker or durable store is added.
 
-`TOFU_TASK_INSPECTOR_CACHE_MAX_MIB` is a cataloged restart setting, bounded to
-4..65,536 MiB. Personal defaults use the existing launch probe: the smaller
-of capacity/256 and available-memory/64, with that same bound. Unknown
-capacity/headroom uses 16 MiB; distributed deployments use 256 MiB. This
-setting controls reconstructible retention, never execution or user evidence.
-The environment inventory also recognizes canonical resource-resolver calls;
-existing launch budgets remain cataloged without changing their values.
+`TOFU_TASK_INSPECTOR_CACHE_MAX_MIB` is a cataloged restart setting, bounded to 4..65,536 MiB. Personal defaults use the existing launch probe: the smaller of capacity/256 and available-memory/64, with that same bound. Unknown capacity/headroom uses 16 MiB; distributed deployments use 256 MiB. This setting controls reconstructible retention, never execution or user evidence. The environment inventory also recognizes canonical resource-resolver calls; existing launch budgets remain cataloged without changing their values.
 
-A controlled append-only 400/800/1,600-round Unicode fixture measured
-`tracemalloc` allocations after fixture/import setup. At 1,600 rounds, retained
-Python allocations fell from 21,331,462 to 1,302,966 bytes and cold selected
-read time from 15.43 to 0.71 seconds; one storage read and exact payload/fold
-results were preserved. This excludes source-fixture storage, native digest
-allocations, unrelated server work and primary-worker RSS. It establishes the
-read-cache scaling improvement, not the cause of a live service's memory growth.
-Timings vary with host load; allocation figures describe the integrated owner.
-Focused regression owners are `test_snapshot_replay_index.py` and
-`test_request_inspector_snapshot_budget.py`, alongside existing replay, wire,
-read-cache, query-bound and page-recovery tests.
+A controlled append-only 400/800/1,600-round Unicode fixture measured `tracemalloc` allocations after fixture/import setup. At 1,600 rounds, retained Python allocations fell from 21,331,462 to 1,302,966 bytes and cold selected read time from 15.43 to 0.71 seconds; one storage read and exact payload/fold results were preserved. This excludes source-fixture storage, native digest allocations, unrelated server work and primary-worker RSS. It establishes the read-cache scaling improvement, not the cause of a live service's memory growth. Timings vary with host load; allocation figures describe the integrated owner. Focused regression owners are `test_snapshot_replay_index.py` and `test_request_inspector_snapshot_budget.py`, alongside existing replay, wire, read-cache, query-bound and page-recovery tests.
 
 
 ## Long-history inspector continuation
 
-Problem: a structural prefix capped at 10,000 rows cannot establish the latest
-snapshot of any round, because a later event may re-emit an earlier address.
-Decision: selected payload and final-wire reads continue chronologically through
-semantic event pages under `event-read-guard/v2`, scoped exactly to request
-snapshots and tool-wire projections. Each slice checks the exact source stamp
-and echoed scope before and after reading. Changed or unavailable guards discard
-its result; retained count/cursor equality alone is never a fence.
-Unrelated appends preserve admitted continuation. Relevant appends and retention
-still require a fresh read; this is not an as-of snapshot lease or a guarantee
-of completion while replay dependencies themselves change continuously.
+Problem: a structural prefix capped at 10,000 rows cannot establish the latest snapshot of any round, because a later event may re-emit an earlier address. Decision: selected payload and final-wire reads continue chronologically through semantic event pages under `event-read-guard/v2`, scoped exactly to request snapshots and tool-wire projections. Each slice checks the exact source stamp and echoed scope before and after reading. Changed or unavailable guards discard its result; retained count/cursor equality alone is never a fence. Unrelated appends preserve admitted continuation. Relevant appends and retention still require a fresh read; this is not an as-of snapshot lease or a guarantee of completion while replay dependencies themselves change continuously.
 
-`SnapshotReplayState` is the existing snapshot decoder made incremental. It
-retains per-turn/version message baselines and tools definitions across slices;
-unselected result records are released immediately. Later matching snapshots
-replace selected ones. Frozen v1 split baselines, v2 chronological baselines,
-prefix/message-count/tool/version checks and explicit degradation are preserved.
-EOF is required for both a payload and a confirmed absence.
+`SnapshotReplayState` is the existing snapshot decoder made incremental. It retains per-turn/version message baselines and tools definitions across slices; unselected result records are released immediately. Later matching snapshots replace selected ones. Frozen v1 split baselines, v2 chronological baselines, prefix/message-count/tool/version checks and explicit degradation are preserved. EOF is required for both a payload and a confirmed absence.
 
-A read consumes at most 20,000 returned events or two seconds of page admission
-per slice, with a 16 MiB conservative decoded-page estimate. One final page may
-cross that byte boundary; native pages separately reject more than 8 MiB.
-Storage calls retain finite deadlines. Working dependency state is bounded by
-the launch-probed inspector byte budget. Between slices it uses the existing
-16-entry aggregate byte cache; active workers leave only weak busy witnesses
-there, and mutable replay graphs belong to their bounded reads. Busy witnesses
-are not evicted while their worker is active. Same-selection readers retry;
-there is no extra worker, timer, durable store or execution authority.
+A read consumes at most 20,000 returned events or two seconds of page admission per slice, with a 16 MiB conservative decoded-page estimate. One final page may cross that byte boundary; native pages separately reject more than 8 MiB. Storage calls retain finite deadlines. Working dependency state is bounded by the launch-probed inspector byte budget. Between slices it uses the existing 16-entry aggregate byte cache; active workers leave only weak busy witnesses there, and mutable replay graphs belong to their bounded reads. Busy witnesses are not evicted while their worker is active. Same-selection readers retry; there is no extra worker, timer, durable store or execution authority.
 
-A budget boundary remains a retryable read failure, and a later request resumes
-an admitted checkpoint. Invalidation, cache eviction, process loss or a new
-source stamp requires a fresh scan from durable events. Memory-budget rejection
-never truncates stored evidence or establishes expiry. Oversized ordinary reads
-still retain their existing uncached path; long dependency scans may fail their
-working budget explicitly. Full payloads are materialized only for the selected
-results after the final fence. Source consistency does not certify arbitrary
-corruption, demand, originality or net benefit.
+A budget boundary remains a retryable read failure, and a later request resumes an admitted checkpoint. Invalidation, cache eviction, process loss or a new source stamp requires a fresh scan from durable events. Memory-budget rejection never truncates stored evidence or establishes expiry. Oversized ordinary reads still retain their existing uncached path; long dependency scans may fail their working budget explicitly. Full payloads are materialized only for the selected results after the final fence. Source consistency does not certify arbitrary corruption, demand, originality or net benefit.
 
-Alternatives: lifting the prefix cap retains every historical payload; scanning
-only the tail loses baseline/tools prerequisites; trusting the first matching
-round misses re-emissions. Streaming the existing decoder preserves one replay
-rule while keeping retained results proportional to the selected addresses.
-Regression owner: `test_request_inspector_history_continuation.py`. Native
-capacity, throughput and full request-list pagination require separate evidence.
+Alternatives: lifting the prefix cap retains every historical payload; scanning only the tail loses baseline/tools prerequisites; trusting the first matching round misses re-emissions. Streaming the existing decoder preserves one replay rule while keeping retained results proportional to the selected addresses. Regression owner: `test_request_inspector_history_continuation.py`. Native capacity, throughput and full request-list pagination require separate evidence.
 
-A controlled constant-message legacy fixture with 1,000/10,000/20,000 source
-snapshots and one selected address measured 5,238 estimated working bytes at
-EOF and 4,397 after releasing continuation dependencies in every case.
-This excludes source-fixture storage, prefix-outline cache, page buffers and
-native allocations; it is not RSS or a throughput result. Growing message
-prefixes, distinct turns and tool catalogs still consume the working budget.
-Real native coverage includes 10,002 retained events, cross-page v2 message/tool
-dependencies, late round re-emission, equal-bounds concurrent retention ABA and
-a fresh-process replay. The existing browser regression opens the resulting
-latest wire in both 390- and 1440-pixel viewports.
+A controlled constant-message legacy fixture with 1,000/10,000/20,000 source snapshots and one selected address measured 5,238 estimated working bytes at EOF and 4,397 after releasing continuation dependencies in every case. This excludes source-fixture storage, prefix-outline cache, page buffers and native allocations; it is not RSS or a throughput result. Growing message prefixes, distinct turns and tool catalogs still consume the working budget. Real native coverage includes 10,002 retained events, cross-page v2 message/tool dependencies, late round re-emission, equal-bounds concurrent retention ABA and a fresh-process replay. The existing browser regression opens the resulting latest wire in both 390- and 1440-pixel viewports.
 
 
 ## Optional JavaScript program instances
 
-Problem: full JavaScript must bound host queues, guest CPU/memory and cleanup
-without retaining a new idle worker pool. Decision: compile one immutable
-637,405-byte reactor on first use, with fuel metering and parallel compilation
-disabled; each program owns and closes a fresh Store, promises and receipt map.
-The existing tool worker invokes callback ports. Scheduling reserves at most
-16 child calls before the guest yields. Source is bounded to 32 KiB. Returns
-and model handoffs use canonical artifact/token-budget delivery without a fixed
-1 MiB execution rejection. Private bridge packets are
-bounded to the instance heap size, scaling with the same launch probe. Normal
-execution uses a cumulative 30-second active guest deadline, including bootstrap,
-built-ins and return serialization, excluding child tool waits and synchronous
-host bridge work. A lazy shared 10-ms epoch ticker interrupts WASM built-ins;
-Stores have independent deadlines. The last Store release stops and joins the
-ticker, and engine disposal joins it before closing native handles. This adds
-at most one thread while programs own Stores and no idle worker. Fuel remains
-metered for statistics and explicit deterministic budgets; its default exact-JSON
-integer maximum is not the normal execution boundary. Timeout and explicit fuel
-failures identify their reason and limit; engine traps are classified separately.
-Problem: a fixed 2-billion instruction cutoff rejected ordinary large projections
-far below the heap bound. Decision: measure actual guest execution time rather
-than engine instruction density. Alternatives rejected: raising the fixed fuel
-constant repeats the same size-dependent failure; disabling every execution
-boundary allows infinite loops and expensive built-ins to occupy workers forever.
+Problem: full JavaScript must bound host queues, guest CPU/memory and cleanup without retaining a new idle worker pool. Decision: compile one immutable 637,405-byte reactor on first use, with fuel metering and parallel compilation disabled; each program owns and closes a fresh Store, promises and receipt map. The existing tool worker invokes callback ports. Scheduling reserves at most 16 child calls before the guest yields. Source is bounded to 32 KiB. Returns and model handoffs use canonical artifact/token-budget delivery without a fixed 1 MiB execution rejection. Private bridge packets are bounded to the instance heap size, scaling with the same launch probe. Normal execution uses a cumulative 30-second active guest deadline, including bootstrap, built-ins and return serialization, excluding child tool waits and synchronous host bridge work. A lazy shared 10-ms epoch ticker interrupts WASM built-ins; Stores have independent deadlines. The last Store release stops and joins the ticker, and engine disposal joins it before closing native handles. This adds at most one thread while programs own Stores and no idle worker. Fuel remains metered for statistics and explicit deterministic budgets; its default exact-JSON integer maximum is not the normal execution boundary. Timeout and explicit fuel failures identify their reason and limit; engine traps are classified separately. Problem: a fixed 2-billion instruction cutoff rejected ordinary large projections far below the heap bound. Decision: measure actual guest execution time rather than engine instruction density. Alternatives rejected: raising the fixed fuel constant repeats the same size-dependent failure; disabling every execution boundary allows infinite loops and expensive built-ins to occupy workers forever.
 
-`TOFU_PROGRAM_HEAP_MAX_MIB` uses the launch probe: personal heap grows with
-capacity/128 and headroom/64, with a 16..1,024 MiB envelope; unknown probes use
-32 MiB. Distributed default is 256 MiB; explicit overrides use the same finite
-envelope. Linear memory is independently bounded to twice the heap plus 16 MiB.
-There is no persistent instance, continuation, temporary file or child work
-owned by this adapter after completion, observation, cancellation or failure.
+`TOFU_PROGRAM_HEAP_MAX_MIB` uses the launch probe: personal heap grows with capacity/128 and headroom/64, with a 16..1,024 MiB envelope; unknown probes use 32 MiB. Distributed default is 256 MiB; explicit overrides use the same finite envelope. Linear memory is independently bounded to twice the heap plus 16 MiB. There is no persistent instance, continuation, temporary file or child work owned by this adapter after completion, observation, cancellation or failure.
 
-A fresh-process local measurement on Python 3.12/Wasmtime 49 processed 240 and
-2,400 synthetic rows (84,784 and 852,635 input bytes): warm medians over five
-runs were 12.94 and 25.23 ms; the first run including compilation took 1,099.8 ms.
-Guest linear memory was 1,572,864 and 3,342,336 bytes. Process RSS was 19.4 MB
-before import, 34.1 MB after import, 85.3/87.9 MB after both workloads and
-87.9 MB after collection; thread count stayed one. RSS includes compilation,
-native dependencies and allocator retention, and is distinct from guest memory.
-These adapter measurements exclude tools, models and gateway overhead.
-After removing fixed return rejection, a 1,200,000-byte UTF-8 return with a
-64 MiB guest heap took 27.76 ms median over three warm runs and used 4 MiB
-WASM linear memory; this excludes model, tool and artifact delivery overhead.
-A 100,641-character string projected through `Object.keys` reproduced the old
-fuel failure at 23,592,960 linear-memory bytes, well below its heap limit. With
-the elapsed deadline it completed 100,641 keys (794,683 output bytes), consuming
-3,828,887,994 instructions and 32,112,640 linear-memory bytes. Five warm local
-runs had a 734.9-ms median adapter latency; the last run recorded 647.8-ms active
-guest time. Thread count returned to one after every run. This measures local
-adapter work, not model latency, and claims no instruction or memory reduction.
-Failure diagnostics reuse the existing at-most-16 canonical child receipts and
-the program's 1 MiB input-delivery bound; they add no resident cache or worker.
-Only failure parses complete inline JSON to summarize its root and first item,
-with at most eight 64-character keys and no field values. A 1,000-row,
-749,519-byte local input produced a 204-byte diagnostic: median 3.90 ms over
-20 warm runs with Python allocation tracing, maximum traced allocation
-1,002,312 bytes. This measures diagnostics after imports, excluding models,
-tool execution and the engine; parsed objects leave scope immediately.
-Alternatives: a resident VM pool adds task-state lifetimes; default parallel
-compilation retains an unnecessary compiler thread pool; an unmetered engine
-misses long-running built-ins. Verification: `test_javascript_program.py`,
-`test_javascript_resources.py`, resource catalog and existing gateway tests.
+A fresh-process local measurement on Python 3.12/Wasmtime 49 processed 240 and 2,400 synthetic rows (84,784 and 852,635 input bytes): warm medians over five runs were 12.94 and 25.23 ms; the first run including compilation took 1,099.8 ms. Guest linear memory was 1,572,864 and 3,342,336 bytes. Process RSS was 19.4 MB before import, 34.1 MB after import, 85.3/87.9 MB after both workloads and 87.9 MB after collection; thread count stayed one. RSS includes compilation, native dependencies and allocator retention, and is distinct from guest memory. These adapter measurements exclude tools, models and gateway overhead. After removing fixed return rejection, a 1,200,000-byte UTF-8 return with a 64 MiB guest heap took 27.76 ms median over three warm runs and used 4 MiB WASM linear memory; this excludes model, tool and artifact delivery overhead. A 100,641-character string projected through `Object.keys` reproduced the old fuel failure at 23,592,960 linear-memory bytes, well below its heap limit. With the elapsed deadline it completed 100,641 keys (794,683 output bytes), consuming 3,828,887,994 instructions and 32,112,640 linear-memory bytes. Five warm local runs had a 734.9-ms median adapter latency; the last run recorded 647.8-ms active guest time. Thread count returned to one after every run. This measures local adapter work, not model latency, and claims no instruction or memory reduction. Failure diagnostics reuse the existing at-most-16 canonical child receipts and the program's 1 MiB input-delivery bound; they add no resident cache or worker. Only failure parses complete inline JSON to summarize its root and first item, with at most eight 64-character keys and no field values. A 1,000-row, 749,519-byte local input produced a 204-byte diagnostic: median 3.90 ms over 20 warm runs with Python allocation tracing, maximum traced allocation 1,002,312 bytes. This measures diagnostics after imports, excluding models, tool execution and the engine; parsed objects leave scope immediately. Alternatives: a resident VM pool adds task-state lifetimes; default parallel compilation retains an unnecessary compiler thread pool; an unmetered engine misses long-running built-ins. Verification: `test_javascript_program.py`, `test_javascript_resources.py`, resource catalog and existing gateway tests.
 
 
-Program result reuse adds one task-turn index, allocated only after an eligible
-post-hook capture. Application and storage-free entries both use the original
-`CanonicalReceipt` runtime descriptor with the same launch-probed
-`TOFU_TOOL_RESULT_CACHE_CAPACITY` (16..1,024; defaults scale with capacity).
-Small JSON arrays/objects use the same index and exact bindings; full delivery adds no model bytes.
-At capacity 16, 32 small manifest captures retain 16 entries / 672 source bytes / 21424 charged bytes.
-Terminal release clears the index; this is retained-source accounting, not RSS.
-Their charged bytes are bounded to capacity times 64 KiB (1..64 MiB),
-with each source at most 1 MiB; oldest entries leave the working set first.
-The charge includes canonical manifest size, frozen name/argument binding bytes,
-and 1 KiB per entry for metadata;
-it is a conservative capacity charge rather than an RSS measurement.
-Terminal callbacks release the index
-and native descriptors; a new Flow turn clears them. There is no new idle
-pool, persistent VM, raw model-preview cache or durable user-state deletion.
-A focused measurement with capacity 16 and twelve 150,004-byte canonical
-inputs retains six entries / 900,024 source bytes (plus charged descriptor
-metadata) under its 1,048,576-byte
-bound; terminal release leaves no index. This is a retained-text measurement,
-not RSS; no new persistence writes or storage reads are added. The public
-SDK integration performs one ordinary source call followed by one program
-reuse and delivers only `{"total":45}` to the model for that program. It proves
-execution behavior, not spontaneous adoption, saved model tokens or latency.
-Explicit `tools.keep` computed JSON uses this same bank, byte bound and terminal
-release, with no new resident pool. A sorted catalog-name SHA-256 fence adds
-64 charged bytes per computed entry; all source coverage remains unknown.
-Sixteen keep attempts per program are separate from source calls and reads.
-A capacity-16 mixed measurement of twelve 150,000-character payloads plus one
-original `[9]` input retains six computed values and one original input:
-900,155 source bytes, 909,397 charged bytes under 1,048,576. Python tracemalloc
-peak is 2,034,237 bytes, not RSS; terminal release removes the bank. The real
-SDK contract executes observation, model selection and a second fresh VM with
-one source call total and zero additional source reads. It mocks only model
-transport, so it establishes behavior rather than spontaneous adoption or cost.
-Partial result delivery reuses that existing bank and adds only host-validated
-snapshot metadata, with no new worker, persistent cache, source read or write.
-A fixed 64-item preview with a 102,703-byte input and synthetic `input_` selector
-adds 202 UTF-8 bytes / 46 cl100k tokens including the derived read expression;
-Validated JSON kind adds 19 bytes / 5 tokens to the same encoded metadata;
-these are local encoding costs, not provider usage or savings. Complete views add zero bytes.
-The stable code-action schema and context guide expose operations and composition
-policy without repeating a full manual. Validation, VM bounds and authority stay fixed;
-local token counts must be distinguished from actual provider usage and paired quality.
-Round aggregate budgeting counts the metadata and recomputes exact visible bytes;
-original coverage and bank capacity/lifecycle remain authoritative. JSON classification
-decodes at most 1 MiB once at admission, retaining only a kind, never a second tree.
-A 101,641-byte row array peaks at 112,686 traced Python bytes; a 1,000,001-byte
-scalar array peaks at 4,169,516 bytes (not RSS). Directory/projection never reread bodies.
-Failed execution snapshots actual counters before Store closure, without extending VM life.
-The private input directory uses the same index, owner and turn lifecycle.
-Bindings are bounded by the existing 32 KiB name/argument binding limit,
-held as immutable UTF-8 bytes, and excluded from JSON task metadata. Queries
-return at most 16 bindings and execute at most 16 times per program; inspection
-does not load result bodies. A synthetic 32-capture / capacity-16 measurement
-with 30,000-character argument values retains 16 entries, 48 source bytes and
-480,608 binding bytes; the charged set is 500,784 bytes under 1,048,576.
-One directory page encodes to 482,233 bytes. Python tracemalloc peak is
-2,627,177 bytes across capture and query; this is not RSS. No storage reads,
-writes, resident workers or durable state are introduced. Verify with
-`tests/tools/test_program_result_reuse.py` and its real SDK execution contract.
-Each capture has a versioned 38-byte runtime reference charged to the same bound.
-The composer reads at most four metadata records without decoding argument bytes,
-emits at most 256 content tokens / 4,096 bytes, and adds no resident cache or
-source-body read. Initial global-budget admission is atomic. A 100-sample
-synthetic measurement at capacities 16/1,024 emitted 199..208 tokens / 622..624
-bytes; median generation was 0.60..2.89 ms with tracemalloc enabled. Peak
-Python allocation was 19,565 bytes including four reference expressions;
-30,000-character arguments remain outside context. This is not RSS. Context history uses existing task token/compaction
-lifecycle bounds; snapshot changes do not alter the static schema or guidance.
+Program result reuse adds one task-turn index, allocated only after an eligible post-hook capture. Application and storage-free entries both use the original `CanonicalReceipt` runtime descriptor with the same launch-probed `TOFU_TOOL_RESULT_CACHE_CAPACITY` (16..1,024; defaults scale with capacity). Small JSON arrays/objects use the same index and exact bindings; full delivery adds no model bytes. At capacity 16, 32 small manifest captures retain 16 entries / 672 source bytes / 21424 charged bytes. Terminal release clears the index; this is retained-source accounting, not RSS. Their charged bytes are bounded to capacity times 64 KiB (1..64 MiB), with each source at most 1 MiB; oldest entries leave the working set first. The charge includes canonical manifest size, frozen name/argument binding bytes, and 1 KiB per entry for metadata; it is a conservative capacity charge rather than an RSS measurement. Terminal callbacks release the index and native descriptors; a new Flow turn clears them. There is no new idle pool, persistent VM, raw model-preview cache or durable user-state deletion. A focused measurement with capacity 16 and twelve 150,004-byte canonical inputs retains six entries / 900,024 source bytes (plus charged descriptor metadata) under its 1,048,576-byte bound; terminal release leaves no index. This is a retained-text measurement, not RSS; no new persistence writes or storage reads are added. The public SDK integration performs one ordinary source call followed by one program reuse and delivers only `{"total":45}` to the model for that program. It proves execution behavior, not spontaneous adoption, saved model tokens or latency. Explicit `tools.keep` computed JSON uses this same bank, byte bound and terminal release, with no new resident pool. A sorted catalog-name SHA-256 fence adds 64 charged bytes per computed entry; all source coverage remains unknown. Sixteen keep attempts per program are separate from source calls and reads. A capacity-16 mixed measurement of twelve 150,000-character payloads plus one original `[9]` input retains six computed values and one original input: 900,155 source bytes, 909,397 charged bytes under 1,048,576. Python tracemalloc peak is 2,034,237 bytes, not RSS; terminal release removes the bank. The real SDK contract executes observation, model selection and a second fresh VM with one source call total and zero additional source reads. It mocks only model transport, so it establishes behavior rather than spontaneous adoption or cost. Partial result delivery reuses that existing bank and adds only host-validated snapshot metadata, with no new worker, persistent cache, source read or write. A fixed 64-item preview with a 102,703-byte input and synthetic `input_` selector adds 202 UTF-8 bytes / 46 cl100k tokens including the derived read expression; Validated JSON kind adds 19 bytes / 5 tokens to the same encoded metadata; these are local encoding costs, not provider usage or savings. Complete views add zero bytes. The stable code-action schema and context guide expose operations and composition policy without repeating a full manual. Validation, VM bounds and authority stay fixed; local token counts must be distinguished from actual provider usage and paired quality. Round aggregate budgeting counts the metadata and recomputes exact visible bytes; original coverage and bank capacity/lifecycle remain authoritative. JSON classification decodes at most 1 MiB once at admission, retaining only a kind, never a second tree. A 101,641-byte row array peaks at 112,686 traced Python bytes; a 1,000,001-byte scalar array peaks at 4,169,516 bytes (not RSS). Directory/projection never reread bodies. Failed execution snapshots actual counters before Store closure, without extending VM life. The private input directory uses the same index, owner and turn lifecycle. Bindings are bounded by the existing 32 KiB name/argument binding limit, held as immutable UTF-8 bytes, and excluded from JSON task metadata. Queries return at most 16 bindings and execute at most 16 times per program; inspection does not load result bodies. A synthetic 32-capture / capacity-16 measurement with 30,000-character argument values retains 16 entries, 48 source bytes and 480,608 binding bytes; the charged set is 500,784 bytes under 1,048,576. One directory page encodes to 482,233 bytes. Python tracemalloc peak is 2,627,177 bytes across capture and query; this is not RSS. No storage reads, writes, resident workers or durable state are introduced. Verify with `tests/tools/test_program_result_reuse.py` and its real SDK execution contract. Each capture has a versioned 38-byte runtime reference charged to the same bound. The composer reads at most four metadata records without decoding argument bytes, emits at most 256 content tokens / 4,096 bytes, and adds no resident cache or source-body read. Initial global-budget admission is atomic. A 100-sample synthetic measurement at capacities 16/1,024 emitted 199..208 tokens / 622..624 bytes; median generation was 0.60..2.89 ms with tracemalloc enabled. Peak Python allocation was 19,565 bytes including four reference expressions; 30,000-character arguments remain outside context. This is not RSS. Context history uses existing task token/compaction lifecycle bounds; snapshot changes do not alter the static schema or guidance.
 
 ## Application DOM resources
 
@@ -1446,1050 +417,844 @@ Measurement: a 1,000-row / 1,000-section query visits 1,000 rows, while repeatin
 
 ## Native Codex login discovery
 
-Problem: services missed the user's installed Codex environment, while spawning
-its runtime for every token read would create needless latency and memory work.
-Decision: the native-login adapter has one metadata cache (30 seconds, failures
-5 seconds) and one last-verified metadata snapshot (absolute age 120 seconds),
-one serialized flight for the process OS credential authority and no bearer
-cache. One lifecycle-owned native metadata session avoids repeated shell/cold
-startup during metadata revalidation. Its reader and idle reaper are lazy;
-there is no import-time process launch. Fresh command metadata is read without
-the native-auth lock, so healthy access-file reads do not wait for renewal.
-Concurrent recovery callers join one completed probe even when it fails, rather
-than queueing repeated native launches. Timeout/unavailability may reuse the
-verified source within its absolute age, with live source/config stamps and live
-bearer checks; policy rejection/source change revokes it, and failures never
-renew its age. Freshness expiry starts one demand-driven revalidation worker
-while healthy reads return immediately; clear/exit drain it. Revalidation uses
-the warm session's config/read and configRequirements/read, never account/read.
-The idle reaper terminates/reaps the process and joins its reader after 60 seconds
-without a metadata exchange, or 120 seconds from startup. Demand rotates at
-90 seconds to rediscover shell hooks/remote policy before the absolute age limit;
-warm success cannot renew that startup policy age. Steady residency is at most
-one native process and two adapter threads (reader + reaper); demand revalidation
-adds one finite worker. Renewal can temporarily add a second, one-shot process
-and reader, serialized against metadata exchanges. No resident pool scales with
-request/account count. Unsupported stores retain no optional native session.
-Launcher provenance hashes the entire sanitized environment, retaining no raw
-values. Known source/config stamps invalidate reuse, and stamps are checked
-around policy reads. Native diagnostics name spawn/initialize_sent/
-initialize_received/session_reuse at debug level and lock/initialize/config/
-requirements/renewal timeouts at warning level, without protocol bodies, paths,
-stderr or environment. Pre-response initialize timeout still cannot distinguish
-shell setup from native boot: no safe acknowledgement exists at that boundary.
-Task preparation retries have three attempts
-and a 30-second admission window, with cancellation-aware backoff and no tool
-replay, new thread or persistent state. Each native transport owns its reader
-and process group. Discovery plus renewal share a 4-second protocol
-budget including lock waits, with 1 MiB stdout, 64 KiB per line and
-16 queued protocol messages; teardown terminates/reaps children and joins the
-reader. Catalogue startup reconciliation already runs in the post-ready worker.
-Native Codex's own reconstructible artifacts stay under its lifecycle; Tofu
-creates no durable cache or copied token. Account-file replacement/logout is
-checked on every read; cached command metadata cannot mask token deletion.
-Measurement on this host with Codex 0.160.0: automatic discovery without a
-CODEX_HOME override took 1.795 seconds with child peak RSS 180,336 KiB; a following
-access-only read took 1 ms. That historical one-shot implementation had zero
-idle workers/processes; the reusable transport now retains bounded residency
-until idle reclamation. This is a
-native-runtime probe cost, not inference throughput or a resource-budget raise.
-Additional measurement on this host: native discovery took 0.332, 0.299 and
-0.295 seconds across three probes; 50 healthy reads had a 0.325 ms median and
-0.426 ms maximum. The protocol budget
-remains 4 seconds; extending the timeout would add latency without correcting
-lock contention or duplicate recovery launches.
-Alternatives rejected: shell-profile text parsing misses wrappers and layering;
-per-read runtime launches amplify cost; retaining a second refresh token races
-the native credential authority. Behavioral tests cover source selection,
-single-flight, live file replacement, renewal and bounded teardown.
-Historical metadata-only measurement on this host: 200 synthetic access-file reads with source
-stamp verification took 0.932 ms median / 1.085 ms maximum with tracemalloc active;
-one initial probe, zero subsequent probes and zero new idle workers. Traced peak
-allocation was 1,082,838 bytes, including the existing bounded file reader.
-Alternative rejected: indefinitely retaining last-good policy would bypass
-revocation; raising every native-command timeout would leave startup on the
-critical path and add latency to healthy requests.
+Problem: services missed the user's installed Codex environment, while spawning its runtime for every token read would create needless latency and memory work. Decision: the native-login adapter has one metadata cache (30 seconds, failures 5 seconds) and one last-verified metadata snapshot (absolute age 120 seconds), one serialized flight for the process OS credential authority and no bearer cache. One lifecycle-owned native metadata session avoids repeated shell/cold startup during metadata revalidation. Its reader and idle reaper are lazy; there is no import-time process launch. Fresh command metadata is read without the native-auth lock, so healthy access-file reads do not wait for renewal. Concurrent recovery callers join one completed probe even when it fails, rather than queueing repeated native launches. Timeout/unavailability may reuse the verified source within its absolute age, with live source/config stamps and live bearer checks; policy rejection/source change revokes it, and failures never renew its age. Freshness expiry starts one demand-driven revalidation worker while healthy reads return immediately; clear/exit drain it. Revalidation uses the warm session's config/read and configRequirements/read, never account/read. The idle reaper terminates/reaps the process and joins its reader after 60 seconds without a metadata exchange, or 120 seconds from startup. Demand rotates at 90 seconds to rediscover shell hooks/remote policy before the absolute age limit; warm success cannot renew that startup policy age. Steady residency is at most one native process and two adapter threads (reader + reaper); demand revalidation adds one finite worker. Renewal can temporarily add a second, one-shot process and reader, serialized against metadata exchanges. No resident pool scales with request/account count. Unsupported stores retain no optional native session. Launcher provenance hashes the entire sanitized environment, retaining no raw values. Known source/config stamps invalidate reuse, and stamps are checked around policy reads. Native diagnostics name spawn/initialize_sent/ initialize_received/session_reuse at debug level and lock/initialize/config/ requirements/renewal timeouts at warning level, without protocol bodies, paths, stderr or environment. Pre-response initialize timeout still cannot distinguish shell setup from native boot: no safe acknowledgement exists at that boundary. Task preparation retries have three attempts and a 30-second admission window, with cancellation-aware backoff and no tool replay, new thread or persistent state. Each native transport owns its reader and process group. Discovery plus renewal share a 4-second protocol budget including lock waits, with 1 MiB stdout, 64 KiB per line and 16 queued protocol messages; teardown terminates/reaps children and joins the reader. Catalogue startup reconciliation already runs in the post-ready worker. Native Codex's own reconstructible artifacts stay under its lifecycle; Tofu creates no durable cache or copied token. Account-file replacement/logout is checked on every read; cached command metadata cannot mask token deletion. Measurement on this host with Codex 0.160.0: automatic discovery without a CODEX_HOME override took 1.795 seconds with child peak RSS 180,336 KiB; a following access-only read took 1 ms. That historical one-shot implementation had zero idle workers/processes; the reusable transport now retains bounded residency until idle reclamation. This is a native-runtime probe cost, not inference throughput or a resource-budget raise. Additional measurement on this host: native discovery took 0.332, 0.299 and 0.295 seconds across three probes; 50 healthy reads had a 0.325 ms median and 0.426 ms maximum. The protocol budget remains 4 seconds; extending the timeout would add latency without correcting lock contention or duplicate recovery launches. Alternatives rejected: shell-profile text parsing misses wrappers and layering; per-read runtime launches amplify cost; retaining a second refresh token races the native credential authority. Behavioral tests cover source selection, single-flight, live file replacement, renewal and bounded teardown. Historical metadata-only measurement on this host: 200 synthetic access-file reads with source stamp verification took 0.932 ms median / 1.085 ms maximum with tracemalloc active; one initial probe, zero subsequent probes and zero new idle workers. Traced peak allocation was 1,082,838 bytes, including the existing bounded file reader. Alternative rejected: indefinitely retaining last-good policy would bypass revocation; raising every native-command timeout would leave startup on the critical path and add latency to healthy requests.
 
-New synthetic lifecycle measurement: a delayed initial boot plus four cache
-expiries with 16 concurrent metadata callers each used one initialize and five
-config/requirements exchanges, with zero account reads. This is subprocess
-startup amortization, not token caching or an inference-throughput claim.
-Idle reclamation, absolute-age expiry and generation-fenced clear/restart tests
-verify that owned processes/readers/reapers exit rather than leak.
+New synthetic lifecycle measurement: a delayed initial boot plus four cache expiries with 16 concurrent metadata callers each used one initialize and five config/requirements exchanges, with zero account reads. This is subprocess startup amortization, not token caching or an inference-throughput claim. Idle reclamation, absolute-age expiry and generation-fenced clear/restart tests verify that owned processes/readers/reapers exit rather than leak.
 
 ## Stage counter contention experiment
 
-Problem: always-on stage timers perform four global atomic writes even when
-request sampling is off. Decision: retain the existing fixed counters. A private
-probe-sized, lazy component-stripe prototype cuts writes to two, preserves
-pre-launch totals and thread-exit counts, and aggregates reporting once. Its
-first serving probe bounds slots by CPU/connection capacity; 22,400 counter
-bytes per slot persist until process exit (allocator/registry overhead excluded).
+Problem: always-on stage timers perform four global atomic writes even when request sampling is off. Decision: retain the existing fixed counters. A private probe-sized, lazy component-stripe prototype cuts writes to two, preserves pre-launch totals and thread-exit counts, and aggregates reporting once. Its first serving probe bounds slots by CPU/connection capacity; 22,400 counter bytes per slot persist until process exit (allocator/registry overhead excluded).
 
-Alternatives: original global counters, stripes, and identical CLI/DSO bytes
-with stripes disabled only in disposable children. The matched-source variant
-regresses array CPU about 6–11% and metrics polling 10%. The same-library
-control shows only mixed scalar/array CPU gains up to about 3%; polling still
-regresses about 7%. Four JSON-kernel symbols retain sizes/mnemonic sequences
-but shift alignment; this does not prove an exclusive code-layout cause.
-[Evidence](evidence/tofudb_stage_stripes_20261005.json) retains 14,118,400 exact
-reads, 16,000 validated timed metrics polls and 153,600 untimed warming reads,
-5 counter / 6 control / 12 FFI focused passes and the later 5-pass counter
-control. No full suite, production ABI/setting/metrics change, pool/queue change
-or SQLite dominance is claimed. Counter contention is not the main read gap.
+Alternatives: original global counters, stripes, and identical CLI/DSO bytes with stripes disabled only in disposable children. The matched-source variant regresses array CPU about 6–11% and metrics polling 10%. The same-library control shows only mixed scalar/array CPU gains up to about 3%; polling still regresses about 7%. Four JSON-kernel symbols retain sizes/mnemonic sequences but shift alignment; this does not prove an exclusive code-layout cause. `tofudb_stage_stripes_20261005.json` retains 14,118,400 exact reads, 16,000 validated timed metrics polls and 153,600 untimed warming reads, 5 counter / 6 control / 12 FFI focused passes and the later 5-pass counter control. No full suite, production ABI/setting/metrics change, pool/queue change or SQLite dominance is claimed. Counter contention is not the main read gap.
 
 ## Portable reply experiment under mimalloc
 
-Problem: reply allocation and retirement could still explain the read gap after
-the accepted allocator update. Decision: retain standard MPSC replies. The
-private alternative uses a unique atomic slot and standard Thread park/unpark,
-preserving cancellation, sender disappearance, timeout/retry and receiver
-transfer between threads. All old direct futex syscalls were removed; their
-wake/filter error boundary was unproved. No immutable waiter shortcut was used.
+Problem: reply allocation and retirement could still explain the read gap after the accepted allocator update. Decision: retain standard MPSC replies. The private alternative uses a unique atomic slot and standard Thread park/unpark, preserving cancellation, sender disappearance, timeout/retry and receiver transfer between threads. All old direct futex syscalls were removed; their wake/filter error boundary was unproved. No immutable waiter shortcut was used.
 
-Identical CLI/DSO bytes switch implementations only in disposable children; an
-observer verifies the actual selected backend. Across 7,059,200 exact timed
-reads, native single-caller CPU improves about 3% and SDK small-response CPU
-about 8%, but native 32-caller means regress 2–5% and SDK concurrent P99 regresses
-12–13%. The average per-leg P99 is not a pooled percentile. Both backends use
-mimalloc; old System allocation observations are not reused as new evidence.
+Identical CLI/DSO bytes switch implementations only in disposable children; an observer verifies the actual selected backend. Across 7,059,200 exact timed reads, native single-caller CPU improves about 3% and SDK small-response CPU about 8%, but native 32-caller means regress 2–5% and SDK concurrent P99 regresses 12–13%. The average per-leg P99 is not a pooled percentile. Both backends use mimalloc; old System allocation observations are not reused as new evidence.
 
-A separate 3,000-read sampling observer sees recycle fall from 170 to 77 ns,
-acquire rise from 75 to 91 ns, queue wait remain around 4.5 us and reply handoff
-around 3.7–3.9 us. These mixed durations overlap and are not additive CPU costs.
-Reply-object replacement is insufficient; scheduling/parking contention remains
-a hypothesis for the concurrent regression, not a uniquely established cause.
-[Evidence](evidence/tofudb_portable_reply_20261005.json) retains 12 reply, 12 FFI
-per backend and 4 actual-source Loom passes, raw hashes and the private prototype
-commit. No full suite, runtime ABI/setting change or SQLite dominance is claimed.
-The previously released database is activated: live daemon bytes match the
-published CLI, with native TofuDB authority preserved; no restart was performed.
+A separate 3,000-read sampling observer sees recycle fall from 170 to 77 ns, acquire rise from 75 to 91 ns, queue wait remain around 4.5 us and reply handoff around 3.7–3.9 us. These mixed durations overlap and are not additive CPU costs. Reply-object replacement is insufficient; scheduling/parking contention remains a hypothesis for the concurrent regression, not a uniquely established cause. `tofudb_portable_reply_20261005.json` retains 12 reply, 12 FFI per backend and 4 actual-source Loom passes, raw hashes and the private prototype commit. No full suite, runtime ABI/setting change or SQLite dominance is claimed. The previously released database is activated: live daemon bytes match the published CLI, with native TofuDB authority preserved; no restart was performed.
 
 ## Exact frame admission and coalesced daemon reads
 
-Problem: every tiny outbound frame reserved 8 MiB before encoding. With a
-128 MiB frame budget and 512 probed connections, only 16 simultaneously blocked
-writes fit. Decision: count encoded bytes with the same FrameBodySink operations
-that emit them, validate/admit before allocating, and allocate the counted size.
-The guard lasts through CRC, short/interrupted writes and errors. No limit rises.
-A deterministic 32-writer test admits 16/rejects 16 on the old path; the new path
-admits all 32 at the same limits and releases every byte/frame afterward.
+Problem: every tiny outbound frame reserved 8 MiB before encoding. With a 128 MiB frame budget and 512 probed connections, only 16 simultaneously blocked writes fit. Decision: count encoded bytes with the same FrameBodySink operations that emit them, validate/admit before allocating, and allocate the counted size. The guard lasts through CRC, short/interrupted writes and errors. No limit rises. A deterministic 32-writer test admits 16/rejects 16 on the old path; the new path admits all 32 at the same limits and releases every byte/frame afterward.
 
-Length-prefix reads now accept up to four bytes; the admitted body and four-byte
-CRC trailer share one bounded read. No following frame is prefetched. Mid-frame
-timeout, CRC, truncated-body/trailer error classes and bearer-body clearing stay
-intact. Full available frames use two reads instead of four. The separate syscall
-observer records 4,013 versus 2,007 recvfrom calls, with other reads unchanged.
-Two opt-in anchors measure frame work after initial prefix progress and decode;
-they exclude idle first-byte waiting and overlap outside semantic dispatch.
-They add 256 fixed counter bytes until process exit. CRC relocation adds at most
-four requested heap bytes per live read frame (256 at the unchanged ceiling);
-allocator rounding is separate. Pool, connection/frame caps and durable growth
-are unchanged. Examples avoid duplicate allocators when the library opts in.
+Length-prefix reads now accept up to four bytes; the admitted body and four-byte CRC trailer share one bounded read. No following frame is prefetched. Mid-frame timeout, CRC, truncated-body/trailer error classes and bearer-body clearing stay intact. Full available frames use two reads instead of four. The separate syscall observer records 4,013 versus 2,007 recvfrom calls, with other reads unchanged. Two opt-in anchors measure frame work after initial prefix progress and decode; they exclude idle first-byte waiting and overlap outside semantic dispatch. They add 256 fixed counter bytes until process exit. CRC relocation adds at most four requested heap bytes per live read frame (256 at the unchanged ceiling); allocator rounding is separate. Pool, connection/frame caps and durable growth are unchanged. Examples avoid duplicate allocators when the library opts in.
 
-Alternatives: pessimistic maximum reservations starve small responses; a separate
-length table risks codec drift; encode-before-admit evades memory admission;
-prefetch buffering retains following-frame/bearer bytes and changes accounting.
-Private toggles and failure probes were removed from the permanent implementation.
-[Evidence](evidence/tofudb_frame_admission_20261005.json) retains 8,595,200 exact
-timed reads, separate syscall sampling, all failed setups and adverse rows. Final
-means improve about 3–5% on native RPC and 1–4% on SDK cases. Overlay single-array
-P99 still worsens 7.4%; no all-tail or SQLite dominance claim. Full native Cargo
-passes 1,601 tests (two existing ignores); default examples compile. Publication
-checks pass 53 initially and two timeout cases on isolated rerun. Publication and
-activation follow the existing lifecycle; backend/identity are preserved.
+Alternatives: pessimistic maximum reservations starve small responses; a separate length table risks codec drift; encode-before-admit evades memory admission; prefetch buffering retains following-frame/bearer bytes and changes accounting. Private toggles and failure probes were removed from the permanent implementation. `tofudb_frame_admission_20261005.json` retains 8,595,200 exact timed reads, separate syscall sampling, all failed setups and adverse rows. Final means improve about 3–5% on native RPC and 1–4% on SDK cases. Overlay single-array P99 still worsens 7.4%; no all-tail or SQLite dominance claim. Full native Cargo passes 1,601 tests (two existing ignores); default examples compile. Publication checks pass 53 initially and two timeout cases on isolated rerun. Publication and activation follow the existing lifecycle; backend/identity are preserved.
 
 ## Native archive preparation and authority-hold attribution
 
-Problem: archive windows encoded large pages under the foreground mutex, and
-`Ok(false)` kept the worker spinning after catch-up. Decision: build each page
-on an owner-scoped, accounted preparation replica; commit validates source and
-manifest witnesses before publishing private blobs. Only `Ok(true)` continues
-catch-up. Read-only replicas alone leave compression inside the hold.
-Private payloads use the existing SnapshotPin transaction budget; one page has
-at most 128 messages and the existing 64 MiB document bound. Leases end at
-commit/abort. Optional request profiling adds 408 bytes of fixed hold counters
-and 16 bytes of accepted-page/message counters per loaded native module; timers
-use 40 stack bytes (previously 32). New probes read no clock or emit warnings
-when disabled. The existing slow-hold warnings retain their threshold.
-`requestProfile.authorityHolds` has 17 fixed phase names, completed wall-time
-totals/maxima/calls, and approximate process-lifetime snapshots. Nested phases
-are not additive or per-authority causal evidence. Archive acceptance counts
-accepted background commits, never a durable prefix or per-owner certificate.
-[Measurement and alternatives](evidence/tofudb_archive_authority_20261005.json)
-retain all default-off paired legs, exact readbacks, fault checks and observers.
-Long small-text P99 rose 10.4%; long-run process RSS rose 1.4–6.2%. Large-text
-mean/P99/CPU improved; universal SQLite or steady-state dominance remains open.
+Problem: archive windows encoded large pages under the foreground mutex, and `Ok(false)` kept the worker spinning after catch-up. Decision: build each page on an owner-scoped, accounted preparation replica; commit validates source and manifest witnesses before publishing private blobs. Only `Ok(true)` continues catch-up. Read-only replicas alone leave compression inside the hold. Private payloads use the existing SnapshotPin transaction budget; one page has at most 128 messages and the existing 64 MiB document bound. Leases end at commit/abort. Optional request profiling adds 408 bytes of fixed hold counters and 16 bytes of accepted-page/message counters per loaded native module; timers use 40 stack bytes (previously 32). New probes read no clock or emit warnings when disabled. The existing slow-hold warnings retain their threshold. `requestProfile.authorityHolds` has 17 fixed phase names, completed wall-time totals/maxima/calls, and approximate process-lifetime snapshots. Nested phases are not additive or per-authority causal evidence. Archive acceptance counts accepted background commits, never a durable prefix or per-owner certificate. Measurement and alternatives retain all default-off paired legs, exact readbacks, fault checks and observers. Long small-text P99 rose 10.4%; long-run process RSS rose 1.4–6.2%. Large-text mean/P99/CPU improved; universal SQLite or steady-state dominance remains open.
 
 ## Immutable private block publication
 
-Problem: private preparation hashed and copied encoded blocks, then publication
-hashed and copied the same immutable bytes again under authority. Decision:
-`PreparedBlockSource` binds identity to its borrowed source, and capture mints an
-immutable `PreparedBlockPayload`; publication retains its Arc allocation through
-the ordinary pending/durable dedup and WAL path. Source mutation after capture
-and copy-on-write reader mutation cannot alter the bound payload. Business/OCC
-validation still precedes publication; rotation accounting and optional loose
-duplicate WAL carrying are preserved. No wire, durability or storage format changes.
+Problem: private preparation hashed and copied encoded blocks, then publication hashed and copied the same immutable bytes again under authority. Decision: `PreparedBlockSource` binds identity to its borrowed source, and capture mints an immutable `PreparedBlockPayload`; publication retains its Arc allocation through the ordinary pending/durable dedup and WAL path. Source mutation after capture and copy-on-write reader mutation cannot alter the bound payload. Business/OCC validation still precedes publication; rotation accounting and optional loose duplicate WAL carrying are preserved. No wire, durability or storage format changes.
 
-Each private block reserves 160 metadata bytes instead of 128, including the
-additional 32-byte identity; the existing transaction lease ends at commit/abort.
-The optional `prepared_blob_publish` stage adds 128 fixed counter bytes per native
-module plus 24 bytes per bounded profile record. It measures private-store locking
-and block publication after lease validation, excluding WAL and commit. Disabled
-diagnostic probes read no clock and update no new counters. No pool, cache or
-persistent-growth limit rises. Existing component labels are classification only;
-an archive worker labelled foreground does not establish foreground CPU cost.
+Each private block reserves 160 metadata bytes instead of 128, including the additional 32-byte identity; the existing transaction lease ends at commit/abort. The optional `prepared_blob_publish` stage adds 128 fixed counter bytes per native module plus 24 bytes per bounded profile record. It measures private-store locking and block publication after lease validation, excluding WAL and commit. Disabled diagnostic probes read no clock and update no new counters. No pool, cache or persistent-growth limit rises. Existing component labels are classification only; an archive worker labelled foreground does not establish foreground CPU cost.
 
-Alternatives: accepting caller-supplied IDs loses provenance; skipping verified
-dedup or WAL carrying weakens persistence; replacing the captured bytes with a
-mutable shared buffer breaks identity. A first test incorrectly expected a cold
-loose duplicate to suppress WAL carrying; the test was corrected, policy retained.
-[Evidence](evidence/tofudb_private_blob_publication_20261005.json) retains all
-paired default-off legs and adverse rows. Long unique-text mean/P99 improve about
-5%, CPU 1.8%, process RSS 1.6%; long small-text mean/P99 worsen 1.4%/3.8%, and
-read controls worsen 2.2%/3.4%. Shared-host observations are finite cohorts, not
-steady-state or universal SQLite dominance. All 198,680 default-off whole-content
-checks and three replay/conflict/reopen patterns pass. Native tests pass 1,569
-with two existing ignores. Zero cache/proof-reuse counters defeat that attribution.
-The separate 1,000-write observer records 1,009 private publications totaling
-27.7 ms, while archive publication still reaches 32.7 ms; remaining commit work
-needs further attribution. Profiled timings are excluded from production gains.
+Alternatives: accepting caller-supplied IDs loses provenance; skipping verified dedup or WAL carrying weakens persistence; replacing the captured bytes with a mutable shared buffer breaks identity. A first test incorrectly expected a cold loose duplicate to suppress WAL carrying; the test was corrected, policy retained. `tofudb_private_blob_publication_20261005.json` retains all paired default-off legs and adverse rows. Long unique-text mean/P99 improve about 5%, CPU 1.8%, process RSS 1.6%; long small-text mean/P99 worsen 1.4%/3.8%, and read controls worsen 2.2%/3.4%. Shared-host observations are finite cohorts, not steady-state or universal SQLite dominance. All 198,680 default-off whole-content checks and three replay/conflict/reopen patterns pass. Native tests pass 1,569 with two existing ignores. Zero cache/proof-reuse counters defeat that attribution. The separate 1,000-write observer records 1,009 private publications totaling 27.7 ms, while archive publication still reaches 32.7 ms; remaining commit work needs further attribution. Profiled timings are excluded from production gains.
 
 ## Producer-bound receipt policy
 
-Problem: receipt eligibility reparsed the full generated response merely to
-exclude root null and root `ok:false`; escaping made this about 0.98 ms per large
-response. Decision: only `turn.rs` mints immutable `SettledAppendResponse`, whose
-fixed root has attempt/conversationRevision/turn and cannot express either case.
-Normal staging validates raw projection inputs first. Eligibility follows only
-the actually selected allocation through IrSlots; mutation, replacement,
-projection overwrite, extraction, literal/missing/raw results and serialized
-replay clear or lack it. It is never a JSON/depth integrity certificate; the
-ordinary final validation and all owner, OCC, deadline, receipt and durability
-checks remain. No request, response or storage encoding changes.
+Problem: receipt eligibility reparsed the full generated response merely to exclude root null and root `ok:false`; escaping made this about 0.98 ms per large response. Decision: only `turn.rs` mints immutable `SettledAppendResponse`, whose fixed root has attempt/conversationRevision/turn and cannot express either case. Normal staging validates raw projection inputs first. Eligibility follows only the actually selected allocation through IrSlots; mutation, replacement, projection overwrite, extraction, literal/missing/raw results and serialized replay clear or lack it. It is never a JSON/depth integrity certificate; the ordinary final validation and all owner, OCC, deadline, receipt and durability checks remain. No request, response or storage encoding changes.
 
-An IR frame uses 64 additional stack bytes (IrSlots 1,600 -> 1,664); IrResponse
-remains 32 bytes. One optional work counter and two diagnostic stage records add
-56 bytes per active/sample/aggregate profile record (observed active 7,232 ->
-7,288). `receipt_encode` includes validation, compression and assembly;
-`receipt_compress` is nested compressor construction/write/finish only. These
-add 256 process/component counter bytes per loaded native module. New diagnostics
-read no clock or update new counters when disabled. Collector bounds/lifetimes
-and all pool, cache, growth and durability limits remain unchanged.
+An IR frame uses 64 additional stack bytes (IrSlots 1,600 -> 1,664); IrResponse remains 32 bytes. One optional work counter and two diagnostic stage records add 56 bytes per active/sample/aggregate profile record (observed active 7,232 -> 7,288). `receipt_encode` includes validation, compression and assembly; `receipt_compress` is nested compressor construction/write/finish only. These add 256 process/component counter bytes per loaded native module. New diagnostics read no clock or update new counters when disabled. Collector bounds/lifetimes and all pool, cache, growth and durability limits remain unchanged.
 
-Alternatives: operation-name trust does not follow selected/mutated IR bytes;
-unchecked arbitrary-byte flags lose producer provenance; streaming JSON policy
-still decodes escaped content. The prior producer-proof experiment was rejected
-for large random-content P99 regression before archive-lock repair; it remains
-in history. This fresh comparison retains every adverse row rather than replacing
-it. [Evidence](evidence/tofudb_receipt_proof_retry_20261005.json) records 198,680
-default-off complete checks, three replay/conflict/reopen patterns and all native
-tests (1,571 passed, two existing ignores). Long escaped mean/CPU improve about
-10%, P99 16%; random mean/P99 remain nearly flat but timed process CPU worsens
-3.9%, small-text P99 worsens 6.1%, read mean/P99 worsen 2.2%/1.7%, and escaped RSS
-worsens 1.8%. Shared-host process CPU includes generation and concurrent workers;
-RSS is process high-water, not steady-state core heap. The separate observer
-confirms receipt-policy work near 0.1 us; random-content receipt compression
-still costs about 1.58 ms. Immutable response reuse needs investigation beyond
-codec replacement. SQLite references, maintenance waits, missing coverage and
-failed setups remain in the evidence; no universal performance or activation claim.
+Alternatives: operation-name trust does not follow selected/mutated IR bytes; unchecked arbitrary-byte flags lose producer provenance; streaming JSON policy still decodes escaped content. The prior producer-proof experiment was rejected for large random-content P99 regression before archive-lock repair; it remains in history. This fresh comparison retains every adverse row rather than replacing it. `tofudb_receipt_proof_retry_20261005.json` records 198,680 default-off complete checks, three replay/conflict/reopen patterns and all native tests (1,571 passed, two existing ignores). Long escaped mean/CPU improve about 10%, P99 16%; random mean/P99 remain nearly flat but timed process CPU worsens 3.9%, small-text P99 worsens 6.1%, read mean/P99 worsen 2.2%/1.7%, and escaped RSS worsens 1.8%. Shared-host process CPU includes generation and concurrent workers; RSS is process high-water, not steady-state core heap. The separate observer confirms receipt-policy work near 0.1 us; random-content receipt compression still costs about 1.58 ms. Immutable response reuse needs investigation beyond codec replacement. SQLite references, maintenance waits, missing coverage and failed setups remain in the evidence; no universal performance or activation claim.
 
 ## Storage JSON admission shape dispatch
 
-Problem: the client traversed every ordinary JSON scalar through abstract
-Mapping/type checks, and mapping materialization repeated them before encoding.
-Decision: dispatch exact built-in scalars/containers directly; subclasses and
-registered Mapping views retain the original generic checks and ordering.
-Non-finite floats still fail before orjson can coerce them, aliased/cyclic
-containers are visited once, and unknown values still reach the original
-serialization error boundary. Canonical/frame bytes and owner adaptation stay
-unchanged. This is shared ingress work, not a new native kernel or query lane.
+Problem: the client traversed every ordinary JSON scalar through abstract Mapping/type checks, and mapping materialization repeated them before encoding. Decision: dispatch exact built-in scalars/containers directly; subclasses and registered Mapping views retain the original generic checks and ordering. Non-finite floats still fail before orjson can coerce them, aliased/cyclic containers are visited once, and unknown values still reach the original serialization error boundary. Canonical/frame bytes and owner adaptation stay unchanged. This is shared ingress work, not a new native kernel or query lane.
 
-Two temporary references add 16 bytes of Python validator frame slots and one
-adds eight bytes per materializer frame; no new retained pool, cache, thread,
-queue, durable state or bound. Timing is observer-only: cProfile/function-edge
-and existing native queue/dispatch/reply anchors run separately from credited
-default-off measurements. Inclusive wall/CPU counts are not additive; cProfile
-overhead does not establish production phase cost.
+Two temporary references add 16 bytes of Python validator frame slots and one adds eight bytes per materializer frame; no new retained pool, cache, thread, queue, durable state or bound. Timing is observer-only: cProfile/function-edge and existing native queue/dispatch/reply anchors run separately from credited default-off measurements. Inclusive wall/CPU counts are not additive; cProfile overhead does not establish production phase cost.
 
-Alternatives: remove number admission (silently coerces NaN/Infinity), dispatch
-subclasses as plain scalars (hides Mapping values), memoize mutable input identity
-(stale evidence), or bypass watchdog delivery (changes timeout/lifetime safety).
-The comparison driver separately stopped allocating unused command IDs for reads;
-writes still allocate once and reuse that ID on classified retries. This is a
-measurement correction, excluded from production ingress gains.
-[Evidence](evidence/tofudb_point_ingress_20261005.json) preserves old-driver BCCBCBBC
-legs, independently corrected-driver controls, exact native/codec checks, Python
-source hashes and unchanged native build identity. Point mean/P99 improve about
-8.7%/8.6%, CPU 6.8%; 2,048-integer record writes improve about 61%/58%, CPU 62%.
-These finite shared-host cohorts do not prove SQLite dominance, active-streaming
-capacity, FUSE or steady-state memory. Cross-thread handoff remains material. Embedded client decoding now passes a temporary memoryview of the caller-owned thread-local output to orjson, removing its response-sized bytes copy. A successful parsed tree owns all values before buffer reuse; the stock decoder fallback keeps the original UTF-8 copy boundary. No pool/thread/cache/file or retained bound changes. The temporary view retires after synchronous decoding (an exception traceback can retain its safely owned buffer reference). Python-only allocation traces and end-to-end cohorts, with limitations, are retained in [client response evidence](evidence/tofudb_client_response_view_20261005.json).
+Alternatives: remove number admission (silently coerces NaN/Infinity), dispatch subclasses as plain scalars (hides Mapping values), memoize mutable input identity (stale evidence), or bypass watchdog delivery (changes timeout/lifetime safety). The comparison driver separately stopped allocating unused command IDs for reads; writes still allocate once and reuse that ID on classified retries. This is a measurement correction, excluded from production ingress gains. `tofudb_point_ingress_20261005.json` preserves old-driver BCCBCBBC legs, independently corrected-driver controls, exact native/codec checks, Python source hashes and unchanged native build identity. Point mean/P99 improve about 8.7%/8.6%, CPU 6.8%; 2,048-integer record writes improve about 61%/58%, CPU 62%. These finite shared-host cohorts do not prove SQLite dominance, active-streaming capacity, FUSE or steady-state memory. Cross-thread handoff remains material. Embedded client decoding now passes a temporary memoryview of the caller-owned thread-local output to orjson, removing its response-sized bytes copy. A successful parsed tree owns all values before buffer reuse; the stock decoder fallback keeps the original UTF-8 copy boundary. No pool/thread/cache/file or retained bound changes. The temporary view retires after synchronous decoding (an exception traceback can retain its safely owned buffer reference). Python-only allocation traces and end-to-end cohorts, with limitations, are retained in `tofudb_client_response_view_20261005.json`.
 
-Project direct-write recovery uses `TOFU_PROJECT_WRITE_RECOVERY_MAX_MIB`, a
-restart-only per-file allowance independent of read/display caps. Personal
-admission scales with launch memory capacity, memory headroom and free volume;
-its fallback is 4 MiB, distributed fallback 16 MiB, and the inline-evidence
-safety ceiling is 1024 MiB. See [project undo](PROJECT_FILE_UNDO.md) for the
-encoding envelope, durable-history lifecycle and executable measurements.
+Project direct-write recovery uses `TOFU_PROJECT_WRITE_RECOVERY_MAX_MIB`, a restart-only per-file allowance independent of read/display caps. Personal admission scales with launch memory capacity, memory headroom and free volume; its fallback is 4 MiB, distributed fallback 16 MiB, and the inline-evidence safety ceiling is 1024 MiB. See [project undo](PROJECT_FILE_UNDO.md) for the encoding envelope, durable-history lifecycle and executable measurements.
 
 ## Project undo payload working set
 
-The undo index cache keeps the existing launch-resolved total byte/session
-budget. A root may use the available total rather than a fixed quarter, with
-LRU eviction across roots. Immutable pre-images and reverse patches stay on
-disk and load only after selection. Packing uses at most that byte budget or
-one required value during migration, with no resident payload cache or worker.
-Packs are reclaimed after the final indexed reference is successfully removed;
-durable pending undo records are never aged out to improve performance.
+The undo index cache keeps the existing launch-resolved total byte/session budget. A root may use the available total rather than a fixed quarter, with LRU eviction across roots. Immutable pre-images and reverse patches stay on disk and load only after selection. Packing uses at most that byte budget or one required value during migration, with no resident payload cache or worker. Packs are reclaimed after the final indexed reference is successfully removed; durable pending undo records are never aged out to improve performance.
 
-A same-host five-file benchmark using a private copy of the roughly 320 MB
-production journal took 29.242 seconds initially and 28.843 seconds on the next
-original-tool batch. With packed contents and compact metadata encoding, the
-first batch including one-time conversion took 5.909 seconds; the next batch
-took 0.927 seconds. The mutable index shrank to about 3.6 MB; original contents
-remain durable in immutable packs. These measurements include normal tool
-write/undo preparation and file-history work on the same FUSE volume, with a
-running application, not just text replacement or a mock storage backend.
+A same-host five-file benchmark using a private copy of the roughly 320 MB production journal took 29.242 seconds initially and 28.843 seconds on the next original-tool batch. With packed contents and compact metadata encoding, the first batch including one-time conversion took 5.909 seconds; the next batch took 0.927 seconds. The mutable index shrank to about 3.6 MB; original contents remain durable in immutable packs. These measurements include normal tool write/undo preparation and file-history work on the same FUSE volume, with a running application, not just text replacement or a mock storage backend.
 
-Translation idle reuse follows the same probed CPU/RSS root capacity as the
-agent pool. Independent jobs and provider calls start on demand; the former
-worker/admission and provider-waiter ceilings no longer govern them. The earlier
-controlled 96-job study on 63 effective CPUs with 208,790 MiB memory headroom,
-using 25-ms simulated provider I/O, took 1.206 s with two workers and 0.059 s with
-48 derived workers. That historical comparison measures local scheduling, not
-an upstream latency promise or the current demand-driven executor. Actual
-provider responses and cancellation remain authoritative.
+Translation idle reuse follows the same probed CPU/RSS root capacity as the agent pool. Independent jobs and provider calls start on demand; the former worker/admission and provider-waiter ceilings no longer govern them. The earlier controlled 96-job study on 63 effective CPUs with 208,790 MiB memory headroom, using 25-ms simulated provider I/O, took 1.206 s with two workers and 0.059 s with 48 derived workers. That historical comparison measures local scheduling, not an upstream latency promise or the current demand-driven executor. Actual provider responses and cancellation remain authoritative.
 
 ## Demand-driven desktop, video and paper work
 
-Problem: local desktop/video semaphores, paper document/subscriber quotas and
-reader/restore slots rejected otherwise valid work. Desktop active state also
-shared the evictable terminal cache, so removing admission alone could lose
-status and permit duplicate work. Reader metadata bytes imposed a hidden quota.
+Problem: local desktop/video semaphores, paper document/subscriber quotas and reader/restore slots rejected otherwise valid work. Desktop active state also shared the evictable terminal cache, so removing admission alone could lose status and permit duplicate work. Reader metadata bytes imposed a hidden quota.
 
-Decision: start work on demand and retain active owner/device state until
-settlement. Video reservations represent cleanup ownership only. Paper workers
-accept separate documents immediately; same-document freshness still coalesces
-revisions. Subscribers, cache readers and durable read leases have no count
-quota. Reader identities expire after the existing lease lifetime; release and
-renewal preserve owner checks. Restores use unique private stages. Chunked reads,
-receipt verification, cancellation joins and storage authority remain intact.
+Decision: start work on demand and retain active owner/device state until settlement. Video reservations represent cleanup ownership only. Paper workers accept separate documents immediately; same-document freshness still coalesces revisions. Subscribers, cache readers and durable read leases have no count quota. Reader identities expire after the existing lease lifetime; release and renewal preserve owner checks. Restores use unique private stages. Chunked reads, receipt verification, cancellation joins and storage authority remain intact.
 
-Alternatives considered: increasing fixed slots would still reject bursts;
-keeping active tasks in the TTL cache would lose lifecycle ownership; dropping
-read leases would allow reclamation during downloads. Tests start 144 desktop
-workers with a one-entry terminal cache, acquire 256 video ownership tokens,
-retain 128 cache/durable readers and stream a 9 MiB artifact with under 4 MiB
-peak Python allocation. Active bookkeeping grows with live demand and is
-released on settlement; reader metadata grows with unexpired identities only.
+Alternatives considered: increasing fixed slots would still reject bursts; keeping active tasks in the TTL cache would lose lifecycle ownership; dropping read leases would allow reclamation during downloads. Tests start 144 desktop workers with a one-entry terminal cache, acquire 256 video ownership tokens, retain 128 cache/durable readers and stream a 9 MiB artifact with under 4 MiB peak Python allocation. Active bookkeeping grows with live demand and is released on settlement; reader metadata grows with unexpired identities only.
 
 ## Device execution and transport ownership
 
-Problem: device execution refused beyond four workers, paper builds had another
-four-job ceiling, and the replay ledger refused beyond 65,536 IDs. Result/stream
-queues blocked task settlement behind fixed item/byte budgets; the browser relay
-fell back after its two-job FIFO filled and retained timed-out queue entries.
+Problem: device execution refused beyond four workers, paper builds had another four-job ceiling, and the replay ledger refused beyond 65,536 IDs. Result/stream queues blocked task settlement behind fixed item/byte budgets; the browser relay fell back after its two-job FIFO filled and retained timed-out queue entries.
 
-Decision: device execution and paper builds start on demand while identities
-remain known until the run ends. Transport frame limits constrain one poll, not
-producer admission. Pending serialized bytes reuse 1/128 of launch-probed
-capacity/headroom (1 MiB lean fallback), split 7/8 results and 1/8 streams;
-overflow uses private temporary spools. A validated reply acknowledges only its
-sent prefix and frees those bytes/files. Actual storage failures are explicit.
-Stopping cancels project streams and waits for real execution settlement before
-reclaiming transport state. Browser relay jobs have an uncapped live FIFO with
-timeout/completion/close cleanup and immediate close notification.
+Decision: device execution and paper builds start on demand while identities remain known until the run ends. Transport frame limits constrain one poll, not producer admission. Pending serialized bytes reuse 1/128 of launch-probed capacity/headroom (1 MiB lean fallback), split 7/8 results and 1/8 streams; overflow uses private temporary spools. A validated reply acknowledges only its sent prefix and frees those bytes/files. Actual storage failures are explicit. Stopping cancels project streams and waits for real execution settlement before reclaiming transport state. Browser relay jobs have an uncapped live FIFO with timeout/completion/close cleanup and immediate close notification.
 
-Alternatives considered: larger quotas still refuse demand; evicting old IDs
-replays side effects; retaining all payloads in RAM magnifies stalled transport;
-spooling every small healthy-path message adds avoidable disk traffic; returning
-from shutdown while processes/readers remain alive loses resource ownership.
+Alternatives considered: larger quotas still refuse demand; evicting old IDs replays side effects; retaining all payloads in RAM magnifies stalled transport; spooling every small healthy-path message adds avoidable disk traffic; returning from shutdown while processes/readers remain alive loses resource ownership.
 
-Measurements on this host: 512 unacknowledged 32 KiB frames held 16,790,418
-serialized bytes with 368,437 peak Python allocation bytes in the disk-overflow
-path; append took 0.105 s and teardown left zero pending bytes. This measures
-local spool throughput, not gateway latency or disk durability. Retaining 70,000
-command identities used 7,403,402 peak Python allocation bytes; IDs are released
-at run teardown. Coverage includes a real 32-command poll burst, replay, invalid
-reply retransmission, spool-write failure, prefix reclamation, 24 concurrent relay
-jobs, process cancellation/start failure, pipe-reader joins and child exit status.
+Measurements on this host: 512 unacknowledged 32 KiB frames held 16,790,418 serialized bytes with 368,437 peak Python allocation bytes in the disk-overflow path; append took 0.105 s and teardown left zero pending bytes. This measures local spool throughput, not gateway latency or disk durability. Retaining 70,000 command identities used 7,403,402 peak Python allocation bytes; IDs are released at run teardown. Coverage includes a real 32-command poll burst, replay, invalid reply retransmission, spool-write failure, prefix reclamation, 24 concurrent relay jobs, process cancellation/start failure, pipe-reader joins and child exit status.
 
 ## Desktop device resources
 
-Problem: fixed worker clamps underused larger devices, while lifetime replay
-retention grew indefinitely. Decision: `lib/desktop_agent/_runtime.py` preserves
-demand-driven local admission and the existing private output spool. Negotiated
-server delivery credits intersect effective CPUs with available GiB from the
-cached launch probe, falling back to one on probe failure. The retired worker
-override cannot reject issued commands. Resident output memory uses 1/128 of
-capacity/headroom (1 MiB lean fallback), split 7/8 results and 1/8 streams; larger
-output spools to private temporary files. Frames and HTTP prefixes stay bounded
-independently of pending disk output. Actual storage errors remain visible.
-Spool ACK deletes files promptly; shutdown joins owned work before reclaiming
-spools. One poll Session closes at run exit. Finite-deadline replay entries retire
-only after completion, expiry and acknowledgement, using a monotonic server-clock
-watermark and expiry heap; legacy records stay pinned until joined shutdown.
-Alternatives rejected: deleting IDs without command expiry permits repeated side
-effects; a larger whole HTTP body can exceed request-size limits and block ACK
-forever; abandoning workers before spool cleanup loses owned output lifecycle.
+Problem: fixed worker clamps underused larger devices, while lifetime replay retention grew indefinitely. Decision: `lib/desktop_agent/_runtime.py` preserves demand-driven local admission and the existing private output spool. Negotiated server delivery credits intersect effective CPUs with available GiB from the cached launch probe, falling back to one on probe failure. The retired worker override cannot reject issued commands. Resident output memory uses 1/128 of capacity/headroom (1 MiB lean fallback), split 7/8 results and 1/8 streams; larger output spools to private temporary files. Frames and HTTP prefixes stay bounded independently of pending disk output. Actual storage errors remain visible. Spool ACK deletes files promptly; shutdown joins owned work before reclaiming spools. One poll Session closes at run exit. Finite-deadline replay entries retire only after completion, expiry and acknowledgement, using a monotonic server-clock watermark and expiry heap; legacy records stay pinned until joined shutdown. Alternatives rejected: deleting IDs without command expiry permits repeated side effects; a larger whole HTTP body can exceed request-size limits and block ACK forever; abandoning workers before spool cleanup loses owned output lifecycle.
 
-Reproduce the offline admission/reclamation measurement with
-`python benchmarks/desktop_runtime.py --commands 100000`. The 1s synthetic pickup
-TTL and 0.01s clock tick retain at most 101 IDs and finish with 100, exceeding the
-old 65,536 lifetime ceiling without restart. Three timing samples completed 100,000 transitions
-in 0.308–0.310s (median 323,753/s); a separate tracemalloc run reports residency; this is a kernel measurement, not actual
-tool throughput, process RSS, provider performance or multi-client certification.
-A loopback HTTP regression verifies two polls reuse one TCP connection.
+Reproduce the offline admission/reclamation measurement with `python benchmarks/desktop_runtime.py --commands 100000`. The 1s synthetic pickup TTL and 0.01s clock tick retain at most 101 IDs and finish with 100, exceeding the old 65,536 lifetime ceiling without restart. Three timing samples completed 100,000 transitions in 0.308–0.310s (median 323,753/s); a separate tracemalloc run reports residency; this is a kernel measurement, not actual tool throughput, process RSS, provider performance or multi-client certification. A loopback HTTP regression verifies two polls reuse one TCP connection.
 
 ## Browser request and lease ownership
 
-Problem: local poll concurrency/RPM gates, device/waiter registration and tab
-lease quotas refused otherwise valid owned requests. Workflow owner gates,
-eight-step/five-item defaults and two-item waves hid available execution
-capacity. Login-capture quotas refused independent routes and fixed cooldown
-maps could evict still-live pacing state.
+Problem: local poll concurrency/RPM gates, device/waiter registration and tab lease quotas refused otherwise valid owned requests. Workflow owner gates, eight-step/five-item defaults and two-item waves hid available execution capacity. Login-capture quotas refused independent routes and fixed cooldown maps could evict still-live pacing state.
 
-Decision: retain exact live HTTP request ownership without quota/TTL admission,
-without credential/owner/global rate buckets or inherited protocol cooldowns.
-Authentication and the current frame still own identity and protocol validity.
-Device/waiter/lease state grows with live demand and leaves through disconnect,
-timeout, cancellation and settlement; one lease sweeper handles every timed
-lease. Same-device long-poll replacement remains atomic. Workflows expand all
-results by default and start independent reads on demand; explicit caller limits,
-serial selection, output bytes, deadlines and site-declared pacing remain. Login
-capture still deduplicates its exact owner/device/domain and rolls back worker
-start failures; it no longer refuses other routes. Route cooldowns expire by
-time without count eviction. Remaining affinity cache sizing is reconstructible
-metadata, not device admission.
+Decision: retain exact live HTTP request ownership without quota/TTL admission, without credential/owner/global rate buckets or inherited protocol cooldowns. Authentication and the current frame still own identity and protocol validity. Device/waiter/lease state grows with live demand and leaves through disconnect, timeout, cancellation and settlement; one lease sweeper handles every timed lease. Same-device long-poll replacement remains atomic. Workflows expand all results by default and start independent reads on demand; explicit caller limits, serial selection, output bytes, deadlines and site-declared pacing remain. Login capture still deduplicates its exact owner/device/domain and rolls back worker start failures; it no longer refuses other routes. Route cooldowns expire by time without count eviction. Remaining affinity cache sizing is reconstructible metadata, not device admission.
 
-Alternatives considered: larger quotas still reject bursts; silently evicting
-leases loses tab/capture ownership; reusing a prior credential protocol failure
-skips current authentication and can delay an upgraded client; removing genuine
-site pacing can trigger upstream challenges; discarding partial workflow receipts
-hides completed reads. Coverage includes 4,096 simultaneous poll leases, 256
-devices/leases, 128 async waiters, a 32-read workflow fan-out, concurrent same-owner
-workflows, real authentication/protocol failures, rollback and resource cleanup.
+Alternatives considered: larger quotas still reject bursts; silently evicting leases loses tab/capture ownership; reusing a prior credential protocol failure skips current authentication and can delay an upgraded client; removing genuine site pacing can trigger upstream challenges; discarding partial workflow receipts hides completed reads. Coverage includes 4,096 simultaneous poll leases, 256 devices/leases, 128 async waiters, a 32-read workflow fan-out, concurrent same-owner workflows, real authentication/protocol failures, rollback and resource cleanup.
 
-A controlled local ownership measurement registered and owner-bound 4,096 live
-poll requests in 0.0508 s with 1,173,684 peak Python allocation bytes; release
-returned the live registry to zero. This measures ownership bookkeeping, not
-network/browser throughput or upstream site latency.
+A controlled local ownership measurement registered and owner-bound 4,096 live poll requests in 0.0508 s with 1,173,684 peak Python allocation bytes; release returned the live registry to zero. This measures ownership bookkeeping, not network/browser throughput or upstream site latency.
 
 ## Extension resources and file-transfer demand
 
-Problem: temporary tabs, captures, debugger sessions, observers and breakpoints
-had independent fixed admission counts. Restart recovery read only four tab
-IDs. File transfers reserved every advertised maximum and rejected bursts by
-owner/process count or cache targets, even when actual storage was available.
-Completed metadata TTL could delete a file before its handoff grace expired.
+Problem: temporary tabs, captures, debugger sessions, observers and breakpoints had independent fixed admission counts. Restart recovery read only four tab IDs. File transfers reserved every advertised maximum and rejected bursts by owner/process count or cache targets, even when actual storage was available. Completed metadata TTL could delete a file before its handoff grace expired.
 
-Decision: own browser resources until settlement without count quotas, recover
-every exact persisted temporary-tab ID, and retain same-tab CDP coordination,
-cancellation, reapers and real Chrome errors. Transfers start without reserving
-hypothetical growth; actual bytes retain free-space, order, hash and atomic
-commit checks. Eligible old completed staging can be reclaimed by byte/count
-cache targets; live and fresh artifacts never cause admission refusal. Expired
-completed metadata leaves files under cache TTL/grace, while unfinished/aborted
-files still leave through their existing cleanup owner.
+Decision: own browser resources until settlement without count quotas, recover every exact persisted temporary-tab ID, and retain same-tab CDP coordination, cancellation, reapers and real Chrome errors. Transfers start without reserving hypothetical growth; actual bytes retain free-space, order, hash and atomic commit checks. Eligible old completed staging can be reclaimed by byte/count cache targets; live and fresh artifacts never cause admission refusal. Expired completed metadata leaves files under cache TTL/grace, while unfinished/aborted files still leave through their existing cleanup owner.
 
-Alternatives considered: increasing quotas still rejects demand; forgetting
-owned IDs strands tabs after worker restart; evicting active resources loses
-claim ownership; reserving every maximum charges bytes not yet written; removing
-actual-write checks weakens the durable volume reserve; deleting fresh completed
-artifacts makes returned receipts unusable. Tests start twelve held tab creates,
-recover eight persisted IDs, own 64 captures/16 debugger sessions/16 observers
-and 40 breakpoints, and create 128 maximum-size transfer descriptors without
-reserved disk growth. Every burst releases its owned resources; content payloads
-and observations keep their existing finite per-resource bounds.
+Alternatives considered: increasing quotas still rejects demand; forgetting owned IDs strands tabs after worker restart; evicting active resources loses claim ownership; reserving every maximum charges bytes not yet written; removing actual-write checks weakens the durable volume reserve; deleting fresh completed artifacts makes returned receipts unusable. Tests start twelve held tab creates, recover eight persisted IDs, own 64 captures/16 debugger sessions/16 observers and 40 breakpoints, and create 128 maximum-size transfer descriptors without reserved disk growth. Every burst releases its owned resources; content payloads and observations keep their existing finite per-resource bounds.
 
-Same-tab concurrent debugger starts coalesce their initialization and retain one
-physical CDP holder; failure/cancellation settle that owner without publishing
-a late active session or deleting another generation's registration.
+Same-tab concurrent debugger starts coalesce their initialization and retain one physical CDP holder; failure/cancellation settle that owner without publishing a late active session or deleting another generation's registration.
 
-The Node worker probe owned 64 captures, 16 debugger sessions, 16 observers and
-40 breakpoints, then released every runtime registry in 212 ms with 1,657,232
-bytes of net V8 heap growth. Chrome APIs were controlled test seams and the
-observer window was 200 ms; this measures worker bookkeeping, not Chromium
-renderer memory, page/network latency or a production concurrency guarantee.
-Detach deadlines are cancelled after actual completion instead of leaving
-five-second timers alive for every reclaimed CDP holder.
+The Node worker probe owned 64 captures, 16 debugger sessions, 16 observers and 40 breakpoints, then released every runtime registry in 212 ms with 1,657,232 bytes of net V8 heap growth. Chrome APIs were controlled test seams and the observer window was 200 ms; this measures worker bookkeeping, not Chromium renderer memory, page/network latency or a production concurrency guarantee. Detach deadlines are cancelled after actual completion instead of leaving five-second timers alive for every reclaimed CDP holder.
 
 ## MCP and custom-tool request ownership
 
-Problem: a four-owner MCP registry evicted idle owners or refused requests while
-an unrelated transport was live. Credential diagnostics used process slots,
-custom client replies had a task-derived waiter quota, and live tool environments
-had a 1,024-handle ceiling. Default definition count rejected more than 32 tools.
-An unused hour-long disposal helper contradicted real terminal ownership.
+Problem: a four-owner MCP registry evicted idle owners or refused requests while an unrelated transport was live. Credential diagnostics used process slots, custom client replies had a task-derived waiter quota, and live tool environments had a 1,024-handle ceiling. Default definition count rejected more than 32 tools. An unused hour-long disposal helper contradicted real terminal ownership.
 
-Decision: retain owner bridge generations without registry quota/eviction;
-independent credential probes start on demand with exact owner/server dedup,
-finite actual reads and start-failure rollback. Custom environments and handoffs
-remain until their exact terminal owner releases them. Definition counts are
-unlimited by default; explicit positive caller limits, schema/result bytes,
-approval, visibility, callback identity and actual timeouts remain enforced.
-Real same-owner shutdown/startup fencing stays intact while unrelated owners
-continue to resolve independently. Retired count settings leave the launch
-manifest and its generated projection.
+Decision: retain owner bridge generations without registry quota/eviction; independent credential probes start on demand with exact owner/server dedup, finite actual reads and start-failure rollback. Custom environments and handoffs remain until their exact terminal owner releases them. Definition counts are unlimited by default; explicit positive caller limits, schema/result bytes, approval, visibility, callback identity and actual timeouts remain enforced. Real same-owner shutdown/startup fencing stays intact while unrelated owners continue to resolve independently. Retired count settings leave the launch manifest and its generated projection.
 
-Alternatives considered: larger quotas still refuse demand; dropping an active
-bridge loses loop/process cleanup ownership; creating a replacement for a still
-stopping same-owner generation weakens lifecycle fencing; removing callback
-identity permits cross-task or cross-owner result injection; timer-expiring live
-environments makes valid long-running tasks lose their declared tools. Coverage
-includes 128 independent bridges, probe overlap/dedup and worker failure, 96
-concurrent handoffs with cross-owner rejection, 1,100 live environments, 128
-request definitions, real terminal disposal and loop-generation rollback.
+Alternatives considered: larger quotas still refuse demand; dropping an active bridge loses loop/process cleanup ownership; creating a replacement for a still stopping same-owner generation weakens lifecycle fencing; removing callback identity permits cross-task or cross-owner result injection; timer-expiring live environments makes valid long-running tasks lose their declared tools. Coverage includes 128 independent bridges, probe overlap/dedup and worker failure, 96 concurrent handoffs with cross-owner rejection, 1,100 live environments, 128 request definitions, real terminal disposal and loop-generation rollback.
 
-Measurement (Python 3.12, this host): minting 128 lazy owner bridges and 1,100
-custom environments together took 701.94 ms with a 3,378,481-byte tracemalloc
-peak (3,372,084 bytes live before cleanup). Both registries returned to zero
-after explicit disposal. No transport loops started; audit-log output was
-disabled for this bookkeeping probe. These figures measure Python registry
-allocation, not provider processes, external latency or production throughput.
+Measurement (Python 3.12, this host): minting 128 lazy owner bridges and 1,100 custom environments together took 701.94 ms with a 3,378,481-byte tracemalloc peak (3,372,084 bytes live before cleanup). Both registries returned to zero after explicit disposal. No transport loops started; audit-log output was disabled for this bookkeeping probe. These figures measure Python registry allocation, not provider processes, external latency or production throughput.
 
 ## Translation and VLM work without count admission
 
-Problem: whole-turn, PPTX, paper, attended-send and VLM jobs waited for a shared
-worker ceiling or were refused by a finite queue; translation calls encountered
-a second active/waiting provider gate. PDF task results could be count-evicted
-before a client retrieved them. The same background lane also serves provider
-probes, so changing only translation would leave the generic admission flaw.
+Problem: whole-turn, PPTX, paper, attended-send and VLM jobs waited for a shared worker ceiling or were refused by a finite queue; translation calls encountered a second active/waiting provider gate. PDF task results could be count-evicted before a client retrieved them. The same background lane also serves provider probes, so changing only translation would leave the generic admission flaw.
 
-Decision: carrier demand equals active plus pending jobs, preserving explicit
-job/owner identity and round-robin selection only for transient pickup. Worker
-counts govern idle reuse; surplus idle carriers retire immediately and reusable
-ones follow the configured quiet timeout. Completed input closures and outputs
-are released before an idle wait, and metric failures cannot deny admission or
-interrupt settlement. Queue counts cannot deny demand.
-Actual startup failure rolls back the newly admitted job; duplicate IDs and
-shutdown remain genuine errors. Translation provider contexts count exact live
-calls and release in finally without a count permit. Actual billing/provider
-errors, deadlines, cancellation, validation and committed result ownership stay
-at their existing boundaries. Fresh PDF results retain their declared retrieval
-TTL. The two retired queue settings leave the launch manifest and projection;
-obsolete local saturation exceptions and HTTP refusals are removed.
+Decision: carrier demand equals active plus pending jobs, preserving explicit job/owner identity and round-robin selection only for transient pickup. Worker counts govern idle reuse; surplus idle carriers retire immediately and reusable ones follow the configured quiet timeout. Completed input closures and outputs are released before an idle wait, and metric failures cannot deny admission or interrupt settlement. Queue counts cannot deny demand. Actual startup failure rolls back the newly admitted job; duplicate IDs and shutdown remain genuine errors. Translation provider contexts count exact live calls and release in finally without a count permit. Actual billing/provider errors, deadlines, cancellation, validation and committed result ownership stay at their existing boundaries. Fresh PDF results retain their declared retrieval TTL. The two retired queue settings leave the launch manifest and projection; obsolete local saturation exceptions and HTTP refusals are removed.
 
-Alternatives considered: larger finite queues still reject demand; removing
-identity would permit callback/cancellation crossover; unlimited permanently
-resident threads would keep burst cost after its work ends; dropping terminal
-results on count pressure loses successful work; bypassing actual provider or
-billing failures would misattribute external limits to local scheduling.
+Alternatives considered: larger finite queues still reject demand; removing identity would permit callback/cancellation crossover; unlimited permanently resident threads would keep burst cost after its work ends; dropping terminal results on count pressure loses successful work; bypassing actual provider or billing failures would misattribute external limits to local scheduling.
 
-Verification includes 64 simultaneously entered lane jobs, 64 provider calls and
-64 whole-PDF tasks, exact owner access, fresh result retrieval, cancellation
-notification races, delayed-pickup round-robin selection, worker-start rollback,
-actual provider failure and observational metric failure. Controlled pickup
-fixtures intentionally delay expansion to expose otherwise transient pending
-states; burst tests exercise the production demand-driven implementation.
+Verification includes 64 simultaneously entered lane jobs, 64 provider calls and 64 whole-PDF tasks, exact owner access, fresh result retrieval, cancellation notification races, delayed-pickup round-robin selection, worker-start rollback, actual provider failure and observational metric failure. Controlled pickup fixtures intentionally delay expansion to expose otherwise transient pending states; burst tests exercise the production demand-driven implementation.
 
-Measurement (Python 3.12, this host): 64 controlled I/O holders entered together
-in 23.17 ms with zero queued jobs, 815,104 bytes of process RSS growth and a
-376,600-byte tracemalloc peak (366,306 bytes live). All jobs settled at
-35.64 ms; all 64 carriers retired at 66.31 ms without shutdown, leaving zero
-active, queued or resident threads and 64 accepted / zero rejected jobs. This
-measures local carrier bookkeeping, not PDF rendering memory, upstream inference
-latency or provider capacity. Idle-reuse lifetime tests also verify completed
-input/output objects are released while their reusable carrier remains alive.
+Measurement (Python 3.12, this host): 64 controlled I/O holders entered together in 23.17 ms with zero queued jobs, 815,104 bytes of process RSS growth and a 376,600-byte tracemalloc peak (366,306 bytes live). All jobs settled at 35.64 ms; all 64 carriers retired at 66.31 ms without shutdown, leaving zero active, queued or resident threads and 64 accepted / zero rejected jobs. This measures local carrier bookkeeping, not PDF rendering memory, upstream inference latency or provider capacity. Idle-reuse lifetime tests also verify completed input/output objects are released while their reusable carrier remains alive.
 
 ## Knowledge-owner and production recovery admission
 
-Problem: a finite enrichment-owner registry deferred an opted-in corpus and
-restart recovery enumerated only its configured owner count. Production restore
-also refused a valid saved job when unrelated live carriers filled a registry.
+Problem: a finite enrichment-owner registry deferred an opted-in corpus and restart recovery enumerated only its configured owner count. Production restore also refused a valid saved job when unrelated live carriers filled a registry.
 
-Decision: start independent knowledge owners on demand; reuse counts govern
-idle threads only. Preserve same-owner coalescing, stop/revive, durable per-asset
-claims, vision authorization and actual startup rollback. Recovery walks ordered
-512-row pages with an exclusive after_user_id cursor through the repository,
-SQL and native authorities; page size bounds transport without truncating total
-owners. Native reads seek the cursor and stream bounded index pages instead of
-materializing a tenant-global inventory with a scan ceiling. Production restore
-retains exact identity/owner checks but drops registry-count admission refusal.
-The retired owner setting leaves the manifest and its generated projection.
+Decision: start independent knowledge owners on demand; reuse counts govern idle threads only. Preserve same-owner coalescing, stop/revive, durable per-asset claims, vision authorization and actual startup rollback. Recovery walks ordered 512-row pages with an exclusive after_user_id cursor through the repository, SQL and native authorities; page size bounds transport without truncating total owners. Native reads seek the cursor and stream bounded index pages instead of materializing a tenant-global inventory with a scan ceiling. Production restore retains exact identity/owner checks but drops registry-count admission refusal. The retired owner setting leaves the manifest and its generated projection.
 
-Alternatives considered: raising owner counts still omits or refuses demand;
-one unbounded inventory response retains all owners and has no transport bound;
-restarting same-owner work concurrently loses stop and asset-claim ownership;
-dropping owner checks would expose another owner's resumed work. The existing
-one-asset-per-owner-turn policy remains a separate scheduling path to audit;
-these changes do not establish full within-corpus inference throughput.
+Alternatives considered: raising owner counts still omits or refuses demand; one unbounded inventory response retains all owners and has no transport bound; restarting same-owner work concurrently loses stop and asset-claim ownership; dropping owner checks would expose another owner's resumed work. The existing one-asset-per-owner-turn policy remains a separate scheduling path to audit; these changes do not establish full within-corpus inference throughput.
 
-Verification covers 64 overlapping independent owners, 1,200 resumed owners,
-cursor advancement failure, 128 restored live jobs, duplicate/foreign identity,
-real native and SQL owner-index pagination, and idle worker retirement.
+Verification covers 64 overlapping independent owners, 1,200 resumed owners, cursor advancement failure, 128 restored live jobs, duplicate/foreign identity, real native and SQL owner-index pagination, and idle worker retirement.
 
-Measurement (Python 3.12, this host): 64 controlled owner callbacks entered in
-19.66 ms with zero queued owners, 815,104 bytes of RSS growth and a
-319,486-byte tracemalloc peak (309,192 bytes live). At 62.5 ms all
-64 carriers had retired without shutdown: zero active, queued, retained owners
-or resident threads; 64 accepted / zero rejected callbacks. This measures local
-owner bookkeeping, excluding paid vision inference and repository asset I/O.
-Native inventory tests restore 520 real owner-index entries and traverse every
-page, including tenant isolation and cursor validation.
+Measurement (Python 3.12, this host): 64 controlled owner callbacks entered in 19.66 ms with zero queued owners, 815,104 bytes of RSS growth and a 319,486-byte tracemalloc peak (309,192 bytes live). At 62.5 ms all 64 carriers had retired without shutdown: zero active, queued, retained owners or resident threads; 64 accepted / zero rejected callbacks. This measures local owner bookkeeping, excluding paid vision inference and repository asset I/O. Native inventory tests restore 520 real owner-index entries and traverse every page, including tenant isolation and cursor validation.
 
 ## Durable paper storage and saved reading without count permits
 
-Problem: native and SQL retained/saved-paper handlers still refused work behind
-aggregate artifact bytes, 128 records, 512 associations and 16 readers. The native
-IR generator still projected retired fields. Browser reading state capped dirty
-documents and serialized every document behind one normal request. Removing
-admission without changing the old fixed-prefix reclamation scan would leave
-expired builds hidden behind the first protected page.
+Problem: native and SQL retained/saved-paper handlers still refused work behind aggregate artifact bytes, 128 records, 512 associations and 16 readers. The native IR generator still projected retired fields. Browser reading state capped dirty documents and serialized every document behind one normal request. Removing admission without changing the old fixed-prefix reclamation scan would leave expired builds hidden behind the first protected page.
 
-Decision: retain transaction-coupled usage accounting without count/total-byte
-admission. Preserve overflow/corruption checks, immutable digests, exact owner,
-lease expiry, requested generation and publication rollback. Native/SQL prune
-uses a persistent owner cursor, 128-row transport pages and 32-chunk deletion
-batches; an unfinished artifact keeps its cursor. Saved-reading writes start
-independently by document while same-document state still coalesces and keeps
-writer/sequence/revision fences. Released entries survive only their pending
-write lifetime; overall close retains its existing deadline. Canonical schemas,
-native/application/frontend projections and launch defaults retire the quotas.
+Decision: retain transaction-coupled usage accounting without count/total-byte admission. Preserve overflow/corruption checks, immutable digests, exact owner, lease expiry, requested generation and publication rollback. Native/SQL prune uses a persistent owner cursor, 128-row transport pages and 32-chunk deletion batches; an unfinished artifact keeps its cursor. Saved-reading writes start independently by document while same-document state still coalesces and keeps writer/sequence/revision fences. Released entries survive only their pending write lifetime; overall close retains its existing deadline. Canonical schemas, native/application/frontend projections and launch defaults retire the quotas.
 
-Alternatives considered: increasing quotas still refuses demand; evicting pinned
-manuscripts loses durable user state; dropping writer identity lets old responses
-overwrite a newer window; unbounded reclamation transactions weaken failure and
-memory ownership; rescanning only the first page starves later expired builds.
-Reader metadata still occupies the existing bounded metadata document; separate
-lease-record layout and remaining parser/compile policy stay on the full audit.
+Alternatives considered: increasing quotas still refuses demand; evicting pinned manuscripts loses durable user state; dropping writer identity lets old responses overwrite a newer window; unbounded reclamation transactions weaken failure and memory ownership; rescanning only the first page starves later expired builds. Reader metadata still occupies the existing bounded metadata document; separate lease-record layout and remaining parser/compile policy stay on the full audit.
 
-Verification includes 256 overlapping native reader leases, 256 saved documents,
-1,025 conversation associations, legacy ledger counts beyond old quotas, exact
-numeric overflow refusal, every upload/publication/reclamation I/O fault matrix,
-recovery after reopening, and a full protected GC page before an expired build.
-A locally served real-browser fixture starts 256 saved-reading requests without
-local refusal, releases every document entry after settlement, and rejects late
-captures after close. The browser service port is controlled; native/SQL tests
-separately verify persistent publication and transaction semantics.
+Verification includes 256 overlapping native reader leases, 256 saved documents, 1,025 conversation associations, legacy ledger counts beyond old quotas, exact numeric overflow refusal, every upload/publication/reclamation I/O fault matrix, recovery after reopening, and a full protected GC page before an expired build. A locally served real-browser fixture starts 256 saved-reading requests without local refusal, releases every document entry after settlement, and rejects late captures after close. The browser service port is controlled; native/SQL tests separately verify persistent publication and transaction semantics.
 
-Measurement (native debug engine, real local filesystem): registering 256
-saved identities took 134.66 ms; the apparent file-length growth after authority
-close was 351,122 bytes. Reopening verified every document identity. This
-measures durable metadata on this filesystem, excluding PDF bytes, inference,
-backup overhead, allocator RSS and production latency guarantees; apparent
-length is distinct from physical allocated blocks.
+Measurement (native debug engine, real local filesystem): registering 256 saved identities took 134.66 ms; the apparent file-length growth after authority close was 351,122 bytes. Reopening verified every document identity. This measures durable metadata on this filesystem, excluding PDF bytes, inference, backup overhead, allocator RSS and production latency guarantees; apparent length is distinct from physical allocated blocks.
 
 ## Classic PDF parsing without local admission slots
 
-Problem: compressed PDFs were refused by an aggregate unfinished count, and a
-fixed process pool queued valid independent work behind its worker count. Direct
-text/visual/ingest paths shared that refusal; HTTP surfaces synthesized busy/503.
-Submission errors could also rerun a potentially published parse inline.
+Problem: compressed PDFs were refused by an aggregate unfinished count, and a fixed process pool queued valid independent work behind its worker count. Direct text/visual/ingest paths shared that refusal; HTTP surfaces synthesized busy/503. Submission errors could also rerun a potentially published parse inline.
 
-Decision: count exact unfinished lifetimes without admission quotas. Each busy
-pooled parse owns one worker executor; independent requests acquire another
-process on demand. Launch-probed counts size idle reuse from CPU/memory headroom,
-excess idle executors retire after settlement, and quiet reusable ones follow
-one generation-fenced timer. Retired count settings and obsolete HTTP refusals
-leave their canonical manifest. Actual worker timeout/error, caller deadlines,
-parser validation, MuPDF locking, owner state and genuine startup errors stay.
-Construction failure before publication alone permits one inline fallback;
-ambiguous submission cleanup owns its executor through a real wait/join. A
-completed parser's TimeoutError is distinct from expiry of its caller's wait.
+Decision: count exact unfinished lifetimes without admission quotas. Each busy pooled parse owns one worker executor; independent requests acquire another process on demand. Launch-probed counts size idle reuse from CPU/memory headroom, excess idle executors retire after settlement, and quiet reusable ones follow one generation-fenced timer. Retired count settings and obsolete HTTP refusals leave their canonical manifest. Actual worker timeout/error, caller deadlines, parser validation, MuPDF locking, owner state and genuine startup errors stay. Construction failure before publication alone permits one inline fallback; ambiguous submission cleanup owns its executor through a real wait/join. A completed parser's TimeoutError is distinct from expiry of its caller's wait.
 
-Alternatives considered: raising slots still denies/queues demand; removing the
-MuPDF lock makes in-process native parsing unsafe; reusing a busy executor merely
-moves the queue; rerunning ambiguous work duplicates CPU/native execution;
-releasing a timed-out live Future loses payload/process lifecycle ownership.
-Direct in-process entrypoints retain the required MuPDF lock and remain a
-separate isolation/performance path in the full audit.
+Alternatives considered: raising slots still denies/queues demand; removing the MuPDF lock makes in-process native parsing unsafe; reusing a busy executor merely moves the queue; rerunning ambiguous work duplicates CPU/native execution; releasing a timed-out live Future loses payload/process lifecycle ownership. Direct in-process entrypoints retain the required MuPDF lock and remain a separate isolation/performance path in the full audit.
 
-Verification includes independent demand beyond idle reuse, exact late Future
-settlement, creation/submission failure separation, actual parser TimeoutError,
-generation-safe idle retirement and real process cleanup. A compatible isolated
-Python launcher loads the installed PyMuPDF against glibc 2.28 without changing
-the application environment or switching its storage authority.
+Verification includes independent demand beyond idle reuse, exact late Future settlement, creation/submission failure separation, actual parser TimeoutError, generation-safe idle retirement and real process cleanup. A compatible isolated Python launcher loads the installed PyMuPDF against glibc 2.28 without changing the application environment or switching its storage authority.
 
-Measurement (installed PyMuPDF, eight real one-page parses): all eight workers
-entered in 1391.44 ms, held with zero local rejection despite idle reuse = 1.
-Parent RSS grew 1,982,464 bytes; aggregate child RSS was 669,216,768
-bytes. Results settled at 1397.16 ms and every child PID was reaped at
-1459.41 ms, with zero remaining unfinished work or managed pools. The
-controlled hold is a test seam; timings include cold interpreter/import startup
-and this host's scheduling, not upstream inference or large-PDF throughput.
+Measurement (installed PyMuPDF, eight real one-page parses): all eight workers entered in 1391.44 ms, held with zero local rejection despite idle reuse = 1. Parent RSS grew 1,982,464 bytes; aggregate child RSS was 669,216,768 bytes. Results settled at 1397.16 ms and every child PID was reaped at 1459.41 ms, with zero remaining unfinished work or managed pools. The controlled hold is a test seam; timings include cold interpreter/import startup and this host's scheduling, not upstream inference or large-PDF throughput.
 
-Provider probes — Problem: fixed per-task thread pools and 4,096-cell admission
-made valid matrix work queue or fail before contacting a provider. Decision: requested
-cells now use the shared demand executor; launch worker values bound idle reuse
-only. Manual and daily matrix construction no longer inject a count sentinel.
-Explicit helper slices, provider authorization, attempt/timeout bounds, same-run
-publication ordering, cancellation and owner CAS remain. Failed persistence
-retains a secret-free terminal snapshot instead of count-evicting fresh results.
-Alternatives: a larger quota retains the same failure mode; a global semaphore would
-serialize independent provider calls. Physical thread creation failures remain
-real errors, and no synthetic success or duplicate inline call is introduced.
-Measurement: 24 controlled cells held simultaneously at idle target 1 entered
-in 5.61 ms and settled in 7.76 ms; process RSS increased by 270,336 bytes while
-held, with 25 additional threads including the calling thread. Thread count
-returned to baseline after settlement. This validates demand ownership and
-cleanup, not real provider latency or billed-call throughput.
+Provider probes — Problem: fixed per-task thread pools and 4,096-cell admission made valid matrix work queue or fail before contacting a provider. Decision: requested cells now use the shared demand executor; launch worker values bound idle reuse only. Manual and daily matrix construction no longer inject a count sentinel. Explicit helper slices, provider authorization, attempt/timeout bounds, same-run publication ordering, cancellation and owner CAS remain. Failed persistence retains a secret-free terminal snapshot instead of count-evicting fresh results. Alternatives: a larger quota retains the same failure mode; a global semaphore would serialize independent provider calls. Physical thread creation failures remain real errors, and no synthetic success or duplicate inline call is introduced. Measurement: 24 controlled cells held simultaneously at idle target 1 entered in 5.61 ms and settled in 7.76 ms; process RSS increased by 270,336 bytes while held, with 25 additional threads including the calling thread. Thread count returned to baseline after settlement. This validates demand ownership and cleanup, not real provider latency or billed-call throughput.
 
 
 ## Host-browser search fallback demand
 
-Problem: the search package's 16-call semaphore silently returned unavailable
-for another eligible fallback while the connected host browser could serve it.
-Decision: every eligible connected fallback invokes its request-bound provider;
-there is no package-wide count admission or waiting queue. The provider retains
-owner/device access authority and physical call ownership. Timeout forwarding,
-content checks, explicit transport policy and real unavailable/error outcomes
-retain their existing behavior. Alternatives: increasing the semaphore postpones
-loss, blocking acquisition queues independent work, and bypassing the host
-provider would lose browser identity/access enforcement.
+Problem: the search package's 16-call semaphore silently returned unavailable for another eligible fallback while the connected host browser could serve it. Decision: every eligible connected fallback invokes its request-bound provider; there is no package-wide count admission or waiting queue. The provider retains owner/device access authority and physical call ownership. Timeout forwarding, content checks, explicit transport policy and real unavailable/error outcomes retain their existing behavior. Alternatives: increasing the semaphore postpones loss, blocking acquisition queues independent work, and bypassing the host provider would lose browser identity/access enforcement.
 
-Controlled offline measurement: 32 blocked calls with distinct bound identities
-remain live while a healthy 33rd completes within two seconds. A transport fault
-settles only its own call, followed by another healthy call; all 35 calls settle,
-34 succeed and one reports unavailable, with zero count-based skips and no
-worker thread left after joined close. Peak provider activity is 33. No new
-thread pool, durable artifact or cache is introduced. Provider work retains its
-existing synchronous owner until actual return. This measures the package/host
-seam, not Chromium tab capacity or real-site throughput. Gates: package browser
-fallback/access/deadline/demand tests, standalone wheel smoke and host search
-bridge/browser ownership tests.
+Controlled offline measurement: 32 blocked calls with distinct bound identities remain live while a healthy 33rd completes within two seconds. A transport fault settles only its own call, followed by another healthy call; all 35 calls settle, 34 succeed and one reports unavailable, with zero count-based skips and no worker thread left after joined close. Peak provider activity is 33. No new thread pool, durable artifact or cache is introduced. Provider work retains its existing synchronous owner until actual return. This measures the package/host seam, not Chromium tab capacity or real-site throughput. Gates: package browser fallback/access/deadline/demand tests, standalone wheel smoke and host search bridge/browser ownership tests.
 
 
 ## Prepared carrier construction by identity
 
-Problem: restoration of every prepared task shared one lock and returned
-`database_busy` after 500 ms, so one slow birth blocked unrelated accepted
-carriers. Decision: synchronize through the shared WeakLockPool by globally
-unique task ID. Each holder/waiter keeps the same lock alive through construction;
-independent IDs start immediately and idle keys disappear. Duplicate restores
-wait for the actual construction then verify owner, digest and unstarted lifecycle,
-returning the same carrier. Same-ID recursion fails as a lifecycle error instead
-of deadlocking. Domain proof/CAS, durable cancellation, ordinary factory authority
-and actual storage errors retain their existing owners. Alternatives: increasing
-the timeout delays global refusal, no lock can replace one resident carrier, and
-a permanent ID-to-lock map retains synchronization state after useful work ends.
+Problem: restoration of every prepared task shared one lock and returned `database_busy` after 500 ms, so one slow birth blocked unrelated accepted carriers. Decision: synchronize through the shared WeakLockPool by globally unique task ID. Each holder/waiter keeps the same lock alive through construction; independent IDs start immediately and idle keys disappear. Duplicate restores wait for the actual construction then verify owner, digest and unstarted lifecycle, returning the same carrier. Same-ID recursion fails as a lifecycle error instead of deadlocking. Domain proof/CAS, durable cancellation, ordinary factory authority and actual storage errors retain their existing owners. Alternatives: increasing the timeout delays global refusal, no lock can replace one resident carrier, and a permanent ID-to-lock map retains synchronization state after useful work ends.
 
-Controlled measurement: 32 blocked independent constructions retain 32 identity
-locks while a healthy 33rd completes within two seconds. Thirty-two duplicate
-restores wait beyond the old 500 ms cutoff and construct exactly one carrier;
-all successful calls retire to zero lock entries. Actual factory failure releases
-the key for retry; foreign owners, changed inputs and started carriers remain
-refused. No worker, queue or durable record is added; weak lock/thread-local
-state lives only with active construction and waiters. These are controlled
-lifecycle measurements, not durable-volume or provider throughput. Gates:
-prepared restore demand, weak lock pool, pending recovery, cancellation and
-terminal delivery tests.
+Controlled measurement: 32 blocked independent constructions retain 32 identity locks while a healthy 33rd completes within two seconds. Thirty-two duplicate restores wait beyond the old 500 ms cutoff and construct exactly one carrier; all successful calls retire to zero lock entries. Actual factory failure releases the key for retry; foreign owners, changed inputs and started carriers remain refused. No worker, queue or durable record is added; weak lock/thread-local state lives only with active construction and waiters. These are controlled lifecycle measurements, not durable-volume or provider throughput. Gates: prepared restore demand, weak lock pool, pending recovery, cancellation and terminal delivery tests.
 
 
 ## Playwright rendering and physical completion
 
-Problem: the synchronous browser worker serialized every fetch/search/PDF/preview
-behind a queue, and caller timeouts left queued or running operations alive.
-Decision: built-in browser operations share one lazy async browser owner loop;
-each admitted call owns its isolated context and starts independently. Blocking
-extraction/file helpers use demand workers and remain attached to their call even
-when Playwright dispatches the callback separately. Context creation shields the
-untransferred result and closes it on cancellation. Timeout and shutdown cancel
-once, drain physical helpers and close contexts before acknowledging completion.
-The server drains used browser work before dependency teardown without importing
-unused search modules. Legacy sync registered handlers keep a separately owned
-thread-affine browser/demand worker. Alternatives: larger serial pools retain a
-queue, sharing a sync browser across threads violates affinity, and one browser
-per normal request multiplies process startup/residency unnecessarily.
+Problem: the synchronous browser worker serialized every fetch/search/PDF/preview behind a queue, and caller timeouts left queued or running operations alive. Decision: built-in browser operations share one lazy async browser owner loop; each admitted call owns its isolated context and starts independently. Blocking extraction/file helpers use demand workers and remain attached to their call even when Playwright dispatches the callback separately. Context creation shields the untransferred result and closes it on cancellation. Timeout and shutdown cancel once, drain physical helpers and close contexts before acknowledging completion. The server drains used browser work before dependency teardown without importing unused search modules. Legacy sync registered handlers keep a separately owned thread-affine browser/demand worker. Alternatives: larger serial pools retain a queue, sharing a sync browser across threads violates affinity, and one browser per normal request multiplies process startup/residency unnecessarily.
 
-Controlled measurement: 32 blocked fetch contexts on one browser/loop allow a
-healthy 33rd to complete within two seconds; all 33 contexts close. Runtime tests
-cover startup failure fan-out, context-creation cancellation, callback helper drain
-and zero calls/threads after shutdown. No durable record or retained result queue
-is added. Context/helper state scales with active work and retires on settlement;
-the used browser remains warm until joined process shutdown. These are offline
-lifecycle measurements; real Chromium availability and whole-browser memory/CPU
-must be reported separately, never inferred from fake page APIs. Gates: package
-Playwright/runtime/access/deadline tests, preview/PDF policy, host shutdown,
-independent wheel import and real-browser smoke where available.
+Controlled measurement: 32 blocked fetch contexts on one browser/loop allow a healthy 33rd to complete within two seconds; all 33 contexts close. Runtime tests cover startup failure fan-out, context-creation cancellation, callback helper drain and zero calls/threads after shutdown. No durable record or retained result queue is added. Context/helper state scales with active work and retires on settlement; the used browser remains warm until joined process shutdown. These are offline lifecycle measurements; real Chromium availability and whole-browser memory/CPU must be reported separately, never inferred from fake page APIs. Gates: package Playwright/runtime/access/deadline tests, preview/PDF policy, host shutdown, independent wheel import and real-browser smoke where available.
 
 ## Terminal observer lifecycle
 
-Problem: a fixed 16-observer quota rejected otherwise valid service adapters,
-and callback snapshots could outlive teardown. Decision: registrations have no
-count quota; each registration owns a generation and per-thread active-call
-counts. External unregister withdraws future claims and joins active callbacks.
-Callback-internal unregister withdraws without joining, avoiding mutual callback
-waits; service teardown must occur outside callbacks. Re-registration cannot
-receive an old snapshot. Required terminal delivery precedes optional observers;
-receipt deduplication, transient suppression and exception isolation remain.
-Alternative: a larger quota retains arbitrary rejection; observer worker queues
-add ownership and shutdown costs without helping these synchronous adapters.
-The controlled fixture delivers to 65 observers once, joins a blocked callback,
-and leaves zero registrations/invocations after teardown; no worker is added.
+Problem: a fixed 16-observer quota rejected otherwise valid service adapters, and callback snapshots could outlive teardown. Decision: registrations have no count quota; each registration owns a generation and per-thread active-call counts. External unregister withdraws future claims and joins active callbacks. Callback-internal unregister withdraws without joining, avoiding mutual callback waits; service teardown must occur outside callbacks. Re-registration cannot receive an old snapshot. Required terminal delivery precedes optional observers; receipt deduplication, transient suppression and exception isolation remain. Alternative: a larger quota retains arbitrary rejection; observer worker queues add ownership and shutdown costs without helping these synchronous adapters. The controlled fixture delivers to 65 observers once, joins a blocked callback, and leaves zero registrations/invocations after teardown; no worker is added.
 
 ## Operator identity configuration demand
 
-Problem: local site credentials, private-host allowlists and the encrypted vault
-rejected valid additions at 64/64/128 rows; cookie adapters silently retained
-only 256 cookies and declarations refused more than 64 fields. Decision: retain
-complete requested collections through existing atomic JSON persistence, without
-aggregate count admission. Name uniqueness, required cookies, hostname/strategy
-validation, encryption, redaction, permissions and per-value validation remain.
-Immutable vault stages share the existing cross-process transaction, preserving
-unrelated entries and duplicate-name refusal. No worker or queue is added; these
-operator stores retain durable configuration until explicit edit/delete.
-Alternatives: larger quotas still reject valid configuration; eviction would
-silently delete credentials or reachability grants. The controlled fixture writes
-193 sources (73,602 bytes, 0.564 s), 193 hosts (29,102 bytes, 0.165 s) and 257
-vault entries (74,838 bytes, 0.430 s), using temporary local files. Tests reload,
-update/delete late rows, preserve 257 cookies/declarations, and exercise four
-processes retaining 136 immutable stages. These are fixture storage measurements,
-not production throughput or peak RSS guarantees.
+Problem: local site credentials, private-host allowlists and the encrypted vault rejected valid additions at 64/64/128 rows; cookie adapters silently retained only 256 cookies and declarations refused more than 64 fields. Decision: retain complete requested collections through existing atomic JSON persistence, without aggregate count admission. Name uniqueness, required cookies, hostname/strategy validation, encryption, redaction, permissions and per-value validation remain. Immutable vault stages share the existing cross-process transaction, preserving unrelated entries and duplicate-name refusal. No worker or queue is added; these operator stores retain durable configuration until explicit edit/delete. Alternatives: larger quotas still reject valid configuration; eviction would silently delete credentials or reachability grants. The controlled fixture writes 193 sources (73,602 bytes, 0.564 s), 193 hosts (29,102 bytes, 0.165 s) and 257 vault entries (74,838 bytes, 0.430 s), using temporary local files. Tests reload, update/delete late rows, preserve 257 cookies/declarations, and exercise four processes retaining 136 immutable stages. These are fixture storage measurements, not production throughput or peak RSS guarantees.
 
 ## Model-routing secret demand and reclamation
 
-Problem: memory, SQL, native writes and migration restore refused the 1,025th
-secret. Native lists assumed at most two pages; a fixed active-reference count
-and oldest-row prune prefix prevented protecting/reclaiming larger collections.
-Decision: retain complete owner/tenant secret sets without count admission.
-Native count arithmetic remains checked and listing traverses every bounded
-index page with exact count/index agreement. SQL mutation locks the requested
-secret identity rather than serializing the owner for quota counting. Required
-record validation, encrypted ciphertext, redacted listings, authority revision
-CAS, atomic indexes and migration identity/replay checks remain unchanged.
-Prune pages past protected references, deleting at most its existing 256-row
-maintenance slice; that slice limits mutation work, never stored identities.
-No worker or queue is added. Secrets remain durable until explicit delete or
-existing inactive/age-qualified reclamation. Alternatives: larger quotas still
-reject valid configuration; dropping references risks deleting active secrets.
-The SQLite fixture retains/lists 2,105 rows (193,552 JSON bytes, 0.022 s combined
-put/list), then protects 1,800 and deletes 256 later rows in 0.004 s. Native
-fixtures cover 2,105 restored rows across reopen, late replay/divergence, complete
-listing and two cleanup slices. Measurements concern controlled metadata only,
-not production throughput, cryptographic work or peak memory.
+Problem: memory, SQL, native writes and migration restore refused the 1,025th secret. Native lists assumed at most two pages; a fixed active-reference count and oldest-row prune prefix prevented protecting/reclaiming larger collections. Decision: retain complete owner/tenant secret sets without count admission. Native count arithmetic remains checked and listing traverses every bounded index page with exact count/index agreement. SQL mutation locks the requested secret identity rather than serializing the owner for quota counting. Required record validation, encrypted ciphertext, redacted listings, authority revision CAS, atomic indexes and migration identity/replay checks remain unchanged. Prune pages past protected references, deleting at most its existing 256-row maintenance slice; that slice limits mutation work, never stored identities. No worker or queue is added. Secrets remain durable until explicit delete or existing inactive/age-qualified reclamation. Alternatives: larger quotas still reject valid configuration; dropping references risks deleting active secrets. The SQLite fixture retains/lists 2,105 rows (193,552 JSON bytes, 0.022 s combined put/list), then protects 1,800 and deletes 256 later rows in 0.004 s. Native fixtures cover 2,105 restored rows across reopen, late replay/divergence, complete listing and two cleanup slices. Measurements concern controlled metadata only, not production throughput, cryptographic work or peak memory.
 
 ## Incremental translation backlog ownership
 
-Problem: a process accumulator quota refused independent tasks, while finite
-buffers discarded accepted previews and ordinary terminal handoff evicted them.
-Decision: independent accumulators start on demand; each owns one lazy anonymous
-file containing pending UTF-8 bodies and an ordered key/range index. Identical
-pending keys coalesce. Consumed/replaced ranges reclaim when obsolete bytes
-exceed live bytes; copying uses 64 KiB scratch space. Empty buffers truncate,
-and idle retirement, consumed terminal handoff, explicit close and worker
-failure release the file. Failed housekeeping retains accepted ranges for retry.
-Normal stamp/replacement drains accepted segments first; explicit cancellation
-withdraws pending work and wakes the consumer. No extra worker is introduced.
-The active, queue-capacity and preview-count launch knobs are retired. Provider
-cost/deadline policy remains explicit; completed originals/translations use the
-paired file-backed task cache described below.
-Alternatives: larger quotas still refuse/discard demand; resident text deques
-scale heap with backlog; dropping pending segments during normal stamp loses
-requested enrichment. A controlled 2,085-segment backlog retains 68,321,280
-bytes in one anonymous file with 485,894 peak Python allocation bytes and zero
-drops; enqueue takes 0.048 s. Drain/terminal leaves zero file bytes/open files.
-A 65-blocked-call plus healthy 66th task fixture joins every worker and releases
-all registry/file ownership after cancellation. These are synthetic backlog and
-lifecycle measurements, not provider throughput, total RSS or restart durability.
+Problem: a process accumulator quota refused independent tasks, while finite buffers discarded accepted previews and ordinary terminal handoff evicted them. Decision: independent accumulators start on demand; each owns one lazy anonymous file containing pending UTF-8 bodies and an ordered key/range index. Identical pending keys coalesce. Consumed/replaced ranges reclaim when obsolete bytes exceed live bytes; copying uses 64 KiB scratch space. Empty buffers truncate, and idle retirement, consumed terminal handoff, explicit close and worker failure release the file. Failed housekeeping retains accepted ranges for retry. Normal stamp/replacement drains accepted segments first; explicit cancellation withdraws pending work and wakes the consumer. No extra worker is introduced. The active, queue-capacity and preview-count launch knobs are retired. Provider cost/deadline policy remains explicit; completed originals/translations use the paired file-backed task cache described below. Alternatives: larger quotas still refuse/discard demand; resident text deques scale heap with backlog; dropping pending segments during normal stamp loses requested enrichment. A controlled 2,085-segment backlog retains 68,321,280 bytes in one anonymous file with 485,894 peak Python allocation bytes and zero drops; enqueue takes 0.048 s. Drain/terminal leaves zero file bytes/open files. A 65-blocked-call plus healthy 66th task fixture joins every worker and releases all registry/file ownership after cancellation. These are synthetic backlog and lifecycle measurements, not provider throughput, total RSS or restart durability.
 
 ## Incremental translation shutdown ownership
 
-Problem: demand accumulators could outlive service teardown; registry removal
-alone did not prove a worker had physically returned. Retired-cache handoffs
-also borrowed storage synchronously without a shutdown ownership receipt.
-Decision: one lifecycle fence withdraws new previews/retired-cache handoffs,
-cancels existing accumulators, joins weakly registered physical thread handles,
-and waits for active synchronous handoffs. Weak handles retain no task/cache
-payloads after worker retirement. Started-then-failed carriers remain joinable;
-never-started failures release their handles. Explicit cancellation suppresses
-late preview publication and clears reconstructible completed caches.
-Production shutdown runs this join off the serving loop after task quiescence,
-before browser/provider/push/storage teardown; failure retains those dependencies.
-An unused translation module stays unloaded. Callback-internal owner close
-refuses self-join before changing lifecycle state; repeated external close joins
-existing work. No new worker, timer, pool, capacity gate or durable store is added.
-Alternatives: a timeout/registry-only stop can certify teardown while callbacks
-still execute; retaining accumulator objects would extend payload lifetime.
-Controlled callbacks and synchronous handoffs keep close pending until release;
-a deregistered worker remains owned beyond 1.1 s and then physically joins.
-After close, worker handles, registered accumulators, synchronous invocations and
-spool ownership are zero. These are lifecycle witnesses, not provider latency or
-peak RSS measurements. Preview frames and completed-cache retention have their
-own demand owners below.
+Problem: demand accumulators could outlive service teardown; registry removal alone did not prove a worker had physically returned. Retired-cache handoffs also borrowed storage synchronously without a shutdown ownership receipt. Decision: one lifecycle fence withdraws new previews/retired-cache handoffs, cancels existing accumulators, joins weakly registered physical thread handles, and waits for active synchronous handoffs. Weak handles retain no task/cache payloads after worker retirement. Started-then-failed carriers remain joinable; never-started failures release their handles. Explicit cancellation suppresses late preview publication and clears reconstructible completed caches. Production shutdown runs this join off the serving loop after task quiescence, before browser/provider/push/storage teardown; failure retains those dependencies. An unused translation module stays unloaded. Callback-internal owner close refuses self-join before changing lifecycle state; repeated external close joins existing work. No new worker, timer, pool, capacity gate or durable store is added. Alternatives: a timeout/registry-only stop can certify teardown while callbacks still execute; retaining accumulator objects would extend payload lifetime. Controlled callbacks and synchronous handoffs keep close pending until release; a deregistered worker remains owned beyond 1.1 s and then physically joins. After close, worker handles, registered accumulators, synchronous invocations and spool ownership are zero. These are lifecycle witnesses, not provider latency or peak RSS measurements. Preview frames and completed-cache retention have their own demand owners below.
 
 ## Translation preview transport work
 
-Problem: every provider chunk copied all completed translations, then serialized
-both the full block map and joined narration. Decision: incremental producers
-publish only the current block's partial/final preview in `partialByRound`.
-The presentation controller owns a null-prototype keyed index, merging changed
-keys without copying prior history or mutating borrowed DTOs. An explicit empty
-map resets previews; clearing/failing the activity releases it. Legacy whole-turn
-`partial` frames still work. Joined narration is derived lazily at presentation;
-the existing graph paint scheduler coalesces a burst while retaining every key.
-Text and reasoning blocks consume ephemeral previews independently; durable
-translations remain preferred and previews never become `translatedMarkdown`.
-The plain-text Surface renderer respects the selected display text too.
-Alternatives: increasing preview count with cumulative frames makes transport
-quadratic; overwriting each received map loses earlier blocks. No new worker,
-queue, timer, durable registry or capacity gate is added. These optional push
-previews remain reconstructible; authoritative completion/reload uses the Turn.
-A controlled 2,000-completed-block fixture reduces a progress payload from
-7,249,045 bytes to 125 bytes. Real Chromium against the local app merges four
-updates into one subsequent paint, preserves all final previews and leaves the
-source TurnState unchanged. Completed cache bodies use the paired file owner
-below; empty accumulators retire on demand as described below. Payload size
-is not total RSS or throughput.
+Problem: every provider chunk copied all completed translations, then serialized both the full block map and joined narration. Decision: incremental producers publish only the current block's partial/final preview in `partialByRound`. The presentation controller owns a null-prototype keyed index, merging changed keys without copying prior history or mutating borrowed DTOs. An explicit empty map resets previews; clearing/failing the activity releases it. Legacy whole-turn `partial` frames still work. Joined narration is derived lazily at presentation; the existing graph paint scheduler coalesces a burst while retaining every key. Text and reasoning blocks consume ephemeral previews independently; durable translations remain preferred and previews never become `translatedMarkdown`. The plain-text Surface renderer respects the selected display text too. Alternatives: increasing preview count with cumulative frames makes transport quadratic; overwriting each received map loses earlier blocks. No new worker, queue, timer, durable registry or capacity gate is added. These optional push previews remain reconstructible; authoritative completion/reload uses the Turn. A controlled 2,000-completed-block fixture reduces a progress payload from 7,249,045 bytes to 125 bytes. Real Chromium against the local app merges four updates into one subsequent paint, preserves all final previews and leaves the source TurnState unchanged. Completed cache bodies use the paired file owner below; empty accumulators retire on demand as described below. Payload size is not total RSS or throughput.
 
 ## Completed translation cache demand
 
-Problem: a 32-default/1,024-maximum preview count suppressed valid later
-segments, while paid originals/translations remained resident in task maps.
-Source/result thresholds also declined long input and discarded paid output.
-Decision: remove preview count and source/result character admission gates, and
-the preview-count launch knob. Complete source/result text uses the existing
-file-backed pending buffer and paid cache. One lazy anonymous file per task
-stores paired UTF-8 bodies; mapping views retain keys/ranges only.
-Pair indexes publish after complete writes, preserving prior paid pairs after
-partial-write failure. Replaced ranges reclaim when obsolete bytes exceed live
-bytes; copying uses 64 KiB scratch. Worker retirement/recreation reuses the same
-cache. Failed terminal persistence keeps the cache for retry; successful
-terminal handoff or explicit cancellation clears views and closes the empty file.
-Done notifications contain status only; consumers hydrate authoritative Turn
-facts rather than receiving another complete cache mirror. Provider cost,
-deadline/retry policy and source identity validation remain explicit. The
-translation engine retains whole-document context, protected markup and its
-truncation/model-rotation checks; local 32,000/64,000 character thresholds no
-longer decline input or discard completed output. Larger thresholds still
-refuse valid text, and arbitrary splitting breaks mixed-language/markup context.
-No extra worker, pool, timer, durable store or count quota is introduced.
-Alternatives: a larger count gate still suppresses valid previews; uncapped
-resident dictionaries grow payload heap; publishing half a pair corrupts source
-matching. The controlled 2,049-pair fixture retains 134,283,264 file bytes with
-985,444 peak Python allocation bytes, writing in 0.104 s; clear leaves zero file
-bytes/open files. A 1,100-preview fixture crosses worker recreation and hands
-all exact pairs to the existing terminal commit. These measure resident cache
-ownership, not total RSS. Terminal enrichment borrows a pinned file snapshot and
-reads only authoritative segment keys as described below; its projection/storage
-encoding still follows the existing authority policy.
-A controlled long-text fixture retains 129 complete source/result pairs
-(280,000/150,000 characters each), totaling
-94,170,000 file bytes with 1,485,460 peak Python
-allocation during append and 0.1473 s write time. Inputs were
-allocated before tracing; this is cache append memory, not total process RSS.
-Clearing closes the file. Real SQLite settlement/cold-read tests preserve long
-source and translated text under the ordinary owner/source/revision fences.
+Problem: a 32-default/1,024-maximum preview count suppressed valid later segments, while paid originals/translations remained resident in task maps. Source/result thresholds also declined long input and discarded paid output. Decision: remove preview count and source/result character admission gates, and the preview-count launch knob. Complete source/result text uses the existing file-backed pending buffer and paid cache. One lazy anonymous file per task stores paired UTF-8 bodies; mapping views retain keys/ranges only. Pair indexes publish after complete writes, preserving prior paid pairs after partial-write failure. Replaced ranges reclaim when obsolete bytes exceed live bytes; copying uses 64 KiB scratch. Worker retirement/recreation reuses the same cache. Failed terminal persistence keeps the cache for retry; successful terminal handoff or explicit cancellation clears views and closes the empty file. Done notifications contain status only; consumers hydrate authoritative Turn facts rather than receiving another complete cache mirror. Provider cost, deadline/retry policy and source identity validation remain explicit. The translation engine retains whole-document context, protected markup and its truncation/model-rotation checks; local 32,000/64,000 character thresholds no longer decline input or discard completed output. Larger thresholds still refuse valid text, and arbitrary splitting breaks mixed-language/markup context. No extra worker, pool, timer, durable store or count quota is introduced. Alternatives: a larger count gate still suppresses valid previews; uncapped resident dictionaries grow payload heap; publishing half a pair corrupts source matching. The controlled 2,049-pair fixture retains 134,283,264 file bytes with 985,444 peak Python allocation bytes, writing in 0.104 s; clear leaves zero file bytes/open files. A 1,100-preview fixture crosses worker recreation and hands all exact pairs to the existing terminal commit. These measure resident cache ownership, not total RSS. Terminal enrichment borrows a pinned file snapshot and reads only authoritative segment keys as described below; its projection/storage encoding still follows the existing authority policy. A controlled long-text fixture retains 129 complete source/result pairs (280,000/150,000 characters each), totaling 94,170,000 file bytes with 1,485,460 peak Python allocation during append and 0.1473 s write time. Inputs were allocated before tracing; this is cache append memory, not total process RSS. Clearing closes the file. Real SQLite settlement/cold-read tests preserve long source and translated text under the ordinary owner/source/revision fences.
 
 ## Incremental translation idle lifetime
 
-Problem: every accumulator retained an idle OS thread for 300 seconds, and an
-arrival during consumer retirement could be refused despite reusable paid cache.
-Decision: enqueue the first accepted segment before starting its carrier; a
-startup commit signal prevents provider dispatch after partial-start failure.
-Consumers retire immediately after draining pending work. Idle retirement owns
-no complete-cache copy or storage commit; terminal handoff owns persistence.
-Producers atomically replace idle-retired carriers and reuse the task cache.
-Terminal/cancel requests fence later submissions, so retirement cannot reopen a
-settled task. A failed producer does not withdraw another accepted producer's
-carrier. Physical worker handles remain joined through the existing shutdown
-owner. No new pool, timer or count-admission queue is introduced.
-Alternatives: shortening a timeout retains idle occupancy; blindly retrying any
-closed queue would reopen cancelled/terminal owners; starting before handoff
-can race an empty consumer; dispatch before startup success can create effects
-while reporting failure. The controlled fixture runs 128 independent completed
-jobs, then observes zero live idle workers/registry entries and retains paid
-cache until explicit cancellation releases its files. Separate fixtures verify
-retirement-window replacement, zero model calls after partial-start failure and
-continued accepted work after an unrelated producer fault. These are lifetime
-counts, not production latency or total RSS guarantees. Terminal complete-map
-materialization and project-wide remaining gates still require their owning work.
+Problem: every accumulator retained an idle OS thread for 300 seconds, and an arrival during consumer retirement could be refused despite reusable paid cache. Decision: enqueue the first accepted segment before starting its carrier; a startup commit signal prevents provider dispatch after partial-start failure. Consumers retire immediately after draining pending work. Idle retirement owns no complete-cache copy or storage commit; terminal handoff owns persistence. Producers atomically replace idle-retired carriers and reuse the task cache. Terminal/cancel requests fence later submissions, so retirement cannot reopen a settled task. A failed producer does not withdraw another accepted producer's carrier. Physical worker handles remain joined through the existing shutdown owner. No new pool, timer or count-admission queue is introduced. Alternatives: shortening a timeout retains idle occupancy; blindly retrying any closed queue would reopen cancelled/terminal owners; starting before handoff can race an empty consumer; dispatch before startup success can create effects while reporting failure. The controlled fixture runs 128 independent completed jobs, then observes zero live idle workers/registry entries and retains paid cache until explicit cancellation releases its files. Separate fixtures verify retirement-window replacement, zero model calls after partial-start failure and continued accepted work after an unrelated producer fault. These are lifetime counts, not production latency or total RSS guarantees. Terminal complete-map materialization and project-wide remaining gates still require their owning work.
 
 ## Terminal translation snapshot reads
 
-Problem: terminal enrichment decoded every cached source/translation into two
-complete dictionaries, even when the authoritative Turn referenced few keys.
-Projection merge also duplicated the already private projection twice.
-Decision: freeze the small range/count index and duplicate its anonymous-file
-handle for the synchronous commit lifetime. Mapping lookups decode only requested
-keys. Absolute-position reads isolate the snapshot from append/reclamation seek
-cursors; platforms without pread use the task cache lock for cursor isolation.
-Append, replacement, cache clear and file reclamation cannot revoke pinned data.
-The snapshot closes in finally after success, failure or retry; completed-cache
-retention still follows terminal persistence/cancellation. Projection merge makes
-one private deep copy and compares it to the untouched original mapping.
-Owner predicates, source equality, settled-Turn refusal, revision CAS and storage
-retry remain at the existing authority boundary. No worker, timer, body mirror,
-capacity gate, transaction split or alternate storage authority is introduced.
-Alternatives: retaining complete dictionaries multiplies decoded heap; borrowing
-mutable live file ranges breaks source matching across cancellation/reclamation;
-splitting authority commits would weaken the existing atomic update contract.
-The 2,049-pair fixture retains 134,283,264 file bytes; committing one authoritative
-segment decodes exactly two values with 248,195 peak Python allocation bytes in
-0.0003 s. Replacement/clear retains old snapshot values until its file handle
-closes. These are controlled enrichment-read measurements, not production
-latency, total RSS or removal of final projection/storage encoding limits.
+Problem: terminal enrichment decoded every cached source/translation into two complete dictionaries, even when the authoritative Turn referenced few keys. Projection merge also duplicated the already private projection twice. Decision: freeze the small range/count index and duplicate its anonymous-file handle for the synchronous commit lifetime. Mapping lookups decode only requested keys. Absolute-position reads isolate the snapshot from append/reclamation seek cursors; platforms without pread use the task cache lock for cursor isolation. Append, replacement, cache clear and file reclamation cannot revoke pinned data. The snapshot closes in finally after success, failure or retry; completed-cache retention still follows terminal persistence/cancellation. Projection merge makes one private deep copy and compares it to the untouched original mapping. Owner predicates, source equality, settled-Turn refusal, revision CAS and storage retry remain at the existing authority boundary. No worker, timer, body mirror, capacity gate, transaction split or alternate storage authority is introduced. Alternatives: retaining complete dictionaries multiplies decoded heap; borrowing mutable live file ranges breaks source matching across cancellation/reclamation; splitting authority commits would weaken the existing atomic update contract. The 2,049-pair fixture retains 134,283,264 file bytes; committing one authoritative segment decodes exactly two values with 248,195 peak Python allocation bytes in 0.0003 s. Replacement/clear retains old snapshot values until its file handle closes. These are controlled enrichment-read measurements, not production latency, total RSS or removal of final projection/storage encoding limits.
 
 ## Push connection demand
 
-Problem: local Push connection registration rejected process/owner counts at
-64/12 reference defaults and 256/128 hard ceilings, scanning all existing peers
-for every new socket. Decision: remove connection quotas, constructor capacity
-arguments and their launch overrides. Authenticated sockets register in the
-existing weak set without a count scan; subscription/owner filtering and eager
-unregister/disconnect remain. Shutdown withdraws new registrations through its
-lifecycle fence and reports service closing (503), never capacity throttling.
-Health reports demand admission; obsolete connection-capacity gauges and install
-knob guidance are removed. No worker, timer, alternate registry or durable state
-is introduced by registration. Local event FIFOs have no count/byte/frame
-refusal, oldest-frame drop, sustained-pressure disconnect or 64-pong eviction.
-One immutable JSON publication is prepared on demand workers and shared across
-matching sockets; FIFO references pin segmented anonymous files until delivery
-or disconnect. Segment and idle worker reuse hints derive from existing launch
-observations and never restrict accepted work. Independent file ranges use
-short reservations and cursor-independent I/O where available. Slow encoding
-and disk reads preserve control/RPC priority; cancellation retains an active
-event and joins every asyncio waiter. Socket close joins privately owned
-workers; application shutdown joins the hub owner. Encoding/file/actual socket
-failures still end affected delivery explicitly, preserving durable authority.
-The sole socket writer sends stored JSON directly instead of parsing and
-serializing large event bodies on the serving loop. Event-limit launch knobs
-and capacity gauges are retired; health reports owned file counts/bytes.
-Alternatives: larger quotas still reject valid sockets; registration-time peer
-scans make bursts quadratic; evicting old sockets drops live ownership. The
-2,049-same-owner fixture registers in 0.0059 s with 295,332 peak Python allocation
-bytes for the registry operation (clients allocated beforehand), then unregisters
-to zero. A 1,026-client fixture delivers only to its 513 authenticated matching
-owners, drains retained bytes, and releases every subscription/client on close.
-These are synthetic registry/lifetime measurements, not socket memory, actual
-network throughput. Increasing old quotas still rejects valid events; unbounded
-resident payload dictionaries multiply heap. Temporary files retain exact
-accepted bytes without a second durable store. Standard-library JSON encoding
-avoids oversized backing allocations from concurrent large orjson encodes.
-A controlled 129-event/33-client fixture holds 4,257 FIFO references to
-135,273,695 file bytes, with 472,825 resident and 97,295,716 peak traced Python
-bytes after 0.6193 s preparation. Source bodies were created during tracing.
-Peak includes concurrently active inputs/encoding; resident bytes are measured
-after every preparation completes. Disconnect/unregister releases all files
-and client entries. This is temporary transport residency, not total RSS or a
-network throughput guarantee. Tests deliver 4,097 FIFO events and a 9 MiB
-Unicode frame, preserve shared publication identity/owner filtering, inject
-partial writes, and join repeated cancellation. A real Quart WebSocket receives
-1,026 ordered events including the large frame without pressure disconnect.
+Problem: local Push connection registration rejected process/owner counts at 64/12 reference defaults and 256/128 hard ceilings, scanning all existing peers for every new socket. Decision: remove connection quotas, constructor capacity arguments and their launch overrides. Authenticated sockets register in the existing weak set without a count scan; subscription/owner filtering and eager unregister/disconnect remain. Shutdown withdraws new registrations through its lifecycle fence and reports service closing (503), never capacity throttling. Health reports demand admission; obsolete connection-capacity gauges and install knob guidance are removed. No worker, timer, alternate registry or durable state is introduced by registration. Local event FIFOs have no count/byte/frame refusal, oldest-frame drop, sustained-pressure disconnect or 64-pong eviction. One immutable JSON publication is prepared on demand workers and shared across matching sockets; FIFO references pin segmented anonymous files until delivery or disconnect. Segment and idle worker reuse hints derive from existing launch observations and never restrict accepted work. Independent file ranges use short reservations and cursor-independent I/O where available. Slow encoding and disk reads preserve control/RPC priority; cancellation retains an active event and joins every asyncio waiter. Socket close joins privately owned workers; application shutdown joins the hub owner. Encoding/file/actual socket failures still end affected delivery explicitly, preserving durable authority. The sole socket writer sends stored JSON directly instead of parsing and serializing large event bodies on the serving loop. Event-limit launch knobs and capacity gauges are retired; health reports owned file counts/bytes. Alternatives: larger quotas still reject valid sockets; registration-time peer scans make bursts quadratic; evicting old sockets drops live ownership. The 2,049-same-owner fixture registers in 0.0059 s with 295,332 peak Python allocation bytes for the registry operation (clients allocated beforehand), then unregisters to zero. A 1,026-client fixture delivers only to its 513 authenticated matching owners, drains retained bytes, and releases every subscription/client on close. These are synthetic registry/lifetime measurements, not socket memory, actual network throughput. Increasing old quotas still rejects valid events; unbounded resident payload dictionaries multiply heap. Temporary files retain exact accepted bytes without a second durable store. Standard-library JSON encoding avoids oversized backing allocations from concurrent large orjson encodes. A controlled 129-event/33-client fixture holds 4,257 FIFO references to 135,273,695 file bytes, with 472,825 resident and 97,295,716 peak traced Python bytes after 0.6193 s preparation. Source bodies were created during tracing. Peak includes concurrently active inputs/encoding; resident bytes are measured after every preparation completes. Disconnect/unregister releases all files and client entries. This is temporary transport residency, not total RSS or a network throughput guarantee. Tests deliver 4,097 FIFO events and a 9 MiB Unicode frame, preserve shared publication identity/owner filtering, inject partial writes, and join repeated cancellation. A real Quart WebSocket receives 1,026 ordered events including the large frame without pressure disconnect.
 
 ## Webhook subscription demand
 
-Problem: registration rejected global and owner subscription counts, while the
-loaded delivery snapshot independently discarded valid rows beyond its count
-budget. Decision: persist owner-bound subscriptions through the existing atomic
-JSON authority without count admission, and project all valid persisted rows.
-The retired subscription override and capacity health fields are removed.
-New opaque subscription IDs use 128 random bits so growing catalogs do not
-inherit the old 32-bit collision risk; existing IDs remain readable/deletable.
-Filtering, secret redaction, HMAC signatures, owner-scoped list/delete, URL/egress
-validation and the cross-process atomic update remain. The transient failure
-state cache uses the existing retry-state reuse hint; its eviction is not
-subscription admission. Immediate/retry and event-byte policies remain separate
-unfinished delivery work. Alternatives: larger quotas still refuse valid rows;
-truncating reload silently deactivates subscriptions; evicting rows deletes
-operator configuration. Durable rows live until explicit deletion. No new
-worker, store, or background lifecycle is introduced by this change.
-A controlled 4,098-row fixture stores 1,183,247 JSON
-bytes; one late atomic append takes 0.1886 s, with
-8,690,442 peak and 2,470,043
-resident traced Python allocation during append/cache publication. Rows were
-seeded before tracing. Cold reload preserves all rows; HTTP tests cover creation,
-owner-only listing, secret redaction, cross-owner refusal and explicit deletion
-beyond the old global/owner ceilings. These are fixture measurements, not total
-RSS or production throughput.
+Problem: registration rejected global and owner subscription counts, while the loaded delivery snapshot independently discarded valid rows beyond its count budget. Decision: persist owner-bound subscriptions through the existing atomic JSON authority without count admission, and project all valid persisted rows. The retired subscription override and capacity health fields are removed. New opaque subscription IDs use 128 random bits so growing catalogs do not inherit the old 32-bit collision risk; existing IDs remain readable/deletable. Filtering, secret redaction, HMAC signatures, owner-scoped list/delete, URL/egress validation and the cross-process atomic update remain. Each active subscription head owns its actual retry attempt/backoff state; no failure-state cache or count eviction controls delivery. Immediate/retry references now use the shared file owner described below; Independent HTTP dispatch uses ordered owner/subscription lanes as described below. Alternatives: larger quotas still refuse valid rows; truncating reload silently deactivates subscriptions; evicting rows deletes operator configuration. Durable rows live until explicit deletion. No new worker, store, or background lifecycle is introduced by this change. A controlled 4,098-row fixture stores 1,183,247 JSON bytes; one late atomic append takes 0.1886 s, with 8,690,442 peak and 2,470,043 resident traced Python allocation during append/cache publication. Rows were seeded before tracing. Cold reload preserves all rows; HTTP tests cover creation, owner-only listing, secret redaction, cross-owner refusal and explicit deletion beyond the old global/owner ceilings. These are fixture measurements, not total RSS or production throughput.
+
+## Webhook event and retry residency
+
+Problem: count/byte admission dropped immediate/retry work, individual large frames were refused, and five actual transient failures discarded a delivery. Decision: ordered immediate and delayed references retain accepted work without count/byte/frame/attempt admission. Shared JSON encoding/file residency now lives in the standard-library `tofu_workers/json_frames.py`; Push binds its launch hints through its adapter, and Webhook uses its own launch-derived file/worker reuse hints. Each publication encodes once off the publisher thread; matching subscriptions and retries pin one immutable anonymous-file range. Only the active HTTP attempt materializes its body, preserving timestamp/HMAC bytes, owner-marker removal, URL revalidation, redirect denial and permanent-status classification. Transient retries share the coordinator's delayed heap with backoff derived from actual failures; exponent calculation saturates without allocating ever-growing integers. Deleted/disabled subscriptions withdraw work. Actual invalid-input, encoding/storage and outbound transport failures remain observable; temporary residency introduces no new durable delivery authority. Shutdown withdraws the publication listener and observes both the sender and exact encoding join carrier through one deadline. A timeout retains physical ownership and reports unfinished close; completion requires both to exit. Alternatives: larger quotas still discard valid work; resident payload mirrors multiply heap; one Timer thread per retry retains idle physical workers; moving file code into each transport creates two lifecycle implementations. The coordinator now delegates blocking HTTP work to the joined demand owner through the injected transport port described below. A controlled 129-event/33-subscription fixture retains 4,257 references to 135,269,051 file bytes, with 1,634,461 resident and 14,000,747 peak traced Python allocation after 0.6139 s preparation. Source bodies were created during tracing; peak includes active encoding. Queue withdrawal and physical close leave 0 files. Tests retain 4,257 retries, progress beyond five attempts, deliver a signed 9 MiB Unicode body, and reject premature shutdown completion while an encoder is blocked. These measurements are transport residency, not total RSS or network throughput.
+
+## Independent webhook HTTP delivery
+
+Problem: the single delivery daemon blocked every subscription behind one slow HTTP request, despite accepting the references. Decision: a lightweight coordinator owns FIFO lanes keyed by explicit owner/subscription identity and retry timing; the existing demand worker owner runs independent HTTP effects. No process active-count/queue quota exists. Only one unresolved head per logical subscription preserves event order; another owner/subscription progresses immediately. Each head retains actual retry state until success, permanent failure or revocation, replacing the redundant evicting failure cache. Physical entry rechecks live owner identity and deletion/disable before network work. Shutdown signals the coordinator and joins the same owned HTTP/encoding workers; a short observation timeout retains physical ownership instead of reporting completion. Startup publishes its worker/listener only after activation succeeds; partial physical start is signaled and joined without sending HTTP prematurely. The real startup path also fixes previously missing global declarations. Alternatives: a fixed send pool still blocks independent endpoints; unbounded parallel posts within one subscription reorder events; one waiting Timer per retry retains idle threads. The synthetic 32-blocked-request fixture completes the healthy 33rd call in 0.00022 s before any blocked request releases, then joins to zero workers. This is controlled scheduling latency, not network throughput. Tests cover owner-scoped lane identity, ordered retries beyond the former five attempts, live revocation, listener activation/withdrawal and physical close. Owner: `lib/webhook_delivery/coordinator.py`; route/storage/HTTP/auth ports remain in `routes/api_v1/webhooks.py`, while `tofu_workers/json_frames.py` owns physical encoding/read/associated transport work under one close boundary.
+
+## Account-usage refresh demand
+
+Problem: the third independent owner/account refresh was silently deferred by a two-daemon process cap and presented as capacity retry. Decision: remove that count admission while retaining the identity-specific singleflight claim through completion publication. A start gate prevents query/publication before successful physical activation; failed startup withdraws its claim, and partial startup signals its exact thread before retry can proceed. Status fallback describes projection reconciliation, never artificial capacity pressure. Authentication, account-switch checks, cache privacy, actual upstream failure retry and confirmed idempotent reset-credit redemption are unchanged. Alternatives: larger caps still defer valid identities; releasing a claim before completion publication permits duplicate queries/receipts; dropping markers on partial start without signaling leaves a physical worker alive. No idle worker, persistent table or new pool is added. The controlled 32-blocked-refresh fixture starts the healthy 33rd identity before release, then joins every created thread and clears all live claims. Owner/account observations and pending evidence now have count-free retention as described below. Cross-process exclusion now uses the exact identity file lifecycle described below.
+
+## Exact account identity flights
+
+Problem: sixteen hashed network-lock stripes serialized unrelated identities; permanent per-identity sidecars would instead grow with historical accounts. Decision: refresh/redemption share one exact opaque identity flight. A short persistent registry guard protects inode creation/reclamation only; upstream work holds its identity-specific advisory lock. Waiting processes retain no old inode reference, so release can unlink safely under the guard. A fresh kernel probe reaps unlocked crash orphans; live files remain owned. Weak thread-lock pools retire idle keys, and fork callbacks close inherited descriptors without unlocking the parent's OFD. POSIX locking errors fail closed; the no-fcntl platform keeps its existing process-local behavior. All cooperating processes must follow this protocol; legacy stripe artifacts are preserved. No token/raw account identifier appears in file names or lock state. Redemption still uses its confirmed command, pending idempotency record and account identity fences. Alternatives: more stripes still collide; unguarded unlink splits mutual exclusion across inodes; timestamp leases can expire while a spend is alive; permanent per-account lock files grow with history. Observation and idempotency retention use the count-free policy below. The controlled fixture holds 32 keys sharing the old stripe while the healthy 33rd enters in 0.000412 s before any holder releases. Active files peak at 33; joining leaves 0 active files and 1 stable guard. A 100-identity churn fixture likewise retires every active file. This measures lock scheduling/artifact lifecycle, not upstream network throughput. Process tests cover spawn/fork exclusion, colliding identities, crash reclamation and failed-lock descriptor cleanup.
+
+## Count-free account observation and redemption retention
+
+Problem: reading only the last 32 rows and writing the latest 16 dropped valid identities and unresolved redemption request IDs. Normal refresh also replaced a complete row and erased pending command evidence. Decision: read/write all valid identity rows; merge pending evidence from the latest row under the atomic write lock before replacing observation fields. Pending evidence is retained until explicit resolution or scoped logout, independently of row count and observation age. Mutation reads are strict: corrupt/unsupported existing evidence prevents overwrite and redemption POST, while passive status retains its unknown/failure presentation. Unprotected none/unknown observations older than 24 hours and reported-expired positive observations reclaim on refresh/command writes with an explicit clock. Unexpired positive notification evidence remains useful; scoped logout removes only its requested scope rather than aging foreign rows. The existing same-credit, 24-hour request-ID reuse rule is separate from retention and is unchanged; redemption still requires fresh details, confirmation, account fencing and persisted pending intent before POST. Cache schema/mode-0600 and token/raw-account redaction remain. Alternatives: larger count ceilings still discard active evidence; retaining every reconstructible observation forever accumulates history; age-pruning pending evidence breaks retry identity; merging from a pre-network snapshot can overwrite a newer command record. The controlled 1,200-pending-record fixture writes 471,825 bytes and reloads every record in 0.0779 s, with 2,481,252 peak and 1,037,858 resident traced Python allocation. Inputs were created before tracing; this is write/reload allocation, not total RSS. Tests preserve the same request ID after 1,200 new identities and across real forced refreshes, reclaim expired unprotected observations, and keep pending evidence even beyond its request-ID reuse window until explicit cleanup.
+
+## Native task Stop resources
+
+AbortSignal adds one notification lock per task and allocates its observer map only while subscribed. One native invocation owns one Future, subscription and async watcher, all disposed/joined before existing process/account teardown; no polling timer, blocking worker, global registry or persistent history is added. Python 3.12 shallow diagnostic: Event/AbortSignal dictionaries 288/296 bytes, notification lock 56 bytes, active subscription/Future/map 56/144/224 bytes. These exclude referents, coroutine frames, allocator arenas and RSS and are not throughput evidence. Installed initial/silent-HTTP Stop tests observe zero pending model requests, zero active host runs and no retained observers after settlement. Dispatched unknown usage stays incomplete; initial Stop spends no model budget.
+
+## Open-mode requests without peer quotas
+
+Problem: admitting remote open-mode peers automatically armed a 120-request per-minute counter. Shared proxy addresses pooled unrelated tasks; exhausting that counter refused otherwise authorized work regardless of machine capacity.
+
+Decision: open-mode admission has no request-rate bucket, path exemption list, rate-limit backend operation, or worker hop. Retired `TOFU_OPEN_MODE_RPM` and `TOFU_OPEN_MODE_EXEMPT_PATHS` settings are ignored. The authentication boundary continues to decide remote peer admission. Credential-specific spending policy and sensitive authentication endpoint policy remain separate authorities.
+
+Alternatives considered: higher default RPM and additional read exemptions still turn valid work into rejections and require path-specific exceptions. A measured 100,000 direct admission checks took 0.1244 seconds under Python allocation tracing, added zero counter entries, and peaked at 376 traced bytes; there is no per-IP resident lifecycle to reclaim. HTTP tests also admit 128 consecutive authenticated-boundary requests with the retired quota set to one.
+
+## Native resolved pricing resources
+
+The pricing kernel consumes Copy value structs and returns one fixed Cost; it retains no pricing tables, histories, caches, workers, timers or account ledger. An explicit System-allocator probe over 100,000 computations observes zero extra requested bytes at peak and after completion. Tokens/ResolvedPrice/Cost layouts are 56/56/152 bytes on this x86_64 build. JSON numeric projection allocates only when requested and is excluded from that probe, together with normalization, price/tier resolution, billing, startup, allocator arenas and RSS. These are allocation/layout observations, not an application speedup or cutover admission. Run the release pricing_measure example and gen_rust_pricing_oracle.py --check with tests/pricing.rs for independent allocation and exact arithmetic evidence.
+
+## Credential request throughput without RPM admission
+
+Problem: each new credential silently inherited 60 requests per minute, and pre-flight RPM consumption refused work independent of available resources.
+
+Decision: remove RPM consumption, denial, refund, and request-rate response headers. New credential creation defaults to zero. Historical RPM values and request-cost arguments remain accepted as retired metadata and have no effect. A credential with no explicit token-spending allowance bypasses the spending backend entirely. Explicit token allowances, actual-use deduction, negative balances, and distributed outage policy remain spending authority behavior. Personal spending balances refill before checking, so elapsed replenishment can admit a request without a preceding failed request to advance the clock.
+
+Alternatives considered: increasing RPM, counting batches as one, and adding per-route exemptions all preserve a request-count rejection mechanism. A traced 100,000 checks using a historical one-RPM credential and request cost 4,097 took 0.2302 seconds, added no state entries, and peaked at 376 Python bytes. Ordinary requests allocate no RPM resident state; stored credential metadata is retained for compatible reads and needs no migration write.
+
+## Endpoint frequency admission removed
+
+Problem: authorized project/media requests consumed a shared IP/endpoint counter, and trading intelligence could refuse repeated work for an hour. Changing deployment or backend multiplied counters rather than providing work.
+
+Decision: remove the frequency decorators from all first-party and trading handlers and delete their implementation. Retire `TOFU_RATE_LIMIT`; no disabled wrapper, counter call, worker hop, or quota-error fallback remains. The legacy counter store is currently retained separately from request dispatch. Domain services still own execution, typed failures, permission, and financial/risk checks. Webhook delivery and HTTP authority descriptions now match these owners.
+
+Alternatives considered: making the decorator a no-op would leave misleading limits at every handler; raising ceilings would continue rejecting admitted work. A real Quart boundary accepts 129 consecutive reconcile operations from one peer, preserves explicit project/owner arguments, returns 400 for a domain conflict, and returns 401 without invoking the domain service after auth removal. No per-endpoint resident frequency state is created or retained.
+
+## Tool selection state without conversation-count eviction
+
+Problem: Tool Search and native routed-exposure state discarded the oldest conversation at launch-derived count ceilings. Unrelated new conversations could therefore rotate an active task's frozen provider wire or lose tool exposure history.
+
+Decision: remove both count-based eviction paths, their capacity resolvers, and obsolete capacity/eviction gauges. Ordered 24-hour idle expiration remains; cleanup examines only the expired prefix and first live state. Reconstructible catalog/term caches retain their own policies. Explicit lifecycle resets remain separate; memory reclamation preserves task history and frozen provider declarations.
+
+Alternatives considered: increasing the count or retaining only recently used conversations still allows unrelated work to displace a live conversation. Regression tests retain the oldest frozen wire across 4,097 unrelated records, retain routed tool union across 4,097 conversations, and keep owners isolated. The two stores retained 4,097 records each in 0.0808 seconds with 3,799,386 resident traced Python bytes (3,800,428 peak). Advancing beyond both idle TTLs and writing one fresh identity reclaimed all old entries, leaving one per store. The measurement includes key/record construction inside tracing.
+
+Native raw pricing normalization borrows the provider Value, probes only generated fixed aliases and returns the existing 56-byte Tokens. Integer strings are scanned without allocation; ASCII digits take a direct fast path and supported Unicode digits/whitespace use immutable generated tables. No history copy, cache, worker, timer or account is added. The pricing_measure probe now measures 100,000 joined normalization/arithmetic calls over a pre-parsed mixed-key/Unicode fixture; JSON parsing/projection, price/tier resolution, billing, startup, arenas and RSS remain outside scope. Unknown settlement completeness stays with usage.rs.
+
+## Complete used-tool history and pressure-safe selection state
+
+Problem: remembering a thirty-third used tool silently removed the oldest name. Memory reclamation also erased task history and frozen wire alongside reconstructible catalog indexes, allowing active task state to rotate.
+
+Decision: retain every unique used tool in insertion order, with a per-state membership set for constant-time duplicate detection. Both recorded execution and caller-supplied used names cross the same helper. Pressure reclamation clears only catalog indexes. Explicit lifecycle/test reset remains available; 24-hour task-only state expiration and durable conversation declaration ownership remain unchanged. No worker or periodic timer is introduced.
+
+Alternatives considered: a larger history limit still forgets early tools; clearing all selection state preserves the same cache-pressure correctness failure. Regression checks retain 4,097 names in order, avoid duplicate entries, retain a frozen wire through index reclamation, and exercise actual cgroup relief without losing task history. Measured 16,385 unique names take 0.0893 seconds to record; recording all names again takes 0.0971 seconds without growing history. Traced resident allocation is 1,665,992 bytes (1,666,286 peak), including name/set construction. Reclaiming the sole catalog index preserves all 16,385 names.
+
+Native admitted pricing cards retain only borrowed immutable base/tier input and scalar FX/peak policy. Validation is once per composition; quote selection is a binary search with no per-quote sort, allocation, price registry or clock. Quote borrows the selected tier and returns the existing fixed Cost. The pricing_measure probe now includes borrowed raw normalization, tier selection and arithmetic over 100,000 calls; JSON parsing/projection, card compilation, price lookup, peak/date resolution, billing, startup, allocator arenas and RSS are excluded. It is not a whole-request or whole-system speedup claim.
+
+## Timer restart without age-based abandonment
+
+Problem: restart inferred exhausted work from creation age, applying a 24-hour floor even to explicitly unlimited watchers. Offline time could therefore silently turn active user work into an expired durable row without a poll.
+
+Decision: restore every durable active timer through its existing owner/lease boundary. Remove the age sweep, helper, private export and configuration read; retired `TOFU_TIMER_MAX_AGE_HOURS` has no effect. Actual poll-count budgets, cancellation and committed ready-dispatch obligations remain authoritative. No periodic service, mirror, worker or queue is introduced; restored watchers use the existing shared wait loop and demand poll-worker lifecycle.
+
+Alternatives considered: exempting only unlimited watchers would still spend bounded timers' budgets by offline age; increasing the age ceiling would retain silent abandonment. Tests restore both unlimited and bounded old work, require owner 7 at watcher entry, and expose only a read port so age recovery cannot write an expired status. Unparseable creation metadata also cannot cancel work. A read-only synthetic restoration of 4,097 aged active records takes 0.0085 seconds and peaks at 1,380,206 traced Python bytes, including row construction; it performs zero durable writes. This isolates restore iteration and excludes physical watcher startup, storage I/O and provider polling.
+
+Native billing credit conversion adds one fixed seven-u64 Credits value, no heap allocations, history, cache, worker or account. The pricing_measure probe now includes borrowed usage normalization, one selected price tier, nine-decimal fee components and integer micro-credit/margin conversion over 100,000 calls. JSON parsing/projection, card/clock/margin resolution, wallet writes, startup, arenas and RSS remain excluded. This is allocation evidence, not whole-system admission.
+
+## Credential spending state without count eviction
+
+Problem: a count-bounded LRU discarded an existing credential's token debt when another credential entered. Re-reading the old identity recreated a full allowance and changed a financial authorization decision due to cache size.
+
+Decision: preserve process-local spending observations per configured credential without row-count eviction. Process/backend lifetime remains the existing owner; explicit token allowances, replenishment, revocation/auth checks and distributed spending policy remain unchanged. Remove obsolete capacity and eviction gauges. No worker, timer or durable store is introduced.
+
+Alternatives considered: larger LRU limits still lose debt under churn; reconstructing evicted state as a fresh allowance changes authorization. A frozen-clock regression spends 150 of a 100-token allowance, visits 4,097 other credentials, and proves the original negative 50 balance still denies new spending. These are spending-policy checks, not a request-rate gate. A traced 4,097-credential initialization and debt check takes 1.3755 seconds with 1,677,090 resident Python bytes (1,731,120 peak). This includes credential and key construction, uses a fixed clock without mock call-history allocation, and excludes cold backend imports. No request-rate state or background owner is created; these figures do not measure model/provider throughput.
+
+## Evolution workspace without storage-slot admission
+
+Problem: shelves stopped at 64 links/192 KiB, updates at 96/128 slots, and the shared workspace at 768 KiB. Coordinator launch and reply settlement reserved slots/bytes; the generic 1 MiB evidence-record guard added another hidden gate.
+
+Decision: keep the existing owner/run single-record CAS so materials and their notices stay atomic, but remove workspace collection and aggregate-byte quotas from producers and schemas. The workspace namespace bypasses the evidence- capsule size policy at the shared record port, preserving acknowledged writes, CAS and actual storage failures. Other namespaces keep their own contracts. Remove reply/terminal reservations and the million-entry sequence/cursor ceiling. Per-item validation, role/owner checks, cancellation, event identity and exact terminal usage accounting remain unchanged. No new pool, timer or mirror exists.
+
+Alternatives considered: raising the limits just moves refusal; separating material and notification writes without an atomic multi-record boundary loses current commit semantics. Paged workspace storage remains a future optimization for large-history projection/write cost, not a count-admission substitute. Dense 160-material records and 129 full Unicode updates cross 1 MiB without loss. Real isolated SQLite and TofuDB storage roundtrips preserve the complete shelf; a stale CAS write fails without replacing the latest value on both backends. The native binary/library pair is source-identity and allocator verified before these tests. Wider domain migration and transport audit remain separate work. The physical SQLite fixture stores 160 materials in 1,300,884 UTF-8 JSON bytes; initial acknowledged write and complete read take 0.1772 seconds, excluding startup. This measures one workspace transaction/roundtrip, not incremental append scaling, native transport or whole-process RSS. The current single-record CAS rewrites full workspace state; paging remains an optimization requirement for high-volume histories.
+
+Native priced settlement reuses one model ACK and one round-settlement delivery, adding no reader, worker, queue, timer, price registry or fee ledger. StreamResult adds an optional boxed Value: on this x86_64 build its exact pre-pricing field layout is 184 bytes versus 192 bytes, with an 8-byte absent pointer and no default cost allocation. Enabled quotes retain fixed amount/credit fields and one price snapshot only through the current response; borrowed history and raw provider usage are unchanged. The host retains one latest frozen snapshot per model-policy actor, reset on the next reservation and released with its owner. Snapshot bytes are bounded at 4,096; the fixture is 157 bytes, with shallow Python carrier/bytes sizes 40/190. These omit referents, allocator arenas, stacks and RSS. Six installed fixtures each observe one HTTP and three model callbacks; no extra pricing RPC is introduced. No whole-system CPU/RSS/tail or default admission is claimed.
+
+## Run launch without projected terminal headroom refusal
+
+Problem: launch measured the fully expanded run history and subtracted 256 KiB from the evidence-record ceiling. It refused valid work even when immutable receipt pages kept the actual stored head well below that ceiling.
+
+Decision: remove the projected-size/reserved-space admission path. `_save` still compacts receipts through the owner/hash-validated archive and commits through the shared CAS write boundary. Actual record/storage failure and explicit execution budgets remain visible. Legacy persisted refusal states remain historical facts; removing admission does not replay their effects.
+
+Alternatives considered: raising the reserve threshold still couples launch to expanded history; ignoring archive integrity would lose durable authority. Regression cases continue execution/review with less than the old reserved headroom, and launch from 9,000 expanded receipts while the stored head retains at most 64 recent receipts and complete history reconstructs unchanged. The synthetic 9,000-receipt fixture stores a 6,587-byte head with 40 recent receipts and 280 immutable pages totaling 1,173,842 JSON bytes. These measure serialized logical storage, not allocator/RSS, filesystem bytes or provider throughput. Historical receipt order/content remains exact after next launch.
+
+The native production price resolver is 72 shallow bytes in Python 3.12 and retains five explicit references/scalars and no tables, histories, worker, timer or cache. Route binding retains one frozen public metadata encoding only for the joined invocation, clearing its callback and latest price on scope exit. Price resolution borrows existing registry/FX ports and adds no network refresh or durable store. Explicit lookup ports carry principal, model/provider, clock and complete prompt parameters. This adapter changes ownership/wiring, not price arithmetic or residency bounds; installed one-request route tests are functional evidence, not CPU/RSS admission.
+
+## Managed local deployment ledger without count eviction
+
+Problem: the 32-row ledger discarded stopped/failed deployment state and could also evict running rows, losing the user's process-control identity. The old zero-room slice additionally failed to enforce its own terminal-row rule.
+
+Decision: retain all deployment records until explicit removal. Remove count and status-based eviction. Atomic field patches merge the current locked row, preserving concurrent state changes and creation time. Strict mutation reads refuse corrupt JSON/collection/identity rows without replacing the original. Per-owner API permission, model registration, process ownership and teardown stay with their existing boundaries. No new resident cache or worker exists.
+
+Alternatives considered: increasing the cap still loses durable state; preserving only running rows destroys user deployment history. Regression checks retain 129 mixed-state/mixed-owner records, update/remove precise IDs, preserve an interleaved status/PID write, and keep damaged ledgers byte-for-byte. A traced sequential-write measurement retains 513 records in a 97,955-byte ledger, taking 4.5062 seconds with 919,250 peak Python bytes (293,547 resident after complete reload). Record construction is included; no model process, provider request or GPU allocation occurs. File retention tracks explicit user deployment records, while temporary test artifacts reclaim at teardown.
+
+Native fee projection stores public records only in the existing task.apiRounds carrier and its authoritative terminal Turn. The wrapper retains one latest round/digest/ACK tuple, one route identity pair and one async lock, never another fee history, worker, timer, account or store. It uses existing task usage/cost fields, validates before mutation, and constructs a temporary reference list for canonical aggregation; temporary work scales with retained rounds and is released after each projection. Frozen native folding excludes price lookup/recomputation. Scratch real-native two-round tests retain two fee rows, deliver each once and read back totals of 31 micro-credits per round and USD .0001 from the Turn. These are lifecycle/accounting counts, not RSS, throughput or whole-system admission.
+
+Native wallet folding borrows existing task.apiRounds and retains seven integer accumulators plus a fixed component summary; it adds no history, worker, timer or store. Work is linear in settled rounds and price lookup/arithmetic remain absent. The real native two-round SQLite fixture sums 31+31 micro-credits, reserves 100 from 1000 and reaches 938 after a committed/lost-ACK retry, with exactly one reserve/debit/release triple. These counts prove accounting/idempotency only, not whole-system CPU, RSS, throughput or production default admission.
+
+Native fee recovery adds one fixed settlement capsule to the existing terminal task-result metadata and live task carrier. It holds seven component integers, round count, reservation and explicit owner/task/wallet/model identifiers, never another round history or store. Closed-schema identity strings are at most 4096 characters each; the owner=7/task/wallet fixture encodes to 282 JSON bytes. This excludes Python referents, allocator residency and unrelated task metadata. Freeze joins the existing terminal writer; the existing bounded reserve sweep performs owner mapping and an owner-scoped metadata read, adding no timer, worker or task. Fresh-process SQLite tests observe one debit/release after lost ACK; missing native settlement retains a 100-micro hold with one error instead of refund. These are durability/count observations, not CPU/RSS or whole-system performance admission.
+
+Priced shared checkpoint composition borrows the existing task fee rows into one bounded checkpoint prefix. It stores per-round quote amounts/prices/credits plus identity and wallet binding, reusing the checkpoint's existing usage array instead of copying vendor usage. Restored records enter the existing task ledger; no second live fee history, reader, worker, timer or storage is added. The cache-heavy one-round fixture encodes its fee prefix to 907 JSON bytes, excluding the already-retained usage and Python referents/RSS. Validation and frozen aggregation are linear in retained fee rows. One temporary encoded future load frame is bounded by the existing caller frame budget before commit. The disabled path carries one boolean and no fee projection. Installed fixtures observe one tool call per case; valid resume performs two HTTP requests and retains old/new fees of 31/61 micro-credits despite price change. Missing/invalid fee state and unsupported old artifacts admit no new HTTP. These are accounting, work and lifecycle checks, not whole-system CPU/RSS or throughput admission.
+
+Standard TofuDB builds now include the native journal capability while journal activation remains explicitly owned. There is no additional timer, worker or second authority. Three alternating release baseline/default pairs each launch a fresh interpreter and private empty local-volume authority, with identical compiler/source identity; baseline uses --no-default-features. Median open wall was 2.080/2.046 ms and process CPU 2.387/2.341 ms. Both add nine existing storage threads. Median open RSS deltas were 1,929,216/1,945,600 bytes (16 KiB difference). Unstripped binary sizes were 19,799,240/19,813,576 bytes; shared libraries were 17,742,616/20,315,768 bytes. Thus the library adds 2,573,152 file bytes even though this small idle cohort observes little extra residency. Debug libraries grow more (141,353,840/215,047,416 bytes) and do not estimate release footprint. Raw observations and the executable six-process measurement are retained in the session's isolated evidence directory. These samples exclude journal workload, FUSE, cold OS caches and whole-application startup/latency; they establish neither a general speedup nor a production capacity admission. Real release tests join and reopen the selected authority after canonical terminal ACK, including lost ACK retry, with one tool execution and old/new fees of 31/61 micro-credits.
+
+Native application round delivery borrows the existing principal, task, executor and round policy, retaining only one open presentation index. Its slotted header is 88 shallow bytes on CPython 3.12; it adds no worker, timer, queue, history or persistent authority. Each admitted model round adds one ordinary start/end pair to existing event retention. Structural publication follows existing durability and resource policy. This is a layout observation, not a throughput admission. Native fee append now installs the candidate list already built for its frozen cost fold; accepted Turn prefixes remain immutable without an extra list build. Problem: mutating a borrowed prefix erased the next durable projection delta. Decision: publish the new prefix rather than mutate the accepted one. Alternatives: deep-copying every projection adds context-sized work; a second fee ledger splits authority. Real native two-round Turn readback verifies both fees.
+
+Native default application approval reuses the existing pending-receipt index and lifecycle-owned executor. One slotted pending record is 64 shallow bytes and one short metadata RLock is 64 shallow bytes on CPython 3.12. A synthetic default write fixture charges 3,271 bytes while granted: 158 proof bytes plus 3,113 bytes of conservatively charged private arguments/carriers. Auto and Manual share this charge; denial leaves zero pending bytes. These are layout/charging observations, not process RSS, throughput or a production capacity admission. Task-owned tool rows are borrowed; no second pending index, history, worker, timer or store is added. Existing caller-owned count/byte budgets bound outstanding grants; rebinding rechecks byte admission. Execute, denial, joined cancellation, terminal withdrawal and close reclaim the same record. Each call publishes one canonical occurrence. Problem: a parallel parsed-call cache duplicates indexing and can drift from its approval proof. Decision: retain the prepared carrier in that exact receipt, with brief metadata locking outside publication/human waits/handler execution. Alternatives: another table duplicates lifecycle; charging borrowed risk/result rows again couples private admission to durable user presentation.
+
+Native HTTP active attempts are demand-driven: Policy.connections no longer creates an HTTP semaphore, and pool_wait no longer queues an attempt. Both stay positive compatibility fields; CLI blocking work uses the shared demand reactor. Idle reuse uses idle_connections independently. Provider/model accounting, caller cancellation, header/stream timeouts, byte admission and bounded terminal drain remain unchanged. active_requests is an atomic diagnostic count held through response/consumer/drain completion, with RAII release on every exit; it never grants authority. PoolTimeout remains a historical error variant. Problem: the native transport introduced a second fixed active quota after model admission, unlike the demand-driven Python transport. Decision: remove that queue while retaining idle reuse and lifetime evidence. Alternatives: increasing the constant still caps productive work; releasing before consumer join lies about quiescence. Real loopback TCP measurement with connections=1 and pool_wait=1ms admits 32 independent requests before any response release, observes 32 active attempts, and returns to zero. One unprofiled local cohort arrived in 33,352 us; this is concurrency/lifecycle evidence, not throughput or whole-system admission. No worker, timer, request queue, durable state or backend is added by HTTP admission. Application entry and full capacity/performance admission remain separate requirements.
+
+Native round count may now be null, preserving productive continuation without an arbitrary count ceiling. Positive explicit bounds still refuse tools that would require a missing next round. Per-round payload, retained context, tool count, model-account, progress and deadline owners are unchanged. Option<usize> replaces one scalar count; SDK text retains only cumulative byte/sequence scalars and no new buffer, worker, timer, queue or store. The controlled native cohort completes eight model rounds and seven unique tool effects with null; a three-round cap performs only two tools before refusing the third. Checkpoint tests keep null on resume and refuse a changed finite limit before dispatch. These count/ownership observations are not throughput or whole-system performance admission. Problem: a large sentinel count hides policy and checkpoint identity. Decision: explicit nullable policy in the existing wire/checkpoint contracts. Alternatives: raising constants still caps work; clearing byte/account limits weakens unrelated owners.
+
+## Native task lifetime without an implicit total expiry
+
+Problem: application tasks without a deadline still required a finite native relative lifetime, preventing faithful native execution of long-running work. Decision: required deadline_ms accepts explicit null; a positive integer retains finite expiry. Absolute application expiry still clamps the native session using its existing one-time wall/monotonic observation and remains checkpoint-bound. Alternatives: a large sentinel merely postpones the mismatch; removing transport timeouts loses independent network failure detection. Header/connect/stream-idle, drain and joined shutdown timeouts remain independent. No worker, queue, timer or retained history is added. Installed tests check delayed success and absolute and relative expiry; these behavior checks do not establish performance gains.
+
+## Native CLI reactor demand and lifetime
+
+Problem: CLI used HTTP connection hints to cap unrelated blocking work and rebuilt its reactor after reading configuration. Decision: reactor::build owns one current-thread Tokio runtime with lazily created blocking workers; its maximum is representability only. Both CLI compositions share that builder, and Agent retains the original stdin registration through its whole lifetime. Existing Tokio idle worker reclamation and joined shutdown remain; no worker is preallocated, no extra pool or application queue is introduced. Physical thread creation failure keeps the runtime error path; request cancellation and transport timeouts remain independent. Alternatives: Tokio's fixed default ceiling still queues eligible independent work; moving DNS to another pool duplicates lifecycle; rebuilding after configuration adds startup and rebinding. Measurement: tests/reactor.rs starts 32 parked blocking jobs and a healthy 33rd, then verifies shutdown remains pending until release and joins every job with zero active jobs. This is scheduling/lifetime evidence, not RSS, DNS latency or whole-application throughput admission. CLI installed protocol tests cover the unchanged input carrier, explicit Stop and timeout settlement.
+
+## Native application default context preparation
+
+Problem: callers could omit the existing application context/dispatch admission by omitting a manually constructed preparation policy. Decision: native task composition creates NativeContextPolicy for absent/accounting-only policies; explicit preparing policies stay authoritative. Selected route metadata and output bind before preparation; model_config resolves the same project behavior. Absent round accounting reserves nothing, while model accounting, pricing and terminal durability retain their existing owners. Alternatives: another native prompt budget would duplicate policy; requiring every caller to wire the same adapter leaves omission possible; a history mirror duplicates native ownership. The slotted adapter retains nine fields and one existing route/tools JSON binding, no history, worker, timer or queue. Python 3.12 reports 104 shallow object bytes; the minimal selected-route fixture binds 150 UTF-8 bytes (191 object bytes), released on close. Larger route/tool metadata grows within existing frame bounds. Installed SQLite tasks assert native preparation actually reaches canonical prompt admission and still settles tools, fees and terminal state. Layout measurement is not RSS or end-to-end performance evidence.
+
+## Native application's existing model-account default
+
+Problem: counted native application execution required a manually constructed account adapter despite already carrying the owned shared tree account. Decision: enabled unpriced model_control with no supplied model policy defaults to NativeModelAccountPolicy over that exact account and executor. Explicit counters and policies retain ownership; missing/foreign accounts, another token authority and unresolved pricing refuse before route consumption. Alternatives: creating a new account duplicates parent limits and settlement; silently omitting model control loses quota enforcement; default pricing would invent financial facts. One existing adapter retains the borrowed task/account/executor and current request/lease/settlement state. Python 3.12 measures 48 shallow object bytes and a 296-byte field map with 14 fields; the account identity is unchanged and no request lease exists at construction. These exclude borrowed object sizes; it adds no ledger, worker, tokenizer or history. The shared-parent fixture clamps 100 requested output tokens to 30 after 20 input tokens, settles 30 reported total tokens, and leaves no pending model request. Actuals remain incomplete until the child owner closes membership. Installed SQLite default-account execution preserves usage and terminal readback. These state/count witnesses are not RSS or whole-system performance measurements.
+
+## Native application counter configuration binding
+
+Problem: manually maintained encodings could follow a wire alias rather than the issued logical model, and output-field configuration could diverge from generation. Decision: optional application preparation fills omitted encoding from canonical encoding_for_model and omitted output field from the clamped template; explicit bounds/encodings stay owned and the generated wire schema validates the completed seven-field profile. Alternatives: loading Python BPE just to choose a name duplicates native cold initialization; model-name guessing in another policy forks selection; silently replacing explicit settings changes caller intent. Routing detaches only metadata/template/profile, never history. The compile result has seven scalar fields; no tokenizer, cache, pool or ledger is created. Tests forbid Python encoder loading, cover logical-model/wire-alias isolation and both output fields, reject invalid/mismatched profiles before launch, and verify installed SQLite account usage/terminal readback with omitted selector fields. These composition counts are not throughput or RSS evidence.
+
+The native application composition is verified on isolated SQLite, TofuDB daemon and embedded authorities for default generation/catalog/context/account/counter policy, owner approvals, priced settlement and terminal readback. The durable checkpoint gate also covers reopen and terminal lost-ACK without paid replay; Rust checkpoint gates retain WAL faults, lease fencing and joined close. `system_native_application_authority_20261011.json` names the exact frozen build and limits. These gates do not select the production root invocation, admit automatic crash takeover/Continue or prove performance.
+
+## Shared native completion presentation
+
+Problem: native completion lacked the final Request Inspector snapshot; invoking the whole Python post-loop tail would repeat history/round/done/persistence work. Decision: _completion_projection owns only the existing sanitized final state snapshot. Python finalization delegates its old block; native uses settled task messages and the existing frozen context model/tools binding after round close. The existing terminal policy projects once, so commit debt retries do not replay the snapshot. Best-effort publication retains the Python failure behavior. Alternatives: a second finalizer forks terminal authority; reconstructing history adds an unnecessary source; a new receipt ledger duplicates frozen retry state. No retained cache, worker, queue or timer is added. Snapshot allocation follows existing diagnostic projection and event ownership; native successful completion now incurs that previously missing presentation work once. Controlled tests verify media redaction, unchanged history, exact tool/model metadata, publication faults and one snapshot through lost commit ACK. This is behavior/lifetime evidence, not CPU/RSS or end-to-end performance admission.
+
+## Count-only native ordinary BPE
+
+Problem: native input counting initialized a full encoder including decoder, special-token and unstable-completion indexes although it only needs a count. Decision: token_rank_counter owns the exact pinned forward merge ranks and compiled split pattern; request-local regex scratch and merge boundaries drop at return. It increments counts without materializing final token IDs/slices. Lazy SHA/ordinal/byte-coverage validation precedes counting; original owner, text/tool/depth admission and scoped-worker joins remain. Alternatives: a global full-encoder pool retains unnecessary state and changes lifetime; another tokenizer changes admission semantics; returning token IDs keeps avoidable work. Pinned generated Rust table bytes participate in native source identity; no cache, pool, queue, worker or model-policy change is added.
+
+`system_native_token_count_kernel_20261011.json` retains 25 alternating independent process pairs with exact existing fixture counts. Median cold CPU ratios are 0.281/0.273 (cl100k/o200k); warm CPU ratios are 0.717/0.656. Retained requested allocation is 5,610,940/11,228,653 bytes versus 14,316,652/28,078,894, and process peak RSS ratio is 0.478. Full-encoder differential covers 3,005 texts per encoding plus 32 concurrent calls each; owner/oversize refusal remains lazy. These synthetic kernel measurements do not establish end-to-end task throughput or provider latency improvement.
+
+## Native long-piece merge scaling
+
+Problem: count-only BPE still moved a boundary vector and rescanned all remaining pairs after each merge, giving quadratic work for long pieces. Decision: pieces of at least 1 KiB use an indexed min-heap over linked byte starts, ordered by rank then original position. Each merge updates only affected neighbors; each byte owns at most one live heap entry. Shorter pieces retain the prior path. Compact u32 offsets use a 16-byte node and 4-byte heap entry; usize covers larger representable inputs. Alternatives: stale-entry heaps grow obsolete work; a count/input ceiling starves valid contexts; using the heap from 128 bytes made 256-byte repeated pieces about 20 percent slower, so the measured crossover retains the old path there. Input/owner bounds and scoped worker lifetime remain.
+
+`system_native_token_merge_heap_20261011.json` retains five independent alternating pairs for both encodings and repeated/ alternating pieces from 64 to 16,384 bytes. Final 16 KiB ratios are about 0.039-0.058 (17-26x faster); all measured pieces at least 1 KiB improve. A separate 25-pair ordinary fixture cohort retains exact allocations and nearly unchanged peak RSS, with warm CPU ratios 1.013-1.015; it does not prove universal short-input nonregression. Compact long-piece scratch grows from 16 to at most 20 variable bytes per input byte (25 percent) and drops at return; no cache, queue, timer or worker is added. Five hundred arbitrary/tied rank graphs match the canonical merger under both index widths, alongside the existing full- encoder text oracle. These are local kernel measurements, not task/provider throughput admission.
+
+## Prepared application entry into native execution
+
+Problem: application preparation already yields RootLoopRequest, but native callers still assembled route, gateway and configure identity separately. Decision: native_prepared consumes that existing request plus explicit owned ports/resource/recovery bounds, constructs one canonical gateway and route, then delegates to native_execution. Context/history/task identities stay with the preparation owner; route override fields share the native routing authority. Route acquisition uses one job on the supplied executor with copied context, withdraws only queued work, joins started work and closes late private routes on cancellation. Cleanup joins no new executor and retains the primary error. Alternatives: another preparation/loop forks policy; synchronous repository reads block the serving loop; detached cancellation loses credential ownership; a private pool duplicates lifecycle. Live text defaults on with explicit opt-out. No account, pool, store, durable ledger or history copy is introduced. Tests check owner/override refusal before repository access, context propagation, joined late success/failure and real Chat/Responses/Anthropic prepared-root tool execution/terminal readback. These composition/lifetime witnesses are not end-to-end performance admission or production selector cutover.
+
+## Native total tool quota separate from response bounds
+
+Problem: native tool_calls bounded both one response and the entire task, terminating productive unbounded application tasks despite their shared budget. Decision: total_tool_calls is optional nullable/nonnegative task policy; explicit null is unbounded, zero refuses physical tools, and finite values preflight the whole batch. Omission keeps direct-caller compatibility. Prepared application entry defaults the total to null while canonical gateway/shared budgets remain authoritative. Per-response tool_calls stays positive and unchanged. Checkpoint tool_limit preserves exact null/finite identity and verifies the saved count. Alternatives: increasing one constant still stops productive work; removing the response bound weakens parsing/memory protection; a mirrored host quota forks shared accounting. No cache, pool, worker, timer or ledger is added. Tests continue twelve one-tool rounds above the response hint, cover legacy/finite/ zero effects and text sequencing, and refuse changed recovery before HTTP. These count/lifetime observations are not whole-system performance evidence.
+
+
+## Native issued resource profile compilation
+
+Problem: prepared native execution required callers to repeat byte boundaries for history, HTTP payloads and tool feedback, leaving production composition without an automatic resource adapter. Decision: native_resources consumes the existing issued launch_policy frame_maximum and NativeProcessClient Budget. Context/request/feedback defaults use the minimum launch/configuration/frame bound; stream/output/tool-frame defaults use the launch/frame minimum. The response tool-count bound defaults to the output-byte bound rather than a small fixed fan-out quota. Explicit positive overrides remain; rounds, relative expiry and total tools default to absent limits. Native prepared entry accepts the issued resource_policy and compiles before gateway/route acquisition. HTTP timeouts, terminal retry, model counting and recovery retain their explicit owners. Production application composition uses `lib/tasks_pkg/native_production_profile.py`; `compose_native_application` pairs an explicit archive pin, current application version, issued launch policy and frozen ROOT/Flow options for the existing app lifespan, with lazy release admission and no storage selection: the existing HTTP compiler, launch/configuration/frame byte minimum for model input, and canonical depth 128 with a 2 MiB scoped counting stack. This stack is a per-count virtual reservation and joins before returning; it adds no idle worker or concurrency quota. `compile_native_transport_budget` is shared with SDK setup and uses the release contract binary bound. Problem: copied 4 KiB/5-second test policies rejected ordinary production work. Decision: model and terminal ACK budgets explicitly default to null, preserving task Stop/deadline, callback joins and persistence-owner failure; missing or malformed values refuse. The terminal allows one retry only after an explicit retry ACK for the same frozen candidate. Alternatives rejected: another probe duplicates capacity ownership; larger hardcoded timeouts still race real storage; unbounded retries can conceal persistent commit failure. `test_native_production_profile.py`, real stdio/account tests and the full production crash/readback gate verify this composition; whole-system performance/default admission remains separate. Source-bound verification records delayed callbacks, selected-storage routes, crash recovery and joined shutdown. Alternatives: probing per task repeats launch work; task RSS reserve is an admission estimate, not a payload ceiling; inventing timeouts or fee policy would change another authority. No cache, queue, worker, store or reservation is added; the result is one call-local mapping, with nested policy values borrowed until existing configuration binding. Real three-protocol prepared-entry tests exercise missing byte fields through the existing host's explicit smaller bounds. This establishes composition, not end-to-end performance or default production selection.
+
+Approval requests now carry required nullable remaining_ms: null means the existing task has no expiry. Rust derives it from the same session snapshot; the host uses asyncio.timeout(None), retains joined cancellation and grants only the existing declared receipt authority. Missing/zero/negative/boolean values refuse before policy dispatch. Finite deadlines still deny late grants. The real write-tool cohort exposed the previous unconditional deadline demand; nullable transport fixes it without adding an expiry or changing tool policy.
+
+A 10,000-call compiler-only tracemalloc diagnostic after 1,000 warmups retained 96 additional bytes and peaked at 1,032 requested bytes. Instrumented CPU was about 7.1 microseconds/call; no paired speedup or whole-task claim follows.
+
+
+## Shared immutable native release image
+
+Problem: independent owner-bound clients each decode, self-check and retain the same native executable. Decision: NativeArchiveImage is an explicit loop-owned immutable archive-image owner. It lazily uses the existing pinned seal_archive admission once; clients borrow independent non-inheritable dup descriptors of that same sealed memfd. Every client keeps its principal, task registry, configuration bounds and joined close. Shared close prevents new borrows and joins acquisition; existing descriptors keep their independent lifetime. Each client binary-byte limit is checked before duplication. Failed admission remains failed until a new explicit owner is created. Alternatives: an owner-keyed client cache retains identity state and needs eviction; copying ELF bytes repeats physical image storage; trusting an extracted path loses the immutable admission boundary. No registry, worker, timer, task ledger or new archive verifier is added. Applications explicitly close this image owner; default production assembly/selection remains pending.
+
+The concurrent four-client acquisition diagnostic retains three alternating pairs in `system_native_shared_image_20261011.json` (retired evidence/ artifact; recoverable from git history). Both arms launch all four acquisitions concurrently. Unique kernel image payload falls exactly from 58,704,128 to 14,676,032 bytes (75 percent), excluding descriptor/object overhead. Observed median shared/independent wall ratio is about 0.660 and host CPU ratio about 0.237. Host CPU excludes self-check children; kernel payload bytes are not process RSS. Three pairs establish a diagnostic, not statistical performance admission or whole-task throughput. Unit cancellation/failure/FD checks, two-principal installed runs, archive removal, independent closes and real three-protocol prepared application tasks cover the lifecycle boundary.
+
+
+## Application native host ownership
+
+Problem: the shared admitted image lacked an application lifecycle owner, and reverse shutdown registration could close storage before native terminal and accounting callbacks joined. Decision: native_host owns one explicit image and a scope-local principal-bound client per invocation. It tracks only active resource owners, never caches clients or duplicates task state. Application and production factories accept native_image explicitly; assembly registers the existing Quart shutdown hook without archive I/O. Production shutdown first joins this host while accounting, events and storage remain live; failed joining refuses dependency teardown. Host close blocks new scopes, attempts every client close and image close, preserves grouped failures and joins repeated cancellation. A scope retains its primary execution error and adds cleanup evidence before releasing its owner reference. One image cannot be transferred to two live hosts. Alternatives: shutdown-registration order alone races production storage release; a user-keyed client cache needs persistent eviction; background image warmup taxes idle startup. No worker, timer, pool, backend selection, repository or identity default is added. The production Python root loop is still selected; host registration is a prerequisite, not a cutover.
+
+An unused-scope diagnostic after 100 warmups runs 1,000 client scopes: all active owners clear, archive acquisition stays lazy, host shallow size is 88 bytes, empty owner map 224 bytes, requested allocation delta 792 bytes and peak 4,012 bytes. These Python allocation observations exclude actual native runs and are not RSS or throughput evidence. Quart rollback/close, production factory laziness, primary-error preservation, failed-join dependency fencing, full shutdown ordering and real three-protocol prepared tasks verify ownership.
+
+A scope that cannot close its client keeps that unresolved resource in the same host owner map after leaving the scope; it is not silently discarded. Host shutdown attempts it and clears only successfully joined resources. Failed close remains visible and fences dependency shutdown.
+
+
+## Native host cleanup-failure admission fence
+
+Problem: failed client cleanup retains an unresolved owner, so accepting new scopes could accumulate uncertain resource debt. Decision: a cleanup failure closes admission immediately while preserving the same unresolved client for host shutdown. Successful cleanup alone leaves admission open. Alternatives: discarding the owner hides possible live effects; accepting more work grows uncertainty; a replacement host silently abandons the failed release scope. No new state store, timer, queue or recovery loop is added. Primary-failure tests verify subsequent refusal and eventual explicit host cleanup.
+
+
+## Native prepared invocation worker bridge
+
+A storage-free native child borrows the same loop, callback executor and sealed image; it creates one child client/process and its own issued route, not another Python pool. The actual cancelled-child probe observes two simultaneous clients (root + child), then zero after joined completion. Existing child abort monitoring and tree-budget membership are retained. Child selector state is retired at joined discard; no durable row is added. This is lifecycle/concurrency evidence, not application RSS, latency or default-selection admission.
+
+CLI Rust composition owns one sealed image and one lazy demand callback owner, using the cached launch policy for idle worker hints and frame bytes. A 2026-10-13 probe admitted a 12,101,776-byte image, a 48-worker idle hint and zero callback threads/clients before work; close left zero callback threads and a closed image. The 25,784,221,696-byte frame value is a host-derived admission bound, not an allocation. No durable records or resident timer is added; this is lifecycle evidence, not application RSS/latency admission.
+
+Rust SDK composition borrows that host/loop/executor and adds no worker or store. A Python 3.12 shallow probe measured NativeAgentConfiguration at 96 bytes with a 740-byte frozen fixture profile; profile bytes use the host configuration bound. One issued frame scalar replaces retained launch metadata. Worker futures own SDK cleanup; result/close waits for their join, and timeout retains borrowed owners. This is layout/lifecycle evidence, not RSS or latency admission.
+
+Problem: application native ownership could not enter the existing synchronous root task invocation, and its terminal commit would be repeated by Python's post-loop finalizer. Decision: NativePreparedInvocation binds explicit host, serving loop, principal, v2 selection/repository, resource profile and callback executor. The private task port _nativePreparedInvocation selects it only after the existing RootLoopRequest preparation. Native runs on the existing loop; the worker blocks until its client scope joins, then skips the Python loop and post-loop finalizer while retaining common prefetch/presence teardown. Already projected native terminal failures propagate without rewriting the candidate; this guard does not infer durability from task status. Preterminal failures use the existing fatal writer with automatic turn replay disabled. Successful native history stamps the existing messages-include-current-run marker.
+
+Worker interruption signals the task's existing AbortSignal and joins the private Future; cancelling that Future would falsely finish before coroutine cleanup. Native cancellation is translated back to asyncio.CancelledError only after the coroutine has joined. Calling on an event-loop thread refuses. Bounded stdlib callback pools refuse a bridge running in their own worker; their publication lock closes the first-job _threads race. Demand executors have no worker-count gate. Alternatives: running asyncio.run in each worker creates a second reactor; invoking both finalizers repeats effects; whole-turn retry after native settlement can replay tools; same bounded callback pool deadlocks. No loop, worker, timer, model account or task state machine is created. A bridge has 16 slots (160 shallow bytes); the controlled profile is 282 UTF-8 bytes (323 object bytes), with no active clients or image loaded before invocation. These are allocation observations, not performance admission.
+
+Tests cover worker context/loop ownership, Stop/join, cancellation type, frozen terminal errors, done/error/aborted selection, default Python behavior, retry refusal and actual three-protocol native tasks through this worker bridge. Selection remains an explicit internal application port; ordinary tasks still use Python. Automatic binding, model/provider retry parity and full recovery/ error-history parity remain pending. Python-only sources-footer, incremental translation and profile-finalization hooks are not automatically replayed by this bridge; their separate native composition is required before default cutover. No live backend switch or whole-system throughput claim follows.
+
+
+## Native observed failure history
+
+Problem: Agent retained model-facing history inside its driver, but error and Stop candidates discarded it, preventing the application from observing tool feedback after a later provider failure. Decision: explicit retain_execution_history selects Agent.run_retained and Task.run_captured. The driver retains one admitted history/verified-round usage vector; errors, Stop and caught provider panic move it into the same frozen terminal candidate. A successful result racing Stop/cleanup failure moves into execution as well. Successful history moves directly into result; there is no additional history copy at this ownership transition. Legacy Agent.run and absent configuration retain their previous event shape. Prepared application entry defaults this flag to true; older archives refuse that field before HTTP rather than silently dropping evidence.
+
+Generated execution_history schema owns shape validation. Terminal projection sets the existing task.messages/current-run marker on error/abort, preserving paid account/usage and partial visible text. Verified-round usage in execution is diagnostic prefix evidence, not complete billing actuals, a refund or a resumable checkpoint. Admission failures before history validation capture nothing. The existing candidate byte/retained-history bounds and terminal ACK apply; commit retry reuses the frozen candidate without provider/tool replay. Alternatives: copying history before every round adds context-sized work; an independent history store forks authority; marking cancellation as error loses outcome facts; treating an observed partial prefix as a recovery frontier can replay uncertain effects. No store, account, worker, timer or cache is added.
+
+Failure candidates now retain their already admitted vectors until terminal debt/publishing completes, just as successful candidates retain results. Event serialization still creates bounded transport projections; no zero-copy or whole-system speed claim follows. Pointer/lifecycle tests verify moved message strings, joined tool effects, panic/Stop, late Stop, and frozen commit retry. Installed tests exercise error and cancellation after one tool, preserve usage and refuse old archives before provider access. Real three-protocol application tests read back failed Task/Turn and the one completed tool effect. Complete durable context recovery, final hooks and default production cutover remain pending; this payload does not introduce another transcript authority.
+
+Installed controlled error/Stop prefixes each retain three messages and one verified usage row. Each controlled prefix serializes to 282 UTF-8 bytes; recursive Python object sizing is 2,855 bytes, conservatively counting repeated references. Complete error/aborted event bytes are 395/333. These are small-fixture sizing observations, not allocator/RSS or throughput measurements. Transport/persistence projections remain bounded and are reclaimed by the existing client/policy lifetime. No additional idle history cache exists.
+
+
+## Native post-commit observers and release
+
+Problem: native root handoff skipped final translation, project/profile observers and the existing reconstructible-state release, leaving finished tasks retaining their full context. Decision: _completion_translation shares the final prose submission before terminal persistence; native projection uses its actual open round and runs once through the existing projection fence. _post_commit owns the same post-persist observer sequence used by Python: log invariants, busy notification, swarm result handoff, project settlement, commit observer admission, heavy-field release and optional profile consolidation over a borrowed messages reference. Python delegates its previous block and retains its callback injection seams. NativePreparedInvocation supplies this completion callback to run_native_task; it runs only after terminal.accepted and native route/cleanup joins, including an acknowledged error or cancellation. Unconfirmed terminal debt retains state. A cancellation while waiting joins the callback and preserves an existing primary failure.
+
+Alternatives: running the whole Python finalizer repeats terminal/accounting work; releasing after projection alone can discard pending commit evidence; starting profile work before acknowledgement races durable state; a separate background queue adds a lifecycle owner. No store, worker pool, timer, invoice or terminal state machine is added. Existing optional observer workers are entered through their existing feature gates and lifecycle. A retained 100,000-character message fixture verifies task.messages becomes None while only the explicit profile observer argument retains its reference. Real three-protocol done/error tasks read back durable Turn/tool effects and verify messages/tool-round release. These are lifecycle/retention facts, not RSS or whole-system throughput evidence. Sources-footer composition, full recovery, automatic binding and default Rust cutover remain pending.
+
+
+## Native source evidence and final footer
+
+Problem: native gateway passed a discarded empty search accumulator to the canonical tool pipeline, and prepared terminal projection skipped the existing sources backstop. Decision: NativeGateway borrows the prepared request's all_search_results_text list. The existing pipeline alone decides which tool results are search evidence and applies its existing UTF-8 accumulation bound. Prepared terminal projection delegates the existing sources-footer helper once after canonical projection, before translation/snapshot/terminal persistence. Only successful final display text is decorated; raw model messages and paid usage remain unchanged. Existing cited-link, empty/aborted, deduplication and five-link rules remain the sole policy. No URL fetch, new accumulator policy, model call, storage authority, cache or worker is added.
+
+Alternatives: scraping arbitrary feedback invents source classification; copying the corpus creates another retained history; adding after commit makes stored/rendered text disagree; changing native result bytes alters raw provider evidence and retry identity. Tests verify borrowed list identity at canonical pipeline entry, normalized deduplication, cited-answer no-op and three actual protocols whose committed Turn contains the footer while model history remains raw. The borrowed list uses the existing owner/budget/lifetime and adds no retained corpus copy. Default native binding and full recovery remain pending; no whole-system performance admission follows.
+
+
+## Native transition preserves the issued task route
+
+**Problem:** prepared native execution previously compiled a fresh primary, which could differ from the task's already admitted route group. **Decision:** the existing group retains one immutable, secret-free owner/tenant, authority revision and primary entity witness. The prepared native entry checks the task pin and group lifetime, then the canonical compiler revalidates that exact witness against the current owner authority before credential resolution. A stale revision, revoked candidate or identity mismatch refuses before provider I/O; no implicit reroute or fallback is introduced. A standalone explicit entry without an issued group keeps its existing primary compilation behavior. **Alternatives rejected:** selecting the new highest-ranked candidate loses the task's admission; trusting a retained candidate alone misses revocation; retaining plaintext credentials beyond their existing slot lifetime creates another cache.
+
+The witness lives only with its existing task-owned group. CPython 3.12 fixture: group shallow size 72 bytes (one additional pointer), mapping proxy 40 bytes, backing dict shallow size 272 bytes, compact witness JSON 222 UTF-8 bytes for nine fields. These are structural diagnostics, not RSS or a speedup claim. The revalidation may inspect all eligible primary candidates; its purpose is route fidelity before automatic native binding. It does not establish default Rust execution, retry/recovery parity or whole-system performance admission. Verify native-issued-route, native-prepared, credential-materialization and real native terminal tests across the three provider protocols. Native execution borrows the group; its existing execution session retains disposal ownership.
+
+
+## Release native application ports on durable task completion
+
+**Problem:** completed task carriers retained _nativePreparedInvocation, which kept application host, loop, repository, callback executor and pricing references alive through the task retention window. The worker's acknowledged Stop guard also consulted that field after terminal publication. **Decision:** include native invocation and issued selection in the existing terminal heavy-state release list. Pending persistence and live tasks retain these fields. Capture only the worker's native-entry boolean before execution, so a committed native Stop remains aborted after the port reference is released. The running invocation still owns its stack references until client/route/tool cleanup joins; this change neither closes borrowed application resources nor alters their lifetime owner. **Alternatives rejected:** retaining the full port until task eviction keeps reconstructible application bindings; clearing it before durable acceptance loses retry ownership; closing the shared host from task cleanup breaks other tasks.
+
+Weak-reference tests prove the unused host becomes collectible after accepted done/error/aborted release and remains retained during live/pending persistence. This is an object-lifetime measurement, not a throughput or RSS claim. Verify native-port-release, worker Stop, native completion and installed ordinary ROOT execution/continuation. Production default and system performance admission remain separate from this retention fix.
+
+
+## Current prebound text ROOT performance cohort
+
+**Problem:** earlier component measurements showed cold CPU or latency and memory regressions; they could not certify the current execution source. **Decision:** retain a new frozen-source paired cohort and a separate stopped-VM memory cohort in `system_native_text_root_current_cohort_20261012.json` (retired evidence/ artifact; recoverable from git history). Across 2378 real fixture ROOT operations in 218 joined workers, three warm pairs of 100 samples per arm improve median wall time by 33–42% and mean CPU by 10–18%. One hundred fresh cold workers per arm give median wall ratio 0.89969 and CPU mean ratio 1.01338; the latter passes the existing 1.05 guard but is not a gain. Three independent stopped-VM pairs give RSS ratios 0.96361–0.96700 and PSS ratios 0.95840–0.96374. The retained raw reports, source hashes and original verdicts remain reviewable; earlier failed reports are preserved. **Alternatives rejected:** a single cold observation cannot establish tails; changing thresholds would conceal regressions; transferring this result to the production configuration would omit counted/priced model-account overhead.
+
+This qualifies only the prebound SQLite text fixture with loopback Chat. It manually constructs the native port and omits model_control/model_counter/pricing required by NativeRootConfiguration; ordinary HTTP ingress, complete application startup, other backends/tools and concurrent scaling remain unmeasured here. Production defaults and whole-system performance are not admitted. The next performance boundary is the ordinary priced/counting application ROOT path.
+
+
+## Priced and counted ordinary HTTP ROOT work comparability
+
+**Problem:** prebound text ROOT performance omitted production-native counted model control and resolved pricing, so its timing could not admit ordinary ingress. **Decision:** benchmarks/native_application_root.py executes two independent workers through the same v4 Quart turn POST, canonical task creation/routing, serving executors, loopback Chat model and durable Task/Turn publication. Only fixture repository/pricing inputs are supplied; no loop result is mocked. Both arms receive the same explicit 100000-token/1000-tool budget with no deadline. The native application profile enables model_control.pricing and model_counter. The retained receipts in `system_native_priced_http_root_comparability_20261012.json` (retired evidence/ artifact; recoverable from git history) have identical decoded requests, canonical usage, fee amounts and resolved quote, shared consumption (5 tokens/0 tools/complete), successful statuses and retired worker/route ownership. Provider telemetry and pricing provenance remain in raw receipts but are excluded from the semantic equality hash; estimated prices, unfinished cleanup and incomplete accounting refuse measurement permission. **Alternatives rejected:** comparing an unpriced native profile understates its work; forcing a task-local native port bypasses ordinary ingress; comparing full telemetry confuses transport metadata with provider work; single clocks cannot establish timing or tail performance.
+
+This grants work-comparability only. The fixture uses in-process Quart test-client HTTP ingress with TESTING auth, fixed fixture price inputs and SQLite; paid wallet debit, actual HTTP socket/TLS, other tools/backends/concurrency and full startup remain outside scope. One diagnostic first operation per arm grants no performance or production-default admission. Warm/cold and independent memory cohorts must measure this configured path before any default-cutover decision.
+
+
+## Priced/counting ordinary HTTP ROOT performance rejection
+
+**Problem:** successful prebound ROOT timing did not include production-native model counting/pricing. A work-comparable ordinary ingress still needed full paired timing and independent memory evidence. **Decision:** retain benchmarks/native_application_root_measure.py and the native_root_memory.py --entry application boundary. The worker runs repeated v4 requests under one application lifespan, preserves exact request/fee/usage/ shared-budget equality, waits for actual worker and route retirement, counts live storage plus waited-child CPU, and never samples memory in timing workers. The original prebound memory entry remains the default.
+
+`system_native_priced_http_performance_20261012.json` (retired evidence/ artifact; recoverable from git history) retains 1652 ROOT operations across 212 joined workers: three warm pairs (100 samples/20 warmups per arm), 100 fresh cold processes per arm, and three separate stopped-VM pairs. Warm median wall ratios 0.8921–0.9001 improve, but warm CPU ratios 1.0640–1.0768, cold mean CPU 1.066081 and cold p95 wall 1.060599 exceed the existing 1.05 guard. RSS/PSS gains pass the memory component and do not override this rejection. **Alternatives rejected:** changing the guard hides regression; transferring the unpriced benchmark result omits real work; timing under a memory sampler changes the workload; discarding slow cold observations loses the tail evidence.
+
+No defaults are promoted. The fixture has TESTING in-process Quart ingress, SQLite text and a loopback model; socket/TLS/auth, wallet debit, other backends/ tools and concurrency remain outside scope. Profile counted-input initialization and host callback work separately before selecting a Rust optimization. The source observation that RankCounter builds forward ranks per transient process is a hypothesis, not measured attribution. Verify comparator fault tests, continuous-worker smoke, both full cohort validators and owned cleanup receipts.
+
+
+## Borrow immutable predecoded native token ranks
+
+**Problem:** each transient counted native process rebuilt forward ranks by parsing decimal ranks and allocating/decoding each base64 token. The ordinary priced HTTP ROOT cohort had CPU and cold p95 regressions. **Decision:** the pinned generator emits a static length-prefixed decoded byte blob, packed SHA and maximum token length. The forward index borrows slices from this immutable blob; pair/merge paths accept the same borrowed-key map. Runtime reconstructs exact upstream base64/rank lines in bounded scratch and checks the original asset SHA before admitting the encoder, as well as the packed SHA. Original upstream text remains test-only generated source; all keys/ranks and borrowed addresses are checked against it. No decoder, special-token policy, user cache, pool, reservation, billing rule or merge ordering is changed. **Alternatives rejected:** skipping upstream hash validation weakens admission; sharing task/provider state to cache encoders risks ownership; output token-ID and decoder maps add work that this count-only boundary never consumes.
+
+`system_native_borrowed_ranks_20261012.json` (retired evidence/ artifact; recoverable from git history) retains 100 independent cold pairs per encoding and 25 cold/warm/allocator pairs. First-count CPU mean ratios are 0.61495/0.61691; warm kernel CPU 0.96756/0.96148; retained requested allocation 0.69501/0.67879. The new sealed executable is 12101776 bytes; static bytes remain in the owned image lifetime, while each encoder owns only its derived index. Allocation figures are diagnostics, not a whole-application RSS claim.
+
+Functional HTTP cases preserve request/fee/budget/Stop/continuation semantics. The complete priced text rerun removes the previous warm CPU and cold CPU/p95 guard failures and passes separate stopped-VM memory. It still fails cold p99 (1.066073 > 1.05). This runtime component optimization remains opt-in and does not promote a production default or certify whole-system performance. Preserve that failure and profile its source before repeating the same full gate.
+
+
+## Separate cold stage diagnosis from performance admission
+
+**Problem:** after encoder optimization the full priced ROOT cohort still failed cold p99; a total clock could not distinguish archive work from common setup waits. **Decision:** opt-in native_application_stages.py wrappers retain only name, relative start, wall duration, calling-thread CPU for sync work and outcome. Async spans record wall only. They delegate original arguments/results/errors, join normal cancellation and restore patched owners at scope exit. Diagnostic workers set profiler_enabled and diagnostic_stages_enabled; the HTTP timing gate refuses either stage marker. Ordinary uninstrumented workers remain unchanged.
+
+`system_native_cold_stage_diagnostics_20261012.json` (retired evidence/ artifact; recoverable from git history) retains ten independent Python/native pairs with exact request/fee/budget/status comparability. Registration and physical worker entry show variable waiting; native archive admission adds another stable span. Spans are nested and overlapping, not an additive breakdown. Wrappers preload observed modules, so these observations do not certify cold p99. **Alternatives rejected:** treating instrumented clocks as admission contaminates latency; summing async/nested CPU invents attribution; changing archive readers without measured gain adds risk. Twenty-five paired archive diagnostics rejected bounded GzipFile/uncompressed-tar (+13% wall/+14% CPU) and seekable gzip-tar (+10% wall/+11% CPU); both runtime edits were removed and existing archive pin, snapshot, metadata, sparse/member and joined self-check behavior is preserved.
+
+The earlier p99 failure remains authoritative. Next split registration/worker-entry storage and route preparation waits, then choose an implementation improvement and rerun the same uninstrumented full gate. No production/default promotion.
+
+HTTP request buffers: the private RAM preference scales from startup memory capacity/headroom, including zero under pressure, and is a file-spill hint rather than admission. The existing ASGI receiver/handler joins accepted blocking I/O before closing anonymous scratch. Multipart delivery chunks are 64 KiB; logical source size is unrestricted on the default video path. Actual allocation failure falls back from the RAM preference to disk, preserving all accepted bytes. Synthetic measurement: 513 MiB / 537,919,488 bytes at zero RAM preference completed in 1.285 seconds with matching SHA-256 and closed scratch ownership; no claim about video processing throughput or total process RSS follows from this test.
+
+
+## Attribute cold ROOT route and storage waits
+
+**Problem:** cold ROOT p99 remained unqualified, with route registration and worker entry showing variable waiting. **Decision:** opt-in fixture diagnostics now label storage operation/connect/send/receive, birth/start commits and route compilation, endpoint admission, dialect validation, initialization and audit. Operation labels retain no payload or credential; sync clocks remain thread CPU. Existing diagnostic flags continue to prohibit timing admission.
+
+`system_native_storage_route_waits_20261012.json` preserves 31 independent pairs across progressively narrower cohorts, with joined workers and exact paid-work comparisons. Birth persistence is around 1 ms. Slow worker entry samples predominantly await turn.attempt.start responses. Direct final dialect spans identify first Slot validation's import-time provider-plugin entry-point scan at roughly 60–78 ms; subsequent validations are negligible. This is disposable SQLite/loopback diagnostic evidence, not live-native storage or full-performance admission. Nested spans overlap and cannot be summed. One earlier cohort overlapped an instrumentation edit; final-label conclusions use separate later launches. **Alternatives rejected:** removing reachability/egress validation discards semantics and does not address measured cost; skipping worker-start durability breaks lifecycle authority. Keep the failed cold p99 result until an unchanged, uninstrumented complete cohort proves improvement.
+
+
+## Demand-load optional provider dialect discovery
+
+**Problem:** built-in Slot validation imported a registry that scanned installed provider entry points, contributing 60–78 ms in direct cold diagnostics. **Decision:** provider_registry imports the Slot-owned built-in vocabulary and answers built-in validation/lookup without discovery. Custom lookup/validation and enumeration share one process-owned reentrant-lock discovery boundary. Other threads wait for publication; same-thread plugin callbacks may inspect the registry. Interrupted discovery releases its boundary and remains retryable. Explicit discovery remains available. No executor, cache, timer or backend added. **Alternatives rejected:** removing plugins changes the extension contract; preloading discovery at boot taxes unused capabilities; skipping Slot validation weakens admission. Plugin import/registration side effects occur at first custom demand rather than module import; plugins must register through their declared entry point. Tests verify installed entry-point admission, built-in body parity, concurrent publication, reentrancy and interruption.
+
+`system_native_builtin_dialect_dormancy_20261012.json` records three independent uninstrumented before/after HTTP pairs per loop arm and a separate diagnostic cohort. Exact request/fee/budget/status work and joined cleanup are required. The small HTTP sample does not establish a total latency improvement or p99 admission; retain the earlier failed full cold p99 gate.
+
+Uploaded image source bytes have no route or HTTP admission quota. Multipart uses its owned seekable file and JSON decoding uses a request-owned anonymous file rather than another complete decoded RAM buffer. Directory orphan quarantine supplies lifecycle cleanup, never a byte admission decision. See [image intake](modules/ingest_media.md#uploaded-image-source-admission) for remaining decode policies, error cleanup and measured byte-integrity coverage.
+
+
+## Full priced ROOT gate after provider discovery dormancy
+
+`system_native_dialect_full_gate_20261012.json` retains three warm pairs (100 samples/20 warmups per worker), 100 independent cold pairs and three separate stopped-VM memory pairs: 212 workers and 1,652 actual ROOT tasks. All tracked frozen sources remained unchanged; paid request/fee/budget/status comparisons and joined cleanup pass. Timing and memory summaries recompute. Warm median ratios are 0.806–0.816, with all warm latency/CPU guards passing. Cold p50/p95 ratios are 0.971787/0.992600 and CPU mean 1.040709; p99 remains 1.084015, above 1.05. RSS ratios are 0.956913–0.961591 and PSS 0.950649–0.953964. These are controlled SQLite/text/loopback results. **Decision:** preserve the cold p99 failure and keep native ordinary ROOT opt-in. **Alternatives rejected:** warm/allocator gains cannot waive cold tails; moving archive or plugin costs outside operation clocks without startup accounting would change the measured boundary. No production default or backend switches. The remaining native/full-system migration is not admitted by this cohort.
+
+Remote generation-history images use file-backed complete reception rather than a 10 MiB admission ceiling or a fixed active-download deadline. Transport timeouts and public-address validation remain at the shared egress boundary. The caller closes the anonymous file after blockwise encoding; failures close partial files. See [remote image ownership](modules/ingest_media.md#remote-image-file-ownership).
+
+
+## Separate native spawn from worker-start response waiting
+
+**Problem:** the full priced ROOT rerun still failed cold p99; waiting could be archive admission, process creation, callback settlement or storage service. **Decision:** fixture-only diagnostics wrap native subprocess creation and round/progress/text/terminal controls, delegating exact arguments and errors. After joined operation clocks finish, optional readback retains aggregate writer, RPC and attempt-event counters. Storage metrics themselves also fence timing admission, even if a stage flag is absent. No production instrumentation added.
+
+`system_native_cold_process_diagnostics_20261013.json` retains ten independent paired paid-work diagnostics. Native spawn median is 0.621 ms (max 5.597); native process span median 149.962 ms (max 216.333), archive median 61.191 ms (max 73.244). Worker-start response reaches 217.186/474.443 ms for Python/native while whole-fixture maximum COMMIT is 1.939/2.763 ms and maximum writer queue depth is one. These counters do not attribute one command, but rule out treating this cohort's long waits as equally long physical commits. **Alternatives rejected:** weakening fsync or bypassing durable worker start changes authority without addressing measured cost; assuming spawn dominates contradicts direct spans. Sidecar resolution/execution/response and caller scheduling need separate attribution. Nested spans overlap; neither clocks nor aggregate counters certify whole-system/default performance. Preserve failed p99.
+
+Video intake has no source-duration admission ceiling or private 30,000-character transcript/storyboard truncation. Processing age cannot establish process death. The shared process-incarnation authority guards interrupted status settlement and stamped scratch reclamation; live and unknown owners survive elapsed-time cleanup. See [video continuity](modules/ingest_media.md#video-duration-and-evidence-continuity) for lifecycle, legacy scratch, and remaining frame/model selection policies.
+
+
+## Attribute worker-start cost inside a disposable Sidecar
+
+**Problem:** worker-start response waits reached hundreds of milliseconds while physical commits and write backlog stayed small. **Decision:** fixture-only native_sidecar_stages substitutes only the owned Python child module argv. It preserves stdin/stdout/stderr, environment, auth, storage, readiness and joined shutdown. Wrappers measure resolution, command wait, transaction/callback and response, then projection/patch/event helpers and selected cold imports. Metrics readback carries child spans and bounded top-100 cProfile rows; production launches never import this helper. Diagnostic flags continue to reject timing.
+
+`system_native_sidecar_phase_diagnostics_20261013.json` retains 15 independent pairs across four progressively narrower cohorts plus two uninstrumented smoke workers. Exact paid work and joined cleanup pass. Callback execution covers most start latency; response sending and projection/patch/event work are short. Direct final import spans identify first jsonschema loading at roughly 97–163 ms under diagnostics, while automation-events import is under 1 ms. Profile cumulative times overlap and are not CPU attribution. This is scoped SQLite fixture evidence, not native-backend or whole-performance admission. **Alternatives rejected:** weakening fsync does not address callback imports; skipping automation evidence changes subscribed-task semantics; moving costly imports to startup hides work and taxes unused features. Existing TofuDB Rust TaskStartedContext validation is the next native-authority comparison boundary, with complete request/fee/budget/terminal proof still required.
+
+Video frame intake has no 64-frame count ceiling: uniform evidence grows with duration and all nonredundant scene cuts remain. Storyboard request windows partition the complete frame set rather than discard its tail; a failed window cannot become a partial success. Partial chat frame selection retains full narration. See [video frame coverage](modules/ingest_media.md#video-frame-and-narration-coverage) for sampling cadence, artifact growth and verification limits.
+
+Turn media and image lists are no longer rejected or silently sliced at 20. Complete owner-scoped resolution and retention preserve every valid ref; source bytes stay in the existing attachment authority. See [complete ref lists](modules/ingest_media.md#complete-turn-attachment-lists) for measured 33-document retention and snapshot coverage.
+
+Knowledge index publication no longer trims aggregate terms to a private 14,336-write budget or imposes 256/4,096 source-term count ceilings. Complete valid postings publish atomically; query windows and term-format validation remain explicit. See [index continuity](modules/ingest_media.md#knowledge-index-term-continuity) for measured corpus, large-chunk, rollback and ownership boundaries.
+
+
+## Explicit native-authority ROOT fixture admission
+
+The paid/counted HTTP fixture accepts --backend daemon only with an explicit --storage-engine. It clears inherited native storage options, verifies current engine source, pins bytes, selects only its disposable authority, and verifies health before execution. Compared arms must report identical backend/transport/ engine pin; no live .env, authority or deployment changes. SQLite remains the default fixture. Mismatched engines fail before opening native test storage.
+
+`system_native_authority_root_readiness_20261013.json` records successful SQLite comparability and 58 identity/update tests, including compiled Rust/Python source identity before and after staging/schema changes. A complete engine build remains unverified: the frozen committed Rust snapshot misses a slots module and consumers reference removed generated constants. Shared in-flight engine edits are preserved. No stale engine or disabled-feature substitution grants native ROOT or performance admission. External build-input identity and snapshot ownership are specified in STORAGE_TOFUDB.md.
+
+Media evidence replacement no longer refuses a result above 200 assets. Complete frame files and references retain the existing atomic publication, rollback and deletion lifecycle. Retrieval page sizes remain offset windows. See [media publication](modules/ingest_media.md#complete-media-evidence-publication) for the 257-frame measurement and late-write rollback coverage.
+
+
+## Restore retained native slot and legacy-bound source coherence
+
+**Problem:** committed Transaction IR referenced an untracked sparse slot module, and compatibility consumers referenced a removed generic byte-bound constant. **Decision:** retain the reviewed sparse module and its MSRV allocation/disposal specs; ten legacy envelope/control consumers reference the declared legacy document byte bound with the same historical numeric value. No new quota, cache, pool, worker or store is introduced. **Alternatives rejected:** dense arrays sized by identifier permit runaway allocation; restoring a generic literal quota changes the new IR admission contract; disabling checkpoints omits required native capability.
+
+`system_native_engine_compile_coherence_20261013.json` records four standalone Rust 1.85.1 module tests and complete crate check failures. The missing slot module is resolved; compiler diagnostics after that addition fall from 31 to 20 after the ten consumer edits. The engine still does not compile, so native ROOT/default/performance admission remains false. Follow the owning machine-readable contracts for remaining consumers and preserve in-flight work.
+
+Unified media document upload has no 50 MiB route/body admission quota. Complete HTTP input uses the existing request-owned file spill path; the current parser still materializes a full byte input. Immutable originals, digest reuse and actual indexing errors retain their existing authority. See [document intake](modules/ingest_media.md#complete-document-upload-admission) for the large ODT route verification and remaining parser policies.
+
+Knowledge extraction no longer truncates sources at 12 million characters or uses a 50-million-character configuration ceiling. Addressable parser output feeds the existing atomic index and document-owned cleanup. Explicit output lengths for other callers remain projection choices. See [complete text](modules/ingest_media.md#complete-knowledge-text-extraction) for the 12,000,058-character / 8,027-chunk measurement and memory limits.
+
+Office package detection no longer uses member count, total declared expansion or aggregate compression ratio as resource admission quotas. Existing parsers read required members; integrity and one-asset spool ownership still determine actual settlement. See [Office package admission](modules/ingest_media.md#office-package-source-admission) for real boundary-crossing packages and corrupt-member failure coverage.
+
+Chat/project archive extraction and project upload spooling have no default private byte/file admission quotas. Owned staging and windowed file copies retain full input; premature member EOF fails and rolls back the staging tree. See [archive intake](modules/ingest_media.md#archive-reception-and-complete-extraction) for measured file/byte boundaries and remaining build/path policies.
+
+Paper source freezing removes 512-file, 32/64 MiB and 4,096-entry admission ceilings. One owned chunk buffer supports copying and hash verification; source metadata grows with actual dependencies. Explicit records and preview change observation preserve their complete lists. See [source freezing](PAPER_BUILDS.md#complete-source-snapshots) for measurements and the separate remaining compiler/output policies.
+
+
+## Native domain build and full-demand functional admission
+
+`system_native_domain_compile_coherence_20261013.json` retains the first full-library six failures and their exact reruns, then 1,809 passing tests/eight ignored on frozen candidate sources. External-input-aware release identity matches the candidate. Actual Python/native ordinary ROOT requests on one pinned disposable TofuDB daemon preserve request, fee, budget, terminal and joined cleanup. One pair is comparability, never full timing or default admission.
+
+Retired domain quotas are replaced by existing blob ownership, complete paged scans, checked sizes/count representations and actual I/O errors. No additional cache, executor or authority is added. Archived sink records over the old inline limit use referenced blocks plus length/SHA-256 witnesses; 9 MiB cleartext outbox and over-2,048-reference reopen/publication/ACK tests quantify newly admitted demand, not residency or tail performance. Full-demand sink durability grows with accepted records; source retirement remains ACK-bound and no accepted state is silently reclaimed. Owning operations contract: STORAGE_TOFUDB.md. Shared in-flight queue append-cache/page-codec/token work is retained separately; a frozen library result does not certify every concurrent shared source variant.
+
+
+## Pin explicit native-authority ROOT performance collectors
+
+**Problem:** the priced/counted HTTP timing and stopped-VM collectors supported SQLite only, while a verified native-authority ROOT pair did not establish tails or memory. **Decision:** explicit --backend daemon/--storage-engine uses one fixture authority witness for source verification and binary SHA. Every worker must report the same backend/transport/pin; per-worker hash checks fence artifact changes. Timing summaries use the selected backend; memory summaries reject missing/foreign witnesses without ratios. SQLite/prebound defaults remain. **Alternatives rejected:** inferring the live deployment risks authority drift; combining SQLite/native clocks changes fixtures; using timing pauses admits contaminated latency; a small successful launch cannot waive cohort thresholds.
+
+`system_native_daemon_collector_20261013.json` retains 49 guard tests and explicit native warm/cold/memory smoke workers. Exact paid work, joined cleanup, authority pin and recomputed summaries pass. Small warm ratios show regressions and memory is incomplete; retain both. The full native cohort and default/whole-system performance remain unadmitted. Collection runs are frozen in an isolated checkout and never change live storage/deployment.
+
+Paper discovery has no private root, depth, scan, source-byte or candidate quota. Existing safe readers and owner bindings retain complete candidate lists through SQL/native resolution and browser selection. See [discovery](PAPER_BUILDS.md#complete-authorized-paper-discovery) for actual root/source counts, owner isolation and remaining policies.
+
+
+## Native counted callback phase diagnostics
+
+**Problem:** native warm ROOT regression could not separate local preparation from host model reservation, dispatch and settlement. **Decision:** opt-in fixture stages observe those three existing ModelControl callbacks separately, along with approval/checkpoint controls. Labels use a closed action vocabulary; invalid actions never enter metrics. Arguments/results and original cancellation exceptions pass through unchanged; async spans record wall only. Existing performance admission rejects all instrumented rows. **Alternatives rejected:** logging request frames leaks private input; summing nested spans double-counts; changing production callbacks would perturb the path being diagnosed. Verification uses stage identity/cancellation tests and native model-control contracts. These observations grant no timing or default-selection admission.
+
+Reusable agent identities have no private 8 MiB state quota, fixed dispatch result reservation or 256-identity roster ceiling. Complete transcripts and immutable dedup evidence share ordinary storage ownership; roster metadata pages traverse to EOF without a 1,000-identity cutoff. See [retained agents](RETAINED_AGENTS.md) for 9 MiB/1,101-identity measurements and unchanged CAS/assignment authority.
+
+### Paper artifact cache publication follows accepted demand
+
+**Problem:** cache byte/count targets rejected a finished build whenever readers protected older artifacts, or the new artifact alone exceeded the reuse target. **Decision:** `LocalBuildCache` publishes verified immutable artifacts before reclaiming eligible idle records. Cache targets control reclamation, never admission. Active filesystem leases, viewer reservations and the prior successful preview during a failed/obsolete publication remain protected. Occupancy may exceed the targets while these records are in use; releasing leases permits the next prune to reclaim them. Actual filesystem errors still surface and failed pointer publication preserves the previous success. **Alternatives considered:** rejecting new results or evicting active previews would respectively lose accepted work or break readers; disabling reclamation would leak reconstructible artifacts.
+
+Verification: `test_paper_build_cache.py` publishes and reopens 145 simultaneously leased results with a one-record/one-byte target, reads every artifact exactly, and reclaims all records after release. This measures retained record/byte occupancy, not RSS. Separate tests cover cross-process viewer protection, oversized publication, corrupted viewer expiry and pointer-write rollback.
+
+
+## Native-authority ROOT full cohort remains unadmitted
+
+**Problem:** SQLite results did not establish native-authority execution costs. **Decision:** retain the complete frozen explicit-daemon cohort: 212 independent workers and 1,652 ROOT operations with identical priced/counted work, joined cleanup and unchanged sources. Warm p50 ratios 1.122–1.144 and p95 1.271–1.410 fail timing admission, despite cold p99 0.982 and qualified stopped-VM memory RSS/PSS ratios 0.923–0.995. Default and whole-system selection remain unadmitted. **Alternatives rejected:** replacing the selected authority mixes fixtures; using cold or memory improvement to waive warm regression hides user-visible cost. `system_native_daemon_full_gate_20261013.json` retains every warm/cold raw clock and exact hashes of separate raw timing, memory and stage artifacts. Stage spans overlap: subprocess spawn median 0.768 ms alone cannot explain the 12–15 ms warm difference; native terminal callback median 20.192 ms and round callbacks require separate policy-phase diagnosis. Never add spans or attribute all unexplained time to token initialization without direct evidence. The engine is source-matched to this frozen checkout only; later shared paper Rust changes require a new verified engine for any current-source native run.
+
+
+## Reject buffered native token-asset hashing
+
+**Problem:** fresh task processes repeat exact token-asset admission; small SHA updates looked like avoidable work. **Decision:** retain direct streaming SHA updates. An 8 KiB fixed-buffer candidate preserved original/packed digests and passed three MSRV rank/digest tests, but 400 fresh paired workers showed cold wall p50 ratios 1.127/1.118 and CPU p50 1.130/1.117 for cl100k/o200k. Reject it; no runtime/default change is admitted. **Alternative rejected:** buffered hashing adds copying and regresses this actual initialization workload. `system_native_token_asset_digest_rejected_20261013.json` retains all clocks, source/binary hashes, candidate patch and rejection criteria. An initial shared Cargo target returned identical binaries and was refused; independent candidate target rebuild produced a distinct binary before comparison. Future paired builds must isolate variant targets; source witnesses alone cannot prove a reused Cargo output belongs to the requested checkout. ROOT warm regression still requires policy-phase diagnosis, not speculative attribution to hashing.
+
+
+## Native-authority control callback diagnosis
+
+**Problem:** aggregate native execution time did not locate warm overhead. **Decision:** observe counted reserve/dispatch/settle through the tested stage module over the same frozen source-matched daemon. Two joined diagnostic workers perform identical paid work (13 operations each); ten measured warm intervals retain the gap from preparation ACK to model reservation. Model callback medians are below 1 ms each, while native terminal control is about 19 ms. The retained pre-reservation gap is a host wall interval including native preparation, IPC and scheduling; it does not prove tokenizer CPU or justify bypassing admission. **Alternatives rejected:** changing the application/store while diagnosing mixes causes; attributing an unobserved interval to one function overstates evidence. `system_native_daemon_control_phases_20261013.json` retains raw content-free spans, exact work and overlay/source identities. Nested spans cannot be summed and instrumented rows cannot grant performance/default admission.
+
+
+## Native token admission hashes one canonical line at a time
+
+**Problem:** fresh native tasks rebuild an exact local encoder; rank admission updated SHA separately for Base64, separator, decimal rank and newline. **Decision:** assemble the same bounded canonical line and update once. The existing stack buffer grows by 12 bytes; no heap/cache/worker is introduced. Both original upstream and packed SHA, duplicate/single-byte checks and every rank remain mandatory. **Alternatives rejected:** the tested 8 KiB batch buffer regressed cold costs; removing either SHA weakens exact asset admission. `system_native_token_canonical_line_20261013.json` retains 400 independent paired cold workers: wall p50 ratios 0.979/0.981 and CPU means 0.983/0.982 for cl100k/o200k, with no >1.05 tail guard failures. Requested retained/peak/post-drop allocations agree exactly. MSRV 1.85.1 workspace checks pass 468 tests (2 ignored), including all 300,254 ranks and exact Unicode/repeated/ concurrent counting; current-toolchain Clippy all targets passes. MSRV Clippy is not installed. The verified new archive performs identical priced/counted ROOT work over disposable SQLite with joined cleanup. This qualifies the cold count component only; native-authority warm regression and default migration remain unadmitted. The separate perf sample has host DWARF limitations and is never used as latency admission evidence.
+
+### Direct SSE relay output follows demand
+
+Problem: a synchronous provider burst could fill the direct relay queue and abort otherwise valid execution with `relay_queue_overflow`. Decision: the existing queue size is a warm text hint; surplus publications hold ordered references to anonymous frames under the shared `JsonFrameStore` worker owner. Segment size and idle worker reuse derive from the existing launch transport probe. Consumers decode one frame at a time; completion, observer failure and disconnection join the file owner before its ranges retire. Detached provider execution keeps the existing settlement owner and stops retaining relay text. Actual spool I/O failure remains a typed, redacted terminal failure. Alternatives: increasing queue capacity fails later; dropping deltas gives false successful output; retaining all serialized output in a text queue scales transport memory with a slow reader. Tests deliver 2,049 ordered Unicode deltas with warm hint one and verify every temporary file closes; this measures frame completeness and lifecycle, not total provider/parser RSS.
+
+### Request Inspector task trees follow retained evidence
+
+Problem: inspector summaries rejected more than 100 roots and native child expansion rejected 1,000 records, hiding evidence from large accepted task trees. Decision: retire these task-count admission quotas in SQL, semantic compilation and native IR/execution. Native metadata scans use 512-row physical windows within the same owner/tenant transaction until the exact child prefix ends; summary reads never hydrate event bodies. Requested roots and overlapping children yield one ordered record per task in both backends. Alternatives: raising the caps fails later; truncation hides evidence; scanning event payloads duplicates unnecessary transcript memory and I/O. Tests retain 129 roots and 1,101 children, request overlapping identities, verify all 1,230 exact counts, reopen the native authority and deny a foreign owner. These are metadata/count measurements, not RSS or a claim of PostgreSQL runtime certification.
+
+
+## Reject a static open-addressed token rank index
+
+**Problem:** per-task encoder construction repeats a heap rank map. **Decision:** retain the admitted borrowed map. A generated immutable 8-byte slot index kept original/packed/index SHA checks, exact ranks and unknown-key semantics. Thirteen focused MSRV/generator tests pass, including 300,254 ranks, 20,000 unknown keys and counting/merge oracles. Pilot tails failed; expanded 1,200 fresh cold workers pass cold guards, but median/mean gains are not stable. Three 1,000-operation warm pairs retain cl100k prose p99 ratios 1.116/1.107/1.128 and additional small/long piece tail failures. Heap requests drop ~82–85%; actual peak RSS stays ~1.0. **Alternative rejected:** static lookup moves memory into mapped artifact pages and does not qualify merely because allocator counters or medians improve. `system_native_static_token_ranks_rejected_20261013.json` retains both pilot and expanded clocks, source/binary hashes and a reproducible non-generated implementation patch. Exact upstream assets regenerate the tables. No index/lookup/generator/benchmark change is installed; default and whole-system migration remain unadmitted. Further native performance work must address owned runtime reuse and repeated admission without weakening source, authority or joined cancellation/persistence boundaries.
+
+### Complete event type catalogs
+
+Problem: native prefix reads and Inspector legacy-flow aggregation refused 1,000 matching event types. Decision: enumerate complete owner-scoped catalogs in 512-row physical windows in the same transaction, validating each key and metadata value. A priority queue merges per-type event cursors in sparse application-sequence order; explicit output pages remain narrow. Alternatives: a larger catalog ceiling fails later; truncating type enumeration hides events; rescanning every type per output row scales as types times output rows. The heap merge instead selects each row in logarithmic type-count work. Verification stores 2,161 types and 2,162 events, reopens the authority, reads 197-row pages with overlapping type/prefix filters, and checks every sequence and type exactly plus the complete Inspector count. This measures metadata and event completeness, not RSS; event bodies are excluded from the metadata scan.
+
+
+## Native reader join fence
+
+**Problem:** concurrent reader release could acknowledge before physical join, and a failed join could acknowledge on retry, preventing safe runtime reuse. **Decision:** explicit Running/Joined/Failed ownership remains locked through join/tail publication. Failed cleanup never becomes success through a missing handle; independent readers and execution remain demand-driven. **Alternatives rejected:** detach-then-wait exposes a false release window; retrying absent ownership conceals actor failure. MSRV x86_64 measurement changes ReaderLease from 80 to 88 bytes, with no new worker/cache/timer or concurrency cap. `system_native_reader_join_fence_20261013.json` preserves exact before/after behavioral proofs: old code fails concurrent release and failure retry, new code passes. Real stdio neighbors pass 23 tests; MSRV workspace passes 469 (2 ignored), and current-toolchain Clippy all targets passes. This is the quiescence prerequisite for persistent native worker/encoder reuse, not a performance/default selection verdict. Application still uses per-task stdio processes and the complete native-authority warm regression remains unadmitted.
+
+### Evolution terminal receipts follow accepted demand
+
+Problem: legacy episode automation refused terminal notifications after a launch-derived queue count (at most 16) and serialized independent checks. Decision: retain all accepted identity/consumption receipts and submit independent checks through the existing production demand executor. Its idle reuse derives from the shared launch probe; it never caps active checks. Task histories are not retained. The coordinator stays published until its executor joins, so Stop and idle retirement cannot forget active check workers. Enqueue during idle close transfers pending receipts to a fresh joined generation. Explicit shutdown still cancels reconstructible checks; durable run receivers retain their own required-delivery path. Retire `TOFU_EVOLUTION_TERMINAL_QUEUE_CAPACITY` from the resource contract/probe. Alternatives: a larger queue still drops work, and one consumer keeps unrelated criteria checks serial. The controlled test starts 64 held checks with reuse hint one, retains exact receipt identities and consumption actuals, releases the original task history and joins all work on Stop. This is a concurrency/lifecycle measurement, not a production throughput or RSS claim.
+
+Legacy terminal binding lookup also retires its first-200-record cutoff. Exact owner/task matching traverses physical record windows through EOF, validates episode/key identity and adapts page size on typed storage resource refusal. A synthetic bound episode after 205 unrelated records settles its actual terminal outcome without changing those unrelated episodes.
+
+
+## Explicit persistent native worker mechanism
+
+**Problem:** every transient CLI task repeats process/reactor/encoder setup. **Decision:** an explicitly started owner-bound worker reuses lazy immutable encoders, while every task and model account is fresh. The command owns cache lifetime through shutdown/EOF; no application worker pool or concurrency cap is introduced. Fixed two-encoding cardinality follows supported vocabulary, not a user/task quota. **Alternatives rejected:** sharing mutable provider/task/account state crosses authority; publishing readiness before exact cleanup hides debt. `system_native_persistent_worker_20261013.json` retains 726 counted standalone CLI tasks, three 100-operation measured pairs, identical requests/full terminals and joined process close. Warm median ratios are 0.070/0.074/0.083 (about 1.3–1.4 ms reuse versus 17–19 ms transient). CPU ratios 0.077–0.084 cover whole arms including startup/warmup, not per-operation CPU. A separate 2,000-task diagnostic retains procfs observations: RSS rises from 5.3 MB cold to 15.1 MB after encoder load, reaches 19.2 MB near operation 100, and stays there through 2,000. This proves that fixed sample only; procfs snapshots are not stopped-VM/RSS admission, allocator diagnosis or unbounded-load proof. Tests pass 472 MSRV workspace (2 ignored), 26 actual stdio and 19 Python contract neighbors; current-toolchain Clippy all targets passes. No application/wallet/ route/gateway timing/default verdict is admitted; full native-authority ROOT warm regression remains failed until application ownership binds this entry.
+
+
+## Application native worker demand ownership
+
+**Problem:** per-task native process/encoder cost remained in the application. **Decision:** explicit reuse follows complete principal/cwd inode/transport keys, lazy serving-loop acquisition, joined readiness and host-owned process lifetime. The published launch-policy root_maximum sizes idle retention only; active demand creates independent workers without a count gate. One bounded frame pump per physical worker supplies backpressure, not an admission quota. Evicted/failed workers and host shutdown join before sealed-image release. **Alternatives rejected:** a global shared worker serializes machine capacity; owner-only reuse mixes principals; dropping source/inner-frame bounds hides cost or authority changes. Threaded prepare installs the owner under a short lock; no image IO or process allocation runs there. Callback/Stop failure retires a worker while existing accounting/terminal cleanup still joins. `system_native_application_worker_reuse_20261013.json` shows 26 exact priced/counted ROOT operations reusing one PID (one idle ready worker), then complete child/client/image cleanup. It retains 125 Python neighbors, actual callback-failure retirement, four real Stop combinations, 473 MSRV Rust tests (2 ignored), and Clippy. This small SQLite functional cohort establishes neither native-authority latency tails nor stopped-VM memory/concurrency admission. The prior standalone 2,000-task residency plateau is component evidence only; do not transfer it to the whole application. Default worker selection remains transient.
+
+## Complete project tree indexes
+
+Problem: entry/frontier ceilings, a 30-level depth cutoff and a 600-second build deadline discarded valid project indexes. Reload and write-fresh checkpointing also rejected snapshots above the idle retention target, causing repeat filesystem walks. Decision: directory builds consume their complete frontier through the existing launch-derived scanner window. Legacy walk deadlines and `TOFU_TREE_INDEX_BUILD_BUDGET_S` do not terminate a valid build. Only actual read failures prevent installation; accepted scanner Futures are joined before the caller sorts or discards rows.
+
+`TOFU_TREE_INDEX_MAX_ENTRIES` is now an idle retention target. The newest usable index survives even above it; older indexes checkpoint write-fresh rows before LRU removal. Borrowed index objects remain owned by their query callers. Disk reload validates exact column/path counts and lengths rather than applying an admission quota. Live rg/fd/Python search no longer has the private depth cutoff; existing result presentation and explicit transport/time policies remain. Alternatives considered: raising thresholds repeats the same valid-source failure; one Future per directory creates a thread storm. The complete frontier uses descriptors while directory Futures remain windowed.
+
+Verification: `tests/project_mod/test_tree_index.py` creates 10,201 real files above a 10,000 retention target, builds/reloads the full index, changes it and checkpoints the complete revision on eviction. A 42-level real directory is queryable through both the index and cold live grep/Python find. `test_tree_index_scan_pressure.py` retains the 4,096-directory window/lifecycle measurement and verifies complete traversal past the legacy deadline and target. These tests do not prove constant frontier or retained-index RAM.
+
+## Search chunk and child retirement
+
+Problem: eagerly submitting every indexed search chunk to the demand executor created a thread/process per chunk; concurrent timeout cleanup then scanned the whole host's `/proc` before reaping those children. Decision: the existing measured search profile defines an internal submission window; exact withheld counts use their existing two-chunk window. Every candidate remains eligible, results retain input order, and explicit `TOFU_GREP_INDEX_JOBS` overrides are honoured without the former eight-job clamp. Early completion cancels and joins prefetched searches. Cleanup reads only owned processes' per-thread child lists, closes pipes and reaps the direct child even after an output callback raises. Alternatives rejected: limiting the shared executor blocks independent user tasks; dropping chunks silently loses evidence; detached cleanup accumulates processes after the result has returned.
+
+Measurement: 1,024 synthetic 2 ms chunks retained all results at windows 2/8/16, with peak active chunks 2/8/16, elapsed 1.148/0.296/0.172 seconds and zero remaining search workers after each return. This measures scheduling, not storage throughput. Specs: `test_grep_withheld_recovery.py` and `test_grep_process_retirement.py` under `tests/project_mod/` cover complete counts, cancellation, failed worker creation, scoped child discovery, and direct-child/descriptor retirement.
+
+## Complete project write recovery evidence
+
+Problem: launch-derived byte ceilings and pending/directory quotas refused valid writes or made older durable evidence unreadable after a smaller restart setting. Decision: exact write-intent preimages, post-images, encoded records and recovery discovery have no private admission quota. The legacy `TOFU_PROJECT_WRITE_RECOVERY_MAX_MIB` setting is ignored and no longer probed or generated as a default. Real filesystem failures, source changes, corrupt envelopes and root/stage identity remain authority boundaries.
+
+Alternatives considered: raising thresholds repeats the same refusal; dropping preimages or reclaiming pending rows weakens durability. Evidence remains an inline, complete-byte representation with its existing acknowledge/aborted cleanup lifecycle, and consumes memory proportional to retained bytes. A Linux measurement on 2026-10-13 prepared an 8,388,608-byte original and 8,388,620-byte post-image, wrote 11,185,310 durable evidence bytes, and classified the stage as unpublished. Peak traced allocations were 50,178,009 bytes including cold validator imports; this is not total RSS or a constant-memory claim.
+
+Verify complete byte/UTF-8/base64 undo, changed legacy settings, 137 pending records with 180 auxiliary entries, interruption/reopen, stage identity and evidence-I/O faults in the project write recovery/intent/atomicity suites. Independent command-snapshot and namespace-transaction policies remain under their owning boundaries for further audit.
+
+
+### Evolution artifact snapshots retain accepted source demand
+
+**Problem:** private 2 MiB/file, 8 MiB selected-byte, 16-generation and 16 MiB bundle limits rejected completed work, including schema-level part limits. **Decision:** explicit declarations retain complete stable file bytes and all selected generations through owner-scoped manifest CAS and immutable 30,000-character parts. Terminal sealing and paged review retain the same hashes and authority. Storage failures and interrupted captures remain visible rather than claiming complete evidence. Durable growth follows the selected source and generations; these records are user evidence, not an idle cache eviction target. **Alternative rejected:** raising fixed limits recreates refusal for larger work; clipping source bodies prevents independent review. The current implementation materializes each captured file and its serialized entry in memory; chunked reads do not imply constant memory.
+
+A controlled repository-port test captures 13,631,506 original UTF-8 bytes into 455 snapshot parts, removes the live file, seals 27,263,280 JSONL bytes into 909 terminal parts, and recovers every byte through owner-scoped pages with matching SHA-256. Separate tests retain 33 generations and concurrent 33-file declarations. These measurements exclude database framing and do not establish native-backend performance or process RSS. Explicit execution allowances, cancellation, path security and corrupt/missing evidence rejection remain enforced.
+
+
+### PDF explicit figure demand preserves requested detail
+
+**Problem:** independent 64-image, 2,048-pixel and fivefold zoom clamps changed caller requests even when the document was successfully parsed. **Decision:** classic figure extraction honors caller image selection and width; detected images are rendered and resized under that explicit projection policy. No new resident worker or queue is introduced. **Alternative rejected:** raising fixed ceilings merely moves the silent omission and downsampling to larger requests. A real 75-page fixture retains all 75 detected figures at requested width 300; a separate real figure requested at width 3,500 decodes above 3,000 pixels and within the requested maximum. Image memory grows with selected raster pixels and retained results; this is no constant-memory or process-RSS claim.
+
+
+### Complete PDF figure selection and cache growth
+
+**Problem:** default 20/30-figure prefixes and selection-blind caches dropped completed document work. **Decision:** default extraction follows actual detected figures; explicit count/width controls remain. Paper cache version 8 records selection and extraction success; incomplete or differently selected caches cannot acknowledge a new request. **Alternative rejected:** raising private count limits or reusing a partial cache merely conceals larger demand. A real 75-page document yields all 75 figures; a 20-figure cached request regenerates to 75, and a changed width regenerates rather than using old detail. An injected first-page failure returns two available figures without reusable success, then retry restores all three. Retained memory/disk follows detected image count and requested raster size; no additional worker pool or residency is introduced, and no constant-memory or native throughput claim is made.
+
+
+### Compiler temporary files follow actual execution demand
+
+**Problem:** implicit 128 MiB per-file and total-output caps killed compiler work independently of available disk. **Decision:** compiler workers install RLIMIT_FSIZE only for an explicit positive caller override; directory accounting observes complete regular-file bytes without a fixed execution quota. Explicit overrides are validated before spawning and passed exactly, including values above the old limit. **Alternative rejected:** a larger automatic cap still rejects a sufficiently large accepted compilation. Lifecycle remains tied to the build directory and joined process group; disk errors remain actual errors. A real supervised child writes 135,266,304 bytes in 1 MiB chunks; the parent verifies every byte and SHA-256 while the normal output inspector remains active. This measures retained temporary bytes, not process RSS or final publication. Artifact admission, retained transfer and PDF validation limits remain distinct pending work; they must not be inferred to be removed by this execution change.
+
+
+Complete paper artifact publication — Problem: a 64 MiB file ceiling and 128 MiB aggregate ceiling rejected already generated results in metadata, remote bundles, retained storage and native receipts. Decision: remove both source quotas across the shared schema, Python/native admission and Overleaf export; full-file readers no longer reject at the old size. MCP read offsets have no private file-size ceiling. Preserve bounded transfer chunks, digest and length verification, ownership, success-only publication and rollback. Reclamation steps scale with the accepted build's actual part count; each GC transaction remains bounded and cancellable. Native size accounting uses checked platform arithmetic so an overflow cannot wrap into a small reservation. Alternative rejected: raising ceilings still rejects larger completed work; clipping artifacts breaks independent recovery. A real valid PDF above 129 MiB traverses the bundle, passes PDF validation, persists in SQLite, survives an authority backup and is recovered chunk by chunk with the exact SHA-256. Native checks cover large receipt admission, extent overflow and the existing retained integrity/owner/rollback lifecycle; they do not establish full large-file native or Windows/PostgreSQL performance. Durable growth follows selected artifact bytes and fixed-size chunk metadata. Separate PDF structural/decode/time budgets and compiler log policies remain under audit.
+
+
+### PDF document scale is independent of structural validity
+
+**Problem:** fixed 1,000-page, 100,000-object, 250,000-operator, 32 MiB stream and 128 MiB aggregate decoded limits refused well-formed PDFs. **Decision:** the owned validator audits the complete document and reports actual page/object/decoded counts; geometry, references, page-tree consistency, strict stream EOF and content syntax remain validity requirements. **Alternative rejected:** larger fixed quotas or stopping the audit early still lose accepted source work. Actual measured fixture demand includes 1,001 pages, at least 100,006 objects, 250,002 content operators and nine 15 MiB decoded streams (141,557,760 decoded source bytes, plus the page content). Larger fixtures use an explicit 512 MiB validator allowance; the unchanged default/native memory and wall-clock policies remain pending work. Memory follows resolved pypdf objects, decoded data and visited identity sets, not a constant-memory claim. No resident validator pool is added; child/report retirement remains owned.
+
+
+### Reader document completeness is separate from viewport residency
+
+**Problem:** fixed page/search/outline/link gates rejected or omitted valid PDF evidence. **Decision:** retain the complete logical document while the existing viewport owner renders and retires canvases. Search cancellation still fences all results; periodic yields keep larger source/result traversal interruptible. **Alternative rejected:** increasing source caps or labeling truncation does not process the omitted work. A real 1,005-page browser journey verifies 301 complete matches, 600 outline entries and 600 valid links; resident canvases stay within eight and observed canvas bytes within 64 MiB, then return to zero on close. Search/outline metadata memory follows actual document demand. This verifies existing residency behavior, not that its fixed raster defaults already scale optimally with every machine; that policy remains a separate audit item.
+
+
+### PDF validation execution follows accepted demand
+
+**Problem:** launch-probed 128..512 MiB RSS/address-space and private 15-second CPU/wall ceilings killed valid audits. **Decision:** retire those defaults from the catalog and probe; explicit nonnegative MiB overrides retain exact values, and positive caller timeouts retain exact deadlines. Default supervision observes RSS, checks cancellation and joins its child without imposing a quota. Linux parent-death signaling and other-platform owner monitoring tie unlimited work to the actual launching process. **Alternative rejected:** larger defaults only move refusal, while removing ownership leaves orphan workers after a host crash. A real PDF decodes nine 60 MiB streams (566,231,040 bytes plus page content), with observed worker memory above the former 512 MiB ceiling. A controlled real child finishes after 15.2 seconds; explicit memory failure, deadline/cancellation and Linux owner death still retire their processes. No resident pool is added. Non-Linux ownership uses one daemon observer per active validator; memory and decoded-object retention follow actual demand. This is not a constant-memory or Windows/macOS execution-parity claim. Reports remain bounded transport and source correctness/owner publication checks remain mandatory.
+
+
+### Compiler progress owns lifetime without private wall-clock admission
+
+**Problem:** 180-second compiler CPU/wall deadlines also timed out live desktop, Research and Overleaf work. **Decision:** default work follows owner completion; explicit positive finite deadlines retain their values. Native workers still check their parent/start marker/Stop, the host joins process trees, desktop work checks connection and cancellation, and Research renews its subscriber. Cloud export uses its existing asynchronous owner without an automatic compile timer. **Alternative rejected:** higher private limits still refuse slower valid work; removing ownership permits orphan processes and stale publications. Real native commands report RLIM_INFINITY by default and 420 seconds for an explicit caller request; neither observation is a long-running compiler performance benchmark. Existing actual file-output, RSS, process-tree, transfer/hash, cloud lease, rollback and cancellation checks remain in the test ladder. No resident pool or new queue is introduced. Log retention and diagnostic-probe policies remain separate audit items. Desktop queued-command pickup expiry is also separate pending work; this change does not claim to remove every desktop queue limit.
+
+
+### Desktop execution credits no longer gate accepted work
+
+**Problem:** CPU/memory/replay slot counts withheld command delivery, while default queue age rejected work before pickup. **Decision:** native dispatch is demand-owned; command batches and activity ID pages bound individual transport polls without imposing active-work cardinality. Server-side owner/device-bound activity acknowledgements preserve progress when later polls omit an ID. Only explicit TTLs reject pickup. Stable first-dispatch replay horizons reclaim completed identity records after both output ACKs; unset-policy legacy server frames retain enforced expiry for compatibility. **Alternative rejected:** larger quotas simply move refusal; dropping receipt identity before ACK causes replay. A controlled forty-command server batch survives zero advertised slots and 1,000 seconds of pre-pickup age. Real thirty-two held handler threads enter in both legacy and negotiated poll loops before release, retaining every result. Byte-bounded rotating activity pages preserve all Unicode IDs. Resident state follows accepted jobs and pending output; existing outbox spooling retires ACKed files and joins work before close. No resident worker pool is added. These checks do not establish restart durability for the ephemeral desktop queue.
+
+
+### Compiler log volume does not grant execution refusal
+
+**Problem:** private 1 MiB logs caused execution kills, post-exit truncation and cloud export refusal. **Decision:** store complete default log bytes on disk; explicit native log-byte limits still constrain requested output. Scan all diagnostic lines using bounded lookahead and reply records, preserving late failure evidence; saved logs provide the complete independent source. **Alternative rejected:** higher caps still reject longer work, and head-only parsing can hide late errors. A real supervised command produces five chunks of 1,048,586 bytes plus a 14-byte tail (5,242,944 bytes), verified by SHA-256. Controlled executable builds retain more than 2 MiB of log bytes and preserve failed/successful publication behavior. Cloud export retains a late main-file marker and complete tail beyond 1 MiB. Disk growth follows actual output and the existing build/artifact lifecycle; diagnostic memory follows eight lines and at most 64 displayed rows/keys, plus a potentially large individual line. No resident worker/queue is added and no log/body bytes are silently reclaimed.
+
+
+### SyncTeX mappings retain full generated demand
+
+**Problem:** a 16 MiB decoded-source quota disabled location for larger builds and full text assembly amplified memory. **Decision:** normalization and queries stream gzip lines through verified EOF; geometry indexes use the same shared parser with iterator input. Publish normalized gzip only by atomic replacement after complete input and staged-file flush/fsync. **Alternative rejected:** larger fixed limits still reject later records; partial publication corrupts source evidence and early query answers evade tail-integrity checks. A gzip fixture contains over 17 MiB of valid box records plus a final mapping on page 1,001/source line 999; exact decoded bytes and unchanged original SHA-256 are verified before forward/inverse queries after source deletion. Failure fixtures preserve prior bytes and leave no staging file. Input buffering follows the longest line; retained geometry indexes follow actual source records. There is no new worker pool, resident queue or constant-memory/native-backend parity claim.
+
+
+### Startup recovery is not a resource admission quota
+
+**Problem:** boot recovery resumed only a worker/inflight/RSS-derived count and recorded `boot_capacity` for the remainder without retrying until another boot. **Decision:** process every elected eligible candidate through the existing owner-scoped recovery protocol. Legacy resume-count values are ignored; normal task owners handle execution and retirement. **Alternative rejected:** a higher resume cap still strands a larger backlog; bypassing durable claims risks duplicate work. Forty real storage-backed candidates all acquire successor receipts under one-worker/one-inflight/one-resume legacy settings; a repeated pass produces zero additional spawns. Tests observe runtime-port handoffs, not forty simultaneous model requests or native-backend performance. Active task state scales with handed-off demand and its ordinary lifecycle. The separate rapid-lineage guard, author eligibility and operator off switch remain enforced.
+
+
+### Restart frequency is not a work-admission resource
+
+**Problem:** three lineage retirements inside ten minutes triggered permanent continuity exhaustion, independently of safe checkpoint contents or actual work. **Decision:** recover eligible candidates under the ordinary journal/budget/owner protocol without counting restarts or applying a private timing window. **Alternative rejected:** larger restart counts merely postpone refusal; bypassing unknown-effect and duplicate-claim checks risks replayed work. Three- and twenty-link storage-backed lineages each yield one successor, then duplicate passes yield no further spawn. These measure recovery handoffs, not model throughput. Historical closure records remain intact. No daemon, timer, pool or counter is added; validation state follows the existing lineage reader.
+
+
+## Classic PDF caller waiting
+
+PDF process counts size idle reuse; independent parses acquire workers on demand. The launch probe does not manufacture a caller deadline. Default parse waits have no private timeout; positive caller/operator limits remain explicit and uncapped. This change creates no pool, timer, or persistent data. It changes only `Future.result` waiting; live futures keep their existing settlement lease after an explicit timeout. Real-process burst tests verify simultaneous work beyond the idle reuse target and joined retirement; they do not claim an RSS benchmark.
+
+
+## Synchronous desktop waits
+
+Desktop tool calls do not derive a 30-second failure from private defaults. Their existing event waits for owner/device settlement; only callers with an explicit timeout or cancellation signal stop waiting. A supplied Stop signal is checked every 250 ms by the existing calling thread, with no watcher thread, new pool, timer or durable growth. A stopped caller withdraws unclaimed work. Already claimed work keeps its existing queue entry until authorized settlement, then removes it. This is transport bookkeeping, not durable remote execution. Tests observe the entry retained across simulated elapsed time and removed after late settlement, and verify cancellation joins the waiter; no RSS claim is made.
+
+
+## Workspace tool lock waiting
+
+Tool writer admission retains cooperative file/checkout exclusion without a private five-second refusal. Default waiting continues on the existing condition and cross-process flock probes until acquisition or task cancellation. Explicit operator waits remain exact; nested fences share the combined lease deadline. `None` represents unlimited waiting through every fence rather than an infinite numeric timeout. No worker, queue, timer, persistent record, or descriptor is added: each waiting call owns its existing lease registry reference and any physical acquisition descriptor, releasing them on cancellation or failure. Real six-second writer holds prove both append and shell work survive the old default; local and process cancellation tests verify joined cleanup. This is behavior/lifecycle evidence, not a throughput or RSS measurement.
+
+
+## Desktop command execution lifetime
+
+Desktop commands now attach the independently owned supervisor described below. They add no executor, queue or timer. Generic shell commands reuse stream readers and a waiter; the poll worker returns after publication while runtime ownership remains until the terminal callback. A waiter checks owner cancellation on its existing 200 ms process-wait cadence. Server progress observation ends with a joined finally path rather than a deadline-driven daemon. Output capture/transport retain their current independent policies; this change does not claim complete output retention. Held real-command and cancellation tests verify completion and quiescence; no RSS/throughput or abrupt-parent-death claim is made.
+
+A 2026-10-13 isolated command observation, after imports, measured 1 parent thread before execution, 4 while held (two pipe readers and one waiter), and 1 after cancellation and joined completion. One command process was observed and zero remained. Parent RSS was 44,937,216 bytes at both sampled points; these are observations, not a peak bound or application-wide memory claim. Generic execution uses these three request-owned helper threads while releasing the existing poll worker; it trades additional reader concurrency for live output and cooperative cleanup rather than adding an admission limit.
+## Desktop independent command owner
+One accepted desktop command now owns one command process plus one independent supervisor. Both start on demand and retire after settlement; there is no idle worker pool or admission count. Two request-owned reader threads tail separate private files and one waiter observes cancellation/completion. Full emitted bytes can grow these temporary files; the caller removes them after joined settlement. A dead POSIX caller triggers supervisor cleanup of only validated IPC paths. Windows job retirement binds process lifetime, but crash-time private-file reclamation requires separate native verification. Workspace files remain outside this cleanup scope. Existing output projections retain their separate policies.
+
+A 2026-10-13 isolated held-command observation measured 1 parent thread before, 4 while active and 1 after joined cancellation; 2 child processes became 0 live children. Parent RSS was 44,638,208 bytes at both samples; aggregate sampled child RSS was 37,392,384 bytes and private IPC files held 69 bytes. The private directory was removed. These are one-command observations after imports, not peak bounds or application-wide throughput/RSS claims. The added supervisor trades per-active-command memory for abrupt-owner-death containment; it never introduces a slot or default execution quota.
+## Complete artifact content
+Artifact byte admission no longer uses 1/8 MiB private thresholds across write promotion, scanning, persistence or response-file publication. It adds no worker, queue, timer or cache. Content and base64 envelopes still use existing caller buffers and the backend's immutable blob owner; their memory and durable growth follow actual emitted bytes. Response-file reads stop at the observed source extent plus an EOF sentinel so a growing file fails freshness validation instead of consuming an unlimited tail. Blob materialization preserves logical length and hash validation and uses fallible reservation for physical allocation failure. Owned durable artifact bytes are never reclaimed as transport cache. Native 9 MiB commit/reopen, file-source removal and exact digest tests verify content retention; no whole-application memory or throughput claim follows from them.
+## Complete artifact counts and version histories
+Artifact creation has no conversation-count quota. The exact persistent u64 count uses checked addition; overflow and count/index mismatch remain corruption errors. Complete conversation lists reuse the declared entity scan window one page at a time, without an extra pool/queue or enlarged storage scan budget. Version traversal stores one visited ID per actual version instead of repeatedly scanning the accumulated chain; durable records are not deleted to satisfy working memory. A native observation creates and reopens 1,005 versions with 10,950 UTF-8 source bytes and returns all 1,005 from both history endpoints. These are exact durable count/content observations, not peak RSS or throughput claims. Per-call metadata memory follows actual selected history; explicit library transport windows and immutable blob lifecycle remain separate.
+## Complete response-image decoding
+Response images have no private byte/pixel admission ceiling. Each active call owns one short-lived decoder process and anonymous input/output pipes; there is no slot pool, persistent spool or idle decoder. The worker disables Pillow's pixel ceiling locally, verifies every frame, and binds its parent lifetime before reading input. Complete encoded bytes remain in existing caller buffers; worker memory follows actual decoding demand. Metadata is checked against the original byte length and digest. Caller completion closes pipes and reaps the worker; Linux abrupt-parent death also terminates it. Native Windows inherited handle behavior requires platform verification.
+
+One Linux 25-million-pixel grayscale PNG observation used 35,339 encoded bytes and one decoder. Sampled decoder peak RSS was 51,417,088 bytes; parent RSS was 38,354,944 bytes before and 38,383,616 after, with zero remaining children. These are observations after imports, not whole-application peak or throughput claims. Tests separately retain a valid PNG above 4 MiB and exercise both frozen entry points with missing Python standard streams on Linux.
+## Complete classic ZIP attachment metadata
+ZIP/Office metadata validation adds no pool, worker, queue or durable copy. Directory validation scans actual declared records before constructing ZipInfo objects; per-call metadata memory follows real member count. Member data is not extracted. OpenDocument MIME validation checks the exact expected byte length before reading that small required member, rather than accepting arbitrary content up to a private quota. Existing caller-owned encoded buffers and immutable artifact storage retain their normal lifecycle.
+
+One 10,001-entry classic ZIP observation used 4,480,470 encoded bytes and 2,320,232 central-directory bytes. Validation after imports took 0.415 seconds; tracemalloc observed 9,185,003 peak and 195,908 live bytes after return, excluding the encoded input allocated before tracing. These are one-call Python allocation observations, not process RSS, application peak or throughput claims.
+## Complete rich-response parsing
+Complete JSON/fence parsing and recognized tool-wrapper projection introduce no worker, pool, queue admission policy or persistent cache. Parsing and mounted content memory follow actual supplied data; teardown uses existing rich-card, image, citation and choice owners. Tool traversal stores selected candidates and visited object identities for one call, uses a cursor instead of repeatedly shifting the queue, and does not traverse arbitrary application properties. A real browser observation mounts one >1 MiB table plus eight following fences, returning nine rich cards and 108 rows including the last large-table cell. This is a content/DOM observation, not a whole-application memory or throughput claim. Collection counts follow complete schema data; scalar validity remains declared.
+
+Mounted rich images also have no fixed four-load slot pool or browser 4 MiB blob ceiling. Each actual image owns its request signal and object URL; teardown aborts every pending request and revokes decoded URLs. An eight-image pending fixture observes eight requests before any settles, then eight aborted signals. A real browser displays a 1500×1500 PNG above 4 MiB after server source removal. Concurrency follows mounted user-visible images and the browser's transport, not a private Tofu queue; no worker or persistent cache is added.
+## Complete rich-response collections
+Rich-response collections have no private count admission ceiling. Rendering and immutable storage follow actual supplied collections; no additional worker, pool, cache or duplicated durable state is introduced. Citation maps are scoped to mounted content and cleared through existing teardown. Chart domains scan actual values with constant auxiliary memory instead of using one function argument per point. A 250,000-value domain fixture observes exact endpoints; a real browser mounts 50 blocks and 2,525 rows, including the last cell in the 25th table and a source in the 25th citation block. These are correctness/DOM observations, not process RSS or whole-application throughput measurements.
+## Visible dynamic resource surfaces
+The rich-response `ResourceHub` retains one request/snapshot per document and owned scope/provider/connection/queue, only while subscribed views exist. Opening a visible panel reads once; optional 30-second updates run only for visible live subscribers in a visible document. Hidden views abort reads and drop timers; last release aborts, removes the visibility listener and drops the snapshot. Different scopes do not share data. No startup request, model polling, durable cache, fixed worker pool or job allocation is added. The backend joins its request-owned provider worker on cancellation, with the existing MCP timeout.
+
+Verification measures 100 identical visible subscriptions: one provider read, one refresh timer, zero timers after disposal; opening a different scope does not refresh the first. Tests also exercise hidden documents, late replies, provider failures and cancellation teardown. Row pagination is a display window of 20, not truncation; every admitted row remains reachable.

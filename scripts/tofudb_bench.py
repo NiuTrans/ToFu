@@ -746,10 +746,9 @@ def workload_turn_size_ceiling_probe(
         cell.latencies_ms.append(elapsed_ms)
     cell.wall_s = sum(cell.latencies_ms) / 1000.0
     cell.notes.append(
-        'rejection codes are the observation: legacy bound is '
-        'MAX_DECODED_RECEIPT_BYTES=4MiB (receipt_codec.py), tofu-db bound '
-        'is MAX_TRANSACTION_IR_LITERAL_BYTES=8MiB over the whole '
-        'transaction literal (engine.rs)')
+        'observed outcomes measure complete request demand; shared receipts and '
+        'IR literals have no private byte quotas, while remaining domain and '
+        'physical storage-format checks stay distinct')
 
 
 def workload_event_append_single(
@@ -1200,13 +1199,9 @@ def _suite(profile: str) -> list[dict[str, Any]]:
                         'warmup_per_writer': 1,
                     },
                 })
-            # 1.5 MiB concurrency is 16-way only: larger documents exceed
-            # the legacy receipt echo budget (4 MiB decoded, request +
-            # response), so no shared larger class exists; the probe cell
-            # documents each authority's own ceiling.  64-way would push
-            # ~96 MiB of in-flight client payload per op round, fine, but
-            # op counts stay bounded.
-            # personal-host budget this suite measures within.
+            # Retain the historical 16-writer 1.5 MiB measurement cell for
+            # comparisons. It is a benchmark sample, not a receipt quota or
+            # runtime admission boundary.
             if writers == 16:
                 plan.append({
                     'name': 'turn_ingest/2MiB-shared-ceiling/concurrent-16',

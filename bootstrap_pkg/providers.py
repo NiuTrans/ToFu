@@ -23,7 +23,7 @@ from .env_reexec import BASE_DIR
 # re-reads lib/model_info/data/*.json (package catalog) and
 # static/provider_templates/*.json (deployment overrides), merging by key in
 # that order, so template edits never require a restart.  The main Settings
-# loader (lib/provider_template_recipes.py) merges the same directories in
+# loader (lib/provider/provider_template_recipes.py) merges the same directories in
 # the same order, so bootstrap and Settings always offer identical providers.
 #
 # This Python list is NOT the catalog.  It only retains bootstrap-form
@@ -278,7 +278,7 @@ def _bootstrap_template_models(base_url: str, templates: list) -> list:
         result.append(row)
     return result
 def _bootstrap_data_root() -> str:
-    """Stdlib twin of lib.runtime_paths.data_root for pre-dependency setup."""
+    """Stdlib twin of lib.runtime.runtime_paths.data_root for pre-dependency setup."""
     explicit = os.environ.get('TOFU_DATA_DIR', '').strip()
     if explicit:
         explicit = os.path.abspath(os.path.expanduser(explicit))

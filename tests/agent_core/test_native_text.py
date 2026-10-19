@@ -13,12 +13,16 @@ from tests.agent_core.test_native_process import principal, budget
 class Sink:
     def __init__(self):
         self.frames = []
+        self.closed = False
 
     def write(self, raw):
         self.frames.append(json.loads(raw))
 
     async def drain(self):
         pass
+
+    def close(self):
+        self.closed = True
 
 
 def frame(sequence=1, text='hello'):
@@ -44,6 +48,16 @@ class NativeTextTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(control.bytes, 11)
         self.assertTrue(all(item['accepted'] for item in process.stdin.frames))
         self.assertEqual(process.stdin.frames[1]['request_id'], 'task-text-2')
+
+    async def test_unbounded_rounds_keep_ordered_delivery_without_total_text_quota(self):
+        seen=[]
+        async def callback(delta):seen.append(delta.text)
+        control,process=self.control(callback,limit=None)
+        for number in range(1,5):
+            await control.handle(frame(number,'hello'),process)
+        self.assertEqual(seen,['hello']*4)
+        self.assertEqual(control.bytes,20)
+        self.assertTrue(all(value['accepted'] for value in process.stdin.frames))
 
     async def test_foreign_identity_sequence_channel_and_empty_text_never_reach_consumer(self):
         calls = []
@@ -119,5 +133,43 @@ class NativeTextTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(caught.exception.__cause__,failure)
 
 
+    async def test_unlimited_round_text_shutdown_still_delivers_settlement_and_terminal_ack(self):
+        seen=[]
+        completed=asyncio.Event()
+        class Process:
+            def __init__(self):
+                self.stdin=Sink()
+                self.stdout=asyncio.StreamReader()
+                self.returncode=None
+                self.killed=False
+            async def wait(self):
+                await completed.wait()
+                self.returncode=-9 if self.killed else 0
+                return self.returncode
+            def kill(self):
+                self.killed=True
+                completed.set()
+        process=Process()
+        for kind in ('round_settled','terminal_request'):
+            process.stdout.feed_data(json.dumps({'type':kind}).encode()+b'\n')
+        process.stdout.feed_eof()
+        class Rounds:
+            async def handle(self,value,child,*,closing):
+                seen.append((value['type'],closing))
+        class Terminal:
+            async def handle(self,value,child):
+                seen.append((value['type'],True))
+                completed.set()
+        control,_=self.control(lambda _delta:None,limit=None)
+        await control.client._shutdown(process,Rounds(),Terminal(),control)
+        self.assertFalse(process.killed)
+        self.assertTrue(process.stdin.closed)
+        self.assertEqual(process.returncode,0)
+        self.assertEqual(seen,[('round_settled',True),('terminal_request',True)])
+
+
 if __name__ == '__main__':
-    unittest.main()
+    # Use the shared pytest storage and lifecycle isolation for direct runs.
+    import sys as _runner_sys
+    import pytest
+    raise SystemExit(pytest.main([__file__, *_runner_sys.argv[1:]]))

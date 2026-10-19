@@ -246,6 +246,12 @@ def test_saved_tool_output_summary_and_requested_evidence_remain_readable(
       replay();
     }''', {'fixtures': fixtures, 'language': language, 'replaySuffix': _REPLAY_SUFFIX})
 
+    # Settled history demand-mounts evidence through the shared Process owner.
+    # Exercise that public disclosure before inspecting individual tool cards.
+    process = frame.locator('.conversation-history-process > summary')
+    process.focus()
+    process.press('Enter')
+    frame.wait_for_selector('.ptool-result-block')
     assert frame.locator('.ptool-result-block').count() == 4
     assert frame.locator('.conversation-round-header').count() == 0
     assert frame.locator('[data-block-id="answer"]').is_visible()
@@ -261,11 +267,10 @@ def test_saved_tool_output_summary_and_requested_evidence_remain_readable(
         title = summary.locator('.ptool-artifact-title')
         assert title.count() == 1
         assert title.inner_text() == _translated(locale, fixture['titleKey'], n=2, count=2)
-        # Attention-bearing failures open on first paint; don't hide their evidence.
+        # Failed lookups expose their diagnostic in the summary; the raw
+        # envelope follows the explicit opt-in failure-evidence contract.
         if fixture['status'] == 'error':
-            assert card.get_attribute('open') is not None
-            summary.focus()
-            page.keyboard.press('Enter')
+            assert card.get_attribute('data-tool-failure-evidence') == 'collapsed'
         assert card.get_attribute('open') is None
         assert not card.locator('.ptool-result-pre').is_visible()
         assert card.locator('.ptool-artifact-request').count() == 1

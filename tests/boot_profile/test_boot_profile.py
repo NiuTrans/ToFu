@@ -24,7 +24,7 @@ _PHASES = [
      'duration_s': 0.2},
     {'key': 'storage_boundary', 'label': 'Exclusive storage boundary',
      'index': 2, 'duration_s': 2.4},
-    {'key': 'storage_sidecar', 'label': 'Storage sidecar', 'index': 3,
+    {'key': 'storage_authority_sql', 'label': 'Storage sidecar', 'index': 3,
      'duration_s': 10.2},
 ]
 
@@ -42,7 +42,7 @@ def test_record_and_load_round_trip(tmp_path, monkeypatch):
     assert written['phase_total'] == 9
     assert written['boot_to_ready_s'] == 34.5
     assert [p['key'] for p in written['phases']] == [
-        'frontend_assets', 'storage_boundary', 'storage_sidecar']
+        'frontend_assets', 'storage_boundary', 'storage_authority_sql']
     assert written['phases'][2]['duration_s'] == 10.2
 
     loaded = bp.load_boot_profile()

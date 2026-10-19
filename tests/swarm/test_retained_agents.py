@@ -30,8 +30,12 @@ class RecordClient:
             {'key': key, **copy.deepcopy(row)}
             for (stored_namespace, key), row in self.rows.items()
             if stored_namespace == namespace and key.startswith(payload['prefix'])
+            and key > payload.get('after_key', '')
         ]
-        return sorted(matches, key=lambda row: row['key'])[:payload['limit']]
+        rows = sorted(matches, key=lambda row: row['key'])[:payload['limit']]
+        if payload.get('include_value') is False:
+            rows = [{key: value for key, value in row.items() if key != 'value'} for row in rows]
+        return rows
 
     def command(self, operation, payload, command_id):
         del command_id
@@ -88,7 +92,7 @@ def test_assignment_is_serial_and_next_run_reads_committed_memory(records, monke
         launches.append((args, kwargs))
         return json.dumps({'status': 'async_launched',
                            'agents': [{'id': args['agents'][0]['id']}],
-                           'swarm_key': task['convId']})
+                           'swarm_key': task['convId'], 'swarm_run_id': task['id']})
 
     monkeypatch.setattr('lib.swarm.integration.execute_swarm_tool', launch)
     first = _manage({'action': 'assign', 'agent_id': agent_id,
@@ -120,7 +124,7 @@ def test_reset_fences_late_completion_and_archive_blocks_assignment(records, mon
                         'role': 'researcher'})['agent']['id']
     monkeypatch.setattr('lib.swarm.integration.execute_swarm_tool',
                         lambda name, args, task, **kwargs: json.dumps({
-                            'status': 'async_launched',
+                            'status': 'async_launched', 'swarm_run_id': task['id'],
                             'agents': [{'id': args['agents'][0]['id']}]}))
     _manage({'action': 'assign', 'agent_id': agent_id, 'objective': 'Read'})
     scope = scope_for(project_path='/workspace/alpha')
@@ -165,6 +169,13 @@ def test_working_memory_is_appended_to_new_child_objective(records, monkeypatch)
         task_id='task-a', conv_id='conv-a', user_id=7, specs=[spec],
         model='test-model', project_path='/workspace/alpha',
         parent_task=_task(), parent_config={})
+
+    from lib.identity import PrincipalContext
+    from lib.swarm.master import bind_retained_assignment_context
+    parent = _task()
+    parent['_principalContext'] = PrincipalContext.user(subject_id='test-user', owner_user_id=7).to_payload()
+    bind_retained_assignment_context(spec, parent_task=parent, parent_config={},
+        all_tools=[], model='test-model', project_path='/workspace/alpha')
     agent = master._make_agent(spec)
     user_messages = [row['content'] for row in agent.messages
                      if row.get('role') == 'user']
@@ -176,10 +187,10 @@ def test_failed_launch_releases_reservation(records, monkeypatch):
     agent_id = _manage({'action': 'create', 'role': 'coder'})['agent']['id']
     monkeypatch.setattr('lib.swarm.integration.execute_swarm_tool',
                         lambda *args, **kwargs: json.dumps({
-                            'status': 'error', 'code': 'swarm_server_busy'}))
+                            'status': 'error', 'code': 'execution_budget_exhausted'}))
     failed = _manage({'action': 'assign', 'agent_id': agent_id,
                       'objective': 'Attempt'})
-    assert failed['code'] == 'swarm_server_busy'
+    assert failed['code'] == 'execution_budget_exhausted'
     assert _manage({'action': 'inspect', 'agent_id': agent_id})['agent']['state'] == 'idle'
 
 
@@ -187,14 +198,17 @@ def test_terminal_swarm_checkpoint_repairs_lost_memory_callback(records, monkeyp
     agent_id = _manage({'action': 'create', 'role': 'analyst'})['agent']['id']
     monkeypatch.setattr('lib.swarm.integration.execute_swarm_tool',
                         lambda name, args, task, **kwargs: json.dumps({
-                            'status': 'async_launched',
+                            'status': 'async_launched', 'swarm_run_id': task['id'],
                             'agents': [{'id': args['agents'][0]['id']}]}))
     _manage({'action': 'assign', 'agent_id': agent_id, 'objective': 'Analyze'})
     scope = scope_for(project_path='/workspace/alpha')
     saved, _ = RetainedAgentRepository(7).get(scope, agent_id)
     monkeypatch.setattr('lib.swarm.persistence.load_session',
                         lambda swarm_key: {
+                            'task_id': saved['run_session_id'], 'conv_id': saved['run_conversation_id'],
                             'config': {'user_id': 7, 'parent_cfg': {}},
+                            'specs': [{'id': saved['run_id'], 'retained_agent_id': agent_id,
+                                       'retained_scope': scope, 'retained_run_id': saved['run_id']}],
                             'agents': [{
                                 'agent_id': saved['run_id'], 'status': 'completed',
                                 'messages': [
@@ -268,7 +282,7 @@ def test_roster_lists_metadata_without_reading_large_memories(records, monkeypat
     agents = repository.list(scope)
     assert [agent['id'] for agent in agents] == [created['id']]
     assert agents[0]['message_count'] == 1
-    assert listed_namespaces == [INDEX_NAMESPACE]
+    assert listed_namespaces and set(listed_namespaces) == {INDEX_NAMESPACE, NAMESPACE}
     assert (NAMESPACE, repository._key(scope, created['id'])) in records.rows
 
 
@@ -331,3 +345,44 @@ def test_team_control_tools_are_root_only_and_reads_skip_write_approval():
     assert spec.write_tools == frozenset({'manage_agents'})
     assert spec.provides == frozenset({'list_agents', 'manage_agents'})
     assert scope_tools_for_role('general', [LIST_AGENTS_TOOL, MANAGE_AGENTS_TOOL]) == []
+
+
+def test_required_memory_completion_waits_without_restarting_assignment(records, monkeypatch):
+    from threading import Event
+    monkeypatch.setattr('lib.tasks_pkg.persistence_wait._BASE_DELAY_SECONDS', 0)
+    repository = RetainedAgentRepository(7)
+    scope = scope_for(project_path='/workspace/alpha')
+    created = repository.create(scope, role='coder', name='Evidence')
+    repository.change(scope, created['id'], lambda value: {
+        **value, 'state': 'busy', 'run_id': 'assigned-run'})
+    original = records.command
+    attempts = []
+    def pressured(operation, payload, command_id):
+        if payload['namespace'] == NAMESPACE:
+            attempts.append((copy.deepcopy(payload), command_id))
+            if len(attempts) <= 20:
+                raise StorageError('database_busy', 'temporary memory pressure')
+        return original(operation, payload, command_id)
+    monkeypatch.setattr(records, 'command', pressured)
+    carrier = {'id': 'execution', 'config': {}, 'abort_event': Event(), 'aborted': True}
+    assert complete_assignment(user_id=7, tenant_id='', scope=scope,
+        agent_id=created['id'], run_id='assigned-run',
+        messages=[{'role': 'assistant', 'content': 'verified effects'}],
+        result={'status': 'completed', 'final_answer': 'verified effects'}, task=carrier)
+    saved, version = repository.get(scope, created['id'])
+    assert saved['state'] == 'idle' and saved['last_status'] == 'completed'
+    assert saved['messages'] == [{'role': 'assistant', 'content': 'verified effects'}]
+    assert version == 3
+    assert len(attempts) == 21 and all(entry == attempts[0] for entry in attempts)
+    assert not carrier['_storageWaits']
+
+
+def test_complete_roster_beyond_old_identity_and_scan_limits(records):
+    repository = RetainedAgentRepository(7, client=lambda **kwargs: records)
+    scope = scope_for(conversation_id='large-roster', requested='conversation')
+    identities = [repository.create(scope, role='coder', name=f'Colleague {index}')['id']
+                  for index in range(1101)]
+    listed = repository.list(scope)
+    assert {row['id'] for row in listed} == set(identities)
+    assert len(listed) == 1101
+    assert RetainedAgentRepository(8, client=lambda **kwargs: records).list(scope) == []

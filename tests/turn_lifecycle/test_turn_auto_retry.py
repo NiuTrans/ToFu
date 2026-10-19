@@ -124,7 +124,7 @@ def _fresh_task(err_kind='ratelimit', pristine=None):
         'error': err,
         'status': 'error',
         'finishReason': 'error',
-        'toolRounds': [{'round': 0}],
+        'toolRounds': [{'round': 0, 'status': 'pending'}],
         # run_task mutated this with injected system context + a partial round:
         'messages': [
             {'role': 'system', 'content': 'INJECTED CONTEXT'},

@@ -24,8 +24,6 @@ Problem: native wheel tags and versions can claim compatibility even when the ac
 
 With the application interpreter, `python -m bootstrap_pkg.runtime_checks` and `healthcheck.py --runtime` remain read-only drift diagnostics. `python -m bootstrap_pkg.runtime_checks --repair` explicitly enables installer admission/repair. Repair requires Rust >=1.96 and a host C compiler; missing CMake is provisioned privately as a temporary build dependency. Missing prerequisites, checksum failures or unsuccessful execution fail installation and preserve the selected environment; the installer never publishes an unverified candidate. No compilation or download occurs inside a programmatic tool call. Repair downloads are bounded to 64 MiB/120 seconds, extraction to 256 MiB, and the build to 30 minutes with process-tree teardown. Build jobs default from the canonical CPU/memory probe (one job per available GiB, bounded by effective CPUs); explicit `CARGO_BUILD_JOBS` remains honored, with toolchain overrides read from project `.env` and process environment taking precedence. Build files, private CMake and staged bindings are reclaimed on every settled exit; no persistent build cache is added. Measured on a glibc 2.17 host with 63 derived jobs: repair completed in 113 seconds, with largest child peak RSS 1.92 GiB; the reactor and host-tool round trip passed.
 
----
-
 ## Pre-configuring the install (Linux / macOS)
 
 Windows users: just run the `.exe` from the release page — no flags.
@@ -65,7 +63,8 @@ interpreting one configuration differently.
 | `--non-interactive` / `--yes` | Disable credential prompts; non-TTY input also selects this mode automatically |
 | `--no-update` | Keep existing source unchanged; dependency/artifact downloads are still allowed (not offline mode) |
 | `--result-json <path>` | New file in an existing writable parent; private completion receipt, never overwrite an existing file |
-| `--skip-playwright` | Skip the optional browser-engine download |
+| `--with-playwright` | Install Chromium and require launch/render verification |
+| `--skip-playwright` | Defer browser-engine installation (default) |
 | `--skip-node` | Legacy no-op (frontend bundles are prebuilt) |
 | `--no-update-conda` | Select conda; don't update installer-owned conda |
 | `--reset-env` | Build a fresh candidate (selected env is preserved; ownership-gated) |
@@ -126,22 +125,7 @@ explicitly reset.
 | Failed conda solve | Bounded repair; whole-env recreation only for an environment created/reset in this run, never erase an existing env merely because a download failed |
 | Invalid path, symlinked `.env`/uv env, unowned reset, or unrelated occupied port | Stop with an actionable message; preserve user data |
 
-`bootstrap_pkg/process.py` owns portable deadlines after Python is available:
-wheel/main conda install 900 seconds, pip/browser repair 300 seconds, frontend
-download 240 seconds. Bootstrap conda repair has a 600-second deadline. Each
-subprocess retains a 64 KiB diagnostic tail and forwards at most 2 MiB; overlong
-lines and recognizable URL credentials are redacted/omitted. Bootstrap repair
-only accepts bounded package specifications for declared dependencies or its
-fixed mypyc repair mapping; it cannot inject pip flags, URLs, or local paths.
-It targets the current interpreter's conda prefix and never updates shared
-base/solver settings or preemptively uninstalls its entire dependency stack.
-Before Python/`timeout` exists, the installer uses Bash-owned process groups
-with a finite watchdog for downloads/bootstrap commands (including on macOS).
-No package-manager command inherits stdin.
-The standalone Python-facade script (`scripts/install_on_server.sh`, not the
-web-app installer) also runs without prompts: pip has a 900-second deadline,
-optional Chromium 300 seconds; verification ignores cwd and `PYTHONPATH` so it
-checks the target Python's installed package instead of a local checkout.
+`bootstrap_pkg/process.py` owns portable deadlines after Python is available: wheel/main conda install 900 seconds, pip/browser repair 300 seconds, frontend download 240 seconds. Bootstrap conda repair has a 600-second deadline. Each subprocess retains a 64 KiB diagnostic tail and forwards at most 2 MiB; overlong lines and recognizable URL credentials are redacted/omitted. Bootstrap repair only accepts bounded package specifications for declared dependencies or its fixed mypyc repair mapping; it cannot inject pip flags, URLs, or local paths. It targets the current interpreter's conda prefix and never updates shared base/solver settings or preemptively uninstalls its entire dependency stack. Before Python/`timeout` exists, the installer uses Bash-owned process groups with a finite watchdog for downloads/bootstrap commands (including on macOS). No package-manager command inherits stdin. The standalone Python-facade script (`scripts/install_on_server.sh`, not the web-app installer) also runs without prompts: pip has a 900-second deadline, optional Chromium 300 seconds; verification ignores cwd and `PYTHONPATH` so it checks the target Python's installed package instead of a local checkout.
 
 The install-time SQLite check writes/reads/deletes in a disposable directory
 on the project volume, not the user's active database. The post-launch runtime
@@ -158,8 +142,6 @@ has at most 12 request handlers and 8 SSE subscribers; replay retains at most
 configuration saves or shutdown. Foreground server diagnostics retain only a
 64 Ki-character stderr tail, not the full lifetime of the service.
 
----
-
 ## What the installer actually does
 
 The installer is `install.sh`. It has two backends and picks the fast one
@@ -173,9 +155,9 @@ uses [uv](https://github.com/astral-sh/uv):
 1. Ensures a `uv` binary (installs it from astral.sh if missing).
 2. Creates a fresh candidate virtualenv under `.tofu-envs/` from uv's own managed
    CPython (Python 3.12) — no system/conda interpreter needed.
-3. `uv pip install -r requirements.txt` — installs the whole dependency
-   stack, preferring available prebuilt wheels. Time depends on the host,
-   package availability, and network; some dependencies may require builds.
+3. Reuses a verified wheel cache or release bundle. When neither matches,
+   uv resolves once and pip acquires/builds the artifacts in staging. Installation
+   consumes an exact hashed local lock with no index access.
 4. Runs an import smoke-test (`lxml`, `fitz`/PyMuPDF, `PIL`/Pillow,
    `cryptography`, …), then `scripts/verify_pdf_stack.py` checks the exact
    PyMuPDF trio and performs a real Markdown extraction. **If either check
@@ -183,8 +165,8 @@ uses [uv](https://github.com/astral-sh/uv):
    compatible wheel — it falls back cleanly to the conda path.**
 5. Detects a system `ripgrep`/`fd` (optional speedups; the app degrades
    to a pure-Python search fallback if absent — never a source build).
-6. Installs and verifies the Playwright Chromium binary unless explicitly
-   skipped.
+6. With `--with-playwright`, installs and verifies Playwright Chromium;
+   the default defers its download until browser automation is needed.
 7. Writes `.tofu_env.json` (`backend: uv`) so `python server.py` re-execs
    into the venv even from an unactivated shell.
 8. Installs the modern text tools `sd`, `goawk` and `miller` (pinned
@@ -212,7 +194,7 @@ The conda path:
    a conda PyMuPDF + unrelated PyMuPDF4LLM split-brain.
 4. Installs `ripgrep`, `fd-find`, and Chromium shared libs from
    conda-forge — no `sudo`, no system packages.
-5. Installs the Playwright Chromium binary.
+5. With `--with-playwright`, installs the Playwright Chromium binary.
 6. Writes `.tofu_env.json` so `python server.py` re-execs into the right
    interpreter even from an unactivated shell.
 7. Installs `sd`, `goawk` and `miller` from conda-forge (falling back to
@@ -224,8 +206,8 @@ lifecycle manager, and wait for readiness. The installer runs the live runtime
 probe in the foreground and then returns; the server stays managed in the
 background. There is no terminal process to keep open and no need to press
 Ctrl+C. The completion message prints the exact URL plus status, stop, and
-restart commands. Unless `--skip-playwright` was selected, the install also
-requires Chromium to launch and render text. Any required runtime validation
+restart commands. With `--with-playwright`, installation also requires Chromium to launch
+and render text. Deferred browser features remain unavailable until installed. Any required runtime validation
 failure leaves its evidence and the managed process available for diagnosis,
 but makes the installer exit non-zero instead of reporting success.
 
@@ -248,50 +230,23 @@ To audit or repair PDF parsing after an environment change, run
 `python scripts/verify_pdf_stack.py`. A healthy result reports all three pinned
 versions and `Markdown smoke passed`; the command exits non-zero otherwise.
 
-### tofu-db engine (both paths): verified prebuilt, source build as fallback
+### tofu-db engine (both paths)
 
-The optional native storage engine installs fastest-first:
+The installer first checks a release archive and its SHA-256 sidecar through
+`scripts/install_tofudb_prebuilt.py`, then deploys the candidate through
+`scripts/deploy_tofudb_engine.py` with host smoke verification and an atomic
+backup. Linux daemon archives use musl-static binaries. If no compatible
+artifact is available, a local Rust toolchain can build it within 900 seconds.
+`--no-tofudb` skips the optional engine installation;
+`TOFU_TOFUDB_NO_DOWNLOAD=1` permits only the local build. Installation preserves
+an existing storage backend; an unavailable accelerant never authorizes a switch.
+Maintainers produce archives with `scripts/build_tofudb_prebuilt.py`.
 
-1. **Verified prebuilt (default).** The installer downloads
-   `tofu-db-<VERSION>-<rust-triple>.tar.gz` plus its SHA-256 sidecar from the
-   same release channel as the prebuilt frontend — one static binary per
-   platform (musl on Linux, so there is no glibc floor and no toolchain on
-   the user's machine, the same model the Codex CLI uses). Verification and
-   installation are fail-closed: `scripts/install_tofudb_prebuilt.py` checks
-   the sidecar against the exact archive bytes, requires a single-binary
-   archive, and deploys through `scripts/deploy_tofudb_engine.py` — the one
-   supported engine path (bounded host smoke run, atomic install with
-   backup, `<binary>.sha256` launch pin the supervisor verifies at every
-   start). Seconds, no compiler.
-2. **Source build (fallback).** When no prebuilt exists for the platform or
-   the download/verification fails, the installer falls back to
-   `cargo build --release` (bounded, 900 s) exactly as before.
-3. **Warned skip.** With neither a prebuilt nor a Rust toolchain the install
-   continues on SQLite — the engine is an accelerant, never a gate.
-
-`--no-tofudb` skips the whole step; `TOFU_TOFUDB_NO_DOWNLOAD=1` skips only
-the download (forces a local build). An already-present
-`packages/tofu-db/target/release/tofu-db` is left untouched, so upgrades
-reuse the existing engine; replace it deliberately through
-`scripts/deploy_tofudb_engine.py`.
-
-Decision record — *Problem:* the per-user cargo compile was the install's
-only compile step (minutes; needs rustup + a modern C toolchain; the most
-common accelerant failure on old hosts). *Decision:* ship per-platform
-static binaries through the existing release channel and verify+deploy them
-with the existing pin/smoke authority, keeping the source build as a
-fallback rather than a requirement. *Alternatives considered:* (a) bundling
-the engine into the Python env as a wheel — rejected: it would split the
-deployment/pin authority away from `deploy_tofudb_engine.py` and
-`_resolve_tofudb_binary`'s checkout path; (b) compiling at first launch —
-rejected: it moves the failure from install time (bounded, logged,
-recoverable) to server boot (fail-closed crashloop territory); (c) per-user
-rustup bootstrapping in install.sh — rejected: installing a compiler
-toolchain to avoid a download is strictly heavier than the download.
-Maintainers publish assets with `python3 scripts/build_tofudb_prebuilt.py
-[--target <triple>] [--sums-out SHA256SUMS] [--upload v<VERSION>]`; the
-script builds the musl/gnu release binary, packages a deterministic
-`tar.gz` + `.sha256`, and can append to the signed SHA256SUMS manifest.
+Problem: per-user compilation requires toolchains and delays installation.
+Decision: verified prebuilt artifacts precede bounded source fallback.
+Alternatives: first-launch compilation delays boot; automatic rustup installation
+adds a larger download; a Python wheel would duplicate the engine deployment
+and launch-pin authority. Native libraries retain their own ABI requirements.
 
 ## Listener and TLS guardrails
 
@@ -384,6 +339,39 @@ directory.
 
 ---
 
+## Verified Python artifacts and platform coverage
+
+Problem: repeated pip resolution/download/build on each new candidate delays
+installation and allows dependency drift. Decision: release jobs build complete
+wheelhouses from `uv.lock` constraints and certify them in empty environments.
+The installer tries a matching release bundle or verified cache before resolving
+locally. Alternatives: caching inside candidates loses reuse; trusting filenames
+misses corruption; installing into the selected environment loses rollback.
+
+Manifests bind requirement inputs, first-party wheel contents, release/lock
+identity, Python implementation/version and OS/architecture. Every wheel must
+match the target interpreter's accepted tags. Archives reject traversal, links,
+duplicates and undeclared members; lock and wheel hashes are checked before use.
+Cache slots `.tofu-install-cache/wheels/{uv,conda}` keep one complete generation
+per backend; replacement reclaims the previous generation after publication.
+Archives are bounded to 1 GiB compressed / 4 GiB unpacked / 2048 members;
+temporary files are reclaimed. Download socket/whole-file deadlines are 10/60
+seconds; resolver/acquisition steps retain 900-second deadlines.
+
+For offline Python dependency installation, set `TOFU_PYTHON_BUNDLE` to the
+release `python-wheels-*.tar.gz` with its adjacent `.sha256`. Explicit mismatches
+fail without network fallback. uv/Python/pip seed artifacts, application/frontend and selected
+browser/native artifacts must also be provisioned for a fully offline install.
+`TOFU_PYTHON_BUNDLE_BASE_URL` selects an HTTPS mirror directory;
+`TOFU_PYTHON_BUNDLE_NO_DOWNLOAD=1` disables release-bundle downloads.
+`TOFU_PYTHON_MIRROR` supplies uv's managed-Python mirror; `TOFU_GH_RELEASE_BASE`
+also supplies frontend, native-engine, Python-bundle and text-tool release URLs.
+
+Desktop jobs build Windows x64, macOS Intel/Apple Silicon and Linux x64/ARM64. Linux frozen bundles are built on Ubuntu 22.04 and retain host loader
+requirements; the source installer keeps its old-glibc conda path. The browser
+UI also works against a reachable Tofu server without a local server install.
+Windows ARM64 native desktop builds and iOS distribution are not certified.
+
 ## Offline / mirror / proxy
 
 `install.sh` honours optional environment variables for hosts that cannot
@@ -414,16 +402,10 @@ python serverctl.py support-bundle \
   --output "tofu-support-$(date +%Y%m%d-%H%M%S).json"
 ```
 
-It includes the lifecycle report and recent installer, manager, worker,
-application, error, storage, PostgreSQL, resource-pressure, watchdog, and
-faulthandler log tails when those files exist. It does not open conversation
-storage or the database and never contacts external services; its lifecycle
-diagnostics may probe the manager and health endpoint over loopback. Log lines
-can still quote user-provided text or unrecognized secret formats, and absolute
-paths/platform metadata may identify a host or user. Credential redaction is
-best-effort, so you must review the JSON before sharing it. Use
-`--no-logs` for a metadata-only artifact. The file is created with mode `0600`
-and an existing path is never overwritten.
+The bundle contains bounded lifecycle and available log evidence. It reads no
+conversation database and contacts only loopback diagnostics. Review it before
+sharing: logs may contain user text or secrets that redaction does not recognize.
+`--no-logs` emits metadata only; output is private (`0600`) and never overwrites.
 
 For interactive troubleshooting, run these in order. All four are read-only:
 
@@ -446,21 +428,10 @@ HTTP endpoint, storage, index page, credentials, and browser engine. This is the
 manual expansion of the support bundle; do not hand-query the database or guess
 which process to kill.
 
-When a report includes a conversation ID copied from the sidebar, inspect that
-one conversation through the same operations entry point:
-
-```bash
-python serverctl.py inspect-conversation mt18xr3wfs0rbq
-```
-
-The command is read-only, resolves the active Sidecar/fastpath SQLite authority,
-renders turn-native conversations and compaction receipts through the server's
-canonical operations, and shows only matching bounded log evidence. Settings
-and log lines use the same
-best-effort credential redaction as durable diagnostics. Its transcript remains
-the actual conversation and may contain private text or credentials pasted by
-the user, so review it before sharing; add `--no-logs` when log evidence is
-unnecessary.
+For a conversation ID, run the read-only configured-backend inspector first:
+`python3 debug/inspect_conversation.py <conv_id>` (or the `serverctl.py
+inspect-conversation` facade). Its transcript may contain private user text;
+review before sharing and use `--no-logs` when appropriate.
 
 If startup itself failed, the installer prints these commands automatically.
 Use `python serverctl.py start` to retry after correcting the reported cause.
@@ -540,20 +511,20 @@ issue.
 | `TOFU_STORAGE_LIVENESS_OVERLOAD_MAX_SUPPRESS` | Consecutive failed probes that may be attributed to host overload before the monitor forces one bounded recycle (default: 60; hard range: 1..100000). Bounds the overload gate so a shared cgroup pinned by siblings cannot withhold a wedged authority forever. |
 | `TOFU_STORAGE_LIVENESS_OVERLOAD_RECYCLE_COOLDOWN_SECONDS` | Floor between two overload-forced recycles; doubled on each escalation (no healthy probe between) up to 1800 s and cleared by any served probe (default: 300; hard range: 1..86400) |
 | `TOFU_STORAGE_RPC_INFLIGHT_MAX_MIB` | RAM threshold for serialized Python v1/v2 receive buffers, derived from the existing launch probe. Overflow uses private anonymous files without slot waits or policy refusal. Existing encoded replies charge exact body bytes; leases and files close on completion or error. Decoded semantic values remain owned heap data; native Rust byte admission is separate. |
-| `TOFU_WEBHOOK_QUEUE_CAPACITY` / `TOFU_WEBHOOK_BUFFER_MAX_MIB` / `TOFU_WEBHOOK_EVENT_MAX_KIB` / `TOFU_WEBHOOK_MAX_ATTEMPTS` | Outbound-webhook immediate/retry residency, aggregate bytes, per-event bytes and actual-attempt ceilings. Personal fallback/reference defaults: 128 immediate + 64 retry items, 16 MiB aggregate, 512 KiB/event, 5 attempts; distributed: 2,048 + 1,024 / 256 MiB / 1 MiB / 5. Subscriptions register and load without a global/owner count quota; the subscription-capacity knob is retired. Delivery hard ceilings: 4,096 items, 512 MiB, 4 MiB/event, 8 attempts. |
 | `TOFU_STORAGE_IDLE_TRIM_RSS_MIB` | Sidecar RSS threshold for returning free arenas when the last active RPC exits (personal: 128..384 MiB from the writer-cache budget; distributed: 1,024 MiB; hard ceiling: 16 GiB) |
 | `TOFU_STORAGE_IDLE_TRIM_COOLDOWN_SECONDS` | Minimum interval between Sidecar idle heap trims (personal default: 60 s; distributed: 300 s; bounded to 30..3,600 s). Trims still require zero active RPCs and RSS above `TOFU_STORAGE_IDLE_TRIM_RSS_MIB` |
 | `TOFU_MCP_STDIO_IDLE_SECONDS` | Idle window before a local MCP stdio process tree exits while its cached tool catalog remains available (personal probe: 180..600 s; distributed: 1,800 s; `0` disables; hard ceiling: 86,400 s) |
 | `TOFU_MCP_CRED_PROBE_TIMEOUT_SECONDS` | Actual read deadline for unattended MCP credential-health probes; independent server probes start on demand, with same-server deduplication and configured periodic intervals. `TOFU_MCP_CRED_PROBE_WORKERS` is retired. |
 | `TOFU_NUMERIC_THREADS` | Process-wide ceiling for implicit OpenBLAS/OpenMP/MKL/NumExpr pools (personal probe: 1..4; distributed: 4; hard ceiling: 32); smaller library-specific values remain valid, larger inherited host values are clamped |
+| `TOFU_WORKSPACE_TOOL_WAIT_SECONDS` | Optional workspace-lock wait for file/command tools and MCP file preparation. Unset or empty waits for acquisition; explicit nonnegative finite seconds are exact, with zero selecting fail-fast. Task cancellation and post-acquisition path/content checks remain active. |
 | `TOFU_EXECUTOR_IDLE_SECONDS` | Quiet window before burst-grown serving-loop worker generations retire (personal probe: 300..1,800 s; distributed: 3,600 s; `0` disables; hard ceiling: 86,400 s); capacity is preserved and recreated lazily |
 | `TOFU_PROJECT_REFRESH_IDLE_SECONDS` | Idle window before reconstructible project summary/status/watch and provider-diagnostic consumers exit (personal probe: 30..300 s; distributed: 600 s; `0` keeps consumers resident; provider diagnostics clamp nonzero values to 15..3,600 s); queue capacity and coalescing are unchanged |
 | `TOFU_TREE_INDEX_WALK_JOBS` | Process-wide project tree scan-worker ceiling shared by concurrent roots (personal probe: 2..8; distributed/hard ceiling: 16) |
-| `TOFU_TREE_INDEX_MAX_ENTRIES` | Both the per-build admission ceiling and process-wide retained-path ceiling (personal probe: 50,000..600,000; 8 GiB reference: 409,600; probe-failure fallback: 100,000; distributed/hard ceiling: 600,000) |
+| `TOFU_TREE_INDEX_MAX_ENTRIES` | Idle index retention target, never a build/load admission ceiling. The newest usable index may exceed it (personal probe: 50,000..600,000; 8 GiB reference: 409,600; probe-failure fallback: 100,000; distributed target: 600,000) |
 | `TOFU_TREE_INDEX_MEM_ROOTS` | Secondary in-memory project-root ceiling; the shared entry ceiling may evict sooner (personal probe: 2..4; distributed: 4; hard ceiling: 8) |
 | `TOFU_LLM_MAX_CONNECTIONS` / `TOFU_LLM_MAX_KEEPALIVE_CONNECTIONS` | Active model HTTP connection caps are retired. The keepalive setting controls idle retention only; its default follows launch-probed sync-worker capacity and expiry owns reclamation. |
 | `TOFU_CONTROL_RPC_WORKERS` | Idle thread reuse target for demand-driven control RPC. It does not cap active requests; per-socket count/rate and reliable response queue quotas are retired. |
-| `TOFU_MAX_SSE_PER_PRINCIPAL` | Retired. SSE uses exact connection ownership without per-principal count quotas. |
+| `TOFU_MAX_SSE_PER_PRINCIPAL` | Per-principal concurrent SSE/stream admission cap (personal launch probe: 8..24; 8 GiB reference/probe-failure: 12; distributed: 64; explicit hard ceiling: 128). `0` disables admission (escape hatch). Routes refuse with 503 (headless SSE) or a bounded 204 (conversation-sync EventSource) when the cap is reached; reconnect ownership and generation fencing remain with ConversationWakeBroker. |
 | `TOFU_SSE_SLOT_TTL` | Retired. Route close/teardown owns connection release; active streams never expire a shared slot lease. |
 | `TOFU_MAX_INFLIGHT_TASKS` / `TOFU_AGENT_WORKERS` | Root execution is demand-driven. `TOFU_AGENT_WORKERS` sizes idle thread reuse from launch capacity; it does not cap running jobs. `TOFU_MAX_INFLIGHT_TASKS` no longer rejects root tasks. Remaining route/feature sizing is still being migrated. |
 | `TOFU_TASK_RUNTIME_TASK_CAPACITY` / `TOFU_TASK_RUNTIME_EVENT_CAPACITY` / `TOFU_TASK_RUNTIME_REPLAY_MAX_MIB` / `TOFU_TASK_RUNTIME_EVENT_MAX_MIB` | Process-memory terminal-record target per task kind plus per-task replay count, ordinary serialized-tail target, and complete single-event ceiling. Probe-failure profile: 64/1,024/2/4; 8 GiB reference: 128/2,048/4/8; distributed: 512/4,096/8/16; hard caps: 1,024/8,192/16/16. Active work is governed separately and never evicted. A valid event above the tail target occupies the window alone; an event above its hard ceiling resets only reconstructible memory replay and advances the absolute cursor. Explicit runtime arguments can lower but not widen the launch policy. |
@@ -578,7 +549,7 @@ issue.
 | `TOFU_SERVER_PYTHON_CACHE=auto|1|0` / `TOFU_SERVER_PYTHON_CACHE_MAX_MIB` / `TOFU_SERVER_PYTHON_CACHE_DIR` | Let the stdlib lifecycle manager select, force, disable, size, or relocate its project/interpreter-scoped host-local server bytecode cache (personal probe: 16..64 MiB; distributed: 128 MiB; hard ceiling: 512 MiB); an existing `PYTHONPYCACHEPREFIX` or `PYTHONDONTWRITEBYTECODE` wins |
 | `TOFU_TOKEN_COUNT_CACHE_CAPACITY` | Digest-only repeated-text token-count entries (personal probe: 64..512 in normal profiles; distributed: 1,024; hard ceiling: 4,096) |
 | `TOFU_USAGE_CACHE_CAPACITY` | Recent per-conversation provider-usage anchors used by the exact-first token counter (personal probe: 128..2,048; 8 GiB reference: 256; probe-failure fallback: 128; distributed: 4,096; hard ceiling: 8,192). Capacity/TTL eviction safely falls through to the next local counter tier; retained model/role/signature fields are bounded and memory-pressure relief may clear the reconstructible working set. |
-| `TOFU_RATE_LIMIT_MEMORY_BUCKET_CAPACITY` | Process-local exact sliding-window endpoint/client buckets and authenticated API-key token-pairs (personal probe: 512..4,096; 8 GiB reference: 1,024; probe-failure fallback: 512; distributed: 4,096; hard ceiling: 16,384). The endpoint/client store derives a second envelope of at most 128 timestamps per configured bucket, capped at 1,048,576 total; both stores reclaim LRU state. Sidecar-backed endpoint/client counters ignore this knob. |
+| `TOFU_RATE_LIMIT_MEMORY_BUCKET_CAPACITY` | Legacy process-local exact sliding-window endpoint/client buckets (personal probe: 512..4,096; 8 GiB reference: 1,024; probe-failure fallback: 512; distributed: 4,096; hard ceiling: 16,384). The endpoint/client store derives a second envelope of at most 128 timestamps per configured bucket, capped at 1,048,576 total; the legacy counter utility reclaims LRU state. Credential spending state has no count-based eviction; this setting does not limit HTTP throughput. Sidecar-backed endpoint/client counters ignore this knob. |
 | `TOFU_TOOL_SEARCH_TERM_CACHE_CAPACITY` | Process-wide short-text tokenization working set for Tool Search (personal probe: 512..4,096 entries; 8 GiB reference: 1,024; probe-failure fallback: 512; distributed: 4,096; hard ceiling: 16,384). Inputs above 1,024 characters remain fully searchable but bypass the cache, so the entry limit is also a bounded text-residency budget. The same launch signal derives MCP pre-request catalog indexes (4 lean, 8 at 8 GiB, 32 distributed/hard ceiling) and 24-hour sticky selection states (1,024 lean, 2,048 at 8 GiB, 4,096 distributed/hard ceiling); no separate knobs can multiply this resident budget. Capacity resolves once per process, and an already materialized positive value is clamped without repeating the unused launch probe. Sticky TTL uses a process-monotonic LRU prefix, so live-state cleanup is independent of wall-clock corrections and does not scan the whole state budget. |
 | `TOFU_TOOL_RESULT_CACHE_CAPACITY` | Per-task FIFO of reusable and streaming-prefetched execution receipts (personal probe: 64..256 entries; 8 GiB reference: 128; probe-failure fallback: 64; distributed: 512; hard ceiling: 1,024). Pressure evicts the oldest optimization receipt for safe live re-execution; terminal settlement releases the whole cache before the remaining hot task TTL. |
 | `TOFU_MEMORY_METADATA_CACHE_CAPACITY` / `TOFU_MEMORY_METADATA_CACHE_MAX_MIB` | Process-wide parsed-frontmatter LRU for body-free memory summary lists, bounded by both entry count and estimated retained bytes (personal probe: 512..4,096 entries / 4..32 MiB; 8 GiB reference: 2,048 / 16 MiB; probe-failure fallback: 512 / 4 MiB; distributed: 8,192 / 64 MiB; hard ceilings: 16,384 / 128 MiB). Exact file fingerprints invalidate edits; body, provenance, eligibility, and authorization are never cached. |
@@ -590,6 +561,7 @@ issue.
 | `TOFU_TRANSLATE_WORKERS` | Launch-probed idle thread reuse target for the shared translation lane. Independent background, attended-send and incremental provider calls start on demand without active/waiting count quotas. `TOFU_TRANSLATE_QUEUE_CAPACITY` is retired. Actual provider errors, cancellation and request deadlines retain their own behavior. |
 | `TOFU_TRANSLATE_WORKER_IDLE_SECONDS` | Quiet window before shared translation workers retire and recreate lazily (personal: 60 s; distributed: 600 s; `0` keeps reusable idle workers resident; excess demand carriers retire immediately; hard ceiling: 86,400 s) |
 | `TOFU_PDF_PROCESSES` | Launch-probed idle parser-process reuse target, scaled by CPU and memory headroom. Independent PDFs acquire a one-worker process on demand; `TOFU_PDF_PARSE_CAPACITY` is retired. A caller timeout retains exact unfinished-work ownership until the submitted Future settles. Broken/submission work never triggers a duplicate inline parse; only construction failure before publication may fall back once. |
+| `TOFU_PDF_PARSE_TIMEOUT` | Optional classic PDF caller wait in seconds: unset or `0` has no private cutoff; positive values are exact, with no launch-derived default or upper clamp. An explicit caller timeout also applies; unfinished work retains ownership until settlement. |
 | `TOFU_PDF_VLM_TASK_WORKERS` | Launch-probed idle coordinator reuse target. Whole-PDF tasks start independently on demand; `TOFU_PDF_VLM_QUEUE_CAPACITY` is retired. Same-task identity, actual thread-start rollback, owner cancellation and parser policy remain enforced. Fresh terminal results remain available for their 30-minute retrieval TTL without count eviction. |
 | `TOFU_PDF_VLM_CALL_WORKERS` / `PDF_VLM_MAX_WORKERS` | Idle thread reuse hints; independent page batches start on demand. `TOFU_PDF_VLM_MAX_PAGES` is retired: every page is eligible unless the caller explicitly supplies a page budget. Each document renders in an independent owned child; JPEG results use one anonymous spool, closed after the child and all model batches join. |
 | `TOFU_PDF_VLM_TASK_TIMEOUT_SECONDS` / `TOFU_PDF_VLM_MAX_429_ATTEMPTS` | Whole-job deadline and actual upstream rate-limit responses allowed per page-batch call (personal probe: 1,920..7,200 s / 4..8 attempts; probe-failure fallback: 1,920/4; distributed: 14,400/16; hard ceilings: 86,400/64) |
@@ -671,52 +643,18 @@ it because the personal `all` process combines serving and worker features.
 
 ## Installation transaction and shared containers
 
-Problem: in-place dependency updates damaged the selected interpreter when
-late artifacts failed. Shared storage also carries native binaries across
-containers with different HOME, temporary directories and glibc versions.
-Decision: install each attempt into a unique checkout-local `.tofu-envs/`
-prefix. Conda operations target this prefix; uv never resets the selected env.
-Candidate configuration and marker commit only after Python and selected-storage
-probes. The commit durably replaces `.env`, then `.tofu_env.json`, restoring
-configuration if pointer publication fails. Old and failed environments remain
-available for operator diagnosis. Source pulls and frontend publication retain
-their own boundaries; this is not an atomic source-code upgrade.
+Installation stages a fresh candidate interpreter and configuration. Required
+artifact/import/runtime checks must pass before the selected environment pointer
+changes. Publication failure restores the previous configuration and interpreter;
+provider credentials, source edits, storage authority and user data remain intact.
+Use `--no-launch` to prepare without starting a worker; `--no-update` preserves
+source but still permits artifact downloads. Locks reject competing installers.
 
-Search admission precedes dependency installation: use a compatible bundled
-wheel, otherwise retained monorepo source. Missing artifacts or cache hash
-mismatches fail closed. Public export rejects missing or stale search wheels.
-`vendor/install-manifest.json` pins the exported search version and hash.
-The pip graph resolves against staging, downloads/builds every needed wheel,
-and records exact versions and SHA-256 hashes. Installation uses the local
-wheelhouse with `--no-index`, `--no-deps`, `--require-hashes`. Conda/native-library
-acquisition remains an online staging step; this is not a fully offline install
-or cross-platform release lock. Dirty checkouts remain source installations.
-
-Browser, uv, managed Python and pip caches default to `.tofu-install-cache/`,
-outside env prefixes and independent of HOME; explicit overrides remain.
-Unavailable TMPDIR falls back to `/tmp`. Native builds repair unavailable
-absolute compiler overrides only in the child, require a C compiler and
-namespace Cargo caches by host ABI/build environment. The affected host's
-fresh build used 63 workers and prepared the verified engine in 338.9 seconds.
-SQLite skips native preparation; reinstall preserves and probes the configured
-native backend rather than changing authority to evade failures.
-
-Alternatives: retries cannot repair unpublished artifacts or ABI mismatches;
-package rollback cannot reliably undo native-library replacement. Delayed
-pointer publication keeps failures from becoming the next runtime environment.
-
-Desktop adapter bring-up and video analysis have no local concurrency quota.
-Paper build worker counts configure idle worker reuse; the historical
-`TOFU_PAPER_BUILD_QUEUE_CAPACITY` value is accepted for compatibility but cannot
-reject work. Paper subscribers, retained readers and restore operations have no
-local count ceiling. Owner-scoped deduplication, cancellation and real process,
-storage or provider errors still apply.
-
-Desktop-device command and paper-build execution are demand-driven. The retired
-`TOFU_DESKTOP_EXECUTION_WORKERS` knob no longer changes execution. Transport
-memory reuse scales from the shared launch probe; overflow uses temporary
-spools, so per-poll frame budgets cannot reject or hold new work. Spools are
-reclaimed on validated acknowledgement or settled runtime teardown.
+Native artifacts copied between containers still require actual host execution:
+matching wheel tags and versions alone cannot prove loader compatibility. The
+Wasmtime reactor/host-tool and PDF checks run before candidate publication;
+`healthcheck.py --runtime` verifies launched application readiness separately.
+Supported repair and diagnostic commands are documented above.
 
 ## Desktop clients
 
@@ -746,3 +684,17 @@ caller choices still honored. Terminal settlement owns handle cleanup.
 identities, conversation associations and read leases have no aggregate admission
 quota. Actual write/digest/owner failures remain errors, and reconstructible
 compile caches retain their separate byte budget and protected leases.
+
+### Explicit private GLIBC for verification
+
+Problem: the selected Python can start on an old host while a native extension requires newer GLIBC symbols. Decision: `scripts/python_with_glibc.py` runs the selected interpreter with a matched, already-installed trusted x86-64 Linux loader/libc pair and an explicit library path. It does not install packages, replace system libc or change the application/backend lifecycle. The runtime is supplied explicitly; the helper neither downloads nor infers it. Alternative: replacing host `/lib` changes unrelated running services; changing storage backend hides the original failure.
+
+Example (replace the runtime directory with your installed runtime):
+
+```sh
+python3 scripts/python_with_glibc.py \
+  --runtime .tofu/toolchains/glibc-2.36-deb12u14 \
+  --python .venv/bin/python -- -m pytest tests/tasks_pkg/test_event_delivery_profile.py
+```
+
+On the GLIBC 2.17 verification host, the private process reports GLIBC 2.36, loads cryptography 50 and completes its encrypt/decrypt probe. The previously blocked metrics-route suite passes (7 cases), as do 22 combined route/delivery-profile/benchmark cases. This validates the chosen process, not a system-wide upgrade. Child processes need their own compatible loader selection; the helper does not rewrite their interpreters.

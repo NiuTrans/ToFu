@@ -9,6 +9,14 @@
 
 ## 0. API v4 release boundary
 
+`TurnProjection.usageComplete` is optional. Explicit `false` means reported
+usage is a paid lower bound and an earlier request remains unreceipted; absence
+does not certify completeness. Continue, checkpoint resume and guidance restore
+this fact from the accepted projection before model admission. An unreceipted
+restored request refuses a new model dispatch even without a token cap; request
+configuration cannot overwrite this authority or turn unknown consumption into
+zero. Existing uncapped live-task behavior remains unchanged.
+
 The browser transport normalizes v4 success JSON by the addressed URL, not a
 global flag. Both `parse: 'json'` and `parse: 'response'` consumers see
 the domain payload. Response mode preserves the native status, headers, body
@@ -163,13 +171,7 @@ Emitted by `api_error(err, status=…)` and its named wrappers:
 `api_payload_too_large` (413), `api_internal_error` (500, auto-logs traceback),
 `api_service_unavailable` (503, sets `Retry-After`).
 
-**Result passthrough:** when a lib-layer function already returned
-`{ok, error, ...}` and the route only chooses the HTTP status, use
-`api_payload(result, status)` — it preserves the result's top-level shape
-(`api_error` would WRONGLY nest it under a single `error` key), keeps a
-present `ok`, defaults `ok = status < 400` when absent, and attaches
-`request_id` on 4xx/5xx. This is the idiom behind the Project Brain routes'
-`if not result.get('ok'): return api_payload(result, 409|400)`.
+**Result passthrough:** when a lib-layer function already returned `{ok, error, ...}` and the route only chooses the HTTP status, use `api_payload(result, status)` — it preserves the result's top-level shape (`api_error` would WRONGLY nest it under a single `error` key), keeps a present `ok`, defaults `ok = status < 400` when absent, and attaches `request_id` on 4xx/5xx. This is the idiom behind the Project Brain routes' `if not result.get('ok'): return api_payload(result, 409|400)`.
 
 `error` is a **string** for legacy-compatible sites (the frontend reads
 `data.error` as a string at >80 places) and a complete **envelope dict** when
@@ -194,6 +196,38 @@ may provide an explicitly reviewed `public_500_detail` through `api_error`;
 API v4 never infers public detail from arbitrary error envelopes. A caller that
 has already logged the same exception may set `log_traceback=False` to avoid a
 duplicate record, but it does not weaken response redaction.
+
+### Recovery with unconfirmed model usage
+
+Unconfirmed model usage retains `execution_token_usage_unknown` and `retryable: false`
+through native settlement, persistence and the localized error card. The original
+finite-budget execution remains closed; missing usage is never zero or settled by
+presentation. **Problem:** asking a nontechnical user to audit provider records
+leaves no usable recovery. **Decision:** the card offers a read-only safety check
+and explicit confirmation of one new finite budget via the [conversation recovery
+command](CONVERSATION_SYNC_V3.md#unconfirmed-usage-forward-recovery). It preserves
+the original Turn, output and known usage; it does not replay its model request or
+resume its checkpoint, Goal or Flow. Unconfirmed tool/background/delegated effects
+remain blocked. **Alternatives rejected:** repeatedly Continue/Regenerate does
+not supply missing evidence; guessing old usage or silently renewing its budget
+weakens accounting. Old generic errors are not reclassified from raw text.
+
+### Local prompt-admission diagnostics
+
+Problem: local tool-schema refusal looked like provider overflow after compaction.
+Decision: `PromptTooLongError(origin='local', reason=...)` retains the existing
+kind and non-retryable policy, with `providerReached: false` and optional
+content-free token counts. The constructor in `lib/llm/llm_errors.py` owns reason
+validation; `lib/error_envelope/_schema.py` owns the additive wire fields.
+Counts are nonnegative JS-safe integers, never booleans or arbitrary text.
+Persistence preserves the evidence; the caller's model/context remain intact.
+Local detail/raw contain fixed reason/count metadata, never exception bodies.
+Custom bilingual title/hint omit generic translation keys. Schema-floor advice
+says no model request was sent, suggests budget/tool checks, and neither claims
+compaction occurred nor recommends deleting history. Missing summary routes
+get route-specific guidance. Legacy provider errors retain their behavior.
+Alternatives rejected: message-text origin inference is unverified; a new error
+kind or frontend classifier duplicates the existing server override boundary.
 
 ### 2.3 Status-code mapping
 
@@ -339,37 +373,7 @@ The browser owns a bounded retry queue because this diagnostic command is not
 part of the generated foreground command retry policy. See
 `TURN_TRACE_CONTRACT.md`.
 
-Request Inspector discovers retained evidence through
-`GET /api/v4/tasks/by-conv/{conversationId}`. New turn-native rows come from the
-owner-filtered, metadata-only `turn.timing_trace.list` operation before any
-limit; its cursor query never selects trace JSON or message content and returns
-at most 100 attempts plus `hasMore`. Durable `task_results` remains the fallback
-for legacy/non-attempt tasks. Task detail is then read through
-`GET /api/v4/tasks/{taskId}/trace`, where a matching attempt is sufficient even
-after hot task-registry and event-retention expiry.
-Private task-result field-codec envelopes never cross this API: full legacy
-reads hydrate the original value, while compact replay may decode only the
-metadata/error or explicitly requested terminal fields it returns.
-`GET /api/v4/tasks/{taskId}/requests` folds ONE run's request rounds; a
-delegating run (Goal mode workers run as swarm agents) merges each
-`{taskId}#agent:{agentId}` child's rounds into the parent list. Merged rows
-carry `sourceTaskId`, and child request-list plus per-round
-payload/state/raw-archive reads MUST address that child task id — the parent's
-own event log holds no snapshots for rounds it delegated. Every inspector child
-route first verifies the authenticated owner against the durable parent and then
-verifies the exact child against persisted structural snapshot metadata; a
-string-shaped or foreign child ID is 404. Child merging is bounded to 32
-streams per fold; if more valid children exist the response explicitly reports
-`coverage:partial` with `coverageReason:child-limit` rather than presenting the
-truncated list as complete. A run whose flow markers exist but whose round list
-is empty reports `coverage:full` (nothing ambiguous to disclose);
-`flow-untagged` requires actual untagged rows.
-The per-round endpoint matches the exact `(taskId, roundNum, turn, kind)`
-address. It restores one proxy-added percent-encoding layer only for minted
-`<phase>:<32-hex-token>` turns and `parent#agent:child` inspector streams;
-it never drops the turn filter to guess a different attempt. A confirmed absent
-or expired snapshot returns 404; an event-store read failure returns retryable
-503. The browser must keep those outcomes distinct.
+Request Inspector discovers retained evidence through `GET /api/v4/tasks/by-conv/{conversationId}`. New turn-native rows come from the owner-filtered, metadata-only `turn.timing_trace.list` operation before any limit; its cursor query never selects trace JSON or message content and returns at most 100 attempts plus `hasMore`. Durable `task_results` remains the fallback for legacy/non-attempt tasks. Task detail is then read through `GET /api/v4/tasks/{taskId}/trace`, where a matching attempt is sufficient even after hot task-registry and event-retention expiry. Private task-result field-codec envelopes never cross this API: full legacy reads hydrate the original value, while compact replay may decode only the metadata/error or explicitly requested terminal fields it returns. `GET /api/v4/tasks/{taskId}/requests` folds ONE run's request rounds; a delegating run (Goal mode workers run as swarm agents) merges each `{taskId}#agent:{agentId}` child's rounds into the parent list. Merged rows carry `sourceTaskId`, and child request-list plus per-round payload/state/raw-archive reads MUST address that child task id — the parent's own event log holds no snapshots for rounds it delegated. Every inspector child route first verifies the authenticated owner against the durable parent and then verifies the exact child against persisted structural snapshot metadata; a string-shaped or foreign child ID is 404. Child merging is bounded to 32 streams per fold; if more valid children exist the response explicitly reports `coverage:partial` with `coverageReason:child-limit` rather than presenting the truncated list as complete. A run whose flow markers exist but whose round list is empty reports `coverage:full` (nothing ambiguous to disclose); `flow-untagged` requires actual untagged rows. The per-round endpoint matches the exact `(taskId, roundNum, turn, kind)` address. It restores one proxy-added percent-encoding layer only for minted `<phase>:<32-hex-token>` turns and `parent#agent:child` inspector streams; it never drops the turn filter to guess a different attempt. A confirmed absent or expired snapshot returns 404; an event-store read failure returns retryable 503. The browser must keep those outcomes distinct.
 
 The per-round payload may include `rawArchives` metadata for provider-bound
 request/response evidence. Bodies remain lazy: consumers read one bounded
@@ -496,26 +500,7 @@ array. Entries contain callback-free strategy schemas, metric units/directions,
 analyzer IDs, versions, and implementation digests. The endpoint never returns
 Python entry points or executable callbacks.
 
-`GET /api/v4/cost-experiments/report?days=1..90` returns
-`contractVersion: "tofu.experiment-report/v1"`, `experimentId`, `specDigest`,
-operational `lifecycle`, fixed-cohort counts (`maximumAssignmentUnits`,
-`observedAssignmentUnits`, `analyzedAssignmentUnits`),
-`arms`, descriptive `comparison`, collection `funnel`, and a versioned
-`decision`. The storage authority filters by explicit `user_id`, exact
-experiment ID, and completion window before applying its row limit. `truncated`
-or `invalidRows > 0` invalidates the decision; a partial report may remain
-descriptively useful but is never promotion evidence.
-Legacy task-result recovery resumes backend-neutral record cursors in pages of
-at most 256 source rows (eight BLOBs per SQL fetch) and has a 10,000-row source
-ceiling; reaching that ceiling sets `truncated` instead of restarting an
-unbounded scan or silently promoting from partial evidence.
-For a versioned run with `started_at_ms`, storage and in-process filtering begin
-at that server-owned start even when `days` requests a shorter display window;
-`analysisStartVerified=false` or `analysisSealVerified=false` blocks inference
-for legacy runs whose complete lifecycle window cannot be proven.
-Assignment-only checkpoints are retained in the cohort denominator;
-`decision.blockers` includes `pending_exposures` while an earlier exposed task
-has no terminal metric observation.
+`GET /api/v4/cost-experiments/report?days=1..90` returns `contractVersion: "tofu.experiment-report/v1"`, `experimentId`, `specDigest`, operational `lifecycle`, fixed-cohort counts (`maximumAssignmentUnits`, `observedAssignmentUnits`, `analyzedAssignmentUnits`), `arms`, descriptive `comparison`, collection `funnel`, and a versioned `decision`. The storage authority filters by explicit `user_id`, exact experiment ID, and completion window before applying its row limit. `truncated` or `invalidRows > 0` invalidates the decision; a partial report may remain descriptively useful but is never promotion evidence. Legacy task-result recovery resumes backend-neutral record cursors in pages of at most 256 source rows (eight BLOBs per SQL fetch) and has a 10,000-row source ceiling; reaching that ceiling sets `truncated` instead of restarting an unbounded scan or silently promoting from partial evidence. For a versioned run with `started_at_ms`, storage and in-process filtering begin at that server-owned start even when `days` requests a shorter display window; `analysisStartVerified=false` or `analysisSealVerified=false` blocks inference for legacy runs whose complete lifecycle window cannot be proven. Assignment-only checkpoints are retained in the cohort denominator; `decision.blockers` includes `pending_exposures` while an earlier exposed task has no terminal metric observation.
 
 The decision fields have deliberately distinct meanings:
 
@@ -549,7 +534,7 @@ persisted configuration entity.
 
 Per-endpoint request/response payloads for this route family are declared in
 [`contracts/api_v1_model_routing.yaml`](../../contracts/api_v1_model_routing.yaml)
-and generated into `lib/api_v1_model_routing_generated.py` (server-side
+and generated into `lib/generated_api_v1_model_routing.py` (server-side
 runtime validation authority) plus
 `frontend/src/api/api-v1-model-routing.generated.ts` (type-level mirror).
 Entity fields reference the aggregate schema above — never restate them.
@@ -663,29 +648,7 @@ rejects `providers`, `models`, and
 `model_catalog` with `legacy_model_routing_state_removed`. The former
 `/api/v4/model-catalog` surface is not registered.
 
-Artificial Analysis is an external, read-only Model enrichment, not a catalog
-authority. Authenticated owners read `GET /api/v4/model-intelligence/aa`,
-explicitly refresh with `POST /api/v4/model-intelligence/aa/refresh`, and save
-or clear their encrypted owner-scoped key with
-`PUT /api/v4/model-intelligence/aa/key` (`{api_key}`, maximum 256 characters).
-Responses expose only status, redacted key source/hint, attribution, fetch
-time, and scores keyed by exact `creator_id::model_id`; they never include the
-plaintext key or any ProviderAccess, Offering, Deployment, alias, or Route.
-Ordinary reads never wait on the external network: a bounded 24-hour public
-dataset cache is served while one background refresh refills stale data.
-OpenRouter pricing is a second external Model enrichment with an explicit
-write policy. `GET /api/v4/model-intelligence/openrouter-pricing` returns a
-read-only report that buckets each canonical Model as priced, fillable,
-official-covered, openrouter-free, unmatched, or drift (a priced Model whose
-USD list price disagrees with the OpenRouter row by more than 25% blended —
-a cross-check signal, never an auto-rewrite).
-`POST /api/v4/model-intelligence/openrouter-pricing/refresh` force-fetches
-the public keyless catalog and CAS-writes `list_pricing` only onto unpriced
-Models whose Creator has no official-direct coverage in the maintained
-pricing tables; officially priced Models are never rewritten, and all-zero
-OpenRouter rows never become a $0 list price (unknown stays unknown instead
-of impersonating an official free tier). The dataset shares the same bounded
-24-hour cache/background-refresh budget as the AA enrichment.
+Artificial Analysis is an external, read-only Model enrichment, not a catalog authority. Authenticated owners read `GET /api/v4/model-intelligence/aa`, explicitly refresh with `POST /api/v4/model-intelligence/aa/refresh`, and save or clear their encrypted owner-scoped key with `PUT /api/v4/model-intelligence/aa/key` (`{api_key}`, maximum 256 characters). Responses expose only status, redacted key source/hint, attribution, fetch time, and scores keyed by exact `creator_id::model_id`; they never include the plaintext key or any ProviderAccess, Offering, Deployment, alias, or Route. Ordinary reads never wait on the external network: a bounded 24-hour public dataset cache is served while one background refresh refills stale data. OpenRouter pricing is a second external Model enrichment with an explicit write policy. `GET /api/v4/model-intelligence/openrouter-pricing` returns a read-only report that buckets each canonical Model as priced, fillable, official-covered, openrouter-free, unmatched, or drift (a priced Model whose USD list price disagrees with the OpenRouter row by more than 25% blended — a cross-check signal, never an auto-rewrite). `POST /api/v4/model-intelligence/openrouter-pricing/refresh` force-fetches the public keyless catalog and CAS-writes `list_pricing` only onto unpriced Models whose Creator has no official-direct coverage in the maintained pricing tables; officially priced Models are never rewritten, and all-zero OpenRouter rows never become a $0 list price (unknown stays unknown instead of impersonating an official free tier). The dataset shares the same bounded 24-hour cache/background-refresh budget as the AA enrichment.
 
 ### 2.10 Compact MCP tool summary
 
@@ -1018,7 +981,11 @@ Rules:
   `failed` on a failed unit and `skipped` on any other terminal unit, so a
   terminal card never shows a forever-spinning stage.
 * `artifacts` appears only for kinds with a published download path (today:
-  `slides-deck`) and only on `done|degraded`. A kind absent from the map
+  `slides-deck` and `motion-video`) and only on `done|degraded`. Video additionally
+  requires the capability's published `result.final_path` receipt; successful
+  scene-only subjobs do not imply a final film. The projection exposes only the
+  owner-checked `/api/v4/motion/videos/{id}/file` URL, never a filesystem path.
+  A kind absent from the map
   omits the slot — the server never invents a URL the capability did not
   publish.
 * `pages` (optional) is the streaming per-page preview projection for kinds
@@ -1031,14 +998,14 @@ Rules:
   render-stage gate blocks publication over missing previews, and a
   checkpoint-resumed deck emits no events for pages it already had). The
   block is omitted entirely when no page evidence exists.
-* `pendingGate` (optional) is the interactive outline review for
-  chat-initiated `slides-deck` jobs: the capability parks before the
-  authoring fan-out and the card renders the outline with an answer box.
+* `pendingGate` (optional) is the interactive outline/storyboard review for
+  chat-initiated `slides-deck` / `motion-video` jobs: the capability parks before
+  production and the card renders the plan with an answer box.
   It projects only while the unit is live and the gate unanswered
-  (`outline_gate` event without a later `outline_gate_resolved`). Answers
-  post to the SHARED `POST /api/v1/chat/human-response` endpoint
+  (`outline_gate` / `storyboard_gate` without its later resolved event). Answers
+  post to the SHARED `POST /api/v4/chat/human-response` endpoint
   (`{guidanceId, response}` — the same owner-bound registry as ask_human);
-  an empty approval means "generate as-is" and any other text feeds ONE
+  a recognized approval means "generate as-is" and other feedback feeds ONE
   bounded outline-revision pass. The gate is never a lifecycle — the task
   snapshot stays the terminal truth.
 * `failure` mirrors the task's error envelope (message/detail/hint) so the
@@ -1058,6 +1025,10 @@ timeline to 32 KiB per agent. Occurrence IDs, running/terminal verdicts and
 explicit omission metadata match durable swarm snapshots. This does not
 persist another result copy. The background-activity list below intentionally
 uses the summary-only status projection, without tool timelines.
+
+Swarm mailbox receipt timestamps (`submittedAt`, `inputInjectedAt`,
+`inputConfirmedAt`) are Unix epoch **milliseconds**, including numeric-string
+representations; lifecycle times such as `created_at` remain seconds.
 
 ### 2.19 Background-activity snapshot
 
@@ -1094,6 +1065,16 @@ Rules:
 
 * Owner-scoped on both halves; a session or command belonging to another
   user is invisible, never redacted.
+
+* Each swarm also carries its exact `swarm_id` (original run task ID, not the
+  reusable `swarm_key`) and the canonical bounded `messageReceipts`,
+  `messageReceiptsAvailable`, `messageReceiptsVersions`, and
+  `messageParticipants` projection. The communication dock uses this existing
+  poll to reconcile push-only receipts; missing history is not an empty mailbox.
+  Mailbox read failures preserve the activity row with availability false.
+  Receipt reads run outside the session-registry and orchestrator locks.
+  This reuses the snapshot owner rather than adding another history poll or
+  treating a received push as proof that all earlier messages are present.
 * `swarms` lists only LIVE (non-terminated) sessions from the process-local
   registry, keyed by the stable swarm key plus `conv_id` for deep-links —
   deliberately not by task id, since the spawning task has usually settled.
@@ -1119,6 +1100,25 @@ Rules:
 
 Paper-build commands, owner-scoped artifacts, subscriber leases and build-bound
 locations follow [the paper-build contract](../PAPER_BUILDS.md).
+
+### 2.21 Published response files
+
+Existing-file publication uses the task-owned `publish_response_file` capability,
+not an arbitrary HTTP filesystem mount. Types, receipt fields and bounds are
+owned by [`response_file_v1.schema.json`](../../contracts/response_file_v1.schema.json).
+Artifact metadata/lifecycle, raw/view/export and downloads recheck the live
+conversation owner for every source, including legacy artifacts. Missing, foreign
+or deleted conversations are unavailable. Private bytes are never browser-cached.
+`GET /api/artifacts/{id}/view` previews Markdown as well as HTML/SVG, sharing the PDF body's lazy renderer.
+Raw Markdown HTML stays escaped, missing rendering falls back to escaped source, and the existing view CSP remains authoritative.
+`GET /api/artifacts/{id}/download` is a raw attachment carve-out: verified original
+bytes, safe filename, `nosniff`, and `private, no-store`. HTML/SVG download defaults
+to inert text; `interactive=1` explicitly selects the original executable format
+and carries a warning. Binary-envelope artifacts have no raw/view/source exposure.
+Owned rich actions resolve through `/api/response-assets/artifacts/{id}` with the
+origin conversation; download reads decode the same snapshot, never its source path.
+No dependency fetching, directory hosting, storage migration or second lifecycle
+is introduced. Preview/code-consent presentation follows [the render contract](../RENDER_CONTRACT.md#native-rich-responses-and-published-assets).
 
 ## 3. Request parsing
 
@@ -1160,30 +1160,7 @@ Adding a carve-out requires: (1) a row in this table, (2) an entry in the
 drift test with the same reason, (3) a commit message explaining why the
 envelope is impossible (not merely inconvenient).
 
-The bridge-secret transport namespace is also deliberately unversioned. In
-addition to `/api/browser/poll`, `/api/browser/download` and
-`/api/desktop/poll`, it contains the path-parameterized browser file-transfer
-start/chunk/complete/abort routes under `/api/browser/file-transfers/`. Those
-four routes use the normal JSON success/error envelope (the chunk request body
-is raw bytes); control envelopes are capped at 16 KiB and chunks at 256 KiB
-before parsing/buffering. They stay beside poll because the extension, not a
-public API consumer, is the only caller. Every non-OPTIONS request still passes
-the real owner-scoped bridge credential gate.
-`/api/browser/poll` additionally passes a bounded credential-digest gate before
-storage authentication and an owner-aware gate afterward. Normal long-polls
-retain the existing 200 wire; pressure returns 429 with `Retry-After`, oversized
-poll/result frames return 413, and protocol rejection remains 426 with
-`Retry-After`. One device retry supersedes its prior waiter without a conflict
-response, so proxy overlap is invisible to healthy clients. A current extension
-uses string device/result IDs of at most 128 characters, a capability array no
-larger than the canonical known-capability set with 64-character string items,
-and bounded version/profile strings; malformed amplification shapes return 400.
-It mirrors its protocol in `X-Browser-Protocol-Version` solely to clear an older
-binary's credential cooldown after an in-place upgrade; the authenticated JSON
-frame remains authoritative and every admission/authentication check still runs.
-Completed results replay idempotently after transport failure; a 413 first
-bisects a multi-result batch and only a still-oversized singleton becomes an
-explicit command error.
+The bridge-secret transport namespace is also deliberately unversioned. In addition to `/api/browser/poll`, `/api/browser/download` and `/api/desktop/poll`, it contains the path-parameterized browser file-transfer start/chunk/complete/abort routes under `/api/browser/file-transfers/`. Those four routes use the normal JSON success/error envelope (the chunk request body is raw bytes); control envelopes are capped at 16 KiB and chunks at 256 KiB before parsing/buffering. They stay beside poll because the extension, not a public API consumer, is the only caller. Every non-OPTIONS request still passes the real owner-scoped bridge credential gate. `/api/browser/poll` additionally passes a bounded credential-digest gate before storage authentication and an owner-aware gate afterward. Normal long-polls retain the existing 200 wire; pressure returns 429 with `Retry-After`, oversized poll/result frames return 413, and protocol rejection remains 426 with `Retry-After`. One device retry supersedes its prior waiter without a conflict response, so proxy overlap is invisible to healthy clients. A current extension uses string device/result IDs of at most 128 characters, a capability array no larger than the canonical known-capability set with 64-character string items, and bounded version/profile strings; malformed amplification shapes return 400. It mirrors its protocol in `X-Browser-Protocol-Version` solely to clear an older binary's credential cooldown after an in-place upgrade; the authenticated JSON frame remains authoritative and every admission/authentication check still runs. Completed results replay idempotently after transport failure; a 413 first bisects a multi-result batch and only a still-oversized singleton becomes an explicit command error.
 
 ## 5. Enforcement (the ratchets)
 
@@ -1269,3 +1246,30 @@ server-owned final dispatch metadata, or an empty string when unavailable.
 This is the final attempt's provider, not a claim that all retry/fallback
 attempts used it; request receipts remain the full attempt evidence. The
 request's preferred provider never fills unknown actual identity.
+
+### Video upload source admission
+
+The default video upload accepts complete source bytes without a private file
+size quota. Request overflow uses the shared owned temporary-file buffer and
+Multipart parsing consumes transport chunks. Format validation, authenticated
+owner scope, actual I/O errors and processing publication failures keep their
+existing envelopes. Explicit application/route overrides remain effective;
+other source-decoder policies are separate from this transport boundary.
+
+## Owned response resource projections
+
+`GET /api/response-surfaces/providers` and `/resources` require the shared auth
+boundary and exactly one context: `runId`, or `conversationId` plus `turnId`.
+Context comes from the mounted task, not rich JSON. No owner/path override or
+duplicate query parameter is accepted. Resources additionally require `provider`
+and optionally a registered `connection` and exact `queue`. Responses are private,
+no-store raw JSON; resource snapshots reuse the rich-response schema definitions.
+The source owner is `routes/response_assets.py`, calling `lib/response_surfaces/__init__.py`.
+
+Providers return `{providers:[{id,connection?,requiresQueue?}]}`. Resources return
+`{version:1,provider,snapshot}` with server read time and provider quantities.
+Unknown capacity stays null; missing pending is not zero. Missing ownership returns
+404, malformed input 400 and provider failure 503 without private transport detail.
+Authenticated ownership is rechecked after external reads. No endpoint submits,
+reserves, cancels or reallocates compute. Existing Turn commands remain the sole
+form-answer write path; read-only resource data grants no write authority.

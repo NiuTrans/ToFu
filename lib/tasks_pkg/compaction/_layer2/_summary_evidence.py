@@ -8,7 +8,7 @@ when the caller supplies no history budget. Omitted material is not evidence.
 import json
 import re
 
-from lib.tool_history_pairing import adjacent_tool_call_result_pairs
+from lib.tool_results.tool_history_pairing import adjacent_tool_call_result_pairs
 
 _TOOL_EVIDENCE_MAX_BYTES = 4096
 _TOOL_EVIDENCE_PREVIEW_BYTES = 1600

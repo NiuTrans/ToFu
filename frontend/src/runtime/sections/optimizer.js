@@ -290,6 +290,9 @@ async function _optimizerRunNow() {
 function _startOptimizerPolling() {
   if (_optimizerPollTimer) return;
   _optimizerPollTimer = setInterval(() => {
+    // Skip while hidden: the 5-minute badge clock keeps aging, and the first
+    // tick after visibility returns fires the catch-up refresh then.
+    if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
     // Refresh badge in background even when panel is closed (every 5 min)
     if (_optimizerPanelOpen || (Date.now() - _optimizerLastRefresh) > 5 * 60 * 1000) {
       _refreshOptimizerPanel();

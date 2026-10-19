@@ -5,7 +5,7 @@ import sqlite3
 
 import pytest
 
-from lib.storage_sidecar.operations_pkg._project_brain import (
+from lib.storage_authority_sql.operations_pkg._project_brain import (
     _project_brain_recovery_snapshot,
 )
 from lib.storage.protocol import StorageError
@@ -78,7 +78,9 @@ def test_recovery_deduplicates_acknowledged_work_without_aliasing_owners(monkeyp
                     {'id': 'work', 'taskId': 'task', 'status': 'active'}]}
                 for owner, project in scopes]}
 
-        def query(self, operation, payload):
+        def query(self, operation, payload, **kwargs):
+            if operation == "record.list":
+                return []
             queries.append(payload)
             return {'status': 'done', 'finishReason': 'stop'}
 
@@ -132,7 +134,9 @@ def test_startup_continues_empty_pages_and_preserves_task_owner(monkeypatch):
                                  'workItems': [{'id': 'work', 'taskId': 'task', 'status': 'active'}]}],
                     'capped': False}
 
-        def query(self, operation, payload):
+        def query(self, operation, payload, **kwargs):
+            if operation == "record.list":
+                return []
             assert payload['user_id'] == 7
             return {'status': 'done', 'finishReason': 'stop'}
 
@@ -179,7 +183,9 @@ def test_startup_ignores_terminal_history_from_older_native_snapshot(monkeypatch
                                       {'id': 'live', 'taskId': 'task', 'status': 'active'}]}],
                     'capped': False}
 
-        def query(self, operation, payload):
+        def query(self, operation, payload, **kwargs):
+            if operation == "record.list":
+                return []
             queries.append(payload)
             return {'status': 'done'}
 
@@ -209,7 +215,9 @@ def test_startup_preserves_active_work_until_intent_acknowledged(monkeypatch, fa
                                                 for work, task in active.items()]}],
                     'capped': False}
 
-        def query(self, operation, payload):
+        def query(self, operation, payload, **kwargs):
+            if operation == "record.list":
+                return []
             assert payload['user_id'] == 7
             return {'status': 'done', 'finishReason': 'stop'}
 
@@ -268,7 +276,9 @@ def test_startup_does_not_synthesize_publication_authority(monkeypatch, stored, 
                                   'workItems': [{'id': 'work', 'taskId': 'task', 'status': 'active'}]}],
                     'capped': False}
 
-        def query(self, operation, payload):
+        def query(self, operation, payload, **kwargs):
+            if operation == "record.list":
+                return []
             assert payload['include_metadata'] is True
             assert payload['include_terminal_payload'] is False
             return dict(stored, config={'readOnlyPaths': ['/readonly']})
@@ -289,3 +299,13 @@ def test_startup_does_not_synthesize_publication_authority(monkeypatch, stored, 
     assert startup.recover_active_work_items() == 1
     assert outcomes == [expected]
     assert finishes[0]['status'] == expected
+
+
+def test_active_project_list_preserves_all_projects_beyond_the_old_limit(recovery_database):
+    from lib.storage_authority_sql.operations_pkg._project_brain import _project_brain_list_active
+    rows = [(1,f'/demand-{n:04}',json.dumps({'projectKey':f'/demand-{n:04}','workItems':[{'id':'work','taskId':'task','status':'active'}]}),n) for n in range(1001)]
+    recovery_database.executemany('INSERT INTO storage_project_brain_projects VALUES (?,?,?,?)',rows)
+    result = _project_brain_list_active(Session(recovery_database),{'owner_user_id':1})
+    assert len(result['projects']) == 1001
+    assert result['projects'][-1]['projectKey'] == '/demand-0000'
+    assert _project_brain_list_active(Session(recovery_database),{'owner_user_id':2}) == {'projects':[]}

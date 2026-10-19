@@ -18,7 +18,7 @@ from lib.config_dir import config_path as _config_path
 from lib.identity import require_user_id
 from lib.json_store import JsonStoreReadError, update_json_atomic
 from lib.log import audit_log, get_logger
-from lib.search_settings import normalise_domain as _ss_normalise_domain
+from lib.search.search_settings import normalise_domain as _ss_normalise_domain
 
 logger = get_logger(__name__)
 
@@ -27,7 +27,7 @@ _CONFIG_FILE = _config_path('server_config.json')
 
 
 def _normalise_domain(domain: str) -> str:
-    # Canonical implementation lives in lib.search_settings.normalise_domain
+    # Canonical implementation lives in lib.search.search_settings.normalise_domain
     # (shared with the update_search_settings agent tool); the alias name is
     # kept because tests patch/assert it here.
     return _ss_normalise_domain(domain)

@@ -27,7 +27,7 @@ use crate::authority::{AuthorityDatabase, AuthorityTransaction};
 use crate::conversation_header::TENANT_GLOBAL_OWNER_ID;
 use crate::entity::EntityKey;
 use crate::generated_paper_build as limits;
-use crate::generated_tofudb_ir::{MAX_ENTITY_KEY_BYTES, MAX_TRANSACTION_IR_LITERAL_BYTES, MAX_ENTITY_RANGE_ROWS};
+use crate::generated_tofudb_ir::{MAX_ENTITY_KEY_BYTES, MAX_LEGACY_DOCUMENT_BYTES, MAX_ENTITY_RANGE_ROWS};
 use crate::paper_build_artifact;
 use crate::paper_build_receipt::lower_hex;
 use crate::paper_document;
@@ -50,7 +50,7 @@ const MIGRATION_KEY: &str = "migration";
 /// A migration packet has its ordinary literal byte bound, independent of
 /// retained record counts.
 const MAX_BUILD_LEDGER_JSON_BYTES: usize =
-    MAX_TRANSACTION_IR_LITERAL_BYTES;
+    MAX_LEGACY_DOCUMENT_BYTES;
 const MAX_DOCUMENT_LEDGER_JSON_BYTES: usize = 256;
 
 #[derive(Deserialize)]

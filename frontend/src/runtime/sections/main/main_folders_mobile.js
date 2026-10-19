@@ -81,203 +81,67 @@ function _closeFolderPicker() {
   if (p) p.remove();
 }
 
-/** Show inline dialog to create a new folder, optionally assigning a conv to it */
-function _promptCreateFolder(assignConvId) {
-  // Remove any existing dialog
-  const existing = document.getElementById('_folderCreateDialog');
-  if (existing) existing.remove();
+/* Temporary folder-dialog ports: all editor/browser behavior lives in the typed
+ * owner. Remove this seam when the retained sidebar composition migrates. */
+let _folderSettingsDialog = null;
 
-  const colors = ['#6e56cf', '#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#ec4899', '#8b5cf6', '#14b8a6'];
-  let selectedColor = colors[Math.floor(Math.random() * colors.length)];
-
-  const overlay = document.createElement('div');
-  overlay.id = '_folderCreateDialog';
-  overlay.className = 'folder-dialog-overlay';
-  overlay.innerHTML = `
-    <div class="folder-dialog">
-      <div class="folder-dialog-title">${t('folder.createTitle')}</div>
-      <input type="text" class="folder-dialog-input" id="_folderNameInput"
-             placeholder="${t('folder.namePh')}" maxlength="50" autocomplete="off" spellcheck="false">
-      <div class="folder-dialog-colors" id="_folderColorPicker">
-        ${colors.map(c => `<span class="folder-color-dot${c === selectedColor ? ' selected' : ''}" data-color="${c}" style="background:${c}"></span>`).join('')}
-      </div>
-      <div class="folder-dialog-actions">
-        <button class="folder-dialog-cancel" id="_folderDialogCancel">${t('folder.cancel')}</button>
-        <button class="folder-dialog-ok" id="_folderDialogOk">${t('folder.create')}</button>
-      </div>
-    </div>
-  `;
-  document.body.appendChild(overlay);
-
-  const nameInput = document.getElementById('_folderNameInput');
-  const colorPicker = document.getElementById('_folderColorPicker');
-  const okBtn = document.getElementById('_folderDialogOk');
-  const cancelBtn = document.getElementById('_folderDialogCancel');
-
-  // Focus input
-  setTimeout(() => nameInput.focus(), 50);
-
-  // Color selection
-  colorPicker.addEventListener('click', (e) => {
-    const dot = e.target.closest('.folder-color-dot');
-    if (!dot) return;
-    colorPicker.querySelectorAll('.folder-color-dot').forEach(d => d.classList.remove('selected'));
-    dot.classList.add('selected');
-    selectedColor = dot.dataset.color;
-  });
-
-  function _closeDialog() { overlay.remove(); }
-
-  async function _submit() {
-    const name = nameInput.value.trim();
-    if (!name) { nameInput.focus(); return; }
-    okBtn.disabled = true;
-    okBtn.textContent = t('folder.creating');
-    const folder = await createFolder(name, selectedColor);
-    _closeDialog();
-    if (!folder) {
-      if (typeof showToast === 'function') showToast('', t('folder.createFailed'), t('folder.cannotCreate'), 3000);
-      return;
-    }
-    if (assignConvId) {
-      setConversationFolder(assignConvId, folder.id);
-    }
-    renderConversationList();
-    if (typeof showToast === 'function') showToast('', t('folder.created'), folder.name, 2000);
-  }
-
-  okBtn.addEventListener('click', _submit);
-  cancelBtn.addEventListener('click', _closeDialog);
-  overlay.addEventListener('click', (e) => { if (e.target === overlay) _closeDialog(); });
-  nameInput.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') { e.preventDefault(); _submit(); }
-    if (e.key === 'Escape') _closeDialog();
-  });
+function _folderSettingsPorts(assignConvId) {
+  return {
+    t,
+    create: async values => {
+      const folder = await createFolder(values.name, values.color, values.projectPaths, values.readOnlyPaths);
+      if (!folder) throw new Error(t('folder.createFailed'));
+      return folder;
+    },
+    onSaved: folder => {
+      if (assignConvId) setConversationFolder(assignConvId, folder.id);
+      renderConversationList();
+    },
+    update: async (id, values) => {
+      const folder = await updateFolder(id, values);
+      if (!folder) throw new Error(t('folder.settings.saveFailed'));
+      renderConversationList();
+      return folder;
+    },
+    reload: async id => {
+      await loadFolders();
+      const folder = getFolderById(id);
+      if (!folder) throw new Error(t('folder.settings.reloadFailed'));
+      return folder;
+    },
+    browse: (path, showHidden, signal) => Api.project.browse(path, showHidden, { onError: 'throw', signal }),
+    recent: () => Api.project.recentList(),
+    remove: async id => {
+      const result = await deleteFolder(id);
+      if (!result) throw new Error(t('folder.deleteFailed'));
+      if (getActiveFolderId() === id) setActiveFolderId(null);
+      renderConversationList();
+      return result;
+    },
+  };
 }
 
+/** Create with a name alone, optionally assigning the captured conversation. */
+function _promptCreateFolder(assignConvId) {
+  if (_folderSettingsDialog) _folderSettingsDialog.dispose();
+  const ports = _folderSettingsPorts(assignConvId);
+  if (!assignConvId) ports.onSaved = folder => { setActiveFolderId(folder.id); renderConversationList(); };
+  _folderSettingsDialog = openFolderSettings(ports);
+}
+
+/** Kept action name for registry compatibility; this is Project settings. */
 function _promptRenameFolder(folderId) {
-  const f = getFolderById(folderId);
-  if (!f) return;
-
-  // Remove any existing dialog
-  const existing = document.getElementById('_folderCreateDialog');
-  if (existing) existing.remove();
-
-  const colors = ['#6e56cf', '#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#ec4899', '#8b5cf6', '#14b8a6'];
-  let selectedColor = f.color || '';
-
-  const overlay = document.createElement('div');
-  overlay.id = '_folderCreateDialog';
-  overlay.className = 'folder-dialog-overlay';
-  overlay.innerHTML = `
-    <div class="folder-dialog">
-      <div class="folder-dialog-title">${t('folder.renameTitle')}</div>
-      <input type="text" class="folder-dialog-input" id="_folderNameInput"
-             placeholder="${t('folder.namePh')}" maxlength="50" autocomplete="off" spellcheck="false">
-      <div class="folder-dialog-colors" id="_folderColorPicker">
-        ${colors.map(c => `<span class="folder-color-dot${c === selectedColor ? ' selected' : ''}" data-color="${c}" style="background:${c}"></span>`).join('')}
-      </div>
-      <div class="folder-dialog-actions">
-        <button class="folder-dialog-cancel" id="_folderDialogCancel">${t('folder.cancel')}</button>
-        <button class="folder-dialog-ok" id="_folderDialogOk">${t('folder.ok')}</button>
-      </div>
-    </div>
-  `;
-  document.body.appendChild(overlay);
-
-  const nameInput = document.getElementById('_folderNameInput');
-  const colorPicker = document.getElementById('_folderColorPicker');
-  nameInput.value = f.name;
-  setTimeout(() => { nameInput.focus(); nameInput.select(); }, 50);
-
-  // Color selection — a second tap on the selected dot clears the color.
-  colorPicker.addEventListener('click', (e) => {
-    const dot = e.target.closest('.folder-color-dot');
-    if (!dot) return;
-    const wasSelected = dot.classList.contains('selected');
-    colorPicker.querySelectorAll('.folder-color-dot').forEach(d => d.classList.remove('selected'));
-    if (wasSelected) {
-      selectedColor = '';
-    } else {
-      dot.classList.add('selected');
-      selectedColor = dot.dataset.color;
-    }
-  });
-
-  function _closeDialog() { overlay.remove(); }
-
-  async function _submit() {
-    const name = nameInput.value.trim();
-    const colorChanged = selectedColor !== (f.color || '');
-    if ((!name || name === f.name) && !colorChanged) { _closeDialog(); return; }
-    const updates = {};
-    if (name && name !== f.name) updates.name = name;
-    if (colorChanged) updates.color = selectedColor;
-    await updateFolder(folderId, updates);
-    _closeDialog();
-    renderConversationList();
-  }
-
-  document.getElementById('_folderDialogOk').addEventListener('click', _submit);
-  document.getElementById('_folderDialogCancel').addEventListener('click', _closeDialog);
-  overlay.addEventListener('click', (e) => { if (e.target === overlay) _closeDialog(); });
-  nameInput.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') { e.preventDefault(); _submit(); }
-    if (e.key === 'Escape') _closeDialog();
-  });
+  const folder = getFolderById(folderId);
+  if (!folder) return;
+  if (_folderSettingsDialog) _folderSettingsDialog.dispose();
+  _folderSettingsDialog = openFolderSettings(_folderSettingsPorts(), folder);
 }
 
 function _confirmDeleteFolder(folderId) {
-  const f = getFolderById(folderId);
-  if (!f) return;
-
-  const existing = document.getElementById('_folderCreateDialog');
-  if (existing) existing.remove();
-
-  const overlay = document.createElement('div');
-  overlay.id = '_folderCreateDialog';
-  overlay.className = 'folder-dialog-overlay';
-  overlay.innerHTML = `
-    <div class="folder-dialog">
-      <div class="folder-dialog-title">${t('folder.deleteTitle')}</div>
-      <div style="font-size:13px;color:var(--text-secondary);margin-bottom:16px;line-height:1.5">
-        ${t('folder.deleteConfirm')} <b style="color:var(--text-primary)">${f.name}</b>？<br>
-        ${t('folder.deleteHint')}
-      </div>
-      <div class="folder-dialog-actions">
-        <button class="folder-dialog-cancel" id="_folderDialogCancel">${t('folder.cancel')}</button>
-        <button class="folder-dialog-ok" id="_folderDialogOk" style="background:#ef4444">${t('common.delete')}</button>
-      </div>
-    </div>
-  `;
-  document.body.appendChild(overlay);
-
-  /* This is a DESTRUCTIVE modal with no text input, so (unlike the
-   * create/rename dialogs which hang Escape off their <input>) we bind a
-   * document-level keydown and clean it up on close. Escape dismisses it —
-   * matching the create/rename dialogs — and we focus Cancel by default so
-   * an accidental long-press → delete isn't one stray tap from destruction. */
-  function _closeDialog() {
-    document.removeEventListener('keydown', _onKey);
-    overlay.remove();
-  }
-  function _onKey(e) { if (e.key === 'Escape') { e.preventDefault(); _closeDialog(); } }
-  document.addEventListener('keydown', _onKey);
-
-  document.getElementById('_folderDialogOk').addEventListener('click', async () => {
-    _closeDialog();
-    // If we're viewing this folder, exit folder view first
-    if (typeof getActiveFolderId === 'function' && getActiveFolderId() === folderId) {
-      setActiveFolderId(null);
-    }
-    await deleteFolder(folderId);
-    renderConversationList();
-    if (typeof showToast === 'function') showToast('', t('folder.deleted'), f.name, 2000);
-  });
-  const _cancelBtn = document.getElementById('_folderDialogCancel');
-  _cancelBtn.addEventListener('click', _closeDialog);
-  setTimeout(() => _cancelBtn.focus(), 50);
-  overlay.addEventListener('click', (e) => { if (e.target === overlay) _closeDialog(); });
+  const folder = getFolderById(folderId);
+  if (!folder) return;
+  if (_folderSettingsDialog) _folderSettingsDialog.dispose();
+  _folderSettingsDialog = openFolderDeleteConfirmation(t, folder, _folderSettingsPorts().remove);
 }
 
 /** Toggle the vertical project rail between labeled and icon-only, persisting
@@ -321,10 +185,24 @@ function _initFolderTabs() {
   }
 
   // Click: rail collapse toggle, new-folder footer, or switch project.
+
+  const disposeConfigInteractions = installFolderConfigInteractions(tabsEl, {
+    settings: _promptRenameFolder,
+    context: _showFolderTabMenu,
+  });
+  window.addEventListener('pagehide', event => {
+    if (!event.persisted) disposeConfigInteractions();
+  });
   tabsEl.addEventListener('click', (e) => {
     const collapseBtn = e.target.closest('.project-rail-collapse');
     if (collapseBtn) { e.stopPropagation(); _toggleProjectRail(); return; }
-    const tab = e.target.closest('.folder-tab');
+    const settingsBtn = e.target.closest('.folder-tab-settings');
+    if (settingsBtn) {
+      e.stopPropagation();
+      _promptRenameFolder(settingsBtn.dataset.folderConfigId);
+      return;
+    }
+    const tab = e.target.closest('.folder-tab, .folder-tab-add');
     if (!tab) return;
     e.stopPropagation();
     if (tab.classList.contains('folder-tab-add')) {
@@ -426,7 +304,7 @@ function _showFolderTabMenu(folderId, x, y) {
   menu.innerHTML = `
     <div class="folder-tab-menu-item" data-action="rename">
       <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/></svg>
-      ${t('folder.rename')}
+      ${t('folder.settings.title')}
     </div>
     <div class="folder-tab-menu-item folder-tab-menu-delete" data-action="delete">
       <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
@@ -439,6 +317,8 @@ function _showFolderTabMenu(folderId, x, y) {
   const mw = menu.offsetWidth, mh = menu.offsetHeight;
   menu.style.left = Math.min(x, window.innerWidth - mw - 8) + 'px';
   menu.style.top = Math.min(y, window.innerHeight - mh - 8) + 'px';
+
+  makeFolderContextMenuAccessible(menu);
 
   menu.addEventListener('click', (e) => {
     const item = e.target.closest('.folder-tab-menu-item');
@@ -531,12 +411,7 @@ function closeMobileSheet() {
 }
 
 function updateMobileSheet() {
-  /* Capability-mode rows (Chat/Studio) mirror the segmented dial — a
-   * radio-style highlight, NOT a toggle. Reflect the live chatMode global. */
-  const _mode = (typeof chatMode !== 'undefined' ? chatMode : 'chat');
-  document.querySelectorAll('.mobile-mode-item').forEach(el => {
-    el.classList.toggle('active', el.dataset.mode === _mode);
-  });
+  paintOptionalProjectAttachment(document, t);
 
   const agentMode = resolveAgentMode(planMode, autopilotEnabled);
   document.querySelectorAll('.mobile-agent-mode-item').forEach((item) => {
@@ -786,64 +661,6 @@ window.addEventListener('resize', (function() {
         }
       }, 150);
     }
-  });
-})();
-
-/* ── Mobile: handle virtual keyboard resize via visualViewport API ── */
-(function initMobileKeyboardHandler() {
-  if (!window.visualViewport) return;
-  /* On mobile, when the virtual keyboard opens the visual viewport shrinks.
-   * We adjust body height to match, keeping the input area visible. */
-  let lastHeight = 0;
-  /* Track whether user was near bottom BEFORE keyboard starts closing.
-   * We sample this on every resize so we know the state at keyboard-open time. */
-  let _wasNearBottom = true;
-  function onViewportResize() {
-    if (!isMobileViewport()) return;
-    const vv = window.visualViewport;
-    const newH = vv.height;
-    if (Math.abs(newH - lastHeight) < 1) return;
-    const growing = newH > lastHeight;
-    lastHeight = newH;
-    /* Set explicit height on body to match the visual viewport */
-    document.body.style.height = newH + 'px';
-    if (!growing) {
-      /* Keyboard opening (viewport shrinking) — record scroll state and
-       * scroll textarea into view */
-      _wasNearBottom = isNearBottom(200);
-      const ta = document.getElementById('userInput');
-      if (ta && document.activeElement === ta) {
-        requestAnimationFrame(function() {
-          ta.scrollIntoView({ block: 'end', behavior: 'smooth' });
-        });
-      }
-    } else {
-      /* Keyboard closing (viewport growing) — the viewport height increases
-       * but scrollTop stays the same, so chat appears to "jump to the middle".
-       * Re-scroll to bottom if the user was near bottom before, or if there's
-       * an active stream (user just sent a message and is watching the reply).
-       * Force sync reflow first (void scrollHeight) so the layout reflects
-       * the new body height, then scroll immediately + schedule a safety rAF. */
-      if (_wasNearBottom || (typeof getActiveConv === 'function'
-          && typeof convIsBusy === 'function' && convIsBusy(getActiveConv()))) {
-        var cc = document.getElementById('chatContainer');
-        if (cc) {
-          void cc.scrollHeight; // force reflow after body height change
-          cc.scrollTop = cc.scrollHeight;
-        }
-        /* Safety: keyboard dismiss can fire multiple resize events as it
-         * animates closed — schedule another scroll after layout settles. */
-        requestAnimationFrame(function() {
-          scrollToBottom(true);
-        });
-      }
-    }
-  }
-  window.visualViewport.addEventListener('resize', onViewportResize);
-  /* Reset on blur / keyboard dismiss */
-  window.visualViewport.addEventListener('scroll', function() {
-    if (!isMobileViewport()) return;
-    document.body.style.height = window.visualViewport.height + 'px';
   });
 })();
 

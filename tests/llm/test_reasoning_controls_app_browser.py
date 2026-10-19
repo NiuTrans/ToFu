@@ -269,8 +269,12 @@ def test_missing_reasoning_controls_are_explained_in_real_app(browser, live_serv
         note=page.locator('#thinkingDepthSection [data-depth-notice]')
         if state == 'restore':
             expect(slider).to_be_enabled()
-            expect(slider).to_have_attribute('max', '2')
-            expect(slider).to_have_value('2')
+            # The ladder is not inflated: 'ultra' maps onto 'high' (the
+            # intersection's richest rung at-or-below it, native index 1 in
+            # ['low','high']), the thumb parks there and the label keeps the
+            # saved intent, flagged unavailable.
+            expect(slider).to_have_attribute('max', '1')
+            expect(slider).to_have_value('1')
             expect(slider).to_have_attribute('aria-valuetext', __import__('re').compile('Unavailable|不可用'))
             expect(note).to_be_hidden()
         else:

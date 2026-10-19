@@ -1,0 +1,556 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "tofu.native-agent-checkpoint/v1",
+  "type": "object",
+  "required": [
+    "format",
+    "owner_user_id",
+    "task_id",
+    "epoch",
+    "binding",
+    "next_round",
+    "tool_calls",
+    "messages",
+    "usage",
+    "round_limit",
+    "tool_limit",
+    "no_progress_limit",
+    "failure_limit",
+    "progress"
+  ],
+  "properties": {
+    "format": {
+      "enum": [
+        "tofu.native-agent-checkpoint/v1"
+      ]
+    },
+    "owner_user_id": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "task_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "epoch": {
+      "type": "string",
+      "minLength": 1
+    },
+    "binding": {
+      "type": "string",
+      "minLength": 1
+    },
+    "next_round": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "tool_calls": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "messages": {
+      "type": "array",
+      "minItems": 2,
+      "items": {
+        "type": "object"
+      }
+    },
+    "usage": {
+      "type": "array",
+      "minItems": 1
+    },
+    "round_limit": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 1
+    },
+    "tool_limit": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "no_progress_limit": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "failure_limit": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "progress": {
+      "type": "object",
+      "required": [
+        "codec",
+        "last_calls",
+        "last_world",
+        "last_evidence",
+        "last_failure",
+        "no_progress_streak",
+        "failure_streak"
+      ],
+      "properties": {
+        "codec": {
+          "enum": [
+            "sha256-token-sequence/v1"
+          ]
+        },
+        "last_calls": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 64,
+          "maxLength": 64
+        },
+        "last_world": {
+          "type": "string"
+        },
+        "last_evidence": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 64,
+          "maxLength": 64
+        },
+        "last_failure": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 64,
+          "maxLength": 64
+        },
+        "no_progress_streak": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "failure_streak": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "model_account": {
+      "type": "object",
+      "required": [
+        "tokens",
+        "last_ordinal",
+        "complete",
+        "policy"
+      ],
+      "properties": {
+        "tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "last_ordinal": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "complete": {
+          "type": "boolean"
+        },
+        "policy": {
+          "type": "object",
+          "required": [
+            "encoding",
+            "output_field",
+            "total_tokens"
+          ],
+          "properties": {
+            "encoding": {
+              "enum": [
+                "cl100k_base",
+                "o200k_base"
+              ]
+            },
+            "output_field": {
+              "enum": [
+                "max_tokens",
+                "max_completion_tokens"
+              ]
+            },
+            "total_tokens": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "deadline_unix_ms": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 18446744073709551615
+    },
+    "shared_model_account": {
+      "type": "object",
+      "required": [
+        "format",
+        "owner_user_id",
+        "root_task_id",
+        "tokens",
+        "tool_calls",
+        "control_tool_calls",
+        "model_ordinal",
+        "tool_ordinal",
+        "complete",
+        "limits",
+        "counter_policy"
+      ],
+      "properties": {
+        "format": {
+          "enum": [
+            "tofu.native-shared-account/v1"
+          ]
+        },
+        "owner_user_id": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        },
+        "root_task_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tokens": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        },
+        "tool_calls": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        },
+        "control_tool_calls": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        },
+        "model_ordinal": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        },
+        "tool_ordinal": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        },
+        "complete": {
+          "type": "boolean"
+        },
+        "limits": {
+          "type": "object",
+          "required": [
+            "max_tokens",
+            "max_tool_calls",
+            "deadline"
+          ],
+          "properties": {
+            "max_tokens": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0,
+              "maximum": 18446744073709551615
+            },
+            "max_tool_calls": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0,
+              "maximum": 18446744073709551615
+            },
+            "deadline": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false
+        },
+        "counter_policy": {
+          "type": "object",
+          "required": [
+            "encoding",
+            "output_field",
+            "wire_model"
+          ],
+          "properties": {
+            "encoding": {
+              "enum": [
+                "cl100k_base",
+                "o200k_base"
+              ]
+            },
+            "output_field": {
+              "enum": [
+                "max_tokens",
+                "max_completion_tokens"
+              ]
+            },
+            "wire_model": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "additionalProperties": false
+        },
+        "root_tokens": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        }
+      },
+      "additionalProperties": false
+    },
+    "host_fee_projection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "format",
+        "owner_user_id",
+        "tenant_id",
+        "task_id",
+        "logical_model",
+        "provider_id",
+        "wallet_user_id",
+        "reserved_micro",
+        "rounds"
+      ],
+      "properties": {
+        "format": {
+          "enum": [
+            "tofu.native-fee-checkpoint/v1"
+          ]
+        },
+        "owner_user_id": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        },
+        "tenant_id": {
+          "type": "string"
+        },
+        "task_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "logical_model": {
+          "type": "string",
+          "minLength": 1
+        },
+        "provider_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "wallet_user_id": {
+          "type": "string"
+        },
+        "reserved_micro": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        },
+        "rounds": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "round",
+              "cost"
+            ],
+            "properties": {
+              "task_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "round": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 18446744073709551615
+              },
+              "cost": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "amounts",
+                  "price",
+                  "credits"
+                ],
+                "properties": {
+                  "amounts": {
+                    "type": [
+                      "object",
+                      "null"
+                    ]
+                  },
+                  "price": {
+                    "type": "object"
+                  },
+                  "credits": {
+                    "type": "object"
+                  }
+                }
+              },
+              "public_round": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 18446744073709551615
+              }
+            }
+          }
+        },
+        "child_rounds": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "round",
+              "task_id",
+              "source_round",
+              "billable_task_id",
+              "usage",
+              "cost"
+            ],
+            "properties": {
+              "round": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 18446744073709551615
+              },
+              "task_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "source_round": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 18446744073709551615
+              },
+              "billable_task_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "usage": {
+                "type": "object"
+              },
+              "cost": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "amounts",
+                  "price",
+                  "credits"
+                ],
+                "properties": {
+                  "amounts": {
+                    "type": [
+                      "object",
+                      "null"
+                    ]
+                  },
+                  "price": {
+                    "type": "object"
+                  },
+                  "credits": {
+                    "type": "object"
+                  }
+                }
+              },
+              "route": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "logical_model",
+                  "provider_id"
+                ],
+                "properties": {
+                  "logical_model": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "provider_id": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "tools_pending": {
+      "enum": [
+        true
+      ]
+    },
+    "tool_recovery": {
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "file_tool_recovery": {
+      "type": "object",
+      "required": [
+        "format",
+        "producer_task_id",
+        "calls"
+      ],
+      "properties": {
+        "format": {
+          "const": "tofu.native-file-tool-recovery/v1"
+        },
+        "producer_task_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "calls": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": [
+              "call_id",
+              "inspection"
+            ],
+            "properties": {
+              "call_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "inspection": {
+                "type": "object"
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

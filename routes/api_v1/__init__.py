@@ -60,9 +60,13 @@ from .oauth import api_v1_oauth_bp
 from .adapter import api_v1_adapter_bp
 from .project import api_v1_project_bp
 from .project_brain import api_v1_project_brain_bp
+
+from . import project_dispatch_batches  # noqa: F401 — registers on the coordination blueprint
 from .integration import api_v1_integration_bp
 from .translate import api_v1_translate_bp
 from .artifacts import api_v1_artifacts_bp
+from .working_facts import api_v1_working_facts_bp
+from .turn_review import api_v1_turn_review_bp
 from .paper import api_v1_paper_bp
 from .paper_builds import api_v1_paper_builds_bp
 from .research import api_v1_research_bp
@@ -129,6 +133,8 @@ ALL_V1_BLUEPRINTS = [
     api_v1_integration_bp,
     api_v1_translate_bp,
     api_v1_artifacts_bp,
+    api_v1_working_facts_bp,
+    api_v1_turn_review_bp,
     api_v1_paper_bp,
     api_v1_paper_builds_bp,
     api_v1_paper_folders_bp,

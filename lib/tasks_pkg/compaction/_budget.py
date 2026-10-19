@@ -475,13 +475,14 @@ def _materialize_file_read_envelope(
     recovery=None,
     token_budget: int = TOOL_RESULT_V2_MAX_TOKENS,
 ) -> str:
-    """Fit every file identity first, then share preview space max-min fairly.
+    """Fit the file preview window, then share preview space max-min fairly.
 
     A batch read is one tool result but several independent observations.  The
     generic item fitter admits items in order and may therefore let one large
-    first file evict every later file.  This specialized projection keeps all
-    identities/statuses and binary-searches one equal per-item preview cap;
-    short previews return their unused share naturally.
+    first file evict every later file. This projection keeps identities/statuses
+    within the shared 64-item view and searches one equal per-item preview cap.
+    Full batch execution/retention is independent of the model preview window;
+    the summary declares omitted preview identities for larger batches.
     """
     from lib.tools.result_envelope import ToolResultEnvelopeV2
 
@@ -540,8 +541,8 @@ def _materialize_file_read_envelope(
         ).with_visible_bytes()
 
     # Identity/status is non-negotiable. Progressive fallbacks only remove
-    # optional detail and shorten pathological paths; at the read_files schema
-    # maximum of 20 items the last form remains far below either token ceiling.
+    # optional detail and shorten pathological paths in the bounded 64-item
+    # model preview. Complete batch observations remain outside this preview.
     minimal = _render(0, path_limit=384, include_details=True)
     if _result_tokens(minimal.to_model_text(), model) > token_budget:
         minimal = _render(0, path_limit=160, include_details=False)
@@ -550,7 +551,7 @@ def _materialize_file_read_envelope(
         minimal = _render(0, path_limit=48, include_details=False)
     if _result_tokens(minimal.to_model_text(), model) > token_budget:
         # Defensive last form for malformed non-schema callers. It still keeps
-        # one identity/status row per input instead of reverting to prefix bias.
+        # one identity/status row per preview item instead of first-file bias.
         fitted_summary = "Batch read result; re-read named files as needed."
         minimal = _render(0, path_limit=24, include_details=False)
 
@@ -582,7 +583,7 @@ def _store_tool_result_artifact(content: str, *, user_id: int,
     if int(user_id or 0) <= 0:
         return ""
     try:
-        from lib.tool_result_artifacts import ToolResultArtifactRepository
+        from lib.tool_results.tool_result_artifacts import ToolResultArtifactRepository
         effective_now = int(observed_at_ms or 0)
         from lib.tools.result_value import TrustedResultText, persist_result
         if isinstance(content, TrustedResultText) and content.canonical is not None:
@@ -797,8 +798,10 @@ def _budget_tool_result_view_v2(tool_name: str, content: str, *, user_id: int,
         if len(file_items) > (0 if recovery_policy == "source" else 1):
             items = file_items
             summary = (
-                f"read_files returned {len(file_items)} file results. Every "
-                "file is represented in items with a bounded preview; "
+                f"read_files returned {len(file_items)} file results. "
+                + ("Every file is represented in items with a bounded preview; "
+                   if len(file_items) <= 64 else
+                   "up to 64 file results are shown in this preview window; ")
                 + (
                     "rerun read_files using recovery.arguments with narrower "
                     "per-file ranges for omitted source evidence."
@@ -833,8 +836,11 @@ def _budget_tool_result_view_v2(tool_name: str, content: str, *, user_id: int,
     if needs_recovery and not artifact_ref and recovery is None:
         if preserve_file_identities:
             summary = (
-                f"read_files returned {len(items)} file results; every file is "
-                "listed with a bounded preview. Full result unavailable; "
+                f"read_files returned {len(items)} file results; "
+                + ("every file is listed with a bounded preview. "
+                   if len(items) <= 64 else
+                   "up to 64 file results are shown in this preview window. ")
+                + "Full result unavailable; "
                 "rerun with narrower per-file ranges."
             )
         else:
@@ -922,6 +928,32 @@ def enforce_round_aggregate_budget(
         total_chars -= saved
         tool_results[tc_id] = (persisted, tool_name, tool_use_id)
         logger.info('[AggregateBudget] Persisted %s result (%s saved), '
+                    'new total %s',
+                    tool_name, _human_size(saved), _human_size(total_chars))
+
+    # Exempt tools (read_files / load_skill) keep their L0 re-call-avoidance
+    # pass-through below 2x SOURCE_TOOL_RESULT_V2_MAX_TOKENS.  Beyond that an
+    # exempt result alone exceeds the reconstructible-source round allowance
+    # (~48k tokens), so it stops riding the hot tail and moves behind the v2
+    # artifact envelope: persist the full content and replace it with a
+    # bounded envelope that names the artifact ref for read_tool_artifact.
+    exempt_limit_chars = SOURCE_TOOL_RESULT_V2_MAX_TOKENS * 2 * 4
+    exempt_candidates = [
+        (tc_id, content, tool_name, tool_use_id)
+        for tc_id, (content, tool_name, tool_use_id) in tool_results.items()
+        if isinstance(content, str)
+        and tool_name in _BUDGET_EXEMPT_TOOLS
+        and not content.startswith('[Persisted to:')
+        and len(content) > exempt_limit_chars
+    ]
+    exempt_candidates.sort(key=lambda x: len(x[1]), reverse=True)
+
+    for tc_id, content, tool_name, tool_use_id in exempt_candidates:
+        persisted = _persist_to_disk(content, tool_name, tool_use_id, conv_id)
+        saved = len(content) - len(persisted)
+        total_chars -= saved
+        tool_results[tc_id] = (persisted, tool_name, tool_use_id)
+        logger.info('[AggregateBudget] Persisted exempt %s result (%s saved), '
                     'new total %s',
                     tool_name, _human_size(saved), _human_size(total_chars))
 

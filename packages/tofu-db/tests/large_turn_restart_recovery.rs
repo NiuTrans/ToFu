@@ -4,7 +4,7 @@
 use serde_json::{json, Value};
 use tofu_db::authority::AuthorityDatabase;
 use tofu_db::generated_storage_operations::STORAGE_SCHEMA_VERSION;
-use tofu_db::generated_tofudb_ir::{MAX_TRANSACTION_IR_LITERAL_BYTES, MAX_TURN_SNAPSHOT_BYTES};
+use tofu_db::generated_tofudb_ir::{MAX_LEGACY_DOCUMENT_BYTES, MAX_TURN_SNAPSHOT_BYTES};
 use tofu_db::protocol::{NegotiatedProtocol, Request, PROTOCOL_VERSION};
 use tofu_db::semantic::{admit_request, AuthenticatedScope};
 use tofu_db::semantic_executor::execute_admitted_request;
@@ -46,7 +46,7 @@ fn execute(
     serde_json::from_slice(&response).unwrap()
 }
 
-fn assert_restart_recovery(append_bytes: usize, crosses_live_write_bound: bool) {
+fn assert_restart_recovery(append_bytes: usize, crosses_eight_mib_fixture: bool) {
     let directory = tempfile::tempdir().unwrap();
     let mut database = AuthorityDatabase::initialize(directory.path()).unwrap();
     let pair = execute(
@@ -130,8 +130,8 @@ fn assert_restart_recovery(append_bytes: usize, crosses_live_write_bound: bool) 
     assert!(before["projection"]["content"].as_str() == Some(expected_content.as_str()));
     let snapshot_bytes = serde_json::to_vec(&before).unwrap().len();
     assert_eq!(
-        snapshot_bytes > MAX_TRANSACTION_IR_LITERAL_BYTES,
-        crosses_live_write_bound,
+        snapshot_bytes > MAX_LEGACY_DOCUMENT_BYTES,
+        crosses_eight_mib_fixture,
         "snapshot size: {snapshot_bytes} bytes"
     );
     assert!(snapshot_bytes < MAX_TURN_SNAPSHOT_BYTES);

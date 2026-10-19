@@ -5,8 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from lib.orchestration.run_lifecycle_policy import RunLifecycle
-from lib.task_replay import TASK_REPLAY_CAUGHT_UP_FIELD, TaskReplayPage
-from lib.task_replay import safe_replay_cursor
+from lib.task_replay.task_replay import TASK_REPLAY_CAUGHT_UP_FIELD, TaskReplayPage
+from lib.task_replay.task_replay import safe_replay_cursor
 
 
 @dataclass(frozen=True)

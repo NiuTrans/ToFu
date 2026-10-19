@@ -127,6 +127,89 @@ class TestGGUFInspection:
         assert r['max_context'] == 40960
         assert r['served_name'] == 'qwen3-8b-q4_k_m'
 
+    def test_metadata_above_old_count_key_and_string_limits(self, tmp_path):
+        path = _write_gguf(tmp_path / 'large.gguf', [
+            ('ignored.' + 'k' * 1025, 'x' * ((1 << 20) + 1)),
+            *[(f'ignored.{i}', i) for i in range(10001)],
+            ('general.architecture', 'qwen3'),
+            ('qwen3.context_length', 65536),
+        ])
+        result = inspect_model_path(path)
+        assert result['architecture'] == 'qwen3'
+        assert result['max_context'] == 65536 and 'error' not in result
+
+    @pytest.mark.parametrize('element_type', [0, 8])
+    def test_large_array_skips_to_following_metadata(self, tmp_path, element_type):
+        path = tmp_path / 'array.gguf'
+        key = b'ignored.array'
+        prefix = (b'GGUF' + struct.pack('<IQQ', 3, 0, 2)
+                  + struct.pack('<Q', len(key)) + key
+                  + struct.pack('<IIQ', 9, element_type, 1000001))
+        following = tmp_path / 'following.gguf'
+        _write_gguf(following, [('general.architecture', 'qwen3')])
+        with path.open('wb') as output:
+            output.write(prefix)
+            # A string array of empty strings still has a length per item.
+            output.write(b'\0' * (1000001 * (8 if element_type == 8 else 1)))
+            output.write(following.read_bytes()[24:])
+        result = inspect_model_path(str(path))
+        assert result['architecture'] == 'qwen3' and 'error' not in result
+
+    def test_nested_arrays_do_not_depend_on_python_recursion_limit(self, tmp_path):
+        path = tmp_path / 'nested.gguf'
+        key = b'ignored.nested'
+        data = (b'GGUF' + struct.pack('<IQQ', 3, 0, 2)
+                + struct.pack('<Q', len(key)) + key + struct.pack('<I', 9)
+                + struct.pack('<IQ', 9, 1) * 2048
+                + struct.pack('<IQ', 0, 1) + b'x')
+        following = tmp_path / 'following.gguf'
+        _write_gguf(following, [('general.architecture', 'qwen3')])
+        path.write_bytes(data + following.read_bytes()[24:])
+        assert inspect_model_path(str(path))['architecture'] == 'qwen3'
+
+    @pytest.mark.parametrize('value', [
+        struct.pack('<IQ', 8, (1 << 64) - 1),
+        struct.pack('<IIQ', 9, 0, (1 << 64) - 1),
+        struct.pack('<IIQ', 9, 8, (1 << 64) - 1),
+        struct.pack('<IIQ', 9, 9, (1 << 64) - 1),
+        struct.pack('<I', 12) + b'x',
+    ])
+    def test_declared_value_past_eof_returns_structured_error(self, tmp_path, value):
+        path = tmp_path / 'truncated.gguf'
+        key = b'ignored'
+        path.write_bytes(b'GGUF' + struct.pack('<IQQ', 3, 0, 1)
+                         + struct.pack('<Q', len(key)) + key + value)
+        result = inspect_model_path(str(path))
+        assert result['format'] == 'unknown' and 'EOF' in result['error']
+
+    def test_declared_metadata_count_past_eof(self, tmp_path):
+        path = tmp_path / 'count.gguf'
+        path.write_bytes(b'GGUF' + struct.pack('<IQQ', 3, 0, (1 << 64) - 1))
+        result = inspect_model_path(str(path))
+        assert result['format'] == 'unknown' and 'EOF' in result['error']
+
+    def test_truncated_selected_string_is_not_adopted(self, tmp_path):
+        path = tmp_path / 'short.gguf'
+        key = b'general.architecture'
+        path.write_bytes(b'GGUF' + struct.pack('<IQQ', 3, 0, 1)
+                         + struct.pack('<Q', len(key)) + key
+                         + struct.pack('<IQ', 8, 100) + b'qwen3')
+        assert inspect_model_path(str(path))['format'] == 'unknown'
+
+    def test_attention_dimensions_survive_late_architecture_field(self, tmp_path):
+        path = _write_gguf(tmp_path / 'dimensions.gguf', [
+            ('qwen3.block_count', 32), ('qwen3.embedding_length', 4096),
+            ('qwen3.attention.head_count', 32), ('qwen3.attention.head_count_kv', 8),
+            ('qwen3.attention.key_length', 128), ('qwen3.attention.value_length', 128),
+            ('ignored.block_count', 999), ('general.architecture', 'qwen3'),
+        ])
+        result = inspect_model_path(path)
+        assert result['attention_dimensions'] == {
+            'block_count': 32, 'embedding_length': 4096,
+            'attention.head_count': 32, 'attention.head_count_kv': 8,
+            'attention.key_length': 128, 'attention.value_length': 128,
+        }
+
     def test_bad_magic(self, tmp_path):
         f = tmp_path / 'fake.gguf'
         f.write_bytes(b'NOTGGUF-content')
@@ -158,3 +241,12 @@ class TestUnknownPaths:
         r = inspect_model_path(str(f))
         assert r['format'] == 'unknown'
         assert '无法识别' in r['error']
+
+
+def test_operator_override_is_captured_in_hardware_snapshot(tmp_path, monkeypatch):
+    from lib.local_serve import _probe
+    monkeypatch.setenv('OLLAMA_NUM_PARALLEL', '7')
+    monkeypatch.setattr(_probe, '_probe_gpus', lambda timeout: [])
+    snapshot = _probe.probe_hardware(disk_path=str(tmp_path))
+    monkeypatch.setenv('OLLAMA_NUM_PARALLEL', '9')
+    assert snapshot['ollama_env'] == {'OLLAMA_NUM_PARALLEL': '7'}

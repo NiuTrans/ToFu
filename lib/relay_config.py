@@ -43,7 +43,7 @@ The two questions a relay operator answers:
     Does Tofu act as a **paying intermediary** (we supply the model
     key, meter token usage, and charge the user's credit wallet) — or
     is it an **agent-only** relay where each user brings their OWN model
-    endpoint (BYO provider, see :mod:`lib.byo_providers`) and we never
+    endpoint (BYO provider, see :mod:`lib.byo.byo_providers`) and we never
     touch money?
 
     * ``true``  (default) → full relay. Chat requests reserve/settle

@@ -14,7 +14,7 @@ logger = get_logger(__name__)
 def _classify_exception(exc: BaseException) -> str:
     """Map an exception to a `kind` string.
 
-    Recognizes both the typed exceptions in ``lib.llm_errors`` and the
+    Recognizes both the typed exceptions in ``lib.llm.llm_errors`` and the
     string-shaped errors that bubble up from the dispatch layer.
     """
     # Local durability failures must win before upstream timeout heuristics.
@@ -48,7 +48,7 @@ def _classify_exception(exc: BaseException) -> str:
 
     if _Abort is not None and isinstance(exc, _Abort):
         return 'aborted'
-    from lib.llm_errors import (
+    from lib.llm.llm_errors import (
         ProviderToolCallFloodError, RequestTransportError,
         SubscriptionLoginRequiredError, SubscriptionCredentialUnavailableError,
     )

@@ -53,7 +53,6 @@ const runtimeActions = Object.freeze({
   _openExternalAsset,
   _openImageFullscreen,
   _recoverOfflineConversations,
-  _removeReplyQuote,
   _safeClipboardWrite,
   _swarmCopyAgentId,
   _swarmToggleClass,
@@ -159,6 +158,9 @@ const ImageGenerationComposerState = Object.freeze({
 // avoids feature-registry override snapshots while keeping mutation funnels in
 // the retained state owner.
 const ProjectPresentationShellState = Object.freeze({
+
+  beginProjectMutation() { return _conversationProjectController.beginMutation(); },
+  captureProjectStatus,
   get activeConversationId() { return activeConvId; },
   set activeConversationId(value) {
     activeConvId = value == null ? null : String(value);

@@ -17,7 +17,7 @@ import pytest
 from lib.storage.errors import StorageError
 from lib.storage.client import StorageClient
 from lib.storage.protocol import PROTOCOL_VERSION, recv_frame
-from lib.storage_sidecar.server import create_server
+from lib.storage_authority_sql.server import create_server
 
 pytestmark = pytest.mark.unit
 
@@ -25,7 +25,7 @@ TOKEN = 't' * 32
 
 
 def test_idle_heap_trim_is_thresholded_cooled_and_measured():
-    from lib.storage_sidecar.server import _IdleHeapTrimmer
+    from lib.storage_authority_sql.server import _IdleHeapTrimmer
 
     now = [100.0]
     rss_samples = iter((600, 400, 700, 500))
@@ -60,7 +60,7 @@ def test_idle_heap_trim_is_thresholded_cooled_and_measured():
 
 
 def test_idle_heap_trim_skips_below_threshold():
-    from lib.storage_sidecar.server import _IdleHeapTrimmer
+    from lib.storage_authority_sql.server import _IdleHeapTrimmer
 
     trim_calls = []
     trimmer = _IdleHeapTrimmer(
@@ -171,7 +171,7 @@ def test_rpc_burst_starts_every_handler_beyond_legacy_capacity_hint(monkeypatch)
 
 
 def test_unpublished_worker_failure_releases_charge_and_classifies_no_dispatch(server, monkeypatch):
-    from lib.storage_sidecar import server as owner
+    from lib.storage_authority_sql import server as owner
     request, peer = socket.socketpair()
     original = owner.threading.Thread.start
     def fail(thread):
@@ -190,7 +190,7 @@ def test_unpublished_worker_failure_releases_charge_and_classifies_no_dispatch(s
 
 
 def test_started_worker_keeps_cleanup_ownership_if_start_raises(server, monkeypatch):
-    from lib.storage_sidecar import server as owner
+    from lib.storage_authority_sql import server as owner
     from lib.storage.protocol import send_frame
     request, peer = socket.socketpair()
     peer.settimeout(3)
@@ -287,7 +287,7 @@ def test_fragmented_response_finishes_before_bounded_handler_release(server,monk
 
 def test_client_that_keeps_reply_socket_open_cannot_retain_handler(server,monkeypatch):
     from lib.storage.protocol import send_frame
-    from lib.storage_sidecar import server as server_module
+    from lib.storage_authority_sql import server as server_module
     original=server_module._StorageHandler._wait_for_peer_close
     def bounded(handler):
         handler.request.settimeout(0.05)

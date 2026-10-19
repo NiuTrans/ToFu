@@ -11,8 +11,7 @@
       "capabilities": [
         "text",
         "vision",
-        "thinking"
-      ],
+        "thinking", "cheap"],
       "context_window": 500000
     },
     {

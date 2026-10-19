@@ -193,7 +193,7 @@ class ModelsBYOSurfaceTest(unittest.TestCase):
         async def go():
             import os
 
-            import lib.http_client as http_client
+            import lib.http_transport.client as http_client
             from lib.model_routing import ModelRoutingRepository, OwnerBoundary
 
             cli = self.app.test_client()

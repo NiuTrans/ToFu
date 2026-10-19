@@ -97,12 +97,12 @@ def test_preparation_retries_then_freezes_payload_and_checks_identity():
         prepare_terminal_persistence(value, content='result', content_epoch=1)
 
 
-@pytest.mark.parametrize('payload', [[], {'number': float('nan')}, {'large': 'x' * (1024 * 1024)}])
-def test_preparation_rejects_non_object_non_json_and_oversized_payload(payload):
+@pytest.mark.parametrize('payload', [[], {'number': float('nan')}, {'number': float('inf')}, {'unsupported': object()}])
+def test_preparation_rejects_non_object_and_non_json_payload(payload):
     from lib.agent_core.terminal_delivery import prepare_terminal_persistence
     value = task()
     bind_terminal_delivery(value, lambda _: None, persistence_preparer=lambda *args: payload)
-    with pytest.raises(ValueError):
+    with pytest.raises((ValueError, TypeError)):
         prepare_terminal_persistence(value, content='result', content_epoch=0)
 
 
@@ -113,3 +113,21 @@ def test_recursive_preparation_is_retryable():
         prepare_terminal_persistence(value, content='result', content_epoch=0))
     with pytest.raises(RuntimeError, match='recursive'):
         prepare_terminal_persistence(value, content='result', content_epoch=0)
+
+
+def test_complete_large_terminal_payload_is_frozen_and_isolated_from_caller_mutation():
+    from lib.agent_core.terminal_delivery import prepare_terminal_persistence
+    value = task()
+    original = {'frozen': '完整终态输入 🧪' * 70000}
+    calls = []
+    def prepare(*args):
+        calls.append(args)
+        return original
+    bind_terminal_delivery(value, lambda _: None, persistence_preparer=prepare)
+    result = prepare_terminal_persistence(value, content='result', content_epoch=1)
+    assert result == original
+    result['frozen'] = 'caller mutation'
+    assert prepare_terminal_persistence(value, content='result', content_epoch=1) == original
+    assert len(calls) == 1
+    with pytest.raises(ValueError, match='input changed'):
+        prepare_terminal_persistence(value, content='changed', content_epoch=1)

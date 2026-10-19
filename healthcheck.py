@@ -451,7 +451,7 @@ tl_checks = [
     ("lib.browser.queue", ["wait_for_commands", "mark_poll", "resolve_batch",
                            "resolve_command", "is_extension_connected", "send_browser_command"]),
     # search/fetch were extracted into the standalone tofu_search package
-    # (consumed via lib/search_bridge.py); the public entrypoint lives there.
+    # (consumed via lib/search/search_bridge.py); the public entrypoint lives there.
     ("tofu_search",       ["perform_web_search"]),
     ("lib.pricing",       ["get_pricing_data"]),
     ("lib.tasks_pkg.manager", ["chat_task_runtime", "create_task", "cleanup_old_tasks"]),
@@ -575,7 +575,7 @@ required_tables = [
 ]
 
 try:
-    from lib.storage_sidecar.schema import declared_table_names
+    from lib.storage_authority_sql.schema import declared_table_names
     _defined_tables = declared_table_names()
 except Exception as e:
     logger.warning('Failed to load Sidecar schema catalogue: %s', e, exc_info=True)

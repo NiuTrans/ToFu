@@ -504,14 +504,15 @@ def test_client_log_relay_manual_flush_pagehide_and_kill_switch_cleanup():
           visibilityListeners.size === 0 && requests[0].payload.entries.length === 1;
         console.warn('do not recurse while relay request is live');
         const originalWins = originalCalls === 3 &&
-          runtimeScope.__clientLogRelay._buf.length === 0;
+          runtimeScope.__clientLogRelay._buf.length === 1;
         requests[0].resolve({ok:true}); await settle();
-        const settled = timers.size === 0 && visibilityListeners.size === 0;
+        const settled = timers.size === 1 && visibilityListeners.size === 1;
 
         console.error('manual');
         runtimeScope.__clientLogRelay.flush();
         const manual = requests.length === 2 && timers.size === 0 &&
-          visibilityListeners.size === 0;
+          visibilityListeners.size === 0 && requests[1].payload.entries.length === 2 &&
+          requests[1].payload.entries[0].msg === 'do not recurse while relay request is live';
         requests[1].resolve({ok:true}); await settle();
 
         enabled = '0';

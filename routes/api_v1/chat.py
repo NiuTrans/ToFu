@@ -49,7 +49,7 @@ from lib.idempotency import idempotent_post
 from lib.ids import short_id
 from lib.log import audit_log, get_logger
 from lib.openapi import api_meta
-from lib.rate_limit_api import record_tokens
+from lib.rate_limit.rate_limit_api import record_tokens
 from lib.usage_tracker import record as record_usage
 from lib.request_parser import (
     async_parse_body, optional_bool, optional_dict, optional_str, require_list,
@@ -221,8 +221,13 @@ def _sse_event(payload) -> str:
 
 
 def _try_acquire_sse_slot(auth):
-    """Account for a principal-owned connection without a quota response."""
-    return sse_limiter.try_acquire(principal_key(auth)), None
+    """Account for a principal-owned connection; refuse when the cap is hit."""
+    token = sse_limiter.try_acquire(principal_key(auth))
+    if token is None:
+        return None, api_error(
+            'Too many concurrent streams for this principal; retry shortly.',
+            status=503, error_kind='overloaded', retry_after=5)
+    return token, None
 
 
 def _settle_streaming_billing(task, *, user_id: str, model: str) -> None:
@@ -260,7 +265,7 @@ async def _stream_generator(task, model: str, requested_id: str,
     cursor = 0
     _billed = False
     task_id = task.get('id') or ''
-    from lib.task_replay import task_memory_replay_page
+    from lib.task_replay.task_replay import task_memory_replay_page
 
     try:
       while True:

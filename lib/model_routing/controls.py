@@ -15,7 +15,6 @@ from .routing import RouteCandidateCompiler, RoutePolicy
 
 from .operations import CHAT_PROTOCOLS
 
-_MAX_CONTROLS = 8192
 
 
 def _choices(profile: Mapping) -> tuple[str, bool | None, tuple[str, ...]]:
@@ -152,6 +151,4 @@ def reasoning_controls(document: Mapping) -> list[dict]:
                        'depths': depths,
                        **({'restoration': reasoning_depth_restoration(depths)}
                           if available and support == 'supported' and len(depths) > 1 else {})})
-        if len(result) >= _MAX_CONTROLS:
-            break
     return result

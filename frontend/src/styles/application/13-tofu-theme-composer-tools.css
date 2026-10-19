@@ -1,5 +1,5 @@
 /* ══════════════════════════════════════════════════════════
-   INPUT — Warm Reading Room composer
+   INPUT — Shared conversation composer
    A calm paper box: soft border, diffuse shadow, quiet focus
    ring. No controller frame, pet mascot, sparkles, D-pad or
    speech-bubble tail — all decorative pseudo-elements retired.
@@ -10,23 +10,6 @@
   box-shadow:none;
   position:relative;
   padding-top:var(--space-2)
-}
-[data-theme="tofu"] .input-box{
-  /* Item 1 — adopt the project bar's "gallery-hung frame" vocabulary: one slim
-     warm frame line + soft two-layer elevation (a tight contact shadow + a
-     feathered ambient halo), 14px radius. Kinship with .project-bar (styles.css
-     :11931), NOT a re-added game panel. STATIC — no animation on the box. */
-  border:1.5px solid rgba(140,116,80,0.34);
-  background:#FFFDF9;
-  border-radius:14px;
-  box-shadow:
-    0 1px 2px rgba(74,58,36,0.10),
-    0 8px 22px -8px rgba(96,76,48,0.22);
-  isolation:auto;
-  overflow:visible;
-  transition:border-color 0.2s ease,box-shadow 0.2s ease;
-  position:relative;
-  z-index:2
 }
 /* Decorative pseudo-elements retired (pet mascot / grip wings) */
 [data-theme="tofu"] .input-box::before,
@@ -51,26 +34,8 @@
   content:none;
   display:none
 }
-/* ── Focus state: quiet accent ring, no lift ── */
-[data-theme="tofu"] .input-box:focus-within{
-  /* Item 3 — warm focus echoing the bar's hover-warmth: deepen the warm frame,
-     widen the ambient shadow a touch, and add a soft warm-amber ring (the bar's
-     #C4956A family). NO lift, NO animation; the glow lives on the box FRAME
-     (box-shadow OUTSIDE the border) — never a layer behind the live text. */
-  border-color:rgba(140,116,80,0.62);
-  box-shadow:
-    0 1px 2px rgba(74,58,36,0.10),
-    0 10px 26px -8px rgba(96,76,48,0.28),
-    0 0 0 3px rgba(196,149,106,0.22);
-  transform:none
-}
-/* ── Conversation strip: the composer card's own top band ──
-   No frame of its own — the .input-box card supplies the paper, border and
-   elevation; the band is set off by one warm hairline, softer than the
-   card's outer frame. */
-[data-theme="tofu"] .conv-status-strip{
-  box-shadow:inset 0 -1px 0 rgba(140,116,80,0.22);
-}
+/* Conversation strip uses the composer card's single hairline. */
+[data-theme="tofu"] .conv-status-strip{box-shadow:inset 0 -1px 0 var(--border-light)}
 /* Quiet, static scene echo in the toolbar tray, never behind typing. */
 @media(min-width:801px){
   [data-theme="tofu"] .input-box .input-actions{border-radius:0 0 12.5px 12.5px}
@@ -78,22 +43,6 @@
   [data-theme="tofu"] .project-bar[data-decor="pool"]:not([style*="none"]) ~ .input-box .input-actions{background:#edf1ef}
   [data-theme="tofu"] .project-bar[data-decor="sky"]:not([style*="none"]) ~ .input-box .input-actions{background:#f5ede8}
 }
-/* ── Textarea ── */
-[data-theme="tofu"] .input-box textarea{
-  min-height:64px;
-  max-height:260px;
-  padding:var(--space-4) var(--space-5) 14px;
-  font-size:var(--font-size-xl);
-  line-height:var(--leading-body)
-}
-[data-theme="tofu"] .input-box textarea::placeholder{
-  font-family:var(--sans-body);
-  color:var(--text-tertiary);
-  font-size:var(--font-size-lg);
-  font-weight:400;
-  letter-spacing:0
-}
-
 /* ══════════════════════════════════════════════════════════════
    Tofu Code Block — clean editorial code surface
    (mono kept for actual code text; cartridge frame/scanline/bevel gone)

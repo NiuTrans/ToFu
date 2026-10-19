@@ -8,7 +8,7 @@ and PDF validation determine success. PDF, normalized SyncTeX and source
 manifest share one immutable build receipt. Location reads verify those
 artifacts and never recompile or read the changed source tree.
 
-Source scans consume directory entries incrementally within the scan budget.
+Source scans consume all directory entries incrementally without a private scan quota.
 The copied manifest is checked against both file content and a second inventory
 of file identities and membership; directory signatures also detect additions
 behind an in-progress scan. Missing or inaccessible dependencies cannot become
@@ -43,16 +43,26 @@ Verify with `tests/paper/test_paper_build_*.py`,
 
 ## Native compiler budget
 
-`process.py` supervises both TeX commands and toolchain version probes. The
-launch probe derives `TOFU_PAPER_BUILD_COMPILE_MAX_MIB`: 256..512 MiB in personal
-mode, 256 MiB on observation failure, with a 1 GiB hard ceiling. This covers
-observed aggregate RSS of the wrapper, latexmk, engines and bibliography tools;
-at most 16 live processes belong to one command. POSIX descendants inherit an
-address-space ceiling twice the RSS budget, CPU time and file-size limits.
-The parent samples aggregate RSS/count and cancels on pressure; these samples
-are observations, not an allocation-level aggregate memory guarantee. Windows
-commands wait for admission into a Job Object with aggregate memory/count and
-kill-on-close limits before executing.
+`process.py` supervises both TeX commands and toolchain version probes. By default it observes aggregate RSS and process counts without imposing a
+private memory ceiling or a 16-process refusal. An explicitly configured
+positive `TOFU_PAPER_BUILD_COMPILE_MAX_MIB` remains an operator RSS ceiling;
+unset or zero means no private ceiling, with no 1 GiB upper clamp. POSIX
+address-space limits apply only with that explicit override. Existing CPU
+deadlines and file-size policies remain independently owned. Windows uses
+kill-on-close Job ownership and adds a memory ceiling only when configured.
+
+**Problem:** launch-derived 256..512 MiB budgets and a fixed process count
+killed healthy compiler trees while the machine could serve them. **Decision:**
+retain lifecycle ownership, usage observations and explicit operator choices,
+and let actual compiler demand proceed. **Alternatives considered:** raising
+the constants repeats the same failure at a different document size; dropping
+process ownership would leak descendants on cancellation or parent death.
+Measurements in `tests/paper/test_paper_build_process.py` cover a 1 GiB
+virtual mapping, two compiler children retaining over 256 MiB aggregate RSS,
+and 20 concurrent child processes, followed by joined cleanup. An isolated
+Linux measurement on 2026-10-13 completed with 482,496,512 peak RSS bytes and
+24 observed processes, with worker IPC reclaimed. Windows/macOS execution
+remains unverified on this host.
 
 The worker cooperatively retires its descendants before returning. Linux uses
 subreaper ownership to reap children orphaned by an exiting compiler. Parent
@@ -108,12 +118,14 @@ inconsistent or over-budget PDFs fail with a typed error; a failure preserves th
 previous successful build. Structural validation does not prove visual fidelity.
 
 The existing admitted build owns one validator child, with no resident pool.
-The launch probe derives `TOFU_PAPER_BUILD_VALIDATION_MAX_MIB`: 128..256 MiB for
-personal use, 128 MiB on probe failure, with a 512 MiB hard ceiling. The contract
-caps validation at 15 seconds, 1,000 pages, 100,000 objects, 250,000 content
-operations, 32 MiB per decoded stream and 128 MiB decoded overall. Native limits
-bound allocation and runtime; the parent monitors RSS, cancellation and expiry,
-then kills and reaps unfinished work. The temporary report is at most 2 KiB and
+Validation has no default private memory or wall-clock ceiling.
+`TOFU_PAPER_BUILD_VALIDATION_MAX_MIB` is an explicit nonnegative operator override:
+zero/unset disables it, and positive values are honored without an upper clamp.
+A positive caller timeout is passed exactly to native and parent supervision.
+Cancellation still kills/reaps unfinished work. Linux binds worker lifetime to
+its launching PID with parent-death signaling; other platforms monitor the
+exact owner lifetime inside the active worker. Page/object/decoded counts have
+no source admission ceilings. The temporary report is at most 2 KiB and
 is removed on every exit. Linux memory measurements exclude pre-exec inherited
 high-water usage. Frozen Desktop executables dispatch the same worker before
 server, tray or application-data startup, without requiring a console.
@@ -200,11 +212,11 @@ owner isolation) and `tests/paper/test_paper_build_sources.py` (safe input reads
 
 `frontend/src/features/paper/pdf-reader.ts` owns independent reader instances;
 `pdf-viewer.ts` adapts Paper-mode actions and metadata. PDF.js and its matching
-worker load lazily. The reader bounds page shells, resident canvases, per-page
-raster bytes, text extraction, search results, outlines and links through the
-same generated contract. Canvas accounting includes a replacement document
+worker load lazily. The reader accepts the complete page set, searches complete
+page text and retains all matching results, outline entries and valid links.
+Resident canvases and per-page raster bytes follow the generated render contract. Canvas accounting includes a replacement document
 before publication: 64 MiB overall and at most 16 MiB per page. The active
-document's page window contains at most eight shells. DPR rasterization stays
+document's render window retains at most eight canvases. DPR rasterization stays
 within the per-page byte ceiling; deeply
 zoomed pages may still be downsampled to remain within that budget.
 
@@ -749,3 +761,210 @@ preceded it (no rlimits, no PDF validation, no receipts) are the
 counterexample recorded in
 [DEFENSIVE_PATTERNS.md](DEFENSIVE_PATTERNS.md).
 
+
+## Complete source snapshots
+
+**Problem:** archive/project intake accepted larger sources while the compiler
+refused 512-plus source files, 32 MiB files, 64 MiB trees or 4,096 scanned
+entries. Explicit source records and browser preview changes repeated these
+ceilings. **Decision:** retire source-count/byte/scan limits from the canonical
+contract and generated bindings. Authorized source inventories, include graphs
+and explicit records retain complete inputs. Filesystem copying and its second
+identity/hash pass stream through the existing descriptor-validated reader in
+1 MiB chunks; snapshots do not materialize whole file byte arrays. Chunk callbacks
+check cancellation, and the existing source-mutation retry/fault seams remain.
+Sources become read-only only after successful verification. Browser preview
+observes complete committed change lists instead of keeping 512-entry prefixes
+or tails. Output traversal also removes the shared obsolete entry-count gate;
+its separate output-byte policy remains.
+**Alternatives considered:** raising limits rejects larger sources later;
+trimming the dependency graph creates invalid builds; reading whole large
+files duplicates their bytes in RAM; removing validation to speed copying
+weakens the authorized-root and immutable-source boundary.
+
+Measurement freezes 1,104 files / 68,171,838 bytes, including a 65 MiB file,
+with exact digests and read-only output. Source records retain 1,102 files and
+a multibyte input above former byte budgets; scans reach dependencies after
+4,101 ignored entries. Browser/Node checks retain all 1,101 committed changes.
+Snapshot metadata grows with the actual inventory and remains owned by the
+build lifecycle. These are source/preparation checks, not a large-document
+TeX throughput benchmark; compiler time/memory, discovery and artifact policies
+remain separate audit work.
+
+## Complete authorized paper discovery
+
+**Problem:** discovery stopped at fixed root/depth/entry/source-byte/candidate
+quotas, then storage and browser projection separately limited the result to
+64 candidates. **Decision:** traverse every authorized local root and supported
+source iteratively, read complete candidate text through the existing safe
+reader, and resolve/project the complete ordered list. Retire those discovery
+resource fields and array bounds from canonical/generated contracts and native
+request admission. Directory iterators close within each visit; pending
+directory metadata grows with actual demand. Existing ignored tool trees,
+symlink denial, selection CAS, owner binding and explicit remote capability
+authority remain. Scan/I/O failures still report incomplete discovery and never
+produce a guessed singleton selection.
+**Alternatives considered:** larger quotas lose later candidates again; keeping
+only a selected prefix hides valid alternatives; unlimited recursive call
+depth can fail on a valid hierarchy; weakening root/path validation grants
+unauthorized sources.
+
+Verification returns 72 real candidates after 4,101 ignored entries and a
+40-directory hierarchy, traverses 33 owned roots, and reads a 17 MiB main
+source. Native registration/reopen resolves all 71 identities in order and
+returns only absent identities for a foreign owner. Browser selection retains
+71 choices and can select the last one. These counts measure admitted demand,
+not process RSS or source throughput. Candidate text still materializes per
+file; format/path and remaining compiler/artifact policies remain under audit.
+
+Research source acceptance — Problem: Research normalization/digests kept only
+24 source files, clipped file/tree text at 65,536/393,216 characters and rejected
+640-KiB workspaces; native workspace storage rejected 8 MiB. Decision: source
+normalization and digests cover every complete source, while workspace CAS and
+owner-bound blob storage retain the full user document without private byte
+admission limits. Source path/type/duplicate validation and server-written
+compilation proofs remain mandatory. The 640-KiB research observation-page target
+continues to govern paged history, not source acceptance. Workspace HTTP bodies
+use the existing owned file-backed transport without the default 50-MiB cap.
+Alternatives: raising caps fails later; clipped source digests can certify a
+different manuscript; changing storage backends weakens the configured authority.
+Verification stores 1,102 source files including 9,437,184 UTF-8 bytes in one
+source, reloads exact content/hashes and verifies a late-file edit changes the
+digest. Native tests retain/reopen a 9-MiB source and enforce CAS/owner isolation.
+These measure completeness and retained bytes, not constant parser RSS.
+
+
+Compiler temporary output demand — Problem: a private 128 MiB native file
+limit and aggregate directory limit killed otherwise valid compiler work.
+Decision: default compiler supervision imposes neither limit. `run_command`
+accepts an explicit nonnegative file limit: zero/omitted disables that override,
+and positive values reach the native worker exactly. Output traversal continues
+to reject nonregular entries. Deadlines, cancellation, joined process retirement
+and explicit RSS limits retain their contracts. Publication/retention and PDF
+validation have separate limits under continuing audit; this change does not
+claim complete large-artifact publication. Alternative rejected: raising the
+default recreates failures for larger compilations. Real subprocess tests write
+and hash 129 MiB, observe an explicit 257 MiB native limit without clamping, and
+verify that an explicit 1 MiB override still stops a larger write.
+
+
+Complete paper artifact publication — Problem: a 64 MiB file ceiling and
+128 MiB aggregate ceiling rejected already generated results in metadata,
+remote bundles, retained storage and native receipts. Decision: remove both
+source quotas across the shared schema, Python/native admission and Overleaf
+export; full-file readers no longer reject at the old size. MCP read offsets
+have no private file-size ceiling. Preserve bounded transfer chunks, digest
+and length verification, ownership, success-only publication and rollback.
+Reclamation steps scale with the accepted build's actual part count; each GC
+transaction remains bounded and cancellable. Native size accounting uses
+checked platform arithmetic so an overflow cannot wrap into a small reservation.
+Alternative rejected: raising ceilings still rejects larger completed work;
+clipping artifacts breaks independent recovery.
+A real valid PDF above 129 MiB traverses the bundle, passes PDF validation,
+persists in SQLite, survives an authority backup and is recovered chunk by chunk
+with the exact SHA-256. Native checks cover large receipt admission, extent
+overflow and the existing retained integrity/owner/rollback lifecycle; they do
+not establish full large-file native or Windows/PostgreSQL performance. Durable
+growth follows selected artifact bytes and fixed-size chunk metadata. Separate
+PDF structural/decode/time budgets and compiler log policies remain under audit.
+
+
+Complete PDF structural audit — Problem: private page/object/operator/decoded
+byte caps rejected valid larger documents and conflated reader projections with
+artifact validity. Decision: traverse complete references and page trees, decode
+complete streams and parse complete content operations. Seen-identity sets still
+prevent graph loops, and invalid page parents/counts, geometry, missing objects,
+repair attempts and truncated/trailing compressed data still fail. Worker-local
+pypdf filter extent hints are restored on return, including error paths.
+Alternative rejected: increasing caps still rejects a larger valid source;
+accepting unaudited late objects would weaken artifact validity. Parent report
+validation accepts nonnegative observed metrics without private document-size
+maxima; small report transport and execution memory/time policies remain separate.
+Real guards validate 1,001 pages, over 100,000 objects, over 250,000 operations,
+a 33 MiB decoded stream and over 128 MiB across streams, plus existing invalid
+PDF and owned-child retirement cases. These are structural checks, not visual
+fidelity or removal of the remaining worker execution limits.
+
+
+Complete reader document demand — Problem: the UI rejected documents over
+1,000 pages and clipped search text/results, outlines at 512 entries/eight
+levels and page links at 512. Decision: navigation, search, outline traversal
+and annotation delivery follow the actual document. Column geometry also scans
+complete page text. Search yields between pages and periodically within large
+text/result sets so cancellation can discard stale results. Outline identity
+tracking prevents cycles without treating nesting or cardinality as a quota.
+Alternative rejected: larger fixed ceilings still hide later evidence; reporting
+a clipped miss does not make the missing work available. Existing viewport
+render residency, canvas accounting, abort fencing and teardown stay in place.
+Real PDF.js browser coverage loads 1,005 pages, finds all 301 matches including
+the last page, traverses 600 outline entries including depth 12, exposes all
+600 first-page links, navigates to the final page and reclaims canvases on close.
+Protocol tests search beyond six million characters and retain 1,201 matches.
+
+
+Validator execution demand — Problem: automatic 128..512 MiB memory and
+15-second wall/CPU limits rejected complete source audits independently of
+actual resources. Decision: default validators follow actual work under owned
+process lifetime; only explicit positive memory/deadline settings install
+limits. Bad overrides fail before launch. Alternative rejected: raising private
+ceilings still rejects larger work; dropping cancellation or parent-lifetime
+ownership would leak an orphan validator after a host crash. Native limits,
+RSS observation, strict report checks and joined cleanup remain separate from
+source admission. Real tests decode over 540 MiB with observed memory above
+512 MiB, complete after 15 seconds, retain exact 2 GiB memory/42-second timeout
+requests, reject explicit overuse and prove Linux parent-death retirement.
+Windows/macOS owner monitoring is implemented but unverified on this host.
+
+
+Compilation execution demand — Problem: a private 180-second CPU/wall limit
+also drove desktop/Research waiting and Overleaf export lifetime. Decision:
+default native compilation and cloud export wait for actual owned completion.
+Positive caller deadlines reach native workers without an upper clamp; toolchain
+version probes retain their separate diagnostic policy. Desktop compilation
+checks connection, Stop and worker ownership; Research maintains its subscriber
+while awaiting the task. Overleaf build calls no longer create a private deadline.
+MCP document calls may omit a deadline or request a positive one above 300
+seconds, retaining configured server policy, cancellation and no ambiguous-call
+replay. Artifact chunk-transfer and lease lifecycles remain independent.
+Alternative rejected: increasing defaults still aborts longer work; abandoning
+parent/connection/cancellation ownership leaks compilation after its requester
+retires. Real native checks observe an unlimited default CPU allowance and an
+exact explicit 420-second allowance. Real TeX, cloud-export, protocol-document,
+Research publication/rollback and cancellation/retirement suites remain guards.
+This verifies supervision policy and complete result delivery, not a claim that
+an actual TeX compilation ran longer than 180 seconds on this host.
+
+
+Complete compilation logs — Problem: a private 1 MiB log gate killed native
+compilation and truncated its original evidence on exit; header-only diagnosis
+and 8 KiB cloud root-input probing omitted late records. Decision: default
+compilation/export retains complete log bytes. Explicit native log limits remain
+caller policy. Diagnostics scan complete line iterators with seven-line lookahead;
+the 64-row reply projection prioritizes late errors over warnings and retains
+only keys for displayed rows. Raw logs remain independently readable artifacts.
+Cloud main-file discovery walks the saved log until the compiler marker while
+preserving path and selected-main validation. Alternative rejected: larger quotas
+still abort or omit longer logs; publishing after a clipped warning-only head
+can misclassify a failed result. Guards write/hash over 5 MiB of actual native
+output, publish a valid PDF with a multi-MiB log, refuse publication for a late
+error after eighty warnings, and export a complete cloud log with a late root
+marker. Parser buffering scales with lookahead and longest line, not total log
+length; this is not a constant-memory claim for arbitrarily long individual lines.
+
+
+Complete SyncTeX source demand — Problem: a private 16 MiB decoded gate
+prevented normalization and source location, while queries assembled a full
+byte body, decoded string and split-line list before parsing. Decision: consume
+gzip lines through EOF/CRC and feed the shared geometric parser an iterator.
+The parser still accepts text callers and retains first boxes, last hboxes and
+nearest-line behavior. Normalization stages in the destination directory, fsyncs
+the complete gzip and atomically replaces only after successful decoding.
+Deterministic gzip metadata avoids changing the artifact digest on an identical
+normalization retry. Alternative rejected: a higher quota still loses larger
+mappings; publishing partial output or returning early skips damaged gzip tails.
+Guards retain over 17 MiB of box records and a late page-1,001/line-999 mapping
+after source removal, preserve exact decoded bytes/source hash and verify inverse
+location. Truncated/CRC-bad input, malformed Input records and injected replace
+failure preserve a previous complete destination and retire staging files.
+This improves streaming input, not constant parser-map memory: geometric
+indexes still grow with source records and a long individual line can be large.

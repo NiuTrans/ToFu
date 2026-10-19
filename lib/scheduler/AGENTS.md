@@ -33,3 +33,11 @@ execution. Read `docs/modules/scheduling_ops.md` and the process-role table in
 Run timer parse/poll/resume/dispatch tests and scheduler process-runner tests.
 Add Sidecar, owner-isolation, multi-worker, restart, and action-domain tests for
 the affected transition.
+
+Terminal execution bookkeeping uses settle_execution, not list_tasks presentation.
+The storage authority owns exact current execution matching; verify
+`tests/scheduler/test_execution_settlement_port.py` and storage receipt tests.
+
+Read-only execution_lookup may skip mutation only on indexed proven absence.
+Uninitialized legacy owners and matches still use the atomic settlement command;
+query and command can race, so the command must retain its current-ID predicate.

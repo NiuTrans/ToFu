@@ -10,7 +10,7 @@ from copy import deepcopy
 import re
 import threading
 
-from lib.storage.errors import StorageError
+from lib.agent_core.storage_errors import StorageError
 from lib.weak_lock_pool import WeakLockPool
 from lib.tasks_pkg.manager.runtime import chat_task_runtime
 

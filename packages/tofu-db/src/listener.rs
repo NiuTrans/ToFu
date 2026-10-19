@@ -265,6 +265,8 @@ impl LoopbackServer {
         let mut terminal_error = None;
         let stopping = Arc::new(AtomicBool::new(false));
         let authority_admission = Arc::new(crate::authority_admission::AuthorityAdmission::default());
+        let checkpoint_control = crate::daemon_checkpoint::DaemonCheckpointControl::new(
+            database.clone(), authenticator.scope(), stopping.clone());
         loop {
             match parent_lease_alive() {
                 Ok(true) => {}
@@ -319,6 +321,7 @@ impl LoopbackServer {
                     let control_observers = control_observers.clone();
                     let rotation_barrier = Arc::clone(&rotation_barrier);
                     let connection_stopping = Arc::clone(&stopping);
+                    let checkpoint_control = checkpoint_control.clone();
                     let worker = thread::Builder::new()
                         .name("tofu-db-v2-connection".to_owned())
                         .stack_size(self.config.connection_stack_bytes)
@@ -336,6 +339,7 @@ impl LoopbackServer {
                                     .with_authority_gc_budget(authority_gc_budget)
                                     .with_authority_admission(authority_admission)
                                     .with_control_observers(control_observers)
+                                    .with_checkpoint_control(checkpoint_control)
                                     .with_rotation_barrier(rotation_barrier);
                                     let stores = match published_queries { Some(view) => stores.with_published_queries(view), None => stores };
                                     match &wal_barrier {

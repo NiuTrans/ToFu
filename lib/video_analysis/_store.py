@@ -17,9 +17,10 @@ import re
 import time
 
 from lib.identity import require_user_id
+from lib.process_owner import process_owner, owner_state
 from lib.json_store import update_json_atomic
 from lib.log import get_logger
-from lib.runtime_paths import data_root
+from lib.runtime.runtime_paths import data_root
 
 from lib.video_analysis._config import RECORD_TTL_S
 
@@ -52,6 +53,7 @@ def create_record(video_id: str, *, name: str, size_bytes: int,
         'error': '',
         'created_at': _now(),
         'updated_at': _now(),
+        'process_owner': process_owner(),
     }
 
     def _mutate(reg):
@@ -59,7 +61,8 @@ def create_record(video_id: str, *, name: str, size_bytes: int,
             reg = {}
         cutoff = _now() - RECORD_TTL_S
         stale = [k for k, v in reg.items()
-                 if isinstance(v, dict) and v.get('updated_at', 0) < cutoff]
+                 if isinstance(v, dict) and v.get('updated_at', 0) < cutoff
+                 and v.get('status') != 'processing']
         for k in stale:
             reg.pop(k, None)
         if stale:
@@ -73,16 +76,10 @@ def create_record(video_id: str, *, name: str, size_bytes: int,
     return record
 
 
-#: A record still in ``processing`` this long after its last update means the
-#: server died mid-pipeline (daemon threads don't survive a restart) — the
-#: status endpoint reports it as failed instead of spinning forever.
-STALE_PROCESSING_S = 30 * 60
-
-
 def get_record(video_id: str, *, user_id: int) -> dict | None:
     """Return the record for ``video_id`` (or None). Never raises.
 
-    Lazily flips stale ``processing`` records to ``failed`` (crash sweep)."""
+    Only proven process exit settles interrupted processing as failed."""
     owner_user_id = require_user_id(user_id, context='video record lookup')
     from lib.json_store import read_json
     try:
@@ -95,8 +92,8 @@ def get_record(video_id: str, *, user_id: int) -> dict | None:
             or int(rec.get('user_id') or 0) != owner_user_id):
         return None
     if (rec.get('status') == 'processing'
-            and _now() - rec.get('updated_at', 0) > STALE_PROCESSING_S):
-        logger.warning('[VideoStore] %s stale in processing — swept to failed', video_id)
+            and owner_state(rec.get('process_owner')) == 'dead'):
+        logger.warning('[VideoStore] %s owner exited — settled as failed', video_id)
         fail_record(video_id, 'processing interrupted (server restarted)')
         rec = dict(rec, status='failed',
                    error='processing interrupted (server restarted)')

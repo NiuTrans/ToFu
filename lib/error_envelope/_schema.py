@@ -70,6 +70,13 @@ def typed_error_envelope_schema() -> dict[str, Any]:
             'transportCause': {'type': 'string'},
             'requestBytes': {'type': 'integer', 'minimum': 0},
             'timeoutSeconds': {'type': 'number', 'minimum': 0},
+
+            'origin': {'type': 'string', 'enum': ['local']},
+            'providerReached': {'type': 'boolean'},
+            'reason': {'type': 'string'},
+            **{field: {'type': 'integer', 'minimum': 0, 'maximum': 2**53 - 1}
+               for field in ('toolSchemaTokens', 'promptBudgetTokens',
+                             'totalTokens', 'contextWindowTokens')},
         },
         'required': list(_REQUIRED_ENVELOPE_FIELDS),
         'additionalProperties': True,

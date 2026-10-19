@@ -51,7 +51,7 @@ def test_booting_picker_recovers_on_ready_without_reload(browser, live_server, f
                 return route.fulfill(json={'ok': True, 'model_routing': catalog,
                                            'reasoning_controls': reasoning_controls(catalog)})
         if path == '/api/v4/boot' and state['booting'] and failure == 'server_booting':
-            phase = {'index': 1, 'key': 'storage_sidecar', 'label': 'Storage',
+            phase = {'index': 1, 'key': 'storage_authority_sql', 'label': 'Storage',
                      'status': 'running', 'duration_s': None, 'error': None}
             return route.fulfill(json={'ok': True, 'status': 'running',
                                        'phaseTotal': 1, 'phases': [phase],

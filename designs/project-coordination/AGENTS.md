@@ -1,10 +1,10 @@
 # Project coordination design guidance
 
-This directory holds the proposed three-level project collaboration design.
+This directory holds the current Coordinator product decisions and interaction design.
 Start with `README.md`, then `communication.md` for lifecycle and message
 semantics or `frontend.md` for product journeys and rendering requirements.
 
-These are implementation plans, not shipped API or runtime contracts. Preserve
+These are product design notes, not API or runtime contracts. Preserve
 the distinction between observed capabilities, proposed changes and open choices.
 Implementation must update the owning machine-readable contracts and runtime
 documents named here; do not treat illustrative fields as an existing API.

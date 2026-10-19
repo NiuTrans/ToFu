@@ -31,6 +31,8 @@ evade the string classifier degrade to the existing attended gate.
 from __future__ import annotations
 
 import os
+
+import json
 import re
 import secrets
 import subprocess
@@ -41,6 +43,12 @@ from lib.log import get_logger
 from lib.project_mod.command_analysis import (
     _ENV_ASSIGNMENT_GUARD_RE,
     _git_guard_classify,
+
+    _classify_git_invocation,
+    git_invocation_parts,
+
+    git_command_words,
+    git_integration_option_evidence,
     _shell_words,
     _split_pipeline,
     _unwrap_command_parts,
@@ -238,9 +246,16 @@ def force_delete_targets_merged(command: str, roots: list) -> bool:
     if not root:
         return False
     saw_force_delete = False
+    # A read-only probe cannot borrow routing/config from another invocation.
+    # Unsupported env/config overrides retain risk rather than prove another HEAD.
+    if any(os.environ.get(key) for key in (
+            'GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE', 'GIT_NAMESPACE')):
+        return False
     for segment in _split_pipeline(command):
         words = [w.text for w in _shell_words(segment)]
         while words and _ENV_ASSIGNMENT_GUARD_RE.match(words[0]):
+            if words[0].startswith('GIT_'):
+                return False
             words = words[1:]
         words = _unwrap_command_parts(words)
         if not words or os.path.basename(words[0]) != 'git':
@@ -249,6 +264,10 @@ def force_delete_targets_merged(command: str, roots: list) -> bool:
         index = 0
         while index < len(sub_words):
             tok = sub_words[index]
+            if tok != '-C' and (tok.startswith('-c') or tok.startswith('--git-dir')
+                               or tok.startswith('--work-tree') or tok.startswith('--namespace')
+                               or tok.startswith('--exec-path') or tok.startswith('--config-env')):
+                return False
             if tok in ('-C', '-c', '--git-dir', '--work-tree',
                        '--namespace', '--exec-path'):
                 index += 2
@@ -309,6 +328,95 @@ def _peer_label(peer: dict) -> str:
     return label
 
 
+# Pure evidence; no additional probes, model calls, cache or retry loop.
+# Never echo arbitrary argv, config values, revisions or commit messages.
+_DIAGNOSTIC_SEGMENTS = 16
+
+
+def _operation_diagnostic(verb: str, args: list[str]) -> tuple[str, list[str], str]:
+    """Annotation of a classified mutation, never execution authority."""
+    from lib.project_mod.git_command_scope import git_metadata_mutation_mode
+    metadata_mode = git_metadata_mutation_mode(verb, args)
+    if verb == 'reset':
+        if metadata_mode == 'soft_reset':
+            return 'head_rewrite', ['refs', 'operation_state'], 'inspect_head_and_task_ownership'
+        return 'index_or_worktree_reset', ['refs', 'index', 'worktree'], 'preserve_uncommitted_work'
+    if verb == 'restore':
+        if metadata_mode == 'staged_restore':
+            return 'staged_content_removal', ['index'], 'preserve_shared_index'
+        return 'index_or_worktree_restore', ['index', 'worktree'], 'inspect_target_paths'
+    if verb == 'clean':
+        return 'untracked_deletion', ['untracked_worktree'], 'preview_deletion_first'
+    if verb == 'stash':
+        return 'stash_mutation', ['stash_refs', 'index', 'worktree'], 'do_not_stash_shared_work'
+    if verb in {'merge', 'cherry-pick', 'revert', 'rebase', 'am'}:
+        return 'integration_recovery_or_strategy', ['operation_state', 'refs', 'index', 'worktree'], 'inspect_operation_ownership'
+    if verb in {'branch', 'tag', 'update-ref', 'symbolic-ref', 'replace', 'reflog'}:
+        return 'reference_mutation', ['refs'], 'inspect_reference_reachability'
+    if verb in {'push', 'fetch'}:
+        return 'forced_or_pruning_reference_update', ['refs', 'remote_refs'], 'inspect_reference_and_remote_authority'
+    if verb == 'commit':
+        return 'history_rewrite', ['refs', 'index'], 'preserve_shared_index'
+    if verb == 'apply':
+        return 'partial_or_extended_patch_application', ['index', 'worktree'], 'preflight_reviewed_patch'
+    return 'checkout_mutation', ['refs', 'index', 'worktree'], 'inspect_target_and_task_ownership'
+
+
+def command_diagnostics(command: str) -> dict:
+    """Reuse the risk classifier's argv parser for numbered shell segments.
+
+    Unknown syntax is not evidence of destructive execution. Segment numbers
+    include cd/filter segments. Evidence lists are bounded; none is authority.
+    """
+    segments = []
+    omitted = 0
+    for number, segment in enumerate(_split_pipeline(command), 1):
+        words = [w.text for w in _shell_words(segment)]
+        while words and _ENV_ASSIGNMENT_GUARD_RE.match(words[0]):
+            words = words[1:]
+        words = git_command_words(words)
+        if not words or os.path.basename(words[0]) != 'git':
+            continue
+        parsed = git_invocation_parts(words[1:])
+        classification = _classify_git_invocation(words[1:])
+        if classification in {'readonly', 'safe_write'}:
+            continue
+        verb, args = parsed if parsed else ('git', [])
+        if classification == 'tree_destroying':
+            reason, effects, action = _operation_diagnostic(verb, args)
+        else:
+            # Unknown subcommands may be shell aliases; never echo their text.
+            verb = verb if verb in {'merge', 'cherry-pick', 'revert', 'apply', 'clean'} else 'git'
+            reason, effects, action = 'unresolved_syntax_or_external_execution', ['unresolved'], 'inspect_syntax_and_request_approval'
+        if len(segments) < _DIAGNOSTIC_SEGMENTS:
+            entry = {'segment': number, 'verb': verb,
+                     'classification': classification or 'unknown',
+                     'reasonCode': reason, 'effects': effects,
+                     'nextAction': action}
+            if verb in {'merge', 'cherry-pick', 'revert'}:
+                option_evidence = git_integration_option_evidence(verb, args)
+                entry['riskyOptions'] = list(dict.fromkeys(option_evidence.risky_options))[:16]
+                entry['hasUnknownOptions'] = bool(option_evidence.unknown_options)
+                entry['hasExternalExecution'] = bool(option_evidence.external_options)
+            segments.append(entry)
+        else:
+            omitted += 1
+    return {'source': 'git_guard', 'classification': classify(command) or 'unknown',
+            'segments': segments, 'omittedSegments': omitted,
+            'automaticReceiptEligible': automatic_receipt_eligible(command)}
+
+
+def refusal_diagnostics(command: str) -> dict:
+    """Evidence extension of the existing public rejection descriptor."""
+    evidence = command_diagnostics(command)
+    return {**evidence, 'syntaxFullyKnown': evidence['automaticReceiptEligible'],
+            'automaticReceiptEligible': False, 'execution': 'not_started',
+            'evidenceLevel': 'advisory_presence_only',
+            'nextActions': ['inspect_status_and_staged_diff',
+                            'preserve_other_tasks_work',
+                            'evaluate_reviewed_path_integration']}
+
+
 def format_refusal(command: str, peers: list[dict], nonce: str,
                    roots: list[str] | None = None) -> str:
     """Build a conservative presence refusal for the EXECUTING agent.
@@ -316,18 +424,33 @@ def format_refusal(command: str, peers: list[dict], nonce: str,
     ``nonce`` is retained for older callers, not rendered or used as authority.
     Callers may supply resolved checkout roots; legacy callers omit them.
     """
+    evidence = refusal_diagnostics(command)
     lines = [
-        f'[git-guard] REFUSED: `{command}` mutates Git state. '
-        'Conservative project-presence policy blocks this high-risk operation '
-        'while other conversations/agents are active on this project.',
+        '[git-guard] REFUSED before execution: a flagged segment mutates Git state. '
+        'Conservative project-presence policy applies to that operation, '
+        'not ordinary integration elsewhere in the command.',
+        'Source: git_guard (not Git stderr or a confirmed writer-lock conflict).',
     ]
-    for root in roots or []:
-        lines.append(f'Checkout root: {root or "(unresolved)"}')
+    for segment in evidence['segments']:
+        lines.append(f"Trigger segment {segment['segment']}: git {segment['verb']}; "
+                     f"reason={segment['reasonCode']}; "
+                     f"nativeEffects={','.join(segment['effects'])}; "
+                     f"nextAction={segment['nextAction']}")
+
+        if segment.get('riskyOptions'):
+            lines.append('  Risk options: ' + ', '.join(segment['riskyOptions']))
+    if evidence['omittedSegments']:
+        lines.append(f"Additional diagnostic segments omitted: {evidence['omittedSegments']}")
+    for root in (roots or [])[:8]:
+        root_label = str(root or '(unresolved)')[:512].replace('\n', '\\n').replace('\r', '\\r')
+        lines.append(f'Checkout root: {root_label}')
+    if len(roots or []) > 8:
+        lines.append('Additional checkout roots omitted from text; all targets still checked.')
     if not roots:
         lines.append('Checkout root: (not supplied by caller)')
     lines.append('Active project presence (not confirmed writers):')
     for peer in peers[:5]:
-        lines.append(f'  - {_peer_label(peer)}')
+        lines.append('  - ' + json.dumps(_peer_label(peer)[:1024], ensure_ascii=False))
     if len(peers) > 5:
         lines.append(f'  - … and {len(peers) - 5} more')
     lines += [
@@ -335,10 +458,32 @@ def format_refusal(command: str, peers: list[dict], nonce: str,
         'conflict. Reported files are incomplete activity hints, not a safe '
         'write set; this operation may overwrite working files or change '
         'refs/history that peers rely on.',
-        'Wait for active project presence to settle, then retry; or use a '
-        'separately authorized isolated worktree.',
+        'Next: inspect git status --porcelain and git diff --cached; inspect '
+        'current content of task target paths. Peer names or online status '
+        'do not establish file ownership.',
+        'For task integration, ordinary merge/cherry-pick do not require '
+        'project-wide idle. Remove an unnecessary stash/abort step from the '
+        'plan; this does not authorize the flagged operation or erase command '
+        'dependencies. Submit intended ordinary integration for its own admission.',
+        'A refusal applies only to the flagged segment. Read-only or non-Git '
+        'work elsewhere in the command (e.g. running tests or inspections) is '
+        'unaffected: re-issue that part on its own, without the refused '
+        'wrapper, in a new call. Never treat this refusal as a reason to stop '
+        'the task.',
+        'If Git itself refuses because unrelated changes are staged, preserve '
+        'them. Only after current-content checks and patch preflight, consider '
+        'reviewed-path integration and git commit --only -- <reviewed-paths>; '
+        'verify unrelated staged blob hashes are unchanged and rerun tests. '
+        'Do not add -A to capture another task\'s work.',
+        'For abort/quit, inspect operation state and task ownership first; '
+        'never use an unrelated abort as cleanup. Preview deletion with '
+        'dry-run rather than forcing deletion as a diagnostic.',
+        'If the SAME risky operation is essential, wait for target '
+        'preconditions or use a separately authorized isolated worktree. '
+        'Do not repeatedly retry an unchanged command.',
         'Acknowledgement tokens cannot override active project presence. '
-        'Committing or stashing shared work does not clear this presence refusal.',
+        'Committing or stashing shared work does not clear this presence refusal. '
+        'Do not disable the guard, delete locks, clear the index or force overwrite.',
     ]
     return '\n'.join(lines)
 
@@ -356,6 +501,9 @@ __all__ = [
     'automatic_receipt_eligible',
     'branch_fully_merged',
     'classify',
+
+    'command_diagnostics',
+    'refusal_diagnostics',
     'consume_ack',
     'enabled',
     'extract_ack',

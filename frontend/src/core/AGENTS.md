@@ -19,7 +19,16 @@ grab bag for feature policy or DOM presentation.
 - Core cannot import feature UI or retained classic sections. Depend on
   generated DTOs and inject presentation callbacks at the edge.
 
+`entity-record.ts` owns TurnStore ID-index layout and bulk readers; its clone/
+reflection boundary is documented in `docs/contracts/CONVERSATION_SYNC_V3.md`.
+`observer.ts` isolates best-effort notifications. Required projection/commit
+callbacks propagate failures to their owner; never pass them to `notifyObserver`.
+
+`turn-projection.ts` owns lifecycle-bound shell invalidation from reducer receipts;
+see `docs/TURN_RENDERING_PERFORMANCE.md` and `turn-projection.test.ts`.
+
 ## Verification
 
-Run focused core/conversation-sync/browser-storage tests, then
+Run focused core/conversation-sync/browser-storage tests (`entity-record.test.ts`
+for ID-index changes), then
 `npm run typecheck:modules` and the relevant generator drift check.

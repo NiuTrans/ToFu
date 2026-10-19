@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""tests/search/test_search_settings.py — lib/search_settings.py + update_search_settings tool.
+"""tests/search/test_search_settings.py — lib/search/search_settings.py + update_search_settings tool.
 
 Pins the single-source-of-truth contract shared by the Settings UI status
 projection and the agent tool:
@@ -25,7 +25,7 @@ from unittest import mock
 import pytest
 
 import lib as _lib
-import lib.search_settings as ss
+import lib.search.search_settings as ss
 from lib.tools.gateway import tool_schema_tokens
 from lib.tools.search import build_update_search_settings_tool
 
@@ -92,12 +92,11 @@ class TestToolSchema:
 
         assert props['profile']['enum'] == ['fast', 'balanced', 'deep']
         assert set(props['overrides']['properties']) == {
-            'fetch_top_n', 'max_chars_search', 'llm_content_filter',
+            'fetch_top_n', 'llm_content_filter',
             'deepen_enabled',
         }
         assert set(props) == {
             'profile', 'overrides', 'fetch_top_n', 'fetch_timeout',
-            'max_chars_search', 'max_chars_direct', 'max_chars_pdf',
             'max_download_mb', 'llm_content_filter', 'block_domain',
             'unblock_domain',
         }
@@ -313,3 +312,28 @@ class TestStatusAndSharedBits:
         assert ok is True
         assert 'no changes requested' in content
         assert not cfg_file['path'].exists()
+
+
+@pytest.mark.parametrize('key', ['max_chars_search', 'max_chars_direct', 'max_chars_pdf'])
+@pytest.mark.parametrize('nested', [False, True])
+def test_handler_rejects_retired_budget_without_any_mutation(cfg_file, monkeypatch, key, nested):
+    import lib.tasks_pkg.handlers.search._settings as h
+    monkeypatch.setattr(h, '_finalize_tool_round', lambda *a, **k: None)
+    apply = mock.Mock(side_effect=AssertionError('must reject before applying settings'))
+    monkeypatch.setattr(ss, 'apply_updates', apply)
+    args = {'fetch_top_n': 7, 'profile': 'deep'}
+    if nested:
+        args['overrides'] = {'fetch_top_n': 9, key: 1000}
+    else:
+        args[key] = 1000
+    _, content, ok = h._handle_update_search_settings(
+        {}, None, 'update_search_settings', 'tc1', args, 1,
+        {'query': 'update_search_settings'}, {}, None, False)
+    assert ok is False
+    assert 'Rejected:' in content
+    assert ('overrides.' + key if nested else key) in content
+    assert 'no settings were changed' in content
+    apply.assert_not_called()
+    cfg_file['reload'].assert_not_called()
+    cfg_file['audit'].assert_not_called()
+    assert not cfg_file['path'].exists()

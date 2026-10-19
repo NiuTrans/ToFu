@@ -467,7 +467,7 @@ def _read_events_uncached(task_id: str, *, rebuild: bool) -> tuple[list, bool]:
     try:
         from lib.orchestration.message_compat import FLOW_EVENT_PREFIXES
         from lib.storage import get_storage_client
-        from lib.task_event_contract import STRUCTURAL_EVENT_TYPES
+        from lib.task_replay.task_event_contract import STRUCTURAL_EVENT_TYPES
 
         from lib.tasks_pkg.request_inspector_history import is_event_page_size_error
         structural = _InspectorEventRows()

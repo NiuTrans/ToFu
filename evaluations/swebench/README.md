@@ -1,6 +1,8 @@
 # 通用 Agent 评测：Harbor 执行适配器
 
-这套入口统一编排 SWE-bench Verified 和 Terminal-Bench 2.1。当前本地默认后端是
+这套入口统一编排 SWE-bench Verified、Terminal-Bench 2.1 / 3.0 / 4.0 和
+DeepSWE v1.1。DeepSWE 和 TB 3.0 / 4.0 必须使用保留独立 verifier 的 Docker/cloud 后端。
+当前本地默认后端是
 `rootless-qemu`，不是旧的 udocker/PRoot，也不是 Singularity：每个 trial 都在新的
 QEMU TCG 虚拟机 overlay 中运行，结束后删除写层；宿主项目、`$HOME`、Docker socket、设备和
 凭据都不挂载进 guest。
@@ -17,6 +19,7 @@ leaderboard 提交。
 python -m evaluations catalog
 python -m evaluations harbor doctor --help
 python -m evaluations harbor run --help
+python -m evaluations platform prepare --help
 ```
 
 `evaluations/benchmark_catalog.json` 是 benchmark 身份权威；`evaluations/catalog.py`
@@ -26,14 +29,80 @@ Harbor 适配器消费该定义，不再把所有非 SWE-bench 的新题集当�
 Tofu production、Codex proxy、OpenCode proxy 必须经过有生命周期和审计的正式 launcher，
 不能通过通用 profile 绕过代理/凭据检查。旧 `python -m evaluations.swebench` 入口仍可用。
 
+内部平台 batch 入口见 [platform_jobs/README.md](../platform_jobs/README.md)：打包已提交
+runner 和 Git 对象证明，复用 SDK 的审批、提交与回收。平台成功单独记录，不转换为得分。
+
 边界为 **benchmark catalog → execution adapter → agent harness / sandbox → evidence / scoring**。
-目前 execution adapter 只有 Harbor，支持两个固定题集；这不是已经实现 TB 4.0 或
-SWE-bench Pro 的声明。新增 Harbor 格式题集需要审核 catalog、任务 lock、资源/网络需求、
+目前 execution adapter 只有 Harbor，catalog 包含五个固定题集；这不是已经完成五个题集
+实测或实现 SWE-bench Pro / Pier 的声明。新增 Harbor 格式题集需要审核 catalog、任务 lock、资源/网络需求、
 verifier 语义和契约测试；非 Harbor harness 应单独实现执行适配器，复用身份/路径契约，
 不扩充 TB 专用条件分支。需要 GPU 或不同评分规则的题集不得被静默降为 CPU/二元任务。
 现有 `compare` 是 TB 2.1 的专用配对统计，不冒充通用评分器。
 
+### DeepSWE 与 Frontier-Bench 后续版本
+
+问题：把新任务交给旧 parser 或单环境 image store，可能丢弃独立 verifier、补丁收集
+和结构化 reward，产生错误成功率。决定：题集声明 `required_capabilities`；doctor 和
+实际 dispatch 都验证 Harbor parser 保留相应字段；当前 QEMU/Singularity 后端在创建
+run 或准备镜像前拒绝这些题集。替代方案是把 verifier 合并进 agent 环境、只保留二元
+reward 或放宽旧后端；这些方案改变任务语义，因此拒绝。parser 检查不是 sandbox
+执行证明，仍须在目标 worker 上完成 oracle smoke 后才跑模型。
+
+输入来自官方仓库和 Harbor Hub 公共 registry，2026-10-10 冻结；任务 lock 包含全部
+任务身份而非挑选容易题：
+
+| catalog key | 题数 | registry digest | 来源 revision |
+|---|---:|---|---|
+| `deepswe-v1.1` | 113 | `sha256:aaa82ceb8404dccc17689c9383f93dbcbc8f029a7601d2e3856a416f2cb89269` | `0b9fabbb63b9104d678fe965e1632f2dd9eaa2ea` |
+| `terminal-bench-3.0` | 74 | `sha256:a32a61879ea94eb9dc16fa1fbeb398759f0c07ca633d9d1f6aec760207036da3` | `2b0442c3c583b710ca8da14c8e601b99f2f1f244` |
+| `terminal-bench-4.0` | 66 | `sha256:39d9f44b40420cde8fdcc087579c0d72a7e14fa3656d603c3f0d22fb35e27732` | `452bf305c6daa62fc59061d22133a7cbc7c1572e` |
+
+[Frontier-Bench 仓库](https://github.com/harbor-framework/frontier-bench) 已重定向到
+[新版 Terminal-Bench](https://github.com/harbor-framework/terminal-bench)。这里按实际
+发布的 3.0 / 4.0 digest 注册，不把不明确的 Frontier 名称映射成 TB 2.1。
+[DeepSWE v1.1](https://github.com/datacurve-ai/deep-swe) 使用独立 verifier，收集 agent
+提交的 patch，在干净环境验证；官方 leaderboard 使用 Pier + mini-SWE-agent + Modal。
+这里接入的是 Harbor 任务与原始结构化 rewards，尚未实现 Pier 的 namespace/网络契约适配，
+不能宣称与其 leaderboard harness 等价。新题集默认五次是本地协议；尚未核实官方
+最低重复数，`official_min_attempts=null`，不能仅凭次数生成 publication-ready 标志。
+
+```bash
+python -m evaluations catalog
+python -m evaluations harbor doctor --benchmark deepswe-v1.1 --backend modal
+python -m evaluations harbor run --benchmark deepswe-v1.1 --backend modal \
+  --agent oracle --model oracle --task datacurve/abs-module-cache-flags --attempts 1 --concurrency 1
+```
+
+`mini-swe-agent` profile 明确为 guest-explicit；运行时需固定其版本和显式短期凭据。
+Tofu production 文件工具目前依赖 rootless guest rootfs，仍不支持这些新题集的
+Docker/cloud 执行；不能删除 backend guard 来假装接通。
+
+### GLM-5.3 的配置差距与终态失败
+
+只读诊断可直接读取 native wire receipts，并区分压缩预算耗尽、上下文超限和基础设施
+故障；大 transcript 只读取末尾 64 KiB，报告保存字节范围和该片段 checksum，不声称
+这是完整文件的 hash。主请求参数与 compaction 请求分开，缺省值保持 unknown。
+
+```bash
+python -m evaluations harbor diagnose /absolute/run/root --reference-profile glm-5.3-tb21
+```
+
+[GLM-5.3 官方说明](https://huggingface.co/zai-org/GLM-5.3#footnotes) 的 TB 2.1
+配置为 Claude Code 2.1.207、6 小时、输出 65536、temperature=1、top_p=1。
+`evaluations/glm53_tb21_runtime.json` 固定 Tofu 候选的输出预算为 65536；它只对齐此项，
+不是官方 harness 的复刻。新候选需显式选择 `--tofu-tool-surface production`、
+`--tofu-wire-proxy`，将配置文件、agent deadline、provider slot、软件 revision 和
+完整题集/五次试验一起登记；不要改写旧 run 配置或继续混合运行。
+
+问题：旧 retry classifier 把所有「did not reach a successful terminal state」归为
+网络故障，包括本地压缩失败和上下文超限。决定：Tofu adapter 在异常 metadata 中保留
+脱敏的 native failure receipt；只有明确 `retryable=true` 的 network/rate_limit/server_error
+允许基础设施重跑。替代方案是按泛化 RuntimeError 文案重跑，会选择性替换 agent
+失败并浪费预算，因此拒绝。旧试次没有 receipt 时需人工诊断，不能推断为瞬时错误。
+任何已有结构化 reward 的试次都不会自动替换；缺失、无效和未评分仍保持独立。
+
 ## DolphinFS-only 宿主存储
+## 宿主存储
 
 默认根为 **checkout `.eval-runs/benchmarks`**，不再依赖宿主 HOME 或 XDG 默认值。
 该 checkout 位于 `/mnt/dolphinfs`，写入型评测路径必须留在该卷；可显式设置同卷的
@@ -53,8 +122,11 @@ manifest 的 `runtime_storage` 在 dispatch 前固定，resume 拒绝缺失/漂�
 返回 `ENOSYS`，unlink-while-open 匿名临时文件的读回返回 `ENOENT`，具名文件正常。
 `rootless_vm.storage_probe` 在模型 dispatch/QEMU 启动前验证具名写入、fsync/rename、
 flock 及 Unix socket round trip；不支持就明确停止，不回退宿主 `/tmp`。
-现有 pathname-IPC QEMU backend 在这种卷上仍不可运行。正确后续方向是审核过的
-继承 fd/socketpair IPC，或有相应能力的 DolphinFS 部署，而不是裸宿主执行、关闭
+默认 pathname-IPC backend 在这种卷上仍不可运行。显式设置
+`ROOTLESS_VM_ALLOW_PRIVATE_LOCAL_ROOTS=1` 可使用当前用户拥有的 0700 HOME 私有目录
+承载 state、prepared cache 和 scratch；路径和存储能力仍必须通过预检，宿主共享临时
+目录及 world-writable 祖先仍被拒绝。此选择写入启动配置，不能在 resume 时静默切换。
+后续可审核继承 fd/socketpair IPC；不能使用裸宿主执行、关闭
 namespace/seccomp、把 QGA 暴露为无认证 TCP/公共 abstract socket。
 Guest/jail 内的 `/tmp` 是私有 VM/沙箱路径，不是宿主 `/tmp`，保留官方任务语义。
 
@@ -411,7 +483,41 @@ DeepSeek 公布的 V4 Flash TB 2.1 分数使用 DeepSeek Harness Minimal preset�
 
 ## OpenCode 与 Tofu 的配对证据
 
-OpenCode 1.18.29 已接入 `rootless_vm.harbor_opencode_agent:OpenCodeGuestAgent`
+### 使用 TofuDB 的应用运行路径
+
+`python -m evaluations.application_agent --request request.json --origin
+http://127.0.0.1:15000 --live` 通过当前应用的 `/api/v4/agent/run` 执行一项任务。
+应用必须位于该题隔离环境内，预先配置同一注册模型和 provider，且原生 TofuDB
+就绪。该入口保留应用原生工具、上下文和执行引擎；不调用 storage-free SDK。
+它只负责一次任务的 HTTP 传输与收据，Harbor 仍负责环境和独立 verifier。
+
+请求是精确字段 JSON：`model={creator_id,model_id}`、`provider_id`、`instruction`、
+`project_root`、新的 `output_root`、`config`（显式 `maxTokens`）、`thinking`、
+`timeout_seconds`、`artifact_max_bytes`。路径均为隔离环境内绝对路径。
+证据容量至少 2048 字节，其中 1024 字节预留给失败回执；HTTP 轮询受剩余任务时间限制。
+不加 `--live` 只校验、不调用模型；API 认证通过 `--api-token-env NAME` 引用
+进程环境，值不进入请求文件或报告。模型路由必须经生产 admission 预先注册。
+
+入口拒绝非 loopback、代理、重定向、缺失身份的存储和非 TofuDB 后端。
+它禁用模型 fallback，固定 provider，使用生产 cursor 读取原始事件，并对
+`view=durable` 返回的终态与 live 终态核对内容、状态、usage 和模型。
+usage 复用生产持久化投影，剔除瞬时 wire 数据；完成判定复用原生 `AgentResult.ok`，
+输出截断、异常流结束和未完成工具交接不能被 `done` 状态覆盖。
+响应必须明确声明 `readSource=durable`，旧服务忽略 query 不算验证通过。
+提交响应未知时只按独有 conversation correlation 查询、取消并等待，不重新提交。
+失败和未收敛的取消仍保留结果收据；同一输出目录不能重用。
+
+Problem：旧 Harbor candidate 使用 transient `AgentRuntime`，不能证明 TofuDB
+执行。Decision：调用生产持久化 API，并读回同一存储 authority 的已提交终态。
+Alternatives：只设置数据库环境变量、复用进程内终态、独立复制 agent loop
+均不能满足这个要求。`completed` 只表示应用执行完成，`formal_score` 始终为空；
+运行源码、物理模型/采样、隔离环境、Harbor 接入及全量比较仍须各自验收。
+测试：`tests/evaluations/test_application_agent.py` 与
+`tests/api_v4/test_durable_chat_replay.py`。
+
+OpenCode 固定到 [1.19.0](https://github.com/anomalyco/opencode/releases/tag/v1.19.0)
+（2026-10-15 查询 GitHub latest 与 npm latest 一致），使用
+`rootless_vm.harbor_opencode_agent:OpenCodeGuestAgent`
 及宿主 `evaluations/opencode_proxy/`。guest 只使用固定二进制、离线 provider cache
 和限定代理端点；宿主固定物理模型并保留逐 trial usage。配置、轨迹与代理 usage 的
 调和仍由 `audit` 负责。Tofu 审计按登记模型核对 request、prompt profile、物理 dispatch、
@@ -549,3 +655,32 @@ Harbor 适配器的事件写入、工具审计和运行证据持久化在有界 
 已有 patch 的最终官方复核仍交给固定版本的 SWE-bench harness。它目前只支持 Docker 或 Modal；
 这条限制与上面的本地 agent rollout 无关。不同 `model_name_or_path` 会拆成独立 run id，避免
 官方 harness 以 `instance_id` 为键时覆盖另一模型的结果。
+
+## 用量与成本统计
+
+`comparison-register --reference-prices prices.json` 冻结 USD/百万 token 参考单价：
+`inputUsdPerMillion`、`outputUsdPerMillion`、`cacheReadUsdPerMillion`、
+`cacheWriteUsdPerMillion`。这是统一价格下的比较，不是实际账单；缺价格则只报告用量。
+Tofu 按 `apiRounds` 单次入账（不重复加入 compactionUsage），OpenCode 优先读取 trial
+标签对应的宿主代理逐请求回执，覆盖超时后缺失 guest 导出的情况。两边归档基础设施
+重跑也进入总支出。无用量回执明确为未知，不能算成零或据此宣布成本显著下降。
+成本比和延迟差以整题为簇重采样，保留全部重复；成本区间要求全域评分和用量完整。
+按最终结果分组的成本只作事后诊断，不能充当运行时成功/失败 oracle。
+
+Tofu `reasoning_effort=default` 保留生产运行时的默认决策；`runtime_config={}` 的
+请求输出预算从生产 resolver 冻结到 manifest，再由模型/上下文传输约束裁剪。
+实际请求参数回执与声明配置同时保留，不能把 harness 原生默认比较称为等采样比较。
+模型身份使用维护目录的精确 creator/model，推理默认值通过生产准入边界安装；
+供应商的 `glm-5.3-m17` 只作 Deployment wire ID，200k 限额属于 Offering。
+这避免私有别名被误当成资料不全的新模型，也避免给 Kimi 套用 GLM 的推理协议。
+证据投影分别核对全程一致的逻辑模型身份与精确的物理 dispatch wire ID；旧记录的
+已登记别名仍可读取，但同族的另一部署不能通过核对。
+
+`capacity.plan_rootless_pair` 同时接受实际 state 卷剩余空间和每 VM overlay 的
+字节上界（virtual disk 加 qcow2 metadata 余量），在 CPU/内存宽度之外按磁盘收窄。
+在缓存迁入后重新探测；空间变大时并发相应放大，不把旧轮次的并发硬编码为默认。
+
+重复任务的基础设施重跑只归档未评分且已分类的失败；保留同题已评分的成功与失败
+兄弟 attempt，交给 Harbor 的配置多重集恢复缺失次数，避免重跑变成择优或超额试验。
+重复次数也进入资源峰值：同一道重任务的多个 attempt 可能同时运行，不能只按不同题的资源排序。
+`comparison-register --infrastructure-retries N` 把上限纳入协议摘要；重跑入口拒绝与冻结值不同的上限，报告也检查已归档的周期是否越界。

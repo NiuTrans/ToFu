@@ -128,6 +128,33 @@ fn persistence_debt_freezes_result_and_never_reexecutes_or_releases() {
     assert_eq!(released.load(Ordering::SeqCst), 1);
     assert_eq!(p.writes.load(Ordering::SeqCst), 2);
 }
+
+#[test]
+fn captured_failure_retry_keeps_same_history_and_never_reexecutes() {
+    let ports=Arc::new(Ports::default());ports.fail_write.store(1,Ordering::SeqCst);
+    let (_registry,_session,task)=setup(ports.clone());
+    let calls=AtomicUsize::new(0);
+    let observed=json!({"messages":[{"role":"tool","content":"already executed"}],"usage":[]});
+    assert_eq!(task.run_captured(7, |_| {calls.fetch_add(1,Ordering::SeqCst);
+        (Err(json!({"kind":"fixture"})),Some(observed.clone()))}).unwrap_err(),TaskError::PersistencePending);
+    let candidate=task.finish(7,None,None).unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst),1);
+    assert_eq!(candidate.status,TaskStatus::Error);
+    assert_eq!(candidate.execution,Some(observed.clone()));
+    assert_eq!(ports.events.lock().unwrap()[0]["execution"],observed);
+}
+
+#[test]
+fn captured_success_racing_stop_keeps_result_as_observed_history() {
+    let ports=Arc::new(Ports::default());let (_registry,session,task)=setup(ports);
+    let result=json!({"messages":[{"role":"assistant","content":"observed"}],"usage":[]});
+    let candidate=task.run_captured(7, |_| {
+        session.request_cancel("late_stop").unwrap();(Ok(result.clone()),None)
+    }).unwrap();
+    assert_eq!(candidate.status,TaskStatus::Aborted);
+    assert!(candidate.result.is_none());
+    assert_eq!(candidate.execution,Some(result));
+}
 #[test]
 fn delivery_retry_skips_successful_persistence() {
     let p = Arc::new(Ports::default());

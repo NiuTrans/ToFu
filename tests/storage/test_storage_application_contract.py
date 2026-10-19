@@ -17,14 +17,19 @@ import pytest
 pytestmark = pytest.mark.api
 
 
+@pytest.fixture
+def application_storage_owner_id():
+    return 1
+
+
 @pytest.fixture(params=['sqlite', 'tofudb',
                         pytest.param('tofudb_embedded',
                                      marks=pytest.mark.serial)])
-def application_storage(request, tmp_path, monkeypatch):
+def application_storage(request, tmp_path, monkeypatch, application_storage_owner_id):
     from lib.storage import StorageRuntime, StorageSupervisor
     from lib.storage import service
 
-    monkeypatch.setenv('TOFUDB_OWNER_ID', '1')
+    monkeypatch.setenv('TOFUDB_OWNER_ID', str(application_storage_owner_id))
     monkeypatch.setenv('TOFUDB_TENANT_ID', '1')
     backend = request.param
     if backend == 'tofudb_embedded':
@@ -40,6 +45,8 @@ def application_storage(request, tmp_path, monkeypatch):
         from scripts.check_tofudb_engine_drift import resolve_deployment_binary
         repository_root = Path(__file__).resolve().parents[2]
         monkeypatch.setenv('TOFUDB_BIN', resolve_deployment_binary(repository_root))
+    # Model/provider preparation reads the same deployment contract as storage.
+    monkeypatch.setenv('TOFU_PERSONAL_STORAGE_BACKEND', backend)
     runtime = StorageRuntime(StorageSupervisor(
         project_root=tmp_path, backend=backend, startup_timeout=60),
         auto_restart=False)
@@ -493,7 +500,7 @@ def test_conversation_inspector_api_reads_real_owner_scoped_projection(applicati
     import json
     from urllib.parse import urlsplit
     from quart import g
-    from lib.app_factory import create_base_app
+    from lib.app.app_factory import create_base_app
     from debug import inspect_conversation as inspector
     from lib.api_keys import local_admin_context
     from lib.api_v4 import success_envelope
@@ -701,7 +708,7 @@ def test_durable_human_wait_restarts_and_resumes_once(application_storage, monke
 
 def test_goal_model_context_and_checklist_survive_authority_restart(application_storage):
     from copy import deepcopy
-    from tests.storage.test_storage_sidecar_contract import _import_conversation
+    from tests.storage.test_storage_authority_sql_contract import _import_conversation
     from lib.goal_runs.context_recovery import publish_worker_context
     from lib.goal_runs.worker_context import GoalWorkerContext
     from lib.tasks_pkg.model_replay import restore_prefix

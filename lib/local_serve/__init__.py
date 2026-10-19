@@ -26,12 +26,12 @@ Module map (import direction is strictly left-to-right, no cycles):
 
 Safety rails:
 
-* **Loopback only.** Managed servers bind 127.0.0.1 on the 18100-18199 band,
-  never the well-known engine ports (8000/30000/11434), so they can neither
-  shadow an operator-run engine nor confuse autodiscovery.
-* **Everything is bounded.** Log files rotate at a fixed size, the ledger is
-  capped, the disk budget for envs is explicit (default 20 GiB), and every
-  subprocess wait has a timeout.
+* **Loopback only.** Managed servers use available 127.0.0.1 ports,
+  avoiding well-known engine ports (8000/30000/11434), and checking actual
+  socket availability plus active/planned ledger endpoints.
+* **Demand and lifecycle.** Installation has no directory or download quota;
+  the ledger retains all instances until explicit removal. Downloads stream
+  in bounded chunks, log files rotate, and subprocess waits have timeouts.
 * **Durable vs reconstructible.** The ledger entry (what the user asked for
   and got) is durable state under data/config/. Envs, logs, and downloaded
   binaries under data/local_serve/ are reconstructible and may be reclaimed.

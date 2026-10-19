@@ -14,7 +14,7 @@ def test_real_evaluator_budget_refusal_escapes_review(monkeypatch):
     task={'id':'review-boundary','config':{'executionLimits':{
         'max_tokens':0,'max_tool_calls':0,'deadline':time.time()+60}}}
     port=model_budget_admission(task)
-    monkeypatch.setattr(evaluation,'_parallel_judge_workers',lambda n:1)
+    monkeypatch.setenv('TOFU_RESEARCH_EVAL_JUDGES', '1')
     calls=[]
     def dispatch(messages,*,model_budget_admit,**kwargs):
         calls.append(model_budget_admit)

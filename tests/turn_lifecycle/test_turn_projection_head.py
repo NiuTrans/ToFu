@@ -32,7 +32,7 @@ class _Session:
 
 
 def _event(revision, patch):
-    from lib.storage_sidecar.operations_pkg._common import _dump
+    from lib.storage_authority_sql.operations_pkg._common import _dump
 
     return {
         "projection_revision": revision,
@@ -49,7 +49,7 @@ def _row(
     patch_bytes=100,
     checkpoint=None,
 ):
-    from lib.storage_sidecar.operations_pkg._common import _dump
+    from lib.storage_authority_sql.operations_pkg._common import _dump
 
     return {
         "turn_id": "turn-head",
@@ -66,8 +66,8 @@ def _row(
 
 
 def test_projection_head_folds_exact_revision_chain_and_reuses_cache():
-    from lib.storage_sidecar.turn_projection_cache import TurnProjectionCache
-    from lib.storage_sidecar.turn_projection_head import projection_from_turn_row
+    from lib.storage_authority_sql.turn_projection_cache import TurnProjectionCache
+    from lib.storage_authority_sql.turn_projection_head import projection_from_turn_row
     from lib.turn_projection_patch import build_projection_patch
 
     base = {"content": "a", "toolRounds": []}
@@ -94,8 +94,8 @@ def test_projection_head_folds_exact_revision_chain_and_reuses_cache():
 
 
 def test_projection_head_folds_from_owner_fenced_checkpoint():
-    from lib.storage_sidecar.operations_pkg._common import _dump
-    from lib.storage_sidecar.turn_projection_head import projection_from_turn_row
+    from lib.storage_authority_sql.operations_pkg._common import _dump
+    from lib.storage_authority_sql.turn_projection_head import projection_from_turn_row
     from lib.turn_projection_patch import build_projection_patch
 
     base = {"content": "checkpoint"}
@@ -121,8 +121,8 @@ def test_projection_head_folds_from_owner_fenced_checkpoint():
 
 
 def test_materialized_settled_projection_does_not_consume_live_cache():
-    from lib.storage_sidecar.turn_projection_cache import TurnProjectionCache
-    from lib.storage_sidecar.turn_projection_head import (
+    from lib.storage_authority_sql.turn_projection_cache import TurnProjectionCache
+    from lib.storage_authority_sql.turn_projection_head import (
         discard_projection_cache_for_row,
         projection_from_turn_row,
     )
@@ -141,13 +141,33 @@ def test_materialized_settled_projection_does_not_consume_live_cache():
         1024 * 1024, max_entries=4)
 
     assert projection_from_turn_row(session, row) == projection
-    assert session.turn_projection_cache.stats()["entries"] == 0
-
-    row["status"] = "running"
-    assert projection_from_turn_row(session, row) == projection
     assert session.turn_projection_cache.stats()["entries"] == 1
     assert discard_projection_cache_for_row(session, row) is True
     assert session.turn_projection_cache.stats()["entries"] == 0
+
+
+def test_settled_projection_reuses_revision_exact_cache_entry():
+    """An unchanged settled turn hydrates from the cache on the second read."""
+    from lib.storage_authority_sql.turn_projection_cache import TurnProjectionCache
+    from lib.storage_authority_sql.turn_projection_head import projection_from_turn_row
+
+    projection = {"content": "settled"}
+    row = _row(
+        projection,
+        materialized=None,
+        revision=9,
+        count=0,
+        patch_bytes=0,
+    )
+    row["status"] = "completed"
+    session = _Session([])
+    session.turn_projection_cache = TurnProjectionCache(
+        1024 * 1024, max_entries=4)
+
+    assert projection_from_turn_row(session, row) == projection
+    assert session.turn_projection_cache.stats()["entries"] == 1
+    assert projection_from_turn_row(session, row) == projection
+    assert session.turn_projection_cache.stats()["hits"] == 1
 
 
 @pytest.mark.parametrize(
@@ -164,7 +184,7 @@ def test_materialized_settled_projection_does_not_consume_live_cache():
 def test_projection_head_rejects_inconsistent_or_unbounded_metadata(
         row_updates, message):
     from lib.storage.errors import StorageError
-    from lib.storage_sidecar.turn_projection_head import projection_from_turn_row
+    from lib.storage_authority_sql.turn_projection_head import projection_from_turn_row
 
     row = _row({"content": "base"})
     row.update(row_updates)
@@ -174,7 +194,7 @@ def test_projection_head_rejects_inconsistent_or_unbounded_metadata(
 
 def test_projection_head_rejects_gap_duplicate_and_misbased_patches():
     from lib.storage.errors import StorageError
-    from lib.storage_sidecar.turn_projection_head import projection_from_turn_row
+    from lib.storage_authority_sql.turn_projection_head import projection_from_turn_row
     from lib.turn_projection_patch import build_projection_patch
 
     base = {"content": "a"}
@@ -194,7 +214,7 @@ def test_projection_head_rejects_gap_duplicate_and_misbased_patches():
 
 
 def test_projection_head_append_plan_bounds_chain_and_skips_empty_new_head():
-    from lib.storage_sidecar.turn_projection_head import (
+    from lib.storage_authority_sql.turn_projection_head import (
         PROJECTION_HEAD_MAX_PATCH_BYTES,
         PROJECTION_HEAD_MAX_PATCHES,
         TurnProjectionHeadState,
@@ -259,9 +279,9 @@ def test_projection_head_append_plan_bounds_chain_and_skips_empty_new_head():
 
 def test_sqlite_checkpoint_isolates_large_projection_from_hot_row_wal(tmp_path):
     """A metadata revision must not journal the untouched checkpoint BLOB."""
-    from lib.storage_sidecar.adapters.sqlite import SQLiteSession
-    from lib.storage_sidecar.operations_pkg._common import _dump
-    from lib.storage_sidecar.schema import initialize_schema
+    from lib.storage_authority_sql.adapters.sqlite import SQLiteSession
+    from lib.storage_authority_sql.operations_pkg._common import _dump
+    from lib.storage_authority_sql.schema import initialize_schema
 
     projection_blob = _dump({"content": "x" * (1024 * 1024)})
 
@@ -326,7 +346,7 @@ def test_sqlite_checkpoint_isolates_large_projection_from_hot_row_wal(tmp_path):
 
 def test_checkpoint_upsert_reports_stable_integrity_error():
     from lib.storage.errors import StorageError
-    from lib.storage_sidecar.turn_projection_write import (
+    from lib.storage_authority_sql.turn_projection_write import (
         _upsert_projection_checkpoint,
     )
 
@@ -350,13 +370,13 @@ def test_checkpoint_upsert_reports_stable_integrity_error():
 
 def test_recovery_budget_charges_checkpoint_without_loading_its_blob():
     from lib.storage.errors import StorageError
-    from lib.storage_sidecar.operations_pkg._turns_lifecycle import (
+    from lib.storage_authority_sql.operations_pkg._turns_lifecycle import (
         _turn_recovery_projection_budget,
     )
-    from lib.storage_sidecar.projection_codec import (
+    from lib.storage_authority_sql.projection_codec import (
         STORAGE_PROJECTION_MAX_HYDRATION_RATIO,
     )
-    from lib.storage_sidecar.turn_projection_cache import (
+    from lib.storage_authority_sql.turn_projection_cache import (
         PROJECTION_CACHE_CHARGE_MULTIPLIER,
     )
 

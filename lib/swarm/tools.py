@@ -17,8 +17,8 @@ Two levels of swarm tools:
 
   2. **SUB_AGENT_TOOLS** — granted to each sub-agent ON TOP of its
      role-scoped tool list. These are strictly the artifact tools:
-     sub-agents can store/read/list, but **cannot** spawn, await, or
-     query siblings — they have no view of the swarm at all.
+     sub-agents can store/read/list. Exact-run messaging is inherited from
+     the current parent catalog; workers cannot spawn, await or activate peers.
 
 Removed in the async migration (no longer exist):
   • ``check_agents``       — async push removes the need to poll status
@@ -28,6 +28,9 @@ Removed in the async migration (no longer exist):
 
 
 from lib.swarm.message_contract import SEND_AGENT_MESSAGE_TOOL, GET_AGENT_MESSAGES_TOOL
+
+TEAM_MESSAGE_TOOL_NAMES = frozenset(tool['function']['name'] for tool in
+                                   (SEND_AGENT_MESSAGE_TOOL, GET_AGENT_MESSAGES_TOOL))
 
 
 # ═══════════════════════════════════════════════════════════
@@ -55,8 +58,6 @@ SUB_AGENT_DENYLIST = frozenset({
     'get_agent_result',
     'ask_human',
 
-    'send_agent_message',
-    'get_agent_messages',
     'set_approval_delegate',
     # kill is control-plane authority over background handles (including
     # sibling agents); a worker must never hold it.
@@ -154,24 +155,18 @@ def _build_spawn_agents_description() -> str:
         '/'.join(sorted(SUB_AGENT_DENYLIST - {'await_agents'})),
     )
     return (
-        "Launch one-off independent subtasks concurrently. For a named worker "
-        "you can assign again later, use manage_agents. Returns immediately with an "
-        "async handle; each agent has its own session/tools, and results arrive "
-        "later as `<swarm-update>` messages.\n\n"
-
-        "Use send_agent_message with the returned agent_id and swarm_run_id "
-        "to add bounded context to an existing pending/running child. It starts "
-        "no new work and does not grant permissions. get_agent_messages reads "
-        "actual input receipts on demand, not in a polling loop. manage_agents "
-        "assign is a new run for an idle identity, not live steering.\n\n"
+        "Launch independent subtasks concurrently; use manage_agents for reusable workers. "
+        "Returns an async handle immediately; results arrive as `<swarm-update>` messages. "
+        "send_agent_message adds context using exact agent_id + swarm_run_id; "
+        "get_agent_messages reads input receipts on demand. Messages grant no permissions. "
+        "manage_agents assign starts an idle identity, never steers a live run.\n\n"
         "Roles and exact tool scopes:\n"
         f"{role_catalogue}\n\n"
         "Choose this for 2+ independent branches or context isolation; keep trivial or sequential "
         "work local. Delegate MCP tools via the `tools` allowlist instead of loading "
         "them yourself. If the task needs a tool not listed by any specialist, use 'general'. "
         "Sub-agents cannot spawn or ask the user; provide self-contained objectives. "
-        "If a sub-agent reports a missing tool, Re-spawn the same task with role='general' or a covering role; "
-        "preserve scope and finish the task.\n\n"
+        "When a worker reports a missing tool, Re-spawn the same task with general or a covering role; preserve scope.\n\n"
         "Put all parallel agents in one `agents[]` call. Use `depends_on` only "
         "for a true prerequisite; otherwise maximize parallelism. This is "
         "fire-and-forget: continue useful local work or end the turn for "

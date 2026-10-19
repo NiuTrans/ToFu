@@ -20,7 +20,7 @@ from urllib.parse import urlparse
 
 from lib.log import get_logger
 from lib.model_catalog import _creator_identity
-from lib.provider_headers import split_header_secrecy
+from lib.provider.provider_headers import split_header_secrecy
 
 from .domain import (
     CONTRACT_VERSION,

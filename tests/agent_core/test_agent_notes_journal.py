@@ -75,7 +75,7 @@ class JournalContextTest(unittest.TestCase):
         ctx = get_context_for_prompt(self.path)
         for name in ('CLAUDE.md', 'AGENTS.md', '.cursorrules', 'COPILOT.md'):
             self.assertIn(f'Unique mandatory rule from {name}.', ctx)
-        self.assertIn('MANDATORY', ctx)
+        self.assertIn('Applies only within:', ctx)
         self.assertIn('Project Journal — JOURNAL.md', ctx)
 
     def test_long_project_rules_are_not_clipped(self):
@@ -116,7 +116,7 @@ class JournalContextTest(unittest.TestCase):
 
 class AgentArtifactRegistryTest(unittest.TestCase):
     def test_known_and_future_names_are_recognised(self):
-        from lib.agent_artifacts import KNOWN_ARTIFACT_NAMES, is_agent_artifact
+        from lib.agent_loop.agent_artifacts import KNOWN_ARTIFACT_NAMES, is_agent_artifact
         for name in (*KNOWN_ARTIFACT_NAMES, '.tofu_cache', '.tofu_whatever_2027',
                      '/some/project/.tofu_trash', '.tofu/'):
             self.assertTrue(is_agent_artifact(name), name)
@@ -124,7 +124,7 @@ class AgentArtifactRegistryTest(unittest.TestCase):
             self.assertFalse(is_agent_artifact(name), name)
 
     def test_gitignore_pattern_is_a_single_glob(self):
-        from lib.agent_artifacts import ARTIFACT_PREFIX, GITIGNORE_PATTERN
+        from lib.agent_loop.agent_artifacts import ARTIFACT_PREFIX, GITIGNORE_PATTERN
         self.assertEqual(GITIGNORE_PATTERN, ARTIFACT_PREFIX + '*')
 
 

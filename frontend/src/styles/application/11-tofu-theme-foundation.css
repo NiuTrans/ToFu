@@ -479,102 +479,7 @@
 }
 /* Pinned zone removed — replaced by folders */
 
-/* ══════════════════════════════════════════════════════
-   🕹️ PIXEL ART SYSTEM — identity through BORDER + FONT
-   SNES-style 3D borders: light top-left, dark bottom-right.
-   JetBrains Mono for cute monospace text in buttons/toggles.
-   Pixel identity = square corners (4px radius) +
-   directional borders + bottom drop shadow + press-down :active.
-
-   Technique: 2px border with per-side colors (FFFCF6 top/left,
-   A89878 bottom/right) + 0 2px 0 drop-shadow.
-   Font: JetBrains Mono 600 for crisp, dark (#5C4A33) text.
-   ══════════════════════════════════════════════════════ */
-
-/* ── New Chat — buttered-toast primary button ──
-   A golden toast-crust gradient (linear) topped by a soft melting-butter
-   sheen (radial highlight) — the Jon Kantner stacked-gradient skeuomorphic
-   recipe. Puffy "bread" depth via an inset top butter-rim + a warm baked
-   bottom crust shadow. Drop shadow stays in tofu's neutral warm-charcoal
-   clay vocabulary (rgba(92,72,44,…) — NO accent glow; guarded by
-   tests/frontend/test_frontend_new_chat_btn_style.py, which also rewrites the
-   rgba(92,72,44,0.10) token, so keep it present). */
-[data-theme="tofu"] .new-chat-btn{
-  background:
-    radial-gradient(58% 48% at 22% 32%,rgba(165,100,38,0.16) 0%,transparent 62%),
-    radial-gradient(52% 46% at 78% 66%,rgba(165,100,38,0.13) 0%,transparent 60%),
-    radial-gradient(42% 60% at 90% 22%,rgba(175,105,42,0.11) 0%,transparent 56%),
-    radial-gradient(100% 130% at 50% -8%,rgba(255,246,222,0.28) 0%,rgba(255,246,222,0) 46%),
-    linear-gradient(180deg,#E6C486 0%,#D8B168 56%,#CA9F52 100%);
-  color:#5A3A16;
-  border:1px solid rgba(150,100,45,0.34);
-  border-radius:12px;
-  box-shadow:0 1px 2px rgba(92,72,44,0.08),0 4px 12px rgba(92,72,44,0.10),inset 0 1px 0 rgba(255,248,228,0.34),inset 0 -3px 4px rgba(150,95,40,0.20);
-  font-family:var(--sans-body);
-  font-size:var(--font-size-md);font-weight:600;letter-spacing:0.01em;line-height:1;
-  text-transform:none;
-  text-shadow:0 1px 0 rgba(255,250,232,0.45);
-  padding:10px var(--space-4);
-  margin:0;
-  width:auto;
-  position:relative;
-  clip-path:none;
-  image-rendering:auto;
-  transition:background 0.18s ease,box-shadow 0.18s ease,transform 0.15s cubic-bezier(.34,1.56,.64,1)
-}
-[data-theme="tofu"] .new-chat-btn:hover{
-  background:
-    radial-gradient(58% 48% at 22% 32%,rgba(165,100,38,0.14) 0%,transparent 62%),
-    radial-gradient(52% 46% at 78% 66%,rgba(165,100,38,0.11) 0%,transparent 60%),
-    radial-gradient(100% 130% at 50% -8%,rgba(255,248,226,0.34) 0%,rgba(255,248,226,0) 46%),
-    linear-gradient(180deg,#EFCA8C 0%,#E2BA6F 56%,#D3A85A 100%);
-  color:#4E3213;
-  box-shadow:0 2px 4px rgba(92,72,44,0.12),0 7px 18px rgba(92,72,44,0.16),inset 0 1px 0 rgba(255,250,232,0.42),inset 0 -3px 4px rgba(150,95,40,0.22);
-  transform:translateY(-1px)
-}
-[data-theme="tofu"] .new-chat-btn:active{
-  transform:translateY(0);
-  box-shadow:var(--clay-pressed),inset 0 2px 4px rgba(150,95,40,0.35);
-  background:linear-gradient(180deg,#D29A4A 0%,#BC833B 100%)
-}
-[data-theme="tofu"] .new-chat-btn svg{
-  transition:transform 0.2s ease;
-  width:13px;height:13px;
-  stroke-width:2.2;
-  filter:none
-}
-[data-theme="tofu"] .new-chat-btn:hover svg{
-  transform:rotate(90deg)
-}
-/* Toasted-bread grain: an organic fractal-noise texture (inline SVG
-   feTurbulence), multiply-blended low so it reads as a fine baked grain,
-   NOT a mechanical dot grid. Sits above the crust, below the label. */
-[data-theme="tofu"] .new-chat-btn::before{
-  content:"";
-  position:absolute;
-  inset:1px;
-  border-radius:inherit;
-  pointer-events:none;
-  z-index:0;
-  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='52'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.82' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
-  background-size:120px 52px;
-  mix-blend-mode:multiply;
-  opacity:0.30
-}
-/* Toasted corners: a soft warm vignette so the edges look more baked. */
-[data-theme="tofu"] .new-chat-btn::after{
-  content:"";
-  position:absolute;
-  inset:0;
-  border-radius:inherit;
-  pointer-events:none;
-  z-index:0;
-  background:radial-gradient(120% 135% at 50% 42%,transparent 62%,rgba(140,80,30,0.14) 100%);
-  mix-blend-mode:multiply
-}
-[data-theme="tofu"] .new-chat-btn > *{position:relative;z-index:1}
-[data-theme="tofu"] .new-chat-btn:hover::before{opacity:0.24}
-
+/* New Chat uses the shared flat primary action in shell navigation. */
 /* ── Tofu theme: sidebar action row ── */
 [data-theme="tofu"] .sidebar-action-row{padding:10px 10px 6px}
 [data-theme="tofu"] .folder-dialog{background:#FDF8F3;border-color:#E8D5C0}
@@ -610,7 +515,7 @@
 [data-theme="tofu"] .folder-tab-menu-item:hover{background:rgba(196,149,106,0.1)}
 [data-theme="tofu"] .folder-tab-menu-delete:hover{color:#D4544A;background:rgba(212,84,74,0.08)}
 
-[data-theme="tofu"] .folder-tab-dot.streaming{animation:tofuBreathing 2.2s cubic-bezier(0.45,0.05,0.55,0.95) infinite}
+[data-theme="tofu"] .folder-tab-dot.streaming{animation:folderDotPulse 2.2s ease-in-out infinite}
 
 /* ── Message avatar — clean, no frame, 40×40 ── */
 [data-theme="tofu"] .message-avatar img,[data-theme="tofu"] .message-avatar svg{filter:none}
@@ -652,138 +557,9 @@
   letter-spacing:0.02em
 }
 
-/* ══════════════════════════════════════════════════════
-   🕹️ Topbar feature launchers (Paper / My Day / Trading) +
-   update btn — previously UNSTYLED in tofu, so they rendered as
-   flat ghost buttons clashing with the beveled pixel buttons in
-   the sidebar. Bring them into the same SNES-bevel language:
-   warm parchment fill, light top-left / dark bottom-right border,
-   JetBrains Mono label, steps() press-down. Active = kinako fill.
-   ══════════════════════════════════════════════════════ */
-[data-theme="tofu"] .topbar-tool-btn,
-[data-theme="tofu"] .update-btn{
-  height:28px;
-  border-radius:4px;
-  border:1.5px solid rgba(194,188,164,0.5);
-  border-top-color:rgba(255,252,246,0.6);
-  border-left-color:rgba(255,252,246,0.6);
-  border-right-color:rgba(168,152,120,0.4);
-  border-bottom-color:rgba(168,152,120,0.4);
-  background:linear-gradient(180deg, rgba(245,242,234,0.6) 0%, rgba(235,232,222,0.6) 100%);
-  box-shadow:0 1px 0 rgba(154,144,122,0.25);
-  color:#7C6A4E;
-  font-family:var(--sans-body);
-  font-size:var(--font-size-xs);
-  font-weight:600;
-  letter-spacing:0.02em;
-  transition:transform 0.08s ease,box-shadow 0.08s ease,color 0.12s,background 0.12s
-}
-[data-theme="tofu"] .topbar-tool-btn:hover,
-[data-theme="tofu"] .update-btn:hover{
-  color:#5C4A33;
-  background:linear-gradient(180deg, rgba(250,247,240,0.85) 0%, rgba(240,237,228,0.85) 100%);
-  border-right-color:rgba(168,152,120,0.55);
-  border-bottom-color:rgba(168,152,120,0.55);
-  transform:translateY(-1px);
-  box-shadow:0 2px 0 rgba(154,144,122,0.25)
-}
-[data-theme="tofu"] .topbar-tool-btn:active,
-[data-theme="tofu"] .update-btn:active{
-  transform:translateY(1px);
-  box-shadow:none
-}
-/* Active launcher (e.g. Paper mode on) — bright kinako selected slot */
-[data-theme="tofu"] .topbar-tool-btn.active{
-  color:#FFF8F0;
-  background:linear-gradient(180deg, #C4956A 0%, #B8895E 100%);
-  border-color:#C4956A;
-  border-top-color:#DEB890;
-  border-left-color:#DEB890;
-  border-right-color:#8A6840;
-  border-bottom-color:#8A6840;
-  text-shadow:0 1px 1px rgba(74,50,20,0.3);
-  box-shadow:0 1px 0 #7A5830
-}
-[data-theme="tofu"] .topbar-tool-btn.active:hover{
-  background:linear-gradient(180deg, #D4A57A 0%, #C8996E 100%);
-  transform:translateY(-1px);
-  box-shadow:0 2px 0 #7A5830
-}
-[data-theme="tofu"] .topbar-tool-btn svg,
-[data-theme="tofu"] .update-btn svg{stroke-width:2.2}
-/* Latency badge — mirror the kinako tool-button shell in the tofu theme. */
-[data-theme="tofu"] .net-latency-badge{
-  height:28px;
-  border-radius:4px;
-  border:1.5px solid rgba(194,188,164,0.5);
-  border-top-color:rgba(255,252,246,0.6);
-  border-left-color:rgba(255,252,246,0.6);
-  border-right-color:rgba(168,152,120,0.4);
-  border-bottom-color:rgba(168,152,120,0.4);
-  background:linear-gradient(180deg, rgba(245,242,234,0.6) 0%, rgba(235,232,222,0.6) 100%);
-  box-shadow:0 1px 0 rgba(154,144,122,0.25);
-  color:#7C6A4E;
-  font-family:var(--sans-body);
-  font-size:var(--font-size-xs);
-  font-weight:600;
-  letter-spacing:0.02em
-}
-[data-theme="tofu"] .net-latency-badge:hover{
-  color:#5C4A33;
-  background:linear-gradient(180deg, rgba(250,247,240,0.85) 0%, rgba(240,237,228,0.85) 100%);
-  border-right-color:rgba(168,152,120,0.55);
-  border-bottom-color:rgba(168,152,120,0.55)
-}
-[data-theme="tofu"] .net-latency-badge .net-ms{color:#9A8A6E}
+/* Topbar and latency controls inherit shared shell geometry and colors. */
 
-/* ══════════════════════════════════════════════════════
-   🕹️ Send btn — pixel art primary action button
-   Warm kinako fill, NES 3D shadow, press-down on click
-   ══════════════════════════════════════════════════════ */
-/* ══════════════════════════════════════════════════════
-   🕹️ Send btn — SNES bordered square (NO clip-path!)
-   Clean 2px border with light top-left / dark bottom-right
-   ══════════════════════════════════════════════════════ */
-[data-theme="tofu"] .send-btn{
-  background:var(--accent);
-  color:#FFFCF6;
-  border:1px solid transparent;
-  border-radius:var(--radius-sm);
-  font-weight:600;
-  position:relative;overflow:visible;
-  box-shadow:var(--clay-sm);
-  clip-path:none;
-  image-rendering:auto;
-  transition:background 0.18s ease,box-shadow 0.18s ease
-}
-[data-theme="tofu"] .send-btn:hover{
-  background:var(--accent-hover);
-  box-shadow:var(--clay-md);
-  transform:none
-}
-[data-theme="tofu"] .send-btn:active{
-  transform:none;
-  box-shadow:var(--clay-pressed);
-  background:var(--accent-hover)
-}
-/* Icon — slight nudge on hover */
-[data-theme="tofu"] .send-btn svg{
-  transition:transform 0.12s ease
-}
-[data-theme="tofu"] .send-btn:hover svg{
-  transform:translate(1px,-1px)
-}
-/* Disabled state — muted */
-[data-theme="tofu"] .send-btn:disabled{
-  background:var(--bg-active);
-  color:var(--text-tertiary);
-  border:1px solid var(--border);
-  box-shadow:none;
-  opacity:0.5
-}
-[data-theme="tofu"] .send-btn:disabled::before,
-[data-theme="tofu"] .send-btn:disabled::after{display:none}
-
+/* Send/stop use the shared composer intent states. */
 /* Attach button — quiet ghost icon */
 [data-theme="tofu"] .attach-btn{
   color:var(--text-secondary);
@@ -797,62 +573,8 @@
 [data-theme="tofu"] .attach-btn:active{
   transform:scale(.94)
 }
-/* Stop btn — calm solid, gentle pulse */
-[data-theme="tofu"] .send-btn.stop-btn{
-  background:var(--error-text);
-  border:1px solid transparent;
-  box-shadow:var(--clay-sm);
-  animation:tofuPixelPulse 1.8s ease-in-out infinite
-}
-[data-theme="tofu"] .send-btn.stop-btn:hover{
-  background:#9E4E3E;
-  box-shadow:var(--clay-md)
-}
-[data-theme="tofu"] .send-btn.stop-btn:active{
-  transform:none;
-  box-shadow:var(--clay-pressed);
-  animation:none
-}
-/* Gentle pulse for stop */
-@keyframes tofuPixelPulse{
-  0%,100%{opacity:1}
-  50%{opacity:0.82}
-}
 
-/* ══════════════════════════════════════════════════════
-   🕹️ Action buttons — rounded icon buttons
-   ══════════════════════════════════════════════════════ */
-/* ── Action buttons — pixel icon buttons with 3D frame ── */
-[data-theme="tofu"] .action-btn{
-  border-radius:4px;
-  border:1.5px solid rgba(194,188,164,0.4);
-  border-top-color:rgba(255,252,246,0.6);
-  border-left-color:rgba(255,252,246,0.6);
-  border-right-color:rgba(168,152,120,0.4);
-  border-bottom-color:rgba(168,152,120,0.4);
-  background:linear-gradient(180deg, rgba(245,242,234,0.5) 0%, rgba(235,232,222,0.5) 100%);
-  color:#6B5A40;
-  box-shadow:0 1px 0 rgba(154,144,122,0.3);
-  clip-path:none;
-  transition:color 0.15s,background 0.15s,transform 0.08s ease,box-shadow 0.08s ease
-}
-[data-theme="tofu"] .action-btn:hover{
-  background:linear-gradient(180deg, rgba(251,248,240,0.7) 0%, rgba(242,239,229,0.7) 100%);
-  color:#4A3820;
-  box-shadow:0 2px 0 rgba(154,144,122,0.3), 0 2px 6px rgba(74,63,47,0.06);
-  transform:translateY(-1px)
-}
-[data-theme="tofu"] .action-btn:active{
-  transform:translateY(1px);
-  box-shadow:0 0 0 rgba(154,144,122,0.3);
-  background:linear-gradient(180deg, rgba(232,229,219,0.7) 0%, rgba(226,223,212,0.7) 100%)
-}
-[data-theme="tofu"] .action-btn.active{
-  color:#8E6B48;
-  background:rgba(196,149,106,0.14);
-  border-color:rgba(196,149,106,0.35);
-  box-shadow:inset 0 1px 2px rgba(0,0,0,0.06)
-}
+/* Action controls use the shared composer control owner. */
 [data-theme="tofu"] .conv-streaming-dot{
   background:#BB9572;
   border-radius:50%;

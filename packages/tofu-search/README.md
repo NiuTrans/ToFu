@@ -28,6 +28,13 @@ stays dependency-free when used standalone.
 - **Three-stage deduplication**: canonical URLs (fragments/tracking parameters
   removed), SERP title/snippet similarity, then fetched-body mirror detection.
   Cross-engine hits are retained as ranking consensus instead of discarded.
+
+- **Automatic evidence quality**: distinguish substantive lexical evidence,
+  weak generic-word matches and unverified candidates. Structured constraints
+  and outbound link inventories do not count as subject evidence. Bounded
+  recovery preserves the original query/freshness; explicit engines never widen.
+  Site scopes constrain both initial results and one-hop links. Lexical evidence
+  is not factual verification; uncertain candidates remain available for follow-up.
 - **Concurrent page fetching**: Race-to-N strategy with SSL fallback + a
   per-domain circuit breaker.
 - **Adaptive proxy strategy**: when a proxy is available each engine tries

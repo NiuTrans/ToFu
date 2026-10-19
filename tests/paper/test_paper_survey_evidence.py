@@ -58,7 +58,7 @@ def test_gap_synonyms_and_counterevidence_survive_identity_gate():
 
 
 def test_retrieval_cancellation():
-    from lib.llm_errors import AbortedError
+    from lib.llm.llm_errors import AbortedError
     with pytest.raises(AbortedError):
         survey._survey_working_set(_papers(100), 'recall', lambda: True)
 

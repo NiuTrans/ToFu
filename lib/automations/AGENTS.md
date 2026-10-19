@@ -19,6 +19,9 @@ step transitions. Start at `docs/modules/scheduling_ops.md` and the executable
   Publication deletes obsolete pure clock transport, retaining accepted runs and
   the latest bounded failure. Generic enqueue rejects reserved automation kinds.
 - `events.py` owns frozen task-start envelopes and bounded subscription prefixes;
+  `contract.py` evaluates that context's small vocabulary directly from the
+  canonical schema, falling back to the full validator for new semantics. Keep
+  full-schema differential tests and cold HTTP evidence; never duplicate limits.
   `turn.attempt.start` atomically produces subscribed transport at physical entry.
   `event_delivery.py` checkpoints bounded indexed fanout in that transport;
   typed completion settles and retires it after the heartbeat joins, preserving

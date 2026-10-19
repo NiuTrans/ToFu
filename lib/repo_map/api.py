@@ -22,7 +22,6 @@ class RepositoryScanner(Protocol):
 def generate_repo_map(root: str,
                       path: str = '',
                       focus: str = '',
-                      max_tokens: int = 2048,
                       chat_rel_paths: set[str] | None = None,
                       with_rank: bool = True,
                       include_tests: bool = False, *,
@@ -51,5 +50,4 @@ def generate_repo_map(root: str,
         scores = {p: float(len(repo.tags.get(p, ())))
                   for p in repo.files if repo.tags.get(p)}
     scores = ensure_scores(repo, scores)
-    return render_map(repo, scores, max_tokens=max_tokens,
-                      chat_rel_paths=chat_rel_paths)
+    return render_map(repo, scores, chat_rel_paths=chat_rel_paths)

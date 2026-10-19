@@ -23,6 +23,7 @@ from lib.orchestration.run_status import (
 EXECUTION_JOURNAL_EVENT_TYPES = (
     'execution_journal_start', 'execution_journal_ready',
     'execution_effect_prepared', 'execution_effect_started', 'execution_effect_completed',
+    'execution_account_frontier',
 )
 
 EVENT_PREVIEW_CHARS = 200
@@ -33,7 +34,7 @@ EVENT_TIMELINE_PREVIEW_CHARS = 120
 # frames.  Unknown future events fail open for persistence in ``is_durable``.
 _EVENT_SPECS: dict[str, dict] = {
     **{name: {'durable': True, 'reduce': False, 'timeline': False}
-       for name in (*EXECUTION_JOURNAL_EVENT_TYPES, 'execution_recovery_claim')},
+       for name in (*EXECUTION_JOURNAL_EVENT_TYPES, 'execution_recovery_claim', 'execution_recovery_consumed')},
     **{name: {'durable': True, 'reduce': False, 'timeline': False}
        for name in CONTINUITY_EVENT_TYPES},
     'fanout_expanded': {'durable': True, 'reduce': True, 'timeline': True},
@@ -197,4 +198,6 @@ def live_event_projection(event: dict) -> dict:
     """Keep recovery bodies durable without duplicating them in live buffers/push."""
     if event.get('type') == 'execution_effect_completed':
         return {key: value for key, value in event.items() if key != 'result'}
+    if event.get('type') == 'execution_account_frontier':
+        return {key: value for key, value in event.items() if key != 'frontier'}
     return event

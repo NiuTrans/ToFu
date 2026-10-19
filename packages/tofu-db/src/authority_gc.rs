@@ -755,11 +755,16 @@ mod tests {
     }
 
     fn authority_with_orphan() -> (Arc<DeterministicVfs>, AuthorityDatabase, BlockId, EntityKey) {
+        authority_with_orphan_overlay(true)
+    }
+
+    fn authority_with_orphan_overlay(overlay: bool) -> (Arc<DeterministicVfs>, AuthorityDatabase, BlockId, EntityKey) {
         let vfs = Arc::new(DeterministicVfs::new(None));
         vfs.create_dir(Path::new("/data")).unwrap();
         vfs.sync_directory(Path::new("/")).unwrap();
         let mut database =
             AuthorityDatabase::initialize_with_vfs(Path::new("/data"), vfs.clone()).unwrap();
+        database.set_write_overlay_for_test(overlay);
         let key = EntityKey::new(7, 11, "record", b"live").unwrap();
         let mut transaction = database.begin(7, 11).unwrap();
         database
@@ -1119,18 +1124,21 @@ mod tests {
 
     #[test]
     fn session_releases_marks_when_rewrite_needs_the_full_temporary_budget() {
-        let (vfs, mut database, _, _) = authority_with_orphan();
+        // Isolate the explicit segment rewrite from disposable overlay cursor
+        // pages; their packing order must not choose this test's victim.
+        let (vfs, mut database, _, _) = authority_with_orphan_overlay(false);
         let live = database
             .commit_block_payload_for_test(b"small-live-payload")
             .unwrap();
         let dead = database
             .write_orphan_block_for_test(&vec![13; 3 * 1024 * 1024])
             .unwrap();
-        database
-            .compact_payload_blocks_for_test(&[live, dead])
-            .unwrap();
+        let packed = database.engine_mut_for_test().compact_payload_blocks(&[live, dead]).unwrap();
         database.checkpoint_for_test().unwrap();
-        let reference = database.engine_mut_for_test().payload_segment_references()[0];
+        // Checkpoint may publish unrelated entity pages in another catalog
+        // position. The temporary budget belongs to this exact victim segment.
+        let reference = *database.engine_mut_for_test().payload_segment_references().iter()
+            .find(|reference| reference.segment_id == packed.segment_id).unwrap();
         let budget = AuthorityGarbageCollectionBudget {
             maximum_temporary_bytes: reference.file_bytes,
             ..test_budget()

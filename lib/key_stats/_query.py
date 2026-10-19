@@ -20,7 +20,7 @@ from lib.key_stats._state import (
     _pair_key,
     _update_store_unlocked,
 )
-from lib.key_stats._enable import _is_last_resort_unlocked
+from lib.key_stats._enable import _credential_auto_disabled, _is_last_resort_unlocked
 
 logger = get_logger(__name__)
 
@@ -69,9 +69,9 @@ def get_today_stats(provider_id: str, key_name: str) -> dict:
         exhausted = bool(entry.get('exhausted'))
         total = s + f
         sr = (s / total) if total else None
-        auto_disabled = (total >= MIN_ATTEMPTS
-                         and sr is not None
-                         and sr < MIN_SUCCESS_RATE)
+        auto_disabled = _credential_auto_disabled(entry)
+        if auto_disabled and not exhausted:
+            last_err = str(entry.get('last_credential_error') or '')
         override = _cache['overrides'].get(pk)
         last_resort = _is_last_resort_unlocked(pk, siblings)
         if override is None:
@@ -81,6 +81,7 @@ def get_today_stats(provider_id: str, key_name: str) -> dict:
         return {
             'success': s,
             'failure': f,
+            'credential_failures': int(entry.get('credential_failures') or 0),
             'rate_limited': rl,
             'consecutive_429': cons429,
             'gateway_errors': gw,
@@ -136,9 +137,9 @@ def get_all_stats() -> dict:
             exhausted = bool(entry.get('exhausted'))
             total = s + f
             sr = (s / total) if total else None
-            auto_disabled = (total >= MIN_ATTEMPTS
-                             and sr is not None
-                             and sr < MIN_SUCCESS_RATE)
+            auto_disabled = _credential_auto_disabled(entry)
+            error_field = ('last_credential_error'
+                           if auto_disabled and not exhausted else 'last_error')
             override = _cache['overrides'].get(pk)
             prov_id = pk.split('::', 1)[0] if '::' in pk else 'default'
             siblings = siblings_by_provider.get(prov_id, [])
@@ -150,6 +151,7 @@ def get_all_stats() -> dict:
             keys_out[pk] = {
                 'success': s,
                 'failure': f,
+                'credential_failures': int(entry.get('credential_failures') or 0),
                 'rate_limited': rl,
                 'consecutive_429': cons429,
                 'gateway_errors': gw,
@@ -160,7 +162,7 @@ def get_all_stats() -> dict:
                 'last_resort': last_resort,
                 'override': override,
                 'enabled': enabled,
-                'last_error': str(entry.get('last_error') or ''),
+                'last_error': str(entry.get(error_field) or ''),
                 'exhausted_models': dict(entry.get('exhausted_models') or {}),
             }
         return {

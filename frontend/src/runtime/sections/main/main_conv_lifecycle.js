@@ -35,7 +35,12 @@ function _conversationLoadFailureText(error) {
     ? `${withDetail}\nRequest ID: ${requestId}` : withDetail;
 }
 
+// Fence authoritative link resolution against subsequent navigation (including drafts).
+const _projectConversationNavigation = createProjectConversationNavigation();
+
 function newChat() {
+
+  _projectConversationNavigation.invalidate();
   _conversationModelController.begin();
   _purgeEmptyConvs();
   const prevConv = getActiveConv();
@@ -64,6 +69,9 @@ function newChat() {
   const hasInput = _hasProjectComposerDraft();
   _conversationProjectController.begin();
   activeConvId = null;
+  runtimeScope.ConversationSurfacePresentation?.activateConversation?.(null);
+
+  composerTranslationStatus.refresh();
   renderComposerModelNotice(document.getElementById('composerModelNotice'), null);
   runtimeScope.updateBackgroundActivity?.();
   sessionStorage.removeItem('tofu_activeConvId');
@@ -74,40 +82,49 @@ function newChat() {
   runtimeScope.PaperPreviewPresentation?.activateConversation(null);
   runtimeScope.activateTurnCtxConversation?.(null);
   /* Show folder context in topbar when creating a new chat from folder view */
-  const _newChatFolderId = typeof getActiveFolderId === 'function' ? getActiveFolderId() : null;
+  const selectedFolderId = typeof getActiveFolderId === 'function' ? getActiveFolderId() : null;
+  // New draft identity owns confirmed folder defaults once, even with text.
+  // Carrying an explicit target/private draft preserves its original identity.
+  _conversationProjectController.startDraft({
+    folderId: selectedFolderId,
+    defaults: typeof folderDefaultWorkspace === 'function'
+      ? folderDefaultWorkspace(selectedFolderId) : null,
+    preserveExplicit: !prevConv && hasInput,
+  });
+  const _newChatFolderId = _conversationProjectController.captureDraftIdentity().folderId;
   const _newChatFolder = _newChatFolderId && typeof getFolderById === 'function' ? getFolderById(_newChatFolderId) : null;
   const topbarEl = document.getElementById("topbarTitle");
   const _newChatLabel = _conversationDisplayTitle(
     'New Chat', t('chat.newConversation'));
   topbarEl.removeAttribute('data-i18n');
   topbarEl.removeAttribute('data-i18n-once');
-  if (_newChatFolder) {
-    topbarEl.innerHTML = `${escapeHtml(_newChatLabel)} <span class="topbar-folder-badge" style="color:${_newChatFolder.color || 'var(--text-tertiary)'}">● ${escapeHtml(_newChatFolder.name)}</span>`;
-  } else {
-    topbarEl.textContent = _newChatLabel;
-  }
+  topbarEl.textContent = _newChatLabel;
   renderConversationList();
   runtimeScope.DebugPresentationState?.clear();
   /* Welcome screen: show folder indicator when new chat will be assigned to a folder */
-  const _folderBadgeHtml = _newChatFolder
-    ? `<div class="welcome-folder-badge"><span class="welcome-folder-dot" style="color:${_newChatFolder.color || '#888'}">●</span> ${escapeHtml(_newChatFolder.name)}</div>`
-    : '';
   document.getElementById("chatInner").innerHTML =
-    `<div class="welcome" id="welcome"><div class="welcome-icon"><img ${brandLogoImgAttrs(64)}></div><h2 class="tofu-brand"><span class="tofu-brand-t">T</span><span class="tofu-brand-o1">o</span><span class="tofu-brand-f">f</span><span class="tofu-brand-u">u</span><small>豆腐</small></h2>${_folderBadgeHtml}<div class="feature-pills">${_welcomePillsHtml()}</div></div>`;
+    `<div class="welcome" id="welcome"><div class="welcome-icon"><img ${brandLogoImgAttrs(64)}></div><h2 class="tofu-brand"><span class="tofu-brand-t">T</span><span class="tofu-brand-o1">o</span><span class="tofu-brand-f">f</span><span class="tofu-brand-u">u</span><small>豆腐</small></h2><div class="feature-pills">${_welcomePillsHtml()}</div></div>`;
+  paintNewChatFolderBadges(document, _newChatFolder || null);
   buildTurnNav(null);
   renderPendingQueueUI(null);
   // A brand-new conversation has no latch — hide any lingering banner.
   updateSendButton();
-  if (!hasInput) {
-    _clearProjectStateLocal();
-    _resetToolsToDefaults();
-  }
-  /* The Project-Brain surfaces re-resolve via the _updateProjectUI funnel
-   *   (project.js) — !hasInput reaches it through _clearProjectStateLocal,
-   *   and with pending input the project legitimately stays armed. */
+  if (!hasInput) _resetToolsToDefaults();
+  // Project-Brain surfaces re-resolve through the local _updateProjectUI funnel.
   if (typeof runtimeScope.updateContextBar === 'function') runtimeScope.updateContextBar();
 }
 function loadConversation(id) {
+
+  // Delete this bridge with retained navigation; the typed owner resolves links
+  // outside the loaded catalog without bypassing TurnStore transcript hydration.
+  const missing = _projectConversationNavigation.resolveMissing(id, {
+    contains: (key) => conversations.some((conversation) => conversation.id === key),
+    fetch: (key) => Api.conversations.get(key, { onError: 'throw' }),
+    merge: (row) => mergeConversationCatalogRows([row]),
+    navigate: loadConversation,
+    error: (error) => { if (typeof showToast === 'function') showToast(_conversationLoadFailureText(error), 'error'); },
+  });
+  if (missing) return missing;
   let projectRestoreEligible = _conversationProjectController.begin();
   const modelRestoreEligible = _conversationModelController.begin();
   _purgeEmptyConvs();
@@ -125,33 +142,43 @@ function loadConversation(id) {
      *   provisional default paint onto it. This is the exact path that turned
      *   a mispainted composer into persisted corruption. */
     // Navigation does not commit a draft's model to the outgoing conversation.
-    prevConv.searchMode = searchMode || "multi";
-    prevConv.fetchEnabled = !!fetchEnabled;
-    prevConv.codeExecEnabled = !!codeExecEnabled;
-    prevConv.browserEnabled = !!browserEnabled;
-    prevConv.desktopEnabled = !!desktopEnabled;
-    prevConv.memoryEnabled = !!memoryEnabled;
-    prevConv.schedulerEnabled = !!schedulerEnabled;
-    prevConv.autopilotEnabled = !!autopilotEnabled;
-    prevConv.activeFlow = activeFlow || '';
-    prevConv.imageGenEnabled = !!imageGenEnabled;
-    prevConv.imageGenMode = !!imageGenMode;
-    prevConv.humanGuidanceEnabled = !!humanGuidanceEnabled;
+    const outgoingSettings = {
+      searchMode: searchMode || "multi",
+      fetchEnabled: !!fetchEnabled,
+      codeExecEnabled: !!codeExecEnabled,
+      browserEnabled: !!browserEnabled,
+      desktopEnabled: !!desktopEnabled,
+      memoryEnabled: !!memoryEnabled,
+      schedulerEnabled: !!schedulerEnabled,
+      autopilotEnabled: !!autopilotEnabled,
+      activeFlow: activeFlow || '',
+      imageGenEnabled: !!imageGenEnabled,
+      imageGenMode: !!imageGenMode,
+      humanGuidanceEnabled: !!humanGuidanceEnabled,
+    };
     if (imageGenMode) {
-      prevConv.imageGenModel = _igSelectedModel || 'gemini-3.1-flash-image-preview';
-      prevConv.imageGenProviderId = _igSelectedProviderId || '';
-      prevConv.imageGenCount = _igSelectedCount || 1;
-      prevConv.imageGenAspect = _igSelectedAspect || '1:1';
-      prevConv.imageGenResolution = _igSelectedResolution || '1K';
+      outgoingSettings.imageGenModel = _igSelectedModel || 'gemini-3.1-flash-image-preview';
+      outgoingSettings.imageGenProviderId = _igSelectedProviderId || '';
+      outgoingSettings.imageGenCount = _igSelectedCount || 1;
+      outgoingSettings.imageGenAspect = _igSelectedAspect || '1:1';
+      outgoingSettings.imageGenResolution = _igSelectedResolution || '1K';
     }
     const _prevTaskActive = typeof convIsBusy === 'function' && convIsBusy(prevConv);
     if (!_prevTaskActive) {
-      prevConv.autoTranslate = !!autoTranslate;
+      outgoingSettings.autoTranslate = !!autoTranslate;
     }
-    /* Project bindings change only through explicit selection or send. */
-    _needsDeferredSave = true;
+    /* Project bindings change only through explicit selection or send.
+     * Compare only the captured fields, before mutating the shell: viewing an
+     * unchanged conversation needs neither metadata reconciliation nor a PATCH. */
+    _needsDeferredSave = Object.entries(outgoingSettings).some(
+      ([key, value]) => prevConv[key] !== value,
+    );
+    Object.assign(prevConv, outgoingSettings);
   }
   activeConvId = id;
+  runtimeScope.ConversationSurfacePresentation?.activateConversation?.(id);
+
+  composerTranslationStatus.refresh();
   renderComposerModelNotice(document.getElementById('composerModelNotice'), null);
   const draftOwner = getActiveConv();
   if (draftOwner?._unsentComposerDraft) {
@@ -177,6 +204,9 @@ function loadConversation(id) {
   if (typeof closeBranchPanel === "function") closeBranchPanel();
   const c = conversations.find((x) => x.id === id);
   if (!c) return;
+
+  _restoreConvProject(c);
+  projectRestoreEligible = _conversationProjectController.begin();
   document.getElementById("topbarTitle").textContent =
     _conversationDisplayTitle(c.title, t('chat.newConversation'));
   /* PERF: Use fast-path O(1) active-class swap instead of O(N) full sidebar rebuild.
@@ -192,10 +222,7 @@ function loadConversation(id) {
    * preserves its own scroll anchor while Turn data converges. */
   if (c._turnSnapshotRequired) {
     runtimeScope.requestAuthoritativeConversationRender(c.id);
-    if (projectRestoreEligible()) {
-      _clearProjectStateLocal();
-      projectRestoreEligible = _conversationProjectController.begin();
-    }
+
     void (async () => {
       if (typeof hydrateConversationRuntime !== 'function') {
         console.error('[loadConversation] conversation turn runtime is unavailable');
@@ -704,12 +731,14 @@ async function _buildConvSettings(conv) {
   );
 }
 
-async function _buildConvSubmission(conv) {
-  const configInputs = _buildConvConfigInputs(conv);
+async function _buildConvSubmission(conv, workspace = captureConversationProject(conv)) {
+  // Freeze roots for this command, not a later project choice during parsing.
+  const submissionConv = { ...conv, ...workspace };
+  const configInputs = _buildConvConfigInputs(submissionConv);
   configInputs.overrides.model = conv.model || configInputs.overrides.model;
   configInputs.overrides.thinkingDepth = conv.thinkingDepth;
   return _conversationSettingsResolution.resolveSubmission(
     configInputs,
-    _buildConvSettingsInputs(conv, configInputs.overrides),
+    _buildConvSettingsInputs(submissionConv, configInputs.overrides),
   );
 }

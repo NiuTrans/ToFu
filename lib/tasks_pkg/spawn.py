@@ -71,7 +71,10 @@ def _mark_worker_started(
     """Cross the durable pending→running boundary on the physical worker."""
     phase_lock = scheduling_phase_lock or threading.Lock()
     from lib.observability import measure_task_startup
-    with measure_task_startup('worker_entry'), phase_lock:
+    with measure_task_startup('worker_entry', identity={
+            'task_id': task.get('id'), 'conversation_id': task.get('convId'),
+            'turn_id': task.get('_turnId'), 'attempt_id': task.get('_attemptId'),
+            'user_id': task.get('_userId')}), phase_lock:
         return _mark_worker_started_locked(task, worker_started)
 
 
@@ -84,6 +87,13 @@ def _mark_worker_started_locked(
     terminal = {'done', 'error', 'aborted', 'interrupted'}
     if str(task.get('status') or '') in terminal:
         return False
+    abort_event = task.get('abort_event')
+    if task.get('aborted') or (abort_event is not None and abort_event.is_set()):
+        from lib.llm.llm_errors import AbortedError
+        raise AbortedError('Task cancelled before worker admission')
+
+    from lib.project_dispatch.admission import validate_task
+    validate_task(task)
 
     attempt_id = str(task.get('_attemptId') or task.get('attemptId') or '')
     if attempt_id:
@@ -118,25 +128,13 @@ def _mark_worker_started_locked(
     # a worker (the phase persistence below is best-effort and may itself fail).
     task['_t_last_event'] = worker_entry_observed_at
     task['_dispatch_heartbeat'] = worker_entry_observed_at
+    # Worker ownership is already committed. Publish a start phase before
+    # root admission. Only an actual isolation request emits workspacePreparing
+    # inside the binder; direct and readonly roots do not imply a snapshot.
+    # Tools still wait for binding, and binding errors retain the finalizer.
     project_path = str((task.get('config') or {}).get('projectPath') or '')
-    if project_path or (task.get('config') or {}).get('projectPaths'):
-        # Binding is execution authority: errors must escape to the existing
-        # rejected-start terminal lane, never continue on a different root.
-        from lib.tasks_pkg.workspace_delivery import bind_worker_workspace
-        bind_worker_workspace(task)
-        project_path = str((task.get('config') or {}).get('projectPath') or '')
-        try:
-            from lib.conversations.project_brain import (
-                note_isolated_workspace_signal,
-            )
-            note_isolated_workspace_signal(task, project_path)
-        except Exception as error:
-            # Workspace detection is coordination, not task admission. A later
-            # todo/file signal still creates the same deterministic work item.
-            logger.debug(
-                '[Spawn] isolated Project work signal failed task=%s: %s',
-                task_id[:8] or '?', error,
-            )
+    has_workspace = bool(
+        project_path or (task.get('config') or {}).get('projectPaths'))
     try:
         from lib.agent_core.events import Phase, emit_phase
         emit_phase(
@@ -150,6 +148,40 @@ def _mark_worker_started_locked(
             '[Spawn] worker-entry phase emit failed task=%s: %s',
             task_id[:8] or '?', error,
         )
+    if has_workspace:
+        # Binding is execution authority: errors must escape to the existing
+        # rejected-start terminal lane, never continue on a different root.
+        from lib.tasks_pkg.workspace_delivery import bind_worker_workspace
+        from lib.observability import measure_task_startup
+        with measure_task_startup('workspace_binding', identity={
+                'task_id': task_id, 'conversation_id': task.get('convId'),
+                'turn_id': task.get('_turnId'), 'attempt_id': attempt_id,
+                'user_id': task.get('_userId')}):
+            bind_worker_workspace(task)
+
+        if task.pop('_workspacePreparing', False):
+            try:
+                emit_phase(
+                    task, Phase.WORKING,
+                    detail='Agent worker acquired; starting the task…',
+                    detailKey='stream.phase.workerStarting',
+                )
+            except Exception as error:
+                logger.debug('[Spawn] workspace-ready phase emit failed task=%s: %s',
+                             task_id[:8] or '?', error)
+        project_path = str((task.get('config') or {}).get('projectPath') or '')
+        try:
+            from lib.conversations.project_brain import (
+                note_isolated_workspace_signal,
+            )
+            note_isolated_workspace_signal(task, project_path)
+        except Exception as error:
+            # Workspace detection is coordination, not task admission. A later
+            # todo/file signal still creates the same deterministic work item.
+            logger.debug(
+                '[Spawn] isolated Project work signal failed task=%s: %s',
+                task_id[:8] or '?', error,
+            )
     if worker_started is not None:
         worker_started.set()
     return True
@@ -172,15 +204,42 @@ def _owned_task_callable(
     scheduling_phase_lock: threading.Lock,
 ):
     def _run_owned_task():
-        if not _mark_worker_started(
-                task, worker_started, scheduling_phase_lock):
+        from lib.llm.llm_errors import AbortedError
+        try:
+            admitted = _mark_worker_started(
+                task, worker_started, scheduling_phase_lock)
+        except AbortedError:
+            from lib.turn_verdict import TurnStatus, derive_task_verdict
+            abort_event = task.get('abort_event')
+            if not (task.get('aborted')
+                    or (abort_event is not None and abort_event.is_set())):
+                raise
+            # Internal authority fences also interrupt physical work. They
+            # retain the failure lane; only cooperative Stop is cancellation.
+            verdict = derive_task_verdict(
+                task, {'type': 'aborted', 'finishReason': 'aborted'})
+            if verdict.status is not TurnStatus.INTERRUPTED:
+                raise
+            from lib.tasks_pkg.manager import finalize_chat_task_aborted
+            try:
+                finalize_chat_task_aborted(task)
+            finally:
+                _settle_unscheduled_workspace(task)
+            return None
+        if not admitted:
             _settle_unscheduled_workspace(task)
             return None
+        native_invocation_owned = task.get('_nativePreparedInvocation') is not None
         try:
             return run_task(task)
         except BaseException as error:
-            from lib.tasks_pkg.manager import finalize_chat_task_error
-            finalize_chat_task_error(task, str(error))
+            committed_native_stop=(isinstance(error,asyncio.CancelledError)
+                and native_invocation_owned
+                and task.get('status')=='aborted'
+                and not task.get('_terminalPersistencePending'))
+            if not committed_native_stop:
+                from lib.tasks_pkg.manager import finalize_chat_task_error
+                finalize_chat_task_error(task, str(error))
             raise
         finally:
             _settle_unscheduled_workspace(task)
@@ -390,7 +449,7 @@ def agent_scheduling_snapshot(task_id: str | None = None) -> dict:
     return dict(snapshot(task_id))
 
 
-def spawn_task(task: dict, *, runner=None, executor=None) -> None:
+def spawn_task(task: dict, *, runner=None, executor=None):
     """Submit one registered chat task through the authoritative worker lane."""
     if runner is None:
         from lib.tasks_pkg.orchestrator.api import run_task
@@ -421,6 +480,7 @@ def spawn_task(task: dict, *, runner=None, executor=None) -> None:
             _finalize_rejected_submission(task, error)
         else:
             future.add_done_callback(completed)
+            return future
         return
 
     try:

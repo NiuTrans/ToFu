@@ -36,6 +36,7 @@ def test_conversation_reading_hierarchy_and_disclosure(frontend_visual_page, tmp
         frame.add_script_tag(path=str(ROOT / source))
     frame.evaluate(r"""() => {
       window.BASE_PATH='';window.projectState={active:false};
+      window._i18nLang='en';window.t=key=>key;
       window.escapeHtml=value=>String(value??'').replace(/[&<>"']/g,
         ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
     }""")
@@ -69,6 +70,11 @@ def test_conversation_reading_hierarchy_and_disclosure(frontend_visual_page, tmp
       window.surface=createConversationSurface(document.getElementById('surface'),createClassicConversationRenderers(ports));
       window.render=()=>surface.render(selectConversationViewModel(state));render();
     }""")
+    # Settled reasoning is demand-mounted inside the shared historical process.
+    # Enter it through the same keyboard disclosure that readers use.
+    process = frame.locator('.conversation-history-process > summary')
+    process.focus()
+    process.press('Enter')
     thinking = frame.locator('.thinking-header')
     thinking.focus()
     thinking.press('Enter')
@@ -99,8 +105,9 @@ def test_conversation_reading_hierarchy_and_disclosure(frontend_visual_page, tmp
       tag:el.tagName, size:parseFloat(getComputedStyle(el).fontSize),
       family:getComputedStyle(el).fontFamily
     }))""")
-    assert any(item['tag'] == 'H2' and item['size'] == 18 for item in typography)
-    assert any(item['tag'] == 'H3' and item['size'] == 16 for item in typography)
+    title_size = next(item['size'] for item in typography if item['tag'] == 'H2')
+    subheading_size = next(item['size'] for item in typography if item['tag'] == 'H3')
+    assert title_size > subheading_size > geometry['answerSize']
     assert all(item['size'] == 13 for item in typography if item['tag'] == 'CODE')
 
     assert geometry['answerBorder'] == 'none'

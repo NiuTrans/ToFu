@@ -20,7 +20,7 @@ import time as _real_time
 import pytest
 
 import lib.llm_dispatch.api as api
-from lib.llm_errors import RateLimitError
+from lib.llm.llm_errors import RateLimitError
 
 
 # ── fakes ────────────────────────────────────────────────────────────

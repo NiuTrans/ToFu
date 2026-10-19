@@ -11,8 +11,7 @@ from importlib import import_module
 
 from .domain import (
     CONTRACT_VERSION,
-    MAX_COUNTS,
-    MAX_DOCUMENT_BYTES,
+    ENTITY_COLLECTIONS,
     MAX_ROUTE_SNAPSHOT_BYTES,
     ModelRef,
     ModelRoutingError,
@@ -68,10 +67,8 @@ from .discovered_provider import (
 
 __all__ = [
     "CONTRACT_VERSION",
-    "MAX_COUNTS",
-    "MAX_DOCUMENT_BYTES",
+    "ENTITY_COLLECTIONS",
     "MAX_ROUTE_SNAPSHOT_BYTES",
-    "MAX_REQUEST_ROUTE_SLOTS",
     "ModelRef",
     "ModelRoutingError",
     "NativeModelSelection",
@@ -125,7 +122,6 @@ __all__ = [
 ]
 
 _LAZY_EXPORT_MODULES = {
-    "MAX_REQUEST_ROUTE_SLOTS": "lib.model_routing.dispatch_adapter",
     "RoutedSlotGroup": "lib.model_routing.dispatch_adapter",
     "decode_credential_secret": "lib.model_routing.dispatch_adapter",
     "dispose_routed_slot_group": "lib.model_routing.dispatch_adapter",

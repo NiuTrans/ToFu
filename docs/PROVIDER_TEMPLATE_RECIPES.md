@@ -1,6 +1,6 @@
 # Provider offering recipes
 
-**Owner:** `lib/provider_template_recipes.py`
+**Owner:** `lib/provider/provider_template_recipes.py`
 **Machine contract:** `contracts/provider_offering_recipe_v1.schema.json`
 **Bundled sources:** `lib/model_info/data/*.json` (package catalog), then
 `static/provider_templates/*.json` (deployment overrides), then
@@ -157,7 +157,7 @@ replace an already installed managed Codex ProviderAccess either.
 
 ## Dynamic feed
 
-**Owner:** `lib/provider_template_feed.py`
+**Owner:** `lib/provider/provider_template_feed.py`
 **Cache:** `data/config/provider_template_feed.json` (machine-written; holds
 no secrets and inherits the `data/` export exclusion)
 **Spec:** `tests/providers/test_provider_template_feed.py`

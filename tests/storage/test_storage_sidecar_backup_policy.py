@@ -11,9 +11,9 @@ import time
 import pytest
 
 from lib.storage.errors import StorageError
-from lib.storage_sidecar import backup_policy, durability
-from lib.storage_sidecar.adapters.sqlite import SQLiteBackend
-from lib.storage_sidecar.config import SidecarConfig
+from lib.storage_authority_sql import backup_policy, durability
+from lib.storage_authority_sql.adapters.sqlite import SQLiteBackend
+from lib.storage_authority_sql.config import SidecarConfig
 
 
 pytestmark = pytest.mark.unit
@@ -421,7 +421,7 @@ def test_backup_failure_releases_read_slot_and_concurrency_lease(
             raise StorageError('database_unavailable', 'no capacity')
 
         monkeypatch.setattr(
-            'lib.storage_sidecar.adapters.sqlite.capacity_preflight',
+            'lib.storage_authority_sql.adapters.sqlite.capacity_preflight',
             reject_capacity,
         )
         with pytest.raises(StorageError, match='no capacity'):
@@ -594,7 +594,7 @@ def test_fastpath_budget_rotation_preserves_old_backup_on_verification_failure(
 
     backend._shipper = FakeShipper()
     monkeypatch.setattr(
-        'lib.storage_sidecar.adapters.sqlite._verify_readonly_backup',
+        'lib.storage_authority_sql.adapters.sqlite._verify_readonly_backup',
         fail_verification,
     )
     try:
@@ -748,7 +748,7 @@ def test_backup_target_connection_arms_deadline_handler_and_busy_timeout(tmp_pat
     slot. The shared opener installs the deadline progress handler plus a
     busy_timeout before any statement runs on the target.
     """
-    from lib.storage_sidecar.adapters import sqlite as sqlite_adapter
+    from lib.storage_authority_sql.adapters import sqlite as sqlite_adapter
 
     target = tmp_path / 'target.sqlite3'
     seed = sqlite3.connect(target)
@@ -774,7 +774,7 @@ def test_backup_target_connection_arms_deadline_handler_and_busy_timeout(tmp_pat
 
 def test_backup_target_verification_maps_only_expired_deadlines_to_timeout():
     """The classified timeout is reserved for a genuinely expired deadline."""
-    from lib.storage_sidecar.adapters import sqlite as sqlite_adapter
+    from lib.storage_authority_sql.adapters import sqlite as sqlite_adapter
 
     class _FakeTarget:
         def __init__(self, result=None, error=None):
@@ -815,7 +815,7 @@ def test_backup_verification_abort_releases_lock_slot_and_artifacts(
     tmp_path, monkeypatch,
 ):
     """An interrupted verification aborts the backup and frees every lease."""
-    from lib.storage_sidecar.adapters import sqlite as sqlite_adapter
+    from lib.storage_authority_sql.adapters import sqlite as sqlite_adapter
 
     monkeypatch.setenv('TOFU_STORAGE_FASTPATH', 'off')
     backend = SQLiteBackend(_config(tmp_path))

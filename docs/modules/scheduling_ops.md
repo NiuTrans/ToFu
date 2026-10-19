@@ -26,7 +26,7 @@ click, so authority, idempotency, and blast-radius controls are contractual.
 | Browser My Day digest/reminder lifecycle | `frontend/src/features/myday/background-controller.ts`, composed by `features/background.ts` |
 | Browser My Day panel presentation | `frontend/src/runtime/sections/myday.js` (migration boundary) |
 
-Scheduled subprocess output is drained in 8 KiB nonblocking reads, retaining at most 50,000 stdout and 10,000 stderr characters before accumulation. Continuous output still observes cancellation and the deadline, without extra reader threads. POSIX timeout/cancellation terminates the process group even after its leader exits, grants at most two seconds for graceful exit, then kills surviving descendants. `tests/scheduler/test_scheduler_process_runner.py` measures parent heap under a 16 MiB dual-stream flood (<2 MiB peak).
+Already-cancelled subprocess jobs return typed cancellation without launch; success requires zero exit code without timeout, cancellation or error. Checking only after launch was rejected because termination cannot undo startup effects; cancellation during launch still joins process-tree cleanup. Scheduled subprocess output is drained in 8 KiB nonblocking reads, retaining at most 50,000 stdout and 10,000 stderr characters before accumulation. Continuous output still observes cancellation and the deadline, without extra reader threads. POSIX timeout/cancellation terminates the process group even after its leader exits, grants at most two seconds for graceful exit, then kills surviving descendants. `tests/scheduler/test_scheduler_process_runner.py` measures parent heap under a 16 MiB dual-stream flood (<2 MiB peak).
 
 Owned task polling uses one terminal snapshot renderer in `lib/scheduler/executor/_await.py`: all status/wait paths return complete terminal evidence, errors/aborts remain partial output, and unavailable or nonterminal states never imply success. Waits require a handle, respect parent cancellation, return early on completion, and are bounded to 60 seconds; no-ID polling is a dashboard. This replaces length-only/tail-only results that contradicted the tool promise. Executable contract: `tests/scheduler/test_poll_task_results.py`.
 
@@ -41,34 +41,38 @@ Owned task polling uses one terminal snapshot renderer in `lib/scheduler/executo
 
 Restart must neither lose a durable timer nor execute one occurrence twice; process-local wakeups are hints, the Sidecar row is authoritative, and parse/timezone failures suspend visibly instead of entering a tight poll loop.
 
-Timer Watchers register every accepted live watcher without process/owner count
-admission quotas. `TOFU_TIMER_LIVE_CAP` and `TOFU_TIMER_RESUME_CAP` are retired.
-Startup recovery uses the internal active feed with limit=0 (all rows through
-native index pages) and starts every eligible definition; declared positive
-query limits still select bounded projections. Cross-replica leases and local
-duplicate registration retain single ownership. Actual thread-start failure
-rolls back local registration/lease and reports startup failure; tool creation
-keeps its existing durable cancellation rollback. Native total/active counts
-remain exact integrity observations and migration no longer refuses definition
-513. Waiting watchers share one lazy event loop; blocking storage/model calls
-use demand workers with no active ceiling or retained idle workers. Cancel wakes
-waits. Shutdown joins physical calls and releases leases before task quiescence,
-HTTP/runtime-store closure; failed joins keep dependencies live. Gates include
-`tests/scheduler/test_timer_wait_runtime.py` (32 blocked peers plus healthy work,
-stop/cancellation drain) and 512 waiting watchers sharing one thread.
+Timer Watchers register every accepted live watcher without process/owner count admission quotas. `TOFU_TIMER_LIVE_CAP` and `TOFU_TIMER_RESUME_CAP` are retired. Startup recovery uses the internal active feed with limit=0 (all rows through native index pages) and starts every eligible definition; declared positive query limits still select bounded projections. Cross-replica leases and local duplicate registration retain single ownership. Actual thread-start failure rolls back local registration/lease and reports startup failure; tool creation keeps its existing durable cancellation rollback. Native total/active counts remain exact integrity observations and migration no longer refuses definition 513. Waiting watchers share one lazy event loop; blocking storage/model calls use demand workers with no active ceiling or retained idle workers. Cancel wakes waits. Shutdown joins physical calls and releases leases before task quiescence, HTTP/runtime-store closure; failed joins keep dependencies live. Gates include `tests/scheduler/test_timer_wait_runtime.py` (32 blocked peers plus healthy work, stop/cancellation drain) and 512 waiting watchers sharing one thread.
 
 Clock jobs use `schedule_create` (cron/`once:`); readiness waiters use `timer_create` (single-shot continuation, no cron). Schemas remain within 600/450/1000 combined tokens. Timer creation is resident/direct-call under routed exposure, Tool Search and programmatic compaction; other scheduler tools remain searchable. SQL/native admission accepts predicate-only watchers, and native `max_polls=0` preserves unlimited checks. Human-only restart/redeploy waits remain forbidden.
 
 **Problem:** equal command output can hide model recovery or semantic changes; negative agreement does not validate a future positive edge. **Decision:** predicates use zero LLM calls; hybrid/semantic watchers retain verification and require JSON booleans. Cancellation fences model/tool boundaries; the shared no-progress guard stops repeated tool/result loops. **Alternatives rejected:** permanent output caching and promotion after three negative agreements can miss or falsely accept readiness; code-only errors never acquire an ungrounded model fallback.
 
+Restart resumes durable active timers regardless of creation age, including
+`max_polls=0` watchers. Offline elapsed time does not consume actual poll budget
+or justify rewriting a timer as expired. `TOFU_TIMER_MAX_AGE_HOURS` is retired
+and ignored; cancellation, exhausted actual poll counts, leases and terminal
+states still govern execution. Startup restoration carries each timer's owner
+and never mutates durable status based on wall-clock age.
+
 Committed `ready` is a dispatch obligation: busy/unavailable lanes retry without new checks, poll exhaustion or resume age expiry. Exact conversation command identity deduplicates continuation. Cancelled/foreign-owner calls have no local watcher authority; exceptional loop exit releases the registry/lease for resume. Commands use the shared bounded process runner, explicit owner/project directory; regex readiness requires successful stdout. The 16 MiB flood test retains <2 MiB parent heap and at most 3,500 stdout + 500 stderr characters. No resident worker is added; default 120 polls bound ledger text to about 0.8 MiB, while explicitly unlimited watchers retain growing audit history. Gates: `tests/scheduler/test_timer_readiness_reliability.py`, SQL storage contract and native semantic timer tests.
 
-Conversation-dispatched runs build their task config through
-`build_task_config` in `lib/scheduler/_shared.py`: the timer's `tools_config` wins on
-conflict, otherwise conversation settings carry through — including the
-translation pair (`autoTranslate`, `uiLang`) that every translation trigger
-resolves from `task['config']` alone. A scheduled turn therefore translates
-exactly like an interactive turn of the same conversation.
+**Problem:** executor acceptance can precede failure of the timer's triggered receipt, and a browser list request can predate a successful mutation. **Decision:** a ready watcher retires only after the triggered status CAS is acknowledged; failure retains the obligation and replays the same Turn command, without another executor. A lost CAS never announces success. Browser mutations retain their pending row until a new list read follows any older in-flight read. Click containment uses the original event path, so synchronous pending-row replacement cannot turn an internal action into an outside click and close it. **Alternatives rejected:** retiring on executor acceptance strands active rows; reusing a pre-mutation list restores stale actions. These changes add no worker, cache or periodic read. Fault and real-storage specifications live in `test_timer_dispatch_outcomes.py` and `test_timer_continuation_integration.py`; `test_timer_mutation_reconciliation.py` and the visual timer-panel test cover stale responses and failure recovery.
+
+Timer/proactive conversation-dispatched runs retain `build_task_config` in
+`lib/scheduler/_shared.py`: the timer's `tools_config` wins on conflict, otherwise
+conversation settings carry through — including the translation pair
+(`autoTranslate`, `uiLang`) that every translation trigger resolves from
+`task['config']` alone.
+
+**Problem:** separate swarm defaults invalidated identical strict/portable replay policy.
+**Decision:** only `swarm_autocontinue_reply` uses inactive `resolve_conv_config`, sharing human prompt/route/depth defaults.
+
+Swarm still disables Flow/autopilot/desktop/guidance/scheduling and rejects tool/noncontrol overrides;
+chat-mode expansion cannot add tools. Read-only/manual-approval settings, virtual-user provenance,
+Stop/parent CAS and budgets remain. Plan returns `start_failed` before admission rather than enable guidance.
+
+**Alternatives rejected:** weaker hashes or unvalidated parent config copying. This wake has no accepted attempt
+config witness; nondefault global prompt/tools still differ and rebuild. Contract: `tests/scheduler/test_swarm_continuation_config.py`.
 
 ## Autonomous authority
 
@@ -85,19 +89,7 @@ durable task rows and rebuilds a least-privilege principal from each row's
 owner, but it does not invent owner 1, install personal built-ins, or perform
 global project/peer scans.
 
-The billing-reserve built-in is the sole periodic recovery owner and is policy
-reconciled disabled unless multi-user relay billing is active. The scheduler's
-durable claim prevents duplicate sweeps; request-worker startup creates no
-parallel janitor. Daily-report backfill also uses this worker: it runs every
-six hours, queues a startup hint only when yesterday is absent, and has no
-second six-hour sleeper. Optimizer and backup built-ins preserve
-user-controlled enablement during definition reconciliation.
-The personal backup's finite `max_runtime` derives from the launch-probed
-recovery-copy budget (30 minutes..6 hours by default, explicit ceiling 24
-hours). If retained recovery points make only the transient peak exceed the
-copy budget, a fastpath run may hard-link and fully publish the new point
-before budget-retiring older verified backups; it never rotates the unique
-deep-clean rollback or falls back to a full copy for that exception.
+The billing-reserve built-in is the sole periodic recovery owner and is policy reconciled disabled unless multi-user relay billing is active. The scheduler's durable claim prevents duplicate sweeps; request-worker startup creates no parallel janitor. Daily-report backfill also uses this worker: it runs every six hours, queues a startup hint only when yesterday is absent, and has no second six-hour sleeper. Optimizer and backup built-ins preserve user-controlled enablement during definition reconciliation. The personal backup's finite `max_runtime` derives from the launch-probed recovery-copy budget (30 minutes..6 hours by default, explicit ceiling 24 hours). If retained recovery points make only the transient peak exceed the copy budget, a fastpath run may hard-link and fully publish the new point before budget-retiring older verified backups; it never rotates the unique deep-clean rollback or falls back to a full copy for that exception.
 
 Personal built-ins have an owner-scoped `system_key`; display names are not
 their authority. During reconciliation, an exact-name-and-type row created
@@ -147,16 +139,7 @@ consumer cannot accidentally initialize autonomous execution.
 
 Daily provider detection: see [model registration](../MODEL_REGISTRATION.md#daily-provider-detection).
 
-Daily-report readers gather owner-scoped state. Historical extraction bounds
-candidates before hydration, then derives statistics and its 800-character
-transcript once with a 128-turn retained prefix; lazy failure drops the day.
-Calendar/day counts send explicit local intervals; storage projects Turn
-timestamp scalars, bounds frozen decoding, and returns only distinct counts.
-Reports commit idempotently; the durable owner reconstructs `reports:maintain`.
-Its reconstructible LLM analysis uses the same strict billing-stop admission;
-the same finite actual-429 allowance applies. Explicit scheduler prompts,
-timer/proactive polls, and attended Agent calls do not inherit either narrower
-policy.
+Daily-report readers gather owner-scoped state. Historical extraction bounds candidates before hydration, then derives statistics and its 800-character transcript once with a 128-turn retained prefix; lazy failure drops the day. Calendar/day counts send explicit local intervals; storage projects Turn timestamp scalars, bounds frozen decoding, and returns only distinct counts. Reports commit idempotently; the durable owner reconstructs `reports:maintain`. Its reconstructible LLM analysis uses the same strict billing-stop admission; the same finite actual-429 allowance applies. Explicit scheduler prompts, timer/proactive polls, and attended Agent calls do not inherit either narrower policy.
 
 Daily-report route discovery likewise keeps storage readers, cost aggregation,
 conversation/todo collectors, LLM generation, and scheduler integration
@@ -164,21 +147,7 @@ dormant. The `lib.daily_report` facade resolves each focused owner on the first
 authorized request or scheduled invocation while preserving the same explicit
 owner and principal through the call.
 
-The browser loads My Day write policy with the lazy feature chunk. Its typed
-controller receives the selected report, render/cache seams, and daily API as
-explicit ports. TODO toggles and deletes update optimistically and restore the
-same item/order on rejection; successful stream cycles adopt the server's
-resolved status, and a created task adopts the returned authoritative report.
-Quick actions use a separate typed intent controller: it fills the composer
-before creating the conversation so project/tool state remains armed, then
-applies each declared tool mode through an injected presentation port.
-The typed report repository is an owner-scoped, reconstructible read cache:
-96 reports of at most 512 KiB plus 24 month overviews of at most 128 KiB bound
-estimated storage at 51 MiB. Schema v3 discards the former unscoped/unbounded
-cache instead of migrating it across owners. The idle background feature owns
-one cache-first digest revalidation and one three-hour reminder timer; its
-owner/date ledger retains at most 16 entries and `beforeunload` destroys both
-timers. The retained panel now owns presentation only.
+The browser loads My Day write policy with the lazy feature chunk. Its typed controller receives the selected report, render/cache seams, and daily API as explicit ports. TODO toggles and deletes update optimistically and restore the same item/order on rejection; successful stream cycles adopt the server's resolved status, and a created task adopts the returned authoritative report. Quick actions use a separate typed intent controller: it fills the composer before creating the conversation so project/tool state remains armed, then applies each declared tool mode through an injected presentation port. The typed report repository is an owner-scoped, reconstructible read cache: 96 reports of at most 512 KiB plus 24 month overviews of at most 128 KiB bound estimated storage at 51 MiB. Schema v3 discards the former unscoped/unbounded cache instead of migrating it across owners. The idle background feature owns one cache-first digest revalidation and one three-hour reminder timer; its owner/date ledger retains at most 16 entries and `beforeunload` destroys both timers. The retained panel now owns presentation only.
 
 ## Failure semantics
 
@@ -236,16 +205,8 @@ pytest -q tests/optimizer/test_optimizer.py tests/optimizer/test_optimizer_sidec
 
 ## Complete scheduled-task admission and dispatch
 
-Problem: owner creation/migration stopped at 100 definitions, and the runtime
-read only a 1,000-task prefix. Decision: exact native counts observe integrity;
-SQL creation keeps identity locking without quota-only owner locking. Native
-count overflow fails before staging documents, claims or indexes. Internal
-owner/global list limit=0 reads every matching definition; positive limits are
-explicit projections without a separate 2,000-row ceiling. Native traversal
-uses bounded index windows in one snapshot and retains every OCC witness;
-built-in adoption traverses the complete owner catalog. Migration preserves
-its explicit cursor pages. Due claims remain atomic and owner-scoped, so the
-complete feed does not duplicate occurrences. Alternatives: larger caps or
-restoring only a prefix still strand accepted work; weakening identity/claim
-fences introduces duplicate effects. Gates: native scheduler demand/migration
-and semantic tests, SQL scheduler contract and due-feed reconciliation tests.
+Problem: owner creation/migration stopped at 100 definitions, and the runtime read only a 1,000-task prefix. Decision: exact native counts observe integrity; SQL creation keeps identity locking without quota-only owner locking. Native count overflow fails before staging documents, claims or indexes. Internal owner/global list limit=0 reads every matching definition; positive limits are explicit projections without a separate 2,000-row ceiling. Native traversal uses bounded index windows in one snapshot and retains every OCC witness; built-in adoption traverses the complete owner catalog. Migration preserves its explicit cursor pages. Due claims remain atomic and owner-scoped, so the complete feed does not duplicate occurrences. Alternatives: larger caps or restoring only a prefix still strand accepted work; weakening identity/claim fences introduces duplicate effects. Gates: native scheduler demand/migration and semantic tests, SQL scheduler contract and due-feed reconciliation tests.
+
+## Atomic execution settlement
+
+**Problem:** terminal bookkeeping hydrated every owner schedule, calculated cron presentation and then updated rows selected by an earlier execution witness. **Decision:** `scheduler.task.settle_execution` atomically matches owner, agent type and exact execution task ID. Rust maintains an owner-scoped execution index with exact document verification; legacy owners backfill once in the same transaction. SQL uses an owner/execution partial index and conditional UPDATE. Receipts replay the original result, and stale execution callbacks change zero rows. One index entry per eligible definition plus one native owner marker is retained until membership changes or deletion; no worker, cache or admission quota is added. A 256-definition fixture retained 257 index entries totaling 14,387 encoded key/value bytes; page, blob and receipt overhead are excluded. Settlement first uses the read-only `scheduler.task.execution_lookup` port. A proven absence skips command/receipt creation; matching or uninitialized legacy state enters atomic settlement with its ordinary receipt/outbox lifecycle. An empty native owner is checked against count and created-index witnesses; a nonempty legacy owner never treats a missing execution index as absence. End-to-end performance remains pending. **Alternatives rejected:** hydrating schedules does work unrelated to settlement; an application reverse map loses restart authority; read-then-update permits a later execution to be overwritten. Verify scheduler execution-settlement port, storage receipt/owner tests and native scheduler execution tests, including legacy backfill, OCC conflict and reopen.

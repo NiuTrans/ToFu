@@ -182,14 +182,55 @@ def _ensure_tool_result_cache(task: dict[str, Any]) -> dict:
         capacity = _resolve_tool_result_cache_capacity()
         task['_tool_result_cache_capacity'] = capacity
     _trim_tool_result_cache(task, cache, capacity)
+    # Adopt legacy/manual tuples once at the common cache-owner seam. Actual
+    # producers already carry their start fence, so are never rebound here.
+    from lib.write_freshness import project_read_cache_generation
+    for key, entry in list(cache.items()):
+        if (key.split('::', 1)[0] in _PROJECT_CACHEABLE_TOOLS
+                and isinstance(entry, (tuple, list))
+                and not isinstance(entry, _ToolResultCacheReceipt)):
+            cache[key] = _ToolResultCacheReceipt(
+                entry, project_read_cache_generation())
     return cache
+
+
+class _ToolResultCacheReceipt(tuple):
+    """Generation metadata without changing legacy tuple slots/projections."""
+
+    def __new__(cls, entry, generation):
+        receipt = super().__new__(cls, entry)
+        receipt.generation = generation
+        return receipt
+
+
+def _project_cache_entry_is_current(tool_name: str, entry: Any) -> bool:
+    if tool_name not in _PROJECT_CACHEABLE_TOOLS:
+        return True
+    from lib.write_freshness import project_read_cache_generation
+    return (getattr(entry, 'generation', None)
+            is project_read_cache_generation())
 
 
 def _store_tool_result_cache_entry(
     task: dict[str, Any], cache_key: str, cache_entry: Any,
+    *, generation: object | None = None,
 ) -> dict:
-    """Insert one receipt as newest and enforce the task-local FIFO bound."""
+    """Insert a bounded receipt; production reads supply their START fence.
+
+    Legacy synchronous/manual entries bind here. Rewrites must carry the old
+    receipt's generation, never bless old in-flight bytes at insertion time.
+    """
     cache = _ensure_tool_result_cache(task)
+    tool_name = cache_key.split('::', 1)[0]
+    if tool_name in _PROJECT_CACHEABLE_TOOLS:
+        from lib.write_freshness import project_read_cache_generation
+        if generation is None:
+            generation = getattr(cache_entry, 'generation', None)
+        if generation is None:
+            generation = project_read_cache_generation()
+        cache_entry = _ToolResultCacheReceipt(cache_entry, generation)
+        if not _project_cache_entry_is_current(tool_name, cache_entry):
+            return cache
     # Replacing an existing receipt refreshes its FIFO age.  This matters for
     # the prefetch-to-budgeted rewrite: the final compact form is the live
     # receipt, not an old entry that should be first under pressure.
@@ -448,7 +489,7 @@ def _make_cache_key(fn_name: str, fn_args: dict[str, Any]) -> str:
 
 # Project tools whose cache entries become stale after a write operation
 _PROJECT_CACHEABLE_TOOLS = frozenset({
-    'read_files', 'list_dir', 'grep_search', 'find_files',
+    'read_files', 'list_dir', 'grep_search', 'find_files', 'inspect_image',
 })
 
 

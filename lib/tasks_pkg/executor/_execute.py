@@ -15,6 +15,9 @@ from lib.agent_core.execution_clock import task_execution_time_ms
 from lib.log import get_logger
 from lib.tasks_pkg.executor._finalize import _finalize_tool_round
 from lib.tasks_pkg.tool_runtime import context_for_task, unregister_context
+from lib.tasks_pkg.executor._effects import (
+    begin_tool_effect, finish_tool_effect, uncertain_effect_error,
+)
 
 logger = get_logger(__name__)
 
@@ -33,6 +36,18 @@ def _execute_tool_one(
     all_tools: list[dict] | None = None,
 ) -> tuple[str, str, bool]:
     """Execute one tool call and update its presentation round."""
+
+    from lib.tasks_pkg.coordinator_policy import coordinator_call_rejection
+    coordinator_denial = coordinator_call_rejection(task, fn_name, fn_args, project_path)
+    if coordinator_denial:
+        return tc_id, coordinator_denial, False
+    from lib.project_dispatch.admission import is_dispatch_task
+    if is_dispatch_task(task):
+        from lib.project_dispatch.scope import admit_tool
+        admit_tool(task, fn_name, fn_args, project_path=project_path)
+        if task.get('_tool_env') is not None:
+            from lib.llm.llm_errors import AbortedError
+            raise AbortedError('Project file authority cannot be shadowed by a custom tool environment')
     if task.get('aborted'):
         logger.info('[Executor] Skipping tool %s (tc_id=%s) — task aborted',
                     fn_name, tc_id[:8])
@@ -43,12 +58,32 @@ def _execute_tool_one(
     if limit_reason:
         return tc_id, limit_reason, False
 
+    from lib.tasks_pkg.executor._file_recovery import check_file_recovery, recovery_receipt
+    recovery = check_file_recovery(task, fn_name, fn_args, round_entry or {}, project_path)
+    refusal = recovery.refusal
+    if recovery.unknown and not refusal and not recovery_receipt(
+            task, fn_name, tc_id, fn_args, recovery, consume=True):
+        from lib.tools.result_envelope import typed_tool_error
+        refusal = typed_tool_error('tool_effect_takeover_required', retryable=False,
+            message='This new write has no exact human decision covering the unresolved earlier operation.',
+            next_action='Use the ordinary attended approval path; do not repeat this write automatically.').to_model_text()
+    if refusal:
+        from lib.tools.registry import build_tool_result_meta
+        from lib.tool_results.tool_rejection import stamp_tool_rejection
+        stamp_tool_rejection(round_entry, {'kind': 'effect_recovery_required', 'tool': fn_name},
+                             reason=refusal, retryable=False)
+        _finalize_tool_round(task, rn, round_entry,
+            [build_tool_result_meta(fn_name, fn_args, refusal)], status='rejected')
+        return tc_id, refusal, False
+
     budget=task.get('_executionBudget')
     if budget is None and callable(task.get('_executionToolObserver')):
         from lib.agent_core.execution_budget import model_budget_admission
         model_budget_admission(task)
         budget=task.get('_executionBudget')
     event=budget.begin_tool_attempt(task,tc_id,fn_name,rn) if budget is not None else None
+    from lib.tasks_pkg.working_tool_sources import begin_tool_source
+    begin_tool_source(task, fn_name, tc_id)
     try:
         from lib.tools.execution_timing import tool_execution_timing
         with tool_execution_timing(fn_name, task_id=task.get('id'),
@@ -93,8 +128,15 @@ def _dispatch_admitted_tool_one(
         round_entry['tStart'] = task_execution_time_ms(task)
 
     handler = None
+    from lib.project_dispatch.admission import is_file_dispatch_task
+    dispatch_file = is_file_dispatch_task(task)
+    if dispatch_file:
+        from lib.tasks_pkg.handlers.project import _handle_project_tool
+        from lib.project_dispatch.scope import assert_firstparty_file_handler
+        handler = _handle_project_tool
+        assert_firstparty_file_handler(fn_name, handler)
     tool_env = task.get('_tool_env')
-    if tool_env is not None:
+    if tool_env is not None and not dispatch_file:
         try:
             handler = tool_env.resolve(fn_name)
         except Exception as exc:
@@ -129,17 +171,36 @@ def _dispatch_admitted_tool_one(
 
     try:
         try:
-            result = handler(
-                task, tc, fn_name, tc_id, fn_args, rn, round_entry,
-                cfg, project_path, project_enabled, all_tools,
-            )
+            from contextlib import nullcontext
+            from lib.project_mod.tool_admission import tool_admission_scope
+            from lib.project_dispatch.scope import tool_scope
+            with tool_admission_scope(task, context, tool_name=fn_name) if dispatch_file else nullcontext():
+                with tool_scope(task, fn_name, fn_args, project_path) if dispatch_file else nullcontext():
+                    begin_tool_effect(task, fn_name, tc_id, rn, round_entry)
+                    if task.get('aborted') or context.cancellation_requested:
+                        from lib.llm.llm_errors import AbortedError
+                        round_entry['executionEffect'] = {
+                            **round_entry['executionEffect'], 'state': 'not_started'}
+                        raise AbortedError('Task cancelled before tool handler entry')
+                    result = handler(
+                        task, tc, fn_name, tc_id, fn_args, rn, round_entry,
+                        cfg, project_path, project_enabled, all_tools,
+                    )
         except Exception as exc:
+            finish_tool_effect(round_entry)
             context.settle_once(
                 'cancelled' if context.cancellation_requested else 'error')
             round_entry['_runtimeState'] = context.terminal_state
             return _handler_error_result(
                 task, fn_name, tc_id, fn_args, rn, round_entry, exc)
 
+        except BaseException:
+            finish_tool_effect(round_entry)
+            context.settle_once('cancelled' if context.cancellation_requested else 'error')
+            round_entry['_runtimeState'] = context.terminal_state
+            raise
+
+        finish_tool_effect(round_entry, returned=True)
         state = 'cancelled' if context.cancellation_requested else 'done'
         context.settle_once(state)
         round_entry['_runtimeState'] = state
@@ -169,7 +230,7 @@ def _handler_error_result(task, fn_name, tc_id, fn_args, rn, round_entry, exc):
     else:
         logger.error(
             '[Executor] Tool handler %s raised %s (tc_id=%s args=%.300s) — '
-            'returning error to LLM so it can retry',
+            'returning error with effect recovery policy',
             fn_name, type(exc).__name__, tc_id[:8], arg_preview, exc_info=True)
         try:
             from lib.error_fingerprint import fingerprint
@@ -199,4 +260,4 @@ def _handler_error_result(task, fn_name, tc_id, fn_args, rn, round_entry, exc):
         except Exception as finalize_exc:
             logger.debug('[Executor] _finalize_tool_round on error path failed '
                          'for %s: %s', fn_name, finalize_exc)
-    return tc_id, err_msg, False
+    return tc_id, uncertain_effect_error(round_entry, err_msg), False

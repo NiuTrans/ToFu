@@ -576,7 +576,7 @@ def test_automatic_source_snapshot_preserves_dirty_context_and_real_index(repo, 
 
 
 
-def test_task_delta_delivery_preserves_source_wip_and_concurrent_unrelated_files(repo, monkeypatch):
+def test_task_delta_depending_on_borrowed_wip_merges_without_committing_others(repo, monkeypatch):
     root, _work, owner = repo
     (root / 'base.txt').write_text('existing user work\n')
     (root / 'staged.txt').write_text('staged user work\n')
@@ -595,7 +595,8 @@ def test_task_delta_delivery_preserves_source_wip_and_concurrent_unrelated_files
     assert git(root, 'rev-parse', 'HEAD') == before_head
     assert state.get_workspace(str(root), 'automatic', user_id=owner)['state'] == 'checkpointed'
     assert automatic_settle(repo)['state'] == 'delivered'
-    assert (root / 'base.txt').read_text().count('task addition') == 1
+    assert not work.exists()
+    assert git(root, 'show', receipt['checkpointSha'] + ':base.txt').count('task addition') == 1
 
 
 
@@ -646,52 +647,36 @@ def test_automatic_unsuccessful_task_is_preserved_without_publication(repo, monk
 
 
 
-def test_task_delta_gate_runs_without_canonical_writer_lease_and_checks_exact_result(repo, monkeypatch):
-    import threading
-    from lib.project_mod.workspace_lease import workspace_write_lease
-    root, _work, _owner = repo
+def test_workspace_delivery_does_not_wait_for_release_verification(repo, monkeypatch):
+    root, _, _ = repo
     work = automatic_workspace(repo, monkeypatch)
     (work / 'new.txt').write_text('task delta\n')
-    checked = []
-
-    def gate(checkout, source, target, configured):
-        assert git(root, 'show', target + ':new.txt') == 'task delta'
-        def probe():
-            with workspace_write_lease(root):
-                checked.append('canonical available')
-        thread = threading.Thread(target=probe)
-        thread.start()
-        thread.join(5)
-        assert not thread.is_alive()
-        return True, ''
-
-    monkeypatch.setattr(ic, '_gate_commands', gate)
+    monkeypatch.setattr(ic, '_gate_commands', lambda *a, **k: pytest.fail('release gate delayed delivery'))
     assert automatic_settle(repo)['state'] == 'delivered'
-    assert checked == ['canonical available']
+    assert (root / 'new.txt').read_text() == 'task delta\n'
 
 
 
-@pytest.mark.parametrize('change', ['file', 'branch', 'revocation'])
-def test_task_delta_revalidates_after_gate_before_publication(repo, monkeypatch, change):
-    root, _work, owner = repo
+@pytest.mark.parametrize('change', ['file', 'revocation'])
+def test_task_delta_revalidates_after_merge_before_publication(repo, monkeypatch, change):
+    from lib.project_mod import task_delta_delivery
+    root, _, owner = repo
     work = automatic_workspace(repo, monkeypatch)
-    (work / 'new.txt').write_text('task delta\n')
-
-    def gate(*args):
+    (work / 'base.txt').write_text('task delta\n')
+    original = task_delta_delivery._merge_workspace_delta
+    def merge(*args):
+        result = original(*args)
         if change == 'file':
-            (root / 'base.txt').write_text('changed during gate\n')
-        elif change == 'branch':
-            git(root, 'symbolic-ref', 'HEAD', 'refs/heads/changed')
+            (root / 'base.txt').write_text('changed during merge\n')
         else:
             delivery.settle_task_workspace(str(root), 'automatic', user_id=owner, outcome='cancelled')
-        return True, ''
-
-    monkeypatch.setattr(ic, '_gate_commands', gate)
-    receipt = automatic_settle(repo)
-    assert receipt['state'] in {'blocked', 'pending', 'preserved'}, receipt
-    assert not (root / 'new.txt').exists()
+        return result
+    monkeypatch.setattr(task_delta_delivery, '_merge_workspace_delta', merge)
+    result = automatic_settle(repo)
+    assert result['state'] in {'blocked', 'preserved'}, result
+    assert (root / 'base.txt').read_text() != 'task delta\n'
     if change == 'revocation':
-        assert receipt['taskOutcome'] == 'cancelled'
+        assert result['taskOutcome'] == 'cancelled'
 
 
 
@@ -709,7 +694,7 @@ def test_task_delta_recovers_lost_final_receipt_without_reapplying(repo, monkeyp
         return original(row, receipt, **updates)
 
     monkeypatch.setattr(delivery, '_save', fail_once)
-    first = automatic_settle(repo)
+    first = delivery.settle_task_workspace(str(root), 'automatic', user_id=repo[2], outcome='completed')
     assert first['state'] == 'blocked', first
     assert first['targetSha'] and first['checkpointSha']
     (root / 'unrelated.txt').write_text('written after patch\n')
@@ -762,29 +747,222 @@ def test_source_snapshot_does_not_contend_with_canonical_writer_lease(repo, monk
 
 
 
-def test_source_snapshot_retries_changed_bytes_and_refuses_moved_head(repo, monkeypatch):
-    root, _work, owner = repo
-    original = ic._alternate_index_checkpoint
-    calls = []
-    def capture(checkout, parent, task_id):
-        snapshot = original(checkout, parent, task_id)
-        calls.append(snapshot)
-        if len(calls) == 1:
+def test_source_snapshot_retries_content_changes_with_one_private_index(repo, monkeypatch):
+    root, _work, _owner = repo
+    original = ic._alternate_index_tree
+    indexes = []
+
+    def capture(checkout, parent, index_path, **kwargs):
+        tree = original(checkout, parent, index_path, **kwargs)
+        indexes.append(index_path)
+        if len(indexes) == 1:
             (root / 'base.txt').write_text('changed during first capture\n')
-        return snapshot
-    monkeypatch.setattr(ic, '_alternate_index_checkpoint', capture)
+        return tree
+
+    monkeypatch.setattr(ic, '_alternate_index_tree', capture)
     work = automatic_workspace(repo, monkeypatch)
-    assert len(calls) == 4
     assert (work / 'base.txt').read_text() == 'changed during first capture\n'
+    assert len(set(indexes)) == 1
+    from pathlib import Path
+    assert not Path(indexes[0]).parent.exists()
 
-    def moved_branch(checkout, parent, task_id):
-        snapshot = original(checkout, parent, task_id)
-        git(root, 'symbolic-ref', 'HEAD', 'refs/heads/new-branch')
-        return snapshot
-    monkeypatch.setattr(ic, '_alternate_index_checkpoint', moved_branch)
-    with pytest.raises(ic.IntegrationError, match='HEAD/branch changed'):
-        ic.create_task_workspace(str(root), 'another-task', user_id=owner)
 
+@pytest.mark.parametrize('movement', ['commit', 'branch'])
+def test_source_snapshot_accepts_continuous_ref_movement(repo, monkeypatch, movement):
+    root, _work, owner = repo
+    baseline = git(root, 'rev-parse', 'HEAD')
+    branch = git(root, 'symbolic-ref', 'HEAD')
+    original = ic._alternate_index_tree
+
+    def capture(checkout, parent, index_path, **kwargs):
+        tree = original(checkout, parent, index_path, **kwargs)
+        if movement == 'commit':
+            git(root, 'commit', '--allow-empty', '-m', 'concurrent commit')
+        else:
+            current = git(root, 'symbolic-ref', 'HEAD')
+            target = 'refs/heads/other' if current == branch else branch
+            git(root, 'update-ref', target, baseline)
+            git(root, 'symbolic-ref', 'HEAD', target)
+        return tree
+
+    monkeypatch.setattr(ic, '_alternate_index_tree', capture)
+    work = automatic_workspace(repo, monkeypatch)
+    row = state.get_workspace(str(root), 'automatic', user_id=owner)
+    accepted_baseline = git(root, 'rev-parse', branch)
+    assert row['origin']['sourceHead'] == accepted_baseline
+    assert row['origin']['sourceRef'] == branch
+    assert git(work, 'rev-parse', 'HEAD') == accepted_baseline
+    assert (work / 'base.txt').read_text() == 'base\n'
+
+
+def test_source_snapshot_observes_new_ignore_rules_without_retaining_untracked_files(repo, monkeypatch):
+    root, _work, _owner = repo
+    (root / 'ignored-later.txt').write_text('untracked context\n')
+    original = ic._alternate_index_tree
+    captured = []
+
+    def capture(checkout, parent, index_path):
+        tree = original(checkout, parent, index_path)
+        if not captured:
+            (root / '.gitignore').write_text('ignored-later.txt\n')
+        captured.append(tree)
+        return tree
+
+    monkeypatch.setattr(ic, '_alternate_index_tree', capture)
+    work = automatic_workspace(repo, monkeypatch)
+    assert not (work / 'ignored-later.txt').exists()
+    assert (work / '.gitignore').read_text() == 'ignored-later.txt\n'
+    assert (root / 'ignored-later.txt').read_text() == 'untracked context\n'
+
+
+def test_source_snapshot_refreshes_tracked_ignored_files_after_concurrent_commit(repo, monkeypatch):
+    root, _work, owner = repo
+    (root / '.gitignore').write_text('ignored.txt\n')
+    git(root, 'add', '.gitignore')
+    git(root, 'commit', '-m', 'ignore policy')
+    baseline = git(root, 'rev-parse', 'HEAD')
+    original = ic._alternate_index_tree
+    moved = []
+
+    def capture(checkout, parent, index_path, **kwargs):
+        tree = original(checkout, parent, index_path, **kwargs)
+        if not moved:
+            (root / 'ignored.txt').write_text('concurrent committed file\n')
+            git(root, 'add', '-f', 'ignored.txt')
+            git(root, 'commit', '-m', 'concurrent tracked file')
+            moved.append(git(root, 'rev-parse', 'HEAD'))
+        return tree
+
+    monkeypatch.setattr(ic, '_alternate_index_tree', capture)
+    work = automatic_workspace(repo, monkeypatch)
+    row = state.get_workspace(str(root), 'automatic', user_id=owner)
+    assert row['origin']['inputHeadSha'] == moved[0]
+    assert (work / 'ignored.txt').read_text() == 'concurrent committed file\n'
+    (work / 'ignored.txt').write_text('task updates the concurrent committed file\n')
+    (work / 'task.txt').write_text('owned delta\n')
+    ic.checkpoint_workspace(str(root), 'automatic', user_id=owner)
+    publication = ic.task_publication_checkpoint(state.get_workspace(str(root), 'automatic', user_id=owner))
+    assert git(root, 'diff', '--name-only', moved[0], publication) == 'ignored.txt\ntask.txt'
+    assert git(root, 'rev-parse', 'HEAD') == moved[0]
+
+
+@pytest.mark.parametrize('noncooperating', [False, True])
+def test_source_snapshot_fences_content_churn_and_refuses_unprotected_writers(repo, monkeypatch, noncooperating):
+    from contextlib import contextmanager
+    from pathlib import Path
+    from lib.project_mod import workspace_lease
+    root, _work, owner = repo
+    original_capture = ic._alternate_index_tree
+    original_lease = workspace_lease.workspace_read_lease
+    protected = []
+    indexes = []
+    commits = []
+    original_git = ic._git
+
+    def observed_git(checkout, args, **kwargs):
+        if args[0] == 'commit-tree':
+            commits.append(args)
+        return original_git(checkout, args, **kwargs)
+
+    @contextmanager
+    def stable_read(*args, **kwargs):
+        with original_lease(*args, **kwargs):
+            protected.append(True)
+            yield
+
+    def capture(checkout, parent, index_path, **kwargs):
+        tree = original_capture(checkout, parent, index_path, **kwargs)
+        indexes.append(index_path)
+        if not protected or noncooperating:
+            (root / 'base.txt').write_text(f'concurrent bytes {len(indexes)}\n')
+        return tree
+
+    monkeypatch.setattr(ic, '_git', observed_git)
+    monkeypatch.setattr(ic, '_alternate_index_tree', capture)
+    monkeypatch.setattr(workspace_lease, 'workspace_read_lease', stable_read)
+    if noncooperating:
+        with pytest.raises(ic.IntegrationError, match='Non-cooperating source files'):
+            automatic_workspace(repo, monkeypatch)
+        assert state.find_workspace(str(root), 'automatic', user_id=owner) is None
+        assert not commits
+    else:
+        work = automatic_workspace(repo, monkeypatch)
+        assert (work / 'base.txt').read_bytes() == (root / 'base.txt').read_bytes()
+        assert len(commits) == 1
+    assert protected
+    assert not Path(indexes[0]).parent.exists()
+
+
+def test_source_snapshot_cancellation_after_capture_creates_no_commit_or_workspace(repo, monkeypatch):
+    from pathlib import Path
+    root, _work, owner = repo
+    original = ic._alternate_index_tree
+    task = {'aborted': False}
+    indexes = []
+
+    def capture(checkout, parent, index_path, **kwargs):
+        tree = original(checkout, parent, index_path, **kwargs)
+        indexes.append(index_path)
+        task['aborted'] = True
+        return tree
+
+    monkeypatch.setattr(ic, '_alternate_index_tree', capture)
+    monkeypatch.setenv('TOFU_INTEGRATION_WORKSPACE_DIR', str(root.parent / 'managed'))
+    with pytest.raises(ic.IntegrationError, match='cancelled during workspace snapshot'):
+        ic.create_task_workspace(str(root), 'cancelled-capture', user_id=owner, task=task)
+    assert state.find_workspace(str(root), 'cancelled-capture', user_id=owner) is None
+    assert not Path(indexes[0]).parent.exists()
+
+
+@pytest.mark.parametrize('cancel_while_waiting', [False, True])
+def test_source_snapshot_waits_for_content_writer_and_honors_cancellation(repo, monkeypatch, cancel_while_waiting):
+    import threading
+    from lib.project_mod import workspace_lease
+    root, _work, owner = repo
+    ready, waiting = threading.Event(), threading.Event()
+    task = {'aborted': False}
+    original_capture = ic._alternate_index_tree
+    original_lease = workspace_lease.workspace_read_lease
+    captures = []
+
+    def writer():
+        with workspace_lease.workspace_write_lease(root):
+            ready.set()
+            assert waiting.wait(5)
+            (root / 'base.txt').write_text('writer finished\n')
+            task['aborted'] = cancel_while_waiting
+
+    def stable_read(*args, **kwargs):
+        waiting.set()
+        return original_lease(*args, **kwargs)
+
+    def capture(checkout, parent, index_path, **kwargs):
+        tree = original_capture(checkout, parent, index_path, **kwargs)
+        captures.append(tree)
+        if not waiting.is_set():
+            (root / 'base.txt').write_text(f'content churn {len(captures)}\n')
+        return tree
+
+    monkeypatch.setattr(ic, '_alternate_index_tree', capture)
+    monkeypatch.setattr(workspace_lease, 'workspace_read_lease', stable_read)
+    monkeypatch.setenv('TOFU_INTEGRATION_WORKSPACE_DIR', str(root.parent / 'managed'))
+    monkeypatch.delenv('TOFU_WORKSPACE_TOOL_WAIT_SECONDS', raising=False)
+    thread = threading.Thread(target=writer)
+    thread.start()
+    try:
+        assert ready.wait(5)
+        if cancel_while_waiting:
+            with pytest.raises(Exception, match='cancelled'):
+                ic.create_task_workspace(str(root), 'waiting-task', user_id=owner, task=task)
+            assert state.find_workspace(str(root), 'waiting-task', user_id=owner) is None
+        else:
+            from pathlib import Path
+            created = ic.create_task_workspace(str(root), 'waiting-task', user_id=owner, task=task)
+            assert (Path(created['workspacePath']) / 'base.txt').read_text() == 'writer finished\n'
+    finally:
+        waiting.set()
+        thread.join(5)
+    assert not thread.is_alive()
 
 
 def test_running_background_command_fences_capture_and_clone_reclamation(repo, monkeypatch):
@@ -856,7 +1034,7 @@ def test_automatic_workspace_operation_measurement(repo, monkeypatch):
 
 
 
-def test_unborn_source_branch_can_execute_and_receive_task_delta_without_creating_head(repo, monkeypatch):
+def test_unborn_source_branch_delivers_without_initial_commit(repo, monkeypatch):
     root, _work, _owner = repo
     git(root, 'symbolic-ref', 'HEAD', 'refs/heads/unborn')
     index_before = (root / '.git/index').read_bytes()
@@ -865,14 +1043,17 @@ def test_unborn_source_branch_can_execute_and_receive_task_delta_without_creatin
     (work / 'new.txt').write_text('new repository task\n')
     receipt = automatic_settle(repo)
     assert receipt['state'] == 'delivered', receipt
+    assert receipt['publicationMode'] == 'working_tree'
     assert (root / 'new.txt').read_text() == 'new repository task\n'
+    assert not work.exists()
+    assert git(root, 'show', receipt['checkpointSha'] + ':new.txt') == 'new repository task'
     assert ic._rev(root, 'HEAD') == ''
     assert (root / '.git/index').read_bytes() == index_before
 
 
 
 @pytest.mark.parametrize('modify_after_verification', [False, True])
-def test_successful_workspace_verifier_is_replayed_on_exact_publication_tree(
+def test_workspace_verification_is_independent_of_delivery(
         repo, monkeypatch, modify_after_verification):
     import sys
     from lib.tasks_pkg import workspace_delivery
@@ -904,12 +1085,8 @@ def test_successful_workspace_verifier_is_replayed_on_exact_publication_tree(
     assert workspace_delivery.persist_terminal_workspace_intent(task) is True
     delivery.resume_pending_workspace_deliveries()
     result = state.get_workspace(str(root), 'automatic', user_id=owner)['origin']['delivery']
-    if modify_after_verification:
-        assert result['state'] == 'failed', result
-        assert not (root / 'package/subject.py').exists()
-    else:
-        assert result['state'] == 'delivered', result
-        assert (root / 'package/subject.py').read_text() == 'VALUE = 1\n'
+    assert result['state'] == 'delivered', result
+    assert (root / 'package/subject.py').read_text() == ('VALUE = 2\n' if modify_after_verification else 'VALUE = 1\n')
 
 
 
@@ -1004,3 +1181,305 @@ def test_terminal_task_capture_refreshes_an_earlier_explicit_checkpoint(repo, mo
     assert receipt['state'] == 'delivered', receipt
     assert receipt['checkpointSha'] != early
     assert (root / 'early.txt').exists() and (root / 'late.txt').exists()
+
+
+def test_foreign_local_gate_runs_for_candidate_and_canonical_adoption(repo, tmp_path, monkeypatch):
+    import shlex
+    import sys
+    root, _, _ = repo
+    marker = tmp_path / 'gate-marker'
+    code = f'from pathlib import Path; p=Path({str(marker)!r}); p.write_text(p.read_text()+"x" if p.exists() else "x")'
+    command = f'{shlex.quote(sys.executable)} -c {shlex.quote(code)}'
+    monkeypatch.delenv('TOFU_INTEGRATION_TEST_ROOT', raising=False)
+    monkeypatch.setenv('TOFU_INTEGRATION_TEST_CMD', 'missing-global-command')
+    git(root, 'config', '--local', 'tofu.integrationTestCommand', command)
+    settle(repo)
+    assert ic.process_ready_once()
+    assert delivery.resume_pending_workspace_deliveries()
+    assert marker.read_text() == 'xx'
+    assert (root / 'feature.txt').read_text() == 'finished\n'
+
+
+def test_canonical_gate_policy_change_after_validation_refuses_adoption(repo, monkeypatch):
+    root, _, _ = repo
+    settle(repo)
+    assert ic.process_ready_once()
+    base = git(root, 'rev-parse', 'HEAD')
+    original = ic._gate_commands
+    def gate_then_policy_change(*args, **kwargs):
+        result = original(*args, **kwargs)
+        assert result[0]
+        git(root, 'config', '--local', 'tofu.integrationTestCommand', 'changed-command')
+        return result
+    monkeypatch.setattr(ic, '_gate_commands', gate_then_policy_change)
+    delivery.resume_pending_workspace_deliveries()
+    row = state.get_workspace(str(root), 'task', user_id=1)
+    assert row['origin']['delivery']['state'] == 'blocked'
+    assert 'policy changed' in row['origin']['delivery']['reason']
+    assert git(root, 'rev-parse', 'HEAD') == base
+    assert not (root / 'feature.txt').exists()
+
+
+def test_controlled_materialization_never_runs_post_checkout_hook(repo, monkeypatch):
+    root, _work, owner = repo
+    monkeypatch.setenv('TOFU_INTEGRATION_WORKSPACE_DIR', str(root.parent / 'managed'))
+    marker = root.parent / 'hook-ran'
+    hook = root / '.git' / 'hooks' / 'post-checkout'
+    hook.write_text('#!/bin/sh\nprintf ran > "' + str(marker) + '"\n')
+    hook.chmod(0o755)
+    created = ic.create_task_workspace(str(root), 'no-hooks', user_id=owner)
+    assert not marker.exists()
+    assert git(created['workspacePath'], 'status', '--porcelain') == ''
+
+
+def test_materialization_failure_after_metadata_rolls_back_for_retry(repo, monkeypatch):
+    from pathlib import Path
+    from lib.project_mod import worktree_process as process
+    root, _work, owner = repo
+    monkeypatch.setenv('TOFU_INTEGRATION_WORKSPACE_DIR', str(root.parent / 'managed'))
+    original = process.run_worktree_add
+    calls = []
+    def fail_checkout(argv, **kwargs):
+        calls.append(argv)
+        if len(calls) == 2:
+            raise RuntimeError('injected stalled checkout')
+        return original(argv, **kwargs)
+    monkeypatch.setattr(process, 'run_worktree_add', fail_checkout)
+    before = git(root, 'rev-parse', 'HEAD')
+    with pytest.raises(RuntimeError, match='injected stalled checkout'):
+        ic.create_task_workspace(str(root), 'partial-checkout', user_id=owner)
+    destination = Path(calls[0][-2])
+    assert not destination.exists()
+    assert str(destination) not in git(root, 'worktree', 'list', '--porcelain')
+    assert state.find_workspace(str(root), 'partial-checkout', user_id=owner) is None
+    assert git(root, 'rev-parse', 'HEAD') == before
+    monkeypatch.setattr(process, 'run_worktree_add', original)
+    assert ic.create_task_workspace(str(root), 'partial-checkout', user_id=owner)['workspacePath'] == str(destination)
+
+
+def test_cleanup_error_does_not_mask_materialization_failure(repo, monkeypatch):
+    root, _work, owner = repo
+    monkeypatch.setenv('TOFU_INTEGRATION_WORKSPACE_DIR', str(root.parent / 'managed'))
+    def fail(*args, **kwargs):
+        raise RuntimeError('primary startup failure')
+    def cleanup_fail(*args, **kwargs):
+        raise RuntimeError('secondary cleanup failure')
+    monkeypatch.setattr(ic, '_materialize_worktree', fail)
+    monkeypatch.setattr(ic, '_remove_controlled_worktree', cleanup_fail)
+    with pytest.raises(RuntimeError, match='primary startup failure'):
+        ic.create_task_workspace(str(root), 'cleanup-failure', user_id=owner)
+
+
+def test_existing_workspace_retry_does_not_capture_source_again(repo, monkeypatch):
+    root, _work, owner = repo
+    monkeypatch.setenv('TOFU_INTEGRATION_WORKSPACE_DIR', str(root.parent / 'managed'))
+    created = ic.create_task_workspace(str(root), 'already-owned', user_id=owner)
+    def unexpected(*args, **kwargs):
+        raise AssertionError('idempotent admission must resolve registration first')
+    monkeypatch.setattr(ic, '_task_input_checkpoint', unexpected)
+    assert ic.create_task_workspace(str(root), 'already-owned', user_id=owner) == created
+
+
+@pytest.mark.parametrize('automatic', [False, True])
+def test_unproven_retirement_preserves_unregistered_destination(repo, monkeypatch, automatic):
+    from lib.project_mod.worktree_process import WorktreeRetirementUnproven
+    root, _work, owner = repo
+    monkeypatch.setenv('TOFU_INTEGRATION_WORKSPACE_DIR', str(root.parent / 'managed'))
+    destinations = []
+    def uncertain(root, destination, *args, **kwargs):
+        destination.mkdir()
+        (destination / 'partial.txt').write_text('partial writer evidence')
+        destinations.append(destination)
+        raise WorktreeRetirementUnproven('writer retirement unproven')
+    monkeypatch.setattr(ic, '_materialize_worktree', uncertain)
+    create = ic.create_task_workspace if automatic else ic.create_workspace
+    with pytest.raises(WorktreeRetirementUnproven):
+        create(str(root), 'unproven', user_id=owner)
+    assert (destinations[0] / 'partial.txt').read_text() == 'partial writer evidence'
+    assert state.find_workspace(str(root), 'unproven', user_id=owner) is None
+
+
+def test_concurrent_manual_admission_cannot_remove_winning_workspace(repo, monkeypatch):
+    import contextlib
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    root, _work, owner = repo
+    monkeypatch.setenv('TOFU_INTEGRATION_WORKSPACE_DIR', str(root.parent / 'managed'))
+    barrier = threading.Barrier(2)
+    local = threading.local()
+    original = ic._destination_lock
+    @contextlib.contextmanager
+    def rendezvous(path, **kwargs):
+        if not getattr(local, 'entered', False):
+            local.entered = True
+            barrier.wait(timeout=5)
+        with original(path, **kwargs):
+            yield
+    monkeypatch.setattr(ic, '_destination_lock', rendezvous)
+    def create():
+        try:
+            return ic.create_workspace(str(root), 'same-task', user_id=owner)
+        except ic.IntegrationError as error:
+            return error
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda _: create(), range(2)))
+    successes = [result for result in results if isinstance(result, dict)]
+    assert len(successes) == 1
+    assert any('already exists' in str(result) for result in results if isinstance(result, Exception))
+    from pathlib import Path
+    destination = Path(successes[0]['workspacePath'])
+    assert destination.is_dir()
+    assert state.get_workspace(str(root), 'same-task', user_id=owner)['workspace_path'] == str(destination)
+    assert git(destination, 'status', '--porcelain') == ''
+
+
+@pytest.mark.parametrize('automatic', [False, True])
+def test_blocked_checkout_allows_independent_task_and_retains_active_destination(repo, monkeypatch, automatic):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    from pathlib import Path
+    from lib.project_mod import worktree_process as process
+    root, _work, owner = repo
+    monkeypatch.setenv('TOFU_INTEGRATION_WORKSPACE_DIR', str(root.parent / 'managed'))
+    entered, release = threading.Event(), threading.Event()
+    original = process.run_worktree_add
+    blocked = []
+
+    def checkout(argv, **kwargs):
+        if 'checkout' in argv and not blocked:
+            blocked.append(Path(kwargs['cwd']))
+            entered.set()
+            assert release.wait(15)
+        return original(argv, **kwargs)
+
+    monkeypatch.setattr(process, 'run_worktree_add', checkout)
+    create = ic.create_task_workspace if automatic else ic.create_workspace
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(create, str(root), 'slow', user_id=owner)
+        try:
+            assert entered.wait(10)
+            # Cleanup may run with repo admission already held. It must skip
+            # this destination without deadlocking or touching its metadata.
+            with ic._repo_lock(str(root)):
+                ic._remove_controlled_worktree(root, blocked[0])
+            assert blocked[0].exists()
+            ic.prune_worktree_metadata(str(root), user_id=owner)
+            second = pool.submit(create, str(root), 'independent', user_id=owner)
+            ready = second.result(timeout=10)
+            assert (Path(ready['workspacePath']) / 'base.txt').read_text() == 'base\n'
+            assert not first.done()
+        finally:
+            release.set()
+        first.result(timeout=10)
+    assert git(root, 'status', '--porcelain') == ''
+
+
+@pytest.mark.parametrize('action', ['retry', 'cancel', 'discard'])
+def test_same_task_lifecycle_waits_through_registration(repo, monkeypatch, action):
+    import contextlib
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    from lib.project_mod import worktree_process as process
+    root, _work, owner = repo
+    monkeypatch.setenv('TOFU_INTEGRATION_WORKSPACE_DIR', str(root.parent / 'managed'))
+    entered, release, waiting = threading.Event(), threading.Event(), threading.Event()
+    original_process = process.run_worktree_add
+    original_lock = ic._destination_lock
+    original_capture = ic._task_input_checkpoint
+    captures = []
+    task = {'aborted': False}
+
+    def capture(*args, **kwargs):
+        captures.append(True)
+        return original_capture(*args, **kwargs)
+
+    @contextlib.contextmanager
+    def admission(*args, **kwargs):
+        if entered.is_set():
+            waiting.set()
+        with original_lock(*args, **kwargs):
+            yield
+
+    def checkout(argv, **kwargs):
+        if 'checkout' in argv:
+            entered.set()
+            assert release.wait(15)
+        return original_process(argv, **kwargs)
+
+    monkeypatch.setattr(ic, '_destination_lock', admission)
+    monkeypatch.setattr(ic, '_task_input_checkpoint', capture)
+    monkeypatch.setattr(process, 'run_worktree_add', checkout)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(ic.create_task_workspace, str(root), 'same', user_id=owner)
+        try:
+            assert entered.wait(10)
+            if action == 'discard':
+                second = pool.submit(ic.discard_workspace, str(root), 'same', user_id=owner)
+            else:
+                second = pool.submit(ic.create_task_workspace, str(root), 'same', user_id=owner, task=task)
+            assert waiting.wait(5)
+            assert not second.done()
+            assert len(captures) == 1
+            if action == 'cancel':
+                task['aborted'] = True
+                with pytest.raises(ic.IntegrationError, match='cancelled'):
+                    second.result(timeout=3)
+                assert not first.done()
+        finally:
+            release.set()
+        created = first.result(timeout=10)
+        if action == 'retry':
+            assert second.result(timeout=10) == created
+        elif action == 'discard':
+            assert second.result(timeout=10)['state'] == 'discarded'
+            assert state.get_workspace(str(root), 'same', user_id=owner)['state'] == 'discarded'
+    assert len(captures) == 1
+
+
+def test_task_cancelled_waiting_for_repository_admission_leaves_no_workspace(repo, monkeypatch):
+    import contextlib
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    root, _work, owner = repo
+    monkeypatch.setenv('TOFU_INTEGRATION_WORKSPACE_DIR', str(root.parent / 'managed'))
+    waiting = threading.Event()
+    original = ic._repo_lock
+    task = {'aborted': False}
+
+    @contextlib.contextmanager
+    def admission(*args, **kwargs):
+        waiting.set()
+        with original(*args, **kwargs):
+            yield
+
+    monkeypatch.setattr(ic, '_repo_lock', admission)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with original(str(root)):
+            future = pool.submit(ic.create_task_workspace, str(root), 'repo-wait', user_id=owner, task=task)
+            assert waiting.wait(10)
+            task['aborted'] = True
+            with pytest.raises(ic.IntegrationError, match='cancelled'):
+                future.result(timeout=3)
+    assert state.find_workspace(str(root), 'repo-wait', user_id=owner) is None
+
+
+def test_task_registration_lost_ack_preserves_checkout_and_retry_input(repo, monkeypatch):
+    from pathlib import Path
+    root, _work, owner = repo
+    monkeypatch.setenv('TOFU_INTEGRATION_WORKSPACE_DIR', str(root.parent / 'managed'))
+    original = state.register_workspace
+
+    def lost_ack(**kwargs):
+        original(**kwargs)
+        raise RuntimeError('registration ACK lost')
+
+    monkeypatch.setattr(state, 'register_workspace', lost_ack)
+    with pytest.raises(RuntimeError, match='ACK lost'):
+        ic.create_task_workspace(str(root), 'lost-ack', user_id=owner)
+    row = state.get_workspace(str(root), 'lost-ack', user_id=owner)
+    work = Path(row['workspace_path'])
+    (root / 'base.txt').write_text('later source WIP\n')
+    created = ic.create_task_workspace(str(root), 'lost-ack', user_id=owner)
+    assert created['workspacePath'] == str(work)
+    assert (work / 'base.txt').read_text() == 'base\n'
+    assert (root / 'base.txt').read_text() == 'later source WIP\n'

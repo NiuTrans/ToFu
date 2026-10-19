@@ -20,7 +20,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 
-from chromium_env import ensure_chromium_env  # noqa: E402 — repo-root helper
+from chromium_env import ensure_chromium_env, chromium_executable  # noqa: E402 — repo-root helper
 from playwright.sync_api import sync_playwright  # noqa: E402
 
 OUT_DIR = Path(__file__).resolve().parent / "previews"
@@ -116,7 +116,7 @@ def ensure_bundle() -> None:
             and all(bundle.stat().st_mtime > s.stat().st_mtime for s in sources)):
         return
     subprocess.run(
-        [str(REPO_ROOT / "node_modules/.bin/esbuild"), str(src),
+        ["node", str(REPO_ROOT / "scripts/vite_test_bundle.mjs"), str(src),
          "--bundle", "--format=esm", f"--outfile={bundle}"],
         check=True, capture_output=True,
     )
@@ -140,7 +140,7 @@ def main() -> None:
     try:
         ensure_chromium_env()  # rootless-conda GUI libs + fontconfig
         with sync_playwright() as pw:
-            browser = pw.chromium.launch(args=["--no-sandbox", "--disable-gpu"])
+            browser = pw.chromium.launch(executable_path=chromium_executable() or None, args=["--no-sandbox", "--disable-gpu"])
             for theme in THEMES:
                 for width, height, label in WIDTHS:
                     page = browser.new_page(viewport={"width": width, "height": height})

@@ -96,13 +96,12 @@ impl tofu_runtime::agent::Approvals for Approvals {
         let remaining = session
             .snapshot()
             .map_err(|_| failure())?
-            .deadline_remaining_nanos
-            .ok_or_else(failure)?;
-        if remaining <= 0 {
+            .deadline_remaining_nanos;
+        if remaining.is_some_and(|remaining| remaining <= 0) {
             return Err(failure());
         }
-        let remaining_ms =
-            u64::try_from((remaining as u128).div_ceil(1_000_000)).unwrap_or(u64::MAX);
+        let remaining_ms = remaining.map(|remaining|
+            u64::try_from((remaining as u128).div_ceil(1_000_000)).unwrap_or(u64::MAX));
         let mut request = json!({"version":self.version,"type":"approval_request","request_id":id,
             "remaining_ms":remaining_ms,
             "owner_user_id":self.owner,"task_id":self.task,"epoch":self.epoch,"call_id":call_id,
@@ -111,7 +110,7 @@ impl tofu_runtime::agent::Approvals for Approvals {
             request.as_object_mut().unwrap().remove("caller");
         }
         self.schemas
-            .validate(self.owner, "approval_request", request.clone())
+            .validate_protocol(self.owner, "approval_request", request.clone())
             .map_err(|_| failure())?;
         let bytes = serde_json::to_vec(&request).map_err(|_| failure())?;
         if bytes.len() > self.frame_bytes {

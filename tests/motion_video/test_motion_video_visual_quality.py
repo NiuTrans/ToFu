@@ -32,6 +32,9 @@ import sys
 import pytest
 
 from tests._runtime_sections import runtime_section_path
+from tests.frontend.test_frontend_paper_video_artifact import (
+    test_video_reader_uses_program_clock_and_preserves_playback as _assert_video_reader,
+)
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
@@ -643,24 +646,7 @@ def test_paper_video_lookup_carries_the_quality_axis():
 
 
 def test_the_panel_renders_a_degrade_notice_when_the_axis_says_degraded():
-    """Asserts the RENDERED markup, not the presence of a variable.
-
-    A field the backend sends and the frontend never draws is the same class
-    of defect as ``install_note`` (declared, rendered nowhere) — the promise
-    exists only in a comment.
-    """
-    js = runtime_section_path('paper/video.js')
-    src = open(js, encoding='utf-8').read()
-    assert 'artifact_quality' in src, (
-        'video.js never reads the quality axis, so a degraded film is '
-        'indistinguishable from a clean one in the panel')
-    assert '_pvQualityBanner' in src, (
-        'no renderer for the degrade notice')
-    # It must be reachable from the terminal (done) render, not defined and
-    # never called — the failure mode this whole section is about.
-    done_tail = src.split('// done')[-1]
-    assert '_pvQualityBanner(' in done_tail, (
-        'the degrade banner is defined but never mounted in the done state')
+    _assert_video_reader()
 
 
 def test_the_composition_choice_is_its_own_control_not_the_render_preset():

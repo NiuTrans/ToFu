@@ -124,7 +124,7 @@ mod tests {
         rebuilt
             .begin_conversation_rebuild(7, 11, "conversation", "generation", 1)
             .unwrap();
-        assert_eq!(rebuilt.database.entity_overlay_entries_for_test(), 0);
+        assert_eq!(crate::authority_gc_online::OnlineGcDatabase::gc_database(&rebuilt).unwrap().entity_overlay_entries_for_test(), 0);
         // A fresh index cannot claim complete source coverage.
         rebuilt.require_source_admission(source_uuid);
         assert!(rebuilt.owner_indexing(7, 11).unwrap());
@@ -143,14 +143,14 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("projection");
         let fresh = TurnSearchProjection::initialize(&path, 1 << 20).unwrap();
-        let uuid = fresh.database.authority_uuid();
+        let uuid = crate::authority_gc_online::OnlineGcDatabase::gc_database(&fresh).unwrap().authority_uuid();
         drop(fresh);
         let mut reopened = TurnSearchProjection::open(&path, 1 << 20).unwrap();
-        assert_eq!(reopened.database.authority_uuid(), uuid);
+        assert_eq!(crate::authority_gc_online::OnlineGcDatabase::gc_database(&reopened).unwrap().authority_uuid(), uuid);
         reopened
             .begin_conversation_rebuild(7, 11, "conversation", "generation", 1)
             .unwrap();
-        assert_eq!(reopened.database.entity_overlay_entries_for_test(), 0);
+        assert_eq!(crate::authority_gc_online::OnlineGcDatabase::gc_database(&reopened).unwrap().entity_overlay_entries_for_test(), 0);
     }
 
     #[test]

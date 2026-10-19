@@ -175,15 +175,17 @@ def test_manual_and_explicit_unlimited_attempts_keep_original_authorization(runt
     assert unlimited['current']['payload']['max_attempts'] == 0
 
 
-def test_replan_requires_diagnosis_and_frontier_has_a_durable_bound(runtime):
+def test_replan_requires_diagnosis_and_preserves_a_large_frontier(runtime):
     initial = launch(runtime, create(runtime))
     task = bound_task(runtime, initial)
     with pytest.raises(runtime[0].EvolutionStateError, match='diagnosis'):
         call(task, initial, 'replan', reason='A speculative failure', steps=[candidate()])
     full = launch(runtime, create(runtime, 'full', steps=[step(title=str(n)) for n in range(31)] + [step('final')]))
     failed = fail_review(runtime, full)
-    assert failed['status'] == 'needs_attention' and 'frontier_full' in failed['error']
-    assert len(failed['queue']) == 32
+    assert failed['status'] == 'active' and not failed['error']
+    assert failed['queue'][0]['kind'] == 'replan'
+    assert failed['queue'][1:] == full['queue']
+    assert len(failed['queue']) == 33
 
 
 # Use the actual task admission, run transitions, review parser and episode store.
@@ -360,3 +362,21 @@ def test_error_label_or_consistent_supported_audit_cannot_authorize_negative_dia
     assert definitive_failure(run,scientific_audit=audit)
     assert not definitive_failure({**run,'scientific_protocol':{**frozen,'primary_metric':'foreign'}},scientific_audit=audit)
     assert not definitive_failure({**run,'scientific_required_outcome':None},scientific_audit=audit)
+
+
+def test_independently_reviewed_followups_expand_large_frontier_without_dropping_checks(runtime):
+    original_steps = [step(title=f'original-{index}') for index in range(65)] + [step('final')]
+    initial = launch(runtime, create(runtime, 'large-replan', steps=original_steps))
+    failed = fail_review(runtime, initial)
+    current = diagnosis(runtime, failed)
+    task = bound_task(runtime, current)
+    response = call(task, current, 'replan', reason='Retain every inspected follow-up and original check.',
+                    steps=[candidate() for _ in range(40)])
+    assert 'unverified plan' in response['evidence_status']
+    assert runtime[0].get_program(initial['program_id'], user_id=OWNER)['queue'] == failed['queue']
+    reviewed = finish(runtime, current)
+    assert reviewed['status'] == 'active'
+    assert reviewed['queue'] == [queued_candidate()] * 40 + original_steps
+    assert reviewed['objective'] == initial['objective']
+    assert reviewed['acceptance'] == initial['acceptance']
+    assert reviewed['queue'][-1]['kind'] == 'final' and len(runtime[2]) == 2

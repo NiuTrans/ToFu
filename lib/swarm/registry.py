@@ -383,7 +383,7 @@ def format_role_catalogue() -> str:
     """
     # Local import — registry is loaded before tools.py finishes (circular
     # import avoidance), same pattern as scope_tools_for_role below.
-    from lib.swarm.tools import ARTIFACT_TOOLS, SUB_AGENT_DENYLIST
+    from lib.swarm.tools import ARTIFACT_TOOLS, SUB_AGENT_DENYLIST, TEAM_MESSAGE_TOOL_NAMES
 
     deny_str = '/'.join(sorted(SUB_AGENT_DENYLIST))
     lines = []
@@ -398,6 +398,7 @@ def format_role_catalogue() -> str:
     artifact_names = ', '.join(t['function']['name'] for t in ARTIFACT_TOOLS)
     lines.append(f'  Every role additionally receives the shared artifact '
                  f'tools: {artifact_names}.')
+    lines.append('  Team messages when granted: ' + ', '.join(sorted(TEAM_MESSAGE_TOOL_NAMES)) + '.')
     return '\n'.join(lines)
 
 
@@ -480,12 +481,13 @@ def scope_tools_for_role(role: str, all_tools: list) -> list:
     """
     # Local import — registry is loaded before tools.py finishes (circular
     # import avoidance). Loading here is cheap (tools.py is just constants).
-    from lib.swarm.tools import SUB_AGENT_DENYLIST
+    from lib.swarm.tools import SUB_AGENT_DENYLIST, TEAM_MESSAGE_TOOL_NAMES
+    from lib.swarm.message_contract import worker_message_tool
 
     hints = get_tools_for_role(role)
 
     if hints:
-        hint_set = set(hints)
+        hint_set = set(hints) | TEAM_MESSAGE_TOOL_NAMES
         scoped = [
             tool for tool in all_tools
             if isinstance(tool, dict)
@@ -496,7 +498,7 @@ def scope_tools_for_role(role: str, all_tools: list) -> list:
 
     # Always strip sub-agent denylist (swarm-control + ask_human).
     return [
-        tool for tool in scoped
+        worker_message_tool(tool) if isinstance(tool, dict) else tool for tool in scoped
         if not (isinstance(tool, dict)
                 and tool.get('function', {}).get('name', '') in SUB_AGENT_DENYLIST)
     ]

@@ -110,6 +110,31 @@ def _summary_selection_details(value) -> dict:
         return {}
     score = value.get('score')
     eligible = value.get('eligibleRoutes')
+    if value.get('ranking') in {
+            'subscription_resource_tier_then_cost_aa', 'authorized_resource_cost_then_aa'}:
+        source, metric, match = (value.get(key) for key in ('source', 'metric', 'match'))
+        valid_evidence = (source, metric, match) in {
+            ('Artificial Analysis', 'intelligence', 'exact'),
+            ('maintained_declared_rule', 'declared_capability', 'declared')}
+        admission_only = ((source, metric, match) ==
+                          ('routing_admission', 'text_capability', 'confirmed')
+                          and value['ranking'] == 'authorized_resource_cost_then_aa'
+                          and score is None)
+        valid_score = (not isinstance(score, bool) and isinstance(score, (int, float))
+                       and math.isfinite(score) and score >= 0)
+        tier = value.get('resourceTier')
+        ceiling = value.get('paidCeilingUsd')
+        if (not (admission_only or (valid_evidence and valid_score))
+                or isinstance(eligible, bool) or not isinstance(eligible, int) or eligible < 1
+                or isinstance(tier, bool) or not isinstance(tier, int) or not 0 <= tier <= 5
+                or (ceiling is not None and (isinstance(ceiling, bool)
+                    or not isinstance(ceiling, (int, float)) or not math.isfinite(ceiling) or ceiling < 0))):
+            return {}
+        return {'source': source, 'metric': metric, 'match': match,
+                'ranking': value['ranking'], 'score': None if admission_only else float(score),
+                'eligibleRoutes': eligible, 'resourceTier': tier,
+                'qualityTier': _short_text(value.get('qualityTier'), 30),
+                'paidCeilingUsd': ceiling}
     if (value.get('source') != 'Artificial Analysis'
             or value.get('metric') != 'intelligence'
             or value.get('match') != 'exact'
@@ -236,8 +261,17 @@ def build_compaction_receipt(
         budget = {
             key: _count(context_budget.get(key, context_budget.get(aliases.get(key))))
             for key in ('routeWindowTokens', 'hardCeilingTokens', 'economicTargetTokens',
-                        'renderedPromptTokens', 'messageTokens', 'toolSchemaTokens')
+                        'renderedPromptTokens', 'messageTokens', 'toolSchemaTokens',
+                        'windowSafetyTokens', 'outputCapTokens', 'resolvedOutputTokens',
+                        'outputResolutionInputTokens')
             if key in context_budget or aliases.get(key) in context_budget}
+        if 'requestedOutputTokens' in context_budget:
+            requested = context_budget['requestedOutputTokens']
+            budget['requestedOutputTokens'] = None if requested is None else _count(requested)
+        for key in ('outputReservationPolicy', 'outputResolutionSource',
+                    'outputResolutionInputSource'):
+            if key in context_budget:
+                budget[key] = _short_text(context_budget[key], 80)
         if 'routeWindowTokens' in budget and 'hardCeilingTokens' in budget:
             budget['reserveTokens'] = max(
                 0, budget['routeWindowTokens'] - budget['hardCeilingTokens'])

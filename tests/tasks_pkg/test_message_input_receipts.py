@@ -100,3 +100,39 @@ def test_scope_denial_records_prior_paid_usage_without_fallback(monkeypatch):
     usage = normalize_usage(totals)
     assert usage['input'] == 16 and usage['output'] == 3
     assert '_verifiedMessageInputIds' not in task
+
+
+@pytest.mark.parametrize('failure_kind', ['missing-binding', 'repository-denial', 'cancel'])
+def test_logical_scope_failure_never_reaches_provider_or_fallback(monkeypatch, failure_kind):
+    from unittest.mock import Mock
+    from lib.tasks_pkg.llm_fallback import _call as calls
+    from lib.tasks_pkg.message_input_receipts import MessageInputScopeError
+    from lib.llm.llm_errors import AbortedError
+    task = {'id': 'root', 'config': {}}
+    messages = [{'role': 'user', 'content': 'pending child delivery',
+                 '_swarmMessageIds': ['pending'], '_swarmMessageMailbox': 'old-mailbox'}]
+    remember(task, messages)
+    if failure_kind != 'missing-binding':
+        def deny(*args):
+            if failure_kind == 'cancel':
+                raise AbortedError('cancelled')
+            raise ValueError('ended or superseded')
+        monkeypatch.setattr('lib.tasks_pkg.message_input_receipts.validate_matches', deny)
+    provider, fallback = Mock(), Mock(return_value='must-not-fallback')
+    monkeypatch.setattr(calls, 'stream_llm_response', provider)
+    monkeypatch.setattr(calls, '_get_fallback_model', fallback)
+    expected = AbortedError if failure_kind == 'cancel' else MessageInputScopeError
+    with pytest.raises(expected) as caught:
+        calls._llm_call_with_fallback(task, {'messages': messages}, 'primary', 0, 32,
+                                     False, [], [], 'low', False, {}, [])
+    provider.assert_not_called()
+    # Route metadata is resolved eagerly, but neither provider is dispatched.
+    fallback.assert_called_once_with(task)
+    assert '_verifiedMessageInputIds' not in task
+    if failure_kind != 'cancel':
+        from lib.llm.llm_errors import RequestScopedError
+        assert isinstance(caught.value, RequestScopedError)
+        assert caught.value.failure_stage == 'before_dispatch'
+        assert 'request-rejected' in str(caught.value._user_message)
+        assert 'both-failed' not in str(caught.value._user_message)
+        assert isinstance(caught.value.__cause__, (PermissionError, ValueError))

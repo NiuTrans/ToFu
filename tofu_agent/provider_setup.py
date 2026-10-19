@@ -103,9 +103,9 @@ class ModelRoutingSetupService:
             if slot.oauth:
                 raise AgentConfigurationError(
                     'OAuth Deployment probes require the full app token lifecycle')
-            from lib.byo_egress import validate_egress_url
+            from lib.byo.byo_egress import validate_egress_url
             validate_egress_url(slot.base_url)
-            from lib.provider_probe import probe_one_cell
+            from lib.provider.provider_probe import probe_one_cell
             started = time.monotonic()
             verdict, _detail = probe_one_cell(
                 slot.base_url,

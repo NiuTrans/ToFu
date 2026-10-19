@@ -243,9 +243,8 @@ fn restore_workspace(
     }
     let count_key = owner_count_key(tx, owner)?;
     let count = read_u64(database, tx, &count_key, "integration owner count")?;
-    if count >= MAX_INTEGRATION_WORKSPACES_PER_OWNER as u64 {
-        return Err(exhausted("integration workspace owner capacity reached"));
-    }
+    let next_count = count.checked_add(1)
+        .ok_or_else(|| invalid_data("integration owner count overflow"))?;
     write_workspace(database, tx, None, &workspace)?;
     database.entity_put(
         tx,
@@ -257,7 +256,7 @@ fn restore_workspace(
         row_locator_key(tx, request.id)?,
         encode(&locator(&workspace), "integration locator")?,
     )?;
-    write_u64(database, tx, count_key, count + 1)?;
+    write_u64(database, tx, count_key, next_count)?;
     advance_sequence_past(database, tx, INTEGRATION_ROW_SEQUENCE_NAMESPACE, request.id)?;
     let stored = read_workspace(database, tx, owner, &request.project_root, &request.task_id)?
         .ok_or_else(|| invalid_data("integration workspace is missing"))?;
@@ -468,7 +467,8 @@ fn restore_event(
     database.entity_put(tx, key, encode(&event, "integration event")?)?;
     let count_key = event_count_key(tx, owner, &request.project_root)?;
     let count = read_u64(database, tx, &count_key, "integration event count")?;
-    write_u64(database, tx, count_key, count + 1)?;
+    write_u64(database, tx, count_key, count.checked_add(1)
+        .ok_or_else(|| invalid_data("integration owner count overflow"))?)?;
     advance_sequence_past(
         database,
         tx,

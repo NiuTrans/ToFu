@@ -18,7 +18,7 @@ from lib.orchestration.agent_runner import (
 from lib.orchestration.chat_event_sink import OrchestrationChatTaskEventSink
 from lib.orchestration.chat_flow_adapter import FlowEventAdapter
 
-from tests.storage.test_storage_sidecar_contract import storage  # isolated Sidecar fixture
+from tests.storage.test_storage_authority_sql_contract import storage  # isolated Sidecar fixture
 pytestmark = pytest.mark.unit
 
 NARRATION = 'I will inspect the synthetic evidence before answering. '

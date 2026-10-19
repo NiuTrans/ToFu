@@ -1,20 +1,6 @@
 # Skills
 
-This domain owns discoverable instruction packages. A skill can improve model behavior
-by supplying task-specific guidance and bounded resources; it does not
-grant execution authority, install dependencies, or bypass tool policy.
-Discovery separates lexical relevance, registry semantic order, and release
-verification. Installed status cannot create a lexical match. Delimited tool
-names match complete words; single-word prefix-only online noise (such as
-Frida/Friday) is discarded before verification without blocking semantic
-synonyms. Empty queries with four or more distinct words can recover using the
-first and middle original-query anchors, stopping at the first nonempty
-candidate list. Each call performs at most three search requests and twelve
-release verifications; search errors (including 429) stop recovery — a
-request-count budget, not a whole-call deadline — and query caches also cover
-fallback requests. Model results expose source status, explicit-only flags,
-recovery queries, rejected/unavailable counts, verification errors and retry
-metadata; search cards distinguish matches, no matches and partial discovery.
+This domain owns discoverable instruction packages. A skill can improve model behavior by supplying task-specific guidance and bounded resources; it does not grant execution authority, install dependencies, or bypass tool policy. Discovery separates lexical relevance, registry semantic order, and release verification. Installed status cannot create a lexical match. Delimited tool names match complete words; single-word prefix-only online noise (such as Frida/Friday) is discarded before verification without blocking semantic synonyms. Empty queries with four or more distinct words can recover using the first and middle original-query anchors, stopping at the first nonempty candidate list. Each call performs at most three search requests and twelve release verifications; search errors (including 429) stop recovery — a request-count budget, not a whole-call deadline — and query caches also cover fallback requests. Model results expose source status, explicit-only flags, recovery queries, rejected/unavailable counts, verification errors and retry metadata; search cards distinguish matches, no matches and partial discovery.
 
 ## Ownership
 
@@ -85,8 +71,12 @@ guide plus a resource manifest, and `read_skill_resource` only for listed
 `skill://` packaged references/scripts (not the main guide). A missing file
 lists available resources instead of inviting invented URIs; workspace paths
 named in a guide stay ordinary files. Results expose `skill://` identifiers, never server paths.
-Inputs, output pages, metadata, instruction files, and the resident index each
-have independent limits; selection never injects a whole catalog into a request.
+Resource reads expose no output-character budget: an optional `cursor`
+selects the UTF-8 suffix, returned whole for shared canonical capture/L0.
+The 2 MiB resource admission ceiling, binary rejection, symlink/path/owner
+checks and opaque package references remain independent safety boundaries.
+Inputs, metadata, instruction files, and the resident index have independent
+limits; selection never injects a whole catalog into a request.
 
 A package may declare tool dependencies via top-level `requires_tools` (or
 `metadata.openclaw.requires.tools`): built-in names or MCP `mcp__server__tool`

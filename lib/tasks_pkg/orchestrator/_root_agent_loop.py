@@ -1,4 +1,4 @@
-"""Root-orchestrator policy adapter for :func:`lib.agent_loop.run_agent_loop`.
+"""Root-orchestrator policy adapter for :func:`lib.agent_loop.agent_loop.run_agent_loop`.
 
 Responsibility
 --------------
@@ -20,7 +20,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from lib.agent_loop import (
+from lib.agent_loop.agent_loop import (
     AbortSignal,
     LoopDirective,
     LoopOutcome,
@@ -66,6 +66,7 @@ from lib.tasks_pkg.orchestrator._tool_call_prelude import (
 from lib.tasks_pkg.orchestrator._tool_dispatch_round import run_tool_dispatch
 from lib.tasks_pkg.orchestrator._tool_loop_breaker import (
     finish_after_background_task_acceptance,
+    guide_nonretryable_tool_recovery,
     handle_tool_loop_circuit_breaker,
 )
 from lib.tasks_pkg.orchestrator._tool_timeout_breaker import (
@@ -127,6 +128,10 @@ def prepare_round_context(task, messages, *, round_num, tid, model,
             task=task, messages=messages,
             round_num=round_num, tid=tid)
 
+    if not is_child_invocation(task):
+        from lib.swarm.team_messages import prepare_coordinator_mailbox
+        prepare_coordinator_mailbox(task)
+
     # Preserve checkpoint carriers even when optional acquisition fails.
     from lib.tasks_pkg.message_input_receipts import remember
     remember(task, messages)
@@ -144,6 +149,12 @@ def prepare_round_context(task, messages, *, round_num, tid, model,
         from lib.evolution.coordination import inject_updates
         inject_updates(task, messages, round_num)
 
+    from lib.tasks_pkg.project_guidance import refresh_project_guidance
+    refresh_project_guidance(task, messages, model=model)
+
+    from lib.tasks_pkg.context_composer.working_facts import refresh_working_facts
+    refresh_working_facts(messages, task=task, model=model)
+
     from lib.tasks_pkg.context_composer import refresh_programmatic_inputs
     from lib.tasks_pkg.manager import task_user_id
     refresh_programmatic_inputs(
@@ -158,19 +169,93 @@ def prepare_round_context(task, messages, *, round_num, tid, model,
 
 def admit_round_context(task, messages, tools, *, round_num, model,
                         precomputed_tool_schema_tokens=None):
-    """Admit after injection and re-admit if the execution notice adds content."""
+    """Admit after injection; the allowance notice is counted in ONE measurement.
+
+    The notice decision is pure watermark logic, so it is computed BEFORE the
+    measurement and the notice text joins the measured prompt directly. A
+    second full-prompt count only happens when injection must re-render
+    against the measured input (forecast/compact form), which can only lower
+    the watermark.
+    """
     from lib.tasks_pkg.compaction._prompt_admission import enforce_dispatch_prompt_limit
-    from lib.tasks_pkg.context_composer.execution_allowance import inject_execution_allowance
-    admission = enforce_dispatch_prompt_limit(messages, tools, task,
-        round_num=round_num, model=model,
-        precomputed_tool_schema_tokens=precomputed_tool_schema_tokens)
-    before_notice = len(messages)
-    inject_execution_allowance(task, messages, round_num,
-        prompt_input_tokens=admission.get('totalTokens'))
-    if len(messages) > before_notice:
+    from lib.tasks_pkg.context_composer.execution_allowance import (
+        commit_allowance_notice, notice_decision)
+    # Decide then commit BEFORE measuring: notice_decision never mutates
+    # task/messages, so a refused admission rolls the append and watermark
+    # back, leaving no notice evidence and no spent milestone.
+    # Snapshot the pre-notice budget/lock/manifest state BEFORE the decision:
+    # the decision itself lazily creates the account and its lock, and a
+    # prompt that never reaches the provider must leave no notice evidence.
+    notice_len_before = len(messages)
+    notice_watermark_before = task.get('_executionAllowanceNotice')
+    notice_budget_before = task.get('_executionBudget')
+    notice_lock_before = task.get('_executionBudgetLock')
+    notice_manifest_before = list(task.get('_contextManifest') or [])
+    notice_notes_before = list(task.get('_injectedNotes') or [])
+    pending_notice = notice_decision(task, messages, round_num)
+    if pending_notice is not None:
+        commit_allowance_notice(task, messages, pending_notice['text'],
+            level=pending_notice['level'],
+            initial_seconds=pending_notice['initial_seconds'],
+            round_num=round_num)
+    try:
         admission = enforce_dispatch_prompt_limit(messages, tools, task,
             round_num=round_num, model=model,
-            precomputed_tool_schema_tokens=admission.get('toolSchemaTokens'))
+            precomputed_tool_schema_tokens=precomputed_tool_schema_tokens)
+    except BaseException:
+        if pending_notice is not None:
+            # Roll back the pre-measure commit: the provider never saw this
+            # notice, so the milestone, account and receipts stay unspent.
+            from lib.tasks_pkg.context_composer.execution_allowance import (
+                _rollback_allowance_notice)
+            _rollback_allowance_notice(task, messages,
+                notice_len_before=notice_len_before,
+                watermark_before=notice_watermark_before,
+                budget_before=notice_budget_before,
+                lock_before=notice_lock_before,
+                manifest_before=notice_manifest_before,
+                notes_before=notice_notes_before)
+        raise
+    if pending_notice is not None:
+        # The forecast level can only be >= the pre-measure level; a rise
+        # re-renders the committed notice in place with the measured input
+        # and re-admits the grown prompt once.
+        snapshot = pending_notice['snapshot']
+        remaining = snapshot['tokens_remaining']
+        forecast_level = pending_notice['level']
+        measured = admission.get('totalTokens')
+        if (type(measured) is int and measured > 0
+                and remaining is not None):
+            peers = remaining // measured
+            forecast_level = max(forecast_level,
+                3 if peers <= 1 else 2 if peers <= 3 else 1 if peers <= 6 else 0)
+        if not snapshot['usage_known']:
+            forecast_level = 4
+        if forecast_level > pending_notice['level']:
+            from lib.tasks_pkg.context_composer.execution_allowance import (
+                render_allowance)
+            from lib.tasks_pkg.context_composer._render import _count_tokens
+            from lib.tasks_pkg.context_composer.registry import injection_spec
+            spec = injection_spec('execution_allowance')
+            model_key = str(task.get('model') or (task.get('config') or {}).get('model') or '')
+            new_text = render_allowance(snapshot, round_num, prompt_input_tokens=measured)
+            if _count_tokens(new_text, model_key) > spec.max_tokens:
+                from lib.tasks_pkg.context_composer.execution_allowance import (
+                    _compact_allowance)
+                new_text = _compact_allowance(snapshot, round_num,
+                                              prompt_input_tokens=measured)
+            from lib.tasks_pkg.context_composer.execution_allowance import (
+                _rerender_allowance_block)
+            if _rerender_allowance_block(messages, new_text, model=model_key) is not None:
+                task['_executionAllowanceNotice'] = {
+                    'level': forecast_level,
+                    'initial_seconds': pending_notice['initial_seconds'],
+                }
+                admission = enforce_dispatch_prompt_limit(messages, tools, task,
+                    round_num=round_num, model=model,
+                    precomputed_tool_schema_tokens=admission.get('toolSchemaTokens'))
+    from lib.tasks_pkg.context_dependencies import prepare
+    prepare(task, messages)
     return admission
 
 
@@ -277,14 +362,12 @@ class _RootLoopHooks:
             'stream_accumulator': stream_accumulator,
             'llm_action': 'proceed',
         }
-        checkpoint_sink = self.task.get('_invocationCheckpointSink')
         request_attempted = False
         dispatch_returned = False
         current_request_usage = None
         try:
-            if callable(checkpoint_sink):
-                self.task['_invocationCheckpointPhase'] = 'model_in_flight'
-                checkpoint_sink(self.task, self.messages, round_num)
+            from lib.tasks_pkg.persistence_wait import checkpoint_invocation
+            checkpoint_invocation(self.task, self.messages, round_num, phase='model_in_flight')
             request_attempted = True
             llm_action = run_llm_call_with_fallback(
                 self.task, state, body, self.messages, round_tools,
@@ -376,6 +459,19 @@ class _RootLoopHooks:
             self.task, state, round_num=round_num, tid=request.tid,
             premature_retry_count=self.premature_retry_count,
             messages=self.messages)
+        # Retry/continuation starts a new physical round. A rejected tool
+        # batch skips the tool checkpoint and the prose-only terminal tail.
+        # Both paths must close their existing round before leaving it.
+        if (stream_action in {'continue', 'program_continue'}
+                or (stream_action == 'break'
+                    and (state.assistant_msg or {}).get('tool_calls'))):
+            from lib.agent_core.events import EventType, build_event
+            from lib.tasks_pkg.manager import append_event
+            reason = ('retry' if stream_action == 'continue'
+                      else 'program_continue' if stream_action == 'program_continue'
+                      else state.last_finish_reason or 'error')
+            append_event(self.task, build_event(
+                EventType.ROUND_END, roundNum=round_num, reason=reason))
         if stream_action == 'break':
             if state.abort_phase:
                 return LoopDirective.abort(state.exit_reason)
@@ -425,12 +521,9 @@ class _RootLoopHooks:
         round_num: int,
         _tool_calls: list,
     ) -> dict:
-        sink = self.task.get('_invocationCheckpointSink')
-        if callable(sink):
-            # Write-ahead intent precedes ALL execution, including a batch or
-            # PTC call that may mutate external state before emitting events.
-            self.task['_invocationCheckpointPhase'] = 'tools_in_flight'
-            sink(self.task, self.messages, round_num)
+        from lib.tasks_pkg.persistence_wait import checkpoint_invocation
+        # The same barrier precedes every agent's external effects.
+        checkpoint_invocation(self.task, self.messages, round_num, phase='tools_in_flight')
         stream_accumulator = self.round_context['stream_accumulator']
         tool_timed_out = run_tool_dispatch(
             self.task, self.state, self.messages,
@@ -488,6 +581,11 @@ class _RootLoopHooks:
             chassis_consecutive_count=consecutive_count,
         )
 
+    def observe_nonretryable_failure_state(self, round_num, consecutive, limit):
+        guide_nonretryable_tool_recovery(
+            self.task, self.messages, round_num=round_num,
+            consecutive=consecutive, limit=limit)
+
     def after_tools(
         self,
         round_num: int,
@@ -515,9 +613,10 @@ class _RootLoopHooks:
         return None
 
     def close_round(self, round_num: int) -> None:
-        checkpoint_sink = self.task.get('_invocationCheckpointSink')
-        if callable(checkpoint_sink):
-            checkpoint_sink(self.task, self.messages, round_num + 1)
+        from lib.tasks_pkg.persistence_wait import checkpoint_invocation
+        phase = self.task.get('_invocationCheckpointPhase') or 'ready'
+        checkpoint_round = round_num if phase == 'tools_in_flight' else round_num + 1
+        checkpoint_invocation(self.task, self.messages, checkpoint_round, phase=phase)
         run_round_checkpoint_and_close(
             self.task, self.state,
             round_num=round_num, tid=self.request.tid)
@@ -560,6 +659,7 @@ def run_root_agent_loop(request: RootLoopRequest) -> RootLoopResult:
         execute_tools=hooks.execute_tools,
         max_consecutive_tool_timeouts=_MAX_CONSECUTIVE_TOOL_TIMEOUTS,
         max_consecutive_nonretryable_failure_rounds=3,
+        on_nonretryable_failure_state=hooks.observe_nonretryable_failure_state,
         on_tool_timeout_state=hooks.observe_timeout_state,
         after_tools=hooks.after_tools,
         on_round_end=hooks.close_round,
@@ -569,9 +669,10 @@ def run_root_agent_loop(request: RootLoopRequest) -> RootLoopResult:
         request.state.exit_reason = outcome.exit_reason
     if request.task.get('_executionLimitReason'):
         from lib.error_envelope import make_envelope
+        reason = request.task['_executionLimitReason']
         request.task['error'] = make_envelope(
-            'budget_exceeded', source='execution-budget',
-            detail=request.task['_executionLimitReason'], retryable=False)
+            reason if reason == 'execution_token_usage_unknown' else 'budget_exceeded',
+            source='execution-budget', detail=reason, retryable=False)
         request.state.last_finish_reason = 'error'
     if outcome.exit_reason == 'nonretryable_tool_failure':
         from lib.error_envelope import make_envelope

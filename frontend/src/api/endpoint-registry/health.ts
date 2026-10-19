@@ -10,6 +10,8 @@ export function createHealthEndpoints(ports: EndpointPorts) {
     // Parsed JSON variant — used by the Settings panel to show the version.
     info: (opts?: EndpointOptions) => get(
       '/api/health', Object.assign({ onError: 'null' }, opts || {})),
+    retryBoot: (opts?: EndpointOptions) => ports.post('/api/v4/boot/retry', {},
+      Object.assign({ onError: 'throw' as const }, opts || {})),
   };
   return health;
 }

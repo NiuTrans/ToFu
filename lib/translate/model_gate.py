@@ -36,7 +36,7 @@ class TranslationModelGate:
         with self._lock:
             if abort_check is not None and abort_check():
                 self._cancelled_waits += 1
-                from lib.llm_errors import AbortedError
+                from lib.llm.llm_errors import AbortedError
                 raise AbortedError('Translation aborted before provider call')
             self._active += 1
             self._acquired += 1

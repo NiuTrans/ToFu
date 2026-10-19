@@ -1,6 +1,6 @@
 """Public dispatch error and wait-status contract types."""
 
-from lib.llm_errors import RateLimitError, is_subscription_quota_error
+from lib.llm.llm_errors import RateLimitError, is_subscription_quota_error
 from dataclasses import dataclass
 
 
@@ -18,6 +18,11 @@ class DispatchWaitStatus:
     reasoning_chars: int = 0
     content_chars: int = 0
     tool_call_count: int = 0
+    # Dominant ``Slot.cooldown_reason`` among cooling slots when ``kind`` is
+    # 'waiting_slot' ('quota' / 'contention' / 'rate_limit' / …); '' when
+    # unknown. Lets the HUD say "quota exhausted, resets at …" instead of a
+    # bare "waiting for the model" during a multi-hour subscription hold.
+    cooldown_cause: str = ''
 
 
 class DispatchNoAdmissibleSlot(RuntimeError):

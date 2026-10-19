@@ -117,12 +117,10 @@ def drain_and_inject_inbox(
             # Each item is the volatile twin of a durable message_queue row
             # (tagged with the row's queueId) — the row is the delivery
             # authority, this lane is only the mid-turn fast path.
-            from lib.turn_source_queue_contract import BACKGROUND_RECEIPT_BATCH_MAX
-            _bgcmd_capacity = max(0, BACKGROUND_RECEIPT_BATCH_MAX - len(
-                task.get('_bgcmd_inject_pending') or []))
-            _bgcmd_items = (_drain_inbox(
-                _swarm_key, modes=['background-command'], max_items=_bgcmd_capacity)
-                if _bgcmd_capacity else [])
+            # A frozen receipt keeps its retry identity until publication.
+            # Otherwise every available completion joins this model round.
+            _bgcmd_items = ([] if task.get('_bgcmd_delivery_event') is not None else
+                _drain_inbox(_swarm_key, modes=['background-command']))
             # Project path-overlap advice exists only on the live task.  It is
             # consumed before this model round or discarded at settlement;
             # it never enters the durable inbox/feed projections.

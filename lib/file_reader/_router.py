@@ -1,7 +1,7 @@
-"""lib/file_reader/_router.py — Extension categories, limits, and dispatcher.
+"""lib/file_reader/_router.py — Extension categories and native-reader dispatch.
 
 Owns the shared constants (``IMAGE_EXTENSIONS`` / ``SUPPORTED_EXTENSIONS`` /
-``_EXT_MIME`` / byte & char limits) plus ``read_local_file`` — the top-level
+``_EXT_MIME``) plus ``read_local_file`` — the top-level
 router that dispatches by file extension to the image / PDF / office / text
 readers.
 
@@ -41,12 +41,6 @@ TEXT_EXTENSIONS = {
 
 SUPPORTED_EXTENSIONS = IMAGE_EXTENSIONS | PDF_EXTENSIONS | OFFICE_EXTENSIONS | TEXT_EXTENSIONS
 
-# ── Limits ──────────────────────────────────────────────────────────
-
-MAX_IMAGE_BYTES = 20 * 1024 * 1024   # 20 MB max for images
-MAX_FILE_BYTES = 50 * 1024 * 1024    # 50 MB max for documents
-MAX_TEXT_CHARS = 50 * 1024 * 1024    # char cap lifted to the byte bound; MAX_FILE_BYTES is the real limit
-
 _EXT_MIME = {
     '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
     '.gif': 'image/gif', '.webp': 'image/webp', '.bmp': 'image/bmp',
@@ -66,7 +60,7 @@ def read_local_file(path: str) -> dict | str:
 
     Raises:
         FileNotFoundError: If the file doesn't exist.
-        ValueError: If the file is too large or unsupported.
+        ValueError: If the file is unsupported.
     """
     # Leaf readers imported here so the router owns dispatch while the
     # doc/pdf parsers themselves stay lazily loaded inside _read_pdf/_read_office.

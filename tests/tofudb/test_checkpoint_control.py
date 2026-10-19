@@ -1,13 +1,16 @@
 """Owned checkpoint C ABI calls never replay one-shot load after buffer failure."""
 from concurrent.futures import ThreadPoolExecutor
 import json
+import sys
 import threading
 import time
 from types import SimpleNamespace
 from pathlib import Path
 import pytest
 from tofu_db.embedded import EmbeddedRuntime, EmbeddedTransportError, _ffi
-from tofu_db.generated_checkpoint_control import FORMAT, RESPONSE_HEADROOM_BYTES, OPERATIONS
+from tofu_db.generated_checkpoint_control import (
+    FORMAT, RESPONSE_HEADROOM_BYTES, OPERATIONS, FRONTIER_OBSERVATION_SCHEMA,
+)
 pytestmark=pytest.mark.unit
 
 def runtime(native):
@@ -26,6 +29,47 @@ def test_checkpoint_buffer_failure_never_reexecutes_one_shot_call():
  with pytest.raises(EmbeddedTransportError,match='not retried'):
   value.checkpoint_control('load',{'format':FORMAT,'capability_id':1},deadline_unix_ms=1,response_bytes=RESPONSE_HEADROOM_BYTES)
  assert len(calls)==1 and value._active_calls==0
+ value.close()
+
+@pytest.mark.parametrize('capacity',[0,-1,True,sys.maxsize+1])
+def test_checkpoint_response_bound_refuses_before_native_effect(capacity):
+ value=runtime(lambda *args:pytest.fail('invalid buffer reached journal'))
+ with pytest.raises(EmbeddedTransportError,match='invalid'):
+  value.checkpoint_control('load',{'format':FORMAT,'capability_id':1},deadline_unix_ms=1,response_bytes=capacity)
+ assert value._active_calls==0
+ value.close()
+
+@pytest.mark.parametrize('failure',[MemoryError,OverflowError])
+def test_checkpoint_issued_large_buffer_allocation_failure_is_typed_without_effect(monkeypatch,failure):
+ from tofu_db import embedded
+ value=runtime(lambda *args:pytest.fail('failed buffer allocation reached journal'))
+ def failed(capacity):
+  assert capacity==17<<20
+  raise failure('fixture allocation failure')
+ monkeypatch.setattr(embedded,'_response_buffer',lambda:(_ffi.new('char[]',1),1))
+ monkeypatch.setattr(embedded,'_grow_response_buffer',failed)
+ with pytest.raises(EmbeddedTransportError,match='before dispatch') as caught:
+  value.checkpoint_control('load',{'format':FORMAT,'capability_id':1},deadline_unix_ms=1,response_bytes=17<<20)
+ assert isinstance(caught.value.__cause__,failure) and value._active_calls==0
+ value.close()
+
+def test_checkpoint_large_issued_capacity_dispatches_once_and_reuses_buffer(monkeypatch):
+ from tofu_db import embedded
+ monkeypatch.setattr(embedded,'_thread_state',threading.local())
+ capacities=[]
+ def native(handle,request,length,out,capacity):
+  capacities.append(capacity)
+  response=json.dumps(dict(format=FORMAT,accepted=True)).encode()
+  _ffi.memmove(out,response,len(response));return len(response)
+ value=runtime(native)
+ for capability in (1,2):
+  assert value.checkpoint_control('forget',dict(format=FORMAT,capability_id=capability),
+      deadline_unix_ms=1,response_bytes=17<<20)['accepted']
+  buffer,capacity=embedded._response_buffer()
+  assert capacity==_ffi.sizeof(buffer)==17<<20
+  if capability==1:first=buffer
+  else:assert buffer is first
+ assert capacities==[17<<20,17<<20] and value._active_calls==0
  value.close()
 
 def test_checkpoint_close_joins_entered_calls_and_refuses_late_calls():
@@ -56,9 +100,17 @@ def test_old_library_refuses_checkpoint_without_native_dispatch():
  value.close()
 
 def test_generated_checkpoint_constants_match_the_authority():
+ from tofu_db.generated_checkpoint_control import CHECKPOINT_DOCUMENT_MAX_BYTES, AGGREGATE_COST_SCHEMA
  root=Path(__file__).resolve().parents[2];spec=json.loads((root/'contracts/native_checkpoint_control_v1.schema.json').read_text())
  assert FORMAT==spec['$id'] and RESPONSE_HEADROOM_BYTES==spec['limits']['responseHeadroomBytes']
- assert set(OPERATIONS)==set(spec['$defs'])-{'binding','response'}
+ assert set(OPERATIONS)==set(spec['$defs'])-{'binding','response','frontier_observation'}
+ assert FRONTIER_OBSERVATION_SCHEMA==spec['$defs']['frontier_observation']
+ assert CHECKPOINT_DOCUMENT_MAX_BYTES==json.loads((root/'contracts/tofudb_ir_v1.json').read_text())['bounds']['maximumLegacyDocumentBytes']
+ assert AGGREGATE_COST_SCHEMA==json.loads((root/'contracts/native_aggregate_cost_v1.schema.json').read_text())
+ from tofu_db.generated_checkpoint_control import TRANSPORT_FORMAT,CAPABILITIES_OPERATION,CONTROL_OPERATION
+ transport=spec['daemonTransport']
+ assert (TRANSPORT_FORMAT,CAPABILITIES_OPERATION,CONTROL_OPERATION)==(transport['format'],transport['capabilitiesOperation'],transport['controlOperation'])
+ assert (root/'contracts/native_checkpoint_control_v1.schema.json').read_bytes()==(root/'packages/tofu-db/contracts/native_checkpoint_control_v1.schema.json').read_bytes()
 
 
 def test_actual_checkpoint_sdk_library_keeps_pause_and_close_fences(tmp_path):

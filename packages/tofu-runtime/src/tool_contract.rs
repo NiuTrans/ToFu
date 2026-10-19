@@ -245,7 +245,7 @@ impl Node {
             deny_extras: schema["additionalProperties"] == false,
         })
     }
-    fn validate(&self, mut value: Value, path: &str) -> Result<Value, ContractError> {
+    fn validate(&self, mut value: Value, path: &str, required_null_is_missing: bool) -> Result<Value, ContractError> {
         if !self.types.is_empty() && !self.types.iter().any(|t| matches_type(&value, t)) {
             return Err(ContractError::new(
                 Code::InvalidArgumentType,
@@ -334,7 +334,7 @@ impl Node {
             }
             if let Some(child) = &self.items {
                 for (i, value) in array.iter_mut().enumerate() {
-                    *value = child.validate(std::mem::take(value), &format!("{path}[{i}]"))?;
+                    *value = child.validate(std::mem::take(value), &format!("{path}[{i}]"), required_null_is_missing)?;
                 }
             }
         }
@@ -342,7 +342,9 @@ impl Node {
             let missing: Vec<_> = self
                 .required
                 .iter()
-                .filter(|name| object.get(*name).is_none_or(Value::is_null))
+                .filter(|name| object.get(*name).is_none_or(|value| {
+                    value.is_null() && required_null_is_missing
+                }))
                 .cloned()
                 .collect();
             if !missing.is_empty() {
@@ -376,7 +378,7 @@ impl Node {
                 if let (Some(node), Some(value)) = (&property.node, object.get_mut(&property.name))
                 {
                     *value =
-                        node.validate(std::mem::take(value), &format!("{path}.{}", property.name))?;
+                        node.validate(std::mem::take(value), &format!("{path}.{}", property.name), required_null_is_missing)?;
                 }
             }
         }
@@ -523,6 +525,14 @@ impl Catalog {
         })
     }
     pub fn validate(&self, owner: u64, name: &str, value: Value) -> Result<Value, AdmissionError> {
+        self.validate_with_required_null_policy(owner, name, value, true)
+    }
+    /// Wire schemas treat explicit null as a value; it still must match type.
+    /// This does not grant tool dispatch authority or change tool normalization.
+    pub fn validate_protocol(&self, owner: u64, name: &str, value: Value) -> Result<Value, AdmissionError> {
+        self.validate_with_required_null_policy(owner, name, value, false)
+    }
+    fn validate_with_required_null_policy(&self, owner: u64, name: &str, value: Value, required_null_is_missing: bool) -> Result<Value, AdmissionError> {
         if owner != self.owner {
             return Err(AdmissionError::WrongOwner);
         }
@@ -537,7 +547,7 @@ impl Catalog {
         })?;
         let value = entry
             .node
-            .validate(value, "$")
+            .validate(value, "$", required_null_is_missing)
             .map_err(AdmissionError::Validation)?;
         if !value.is_object() {
             return Err(AdmissionError::Validation(ContractError::new(

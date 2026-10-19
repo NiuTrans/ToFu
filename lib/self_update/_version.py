@@ -14,7 +14,7 @@ from typing import Optional
 
 import requests
 
-from lib.http_client import http_get
+from lib.http_transport.client import http_get
 from lib.self_update._config import UPDATE_REPO, _TAGS_URL
 
 from lib.log import get_logger
@@ -137,6 +137,7 @@ def _retry_after_proxy_refusal(headers: dict,
         return http_get(_TAGS_URL, timeout=15, headers=headers,
                         use_proxy=False), None
     except Exception as e2:
+        logger.debug('_retry_after_proxy_refusal failure handled: %s', type(e2).__name__)
         return None, {'kind': 'network', 'detail': str(e2)[:300]}
 
 

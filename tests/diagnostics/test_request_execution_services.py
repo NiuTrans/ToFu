@@ -26,7 +26,7 @@ class _Admission:
 def test_log_compression_has_owner_deadline_retry_budget_and_exact_lease(
         monkeypatch):
     import lib.llm_dispatch as dispatch
-    import lib.log_compression as service
+    import lib.logging_pkg.log_compression as service
 
     admission = _Admission()
     monkeypatch.setattr(service, "controller", admission)
@@ -50,7 +50,7 @@ def test_log_compression_has_owner_deadline_retry_budget_and_exact_lease(
 
 def test_log_compression_dispatch_failure_still_releases_exact_lease(monkeypatch):
     import lib.llm_dispatch as dispatch
-    import lib.log_compression as service
+    import lib.logging_pkg.log_compression as service
 
     admission = _Admission()
     monkeypatch.setattr(service, "controller", admission)

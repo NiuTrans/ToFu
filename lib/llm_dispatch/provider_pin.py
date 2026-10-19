@@ -12,8 +12,10 @@ That override was **advisory** (a hint in the request body), not a hard
 scope. This module makes it a hard execution-context binding:
 
     once a task is created with route group P, every LLM dispatch on that
-    task execution context (main solve, compaction summary, endpoint replan, …)
-    may ONLY pick a slot whose dispatcher ``provider_id == P``. If no such slot is
+    task execution context (main solve, endpoint replan, …) may ONLY pick a
+    slot whose dispatcher ``provider_id == P``. Authorized auxiliary compaction
+    may mint its own bounded owner-scoped group and nest provider_pin for that
+    dispatch only; it restores P and disposes the auxiliary group on every exit. If no such slot is
     available the picker returns None — it NEVER falls back to a
     different provider's key.
 

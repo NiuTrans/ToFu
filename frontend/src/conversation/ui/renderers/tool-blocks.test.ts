@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /** Program fallback retains the concurrent evidence-first presentation contract. */
 import { expect, it, vi } from 'vitest';
 import type { ConversationBlockViewModel, ConversationTurnViewModel } from '../../presentation/conversation-view-model';

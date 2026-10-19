@@ -105,7 +105,7 @@ class TestEnsureFont:
             status_code = 200
             content = payload
 
-        import lib.http_client as hc
+        import lib.http_transport.client as hc
         monkeypatch.setattr(hc, 'http_get', lambda url, timeout=0: _Resp())
         path = fonts.ensure_font('misans', 400)
         assert path and os.path.isfile(path)
@@ -126,7 +126,7 @@ class TestEnsureFont:
             status_code = 200
             content = b'\xAA' * 16384
 
-        import lib.http_client as hc
+        import lib.http_transport.client as hc
         monkeypatch.setattr(hc, 'http_get', lambda url, timeout=0: _Resp())
         # Real registry pins will NOT match b'\xAA'*16k → refused.
         assert fonts.ensure_font('misans', 400) == ''
@@ -264,7 +264,7 @@ def test_parallel_font_first_fetch_publishes_one_complete_alias(tmp_path, monkey
     from concurrent.futures import ThreadPoolExecutor
     from lib.design_sys import fonts
     from lib.design_sys import _store as store
-    import lib.http_client as http
+    import lib.http_transport.client as http
     monkeypatch.setattr(store,'store_root',lambda:str(tmp_path))
     monkeypatch.setattr(fonts,'_store_dir',lambda:str(tmp_path/'fonts'))
     face=fonts.get_font('misans');source=face.sources[0];payload=b'0'*source.size

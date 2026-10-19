@@ -1,12 +1,11 @@
-"""lib/scheduler/timer/_crud.py — Timer CRUD + resume guardrail helpers.
+"""lib/scheduler/timer/_crud.py — Owner-scoped Timer CRUD.
 
-create / cancel / force-trigger / get / list / poll-log accessors, plus the
-age-policy helper (``_resume_max_age_seconds``) consulted by the resume-on-restart path.
+Create, cancel, force-trigger, get, list and poll-log accessors.
+Restart restores active work without rewriting state based on creation age.
 """
 
 from __future__ import annotations
 
-import os as _os
 import uuid
 from datetime import datetime
 from typing import Any
@@ -21,37 +20,6 @@ logger = get_logger(__name__)
 def _timer_client(*, write: bool = False):
     from lib.storage import get_storage_client
     return get_storage_client(write=write)
-
-
-# ── Boot-time resume guardrails (env-tunable) ───────────────────────────────
-# A timer that is still ``active`` long after its own poll budget should have
-# elapsed is, by definition, failing to make progress (e.g. its poll_count
-# never advanced because a DB error swallowed the increment). Resuming such a
-# zombie on every restart caused the 2026-06-26 search storm. On resume we
-# auto-expire any active timer older than a generous age cap, and we cap how
-# many timers a single boot will re-spawn so a leaked batch can never flood the
-# poll workers again.
-
-
-def _resume_max_age_seconds(timer: dict[str, Any]) -> float:
-    """Max wall-clock age (seconds) before an active timer is force-expired.
-
-    Defaults to the larger of 24h and 1.5× the timer's own theoretical poll
-    budget (poll_interval × max_polls), so a legitimately long timer is never
-    expired prematurely. Override the 24h floor via TOFU_TIMER_MAX_AGE_HOURS.
-    """
-    try:
-        floor_hours = float(_os.environ.get('TOFU_TIMER_MAX_AGE_HOURS', '24'))
-    except (TypeError, ValueError) as e:
-        logger.debug('[Timer] TOFU_TIMER_MAX_AGE_HOURS parse failed, using default: %s', e)
-        floor_hours = 24.0
-    floor = max(floor_hours, 0.0) * 3600.0
-    try:
-        budget = float(timer.get('poll_interval') or 60) * float(timer.get('max_polls') or 0)
-    except (TypeError, ValueError) as e:
-        logger.debug('[Timer] timer poll-budget computation failed, using 0: %s', e)
-        budget = 0.0
-    return max(floor, budget * 1.5)
 
 
 # ═════════════════════════════════════════════════════════════════════════════

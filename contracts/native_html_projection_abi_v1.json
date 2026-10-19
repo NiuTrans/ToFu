@@ -1,0 +1,23 @@
+{
+  "format": "tofu.native-html-projection-abi/v1",
+  "abi_version": 1,
+  "status": {
+    "OK": 0,
+    "INVALID_BUFFER": 1,
+    "INVALID_UTF8": 2,
+    "NUMERIC_REFERENCE": 3,
+    "PROJECTION_BUDGET": 4,
+    "ALLOCATION": 5,
+    "SINK": 6,
+    "PANIC": 7
+  },
+  "symbols": [
+    "tofu_html_projection_abi_version",
+    "tofu_html_projection_profile",
+    "tofu_html_projection_project"
+  ],
+  "lifetime": "Synchronous, stateless calls borrow caller UTF-8 bytes. A non-null sink is called exactly once after successful projection, including empty output, and borrows the complete UTF-8 result until the sink returns. The sink must not unwind across C. It returns zero on acceptance; any other value produces SINK. No output pointers or handles survive return. The caller must join all accepted calls before unloading code.",
+  "budget": "A size_t projection budget bounds individual text assemblies and aggregate generated heading/table text. Zero admits empty projection only; SIZE_MAX imposes no explicit text limit. Refusal invokes no sink. This is not an aggregate memory budget or an allocation-failure guarantee.",
+  "profile": "Profile sink receives JSON: python_version, tokenizer_sha256, owner_sha256 and native_sources SHA-256 witnesses. The declared Python tokenizer profile is the semantic version; host Python/Rust versions do not redefine it.",
+  "authority": "Pure HTML text projection only. No storage, account, fallback, worker, environment selection or default activation authority."
+}

@@ -3,8 +3,8 @@
 Entry points
 ------------
 ``tool_search_term_cache_capacity`` resolves the process-wide Tool Search
-tokenization cache. The catalog-index and sticky-selection capacities derive
-from that same launch-time working-set signal. ``tool_result_cache_capacity``
+tokenization cache. The reconstructible catalog-index capacity derives
+from that signal; live conversation state has no item-count quota. ``tool_result_cache_capacity``
 resolves each task's live execution-receipt cache. Query/schema and receipt
 semantics remain with their respective task/gateway owners.
 """
@@ -19,8 +19,6 @@ from runtime_guards import resolve_resource_budget
 
 TOOL_SEARCH_TERM_CACHE_HARD_CAPACITY = 16_384
 TOOL_SEARCH_CATALOG_INDEX_HARD_CAPACITY = 32
-TOOL_SEARCH_SELECTION_STATE_HARD_CAPACITY = 4_096
-TOOL_ROUTING_STICKY_STATE_HARD_CAPACITY = 4_096
 TOOL_RESULT_CACHE_HARD_CAPACITY = 1_024
 
 
@@ -43,26 +41,8 @@ def tool_search_catalog_index_capacity() -> int:
     )
 
 
-def tool_search_selection_state_capacity() -> int:
-    """Return the finite owner/conversation sticky-selection working set."""
-    term_capacity = tool_search_term_cache_capacity()
-    return max(
-        128,
-        min(TOOL_SEARCH_SELECTION_STATE_HARD_CAPACITY, term_capacity * 2),
-    )
 
 
-def tool_routing_sticky_state_capacity() -> int:
-    """Return the finite owner/conversation sticky routed-exposure working set.
-
-    Same launch-probed working-set signal as the Tool Search selection state:
-    both hold one small per-conversation record for the conversation's life.
-    """
-    term_capacity = tool_search_term_cache_capacity()
-    return max(
-        128,
-        min(TOOL_ROUTING_STICKY_STATE_HARD_CAPACITY, term_capacity * 2),
-    )
 
 
 def tool_result_cache_capacity(
@@ -79,13 +59,9 @@ def tool_result_cache_capacity(
 
 __all__ = [
     'TOOL_RESULT_CACHE_HARD_CAPACITY',
-    'TOOL_ROUTING_STICKY_STATE_HARD_CAPACITY',
     'TOOL_SEARCH_CATALOG_INDEX_HARD_CAPACITY',
-    'TOOL_SEARCH_SELECTION_STATE_HARD_CAPACITY',
     'TOOL_SEARCH_TERM_CACHE_HARD_CAPACITY',
     'tool_result_cache_capacity',
-    'tool_routing_sticky_state_capacity',
     'tool_search_catalog_index_capacity',
-    'tool_search_selection_state_capacity',
     'tool_search_term_cache_capacity',
 ]

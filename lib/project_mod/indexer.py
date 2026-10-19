@@ -45,8 +45,8 @@ _JOURNAL_FILE = 'JOURNAL.md'
 # they are per-developer / per-host working state, so we keep them out of git.
 # A SINGLE glob (.tofu*) from the central registry covers every current AND
 # future ``.tofu``-prefixed artifact, so this never needs editing when a new
-# one is introduced — see lib/agent_artifacts.py for the naming convention.
-from lib.agent_artifacts import GITIGNORE_PATTERN as _TOFU_ARTIFACT_GLOB
+# one is introduced — see lib/agent_loop/agent_artifacts.py for the naming convention.
+from lib.agent_loop.agent_artifacts import GITIGNORE_PATTERN as _TOFU_ARTIFACT_GLOB
 
 _TOFU_ARTIFACT_IGNORES = (_TOFU_ARTIFACT_GLOB,)
 
@@ -193,7 +193,7 @@ def _journal_seed() -> str:
 #  Context for Chat
 # ═══════════════════════════════════════════════════════
 
-def get_context_for_prompt(base_path=None, conv_id=None):
+def get_context_for_prompt(base_path=None, conv_id=None, *, include_guidance=True):
     """Build the system-prompt project-context block for a session.
 
     Contains only *system-level* context — the project header, multi-root
@@ -214,7 +214,7 @@ def get_context_for_prompt(base_path=None, conv_id=None):
     single-user UI / legacy path.
     """
     with _lock:
-        path = base_path or _state['path']
+        path = base_path or (None if conv_id else _state['path'])
     # Source the root set from the per-conv registry when we know the conv,
     # so the prompt's root table agrees with the resolver's strict isolation.
     if conv_id:
@@ -318,41 +318,14 @@ def get_context_for_prompt(base_path=None, conv_id=None):
     # ═══════════════════════════════════════════════════════
     #  CLAUDE.md / Project Intelligence auto-detection
     # ═══════════════════════════════════════════════════════
-    _INTELLIGENCE_FILES = ['CLAUDE.md', '.cursorrules', 'AGENTS.md', 'COPILOT.md']
-    for intel_name in _INTELLIGENCE_FILES:
-        intel_path = os.path.join(path, intel_name)
-        try:
-            # Only verified absence, not a stat/read failure, removes a rule.
-            import stat
-            present = stat.S_ISREG(os.stat(intel_path).st_mode)
-        except FileNotFoundError:
-            present = False
-        except OSError as e:
-            logger.warning('[Context] Failed to stat project intelligence file %s: %s',
-                           intel_path, e)
-            # Preserve the previous complete snapshot on partial failure.
-            raise
-        # A transient stat failure (permission, FUSE blip) is not verified
-        # absence: propagate so the provider records unavailable and the last
-        # complete snapshot is retained instead of silently dropped.
-        if present:
-            try:
-                with open(intel_path, encoding='utf-8', errors='replace') as f:
-                    intel_content = f.read()
-                if intel_content.strip():
-                    ctx += (f"\n{'='*50}\n"
-                            f"Project Intelligence — {intel_name}\n"
-                            f"{'='*50}\n"
-                            f"(Auto-detected from {intel_path})\n"
-                            f"MANDATORY: All code changes in this project MUST comply with the rules below.\n\n"
-                            f"{intel_content.strip()}\n")
-                    logger.info('[Context] Injected project intelligence file: %s (%d chars)',
-                                intel_path, len(intel_content))
-            except OSError as e:
-                logger.warning('[Context] Failed to read project intelligence file %s: %s',
-                               intel_path, e)
-                # Preserve the previous complete snapshot on partial failure.
-                raise
+    from lib.project_mod.instructions import read_root_guidance, render_guidance
+    if include_guidance:
+        rule_rows = []
+        for root in dict.fromkeys([path, *(rs['path'] for rs in extra_roots.values())]):
+            rule_rows.extend(read_root_guidance(root))
+        # Standalone callers retain complete rules. Task execution delivers
+        # them once through the raw-witness scoped guidance owner instead.
+        ctx += render_guidance(rule_rows)
 
     # Context reads advertise the journal location, never its history or a
     # maintenance lifecycle. Historical evidence is retrieved only as needed.

@@ -77,7 +77,7 @@ class TestInternalErrorClassification:
     def test_context_compaction_error_is_internal_not_prompt_too_long(self):
         from lib.error_envelope import from_exception
         from lib.error_envelope._classify import _classify_exception
-        from lib.llm_errors import ContextCompactionError
+        from lib.llm.llm_errors import ContextCompactionError
 
         exc = ContextCompactionError(
             'Automatic context compaction failed locally.')
@@ -120,7 +120,7 @@ class TestVendorOutageClassification:
 
     Root cause (2026-07-26, logs/error.log): the toio gateway wraps vendor
     transients in 4xx bodies (``ext.error.source=UPSTREAM_VENDOR``). The
-    raise layer (lib/llm_errors.py) already re-raises them as
+    raise layer (lib/llm/llm_errors.py) already re-raises them as
     ``RateLimitError(is_gateway=True)`` / ``RetryableAPIError`` so dispatch
     rotates slots — but the DISPLAY classifier mapped a gateway-RL to
     ``ratelimit`` (Settings→Keys hint) and a 5xx-after-retries fell to the
@@ -257,7 +257,7 @@ class TestStorageErrorClassification:
         env = make_envelope('storage_fence')
         hint = env['hint']
         assert env['hintKey'] == 'err.k.storage_fence.hint'
-        assert 'python3 -m lib.log_diagnostics --conversation-id' in hint
+        assert 'python3 -m lib.logging_pkg.log_diagnostics --conversation-id' in hint
         assert '/api/v4/logs/diagnostics' in hint
         assert 'logs/app.log' in hint
         assert 'tofu.storage.engine' in hint

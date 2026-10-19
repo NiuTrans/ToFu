@@ -73,12 +73,13 @@ def test_delivery_preserves_tool_pairs_and_requires_explicit_ack(world):
     with pytest.raises(EvolutionStateError):c.acknowledge(task,2,'accepted','stale')
 
 
-def test_update_capacity_refuses_without_evicting_material_or_history(world):
-    for i in range(96):update(str(i),kind='experiment',key=str(i))
-    with pytest.raises(EvolutionStateError):library.save_material('a',{'kind':'web','title':'No room','url':'https://example.org/'},user_id=12)
-    assert library.list_materials('a',user_id=12)==[]
-    state=c.snapshot('a',user_id=12);assert len(state['updates'])==96
-    assert len(json.dumps(state).encode())<c.MAX_WORKSPACE_BYTES
+def test_updates_and_materials_cross_old_collection_limits(world):
+    for i in range(257):update(str(i),kind='experiment',key=str(i))
+    library.save_material('a',{'kind':'web','title':'Retained','url':'https://example.org/'},user_id=12)
+    assert len(library.list_materials('a',user_id=12))==1
+    state=c.snapshot('a',user_id=12)
+    assert len(state['updates'])==258 and state['updates'][0]['content']=='0'
+
 
 
 def test_manager_single_flight_pending_messages_and_durable_reply(world):
@@ -174,17 +175,13 @@ def test_followup_freezes_context_and_reuses_intent(world,monkeypatch):
     with pytest.raises(EvolutionStateError):manager.start_followup('a',body,user_id=12,request_id='different')
 
 
-def test_utf8_workspace_budget_refuses_without_partial_append(world):
-    from lib.evolution import records
-    for i in range(96):
-        try:update('资料'*2000,kind='experiment',key=str(i))
-        except EvolutionStateError:break
+def test_utf8_updates_cross_old_workspace_bytes_without_loss(world):
+    for i in range(129):update('资料'*2000,kind='experiment',key=str(i))
     state=c.snapshot('a',user_id=12)
-    assert 0<len(state['updates'])<96
-    revision=state['revision']
-    with pytest.raises(EvolutionStateError):update('资料'*2000,kind='experiment',key='overflow')
-    assert c.snapshot('a',user_id=12)['revision']==revision
-    assert max(len(json.dumps(v,ensure_ascii=False).encode()) for v in world[0].rows.values())<=c.MAX_WORKSPACE_BYTES
+    assert len(state['updates'])==129
+    assert all(event['content']=='资料'*2000 for event in state['updates'])
+    assert len(json.dumps(state,ensure_ascii=False).encode())>1024*1024
+
 
 
 def test_large_reference_lists_have_bounded_preview_and_explicit_detail(world):
@@ -326,20 +323,21 @@ def test_coordinator_full_journal_settles_once_without_replay(world, terminal_st
     def fill(state):
         c.append_to_row({'coordination': state}, event_id='terminal:worker',
                         kind='run_result', content='Run result', origin='system')
-        while len(state['updates']) < c.MAX_UPDATES:
+        while len(state['updates']) < 256:
             seq = len(state['updates'])
             c.append_to_row({'coordination': state}, event_id=f'old-reply-{seq}',
                             kind='reply', content='Retained response', origin='agent')
     c.mutate('a', 12, fill)
     before = c.snapshot('a', user_id=12)['updates']
+    task['_evolutionPresented']=c.snapshot('a',user_id=12)['revision']
     task.update(status=terminal_status, content='The terminal response remains visible.')
     if terminal_status == 'error':
         task['error'] = 'provider failed'
     settled = manager.settle(task)
-    assert settled['status'] == 'needs_attention'
+    assert settled['status'] == ('idle' if terminal_status == 'done' else 'needs_attention')
     assert settled['tokens'] == 10 and settled['tool_calls'] == 1
     assert settled['last_response'] == task['content']
-    assert c.snapshot('a', user_id=12)['updates'] == before
+    assert c.snapshot('a', user_id=12)['updates'][:len(before)] == before
     assert len(world[2]) == 1
     assert manager.settle(task) == settled
 
@@ -349,60 +347,49 @@ def test_coordinator_full_journal_refuses_launch_before_allocating_task(world):
     def fill(state):
         c.append_to_row({'coordination': state}, event_id='terminal:worker',
                         kind='run_result', content='Run result', origin='system')
-        while len(state['updates']) < c.MAX_UPDATES:
+        while len(state['updates']) < 256:
             seq = len(state['updates'])
             c.append_to_row({'coordination': state}, event_id=f'old-reply-{seq}',
                             kind='reply', content='Retained response', origin='agent')
     c.mutate('a', 12, fill)
     settled = manager.wake('a', user_id=12, enable=True)
-    assert settled['status'] == 'needs_attention'
-    assert settled['error'] == 'coordinator_reply_capacity_exhausted'
-    assert world[2] == []
+    assert settled['status'] == 'running'
+    assert settled['error'] == ''
+    assert len(world[2]) == 1
 
 
 @pytest.mark.parametrize('terminal_status', ['done', 'error'])
-def test_coordinator_byte_capacity_keeps_task_reference_and_accounts_once(world, monkeypatch, terminal_status):
-    from lib.evolution import records
-    update('Explain the result', kind='message')
-    manager.wake('a', user_id=12, enable=True)
-    task = world[2][0]
-    task['_evolutionPresented'] = 1
-    before = c.snapshot('a', user_id=12)['updates']
-    row = next(value for (namespace, _), value in world[0].rows.items()
-               if namespace == records.NAMESPACE_LIBRARIES)
-    # Model a concurrent fill leaving enough space for metadata, not a reply.
-    monkeypatch.setattr(c, 'MAX_WORKSPACE_BYTES', len(json.dumps(row, ensure_ascii=False).encode()) + 256)
-    task.update(status=terminal_status, content='资料' * 4000)
-    settled = manager.settle(task)
-    assert settled['status'] == 'needs_attention'
-    assert settled['task_id'] == task['id']
-    assert 'capacity' in settled['error']
-    assert settled['tokens'] == 10 and settled['tool_calls'] == 1
-    assert c.snapshot('a', user_id=12)['updates'] == before
-    assert len(world[2]) == 1
-    assert manager.settle(task) == settled
-    row = next(value for (namespace, _), value in world[0].rows.items()
-               if namespace == records.NAMESPACE_LIBRARIES)
-    assert len(json.dumps(row, ensure_ascii=False).encode()) <= c.MAX_WORKSPACE_BYTES
+def test_coordinator_large_journal_accounts_and_persists_reply_once(world, monkeypatch, terminal_status):
+    update('Explain the result',kind='message')
+    manager.wake('a',user_id=12,enable=True)
+    task=world[2][0];task['_evolutionPresented']=1
+    for index in range(100):update('资料'*2000,kind='experiment',key=f'large-{index}')
+    before=c.snapshot('a',user_id=12)['updates']
+    task['_evolutionPresented']=c.snapshot('a',user_id=12)['revision']
+    task.update(status=terminal_status,content='资料'*4000)
+    settled=manager.settle(task)
+    assert settled['status']==('idle' if terminal_status=='done' else 'needs_attention')
+    assert settled['task_id']==task['id']
+    assert settled['tokens']==10 and settled['tool_calls']==1
+    events=c.snapshot('a',user_id=12)['updates']
+    assert events[:len(before)]==before
+    assert len(events)==len(before)+(terminal_status=='done')
+    assert manager.settle(task)==settled
 
 
-def test_replies_preserve_terminal_slot_and_bytes(world):
+
+def test_terminal_notice_does_not_need_a_reserved_slot(world):
     update(kind='message')
     def fill(state):
-        while len(state['updates']) < c.MAX_UPDATES - 1:
-            c.append_to_row({'coordination': state}, event_id=f"reply-{state['revision']}",
-                            kind='reply', content='response', origin='agent')
-    c.mutate('a', 12, fill)
-    assert manager.wake('a', user_id=12, enable=True)['status'] == 'needs_attention'
-    assert not world[2]
-    with pytest.raises(EvolutionStateError):
-        c.mutate('a', 12, lambda state: c.append_to_row({'coordination': state},
-            event_id='one-too-many', kind='reply', content='reply', origin='agent'))
-    world[1].update(status='completed', result='Verified result')
-    result = c.record_run_result(world[1], user_id=12)
-    assert result['kind'] == 'run_result'
-    assert c.record_run_result(world[1], user_id=12) == result
-    assert len(c.snapshot('a', user_id=12)['updates']) == c.MAX_UPDATES
+        for index in range(256):
+            c.append_to_row({'coordination':state},event_id=f'reply-{index}',kind='reply',content='response',origin='agent')
+    c.mutate('a',12,fill)
+    world[1].update(status='completed',result='Verified result')
+    result=c.record_run_result(world[1],user_id=12)
+    assert result['kind']=='run_result'
+    assert c.record_run_result(world[1],user_id=12)==result
+    assert len(c.snapshot('a',user_id=12)['updates'])==258
+
 
 
 def test_legacy_full_journal_does_not_block_terminal_reconciliation(world, monkeypatch):
@@ -414,7 +401,7 @@ def test_legacy_full_journal_does_not_block_terminal_reconciliation(world, monke
     row = next(value for (namespace, _), value in world[0].rows.items()
                if namespace == records.NAMESPACE_LIBRARIES)
     state = row['coordination']
-    while len(state['updates']) < c.MAX_UPDATES:
+    while len(state['updates']) < 256:
         seq = state['revision'] + 1
         state['updates'].append({'event_id': f'legacy-{seq}', 'kind': 'reply',
             'content': 'preserved', 'origin': 'agent', 'target': 'all',
@@ -422,13 +409,15 @@ def test_legacy_full_journal_does_not_block_terminal_reconciliation(world, monke
         state['revision'] = seq
     before = json.dumps(state['updates'])
     world[1].update(status='completed', result='Verified result')
+    c.record_run_result(world[1],user_id=12)
+    task['_evolutionPresented']=c.snapshot('a',user_id=12)['revision']
     monkeypatch.setattr(manager, 'default_task_loader', lambda *a, **kw: task)
     task.update(status='done', content='Run is finished')
     result = manager.reconcile('a', user_id=12)
-    assert result['status'] == 'needs_attention'
+    assert result['status'] == 'idle'
     assert result['tokens'] == 10
     assert manager.reconcile('a', user_id=12)['tokens'] == 10
-    assert json.dumps(c.snapshot('a', user_id=12)['updates']) == before
+    assert c.snapshot('a', user_id=12)['updates'][:256] == json.loads(before)
     assert len(world[2]) == 1
 
 
@@ -458,3 +447,11 @@ def test_revoked_task_update_injection_preserves_existing_messages(world):
     messages=[{'role':'user','content':'Original objective'}]
     c.inject_updates(task,messages,0)
     assert messages==[{'role':'user','content':'Original objective'}]
+
+
+def test_journal_revision_outlives_old_numeric_collection_ceiling(world):
+    c.mutate('a',12,lambda state:state.update(revision=1000000))
+    event=update('new evidence',kind='experiment',key='after-million')
+    state=c.snapshot('a',user_id=12)
+    assert state['revision']==1000001
+    assert state['updates'][-1]['seq']==1000001

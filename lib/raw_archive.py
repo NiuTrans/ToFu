@@ -22,7 +22,7 @@ import zlib
 import orjson
 
 from lib.log import get_logger
-from lib.log_record_values import text_value
+from lib.logging_pkg.log_record_values import text_value
 from lib.raw_archive_contract import RAW_ARCHIVE_FREE_SPACE_WIRE_MAX_BYTES
 from lib.storage.errors import StorageError
 
@@ -242,7 +242,7 @@ class RawArchiveCapture:
             min_free_bytes = _configured_min_free_bytes()
             available_free_bytes = 0
             try:
-                from lib.runtime_paths import data_root
+                from lib.runtime.runtime_paths import data_root
 
                 available_free_bytes = min(
                     int(shutil.disk_usage(data_root()).free),

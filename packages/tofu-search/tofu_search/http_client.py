@@ -1,6 +1,6 @@
 """tofu_search.http_client — Minimal proxy-aware HTTP helper.
 
-Replaces chatui's lib.http_client for the vertical-search module. Honors the
+Replaces chatui's lib.http_transport.client for the vertical-search module. Honors the
 standard HTTP(S)_PROXY env vars (requests does this by default) and applies a
 default timeout + User-Agent. Kept intentionally small — the heavy fetch
 pipeline lives in tofu_search.fetch.

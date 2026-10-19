@@ -163,6 +163,7 @@ def poll_decision(
                 max_tokens=256,
                 temperature=0,
                 capability='cheap',
+                owner_user_id=int(task['user_id']),
                 log_prefix=f'[Proactive:{task["id"][:8]}]',
             )
     except Exception as e:

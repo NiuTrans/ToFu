@@ -1832,7 +1832,7 @@ def test_every_engine_event_is_declared_in_the_runtime_contract():
         )
     )
     emitted = set(re.findall(
-        r"self\._emit\(\{\s*'type':\s*'([^']+)'", source,
+        r"(?:self|execution_owner)\._emit\(\{\s*'type':\s*'([^']+)'", source,
     ))
     assert {'flow_start', 'flow_complete', 'step_phase', 'step_delta',
             'step_trace', 'no_progress'} <= emitted

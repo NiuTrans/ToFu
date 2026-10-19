@@ -10,9 +10,9 @@ from __future__ import annotations
 import os
 import subprocess
 
-from lib.http_client import http_stream
+from lib.http_transport.client import http_stream
 from lib.log import audit_log, log_context
-from lib.runtime_layout import is_overlay_skipped as _rl_is_overlay_skipped
+from lib.runtime.runtime_layout import is_overlay_skipped as _rl_is_overlay_skipped
 from lib.self_update._config import (
     UPDATE_BRANCH,
     UPDATE_REMOTE,
@@ -317,7 +317,7 @@ def _apply_via_git(progress=None) -> dict:
 def _overlay_skip(rel: str) -> bool:
     """True if ``rel`` (project-root-relative, '/'-separated) must NOT be
     overwritten by a tarball overlay — user/runtime state (see
-    ``lib.runtime_layout.OVERLAY_SKIP_PREFIXES``). Delegates to the single-source
+    ``lib.runtime.runtime_layout.OVERLAY_SKIP_PREFIXES``). Delegates to the single-source
     registry, which also covers any ``.tofu*`` agent artifact at any depth."""
     return _rl_is_overlay_skipped(rel)
 

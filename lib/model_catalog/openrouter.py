@@ -33,7 +33,7 @@ from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 from lib.log import get_logger
-from lib.runtime_paths import data_root
+from lib.runtime.runtime_paths import data_root
 
 
 logger = get_logger(__name__)
@@ -121,7 +121,7 @@ def _parse_dataset(payload: Any) -> list[dict[str, Any]]:
 
 def _fetch_dataset(fetcher: Callable[..., Any] | None = None) -> list[dict[str, Any]]:
     if fetcher is None:
-        from lib.http_client import http_get
+        from lib.http_transport.client import http_get
 
         fetcher = http_get
     response = fetcher(OPENROUTER_MODELS_URL, timeout=_FETCH_TIMEOUT_SECONDS)

@@ -104,17 +104,16 @@ def _handle_read_page(fn_args, runtime):
             return ('Error: browser extension upgrade required for captured API '
                     f'data; missing capabilities: {", ".join(exc.missing)}')
         result, error = runtime.send('read_tab', {
-            'tabId': int(tab_id), 'maxChars': fn_args.get('maxChars', 30_000),
+            'tabId': int(tab_id), 'maxChars': 80_000,
         }, timeout=30)
         if error:
             return f'Error reading captured API data from tab {tab_id}: {error}'
         if not _result_url_allowed(result, runtime):
             return 'Error: browser read result was denied by domain policy'
         from lib.browser.content import collect_content, render_content
-        max_chars = fn_args.get('maxChars', 30_000)
         content = collect_content(result, owner_user_id=runtime.owner_user_id,
-                                  target=target, max_chars=max_chars, representation='data')
-        return render_content(content, max_chars=max_chars)
+                                  target=target, representation='data')
+        return render_content(content)
     if mode == 'elements':
         return _read_elements({
             'tabId': tab_id,
@@ -130,7 +129,7 @@ def _handle_read_page(fn_args, runtime):
     # ── auto: optimistic text read; diagnose only on sparsity ──
     result, error = runtime.send('read_tab', {
         'tabId': int(tab_id), 'selector': fn_args.get('selector'),
-        'maxChars': fn_args.get('maxChars', 30000),
+        'maxChars': 80_000,
     }, timeout=30)
     if error:
         return f'Error reading tab {tab_id}: {error}'
@@ -138,21 +137,20 @@ def _handle_read_page(fn_args, runtime):
         return 'Error: browser read result was denied by domain policy'
     if isinstance(result, dict) and not result.get('error') and not result.get('elements'):
         from lib.browser.content import collect_content, render_content
-        max_chars = fn_args.get('maxChars', 30_000)
         if mode == 'text':
             # Explicit DOM mode uses the same acceptance core, without API/state enrichment.
             result = {key: value for key, value in result.items()
                       if key not in ('network', 'networkResponses', 'initialStatePayloads')}
         content = collect_content(result, owner_user_id=runtime.owner_user_id,
-                                  target=target, max_chars=max_chars)
+                                  target=target)
         if content['status'] in ('ok', 'partial', 'empty', 'blocked'):
-            return _render_with_evidence(content, max_chars)
+            return _render_with_evidence(content)
         text = content['content']
         # Sparse: the page is likely Canvas/SVG/SPA — attach the structural
         # summary (framework, forms, canvas count) so the model gets the
         # diagnosis instead of having to make it.
         summary = _summarize_page({'tabId': tab_id}, runtime)
-        body = render_content(content, max_chars=max_chars)
+        body = render_content(content)
         diagnostic = (
             f'Text extraction is sparse ({len((text or "").strip())} chars) — '
             f'the page is likely Canvas/SVG/SPA-rendered.\n'
@@ -162,18 +160,14 @@ def _handle_read_page(fn_args, runtime):
             f'--- Structural summary ---\n{summary}\n\n'
             f'--- Extracted text (sparse) ---\n{body}'
         )
-        return diagnostic[:max_chars]
+        return diagnostic
     return _render_read_result(result, tab_id)
 
 
-def _render_with_evidence(content, max_chars):
-    """Bounded render for the model; full secured receipt retained canonically.
-
-    The artifact layer then recovers any records/content the model-view clip
-    removed, so a re-read is a new observation rather than silent evidence loss.
-    """
+def _render_with_evidence(content):
+    """Pass accepted content and canonical evidence intact to common L0."""
     from lib.browser.content import render_content
-    body = render_content(content, max_chars=max_chars)
+    body = render_content(content)
     evidence_json = getattr(content, 'evidence_json', '')
     if not evidence_json:
         return body

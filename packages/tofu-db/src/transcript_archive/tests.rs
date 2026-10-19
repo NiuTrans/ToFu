@@ -149,7 +149,7 @@ fn tampered_page_digest_fails_closed() {
     )
     .unwrap()
     .unwrap();
-    let mut manifest = decode_manifest(&manifest_bytes).unwrap();
+    let mut manifest = decode_manifest(&manifest_bytes).unwrap().unwrap();
     manifest.pages[0].sha256 = "00".repeat(32);
     vd_put(
         &database,
@@ -673,6 +673,36 @@ fn prepared_archive_keeps_private_bytes_and_allows_unrelated_foreground_commit()
             .retained_transaction_bytes,
         0
     );
+}
+
+#[test]
+fn retired_archive_format_falls_back_and_rebuilds_from_authoritative_turns() {
+    let (_, mut database) = prepared_archive_seed();
+    let replica = database.build_preparation_replica().unwrap();
+    let prepared = prepare_one_conversation(&replica, 1, 7, "prepared-archive").unwrap().unwrap();
+    database.commit(prepared.transaction).unwrap();
+    let mut transaction = database.begin(1, 7).unwrap();
+    let key = manifest_key(&transaction, "prepared-archive").unwrap();
+    let bytes = vd_read(&database, &mut transaction, &key, TRANSCRIPT_ARCHIVE_MANIFEST_NAMESPACE).unwrap().unwrap();
+    let mut old: Value = serde_json::from_slice(&bytes).unwrap();
+    old["format"] = json!(crate::generated_tofudb_ir::TRANSCRIPT_ARCHIVE_RETIRED_FORMAT);
+    vd_put(&database, &mut transaction, key.clone(), TRANSCRIPT_ARCHIVE_MANIFEST_NAMESPACE,
+        String::from_utf8(key.key_bytes().to_vec()).unwrap(), serde_json::to_vec(&old).unwrap(), 1_700_000_010).unwrap();
+    database.commit(transaction).unwrap();
+    let mut read = database.begin(1, 7).unwrap();
+    assert!(read_sealed(&database, &mut read, "prepared-archive", 2).unwrap().is_none());
+    let (exact, count, _, _) = crate::turn::legacy_messages(&database, &mut read,
+        "prepared-archive", 0, None, &mut || false).unwrap();
+    assert_eq!(count, 2);
+    assert!(exact[1]["content"].as_str().unwrap().starts_with("1-message"));
+    drop(read);
+    let replica = database.build_preparation_replica().unwrap();
+    let prepared = prepare_one_conversation(&replica, 1, 7, "prepared-archive").unwrap().unwrap();
+    database.commit(prepared.transaction).unwrap();
+    let mut read = database.begin(1, 7).unwrap();
+    assert_eq!(read_sealed(&database, &mut read, "prepared-archive", 2).unwrap().unwrap(), exact);
+    let encoded = vd_read(&database, &mut read, &key, TRANSCRIPT_ARCHIVE_MANIFEST_NAMESPACE).unwrap().unwrap();
+    assert_eq!(serde_json::from_slice::<Value>(&encoded).unwrap()["format"], FORMAT);
 }
 
 #[test]

@@ -91,6 +91,23 @@ global.setTimeout=originalTimeout;
 """)
 
 
+def test_working_facts_keep_scope_signal_and_revision_without_retrying_unknown_decisions(registry_bundle):
+    run_registry(registry_bundle, r"""
+const rows=[],abort=new AbortController(),command={action:'correct',id:'fact',revision:7,text:'new',note:'owner'};
+const owner={...apiTransport,request:async(path,options)=>{
+ rows.push({path,options});if(options.method==='POST')throw new Error('acknowledgement lost');return {revision:7};
+}};
+const local=createEndpointRegistry(owner,()=> 'en');
+await local.conversations.workingFacts('a/b',abort.signal);
+await local.conversations.workingFactConsumers('a/b','cursor',abort.signal);
+await assert.rejects(local.conversations.saveWorkingFact('a/b',command,abort.signal),/acknowledgement lost/);
+assert.equal(rows.length,3);assert.equal(rows[0].path,'/api/v4/conversations/a%2Fb/working-facts');
+assert.equal(rows[1].path,rows[0].path+'/consumers');assert.deepEqual(rows[1].options.query,{cursor:'cursor',limit:50});
+assert.equal(rows[2].options.json,command);assert.equal(rows[2].options.method,'POST');
+for(const row of rows)assert.equal(row.options.signal,abort.signal);
+""")
+
+
 def test_idempotent_write_preserves_key_response_and_caller_options(registry_bundle):
     run_registry(registry_bundle, r"""
 const delays=[],requests=[];let keys=0;
@@ -140,4 +157,22 @@ const failure=api.conversations.get('id',{onError:'throw'}),sameFailure=api.conv
 pending.at(-1).reject(new TypeError('offline'));await assert.rejects(failure,error=>error instanceof api.ApiError&&error.code==='network');
 const retry=api.conversations.get('id',{onError:'throw'});assert.notEqual(retry,failure);assert.equal(pending.length,4);
 pending.at(-1).resolve(new Response(JSON.stringify({data:{recovered:true},meta:{}}),{headers:{'content-type':'application/json'}}));assert.equal((await retry).recovered,true);
+""")
+
+
+def test_boot_retry_uses_existing_phase_command_and_preserves_refusal(registry_bundle):
+    run_registry(registry_bundle, r"""
+const calls=[];
+global.fetch=async (url,options)=>{
+  calls.push({url,options});
+  return new Response(JSON.stringify({ok:true}),{headers:{'content-type':'application/json'}});
+};
+await api.health.retryBoot({timeout:1000});
+assert.equal(calls.length,1);
+assert.equal(calls[0].url,'/api/v4/boot/retry');
+assert.equal(calls[0].options.method,'POST');
+assert.equal(calls[0].options.body,'{}');
+global.fetch=async ()=>new Response(JSON.stringify({error:'server_boot_failed'}),{
+  status:503,headers:{'content-type':'application/json'}});
+await assert.rejects(api.health.retryBoot({timeout:1000}),error=>error.status===503);
 """)

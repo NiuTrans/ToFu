@@ -56,7 +56,7 @@ class Bridge:
         return copy.deepcopy(self.catalog)
 
     def call_tool_document(self, name, args, *, timeout, cancel=None):
-        assert 0 < timeout <= 300
+        assert timeout is None or timeout > 0
         with self.lock:
             self.calls.append((name, copy.deepcopy(args)))
         identity = {key: args[key] for key in ('schema_version', 'owner_user_id', 'project_id', 'request_id')}
@@ -165,7 +165,7 @@ def test_common_document_selection_switches_sources_without_compiling_or_losing_
     assert state['paperDocument'] == local and state['paperOverleafSources'] == []
 
 
-def test_disabled_capabilities_preserve_selection_intent_and_bound_combined_discovery(owned, tmp_path):
+def test_disabled_capabilities_preserve_selection_intent_and_complete_combined_discovery(owned, tmp_path):
     from lib.paper.builds.documents import discover_documents
     state, _ = owned
     source = select()
@@ -181,9 +181,9 @@ def test_disabled_capabilities_preserve_selection_intent_and_bound_combined_disc
     for number in range(64):
         (tmp_path/f'paper{number}.tex').write_text('\\documentclass{article}')
     result = discover_documents({'conv_id': 'c'}, owner_user_id=7)
-    assert len(result['documents']) == 64 and result['selected'] == state['paperDocument']
+    assert len(result['documents']) == 80 and result['selected'] == state['paperDocument']
     assert result['selected'] in result['documents']
-    assert any(row['code'] == 'discovery_limit' for row in result['diagnostics'])
+    assert not any(row['code'] == 'discovery_limit' for row in result['diagnostics'])
 
 
 def test_overleaf_document_http_scope_owner_selection_and_revocation(owned):

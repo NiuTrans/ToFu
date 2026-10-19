@@ -11,7 +11,6 @@ import hashlib
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
-from .contract import limit
 from .errors import BuildError, check_cancelled
 from .sources import SourceSnapshot, manifest_digest
 
@@ -23,11 +22,10 @@ class SourceRecords:
 
     @classmethod
     def from_text(cls, files: list[dict], *, main_file: str = 'main.tex') -> 'SourceRecords':
-        if not files or len(files) > limit('source_files'):
-            raise BuildError('source_limit', 'Choose a bounded, nonempty source tree')
+        if not files:
+            raise BuildError('source_limit', 'Choose a nonempty source tree')
         records = []
         names = set()
-        size = 0
         for row in files:
             if not isinstance(row, dict):
                 raise BuildError('source_path', 'Source records must be objects')
@@ -41,12 +39,7 @@ class SourceRecords:
                     or any(PureWindowsPath(part).is_reserved() for part in relative.parts)):
                 raise BuildError('source_path', 'Source paths must be distinct portable relative files')
             names.add(path.casefold())
-            if len(content) > limit('source_file_bytes'):
-                raise BuildError('source_limit', 'Source record exceeds the compiler byte budget')
             data = content.encode('utf-8')
-            size += len(data)
-            if len(data) > limit('source_file_bytes') or size > limit('source_bytes'):
-                raise BuildError('source_limit', 'Source records exceed the compiler byte budget')
             records.append((path, data))
         if main_file not in {path for path, _ in records}:
             raise BuildError('main_file', 'Choose a main file from the exact source tree')

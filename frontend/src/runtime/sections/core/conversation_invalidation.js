@@ -141,6 +141,10 @@ function _onFoldersChangedPush(rawFrame) {
   if (!frame) return;
   if (!_frameIsOurs(frame.userId)) return;
   const deletedFolderId = frame.deletedFolderId;
+
+  // Push is an invalidation, including when its debounce joins an older read.
+  // The catalog owner refetches after that older delivery rather than admitting it.
+  if (typeof invalidateFolderProjection === 'function') invalidateFolderProjection();
   if (deletedFolderId) {
     for (const conversation of conversations) {
       if (conversation?.folderId === deletedFolderId) conversation.folderId = null;

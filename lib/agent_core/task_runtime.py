@@ -71,8 +71,11 @@ quality dimensions get a new KEY inside ``artifact_quality`` — never a new
 import asyncio
 
 from lib.agent_core.publication import publication_commit, check_publication
+from copy import deepcopy
 import json
 import threading
+from lib.agent_core.abort_signal import AbortSignal
+from lib.agent_core.execution_clock import ExecutionClock, stamp_execution_clock
 import time
 from typing import Any, Callable, Optional
 
@@ -87,7 +90,7 @@ from lib.agent_core.execution_session import (
 from lib.ids import short_id
 from lib.identity import PrincipalContext, require_user_id
 from lib.log import bind_log_context, get_logger, req_id, set_req_id
-from lib.task_replay import (
+from lib.task_replay.task_replay import (
     TASK_REPLAY_EVENT_SEQUENCE_FIELD,
     TASK_REPLAY_EVENT_TYPE_FIELD,
     TASK_REPLAY_TERMINAL_STATUSES,
@@ -340,7 +343,6 @@ class TaskRuntime:
         if not task_id:
             task_id = short_id(n=12)
         _now = time.time()
-        from lib.agent_core.execution_clock import ExecutionClock
         if execution_clock is None:
             execution_clock = ExecutionClock.start(origin_at_ms=int(_now * 1000))
         elif not isinstance(execution_clock, ExecutionClock):
@@ -367,7 +369,7 @@ class TaskRuntime:
             '_eventRetainedBytes': 0,
             '_eventRetainedSizes': [],
             'events_lock': threading.Lock(),
-            'abort_event': threading.Event(),
+            'abort_event': AbortSignal(),
             'result': None,
             'error': None,
             'created_at': _now,
@@ -684,7 +686,7 @@ class TaskRuntime:
         if 'events_lock' not in task:
             task['events_lock'] = threading.Lock()
         if 'abort_event' not in task:
-            task['abort_event'] = threading.Event()
+            task['abort_event'] = AbortSignal()
         task.setdefault('status', 'running')
         task.setdefault('result', None)
         task.setdefault('error', None)
@@ -774,7 +776,6 @@ class TaskRuntime:
         # Standard event envelope. These fields are additive and stable across
         # live WebSocket delivery, SSE and cursor replay.
         event.setdefault('taskId', task_id)
-        from lib.agent_core.execution_clock import stamp_execution_clock
         stamp_execution_clock(task, event)
         request_id = task.get('_requestId') or (task.get('meta') or {}).get('requestId')
         if request_id:
@@ -916,6 +917,14 @@ class TaskRuntime:
             except Exception as e:
                 terminal = event.get(TASK_REPLAY_EVENT_TYPE_FIELD) in (
                     'done', 'error', 'aborted', 'interrupted')
+
+                if type(e).__name__ == 'EventDeliveryCancelled':
+                    # The producer declined an unaccepted post-Stop frame,
+                    # not a failed durable write. Keep it invisible without
+                    # planting a delivery-wedge or persistence-error report.
+                    logger.debug('[TaskRuntime:%s] owner cancelled event task=%s seq=%s',
+                                 self.kind, task_id[:8], seq)
+                    return seq
                 # v2 events have a stronger contract than the legacy task
                 # channel: every frame is durable before visibility, not just
                 # the terminal one.  A stale/superseded attempt therefore
@@ -995,6 +1004,19 @@ class TaskRuntime:
                 return False
             task['_executionTerminalizing'] = True
             abort_requested = task['abort_event'].is_set()
+        try:
+            return self._finish_claimed(task_id, task, result=result, envelope=envelope,
+                abort_requested=abort_requested, error_context=error_context,
+                degraded=degraded, degraded_reason=degraded_reason,
+                terminal_event_fields=terminal_event_fields)
+        finally:
+            with self._lock:
+                if self._tasks.get(task_id) is task:
+                    task['_executionTerminalizing'] = False
+
+    def _finish_claimed(self, task_id, task, *, result, envelope, abort_requested,
+                        error_context, degraded, degraded_reason, terminal_event_fields):
+        """Settle and publish under finish's single terminalization guard."""
         requested_outcome = (
             ExecutionPhase.CANCELLED
             if abort_requested and envelope is None
@@ -1010,11 +1032,6 @@ class TaskRuntime:
         except ValueError:
             # Adopted legacy/test carriers may predate the private session.
             execution_receipt = None
-        except BaseException:
-            with self._lock:
-                if self._tasks.get(task_id) is task:
-                    task['_executionTerminalizing'] = False
-            raise
         settled_cancelled = bool(
             execution_receipt is not None
             and execution_receipt.outcome in {
@@ -1034,32 +1051,39 @@ class TaskRuntime:
         with self._lock:
             if (self._tasks.get(task_id) is not task
                     or task['status'] in TASK_REPLAY_TERMINAL_STATUSES):
-                task['_executionTerminalizing'] = False
                 return False
-            candidate = task.get('_terminalPersistenceCandidate')
-            if candidate is None:
+            pending = task.get('_terminalPersistenceCandidate')
+            if pending is not None and self.terminal_persist is None:
+                raise RuntimeError('Pending terminal persistence requires its durability port')
+            if pending is None:
                 final_status = 'aborted' if (abort_requested or settled_cancelled) and envelope is None else (
                     'error' if envelope else 'done')
                 quality = ({'degraded': bool(degraded), 'reason': str(degraded_reason or '')}
                            if degraded is not None else task.get('artifact_quality'))
                 candidate = {'status': final_status, 'result': result, 'error': envelope,
                              'artifact_quality': quality, 'finished_at': time.time()}
-                if self.terminal_persist is not None:
-                    task['_terminalPersistenceCandidate'] = candidate
         # The port owns durability, not execution. Never hold the registry lock
-        # across external I/O; competing finish/abort calls remain fenced.
+        # across snapshots or I/O; competing finish/abort calls remain fenced.
         if self.terminal_persist is not None:
+            if pending is None:
+                pending = deepcopy({'state': candidate,
+                                    'event_fields': dict(terminal_event_fields or {})})
+                with self._lock:
+                    task['_terminalPersistenceCandidate'] = pending
+            candidate = pending['state']
+            terminal_event_fields = pending['event_fields']
             try:
-                self.terminal_persist(task, candidate)
+                # The caller and the port may retain/mutate their inputs. Neither
+                # can change the accepted retry candidate or visible outcome.
+                if self.terminal_persist(task, deepcopy(candidate)) is False:
+                    raise RuntimeError('Terminal persistence was not acknowledged')
             except BaseException:
                 with self._lock:
                     if self._tasks.get(task_id) is task:
                         task['_terminalPersistencePending'] = True
-                        task['_executionTerminalizing'] = False
                 raise
         with self._lock:
             if self._tasks.get(task_id) is not task or task['status'] in TASK_REPLAY_TERMINAL_STATUSES:
-                task['_executionTerminalizing'] = False
                 return False
             task.update(candidate)
             task.pop('_terminalPersistenceCandidate', None)
@@ -1085,12 +1109,7 @@ class TaskRuntime:
             terminal_event['artifact_quality'] = quality
         if result is not None and final_status == 'done':
             terminal_event['result'] = result
-        try:
-            self.append_event(task_id, terminal_event)
-        finally:
-            with self._lock:
-                if self._tasks.get(task_id) is task:
-                    task['_executionTerminalizing'] = False
+        self.append_event(task_id, terminal_event)
         logger.debug('[TaskRuntime:%s] task %s finished: %s%s',
                      self.kind, task_id[:8], final_status,
                      ' (DEGRADED)' if (quality or {}).get('degraded') else '')

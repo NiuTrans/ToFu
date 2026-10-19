@@ -27,7 +27,7 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
-from lib.llm_errors import (  # noqa: E402
+from lib.llm.llm_errors import (  # noqa: E402
     BadRequestError,
     PermissionError_,
     PromptTooLongError,
@@ -39,7 +39,7 @@ from lib.llm_errors import (  # noqa: E402
     repair_mojibake,
     summarize_error_body,
 )
-import lib.llm_errors as _llm_errors  # noqa: E402
+import lib.llm.llm_errors as _llm_errors  # noqa: E402
 
 pytestmark = [pytest.mark.auth_mode('open'), pytest.mark.unit]
 
@@ -178,9 +178,9 @@ class TestClassifyDisplayIntegration:
         """Dispatcher owns bounded INFO records for a repeated family streak."""
         infos, debugs = [], []
         monkeypatch.setattr(
-            'lib.llm_errors.logger.info', lambda *a, **k: infos.append(a))
+            'lib.llm.llm_errors.logger.info', lambda *a, **k: infos.append(a))
         monkeypatch.setattr(
-            'lib.llm_errors.logger.debug', lambda *a, **k: debugs.append(a))
+            'lib.llm.llm_errors.logger.debug', lambda *a, **k: debugs.append(a))
 
         with pytest.raises(RateLimitError) as ei:
             _classify_http_error(

@@ -1,5 +1,7 @@
 """lib/pdf_parser/core.py — Unified PDF parsing entry point (text + images)."""
 
+import sys
+
 from lib.log import get_logger
 from lib.pdf_parser._common import (
     HAS_PYMUPDF4LLM,
@@ -35,7 +37,7 @@ __all__ = ['parse_pdf']
 def _parse_pdf_without_admission(pdf_bytes: bytes, *,
                                  max_text_chars: int = 0,
                                  max_image_width: int = 1024,
-                                 max_images: int = 20,
+                                 max_images: int | None = None,
                                  min_img_dim: int = 80,
                                  min_img_bytes: int = 2000,
                                  progress_callback=None,
@@ -52,9 +54,11 @@ def _parse_pdf_without_admission(pdf_bytes: bytes, *,
             as ``(stage, done, total)`` where ``stage`` is ``'text'`` during
             text extraction and ``'images'`` during figure clipping. Exceptions
             from the callback are swallowed (logged at DEBUG).
-        max_text_chars: Zero selects the process output budget; positive
-            values may lower that budget. max_pages: zero traverses all pages;
+        max_text_chars: Zero requests complete text; positive values select
+            the explicit caller output cut. max_pages: zero traverses all pages;
             positive values select the caller's requested prefix.
+        max_images: None captures all detected figures; zero disables images;
+            positive values select the caller's explicit image prefix.
 
     Returns dict with keys:
         text, images, totalPages, textLength, isScanned, method, extractor,
@@ -151,10 +155,10 @@ def _parse_pdf_without_admission(pdf_bytes: bytes, *,
 
             # ── Images (figures & tables) ──
             images = []
-            if image_limit > 0:
+            if image_limit is None or image_limit > 0:
                 pages_to_render = pages_to_process
                 for pi in range(pages_to_render):
-                    if len(images) >= image_limit:
+                    if image_limit is not None and len(images) >= image_limit:
                         break
                     page = doc[pi]
                     page_imgs = detect_and_clip_figures(
@@ -164,7 +168,7 @@ def _parse_pdf_without_admission(pdf_bytes: bytes, *,
                         min_bytes=min_img_bytes,
                     )
                     for img in page_imgs:
-                        if len(images) >= image_limit:
+                        if image_limit is not None and len(images) >= image_limit:
                             break
                         images.append(img)
                     if progress_callback is not None:
@@ -188,7 +192,7 @@ def _parse_pdf_without_admission(pdf_bytes: bytes, *,
         'warnings': warnings,
         'limits': {
             'maxPages': page_limit,
-            'maxTextChars': max_chars,
+            'maxTextChars': 0 if max_chars == sys.maxsize else max_chars,
             'maxImages': image_limit,
             'maxImageWidth': image_width,
         },
@@ -198,7 +202,7 @@ def _parse_pdf_without_admission(pdf_bytes: bytes, *,
 def parse_pdf(pdf_bytes: bytes, *,
               max_text_chars: int = 0,
               max_image_width: int = 1024,
-              max_images: int = 20,
+              max_images: int | None = None,
               min_img_dim: int = 80,
               min_img_bytes: int = 2000,
               progress_callback=None,

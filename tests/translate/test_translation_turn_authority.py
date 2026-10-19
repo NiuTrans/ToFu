@@ -313,7 +313,7 @@ def test_cached_segment_sources_fence_replaced_terminal_reasoning():
 def test_idle_cache_commits_after_real_turn_settlement_and_survives_cold_read(
         turn_store, monkeypatch, source, translated):
     import lib.translate.incremental as incremental
-    from lib.tool_round_identity import model_batch_segment_block_id
+    from lib.tool_results.tool_round_identity import model_batch_segment_block_id
     from lib.turn_lifecycle import create_turn_pair, get_turn, record_task_event
 
     conversation_id = 'translation-retirement-authority'

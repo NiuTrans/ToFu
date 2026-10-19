@@ -232,3 +232,22 @@ def test_completion_without_admission_metadata_keeps_explicit_linked_root():
     from lib.background_command_delivery import completion_delivery_config
     config = {'projectPath': '/explicit-worktree', 'readOnlyPaths': ['/explicit-worktree/docs']}
     assert completion_delivery_config(config) == config
+
+
+def test_recovery_reads_every_page_with_growing_windows_and_honors_explicit_subset(monkeypatch):
+    requests = []
+    def page(conv_id, *, user_id, page_size, cursor):
+        offset = 0 if cursor is None else cursor['offset']
+        end = min(513, offset + page_size)
+        requests.append(page_size)
+        return {'items':[{'queueId':f'q{i}','position':i,'kind':'background_receipt',
+                          'payload':{'_backgroundCommand':f'bg{i}','text':'complete'}} for i in range(offset,end)],
+                'nextCursor':{'offset':end} if end < 513 else None}
+    monkeypatch.setattr(message_queue,'background_receipt_page',page)
+    result = message_queue.pending_background_command_injections('conv',user_id=7)
+    assert [item['queueId'] for item in result] == [f'q{i}' for i in range(513)]
+    assert requests == [32,64,128,256,512]
+    requests.clear()
+    limited = message_queue.pending_background_command_injections('conv',user_id=7,max_items=35)
+    assert len(limited) == 35
+    assert requests == [32,3]

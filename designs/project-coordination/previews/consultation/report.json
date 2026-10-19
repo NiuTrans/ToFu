@@ -1,0 +1,131 @@
+{
+  "scope": "Static UI mocks only; NOT backend/native acceptance; no paid models",
+  "cases": [
+    {
+      "width": 1440,
+      "theme": "tofu",
+      "noAutoGrant": true,
+      "consentEnforced": true,
+      "mockGrants": 1,
+      "canonicalDelivery": false,
+      "geometry": {
+        "client": 419,
+        "scroll": 419
+      },
+      "focusRestored": true,
+      "pageErrors": []
+    },
+    {
+      "width": 1440,
+      "theme": "dark",
+      "noAutoGrant": true,
+      "consentEnforced": true,
+      "mockGrants": 1,
+      "canonicalDelivery": false,
+      "geometry": {
+        "client": 419,
+        "scroll": 419
+      },
+      "focusRestored": true,
+      "pageErrors": []
+    },
+    {
+      "width": 1440,
+      "theme": "light",
+      "noAutoGrant": true,
+      "consentEnforced": true,
+      "mockGrants": 1,
+      "canonicalDelivery": false,
+      "geometry": {
+        "client": 419,
+        "scroll": 419
+      },
+      "focusRestored": true,
+      "pageErrors": []
+    },
+    {
+      "width": 390,
+      "theme": "tofu",
+      "noAutoGrant": true,
+      "consentEnforced": true,
+      "mockGrants": 1,
+      "canonicalDelivery": false,
+      "geometry": {
+        "client": 351,
+        "scroll": 351
+      },
+      "focusRestored": true,
+      "pageErrors": []
+    },
+    {
+      "width": 390,
+      "theme": "dark",
+      "noAutoGrant": true,
+      "consentEnforced": true,
+      "mockGrants": 1,
+      "canonicalDelivery": false,
+      "geometry": {
+        "client": 351,
+        "scroll": 351
+      },
+      "focusRestored": true,
+      "pageErrors": []
+    },
+    {
+      "width": 390,
+      "theme": "light",
+      "noAutoGrant": true,
+      "consentEnforced": true,
+      "mockGrants": 1,
+      "canonicalDelivery": false,
+      "geometry": {
+        "client": 351,
+        "scroll": 351
+      },
+      "focusRestored": true,
+      "pageErrors": []
+    },
+    {
+      "width": 320,
+      "theme": "tofu",
+      "noAutoGrant": true,
+      "consentEnforced": true,
+      "mockGrants": 1,
+      "canonicalDelivery": false,
+      "geometry": {
+        "client": 281,
+        "scroll": 281
+      },
+      "focusRestored": true,
+      "pageErrors": []
+    },
+    {
+      "width": 320,
+      "theme": "dark",
+      "noAutoGrant": true,
+      "consentEnforced": true,
+      "mockGrants": 1,
+      "canonicalDelivery": false,
+      "geometry": {
+        "client": 281,
+        "scroll": 281
+      },
+      "focusRestored": true,
+      "pageErrors": []
+    },
+    {
+      "width": 320,
+      "theme": "light",
+      "noAutoGrant": true,
+      "consentEnforced": true,
+      "mockGrants": 1,
+      "canonicalDelivery": false,
+      "geometry": {
+        "client": 281,
+        "scroll": 281
+      },
+      "focusRestored": true,
+      "pageErrors": []
+    }
+  ]
+}

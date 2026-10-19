@@ -26,8 +26,15 @@ from evaluations.codex_kimi_proxy.codex_contract import validate_proxy_metrics
 from lib.benchmark_contract import (
     CONTRACT_VERSION_V2,
     BenchmarkContractError,
+    canonical_benchmark_usage,
     public_price_cost_from_usage,
     validate_record,
+)
+
+
+from evaluations.long_agent_release.usage_evidence import (
+    partition_billed_rounds, reconcile_compaction_usage, validate_billed_model,
+    validate_usage_accounting,
 )
 
 
@@ -380,6 +387,10 @@ def _validate_attempt_event(
         if not isinstance(usages, list) or any(
                 not isinstance(usage, dict) for usage in usages):
             raise ReleaseRunError("attempt failure modelUsages are invalid")
+        for index, usage in enumerate(usages):
+            _canonical_failed_usage(
+                usage, f"attempt failure modelUsages[{index}]",
+                usage_format="responses" if manifest["comparisonRole"] == "baseline" else "provider")
         if not isinstance(artifacts, list) or any(
                 not isinstance(artifact, dict) for artifact in artifacts):
             raise ReleaseRunError("attempt failure artifacts are invalid")
@@ -879,57 +890,13 @@ def _validate_jsonl_artifact(path: Path, label: str) -> None:
         raise ReleaseRunError(f"{label} must contain at least one event")
 
 
-def _canonical_failed_usage(value: Any, label: str) -> dict[str, int]:
-    """Validate one failed-call usage row under the release price contract."""
-    if not isinstance(value, dict):
-        raise ReleaseRunError(f"{label} must be an object")
-    numeric_keys = {
-        "prompt_tokens", "input_tokens", "completion_tokens", "output_tokens",
-        "cache_read_tokens", "cache_write_tokens", "cached_tokens",
-        "cache_creation_input_tokens", "cache_read_input_tokens",
-        "reasoning_tokens", "thinking_tokens", "total_tokens",
-    }
-    for key in numeric_keys:
-        if key not in value:
-            continue
-        amount = value[key]
-        if isinstance(amount, bool) or not isinstance(amount, int) or amount < 0:
-            raise ReleaseRunError(
-                f"{label}.{key} must be a non-negative integer")
-    for parent, child in (
-        ("prompt_tokens_details", "cached_tokens"),
-        ("completion_tokens_details", "reasoning_tokens"),
-    ):
-        details = value.get(parent)
-        if details is None:
-            continue
-        if not isinstance(details, dict):
-            raise ReleaseRunError(f"{label}.{parent} must be an object")
-        if child in details:
-            amount = details[child]
-            if isinstance(amount, bool) or not isinstance(amount, int) \
-                    or amount < 0:
-                raise ReleaseRunError(
-                    f"{label}.{parent}.{child} must be a non-negative integer")
-    from lib.cost import normalize_usage, split_input_tokens
-
-    normalized = normalize_usage(value)
-    uncached, total_input = split_input_tokens(value)
-    if any(amount < 0 for amount in normalized.values()) \
-            or uncached < 0 or total_input < 0:
-        raise ReleaseRunError(f"{label} has an invalid cache convention")
-    output = int(normalized["output"])
-    reasoning = int(normalized["thinking"])
-    if output > 0 and reasoning > output:
-        raise ReleaseRunError(f"{label} reasoning exceeds output tokens")
-    return {
-        "prompt_tokens": int(total_input),
-        "completion_tokens": output,
-        "cache_read_tokens": int(normalized["cache_read"]),
-        "cache_write_tokens": int(normalized["cache_write"]),
-        "reasoning_tokens": reasoning,
-        "total_tokens": int(total_input) + output,
-    }
+def _canonical_failed_usage(value: Any, label: str, *,
+                            usage_format: str = "provider") -> dict[str, int]:
+    """Validate failed-call counters with the same authority as successful calls."""
+    try:
+        return canonical_benchmark_usage(value, usage_format=usage_format)
+    except BenchmarkContractError as exc:
+        raise ReleaseRunError(f"{label}: {exc}") from exc
 
 
 def _failed_attempt_proxy_usages(path: Path) -> list[dict[str, Any]]:
@@ -985,7 +952,7 @@ def _validate_failed_attempt_artifacts(
             runtime_paths[0], "failed Tofu runtime evidence")
         if evidence.get("contractVersion") \
                 != _TOFU_RUNTIME_EVIDENCE_CONTRACT \
-                or evidence.get("model") != "kimi-k3":
+                or evidence.get("model") != manifest["model"]:
             raise ReleaseRunError(
                 "failed Tofu runtime evidence contract/model is invalid")
         evidence_usages: list[dict[str, Any]] = []
@@ -1003,24 +970,17 @@ def _validate_failed_attempt_artifacts(
             evidence_usages.append(usage)
             canonical_usages.append(_canonical_failed_usage(
                 usage, f"failed Tofu API round {index} usage"))
-        compaction = evidence.get("compactionUsage")
-        if compaction not in (None, {}):
-            if not isinstance(compaction, dict):
-                raise ReleaseRunError(
-                    "failed Tofu compaction usage is invalid")
-            raw_calls = compaction.get("n_calls", 0)
-            if isinstance(raw_calls, bool) or not isinstance(raw_calls, int) \
-                    or raw_calls < 0:
-                raise ReleaseRunError(
-                    "failed Tofu compaction call count is invalid")
-            canonical_compaction = _canonical_failed_usage(
-                compaction, "failed Tofu compaction usage")
-            if raw_calls:
-                evidence_usages.append(compaction)
-                canonical_usages.append(canonical_compaction)
-            elif any(canonical_compaction.values()):
-                raise ReleaseRunError(
-                    "failed Tofu compaction tokens require a model call")
+            try:
+                validate_billed_model(api_round, manifest["model"], manifest["model"])
+            except BenchmarkContractError as exc:
+                raise ReleaseRunError(f"failed Tofu API round {index}: {exc}") from exc
+        try:
+            _, compaction_rounds = partition_billed_rounds(api_rounds)
+            reconcile_compaction_usage(
+                evidence.get("compactionUsage"), compaction_rounds,
+                logical_model=manifest["model"], physical_model=manifest["model"])
+        except BenchmarkContractError as exc:
+            raise ReleaseRunError(f"failed Tofu usage: {exc}") from exc
         aggregate = {
             key: sum(row[key] for row in canonical_usages)
             for key in (
@@ -1033,6 +993,10 @@ def _validate_failed_attempt_artifacts(
                 != aggregate:
             raise ReleaseRunError(
                 "failed Tofu aggregate usage differs from billed calls")
+        try:
+            validate_usage_accounting(evidence, aggregate["total_tokens"])
+        except BenchmarkContractError as exc:
+            raise ReleaseRunError(f"failed Tofu usage: {exc}") from exc
         if evidence_usages != failure["modelUsages"]:
             raise ReleaseRunError(
                 "failed Tofu model usages differ from runtime evidence")
@@ -1074,7 +1038,9 @@ def _validate_cost(record: dict[str, Any], manifest: dict[str, Any]) -> None:
             raise ReleaseRunError("retry modelUsages must be a list of objects")
         for usage in usages:
             model_cost += public_price_cost_from_usage(
-                usage, price_card)["costUsd"]
+                usage, price_card,
+                usage_format="responses" if manifest["comparisonRole"] == "baseline" else "provider",
+            )["costUsd"]
     compaction_cost = 0.0
     for compaction in record["compactions"]:
         usage = compaction.get("usage")
@@ -1162,7 +1128,10 @@ def _validate_task_binding(
     if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
         raise ReleaseRunError("task finalOutputDigest is required")
     _validate_retries(record, manifest)
-    _validate_cost(record, manifest)
+    try:
+        _validate_cost(record, manifest)
+    except BenchmarkContractError as exc:
+        raise ReleaseRunError(f"invalid task usage: {exc}") from exc
     artifacts = record.get("artifacts") or []
     paths: dict[str, list[Path]] = {}
     for artifact in artifacts:

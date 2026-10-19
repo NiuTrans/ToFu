@@ -123,7 +123,7 @@ def test_direct_builder_explicit_effort(rung):
 @pytest.mark.parametrize('rung', RUNGS)
 def test_same_model_reactive_rebuild_preserves_effort(monkeypatch, rung):
     from lib.tasks_pkg.llm_fallback import _call as fallback
-    from lib.llm_errors import PromptTooLongError
+    from lib.llm.llm_errors import PromptTooLongError
     monkeypatch.setattr('lib.tasks_pkg.compaction.api.reactive_compact', lambda *a, **k: None)
     monkeypatch.setattr('lib.tasks_pkg.context_composer.checklist.restore_checklist_context',
                         lambda *a, **k: None)

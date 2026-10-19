@@ -3,7 +3,7 @@
 Entry: ProfiledHtmlCorpus. Uses durable.py's actual native upload/readback harness.
 These instrumented observations diagnose costs; they are never admission evidence.
 """
-from functools import wraps as wraps
+from functools import partial, wraps
 from time import perf_counter_ns as perf_counter_ns
 
 from benchmarks.knowledge_html.durable import DurableHtmlCorpus as DurableHtmlCorpus, semantic_projection as semantic_projection
@@ -14,9 +14,24 @@ class ProfiledHtmlCorpus(DurableHtmlCorpus):
         super().__init__(*args, **kwargs)
         self.phase_samples = []
         self._phases = None
-        namespace = self.add_document.__globals__
+        try:
+            self._instrument_upload()
+        except BaseException as primary:
+            try:
+                self.close()
+            except BaseException as cleanup:
+                raise BaseExceptionGroup('upload instrumentation and cleanup failed',
+                                         [primary, cleanup]) from None
+            raise
+
+    def _instrument_upload(self):
+        add = self.add_document
+        # Native projection is borrowed through a partial of the same private
+        # upload function. Observe its namespace without losing bound arguments.
+        function = add.func if isinstance(add, partial) else add
+        namespace = function.__globals__
         for name, stage in (('extract', 'extract'), ('chunk_document', 'chunk'),
-                            ('_trimmed_index_chunks', 'search_index'),
+                            ('_indexed_chunks', 'search_index'),
                             ('_write_source', 'source_write_fsync')):
             namespace[name] = self._observe(stage, namespace[name])
         repository = self.repository
@@ -28,7 +43,6 @@ class ProfiledHtmlCorpus(DurableHtmlCorpus):
             result.settings = self._observe('native_visual_settings', result.settings)
             return result
         namespace['_repository'] = instrument_repository
-        add = self.add_document
         @wraps(add)
         def upload(*arguments, **options):
             if self._phases is not None:

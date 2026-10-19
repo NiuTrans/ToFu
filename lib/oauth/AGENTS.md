@@ -23,8 +23,9 @@ stdlib-only `codex_local_login.py` / `codex_command_login.py`; source/refresh/op
   upstream bodies.
 - Exchange, refresh, logout, and earned-reset/status behavior are idempotent
   where applicable and scoped to the authenticated owner/account.
-- Bound caches, lock stripes, network calls, retries, histories, and proactive
-  refresh. No ownerless background worker or unbounded per-account lock map.
+- Bound reconstructible caches, network calls, retries and histories. Active
+  identity locks retire with their holders/waiters; no ownerless background
+  worker or permanently growing per-account lock map.
 - Map upstream failures to the canonical typed/auth error vocabulary without
   leaking whether another owner's account exists.
 
@@ -33,3 +34,14 @@ stdlib-only `codex_local_login.py` / `codex_command_login.py`; source/refresh/op
 Run focused OAuth outbound, exchange error, refresh/logout, owner-isolation,
 redaction, and earned-reset tests. Add identity and provider-dispatch tests when
 the public account projection changes.
+
+native_credentials owns production native Codex grant/source checks around the
+existing outbound resolver. Verify native-credentials and outbound/refresh tests;
+use the actual native archive refusal test. Keep per-invocation source identity,
+owner/tenant/account binding and first-party destination fencing; no new vault.
+
+`identity_flight.py` owns exact refresh/redemption exclusion across threads and
+POSIX processes. Its persistent guard is short-lived; active files reclaim only
+under that guard after a kernel lock probe. Verify process/fork/crash/error
+cases in `test_identity_flight.py` and account redemption/refresh tests before
+changing inode lifecycle or fallbacks.

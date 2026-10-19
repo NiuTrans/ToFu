@@ -1,0 +1,8 @@
+/* Owner-bound human guidance layout; behavioral radio/button styles belong to the kit. */
+.rich-choices { display: grid; gap: var(--space-3); min-width: 0; }
+.rich-choices fieldset { display: grid; gap: var(--space-3); min-width: 0; border: 0; padding: 0; margin: 0; }
+.rich-choices legend { font-weight: var(--weight-semibold); margin-bottom: var(--space-2); }
+.rich-choices p { margin: 0; overflow-wrap: anywhere; }
+.rich-choices [role="status"] { color: var(--text-secondary); font-size: var(--font-size-sm); }
+.rich-choices .ui-choice { max-width: 100%; overflow-wrap: anywhere; }
+.rich-choice-description { color: var(--text-secondary); font-size: var(--font-size-sm); }

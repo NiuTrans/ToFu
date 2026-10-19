@@ -503,7 +503,11 @@ function _formatTurnDuration(ms) {
 
 
 
-const _waitingBlockPolls = new Map();
+/* WeakMap keyed on the details node: a node removed while closed is collected
+ * instead of pinning its poll entry forever. The toggle handler is the only
+ * writer, and _stopWaitingBlockPoll still runs on toggle/terminal/disconnect,
+ * so no poll outlives an open, mounted block. */
+const _waitingBlockPolls = new WeakMap();
 function _waitText(key, fallback, values) {
   const value = typeof t === 'function' ? t(key, values) : '';
   return value && value !== key ? value : fallback;
@@ -536,6 +540,9 @@ async function _pollWaitingBlock(details) {
     _stopWaitingBlockPoll(details);
     return;
   }
+  /* Visibility-gated like the Swarm reconciliation scheduler: a hidden tab
+   * does not poll, and the interval self-prunes on the next tick. */
+  if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
   if (typeof Api === 'undefined' || !Api.swarm?.status) return;
   try {
     const status = await Api.swarm.status(details.getAttribute('data-wait-swarm-key'));

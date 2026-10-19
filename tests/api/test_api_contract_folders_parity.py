@@ -36,7 +36,7 @@ pytestmark = pytest.mark.unit
 
 
 def _make_app():
-    from lib.app_factory import create_base_app
+    from lib.app.app_factory import create_base_app
     return create_base_app(__name__)
 
 
@@ -135,9 +135,8 @@ def test_shipped_source_converted():
             f'{name} still builds responses with bare jsonify(')
         assert not re.search(r'from flask import[^\n]*\bjsonify\b', src), (
             f'{name} still imports jsonify')
-        assert "'items': _read_folders()" in src, (
-            f'{name}: expected the bare-array list to wrap as '
-            "api_ok({'items': _read_folders()})")
+        assert re.search(r"api_ok\(\{'items':", src), (
+            f'{name}: list must wrap owner-visible records in the items envelope')
 
 
 if __name__ == '__main__':

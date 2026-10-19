@@ -4,15 +4,22 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tofu-environments"
-version = "0.1.0"
+version = "0.2.0"
 readme = "README.md"
-description = "Provider-neutral image and workspace provisioning for Tofu"
+description = "Actor-bound environment and batch compute SDK with optional MCP service"
 requires-python = ">=3.10"
 dependencies = ["jsonschema>=4.21,<5"]
 license = {text = "MIT"}
 
+[project.optional-dependencies]
+mcp = ["mcp>=2,<3"]
+
+[project.scripts]
+tofu-environments-mcp = "tofu_environments.mcp_server:main"
+
 [project.entry-points."tofu.tools"]
 environments = "tofu_environments.host:register"
+compute = "tofu_environments.host:register_compute"
 
 [tool.setuptools.package-data]
 tofu_environments = ["*.json"]

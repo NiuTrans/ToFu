@@ -105,7 +105,7 @@ def _warm_resume_serviceable(resume_cursor, base_cursor, next_cursor):
     serviceable: replay is empty and live streaming continues at the exact
     producer boundary.
     """
-    from lib.task_replay import sse_resume_serviceable
+    from lib.task_replay.task_replay import sse_resume_serviceable
     return sse_resume_serviceable(
         resume_cursor, base_cursor=base_cursor, next_cursor=next_cursor)
 

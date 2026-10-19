@@ -9,6 +9,7 @@
     "Conversation content renderer dependencies are acyclic and never import their composition facade; every effect enters through a declared port.",
     "Conversation block projection dependencies are acyclic and never import their composition facade; presentation types have a dedicated owner.",
     "ConversationSurface owns the bounded DOM window, scroll anchor, and follow suspension without truncating TurnStore.",
+    "Retained chat buttons and mobile layout forward explicit-latest, conditional-follow and near-latest intents to that Surface; physical window position is never a second follow authority. Keyed commits publish mounted Turn identities, and the application controller fences/coalesces graph and presentation deliveries through one commit path.",
     "turnId is the only durable rendered identity and blockId is the only identity below a turn.",
     "Conversation shells contain catalog and settings metadata only; settings persistence never depends on Turn presence.",
     "Durable document state, live session state, and local interaction state never share an owner.",
@@ -449,7 +450,7 @@
       "metric": "regex_count",
       "roots": ["frontend/src/runtime/sections"],
       "suffixes": [".js"],
-      "pattern": "\\b(?:_explicitBottomLatch|_openScrollConvId|_initialSwitchLoad)\\b",
+      "pattern": "\\b(?:_explicitBottomLatch|_openScrollConvId|_initialSwitchLoad|_followSuspended|_scrollRafId|_armFollowSuspensionListeners)\\b",
       "maximum": 0,
       "target": 0,
       "remedy": "Keep scroll and loading presentation in the lifecycle-scoped ConversationSurface host, never on the conversation shell."

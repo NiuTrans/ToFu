@@ -24,9 +24,9 @@ export interface ChoiceHandle {
   input: HTMLInputElement;
 }
 
-export function createChoice(options: ChoiceOptions): ChoiceHandle {
+export function createChoice(options: ChoiceOptions, doc: Document = document): ChoiceHandle {
   const type = options.type ?? 'checkbox';
-  const input = document.createElement('input');
+  const input = doc.createElement('input');
   input.type = type === 'radio' ? 'radio' : 'checkbox';
   if (type === 'switch') {
     input.className = 'ui-switch';
@@ -40,10 +40,10 @@ export function createChoice(options: ChoiceOptions): ChoiceHandle {
     input.addEventListener('change', () => options.onChange?.(input.checked, input));
   }
 
-  const text = document.createElement('span');
+  const text = doc.createElement('span');
   text.textContent = options.label;
 
-  const el = document.createElement('label');
+  const el = doc.createElement('label');
   el.className = 'ui-choice';
   el.appendChild(input);
   el.appendChild(text);

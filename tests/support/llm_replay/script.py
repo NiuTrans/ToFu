@@ -102,7 +102,7 @@ _EXCEPTION_ATTR_ALLOWLIST = (
 def _resolve_exception_class(name: str):
     """Resolve one exception name against the transport error vocabulary."""
     import lib.llm as llm_pkg
-    import lib.llm_errors as llm_errors
+    import lib.llm.llm_errors as llm_errors
     for module in (llm_pkg, llm_errors):
         candidate = getattr(module, name, None)
         if isinstance(candidate, type) and issubclass(candidate, BaseException):
@@ -117,7 +117,7 @@ def build_exception(name: str, message: str,
     if cls is None:
         raise ScriptError(
             f'unknown exception {name!r} — not exported by lib.llm or '
-            f'lib.llm_errors')
+            f'lib.llm.llm_errors')
     import inspect
     kwargs: dict[str, Any] = {}
     try:

@@ -117,6 +117,9 @@ class _CustomTool:
 _client_results: dict[tuple[str, str], dict] = {}
 _client_results_lock = threading.Lock()
 _CLIENT_ABORT_POLL_INTERVAL = 1.0
+_UNCONFIRMED_RESULT_GUIDANCE = (
+    'The operation may have taken effect. Do not automatically repeat it; '
+    'inspect the client or service outcome first. Continue independent work.')
 
 
 def _require_handoff_id(value: object, *, field: str, max_chars: int) -> str:
@@ -131,8 +134,24 @@ def _bound_result_text(content: Any, max_chars: int) -> str:
     text = content if isinstance(content, str) else json.dumps(
         content, ensure_ascii=False) if content is not None else ''
     if len(text) > max_chars:
-        return text[:max_chars] + '\n… [custom tool result truncated]'
+        raise CustomToolError(
+            f'Custom tool result exceeds resource admission limit '
+            f'({len(text)} > {max_chars} characters); result was not retained.')
     return text
+
+
+def _result_admission_error(error: CustomToolError) -> str:
+    """Fixed-size diagnostic, not a preview or a retained source result."""
+    from lib.tools.result_envelope import typed_tool_error
+    return typed_tool_error(
+        'custom_tool_result_too_large', retryable=False,
+        message=str(error),
+        next_action=(
+            'The tool may have taken effect; only its result was rejected. '
+            'Do not repeat the operation to recover output. Inspect existing '
+            'state or an owner-authorized source reference; request a smaller '
+            'view of retained output if available. Continue independent work.')
+    ).to_envelope_text()
 
 
 def request_client_tool_result(call_id: str, *, task: dict | None = None,
@@ -206,12 +225,14 @@ def request_client_tool_result(call_id: str, *, task: dict | None = None,
                         bool(entry.get('is_error')))
             logger.warning('[CustomTool] client handoff %s timed out', call_id)
             return (f'Custom tool call {call_id} timed out after {timeout:.0f}s '
-                    'waiting for the client to return a result.', True)
+                    'waiting for the client to return a result. '
+                    + _UNCONFIRMED_RESULT_GUIDANCE, True)
         if evt.wait(timeout=min(remaining, _CLIENT_ABORT_POLL_INTERVAL)):
             with _client_results_lock:
                 entry = _client_results.pop(registry_key, {})
             if not entry.get('resolved'):
-                return ('Custom tool handoff ended without a terminal result.',
+                return ('Custom tool handoff ended without a terminal result. '
+                        + _UNCONFIRMED_RESULT_GUIDANCE,
                         True)
             return (entry.get('content') or '', bool(entry.get('is_error')))
         abort_event = (task or {}).get('abort_event')
@@ -263,8 +284,12 @@ def resolve_client_tool_result(
         # Bound before retaining the callback in the process-wide table.  The
         # downstream dispatch cap remains as defense in depth for webhook and
         # sandbox backends, which do not pass through this registry.
-        entry['content'] = _bound_result_text(
-            content, int(entry['max_result_chars']))
+        try:
+            entry['content'] = _bound_result_text(
+                content, int(entry['max_result_chars']))
+        except CustomToolError as error:
+            entry['content'] = _result_admission_error(error)
+            is_error = True
         entry['is_error'] = is_error
         entry['resolved'] = True
         entry['event'].set()
@@ -296,6 +321,18 @@ class ToolEnvironment:
     def schemas(self) -> list[dict]:
         """Canonical schemas/decoded-result metadata; no execution or write keys."""
         return [t.schema for t in self.tools]
+
+    @property
+    def contract_documents(self) -> dict[str, dict]:
+        """Private execution metadata; never inferred from names or model text."""
+        from lib.tools.contracts import adapt_legacy_tool_contract
+        return {tool.name: adapt_legacy_tool_contract(
+            tool.schema, namespace='custom',
+            permission='write' if tool.write else 'read',
+            idempotency=('idempotent' if tool.idempotent else
+                         'non_idempotent' if tool.write else 'read_only'),
+            shell_command_argument=tool.execution.get('shell_command_argument'),
+        ).search_document() for tool in self.tools}
 
     @property
     def write_names(self) -> frozenset[str]:
@@ -348,9 +385,14 @@ class ToolEnvironment:
             logger.error('[Task %s] [CustomTool:%s] dispatch failed: %s',
                          tid, tool.name, e, exc_info=True)
             content, is_err = (f'Custom tool {tool.name} failed: '
-                               f'{type(e).__name__}: {e}', True)
+                               f'{type(e).__name__}: {e}. '
+                               + _UNCONFIRMED_RESULT_GUIDANCE, True)
 
-        content = self._cap(content)
+        try:
+            content = self._cap(content)
+        except CustomToolError as error:
+            # This fixed-size diagnostic is outside the source payload budget.
+            content, is_err = _result_admission_error(error), True
         elapsed = time.time() - t0
         logger.info('[Task %s] [CustomTool:%s] done in %.1fs (len=%d, err=%s)',
                     tid, tool.name, elapsed, len(content), is_err)
@@ -400,8 +442,8 @@ class ToolEnvironment:
 
     # ── webhook: SSRF-guarded remote function ──
     def _run_webhook(self, tool, fn_args) -> tuple[str, bool]:
-        from lib.byo_egress import EgressDenied, validate_egress_url
-        from lib.http_client import http_post
+        from lib.byo.byo_egress import EgressDenied, validate_egress_url
+        from lib.http_transport.client import http_post
         url = tool.execution.get('url', '')
         try:
             validate_egress_url(url)   # use-time check defeats DNS rebind
@@ -421,10 +463,11 @@ class ToolEnvironment:
         except Exception as e:
             logger.debug('[CustomTool] webhook request failed for %s: %s: %s',
                          tool.name, type(e).__name__, e)
-            return (f'Webhook request failed: {type(e).__name__}: {e}', True)
+            return (f'Webhook request failed: {type(e).__name__}: {e}. '
+                    + _UNCONFIRMED_RESULT_GUIDANCE, True)
         if resp.status_code >= 400:
             return (f'Webhook returned HTTP {resp.status_code}: '
-                    f'{resp.text[:500]}', True)
+                    f'{resp.text}. ' + _UNCONFIRMED_RESULT_GUIDANCE, True)
         return (resp.text or '', False)
 
     # ── sandbox: operator-gated code execution ──
@@ -441,7 +484,8 @@ class ToolEnvironment:
         except Exception as e:
             logger.warning('[CustomTool] sandbox command failed for %s: %s: %s',
                            tool.name, type(e).__name__, e)
-            return (f'Sandbox command failed: {type(e).__name__}: {e}', True)
+            return (f'Sandbox command failed: {type(e).__name__}: {e}. '
+                    + _UNCONFIRMED_RESULT_GUIDANCE, True)
         finally:
             if prev is None:
                 os.environ.pop('TOFU_TOOL_ARGS', None)
@@ -502,7 +546,7 @@ def _validate_one(raw: dict, idx: int, builtins: set[str],
         url = execution.get('url', '')
         if not isinstance(url, str) or not url.strip():
             raise CustomToolError(f'tools[{idx}] webhook mode requires execution.url')
-        from lib.byo_egress import EgressDenied, validate_egress_url
+        from lib.byo.byo_egress import EgressDenied, validate_egress_url
         try:
             validate_egress_url(url)
         except EgressDenied as e:
@@ -514,6 +558,16 @@ def _validate_one(raw: dict, idx: int, builtins: set[str],
                 '(operator must set TOFU_CUSTOM_TOOLS_ALLOW_SANDBOX=1)')
         if not (execution.get('command') or '').strip():
             raise CustomToolError(f'tools[{idx}] sandbox mode requires execution.command')
+
+    if 'shell_command_argument' in execution:
+        from lib.tools.contracts import adapt_legacy_tool_contract
+        try:
+            argument = execution['shell_command_argument']
+            if argument is None:
+                raise ValueError('shell_command_argument must be a string')
+            adapt_legacy_tool_contract(raw, shell_command_argument=argument)
+        except ValueError as exc:
+            raise CustomToolError(f'tools[{idx}] {exc}') from exc
 
     # Keep decoded-result metadata for discovery/code compilation. The common
     # wire boundary removes it after projecting it into model documentation.

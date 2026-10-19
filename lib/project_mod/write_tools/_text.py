@@ -141,6 +141,43 @@ def _common_indent(lines):
     return ''
 
 
+def _uniform_indent_offset(search_lines, content_lines, *, decode=False):
+    """Return one literal (removed, added) indentation prefix, or no match.
+
+    Every nonblank line must have identical text and the same prefix shift.
+    Stripping each line independently would erase Python nesting and accept
+    anchors describing different control flow. Tabs are literal, never widths.
+    Blank-line/trailing whitespace and numeric escape tolerance stay separate.
+    """
+    offset = None
+    for search, content in zip(search_lines, content_lines):
+        search_body = search.lstrip(' \t').rstrip()
+        content_body = content.lstrip(' \t').rstrip()
+        if not search_body and not content_body:
+            continue
+        if not search_body or not content_body:
+            return None
+        if decode:
+            search_body = _decode_unicode_escapes(search_body)
+            content_body = _decode_unicode_escapes(content_body)
+        if search_body != content_body:
+            return None
+        search_prefix = search[:len(search) - len(search.lstrip(' \t'))]
+        content_prefix = content[:len(content) - len(content.lstrip(' \t'))]
+        if offset is None:
+            if content_prefix.endswith(search_prefix):
+                offset = ('', content_prefix[:len(content_prefix) - len(search_prefix)])
+            elif search_prefix.endswith(content_prefix):
+                offset = (search_prefix[:len(search_prefix) - len(content_prefix)], '')
+            else:
+                return None
+        removed, added = offset
+        if (not search_prefix.startswith(removed)
+                or added + search_prefix[len(removed):] != content_prefix):
+            return None
+    return offset
+
+
 def _reindent_block(lines, *, from_prefix, to_prefix):
     """Re-frame replacement *lines* from the search anchor's indentation into
     the matched file block's indentation.

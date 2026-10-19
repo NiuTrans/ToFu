@@ -61,7 +61,7 @@ def test_stream_chat_fires_on_transport_retry_never_on_success(monkeypatch):
     attempt (partial content had already streamed), then NOT again when the
     second attempt succeeds."""
     import lib.llm.stream as _stream_mod
-    from lib.llm_errors import RetryableAPIError
+    from lib.llm.llm_errors import RetryableAPIError
 
     monkeypatch.setattr(_stream_mod, 'abortable_sleep', lambda *a, **k: None)
     fires = []
@@ -108,7 +108,7 @@ def test_stream_chat_does_not_fire_after_final_exhausted_failure(monkeypatch):
     """When retries are EXHAUSTED the loop raises — no further attempt will
     run, so firing on the last failure would be a lie (nothing restarts)."""
     import lib.llm.stream as _stream_mod
-    from lib.llm_errors import RetryableAPIError
+    from lib.llm.llm_errors import RetryableAPIError
 
     monkeypatch.setattr(_stream_mod, 'abortable_sleep', lambda *a, **k: None)
     fires = []

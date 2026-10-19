@@ -121,7 +121,7 @@ class TestPluginDialect(unittest.TestCase):
         self.assertEqual(s.thinking_format, self.key)
 
     def test_byo_validator_accepts_plugin_dialect(self):
-        from lib.byo_providers import _validate_thinking_format
+        from lib.byo.byo_providers import _validate_thinking_format
         self.assertEqual(_validate_thinking_format(self.key), self.key)
 
 
@@ -132,7 +132,7 @@ class TestStrictValidation(unittest.TestCase):
                  capabilities={'text'}, thinking_format='chat_template_kwarg')
 
     def test_byo_rejects_typo(self):
-        from lib.byo_providers import _validate_thinking_format
+        from lib.byo.byo_providers import _validate_thinking_format
         with self.assertRaises(ValueError):
             _validate_thinking_format('bogus_dialect')
 

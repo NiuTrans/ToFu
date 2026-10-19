@@ -28,7 +28,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-import lib.log_aggregates as la
+import lib.logging_pkg.log_aggregates as la
 
 pytestmark = pytest.mark.unit
 
@@ -345,7 +345,7 @@ class TestAggregatesEndpoint(_DbBase):
     def _app(self):
         from quart import g
 
-        from lib.app_factory import create_base_app
+        from lib.app.app_factory import create_base_app
         from lib.api_keys import local_admin_context
         from routes.api_v1.logs import api_v1_logs_bp
 

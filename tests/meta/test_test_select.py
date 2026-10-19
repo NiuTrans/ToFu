@@ -1,11 +1,4 @@
-"""P2-3 针:scripts/test_select.py 的索引与选择逻辑(纯函数,不依赖真仓库)。
-
-设计稿 docs/TESTING_STRATEGY.md §4。单元层全量实测 19m58s 超 15min 阈值,
-迭代内环改「静态反向索引选择」:测试文件 → 它引用的源文件(AST import +
-字面量路径),改动 ∩ 引用 = 入选。不上 ML(透明映射可审计,15k 规模用不上
-预测模型)。本套件钉纯函数语义;脚本加载走 spec_from_file_location(scripts/
-无 __init__.py,与 server.py 同款载入)。
-"""
+"""Behavioral specifications for affected-test discovery, selection and execution."""
 
 import importlib.util
 import os
@@ -94,6 +87,7 @@ class TestSelectTests:
         B: {UI_Y},
         C: {CORE_Z},
         D: {LIB_X, LIB_W},
+        **{f'tests/contracts/{name}': set() for name in ts.GUARD_CORE_BASENAMES},
     }
 
     def test_changed_source_selects_importers(self):
@@ -120,7 +114,7 @@ class TestSelectTests:
 
     def test_unknown_change_falls_back_to_guard_core(self):
         selected, reasons = ts.select_tests(self.INDEX, ['README.md'])
-        direct = {f for f in selected if f in self.INDEX}
+        direct = {f for f in selected if reasons[f] != 'guard-core'}
         assert not direct, 'unrelated change must not pull behaviour suites'
         assert selected, 'guard core must still run as the smoke floor'
 
@@ -143,7 +137,7 @@ class TestPytestCommand:
         cmd = ts.build_pytest_command(None, '0')
 
         assert '-n' not in cmd
-        assert cmd[-5:-3] == ['-m', 'unit']
+        assert cmd[cmd.index('-m', 3) + 1] == '(unit or api) and not (visual or slow or live_llm)'
 
     def test_implicit_single_file_selection_stays_serial(self):
         cmd = ts.build_pytest_command([_p('tests', 'test_a.py')], None)
@@ -155,3 +149,150 @@ class TestPytestCommand:
         cmd = ts.build_pytest_command(selected, None)
 
         assert cmd[cmd.index('-n') + 1] == 'auto'
+
+
+@pytest.fixture
+def selection_repo(tmp_path):
+    import subprocess
+    subprocess.run(['git', 'init', '-q', str(tmp_path)], check=True)
+    (tmp_path / 'tests').mkdir()
+    return tmp_path
+
+
+def write_test(root, relative, content='assert True\n'):
+    path = root / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content)
+    return path
+
+
+def test_index_discovers_nested_and_untracked_tests_but_not_ignored(selection_repo):
+    import subprocess
+    root = selection_repo
+    tracked = write_test(root, _p('tests', 'domain/test_tracked.py'), 'import lib.example\n')
+    subprocess.run(['git', 'add', str(tracked)], cwd=root, check=True)
+    nested = write_test(root, _p('tests', 'new domain/test_new.py'))
+    (root / '.gitignore').write_text('tests/ignored/\n')
+    write_test(root, _p('tests', 'ignored/test_cache.py'))
+    index = ts.build_index(str(root / 'tests'), None)
+    assert set(index) == {tracked.relative_to(root).as_posix(), nested.relative_to(root).as_posix()}
+    assert _p('lib', 'example.py') in index[tracked.relative_to(root).as_posix()]['refs']
+
+
+def test_git_failure_cannot_be_an_empty_success(tmp_path):
+    import subprocess
+    (tmp_path / 'tests').mkdir()
+    with pytest.raises(subprocess.CalledProcessError):
+        ts.build_index(str(tmp_path / 'tests'), None)
+
+
+def test_guard_core_resolves_current_paths_and_deleted_tests_are_not_selected():
+    guards = {_p('tests', 'contracts/' + name): set() for name in ts.GUARD_CORE_BASENAMES}
+    deleted = _p('tests', 'domain/test_removed.py')
+    selected, reasons = ts.select_tests(guards, [deleted])
+    assert selected == set(guards)
+    assert set(reasons.values()) == {'guard-core'}
+
+
+def test_missing_guard_fails_with_actionable_error():
+    with pytest.raises(ValueError, match='guard'):
+        ts.select_tests({}, ['README.md'])
+
+
+def test_empty_selection_cannot_launch_unscoped_pytest():
+    with pytest.raises(ValueError, match='empty'):
+        ts.build_pytest_command([], None)
+
+
+def test_nested_conftest_selects_its_subtree():
+    guards = {_p('tests', 'contracts/' + name): set() for name in ts.GUARD_CORE_BASENAMES}
+    inside, outside = _p('tests', 'domain/test_a.py'), _p('tests', 'neighbor/test_b.py')
+    selected, _ = ts.select_tests({**guards, inside: set(), outside: set()},
+                                  [_p('tests', 'domain/conftest.py')])
+    assert inside in selected
+    assert outside not in selected
+
+
+
+def test_cache_forgets_removed_files_and_rebuilds_invalid_entries(selection_repo):
+    import json
+    root = selection_repo
+    keep = write_test(root, _p('tests', 'domain/test_keep.py'), 'import lib.before\n')
+    removed = write_test(root, _p('tests', 'domain/test_removed.py'))
+    cache = root / 'cache.json'
+    first = ts.build_index(str(root / 'tests'), str(cache))
+    assert len(first) == 2
+    removed.unlink()
+    keep.write_text('from lib import after\n')
+    changed = ts.build_index(str(root / 'tests'), str(cache))
+    assert set(changed) == {keep.relative_to(root).as_posix()}
+    assert _p('lib', 'after.py') in next(iter(changed.values()))['refs']
+    assert ts.build_index(str(root / 'tests'), str(cache)) == changed
+    cache.write_text(json.dumps({'version': 2, 'index': []}))
+    assert ts.build_index(str(root / 'tests'), str(cache)) == changed
+    cache.write_text('{')
+    assert ts.build_index(str(root / 'tests'), str(cache)) == changed
+
+
+def test_git_changes_preserve_rename_endpoints_and_unusual_names(selection_repo, monkeypatch):
+    import subprocess
+    root = selection_repo
+    before = write_test(root, _p('tests', 'domain/test_before.py'))
+    def git(*args):
+        return subprocess.run(['git', '-c', 'user.name=Test', '-c',
+                               'user.email=test@example.invalid', *args], cwd=root,
+                              check=True, text=True, capture_output=True).stdout.strip()
+    git('add', '.')
+    git('commit', '-qm', 'initial')
+    base = git('rev-parse', 'HEAD')
+    after = before.with_name('test_after space\nline.py')
+    before.rename(after)
+    extra = write_test(root, _p('tests', 'new domain/test_extra.py'))
+    monkeypatch.setattr(ts, 'ROOT', str(root))
+    expected = sorted(p.relative_to(root).as_posix() for p in (before, after, extra))
+    assert ts.changed_files(None) == expected
+    git('add', '.')
+    git('commit', '-qm', 'rename and add')
+    assert ts.changed_files(base) == expected
+    assert ts.changed_files(None) == []
+
+
+def test_default_execution_never_enables_opt_in_tiers():
+    for files in (None, [_p('tests', 'domain/test_api.py')]):
+        command = ts.build_pytest_command(files, '0')
+        assert command[command.index('-m', 3) + 1] == '(unit or api) and not (visual or slow or live_llm)'
+
+
+
+def test_workflow_literal_selects_its_behavioral_contract():
+    workflow = '.github/workflows/ci.yml'
+    assert workflow in ts.refs_of_test_file("path = ROOT / '.github/workflows/ci.yml'")
+
+
+def test_selector_cli_runs_api_and_unit_without_opt_in_tiers(selection_repo):
+    import shutil
+    import subprocess
+    import sys
+    root = selection_repo
+    scripts = root / 'scripts'
+    scripts.mkdir()
+    shutil.copyfile(_SCRIPT, scripts / 'test_select.py')
+    (root / 'pyproject.toml').write_text(
+        '[tool.pytest.ini_options]\naddopts = "-p pytest_timeout"\n'
+        'markers = ["unit", "api", "visual", "slow", "live_llm"]\n')
+    for name in ts.GUARD_CORE_BASENAMES:
+        write_test(root, _p('tests', 'guards/' + name),
+                   'import pytest\npytestmark = pytest.mark.unit\ndef test_guard():\n    assert True\n')
+    write_test(root, _p('tests', 'domain/test_api.py'),
+               'import pytest\nfrom pathlib import Path\npytestmark = pytest.mark.api\n'
+               'def test_api():\n    Path("api-ran").write_text("yes")\n')
+    for marker in ('visual', 'slow', 'live_llm'):
+        write_test(root, _p('tests', f'optional/test_{marker}.py'),
+                   f'import pytest\npytestmark = pytest.mark.{marker}\n'
+                   'def test_optional():\n    pytest.fail("opt-in tier must not execute")\n')
+    subprocess.run(['git', '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid',
+                    'commit', '--allow-empty', '-qm', 'initial'], cwd=root, check=True)
+    result = subprocess.run([sys.executable, str(scripts / 'test_select.py'), '--run', '--jobs', '0'],
+                            cwd=root, text=True, capture_output=True, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (root / 'api-ran').read_text() == 'yes'

@@ -104,3 +104,16 @@ def test_plain_messages_without_location_still_validate():
     rows = _diagnostics('! Undefined control sequence.\nl.1 x\nSome noise\n')
     assert rows[0]['file'] == '' and rows[0]['line'] == 1
     assert rows[0]['severity'] == 'error'
+
+
+def test_complete_log_scans_late_error_after_full_warning_projection():
+    from lib.paper.builds.contract import limit
+    consumed=[]
+    def lines():
+        for i in range(1000):
+            consumed.append(i);yield f'LaTeX Warning: unique warning {i}\n'
+        yield './main.tex:900: LaTeX Error: late fatal error\n'
+        yield 'end of complete source\n'
+    rows=_diagnostics(lines())
+    assert consumed==list(range(1000)) and len(rows)==limit('diagnostics')
+    assert any(row['severity']=='error' and row['line']==900 for row in rows)

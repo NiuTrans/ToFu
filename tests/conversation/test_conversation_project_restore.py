@@ -1,4 +1,4 @@
-"""Typed conversation project restore: drafts, races and durable bindings."""
+"""Frontend project projection: drafts, late choices and isolated send roots."""
 import subprocess
 from pathlib import Path
 
@@ -16,47 +16,46 @@ new Function('module','exports', ts.transpileModule(fs.readFileSync(
  'frontend/src/conversation/application/conversation-project.ts','utf8'),
  {compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.CommonJS}}).outputText)(m,m.exports);
 (async () => {
- let active='A', draft=false, state={}, calls=[], warnings=[], resolve;
+ const p=m.exports;
+ let active='A', draft='unsent', state={}, serverWrites=0;
  const conv={id:'A',projectPath:'/A',projectPaths:['/extra','/A'],readOnlyPaths:['/A','/extra']};
+ const other={id:'B',projectPath:'/B',projectPaths:['/B'],readOnlyPaths:[]};
  const original=JSON.stringify(conv);
- let request=async () => ({ok:true,json:async()=>({path:'/A'})});
- const c=m.exports.createConversationProjectController({
- activeId:()=>active,exists:()=>true,hasDraft:()=>draft,selection:()=>state,
- clear:()=>{state={};},remote:(_,path)=>{state={path};},apply:data=>{state={...data,active:true};},
- setPaths:(...args)=>{calls.push(args);return request();},warn:x=>warnings.push(x)});
- await c.restore(conv);
- assert.deepStrictEqual(calls[0],[['/A','/extra'],['/A','/extra'],['/A']]);
+ const c=p.createConversationProjectController({
+   activeId:()=>active,exists:()=>true,apply:data=>{state=data;},
+   // A forbidden navigation side effect: the projection must never call it.
+   setPaths:()=>{serverWrites++;throw Error('global registry write');},
+   hasDraft:()=>!!draft,
+ });
+ c.restore(conv);
  assert.equal(state.path,'/A');
  assert.deepStrictEqual(state.extraRoots,[{path:'/extra',readOnly:true}]);
- await c.restore(conv); assert.equal(calls.length,1); state={};
- request=async()=>({ok:true,json:async()=>({path:'/wrong'})});
- await c.restore(conv); assert.notEqual(state.path,'/wrong');
- assert.equal(JSON.stringify(conv),original); warnings=[]; calls=[];
- request=async()=>({ok:true,json:async()=>({path:'/A'})});
- await c.restore(conv);
- draft=true; state={path:'/draft'}; await c.restore(conv);
- assert.equal(state.path,'/draft'); assert.equal(calls.length,1);
- const blocked=c.begin(); draft=false; await c.restore(conv,blocked);
- assert.equal(calls.length,1);
- const cold=c.begin(); state={path:'/chosen'}; await c.restore(conv,cold);
- assert.equal(state.path,'/chosen');
- request=()=>new Promise(r=>resolve=r);
- let pending=c.restore(conv); draft=true;
- resolve({ok:true,json:async()=>({path:'/stale'})}); await pending;
- assert.notEqual(state.path,'/stale'); draft=false;
- pending=c.restore(conv); active='B'; c.begin(); active='A'; c.begin();
- resolve({ok:true,json:async()=>({path:'/stale'})}); await pending;
- assert.notEqual(state.path,'/stale');
- pending=c.restore(conv); state={path:'/user'};
- resolve({ok:true,json:async()=>({path:'/stale'})}); await pending;
- assert.equal(state.path,'/user');
- request=async()=>({ok:false,json:async()=>({})}); await c.restore(conv);
- assert.equal(warnings.length,1); assert.equal(JSON.stringify(conv),original);
- request=async()=>{throw Error('offline');}; await c.restore(conv);
- assert.equal(warnings.length,2); assert.equal(JSON.stringify(conv),original);
- await c.restore({id:'A',projectPath:'remote:device:/root'});
- assert.equal(state.path,'remote:device:/root');
- await c.restore({id:'A'}); assert.deepStrictEqual(state,{});
+ assert.equal(draft,'unsent'); assert.equal(serverWrites,0);
+ const delayed=c.begin(); active='B'; c.restore(other);
+ c.restore(conv,delayed); assert.equal(state.path,'/B');
+ const staleChoice=c.beginMutation(); c.restore({...other,projectPath:'/chosen'});
+ assert.equal(staleChoice(),false);
+ active='A'; c.restore(conv);
+ assert.equal(JSON.stringify(conv),original);
+ const empty=p.captureConversationProject({...conv,projectPath:''});
+ assert.deepStrictEqual(empty,{projectPath:'',projectPaths:[],readOnlyPaths:[]});
+ const send=p.captureConversationProject(conv);
+ conv.projectPaths.push('/later');
+ assert.deepStrictEqual(send.projectPaths,['/A','/extra']);
+ let finish;
+ const pending=p.withProjectHydration(conv,async()=>{
+   await new Promise(resolve=>finish=resolve);
+   Object.assign(conv,p.protectHydratingProjectSettings(conv,other));
+ });
+ Object.assign(conv,{projectPath:'/chosen',projectPaths:['/chosen'],readOnlyPaths:['/chosen']});
+ p.noteConversationProjectChoice(conv); finish(); await pending;
+ assert.equal(conv.projectPath,'/chosen');
+ assert.equal(p.protectHydratingProjectSettings(conv,other).projectPath,'/B');
+ active=null; c.restore(null); assert.equal(state.active,false);
+ c.chooseDraft({projectPath:'/draft'});
+ assert.equal(c.captureDraft().projectPath,'/draft');
+ c.restore(null); assert.equal(c.captureDraft().projectPath,'/draft');
+ assert.equal(serverWrites,0);
 })().catch(e=>{console.error(e);process.exitCode=1;});
 """
     result = subprocess.run(['node', '-e', script], cwd=ROOT, capture_output=True,

@@ -69,7 +69,7 @@ assert(bubble.querySelectorAll('button').length===6,'bounded quote actions');
     assert result.stdout.strip() == 'ok'
 
 
-def test_pdf_quote_search_whitespace_limits_and_cancellation():
+def test_pdf_quote_search_complete_results_and_cancellation():
     source = ROOT / 'frontend/src/features/paper/pdf-reader-content.ts'
     entry = """
 import { searchDocument } from './pdf-reader-content';
@@ -83,10 +83,12 @@ const doc=(pages)=>({numPages:pages.length,getPage:async n=>({getTextContent:asy
 (async()=>{
  const match=await searchDocument(doc(['Other content','The method\n  improves the measured outcome.']),'method   improves',()=>false);
  assert(match.matches[0].page===2&&match.matches[0].excerpt.includes('method improves'),'whitespace-normalized real page match');
+ const large=await searchDocument(doc(['head '.repeat(600001),'more '.repeat(600001)+'complete tail']),'complete tail',()=>false);
+ assert(large.matches.length===1&&large.matches[0].page===2&&!large.truncated,'complete character source after old page and document limits');
  const missing=await searchDocument(doc(['Other content']),'invented quote',()=>false);
  assert(!missing.matches.length&&!missing.truncated,'ordinary miss');
- const bounded=await searchDocument(doc(['word '.repeat(PAPER_BUILD_LIMITS.reader_search_matches+1)]),'word',()=>false);
- assert(bounded.matches.length===PAPER_BUILD_LIMITS.reader_search_matches&&bounded.truncated,'shared result bound');
+ const bounded=await searchDocument(doc(['word '.repeat(1201)]),'word',()=>false);
+ assert(bounded.matches.length===1201&&!bounded.truncated,'complete matching results');
  let cancel=false;const delayed={numPages:1,getPage:async()=>({getTextContent:async()=>{cancel=true;return {items:[{str:'Exact quote'}]}}})};
  const cancelled=await searchDocument(delayed,'Exact quote',()=>cancel);
  assert(!cancelled.matches.length,'cancelled extraction cannot return matches');

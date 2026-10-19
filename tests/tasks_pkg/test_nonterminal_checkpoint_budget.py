@@ -6,7 +6,7 @@ import time
 import pytest
 
 from lib.storage import StorageError
-from lib.task_result_checkpoint_contract import TASK_RESULT_CHECKPOINT_GUARD_CONTRACT
+from lib.task_replay.task_result_checkpoint_contract import TASK_RESULT_CHECKPOINT_GUARD_CONTRACT
 from lib.tasks_pkg.manager._persist import _upsert_task_row
 
 pytestmark = pytest.mark.unit
@@ -76,14 +76,21 @@ def test_only_terminal_write_retries_transient_pressure(monkeypatch, status, att
     class Client:
         def command(self, operation, payload, command_id, **options):
             calls.append(options)
+            if status == 'done' and len(calls) == attempts:
+                return {'guard_contract': TASK_RESULT_CHECKPOINT_GUARD_CONTRACT,
+                        'owned': True, 'version': 2}
             raise StorageError('database_busy', 'injected writer pressure')
 
     monkeypatch.setattr('lib.storage.get_storage_client', lambda **_: Client())
     task = {'id': 'task', 'convId': '', '_userId': 7,
             '_taskResultVersion': 1,
             '_taskResultCheckpointGuard': TASK_RESULT_CHECKPOINT_GUARD_CONTRACT}
-    with pytest.raises(StorageError, match='injected writer pressure'):
+    if status == 'done':
         write(task, status)
+        assert task['_taskResultVersion'] == 2
+    else:
+        with pytest.raises(StorageError, match='injected writer pressure'):
+            write(task, status)
     assert len(calls) == attempts
     if status == 'done':
         assert all('deadline' not in options for options in calls)
